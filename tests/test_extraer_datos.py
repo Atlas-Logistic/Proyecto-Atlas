@@ -75,9 +75,36 @@ def probar_guia2():
     assert datos["peso"] == "27.398", datos
 
 
+def probar_guia3():
+    textos = [
+        "RUT. 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N° 462654 SANTIAGO PONIENTE Numero SAP ORDEN DE COMPRA 4300000509 0030020353 SOLICITANTE COYSIRUCIORA POCURO S?4 TELEFONO 86228064 OBRA DESTINO CCNSIRUCIOAA PCCURO Spa COD DESTINATARIO 0002012926 HORA ENTRADA 1118:00 HORA SALIDA 12,02630 Nro. TRANSPORTE 0000347050",
+        "Codigo Cliente 0001000047 FECHA DE EMISION SENOR(ES) Rut: Giro DIRECCION COMUNA CIUDAD INDICADOR TRASLADO empresa TRANSPORTE 07-07-2026 ACMA 92,190,000 INDUSTRIAS BASICAS MARURI 1942 RENCA SANTIAGO Operacion constituye Venta TRANSPORTES Yat SPA",
+        "DESCRIPCION HORMIGON 10vN 12K A630-420 Coladas 2617697002 HORMIGON 12KX 12k a630-420k Coladas 2617717302",
+        "250 000 Peso Bruto 14-270,00",
+        "CAJA 07/07 15:00 SZRGIO 963063650 556.460 020400 EDUARDO FREI KONTALVA 16no MAI?U KAIPD PDTE 18098153 07-07-2026 VALOR TOTAL : PESOKG DESPACHAR A rut Chofer FECHA SALIDA",
+        "retira PATENTE FECHA LLEGADA PAIRICIO VILLAGRA 2DRG50 07/07 2026",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "462654", datos
+    assert datos["número de transporte"] == "0000347050", datos
+    assert datos["cliente"] == "ACMA SA", datos
+    assert datos["obra destino"] == "CONSTRUCTORA POCURO SPA", datos
+    assert datos["RUT del cliente"] == "92.190.000-7", datos
+    assert datos["chofer"] == "PATRICIO VILLAGRA", datos
+    assert datos["RUT del chofer"] == "18098153-5", datos
+    assert datos["patente del tracto"] == "BDFG50", datos
+    assert datos["patente del carro"] == "No encontrado", datos
+    assert datos["hora de entrada"] == "11:18", datos
+    assert datos["hora de salida"] == "12:02", datos
+    assert datos["peso"] == "14.270,000", datos
+
+
 def main():
     probar_guia1()
     probar_guia2()
+    probar_guia3()
     print("Todas las pruebas de extracción pasaron correctamente.")
 
 
