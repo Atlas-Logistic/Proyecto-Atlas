@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+.venv/
+.env
+# No subir guías reales ni imágenes con datos de clientes
+data/*
+!data/.gitkeep
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
