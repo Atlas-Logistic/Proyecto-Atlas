@@ -101,6 +101,34 @@ def probar_guia3():
     assert datos["peso"] == "14.270,000", datos
 
 
+
+def probar_guia4():
+    textos = [
+        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRÓNICA N? 462757",
+        "Código Cliente 0001001422 FECHA DE EMISIÓN 08-07-2026 SEÑOR(ES) EASY RETAIL SA RUT. 76.568 . 660-1 GIRO VTA AL X MENOR ART DIRECCION AV KENNEDY 9001 COMUNA LAS CONDES",
+        "Número SAP 0080539121 ORDEN DE COMPRA 6701566017 0030020689 SOLICITANTE CONSTRUCTORA ALTIUS SPA TELEFONO OBRA DESTINO CONSTRUCTORA ALTIUS SPA COD DESTINATARIO 0002012303 HORA ENTRADA 13:28 :00 HORA SALIDA 14:18:46 Nro. TRANSPORTE 0000347238",
+        "Tara 9.290,000 Peso Bruto 10 .863,000",
+        "VALOR TOTAL 1.318.174 PESO KG.- 1.573,00 DESPACHAR A RUT CHOFER FECHA SALIDA AV PROVIDENCIA 1550 SANTIAGO PROVIDENCIA 18626166-6",
+        "RETIRA PATENTE FECHA LLEGADA PAIRICK ORTIZ XF3629",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "462757", datos
+    assert datos["número de transporte"] == "0000347238", datos
+    assert datos["cliente"] == "EASY RETAIL SA", datos
+    assert datos["obra destino"] == "CONSTRUCTORA ALTIUS SPA", datos
+    assert datos["RUT del cliente"] == "76.568.660-1", datos
+    assert datos["chofer"] == "PATRICK ORTIZ", datos
+    assert datos["RUT del chofer"] == "18626166-6", datos
+    assert datos["patente del tracto"] == "XF3629", datos
+    assert datos["patente del carro"] == "No encontrado", datos
+    assert datos["hora de entrada"] == "13:28", datos
+    assert datos["hora de salida"] == "14:18", datos
+    assert datos["peso"] == "10.863,000", datos
+
+
+
 def main():
     probar_guia1()
     probar_guia2()

@@ -10,3 +10,4 @@ data/*
 # Archivos temporales de Python
 __pycache__/
 *.pyc
+imagenes/
