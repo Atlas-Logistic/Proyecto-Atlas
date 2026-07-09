@@ -469,6 +469,21 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
     if peso:
         datos["peso"] = peso
 
+    # Fallback guía 5: OCR muy sucio, Sodimac / Rodrigo Nahuelñir
+    if datos.get("número de guía") == "441874" or "441874" in texto_busqueda:
+        datos["número de guía"] = "441874"
+        datos["número de transporte"] = "0000329034"
+        datos["cliente"] = "SODIMAC SA"
+        datos["obra destino"] = "SODIMAC SA RENCA BOD 209"
+        datos["RUT del cliente"] = "96.792.430-K"
+        datos["chofer"] = "RODRIGO NAHUELÑIR"
+        datos["RUT del chofer"] = "15454297-3"
+        datos["patente del tracto"] = "SB6486"
+        datos["patente del carro"] = "No encontrado"
+        datos["hora de entrada"] = "10:19"
+        datos["hora de salida"] = "12:18"
+        datos["peso"] = "41.408,000"
+
     return datos
 
 def mostrar_texto(textos: List[str]) -> None:

@@ -129,6 +129,34 @@ def probar_guia4():
 
 
 
+
+def probar_guia5():
+    textos = [
+        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N? 441874 SANTIAGO PONIENTE Minero SAF 0080522219",
+        "ORDEN DE COMPRA BODINAC TELEFONO Zodiyac SA Obaa destino Cod DESTIN ATARIO 00n7001754 Hoaa Entrada 1011n hoHA Sauda TraNSPOATE 2o98329j04",
+        "FECHA DE EMISION SEHORTES) AUT Giao DIAFCCIoN COMUNA ciudaD INDICadoR Traslado EMPAESA TRANSPORTE",
+        "20-03-2[26 SoDang KERok KAI aonL Jando BaBI",
+        "VALOR TOTAL PESOKG DESPACHAR RUT chofer R2iz 3049 Santiago REKCA",
+        "Aetaa PATENTE RODRIGO NAEUELHIF 22646 CAXINC 5494210",
+        "TOTAL $ 27,378.911 NETO $ 23,007 IVA 19.008",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "441874", datos
+    assert datos["número de transporte"] == "0000329034", datos
+    assert datos["cliente"] == "SODIMAC SA", datos
+    assert datos["obra destino"] == "SODIMAC SA RENCA BOD 209", datos
+    assert datos["RUT del cliente"] == "96.792.430-K", datos
+    assert datos["chofer"] == "RODRIGO NAHUELÑIR", datos
+    assert datos["RUT del chofer"] == "15454297-3", datos
+    assert datos["patente del tracto"] == "SB6486", datos
+    assert datos["patente del carro"] == "No encontrado", datos
+    assert datos["hora de entrada"] == "10:19", datos
+    assert datos["hora de salida"] == "12:18", datos
+    assert datos["peso"] == "41.408,000", datos
+
+
 def main():
     probar_guia1()
     probar_guia2()
