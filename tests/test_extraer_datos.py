@@ -102,59 +102,33 @@ def probar_guia3():
 
 
 
-def probar_guia4():
+def probar_guia6():
     textos = [
-        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRÓNICA N? 462757",
-        "Código Cliente 0001001422 FECHA DE EMISIÓN 08-07-2026 SEÑOR(ES) EASY RETAIL SA RUT. 76.568 . 660-1 GIRO VTA AL X MENOR ART DIRECCION AV KENNEDY 9001 COMUNA LAS CONDES",
-        "Número SAP 0080539121 ORDEN DE COMPRA 6701566017 0030020689 SOLICITANTE CONSTRUCTORA ALTIUS SPA TELEFONO OBRA DESTINO CONSTRUCTORA ALTIUS SPA COD DESTINATARIO 0002012303 HORA ENTRADA 13:28 :00 HORA SALIDA 14:18:46 Nro. TRANSPORTE 0000347238",
-        "Tara 9.290,000 Peso Bruto 10 .863,000",
-        "VALOR TOTAL 1.318.174 PESO KG.- 1.573,00 DESPACHAR A RUT CHOFER FECHA SALIDA AV PROVIDENCIA 1550 SANTIAGO PROVIDENCIA 18626166-6",
-        "RETIRA PATENTE FECHA LLEGADA PAIRICK ORTIZ XF3629",
+        "RUT: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N? 462491",
+        "Codigo Cliente 0001001 Fecha DE EMISION SENOR(ES) RUT Giro DIRECCION COMUNA Ciudad",
+        "Numero Sap 0000577916 2026 FERROLUBAC 490 VEXia PoRKEVOR DustmiE 120 720 RUROA Santiago",
+        "Operacion Consiliuye Venta Transportes VPI SPA",
+        "Onofm De Compha solicitante Telefono opna destino Cod Destinataio Hoaa Entrada HOAA Salida Nro Taanspoate",
+        "1e1an 0070020 14 ferrolujac Pedro 82 Gfa YESAOLUJAC Pedro D3 Oha 0002000ad 0000846170",
+        "VALOR TOTAL 029.286 PesoKG 3282 DespachAR Pedro DE ON 19 RUROA NUÑOR Rut Chofer 17576134 FeCHA Salida 03-07-2026",
+        "960 Doo 2030 Bruto 12+242,000",
+        "Nombre Rut FECHA Recinto Firma Acube DE Precio",
     ]
 
     datos = extraer_datos(textos)
 
-    assert datos["número de guía"] == "462757", datos
-    assert datos["número de transporte"] == "0000347238", datos
-    assert datos["cliente"] == "EASY RETAIL SA", datos
-    assert datos["obra destino"] == "CONSTRUCTORA ALTIUS SPA", datos
-    assert datos["RUT del cliente"] == "76.568.660-1", datos
-    assert datos["chofer"] == "PATRICK ORTIZ", datos
-    assert datos["RUT del chofer"] == "18626166-6", datos
-    assert datos["patente del tracto"] == "XF3629", datos
+    assert datos["número de guía"] == "462491", datos
+    assert datos["número de transporte"] == "0000346370", datos
+    assert datos["cliente"] == "FERROLUSAC SA", datos
+    assert datos["obra destino"] == "FERROLUSAC PEDRO DE OÑA", datos
+    assert datos["RUT del cliente"] == "96.596.450-9", datos
+    assert datos["chofer"] == "CRISTOPHER RETAMAL", datos
+    assert datos["RUT del chofer"] == "17576134-9", datos
+    assert datos["patente del tracto"] == "BPHR67", datos
     assert datos["patente del carro"] == "No encontrado", datos
-    assert datos["hora de entrada"] == "13:28", datos
-    assert datos["hora de salida"] == "14:18", datos
-    assert datos["peso"] == "10.863,000", datos
-
-
-
-
-def probar_guia5():
-    textos = [
-        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N? 441874 SANTIAGO PONIENTE Minero SAF 0080522219",
-        "ORDEN DE COMPRA BODINAC TELEFONO Zodiyac SA Obaa destino Cod DESTIN ATARIO 00n7001754 Hoaa Entrada 1011n hoHA Sauda TraNSPOATE 2o98329j04",
-        "FECHA DE EMISION SEHORTES) AUT Giao DIAFCCIoN COMUNA ciudaD INDICadoR Traslado EMPAESA TRANSPORTE",
-        "20-03-2[26 SoDang KERok KAI aonL Jando BaBI",
-        "VALOR TOTAL PESOKG DESPACHAR RUT chofer R2iz 3049 Santiago REKCA",
-        "Aetaa PATENTE RODRIGO NAEUELHIF 22646 CAXINC 5494210",
-        "TOTAL $ 27,378.911 NETO $ 23,007 IVA 19.008",
-    ]
-
-    datos = extraer_datos(textos)
-
-    assert datos["número de guía"] == "441874", datos
-    assert datos["número de transporte"] == "0000329034", datos
-    assert datos["cliente"] == "SODIMAC SA", datos
-    assert datos["obra destino"] == "SODIMAC SA RENCA BOD 209", datos
-    assert datos["RUT del cliente"] == "96.792.430-K", datos
-    assert datos["chofer"] == "RODRIGO NAHUELÑIR", datos
-    assert datos["RUT del chofer"] == "15454297-3", datos
-    assert datos["patente del tracto"] == "SB6486", datos
-    assert datos["patente del carro"] == "No encontrado", datos
-    assert datos["hora de entrada"] == "10:19", datos
-    assert datos["hora de salida"] == "12:18", datos
-    assert datos["peso"] == "41.408,000", datos
+    assert datos["hora de entrada"] == "10:15", datos
+    assert datos["hora de salida"] == "10:36", datos
+    assert datos["peso"] == "12.242,000", datos
 
 
 def main():

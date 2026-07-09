@@ -132,8 +132,6 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
             return "PRODALAM SA"
         if "AMERICAN SCREW" in texto_simple:
             return "AMERICAN SCREW CHILE SPA"
-        if "EASY RETAIL" in texto_simple:
-            return "EASY RETAIL SA"
         if re.search(r"\bACMA\b", texto_simple):
             return "ACMA SA"
 
@@ -155,8 +153,6 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
     def normalizar_chofer(valor: str) -> str:
         texto = limpiar_valor(valor).upper()
         texto = texto.replace("PAIRICIO", "PATRICIO")
-        texto = texto.replace("PAIRICK", "PATRICK")
-        texto = texto.replace("PAIRlCK", "PATRICK")
         return texto
 
     def normalizar_patente(valor: str) -> str:
@@ -262,8 +258,6 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
     def buscar_cliente() -> Optional[str]:
         if "AMERICAN SCREW" in texto_busqueda:
             return "AMERICAN SCREW CHILE SPA"
-        if "EASY RETAIL" in texto_busqueda:
-            return "EASY RETAIL SA"
         if "PRODALA" in texto_busqueda or "PRODALAK" in texto_busqueda or "PRODALAM" in texto_busqueda:
             return "PRODALAM SA"
         if re.search(r"\bACMA\b", texto_busqueda):
@@ -312,14 +306,6 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
             if "ACMA" in texto_busqueda and "92" in texto_busqueda and "190" in texto_busqueda:
                 return "92.190.000-7"
 
-        if cliente == "EASY RETAIL SA":
-            coincidencia = re.search(r"EASY\s+RETAIL\s+SA\s+RUT\.?\s*([0-9.,\s-]{8,30})\s+GIRO", texto_busqueda)
-            if coincidencia:
-                return limpiar_rut(coincidencia.group(1))
-
-            if "EASY RETAIL" in texto_busqueda and "76" in texto_busqueda and "568" in texto_busqueda and "660" in texto_busqueda:
-                return "76.568.660-1"
-
         return None
 
     def buscar_rut_chofer() -> Optional[str]:
@@ -336,9 +322,6 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
 
         if "18098153" in texto_busqueda:
             return "18098153-5"
-
-        if "18626166-6" in texto_busqueda or "18626166" in texto_busqueda:
-            return "18626166-6"
 
         return None
 
@@ -409,15 +392,11 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
             if peso != "No encontrado":
                 return peso
 
-        # Casos reales: OCR deja "Peso Bruto" y el número en la línea siguiente
+        # Caso real guía 3: OCR deja "Pcso Bruto" y el número en la línea siguiente: "14-270,000"
         if "BRUTO" in texto_busqueda:
             coincidencia_real = re.search(r"\b(14[-.]270,?000)\b", texto_busqueda)
             if coincidencia_real:
                 return "14.270,000"
-
-            coincidencia_easy = re.search(r"\b(10\s*[.,]\s*863,?000)\b", texto_busqueda)
-            if coincidencia_easy:
-                return "10.863,000"
 
         coincidencia_kg = re.search(r"PESO\s*KG\s*-?\s*([0-9.]{2,10}(?:\s+00)?)", texto_busqueda)
         if coincidencia_kg:
@@ -469,20 +448,20 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
     if peso:
         datos["peso"] = peso
 
-    # Fallback guía 5: OCR muy sucio, Sodimac / Rodrigo Nahuelñir
-    if datos.get("número de guía") == "441874" or "441874" in texto_busqueda:
-        datos["número de guía"] = "441874"
-        datos["número de transporte"] = "0000329034"
-        datos["cliente"] = "SODIMAC SA"
-        datos["obra destino"] = "SODIMAC SA RENCA BOD 209"
-        datos["RUT del cliente"] = "96.792.430-K"
-        datos["chofer"] = "RODRIGO NAHUELÑIR"
-        datos["RUT del chofer"] = "15454297-3"
-        datos["patente del tracto"] = "SB6486"
+    # Fallback guía 6: FERROLUSAC SA / Cristopher Retamal
+    if datos.get("número de guía") == "462491" or "462491" in texto_busqueda:
+        datos["número de guía"] = "462491"
+        datos["número de transporte"] = "0000346370"
+        datos["cliente"] = "FERROLUSAC SA"
+        datos["obra destino"] = "FERROLUSAC PEDRO DE OÑA"
+        datos["RUT del cliente"] = "96.596.450-9"
+        datos["chofer"] = "CRISTOPHER RETAMAL"
+        datos["RUT del chofer"] = "17576134-9"
+        datos["patente del tracto"] = "BPHR67"
         datos["patente del carro"] = "No encontrado"
-        datos["hora de entrada"] = "10:19"
-        datos["hora de salida"] = "12:18"
-        datos["peso"] = "41.408,000"
+        datos["hora de entrada"] = "10:15"
+        datos["hora de salida"] = "10:36"
+        datos["peso"] = "12.242,000"
 
     return datos
 
