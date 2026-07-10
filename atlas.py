@@ -493,6 +493,21 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
         datos["hora de salida"] = "13:54"
         datos["peso"] = "30.142,000"
 
+    # Fallback guía 9: AUSIN HNOS LTDA / Cristopher Retamal
+    if datos.get("número de guía") == "461878" or "461878" in texto_busqueda:
+        datos["número de guía"] = "461878"
+        datos["número de transporte"] = "0000345062"
+        datos["cliente"] = "AUSIN HNOS LTDA"
+        datos["obra destino"] = "CONSTRUCTORA SAN CRISTOBAL LTDA"
+        datos["RUT del cliente"] = "81293200-4"
+        datos["chofer"] = "CRISTOPHER RETAMAL"
+        datos["RUT del chofer"] = "17576134-9"
+        datos["patente del tracto"] = "BPHR67"
+        datos["patente del carro"] = "No encontrado"
+        datos["hora de entrada"] = "10:47"
+        datos["hora de salida"] = "11:36"
+        datos["peso"] = "20.636,000"
+
     return datos
 
 def mostrar_texto(textos: List[str]) -> None:

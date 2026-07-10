@@ -199,6 +199,38 @@ def probar_guia8():
     assert datos["peso"] == "30.142,000", datos
 
 
+
+def probar_guia9():
+    textos = [
+        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRÓNICA N° 461878",
+        "SLL SANTIAGO PONIENTE INVICTOPA TAF CPISloaalf Obra CASAALIDA 136",
+        "Codigo Cliente 0061000Peo FECHA DE EMISION 24206-2026 SeNoR(ES) Alsix nos Ltda",
+        "RUT 293.200 GIRO VEAL MESCA PINT Direccion VATECAA 25 COMUNA GAYtinGO",
+        "DESTINO InvICTOPA Taf CPISloaalf Obra SALIDA 136",
+        "Nro. TAANSPORTE 0000345062",
+        "VALOR TOTAL PESOkg DESPACHA A RuT Chofea FECHA SALDA",
+        "COLO COLO 341 QUILICURA 175/6134 247062026",
+        "RETIRA PATENTE FECHA LLEGADA CRISIOPWER RIAAI 121A67 24-06-2026",
+        "20,636,0U0",
+        "TOTAL $ 124824.960",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "461878", datos
+    assert datos["número de transporte"] == "0000345062", datos
+    assert datos["cliente"] == "AUSIN HNOS LTDA", datos
+    assert datos["obra destino"] == "CONSTRUCTORA SAN CRISTOBAL LTDA", datos
+    assert datos["RUT del cliente"] == "81293200-4", datos
+    assert datos["chofer"] == "CRISTOPHER RETAMAL", datos
+    assert datos["RUT del chofer"] == "17576134-9", datos
+    assert datos["patente del tracto"] == "BPHR67", datos
+    assert datos["patente del carro"] == "No encontrado", datos
+    assert datos["hora de entrada"] == "10:47", datos
+    assert datos["hora de salida"] == "11:36", datos
+    assert datos["peso"] == "20.636,000", datos
+
+
 def main():
     probar_guia1()
     probar_guia2()
