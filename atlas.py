@@ -578,6 +578,59 @@ def guardar_ficha_viaje(datos):
     return ruta_ficha
 
 
+
+def guardar_viaje_csv(datos):
+    import csv
+    from pathlib import Path
+
+    carpeta = Path("output")
+    carpeta.mkdir(parents=True, exist_ok=True)
+
+    ruta_csv = carpeta / "viajes.csv"
+
+    columnas = [
+        "numero_guia",
+        "numero_transporte",
+        "cliente",
+        "rut_cliente",
+        "obra_destino",
+        "chofer",
+        "rut_chofer",
+        "patente_tracto",
+        "patente_carro",
+        "hora_entrada",
+        "hora_salida",
+        "peso",
+    ]
+
+    fila = {
+        "numero_guia": datos.get("número de guía", "No encontrado"),
+        "numero_transporte": datos.get("número de transporte", "No encontrado"),
+        "cliente": datos.get("cliente", "No encontrado"),
+        "rut_cliente": datos.get("RUT del cliente", "No encontrado"),
+        "obra_destino": datos.get("obra destino", "No encontrado"),
+        "chofer": datos.get("chofer", "No encontrado"),
+        "rut_chofer": datos.get("RUT del chofer", "No encontrado"),
+        "patente_tracto": datos.get("patente del tracto", "No encontrado"),
+        "patente_carro": datos.get("patente del carro", "No encontrado"),
+        "hora_entrada": datos.get("hora de entrada", "No encontrado"),
+        "hora_salida": datos.get("hora de salida", "No encontrado"),
+        "peso": datos.get("peso", "No encontrado"),
+    }
+
+    archivo_existe = ruta_csv.exists()
+
+    with ruta_csv.open("a", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=columnas, delimiter=";")
+
+        if not archivo_existe:
+            escritor.writeheader()
+
+        escritor.writerow(fila)
+
+    return ruta_csv
+
+
 def main() -> None:
     """Función principal del programa."""
     print("Proyecto Atlas")
@@ -594,6 +647,8 @@ def main() -> None:
     mostrar_datos_extraidos(datos)
     ruta_ficha = guardar_ficha_viaje(datos)
     print(f"\nFicha de viaje guardada en: {ruta_ficha}")
+    ruta_csv = guardar_viaje_csv(datos)
+    print(f"Viaje agregado al CSV en: {ruta_csv}")
 
 
 if __name__ == "__main__":
