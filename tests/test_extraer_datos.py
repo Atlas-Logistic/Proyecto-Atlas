@@ -131,6 +131,39 @@ def probar_guia6():
     assert datos["peso"] == "12.242,000", datos
 
 
+
+def probar_guia7():
+    textos = [
+        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N? 462793",
+        "SLL SANTIAGO PONIENTE CODIGO 0001001411 FECHA DE EMISION 02072026 SENOR(ES) DSI RUT UNDERGROUND CHILE SPA",
+        "VENTA AL POR MAYOR DIRECCION AVDA CORDILLERA 482 COMUNA QUILICURA CIUDAD SANTIAGO",
+        "Numero SAP 0000579034 ORDEN DE COMPRA P0013429 SOLICITANTE DSI UNDERGROUND CHILE Spa",
+        "TELEFONO OBRA DESTINO Ds1 UNDERGROUND CHILE Spa COD DESTINATARIO 0002002906",
+        "HORA ENTRADA 01:00 HORA SALIDA 02 : 2 Nro TRANSPORTE d00d3/7265",
+        "VALOR TOTAL 26.926.530 PESO KG 26.846",
+        "Victor Rodriguez A. Rut: 17.519.432-0 Fecha: 07/26",
+        "DESPACHAR A RUT Chofer FECHA SALIDA",
+        "Las VIOLETAS 55 SECTOR 10833150-K",
+        "retira PATENTE FECHA LLEGADA JOSE LAZCASO RL1E79 CRARO: JK2501 09-07-2026",
+        "09-07-2026 2 20.926 538 IVA 19 00%",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "462793", datos
+    assert datos["número de transporte"] == "0000347265", datos
+    assert datos["cliente"] == "DSI UNDERGROUND CHILE SPA", datos
+    assert datos["obra destino"] == "DSI UNDERGROUND CHILE SPA", datos
+    assert datos["RUT del cliente"] == "76083093-3", datos
+    assert datos["chofer"] == "JOSE LAZCANO", datos
+    assert datos["RUT del chofer"] == "10833150-K", datos
+    assert datos["patente del tracto"] == "AL1879", datos
+    assert datos["patente del carro"] == "JK2501", datos
+    assert datos["hora de entrada"] == "07:01", datos
+    assert datos["hora de salida"] == "09:02", datos
+    assert datos["peso"] == "41.886,000", datos
+
+
 def main():
     probar_guia1()
     probar_guia2()
