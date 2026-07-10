@@ -164,6 +164,41 @@ def probar_guia7():
     assert datos["peso"] == "41.886,000", datos
 
 
+
+def probar_guia8():
+    textos = [
+        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N? 462833",
+        "Sui : SANTIAGO PONIENTE Numero SAP 0080589226 PED252644 0020020731 AGF ACEROS DE CHILE SPA",
+        "AGF ACEROS DE CRILE Spa 0002001737 12216300 13851:5 0000347401",
+        "Codigo Cliente 0001006226 FECHA DE EMISION 07-2026 SENOR(ES) MGF ACEROS DE CHILE Spa",
+        "RUT. 4104131 GIRO Construccion PIOY DIRECCION APOQUINDO OI . 605 PISO 6410 COMUNA CONDES CIUDAD SANTIAGO",
+        "EMPRESA TRANSPORTE IranSpORTES HaT",
+        "ORDEN DE COMPRA SOLICITANTE TELEFONO OBRA DESTINO COD DESTINATARIO hora EnTRADA HORA SALIDA Nro. TAANSPORTE",
+        "DESCRIPCION ROLLO HORMIGON 16x11 1gjo 20H Golagas 2616976102 2617620212",
+        "UNIDAD PrECIo VaLOA 836, 00 12,881 .736",
+        "14 . 770, 000 Pasg aruro 30.142 000",
+        "VALOR TOTAL 12.881,736 PESOKG 150272, 00",
+        "DESPACHAR rut Chofer FECHA SALIDA PANIERICANA NORTE 22650 SANTIAGO LAMPA 18091586",
+        "retira PATENTE FECHA LLEGADA SALCKON PIZARRO 1G8925 CARRO: JF9565 10-07 2026",
+        "09-07-2026 NETO $ 881.736 IVA 19.0096",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "462833", datos
+    assert datos["número de transporte"] == "0000347401", datos
+    assert datos["cliente"] == "AGF ACEROS DE CHILE SPA", datos
+    assert datos["obra destino"] == "AGF ACEROS DE CHILE SPA", datos
+    assert datos["RUT del cliente"] == "77410131-4", datos
+    assert datos["chofer"] == "SALOMÓN PIZARRO", datos
+    assert datos["RUT del chofer"] == "18091588-5", datos
+    assert datos["patente del tracto"] == "TG8925", datos
+    assert datos["patente del carro"] == "JF9565", datos
+    assert datos["hora de entrada"] == "12:46", datos
+    assert datos["hora de salida"] == "13:54", datos
+    assert datos["peso"] == "30.142,000", datos
+
+
 def main():
     probar_guia1()
     probar_guia2()
