@@ -264,6 +264,34 @@ def probar_guia10():
     assert datos["peso"] == "14.971,000", datos
 
 
+
+def probar_guia5():
+    textos = [
+        "RUT.: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N° 462395",
+        "AMERICAN SCREW CHILE SPA SOLICITANTE TELEFONO OBRA DESTINO",
+        "SENOR(ES) AMERICAN SCREW CHILE SPA RUT 91.410.000-3",
+        "HORA ENTRADA 08:13:00 HORA SALIDA 09:34:10 NRO TRANSPORTE 0000346245",
+        "RETIRA PATENTE FECHA LLEGADA RODRIGO NAHUELÑIR SB6486 CARRO JF4288",
+        "RUT CHOFER 15454297",
+        "PESO BRUTO 43.624,000",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "462395", datos
+    assert datos["número de transporte"] == "0000346245", datos
+    assert datos["cliente"] == "AMERICAN SCREW CHILE SPA", datos
+    assert datos["obra destino"] == "AMERICAN SCREW CHILE SPA", datos
+    assert datos["RUT del cliente"] == "91410000-3", datos
+    assert datos["chofer"] == "RODRIGO NAHUELÑIR", datos
+    assert datos["RUT del chofer"] == "15454297-3", datos
+    assert datos["patente del tracto"] == "SB6486", datos
+    assert datos["patente del carro"] == "JF4288", datos
+    assert datos["hora de entrada"] == "08:13", datos
+    assert datos["hora de salida"] == "09:34", datos
+    assert datos["peso"] == "43.624,000", datos
+
+
 def main():
     probar_guia1()
     probar_guia2()
