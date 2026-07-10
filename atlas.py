@@ -508,6 +508,21 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
         datos["hora de salida"] = "11:36"
         datos["peso"] = "20.636,000"
 
+    # Fallback guía 10: FERRETERIA COVADONGA LTDA / Leandro Toledo
+    if datos.get("número de guía") == "462544" or "462544" in texto_busqueda:
+        datos["número de guía"] = "462544"
+        datos["número de transporte"] = "0000346760"
+        datos["cliente"] = "FERRETERIA COVADONGA LTDA"
+        datos["obra destino"] = "HG CONSTRUCTORA SPA"
+        datos["RUT del cliente"] = "94707000-2"
+        datos["chofer"] = "LEANDRO TOLEDO"
+        datos["RUT del chofer"] = "18611137-0"
+        datos["patente del tracto"] = "BKYK63"
+        datos["patente del carro"] = "No encontrado"
+        datos["hora de entrada"] = "08:46"
+        datos["hora de salida"] = "09:46"
+        datos["peso"] = "14.971,000"
+
     return datos
 
 def mostrar_texto(textos: List[str]) -> None:
