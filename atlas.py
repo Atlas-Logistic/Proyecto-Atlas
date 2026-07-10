@@ -543,6 +543,41 @@ def mostrar_datos_extraidos(datos: Dict[str, str]) -> None:
         print(f"{campo}: {valor}")
 
 
+
+def guardar_ficha_viaje(datos):
+    from pathlib import Path
+
+    carpeta = Path("output") / "fichas"
+    carpeta.mkdir(parents=True, exist_ok=True)
+
+    numero_guia = datos.get("número de guía", "sin_numero")
+    if not numero_guia or numero_guia == "No encontrado":
+        numero_guia = "sin_numero"
+
+    ruta_ficha = carpeta / f"guia_{numero_guia}.txt"
+
+    lineas = [
+        "FICHA DE VIAJE",
+        "",
+        f"NRO GUIA: {datos.get('número de guía', 'No encontrado')}",
+        f"NRO TRANSPORTE: {datos.get('número de transporte', 'No encontrado')}",
+        f"CLIENTE: {datos.get('cliente', 'No encontrado')}",
+        f"RUT CLIENTE: {datos.get('RUT del cliente', 'No encontrado')}",
+        f"OBRA DESTINO: {datos.get('obra destino', 'No encontrado')}",
+        f"CHOFER: {datos.get('chofer', 'No encontrado')}",
+        f"RUT CHOFER: {datos.get('RUT del chofer', 'No encontrado')}",
+        f"PATENTE TRACTO: {datos.get('patente del tracto', 'No encontrado')}",
+        f"PATENTE CARRO: {datos.get('patente del carro', 'No encontrado')}",
+        f"HORA ENTRADA: {datos.get('hora de entrada', 'No encontrado')}",
+        f"HORA SALIDA: {datos.get('hora de salida', 'No encontrado')}",
+        f"PESO: {datos.get('peso', 'No encontrado')}",
+    ]
+
+    ruta_ficha.write_text("\n".join(lineas), encoding="utf-8")
+
+    return ruta_ficha
+
+
 def main() -> None:
     """Función principal del programa."""
     print("Proyecto Atlas")
@@ -557,6 +592,8 @@ def main() -> None:
 
     datos = extraer_datos(textos)
     mostrar_datos_extraidos(datos)
+    ruta_ficha = guardar_ficha_viaje(datos)
+    print(f"\nFicha de viaje guardada en: {ruta_ficha}")
 
 
 if __name__ == "__main__":
