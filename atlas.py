@@ -633,6 +633,16 @@ def guardar_viaje_csv(datos):
         "peso": datos.get("peso", "No encontrado"),
     }
 
+    numero_guia = fila["numero_guia"]
+
+    if ruta_csv.exists():
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+            lector = csv.DictReader(archivo, delimiter=";")
+            for fila_existente in lector:
+                if fila_existente.get("numero_guia") == numero_guia:
+                    print(f"Guía {numero_guia} ya existe en el CSV. No se agregó duplicado.")
+                    return ruta_csv
+
     archivo_existe = ruta_csv.exists()
 
     with ruta_csv.open("a", newline="", encoding="utf-8-sig") as archivo:
@@ -644,7 +654,6 @@ def guardar_viaje_csv(datos):
         escritor.writerow(fila)
 
     return ruta_csv
-
 
 
 def procesar_imagen(ruta_imagen):
