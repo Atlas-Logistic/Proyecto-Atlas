@@ -1,10 +1,15 @@
 """Extracción de datos desde texto reconocido."""
 
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 
+from atlas_core.catalogos import enriquecer_datos_con_catalogos
 
-def extraer_datos(textos: List[str]) -> Dict[str, str]:
+
+def extraer_datos(
+    textos: List[str], carpeta_catalogos: str | Path = "catalogos"
+) -> Dict[str, str]:
     texto_completo = "\n".join(textos)
     texto_mayus = texto_completo.upper()
     texto_busqueda = texto_mayus.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
@@ -498,5 +503,5 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
         datos["hora de salida"] = "09:34"
         datos["peso"] = "43.624,000"
 
-    return datos
+    return enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
 
