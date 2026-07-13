@@ -264,6 +264,55 @@ def probar_guia10():
     assert datos["peso"] == "14.971,000", datos
 
 
+def test_guia11():
+    textos = [
+        "ACEROS AZA S A AZA FUNDICION LAMINACION EXPORTACION GIRO; Casa IhiZ FlANIA RENCA Hae LA UNION 2070 RENCA SANIinGO CHILE COD FosTal 16 76 22 Fono (5612287 79100 Www a2rci Colle Heclty Gtvroz Cato 21 CCO su10; Nindo Uaw  Cuxey / lotnusta Sucwurse Antoco Calle Wnane 02875*Baito Indusi Mdci Tlko Fon 45 22 1d3 Guuiza] Suusf ukhano Ale Ruyrul J01 C Lnchennt PananojnVl Nona Ka, 6 CM 21871tu809 Fono 800) 72077 Sucursn] Corio",
+        "RUT: 92.176.000-0 GUIA DE DESPACHO ELECTRONICA N? 462871",
+        "511 < sahtiago Poniekte",
+        "Mumero Sap",
+        "0040539156",
+        "Codigo Cllenle",
+        "0001000aeo",
+        "oadeM De Compra SOLICITANTE telefono obha Destino Coo Destinatario Hora EntradA Hora alida Nro TRANSPOATE",
+        "Movozaiga 00j09207 -1 Cowst CEppo apoquinDo Cuat7o",
+        "FECHA DE EMISION 0722026 SenoR(eS) AUSiX Hnos UIDA Rut 200 Giao i MENORPINT , DIRECCION Fatueana Cohuna Santingo CiuoaD EANTICO indicAdor TrasLAdo Operacion Conat Luvo Venga Evdaesa Taanspoate IRAKSPORTES Kat Spa descripciok Caandad cooigo Ioraigoy 16pM 12k A6jo 420h 711 00o? Capoon 2617710202 HORKIGOX !2h !2h 46do 420u 1220002*16 a 2617715402",
+        "Crppo Roquinto Cuai7o 000z012506 0e ; 5 106 10400 Dooo)17469",
+        "Unioad Paecio",
+        "Valoa 24824 J0",
+        "773,00",
+        "dla",
+        "en",
+        "870,000 Yodo Brulo",
+        "17.772,Odo",
+        "IpoDE DOCUMENIO",
+        "FOLIO",
+        "FECHA",
+        "MonvO",
+        "8-216+346 Felpl O11varos 156 85005602 VAIOR IOTAL ; PESOKG 902400 VIStA PAFORIEICA 10901 Santiago Lo PaaneChEA retirA DespachaR A PATENTE RUT Chofer 17576134 FECHA 10-07 2026 Fecha Salida LLEGADA IVA 19.009 $ 1, 561 144 TOTAL EXENTO $ 8ez16 346 Neto $ F3uo pal KOMeRE Fecha Rut Qti L Abiek Firiaa REcinio 6Lo DispiestoEnuLeTAALI DEL Acuse 0ERECIBO Qe Eneste ACTOAOEEAEUERDC ^L EniheoA DE Heicadfa ^5 VIF DELNi Jacaedi Serv cios5) paestabois boohecib Dos)",
+        "Cristopher REILAL BpHR6 /",
+        "1J70772026",
+        "IOTAL $",
+        "447772090",
+        "Ilmbre Elecuonlco SIl Res80 d0 2014 Venlique docur Cedible Con SU FACTURA",
+        "JU 203s Soluclon 00 Fociurn Electronica w Snbmel€ 22",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["número de guía"] == "462871", datos
+    assert datos["número de transporte"] == "0000347469", datos
+    assert datos["cliente"] == "AUSIN HNOS LTDA", datos
+    assert datos["obra destino"] == "CONST CERRO APOQUINDO CUATRO", datos
+    assert datos["RUT del cliente"] == "81293200-4", datos
+    assert datos["chofer"] == "CRISTOPHER RETAMAL", datos
+    assert datos["RUT del chofer"] == "17576134-9", datos
+    assert datos["patente del tracto"] == "BPHR67", datos
+    assert datos["patente del carro"] == "No encontrado", datos
+    assert datos["hora de entrada"] == "08:53", datos
+    assert datos["hora de salida"] == "10:00", datos
+    assert datos["peso"] == "17.772,000", datos
+
+
 
 def probar_guia5():
     textos = [

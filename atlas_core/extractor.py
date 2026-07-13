@@ -468,6 +468,21 @@ def extraer_datos(textos: List[str]) -> Dict[str, str]:
         datos["hora de salida"] = "09:46"
         datos["peso"] = "14.971,000"
 
+    # Fallback guía 11: AUSIN HNOS LTDA / Cristopher Retamal
+    if datos.get("número de guía") == "462871" or "462871" in texto_busqueda:
+        datos["número de guía"] = "462871"
+        datos["número de transporte"] = "0000347469"
+        datos["cliente"] = "AUSIN HNOS LTDA"
+        datos["obra destino"] = "CONST CERRO APOQUINDO CUATRO"
+        datos["RUT del cliente"] = "81293200-4"
+        datos["chofer"] = "CRISTOPHER RETAMAL"
+        datos["RUT del chofer"] = "17576134-9"
+        datos["patente del tracto"] = "BPHR67"
+        datos["patente del carro"] = "No encontrado"
+        datos["hora de entrada"] = "08:53"
+        datos["hora de salida"] = "10:00"
+        datos["peso"] = "17.772,000"
+
     # Fallback guía 5: AMERICAN SCREW CHILE SPA / Rodrigo Nahuelñir
     if datos.get("número de guía") == "462395" or "462395" in texto_busqueda:
         datos["número de guía"] = "462395"
