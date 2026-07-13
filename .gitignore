@@ -12,3 +12,9 @@ __pycache__/
 *.pyc
 imagenes/
 output/
+
+# Catálogos maestros reales (contienen datos privados)
+catalogos/empresas.json
+catalogos/destinos.json
+catalogos/choferes.json
+catalogos/vehiculos.json
