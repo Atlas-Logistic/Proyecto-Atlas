@@ -1,3 +1,5 @@
 # Dependencias del proyecto
 easyocr
+numpy
+Pillow
 pytest
