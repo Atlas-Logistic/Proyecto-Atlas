@@ -1,10 +1,12 @@
 import ast
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from atlas_core.catalogo_transportistas import (
+    AliasTransportista,
     ErrorCatalogoTransportistas,
     ErrorRutTransportista,
     ErrorValidacionTransportista,
@@ -13,8 +15,10 @@ from atlas_core.catalogo_transportistas import (
     EstadoVigenciaAliasTransportista,
     EstadoVigenciaTransportista,
     MotivoRevisionBusquedaTransportista,
+    ResultadoBusquedaTransportista,
     TipoAliasTransportista,
     TipoOrigenCoincidenciaTransportista,
+    Transportista,
     normalizar_nombre_transportista,
     normalizar_rut_transportista,
     validar_fecha_iso8601_transportista,
@@ -217,3 +221,555 @@ def test_modulo_permanece_aislado_y_sin_efectos_de_archivo():
     prohibidos = ("ocr", "extractor", "rutas", "catalogo_clientes")
     assert not any(fragmento in nombre for nombre in importados for fragmento in prohibidos)
     assert not (Path(__file__).parents[1] / "catalogos" / "transportistas.json").exists()
+
+
+FECHA_ANTERIOR = "2026-01-01T00:00:00+00:00"
+FECHA_CREACION = "2026-01-02T00:00:00+00:00"
+FECHA_MODIFICACION = "2026-01-03T00:00:00+00:00"
+
+
+def _crear_alias(**cambios):
+    datos = {
+        "alias_id": str(uuid4()),
+        "valor": "TRANSPORTES DEMO ANTERIOR SPA",
+        "tipo": TipoAliasTransportista.RAZON_SOCIAL_ANTERIOR,
+        "estado_vigencia": EstadoVigenciaAliasTransportista.ACTIVO,
+        "fuente": "FUENTE SINTETICA",
+        "observacion": "",
+        "fecha_confirmacion_valor": FECHA_ANTERIOR,
+        "fecha_creacion": FECHA_CREACION,
+        "fecha_modificacion": FECHA_MODIFICACION,
+    }
+    datos.update(cambios)
+    return AliasTransportista(**datos)
+
+
+def _crear_transportista(**cambios):
+    datos = {
+        "transportista_id": str(uuid4()),
+        "razon_social": "TRANSPORTES DEMO NORTE SPA",
+        "fuente_razon_social": "FUENTE SINTETICA",
+        "fecha_confirmacion_razon_social": "",
+        "nombre_normalizado": "TRANSPORTES DEMO NORTE SPA",
+        "nombre_comercial": "DEMO LOGISTICA",
+        "rut": "",
+        "aliases": (),
+        "pais": "CL",
+        "estado_calidad": EstadoCalidadTransportista.PENDIENTE,
+        "estado_vigencia": EstadoVigenciaTransportista.ACTIVO,
+        "fuente": "FUENTE SINTETICA",
+        "observacion": "",
+        "fecha_creacion": FECHA_CREACION,
+        "fecha_modificacion": FECHA_MODIFICACION,
+    }
+    datos.update(cambios)
+    return Transportista(**datos)
+
+
+def _datos_alias(alias=None):
+    return (alias or _crear_alias()).a_dict()
+
+
+def _datos_transportista(transportista=None):
+    return (transportista or _crear_transportista()).a_dict()
+
+
+def test_alias_valido_inmutable_y_serializable():
+    alias = _crear_alias()
+    with pytest.raises(FrozenInstanceError):
+        alias.valor = "OTRO"
+    datos = alias.a_dict()
+    assert tuple(datos) == AliasTransportista._CAMPOS
+    assert datos["tipo"] == "RAZON_SOCIAL_ANTERIOR"
+    assert datos["estado_vigencia"] == "ACTIVO"
+    assert AliasTransportista.desde_dict(datos) == alias
+    assert AliasTransportista.desde_dict(alias.a_dict()).a_dict() == datos
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    (
+        ("alias_id", "uuid-invalido"),
+        ("valor", ""),
+        ("fuente", " "),
+        ("tipo", "ALIAS"),
+        ("estado_vigencia", "ACTIVO"),
+        ("observacion", None),
+        ("fecha_confirmacion_valor", ""),
+        ("fecha_creacion", "2026-01-02T00:00:00"),
+        ("fecha_modificacion", "fecha-invalida"),
+    ),
+)
+def test_alias_rechaza_campos_invalidos(campo, valor):
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_alias(**{campo: valor})
+
+
+@pytest.mark.parametrize(
+    "cambios",
+    (
+        {"fecha_confirmacion_valor": "2026-01-03T00:00:00+00:00"},
+        {"fecha_creacion": "2026-01-04T00:00:00+00:00"},
+    ),
+)
+def test_alias_rechaza_orden_temporal_invalido(cambios):
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_alias(**cambios)
+
+
+@pytest.mark.parametrize("alteracion", ("faltante", "extra", "raiz", "enum", "enum_tipado"))
+def test_alias_desde_dict_es_estricto_y_no_muta(alteracion):
+    datos = _datos_alias()
+    original = {**datos}
+    entrada = datos
+    if alteracion == "faltante":
+        entrada = {clave: valor for clave, valor in datos.items() if clave != "fuente"}
+    elif alteracion == "extra":
+        entrada = {**datos, "extra": True}
+    elif alteracion == "raiz":
+        entrada = list(datos.values())
+    elif alteracion == "enum":
+        entrada = {**datos, "tipo": "DESCONOCIDO"}
+    elif alteracion == "enum_tipado":
+        entrada = {**datos, "tipo": TipoAliasTransportista.ALIAS}
+    with pytest.raises(ErrorValidacionTransportista):
+        AliasTransportista.desde_dict(entrada)
+    assert datos == original
+
+
+def test_transportistas_validos_por_estado_de_calidad():
+    pendiente = _crear_transportista()
+    confirmado = _crear_transportista(
+        estado_calidad=EstadoCalidadTransportista.CONFIRMADO,
+        fecha_confirmacion_razon_social=FECHA_CREACION,
+    )
+    revision_nueva = _crear_transportista(
+        estado_calidad=EstadoCalidadTransportista.REQUIERE_REVISION
+    )
+    revision_historica = _crear_transportista(
+        estado_calidad=EstadoCalidadTransportista.REQUIERE_REVISION,
+        fecha_confirmacion_razon_social=FECHA_ANTERIOR,
+    )
+    assert pendiente.fecha_confirmacion_razon_social == ""
+    assert confirmado.fecha_confirmacion_razon_social == FECHA_CREACION
+    assert revision_nueva.fecha_confirmacion_razon_social == ""
+    assert revision_historica.fecha_confirmacion_razon_social == FECHA_ANTERIOR
+
+
+def test_transportista_es_inmutable():
+    transportista = _crear_transportista()
+    with pytest.raises(FrozenInstanceError):
+        transportista.razon_social = "OTRA"
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    (
+        ("transportista_id", "uuid-invalido"),
+        ("razon_social", ""),
+        ("fuente_razon_social", ""),
+        ("nombre_normalizado", "NOMBRE INCORRECTO"),
+        ("nombre_comercial", None),
+        ("pais", "AR"),
+        ("estado_calidad", "PENDIENTE"),
+        ("estado_vigencia", "ACTIVO"),
+        ("fuente", ""),
+        ("observacion", None),
+        ("fecha_creacion", "2026-01-02T00:00:00"),
+        ("fecha_modificacion", "fecha-invalida"),
+    ),
+)
+def test_transportista_rechaza_campos_invalidos(campo, valor):
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_transportista(**{campo: valor})
+
+
+def test_transportista_rechaza_orden_y_reglas_de_confirmacion_invalidos():
+    casos = (
+        {"fecha_creacion": "2026-01-04T00:00:00+00:00"},
+        {"fecha_confirmacion_razon_social": FECHA_ANTERIOR},
+        {"estado_calidad": EstadoCalidadTransportista.CONFIRMADO},
+        {
+            "estado_calidad": EstadoCalidadTransportista.CONFIRMADO,
+            "fecha_confirmacion_razon_social": "2026-01-04T00:00:00+00:00",
+        },
+    )
+    for cambios in casos:
+        with pytest.raises(ErrorValidacionTransportista):
+            _crear_transportista(**cambios)
+
+
+def test_transportista_admite_rut_vacio_y_canonico():
+    cuerpo, digito = _rut_sintetico()
+    assert _crear_transportista().rut == ""
+    rut = f"{cuerpo}-{digito}"
+    assert _crear_transportista(rut=rut).rut == rut
+
+
+def test_transportista_rechaza_rut_no_canonico_o_invalido_sin_exponerlo():
+    cuerpo, digito = _rut_sintetico()
+    entradas = (f"{cuerpo[:2]}.{cuerpo[2:5]}.{cuerpo[5:]}-{digito}", f"{cuerpo}-X")
+    for recibido in entradas:
+        with pytest.raises(ErrorValidacionTransportista) as capturado:
+            _crear_transportista(rut=recibido)
+        mensaje = str(capturado.value)
+        assert recibido not in mensaje
+        assert cuerpo not in mensaje
+        assert mensaje == "RUT del transportista inválido o no canónico"
+
+
+@pytest.mark.parametrize("aliases", ([], (_crear_alias(), "no-alias")))
+def test_transportista_exige_tupla_de_aliases_tipados(aliases):
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_transportista(aliases=aliases)
+
+
+def test_transportista_rechaza_colisiones_internas_de_aliases():
+    alias = _crear_alias()
+    repetido_id = _crear_alias(alias_id=alias.alias_id, valor="OTRO NOMBRE")
+    repetido_valor = _crear_alias(valor="Transportes Démo Anterior, S.P.A.")
+    igual_razon = _crear_alias(valor="Transportes Demo Norte S.P.A.")
+    igual_comercial = _crear_alias(valor="Demo Logística")
+    for aliases in (
+        (alias, repetido_id),
+        (alias, repetido_valor),
+        (igual_razon,),
+        (igual_comercial,),
+    ):
+        with pytest.raises(ErrorValidacionTransportista):
+            _crear_transportista(aliases=aliases)
+
+
+def test_aliases_activos_e_inactivos_permanecen_representables():
+    activo = _crear_alias(valor="ALIAS DEMO UNO")
+    inactivo = _crear_alias(
+        valor="ALIAS DEMO DOS",
+        estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+    transportista = _crear_transportista(aliases=(activo, inactivo))
+    assert tuple(alias.estado_vigencia for alias in transportista.aliases) == (
+        EstadoVigenciaAliasTransportista.ACTIVO,
+        EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+
+
+def test_transportista_round_trip_estable_con_aliases_y_enums():
+    transportista = _crear_transportista(
+        aliases=(_crear_alias(valor="ALIAS DEMO UNO"),),
+        estado_calidad=EstadoCalidadTransportista.CONFIRMADO,
+        fecha_confirmacion_razon_social=FECHA_ANTERIOR,
+    )
+    datos = transportista.a_dict()
+    assert tuple(datos) == Transportista._CAMPOS
+    assert isinstance(datos["aliases"], list)
+    assert datos["estado_calidad"] == "CONFIRMADO"
+    assert datos["estado_vigencia"] == "ACTIVO"
+    reconstruido = Transportista.desde_dict(datos)
+    assert reconstruido == transportista
+    assert reconstruido.a_dict() == datos
+
+
+@pytest.mark.parametrize("alteracion", ("faltante", "extra", "raiz", "aliases", "enum", "enum_tipado"))
+def test_transportista_desde_dict_es_estricto_y_no_muta(alteracion):
+    datos = _datos_transportista()
+    original = {**datos, "aliases": list(datos["aliases"])}
+    entrada = datos
+    if alteracion == "faltante":
+        entrada = {clave: valor for clave, valor in datos.items() if clave != "fuente"}
+    elif alteracion == "extra":
+        entrada = {**datos, "extra": True}
+    elif alteracion == "raiz":
+        entrada = list(datos.values())
+    elif alteracion == "aliases":
+        entrada = {**datos, "aliases": ()}
+    elif alteracion == "enum":
+        entrada = {**datos, "estado_calidad": "DESCONOCIDO"}
+    elif alteracion == "enum_tipado":
+        entrada = {**datos, "estado_calidad": EstadoCalidadTransportista.PENDIENTE}
+    with pytest.raises(ErrorValidacionTransportista):
+        Transportista.desde_dict(entrada)
+    assert datos == original
+
+
+_NO_INDICADO = object()
+
+
+def _resultado(estado, transportista=_NO_INDICADO, **cambios):
+    requiere = estado in {
+        EstadoBusquedaTransportista.COINCIDENCIA,
+        EstadoBusquedaTransportista.REQUIERE_REACTIVACION,
+        EstadoBusquedaTransportista.PROPUESTA_EXISTENTE,
+        EstadoBusquedaTransportista.EN_REVISION,
+    }
+    elegido = (_crear_transportista() if requiere else None) if transportista is _NO_INDICADO else transportista
+    datos = {
+        "estado": estado,
+        "motivo_revision": (
+            MotivoRevisionBusquedaTransportista.ESTADO_CALIDAD
+            if estado is EstadoBusquedaTransportista.EN_REVISION else None
+        ),
+        "transportista": elegido,
+        "cantidad_candidatos": 1 if requiere else 0,
+        "transportista_ids": (
+            (elegido.transportista_id,)
+            if requiere and isinstance(elegido, Transportista)
+            else ()
+        ),
+        "origenes_coincidencia": (
+            (TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,) if requiere else ()
+        ),
+    }
+    datos.update(cambios)
+    return ResultadoBusquedaTransportista(**datos)
+
+
+@pytest.mark.parametrize(
+    "estado",
+    (
+        EstadoBusquedaTransportista.COINCIDENCIA,
+        EstadoBusquedaTransportista.REQUIERE_REACTIVACION,
+        EstadoBusquedaTransportista.PROPUESTA_EXISTENTE,
+        EstadoBusquedaTransportista.EN_REVISION,
+        EstadoBusquedaTransportista.SIN_COINCIDENCIA,
+    ),
+)
+def test_resultados_validos_por_estado(estado):
+    assert _resultado(estado).estado is estado
+
+
+@pytest.mark.parametrize(
+    "motivo",
+    tuple(MotivoRevisionBusquedaTransportista),
+)
+def test_en_revision_admite_ambos_motivos(motivo):
+    origen = (
+        TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO
+        if motivo is MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO
+        else TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL
+    )
+    assert _resultado(
+        EstadoBusquedaTransportista.EN_REVISION,
+        motivo_revision=motivo,
+        origenes_coincidencia=(origen,),
+    ).motivo_revision is motivo
+
+
+def test_resultado_ambiguo_valido_con_ids_ordenados():
+    ids = tuple(sorted((str(uuid4()), str(uuid4()))))
+    resultado = _resultado(
+        EstadoBusquedaTransportista.AMBIGUA,
+        cantidad_candidatos=2,
+        transportista_ids=ids,
+        origenes_coincidencia=(TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,),
+    )
+    assert resultado.transportista is None
+
+
+@pytest.mark.parametrize(
+    "cambios",
+    (
+        {"motivo_revision": MotivoRevisionBusquedaTransportista.ESTADO_CALIDAD},
+        {"transportista": None},
+        {"cantidad_candidatos": -1},
+        {"cantidad_candidatos": True},
+        {"transportista_ids": ()},
+    ),
+)
+def test_resultado_individual_rechaza_inconsistencias(cambios):
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(EstadoBusquedaTransportista.COINCIDENCIA, **cambios)
+
+
+def test_resultado_en_revision_exige_motivo():
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(EstadoBusquedaTransportista.EN_REVISION, motivo_revision=None)
+
+
+def test_resultado_rechaza_uuid_distinto_repetido_no_canonico_o_desordenado():
+    transportista = _crear_transportista()
+    otro = str(uuid4())
+    casos = (
+        (otro,),
+        (otro, otro),
+        (otro.upper(),),
+        tuple(reversed(sorted((otro, str(uuid4()))))),
+    )
+    for ids in casos:
+        with pytest.raises(ErrorValidacionTransportista):
+            _resultado(
+                EstadoBusquedaTransportista.COINCIDENCIA,
+                transportista=transportista,
+                transportista_ids=ids,
+                cantidad_candidatos=len(ids),
+            )
+
+
+def test_resultado_ambiguo_rechaza_transportista_o_cantidad_inconsistente():
+    ids = tuple(sorted((str(uuid4()), str(uuid4()))))
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.AMBIGUA,
+            transportista=_crear_transportista(),
+            cantidad_candidatos=2,
+            transportista_ids=ids,
+        )
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.AMBIGUA,
+            cantidad_candidatos=3,
+            transportista_ids=ids,
+        )
+
+
+def test_sin_coincidencia_rechaza_origenes():
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.SIN_COINCIDENCIA,
+            origenes_coincidencia=(TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,),
+        )
+
+
+@pytest.mark.parametrize(
+    "origenes",
+    (
+        (TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,) * 2,
+        ("ALIAS_ACTIVO",),
+        [TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO],
+    ),
+)
+def test_resultado_rechaza_origenes_repetidos_o_mal_tipados(origenes):
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(EstadoBusquedaTransportista.COINCIDENCIA, origenes_coincidencia=origenes)
+
+
+def test_resultado_es_inmutable_y_no_tiene_serializacion_persistente():
+    resultado = _resultado(EstadoBusquedaTransportista.COINCIDENCIA)
+    with pytest.raises(FrozenInstanceError):
+        resultado.cantidad_candidatos = 2
+    assert not hasattr(resultado, "a_dict")
+    assert not hasattr(ResultadoBusquedaTransportista, "desde_dict")
+
+
+@pytest.mark.parametrize(
+    "estado",
+    (
+        EstadoBusquedaTransportista.COINCIDENCIA,
+        EstadoBusquedaTransportista.REQUIERE_REACTIVACION,
+        EstadoBusquedaTransportista.PROPUESTA_EXISTENTE,
+        EstadoBusquedaTransportista.EN_REVISION,
+    ),
+)
+def test_resultados_con_candidato_rechazan_origenes_vacios(estado):
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(estado, origenes_coincidencia=())
+
+
+def test_en_revision_por_alias_inactivo_exige_origen_correspondiente():
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.EN_REVISION,
+            motivo_revision=MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO,
+            origenes_coincidencia=(),
+        )
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.EN_REVISION,
+            motivo_revision=MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO,
+            origenes_coincidencia=(TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,),
+        )
+    resultado = _resultado(
+        EstadoBusquedaTransportista.EN_REVISION,
+        motivo_revision=MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO,
+        origenes_coincidencia=(
+            TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,
+            TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+        ),
+    )
+    assert TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO in resultado.origenes_coincidencia
+
+
+def test_resultado_ambiguo_rechaza_origenes_vacios():
+    ids = tuple(sorted((str(uuid4()), str(uuid4()))))
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.AMBIGUA,
+            cantidad_candidatos=2,
+            transportista_ids=ids,
+            origenes_coincidencia=(),
+        )
+
+
+def test_sin_coincidencia_exige_origenes_vacios():
+    assert _resultado(EstadoBusquedaTransportista.SIN_COINCIDENCIA).origenes_coincidencia == ()
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.SIN_COINCIDENCIA,
+            origenes_coincidencia=(TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,),
+        )
+
+
+class _TextoDerivado(str):
+    pass
+
+
+class _DictDerivado(dict):
+    pass
+
+
+class _TuplaDerivada(tuple):
+    pass
+
+
+class _ListaDerivada(list):
+    pass
+
+
+class _EnteroDerivado(int):
+    pass
+
+
+def test_modelos_rechazan_subclases_de_texto():
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_alias(valor=_TextoDerivado("ALIAS DEMO"))
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_transportista(razon_social=_TextoDerivado("TRANSPORTES DEMO NORTE SPA"))
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_alias(alias_id=_TextoDerivado(str(uuid4())))
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_alias(fecha_creacion=_TextoDerivado(FECHA_CREACION))
+
+
+def test_deserializacion_rechaza_subclase_de_dict():
+    with pytest.raises(ErrorValidacionTransportista):
+        AliasTransportista.desde_dict(_DictDerivado(_datos_alias()))
+    with pytest.raises(ErrorValidacionTransportista):
+        Transportista.desde_dict(_DictDerivado(_datos_transportista()))
+
+
+def test_deserializacion_rechaza_subclase_de_lista_para_aliases():
+    datos = _datos_transportista()
+    datos["aliases"] = _ListaDerivada(datos["aliases"])
+    with pytest.raises(ErrorValidacionTransportista):
+        Transportista.desde_dict(datos)
+
+
+def test_modelos_rechazan_subclases_de_tupla_y_entero():
+    with pytest.raises(ErrorValidacionTransportista):
+        _crear_transportista(aliases=_TuplaDerivada())
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.COINCIDENCIA,
+            cantidad_candidatos=_EnteroDerivado(1),
+        )
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.COINCIDENCIA,
+            transportista_ids=_TuplaDerivada((_crear_transportista().transportista_id,)),
+        )
+    with pytest.raises(ErrorValidacionTransportista):
+        _resultado(
+            EstadoBusquedaTransportista.COINCIDENCIA,
+            origenes_coincidencia=_TuplaDerivada(
+                (TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,)
+            ),
+        )
