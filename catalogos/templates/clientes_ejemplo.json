@@ -1,0 +1,21 @@
+{
+  "version_formato": 1,
+  "clientes": [
+    {
+      "cliente_id": "00000000-0000-4000-8000-000000000101",
+      "razon_social": "EMPRESA DEMOSTRACIÓN NORTE S.A.",
+      "nombre_normalizado": "EMPRESA DEMOSTRACION NORTE",
+      "nombre_comercial": "MARCA DEMO NORTE",
+      "rut": "",
+      "aliases": [
+        "EMPRESA DEMO NORTE"
+      ],
+      "estado_calidad": "PENDIENTE",
+      "estado_vigencia": "ACTIVO",
+      "fuente": "PLANTILLA_SINTETICA",
+      "observacion": "Registro ficticio para demostrar el formato.",
+      "fecha_creacion": "2026-01-01T00:00:00+00:00",
+      "fecha_modificacion": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}

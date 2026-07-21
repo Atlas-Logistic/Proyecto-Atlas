@@ -18,3 +18,11 @@ catalogos/empresas.json
 catalogos/destinos.json
 catalogos/choferes.json
 catalogos/vehiculos.json
+catalogos/plantas.json
+catalogos/clientes.json
+catalogos/respaldo_destinos_legado_2026-07-20.json
+catalogos/destinos_legado_original_2026-07-21.json
+resultado_pruebas.txt
+.pytest_cache/
+.pytest_temp*/
+.tmp_atlas_master_context_verify/

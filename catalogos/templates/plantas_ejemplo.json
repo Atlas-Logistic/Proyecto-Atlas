@@ -1,0 +1,22 @@
+{
+  "version_formato": 1,
+  "plantas": [
+    {
+      "planta_id": "00000000-0000-4000-8000-000000000001",
+      "nombre": "PLANTA DEMOSTRACIÓN NORTE",
+      "nombre_normalizado": "PLANTA DEMOSTRACION NORTE",
+      "direccion": "AVENIDA FICTICIA 100",
+      "comuna": "COMUNA DEMOSTRACIÓN",
+      "region": "REGIÓN DEMOSTRACIÓN",
+      "pais": "PAÍS DEMOSTRACIÓN",
+      "latitud": null,
+      "longitud": null,
+      "estado_calidad": "PENDIENTE",
+      "estado_vigencia": "ACTIVA",
+      "fuente": "PLANTILLA_SINTETICA",
+      "observacion": "Registro exclusivamente ilustrativo; no representa una planta real.",
+      "fecha_creacion": "2026-01-01T00:00:00+00:00",
+      "fecha_modificacion": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}
