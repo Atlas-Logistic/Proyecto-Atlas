@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -72,6 +75,10 @@ class ErrorRutTransportista(ErrorValidacionTransportista):
 
 class ErrorCatalogoTransportistasCorrupto(ErrorCatalogoTransportistas):
     """El archivo del catálogo no cumple su contrato estructural."""
+
+
+class ErrorEscrituraCatalogoTransportistas(ErrorCatalogoTransportistas):
+    """Falló la escritura atómica del catálogo."""
 
 
 class _ClaveJsonDuplicada(ValueError):
@@ -669,6 +676,58 @@ class CatalogoTransportistas:
 
         self._validar_catalogo_completo(transportistas)
         return transportistas
+
+    def _escribir(self, transportistas: tuple[Transportista, ...]) -> None:
+        """Persiste una colección ya leída y validada por una futura mutación."""
+        if type(transportistas) is not tuple or not all(
+            type(transportista) is Transportista for transportista in transportistas
+        ):
+            raise ErrorValidacionTransportista(
+                "la escritura requiere una tupla de Transportista"
+            )
+        self._validar_catalogo_completo(list(transportistas))
+        contenido = {
+            "version_formato": VERSION_FORMATO_TRANSPORTISTAS,
+            "transportistas": [transportista.a_dict() for transportista in transportistas],
+        }
+        temporal: Path | None = None
+        try:
+            self.ruta.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                dir=self.ruta.parent,
+                prefix=f".{self.ruta.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as archivo:
+                temporal = Path(archivo.name)
+                json.dump(
+                    contenido,
+                    archivo,
+                    ensure_ascii=False,
+                    indent=2,
+                    allow_nan=False,
+                )
+                archivo.write("\n")
+                archivo.flush()
+                os.fsync(archivo.fileno())
+            os.replace(temporal, self.ruta)
+        except OSError as error:
+            raise ErrorEscrituraCatalogoTransportistas(
+                "no se pudo escribir el catálogo"
+            ) from error
+        finally:
+            excepcion_activa = sys.exc_info()[0] is not None
+            if temporal is not None:
+                try:
+                    temporal.unlink(missing_ok=True)
+                except OSError as error:
+                    if not excepcion_activa:
+                        raise ErrorEscrituraCatalogoTransportistas(
+                            "no se pudo limpiar el archivo temporal"
+                        ) from error
 
     @staticmethod
     def _validar_catalogo_completo(transportistas: list[Transportista]) -> None:

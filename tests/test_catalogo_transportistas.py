@@ -5,12 +5,14 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import atlas_core.catalogo_transportistas as modulo_transportistas
 
 from atlas_core.catalogo_transportistas import (
     AliasTransportista,
     CatalogoTransportistas,
     ErrorCatalogoTransportistas,
     ErrorCatalogoTransportistasCorrupto,
+    ErrorEscrituraCatalogoTransportistas,
     ErrorRutTransportista,
     ErrorValidacionTransportista,
     EstadoBusquedaTransportista,
@@ -1144,8 +1146,8 @@ def test_catalogo_solo_implementa_listar_y_no_escribe(tmp_path):
         assert not hasattr(catalogo, nombre)
     modulo = Path(__file__).parents[1] / "atlas_core" / "catalogo_transportistas.py"
     texto = modulo.read_text(encoding="utf-8")
-    assert "os.replace" not in texto
-    assert "NamedTemporaryFile" not in texto
+    assert texto.count("os.replace") == 1
+    assert texto.count("NamedTemporaryFile") == 1
     assert not (Path(__file__).parents[1] / "catalogos" / "transportistas.json").exists()
 
 
@@ -1499,3 +1501,325 @@ def test_buscar_ambiguo_no_modifica_bytes_del_archivo(tmp_path):
     antes = ruta.read_bytes()
     assert catalogo.buscar(texto).estado is EstadoBusquedaTransportista.AMBIGUA
     assert ruta.read_bytes() == antes
+
+
+def test_escritura_privada_catalogo_vacio_crea_directorio_y_formato_exacto(tmp_path):
+    ruta = tmp_path / "nuevo" / "transportistas.json"
+    catalogo = CatalogoTransportistas(ruta)
+    assert not ruta.parent.exists()
+    catalogo._escribir(())
+    assert ruta.parent.exists()
+    bytes_escritos = ruta.read_bytes()
+    assert bytes_escritos == b'{\n  "version_formato": 1,\n  "transportistas": []\n}\n'
+    assert not bytes_escritos.startswith(b"\xef\xbb\xbf")
+    assert CatalogoTransportistas(ruta).listar() == ()
+
+
+def test_escritura_serializa_transportistas_aliases_en_orden_y_round_trip(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    alias_activo = _crear_alias(valor="ALIAS ÑANDÚ ACTIVO")
+    alias_inactivo = _crear_alias(
+        valor="ALIAS HISTÓRICO",
+        estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+    primero = _transportista_para_busqueda(
+        razon_social="TRANSPORTES ÑANDÚ SPA",
+        nombre_normalizado="TRANSPORTES NANDU SPA",
+        aliases=(alias_activo, alias_inactivo),
+    )
+    segundo = _transportista_para_busqueda(
+        razon_social="SEGUNDO TRANSPORTISTA LTDA",
+        nombre_normalizado="SEGUNDO TRANSPORTISTA LTDA",
+    )
+    CatalogoTransportistas(ruta)._escribir((segundo, primero))
+    texto = ruta.read_text(encoding="utf-8")
+    assert "ÑANDÚ" in texto
+    assert "\\u00d1" not in texto
+    assert "\r" not in texto
+    assert texto.endswith("\n")
+    assert '\n  "version_formato": 1,' in texto
+    assert texto.index('"version_formato"') < texto.index('"transportistas"')
+    assert texto.index('"transportista_id"') < texto.index('"razon_social"')
+    documento = json.loads(texto)
+    assert tuple(documento) == ("version_formato", "transportistas")
+    assert isinstance(documento["transportistas"][1]["aliases"], list)
+    assert documento["transportistas"][1]["estado_calidad"] == "CONFIRMADO"
+    assert CatalogoTransportistas(ruta).listar() == (segundo, primero)
+
+
+def test_escritura_es_determinista_para_misma_coleccion(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    transportista = _transportista_para_busqueda()
+    catalogo = CatalogoTransportistas(ruta)
+    catalogo._escribir((transportista,))
+    primera = ruta.read_bytes()
+    catalogo._escribir((transportista,))
+    assert ruta.read_bytes() == primera
+
+
+@pytest.mark.parametrize("coleccion", ([], _TuplaDerivada(), (_crear_alias(),)))
+def test_escritura_rechaza_coleccion_no_tipado_estricto(tmp_path, coleccion):
+    ruta = tmp_path / "transportistas.json"
+    with pytest.raises(ErrorValidacionTransportista):
+        CatalogoTransportistas(ruta)._escribir(coleccion)
+    assert not ruta.exists()
+    assert not ruta.parent.joinpath("otro").exists()
+
+
+def test_escritura_revalida_duplicidades_globales_antes_de_tocar_disco(tmp_path):
+    ruta = tmp_path / "nuevo" / "transportistas.json"
+    cuerpo, digito = _rut_sintetico()
+    rut = f"{cuerpo}-{digito}"
+    primero = _transportista_para_busqueda(rut=rut)
+    segundo_id = _transportista_para_busqueda(
+        transportista_id=primero.transportista_id,
+        razon_social="SEGUNDO SPA",
+        nombre_normalizado="SEGUNDO SPA",
+    )
+    alias = _crear_alias(valor="ALIAS UNO")
+    primero_alias = _transportista_para_busqueda(aliases=(alias,))
+    segundo_alias = _transportista_para_busqueda(
+        razon_social="SEGUNDO SPA",
+        nombre_normalizado="SEGUNDO SPA",
+        aliases=(_crear_alias(alias_id=alias.alias_id, valor="ALIAS DOS"),),
+    )
+    segundo_rut = _transportista_para_busqueda(
+        razon_social="SEGUNDO SPA", nombre_normalizado="SEGUNDO SPA", rut=rut
+    )
+    for coleccion in (
+        (primero, segundo_id),
+        (primero_alias, segundo_alias),
+        (primero, segundo_rut),
+    ):
+        with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+            CatalogoTransportistas(ruta)._escribir(coleccion)
+        assert rut not in str(capturado.value)
+        assert not ruta.parent.exists()
+
+
+def test_escritura_permite_ruts_vacios_y_colisiones_nominales(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    texto = "NOMBRE COMPARTIDO SPA"
+    primero = _transportista_para_busqueda(razon_social=texto, nombre_normalizado=texto)
+    segundo = _transportista_para_busqueda(razon_social=texto, nombre_normalizado=texto)
+    CatalogoTransportistas(ruta)._escribir((primero, segundo))
+    assert CatalogoTransportistas(ruta).listar() == (primero, segundo)
+
+
+def test_escritura_temporal_mismo_directorio_cerrado_y_reemplazo_atomico(
+    monkeypatch, tmp_path
+):
+    ruta = tmp_path / "transportistas.json"
+    real_temporal = modulo_transportistas.tempfile.NamedTemporaryFile
+    real_replace = modulo_transportistas.os.replace
+    observado = {}
+
+    def crear_temporal(*args, **kwargs):
+        observado["dir"] = Path(kwargs["dir"])
+        archivo = real_temporal(*args, **kwargs)
+        observado["archivo"] = archivo
+        observado["nombre"] = Path(archivo.name)
+        return archivo
+
+    def reemplazar(origen, destino):
+        observado["cerrado"] = observado["archivo"].file.closed
+        observado["origen"] = Path(origen)
+        observado["destino"] = Path(destino)
+        return real_replace(origen, destino)
+
+    monkeypatch.setattr(modulo_transportistas.tempfile, "NamedTemporaryFile", crear_temporal)
+    monkeypatch.setattr(modulo_transportistas.os, "replace", reemplazar)
+    CatalogoTransportistas(ruta)._escribir((_transportista_para_busqueda(),))
+    assert observado["dir"] == ruta.parent
+    assert observado["nombre"] != ruta
+    assert observado["origen"] == observado["nombre"]
+    assert observado["destino"] == ruta
+    assert observado["cerrado"] is True
+    assert not observado["nombre"].exists()
+
+
+def test_escritura_reemplaza_archivo_existente(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    ruta.write_bytes(b"CONTENIDO ANTERIOR")
+    transportista = _transportista_para_busqueda()
+    CatalogoTransportistas(ruta)._escribir((transportista,))
+    assert ruta.read_bytes() != b"CONTENIDO ANTERIOR"
+    assert CatalogoTransportistas(ruta).listar() == (transportista,)
+
+
+@pytest.mark.parametrize("destino_preexistente", (True, False))
+def test_fallo_replace_preserva_destino_y_elimina_temporal(
+    monkeypatch, tmp_path, destino_preexistente
+):
+    ruta = tmp_path / "transportistas.json"
+    anteriores = b"BYTES ANTERIORES"
+    if destino_preexistente:
+        ruta.write_bytes(anteriores)
+    temporal_observado = None
+
+    def fallar(origen, destino):
+        nonlocal temporal_observado
+        temporal_observado = Path(origen)
+        raise OSError("ruta y temporal privados")
+
+    monkeypatch.setattr(modulo_transportistas.os, "replace", fallar)
+    with pytest.raises(ErrorEscrituraCatalogoTransportistas) as capturado:
+        CatalogoTransportistas(ruta)._escribir((_transportista_para_busqueda(),))
+    assert str(capturado.value) == "no se pudo escribir el catálogo"
+    assert temporal_observado is not None and not temporal_observado.exists()
+    if destino_preexistente:
+        assert ruta.read_bytes() == anteriores
+    else:
+        assert not ruta.exists()
+
+
+def test_fallo_mkdir_es_seguro_y_no_crea_destino(monkeypatch, tmp_path):
+    ruta = tmp_path / "privado" / "transportistas.json"
+
+    def fallar(*args, **kwargs):
+        raise OSError("ruta absoluta privada")
+
+    monkeypatch.setattr(Path, "mkdir", fallar)
+    with pytest.raises(ErrorEscrituraCatalogoTransportistas) as capturado:
+        CatalogoTransportistas(ruta)._escribir(())
+    assert str(capturado.value) == "no se pudo escribir el catálogo"
+    assert str(ruta) not in str(capturado.value)
+    assert not ruta.exists()
+
+
+def test_fallo_escritura_preserva_archivo_y_no_reemplaza(monkeypatch, tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    anteriores = b"ORIGINAL"
+    ruta.write_bytes(anteriores)
+    reemplazo = False
+
+    def fallar(*args, **kwargs):
+        raise OSError("contenido privado")
+
+    def marcar(*args, **kwargs):
+        nonlocal reemplazo
+        reemplazo = True
+
+    monkeypatch.setattr(modulo_transportistas.json, "dump", fallar)
+    monkeypatch.setattr(modulo_transportistas.os, "replace", marcar)
+    with pytest.raises(ErrorEscrituraCatalogoTransportistas):
+        CatalogoTransportistas(ruta)._escribir((_transportista_para_busqueda(),))
+    assert ruta.read_bytes() == anteriores
+    assert reemplazo is False
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+class _ArchivoConFlushFallido:
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, nombre):
+        return getattr(self._real, nombre)
+
+    def write(self, valor):
+        return self._real.write(valor)
+
+    def flush(self):
+        raise OSError("flush privado")
+
+
+class _ContextoTemporalConProxy:
+    def __init__(self, contexto, proxy):
+        self._contexto = contexto
+        self._proxy = proxy
+
+    def __enter__(self):
+        self._contexto.__enter__()
+        return self._proxy
+
+    def __exit__(self, *args):
+        return self._contexto.__exit__(*args)
+
+
+def test_fallo_flush_preserva_archivo_y_no_reemplaza(monkeypatch, tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    anteriores = b"ORIGINAL"
+    ruta.write_bytes(anteriores)
+    real_temporal = modulo_transportistas.tempfile.NamedTemporaryFile
+    reemplazo = False
+
+    def crear(*args, **kwargs):
+        contexto = real_temporal(*args, **kwargs)
+        return _ContextoTemporalConProxy(contexto, _ArchivoConFlushFallido(contexto))
+
+    def marcar(*args, **kwargs):
+        nonlocal reemplazo
+        reemplazo = True
+
+    monkeypatch.setattr(modulo_transportistas.tempfile, "NamedTemporaryFile", crear)
+    monkeypatch.setattr(modulo_transportistas.os, "replace", marcar)
+    with pytest.raises(ErrorEscrituraCatalogoTransportistas):
+        CatalogoTransportistas(ruta)._escribir((_transportista_para_busqueda(),))
+    assert ruta.read_bytes() == anteriores
+    assert reemplazo is False
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_fallo_fsync_preserva_archivo_y_no_reemplaza(monkeypatch, tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    anteriores = b"ORIGINAL"
+    ruta.write_bytes(anteriores)
+    reemplazo = False
+
+    def fallar(descriptor):
+        raise OSError("fsync privado")
+
+    def marcar(*args, **kwargs):
+        nonlocal reemplazo
+        reemplazo = True
+
+    monkeypatch.setattr(modulo_transportistas.os, "fsync", fallar)
+    monkeypatch.setattr(modulo_transportistas.os, "replace", marcar)
+    with pytest.raises(ErrorEscrituraCatalogoTransportistas):
+        CatalogoTransportistas(ruta)._escribir((_transportista_para_busqueda(),))
+    assert ruta.read_bytes() == anteriores
+    assert reemplazo is False
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_keyboard_interrupt_limpia_temporal_y_se_propaga(monkeypatch, tmp_path):
+    ruta = tmp_path / "transportistas.json"
+
+    def interrumpir(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(modulo_transportistas.json, "dump", interrumpir)
+    with pytest.raises(KeyboardInterrupt):
+        CatalogoTransportistas(ruta)._escribir((_transportista_para_busqueda(),))
+    assert not ruta.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_error_escritura_no_expone_rut_json_ruta_o_temporal(monkeypatch, tmp_path):
+    ruta = tmp_path / "directorio-privado" / "transportistas.json"
+    cuerpo, digito = _rut_sintetico()
+    rut = f"{cuerpo}-{digito}"
+    transportista = _transportista_para_busqueda(rut=rut)
+
+    def fallar(origen, destino):
+        raise OSError(f"{origen} {destino} {rut} contenido JSON privado")
+
+    monkeypatch.setattr(modulo_transportistas.os, "replace", fallar)
+    with pytest.raises(ErrorEscrituraCatalogoTransportistas) as capturado:
+        CatalogoTransportistas(ruta)._escribir((transportista,))
+    mensaje = str(capturado.value)
+    assert mensaje == "no se pudo escribir el catálogo"
+    assert rut not in mensaje
+    assert str(ruta) not in mensaje
+    assert "JSON" not in mensaje
+
+
+def test_persistencia_no_agrega_metodos_publicos(tmp_path):
+    catalogo = CatalogoTransportistas(tmp_path / "transportistas.json")
+    publicos = {
+        nombre
+        for nombre in dir(catalogo)
+        if not nombre.startswith("_") and callable(getattr(catalogo, nombre))
+    }
+    assert publicos == {"listar", "buscar"}
+    assert not (Path(__file__).parents[1] / "catalogos" / "transportistas.json").exists()
