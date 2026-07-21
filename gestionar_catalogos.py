@@ -20,11 +20,16 @@ from atlas_core.catalogo_destinos import (
     EstadoCalidadDestino,
 )
 from atlas_core.catalogo_plantas import CatalogoPlantas, ErrorCatalogoPlantas, EstadoCalidad
+from atlas_core.rutas.modelos import Coordenadas, ErrorRutas, EstadoRuta
+from atlas_core.rutas.proveedor import ProveedorRutasSimulado
+from atlas_core.rutas.repositorio import RepositorioRutas
+from atlas_core.rutas.servicio import ServicioRutas
 
 
 RUTA_PLANTAS_PREDETERMINADA = Path("catalogos/plantas.json")
 RUTA_CLIENTES_PREDETERMINADA = Path("catalogos/clientes.json")
 RUTA_DESTINOS_PREDETERMINADA = Path("catalogos/destinos.json")
+RUTA_RUTAS_PREDETERMINADA = Path("catalogos/rutas.json")
 
 
 def _agregar_campos_planta(parser: argparse.ArgumentParser, *, edicion: bool) -> None:
@@ -184,6 +189,35 @@ def crear_parser_destinos() -> argparse.ArgumentParser:
     buscar = subcomandos.add_parser("buscar", help="Busca por nombre o alias normalizado")
     buscar.add_argument("--texto", required=True)
     buscar.add_argument("--cliente-id", help="Limita la búsqueda a un cliente")
+    return parser
+
+
+def crear_parser_rutas() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="gestionar_catalogos.py rutas",
+        description="Gestiona el catálogo privado y aislado de Rutas de Atlas.",
+    )
+    parser.add_argument("--archivo", type=Path, default=RUTA_RUTAS_PREDETERMINADA)
+    parser.add_argument("--archivo-plantas", type=Path, default=RUTA_PLANTAS_PREDETERMINADA)
+    parser.add_argument("--archivo-destinos", type=Path, default=RUTA_DESTINOS_PREDETERMINADA)
+    subcomandos = parser.add_subparsers(dest="accion", required=True)
+    subcomandos.add_parser("listar", help="Lista rutas, incluido el historial")
+    mostrar = subcomandos.add_parser("mostrar", help="Muestra una ruta por UUID")
+    mostrar.add_argument("ruta_id")
+    calcular = subcomandos.add_parser("calcular", help="Prepara o calcula una ruta aislada")
+    calcular.add_argument("--planta-id", required=True)
+    calcular.add_argument("--destino-id", required=True)
+    calcular.add_argument("--perfil", default="driving-car")
+    calcular.add_argument(
+        "--proveedor-simulado", action="store_true",
+        help="Usa exclusivamente el proveedor ficticio sin red",
+    )
+    calcular.add_argument(
+        "--confirmar", action="store_true",
+        help="Confirma explícitamente candidatos y permite guardar la ruta simulada",
+    )
+    for nombre in ("longitud-origen", "latitud-origen", "longitud-destino", "latitud-destino"):
+        calcular.add_argument(f"--{nombre}", type=float)
     return parser
 
 
@@ -388,9 +422,75 @@ def ejecutar_destinos(argumentos: argparse.Namespace) -> int:
     return 0
 
 
+def ejecutar_rutas(argumentos: argparse.Namespace) -> int:
+    repositorio = RepositorioRutas(argumentos.archivo)
+    if argumentos.accion == "listar":
+        rutas = repositorio.listar()
+        if not rutas:
+            print("El catálogo de rutas está vacío.")
+            return 0
+        for ruta in rutas:
+            print(
+                f"{ruta.ruta_id} | planta={ruta.planta_id} | destino={ruta.destino_id} | "
+                f"{ruta.perfil_ruta} | {ruta.estado} | vigente={ruta.vigente}"
+            )
+        return 0
+    if argumentos.accion == "mostrar":
+        print(json.dumps(repositorio.obtener(argumentos.ruta_id).a_dict(),
+                         ensure_ascii=False, indent=2))
+        return 0
+    if not argumentos.proveedor_simulado:
+        print("Error: el proveedor real está deshabilitado; use --proveedor-simulado.")
+        return 2
+    planta = CatalogoPlantas(argumentos.archivo_plantas).obtener(argumentos.planta_id)
+    destino = CatalogoDestinos(argumentos.archivo_destinos).obtener(argumentos.destino_id)
+    proveedor = ProveedorRutasSimulado()
+    servicio = ServicioRutas(proveedor, repositorio)
+    preparado = servicio.preparar(planta, destino, argumentos.perfil)
+    if preparado.estado == EstadoRuta.RESULTADO_DESDE_CACHE:
+        print("Resultado reutilizado desde caché; no se consultó al proveedor.")
+        print(json.dumps(preparado.ruta.a_dict(), ensure_ascii=False, indent=2))
+        return 0
+    if preparado.estado != EstadoRuta.REQUIERE_REVISION:
+        print(f"Estado: {preparado.estado.value} | motivo={preparado.motivo}")
+        return 2
+    print("Candidatos sintéticos preparados; se requiere confirmación explícita.")
+    for tipo, geocodificacion in (("origen", preparado.origen), ("destino", preparado.destino)):
+        for indice, candidato in enumerate(geocodificacion.candidatos, start=1):
+            print(
+                f"{tipo} candidato {indice}: {candidato.etiqueta} | "
+                f"longitud={candidato.coordenadas.longitud} | "
+                f"latitud={candidato.coordenadas.latitud}"
+            )
+    if not argumentos.confirmar:
+        return 0
+    valores = (
+        argumentos.longitud_origen, argumentos.latitud_origen,
+        argumentos.longitud_destino, argumentos.latitud_destino,
+    )
+    if any(valor is None for valor in valores):
+        print("Error: --confirmar requiere las cuatro coordenadas explícitas.")
+        return 2
+    resultado = servicio.confirmar_y_calcular(
+        planta, destino, argumentos.perfil,
+        Coordenadas(argumentos.longitud_origen, argumentos.latitud_origen),
+        Coordenadas(argumentos.longitud_destino, argumentos.latitud_destino),
+        confirmacion_explicita=True,
+    )
+    print(f"Estado: {resultado.estado.value}")
+    if resultado.ruta:
+        print(json.dumps(resultado.ruta.a_dict(), ensure_ascii=False, indent=2))
+    return 0 if resultado.estado in {
+        EstadoRuta.RUTA_CALCULADA, EstadoRuta.RESULTADO_DESDE_CACHE
+    } else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     argumentos_crudos = list(sys.argv[1:] if argv is None else argv)
     try:
+        if argumentos_crudos and argumentos_crudos[0] == "rutas":
+            argumentos = crear_parser_rutas().parse_args(argumentos_crudos[1:])
+            return ejecutar_rutas(argumentos)
         if argumentos_crudos and argumentos_crudos[0] == "destinos":
             argumentos = crear_parser_destinos().parse_args(argumentos_crudos[1:])
             return ejecutar_destinos(argumentos)
@@ -405,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         ErrorCatalogoPlantas,
         ErrorCatalogoClientes,
         ErrorCatalogoDestinos,
+        ErrorRutas,
         OSError,
     ) as error:
         print(f"Error: {error}")
