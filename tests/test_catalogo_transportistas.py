@@ -1138,10 +1138,364 @@ def test_catalogo_permite_colisiones_nominales_entre_transportistas(tmp_path):
 
 def test_catalogo_solo_implementa_listar_y_no_escribe(tmp_path):
     catalogo = CatalogoTransportistas(tmp_path / "transportistas.json")
-    for nombre in ("obtener", "buscar", "agregar", "editar", "guardar", "escribir", "activar", "desactivar", "confirmar"):
+    assert callable(catalogo.listar)
+    assert callable(catalogo.buscar)
+    for nombre in ("obtener", "agregar", "editar", "guardar", "escribir", "activar", "desactivar", "confirmar"):
         assert not hasattr(catalogo, nombre)
     modulo = Path(__file__).parents[1] / "atlas_core" / "catalogo_transportistas.py"
     texto = modulo.read_text(encoding="utf-8")
     assert "os.replace" not in texto
     assert "NamedTemporaryFile" not in texto
     assert not (Path(__file__).parents[1] / "catalogos" / "transportistas.json").exists()
+
+
+def _transportista_para_busqueda(
+    *,
+    estado=EstadoCalidadTransportista.CONFIRMADO,
+    vigencia=EstadoVigenciaTransportista.ACTIVO,
+    **cambios,
+):
+    return _crear_transportista(
+        estado_calidad=estado,
+        estado_vigencia=vigencia,
+        fecha_confirmacion_razon_social=(
+            FECHA_ANTERIOR if estado is EstadoCalidadTransportista.CONFIRMADO else ""
+        ),
+        **cambios,
+    )
+
+
+def _catalogo_busqueda(tmp_path, *transportistas):
+    ruta = tmp_path / "transportistas.json"
+    _escribir_catalogo(ruta, _contenido_catalogo(*transportistas))
+    return CatalogoTransportistas(ruta), ruta
+
+
+@pytest.mark.parametrize("texto", ("", "   ", None, 123, _TextoDerivado("DEMO")))
+def test_buscar_rechaza_entrada_invalida_sin_exponerla(tmp_path, texto):
+    catalogo = CatalogoTransportistas(tmp_path / "transportistas.json")
+    with pytest.raises(ErrorValidacionTransportista) as capturado:
+        catalogo.buscar(texto)
+    assert str(capturado.value) == "texto de búsqueda inválido"
+    if str(texto):
+        assert str(texto) not in str(capturado.value)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    (
+        "TRANSPORTES ÑANDÚ DEMO SPA",
+        "transportes ñandú demo spa",
+        "  TRANSPORTES   NANDU\tDEMO   SPA  ",
+        "TRANSPORTES NANDU DEMO S.P.A.",
+    ),
+)
+def test_buscar_coincide_con_razon_social_normalizada(tmp_path, texto):
+    transportista = _transportista_para_busqueda(
+        razon_social="TRANSPORTES ÑANDÚ DEMO SPA",
+        nombre_normalizado="TRANSPORTES NANDU DEMO SPA",
+    )
+    catalogo, _ = _catalogo_busqueda(tmp_path, transportista)
+    resultado = catalogo.buscar(texto)
+    assert resultado.estado is EstadoBusquedaTransportista.COINCIDENCIA
+    assert resultado.transportista == transportista
+    assert resultado.origenes_coincidencia == (
+        TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,
+    )
+
+
+def test_buscar_compara_nombre_comercial_y_aliases_activos_e_inactivos(tmp_path):
+    activo = _crear_alias(valor="MARCA SINTETICA ACTIVA")
+    inactivo = _crear_alias(
+        valor="MARCA SINTETICA HISTORICA",
+        estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+    transportista = _transportista_para_busqueda(
+        nombre_comercial="NOMBRE COMERCIAL SINTETICO",
+        aliases=(activo, inactivo),
+    )
+    catalogo, _ = _catalogo_busqueda(tmp_path, transportista)
+    comercial = catalogo.buscar("nombre comercial sintetico")
+    alias_activo = catalogo.buscar("marca sintetica activa")
+    alias_inactivo = catalogo.buscar("marca sintetica historica")
+    assert comercial.origenes_coincidencia == (
+        TipoOrigenCoincidenciaTransportista.NOMBRE_COMERCIAL,
+    )
+    assert alias_activo.origenes_coincidencia == (
+        TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,
+    )
+    assert alias_inactivo.estado is EstadoBusquedaTransportista.EN_REVISION
+    assert alias_inactivo.motivo_revision is MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO
+    assert alias_inactivo.origenes_coincidencia == (
+        TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+    )
+
+
+@pytest.mark.parametrize(
+    "texto",
+    (
+        "SIN COINCIDENCIA",
+        "TRANSPORTES DEMO",
+        "TRANSPORTES",
+        "DEMO NORTE",
+        "NORTE",
+        "TRANSPORTES DEMO NORTE SP",
+        "TRANSPORTES DEMO NORTA SPA",
+    ),
+)
+def test_buscar_rechaza_coincidencias_no_exactas(tmp_path, texto):
+    transportista = _transportista_para_busqueda()
+    catalogo, _ = _catalogo_busqueda(tmp_path, transportista)
+    resultado = catalogo.buscar(texto)
+    assert resultado == ResultadoBusquedaTransportista(
+        EstadoBusquedaTransportista.SIN_COINCIDENCIA,
+        None,
+        None,
+        0,
+        (),
+        (),
+    )
+
+
+def test_buscar_no_compara_rut(tmp_path):
+    cuerpo, digito = _rut_sintetico()
+    rut = f"{cuerpo}-{digito}"
+    transportista = _transportista_para_busqueda(rut=rut)
+    catalogo, _ = _catalogo_busqueda(tmp_path, transportista)
+    assert catalogo.buscar(rut).estado is EstadoBusquedaTransportista.SIN_COINCIDENCIA
+
+
+@pytest.mark.parametrize(
+    ("estado", "vigencia", "esperado", "motivo"),
+    (
+        (EstadoCalidadTransportista.CONFIRMADO, EstadoVigenciaTransportista.ACTIVO, EstadoBusquedaTransportista.COINCIDENCIA, None),
+        (EstadoCalidadTransportista.CONFIRMADO, EstadoVigenciaTransportista.INACTIVO, EstadoBusquedaTransportista.REQUIERE_REACTIVACION, None),
+        (EstadoCalidadTransportista.PENDIENTE, EstadoVigenciaTransportista.ACTIVO, EstadoBusquedaTransportista.PROPUESTA_EXISTENTE, None),
+        (EstadoCalidadTransportista.PENDIENTE, EstadoVigenciaTransportista.INACTIVO, EstadoBusquedaTransportista.PROPUESTA_EXISTENTE, None),
+        (EstadoCalidadTransportista.REQUIERE_REVISION, EstadoVigenciaTransportista.ACTIVO, EstadoBusquedaTransportista.EN_REVISION, MotivoRevisionBusquedaTransportista.ESTADO_CALIDAD),
+        (EstadoCalidadTransportista.REQUIERE_REVISION, EstadoVigenciaTransportista.INACTIVO, EstadoBusquedaTransportista.EN_REVISION, MotivoRevisionBusquedaTransportista.ESTADO_CALIDAD),
+    ),
+)
+def test_buscar_resuelve_candidato_elegible_por_calidad_y_vigencia(
+    tmp_path, estado, vigencia, esperado, motivo
+):
+    transportista = _transportista_para_busqueda(estado=estado, vigencia=vigencia)
+    catalogo, _ = _catalogo_busqueda(tmp_path, transportista)
+    resultado = catalogo.buscar(transportista.razon_social)
+    assert resultado.estado is esperado
+    assert resultado.motivo_revision is motivo
+    assert resultado.transportista == transportista
+    assert resultado.cantidad_candidatos == 1
+
+
+@pytest.mark.parametrize(
+    "estado",
+    (
+        EstadoCalidadTransportista.CONFIRMADO,
+        EstadoCalidadTransportista.PENDIENTE,
+        EstadoCalidadTransportista.REQUIERE_REVISION,
+    ),
+)
+def test_buscar_alias_inactivo_exclusivo_prevalece_sobre_calidad(tmp_path, estado):
+    alias = _crear_alias(
+        valor="ALIAS HISTORICO EXCLUSIVO",
+        estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+    transportista = _transportista_para_busqueda(estado=estado, aliases=(alias,))
+    catalogo, _ = _catalogo_busqueda(tmp_path, transportista)
+    resultado = catalogo.buscar(alias.valor)
+    assert resultado.estado is EstadoBusquedaTransportista.EN_REVISION
+    assert resultado.motivo_revision is MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO
+    assert resultado.transportista_ids == (transportista.transportista_id,)
+
+
+def test_resolucion_pura_conserva_origenes_unicos_en_orden_fijo():
+    transportista = _transportista_para_busqueda(
+        razon_social="IDENTIFICADOR MULTIPLE",
+        nombre_normalizado="IDENTIFICADOR MULTIPLE",
+        nombre_comercial="IDENTIFICADOR MULTIPLE",
+    )
+    origenes = {
+        TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+        TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,
+        TipoOrigenCoincidenciaTransportista.NOMBRE_COMERCIAL,
+        TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,
+    }
+    resultado = CatalogoTransportistas._resolver_candidatos(
+        {transportista.transportista_id: (transportista, origenes)}
+    )
+    assert resultado.cantidad_candidatos == 1
+    assert resultado.estado is EstadoBusquedaTransportista.COINCIDENCIA
+    assert resultado.origenes_coincidencia == CatalogoTransportistas._ORDEN_ORIGENES
+
+
+def test_resolucion_pura_no_bloquea_origen_elegible_por_alias_inactivo():
+    transportista = _transportista_para_busqueda(
+        estado=EstadoCalidadTransportista.PENDIENTE
+    )
+    resultado = CatalogoTransportistas._resolver_candidatos(
+        {
+            transportista.transportista_id: (
+                transportista,
+                {
+                    TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,
+                    TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+                },
+            )
+        }
+    )
+    assert resultado.estado is EstadoBusquedaTransportista.PROPUESTA_EXISTENTE
+    assert resultado.motivo_revision is None
+    assert resultado.origenes_coincidencia == (
+        TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,
+        TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+    )
+
+
+@pytest.mark.parametrize(
+    "modalidad",
+    ("razon", "comercial", "alias_activo", "alias_cruzado", "activo_inactivo"),
+)
+def test_buscar_ambiguedad_prevalece_entre_uuid(tmp_path, modalidad):
+    texto = "IDENTIFICADOR AMBIGUO"
+    cambios_uno = {"razon_social": "PRIMERO SPA", "nombre_normalizado": "PRIMERO SPA"}
+    cambios_dos = {"razon_social": "SEGUNDO SPA", "nombre_normalizado": "SEGUNDO SPA"}
+    if modalidad == "razon":
+        cambios_uno.update(razon_social=texto, nombre_normalizado=texto)
+        cambios_dos.update(razon_social=texto, nombre_normalizado=texto)
+    elif modalidad == "comercial":
+        cambios_uno["nombre_comercial"] = texto
+        cambios_dos["nombre_comercial"] = texto
+    elif modalidad == "alias_activo":
+        cambios_uno["aliases"] = (_crear_alias(valor=texto),)
+        cambios_dos["aliases"] = (_crear_alias(valor=texto),)
+    elif modalidad == "alias_cruzado":
+        cambios_uno.update(razon_social=texto, nombre_normalizado=texto)
+        cambios_dos["aliases"] = (_crear_alias(valor=texto),)
+    else:
+        cambios_uno["aliases"] = (_crear_alias(valor=texto),)
+        cambios_dos["aliases"] = (_crear_alias(valor=texto, estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO),)
+    primero = _transportista_para_busqueda(**cambios_uno)
+    segundo = _transportista_para_busqueda(
+        estado=EstadoCalidadTransportista.PENDIENTE,
+        vigencia=EstadoVigenciaTransportista.INACTIVO,
+        **cambios_dos,
+    )
+    catalogo, _ = _catalogo_busqueda(tmp_path, segundo, primero)
+    resultado = catalogo.buscar(texto)
+    assert resultado.estado is EstadoBusquedaTransportista.AMBIGUA
+    assert resultado.transportista is None
+    assert resultado.motivo_revision is None
+    assert resultado.cantidad_candidatos == 2
+    assert resultado.transportista_ids == tuple(sorted((primero.transportista_id, segundo.transportista_id)))
+
+
+def test_buscar_ambiguedad_de_tres_candidatos_une_origenes_en_orden(tmp_path):
+    texto = "IDENTIFICADOR GLOBAL"
+    primero = _transportista_para_busqueda(razon_social=texto, nombre_normalizado=texto)
+    segundo = _transportista_para_busqueda(
+        razon_social="SEGUNDO SPA", nombre_normalizado="SEGUNDO SPA", nombre_comercial=texto
+    )
+    tercero = _transportista_para_busqueda(
+        razon_social="TERCERO SPA",
+        nombre_normalizado="TERCERO SPA",
+        aliases=(_crear_alias(valor=texto, estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO),),
+    )
+    catalogo, _ = _catalogo_busqueda(tmp_path, tercero, primero, segundo)
+    resultado = catalogo.buscar(texto)
+    assert resultado.estado is EstadoBusquedaTransportista.AMBIGUA
+    assert resultado.cantidad_candidatos == 3
+    assert resultado.transportista_ids == tuple(sorted((primero.transportista_id, segundo.transportista_id, tercero.transportista_id)))
+    assert resultado.origenes_coincidencia == (
+        TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,
+        TipoOrigenCoincidenciaTransportista.NOMBRE_COMERCIAL,
+        TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+    )
+
+
+def test_buscar_relee_refleja_cambios_y_no_modifica_archivo(tmp_path):
+    primero = _transportista_para_busqueda(
+        razon_social="PRIMER IDENTIFICADOR SPA", nombre_normalizado="PRIMER IDENTIFICADOR SPA"
+    )
+    segundo = _transportista_para_busqueda(
+        razon_social="SEGUNDO IDENTIFICADOR SPA", nombre_normalizado="SEGUNDO IDENTIFICADOR SPA"
+    )
+    catalogo, ruta = _catalogo_busqueda(tmp_path, primero)
+    contenido_inicial = ruta.read_bytes()
+    assert catalogo.buscar(primero.razon_social).transportista == primero
+    assert ruta.read_bytes() == contenido_inicial
+    _escribir_catalogo(ruta, _contenido_catalogo(segundo))
+    contenido_nuevo = ruta.read_bytes()
+    assert catalogo.buscar(primero.razon_social).estado is EstadoBusquedaTransportista.SIN_COINCIDENCIA
+    assert catalogo.buscar(segundo.razon_social).transportista == segundo
+    assert ruta.read_bytes() == contenido_nuevo
+
+
+def test_buscar_archivo_inexistente_no_crea_directorios_ni_registros(tmp_path):
+    ruta = tmp_path / "padre" / "transportistas.json"
+    resultado = CatalogoTransportistas(ruta).buscar("EMPRESA SINTETICA SPA")
+    assert resultado.estado is EstadoBusquedaTransportista.SIN_COINCIDENCIA
+    assert not ruta.exists()
+    assert not ruta.parent.exists()
+    assert not (Path(__file__).parents[1] / "catalogos" / "transportistas.json").exists()
+
+
+def test_buscar_no_muta_transportista(tmp_path):
+    transportista = _transportista_para_busqueda(
+        aliases=(_crear_alias(valor="ALIAS ESTABLE"),),
+        observacion="OBSERVACION SINTETICA",
+    )
+    antes = transportista.a_dict()
+    catalogo, ruta = _catalogo_busqueda(tmp_path, transportista)
+    bytes_antes = ruta.read_bytes()
+    resultado = catalogo.buscar("ALIAS ESTABLE")
+    assert resultado.transportista.a_dict() == antes
+    assert ruta.read_bytes() == bytes_antes
+
+
+def test_buscar_ambiguedad_es_independiente_del_orden_del_archivo(tmp_path):
+    texto = "ORDEN DETERMINISTA"
+    primero = _transportista_para_busqueda(razon_social=texto, nombre_normalizado=texto)
+    segundo = _transportista_para_busqueda(
+        razon_social="SEGUNDO SPA",
+        nombre_normalizado="SEGUNDO SPA",
+        aliases=(_crear_alias(valor=texto),),
+    )
+    catalogo, ruta = _catalogo_busqueda(tmp_path, primero, segundo)
+    resultado_uno = catalogo.buscar(texto)
+    _escribir_catalogo(ruta, _contenido_catalogo(segundo, primero))
+    resultado_dos = catalogo.buscar(texto)
+    assert resultado_uno == resultado_dos
+
+
+def test_buscar_origen_no_depende_del_orden_de_aliases(tmp_path):
+    buscado = _crear_alias(valor="ALIAS BUSCADO")
+    adicional = _crear_alias(valor="ALIAS ADICIONAL")
+    transportista_id = str(uuid4())
+    primero = _transportista_para_busqueda(
+        transportista_id=transportista_id,
+        aliases=(buscado, adicional),
+    )
+    segundo = _transportista_para_busqueda(
+        transportista_id=transportista_id,
+        aliases=(adicional, buscado),
+    )
+    catalogo, ruta = _catalogo_busqueda(tmp_path, primero)
+    resultado_uno = catalogo.buscar(buscado.valor)
+    _escribir_catalogo(ruta, _contenido_catalogo(segundo))
+    resultado_dos = catalogo.buscar(buscado.valor)
+    assert resultado_uno.estado is resultado_dos.estado
+    assert resultado_uno.transportista_ids == resultado_dos.transportista_ids
+    assert resultado_uno.origenes_coincidencia == resultado_dos.origenes_coincidencia
+
+
+def test_buscar_ambiguo_no_modifica_bytes_del_archivo(tmp_path):
+    texto = "AMBIGUEDAD SIN MUTACION"
+    primero = _transportista_para_busqueda(razon_social=texto, nombre_normalizado=texto)
+    segundo = _transportista_para_busqueda(
+        razon_social="SEGUNDO SPA", nombre_normalizado="SEGUNDO SPA", nombre_comercial=texto
+    )
+    catalogo, ruta = _catalogo_busqueda(tmp_path, primero, segundo)
+    antes = ruta.read_bytes()
+    assert catalogo.buscar(texto).estado is EstadoBusquedaTransportista.AMBIGUA
+    assert ruta.read_bytes() == antes

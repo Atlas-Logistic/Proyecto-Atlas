@@ -513,6 +513,12 @@ class CatalogoTransportistas:
     """Lee y valida el catálogo privado sin modificar el sistema de archivos."""
 
     _CAMPOS_RAIZ = {"version_formato", "transportistas"}
+    _ORDEN_ORIGENES = (
+        TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,
+        TipoOrigenCoincidenciaTransportista.NOMBRE_COMERCIAL,
+        TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO,
+        TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO,
+    )
 
     def __init__(self, ruta: str | Path = "catalogos/transportistas.json") -> None:
         if type(ruta) is not str and not isinstance(ruta, Path):
@@ -521,6 +527,104 @@ class CatalogoTransportistas:
 
     def listar(self) -> tuple[Transportista, ...]:
         return tuple(self._leer())
+
+    def buscar(self, texto: str) -> ResultadoBusquedaTransportista:
+        if type(texto) is not str or not texto.strip():
+            raise ErrorValidacionTransportista("texto de búsqueda inválido")
+        clave = normalizar_nombre_transportista(texto)
+        candidatos: dict[
+            str, tuple[Transportista, set[TipoOrigenCoincidenciaTransportista]]
+        ] = {}
+        for transportista in self.listar():
+            origenes = self._origenes_coincidentes(transportista, clave)
+            if origenes:
+                candidatos[transportista.transportista_id] = (transportista, origenes)
+
+        return self._resolver_candidatos(candidatos)
+
+    @classmethod
+    def _resolver_candidatos(
+        cls,
+        candidatos: dict[
+            str, tuple[Transportista, set[TipoOrigenCoincidenciaTransportista]]
+        ],
+    ) -> ResultadoBusquedaTransportista:
+        if not candidatos:
+            return ResultadoBusquedaTransportista(
+                EstadoBusquedaTransportista.SIN_COINCIDENCIA,
+                None,
+                None,
+                0,
+                (),
+                (),
+            )
+
+        transportista_ids = tuple(sorted(candidatos))
+        union_origenes = set().union(
+            *(origenes for _, origenes in candidatos.values())
+        )
+        origenes_ordenados = tuple(
+            origen for origen in cls._ORDEN_ORIGENES if origen in union_origenes
+        )
+        if len(candidatos) > 1:
+            return ResultadoBusquedaTransportista(
+                EstadoBusquedaTransportista.AMBIGUA,
+                None,
+                None,
+                len(candidatos),
+                transportista_ids,
+                origenes_ordenados,
+            )
+
+        transportista, origenes = next(iter(candidatos.values()))
+        if origenes == {TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO}:
+            estado = EstadoBusquedaTransportista.EN_REVISION
+            motivo = MotivoRevisionBusquedaTransportista.ALIAS_INACTIVO
+        elif transportista.estado_calidad is EstadoCalidadTransportista.PENDIENTE:
+            estado = EstadoBusquedaTransportista.PROPUESTA_EXISTENTE
+            motivo = None
+        elif transportista.estado_calidad is EstadoCalidadTransportista.REQUIERE_REVISION:
+            estado = EstadoBusquedaTransportista.EN_REVISION
+            motivo = MotivoRevisionBusquedaTransportista.ESTADO_CALIDAD
+        elif transportista.estado_vigencia is EstadoVigenciaTransportista.INACTIVO:
+            estado = EstadoBusquedaTransportista.REQUIERE_REACTIVACION
+            motivo = None
+        else:
+            estado = EstadoBusquedaTransportista.COINCIDENCIA
+            motivo = None
+        origenes_candidato = tuple(
+            origen for origen in cls._ORDEN_ORIGENES if origen in origenes
+        )
+        return ResultadoBusquedaTransportista(
+            estado,
+            motivo,
+            transportista,
+            1,
+            (transportista.transportista_id,),
+            origenes_candidato,
+        )
+
+    @staticmethod
+    def _origenes_coincidentes(
+        transportista: Transportista, clave: str
+    ) -> set[TipoOrigenCoincidenciaTransportista]:
+        origenes: set[TipoOrigenCoincidenciaTransportista] = set()
+        if normalizar_nombre_transportista(transportista.razon_social) == clave:
+            origenes.add(TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL)
+        if (
+            transportista.nombre_comercial
+            and normalizar_nombre_transportista(transportista.nombre_comercial) == clave
+        ):
+            origenes.add(TipoOrigenCoincidenciaTransportista.NOMBRE_COMERCIAL)
+        for alias in transportista.aliases:
+            if normalizar_nombre_transportista(alias.valor) != clave:
+                continue
+            origenes.add(
+                TipoOrigenCoincidenciaTransportista.ALIAS_ACTIVO
+                if alias.estado_vigencia is EstadoVigenciaAliasTransportista.ACTIVO
+                else TipoOrigenCoincidenciaTransportista.ALIAS_INACTIVO
+            )
+        return origenes
 
     def _leer(self) -> list[Transportista]:
         try:
