@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from uuid import UUID
+
+
+VERSION_FORMATO_TRANSPORTISTAS = 1
 
 
 class EstadoCalidadTransportista(str, Enum):
@@ -63,6 +68,23 @@ class ErrorValidacionTransportista(ErrorCatalogoTransportistas):
 
 class ErrorRutTransportista(ErrorValidacionTransportista):
     """Un RUT no cumple su estructura o dígito verificador."""
+
+
+class ErrorCatalogoTransportistasCorrupto(ErrorCatalogoTransportistas):
+    """El archivo del catálogo no cumple su contrato estructural."""
+
+
+class _ClaveJsonDuplicada(ValueError):
+    """Señal interna sin datos de la clave duplicada."""
+
+
+def _dict_sin_claves_duplicadas(pares: list[tuple[str, object]]) -> dict[str, object]:
+    resultado: dict[str, object] = {}
+    for clave, valor in pares:
+        if clave in resultado:
+            raise _ClaveJsonDuplicada
+        resultado[clave] = valor
+    return resultado
 
 
 _GUIONES_UNICODE = dict.fromkeys(
@@ -485,3 +507,85 @@ class ResultadoBusquedaTransportista:
         if self.estado is EstadoBusquedaTransportista.SIN_COINCIDENCIA:
             if self.cantidad_candidatos != 0 or self.transportista_ids or self.origenes_coincidencia:
                 raise ErrorValidacionTransportista("resultado sin coincidencia inconsistente")
+
+
+class CatalogoTransportistas:
+    """Lee y valida el catálogo privado sin modificar el sistema de archivos."""
+
+    _CAMPOS_RAIZ = {"version_formato", "transportistas"}
+
+    def __init__(self, ruta: str | Path = "catalogos/transportistas.json") -> None:
+        if type(ruta) is not str and not isinstance(ruta, Path):
+            raise ErrorValidacionTransportista("ruta del catálogo inválida")
+        self.ruta = Path(ruta)
+
+    def listar(self) -> tuple[Transportista, ...]:
+        return tuple(self._leer())
+
+    def _leer(self) -> list[Transportista]:
+        try:
+            with self.ruta.open("r", encoding="utf-8") as archivo:
+                contenido = json.load(
+                    archivo, object_pairs_hook=_dict_sin_claves_duplicadas
+                )
+        except FileNotFoundError:
+            return []
+        except _ClaveJsonDuplicada as error:
+            raise ErrorCatalogoTransportistasCorrupto(
+                "el catálogo contiene una clave JSON duplicada"
+            ) from error
+        except json.JSONDecodeError as error:
+            raise ErrorCatalogoTransportistasCorrupto("JSON del catálogo inválido") from error
+        except UnicodeError as error:
+            raise ErrorCatalogoTransportistasCorrupto("codificación UTF-8 inválida") from error
+        except OSError as error:
+            raise ErrorCatalogoTransportistasCorrupto("no se pudo leer el catálogo") from error
+
+        if type(contenido) is not dict or set(contenido) != self._CAMPOS_RAIZ:
+            raise ErrorCatalogoTransportistasCorrupto("raíz del catálogo incompatible")
+        version = contenido["version_formato"]
+        if type(version) is not int or version != VERSION_FORMATO_TRANSPORTISTAS:
+            raise ErrorCatalogoTransportistasCorrupto("versión de formato incompatible")
+        registros = contenido["transportistas"]
+        if type(registros) is not list:
+            raise ErrorCatalogoTransportistasCorrupto("transportistas debe ser una lista")
+
+        transportistas: list[Transportista] = []
+        for indice, registro in enumerate(registros):
+            if type(registro) is not dict:
+                raise ErrorCatalogoTransportistasCorrupto(
+                    f"registro de transportista inválido en índice {indice}"
+                )
+            try:
+                transportistas.append(Transportista.desde_dict(registro))
+            except (ErrorValidacionTransportista, ValueError, TypeError) as error:
+                raise ErrorCatalogoTransportistasCorrupto(
+                    f"registro de transportista inválido en índice {indice}"
+                ) from error
+
+        self._validar_catalogo_completo(transportistas)
+        return transportistas
+
+    @staticmethod
+    def _validar_catalogo_completo(transportistas: list[Transportista]) -> None:
+        transportista_ids: set[str] = set()
+        alias_ids: set[str] = set()
+        ruts: set[str] = set()
+        for transportista in transportistas:
+            if transportista.transportista_id in transportista_ids:
+                raise ErrorCatalogoTransportistasCorrupto(
+                    "el catálogo contiene transportista_id duplicado"
+                )
+            transportista_ids.add(transportista.transportista_id)
+            for alias in transportista.aliases:
+                if alias.alias_id in alias_ids:
+                    raise ErrorCatalogoTransportistasCorrupto(
+                        "el catálogo contiene alias_id duplicado"
+                    )
+                alias_ids.add(alias.alias_id)
+            if transportista.rut:
+                if transportista.rut in ruts:
+                    raise ErrorCatalogoTransportistasCorrupto(
+                        "el catálogo contiene RUT duplicado"
+                    )
+                ruts.add(transportista.rut)

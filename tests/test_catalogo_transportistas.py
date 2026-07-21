@@ -1,4 +1,5 @@
 import ast
+import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from uuid import uuid4
@@ -7,7 +8,9 @@ import pytest
 
 from atlas_core.catalogo_transportistas import (
     AliasTransportista,
+    CatalogoTransportistas,
     ErrorCatalogoTransportistas,
+    ErrorCatalogoTransportistasCorrupto,
     ErrorRutTransportista,
     ErrorValidacionTransportista,
     EstadoBusquedaTransportista,
@@ -19,6 +22,7 @@ from atlas_core.catalogo_transportistas import (
     TipoAliasTransportista,
     TipoOrigenCoincidenciaTransportista,
     Transportista,
+    VERSION_FORMATO_TRANSPORTISTAS,
     normalizar_nombre_transportista,
     normalizar_rut_transportista,
     validar_fecha_iso8601_transportista,
@@ -773,3 +777,371 @@ def test_modelos_rechazan_subclases_de_tupla_y_entero():
                 (TipoOrigenCoincidenciaTransportista.RAZON_SOCIAL,)
             ),
         )
+
+
+def _contenido_catalogo(*transportistas):
+    return {
+        "version_formato": VERSION_FORMATO_TRANSPORTISTAS,
+        "transportistas": [transportista.a_dict() for transportista in transportistas],
+    }
+
+
+def _escribir_catalogo(ruta, contenido):
+    ruta.write_text(json.dumps(contenido, ensure_ascii=False), encoding="utf-8")
+
+
+def test_catalogo_inexistente_es_vacio_y_no_crea_rutas(tmp_path):
+    ruta = tmp_path / "padre-inexistente" / "transportistas.json"
+    catalogo = CatalogoTransportistas(ruta)
+    assert catalogo.ruta == ruta
+    assert not ruta.parent.exists()
+    assert catalogo.listar() == ()
+    assert not ruta.exists()
+    assert not ruta.parent.exists()
+
+
+def test_constructor_no_lee_el_archivo(monkeypatch, tmp_path):
+    def fallar(*args, **kwargs):
+        raise AssertionError("el constructor intentó leer")
+
+    monkeypatch.setattr(Path, "open", fallar)
+    CatalogoTransportistas(tmp_path / "transportistas.json")
+
+
+class _RutaConvertibleArbitraria:
+    def __fspath__(self):
+        return "transportistas.json"
+
+
+@pytest.mark.parametrize("ruta", (_RutaConvertibleArbitraria(), 123, None))
+def test_constructor_rechaza_objetos_convertibles_arbitrarios(ruta):
+    with pytest.raises(ErrorValidacionTransportista):
+        CatalogoTransportistas(ruta)
+
+
+def test_catalogo_valido_vacio(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    _escribir_catalogo(ruta, _contenido_catalogo())
+    resultado = CatalogoTransportistas(str(ruta)).listar()
+    assert resultado == ()
+    assert type(resultado) is tuple
+
+
+def test_catalogo_conserva_orden_aliases_y_relee_cada_llamada(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    alias_activo = _crear_alias(valor="ALIAS SINTETICO UNO")
+    alias_inactivo = _crear_alias(
+        valor="ALIAS SINTETICO DOS",
+        estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+    primero = _crear_transportista(
+        razon_social="TRANSPORTES SINTETICOS UNO SPA",
+        nombre_normalizado="TRANSPORTES SINTETICOS UNO SPA",
+        aliases=(alias_activo, alias_inactivo),
+    )
+    segundo = _crear_transportista(
+        razon_social="TRANSPORTES SINTETICOS DOS LTDA",
+        nombre_normalizado="TRANSPORTES SINTETICOS DOS LTDA",
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(primero))
+    catalogo = CatalogoTransportistas(ruta)
+    inicial = catalogo.listar()
+    assert inicial == (primero,)
+    assert tuple(alias.estado_vigencia for alias in inicial[0].aliases) == (
+        EstadoVigenciaAliasTransportista.ACTIVO,
+        EstadoVigenciaAliasTransportista.INACTIVO,
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(segundo, primero))
+    assert catalogo.listar() == (segundo, primero)
+    assert catalogo.listar() is not catalogo.listar()
+
+
+@pytest.mark.parametrize(
+    "contenido",
+    (
+        [],
+        {"version_formato": 1},
+        {"transportistas": []},
+        {"version_formato": 1, "transportistas": [], "extra": True},
+        {"version_formato": True, "transportistas": []},
+        {"version_formato": "1", "transportistas": []},
+        {"version_formato": 2, "transportistas": []},
+        {"version_formato": 1, "transportistas": {}},
+        {"version_formato": 1, "transportistas": ["registro"]},
+    ),
+)
+def test_catalogo_rechaza_raiz_version_coleccion_o_registro_invalidos(tmp_path, contenido):
+    ruta = tmp_path / "transportistas.json"
+    _escribir_catalogo(ruta, contenido)
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto):
+        CatalogoTransportistas(ruta).listar()
+
+
+@pytest.mark.parametrize("estructura", ("raiz", "lista", "registro"))
+def test_catalogo_rechaza_subclases_estructurales(monkeypatch, tmp_path, estructura):
+    ruta = tmp_path / "transportistas.json"
+    ruta.write_text("{}", encoding="utf-8")
+    contenido = _contenido_catalogo()
+    if estructura == "raiz":
+        contenido = _DictDerivado(contenido)
+    elif estructura == "lista":
+        contenido["transportistas"] = _ListaDerivada()
+    else:
+        contenido["transportistas"] = [_DictDerivado(_datos_transportista())]
+    monkeypatch.setattr(json, "load", lambda archivo, **kwargs: contenido)
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto):
+        CatalogoTransportistas(ruta).listar()
+
+
+@pytest.mark.parametrize("texto", ("", "no es json", "{"))
+def test_catalogo_rechaza_json_invalido_sin_exponer_contenido(tmp_path, texto):
+    ruta = tmp_path / "transportistas.json"
+    ruta.write_text(texto, encoding="utf-8")
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "JSON del catálogo inválido"
+    assert texto not in str(capturado.value) or not texto
+
+
+def _assert_clave_json_duplicada(ruta, texto):
+    ruta.write_text(texto, encoding="utf-8")
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "el catálogo contiene una clave JSON duplicada"
+
+
+def test_catalogo_rechaza_clave_json_duplicada_en_raiz(tmp_path):
+    _assert_clave_json_duplicada(
+        tmp_path / "transportistas.json",
+        '{"version_formato":1,"version_formato":1,"transportistas":[]}',
+    )
+
+
+def test_catalogo_rechaza_clave_json_duplicada_en_transportista(tmp_path):
+    texto = json.dumps(_contenido_catalogo(_crear_transportista()), ensure_ascii=False)
+    texto = texto.replace('"rut": ""', '"rut": "", "rut": ""', 1)
+    _assert_clave_json_duplicada(tmp_path / "transportistas.json", texto)
+
+
+def test_catalogo_rechaza_clave_json_duplicada_en_alias(tmp_path):
+    transportista = _crear_transportista(aliases=(_crear_alias(valor="ALIAS DEMO UNICO"),))
+    texto = json.dumps(_contenido_catalogo(transportista), ensure_ascii=False)
+    texto = texto.replace(
+        '"valor": "ALIAS DEMO UNICO"',
+        '"valor": "ALIAS DEMO UNICO", "valor": "ALIAS DEMO UNICO"',
+        1,
+    )
+    _assert_clave_json_duplicada(tmp_path / "transportistas.json", texto)
+
+
+def test_catalogo_convierte_error_de_lectura(monkeypatch, tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    ruta.write_text("{}", encoding="utf-8")
+
+    def denegar(*args, **kwargs):
+        raise PermissionError("detalle privado")
+
+    monkeypatch.setattr(Path, "open", denegar)
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "no se pudo leer el catálogo"
+    assert "detalle privado" not in str(capturado.value)
+
+
+@pytest.mark.parametrize("error", (IsADirectoryError("privado"), OSError("privado")))
+def test_catalogo_convierte_otros_errores_de_sistema(monkeypatch, tmp_path, error):
+    ruta = tmp_path / "transportistas.json"
+
+    def fallar(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(Path, "open", fallar)
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "no se pudo leer el catálogo"
+    assert "privado" not in str(capturado.value)
+
+
+def test_catalogo_trata_file_not_found_durante_apertura_como_inexistente(monkeypatch, tmp_path):
+    ruta = tmp_path / "transportistas.json"
+
+    def desaparecer(*args, **kwargs):
+        raise FileNotFoundError("ruta privada")
+
+    monkeypatch.setattr(Path, "open", desaparecer)
+    assert CatalogoTransportistas(ruta).listar() == ()
+
+
+def test_catalogo_rechaza_bom_como_los_catalogos_existentes(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    texto = json.dumps(_contenido_catalogo())
+    ruta.write_bytes(b"\xef\xbb\xbf" + texto.encode("utf-8"))
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "JSON del catálogo inválido"
+
+
+def test_catalogo_rechaza_codificacion_utf8_invalida(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    ruta.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "codificación UTF-8 inválida"
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    (
+        ("razon_social", ""),
+        ("estado_calidad", "DESCONOCIDO"),
+        ("fecha_creacion", "fecha-invalida"),
+    ),
+)
+def test_catalogo_convierte_registro_invalido_con_indice_seguro(tmp_path, campo, valor):
+    ruta = tmp_path / "transportistas.json"
+    datos = _datos_transportista()
+    datos[campo] = valor
+    _escribir_catalogo(ruta, {"version_formato": 1, "transportistas": [datos]})
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "registro de transportista inválido en índice 0"
+
+
+def test_catalogo_convierte_alias_invalido_con_indice_seguro(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    datos = _datos_transportista(_crear_transportista(aliases=(_crear_alias(),)))
+    datos["aliases"][0]["fecha_creacion"] = "sin-zona"
+    _escribir_catalogo(ruta, {"version_formato": 1, "transportistas": [datos]})
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "registro de transportista inválido en índice 0"
+
+
+def test_catalogo_no_expone_rut_invalido(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    cuerpo, digito = _rut_sintetico()
+    rut_privado = f"{cuerpo}-X"
+    datos = _datos_transportista()
+    datos["rut"] = rut_privado
+    _escribir_catalogo(ruta, {"version_formato": 1, "transportistas": [datos]})
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    mensaje = str(capturado.value)
+    assert mensaje == "registro de transportista inválido en índice 0"
+    assert rut_privado not in mensaje
+    assert cuerpo not in mensaje
+
+
+def test_catalogo_rechaza_transportista_id_global_repetido(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    primero = _crear_transportista()
+    segundo = _crear_transportista(
+        transportista_id=primero.transportista_id,
+        razon_social="OTRO TRANSPORTISTA SPA",
+        nombre_normalizado="OTRO TRANSPORTISTA SPA",
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(primero, segundo))
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto, match="transportista_id duplicado"):
+        CatalogoTransportistas(ruta).listar()
+
+
+def test_catalogo_rechaza_alias_id_global_repetido(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    alias = _crear_alias(valor="ALIAS GLOBAL UNO")
+    primero = _crear_transportista(aliases=(alias,))
+    segundo = _crear_transportista(
+        razon_social="OTRO TRANSPORTISTA SPA",
+        nombre_normalizado="OTRO TRANSPORTISTA SPA",
+        aliases=(_crear_alias(alias_id=alias.alias_id, valor="ALIAS GLOBAL DOS"),),
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(primero, segundo))
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto, match="alias_id duplicado"):
+        CatalogoTransportistas(ruta).listar()
+
+
+@pytest.mark.parametrize(
+    ("estado_primero", "estado_segundo", "vigencia_segundo"),
+    (
+        (EstadoCalidadTransportista.PENDIENTE, EstadoCalidadTransportista.PENDIENTE, EstadoVigenciaTransportista.ACTIVO),
+        (EstadoCalidadTransportista.PENDIENTE, EstadoCalidadTransportista.PENDIENTE, EstadoVigenciaTransportista.INACTIVO),
+        (EstadoCalidadTransportista.PENDIENTE, EstadoCalidadTransportista.CONFIRMADO, EstadoVigenciaTransportista.ACTIVO),
+        (EstadoCalidadTransportista.PENDIENTE, EstadoCalidadTransportista.REQUIERE_REVISION, EstadoVigenciaTransportista.ACTIVO),
+    ),
+)
+def test_catalogo_rechaza_rut_global_repetido_en_todos_los_estados(
+    tmp_path, estado_primero, estado_segundo, vigencia_segundo
+):
+    ruta = tmp_path / "transportistas.json"
+    cuerpo, digito = _rut_sintetico()
+    rut = f"{cuerpo}-{digito}"
+    def fecha_confirmacion(estado):
+        return FECHA_ANTERIOR if estado is EstadoCalidadTransportista.CONFIRMADO else ""
+    primero = _crear_transportista(
+        rut=rut,
+        estado_calidad=estado_primero,
+        fecha_confirmacion_razon_social=fecha_confirmacion(estado_primero),
+    )
+    segundo = _crear_transportista(
+        razon_social="OTRO TRANSPORTISTA SPA",
+        nombre_normalizado="OTRO TRANSPORTISTA SPA",
+        rut=rut,
+        estado_calidad=estado_segundo,
+        estado_vigencia=vigencia_segundo,
+        fecha_confirmacion_razon_social=fecha_confirmacion(estado_segundo),
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(primero, segundo))
+    with pytest.raises(ErrorCatalogoTransportistasCorrupto) as capturado:
+        CatalogoTransportistas(ruta).listar()
+    assert str(capturado.value) == "el catálogo contiene RUT duplicado"
+    assert rut not in str(capturado.value)
+
+
+def test_catalogo_permite_rut_vacio_repetido(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    primero = _crear_transportista()
+    segundo = _crear_transportista(
+        razon_social="OTRO TRANSPORTISTA SPA",
+        nombre_normalizado="OTRO TRANSPORTISTA SPA",
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(primero, segundo))
+    assert CatalogoTransportistas(ruta).listar() == (primero, segundo)
+
+
+def test_catalogo_permite_colisiones_nominales_entre_transportistas(tmp_path):
+    ruta = tmp_path / "transportistas.json"
+    primero = _crear_transportista(
+        razon_social="NOMBRE NOMINAL COMPARTIDO SPA",
+        nombre_normalizado="NOMBRE NOMINAL COMPARTIDO SPA",
+        nombre_comercial="COMERCIAL COMPARTIDO",
+        aliases=(
+            _crear_alias(valor="ALIAS COMPARTIDO", estado_vigencia=EstadoVigenciaAliasTransportista.ACTIVO),
+            _crear_alias(valor="ALIAS CRUZADO"),
+        ),
+    )
+    segundo = _crear_transportista(
+        razon_social="NOMBRE NOMINAL COMPARTIDO SPA",
+        nombre_normalizado="NOMBRE NOMINAL COMPARTIDO SPA",
+        nombre_comercial="COMERCIAL COMPARTIDO",
+        aliases=(
+            _crear_alias(valor="ALIAS COMPARTIDO", estado_vigencia=EstadoVigenciaAliasTransportista.INACTIVO),
+            _crear_alias(valor="OTRO ALIAS"),
+        ),
+        estado_vigencia=EstadoVigenciaTransportista.INACTIVO,
+    )
+    tercero = _crear_transportista(
+        razon_social="ALIAS CRUZADO",
+        nombre_normalizado="ALIAS CRUZADO",
+    )
+    _escribir_catalogo(ruta, _contenido_catalogo(primero, segundo, tercero))
+    assert CatalogoTransportistas(ruta).listar() == (primero, segundo, tercero)
+
+
+def test_catalogo_solo_implementa_listar_y_no_escribe(tmp_path):
+    catalogo = CatalogoTransportistas(tmp_path / "transportistas.json")
+    for nombre in ("obtener", "buscar", "agregar", "editar", "guardar", "escribir", "activar", "desactivar", "confirmar"):
+        assert not hasattr(catalogo, nombre)
+    modulo = Path(__file__).parents[1] / "atlas_core" / "catalogo_transportistas.py"
+    texto = modulo.read_text(encoding="utf-8")
+    assert "os.replace" not in texto
+    assert "NamedTemporaryFile" not in texto
+    assert not (Path(__file__).parents[1] / "catalogos" / "transportistas.json").exists()
