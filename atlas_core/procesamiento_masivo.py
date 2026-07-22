@@ -14,9 +14,11 @@ from typing import Callable, Iterable, Mapping
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
 from atlas_core.extractor import (
+    _chofer_lineal_contaminado,
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_transporte_geometrico,
+    _extraer_chofer_geometrico,
     extraer_datos,
 )
 from atlas_core.ocr import (
@@ -314,12 +316,13 @@ def procesar_archivo(
     textos = leer_texto_imagen(ruta, lector=lector_ocr)
     datos = extraer_datos(textos)
     recuperacion_geometrica = False
+    recuperacion_chofer = False
     transporte_corregido = False
     bloques_guia = None
     campos_ausentes = any(
         datos.get(campo) in {None, "", "No encontrado"}
         for campo in ("cliente", "obra destino", "número de transporte")
-    )
+    ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
     if campos_ausentes:
         try:
             bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
@@ -329,6 +332,13 @@ def procesar_archivo(
                     datos[campo] = asociaciones[campo]
                     recuperacion_geometrica = True
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
+            chofer_actual = datos.get("chofer", "No encontrado")
+            if chofer_actual in {None, "", "No encontrado"} or _chofer_lineal_contaminado(chofer_actual):
+                decision_chofer = _extraer_chofer_geometrico(bloques_guia)
+                if decision_chofer.get("valor"):
+                    datos["chofer"] = decision_chofer["valor"]
+                    recuperacion_chofer = True
+                    logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
             transporte_actual = str(datos.get("número de transporte", "No encontrado"))
             if not re.fullmatch(r"\d{10}", transporte_actual):
                 decision_transporte = _extraer_transporte_geometrico(
@@ -378,7 +388,7 @@ def procesar_archivo(
     )
     requiere_revision = any(
         not valor or valor == "No encontrado" for valor in valores_clave
-    ) or not descripcion or recuperacion_geometrica or transporte_corregido
+    ) or not descripcion or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
 
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),

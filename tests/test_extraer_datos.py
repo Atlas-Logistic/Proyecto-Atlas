@@ -26,9 +26,11 @@ sys.modules.setdefault("easyocr", easyocr_stub)
 
 from atlas import extraer_datos
 from atlas_core.extractor import (
+    _chofer_lineal_contaminado,
     _clasificar_evidencia_transporte,
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
+    _extraer_chofer_geometrico,
     _extraer_transporte_geometrico,
 )
 from atlas_core.ocr import BloqueOCR
@@ -508,6 +510,157 @@ def test_confianza_no_desplaza_jerarquia_de_evidencia():
     ]
 
     assert _consensuar_transporte_focal(lecturas)["valor"] == "0000348808"
+
+
+def _chofer(*candidatos):
+    return _extraer_chofer_geometrico(
+        [_bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 50, 70), *candidatos]
+    )
+
+
+def test_chofer_a_la_derecha_de_retira():
+    assert _chofer(_bloque("MARIO SOTO", 120, 20))["valor"] == "MARIO SOTO"
+
+
+def test_chofer_debajo_de_retira():
+    assert _chofer(_bloque("ELENA ROJAS", 25, 42))["valor"] == "ELENA ROJAS"
+
+
+def test_chofer_compone_nombre_dividido_y_apellido_compuesto():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 50, 70),
+        _bloque("ANA", 120, 20, 35), _bloque("MARIA", 160, 20, 45),
+        _bloque("DEL RIO", 210, 20, 65),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques)["valor"] == "ANA MARIA DEL RIO"
+
+
+def test_chofer_independiente_del_orden_ocr():
+    bloques = [_bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 50, 70), _bloque("LUIS PEREZ", 120, 20)]
+
+    assert _extraer_chofer_geometrico(bloques) == _extraer_chofer_geometrico(list(reversed(bloques)))
+
+
+@pytest.mark.parametrize(
+    "texto",
+    ["TOTAL EXENTO", "NETO IVA TOTAL", "PATENTE CARRO", "RUT 12345678", "FECHA 21-07-2026", "DIRECCION AVENIDA CENTRAL", "AB1234"],
+)
+def test_chofer_excluye_finanzas_etiquetas_rut_fecha_direccion_y_patente(texto):
+    assert _chofer(_bloque(texto, 120, 20)) == {}
+
+
+def test_chofer_rechaza_numero_interno():
+    assert _chofer(_bloque("MARI0 SOTO", 120, 20)) == {}
+
+
+@pytest.mark.parametrize("nombre", ["ANA PEREZ-GOMEZ", "LUIS O'NEILL"])
+def test_chofer_admite_guion_y_apostrofe_entre_letras(nombre):
+    assert _chofer(_bloque(nombre, 120, 20))["valor"] == nombre
+
+
+def test_chofer_se_abstiene_ante_dos_candidatos_equivalentes():
+    bloques = [
+        _bloque("RETIRA", 20, 50, 60), _bloque("PATENTE", 20, 80, 70),
+        _bloque("MARIO NORTE", 120, 40, 100), _bloque("MARIO SUR", 120, 60, 100),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques) == {}
+
+
+def test_chofer_etiqueta_sin_candidato_y_cajas_invalidas():
+    malo = BloqueOCR("NOMBRE APELLIDO", ((1, 1),), 0.5)
+    assert _extraer_chofer_geometrico([_bloque("RETIRA", 20, 20), malo]) == {}
+
+
+def test_chofer_resultado_determinista():
+    bloques = [_bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 50, 70), _bloque("PEDRO LUNA", 120, 20)]
+
+    assert [_extraer_chofer_geometrico(bloques) for _ in range(5)] == [{"valor": "PEDRO LUNA"}] * 5
+
+
+def test_chofer_no_recibe_nombre_de_archivo():
+    assert _extraer_chofer_geometrico([]) == {}
+
+
+@pytest.mark.parametrize(
+    ("valor", "contaminado"),
+    [
+        ("TOTAL EXENTO JUAN PEREZ", True),
+        ("NETO JUAN PEREZ", True),
+        ("JUAN PEREZ PATENTE", True),
+        ("JUAN PEREZ", False),
+        ("TOTALINO PEREZ", False),
+    ],
+)
+def test_chofer_contaminacion_lineal_usa_palabras_completas(valor, contaminado):
+    assert _chofer_lineal_contaminado(valor) is contaminado
+
+
+def test_chofer_no_excluye_apellido_que_contiene_parcialmente_iva():
+    assert _chofer(_bloque("PEDRO OLIVARES", 120, 20))["valor"] == "PEDRO OLIVARES"
+
+
+def test_chofer_compone_cuatro_bloques_nominales():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 55, 70),
+        _bloque("JUAN", 110, 20, 38), _bloque("CARLOS", 154, 21, 48),
+        _bloque("DE", 208, 20, 22), _bloque("LA", 236, 21, 22),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques)["valor"] == "JUAN CARLOS DE LA"
+
+
+def test_chofer_no_une_bloques_atravesando_patente():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("RUT CHOFER", 20, 55, 90),
+        _bloque("JUAN", 110, 20, 38), _bloque("PATENTE", 152, 20, 70),
+        _bloque("PEREZ", 226, 20, 45),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques) == {}
+
+
+def test_chofer_no_cuenta_bloque_duplicado_como_nombre_compuesto():
+    nombre = _bloque("MARIO", 120, 20, 50)
+
+    assert _chofer(nombre, nombre) == {}
+
+
+def test_chofer_orden_mezclado_repetido_es_determinista():
+    import random
+
+    bloques = [_bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 55, 70), _bloque("ANA MARIA", 120, 20)]
+    resultados = []
+    for semilla in range(5):
+        mezcla = list(bloques)
+        random.Random(semilla).shuffle(mezcla)
+        resultados.append(_extraer_chofer_geometrico(mezcla))
+
+    assert resultados == [{"valor": "ANA MARIA"}] * 5
+
+
+@pytest.mark.parametrize("confianza", ["alta", float("nan"), float("inf")])
+def test_chofer_confianza_invalida_no_decide(confianza):
+    bloque = BloqueOCR("ANA MARIA", ((120, 20), (200, 20), (200, 38), (120, 38)), confianza)
+
+    assert _chofer(bloque)["valor"] == "ANA MARIA"
+
+
+def test_chofer_caja_con_puntos_invertidos_se_normaliza():
+    bloque = BloqueOCR("ANA MARIA", ((200, 38), (120, 38), (120, 20), (200, 20)), 0.8)
+
+    assert _chofer(bloque)["valor"] == "ANA MARIA"
+
+
+def test_chofer_candidato_junto_a_cliente_no_desplaza_zona_retira():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 55, 70),
+        _bloque("MARIO SOTO", 130, 20, 90),
+        _bloque("CLIENTE", 300, 20, 70), _bloque("EMPRESA NORTE", 378, 20, 110),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques)["valor"] == "MARIO SOTO"
 
 
 def probar_guia1():

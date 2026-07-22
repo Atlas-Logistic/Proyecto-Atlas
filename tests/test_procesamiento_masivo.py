@@ -57,6 +57,7 @@ def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monk
         "número de transporte": "0000123456",
         "cliente": "CLIENTE LINEAL",
         "obra destino": "DESTINO LINEAL",
+        "chofer": "MARIO SOTO",
     }
     leer_bloques = Mock()
     focal = Mock()
@@ -179,6 +180,52 @@ def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch)
     resultado = procesar_archivo(ruta)
 
     assert resultado["numero_transporte"] == "No encontrado"
+
+
+def test_procesar_archivo_preserva_chofer_lineal_limpio(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = Mock()
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", bloques)
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "0000123456", "cliente": "A", "obra destino": "B", "chofer": "MARIO SOTO"}),
+    )
+
+    assert procesar_archivo(ruta)["chofer"] == "MARIO SOTO"
+    bloques.assert_not_called()
+
+
+def test_procesar_archivo_reemplaza_chofer_contaminado_y_mantiene_revision(tmp_path, monkeypatch):
+    ruta = tmp_path / "archivo_sin_nombre_personal.jpg"
+    bloques = [
+        BloqueOCR("RETIRA", ((10, 10), (70, 10), (70, 30), (10, 30)), 0.9),
+        BloqueOCR("NOMBRE APELLIDO", ((120, 10), (250, 10), (250, 30), (120, 30)), 0.8),
+        BloqueOCR("PATENTE", ((10, 40), (80, 40), (80, 60), (10, 60)), 0.9),
+    ]
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "0000123456", "cliente": "A", "obra destino": "B", "chofer": "TOTAL EXENTO NOMBRE APELLIDO"}),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["chofer"] == "NOMBRE APELLIDO"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_contaminado_sin_candidato_conserva_valor_anterior(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "0000123456", "cliente": "A", "obra destino": "B", "chofer": "TOTAL EXENTO JUAN PEREZ"}),
+    )
+
+    assert procesar_archivo(ruta)["chofer"] == "TOTAL EXENTO JUAN PEREZ"
 
 
 def test_descubre_extensiones_permitidas_en_subcarpetas_y_ordena(tmp_path):

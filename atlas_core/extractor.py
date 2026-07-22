@@ -407,6 +407,145 @@ def _extraer_transporte_geometrico(
     return resultado
 
 
+def _chofer_lineal_contaminado(valor: Any) -> bool:
+    """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
+    texto = _texto_simple(str(valor or ""))
+    return any(
+        re.search(rf"(?<![A-Z0-9]){re.escape(etiqueta)}(?![A-Z0-9])", texto)
+        for etiqueta in (
+            "TOTAL EXENTO", "TOTAL", "NETO", "IVA", "PATENTE", "RETIRA",
+            "FECHA LLEGADA",
+        )
+    )
+
+
+def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza un nombre de chofer limpio en la zona geométrica de RETIRA."""
+    items = _normalizar_bloques_geometricos(bloques)
+    exclusiones = (
+        "TOTAL EXENTO", "TOTAL", "NETO", "IVA", "VALOR", "PESO", "TARA",
+        "BRUTO", "PATENTE", "CARRO", "FECHA", "LLEGADA", "RUT CHOFER",
+        "RETIRA", "DIRECCION", "DESPACHAR A", "RUT", "HORA",
+    )
+
+    def es_retiro(item: Dict[str, Any]) -> bool:
+        return item["simple"] == "RETIRA"
+
+    def es_contexto(item: Dict[str, Any]) -> bool:
+        return item["simple"] in {"PATENTE", "RUT CHOFER"}
+
+    def nominal(item: Dict[str, Any]) -> bool:
+        texto = item["texto"].strip()
+        simple = item["simple"]
+        contiene_exclusion = any(
+            re.search(rf"(?<![A-Z0-9]){re.escape(valor)}(?![A-Z0-9])", simple)
+            for valor in exclusiones
+        )
+        if not 2 <= len(texto) <= 60 or contiene_exclusion:
+            return False
+        if any(caracter.isdigit() for caracter in texto):
+            return False
+        if re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{5,8}", simple):
+            return False
+        componentes = texto.split()
+        if not componentes:
+            return False
+        patron = r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:[-'][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*"
+        return all(re.fullmatch(patron, componente) for componente in componentes)
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+            brecha = max(0.0, candidato["x1"] - etiqueta["x2"])
+            if brecha <= 300:
+                return brecha / 300 + diferencia_y / (alto * 8)
+        diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+        if abs(candidato["cx"] - etiqueta["cx"]) <= 170 and 0 < diferencia_vertical <= 65:
+            return 0.30 + diferencia_vertical / 160
+        return None
+
+    decisiones = []
+    contextos = [item for item in items if es_contexto(item)]
+    barreras = [
+        item for item in items
+        if any(
+            re.search(rf"(?<![A-Z0-9]){re.escape(etiqueta)}(?![A-Z0-9])", item["simple"])
+            for etiqueta in ("PATENTE", "RUT CHOFER", "CLIENTE", "DESPACHAR A", "DIRECCION")
+        )
+    ]
+    zonas_ajenas = [
+        item for item in items
+        if item["simple"] in {"CLIENTE", "DESPACHAR A", "DIRECCION"}
+    ]
+    for etiqueta in (item for item in items if es_retiro(item)):
+        candidatos = []
+        vistos = set()
+        for item in items:
+            if item is etiqueta or not nominal(item):
+                continue
+            clave = (item["texto"], item["x1"], item["y1"], item["x2"], item["y2"])
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            puntuacion = puntuar(etiqueta, item)
+            if puntuacion is None:
+                continue
+            distancia_retiro = abs(item["cx"] - etiqueta["cx"]) + abs(item["cy"] - etiqueta["cy"])
+            if zonas_ajenas and min(
+                abs(item["cx"] - zona["cx"]) + abs(item["cy"] - zona["cy"])
+                for zona in zonas_ajenas
+            ) + 8 < distancia_retiro:
+                continue
+            if contextos:
+                cercania = min(
+                    abs(item["cx"] - contexto["cx"]) + abs(item["cy"] - contexto["cy"])
+                    for contexto in contextos
+                )
+                if cercania > 330:
+                    continue
+                puntuacion -= min(0.08, 20 / max(cercania, 1))
+            candidatos.append((puntuacion, item))
+
+        candidatos.sort(key=lambda candidato: (candidato[1]["x1"], candidato[1]["y1"], candidato[1]["simple"]))
+        for indice, (puntuacion, item) in enumerate(candidatos):
+            if len(item["texto"].split()) >= 2:
+                decisiones.append((puntuacion, item["texto"].strip()))
+            cadena = [item]
+            for _, vecino in candidatos[indice + 1 : indice + 4]:
+                anterior = cadena[-1]
+                misma_fila = abs(vecino["cy"] - anterior["cy"]) <= max(vecino["h"], anterior["h"])
+                brecha = vecino["x1"] - anterior["x2"]
+                atraviesa_barrera = any(
+                    barrera not in cadena
+                    and barrera is not vecino
+                    and abs(barrera["cy"] - anterior["cy"]) <= max(barrera["h"], anterior["h"])
+                    and anterior["x2"] <= barrera["cx"] <= vecino["x1"]
+                    for barrera in barreras
+                )
+                if not misma_fila or not 0 <= brecha <= 40 or atraviesa_barrera:
+                    break
+                cadena.append(vecino)
+                compuesto = " ".join(bloque["texto"].strip() for bloque in cadena)
+                if 2 <= len(compuesto.split()) <= 4 and len(compuesto) <= 60:
+                    decisiones.append((puntuacion - 0.03 * (len(cadena) - 1), compuesto))
+
+    if not decisiones:
+        return {}
+    decisiones.sort(key=lambda decision: (round(decision[0], 6), _texto_simple(decision[1])))
+    mejor_puntaje, mejor = decisiones[0]
+    rivales = {
+        _texto_simple(valor)
+        for puntaje, valor in decisiones
+        if abs(puntaje - mejor_puntaje) <= 0.06
+        and _texto_simple(valor) != _texto_simple(mejor)
+        and _texto_simple(valor) not in _texto_simple(mejor)
+    }
+    if rivales:
+        return {}
+    return {"valor": re.sub(r"\s+", " ", mejor).strip()}
+
+
 def extraer_datos(
     textos: List[str], carpeta_catalogos: str | Path = "catalogos"
 ) -> Dict[str, str]:
