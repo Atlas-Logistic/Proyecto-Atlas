@@ -1,10 +1,164 @@
 """Extracción de datos desde texto reconocido."""
 
+import math
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from atlas_core.catalogos import enriquecer_datos_con_catalogos
+
+
+def _texto_simple(valor: str) -> str:
+    """Normaliza texto OCR para comparaciones, sin corregir su contenido."""
+    texto = re.sub(r"\s+", " ", str(valor or "")).strip(" :;,-.").upper()
+    return (
+        texto.replace("Á", "A")
+        .replace("É", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Ú", "U")
+        .replace("Ñ", "N")
+    )
+
+
+def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
+    """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
+    if not bloques:
+        return {}
+
+    items = []
+    for bloque in bloques:
+        try:
+            texto = re.sub(r"\s+", " ", str(bloque.texto or "")).strip(" :;,-.")
+            puntos = bloque.bounding_box
+            if len(puntos) != 4 or any(len(punto) < 2 for punto in puntos):
+                continue
+            xs = [float(p[0]) for p in puntos]
+            ys = [float(p[1]) for p in puntos]
+            if not all(math.isfinite(valor) for valor in (*xs, *ys)):
+                continue
+        except (AttributeError, TypeError, ValueError):
+            continue
+        items.append(
+            {
+                "texto": texto,
+                "simple": _texto_simple(texto),
+                "x1": min(xs),
+                "y1": min(ys),
+                "x2": max(xs),
+                "y2": max(ys),
+                "cx": (min(xs) + max(xs)) / 2,
+                "cy": (min(ys) + max(ys)) / 2,
+                "h": max(max(ys) - min(ys), 1.0),
+            }
+        )
+    items.sort(key=lambda item: (item["y1"], item["x1"], item["simple"]))
+
+    exclusiones = (
+        "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
+        "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
+        "SOLICITANTE", "TRANSPORTE", "FECHA", "ENTRADA", "SALIDA",
+        "OBRA DESTINO", "SENOR", "DESPACHAR A", "PESO", "BRUTO",
+        "TARA", "TOTAL", "VALOR", "NETO", "IVA",
+    )
+
+    def es_etiqueta(item: Dict[str, Any], campo: str) -> bool:
+        texto = item["simple"]
+        if campo == "cliente":
+            return bool(re.search(r"\bSENOR(?:ES|IES)?\b", texto)) or texto == "CLIENTE"
+        return "OBRA DESTINO" in texto or texto == "DESTINO"
+
+    def nominal(item: Dict[str, Any]) -> bool:
+        texto = item["simple"]
+        if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
+            return False
+        if any(palabra in texto for palabra in exclusiones):
+            return False
+        if re.fullmatch(r"[\d\W_]+", texto) or re.search(r"\b\d{1,2}[:;]\d{2}\b", texto):
+            return False
+        digitos = sum(caracter.isdigit() for caracter in texto)
+        if digitos and digitos >= sum(caracter.isalpha() for caracter in texto):
+            return False
+        return True
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.25:
+            if candidato["x1"] >= etiqueta["x2"] - 8:
+                distancia = max(0.0, candidato["x1"] - etiqueta["x2"])
+                return distancia / 350 + diferencia_y / (alto * 8)
+            if candidato["x2"] <= etiqueta["x1"] + 8:
+                distancia = max(0.0, etiqueta["x1"] - candidato["x2"])
+                return 0.18 + distancia / 350 + diferencia_y / (alto * 8)
+        solape_x = max(0.0, min(etiqueta["x2"], candidato["x2"]) - max(etiqueta["x1"], candidato["x1"]))
+        cerca_x = abs(candidato["cx"] - etiqueta["cx"]) <= 180
+        if solape_x > 0 or cerca_x:
+            if 0 < candidato["y1"] - etiqueta["y2"] <= 65:
+                return 0.28 + (candidato["y1"] - etiqueta["y2"]) / 160
+            if 0 < etiqueta["y1"] - candidato["y2"] <= 65:
+                return 0.34 + (etiqueta["y1"] - candidato["y2"]) / 160
+        return None
+
+    def seleccionar(campo: str) -> Optional[str]:
+        decisiones = []
+        for etiqueta in (item for item in items if es_etiqueta(item, campo)):
+            candidatos = []
+            for item in items:
+                if item is etiqueta or not nominal(item):
+                    continue
+                puntuacion = puntuar(etiqueta, item)
+                if puntuacion is None or puntuacion > 1.25:
+                    continue
+                # No atraviesa otra etiqueta: el candidato debe pertenecer a la
+                # zona de esta etiqueta y no estar más cerca de otra.
+                distancia_objetivo = abs(item["cx"] - etiqueta["cx"]) + abs(item["cy"] - etiqueta["cy"])
+                otras = [
+                    abs(item["cx"] - otra["cx"]) + abs(item["cy"] - otra["cy"])
+                    for otra in items
+                    if otra is not etiqueta and es_etiqueta(otra, campo)
+                ]
+                if otras and min(otras) + 8 < distancia_objetivo:
+                    continue
+                candidatos.append((puntuacion, item))
+
+            for puntuacion, item in candidatos:
+                decisiones.append((puntuacion, item["texto"].upper()))
+                for _, vecino in candidatos:
+                    if vecino is item:
+                        continue
+                    misma_fila = abs(vecino["cy"] - item["cy"]) <= max(vecino["h"], item["h"])
+                    brecha = vecino["x1"] - item["x2"]
+                    if misma_fila and 0 <= brecha <= 28:
+                        decisiones.append((puntuacion - 0.03, f'{item["texto"]} {vecino["texto"]}'.upper()))
+
+        if not decisiones:
+            return None
+        decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1]))
+        mejor_puntaje, mejor = decisiones[0]
+        # Variaciones de puntuación de hasta 0,06 representan la misma zona
+        # visual; se consideran ambiguas en vez de usar el orden OCR como desempate.
+        margen_ambiguedad = 0.06
+        equivalentes = {
+            valor for puntaje, valor in decisiones
+            if (
+                abs(puntaje - mejor_puntaje) <= margen_ambiguedad
+                and valor != mejor
+                and valor not in mejor
+            )
+        }
+        if equivalentes:
+            return None
+        return re.sub(r"\s+", " ", mejor).strip()
+
+    resultado = {}
+    cliente = seleccionar("cliente")
+    destino = seleccionar("obra destino")
+    if cliente:
+        resultado["cliente"] = cliente
+    if destino:
+        resultado["obra destino"] = destino
+    return resultado
 
 
 def extraer_datos(

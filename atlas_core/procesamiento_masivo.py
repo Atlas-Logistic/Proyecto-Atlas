@@ -13,7 +13,7 @@ from typing import Callable, Iterable, Mapping
 
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
-from atlas_core.extractor import extraer_datos
+from atlas_core.extractor import _extraer_asociaciones_geometricas, extraer_datos
 from atlas_core.ocr import crear_lector_ocr, leer_bloques_imagen, leer_texto_imagen
 
 
@@ -303,10 +303,24 @@ def procesar_archivo(
     """Procesa una guía reutilizando el OCR y extractor actuales."""
     textos = leer_texto_imagen(ruta, lector=lector_ocr)
     datos = extraer_datos(textos)
+    recuperacion_geometrica = False
+    bloques_guia = None
+    if any(datos.get(campo) in {None, "", "No encontrado"} for campo in ("cliente", "obra destino")):
+        try:
+            bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+            asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
+            for campo in ("cliente", "obra destino"):
+                if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
+                    datos[campo] = asociaciones[campo]
+                    recuperacion_geometrica = True
+                    logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
+        except Exception as exc:
+            logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
         try:
-            bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+            if bloques_guia is None:
+                bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
             decision_guia = decidir_bloques_ocr(bloques_guia, numero_guia_actual)
             candidato_guia = str(decision_guia["valor"])
             if decision_guia["emitida"] and re.fullmatch(r"\d{5,8}", candidato_guia):
@@ -323,7 +337,7 @@ def procesar_archivo(
     )
     requiere_revision = any(
         not valor or valor == "No encontrado" for valor in valores_clave
-    ) or not descripcion
+    ) or not descripcion or recuperacion_geometrica
 
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),

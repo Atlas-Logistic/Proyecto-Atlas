@@ -23,6 +23,173 @@ easyocr_stub.Reader = Reader
 sys.modules.setdefault("easyocr", easyocr_stub)
 
 from atlas import extraer_datos
+from atlas_core.extractor import _extraer_asociaciones_geometricas
+from atlas_core.ocr import BloqueOCR
+
+
+def _bloque(texto, x, y, ancho=None, alto=18):
+    ancho = ancho if ancho is not None else max(30, len(texto) * 8)
+    return BloqueOCR(
+        texto=texto,
+        bounding_box=((x, y), (x + ancho, y), (x + ancho, y + alto), (x, y + alto)),
+        confianza=0.9,
+    )
+
+
+def test_geometria_cliente_a_la_derecha_de_senores():
+    bloques = [_bloque("SEÑOR(ES)", 20, 20, 80), _bloque("ACEROS DEL SUR", 180, 20)]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ACEROS DEL SUR"
+
+
+def test_geometria_cliente_debajo_de_senores():
+    bloques = [_bloque("SEÑOR(ES)", 20, 20, 80), _bloque("METALURGICA ANDINA", 25, 55)]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "METALURGICA ANDINA"
+
+
+def test_geometria_cliente_dividido_en_dos_bloques():
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("ACEROS", 150, 20, 55),
+        _bloque("NUBLE", 212, 20, 48),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ACEROS NUBLE"
+
+
+def test_geometria_no_depende_del_orden_ocr():
+    etiqueta = _bloque("SEÑOR(ES)", 20, 20, 80)
+    valor = _bloque("INDUSTRIAS PACIFICO", 180, 20)
+
+    directo = _extraer_asociaciones_geometricas([etiqueta, valor])
+    invertido = _extraer_asociaciones_geometricas([valor, etiqueta])
+
+    assert directo == invertido == {"cliente": "INDUSTRIAS PACIFICO"}
+
+
+def test_geometria_obra_destino_a_la_izquierda_de_etiqueta():
+    bloques = [_bloque("PLANTA CENTRAL", 20, 20, 110), _bloque("OBRA DESTINO", 170, 20, 105)]
+
+    assert _extraer_asociaciones_geometricas(bloques)["obra destino"] == "PLANTA CENTRAL"
+
+
+def test_geometria_obra_destino_sobre_etiqueta():
+    bloques = [_bloque("PROYECTO CORDILLERA", 100, 10), _bloque("OBRA DESTINO", 110, 45, 105)]
+
+    assert _extraer_asociaciones_geometricas(bloques)["obra destino"] == "PROYECTO CORDILLERA"
+
+
+def test_geometria_obra_destino_compone_nombre_y_sa_solo_si_ambos_existen():
+    bloques = [
+        _bloque("OBRA DESTINO", 20, 20, 105),
+        _bloque("CONSTRUCTORA NORTE", 170, 20, 150),
+        _bloque("SA", 326, 20, 24),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["obra destino"] == "CONSTRUCTORA NORTE SA"
+
+
+def test_geometria_no_inventa_sa():
+    bloques = [_bloque("OBRA DESTINO", 20, 20, 105), _bloque("CONSTRUCTORA NORTE", 170, 20)]
+
+    assert _extraer_asociaciones_geometricas(bloques)["obra destino"] == "CONSTRUCTORA NORTE"
+
+
+def test_geometria_excluye_rut_telefono_codigo_hora_y_direccion():
+    excluidos = [
+        _bloque("RUT 76.123.456-7", 145, 20),
+        _bloque("TELEFONO 987654321", 145, 20),
+        _bloque("0001001424", 145, 20),
+        _bloque("08:45:00", 145, 20),
+        _bloque("DIRECCION GALVARINO 8501", 145, 20),
+    ]
+    etiqueta = _bloque("SEÑOR(ES)", 20, 20, 80)
+
+    for candidato in excluidos:
+        assert _extraer_asociaciones_geometricas([etiqueta, candidato]) == {}
+
+
+def test_geometria_se_abstiene_ante_dos_candidatos_equivalentes():
+    bloques = [
+        _bloque("SEÑOR(ES)", 100, 50, 80),
+        _bloque("EMPRESA NORTE", 190, 40, 100),
+        _bloque("EMPRESA SUR", 190, 60, 100),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques) == {}
+
+
+def test_geometria_sin_candidato_se_abstiene():
+    assert _extraer_asociaciones_geometricas([_bloque("OBRA DESTINO", 20, 20)]) == {}
+
+
+def test_geometria_resultado_determinista_en_repeticiones():
+    bloques = [_bloque("OBRA DESTINO", 20, 20, 105), _bloque("PLANTA ORIENTE", 170, 20)]
+
+    resultados = [_extraer_asociaciones_geometricas(list(reversed(bloques))) for _ in range(5)]
+
+    assert resultados == [{"obra destino": "PLANTA ORIENTE"}] * 5
+
+
+def test_geometria_no_usa_nombre_de_archivo():
+    # La función recibe exclusivamente bloques OCR, no una ruta o nombre de guía.
+    assert _extraer_asociaciones_geometricas([_bloque("SEÑOR(ES)", 20, 20)]) == {}
+
+
+def test_geometria_prefiere_nominal_frente_a_numerico_cercano():
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("0001001424", 110, 20),
+        _bloque("INDUSTRIAS ANDINAS", 210, 20),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "INDUSTRIAS ANDINAS"
+
+
+def test_geometria_excluye_montos_y_pesos_alfanumericos():
+    etiqueta = _bloque("OBRA DESTINO", 20, 20, 105)
+
+    for texto in ("TOTAL 5.585.996", "PESO BRUTO 21.052 KG", "IVA 1.061.339"):
+        assert _extraer_asociaciones_geometricas([etiqueta, _bloque(texto, 140, 20)]) == {}
+
+
+def test_geometria_sa_lejano_no_se_une():
+    bloques = [
+        _bloque("OBRA DESTINO", 20, 20, 105),
+        _bloque("CONSTRUCTORA NORTE", 170, 20, 150),
+        _bloque("SA", 410, 20, 24),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["obra destino"] == "CONSTRUCTORA NORTE"
+
+
+def test_geometria_ignora_cajas_ausentes_o_malformadas_sin_perder_validas():
+    class Incompleto:
+        texto = "RUIDO"
+
+    bloques = [
+        Incompleto(),
+        BloqueOCR("RUIDO", ((1, 1),), 0.5),
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("EMPRESA VALIDA", 150, 20),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques) == {"cliente": "EMPRESA VALIDA"}
+
+
+def test_geometria_cliente_y_destino_simultaneos_no_se_mezclan():
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("EMPRESA ANDINA", 150, 20),
+        _bloque("OBRA DESTINO", 20, 90, 105),
+        _bloque("PLANTA COSTA", 170, 90),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques) == {
+        "cliente": "EMPRESA ANDINA",
+        "obra destino": "PLANTA COSTA",
+    }
 
 
 def probar_guia1():

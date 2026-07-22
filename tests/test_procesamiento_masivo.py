@@ -7,6 +7,7 @@ import pytest
 
 import analizar_guias_masivo
 from atlas_core import procesamiento_masivo
+from atlas_core.ocr import BloqueOCR
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     descubrir_archivos,
@@ -20,6 +21,52 @@ from atlas_core.procesamiento_masivo import (
 def _crear_archivo(ruta):
     ruta.parent.mkdir(parents=True, exist_ok=True)
     ruta.write_bytes(b"simulado")
+
+
+def test_procesar_archivo_integra_asociacion_geometrica_y_mantiene_revision(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "nombre_sin_datos.jpg"
+    etiqueta = BloqueOCR("SEÑOR(ES)", ((10, 10), (90, 10), (90, 30), (10, 30)), 0.9)
+    cliente = BloqueOCR("ACEROS SUR", ((150, 10), (240, 10), (240, 30), (150, 30)), 0.9)
+    destino_etiqueta = BloqueOCR("OBRA DESTINO", ((10, 50), (115, 50), (115, 70), (10, 70)), 0.9)
+    destino = BloqueOCR("PLANTA CENTRAL", ((170, 50), (280, 50), (280, 70), (170, 70)), 0.9)
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "leer_bloques_imagen",
+        Mock(return_value=[destino, cliente, destino_etiqueta, etiqueta]),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "cliente": "No encontrado", "obra destino": "No encontrado"}),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["cliente"] == "ACEROS SUR"
+    assert resultado["obra_destino"] == "PLANTA CENTRAL"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "cliente": "CLIENTE LINEAL",
+        "obra destino": "DESTINO LINEAL",
+    }
+    leer_bloques = Mock()
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["cliente"] == "CLIENTE LINEAL"
+    assert resultado["obra_destino"] == "DESTINO LINEAL"
+    leer_bloques.assert_not_called()
 
 
 def test_descubre_extensiones_permitidas_en_subcarpetas_y_ordena(tmp_path):
