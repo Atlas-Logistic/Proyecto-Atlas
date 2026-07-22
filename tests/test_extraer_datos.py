@@ -2,6 +2,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 # Permitir importar atlas.py desde la raíz del proyecto cuando se ejecute este script.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,7 +25,12 @@ easyocr_stub.Reader = Reader
 sys.modules.setdefault("easyocr", easyocr_stub)
 
 from atlas import extraer_datos
-from atlas_core.extractor import _extraer_asociaciones_geometricas
+from atlas_core.extractor import (
+    _clasificar_evidencia_transporte,
+    _consensuar_transporte_focal,
+    _extraer_asociaciones_geometricas,
+    _extraer_transporte_geometrico,
+)
 from atlas_core.ocr import BloqueOCR
 
 
@@ -190,6 +197,317 @@ def test_geometria_cliente_y_destino_simultaneos_no_se_mezclan():
         "cliente": "EMPRESA ANDINA",
         "obra destino": "PLANTA COSTA",
     }
+
+
+def _transporte(candidato, etiqueta="NRO. TRANSPORTE"):
+    return _extraer_transporte_geometrico(
+        [_bloque(etiqueta, 20, 20, 120), _bloque(candidato, 180, 20, 100)]
+    )
+
+
+def test_transporte_acepta_diez_digitos_y_conserva_ceros_iniciales():
+    assert _transporte("0000348808") == {"valor": "0000348808", "corregido": False}
+
+
+@pytest.mark.parametrize(
+    "etiqueta", ["NRO. TRANSPORTE", "Nro, TRANSPORTE", "NRO TRANSPORTE", "NÚMERO TRANSPORTE", "TRANSPORTE"]
+)
+def test_transporte_reconoce_variantes_de_etiqueta(etiqueta):
+    assert _transporte("0000348808", etiqueta)["valor"] == "0000348808"
+
+
+@pytest.mark.parametrize(
+    ("ocr", "esperado"),
+    [
+        ("O000348808", "0000348808"),
+        ("000o348808", "0000348808"),
+        ("D000348808", "0000348808"),
+        ("000d348808", "0000348808"),
+        ("Q000348808", "0000348808"),
+        ("I000348808", "1000348808"),
+        ("l000348808", "1000348808"),
+        ("|000348808", "1000348808"),
+        ("00do348808", "0000348808"),
+    ],
+)
+def test_transporte_aplica_solo_sustituciones_autorizadas(ocr, esperado):
+    assert _transporte(ocr) == {"valor": esperado, "corregido": True}
+
+
+@pytest.mark.parametrize("ocr", ["OQD0348808", "000X348808", "000348808", "00000348808"])
+def test_transporte_rechaza_dudosos_no_autorizados_o_longitud_invalida(ocr):
+    assert _transporte(ocr) == {}
+
+
+def test_transporte_acepta_solo_espacio_punto_y_guion_como_separadores():
+    assert _transporte("00 00.34-8808")["valor"] == "0000348808"
+    assert _transporte("0000/348808") == {}
+
+
+@pytest.mark.parametrize(
+    ("otra_etiqueta", "valor"),
+    [
+        ("ORDEN DE COMPRA", "4500205692"),
+        ("CODIGO CLIENTE", "0001001424"),
+        ("TELEFONO", "9876543210"),
+        ("HORA ENTRADA", "0000084500"),
+    ],
+)
+def test_transporte_excluye_numeros_mas_cercanos_a_otras_etiquetas(otra_etiqueta, valor):
+    bloques = [
+        _bloque("NRO TRANSPORTE", 20, 20, 120),
+        _bloque(otra_etiqueta, 170, 20, 120),
+        _bloque(valor, 300, 20, 100),
+    ]
+
+    assert _extraer_transporte_geometrico(bloques) == {}
+
+
+def test_transporte_rechaza_numero_cercano_fuera_de_la_zona_de_etiqueta():
+    bloques = [_bloque("NRO TRANSPORTE", 20, 20, 120), _bloque("0000348808", 500, 200)]
+
+    assert _extraer_transporte_geometrico(bloques) == {}
+
+
+def test_transporte_se_abstiene_ante_dos_candidatos_equivalentes():
+    bloques = [
+        _bloque("NRO TRANSPORTE", 20, 50, 120),
+        _bloque("0000348808", 180, 40, 100),
+        _bloque("0000349909", 180, 60, 100),
+    ]
+
+    assert _extraer_transporte_geometrico(bloques) == {}
+
+
+def test_transporte_etiqueta_sin_candidato_y_ausencia_de_etiqueta_se_abstienen():
+    assert _extraer_transporte_geometrico([_bloque("NRO TRANSPORTE", 20, 20)]) == {}
+    assert _extraer_transporte_geometrico([_bloque("0000348808", 180, 20)]) == {}
+
+
+def test_transporte_ignora_cajas_malformadas():
+    bloque_malo = BloqueOCR("0000348808", ((1, 1),), 0.5)
+
+    assert _extraer_transporte_geometrico([_bloque("NRO TRANSPORTE", 20, 20), bloque_malo]) == {}
+
+
+def test_transporte_es_independiente_del_orden_y_determinista():
+    bloques = [_bloque("NUMERO TRANSPORTE", 20, 20, 140), _bloque("000o348808", 190, 20)]
+    esperado = {"valor": "0000348808", "corregido": True}
+
+    assert _extraer_transporte_geometrico(bloques) == esperado
+    assert [_extraer_transporte_geometrico(list(reversed(bloques))) for _ in range(5)] == [esperado] * 5
+
+
+def test_transporte_no_recibe_nombre_de_archivo():
+    assert _extraer_transporte_geometrico([]) == {}
+
+
+def test_consenso_focal_dos_lecturas_iguales():
+    resultado = _consensuar_transporte_focal(["0000348808", "0000348808"])
+
+    assert resultado["valor"] == "0000348808"
+
+
+def test_consenso_focal_mayoria_dos_a_uno_por_posicion():
+    resultado = _consensuar_transporte_focal(
+        ["000o348808", "000o348808", "000o348608"]
+    )
+
+    assert resultado["valor"] == "0000348808"
+    assert resultado["posiciones"][7] == {"8": 2, "6": 1}
+
+
+def test_consenso_focal_empate_en_una_posicion_abstiene_completo():
+    resultado = _consensuar_transporte_focal(["0000348808", "0000348608"])
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "candidatos-exactos-conflictivos"
+
+
+def test_consenso_focal_ruido_separado_con_un_unico_segmento_valido():
+    resultado = _consensuar_transporte_focal(
+        ["000o348608", "000o348608", "oo 00do348808", "oo 0000348808"]
+    )
+
+    assert resultado["normalizados"] == [
+        "0000348608", "0000348608", "0000348808", "0000348808"
+    ]
+    assert resultado["valor"] == "0000348808"
+    assert resultado["motivo"] == "evidencia-exacta-con-respaldo-independiente"
+
+
+def test_consenso_focal_una_sola_lectura_valida_abstiene():
+    resultado = _consensuar_transporte_focal(["0000348808"])
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "evidencia-exacta-sin-respaldo"
+
+
+def test_consenso_focal_longitudes_invalidas_no_completan_posiciones():
+    resultado = _consensuar_transporte_focal(["000348808", "00000348808"])
+
+    assert resultado["normalizados"] == []
+    assert "valor" not in resultado
+
+
+@pytest.mark.parametrize("global_ocr", ["0000348808", "00do348608"])
+def test_consenso_focal_no_deja_que_global_prevalezca_sobre_dos_focales(global_ocr):
+    resultado = _consensuar_transporte_focal(
+        ["0000348808", "0000348808"], global_ocr
+    )
+
+    assert resultado["valor"] == "0000348808"
+    assert resultado["global"][0] in {"0000348808", "0000348608"}
+
+
+def test_consenso_no_contiene_sustitucion_general_seis_a_ocho():
+    resultado = _consensuar_transporte_focal(["0000348608", "0000348608"])
+
+    assert resultado["valor"] == "0000348608"
+
+
+def test_jerarquia_exacta_mas_respaldo_normalizado_coincidente():
+    resultado = _consensuar_transporte_focal(["oo 0000348808", "oo 00do348808"])
+
+    assert resultado["valor"] == "0000348808"
+    assert [e["categoria"] for e in resultado["evidencias"]] == ["EXACTA", "NORMALIZADA_2"]
+
+
+def test_jerarquia_exacta_mas_respaldo_exacto():
+    resultado = _consensuar_transporte_focal(["0000348808", "00 00 34 88 08"])
+
+    assert resultado["valor"] == "0000348808"
+    assert [e["categoria"] for e in resultado["evidencias"]] == ["EXACTA", "EXACTA"]
+
+
+def test_jerarquia_exacta_unica_sin_respaldo_abstiene():
+    resultado = _consensuar_transporte_focal(["0000348808", "000o348608"])
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "evidencia-exacta-sin-respaldo"
+
+
+def test_jerarquia_dos_exactas_conflictivas_abstiene():
+    resultado = _consensuar_transporte_focal(["0000348808", "0000348608"])
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "candidatos-exactos-conflictivos"
+
+
+def test_jerarquia_exacta_respaldada_supera_dos_normalizadas_distintas():
+    resultado = _consensuar_transporte_focal(
+        ["oo 0000348808", "oo 00do348808", "000o348608", "000o348608"]
+    )
+
+    assert resultado["valor"] == "0000348808"
+
+
+def test_jerarquia_dos_candidatos_solo_normalizados_empatados_abstiene():
+    resultado = _consensuar_transporte_focal(["000o348808", "000o348608"])
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "sin-mayoria-posicion-7"
+
+
+def test_jerarquia_caso_sintetico_obligatorio():
+    resultado = _consensuar_transporte_focal(
+        ["oo 0000348808", "oo 00do348808", "000o348608"]
+    )
+
+    assert resultado["valor"] == "0000348808"
+    assert resultado["motivo"] == "evidencia-exacta-con-respaldo-independiente"
+
+
+@pytest.mark.parametrize("texto", ["oo 0000348808", "00 00 34 88 08", "0000.348-808"])
+def test_clasificacion_detecta_exacta_con_ruido_o_separadores_permitidos(texto):
+    evidencia = _clasificar_evidencia_transporte(texto, "variante", 0.8)
+
+    assert evidencia["categoria"] == "EXACTA"
+    assert evidencia["candidato"] == "0000348808"
+    assert evidencia["sustituciones"] == 0
+    assert evidencia["confianza"] == 0.8
+
+
+def test_clasificacion_extrae_exacta_rodeada_por_letras_exteriores():
+    evidencia = _clasificar_evidencia_transporte("A0000348808B")
+
+    assert evidencia["categoria"] == "EXACTA"
+    assert evidencia["candidato"] == "0000348808"
+
+
+def test_clasificacion_once_digitos_no_contiene_exacta_de_diez():
+    evidencia = _clasificar_evidencia_transporte("00000348808")
+
+    assert evidencia["categoria"] == "INVALIDA"
+
+
+def test_clasificacion_letra_interna_es_normalizada_no_exacta():
+    evidencia = _clasificar_evidencia_transporte("000o348608")
+
+    assert evidencia["categoria"] == "NORMALIZADA_1"
+    assert evidencia["directa"] is False
+
+
+def test_jerarquia_es_determinista_y_no_sustituye_seis_por_ocho():
+    lecturas = ["oo 0000348808", "oo 00do348808", "000o348608"]
+
+    assert [_consensuar_transporte_focal(lecturas)["valor"] for _ in range(5)] == ["0000348808"] * 5
+    assert _clasificar_evidencia_transporte("0000348608")["candidato"] == "0000348608"
+
+
+def test_jerarquia_independiente_del_orden_de_variantes():
+    lecturas = [
+        {"variante": "a", "texto": "oo 0000348808"},
+        {"variante": "b", "texto": "oo 00do348808"},
+        {"variante": "c", "texto": "000o348608"},
+    ]
+
+    assert _consensuar_transporte_focal(lecturas)["valor"] == "0000348808"
+    assert _consensuar_transporte_focal(list(reversed(lecturas)))["valor"] == "0000348808"
+
+
+def test_jerarquia_no_cuenta_dos_veces_la_misma_variante():
+    lecturas = [
+        {"variante": "original", "texto": "0000348808"},
+        {"variante": "original", "texto": "0000348808"},
+        {"variante": "grises", "texto": "000o348608"},
+    ]
+
+    resultado = _consensuar_transporte_focal(lecturas)
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "evidencia-exacta-sin-respaldo"
+    assert len(resultado["evidencias"]) == 2
+
+
+def test_clasificacion_dos_secuencias_exactas_distintas_es_invalida():
+    evidencia = _clasificar_evidencia_transporte("0000348808 0000348608")
+
+    assert evidencia["categoria"] == "INVALIDA"
+    assert evidencia["motivo"] == "secuencia-numerica-mayor"
+
+
+@pytest.mark.parametrize("confianza", [None, "alta", float("nan"), float("inf")])
+def test_confianza_invalida_se_conserva_sin_decidir(confianza):
+    lecturas = [
+        {"variante": "a", "texto": "0000348808", "confianza": confianza},
+        {"variante": "b", "texto": "000o348808", "confianza": 0.1},
+    ]
+
+    resultado = _consensuar_transporte_focal(lecturas)
+
+    assert resultado["valor"] == "0000348808"
+    assert resultado["evidencias"][0]["confianza"] is confianza
+
+
+def test_confianza_no_desplaza_jerarquia_de_evidencia():
+    lecturas = [
+        {"variante": "exacta", "texto": "0000348808", "confianza": 0.01},
+        {"variante": "respaldo", "texto": "000o348808", "confianza": 0.02},
+        {"variante": "conflicto", "texto": "000o348608", "confianza": 0.99},
+    ]
+
+    assert _consensuar_transporte_focal(lecturas)["valor"] == "0000348808"
 
 
 def probar_guia1():

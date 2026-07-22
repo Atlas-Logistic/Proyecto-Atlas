@@ -13,8 +13,18 @@ from typing import Callable, Iterable, Mapping
 
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
-from atlas_core.extractor import _extraer_asociaciones_geometricas, extraer_datos
-from atlas_core.ocr import crear_lector_ocr, leer_bloques_imagen, leer_texto_imagen
+from atlas_core.extractor import (
+    _consensuar_transporte_focal,
+    _extraer_asociaciones_geometricas,
+    _extraer_transporte_geometrico,
+    extraer_datos,
+)
+from atlas_core.ocr import (
+    _leer_transporte_focal,
+    crear_lector_ocr,
+    leer_bloques_imagen,
+    leer_texto_imagen,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -304,8 +314,13 @@ def procesar_archivo(
     textos = leer_texto_imagen(ruta, lector=lector_ocr)
     datos = extraer_datos(textos)
     recuperacion_geometrica = False
+    transporte_corregido = False
     bloques_guia = None
-    if any(datos.get(campo) in {None, "", "No encontrado"} for campo in ("cliente", "obra destino")):
+    campos_ausentes = any(
+        datos.get(campo) in {None, "", "No encontrado"}
+        for campo in ("cliente", "obra destino", "número de transporte")
+    )
+    if campos_ausentes:
         try:
             bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
             asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
@@ -314,6 +329,32 @@ def procesar_archivo(
                     datos[campo] = asociaciones[campo]
                     recuperacion_geometrica = True
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
+            transporte_actual = str(datos.get("número de transporte", "No encontrado"))
+            if not re.fullmatch(r"\d{10}", transporte_actual):
+                decision_transporte = _extraer_transporte_geometrico(
+                    bloques_guia, incluir_traza=True
+                )
+                if decision_transporte.get("valor"):
+                    requiere_focal = bool(decision_transporte.get("corregido")) or float(
+                        decision_transporte.get("confianza", 0.0)
+                    ) < 0.65
+                    if requiere_focal:
+                        evidencia_focal = _leer_transporte_focal(
+                            ruta,
+                            decision_transporte["caja"],
+                            lector=lector_ocr,
+                        )
+                        consenso = _consensuar_transporte_focal(
+                            evidencia_focal["lecturas"],
+                            str(decision_transporte.get("texto_global", "")),
+                        )
+                        if consenso.get("valor"):
+                            datos["número de transporte"] = consenso["valor"]
+                            transporte_corregido = True
+                            logger.info("numero_transporte recuperado mediante consenso-focal-v1")
+                    else:
+                        datos["número de transporte"] = decision_transporte["valor"]
+                        logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
@@ -337,7 +378,7 @@ def procesar_archivo(
     )
     requiere_revision = any(
         not valor or valor == "No encontrado" for valor in valores_clave
-    ) or not descripcion or recuperacion_geometrica
+    ) or not descripcion or recuperacion_geometrica or transporte_corregido
 
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),

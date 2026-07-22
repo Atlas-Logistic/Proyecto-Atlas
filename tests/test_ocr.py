@@ -168,3 +168,73 @@ def test_leer_bloques_mantiene_errores_claros(tmp_path, preparar_ruta, error):
 
     with pytest.raises(error):
         ocr.leer_bloques_imagen(ruta)
+
+
+def test_transporte_focal_recorta_dinamicamente_dentro_de_limites_y_reutiliza_lector(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [["0000348808"]] * 4
+    crear = Mock()
+    monkeypatch.setattr(ocr, "crear_lector_ocr", crear)
+
+    resultado = ocr._leer_transporte_focal(ruta, (20, 10, 80, 30), lector=lector)
+
+    assert resultado["recorte"] == (13, 3, 87, 37)
+    assert [lectura["variante"] for lectura in resultado["lecturas"]] == [
+        "original", "grises", "ampliada_2x", "ampliada_2x_contraste"
+    ]
+    assert [lectura["texto"] for lectura in resultado["lecturas"]] == ["0000348808"] * 4
+    assert lector.readtext.call_count == 4
+    crear.assert_not_called()
+
+
+def test_transporte_focal_caja_proxima_al_borde_se_limita_a_imagen(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    resultado = ocr._leer_transporte_focal(ruta, (1, 1, 39, 29), lector=lector)
+
+    assert resultado["recorte"] == (0, 0, 40, 30)
+    for llamada in lector.readtext.call_args_list:
+        assert llamada.kwargs["detail"] == 1
+        assert llamada.kwargs["paragraph"] is False
+
+
+@pytest.mark.parametrize(
+    "caja",
+    [(0, 10, 15, 20), (85, 10, 100, 20), (10, 0, 30, 10), (10, 50, 30, 60)],
+)
+def test_transporte_focal_limita_recortes_en_cada_borde(tmp_path, caja):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    recorte = ocr._leer_transporte_focal(ruta, caja, lector=lector)["recorte"]
+
+    assert 0 <= recorte[0] < recorte[2] <= 100
+    assert 0 <= recorte[1] < recorte[3] <= 60
+
+
+def test_transporte_focal_sin_resultados_conserva_cuatro_lecturas_vacias(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert [lectura["texto"] for lectura in resultado["lecturas"]] == [""] * 4
+
+
+def test_transporte_focal_rechaza_recorte_vacio(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+
+    with pytest.raises(ValueError, match="dimensiones válidas"):
+        ocr._leer_transporte_focal(ruta, (10, 10, 10, 20), lector=Mock())

@@ -54,19 +54,131 @@ def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monk
     ruta = tmp_path / "guia.jpg"
     datos = {
         "número de guía": "123456",
+        "número de transporte": "0000123456",
         "cliente": "CLIENTE LINEAL",
         "obra destino": "DESTINO LINEAL",
     }
     leer_bloques = Mock()
+    focal = Mock()
     monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
     monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
+    monkeypatch.setattr(procesamiento_masivo, "_leer_transporte_focal", focal)
     monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
 
     resultado = procesar_archivo(ruta)
 
     assert resultado["cliente"] == "CLIENTE LINEAL"
     assert resultado["obra_destino"] == "DESTINO LINEAL"
+    assert resultado["numero_transporte"] == "0000123456"
     leer_bloques.assert_not_called()
+    focal.assert_not_called()
+
+
+def test_procesar_archivo_integra_transporte_corregido_y_reutiliza_bloques(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "sin_numero_en_nombre.jpg"
+    bloques = [
+        BloqueOCR("NRO TRANSPORTE", ((10, 10), (130, 10), (130, 30), (10, 30)), 0.9),
+        BloqueOCR("00do348808", ((180, 10), (280, 10), (280, 30), (180, 30)), 0.8),
+    ]
+    leer_bloques = Mock(return_value=bloques)
+    focal = Mock(
+        return_value={
+            "recorte": (170, 5, 290, 35),
+            "lecturas": [
+                {"variante": "original", "texto": "0000348808"},
+                {"variante": "grises", "texto": "0000348808"},
+            ],
+        }
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
+    monkeypatch.setattr(procesamiento_masivo, "_leer_transporte_focal", focal)
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value={
+                "número de guía": "123456",
+                "número de transporte": "No encontrado",
+                "cliente": "CLIENTE LINEAL",
+                "obra destino": "DESTINO LINEAL",
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["numero_transporte"] == "0000348808"
+    assert resultado["indicador_revision"] == "REVISAR"
+    leer_bloques.assert_called_once_with(ruta, lector=None)
+    focal.assert_called_once()
+
+
+def test_procesar_archivo_consenso_focal_corrige_global_sin_mapa_seis_a_ocho(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("NRO TRANSPORTE", ((10, 10), (130, 10), (130, 30), (10, 30)), 0.9),
+        BloqueOCR("00do348608", ((180, 10), (280, 10), (280, 30), (180, 30)), 0.3),
+    ]
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "No encontrado", "cliente": "A", "obra destino": "B"}),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "_leer_transporte_focal",
+        Mock(return_value={"lecturas": [
+            {"variante": "original", "texto": "oo 0000348808"},
+            {"variante": "grises", "texto": "oo 00do348808"},
+            {"variante": "ampliada_2x", "texto": "000o348608"},
+        ]}),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["numero_transporte"] == "0000348808"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_sin_etiqueta_no_ejecuta_ocr_focal(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    focal = Mock()
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "_leer_transporte_focal", focal)
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "No encontrado", "cliente": "A", "obra destino": "B"}),
+    )
+
+    assert procesar_archivo(ruta)["numero_transporte"] == "No encontrado"
+    focal.assert_not_called()
+
+
+def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("NRO TRANSPORTE", ((10, 10), (130, 10), (130, 30), (10, 30)), 0.9),
+        BloqueOCR("000o348808", ((180, 10), (280, 10), (280, 30), (180, 30)), 0.8),
+    ]
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "_leer_transporte_focal", Mock(side_effect=RuntimeError("fallo focal"))
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "No encontrado", "cliente": "A", "obra destino": "B"}),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["numero_transporte"] == "No encontrado"
 
 
 def test_descubre_extensiones_permitidas_en_subcarpetas_y_ordena(tmp_path):
