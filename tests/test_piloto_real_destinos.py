@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 from piloto_real_destinos import (
     CAMPOS_AUTORIZADOS,
@@ -9,6 +11,7 @@ from piloto_real_destinos import (
     _region_compatible_humana,
     preparar,
     recomendar,
+    reproducir_desde_congelado,
     sha256,
 )
 
@@ -71,3 +74,18 @@ def test_recomendacion_exige_cero_falsos_positivos_y_determinismo():
     assert recomendar(metricas) == "APTO PARA INTEGRACIÓN OPCIONAL EN MODO REVISIÓN"
     metricas["falsos_positivos"] = [1, 12]
     assert recomendar(metricas) == "REQUIERE AJUSTES ANTES DE USAR DESTINOS REALES"
+
+
+def test_reprocesamiento_congelado_corrige_la_union_sin_red(tmp_path, monkeypatch):
+    origen = Path("validaciones/piloto_real_destinos_2026-07-28")
+    salida = tmp_path / "piloto"
+    shutil.copytree(origen, salida)
+    monkeypatch.setattr(
+        "atlas_core.inteligencia.verificacion_destinos._transporte_urllib",
+        lambda *_: (_ for _ in ()).throw(AssertionError("red no autorizada")),
+    )
+    resultado = reproducir_desde_congelado(salida)
+    assert resultado["metricas"]["falsos_positivos"] == [0, 12]
+    assert resultado["metricas"]["falsos_negativos"] == [0, 12]
+    assert resultado["metricas"]["cobertura_confirmaciones"] == [1, 12]
+    assert resultado["metricas"]["determinismo"]["consultas_nuevas_en_repeticion"] == 0

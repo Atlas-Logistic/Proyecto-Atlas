@@ -152,6 +152,21 @@ CASOS = (
     },
 )
 
+RESULTADOS_BASE = {
+    "REAL-001": ("CONTRADICCION_REGION", "ACIERTO_ABSTENCION"),
+    "REAL-002": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-003": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-004": ("CONTRADICCION_REGION", "ACIERTO_ABSTENCION"),
+    "REAL-005": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-006": ("CONTRADICCION_REGION", "ACIERTO_ABSTENCION"),
+    "REAL-007": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-008": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-009": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-010": ("REVISAR", "ACIERTO_ABSTENCION"),
+    "REAL-011": ("CONTRADICCION_REGION", "FALSO_NEGATIVO"),
+    "REAL-012": ("REVISAR", "ACIERTO_ABSTENCION"),
+}
+
 
 def sha256(ruta: Path) -> str:
     return hashlib.sha256(ruta.read_bytes()).hexdigest()
@@ -307,7 +322,11 @@ def _fila_resultado(caso, resultado, propuesta, desde_cache):
         resultado.direccion_devuelta
     ):
         clasificacion = "FALSO_POSITIVO" if estado == "VERIFICADA" else "ACIERTO_CONTRADICCION"
-    coordenadas = "RECHAZADAS_PENDIENTE_CONFIRMACION"
+    coordenadas = (
+        "ACEPTADAS_EVIDENCIA_SUFFICIENTE"
+        if estado == "VERIFICADA"
+        else "RECHAZADAS_PENDIENTE_CONFIRMACION"
+    )
     if resultado.latitud is None or resultado.longitud is None:
         coordenadas = "NO_PROPUESTAS"
     if "latitud_aprobada" in caso and resultado.latitud is not None:
@@ -315,7 +334,7 @@ def _fila_resultado(caso, resultado, propuesta, desde_cache):
             resultado.longitud - caso["longitud_aprobada"]
         )
         coordenadas = (
-            "ACEPTABLES_CON_GT_HUMANO"
+            "ACEPTADAS_EVIDENCIA_SUFFICIENTE"
             if estado == "VERIFICADA" and distancia_simple <= 0.001
             else "RECHAZADAS_INCOMPATIBLES_O_NO_VERIFICADAS"
         )
@@ -325,6 +344,7 @@ def _fila_resultado(caso, resultado, propuesta, desde_cache):
         "direccion_gt": caso["direccion"],
         "consulta_minimizada": resultado.consulta_minimizada,
         "estado_externo": estado,
+        "tipo_coincidencia": resultado.tipo_coincidencia,
         "direccion_devuelta": resultado.direccion_devuelta,
         "comuna_devuelta": resultado.comuna_encontrada,
         "region_devuelta": resultado.region_encontrada,
@@ -338,6 +358,22 @@ def _fila_resultado(caso, resultado, propuesta, desde_cache):
         "confianza_motor": propuesta.confianza.value,
         "requiere_revision": resultado.requiere_revision,
         "region_compatible_humana": region_compatible_humana,
+        "calle_coincide": resultado.detalle_comparacion.get(
+            "calle_coincide", False
+        ),
+        "numero_coincide": resultado.detalle_comparacion.get(
+            "numero_coincide", False
+        ),
+        "comuna_coincide": resultado.detalle_comparacion.get(
+            "comuna_coincide", False
+        ),
+        "region_coincide": resultado.detalle_comparacion.get(
+            "region_coincide", False
+        ),
+        "explicacion_geografica": json.dumps(
+            resultado.detalle_comparacion.get("explicacion", ()),
+            ensure_ascii=False,
+        ),
         "trazabilidad": externa is not None or bool(resultado.identificador_consulta),
         "identificador_consulta": resultado.identificador_consulta,
         "desde_cache": desde_cache,
@@ -371,7 +407,9 @@ def _metricas(filas, consultas_reales):
     conteo = Counter(f["clasificacion"] for f in filas)
     confirmaciones = sum(f["estado_externo"] == "VERIFICADA" for f in filas)
     abstenciones = sum(bool(f["requiere_revision"]) for f in filas)
-    coords_aceptadas = sum(f["coordenadas"] == "ACEPTABLES_CON_GT_HUMANO" for f in filas)
+    coords_aceptadas = sum(
+        f["coordenadas"] == "ACEPTADAS_EVIDENCIA_SUFFICIENTE" for f in filas
+    )
     coords_rechazadas = sum(f["coordenadas"].startswith("RECHAZADAS") for f in filas)
     comuna = sum(
         normalizar(f["comuna_devuelta"]) == normalizar(CASOS[i]["comuna"])
@@ -407,6 +445,38 @@ def _metricas(filas, consultas_reales):
 def _canon(filas):
     omitir = {"desde_cache", "duracion_ms"}
     return [{k: v for k, v in fila.items() if k not in omitir} for fila in filas]
+
+
+def _escribir_antes_despues(salida, filas, metricas):
+    antes_despues = [{
+        "id_caso": f["id_caso"],
+        "estado_antes": RESULTADOS_BASE[f["id_caso"]][0],
+        "estado_despues": f["estado_externo"],
+        "clasificacion_antes": RESULTADOS_BASE[f["id_caso"]][1],
+        "clasificacion_despues": f["clasificacion"],
+        "tipo_coincidencia_despues": f["tipo_coincidencia"],
+        "calle_coincide": f["calle_coincide"],
+        "numero_coincide": f["numero_coincide"],
+        "comuna_coincide": f["comuna_coincide"],
+        "region_coincide": f["region_coincide"],
+        "coordenadas_despues": f["coordenadas"],
+        "requiere_revision_despues": f["requiere_revision"],
+    } for f in filas]
+    escribir_csv(salida / "comparacion_antes_despues.csv", antes_despues)
+    escribir_json(salida / "metricas_antes_despues.json", {
+        "antes": {
+            "confirmaciones": [0, 12], "abstenciones": [12, 12],
+            "falsos_positivos": [0, 12], "falsos_negativos": [1, 12],
+            "coordenadas_aceptadas": [0, 12],
+        },
+        "despues": {
+            "confirmaciones": metricas["cobertura_confirmaciones"],
+            "abstenciones": metricas["tasa_abstencion"],
+            "falsos_positivos": metricas["falsos_positivos"],
+            "falsos_negativos": metricas["falsos_negativos"],
+            "coordenadas_aceptadas": metricas["coordenadas_aceptadas"],
+        },
+    })
 
 
 def ejecutar(salida: Path = SALIDA_PREDETERMINADA) -> dict[str, Any]:
@@ -451,6 +521,7 @@ def ejecutar(salida: Path = SALIDA_PREDETERMINADA) -> dict[str, Any]:
         for f in primera
     ]
     escribir_csv(salida / "comparacion.csv", comparacion)
+    _escribir_antes_despues(salida, primera, metricas)
     recomendacion = recomendar(metricas)
     (salida / "recomendacion.txt").write_text(
         recomendacion + "\n", encoding="utf-8"
@@ -522,6 +593,7 @@ def reproducir_desde_congelado(
         "requiere_revision": f["requiere_revision"],
     } for f in primera]
     escribir_csv(salida / "comparacion.csv", comparacion)
+    _escribir_antes_despues(salida, primera, metricas)
     recomendacion = recomendar(metricas)
     (salida / "recomendacion.txt").write_text(recomendacion + "\n", encoding="utf-8")
     hashes = {

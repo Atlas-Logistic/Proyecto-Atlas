@@ -14,6 +14,17 @@ from atlas_core.inteligencia.modelos import (
     TipoFuente,
 )
 from atlas_core.inteligencia.motor import MotorResolucion, normalizar
+from atlas_core.inteligencia.normalizacion_geografica import (
+    ComparacionDireccion,
+    ComponentesDireccion,
+    EstadoCoincidenciaDireccion,
+    ResultadoNormalizacionGeografica,
+    comparar_direccion,
+    comunas_equivalentes,
+    normalizar_region_chile,
+    regiones_equivalentes,
+    separar_direccion,
+)
 from atlas_core.inteligencia.politicas import (
     PESOS_FUENTE,
     POLITICAS,
@@ -46,5 +57,8 @@ __all__ = [
     "ResultadoVerificacionDestino", "SolicitudVerificacionDestino",
     "VerificadorDestinosOpenRouteService", "convertir_a_evidencia",
     "resolver_destino_con_verificacion", "normalizar", "obtener_politica",
-    "preparar_envio",
+    "preparar_envio", "ComparacionDireccion", "ComponentesDireccion",
+    "EstadoCoincidenciaDireccion", "ResultadoNormalizacionGeografica",
+    "comparar_direccion", "comunas_equivalentes", "normalizar_region_chile",
+    "regiones_equivalentes", "separar_direccion",
 ]

@@ -33,3 +33,13 @@ incorrecto. Una respuesta sin el número 2351 o con otra numeración debe revisa
 Los casos sintéticos `DEST-059`–`DEST-064` y la precedencia
 `CONSULTA_NO_AUTORIZADA`/`DATOS_INSUFICIENTES` permanecen separados y no afectan
 las métricas de este piloto real.
+
+## Reprocesamiento con normalización geográfica
+
+La rama `mejora-normalizacion-geografica-destinos` vuelve a procesar exactamente
+las mismas respuestas congeladas. `comparacion_antes_despues.csv` y
+`metricas_antes_despues.json` documentan el cambio sin consultas externas.
+
+La capa reconoce únicamente alias controlados de Región Metropolitana, separa
+calle, número y geografía, y mantiene en revisión calles sin número, comunas
+contradictorias y respuestas con varios candidatos.

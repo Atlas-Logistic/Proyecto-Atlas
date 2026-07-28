@@ -24,6 +24,10 @@ from atlas_core.inteligencia.modelos import (
     TipoFuente,
 )
 from atlas_core.inteligencia.motor import MotorResolucion, normalizar
+from atlas_core.inteligencia.normalizacion_geografica import (
+    EstadoCoincidenciaDireccion,
+    comparar_direccion,
+)
 
 
 class EstadoVerificacionDestino(str, Enum):
@@ -31,6 +35,7 @@ class EstadoVerificacionDestino(str, Enum):
     COINCIDENCIA_PARCIAL = "COINCIDENCIA_PARCIAL"
     CONTRADICCION_COMUNA = "CONTRADICCION_COMUNA"
     CONTRADICCION_REGION = "CONTRADICCION_REGION"
+    CONTRADICCION_NUMERO = "CONTRADICCION_NUMERO"
     SIN_RESULTADOS = "SIN_RESULTADOS"
     CREDENCIAL_NO_DISPONIBLE = "CREDENCIAL_NO_DISPONIBLE"
     CUOTA_AGOTADA = "CUOTA_AGOTADA"
@@ -81,6 +86,7 @@ class ResultadoVerificacionDestino:
     identificador_consulta: str
     expira_en: datetime
     desde_cache: bool = False
+    detalle_comparacion: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -259,11 +265,13 @@ class VerificadorDestinosOpenRouteService:
             resultado = self._fallo(
                 EstadoVerificacionDestino.SIN_RESULTADOS,
                 "SIN_RESULTADOS", base, respuesta.estado, inicio,
+                tipo_coincidencia=EstadoCoincidenciaDireccion.SIN_RESULTADO.value,
             )
         elif len(features) > 1:
             resultado = self._fallo(
                 EstadoVerificacionDestino.REVISAR,
                 "MULTIPLES_RESULTADOS", base, respuesta.estado, inicio,
+                tipo_coincidencia=EstadoCoincidenciaDireccion.AMBIGUA.value,
             )
         else:
             resultado = self._interpretar(
@@ -286,12 +294,14 @@ class VerificadorDestinosOpenRouteService:
             ):
                 raise ValueError
             direccion = str(propiedades.get("label", "")).strip()
-            comuna = str(
-                propiedades.get("locality")
-                or propiedades.get("localadmin")
-                or propiedades.get("county")
-                or ""
-            ).strip()
+            if propiedades.get("localadmin"):
+                comuna, fuente_comuna = str(propiedades["localadmin"]).strip(), "localadmin"
+            elif propiedades.get("locality"):
+                comuna, fuente_comuna = str(propiedades["locality"]).strip(), "locality"
+            elif propiedades.get("county"):
+                comuna, fuente_comuna = str(propiedades["county"]).strip(), "county"
+            else:
+                comuna, fuente_comuna = "", "ausente"
             region = str(propiedades.get("region", "")).strip()
             pais = str(propiedades.get("country", "")).strip()
             confianza = _confianza(propiedades.get("confidence"))
@@ -302,29 +312,59 @@ class VerificadorDestinosOpenRouteService:
                 EstadoVerificacionDestino.ERROR_PROVEEDOR,
                 "RESULTADO_INCOMPLETO_O_INVALIDO", base, codigo, inicio,
             )
-        comuna_ok = _compatible(solicitud.comuna_esperada, comuna)
-        region_ok = _compatible(solicitud.region_esperada, region)
-        direccion_exacta = normalizar(solicitud.direccion_original) in normalizar(direccion)
-        if solicitud.region_esperada.strip() and not region_ok:
-            estado, tipo = EstadoVerificacionDestino.CONTRADICCION_REGION, "CONTRADICCION"
-        elif solicitud.comuna_esperada.strip() and not comuna_ok:
-            estado, tipo = EstadoVerificacionDestino.CONTRADICCION_COMUNA, "CONTRADICCION"
-        elif direccion_exacta and comuna_ok and region_ok:
-            estado, tipo = EstadoVerificacionDestino.VERIFICADA, "EXACTA"
+        comparacion = comparar_direccion(
+            direccion_esperada=solicitud.direccion_original,
+            direccion_encontrada=direccion,
+            comuna_esperada=solicitud.comuna_esperada,
+            comuna_encontrada=comuna,
+            region_esperada=solicitud.region_esperada,
+            region_encontrada=region,
+            coordenadas_validas=True,
+        )
+        tipo = comparacion.estado.value
+        if comparacion.estado == EstadoCoincidenciaDireccion.CONTRADICCION_REGION:
+            estado = EstadoVerificacionDestino.CONTRADICCION_REGION
+        elif comparacion.estado == EstadoCoincidenciaDireccion.CONTRADICCION_COMUNA:
+            estado = EstadoVerificacionDestino.CONTRADICCION_COMUNA
+        elif comparacion.estado == EstadoCoincidenciaDireccion.CONTRADICCION_NUMERO:
+            estado = EstadoVerificacionDestino.CONTRADICCION_NUMERO
+        elif comparacion.confirmable:
+            estado = EstadoVerificacionDestino.VERIFICADA
+        elif comparacion.estado in {
+            EstadoCoincidenciaDireccion.COINCIDENCIA_PARCIAL_SIN_NUMERO,
+            EstadoCoincidenciaDireccion.COINCIDENCIA_SOLO_CALLE,
+            EstadoCoincidenciaDireccion.COINCIDENCIA_SOLO_COMUNA_REGION,
+        }:
+            estado = EstadoVerificacionDestino.COINCIDENCIA_PARCIAL
         else:
-            estado, tipo = EstadoVerificacionDestino.COINCIDENCIA_PARCIAL, "APROXIMADA"
+            estado = EstadoVerificacionDestino.REVISAR
         revisar = estado != EstadoVerificacionDestino.VERIFICADA
+        detalle = {
+            "fuente_comuna": fuente_comuna,
+            "calle_coincide": comparacion.calle_coincide,
+            "numero_coincide": comparacion.numero_coincide,
+            "comuna_coincide": comparacion.comuna_coincide,
+            "region_coincide": comparacion.region_coincide,
+            "region_original": comparacion.region_encontrada.original,
+            "region_canonica": comparacion.region_encontrada.canonico,
+            "transformaciones_region": comparacion.region_encontrada.transformaciones,
+            "explicacion": comparacion.explicacion,
+        }
         return ResultadoVerificacionDestino(
             estado, base["consulta_minimizada"], direccion, comuna, region, pais,
             latitud, longitud, tipo, confianza, codigo, self.nombre,
             base["fecha_consulta"], _duracion(self._monotono, inicio), "",
             revisar, solicitud, base["identificador_consulta"], base["expira_en"],
+            False, detalle,
         )
 
-    def _fallo(self, estado, error, base, codigo=None, inicio=None):
+    def _fallo(
+        self, estado, error, base, codigo=None, inicio=None, *,
+        tipo_coincidencia="NINGUNA",
+    ):
         return ResultadoVerificacionDestino(
             estado, base["consulta_minimizada"], "", "", "", "", None, None,
-            "NINGUNA", None, codigo, self.nombre, base["fecha_consulta"],
+            tipo_coincidencia, None, codigo, self.nombre, base["fecha_consulta"],
             _duracion(self._monotono, inicio), error, True,
             base["evidencia_original"], base["identificador_consulta"],
             base["expira_en"],
@@ -354,6 +394,7 @@ def convertir_a_evidencia(
             "pais": resultado.pais_encontrado,
             "tipo_coincidencia": resultado.tipo_coincidencia,
             "requiere_revision": resultado.requiere_revision,
+            "detalle_comparacion": dict(resultado.detalle_comparacion),
         },
         contiene_datos_sensibles=True,
     )

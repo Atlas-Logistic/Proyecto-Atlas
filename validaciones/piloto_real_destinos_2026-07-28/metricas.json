@@ -1,11 +1,12 @@
 {
   "casos": 12,
   "clasificaciones": {
-    "ACIERTO_ABSTENCION": 11,
-    "FALSO_NEGATIVO": 1
+    "ACIERTO_ABSTENCION": 10,
+    "ACIERTO_CONFIRMACION": 1,
+    "ACIERTO_CONTRADICCION": 1
   },
   "cobertura_confirmaciones": [
-    0,
+    1,
     12
   ],
   "coincidencia_comuna": [
@@ -21,11 +22,11 @@
     12
   ],
   "coordenadas_aceptadas": [
-    0,
+    1,
     12
   ],
   "coordenadas_rechazadas": [
-    4,
+    3,
     12
   ],
   "determinismo": {
@@ -34,7 +35,7 @@
     "resultados_semanticos_identicos": true
   },
   "falsos_negativos": [
-    1,
+    0,
     12
   ],
   "falsos_positivos": [
@@ -46,15 +47,15 @@
     12
   ],
   "precision_confirmaciones": [
-    0,
-    0
+    1,
+    1
   ],
   "tasa_abstencion": [
-    12,
+    11,
     12
   ],
   "tiempo_medio_consulta_ms": 3254.949,
-  "tiempo_medio_reproduccion_ms": 0.188,
+  "tiempo_medio_reproduccion_ms": 0.152,
   "trazabilidad_completa": [
     12,
     12

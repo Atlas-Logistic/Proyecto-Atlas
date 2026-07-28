@@ -1,0 +1,46 @@
+{
+  "antes": {
+    "abstenciones": [
+      12,
+      12
+    ],
+    "confirmaciones": [
+      0,
+      12
+    ],
+    "coordenadas_aceptadas": [
+      0,
+      12
+    ],
+    "falsos_negativos": [
+      1,
+      12
+    ],
+    "falsos_positivos": [
+      0,
+      12
+    ]
+  },
+  "despues": {
+    "abstenciones": [
+      11,
+      12
+    ],
+    "confirmaciones": [
+      1,
+      12
+    ],
+    "coordenadas_aceptadas": [
+      1,
+      12
+    ],
+    "falsos_negativos": [
+      0,
+      12
+    ],
+    "falsos_positivos": [
+      0,
+      12
+    ]
+  }
+}
