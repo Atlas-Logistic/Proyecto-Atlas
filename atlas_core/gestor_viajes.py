@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 
 _AUSENTES = {"", "no encontrado", "revisar", "ilegible"}
-_PATRON_TRANSPORTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_PATRON_TRANSPORTE = re.compile(r"^\d+$")
 
 
 def _valor_presente(valor: object) -> bool:
@@ -187,17 +187,14 @@ def _documento_desde_fila(
 def _deduplicar_filas(
     filas: Iterable[Mapping[str, object]],
 ) -> list[Mapping[str, object]]:
-    """Evita duplicados exactos de una guía sin eliminar filas diferentes."""
-    vistas: set[tuple[tuple[str, str], ...]] = set()
-    resultado: list[Mapping[str, object]] = []
+    """Evita duplicados exactos y fija un orden independiente de la entrada."""
+    unicas: dict[tuple[tuple[str, str], ...], Mapping[str, object]] = {}
     for fila in filas:
         huella = tuple(
             sorted((str(k), str(v or "")) for k, v in fila.items())
         )
-        if huella not in vistas:
-            vistas.add(huella)
-            resultado.append(fila)
-    return resultado
+        unicas.setdefault(huella, fila)
+    return [unicas[huella] for huella in sorted(unicas)]
 
 
 def agrupar_viajes(

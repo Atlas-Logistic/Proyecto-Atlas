@@ -50,9 +50,18 @@ def comando_snapshot(argumentos: argparse.Namespace) -> None:
 
 def comando_resumen(argumentos: argparse.Namespace) -> None:
     filas_masivo = _leer_csv(argumentos.csv_masivo, obligatorio=True)
-    por_archivo = {
-        fila["archivo"]: fila for fila in filas_masivo if fila.get("archivo", "").strip()
-    }
+    por_archivo: dict[str, dict[str, str]] = {}
+    for fila in filas_masivo:
+        archivo = fila.get("archivo", "").strip()
+        if not archivo:
+            continue
+        anterior = por_archivo.get(archivo)
+        transporte = fila.get("numero_transporte", "").strip()
+        transporte_anterior = (
+            anterior.get("numero_transporte", "").strip() if anterior else ""
+        )
+        if anterior is None or (not transporte_anterior and transporte):
+            por_archivo[archivo] = fila
     snapshot = Path(argumentos.snapshot)
     if not snapshot.exists():
         raise FileNotFoundError(f"No existe el snapshot requerido: {snapshot}")
@@ -82,16 +91,6 @@ def comando_resumen(argumentos: argparse.Namespace) -> None:
             resultados.append({"archivo": nombre, "encontrado": False})
             continue
         transporte = fila.get("numero_transporte", "").strip()
-        if not transporte or nombre in archivos_sin_transporte:
-            resultados.append(
-                {
-                    "archivo": nombre,
-                    "encontrado": True,
-                    "sin_transporte": True,
-                    "numero_transporte": transporte,
-                }
-            )
-            continue
         viaje_encontrado = next(
             (
                 viaje
@@ -101,6 +100,18 @@ def comando_resumen(argumentos: argparse.Namespace) -> None:
             ),
             None,
         )
+        if not transporte or (
+            nombre in archivos_sin_transporte and viaje_encontrado is None
+        ):
+            resultados.append(
+                {
+                    "archivo": nombre,
+                    "encontrado": True,
+                    "sin_transporte": True,
+                    "numero_transporte": transporte,
+                }
+            )
+            continue
         resultados.append(
             {
                 "archivo": nombre,

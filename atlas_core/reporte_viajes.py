@@ -214,15 +214,26 @@ def _construir_clientes_no_reconocidos(
         grupo["archivos"].append(fila.get("archivo", ""))
     resultado = [
         {
-            "cliente": grupo["variantes"].most_common(1)[0][0],
+            "cliente": sorted(
+                grupo["variantes"],
+                key=lambda variante: (
+                    -grupo["variantes"][variante],
+                    _clave_cliente_orden(variante),
+                    variante,
+                ),
+            )[0],
             "cantidad_apariciones": sum(grupo["variantes"].values()),
-            "archivos": " | ".join(grupo["archivos"]),
+            "archivos": " | ".join(sorted(grupo["archivos"])),
         }
         for grupo in grupos.values()
     ]
     return sorted(
         resultado, key=lambda item: (-item["cantidad_apariciones"], item["cliente"])
     )
+
+
+def _clave_cliente_orden(valor: str) -> str:
+    return normalizar_nombre_cliente(valor)
 
 
 def _normalizador_chofer_desde_catalogo(catalogo):

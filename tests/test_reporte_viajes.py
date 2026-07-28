@@ -177,6 +177,34 @@ def test_reejecucion_en_otro_destino_es_determinista_y_sin_duplicados(tmp_path):
     assert _leer_csv(salidas[0] / "viajes.csv")[0]["cantidad_documentos"] == "1"
 
 
+def test_orden_invertido_conserva_salida_determinista(tmp_path):
+    filas = [
+        _fila(archivo="b.jpg", numero_guia="000102", cliente="CLIENTE DOS"),
+        _fila(archivo="a.jpg", numero_guia="000101", cliente="CLIENTE UNO"),
+    ]
+    rutas = []
+    for indice, orden in enumerate((filas, list(reversed(filas))), start=1):
+        origen = tmp_path / f"entrada {indice}.csv"
+        salida = tmp_path / f"reporte {indice}"
+        _escribir_csv(origen, orden)
+        generar_reporte_viajes(
+            origen, salida, carpeta_catalogos=tmp_path / "cats", reloj=RELOJ
+        )
+        rutas.append(salida / "viajes.csv")
+    assert rutas[0].read_bytes() == rutas[1].read_bytes()
+
+
+def test_caracteres_csv_y_columnas_adicionales_quedan_en_evidencia(tmp_path):
+    columnas = COLUMNAS_OFICIALES + ("campo_futuro",)
+    valor = 'Ñuble, región; "línea uno"\nlínea dos'
+    fila = _fila(campo_futuro=valor, cliente=valor)
+    _, salida, _ = _generar(tmp_path, [fila], columnas)
+    viaje = _leer_csv(salida / "viajes.csv")[0]
+    evidencias = json.loads(viaje["evidencias_documentos"])
+    assert evidencias[0]["campo_futuro"] == valor
+    assert viaje["clientes"] == valor
+
+
 def test_resumen_desktop_snapshot_y_resultado(tmp_path, capsys):
     origen, reporte, _ = _generar(
         tmp_path,
@@ -203,6 +231,32 @@ def test_resumen_desktop_snapshot_y_resultado(tmp_path, capsys):
     assert len(resultado) == 2
     assert resultado[0]["numero_transporte"] == "00002001"
     assert resultado[1]["sin_transporte"] is True
+
+
+def test_resumen_prefiere_fila_posterior_con_transporte_sin_depender_del_orden(
+    tmp_path, capsys
+):
+    sin_transporte = _fila(archivo="mismo.jpg", numero_transporte="")
+    con_transporte = _fila(archivo="mismo.jpg", numero_transporte="0000349935")
+    for indice, filas in enumerate(
+        ([sin_transporte, con_transporte], [con_transporte, sin_transporte]), start=1
+    ):
+        origen, reporte, _ = _generar(
+            tmp_path, filas, nombre=f"reporte resumen {indice}"
+        )
+        snapshot = tmp_path / f"snapshot {indice}.json"
+        comando_snapshot(argparse.Namespace(csv_masivo=origen, salida=snapshot))
+        comando_resumen(
+            argparse.Namespace(
+                csv_masivo=origen,
+                reporte=reporte,
+                snapshot=snapshot,
+                archivo=["mismo.jpg"],
+            )
+        )
+        resultado = json.loads(capsys.readouterr().out)
+        assert resultado[0]["numero_transporte"] == "0000349935"
+        assert resultado[0]["sin_transporte"] is False
 
 
 def test_documentos_sin_transporte_conserva_todas_las_filas_distintas(tmp_path):

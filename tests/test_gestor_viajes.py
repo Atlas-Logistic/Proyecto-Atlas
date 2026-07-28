@@ -37,6 +37,15 @@ def test_una_guia_con_transporte_conserva_ceros_y_campos():
     assert viajes[0].clientes == ["CLIENTE ÑUBLE"]
 
 
+@pytest.mark.parametrize("transporte", ["0000349935", "  0000349935  "])
+def test_transporte_numerico_conserva_ceros_y_admite_espacios_exteriores(
+    transporte,
+):
+    viajes, pendientes = agrupar_viajes([_fila(numero_transporte=transporte)])
+    assert not pendientes
+    assert viajes[0].numero_transporte == "0000349935"
+
+
 def test_tres_guias_mismo_transporte_se_agrupan_sin_duplicar_guias():
     filas = [
         _fila(archivo="a.jpg", numero_guia="000101"),
@@ -56,7 +65,8 @@ def test_fila_exactamente_duplicada_no_duplica_documento():
 
 
 @pytest.mark.parametrize(
-    "transporte", ["", "No encontrado", "REVISAR", "ILEGIBLE", "valor inválido !"]
+    "transporte",
+    ["", "No encontrado", "REVISAR", "ILEGIBLE", "ABC0349935", "valor inválido !"],
 )
 def test_transporte_ausente_o_invalido_queda_pendiente(transporte):
     viajes, pendientes = agrupar_viajes([_fila(numero_transporte=transporte)])
@@ -105,6 +115,28 @@ def test_origen_opcional_contradictorio_activa_revision():
     assert MotivoRevision.CONFLICTO_ORIGEN in viajes[0].motivos_revision
 
 
+def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
+    filas = [
+        _fila(archivo="a.jpg", origen="ORIGEN BASE"),
+        _fila(
+            archivo="b.jpg",
+            fecha="2026-07-29",
+            chofer="OTRO CHOFER",
+            rut_chofer="9.999.999-9",
+            cliente="OTRO CLIENTE",
+            obra_destino="OTRA OBRA",
+            origen="OTRO ORIGEN",
+            patente_tracto="ZZZZ99",
+            patente_rampla="YYYY88",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.REQUIERE_REVISION
+    assert set(viaje.motivos_revision) == set(MotivoRevision)
+    assert len(viaje.a_dict()["evidencias_documentos"]) == 2
+
+
 def test_ausencia_no_copia_valor_ni_genera_conflicto():
     filas = [
         _fila(archivo="a.jpg", cliente="CLIENTE UNO"),
@@ -116,11 +148,57 @@ def test_ausencia_no_copia_valor_ni_genera_conflicto():
     assert viajes[0].documentos[1].evidencia["cliente"] == "No encontrado"
 
 
+def test_tres_guias_una_sola_con_campo_legible_no_inventa_ni_genera_conflicto():
+    filas = [
+        _fila(archivo="a.jpg", numero_guia="1", cliente="No encontrado"),
+        _fila(archivo="b.jpg", numero_guia="2", cliente="CLIENTE ÚNICO"),
+        _fila(archivo="c.jpg", numero_guia="3", cliente=""),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert viajes[0].estado == EstadoViaje.CONFIRMADO
+    assert viajes[0].clientes == ["CLIENTE ÚNICO"]
+    assert [
+        documento.evidencia["cliente"] for documento in viajes[0].documentos
+    ] == ["No encontrado", "CLIENTE ÚNICO", ""]
+
+
+def test_misma_guia_en_archivos_distintos_no_elimina_documentos():
+    filas = [_fila(archivo="a.jpg"), _fila(archivo="b.jpg")]
+    viajes, _ = agrupar_viajes(filas)
+    assert len(viajes[0].documentos) == 2
+    assert viajes[0].numeros_guia == ["000101"]
+
+
+def test_misma_guia_con_transportes_distintos_forma_viajes_separados():
+    filas = [
+        _fila(archivo="a.jpg", numero_transporte="0000349935"),
+        _fila(archivo="b.jpg", numero_transporte="0000349936"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert [viaje.numero_transporte for viaje in viajes] == [
+        "0000349935",
+        "0000349936",
+    ]
+
+
 def test_id_es_determinista_entre_reejecuciones():
     reloj = lambda: datetime(2026, 7, 28, tzinfo=timezone.utc)
     primero, _ = agrupar_viajes([_fila()], reloj=reloj)
     segundo, _ = agrupar_viajes([_fila()], reloj=reloj)
     assert primero[0].a_dict() == segundo[0].a_dict()
+
+
+def test_orden_invertido_produce_el_mismo_resultado():
+    reloj = lambda: datetime(2026, 7, 28, tzinfo=timezone.utc)
+    filas = [
+        _fila(archivo="b.jpg", numero_guia="000102"),
+        _fila(archivo="a.jpg", numero_guia="000101"),
+    ]
+    primero, _ = agrupar_viajes(filas, reloj=reloj)
+    segundo, _ = agrupar_viajes(list(reversed(filas)), reloj=reloj)
+    assert [viaje.a_dict() for viaje in primero] == [
+        viaje.a_dict() for viaje in segundo
+    ]
 
 
 def test_acentos_y_espacios_no_crean_conflicto():
