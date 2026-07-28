@@ -26,6 +26,15 @@ from atlas_core.inteligencia.proveedores import (
     ProveedorModeloSimulado,
     RespuestaProveedor,
 )
+from atlas_core.inteligencia.verificacion_destinos import (
+    CacheVerificacionesMemoria,
+    EstadoVerificacionDestino,
+    ResultadoVerificacionDestino,
+    SolicitudVerificacionDestino,
+    VerificadorDestinosOpenRouteService,
+    convertir_a_evidencia,
+    resolver_destino_con_verificacion,
+)
 
 __all__ = [
     "Contradiccion", "CorreccionHumana", "EnvioAutorizado", "EstadoCorreccion",
@@ -33,5 +42,9 @@ __all__ = [
     "PESOS_FUENTE", "POLITICAS", "PoliticaResolucion", "Propuesta",
     "ProveedorExternoSimulado", "ProveedorModeloSimulado",
     "RepositorioCorreccionesMemoria", "RespuestaProveedor", "TipoFuente",
-    "normalizar", "obtener_politica", "preparar_envio",
+    "CacheVerificacionesMemoria", "EstadoVerificacionDestino",
+    "ResultadoVerificacionDestino", "SolicitudVerificacionDestino",
+    "VerificadorDestinosOpenRouteService", "convertir_a_evidencia",
+    "resolver_destino_con_verificacion", "normalizar", "obtener_politica",
+    "preparar_envio",
 ]
