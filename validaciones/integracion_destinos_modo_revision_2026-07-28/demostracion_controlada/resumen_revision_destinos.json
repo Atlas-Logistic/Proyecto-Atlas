@@ -1,0 +1,33 @@
+{
+  "ambiguos": 8,
+  "casos_requieren_decision_humana": 12,
+  "confirmaciones_propuestas": 1,
+  "consultas_externas_consumidas": 0,
+  "consultas_no_autorizadas": 0,
+  "contradicciones": 1,
+  "coordenadas_propuestas": 0,
+  "destinos_evaluados": 12,
+  "destinos_leidos": 12,
+  "entrada_intacta": true,
+  "errores": 0,
+  "estados": {
+    "COINCIDENCIA_PARCIAL": 2,
+    "CONFIRMACION_PROPUESTA": 1,
+    "CONSULTA_NO_AUTORIZADA": 0,
+    "CONTRADICCION_COMUNA": 1,
+    "CONTRADICCION_DIRECCION": 0,
+    "CONTRADICCION_NUMERO": 0,
+    "CONTRADICCION_REGION": 0,
+    "COORDENADAS_PROPUESTAS": 0,
+    "ERROR_PROVEEDOR": 0,
+    "REQUIERE_REVISION": 0,
+    "RESPUESTA_AMBIGUA": 8,
+    "SIN_CAMBIOS": 0,
+    "SIN_RESULTADOS": 0
+  },
+  "hash_entrada_antes": "acfbbe90b97194b67e5af0d266ee19f26a75b34bf25dc4479f6fc3a3361dd147",
+  "hash_entrada_despues": "acfbbe90b97194b67e5af0d266ee19f26a75b34bf25dc4479f6fc3a3361dd147",
+  "resultados_desde_cache": 12,
+  "sin_cambios": 0,
+  "sin_resultados": 0
+}

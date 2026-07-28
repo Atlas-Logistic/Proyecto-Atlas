@@ -32,6 +32,18 @@ from atlas_core.inteligencia.politicas import (
     obtener_politica,
 )
 from atlas_core.inteligencia.privacidad import EnvioAutorizado, preparar_envio
+from atlas_core.inteligencia.revision_destinos import (
+    ConfiguracionRevisionDestinos,
+    DecisionHumanaDestino,
+    DestinoEntrada,
+    EstadoRevisionDestino,
+    RegistroRevisionDestino,
+    ResultadoLoteRevision,
+    cargar_destinos,
+    ejecutar_archivo,
+    guardar_bandeja,
+    procesar_destinos,
+)
 from atlas_core.inteligencia.proveedores import (
     ProveedorExternoSimulado,
     ProveedorModeloSimulado,
@@ -61,4 +73,8 @@ __all__ = [
     "EstadoCoincidenciaDireccion", "ResultadoNormalizacionGeografica",
     "comparar_direccion", "comunas_equivalentes", "normalizar_region_chile",
     "regiones_equivalentes", "separar_direccion",
+    "ConfiguracionRevisionDestinos", "DecisionHumanaDestino", "DestinoEntrada",
+    "EstadoRevisionDestino", "RegistroRevisionDestino", "ResultadoLoteRevision",
+    "cargar_destinos", "ejecutar_archivo", "guardar_bandeja",
+    "procesar_destinos",
 ]
