@@ -37,6 +37,10 @@ class ProveedorRutasSimulado:
     version: str = "1"
     llamadas_geocodificacion: int = 0
     llamadas_ruta: int = 0
+    perfiles_usados: list[str] = field(default_factory=list)
+    pares_coordenadas: list[tuple[Coordenadas, Coordenadas]] = field(
+        default_factory=list
+    )
 
     def geocodificar(self, direccion: str) -> ResultadoGeocodificacion:
         self.llamadas_geocodificacion += 1
@@ -53,4 +57,6 @@ class ProveedorRutasSimulado:
         self, origen: Coordenadas, destino: Coordenadas, perfil: str
     ) -> ResultadoRuta:
         self.llamadas_ruta += 1
+        self.perfiles_usados.append(perfil)
+        self.pares_coordenadas.append((origen, destino))
         return self.resultado_ruta
