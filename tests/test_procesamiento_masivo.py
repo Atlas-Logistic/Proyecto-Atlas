@@ -228,6 +228,145 @@ def test_procesar_archivo_contaminado_sin_candidato_conserva_valor_anterior(tmp_
     assert procesar_archivo(ruta)["chofer"] == "TOTAL EXENTO JUAN PEREZ"
 
 
+def _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo, bloques=None):
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[])
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=datos)
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "cargar_catalogo_json",
+        Mock(return_value=catalogo),
+    )
+    if bloques is not None:
+        monkeypatch.setattr(
+            procesamiento_masivo,
+            "leer_bloques_imagen",
+            Mock(return_value=bloques),
+        )
+
+
+def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE ORIGINAL",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "ENRIQUE RANOS",
+        "RUT del chofer": "No encontrado",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    _preparar_procesamiento_fuzzy(
+        monkeypatch,
+        datos,
+        {"1": {"nombre": "ENRIQUE RAMOS", "activo": True}},
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["chofer"] == "ENRIQUE RAMOS"
+    assert resultado["numero_guia"] == "463309"
+    assert resultado["numero_transporte"] == "0000123456"
+    assert resultado["cliente"] == "CLIENTE ORIGINAL"
+    assert resultado["obra_destino"] == "DESTINO ORIGINAL"
+    assert resultado["patente_tracto"] == "ABCD12"
+    assert resultado["patente_rampla"] == "EFGH34"
+
+
+def test_fuzzy_se_aplica_al_chofer_del_fallback_y_conserva_revision(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE ORIGINAL",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "No encontrado",
+    }
+    bloques = [
+        BloqueOCR("RETIRA", ((10, 10), (70, 10), (70, 30), (10, 30)), 0.9),
+        BloqueOCR(
+            "ENRIQUE RANOS", ((120, 10), (250, 10), (250, 30), (120, 30)), 0.8
+        ),
+        BloqueOCR("PATENTE", ((10, 40), (80, 40), (80, 60), (10, 60)), 0.9),
+    ]
+    _preparar_procesamiento_fuzzy(
+        monkeypatch,
+        datos,
+        {"1": {"nombre": "ENRIQUE RAMOS", "activo": True}},
+        bloques,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["chofer"] == "ENRIQUE RAMOS"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_fuzzy_sin_coincidencia_conserva_nombre_y_revision_actual(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE ORIGINAL",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "NOMBRE ORIGINAL",
+    }
+    _preparar_procesamiento_fuzzy(
+        monkeypatch,
+        datos,
+        {"1": {"nombre": "PERSONA DIFERENTE", "activo": True}},
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["chofer"] == "NOMBRE ORIGINAL"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE ORIGINAL",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "ENRIQUE RANOS",
+        "RUT del chofer": "11.111.111-1",
+    }
+    catalogo = {
+        "111111111": {"nombre": "OTRO NOMBRE", "activo": True},
+        "222222222": {"nombre": "ENRIQUE RAMOS", "activo": True},
+    }
+    _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo)
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["chofer"] == "ENRIQUE RANOS"
+    assert resultado["rut_chofer"] == "11.111.111-1"
+    assert set(resultado) == {
+        "numero_guia",
+        "numero_transporte",
+        "fecha",
+        "chofer",
+        "rut_chofer",
+        "cliente",
+        "obra_destino",
+        "patente_tracto",
+        "patente_rampla",
+        "descripcion_material",
+        "tipo_carga",
+        "indicador_revision",
+    }
+
+
 def test_descubre_extensiones_permitidas_en_subcarpetas_y_ordena(tmp_path):
     for nombre in ("z.TIFF", "sub/b.jpeg", "sub/a.PNG", "foto.webp", "x.tif"):
         _crear_archivo(tmp_path / nombre)

@@ -11,6 +11,11 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from atlas_core.catalogos import (
+    buscar_chofer_por_rut,
+    cargar_catalogo_json,
+    resolver_nombre_chofer_difuso,
+)
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
 from atlas_core.extractor import (
@@ -35,6 +40,7 @@ logger = logging.getLogger(__name__)
 EXTENSIONES_PERMITIDAS = frozenset(
     {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 )
+RUTA_CATALOGO_CHOFERES = Path("catalogos/choferes.json")
 
 COLUMNAS = [
     "archivo",
@@ -367,6 +373,26 @@ def procesar_archivo(
                         logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
+
+    nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()
+    if nombre_chofer not in {"", "No encontrado"}:
+        catalogo_choferes = cargar_catalogo_json(RUTA_CATALOGO_CHOFERES)
+        rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
+        if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is None:
+            decision_fuzzy = resolver_nombre_chofer_difuso(
+                catalogo_choferes, nombre_chofer
+            )
+            if decision_fuzzy.estado == "COINCIDENCIA_SEGURA":
+                datos["chofer"] = decision_fuzzy.valor_resultado
+            logger.info(
+                "fuzzy-matching-catalogo-choferes-v1 estado=%s similitud=%s",
+                decision_fuzzy.estado,
+                (
+                    f"{decision_fuzzy.similitud:.3f}"
+                    if decision_fuzzy.similitud is not None
+                    else "n/a"
+                ),
+            )
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
         try:

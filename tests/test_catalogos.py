@@ -9,6 +9,7 @@ from atlas_core.catalogos import (
     enriquecer_datos_con_catalogos,
     normalizar_patente,
     normalizar_rut,
+    resolver_nombre_chofer_difuso,
 )
 from atlas_core.extractor import extraer_datos
 
@@ -76,6 +77,66 @@ def test_busquedas_desconocidas_devuelven_none(tmp_path):
     assert buscar_destino_por_codigo({}, "SIN_DESTINO") is None
     assert buscar_chofer_por_rut({}, "2-K") is None
     assert buscar_vehiculo_por_patente({}, "ZZZZ99") is None
+
+
+def test_fuzzy_chofer_coincidencia_exacta_no_degrada_nombre():
+    catalogo = {"1": {"nombre": "ÁNGELA SOTO", "activo": True}}
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "ÁNGELA SOTO")
+
+    assert resultado.estado == "SIN_CAMBIO"
+    assert resultado.valor_resultado == "ÁNGELA SOTO"
+    assert resultado.similitud == 1.0
+
+
+def test_fuzzy_chofer_corrige_error_ocr_leve_sobre_umbral():
+    catalogo = {"1": {"nombre": "ENRIQUE RAMOS", "activo": True}}
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "ENRIQUE RANOS")
+
+    assert resultado.estado == "COINCIDENCIA_SEGURA"
+    assert resultado.valor_resultado == "ENRIQUE RAMOS"
+    assert resultado.similitud >= 0.85
+
+
+def test_fuzzy_chofer_debajo_umbral_conserva_original():
+    catalogo = {"1": {"nombre": "ENRIQUE RAMOS", "activo": True}}
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "MARTA SILVA")
+
+    assert resultado.estado == "DEBAJO_UMBRAL"
+    assert resultado.valor_resultado == "MARTA SILVA"
+
+
+def test_fuzzy_chofer_ambiguo_se_abstiene():
+    catalogo = {
+        "1": {"nombre": "MARIO SOTO", "activo": True},
+        "2": {"nombre": "MARIA SOTO", "activo": True},
+    }
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "MARI SOTO")
+
+    assert resultado.estado == "AMBIGUO"
+    assert resultado.valor_resultado == "MARI SOTO"
+
+
+def test_fuzzy_chofer_inactivo_no_puede_usarse():
+    catalogo = {"1": {"nombre": "ENRIQUE RAMOS", "activo": False}}
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "ENRIQUE RANOS")
+
+    assert resultado.estado == "CATALOGO_VACIO"
+    assert resultado.valor_resultado == "ENRIQUE RANOS"
+
+
+def test_fuzzy_chofer_catalogo_vacio_o_no_disponible(tmp_path):
+    vacio = resolver_nombre_chofer_difuso({}, "NOMBRE ORIGINAL")
+    no_disponible = resolver_nombre_chofer_difuso(
+        tmp_path / "no_existe.json", "NOMBRE ORIGINAL"
+    )
+
+    assert vacio.estado == no_disponible.estado == "CATALOGO_VACIO"
+    assert vacio.valor_resultado == no_disponible.valor_resultado == "NOMBRE ORIGINAL"
 
 
 def test_enriquecer_datos_con_catalogos(tmp_path):

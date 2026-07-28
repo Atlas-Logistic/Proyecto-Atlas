@@ -1,8 +1,10 @@
 """Carga y consulta de catálogos maestros locales."""
 
+import difflib
 import json
 import re
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -97,6 +99,85 @@ def buscar_vehiculo_por_patente(
 ) -> dict[str, Any] | None:
     """Busca un vehículo por su patente y devuelve su registro completo."""
     return _buscar_registro(catalogo, patente, normalizar_patente)
+
+
+UMBRAL_NOMBRE_CHOFER_DIFUSO = 0.85
+MARGEN_MINIMO_NOMBRE_CHOFER_DIFUSO = 0.05
+
+
+@dataclass(frozen=True)
+class ResultadoCoincidenciaChofer:
+    """Decisión trazable y sin efectos laterales del matching de chofer."""
+
+    estado: str
+    valor_original: str
+    valor_resultado: str
+    similitud: float | None = None
+
+
+def _normalizar_nombre_chofer(texto: str) -> str:
+    texto_mayuscula = " ".join(str(texto or "").strip().upper().split())
+    sin_acentos = unicodedata.normalize("NFKD", texto_mayuscula)
+    return "".join(
+        caracter for caracter in sin_acentos
+        if not unicodedata.combining(caracter)
+    )
+
+
+def _similitud_nombre_chofer(a: str, b: str) -> float:
+    a_normalizado = _normalizar_nombre_chofer(a)
+    b_normalizado = _normalizar_nombre_chofer(b)
+    if not a_normalizado or not b_normalizado:
+        return 0.0
+    return difflib.SequenceMatcher(None, a_normalizado, b_normalizado).ratio()
+
+
+def resolver_nombre_chofer_difuso(
+    catalogo: FuenteCatalogo,
+    nombre: str,
+    *,
+    umbral: float = UMBRAL_NOMBRE_CHOFER_DIFUSO,
+    margen_ambiguedad: float = MARGEN_MINIMO_NOMBRE_CHOFER_DIFUSO,
+) -> ResultadoCoincidenciaChofer:
+    """Resuelve un nombre solo contra choferes activos y se abstiene ante duda."""
+    original = str(nombre or "").strip()
+    if not original or original == "No encontrado":
+        return ResultadoCoincidenciaChofer("SIN_CAMBIO", original, original)
+
+    candidatos: list[tuple[float, str]] = []
+    for registro in _obtener_catalogo(catalogo).values():
+        if not isinstance(registro, dict) or registro.get("activo", True) is not True:
+            continue
+        nombre_catalogo = str(registro.get("nombre", "")).strip()
+        if nombre_catalogo:
+            candidatos.append(
+                (_similitud_nombre_chofer(original, nombre_catalogo), nombre_catalogo)
+            )
+
+    if not candidatos:
+        return ResultadoCoincidenciaChofer("CATALOGO_VACIO", original, original)
+
+    candidatos.sort(key=lambda candidato: (-candidato[0], candidato[1]))
+    mejor_similitud, mejor_nombre = candidatos[0]
+    if mejor_similitud < umbral:
+        return ResultadoCoincidenciaChofer(
+            "DEBAJO_UMBRAL", original, original, mejor_similitud
+        )
+
+    if len(candidatos) > 1:
+        segunda_similitud = candidatos[1][0]
+        if mejor_similitud - segunda_similitud < margen_ambiguedad:
+            return ResultadoCoincidenciaChofer(
+                "AMBIGUO", original, original, mejor_similitud
+            )
+
+    if _normalizar_nombre_chofer(original) == _normalizar_nombre_chofer(mejor_nombre):
+        return ResultadoCoincidenciaChofer(
+            "SIN_CAMBIO", original, original, mejor_similitud
+        )
+    return ResultadoCoincidenciaChofer(
+        "COINCIDENCIA_SEGURA", original, mejor_nombre, mejor_similitud
+    )
 
 
 def _texto_sin_acentos(texto: str) -> str:
