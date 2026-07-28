@@ -51,6 +51,19 @@ def test_limite_de_cuota(codigo):
     assert proveedor.geocodificar("DIRECCION DEMO").estado == EstadoRuta.LIMITE_CUOTA
 
 
+@pytest.mark.parametrize("codigo", [400, 401, 404, 500])
+def test_errores_http_se_controlan(codigo):
+    proveedor = OpenRouteService(
+        api_key="SECRETO_DE_PRUEBA", transporte=transporte_json({}, codigo)
+    )
+    assert (
+        proveedor.calcular_ruta(
+            Coordenadas(-70, -33), Coordenadas(-70.1, -33.1), "driving-hgv"
+        ).estado
+        == EstadoRuta.PROVEEDOR_NO_DISPONIBLE
+    )
+
+
 def test_respuesta_invalida():
     proveedor = OpenRouteService(
         api_key="SECRETO_DE_PRUEBA",
@@ -81,6 +94,27 @@ def test_calculo_correcto_convierte_unidades_y_envia_lon_lat():
     assert cuerpo["coordinates"][0] == [-20, -10]
     assert resultado.distancia_km == 12.5
     assert resultado.duracion_estimada_min == 24
+
+
+@pytest.mark.parametrize(
+    "datos",
+    [
+        {},
+        {"routes": []},
+        {"routes": [{}]},
+        {"routes": [{"summary": {}}]},
+        {"routes": [{"summary": {"distance": 1000}}]},
+        {"routes": [{"summary": {"duration": 60}}]},
+    ],
+)
+def test_respuesta_de_ruta_incompleta_se_rechaza(datos):
+    proveedor = OpenRouteService(
+        api_key="SECRETO_DE_PRUEBA", transporte=transporte_json(datos)
+    )
+    resultado = proveedor.calcular_ruta(
+        Coordenadas(-70, -33), Coordenadas(-70.1, -33.1), "driving-hgv"
+    )
+    assert resultado.estado == EstadoRuta.RESPUESTA_INVALIDA
 
 
 def test_clave_no_aparece_en_resultados_ni_errores():

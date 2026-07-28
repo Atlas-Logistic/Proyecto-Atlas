@@ -18,3 +18,29 @@ __all__ = [
     "ResultadoGeocodificacion", "ResultadoRuta", "ResultadoServicioRutas",
     "ProveedorRutas", "ProveedorRutasSimulado", "RepositorioRutas", "ServicioRutas",
 ]
+"""API pública del módulo aislado de rutas."""
+
+from atlas_core.rutas.calculo import (
+    PERFIL_PREDETERMINADO,
+    PLANTAS_OPERACIONALES,
+    CalculadorRutas,
+    EstadoCalculoRuta,
+    ResultadoCalculoRuta,
+    SolicitudCalculoRuta,
+)
+from atlas_core.rutas.modelos import Coordenadas
+from atlas_core.rutas.openrouteservice import OpenRouteService
+from atlas_core.rutas.proveedor import ProveedorRutas, ProveedorRutasSimulado
+
+__all__ = [
+    "PERFIL_PREDETERMINADO",
+    "PLANTAS_OPERACIONALES",
+    "CalculadorRutas",
+    "Coordenadas",
+    "EstadoCalculoRuta",
+    "OpenRouteService",
+    "ProveedorRutas",
+    "ProveedorRutasSimulado",
+    "ResultadoCalculoRuta",
+    "SolicitudCalculoRuta",
+]

@@ -1,5 +1,9 @@
 # Módulo aislado de Rutas — Atlas
 
+> El contrato sin I/O para coordenadas confirmadas se documenta en
+> `INTEGRACION_RUTAS_OPENROUTE_OFICIAL.md`. Este documento conserva además el
+> diseño previo de geocodificación, confirmación y repositorio.
+
 ## Alcance
 
 El módulo calcula y conserva rutas entre Plantas y Destinos confirmados sin depender de OCR, extractor, procesamiento masivo, viajes o reportes. La fase actual está preparada para pruebas simuladas: la CLI no habilita OpenRouteService real.
