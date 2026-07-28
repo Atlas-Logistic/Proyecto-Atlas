@@ -77,6 +77,7 @@ def test_csv_oficial_15_columnas_genera_contrato_desktop(tmp_path):
     assert list(viaje) == list(COLUMNAS_VIAJES)
     assert viaje["numero_transporte"] == "00002001"
     assert viaje["numeros_guia"] == "000101"
+    assert viaje["fecha"] == "28-07-2026"
 
 
 def test_csv_historico_21_preserva_columnas_en_pendientes(tmp_path):

@@ -133,7 +133,9 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
     viajes, _ = agrupar_viajes(filas)
     viaje = viajes[0]
     assert viaje.estado == EstadoViaje.REQUIERE_REVISION
-    assert set(viaje.motivos_revision) == set(MotivoRevision)
+    assert set(viaje.motivos_revision) == set(MotivoRevision) - {
+        MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP
+    }
     assert len(viaje.a_dict()["evidencias_documentos"]) == 2
 
 
@@ -186,6 +188,31 @@ def test_id_es_determinista_entre_reejecuciones():
     primero, _ = agrupar_viajes([_fila()], reloj=reloj)
     segundo, _ = agrupar_viajes([_fila()], reloj=reloj)
     assert primero[0].a_dict() == segundo[0].a_dict()
+
+
+def test_fecha_se_normaliza_al_contrato_desktop_sin_falso_conflicto():
+    filas = [
+        _fila(archivo="a.jpg", fecha="2026-07-28"),
+        _fila(archivo="b.jpg", fecha="28/07/2026"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert viajes[0].fecha == "28-07-2026"
+    assert viajes[0].estado == EstadoViaje.CONFIRMADO
+    assert [d.evidencia["fecha"] for d in viajes[0].documentos] == [
+        "2026-07-28",
+        "28/07/2026",
+    ]
+
+
+def test_fecha_no_compatible_no_se_publica_como_confirmada():
+    viajes, _ = agrupar_viajes([_fila(fecha="fecha ambigua")])
+    assert viajes[0].fecha == ""
+    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
+    assert (
+        MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP
+        in viajes[0].motivos_revision
+    )
+    assert viajes[0].documentos[0].evidencia["fecha"] == "fecha ambigua"
 
 
 def test_orden_invertido_produce_el_mismo_resultado():

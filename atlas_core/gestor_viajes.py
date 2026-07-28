@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Callable, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
@@ -36,6 +36,25 @@ def _transporte_valido(valor: object) -> bool:
     return _valor_presente(texto) and _PATRON_TRANSPORTE.fullmatch(texto) is not None
 
 
+def _fecha_para_desktop(valor: object) -> str | None:
+    texto = str(valor or "").strip()
+    if not _valor_presente(texto):
+        return None
+    dmy = re.fullmatch(r"(\d{1,2})[-/](\d{1,2})[-/](\d{4})", texto)
+    iso = re.fullmatch(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", texto)
+    if dmy:
+        dia, mes, anio = map(int, dmy.groups())
+    elif iso:
+        anio, mes, dia = map(int, iso.groups())
+    else:
+        return None
+    try:
+        fecha = date(anio, mes, dia)
+    except ValueError:
+        return None
+    return fecha.strftime("%d-%m-%Y")
+
+
 def _valores_unicos(valores: Iterable[str]) -> list[str]:
     unicos: dict[str, str] = {}
     for valor in valores:
@@ -54,6 +73,7 @@ class EstadoViaje(str, Enum):
 
 
 class MotivoRevision(str, Enum):
+    FECHA_NO_COMPATIBLE_DESKTOP = "FECHA_NO_COMPATIBLE_DESKTOP"
     CONFLICTO_FECHA = "CONFLICTO_FECHA"
     CONFLICTO_CHOFER = "CONFLICTO_CHOFER"
     CONFLICTO_RUT_CHOFER = "CONFLICTO_RUT_CHOFER"
@@ -224,8 +244,10 @@ def agrupar_viajes(
             )
             for fila in filas_grupo
         ]
+        fechas_originales = [str(f.get("fecha", "")).strip() for f in filas_grupo]
+        fechas_desktop = [_fecha_para_desktop(valor) for valor in fechas_originales]
         campos_conflicto = (
-            (MotivoRevision.CONFLICTO_FECHA, [str(f.get("fecha", "")) for f in filas_grupo]),
+            (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop]),
             (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos]),
             (MotivoRevision.CONFLICTO_RUT_CHOFER, [d.rut_chofer for d in documentos]),
             (MotivoRevision.CONFLICTO_CLIENTE, [d.cliente for d in documentos]),
@@ -238,8 +260,12 @@ def agrupar_viajes(
             motivo for motivo, valores in campos_conflicto
             if not _valores_compatibles(valores)
         ]
-        fechas = [str(f.get("fecha", "")).strip() for f in filas_grupo]
-        fecha = next((valor for valor in fechas if _valor_presente(valor)), "")
+        if any(
+            _valor_presente(original) and normalizada is None
+            for original, normalizada in zip(fechas_originales, fechas_desktop)
+        ):
+            motivos.append(MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP)
+        fecha = next((valor for valor in fechas_desktop if valor), "")
         identificador = (
             generador_id()
             if generador_id
