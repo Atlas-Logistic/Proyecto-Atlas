@@ -1,0 +1,1818 @@
+[
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 001",
+    "id_caso": "DEST-001",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.001,
+              -10.001
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 001, COMUNA SINTETICA 2, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 002, Torre Á",
+    "id_caso": "DEST-002",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.002,
+              -10.002
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Pasaje Ñandú Sintético Nº 002, Torre Á, COMUNA SINTETICA 3, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 003",
+    "id_caso": "DEST-003",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.003,
+              -10.003
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 003, COMUNA SINTETICA 4, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 004",
+    "id_caso": "DEST-004",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.004,
+              -10.004
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 004, COMUNA SINTETICA 5, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 005",
+    "id_caso": "DEST-005",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.005,
+              -10.005
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 005, COMUNA SINTETICA 1, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 006",
+    "id_caso": "DEST-006",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.006,
+              -10.006
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 006, COMUNA SINTETICA 2, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 007, Torre Á",
+    "id_caso": "DEST-007",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.007,
+              -10.007
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Pasaje Ñandú Sintético Nº 007, Torre Á, COMUNA SINTETICA 3, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 008",
+    "id_caso": "DEST-008",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.008,
+              -10.008
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 008, COMUNA SINTETICA 4, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 009",
+    "id_caso": "DEST-009",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.009,
+              -10.009
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 009, COMUNA SINTETICA 5, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 010",
+    "id_caso": "DEST-010",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.01,
+              -10.01
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 010, COMUNA SINTETICA 1, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 011",
+    "id_caso": "DEST-011",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.011,
+              -10.011
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 011, COMUNA SINTETICA 2, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 012",
+    "id_caso": "DEST-012",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.012,
+              -10.012
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 012, COMUNA SINTETICA 3, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 013",
+    "id_caso": "DEST-013",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.013,
+              -10.013
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 013, COMUNA SINTETICA 4, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 014, Torre Á",
+    "id_caso": "DEST-014",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.014,
+              -10.014
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 014, COMUNA SINTETICA 5, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 015",
+    "id_caso": "DEST-015",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.015,
+              -10.015
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 015, COMUNA SINTETICA 1, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 016",
+    "id_caso": "DEST-016",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.016,
+              -10.016
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 016, COMUNA SINTETICA 2, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 017",
+    "id_caso": "DEST-017",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.017,
+              -10.017
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 017, COMUNA SINTETICA 3, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 018",
+    "id_caso": "DEST-018",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.018,
+              -10.018
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 018, COMUNA SINTETICA 4, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 019, Torre Á",
+    "id_caso": "DEST-019",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.019,
+              -10.019
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 019, COMUNA SINTETICA 5, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 020",
+    "id_caso": "DEST-020",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.02,
+              -10.02
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 020, COMUNA SINTETICA 1, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 021",
+    "id_caso": "DEST-021",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.021,
+              -10.021
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 021, COMUNA SINTETICA 2, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 022",
+    "id_caso": "DEST-022",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.022,
+              -10.022
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 022, COMUNA SINTETICA 3, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 023",
+    "id_caso": "DEST-023",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.023,
+              -10.023
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 023, COMUNA SINTETICA 4, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 024",
+    "id_caso": "DEST-024",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.024,
+              -10.024
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "AVENIDA APROXIMADA 024, COMUNA SINTETICA 5, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 025",
+    "id_caso": "DEST-025",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.025,
+              -10.025
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 025, COMUNA SINTETICA 1, REGION SINTETICA 2",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 026",
+    "id_caso": "DEST-026",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.026,
+              -10.026
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 026, COMUNA SINTETICA 2, REGION SINTETICA 3",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 027",
+    "id_caso": "DEST-027",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.027,
+              -10.027
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 027, COMUNA SINTETICA 3, REGION SINTETICA 1",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 028, Torre Á",
+    "id_caso": "DEST-028",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.028,
+              -10.028
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Pasaje Ñandú Sintético Nº 028, Torre Á, COMUNA SINTETICA 4, REGION SINTETICA 2",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 029",
+    "id_caso": "DEST-029",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.029,
+              -10.029
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 029, COMUNA SINTETICA 5, REGION SINTETICA 3",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 030",
+    "id_caso": "DEST-030",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.03,
+              -10.03
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 030, COMUNA SINTETICA 1, REGION SINTETICA 1",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 031",
+    "id_caso": "DEST-031",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.031,
+              -10.031
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 031, COMUNA SINTETICA 2, REGION SINTETICA 2",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 032",
+    "id_caso": "DEST-032",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.032,
+              -10.032
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 032, COMUNA SINTETICA 3, REGION SINTETICA 3",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 033",
+    "id_caso": "DEST-033",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.033,
+              -10.033
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 033, COMUNA SINTETICA 4, REGION SINTETICA 1",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 034",
+    "id_caso": "DEST-034",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.034,
+              -10.034
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 034, COMUNA SINTETICA 5, REGION SINTETICA 2",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 035",
+    "id_caso": "DEST-035",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.035,
+              -10.035
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 035, COMUNA SINTETICA 1, REGION SINTETICA 3",
+            "locality": "COMUNA CONTRARIA",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 036",
+    "id_caso": "DEST-036",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.036,
+              -10.036
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 036, COMUNA SINTETICA 2, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 037, Torre Á",
+    "id_caso": "DEST-037",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.037,
+              -10.037
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Pasaje Ñandú Sintético Nº 037, Torre Á, COMUNA SINTETICA 3, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 038",
+    "id_caso": "DEST-038",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.038,
+              -10.038
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 038, COMUNA SINTETICA 4, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 039",
+    "id_caso": "DEST-039",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.039,
+              -10.039
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 039, COMUNA SINTETICA 5, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 040",
+    "id_caso": "DEST-040",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.04,
+              -10.04
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 040, COMUNA SINTETICA 1, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 041",
+    "id_caso": "DEST-041",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.041,
+              -10.041
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 041, COMUNA SINTETICA 2, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 042",
+    "id_caso": "DEST-042",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.042,
+              -10.042
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 042, COMUNA SINTETICA 3, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 043",
+    "id_caso": "DEST-043",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.043,
+              -10.043
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 043, COMUNA SINTETICA 4, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 044",
+    "id_caso": "DEST-044",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.044,
+              -10.044
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 044, COMUNA SINTETICA 5, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION CONTRARIA"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 045",
+    "id_caso": "DEST-045",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.045,
+              -10.045
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 045, COMUNA SINTETICA 1, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 1"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.145,
+              -10.145
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 45, COMUNA SINTETICA 1, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 046, Torre Á",
+    "id_caso": "DEST-046",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.046,
+              -10.046
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Pasaje Ñandú Sintético Nº 046, Torre Á, COMUNA SINTETICA 2, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 2"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.146,
+              -10.146
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 46, COMUNA SINTETICA 2, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 047",
+    "id_caso": "DEST-047",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.047,
+              -10.047
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 047, COMUNA SINTETICA 3, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 3"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.147,
+              -10.147
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 47, COMUNA SINTETICA 3, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 048",
+    "id_caso": "DEST-048",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.048,
+              -10.048
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 048, COMUNA SINTETICA 4, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 1"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.148,
+              -10.148
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 48, COMUNA SINTETICA 4, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 049",
+    "id_caso": "DEST-049",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.049,
+              -10.049
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 049, COMUNA SINTETICA 5, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 2"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.149,
+              -10.149
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 49, COMUNA SINTETICA 5, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 050",
+    "id_caso": "DEST-050",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.05,
+              -10.05
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 050, COMUNA SINTETICA 1, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 3"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.15,
+              -10.15
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 50, COMUNA SINTETICA 1, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 051",
+    "id_caso": "DEST-051",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.051,
+              -10.051
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 051, COMUNA SINTETICA 2, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 1"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.151,
+              -10.151
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 51, COMUNA SINTETICA 2, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 052",
+    "id_caso": "DEST-052",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.052,
+              -10.052
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 052, COMUNA SINTETICA 3, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 2"
+          }
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -20.152,
+              -10.152
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Alternativa Sintética 52, COMUNA SINTETICA 3, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 053",
+    "id_caso": "DEST-053",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": []
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 054",
+    "id_caso": "DEST-054",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": []
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 055",
+    "id_caso": "DEST-055",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": []
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 056",
+    "id_caso": "DEST-056",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": []
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 057",
+    "id_caso": "DEST-057",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": []
+    }
+  },
+  {
+    "autorizado": true,
+    "caso_especial": true,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Pasaje Ñandú Sintético Nº 058, Torre Á",
+    "id_caso": "DEST-058",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": []
+    }
+  },
+  {
+    "autorizado": false,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 059",
+    "id_caso": "DEST-059",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.059,
+              -10.059
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 059, COMUNA SINTETICA 5, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": false,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 1",
+    "direccion_entrada": "Calle Sintética 060",
+    "id_caso": "DEST-060",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.06,
+              -10.06
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 060, COMUNA SINTETICA 1, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 1",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": false,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 2",
+    "direccion_entrada": "Calle Sintética 061",
+    "id_caso": "DEST-061",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.061,
+              -10.061
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 061, COMUNA SINTETICA 2, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 2",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": false,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 3",
+    "direccion_entrada": "Calle Sintética 062",
+    "id_caso": "DEST-062",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 3",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.062,
+              -10.062
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 062, COMUNA SINTETICA 3, REGION SINTETICA 3",
+            "locality": "COMUNA SINTETICA 3",
+            "region": "REGION SINTETICA 3"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": false,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 4",
+    "direccion_entrada": "Calle Sintética 063",
+    "id_caso": "DEST-063",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 1",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.063,
+              -10.063
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 063, COMUNA SINTETICA 4, REGION SINTETICA 1",
+            "locality": "COMUNA SINTETICA 4",
+            "region": "REGION SINTETICA 1"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "autorizado": false,
+    "caso_especial": false,
+    "comuna_esperada": "COMUNA SINTETICA 5",
+    "direccion_entrada": "Calle Sintética 064",
+    "id_caso": "DEST-064",
+    "pais": "PAIS SINTETICO",
+    "region_esperada": "REGION SINTETICA 2",
+    "respuesta_simulada": {
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -20.064,
+              -10.064
+            ]
+          },
+          "properties": {
+            "confidence": 0.92,
+            "country": "PAIS SINTETICO",
+            "label": "Calle Sintética 064, COMUNA SINTETICA 5, REGION SINTETICA 2",
+            "locality": "COMUNA SINTETICA 5",
+            "region": "REGION SINTETICA 2"
+          }
+        }
+      ]
+    }
+  }
+]

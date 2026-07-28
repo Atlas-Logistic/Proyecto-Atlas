@@ -1,0 +1,65 @@
+﻿id_caso,direccion_entrada,comuna_esperada,region_esperada,clase_gt,resultado_esperado,requiere_revision_esperado,coordenadas_aceptables,motivo_gt
+DEST-001,Calle Sintética 001,COMUNA SINTETICA 2,REGION SINTETICA 2,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-002,"Pasaje Ñandú Sintético Nº 002, Torre Á",COMUNA SINTETICA 3,REGION SINTETICA 3,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-003,Calle Sintética 003,COMUNA SINTETICA 4,REGION SINTETICA 1,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-004,Calle Sintética 004,COMUNA SINTETICA 5,REGION SINTETICA 2,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-005,Calle Sintética 005,COMUNA SINTETICA 1,REGION SINTETICA 3,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-006,Calle Sintética 006,COMUNA SINTETICA 2,REGION SINTETICA 1,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-007,"Pasaje Ñandú Sintético Nº 007, Torre Á",COMUNA SINTETICA 3,REGION SINTETICA 2,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-008,Calle Sintética 008,COMUNA SINTETICA 4,REGION SINTETICA 3,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-009,Calle Sintética 009,COMUNA SINTETICA 5,REGION SINTETICA 1,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-010,Calle Sintética 010,COMUNA SINTETICA 1,REGION SINTETICA 2,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-011,Calle Sintética 011,COMUNA SINTETICA 2,REGION SINTETICA 3,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-012,Calle Sintética 012,COMUNA SINTETICA 3,REGION SINTETICA 1,VERIFICABLE_EXACTA,VERIFICADA,False,True,"Dirección, comuna y región coinciden."
+DEST-013,Calle Sintética 013,COMUNA SINTETICA 4,REGION SINTETICA 2,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-014,"Pasaje Ñandú Sintético Nº 014, Torre Á",COMUNA SINTETICA 5,REGION SINTETICA 3,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-015,Calle Sintética 015,COMUNA SINTETICA 1,REGION SINTETICA 1,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-016,Calle Sintética 016,COMUNA SINTETICA 2,REGION SINTETICA 2,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-017,Calle Sintética 017,COMUNA SINTETICA 3,REGION SINTETICA 3,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-018,Calle Sintética 018,COMUNA SINTETICA 4,REGION SINTETICA 1,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-019,"Pasaje Ñandú Sintético Nº 019, Torre Á",COMUNA SINTETICA 5,REGION SINTETICA 2,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-020,Calle Sintética 020,COMUNA SINTETICA 1,REGION SINTETICA 3,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-021,Calle Sintética 021,COMUNA SINTETICA 2,REGION SINTETICA 1,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-022,Calle Sintética 022,COMUNA SINTETICA 3,REGION SINTETICA 2,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-023,Calle Sintética 023,COMUNA SINTETICA 4,REGION SINTETICA 3,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-024,Calle Sintética 024,COMUNA SINTETICA 5,REGION SINTETICA 1,VERIFICABLE_APROXIMADA,COINCIDENCIA_PARCIAL,True,False,"La geografía coincide, pero la dirección es aproximada."
+DEST-025,Calle Sintética 025,COMUNA SINTETICA 1,REGION SINTETICA 2,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-026,Calle Sintética 026,COMUNA SINTETICA 2,REGION SINTETICA 3,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-027,Calle Sintética 027,COMUNA SINTETICA 3,REGION SINTETICA 1,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-028,"Pasaje Ñandú Sintético Nº 028, Torre Á",COMUNA SINTETICA 4,REGION SINTETICA 2,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-029,Calle Sintética 029,COMUNA SINTETICA 5,REGION SINTETICA 3,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-030,Calle Sintética 030,COMUNA SINTETICA 1,REGION SINTETICA 1,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-031,Calle Sintética 031,COMUNA SINTETICA 2,REGION SINTETICA 2,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-032,Calle Sintética 032,COMUNA SINTETICA 3,REGION SINTETICA 3,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-033,Calle Sintética 033,COMUNA SINTETICA 4,REGION SINTETICA 1,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-034,Calle Sintética 034,COMUNA SINTETICA 5,REGION SINTETICA 2,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-035,Calle Sintética 035,COMUNA SINTETICA 1,REGION SINTETICA 3,CONTRADICCION_COMUNA,CONTRADICCION_COMUNA,True,False,La comuna externa contradice la esperada.
+DEST-036,Calle Sintética 036,COMUNA SINTETICA 2,REGION SINTETICA 1,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-037,"Pasaje Ñandú Sintético Nº 037, Torre Á",COMUNA SINTETICA 3,REGION SINTETICA 2,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-038,Calle Sintética 038,COMUNA SINTETICA 4,REGION SINTETICA 3,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-039,Calle Sintética 039,COMUNA SINTETICA 5,REGION SINTETICA 1,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-040,Calle Sintética 040,COMUNA SINTETICA 1,REGION SINTETICA 2,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-041,Calle Sintética 041,COMUNA SINTETICA 2,REGION SINTETICA 3,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-042,Calle Sintética 042,COMUNA SINTETICA 3,REGION SINTETICA 1,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-043,Calle Sintética 043,COMUNA SINTETICA 4,REGION SINTETICA 2,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-044,Calle Sintética 044,COMUNA SINTETICA 5,REGION SINTETICA 3,CONTRADICCION_REGION,CONTRADICCION_REGION,True,False,La región externa contradice la esperada.
+DEST-045,Calle Sintética 045,COMUNA SINTETICA 1,REGION SINTETICA 1,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-046,"Pasaje Ñandú Sintético Nº 046, Torre Á",COMUNA SINTETICA 2,REGION SINTETICA 2,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-047,Calle Sintética 047,COMUNA SINTETICA 3,REGION SINTETICA 3,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-048,Calle Sintética 048,COMUNA SINTETICA 4,REGION SINTETICA 1,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-049,Calle Sintética 049,COMUNA SINTETICA 5,REGION SINTETICA 2,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-050,Calle Sintética 050,COMUNA SINTETICA 1,REGION SINTETICA 3,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-051,Calle Sintética 051,COMUNA SINTETICA 2,REGION SINTETICA 1,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-052,Calle Sintética 052,COMUNA SINTETICA 3,REGION SINTETICA 2,AMBIGUA,REVISAR,True,False,Existen varios candidatos y se requiere abstención.
+DEST-053,Calle Sintética 053,COMUNA SINTETICA 4,REGION SINTETICA 3,SIN_RESULTADOS,SIN_RESULTADOS,True,False,El proveedor no devuelve candidatos.
+DEST-054,Calle Sintética 054,COMUNA SINTETICA 5,REGION SINTETICA 1,SIN_RESULTADOS,SIN_RESULTADOS,True,False,El proveedor no devuelve candidatos.
+DEST-055,Calle Sintética 055,COMUNA SINTETICA 1,REGION SINTETICA 2,SIN_RESULTADOS,SIN_RESULTADOS,True,False,El proveedor no devuelve candidatos.
+DEST-056,Calle Sintética 056,COMUNA SINTETICA 2,REGION SINTETICA 3,SIN_RESULTADOS,SIN_RESULTADOS,True,False,El proveedor no devuelve candidatos.
+DEST-057,Calle Sintética 057,COMUNA SINTETICA 3,REGION SINTETICA 1,SIN_RESULTADOS,SIN_RESULTADOS,True,False,El proveedor no devuelve candidatos.
+DEST-058,"Pasaje Ñandú Sintético Nº 058, Torre Á",COMUNA SINTETICA 4,REGION SINTETICA 2,SIN_RESULTADOS,SIN_RESULTADOS,True,False,El proveedor no devuelve candidatos.
+DEST-059,Calle Sintética 059,COMUNA SINTETICA 5,REGION SINTETICA 3,DATOS_INSUFICIENTES,DATOS_INSUFICIENTES,True,False,La consulta no está autorizada.
+DEST-060,Calle Sintética 060,COMUNA SINTETICA 1,REGION SINTETICA 1,DATOS_INSUFICIENTES,DATOS_INSUFICIENTES,True,False,La consulta no está autorizada.
+DEST-061,Calle Sintética 061,COMUNA SINTETICA 2,REGION SINTETICA 2,DATOS_INSUFICIENTES,DATOS_INSUFICIENTES,True,False,La consulta no está autorizada.
+DEST-062,Calle Sintética 062,COMUNA SINTETICA 3,REGION SINTETICA 3,DATOS_INSUFICIENTES,DATOS_INSUFICIENTES,True,False,La consulta no está autorizada.
+DEST-063,Calle Sintética 063,COMUNA SINTETICA 4,REGION SINTETICA 1,DATOS_INSUFICIENTES,DATOS_INSUFICIENTES,True,False,La consulta no está autorizada.
+DEST-064,Calle Sintética 064,COMUNA SINTETICA 5,REGION SINTETICA 2,DATOS_INSUFICIENTES,DATOS_INSUFICIENTES,True,False,La consulta no está autorizada.
