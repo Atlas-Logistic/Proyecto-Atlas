@@ -1,0 +1,14 @@
+{
+  "README.md": "defc7d4b46628bcf29e96ac2b74664fb88e37c36ac20397efa0dfb3a1139d9fc",
+  "comparacion.csv": "7e7c8e665aa831f8fa32b880cc387639f56fea244061a48b8e24a22e0cc01903",
+  "diagnostico.md": "4600e5ae69cedf60b0198fbc81e04d08f979554f0542481637a5f1f34d781b75",
+  "ejecucion_externa.json": "2fd55b70a8f5ff47fed637605bb25795fa255ac9f1b635ec6289e4759866434e",
+  "ground_truth_congelado.csv": "78d92a8ee73b4a1300166469e7162e24ccac8f743a09bf5a72d7a5e7d715a5be",
+  "hashes_preconsulta.json": "b9f4ef5934d209a43cbdfdb2d672e27f918a6bad2076e73be5c5bf3807b6381e",
+  "manifiesto_definitivo.json": "19b8881b2a28264d376a7e632012c075b79876121bff6d85c6ed6ad99b3fd315",
+  "metricas.json": "969685a8985970fd6c7696f5ef4c69fb69e2275b2b46b34b4ad855a88bac93a5",
+  "recomendacion.txt": "844f0d9fe9402ee7635a9197cbc22b8ab6f6c260412ec75d4e4ddead1d633d1b",
+  "respuestas_ors_congeladas.json": "b6ce7465cab279b37e53ebdafd7cf21d8fc0941d5cbc680d7c4f91f1b1094e2e",
+  "resultados_desde_cache.csv": "c6571bc294166d775e9ef73763cd966052140e8bfb0030126ba0137be72356c9",
+  "resultados_primera_ejecucion.csv": "18054519ea03be9a5e4aee45e2a50691564604c3772e756e4031d9955f3c0085"
+}

@@ -1,0 +1,62 @@
+{
+  "casos": 12,
+  "clasificaciones": {
+    "ACIERTO_ABSTENCION": 11,
+    "FALSO_NEGATIVO": 1
+  },
+  "cobertura_confirmaciones": [
+    0,
+    12
+  ],
+  "coincidencia_comuna": [
+    3,
+    4
+  ],
+  "coincidencia_region": [
+    4,
+    4
+  ],
+  "consumo_cuota": [
+    12,
+    12
+  ],
+  "coordenadas_aceptadas": [
+    0,
+    12
+  ],
+  "coordenadas_rechazadas": [
+    4,
+    12
+  ],
+  "determinismo": {
+    "casos_desde_cache": 12,
+    "consultas_nuevas_en_repeticion": 0,
+    "resultados_semanticos_identicos": true
+  },
+  "falsos_negativos": [
+    1,
+    12
+  ],
+  "falsos_positivos": [
+    0,
+    12
+  ],
+  "originales_conservados": [
+    12,
+    12
+  ],
+  "precision_confirmaciones": [
+    0,
+    0
+  ],
+  "tasa_abstencion": [
+    12,
+    12
+  ],
+  "tiempo_medio_consulta_ms": 3254.949,
+  "tiempo_medio_reproduccion_ms": 0.188,
+  "trazabilidad_completa": [
+    12,
+    12
+  ]
+}

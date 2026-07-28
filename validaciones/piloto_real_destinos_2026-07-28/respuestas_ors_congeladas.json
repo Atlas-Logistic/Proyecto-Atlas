@@ -1,0 +1,1381 @@
+[
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.746685,
+        -33.316549,
+        -70.728051,
+        -33.305376
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.746685,
+            -33.316549,
+            -70.728051,
+            -33.305376
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.737609,
+              -33.310665
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Chacabuco",
+            "county_a": "CB",
+            "county_gid": "whosonfirst:county:102063173",
+            "gid": "openstreetmap:street:polyline:25836018",
+            "id": "polyline:25836018",
+            "label": "Santa Isabel, Lampa, RM, Chile",
+            "layer": "street",
+            "locality": "Lampa",
+            "locality_gid": "whosonfirst:locality:102017535",
+            "match_type": "fallback",
+            "name": "Santa Isabel",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25836018",
+            "street": "Santa Isabel"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "lampa",
+            "country": "chile",
+            "county": "región metropolitana",
+            "housenumber": "585",
+            "street": "santa isabel"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "SANTA ISABEL 585, LAMPA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268009640,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 1
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -73.118463,
+        -41.008561,
+        -66.105337,
+        18.309314
+      ],
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -66.105337,
+              18.309314
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "point",
+            "confidence": 1,
+            "continent": "North America",
+            "continent_gid": "whosonfirst:continent:102191575",
+            "county": "Guaynabo",
+            "county_a": "GB",
+            "county_gid": "whosonfirst:county:102080365",
+            "dependency": "Puerto Rico",
+            "dependency_a": "PRI",
+            "dependency_gid": "whosonfirst:dependency:85633729",
+            "gid": "openstreetmap:address:way/405200706",
+            "housenumber": "15",
+            "id": "way/405200706",
+            "label": "15 Camino Sector Las Flores, Puerto Rico",
+            "layer": "address",
+            "match_type": "exact",
+            "name": "15 Camino Sector Las Flores",
+            "source": "openstreetmap",
+            "source_id": "way/405200706",
+            "street": "Camino Sector Las Flores"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -73.118463,
+            -41.008561,
+            -73.098704,
+            -41.000711
+          ],
+          "geometry": {
+            "coordinates": [
+              -73.104421,
+              -41.007288
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Llanquihue",
+            "county_a": "LL",
+            "county_gid": "whosonfirst:county:102063135",
+            "gid": "openstreetmap:street:polyline:26552573",
+            "id": "polyline:26552573",
+            "label": "Sector las Parcelas, LG, Chile",
+            "layer": "street",
+            "match_type": "fallback",
+            "name": "Sector las Parcelas",
+            "region": "De Los Lagos",
+            "region_a": "LG",
+            "region_gid": "whosonfirst:region:85682233",
+            "source": "openstreetmap",
+            "source_id": "polyline:26552573",
+            "street": "Sector las Parcelas"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "admin": "ESPERANZA, PADRE HURTADO, REGIÓN METROPOLITANA, CHILE",
+            "country": "CHILE",
+            "housenumber": "55",
+            "locality": "PADRE HURTADO",
+            "region": "METROPOLITANA",
+            "street": "SECTOR LAS",
+            "subject": "55 SECTOR LAS"
+          },
+          "parser": "pelias",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "LAS VIOLETAS 55 SECTOR LAS ESPERANZA, PADRE HURTADO, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268014616,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 2
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -97.822071,
+        -33.329344,
+        -70.50351,
+        22.28846
+      ],
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -97.822071,
+              22.28846
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "point",
+            "confidence": 1,
+            "continent": "North America",
+            "continent_gid": "whosonfirst:continent:102191575",
+            "country": "Mexico",
+            "country_a": "MEX",
+            "country_gid": "whosonfirst:country:85633293",
+            "county": "Ciudad Madero",
+            "county_a": "CM",
+            "county_gid": "whosonfirst:county:102078947",
+            "gid": "openaddresses:address:mx/countrywide-addresses-country:8439c20871e8288a",
+            "housenumber": "700",
+            "id": "mx/countrywide-addresses-country:8439c20871e8288a",
+            "label": "700 Calle Circuito Interior, Ciudad Madero, TAM, Mexico",
+            "layer": "address",
+            "locality": "Ciudad Madero",
+            "locality_gid": "whosonfirst:locality:102001085",
+            "match_type": "exact",
+            "name": "700 Calle Circuito Interior",
+            "region": "Tamaulipas",
+            "region_a": "TAM",
+            "region_gid": "whosonfirst:region:85686695",
+            "source": "openaddresses",
+            "source_id": "mx/countrywide-addresses-country:8439c20871e8288a",
+            "street": "Calle Circuito Interior"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -70.503522,
+            -33.329344,
+            -70.50351,
+            -33.328827
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.503516,
+              -33.329086
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:25847379",
+            "id": "polyline:25847379",
+            "label": "Calle Interior, Santiago, RM, Chile",
+            "layer": "street",
+            "locality": "Santiago",
+            "locality_gid": "whosonfirst:locality:102016915",
+            "match_type": "fallback",
+            "name": "Calle Interior",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25847379",
+            "street": "Calle Interior"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "admin": "FUNDO LA MONTAÑA, LAMPA, REGIÓN METROPOLITANA, CHILE",
+            "country": "CHILE",
+            "housenumber": "700",
+            "locality": "LAMPA",
+            "region": "METROPOLITANA",
+            "street": "CALLE INTERIOR",
+            "subject": "700 CALLE INTERIOR"
+          },
+          "parser": "pelias",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "CALLE INTERIOR 700, FUNDO LA MONTAÑA, LAMPA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268019655,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 3
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.716583,
+        -33.524321,
+        -70.714383,
+        -33.523515
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.716583,
+            -33.524321,
+            -70.714383,
+            -33.523515
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.715483,
+              -33.523918
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:25901512",
+            "id": "polyline:25901512",
+            "label": "Vista Clara, Santiago, RM, Chile",
+            "layer": "street",
+            "locality": "Santiago",
+            "locality_gid": "whosonfirst:locality:102016915",
+            "match_type": "fallback",
+            "name": "Vista Clara",
+            "neighbourhood": "Cerrillos",
+            "neighbourhood_gid": "whosonfirst:neighbourhood:85765889",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25901512",
+            "street": "Vista Clara"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "región metropolitana",
+            "country": "chile",
+            "housenumber": "2351",
+            "neighbourhood": "cerrillos",
+            "street": "vista clara"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "VISTA CLARA 2351, CERRILLOS, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268024540,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 4
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.716449,
+        -33.371751,
+        -70.699876,
+        -33.327571
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.716449,
+            -33.371751,
+            -70.715885,
+            -33.370118
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.716168,
+              -33.370934
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:25845132",
+            "id": "polyline:25845132",
+            "label": "Galvarino, Quilicura, RM, Chile",
+            "layer": "street",
+            "locality": "Quilicura",
+            "locality_gid": "whosonfirst:locality:102017087",
+            "match_type": "fallback",
+            "name": "Galvarino",
+            "neighbourhood": "Carrascal",
+            "neighbourhood_gid": "whosonfirst:neighbourhood:85764391",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25845132",
+            "street": "Galvarino"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -70.707924,
+            -33.345764,
+            -70.699876,
+            -33.327571
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.703626,
+              -33.336595
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:25840144",
+            "id": "polyline:25840144",
+            "label": "Galvarino, Quilicura, RM, Chile",
+            "layer": "street",
+            "locality": "Quilicura",
+            "locality_gid": "whosonfirst:locality:102017087",
+            "match_type": "fallback",
+            "name": "Galvarino",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25840144",
+            "street": "Galvarino"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "quilicura",
+            "country": "chile",
+            "county": "región metropolitana",
+            "housenumber": "8501",
+            "street": "galvarino"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "GALVARINO 8501, QUILICURA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268029420,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 5
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.686583,
+        -33.402772,
+        -70.686339,
+        -33.402287
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.686583,
+            -33.402772,
+            -70.686339,
+            -33.402287
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.686461,
+              -33.402531
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:30430396",
+            "id": "polyline:30430396",
+            "label": "Camino Lo Ruiz, Renca, RM, Chile",
+            "layer": "street",
+            "locality": "Renca",
+            "locality_gid": "whosonfirst:locality:102017035",
+            "match_type": "fallback",
+            "name": "Camino Lo Ruiz",
+            "neighbourhood": "El Mirador",
+            "neighbourhood_gid": "whosonfirst:neighbourhood:85764403",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:30430396",
+            "street": "Camino Lo Ruiz"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "renca región metropolitana",
+            "country": "chile",
+            "housenumber": "2901",
+            "street": "camino lo ruiz"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "CAMINO LO RUIZ 2901, RENCA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268034244,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 6
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -71.200523,
+        -32.736056,
+        -70.3354,
+        -27.37193
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.336773,
+            -27.380023,
+            -70.3354,
+            -27.37193
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.336107,
+              -27.374955
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Copiapó",
+            "county_a": "CO",
+            "county_gid": "whosonfirst:county:102063143",
+            "gid": "openstreetmap:street:polyline:30350011",
+            "id": "polyline:30350011",
+            "label": "Panamericana Norte, Copiapó, AT, Chile",
+            "layer": "street",
+            "locality": "Copiapó",
+            "locality_gid": "whosonfirst:locality:102017751",
+            "match_type": "fallback",
+            "name": "Panamericana Norte",
+            "region": "De Atacama",
+            "region_a": "AT",
+            "region_gid": "whosonfirst:region:85682139",
+            "source": "openstreetmap",
+            "source_id": "polyline:30350011",
+            "street": "Panamericana Norte"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -71.200523,
+            -32.736056,
+            -71.199835,
+            -32.734032
+          ],
+          "geometry": {
+            "coordinates": [
+              -71.200137,
+              -32.735017
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Quillota",
+            "county_a": "QT",
+            "county_gid": "whosonfirst:county:102063103",
+            "gid": "openstreetmap:street:polyline:25742216",
+            "id": "polyline:25742216",
+            "label": "Panamericana Norte, Nogales, VS, Chile",
+            "layer": "street",
+            "locality": "Nogales",
+            "locality_gid": "whosonfirst:locality:102017321",
+            "match_type": "fallback",
+            "name": "Panamericana Norte",
+            "region": "De Valparaiso",
+            "region_a": "VS",
+            "region_gid": "whosonfirst:region:85682143",
+            "source": "openstreetmap",
+            "source_id": "polyline:25742216",
+            "street": "Panamericana Norte"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "admin": "LAMPA, REGIÓN METROPOLITANA, CHILE",
+            "country": "CHILE",
+            "locality": "LAMPA",
+            "postcode": "22650",
+            "region": "METROPOLITANA",
+            "subject": "PANAMERICANA NORTE"
+          },
+          "parser": "pelias",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "PANAMERICANA NORTE 22650, LAMPA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268035438,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 7
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.83607,
+        -33.45542,
+        -70.63607,
+        -33.25542
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.7958984375,
+            -33.3962344783,
+            -70.6822026509,
+            -33.3167583029
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.728749,
+              -33.365227
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.6,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "whosonfirst:locality:102017087",
+            "id": "102017087",
+            "label": "Quilicura, RM, Chile",
+            "layer": "locality",
+            "locality": "Quilicura",
+            "locality_gid": "whosonfirst:locality:102017087",
+            "match_type": "fallback",
+            "name": "Quilicura",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "whosonfirst",
+            "source_id": "102017087"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -70.83607,
+            -33.45542,
+            -70.63607,
+            -33.25542
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.73607,
+              -33.35542
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.6,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "whosonfirst:localadmin:890517991",
+            "id": "890517991",
+            "label": "Quilicura, RM, Chile",
+            "layer": "localadmin",
+            "localadmin": "Quilicura",
+            "localadmin_gid": "whosonfirst:localadmin:890517991",
+            "match_type": "fallback",
+            "name": "Quilicura",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "whosonfirst",
+            "source_id": "890517991"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "quilicura",
+            "country": "chile",
+            "county": "región metropolitana",
+            "housenumber": "482",
+            "street": "av cordillera"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "AV CORDILLERA 482, QUILICURA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268036257,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 8
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.711949,
+        -33.619214,
+        -70.682198,
+        -33.569724
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.711949,
+            -33.570608,
+            -70.69935,
+            -33.569724
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.705649,
+              -33.570174
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 1,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Maipo",
+            "county_a": "MI",
+            "county_gid": "whosonfirst:county:102063119",
+            "gid": "openstreetmap:street:polyline:25888366",
+            "id": "polyline:25888366",
+            "label": "Camino Los Pinos, San Bernardo, RM, Chile",
+            "layer": "street",
+            "locality": "San Bernardo",
+            "locality_gid": "whosonfirst:locality:102016991",
+            "match_type": "exact",
+            "name": "Camino Los Pinos",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25888366",
+            "street": "Camino Los Pinos"
+          },
+          "type": "Feature"
+        },
+        {
+          "geometry": {
+            "coordinates": [
+              -70.682198,
+              -33.619214
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "point",
+            "addendum": {
+              "osm": {
+                "operator": "3"
+              }
+            },
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Maipo",
+            "county_a": "MI",
+            "county_gid": "whosonfirst:county:102063119",
+            "gid": "openstreetmap:address:node/906399162",
+            "housenumber": "399",
+            "id": "node/906399162",
+            "label": "399 Camino Los Morros, San Bernardo, RM, Chile",
+            "layer": "address",
+            "locality": "San Bernardo",
+            "locality_gid": "whosonfirst:locality:102016991",
+            "match_type": "fallback",
+            "name": "399 Camino Los Morros",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "node/906399162",
+            "street": "Camino Los Morros"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "admin": "PINOS , SAN BERNARDO, REGIÓN METROPOLITANA, CHILE",
+            "country": "CHILE",
+            "locality": "SAN BERNARDO",
+            "postcode": "3394",
+            "region": "METROPOLITANA",
+            "street": "CAMINO LOS",
+            "subject": "CAMINO LOS"
+          },
+          "parser": "pelias",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "CAMINO LOS PINOS 3394, SAN BERNARDO, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268037208,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 9
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.854356,
+        -33.942395,
+        -70.654356,
+        -33.742395
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.7792356226,
+            -33.9222240641,
+            -70.6587566069,
+            -33.773721126
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.730303,
+              -33.803869
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.6,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Maipo",
+            "county_a": "MI",
+            "county_gid": "whosonfirst:county:102063119",
+            "gid": "whosonfirst:locality:102017281",
+            "id": "102017281",
+            "label": "Paine, RM, Chile",
+            "layer": "locality",
+            "locality": "Paine",
+            "locality_gid": "whosonfirst:locality:102017281",
+            "match_type": "fallback",
+            "name": "Paine",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "whosonfirst",
+            "source_id": "102017281"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -70.854356,
+            -33.942395,
+            -70.654356,
+            -33.742395
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.754356,
+              -33.842395
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.6,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Maipo",
+            "county_a": "MI",
+            "county_gid": "whosonfirst:county:102063119",
+            "gid": "whosonfirst:localadmin:890518107",
+            "id": "890518107",
+            "label": "Paine, RM, Chile",
+            "layer": "localadmin",
+            "localadmin": "Paine",
+            "localadmin_gid": "whosonfirst:localadmin:890518107",
+            "match_type": "fallback",
+            "name": "Paine",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "whosonfirst",
+            "source_id": "890518107"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "paine región metropolitana",
+            "country": "chile",
+            "street": "ruta 5 km 40 s/n"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "RUTA 5 KM 40 S/N, PAINE, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268038023,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 10
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.685226,
+        -33.401595,
+        -70.685226,
+        -33.401595
+      ],
+      "features": [
+        {
+          "geometry": {
+            "coordinates": [
+              -70.685226,
+              -33.401595
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "point",
+            "confidence": 1,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:address:way/446863402",
+            "housenumber": "3070",
+            "id": "way/446863402",
+            "label": "3070 La Union, Renca, RM, Chile",
+            "layer": "address",
+            "locality": "Renca",
+            "locality_gid": "whosonfirst:locality:102017035",
+            "match_type": "exact",
+            "name": "3070 La Union",
+            "neighbourhood": "El Mirador",
+            "neighbourhood_gid": "whosonfirst:neighbourhood:85764403",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "way/446863402",
+            "street": "La Union"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "renca región metropolitana",
+            "country": "chile",
+            "housenumber": "3070",
+            "street": "la union"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "LA UNION 3070, RENCA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268038824,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 11
+  },
+  {
+    "codigo_http": 200,
+    "cuerpo": {
+      "bbox": [
+        -70.7157,
+        -33.370892,
+        -70.709319,
+        -33.345307
+      ],
+      "features": [
+        {
+          "bbox": [
+            -70.709873,
+            -33.345565,
+            -70.709319,
+            -33.345307
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.709596,
+              -33.345436
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:30430407",
+            "id": "polyline:30430407",
+            "label": "Lautaro, Quilicura, RM, Chile",
+            "layer": "street",
+            "locality": "Quilicura",
+            "locality_gid": "whosonfirst:locality:102017087",
+            "match_type": "fallback",
+            "name": "Lautaro",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:30430407",
+            "street": "Lautaro"
+          },
+          "type": "Feature"
+        },
+        {
+          "bbox": [
+            -70.7157,
+            -33.370892,
+            -70.715444,
+            -33.370141
+          ],
+          "geometry": {
+            "coordinates": [
+              -70.715572,
+              -33.370517
+            ],
+            "type": "Point"
+          },
+          "properties": {
+            "accuracy": "centroid",
+            "confidence": 0.8,
+            "continent": "South America",
+            "continent_gid": "whosonfirst:continent:102191577",
+            "country": "Chile",
+            "country_a": "CHL",
+            "country_gid": "whosonfirst:country:85633057",
+            "county": "Santiago",
+            "county_a": "SG",
+            "county_gid": "whosonfirst:county:102063117",
+            "gid": "openstreetmap:street:polyline:25845120",
+            "id": "polyline:25845120",
+            "label": "Lautaro, Quilicura, RM, Chile",
+            "layer": "street",
+            "locality": "Quilicura",
+            "locality_gid": "whosonfirst:locality:102017087",
+            "match_type": "fallback",
+            "name": "Lautaro",
+            "neighbourhood": "Carrascal",
+            "neighbourhood_gid": "whosonfirst:neighbourhood:85764391",
+            "region": "Metropolitana",
+            "region_a": "RM",
+            "region_gid": "whosonfirst:region:85682207",
+            "source": "openstreetmap",
+            "source_id": "polyline:25845120",
+            "street": "Lautaro"
+          },
+          "type": "Feature"
+        }
+      ],
+      "geocoding": {
+        "attribution": "https://openrouteservice.org/terms-of-service/#attribution-geocode",
+        "engine": {
+          "author": "Mapzen",
+          "name": "Pelias",
+          "version": "1.0"
+        },
+        "query": {
+          "lang": {
+            "defaulted": true,
+            "iso6391": "en",
+            "iso6393": "eng",
+            "name": "English",
+            "via": "default"
+          },
+          "parsed_text": {
+            "city": "quilicura",
+            "country": "chile",
+            "county": "región metropolitana",
+            "housenumber": "9202",
+            "street": "lautaro"
+          },
+          "parser": "libpostal",
+          "private": false,
+          "querySize": 20,
+          "size": 2,
+          "text": "LAUTARO 9202, QUILICURA, REGIÓN METROPOLITANA, CHILE"
+        },
+        "timestamp": 1785268043640,
+        "version": "0.2"
+      },
+      "type": "FeatureCollection"
+    },
+    "orden": 12
+  }
+]

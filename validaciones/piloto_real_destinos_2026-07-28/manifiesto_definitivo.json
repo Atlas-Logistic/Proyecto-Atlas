@@ -1,0 +1,52 @@
+{
+  "aceptacion_automatica_coordenadas": false,
+  "campos_enviados": [
+    "direccion_original",
+    "comuna_esperada",
+    "region_esperada",
+    "pais"
+  ],
+  "campos_excluidos": [
+    "cliente",
+    "rut",
+    "chofer",
+    "patente",
+    "guia",
+    "transporte",
+    "imagen"
+  ],
+  "cantidad_casos": 12,
+  "commit_base": "7beb9c6a8569d1af207300fff8dd84e81a2cd9c2",
+  "destino_ids": [
+    "51b4cd04-0c4c-41f1-9fd2-3da535148c24",
+    "7ca60aef-ae2e-4149-b2e5-408ff5e6da95",
+    "aefa98d8-62b5-4538-b8d2-4e16f6ac5b15",
+    "34b754bc-4d2f-4f3f-85e5-98d907106262",
+    "32d67fec-2b5d-4daf-8205-b78719bc4ab7",
+    "7df58eec-eff3-4a6a-bdfa-34509ee8d2a2",
+    "73b2f2a2-12a4-4a56-b9a4-3932adf8025c",
+    "b1332634-4904-4a1e-a0c2-f73e44beec6e",
+    "c64c55e3-2fd2-445f-ab0f-6546531034f3",
+    "f2cef3d4-c1a5-48e8-8713-067222aaada6",
+    "aa4e2bcb-c580-4e90-85ca-bd475514caed",
+    "09011c4c-15c6-425a-a825-ede7313b9e78"
+  ],
+  "fecha": "2026-07-28",
+  "maximo_consultas_unicas": 12,
+  "modifica_catalogos": false,
+  "orden_casos": [
+    "REAL-001",
+    "REAL-002",
+    "REAL-003",
+    "REAL-004",
+    "REAL-005",
+    "REAL-006",
+    "REAL-007",
+    "REAL-008",
+    "REAL-009",
+    "REAL-010",
+    "REAL-011",
+    "REAL-012"
+  ],
+  "rama": "piloto-real-controlado-destinos"
+}
