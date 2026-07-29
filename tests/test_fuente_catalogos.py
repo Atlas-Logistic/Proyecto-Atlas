@@ -84,3 +84,22 @@ def test_alias_inactivo_no_contamina_y_duda_preserva_original():
     assert inactivo.valor_resultado == "OCR EXACTO"
     assert ambiguo.estado == "AMBIGUO"
     assert ambiguo.valor_resultado == "MARI SOTO"
+
+
+def test_caso_autorizado_pairicio_patritio_depende_de_alias_explicito():
+    catalogo = {
+        "ID-ESTABLE": {
+            "nombre": "PATRICIO VILLAGRA MUÑOZ", "activo": True,
+        },
+        "ID-PENDIENTE": {
+            "nombre": "PATRICIO VILLAGRA", "activo": True,
+            "aliases": ["PAIRICIO VILLAGRA"],
+        },
+    }
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "PAIRICIO VILLAGRA")
+
+    assert resultado.valor_resultado == "PATRICIO VILLAGRA"
+    assert resultado.similitud == 1.0
+    assert resultado.segunda_similitud == 0.8
+    assert resultado.margen == pytest.approx(0.2)

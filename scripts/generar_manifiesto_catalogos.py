@@ -5,13 +5,95 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from atlas_core.catalogos import _normalizar_nombre_chofer
 from atlas_core.fuente_catalogos import ARCHIVOS_REQUERIDOS, validar_fuente_catalogos
 
 
 def sha256(ruta: Path) -> str:
     return hashlib.sha256(ruta.read_bytes()).hexdigest()
+
+
+def metricas_choferes(choferes: dict[str, dict[str, object]]) -> dict[str, int]:
+    """Separa alias almacenados de canónicos y variantes usadas por fuzzy."""
+    registros = list(choferes.values())
+    activos = [r for r in registros if r.get("activo") is True]
+    aliases = [
+        str(alias).strip()
+        for registro in registros
+        for alias in registro.get("aliases", [])
+        if str(alias).strip()
+    ]
+    aliases_activos = [
+        str(alias).strip()
+        for registro in activos
+        for alias in registro.get("aliases", [])
+        if str(alias).strip()
+    ]
+    canonicos_activos = {
+        _normalizar_nombre_chofer(str(registro.get("nombre", "")))
+        for registro in activos
+        if str(registro.get("nombre", "")).strip()
+    }
+    aliases_activos_normalizados = {
+        _normalizar_nombre_chofer(alias) for alias in aliases_activos
+    }
+    variantes_activas = [
+        str(variante).strip()
+        for registro in activos
+        for variante in [registro.get("nombre", ""), *registro.get("aliases", [])]
+        if str(variante).strip()
+    ]
+    valores_almacenados = [
+        str(registro.get("nombre", "")).strip() for registro in registros
+        if str(registro.get("nombre", "")).strip()
+    ] + aliases
+    return {
+        "choferes_total": len(registros),
+        "choferes_activos": len(activos),
+        "choferes_inactivos": len(registros) - len(activos),
+        "nombres_canonicos": sum(
+            bool(str(registro.get("nombre", "")).strip()) for registro in registros
+        ),
+        "aliases_explicitos_total": len(aliases),
+        "aliases_explicitos_unicos_literal": len(set(aliases)),
+        "aliases_explicitos_unicos_normalizados": len(
+            {_normalizar_nombre_chofer(alias) for alias in aliases}
+        ),
+        "aliases_explicitos_colisiones_normalizadas": len(aliases) - len(
+            {_normalizar_nombre_chofer(alias) for alias in aliases}
+        ),
+        "aliases_normalizados_que_coinciden_con_canonico_activo": len(
+            aliases_activos_normalizados & canonicos_activos
+        ),
+        "aliases_explicitos_inactivos": len(aliases) - len(aliases_activos),
+        "aliases_explicitos_vacios": sum(
+            not str(alias).strip()
+            for registro in registros for alias in registro.get("aliases", [])
+        ),
+        "registros_sin_alias_explicitos": sum(
+            not any(str(alias).strip() for alias in registro.get("aliases", []))
+            for registro in registros
+        ),
+        "variantes_normalizadas_generadas": sum(
+            _normalizar_nombre_chofer(valor) != valor.upper()
+            for valor in valores_almacenados
+        ),
+        "variantes_fuzzy_activas_total": len(variantes_activas),
+        "variantes_fuzzy_activas_unicas_normalizadas": len(
+            {_normalizar_nombre_chofer(valor) for valor in variantes_activas}
+        ),
+        "aliases_utilizables_fuzzy_unicos_normalizados": len(
+            aliases_activos_normalizados - canonicos_activos
+        ),
+        "identidades_chofer_pendientes": sum(
+            str(identidad).upper().startswith("PENDIENTE") for identidad in choferes
+        ),
+    }
 
 
 def crear_manifiesto(carpeta: Path) -> dict[str, object]:
@@ -28,7 +110,7 @@ def crear_manifiesto(carpeta: Path) -> dict[str, object]:
     }
     ruts_empresas = set(empresas)
     return {
-        "esquema": "atlas-catalogos-manifiesto-v1",
+        "esquema": "atlas-catalogos-manifiesto-v2",
         "fecha": "2026-07-29",
         "archivos": [
             {
@@ -44,10 +126,7 @@ def crear_manifiesto(carpeta: Path) -> dict[str, object]:
             for nombre in sorted(ARCHIVOS_REQUERIDOS)
         ],
         "conteos": {
-            "choferes_total": len(choferes),
-            "choferes_activos": sum(r.get("activo") is True for r in choferes.values()),
-            "choferes_inactivos": sum(r.get("activo") is False for r in choferes.values()),
-            "aliases_choferes": sum(len(r.get("aliases", [])) for r in choferes.values()),
+            **metricas_choferes(choferes),
             "clientes_confirmados_activos": sum(
                 r.get("estado_calidad") == "CONFIRMADO"
                 and r.get("estado_vigencia") == "ACTIVO" for r in clientes
@@ -73,6 +152,10 @@ def crear_manifiesto(carpeta: Path) -> dict[str, object]:
         },
         "reglas": {
             "choferes": "solo activos; umbral 0.85; margen 0.05; original ante duda",
+            "contrato_alias_choferes": (
+                "alias explicito = valor no vacio almacenado en aliases; nombres "
+                "canonicos y variantes normalizadas se cuentan por separado"
+            ),
             "clientes": "solo CONFIRMADO y ACTIVO como candidatos productivos",
             "empresas": "relacionar por RUT; no mezclar sin identidad estable",
             "destinos": "activo no implica confirmado; Ground Truth no se promueve",
