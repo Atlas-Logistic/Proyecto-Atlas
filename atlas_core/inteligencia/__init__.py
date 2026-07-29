@@ -5,6 +5,18 @@ from atlas_core.inteligencia.correcciones import (
     EstadoCorreccion,
     RepositorioCorreccionesMemoria,
 )
+from atlas_core.inteligencia.contrato_multicampo import (
+    AlternativaResolucion,
+    CalidadObservacion,
+    ContradiccionResolucion,
+    Disponibilidad,
+    EntidadCanonica,
+    EstadoResolucion,
+    EvidenciaResolucion,
+    GravedadContradiccion,
+    ResultadoResolucion,
+    ValorObservado,
+)
 from atlas_core.inteligencia.modelos import (
     Contradiccion,
     EstadoPropuesta,
@@ -49,6 +61,12 @@ from atlas_core.inteligencia.proveedores import (
     ProveedorModeloSimulado,
     RespuestaProveedor,
 )
+from atlas_core.inteligencia.resolucion_chofer import (
+    HallazgoCatalogoChoferes,
+    auditar_catalogo_choferes,
+    normalizar_nombre_identidad,
+    resolver_chofer_rut,
+)
 from atlas_core.inteligencia.verificacion_destinos import (
     CacheVerificacionesMemoria,
     EstadoVerificacionDestino,
@@ -77,4 +95,10 @@ __all__ = [
     "EstadoRevisionDestino", "RegistroRevisionDestino", "ResultadoLoteRevision",
     "cargar_destinos", "ejecutar_archivo", "guardar_bandeja",
     "procesar_destinos",
+    "AlternativaResolucion", "CalidadObservacion", "ContradiccionResolucion",
+    "Disponibilidad", "EntidadCanonica", "EstadoResolucion",
+    "EvidenciaResolucion", "GravedadContradiccion", "ResultadoResolucion",
+    "ValorObservado", "HallazgoCatalogoChoferes",
+    "auditar_catalogo_choferes", "normalizar_nombre_identidad",
+    "resolver_chofer_rut",
 ]
