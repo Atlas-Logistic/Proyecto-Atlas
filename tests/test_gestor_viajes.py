@@ -134,7 +134,9 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
     viaje = viajes[0]
     assert viaje.estado == EstadoViaje.REQUIERE_REVISION
     assert set(viaje.motivos_revision) == set(MotivoRevision) - {
-        MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP
+        MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP,
+        MotivoRevision.DOCUMENTO_REQUIERE_REVISION,
+        MotivoRevision.ERROR_TECNICO_DOCUMENTO,
     }
     assert len(viaje.a_dict()["evidencias_documentos"]) == 2
 

@@ -73,6 +73,8 @@ class EstadoViaje(str, Enum):
 
 
 class MotivoRevision(str, Enum):
+    DOCUMENTO_REQUIERE_REVISION = "DOCUMENTO_REQUIERE_REVISION"
+    ERROR_TECNICO_DOCUMENTO = "ERROR_TECNICO_DOCUMENTO"
     FECHA_NO_COMPATIBLE_DESKTOP = "FECHA_NO_COMPATIBLE_DESKTOP"
     CONFLICTO_FECHA = "CONFLICTO_FECHA"
     CONFLICTO_CHOFER = "CONFLICTO_CHOFER"
@@ -217,6 +219,32 @@ def _deduplicar_filas(
     return [unicas[huella] for huella in sorted(unicas)]
 
 
+def _motivos_revision_documentos(
+    filas: Iterable[Mapping[str, object]],
+) -> list[MotivoRevision]:
+    """Propaga señales conservadoras de cada fila sin perder su evidencia."""
+    filas = list(filas)
+    indicador_revision = any(
+        _clave_normalizada(fila.get("indicador_revision", ""))
+        not in {"", "ok", "confirmado"}
+        for fila in filas
+    )
+    error_tecnico = any(
+        (
+            _valor_presente(fila.get("estado_procesamiento", ""))
+            and _clave_normalizada(fila.get("estado_procesamiento", "")) != "ok"
+        )
+        or _valor_presente(fila.get("error", ""))
+        for fila in filas
+    )
+    motivos: list[MotivoRevision] = []
+    if indicador_revision:
+        motivos.append(MotivoRevision.DOCUMENTO_REQUIERE_REVISION)
+    if error_tecnico:
+        motivos.append(MotivoRevision.ERROR_TECNICO_DOCUMENTO)
+    return motivos
+
+
 def agrupar_viajes(
     filas: Iterable[Mapping[str, object]],
     *,
@@ -256,10 +284,11 @@ def agrupar_viajes(
             (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos]),
             (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos]),
         )
-        motivos = [
+        motivos = _motivos_revision_documentos(filas_grupo)
+        motivos.extend(
             motivo for motivo, valores in campos_conflicto
             if not _valores_compatibles(valores)
-        ]
+        )
         if any(
             _valor_presente(original) and normalizada is None
             for original, normalizada in zip(fechas_originales, fechas_desktop)
