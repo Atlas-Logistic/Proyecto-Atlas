@@ -207,6 +207,25 @@ def test_enriquecer_con_catalogos_vacios_conserva_datos(tmp_path):
     assert enriquecer_datos_con_catalogos(datos, ["COD DESTINATARIO OTRO"], tmp_path) == datos
 
 
+def test_conflicto_nombre_fuzzy_seguro_y_rut_conserva_decision_trazable(tmp_path):
+    (tmp_path / "empresas.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "destinos.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "vehiculos.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "choferes.json").write_text(json.dumps({
+        "111111111": {"nombre": "ALFREDO MONTERO SUR", "activo": True},
+        "PENDIENTE1": {
+            "nombre": "ALFREDO MONTERO", "activo": True,
+            "aliases": ["ALEREDO MONTERO"],
+        },
+    }), encoding="utf-8")
+    datos = {
+        "chofer": "ALEREDO MONTERO", "RUT del chofer": "11.111.111-1",
+        "cliente": "No encontrado", "RUT del cliente": "No encontrado",
+    }
+    salida = enriquecer_datos_con_catalogos(datos, [], tmp_path)
+    assert salida["chofer"] == "ALFREDO MONTERO"
+
+
 def test_enriquecer_sin_archivos_y_extraer_con_ruta_opcional(tmp_path):
     datos = {
         "cliente": "EMPRESA ORIGINAL",
@@ -219,3 +238,30 @@ def test_enriquecer_sin_archivos_y_extraer_con_ruta_opcional(tmp_path):
     assert enriquecer_datos_con_catalogos(datos, [], carpeta_inexistente) == datos
     extraidos = extraer_datos([], carpeta_catalogos=carpeta_inexistente)
     assert all(valor == "No encontrado" for valor in extraidos.values())
+
+
+def test_clientes_y_destinos_maestros_solo_resuelven_identidad_exacta_apta(tmp_path):
+    for nombre in ("empresas.json", "destinos.json", "choferes.json", "vehiculos.json"):
+        (tmp_path / nombre).write_text("{}", encoding="utf-8")
+    (tmp_path / "clientes.json").write_text(json.dumps({"clientes": [{
+        "cliente_id": "CLIENTE-DEMO", "razon_social": "CLIENTE DEMO CONFIRMADO",
+        "rut": "12345678K", "estado_calidad": "CONFIRMADO",
+        "estado_vigencia": "ACTIVO",
+    }]}), encoding="utf-8")
+    (tmp_path / "destinos_maestros.json").write_text(json.dumps({"destinos": [{
+        "destino_id": "DESTINO-DEMO", "nombre_destino": "DESTINO DEMO DOCUMENTAL",
+        "codigo_destino": "D001", "estado_calidad": "CONFIRMADO_DOCUMENTAL",
+        "estado_vigencia": "ACTIVO",
+    }]}), encoding="utf-8")
+    datos = {
+        "cliente": "LECTURA ORIGINAL", "RUT del cliente": "12.345.678-k",
+        "obra destino": "DESTINO ORIGINAL", "chofer": "CHOFER ORIGINAL",
+        "RUT del chofer": "No encontrado",
+    }
+
+    salida = enriquecer_datos_con_catalogos(
+        datos, ["CODIGO DESTINATARIO: D001"], tmp_path
+    )
+
+    assert salida["cliente"] == "CLIENTE DEMO CONFIRMADO"
+    assert salida["obra destino"] == "DESTINO DEMO DOCUMENTAL"

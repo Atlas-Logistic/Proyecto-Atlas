@@ -1088,8 +1088,9 @@ def test_cli_acepta_fechas_validas(monkeypatch, tmp_path):
             str(tmp_path),
             "--fecha-desde",
             "2025-01-01",
-            "--fecha-hasta",
-            "2026-07-31",
+                "--fecha-hasta",
+                "2026-07-31",
+                "--sin-catalogos",
         ],
     )
 
@@ -1152,7 +1153,9 @@ def test_cli_rechaza_rango_invertido_antes_de_procesar(
 def test_cli_sin_fechas_mantiene_compatibilidad(monkeypatch, tmp_path):
     procesar = Mock(return_value=_resumen_cli())
     monkeypatch.setattr(analizar_guias_masivo, "procesar_carpeta", procesar)
-    monkeypatch.setattr(sys, "argv", ["analizar_guias_masivo.py", str(tmp_path)])
+    monkeypatch.setattr(
+        sys, "argv", ["analizar_guias_masivo.py", str(tmp_path), "--sin-catalogos"]
+    )
 
     analizar_guias_masivo.main()
 

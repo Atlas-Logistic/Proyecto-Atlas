@@ -2,6 +2,7 @@
 
 import difflib
 import json
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Any, Callable, Mapping
 
 Catalogo = Mapping[str, dict[str, Any]]
 FuenteCatalogo = Catalogo | str | Path
+logger = logging.getLogger(__name__)
 
 
 def normalizar_rut(rut: str) -> str:
@@ -113,6 +115,8 @@ class ResultadoCoincidenciaChofer:
     valor_original: str
     valor_resultado: str
     similitud: float | None = None
+    segunda_similitud: float | None = None
+    margen: float | None = None
 
 
 def _normalizar_nombre_chofer(texto: str) -> str:
@@ -150,8 +154,17 @@ def resolver_nombre_chofer_difuso(
             continue
         nombre_catalogo = str(registro.get("nombre", "")).strip()
         if nombre_catalogo:
+            variantes = [nombre_catalogo]
+            aliases = registro.get("aliases", [])
+            if isinstance(aliases, list):
+                variantes.extend(
+                    str(alias).strip() for alias in aliases if str(alias).strip()
+                )
             candidatos.append(
-                (_similitud_nombre_chofer(original, nombre_catalogo), nombre_catalogo)
+                (
+                    max(_similitud_nombre_chofer(original, variante) for variante in variantes),
+                    nombre_catalogo,
+                )
             )
 
     if not candidatos:
@@ -159,24 +172,32 @@ def resolver_nombre_chofer_difuso(
 
     candidatos.sort(key=lambda candidato: (-candidato[0], candidato[1]))
     mejor_similitud, mejor_nombre = candidatos[0]
+    segunda_similitud = candidatos[1][0] if len(candidatos) > 1 else None
+    margen = (
+        mejor_similitud - segunda_similitud
+        if segunda_similitud is not None
+        else None
+    )
     if mejor_similitud < umbral:
         return ResultadoCoincidenciaChofer(
-            "DEBAJO_UMBRAL", original, original, mejor_similitud
+            "DEBAJO_UMBRAL", original, original, mejor_similitud,
+            segunda_similitud, margen,
         )
 
-    if len(candidatos) > 1:
-        segunda_similitud = candidatos[1][0]
-        if mejor_similitud - segunda_similitud < margen_ambiguedad:
-            return ResultadoCoincidenciaChofer(
-                "AMBIGUO", original, original, mejor_similitud
-            )
+    if margen is not None and margen < margen_ambiguedad:
+        return ResultadoCoincidenciaChofer(
+            "AMBIGUO", original, original, mejor_similitud,
+            segunda_similitud, margen,
+        )
 
     if _normalizar_nombre_chofer(original) == _normalizar_nombre_chofer(mejor_nombre):
         return ResultadoCoincidenciaChofer(
-            "SIN_CAMBIO", original, original, mejor_similitud
+            "SIN_CAMBIO", original, mejor_nombre, mejor_similitud,
+            segunda_similitud, margen,
         )
     return ResultadoCoincidenciaChofer(
-        "COINCIDENCIA_SEGURA", original, mejor_nombre, mejor_similitud
+        "COINCIDENCIA_SEGURA", original, mejor_nombre, mejor_similitud,
+        segunda_similitud, margen,
     )
 
 
@@ -204,6 +225,46 @@ def _buscar_destino_en_textos(
     return None
 
 
+def _buscar_cliente_maestro_por_rut(contenido: Any, rut: str) -> dict[str, Any] | None:
+    rut_normalizado = normalizar_rut(rut)
+    if not rut_normalizado or not isinstance(contenido, dict):
+        return None
+    for registro in contenido.get("clientes", []):
+        if (
+            isinstance(registro, dict)
+            and registro.get("estado_calidad") == "CONFIRMADO"
+            and registro.get("estado_vigencia") == "ACTIVO"
+            and normalizar_rut(str(registro.get("rut", ""))) == rut_normalizado
+        ):
+            return registro
+    return None
+
+
+def _buscar_destino_maestro_en_textos(
+    textos: list[str], contenido: Any
+) -> dict[str, Any] | None:
+    if not isinstance(contenido, dict):
+        return None
+    texto_ocr = _texto_sin_acentos("\n".join(textos).upper())
+    codigos = {
+        str(registro.get("codigo_destino", "")).strip().upper(): registro
+        for registro in contenido.get("destinos", [])
+        if isinstance(registro, dict)
+        and registro.get("estado_vigencia") == "ACTIVO"
+        and registro.get("estado_calidad") in {"CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+        and str(registro.get("codigo_destino", "")).strip()
+    }
+    patron = re.compile(
+        r"\bC[O0][D0O](?:IG[O0])?\.?\s+D[E3]STINATARI[O0]\b"
+        r"\s*[:\-]?\s*([A-Z0-9_-]+)"
+    )
+    for coincidencia in patron.finditer(texto_ocr):
+        registro = codigos.get(coincidencia.group(1).upper())
+        if registro is not None:
+            return registro
+    return None
+
+
 def enriquecer_datos_con_catalogos(
     datos: dict[str, str],
     textos: list[str],
@@ -213,26 +274,57 @@ def enriquecer_datos_con_catalogos(
     carpeta = Path(carpeta_catalogos)
     empresas = cargar_catalogo_json(carpeta / "empresas.json")
     destinos = cargar_catalogo_json(carpeta / "destinos.json")
+    clientes_maestros = cargar_catalogo_json(carpeta / "clientes.json")
+    destinos_maestros = cargar_catalogo_json(carpeta / "destinos_maestros.json")
     choferes = cargar_catalogo_json(carpeta / "choferes.json")
     vehiculos = cargar_catalogo_json(carpeta / "vehiculos.json")
 
     datos_enriquecidos = datos.copy()
 
     empresa = buscar_empresa_por_rut(empresas, datos.get("RUT del cliente", ""))
-    if empresa is not None:
+    cliente_maestro = _buscar_cliente_maestro_por_rut(
+        clientes_maestros, datos.get("RUT del cliente", "")
+    )
+    if cliente_maestro is not None:
+        razon_social = cliente_maestro.get("razon_social")
+        if isinstance(razon_social, str) and razon_social.strip():
+            datos_enriquecidos["cliente"] = razon_social.strip()
+    elif empresa is not None:
         nombre_empresa = empresa.get("nombre")
         if isinstance(nombre_empresa, str) and nombre_empresa.strip():
             datos_enriquecidos["cliente"] = nombre_empresa.strip()
 
+    nombre_ocr = str(datos.get("chofer", "")).strip()
+    decision_nombre = resolver_nombre_chofer_difuso(choferes, nombre_ocr)
     chofer = buscar_chofer_por_rut(choferes, datos.get("RUT del chofer", ""))
-    if chofer is not None:
-        nombre_chofer = chofer.get("nombre")
-        if isinstance(nombre_chofer, str) and nombre_chofer.strip():
-            datos_enriquecidos["chofer"] = nombre_chofer.strip()
+    nombre_por_rut = (
+        str(chofer.get("nombre", "")).strip()
+        if isinstance(chofer, dict) else ""
+    )
+    if decision_nombre.estado in {"COINCIDENCIA_SEGURA", "SIN_CAMBIO"} and (
+        decision_nombre.similitud is not None
+    ):
+        datos_enriquecidos["chofer"] = decision_nombre.valor_resultado
+        if nombre_por_rut and _normalizar_nombre_chofer(nombre_por_rut) != _normalizar_nombre_chofer(
+            decision_nombre.valor_resultado
+        ):
+            logger.warning(
+                "conflicto-chofer-nombre-rut-v1 nombre=%s rut=%s; se conserva "
+                "la decisión fuzzy segura y se requiere revisión",
+                decision_nombre.valor_resultado, nombre_por_rut,
+            )
+    elif nombre_por_rut:
+        datos_enriquecidos["chofer"] = nombre_por_rut
 
-    destino = _buscar_destino_en_textos(textos, destinos)
+    destino = _buscar_destino_maestro_en_textos(textos, destinos_maestros)
     if destino is not None:
-        nombre_destino = destino.get("nombre")
+        nombre_destino = destino.get("nombre_destino")
+        if isinstance(nombre_destino, str) and nombre_destino.strip():
+            datos_enriquecidos["obra destino"] = nombre_destino.strip()
+    else:
+        destino = _buscar_destino_en_textos(textos, destinos)
+    if destino is not None:
+        nombre_destino = destino.get("nombre_destino", destino.get("nombre"))
         if isinstance(nombre_destino, str) and nombre_destino.strip():
             datos_enriquecidos["obra destino"] = nombre_destino.strip()
 

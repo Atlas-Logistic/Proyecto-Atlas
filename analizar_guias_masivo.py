@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from atlas_core.procesamiento_masivo import procesar_carpeta
+from atlas_core.fuente_catalogos import validar_fuente_catalogos
 
 
 def fecha_iso(valor: str) -> date:
@@ -47,6 +48,16 @@ def crear_parser() -> argparse.ArgumentParser:
         type=fecha_iso,
         help="Límite superior inclusivo para fechas (YYYY-MM-DD)",
     )
+    parser.add_argument(
+        "--catalogos",
+        type=Path,
+        help="Fuente privada validada (o use ATLAS_CATALOGOS_DIR)",
+    )
+    parser.add_argument(
+        "--sin-catalogos",
+        action="store_true",
+        help="Declara explícitamente un procesamiento sin catálogos",
+    )
     return parser
 
 
@@ -59,12 +70,16 @@ def main() -> None:
         and argumentos.fecha_desde > argumentos.fecha_hasta
     ):
         parser.error("--fecha-desde no puede ser posterior a --fecha-hasta")
+    estado_catalogos = validar_fuente_catalogos(
+        argumentos.catalogos, permitir_sin_catalogos=argumentos.sin_catalogos
+    )
     resumen = procesar_carpeta(
         argumentos.carpeta,
         argumentos.salida,
         reprocesar=argumentos.reprocesar,
         fecha_desde=argumentos.fecha_desde,
         fecha_hasta=argumentos.fecha_hasta,
+        carpeta_catalogos=estado_catalogos.ruta,
     )
     print("\nResumen final")
     print(f"Total encontrados: {resumen['encontrados']}")

@@ -14,6 +14,7 @@ from typing import Callable, Iterable, Mapping
 from atlas_core.catalogos import (
     buscar_chofer_por_rut,
     cargar_catalogo_json,
+    enriquecer_datos_con_catalogos,
     resolver_nombre_chofer_difuso,
 )
 from atlas_core.clasificador_material import clasificar_material
@@ -40,8 +41,6 @@ logger = logging.getLogger(__name__)
 EXTENSIONES_PERMITIDAS = frozenset(
     {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 )
-RUTA_CATALOGO_CHOFERES = Path("catalogos/choferes.json")
-
 COLUMNAS = [
     "archivo",
     "estado_procesamiento",
@@ -317,9 +316,12 @@ def procesar_archivo(
     lector_ocr: object = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales."""
     textos = leer_texto_imagen(ruta, lector=lector_ocr)
+    # Primero conserva el OCR y completa geometría; solo después aplica catálogos.
+    # Así un RUT conocido no oculta el nombre bruto necesario para fuzzy y trazabilidad.
     datos = extraer_datos(textos)
     recuperacion_geometrica = False
     recuperacion_chofer = False
@@ -374,9 +376,14 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
 
+    datos = enriquecer_datos_con_catalogos(
+        datos, textos, carpeta_catalogos or "catalogos"
+    )
     nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()
     if nombre_chofer not in {"", "No encontrado"}:
-        catalogo_choferes = cargar_catalogo_json(RUTA_CATALOGO_CHOFERES)
+        catalogo_choferes = cargar_catalogo_json(
+            Path(carpeta_catalogos or "catalogos") / "choferes.json"
+        )
         rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
         if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is None:
             decision_fuzzy = resolver_nombre_chofer_difuso(
@@ -487,6 +494,7 @@ def procesar_carpeta(
     lector_ocr: object = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos."""
     if cada < 1:
@@ -531,13 +539,16 @@ def procesar_carpeta(
         if lector_compartido is None:
             lector_compartido = crear_lector_ocr()
         if fecha_desde is None and fecha_hasta is None:
-            return procesar_archivo(ruta, lector_ocr=lector_compartido)
-        return procesar_archivo(
-            ruta,
-            lector_ocr=lector_compartido,
-            fecha_desde=fecha_desde,
-            fecha_hasta=fecha_hasta,
-        )
+            argumentos = {"lector_ocr": lector_compartido}
+        else:
+            argumentos = {
+                "lector_ocr": lector_compartido,
+                "fecha_desde": fecha_desde,
+                "fecha_hasta": fecha_hasta,
+            }
+        if carpeta_catalogos is not None:
+            argumentos["carpeta_catalogos"] = carpeta_catalogos
+        return procesar_archivo(ruta, **argumentos)
 
     try:
         for indice, ruta in enumerate(archivos, start=1):

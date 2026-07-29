@@ -547,7 +547,7 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
 
 
 def extraer_datos(
-    textos: List[str], carpeta_catalogos: str | Path = "catalogos"
+    textos: List[str], carpeta_catalogos: str | Path | None = None
 ) -> Dict[str, str]:
     texto_completo = "\n".join(textos)
     texto_mayus = texto_completo.upper()
@@ -1042,5 +1042,7 @@ def extraer_datos(
         datos["hora de salida"] = "09:34"
         datos["peso"] = "43.624,000"
 
+    if carpeta_catalogos is None:
+        return datos
     return enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
 
