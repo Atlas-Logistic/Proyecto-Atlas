@@ -90,7 +90,7 @@ def test_nombre_ocr_imperfecto_mas_rut_exacto_confirma(catalogo):
         "MARLNA DEMO ALVAREZ", _rut(101), catalogo
     )
     assert resultado.estado is EstadoResolucion.CONFIRMADO
-    assert resultado.valores_ocr_originales["nombre_chofer"] == "MARLNA DEMO ALVAREZ"
+    assert resultado.valores_ocr_originales["nombre_chofer"] == ("MARLNA DEMO ALVAREZ",)
     assert any(e.tipo == "NOMBRE_FUZZY" for e in resultado.evidencias)
 
 
@@ -211,7 +211,7 @@ def test_enie_y_ene_se_mantienen_distintas():
 def test_acentos_y_espacios_repetidos_no_impiden_exacto(catalogo):
     resultado = resolver_chofer_rut("  MARINA   DEMO ALVAREZ ", "", catalogo)
     assert resultado.estado is EstadoResolucion.CONFIRMADO
-    assert resultado.valores_ocr_originales["nombre_chofer"] == "  MARINA   DEMO ALVAREZ "
+    assert resultado.valores_ocr_originales["nombre_chofer"] == ("  MARINA   DEMO ALVAREZ ",)
 
 
 @pytest.mark.parametrize(

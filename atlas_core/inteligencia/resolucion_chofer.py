@@ -19,6 +19,16 @@ from atlas_core.inteligencia.contrato_multicampo import (
     GravedadContradiccion,
     ResultadoResolucion,
     ValorObservado,
+    requiere_revision_por_estado,
+)
+from atlas_core.inteligencia.politica_confianza_chofer import (
+    POLITICA_CONFIANZA_CHOFER_V1_1,
+    PoliticaConfianzaChofer,
+    ViaDecisionChofer,
+)
+from atlas_core.inteligencia.snapshot_catalogo_choferes import (
+    InstantaneaCatalogoChoferes,
+    crear_snapshot_catalogo_choferes,
 )
 from atlas_core.modelos import EstadoValidacion
 from atlas_core.validadores import validar_rut_chileno
@@ -38,7 +48,9 @@ class HallazgoCatalogoChoferes:
 
 def normalizar_nombre_identidad(valor: object) -> str:
     """Normaliza búsqueda sin fusionar Ñ con N."""
-    texto = " ".join(str(valor or "").strip().upper().split())
+    texto = unicodedata.normalize(
+        "NFC", " ".join(str(valor or "").strip().upper().split())
+    )
     salida: list[str] = []
     for caracter in texto:
         if caracter == "Ñ":
@@ -188,15 +200,23 @@ def _similitud(a: str, b: str) -> float:
 def resolver_chofer_rut(
     nombre_ocr: object,
     rut_ocr: object,
-    catalogo: Mapping[str, Mapping[str, Any]],
+    catalogo: Mapping[str, Mapping[str, Any]] | InstantaneaCatalogoChoferes,
     contexto: Mapping[str, Any] | None = None,
+    *,
+    campo_obligatorio: bool = True,
+    politica_confianza: PoliticaConfianzaChofer = POLITICA_CONFIANZA_CHOFER_V1_1,
 ) -> ResultadoResolucion:
     """Aplica una tabla de decisión explícita; nunca modifica ``catalogo``."""
+    snapshot = (
+        catalogo
+        if isinstance(catalogo, InstantaneaCatalogoChoferes)
+        else crear_snapshot_catalogo_choferes(catalogo)
+    )
     nombre_obs = _observacion_nombre(nombre_ocr)
     rut_obs, clase_rut = _observacion_rut(rut_ocr)
     registros = [
         (str(i), r, _entidad(str(i), r))
-        for i, r in sorted(catalogo.items(), key=lambda item: str(item[0]))
+        for i, r in snapshot.registros.items()
         if isinstance(r, Mapping) and str(r.get("nombre", "")).strip()
     ]
     evidencias: list[EvidenciaResolucion] = []
@@ -267,6 +287,8 @@ def resolver_chofer_rut(
         elif mejor[0] >= UMBRAL_FUZZY_CHOFER:
             nombre_ambiguo = True
 
+    rut_entidad = rut_coincidentes[0][2] if len(rut_coincidentes) == 1 else None
+    nombre_entidad = nombre_fuerte[2] if nombre_fuerte else None
     parcial_coincidentes: list[tuple[str, Mapping[str, Any], EntidadCanonica]] = []
     if clase_rut == "PARCIAL":
         parcial = rut_obs.valor_normalizado
@@ -278,12 +300,25 @@ def resolver_chofer_rut(
         for _, _, entidad in parcial_coincidentes:
             evidencias.append(EvidenciaResolucion(
                 "RUT_PARCIAL_COMPATIBLE", "catalogo_choferes", rut_obs, entidad,
-                0.55, "El fragmento coincide, pero no prueba un RUT exacto.", True,
+                0.55, "El fragmento coincide, pero no prueba un RUT exacto.",
+                nombre_entidad is None
+                or entidad.identificador == nombre_entidad.identificador,
+            ))
+        if not parcial_coincidentes:
+            evidencias.append(EvidenciaResolucion(
+                "RUT_PARCIAL_SIN_COINCIDENCIA", "catalogo_choferes", rut_obs,
+                None, 0.0,
+                "El fragmento no coincide con ninguna clave RUT del snapshot.",
+                False,
             ))
 
+    if clase_rut == "INVALIDO":
+        evidencias.append(EvidenciaResolucion(
+            "RUT_INVALIDO", "validador_rut_chileno", rut_obs, None, 0.0,
+            rut_obs.detalle_calidad, False,
+        ))
+
     contradicciones: list[ContradiccionResolucion] = []
-    rut_entidad = rut_coincidentes[0][2] if len(rut_coincidentes) == 1 else None
-    nombre_entidad = nombre_fuerte[2] if nombre_fuerte else None
     if rut_entidad and nombre_entidad and rut_entidad.identificador != nombre_entidad.identificador:
         enfrentadas = tuple(
             e for e in evidencias
@@ -298,13 +333,32 @@ def resolver_chofer_rut(
             GravedadContradiccion.ALTA, "Impide confirmar o corregir silenciosamente.",
         ))
     if nombre_entidad and clase_rut == "PARCIAL" and (
-        not parcial_coincidentes
-        or all(item[2].identificador != nombre_entidad.identificador for item in parcial_coincidentes)
+        len(parcial_coincidentes) != 1
+        or parcial_coincidentes[0][2].identificador != nombre_entidad.identificador
     ):
-        relacionadas = tuple(e for e in evidencias if e.candidato == nombre_entidad)
+        ids_parciales = {
+            item[2].identificador for item in parcial_coincidentes
+        }
+        relacionadas = tuple(
+            e for e in evidencias
+            if (
+                e.candidato == nombre_entidad
+                or e.observado is rut_obs
+                or (
+                    e.candidato
+                    and e.candidato.identificador in ids_parciales
+                )
+            )
+        )
+        entidades_parciales = tuple(item[2] for item in parcial_coincidentes)
         contradicciones.append(ContradiccionResolucion(
-            ("nombre_chofer", "rut_chofer"), relacionadas, (nombre_entidad,),
-            "El fragmento de RUT es incompatible con la identidad indicada por el nombre.",
+            ("nombre_chofer", "rut_chofer"), relacionadas,
+            (nombre_entidad, *entidades_parciales),
+            (
+                "El fragmento de RUT es ambiguo entre varias identidades."
+                if len(parcial_coincidentes) > 1
+                else "El fragmento de RUT es incompatible con la identidad indicada por el nombre."
+            ),
             GravedadContradiccion.ALTA, "Obliga a revisión humana.",
         ))
 
@@ -313,54 +367,90 @@ def resolver_chofer_rut(
         "Los valores OCR originales se conservaron sin sobrescritura.",
         "La decisión se obtuvo mediante una tabla de evidencias, no por aprendizaje automático.",
     ]
+    via = ViaDecisionChofer.NO_RESUELTO
     if len(rut_coincidentes) > 1:
-        estado, confianza = EstadoResolucion.REQUIERE_REVISION, 0.0
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionChofer.DUPLICADO
         candidato = None
         razones.append("Más de una entidad comparte el mismo RUT válido.")
+    elif clase_rut == "PARCIAL" and len(parcial_coincidentes) > 1:
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionChofer.DUPLICADO
+        candidato = None
+        razones.append("El RUT parcial coincide con más de una identidad.")
     elif contradicciones:
-        estado, confianza = EstadoResolucion.REQUIERE_REVISION, 0.0
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionChofer.CONTRADICCION
         razones.append("Existe una contradicción explícita entre campos.")
     elif nombre_ambiguo:
-        estado, confianza = EstadoResolucion.REQUIERE_REVISION, 0.0
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionChofer.DUPLICADO
         candidato = None
         razones.append("El nombre tiene candidatos ambiguos o una clave exacta compartida.")
     elif candidato and candidato.activa is not True:
-        estado, confianza = EstadoResolucion.REQUIERE_REVISION, 0.0
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionChofer.INACTIVO
         razones.append("La identidad candidata está inactiva.")
     elif clase_rut == "INVALIDO" and candidato:
-        estado, confianza = EstadoResolucion.REQUIERE_REVISION, 0.0
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionChofer.CONTRADICCION
         razones.append("El RUT observado es inválido y debe revisarse.")
     elif rut_entidad:
         estado = EstadoResolucion.CONFIRMADO
-        confianza = 1.0 if nombre_entidad == rut_entidad else 0.95
+        via = (
+            ViaDecisionChofer.RUT_EXACTO_MAS_NOMBRE_COMPATIBLE
+            if nombre_entidad == rut_entidad
+            else ViaDecisionChofer.RUT_EXACTO_UNICO
+        )
         razones.append("Un RUT chileno válido y único fija la identidad canónica.")
     elif nombre_fuerte and nombre_fuerte[3] in {"NOMBRE_CANONICO_EXACTO", "ALIAS_CONFIRMADO_EXACTO"}:
         if clase_rut == "PARCIAL" and parcial_coincidentes and all(
             item[2].identificador != nombre_entidad.identificador for item in parcial_coincidentes
         ):
-            estado, confianza = EstadoResolucion.REQUIERE_REVISION, 0.0
+            estado = EstadoResolucion.REQUIERE_REVISION
+            via = ViaDecisionChofer.CONTRADICCION
         else:
-            estado, confianza = EstadoResolucion.CONFIRMADO, 0.90
+            estado = EstadoResolucion.CONFIRMADO
+            via = (
+                ViaDecisionChofer.CANONICO_EXACTO_UNICO
+                if nombre_fuerte[3] == "NOMBRE_CANONICO_EXACTO"
+                else ViaDecisionChofer.ALIAS_HUMANO_UNICO
+            )
             razones.append("Nombre canónico o alias humano confirmado, exacto y único.")
     elif nombre_fuerte and nombre_fuerte[3] == "NOMBRE_FUZZY":
-        estado, confianza = EstadoResolucion.PROPUESTO, next(
+        estado = EstadoResolucion.PROPUESTO
+        via = ViaDecisionChofer.FUZZY_UNICO
+        medicion_fuzzy = next(
             e.fuerza for e in evidencias if e.tipo == "NOMBRE_FUZZY"
         )
         razones.append("El fuzzy aislado solo puede proponer; nunca confirma por 0,85.")
     elif clase_rut == "PARCIAL" and len(parcial_coincidentes) == 1:
         candidato = parcial_coincidentes[0][2]
-        estado, confianza = EstadoResolucion.PROPUESTO, 0.55
+        estado = EstadoResolucion.PROPUESTO
+        via = ViaDecisionChofer.RUT_PARCIAL_COMPATIBLE
         razones.append("Un RUT parcial único solo permite proponer.")
     else:
         candidato = None
-        estado, confianza = EstadoResolucion.NO_RESUELTO, 0.0
+        estado = EstadoResolucion.NO_RESUELTO
+        via = ViaDecisionChofer.NO_RESUELTO
         razones.append("No existe evidencia suficiente para resolver.")
 
+    confianza = politica_confianza.confianza(
+        via,
+        medicion_fuzzy=(
+            medicion_fuzzy
+            if via is ViaDecisionChofer.FUZZY_UNICO
+            else None
+        ),
+    )
     if candidato and not any(a.entidad.identificador == candidato.identificador for a in alternativas):
         alternativas.insert(0, AlternativaResolucion(candidato, None, "Candidato principal."))
     return ResultadoResolucion(
         "chofer", (nombre_obs, rut_obs), candidato, estado, confianza,
         tuple(evidencias), tuple(contradicciones), tuple(razones),
-        estado in {EstadoResolucion.REQUIERE_REVISION, EstadoResolucion.PROPUESTO},
-        tuple(alternativas[:3]), contexto,
+        requiere_revision_por_estado(
+            estado, campo_obligatorio=campo_obligatorio
+        ),
+        tuple(alternativas[:3]), contexto, politica_confianza.version,
+        via.value, snapshot.version,
     )

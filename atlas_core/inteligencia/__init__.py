@@ -16,6 +16,9 @@ from atlas_core.inteligencia.contrato_multicampo import (
     GravedadContradiccion,
     ResultadoResolucion,
     ValorObservado,
+    congelar_profundo,
+    descongelar,
+    requiere_revision_por_estado,
 )
 from atlas_core.inteligencia.modelos import (
     Contradiccion,
@@ -61,11 +64,25 @@ from atlas_core.inteligencia.proveedores import (
     ProveedorModeloSimulado,
     RespuestaProveedor,
 )
+from atlas_core.inteligencia.politica_confianza_chofer import (
+    POLITICA_CONFIANZA_CHOFER_V1_1,
+    PoliticaConfianzaChofer,
+    ViaDecisionChofer,
+)
+from atlas_core.inteligencia.redireccion_identidad import (
+    EventoRedireccionIdentidad,
+    HistorialRedireccionesIdentidad,
+    TipoRedireccionIdentidad,
+)
 from atlas_core.inteligencia.resolucion_chofer import (
     HallazgoCatalogoChoferes,
     auditar_catalogo_choferes,
     normalizar_nombre_identidad,
     resolver_chofer_rut,
+)
+from atlas_core.inteligencia.snapshot_catalogo_choferes import (
+    InstantaneaCatalogoChoferes,
+    crear_snapshot_catalogo_choferes,
 )
 from atlas_core.inteligencia.verificacion_destinos import (
     CacheVerificacionesMemoria,
@@ -101,4 +118,9 @@ __all__ = [
     "ValorObservado", "HallazgoCatalogoChoferes",
     "auditar_catalogo_choferes", "normalizar_nombre_identidad",
     "resolver_chofer_rut",
+    "congelar_profundo", "descongelar", "requiere_revision_por_estado",
+    "POLITICA_CONFIANZA_CHOFER_V1_1", "PoliticaConfianzaChofer",
+    "ViaDecisionChofer", "InstantaneaCatalogoChoferes",
+    "crear_snapshot_catalogo_choferes", "EventoRedireccionIdentidad",
+    "HistorialRedireccionesIdentidad", "TipoRedireccionIdentidad",
 ]
