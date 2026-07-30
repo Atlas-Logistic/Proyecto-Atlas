@@ -37,6 +37,8 @@ from atlas_core.validadores import validar_rut_chileno
 UMBRAL_FUZZY_CLIENTE = 0.88
 MARGEN_MINIMO_FUZZY_CLIENTE = 0.08
 MINIMO_CARACTERES_FUZZY_CLIENTE = 5
+MINIMO_BASE_SUFIJO_PEGADO = 7
+MINIMO_RUT_PARCIAL_CLIENTE = 4
 
 _SUFIJOS: tuple[tuple[str, ...], ...] = (
     ("EMPRESA", "INDIVIDUAL", "DE", "RESPONSABILIDAD", "LIMITADA"),
@@ -110,6 +112,46 @@ def normalizar_nombre_cliente_multicampo(valor: object) -> str:
                 cambio = True
                 break
     return " ".join(tokens)
+
+
+def _sufijo_explicito(valor: object) -> bool:
+    texto = unicodedata.normalize("NFKD", str(valor or "").strip().upper())
+    texto = "".join(
+        caracter for caracter in texto if not unicodedata.combining(caracter)
+    )
+    tokens = re.findall(r"[A-Z0-9Ñ]+", texto)
+    return any(
+        len(tokens) >= len(sufijo)
+        and tuple(tokens[-len(sufijo):]) == sufijo
+        for sufijo in _SUFIJOS
+    )
+
+
+def _variante_sufijo_pegado(valor: object) -> tuple[str, str] | None:
+    """Separa solo el último token y exige una base larga e inequívoca."""
+    texto = unicodedata.normalize(
+        "NFC", " ".join(str(valor or "").strip().upper().split())
+    )
+    tokens = re.findall(r"[A-Z0-9Ñ]+", texto)
+    if not tokens:
+        return None
+    ultimo = tokens[-1]
+    for sufijo in ("EIRL", "LTDA", "SPA", "SA"):
+        if not ultimo.endswith(sufijo):
+            continue
+        base = ultimo[:-len(sufijo)]
+        # Una palabra aislada exige una raíz larga. En nombres compuestos se
+        # admite una última raíz más breve (p. ej. ``DEMO``), siempre que haya
+        # contexto previo y luego exista coincidencia exacta en el catálogo.
+        if len(base) < MINIMO_BASE_SUFIJO_PEGADO and not (
+            len(tokens) >= 2 and len(base) >= 4
+        ):
+            continue
+        tokens[-1] = base
+        normalizado = normalizar_nombre_cliente_multicampo(" ".join(tokens))
+        if normalizado:
+            return normalizado, sufijo
+    return None
 
 
 def _rut_limpio(valor: object) -> str:
@@ -229,6 +271,26 @@ def _observacion_rut(valor: object) -> tuple[ValorObservado, str]:
             ),
             "AUSENTE",
         )
+    if (
+        re.fullmatch(r"[0-9]+K?", limpio)
+        and MINIMO_RUT_PARCIAL_CLIENTE <= len(limpio) < 8
+        and "-" not in original
+    ):
+        return (
+            ValorObservado(
+                "rut_cliente",
+                original,
+                limpio,
+                "OCR",
+                Disponibilidad.PARCIAL,
+                CalidadObservacion.NO_EVALUADA,
+                (
+                    "Fragmento de RUT de cliente: se conserva para auditoría, "
+                    "pero no identifica ni confirma una entidad."
+                ),
+            ),
+            "PARCIAL",
+        )
     canonico = _rut_canonico(original)
     if canonico:
         return (
@@ -327,23 +389,35 @@ def resolver_cliente_rut(
 
     nombre_matches = []
     if nombre_obs.valor_normalizado:
+        variante_pegada = _variante_sufijo_pegado(nombre_obs.valor_original)
         for identificador, registro, entidad in registros:
             variantes = _variantes_nombre(registro)
-            coincidencias = [
+            coincidencias_literales = [
                 variante
                 for variante in variantes
                 if normalizar_nombre_cliente_multicampo(variante)
                 == nombre_obs.valor_normalizado
             ]
-            if not coincidencias:
+            coincidencias_pegadas = [
+                variante
+                for variante in variantes
+                if variante_pegada
+                and _sufijo_explicito(variante)
+                and normalizar_nombre_cliente_multicampo(variante)
+                == variante_pegada[0]
+            ]
+            if not coincidencias_literales and not coincidencias_pegadas:
                 continue
-            tipo = (
-                "NOMBRE_CANONICO_EXACTO"
-                if normalizar_nombre_cliente_multicampo(
-                    registro.get("razon_social")
-                ) == nombre_obs.valor_normalizado
-                else "ALIAS_EMPRESARIAL_EXACTO"
-            )
+            if coincidencias_literales:
+                tipo = (
+                    "NOMBRE_CANONICO_EXACTO"
+                    if normalizar_nombre_cliente_multicampo(
+                        registro.get("razon_social")
+                    ) == nombre_obs.valor_normalizado
+                    else "ALIAS_EMPRESARIAL_EXACTO"
+                )
+            else:
+                tipo = "SUFIJO_SOCIETARIO_PEGADO_NORMALIZADO"
             nombre_matches.append(
                 (identificador, registro, entidad, tipo)
             )
@@ -356,7 +430,14 @@ def resolver_cliente_rut(
                 (
                     "Coincidencia exacta tras normalizar el sufijo societario."
                     if tipo == "NOMBRE_CANONICO_EXACTO"
-                    else "Coincidencia exacta con nombre comercial o alias."
+                    else (
+                        "Coincidencia exacta con nombre comercial o alias."
+                        if tipo == "ALIAS_EMPRESARIAL_EXACTO"
+                        else (
+                            "Sufijo societario pegado separado solo para "
+                            "comparación exacta contra un sufijo explícito."
+                        )
+                    )
                 ),
                 True,
             ))
@@ -454,6 +535,58 @@ def resolver_cliente_rut(
             for evidencia in evidencias
         ]
 
+    if clase_rut == "PARCIAL":
+        evidencias.append(EvidenciaResolucion(
+            "RUT_PARCIAL_NO_IDENTIFICANTE",
+            "politica_cliente_rut_parcial",
+            rut_obs,
+            None,
+            0.0,
+            (
+                "El fragmento no contiene evidencia suficiente de identidad "
+                "ni dígito verificador verificable."
+            ),
+            False,
+        ))
+        if nombre_entidad:
+            registro_nombre = next(
+                registro
+                for _, registro, entidad in registros
+                if entidad.identificador == nombre_entidad.identificador
+            )
+            rut_nombre = _rut_canonico(registro_nombre.get("rut"))
+            parcial = rut_obs.valor_normalizado
+            compatible = bool(
+                rut_nombre
+                and (
+                    rut_nombre.startswith(parcial)
+                    or rut_nombre.endswith(parcial)
+                )
+            )
+            if not compatible:
+                evidencia_nombre = tuple(
+                    evidencia
+                    for evidencia in evidencias
+                    if evidencia.candidato == nombre_entidad
+                    and evidencia.observado is nombre_obs
+                )
+                evidencia_parcial = next(
+                    evidencia
+                    for evidencia in evidencias
+                    if evidencia.tipo == "RUT_PARCIAL_NO_IDENTIFICANTE"
+                )
+                contradicciones.append(ContradiccionResolucion(
+                    ("cliente", "rut_cliente"),
+                    (*evidencia_nombre, evidencia_parcial),
+                    (nombre_entidad,),
+                    (
+                        "El fragmento de RUT es incompatible con el RUT de "
+                        "la identidad indicada por el nombre."
+                    ),
+                    GravedadContradiccion.ALTA,
+                    "Obliga a revisión; el fragmento nunca reasigna identidad.",
+                ))
+
     candidato = rut_entidad or nombre_entidad
     via = ViaDecisionCliente.NO_RESUELTO
     razones = [
@@ -479,6 +612,21 @@ def resolver_cliente_rut(
         estado = EstadoResolucion.REQUIERE_REVISION
         via = ViaDecisionCliente.INACTIVO
         razones.append("La identidad candidata está inactiva.")
+    elif clase_rut == "PARCIAL":
+        if nombre_entidad:
+            candidato = nombre_entidad
+            estado = EstadoResolucion.REQUIERE_REVISION
+            via = ViaDecisionCliente.CONTRADICCION
+            razones.append(
+                "El RUT parcial nunca confirma cliente; el nombre queda para revisión."
+            )
+        else:
+            candidato = None
+            estado = EstadoResolucion.NO_RESUELTO
+            via = ViaDecisionCliente.NO_RESUELTO
+            razones.append(
+                "El RUT parcial se conserva, pero no se usa para buscar identidad."
+            )
     elif candidato and not _calidad_confirmada(
         next(
             registro
@@ -506,12 +654,17 @@ def resolver_cliente_rut(
     elif nombre_fuerte and nombre_fuerte[3] in {
         "NOMBRE_CANONICO_EXACTO",
         "ALIAS_EMPRESARIAL_EXACTO",
+        "SUFIJO_SOCIETARIO_PEGADO_NORMALIZADO",
     }:
         estado = EstadoResolucion.CONFIRMADO
         via = (
             ViaDecisionCliente.CANONICO_EXACTO_UNICO
             if nombre_fuerte[3] == "NOMBRE_CANONICO_EXACTO"
-            else ViaDecisionCliente.ALIAS_HUMANO_UNICO
+            else (
+                ViaDecisionCliente.ALIAS_HUMANO_UNICO
+                if nombre_fuerte[3] == "ALIAS_EMPRESARIAL_EXACTO"
+                else ViaDecisionCliente.CANONICO_EXACTO_UNICO
+            )
         )
         razones.append("Nombre empresarial exacto, único y confirmado.")
     elif nombre_fuerte and nombre_fuerte[3] == "NOMBRE_FUZZY":
