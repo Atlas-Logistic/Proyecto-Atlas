@@ -74,6 +74,11 @@ from atlas_core.inteligencia.politica_confianza_cliente import (
     PoliticaConfianzaCliente,
     ViaDecisionCliente,
 )
+from atlas_core.inteligencia.politica_confianza_vehiculo import (
+    POLITICA_CONFIANZA_VEHICULO_V1,
+    PoliticaConfianzaVehiculo,
+    ViaDecisionVehiculo,
+)
 from atlas_core.inteligencia.redireccion_identidad import (
     EventoRedireccionIdentidad,
     HistorialRedireccionesIdentidad,
@@ -92,6 +97,13 @@ from atlas_core.inteligencia.resolucion_cliente import (
     normalizar_nombre_cliente_multicampo,
     resolver_cliente_rut,
 )
+from atlas_core.inteligencia.resolucion_vehiculo import (
+    HallazgoCatalogoVehiculos,
+    ResultadoResolucionVehiculo,
+    auditar_catalogo_vehiculos,
+    patente_chilena_valida,
+    resolver_vehiculo_patente,
+)
 from atlas_core.inteligencia.snapshot_catalogo_clientes import (
     InstantaneaCatalogoClientes,
     crear_snapshot_catalogo_clientes,
@@ -99,6 +111,12 @@ from atlas_core.inteligencia.snapshot_catalogo_clientes import (
 from atlas_core.inteligencia.snapshot_catalogo_choferes import (
     InstantaneaCatalogoChoferes,
     crear_snapshot_catalogo_choferes,
+)
+from atlas_core.inteligencia.snapshot_catalogo_vehiculos import (
+    InstantaneaCatalogoVehiculos,
+    crear_snapshot_catalogo_vehiculos,
+    normalizar_patente,
+    normalizar_rol_vehiculo,
 )
 from atlas_core.inteligencia.verificacion_destinos import (
     CacheVerificacionesMemoria,
@@ -145,4 +163,10 @@ __all__ = [
     "auditar_catalogo_clientes", "normalizar_nombre_cliente_multicampo",
     "resolver_cliente_rut", "InstantaneaCatalogoClientes",
     "crear_snapshot_catalogo_clientes",
+    "POLITICA_CONFIANZA_VEHICULO_V1", "PoliticaConfianzaVehiculo",
+    "ViaDecisionVehiculo", "HallazgoCatalogoVehiculos",
+    "ResultadoResolucionVehiculo", "auditar_catalogo_vehiculos",
+    "patente_chilena_valida", "resolver_vehiculo_patente",
+    "InstantaneaCatalogoVehiculos", "crear_snapshot_catalogo_vehiculos",
+    "normalizar_patente", "normalizar_rol_vehiculo",
 ]
