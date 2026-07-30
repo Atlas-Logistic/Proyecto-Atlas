@@ -69,6 +69,11 @@ from atlas_core.inteligencia.politica_confianza_chofer import (
     PoliticaConfianzaChofer,
     ViaDecisionChofer,
 )
+from atlas_core.inteligencia.politica_confianza_cliente import (
+    POLITICA_CONFIANZA_CLIENTE_V1,
+    PoliticaConfianzaCliente,
+    ViaDecisionCliente,
+)
 from atlas_core.inteligencia.redireccion_identidad import (
     EventoRedireccionIdentidad,
     HistorialRedireccionesIdentidad,
@@ -79,6 +84,17 @@ from atlas_core.inteligencia.resolucion_chofer import (
     auditar_catalogo_choferes,
     normalizar_nombre_identidad,
     resolver_chofer_rut,
+)
+from atlas_core.inteligencia.resolucion_cliente import (
+    HallazgoCatalogoClientes,
+    ResultadoResolucionCliente,
+    auditar_catalogo_clientes,
+    normalizar_nombre_cliente_multicampo,
+    resolver_cliente_rut,
+)
+from atlas_core.inteligencia.snapshot_catalogo_clientes import (
+    InstantaneaCatalogoClientes,
+    crear_snapshot_catalogo_clientes,
 )
 from atlas_core.inteligencia.snapshot_catalogo_choferes import (
     InstantaneaCatalogoChoferes,
@@ -123,4 +139,10 @@ __all__ = [
     "ViaDecisionChofer", "InstantaneaCatalogoChoferes",
     "crear_snapshot_catalogo_choferes", "EventoRedireccionIdentidad",
     "HistorialRedireccionesIdentidad", "TipoRedireccionIdentidad",
+    "POLITICA_CONFIANZA_CLIENTE_V1", "PoliticaConfianzaCliente",
+    "ViaDecisionCliente", "HallazgoCatalogoClientes",
+    "ResultadoResolucionCliente",
+    "auditar_catalogo_clientes", "normalizar_nombre_cliente_multicampo",
+    "resolver_cliente_rut", "InstantaneaCatalogoClientes",
+    "crear_snapshot_catalogo_clientes",
 ]
