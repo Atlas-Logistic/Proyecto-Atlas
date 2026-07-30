@@ -124,6 +124,17 @@ from atlas_core.inteligencia.resolucion_vehiculo import (
     patente_chilena_valida,
     resolver_vehiculo_patente,
 )
+from atlas_core.inteligencia.politica_confianza_material import (
+    POLITICA_CONFIANZA_MATERIAL_V1, PoliticaConfianzaMaterial,
+    ViaDecisionMaterial,
+)
+from atlas_core.inteligencia.resolucion_material import (
+    CandidatoMaterial, ResultadoResolucionMaterial, normalizar_material,
+    resolver_material_tipo_carga,
+)
+from atlas_core.inteligencia.snapshot_catalogo_materiales import (
+    InstantaneaCatalogoMateriales, crear_snapshot_catalogo_materiales,
+)
 from atlas_core.inteligencia.snapshot_catalogo_clientes import (
     InstantaneaCatalogoClientes,
     crear_snapshot_catalogo_clientes,
@@ -204,4 +215,8 @@ __all__ = [
     "POLITICA_CONFIANZA_DOCUMENTO_V1", "PoliticaConfianzaDocumento",
     "CandidatoDocumento", "ResultadoResolucionDocumento",
     "resolver_guia_transporte_fecha",
+    "POLITICA_CONFIANZA_MATERIAL_V1", "PoliticaConfianzaMaterial",
+    "ViaDecisionMaterial", "CandidatoMaterial", "ResultadoResolucionMaterial",
+    "normalizar_material", "resolver_material_tipo_carga",
+    "InstantaneaCatalogoMateriales", "crear_snapshot_catalogo_materiales",
 ]
