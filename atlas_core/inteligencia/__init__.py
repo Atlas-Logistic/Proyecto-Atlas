@@ -79,6 +79,10 @@ from atlas_core.inteligencia.politica_confianza_destino import (
     PoliticaConfianzaDestino,
     ViaDecisionDestino,
 )
+from atlas_core.inteligencia.politica_confianza_documento import (
+    POLITICA_CONFIANZA_DOCUMENTO_V1,
+    PoliticaConfianzaDocumento,
+)
 from atlas_core.inteligencia.politica_confianza_vehiculo import (
     POLITICA_CONFIANZA_VEHICULO_V1,
     PoliticaConfianzaVehiculo,
@@ -107,6 +111,11 @@ from atlas_core.inteligencia.resolucion_destino import (
     ResultadoResolucionDestino,
     auditar_catalogo_destinos,
     resolver_destino_ubicacion,
+)
+from atlas_core.inteligencia.resolucion_documento import (
+    CandidatoDocumento,
+    ResultadoResolucionDocumento,
+    resolver_guia_transporte_fecha,
 )
 from atlas_core.inteligencia.resolucion_vehiculo import (
     HallazgoCatalogoVehiculos,
@@ -192,4 +201,7 @@ __all__ = [
     "resolver_destino_ubicacion", "InstantaneaCatalogoDestinos",
     "crear_snapshot_catalogo_destinos", "normalizar_texto_destino",
     "region_canonica",
+    "POLITICA_CONFIANZA_DOCUMENTO_V1", "PoliticaConfianzaDocumento",
+    "CandidatoDocumento", "ResultadoResolucionDocumento",
+    "resolver_guia_transporte_fecha",
 ]
