@@ -74,6 +74,11 @@ from atlas_core.inteligencia.politica_confianza_cliente import (
     PoliticaConfianzaCliente,
     ViaDecisionCliente,
 )
+from atlas_core.inteligencia.politica_confianza_destino import (
+    POLITICA_CONFIANZA_DESTINO_V1,
+    PoliticaConfianzaDestino,
+    ViaDecisionDestino,
+)
 from atlas_core.inteligencia.politica_confianza_vehiculo import (
     POLITICA_CONFIANZA_VEHICULO_V1,
     PoliticaConfianzaVehiculo,
@@ -97,6 +102,12 @@ from atlas_core.inteligencia.resolucion_cliente import (
     normalizar_nombre_cliente_multicampo,
     resolver_cliente_rut,
 )
+from atlas_core.inteligencia.resolucion_destino import (
+    HallazgoCatalogoDestinos,
+    ResultadoResolucionDestino,
+    auditar_catalogo_destinos,
+    resolver_destino_ubicacion,
+)
 from atlas_core.inteligencia.resolucion_vehiculo import (
     HallazgoCatalogoVehiculos,
     ResultadoResolucionVehiculo,
@@ -107,6 +118,12 @@ from atlas_core.inteligencia.resolucion_vehiculo import (
 from atlas_core.inteligencia.snapshot_catalogo_clientes import (
     InstantaneaCatalogoClientes,
     crear_snapshot_catalogo_clientes,
+)
+from atlas_core.inteligencia.snapshot_catalogo_destinos import (
+    InstantaneaCatalogoDestinos,
+    crear_snapshot_catalogo_destinos,
+    normalizar_texto_destino,
+    region_canonica,
 )
 from atlas_core.inteligencia.snapshot_catalogo_choferes import (
     InstantaneaCatalogoChoferes,
@@ -169,4 +186,10 @@ __all__ = [
     "patente_chilena_valida", "resolver_vehiculo_patente",
     "InstantaneaCatalogoVehiculos", "crear_snapshot_catalogo_vehiculos",
     "normalizar_patente", "normalizar_rol_vehiculo",
+    "POLITICA_CONFIANZA_DESTINO_V1", "PoliticaConfianzaDestino",
+    "ViaDecisionDestino", "HallazgoCatalogoDestinos",
+    "ResultadoResolucionDestino", "auditar_catalogo_destinos",
+    "resolver_destino_ubicacion", "InstantaneaCatalogoDestinos",
+    "crear_snapshot_catalogo_destinos", "normalizar_texto_destino",
+    "region_canonica",
 ]
