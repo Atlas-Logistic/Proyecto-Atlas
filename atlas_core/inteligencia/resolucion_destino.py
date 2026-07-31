@@ -334,6 +334,12 @@ def resolver_destino_ubicacion(
     cliente_id = _resolver_cliente_id(
         snapshot, id_cliente_canonico, cliente_canonico
     )
+
+    def clientes_destino(registro: Mapping[str, Any]) -> frozenset[str]:
+        ids = registro.get("cliente_ids", ())
+        if isinstance(ids, str):
+            ids = (ids,)
+        return frozenset(str(item).strip() for item in ids if str(item).strip())
     nombre_generico = _nombre_generico(obs_nombre.valor_normalizado)
     datos: dict[str, dict[str, Any]] = {}
     nombre_fuertes: set[str] = set()
@@ -371,7 +377,7 @@ def resolver_destino_ubicacion(
         )
         score = evidencia_score + (
             20 if evidencia_score and cliente_id
-            and registro["cliente_id"] == cliente_id else 0
+            and cliente_id in clientes_destino(registro) else 0
         )
         if score:
             datos[identificador] = {
@@ -402,27 +408,32 @@ def resolver_destino_ubicacion(
             "Exige revisión y conserva ambos valores OCR.",
         ))
 
-    fuertes = nombre_fuertes | direccion_fuertes
-    if cliente_id and fuertes and not any(
-        snapshot.destinos[i]["cliente_id"] == cliente_id for i in fuertes
-    ):
-        contradicciones.append(ContradiccionResolucion(
-            ("cliente", "obra_destino"),
-            (),
-            tuple(
-                _entidad_destino(i, snapshot.destinos[i])
-                for i in sorted(fuertes)
-            ),
-            "El destino observado pertenece a otro cliente canónico.",
-            GravedadContradiccion.ALTA,
-            "El cliente reduce candidatos, pero nunca fuerza otro destino.",
-        ))
-
-    compatibles = {
-        i: d for i, d in datos.items()
-        if not cliente_id or d["registro"]["cliente_id"] == cliente_id
-    }
-    if cliente_id and compatibles:
+    if cliente_id:
+        candidatos_con_evidencia = dict(datos)
+        compatibles = {
+            i: d for i, d in datos.items()
+            if cliente_id in clientes_destino(d["registro"])
+        }
+        if candidatos_con_evidencia and not compatibles:
+            sin_relacion = all(
+                not clientes_destino(d["registro"])
+                for d in candidatos_con_evidencia.values()
+            )
+            contradicciones.append(ContradiccionResolucion(
+                ("cliente", "obra_destino"),
+                (),
+                tuple(
+                    _entidad_destino(i, d["registro"])
+                    for i, d in sorted(candidatos_con_evidencia.items())
+                ),
+                (
+                    "El catálogo no declara relación entre el cliente y el destino."
+                    if sin_relacion else
+                    "El destino observado pertenece explícitamente a otro cliente canónico."
+                ),
+                GravedadContradiccion.ALTA,
+                "El filtro cliente-destino es obligatorio y nunca falla abierto.",
+            ))
         datos = compatibles
     ranking = sorted(
         datos.items(),
@@ -487,6 +498,13 @@ def resolver_destino_ubicacion(
                     GravedadContradiccion.ALTA,
                     "Exige revisión; los números nunca se aproximan.",
                 ))
+        elif obs_direccion.disponibilidad is Disponibilidad.DISPONIBLE:
+            contradicciones.append(ContradiccionResolucion(
+                ("direccion", "direccion_canonica"), (), (entidad,),
+                "La dirección OCR no es compatible con el destino candidato.",
+                GravedadContradiccion.ALTA,
+                "Exige revisión antes de confirmar el destino.",
+            ))
         if (
             obs_comuna.disponibilidad is Disponibilidad.DISPONIBLE
             and not comunas_equivalentes(obs_comuna.valor_original, registro["comuna"])
@@ -601,6 +619,29 @@ def resolver_destino_ubicacion(
         via = ViaDecisionDestino.FUZZY_O_PARCIAL
     else:
         candidato = None
+
+    if estado is EstadoResolucion.CONFIRMADO:
+        relacion_valida = bool(
+            not cliente_id
+            or (registro and cliente_id in clientes_destino(registro))
+        )
+        direccion_valida = bool(
+            dato and (
+                obs_direccion.disponibilidad is Disponibilidad.AUSENTE
+                or dato["direccion_tipo"] not in {
+                    "SIN_COINCIDENCIA", "CONTRADICCION_NUMERO"
+                }
+            )
+        )
+        if not (
+            entidad and entidad.activa and seleccionado and not ambiguo
+            and registro and relacion_valida and direccion_valida
+            and not contradicciones
+        ):
+            raise AssertionError(
+                "invariante destino: CONFIRMADO exige candidato único, activo, "
+                "dirección y cliente compatibles y cero contradicciones"
+            )
 
     explicaciones = {
         ViaDecisionDestino.DESTINO_EXACTO_UNICO:

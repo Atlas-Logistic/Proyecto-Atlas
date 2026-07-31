@@ -91,6 +91,14 @@ def crear_snapshot_catalogo_destinos(
         ({
             "destino_id": str(r.get("destino_id", "")).strip(),
             "cliente_id": str(r.get("cliente_id", "")).strip(),
+            "cliente_ids": tuple(sorted({
+                str(cliente_id).strip()
+                for cliente_id in (
+                    r.get("cliente_ids", r.get("clientes_ids", ())) or ()
+                )
+                if str(cliente_id).strip()
+            } | ({str(r.get("cliente_id", "")).strip()}
+                 if str(r.get("cliente_id", "")).strip() else set()))),
             "nombre_destino": str(r.get("nombre_destino", "")).strip(),
             "direccion": str(r.get("direccion", "")).strip(),
             "comuna": str(r.get("comuna", "")).strip().upper(),
