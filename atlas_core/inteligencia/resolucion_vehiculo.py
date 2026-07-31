@@ -365,6 +365,7 @@ def resolver_vehiculo_patente(
     tracto = resueltos.get("patente_tracto")
     rampla = resueltos.get("patente_rampla")
     generica = resueltos.get("patente")
+    generica_observada = observaciones[2]
     intercambiados = bool(
         tracto and rampla
         and tracto[1]["tipo"] == "RAMPLA"
@@ -384,6 +385,31 @@ def resolver_vehiculo_patente(
             GravedadContradiccion.ALTA,
             "Exige revisión; no corrige silenciosamente los campos.",
         ))
+
+    if tracto and rampla and generica_observada.disponibilidad is not (
+        Disponibilidad.AUSENTE
+    ):
+        ids_par = {tracto[0].identificador, rampla[0].identificador}
+        generica_compatible = bool(
+            generica and generica[0].identificador in ids_par
+        )
+        if not generica_compatible:
+            evidencias_generica = tuple(
+                evidencia for evidencia in evidencias
+                if evidencia.observado.campo == "patente"
+            )
+            candidatos_generica = tuple(dict.fromkeys(
+                evidencia.candidato for evidencia in evidencias_generica
+                if evidencia.candidato is not None
+            ))
+            contradicciones.append(ContradiccionResolucion(
+                ("patente", "patente_tracto", "patente_rampla"),
+                evidencias_generica,
+                (tracto[0], rampla[0], *candidatos_generica),
+                "La patente genérica no corresponde al par tracto/rampla.",
+                GravedadContradiccion.ALTA,
+                "Exige revisión; la patente genérica no reemplaza la identidad principal.",
+            ))
 
     principal = tracto or generica or rampla
     es_cajita = bool(
@@ -498,12 +524,20 @@ def resolver_vehiculo_patente(
 
     tracto_canonico = tracto[0].valor if tracto else None
     rampla_canonica = rampla[0].valor if rampla else None
-    patente_canonica = (
-        generica[0].valor if generica else (
-            principal[0].valor if principal else None
-        )
-    )
+    patente_canonica = principal[0].valor if principal else None
     rol = str(principal[1]["tipo"]) if principal else None
+    if candidato and principal and (
+        patente_canonica != candidato.valor
+        or rol != str(principal[1]["tipo"])
+    ):
+        raise AssertionError(
+            "invariante vehículo: ID, patente y rol canónicos deben describir "
+            "la misma identidad"
+        )
+    if estado is EstadoResolucion.CONFIRMADO and contradicciones:
+        raise AssertionError(
+            "invariante vehículo: un resultado confirmado no admite contradicciones"
+        )
     rampla_salida = "NO_APLICA" if es_cajita else rampla_canonica
     contexto_salida = dict(contexto or {})
     contexto_salida["rampla_disponibilidad"] = (
