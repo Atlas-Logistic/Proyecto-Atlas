@@ -21,7 +21,7 @@
 - Cierre técnico del bloque ejecutado sin modificar datos reales ni introducir nuevas funcionalidades.
 - El bloque queda listo para integración en la rama oficial.
 
-## Bloque de lectura focal de transporte — consenso conservador
+## Bloque Lector Focal Adaptativo – Fase 1 (Relectura de campos numéricos)
 
 - Estado: COMPLETADO
 - Rama de trabajo: main
@@ -29,9 +29,22 @@
 - Fecha de cierre: 2026-07-31
 
 ### Resumen técnico
-- Se implementó un consenso conservador para lecturas focales de transporte.
-- La política confirma un transporte solo cuando existe soporte suficiente y devuelve REVISAR ante evidencia débil o contradictoria.
-- La validación incluyó 239 pruebas aprobadas, revisión adversarial independiente y comparación sobre guías reales.
+- Se implementó la relectura focal controlada sobre recortes de transporte.
+- La segunda lectura se evalúa antes de incorporarse como evidencia de consenso.
+- Se descartan lecturas idénticas o degradadas, y solo se conservan conflictos relevantes o evidencia útil.
+- No se modificó la política de decisión del consenso; se preserva la compatibilidad con extractor.py y procesamiento_masivo.py.
 
-### Riesgo de seguimiento
-- Monitorear en futuras validaciones masivas si aumenta el porcentaje de casos REVISAR tras la política conservadora de consenso focal.
+### Evidencia de cierre
+- 244 pruebas aprobadas.
+- 1 warning no bloqueante.
+- Exit code 0.
+- Revisión adversarial independiente aprobada.
+
+### Seguimientos no bloqueantes
+- Evolucionar el evaluador de evidencia hacia comparaciones semánticas además de literales.
+- Validar el lector focal adaptativo mediante pruebas E2E con imágenes reales.
+- Medir el impacto en rendimiento sobre procesamiento masivo.
+
+### Handoff
+- Cierre técnico del bloque ejecutado sin modificar la política de consenso ni introducir cambios en el contrato del flujo.
+- El bloque queda listo para integración en la rama oficial.

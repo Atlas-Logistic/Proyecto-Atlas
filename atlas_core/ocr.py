@@ -150,14 +150,8 @@ def _leer_transporte_focal(
 
     if lector is None:
         lector = crear_lector_ocr()
-    lecturas = []
-    for nombre, arreglo in arreglos:
-        resultados = lector.readtext(
-            arreglo,
-            detail=1,
-            paragraph=False,
-            allowlist="0123456789OoDdQqIl| .-",
-        )
+
+    def _extraer_texto_desde_resultados(resultados: Any) -> tuple[str, float | None]:
         segmentos = []
         confianzas = []
         for resultado in resultados:
@@ -171,11 +165,100 @@ def _leer_transporte_focal(
             if texto_resultado:
                 segmentos.append(texto_resultado)
         texto = " ".join(segmentos)
+        return texto, (min(confianzas) if confianzas else None)
+
+    lecturas = []
+    comparacion = {}
+    evaluacion = {}
+    for nombre, arreglo in arreglos:
+        resultados = lector.readtext(
+            arreglo,
+            detail=1,
+            paragraph=False,
+            allowlist="0123456789OoDdQqIl| .-",
+        )
+        texto, confianza = _extraer_texto_desde_resultados(resultados)
         lecturas.append(
             {
                 "variante": nombre,
                 "texto": texto,
-                "confianza": min(confianzas) if confianzas else None,
+                "confianza": confianza,
+                "relectura": False,
             }
         )
-    return {"recorte": recorte, "lecturas": lecturas}
+
+        texto_relectura = ""
+        confianza_relectura = None
+        if texto.strip():
+            relectura_resultados = lector.readtext(
+                arreglo,
+                detail=1,
+                paragraph=True,
+                allowlist="0123456789OoDdQqIl| .-",
+            )
+            texto_relectura, confianza_relectura = _extraer_texto_desde_resultados(
+                relectura_resultados
+            )
+            if texto_relectura and texto_relectura != texto:
+                lecturas.append(
+                    {
+                        "variante": f"{nombre}_relectura",
+                        "texto": texto_relectura,
+                        "confianza": confianza_relectura,
+                        "relectura": True,
+                    }
+                )
+
+        coincide = texto == texto_relectura
+        longitud_principal = len(texto.strip())
+        longitud_relectura = len(texto_relectura.strip())
+        calidad_principal = bool(texto.strip())
+        calidad_relectura = bool(texto_relectura.strip())
+        umbral_degradacion = max(4, longitud_principal // 2)
+        conflicto_relevante = (
+            calidad_principal
+            and calidad_relectura
+            and not coincide
+            and texto_relectura != texto
+            and longitud_relectura >= umbral_degradacion
+            and longitud_relectura >= longitud_principal - 2
+        )
+        if not calidad_principal:
+            motivo = "sin-lectura-principal"
+            incluir_consenso = False
+        elif not calidad_relectura:
+            motivo = "sin-relectura"
+            incluir_consenso = False
+        elif coincide:
+            motivo = "relectura-identica"
+            incluir_consenso = False
+        elif longitud_relectura < longitud_principal and longitud_relectura <= umbral_degradacion:
+            motivo = "relectura-degradada"
+            incluir_consenso = False
+        elif conflicto_relevante:
+            motivo = "conflicto-relevante"
+            incluir_consenso = True
+        else:
+            motivo = "relectura-no-util"
+            incluir_consenso = False
+
+        comparacion[nombre] = {
+            "principal": texto,
+            "relectura": texto_relectura,
+            "coincide": coincide,
+            "candidatos": [texto, texto_relectura],
+        }
+        evaluacion[nombre] = {
+            "incluir_en_consenso": incluir_consenso,
+            "conflicto_relevante": conflicto_relevante,
+            "motivo": motivo,
+            "longitud_principal": longitud_principal,
+            "longitud_relectura": longitud_relectura,
+        }
+
+    return {
+        "recorte": recorte,
+        "lecturas": lecturas,
+        "comparacion": comparacion,
+        "evaluacion": evaluacion,
+    }

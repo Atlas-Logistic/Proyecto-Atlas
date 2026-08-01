@@ -176,18 +176,26 @@ def test_transporte_focal_recorta_dinamicamente_dentro_de_limites_y_reutiliza_le
     ruta = tmp_path / "imagen.png"
     Image.new("RGB", (100, 60), color="white").save(ruta)
     lector = Mock()
-    lector.readtext.side_effect = [["0000348808"]] * 4
+    lector.readtext.side_effect = [["0000348808"]] * 8
     crear = Mock()
     monkeypatch.setattr(ocr, "crear_lector_ocr", crear)
 
     resultado = ocr._leer_transporte_focal(ruta, (20, 10, 80, 30), lector=lector)
 
     assert resultado["recorte"] == (13, 3, 87, 37)
-    assert [lectura["variante"] for lectura in resultado["lecturas"]] == [
+    assert [lectura["variante"] for lectura in resultado["lecturas"]][:4] == [
         "original", "grises", "ampliada_2x", "ampliada_2x_contraste"
     ]
-    assert [lectura["texto"] for lectura in resultado["lecturas"]] == ["0000348808"] * 4
-    assert lector.readtext.call_count == 4
+    assert [lectura["texto"] for lectura in resultado["lecturas"]][:4] == [
+        "0000348808"
+    ] * 4
+    assert lector.readtext.call_count == 8
+    assert [llamada.kwargs["paragraph"] for llamada in lector.readtext.call_args_list[:4]] == [
+        False,
+        True,
+        False,
+        True,
+    ]
     crear.assert_not_called()
 
 
@@ -202,7 +210,12 @@ def test_transporte_focal_caja_proxima_al_borde_se_limita_a_imagen(tmp_path):
     assert resultado["recorte"] == (0, 0, 40, 30)
     for llamada in lector.readtext.call_args_list:
         assert llamada.kwargs["detail"] == 1
-        assert llamada.kwargs["paragraph"] is False
+    assert [llamada.kwargs["paragraph"] for llamada in lector.readtext.call_args_list[:4]] == [
+        False,
+        False,
+        False,
+        False,
+    ]
 
 
 @pytest.mark.parametrize(
@@ -230,6 +243,115 @@ def test_transporte_focal_sin_resultados_conserva_cuatro_lecturas_vacias(tmp_pat
     resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
 
     assert [lectura["texto"] for lectura in resultado["lecturas"]] == [""] * 4
+
+
+def test_transporte_focal_compara_relecturas_y_entrega_evidencia_adicional(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348808", 0.91)],
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348608", 0.73)],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert resultado["comparacion"]["original"]["coincide"] is False
+    assert resultado["comparacion"]["original"]["candidatos"] == [
+        "0000348808",
+        "0000348608",
+    ]
+    assert any(lectura["texto"] == "0000348608" for lectura in resultado["lecturas"])
+
+
+def test_segunda_lectura_util_se_conserva_para_consenso(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348808", 0.91)],
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348608", 0.73)],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert resultado["evaluacion"]["original"]["incluir_en_consenso"] is True
+    assert resultado["evaluacion"]["original"]["conflicto_relevante"] is True
+
+
+def test_segunda_lectura_degradada_se_descarta(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348808", 0.91)],
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "00003", 0.73)],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert resultado["evaluacion"]["original"]["incluir_en_consenso"] is False
+    assert resultado["evaluacion"]["original"]["motivo"] == "relectura-degradada"
+
+
+def test_segunda_lectura_identica_se_descarta(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348808", 0.91)],
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348808", 0.73)],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert resultado["evaluacion"]["original"]["incluir_en_consenso"] is False
+    assert resultado["evaluacion"]["original"]["motivo"] == "relectura-identica"
+
+
+def test_conflicto_entre_lecturas_queda_marcado_para_consenso(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348808", 0.91)],
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "0000348608", 0.73)],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    ]
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert resultado["comparacion"]["original"]["coincide"] is False
+    assert resultado["evaluacion"]["original"]["conflicto_relevante"] is True
 
 
 def test_transporte_focal_rechaza_recorte_vacio(tmp_path):
