@@ -1,6 +1,7 @@
 """Validadores especializados y deterministas para datos de documentos."""
 
 import re
+from datetime import date
 
 from atlas_core.modelos import CampoProcesado, EstadoValidacion, FuenteCampo
 
@@ -127,4 +128,84 @@ def validar_rut_chileno(
         confianza=confianza,
         revision_humana=revision_humana,
         valor_original=valor_original,
+    )
+
+
+def validar_fecha(
+    valor: object,
+    nombre: str = "fecha",
+    fuente: FuenteCampo = FuenteCampo.EXTRACCION,
+    confianza: float = 0.0,
+    revision_humana: bool = False,
+    formato_esperado: str = "YYYY-MM-DD",
+) -> CampoProcesado:
+    """Valida una fecha explícita y la normaliza al formato ISO."""
+    formatos = {"YYYY-MM-DD", "DD/MM/YYYY"}
+    if formato_esperado not in formatos:
+        raise ValueError(
+            "Formato de fecha no soportado; use YYYY-MM-DD o DD/MM/YYYY"
+        )
+
+    if valor is None or (isinstance(valor, str) and not valor.strip()):
+        return CampoProcesado(
+            nombre=nombre,
+            valor=None,
+            fuente=fuente,
+            estado=EstadoValidacion.AUSENTE,
+            confianza=confianza,
+            revision_humana=revision_humana,
+        )
+
+    if not isinstance(valor, str):
+        return CampoProcesado(
+            nombre=nombre,
+            valor=valor,
+            fuente=fuente,
+            estado=EstadoValidacion.INVALIDO,
+            confianza=confianza,
+            revision_humana=revision_humana,
+            advertencias=["La fecha debe recibirse como texto"],
+        )
+
+    texto = valor.strip()
+    patron = r"([0-9]{4})-([0-9]{2})-([0-9]{2})" if formato_esperado == "YYYY-MM-DD" else r"([0-9]{2})/([0-9]{2})/([0-9]{4})"
+    coincidencia = re.fullmatch(patron, texto)
+    if coincidencia is None:
+        return CampoProcesado(
+            nombre=nombre,
+            valor=valor,
+            fuente=fuente,
+            estado=EstadoValidacion.INVALIDO,
+            confianza=confianza,
+            revision_humana=revision_humana,
+            advertencias=[f"La fecha no cumple el formato esperado {formato_esperado}"],
+        )
+
+    if formato_esperado == "YYYY-MM-DD":
+        anio, mes, dia = (int(parte) for parte in coincidencia.groups())
+    else:
+        dia, mes, anio = (int(parte) for parte in coincidencia.groups())
+
+    try:
+        fecha = date(anio, mes, dia)
+    except ValueError:
+        return CampoProcesado(
+            nombre=nombre,
+            valor=valor,
+            fuente=fuente,
+            estado=EstadoValidacion.INVALIDO,
+            confianza=confianza,
+            revision_humana=revision_humana,
+            advertencias=["La fecha no existe en el calendario"],
+        )
+
+    valor_canonico = fecha.isoformat()
+    return CampoProcesado(
+        nombre=nombre,
+        valor=valor_canonico,
+        fuente=fuente,
+        estado=EstadoValidacion.VALIDO,
+        confianza=confianza,
+        revision_humana=revision_humana,
+        valor_original=valor if valor != valor_canonico else None,
     )

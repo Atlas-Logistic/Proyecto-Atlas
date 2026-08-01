@@ -1,0 +1,27 @@
+{
+  "version_formato": 1,
+  "destinos": [
+    {
+      "destino_id": "00000000-0000-4000-8000-000000000201",
+      "cliente_id": "00000000-0000-4000-8000-000000000101",
+      "nombre_destino": "CENTRO DEMOSTRACIÓN NORTE",
+      "nombre_normalizado": "CENTRO DEMOSTRACION NORTE",
+      "codigo_destino": "DEMO-NORTE-01",
+      "direccion": "AVENIDA FICTICIA 200",
+      "comuna": "COMUNA DEMOSTRACIÓN",
+      "region": "REGIÓN DEMOSTRACIÓN",
+      "pais": "PAÍS DEMOSTRACIÓN",
+      "latitud": null,
+      "longitud": null,
+      "aliases": [
+        "BODEGA DEMO NORTE"
+      ],
+      "estado_calidad": "PENDIENTE",
+      "estado_vigencia": "ACTIVO",
+      "fuente": "PLANTILLA_SINTETICA",
+      "observacion": "Registro ficticio para demostrar el formato.",
+      "fecha_creacion": "2026-01-01T00:00:00+00:00",
+      "fecha_modificacion": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}

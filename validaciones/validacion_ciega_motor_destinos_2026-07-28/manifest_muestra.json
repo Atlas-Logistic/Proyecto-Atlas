@@ -1,0 +1,16 @@
+{
+  "cantidad": 64,
+  "casos_especiales": 8,
+  "distribucion": {
+    "AMBIGUA": 8,
+    "CONTRADICCION_COMUNA": 11,
+    "CONTRADICCION_REGION": 9,
+    "DATOS_INSUFICIENTES": 6,
+    "SIN_RESULTADOS": 6,
+    "VERIFICABLE_APROXIMADA": 12,
+    "VERIFICABLE_EXACTA": 12
+  },
+  "red_permitida": false,
+  "sintetica": true,
+  "version": "1"
+}

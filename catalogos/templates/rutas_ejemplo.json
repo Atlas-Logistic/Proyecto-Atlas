@@ -1,0 +1,29 @@
+{
+  "version_formato": 1,
+  "rutas": [
+    {
+      "ruta_id": "RUTA-SINTETICA-001",
+      "planta_id": "PLANTA-SINTETICA-001",
+      "destino_id": "DESTINO-SINTETICO-001",
+      "perfil_ruta": "driving-car",
+      "proveedor": "simulado",
+      "version_proveedor": "1",
+      "distancia_km": 12.5,
+      "duracion_estimada_min": 24.0,
+      "longitud_origen": -20.0,
+      "latitud_origen": -10.0,
+      "longitud_destino": -20.1,
+      "latitud_destino": -10.1,
+      "direccion_origen_normalizada": "AVENIDA FICTICIA 100 COMUNA DEMO REGION DEMO PAIS DEMO",
+      "direccion_destino_normalizada": "AVENIDA FICTICIA 200 COMUNA DEMO REGION DEMO PAIS DEMO",
+      "huella_direccion_origen": "HUELLA-SINTETICA-ORIGEN",
+      "huella_direccion_destino": "HUELLA-SINTETICA-DESTINO",
+      "estado": "RUTA_CALCULADA",
+      "motivo": "PLANTILLA_SINTETICA",
+      "vigente": true,
+      "fecha_calculo": "2026-01-01T00:00:00+00:00",
+      "fecha_creacion": "2026-01-01T00:00:00+00:00",
+      "fecha_modificacion": "2026-01-01T00:00:00+00:00"
+    }
+  ]
+}

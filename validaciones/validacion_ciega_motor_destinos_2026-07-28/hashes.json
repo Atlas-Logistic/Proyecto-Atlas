@@ -1,0 +1,13 @@
+{
+  "README.md": "1f402c3f10236287c4806f3a6dba18928dd04bbf402d184bbdb3555fffca6a30",
+  "comparacion.csv": "855d6bf86b8959469d9da3676763a7c6efe41ece6e7a1599b1954067f15cf045",
+  "diagnostico.csv": "96ead7bcbc38d7d81c18c148f0509dfcd0d56eab7d0d15c97be303c5edf585ca",
+  "ground_truth_congelado.csv": "504e7a503df657d435f919bb274f8267bea17373b62be559df1a03125293104c",
+  "hash_ground_truth.txt": "957f2b5a4a1ad8c1f90e3322f3de38373e5e0155cdf53c15aa41e6317c01e102",
+  "hash_predicciones.txt": "81e4e1f44872dd3d16dcc25c0c18c0db9b50f169dc489b0db351f0b763d126c5",
+  "manifest_muestra.json": "07f81edd346fadb775d98a331ed28110ba7495c91267b8820415ba3e7e4a47d5",
+  "metricas.json": "62cf2173dd02a3dfe6ea42d508967aede0f2d99499d185783054513e5e68b895",
+  "muestra_proveedor_simulado.json": "aa963e19a51efe72a70f444afb66b96a21475f444ad0e8e944a208583d2478f9",
+  "predicciones_congeladas.csv": "9929e5d7f7d2b3dc825163e28060ce0bcb4d48e663a28f54b93f66c55cbea3fc",
+  "predicciones_repeticion.csv": "9929e5d7f7d2b3dc825163e28060ce0bcb4d48e663a28f54b93f66c55cbea3fc"
+}

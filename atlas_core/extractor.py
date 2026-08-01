@@ -1,14 +1,553 @@
 """Extracción de datos desde texto reconocido."""
 
+import math
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from atlas_core.catalogos import enriquecer_datos_con_catalogos
 
 
+def _texto_simple(valor: str) -> str:
+    """Normaliza texto OCR para comparaciones, sin corregir su contenido."""
+    texto = re.sub(r"\s+", " ", str(valor or "")).strip(" :;,-.").upper()
+    return (
+        texto.replace("Á", "A")
+        .replace("É", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Ú", "U")
+        .replace("Ñ", "N")
+    )
+
+
+def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
+    """Convierte cajas OCR válidas en una representación geométrica estable."""
+    items = []
+    for bloque in bloques or []:
+        try:
+            texto = re.sub(r"\s+", " ", str(bloque.texto or "")).strip(" :;,-.")
+            puntos = bloque.bounding_box
+            if len(puntos) != 4 or any(len(punto) < 2 for punto in puntos):
+                continue
+            xs = [float(p[0]) for p in puntos]
+            ys = [float(p[1]) for p in puntos]
+            if not all(math.isfinite(valor) for valor in (*xs, *ys)):
+                continue
+        except (AttributeError, TypeError, ValueError):
+            continue
+        items.append(
+            {
+                "texto": texto,
+                "simple": _texto_simple(texto),
+                "x1": min(xs),
+                "y1": min(ys),
+                "x2": max(xs),
+                "y2": max(ys),
+                "cx": (min(xs) + max(xs)) / 2,
+                "cy": (min(ys) + max(ys)) / 2,
+                "h": max(max(ys) - min(ys), 1.0),
+                "confianza": (
+                    float(bloque.confianza)
+                    if isinstance(getattr(bloque, "confianza", None), (int, float))
+                    and math.isfinite(float(bloque.confianza))
+                    else 0.0
+                ),
+            }
+        )
+    items.sort(key=lambda item: (item["y1"], item["x1"], item["simple"]))
+    return items
+
+
+def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
+    """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    exclusiones = (
+        "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
+        "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
+        "SOLICITANTE", "TRANSPORTE", "FECHA", "ENTRADA", "SALIDA",
+        "OBRA DESTINO", "SENOR", "DESPACHAR A", "PESO", "BRUTO",
+        "TARA", "TOTAL", "VALOR", "NETO", "IVA",
+    )
+
+    def es_etiqueta(item: Dict[str, Any], campo: str) -> bool:
+        texto = item["simple"]
+        if campo == "cliente":
+            return bool(re.search(r"\bSENOR(?:ES|IES)?\b", texto)) or texto == "CLIENTE"
+        return "OBRA DESTINO" in texto or texto == "DESTINO"
+
+    def nominal(item: Dict[str, Any]) -> bool:
+        texto = item["simple"]
+        if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
+            return False
+        if any(palabra in texto for palabra in exclusiones):
+            return False
+        if re.fullmatch(r"[\d\W_]+", texto) or re.search(r"\b\d{1,2}[:;]\d{2}\b", texto):
+            return False
+        digitos = sum(caracter.isdigit() for caracter in texto)
+        if digitos and digitos >= sum(caracter.isalpha() for caracter in texto):
+            return False
+        return True
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.25:
+            if candidato["x1"] >= etiqueta["x2"] - 8:
+                distancia = max(0.0, candidato["x1"] - etiqueta["x2"])
+                return distancia / 350 + diferencia_y / (alto * 8)
+            if candidato["x2"] <= etiqueta["x1"] + 8:
+                distancia = max(0.0, etiqueta["x1"] - candidato["x2"])
+                return 0.18 + distancia / 350 + diferencia_y / (alto * 8)
+        solape_x = max(0.0, min(etiqueta["x2"], candidato["x2"]) - max(etiqueta["x1"], candidato["x1"]))
+        cerca_x = abs(candidato["cx"] - etiqueta["cx"]) <= 180
+        if solape_x > 0 or cerca_x:
+            if 0 < candidato["y1"] - etiqueta["y2"] <= 65:
+                return 0.28 + (candidato["y1"] - etiqueta["y2"]) / 160
+            if 0 < etiqueta["y1"] - candidato["y2"] <= 65:
+                return 0.34 + (etiqueta["y1"] - candidato["y2"]) / 160
+        return None
+
+    def seleccionar(campo: str) -> Optional[str]:
+        decisiones = []
+        for etiqueta in (item for item in items if es_etiqueta(item, campo)):
+            candidatos = []
+            for item in items:
+                if item is etiqueta or not nominal(item):
+                    continue
+                puntuacion = puntuar(etiqueta, item)
+                if puntuacion is None or puntuacion > 1.25:
+                    continue
+                # No atraviesa otra etiqueta: el candidato debe pertenecer a la
+                # zona de esta etiqueta y no estar más cerca de otra.
+                distancia_objetivo = abs(item["cx"] - etiqueta["cx"]) + abs(item["cy"] - etiqueta["cy"])
+                otras = [
+                    abs(item["cx"] - otra["cx"]) + abs(item["cy"] - otra["cy"])
+                    for otra in items
+                    if otra is not etiqueta and es_etiqueta(otra, campo)
+                ]
+                if otras and min(otras) + 8 < distancia_objetivo:
+                    continue
+                candidatos.append((puntuacion, item))
+
+            for puntuacion, item in candidatos:
+                decisiones.append((puntuacion, item["texto"].upper()))
+                for _, vecino in candidatos:
+                    if vecino is item:
+                        continue
+                    misma_fila = abs(vecino["cy"] - item["cy"]) <= max(vecino["h"], item["h"])
+                    brecha = vecino["x1"] - item["x2"]
+                    if misma_fila and 0 <= brecha <= 28:
+                        decisiones.append((puntuacion - 0.03, f'{item["texto"]} {vecino["texto"]}'.upper()))
+
+        if not decisiones:
+            return None
+        decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1]))
+        mejor_puntaje, mejor = decisiones[0]
+        # Variaciones de puntuación de hasta 0,06 representan la misma zona
+        # visual; se consideran ambiguas en vez de usar el orden OCR como desempate.
+        margen_ambiguedad = 0.06
+        equivalentes = {
+            valor for puntaje, valor in decisiones
+            if (
+                abs(puntaje - mejor_puntaje) <= margen_ambiguedad
+                and valor != mejor
+                and valor not in mejor
+            )
+        }
+        if equivalentes:
+            return None
+        return re.sub(r"\s+", " ", mejor).strip()
+
+    resultado = {}
+    cliente = seleccionar("cliente")
+    destino = seleccionar("obra destino")
+    if cliente:
+        resultado["cliente"] = cliente
+    if destino:
+        resultado["obra destino"] = destino
+    return resultado
+
+
+def _normalizar_transporte_aza(texto: str) -> Optional[tuple[str, bool]]:
+    """Aplica exclusivamente el contrato numérico contextual autorizado."""
+    sustituciones = {
+        "O": "0", "o": "0", "D": "0", "d": "0", "Q": "0", "q": "0",
+        "I": "1", "l": "1", "|": "1",
+    }
+    def normalizar_tramo(tramo: str) -> Optional[tuple[str, bool]]:
+        posiciones = re.sub(r"[ .-]", "", tramo)
+        if len(posiciones) != 10:
+            return None
+        digitos_originales = sum("0" <= caracter <= "9" for caracter in posiciones)
+        dudosos = len(posiciones) - digitos_originales
+        if digitos_originales < 8 or dudosos > 2:
+            return None
+        resultado = []
+        for caracter in posiciones:
+            if "0" <= caracter <= "9":
+                resultado.append(caracter)
+            elif caracter in sustituciones:
+                resultado.append(sustituciones[caracter])
+            else:
+                return None
+        valor = "".join(resultado)
+        return (valor, bool(dudosos)) if re.fullmatch(r"[0-9]{10}", valor) else None
+
+    completo = normalizar_tramo(texto)
+    if completo:
+        return completo
+    segmentos = [normalizar_tramo(segmento) for segmento in texto.split()]
+    validos = [segmento for segmento in segmentos if segmento is not None]
+    return validos[0] if len(validos) == 1 else None
+
+
+def _clasificar_evidencia_transporte(
+    texto: str, variante: str = "", confianza: Any = None
+) -> Dict[str, Any]:
+    """Clasifica una lectura focal sin equiparar evidencia exacta y corregida."""
+    base = {"texto": texto, "variante": variante, "confianza": confianza}
+    tramos_numericos = re.findall(r"[0-9](?:[0-9 .-]*[0-9])?", texto)
+    exactos = {
+        re.sub(r"[ .-]", "", tramo)
+        for tramo in tramos_numericos
+        if len(re.sub(r"[ .-]", "", tramo)) == 10
+    }
+    if len(exactos) == 1:
+        return {
+            **base,
+            "candidato": next(iter(exactos)),
+            "sustituciones": 0,
+            "categoria": "EXACTA",
+            "directa": True,
+        }
+    if len(exactos) > 1:
+        return {**base, "categoria": "INVALIDA", "motivo": "multiples-secuencias-exactas"}
+    if any(len(re.sub(r"[ .-]", "", tramo)) > 10 for tramo in tramos_numericos):
+        return {**base, "categoria": "INVALIDA", "motivo": "secuencia-numerica-mayor"}
+
+    normalizado = _normalizar_transporte_aza(texto)
+    if not normalizado:
+        return {**base, "categoria": "INVALIDA", "motivo": "contrato-incumplido"}
+    candidato, _ = normalizado
+
+    def sustituciones_tramo(tramo: str) -> Optional[int]:
+        posiciones = re.sub(r"[ .-]", "", tramo)
+        if len(posiciones) != 10:
+            return None
+        return sum(not ("0" <= caracter <= "9") for caracter in posiciones)
+
+    conteo = sustituciones_tramo(texto)
+    if conteo is None:
+        conteos = [sustituciones_tramo(segmento) for segmento in texto.split()]
+        validos = [valor for valor in conteos if valor is not None and valor <= 2]
+        conteo = validos[0] if len(validos) == 1 else None
+    if conteo not in {1, 2}:
+        return {**base, "categoria": "INVALIDA", "motivo": "sustituciones-invalidas"}
+    return {
+        **base,
+        "candidato": candidato,
+        "sustituciones": conteo,
+        "categoria": f"NORMALIZADA_{conteo}",
+        "directa": False,
+    }
+
+
+def _consensuar_transporte_focal(
+    lecturas: List[Any], texto_global: str = ""
+) -> Dict[str, Any]:
+    """Aplica jerarquía exacta y, sin exactas, mayoría posicional."""
+    evidencias = []
+    variantes_vistas = set()
+    for lectura in lecturas:
+        if isinstance(lectura, dict):
+            variante = str(lectura.get("variante", ""))
+            if variante and variante in variantes_vistas:
+                continue
+            if variante:
+                variantes_vistas.add(variante)
+            evidencias.append(
+                _clasificar_evidencia_transporte(
+                    str(lectura.get("texto", "")),
+                    variante,
+                    lectura.get("confianza"),
+                )
+            )
+        else:
+            evidencias.append(_clasificar_evidencia_transporte(str(lectura)))
+    validas = [evidencia for evidencia in evidencias if evidencia.get("candidato")]
+    normalizados = [str(evidencia["candidato"]) for evidencia in validas]
+    traza = {
+        "lecturas": [evidencia["texto"] for evidencia in evidencias],
+        "evidencias": evidencias,
+        "normalizados": normalizados,
+        "global": _normalizar_transporte_aza(texto_global),
+    }
+    exactos = {
+        str(evidencia["candidato"])
+        for evidencia in validas
+        if evidencia["categoria"] == "EXACTA"
+    }
+    if len(exactos) > 1:
+        return {**traza, "motivo": "candidatos-exactos-conflictivos"}
+    if len(exactos) == 1:
+        exacto = next(iter(exactos))
+        respaldos = [evidencia for evidencia in validas if evidencia["candidato"] == exacto]
+        if len(respaldos) >= 2:
+            return {
+                **traza,
+                "valor": exacto,
+                "motivo": "evidencia-exacta-con-respaldo-independiente",
+                "respaldos": len(respaldos),
+            }
+        return {**traza, "motivo": "evidencia-exacta-sin-respaldo"}
+    if len(normalizados) < 2:
+        return {**traza, "motivo": "menos-de-dos-lecturas-focales-validas"}
+    consenso = []
+    posiciones = []
+    for indice in range(10):
+        conteos: Dict[str, int] = {}
+        for candidato in normalizados:
+            digito = candidato[indice]
+            conteos[digito] = conteos.get(digito, 0) + 1
+        ordenados = sorted(conteos.items(), key=lambda item: (-item[1], item[0]))
+        ganador, votos = ordenados[0]
+        posiciones.append(conteos)
+        if votos <= len(normalizados) / 2:
+            return {
+                **traza,
+                "posiciones": posiciones,
+                "motivo": f"sin-mayoria-posicion-{indice}",
+            }
+        consenso.append(ganador)
+    return {
+        **traza,
+        "posiciones": posiciones,
+        "valor": "".join(consenso),
+        "motivo": "consenso-completo",
+    }
+
+
+def _extraer_transporte_geometrico(
+    bloques: List[Any], incluir_traza: bool = False
+) -> Dict[str, Any]:
+    """Localiza un identificador AZA de diez dígitos junto a su etiqueta."""
+    items = _normalizar_bloques_geometricos(bloques)
+
+    def es_etiqueta_transporte(item: Dict[str, Any]) -> bool:
+        texto = re.sub(r"[.,:;]", " ", item["simple"])
+        texto = re.sub(r"\s+", " ", texto).strip()
+        return bool(re.fullmatch(r"(?:NRO|NUMERO) TRANSPORTE", texto)) or texto == "TRANSPORTE"
+
+    def es_otra_etiqueta_numerica(item: Dict[str, Any]) -> bool:
+        texto = item["simple"]
+        return any(
+            patron in texto
+            for patron in (
+                "ORDEN DE COMPRA", "ORDEN COMPRA", "CODIGO CLIENTE",
+                "COD DESTINATARIO", "TELEFONO", "HORA ENTRADA",
+                "HORA SALIDA", "NUMERO SAP",
+            )
+        )
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+            brecha = max(0.0, candidato["x1"] - etiqueta["x2"])
+            if brecha <= 360:
+                return brecha / 360 + diferencia_y / (alto * 8)
+        diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+        alineado = abs(candidato["cx"] - etiqueta["cx"]) <= 190
+        if alineado and 0 < diferencia_vertical <= 70:
+            return 0.30 + diferencia_vertical / 175
+        return None
+
+    decisiones = []
+    etiquetas = [item for item in items if es_etiqueta_transporte(item)]
+    otras_etiquetas = [item for item in items if es_otra_etiqueta_numerica(item)]
+    for etiqueta in etiquetas:
+        for candidato in items:
+            if candidato is etiqueta:
+                continue
+            convertido = _normalizar_transporte_aza(candidato["texto"])
+            if convertido is None:
+                continue
+            puntuacion = puntuar(etiqueta, candidato)
+            if puntuacion is None:
+                continue
+            distancia = abs(candidato["cx"] - etiqueta["cx"]) + abs(candidato["cy"] - etiqueta["cy"])
+            distancias_ajenas = [
+                abs(candidato["cx"] - otra["cx"]) + abs(candidato["cy"] - otra["cy"])
+                for otra in otras_etiquetas
+            ]
+            if distancias_ajenas and min(distancias_ajenas) + 8 < distancia:
+                continue
+            decisiones.append((puntuacion, candidato["y1"], candidato["x1"], convertido, candidato))
+
+    if not decisiones:
+        return {}
+    decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1], decision[2], decision[3][0]))
+    mejor = decisiones[0]
+    if any(abs(decision[0] - mejor[0]) <= 0.06 for decision in decisiones[1:]):
+        return {}
+    resultado = {"valor": mejor[3][0], "corregido": mejor[3][1]}
+    if incluir_traza:
+        candidato = mejor[4]
+        resultado.update(
+            {
+                "texto_global": candidato["texto"],
+                "confianza": candidato["confianza"],
+                "caja": (candidato["x1"], candidato["y1"], candidato["x2"], candidato["y2"]),
+            }
+        )
+    return resultado
+
+
+def _chofer_lineal_contaminado(valor: Any) -> bool:
+    """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
+    texto = _texto_simple(str(valor or ""))
+    return any(
+        re.search(rf"(?<![A-Z0-9]){re.escape(etiqueta)}(?![A-Z0-9])", texto)
+        for etiqueta in (
+            "TOTAL EXENTO", "TOTAL", "NETO", "IVA", "PATENTE", "RETIRA",
+            "FECHA LLEGADA",
+        )
+    )
+
+
+def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza un nombre de chofer limpio en la zona geométrica de RETIRA."""
+    items = _normalizar_bloques_geometricos(bloques)
+    exclusiones = (
+        "TOTAL EXENTO", "TOTAL", "NETO", "IVA", "VALOR", "PESO", "TARA",
+        "BRUTO", "PATENTE", "CARRO", "FECHA", "LLEGADA", "RUT CHOFER",
+        "RETIRA", "DIRECCION", "DESPACHAR A", "RUT", "HORA",
+    )
+
+    def es_retiro(item: Dict[str, Any]) -> bool:
+        return item["simple"] == "RETIRA"
+
+    def es_contexto(item: Dict[str, Any]) -> bool:
+        return item["simple"] in {"PATENTE", "RUT CHOFER"}
+
+    def nominal(item: Dict[str, Any]) -> bool:
+        texto = item["texto"].strip()
+        simple = item["simple"]
+        contiene_exclusion = any(
+            re.search(rf"(?<![A-Z0-9]){re.escape(valor)}(?![A-Z0-9])", simple)
+            for valor in exclusiones
+        )
+        if not 2 <= len(texto) <= 60 or contiene_exclusion:
+            return False
+        if any(caracter.isdigit() for caracter in texto):
+            return False
+        if re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{5,8}", simple):
+            return False
+        componentes = texto.split()
+        if not componentes:
+            return False
+        patron = r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:[-'][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*"
+        return all(re.fullmatch(patron, componente) for componente in componentes)
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+            brecha = max(0.0, candidato["x1"] - etiqueta["x2"])
+            if brecha <= 300:
+                return brecha / 300 + diferencia_y / (alto * 8)
+        diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+        if abs(candidato["cx"] - etiqueta["cx"]) <= 170 and 0 < diferencia_vertical <= 65:
+            return 0.30 + diferencia_vertical / 160
+        return None
+
+    decisiones = []
+    contextos = [item for item in items if es_contexto(item)]
+    barreras = [
+        item for item in items
+        if any(
+            re.search(rf"(?<![A-Z0-9]){re.escape(etiqueta)}(?![A-Z0-9])", item["simple"])
+            for etiqueta in ("PATENTE", "RUT CHOFER", "CLIENTE", "DESPACHAR A", "DIRECCION")
+        )
+    ]
+    zonas_ajenas = [
+        item for item in items
+        if item["simple"] in {"CLIENTE", "DESPACHAR A", "DIRECCION"}
+    ]
+    for etiqueta in (item for item in items if es_retiro(item)):
+        candidatos = []
+        vistos = set()
+        for item in items:
+            if item is etiqueta or not nominal(item):
+                continue
+            clave = (item["texto"], item["x1"], item["y1"], item["x2"], item["y2"])
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            puntuacion = puntuar(etiqueta, item)
+            if puntuacion is None:
+                continue
+            distancia_retiro = abs(item["cx"] - etiqueta["cx"]) + abs(item["cy"] - etiqueta["cy"])
+            if zonas_ajenas and min(
+                abs(item["cx"] - zona["cx"]) + abs(item["cy"] - zona["cy"])
+                for zona in zonas_ajenas
+            ) + 8 < distancia_retiro:
+                continue
+            if contextos:
+                cercania = min(
+                    abs(item["cx"] - contexto["cx"]) + abs(item["cy"] - contexto["cy"])
+                    for contexto in contextos
+                )
+                if cercania > 330:
+                    continue
+                puntuacion -= min(0.08, 20 / max(cercania, 1))
+            candidatos.append((puntuacion, item))
+
+        candidatos.sort(key=lambda candidato: (candidato[1]["x1"], candidato[1]["y1"], candidato[1]["simple"]))
+        for indice, (puntuacion, item) in enumerate(candidatos):
+            if len(item["texto"].split()) >= 2:
+                decisiones.append((puntuacion, item["texto"].strip()))
+            cadena = [item]
+            for _, vecino in candidatos[indice + 1 : indice + 4]:
+                anterior = cadena[-1]
+                misma_fila = abs(vecino["cy"] - anterior["cy"]) <= max(vecino["h"], anterior["h"])
+                brecha = vecino["x1"] - anterior["x2"]
+                atraviesa_barrera = any(
+                    barrera not in cadena
+                    and barrera is not vecino
+                    and abs(barrera["cy"] - anterior["cy"]) <= max(barrera["h"], anterior["h"])
+                    and anterior["x2"] <= barrera["cx"] <= vecino["x1"]
+                    for barrera in barreras
+                )
+                if not misma_fila or not 0 <= brecha <= 40 or atraviesa_barrera:
+                    break
+                cadena.append(vecino)
+                compuesto = " ".join(bloque["texto"].strip() for bloque in cadena)
+                if 2 <= len(compuesto.split()) <= 4 and len(compuesto) <= 60:
+                    decisiones.append((puntuacion - 0.03 * (len(cadena) - 1), compuesto))
+
+    if not decisiones:
+        return {}
+    decisiones.sort(key=lambda decision: (round(decision[0], 6), _texto_simple(decision[1])))
+    mejor_puntaje, mejor = decisiones[0]
+    rivales = {
+        _texto_simple(valor)
+        for puntaje, valor in decisiones
+        if abs(puntaje - mejor_puntaje) <= 0.06
+        and _texto_simple(valor) != _texto_simple(mejor)
+        and _texto_simple(valor) not in _texto_simple(mejor)
+    }
+    if rivales:
+        return {}
+    return {"valor": re.sub(r"\s+", " ", mejor).strip()}
+
+
 def extraer_datos(
-    textos: List[str], carpeta_catalogos: str | Path = "catalogos"
+    textos: List[str], carpeta_catalogos: str | Path | None = None
 ) -> Dict[str, str]:
     texto_completo = "\n".join(textos)
     texto_mayus = texto_completo.upper()
@@ -503,5 +1042,7 @@ def extraer_datos(
         datos["hora de salida"] = "09:34"
         datos["peso"] = "43.624,000"
 
+    if carpeta_catalogos is None:
+        return datos
     return enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
 

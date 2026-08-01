@@ -1,0 +1,37 @@
+{
+  "acciones_permitidas": [
+    "EVALUAR_COORDENADAS",
+    "MANTENER",
+    "REPETIR_CONSULTA_MANUALMENTE",
+    "REVISAR_COMUNA",
+    "REVISAR_DIRECCION",
+    "REVISAR_NUMERACION",
+    "REVISAR_REGION",
+    "SIN_ACCION_AUTOMATICA"
+  ],
+  "consultas_reales_habilitadas": false,
+  "decision_humana_separada": true,
+  "destinos_leidos": 12,
+  "escritura_catalogo": false,
+  "fecha_evaluacion": "2026-07-28T23:30:00+00:00",
+  "max_consultas": 0,
+  "modo": "REVISION_HUMANA_SIN_ESCRITURA",
+  "orden_destinos": [
+    "09011c4c-15c6-425a-a825-ede7313b9e78",
+    "32d67fec-2b5d-4daf-8205-b78719bc4ab7",
+    "34b754bc-4d2f-4f3f-85e5-98d907106262",
+    "51b4cd04-0c4c-41f1-9fd2-3da535148c24",
+    "73b2f2a2-12a4-4a56-b9a4-3932adf8025c",
+    "7ca60aef-ae2e-4149-b2e5-408ff5e6da95",
+    "7df58eec-eff3-4a6a-bdfa-34509ee8d2a2",
+    "aa4e2bcb-c580-4e90-85ca-bd475514caed",
+    "aefa98d8-62b5-4538-b8d2-4e16f6ac5b15",
+    "b1332634-4904-4a1e-a0c2-f73e44beec6e",
+    "c64c55e3-2fd2-445f-ab0f-6546531034f3",
+    "f2cef3d4-c1a5-48e8-8713-067222aaada6"
+  ],
+  "proveedor": "respuestas-congeladas",
+  "solo_cache": true,
+  "timeout": 8.0,
+  "usar_cache": true
+}

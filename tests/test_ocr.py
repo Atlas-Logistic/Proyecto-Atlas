@@ -28,6 +28,40 @@ def test_abre_nombre_unicode_y_entrega_arreglo_rgb(tmp_path, monkeypatch):
     assert lector.readtext.call_args.kwargs == {"detail": 0, "paragraph": True}
 
 
+def test_llamada_tradicional_crea_easyocr_con_configuracion_esperada(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (2, 2), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = ["texto"]
+    crear_reader = Mock(return_value=lector)
+    monkeypatch.setattr(ocr.easyocr, "Reader", crear_reader)
+
+    assert ocr.leer_texto_imagen(ruta) == ["texto"]
+
+    crear_reader.assert_called_once_with(["es", "en"], gpu=False)
+    lector.readtext.assert_called_once()
+    assert lector.readtext.call_args.kwargs == {"detail": 0, "paragraph": True}
+
+
+def test_lector_inyectado_reutiliza_el_objeto_y_no_crea_otro(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (2, 2), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = ["texto"]
+    crear_reader = Mock()
+    monkeypatch.setattr(ocr.easyocr, "Reader", crear_reader)
+
+    assert ocr.leer_texto_imagen(ruta, lector=lector) == ["texto"]
+
+    crear_reader.assert_not_called()
+    lector.readtext.assert_called_once()
+    assert lector.readtext.call_args.kwargs == {"detail": 0, "paragraph": True}
+
+
 def test_aplica_orientacion_exif_antes_del_ocr(tmp_path, monkeypatch):
     ruta = tmp_path / "foto (teléfono).png"
     Image.new("RGB", (2, 3), color="red").save(ruta)
@@ -62,3 +96,145 @@ def test_archivo_invalido_incluye_ruta(tmp_path):
 
     with pytest.raises(ValueError, match="imagen inválida\\.jpg"):
         ocr.leer_texto_imagen(ruta)
+
+
+def test_leer_bloques_usa_detalle_y_sin_parrafos(tmp_path, monkeypatch):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (4, 3), color="white").save(ruta)
+    lector = preparar_lector(
+        monkeypatch,
+        [([[0, 0], [4, 0], [4, 2], [0, 2]], "Transporte", 0.91)],
+    )
+
+    bloques = ocr.leer_bloques_imagen(ruta)
+
+    assert lector.readtext.call_args.kwargs == {"detail": 1, "paragraph": False}
+    assert bloques == [
+        ocr.BloqueOCR(
+            texto="Transporte",
+            bounding_box=((0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (0.0, 2.0)),
+            confianza=0.91,
+        )
+    ]
+
+
+def test_leer_bloques_filtra_vacios_y_conserva_texto_original(tmp_path, monkeypatch):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (2, 2), color="white").save(ruta)
+    lector = preparar_lector(
+        monkeypatch,
+        [
+            ([[0, 0], [1, 0], [1, 1], [0, 1]], "  ", 0.2),
+            ([[0, 0], [2, 0], [2, 1], [0, 1]], " Texto ", 0.7),
+        ],
+    )
+
+    bloques = ocr.leer_bloques_imagen(ruta)
+
+    assert [bloque.texto for bloque in bloques] == [" Texto "]
+    assert bloques[0].confianza == 0.7
+
+
+def test_leer_bloques_reutiliza_lector_y_orienta_exif(tmp_path, monkeypatch):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (2, 3), color="red").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+    crear_lector = Mock()
+    monkeypatch.setattr(ocr, "crear_lector_ocr", crear_lector)
+    imagen_orientada = Image.new("RGB", (3, 2), color="blue")
+    exif_transpose = Mock(return_value=imagen_orientada)
+    monkeypatch.setattr(ocr.ImageOps, "exif_transpose", exif_transpose)
+
+    assert ocr.leer_bloques_imagen(ruta, lector=lector) == []
+
+    crear_lector.assert_not_called()
+    exif_transpose.assert_called_once()
+    imagen_ocr = lector.readtext.call_args.args[0]
+    assert imagen_ocr.shape == (2, 3, 3)
+
+
+@pytest.mark.parametrize(
+    ("preparar_ruta", "error"),
+    [
+        (lambda ruta: None, FileNotFoundError),
+        (lambda ruta: ruta.mkdir(), IsADirectoryError),
+        (lambda ruta: ruta.write_text("no es imagen", encoding="utf-8"), ValueError),
+    ],
+)
+def test_leer_bloques_mantiene_errores_claros(tmp_path, preparar_ruta, error):
+    ruta = tmp_path / "entrada.jpg"
+    preparar_ruta(ruta)
+
+    with pytest.raises(error):
+        ocr.leer_bloques_imagen(ruta)
+
+
+def test_transporte_focal_recorta_dinamicamente_dentro_de_limites_y_reutiliza_lector(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.side_effect = [["0000348808"]] * 4
+    crear = Mock()
+    monkeypatch.setattr(ocr, "crear_lector_ocr", crear)
+
+    resultado = ocr._leer_transporte_focal(ruta, (20, 10, 80, 30), lector=lector)
+
+    assert resultado["recorte"] == (13, 3, 87, 37)
+    assert [lectura["variante"] for lectura in resultado["lecturas"]] == [
+        "original", "grises", "ampliada_2x", "ampliada_2x_contraste"
+    ]
+    assert [lectura["texto"] for lectura in resultado["lecturas"]] == ["0000348808"] * 4
+    assert lector.readtext.call_count == 4
+    crear.assert_not_called()
+
+
+def test_transporte_focal_caja_proxima_al_borde_se_limita_a_imagen(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    resultado = ocr._leer_transporte_focal(ruta, (1, 1, 39, 29), lector=lector)
+
+    assert resultado["recorte"] == (0, 0, 40, 30)
+    for llamada in lector.readtext.call_args_list:
+        assert llamada.kwargs["detail"] == 1
+        assert llamada.kwargs["paragraph"] is False
+
+
+@pytest.mark.parametrize(
+    "caja",
+    [(0, 10, 15, 20), (85, 10, 100, 20), (10, 0, 30, 10), (10, 50, 30, 60)],
+)
+def test_transporte_focal_limita_recortes_en_cada_borde(tmp_path, caja):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    recorte = ocr._leer_transporte_focal(ruta, caja, lector=lector)["recorte"]
+
+    assert 0 <= recorte[0] < recorte[2] <= 100
+    assert 0 <= recorte[1] < recorte[3] <= 60
+
+
+def test_transporte_focal_sin_resultados_conserva_cuatro_lecturas_vacias(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    resultado = ocr._leer_transporte_focal(ruta, (5, 5, 30, 20), lector=lector)
+
+    assert [lectura["texto"] for lectura in resultado["lecturas"]] == [""] * 4
+
+
+def test_transporte_focal_rechaza_recorte_vacio(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (40, 30), color="white").save(ruta)
+
+    with pytest.raises(ValueError, match="dimensiones válidas"):
+        ocr._leer_transporte_focal(ruta, (10, 10, 10, 20), lector=Mock())
