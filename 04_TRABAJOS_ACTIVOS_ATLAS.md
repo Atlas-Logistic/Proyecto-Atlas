@@ -20,3 +20,18 @@
 ### Handoff
 - Cierre técnico del bloque ejecutado sin modificar datos reales ni introducir nuevas funcionalidades.
 - El bloque queda listo para integración en la rama oficial.
+
+## Bloque de lectura focal de transporte — consenso conservador
+
+- Estado: COMPLETADO
+- Rama de trabajo: main
+- Rama de integración: main
+- Fecha de cierre: 2026-07-31
+
+### Resumen técnico
+- Se implementó un consenso conservador para lecturas focales de transporte.
+- La política confirma un transporte solo cuando existe soporte suficiente y devuelve REVISAR ante evidencia débil o contradictoria.
+- La validación incluyó 239 pruebas aprobadas, revisión adversarial independiente y comparación sobre guías reales.
+
+### Riesgo de seguimiento
+- Monitorear en futuras validaciones masivas si aumenta el porcentaje de casos REVISAR tras la política conservadora de consenso focal.

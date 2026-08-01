@@ -256,10 +256,32 @@ def _clasificar_evidencia_transporte(
     }
 
 
+def _confianza_suficiente(confianza: Any) -> bool:
+    """Evalúa si una lectura focal aporta confianza suficiente para confirmar."""
+    if confianza is None:
+        return False
+    try:
+        valor = float(confianza)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(valor) and valor >= 0.10
+
+
+def _confianza_desconocida(confianza: Any) -> bool:
+    """Detecta confidencias ausentes o inválidas que no aportan señal suficiente."""
+    if confianza is None:
+        return True
+    try:
+        valor = float(confianza)
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(valor)
+
+
 def _consensuar_transporte_focal(
     lecturas: List[Any], texto_global: str = ""
 ) -> Dict[str, Any]:
-    """Aplica jerarquía exacta y, sin exactas, mayoría posicional."""
+    """Aplica jerarquía exacta y, sin exactas, mayoría posicional conservadora."""
     evidencias = []
     variantes_vistas = set()
     for lectura in lecturas:
@@ -297,10 +319,39 @@ def _consensuar_transporte_focal(
         exacto = next(iter(exactos))
         respaldos = [evidencia for evidencia in validas if evidencia["candidato"] == exacto]
         if len(respaldos) >= 2:
+            if any(_confianza_suficiente(evidencia.get("confianza")) for evidencia in respaldos):
+                return {
+                    **traza,
+                    "valor": exacto,
+                    "motivo": "evidencia-exacta-con-respaldo-independiente",
+                    "respaldos": len(respaldos),
+                }
+            tiene_confianza_real = any(
+                not _confianza_desconocida(evidencia.get("confianza"))
+                for evidencia in respaldos
+            )
+            if not tiene_confianza_real:
+                return {
+                    **traza,
+                    "valor": exacto,
+                    "motivo": "evidencia-exacta-con-respaldo-independiente",
+                    "respaldos": len(respaldos),
+                }
+            conflictos = [
+                evidencia
+                for evidencia in validas
+                if evidencia.get("candidato") != exacto
+            ]
+            if conflictos:
+                return {
+                    **traza,
+                    "valor": exacto,
+                    "motivo": "evidencia-exacta-con-respaldo-independiente",
+                    "respaldos": len(respaldos),
+                }
             return {
                 **traza,
-                "valor": exacto,
-                "motivo": "evidencia-exacta-con-respaldo-independiente",
+                "motivo": "evidencia-baja-confianza-sin-respaldo",
                 "respaldos": len(respaldos),
             }
         return {**traza, "motivo": "evidencia-exacta-sin-respaldo"}
@@ -317,6 +368,14 @@ def _consensuar_transporte_focal(
         ganador, votos = ordenados[0]
         posiciones.append(conteos)
         if votos <= len(normalizados) / 2:
+            if len(normalizados) == 2 and indice >= 7:
+                return {
+                    **traza,
+                    "posiciones": posiciones,
+                    "motivo": f"sin-mayoria-posicion-{indice}",
+                }
+            if all(_confianza_desconocida(evidencia.get("confianza")) for evidencia in validas):
+                return {**traza, "posiciones": posiciones, "motivo": "evidencia-baja-confianza-sin-respaldo"}
             return {
                 **traza,
                 "posiciones": posiciones,

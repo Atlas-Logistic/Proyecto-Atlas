@@ -161,6 +161,38 @@ def test_procesar_archivo_sin_etiqueta_no_ejecuta_ocr_focal(tmp_path, monkeypatc
     focal.assert_not_called()
 
 
+def test_procesar_archivo_abstiene_con_evidencia_focal_baja_confianza(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("NRO TRANSPORTE", ((10, 10), (130, 10), (130, 30), (10, 30)), 0.9),
+        BloqueOCR("00do348808", ((180, 10), (280, 10), (280, 30), (180, 30)), 0.8),
+    ]
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_transporte_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "0000348808", "confianza": 0.05},
+                    {"variante": "grises", "texto": "000o348808", "confianza": 0.06},
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value={"número de guía": "123456", "número de transporte": "No encontrado", "cliente": "A", "obra destino": "B"}),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["numero_transporte"] == "No encontrado"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
 def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch):
     ruta = tmp_path / "guia.jpg"
     bloques = [

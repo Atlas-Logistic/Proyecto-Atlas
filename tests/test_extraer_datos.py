@@ -512,6 +512,18 @@ def test_confianza_no_desplaza_jerarquia_de_evidencia():
     assert _consensuar_transporte_focal(lecturas)["valor"] == "0000348808"
 
 
+def test_consenso_focal_abstiene_con_evidencia_baja_confianza():
+    resultado = _consensuar_transporte_focal(
+        [
+            {"variante": "original", "texto": "0000348808", "confianza": 0.05},
+            {"variante": "grises", "texto": "000o348808", "confianza": 0.06},
+        ]
+    )
+
+    assert "valor" not in resultado
+    assert resultado["motivo"] == "evidencia-baja-confianza-sin-respaldo"
+
+
 def _chofer(*candidatos):
     return _extraer_chofer_geometrico(
         [_bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 50, 70), *candidatos]

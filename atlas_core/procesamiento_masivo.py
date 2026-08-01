@@ -370,6 +370,22 @@ def procesar_archivo(
                             datos["número de transporte"] = consenso["valor"]
                             transporte_corregido = True
                             logger.info("numero_transporte recuperado mediante consenso-focal-v1")
+                        elif consenso.get("motivo") in {
+                            "evidencia-baja-confianza-sin-respaldo",
+                            "sin-mayoria-posicion-0",
+                            "sin-mayoria-posicion-1",
+                            "sin-mayoria-posicion-2",
+                            "sin-mayoria-posicion-3",
+                            "sin-mayoria-posicion-4",
+                            "sin-mayoria-posicion-5",
+                            "sin-mayoria-posicion-6",
+                            "sin-mayoria-posicion-7",
+                            "sin-mayoria-posicion-8",
+                            "sin-mayoria-posicion-9",
+                            "menos-de-dos-lecturas-focales-validas",
+                        }:
+                            datos["número de transporte"] = "No encontrado"
+                            logger.info("numero_transporte abstiene por consenso-focal-conservador-v1")
                     else:
                         datos["número de transporte"] = decision_transporte["valor"]
                         logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
