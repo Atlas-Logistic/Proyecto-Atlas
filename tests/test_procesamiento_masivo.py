@@ -1,5 +1,6 @@
 import csv
 import sys
+from pathlib import Path
 from datetime import date
 from unittest.mock import Mock
 
@@ -21,6 +22,21 @@ from atlas_core.procesamiento_masivo import (
 def _crear_archivo(ruta):
     ruta.parent.mkdir(parents=True, exist_ok=True)
     ruta.write_bytes(b"simulado")
+
+
+def _dv(base: str) -> str:
+    suma = 0
+    factor = 2
+    for digito in reversed(base):
+        suma += int(digito) * factor
+        factor = factor + 1 if factor < 7 else 2
+    resto = 11 - suma % 11
+    return "0" if resto == 11 else "K" if resto == 10 else str(resto)
+
+
+def _rut(numero: int) -> str:
+    base = f"{numero:08d}"
+    return f"{base}-{_dv(base)}"
 
 
 def test_procesar_archivo_integra_asociacion_geometrica_y_mantiene_revision(
@@ -280,7 +296,313 @@ def _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo, bloques=None):
         )
 
 
-def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
+def _preparar_procesamiento_clientes(
+    monkeypatch,
+    datos,
+    *,
+    catalogo_clientes,
+    catalogo_choferes,
+    bloques=None,
+):
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[])
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=datos)
+    )
+
+    def _cargar_catalogo(ruta):
+        nombre = Path(ruta).name
+        if nombre == "clientes.json":
+            return catalogo_clientes
+        if nombre == "choferes.json":
+            return catalogo_choferes
+        return {}
+
+    cargador = Mock(side_effect=_cargar_catalogo)
+    monkeypatch.setattr(procesamiento_masivo, "cargar_catalogo_json", cargador)
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", cargador)
+    if bloques is not None:
+        monkeypatch.setattr(
+            procesamiento_masivo,
+            "leer_bloques_imagen",
+            Mock(return_value=bloques),
+        )
+
+
+def test_resolucion_de_cliente_confirma_con_motor_multicampo_y_conserva_ocr_en_contradiccion(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE OCR",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOTO",
+        "RUT del cliente": "11.111.111-1",
+    }
+    catalogo = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo",
+                "razon_social": "EMPRESA CATALOGO",
+                "nombre_comercial": "",
+                "rut": "111111111",
+                "aliases": [],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            }
+        ],
+    }
+    _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo)
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "CLIENTE OCR"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_resolucion_de_cliente_propuesto_marca_revision_en_flujo_principal(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "ACER0S DEMO DEL NORTE",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOT0",
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo-norte",
+                "razon_social": "ACEROS DEMO DEL NORTE SpA",
+                "nombre_comercial": "ACEROS NORTE DEMO",
+                "rut": _rut(101),
+                "aliases": ["ADN DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            }
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "ACER0S DEMO DEL NORTE"
+    assert resultado["chofer"] == "MARIO SOTO"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_resolucion_de_cliente_no_resuelto_marca_revision_en_flujo_principal(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE COMPLETAMENTE AJENO",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOT0",
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo-norte",
+                "razon_social": "ACEROS DEMO DEL NORTE SpA",
+                "nombre_comercial": "ACEROS NORTE DEMO",
+                "rut": _rut(101),
+                "aliases": ["ADN DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            }
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "CLIENTE COMPLETAMENTE AJENO"
+    assert resultado["chofer"] == "MARIO SOTO"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_resolucion_de_cliente_alias_ambiguo_marca_revision_en_flujo_principal(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "GRUPO DEMO",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOT0",
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "uno",
+                "razon_social": "EMPRESA DEMO UNO SA",
+                "nombre_comercial": "",
+                "rut": _rut(101),
+                "aliases": ["GRUPO DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            },
+            {
+                "cliente_id": "dos",
+                "razon_social": "EMPRESA DEMO DOS SPA",
+                "nombre_comercial": "",
+                "rut": _rut(202),
+                "aliases": ["GRUPO DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            },
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "GRUPO DEMO"
+    assert resultado["chofer"] == "MARIO SOTO"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_resolucion_de_cliente_rut_contradictorio_marca_revision_en_flujo_principal(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "ADN DEMO",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOT0",
+        "RUT del cliente": _rut(202),
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo-norte",
+                "razon_social": "ACEROS DEMO DEL NORTE SpA",
+                "nombre_comercial": "ACEROS NORTE DEMO",
+                "rut": _rut(101),
+                "aliases": ["ADN DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            },
+            {
+                "cliente_id": "cliente-demo-sur",
+                "razon_social": "TRANSPORTES DEMO DEL SUR LTDA.",
+                "nombre_comercial": "",
+                "rut": _rut(202),
+                "aliases": ["TDS DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            },
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "ADN DEMO"
+    assert resultado["chofer"] == "MARIO SOTO"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_resolucion_de_cliente_alias_unico_confirma_contrato_definitivo_de_catalogo(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "ADN DEMO",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOT0",
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo-norte",
+                "razon_social": "ACEROS DEMO DEL NORTE SpA",
+                "nombre_comercial": "ACEROS NORTE DEMO",
+                "rut": _rut(101),
+                "aliases": ["ADN DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            }
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "ACEROS DEMO DEL NORTE SpA"
+    assert resultado["chofer"] == "MARIO SOTO"
+    assert resultado["indicador_revision"] == "OK"
+
+
+def test_resolucion_de_chofer_confirma_por_rut_en_flujo_principal(
     tmp_path, monkeypatch
 ):
     datos = {
@@ -288,16 +610,15 @@ def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
         "número de transporte": "0000123456",
         "cliente": "CLIENTE ORIGINAL",
         "obra destino": "DESTINO ORIGINAL",
-        "chofer": "ENRIQUE RANOS",
-        "RUT del chofer": "No encontrado",
+        "chofer": "NOMBRE OCR",
+        "RUT del chofer": "11.111.111-1",
         "patente del tracto": "ABCD12",
         "patente del carro": "EFGH34",
     }
-    _preparar_procesamiento_fuzzy(
-        monkeypatch,
-        datos,
-        {"1": {"nombre": "ENRIQUE RAMOS", "activo": True}},
-    )
+    catalogo = {
+        "111111111": {"nombre": "ENRIQUE RAMOS", "activo": True},
+    }
+    _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo)
 
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 
@@ -308,9 +629,10 @@ def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
     assert resultado["obra_destino"] == "DESTINO ORIGINAL"
     assert resultado["patente_tracto"] == "ABCD12"
     assert resultado["patente_rampla"] == "EFGH34"
+    assert resultado["indicador_revision"] == "REVISAR"
 
 
-def test_fuzzy_se_aplica_al_chofer_del_fallback_y_conserva_revision(
+def test_resolucion_de_chofer_abstiene_con_evidencia_debil_y_marca_revision(
     tmp_path, monkeypatch
 ):
     datos = {
@@ -336,7 +658,7 @@ def test_fuzzy_se_aplica_al_chofer_del_fallback_y_conserva_revision(
 
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 
-    assert resultado["chofer"] == "ENRIQUE RAMOS"
+    assert resultado["chofer"] == "No encontrado"
     assert resultado["indicador_revision"] == "REVISAR"
 
 

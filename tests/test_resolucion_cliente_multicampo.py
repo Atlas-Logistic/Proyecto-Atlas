@@ -109,6 +109,17 @@ def test_nombre_fuerte_sin_rut_confirma(catalogo):
     assert resultado.identificador_canonico == "cliente:cliente-demo-norte"
 
 
+def test_contexto_compatible_refuerza_evidencia_sin_sustituir_decision(catalogo):
+    resultado = resolver_cliente_rut(
+        "ADN DEMO",
+        "",
+        catalogo,
+        {"destino": "ACEROS DEMO DEL NORTE", "material": "BARRAS"},
+    )
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert any(e.tipo == "CONTEXTO_COMPATIBLE" for e in resultado.evidencias)
+
+
 def test_rut_fuerte_sin_nombre_confirma(catalogo):
     resultado = resolver_cliente_rut("", _rut(202), catalogo)
     assert resultado.estado is EstadoResolucion.CONFIRMADO

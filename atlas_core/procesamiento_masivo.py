@@ -12,10 +12,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from atlas_core.catalogos import (
-    buscar_chofer_por_rut,
     cargar_catalogo_json,
     enriquecer_datos_con_catalogos,
-    resolver_nombre_chofer_difuso,
 )
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
@@ -27,6 +25,9 @@ from atlas_core.extractor import (
     _extraer_chofer_geometrico,
     extraer_datos,
 )
+from atlas_core.inteligencia.contrato_multicampo import EstadoResolucion
+from atlas_core.inteligencia.resolucion_chofer import resolver_chofer_rut
+from atlas_core.inteligencia.resolucion_cliente import resolver_cliente_rut
 from atlas_core.ocr import (
     _leer_transporte_focal,
     crear_lector_ocr,
@@ -343,7 +344,10 @@ def procesar_archivo(
             chofer_actual = datos.get("chofer", "No encontrado")
             if chofer_actual in {None, "", "No encontrado"} or _chofer_lineal_contaminado(chofer_actual):
                 decision_chofer = _extraer_chofer_geometrico(bloques_guia)
-                if decision_chofer.get("valor"):
+                if decision_chofer.get("valor") and (
+                    _chofer_lineal_contaminado(chofer_actual)
+                    or chofer_actual not in {None, "", "No encontrado"}
+                ):
                     datos["chofer"] = decision_chofer["valor"]
                     recuperacion_chofer = True
                     logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
@@ -392,30 +396,58 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
 
+    nombre_chofer_original = str(datos.get("chofer", "No encontrado")).strip()
+    nombre_cliente_original = str(datos.get("cliente", "No encontrado")).strip()
     datos = enriquecer_datos_con_catalogos(
         datos, textos, carpeta_catalogos or "catalogos"
     )
-    nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()
-    if nombre_chofer not in {"", "No encontrado"}:
+    nombre_chofer_ocr = nombre_chofer_original
+    rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
+    rut_cliente = str(datos.get("RUT del cliente", "No encontrado")).strip()
+    nombre_cliente_ocr = nombre_cliente_original
+    decision_cliente = None
+    contexto_cliente = {
+        "fuente": "procesamiento_masivo",
+        "destino": str(datos.get("obra destino", "No encontrado")).strip(),
+    }
+    if nombre_cliente_ocr not in {"", "No encontrado"} or rut_cliente not in {"", "No encontrado"}:
+        catalogo_clientes = cargar_catalogo_json(
+            Path(carpeta_catalogos or "catalogos") / "clientes.json"
+        )
+        decision_cliente = resolver_cliente_rut(
+            nombre_cliente_ocr,
+            rut_cliente,
+            catalogo_clientes,
+            contexto=contexto_cliente,
+        )
+        if decision_cliente.estado is EstadoResolucion.CONFIRMADO:
+            datos["cliente"] = decision_cliente.valor_canonico or nombre_cliente_ocr
+        else:
+            datos["cliente"] = nombre_cliente_ocr or str(datos.get("cliente", "No encontrado")).strip()
+        logger.info(
+            "resolucion-cliente-multicampo-v1 estado=%s via=%s",
+            decision_cliente.estado.value,
+            decision_cliente.via_decision,
+        )
+    if nombre_chofer_ocr not in {"", "No encontrado"} or rut_chofer not in {"", "No encontrado"}:
         catalogo_choferes = cargar_catalogo_json(
             Path(carpeta_catalogos or "catalogos") / "choferes.json"
         )
-        rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
-        if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is None:
-            decision_fuzzy = resolver_nombre_chofer_difuso(
-                catalogo_choferes, nombre_chofer
-            )
-            if decision_fuzzy.estado == "COINCIDENCIA_SEGURA":
-                datos["chofer"] = decision_fuzzy.valor_resultado
-            logger.info(
-                "fuzzy-matching-catalogo-choferes-v1 estado=%s similitud=%s",
-                decision_fuzzy.estado,
-                (
-                    f"{decision_fuzzy.similitud:.3f}"
-                    if decision_fuzzy.similitud is not None
-                    else "n/a"
-                ),
-            )
+        decision_chofer = resolver_chofer_rut(
+            nombre_chofer_ocr,
+            rut_chofer,
+            catalogo_choferes,
+            contexto={"fuente": "procesamiento_masivo"},
+        )
+        if decision_chofer.estado is EstadoResolucion.CONFIRMADO:
+            datos["chofer"] = decision_chofer.valor_canonico or nombre_chofer_ocr
+        else:
+            datos["chofer"] = nombre_chofer_ocr or str(datos.get("chofer", "No encontrado")).strip()
+        logger.info(
+            "resolucion-chofer-multicampo-v1 estado=%s via=%s",
+            decision_chofer.estado.value,
+            decision_chofer.via_decision,
+        )
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
         try:
@@ -437,7 +469,14 @@ def procesar_archivo(
     )
     requiere_revision = any(
         not valor or valor == "No encontrado" for valor in valores_clave
-    ) or not descripcion or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
+    ) or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
+    if nombre_chofer_original not in {"", "No encontrado"} and datos.get("chofer") == nombre_chofer_original:
+        requiere_revision = True
+    if (
+        decision_cliente is not None
+        and decision_cliente.estado is not EstadoResolucion.CONFIRMADO
+    ):
+        requiere_revision = True
 
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),

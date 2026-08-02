@@ -325,6 +325,52 @@ def _similitud(izquierda: str, derecha: str) -> float:
     return difflib.SequenceMatcher(None, izquierda, derecha).ratio()
 
 
+def _contexto_compatible(
+    registro: Mapping[str, Any],
+    entidad: EntidadCanonica,
+    contexto: Mapping[str, Any] | None,
+) -> bool:
+    if not contexto:
+        return False
+    if not registro or not entidad:
+        return False
+    valores_contexto = []
+    for clave in ("destino", "material"):
+        valor = contexto.get(clave)
+        if not valor:
+            continue
+        texto = str(valor).strip()
+        if texto:
+            valores_contexto.append(texto)
+    if not valores_contexto:
+        return False
+    variantes = set()
+    for campo in ("razon_social", "nombre_comercial"):
+        valor = str(registro.get(campo, "") or "").strip()
+        if valor:
+            variantes.add(normalizar_nombre_cliente_multicampo(valor))
+    for alias in registro.get("aliases", ()) or ():
+        valor = str(alias).strip()
+        if valor:
+            variantes.add(normalizar_nombre_cliente_multicampo(valor))
+    if not variantes:
+        return False
+    for valor_contexto in valores_contexto:
+        contexto_norm = normalizar_nombre_cliente_multicampo(valor_contexto)
+        if not contexto_norm:
+            continue
+        for variante in variantes:
+            if not variante:
+                continue
+            if variante == contexto_norm:
+                return True
+            if variante in contexto_norm or contexto_norm in variante:
+                return True
+            if _similitud(variante, contexto_norm) >= 0.8:
+                return True
+    return False
+
+
 def resolver_cliente_rut(
     cliente_ocr: object,
     rut_cliente_ocr: object,
@@ -588,11 +634,38 @@ def resolver_cliente_rut(
                 ))
 
     candidato = rut_entidad or nombre_entidad
-    via = ViaDecisionCliente.NO_RESUELTO
-    razones = [
+    razones: list[str] = [
         "Los valores OCR originales se conservaron sin sobrescritura.",
         "Solo cliente y RUT participaron en la decisión.",
         "No hubo aprendizaje ni escritura de catálogos.",
+    ]
+    if contexto and candidato:
+        compatible = _contexto_compatible(
+            next(
+                registro
+                for _, registro, entidad in registros
+                if entidad.identificador == candidato.identificador
+            ),
+            candidato,
+            contexto,
+        )
+        if compatible:
+            evidencias.append(EvidenciaResolucion(
+                "CONTEXTO_COMPATIBLE",
+                "contexto_operacional",
+                nombre_obs,
+                candidato,
+                0.25,
+                "El contexto de destino o material fue consistente con la identidad propuesta.",
+                True,
+            ))
+            razones.append("El contexto operacional reforzó la decisión, pero no reemplazó la evidencia principal.")
+        else:
+            razones.append("El contexto operacional no aportó una coincidencia suficiente y se descartó como fuente principal.")
+
+    via = ViaDecisionCliente.NO_RESUELTO
+    razones = [
+        *razones,
     ]
     if len(rut_matches) > 1:
         estado = EstadoResolucion.REQUIERE_REVISION
@@ -641,6 +714,18 @@ def resolver_cliente_rut(
         estado = EstadoResolucion.REQUIERE_REVISION
         via = ViaDecisionCliente.CONTRADICCION
         razones.append("El RUT observado es inválido por módulo 11 o formato.")
+    elif (
+        rut_entidad
+        and nombre_obs.valor_normalizado
+        and not nombre_matches
+        and not nombre_fuerte
+    ):
+        candidato = None
+        estado = EstadoResolucion.REQUIERE_REVISION
+        via = ViaDecisionCliente.CONTRADICCION
+        razones.append(
+            "El nombre OCR no coincide con la identidad del RUT; se conserva el OCR y se requiere revisión."
+        )
     elif rut_entidad:
         estado = EstadoResolucion.CONFIRMADO
         if nombre_entidad == rut_entidad:

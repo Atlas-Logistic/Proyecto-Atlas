@@ -139,7 +139,7 @@ def test_fuzzy_chofer_catalogo_vacio_o_no_disponible(tmp_path):
     assert vacio.valor_resultado == no_disponible.valor_resultado == "NOMBRE ORIGINAL"
 
 
-def test_enriquecer_datos_con_catalogos(tmp_path):
+def test_enriquecer_datos_con_catalogos_conserva_cliente_y_corrige_campos_auxiliares(tmp_path):
     catalogos = {
         "empresas.json": {
             "12345678K": {
@@ -177,7 +177,7 @@ def test_enriquecer_datos_con_catalogos(tmp_path):
 
     enriquecidos = enriquecer_datos_con_catalogos(datos, textos, tmp_path)
 
-    assert enriquecidos["cliente"] == "EMPRESA FICTICIA OFICIAL SPA"
+    assert enriquecidos["cliente"] == "EMPRESA MAL LEIDA"
     assert enriquecidos["chofer"] == "CHOFER FICTICIO OFICIAL"
     assert enriquecidos["obra destino"] == "DESTINO FICTICIO OFICIAL"
     assert enriquecidos["patente del tracto"] == "ABCD12"
@@ -240,7 +240,7 @@ def test_enriquecer_sin_archivos_y_extraer_con_ruta_opcional(tmp_path):
     assert all(valor == "No encontrado" for valor in extraidos.values())
 
 
-def test_clientes_y_destinos_maestros_solo_resuelven_identidad_exacta_apta(tmp_path):
+def test_destinos_maestros_corrigen_destino_sin_sobrescribir_cliente(tmp_path):
     for nombre in ("empresas.json", "destinos.json", "choferes.json", "vehiculos.json"):
         (tmp_path / nombre).write_text("{}", encoding="utf-8")
     (tmp_path / "clientes.json").write_text(json.dumps({"clientes": [{
@@ -263,5 +263,5 @@ def test_clientes_y_destinos_maestros_solo_resuelven_identidad_exacta_apta(tmp_p
         datos, ["CODIGO DESTINATARIO: D001"], tmp_path
     )
 
-    assert salida["cliente"] == "CLIENTE DEMO CONFIRMADO"
+    assert salida["cliente"] == "LECTURA ORIGINAL"
     assert salida["obra destino"] == "DESTINO DEMO DOCUMENTAL"

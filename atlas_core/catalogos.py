@@ -225,21 +225,6 @@ def _buscar_destino_en_textos(
     return None
 
 
-def _buscar_cliente_maestro_por_rut(contenido: Any, rut: str) -> dict[str, Any] | None:
-    rut_normalizado = normalizar_rut(rut)
-    if not rut_normalizado or not isinstance(contenido, dict):
-        return None
-    for registro in contenido.get("clientes", []):
-        if (
-            isinstance(registro, dict)
-            and registro.get("estado_calidad") == "CONFIRMADO"
-            and registro.get("estado_vigencia") == "ACTIVO"
-            and normalizar_rut(str(registro.get("rut", ""))) == rut_normalizado
-        ):
-            return registro
-    return None
-
-
 def _buscar_destino_maestro_en_textos(
     textos: list[str], contenido: Any
 ) -> dict[str, Any] | None:
@@ -270,29 +255,14 @@ def enriquecer_datos_con_catalogos(
     textos: list[str],
     carpeta_catalogos: str | Path = "catalogos",
 ) -> dict[str, str]:
-    """Corrige datos OCR usando catálogos locales sin modificar esos archivos."""
+    """Corrige campos auxiliares con catálogos; la identidad del cliente se resuelve aparte."""
     carpeta = Path(carpeta_catalogos)
-    empresas = cargar_catalogo_json(carpeta / "empresas.json")
     destinos = cargar_catalogo_json(carpeta / "destinos.json")
-    clientes_maestros = cargar_catalogo_json(carpeta / "clientes.json")
     destinos_maestros = cargar_catalogo_json(carpeta / "destinos_maestros.json")
     choferes = cargar_catalogo_json(carpeta / "choferes.json")
     vehiculos = cargar_catalogo_json(carpeta / "vehiculos.json")
 
     datos_enriquecidos = datos.copy()
-
-    empresa = buscar_empresa_por_rut(empresas, datos.get("RUT del cliente", ""))
-    cliente_maestro = _buscar_cliente_maestro_por_rut(
-        clientes_maestros, datos.get("RUT del cliente", "")
-    )
-    if cliente_maestro is not None:
-        razon_social = cliente_maestro.get("razon_social")
-        if isinstance(razon_social, str) and razon_social.strip():
-            datos_enriquecidos["cliente"] = razon_social.strip()
-    elif empresa is not None:
-        nombre_empresa = empresa.get("nombre")
-        if isinstance(nombre_empresa, str) and nombre_empresa.strip():
-            datos_enriquecidos["cliente"] = nombre_empresa.strip()
 
     nombre_ocr = str(datos.get("chofer", "")).strip()
     decision_nombre = resolver_nombre_chofer_difuso(choferes, nombre_ocr)
