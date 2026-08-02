@@ -58,6 +58,15 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Justificación: el bloque quedó estable, auditado y con contrato unificado; el riesgo restante es conocido, acotado y no invalida la centralización de decisión en `resolucion_cliente.py`.
 - Acuerdo entre herramientas: Clientes queda cerrado solo después de commit, integración y publicación en `origin/main`, y Destinos no debe abrirse antes de confirmar ese estado.
 
+### 2026-08-01 — Infraestructura mínima de integración multicampo
+- Decisión importante: introducir un helper mínimo en `procesamiento_masivo.py` para encapsular la integración común de resoluciones multicampo, sin mover reglas de matching ni políticas de negocio fuera de sus resolvers.
+- Cambio de estrategia: reutilizar solo la capa repetida de aplicación del valor canónico, conservación del OCR, logging homogéneo y propagación opcional de revisión según contrato.
+- Alternativas descartadas: crear un framework genérico de resolución, abstraer las reglas de matching nombre/RUT o unificar prematuramente Choferes, Clientes, Destinos y Materiales bajo una arquitectura nueva.
+- Problemas encontrados: Choferes y Clientes repetían la misma capa de integración en el flujo principal, que ya había demostrado ser un punto sensible a defectos de propagación de estado.
+- Justificación: la deduplicación se concentra en la zona de mayor retorno y menor riesgo; la lógica de negocio permanece intacta y las pruebas del comportamiento previo siguen aprobando sin cambios funcionales.
+- Acuerdo entre herramientas: migrar primero Choferes y Clientes al helper mínimo; Destinos y Materiales no se incorporan todavía a esta infraestructura.
+- Decisión permanente: a partir de este cambio, toda integración entre un resolver multicampo y `procesamiento_masivo` deberá realizarse mediante el helper de integración oficial. No se permitirá duplicar nuevamente esta lógica en futuros resolvers.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.

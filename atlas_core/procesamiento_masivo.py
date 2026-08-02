@@ -25,7 +25,10 @@ from atlas_core.extractor import (
     _extraer_chofer_geometrico,
     extraer_datos,
 )
-from atlas_core.inteligencia.contrato_multicampo import EstadoResolucion
+from atlas_core.inteligencia.contrato_multicampo import (
+    EstadoResolucion,
+    ResultadoResolucion,
+)
 from atlas_core.inteligencia.resolucion_chofer import resolver_chofer_rut
 from atlas_core.inteligencia.resolucion_cliente import resolver_cliente_rut
 from atlas_core.ocr import (
@@ -312,6 +315,31 @@ def extraer_fecha(
     return "No encontrado"
 
 
+def _integrar_resolucion_multicampo(
+    *,
+    valor_ocr: str,
+    valor_actual: object,
+    resultado: ResultadoResolucion,
+    etiqueta_log: str,
+    propagar_revision_contrato: bool,
+) -> tuple[str, bool]:
+    if resultado.estado is EstadoResolucion.CONFIRMADO:
+        valor_final = resultado.valor_canonico or valor_ocr
+    else:
+        valor_final = valor_ocr or str(valor_actual or "").strip()
+    logger.info(
+        "%s estado=%s via=%s",
+        etiqueta_log,
+        resultado.estado.value,
+        resultado.via_decision,
+    )
+    requiere_revision = (
+        propagar_revision_contrato
+        and resultado.estado is not EstadoResolucion.CONFIRMADO
+    )
+    return valor_final, requiere_revision
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -420,15 +448,15 @@ def procesar_archivo(
             catalogo_clientes,
             contexto=contexto_cliente,
         )
-        if decision_cliente.estado is EstadoResolucion.CONFIRMADO:
-            datos["cliente"] = decision_cliente.valor_canonico or nombre_cliente_ocr
-        else:
-            datos["cliente"] = nombre_cliente_ocr or str(datos.get("cliente", "No encontrado")).strip()
-        logger.info(
-            "resolucion-cliente-multicampo-v1 estado=%s via=%s",
-            decision_cliente.estado.value,
-            decision_cliente.via_decision,
+        datos["cliente"], requiere_revision_cliente = _integrar_resolucion_multicampo(
+            valor_ocr=nombre_cliente_ocr,
+            valor_actual=datos.get("cliente", "No encontrado"),
+            resultado=decision_cliente,
+            etiqueta_log="resolucion-cliente-multicampo-v1",
+            propagar_revision_contrato=True,
         )
+    else:
+        requiere_revision_cliente = False
     if nombre_chofer_ocr not in {"", "No encontrado"} or rut_chofer not in {"", "No encontrado"}:
         catalogo_choferes = cargar_catalogo_json(
             Path(carpeta_catalogos or "catalogos") / "choferes.json"
@@ -439,14 +467,12 @@ def procesar_archivo(
             catalogo_choferes,
             contexto={"fuente": "procesamiento_masivo"},
         )
-        if decision_chofer.estado is EstadoResolucion.CONFIRMADO:
-            datos["chofer"] = decision_chofer.valor_canonico or nombre_chofer_ocr
-        else:
-            datos["chofer"] = nombre_chofer_ocr or str(datos.get("chofer", "No encontrado")).strip()
-        logger.info(
-            "resolucion-chofer-multicampo-v1 estado=%s via=%s",
-            decision_chofer.estado.value,
-            decision_chofer.via_decision,
+        datos["chofer"], _ = _integrar_resolucion_multicampo(
+            valor_ocr=nombre_chofer_ocr,
+            valor_actual=datos.get("chofer", "No encontrado"),
+            resultado=decision_chofer,
+            etiqueta_log="resolucion-chofer-multicampo-v1",
+            propagar_revision_contrato=False,
         )
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
@@ -472,10 +498,7 @@ def procesar_archivo(
     ) or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
     if nombre_chofer_original not in {"", "No encontrado"} and datos.get("chofer") == nombre_chofer_original:
         requiere_revision = True
-    if (
-        decision_cliente is not None
-        and decision_cliente.estado is not EstadoResolucion.CONFIRMADO
-    ):
+    if requiere_revision_cliente:
         requiere_revision = True
 
     return {
