@@ -1,5 +1,18 @@
 # Trabajos activos Atlas
 
+## Análisis Profundo de los Casos REVISAR — Fase 1
+
+- Estado: COMPLETADO — diagnóstico únicamente, sin correcciones.
+- Rama: `analysis-casos-revisar-fase1`.
+- Casos: 002 por regla conservadora post-recuperación; 005 y 007 por RUT de
+  Cliente truncado sin DV; 010 por bloqueo compuesto de región OCR, evidencia
+  de Chofer y catálogo.
+- Resultado: Orquestador, Política, Destinos y Materiales no originan las
+  revisiones; no se modificó ningún componente funcional.
+- Próximo bloque recomendado: OCR focal estructurado de RUT de Cliente, con
+  consenso y módulo 11; impacto esperado inmediato 2/4 revisiones.
+- Evidencia: `docs/ANALISIS_CASOS_REVISAR_FASE1.md`.
+
 ## Activación Controlada de Materiales — Fase 1
 
 - Estado: COMPLETADA — Sistema Multicampo oficialmente finalizado.

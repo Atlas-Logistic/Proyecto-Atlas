@@ -85,6 +85,13 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - E2E: 12/12 guías, 2 confirmaciones, 10 abstenciones, precisión 2/2, cero falsos positivos, cero contradicciones y 4/12 revisiones.
 - Acuerdo entre herramientas: el Sistema Multicampo queda oficialmente finalizado con Choferes y Clientes en `PRODUCTIVO`, y Destinos y Materiales en `PRODUCTIVO_CONTROLADO`.
 
+### 2026-08-03 — Análisis profundo de los casos REVISAR — Fase 1
+- Decisión importante: separar la causa que marca revisión de las diferencias de salida; Destinos y Materiales pueden abstenerse sin propagar `REVISAR`.
+- Evidencia: 002 queda marcado solo por recuperación geométrica; 005 y 007 entregan al resolver RUT de Cliente sin DV; 010 combina Destino mal asociado, Chofer no resuelto y ausencia de LUIS REYES en catálogo.
+- Alternativas descartadas: relajar resolvers, aceptar RUT incompletos, convertir `COMUNA` en alias o inferir el Chofer.
+- Justificación: esas alternativas elevan falsos positivos y contradicen los contratos congelados.
+- Acuerdo: priorizar un bloque único de OCR focal estructurado de RUT de Cliente, con consenso y módulo 11, antes de reconsiderar reglas o catálogos.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.
