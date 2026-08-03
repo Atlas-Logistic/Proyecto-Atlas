@@ -1,7 +1,7 @@
 # Handoff — Orquestador Multicampo, Fase 1
 
 Fecha: 2026-08-03
-Estado: LISTO PARA AUDITORÍA INDEPENDIENTE
+Estado: AUDITADO — APROBADO PARA INTEGRACIÓN
 
 ## Alcance cerrado
 
@@ -64,8 +64,16 @@ extractor, procesamiento masivo, Desktop, catálogos o producción. No se
 procesaron guías reales. La evidencia E2E preservada y no rastreada permaneció
 intacta y fuera de los commits.
 
-## Auditoría solicitada
+## Cierre de auditoría
 
-Confirmar que la capa es puramente compositiva, que no existe ruta de
-publicación productiva y que ningún resultado directo cambia al ejecutarse a
-través del orquestador.
+La auditoría confirmó que la capa es puramente compositiva, que no existe
+ruta de publicación productiva y que los seis resultados directos no cambian
+al ejecutarse mediante el orquestador. Se corrigió un defecto del límite de
+adaptadores: un resumidor inválido o asociado a otro campo ahora queda aislado
+como fallo, preservando el contrato agregado y la trazabilidad.
+
+- Específicas: 14/14.
+- Cobertura del orquestador: 92,3 % mediante `trace` de Python.
+- Seis resolvers previstos: 193/193.
+- Regresión completa: 1102/1102.
+- `compileall` y `git diff --check`: aprobados.

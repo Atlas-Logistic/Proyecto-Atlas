@@ -2,13 +2,16 @@
 
 ## Orquestador Multicampo — Fase 1
 
-- Estado: LISTO PARA AUDITORÍA — modo sombra, sin reemplazar el flujo existente.
+- Estado: AUDITADO Y APROBADO PARA INTEGRACIÓN — modo sombra, sin reemplazar el flujo existente.
 - Rama: `feature-orquestador-multicampo-fase1`.
 - Reserva Codex: LIBERADA; ningún archivo o módulo reservado.
 - Restricciones: no modificar resolvers, políticas, snapshots, producción,
   Desktop, catálogos ni reglas de negocio.
 - Implementación: `acfe3f19854043fa5c824a14e50a47618b7c3a35`;
-  12/12 pruebas específicas y 217/217 afectadas.
+  auditoría de cierre con 14/14 pruebas específicas, 92,3 % de cobertura del
+  orquestador, 193/193 de los seis resolvers y 1102/1102 de regresión completa.
+- Corrección de auditoría: los adaptadores que devuelven un resumen inválido
+  o asociado a otro campo quedan aislados como fallo del campo.
 
 > Nota (Claude, 2026-08-01): este archivo es una copia local, dentro del
 > repositorio, del archivo de coordinación entre herramientas. La copia

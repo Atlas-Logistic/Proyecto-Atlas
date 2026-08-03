@@ -76,7 +76,7 @@ def test_adapta_contratos_especializados_documento_y_material():
 
 
 def test_compone_todos_los_resolvers_estandar_sin_conocer_sus_firmas():
-    resultado = orquestar_multicampo_sombra((
+    solicitudes = (
         SolicitudResolucionSombra(
             "chofer", resolver_chofer_rut, ("", "", {}),
         ),
@@ -96,10 +96,20 @@ def test_compone_todos_los_resolvers_estandar_sin_conocer_sus_firmas():
         SolicitudResolucionSombra(
             "material", resolver_material_tipo_carga,
         ),
-    ))
+    )
+    directos = {
+        solicitud.campo: solicitud.resolver(
+            *solicitud.argumentos, **solicitud.opciones
+        )
+        for solicitud in solicitudes
+    }
+
+    resultado = orquestar_multicampo_sombra(solicitudes)
+
     assert tuple(resultado.resultados) == (
         "chofer", "cliente", "vehiculo", "destino", "documento", "material"
     )
+    assert resultado.resultados == directos
     assert resultado.completo is True
 
 
@@ -119,6 +129,32 @@ def test_adaptador_explicito_permite_contratos_externos_sin_duplicar_reglas():
     ))
     assert resultado.resultados["ruta"] is resultado_externo
     assert resultado.resumenes["ruta"].estado is EstadoResolucion.PROPUESTO
+
+
+@pytest.mark.parametrize(
+    "resumidor,tipo_error",
+    [
+        (lambda _campo, _resultado: object(), "TypeError"),
+        (
+            lambda _campo, _resultado: ResumenResolucionSombra(
+                "otro", EstadoResolucion.PROPUESTO, 0.5, True, 0
+            ),
+            "ValueError",
+        ),
+    ],
+)
+def test_aisla_adaptadores_que_incumplen_el_contrato(resumidor, tipo_error):
+    resultado = orquestar_multicampo_sombra((
+        SolicitudResolucionSombra(
+            "ruta", lambda: object(), resumidor=resumidor
+        ),
+    ))
+
+    assert resultado.resultados == MappingProxyType({})
+    assert resultado.resumenes == MappingProxyType({})
+    assert resultado.fallos["ruta"].tipo_error == tipo_error
+    assert resultado.completo is False
+    assert resultado.requiere_revision is True
 
 
 def test_fallo_de_un_resolver_no_impide_los_demas():
