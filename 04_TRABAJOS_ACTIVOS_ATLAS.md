@@ -1,5 +1,19 @@
 # Trabajos activos Atlas
 
+## Aliases Controlados de Materiales — Fase 1
+
+- Estado: COMPLETADA — candidato apto para activación controlada.
+- Rama: `feature-aliases-controlados-materiales-fase1`.
+- Catálogo: se incorporaron exclusivamente `OCR-MAT-002 → GT-MAT-009` y
+  `OCR-MAT-003 → GT-MAT-010`; los 15 materiales canónicos permanecen intactos.
+- E2E: Materiales pasó de 0/12 a 2/12 confirmaciones y de 12/12 a 10/12
+  abstenciones; ambos aciertos fueron por alias exacto, con confianza 1,0 y
+  cero contradicciones. Los otros diez casos no cambiaron.
+- Calidad: precisión de Materiales 2/2 (100 %) y precisión final 48/49
+  (97,96 %) sin disminución; revisiones estables en 4/12.
+- Riesgo residual: cobertura limitada por ocho guías sin descripción material
+  utilizable y dos variantes multilínea expresamente rechazadas.
+
 ## Validación Controlada de Variantes OCR de Materiales — Fase 1
 
 - Estado: COMPLETADA — todavía sin crear alias.

@@ -86,7 +86,9 @@
       "material_id": "GT-MAT-009",
       "descripcion_oficial": "ROLLO HORMIGON 10MM A630-420HS (N)",
       "tipo_carga": "ROLLOS",
-      "aliases": [],
+      "aliases": [
+        "ROLLO HORMIGON 1 OMH A63b 1204S (NT Coladas: 2617650602,2617650803 0 ; 5 Cu { 1 g 9 1"
+      ],
       "abreviaciones": [],
       "estado_calidad": "CONFIRMADO",
       "estado_vigencia": "ACTIVO",
@@ -96,7 +98,9 @@
       "material_id": "GT-MAT-010",
       "descripcion_oficial": "ROLLO HORMIGON 16MM A630-420H (N)",
       "tipo_carga": "ROLLOS",
-      "aliases": [],
+      "aliases": [
+        "DESCRIPCION ROLLO HORHIGON 16x11 1gj0 120H Golagas 2616976102 2617620212"
+      ],
       "abreviaciones": [],
       "estado_calidad": "CONFIRMADO",
       "estado_vigencia": "ACTIVO",
