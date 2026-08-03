@@ -467,13 +467,15 @@ def procesar_archivo(
             catalogo_choferes,
             contexto={"fuente": "procesamiento_masivo"},
         )
-        datos["chofer"], _ = _integrar_resolucion_multicampo(
+        datos["chofer"], requiere_revision_chofer = _integrar_resolucion_multicampo(
             valor_ocr=nombre_chofer_ocr,
             valor_actual=datos.get("chofer", "No encontrado"),
             resultado=decision_chofer,
             etiqueta_log="resolucion-chofer-multicampo-v1",
-            propagar_revision_contrato=False,
+            propagar_revision_contrato=True,
         )
+    else:
+        requiere_revision_chofer = False
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
         try:
@@ -496,7 +498,7 @@ def procesar_archivo(
     requiere_revision = any(
         not valor or valor == "No encontrado" for valor in valores_clave
     ) or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
-    if nombre_chofer_original not in {"", "No encontrado"} and datos.get("chofer") == nombre_chofer_original:
+    if requiere_revision_chofer:
         requiere_revision = True
     if requiere_revision_cliente:
         requiere_revision = True

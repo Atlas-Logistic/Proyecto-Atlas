@@ -258,6 +258,19 @@ def test_fuzzy_sin_rut_solo_propone(catalogo):
     assert resultado.identificador_canonico == "cliente:cliente-demo-norte"
 
 
+def test_fuzzy_sin_rut_de_alta_confianza_confirma_sin_rut(catalogo):
+    # Falta solo la última letra ("NORT" en vez de "NORTE"): similitud 0.976
+    # contra el catálogo, muy por encima del umbral de solo-propuesta (0.88)
+    # y del nuevo umbral de confirmación (0.97). Decisión de producto: el RUT
+    # de cliente casi nunca viene legible en guías reales, así que un fuzzy de
+    # esta confianza debe confirmar sin exigir RUT.
+    resultado = resolver_cliente_rut("ACEROS DEMO DEL NORT", "", catalogo)
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert resultado.via_decision == "FUZZY_ALTA_CONFIANZA"
+    assert resultado.identificador_canonico == "cliente:cliente-demo-norte"
+    assert resultado.requiere_revision_humana is False
+
+
 def test_catalogo_no_muta_y_propuesta_no_aprende(catalogo):
     original = deepcopy(catalogo)
     uno = resolver_cliente_rut("ACER0S DEMO DEL NORTE", "", catalogo)

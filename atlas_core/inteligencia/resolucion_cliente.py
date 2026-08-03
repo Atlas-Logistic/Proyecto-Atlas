@@ -40,6 +40,22 @@ MINIMO_CARACTERES_FUZZY_CLIENTE = 5
 MINIMO_BASE_SUFIJO_PEGADO = 7
 MINIMO_RUT_PARCIAL_CLIENTE = 4
 
+# Umbral para que un fuzzy-match aislado (sin RUT) confirme por sí solo, en
+# vez de solo proponer para revisión manual. 0.97 corresponde, en la práctica,
+# a nombres idénticos salvo un ruido de OCR mínimo (un carácter suelto o un
+# espacio en una razón social típica de ~15-25 caracteres) — decisión de
+# producto tomada porque el RUT de cliente casi nunca viene legible en las
+# guías reales, así que exigir RUT siempre deja el campo cliente en REVISAR
+# de forma casi permanente. El margen exigido es mayor que el de la sola
+# propuesta (0.10 vs 0.08) para reducir el riesgo de confundir dos clientes
+# con nombres parecidos. Además de este umbral, siguen aplicando todos los
+# demás resguardos ya existentes: solo corre si el nombre es único candidato
+# (nombre_ambiguo lo bloquea), la entidad debe estar ACTIVA y con
+# estado_calidad=CONFIRMADO en el catálogo, y cualquier contradicción con un
+# RUT observado sigue forzando revisión antes de llegar a esta rama.
+UMBRAL_FUZZY_CLIENTE_CONFIRMA = 0.97
+MARGEN_MINIMO_FUZZY_CLIENTE_CONFIRMA = 0.10
+
 _SUFIJOS: tuple[tuple[str, ...], ...] = (
     ("EMPRESA", "INDIVIDUAL", "DE", "RESPONSABILIDAD", "LIMITADA"),
     ("SOCIEDAD", "POR", "ACCIONES"),
@@ -513,6 +529,8 @@ def resolver_cliente_rut(
             ))
 
     nombre_fuerte = None
+    puntaje_fuzzy_nombre: float | None = None
+    margen_fuzzy_nombre: float | None = None
     nombre_ambiguo = len(nombre_matches) > 1
     if len(nombre_matches) == 1:
         nombre_fuerte = nombre_matches[0]
@@ -525,6 +543,8 @@ def resolver_cliente_rut(
             and margen >= MARGEN_MINIMO_FUZZY_CLIENTE
         ):
             nombre_fuerte = (mejor[1], mejor[2], mejor[3], "NOMBRE_FUZZY")
+            puntaje_fuzzy_nombre = mejor[0]
+            margen_fuzzy_nombre = margen
             evidencias.append(EvidenciaResolucion(
                 "NOMBRE_FUZZY",
                 "comparacion_determinista",
@@ -752,6 +772,21 @@ def resolver_cliente_rut(
             )
         )
         razones.append("Nombre empresarial exacto, único y confirmado.")
+    elif (
+        nombre_fuerte
+        and nombre_fuerte[3] == "NOMBRE_FUZZY"
+        and puntaje_fuzzy_nombre is not None
+        and puntaje_fuzzy_nombre >= UMBRAL_FUZZY_CLIENTE_CONFIRMA
+        and margen_fuzzy_nombre is not None
+        and margen_fuzzy_nombre >= MARGEN_MINIMO_FUZZY_CLIENTE_CONFIRMA
+    ):
+        estado = EstadoResolucion.CONFIRMADO
+        via = ViaDecisionCliente.FUZZY_ALTA_CONFIANZA
+        razones.append(
+            f"Fuzzy de alta confianza ({puntaje_fuzzy_nombre:.3f} >= "
+            f"{UMBRAL_FUZZY_CLIENTE_CONFIRMA}, margen {margen_fuzzy_nombre:.3f}); "
+            "confirma sin RUT por decisión de producto."
+        )
     elif nombre_fuerte and nombre_fuerte[3] == "NOMBRE_FUZZY":
         estado = EstadoResolucion.PROPUESTO
         via = ViaDecisionCliente.FUZZY_UNICO
@@ -774,7 +809,7 @@ def resolver_cliente_rut(
         via,
         medicion_fuzzy=(
             medicion_fuzzy
-            if via is ViaDecisionCliente.FUZZY_UNICO
+            if via in (ViaDecisionCliente.FUZZY_UNICO, ViaDecisionCliente.FUZZY_ALTA_CONFIANZA)
             else None
         ),
     )

@@ -14,6 +14,7 @@ class ViaDecisionCliente(str, Enum):
     ALIAS_HUMANO_UNICO = "ALIAS_HUMANO_UNICO"
     CANONICO_EXACTO_UNICO = "CANONICO_EXACTO_UNICO"
     FUZZY_MAS_RUT = "FUZZY_MAS_RUT"
+    FUZZY_ALTA_CONFIANZA = "FUZZY_ALTA_CONFIANZA"
     FUZZY_UNICO = "FUZZY_UNICO"
     CONTRADICCION = "CONTRADICCION"
     DUPLICADO = "DUPLICADO"
@@ -46,7 +47,10 @@ class PoliticaConfianzaCliente:
     def confianza(
         self, via: ViaDecisionCliente, *, medicion_fuzzy: float | None = None
     ) -> float:
-        if via is ViaDecisionCliente.FUZZY_UNICO and medicion_fuzzy is not None:
+        if (
+            via in (ViaDecisionCliente.FUZZY_UNICO, ViaDecisionCliente.FUZZY_ALTA_CONFIANZA)
+            and medicion_fuzzy is not None
+        ):
             return max(0.0, min(1.0, float(medicion_fuzzy)))
         return self.valores[via]
 
@@ -59,6 +63,7 @@ POLITICA_CONFIANZA_CLIENTE_V1 = PoliticaConfianzaCliente(
         ViaDecisionCliente.ALIAS_HUMANO_UNICO: 0.90,
         ViaDecisionCliente.CANONICO_EXACTO_UNICO: 0.90,
         ViaDecisionCliente.FUZZY_MAS_RUT: 0.98,
+        ViaDecisionCliente.FUZZY_ALTA_CONFIANZA: 0.95,
         ViaDecisionCliente.FUZZY_UNICO: 0.85,
         ViaDecisionCliente.CONTRADICCION: 0.0,
         ViaDecisionCliente.DUPLICADO: 0.0,

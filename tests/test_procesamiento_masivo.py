@@ -602,6 +602,56 @@ def test_resolucion_de_cliente_alias_unico_confirma_contrato_definitivo_de_catal
     assert resultado["indicador_revision"] == "OK"
 
 
+def test_chofer_ocr_ya_coincide_con_canonico_no_fuerza_revision(
+    tmp_path, monkeypatch
+):
+    # Reproduce el defecto ya documentado el 2026-08-01 y confirmado en el
+    # diagnóstico de la validación E2E (12/12 REVISAR): el OCR del chofer ya
+    # coincide textualmente con el nombre canónico confirmado por RUT (el
+    # caso de éxito, sin necesidad de corrección) y aun así el documento
+    # quedaba forzado a REVISAR. Con el fix, si el chofer y el cliente
+    # confirman limpio, el documento debe quedar OK.
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "ADN DEMO",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOTO",
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo-norte",
+                "razon_social": "ACEROS DEMO DEL NORTE SpA",
+                "nombre_comercial": "ACEROS NORTE DEMO",
+                "rut": _rut(101),
+                "aliases": ["ADN DEMO"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            }
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["chofer"] == "MARIO SOTO"
+    assert resultado["cliente"] == "ACEROS DEMO DEL NORTE SpA"
+    assert resultado["indicador_revision"] == "OK"
+
+
 def test_resolucion_de_chofer_confirma_por_rut_en_flujo_principal(
     tmp_path, monkeypatch
 ):
