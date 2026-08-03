@@ -24,6 +24,17 @@
 - Evidencia: 4/4 pruebas de integración, 54/54 específicas y de contrato,
   92,3 % de cobertura del resolver y 1106/1106 de regresión completa.
 
+## Resolución Inteligente de Materiales — Fase 1
+
+- Estado: COMPLETADO EN MODO SOMBRA — listo para auditoría.
+- Rama: `feature-resolucion-inteligente-materiales-fase1`.
+- Integración: `procesamiento_masivo` compone una solicitud de Materiales
+  usando exclusivamente las interfaces públicas del Orquestador congelado.
+- Seguridad: conserva descripción y tipo de carga productivos; registra
+  estado, vía, confianza y contradicciones; un fallo queda aislado.
+- Evidencia: 4/4 pruebas de integración, 36/36 específicas y de contrato,
+  96,6 % de cobertura del resolver y 1110/1110 de regresión completa.
+
 > Nota (Claude, 2026-08-01): este archivo es una copia local, dentro del
 > repositorio, del archivo de coordinación entre herramientas. La copia
 > canónica y compartida vive en Google Drive:

@@ -37,6 +37,7 @@ from atlas_core.inteligencia.orquestador_multicampo import (
 from atlas_core.inteligencia.resolucion_chofer import resolver_chofer_rut
 from atlas_core.inteligencia.resolucion_cliente import resolver_cliente_rut
 from atlas_core.inteligencia.resolucion_destino import resolver_destino_ubicacion
+from atlas_core.inteligencia.resolucion_material import resolver_material_tipo_carga
 from atlas_core.ocr import (
     _leer_transporte_focal,
     crear_lector_ocr,
@@ -359,6 +360,19 @@ def _orquestar_destino_sombra(
     ))
 
 
+def _orquestar_material_sombra(
+    **argumentos_material: object,
+) -> ResultadoOrquestacionSombra:
+    """Compone Materiales con el núcleo congelado, sin publicar su decisión."""
+    return orquestar_multicampo_sombra((
+        SolicitudResolucionSombra(
+            "material",
+            resolver_material_tipo_carga,
+            opciones=argumentos_material,
+        ),
+    ))
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -553,6 +567,31 @@ def procesar_archivo(
         except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
             logger.warning("Fallback espacial de numero_guia omitido: %s: %s", type(exc).__name__, exc)
     descripcion = extraer_descripcion_material(textos)
+    tipo_carga_actual = clasificar_material(descripcion).value
+    resultado_material_sombra = _orquestar_material_sombra(
+        descripcion_material_ocr=descripcion,
+        tipo_carga_ocr=tipo_carga_actual,
+        catalogo_materiales=cargar_catalogo_json(
+            Path(carpeta_catalogos or "catalogos") / "materiales.json"
+        ),
+        contexto={"fuente": "procesamiento_masivo"},
+    )
+    if resultado_material_sombra.completo:
+        resumen_material = resultado_material_sombra.resumenes["material"]
+        decision_material = resultado_material_sombra.resultados["material"]
+        logger.info(
+            "orquestador-material-sombra-v1 estado=%s via=%s "
+            "confianza=%.3f contradicciones=%d",
+            resumen_material.estado.value,
+            decision_material.via_decision,
+            resumen_material.confianza,
+            resumen_material.cantidad_contradicciones,
+        )
+    else:
+        logger.warning(
+            "orquestador-material-sombra-v1 fallo=%s",
+            resultado_material_sombra.fallos["material"].tipo_error,
+        )
     valores_clave = (
         numero_guia_actual,
         datos.get("número de transporte"),
@@ -580,7 +619,7 @@ def procesar_archivo(
         "patente_tracto": str(datos.get("patente del tracto", "No encontrado")),
         "patente_rampla": str(datos.get("patente del carro", "No encontrado")),
         "descripcion_material": descripcion,
-        "tipo_carga": clasificar_material(descripcion).value,
+        "tipo_carga": tipo_carga_actual,
         "indicador_revision": "REVISAR" if requiere_revision else "OK",
     }
 
