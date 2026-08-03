@@ -22,7 +22,7 @@ REGISTRO_ACTIVACION_MULTICAMPO_FASE1: Mapping[str, EstadoOperacional] = (
     MappingProxyType({
         "chofer": EstadoOperacional.PRODUCTIVO,
         "cliente": EstadoOperacional.PRODUCTIVO,
-        "destino": EstadoOperacional.SOMBRA,
+        "destino": EstadoOperacional.PRODUCTIVO_CONTROLADO,
         "material": EstadoOperacional.SOMBRA,
     })
 )

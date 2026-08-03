@@ -1,10 +1,15 @@
 import logging
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import Mock
 
 from atlas_core import procesamiento_masivo
 from atlas_core.inteligencia.contrato_multicampo import EstadoResolucion
 from atlas_core.inteligencia.resolucion_destino import resolver_destino_ubicacion
+from atlas_core.politica_activacion_multicampo import (
+    EstadoOperacional,
+    REGISTRO_ACTIVACION_MULTICAMPO_FASE1,
+)
 
 
 CLIENTES = {"clientes": [{
@@ -73,7 +78,7 @@ def test_fallo_del_resolver_destino_queda_aislado(monkeypatch):
     assert agregado.requiere_revision is True
 
 
-def test_flujo_principal_ejecuta_destino_en_sombra_sin_publicarlo(
+def test_flujo_principal_ejecuta_destino_controlado_sin_autorizacion(
     tmp_path, monkeypatch, caplog
 ):
     datos = {
@@ -106,6 +111,63 @@ def test_flujo_principal_ejecuta_destino_en_sombra_sin_publicarlo(
 
     assert salida["obra_destino"] == "BODEGA CENTRAL"
     assert "orquestador-destino-sombra-v1 estado=CONFIRMADO" in caplog.text
+    assert "estado_operacional=PRODUCTIVO_CONTROLADO publicar=False" in caplog.text
+
+
+def test_publicacion_controlada_y_rollback_de_destino_aislan_otros_campos(
+    tmp_path, monkeypatch, caplog
+):
+    datos = {
+        "nÃºmero de guÃ­a": "463309",
+        "nÃºmero de transporte": "0000123456",
+        "cliente": "CLIENTE DEMO SPA",
+        "obra destino": "BODEGA OCR",
+        "chofer": "CHOFER DEMO",
+    }
+    destinos_con_alias = deepcopy(DESTINOS)
+    destinos_con_alias["destinos"][0]["aliases"] = ["BODEGA OCR"]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[])
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        lambda _textos: dict(datos),
+    )
+
+    def cargar(ruta):
+        return {
+            "clientes.json": CLIENTES,
+            "destinos.json": destinos_con_alias,
+            "plantas.json": PLANTAS,
+            "choferes.json": {},
+        }.get(Path(ruta).name, {})
+
+    monkeypatch.setattr(procesamiento_masivo, "cargar_catalogo_json", cargar)
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", cargar)
+
+    sin_autorizacion = procesamiento_masivo.procesar_archivo(
+        tmp_path / "sin-autorizacion.jpg"
+    )
+    with caplog.at_level(logging.INFO):
+        autorizado = procesamiento_masivo.procesar_archivo(
+            tmp_path / "autorizado.jpg",
+            campos_controlados_autorizados={"destino"},
+        )
+    registro_rollback = dict(REGISTRO_ACTIVACION_MULTICAMPO_FASE1)
+    registro_rollback["destino"] = EstadoOperacional.SOMBRA
+    rollback = procesamiento_masivo.procesar_archivo(
+        tmp_path / "rollback.jpg",
+        registro_activacion=registro_rollback,
+        campos_controlados_autorizados={"destino"},
+    )
+
+    assert sin_autorizacion["obra_destino"] == "BODEGA OCR"
+    assert autorizado["obra_destino"] == "BODEGA CENTRAL"
+    assert rollback["obra_destino"] == "BODEGA OCR"
+    for campo in ("chofer", "cliente", "descripcion_material", "tipo_carga"):
+        assert autorizado[campo] == sin_autorizacion[campo] == rollback[campo]
+    assert "publicar=True motivo=publicacion-controlada-autorizada" in caplog.text
 
 
 def test_fallo_de_destino_no_interrumpe_el_flujo_principal(

@@ -1,13 +1,24 @@
 # Trabajos activos Atlas
 
+## Activación Controlada de Destinos — Fase 1
+
+- Estado: IMPLEMENTADA Y VALIDADA — publicación solo con autorización explícita.
+- Rama: `feature-activacion-controlada-destinos-fase1`.
+- Configuración: Destinos `PRODUCTIVO_CONTROLADO`; Materiales `SOMBRA`;
+  Choferes y Clientes conservan `PRODUCTIVO`.
+- Rollback: cambiar exclusivamente Destinos a `SOMBRA` conserva el valor OCR,
+  aun cuando la ejecución incluya una autorización controlada.
+- Evidencia: 128/128 pruebas focalizadas, 1126/1126 de regresión completa y
+  100 % de cobertura de líneas de la política.
+
 ## Política de Activación Multicampo — Fase 1
 
 - Estado: IMPLEMENTADA Y VALIDADA — sin cambios productivos.
 - Rama: `feature-politica-activacion-fase1`.
 - Arquitectura: registro inmutable campo → estado operacional y decisión de
   publicación externa al Orquestador y a los resolvers.
-- Configuración oficial: Choferes/Clientes `PRODUCTIVO`; Destinos/Materiales
-  `SOMBRA`, reproduciendo el comportamiento previo.
+- Configuración vigente: Choferes/Clientes `PRODUCTIVO`; Destinos
+  `PRODUCTIVO_CONTROLADO`; Materiales `SOMBRA`.
 - Seguridad: `PRODUCTIVO_CONTROLADO` exige autorización explícita; los
   registros incompletos, desconocidos o inválidos fallan cerrados.
 - Evidencia: 11/11 pruebas específicas, 123/123 focalizadas, 1125/1125 de
