@@ -35,6 +35,20 @@
 - Evidencia: 4/4 pruebas de integración, 36/36 específicas y de contrato,
   96,6 % de cobertura del resolver y 1110/1110 de regresión completa.
 
+## Auditoría Integral del Sistema Multicampo
+
+- Estado: COMPLETADA — requiere una decisión final de política de activación.
+- Rama: `audit-sistema-multicampo-integral`.
+- Resultado técnico: composición conjunta, contratos, inmutabilidad y
+  aislamiento aprobados para Choferes, Clientes, Destinos y Materiales.
+- Hallazgo: Destinos y Materiales son sombra pura, mientras Choferes y
+  Clientes conservan publicación productiva preexistente en
+  `procesamiento_masivo`; el estado de activación no es homogéneo.
+- Evidencia: 3/3 pruebas integrales, 138/138 de núcleo y resolvers,
+  1113/1113 de regresión completa; cobertura entre 81,6 % y 94,4 %.
+- Pendiente: definir explícitamente si Choferes/Clientes vuelven a sombra o si
+  se autoriza como política la activación gradual antes de certificar producción.
+
 > Nota (Claude, 2026-08-01): este archivo es una copia local, dentro del
 > repositorio, del archivo de coordinación entre herramientas. La copia
 > canónica y compartida vive en Google Drive:
