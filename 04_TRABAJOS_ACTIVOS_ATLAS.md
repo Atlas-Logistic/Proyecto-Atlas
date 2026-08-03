@@ -1,5 +1,18 @@
 # Trabajos activos Atlas
 
+## Política de Activación Multicampo — Fase 1
+
+- Estado: IMPLEMENTADA Y VALIDADA — sin cambios productivos.
+- Rama: `feature-politica-activacion-fase1`.
+- Arquitectura: registro inmutable campo → estado operacional y decisión de
+  publicación externa al Orquestador y a los resolvers.
+- Configuración oficial: Choferes/Clientes `PRODUCTIVO`; Destinos/Materiales
+  `SOMBRA`, reproduciendo el comportamiento previo.
+- Seguridad: `PRODUCTIVO_CONTROLADO` exige autorización explícita; los
+  registros incompletos, desconocidos o inválidos fallan cerrados.
+- Evidencia: 11/11 pruebas específicas, 123/123 focalizadas, 1125/1125 de
+  regresión completa y 100 % de cobertura de líneas de la política.
+
 ## Orquestador Multicampo — Fase 1
 
 - Estado: AUDITADO Y APROBADO PARA INTEGRACIÓN — modo sombra, sin reemplazar el flujo existente.

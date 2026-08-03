@@ -9,7 +9,7 @@ import time
 import unicodedata
 from datetime import date
 from pathlib import Path
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Collection, Iterable, Mapping
 
 from atlas_core.catalogos import (
     cargar_catalogo_json,
@@ -43,6 +43,11 @@ from atlas_core.ocr import (
     crear_lector_ocr,
     leer_bloques_imagen,
     leer_texto_imagen,
+)
+from atlas_core.politica_activacion_multicampo import (
+    EstadoOperacional,
+    REGISTRO_ACTIVACION_MULTICAMPO_FASE1,
+    decidir_publicacion,
 )
 
 
@@ -324,27 +329,40 @@ def extraer_fecha(
 
 def _integrar_resolucion_multicampo(
     *,
+    campo: str,
     valor_ocr: str,
     valor_actual: object,
     resultado: ResultadoResolucion,
     etiqueta_log: str,
     propagar_revision_contrato: bool,
+    registro_activacion: Mapping[str, EstadoOperacional | str],
+    campos_controlados_autorizados: Collection[str],
 ) -> tuple[str, bool]:
     if resultado.estado is EstadoResolucion.CONFIRMADO:
-        valor_final = resultado.valor_canonico or valor_ocr
+        valor_resuelto = resultado.valor_canonico or valor_ocr
     else:
-        valor_final = valor_ocr or str(valor_actual or "").strip()
+        valor_resuelto = valor_ocr or str(valor_actual or "").strip()
+    valor_previo = valor_ocr or str(valor_actual or "").strip()
+    publicacion = decidir_publicacion(
+        campo,
+        valor_previo,
+        valor_resuelto,
+        registro=registro_activacion,
+        autorizacion_controlada=campo in campos_controlados_autorizados,
+    )
     logger.info(
-        "%s estado=%s via=%s",
+        "%s estado=%s via=%s estado_operacional=%s publicar=%s",
         etiqueta_log,
         resultado.estado.value,
         resultado.via_decision,
+        publicacion.estado_operacional.value,
+        publicacion.publicar,
     )
     requiere_revision = (
         propagar_revision_contrato
         and resultado.estado is not EstadoResolucion.CONFIRMADO
     )
-    return valor_final, requiere_revision
+    return publicacion.valor, requiere_revision
 
 
 def _orquestar_destino_sombra(
@@ -379,6 +397,10 @@ def procesar_archivo(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
     carpeta_catalogos: str | Path | None = None,
+    registro_activacion: Mapping[str, EstadoOperacional | str] = (
+        REGISTRO_ACTIVACION_MULTICAMPO_FASE1
+    ),
+    campos_controlados_autorizados: Collection[str] = frozenset(),
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales."""
     textos = leer_texto_imagen(ruta, lector=lector_ocr)
@@ -484,11 +506,14 @@ def procesar_archivo(
             contexto=contexto_cliente,
         )
         datos["cliente"], requiere_revision_cliente = _integrar_resolucion_multicampo(
+            campo="cliente",
             valor_ocr=nombre_cliente_ocr,
             valor_actual=datos.get("cliente", "No encontrado"),
             resultado=decision_cliente,
             etiqueta_log="resolucion-cliente-multicampo-v1",
             propagar_revision_contrato=True,
+            registro_activacion=registro_activacion,
+            campos_controlados_autorizados=campos_controlados_autorizados,
         )
     else:
         requiere_revision_cliente = False
@@ -530,6 +555,23 @@ def procesar_archivo(
             resumen_destino.confianza,
             resumen_destino.cantidad_contradicciones,
         )
+        publicacion_destino = decidir_publicacion(
+            "destino",
+            str(datos.get("obra destino", "No encontrado")),
+            decision_destino.destino_canonico or destino_original,
+            registro=registro_activacion,
+            autorizacion_controlada=(
+                "destino" in campos_controlados_autorizados
+            ),
+        )
+        datos["obra destino"] = publicacion_destino.valor
+        logger.info(
+            "politica-activacion campo=destino estado_operacional=%s "
+            "publicar=%s motivo=%s",
+            publicacion_destino.estado_operacional.value,
+            publicacion_destino.publicar,
+            publicacion_destino.motivo,
+        )
     else:
         logger.warning(
             "orquestador-destino-sombra-v1 fallo=%s",
@@ -546,11 +588,14 @@ def procesar_archivo(
             contexto={"fuente": "procesamiento_masivo"},
         )
         datos["chofer"], requiere_revision_chofer = _integrar_resolucion_multicampo(
+            campo="chofer",
             valor_ocr=nombre_chofer_ocr,
             valor_actual=datos.get("chofer", "No encontrado"),
             resultado=decision_chofer,
             etiqueta_log="resolucion-chofer-multicampo-v1",
             propagar_revision_contrato=True,
+            registro_activacion=registro_activacion,
+            campos_controlados_autorizados=campos_controlados_autorizados,
         )
     else:
         requiere_revision_chofer = False
@@ -586,6 +631,26 @@ def procesar_archivo(
             decision_material.via_decision,
             resumen_material.confianza,
             resumen_material.cantidad_contradicciones,
+        )
+        publicacion_material = decidir_publicacion(
+            "material",
+            (descripcion, tipo_carga_actual),
+            (
+                decision_material.material_canonico or descripcion,
+                decision_material.tipo_carga_canonico or tipo_carga_actual,
+            ),
+            registro=registro_activacion,
+            autorizacion_controlada=(
+                "material" in campos_controlados_autorizados
+            ),
+        )
+        descripcion, tipo_carga_actual = publicacion_material.valor
+        logger.info(
+            "politica-activacion campo=material estado_operacional=%s "
+            "publicar=%s motivo=%s",
+            publicacion_material.estado_operacional.value,
+            publicacion_material.publicar,
+            publicacion_material.motivo,
         )
     else:
         logger.warning(
@@ -678,6 +743,8 @@ def procesar_carpeta(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
     carpeta_catalogos: str | Path | None = None,
+    registro_activacion: Mapping[str, EstadoOperacional | str] | None = None,
+    campos_controlados_autorizados: Collection[str] | None = None,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos."""
     if cada < 1:
@@ -731,6 +798,12 @@ def procesar_carpeta(
             }
         if carpeta_catalogos is not None:
             argumentos["carpeta_catalogos"] = carpeta_catalogos
+        if registro_activacion is not None:
+            argumentos["registro_activacion"] = registro_activacion
+        if campos_controlados_autorizados is not None:
+            argumentos["campos_controlados_autorizados"] = (
+                campos_controlados_autorizados
+            )
         return procesar_archivo(ruta, **argumentos)
 
     try:

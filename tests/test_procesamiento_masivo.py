@@ -9,6 +9,10 @@ import pytest
 import analizar_guias_masivo
 from atlas_core import procesamiento_masivo
 from atlas_core.ocr import BloqueOCR
+from atlas_core.politica_activacion_multicampo import (
+    EstadoOperacional,
+    REGISTRO_ACTIVACION_MULTICAMPO_FASE1,
+)
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     descubrir_archivos,
@@ -680,6 +684,36 @@ def test_resolucion_de_chofer_confirma_por_rut_en_flujo_principal(
     assert resultado["patente_tracto"] == "ABCD12"
     assert resultado["patente_rampla"] == "EFGH34"
     assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_rollback_de_chofer_por_configuracion_conserva_valor_ocr(
+    tmp_path, monkeypatch
+):
+    datos = {
+        "nÃºmero de guÃ­a": "463309",
+        "nÃºmero de transporte": "0000123456",
+        "cliente": "CLIENTE ORIGINAL",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "NOMBRE OCR",
+        "RUT del chofer": "11.111.111-1",
+        "patente del tracto": "ABCD12",
+        "patente del carro": "EFGH34",
+    }
+    _preparar_procesamiento_fuzzy(
+        monkeypatch,
+        datos,
+        {"111111111": {"nombre": "ENRIQUE RAMOS", "activo": True}},
+    )
+    registro_rollback = dict(REGISTRO_ACTIVACION_MULTICAMPO_FASE1)
+    registro_rollback["chofer"] = EstadoOperacional.SOMBRA
+
+    resultado = procesar_archivo(
+        tmp_path / "guia.jpg",
+        registro_activacion=registro_rollback,
+    )
+
+    assert resultado["chofer"] == "NOMBRE OCR"
+    assert resultado["cliente"] == "CLIENTE ORIGINAL"
 
 
 def test_resolucion_de_chofer_abstiene_con_evidencia_debil_y_marca_revision(
