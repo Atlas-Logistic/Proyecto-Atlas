@@ -1,5 +1,18 @@
 # Trabajos activos Atlas
 
+## Catálogo Canónico de Materiales — Fase 1
+
+- Estado: CONSTRUIDO Y VALIDADO — no apto aún para activación controlada.
+- Rama: `feature-catalogo-canonico-materiales-fase1`.
+- Catálogo: 15 registros derivados 1:1 del Ground Truth aprobado; cero
+  duplicados, alias o abreviaciones; todas las entradas poseen evidencia.
+- E2E: Materiales permanece 0/12 `CONFIRMADO` y 12/12 `PROPUESTO`; precisión
+  global 48/49 y revisiones 4/12 sin cambios; cero contradicciones.
+- Diagnóstico: 8/12 guías no entregan descripción material al resolver y las
+  cuatro variantes observables no alcanzan coincidencia canónica sin alias.
+- Artefacto: `catalogos/materiales.json`, SHA-256
+  `7f3f92fac153c02149a2449b6ef8ffc54d3d8a8f0b8435b25fd92a15b73af3cc`.
+
 ## Ground Truth de Materiales — Fase 1
 
 - Estado: COMPLETADO — sin crear `materiales.json`.

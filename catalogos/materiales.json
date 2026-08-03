@@ -1,0 +1,156 @@
+{
+  "version_formato": 1,
+  "fuente": "ground_truth_materiales_fase1_2026-08-03",
+  "materiales": [
+    {
+      "material_id": "GT-MAT-001",
+      "descripcion_oficial": "B HORMIGON 16MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-001", "ATLAS-E2E-005"]
+    },
+    {
+      "material_id": "GT-MAT-002",
+      "descripcion_oficial": "B HORMIGON 12MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-001", "ATLAS-E2E-006"]
+    },
+    {
+      "material_id": "GT-MAT-003",
+      "descripcion_oficial": "B HORMIGON 8MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-002", "ATLAS-E2E-011"]
+    },
+    {
+      "material_id": "GT-MAT-004",
+      "descripcion_oficial": "B HORMIGON 8MM 6M A630-420H (I)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-003"]
+    },
+    {
+      "material_id": "GT-MAT-005",
+      "descripcion_oficial": "B HORMIGON 16MM 6M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-003", "ATLAS-E2E-004"]
+    },
+    {
+      "material_id": "GT-MAT-006",
+      "descripcion_oficial": "B HORMIGON 18MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-005"]
+    },
+    {
+      "material_id": "GT-MAT-007",
+      "descripcion_oficial": "B HORMIGON 25MM 7M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-005"]
+    },
+    {
+      "material_id": "GT-MAT-008",
+      "descripcion_oficial": "B HORMIGON 10MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-006"]
+    },
+    {
+      "material_id": "GT-MAT-009",
+      "descripcion_oficial": "ROLLO HORMIGON 10MM A630-420HS (N)",
+      "tipo_carga": "ROLLOS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-007"]
+    },
+    {
+      "material_id": "GT-MAT-010",
+      "descripcion_oficial": "ROLLO HORMIGON 16MM A630-420H (N)",
+      "tipo_carga": "ROLLOS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-008"]
+    },
+    {
+      "material_id": "GT-MAT-011",
+      "descripcion_oficial": "B HORMIGON 22MM 12M A630-420HS (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-009"]
+    },
+    {
+      "material_id": "GT-MAT-012",
+      "descripcion_oficial": "B HORMIGON 22MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-010"]
+    },
+    {
+      "material_id": "GT-MAT-013",
+      "descripcion_oficial": "B HORMIGON 12MM 6M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-010"]
+    },
+    {
+      "material_id": "GT-MAT-014",
+      "descripcion_oficial": "B HORMIGON 25MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-011"]
+    },
+    {
+      "material_id": "GT-MAT-015",
+      "descripcion_oficial": "ROLLO HORMIGON 10MM A630-420H (N)",
+      "tipo_carga": "ROLLOS",
+      "aliases": [],
+      "abreviaciones": [],
+      "estado_calidad": "CONFIRMADO",
+      "estado_vigencia": "ACTIVO",
+      "evidencia": ["ATLAS-E2E-012"]
+    }
+  ]
+}
