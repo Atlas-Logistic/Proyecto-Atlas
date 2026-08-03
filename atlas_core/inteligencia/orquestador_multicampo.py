@@ -118,6 +118,14 @@ class OrquestadorMulticampoSombra:
                 resumen = (solicitud.resumidor or _resumir)(
                     solicitud.campo, resultado
                 )
+                if not isinstance(resumen, ResumenResolucionSombra):
+                    raise TypeError(
+                        "resumidor debe devolver ResumenResolucionSombra"
+                    )
+                if resumen.campo != solicitud.campo:
+                    raise ValueError(
+                        "el campo del resumen no coincide con la solicitud"
+                    )
             except Exception as error:  # Aislamiento obligatorio del modo sombra.
                 fallos[solicitud.campo] = FalloResolucionSombra(
                     solicitud.campo, type(error).__name__
