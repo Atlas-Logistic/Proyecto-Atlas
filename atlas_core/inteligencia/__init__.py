@@ -40,6 +40,14 @@ from atlas_core.inteligencia.normalizacion_geografica import (
     regiones_equivalentes,
     separar_direccion,
 )
+from atlas_core.inteligencia.orquestador_multicampo import (
+    FalloResolucionSombra,
+    OrquestadorMulticampoSombra,
+    ResultadoOrquestacionSombra,
+    ResumenResolucionSombra,
+    SolicitudResolucionSombra,
+    orquestar_multicampo_sombra,
+)
 from atlas_core.inteligencia.politicas import (
     PESOS_FUENTE,
     POLITICAS,
@@ -219,4 +227,7 @@ __all__ = [
     "ViaDecisionMaterial", "CandidatoMaterial", "ResultadoResolucionMaterial",
     "normalizar_material", "resolver_material_tipo_carga",
     "InstantaneaCatalogoMateriales", "crear_snapshot_catalogo_materiales",
+    "FalloResolucionSombra", "OrquestadorMulticampoSombra",
+    "ResultadoOrquestacionSombra", "ResumenResolucionSombra",
+    "SolicitudResolucionSombra", "orquestar_multicampo_sombra",
 ]
