@@ -1,0 +1,51 @@
+{
+  "esquema": "atlas-cobertura-catalogos-multicampo-fase1-v1",
+  "fecha": "2026-08-03",
+  "fuente_evidencia": "atlas-e2e-oficial-2026-08-01",
+  "datos_privados_versionados": false,
+  "catalogos": {
+    "clientes": {
+      "registros_antes": 18,
+      "registros_despues": 22,
+      "registros_agregados": 4,
+      "aliases_agregados": 2,
+      "sha256_despues": "67459444d2ba70abba8b11cb2ff6c6de16a91488cf8bde157bb642fe52f74cd8"
+    },
+    "destinos": {
+      "registros_antes": 20,
+      "registros_despues": 29,
+      "registros_agregados": 9,
+      "registros_incompletos_por_ubicacion": 9,
+      "sha256_despues": "8cb0ada37533ea2c9b7a080b58106334e0a4d290c34c3b1a769d32c3b64a5a17"
+    },
+    "materiales": {
+      "registros_antes": 0,
+      "registros_despues": 0,
+      "motivo": "El ground truth solo confirma tipo de carga; no confirma identidad de material."
+    }
+  },
+  "e2e": {
+    "casos": 12,
+    "valores_evaluables": 49,
+    "aciertos_antes": 46,
+    "aciertos_despues": 48,
+    "precision_antes": 0.9388,
+    "precision_despues": 0.9796,
+    "confirmaciones_antes": 18,
+    "confirmaciones_despues": 22,
+    "abstenciones_antes": 30,
+    "abstenciones_despues": 26,
+    "revisiones_antes": 7,
+    "revisiones_despues": 4,
+    "contradicciones_antes": 0,
+    "contradicciones_despues": 0
+  },
+  "controles": {
+    "alias_generico_rechazado": 1,
+    "materiales_no_demostrados_rechazados": 2,
+    "identificadores_invalidos": 0,
+    "algoritmos_modificados": false,
+    "ocr_modificado": false,
+    "resolvers_modificados": false
+  }
+}

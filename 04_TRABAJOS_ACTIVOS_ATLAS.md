@@ -1,5 +1,18 @@
 # Trabajos activos Atlas
 
+## Cobertura y Calidad de Catálogos Multicampo — Fase 1
+
+- Estado: COMPLETADA — datos privados preservados fuera de Git.
+- Rama: `feature-cobertura-calidad-catalogos-multicampo-fase1`.
+- Crecimiento: Clientes 18→22 y dos alias demostrados; Destinos 20→29;
+  Materiales 0→0 por falta de identidad canónica en el ground truth.
+- E2E: precisión global 46/49→48/49; confirmaciones 18→22;
+  abstenciones 30→26; revisiones 7/12→4/12; cero contradicciones.
+- Seguridad: `COMUNA` no se incorporó como alias; los Destinos sin ubicación
+  permanecen incompletos y no se promueven artificialmente.
+- Evidencia versionada sin datos personales:
+  `catalogos/manifiesto_cobertura_multicampo_fase1.json`.
+
 ## Activación Controlada de Destinos — Fase 1
 
 - Estado: IMPLEMENTADA Y VALIDADA — publicación solo con autorización explícita.
