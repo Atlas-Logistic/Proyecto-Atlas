@@ -29,8 +29,14 @@ from atlas_core.inteligencia.contrato_multicampo import (
     EstadoResolucion,
     ResultadoResolucion,
 )
+from atlas_core.inteligencia.orquestador_multicampo import (
+    ResultadoOrquestacionSombra,
+    SolicitudResolucionSombra,
+    orquestar_multicampo_sombra,
+)
 from atlas_core.inteligencia.resolucion_chofer import resolver_chofer_rut
 from atlas_core.inteligencia.resolucion_cliente import resolver_cliente_rut
+from atlas_core.inteligencia.resolucion_destino import resolver_destino_ubicacion
 from atlas_core.ocr import (
     _leer_transporte_focal,
     crear_lector_ocr,
@@ -340,6 +346,19 @@ def _integrar_resolucion_multicampo(
     return valor_final, requiere_revision
 
 
+def _orquestar_destino_sombra(
+    **argumentos_destino: object,
+) -> ResultadoOrquestacionSombra:
+    """Compone Destinos con el núcleo congelado, sin publicar su decisión."""
+    return orquestar_multicampo_sombra((
+        SolicitudResolucionSombra(
+            "destino",
+            resolver_destino_ubicacion,
+            opciones=argumentos_destino,
+        ),
+    ))
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -426,6 +445,7 @@ def procesar_archivo(
 
     nombre_chofer_original = str(datos.get("chofer", "No encontrado")).strip()
     nombre_cliente_original = str(datos.get("cliente", "No encontrado")).strip()
+    destino_original = str(datos.get("obra destino", "No encontrado")).strip()
     datos = enriquecer_datos_con_catalogos(
         datos, textos, carpeta_catalogos or "catalogos"
     )
@@ -434,6 +454,7 @@ def procesar_archivo(
     rut_cliente = str(datos.get("RUT del cliente", "No encontrado")).strip()
     nombre_cliente_ocr = nombre_cliente_original
     decision_cliente = None
+    catalogo_clientes = None
     contexto_cliente = {
         "fuente": "procesamiento_masivo",
         "destino": str(datos.get("obra destino", "No encontrado")).strip(),
@@ -457,6 +478,49 @@ def procesar_archivo(
         )
     else:
         requiere_revision_cliente = False
+    if catalogo_clientes is None:
+        catalogo_clientes = cargar_catalogo_json(
+            Path(carpeta_catalogos or "catalogos") / "clientes.json"
+        )
+    resultado_destino_sombra = _orquestar_destino_sombra(
+        obra_destino=destino_original,
+        catalogo_destinos=cargar_catalogo_json(
+            Path(carpeta_catalogos or "catalogos") / "destinos.json"
+        ),
+        catalogo_clientes=catalogo_clientes,
+        catalogo_plantas=cargar_catalogo_json(
+            Path(carpeta_catalogos or "catalogos") / "plantas.json"
+        ),
+        id_cliente_canonico=(
+            decision_cliente.identificador_canonico
+            if decision_cliente is not None
+            and decision_cliente.estado is EstadoResolucion.CONFIRMADO
+            else ""
+        ),
+        cliente_canonico=(
+            decision_cliente.valor_canonico
+            if decision_cliente is not None
+            and decision_cliente.estado is EstadoResolucion.CONFIRMADO
+            else nombre_cliente_original
+        ),
+        contexto={"fuente": "procesamiento_masivo"},
+    )
+    if resultado_destino_sombra.completo:
+        resumen_destino = resultado_destino_sombra.resumenes["destino"]
+        decision_destino = resultado_destino_sombra.resultados["destino"]
+        logger.info(
+            "orquestador-destino-sombra-v1 estado=%s via=%s "
+            "confianza=%.3f contradicciones=%d",
+            resumen_destino.estado.value,
+            decision_destino.via_decision,
+            resumen_destino.confianza,
+            resumen_destino.cantidad_contradicciones,
+        )
+    else:
+        logger.warning(
+            "orquestador-destino-sombra-v1 fallo=%s",
+            resultado_destino_sombra.fallos["destino"].tipo_error,
+        )
     if nombre_chofer_ocr not in {"", "No encontrado"} or rut_chofer not in {"", "No encontrado"}:
         catalogo_choferes = cargar_catalogo_json(
             Path(carpeta_catalogos or "catalogos") / "choferes.json"

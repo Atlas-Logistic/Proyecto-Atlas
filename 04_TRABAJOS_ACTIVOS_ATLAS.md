@@ -13,6 +13,17 @@
 - Corrección de auditoría: los adaptadores que devuelven un resumen inválido
   o asociado a otro campo quedan aislados como fallo del campo.
 
+## Resolución Inteligente de Destinos — Fase 1
+
+- Estado: COMPLETADO EN MODO SOMBRA — listo para auditoría.
+- Rama: `feature-resolucion-inteligente-destinos-fase1`.
+- Integración: `procesamiento_masivo` compone una solicitud de Destinos usando
+  exclusivamente las interfaces públicas del Orquestador congelado.
+- Seguridad: conserva la salida OCR/productiva; registra estado, vía,
+  confianza y contradicciones; un fallo del resolver queda aislado.
+- Evidencia: 4/4 pruebas de integración, 54/54 específicas y de contrato,
+  92,3 % de cobertura del resolver y 1106/1106 de regresión completa.
+
 > Nota (Claude, 2026-08-01): este archivo es una copia local, dentro del
 > repositorio, del archivo de coordinación entre herramientas. La copia
 > canónica y compartida vive en Google Drive:
