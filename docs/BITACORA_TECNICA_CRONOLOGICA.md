@@ -77,6 +77,14 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Validación: 12 pruebas específicas y 217 pruebas de consumidores de la API pública; `compileall` y `git diff --check` aprobados.
 - Estado: implementación `acfe3f19854043fa5c824a14e50a47618b7c3a35`, lista para auditoría independiente.
 
+### 2026-08-03 — Activación Controlada de Materiales — Fase 1
+- Decisión importante: promover exclusivamente `material` de `SOMBRA` a `PRODUCTIVO_CONTROLADO` en el registro inmutable existente.
+- Cambio de estrategia: ninguno; se reutiliza la Política de Activación aprobada y la autorización explícita por ejecución.
+- Alternativas descartadas: activar Materiales como `PRODUCTIVO`, publicar sin autorización o modificar OCR, resolver, Orquestador y catálogos.
+- Validación: sin autorización se preserva OCR; con autorización se publican únicamente GT-MAT-009 y GT-MAT-010; el rollback a `SOMBRA` preserva OCR y no cambia Choferes, Clientes, Destinos ni revisión.
+- E2E: 12/12 guías, 2 confirmaciones, 10 abstenciones, precisión 2/2, cero falsos positivos, cero contradicciones y 4/12 revisiones.
+- Acuerdo entre herramientas: el Sistema Multicampo queda oficialmente finalizado con Choferes y Clientes en `PRODUCTIVO`, y Destinos y Materiales en `PRODUCTIVO_CONTROLADO`.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.

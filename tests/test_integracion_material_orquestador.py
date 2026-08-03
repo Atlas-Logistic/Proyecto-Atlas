@@ -5,6 +5,10 @@ from unittest.mock import Mock
 from atlas_core import procesamiento_masivo
 from atlas_core.inteligencia.contrato_multicampo import EstadoResolucion
 from atlas_core.inteligencia.resolucion_material import resolver_material_tipo_carga
+from atlas_core.politica_activacion_multicampo import (
+    EstadoOperacional,
+    REGISTRO_ACTIVACION_MULTICAMPO_FASE1,
+)
 
 
 MATERIALES = {"materiales": [{
@@ -58,7 +62,7 @@ def test_fallo_del_resolver_material_queda_aislado(monkeypatch):
     assert agregado.requiere_revision is True
 
 
-def test_flujo_principal_ejecuta_material_en_sombra_sin_publicarlo(
+def test_flujo_principal_ejecuta_material_controlado_sin_autorizacion(
     tmp_path, monkeypatch, caplog
 ):
     datos = {
@@ -89,6 +93,68 @@ def test_flujo_principal_ejecuta_material_en_sombra_sin_publicarlo(
     assert salida["descripcion_material"] == "B HORMIGÓN 16 MM 12 M"
     assert salida["tipo_carga"] == "BARRAS"
     assert "orquestador-material-sombra-v1 estado=CONFIRMADO" in caplog.text
+    assert "estado_operacional=PRODUCTIVO_CONTROLADO publicar=False" in caplog.text
+
+
+def test_publicacion_controlada_y_rollback_de_material_aislan_otros_campos(
+    tmp_path, monkeypatch, caplog
+):
+    alias_ocr = (
+        "ROLLO HORMIGON 1 OMH A63b 1204S (NT Coladas: "
+        "2617650602,2617650803 0 ; 5 Cu { 1 g 9 1"
+    )
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE DEMO",
+        "obra destino": "DESTINO DEMO",
+        "chofer": "CHOFER DEMO",
+    }
+    materiales_con_alias = {"materiales": [{
+        **MATERIALES["materiales"][0],
+        "descripcion_oficial": "ROLLO HORMIGON 10MM A630-420HS (N)",
+        "tipo_carga": "ROLLOS",
+        "aliases": [alias_ocr],
+    }]}
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "leer_texto_imagen",
+        Mock(return_value=[alias_ocr]),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", lambda _textos: dict(datos)
+    )
+
+    def cargar(ruta):
+        return materiales_con_alias if Path(ruta).name == "materiales.json" else {}
+
+    monkeypatch.setattr(procesamiento_masivo, "cargar_catalogo_json", cargar)
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", cargar)
+
+    sin_autorizacion = procesamiento_masivo.procesar_archivo(
+        tmp_path / "sin-autorizacion.jpg"
+    )
+    with caplog.at_level(logging.INFO):
+        autorizado = procesamiento_masivo.procesar_archivo(
+            tmp_path / "autorizado.jpg",
+            campos_controlados_autorizados={"material"},
+        )
+    registro_rollback = dict(REGISTRO_ACTIVACION_MULTICAMPO_FASE1)
+    registro_rollback["material"] = EstadoOperacional.SOMBRA
+    rollback = procesamiento_masivo.procesar_archivo(
+        tmp_path / "rollback.jpg",
+        registro_activacion=registro_rollback,
+        campos_controlados_autorizados={"material"},
+    )
+
+    assert sin_autorizacion["descripcion_material"] == alias_ocr
+    assert autorizado["descripcion_material"] == "ROLLO HORMIGON 10MM A630-420HS (N)"
+    assert rollback["descripcion_material"] == alias_ocr
+    assert autorizado["tipo_carga"] == sin_autorizacion["tipo_carga"] == "ROLLOS"
+    assert rollback["tipo_carga"] == "ROLLOS"
+    for campo in ("chofer", "cliente", "obra_destino", "indicador_revision"):
+        assert autorizado[campo] == sin_autorizacion[campo] == rollback[campo]
+    assert "publicar=True motivo=publicacion-controlada-autorizada" in caplog.text
 
 
 def test_fallo_de_material_no_interrumpe_el_flujo_principal(

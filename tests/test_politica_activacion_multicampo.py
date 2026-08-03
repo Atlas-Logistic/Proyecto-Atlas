@@ -21,7 +21,7 @@ def test_registro_oficial_reproduce_el_estado_productivo_actual():
         "chofer": EstadoOperacional.PRODUCTIVO,
         "cliente": EstadoOperacional.PRODUCTIVO,
         "destino": EstadoOperacional.PRODUCTIVO_CONTROLADO,
-        "material": EstadoOperacional.SOMBRA,
+        "material": EstadoOperacional.PRODUCTIVO_CONTROLADO,
     }
     assert isinstance(REGISTRO_ACTIVACION_MULTICAMPO_FASE1, MappingProxyType)
     with pytest.raises(TypeError):

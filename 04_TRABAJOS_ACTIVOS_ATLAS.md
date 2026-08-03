@@ -1,5 +1,19 @@
 # Trabajos activos Atlas
 
+## Activación Controlada de Materiales — Fase 1
+
+- Estado: COMPLETADA — Sistema Multicampo oficialmente finalizado.
+- Rama: `feature-activacion-controlada-materiales-fase1`.
+- Configuración: `material` pasó de `SOMBRA` a `PRODUCTIVO_CONTROLADO`; Choferes,
+  Clientes y Destinos conservaron sus estados anteriores.
+- E2E oficial: 12/12 guías; 2/12 confirmaciones de Materiales, 10/12
+  abstenciones, 2/2 aciertos evaluables (100 %), cero falsos positivos, cero
+  contradicciones y 4/12 revisiones sin cambios.
+- Control: sin autorización conserva OCR; con autorización publica GT-MAT-009
+  y GT-MAT-010; rollback a `SOMBRA` probado únicamente por configuración.
+- Riesgo residual: cobertura limitada por diez casos sin confirmación canónica;
+  el estado controlado exige autorización explícita por ejecución.
+
 ## Aliases Controlados de Materiales — Fase 1
 
 - Estado: COMPLETADA — candidato apto para activación controlada.
