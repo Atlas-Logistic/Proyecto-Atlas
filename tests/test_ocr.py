@@ -7,6 +7,62 @@ from PIL import Image
 from atlas_core import ocr
 
 
+def test_consenso_rut_cliente_exige_dos_lecturas_validas_iguales():
+    resultado = ocr._consensuar_rut_cliente_focal(
+        ["93.772.000-9", "93772000-9", "93.772.000"]
+    )
+
+    assert resultado["valor"] == "93772000-9"
+    assert resultado["motivo"] == "consenso-modulo-11"
+
+
+def test_consenso_rut_cliente_abstiene_sin_repeticion():
+    resultado = ocr._consensuar_rut_cliente_focal(
+        ["93.772.000-9", "93.772.000", "ruido"]
+    )
+
+    assert resultado["valor"] is None
+    assert resultado["motivo"] == "sin-consenso-suficiente"
+
+
+def test_consenso_rut_cliente_abstiene_ante_conflicto_valido():
+    resultado = ocr._consensuar_rut_cliente_focal(
+        ["93.772.000-9", "93772000-9", "91.410.000-3"]
+    )
+
+    assert resultado["valor"] is None
+    assert resultado["motivo"] == "conflicto-ruts-validos"
+
+
+def test_rut_cliente_focal_usa_fila_asociada_a_senor(tmp_path):
+    ruta = tmp_path / "guia.png"
+    Image.new("RGB", (900, 1600), color="white").save(ruta)
+    bloques = [
+        ocr.BloqueOCR(
+            "SEÑOR(ES)", ((60, 440), (145, 440), (145, 460), (60, 460)), 0.9
+        ),
+        ocr.BloqueOCR("R.U.T.", ((65, 470), (110, 470), (110, 490), (65, 490)), 0.9),
+        ocr.BloqueOCR("RUT", ((30, 1110), (70, 1110), (70, 1130), (30, 1130)), 0.9),
+    ]
+    lector = Mock()
+    lector.readtext.side_effect = [
+        ["93.772.000-9"],
+        ["93772000-9"],
+        ["93.772.000-9"],
+        ["93.772.000"],
+    ]
+
+    resultado = ocr._leer_rut_cliente_focal(ruta, bloques, lector=lector)
+
+    assert resultado["valor"] == "93772000-9"
+    assert resultado["recorte"][1] < 470 < resultado["recorte"][3]
+    assert lector.readtext.call_count == 4
+    assert all(
+        llamada.kwargs["allowlist"] == "0123456789Kk.- "
+        for llamada in lector.readtext.call_args_list
+    )
+
+
 def preparar_lector(monkeypatch, resultados=None):
     lector = Mock()
     lector.readtext.return_value = resultados or []

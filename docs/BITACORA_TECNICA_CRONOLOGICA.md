@@ -92,6 +92,15 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Justificación: esas alternativas elevan falsos positivos y contradicen los contratos congelados.
 - Acuerdo: priorizar un bloque único de OCR focal estructurado de RUT de Cliente, con consenso y módulo 11, antes de reconsiderar reglas o catálogos.
 
+### 2026-08-03 — OCR focal estructurado de RUT de Cliente — Fase 1
+- Decisión importante: releer únicamente RUT de Cliente ya observado pero incompleto o inválido, sin ampliar OCR a campos ausentes.
+- Diseño: localizar la fila `RUT` por proximidad geométrica a `SEÑOR(ES)`, ejecutar cuatro variantes sobre el recorte y extraer exclusivamente candidatos completos.
+- Política conservadora: aceptar un único RUT módulo 11 válido observado al menos dos veces; cualquier candidato válido diferente provoca abstención y preserva el original.
+- E2E: ATLAS-E2E-005 recupera 93772000-9 y ATLAS-E2E-007 recupera 91410000-3; ambos pasan de `REVISAR` a `OK`; quedan 002 y 010.
+- Calidad: precisión oficial 48/49 (97,96 %), contradicciones 0 y falsos positivos 0, sin cambios.
+- Rendimiento: total 385,779 s frente a 439,647 s de la evidencia oficial; por caso activado se observa un costo adicional de 21,413 s y 24,923 s, que debe optimizarse antes de ampliar cobertura.
+- Acuerdo: no completar dígitos por inferencia ni usar el catálogo para fabricar el DV; el siguiente análisis debe abordar la recuperación geométrica de 002 con autorización separada.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.

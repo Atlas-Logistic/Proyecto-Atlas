@@ -39,7 +39,9 @@ from atlas_core.inteligencia.resolucion_cliente import resolver_cliente_rut
 from atlas_core.inteligencia.resolucion_destino import resolver_destino_ubicacion
 from atlas_core.inteligencia.resolucion_material import resolver_material_tipo_carga
 from atlas_core.ocr import (
+    _leer_rut_cliente_focal,
     _leer_transporte_focal,
+    _rut_chileno_canonico,
     crear_lector_ocr,
     leer_bloques_imagen,
     leer_texto_imagen,
@@ -76,6 +78,17 @@ COLUMNAS = [
 ]
 
 Procesador = Callable[[Path], Mapping[str, object]]
+
+
+def _rut_cliente_requiere_relectura(valor: object) -> bool:
+    texto = str(valor or "").strip()
+    if texto in {"", "No encontrado"}:
+        return False
+    formato_completo = re.fullmatch(
+        r"\s*(?:\d{1,8}|\d{1,3}(?:\.\d{3})+)\s*-\s*[\dKk]\s*",
+        texto,
+    )
+    return formato_completo is None or _rut_chileno_canonico(texto) is None
 
 
 def descubrir_archivos(carpeta: str | Path) -> list[Path]:
@@ -478,6 +491,30 @@ def procesar_archivo(
                         logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
+
+    rut_cliente_inicial = str(datos.get("RUT del cliente", "No encontrado")).strip()
+    if _rut_cliente_requiere_relectura(rut_cliente_inicial):
+        try:
+            if bloques_guia is None:
+                bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+            evidencia_rut_cliente = _leer_rut_cliente_focal(
+                ruta, bloques_guia, lector=lector_ocr
+            )
+            if evidencia_rut_cliente.get("valor"):
+                datos["RUT del cliente"] = str(evidencia_rut_cliente["valor"])
+                logger.info(
+                    "rut_cliente recuperado mediante consenso-focal-estructurado-v1"
+                )
+            else:
+                logger.info(
+                    "rut_cliente focal abstiene motivo=%s",
+                    evidencia_rut_cliente.get("motivo", "sin-evidencia"),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Relectura focal de RUT cliente omitida: %s: %s",
+                type(exc).__name__, exc,
+            )
 
     nombre_chofer_original = str(datos.get("chofer", "No encontrado")).strip()
     nombre_cliente_original = str(datos.get("cliente", "No encontrado")).strip()

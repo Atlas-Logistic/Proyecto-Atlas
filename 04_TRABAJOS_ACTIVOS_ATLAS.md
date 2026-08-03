@@ -1,5 +1,21 @@
 # Trabajos activos Atlas
 
+## OCR Focal Estructurado de RUT de Cliente — Fase 1
+
+- Estado: COMPLETADO — validado sobre corpus E2E oficial.
+- Rama: `feature-ocr-focal-rut-cliente-fase1`.
+- Alcance: relectura exclusiva de la fila RUT asociada a `SEÑOR(ES)`, cuatro
+  variantes, consenso mínimo de dos observaciones, módulo 11 y abstención ante
+  conflicto.
+- E2E: `REVISAR` 4/12→2/12; 005 y 007 pasan a `OK`; precisión oficial 48/49
+  (97,96 %), contradicciones 0 y falsos positivos 0, todos sin cambios.
+- Tiempo: corrida oficial 439,647→385,779 s (variación global favorable no
+  atribuible); los casos activados aumentan 21,413 s y 24,923 s.
+- Riesgo residual: costo focal aproximado de 21–25 s por documento activado;
+  002 y 010 permanecen fuera del alcance por causas diferentes.
+- Próximo sprint recomendado: validación controlada de recuperación geométrica
+  post-resolución para ATLAS-E2E-002.
+
 ## Análisis Profundo de los Casos REVISAR — Fase 1
 
 - Estado: COMPLETADO — diagnóstico únicamente, sin correcciones.

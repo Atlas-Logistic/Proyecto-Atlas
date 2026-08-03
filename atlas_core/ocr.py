@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Tuple, Union
+import re
+from typing import Any, Iterable, List, Tuple, Union
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageOps, UnidentifiedImageError
@@ -26,6 +27,142 @@ class BloqueOCR:
     texto: str
     bounding_box: BoundingBoxOCR
     confianza: float
+
+
+def _normalizar_etiqueta_ocr(texto: object) -> str:
+    normalizado = str(texto or "").upper().replace("Ñ", "N")
+    return "".join(caracter for caracter in normalizado if caracter.isalnum())
+
+
+def _rut_chileno_canonico(texto: object) -> str | None:
+    limpio = "".join(
+        caracter for caracter in str(texto or "").upper()
+        if caracter.isdigit() or caracter == "K"
+    )
+    if len(limpio) not in {8, 9} or not limpio[:-1].isdigit():
+        return None
+    base, digito = limpio[:-1], limpio[-1]
+    suma = 0
+    factor = 2
+    for caracter in reversed(base):
+        suma += int(caracter) * factor
+        factor = factor + 1 if factor < 7 else 2
+    resto = 11 - suma % 11
+    esperado = "0" if resto == 11 else "K" if resto == 10 else str(resto)
+    return f"{base}-{digito}" if digito == esperado else None
+
+
+def _consensuar_rut_cliente_focal(lecturas: Iterable[object]) -> dict[str, object]:
+    """Acepta solo un RUT válido repetido y abstiene ante cualquier conflicto."""
+    candidatos = []
+    patron = re.compile(
+        r"(?<!\d)(?:\d{7,8}|\d{1,3}(?:[.\s]+\d{3}){2})\s*-\s*[\dKk](?!\w)"
+    )
+    for lectura in lecturas:
+        encontrados = {
+            candidato
+            for coincidencia in patron.findall(str(lectura or ""))
+            if (candidato := _rut_chileno_canonico(coincidencia)) is not None
+        }
+        candidatos.extend(sorted(encontrados))
+    unicos = sorted(set(candidatos))
+    if len(unicos) > 1:
+        return {"valor": None, "motivo": "conflicto-ruts-validos", "candidatos": unicos}
+    if not unicos or candidatos.count(unicos[0]) < 2:
+        return {
+            "valor": None,
+            "motivo": "sin-consenso-suficiente",
+            "candidatos": unicos,
+        }
+    return {"valor": unicos[0], "motivo": "consenso-modulo-11", "candidatos": unicos}
+
+
+def _localizar_fila_rut_cliente(
+    bloques: Iterable[BloqueOCR], ancho: int, alto: int
+) -> tuple[float, float, float, float] | None:
+    bloques_lista = list(bloques)
+    senores = [
+        bloque for bloque in bloques_lista
+        if "SENOR" in _normalizar_etiqueta_ocr(bloque.texto)
+    ]
+    etiquetas_rut = [
+        bloque for bloque in bloques_lista
+        if _normalizar_etiqueta_ocr(bloque.texto) == "RUT"
+    ]
+    pares = []
+    for senor in senores:
+        sx = min(punto[0] for punto in senor.bounding_box)
+        sy = min(punto[1] for punto in senor.bounding_box)
+        sh = max(punto[1] for punto in senor.bounding_box) - sy
+        for rut in etiquetas_rut:
+            rx1 = min(punto[0] for punto in rut.bounding_box)
+            rx2 = max(punto[0] for punto in rut.bounding_box)
+            ry1 = min(punto[1] for punto in rut.bounding_box)
+            ry2 = max(punto[1] for punto in rut.bounding_box)
+            distancia_y = ry1 - sy
+            if 0 <= distancia_y <= max(100.0, sh * 5) and abs(rx1 - sx) <= 140:
+                pares.append((distancia_y, rut, rx2, ry1, ry2))
+    if not pares:
+        return None
+    _, _, rx2, ry1, ry2 = min(pares, key=lambda item: item[0])
+    altura = max(ry2 - ry1, 12.0)
+    x1 = max(0.0, rx2 + ancho * 0.035)
+    x2 = min(float(ancho), max(x1 + 120.0, ancho * 0.60))
+    y1 = max(0.0, ry1 - altura * 0.65)
+    y2 = min(float(alto), ry2 + altura * 0.85)
+    return x1, y1, x2, y2
+
+
+def _leer_rut_cliente_focal(
+    ruta_imagen: Union[str, Path],
+    bloques: Iterable[BloqueOCR],
+    lector: Any = None,
+) -> dict[str, object]:
+    """Relee únicamente la fila de RUT asociada a SEÑOR(ES)."""
+    ruta = Path(ruta_imagen)
+    if not ruta.exists():
+        raise FileNotFoundError(f"La imagen no existe: {ruta}")
+    if not ruta.is_file():
+        raise IsADirectoryError(f"La ruta de imagen no es un archivo: {ruta}")
+    try:
+        with Image.open(ruta) as imagen:
+            orientada = ImageOps.exif_transpose(imagen).convert("RGB")
+            caja = _localizar_fila_rut_cliente(bloques, orientada.width, orientada.height)
+            if caja is None:
+                return {"valor": None, "motivo": "fila-rut-cliente-no-localizada", "lecturas": []}
+            x1, y1, x2, y2 = caja
+            recorte = orientada.crop((int(x1), int(y1), int(x2), int(y2)))
+            ampliada = recorte.resize(
+                (recorte.width * 3, recorte.height * 3), Image.Resampling.LANCZOS
+            )
+            gris = ImageOps.grayscale(ampliada)
+            contraste = ImageEnhance.Contrast(gris).enhance(1.6)
+            umbral = gris.point(lambda valor: 255 if valor >= 175 else 0)
+            variantes = (
+                ("ampliada_3x", ampliada),
+                ("grises_3x", gris),
+                ("contraste_3x", contraste),
+                ("umbral_3x", umbral),
+            )
+            arreglos = [(nombre, np.asarray(variante)) for nombre, variante in variantes]
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"No se pudo abrir la imagen: {ruta}") from exc
+    if lector is None:
+        lector = crear_lector_ocr()
+    lecturas = []
+    for nombre, arreglo in arreglos:
+        resultados = lector.readtext(
+            arreglo,
+            detail=0,
+            paragraph=False,
+            allowlist="0123456789Kk.- ",
+        )
+        texto = " ".join(str(resultado).strip() for resultado in resultados).strip()
+        lecturas.append({"variante": nombre, "texto": texto})
+    consenso = _consensuar_rut_cliente_focal(
+        lectura["texto"] for lectura in lecturas
+    )
+    return {**consenso, "lecturas": lecturas, "recorte": tuple(round(v) for v in caja)}
 
 
 def crear_lector_ocr() -> Any:

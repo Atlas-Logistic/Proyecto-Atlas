@@ -15,12 +15,29 @@ from atlas_core.politica_activacion_multicampo import (
 )
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
+    _rut_cliente_requiere_relectura,
     descubrir_archivos,
     extraer_descripcion_material,
     extraer_fecha,
     procesar_archivo,
     procesar_carpeta,
 )
+
+
+@pytest.mark.parametrize(
+    ("rut", "esperado"),
+    [
+        ("93.772.000", True),
+        ("93.772.000-1", True),
+        ("93.772.000-9", False),
+        ("No encontrado", False),
+        ("", False),
+    ],
+)
+def test_rut_cliente_requiere_relectura_solo_si_hay_evidencia_invalida(
+    rut, esperado
+):
+    assert _rut_cliente_requiere_relectura(rut) is esperado
 
 
 def _crear_archivo(ruta):
@@ -93,6 +110,70 @@ def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monk
     assert resultado["numero_transporte"] == "0000123456"
     leer_bloques.assert_not_called()
     focal.assert_not_called()
+
+
+def test_procesar_archivo_relee_solo_rut_cliente_incompleto(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("SEÑOR(ES)", ((10, 10), (90, 10), (90, 30), (10, 30)), 0.9),
+        BloqueOCR("RUT", ((10, 40), (50, 40), (50, 60), (10, 60)), 0.9),
+    ]
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "PRODALAM SA",
+        "RUT del cliente": "93.772.000",
+        "obra destino": "DESTINO LINEAL",
+        "chofer": "MARIO SOTO",
+    }
+    focal = Mock(return_value={
+        "valor": "93772000-9",
+        "motivo": "consenso-modulo-11",
+        "lecturas": [],
+    })
+    resolver_cliente = Mock(wraps=procesamiento_masivo.resolver_cliente_rut)
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(procesamiento_masivo, "_leer_rut_cliente_focal", focal)
+    monkeypatch.setattr(procesamiento_masivo, "resolver_cliente_rut", resolver_cliente)
+    monkeypatch.setattr(procesamiento_masivo, "cargar_catalogo_json", Mock(return_value={}))
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+
+    procesar_archivo(ruta)
+
+    focal.assert_called_once_with(ruta, bloques, lector=None)
+    assert resolver_cliente.call_args.args[1] == "93772000-9"
+
+
+def test_procesar_archivo_abstiene_y_conserva_rut_cliente_ante_conflicto(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "PRODALAM SA",
+        "RUT del cliente": "93.772.000",
+        "obra destino": "DESTINO LINEAL",
+        "chofer": "MARIO SOTO",
+    }
+    resolver_cliente = Mock(wraps=procesamiento_masivo.resolver_cliente_rut)
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_rut_cliente_focal",
+        Mock(return_value={"valor": None, "motivo": "conflicto-ruts-validos"}),
+    )
+    monkeypatch.setattr(procesamiento_masivo, "resolver_cliente_rut", resolver_cliente)
+    monkeypatch.setattr(procesamiento_masivo, "cargar_catalogo_json", Mock(return_value={}))
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+
+    procesar_archivo(ruta)
+
+    assert resolver_cliente.call_args.args[1] == "93.772.000"
 
 
 def test_procesar_archivo_integra_transporte_corregido_y_reutiliza_bloques(
