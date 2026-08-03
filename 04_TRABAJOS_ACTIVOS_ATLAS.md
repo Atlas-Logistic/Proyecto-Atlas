@@ -1,5 +1,16 @@
 # Trabajos activos Atlas
 
+## Ground Truth de Materiales — Fase 1
+
+- Estado: COMPLETADO — sin crear `materiales.json`.
+- Rama: `feature-ground-truth-materiales-fase1`.
+- Corpus: 12/12 guías reales con evidencia documental; 19/19 líneas
+  confirmadas; 15 materiales únicos; cero pendientes e inferencias.
+- OCR: cuatro variantes literales observadas; ninguna fue promovida a alias.
+- Calidad: ALTA; cero duplicados inconsistentes y cobertura documental 100 %.
+- Artefacto canónico:
+  `validaciones/ground_truth_materiales_fase1_2026-08-03.json`.
+
 ## Calidad Documental de Destinos — Fase 1
 
 - Estado: COMPLETADA — nueve ubicaciones respaldadas por guías oficiales.

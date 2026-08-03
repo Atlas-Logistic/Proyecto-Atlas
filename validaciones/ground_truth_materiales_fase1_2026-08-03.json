@@ -1,0 +1,187 @@
+{
+  "esquema": "atlas-ground-truth-materiales-fase1-v1",
+  "fecha": "2026-08-03",
+  "corpus_id": "atlas-e2e-oficial-2026-08-01",
+  "criterio": {
+    "fuente_canonica": "seccion DESCRIPCION visible en la guia real",
+    "normalizacion": "ninguna; transcripcion documental literal",
+    "alias_creados": 0,
+    "materiales_inferidos": 0
+  },
+  "materiales_unicos": [
+    {
+      "ground_truth_id": "GT-MAT-001",
+      "descripcion_exacta": "B HORMIGON 16MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 2,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-001", "ATLAS-E2E-005"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-002",
+      "descripcion_exacta": "B HORMIGON 12MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 2,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-001", "ATLAS-E2E-006"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-003",
+      "descripcion_exacta": "B HORMIGON 8MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 2,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-002", "ATLAS-E2E-011"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-004",
+      "descripcion_exacta": "B HORMIGON 8MM 6M A630-420H (I)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-003"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-005",
+      "descripcion_exacta": "B HORMIGON 16MM 6M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 2,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-003", "ATLAS-E2E-004"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-006",
+      "descripcion_exacta": "B HORMIGON 18MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-005"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-007",
+      "descripcion_exacta": "B HORMIGON 25MM 7M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-005"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-008",
+      "descripcion_exacta": "B HORMIGON 10MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-006"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-009",
+      "descripcion_exacta": "ROLLO HORMIGON 10MM A630-420HS (N)",
+      "tipo_carga": "ROLLOS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-007"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-010",
+      "descripcion_exacta": "ROLLO HORMIGON 16MM A630-420H (N)",
+      "tipo_carga": "ROLLOS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-008"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-011",
+      "descripcion_exacta": "B HORMIGON 22MM 12M A630-420HS (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-009"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-012",
+      "descripcion_exacta": "B HORMIGON 22MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-010"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-013",
+      "descripcion_exacta": "B HORMIGON 12MM 6M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-010"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-014",
+      "descripcion_exacta": "B HORMIGON 25MM 12M A630-420H (N)",
+      "tipo_carga": "BARRAS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-011"]
+    },
+    {
+      "ground_truth_id": "GT-MAT-015",
+      "descripcion_exacta": "ROLLO HORMIGON 10MM A630-420H (N)",
+      "tipo_carga": "ROLLOS",
+      "frecuencia_guias": 1,
+      "confianza": "ALTA",
+      "evidencia": ["ATLAS-E2E-012"]
+    }
+  ],
+  "variantes_ocr_observadas": [
+    {
+      "id_caso": "ATLAS-E2E-006",
+      "frecuencia": 1,
+      "asociacion": "DOCUMENTO_MULTILINEA",
+      "texto_ocr": "DESCRIPCION HORMIGON 1OvN [2K A6j0-4204 adas 2617697002 HORKIGON 12X 12K a630-420k Coladas: 2617717302"
+    },
+    {
+      "id_caso": "ATLAS-E2E-007",
+      "frecuencia": 1,
+      "asociacion": "GT-MAT-009",
+      "texto_ocr": "ROLLO HORMIGON 1 OMH A63b 1204S (NT Coladas: 2617650602,2617650803 0 ; 5 Cu { 1 g 9 1"
+    },
+    {
+      "id_caso": "ATLAS-E2E-008",
+      "frecuencia": 1,
+      "asociacion": "GT-MAT-010",
+      "texto_ocr": "DESCRIPCION ROLLO HORHIGON 16x11 1gj0 120H Golagas 2616976102 2617620212"
+    },
+    {
+      "id_caso": "ATLAS-E2E-010",
+      "frecuencia": 1,
+      "asociacion": "DOCUMENTO_MULTILINEA",
+      "texto_ocr": "HORMIGON 22VN 12k Agj0 420H Coladas; 2617740102,2617740202 | HORNIGON 1ZyM 6H 1630-4203 Coladas 2617721502,2617721602"
+    }
+  ],
+  "evidencia_documental": [
+    {"id_caso": "ATLAS-E2E-001", "archivo": "CHOFER-001.jpeg", "sha256": "6b06838772e9cc85722e9f9f1bdab97b82916d221ea4562c1081eebec87796f4", "materiales": ["GT-MAT-001", "GT-MAT-002"]},
+    {"id_caso": "ATLAS-E2E-002", "archivo": "CHOFER-002.jpeg", "sha256": "79daea23da114198542c6b5bd12a77eb5ca8f5a75607aa0c07d08ffc7082c563", "materiales": ["GT-MAT-003"]},
+    {"id_caso": "ATLAS-E2E-003", "archivo": "CHOFER-003.jpeg", "sha256": "7c64b9c965ce34fce4b7c75401f6c9c380f8de6147b6c7f24c07fad061954d5f", "materiales": ["GT-MAT-004", "GT-MAT-005"]},
+    {"id_caso": "ATLAS-E2E-004", "archivo": "CHOFER-004.jpeg", "sha256": "9060805d355fec1c1d6ddca2c5f00c232346a70c87afa9b743f342c44d5bf4e1", "materiales": ["GT-MAT-005"]},
+    {"id_caso": "ATLAS-E2E-005", "archivo": "CHOFER-005.jpeg", "sha256": "980fb5eb0394984c385a74810a9f610e23941657ffaef65cfdd5cb36d82fb2c6", "materiales": ["GT-MAT-001", "GT-MAT-006", "GT-MAT-007"]},
+    {"id_caso": "ATLAS-E2E-006", "archivo": "CHOFER-006.jpeg", "sha256": "a0b27eb81f7e4356b826c3bc84b96b9af1808af540e236a83eeed27333ea0610", "materiales": ["GT-MAT-008", "GT-MAT-002"]},
+    {"id_caso": "ATLAS-E2E-007", "archivo": "CHOFER-007.jpeg", "sha256": "a3e356af415feb11979842db3696ea01a954e3b2b6a5fc4aca8f33c993ed1952", "materiales": ["GT-MAT-009"]},
+    {"id_caso": "ATLAS-E2E-008", "archivo": "CHOFER-008.jpeg", "sha256": "a74a0c13ce1cd3a59a314a8dfb5f7554b1b7c3e718df6651b3902113fdaf5616", "materiales": ["GT-MAT-010"]},
+    {"id_caso": "ATLAS-E2E-009", "archivo": "CHOFER-009.jpeg", "sha256": "b3cc7770a86011ac6fec0c34dc097121d8312d64000849e8209ccf310116ba5b", "materiales": ["GT-MAT-011"]},
+    {"id_caso": "ATLAS-E2E-010", "archivo": "CHOFER-010.jpeg", "sha256": "c51a242c8ff5f68bfa129e84ea19af02e1f48cdc5279698d79c0df6e28a72916", "materiales": ["GT-MAT-012", "GT-MAT-013"]},
+    {"id_caso": "ATLAS-E2E-011", "archivo": "CHOFER-011.jpeg", "sha256": "d90c27271762f3dda78e84a7c51740d32d470d6eeee9875d6260357a469fc85c", "materiales": ["GT-MAT-003", "GT-MAT-014"]},
+    {"id_caso": "ATLAS-E2E-012", "archivo": "CHOFER-012.jpeg", "sha256": "ff616c90e1875d6a8accc6c68217908200602da7d237d1ab2f8ac781014eac28", "materiales": ["GT-MAT-015"]}
+  ],
+  "materiales_pendientes": [],
+  "cobertura": {
+    "guias_con_material_confirmado": [12, 12],
+    "lineas_documentales_confirmadas": [19, 19],
+    "guias_con_variante_ocr_observable": [4, 12]
+  },
+  "calidad": {
+    "nivel": "ALTA",
+    "materiales_unicos": 15,
+    "duplicados_inconsistentes": 0,
+    "entidades_sin_evidencia": 0,
+    "entidades_inferidas": 0,
+    "suficiente_para_catalogo_canonico": true
+  }
+}
