@@ -8,6 +8,30 @@ from typing import Any, Dict, List, Optional
 from atlas_core.catalogos import enriquecer_datos_con_catalogos
 
 
+# Etiquetas del formulario que un extractor puede confundir con el nombre
+# de cliente cuando el texto real entre "SEÑOR(ES)" y "RUT" viene vacío o
+# el OCR salta directo a la etiqueta siguiente. Hallazgo real: 2026-08-03,
+# handoff base_conocimiento_operativo_guias_reales (~90/327 "clientes no
+# reconocidos" eran en realidad fragmentos de estas etiquetas, no nombres).
+ETIQUETAS_NO_SON_NOMBRE_CLIENTE = (
+    "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
+    "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
+    "SOLICITANTE", "TRANSPORTE", "FECHA", "EMISION", "ENTRADA", "SALIDA",
+    "OBRA DESTINO", "SENOR", "DESPACHAR A", "PESO", "BRUTO",
+    "TARA", "TOTAL", "VALOR", "NETO", "IVA",
+)
+
+
+def _es_fragmento_de_etiqueta_cliente(texto: str) -> bool:
+    """True si el texto capturado es en realidad una etiqueta del
+    formulario (o un fragmento demasiado corto), no un nombre de cliente."""
+    simple = _texto_simple(texto)
+    if simple in ETIQUETAS_NO_SON_NOMBRE_CLIENTE:
+        return True
+    letras = sum(caracter.isalpha() for caracter in simple)
+    return letras < 4
+
+
 def _texto_simple(valor: str) -> str:
     """Normaliza texto OCR para comparaciones, sin corregir su contenido."""
     texto = re.sub(r"\s+", " ", str(valor or "")).strip(" :;,-.").upper()
@@ -65,13 +89,7 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     if not items:
         return {}
 
-    exclusiones = (
-        "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
-        "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
-        "SOLICITANTE", "TRANSPORTE", "FECHA", "ENTRADA", "SALIDA",
-        "OBRA DESTINO", "SENOR", "DESPACHAR A", "PESO", "BRUTO",
-        "TARA", "TOTAL", "VALOR", "NETO", "IVA",
-    )
+    exclusiones = ETIQUETAS_NO_SON_NOMBRE_CLIENTE
 
     def es_etiqueta(item: Dict[str, Any], campo: str) -> bool:
         texto = item["simple"]
@@ -813,7 +831,9 @@ def extraer_datos(
 
         coincidencia = re.search(r"SENOR(?:\(ES\))?\s+(.+?)\s+RUT", texto_busqueda)
         if coincidencia:
-            return normalizar_cliente(coincidencia.group(1))
+            candidato = normalizar_cliente(coincidencia.group(1))
+            if not _es_fragmento_de_etiqueta_cliente(candidato):
+                return candidato
 
         return None
 

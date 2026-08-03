@@ -29,6 +29,7 @@ from atlas_core.extractor import (
     _chofer_lineal_contaminado,
     _clasificar_evidencia_transporte,
     _consensuar_transporte_focal,
+    _es_fragmento_de_etiqueta_cliente,
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
     _extraer_transporte_geometrico,
@@ -117,6 +118,36 @@ def test_geometria_excluye_rut_telefono_codigo_hora_y_direccion():
 
     for candidato in excluidos:
         assert _extraer_asociaciones_geometricas([etiqueta, candidato]) == {}
+
+
+@pytest.mark.parametrize(
+    "fragmento",
+    ["RUT", "RUI", "R.UT", "EMISION", "ES)", "ES", "AUT", "CLIENTE"],
+)
+def test_fragmento_de_etiqueta_cliente_se_rechaza(fragmento):
+    # Hallazgo real 2026-08-03 (handoff base_conocimiento_operativo_guias_reales):
+    # ~90/327 "clientes no reconocidos" reales eran fragmentos de etiquetas
+    # del formulario (RUT, EMISION, etc.), no nombres de cliente.
+    assert _es_fragmento_de_etiqueta_cliente(fragmento) is True
+
+
+def test_nombre_de_cliente_real_no_se_rechaza():
+    assert _es_fragmento_de_etiqueta_cliente("ACEROS DEMO DEL NORTE SPA") is False
+
+
+def test_buscar_cliente_no_acepta_etiqueta_repetida_como_nombre():
+    # Reproduce la clase de bug real: cuando el texto entre "SEÑOR(ES)" y la
+    # etiqueta "RUT" no trae un nombre real (aquí, "RUT" duplicado por ruido
+    # de OCR), el extractor ya no debe aceptar "RUT" como nombre de cliente.
+    textos = [
+        "GUIA DE DESPACHO ELECTRONICA N 555555 SEÑOR(ES) RUT RUT 12.345.678-9 "
+        "GIRO VENTA POR MAYOR OBRA DESTINO CONSTRUCTORA DEMO COD DESTINATARIO "
+        "0001234567 HORA ENTRADA 10:00 HORA SALIDA 10:30 Nro. TRANSPORTE 0000123456",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["cliente"] == "No encontrado", datos
 
 
 def test_geometria_se_abstiene_ante_dos_candidatos_equivalentes():
