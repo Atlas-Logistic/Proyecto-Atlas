@@ -4,9 +4,7 @@
 
 - Estado: LISTO PARA AUDITORÍA — modo sombra, sin reemplazar el flujo existente.
 - Rama: `feature-orquestador-multicampo-fase1`.
-- Reserva Codex: `atlas_core/inteligencia/orquestador_multicampo.py`, API
-  pública de `atlas_core/inteligencia/__init__.py`, pruebas específicas y
-  documentación mínima de cierre.
+- Reserva Codex: LIBERADA; ningún archivo o módulo reservado.
 - Restricciones: no modificar resolvers, políticas, snapshots, producción,
   Desktop, catálogos ni reglas de negocio.
 - Implementación: `acfe3f19854043fa5c824a14e50a47618b7c3a35`;
