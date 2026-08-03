@@ -1,5 +1,17 @@
 # Trabajos activos Atlas
 
+## Orquestador Multicampo — Fase 1
+
+- Estado: LISTO PARA AUDITORÍA — modo sombra, sin reemplazar el flujo existente.
+- Rama: `feature-orquestador-multicampo-fase1`.
+- Reserva Codex: `atlas_core/inteligencia/orquestador_multicampo.py`, API
+  pública de `atlas_core/inteligencia/__init__.py`, pruebas específicas y
+  documentación mínima de cierre.
+- Restricciones: no modificar resolvers, políticas, snapshots, producción,
+  Desktop, catálogos ni reglas de negocio.
+- Implementación: `acfe3f19854043fa5c824a14e50a47618b7c3a35`;
+  12/12 pruebas específicas y 217/217 afectadas.
+
 > Nota (Claude, 2026-08-01): este archivo es una copia local, dentro del
 > repositorio, del archivo de coordinación entre herramientas. La copia
 > canónica y compartida vive en Google Drive:

@@ -67,6 +67,16 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Acuerdo entre herramientas: migrar primero Choferes y Clientes al helper mínimo; Destinos y Materiales no se incorporan todavía a esta infraestructura.
 - Decisión permanente: a partir de este cambio, toda integración entre un resolver multicampo y `procesamiento_masivo` deberá realizarse mediante el helper de integración oficial. No se permitirá duplicar nuevamente esta lógica en futuros resolvers.
 
+### 2026-08-03 — Orquestador Multicampo – Fase 1
+- Decisión importante: incorporar una capa de aplicación reutilizable que ejecute resolvers existentes únicamente en modo sombra, sin publicar valores ni reemplazar el flujo actual.
+- Cambio de estrategia: adoptar composición por solicitudes e inyección de funciones en vez de crear un objeto de entrada universal que conociera anticipadamente todas las firmas, catálogos y políticas.
+- Alternativas descartadas: modificar cada resolver para ajustarlo a una interfaz nueva; duplicar sus reglas dentro del orquestador; conectar inmediatamente el orquestador a `procesamiento_masivo`; traducir implícitamente contratos externos como rutas.
+- Justificación: la inyección preserva los contratos actuales, permite usar snapshots y políticas ya preparados por cada llamador, mantiene aislamiento por campo y admite contratos externos mediante un adaptador de resumen explícito.
+- Comportamiento: conserva el resultado crudo de cada resolver; genera solo estado, confianza, revisión y cantidad de contradicciones; aísla fallos sin guardar mensajes potencialmente sensibles; rechaza campos duplicados y cualquier modo distinto de `SOMBRA`.
+- Integridad: no se modificaron resolvers, políticas, snapshots, extractor, procesamiento masivo, Desktop, catálogos ni resultados productivos.
+- Validación: 12 pruebas específicas y 217 pruebas de consumidores de la API pública; `compileall` y `git diff --check` aprobados.
+- Estado: implementación `acfe3f19854043fa5c824a14e50a47618b7c3a35`, lista para auditoría independiente.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.
