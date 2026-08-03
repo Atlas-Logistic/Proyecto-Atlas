@@ -1,5 +1,16 @@
 # Trabajos activos Atlas
 
+## Calidad Documental de Destinos — Fase 1
+
+- Estado: COMPLETADA — nueve ubicaciones respaldadas por guías oficiales.
+- Rama: `feature-calidad-documental-destinos-fase1`.
+- Crecimiento documental: 9 direcciones, 9 comunas y 9 regiones; registros
+  priorizados completos 0/9→9/9; cero ubicaciones inferidas.
+- E2E: confirmaciones de Destinos 1/12→11/12; abstenciones 11/12→1/12;
+  confirmaciones globales 22→32; precisión 48/49 y revisiones 4/12 estables.
+- Evidencia versionada sin datos personales:
+  `catalogos/manifiesto_calidad_documental_destinos_fase1.json`.
+
 ## Cobertura y Calidad de Catálogos Multicampo — Fase 1
 
 - Estado: COMPLETADA — datos privados preservados fuera de Git.

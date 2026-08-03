@@ -1,0 +1,46 @@
+{
+  "esquema": "atlas-calidad-documental-destinos-fase1-v1",
+  "fecha": "2026-08-03",
+  "fuente_documental": "guias-atlas-e2e-oficial-2026-08-01",
+  "datos_privados_versionados": false,
+  "catalogo_destinos": {
+    "registros_totales": 29,
+    "registros_priorizados": 9,
+    "registros_completos_antes": 0,
+    "registros_completos_despues": 9,
+    "direcciones_agregadas": 9,
+    "comunas_agregadas": 9,
+    "regiones_agregadas": 9,
+    "identificadores_invalidos": 0,
+    "sha256_despues": "802cef891b38f2628d8e23f1b8025c6d0ddd1ef64f31ff2860ae29a885ead75a"
+  },
+  "e2e": {
+    "casos": 12,
+    "valores_evaluables": 49,
+    "confirmaciones_antes": 22,
+    "confirmaciones_despues": 32,
+    "abstenciones_antes": 26,
+    "abstenciones_despues": 16,
+    "confirmaciones_destino_antes": 1,
+    "confirmaciones_destino_despues": 11,
+    "abstenciones_destino_antes": 11,
+    "abstenciones_destino_despues": 1,
+    "revisiones_antes": 4,
+    "revisiones_despues": 4,
+    "aciertos_antes": 48,
+    "aciertos_despues": 48,
+    "precision_antes": 0.9796,
+    "precision_despues": 0.9796,
+    "precision_destino_antes": 0.9167,
+    "precision_destino_despues": 0.9167,
+    "contradicciones_despues": 0
+  },
+  "controles": {
+    "ubicaciones_inferidas": 0,
+    "ubicaciones_con_evidencia_documental": 9,
+    "codigo_modificado": false,
+    "ocr_modificado": false,
+    "resolvers_modificados": false,
+    "politica_modificada": false
+  }
+}
