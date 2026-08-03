@@ -1,5 +1,17 @@
 # Trabajos activos Atlas
 
+## Validación Controlada de Variantes OCR de Materiales — Fase 1
+
+- Estado: COMPLETADA — todavía sin crear alias.
+- Rama: `feature-validacion-variantes-ocr-materiales-fase1`.
+- Resultado: 4 variantes evaluadas; 2 aprobadas, 2 rechazadas y 0 pendientes.
+- Aprobadas: observaciones monomaterial asociadas inequívocamente a
+  `GT-MAT-009` y `GT-MAT-010`; frecuencia total 2.
+- Rechazadas: dos observaciones multilínea que concatenan dos materiales.
+- Impacto máximo esperado de futuros alias exactos: 2/12 confirmaciones de
+  Materiales, sin modificar OCR ni resolver.
+- Evidencia: `validaciones/validacion_variantes_ocr_materiales_fase1_2026-08-03.json`.
+
 ## Catálogo Canónico de Materiales — Fase 1
 
 - Estado: CONSTRUIDO Y VALIDADO — no apto aún para activación controlada.

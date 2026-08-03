@@ -1,0 +1,79 @@
+{
+  "esquema": "atlas-validacion-variantes-ocr-materiales-fase1-v1",
+  "fecha": "2026-08-03",
+  "fuentes_exclusivas": [
+    "validaciones/ground_truth_materiales_fase1_2026-08-03.json",
+    "catalogos/materiales.json",
+    "atlas-e2e-oficial-2026-08-01"
+  ],
+  "criterios": {
+    "aprobada": "La guia contiene un solo material y la variante se vincula por evidencia documental directa.",
+    "rechazada": "La observacion mezcla mas de un material o presenta riesgo estructural de asociacion multiple.",
+    "insuficiente_evidencia": "No existe evidencia documental suficiente para decidir.",
+    "aliases_creados": 0
+  },
+  "variantes": [
+    {
+      "variante_id": "OCR-MAT-001",
+      "id_caso": "ATLAS-E2E-006",
+      "texto_ocr": "DESCRIPCION HORMIGON 1OvN [2K A6j0-4204 adas 2617697002 HORKIGON 12X 12K a630-420k Coladas: 2617717302",
+      "material_canonico_candidato": null,
+      "candidatos_documentales": ["GT-MAT-008", "GT-MAT-002"],
+      "evidencia_documental": ["ATLAS-E2E-006"],
+      "frecuencia": 1,
+      "nivel_confianza": "ALTA",
+      "riesgo_falso_positivo": "ALTO",
+      "clasificacion": "RECHAZADA",
+      "motivo": "Una sola observacion OCR concatena dos materiales canonicos distintos."
+    },
+    {
+      "variante_id": "OCR-MAT-002",
+      "id_caso": "ATLAS-E2E-007",
+      "texto_ocr": "ROLLO HORMIGON 1 OMH A63b 1204S (NT Coladas: 2617650602,2617650803 0 ; 5 Cu { 1 g 9 1",
+      "material_canonico_candidato": "GT-MAT-009",
+      "candidatos_documentales": ["GT-MAT-009"],
+      "evidencia_documental": ["ATLAS-E2E-007"],
+      "frecuencia": 1,
+      "nivel_confianza": "ALTA",
+      "riesgo_falso_positivo": "BAJO",
+      "clasificacion": "APROBADA",
+      "motivo": "La guia contiene una unica linea de material y conserva la forma ROLLO HORMIGON."
+    },
+    {
+      "variante_id": "OCR-MAT-003",
+      "id_caso": "ATLAS-E2E-008",
+      "texto_ocr": "DESCRIPCION ROLLO HORHIGON 16x11 1gj0 120H Golagas 2616976102 2617620212",
+      "material_canonico_candidato": "GT-MAT-010",
+      "candidatos_documentales": ["GT-MAT-010"],
+      "evidencia_documental": ["ATLAS-E2E-008"],
+      "frecuencia": 1,
+      "nivel_confianza": "ALTA",
+      "riesgo_falso_positivo": "BAJO",
+      "clasificacion": "APROBADA",
+      "motivo": "La guia contiene una unica linea y la variante conserva forma y diametro discriminantes."
+    },
+    {
+      "variante_id": "OCR-MAT-004",
+      "id_caso": "ATLAS-E2E-010",
+      "texto_ocr": "HORMIGON 22VN 12k Agj0 420H Coladas; 2617740102,2617740202 | HORNIGON 1ZyM 6H 1630-4203 Coladas 2617721502,2617721602",
+      "material_canonico_candidato": null,
+      "candidatos_documentales": ["GT-MAT-012", "GT-MAT-013"],
+      "evidencia_documental": ["ATLAS-E2E-010"],
+      "frecuencia": 1,
+      "nivel_confianza": "ALTA",
+      "riesgo_falso_positivo": "ALTO",
+      "clasificacion": "RECHAZADA",
+      "motivo": "Una sola observacion OCR concatena dos materiales canonicos distintos."
+    }
+  ],
+  "resumen": {
+    "variantes_totales": 4,
+    "aprobadas": 2,
+    "rechazadas": 2,
+    "insuficiente_evidencia": 0,
+    "frecuencia_total_aprobada": 2,
+    "impacto_maximo_esperado_confirmaciones": [2, 12],
+    "materiales_canonicos_potencialmente_cubiertos": ["GT-MAT-009", "GT-MAT-010"],
+    "apto_para_construccion_controlada_de_aliases": true
+  }
+}
