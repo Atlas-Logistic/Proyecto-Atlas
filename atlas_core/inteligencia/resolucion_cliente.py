@@ -559,6 +559,41 @@ def resolver_cliente_rut(
 
     rut_entidad = rut_matches[0][2] if len(rut_matches) == 1 else None
     nombre_entidad = nombre_fuerte[2] if nombre_fuerte else None
+    nombre_parcial_compatible_rut = False
+    if (
+        rut_entidad
+        and not nombre_entidad
+        and len(nombre_obs.valor_normalizado) >= 8
+    ):
+        coincidencias_prefijo = [
+            entidad
+            for _, registro, entidad in registros
+            if _calidad_confirmada(registro)
+            and entidad.activa
+            and any(
+                normalizar_nombre_cliente_multicampo(variante).startswith(
+                    nombre_obs.valor_normalizado + " "
+                )
+                for variante in _variantes_nombre(registro)
+            )
+        ]
+        nombre_parcial_compatible_rut = (
+            len(coincidencias_prefijo) == 1
+            and coincidencias_prefijo[0].identificador == rut_entidad.identificador
+        )
+        if nombre_parcial_compatible_rut:
+            evidencias.append(EvidenciaResolucion(
+                "NOMBRE_OCR_PREFIJO_UNICO_MAS_RUT_EXACTO",
+                "comparacion_determinista",
+                nombre_obs,
+                rut_entidad,
+                0.9,
+                (
+                    "El nombre OCR es un prefijo completo y único de la "
+                    "misma identidad fijada por el RUT válido exacto."
+                ),
+                True,
+            ))
     contradicciones: list[ContradiccionResolucion] = []
     if (
         rut_entidad
@@ -739,6 +774,7 @@ def resolver_cliente_rut(
         and nombre_obs.valor_normalizado
         and not nombre_matches
         and not nombre_fuerte
+        and not nombre_parcial_compatible_rut
     ):
         candidato = None
         estado = EstadoResolucion.REQUIERE_REVISION
@@ -748,7 +784,7 @@ def resolver_cliente_rut(
         )
     elif rut_entidad:
         estado = EstadoResolucion.CONFIRMADO
-        if nombre_entidad == rut_entidad:
+        if nombre_entidad == rut_entidad or nombre_parcial_compatible_rut:
             if nombre_fuerte and nombre_fuerte[3] == "NOMBRE_FUZZY":
                 via = ViaDecisionCliente.FUZZY_MAS_RUT
             else:

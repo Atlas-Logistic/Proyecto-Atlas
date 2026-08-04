@@ -15,6 +15,7 @@ from atlas_core.politica_activacion_multicampo import (
 )
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
+    COLUMNAS_PUBLICACION,
     _rut_cliente_requiere_relectura,
     descubrir_archivos,
     extraer_descripcion_material,
@@ -38,6 +39,14 @@ def test_rut_cliente_requiere_relectura_solo_si_hay_evidencia_invalida(
     rut, esperado
 ):
     assert _rut_cliente_requiere_relectura(rut) is esperado
+
+
+def test_rut_cliente_ausente_se_relee_solo_con_cliente_observado():
+    assert _rut_cliente_requiere_relectura(
+        "No encontrado", "COMERCIAL", etiqueta_rut_observada=True
+    ) is True
+    assert _rut_cliente_requiere_relectura("", "No encontrado") is False
+    assert _rut_cliente_requiere_relectura("", "COMERCIAL") is False
 
 
 def _crear_archivo(ruta):
@@ -919,9 +928,10 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "patente_tracto",
         "patente_rampla",
         "descripcion_material",
-        "tipo_carga",
-        "indicador_revision",
-    }
+            "tipo_carga",
+            "indicador_revision",
+            "peso",
+        }
 
 
 def test_descubre_extensiones_permitidas_en_subcarpetas_y_ordena(tmp_path):
@@ -957,7 +967,7 @@ def test_continua_si_un_archivo_falla_y_escribe_csv_excel(tmp_path):
     with salida.open(encoding="utf-8-sig", newline="") as archivo:
         lector = csv.DictReader(archivo, delimiter=";")
         filas = list(lector)
-    assert lector.fieldnames == COLUMNAS
+    assert lector.fieldnames == COLUMNAS_PUBLICACION
     assert filas[0]["estado_procesamiento"] == "ERROR"
     assert "RuntimeError: OCR falló" == filas[0]["error"]
     assert filas[1]["cliente"] == "ACEROS ÑUBLE"
@@ -1024,7 +1034,7 @@ def test_acepta_csv_existente_vacio(tmp_path):
     with salida.open(encoding="utf-8-sig", newline="") as archivo:
         lector = csv.DictReader(archivo, delimiter=";")
         filas = list(lector)
-    assert lector.fieldnames == COLUMNAS
+    assert lector.fieldnames == COLUMNAS_PUBLICACION
     assert len(filas) == 1
 
 
@@ -1033,7 +1043,7 @@ def test_acepta_encabezado_exacto_para_reanudar(tmp_path):
     _crear_archivo(carpeta / "a.jpg")
     salida = tmp_path / "resultado.csv"
     with salida.open("w", encoding="utf-8-sig", newline="") as archivo:
-        csv.writer(archivo, delimiter=";").writerow(COLUMNAS)
+        csv.writer(archivo, delimiter=";").writerow(COLUMNAS_PUBLICACION)
 
     resumen = procesar_carpeta(
         carpeta, salida, procesador=lambda ruta: {"numero_guia": "1"}
@@ -1045,9 +1055,9 @@ def test_acepta_encabezado_exacto_para_reanudar(tmp_path):
 @pytest.mark.parametrize(
     "encabezado",
     [
-        COLUMNAS[:-1],
-        COLUMNAS + ["columna_extra"],
-        [*COLUMNAS[:-1], COLUMNAS[-2]],
+        COLUMNAS_PUBLICACION[:-1],
+        COLUMNAS_PUBLICACION + ["columna_extra"],
+        [*COLUMNAS_PUBLICACION[:-1], COLUMNAS_PUBLICACION[-2]],
     ],
 )
 def test_rechaza_encabezado_incompatible_sin_modificarlo(tmp_path, encabezado):

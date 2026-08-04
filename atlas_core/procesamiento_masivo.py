@@ -76,14 +76,23 @@ COLUMNAS = [
     "tipo_carga",
     "indicador_revision",
 ]
+COLUMNAS_PUBLICACION = [*COLUMNAS, "peso"]
 
 Procesador = Callable[[Path], Mapping[str, object]]
 
 
-def _rut_cliente_requiere_relectura(valor: object) -> bool:
+def _rut_cliente_requiere_relectura(
+    valor: object,
+    cliente: object = "",
+    *,
+    etiqueta_rut_observada: bool = False,
+) -> bool:
     texto = str(valor or "").strip()
     if texto in {"", "No encontrado"}:
-        return False
+        return (
+            etiqueta_rut_observada
+            and str(cliente or "").strip() not in {"", "No encontrado"}
+        )
     formato_completo = re.fullmatch(
         r"\s*(?:\d{1,8}|\d{1,3}(?:\.\d{3})+)\s*-\s*[\dKk]\s*",
         texto,
@@ -490,7 +499,14 @@ def procesar_archivo(
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
 
     rut_cliente_inicial = str(datos.get("RUT del cliente", "No encontrado")).strip()
-    if _rut_cliente_requiere_relectura(rut_cliente_inicial):
+    if _rut_cliente_requiere_relectura(
+        rut_cliente_inicial,
+        datos.get("cliente", "No encontrado"),
+        etiqueta_rut_observada=any(
+            re.search(r"\bR\.?\s*U\.?\s*T\.?\b", _normalizar(texto))
+            for texto in textos
+        ),
+    ):
         try:
             if bloques_guia is None:
                 bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
@@ -720,6 +736,7 @@ def procesar_archivo(
         "descripcion_material": descripcion,
         "tipo_carga": tipo_carga_actual,
         "indicador_revision": "REVISAR" if requiere_revision else "OK",
+        "peso": str(datos.get("peso", "No encontrado")),
     }
 
 
@@ -744,7 +761,7 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         lector = csv.reader(archivo, delimiter=";")
         encabezado = next(lector, None)
-        if encabezado != COLUMNAS:
+        if encabezado != COLUMNAS_PUBLICACION:
             raise ValueError(
                 "El CSV existente tiene un esquema incompatible. "
                 "Se esperaba el encabezado exacto separado por ';'."
@@ -759,7 +776,7 @@ def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
     existe_con_contenido = ruta_csv.exists() and ruta_csv.stat().st_size > 0
     with ruta_csv.open("a", newline="", encoding="utf-8-sig") as archivo:
         escritor = csv.DictWriter(
-            archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore"
+            archivo, fieldnames=COLUMNAS_PUBLICACION, delimiter=";", extrasaction="ignore"
         )
         if not existe_con_contenido:
             escritor.writeheader()
@@ -852,7 +869,7 @@ def procesar_carpeta(
                 resultado = dict(ejecutar(ruta))
                 fila = {
                     columna: str(resultado.get(columna, ""))
-                    for columna in COLUMNAS
+                    for columna in COLUMNAS_PUBLICACION
                 }
                 fila.update(
                     archivo=identificador,
@@ -860,7 +877,7 @@ def procesar_carpeta(
                     error="",
                 )
             except Exception as error:  # cada documento es una unidad independiente
-                fila = {columna: "" for columna in COLUMNAS}
+                fila = {columna: "" for columna in COLUMNAS_PUBLICACION}
                 fila.update(
                     archivo=identificador,
                     estado_procesamiento="ERROR",

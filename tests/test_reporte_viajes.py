@@ -73,8 +73,11 @@ def _generar(tmp_path, filas, columnas=COLUMNAS_OFICIALES, nombre="reporte"):
     return origen, salida, manifest
 
 
-def test_csv_oficial_15_columnas_genera_contrato_desktop(tmp_path):
-    origen, salida, manifest = _generar(tmp_path, [_fila()])
+def test_csv_oficial_genera_contrato_desktop_y_preserva_peso(tmp_path):
+    fila = _fila(peso="14.947,000")
+    origen, salida, manifest = _generar(
+        tmp_path, [fila], columnas=COLUMNAS_OFICIALES + ("peso",)
+    )
     assert origen.exists()
     assert set(p.name for p in salida.iterdir()) == set(ARCHIVOS_SALIDA)
     assert manifest["esquema_entrada"]["tipo"] == "OFICIAL_15"
@@ -83,6 +86,8 @@ def test_csv_oficial_15_columnas_genera_contrato_desktop(tmp_path):
     assert viaje["numero_transporte"] == "00002001"
     assert viaje["numeros_guia"] == "000101"
     assert viaje["fecha"] == "28-07-2026"
+    evidencia = json.loads(viaje["evidencias_documentos"])[0]
+    assert evidencia["peso"] == fila["peso"]
 
 
 def test_csv_historico_21_preserva_columnas_en_pendientes(tmp_path):

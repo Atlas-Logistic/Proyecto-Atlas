@@ -103,6 +103,32 @@ def test_nombre_fuzzy_y_rut_valido_mismo_cliente_confirman(catalogo):
     assert any(e.tipo == "NOMBRE_FUZZY" for e in resultado.evidencias)
 
 
+def test_rut_exacto_y_prefijo_ocr_unico_publican_nombre_completo():
+    rut = "786349109"
+    catalogo = {"version_formato": 1, "clientes": [
+        _registro("comercial-ayb", "COMERCIAL A Y B LTDA", rut),
+        _registro("aceros-cox", "ACEROS COX COMERCIAL SA", _rut(404)),
+    ]}
+    resultado = resolver_cliente_rut("COMERCIAL", rut, catalogo)
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert resultado.valor_canonico == "COMERCIAL A Y B LTDA"
+    assert any(
+        e.tipo == "NOMBRE_OCR_PREFIJO_UNICO_MAS_RUT_EXACTO"
+        for e in resultado.evidencias
+    )
+
+
+def test_prefijo_ocr_ambiguo_no_confirma_aunque_el_rut_sea_valido():
+    rut = _rut(405)
+    catalogo = {"version_formato": 1, "clientes": [
+        _registro("comercial-uno", "COMERCIAL UNO LTDA", rut),
+        _registro("comercial-dos", "COMERCIAL DOS LTDA", _rut(406)),
+    ]}
+    resultado = resolver_cliente_rut("COMERCIAL", rut, catalogo)
+    assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
+    assert resultado.valor_canonico is None
+
+
 def test_nombre_fuerte_sin_rut_confirma(catalogo):
     resultado = resolver_cliente_rut("ADN DEMO", "", catalogo)
     assert resultado.estado is EstadoResolucion.CONFIRMADO

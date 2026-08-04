@@ -415,6 +415,15 @@ La lógica de `requiere_revision` fuerza revisión manual **incluso cuando el ch
 - Validación: 49/49 pruebas Desktop y matriz visual de viaje simple, multiguía, confirmado y en revisión.
 - Integridad: cambio exclusivamente presentacional; motor, OCR, Multicampo, Política, resolvers, catálogos, ORS y procesamiento masivo permanecen intactos.
 - Despliegue activo: versión 1.2.0, commit `dbc75685bf433beb365f339902f2c89eb45a5dad`, `app.asar` SHA-256 `5bfdfbcf6d7f6bb443340069f2042455ebbca487a39931530ef2778504535891`.
+
+## Calidad de Datos Operacionales — Fase 1
+
+- Estado: COMPLETADO CON PENDIENTES AISLADOS.
+- Mejoras: Cliente canónico y peso documental publicados extremo a extremo.
+- Caso real: guía 464089 pasa de `COMERCIAL` a `COMERCIAL A Y B LTDA` mediante RUT focal `78.634.910-9`, consenso, módulo 11 y prefijo canónico único; peso `14.947,000` preservado en CSV y reporte.
+- Seguridad: `COMERCIAL` no fue agregado como alias; prefijos ambiguos continúan en `REQUIERE_REVISION`; las 15 columnas oficiales permanecen congeladas y `peso` es evidencia adicional compatible.
+- Validación: 168 focalizadas, 1148/1148 regresión Atlas y 49/49 Desktop.
+- Pendientes: Destinos parciales; patentes 464106 (`SB6486`/`JF4288`); cantidad independiente; materiales OCR no canónicos; origen vacío antes del cálculo de kilómetros.
 ## Hotfix regresión Chofer — guía 464089
 
 - Estado: COMPLETADO en la rama de hotfix.

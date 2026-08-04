@@ -32,6 +32,11 @@ tipo_carga
 indicador_revision
 ```
 
+La salida nueva de procesamiento añade `peso` como evidencia adicional
+compatible. No altera las 15 columnas oficiales: conserva exclusivamente el
+valor extraído del documento y el reporte lo incluye en
+`evidencias_documentos` para permitir el detalle y la suma conservadora.
+
 ### Columnas históricas opcionales
 
 ```text

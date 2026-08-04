@@ -1,4 +1,4 @@
-"""Reportes de viajes compatibles con CSV masivos Atlas de 15 y 21 columnas.
+"""Reportes de viajes compatibles con el esquema oficial y su extensión histórica.
 
 Contrato de entrada:
 

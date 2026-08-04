@@ -269,3 +269,14 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Validación: 49/49 pruebas Desktop, Electron visual sin desbordamiento y matriz simple/multiguía/confirmado/revisión aprobada.
 - Alcance preservado: sin cambios en OCR, Multicampo, Política, resolvers, catálogos, ORS ni procesamiento masivo.
 - Instalación activa validada: versión 1.2.0, commit `dbc75685bf433beb365f339902f2c89eb45a5dad`, `app.asar` SHA-256 `5bfdfbcf6d7f6bb443340069f2042455ebbca487a39931530ef2778504535891`.
+
+### 2026-08-04 — Calidad de Datos Operacionales, Fase 1
+
+- Cliente 464089: OCR lineal entregaba `COMERCIAL` y ningún RUT; la relectura focal real obtuvo cuatro lecturas concordantes de `78.634.910-9`, válido por módulo 11. El catálogo activo no contenía la entidad y se incorporó `COMERCIAL A Y B LTDA` con evidencia de la guía, sin alias parcial.
+- El Resolver confirma el nombre completo sólo cuando el RUT es válido, exacto y único, y el prefijo OCR identifica una única entidad canónica confirmada. La prueba adversarial con dos clientes `COMERCIAL ...` conserva `REQUIERE_REVISION`.
+- Peso: `extraer_datos` ya obtenía `14.947,000`, pero `procesamiento_masivo` lo descartaba antes del CSV. Se preserva como columna adicional compatible y queda en `evidencias_documentos`; las 15 columnas oficiales permanecen intactas.
+- Validación real 464089: Cliente `COMERCIAL A Y B LTDA`, peso `14.947,000`, material y evidencia originales preservados; Desktop puede totalizar el peso sin inferencias.
+- Destinos: 464089 continúa como `COMERCIAL LIDA`; no existe destino canónico documentado para la nueva entidad. 464106 tiene evidencia `VISTA CLARA 2351`, pero requiere validación aislada contra el registro maestro corregido a 2401.
+- Patentes: la imagen 464106 documenta tracto `SB6486` y carro `JF4288`; el flujo anterior publicó `J54288` como tracto y perdió ambos roles. No se corrigió porque exige recuperación focal/geométrica específica y regresión vehicular.
+- Cantidad: no existe extractor independiente; no se reutilizó peso como cantidad. Materiales: se preservaron descripciones OCR y sólo avanzaron canónicos ya aprobados. Kilómetros: los reportes reales publican `origenes` vacío, por lo que el cálculo se abstiene antes de ORS.
+- Regresión: 168 focalizadas, 1148/1148 Atlas y 49/49 Desktop; `compileall` y `git diff --check` aprobados.
