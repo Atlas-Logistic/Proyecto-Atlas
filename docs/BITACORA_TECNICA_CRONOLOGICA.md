@@ -169,3 +169,19 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   `REVISAR`, coherente con el comportamiento restaurado.
 - Integridad: ningún cambio en OCR, recuperador geométrico, resolvers, Desktop,
   Política de Activación, Sistema Multicampo, catálogos o reglas de negocio.
+### 2026-08-04 — Desktop UX — Reprocesamiento Inteligente
+
+- Causa abordada: el arrastre omitía silenciosamente nombres presentes en el
+  CSV acumulado, aunque la interfaz comunicaba un procesamiento nuevo.
+- Decisión: Desktop consulta primero los nombres existentes y presenta tres
+  acciones explícitas: reutilizar, reprocesar completamente o cancelar.
+- Reutilizar mantiene el flujo idempotente actual. Reprocesar ejecuta
+  `--reprocesar` sobre un CSV nuevo y reemplaza atómicamente las filas
+  seleccionadas en el acumulado. Cancelar retorna antes de copiar imágenes.
+- Validación 464089: reutilizar mantuvo SHA-256
+  `0BC1B97256035467B0EBFAD6A046BFF12A44F677C55EA80DC7B261290ED075EE`;
+  reprocesar ejecutó OCR, recuperó `LEANDRO IOLEDO` y actualizó el reporte.
+  Desktop muestra `LEANDRO TOLEDO` por normalización existente y conserva la
+  lectura cruda en `evidencias_documentos`.
+- Integridad: OCR, recuperador geométrico, `procesamiento_masivo`, Orquestador,
+  Política, resolvers y reglas de negocio permanecen intactos.

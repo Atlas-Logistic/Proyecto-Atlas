@@ -1,5 +1,19 @@
 # Trabajos activos Atlas
 
+## Desktop UX — Reprocesamiento Inteligente
+
+- Estado: COMPLETADO en rama `feature-desktop-reprocesamiento-inteligente`.
+- Decisión explícita ante nombres ya existentes: reutilizar, reprocesar
+  completamente o cancelar.
+- Reutilizar conserva el CSV acumulado sin cambios; reprocesar usa una salida
+  nueva con `--reprocesar` y reemplaza atómicamente solo las filas seleccionadas.
+- Validación real 464089: reutilizar produjo 0 procesados/1 omitido y SHA-256
+  idéntico; reprocesar produjo 1 procesado/0 omitidos y recuperó
+  `LEANDRO IOLEDO` en la evidencia. Desktop publicó `LEANDRO TOLEDO` mediante
+  la normalización de reporte ya existente.
+- Integridad: sin cambios en OCR, recuperación geométrica,
+  `procesamiento_masivo`, Sistema Multicampo, Política o resolvers.
+
 ## Kilómetros visibles en Atlas Desktop — Fase 1
 
 - Estado: COMPLETADO — sin reservas activas.

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -46,6 +48,68 @@ def comando_snapshot(argumentos: argparse.Namespace) -> None:
         json.dumps({"transportes_existentes": transportes}, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def comando_existentes(argumentos: argparse.Namespace) -> None:
+    filas = _leer_csv(argumentos.csv_masivo)
+    existentes = {
+        fila.get("archivo", "").strip()
+        for fila in filas
+        if fila.get("archivo", "").strip()
+    }
+    nombres = list(dict.fromkeys(argumentos.archivo))
+    print(json.dumps(
+        {"existentes": [nombre for nombre in nombres if nombre in existentes]},
+        ensure_ascii=False,
+    ))
+
+
+def comando_reemplazar(argumentos: argparse.Namespace) -> None:
+    ruta_masivo = Path(argumentos.csv_masivo)
+    ruta_reprocesado = Path(argumentos.csv_reprocesado)
+    filas_masivo = _leer_csv(ruta_masivo, obligatorio=True)
+    filas_reprocesadas = _leer_csv(ruta_reprocesado, obligatorio=True)
+    with ruta_masivo.open("r", newline="", encoding="utf-8-sig") as archivo:
+        columnas_masivo = csv.DictReader(archivo, delimiter=";").fieldnames
+    with ruta_reprocesado.open("r", newline="", encoding="utf-8-sig") as archivo:
+        columnas_reprocesado = csv.DictReader(archivo, delimiter=";").fieldnames
+    if columnas_masivo != columnas_reprocesado or columnas_masivo is None:
+        raise ValueError("Los CSV de reprocesamiento tienen esquemas incompatibles")
+
+    nombres = [fila.get("archivo", "").strip() for fila in filas_reprocesadas]
+    if any(not nombre for nombre in nombres) or len(nombres) != len(set(nombres)):
+        raise ValueError("El reprocesamiento debe entregar un resultado único por archivo")
+    reemplazados = set(nombres)
+    resultado = [
+        fila for fila in filas_masivo
+        if fila.get("archivo", "").strip() not in reemplazados
+    ] + filas_reprocesadas
+
+    ruta_masivo.parent.mkdir(parents=True, exist_ok=True)
+    temporal = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            dir=ruta_masivo.parent,
+            prefix=f".{ruta_masivo.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as archivo:
+            temporal = Path(archivo.name)
+            escritor = csv.DictWriter(
+                archivo, fieldnames=columnas_masivo, delimiter=";"
+            )
+            escritor.writeheader()
+            escritor.writerows(resultado)
+            archivo.flush()
+            os.fsync(archivo.fileno())
+        os.replace(temporal, ruta_masivo)
+    finally:
+        if temporal is not None and temporal.exists():
+            temporal.unlink()
+    print(json.dumps({"reemplazados": nombres}, ensure_ascii=False))
 
 
 def comando_resumen(argumentos: argparse.Namespace) -> None:
@@ -139,6 +203,14 @@ def crear_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--csv-masivo", type=Path, required=True)
     snapshot.add_argument("--salida", type=Path, required=True)
     snapshot.set_defaults(func=comando_snapshot)
+    existentes = subcomandos.add_parser("existentes")
+    existentes.add_argument("--csv-masivo", type=Path, required=True)
+    existentes.add_argument("--archivo", action="append", required=True)
+    existentes.set_defaults(func=comando_existentes)
+    reemplazar = subcomandos.add_parser("reemplazar")
+    reemplazar.add_argument("--csv-masivo", type=Path, required=True)
+    reemplazar.add_argument("--csv-reprocesado", type=Path, required=True)
+    reemplazar.set_defaults(func=comando_reemplazar)
     resumen = subcomandos.add_parser("resumen")
     resumen.add_argument("--csv-masivo", type=Path, required=True)
     resumen.add_argument("--reporte", type=Path, required=True)

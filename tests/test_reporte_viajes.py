@@ -12,7 +12,12 @@ from atlas_core.reporte_viajes import (
     COLUMNAS_VIAJES,
     generar_reporte_viajes,
 )
-from resumen_procesamiento_desktop import comando_resumen, comando_snapshot
+from resumen_procesamiento_desktop import (
+    comando_existentes,
+    comando_reemplazar,
+    comando_resumen,
+    comando_snapshot,
+)
 
 
 RELOJ = lambda: datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
@@ -258,6 +263,41 @@ def test_resumen_prefiere_fila_posterior_con_transporte_sin_depender_del_orden(
         resultado = json.loads(capsys.readouterr().out)
         assert resultado[0]["numero_transporte"] == "0000349935"
         assert resultado[0]["sin_transporte"] is False
+
+
+def test_reprocesamiento_desktop_detecta_y_reemplaza_solo_archivos_seleccionados(
+    tmp_path, capsys
+):
+    masivo = tmp_path / "analisis_completo_guias.csv"
+    reprocesado = tmp_path / "reprocesado.csv"
+    original_464089 = _fila(
+        archivo="464089.jpeg", numero_guia="464089", chofer="No encontrado"
+    )
+    intacta = _fila(archivo="otra.jpeg", numero_guia="999999", chofer="OTRO")
+    actualizado_464089 = _fila(
+        archivo="464089.jpeg", numero_guia="464089", chofer="LEANDRO IOLEDO"
+    )
+    _escribir_csv(masivo, [original_464089, intacta])
+    _escribir_csv(reprocesado, [actualizado_464089])
+
+    comando_existentes(argparse.Namespace(
+        csv_masivo=masivo,
+        archivo=["464089.jpeg", "nueva.jpeg", "464089.jpeg"],
+    ))
+    assert json.loads(capsys.readouterr().out) == {
+        "existentes": ["464089.jpeg"]
+    }
+
+    comando_reemplazar(argparse.Namespace(
+        csv_masivo=masivo,
+        csv_reprocesado=reprocesado,
+    ))
+    assert json.loads(capsys.readouterr().out) == {
+        "reemplazados": ["464089.jpeg"]
+    }
+    filas = {fila["archivo"]: fila for fila in _leer_csv(masivo)}
+    assert filas["464089.jpeg"]["chofer"] == "LEANDRO IOLEDO"
+    assert filas["otra.jpeg"] == intacta
 
 
 def test_documentos_sin_transporte_conserva_todas_las_filas_distintas(tmp_path):
