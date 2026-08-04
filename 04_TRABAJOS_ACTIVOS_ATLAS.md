@@ -397,6 +397,15 @@ La lógica de `requiere_revision` fuerza revisión manual **incluso cuando el ch
 
 ### Handoff
 - No abrir todavía el bloque de Destinos hasta confirmar que Clientes quedó completamente integrado y publicado en `origin/main`.
+
+## Consolidación Inteligente de Viajes — Fase 1
+
+- Estado: COMPLETADO.
+- Desktop: commit `5acbed0`, rama `feature-consolidacion-viajes-1`.
+- Resultado: el número de transporte identifica visualmente un único viaje; se muestran cantidad y listado de guías, totales disponibles y detalle documental por guía.
+- Validación: 46/46 pruebas Desktop, prueba visual Electron y viajes históricos de 2, 3 y 5 documentos.
+- Integridad: no se modificaron OCR, Sistema Multicampo, Política, resolvers, OpenRouteService ni reglas documentales.
+- Despliegue activo: versión 1.2.0, commit `5acbed0e08e2a0547104c30c62b85fe0e5026e4e`, `app.asar` SHA-256 `17ce3bb5e4cd257411fba7bcc817ee50016cc0602580e2995969c1428d3557e8`.
 ## Hotfix regresión Chofer — guía 464089
 
 - Estado: COMPLETADO en la rama de hotfix.

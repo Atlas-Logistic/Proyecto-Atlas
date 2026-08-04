@@ -250,3 +250,12 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   produjeron rutas absolutas. `384674.jpg` ejecutó OCR en 54,15 s con 1/1
   procesada y cero errores. `464089.jpeg` fue detectada como duplicada por el
   CSV acumulado, condición que abre el diálogo de reprocesamiento.
+
+### 2026-08-04 — Consolidación Inteligente de Viajes, Fase 1
+
+- Atlas Desktop incorpora un modelo de presentación encapsulado que agrupa por el viaje ya emitido por `viajes.csv`; no altera el motor ni la información documental.
+- El panel consolidado muestra cantidad y lista de guías, peso total, cantidad total y una tabla por guía con peso, cantidad, material y archivo origen.
+- Los totales se calculan únicamente cuando todas las guías poseen evidencia numérica válida. Ante cualquier ausencia, el total y el campo individual se muestran como `No disponible`.
+- Validación histórica: transporte `0000350703` con 2 guías; `0000279246` con 3; `0000279047` con 5 documentos. Este último sólo publica cuatro números de guía, por lo que la quinta fila queda explícitamente sin número inferido.
+- Validación técnica: 46/46 pruebas Desktop, prueba visual Electron sin desbordamiento y `git diff --check` correcto.
+- Despliegue oficial: versión 1.2.0, commit `5acbed0e08e2a0547104c30c62b85fe0e5026e4e`, `app.asar` SHA-256 `17ce3bb5e4cd257411fba7bcc817ee50016cc0602580e2995969c1428d3557e8`.
