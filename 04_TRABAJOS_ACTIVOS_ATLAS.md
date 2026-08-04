@@ -1,5 +1,27 @@
 # Trabajos activos Atlas
 
+## Auditoría del Pipeline de Publicación Operacional — Fase 1
+
+- Estado: COMPLETADA CON PENDIENTES DOCUMENTALES — sin reserva activa.
+- Guía real 464106: origen vacío → `AZA RENCA`; patentes incorrectas/ausentes
+  → tracto `SB6486` y rampla `JF4288`; cantidad ausente → `15.253`; peso
+  `15.253` permanece estable.
+- Publicación verificada extremo a extremo: `procesamiento_masivo`, CSV,
+  `viajes.csv`, JSON `evidencias_documentos`, backend Desktop y consolidado
+  frontend conservan los mismos valores.
+- Seguridad: patentes requieren rol explícito y coincidencia canónica única;
+  origen exige consenso de dos relecturas y una planta activa confirmada;
+  cualquier ambigüedad produce abstención.
+- Pendientes: Cliente y Destino de 464106 continúan como evidencia OCR parcial;
+  no se canonizan porque el RUT observado es inválido y la dirección documental
+  2351 contradice el maestro 2401. ORS ya recibe el origen y se abstiene por
+  destino no confirmado.
+- Regresión: 1154/1154 Atlas y 49/49 Desktop; clientes COMERCIAL A Y B, EBEMA y
+  TORRES OCARANZA confirman sólo con RUT válido y exacto; cero relajación de
+  umbrales.
+- Próximo bloque recomendado: recuperación focal estructurada del RUT de
+  Cliente de TORRES OCARANZA, con consenso módulo 11 y sin alias genéricos.
+
 ## Hotfix crítico — Drag & Drop Electron 43
 
 - Estado: CORREGIDO Y VALIDADO.

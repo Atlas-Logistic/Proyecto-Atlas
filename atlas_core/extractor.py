@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from atlas_core.catalogos import enriquecer_datos_con_catalogos
+from atlas_core.catalogos import enriquecer_datos_con_catalogos, normalizar_patente
 
 
 def _texto_simple(valor: str) -> str:
@@ -170,6 +170,95 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     if destino:
         resultado["obra destino"] = destino
     return resultado
+
+
+def _distancia_patente_ocr(valor: str, canonica: str) -> int:
+    """Cuenta sustituciones OCR en patentes de longitud documental fija."""
+    observado = normalizar_patente(valor)
+    esperada = normalizar_patente(canonica)
+    if len(observado) != 6 or len(esperada) != 6:
+        return 99
+    return sum(a != b for a, b in zip(observado, esperada))
+
+
+def _extraer_patentes_geometricas(
+    bloques: List[Any], catalogo_vehiculos: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Recupera patentes por rol explícito y catálogo; abstiene ante ambigüedad."""
+    items = _normalizar_bloques_geometricos(bloques)
+    resultado: Dict[str, Any] = {"conflictos": []}
+    roles = {
+        "patente_tracto": "TRACTO",
+        "patente_rampla": "CARRO",
+    }
+
+    candidatos_observados: Dict[str, list[str]] = {campo: [] for campo in roles}
+    for indice, item in enumerate(items):
+        simple = item["simple"]
+        if simple == "PATENTE":
+            for vecino in items[indice + 1 :]:
+                if abs(vecino["cy"] - item["cy"]) > max(item["h"], vecino["h"]) * 1.5:
+                    continue
+                if 0 <= vecino["x1"] - item["x2"] <= 90:
+                    candidatos_observados["patente_tracto"].extend(
+                        re.findall(r"\b[A-Z0-9]{6}\b", vecino["simple"])
+                    )
+        coincidencia_carro = re.search(r"\bCARRO\s*:?\s*([A-Z0-9]{6})\b", simple)
+        if coincidencia_carro:
+            candidatos_observados["patente_rampla"].append(coincidencia_carro.group(1))
+
+    for campo, tipo in roles.items():
+        canonicas = [
+            normalizar_patente(patente)
+            for patente, registro in catalogo_vehiculos.items()
+            if isinstance(registro, dict)
+            and str(registro.get("tipo", "")).strip().upper() == tipo
+            and len(normalizar_patente(patente)) == 6
+        ]
+        decisiones = []
+        for observado in dict.fromkeys(candidatos_observados[campo]):
+            distancias = sorted(
+                (_distancia_patente_ocr(observado, canonica), canonica)
+                for canonica in canonicas
+            )
+            if not distancias or distancias[0][0] > 2:
+                continue
+            mejor_distancia = distancias[0][0]
+            mejores = [canonica for distancia, canonica in distancias if distancia == mejor_distancia]
+            if len(mejores) == 1:
+                decisiones.append((mejor_distancia, mejores[0], observado))
+
+        valores = {decision[1] for decision in decisiones}
+        if len(valores) == 1:
+            distancia, valor, observado = min(decisiones)
+            resultado[campo] = valor
+            resultado[f"{campo}_evidencia"] = {
+                "observado": observado,
+                "distancia": distancia,
+                "rol": tipo,
+            }
+        elif len(valores) > 1:
+            resultado["conflictos"].append(campo)
+    return resultado
+
+
+def _extraer_cantidad_geometrica(bloques: List[Any]) -> Optional[str]:
+    """Extrae solo la cantidad situada bajo su encabezado documental."""
+    items = _normalizar_bloques_geometricos(bloques)
+    etiquetas = [item for item in items if item["simple"] == "CANTIDAD"]
+    decisiones = []
+    for etiqueta in etiquetas:
+        for item in items:
+            separacion_y = item["y1"] - etiqueta["y2"]
+            if not 0 <= separacion_y <= 45:
+                continue
+            if item["x1"] > etiqueta["x2"] + 85 or item["x2"] < etiqueta["x1"] - 15:
+                continue
+            coincidencia = re.match(r"\s*(\d{1,3}(?:[.]\d{3})+|\d+)\s*(?:[/|]|$)", item["texto"])
+            if coincidencia:
+                decisiones.append(coincidencia.group(1))
+    unicos = list(dict.fromkeys(decisiones))
+    return unicos[0] if len(unicos) == 1 else None
 
 
 def _normalizar_transporte_aza(texto: str) -> Optional[tuple[str, bool]]:

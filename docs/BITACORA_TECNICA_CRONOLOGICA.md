@@ -280,3 +280,25 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Patentes: la imagen 464106 documenta tracto `SB6486` y carro `JF4288`; el flujo anterior publicó `J54288` como tracto y perdió ambos roles. No se corrigió porque exige recuperación focal/geométrica específica y regresión vehicular.
 - Cantidad: no existe extractor independiente; no se reutilizó peso como cantidad. Materiales: se preservaron descripciones OCR y sólo avanzaron canónicos ya aprobados. Kilómetros: los reportes reales publican `origenes` vacío, por lo que el cálculo se abstiene antes de ORS.
 - Regresión: 168 focalizadas, 1148/1148 Atlas y 49/49 Desktop; `compileall` y `git diff --check` aprobados.
+
+### 2026-08-04 — Auditoría del Pipeline de Publicación Operacional, Fase 1
+
+- Trazabilidad real 464106: OCR contenía `CANTIDAD 15.253`, `PESO KG 15.253`,
+  “Casa Matriz Planta Renca” y los roles PATENTE/CARRO; el flujo anterior no
+  tenía contrato de publicación para origen/cantidad y el OCR lineal degradaba
+  las patentes a `836486`/`J54288`.
+- Corrección: cantidad se asocia geométricamente sólo bajo su encabezado;
+  patentes se recuperan sólo con rol documental, distancia OCR acotada y un
+  único vehículo del tipo esperado; origen exige dos lecturas focales
+  concordantes y una única planta activa confirmada. Los conflictos abstienen.
+- Resultado real: `AZA RENCA`, tracto `SB6486`, rampla `JF4288`, cantidad
+  `15.253` y peso `15.253` se preservan en CSV, `viajes.csv`, JSON embebido y el
+  modelo de presentación Desktop. El consolidado publica peso y cantidad sin
+  inferir.
+- ORS recibe `AZA RENCA`; la ruta permanece correctamente `PENDIENTE` por
+  “destino no confirmado en catálogo”, ya no por origen ausente.
+- Clientes: COMERCIAL A Y B, EBEMA y TORRES OCARANZA confirman con RUT exacto;
+  las variantes sin RUT o con RUT inválido siguen `NO_RESUELTO`. En 464106 el
+  Cliente y Destino permanecen pendientes; no se redujeron umbrales.
+- Validación: 1154/1154 pruebas Atlas, 49/49 Desktop, `compileall` y
+  `git diff --check` aprobados.

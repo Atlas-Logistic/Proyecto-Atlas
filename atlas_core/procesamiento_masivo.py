@@ -23,6 +23,8 @@ from atlas_core.extractor import (
     _extraer_asociaciones_geometricas,
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
+    _extraer_cantidad_geometrica,
+    _extraer_patentes_geometricas,
     extraer_datos,
 )
 from atlas_core.inteligencia.contrato_multicampo import (
@@ -44,6 +46,7 @@ from atlas_core.ocr import (
     _rut_chileno_canonico,
     crear_lector_ocr,
     leer_bloques_imagen,
+    leer_encabezado_origen_focal,
     leer_texto_imagen,
 )
 from atlas_core.politica_activacion_multicampo import (
@@ -76,9 +79,64 @@ COLUMNAS = [
     "tipo_carga",
     "indicador_revision",
 ]
-COLUMNAS_PUBLICACION = [*COLUMNAS, "peso"]
+COLUMNAS_PUBLICACION = [*COLUMNAS, "peso", "cantidad", "origen"]
+COLUMNAS_TRAZA_HISTORICA = [
+    "numero_guia_fuente",
+    "numero_guia_motivo",
+    "rut_chofer_estado_validacion",
+    "cliente_fuente",
+    "obra_destino_fuente",
+    "chofer_fuente",
+]
 
 Procesador = Callable[[Path], Mapping[str, object]]
+
+
+def _distancia_token(a: str, b: str) -> int:
+    if abs(len(a) - len(b)) > 1:
+        return 99
+    anterior = list(range(len(b) + 1))
+    for indice_a, caracter_a in enumerate(a, 1):
+        actual = [indice_a]
+        for indice_b, caracter_b in enumerate(b, 1):
+            actual.append(min(
+                actual[-1] + 1,
+                anterior[indice_b] + 1,
+                anterior[indice_b - 1] + (caracter_a != caracter_b),
+            ))
+        anterior = actual
+    return anterior[-1]
+
+
+def _resolver_origen_documental(
+    lecturas: Iterable[str], catalogo_plantas: Mapping[str, object]
+) -> str | None:
+    """Confirma una planta única por consenso OCR y catálogo aprobado."""
+    plantas = catalogo_plantas.get("plantas", [])
+    if not isinstance(plantas, list):
+        return None
+    votos: dict[str, int] = {}
+    for lectura in lecturas:
+        tokens = re.findall(r"[A-Z0-9]+", _normalizar(lectura))
+        coincidencias = []
+        for planta in plantas:
+            if not isinstance(planta, Mapping):
+                continue
+            if str(planta.get("estado_vigencia", "")).upper() not in {"ACTIVA", "ACTIVO"}:
+                continue
+            if str(planta.get("estado_calidad", "")).upper() not in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}:
+                continue
+            nombre = str(planta.get("nombre", "")).strip()
+            nombre_tokens = re.findall(r"[A-Z0-9]+", _normalizar(nombre))
+            if nombre_tokens and all(
+                any(_distancia_token(observado, esperado) <= 1 for observado in tokens)
+                for esperado in nombre_tokens
+            ):
+                coincidencias.append(nombre)
+        if len(coincidencias) == 1:
+            votos[coincidencias[0]] = votos.get(coincidencias[0], 0) + 1
+    aprobadas = [nombre for nombre, cantidad in votos.items() if cantidad >= 2]
+    return aprobadas[0] if len(aprobadas) == 1 else None
 
 
 def _rut_cliente_requiere_relectura(
@@ -431,6 +489,7 @@ def procesar_archivo(
     datos = extraer_datos(textos)
     recuperacion_geometrica = False
     recuperacion_chofer = False
+    recuperacion_patentes = False
     transporte_corregido = False
     bloques_guia = None
     campos_ausentes = any(
@@ -535,6 +594,59 @@ def procesar_archivo(
     datos = enriquecer_datos_con_catalogos(
         datos, textos, carpeta_catalogos or "catalogos"
     )
+    carpeta_catalogos_activa = Path(carpeta_catalogos or "catalogos")
+    catalogo_vehiculos_cargado = cargar_catalogo_json(
+        carpeta_catalogos_activa / "vehiculos.json"
+    )
+    catalogo_vehiculos = {
+        clave: registro
+        for clave, registro in catalogo_vehiculos_cargado.items()
+        if isinstance(registro, dict)
+        and str(registro.get("tipo", "")).strip().upper() in {"TRACTO", "CARRO"}
+    }
+    patentes_actuales = {
+        "patente_tracto": str(datos.get("patente del tracto", "No encontrado")),
+        "patente_rampla": str(datos.get("patente del carro", "No encontrado")),
+    }
+    if catalogo_vehiculos and any(
+        valor in {"", "No encontrado"} or valor not in catalogo_vehiculos
+        for valor in patentes_actuales.values()
+    ):
+        if bloques_guia is None:
+            bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+        decision_patentes = _extraer_patentes_geometricas(
+            bloques_guia, catalogo_vehiculos
+        )
+        for campo_publico, campo_datos in (
+            ("patente_tracto", "patente del tracto"),
+            ("patente_rampla", "patente del carro"),
+        ):
+            candidata = decision_patentes.get(campo_publico)
+            actual = patentes_actuales[campo_publico]
+            actual_valida = actual in catalogo_vehiculos
+            if candidata and (not actual_valida or actual == candidata):
+                datos[campo_datos] = candidata
+                recuperacion_patentes = recuperacion_patentes or actual != candidata
+            elif candidata and actual_valida and actual != candidata:
+                datos[campo_datos] = "No encontrado"
+                recuperacion_patentes = True
+                logger.info("%s abstiene por conflicto OCR/catalogo", campo_publico)
+    cantidad = (
+        _extraer_cantidad_geometrica(bloques_guia)
+        if bloques_guia is not None else None
+    )
+    origen = None
+    catalogo_plantas = cargar_catalogo_json(
+        carpeta_catalogos_activa / "plantas.json"
+    )
+    if isinstance(catalogo_plantas.get("plantas"), list):
+        try:
+            lecturas_origen = leer_encabezado_origen_focal(ruta, lector=lector_ocr)
+            origen = _resolver_origen_documental(
+                lecturas_origen, catalogo_plantas
+            )
+        except Exception as exc:
+            logger.warning("Relectura focal de origen omitida: %s: %s", type(exc).__name__, exc)
     nombre_chofer_ocr = nombre_chofer_original
     rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
     rut_cliente = str(datos.get("RUT del cliente", "No encontrado")).strip()
@@ -715,7 +827,7 @@ def procesar_archivo(
     )
     requiere_revision = any(
         not valor or valor == "No encontrado" for valor in valores_clave
-    ) or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
+    ) or recuperacion_geometrica or transporte_corregido or recuperacion_chofer or recuperacion_patentes
     if requiere_revision_chofer:
         requiere_revision = True
     if requiere_revision_cliente:
@@ -737,6 +849,8 @@ def procesar_archivo(
         "tipo_carga": tipo_carga_actual,
         "indicador_revision": "REVISAR" if requiere_revision else "OK",
         "peso": str(datos.get("peso", "No encontrado")),
+        "cantidad": str(cantidad or "No encontrado"),
+        "origen": str(origen or "No encontrado"),
     }
 
 
@@ -759,14 +873,42 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
         raise ValueError(f"La salida existente no es un archivo: {ruta_csv}")
 
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
-        lector = csv.reader(archivo, delimiter=";")
-        encabezado = next(lector, None)
-        if encabezado != COLUMNAS_PUBLICACION:
-            raise ValueError(
-                "El CSV existente tiene un esquema incompatible. "
-                "Se esperaba el encabezado exacto separado por ';'."
-            )
-        return next(lector, None) is not None
+        lector = csv.DictReader(archivo, delimiter=";")
+        encabezado = lector.fieldnames
+        filas = list(lector)
+    if encabezado is None or encabezado[: len(COLUMNAS)] != COLUMNAS:
+        raise ValueError(
+            "El CSV existente tiene un esquema incompatible. "
+            "Se esperaba el encabezado Atlas separado por ';'."
+        )
+    permitidas = set(COLUMNAS_PUBLICACION + COLUMNAS_TRAZA_HISTORICA)
+    if len(encabezado) != len(set(encabezado)) or any(
+        columna not in permitidas for columna in encabezado
+    ):
+        raise ValueError(
+            "El CSV existente tiene un esquema incompatible. "
+            "Contiene columnas desconocidas o repetidas."
+        )
+    faltantes = [
+        columna for columna in ("peso", "cantidad", "origen")
+        if columna not in encabezado
+    ]
+    if faltantes:
+        encabezado_nuevo = [*encabezado, *faltantes]
+        temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".tmp")
+        try:
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+                escritor = csv.DictWriter(
+                    archivo, fieldnames=encabezado_nuevo, delimiter=";",
+                    extrasaction="ignore",
+                )
+                escritor.writeheader()
+                escritor.writerows(filas)
+            temporal.replace(ruta_csv)
+        finally:
+            if temporal.exists():
+                temporal.unlink()
+    return bool(filas)
 
 
 def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
@@ -774,9 +916,15 @@ def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
         return
     ruta_csv.parent.mkdir(parents=True, exist_ok=True)
     existe_con_contenido = ruta_csv.exists() and ruta_csv.stat().st_size > 0
+    columnas_salida = COLUMNAS_PUBLICACION
+    if existe_con_contenido:
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+            columnas_existentes = next(csv.reader(archivo, delimiter=";"), None)
+        if columnas_existentes:
+            columnas_salida = columnas_existentes
     with ruta_csv.open("a", newline="", encoding="utf-8-sig") as archivo:
         escritor = csv.DictWriter(
-            archivo, fieldnames=COLUMNAS_PUBLICACION, delimiter=";", extrasaction="ignore"
+            archivo, fieldnames=columnas_salida, delimiter=";", extrasaction="ignore"
         )
         if not existe_con_contenido:
             escritor.writeheader()

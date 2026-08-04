@@ -16,6 +16,7 @@ from atlas_core.politica_activacion_multicampo import (
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     COLUMNAS_PUBLICACION,
+    _resolver_origen_documental,
     _rut_cliente_requiere_relectura,
     descubrir_archivos,
     extraer_descripcion_material,
@@ -23,6 +24,44 @@ from atlas_core.procesamiento_masivo import (
     procesar_archivo,
     procesar_carpeta,
 )
+
+
+def test_origen_documental_exige_consenso_y_planta_unica():
+    catalogo = {
+        "plantas": [
+            {
+                "nombre": "AZA RENCA",
+                "estado_calidad": "CONFIRMADA",
+                "estado_vigencia": "ACTIVA",
+            },
+            {
+                "nombre": "AZA COLINA",
+                "estado_calidad": "CONFIRMADA",
+                "estado_vigencia": "ACTIVA",
+            },
+        ]
+    }
+    lecturas = [
+        "ACEROS AZA CASA MATRIZ PLANTA RENCA",
+        "ACEROS AZA CASA MATRIZ PLANTA RENECA",
+        "texto ilegible",
+    ]
+
+    assert _resolver_origen_documental(lecturas, catalogo) == "AZA RENCA"
+
+
+def test_origen_documental_abstiene_sin_dos_lecturas_coincidentes():
+    catalogo = {
+        "plantas": [{
+            "nombre": "AZA RENCA",
+            "estado_calidad": "CONFIRMADA",
+            "estado_vigencia": "ACTIVA",
+        }]
+    }
+
+    assert _resolver_origen_documental(
+        ["ACEROS AZA PLANTA RENCA", "texto ilegible"], catalogo
+    ) is None
 
 
 @pytest.mark.parametrize(
@@ -931,6 +970,8 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
             "tipo_carga",
             "indicador_revision",
             "peso",
+            "cantidad",
+            "origen",
         }
 
 
@@ -1038,6 +1079,34 @@ def test_acepta_csv_existente_vacio(tmp_path):
     assert len(filas) == 1
 
 
+def test_migra_csv_atlas_15_columnas_sin_perder_filas(tmp_path):
+    carpeta = tmp_path / "guias"
+    _crear_archivo(carpeta / "nueva.jpg")
+    salida = tmp_path / "resultado.csv"
+    with salida.open("w", encoding="utf-8-sig", newline="") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerow({"archivo": "anterior.jpg", "numero_guia": "100"})
+
+    resumen = procesar_carpeta(
+        carpeta,
+        salida,
+        procesador=lambda ruta: {
+            "numero_guia": "200", "peso": "10", "cantidad": "2", "origen": "AZA RENCA"
+        },
+    )
+
+    with salida.open(encoding="utf-8-sig", newline="") as archivo:
+        lector = csv.DictReader(archivo, delimiter=";")
+        filas = list(lector)
+    assert lector.fieldnames == COLUMNAS_PUBLICACION
+    assert filas[0]["numero_guia"] == "100"
+    assert filas[0]["peso"] == filas[0]["cantidad"] == filas[0]["origen"] == ""
+    assert filas[1]["numero_guia"] == "200"
+    assert filas[1]["origen"] == "AZA RENCA"
+    assert resumen["procesados"] == 1
+
+
 def test_acepta_encabezado_exacto_para_reanudar(tmp_path):
     carpeta = tmp_path / "guias"
     _crear_archivo(carpeta / "a.jpg")
@@ -1055,7 +1124,7 @@ def test_acepta_encabezado_exacto_para_reanudar(tmp_path):
 @pytest.mark.parametrize(
     "encabezado",
     [
-        COLUMNAS_PUBLICACION[:-1],
+        COLUMNAS[1:],
         COLUMNAS_PUBLICACION + ["columna_extra"],
         [*COLUMNAS_PUBLICACION[:-1], COLUMNAS_PUBLICACION[-2]],
     ],

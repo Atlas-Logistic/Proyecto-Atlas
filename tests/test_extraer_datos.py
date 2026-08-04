@@ -31,6 +31,8 @@ from atlas_core.extractor import (
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
+    _extraer_cantidad_geometrica,
+    _extraer_patentes_geometricas,
     _extraer_transporte_geometrico,
 )
 from atlas_core.ocr import BloqueOCR
@@ -43,6 +45,45 @@ def _bloque(texto, x, y, ancho=None, alto=18):
         bounding_box=((x, y), (x + ancho, y), (x + ancho, y + alto), (x, y + alto)),
         confianza=0.9,
     )
+
+
+def test_patentes_geometricas_recuperan_roles_con_catalogo_unico():
+    bloques = [
+        _bloque("PATENTE", 548, 898, 63),
+        _bloque("836486", 633, 905, 50),
+        _bloque("CARRO: J54288", 695, 907, 92),
+    ]
+    catalogo = {
+        "SB6486": {"tipo": "TRACTO"},
+        "JF4288": {"tipo": "CARRO"},
+    }
+
+    resultado = _extraer_patentes_geometricas(bloques, catalogo)
+
+    assert resultado["patente_tracto"] == "SB6486"
+    assert resultado["patente_rampla"] == "JF4288"
+
+
+def test_patentes_geometricas_abstienen_si_catalogo_es_ambiguo():
+    bloques = [_bloque("CARRO: J54288", 695, 907, 92)]
+    catalogo = {
+        "JF4288": {"tipo": "CARRO"},
+        "JG4288": {"tipo": "CARRO"},
+    }
+
+    resultado = _extraer_patentes_geometricas(bloques, catalogo)
+
+    assert "patente_rampla" not in resultado
+
+
+def test_cantidad_geometrica_separa_valor_de_codigo_en_celda_ocr_fusionada():
+    bloques = [
+        _bloque("CANTIDAD", 81, 489, 62),
+        _bloque("Codigo", 189, 489, 50),
+        _bloque("15.253/110002946", 103, 511, 104),
+    ]
+
+    assert _extraer_cantidad_geometrica(bloques) == "15.253"
 
 
 def test_geometria_cliente_a_la_derecha_de_senores():

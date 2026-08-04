@@ -6,7 +6,7 @@ import re
 from typing import Any, Iterable, List, Tuple, Union
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
 
 try:
     import easyocr
@@ -235,6 +235,37 @@ def leer_bloques_imagen(
             )
         )
     return bloques
+
+
+def leer_encabezado_origen_focal(
+    ruta_imagen: Union[str, Path], lector: Any = None
+) -> List[str]:
+    """Relee el encabezado del emisor sin interpretar ni completar su contenido."""
+    ruta = Path(ruta_imagen)
+    try:
+        with Image.open(ruta) as imagen:
+            gris = ImageOps.exif_transpose(imagen).convert("L")
+            ancho, alto = gris.size
+            recorte = gris.crop((
+                int(ancho * 0.07), int(alto * 0.10),
+                int(ancho * 0.62), int(alto * 0.24),
+            )).resize((int(ancho * 1.65), int(alto * 0.42)))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"No se pudo abrir la imagen: {ruta}") from exc
+    if lector is None:
+        lector = crear_lector_ocr()
+    variantes = (
+        recorte,
+        ImageEnhance.Contrast(recorte).enhance(2.2),
+        ImageEnhance.Contrast(recorte.filter(ImageFilter.SHARPEN)).enhance(2.5),
+    )
+    lecturas = []
+    for variante in variantes:
+        resultados = lector.readtext(
+            np.asarray(variante), detail=0, paragraph=False
+        )
+        lecturas.append(" ".join(str(valor).strip() for valor in resultados))
+    return lecturas
 
 
 def _leer_transporte_focal(
