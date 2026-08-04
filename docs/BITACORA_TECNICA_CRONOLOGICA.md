@@ -10,6 +10,29 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 
 ## Registro cronológico
 
+### 2026-08-04 — Validación Operacional Masiva, Fase 1
+- Decisión importante: medir el mayor corpus operacional disponible (1.177
+  guías reales y 574 viajes) sin equiparar cobertura con precisión.
+- Evidencia: 1.177/1.177 filas fueron procesadas sin error; 1.033 conservan
+  indicador global `REVISAR`. Cliente aparece en 719, Destino en 777, Chofer en
+  711 y Transporte en 730 documentos.
+- Hallazgo estructural: el snapshot masivo del 28-07-2026 no contiene columnas
+  Origen, Peso ni Cantidad; por ello esos campos y los kilómetros no pueden
+  medirse como publicados en ese corte, aunque existan validaciones focales
+  posteriores del pipeline vigente.
+- Consolidación: los 730 documentos con transporte se conservan exactamente en
+  574 viajes; 490 viajes/529 documentos quedan confirmados y 84 viajes/201
+  documentos requieren revisión. Otros 447 documentos no poseen transporte.
+- Calidad: no hay ground truth humano masivo por campo. Se mantiene como
+  referencia separada el E2E oficial de 48/49 valores (97,96 %), sin
+  extrapolación estadística al corpus operacional.
+- Alternativa descartada: declarar como correctos todos los valores presentes o
+  ejecutar correcciones/reprocesamiento durante una fase exclusivamente de
+  medición.
+- Siguiente bloque recomendado: reprocesar una cohorte estratificada con el
+  pipeline vigente, congelar ground truth por campo y priorizar
+  Origen/Transporte/Destino para desbloquear consolidación y rutas.
+
 ### 2026-07-31 — Priorización del cuello de botella de calidad de lectura
 - Decisión importante: priorizar la calidad de lectura real sobre seguir el roadmap únicamente por orden histórico.
 - Cambio de estrategia: enfocar la siguiente iteración en el bloque de lectura y resolución antes de ampliar capacidades nuevas.

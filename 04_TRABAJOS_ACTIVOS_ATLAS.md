@@ -1,5 +1,27 @@
 # Trabajos activos Atlas
 
+## Validación Operacional Masiva — Fase 1
+
+- Estado: COMPLETADA — sin reserva activa y sin cambios funcionales.
+- Universo: 1.177 guías reales, todas procesadas sin error, y 574 viajes
+  consolidados. El snapshot operacional es del 28-07-2026; no se confunde
+  presencia de datos con exactitud contra ground truth.
+- Cobertura destacada: Cliente 61,09 %, Destino 66,02 %, Chofer 60,41 %,
+  Transporte 62,02 %, tracto 8,67 %, rampla 2,72 %, Material 22,43 % y tipo de
+  carga 6,71 %. Origen, Peso y Cantidad no existen en el esquema de este
+  snapshot masivo, por lo que su cobertura publicada es 0 %.
+- Consolidación: 730/1.177 documentos se asignan por transporte a 574 viajes;
+  490 viajes quedan confirmados y 84 en revisión. La invariancia estructural
+  conserva 730/730 documentos, pero no sustituye validación semántica humana.
+- Kilómetros: 0/574 viajes del snapshot pueden medirse de extremo a extremo
+  porque el campo Origen no fue publicado en ese corte histórico.
+- Precisión: el corpus masivo no posee ground truth por campo y no autoriza una
+  cifra de precisión. La referencia oficial independiente permanece en 48/49
+  valores E2E (97,96 %), sin extrapolarla a las 1.177 guías.
+- Próximo bloque recomendado: Reprocesamiento Operacional Controlado y Ground
+  Truth Estratificado, comenzando por Origen/Transporte/Destino por su efecto
+  directo sobre viajes y kilómetros.
+
 ## Reconstrucción Estructurada de Campos OCR — Fase 1
 
 - Estado: COMPLETADA — sin reserva activa.
