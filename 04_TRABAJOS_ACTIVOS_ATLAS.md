@@ -1,5 +1,21 @@
 # Trabajos activos Atlas
 
+## Logistics UX 1.0
+
+- Estado: IMPLEMENTADO Y VALIDADO VISUALMENTE; despliegue bloqueado por política
+  local de ejecución.
+- Desktop presenta un resumen operativo de ruta, distancia destacada, tiempo,
+  proveedor, estado y motivo explícito para resultados no calculados.
+- Validación visual: guías 462429 (33,2 km/40 min), 464089 (pendiente), 464135
+  (destino sin dirección) y 462474 (proveedor no disponible), sin desbordamiento.
+- Pruebas: 39/39 Desktop y prueba visual Electron aprobadas.
+- El `app.asar` activo contiene el commit `9b67abb7a2b3d6a9ecc98bdf2a644cbdb168eb43`,
+  versión `1.2.0`, SHA-256
+  `03f0bcddc1e8b3299f31cf973c1fea4266a2fa256706c9b070c1aaefcb5e3892`.
+- Bloqueo puntual: Smart App Control impide iniciar el ejecutable no firmado;
+  Code Integrity registró el evento 3077 para la política
+  `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`. No se modificó el flujo oficial.
+
 ## Despliegue controlado de Atlas Desktop
 
 - Estado: COMPLETADO — sin reservas activas.

@@ -203,3 +203,18 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - La guía 464089 fue reprocesada realmente: 1/1 procesada, OCR en 49,66 s,
   evidencia `LEANDRO IOLEDO`; el reporte y Desktop publicaron el canónico
   existente `LEANDRO TOLEDO`.
+
+### 2026-08-04 — Logistics UX 1.0
+
+- Se reorganizó exclusivamente la presentación del panel logístico: resumen
+  operativo, distancia destacada, tiempo, proveedor, estado y motivo cuando no
+  existe cálculo. No cambió el contrato ni el cálculo OpenRouteService.
+- La prueba visual cubrió 462429 calculada (33,2 km, 40 min), 464089 pendiente,
+  464135 sin dirección y 462474 con proveedor no disponible.
+- `npm run deploy:dev` construyó y copió el build. El `app.asar` activo quedó en
+  versión 1.2.0, commit `9b67abb7a2b3d6a9ecc98bdf2a644cbdb168eb43`, SHA-256
+  `03f0bcddc1e8b3299f31cf973c1fea4266a2fa256706c9b070c1aaefcb5e3892`.
+- El relanzamiento fue rechazado por Smart App Control. Code Integrity evento
+  3077 registra que el ejecutable no cumple el nivel de firma exigido por la
+  política `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`. El flujo oficial no fue
+  modificado y la instalación activa no se declaró funcionalmente validada.
