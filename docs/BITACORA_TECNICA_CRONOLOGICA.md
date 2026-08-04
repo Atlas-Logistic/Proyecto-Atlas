@@ -131,3 +131,17 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - [docs/CONTRATO_VIAJES_DESKTOP.md](docs/CONTRATO_VIAJES_DESKTOP.md)
 - [docs/ATLAS_MASTER_CATALOGS.md](docs/ATLAS_MASTER_CATALOGS.md)
 - [04_TRABAJOS_ACTIVOS_ATLAS.md](04_TRABAJOS_ACTIVOS_ATLAS.md)
+### 2026-08-04 — Hotfix regresión Chofer — guía 464089
+
+- Causa: `67541f0` añadió una condición imposible para publicar la recuperación
+  geométrica cuando el valor lineal era `None`, vacío o `No encontrado`.
+- Corrección: se restauró la única precondición válida: publicar cuando el
+  recuperador geométrico conservador entrega un valor.
+- Evidencia real: 464089 pasa de `No encontrado` a `LEANDRO IOLEDO`, lectura OCR
+  geométrica disponible; continúa en `REVISAR` porque no se modificaron
+  resolvers ni reglas de canonización.
+- Regresión: 120/120 pruebas de `procesamiento_masivo` aprobadas. Un caso de
+  evidencia débil conserva ahora la recuperación cruda y continúa en
+  `REVISAR`, coherente con el comportamiento restaurado.
+- Integridad: ningún cambio en OCR, recuperador geométrico, resolvers, Desktop,
+  Política de Activación, Sistema Multicampo, catálogos o reglas de negocio.

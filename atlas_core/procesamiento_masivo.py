@@ -440,10 +440,7 @@ def procesar_archivo(
             chofer_actual = datos.get("chofer", "No encontrado")
             if chofer_actual in {None, "", "No encontrado"} or _chofer_lineal_contaminado(chofer_actual):
                 decision_chofer = _extraer_chofer_geometrico(bloques_guia)
-                if decision_chofer.get("valor") and (
-                    _chofer_lineal_contaminado(chofer_actual)
-                    or chofer_actual not in {None, "", "No encontrado"}
-                ):
+                if decision_chofer.get("valor"):
                     datos["chofer"] = decision_chofer["valor"]
                     recuperacion_chofer = True
                     logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
