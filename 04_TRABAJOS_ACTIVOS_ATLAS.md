@@ -1,5 +1,35 @@
 # Trabajos activos Atlas
 
+## Atlas Benchmark 2.0 — Validación Operacional Masiva del Motor Actual
+
+- Estado: COMPLETADO — sin reserva activa y sin cambios funcionales.
+- Corpus actual congelado: 127 imágenes reales únicas por SHA-256, reunidas
+  desde muestra oficial, paquetes de validación y entradas Desktop. Se
+  descartaron 16 copias byte a byte y no se incluyeron recortes, montajes ni
+  capturas derivadas. SHA-256 agregado:
+  `eba4594f2f2f4d87861b1720f3f5218840bf748d1d3d9ad641dffb96f5d4a47b`.
+- Reprocesamiento completo: 127/127 desde cero con el motor actual, catálogos
+  privados vigentes, cero omisiones, cero errores y ningún resultado histórico
+  reutilizado.
+- Cobertura actual: Cliente 55,91 %, Destino 70,87 %, Chofer 71,65 %,
+  Transporte 70,87 %, tracto 55,12 %, rampla 14,96 %, Peso 22,83 %, Cantidad
+  29,92 %, Material 22,83 % y Origen 40,94 %.
+- Comparación descriptiva contra snapshot: Cliente -5,18 pp; Destino +4,85 pp;
+  Chofer +11,24 pp; Transporte +8,85 pp; tracto +46,45 pp; rampla +12,24 pp;
+  Peso +22,83 pp; Cantidad +29,92 pp; Material +0,40 pp; Origen +40,94 pp.
+  Los universos no son pareados: 1.177 filas históricas frente a 127 originales
+  recuperables actuales.
+- Viajes: 90 documentos con transporte forman 86 viajes; 7 confirmados, 79 en
+  revisión y 37 documentos sin transporte. Consolidación 62,02 % → 70,87 %.
+- Rutas reales: 2/86 calculadas por OpenRouteService, ambas 16,7 km y 25 min;
+  84 pendientes. Motivos: origen ausente 47, destino no confirmado 29, destino
+  ausente 5, destino ambiguo 2 y origen sin coordenadas 1.
+- Riesgo metodológico: `confirmado` significa valor presente en un documento
+  cuyo indicador global no es `REVISAR`; no equivale a exactitud contra ground
+  truth. El corpus actual no dispone de verdad humana completa por campo.
+- Próximo bloque recomendado: Cobertura Operacional de Origen — Fase 1, por
+  desbloquear potencialmente 47/86 rutas y afectar 75/127 documentos.
+
 ## Validación Operacional Masiva — Fase 1
 
 - Estado: COMPLETADA — sin reserva activa y sin cambios funcionales.

@@ -10,6 +10,34 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 
 ## Registro cronológico
 
+### 2026-08-04 — Atlas Benchmark 2.0, motor actual
+- Decisión: reconstruir un corpus actual desde las imágenes originales
+  recuperables y no reutilizar ninguna fila del snapshot histórico.
+- Universo: 143 archivos candidatos, 16 duplicados exactos descartados y 127
+  imágenes únicas procesadas. Se excluyeron derivados visuales y recortes OCR.
+- Ejecución: motor funcional base `173f135`, HEAD documental `7f61ff1`,
+  catálogos privados vigentes, 127 OK, cero errores y cero omisiones. La salida,
+  reporte y rutas permanecen en el área temporal privada de Atlas.
+- Rendimiento: la primera cohorte secuencial requirió cerca de 65 segundos por
+  documento; tres lectores concurrentes elevaron el promedio individual a
+  165–174 segundos por contención CPU. No se alteraron relecturas ni parámetros.
+- Cobertura: Cliente 55,91 %, Destino 70,87 %, Chofer 71,65 %, Transporte
+  70,87 %, tracto 55,12 %, rampla 14,96 %, Peso 22,83 %, Cantidad 29,92 %,
+  Material 22,83 % y Origen 40,94 %.
+- Consolidación: 90/127 documentos forman 86 viajes; 7 viajes/7 documentos
+  quedan confirmados y 79 viajes/83 documentos requieren revisión; 37
+  documentos carecen de transporte.
+- Rutas: ORS calculó 2/86 viajes, ambos AZA RENCA → VISTA CLARA 2351, 16,7 km
+  y 25 min. Permanecen 84 pendientes: 47 sin origen, 29 con destino no
+  confirmado, 5 sin destino, 2 con destino ambiguo y 1 sin coordenadas de
+  origen.
+- Interpretación: la variación frente al snapshot es descriptiva, no pareada;
+  Cliente baja 5,18 pp mientras los restantes campos mejoran o permanecen
+  estables. Sin ground truth completo no se declara precisión masiva.
+- Priorización: Origen primero por bloquear 47 rutas y faltar en 75 documentos;
+  Destino segundo por bloquear otros 36 viajes; Transporte tercero por excluir
+  37 documentos de consolidación.
+
 ### 2026-08-04 — Validación Operacional Masiva, Fase 1
 - Decisión importante: medir el mayor corpus operacional disponible (1.177
   guías reales y 574 viajes) sin equiparar cobertura con precisión.
