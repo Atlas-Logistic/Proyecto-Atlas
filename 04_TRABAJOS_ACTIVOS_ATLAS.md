@@ -1,5 +1,24 @@
 # Trabajos activos Atlas
 
+## Kilómetros visibles en Atlas Desktop — Fase 1
+
+- Estado: COMPLETADO — sin reservas activas.
+- Implementación: `viajes.csv` y los catálogos confirmados de Plantas/Destinos
+  alimentan el `CalculadorRutas` y el adaptador OpenRouteService ya existentes;
+  Desktop consume el resultado mediante un IPC aislado.
+- Publicación: distancia, tiempo estimado, estado, proveedor y motivo quedan
+  visibles en el panel preparado por Atlas Desktop UX 1.0.
+- Seguridad: solo calcula con origen y destino únicos, confirmados, activos,
+  con dirección completa y coordenadas canónicas; cualquier ausencia o fallo
+  produce `Pendiente` o `No disponible`, nunca métricas vacías o cero.
+- Validación: 63/63 pruebas focales Python, 1144/1144 de regresión, 36/36
+  pruebas Desktop, prueba visual Electron, build Windows y consulta ORS real
+  entre extremos canónicos confirmados (`33,2 km`, `40 min`, `CALCULADA`).
+- Integridad: no se modificaron OCR, Orquestador, Política de Activación,
+  resolvers, reglas de negocio ni arquitectura multicampo.
+- Próximo bloque recomendado: observabilidad operacional de rutas y medición de
+  cobertura sobre viajes reales antes de autorizar caché o más proveedores.
+
 ## Atlas Desktop UX 1.0 — Fases 1 y 2
 
 - Estado: COMPLETADO — sin reservas activas.

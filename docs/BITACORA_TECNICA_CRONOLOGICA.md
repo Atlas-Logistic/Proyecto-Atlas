@@ -121,6 +121,30 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Validación: 35/35 pruebas, prueba estructural con captura Electron, build
   Windows y ausencia de desbordamiento horizontal.
 
+### 2026-08-04 — Kilómetros visibles en Atlas Desktop — Fase 1
+
+- Decisión importante: conectar Desktop al adaptador OpenRouteService y al
+  `CalculadorRutas` existentes mediante un caso de uso Python independiente y
+  un único IPC de solo resultado.
+- Selección: cada viaje exige un origen y un destino únicos. Ambos deben
+  coincidir exactamente con entidades activas y confirmadas; además requieren
+  dirección completa y coordenadas canónicas. No se geocodifica ni se infiere.
+- Estados: una ruta válida publica kilómetros, duración, proveedor y
+  `Calculado`; faltantes documentales producen `Pendiente`; credencial,
+  conexión o proveedor fallido producen `No disponible`. Todo estado incluye
+  un motivo legible.
+- Reutilización: no se creó otro proveedor ni se duplicó transporte HTTP,
+  validación de métricas o contrato logístico. El puerto existente permite una
+  futura selección multiproveedor sin acoplar Desktop.
+- Fuera de alcance: caché, persistencia de rutas, reintentos, fallback,
+  analítica y geocodificación automática.
+- Validación: consulta ORS real `CALCULADA` entre AZA RENCA y LAS VIOLETAS 55,
+  con 33,2 km y 40 min; 63/63 pruebas focales, 1144/1144 de regresión,
+  36/36 Desktop, prueba visual
+  Electron, build Windows, `compileall` y `git diff --check`.
+- Integridad: cero cambios en OCR, Orquestador, Política, resolvers, negocio o
+  arquitectura multicampo.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.
