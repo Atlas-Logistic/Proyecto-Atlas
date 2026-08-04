@@ -767,6 +767,44 @@ def test_resolucion_de_chofer_confirma_por_rut_en_flujo_principal(
     assert resultado["indicador_revision"] == "REVISAR"
 
 
+def test_procesar_archivo_464089_recupera_chofer_ausente_geometricamente(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "464089.jpeg"
+    bloques = [
+        BloqueOCR("RETIRA", ((10, 10), (70, 10), (70, 30), (10, 30)), 0.98),
+        BloqueOCR(
+            "LEANDRO TOLEDO",
+            ((120, 10), (250, 10), (250, 30), (120, 30)),
+            0.97,
+        ),
+        BloqueOCR("PATENTE", ((10, 40), (80, 40), (80, 60), (10, 60)), 0.99),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[])
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques)
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos",
+        Mock(
+            return_value={
+                "número de guía": "464089",
+                "número de transporte": "0000350880",
+                "cliente": "A",
+                "obra destino": "B",
+                "chofer": "No encontrado",
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["chofer"] == "LEANDRO TOLEDO"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
 def test_rollback_de_chofer_por_configuracion_conserva_valor_ocr(
     tmp_path, monkeypatch
 ):
@@ -797,7 +835,7 @@ def test_rollback_de_chofer_por_configuracion_conserva_valor_ocr(
     assert resultado["cliente"] == "CLIENTE ORIGINAL"
 
 
-def test_resolucion_de_chofer_abstiene_con_evidencia_debil_y_marca_revision(
+def test_resolucion_de_chofer_conserva_recuperacion_geometrica_y_marca_revision(
     tmp_path, monkeypatch
 ):
     datos = {
@@ -823,7 +861,7 @@ def test_resolucion_de_chofer_abstiene_con_evidencia_debil_y_marca_revision(
 
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 
-    assert resultado["chofer"] == "No encontrado"
+    assert resultado["chofer"] == "ENRIQUE RANOS"
     assert resultado["indicador_revision"] == "REVISAR"
 
 

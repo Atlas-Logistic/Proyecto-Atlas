@@ -318,3 +318,14 @@ La lógica de `requiere_revision` fuerza revisión manual **incluso cuando el ch
 
 ### Handoff
 - No abrir todavía el bloque de Destinos hasta confirmar que Clientes quedó completamente integrado y publicado en `origin/main`.
+## Hotfix regresión Chofer — guía 464089
+
+- Estado: COMPLETADO en la rama de hotfix.
+- Rama: `hotfix-regresion-chofer-464089`.
+- Fecha: 2026-08-04.
+- Alcance: restaurar la publicación de la recuperación geométrica conservadora
+  cuando la extracción lineal entrega `No encontrado`.
+- Validación: 120/120 pruebas de `procesamiento_masivo` aprobadas; la guía 464089
+  recupera el Chofer y los casos conservadores permanecen en `REVISAR`.
+- Integridad: sin cambios en OCR, recuperador geométrico, resolvers, Desktop,
+  Política de Activación, Sistema Multicampo ni catálogos.
