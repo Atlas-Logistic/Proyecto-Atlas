@@ -1,5 +1,21 @@
 # Trabajos activos Atlas
 
+## Despliegue controlado de Atlas Desktop
+
+- Estado: COMPLETADO — sin reservas activas.
+- Método oficial: `npm run deploy:dev` desde el repositorio Desktop limpio.
+- El comando genera metadatos, construye, respalda la instalación activa,
+  despliega y valida automáticamente ruta, SHA-256, commit y versión.
+- Instalación validada: `C:\Users\corte\Desktop\Atlas Viajes`; versión `1.2.0`,
+  commit `3bbd3b277fe1a37652c93d7c22cfbfe7da1e2ac7`, SHA-256 del `app.asar`
+  `5e638fa7efa78202e9636b3ed198462d4b21feff397f75abc7ab63045afd418f`.
+- Validación 464089: el reprocesamiento real ejecutó OCR, recuperó
+  `LEANDRO IOLEDO` y Desktop publicó `LEANDRO TOLEDO` mediante la normalización
+  ya existente. El paquete activo contiene el diálogo de duplicados y la opción
+  `Reprocesar completamente`.
+- Integridad: no se modificaron OCR, Sistema Multicampo, resolvers, catálogos ni
+  reglas de negocio.
+
 ## Desktop UX — Reprocesamiento Inteligente
 
 - Estado: COMPLETADO en rama `feature-desktop-reprocesamiento-inteligente`.

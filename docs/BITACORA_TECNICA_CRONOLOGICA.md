@@ -185,3 +185,21 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   lectura cruda en `evidencias_documentos`.
 - Integridad: OCR, recuperador geométrico, `procesamiento_masivo`, Orquestador,
   Política, resolvers y reglas de negocio permanecen intactos.
+
+### 2026-08-04 — Despliegue controlado de Atlas Desktop
+
+- Se oficializó `npm run deploy:dev` como único comando de despliegue de
+  desarrollo. Exige repositorio limpio, genera metadatos del build, empaqueta,
+  respalda `app.asar` y configuración, copia la distribución y relanza la
+  instalación objetivo.
+- La verificación inspecciona el contenido del `app.asar` y compara ruta,
+  SHA-256, commit embebido y versión; además comprueba que el diálogo de
+  reprocesamiento forme parte del paquete activo.
+- Instalación activa: `C:\Users\corte\Desktop\Atlas Viajes`; commit
+  `3bbd3b277fe1a37652c93d7c22cfbfe7da1e2ac7`, versión `1.2.0`, SHA-256
+  `5e638fa7efa78202e9636b3ed198462d4b21feff397f75abc7ab63045afd418f`.
+- El arranque neutraliza `ELECTRON_RUN_AS_NODE` para impedir que variables del
+  entorno de automatización cambien el modo de ejecución de Electron.
+- La guía 464089 fue reprocesada realmente: 1/1 procesada, OCR en 49,66 s,
+  evidencia `LEANDRO IOLEDO`; el reporte y Desktop publicaron el canónico
+  existente `LEANDRO TOLEDO`.
