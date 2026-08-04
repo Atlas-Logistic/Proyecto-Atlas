@@ -302,3 +302,29 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   Cliente y Destino permanecen pendientes; no se redujeron umbrales.
 - Validación: 1154/1154 pruebas Atlas, 49/49 Desktop, `compileall` y
   `git diff --check` aprobados.
+
+### 2026-08-04 — Resolución Canónica de Clientes y Destinos, Fase 1
+
+- 464089 permanece estable: el consenso focal `78.634.910-9` y la entidad única
+  siguen publicando `COMERCIAL A Y B LTDA`.
+- 464106: extracción inicial `IORRSS OCARANZA`; relectura focal estructurada
+  `50.234.350-5` en tres lecturas útiles concordantes, válido por módulo 11.
+  El fuzzy de nombre era 0,8667, inferior al umbral 0,88, por lo que se mantuvo
+  el umbral y se añadió sólo el alias OCR documental exacto a TORRES OCARANZA.
+- El reprocesamiento real publica `TORRES OCARANZA LTDA` en procesamiento, CSV,
+  reporte y evidencia Desktop. No cambian resolvers, Política, Orquestador,
+  pipeline, ORS ni UX.
+- Caso equivalente 463528: imagen legible con TORRES OCARANZA LTDA, RUT
+  `50.234.350-5` y VISTA CLARA 2351; el RUT focal alcanza consenso y el flujo
+  existente confirma el Cliente al reprocesar.
+- Destino: `VISTA CLARA 2351` figura en 464106, 463528 y la clave histórica del
+  catálogo. Sin embargo, una corrección manual previa establece 2401. El
+  registro permanece `PENDIENTE`, con latitud/longitud nulas y existen además
+  otros dos destinos de TORRES OCARANZA; el nombre del Cliente no puede usarse
+  como alias de Destino.
+- Kilómetros: 464106 sigue `PENDIENTE`, motivo `destino no confirmado en
+  catálogo`. Para avanzar faltan confirmación autoritativa de 2351/2401 y
+  coordenadas exactas.
+- Catálogo privado respaldado y manifiesto regenerado: 28 Clientes, 42 alias,
+  cero identificadores duplicados y cero promociones automáticas desde OCR.
+- Regresión: 1154/1154 Atlas y 49/49 Desktop; compileall y diff-check aprobados.

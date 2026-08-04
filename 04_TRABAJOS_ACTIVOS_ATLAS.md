@@ -1,5 +1,31 @@
 # Trabajos activos Atlas
 
+## Resolución Canónica de Clientes y Destinos — Fase 1
+
+- Estado: COMPLETADA CON ABSTENCIÓN CORRECTA DE DESTINO — sin reserva activa.
+- 464089 permanece estable: `COMERCIAL A Y B LTDA`, confirmado por RUT focal
+  `78.634.910-9` y catálogo único.
+- 464106: cuatro lecturas focales producen consenso de `50.234.350-5`, válido
+  por módulo 11. Se registró exclusivamente el alias documental específico
+  `IORRSS OCARANZA` para `TORRES OCARANZA LTDA`; no se añadieron alias parciales
+  ni se redujeron umbrales.
+- Resultado 464106: Cliente `IORRSS OCARANZA` → `TORRES OCARANZA LTDA` desde el
+  Resolver hasta CSV y reporte. Destino conserva `IORRES OCARANZA LIDA` y
+  `REVISAR`.
+- Caso equivalente 463528: la imagen documenta TORRES OCARANZA LTDA, RUT
+  `50.234.350-5` y VISTA CLARA 2351; el reprocesamiento confirma correctamente
+  el Cliente con el mecanismo existente.
+- Destino VISTA CLARA no avanza: dos guías y el origen histórico indican 2351,
+  pero una corrección manual previa fija 2401; el catálogo está `PENDIENTE` y
+  no posee coordenadas. Se requiere confirmación documental/manual de la
+  dirección correcta y coordenadas exactas antes de calcular rutas.
+- Kilómetros: sin cambio; 464106 continúa `PENDIENTE` por “destino no confirmado
+  en catálogo”.
+- Validación: 1154/1154 Atlas, 49/49 Desktop, catálogo privado válido y cero
+  conflictos de manifiesto.
+- Próximo bloque recomendado: Calidad Documental de VISTA CLARA 2351/2401 y
+  coordenadas, sin consultar Internet hasta autorización expresa.
+
 ## Auditoría del Pipeline de Publicación Operacional — Fase 1
 
 - Estado: COMPLETADA CON PENDIENTES DOCUMENTALES — sin reserva activa.
