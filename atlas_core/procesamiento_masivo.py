@@ -25,6 +25,7 @@ from atlas_core.extractor import (
     _extraer_chofer_geometrico,
     _extraer_cantidad_geometrica,
     _extraer_patentes_geometricas,
+    _reconstruir_campos_documentales,
     extraer_datos,
 )
 from atlas_core.inteligencia.contrato_multicampo import (
@@ -591,8 +592,41 @@ def procesar_archivo(
     nombre_chofer_original = str(datos.get("chofer", "No encontrado")).strip()
     nombre_cliente_original = str(datos.get("cliente", "No encontrado")).strip()
     destino_original = str(datos.get("obra destino", "No encontrado")).strip()
+    catalogo_destinos_maestros = cargar_catalogo_json(
+        Path(carpeta_catalogos or "catalogos") / "destinos_maestros.json"
+    )
+    nombres_destino_confirmados = {
+        _normalizar(registro.get("nombre_destino", ""))
+        for registro in catalogo_destinos_maestros.get("destinos", [])
+        if isinstance(registro, dict)
+        and registro.get("estado_vigencia") == "ACTIVO"
+        and registro.get("estado_calidad") in {"CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+    }
+    campos_estructurados: dict[str, object] = {}
+    if (
+        _normalizar(destino_original) not in nombres_destino_confirmados
+        and any(
+            str(registro.get("codigo_destino", "")).strip()
+            for registro in catalogo_destinos_maestros.get("destinos", [])
+            if isinstance(registro, dict)
+        )
+    ):
+        if bloques_guia is None:
+            bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+        reconstruidos = _reconstruir_campos_documentales(bloques_guia)
+        campos_estructurados = {
+            campo: evidencia["valor"]
+            for campo, evidencia in reconstruidos.items()
+        }
+        if "codigo_destinatario" in reconstruidos:
+            logger.info(
+                "codigo_destinatario reconstruido mediante etiqueta-valor-geometrico-v1"
+            )
     datos = enriquecer_datos_con_catalogos(
-        datos, textos, carpeta_catalogos or "catalogos"
+        datos,
+        textos,
+        carpeta_catalogos or "catalogos",
+        campos_estructurados=campos_estructurados,
     )
     carpeta_catalogos_activa = Path(carpeta_catalogos or "catalogos")
     catalogo_vehiculos_cargado = cargar_catalogo_json(

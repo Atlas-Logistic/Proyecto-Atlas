@@ -1,5 +1,29 @@
 # Trabajos activos Atlas
 
+## Reconstrucción Estructurada de Campos OCR — Fase 1
+
+- Estado: COMPLETADA — sin reserva activa.
+- Patrón: EasyOCR conserva etiqueta y valor en cajas distintas, pero la lectura
+  por párrafos pierde su relación. En 464110 incluso divide la etiqueta en
+  `COD` + `DESTINATARIO`.
+- Se incorporó un reconstructor geométrico reutilizable para código Cliente,
+  código Destinatario, número SAP y número Transporte. Exige proximidad,
+  alineación, tipado, unicidad y ausencia de otra etiqueta intermedia; ante
+  valores distintos se abstiene.
+- El código Destinatario sólo publica cuando coincide exactamente con un único
+  destino activo y confirmado del maestro. No se modificaron OCR, umbrales,
+  Multicampo, Política, Orquestador, ORS ni Desktop UX.
+- Casos reales: 464106, 463528 y 464110 recuperan código `0001004443` y publican
+  `VISTA CLARA 2351`.
+- Kilómetros: 464106 pasa de `PENDIENTE` a `CALCULADO`: AZA RENCA → VISTA CLARA
+  2351, 16,7 km, 25 min, OpenRouteService; el formateador Desktop lo presenta
+  como `Calculada`. 463528 conserva destino canónico y
+  permanece pendiente exclusivamente por origen ausente.
+- Validación: 1160/1160 Atlas, 49/49 Desktop, `compileall` y
+  `git diff --check` aprobados.
+- Próximo bloque recomendado: recuperación estructurada y conservadora del
+  origen ausente de 463528, sin ampliar la lógica de rutas.
+
 ## Normalización Maestra de Destinos Operacionales — Fase 1
 
 - Estado: MAESTRO COMPLETADO; PUBLICACIÓN DOCUMENTAL PENDIENTE — sin reserva activa.

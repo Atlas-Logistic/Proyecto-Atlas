@@ -265,3 +265,47 @@ def test_destinos_maestros_corrigen_destino_sin_sobrescribir_cliente(tmp_path):
 
     assert salida["cliente"] == "LECTURA ORIGINAL"
     assert salida["obra destino"] == "DESTINO DEMO DOCUMENTAL"
+
+
+def test_codigo_destinatario_estructurado_resuelve_maestro_exacto(tmp_path):
+    for nombre in ("empresas.json", "destinos.json", "choferes.json", "vehiculos.json"):
+        (tmp_path / nombre).write_text("{}", encoding="utf-8")
+    (tmp_path / "destinos_maestros.json").write_text(json.dumps({"destinos": [{
+        "destino_id": "DESTINO-DEMO", "nombre_destino": "VISTA CLARA 2351",
+        "codigo_destino": "0001004443", "estado_calidad": "CONFIRMADO",
+        "estado_vigencia": "ACTIVO",
+    }]}), encoding="utf-8")
+    datos = {"obra destino": "IORRES OCARANZA LIDA", "chofer": ""}
+
+    salida = enriquecer_datos_con_catalogos(
+        datos,
+        [],
+        tmp_path,
+        campos_estructurados={"codigo_destinatario": "0001004443"},
+    )
+
+    assert salida["obra destino"] == "VISTA CLARA 2351"
+
+
+def test_codigo_destinatario_estructurado_desconocido_o_duplicado_se_abstiene(tmp_path):
+    for nombre in ("empresas.json", "destinos.json", "choferes.json", "vehiculos.json"):
+        (tmp_path / nombre).write_text("{}", encoding="utf-8")
+    registros = [
+        {"destino_id": identificador, "nombre_destino": nombre,
+         "codigo_destino": "DUPLICADO", "estado_calidad": "CONFIRMADO",
+         "estado_vigencia": "ACTIVO"}
+        for identificador, nombre in (("D1", "DESTINO UNO"), ("D2", "DESTINO DOS"))
+    ]
+    (tmp_path / "destinos_maestros.json").write_text(
+        json.dumps({"destinos": registros}), encoding="utf-8"
+    )
+    datos = {"obra destino": "ORIGINAL", "chofer": ""}
+
+    assert enriquecer_datos_con_catalogos(
+        datos, [], tmp_path,
+        campos_estructurados={"codigo_destinatario": "DESCONOCIDO"},
+    )["obra destino"] == "ORIGINAL"
+    assert enriquecer_datos_con_catalogos(
+        datos, [], tmp_path,
+        campos_estructurados={"codigo_destinatario": "DUPLICADO"},
+    )["obra destino"] == "ORIGINAL"

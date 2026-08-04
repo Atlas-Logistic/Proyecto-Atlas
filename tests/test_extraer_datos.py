@@ -34,6 +34,7 @@ from atlas_core.extractor import (
     _extraer_cantidad_geometrica,
     _extraer_patentes_geometricas,
     _extraer_transporte_geometrico,
+    _reconstruir_campos_documentales,
 )
 from atlas_core.ocr import BloqueOCR
 
@@ -84,6 +85,66 @@ def test_cantidad_geometrica_separa_valor_de_codigo_en_celda_ocr_fusionada():
     ]
 
     assert _extraer_cantidad_geometrica(bloques) == "15.253"
+
+
+def test_reconstruccion_documental_asocia_etiquetas_y_valores_separados():
+    bloques = [
+        _bloque("Código Cliente", 20, 20, 110),
+        _bloque("0001004441", 170, 20, 90),
+        _bloque("COD DESTINATARIO", 20, 50, 135),
+        _bloque("0001004443", 170, 50, 90),
+        _bloque("Número SAP", 20, 80, 90),
+        _bloque("0080543481", 170, 80, 90),
+        _bloque("Nro. Transporte", 20, 110, 120),
+        _bloque("0000351108", 170, 110, 90),
+    ]
+
+    resultado = _reconstruir_campos_documentales(bloques)
+
+    assert {campo: evidencia["valor"] for campo, evidencia in resultado.items()} == {
+        "codigo_cliente": "0001004441",
+        "codigo_destinatario": "0001004443",
+        "numero_sap": "0080543481",
+        "numero_transporte": "0000351108",
+    }
+    assert all(evidencia["relacion"] == "MISMA_FILA" for evidencia in resultado.values())
+
+
+def test_reconstruccion_documental_se_abstiene_ante_codigos_en_conflicto():
+    bloques = [
+        _bloque("COD DESTINATARIO", 20, 20, 135),
+        _bloque("0001004443", 170, 20, 90),
+        _bloque("COD DESTINATARIO", 20, 60, 135),
+        _bloque("0001009999", 170, 60, 90),
+    ]
+
+    assert "codigo_destinatario" not in _reconstruir_campos_documentales(bloques)
+
+
+def test_reconstruccion_documental_no_atraviesa_otra_etiqueta():
+    bloques = [
+        _bloque("COD DESTINATARIO", 20, 20, 135),
+        _bloque("HORA ENTRADA", 170, 20, 100),
+        _bloque("0001004443", 300, 20, 90),
+    ]
+
+    assert "codigo_destinatario" not in _reconstruir_campos_documentales(bloques)
+
+
+def test_reconstruccion_documental_compone_etiqueta_dividida_sin_inferir_valor():
+    bloques = [
+        _bloque("COD", 20, 22, 30),
+        _bloque("DESTINATARIO", 48, 20, 105),
+        _bloque("0001004443", 190, 20, 90),
+        _bloque("Nro", 20, 62, 28),
+        _bloque("TRANSPORTE", 47, 60, 92),
+        _bloque("0000351108", 190, 60, 90),
+    ]
+
+    resultado = _reconstruir_campos_documentales(bloques)
+
+    assert resultado["codigo_destinatario"]["valor"] == "0001004443"
+    assert resultado["numero_transporte"]["valor"] == "0000351108"
 
 
 def test_geometria_cliente_a_la_derecha_de_senores():

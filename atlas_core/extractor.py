@@ -59,6 +59,167 @@ def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
     return items
 
 
+def _reconstruir_campos_etiqueta_valor(
+    bloques: List[Any],
+    especificaciones: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Reconstruye campos tipados desde cajas separadas y se abstiene ante conflicto."""
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    # EasyOCR también puede dividir la propia etiqueta (p. ej. ``COD`` y
+    # ``DESTINATARIO``). Se crean vistas virtuales solo para cajas contiguas;
+    # los bloques originales permanecen intactos como evidencia.
+    virtuales = []
+    for izquierda in items:
+        for derecha in items:
+            if izquierda is derecha or izquierda["x1"] >= derecha["x1"]:
+                continue
+            alto = max(izquierda["h"], derecha["h"])
+            brecha = derecha["x1"] - izquierda["x2"]
+            if abs(izquierda["cy"] - derecha["cy"]) > alto * 1.1:
+                continue
+            if not -10 <= brecha <= 28:
+                continue
+            texto = f'{izquierda["texto"]} {derecha["texto"]}'
+            simple_virtual = _texto_simple(texto)
+            if not any(
+                hasattr(spec.get("etiqueta"), "fullmatch")
+                and spec["etiqueta"].fullmatch(simple_virtual)
+                for spec in especificaciones.values()
+            ):
+                continue
+            virtuales.append({
+                "texto": texto,
+                "simple": simple_virtual,
+                "x1": izquierda["x1"],
+                "y1": min(izquierda["y1"], derecha["y1"]),
+                "x2": derecha["x2"],
+                "y2": max(izquierda["y2"], derecha["y2"]),
+                "cx": (izquierda["x1"] + derecha["x2"]) / 2,
+                "cy": (min(izquierda["y1"], derecha["y1"]) + max(
+                    izquierda["y2"], derecha["y2"]
+                )) / 2,
+                "h": max(
+                    max(izquierda["y2"], derecha["y2"])
+                    - min(izquierda["y1"], derecha["y1"]),
+                    1.0,
+                ),
+                "confianza": min(
+                    izquierda["confianza"], derecha["confianza"]
+                ),
+                "virtual": True,
+            })
+    items = sorted(
+        [*items, *virtuales],
+        key=lambda item: (item["y1"], item["x1"], item["simple"]),
+    )
+
+    resultado: Dict[str, Dict[str, Any]] = {}
+    patron_bloqueador = re.compile(
+        r"\b(?:HORA\s+(?:ENTRADA|SALIDA)|OBRA\s+DESTINO|TELEFONO|DIRECCION|"
+        r"COMUNA|CIUDAD|SOLICITANTE|ORDEN\s+DE\s+COMPRA|COD(?:IGO)?\s+"
+        r"(?:CLIENTE|DESTINATARIO)|NUMERO\s+SAP|(?:NRO[.]?|NUMERO)\s+TRANSPORTE)\b"
+    )
+    for campo, especificacion in especificaciones.items():
+        patron_etiqueta = especificacion.get("etiqueta")
+        patron_valor = especificacion.get("valor")
+        if not hasattr(patron_etiqueta, "search") or not hasattr(
+            patron_valor, "fullmatch"
+        ):
+            raise ValueError("cada especificación requiere patrones de etiqueta y valor")
+        etiquetas = [
+            item for item in items if patron_etiqueta.search(item["simple"])
+        ]
+        decisiones: list[tuple[float, str, Dict[str, Any], Dict[str, Any]]] = []
+        for etiqueta in etiquetas:
+            candidatos = []
+            for candidato in items:
+                if candidato is etiqueta:
+                    continue
+                coincidencia = patron_valor.fullmatch(candidato["simple"])
+                if coincidencia is None:
+                    continue
+                valor = coincidencia.group(1) if coincidencia.lastindex else coincidencia.group(0)
+                alto = max(etiqueta["h"], candidato["h"])
+                diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+                brecha_x = candidato["x1"] - etiqueta["x2"]
+                if diferencia_y <= alto * 1.15 and -6 <= brecha_x <= 230:
+                    puntaje = max(0.0, brecha_x) / 230 + diferencia_y / (alto * 6)
+                else:
+                    separacion_y = candidato["y1"] - etiqueta["y2"]
+                    solape_x = max(
+                        0.0,
+                        min(etiqueta["x2"], candidato["x2"])
+                        - max(etiqueta["x1"], candidato["x1"]),
+                    )
+                    if not (0 <= separacion_y <= 42 and solape_x > 0):
+                        continue
+                    puntaje = 0.65 + separacion_y / 84
+
+                # Una segunda etiqueta entre ambas cajas delimita otra celda.
+                atraviesa_etiqueta = any(
+                    otra is not etiqueta
+                    and otra is not candidato
+                    and patron_bloqueador.search(otra["simple"])
+                    and etiqueta["x2"] < otra["cx"] < candidato["x1"]
+                    and abs(otra["cy"] - etiqueta["cy"]) <= alto * 1.25
+                    for otra in items
+                )
+                if not atraviesa_etiqueta:
+                    candidatos.append((puntaje, valor, candidato))
+            if candidatos:
+                mejor = min(candidatos, key=lambda item: (item[0], item[1]))
+                empatados = {
+                    valor for puntaje, valor, _ in candidatos
+                    if abs(puntaje - mejor[0]) <= 0.08
+                }
+                if len(empatados) == 1:
+                    decisiones.append((*mejor[:2], etiqueta, mejor[2]))
+
+        valores = {valor for _, valor, _, _ in decisiones}
+        if len(valores) != 1:
+            continue
+        mejor = min(decisiones, key=lambda item: (item[0], item[1]))
+        _, valor, etiqueta, candidato = mejor
+        resultado[campo] = {
+            "valor": valor,
+            "etiqueta": etiqueta["texto"],
+            "confianza_etiqueta": etiqueta["confianza"],
+            "confianza_valor": candidato["confianza"],
+            "relacion": "MISMA_FILA" if abs(
+                candidato["cy"] - etiqueta["cy"]
+            ) <= max(etiqueta["h"], candidato["h"]) * 1.15 else "DEBAJO",
+        }
+    return resultado
+
+
+def _reconstruir_campos_documentales(bloques: List[Any]) -> Dict[str, Dict[str, Any]]:
+    """Configura campos documentales de forma reutilizable y sin corrección OCR."""
+    return _reconstruir_campos_etiqueta_valor(
+        bloques,
+        {
+            "codigo_cliente": {
+                "etiqueta": re.compile(r"\bCODIGO\s+CLIENTE\b"),
+                "valor": re.compile(r"(\d{10})"),
+            },
+            "codigo_destinatario": {
+                "etiqueta": re.compile(r"\bCOD(?:IGO)?\s+DESTINATARIO\b"),
+                "valor": re.compile(r"([A-Z0-9_-]{4,20})"),
+            },
+            "numero_sap": {
+                "etiqueta": re.compile(r"\bNUMERO\s+SAP\b"),
+                "valor": re.compile(r"(\d{10})"),
+            },
+            "numero_transporte": {
+                "etiqueta": re.compile(r"\b(?:NRO[.]?|NUMERO)\s+TRANSPORTE\b"),
+                "valor": re.compile(r"(\d{10})"),
+            },
+        },
+    )
+
+
 def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
     items = _normalizar_bloques_geometricos(bloques)

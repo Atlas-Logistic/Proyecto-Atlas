@@ -353,3 +353,26 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   documental llegue al enriquecimiento; 463528 también requiere origen.
 - Regresión: 197/197 pruebas focalizadas y 1154/1154 pruebas Atlas; `compileall`
   y `git diff --check` aprobados.
+
+### 2026-08-04 — Reconstrucción Estructurada de Campos OCR, Fase 1
+
+- Causa demostrada: el OCR detallado entrega etiqueta y valor como cajas
+  independientes; `leer_texto_imagen(..., paragraph=True)` pierde la relación
+  espacial y el patrón textual exige adyacencia que no existe en el párrafo.
+- Se agregó `_reconstruir_campos_etiqueta_valor`, parametrizable por patrones de
+  etiqueta y valor. Sólo acepta cajas alineadas o inmediatamente inferiores,
+  limita distancia, impide cruzar otra etiqueta y exige un único valor global.
+- `_reconstruir_campos_documentales` configura código Cliente, código
+  Destinatario, número SAP y número Transporte. También compone etiquetas
+  físicamente contiguas como `COD` + `DESTINATARIO`, sin alterar los bloques OCR.
+- El enriquecimiento por código exige coincidencia exacta, única, activa y
+  confirmada en `destinos_maestros.json`; desconocidos y duplicados se abstienen.
+- Reprocesamiento real: 464106 y 463528 pasan de `IORRES OCARANZA LIDA/LTDA` a
+  `VISTA CLARA 2351`; el equivalente 464110 pasa de `No encontrado` al mismo
+  maestro pese a la etiqueta dividida.
+- Ruta real 464106: AZA RENCA → VISTA CLARA 2351, 16,7 km, 25 min,
+  OpenRouteService, estado `CALCULADO`. El contrato de presentación Desktop
+  consume el resultado como `Calculada`, `16,7 km`, `25 min` y proveedor
+  `OpenRouteService`. 463528 conserva `PENDIENTE` por origen
+  no informado, no por destino.
+- Regresión: 1160/1160 Atlas y 49/49 Desktop; `compileall` y diff-check aprobados.

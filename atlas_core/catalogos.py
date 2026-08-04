@@ -250,10 +250,30 @@ def _buscar_destino_maestro_en_textos(
     return None
 
 
+def _buscar_destino_maestro_por_codigo_estructurado(
+    codigo: object, contenido: Any
+) -> dict[str, Any] | None:
+    """Acepta exclusivamente un código exacto, único y confirmado del maestro."""
+    buscado = str(codigo or "").strip().upper()
+    if not buscado or not isinstance(contenido, dict):
+        return None
+    coincidencias = [
+        registro
+        for registro in contenido.get("destinos", [])
+        if isinstance(registro, dict)
+        and registro.get("estado_vigencia") == "ACTIVO"
+        and registro.get("estado_calidad") in {"CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+        and str(registro.get("codigo_destino", "")).strip().upper() == buscado
+    ]
+    return coincidencias[0] if len(coincidencias) == 1 else None
+
+
 def enriquecer_datos_con_catalogos(
     datos: dict[str, str],
     textos: list[str],
     carpeta_catalogos: str | Path = "catalogos",
+    *,
+    campos_estructurados: Mapping[str, object] | None = None,
 ) -> dict[str, str]:
     """Corrige campos auxiliares con catálogos; la identidad del cliente se resuelve aparte."""
     carpeta = Path(carpeta_catalogos)
@@ -286,7 +306,12 @@ def enriquecer_datos_con_catalogos(
     elif nombre_por_rut:
         datos_enriquecidos["chofer"] = nombre_por_rut
 
-    destino = _buscar_destino_maestro_en_textos(textos, destinos_maestros)
+    destino = _buscar_destino_maestro_por_codigo_estructurado(
+        (campos_estructurados or {}).get("codigo_destinatario"),
+        destinos_maestros,
+    )
+    if destino is None:
+        destino = _buscar_destino_maestro_en_textos(textos, destinos_maestros)
     if destino is not None:
         nombre_destino = destino.get("nombre_destino")
         if isinstance(nombre_destino, str) and nombre_destino.strip():
