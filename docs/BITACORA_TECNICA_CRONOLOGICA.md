@@ -259,3 +259,13 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Validación histórica: transporte `0000350703` con 2 guías; `0000279246` con 3; `0000279047` con 5 documentos. Este último sólo publica cuatro números de guía, por lo que la quinta fila queda explícitamente sin número inferido.
 - Validación técnica: 46/46 pruebas Desktop, prueba visual Electron sin desbordamiento y `git diff --check` correcto.
 - Despliegue oficial: versión 1.2.0, commit `5acbed0e08e2a0547104c30c62b85fe0e5026e4e`, `app.asar` SHA-256 `17ce3bb5e4cd257411fba7bcc817ee50016cc0602580e2995969c1428d3557e8`.
+
+### 2026-08-04 — UX Operacional Atlas, Fase 1
+
+- La tabla principal queda limitada a fecha, número de guía, cliente, chofer, material y estado. El número de transporte pasa al encabezado del viaje consolidado.
+- El detalle se ordena por urgencia operacional: observaciones compactas, viaje consolidado, información logística, inteligencia aplicada y datos auxiliares.
+- Las observaciones usan chips compactos editables y, sin marcas activas, presentan únicamente `Sin observaciones operacionales` en estado cerrado.
+- Peso y cantidad total se omiten cuando la evidencia no permite totalizarlos; las fuentes `No disponible` dejan de renderizarse. Se incorpora la etiqueta útil `Recuperación geométrica` cuando la trazabilidad la entrega.
+- Validación: 49/49 pruebas Desktop, Electron visual sin desbordamiento y matriz simple/multiguía/confirmado/revisión aprobada.
+- Alcance preservado: sin cambios en OCR, Multicampo, Política, resolvers, catálogos, ORS ni procesamiento masivo.
+- Instalación activa validada: versión 1.2.0, commit `dbc75685bf433beb365f339902f2c89eb45a5dad`, `app.asar` SHA-256 `5bfdfbcf6d7f6bb443340069f2042455ebbca487a39931530ef2778504535891`.

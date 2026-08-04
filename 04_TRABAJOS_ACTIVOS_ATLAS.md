@@ -406,6 +406,15 @@ La lógica de `requiere_revision` fuerza revisión manual **incluso cuando el ch
 - Validación: 46/46 pruebas Desktop, prueba visual Electron y viajes históricos de 2, 3 y 5 documentos.
 - Integridad: no se modificaron OCR, Sistema Multicampo, Política, resolvers, OpenRouteService ni reglas documentales.
 - Despliegue activo: versión 1.2.0, commit `5acbed0e08e2a0547104c30c62b85fe0e5026e4e`, `app.asar` SHA-256 `17ce3bb5e4cd257411fba7bcc817ee50016cc0602580e2995969c1428d3557e8`.
+
+## UX Operacional Atlas — Fase 1
+
+- Estado: COMPLETADO.
+- Desktop: implementación `ccdbd7a`, matriz visual `dbc7568`.
+- Resultado: resumen principal reducido a fecha, guías, cliente, chofer, material y estado; detalle ordenado como observaciones, viaje consolidado, logística, inteligencia y datos auxiliares.
+- Validación: 49/49 pruebas Desktop y matriz visual de viaje simple, multiguía, confirmado y en revisión.
+- Integridad: cambio exclusivamente presentacional; motor, OCR, Multicampo, Política, resolvers, catálogos, ORS y procesamiento masivo permanecen intactos.
+- Despliegue activo: versión 1.2.0, commit `dbc75685bf433beb365f339902f2c89eb45a5dad`, `app.asar` SHA-256 `5bfdfbcf6d7f6bb443340069f2042455ebbca487a39931530ef2778504535891`.
 ## Hotfix regresión Chofer — guía 464089
 
 - Estado: COMPLETADO en la rama de hotfix.
