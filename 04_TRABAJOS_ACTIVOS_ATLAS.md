@@ -1,5 +1,19 @@
 # Trabajos activos Atlas
 
+## Hotfix crítico — Drag & Drop Electron 43
+
+- Estado: CORREGIDO Y VALIDADO.
+- Causa: desde Electron 32 `File.path` no está disponible; el commit `e15d294`
+  actualizó Desktop de Electron 31.3.1 a 43.2.0 sin migrar esa API.
+- Corrección: el renderer conserva `DataTransfer.files/items` y obtiene la ruta
+  exclusivamente mediante `webUtils.getPathForFile` en el preload aislado.
+- Instalación activa: JPEG, JPG y PNG entregan una ruta absoluta, extensión y
+  MIME válidos; 42/42 pruebas Desktop aprobadas.
+- Guía nueva `384674.jpg`: OCR ejecutado, 1 procesada, 0 omitidas, 0 errores,
+  54,15 s. La guía `464089.jpeg` se detecta como duplicada y habilita el diálogo
+  con Reutilizar, Reprocesar completamente y Cancelar.
+- Integridad: sin cambios en OCR, Sistema Multicampo, Política, kilómetros ni UX.
+
 ## Logistics UX 1.0
 
 - Estado: IMPLEMENTADO Y VALIDADO VISUALMENTE; despliegue bloqueado por política

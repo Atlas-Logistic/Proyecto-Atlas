@@ -218,3 +218,35 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   3077 registra que el ejecutable no cumple el nivel de firma exigido por la
   política `{0283ac0f-fff1-49ae-ada1-8a933130cad6}`. El flujo oficial no fue
   modificado y la instalación activa no se declaró funcionalmente validada.
+
+### 2026-08-04 — Auditoría de publicación de Cliente canónico 464089
+
+- La imagen documenta `COMERCIAL A Y B LTDA`, RUT `78.634.910-9`. El OCR
+  completo observa `COMERCIAL B LIDA` y un RUT incompleto; el extractor entrega
+  al Resolver `COMERCIAL` y `No encontrado`.
+- Con esos valores y el catálogo activo, el Resolver devuelve `NO_RESUELTO`,
+  sin identificador ni valor canónico, vía `NO_RESUELTO` y confianza `0.0`.
+  `ACEROS COX COMERCIAL SA` aparece solo como alternativa de similitud 0,6207.
+- El catálogo activo no contiene `COMERCIAL A Y B LTDA` ni su RUT documental.
+  Por tanto, la Política en estado `PRODUCTIVO` publica correctamente el valor
+  previo `COMERCIAL`, motivo `publicacion-productiva`.
+- `procesamiento_masivo`, el CSV acumulado, `viajes.csv`, el JSON embebido de
+  evidencias y Desktop conservan exactamente `COMERCIAL`. No existe una pérdida
+  posterior al Resolver ni una integración canónica pendiente en Desktop.
+
+### 2026-08-04 — Hotfix crítico Drag & Drop Electron 43
+
+- Reproducción: el drop contenía un `File` llamado `464089.jpeg`, MIME
+  `image/jpeg`; `DataTransfer.files=1` y `DataTransfer.items=1`. La ruta leída
+  mediante `file.path` era `undefined`, por lo que no existía extensión y el
+  filtro descartaba el archivo antes de invocar IPC u OCR.
+- Último estado funcional en la línea oficial: `f293e8c`, con Electron 31.3.1.
+  El commit introductor fue `e15d294`, que fijó Electron 43.2.0 manteniendo el
+  acceso obsoleto `File.path`.
+- Corrección mínima: `webUtils.getPathForFile` queda encapsulado en preload; el
+  renderer procesa `files` y `items`, deduplica objetos y valida `.jpg`, `.jpeg`
+  y `.png` sobre la ruta real.
+- Instalación empaquetada: JPEG `image/jpeg`, JPG `image/jpeg` y PNG `image/png`
+  produjeron rutas absolutas. `384674.jpg` ejecutó OCR en 54,15 s con 1/1
+  procesada y cero errores. `464089.jpeg` fue detectada como duplicada por el
+  CSV acumulado, condición que abre el diálogo de reprocesamiento.
