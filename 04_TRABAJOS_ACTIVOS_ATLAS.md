@@ -1,5 +1,22 @@
 # Trabajos activos Atlas
 
+## Atlas Desktop UX 1.0 — Fases 1 y 2
+
+- Estado: COMPLETADO — sin reservas activas.
+- Repositorio de implementación: `Atlas-Logistic/Atlas-Viajes-Desktop`, rama
+  `feature-atlas-desktop-ux-1`.
+- UX visible: estado por campo, origen, confianza disponible, corrección
+  automática, resumen final, tiempo de procesamiento y porcentaje confirmado.
+- Kilómetros: interfaz preparada con distancia, tiempo estimado y proveedor en
+  estado explícito `No calculado`/`Pendiente`; no se incorporó cálculo de rutas.
+- Integridad: no se modificaron OCR, Orquestador, Política de Activación,
+  resolvers, catálogos, reglas de negocio, arquitectura ni infraestructura.
+- Validación: 35/35 pruebas Desktop, prueba visual Electron, build Windows,
+  `compileall` del motor y `git diff --check`.
+- Próximo bloque recomendado: integración de cálculo de kilómetros mediante un
+  proveedor encapsulado, manteniendo el placeholder y el contrato visual ya
+  preparados.
+
 ## OCR Focal Estructurado de RUT de Cliente — Fase 1
 
 - Estado: COMPLETADO — validado sobre corpus E2E oficial.

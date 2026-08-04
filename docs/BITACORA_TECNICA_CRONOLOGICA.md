@@ -101,6 +101,26 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Rendimiento: total 385,779 s frente a 439,647 s de la evidencia oficial; por caso activado se observa un costo adicional de 21,413 s y 24,923 s, que debe optimizarse antes de ampliar cobertura.
 - Acuerdo: no completar dígitos por inferencia ni usar el catálogo para fabricar el DV; el siguiente análisis debe abordar la recuperación geométrica de 002 con autorización separada.
 
+### 2026-08-04 — Atlas Desktop UX 1.0 — Fases 1 y 2
+
+- Decisión importante: presentar la inteligencia existente mediante un modelo
+  de vista aislado en Desktop que consume `evidencias_documentos` y las columnas
+  opcionales de trazabilidad del contrato vigente.
+- Comportamiento: cada campo muestra `Confirmado`, `Propuesto` o `Revisar`, su
+  origen visible (`OCR`, `Catálogo` o `Multicampo`), confianza solo si existe y
+  una marca de corrección automática cuando la fuente existente lo demuestra.
+- Resumen: la aplicación muestra porcentaje de campos confirmados y, después de
+  procesar imágenes, cantidad, resultado y tiempo total medido en Desktop.
+- Kilómetros: se reservó la superficie para distancia, tiempo estimado y
+  proveedor, con estados iniciales `No calculado` y `Pendiente`; no se ejecutan
+  rutas ni llamadas externas.
+- Alternativas descartadas: modificar el CSV productivo, extraer trazabilidad
+  nueva del motor, inferir confianza o duplicar decisiones multicampo.
+- Integridad: OCR, Orquestador, Política, resolvers, catálogos, negocio,
+  arquitectura e infraestructura permanecen congelados.
+- Validación: 35/35 pruebas, prueba estructural con captura Electron, build
+  Windows y ausencia de desbordamiento horizontal.
+
 ## Acuerdos operativos de coordinación
 - La bitácora ejecutiva resume estado, pruebas y riesgos; la bitácora técnica cronológica conserva el porqué de las decisiones.
 - Los cambios de bloque deben cerrarse con: documentación, pruebas, auditoría y registro en ambas bitácoras.
