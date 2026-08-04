@@ -1,5 +1,28 @@
 # Trabajos activos Atlas
 
+## Normalización Maestra de Destinos Operacionales — Fase 1
+
+- Estado: MAESTRO COMPLETADO; PUBLICACIÓN DOCUMENTAL PENDIENTE — sin reserva activa.
+- `VISTA CLARA 2351` queda confirmado para `TORRES OCARANZA LTDA`, código
+  destinatario `0001004443`, comuna Cerrillos y Región Metropolitana.
+- Coordenadas verificadas en la ficha cartográfica de la entidad: latitud
+  `-33.524258`, longitud `-70.7149958`. ORS/Pelias devolvió sólo un centroide de
+  calle sin número y ese resultado aproximado fue descartado.
+- Reprocesamiento real: 464106 y 463528 conservan en publicación
+  `IORRES OCARANZA LIDA/LTDA`. La etiqueta `COD DESTINATARIO` y el valor
+  `0001004443` aparecen separados en el OCR, por lo que el enriquecimiento por
+  código no enlaza el maestro.
+- No se creó un alias con el nombre degradado del Cliente: TORRES OCARANZA tiene
+  varios destinos y esa asociación produciría falsos positivos.
+- Control de ruta con el destino canónico: AZA RENCA → VISTA CLARA 2351,
+  `16,7 km`, `25 min`, OpenRouteService. Flujo real 464106 sigue pendiente por
+  destino no publicado; 463528 también carece de origen publicado.
+- Validación: 197 pruebas focalizadas y 1154/1154 de regresión completa;
+  `compileall` y `git diff --check` aprobados.
+- Próximo bloque recomendado: extracción estructurada conservadora del código
+  destinatario cuando etiqueta y valor estén separados, sin alterar OCR ni
+  umbrales.
+
 ## Resolución Canónica de Clientes y Destinos — Fase 1
 
 - Estado: COMPLETADA CON ABSTENCIÓN CORRECTA DE DESTINO — sin reserva activa.

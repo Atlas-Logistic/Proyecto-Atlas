@@ -328,3 +328,28 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Catálogo privado respaldado y manifiesto regenerado: 28 Clientes, 42 alias,
   cero identificadores duplicados y cero promociones automáticas desde OCR.
 - Regresión: 1154/1154 Atlas y 49/49 Desktop; compileall y diff-check aprobados.
+
+### 2026-08-04 — Normalización Maestra de Destinos Operacionales, Fase 1
+
+- Decisión operacional aplicada: `VISTA CLARA 2351` es el destino canónico de
+  TORRES OCARANZA para el registro `34b754bc-4d2f-4f3f-85e5-98d907106262`.
+- Registro confirmado con código destinatario `0001004443`, Cerrillos, Región
+  Metropolitana y coordenadas `-33.524258,-70.7149958`, provenientes de la
+  ficha Google Maps de Torres Ocaranza Ltda
+  (`ChIJN5_ex2HbYpYRfHMnbmBX5q0`).
+- ORS/Pelias fue consultado nuevamente y sólo devolvió el centroide de la calle,
+  sin número y con comuna genérica Santiago; esas coordenadas no se persistieron.
+- El catálogo previo y su manifiesto quedaron respaldados. La fuente privada
+  valida 47 destinos y el manifiesto consolidado fue regenerado.
+- Reprocesamiento real sin errores: 464106 y 463528. Ambos documentos contienen
+  VISTA CLARA 2351 y el código 0001004443, pero el OCR separa la etiqueta
+  `COD DESTINATARIO` de su valor; el patrón conservador existente no los asocia
+  y la publicación conserva `IORRES OCARANZA LIDA/LTDA`.
+- No se añadió ese nombre de Cliente como alias de Destino porque existen tres
+  destinos de TORRES OCARANZA y se introducirían falsos positivos.
+- Validación controlada, reemplazando sólo en memoria el valor publicado por el
+  maestro ya confirmado: AZA RENCA → VISTA CLARA 2351 calculó 16,7 km y 25 min
+  con OpenRouteService. El flujo real continúa pendiente hasta que el código
+  documental llegue al enriquecimiento; 463528 también requiere origen.
+- Regresión: 197/197 pruebas focalizadas y 1154/1154 pruebas Atlas; `compileall`
+  y `git diff --check` aprobados.
