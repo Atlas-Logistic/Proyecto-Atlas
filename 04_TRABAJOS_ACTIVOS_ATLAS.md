@@ -54,10 +54,15 @@
     `"No encontrado"` (abstención correcta).
   - Chofer y demás campos: sin cambios (`"RodRiGo NAHUELNIR"`, `origen`
     `"AZA RENCA"`).
-- Validación real adicional (mismo lote, guías 463774/463936/464145/464206;
-  guía de control 463604): cero regresiones — 463604 conserva exactamente
+- Validación real adicional (mismo lote, guías 463774/463936/464145/464206/
+  464259 y el lote 464106–464110; guía de control 463604): cero
+  regresiones — 463604 conserva exactamente
   `patente_tracto="KX5439"`/`patente_rampla="JF6468"` (contiene "CARRO" con
-  letra O, no "CARR0") y su Cliente/Destino ya correctos no se ven alterados.
+  letra O, no "CARR0"); 464106 conserva intactos
+  `patente_tracto="SB6486"`/`patente_rampla="JF4288"`/`cantidad="15.253"`/
+  `peso="15.253"` ya validados en bloques anteriores; 464110 conserva
+  `obra_destino="VISTA CLARA 2351"`, el caso exacto protegido por la
+  prueba de regresión de la Fase 1 de Destinos.
 - Validación: 1185/1185 Atlas (11 pruebas nuevas), `compileall` y
   `git diff --check` aprobados.
 - Riesgo residual: la limpieza de contaminación expone el texto OCR crudo de

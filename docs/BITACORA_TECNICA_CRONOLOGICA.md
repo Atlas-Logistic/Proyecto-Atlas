@@ -734,7 +734,18 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   correctos; 464145 deja de publicar el destino contaminado con "RUT ..." y
   pasa a `"SODIYAS RENC"`. Guía de control 463604 (contiene "CARRO" con
   letra O, no "CARR0"): `patente_tracto="KX5439"` y `patente_rampla="JF6468"`
-  permanecen exactamente iguales — cero regresión.
+  permanecen exactamente iguales — cero regresión. Se completó además el
+  reprocesamiento real de 464206, 464259 y del lote 464106–464110 (las
+  guías usadas en los bloques "Cobertura Operacional de Origen" y
+  "Reconstrucción Estructurada de Campos OCR"): 464106 conserva intactos
+  `patente_tracto="SB6486"`, `patente_rampla="JF4288"`, `cantidad="15.253"`
+  y `peso="15.253"` (los mismos valores ya validados en esos bloques
+  anteriores); 464110 conserva `obra_destino="VISTA CLARA 2351"` (el caso
+  exacto protegido por
+  `test_procesar_archivo_destino_por_codigo_no_se_pierde_si_sombra_no_confirma`
+  de la Fase 1 de Destinos); 464107/464108/464109 permanecen con las mismas
+  ausencias ya documentadas por desenfoque u omisión de OCR, no corregibles
+  de forma conservadora. Cero regresiones en todo el lote real disponible.
 - Regresión: 1185/1185 Atlas (11 pruebas nuevas: contaminación de
   Cliente/Destino, tolerancia CARR0 en ambas rutas de patente con exclusión
   posicional, abstención de Cantidad sin separador de miles); `compileall` y
