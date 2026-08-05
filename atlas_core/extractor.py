@@ -868,6 +868,8 @@ def extraer_datos(
         "número de transporte": "No encontrado",
         "cliente": "No encontrado",
         "obra destino": "No encontrado",
+        "direccion": "No encontrado",
+        "comuna": "No encontrado",
         "RUT del cliente": "No encontrado",
         "chofer": "No encontrado",
         "RUT del chofer": "No encontrado",
@@ -1083,6 +1085,28 @@ def extraer_datos(
 
         return None
 
+    def buscar_direccion() -> Optional[str]:
+        # La dirección real de entrega vive en un campo documental propio
+        # ("DIRECCION"), distinto de "OBRA DESTINO" (que suele repetir el
+        # nombre del cliente). Solo se conserva el valor tal como el OCR lo
+        # entrega, sin corregirlo.
+        coincidencia = re.search(r"DIRECCION\s+(.+?)\s+COMUNA\b", texto_busqueda)
+        if coincidencia:
+            valor = limpiar_valor(coincidencia.group(1))
+            if valor:
+                return valor
+        return None
+
+    def buscar_comuna() -> Optional[str]:
+        coincidencia = re.search(
+            r"COMUNA\s+(.+?)\s+(?:CIUDAD|INDICADOR)\b", texto_busqueda
+        )
+        if coincidencia:
+            valor = limpiar_valor(coincidencia.group(1))
+            if valor:
+                return valor
+        return None
+
     def buscar_rut_cliente(cliente: str) -> Optional[str]:
         if cliente == "PRODALAM SA":
             coincidencia = re.search(r"PRODALA\w*\s+RUT\.?\s*([0-9.,\s-]{6,20})\s+GIRO", texto_busqueda)
@@ -1219,6 +1243,14 @@ def extraer_datos(
     obra_destino = buscar_obra_destino()
     if obra_destino:
         datos["obra destino"] = obra_destino
+
+    direccion = buscar_direccion()
+    if direccion:
+        datos["direccion"] = direccion
+
+    comuna = buscar_comuna()
+    if comuna:
+        datos["comuna"] = comuna
 
     rut_cliente = buscar_rut_cliente(datos["cliente"])
     if rut_cliente:

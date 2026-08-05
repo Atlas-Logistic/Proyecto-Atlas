@@ -30,6 +30,8 @@ class ExtraerDatosTests(unittest.TestCase):
 
         self.assertEqual(datos["cliente"], "AMERICAN SCREW CHILE SPA")
         self.assertEqual(datos["RUT del cliente"], "91.410.000")
+        self.assertEqual(datos["direccion"], "CAMINO MELIPILLA 10800")
+        self.assertEqual(datos["comuna"], "MIPU")
 
     def test_formato_primera_guia(self):
         textos = [
@@ -75,6 +77,31 @@ class ExtraerDatosTests(unittest.TestCase):
         self.assertEqual(datos["hora de salida"], "09:30")
         self.assertEqual(datos["peso"], "27.398")
         self.assertEqual(datos["número de transporte"], "0000346352")
+        self.assertEqual(datos["direccion"], "CAMINO MELIPILLA 10800")
+        self.assertEqual(datos["comuna"], "MIPU")
+
+    def test_direccion_y_comuna_ausentes_sin_etiquetas_documentales(self):
+        textos = ["SEÑOR(ES) PRODALAM SA RUT 93.772.000 GIRO VENTA AL POR MAYOR"]
+
+        datos = extraer_datos(textos)
+
+        self.assertEqual(datos["direccion"], "No encontrado")
+        self.assertEqual(datos["comuna"], "No encontrado")
+
+    def test_direccion_y_comuna_reales_layout_dos_columnas(self):
+        # Reproduce el layout real de dos columnas (guía 464106): DIRECCION y
+        # COMUNA quedan en la misma línea del OCR, con ruido típico.
+        textos = [
+            "Codigo Cltente 0001004441 FECHA DE EMISION 03-08-2026 SEnORIES) "
+            "IoRRss OcaRANZA LtDA Rut 50 . 234 .150 Giro ISaKIV ACab EDIF "
+            "DIRECCION VISIA CLARA 2351 COMUNA CZRRILLOS ciudad SantiaGO "
+            "INDICADOR TRASLADO Occracion Constituyc Venca"
+        ]
+
+        datos = extraer_datos(textos)
+
+        self.assertEqual(datos["direccion"], "VISIA CLARA 2351")
+        self.assertEqual(datos["comuna"], "CZRRILLOS")
 
 
 if __name__ == "__main__":

@@ -58,6 +58,16 @@ def crear_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Declara explícitamente un procesamiento sin catálogos",
     )
+    parser.add_argument(
+        "--autorizar-campos-controlados",
+        type=str,
+        default="",
+        help=(
+            "Lista separada por comas de campos en PRODUCTIVO_CONTROLADO a "
+            "autorizar explícitamente en esta ejecución (por ejemplo: destino). "
+            "Sin este flag, la Política de Activación no publica esos campos."
+        ),
+    )
     return parser
 
 
@@ -73,6 +83,11 @@ def main() -> None:
     estado_catalogos = validar_fuente_catalogos(
         argumentos.catalogos, permitir_sin_catalogos=argumentos.sin_catalogos
     )
+    campos_controlados_autorizados = frozenset(
+        campo.strip()
+        for campo in argumentos.autorizar_campos_controlados.split(",")
+        if campo.strip()
+    )
     resumen = procesar_carpeta(
         argumentos.carpeta,
         argumentos.salida,
@@ -80,6 +95,7 @@ def main() -> None:
         fecha_desde=argumentos.fecha_desde,
         fecha_hasta=argumentos.fecha_hasta,
         carpeta_catalogos=estado_catalogos.ruta,
+        campos_controlados_autorizados=campos_controlados_autorizados,
     )
     print("\nResumen final")
     print(f"Total encontrados: {resumen['encontrados']}")

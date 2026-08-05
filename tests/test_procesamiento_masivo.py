@@ -438,6 +438,186 @@ def test_procesar_archivo_recupera_origen_girando_la_imagen(tmp_path, monkeypatc
     assert grados_llamados == [0, 90]
 
 
+def test_procesar_archivo_orquestador_destino_usa_catalogo_maestro(
+    tmp_path, monkeypatch
+):
+    """Reproduce la causa raíz real: el resolver de destino debe leer
+    destinos_maestros.json (catálogo rico y vigente), nunca destinos.json
+    (catálogo legado código->nombre, sin relación con el esquema esperado).
+    Verificado con datos reales: el mismo destino resuelve NO_RESUELTO con
+    destinos.json y CONFIRMADO con destinos_maestros.json."""
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE DEMO SPA",
+        "obra destino": "BODEGA CENTRAL",
+        "direccion": "CALLE UNO 123",
+        "comuna": "RENCA",
+        "chofer": "MARIO SOTO",
+    }
+    destinos_maestros = {
+        "destinos": [{
+            "destino_id": "destino-1",
+            "cliente_id": "",
+            "nombre_destino": "BODEGA CENTRAL",
+            "direccion": "CALLE UNO 123",
+            "comuna": "RENCA",
+            "region": "RM",
+            "pais": "CHILE",
+            "aliases": [],
+            "estado_calidad": "CONFIRMADO",
+            "estado_vigencia": "ACTIVO",
+        }]
+    }
+    # Catálogo legado real: esquema código->nombre, sin la clave "destinos".
+    # Si el resolver llegara a leer este archivo, la solicitud queda vacía.
+    destinos_legado = {"0000000000": {"nombre": "OTRA COSA", "rut_empresa": "1"}}
+    rutas_solicitadas: list[str] = []
+
+    def cargar_catalogo(ruta_catalogo, *args, **kwargs):
+        nombre = Path(ruta_catalogo).name
+        rutas_solicitadas.append(nombre)
+        if nombre == "destinos_maestros.json":
+            return destinos_maestros
+        if nombre == "destinos.json":
+            return destinos_legado
+        return {}
+
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(
+        procesamiento_masivo, "cargar_catalogo_json", Mock(side_effect=cargar_catalogo)
+    )
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+
+    resultado = procesar_archivo(
+        ruta, campos_controlados_autorizados=frozenset({"destino"})
+    )
+
+    assert resultado["obra_destino"] == "BODEGA CENTRAL"
+    assert "destinos_maestros.json" in rutas_solicitadas
+
+
+def test_procesar_archivo_direccion_ausente_no_genera_contradiccion_destino(
+    tmp_path, monkeypatch
+):
+    """Sin dirección/comuna extraídas, el resolver no debe fabricar una
+    contradicción de dirección; el destino simplemente no se confirma."""
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE DEMO SPA",
+        "obra destino": "BODEGA CENTRAL",
+        "chofer": "MARIO SOTO",
+    }
+    destinos_maestros = {
+        "destinos": [{
+            "destino_id": "destino-1",
+            "cliente_id": "",
+            "nombre_destino": "BODEGA CENTRAL",
+            "direccion": "CALLE UNO 123",
+            "comuna": "RENCA",
+            "region": "RM",
+            "pais": "CHILE",
+            "aliases": [],
+            "estado_calidad": "CONFIRMADO",
+            "estado_vigencia": "ACTIVO",
+        }]
+    }
+
+    def cargar_catalogo(ruta_catalogo, *args, **kwargs):
+        if Path(ruta_catalogo).name == "destinos_maestros.json":
+            return destinos_maestros
+        return {}
+
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(
+        procesamiento_masivo, "cargar_catalogo_json", Mock(side_effect=cargar_catalogo)
+    )
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+
+    resultado = procesar_archivo(
+        ruta, campos_controlados_autorizados=frozenset({"destino"})
+    )
+
+    # Nombre exacto y único basta para confirmar aunque falte la dirección.
+    assert resultado["obra_destino"] == "BODEGA CENTRAL"
+
+
+def test_procesar_archivo_destino_por_codigo_no_se_pierde_si_sombra_no_confirma(
+    tmp_path, monkeypatch
+):
+    """Reproduce un caso real (464110): el código destinatario ya vinculó el
+    maestro confirmado antes de que corra el orquestador en sombra. Si el
+    texto libre de "OBRA DESTINO" no coincide por nombre ni dirección, el
+    resolver en sombra no confirma nada nuevo — pero eso NO debe pisar el
+    valor ya enriquecido por código destinatario con el OCR crudo anterior,
+    aun con "destino" autorizado en PRODUCTIVO_CONTROLADO."""
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE DEMO SPA",
+        # Texto libre real de "OBRA DESTINO": el nombre del cliente, no una
+        # dirección ni el nombre del destino maestro.
+        "obra destino": "CLIENTE DEMO SPA",
+        "chofer": "MARIO SOTO",
+    }
+    destinos_maestros = {
+        "destinos": [{
+            "destino_id": "destino-1",
+            "cliente_id": "",
+            "nombre_destino": "BODEGA CENTRAL",
+            "codigo_destino": "0001004443",
+            "direccion": "CALLE UNO 123",
+            "comuna": "RENCA",
+            "region": "RM",
+            "pais": "CHILE",
+            "aliases": [],
+            "estado_calidad": "CONFIRMADO",
+            "estado_vigencia": "ACTIVO",
+        }]
+    }
+
+    def cargar_catalogo(ruta_catalogo, *args, **kwargs):
+        if Path(ruta_catalogo).name == "destinos_maestros.json":
+            return destinos_maestros
+        return {}
+
+    def enriquecer(datos_originales, textos, carpeta, *, campos_estructurados=None):
+        # Simula el enriquecimiento por código destinatario: reemplaza el
+        # texto libre por el nombre del maestro confirmado ANTES de que el
+        # orquestador en sombra reciba destino_original.
+        enriquecido = dict(datos_originales)
+        enriquecido["obra destino"] = "BODEGA CENTRAL"
+        return enriquecido
+
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(
+        procesamiento_masivo, "cargar_catalogo_json", Mock(side_effect=cargar_catalogo)
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "enriquecer_datos_con_catalogos", enriquecer
+    )
+
+    resultado = procesar_archivo(
+        ruta, campos_controlados_autorizados=frozenset({"destino"})
+    )
+
+    # El nombre libre ("CLIENTE DEMO SPA") no coincide con "BODEGA CENTRAL"
+    # por nombre ni dirección, así que el resolver en sombra no confirma
+    # nada nuevo — pero el valor ya vinculado por código destinatario debe
+    # conservarse intacto, no revertir al OCR original.
+    assert resultado["obra_destino"] == "BODEGA CENTRAL"
+
+
 def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch):
     ruta = tmp_path / "guia.jpg"
     bloques = [
@@ -1893,3 +2073,37 @@ def test_cli_sin_fechas_mantiene_compatibilidad(monkeypatch, tmp_path):
 
     assert procesar.call_args.kwargs["fecha_desde"] is None
     assert procesar.call_args.kwargs["fecha_hasta"] is None
+
+
+def test_cli_sin_autorizar_no_habilita_campos_controlados(monkeypatch, tmp_path):
+    procesar = Mock(return_value=_resumen_cli())
+    monkeypatch.setattr(analizar_guias_masivo, "procesar_carpeta", procesar)
+    monkeypatch.setattr(
+        sys, "argv", ["analizar_guias_masivo.py", str(tmp_path), "--sin-catalogos"]
+    )
+
+    analizar_guias_masivo.main()
+
+    assert procesar.call_args.kwargs["campos_controlados_autorizados"] == frozenset()
+
+
+def test_cli_autoriza_campos_controlados_explicitamente(monkeypatch, tmp_path):
+    procesar = Mock(return_value=_resumen_cli())
+    monkeypatch.setattr(analizar_guias_masivo, "procesar_carpeta", procesar)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "analizar_guias_masivo.py",
+            str(tmp_path),
+            "--sin-catalogos",
+            "--autorizar-campos-controlados",
+            "destino, material",
+        ],
+    )
+
+    analizar_guias_masivo.main()
+
+    assert procesar.call_args.kwargs["campos_controlados_autorizados"] == frozenset(
+        {"destino", "material"}
+    )

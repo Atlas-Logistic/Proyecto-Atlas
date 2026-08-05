@@ -98,7 +98,7 @@ def test_flujo_principal_ejecuta_destino_controlado_sin_autorizacion(
     def cargar(ruta):
         return {
             "clientes.json": CLIENTES,
-            "destinos.json": DESTINOS,
+            "destinos_maestros.json": DESTINOS,
             "plantas.json": PLANTAS,
             "choferes.json": {},
         }.get(Path(ruta).name, {})
@@ -138,7 +138,7 @@ def test_publicacion_controlada_y_rollback_de_destino_aislan_otros_campos(
     def cargar(ruta):
         return {
             "clientes.json": CLIENTES,
-            "destinos.json": destinos_con_alias,
+            "destinos_maestros.json": destinos_con_alias,
             "plantas.json": PLANTAS,
             "choferes.json": {},
         }.get(Path(ruta).name, {})

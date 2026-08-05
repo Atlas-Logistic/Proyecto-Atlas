@@ -1,5 +1,61 @@
 # Trabajos activos Atlas
 
+## Calidad Documental de Destinos — Fase 1
+
+- Estado: COMPLETADA — sin reserva activa.
+- Rama: `feature-cobertura-origen-fase1` (continuación directa de Origen).
+- Causa raíz demostrada con datos reales, tres defectos independientes en el
+  pipeline de Destino (ninguno relacionado con umbrales ni OCR base):
+  1. `_orquestar_destino_sombra` cargaba `destinos.json` (catálogo legado
+     código→nombre de 6 registros, esquema distinto) en vez de
+     `destinos_maestros.json` (47 registros, 3 `CONFIRMADO`, el mismo que usa
+     `calcular_rutas_desktop.py`). Demostrado ejecutando el resolver real con
+     el mismo input: `NO_RESUELTO` con el catálogo viejo, `CONFIRMADO` con el
+     correcto.
+  2. `extraer_datos` nunca capturaba los campos documentales `DIRECCION`/
+     `COMUNA` (el OCR sí los lee, en la misma línea); el resolver de destino
+     nunca los recibía, perdiendo su vía de confirmación más fuerte cuando
+     "OBRA DESTINO" es solo el nombre del cliente, no una dirección.
+  3. Ningún CLI de producción exponía `campos_controlados_autorizados`, así
+     que aunque el resolver confirmara, la Política nunca publicaba Destino.
+- Corrección: (1) apuntar el orquestador en sombra a `destinos_maestros.json`;
+  (2) extraer `direccion`/`comuna` con el mismo patrón de línea ya usado para
+  `obra destino` y pasarlos al resolver; (3) agregar
+  `--autorizar-campos-controlados` a `analizar_guias_masivo.py`, plomeado al
+  parámetro ya existente, sin tocar la Política. Durante la validación con
+  datos reales se encontró y corrigió un cuarto defecto: cuando el resolver en
+  sombra no confirmaba nada nuevo pero la publicación estaba autorizada, el
+  valor de respaldo era el OCR anterior al enriquecimiento por código
+  destinatario, pisando un destino ya correctamente vinculado (464110 real).
+  Se corrigió para respaldar siempre con el valor ya enriquecido.
+- Además, con evidencia documental real (guía 462429: RUT de PRODALAM SA
+  coincide con el cliente confirmado; dirección con número exacto 1610 y
+  calle casi idéntica salvo ruido OCR) se promovió a `CONFIRMADO` el destino
+  ya existente "ALBERTO PEPPER 1610, RENCA" en el catálogo privado, siguiendo
+  el mismo criterio documental ya usado para VISTA CLARA 2351.
+- Validación real (9 guías reales, catálogos privados reales,
+  `--autorizar-campos-controlados destino`): 462429 pasa de destino sin
+  confirmar a `ALBERTO PEPPER 1610` confirmado; 464106 y 464110 conservan
+  `VISTA CLARA 2351`; 464089, 464135 y 384674 conservan su texto OCR sin
+  confirmar (sin destino catalogado equivalente); 464107, 464108 y 464109
+  continúan sin destino por las mismas causas de calidad de imagen ya
+  documentadas en el bloque de Origen.
+- Impacto operativo real: la guía 462429 (PRODALAM SA) pasa de `PENDIENTE`
+  ("origen no informado") a `CALCULADO`: **6,3 km, 11 min**, confirmado con
+  una consulta real a OpenRouteService. Es el primer viaje real de esta fase
+  que llega a Ruta Calculada gracias a Origen (sprint anterior) + Destino
+  (este sprint) combinados.
+- Validación: 1172/1172 Atlas (7 pruebas nuevas), `compileall` y
+  `git diff --check` aprobados.
+- Riesgo residual: solo 3/47 destinos del catálogo real están `CONFIRMADO`;
+  42/47 ya tienen dirección y coordenadas pero permanecen `PENDIENTE` sin
+  evidencia documental individual — no se promovieron sin esa evidencia. El
+  flag de autorización no está conectado a Desktop; solo esta ejecución
+  manual lo usó.
+- Próximo bloque recomendado: revisar, guía por guía, los 42 destinos
+  `PENDIENTE` restantes contra evidencia documental real, y decidir si
+  Desktop debe exponer la autorización de Destino de forma controlada.
+
 ## Cobertura Operacional de Origen — Fase 1
 
 - Estado: COMPLETADA — sin reserva activa.

@@ -492,3 +492,90 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   sobre el universo real para que los orígenes ya recuperados también puedan
   calcular ruta; no se autoriza tocar resolvers ni catálogos de destino en
   este bloque.
+
+### 2026-08-05 — Calidad Documental de Destinos, Fase 1
+
+- Decisión importante: analizar el pipeline completo de Destino (OCR →
+  extracción → resolución canónica → procesamiento → CSV → reporte →
+  Desktop) con guías reales y catálogos privados reales antes de tocar
+  código, igual que en Origen.
+- Hallazgo 1 (dominante): `_orquestar_destino_sombra` cargaba `destinos.json`
+  — un catálogo legado código→nombre de 6 registros sin relación con el
+  esquema que `resolver_destino_ubicacion`/`crear_snapshot_catalogo_destinos`
+  esperan — en vez de `destinos_maestros.json` (47 registros reales, 3
+  `CONFIRMADO`, el mismo catálogo que usan `calcular_rutas_desktop.py` y la
+  reconstrucción de código destinatario). Confirmado por `git log`: ambos
+  catálogos se conectaron en commits de días distintos y el punto de
+  integración del orquestador nunca se migró. Reproducido ejecutando el
+  resolver real con el mismo input exacto: `NO_RESUELTO` con `destinos.json`,
+  `CONFIRMADO → VISTA CLARA 2351` con `destinos_maestros.json`.
+- Hallazgo 2: `extraer_datos` nunca capturaba los campos documentales
+  `DIRECCION`/`COMUNA`. El OCR real sí los lee correctamente en la misma
+  línea (verificado en 3 guías reales), pero el resolver de destino solo
+  recibía el campo libre `OBRA DESTINO`, que en el layout real observado
+  suele ser el nombre del cliente, no una dirección (464106 real imprime
+  "OBRA DESTINO: TORRES OCARANZA LTDA").
+- Hallazgo 3: ningún CLI de producción (`analizar_guias_masivo.py`) exponía
+  `campos_controlados_autorizados`; aunque el resolver confirmara, la
+  Política nunca publicaba Destino por falta de autorización explícita.
+- Alternativas descartadas: cambiar a lectura de página completa para
+  dirección/comuna (innecesario; el recorte por línea ya funciona con datos
+  reales); bajar el umbral fuzzy de destino; promover en bloque los 44
+  destinos `PENDIENTE` sin evidencia documental individual; modificar
+  Política o el Orquestador para forzar publicación.
+- Corrección: (1) apuntar el orquestador en sombra a `destinos_maestros.json`;
+  (2) `extraer_datos` agrega `buscar_direccion`/`buscar_comuna`, mismo patrón
+  de línea que `buscar_obra_destino`, y `procesar_archivo` los pasa al
+  resolver como cadena vacía (no "No encontrado") cuando están ausentes, para
+  no fabricar una contradicción de dirección; (3) se agregó
+  `--autorizar-campos-controlados` a `analizar_guias_masivo.py`, plomeado al
+  parámetro `campos_controlados_autorizados` que ya existía en
+  `procesar_carpeta`/`procesar_archivo`, sin tocar Política.
+- Defecto adicional encontrado durante la validación con datos reales (no
+  hipotético): al reprocesar con autorización activa, la guía real 464110
+  perdió su destino ya confirmado `VISTA CLARA 2351` (vinculado por código
+  destinatario) y publicó `No encontrado`. Causa: cuando el resolver en
+  sombra no confirmaba nada nuevo pero la Política sí publicaba, el valor de
+  respaldo era el OCR previo al enriquecimiento por código destinatario, no
+  el valor ya enriquecido — pisando una identidad ya validada por un
+  mecanismo distinto. Corregido para respaldar siempre con
+  `datos.get("obra destino")` actual, nunca con el OCR original. Prueba de
+  regresión agregada reproduciendo exactamente este caso.
+- Curación documental con evidencia real: la guía 462429 (PRODALAM SA,
+  RUT 93.772.000 sin DV en el OCR, confirmado como 93772000-9 por el
+  resolver de cliente) imprime dirección "ALBERIO PEPPER 1610" y comuna
+  "RENCA". El catálogo privado ya contenía "ALBERTO PEPPER 1610, RENCA,
+  CHILE" con el mismo `cliente_id` de PRODALAM SA, migrado de un estudio
+  histórico y en estado `PENDIENTE`. Con número exacto (1610) y calle casi
+  idéntica (ruido OCR T→I), se promovió a `CONFIRMADO` siguiendo el mismo
+  criterio documental usado para VISTA CLARA 2351; se respaldó el catálogo
+  antes de editar y se documentó la evidencia en la observación del
+  registro. Las coordenadas del registro siguen siendo aproximadas (ORS
+  fallback, confidence=0.6, nivel calle/comuna); el kilómetro resultante
+  hereda esa aproximación, declarado explícitamente.
+- Validación real (9 guías reales, catálogos privados reales,
+  `--autorizar-campos-controlados destino`): 462429 pasa a `ALBERTO PEPPER
+  1610` confirmado; 464106 y 464110 conservan `VISTA CLARA 2351` sin
+  regresión; 464089, 464135 y 384674 conservan su texto OCR sin confirmar
+  (sin destino catalogado equivalente evaluado con evidencia suficiente);
+  464107, 464108 y 464109 continúan sin destino por las mismas causas de
+  calidad de imagen ya documentadas en Origen.
+- Impacto operativo real, verificado con `calcular_rutas_desktop.py` y una
+  consulta real a OpenRouteService: la guía 462429 pasa de `PENDIENTE`
+  ("origen no informado") a `CALCULADO`, 6,3 km, 11 min. Es el primer viaje
+  real de esta fase que llega a Ruta Calculada combinando el origen
+  recuperado en el bloque anterior con el destino confirmado en este bloque.
+- Regresión: 1172/1172 Atlas (7 pruebas nuevas); `compileall` y
+  `git diff --check` aprobados.
+- Integridad: sin cambios en OCR base, Sistema Multicampo, Política de
+  Activación, Orquestador, resolvers de Cliente/Chofer/Material,
+  OpenRouteService ni Desktop. `resolver_destino_ubicacion` no se modificó;
+  solo se corrigió el catálogo que recibe y se le agregó evidencia de
+  dirección/comuna que antes nunca le llegaba.
+- Riesgo residual: 42/47 destinos reales ya tienen dirección y coordenadas
+  pero siguen `PENDIENTE` sin evidencia documental individual verificada;
+  no se promovieron sin esa evidencia. El flag de autorización no está
+  conectado a Desktop; solo se usó manualmente para esta validación.
+- Acuerdo: el siguiente bloque debe revisar guía por guía los 42 destinos
+  `PENDIENTE` restantes contra evidencia documental real, y decidir si
+  Desktop debe exponer la autorización de Destino de forma controlada.

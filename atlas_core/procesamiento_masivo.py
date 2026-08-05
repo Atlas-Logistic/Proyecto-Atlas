@@ -757,10 +757,22 @@ def procesar_archivo(
         catalogo_clientes = cargar_catalogo_json(
             Path(carpeta_catalogos or "catalogos") / "clientes.json"
         )
+    direccion_observada = str(datos.get("direccion", "")).strip()
+    if direccion_observada == "No encontrado":
+        direccion_observada = ""
+    comuna_observada = str(datos.get("comuna", "")).strip()
+    if comuna_observada == "No encontrado":
+        comuna_observada = ""
     resultado_destino_sombra = _orquestar_destino_sombra(
         obra_destino=destino_original,
+        direccion=direccion_observada,
+        comuna=comuna_observada,
+        # El resolver de destino consume el catálogo maestro (rico en
+        # dirección, comuna, región y estado de calidad); "destinos.json" es
+        # un catálogo legado código→nombre distinto, usado únicamente como
+        # respaldo dentro de enriquecer_datos_con_catalogos.
         catalogo_destinos=cargar_catalogo_json(
-            Path(carpeta_catalogos or "catalogos") / "destinos.json"
+            Path(carpeta_catalogos or "catalogos") / "destinos_maestros.json"
         ),
         catalogo_clientes=catalogo_clientes,
         catalogo_plantas=cargar_catalogo_json(
@@ -791,10 +803,16 @@ def procesar_archivo(
             resumen_destino.confianza,
             resumen_destino.cantidad_contradicciones,
         )
+        # El valor de respaldo debe ser el valor YA enriquecido (por ejemplo,
+        # el maestro ya vinculado por código destinatario), nunca el OCR
+        # anterior a ese enriquecimiento: si el resolver en sombra no
+        # confirma nada nuevo, la publicación no debe pisar una identidad ya
+        # validada por un mecanismo distinto.
+        valor_destino_actual = str(datos.get("obra destino", "No encontrado"))
         publicacion_destino = decidir_publicacion(
             "destino",
-            str(datos.get("obra destino", "No encontrado")),
-            decision_destino.destino_canonico or destino_original,
+            valor_destino_actual,
+            decision_destino.destino_canonico or valor_destino_actual,
             registro=registro_activacion,
             autorizacion_controlada=(
                 "destino" in campos_controlados_autorizados
