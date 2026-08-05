@@ -685,6 +685,69 @@ def test_procesar_archivo_contaminado_sin_candidato_conserva_valor_anterior(tmp_
     assert procesar_archivo(ruta)["chofer"] == "TOTAL EXENTO JUAN PEREZ"
 
 
+def test_procesar_archivo_reemplaza_cliente_y_destino_contaminados_con_geometria(
+    tmp_path, monkeypatch
+):
+    """Reproduce el patrón real de la guía 464260: el extractor lineal arrastra
+    la etiqueta de la columna vecina ("SOLICITANTE ..." / "DIRECCION ...") al
+    fusionar columnas del párrafo OCR. La contaminación debe habilitar el
+    reemplazo geométrico aunque el valor lineal no esté vacío, igual que ya
+    ocurre con el chofer.
+    """
+    ruta = tmp_path / "guia.jpg"
+    etiqueta_cliente = BloqueOCR("SEÑOR(ES)", ((10, 10), (90, 10), (90, 30), (10, 30)), 0.9)
+    cliente = BloqueOCR("ACEROS SUR", ((150, 10), (240, 10), (240, 30), (150, 30)), 0.9)
+    etiqueta_destino = BloqueOCR("OBRA DESTINO", ((10, 50), (115, 50), (115, 70), (10, 70)), 0.9)
+    destino = BloqueOCR("PLANTA CENTRAL", ((170, 50), (280, 50), (280, 70), (170, 70)), 0.9)
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "leer_bloques_imagen",
+        Mock(return_value=[destino, cliente, etiqueta_destino, etiqueta_cliente]),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value={
+            "número de guía": "123456",
+            "número de transporte": "0000123456",
+            "cliente": "SOLICITANTE SALCMON SACX SAX SRUOKON SACK",
+            "obra destino": "DIRECCION PAES1D EDO FAEL MOYTALVA 9770",
+            "chofer": "MARIO SOTO",
+        }),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["cliente"] == "ACEROS SUR"
+    assert resultado["obra_destino"] == "PLANTA CENTRAL"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_cliente_y_destino_contaminados_sin_candidato_conservan_valor(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value={
+            "número de guía": "123456",
+            "número de transporte": "0000123456",
+            "cliente": "SOLICITANTE SALCMON SACX SAX SRUOKON SACK",
+            "obra destino": "DIRECCION PAES1D EDO FAEL MOYTALVA 9770",
+            "chofer": "MARIO SOTO",
+        }),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["cliente"] == "SOLICITANTE SALCMON SACX SAX SRUOKON SACK"
+    assert resultado["obra_destino"] == "DIRECCION PAES1D EDO FAEL MOYTALVA 9770"
+
+
 def _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo, bloques=None):
     monkeypatch.setattr(
         procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[])

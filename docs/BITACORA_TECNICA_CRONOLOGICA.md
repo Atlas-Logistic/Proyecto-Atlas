@@ -643,3 +643,144 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   del `config.json` activo de la instalación.
 - Acuerdo: el siguiente bloque de Desktop debe resolver la firma/confianza
   del ejecutable para permitir una validación visual completa.
+
+### 2026-08-05 — Calidad de Publicación Operacional — Fase 1
+
+- Decisión importante: diagnosticar primero, sin tocar código, por qué los
+  datos extraídos no terminan publicados correctamente en Desktop, usando la
+  guía real 464260 como caso principal (valores observados por el usuario en
+  Desktop: Cliente `"SOLICITANTE SALCMON SACX SAX SRUOKON SACK"`, Destino
+  `"DIRECCION PAES1D EDO FAEL MOYTALVA 9770"`, Patente tracto `"J54288"`,
+  Cantidad `"10002943"`, Material `"No disponible"`) más otras guías reales
+  del mismo lote (`output/_entrantes_desktop/20260805_170250` y
+  `output/_entrantes_desktop/20260805_152139`) antes de proponer ninguna
+  corrección.
+- Trazado real campo por campo (EasyOCR → `extractor.py` lineal → geometría →
+  `procesamiento_masivo.py` → `procesar_archivo` completo) sobre 464260,
+  reproducido con `crear_lector_ocr`/`leer_texto_imagen`/`leer_bloques_imagen`
+  reales, sin simular ningún texto:
+  1. **Cliente/Destino (Extracción → Publicación)**: el extractor lineal captura
+     por regex sobre el párrafo OCR completo sin límite de columna. EasyOCR
+     fusionó la fila `SOLICITANTE/TELEFONO/OBRA DESTINO/COD DESTINATARIO` (columna
+     derecha) con la fila `SEÑOR(ES)` (columna del cliente) y la fila
+     `DIRECCION/COMUNA/CIUDAD` (columna izquierda) con `OBRA DESTINO`, en un
+     único bloque de 842 caracteres. El resultado lineal arrastra la etiqueta
+     ajena completa. `procesamiento_masivo.procesar_archivo` ya detecta y
+     corrige esta misma contaminación para Chofer (`_chofer_lineal_contaminado`
+     + recuperación geométrica en el bloque `campos_ausentes`), pero no existía
+     un detector equivalente para Cliente/Destino, así que el valor
+     contaminado se publicaba tal cual.
+  2. **Patente rampla (Extracción)**: la etiqueta "CARRO" solo se reconocía con
+     la letra "O" (`_extraer_patentes_geometricas` y `buscar_chofer_y_patentes`
+     dentro de `extraer_datos`). El bloque OCR real de 464260 es
+     `"RodRiGo NAHUELNIR 506466 CARR0:J54288 05-08-2026"` — EasyOCR leyó la
+     etiqueta como "CARR0" (cero). Sin reconocerla, el único candidato válido
+     de 6 caracteres alfanuméricos en la zona ("J54288") quedaba asignado al
+     tracto por el escaneo genérico, y la rampla nunca se publicaba.
+  3. **Cantidad (Extracción)**: `_extraer_cantidad_geometrica` aceptaba
+     `\d{1,3}(?:[.]\d{3})+` **o** cualquier `\d+` suelto bajo la etiqueta
+     CANTIDAD. En 464260 la celda fusionada bajo esa etiqueta contiene el
+     código de producto `"10002943"` (sin separador de miles); al no exigir el
+     formato documental, ese código se publicaba como si fuera la cantidad.
+  4. Chofer, patente tracto (cuando no hay contaminación de carro) y demás
+     campos ya llegaban correctamente hasta Desktop; el problema estaba
+     acotado a estos tres puntos, confirmados también en 464145 (Destino con
+     "RUT" arrastrado) y en el bug de patente ya documentado en 464106.
+- Alternativas descartadas: bajar el umbral de confianza de OCR; agregar un
+  alias genérico "CARRO/CARR0" en el catálogo de vehículos; tratar el caso
+  como específico de la guía 464260 (`if numero_guia == "464260"`), igual que
+  los fallbacks legado ya señalados en la auditoría previa — todas
+  rechazadas por instrucción explícita del usuario y por reintroducir el
+  mismo patrón fuera de alcance.
+- Corrección (autorizada explícitamente tras el diagnóstico, alcance
+  estrictamente acotado a lo demostrado):
+  1. `atlas_core/extractor.py`: `_valor_lineal_contaminado(valor, etiquetas)`
+     generaliza la lógica ya existente de `_chofer_lineal_contaminado`;
+     `_cliente_lineal_contaminado`/`_obra_destino_lineal_contaminado` reutilizan
+     esa función con tablas de etiquetas ajenas (`_ETIQUETAS_AJENAS_CLIENTE`,
+     `_ETIQUETAS_AJENAS_OBRA_DESTINO`) documentadas con evidencia real
+     (464260, 464145). `atlas_core/procesamiento_masivo.py`: el bloque
+     `campos_ausentes` de `procesar_archivo` ahora también dispara la
+     recuperación geométrica cuando Cliente/Destino están contaminados (no
+     solo ausentes), reutilizando `_extraer_asociaciones_geometricas` ya
+     congelada; nunca sobreescribe con un valor geométrico vacío ni inventa
+     datos nuevos.
+  2. `_extraer_patentes_geometricas` y `buscar_chofer_y_patentes` (dentro de
+     `extraer_datos`) toleran de forma determinista `CARR[O0]` (una sola
+     letra en una posición fija, no una coincidencia difusa). En la ruta
+     lineal se añadió una exclusión posicional: el tramo de texto ya asignado
+     al carro por su propia etiqueta no puede volver a reclamarse como
+     tracto en el escaneo genérico de 6 caracteres.
+  3. `_extraer_cantidad_geometrica` exige el separador de miles
+     (`\d{1,3}(?:[.]\d{3})+`); sin él, se abstiene en vez de publicar un
+     código de producto como cantidad.
+- Validación real end-to-end, guía 464260 (antes → después, mismo catálogo
+  real de vehículos y plantas):
+  - Cliente: `"SOLICITANTE SALCMON SACX SAX SRUOKON SACK"` → `"SRUOKON SACK"`.
+  - Obra destino: `"DIRECCION PAES1D EDO FAEL MOYTALVA 9770"` →
+    `"SALCHON SACX SAY"`.
+  - Patente tracto: `"J54288"` (robado al carro) → `"No encontrado"`
+    (abstención correcta; el catálogo de vehículos real no ofrece un segundo
+    candidato de tracto en esta guía).
+  - Patente rampla: `"No encontrado"` → `"JF4288"` (recuperada por
+    coincidencia con el catálogo real de vehículos, distancia 1).
+  - Cantidad: `"10002943"` → `"No encontrado"` (abstención correcta).
+  - Sin cambios: Chofer (`"RodRiGo NAHUELNIR"`), origen (`"AZA RENCA"`).
+  - La calidad intrínseca del OCR de los nombres propios ("SRUOKON SACK",
+    "SALCHON SACX SAY") no se corrigió: es exactamente el texto que EasyOCR
+    ya leía en esa columna, y mejorar OCR estaba fuera de alcance.
+- Validación real adicional, mismo lote (`extraer_datos`/`procesar_archivo`
+  reales, sin simulación): 463774 y 463936 sin regresión en los campos ya
+  correctos; 464145 deja de publicar el destino contaminado con "RUT ..." y
+  pasa a `"SODIYAS RENC"`. Guía de control 463604 (contiene "CARRO" con
+  letra O, no "CARR0"): `patente_tracto="KX5439"` y `patente_rampla="JF6468"`
+  permanecen exactamente iguales — cero regresión.
+- Regresión: 1185/1185 Atlas (11 pruebas nuevas: contaminación de
+  Cliente/Destino, tolerancia CARR0 en ambas rutas de patente con exclusión
+  posicional, abstención de Cantidad sin separador de miles); `compileall` y
+  `git diff --check` aprobados.
+- Integridad: sin cambios en EasyOCR, umbrales, Sistema Multicampo, Política
+  de Activación, Orquestador, OpenRouteService ni Desktop; ninguna regla usa
+  el número de guía como condición.
+- Hallazgo adicional fuera del alcance de este bloque (diagnóstico, sin
+  cambios de código): el usuario reportó que la pestaña "Revisión de
+  destinos" de Atlas Desktop se ve completamente vacía, cuando antes mostraba
+  un mapa e información GPS de destinos. Para diagnosticarlo con evidencia
+  real (no especulación) se extrajo de forma solo-lectura el `app.asar` de la
+  instalación activa (`C:\Users\...\Desktop\Atlas Viajes\resources\app.asar`,
+  vía `npx asar extract`, sin modificar el archivo original). El
+  `build_info.json` embebido identifica exactamente el build activo: versión
+  `1.2.0`, commit `dbc75685bf433beb365f339902f2c89eb45a5dad`, rama
+  `feature-consolidacion-viajes-1` — que coincide con el commit corto
+  `dbc7568` citado en esta misma bitácora para "UX Operacional Atlas — Fase
+  1" (2026-08-04), el **último** despliegue de Desktop registrado en el
+  proyecto. La pestaña vive en `src/atlas_viajes.html`
+  (`#tab-revision-destinos` / `#vista-revision-destinos`) y su lógica en
+  `src/revision_destinos_ui.js` + `src/revision_destinos_logic.js`: una
+  búsqueda exhaustiva en todo el árbol de la aplicación (fuente y
+  `node_modules` empaquetados) por "mapa", "leaflet", "gps", "latitud" y
+  "longitud" no arrojó ningún resultado — no hay ninguna librería de mapas
+  incluida ni código que dibuje coordenadas. La pestaña es, en este build, un
+  flujo de revisión de decisiones sobre un archivo JSON ("bandeja") que el
+  usuario debe abrir manualmente (`window.atlasAPI.seleccionarBandejaDestinos`
+  → diálogo nativo de archivo → `revisiones_destinos.json`); sin ese archivo
+  cargado muestra el estado vacío por diseño ("No hay una bandeja de destinos
+  cargada"), y aun con datos cargados solo renderiza tabla y texto, nunca un
+  mapa. No se pudo identificar el commit exacto que haya retirado un
+  eventual mapa anterior porque el repositorio fuente de
+  `Atlas-Viajes-Desktop` no es accesible desde esta sesión (solo el binario
+  empaquetado) y ninguna entrada previa de esta bitácora documenta haber
+  construido un componente de mapa para esta pestaña. No se implementó
+  ningún rediseño ni hotfix, conforme a lo solicitado.
+- Riesgo residual: la limpieza de contaminación de Cliente/Destino expone
+  texto OCR crudo de esa columna que puede seguir siendo poco legible por
+  calidad de imagen; ambos campos permanecen sujetos a
+  `indicador_revision = REVISAR` cuando corresponde. La pestaña "Revisión de
+  destinos" de Desktop sigue sin mostrar mapa/GPS; resolverlo requiere
+  trabajo en el repositorio `Atlas-Viajes-Desktop`, fuera del alcance de esta
+  sesión.
+- Acuerdo: si se confirma que existió un mapa antes de
+  `feature-consolidacion-viajes-1`, el siguiente bloque de Desktop debe
+  revisar su propio historial de git alrededor de esa rama para decidir entre
+  restaurarlo o documentar el flujo manual de bandeja como comportamiento
+  esperado.

@@ -27,6 +27,8 @@ sys.modules.setdefault("easyocr", easyocr_stub)
 from atlas import extraer_datos
 from atlas_core.extractor import (
     _chofer_lineal_contaminado,
+    _cliente_lineal_contaminado,
+    _obra_destino_lineal_contaminado,
     _clasificar_evidencia_transporte,
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
@@ -77,6 +79,25 @@ def test_patentes_geometricas_abstienen_si_catalogo_es_ambiguo():
     assert "patente_rampla" not in resultado
 
 
+def test_patentes_geometricas_toleran_carro_leido_como_carr0():
+    # Confusión OCR real y documentada (guía 464260): la "O" de la etiqueta
+    # "CARRO" se lee como "0". Debe resolver igual que "CARRO: J54288".
+    bloques = [
+        _bloque("PATENTE", 548, 898, 63),
+        _bloque("836486", 633, 905, 50),
+        _bloque("CARR0: J54288", 695, 907, 92),
+    ]
+    catalogo = {
+        "SB6486": {"tipo": "TRACTO"},
+        "JF4288": {"tipo": "CARRO"},
+    }
+
+    resultado = _extraer_patentes_geometricas(bloques, catalogo)
+
+    assert resultado["patente_tracto"] == "SB6486"
+    assert resultado["patente_rampla"] == "JF4288"
+
+
 def test_cantidad_geometrica_separa_valor_de_codigo_en_celda_ocr_fusionada():
     bloques = [
         _bloque("CANTIDAD", 81, 489, 62),
@@ -85,6 +106,18 @@ def test_cantidad_geometrica_separa_valor_de_codigo_en_celda_ocr_fusionada():
     ]
 
     assert _extraer_cantidad_geometrica(bloques) == "15.253"
+
+
+def test_cantidad_geometrica_se_abstiene_sin_separador_de_miles():
+    # Caso real guía 464260: bajo la etiqueta CANTIDAD solo aparece un código
+    # de producto sin puntos de miles ("10002943"). Publicarlo como cantidad
+    # confundiría un código con un valor documental; se prefiere abstención.
+    bloques = [
+        _bloque("CANTIDAD", 81, 489, 62),
+        _bloque("10002943", 103, 511, 104),
+    ]
+
+    assert _extraer_cantidad_geometrica(bloques) is None
 
 
 def test_reconstruccion_documental_asocia_etiquetas_y_valores_separados():
@@ -713,6 +746,52 @@ def test_chofer_contaminacion_lineal_usa_palabras_completas(valor, contaminado):
 
 def test_chofer_no_excluye_apellido_que_contiene_parcialmente_iva():
     assert _chofer(_bloque("PEDRO OLIVARES", 120, 20))["valor"] == "PEDRO OLIVARES"
+
+
+@pytest.mark.parametrize(
+    ("valor", "contaminado"),
+    [
+        # Caso real guía 464260: la columna SOLICITANTE/TELEFONO se fusiona
+        # con la columna cliente en el párrafo OCR.
+        ("SOLICITANTE SALCMON SACX SAX SRUOKON SACK", True),
+        ("ACEROS DEL SUR", False),
+        ("SOLICITANTES UNIDOS SPA", False),  # "SOLICITANTES" no es la palabra completa "SOLICITANTE"
+    ],
+)
+def test_cliente_contaminacion_lineal_usa_palabras_completas(valor, contaminado):
+    assert _cliente_lineal_contaminado(valor) is contaminado
+
+
+@pytest.mark.parametrize(
+    ("valor", "contaminado"),
+    [
+        # Caso real guía 464260: la columna DIRECCION/COMUNA se fusiona con
+        # la columna "obra destino" en el párrafo OCR.
+        ("DIRECCION PAES1D EDO FAEL MOYTALVA 9770", True),
+        ("PLANTA CENTRAL", False),
+        ("DIRECCIONAL LOGISTICA SPA", False),  # "DIRECCIONAL" no es la palabra completa "DIRECCION"
+    ],
+)
+def test_obra_destino_contaminacion_lineal_usa_palabras_completas(valor, contaminado):
+    assert _obra_destino_lineal_contaminado(valor) is contaminado
+
+
+def test_patente_lineal_tolera_carr0_y_no_reclama_el_mismo_texto_para_tracto():
+    # Caso real guía 464260: "CARR0:J54288" (cero en vez de la letra O).
+    # Antes del fix, "J54288" era la única secuencia valida de 6 caracteres
+    # en el bloque y el escaneo genérico la asignaba erróneamente al tracto,
+    # dejando el carro sin publicar. Ahora la etiqueta "CARR[O0]" debe
+    # capturar J54288 como patente del carro, y ese mismo tramo de texto no
+    # puede volver a reclamarse como tracto genérico.
+    textos = [
+        "rETIRA PATENTE FECHA LLEGADA TOTAL EXENTO $",
+        "RodRiGo NAHUELNIR 506466 CARR0:J54288 05-08-2026",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["patente del carro"] == "J54288", datos
+    assert datos["patente del tracto"] == "No encontrado", datos
 
 
 def test_chofer_compone_cuatro_bloques_nominales():

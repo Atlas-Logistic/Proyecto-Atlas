@@ -19,6 +19,8 @@ from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
 from atlas_core.extractor import (
     _chofer_lineal_contaminado,
+    _cliente_lineal_contaminado,
+    _obra_destino_lineal_contaminado,
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_transporte_geometrico,
@@ -516,16 +518,35 @@ def procesar_archivo(
     recuperacion_patentes = False
     transporte_corregido = False
     bloques_guia = None
-    campos_ausentes = any(
-        datos.get(campo) in {None, "", "No encontrado"}
-        for campo in ("cliente", "obra destino", "número de transporte")
-    ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
+    campos_ausentes = (
+        any(
+            datos.get(campo) in {None, "", "No encontrado"}
+            for campo in ("cliente", "obra destino", "número de transporte")
+        )
+        or datos.get("chofer") in {None, "", "No encontrado"}
+        or _chofer_lineal_contaminado(datos.get("chofer"))
+        or _cliente_lineal_contaminado(datos.get("cliente"))
+        or _obra_destino_lineal_contaminado(datos.get("obra destino"))
+    )
     if campos_ausentes:
         try:
             bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
             asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
-            for campo in ("cliente", "obra destino"):
-                if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
+            # La contaminación (etiqueta ajena arrastrada por fusión de
+            # columnas en el párrafo OCR) habilita el reemplazo aunque el
+            # valor lineal no esté vacío; nunca se sobreescribe con un valor
+            # geométrico ausente ni se inventa un dato nuevo.
+            detectores_contaminacion = {
+                "cliente": _cliente_lineal_contaminado,
+                "obra destino": _obra_destino_lineal_contaminado,
+            }
+            for campo, esta_contaminado in detectores_contaminacion.items():
+                valor_actual = datos.get(campo)
+                requiere_reemplazo = (
+                    valor_actual in {None, "", "No encontrado"}
+                    or esta_contaminado(valor_actual)
+                )
+                if requiere_reemplazo and asociaciones.get(campo):
                     datos[campo] = asociaciones[campo]
                     recuperacion_geometrica = True
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)

@@ -364,7 +364,10 @@ def _extraer_patentes_geometricas(
                     candidatos_observados["patente_tracto"].extend(
                         re.findall(r"\b[A-Z0-9]{6}\b", vecino["simple"])
                     )
-        coincidencia_carro = re.search(r"\bCARRO\s*:?\s*([A-Z0-9]{6})\b", simple)
+        # "CARR0" (cero) es una confusión OCR conocida de la letra "O" en esta
+        # etiqueta; tolerarla aquí es determinista (una sola letra permitida
+        # en una posición fija), no una coincidencia difusa.
+        coincidencia_carro = re.search(r"\bCARR[O0]\s*:?\s*([A-Z0-9]{6})\b", simple)
         if coincidencia_carro:
             candidatos_observados["patente_rampla"].append(coincidencia_carro.group(1))
 
@@ -404,7 +407,14 @@ def _extraer_patentes_geometricas(
 
 
 def _extraer_cantidad_geometrica(bloques: List[Any]) -> Optional[str]:
-    """Extrae solo la cantidad situada bajo su encabezado documental."""
+    """Extrae solo la cantidad situada bajo su encabezado documental.
+
+    Exige el separador de miles (formato documental real: "1.030", "15.253").
+    Un número sin puntos dentro de la misma ventana suele ser una columna
+    vecina (por ejemplo "CÓDIGO") en guías con más de una línea de material;
+    aceptarlo sin ese separador confunde un código con una cantidad. Ante esa
+    ambigüedad se prefiere abstener antes que publicar un valor equivocado.
+    """
     items = _normalizar_bloques_geometricos(bloques)
     etiquetas = [item for item in items if item["simple"] == "CANTIDAD"]
     decisiones = []
@@ -415,7 +425,7 @@ def _extraer_cantidad_geometrica(bloques: List[Any]) -> Optional[str]:
                 continue
             if item["x1"] > etiqueta["x2"] + 85 or item["x2"] < etiqueta["x1"] - 15:
                 continue
-            coincidencia = re.match(r"\s*(\d{1,3}(?:[.]\d{3})+|\d+)\s*(?:[/|]|$)", item["texto"])
+            coincidencia = re.match(r"\s*(\d{1,3}(?:[.]\d{3})+)\s*(?:[/|]|$)", item["texto"])
             if coincidencia:
                 decisiones.append(coincidencia.group(1))
     unicos = list(dict.fromkeys(decisiones))
@@ -716,16 +726,58 @@ def _extraer_transporte_geometrico(
     return resultado
 
 
-def _chofer_lineal_contaminado(valor: Any) -> bool:
-    """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
+def _valor_lineal_contaminado(valor: Any, etiquetas: tuple[str, ...]) -> bool:
+    """Detecta etiquetas ajenas incorporadas inequívocamente a un valor lineal.
+
+    El extractor lineal captura texto por expresión regular sobre el párrafo
+    OCR completo, sin límite de columna. Cuando EasyOCR fusiona una fila de
+    dos columnas en un solo bloque de texto, la captura puede arrastrar la
+    etiqueta y el valor de la columna vecina. Esta función detecta esa
+    contaminación de forma determinista, sin inferir ni corregir el valor.
+    """
     texto = _texto_simple(str(valor or ""))
     return any(
         re.search(rf"(?<![A-Z0-9]){re.escape(etiqueta)}(?![A-Z0-9])", texto)
-        for etiqueta in (
-            "TOTAL EXENTO", "TOTAL", "NETO", "IVA", "PATENTE", "RETIRA",
-            "FECHA LLEGADA",
-        )
+        for etiqueta in etiquetas
     )
+
+
+def _chofer_lineal_contaminado(valor: Any) -> bool:
+    """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
+    return _valor_lineal_contaminado(valor, (
+        "TOTAL EXENTO", "TOTAL", "NETO", "IVA", "PATENTE", "RETIRA",
+        "FECHA LLEGADA",
+    ))
+
+
+# Etiquetas de la columna derecha (SOLICITANTE/TELEFONO/OBRA DESTINO/...) que
+# pueden arrastrarse al capturar "cliente" entre SEÑOR(ES) y RUT cuando ambas
+# columnas quedan fusionadas en el mismo bloque de párrafo. Reproducido con
+# guías reales: 464260 ("SOLICITANTE SALCMON SACX SAX SRUOKON SACK").
+_ETIQUETAS_AJENAS_CLIENTE = (
+    "SOLICITANTE", "TELEFONO", "OBRA DESTINO", "COD DESTINATARIO",
+    "HORA ENTRADA", "HORA SALIDA", "NRO TRANSPORTE",
+)
+
+# Etiquetas de la columna izquierda (DIRECCION/COMUNA/CIUDAD/GIRO/RUT/...) que
+# pueden arrastrarse al capturar "obra destino" entre OBRA DESTINO y COD
+# DESTINATARIO cuando ese segundo rótulo no aparece de inmediato en el texto
+# fusionado. Reproducido con guías reales: 464260
+# ("DIRECCION PAES1D EDO FAEL MOYTALVA 9770") y 464145
+# ("000200?22T RUT ..."), ambas del mismo lote.
+_ETIQUETAS_AJENAS_OBRA_DESTINO = (
+    "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "RUT", "SOLICITANTE", "TELEFONO",
+)
+
+
+def _cliente_lineal_contaminado(valor: Any) -> bool:
+    """Detecta etiquetas de la columna vecina incorporadas al cliente lineal."""
+    return _valor_lineal_contaminado(valor, _ETIQUETAS_AJENAS_CLIENTE)
+
+
+def _obra_destino_lineal_contaminado(valor: Any) -> bool:
+    """Detecta etiquetas de la columna vecina incorporadas al destino lineal."""
+    return _valor_lineal_contaminado(valor, _ETIQUETAS_AJENAS_OBRA_DESTINO)
 
 
 def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
@@ -1155,16 +1207,24 @@ def extraer_datos(
         bloque = texto_busqueda[posicion + len("RETIRA PATENTE FECHA LLEGADA") : posicion + 260]
 
         patente_carro = None
-        coincidencia_carro = re.search(r"CARRO\s*:?\s*([A-Z0-9]{6})", bloque)
+        # "CARR0" (cero) es una confusión OCR conocida de la letra "O" en esta
+        # etiqueta; tolerarla aquí es determinista (una sola letra permitida
+        # en una posición fija), no una coincidencia difusa.
+        coincidencia_carro = re.search(r"CARR[O0]\s*:?\s*([A-Z0-9]{6})", bloque)
         if coincidencia_carro and patente_valida(coincidencia_carro.group(1)):
             patente_carro = normalizar_patente(coincidencia_carro.group(1))
 
         coincidencia_patente = None
         for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", bloque):
             posible = coincidencia.group(0)
-            if patente_valida(posible):
-                coincidencia_patente = coincidencia
-                break
+            if not patente_valida(posible):
+                continue
+            # No reasignar al tracto el mismo texto ya identificado como
+            # patente del carro por su propia etiqueta "CARR[O0]".
+            if coincidencia_carro and coincidencia.start() == coincidencia_carro.start(1):
+                continue
+            coincidencia_patente = coincidencia
+            break
 
         chofer = None
         patente_tracto = None
@@ -1172,7 +1232,7 @@ def extraer_datos(
         if coincidencia_patente:
             patente_tracto = normalizar_patente(coincidencia_patente.group(0))
             candidato = bloque[:coincidencia_patente.start()]
-            candidato = re.sub(r"\b(RETIRA|PATENTE|FECHA|LLEGADA|CARRO)\b", " ", candidato)
+            candidato = re.sub(r"\b(RETIRA|PATENTE|FECHA|LLEGADA|CARR[O0])\b", " ", candidato)
             candidato = re.sub(r"[^A-ZÁÉÍÓÚÑ ]", " ", candidato)
             candidato = limpiar_valor(candidato)
 

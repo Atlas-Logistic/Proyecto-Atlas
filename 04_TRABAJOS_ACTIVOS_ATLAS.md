@@ -1,5 +1,85 @@
 # Trabajos activos Atlas
 
+## Calidad de Publicación Operacional — Fase 1
+
+- Estado: COMPLETADA — sin reserva activa.
+- Rama: `feature-cobertura-origen-fase1` (continuación directa del Hotfix CSV).
+- Causa raíz demostrada con guía real 464260 (y confirmada en otras guías del
+  mismo lote real), tres defectos independientes de publicación, ninguno de
+  OCR base ni de umbrales:
+  1. El extractor lineal captura Cliente/Obra destino por regex sobre el
+     párrafo OCR completo, sin límite de columna; cuando EasyOCR fusiona la
+     fila de dos columnas en un bloque, la captura arrastra la etiqueta y el
+     valor de la columna vecina ("SOLICITANTE ..." dentro de Cliente,
+     "DIRECCION ..." dentro de Obra destino). El pipeline ya detectaba y
+     corregía esta misma contaminación para Chofer mediante recuperación
+     geométrica, pero no para Cliente/Destino.
+  2. La etiqueta "CARRO" de patente rampla se reconoce solo con la letra "O";
+     cuando EasyOCR la lee como "CARR0" (cero, confusión visual conocida), ni
+     la ruta lineal ni la geométrica la reconocen, y el único candidato válido
+     de 6 caracteres queda mal asignado al tracto.
+  3. `_extraer_cantidad_geometrica` aceptaba cualquier número bajo la etiqueta
+     CANTIDAD, incluyendo códigos de producto sin separador de miles cuando
+     dos columnas quedan fusionadas en una sola celda OCR, publicando un
+     código como si fuera cantidad.
+- Corrección (alcance estrictamente acotado a lo autorizado, sin tocar OCR
+  base, umbrales, Multicampo, Política, Orquestador, OpenRouteService ni
+  lógica específica de una guía):
+  1. `_valor_lineal_contaminado` generaliza la detección ya existente para
+     Chofer; nuevas `_cliente_lineal_contaminado`/`_obra_destino_lineal_contaminado`
+     (con sus tablas de etiquetas ajenas documentadas con evidencia real) se
+     integran en `procesamiento_masivo.procesar_archivo` reutilizando la misma
+     recuperación geométrica ya congelada, habilitando el reemplazo aunque el
+     valor lineal no esté vacío (igual que ya ocurría con Chofer).
+  2. Tolerancia determinista de un solo carácter ("O"→"0") en la etiqueta
+     "CARR[O0]" en ambas rutas (lineal y geométrica) de extracción de
+     patentes; en la ruta lineal se añadió además una exclusión posicional
+     para que el mismo tramo de texto ya asignado al carro no vuelva a
+     reclamarse como tracto genérico.
+  3. `_extraer_cantidad_geometrica` exige el separador de miles documental
+     (`\d{1,3}(?:[.]\d{3})+`); ante un número sin ese formato se abstiene en
+     vez de publicar un código como cantidad.
+- Validación real (guía 464260, reprocesamiento completo con catálogos
+  privados reales, antes/después):
+  - Cliente: `"SOLICITANTE SALCMON SACX SAX SRUOKON SACK"` →
+    `"SRUOKON SACK"` (contaminación eliminada; la calidad del OCR de nombres
+    propios queda fuera de alcance, tal como se acordó).
+  - Obra destino: `"DIRECCION PAES1D EDO FAEL MOYTALVA 9770"` →
+    `"SALCHON SACX SAY"` (misma razón).
+  - Patente tracto: `"J54288"` (incorrecto, robado al carro) →
+    `"No encontrado"` (abstención correcta; ya no publica el valor del carro).
+  - Patente rampla: `"No encontrado"` → `"JF4288"` (recuperada por catálogo
+    real de vehículos con distancia 1).
+  - Cantidad: `"10002943"` (código de producto publicado como cantidad) →
+    `"No encontrado"` (abstención correcta).
+  - Chofer y demás campos: sin cambios (`"RodRiGo NAHUELNIR"`, `origen`
+    `"AZA RENCA"`).
+- Validación real adicional (mismo lote, guías 463774/463936/464145/464206;
+  guía de control 463604): cero regresiones — 463604 conserva exactamente
+  `patente_tracto="KX5439"`/`patente_rampla="JF6468"` (contiene "CARRO" con
+  letra O, no "CARR0") y su Cliente/Destino ya correctos no se ven alterados.
+- Validación: 1185/1185 Atlas (11 pruebas nuevas), `compileall` y
+  `git diff --check` aprobados.
+- Riesgo residual: la limpieza de contaminación expone el texto OCR crudo de
+  esa columna, que puede seguir siendo ilegible por calidad de imagen (fuera
+  de alcance: no se mejora OCR); ambos campos permanecen sujetos a
+  `indicador_revision = REVISAR` cuando corresponde.
+- Hallazgo adicional (diagnóstico, sin cambios de código): la pestaña
+  "Revisión de destinos" de Atlas Desktop no contiene ni ha contenido, en el
+  build actualmente instalado (`app.asar` commit `dbc7568`, versión 1.2.0,
+  rama `feature-consolidacion-viajes-1` — el último despliegue de Desktop
+  registrado en esta bitácora), ningún componente de mapa/GPS: es un flujo de
+  revisión de decisiones sobre un archivo JSON ("bandeja") que el usuario debe
+  seleccionar manualmente; mientras no se seleccione, muestra un estado vacío
+  por diseño. No se identificó el commit exacto que haya retirado un mapa
+  porque el repositorio fuente de `Atlas-Viajes-Desktop` no es accesible desde
+  esta sesión y ninguna bitácora del proyecto documenta haber construido un
+  mapa para esta pestaña. Detalle completo en el informe de este bloque.
+- Próximo bloque recomendado: si se confirma que existió un mapa antes,
+  revisar el historial de `Atlas-Viajes-Desktop` alrededor de
+  `feature-consolidacion-viajes-1`; si no, generar y cargar manualmente la
+  bandeja `revisiones_destinos.json` como paso operacional.
+
 ## Hotfix — Incompatibilidad de Esquema en CSV de Reprocesamiento
 
 - Estado: CORREGIDO Y VALIDADO — sin reserva activa.
