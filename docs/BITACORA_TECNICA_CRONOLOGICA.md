@@ -579,3 +579,67 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Acuerdo: el siguiente bloque debe revisar guía por guía los 42 destinos
   `PENDIENTE` restantes contra evidencia documental real, y decidir si
   Desktop debe exponer la autorización de Destino de forma controlada.
+
+### 2026-08-05 — Hotfix: Incompatibilidad de Esquema en CSV de Reprocesamiento
+
+- Decisión importante: diagnosticar con el CSV real de producción antes de
+  tocar código. El usuario reportó que Atlas abortaba antes de iniciar OCR
+  al cargar 35 guías nuevas desde Desktop, con
+  `ValueError: Los CSV de reprocesamiento tienen esquemas incompatibles`
+  desde `resumen_procesamiento_desktop.py`.
+- Hallazgo: el CSV acumulado real de la instalación activa
+  (`C:\Users\...\AppData\Local\Atlas\datos\procesamiento\
+  analisis_completo_guias.csv`) no se había tocado desde 2026-07-28 (1.177
+  filas, 21 columnas: 15 base + 6 de traza histórica). Los bloques
+  "Calidad de Datos Operacionales" y "Auditoría del Pipeline de
+  Publicación Operacional" (2026-08-04) ampliaron `COLUMNAS_PUBLICACION` a
+  18 columnas (+`peso`, `cantidad`, `origen`) y enseñaron a
+  `_validar_csv_existente` a migrar esa diferencia de forma aditiva, pero
+  nunca tocaron `resumen_procesamiento_desktop.py::comando_reemplazar`, que
+  mantenía su propia comparación `columnas_masivo != columnas_reprocesado`
+  — una igualdad estricta de orden y conjunto, sin ninguna tolerancia a la
+  evolución aditiva del esquema.
+- Evidencia real, no simulada: reproduje el error exacto usando una copia
+  del CSV acumulado real de producción contra un CSV sintético con el
+  esquema vigente — mismo mensaje reportado por el usuario. Verifiqué
+  también que `_validar_csv_existente`, aplicada a una copia del mismo
+  archivo real, migra correctamente: agrega `peso`/`cantidad`/`origen`
+  vacíos, conserva las 1.177 filas y las 21 columnas originales sin ninguna
+  diferencia.
+- Alternativas descartadas: reescribir manualmente el CSV de producción;
+  bajar o eliminar la validación de esquema en `comando_reemplazar`;
+  mantener dos validaciones de esquema en paralelo (la causa del defecto).
+- Corrección: `comando_reemplazar` reutiliza `_validar_csv_existente` como
+  única fuente de verdad — se eliminó por completo la comparación paralela.
+  Se aplica a ambos archivos (acumulado y reprocesado) antes de leerlos, de
+  forma atómica y determinista. La fusión final usa la unión de columnas de
+  ambos encabezados (ya normalizados), preservando toda columna de traza
+  histórica y sin inventar valores en las columnas nuevas; la escritura usa
+  `extrasaction="ignore"` para tolerar la diferencia legítima entre ambos
+  orígenes. Las validaciones de seguridad (prefijo de 15 columnas fijas,
+  columnas desconocidas o duplicadas) se conservan intactas, por ser las
+  mismas de `_validar_csv_existente`; se agregó una prueba que confirma que
+  un esquema genuinamente incompatible sigue rechazándose.
+- Validación real end-to-end: se respaldó el CSV de producción y se migró
+  con `_validar_csv_existente` — 1.177 filas antes y después, cero
+  diferencias en las 21 columnas originales, cero valores inventados en las
+  3 columnas nuevas. Se reprodujo además el flujo completo de Desktop
+  (`comando_existentes` → OCR real vía `procesar_carpeta` con catálogos
+  privados reales → `comando_reemplazar`) contra una copia del acumulado
+  **sin migrar**, usando 4 guías reales nunca antes procesadas (464107,
+  464108, 464109, 464110): el merge ya no lanza `ValueError`, produce
+  1.177+4=1.181 filas y cero diferencias en las 1.177 filas históricas.
+- Regresión: 1174/1174 Atlas (3 pruebas nuevas); `compileall` y
+  `git diff --check` aprobados.
+- Integridad: sin cambios en OCR, Sistema Multicampo, Política de
+  Activación, Orquestador, resolvers, catálogos, OpenRouteService ni
+  Desktop; `procesamiento_masivo.py::_validar_csv_existente` no se
+  modificó, solo se reutilizó desde el segundo punto de validación.
+- Riesgo residual: no fue posible confirmar visualmente en la interfaz de
+  Desktop porque el ejecutable instalado sigue bloqueado por Smart App
+  Control (Code Integrity 3077, ya documentado en "Logistics UX 1.0" y sin
+  relación con este fix). La validación se hizo en la capa Python que
+  Desktop invoca directamente, confirmada por la ruta `carpetaProyectoPython`
+  del `config.json` activo de la instalación.
+- Acuerdo: el siguiente bloque de Desktop debe resolver la firma/confianza
+  del ejecutable para permitir una validación visual completa.

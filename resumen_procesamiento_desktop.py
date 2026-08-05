@@ -9,6 +9,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from atlas_core.procesamiento_masivo import _validar_csv_existente
+
 
 def _leer_csv(
     ruta: Path,
@@ -67,14 +69,29 @@ def comando_existentes(argumentos: argparse.Namespace) -> None:
 def comando_reemplazar(argumentos: argparse.Namespace) -> None:
     ruta_masivo = Path(argumentos.csv_masivo)
     ruta_reprocesado = Path(argumentos.csv_reprocesado)
+    # Única fuente de verdad para validar y migrar el esquema: la misma
+    # función que ya usa procesamiento_masivo.py para el flujo principal. Se
+    # aplica a ambos archivos antes de leerlos, de forma atómica y
+    # determinista: agrega columnas aditivas faltantes (por ejemplo
+    # peso/cantidad/origen) conservando todas las filas y columnas
+    # existentes, o rechaza explícitamente un esquema base distinto o
+    # columnas desconocidas/duplicadas. No existe una segunda validación
+    # paralela: Desktop depende exactamente del mismo mecanismo oficial.
+    _validar_csv_existente(ruta_masivo)
+    _validar_csv_existente(ruta_reprocesado)
     filas_masivo = _leer_csv(ruta_masivo, obligatorio=True)
     filas_reprocesadas = _leer_csv(ruta_reprocesado, obligatorio=True)
     with ruta_masivo.open("r", newline="", encoding="utf-8-sig") as archivo:
-        columnas_masivo = csv.DictReader(archivo, delimiter=";").fieldnames
+        columnas_masivo = csv.DictReader(archivo, delimiter=";").fieldnames or []
     with ruta_reprocesado.open("r", newline="", encoding="utf-8-sig") as archivo:
-        columnas_reprocesado = csv.DictReader(archivo, delimiter=";").fieldnames
-    if columnas_masivo != columnas_reprocesado or columnas_masivo is None:
-        raise ValueError("Los CSV de reprocesamiento tienen esquemas incompatibles")
+        columnas_reprocesado = csv.DictReader(archivo, delimiter=";").fieldnames or []
+    # Tras la validación anterior, ambos encabezados ya comparten el mismo
+    # prefijo base y solo contienen columnas conocidas; la única diferencia
+    # legítima posible es la traza histórica opcional. Se fusionan sin
+    # perder ninguna columna de ninguno de los dos orígenes.
+    columnas_fusionadas = list(columnas_masivo) + [
+        columna for columna in columnas_reprocesado if columna not in columnas_masivo
+    ]
 
     nombres = [fila.get("archivo", "").strip() for fila in filas_reprocesadas]
     if any(not nombre for nombre in nombres) or len(nombres) != len(set(nombres)):
@@ -99,7 +116,8 @@ def comando_reemplazar(argumentos: argparse.Namespace) -> None:
         ) as archivo:
             temporal = Path(archivo.name)
             escritor = csv.DictWriter(
-                archivo, fieldnames=columnas_masivo, delimiter=";"
+                archivo, fieldnames=columnas_fusionadas, delimiter=";",
+                extrasaction="ignore",
             )
             escritor.writeheader()
             escritor.writerows(resultado)

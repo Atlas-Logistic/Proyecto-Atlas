@@ -302,7 +302,77 @@ def test_reprocesamiento_desktop_detecta_y_reemplaza_solo_archivos_seleccionados
     }
     filas = {fila["archivo"]: fila for fila in _leer_csv(masivo)}
     assert filas["464089.jpeg"]["chofer"] == "LEANDRO IOLEDO"
-    assert filas["otra.jpeg"] == intacta
+    # comando_reemplazar migra el esquema legado (15 columnas) al vigente
+    # reutilizando _validar_csv_existente: agrega peso/cantidad/origen
+    # vacíos sin alterar ningún valor histórico existente.
+    assert filas["otra.jpeg"] == {**intacta, "peso": "", "cantidad": "", "origen": ""}
+
+
+def test_reemplazar_migra_esquema_legado_con_traza_historica_sin_perder_datos(
+    tmp_path, capsys
+):
+    """Reproduce el CSV acumulado real (guías anteriores a peso/cantidad/
+    origen, con traza histórica) fusionado con un reprocesamiento del
+    esquema vigente. comando_reemplazar debe migrar, no rechazar, y no
+    perder ninguna fila ni columna existente."""
+    masivo = tmp_path / "analisis_completo_guias.csv"
+    reprocesado = tmp_path / "reprocesado.csv"
+    columnas_legado = list(COLUMNAS_OFICIALES) + list(COLUMNAS_HISTORICAS)
+    intacta = _fila(archivo="intacta.jpeg", numero_guia="111111")
+    intacta.update({columna: "valor-historico" for columna in COLUMNAS_HISTORICAS})
+    original_464089 = _fila(
+        archivo="464089.jpeg", numero_guia="464089", chofer="No encontrado"
+    )
+    original_464089.update({columna: "" for columna in COLUMNAS_HISTORICAS})
+    _escribir_csv(masivo, [intacta, original_464089], columnas=columnas_legado)
+
+    actualizado_464089 = _fila(
+        archivo="464089.jpeg", numero_guia="464089", chofer="LEANDRO IOLEDO"
+    )
+    actualizado_464089.update({"peso": "14.947,000", "cantidad": "", "origen": "AZA RENCA"})
+    columnas_vigentes = list(COLUMNAS_OFICIALES) + ["peso", "cantidad", "origen"]
+    _escribir_csv(reprocesado, [actualizado_464089], columnas=columnas_vigentes)
+
+    comando_reemplazar(argparse.Namespace(
+        csv_masivo=masivo, csv_reprocesado=reprocesado
+    ))
+    assert json.loads(capsys.readouterr().out) == {"reemplazados": ["464089.jpeg"]}
+
+    filas = _leer_csv(masivo)
+    assert len(filas) == 2
+    por_archivo = {fila["archivo"]: fila for fila in filas}
+
+    # Cero pérdida: la fila no tocada conserva su traza histórica intacta.
+    assert por_archivo["intacta.jpeg"]["numero_guia_fuente"] == "valor-historico"
+    assert por_archivo["intacta.jpeg"]["peso"] == ""
+
+    # La fila reprocesada publica el esquema vigente completo.
+    assert por_archivo["464089.jpeg"]["chofer"] == "LEANDRO IOLEDO"
+    assert por_archivo["464089.jpeg"]["peso"] == "14.947,000"
+    assert por_archivo["464089.jpeg"]["origen"] == "AZA RENCA"
+    # La traza histórica de la fila reprocesada no existía en el origen del
+    # reprocesamiento; queda vacía, sin inventar un valor.
+    assert por_archivo["464089.jpeg"]["numero_guia_fuente"] == ""
+
+
+def test_reemplazar_sigue_rechazando_esquema_genuinamente_incompatible(tmp_path):
+    """La migración es solo aditiva: una columna desconocida debe seguir
+    rechazándose, igual que en procesamiento_masivo.py."""
+    masivo = tmp_path / "analisis_completo_guias.csv"
+    reprocesado = tmp_path / "reprocesado.csv"
+    fila_con_columna_desconocida = _fila(archivo="464089.jpeg")
+    fila_con_columna_desconocida["columna_inventada"] = "x"
+    _escribir_csv(
+        masivo,
+        [fila_con_columna_desconocida],
+        columnas=list(COLUMNAS_OFICIALES) + ["columna_inventada"],
+    )
+    _escribir_csv(reprocesado, [_fila(archivo="464089.jpeg")])
+
+    with pytest.raises(ValueError, match="esquema incompatible"):
+        comando_reemplazar(argparse.Namespace(
+            csv_masivo=masivo, csv_reprocesado=reprocesado
+        ))
 
 
 def test_documentos_sin_transporte_conserva_todas_las_filas_distintas(tmp_path):

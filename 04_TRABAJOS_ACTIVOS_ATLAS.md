@@ -1,5 +1,44 @@
 # Trabajos activos Atlas
 
+## Hotfix — Incompatibilidad de Esquema en CSV de Reprocesamiento
+
+- Estado: CORREGIDO Y VALIDADO — sin reserva activa.
+- Rama: `feature-cobertura-origen-fase1` (continuación directa de Destino).
+- Causa raíz demostrada: `resumen_procesamiento_desktop.py::comando_reemplazar`
+  mantenía su propia comparación `!=` estricta de encabezados, totalmente
+  independiente de `_validar_csv_existente` (la migración aditiva oficial de
+  `procesamiento_masivo.py`). Cuando los bloques de Origen y Destino nunca
+  tocaron el CSV acumulado real de Desktop (`analisis_completo_guias.csv`,
+  última escritura 2026-07-28, 1.177 filas, sin `peso`/`cantidad`/`origen`),
+  cualquier reprocesamiento nuevo generaba un CSV con el esquema vigente
+  (18 columnas) que nunca podía ser `==` al acumulado (21 columnas, con
+  traza histórica) → `ValueError` antes de iniciar OCR. Reproducido
+  literalmente con el archivo real.
+- Corrección: `comando_reemplazar` ahora reutiliza `_validar_csv_existente`
+  como única fuente de verdad — se eliminó la comparación paralela. Migra
+  ambos CSV (acumulado y reprocesado) de forma atómica y determinista antes
+  de fusionar, y fusiona por unión de columnas (sin perder la traza
+  histórica ni inventar valores en las columnas nuevas). Las validaciones de
+  seguridad (prefijo de 15 columnas, columnas desconocidas o duplicadas)
+  se mantienen intactas porque son las mismas de `_validar_csv_existente`.
+- Validación real: se migró el CSV acumulado real de producción
+  (respaldado antes) — 1.177 filas antes y después, cero diferencias en las
+  21 columnas originales, cero valores inventados en las 3 columnas nuevas.
+  Se reprodujo el flujo completo de Desktop (`comando_existentes` → OCR real
+  → `comando_reemplazar`) con 4 guías reales nunca antes procesadas contra
+  una copia del acumulado sin migrar: el merge ya no falla, resultan
+  1.177 + 4 = 1.181 filas, cero diferencias en las filas históricas.
+- Validación: 1174/1174 Atlas (3 pruebas nuevas), `compileall` y
+  `git diff --check` aprobados.
+- Riesgo residual: no se pudo confirmar visualmente en la interfaz de
+  Desktop porque el ejecutable instalado sigue bloqueado por Smart App
+  Control (mismo bloqueo ya documentado en "Logistics UX 1.0", no
+  relacionado con este fix); la validación se hizo exhaustivamente en la
+  capa Python que Desktop invoca directamente (mismo `carpetaProyectoPython`
+  configurado).
+- Próximo bloque recomendado: resolver la firma/confianza del ejecutable de
+  Desktop para poder validar visualmente en la interfaz.
+
 ## Calidad Documental de Destinos — Fase 1
 
 - Estado: COMPLETADA — sin reserva activa.
