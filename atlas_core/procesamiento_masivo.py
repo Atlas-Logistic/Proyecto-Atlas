@@ -109,6 +109,29 @@ def _distancia_token(a: str, b: str) -> int:
     return anterior[-1]
 
 
+def _tokens_encabezado_origen(lectura: str) -> list[str]:
+    """Recorta los tokens al encabezado del emisor, antes del directorio de sucursales.
+
+    El encabezado de una guía suele continuar con un listado fijo de
+    sucursales (``Sucursal <ciudad>...``) impreso como información de
+    contacto, no como planta de despacho. Si esas ciudades también existen
+    como plantas confirmadas en el catálogo, comparar contra el texto
+    completo genera coincidencias múltiples y anula el voto. Se conserva
+    únicamente el tramo anterior a la primera mención tolerante a ruido OCR
+    de "SUCURSAL"; sin esa mención, el comportamiento es idéntico al actual.
+    """
+    tokens_completos = re.findall(r"[A-Z0-9]+", _normalizar(lectura))
+    limite = next(
+        (
+            indice
+            for indice, token in enumerate(tokens_completos)
+            if _distancia_token(token, "SUCURSAL") <= 1
+        ),
+        len(tokens_completos),
+    )
+    return tokens_completos[:limite]
+
+
 def _resolver_origen_documental(
     lecturas: Iterable[str], catalogo_plantas: Mapping[str, object]
 ) -> str | None:
@@ -118,7 +141,7 @@ def _resolver_origen_documental(
         return None
     votos: dict[str, int] = {}
     for lectura in lecturas:
-        tokens = re.findall(r"[A-Z0-9]+", _normalizar(lectura))
+        tokens = _tokens_encabezado_origen(lectura)
         coincidencias = []
         for planta in plantas:
             if not isinstance(planta, Mapping):
@@ -674,13 +697,30 @@ def procesar_archivo(
         carpeta_catalogos_activa / "plantas.json"
     )
     if isinstance(catalogo_plantas.get("plantas"), list):
-        try:
-            lecturas_origen = leer_encabezado_origen_focal(ruta, lector=lector_ocr)
-            origen = _resolver_origen_documental(
-                lecturas_origen, catalogo_plantas
-            )
-        except Exception as exc:
-            logger.warning("Relectura focal de origen omitida: %s: %s", type(exc).__name__, exc)
+        # Se reintenta con giros de 90/180/270 grados únicamente cuando la
+        # lectura sin girar no confirma origen: compensa fotografías cuya
+        # orientación real no queda reflejada en su metadato EXIF, sin
+        # imponer costo adicional a los documentos que ya resuelven a 0°.
+        for grados in (0, 90, 180, 270):
+            try:
+                lecturas_origen = leer_encabezado_origen_focal(
+                    ruta, lector=lector_ocr, grados_adicionales=grados
+                )
+                origen = _resolver_origen_documental(
+                    lecturas_origen, catalogo_plantas
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Relectura focal de origen omitida (%s grados): %s: %s",
+                    grados, type(exc).__name__, exc,
+                )
+                continue
+            if origen:
+                if grados:
+                    logger.info(
+                        "origen recuperado tras girar la imagen %s grados", grados
+                    )
+                break
     nombre_chofer_ocr = nombre_chofer_original
     rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
     rut_cliente = str(datos.get("RUT del cliente", "No encontrado")).strip()

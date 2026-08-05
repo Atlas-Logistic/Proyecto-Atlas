@@ -416,3 +416,29 @@ def test_transporte_focal_rechaza_recorte_vacio(tmp_path):
 
     with pytest.raises(ValueError, match="dimensiones válidas"):
         ocr._leer_transporte_focal(ruta, (10, 10, 10, 20), lector=Mock())
+
+
+def test_encabezado_origen_focal_gira_antes_de_recortar(tmp_path):
+    """Reproduce el caso real 464108 (foto apaisada sin EXIF útil): girar la
+    imagen antes de recortar cambia el encuadre efectivo del encabezado."""
+    ruta = tmp_path / "guia.png"
+    Image.new("L", (200, 100), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    ocr.leer_encabezado_origen_focal(ruta, lector=lector, grados_adicionales=0)
+    forma_sin_girar = lector.readtext.call_args.args[0].shape
+
+    lector.reset_mock()
+    ocr.leer_encabezado_origen_focal(ruta, lector=lector, grados_adicionales=90)
+    forma_girada = lector.readtext.call_args.args[0].shape
+
+    assert forma_sin_girar != forma_girada
+
+
+def test_encabezado_origen_focal_rechaza_grados_invalidos(tmp_path):
+    ruta = tmp_path / "guia.png"
+    Image.new("L", (100, 100), color="white").save(ruta)
+
+    with pytest.raises(ValueError, match="grados_adicionales"):
+        ocr.leer_encabezado_origen_focal(ruta, lector=Mock(), grados_adicionales=45)

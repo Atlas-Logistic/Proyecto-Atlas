@@ -238,13 +238,24 @@ def leer_bloques_imagen(
 
 
 def leer_encabezado_origen_focal(
-    ruta_imagen: Union[str, Path], lector: Any = None
+    ruta_imagen: Union[str, Path], lector: Any = None, *, grados_adicionales: int = 0
 ) -> List[str]:
-    """Relee el encabezado del emisor sin interpretar ni completar su contenido."""
+    """Relee el encabezado del emisor sin interpretar ni completar su contenido.
+
+    ``grados_adicionales`` gira la imagen (sentido antihorario, vía
+    ``Image.rotate``) antes de recortar el encabezado. Existe exclusivamente
+    para compensar fotografías cuya orientación real no queda reflejada en su
+    metadato EXIF; no reinterpreta ni corrige el contenido leído, solo cambia
+    el encuadre desde el que se recorta.
+    """
     ruta = Path(ruta_imagen)
+    if grados_adicionales % 360 not in (0, 90, 180, 270):
+        raise ValueError("grados_adicionales debe ser 0, 90, 180 o 270")
     try:
         with Image.open(ruta) as imagen:
             gris = ImageOps.exif_transpose(imagen).convert("L")
+            if grados_adicionales % 360:
+                gris = gris.rotate(grados_adicionales, expand=True)
             ancho, alto = gris.size
             recorte = gris.crop((
                 int(ancho * 0.07), int(alto * 0.10),

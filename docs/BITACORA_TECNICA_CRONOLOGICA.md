@@ -427,3 +427,68 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   `OpenRouteService`. 463528 conserva `PENDIENTE` por origen
   no informado, no por destino.
 - Regresión: 1160/1160 Atlas y 49/49 Desktop; `compileall` y diff-check aprobados.
+
+### 2026-08-05 — Cobertura Operacional de Origen, Fase 1
+
+- Decisión importante: no asumir la causa de los 75/127 documentos sin origen
+  del Benchmark 2.0; reproducir el algoritmo real (`leer_encabezado_origen_focal`
+  + `_resolver_origen_documental`) contra 9 guías reales del repositorio y
+  contra el catálogo privado de plantas realmente vigente en este equipo antes
+  de tocar código.
+- Hallazgo 1 (dominante y activo hoy): el catálogo privado real ya confirma
+  `AZA RENCA` y `AZA COLINA` a la vez. El resolver comparaba contra el bloque
+  OCR completo del encabezado, que siempre incluye el directorio fijo de
+  sucursales impreso en toda guía AZA (Antofagasta, Temuco, Talcahuano,
+  Colina). Cuando ese directorio menciona "Colina", coincide también con la
+  planta confirmada `AZA COLINA` y la ambigüedad anula el voto — reproducido
+  ejecutando el resolver real contra el catálogo real: 464089 y 462429 (guías
+  reales, evidencia legible de `AZA RENCA`) pasaban de `AZA RENCA` a `None`
+  únicamente por agregar `AZA COLINA` como planta confirmada, sin tocar OCR
+  ni umbrales.
+- Hallazgo 2 (independiente): el recorte del encabezado usa porcentajes fijos
+  de ancho/alto que asumen orientación vertical. La guía real 464108
+  (1280×960, apaisada, sin EXIF útil) cae con ese recorte sobre la tabla de
+  cantidades y nunca ve el encabezado; confirmado visualmente y por OCR real,
+  con probabilidad cero de coincidencia sin importar el catálogo.
+- Alternativas descartadas: releer con `leer_bloques_imagen` de página
+  completa (probado contra 4 guías reales; en 3 de 4 el detector ni siquiera
+  segmentó "CASA MATRIZ PLANTA RENCA" como texto a resolución completa — el
+  recorte dedicado con realce de contraste es necesario, no el problema);
+  bajar el umbral de distancia OCR; crear un alias o regla específica para
+  AZA; ampliar OCR a campos ausentes.
+- Corrección: `_resolver_origen_documental` corta los tokens de cada lectura
+  en la primera mención tolerante a ruido OCR (distancia≤1) de "SUCURSAL"
+  antes de comparar contra el catálogo; sin esa palabra el comportamiento es
+  idéntico al previo. `leer_encabezado_origen_focal` admite un giro opcional
+  y `procesar_archivo` reintenta 90/180/270 grados únicamente cuando la
+  lectura a 0° no confirma origen, sin costo adicional en el caso típico.
+- Validación real (catálogos privados reales, 9 guías reales, sin datos
+  sintéticos): cobertura de origen en la muestra 4/9→7/9. 464089 y 462429
+  recuperados por el corte de sucursales; 464108 recuperado por el reintento
+  de rotación; 464106, 464135, 464110 y 384674 sin cambios porque ya
+  resolvían; 464107 (desenfoque severo, texto irreproducible en las 3
+  variantes) y 464109 (EasyOCR omite la línea del encabezado en las 3
+  variantes pese a ser legible a simple vista) permanecen correctamente en
+  `No encontrado`: ninguna corrección conservadora puede recuperarlos sin
+  inventar evidencia.
+- Impacto en rutas verificado con datos reales: ninguno de los tres
+  documentos recuperados tiene destino `CONFIRMADO`/`ACTIVO` en el catálogo
+  privado vigente (solo 3 de 47 destinos lo están). `calcular_rutas_desktop.
+  calcular_fila` confirma que el motivo de bloqueo cambia de "origen no
+  informado" a "destino no confirmado en catálogo" / "destino no informado"
+  — el origen deja de ser el bloqueador, pero el viaje sigue `PENDIENTE`.
+  Con una consulta real a OpenRouteService confirmé el mecanismo completo:
+  sin origen y con VISTA CLARA 2351 confirmado → `PENDIENTE` "origen no
+  informado"; con `AZA RENCA` presente → `CALCULADO`, 16,7 km, 25 min (mismo
+  resultado ya validado para 464106). No se declara un número de viajes ni de
+  kilómetros nuevos en Desktop: ningún documento disponible combina origen
+  recién recuperado con destino ya confirmado, y no se inventa esa cifra.
+- Regresión: 1165/1165 Atlas (5 pruebas nuevas); `compileall` y
+  `git diff --check` aprobados.
+- Integridad: sin cambios en OCR base, Sistema Multicampo, Política de
+  Activación, Orquestador, resolvers de Cliente/Chofer/Destino/Material,
+  OpenRouteService ni Desktop.
+- Acuerdo: el siguiente bloque debe abordar la calidad documental de Destino
+  sobre el universo real para que los orígenes ya recuperados también puedan
+  calcular ruta; no se autoriza tocar resolvers ni catálogos de destino en
+  este bloque.

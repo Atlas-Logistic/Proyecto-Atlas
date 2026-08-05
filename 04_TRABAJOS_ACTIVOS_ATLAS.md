@@ -1,5 +1,58 @@
 # Trabajos activos Atlas
 
+## Cobertura Operacional de Origen — Fase 1
+
+- Estado: COMPLETADA — sin reserva activa.
+- Rama: `feature-cobertura-origen-fase1`.
+- Causa raíz demostrada con OCR real (9 guías reales, no simuladas): el
+  catálogo privado vigente de plantas ya confirma `AZA RENCA` y `AZA COLINA`
+  a la vez; `_resolver_origen_documental` comparaba contra el bloque OCR
+  completo del encabezado, que siempre incluye el directorio fijo de
+  sucursales (Antofagasta, Temuco, Talcahuano, Colina). Esa doble
+  coincidencia anulaba el voto para documentos que en realidad sí traían
+  evidencia legible de `AZA RENCA` (464089 y 462429 reales). Una segunda
+  causa independiente: el recorte del encabezado usa porcentajes fijos que
+  asumen orientación vertical; una foto apaisada sin EXIF útil (464108 real)
+  cae sobre la tabla de cantidades y nunca llega a leer el encabezado.
+- Corrección: (1) `_resolver_origen_documental` corta los tokens de cada
+  lectura en la primera mención tolerante a ruido OCR de "SUCURSAL", antes
+  de comparar contra el catálogo — sin ese texto, el comportamiento es
+  idéntico al previo; (2) `leer_encabezado_origen_focal` acepta un giro
+  opcional y `procesar_archivo` reintenta con 90/180/270 grados solo cuando
+  la lectura a 0° no confirma origen, sin costo adicional en el caso típico.
+  No se modificó el consenso de 2 lecturas, ningún umbral, ni Multicampo,
+  Política, Orquestador, ORS, Desktop u OCR base.
+- Validación real (reprocesamiento completo, catálogos privados reales, 9
+  guías reales): cobertura de origen en la muestra 4/9→7/9. Recuperados
+  464089 y 462429 (ambigüedad de catálogo) y 464108 (rotación); sin cambios
+  en 464106, 464135, 464110 y 384674 (ya resolvían); 464107 y 464109
+  permanecen correctamente en `No encontrado` por desenfoque severo y por
+  una omisión de detección OCR de esa línea específica, ninguna corregible
+  sin relajar el comportamiento conservador.
+- Impacto en rutas: ninguno de los tres documentos recuperados tiene todavía
+  un destino `CONFIRMADO`/`ACTIVO` en el catálogo privado vigente (solo 3 de
+  47 destinos lo están hoy), por lo que sus viajes siguen `PENDIENTE`; el
+  motivo verificado con `calcular_rutas_desktop.calcular_fila` cambia de
+  "origen no informado" a "destino no confirmado en catálogo" / "destino no
+  informado" — el origen deja de ser el bloqueador. Con una consulta real a
+  OpenRouteService confirmé el mecanismo completo: origen ausente con VISTA
+  CLARA 2351 confirmado → `PENDIENTE`; con `AZA RENCA` presente → `CALCULADO`,
+  16,7 km, 25 min (mismo resultado ya validado para 464106). No se declara un
+  número de viajes ni de kilómetros nuevos en Desktop porque ningún documento
+  físicamente disponible combina origen recién recuperado con destino ya
+  confirmado; ese acoplamiento depende de la calidad documental de Destino,
+  un bloque aparte fuera del alcance autorizado en esta sesión.
+- Validación: 1165/1165 Atlas (5 pruebas nuevas), `compileall` y
+  `git diff --check` aprobados.
+- Riesgo residual: 464107 (desenfoque) y 464109 (omisión de detección OCR de
+  la línea del encabezado) permanecen sin origen; ningún fix conservador
+  puede recuperarlos sin inventar evidencia. El reintento de rotación agrega
+  hasta 3 lecturas focales adicionales, mas solo en documentos que ya
+  fallaban a 0°.
+- Próximo bloque recomendado: Calidad Documental de Destino sobre el
+  universo real, para que los orígenes ya recuperados puedan además calcular
+  ruta.
+
 ## Atlas Benchmark 2.0 — Validación Operacional Masiva del Motor Actual
 
 - Estado: COMPLETADO — sin reserva activa y sin cambios funcionales.

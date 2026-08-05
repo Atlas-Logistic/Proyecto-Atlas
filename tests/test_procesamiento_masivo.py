@@ -64,6 +64,55 @@ def test_origen_documental_abstiene_sin_dos_lecturas_coincidentes():
     ) is None
 
 
+def test_origen_documental_ignora_sucursales_confirmadas_como_plantas():
+    """Reproduce con datos reales el catálogo privado vigente (AZA RENCA +
+    AZA COLINA, ambas CONFIRMADA/ACTIVA) y el encabezado real de una guía:
+    sin el corte en "SUCURSAL", el token COLINA impreso en el directorio de
+    sucursales produce una segunda coincidencia y anula el voto para RENCA.
+    """
+    catalogo = {
+        "plantas": [
+            {
+                "nombre": "AZA RENCA",
+                "estado_calidad": "CONFIRMADA",
+                "estado_vigencia": "ACTIVA",
+            },
+            {
+                "nombre": "AZA COLINA",
+                "estado_calidad": "CONFIRMADA",
+                "estado_vigencia": "ACTIVA",
+            },
+        ]
+    }
+    lectura_real = (
+        "ACEROS AZA S A AZA GIRO: FUNDICION LAMINACION EXPORTACION CASA "
+        "MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE COD POSTAL "
+        "746 45 22 FONO (56)2267 79100 www aza cl Sucursal Antofagasta "
+        "Calle Hector Gomez Cobo 21.000 sector Nudo Uribe Cuidad Antofagasta "
+        "Sucursal Temuco Calle Milano 03625 Barrio Industrial Ciudad Temuco "
+        "Fono 45 2252 103 Sucursal Talcahuano Jaime Repullo 1014 Ciudad "
+        "Talcahuano Sucursal Colina Panamericana Norte KM 18 Colina Santiago "
+        "Fono (56) 226779501"
+    )
+
+    assert _resolver_origen_documental([lectura_real] * 3, catalogo) == "AZA RENCA"
+
+
+def test_origen_documental_sin_encabezado_de_sucursales_no_cambia():
+    """Sin la palabra "SUCURSAL" el comportamiento es idéntico al previo."""
+    catalogo = {
+        "plantas": [{
+            "nombre": "AZA RENCA",
+            "estado_calidad": "CONFIRMADA",
+            "estado_vigencia": "ACTIVA",
+        }]
+    }
+
+    assert _resolver_origen_documental(
+        ["ACEROS AZA CASA MATRIZ PLANTA RENCA"] * 2, catalogo
+    ) == "AZA RENCA"
+
+
 @pytest.mark.parametrize(
     ("rut", "esperado"),
     [
@@ -340,6 +389,53 @@ def test_procesar_archivo_abstiene_con_evidencia_focal_baja_confianza(tmp_path, 
 
     assert resultado["numero_transporte"] == "No encontrado"
     assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_recupera_origen_girando_la_imagen(tmp_path, monkeypatch):
+    """Reproduce el caso real 464108: la foto no confirma origen a 0 grados
+    pero sí lo hace tras girarla, y el reintento se detiene en el primer
+    giro exitoso sin agotar 180/270."""
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "PRODALAM SA",
+        "obra destino": "DESTINO LINEAL",
+        "chofer": "MARIO SOTO",
+    }
+    catalogo_plantas = {
+        "plantas": [{
+            "nombre": "AZA RENCA",
+            "estado_calidad": "CONFIRMADA",
+            "estado_vigencia": "ACTIVA",
+        }]
+    }
+
+    def cargar_catalogo(ruta_catalogo, *args, **kwargs):
+        if Path(ruta_catalogo).name == "plantas.json":
+            return catalogo_plantas
+        return {}
+
+    def origen_focal(ruta_imagen, lector=None, grados_adicionales=0):
+        if grados_adicionales == 90:
+            return ["ACEROS AZA CASA MATRIZ PLANTA RENCA"] * 2
+        return ["texto irreconocible"] * 3
+
+    origen_focal_mock = Mock(side_effect=origen_focal)
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(procesamiento_masivo, "cargar_catalogo_json", Mock(side_effect=cargar_catalogo))
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+    monkeypatch.setattr(procesamiento_masivo, "leer_encabezado_origen_focal", origen_focal_mock)
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["origen"] == "AZA RENCA"
+    grados_llamados = [
+        llamada.kwargs["grados_adicionales"] for llamada in origen_focal_mock.call_args_list
+    ]
+    assert grados_llamados == [0, 90]
 
 
 def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch):
