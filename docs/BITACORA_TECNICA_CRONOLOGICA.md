@@ -920,3 +920,97 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
 - Acuerdo: por instrucción explícita, el siguiente bloque es exclusivamente
   la recuperación del panel GPS / "Revisión de destinos" de Atlas Desktop;
   Chofer y Material quedan pendientes de una autorización aparte.
+
+### 2026-08-06 — Integridad de Publicación Operacional (diagnóstico) y Recuperación Geométrica Conservadora — Fase 1 (corrección)
+
+- Decisión importante: antes de auditar visualmente Atlas más allá de lo ya
+  hecho, verificar con evidencia de ejecución real si existía contaminación
+  entre campos específicamente en el paso Extracción → Resolución →
+  Publicación, usando varias guías reales donde ya se había observado una
+  diferencia entre el valor extraído y el valor publicado (caso guía real
+  `guia6.jpeg`: Cliente `"No encontrado"` en la extracción lineal, pero
+  `"EMISION"` en el diccionario final).
+- Diagnóstico (sin cambios de código): se instrumentó, con envoltorios sobre
+  las funciones reales (sin mocks, sin simular OCR), la ejecución completa de
+  `procesar_archivo` sobre `guia6.jpeg` con los catálogos privados reales.
+  Traza real función por función: `extraer_datos` entrega
+  `cliente="No encontrado"`; `_extraer_asociaciones_geometricas` (recuperación
+  geométrica de `procesamiento_masivo.procesar_archivo`, bloque
+  `campos_ausentes`) devuelve `{"cliente": "EMISION", "obra destino": "CONSI
+  MRGA KARGA SPA"}`; ese valor se asigna directamente a `datos["cliente"]` y
+  llega así, ya contaminado, a `resolver_cliente_rut`, que recibe
+  `nombre="EMISION"` junto al RUT real observado `93772000-9` (PRODALAM SA),
+  detecta `CONTRADICCION` y marca `REQUIERE_REVISION` — comportamiento
+  correcto del Resolver dado lo que recibió, pero sin ningún mecanismo para
+  limpiar el dato de entrada; `_integrar_resolucion_multicampo` cae de vuelta
+  al mismo valor `"EMISION"` por no existir confirmación, y ese valor llega
+  intacto al diccionario final (`indicador_revision="REVISAR"`).
+- Causa raíz aislada con evidencia geométrica real: se reprodujo externamente
+  (sin tocar el archivo) la lista completa de candidatos y puntajes que
+  evalúa `seleccionar("cliente")` para la etiqueta `SEÑOR(ES)` de esa guía:
+  `EMISION` puntaje `0,1406` (texto de un encabezado documental ajeno,
+  geométricamente más cercano por la disposición de esa página), `VENTA`
+  `0,3675`, `PRODALNY` `0,3720` (lectura OCR degradada del nombre real,
+  PRODALAM SA), `RENCA` `0,5550`. La función nunca contempla la posibilidad
+  de que el candidato más cercano sea, simplemente, un token ajeno: solo
+  compara el ganador contra empates cercanos (margen 0,06), y `0,1406` vs
+  `0,3720` no es un empate — así que "EMISION" ganaba limpiamente sin ninguna
+  verificación de que perteneciera realmente al campo.
+- Alternativas descartadas: agregar "EMISION" (o una lista de palabras de
+  encabezado) a la tabla de exclusión existente — habría sido un parche
+  reactivo, no reutilizable para cualquier futuro token de encabezado ni
+  para ningún otro campo; bajar el umbral de puntaje de aceptación (1,25) o
+  el margen de ambigüedad (0,06) — ambos ya existían y la instrucción
+  explícita fue no bajar umbrales; usar el número o nombre de la guía como
+  condición — prohibido explícitamente y contrario al patrón ya establecido
+  en el proyecto.
+- Corrección implementada, acotada exclusivamente a
+  `_extraer_asociaciones_geometricas` (`atlas_core/extractor.py`): nueva
+  función `_contar_grupos_geometricos_contiguos`, que agrupa por
+  unión-búsqueda los candidatos de una etiqueta usando la misma regla de
+  adyacencia ("misma fila" + brecha horizontal de 0 a 28 px) que la función
+  ya usaba para componer nombres partidos en varias cajas OCR (evita que un
+  nombre real partido en 2 cajas se cuente como 2 candidatos rivales). Si el
+  resultado es 3 o más grupos independientes dentro del margen geométrico
+  válido de una etiqueta, `seleccionar()` se abstiene para esa etiqueta en
+  vez de tomar el candidato de mejor puntaje: una vecindad con 3 o más
+  señales visuales distintas es, por definición, una vecindad donde la
+  cercanía sola no alcanza para demostrar pertenencia. No se modificó
+  `puntuar()`, `nominal()`, `es_etiqueta()` ni ningún umbral numérico
+  existente; el criterio es general (no depende de palabras, campos ni
+  guías) y se aplica igual a Cliente y a Destino, los dos campos que usan
+  esta función.
+- Validación real end-to-end (mismos catálogos privados reales,
+  reprocesamiento completo, antes → después):
+  - `guia6.jpeg`: Cliente `"EMISION"` → `"No encontrado"` (abstención
+    correcta; el candidato real "PRODALNY" tampoco se publica, porque la
+    vecindad completa —4 grupos— se considera saturada, no solo el ganador
+    anterior; sigue en `REVISAR`, coherente con el contrato conservador).
+  - `guia4.jpeg` (regresión, caso de recuperación geométrica legítima ya en
+    producción): Cliente `"No encontrado"` → `"EASY RETAIL SA"` sin cambios.
+  - `guia8.jpeg` (regresión, caso ya resuelto sin necesidad de recuperación
+    geométrica): Cliente `"DSI UNDERGROUND CHILE SPA"` sin cambios en
+    ninguna etapa.
+  - Cero regresiones en los dos casos reales de recuperación geométrica
+    correcta disponibles para prueba.
+- Regresión: 1205/1205 Atlas (6 pruebas nuevas: 3 unitarias directas sobre
+  `_contar_grupos_geometricos_contiguos`, 1 de vecindad saturada de
+  propósito general con 3 candidatos dispersos, 1 que confirma que un
+  nombre partido en 2 cajas sigue resolviendo pese a un tercer candidato
+  lejano, y 1 que reproduce directamente —con coordenadas modeladas sobre
+  la guía real— el caso diagnosticado); `compileall` y `git diff --check`
+  aprobados.
+- Integridad: sin cambios en EasyOCR, `resolver_cliente_rut`,
+  `resolver_destino_ubicacion`, Política de Activación, `procesamiento_masivo`
+  (salvo la llamada ya existente a `_extraer_asociaciones_geometricas`, sin
+  modificar su firma ni su punto de invocación), CSV, Desktop ni ningún
+  catálogo; ningún umbral numérico existente cambió de valor.
+- Riesgo residual: un nombre real partido en tres o más cajas OCR
+  mutuamente no contiguas activaría la misma abstención conservadora y
+  quedaría en revisión manual en vez de publicarse; no se observó ese
+  patrón en los casos reales disponibles, pero es una limitación conocida y
+  explícita, no una regresión silenciosa.
+- Acuerdo: el siguiente bloque, si se autoriza, debe extender el mismo
+  diagnóstico de integridad de publicación a Chofer, que usa un mecanismo de
+  recuperación geométrica distinto (`_extraer_chofer_geometrico`, con su
+  propia tabla de exclusión) no auditado en este bloque.

@@ -1,5 +1,59 @@
 # Trabajos activos Atlas
 
+## Recuperación Geométrica Conservadora — Fase 1
+
+- Estado: COMPLETADA — sin reserva activa.
+- Rama: `feature-cobertura-origen-fase1` (continuación directa del
+  diagnóstico de Integridad de Publicación Operacional).
+- Causa raíz demostrada con evidencia de ejecución real, función por función
+  (guía real `guia6.jpeg`): `_extraer_asociaciones_geometricas` (Extracción)
+  seleccionaba el candidato nominal geométricamente más cercano a la
+  etiqueta `SEÑOR(ES)` sin verificar que perteneciera realmente al campo. En
+  esa guía, un token de encabezado ajeno ("EMISION") quedó más cerca en
+  píxeles que el nombre real del cliente ("PRODALNY", lectura OCR degradada
+  de PRODALAM SA) y ganó por puntaje (0,1406 contra 0,3720); el bloque
+  `campos_ausentes` de `procesamiento_masivo.procesar_archivo` asignó
+  `datos["cliente"] = "EMISION"` directamente. El Resolver
+  (`resolver_cliente_rut`) recibió ese valor ya contaminado, detectó
+  `CONTRADICCION` contra el RUT real observado (`93772000-9`, PRODALAM SA) y
+  marcó `REQUIERE_REVISION` — correcto dado lo que recibió, pero sin
+  mecanismo para limpiar el dato de entrada; `_integrar_resolucion_multicampo`
+  cayó de vuelta al mismo valor contaminado por no existir confirmación, y
+  ese valor llegó intacto al diccionario final y al CSV.
+- Corrección (alcance estrictamente acotado a `_extraer_asociaciones_geometricas`,
+  sin tocar OCR, Resolver, Política, Publicación, CSV, Desktop ni catálogos):
+  nueva función `_contar_grupos_geometricos_contiguos` (unión-búsqueda sobre
+  la misma regla de adyacencia "misma fila, brecha ≤28 px" ya usada para
+  componer nombres partidos en varias cajas OCR) cuenta cuántos grupos de
+  candidatos independientes caen dentro del margen geométrico válido de una
+  etiqueta. Tres o más grupos distintos indican una vecindad visualmente
+  saturada donde la cercanía sola no puede demostrar pertenencia al campo;
+  en ese caso `seleccionar()` se abstiene para esa etiqueta en vez de tomar
+  el candidato de mejor puntaje. No se bajó ningún umbral existente, no se
+  agregaron alias ni excepciones por número de guía; el criterio es general
+  y aplica igual a Cliente y a Destino, los dos campos que hoy usan esta
+  función.
+- Validación real (reprocesamiento completo, mismos catálogos privados
+  reales, antes → después): `guia6.jpeg` Cliente `"EMISION"` →
+  `"No encontrado"` (abstención correcta); `guia4.jpeg` conserva intacta la
+  recuperación geométrica legítima `"EASY RETAIL SA"`; `guia8.jpeg` conserva
+  `"DSI UNDERGROUND CHILE SPA"` sin cambios. Cero regresiones en los dos
+  casos reales de recuperación geométrica ya correcta.
+- Validación: 1205/1205 Atlas (6 pruebas nuevas: 3 unitarias sobre el nuevo
+  agrupador geométrico, 1 de vecindad saturada de propósito general, 1 de
+  nombre partido que no debe abstenerse pese a un tercer candidato lejano, 1
+  de reproducción directa del caso real diagnosticado), `compileall` y
+  `git diff --check` aprobados.
+- Riesgo residual: un nombre de cliente/destino legítimo partido en tres o
+  más cajas OCR mutuamente no contiguas (no observado en los casos reales
+  disponibles, que son de una o dos cajas) activaría esta misma abstención
+  conservadora; se prefiere abstenerse y marcar revisión antes que publicar
+  un valor sin poder demostrar que pertenece al campo.
+- Próximo bloque recomendado: extender el mismo diagnóstico de integridad de
+  publicación (Extracción → Resolución → Publicación) a Chofer, que usa un
+  mecanismo de recuperación geométrica distinto (`_extraer_chofer_geometrico`),
+  fuera del alcance autorizado en este bloque.
+
 ## Resolución Inteligente de Identidades Operacionales — Fase 1 (Cliente ↔ Destino)
 
 - Estado: COMPLETADA — sin reserva activa.

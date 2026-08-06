@@ -31,6 +31,7 @@ from atlas_core.extractor import (
     _obra_destino_lineal_contaminado,
     _clasificar_evidencia_transporte,
     _consensuar_transporte_focal,
+    _contar_grupos_geometricos_contiguos,
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
     _extraer_cantidad_geometrica,
@@ -334,6 +335,80 @@ def test_geometria_cliente_y_destino_simultaneos_no_se_mezclan():
         "cliente": "EMPRESA ANDINA",
         "obra destino": "PLANTA COSTA",
     }
+
+
+def test_grupos_geometricos_nombre_partido_en_cajas_contiguas_es_un_solo_grupo():
+    contiguos = [
+        {"cx": 0, "cy": 20, "h": 18, "x1": 150, "x2": 245},
+        {"cx": 0, "cy": 20, "h": 18, "x1": 253, "x2": 293},
+        {"cx": 0, "cy": 20, "h": 18, "x1": 301, "x2": 356},
+    ]
+
+    assert _contar_grupos_geometricos_contiguos(contiguos) == 1
+
+
+def test_grupos_geometricos_candidatos_dispersos_cuentan_por_separado():
+    dispersos = [
+        {"cx": 0, "cy": 20, "h": 18, "x1": 105, "x2": 185},
+        {"cx": 0, "cy": 20, "h": 18, "x1": 300, "x2": 396},
+        {"cx": 0, "cy": 90, "h": 18, "x1": 20, "x2": 130},
+    ]
+
+    assert _contar_grupos_geometricos_contiguos(dispersos) == 3
+
+
+def test_grupos_geometricos_lista_vacia_es_cero_grupos():
+    assert _contar_grupos_geometricos_contiguos([]) == 0
+
+
+def test_geometria_abstiene_con_tres_candidatos_dispersos():
+    """Vecindad saturada: tres candidatos nominales independientes (no
+    fragmentos de un mismo nombre) caen dentro del margen geométrico válido
+    de una sola etiqueta. Sin este criterio, "ENCABEZADO" ganaría por ser el
+    más cercano aunque no tenga relación alguna con el campo — exactamente el
+    patrón reproducido con la guía real del diagnóstico de Integridad de
+    Publicación Operacional (Cliente "No encontrado" -> "EMISION")."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("ENCABEZADO", 105, 20),
+        _bloque("EMPRESA REAL", 300, 20),
+        _bloque("TERCERO AJENO", 20, 90, 110),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques) == {}
+
+
+def test_geometria_no_abstiene_por_nombre_partido_en_dos_cajas_pese_a_tercero_lejano():
+    """Dos cajas contiguas (un solo nombre partido) más un tercer candidato
+    genuinamente disperso siguen resolviendo con normalidad: el nombre
+    partido cuenta como un solo grupo, así que solo hay dos grupos en total,
+    no tres."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("ACEROS", 150, 20, 55),
+        _bloque("NUBLE", 212, 20, 48),
+        _bloque("TERCERO LEJANO", 20, 90, 120),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ACEROS NUBLE"
+
+
+def test_geometria_caso_real_cliente_no_confirma_texto_de_encabezado_ajeno():
+    """Reproduce, con coordenadas modeladas sobre la guía real diagnosticada,
+    el layout donde "EMISION" (parte de un encabezado ajeno) quedaba más
+    cerca de "SEÑOR(ES)" que el nombre real del cliente, y un tercer y cuarto
+    token dispersos completaban la vecindad saturada. Antes de esta
+    corrección, `_extraer_asociaciones_geometricas` devolvía
+    {"cliente": "EMISION"}; ahora se abstiene."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 91, 494, 40),
+        _bloque("EMISION", 141, 485, 56),
+        _bloque("VENTA", 263, 521, 40),
+        _bloque("PRODALNY", 252, 490, 64),
+        _bloque("RENCA", 264, 551, 40),
+    ]
+
+    assert "cliente" not in _extraer_asociaciones_geometricas(bloques)
 
 
 def _transporte(candidato, etiqueta="NRO. TRANSPORTE"):

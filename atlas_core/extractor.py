@@ -220,6 +220,47 @@ def _reconstruir_campos_documentales(bloques: List[Any]) -> Dict[str, Dict[str, 
     )
 
 
+def _contar_grupos_geometricos_contiguos(candidatos: List[Dict[str, Any]]) -> int:
+    """Cuenta grupos de candidatos contiguos (misma fila, separación breve).
+
+    Dos cajas OCR que forman un único nombre partido por el OCR (por ejemplo
+    "ACEROS" + "NUBLE") deben contarse como un solo grupo, no como dos
+    candidatos rivales; dos cajas dispersas y sin relación entre sí deben
+    contarse cada una por separado. Se usa exactamente la misma regla de
+    adyacencia ("misma fila" + brecha horizontal de 0 a 28 px) que ya emplea
+    `seleccionar()` para componer nombres partidos, agrupada aquí mediante
+    unión-búsqueda para que la transitividad (A pegado a B, B pegado a C)
+    también cuente como un solo grupo. Es de propósito general: no depende
+    del campo, de ninguna palabra específica ni de ninguna guía en particular.
+    """
+    total = len(candidatos)
+    padre = list(range(total))
+
+    def raiz(indice: int) -> int:
+        while padre[indice] != indice:
+            padre[indice] = padre[padre[indice]]
+            indice = padre[indice]
+        return indice
+
+    def unir(a: int, b: int) -> None:
+        raiz_a, raiz_b = raiz(a), raiz(b)
+        if raiz_a != raiz_b:
+            padre[raiz_a] = raiz_b
+
+    for i in range(total):
+        for j in range(i + 1, total):
+            primero, segundo = candidatos[i], candidatos[j]
+            misma_fila = abs(primero["cy"] - segundo["cy"]) <= max(primero["h"], segundo["h"])
+            brecha = max(
+                primero["x1"] - segundo["x2"],
+                segundo["x1"] - primero["x2"],
+            )
+            if misma_fila and 0 <= brecha <= 28:
+                unir(i, j)
+
+    return len({raiz(indice) for indice in range(total)})
+
+
 def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
     items = _normalizar_bloques_geometricos(bloques)
@@ -293,6 +334,22 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                 if otras and min(otras) + 8 < distancia_objetivo:
                     continue
                 candidatos.append((puntuacion, item))
+
+            # Vecindad visualmente saturada: tres o más candidatos nominales
+            # independientes (no fragmentos del mismo nombre partido en varias
+            # cajas OCR) caen dentro del margen geométrico válido de esta
+            # etiqueta. En ese escenario la cercanía por sí sola ya no puede
+            # demostrar cuál candidato pertenece realmente al campo — puede
+            # ganar por puntaje un token ajeno (p. ej. un encabezado como
+            # "EMISION") que simplemente cayó más cerca por la disposición de
+            # esa página, no porque sea el valor del campo. Se abstiene en vez
+            # de adivinar con el mejor puntaje. Reproducido con evidencia real
+            # (guía real, caso Cliente "EMISION"): ver diagnóstico de
+            # Integridad de Publicación Operacional.
+            if _contar_grupos_geometricos_contiguos(
+                [item for _, item in candidatos]
+            ) >= 3:
+                continue
 
             for puntuacion, item in candidatos:
                 decisiones.append((puntuacion, item["texto"].upper()))
