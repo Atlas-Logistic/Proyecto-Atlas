@@ -1014,3 +1014,128 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   diagnóstico de integridad de publicación a Chofer, que usa un mecanismo de
   recuperación geométrica distinto (`_extraer_chofer_geometrico`, con su
   propia tabla de exclusión) no auditado en este bloque.
+
+### 2026-08-06 — Recuperación Geométrica Inteligente — Fase 2 (Cliente + Destino)
+
+- Decisión importante: implementar exclusivamente la causa raíz compartida
+  que el diagnóstico "Trazabilidad Integral del Pipeline — Caso real
+  464345" demostró para Cliente y Destino, sin construir nada específico
+  para esa guía ni para "TORRES OCARANZA"/"VISTA CLARA", y sin tocar nada
+  fuera de la etapa de Extracción Geométrica.
+- Causa raíz (ya demostrada en el diagnóstico previo, no redemostrada aquí):
+  la guardia de vecindad saturada de `_extraer_asociaciones_geometricas`
+  (`_contar_grupos_geometricos_contiguos(...) >= 3`, de *Recuperación
+  Geométrica Conservadora — Fase 1*) no distinguía candidatos distintos
+  genuinamente ajenos (ruido) de variantes OCR del mismo dato repetido por
+  el propio documento en varias columnas. En 464345, "TORRES OCARANZA LTDA"
+  aparece en SEÑOR(ES), SOLICITANTE y OBRA DESTINO a la vez, fragmentado
+  por el OCR; la guardia contaba 6 grupos junto a SEÑOR(ES) y 8 junto a
+  OBRA DESTINO, y se abstenía pese a que el candidato de mejor puntaje en
+  ambos casos ya era el dato correcto ("IoRaES OCARANZA LTDA" 0.4267 junto
+  a SEÑOR(ES); "ToRRES" 0.2409 junto a OBRA DESTINO).
+- Búsqueda de reutilización (antes de escribir código, según lo pedido):
+  se revisó todo el proyecto en busca de normalización/similitud/
+  clustering ya existente. Hallazgo: `difflib.SequenceMatcher` con
+  comparación de nombres ya está duplicado de forma idéntica cinco veces
+  (`atlas_core/catalogos.py`, `resolucion_chofer.py`, `resolucion_cliente.py`,
+  `resolucion_destino.py`, `resolucion_material.py`), siempre con umbral
+  0.85 para nombres. No existe un módulo de utilidades compartido — es el
+  patrón establecido del proyecto (una copia privada por módulo) — así que
+  se reutilizó exactamente esa herramienta y ese umbral en vez de crear
+  una nueva. También se reutilizó el criterio de contención literal
+  (`valor not in mejor`) que `seleccionar()` ya usaba para no confundir un
+  fragmento con un rival, y la propia unión-búsqueda de
+  `_contar_grupos_geometricos_contiguos`, refactorizada (sin cambiar su
+  firma ni su resultado) para exponer los grupos y no solo su conteo.
+- Corrección (confinada a `atlas_core/extractor.py`, sin tocar OCR,
+  Resolver, Política, Publicación, Desktop ni catálogos):
+  1. `_agrupar_geometricos_contiguos` (nueva): extrae la unión-búsqueda ya
+     existente para devolver los grupos mismos; `_contar_grupos_
+     geometricos_contiguos` pasa a ser un envoltorio de una línea sobre
+     ella, sin cambiar su comportamiento para ningún llamador existente
+     (Cliente/Destino y Chofer).
+  2. `_son_variantes_del_mismo_dato(a, b)` (nueva): coincidencia exacta,
+     contención literal (con un mínimo de 5 caracteres en el fragmento
+     contenido — ver hallazgo de validación abajo), o
+     `difflib.SequenceMatcher(...).ratio() >= 0.85`.
+  3. `_campos_de_datos_repetidos` (nueva): agrupa TODOS los candidatos
+     nominales de la página (no solo los de una etiqueta puntual) por
+     contigüidad, y marca como "repetido" a cualquier grupo cuyo texto sea
+     variante del texto de otro grupo geométricamente independiente en
+     cualquier parte de la página.
+  4. En `seleccionar()`: la guardia de saturación exime de abstención al
+     candidato de mejor puntaje cuando `es_dato_repetido` es verdadero
+     para él; el chequeo de rivales cercanos (margen 0.06) deja de dejarse
+     bloquear por un rival sin corroboración documental cuando el mejor
+     candidato sí la tiene. Sin candidato repetido, el comportamiento es
+     idéntico al de Fase 1 en ambos puntos. Ningún umbral existente (3
+     grupos, margen 0.06, 1.25 de puntaje máximo) cambió de valor.
+- Hallazgo durante la propia validación (encontrado y corregido antes de
+  cerrar el bloque, de propósito general, no específico de esta guía): la
+  primera versión de `_son_variantes_del_mismo_dato` permitía contención
+  literal sin mínimo de longitud. Al ejecutar la corrección contra la
+  guía real 464345, el candidato ganador de la etiqueta "Cliente" (una
+  coincidencia falsa-positiva preexistente de `es_etiqueta`, que reconoce
+  también el literal "CLIENTE" dentro de "Código Cliente") resultó ser
+  "CODLGO" (lectura OCR de "Código"), corroborado por error contra "CoD"
+  (fragmento de "COD DESTINATARIO" cerca de OBRA DESTINO) por la simple
+  coincidencia de 3 caracteres "COD". Se corrigió exigiendo un mínimo de 5
+  caracteres en el fragmento contenido; con esa corrección, la extracción
+  de Cliente pasó de `"CODLGO"` a `"IORAES OCARANZA LTDA"` (el candidato
+  correcto), reproducido con la misma imagen real antes y después del
+  ajuste.
+- Validación real (reprocesamiento completo, catálogos privados reales,
+  antes → después):
+  - Guía 464345: `_extraer_asociaciones_geometricas` directa: Cliente `{}`
+    → `{"cliente": "IORAES OCARANZA LTDA"}`; Destino `{}` → `{"obra
+    destino": "TORRES OCARANZA"}`.
+  - Guía de control real usada también como prueba histórica (462491,
+    cliente real "FERROLUSAC SA" — nota: el archivo local llamado
+    "guia6.jpeg" encontrado en una copia distinta del proyecto resultó ser
+    esta guía, no el caso "EMISION"/PRODALAM SA de la bitácora; se usó de
+    todas formas como control real adicional): cliente publicado
+    `"FERROLUSAC SA"` y destino `"FERROLUSAC PEDRO DE OÑA"`, ambos
+    correctos y sin cambios.
+  - Caso histórico "EMISION": el archivo real de esa sesión no está
+    disponible en este equipo; se validó mediante la prueba de regresión
+    sintética ya existente
+    (`test_geometria_caso_real_cliente_no_confirma_texto_de_encabezado_ajeno`),
+    construida con coordenadas modeladas sobre la guía real diagnosticada
+    en su momento — sigue abstenida exactamente igual.
+- Trazado real de la publicación final de 464345 tras el fix (con logging
+  real, sin simular): `cliente recuperado mediante asociacion-geometrica-
+  conservadora-v1`; `obra destino recuperado mediante asociacion-
+  geometrica-conservadora-v1`; pero `rut_cliente focal abstiene
+  motivo=fila-rut-cliente-no-localizada` (la relectura focal de RUT de
+  cliente, ya desbloqueada porque el nombre dejó de estar vacío, no logra
+  ubicar la fila del RUT en este layout); `resolucion-cliente-multicampo-v1
+  estado=NO_RESUELTO`; `codigo_destinatario reconstruido` como
+  `"0001001443"` (el real es `"0001004443"`, un dígito distinto);
+  `orquestador-destino-sombra-v1 estado=NO_RESUELTO`. La extracción
+  geométrica dejó de ser el bloqueador; la publicación final de esta guía
+  específica sigue bloqueada por dos causas independientes que viven en
+  Resolver/relectura focal, fuera del alcance autorizado de este bloque.
+- Regresión: 1217/1217 Atlas (9 pruebas nuevas: 4 unitarias sobre
+  `_son_variantes_del_mismo_dato`, 2 sobre `_campos_de_datos_repetidos`, 1
+  de recuperación por corroboración de propósito general, 1 de control sin
+  corroboración, 1 de reproducción directa con coordenadas modeladas sobre
+  la guía real 464345); `compileall` y `git diff --check` aprobados.
+- Integridad: sin cambios en EasyOCR, umbrales existentes, resolvers,
+  Política de Activación, Orquestador, Publicación, Desktop ni catálogos;
+  ninguna regla usa el número de guía, el nombre del cliente ni el nombre
+  del destino como condición.
+- Riesgo residual: la corroboración documental depende de que el dato
+  repetido aparezca en dos o más lugares geométricamente independientes de
+  la misma página; un dato legítimo que el documento solo menciona una vez
+  sigue protegido por la abstención conservadora sin cambios. El mínimo de
+  5 caracteres para contención es una elección conservadora general, no
+  ajustada a ninguna guía; un fragmento genuino de exactamente 3-4
+  caracteres seguiría sin corroborar por contención (sí podría hacerlo por
+  similitud de secuencia si la comparación es contra un texto de longitud
+  comparable).
+- Acuerdo: el siguiente bloque, si se autoriza, debe abordar por separado
+  la relectura focal de RUT de cliente (por qué no localiza la fila del
+  RUT en este layout) y la lectura del código destinatario (dígito OCR
+  erróneo) para que la guía 464345 y casos con el mismo patrón lleguen a
+  publicar el valor canónico completo, no solo el texto OCR recuperado en
+  extracción.

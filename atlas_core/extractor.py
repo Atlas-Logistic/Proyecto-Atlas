@@ -1,5 +1,6 @@
 """Extracción de datos desde texto reconocido."""
 
+import difflib
 import math
 import re
 from pathlib import Path
@@ -220,18 +221,24 @@ def _reconstruir_campos_documentales(bloques: List[Any]) -> Dict[str, Dict[str, 
     )
 
 
-def _contar_grupos_geometricos_contiguos(candidatos: List[Dict[str, Any]]) -> int:
-    """Cuenta grupos de candidatos contiguos (misma fila, separación breve).
+def _agrupar_geometricos_contiguos(
+    candidatos: List[Dict[str, Any]]
+) -> List[List[Dict[str, Any]]]:
+    """Agrupa candidatos contiguos (misma fila, separación breve) por
+    unión-búsqueda y devuelve los grupos mismos (no solo su conteo).
 
     Dos cajas OCR que forman un único nombre partido por el OCR (por ejemplo
-    "ACEROS" + "NUBLE") deben contarse como un solo grupo, no como dos
+    "ACEROS" + "NUBLE") deben agruparse como una sola, no como dos
     candidatos rivales; dos cajas dispersas y sin relación entre sí deben
-    contarse cada una por separado. Se usa exactamente la misma regla de
-    adyacencia ("misma fila" + brecha horizontal de 0 a 28 px) que ya emplea
-    `seleccionar()` para componer nombres partidos, agrupada aquí mediante
-    unión-búsqueda para que la transitividad (A pegado a B, B pegado a C)
-    también cuente como un solo grupo. Es de propósito general: no depende
-    del campo, de ninguna palabra específica ni de ninguna guía en particular.
+    quedar cada una en su propio grupo. Regla de adyacencia ("misma fila" +
+    brecha horizontal de 0 a 28 px) idéntica a la que ya emplea
+    `seleccionar()` para componer nombres partidos; la transitividad (A
+    pegado a B, B pegado a C) también cuenta como un solo grupo. Es de
+    propósito general: no depende del campo, de ninguna palabra específica
+    ni de ninguna guía en particular. Es la base compartida de
+    `_contar_grupos_geometricos_contiguos` (que solo cuenta) y de
+    `_campos_de_datos_repetidos` (que además compara el texto de cada
+    grupo) — ninguna de las dos duplica esta unión-búsqueda.
     """
     total = len(candidatos)
     padre = list(range(total))
@@ -258,7 +265,99 @@ def _contar_grupos_geometricos_contiguos(candidatos: List[Dict[str, Any]]) -> in
             if misma_fila and 0 <= brecha <= 28:
                 unir(i, j)
 
-    return len({raiz(indice) for indice in range(total)})
+    grupos: Dict[int, List[Dict[str, Any]]] = {}
+    for indice in range(total):
+        grupos.setdefault(raiz(indice), []).append(candidatos[indice])
+    return list(grupos.values())
+
+
+def _contar_grupos_geometricos_contiguos(candidatos: List[Dict[str, Any]]) -> int:
+    """Cuenta grupos de candidatos contiguos (misma fila, separación breve).
+
+    Ver `_agrupar_geometricos_contiguos`, de la que esta función es un
+    envoltorio de conteo; se conserva por compatibilidad con quienes ya la
+    llaman (Cliente/Destino y Chofer) sin cambiar su firma ni su resultado.
+    """
+    return len(_agrupar_geometricos_contiguos(candidatos))
+
+
+UMBRAL_SIMILITUD_VARIANTE_OCR = 0.85
+LONGITUD_MINIMA_CONTENCION_VARIANTE = 5
+
+
+def _son_variantes_del_mismo_dato(texto_a: str, texto_b: str) -> bool:
+    """Determina si dos lecturas OCR probablemente representan el mismo dato
+    real y no dos hallazgos distintos: coincidencia exacta, una contenida
+    literalmente en la otra (el mismo criterio de contención que
+    `seleccionar()` ya usa más abajo para no confundir un fragmento con un
+    rival genuino) siempre que el fragmento contenido tenga al menos
+    `LONGITUD_MINIMA_CONTENCION_VARIANTE` caracteres, o alta similitud de
+    secuencia. `difflib.SequenceMatcher` y el umbral 0.85 no son una
+    herramienta nueva: son exactamente lo que ya usa este proyecto para
+    comparar nombres en `atlas_core/catalogos.py`,
+    `atlas_core/inteligencia/resolucion_chofer.py`,
+    `resolucion_cliente.py`, `resolucion_destino.py` y
+    `resolucion_material.py`. No se baja ningún umbral existente: 0.85 es
+    igual o más estricto que los ya usados en el proyecto para nombres.
+
+    El mínimo de longitud para la contención evita falsos positivos de
+    propósito general (no de una guía en particular): fragmentos cortos
+    como "COD" caen, por simple coincidencia de caracteres, dentro de
+    palabras completamente ajenas ("CODLGO", lectura OCR de "Código" en
+    una etiqueta distinta) sin representar el mismo dato real. La
+    similitud de secuencia no tiene este problema porque ya exige que la
+    mayoría de los caracteres de ambos textos coincidan, no solo un
+    fragmento corto.
+    """
+    if not texto_a or not texto_b:
+        return False
+    if texto_a == texto_b:
+        return True
+    mas_corto = texto_a if len(texto_a) <= len(texto_b) else texto_b
+    mas_largo = texto_b if mas_corto is texto_a else texto_a
+    if (
+        len(mas_corto) >= LONGITUD_MINIMA_CONTENCION_VARIANTE
+        and mas_corto in mas_largo
+    ):
+        return True
+    return (
+        difflib.SequenceMatcher(None, texto_a, texto_b).ratio()
+        >= UMBRAL_SIMILITUD_VARIANTE_OCR
+    )
+
+
+def _texto_representativo_grupo(grupo: List[Dict[str, Any]]) -> str:
+    """Texto de un grupo geométrico contiguo, uniendo sus cajas de izquierda
+    a derecha — la misma composición que `seleccionar()` ya aplica más abajo
+    para nombres partidos en varias cajas OCR."""
+    ordenado = sorted(grupo, key=lambda item: item["x1"])
+    return _texto_simple(" ".join(item["texto"] for item in ordenado))
+
+
+def _campos_de_datos_repetidos(items_nominales: List[Dict[str, Any]]) -> set[str]:
+    """Identifica qué datos repite el propio documento en dos o más lugares
+    geométricamente independientes de la página (por ejemplo: el nombre del
+    cliente suele figurar a la vez en SEÑOR(ES), SOLICITANTE y OBRA
+    DESTINO). Un token de ruido — un fragmento de encabezado, de otro campo
+    cualquiera — no vuelve a aparecer en ningún otro lugar del documento.
+
+    No depende de ningún nombre, cliente, destino ni guía en particular:
+    agrupa primero por la misma contigüidad geométrica ya usada en todo
+    este archivo (`_agrupar_geometricos_contiguos`) y solo compara el texto
+    resultante de cada grupo contra el de los demás grupos de la misma
+    página, con `_son_variantes_del_mismo_dato`. Reproducido con evidencia
+    real (guía real 464345): ver diagnóstico de Trazabilidad Integral del
+    Pipeline.
+    """
+    grupos = _agrupar_geometricos_contiguos(items_nominales)
+    representativos = [_texto_representativo_grupo(grupo) for grupo in grupos]
+    repetidos: set[str] = set()
+    for i in range(len(representativos)):
+        for j in range(i + 1, len(representativos)):
+            if _son_variantes_del_mismo_dato(representativos[i], representativos[j]):
+                repetidos.add(representativos[i])
+                repetidos.add(representativos[j])
+    return repetidos
 
 
 def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
@@ -293,6 +392,21 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         if digitos and digitos >= sum(caracter.isalpha() for caracter in texto):
             return False
         return True
+
+    # Datos que el propio documento repite en más de un lugar independiente
+    # de la página (p. ej. el nombre del cliente en SEÑOR(ES), SOLICITANTE y
+    # OBRA DESTINO a la vez). Se calcula una sola vez, sobre TODOS los
+    # candidatos nominales de la página, y lo comparten cliente y destino
+    # (ver uso en `seleccionar()`, más abajo).
+    items_nominales = [item for item in items if nominal(item)]
+    datos_repetidos = _campos_de_datos_repetidos(items_nominales)
+
+    def es_dato_repetido(texto: str) -> bool:
+        simple = _texto_simple(texto)
+        return simple in datos_repetidos or any(
+            _son_variantes_del_mismo_dato(simple, repetido)
+            for repetido in datos_repetidos
+        )
 
     def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
         alto = max(etiqueta["h"], candidato["h"])
@@ -346,10 +460,26 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
             # de adivinar con el mejor puntaje. Reproducido con evidencia real
             # (guía real, caso Cliente "EMISION"): ver diagnóstico de
             # Integridad de Publicación Operacional.
+            #
+            # Excepción, igualmente general: si el candidato de mejor
+            # puntaje es un dato que el propio documento repite en otro
+            # lugar independiente de la página (`es_dato_repetido`), esa
+            # repetición documental es evidencia real de pertenencia al
+            # campo — no una simple cercanía geométrica — y dejar de
+            # publicarlo solo por vecindad saturada perdería un dato
+            # correcto. La vecindad saturada sigue exigiendo abstención
+            # para cualquier candidato que NO tenga esa corroboración.
+            # Reproducido con evidencia real (guía real 464345, "TORRES
+            # OCARANZA LTDA" repetido en tres columnas de la misma guía):
+            # ver diagnóstico de Trazabilidad Integral del Pipeline.
             if _contar_grupos_geometricos_contiguos(
                 [item for _, item in candidatos]
             ) >= 3:
-                continue
+                mejor_candidato = (
+                    min(candidatos, key=lambda c: c[0])[1] if candidatos else None
+                )
+                if mejor_candidato is None or not es_dato_repetido(mejor_candidato["texto"]):
+                    continue
 
             for puntuacion, item in candidatos:
                 decisiones.append((puntuacion, item["texto"].upper()))
@@ -368,12 +498,25 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         # Variaciones de puntuación de hasta 0,06 representan la misma zona
         # visual; se consideran ambiguas en vez de usar el orden OCR como desempate.
         margen_ambiguedad = 0.06
+        # Mismo criterio de corroboración documental que la guardia de
+        # vecindad saturada, aplicado aquí porque un token de ruido sin
+        # ninguna repetición en el documento (p. ej. "IERKIN", un fragmento
+        # de otro campo) puede caer por azar dentro del margen de 0,06 de
+        # un candidato que sí está corroborado en otra parte de la misma
+        # página. Un rival sin corroboración documental no puede forzar la
+        # abstención de un candidato que sí la tiene; si ambos están
+        # corroborados (dos datos genuinamente repetidos y distintos), o si
+        # ninguno lo está, la ambigüedad se resuelve exactamente igual que
+        # antes. Reproducido con evidencia real (guía real 464345): ver
+        # diagnóstico de Trazabilidad Integral del Pipeline.
+        mejor_esta_corroborado = es_dato_repetido(mejor)
         equivalentes = {
             valor for puntaje, valor in decisiones
             if (
                 abs(puntaje - mejor_puntaje) <= margen_ambiguedad
                 and valor != mejor
                 and valor not in mejor
+                and not (mejor_esta_corroborado and not es_dato_repetido(valor))
             )
         }
         if equivalentes:

@@ -1,5 +1,98 @@
 # Trabajos activos Atlas
 
+## Recuperación Geométrica Inteligente — Fase 2 (Cliente + Destino)
+
+- Estado: COMPLETADA EN LA ETAPA DE EXTRACCIÓN GEOMÉTRICA — sin reserva
+  activa. No cierra por sí sola la publicación final de Cliente/Destino de
+  la guía 464345; ver "Riesgo residual" y "Próximo bloque recomendado".
+- Rama: `feature-cobertura-origen-fase1` (continuación directa del
+  diagnóstico "Trazabilidad Integral del Pipeline — Caso real 464345").
+- Causa raíz demostrada (compartida entre Cliente y Destino): la guardia de
+  "vecindad geométrica saturada" de `_extraer_asociaciones_geometricas`
+  (`_contar_grupos_geometricos_contiguos(...) >= 3`, de *Recuperación
+  Geométrica Conservadora — Fase 1*) no distinguía entre candidatos
+  distintos genuinamente ajenos (ruido) y variantes OCR del mismo dato real
+  repetido por el propio documento en varias columnas. En la guía real
+  464345, "TORRES OCARANZA LTDA" aparece en SEÑOR(ES), SOLICITANTE y OBRA
+  DESTINO a la vez, fragmentado por el OCR en cajas independientes; la
+  guardia contaba 6 y 8 grupos respectivamente y se abstenía pese a que el
+  candidato de mejor puntaje en ambos casos ya era el dato correcto.
+- Corrección (confinada exclusivamente a la etapa de Extracción Geométrica,
+  sin tocar OCR, Resolver, Política, Publicación, Desktop ni catálogos):
+  1. `_contar_grupos_geometricos_contiguos` se refactorizó, sin cambiar su
+     firma ni su resultado para quien ya la llama (Cliente/Destino y
+     Chofer), sobre una nueva función compartida `_agrupar_geometricos_
+     contiguos` que expone los grupos mismos, no solo su conteo.
+  2. Nueva `_son_variantes_del_mismo_dato(a, b)`: coincidencia exacta,
+     contención literal (exigiendo un mínimo de 5 caracteres en el
+     fragmento contenido, para evitar falsos positivos de fragmentos
+     cortos — ver hallazgo abajo), o similitud de secuencia
+     (`difflib.SequenceMatcher`, umbral 0.85). No es una herramienta nueva:
+     es exactamente lo que el proyecto ya usa para comparar nombres en
+     `catalogos.py`, `resolucion_chofer.py`, `resolucion_cliente.py`,
+     `resolucion_destino.py` y `resolucion_material.py`; se reutilizó en
+     vez de duplicarse.
+  3. Nueva `_campos_de_datos_repetidos`: agrupa TODOS los candidatos
+     nominales de la página por contigüidad (reutilizando
+     `_agrupar_geometricos_contiguos`) y marca como "dato repetido" a los
+     grupos cuyo texto es una variante del texto de otro grupo
+     geométricamente independiente en cualquier parte de la página — no
+     solo dentro de la ventana de una etiqueta puntual.
+  4. La guardia de saturación y el chequeo de rivales cercanos (margen
+     0,06) de `seleccionar()` ahora exceptúan, cada uno, al candidato de
+     mejor puntaje cuando está documentalmente corroborado: la vecindad
+     saturada deja de forzar abstención para ese candidato, y un rival sin
+     corroboración documental no puede bloquearlo solo por caer dentro del
+     margen de 0,06. Ningún umbral existente bajó (0,85 es igual o más
+     estricto que los ya usados para nombres; el margen 0,06 y el umbral de
+     3 grupos no cambiaron); ninguna protección se eliminó: sin
+     corroboración, el comportamiento es idéntico al de Fase 1.
+- Hallazgo durante la propia validación (corregido antes de cerrar el
+  bloque, no una guía específica): la contención literal sin mínimo de
+  longitud producía un falso positivo real — "COD" (fragmento de "COD
+  DESTINATARIO") corroboraba por coincidencia "CODLGO" (lectura OCR de
+  "Código" en una etiqueta ajena y sin relación), recuperando un fragmento
+  de etiqueta en vez del nombre real del cliente. Se corrigió exigiendo un
+  mínimo de 5 caracteres en el fragmento contenido para que cuente como
+  evidencia — no se ajustó a esta guía puntual, es un mínimo general.
+- Validación real (reprocesamiento completo, catálogos privados reales,
+  antes → después):
+  - Guía 464345: extracción geométrica de Cliente `{}` (abstención) →
+    `{"cliente": "IORAES OCARANZA LTDA"}`; de Destino `{}` → `{"obra
+    destino": "TORRES OCARANZA"}`. Ambos ya no se pierden en la etapa de
+    extracción.
+  - Guía real usada como control histórico (Cliente "FERROLUSAC SA",
+    guía 462491): sin cambios, cliente y destino se resuelven igual que
+    antes.
+  - Caso histórico "EMISION" (Cliente): validado mediante la prueba de
+    regresión sintética ya existente, construida con coordenadas modeladas
+    sobre la guía real diagnosticada en *Recuperación Geométrica
+    Conservadora — Fase 1* (el archivo real de esa sesión no está
+    disponible en este equipo); sigue abstenida exactamente igual.
+- Riesgo residual (fuera del alcance autorizado de este bloque, no se tocó):
+  la extracción geométrica ya no es el bloqueador, pero la publicación
+  final de la guía 464345 aún no llega a "TORRES OCARANZA LTDA" / "VISTA
+  CLARA 2351". Verificado con evidencia real, no inferido: `resolucion-
+  cliente-multicampo-v1 estado=NO_RESUELTO` porque la relectura focal de
+  RUT de cliente (`_rut_cliente_requiere_relectura`, ya desbloqueada por
+  esta corrección al dejar de estar vacío el nombre) abstiene con motivo
+  `fila-rut-cliente-no-localizada`; y `orquestador-destino-sombra-v1
+  estado=NO_RESUELTO` porque el código destinatario reconstruido
+  (`0001001443`) difiere en un dígito OCR del real (`0001004443`) y no hay
+  coincidencia exacta. Ambas causas viven en Resolver/relectura focal, no
+  en Extracción Geométrica, y quedaron expresamente fuera de este bloque.
+- Validación: 1217/1217 Atlas (9 pruebas nuevas: 4 unitarias sobre
+  `_son_variantes_del_mismo_dato`, 2 sobre `_campos_de_datos_repetidos`, 1
+  de recuperación por corroboración de propósito general, 1 de control sin
+  corroboración que confirma que la excepción exige evidencia real, 1 de
+  reproducción directa con coordenadas modeladas sobre la guía real
+  464345), `compileall` y `git diff --check` aprobados.
+- Próximo bloque recomendado: cerrar la publicación final de Cliente/Destino
+  de la guía 464345 abordando, por separado, la relectura focal de RUT de
+  cliente (por qué no localiza la fila del RUT en este layout) y la lectura
+  del código destinatario (dígito OCR erróneo) — ambos fuera de Extracción
+  Geométrica y del alcance de este bloque.
+
 ## Recuperación Geométrica Conservadora — Fase 1
 
 - Estado: COMPLETADA — sin reserva activa.

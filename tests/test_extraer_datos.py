@@ -32,12 +32,14 @@ from atlas_core.extractor import (
     _clasificar_evidencia_transporte,
     _consensuar_transporte_focal,
     _contar_grupos_geometricos_contiguos,
+    _campos_de_datos_repetidos,
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
     _extraer_cantidad_geometrica,
     _extraer_patentes_geometricas,
     _extraer_transporte_geometrico,
     _reconstruir_campos_documentales,
+    _son_variantes_del_mismo_dato,
 )
 from atlas_core.ocr import BloqueOCR
 
@@ -409,6 +411,140 @@ def test_geometria_caso_real_cliente_no_confirma_texto_de_encabezado_ajeno():
     ]
 
     assert "cliente" not in _extraer_asociaciones_geometricas(bloques)
+
+
+# ---- Fase 2: corroboración documental (variantes OCR del mismo dato) ----
+
+
+def test_variantes_texto_no_relacionado_no_corrobora():
+    """Textos genuinamente distintos, sin relación, no deben tratarse como
+    variantes del mismo dato -- mismos casos ya usados para demostrar la
+    abstención del caso real "EMISION"."""
+    assert _son_variantes_del_mismo_dato("EMISION", "VENTA") is False
+    assert _son_variantes_del_mismo_dato("EMISION", "PRODALNY") is False
+    assert _son_variantes_del_mismo_dato("EMISION", "RENCA") is False
+
+
+def test_variantes_fragmento_largo_corrobora_por_contencion():
+    """Un fragmento suficientemente largo sí corrobora por contención
+    literal, el mismo criterio que `seleccionar()` ya usa para no confundir
+    un fragmento con un rival genuino."""
+    assert _son_variantes_del_mismo_dato("TORRES", "TORRES OCARANZA LTDA") is True
+    assert _son_variantes_del_mismo_dato("OCARANZA", "TORRES OCARANZA LTDA") is True
+
+
+def test_variantes_fragmento_corto_no_corrobora_por_coincidencia():
+    """Un fragmento corto (menos de 5 caracteres) no debe bastar para
+    considerar corroborados dos textos no relacionados solo porque uno cae,
+    por coincidencia, dentro del otro. Caso real de la guía 464345: "COD"
+    (fragmento de "COD DESTINATARIO") no corrobora "CODLGO" (lectura OCR de
+    "Código", en una etiqueta completamente distinta y sin relación con el
+    dato real). Encontrado y corregido durante la validación de esta misma
+    corrección: sin este mínimo de longitud, la corroboración documental
+    recuperaba un fragmento de etiqueta en vez del nombre real del cliente."""
+    assert _son_variantes_del_mismo_dato("COD", "CODLGO") is False
+    assert _son_variantes_del_mismo_dato("CODLGO", "COD") is False
+
+
+def test_variantes_alta_similitud_de_secuencia_corrobora():
+    """Dos lecturas OCR distintas del mismo nombre, sin relación de
+    contención pero con alta similitud de secuencia (0.85 o más, el mismo
+    umbral ya usado en el proyecto para nombres), se reconocen como
+    variantes del mismo dato. Ratio real reproducido de la guía 464345:
+    'IORAES OCARANZA LTDA' vs 'TORRES OCARANZA LTDA' = 0.90."""
+    assert _son_variantes_del_mismo_dato("IORAES OCARANZA LTDA", "TORRES OCARANZA LTDA") is True
+
+
+def test_campos_de_datos_repetidos_ignora_grupo_unico():
+    """Un solo grupo, sin ninguna repetición en otro lugar de la página, no
+    cuenta como dato repetido."""
+    items = [
+        {"texto": "ENCABEZADO", "simple": "ENCABEZADO", "x1": 0, "y1": 0, "x2": 90, "y2": 18, "h": 18, "cx": 45, "cy": 9},
+    ]
+    assert _campos_de_datos_repetidos(items) == set()
+
+
+def test_campos_de_datos_repetidos_detecta_repeticion_independiente():
+    """Dos grupos geométricamente independientes (filas muy distintas) cuyo
+    texto es la misma variante OCR sí quedan marcados como dato repetido."""
+    items = [
+        {"texto": "TORRES OCARANZA", "simple": "TORRES OCARANZA", "x1": 0, "y1": 0, "x2": 140, "y2": 18, "h": 18, "cx": 70, "cy": 9},
+        {"texto": "TORRES", "simple": "TORRES", "x1": 0, "y1": 400, "x2": 60, "y2": 418, "h": 18, "cx": 30, "cy": 409},
+        {"texto": "RUIDO AJENO", "simple": "RUIDO AJENO", "x1": 300, "y1": 200, "x2": 400, "y2": 218, "h": 18, "cx": 350, "cy": 209},
+    ]
+    repetidos = _campos_de_datos_repetidos(items)
+    assert "TORRES OCARANZA" in repetidos
+    assert "TORRES" in repetidos
+    assert "RUIDO AJENO" not in repetidos
+
+
+def test_geometria_corroboracion_documental_recupera_pese_a_vecindad_saturada():
+    """Vecindad saturada (tres grupos), igual que el caso ya corregido de
+    encabezado ajeno -- pero aquí el candidato de mejor puntaje SÍ es un
+    dato que el documento repite en otro lugar independiente y lejano de
+    la página: evidencia real de pertenencia al campo, no una simple
+    cercanía geométrica. A diferencia de un token de ruido que nunca se
+    repite, este candidato debe recuperarse en vez de abstenerse. No
+    depende de ningún cliente, destino ni guía en particular."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("EMPRESA BUENA", 110, 20, 80),
+        _bloque("RUIDO UNO", 250, 20, 80),
+        _bloque("RUIDO DOS", 20, 90, 100),
+        _bloque("EMPRESA BUENA", 20, 400, 100),
+    ]
+
+    resultado = _extraer_asociaciones_geometricas(bloques)
+    assert resultado.get("cliente") == "EMPRESA BUENA"
+
+
+def test_geometria_sin_repeticion_documental_sigue_abstenida_pese_a_mismo_layout():
+    """Mismo layout que el test anterior, sin la segunda aparición
+    independiente de "EMPRESA BUENA": sigue abstenida, exactamente el
+    comportamiento ya vigente antes de esta corrección. Confirma que la
+    excepción exige corroboración real, no basta con tener buen puntaje."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("EMPRESA BUENA", 110, 20, 80),
+        _bloque("RUIDO UNO", 250, 20, 80),
+        _bloque("RUIDO DOS", 20, 90, 100),
+    ]
+
+    assert "cliente" not in _extraer_asociaciones_geometricas(bloques)
+
+
+def test_geometria_caso_real_464345_recupera_cliente_y_destino_repetidos():
+    """Reproduce, con coordenadas modeladas sobre la guía real 464345
+    (ver diagnóstico de Trazabilidad Integral del Pipeline), el layout
+    donde "TORRES OCARANZA LTDA" aparece en tres columnas distintas de la
+    misma guía (SEÑOR(ES), SOLICITANTE y OBRA DESTINO), fragmentado por el
+    OCR en cajas independientes. Antes de esta corrección,
+    `_extraer_asociaciones_geometricas` se abstenía para cliente y destino
+    pese a que el candidato correcto ya estaba entre los candidatos con
+    mejor puntaje; ahora los recupera."""
+    bloques = [
+        _bloque("Senor(es)", 72, 632, 69, 25),
+        _bloque("IoRaES OCARANZA LTDA", 261, 653, 132, 16),
+        _bloque("IERKIN", 259, 681, 44, 12),
+        _bloque("Codlgo", 85, 599, 42, 16),
+        _bloque("SAMIIAGO", 256, 721, 57, 16),
+        _bloque("Oroen DE", 483, 641, 60, 14),
+        _bloque("CoMprA", 541, 639, 52, 14),
+        _bloque("obra DESTINO", 483, 681, 84, 14),
+        _bloque("ToRRES", 634, 676, 43, 13),
+        _bloque("OCARANZA", 680, 672, 57, 18),
+        _bloque("ToRrES", 635, 651, 42, 12),
+        _bloque("LTda", 741, 671, 30, 14),
+        _bloque("CoD", 483, 697, 26, 12),
+        _bloque("EDIE", 348, 682, 29, 14),
+        _bloque("VISTA CLLZA", 259, 695, 74, 14),
+    ]
+
+    resultado = _extraer_asociaciones_geometricas(bloques)
+    assert resultado.get("cliente") == "IORAES OCARANZA LTDA"
+    assert "TORRES" in resultado.get("obra destino", "")
+    assert "CODLGO" not in resultado.get("cliente", "")
+    assert "COD" != resultado.get("obra destino", "")
 
 
 def _transporte(candidato, etiqueta="NRO. TRANSPORTE"):
