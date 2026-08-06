@@ -63,6 +63,88 @@ def test_rut_cliente_focal_usa_fila_asociada_a_senor(tmp_path):
     )
 
 
+def test_es_etiqueta_rut_tolerante_reconoce_coincidencia_exacta():
+    assert ocr._es_etiqueta_rut_tolerante("RUT") is True
+    assert ocr._es_etiqueta_rut_tolerante("R.U.T.") is True
+
+
+def test_es_etiqueta_rut_tolerante_admite_una_sola_confusion_visual():
+    """Caso real (guía 464345): "R.U.T." fue leído por EasyOCR como "RuI."
+    (T confundida con I). Misma clase de tolerancia determinista ya usada
+    en el proyecto para "CARR[O0]" (Calidad de Publicación Operacional) y
+    para patentes (`_distancia_patente_ocr`): un solo carácter de
+    diferencia sobre una palabra de longitud fija y conocida, no una
+    coincidencia difusa."""
+    assert ocr._es_etiqueta_rut_tolerante("RuI.") is True
+    assert ocr._es_etiqueta_rut_tolerante("RVT") is True
+    assert ocr._es_etiqueta_rut_tolerante("R0T") is True
+
+
+def test_es_etiqueta_rut_tolerante_rechaza_dos_o_mas_diferencias():
+    assert ocr._es_etiqueta_rut_tolerante("XYZ") is False
+    assert ocr._es_etiqueta_rut_tolerante("RXX") is False
+
+
+def test_es_etiqueta_rut_tolerante_rechaza_longitud_distinta():
+    assert ocr._es_etiqueta_rut_tolerante("RUTA") is False
+    assert ocr._es_etiqueta_rut_tolerante("RU") is False
+    assert ocr._es_etiqueta_rut_tolerante("") is False
+
+
+def test_consenso_rut_cliente_acepta_espacio_como_separador_del_digito_verificador():
+    """Caso real (guía 464345): en 3 de 4 variantes focales el guion del
+    RUT se leyó como espacio ("50.234.350 5"); solo una variante conservó
+    un guion, pero con un dígito equivocado ("50.234.150-5"). El separador
+    de miles ya toleraba espacio o punto; ahora el separador del dígito
+    verificador también tolera espacio, no solo guion."""
+    resultado = ocr._consensuar_rut_cliente_focal(
+        ["50.234.350 5", "50.234.350 5", "50.234.150-5"]
+    )
+
+    assert resultado["valor"] == "50234350-5"
+    assert resultado["motivo"] == "consenso-modulo-11"
+
+
+def test_consenso_rut_cliente_con_guion_sigue_funcionando_igual():
+    """El formato con guion, ya cubierto antes de este ajuste, no cambia."""
+    resultado = ocr._consensuar_rut_cliente_focal(
+        ["93.772.000-9", "93772000-9", "93.772.000"]
+    )
+
+    assert resultado["valor"] == "93772000-9"
+    assert resultado["motivo"] == "consenso-modulo-11"
+
+
+def test_rut_cliente_focal_localiza_fila_pese_a_confusion_visual_en_la_etiqueta(tmp_path):
+    """Reproduce, con el mismo mecanismo de mockeo que
+    test_rut_cliente_focal_usa_fila_asociada_a_senor, el caso real de la
+    guía 464345 donde "R.U.T." se lee como "RuI.": antes de esta
+    corrección, `_localizar_fila_rut_cliente` exigía la coincidencia
+    exacta "RUT" y no encontraba ninguna fila, así que la relectura focal
+    abstenía con motivo "fila-rut-cliente-no-localizada" pese a que el RUT
+    sí estaba legible en la imagen."""
+    ruta = tmp_path / "guia.png"
+    Image.new("RGB", (900, 1600), color="white").save(ruta)
+    bloques = [
+        ocr.BloqueOCR(
+            "SEÑOR(ES)", ((60, 440), (145, 440), (145, 460), (60, 460)), 0.9
+        ),
+        ocr.BloqueOCR("RuI.", ((65, 470), (110, 470), (110, 490), (65, 490)), 0.9),
+    ]
+    lector = Mock()
+    lector.readtext.side_effect = [
+        ["50.234.350 5"],
+        ["50.234.350 5"],
+        ["50.234.150-5"],
+        ["50.234.350 5"],
+    ]
+
+    resultado = ocr._leer_rut_cliente_focal(ruta, bloques, lector=lector)
+
+    assert resultado["valor"] == "50234350-5"
+    assert resultado["motivo"] == "consenso-modulo-11"
+
+
 def preparar_lector(monkeypatch, resultados=None):
     lector = Mock()
     lector.readtext.return_value = resultados or []

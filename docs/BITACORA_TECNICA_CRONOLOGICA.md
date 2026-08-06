@@ -1139,3 +1139,202 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   erróneo) para que la guía 464345 y casos con el mismo patrón lleguen a
   publicar el valor canónico completo, no solo el texto OCR recuperado en
   extracción.
+
+### 2026-08-06 — Resolución Inteligente Cliente ↔ Destino — Fase 2 (RUT Cliente + Código Destinatario)
+
+- Decisión importante: implementar exclusivamente los dos bloqueadores ya
+  identificados en el bloque anterior (relectura focal de RUT de Cliente;
+  reconstrucción del Código Destinatario), sin volver a diagnosticar nada
+  ya demostrado y sin tocar Recuperación Geométrica, Resolver Cliente,
+  Resolver Destino, Política, Desktop, GPS ni Catálogos.
+
+#### Bloque A — RUT Cliente
+
+- Causa raíz (dos fallos independientes, aislados con ejecución real sobre
+  la guía 464345, ninguno de OCR base):
+  1. `_localizar_fila_rut_cliente` (`atlas_core/ocr.py`) exige que
+     `_normalizar_etiqueta_ocr(bloque.texto) == "RUT"`. El bloque OCR real
+     junto a "Senor(es)" (72,632) es `"RuI."` → normalizado `"RUI"` (T
+     confundida con I) — no matchea. El único bloque de la página cuyo
+     texto normaliza exactamente a `"RUT"` es el de "RUT Chofer", en
+     (25,1273) — geométricamente muy por fuera del margen válido junto a
+     SEÑOR(ES) (`distancia_y` 641 contra un máximo de 125), así que ni
+     siquiera ese candidato produce un par válido. `pares` queda vacío,
+     la función devuelve `None`, y `_leer_rut_cliente_focal` abstiene con
+     motivo `fila-rut-cliente-no-localizada` — exactamente el síntoma
+     reportado, ahora con causa exacta.
+  2. Corregido lo anterior (ver Implementación), la relectura focal real
+     sí ubica y recorta la fila, y de hecho **ya lee el RUT correcto en 3
+     de 4 variantes**: `ampliada_3x`→`"...50.234.350 5 2KKK"`,
+     `grises_3x`→`"...50.234.350 5 2K27K1K"`,
+     `contraste_3x`→`"...50.234.350 5 4KK7KKK"` (las tres con el guion
+     leído como espacio); solo `umbral_3x` difiere:
+     `"...50.234.150-5 72KkKK"` (guion presente, pero un dígito
+     equivocado). El patrón de consenso
+     `r"(?<!\d)(?:\d{7,8}|\d{1,3}(?:[.\s]+\d{3}){2})\s*-\s*[\dKk](?!\w)"`
+     exige un guion literal (`\s*-\s*`) antes del dígito verificador; como
+     ninguna de las 3 lecturas correctas tiene guion (solo espacio), el
+     patrón no matchea en ninguna de ellas, y la única lectura que sí
+     matchea (`umbral_3x`) trae un dígito equivocado — el consenso nunca
+     alcanza las 2 coincidencias iguales que exige, y abstiene con
+     `sin-consenso-suficiente`.
+- Búsqueda de reutilización: la tolerancia de 1 carácter sobre una palabra
+  de longitud fija ya existe y está en producción para "CARR[O0]"
+  (Calidad de Publicación Operacional) y para patentes
+  (`_distancia_patente_ocr`, `atlas_core/extractor.py`). Se aplicó la
+  misma técnica (no el mismo código, dominios distintos) a la etiqueta
+  "RUT". El separador `[\s-]+` reutiliza exactamente la misma tolerancia
+  que el propio patrón ya aplicaba al separador de miles (`[.\s]+`), solo
+  extendida de forma consistente al separador del dígito verificador.
+- Implementación (confinada a `atlas_core/ocr.py`):
+  1. Nueva `_es_etiqueta_rut_tolerante(texto)`: normaliza y exige longitud
+     exacta 3, aceptando hasta 1 sustitución de carácter respecto de
+     `"RUT"`. `_localizar_fila_rut_cliente` la usa en vez de la
+     comparación exacta anterior; el resto de su lógica (ventana
+     geométrica, elección de la fila más cercana) no cambió.
+  2. `_consensuar_rut_cliente_focal`: el separador del dígito verificador
+     pasa de `\s*-\s*` a `[\s-]+`. Ningún umbral de consenso (2 lecturas
+     iguales mínimo, módulo 11, abstención ante conflicto) cambió.
+- Resultado real, guía 464345 (antes → después, mismos catálogos reales):
+  `_leer_rut_cliente_focal` pasa de
+  `{"valor": None, "motivo": "fila-rut-cliente-no-localizada"}` a
+  `{"valor": "50234350-5", "motivo": "consenso-modulo-11"}` — coincide
+  exactamente con el RUT de "TORRES OCARANZA LTDA" en el catálogo privado
+  real de clientes.
+
+#### Bloque B — Código Destinatario
+
+- Causa raíz: `_reconstruir_campos_documentales` (`atlas_core/
+  extractor.py`, sin modificar) reconstruye `codigo_destinatario` con el
+  patrón `[A-Z0-9_-]{4,20}` sobre lo que haya bajo la etiqueta "COD
+  DESTINATARIO", sin ninguna validación posterior. En 464345 el código
+  real (`0001004443`, confirmado directamente en `destinos_maestros.json`)
+  se leyó `0001001443` — un solo dígito (posición 6) distinto. Como
+  `_buscar_destino_maestro_por_codigo_estructurado` (`atlas_core/
+  catalogos.py`, sin modificar) exige coincidencia exacta, el código mal
+  leído nunca encontraba el destino, sin ningún mecanismo intermedio para
+  detectarlo o corregirlo.
+- Búsqueda de reutilización: mismo criterio que Bloque A —
+  `_distancia_patente_ocr` ya demuestra, en producción, que "distancia de
+  caracteres sobre cadena de longitud fija + exigir coincidencia única"
+  es una técnica ya aceptada en este proyecto para tolerar un dígito/letra
+  de OCR sin adivinar. Se reutilizó esa técnica en un dominio nuevo
+  (códigos destinatario contra el catálogo de destinos), sin duplicar la
+  función (que es específica de patentes de 6 caracteres) ni tocar
+  `atlas_core/catalogos.py`.
+- Implementación: nueva `_corregir_codigo_destinatario_por_catalogo(codigo,
+  catalogo_destinos_maestros)` en `atlas_core/procesamiento_masivo.py`.
+  Reúne los `codigo_destino` de los registros `ACTIVO` +
+  `CONFIRMADO`/`CONFIRMADO_DOCUMENTAL` del catálogo; si el código
+  reconstruido ya está en ese conjunto, lo devuelve sin cambios; si no,
+  busca candidatos de la misma longitud a distancia de Hamming exactamente
+  1; solo corrige si hay un único candidato a esa distancia, y nunca
+  inventa un código que no exista literalmente en el catálogo. Se invoca
+  en `procesar_archivo` justo después de reconstruir `codigo_destinatario`
+  y antes de `_buscar_destino_maestro_por_codigo_estructurado`, que sigue
+  intacta y sigue siendo la única que decide si un código confirma un
+  destino.
+- Resultado real, guía 464345 (antes → después): `codigo_destinatario`
+  `"0001001443"` → `"0001004443"` (log real:
+  `codigo_destinatario corregido por tolerancia-un-digito-catalogo-v1
+  leido=0001001443 corregido=0001004443`); `_buscar_destino_maestro_por_
+  codigo_estructurado` pasa de no encontrar nada a confirmar el registro
+  de "VISTA CLARA 2351", que `enriquecer_datos_con_catalogos` (sin
+  modificar) propaga a `obra_destino`.
+
+#### Resultado final de 464345 con Bloque A y Bloque B activos (trazado con logging real)
+
+```
+cliente recuperado mediante asociacion-geometrica-conservadora-v1
+obra destino recuperado mediante asociacion-geometrica-conservadora-v1
+rut_cliente recuperado mediante consenso-focal-estructurado-v1
+codigo_destinatario reconstruido mediante etiqueta-valor-geometrico-v1
+codigo_destinatario corregido por tolerancia-un-digito-catalogo-v1 leido=0001001443 corregido=0001004443
+resolucion-cliente-multicampo-v1 estado=REQUIERE_REVISION via=CONTRADICCION
+orquestador-destino-sombra-v1 estado=REQUIERE_REVISION via=CONTRADICCION contradicciones=2
+```
+
+- `obra_destino` publicado: `"VISTA CLARA 2351"` — correcto.
+- `cliente` publicado: `"IORAES OCARANZA LTDA"` — sin confirmar.
+  `resolver_cliente_rut`, ejecutado directamente con el RUT ya correcto
+  (`50234350-5`), encuentra evidencia `RUT_EXACTO_VALIDO` apuntando a
+  "TORRES OCARANZA LTDA", pero la razón devuelta es explícita: "El nombre
+  OCR no coincide con la identidad del RUT; se conserva el OCR y se
+  requiere revisión" — un chequeo de similitud nombre-vs-RUT ya existente
+  dentro de `resolucion_cliente.py`, expresamente fuera del alcance de
+  este bloque ("No modificar Resolver Cliente").
+- `orquestador-destino-sombra-v1` marca `CONTRADICCION` (no `CONFIRMADO`)
+  pese a encontrar el candidato correcto, porque `resolver_destino_
+  ubicacion` (sin modificar) detecta que `direccion` (`"IERKIN ACAD EDIE
+  OBRA DESTINO"`, en realidad el GIRO mal leído) y `comuna` (un bloque de
+  70 caracteres con varios campos fusionados) son incompatibles con la
+  dirección real del destino candidato — dos contradicciones de gravedad
+  ALTA. El valor de `obra_destino` en el CSV llega correcto de todas
+  formas porque `enriquecer_datos_con_catalogos` ya lo había fijado antes
+  de que el Resolver formal se ejecutara; pero `indicador_revision`
+  general sigue en `REVISAR`. La causa de esta contradicción específica
+  (`direccion`/`comuna` mal extraídos) vive en `buscar_direccion`/
+  `buscar_comuna`, un mecanismo lineal distinto del código destinatario,
+  no nombrado como bloqueador autorizado en este bloque.
+- Conclusión: el resultado esperado ("Cliente: TORRES OCARANZA LTDA /
+  Destino: VISTA CLARA 2351, sin revisión manual") se alcanza solo
+  parcialmente dentro del alcance autorizado. Destino llega al valor
+  canónico correcto. Cliente llega hasta el límite de lo que Extracción y
+  OCR focal pueden demostrar (nombre correctamente leído en su mejor
+  variante disponible, RUT correcto y coincidente) — cerrar la brecha
+  restante exige tocar Resolver Cliente y/o la extracción de
+  dirección/comuna, ambos expresamente fuera de este bloque.
+
+#### Regresión detectada durante la validación obligatoria: 464260
+
+- Al ejecutar la validación de regresión exigida (`guia6`, 464260, 464110,
+  464106), se encontró que 464260 ya no reproduce el resultado documentado
+  en el cierre de *Calidad de Publicación Operacional — Fase 1*
+  (`"cliente": "SRUOKON SACK"`, `"obra destino": "SALCHON SACX SAY"`):
+  `_extraer_asociaciones_geometricas` devuelve `{}` para ambos campos.
+- Aislamiento de causa con evidencia real, ejecutando el mismo archivo de
+  imagen contra tres versiones distintas de `atlas_core/extractor.py`
+  (extraídas con `git show <commit>:atlas_core/extractor.py`, cargadas
+  como módulo independiente, sin tocar el repositorio):
+  - `d37c6a8` (cierre de *Calidad de Publicación Operacional — Fase 1*):
+    `{"cliente": "SRUOKON SACK", "obra destino": "SALCHON SACX SAY"}` —
+    correcto.
+  - `dada0be` (cierre de *Unificación de Arquitectura de Resolución de
+    Chofer*, el commit inmediatamente anterior a este bloque y a
+    *Recuperación Geométrica Inteligente — Fase 2*): `{}`.
+  - Código actual (con Bloque A/B de este mismo bloque, que no toca
+    `_extraer_asociaciones_geometricas`): `{}`, igual que en `dada0be`.
+- Conclusión: la regresión se introdujo en `fff73ea` (*Recuperación
+  Geométrica Conservadora — Fase 1*, la guardia de vecindad saturada) y
+  ya estaba presente antes de que este bloque tocara nada. La validación
+  de esa fase, documentada en su momento, solo cubrió `guia4`, `guia6` y
+  `guia8` — 464260 nunca se validó contra ese cambio pese a ser una guía
+  real ya usada en un bloque anterior cerrado.
+- Decisión: por instrucción explícita del usuario ante este hallazgo, se
+  cierra este bloque (Bloque A + Bloque B) sin tocar
+  `_extraer_asociaciones_geometricas` — la corrección de 464260 exigiría
+  modificar Recuperación Geométrica, expresamente prohibido en el alcance
+  de este bloque — y se documenta la regresión aparte, pendiente de
+  autorización para un bloque propio.
+- Regresión (del propio Bloque A/B, no de 464260): 1231/1231 Atlas (14
+  pruebas nuevas: 7 en `tests/test_ocr.py` — tolerancia de etiqueta RUT,
+  separador de dígito verificador, reproducción end-to-end con mocks del
+  caso real —, 7 en `tests/test_procesamiento_masivo.py` sobre
+  `_corregir_codigo_destinatario_por_catalogo`), `compileall` y
+  `git diff --check` aprobados. Validación adicional con guías reales:
+  464110 y 464106 sin cambios (ya funcionaban); 462491 (control) sin
+  cambios; guía histórica "EMISION" validada por la prueba de regresión
+  sintética ya existente, sin cambios.
+- Integridad: sin cambios en EasyOCR más allá de lo descrito (Bloque A);
+  sin cambios en `_extraer_asociaciones_geometricas`,
+  `_buscar_destino_maestro_por_codigo_estructurado`, `resolver_cliente_
+  rut`, `resolver_destino_ubicacion`, Política de Activación, Desktop, GPS
+  ni catálogos.
+- Acuerdo: el siguiente bloque, si se autoriza, debe elegir entre (a)
+  diagnosticar y corregir la regresión de 464260 en
+  `_extraer_asociaciones_geometricas`, validando esta vez contra el lote
+  completo de guías reales ya usadas en bloques anteriores, o (b) revisar
+  el chequeo de similitud nombre-RUT de `resolucion_cliente.py` y la
+  extracción de `direccion`/`comuna` en `extractor.py` para que 464345
+  llegue a publicarse sin revisión manual. Ambos frentes son
+  independientes entre sí y ninguno estaba autorizado en este bloque.

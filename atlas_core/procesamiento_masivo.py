@@ -185,6 +185,62 @@ def _rut_cliente_requiere_relectura(
     return formato_completo is None or _rut_chileno_canonico(texto) is None
 
 
+def _corregir_codigo_destinatario_por_catalogo(
+    codigo: object, catalogo_destinos_maestros: Mapping[str, object] | None
+) -> str:
+    """Tolera un único dígito de OCR en el código destinatario reconstruido,
+    comparándolo contra los códigos reales, activos y confirmados del
+    catálogo maestro de destinos.
+
+    Reutiliza la misma técnica ya probada en el proyecto para patentes
+    (``_distancia_patente_ocr`` en ``atlas_core/extractor.py``): distancia
+    de caracteres sobre una cadena de longitud fija, exigiendo coincidencia
+    única para no adivinar entre dos códigos igualmente cercanos. No
+    modifica el catálogo ni la búsqueda exacta ya existente
+    (``_buscar_destino_maestro_por_codigo_estructurado`` en
+    ``atlas_core/catalogos.py``, que sigue intacta y sigue siendo la única
+    que decide si un código confirma un destino): esta función solo
+    corrige, antes de esa búsqueda, el texto reconstruido cuando difiere en
+    exactamente un carácter de un único código real del catálogo. Si el
+    código ya coincide exactamente, o si hay más de un código igualmente
+    cercano, se abstiene y devuelve el texto sin cambios.
+
+    Evidencia real (guía 464345): código real del catálogo
+    ``0001004443``; código reconstruido por OCR ``0001001443`` (un solo
+    dígito distinto, posición 6). No depende de este código ni de esta
+    guía en particular: cualquier código futuro con un único dígito mal
+    leído queda cubierto por el mismo mecanismo.
+    """
+    original = str(codigo or "")
+    buscado = original.strip().upper()
+    if not buscado or not isinstance(catalogo_destinos_maestros, Mapping):
+        return original
+    codigos_activos = {
+        str(registro.get("codigo_destino", "")).strip().upper()
+        for registro in catalogo_destinos_maestros.get("destinos", [])
+        if isinstance(registro, dict)
+        and registro.get("estado_vigencia") == "ACTIVO"
+        and registro.get("estado_calidad") in {"CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+        and str(registro.get("codigo_destino", "")).strip()
+    }
+    if buscado in codigos_activos:
+        return original
+    candidatos = [
+        codigo_catalogo
+        for codigo_catalogo in codigos_activos
+        if len(codigo_catalogo) == len(buscado)
+        and sum(a != b for a, b in zip(codigo_catalogo, buscado)) == 1
+    ]
+    if len(candidatos) == 1:
+        logger.info(
+            "codigo_destinatario corregido por tolerancia-un-digito-catalogo-v1 "
+            "leido=%s corregido=%s",
+            buscado, candidatos[0],
+        )
+        return candidatos[0]
+    return original
+
+
 def descubrir_archivos(carpeta: str | Path) -> list[Path]:
     """Devuelve archivos procesables de la carpeta y sus subcarpetas."""
     raiz = Path(carpeta)
@@ -676,6 +732,12 @@ def procesar_archivo(
         if "codigo_destinatario" in reconstruidos:
             logger.info(
                 "codigo_destinatario reconstruido mediante etiqueta-valor-geometrico-v1"
+            )
+            campos_estructurados["codigo_destinatario"] = (
+                _corregir_codigo_destinatario_por_catalogo(
+                    campos_estructurados["codigo_destinatario"],
+                    catalogo_destinos_maestros,
+                )
             )
     # Cadena de evidencia determinista y general: Código Destinatario ->
     # destino confirmado y único del catálogo maestro -> cliente_id del

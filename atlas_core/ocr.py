@@ -55,8 +55,17 @@ def _rut_chileno_canonico(texto: object) -> str | None:
 def _consensuar_rut_cliente_focal(lecturas: Iterable[object]) -> dict[str, object]:
     """Acepta solo un RUT válido repetido y abstiene ante cualquier conflicto."""
     candidatos = []
+    # El separador entre la base y el dígito verificador acepta guion o
+    # espacio (uno o más de cualquiera de los dos), igual de tolerante que
+    # el separador de miles `[.\s]+` que esta misma expresión ya acepta un
+    # poco más adelante. Evidencia real (guía 464345): en 3 de 4 variantes
+    # focales el guion del RUT se lee como espacio ("50.234.350 5"); solo
+    # la variante de umbral binario conserva un guion, pero con un dígito
+    # equivocado ("50.234.150-5"). Sin este ajuste, ninguna de las lecturas
+    # correctas satisface el patrón y el consenso nunca puede reunir dos
+    # coincidencias, aunque el dato correcto ya esté leído dos o más veces.
     patron = re.compile(
-        r"(?<!\d)(?:\d{7,8}|\d{1,3}(?:[.\s]+\d{3}){2})\s*-\s*[\dKk](?!\w)"
+        r"(?<!\d)(?:\d{7,8}|\d{1,3}(?:[.\s]+\d{3}){2})[\s-]+[\dKk](?!\w)"
     )
     for lectura in lecturas:
         encontrados = {
@@ -77,6 +86,23 @@ def _consensuar_rut_cliente_focal(lecturas: Iterable[object]) -> dict[str, objec
     return {"valor": unicos[0], "motivo": "consenso-modulo-11", "candidatos": unicos}
 
 
+def _es_etiqueta_rut_tolerante(texto: object) -> bool:
+    """Reconoce la etiqueta "RUT" tolerando una única sustitución de
+    carácter: la misma clase de tolerancia determinista ya usada en el
+    proyecto para "CARR[O0]" (Calidad de Publicación Operacional) y para
+    patentes (``_distancia_patente_ocr`` en ``extractor.py``) — no es una
+    coincidencia difusa, es un margen de edición de 1 carácter sobre una
+    palabra de longitud fija y conocida (3 letras), pensado para compensar
+    confusiones visuales de OCR ya documentadas con evidencia real (guía
+    464345: "R.U.T." leído como "RuI.", T confundida con I). Un texto que
+    ya coincide exactamente ("RUT") sigue reconociéndose igual que antes.
+    """
+    normalizado = _normalizar_etiqueta_ocr(texto)
+    if len(normalizado) != 3:
+        return False
+    return sum(a != b for a, b in zip(normalizado, "RUT")) <= 1
+
+
 def _localizar_fila_rut_cliente(
     bloques: Iterable[BloqueOCR], ancho: int, alto: int
 ) -> tuple[float, float, float, float] | None:
@@ -87,7 +113,7 @@ def _localizar_fila_rut_cliente(
     ]
     etiquetas_rut = [
         bloque for bloque in bloques_lista
-        if _normalizar_etiqueta_ocr(bloque.texto) == "RUT"
+        if _es_etiqueta_rut_tolerante(bloque.texto)
     ]
     pares = []
     for senor in senores:

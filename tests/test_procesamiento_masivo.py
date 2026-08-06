@@ -16,6 +16,7 @@ from atlas_core.politica_activacion_multicampo import (
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     COLUMNAS_PUBLICACION,
+    _corregir_codigo_destinatario_por_catalogo,
     _resolver_origen_documental,
     _rut_cliente_requiere_relectura,
     descubrir_archivos,
@@ -135,6 +136,97 @@ def test_rut_cliente_ausente_se_relee_solo_con_cliente_observado():
     ) is True
     assert _rut_cliente_requiere_relectura("", "No encontrado") is False
     assert _rut_cliente_requiere_relectura("", "COMERCIAL") is False
+
+
+def _catalogo_destinos_con_codigo(
+    codigo, estado_calidad="CONFIRMADO", estado_vigencia="ACTIVO"
+):
+    return {
+        "destinos": [
+            {
+                "codigo_destino": codigo,
+                "estado_calidad": estado_calidad,
+                "estado_vigencia": estado_vigencia,
+            }
+        ]
+    }
+
+
+def test_corregir_codigo_destinatario_conserva_coincidencia_exacta():
+    catalogo = _catalogo_destinos_con_codigo("0001004443")
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("0001004443", catalogo)
+        == "0001004443"
+    )
+
+
+def test_corregir_codigo_destinatario_tolera_un_solo_digito():
+    """Caso real (guía 464345): código real del catálogo maestro
+    "0001004443"; código reconstruido por OCR "0001001443" (un solo
+    dígito distinto, posición 6). Reutiliza la misma técnica ya probada
+    en el proyecto para patentes (`_distancia_patente_ocr` en
+    `extractor.py`): distancia de caracteres sobre una cadena de longitud
+    fija, exigiendo coincidencia única."""
+    catalogo = _catalogo_destinos_con_codigo("0001004443")
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("0001001443", catalogo)
+        == "0001004443"
+    )
+
+
+def test_corregir_codigo_destinatario_abstiene_con_dos_diferencias():
+    catalogo = _catalogo_destinos_con_codigo("0001004443")
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("0001009943", catalogo)
+        == "0001009943"
+    )
+
+
+def test_corregir_codigo_destinatario_abstiene_con_longitud_distinta():
+    catalogo = _catalogo_destinos_con_codigo("0001004443")
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("000100444", catalogo)
+        == "000100444"
+    )
+
+
+def test_corregir_codigo_destinatario_abstiene_ante_ambiguedad():
+    """Si dos códigos activos y confirmados del catálogo quedan igual de
+    cerca (distancia 1) del código leído, no se adivina entre ellos —
+    mismo criterio conservador de unicidad ya usado para patentes."""
+    catalogo = {
+        "destinos": [
+            {"codigo_destino": "1111111112", "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO"},
+            {"codigo_destino": "2111111111", "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO"},
+        ]
+    }
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("1111111111", catalogo)
+        == "1111111111"
+    )
+
+
+def test_corregir_codigo_destinatario_ignora_destino_inactivo_o_no_confirmado():
+    catalogo = _catalogo_destinos_con_codigo(
+        "0001004443", estado_calidad="PENDIENTE"
+    )
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("0001001443", catalogo)
+        == "0001001443"
+    )
+    catalogo_inactivo = _catalogo_destinos_con_codigo(
+        "0001004443", estado_vigencia="INACTIVO"
+    )
+    assert (
+        _corregir_codigo_destinatario_por_catalogo("0001001443", catalogo_inactivo)
+        == "0001001443"
+    )
+
+
+def test_corregir_codigo_destinatario_sin_catalogo_no_falla():
+    assert _corregir_codigo_destinatario_por_catalogo("0001001443", None) == "0001001443"
+    assert _corregir_codigo_destinatario_por_catalogo("", {"destinos": []}) == ""
+    assert _corregir_codigo_destinatario_por_catalogo(None, {"destinos": []}) == ""
 
 
 def _crear_archivo(ruta):
