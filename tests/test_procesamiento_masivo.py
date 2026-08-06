@@ -618,6 +618,132 @@ def test_procesar_archivo_destino_por_codigo_no_se_pierde_si_sombra_no_confirma(
     assert resultado["obra_destino"] == "BODEGA CENTRAL"
 
 
+def test_procesar_archivo_resuelve_cliente_por_codigo_destinatario_del_destino(
+    tmp_path, monkeypatch
+):
+    """Reproduce el caso real 464110: cliente y RUT no llegan legibles desde
+    el OCR, pero el Código Destinatario ya identifica, a través de un
+    destino confirmado y único, el cliente_id vinculado en el catálogo
+    maestro. Mecanismo general: Código Destinatario -> destino -> cliente_id
+    -> Cliente, sin nombre ni RUT legibles en el documento."""
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "No encontrado",
+        "RUT del cliente": "No encontrado",
+        "obra destino": "No encontrado",
+        "chofer": "MARIO SOTO",
+    }
+    bloques = [
+        BloqueOCR("COD DESTINATARIO", ((20, 20), (155, 20), (155, 38), (20, 38)), 0.9),
+        BloqueOCR("0001004443", ((170, 20), (260, 20), (260, 38), (170, 38)), 0.9),
+    ]
+    destinos_maestros = {
+        "destinos": [{
+            "destino_id": "destino-1",
+            "cliente_id": "cliente-1",
+            "nombre_destino": "VISTA CLARA 2351",
+            "codigo_destino": "0001004443",
+            "direccion": "VISTA CLARA 2351, CERRILLOS",
+            "comuna": "CERRILLOS",
+            "region": "RM",
+            "pais": "CHILE",
+            "aliases": [],
+            "estado_calidad": "CONFIRMADO",
+            "estado_vigencia": "ACTIVO",
+        }]
+    }
+    clientes = {
+        "clientes": [{
+            "cliente_id": "cliente-1",
+            "razon_social": "TORRES OCARANZA LTDA",
+            "nombre_comercial": "",
+            "rut": "50234350-5",
+            "aliases": [],
+            "estado_calidad": "CONFIRMADO",
+            "estado_vigencia": "ACTIVO",
+        }]
+    }
+
+    def cargar_catalogo(ruta_catalogo, *args, **kwargs):
+        nombre = Path(ruta_catalogo).name
+        if nombre == "destinos_maestros.json":
+            return destinos_maestros
+        if nombre == "clientes.json":
+            return clientes
+        return {}
+
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(
+        procesamiento_masivo, "cargar_catalogo_json", Mock(side_effect=cargar_catalogo)
+    )
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+
+    resultado = procesar_archivo(
+        ruta, campos_controlados_autorizados=frozenset({"destino"})
+    )
+
+    assert resultado["cliente"] == "TORRES OCARANZA LTDA"
+    assert resultado["obra_destino"] == "VISTA CLARA 2351"
+
+
+def test_procesar_archivo_codigo_destinatario_sin_coincidencia_conserva_abstencion(
+    tmp_path, monkeypatch
+):
+    """Caso real 464260: existe Código Destinatario pero no coincide con
+    ningún destino confirmado del catálogo; cliente debe permanecer en
+    abstención, igual que sin el mecanismo nuevo."""
+    ruta = tmp_path / "guia.jpg"
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "No encontrado",
+        "RUT del cliente": "No encontrado",
+        "obra destino": "No encontrado",
+        "chofer": "MARIO SOTO",
+    }
+    bloques = [
+        BloqueOCR("COD DESTINATARIO", ((20, 20), (155, 20), (155, 38), (20, 38)), 0.9),
+        BloqueOCR("00D2N032BD", ((170, 20), (260, 20), (260, 38), (170, 38)), 0.9),
+    ]
+    destinos_maestros = {
+        "destinos": [{
+            "destino_id": "destino-1",
+            "cliente_id": "cliente-1",
+            "nombre_destino": "VISTA CLARA 2351",
+            "codigo_destino": "0001004443",
+            "direccion": "VISTA CLARA 2351, CERRILLOS",
+            "comuna": "CERRILLOS",
+            "region": "RM",
+            "pais": "CHILE",
+            "aliases": [],
+            "estado_calidad": "CONFIRMADO",
+            "estado_vigencia": "ACTIVO",
+        }]
+    }
+
+    def cargar_catalogo(ruta_catalogo, *args, **kwargs):
+        nombre = Path(ruta_catalogo).name
+        if nombre == "destinos_maestros.json":
+            return destinos_maestros
+        return {}
+
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    monkeypatch.setattr(
+        procesamiento_masivo, "cargar_catalogo_json", Mock(side_effect=cargar_catalogo)
+    )
+    monkeypatch.setattr("atlas_core.catalogos.cargar_catalogo_json", Mock(return_value={}))
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["cliente"] == "No encontrado"
+
+
 def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch):
     ruta = tmp_path / "guia.jpg"
     bloques = [

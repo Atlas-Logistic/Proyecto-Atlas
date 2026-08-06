@@ -35,11 +35,13 @@ def _destino(
     aliases=(),
     calidad="CONFIRMADO",
     activo=True,
+    codigo="",
 ):
     return {
         "destino_id": destino_id,
         "cliente_id": cliente_id,
         "nombre_destino": nombre,
+        "codigo_destino": codigo,
         "direccion": direccion,
         "comuna": comuna,
         "region": region,
@@ -397,3 +399,82 @@ def test_evidencia_insuficiente_abstencion_segura():
     )
     assert resultado.estado is EstadoResolucion.NO_RESUELTO
     assert resultado.entidad is None
+
+
+def test_codigo_destinatario_exacto_confirma_con_nombre_ilegible():
+    # Caso real guía 464110/464106: el nombre OCR de destino está demasiado
+    # degradado para superar el umbral fuzzy, pero el Código Destinatario
+    # coincide de forma exacta y única con el catálogo maestro.
+    resultado = _resolver(
+        _destino(
+            "d1", "c1", "VISTA CLARA 2351", "VISTA CLARA 2351, CERRILLOS",
+            comuna="CERRILLOS", codigo="0001004443",
+        ),
+        obra_destino="xxx ilegible xxx",
+        codigo_destinatario="0001004443",
+    )
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert resultado.via_decision == "CODIGO_DESTINATARIO_EXACTO"
+    assert resultado.id_destino_canonico == "d1"
+    assert resultado.destino_canonico == "VISTA CLARA 2351"
+    assert any(
+        e.tipo == "CODIGO_DESTINATARIO_EXACTO" for e in resultado.evidencias
+    )
+
+
+def test_codigo_destinatario_ausente_no_cambia_comportamiento_previo():
+    resultado = _resolver(
+        _destino(
+            "d1", "c1", "VISTA CLARA 2351", "VISTA CLARA 2351, CERRILLOS",
+            comuna="CERRILLOS", codigo="0001004443",
+        ),
+        obra_destino="xxx ilegible xxx",
+    )
+    assert resultado.estado is EstadoResolucion.NO_RESUELTO
+
+
+def test_codigo_destinatario_sin_coincidencia_en_catalogo_se_abstiene():
+    # Caso real guía 464260: el código extraído no coincide con ningún
+    # destino confirmado del catálogo.
+    resultado = _resolver(
+        _destino(
+            "d1", "c1", "VISTA CLARA 2351", "VISTA CLARA 2351, CERRILLOS",
+            comuna="CERRILLOS", codigo="0001004443",
+        ),
+        obra_destino="xxx ilegible xxx",
+        codigo_destinatario="00D2N032BD",
+    )
+    assert resultado.estado is EstadoResolucion.NO_RESUELTO
+
+
+def test_codigo_destinatario_en_conflicto_con_nombre_exige_revision():
+    resultado = _resolver(
+        _destino(
+            "d1", "c1", "VISTA CLARA 2351", "VISTA CLARA 2351, CERRILLOS",
+            comuna="CERRILLOS", codigo="0001004443",
+        ),
+        _destino(
+            "d2", "c1", "BODEGA NORTE", "OTRA CALLE 999, RENCA",
+            codigo="",
+        ),
+        obra_destino="BODEGA NORTE",
+        codigo_destinatario="0001004443",
+    )
+    assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
+    assert any(
+        c.campos_enfrentados == ("obra_destino", "codigo_destinatario")
+        for c in resultado.contradicciones
+    )
+
+
+def test_codigo_destinatario_de_destino_no_confirmado_exige_revision():
+    resultado = _resolver(
+        _destino(
+            "d1", "c1", "VISTA CLARA 2351", "VISTA CLARA 2351, CERRILLOS",
+            comuna="CERRILLOS", codigo="0001004443", calidad="PENDIENTE",
+        ),
+        obra_destino="xxx ilegible xxx",
+        codigo_destinatario="0001004443",
+    )
+    assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
+    assert resultado.via_decision == "CALIDAD_INCOMPLETA"

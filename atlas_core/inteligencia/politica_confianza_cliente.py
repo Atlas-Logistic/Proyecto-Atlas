@@ -16,6 +16,7 @@ class ViaDecisionCliente(str, Enum):
     FUZZY_MAS_RUT = "FUZZY_MAS_RUT"
     FUZZY_ALTA_CONFIANZA = "FUZZY_ALTA_CONFIANZA"
     FUZZY_UNICO = "FUZZY_UNICO"
+    CLIENTE_ID_POR_DESTINO_CODIGO = "CLIENTE_ID_POR_DESTINO_CODIGO"
     CONTRADICCION = "CONTRADICCION"
     DUPLICADO = "DUPLICADO"
     INACTIVO = "INACTIVO"
@@ -65,6 +66,13 @@ POLITICA_CONFIANZA_CLIENTE_V1 = PoliticaConfianzaCliente(
         ViaDecisionCliente.FUZZY_MAS_RUT: 0.98,
         ViaDecisionCliente.FUZZY_ALTA_CONFIANZA: 0.95,
         ViaDecisionCliente.FUZZY_UNICO: 0.85,
+        # Evidencia determinista de dos saltos, sin ninguna coincidencia
+        # difusa: Código Destinatario -> destino confirmado y único ->
+        # cliente_id del mismo registro. Por debajo del RUT leído
+        # directamente en este documento (0.95), pero por encima de un
+        # nombre canónico exacto aislado (0.90), porque exige unicidad y
+        # calidad confirmada en dos catálogos distintos, no solo en uno.
+        ViaDecisionCliente.CLIENTE_ID_POR_DESTINO_CODIGO: 0.93,
         ViaDecisionCliente.CONTRADICCION: 0.0,
         ViaDecisionCliente.DUPLICADO: 0.0,
         ViaDecisionCliente.INACTIVO: 0.0,

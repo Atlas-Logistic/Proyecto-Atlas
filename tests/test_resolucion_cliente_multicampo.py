@@ -322,3 +322,91 @@ def test_auditoria_detecta_rut_y_alias_duplicados():
     assert resolver_cliente_rut("", rut, catalogo).estado is (
         EstadoResolucion.REQUIERE_REVISION
     )
+
+
+def test_codigo_destinatario_sin_nombre_ni_rut_confirma_cliente(catalogo):
+    # Caso real guía 464110: cliente y RUT vienen ilegibles en el documento,
+    # pero el Código Destinatario ya identificó, a través de un destino
+    # confirmado y único, el cliente_id vinculado en el catálogo maestro.
+    resultado = resolver_cliente_rut(
+        "", "", catalogo,
+        id_cliente_por_destino_codigo="cliente-demo-sur",
+    )
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert resultado.identificador_canonico == "cliente:cliente-demo-sur"
+    assert resultado.valor_canonico == "TRANSPORTES DEMO DEL SUR LTDA."
+    assert resultado.via_decision == "CLIENTE_ID_POR_DESTINO_CODIGO"
+    assert any(
+        e.tipo == "CLIENTE_ID_POR_DESTINO_CODIGO" for e in resultado.evidencias
+    )
+    assert not resultado.requiere_revision_humana
+
+
+def test_codigo_destinatario_inexistente_en_catalogo_se_abstiene(catalogo):
+    resultado = resolver_cliente_rut(
+        "", "", catalogo,
+        id_cliente_por_destino_codigo="cliente-que-no-existe",
+    )
+    assert resultado.estado is EstadoResolucion.NO_RESUELTO
+    assert resultado.entidad is None
+
+
+def test_codigo_destinatario_ausente_no_cambia_comportamiento_previo(catalogo):
+    # Caso real guía 464260: no hay destino confirmado por código para esta
+    # guía, así que la evidencia cruzada nunca llega; debe abstenerse igual
+    # que sin el mecanismo nuevo.
+    resultado = resolver_cliente_rut("", "", catalogo)
+    assert resultado.estado is EstadoResolucion.NO_RESUELTO
+    assert resultado.entidad is None
+
+
+def test_codigo_destinatario_en_conflicto_con_rut_exige_revision(catalogo):
+    resultado = resolver_cliente_rut(
+        "", _rut(101), catalogo,
+        id_cliente_por_destino_codigo="cliente-demo-sur",
+    )
+    assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
+    assert resultado.requiere_revision_humana
+    contradiccion = next(
+        c for c in resultado.contradicciones
+        if c.campos_enfrentados == ("cliente", "cliente_id_por_destino_codigo")
+    )
+    assert len(contradiccion.entidades_involucradas) == 2
+
+
+def test_codigo_destinatario_en_conflicto_con_nombre_exige_revision(catalogo):
+    resultado = resolver_cliente_rut(
+        "ADN DEMO", "", catalogo,
+        id_cliente_por_destino_codigo="cliente-demo-sur",
+    )
+    assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
+    assert any(
+        c.campos_enfrentados == ("cliente", "cliente_id_por_destino_codigo")
+        for c in resultado.contradicciones
+    )
+
+
+def test_rut_exacto_tiene_prioridad_sobre_codigo_destinatario_compatible(catalogo):
+    resultado = resolver_cliente_rut(
+        "", _rut(202), catalogo,
+        id_cliente_por_destino_codigo="cliente-demo-sur",
+    )
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert resultado.identificador_canonico == "cliente:cliente-demo-sur"
+    assert resultado.via_decision == "RUT_EXACTO_UNICO"
+
+
+def test_codigo_destinatario_de_cliente_no_confirmado_exige_revision():
+    catalogo = {
+        "clientes": [
+            _registro(
+                "pendiente", "CLIENTE SIN CONFIRMAR SPA", _rut(9),
+                estado_calidad="PENDIENTE",
+            ),
+        ]
+    }
+    resultado = resolver_cliente_rut(
+        "", "", catalogo, id_cliente_por_destino_codigo="pendiente",
+    )
+    assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
+    assert resultado.via_decision == "CALIDAD_NO_CONFIRMADA"

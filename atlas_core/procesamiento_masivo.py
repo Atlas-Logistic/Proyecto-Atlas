@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Collection, Iterable, Mapping
 
 from atlas_core.catalogos import (
+    _buscar_destino_maestro_por_codigo_estructurado,
     cargar_catalogo_json,
     enriquecer_datos_con_catalogos,
 )
@@ -646,14 +647,24 @@ def procesar_archivo(
         and registro.get("estado_vigencia") == "ACTIVO"
         and registro.get("estado_calidad") in {"CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
     }
+    cliente_sin_evidencia_directa = (
+        nombre_cliente_original in {"", "No encontrado"}
+        and str(datos.get("RUT del cliente", "No encontrado")).strip()
+        in {"", "No encontrado"}
+    )
+    catalogo_destinos_tiene_codigos = any(
+        str(registro.get("codigo_destino", "")).strip()
+        for registro in catalogo_destinos_maestros.get("destinos", [])
+        if isinstance(registro, dict)
+    )
     campos_estructurados: dict[str, object] = {}
-    if (
+    if catalogo_destinos_tiene_codigos and (
         _normalizar(destino_original) not in nombres_destino_confirmados
-        and any(
-            str(registro.get("codigo_destino", "")).strip()
-            for registro in catalogo_destinos_maestros.get("destinos", [])
-            if isinstance(registro, dict)
-        )
+        # Sin nombre ni RUT de cliente legibles en el documento, el Código
+        # Destinatario es la única vía posible para identificar cliente
+        # (destino -> cliente_id); se reconstruye aunque el destino ya
+        # esté resuelto por nombre.
+        or cliente_sin_evidencia_directa
     ):
         if bloques_guia is None:
             bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
@@ -666,6 +677,20 @@ def procesar_archivo(
             logger.info(
                 "codigo_destinatario reconstruido mediante etiqueta-valor-geometrico-v1"
             )
+    # Cadena de evidencia determinista y general: Código Destinatario ->
+    # destino confirmado y único del catálogo maestro -> cliente_id del
+    # mismo registro. Reutiliza la misma función exacta-única-confirmada ya
+    # usada por el enriquecimiento de destino; no introduce una segunda
+    # lógica de búsqueda.
+    destino_por_codigo_destinatario = _buscar_destino_maestro_por_codigo_estructurado(
+        campos_estructurados.get("codigo_destinatario"),
+        catalogo_destinos_maestros,
+    )
+    id_cliente_por_destino_codigo = (
+        str(destino_por_codigo_destinatario.get("cliente_id", "")).strip()
+        if destino_por_codigo_destinatario is not None
+        else ""
+    )
     datos = enriquecer_datos_con_catalogos(
         datos,
         textos,
@@ -752,7 +777,11 @@ def procesar_archivo(
         "fuente": "procesamiento_masivo",
         "destino": str(datos.get("obra destino", "No encontrado")).strip(),
     }
-    if nombre_cliente_ocr not in {"", "No encontrado"} or rut_cliente not in {"", "No encontrado"}:
+    if (
+        nombre_cliente_ocr not in {"", "No encontrado"}
+        or rut_cliente not in {"", "No encontrado"}
+        or id_cliente_por_destino_codigo
+    ):
         catalogo_clientes = cargar_catalogo_json(
             Path(carpeta_catalogos or "catalogos") / "clientes.json"
         )
@@ -761,6 +790,7 @@ def procesar_archivo(
             rut_cliente,
             catalogo_clientes,
             contexto=contexto_cliente,
+            id_cliente_por_destino_codigo=id_cliente_por_destino_codigo,
         )
         datos["cliente"], requiere_revision_cliente = _integrar_resolucion_multicampo(
             campo="cliente",
@@ -811,6 +841,7 @@ def procesar_archivo(
             and decision_cliente.estado is EstadoResolucion.CONFIRMADO
             else nombre_cliente_original
         ),
+        codigo_destinatario=campos_estructurados.get("codigo_destinatario", ""),
         contexto={"fuente": "procesamiento_masivo"},
     )
     if resultado_destino_sombra.completo:

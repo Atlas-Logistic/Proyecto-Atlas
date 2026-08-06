@@ -100,6 +100,7 @@ def crear_snapshot_catalogo_destinos(
             } | ({str(r.get("cliente_id", "")).strip()}
                  if str(r.get("cliente_id", "")).strip() else set()))),
             "nombre_destino": str(r.get("nombre_destino", "")).strip(),
+            "codigo_destino": str(r.get("codigo_destino", "")).strip(),
             "direccion": str(r.get("direccion", "")).strip(),
             "comuna": str(r.get("comuna", "")).strip().upper(),
             "region": region_canonica(r.get("region", "")),

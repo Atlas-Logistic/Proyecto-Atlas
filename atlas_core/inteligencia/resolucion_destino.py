@@ -292,6 +292,7 @@ def resolver_destino_ubicacion(
     *,
     id_cliente_canonico: object = "",
     cliente_canonico: object = "",
+    codigo_destinatario: object = "",
     planta_documental: object = "",
     calidades: Mapping[str, float] | None = None,
     contexto: Mapping[str, Any] | None = None,
@@ -327,10 +328,14 @@ def resolver_destino_ubicacion(
     obs_planta_doc = _observacion(
         "planta_documental", planta_documental, "EVIDENCIA_DOCUMENTAL"
     )
+    obs_codigo = _observacion(
+        "codigo_destinatario", codigo_destinatario, "EVIDENCIA_DOCUMENTAL"
+    )
     observaciones = (
         obs_nombre, obs_direccion, obs_comuna, obs_region,
-        obs_planta, obs_planta_doc,
+        obs_planta, obs_planta_doc, obs_codigo,
     )
+    codigo_buscado = str(codigo_destinatario or "").strip().upper()
     cliente_id = _resolver_cliente_id(
         snapshot, id_cliente_canonico, cliente_canonico
     )
@@ -344,6 +349,7 @@ def resolver_destino_ubicacion(
     datos: dict[str, dict[str, Any]] = {}
     nombre_fuertes: set[str] = set()
     direccion_fuertes: set[str] = set()
+    codigo_fuertes: set[str] = set()
     for identificador, registro in snapshot.destinos.items():
         variantes = _variantes_nombre(registro)
         variantes_norm = [normalizar_texto_destino(v) for v in variantes]
@@ -364,10 +370,24 @@ def resolver_destino_ubicacion(
         tipo_direccion, similitud_direccion = _direccion_tipo(
             obs_direccion.valor_original, str(registro["direccion"])
         )
+        # Coincidencia exacta y única de Código Destinatario contra el
+        # código maestro del propio registro: evidencia determinista, sin
+        # comparación difusa de texto. Se exige además calidad confirmada
+        # más abajo, igual que cualquier otra vía. A diferencia del nombre
+        # y la dirección, esta evidencia puede generar un candidato por sí
+        # sola, incluso si el nombre OCR está demasiado degradado para
+        # coincidir con nada.
+        codigo_exacto = bool(
+            codigo_buscado
+            and str(registro.get("codigo_destino", "")).strip().upper()
+            == codigo_buscado
+        )
         if exacto_canonico or alias_exacto:
             nombre_fuertes.add(identificador)
         if tipo_direccion == "DIRECCION_EXACTA":
             direccion_fuertes.add(identificador)
+        if codigo_exacto:
+            codigo_fuertes.add(identificador)
         evidencia_score = (
             (55 if alias_exacto else 50 if exacto_canonico else 20 * fuzzy
              if fuzzy >= UMBRAL_FUZZY_DESTINO else 0)
@@ -378,7 +398,7 @@ def resolver_destino_ubicacion(
         score = evidencia_score + (
             20 if evidencia_score and cliente_id
             and cliente_id in clientes_destino(registro) else 0
-        )
+        ) + (200 if codigo_exacto else 0)
         if score:
             datos[identificador] = {
                 "registro": registro,
@@ -387,12 +407,26 @@ def resolver_destino_ubicacion(
                 "fuzzy": fuzzy,
                 "direccion_tipo": tipo_direccion,
                 "direccion_similitud": similitud_direccion,
+                "codigo_exacto": codigo_exacto,
                 "score": score,
             }
 
     evidencias: list[EvidenciaResolucion] = []
     contradicciones: list[ContradiccionResolucion] = []
     alternativas: list[AlternativaResolucion] = []
+    if codigo_fuertes and (nombre_fuertes | direccion_fuertes) - codigo_fuertes:
+        contradicciones.append(ContradiccionResolucion(
+            ("obra_destino", "codigo_destinatario"),
+            (),
+            tuple(
+                _entidad_destino(i, snapshot.destinos[i])
+                for i in sorted(codigo_fuertes | nombre_fuertes | direccion_fuertes)
+            ),
+            "El código destinatario y el nombre o dirección observados "
+            "apuntan a destinos distintos.",
+            GravedadContradiccion.ALTA,
+            "Exige revisión; el código nunca reemplaza silenciosamente al nombre.",
+        ))
     if nombre_fuertes and direccion_fuertes and nombre_fuertes.isdisjoint(
         direccion_fuertes
     ):
@@ -473,6 +507,13 @@ def resolver_destino_ubicacion(
                 "ALIAS_DESTINO_EXACTO", "snapshot_destinos", obs_nombre,
                 entidad, 0.98 * calidad("obra_destino"),
                 "Alias explícito y único.", True,
+            ))
+        if dato["codigo_exacto"]:
+            evidencias.append(EvidenciaResolucion(
+                "CODIGO_DESTINATARIO_EXACTO", "snapshot_destinos", obs_codigo,
+                entidad, calidad("codigo_destinatario"),
+                "Código destinatario exacto y único contra el catálogo maestro.",
+                True,
             ))
         if dato["fuzzy"] >= UMBRAL_FUZZY_DESTINO and not (
             dato["exacto"] or dato["alias"]
@@ -590,6 +631,9 @@ def resolver_destino_ubicacion(
     ):
         estado = EstadoResolucion.REQUIERE_REVISION
         via = ViaDecisionDestino.CALIDAD_INCOMPLETA
+    elif dato and dato["codigo_exacto"]:
+        estado = EstadoResolucion.CONFIRMADO
+        via = ViaDecisionDestino.CODIGO_DESTINATARIO_EXACTO
     elif dato and dato["direccion_tipo"] == "DIRECCION_EXACTA" and (
         dato["exacto"] or dato["alias"]
     ):
@@ -648,6 +692,8 @@ def resolver_destino_ubicacion(
             "Nombre exacto, único y de calidad confirmada.",
         ViaDecisionDestino.ALIAS_EXACTO_UNICO:
             "Alias exacto, único y trazable.",
+        ViaDecisionDestino.CODIGO_DESTINATARIO_EXACTO:
+            "Código destinatario exacto, único y confirmado fijó el destino.",
         ViaDecisionDestino.DIRECCION_EXACTA_UNICA:
             "Dirección completa y única confirmó el destino.",
         ViaDecisionDestino.NOMBRE_MAS_DIRECCION:

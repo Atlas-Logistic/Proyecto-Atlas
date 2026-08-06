@@ -1,5 +1,64 @@
 # Trabajos activos Atlas
 
+## Resolución Inteligente de Identidades Operacionales — Fase 1 (Cliente ↔ Destino)
+
+- Estado: COMPLETADA — sin reserva activa.
+- Rama: `feature-cobertura-origen-fase1` (continuación directa de Calidad de
+  Publicación Operacional).
+- Causa raíz demostrada: cada resolver (Cliente, Destino) solo consumía
+  evidencia de su propio campo; la evidencia cruzada entre entidades ya
+  extraída por el pipeline (Código Destinatario, `cliente_id` del destino)
+  estaba conectada únicamente como bono de confianza para un candidato ya
+  encontrado por nombre/dirección — nunca como generador independiente de
+  candidato. Con evidencia real: la guía 464110 resolvía
+  `obra_destino="VISTA CLARA 2351"` por Código Destinatario, y ese mismo
+  registro del catálogo trae `cliente_id` apuntando a `TORRES OCARANZA LTDA`
+  — pero `cliente` quedaba `"No encontrado"`, aunque la identidad correcta
+  ya estaba cargada en memoria para esa misma guía.
+- Mecanismo general implementado (sin bajar umbrales, sin alias genéricos,
+  sin memorizar guías, sin tocar Política/Orquestador/OpenRouteService/
+  Desktop):
+  1. `resolver_destino_ubicacion` (`atlas_core/inteligencia/resolucion_destino.py`)
+     gana una vía nueva, `CODIGO_DESTINATARIO_EXACTO`: Código Destinatario
+     exacto y único contra un destino `CONFIRMADO`/`CONFIRMADO_DOCUMENTAL`
+     genera candidato por sí solo (no solo amplifica uno ya encontrado por
+     nombre/dirección); un conflicto entre código y nombre/dirección fuerza
+     `REQUIERE_REVISION` en vez de sobrescribir en silencio.
+  2. `resolver_cliente_rut` (`atlas_core/inteligencia/resolucion_cliente.py`)
+     gana `id_cliente_por_destino_codigo`: cuando Destino ya resolvió por
+     Código Destinatario, su `cliente_id` se ofrece como evidencia
+     determinista de cliente (vía nueva `CLIENTE_ID_POR_DESTINO_CODIGO`),
+     exigiendo entidad única, activa y de calidad confirmada en el catálogo
+     de clientes; cede ante cualquier contradicción con RUT o nombre.
+  3. `procesamiento_masivo.procesar_archivo` conecta la cadena reutilizando
+     la misma función exacta-única-confirmada ya usada por el
+     enriquecimiento de destino (`_buscar_destino_maestro_por_codigo_estructurado`),
+     sin duplicar lógica de búsqueda; el resolver de Cliente ahora se invoca
+     también cuando nombre y RUT vienen vacíos pero existe esa evidencia
+     cruzada.
+- Validación real (guía 464110, antes → después): Cliente
+  `"No encontrado"` → `"TORRES OCARANZA LTDA"`; Destino se mantiene
+  `"VISTA CLARA 2351"`. Guía 464106 y guía de control 463604: `cliente`
+  sin cambios (`"TORRES OCARANZA LTDA"` en ambas, ya resuelto por evidencia
+  directa). Guía 464260: `cliente` permanece en abstención
+  (`"SRUOKON SACK"`) porque su Código Destinatario no coincide con ningún
+  destino confirmado del catálogo — el mecanismo nunca inventa evidencia
+  que no existe. Cero regresiones en el resto del lote real
+  (463774, 463936, 464145, 464206, 464259, 464107, 464108, 464109).
+- Validación: 1199/1199 Atlas (14 pruebas nuevas), `compileall` y
+  `git diff --check` aprobados.
+- Riesgo residual: Código Cliente (además de Código Destinatario) quedó
+  cableado con el mismo mecanismo general, pero es inerte en producción
+  porque `clientes.json` no tiene ningún campo `codigo_cliente` hoy; se
+  activará solo si ese campo se agrega al catálogo. Chofer y Material
+  quedaron fuera de este bloque por bloqueos de datos ya diagnosticados
+  (sin vínculo patente↔chofer en `vehiculos.json`; sin `materiales.json`
+  real en producción) — no se tocaron.
+- Próximo bloque: por instrucción explícita, el siguiente bloque es
+  exclusivamente la recuperación del panel GPS / "Revisión de destinos" de
+  Atlas Desktop; no se continúa con Chofer ni Material sin autorización
+  aparte.
+
 ## Calidad de Publicación Operacional — Fase 1
 
 - Estado: COMPLETADA — sin reserva activa.

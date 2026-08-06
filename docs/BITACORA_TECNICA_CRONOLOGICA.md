@@ -795,3 +795,128 @@ Esta bitácora registra, en orden temporal, las decisiones importantes, cambios 
   revisar su propio historial de git alrededor de esa rama para decidir entre
   restaurarlo o documentar el flujo manual de bandeja como comportamiento
   esperado.
+
+### 2026-08-05 — Resolución Inteligente de Identidades Operacionales — Fase 1 (Cliente ↔ Destino)
+
+- Decisión importante: diagnosticar primero, sin tocar código, por qué Atlas
+  publica el texto OCR limpio de Cliente/Destino tal cual, sin convertirlo en
+  identidad canónica, cuando ya existe evidencia estructural suficiente
+  (RUT, Código Cliente, Código Destinatario, SAP, catálogos) para hacerlo.
+- Mapeo real de la arquitectura (lectura directa del código, no supuestos):
+  `resolver_cliente_rut` (`atlas_core/inteligencia/resolucion_cliente.py`)
+  solo combinaba nombre + RUT propios; `contexto` (destino/material en
+  texto) únicamente sumaba un bono de 0.25 a un candidato ya elegido por
+  nombre o RUT, nunca generaba uno. `resolver_destino_ubicacion`
+  (`atlas_core/inteligencia/resolucion_destino.py`) sí recibía
+  `id_cliente_canonico`/`cliente_canonico`, pero solo como bono de +20 sobre
+  un `score` que ya debía ser mayor que 0 por nombre o dirección — si el
+  nombre OCR no superaba el umbral fuzzy (0.88) y la dirección tampoco
+  coincidía, ese destino nunca entraba al diccionario de candidatos,
+  cliente_id o no. El Código Destinatario, extraído de forma estructural por
+  `_reconstruir_campos_documentales`, solo se usaba en un atajo previo y
+  simple (`atlas_core.catalogos.enriquecer_datos_con_catalogos` →
+  `_buscar_destino_maestro_por_codigo_estructurado`), completamente fuera
+  del contrato Multicampo (sin `EvidenciaResolucion`, sin `via_decision`, sin
+  traza de auditoría) y nunca llegaba al resolver real de Destino ni,
+  mucho menos, al de Cliente.
+- Evidencia real, guía 464110 (inspección directa de los catálogos privados
+  reales): `destinos_maestros.json` tiene `"VISTA CLARA 2351"` con
+  `codigo_destino="0001004443"` y `cliente_id="0f9d4dfa-..."`;
+  `clientes.json` tiene ese mismo `cliente_id` con
+  `razon_social="TORRES OCARANZA LTDA"`, `estado_calidad="CONFIRMADO"`,
+  `estado_vigencia="ACTIVO"`. Trazado real (`extraer_datos` +
+  `_reconstruir_campos_documentales` + `enriquecer_datos_con_catalogos`
+  sobre la guía real): `cliente` y `RUT del cliente` llegan `"No encontrado"`
+  desde el extractor lineal; el gate de `procesamiento_masivo.procesar_archivo`
+  que decide si vale la pena llamar a `resolver_cliente_rut` (`nombre != ""
+  or rut != ""`) daba `False`, así que **el resolver de Cliente nunca se
+  invocaba** para esta guía — mientras que `obra destino` sí se resolvía
+  correctamente a `"VISTA CLARA 2351"` por el atajo de Código Destinatario.
+  La identidad de cliente estaba deducible con evidencia 100% determinista,
+  ya cargada en memoria para la misma guía, y nunca se usaba.
+- Alternativas descartadas: bajar el umbral fuzzy de nombre; agregar un
+  alias genérico "TORRES OCARANZA"/variantes OCR al catálogo; memorizar la
+  guía 464110/464106 con un `if numero_guia == ...` — todas rechazadas por
+  instrucción explícita y por reproducir el mismo patrón de fallbacks por
+  guía ya señalado en la auditoría previa.
+- Mecanismo general implementado (autorizado tras el diagnóstico, alcance
+  estrictamente acotado a Cliente↔Destino):
+  1. `atlas_core/inteligencia/snapshot_catalogo_destinos.py`: se agrega
+     `codigo_destino` a los campos preservados del snapshot de destinos
+     (antes se descartaba por completo al congelar el catálogo).
+  2. `atlas_core/inteligencia/politica_confianza_destino.py` y
+     `politica_confianza_cliente.py`: nuevas vías `CODIGO_DESTINATARIO_EXACTO`
+     (0.98, al nivel de una dirección completa exacta) y
+     `CLIENTE_ID_POR_DESTINO_CODIGO` (0.93, por debajo del RUT leído en el
+     propio documento pero por encima de un nombre canónico exacto aislado,
+     porque exige unicidad y calidad confirmada en dos catálogos distintos).
+  3. `resolver_destino_ubicacion` gana el parámetro `codigo_destinatario`:
+     una coincidencia exacta y única contra `codigo_destino` del registro
+     genera candidato por sí sola (antes solo nombre/dirección podían
+     hacerlo); un conflicto entre código y un nombre/dirección fuerte de
+     *otro* destino se vuelve `ContradiccionResolucion` explícita en vez de
+     sobrescribir en silencio. El resto de las validaciones ya existentes
+     (calidad confirmada, activo, dirección/comuna/región compatibles)
+     siguen aplicando igual, por ser genéricas sobre el candidato elegido.
+  4. `resolver_cliente_rut` gana el parámetro `id_cliente_por_destino_codigo`:
+     se busca ese identificador exacto en el snapshot de clientes (sin
+     ninguna comparación difusa); si es único, activo y de calidad
+     confirmada, y no contradice al RUT o nombre observados, confirma
+     cliente por la nueva vía. Un conflicto con RUT o nombre se vuelve
+     `ContradiccionResolucion` y exige revisión, igual que la contradicción
+     RUT-vs-nombre ya existente.
+  5. `procesamiento_masivo.procesar_archivo` conecta la cadena reutilizando
+     `_buscar_destino_maestro_por_codigo_estructurado` (la misma función ya
+     usada por el enriquecimiento de destino, sin duplicar lógica de
+     búsqueda) para obtener el `cliente_id` del destino ya vinculado por
+     código, y lo pasa a `resolver_cliente_rut`. El gate que decide si
+     reconstruir campos estructurados desde bloques OCR ahora también se
+     activa cuando cliente no tiene nombre ni RUT legibles (antes solo
+     dependía del estado de destino), y el gate que decide si invocar al
+     resolver de Cliente ahora también se activa cuando existe esa
+     evidencia cruzada, aunque nombre y RUT vengan vacíos.
+- Corrección de una regresión propia detectada en el primer `pytest` tras
+  implementar: extender el primer gate a "cliente sin evidencia" sin
+  condicionarlo a que el catálogo realmente tenga códigos de destino rompió
+  4 pruebas existentes que no mockean catálogos ni imagen (`extraer_datos`
+  devolvía `{}`; el código intentaba entonces leer una imagen de prueba
+  inexistente y lanzaba `FileNotFoundError`). Se corrigió exigiendo primero,
+  como ya hacía el gate original, que el catálogo de destinos tenga al menos
+  un `codigo_destino` no vacío antes de intentar la reconstrucción
+  geométrica.
+- Validación real end-to-end (mismos catálogos privados reales,
+  reprocesamiento completo):
+  - 464110 (caso principal): `cliente` `"No encontrado"` →
+    `"TORRES OCARANZA LTDA"`; `obra_destino` se mantiene `"VISTA CLARA 2351"`;
+    el resto de los campos sin cambios.
+  - 464106: `cliente="TORRES OCARANZA LTDA"` sin cambios (ya resolvía por
+    evidencia directa); cero regresión.
+  - 464260: `cliente="SRUOKON SACK"` sin cambios — su Código Destinatario
+    (`00D2N032BD`) no coincide con ningún destino confirmado del catálogo
+    real, así que la cadena nunca se completa y el campo permanece
+    correctamente en abstención, tal como exige el contrato conservador.
+  - Guía de control 463604: `cliente="TORRES OCARANZA LTDA"` sin cambios.
+  - Resto del lote real (463774, 463936, 464145, 464206, 464259, 464107,
+    464108, 464109): sin cambios en ningún campo — cero regresiones.
+- Regresión: 1199/1199 Atlas (14 pruebas nuevas: vía por código en
+  `resolucion_cliente_multicampo`, vía por código en
+  `resolucion_destino_multicampo`, dos pruebas de integración reales en
+  `test_procesamiento_masivo.py` reproduciendo 464110 y 464260);
+  `compileall` y `git diff --check` aprobados.
+- Integridad: sin cambios en EasyOCR, umbrales de ningún campo, alias
+  genéricos, Política de Activación, Orquestador Multicampo,
+  OpenRouteService ni Desktop; ninguna regla usa el número de guía como
+  condición; el mismo contrato de evidencia/confianza/contradicción/
+  abstención de los resolvers existentes se mantiene sin excepciones.
+- Riesgo residual: Código Cliente quedó cableado con el mismo mecanismo
+  general (parámetro `id_cliente_por_destino_codigo` acepta cualquier
+  `cliente_id` determinado externamente, no solo el derivado de destino),
+  pero es inerte en producción porque `clientes.json` no tiene ningún campo
+  `codigo_cliente` hoy. Chofer y Material quedaron explícitamente fuera de
+  este bloque: Chofer porque `vehiculos.json` no tiene ningún vínculo
+  patente↔chofer; Material porque no existe `materiales.json` real en la
+  instalación de producción (ninguno de los dos es un problema de cableado
+  de evidencia, sino de datos/catálogo faltante).
+- Acuerdo: por instrucción explícita, el siguiente bloque es exclusivamente
+  la recuperación del panel GPS / "Revisión de destinos" de Atlas Desktop;
+  Chofer y Material quedan pendientes de una autorización aparte.

@@ -398,12 +398,22 @@ def resolver_cliente_rut(
     contexto: Mapping[str, Any] | None = None,
     *,
     catalogo_empresas: Mapping[str, Mapping[str, Any]] | None = None,
+    id_cliente_por_destino_codigo: object = "",
     campo_obligatorio: bool = True,
     politica_confianza: PoliticaConfianzaCliente = (
         POLITICA_CONFIANZA_CLIENTE_V1
     ),
 ) -> ResultadoResolucionCliente:
-    """Resuelve solo cliente + RUT; destino/obra/contexto nunca deciden."""
+    """Resuelve cliente + RUT; ``contexto`` nunca decide por sí solo.
+
+    ``id_cliente_por_destino_codigo`` es la única evidencia cruzada que sí
+    puede fijar identidad por sí misma: debe ser un ``cliente_id`` ya
+    determinado de forma determinista y externa (Código Destinatario exacto,
+    único, contra un destino ``CONFIRMADO``/``CONFIRMADO_DOCUMENTAL`` del
+    catálogo maestro) — no una búsqueda difusa. Sigue exigiendo que la
+    entidad esté activa y con calidad confirmada en el catálogo de clientes,
+    y cede ante cualquier contradicción con RUT o nombre observados.
+    """
     snapshot = (
         catalogo_clientes
         if isinstance(catalogo_clientes, InstantaneaCatalogoClientes)
@@ -420,6 +430,42 @@ def resolver_cliente_rut(
     ]
     evidencias: list[EvidenciaResolucion] = []
     alternativas: list[AlternativaResolucion] = []
+
+    id_codigo_texto = str(id_cliente_por_destino_codigo or "").strip()
+    codigo_obs = ValorObservado(
+        "cliente_id_por_destino_codigo",
+        id_codigo_texto,
+        id_codigo_texto,
+        "destino_codigo_destinatario",
+        Disponibilidad.DISPONIBLE if id_codigo_texto else Disponibilidad.AUSENTE,
+        CalidadObservacion.NO_EVALUADA,
+        (
+            "cliente_id derivado de un destino resuelto por Código "
+            "Destinatario exacto, único y confirmado."
+        ),
+    )
+    # El identificador ya llega determinado externamente (Código
+    # Destinatario -> destino confirmado y único -> cliente_id del mismo
+    # registro): solo se busca por coincidencia exacta de identificador, sin
+    # ningún componente difuso.
+    codigo_matches = [
+        item for item in registros if item[0] == id_codigo_texto
+    ] if id_codigo_texto else []
+    for _, _, entidad in codigo_matches:
+        evidencias.append(EvidenciaResolucion(
+            "CLIENTE_ID_POR_DESTINO_CODIGO",
+            "destino_codigo_destinatario",
+            codigo_obs,
+            entidad,
+            0.93,
+            (
+                "El Código Destinatario del documento identificó, a través "
+                "de un destino confirmado y único, la identidad de cliente "
+                "vinculada en el catálogo maestro."
+            ),
+            True,
+        ))
+    codigo_entidad = codigo_matches[0][2] if len(codigo_matches) == 1 else None
 
     rut_matches = []
     if clase_rut == "VALIDO":
@@ -636,6 +682,34 @@ def resolver_cliente_rut(
             for evidencia in evidencias
         ]
 
+    if codigo_entidad and any(
+        otro and otro.identificador != codigo_entidad.identificador
+        for otro in (rut_entidad, nombre_entidad)
+    ):
+        entidades_en_conflicto = tuple(
+            e for e in (rut_entidad, nombre_entidad, codigo_entidad)
+            if e is not None
+        )
+        contradicciones.append(ContradiccionResolucion(
+            ("cliente", "cliente_id_por_destino_codigo"),
+            tuple(
+                evidencia
+                for evidencia in evidencias
+                if evidencia.candidato
+                and evidencia.candidato.identificador in {
+                    e.identificador for e in entidades_en_conflicto
+                }
+            ),
+            entidades_en_conflicto,
+            (
+                "El cliente_id derivado del destino por Código Destinatario "
+                "identifica una identidad distinta a la indicada por el "
+                "nombre o el RUT observados en este documento."
+            ),
+            GravedadContradiccion.ALTA,
+            "Impide reasignar la identidad silenciosamente; exige revisión.",
+        ))
+
     if clase_rut == "PARCIAL":
         evidencias.append(EvidenciaResolucion(
             "RUT_PARCIAL_NO_IDENTIFICANTE",
@@ -688,7 +762,7 @@ def resolver_cliente_rut(
                     "Obliga a revisión; el fragmento nunca reasigna identidad.",
                 ))
 
-    candidato = rut_entidad or nombre_entidad
+    candidato = rut_entidad or nombre_entidad or codigo_entidad
     razones: list[str] = [
         "Los valores OCR originales se conservaron sin sobrescritura.",
         "Solo cliente y RUT participaron en la decisión.",
@@ -827,6 +901,14 @@ def resolver_cliente_rut(
         estado = EstadoResolucion.PROPUESTO
         via = ViaDecisionCliente.FUZZY_UNICO
         razones.append("El fuzzy aislado solo propone; nunca confirma por sí solo.")
+    elif codigo_entidad:
+        estado = EstadoResolucion.CONFIRMADO
+        via = ViaDecisionCliente.CLIENTE_ID_POR_DESTINO_CODIGO
+        razones.append(
+            "El Código Destinatario, a través de un destino confirmado y "
+            "único, fija la identidad del cliente sin necesitar nombre ni "
+            "RUT legibles en este documento."
+        )
     else:
         candidato = None
         estado = EstadoResolucion.NO_RESUELTO
@@ -872,7 +954,7 @@ def resolver_cliente_rut(
     )
     return ResultadoResolucionCliente(
         tipo_entidad="cliente",
-        observaciones=(nombre_obs, rut_obs),
+        observaciones=(nombre_obs, rut_obs, codigo_obs),
         entidad=candidato,
         estado=estado,
         confianza=confianza,

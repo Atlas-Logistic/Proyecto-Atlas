@@ -15,6 +15,7 @@ class ViaDecisionDestino(str, Enum):
     NOMBRE_MAS_DIRECCION = "NOMBRE_MAS_DIRECCION"
     FUZZY_MAS_DIRECCION = "FUZZY_MAS_DIRECCION"
     FUZZY_O_PARCIAL = "FUZZY_O_PARCIAL"
+    CODIGO_DESTINATARIO_EXACTO = "CODIGO_DESTINATARIO_EXACTO"
     CONTRADICCION = "CONTRADICCION"
     DUPLICADO = "DUPLICADO"
     INACTIVO = "INACTIVO"
@@ -60,6 +61,11 @@ POLITICA_CONFIANZA_DESTINO_V1 = PoliticaConfianzaDestino(
         ViaDecisionDestino.NOMBRE_MAS_DIRECCION: 1.0,
         ViaDecisionDestino.FUZZY_MAS_DIRECCION: 0.92,
         ViaDecisionDestino.FUZZY_O_PARCIAL: 0.65,
+        # Código Destinatario exacto y único contra un registro maestro
+        # CONFIRMADO/CONFIRMADO_DOCUMENTAL: sin ninguna comparación difusa
+        # de texto, al mismo nivel de exigencia que una dirección completa
+        # exacta.
+        ViaDecisionDestino.CODIGO_DESTINATARIO_EXACTO: 0.98,
         ViaDecisionDestino.CONTRADICCION: 0.0,
         ViaDecisionDestino.DUPLICADO: 0.0,
         ViaDecisionDestino.INACTIVO: 0.0,
