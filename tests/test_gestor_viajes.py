@@ -77,7 +77,7 @@ def test_transporte_ausente_o_invalido_queda_pendiente(transporte):
 def test_chofer_canonico_fuzzy_se_conserva():
     viajes, _ = agrupar_viajes(
         [_fila(chofer="J0SE PEREZ")],
-        normalizador_chofer=lambda _: "JOSÉ PÉREZ",
+        normalizador_chofer=lambda nombre, rut: "JOSÉ PÉREZ",
     )
     assert viajes[0].choferes == ["JOSÉ PÉREZ"]
     assert viajes[0].documentos[0].evidencia["chofer"] == "J0SE PEREZ"

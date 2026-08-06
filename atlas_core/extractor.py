@@ -925,6 +925,19 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
                 puntuacion -= min(0.08, 20 / max(cercania, 1))
             candidatos.append((puntuacion, item))
 
+        # Vecindad visualmente saturada: misma protección general ya usada
+        # por _extraer_asociaciones_geometricas (Cliente/Destino) desde
+        # "Recuperación Geométrica Conservadora — Fase 1". Reutiliza la
+        # función exacta, sin duplicar lógica ni bajar ningún margen
+        # existente: tres o más grupos geométricos independientes junto a
+        # RETIRA impiden demostrar cuál candidato pertenece realmente al
+        # campo, así que se abstiene para esta etiqueta en vez de tomar el
+        # candidato de mejor puntaje.
+        if _contar_grupos_geometricos_contiguos(
+            [item for _, item in candidatos]
+        ) >= 3:
+            continue
+
         candidatos.sort(key=lambda candidato: (candidato[1]["x1"], candidato[1]["y1"], candidato[1]["simple"]))
         for indice, (puntuacion, item) in enumerate(candidatos):
             if len(item["texto"].split()) >= 2:

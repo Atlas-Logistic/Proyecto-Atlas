@@ -179,12 +179,13 @@ class Viaje:
 def _documento_desde_fila(
     fila: Mapping[str, object],
     *,
-    normalizador_chofer: Callable[[str], str] | None,
+    normalizador_chofer: Callable[[str, str], str] | None,
 ) -> DocumentoViaje:
     evidencia = {str(clave): str(valor or "") for clave, valor in fila.items()}
     chofer_original = str(fila.get("chofer", "")).strip()
+    rut_chofer_fila = str(fila.get("rut_chofer", "")).strip()
     chofer = (
-        normalizador_chofer(chofer_original)
+        normalizador_chofer(chofer_original, rut_chofer_fila)
         if normalizador_chofer and _valor_presente(chofer_original)
         else chofer_original
     )
@@ -248,7 +249,7 @@ def _motivos_revision_documentos(
 def agrupar_viajes(
     filas: Iterable[Mapping[str, object]],
     *,
-    normalizador_chofer: Callable[[str], str] | None = None,
+    normalizador_chofer: Callable[[str, str], str] | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     generador_id: Callable[[], str] | None = None,
 ) -> tuple[list[Viaje], list[dict[str, object]]]:

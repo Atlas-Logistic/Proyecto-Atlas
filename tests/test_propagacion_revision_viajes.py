@@ -160,7 +160,7 @@ def test_alias_ocr_conserva_revision_y_motivos():
     )
     viajes, _ = agrupar_viajes(
         [_fila(chofer="PAIRICIO SINTETICO", indicador_revision="REVISAR")],
-        normalizador_chofer=lambda _: "PATRICIO SINTETICO",
+        normalizador_chofer=lambda nombre, rut: "PATRICIO SINTETICO",
         reloj=RELOJ,
     )
     corregido = viajes[0]

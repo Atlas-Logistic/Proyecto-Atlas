@@ -148,7 +148,16 @@ def test_conflictos_y_evidencias_aparecen_en_viajes_csv(tmp_path):
     assert [e["numero_guia"] for e in evidencias] == ["000101", "000102"]
 
 
-def test_fuzzy_oficial_conserva_nombre_canonico_sin_cambiar_umbral(tmp_path):
+def test_fuzzy_puro_no_sobrescribe_nombre_en_viajes_sin_evidencia_de_rut(tmp_path):
+    """Antes de unificar la arquitectura, un único candidato por similitud
+    (sin RUT) bastaba para que el reporte reescribiera el nombre en
+    ``viajes.csv`` mediante un resolver fuzzy independiente. Esa es
+    exactamente la evidencia que ``resolver_chofer_rut`` —el resolver
+    oficial, ya usado por ``procesamiento_masivo``— clasifica como
+    ``PROPUESTO``, nunca ``CONFIRMADO`` ("el fuzzy aislado solo puede
+    proponer; nunca confirma por 0,85"). Con una única fuente de decisión,
+    el reporte ya no contradice ese contrato: conserva el valor tal como
+    llegó del pipeline principal."""
     catalogos = tmp_path / "catálogos"
     catalogos.mkdir()
     (catalogos / "choferes.json").write_text(
@@ -160,7 +169,35 @@ def test_fuzzy_oficial_conserva_nombre_canonico_sin_cambiar_umbral(tmp_path):
     )
     origen = tmp_path / "entrada.csv"
     salida = tmp_path / "reporte"
-    _escribir_csv(origen, [_fila(chofer="SALOMON PIZARR0")])
+    _escribir_csv(
+        origen,
+        [_fila(chofer="SALOMON PIZARR0", rut_chofer="No encontrado")],
+    )
+    generar_reporte_viajes(origen, salida, carpeta_catalogos=catalogos, reloj=RELOJ)
+    assert _leer_csv(salida / "viajes.csv")[0]["choferes"] == "SALOMON PIZARR0"
+
+
+def test_confirmacion_por_rut_se_reutiliza_como_unica_fuente_en_viajes_csv(tmp_path):
+    """Cuando el RUT observado coincide exacto y único con el catálogo —la
+    misma vía que ya usa ``procesamiento_masivo`` para confirmar Chofer en
+    el CSV principal—, el reporte de viajes reutiliza esa decisión oficial
+    en vez de aplicar una segunda lógica paralela: publica el nombre
+    canónico en ``viajes.csv``."""
+    catalogos = tmp_path / "catálogos"
+    catalogos.mkdir()
+    (catalogos / "choferes.json").write_text(
+        json.dumps(
+            {"12.345.678-5": {"nombre": "SALOMÓN PIZARRO", "activo": True}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    origen = tmp_path / "entrada.csv"
+    salida = tmp_path / "reporte"
+    _escribir_csv(
+        origen,
+        [_fila(chofer="SALOMON PIZARR0", rut_chofer="12.345.678-5")],
+    )
     generar_reporte_viajes(origen, salida, carpeta_catalogos=catalogos, reloj=RELOJ)
     assert _leer_csv(salida / "viajes.csv")[0]["choferes"] == "SALOMÓN PIZARRO"
 

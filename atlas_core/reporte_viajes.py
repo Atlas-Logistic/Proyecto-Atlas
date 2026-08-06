@@ -28,11 +28,10 @@ from atlas_core.catalogo_clientes import (
     EstadoVigenciaCliente,
     normalizar_nombre_cliente,
 )
-from atlas_core.catalogos import (
-    cargar_catalogo_json,
-    resolver_nombre_chofer_difuso,
-)
+from atlas_core.catalogos import cargar_catalogo_json
 from atlas_core.gestor_viajes import EstadoViaje, agrupar_viajes
+from atlas_core.inteligencia.contrato_multicampo import EstadoResolucion
+from atlas_core.inteligencia.resolucion_chofer import resolver_chofer_rut
 from atlas_core.procesamiento_masivo import COLUMNAS as COLUMNAS_PROCESAMIENTO
 
 
@@ -237,15 +236,26 @@ def _clave_cliente_orden(valor: str) -> str:
 
 
 def _normalizador_chofer_desde_catalogo(catalogo):
-    """Aplica exactamente el fuzzy conservador aprobado, sin cambiar umbrales."""
+    """Fuente única de decisión para el nombre de chofer publicado.
 
-    def normalizar(valor: str) -> str:
-        decision = resolver_nombre_chofer_difuso(catalogo, valor)
-        return (
-            decision.valor_resultado
-            if decision.estado == "COINCIDENCIA_SEGURA"
-            else valor
-        )
+    Reutiliza exactamente ``resolver_chofer_rut``, el mismo resolver oficial
+    que ya usa ``procesamiento_masivo`` para decidir el chofer del CSV
+    principal (RUT exacto, nombre/alias exacto o, si no hay evidencia más
+    fuerte, similitud difusa). El reporte de viajes ya no toma una segunda
+    decisión independiente: solo sustituye el nombre por el canónico cuando
+    ese mismo resolver lo confirma (``EstadoResolucion.CONFIRMADO``) — una
+    coincidencia únicamente difusa nunca confirma ahí ("el fuzzy aislado
+    solo puede proponer; nunca confirma por 0,85"), así que tampoco puede
+    hacerlo aquí. Esto elimina la duplicidad detectada entre este módulo y
+    ``resolver_chofer_rut``: un único contrato de evidencia decide qué
+    nombre llega al usuario, sea en el CSV principal o en ``viajes.csv``.
+    """
+
+    def normalizar(valor: str, rut: str) -> str:
+        resultado = resolver_chofer_rut(valor, rut, catalogo)
+        if resultado.estado is EstadoResolucion.CONFIRMADO:
+            return resultado.valor_canonico or valor
+        return valor
 
     return normalizar
 

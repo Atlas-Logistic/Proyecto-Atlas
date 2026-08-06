@@ -790,6 +790,41 @@ def test_chofer_se_abstiene_ante_dos_candidatos_equivalentes():
     assert _extraer_chofer_geometrico(bloques) == {}
 
 
+def test_chofer_no_abstiene_por_nombre_partido_en_dos_cajas_pese_a_tercero_lejano():
+    """Dos cajas contiguas (un solo nombre partido) más un candidato
+    genuinamente disperso siguen resolviendo con normalidad: el nombre
+    partido cuenta como un solo grupo geométrico, así que solo hay dos
+    grupos en total junto a RETIRA, no tres. Mismo criterio ya validado
+    para Cliente/Destino, ahora también en el mecanismo geométrico de
+    Chofer."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 55, 70),
+        _bloque("ANA", 120, 20, 40), _bloque("TORRES", 168, 20, 60),
+        _bloque("OBSERVACION", 20, 90, 100),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques)["valor"] == "ANA TORRES"
+
+
+def test_chofer_abstiene_con_tres_candidatos_dispersos():
+    """Vecindad visualmente saturada: misma protección general ya aplicada
+    a Cliente/Destino en "Recuperación Geométrica Conservadora — Fase 1",
+    extendida ahora al mecanismo geométrico propio de Chofer
+    (`_extraer_chofer_geometrico`). Tres candidatos nominales
+    independientes (no fragmentos de un mismo nombre) caen dentro del
+    margen geométrico válido de RETIRA: la cercanía sola no puede demostrar
+    cuál pertenece realmente al campo, así que se abstiene en vez de tomar
+    el de mejor puntaje."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("PATENTE", 20, 55, 70),
+        _bloque("ENCABEZADO", 20, 45, 100),
+        _bloque("COMENTARIO", 20, 68, 100),
+        _bloque("REFERENCIA", 20, 91, 100),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques) == {}
+
+
 def test_chofer_etiqueta_sin_candidato_y_cajas_invalidas():
     malo = BloqueOCR("NOMBRE APELLIDO", ((1, 1),), 0.5)
     assert _extraer_chofer_geometrico([_bloque("RETIRA", 20, 20), malo]) == {}
