@@ -1,5 +1,105 @@
 # Trabajos activos Atlas
 
+## Resolver de Cliente — Separación entre Identificación y Corroboración
+
+- Estado: COMPLETADA — implementada, validada con OCR real y catálogos
+  privados reales, cero regresiones en las 1233 pruebas de la suite.
+- Rama: `feature-cobertura-origen-fase1` (continuación directa de
+  *Resolución Inteligente Cliente ↔ Destino — Fase 2*).
+- Base exclusiva de este bloque: *Auditoría Arquitectónica del Resolver de
+  Cliente — Caso real 464345* (auditoría de solo lectura, sin código ni
+  commit propio, por eso no tiene sección aparte arriba). Esa auditoría
+  demostró con evidencia real que el bloqueo de Cliente en 464345 era un
+  defecto real, no comportamiento esperado: `resolver_cliente_rut` exigía
+  que el nombre OCR alcanzara por sí solo, mediante `UMBRAL_FUZZY_CLIENTE`,
+  el mismo umbral usado para identificar sin RUT — y trataba no alcanzarlo
+  como si el nombre contradijera al RUT, aunque no señalara a ningún otro
+  cliente del catálogo. La similitud real de 464345 ("IORAES OCARANZA" vs.
+  "TORRES OCARANZA") es 0,8667 contra un umbral de 0,88 — 464106 tiene
+  exactamente la misma similitud (0,8667) contra el mismo nombre canónico y
+  sí confirma hoy, solo porque existe un alias manual (`IORRSS OCARANZA`)
+  registrado en `clientes.json` para ese caso puntual. La evidencia
+  subyacente es idéntica entre ambas guías; solo la coincidencia de un
+  alias hecho a mano decide el resultado.
+- Objetivo: corregir la causa arquitectónica sin bajar `UMBRAL_FUZZY_
+  CLIENTE`, sin agregar alias y sin crear excepciones por guía — separando
+  explícitamente identificación (nombre solo) de corroboración (nombre
+  dado un RUT que ya identificó de forma exacta y única).
+
+### Diseño de la corrección
+
+- Antes de implementar, se revisaron `resolver_cliente_rut` y `resolver_
+  chofer_rut` en busca de la arquitectura común entre ambos. Chofer no
+  exige que el nombre corrobore al RUT: `elif rut_entidad: estado =
+  CONFIRMADO`, incondicional, una vez que el RUT ya pasó por los chequeos
+  previos (RUT único, sin duplicado, sin contradicción genuina). Cliente sí
+  lo exigía, mediante una rama extra que Chofer nunca tuvo.
+- Cambio, confinado por completo a `atlas_core/inteligencia/
+  resolucion_cliente.py`: se eliminó la rama que trataba la ausencia de
+  corroboración del nombre como `CONTRADICCION`/`REQUIERE_REVISION`. Con
+  esa rama fuera, la ejecución llega directamente a `elif rut_entidad:
+  estado = CONFIRMADO`, ya existente, que sigue distinguiendo correctamente
+  `RUT_EXACTO_MAS_NOMBRE_COMPATIBLE` (cuando el nombre sí corrobora) de
+  `RUT_EXACTO_UNICO` (cuando el RUT confirma solo) — el mismo mirror
+  deliberado de la arquitectura de Chofer.
+- La contradicción genuina (nombre y RUT identificando, cada uno con
+  evidencia fuerte propia, a clientes DISTINTOS) es un chequeo preexistente
+  y no se tocó: sigue bloqueando exactamente igual que antes.
+- Un caso límite adicional apareció al validar contra la suite existente:
+  un nombre OCR truncado que es un prefijo válido de **más de una**
+  identidad del catálogo (p. ej. "COMERCIAL" ante "COMERCIAL UNO LTDA" y
+  "COMERCIAL DOS LTDA") no es "ausencia de evidencia" sino evidencia
+  parcial genuinamente ambigua. Se corrigió sumando ese caso al mecanismo
+  `nombre_ambiguo` ya existente (el mismo que usa el nombre fuzzy con
+  candidatos empatados), en vez de inventar una rama nueva — mismo criterio
+  de reutilización que el resto del bloque.
+- `UMBRAL_FUZZY_CLIENTE`, `MARGEN_MINIMO_FUZZY_CLIENTE` y toda la lógica de
+  identificación pura por nombre (sin RUT) quedaron sin modificar.
+
+### Resultado real (misma imagen, antes → después)
+
+- 464345: Cliente pasa de `REQUIERE_REVISION`/`CONTRADICCION` a
+  `CONFIRMADO` vía `RUT_EXACTO_UNICO`, publicando **"TORRES OCARANZA
+  LTDA"**, `requiere_revision_humana=False` — cumple exactamente el
+  resultado exigido por el bloque.
+- 464106 (regresión): sigue `CONFIRMADO`, publicando "TORRES OCARANZA
+  LTDA"; la vía cambia de la ruta basada en alias a `RUT_EXACTO_MAS_
+  NOMBRE_COMPATIBLE` (el nombre y el RUT siguen apuntando a la misma
+  identidad), sin cambio de resultado publicado.
+- 464110 (regresión): sigue `CONFIRMADO` vía `CLIENTE_ID_POR_DESTINO_
+  CODIGO`, sin tocar esta rama del cambio.
+- 462491 (control, "FERROLUSAC SA"): sigue `NO_RESUELTO`, sin cambios.
+- Guía histórica "EMISION": validada mediante la prueba de regresión
+  sintética ya existente (no hay imagen original disponible en esta
+  máquina); sigue abstenida igual.
+- `indicador_revision` agregado de 464345 sigue en `REVISAR` porque otros
+  campos de esa guía (no Cliente) todavía no confirman — eso es correcto y
+  esperado: la validación exigida por este bloque es sobre la decisión
+  propia de Cliente (`estado`, `via_decision`, `requiere_revision_humana`),
+  no sobre el indicador agregado de toda la guía, que depende de campos
+  fuera de este alcance.
+
+### Validación
+
+- 2 pruebas nuevas en `tests/test_resolucion_cliente_multicampo.py`
+  (RUT exacto confirma sin corroboración del nombre) y en `tests/
+  test_procesamiento_masivo.py` se reescribió la prueba que asumía el
+  comportamiento anterior en dos: una que fija el nuevo comportamiento
+  correcto (RUT confirma sin corroboración) y otra que preserva la
+  cobertura de contradicción genuina (nombre y RUT a clientes distintos,
+  sigue bloqueando y conservando el OCR).
+- Reprocesamiento real (EasyOCR real, `gpu=False`, catálogos privados
+  reales en `C:\Users\corte\AppData\Local\Atlas\datos\catalogos_privados`)
+  de 464345, 464106, 464110 y 462491; prueba sintética histórica "EMISION".
+- Suite completa: 1233/1233 pruebas Atlas aprobadas (cero regresiones);
+  `python -m compileall` y `git diff --check` aprobados.
+- Riesgo residual: ninguno nuevo identificado; el cambio queda confinado a
+  `resolucion_cliente.py` y sus pruebas — no se tocó OCR, Extracción,
+  Recuperación Geométrica, Política, Publicación, Desktop, GPS ni
+  Catálogos. La regresión ya documentada de 464260 (Recuperación
+  Geométrica, sección de abajo) permanece pendiente de autorización aparte
+  y no fue tocada por este bloque.
+
 ## ⚠️ Regresión detectada (sin corregir, requiere autorización aparte): 464260
 
 - Estado: DETECTADA Y DOCUMENTADA — NO CORREGIDA. No se tocó ningún archivo

@@ -1020,9 +1020,20 @@ def _preparar_procesamiento_clientes(
         )
 
 
-def test_resolucion_de_cliente_confirma_con_motor_multicampo_y_conserva_ocr_en_contradiccion(
+def test_resolucion_de_cliente_confirma_por_rut_aunque_el_nombre_ocr_no_corrobore(
     tmp_path, monkeypatch
 ):
+    # Auditoría "Resolver de Cliente — Separación entre Identificación y
+    # Corroboración" (caso real 464345): un RUT chileno válido, único,
+    # activo y confirmado en catálogo fija la identidad por sí solo, aunque
+    # el nombre OCR no la corrobore — mientras no señale, con evidencia
+    # fuerte propia, a OTRO cliente del catálogo. Eso ya no se trata como
+    # contradicción; ver el siguiente test para la contradicción genuina,
+    # que sí sigue conservando el OCR y exigiendo revisión. Se usa
+    # _preparar_procesamiento_clientes (catálogo de choferes real, no el
+    # comodín que _preparar_procesamiento_fuzzy repite para todo archivo)
+    # para que el chofer también confirme y el indicador global de revisión
+    # refleje únicamente la decisión de Cliente.
     datos = {
         "número de guía": "463309",
         "número de transporte": "0000123456",
@@ -1031,7 +1042,7 @@ def test_resolucion_de_cliente_confirma_con_motor_multicampo_y_conserva_ocr_en_c
         "chofer": "MARIO SOTO",
         "RUT del cliente": "11.111.111-1",
     }
-    catalogo = {
+    catalogo_clientes = {
         "version_formato": 1,
         "clientes": [
             {
@@ -1045,7 +1056,70 @@ def test_resolucion_de_cliente_confirma_con_motor_multicampo_y_conserva_ocr_en_c
             }
         ],
     }
-    _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo)
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg")
+
+    assert resultado["cliente"] == "EMPRESA CATALOGO"
+    assert resultado["indicador_revision"] == "OK"
+
+
+def test_resolucion_de_cliente_conserva_ocr_ante_contradiccion_real_nombre_vs_rut(
+    tmp_path, monkeypatch
+):
+    # Contradicción genuina: el nombre OCR identifica, con evidencia fuerte
+    # propia (alias exacto), a un cliente DISTINTO del que fija el RUT
+    # exacto. Esto sigue bloqueando la confirmación y conservando el OCR —
+    # es exactamente el caso que el mecanismo de corroboración no debe
+    # tocar (bloque `contradicciones` en resolucion_cliente.py).
+    datos = {
+        "número de guía": "463309",
+        "número de transporte": "0000123456",
+        "cliente": "CLIENTE OCR",
+        "obra destino": "DESTINO ORIGINAL",
+        "chofer": "MARIO SOTO",
+        "RUT del cliente": "11.111.111-1",
+    }
+    catalogo_clientes = {
+        "version_formato": 1,
+        "clientes": [
+            {
+                "cliente_id": "cliente-demo",
+                "razon_social": "EMPRESA CATALOGO",
+                "nombre_comercial": "",
+                "rut": "111111111",
+                "aliases": [],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            },
+            {
+                "cliente_id": "cliente-otro",
+                "razon_social": "OTRA EMPRESA DISTINTA SPA",
+                "nombre_comercial": "",
+                "rut": _rut(202),
+                "aliases": ["CLIENTE OCR"],
+                "estado_calidad": "CONFIRMADO",
+                "estado_vigencia": "ACTIVO",
+            },
+        ],
+    }
+    catalogo_choferes = {
+        "111111111": {"nombre": "MARIO SOTO", "activo": True}
+    }
+    _preparar_procesamiento_clientes(
+        monkeypatch,
+        datos,
+        catalogo_clientes=catalogo_clientes,
+        catalogo_choferes=catalogo_choferes,
+    )
 
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 

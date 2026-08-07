@@ -1338,3 +1338,105 @@ orquestador-destino-sombra-v1 estado=REQUIERE_REVISION via=CONTRADICCION contrad
   extracción de `direccion`/`comuna` en `extractor.py` para que 464345
   llegue a publicarse sin revisión manual. Ambos frentes son
   independientes entre sí y ninguno estaba autorizado en este bloque.
+
+### 2026-08-06 — Auditoría Arquitectónica del Resolver de Cliente — Caso real 464345 (diagnóstico) y Resolver de Cliente — Separación entre Identificación y Corroboración (corrección)
+
+- Decisión importante: antes de tocar código, ejecutar una auditoría
+  exclusivamente de lectura (sin commit, sin bitácoras, sin pruebas nuevas)
+  para determinar con evidencia si el bloqueo de Cliente en 464345
+  (documentado en el bloque anterior) era comportamiento esperado o un
+  defecto real, y en qué bloque exacto correspondía corregirlo.
+- Trazabilidad completa (OCR real → Extracción → `resolver_cliente_rut` →
+  Política → Publicación) sobre 464345, contrastada contra el caso real
+  464106 (que sí confirma hoy), ambos con `resolver_cliente_rut` invocado
+  directamente y sin simular nada:
+  - 464345: nombre OCR "IORAES OCARANZA LTDA" (sin sufijo societario:
+    "IORAES OCARANZA"); RUT focal ya correcto (50.234.350-5, recuperado por
+    el bloque anterior), `RUT_EXACTO_VALIDO` apunta a "TORRES OCARANZA
+    LTDA". Similitud fuzzy nombre-vs-canónico: **0,8667**, contra
+    `UMBRAL_FUZZY_CLIENTE = 0,88` — insuficiente por 0,0133, con margen
+    0,3867 sobre cualquier otro candidato (`MARGEN_MINIMO_FUZZY_CLIENTE =
+    0,08`) — es decir, sin ambigüedad real, solo por debajo del umbral. La
+    rama de decisión evaluada trataba esa insuficiencia como si fuera una
+    contradicción activa entre nombre y RUT, y devolvía
+    `REQUIERE_REVISION`/`CONTRADICCION` con la razón "El nombre OCR no
+    coincide con la identidad del RUT".
+  - 464106 (comparación real confirmada): nombre OCR "IORRSS OCARANZA
+    LTDA"; mismo RUT canónico de "TORRES OCARANZA LTDA". Similitud fuzzy
+    contra el mismo nombre canónico: **también 0,8667** — idéntica a
+    464345. Confirma hoy únicamente porque "IORRSS OCARANZA" está
+    registrado como alias literal manual en `clientes.json` para ese
+    registro puntual, lo que activa una coincidencia exacta de alias
+    (`nombre_matches`) en vez de depender del fuzzy. La evidencia
+    subyacente (similitud fuzzy) es exactamente igual entre ambas guías;
+    solo la existencia casual de un alias hecho a mano decide cuál
+    confirma y cuál no.
+- Clasificación (de las cinco planteadas: comportamiento esperado, umbral
+  excesivamente conservador, validación obsoleta, bug, u otra causa): se
+  concluyó **defecto real de arquitectura**, no un umbral a bajar ni un bug
+  puntual. La causa exacta es que `resolver_cliente_rut` reutilizaba el
+  mismo criterio de similitud pensado para *identificar* un cliente sin
+  RUT (`UMBRAL_FUZZY_CLIENTE`) también para *corroborar* el nombre cuando
+  el RUT ya identificó de forma exacta, única, activa y confirmada en
+  catálogo — dos preguntas distintas con evidencia de distinta fuerza,
+  acopladas en una sola rama de decisión.
+- Comparación con `resolver_chofer_rut` (mismo archivo `atlas_core/
+  inteligencia/`, arquitectura hermana, ya auditada y unificada en un
+  bloque anterior): Chofer no tiene esa rama; una vez que el RUT pasa sus
+  chequeos previos (único, sin duplicado, sin contradicción genuina),
+  `elif rut_entidad: estado = CONFIRMADO` es incondicional. Cliente
+  agregaba una exigencia extra que Chofer nunca tuvo, y que la propia
+  auditoría de Chofer nunca detectó como necesaria.
+- Bloque de corrección propuesto por la auditoría (sin código todavía):
+  eliminar esa rama en `resolucion_cliente.py` — sin bajar
+  `UMBRAL_FUZZY_CLIENTE`, sin agregar alias, sin excepciones por guía —
+  preservando intacta la contradicción genuina (nombre y RUT a clientes
+  distintos, chequeo preexistente y separado) y toda la lógica de
+  identificación pura por nombre.
+- Implementación (bloque siguiente, mismo día, misma rama): se eliminó
+  exactamente esa rama en `atlas_core/inteligencia/resolucion_cliente.py`.
+  Con la rama fuera, la ejecución cae directamente en `elif rut_entidad:
+  estado = CONFIRMADO`, ya existente, que sigue distinguiendo
+  `RUT_EXACTO_MAS_NOMBRE_COMPATIBLE` de `RUT_EXACTO_UNICO` según si el
+  nombre también corrobora — mismo mirror deliberado de Chofer.
+- Caso límite adicional encontrado al correr la suite existente (no
+  previsto por la auditoría, descubierto durante la implementación): un
+  nombre OCR truncado que es prefijo válido de **más de una** identidad
+  del catálogo (p. ej. "COMERCIAL" ante dos razones sociales que empiezan
+  igual) no es ausencia de evidencia sino evidencia parcial genuinamente
+  ambigua; tratarlo como "RUT confirma solo" habría sido incorrecto.
+  Corregido sumando ese caso al mecanismo `nombre_ambiguo` ya existente
+  (el mismo que usa el nombre fuzzy con candidatos empatados en margen),
+  en vez de crear una rama nueva.
+- Resultado real, guía 464345 (antes → después, mismos catálogos
+  privados reales): Cliente pasa de `REQUIERE_REVISION`/`CONTRADICCION` a
+  `CONFIRMADO` vía `RUT_EXACTO_UNICO`, publicando "TORRES OCARANZA LTDA",
+  `requiere_revision_humana=False` — cumple el resultado exigido.
+  `indicador_revision` agregado de la guía sigue en `REVISAR` por otros
+  campos fuera de este bloque (dirección/comuna del destino, no tocados);
+  eso es esperado y no forma parte de lo exigido a este bloque.
+- Validación de regresión con guías reales (mismos catálogos privados,
+  OCR real, sin simular nada): 464106 sigue `CONFIRMADO` (vía cambia de la
+  ruta de alias a `RUT_EXACTO_MAS_NOMBRE_COMPATIBLE`, mismo resultado
+  publicado); 464110 sigue `CONFIRMADO` vía `CLIENTE_ID_POR_DESTINO_
+  CODIGO`, rama no tocada; 462491 (control, "FERROLUSAC SA") sigue
+  `NO_RESUELTO`, sin cambios; guía histórica "EMISION" validada mediante
+  la prueba de regresión sintética ya existente (no hay imagen original
+  disponible en esta máquina), sigue abstenida igual.
+- Pruebas: 2 nuevas (una en `tests/test_resolucion_cliente_multicampo.py`
+  fijando que un RUT exacto confirma sin corroboración del nombre; la
+  prueba de `tests/test_procesamiento_masivo.py` que asumía el
+  comportamiento anterior se reescribió en dos — una para el nuevo
+  comportamiento correcto y otra para la contradicción genuina, que sigue
+  bloqueando exactamente igual). Suite completa: 1233/1233 Atlas
+  aprobadas, cero regresiones; `compileall` y `git diff --check`
+  aprobados.
+- Integridad: cambio confinado por completo a `atlas_core/inteligencia/
+  resolucion_cliente.py` y sus pruebas; sin tocar OCR, Extracción,
+  Recuperación Geométrica, Política, Publicación, Desktop, GPS ni
+  Catálogos.
+- Acuerdo: la regresión ya documentada de 464260 (sección anterior) sigue
+  pendiente de autorización aparte y no fue tocada por este bloque; con
+  este cierre, el segundo de los dos frentes independientes recomendados
+  arriba (revisar el chequeo de similitud nombre-RUT de
+  `resolucion_cliente.py`) queda resuelto.

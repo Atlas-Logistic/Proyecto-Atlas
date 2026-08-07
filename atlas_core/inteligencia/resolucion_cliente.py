@@ -627,6 +627,15 @@ def resolver_cliente_rut(
             len(coincidencias_prefijo) == 1
             and coincidencias_prefijo[0].identificador == rut_entidad.identificador
         )
+        if len(coincidencias_prefijo) > 1:
+            # El nombre OCR truncado no es "ausencia de evidencia": es un
+            # prefijo válido de MÁS DE UNA identidad del catálogo. A
+            # diferencia del silencio simple (que la corroboración por RUT
+            # ya no bloquea, ver más abajo), esto sí es evidencia parcial
+            # genuinamente ambigua, equivalente a un nombre fuzzy con
+            # candidatos empatados — se trata con el mismo mecanismo
+            # (`nombre_ambiguo`) que ya usa esa situación.
+            nombre_ambiguo = True
         if nombre_parcial_compatible_rut:
             evidencias.append(EvidenciaResolucion(
                 "NOMBRE_OCR_PREFIJO_UNICO_MAS_RUT_EXACTO",
@@ -843,19 +852,35 @@ def resolver_cliente_rut(
         estado = EstadoResolucion.REQUIERE_REVISION
         via = ViaDecisionCliente.CONTRADICCION
         razones.append("El RUT observado es inválido por módulo 11 o formato.")
-    elif (
-        rut_entidad
-        and nombre_obs.valor_normalizado
-        and not nombre_matches
-        and not nombre_fuerte
-        and not nombre_parcial_compatible_rut
-    ):
-        candidato = None
-        estado = EstadoResolucion.REQUIERE_REVISION
-        via = ViaDecisionCliente.CONTRADICCION
-        razones.append(
-            "El nombre OCR no coincide con la identidad del RUT; se conserva el OCR y se requiere revisión."
-        )
+    # Identificación (¿este nombre por sí solo identifica a alguien?) y
+    # corroboración (¿este nombre es al menos compatible con la identidad
+    # que el RUT ya demostró?) son preguntas distintas y usan evidencia de
+    # distinta fuerza. Antes, esta rama exigía que el nombre TAMBIÉN
+    # alcanzara por sí solo el umbral de identificación (UMBRAL_FUZZY_
+    # CLIENTE, pensado para cuando NO hay RUT) y trataba no alcanzarlo como
+    # si el nombre contradijera al RUT, aunque no señalara a ninguna otra
+    # identidad. Auditoría "Auditoría Arquitectónica del Resolver de
+    # Cliente — Caso real 464345": ese acoplamiento era la causa raíz de
+    # que un RUT exacto, único, válido por módulo 11 y confirmado en
+    # catálogo no bastara para confirmar cuando el nombre OCR, sin señalar
+    # a nadie más, simplemente no llegaba a ese umbral (evidencia real:
+    # similitud 0.8667 contra un umbral de 0.88, con margen 0.39 sobre
+    # cualquier otro candidato — no hay ambigüedad real, solo ausencia de
+    # refuerzo).
+    #
+    # La contradicción genuina —nombre y RUT identificando, cada uno con
+    # evidencia fuerte propia, a personas DISTINTAS— ya está cubierta
+    # arriba (bloque `contradicciones`, más arriba en esta función); el
+    # mero silencio del nombre (no alcanza el umbral de identificación,
+    # pero tampoco señala a nadie más) ya no se trata como contradicción.
+    # Es exactamente la misma filosofía que ya usa `resolver_chofer_rut`
+    # (`atlas_core/inteligencia/resolucion_chofer.py`): un RUT válido,
+    # único, activo y confirmado fija la identidad por sí solo; el nombre
+    # solo puede reforzarla (`RUT_EXACTO_MAS_NOMBRE_COMPATIBLE`) o
+    # contradecirla genuinamente — nunca bloquear por simple ausencia de
+    # refuerzo. El criterio de identificación (`UMBRAL_FUZZY_CLIENTE`,
+    # `MARGEN_MINIMO_FUZZY_CLIENTE`) no cambia: sigue siendo exactamente el
+    # mismo, y sigue siendo el único camino cuando no hay RUT (más abajo).
     elif rut_entidad:
         estado = EstadoResolucion.CONFIRMADO
         if nombre_entidad == rut_entidad or nombre_parcial_compatible_rut:

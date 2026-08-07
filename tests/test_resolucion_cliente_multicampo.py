@@ -152,6 +152,26 @@ def test_rut_fuerte_sin_nombre_confirma(catalogo):
     assert resultado.identificador_canonico == "cliente:cliente-demo-sur"
 
 
+def test_rut_exacto_unico_confirma_aunque_el_nombre_no_corrobore(catalogo):
+    # Auditoría "Resolver de Cliente — Separación entre Identificación y
+    # Corroboración" (caso real 464345): un RUT chileno válido, único,
+    # activo y con calidad de catálogo confirmada basta por sí solo para
+    # fijar la identidad, aunque el nombre OCR no alcance el umbral de
+    # identificación fuzzy (UMBRAL_FUZZY_CLIENTE) usado cuando NO hay RUT —
+    # mientras el nombre no señale, con evidencia fuerte propia, a OTRO
+    # cliente del catálogo (eso sigue siendo una contradicción genuina, ver
+    # test_nombre_y_rut_de_clientes_distintos_contradiccion). Antes de esta
+    # corrección, la ausencia de corroboración del nombre se trataba como si
+    # fuera una contradicción y bloqueaba la confirmación.
+    resultado = resolver_cliente_rut(
+        "XYZQW ILEGIBLE TOTALMENTE DISTINTO", _rut(101), catalogo
+    )
+    assert resultado.estado is EstadoResolucion.CONFIRMADO
+    assert resultado.identificador_canonico == "cliente:cliente-demo-norte"
+    assert resultado.via_decision == "RUT_EXACTO_UNICO"
+    assert resultado.requiere_revision_humana is False
+
+
 def test_nombre_y_rut_de_clientes_distintos_contradiccion(catalogo):
     resultado = resolver_cliente_rut("ADN DEMO", _rut(202), catalogo)
     assert resultado.estado is EstadoResolucion.REQUIERE_REVISION
