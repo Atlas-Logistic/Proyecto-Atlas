@@ -4,6 +4,28 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-10 — Bloque M1: PaddleOCR integrado detrás de un proveedor OCR (CERRADO Y APROBADO)
+
+- **Cierre aprobado.** PaddleOCR queda como **motor principal** de Atlas; EasyOCR queda como **fallback temporal** (no eliminado, se usa automáticamente si Paddle no está disponible).
+- `IMG-20250930-WA0047.jpg` (número de guía) se registra como **discrepancia editorial de ground truth pendiente** — el propio Excel de validación documenta "410627" pero la imagen muestra "410267" — no se cuenta como fallo de Atlas.
+- **Riesgo principal pendiente:** PaddleOCR depende hoy de un runtime externo en `C:\Users\Jjjc0508\Desktop\Atlas\ocr_eval_gpu_env`. Esa ruta es temporal, no es la arquitectura definitiva de despliegue — es el objetivo del próximo bloque.
+- La validación de portabilidad en CPU (máquina sin GPU) se hará más adelante con una prueba corta en el PC de oficina — no bloqueó este cierre.
+- **Próximo bloque oficial: M2 — runtime Paddle reproducible/portable** (no iniciado).
+
+- Decisión ya tomada previamente (evaluación OCR-EVAL): PaddleOCR reemplaza a EasyOCR como motor principal. Este bloque es la primera implementación real, no una nueva evaluación.
+- Se creó una abstracción de proveedor OCR (`ProveedorOCR`) de la que depende el resto de Atlas — ya no hay ningún llamado directo a `easyocr.Reader` fuera de `EasyOCRProvider`. PaddleOCR corre en un **proceso completamente aislado** (venv externo, fuera del entorno principal de Atlas) para no mezclar sus ~55 dependencias con las de Atlas; se comunica por un protocolo simple, sin acoplar el resto del código a los detalles de ese aislamiento.
+- Selección de dispositivo automática: usa GPU NVIDIA si hay una disponible, si no cae a CPU con el workaround ya validado (`enable_mkldnn=False`). No hay ninguna GPU hardcodeada.
+- EasyOCR **no se eliminó** — sigue siendo el comportamiento por defecto si no se pasa un proveedor, y es el fallback automático si PaddleOCR no está disponible (venv ausente, proceso no arranca, etc.).
+- Se resolvieron las dos incompatibilidades diagnosticadas en el bloque de evaluación:
+  1. **`numero_guia`** ya no depende de que "GUIA DE DESPACHO ELECTRONICA N°..." llegue como frase contigua — se conectó al mecanismo geométrico ancla→marcador→candidato que Atlas ya tenía (`decidir_bloques_ocr`), simplemente asegurando que reciba los bloques del proveedor activo. **Resultado real: 2/30 → 29/30** (el único caso restante es una disputa de ground truth ya documentada en el Excel original, no un error del algoritmo).
+  2. La **recuperación focal** (fecha F2 y transporte) se generalizó para hablar con el proveedor activo en vez de llamar `lector.readtext()` específico de EasyOCR — sigue funcionando igual con ambos motores.
+- Se agregó una guarda documental mínima: si muchos campos clave de un mismo documento vuelven vacíos a la vez, el documento completo queda marcado `REVISAR`, sin inventar ni corregir ningún valor. Confirmado: `IMG-20260512-WA0027.jpg` (el caso con fecha incorrecta detectado en la evaluación) queda `REVISAR`.
+- **Resultado real sobre las 30 guías, con PaddleOCR real integrado (no simulado):** fecha 27/30, numero_guia 29/30, numero_transporte 28/30 (93.3%), cliente 21/25 (84.0%), obra_destino 12/27 (44.4%), chofer 15/23 (65.2%), descripción de material 24/25 (96.0%), tipo de carga 24/29 (82.8%) — todos consistentes con la evaluación previa, **sin regresiones**. Tiempo: 3.03 s/imagen (proceso persistente + GPU).
+- Suite completa verde: 458 → **482 tests** (24 nuevos de este bloque).
+- Pendiente para el próximo bloque: esto integra PaddleOCR como proveedor disponible y probado, pero **no cambia todavía el proveedor por defecto en producción** ni hace commit — eso queda para una decisión explícita posterior.
+
+---
+
 ## 2026-08-10 — Bloque Fechas F2: recuperación OCR focal de FECHA DE EMISIÓN (cerrado)
 
 - Baseline de entrada: 14/30 exactas (F1 cerrado).

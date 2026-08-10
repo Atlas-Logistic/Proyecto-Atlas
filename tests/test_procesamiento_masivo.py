@@ -475,6 +475,199 @@ def test_procesar_archivo_fecha_focal_sin_caja_geometrica_se_abstiene(tmp_path, 
     fecha_focal.assert_not_called()
 
 
+# ---- Bloque M1: proveedor OCR (numero_guia robusto, focal generalizado, guarda documental) ----
+
+class _ProveedorFalso:
+    """Proveedor OCR mínimo para tests, cumple el contrato ProveedorOCR."""
+
+    def __init__(self, texto=None, bloques=None, focal=None):
+        self._texto = texto or []
+        self._bloques = bloques or []
+        self._focal = focal or {"lecturas": []}
+        self.llamadas_focal = []
+
+    def leer_texto(self, ruta):
+        return self._texto
+
+    def leer_bloques(self, ruta):
+        return self._bloques
+
+    def leer_focal(self, ruta, caja, allowlist):
+        self.llamadas_focal.append((ruta, caja, allowlist))
+        return self._focal
+
+
+def test_procesar_archivo_numero_guia_recupera_con_etiqueta_fragmentada_via_proveedor(
+    tmp_path, monkeypatch
+):
+    """Reproduce el caso real de PaddleOCR: "GUIA"/"DESPACHO"/"ELECTRONICA"
+    llegan en bloques separados con una línea ajena en medio (dirección),
+    y el número está más abajo junto a un marcador "N°". decidir_bloques_ocr
+    ya resuelve esto — este test confirma que queda conectado vía proveedor."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("GUIA", ((10, 10), (50, 10), (50, 28), (10, 28)), 0.9),
+        BloqueOCR("DESPACHO", ((55, 10), (135, 10), (135, 28), (55, 28)), 0.9),
+        BloqueOCR("ELECTRONICA", ((140, 10), (230, 10), (230, 28), (140, 28)), 0.9),
+        BloqueOCR("LA UNION 3070 RENCA SANTIAGO", ((10, 40), (270, 40), (270, 58), (10, 58)), 0.9),
+        BloqueOCR("N°", ((10, 70), (35, 70), (35, 88), (10, 88)), 0.9),
+        BloqueOCR("384674", ((40, 70), (105, 70), (105, 88), (40, 88)), 0.9),
+    ]
+    proveedor = _ProveedorFalso(texto=["sin fecha reconocible"], bloques=bloques)
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(**{"número de guía": "No encontrado"})),
+    )
+
+    resultado = procesar_archivo(ruta, proveedor=proveedor)
+
+    assert resultado["numero_guia"] == "384674"
+
+
+def test_procesar_archivo_numero_guia_sin_contexto_suficiente_se_abstiene(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("GUIA", ((10, 10), (50, 10), (50, 28), (10, 28)), 0.9),
+        BloqueOCR("DESPACHO", ((55, 10), (135, 10), (135, 28), (55, 28)), 0.9),
+        BloqueOCR("ELECTRONICA", ((140, 10), (230, 10), (230, 28), (140, 28)), 0.9),
+        BloqueOCR("384674", ((10, 200), (75, 200), (75, 218), (10, 218)), 0.9),  # sin marcador N° cerca
+    ]
+    proveedor = _ProveedorFalso(texto=["sin fecha reconocible"], bloques=bloques)
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(**{"número de guía": "No encontrado"})),
+    )
+
+    resultado = procesar_archivo(ruta, proveedor=proveedor)
+
+    assert resultado["numero_guia"] == "No encontrado"
+
+
+def test_procesar_archivo_fecha_focal_via_proveedor(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("RUIDO 2025", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.3),
+    ]
+    proveedor = _ProveedorFalso(
+        texto=["sin fecha reconocible"],
+        bloques=bloques,
+        focal={
+            "lecturas": [
+                {"variante": "original", "texto": "FECHA DE EMISION 23-06-2025", "confianza": 0.95},
+                {"variante": "grises", "texto": "FECHA DE EMISION 23-06-2025", "confianza": 0.90},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+
+    resultado = procesar_archivo(ruta, proveedor=proveedor)
+
+    assert resultado["fecha"] == "23-06-2025"
+    assert len(proveedor.llamadas_focal) == 1
+
+
+def test_procesar_archivo_transporte_focal_via_proveedor(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("NRO TRANSPORTE", ((10, 10), (130, 10), (130, 30), (10, 30)), 0.9),
+        BloqueOCR("00do348608", ((180, 10), (280, 10), (280, 30), (180, 30)), 0.3),
+    ]
+    proveedor = _ProveedorFalso(
+        texto=["sin fecha reconocible"],
+        bloques=bloques,
+        focal={
+            "lecturas": [
+                {"variante": "original", "texto": "oo 0000348808", "confianza": 0.9},
+                {"variante": "grises", "texto": "oo 00do348808", "confianza": 0.9},
+                {"variante": "ampliada_2x", "texto": "000o348608", "confianza": 0.9},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value={
+                "número de guía": "123456", "número de transporte": "No encontrado",
+                "cliente": "A", "obra destino": "B", "chofer": "C",
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta, proveedor=proveedor)
+
+    assert resultado["numero_transporte"] == "0000348808"
+    assert len(proveedor.llamadas_focal) == 1
+
+
+def test_documento_degradado_activa_con_multiples_campos_faltantes():
+    datos = {
+        "número de guía": "No encontrado", "número de transporte": "0000123456",
+        "cliente": "No encontrado", "obra destino": "No encontrado",
+        "chofer": "JUAN PEREZ", "patente del tracto": "No encontrado",
+        "patente del carro": "No encontrado",
+    }
+    assert procesamiento_masivo._documento_degradado(datos, "HORMIGON 10MM") is True
+
+
+def test_documento_degradado_no_se_activa_con_pocos_campos_faltantes():
+    datos = {
+        "número de guía": "123456", "número de transporte": "0000123456",
+        "cliente": "ACEROS SUR", "obra destino": "No encontrado",
+        "chofer": "JUAN PEREZ", "patente del tracto": "ABCD12",
+        "patente del carro": "No encontrado",
+    }
+    assert procesamiento_masivo._documento_degradado(datos, "HORMIGON 10MM") is False
+
+
+def test_procesar_archivo_documento_degradado_queda_revisar(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA DE EMISIÓN 23-06-2025"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value={
+                "número de guía": "No encontrado", "número de transporte": "0000123456",
+                "cliente": "No encontrado", "obra destino": "No encontrado",
+                "chofer": "JUAN PEREZ", "patente del tracto": "No encontrado",
+                "patente del carro": "No encontrado",
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_sin_proveedor_usa_easyocr_directo_como_antes(tmp_path, monkeypatch):
+    """No degradar comportamiento existente: sin `proveedor`, la ruta sigue
+    siendo exactamente la de EasyOCR directo, sin tocar bloques si no hace falta."""
+    ruta = tmp_path / "guia.jpg"
+    leer_texto = Mock(return_value=["FECHA DE EMISIÓN 23-06-2025"])
+    leer_bloques = Mock()
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", leer_texto)
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "23-06-2025"
+    leer_texto.assert_called_once_with(ruta, lector=None)
+    leer_bloques.assert_not_called()
+
+
 def _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo, bloques=None):
     monkeypatch.setattr(
         procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[])

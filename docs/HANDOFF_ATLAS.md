@@ -4,6 +4,22 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-10 — Cierre Bloque M1: proveedor OCR + PaddleOCR integrado (APROBADO)
+
+- **Rama:** `lector-mvp-guia-nueva`. Commit hecho y pusheado a `origin/lector-mvp-guia-nueva` (ver SHA en el mensaje de cierre de esa sesión).
+- **Decisión de cierre: PaddleOCR queda aprobado como motor OCR principal de Atlas. EasyOCR queda como fallback temporal**, no eliminado — sigue siendo el proveedor si Paddle no está disponible, y sigue siendo el camino usado por defecto en el código cuando no se pasa `proveedor=` explícitamente.
+- **Precisión importante para quien retome esto:** "integrado" significa que la infraestructura (`ProveedorOCR`, `EasyOCRProvider`, `PaddleOCRProvider`, selección GPU/CPU, `numero_guia` robusto, focal generalizado) está lista, testeada (482 tests) y validada con una corrida real de las 30 guías — **no** que `procesar_carpeta` (el punto de entrada real de la CLI/lote) ya construya y use un `PaddleOCRProvider` por defecto. `procesar_carpeta` todavía no recibe ni pasa ningún `proveedor` — sigue llamando a `procesar_archivo` solo con `lector_ocr` (EasyOCR). Conectar el proveedor Paddle al flujo de lote real (`procesar_carpeta`/CLI) sigue pendiente y no se hizo en M1.
+- **numero_guia recuperado:** 2/30 → 29/30, reutilizando `decidir_bloques_ocr` (ya existía) conectado al proveedor activo.
+- **`IMG-20250930-WA0047.jpg` (número de guía):** discrepancia editorial de ground truth pendiente (410627 documentado vs 410267 que la imagen realmente muestra, según la observación original del validador) — no cuenta como fallo de Atlas, no bloqueó el cierre.
+- **PaddleOCR corre en proceso completamente aislado**, nunca en el entorno principal — sus ~55 dependencias no tocan `requirements.txt` ni el venv de producción.
+- **Selección GPU/CPU automática**, sin GPU hardcodeada. GPU real confirmada en este PC (3.03 s/imagen). **Portabilidad CPU explícitamente diferida**: no se corrió otro benchmark completo de 30 imágenes en CPU en este cierre — se validará con una prueba corta en el PC de oficina en un momento posterior.
+- **Riesgo principal pendiente, con nombre:** `PaddleOCRProvider` apunta hoy a una ruta fija de este equipo (`C:\Users\Jjjc0508\Desktop\Atlas\ocr_eval_gpu_env`), creada para el bloque de evaluación — no es arquitectura de despliegue definitiva.
+- **`IMG-20260512-WA0027.jpg` queda `REVISAR`** por la guarda documental — su fecha sigue siendo incorrecta, la guarda no la corrige, solo evita que pase como dato confiable.
+- Suite: 458 → **482 tests**, todos verdes.
+- **Próximo bloque oficial: M2 — runtime Paddle reproducible/portable** (reemplazar la ruta fija del venv por algo que no dependa de este equipo específico). No iniciado todavía.
+
+---
+
 ## 2026-08-10 — Cierre Bloque Fechas F2 (con gate de confianza)
 
 - **Rama:** `lector-mvp-guia-nueva`.

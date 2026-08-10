@@ -28,6 +28,8 @@ from atlas_core.extractor import (
     extraer_datos,
 )
 from atlas_core.ocr import (
+    ALLOWLIST_FECHA,
+    ALLOWLIST_TRANSPORTE,
     _leer_fecha_focal,
     _leer_transporte_focal,
     crear_lector_ocr,
@@ -373,14 +375,61 @@ def extraer_fecha(
     return "No encontrado"
 
 
+# Guarda documental (M1): señal estructural mínima de degradación global del
+# documento. Cuenta cuántos de estos campos volvieron vacíos/"No encontrado"
+# a la vez; si son demasiados, el documento probablemente esté degradado en
+# su conjunto (mala foto, guía ilegible) y no solo en un campo puntual. Esta
+# señal solo puede EMPUJAR indicador_revision hacia "REVISAR" — nunca
+# modifica un valor ya extraído (incluida la fecha) ni lo descarta.
+CAMPOS_GUARDA_DOCUMENTAL = (
+    "número de guía", "número de transporte", "cliente", "obra destino",
+    "chofer", "patente del tracto", "patente del carro",
+)
+UMBRAL_CAMPOS_FALTANTES_DOCUMENTO_DEGRADADO = 5
+
+
+def _documento_degradado(datos: dict, descripcion: str) -> bool:
+    faltantes = sum(
+        1 for campo in CAMPOS_GUARDA_DOCUMENTAL
+        if datos.get(campo) in {None, "", "No encontrado"}
+    )
+    if not descripcion:
+        faltantes += 1
+    return faltantes >= UMBRAL_CAMPOS_FALTANTES_DOCUMENTO_DEGRADADO
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    proveedor: object = None,
 ) -> dict[str, str]:
-    """Procesa una guía reutilizando el OCR y extractor actuales."""
-    textos = leer_texto_imagen(ruta, lector=lector_ocr)
+    """Procesa una guía reutilizando el OCR y extractor actuales.
+
+    `proveedor` (ProveedorOCR, opcional) permite usar cualquier motor OCR
+    que cumpla el contrato de atlas_core.ocr_provider en vez de EasyOCR
+    directo. Si no se entrega, el comportamiento es idéntico al anterior
+    (EasyOCR vía `lector_ocr`) — no hay cambio de comportamiento por
+    defecto.
+    """
+
+    def _leer_texto() -> list[str]:
+        if proveedor is not None:
+            return proveedor.leer_texto(ruta)
+        return leer_texto_imagen(ruta, lector=lector_ocr)
+
+    def _leer_bloques() -> list:
+        if proveedor is not None:
+            return proveedor.leer_bloques(ruta)
+        return leer_bloques_imagen(ruta, lector=lector_ocr)
+
+    def _leer_focal(caja, allowlist: str, funcion_easyocr) -> dict:
+        if proveedor is not None:
+            return proveedor.leer_focal(ruta, caja, allowlist=allowlist)
+        return funcion_easyocr(ruta, caja, lector=lector_ocr)
+
+    textos = _leer_texto()
     datos = extraer_datos(textos)
     recuperacion_geometrica = False
     recuperacion_chofer = False
@@ -392,7 +441,7 @@ def procesar_archivo(
     ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
     if campos_ausentes:
         try:
-            bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+            bloques_guia = _leer_bloques()
             asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
             for campo in ("cliente", "obra destino"):
                 if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
@@ -416,10 +465,8 @@ def procesar_archivo(
                         decision_transporte.get("confianza", 0.0)
                     ) < 0.65
                     if requiere_focal:
-                        evidencia_focal = _leer_transporte_focal(
-                            ruta,
-                            decision_transporte["caja"],
-                            lector=lector_ocr,
+                        evidencia_focal = _leer_focal(
+                            decision_transporte["caja"], ALLOWLIST_TRANSPORTE, _leer_transporte_focal
                         )
                         consenso = _consensuar_transporte_focal(
                             evidencia_focal["lecturas"],
@@ -458,7 +505,7 @@ def procesar_archivo(
     if numero_guia_actual in {"", "No encontrado"}:
         try:
             if bloques_guia is None:
-                bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+                bloques_guia = _leer_bloques()
             decision_guia = decidir_bloques_ocr(bloques_guia, numero_guia_actual)
             candidato_guia = str(decision_guia["valor"])
             if decision_guia["emitida"] and re.fullmatch(r"\d{5,8}", candidato_guia):
@@ -472,12 +519,10 @@ def procesar_archivo(
     if fecha_actual == "No encontrado":
         try:
             if bloques_guia is None:
-                bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+                bloques_guia = _leer_bloques()
             decision_fecha = _extraer_fecha_geometrico(bloques_guia)
             if decision_fecha.get("caja"):
-                evidencia_focal = _leer_fecha_focal(
-                    ruta, decision_fecha["caja"], lector=lector_ocr
-                )
+                evidencia_focal = _leer_focal(decision_fecha["caja"], ALLOWLIST_FECHA, _leer_fecha_focal)
                 votos_por_fecha: dict[date, list[tuple[str, object]]] = {}
                 for lectura in evidencia_focal["lecturas"]:
                     valor_focal = extraer_fecha(
@@ -525,6 +570,7 @@ def procesar_archivo(
         or transporte_corregido
         or recuperacion_chofer
         or fecha_recuperada_focal
+        or _documento_degradado(datos, descripcion)
     )
 
     return {
