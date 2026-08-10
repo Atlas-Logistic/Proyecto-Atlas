@@ -58,6 +58,8 @@ def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monk
         "cliente": "CLIENTE LINEAL",
         "obra destino": "DESTINO LINEAL",
         "chofer": "MARIO SOTO",
+        "patente del tracto": "AB1234",
+        "patente del carro": "CD5678",
     }
     leer_bloques = Mock()
     focal = Mock()
@@ -119,6 +121,41 @@ def test_procesar_archivo_integra_transporte_corregido_y_reutiliza_bloques(
     assert resultado["indicador_revision"] == "REVISAR"
     leer_bloques.assert_called_once_with(ruta, lector=None)
     focal.assert_called_once()
+
+
+def test_procesar_archivo_patentes_geometricas_recuperan_tracto_y_carro_desde_bloques_paddle(
+    tmp_path, monkeypatch
+):
+    """P1: reproduce la guía real con RODRIGO NAHUELÑIR (tracto SB6486 leído
+    por Paddle como SD6486, rampla JF4288), pero con las etiquetas repartidas
+    en bloques separados como entrega PaddleOCR (no la frase contigua "RETIRA
+    PATENTE FECHA LLEGADA" del formato lineal histórico)."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("RETIRA", ((10, 10), (70, 10), (70, 30), (10, 30)), 0.9),
+        BloqueOCR("PATENTE", ((10, 40), (80, 40), (80, 60), (10, 60)), 0.9),
+        BloqueOCR(":SD6486 CARRO:JF4288", ((10, 70), (230, 70), (230, 90), (10, 90)), 0.85),
+        BloqueOCR("FECHA LLEGADA", ((10, 100), (130, 100), (130, 120), (10, 120)), 0.9),
+    ]
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value={
+                "número de guía": "123456", "número de transporte": "0000123456",
+                "cliente": "A", "obra destino": "B", "chofer": "C",
+                "patente del tracto": "No encontrado", "patente del carro": "No encontrado",
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["patente_tracto"] == "SD6486"
+    assert resultado["patente_rampla"] == "JF4288"
+    assert resultado["indicador_revision"] == "REVISAR"
 
 
 def test_procesar_archivo_consenso_focal_corrige_global_sin_mapa_seis_a_ocho(
@@ -197,7 +234,11 @@ def test_procesar_archivo_preserva_chofer_lineal_limpio(tmp_path, monkeypatch):
     monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", bloques)
     monkeypatch.setattr(
         procesamiento_masivo, "extraer_datos",
-        Mock(return_value={"número de guía": "123456", "número de transporte": "0000123456", "cliente": "A", "obra destino": "B", "chofer": "MARIO SOTO"}),
+        Mock(return_value={
+            "número de guía": "123456", "número de transporte": "0000123456",
+            "cliente": "A", "obra destino": "B", "chofer": "MARIO SOTO",
+            "patente del tracto": "AB1234", "patente del carro": "CD5678",
+        }),
     )
 
     assert procesar_archivo(ruta)["chofer"] == "MARIO SOTO"
@@ -243,6 +284,8 @@ def _datos_lineales_completos(**overrides):
         "cliente": "A",
         "obra destino": "B",
         "chofer": "C",
+        "patente del tracto": "AB1234",
+        "patente del carro": "CD5678",
     }
     datos.update(overrides)
     return datos

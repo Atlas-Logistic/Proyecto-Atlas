@@ -4,6 +4,19 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-10 — Bloque Patentes P1: recuperación geométrica de patentes compatible con Paddle (CERRADO)
+
+- **Problema real confirmado:** `buscar_chofer_y_patentes()` exigía la frase contigua `"RETIRA PATENTE FECHA LLEGADA"` en el texto OCR; PaddleOCR reparte esas etiquetas en bloques/líneas separados, por lo que `patente_tracto`/`patente_carro` volvían `"No encontrado"` aunque el valor estuviera presente en el OCR.
+- **Solución:** se agregó `_extraer_patentes_geometrico`, una nueva función geométrica (mismo patrón ya usado para chofer/transporte/fecha) que ancla la búsqueda en la zona RETIRA–FECHA LLEGADA por coordenadas, sin depender de la frase contigua. Se activa solo como *fallback*, cuando la lectura lineal ya devolvió "No encontrado". **PaddleOCR no se tocó.**
+- **Camino histórico EasyOCR preservado:** `buscar_chofer_y_patentes()` (lectura lineal por frase contigua) no se modificó; sigue siendo la vía primaria y sigue funcionando igual que antes.
+- **Alcance deliberadamente acotado:** P1 solo recupera el valor OCR disponible, no lo corrige. La guía real `464511` expone esto con claridad: Paddle lee la patente del tracto como `SD6486` (una B real leída como D); P1 recupera ese valor tal cual, no lo corrige a `SB6486` — esa homologación queda para un microbloque posterior.
+- **Resultado real, guía `464511`:** `patente_tracto` pasa de `"No encontrado"` a `SD6486`; `patente_rampla` pasa de `"No encontrado"` a `JF4288` (correcto). Resto de campos sin cambios. **0 regresiones** (confirmado comparando el mismo procesamiento real antes/después del cambio).
+- Validación automatizada: **566 tests**, todos verdes (556 → 566).
+- No se tocó Desktop ni la generación de reportes: `procesar_archivo` es el único punto de propagación, así que Desktop y reportes reciben el valor recuperado automáticamente sin cambios propios.
+- **Siguiente microbloque pendiente:** homologación de patente OCR contra catálogo de vehículos (ejemplo `SD6486 → SB6486`), sin alterar el OCR. No iniciado.
+
+---
+
 ## 2026-08-10 — Integración Desktop ↔ Motor Paddle restaurada y validada
 
 - Se restauró el contrato histórico de integración utilizado por Atlas Viajes Desktop: `analizar_guias_masivo.py` vuelve a aceptar `--catalogos <ruta>` y valida explícitamente la fuente privada canónica antes de procesar. También admite `ATLAS_CATALOGOS_DIR`; los archivos `*.example.json` nunca se aceptan silenciosamente como producción.

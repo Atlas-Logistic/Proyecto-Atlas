@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-10 — Cierre Patentes P1: recuperación geométrica de patentes compatible con Paddle
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `0bcb43ca56e5ab1cdc6f596bb80af225ce234739`.
+- **Problema resuelto:** `patente_tracto`/`patente_carro` volvían `"No encontrado"` con salida Paddle porque la extracción original exigía la frase contigua `"RETIRA PATENTE FECHA LLEGADA"`, y Paddle reparte esas etiquetas en bloques/líneas separados. Se agregó `_extraer_patentes_geometrico` (`atlas_core/extractor.py`), nueva función geométrica que ancla en la zona RETIRA–FECHA LLEGADA por coordenadas, activa solo como *fallback* cuando la lectura lineal ya devolvió "No encontrado". **PaddleOCR no se tocó.**
+- **Camino histórico EasyOCR preservado:** `buscar_chofer_y_patentes()` (lectura lineal por frase contigua) no se modificó.
+- **Alcance deliberadamente acotado:** P1 recupera el valor OCR disponible, no lo corrige. La guía real `464511` recupera `patente_tracto = SD6486` (el valor que Paddle realmente lee, con una B leída como D) y `patente_rampla = JF4288` (correcto); no se corrige `SD6486` a `SB6486`.
+- Suite final: **566/566 tests** (556 → 566).
+- No se tocó Desktop ni la generación de reportes — ambos consumen el dict que devuelve `procesar_archivo`, así que reciben el valor recuperado automáticamente sin cambios propios.
+- **Próximo microbloque pendiente:** homologación de patente OCR contra catálogo de vehículos (ejemplo `SD6486 → SB6486`), sin alterar el OCR. No iniciado.
+
+---
+
 ## 2026-08-10 — Integración Desktop ↔ Motor Paddle cerrada
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `e61c04af4081b3d52761ad7928291bd88b6a83d2`.

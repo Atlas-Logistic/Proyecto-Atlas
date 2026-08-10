@@ -486,6 +486,23 @@ def _extraer_fecha_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     }
 
 
+def _normalizar_patente(valor: str) -> str:
+    patente = re.sub(r"\s+", " ", valor or "").strip(" :;,-.").upper()
+    patente = patente.replace(" ", "")
+    patente = patente.replace("O", "0")
+
+    # Corrección conocida por OCR para guía 3
+    if patente in {"2DRG50", "2DRG5O", "2DRG5Q"}:
+        return "BDFG50"
+
+    return patente
+
+
+def _patente_valida(valor: str) -> bool:
+    valor = valor.upper()
+    return bool(re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6}", valor))
+
+
 def _chofer_lineal_contaminado(valor: Any) -> bool:
     """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
     texto = _texto_simple(str(valor or ""))
@@ -625,6 +642,72 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     return {"valor": re.sub(r"\s+", " ", mejor).strip()}
 
 
+def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza patente(s) de tracto y carro/rampla en la zona geométrica
+    RETIRA-FECHA LLEGADA, tolerante al orden de bloques que produce PaddleOCR.
+
+    No corrige el valor OCR leído (p. ej. una B leída como D): solo recupera
+    el valor disponible en la zona en vez de dejarlo en "No encontrado". Se
+    abstiene si no hay ancla RETIRA, si un candidato queda fuera de la zona
+    RETIRA-FECHA LLEGADA, o si hay dos candidatos válidos ambiguos para el
+    mismo campo (no adivina eligiendo el primero por orden OCR).
+    """
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    def _texto_colapsado(item: Dict[str, Any]) -> str:
+        texto = re.sub(r"[.,:;]", " ", item["simple"])
+        return re.sub(r"\s+", " ", texto).strip()
+
+    def es_retira(item: Dict[str, Any]) -> bool:
+        texto = _texto_colapsado(item)
+        return texto == "RETIRA" or texto.startswith("RETIRA ")
+
+    def es_llegada(item: Dict[str, Any]) -> bool:
+        texto = _texto_colapsado(item)
+        return bool(re.fullmatch(r"FECHA LLEGADA", texto)) or texto == "LLEGADA"
+
+    anclas_inicio = [item for item in items if es_retira(item)]
+    if not anclas_inicio:
+        return {}
+    y_inicio = min(item["y1"] for item in anclas_inicio)
+
+    anclas_fin = [item for item in items if es_llegada(item) and item["y1"] >= y_inicio - 5]
+    y_fin = max((item["y2"] for item in anclas_fin), default=y_inicio + 260)
+
+    margen = 15
+    zona = [item for item in items if y_inicio - margen <= item["cy"] <= y_fin + margen]
+    if not zona:
+        return {}
+
+    texto_zona = " ".join(item["simple"] for item in zona)
+
+    patron_carro = re.compile(r"\b(?:CARRO|RAMPLA)\s*:?\s*([A-Z0-9]{6})\b")
+    carro_valores = {
+        coincidencia.group(1)
+        for coincidencia in patron_carro.finditer(texto_zona)
+        if _patente_valida(coincidencia.group(1))
+    }
+
+    texto_sin_carro = patron_carro.sub(" ", texto_zona)
+    texto_sin_carro = re.sub(r"\b(RETIRA|PATENTE|FECHA|LLEGADA)\b", " ", texto_sin_carro)
+    tracto_valores = {
+        coincidencia.group(0)
+        for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", texto_sin_carro)
+        if _patente_valida(coincidencia.group(0))
+    }
+
+    resultado: Dict[str, Any] = {}
+    if len(tracto_valores) == 1:
+        resultado["tracto"] = next(iter(tracto_valores))
+    if len(carro_valores) == 1:
+        carro = next(iter(carro_valores))
+        if carro != resultado.get("tracto"):
+            resultado["carro"] = carro
+    return resultado
+
+
 def extraer_datos(
     textos: List[str], carpeta_catalogos: str | Path = "catalogos"
 ) -> Dict[str, str]:
@@ -722,21 +805,6 @@ def extraer_datos(
         texto = limpiar_valor(valor).upper()
         texto = texto.replace("PAIRICIO", "PATRICIO")
         return texto
-
-    def normalizar_patente(valor: str) -> str:
-        patente = limpiar_valor(valor).upper()
-        patente = patente.replace(" ", "")
-        patente = patente.replace("O", "0")
-
-        # Corrección conocida por OCR para guía 3
-        if patente in {"2DRG50", "2DRG5O", "2DRG5Q"}:
-            return "BDFG50"
-
-        return patente
-
-    def patente_valida(valor: str) -> bool:
-        valor = valor.upper()
-        return bool(re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6}", valor))
 
     def normalizar_hora(valor: str, preferir_ultima: bool = False) -> Optional[str]:
         texto = limpiar_valor(valor)
@@ -902,13 +970,13 @@ def extraer_datos(
 
         patente_carro = None
         coincidencia_carro = re.search(r"CARRO\s*:?\s*([A-Z0-9]{6})", bloque)
-        if coincidencia_carro and patente_valida(coincidencia_carro.group(1)):
-            patente_carro = normalizar_patente(coincidencia_carro.group(1))
+        if coincidencia_carro and _patente_valida(coincidencia_carro.group(1)):
+            patente_carro = _normalizar_patente(coincidencia_carro.group(1))
 
         coincidencia_patente = None
         for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", bloque):
             posible = coincidencia.group(0)
-            if patente_valida(posible):
+            if _patente_valida(posible):
                 coincidencia_patente = coincidencia
                 break
 
@@ -916,7 +984,7 @@ def extraer_datos(
         patente_tracto = None
 
         if coincidencia_patente:
-            patente_tracto = normalizar_patente(coincidencia_patente.group(0))
+            patente_tracto = _normalizar_patente(coincidencia_patente.group(0))
             candidato = bloque[:coincidencia_patente.start()]
             candidato = re.sub(r"\b(RETIRA|PATENTE|FECHA|LLEGADA|CARRO)\b", " ", candidato)
             candidato = re.sub(r"[^A-ZÁÉÍÓÚÑ ]", " ", candidato)

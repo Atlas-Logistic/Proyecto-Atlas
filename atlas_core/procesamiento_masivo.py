@@ -24,6 +24,7 @@ from atlas_core.extractor import (
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_fecha_geometrico,
+    _extraer_patentes_geometrico,
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
     extraer_datos,
@@ -440,11 +441,15 @@ def procesar_archivo(
     )
     recuperacion_geometrica = False
     recuperacion_chofer = False
+    recuperacion_patentes = False
     transporte_corregido = False
     bloques_guia = None
     campos_ausentes = any(
         datos.get(campo) in {None, "", "No encontrado"}
-        for campo in ("cliente", "obra destino", "número de transporte")
+        for campo in (
+            "cliente", "obra destino", "número de transporte",
+            "patente del tracto", "patente del carro",
+        )
     ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
     if campos_ausentes:
         try:
@@ -486,6 +491,18 @@ def procesar_archivo(
                     else:
                         datos["número de transporte"] = decision_transporte["valor"]
                         logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
+            patente_tracto_actual = str(datos.get("patente del tracto", "No encontrado"))
+            patente_carro_actual = str(datos.get("patente del carro", "No encontrado"))
+            if patente_tracto_actual == "No encontrado" or patente_carro_actual == "No encontrado":
+                decision_patentes = _extraer_patentes_geometrico(bloques_guia)
+                if patente_tracto_actual == "No encontrado" and decision_patentes.get("tracto"):
+                    datos["patente del tracto"] = decision_patentes["tracto"]
+                    recuperacion_patentes = True
+                    logger.info("patente_tracto recuperado mediante patentes-geometrico-conservador-v1")
+                if patente_carro_actual == "No encontrado" and decision_patentes.get("carro"):
+                    datos["patente del carro"] = decision_patentes["carro"]
+                    recuperacion_patentes = True
+                    logger.info("patente_carro recuperado mediante patentes-geometrico-conservador-v1")
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
 
@@ -586,6 +603,7 @@ def procesar_archivo(
         or recuperacion_geometrica
         or transporte_corregido
         or recuperacion_chofer
+        or recuperacion_patentes
         or fecha_recuperada_focal
         or _documento_degradado(datos, descripcion)
     )

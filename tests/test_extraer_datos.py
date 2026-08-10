@@ -32,6 +32,7 @@ from atlas_core.extractor import (
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
     _extraer_fecha_geometrico,
+    _extraer_patentes_geometrico,
     _extraer_transporte_geometrico,
 )
 from atlas_core.ocr import BloqueOCR
@@ -723,6 +724,107 @@ def test_chofer_candidato_junto_a_cliente_no_desplaza_zona_retira():
     ]
 
     assert _extraer_chofer_geometrico(bloques)["valor"] == "MARIO SOTO"
+
+
+# --- P1: patentes tolerantes al orden de bloques que produce PaddleOCR ---
+
+
+def test_patentes_secuencia_real_paddle_valor_y_carro_en_un_solo_bloque():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque(":SD6486 CARRO:JF4288", 20, 80, 220),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "SD6486", "carro": "JF4288"}
+
+
+def test_patentes_etiquetas_y_valores_separados_por_bloques():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque("SD6486", 120, 50, 70),
+        _bloque("CARRO", 20, 80, 60),
+        _bloque("JF4288", 120, 80, 70),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "SD6486", "carro": "JF4288"}
+
+
+def test_patentes_candidato_fuera_de_zona_retira_llegada_se_rechaza():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque("FECHA LLEGADA", 20, 80, 120),
+        _bloque("ZZ9999", 20, 400, 70),  # muy por debajo de la zona RETIRA-LLEGADA
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {}
+
+
+def test_patentes_dos_candidatos_ambiguos_se_abstiene():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque("AB1234", 120, 50, 70),
+        _bloque("CD5678", 220, 50, 70),
+        _bloque("FECHA LLEGADA", 20, 80, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {}
+
+
+def test_patentes_solo_tracto_disponible():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque("AB1234", 120, 50, 70),
+        _bloque("FECHA LLEGADA", 20, 80, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "AB1234"}
+
+
+def test_patentes_solo_carro_disponible():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque("CARRO:JF4288", 120, 50, 110),
+        _bloque("FECHA LLEGADA", 20, 80, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"carro": "JF4288"}
+
+
+def test_patentes_sin_ancla_retira_se_abstiene():
+    bloques = [_bloque("PATENTE", 20, 50, 70), _bloque("AB1234", 120, 50, 70)]
+
+    assert _extraer_patentes_geometrico(bloques) == {}
+
+
+def test_patentes_no_afecta_extraccion_de_chofer():
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("MARIO SOTO", 120, 20, 90),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque("SD6486", 120, 50, 70),
+        _bloque("CARRO", 20, 80, 60),
+        _bloque("JF4288", 120, 80, 70),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_chofer_geometrico(bloques)["valor"] == "MARIO SOTO"
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "SD6486", "carro": "JF4288"}
+
+
+def test_guia5_formato_historico_easyocr_continuo_sigue_funcionando():
+    """Regresión: la fase textual (`buscar_chofer_y_patentes`) no se tocó en
+    P1; la guía real con RODRIGO NAHUELÑIR / SB6486 / JF4288 sigue
+    resolviéndose por el camino lineal cuando el OCR entrega la frase
+    contigua "RETIRA PATENTE FECHA LLEGADA" (formato histórico EasyOCR)."""
+    probar_guia5()
 
 
 def probar_guia1():
