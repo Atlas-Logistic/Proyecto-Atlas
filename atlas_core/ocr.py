@@ -100,12 +100,22 @@ def leer_bloques_imagen(
     return bloques
 
 
-def _leer_transporte_focal(
+ALLOWLIST_TRANSPORTE = "0123456789OoDdQqIl| .-"
+ALLOWLIST_FECHA = "0123456789-/ "
+
+
+def _leer_region_focal(
     ruta_imagen: Union[str, Path],
     caja: Tuple[float, float, float, float],
     lector: Any = None,
+    allowlist: str = ALLOWLIST_TRANSPORTE,
 ) -> dict[str, Any]:
-    """Ejecuta cuatro variantes OCR sobre un recorte calculado desde una caja."""
+    """Ejecuta cuatro variantes OCR sobre un recorte calculado desde una caja.
+
+    Helper genérico de OCR focal: recorte con margen + 4 variantes (original,
+    grises, ampliada 2x LANCZOS, ampliada 2x con contraste). El `allowlist`
+    es lo único que varía según qué se está leyendo (transporte, fecha, etc.).
+    """
     ruta = Path(ruta_imagen)
     if not ruta.exists():
         raise FileNotFoundError(f"La imagen no existe: {ruta}")
@@ -156,7 +166,7 @@ def _leer_transporte_focal(
             arreglo,
             detail=1,
             paragraph=False,
-            allowlist="0123456789OoDdQqIl| .-",
+            allowlist=allowlist,
         )
         segmentos = []
         confianzas = []
@@ -179,3 +189,29 @@ def _leer_transporte_focal(
             }
         )
     return {"recorte": recorte, "lecturas": lecturas}
+
+
+def _leer_transporte_focal(
+    ruta_imagen: Union[str, Path],
+    caja: Tuple[float, float, float, float],
+    lector: Any = None,
+) -> dict[str, Any]:
+    """Ejecuta cuatro variantes OCR sobre un recorte calculado desde una caja.
+
+    Sin cambio funcional respecto de la versión anterior: delega en el
+    helper genérico con el allowlist de transporte de siempre.
+    """
+    return _leer_region_focal(ruta_imagen, caja, lector, allowlist=ALLOWLIST_TRANSPORTE)
+
+
+def _leer_fecha_focal(
+    ruta_imagen: Union[str, Path],
+    caja: Tuple[float, float, float, float],
+    lector: Any = None,
+) -> dict[str, Any]:
+    """Ejecuta cuatro variantes OCR sobre un recorte focal de fecha.
+
+    Mismo mecanismo de recorte/variantes que el resto del OCR focal, con un
+    allowlist minimal (dígitos, separadores de fecha y espacio; sin letras).
+    """
+    return _leer_region_focal(ruta_imagen, caja, lector, allowlist=ALLOWLIST_FECHA)

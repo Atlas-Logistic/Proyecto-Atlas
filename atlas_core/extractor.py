@@ -407,6 +407,85 @@ def _extraer_transporte_geometrico(
     return resultado
 
 
+def _extraer_fecha_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza la zona de FECHA DE EMISIÓN mediante geometría OCR conservadora.
+
+    No valida ni normaliza la fecha: solo ubica la caja de recorte que un
+    OCR focal posterior debe releer. Se abstiene si hay ambigüedad o si el
+    candidato más cercano en realidad pertenece a FECHA SALIDA/LLEGADA.
+    """
+    items = _normalizar_bloques_geometricos(bloques)
+
+    def _texto_colapsado(item: Dict[str, Any]) -> str:
+        texto = re.sub(r"[.,:;]", " ", item["simple"])
+        return re.sub(r"\s+", " ", texto).strip()
+
+    def es_etiqueta_emision(item: Dict[str, Any]) -> bool:
+        texto = _texto_colapsado(item)
+        return bool(re.fullmatch(r"FECHA(?: DE)? EMISION", texto)) or texto == "EMISION"
+
+    def es_etiqueta_fecha_rival(item: Dict[str, Any]) -> bool:
+        texto = _texto_colapsado(item)
+        if bool(re.fullmatch(r"FECHA(?: DE)? SALIDA", texto)) or texto == "SALIDA":
+            return True
+        if bool(re.fullmatch(r"FECHA(?: DE)? LLEGADA", texto)) or texto == "LLEGADA":
+            return True
+        return False
+
+    def candidato_fecha(item: Dict[str, Any]) -> bool:
+        texto = item["texto"].strip()
+        if sum(caracter.isdigit() for caracter in texto) < 4:
+            return False
+        if re.fullmatch(r"\d{1,2}[:;]\d{2}", texto):
+            return False
+        return True
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+            brecha = max(0.0, candidato["x1"] - etiqueta["x2"])
+            if brecha <= 320:
+                return brecha / 320 + diferencia_y / (alto * 8)
+        diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+        alineado = abs(candidato["cx"] - etiqueta["cx"]) <= 190
+        if alineado and 0 < diferencia_vertical <= 70:
+            return 0.30 + diferencia_vertical / 175
+        return None
+
+    decisiones = []
+    etiquetas = [item for item in items if es_etiqueta_emision(item)]
+    rivales = [item for item in items if es_etiqueta_fecha_rival(item)]
+    for etiqueta in etiquetas:
+        for candidato in items:
+            if candidato is etiqueta or not candidato_fecha(candidato):
+                continue
+            puntuacion = puntuar(etiqueta, candidato)
+            if puntuacion is None:
+                continue
+            distancia = abs(candidato["cx"] - etiqueta["cx"]) + abs(candidato["cy"] - etiqueta["cy"])
+            distancias_rivales = [
+                abs(candidato["cx"] - rival["cx"]) + abs(candidato["cy"] - rival["cy"])
+                for rival in rivales
+            ]
+            if distancias_rivales and min(distancias_rivales) + 8 < distancia:
+                continue
+            decisiones.append((puntuacion, candidato["y1"], candidato["x1"], candidato))
+
+    if not decisiones:
+        return {}
+    decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1], decision[2]))
+    mejor = decisiones[0]
+    if any(abs(decision[0] - mejor[0]) <= 0.06 for decision in decisiones[1:]):
+        return {}
+    candidato = mejor[3]
+    return {
+        "valor": candidato["texto"],
+        "caja": (candidato["x1"], candidato["y1"], candidato["x2"], candidato["y2"]),
+        "confianza": candidato["confianza"],
+    }
+
+
 def _chofer_lineal_contaminado(valor: Any) -> bool:
     """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
     texto = _texto_simple(str(valor or ""))

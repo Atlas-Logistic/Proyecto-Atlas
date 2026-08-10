@@ -61,7 +61,11 @@ def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monk
     }
     leer_bloques = Mock()
     focal = Mock()
-    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "leer_texto_imagen",
+        Mock(return_value=["FECHA DE EMISIÓN 23-06-2025"]),
+    )
     monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
     monkeypatch.setattr(procesamiento_masivo, "_leer_transporte_focal", focal)
     monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
@@ -185,7 +189,11 @@ def test_procesar_archivo_excepcion_ocr_focal_se_abstiene(tmp_path, monkeypatch)
 def test_procesar_archivo_preserva_chofer_lineal_limpio(tmp_path, monkeypatch):
     ruta = tmp_path / "guia.jpg"
     bloques = Mock()
-    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "leer_texto_imagen",
+        Mock(return_value=["FECHA DE EMISIÓN 23-06-2025"]),
+    )
     monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", bloques)
     monkeypatch.setattr(
         procesamiento_masivo, "extraer_datos",
@@ -226,6 +234,245 @@ def test_procesar_archivo_contaminado_sin_candidato_conserva_valor_anterior(tmp_
     )
 
     assert procesar_archivo(ruta)["chofer"] == "TOTAL EXENTO JUAN PEREZ"
+
+
+def _datos_lineales_completos(**overrides):
+    datos = {
+        "número de guía": "123456",
+        "número de transporte": "0000123456",
+        "cliente": "A",
+        "obra destino": "B",
+        "chofer": "C",
+    }
+    datos.update(overrides)
+    return datos
+
+
+def test_procesar_archivo_fecha_global_valida_no_dispara_focal(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    leer_bloques = Mock()
+    fecha_geometrica = Mock()
+    fecha_focal = Mock()
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "leer_texto_imagen",
+        Mock(return_value=["FECHA DE EMISIÓN 23-06-2025"]),
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
+    monkeypatch.setattr(procesamiento_masivo, "_extraer_fecha_geometrico", fecha_geometrica)
+    monkeypatch.setattr(procesamiento_masivo, "_leer_fecha_focal", fecha_focal)
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "23-06-2025"
+    leer_bloques.assert_not_called()
+    fecha_geometrica.assert_not_called()
+    fecha_focal.assert_not_called()
+
+
+def test_procesar_archivo_fecha_focal_recupera_con_consenso_de_dos_variantes(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("RUIDO 2025", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.3),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["sin fecha reconocible"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 23-06-2025", "confianza": 0.95},
+                    {"variante": "grises", "texto": "FECHA DE EMISION 23-06-2025", "confianza": 0.90},
+                    {"variante": "ampliada_2x", "texto": "", "confianza": None},
+                    {"variante": "ampliada_2x_contraste", "texto": "", "confianza": None},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "23-06-2025"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_fecha_focal_abstiene_si_un_voto_coincidente_tiene_confianza_baja(
+    tmp_path, monkeypatch
+):
+    """Reproduce el caso real IMG-20250930-WA0046.jpg (F2.2): 3 variantes
+    coinciden en la misma fecha (incorrecta en el caso real), pero una de
+    ellas tiene confianza por debajo del umbral -> se descarta el consenso
+    completo y se abstiene, en vez de aceptar un consenso débil."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("RUIDO 2025", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.3),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["sin fecha reconocible"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 10-09-2025", "confianza": 0.82},
+                    {"variante": "grises", "texto": "FECHA DE EMISION 10-09-2025", "confianza": 0.82},
+                    {"variante": "ampliada_2x", "texto": "FECHA DE EMISION 10-09-2025", "confianza": 0.47},
+                    {"variante": "ampliada_2x_contraste", "texto": "", "confianza": 0.99},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "No encontrado"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_fecha_focal_acepta_confianza_exactamente_en_el_umbral(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("RUIDO 2025", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.3),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["sin fecha reconocible"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 30-09-2025", "confianza": 0.70},
+                    {"variante": "grises", "texto": "", "confianza": None},
+                    {"variante": "ampliada_2x", "texto": "FECHA DE EMISION 30-09-2025", "confianza": 0.70},
+                    {"variante": "ampliada_2x_contraste", "texto": "", "confianza": None},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "30-09-2025"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_fecha_focal_variantes_discordantes_no_convergen(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("RUIDO 2025", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.3),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["sin fecha reconocible"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 23-06-2025"},
+                    {"variante": "grises", "texto": "FECHA DE EMISION 24-06-2025"},
+                    {"variante": "ampliada_2x", "texto": "FECHA DE EMISION 25-06-2025"},
+                    {"variante": "ampliada_2x_contraste", "texto": ""},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "No encontrado"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_fecha_focal_descarta_anio_absurdo_por_plausibilidad(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("RUIDO 2025", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.3),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["sin fecha reconocible"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 23-06-7025"},
+                    {"variante": "grises", "texto": "FECHA DE EMISION 23-06-7025"},
+                    {"variante": "ampliada_2x", "texto": ""},
+                    {"variante": "ampliada_2x_contraste", "texto": ""},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "No encontrado"
+
+
+def test_procesar_archivo_fecha_focal_sin_caja_geometrica_se_abstiene(tmp_path, monkeypatch):
+    ruta = tmp_path / "guia.jpg"
+    bloques = [BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9)]
+    fecha_focal = Mock()
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["sin fecha reconocible"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "_leer_fecha_focal", fecha_focal)
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "No encontrado"
+    fecha_focal.assert_not_called()
 
 
 def _preparar_procesamiento_fuzzy(monkeypatch, datos, catalogo, bloques=None):

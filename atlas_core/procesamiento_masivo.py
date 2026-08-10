@@ -22,11 +22,13 @@ from atlas_core.extractor import (
     _chofer_lineal_contaminado,
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
+    _extraer_fecha_geometrico,
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
     extraer_datos,
 )
 from atlas_core.ocr import (
+    _leer_fecha_focal,
     _leer_transporte_focal,
     crear_lector_ocr,
     leer_bloques_imagen,
@@ -51,6 +53,17 @@ ANIO_MINIMO_PLAUSIBLE = 2015
 ANIO_MAXIMO_PLAUSIBLE = 2035
 FECHA_MINIMA_PLAUSIBLE = date(ANIO_MINIMO_PLAUSIBLE, 1, 1)
 FECHA_MAXIMA_PLAUSIBLE = date(ANIO_MAXIMO_PLAUSIBLE, 12, 31)
+
+# Umbral de confianza para el consenso de fecha por OCR focal (F2.2): un
+# candidato con >=2 variantes coincidentes solo se acepta si TODAS esas
+# variantes tienen confianza >= este umbral; si no, se prefiere abstenerse
+# ("No encontrado") antes que aceptar un consenso débil. Validado sobre una
+# muestra real limitada (7 casos con caja geométrica de la muestra histórica
+# de 30 guías) — separa con margen los votos correctos observados (~0.90-0.98
+# de confianza) de los votos incorrectos observados (~0.47-0.82), pero NO
+# demuestra suficiencia general del motor OCR; requiere seguimiento con más
+# muestra antes de tratarse como calibración definitiva.
+CONFIANZA_MINIMA_FECHA_FOCAL = 0.70
 
 COLUMNAS = [
     "archivo",
@@ -152,6 +165,27 @@ def _limites_temporales_efectivos(
     efectivo_desde = fecha_desde if fecha_desde is not None else FECHA_MINIMA_PLAUSIBLE
     efectivo_hasta = fecha_hasta if fecha_hasta is not None else FECHA_MAXIMA_PLAUSIBLE
     return efectivo_desde, efectivo_hasta
+
+
+def _valor_fecha_a_date(valor: str) -> date | None:
+    """Convierte un valor ya devuelto por extraer_fecha a un date comparable.
+
+    Solo se usa para comparar variantes focales entre sí (p. ej. "01-07-2026"
+    contra "01/07/2026"); no reimplementa ni reemplaza el reconocimiento de
+    extraer_fecha, que ya validó el valor antes de devolverlo.
+    """
+    coincidencia = re.fullmatch(r"(\d{2})[-/](\d{2})[-/](\d{4})", valor)
+    if coincidencia:
+        dia, mes, anio = (int(parte) for parte in coincidencia.groups())
+    else:
+        coincidencia = re.fullmatch(r"(\d{4})[-/](\d{2})[-/](\d{2})", valor)
+        if not coincidencia:
+            return None
+        anio, mes, dia = (int(parte) for parte in coincidencia.groups())
+    try:
+        return date(anio, mes, dia)
+    except ValueError:
+        return None
 
 
 def _fecha_dmy_valida(
@@ -432,6 +466,51 @@ def procesar_archivo(
                 logger.info("numero_guia recuperado mediante numero-guia-contextual-conservador-v1")
         except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
             logger.warning("Fallback espacial de numero_guia omitido: %s: %s", type(exc).__name__, exc)
+
+    fecha_actual = extraer_fecha(textos, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta)
+    fecha_recuperada_focal = False
+    if fecha_actual == "No encontrado":
+        try:
+            if bloques_guia is None:
+                bloques_guia = leer_bloques_imagen(ruta, lector=lector_ocr)
+            decision_fecha = _extraer_fecha_geometrico(bloques_guia)
+            if decision_fecha.get("caja"):
+                evidencia_focal = _leer_fecha_focal(
+                    ruta, decision_fecha["caja"], lector=lector_ocr
+                )
+                votos_por_fecha: dict[date, list[tuple[str, object]]] = {}
+                for lectura in evidencia_focal["lecturas"]:
+                    valor_focal = extraer_fecha(
+                        [str(lectura.get("texto", ""))],
+                        fecha_desde=fecha_desde,
+                        fecha_hasta=fecha_hasta,
+                    )
+                    if valor_focal == "No encontrado":
+                        continue
+                    fecha_comparable = _valor_fecha_a_date(valor_focal)
+                    if fecha_comparable is None:
+                        continue
+                    votos_por_fecha.setdefault(fecha_comparable, []).append(
+                        (valor_focal, lectura.get("confianza"))
+                    )
+                coincidencias = {
+                    fecha: votos
+                    for fecha, votos in votos_por_fecha.items()
+                    if len(votos) >= 2
+                    and all(
+                        isinstance(confianza, (int, float))
+                        and confianza >= CONFIANZA_MINIMA_FECHA_FOCAL
+                        for _, confianza in votos
+                    )
+                }
+                if len(coincidencias) == 1:
+                    ((_, votos_ganadores),) = coincidencias.items()
+                    fecha_actual = votos_ganadores[0][0]
+                    fecha_recuperada_focal = True
+                    logger.info("fecha recuperada mediante consenso-focal-v1")
+        except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
+            logger.warning("Recuperación focal de fecha omitida: %s: %s", type(exc).__name__, exc)
+
     descripcion = extraer_descripcion_material(textos)
     valores_clave = (
         numero_guia_actual,
@@ -439,16 +518,19 @@ def procesar_archivo(
         datos.get("chofer"),
         datos.get("cliente"),
     )
-    requiere_revision = any(
-        not valor or valor == "No encontrado" for valor in valores_clave
-    ) or not descripcion or recuperacion_geometrica or transporte_corregido or recuperacion_chofer
+    requiere_revision = (
+        any(not valor or valor == "No encontrado" for valor in valores_clave)
+        or not descripcion
+        or recuperacion_geometrica
+        or transporte_corregido
+        or recuperacion_chofer
+        or fecha_recuperada_focal
+    )
 
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
-        "fecha": extraer_fecha(
-            textos, fecha_desde=fecha_desde, fecha_hasta=fecha_hasta
-        ),
+        "fecha": fecha_actual,
         "chofer": str(datos.get("chofer", "No encontrado")),
         "rut_chofer": str(datos.get("RUT del chofer", "No encontrado")),
         "cliente": str(datos.get("cliente", "No encontrado")),

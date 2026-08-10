@@ -31,6 +31,7 @@ from atlas_core.extractor import (
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
+    _extraer_fecha_geometrico,
     _extraer_transporte_geometrico,
 )
 from atlas_core.ocr import BloqueOCR
@@ -302,6 +303,67 @@ def test_transporte_es_independiente_del_orden_y_determinista():
 
 def test_transporte_no_recibe_nombre_de_archivo():
     assert _extraer_transporte_geometrico([]) == {}
+
+
+def test_fecha_geometrica_candidato_a_la_derecha_de_la_etiqueta():
+    bloques = [
+        _bloque("FECHA DE EMISION", 20, 20, 150),
+        _bloque("23-06-2025", 190, 20, 90),
+    ]
+
+    resultado = _extraer_fecha_geometrico(bloques)
+
+    assert resultado["valor"] == "23-06-2025"
+    assert resultado["caja"] == (190.0, 20.0, 280.0, 38.0)
+
+
+def test_fecha_geometrica_candidato_debajo_de_la_etiqueta():
+    bloques = [
+        _bloque("FECHA DE EMISION", 20, 20, 150),
+        _bloque("23-06-2025", 25, 55, 90),
+    ]
+
+    assert _extraer_fecha_geometrico(bloques)["valor"] == "23-06-2025"
+
+
+def test_fecha_geometrica_etiqueta_ausente_se_abstiene():
+    assert _extraer_fecha_geometrico([_bloque("23-06-2025", 190, 20, 90)]) == {}
+
+
+def test_fecha_geometrica_sin_candidato_se_abstiene():
+    assert _extraer_fecha_geometrico([_bloque("FECHA DE EMISION", 20, 20, 150)]) == {}
+
+
+def test_fecha_geometrica_se_abstiene_ante_dos_candidatos_equivalentes():
+    bloques = [
+        _bloque("FECHA DE EMISION", 20, 50, 150),
+        _bloque("23-06-2025", 190, 40, 90),
+        _bloque("24-06-2025", 190, 60, 90),
+    ]
+
+    assert _extraer_fecha_geometrico(bloques) == {}
+
+
+def test_fecha_geometrica_prioriza_emision_sobre_salida_cercana():
+    bloques = [
+        _bloque("FECHA SALIDA", 20, 20, 120),
+        _bloque("FECHA DE EMISION", 20, 60, 150),
+        _bloque("23-06-2025", 190, 60, 90),
+    ]
+
+    resultado = _extraer_fecha_geometrico(bloques)
+
+    assert resultado["valor"] == "23-06-2025"
+
+
+def test_fecha_geometrica_no_toma_candidato_mas_cercano_a_salida_que_a_emision():
+    bloques = [
+        _bloque("FECHA DE EMISION", 20, 20, 150),
+        _bloque("FECHA SALIDA", 20, 60, 120),
+        _bloque("25-06-2025", 190, 60, 90),
+    ]
+
+    assert _extraer_fecha_geometrico(bloques) == {}
 
 
 def test_consenso_focal_dos_lecturas_iguales():

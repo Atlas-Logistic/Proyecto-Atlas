@@ -238,3 +238,52 @@ def test_transporte_focal_rechaza_recorte_vacio(tmp_path):
 
     with pytest.raises(ValueError, match="dimensiones válidas"):
         ocr._leer_transporte_focal(ruta, (10, 10, 10, 20), lector=Mock())
+
+
+def test_transporte_focal_conserva_allowlist_previo_sin_cambios(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    ocr._leer_transporte_focal(ruta, (20, 10, 80, 30), lector=lector)
+
+    for llamada in lector.readtext.call_args_list:
+        assert llamada.kwargs["allowlist"] == "0123456789OoDdQqIl| .-"
+
+
+def test_helper_focal_generico_reproduce_exactamente_el_comportamiento_de_transporte(
+    tmp_path,
+):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector_a = Mock()
+    lector_a.readtext.side_effect = [["0000348808"]] * 4
+    lector_b = Mock()
+    lector_b.readtext.side_effect = [["0000348808"]] * 4
+
+    via_wrapper = ocr._leer_transporte_focal(ruta, (20, 10, 80, 30), lector=lector_a)
+    via_helper = ocr._leer_region_focal(
+        ruta, (20, 10, 80, 30), lector=lector_b, allowlist=ocr.ALLOWLIST_TRANSPORTE
+    )
+
+    assert via_wrapper == via_helper
+    assert (
+        lector_a.readtext.call_args_list[0].kwargs
+        == lector_b.readtext.call_args_list[0].kwargs
+    )
+
+
+def test_fecha_focal_usa_allowlist_minimo_que_acepta_separador_barra(tmp_path):
+    ruta = tmp_path / "imagen.png"
+    Image.new("RGB", (100, 60), color="white").save(ruta)
+    lector = Mock()
+    lector.readtext.return_value = []
+
+    ocr._leer_fecha_focal(ruta, (20, 10, 80, 30), lector=lector)
+
+    assert ocr.ALLOWLIST_FECHA == "0123456789-/ "
+    assert "/" in ocr.ALLOWLIST_FECHA
+    assert not any(caracter.isalpha() for caracter in ocr.ALLOWLIST_FECHA)
+    for llamada in lector.readtext.call_args_list:
+        assert llamada.kwargs["allowlist"] == ocr.ALLOWLIST_FECHA
