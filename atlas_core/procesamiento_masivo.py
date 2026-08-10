@@ -14,6 +14,7 @@ from typing import Callable, Iterable, Mapping
 from atlas_core.catalogos import (
     buscar_chofer_por_rut,
     cargar_catalogo_json,
+    enriquecer_datos_con_catalogos,
     resolver_nombre_chofer_difuso,
 )
 from atlas_core.clasificador_material import clasificar_material
@@ -405,6 +406,7 @@ def procesar_archivo(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
     proveedor: object = None,
+    carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
 
@@ -431,7 +433,11 @@ def procesar_archivo(
         return funcion_easyocr(ruta, caja, lector=lector_ocr)
 
     textos = _leer_texto()
-    datos = extraer_datos(textos)
+    datos = (
+        extraer_datos(textos, carpeta_catalogos)
+        if carpeta_catalogos is not None
+        else extraer_datos(textos)
+    )
     recuperacion_geometrica = False
     recuperacion_chofer = False
     transporte_corregido = False
@@ -483,9 +489,19 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
 
+    if carpeta_catalogos is not None:
+        # La geometría puede recuperar valores después de la extracción lineal;
+        # reaplicar la misma fuente al final conserva el nombre canónico.
+        datos = enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
+
     nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()
     if nombre_chofer not in {"", "No encontrado"}:
-        catalogo_choferes = cargar_catalogo_json(RUTA_CATALOGO_CHOFERES)
+        ruta_choferes = (
+            Path(carpeta_catalogos) / "choferes.json"
+            if carpeta_catalogos is not None
+            else RUTA_CATALOGO_CHOFERES
+        )
+        catalogo_choferes = cargar_catalogo_json(ruta_choferes)
         rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
         if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is None:
             decision_fuzzy = resolver_nombre_chofer_difuso(
@@ -644,6 +660,7 @@ def procesar_carpeta(
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
     proveedor: object = None,
+    carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
 
@@ -695,13 +712,20 @@ def procesar_carpeta(
         if procesador is not None:
             return procesador(ruta)
 
+        argumentos_archivo: dict[str, object] = {}
+        if carpeta_catalogos is not None:
+            argumentos_archivo["carpeta_catalogos"] = carpeta_catalogos
+
         if lector_ocr is not None:
             # Compatibilidad: EasyOCR explícito, sin pasar por el proveedor.
             if fecha_desde is None and fecha_hasta is None:
-                return procesar_archivo(ruta, lector_ocr=lector_compartido)
+                return procesar_archivo(
+                    ruta, lector_ocr=lector_compartido, **argumentos_archivo
+                )
             return procesar_archivo(
                 ruta, lector_ocr=lector_compartido,
                 fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+                **argumentos_archivo,
             )
 
         if proveedor_compartido is None:
@@ -711,10 +735,13 @@ def procesar_carpeta(
                 type(proveedor_compartido).__name__,
             )
         if fecha_desde is None and fecha_hasta is None:
-            return procesar_archivo(ruta, proveedor=proveedor_compartido)
+            return procesar_archivo(
+                ruta, proveedor=proveedor_compartido, **argumentos_archivo
+            )
         return procesar_archivo(
             ruta, proveedor=proveedor_compartido,
             fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+            **argumentos_archivo,
         )
 
     try:

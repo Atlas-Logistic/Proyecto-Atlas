@@ -4,6 +4,19 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-10 — Integración Desktop ↔ Motor Paddle cerrada
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `e61c04af4081b3d52761ad7928291bd88b6a83d2`.
+- Atlas Viajes Desktop 1.4.3 y el motor vuelven a compartir el contrato histórico `--catalogos <ruta>`. También se admite `ATLAS_CATALOGOS_DIR`; fuentes incompletas, inexistentes o compuestas solo por plantillas `.example` se rechazan.
+- `resumen_procesamiento_desktop.py` fue recuperado desde Git y verificado contra su blob histórico. `generar_reporte_viajes.py`, `atlas_core/gestor_viajes.py` y `atlas_core/reporte_viajes.py` también fueron recuperados desde la línea histórica compatible y validados contra el HEAD actual.
+- La propagación de catálogos fue fusionada selectivamente con M2. **PaddleOCR continúa como proveedor principal**, GPU activa en este PC, proveedor único reutilizado por lote y EasyOCR disponible como fallback.
+- Suite final: **556/556 tests**.
+- Prueba manual end-to-end exitosa: Desktop procesó la guía real `464511`, obtuvo transporte `0000352449`, fecha `10-08-2026`, cliente `ARMACERO MATCO SA` y chofer `RODRIGO NAHUELÑIR`; el viaje se mostró correctamente en Atlas Viajes 1.4.3 con estado OK.
+- Los 574 viajes operativos no fueron reprocesados ni modificados durante las pruebas técnicas aisladas.
+- **Próximo frente:** RECUPERACIÓN UX HISTÓRICA del Desktop. No iniciar cambios del motor como parte de ese frente. Antes de considerar perdido un archivo o comportamiento, revisar `G:\Mi unidad\BACKUP_PRE_FORMATEO_20260808`.
+
+---
+
 ## 2026-08-10 — Cierre Bloque M2: runtime Paddle portable + activación batch (pendiente de tu aprobación final)
 
 - **Rama:** `lector-mvp-guia-nueva`. **Sin commit, sin push** — a la espera de que apruebes antes de cerrar formalmente (a diferencia de M1, aquí no hice el commit todavía porque me pediste el reporte de los 10 puntos primero).

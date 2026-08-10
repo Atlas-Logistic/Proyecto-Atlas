@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-10 — Integración Desktop ↔ Motor Paddle restaurada y validada
+
+- Se restauró el contrato histórico de integración utilizado por Atlas Viajes Desktop: `analizar_guias_masivo.py` vuelve a aceptar `--catalogos <ruta>` y valida explícitamente la fuente privada canónica antes de procesar. También admite `ATLAS_CATALOGOS_DIR`; los archivos `*.example.json` nunca se aceptan silenciosamente como producción.
+- `procesar_carpeta` propaga la fuente validada hasta `procesar_archivo` y la resolución canónica de clientes/choferes, conservando intacta la arquitectura M2: PaddleOCR sigue siendo el proveedor principal, con GPU automática en este PC, un único proveedor reutilizado por lote y EasyOCR como fallback.
+- Se recuperó `resumen_procesamiento_desktop.py` desde la historia real del proyecto y se verificó que coincide con el blob histórico validado. También se recuperaron `generar_reporte_viajes.py` y sus dependencias originales de agrupación/publicación de viajes.
+- Validación automatizada final: **556 tests**, todos verdes.
+- Validación manual end-to-end confirmada en Atlas Viajes 1.4.3: al arrastrar la guía real `464511`, Desktop ejecutó el motor con PaddleOCR GPU, produjo transporte `0000352449`, fecha `10-08-2026`, cliente `ARMACERO MATCO SA` y chofer `RODRIGO NAHUELÑIR`; el viaje apareció correctamente en la UI con estado OK.
+- **Siguiente frente Desktop:** recuperación de UX histórica. No corresponde introducir nuevos cambios del motor en ese bloque. Antes de asumir perdido cualquier elemento histórico, revisar `G:\Mi unidad\BACKUP_PRE_FORMATEO_20260808`.
+
+---
+
 ## 2026-08-10 — Bloque M2: runtime Paddle portable + activación en flujo batch
 
 - El runtime de PaddleOCR ya no depende de ninguna ruta de este PC: se resuelve en `%LOCALAPPDATA%\Atlas\runtime\paddleocr` (portable, sin nombre de usuario ni Desktop hardcodeados), con posibilidad de override explícito por variable de entorno para desarrollo.
