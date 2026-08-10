@@ -646,8 +646,65 @@ FECHA_DESDE_LOTE = date(2025, 1, 1)
 FECHA_HASTA_LOTE = date(2026, 7, 31)
 
 
-def test_fecha_sin_rango_conserva_comportamiento_de_etapa_uno():
-    assert extraer_fecha(["FECHA DE EMISIÓN 01-07-7025"]) == "01-07-7025"
+def test_fecha_sin_rango_descarta_anio_operacionalmente_absurdo():
+    """Sin fecha_desde/fecha_hasta explícitos, igual rige la guarda de
+    plausibilidad temporal por defecto: un año como 7025 no puede ser un
+    documento real de Atlas, sin importar que el calendario lo acepte."""
+    assert extraer_fecha(["FECHA DE EMISIÓN 01-07-7025"]) == "No encontrado"
+
+
+def test_fecha_sin_rango_acepta_anio_normal_de_la_muestra():
+    """Una fecha típica de la muestra real (2025-2026) se mantiene válida
+    sin necesidad de pasar fecha_desde/fecha_hasta."""
+    assert extraer_fecha(["FECHA DE EMISIÓN 13-07-2026"]) == "13-07-2026"
+
+
+def test_fecha_sin_rango_limite_inferior_plausible_es_aceptado():
+    anio = procesamiento_masivo.ANIO_MINIMO_PLAUSIBLE
+    assert extraer_fecha([f"FECHA DE EMISIÓN 01-01-{anio}"]) == f"01-01-{anio}"
+
+
+def test_fecha_sin_rango_limite_superior_plausible_es_aceptado():
+    anio = procesamiento_masivo.ANIO_MAXIMO_PLAUSIBLE
+    assert extraer_fecha([f"FECHA DE EMISIÓN 31-12-{anio}"]) == f"31-12-{anio}"
+
+
+@pytest.mark.parametrize(
+    "anio",
+    [
+        procesamiento_masivo.ANIO_MINIMO_PLAUSIBLE - 1,
+        procesamiento_masivo.ANIO_MAXIMO_PLAUSIBLE + 1,
+    ],
+)
+def test_fecha_sin_rango_anio_fuera_del_rango_plausible_se_descarta(anio):
+    assert extraer_fecha([f"FECHA DE EMISIÓN 01-01-{anio}"]) == "No encontrado"
+
+
+def test_fecha_con_rango_explicito_mas_amplio_que_el_default_prevalece():
+    """Un fecha_desde/fecha_hasta explícito manda por completo sobre la
+    guarda de plausibilidad por defecto, incluso si es más amplio que ella."""
+    resultado = extraer_fecha(
+        ["FECHA DE EMISIÓN 01-01-2040"],
+        date(1990, 1, 1),
+        date(2099, 12, 31),
+    )
+    assert resultado == "01-01-2040"
+
+
+def test_fecha_con_rango_explicito_mas_estrecho_que_el_default_prevalece():
+    """Un rango explícito también puede ser más estrecho que el default y
+    sigue mandando sobre él (comportamiento de rango explícito sin cambios)."""
+    resultado = extraer_fecha(
+        ["FECHA DE EMISIÓN 01-01-2020"],
+        FECHA_DESDE_LOTE,
+        FECHA_HASTA_LOTE,
+    )
+    assert resultado == "No encontrado"
+
+
+def test_fecha_sin_rango_candidato_absurdo_y_plausible_elige_el_plausible():
+    textos = ["FECHA SALIDA 01-07-7025 FECHA DE EMISIÓN 13-07-2026"]
+    assert extraer_fecha(textos) == "13-07-2026"
 
 
 def test_fecha_dentro_del_rango_es_aceptada():
@@ -778,7 +835,9 @@ def test_procesar_archivo_integra_rango_de_fecha(tmp_path, monkeypatch):
     assert resultado["fecha"] == "15-06-2026"
 
 
-def test_procesar_archivo_sin_rango_conserva_compatibilidad(tmp_path, monkeypatch):
+def test_procesar_archivo_sin_rango_descarta_anio_operacionalmente_absurdo(
+    tmp_path, monkeypatch
+):
     ruta = tmp_path / "guia.jpg"
     monkeypatch.setattr(
         procesamiento_masivo,
@@ -789,7 +848,7 @@ def test_procesar_archivo_sin_rango_conserva_compatibilidad(tmp_path, monkeypatc
 
     resultado = procesar_archivo(ruta)
 
-    assert resultado["fecha"] == "01-07-7025"
+    assert resultado["fecha"] == "No encontrado"
 
 
 @pytest.mark.parametrize(

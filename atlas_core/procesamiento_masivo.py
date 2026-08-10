@@ -42,6 +42,16 @@ EXTENSIONES_PERMITIDAS = frozenset(
 )
 RUTA_CATALOGO_CHOFERES = Path("catalogos/choferes.json")
 
+# Guarda de plausibilidad temporal: cuando el llamador no entrega
+# fecha_desde/fecha_hasta explícitos, igual se descartan años que ningún
+# documento real de Atlas podría tener (OCR corrompido, p. ej. "7025").
+# Centralizado aquí para no hardcodear el rango dentro de los regex de
+# extraer_fecha ni duplicarlo entre la pasada estricta y la tolerante.
+ANIO_MINIMO_PLAUSIBLE = 2015
+ANIO_MAXIMO_PLAUSIBLE = 2035
+FECHA_MINIMA_PLAUSIBLE = date(ANIO_MINIMO_PLAUSIBLE, 1, 1)
+FECHA_MAXIMA_PLAUSIBLE = date(ANIO_MAXIMO_PLAUSIBLE, 12, 31)
+
 COLUMNAS = [
     "archivo",
     "estado_procesamiento",
@@ -129,6 +139,21 @@ def _clasificar_contexto_fecha(
     return 3, "GLOBAL"
 
 
+def _limites_temporales_efectivos(
+    fecha_desde: date | None,
+    fecha_hasta: date | None,
+) -> tuple[date, date]:
+    """Resuelve los límites reales a aplicar durante la extracción de fecha.
+
+    Un límite explícito siempre prevalece. Cuando el llamador no entrega
+    fecha_desde y/o fecha_hasta, se completa con la guarda de plausibilidad
+    temporal por defecto en vez de dejar ese lado sin cota.
+    """
+    efectivo_desde = fecha_desde if fecha_desde is not None else FECHA_MINIMA_PLAUSIBLE
+    efectivo_hasta = fecha_hasta if fecha_hasta is not None else FECHA_MAXIMA_PLAUSIBLE
+    return efectivo_desde, efectivo_hasta
+
+
 def _fecha_dmy_valida(
     valor: str,
     fecha_desde: date | None,
@@ -180,6 +205,10 @@ def extraer_fecha(
     ):
         raise ValueError("fecha_desde no puede ser posterior a fecha_hasta")
 
+    fecha_desde_efectiva, fecha_hasta_efectiva = _limites_temporales_efectivos(
+        fecha_desde, fecha_hasta
+    )
+
     texto = "\n".join(str(valor) for valor in textos)
     texto_normalizado = _normalizar(texto)
     patron_fecha = re.compile(
@@ -203,9 +232,7 @@ def extraer_fecha(
             fecha_candidata = date(anio, mes, dia)
         except ValueError:
             continue
-        if fecha_desde is not None and fecha_candidata < fecha_desde:
-            continue
-        if fecha_hasta is not None and fecha_candidata > fecha_hasta:
+        if fecha_candidata < fecha_desde_efectiva or fecha_candidata > fecha_hasta_efectiva:
             continue
 
         inicio_contexto = max(0, coincidencia.start() - 120)
@@ -296,7 +323,7 @@ def extraer_fecha(
 
     for propuesta in _normalizaciones_fecha_unicas(propuestas):
         valor = str(propuesta["valor_normalizado"])
-        if _fecha_dmy_valida(valor, fecha_desde, fecha_hasta):
+        if _fecha_dmy_valida(valor, fecha_desde_efectiva, fecha_hasta_efectiva):
             candidatos.append(propuesta)
 
     if candidatos:
