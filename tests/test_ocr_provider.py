@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -102,8 +103,22 @@ class _ProcesoFalso:
         pass
 
 
+RUTA_PYTHON_FALSA = Path("C:/runtime-falso-para-tests/Scripts/python.exe")
+
+
+def _prohibir_bootstrap_real(monkeypatch):
+    """Ningún test de este archivo debe disparar una instalación real: si algo
+    llega a llamar asegurar_runtime_paddle() sin haberlo mockeado, que falle
+    ruidosamente en vez de crear un venv de verdad."""
+    def _explota(*a, **k):
+        raise AssertionError("asegurar_runtime_paddle() no debe llamarse de verdad en tests")
+
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", _explota)
+
+
 def _preparar_proveedor_paddle(monkeypatch, respuestas=None, falla_al_iniciar=False):
-    proveedor = PaddleOCRProvider(device="cpu")
+    _prohibir_bootstrap_real(monkeypatch)
+    proveedor = PaddleOCRProvider(device="cpu", ruta_python=RUTA_PYTHON_FALSA)
     proceso = _ProcesoFalso(respuestas=respuestas, falla_al_iniciar=falla_al_iniciar)
     proceso.stdin.write = Mock(side_effect=proceso._escribir)
     proceso.stdin.flush = Mock()
@@ -166,9 +181,18 @@ def test_paddleocr_provider_no_disponible_si_worker_no_arranca(monkeypatch):
         proveedor.leer_texto("guia.jpg")
 
 
-def test_paddleocr_provider_no_disponible_si_venv_no_existe(monkeypatch):
+def test_paddleocr_provider_no_disponible_si_runtime_no_se_pudo_preparar(monkeypatch):
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", lambda: None)
+    proveedor = PaddleOCRProvider(device="cpu")  # sin ruta_python: usa asegurar_runtime_paddle()
+
+    with pytest.raises(ProveedorOCRNoDisponible):
+        proveedor.leer_texto("guia.jpg")
+
+
+def test_paddleocr_provider_no_disponible_si_python_del_runtime_no_existe(monkeypatch):
+    _prohibir_bootstrap_real(monkeypatch)
     monkeypatch.setattr(ocr_provider.Path, "exists", lambda self: False)
-    proveedor = PaddleOCRProvider(device="cpu")
+    proveedor = PaddleOCRProvider(device="cpu", ruta_python=RUTA_PYTHON_FALSA)
 
     with pytest.raises(ProveedorOCRNoDisponible):
         proveedor.leer_texto("guia.jpg")
@@ -188,6 +212,7 @@ def test_crear_proveedor_ocr_easyocr_explicito_no_toca_paddle(monkeypatch):
 
 def test_crear_proveedor_ocr_usa_paddle_cuando_esta_disponible(monkeypatch):
     monkeypatch.setattr(ocr_provider, "_gpu_nvidia_disponible", lambda: False)
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", lambda: RUTA_PYTHON_FALSA)
     monkeypatch.setattr(ocr_provider.Path, "exists", lambda self: True)
     proceso = _ProcesoFalso()
     proceso.stdin.write = Mock(side_effect=proceso._escribir)
@@ -202,7 +227,7 @@ def test_crear_proveedor_ocr_usa_paddle_cuando_esta_disponible(monkeypatch):
 
 
 def test_crear_proveedor_ocr_cae_a_easyocr_si_paddle_no_arranca(monkeypatch):
-    monkeypatch.setattr(ocr_provider.Path, "exists", lambda self: False)
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", lambda: None)
 
     proveedor = crear_proveedor_ocr("paddleocr")
 
@@ -216,3 +241,64 @@ def test_gpu_nvidia_disponible_sin_nvidia_smi_devuelve_false(monkeypatch):
     monkeypatch.setattr(ocr_provider.subprocess, "run", _falla)
 
     assert ocr_provider._gpu_nvidia_disponible() is False
+
+
+def test_paddleocr_provider_selecciona_gpu_si_hay_nvidia(monkeypatch):
+    monkeypatch.setattr(ocr_provider, "_gpu_nvidia_disponible", lambda: True)
+
+    assert PaddleOCRProvider().device == "gpu"
+
+
+def test_paddleocr_provider_selecciona_cpu_si_no_hay_nvidia(monkeypatch):
+    monkeypatch.setattr(ocr_provider, "_gpu_nvidia_disponible", lambda: False)
+
+    assert PaddleOCRProvider().device == "cpu"
+
+
+def test_paddleocr_provider_device_explicito_no_consulta_gpu(monkeypatch):
+    llamado = Mock(side_effect=AssertionError("no debería consultar GPU si device viene explícito"))
+    monkeypatch.setattr(ocr_provider, "_gpu_nvidia_disponible", llamado)
+
+    assert PaddleOCRProvider(device="cpu").device == "cpu"
+    llamado.assert_not_called()
+
+
+# --- visibilidad de logs/estado (no fallback silencioso) ---
+
+def test_crear_proveedor_ocr_fallback_deja_mensaje_visible(monkeypatch, capsys):
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", lambda: None)
+
+    crear_proveedor_ocr("paddleocr")
+
+    salida = capsys.readouterr().out
+    assert "EasyOCR" in salida
+    assert "no disponible" in salida.lower() or "fallback" in salida.lower()
+
+
+def test_crear_proveedor_ocr_exito_deja_mensaje_visible_con_device(monkeypatch, capsys):
+    monkeypatch.setattr(ocr_provider, "_gpu_nvidia_disponible", lambda: False)
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", lambda: RUTA_PYTHON_FALSA)
+    monkeypatch.setattr(ocr_provider.Path, "exists", lambda self: True)
+    proceso = _ProcesoFalso()
+    proceso.stdin.write = Mock(side_effect=proceso._escribir)
+    proceso.stdin.flush = Mock()
+    proceso.stdout = Mock()
+    proceso.stdout.readline = Mock(side_effect=proceso._leer_linea)
+    monkeypatch.setattr(ocr_provider.subprocess, "Popen", Mock(return_value=proceso))
+
+    crear_proveedor_ocr("paddleocr")
+
+    salida = capsys.readouterr().out
+    assert "PaddleOCR" in salida
+    assert "cpu" in salida.lower()
+
+
+# --- sin ruta/usuario/venv de desarrollo hardcodeados ---
+
+def test_ocr_provider_no_depende_de_ocr_eval_gpu_env():
+    import inspect
+
+    fuente = inspect.getsource(ocr_provider)
+    assert "ocr_eval_gpu_env" not in fuente
+    assert "Jjjc0508" not in fuente
+    assert r"C:\Users" not in fuente

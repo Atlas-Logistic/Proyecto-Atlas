@@ -1414,39 +1414,62 @@ def test_fecha_normalizada_sin_rango_conserva_compatibilidad():
     assert extraer_fecha(["FECHA DE EMISION 23-062025"]) == "23-06-2025"
 
 
-def test_crea_lector_una_vez_y_lo_reutiliza(tmp_path, monkeypatch):
+def test_procesar_carpeta_crea_proveedor_una_vez_y_lo_reutiliza(tmp_path, monkeypatch):
+    """M2: por defecto (sin lector_ocr ni proveedor explícitos), procesar_carpeta
+    construye UN proveedor OCR vía crear_proveedor_ocr() para todo el lote —
+    no uno por imagen — y se lo pasa a procesar_archivo."""
     carpeta = tmp_path / "guias"
     for nombre in ("a.jpg", "b.jpg", "c.jpg"):
         _crear_archivo(carpeta / nombre)
-    lector = object()
-    crear_lector = Mock(return_value=lector)
-    lectores_recibidos = []
-    monkeypatch.setattr(procesamiento_masivo, "crear_lector_ocr", crear_lector)
+    proveedor_falso = object()
+    crear_proveedor = Mock(return_value=proveedor_falso)
+    proveedores_recibidos = []
+    monkeypatch.setattr(procesamiento_masivo, "crear_proveedor_ocr", crear_proveedor)
 
-    def procesar(ruta, lector_ocr=None):
-        lectores_recibidos.append(lector_ocr)
+    def procesar(ruta, proveedor=None):
+        proveedores_recibidos.append(proveedor)
         return {"tipo_carga": "NO DETERMINADO"}
 
     monkeypatch.setattr(procesamiento_masivo, "procesar_archivo", procesar)
     procesar_carpeta(carpeta, tmp_path / "resultado.csv")
 
-    crear_lector.assert_called_once_with()
-    assert lectores_recibidos == [lector, lector, lector]
+    crear_proveedor.assert_called_once_with()
+    assert proveedores_recibidos == [proveedor_falso, proveedor_falso, proveedor_falso]
 
 
-def test_lector_inyectado_no_crea_otro(tmp_path, monkeypatch):
+def test_lector_inyectado_no_crea_proveedor(tmp_path, monkeypatch):
     carpeta = tmp_path / "guias"
     _crear_archivo(carpeta / "a.jpg")
     lector = object()
-    crear_lector = Mock()
+    crear_proveedor = Mock()
     procesar = Mock(return_value={"tipo_carga": "BARRAS"})
-    monkeypatch.setattr(procesamiento_masivo, "crear_lector_ocr", crear_lector)
+    monkeypatch.setattr(procesamiento_masivo, "crear_proveedor_ocr", crear_proveedor)
     monkeypatch.setattr(procesamiento_masivo, "procesar_archivo", procesar)
 
     procesar_carpeta(carpeta, tmp_path / "resultado.csv", lector_ocr=lector)
 
-    crear_lector.assert_not_called()
+    crear_proveedor.assert_not_called()
     procesar.assert_called_once_with(next(carpeta.iterdir()), lector_ocr=lector)
+
+
+def test_proveedor_inyectado_se_reutiliza_sin_crear_otro(tmp_path, monkeypatch):
+    carpeta = tmp_path / "guias"
+    for nombre in ("a.jpg", "b.jpg"):
+        _crear_archivo(carpeta / nombre)
+    proveedor_dado = object()
+    crear_proveedor = Mock()
+    proveedores_recibidos = []
+    monkeypatch.setattr(procesamiento_masivo, "crear_proveedor_ocr", crear_proveedor)
+
+    def procesar(ruta, proveedor=None):
+        proveedores_recibidos.append(proveedor)
+        return {"tipo_carga": "NO DETERMINADO"}
+
+    monkeypatch.setattr(procesamiento_masivo, "procesar_archivo", procesar)
+    procesar_carpeta(carpeta, tmp_path / "resultado.csv", proveedor=proveedor_dado)
+
+    crear_proveedor.assert_not_called()
+    assert proveedores_recibidos == [proveedor_dado, proveedor_dado]
 
 
 def test_resumen_cuenta_tipos_y_tiempos(tmp_path):

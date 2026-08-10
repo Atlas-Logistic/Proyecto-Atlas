@@ -4,6 +4,19 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-10 — Bloque M2: runtime Paddle portable + activación en flujo batch
+
+- El runtime de PaddleOCR ya no depende de ninguna ruta de este PC: se resuelve en `%LOCALAPPDATA%\Atlas\runtime\paddleocr` (portable, sin nombre de usuario ni Desktop hardcodeados), con posibilidad de override explícito por variable de entorno para desarrollo.
+- Se agregó un mecanismo de bootstrap que crea/valida ese runtime automáticamente: no reinstala si ya existe y coincide con las versiones fijadas (`paddleocr==3.7.0`, `paddlepaddle`/`paddlepaddle-gpu==3.3.1`), elige build GPU o CPU según haya o no una NVIDIA disponible, y aplica el workaround de CPU ya conocido. No modifica drivers del sistema.
+- **`procesar_carpeta` (el flujo real de lote/CLI) ya construye y usa un proveedor OCR por defecto** — antes de este bloque, la integración de PaddleOCR existía como capacidad pero no se activaba en el camino real de procesamiento masivo. Ahora sí: un solo proveedor por ejecución, reutilizado para todo el lote, sin recargar el modelo por imagen.
+- **Validado con el runtime real, recién creado desde cero** (bootstrap real, sin mocks, ~3.5 min) en la ubicación definitiva, y con una corrida corta real de la CLI sobre 4 guías reales: proveedor PaddleOCR con GPU seleccionada automáticamente, mensaje visible en consola, resultados coherentes (número de guía y fecha correctos en las 4).
+- No se corrió otra vez el lote completo de 30 — la lógica de extracción ya se validó exhaustivamente en el bloque M1; este bloque solo cambiaba *cómo* se resuelve y activa el proveedor, no la lógica de extracción en sí.
+- Suite completa verde: 482 → **501 tests**.
+- **Hallazgo de rendimiento, no de corrección:** el primer uso del runtime recién creado fue notablemente más lento (~48 s/imagen) que corridas posteriores (~10.5 s/imagen) — consistente con sobrecarga de primer uso del sistema (antivirus escaneando binarios nuevos, cachés de disco fríos), no con un problema del código. Se re-ejecutó el mismo lote una segunda vez para confirmarlo.
+- Sin commit ni push — pendiente de tu revisión.
+
+---
+
 ## 2026-08-10 — Bloque M1: PaddleOCR integrado detrás de un proveedor OCR (CERRADO Y APROBADO)
 
 - **Cierre aprobado.** PaddleOCR queda como **motor principal** de Atlas; EasyOCR queda como **fallback temporal** (no eliminado, se usa automáticamente si Paddle no está disponible).

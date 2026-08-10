@@ -1,25 +1,26 @@
-"""Abstracción de proveedor OCR (Bloque M1).
+"""Abstracción de proveedor OCR (Bloques M1/M2).
 
 El resto de Atlas debe depender de este contrato, no de easyocr.Reader
 directamente. Dos implementaciones:
 
 - EasyOCRProvider: envuelve las funciones ya existentes en atlas_core.ocr,
   en el mismo proceso (EasyOCR ya es dependencia del entorno principal).
-- PaddleOCRProvider: ejecuta PaddleOCR en un proceso aislado (venv externo,
-  fuera del entorno principal) para no mezclar sus dependencias con las de
-  Atlas. Habla con ese proceso por un protocolo JSON línea a línea sobre
-  stdin/stdout (ver atlas_core/paddleocr_worker.py).
+- PaddleOCRProvider: ejecuta PaddleOCR en un proceso aislado — un runtime
+  portable resuelto por atlas_core.paddle_runtime (nunca una ruta fija de
+  este PC, nunca el entorno principal) — para no mezclar sus dependencias
+  con las de Atlas. Habla con ese proceso por un protocolo JSON línea a
+  línea sobre stdin/stdout (ver atlas_core/paddleocr_worker.py).
 
 Selección de proveedor: crear_proveedor_ocr() intenta el proveedor
-preferido (por defecto PaddleOCR) y cae a EasyOCR si no está disponible o
-falla al iniciar — nunca deja a Atlas sin poder leer OCR.
+preferido (por defecto PaddleOCR: GPU si hay, si no CPU) y cae a EasyOCR si
+no está disponible o falla al iniciar — nunca deja a Atlas sin poder leer
+OCR, y siempre deja un log visible de cuál se usó.
 """
 from __future__ import annotations
 
 import json
 import logging
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -32,14 +33,10 @@ from atlas_core.ocr import (
     leer_bloques_imagen,
     leer_texto_imagen,
 )
+from atlas_core.paddle_runtime import asegurar_runtime_paddle
 
 logger = logging.getLogger(__name__)
 
-# Venv aislado con PaddlePaddle/PaddleOCR (validado en el bloque OCR-EVAL:
-# paddlepaddle-gpu==3.3.1 cu118, corre en GPU si hay una NVIDIA compatible y
-# también en CPU con el mismo wheel — no se necesita un segundo venv).
-RUTA_VENV_PADDLE = Path(r"C:\Users\Jjjc0508\Desktop\Atlas\ocr_eval_gpu_env")
-RUTA_PYTHON_PADDLE = RUTA_VENV_PADDLE / "Scripts" / "python.exe"
 RUTA_WORKER_PADDLE = Path(__file__).resolve().parent / "paddleocr_worker.py"
 
 TIMEOUT_INICIO_SEG = 120
@@ -106,15 +103,18 @@ def _gpu_nvidia_disponible() -> bool:
 
 
 class PaddleOCRProvider:
-    """Ejecuta PaddleOCR en un proceso del venv aislado (nunca en el entorno principal).
+    """Ejecuta PaddleOCR en un proceso del runtime aislado (nunca en el entorno principal).
 
-    Selecciona GPU si hay una NVIDIA disponible, si no CPU (con el workaround
+    La ruta del runtime se resuelve vía atlas_core.paddle_runtime — portable,
+    sin ningún nombre de usuario ni ruta de este PC hardcodeados. Selecciona
+    GPU si hay una NVIDIA disponible, si no CPU (con el workaround
     enable_mkldnn=False). El proceso worker se mantiene vivo entre llamadas
     para no recargar el modelo en cada imagen.
     """
 
-    def __init__(self, device: str | None = None) -> None:
+    def __init__(self, device: str | None = None, ruta_python: Path | None = None) -> None:
         self._device = device or ("gpu" if _gpu_nvidia_disponible() else "cpu")
+        self._ruta_python_forzada = ruta_python
         self._proceso: subprocess.Popen | None = None
 
     @property
@@ -125,13 +125,16 @@ class PaddleOCRProvider:
         if self._proceso is not None and self._proceso.poll() is None:
             return self._proceso
 
-        if not RUTA_PYTHON_PADDLE.exists():
+        ruta_python = self._ruta_python_forzada or asegurar_runtime_paddle()
+        if ruta_python is None:
+            raise ProveedorOCRNoDisponible("No se pudo preparar el runtime aislado de PaddleOCR")
+        if not Path(ruta_python).exists():
             raise ProveedorOCRNoDisponible(
-                f"No se encontró el intérprete del venv aislado de PaddleOCR: {RUTA_PYTHON_PADDLE}"
+                f"No se encontró el intérprete del runtime de PaddleOCR: {ruta_python}"
             )
 
         proceso = subprocess.Popen(
-            [str(RUTA_PYTHON_PADDLE), str(RUTA_WORKER_PADDLE)],
+            [str(ruta_python), str(RUTA_WORKER_PADDLE)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
@@ -210,12 +213,18 @@ def crear_proveedor_ocr(preferido: str = "paddleocr") -> ProveedorOCR:
     arranca, etc.) — Atlas nunca se queda sin poder leer OCR por esto.
     """
     if preferido == "easyocr":
+        logger.info("Proveedor OCR: EasyOCR (solicitado explícitamente)")
+        print("[Atlas OCR] Proveedor activo: EasyOCR (solicitado explícitamente)")
         return EasyOCRProvider()
 
     proveedor = PaddleOCRProvider()
     try:
         proveedor._asegurar_proceso()
     except ProveedorOCRNoDisponible as exc:
-        logger.warning("PaddleOCR no disponible, usando EasyOCR como fallback: %s", exc)
+        mensaje = f"PaddleOCR no disponible, usando EasyOCR como fallback: {exc}"
+        logger.warning(mensaje)
+        print(f"[Atlas OCR] {mensaje}")  # visible en la CLI aunque no haya logging configurado
         return EasyOCRProvider()
+    logger.info("Proveedor OCR: PaddleOCR (device=%s)", proveedor.device)
+    print(f"[Atlas OCR] Proveedor activo: PaddleOCR (device={proveedor.device})")
     return proveedor

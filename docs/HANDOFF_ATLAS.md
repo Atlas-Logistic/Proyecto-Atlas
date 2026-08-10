@@ -4,6 +4,20 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-10 — Cierre Bloque M2: runtime Paddle portable + activación batch (pendiente de tu aprobación final)
+
+- **Rama:** `lector-mvp-guia-nueva`. **Sin commit, sin push** — a la espera de que apruebes antes de cerrar formalmente (a diferencia de M1, aquí no hice el commit todavía porque me pediste el reporte de los 10 puntos primero).
+- **Runtime portable resuelto:** `%LOCALAPPDATA%\Atlas\runtime\paddleocr` (variable de entorno `ATLAS_PADDLE_RUNTIME` disponible como override de desarrollo). Ya no depende de `ocr_eval_gpu_env` ni de ninguna ruta de este PC — confirmado por tests y por `grep` sobre la validación real.
+- **`procesar_carpeta` ya activa PaddleOCR en el flujo real de lote** — antes de este bloque solo `procesar_archivo` sabía usar un proveedor; ahora la CLI real (`analizar_guias_masivo.py`) lo hace por defecto, con un único proveedor por ejecución.
+- **Validado con una instalación real desde cero** (no simulada): el bootstrap completo tomó 209 s. Una corrida corta real de 4 guías con la CLI real confirmó GPU seleccionada automáticamente, un solo mensaje de proveedor activo (no uno por imagen), y resultados correctos.
+- **No se corrieron las 30 imágenes de nuevo** — decisión deliberada, ya justificada: la lógica de extracción no cambió respecto a M1 (que sí las validó completas), este bloque solo tocaba la resolución de runtime y la activación en `procesar_carpeta`.
+- **Nota de rendimiento para quien lea las métricas de una primera corrida en una máquina nueva:** el primer uso de un runtime recién creado es notablemente más lento (antivirus escaneando binarios nuevos, cachés fríos) — no lo tomes como el rendimiento real; una segunda corrida ya estabiliza.
+- **Hallazgo fuera de alcance:** apareció un archivo no rastreado `resumen_procesamiento_desktop.py` en la raíz del repo, que yo no creé ni toqué — queda ahí, sin explicación, fuera de este commit. Alguien debería revisar de dónde salió.
+- Suite: 482 → **501 tests**, todos verdes.
+- **Siguiente decisión pendiente:** no hay un bloque M3 definido todavía. Con M1+M2, PaddleOCR queda como motor principal, portable, activo en el flujo real, con EasyOCR de fallback — el trabajo de integración de este frente queda esencialmente completo salvo lo que decidas priorizar después (p. ej. confirmar el camino CPU puro en una máquina sin GPU, que sigue pendiente desde M1).
+
+---
+
 ## 2026-08-10 — Cierre Bloque M1: proveedor OCR + PaddleOCR integrado (APROBADO)
 
 - **Rama:** `lector-mvp-guia-nueva`. Commit hecho y pusheado a `origin/lector-mvp-guia-nueva` (ver SHA en el mensaje de cierre de esa sesión).

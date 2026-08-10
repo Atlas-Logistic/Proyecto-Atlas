@@ -36,6 +36,7 @@ from atlas_core.ocr import (
     leer_bloques_imagen,
     leer_texto_imagen,
 )
+from atlas_core.ocr_provider import crear_proveedor_ocr
 
 
 logger = logging.getLogger(__name__)
@@ -642,8 +643,17 @@ def procesar_carpeta(
     lector_ocr: object = None,
     fecha_desde: date | None = None,
     fecha_hasta: date | None = None,
+    proveedor: object = None,
 ) -> dict[str, int | float]:
-    """Procesa secuencialmente una carpeta, persistiendo avances periódicos."""
+    """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
+
+    Sin `procesador` ni `lector_ocr` explícitos, se construye **un solo**
+    `ProveedorOCR` (vía `crear_proveedor_ocr()` — PaddleOCR si está
+    disponible, si no EasyOCR) para todo el lote, y se reutiliza para cada
+    archivo — el modelo no se recarga por imagen. Si se entrega
+    `lector_ocr` explícito, se conserva el camino EasyOCR directo de
+    siempre, sin pasar por el proveedor (compatibilidad).
+    """
     if cada < 1:
         raise ValueError("La frecuencia de guardado debe ser mayor que cero")
     if (
@@ -678,20 +688,33 @@ def procesar_carpeta(
         "promedio_segundos_archivo": 0.0,
     }
     lector_compartido = lector_ocr
+    proveedor_compartido = proveedor
 
     def ejecutar(ruta: Path) -> Mapping[str, object]:
-        nonlocal lector_compartido
+        nonlocal lector_compartido, proveedor_compartido
         if procesador is not None:
             return procesador(ruta)
-        if lector_compartido is None:
-            lector_compartido = crear_lector_ocr()
+
+        if lector_ocr is not None:
+            # Compatibilidad: EasyOCR explícito, sin pasar por el proveedor.
+            if fecha_desde is None and fecha_hasta is None:
+                return procesar_archivo(ruta, lector_ocr=lector_compartido)
+            return procesar_archivo(
+                ruta, lector_ocr=lector_compartido,
+                fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+            )
+
+        if proveedor_compartido is None:
+            proveedor_compartido = crear_proveedor_ocr()
+            logger.info(
+                "procesar_carpeta: proveedor OCR creado una sola vez para todo el lote (%s)",
+                type(proveedor_compartido).__name__,
+            )
         if fecha_desde is None and fecha_hasta is None:
-            return procesar_archivo(ruta, lector_ocr=lector_compartido)
+            return procesar_archivo(ruta, proveedor=proveedor_compartido)
         return procesar_archivo(
-            ruta,
-            lector_ocr=lector_compartido,
-            fecha_desde=fecha_desde,
-            fecha_hasta=fecha_hasta,
+            ruta, proveedor=proveedor_compartido,
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
         )
 
     try:
