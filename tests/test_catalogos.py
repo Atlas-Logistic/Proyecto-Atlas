@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from atlas_core.catalogos import (
     buscar_chofer_por_rut,
@@ -10,6 +11,7 @@ from atlas_core.catalogos import (
     normalizar_patente,
     normalizar_rut,
     resolver_nombre_chofer_difuso,
+    resolver_patente_canonica,
 )
 from atlas_core.extractor import extraer_datos
 
@@ -219,3 +221,137 @@ def test_enriquecer_sin_archivos_y_extraer_con_ruta_opcional(tmp_path):
     assert enriquecer_datos_con_catalogos(datos, [], carpeta_inexistente) == datos
     extraidos = extraer_datos([], carpeta_catalogos=carpeta_inexistente)
     assert all(valor == "No encontrado" for valor in extraidos.values())
+
+
+# --- P2: resolucion_patente_canonica (homologacion conservadora de patentes) ---
+
+CATALOGO_VEHICULOS_REAL_464511 = {
+    "BKYX63": {"tipo": "TRACTO"},
+    "BKYK63": {"tipo": "TRACTO"},
+    "DD2494": {"tipo": "TRACTO"},
+    "JB8529": {"tipo": "CARRO"},
+    "BDFG50": {"tipo": "TRACTO"},
+    "BPHR67": {"tipo": "TRACTO"},
+    "AL1879": {"tipo": "TRACTO"},
+    "JK2501": {"tipo": "CARRO"},
+    "TG8925": {"tipo": "TRACTO"},
+    "JF9565": {"tipo": "CARRO"},
+    "SB6486": {"tipo": "TRACTO"},
+    "JF4288": {"tipo": "CARRO"},
+}
+
+
+def test_patente_exacta_resuelve_a_canonica():
+    catalogo = {"AB1234": {"tipo": "TRACTO"}}
+
+    resultado = resolver_patente_canonica(catalogo, "ab 1234", tipo_esperado="TRACTO")
+
+    assert resultado.estado == "COINCIDENCIA_EXACTA"
+    assert resultado.valor_resultado == "AB1234"
+
+
+def test_patente_sd6486_resuelve_a_sb6486_con_catalogo_real_simulado():
+    """Caso real obligatorio: SD6486 (lectura Paddle) debe resolver a SB6486
+    solo porque el catálogo real contiene SB6486 como candidato único seguro
+    (una sola diferencia, confusión OCR B/D documentada)."""
+    resultado = resolver_patente_canonica(
+        CATALOGO_VEHICULOS_REAL_464511, "SD6486", tipo_esperado="TRACTO"
+    )
+
+    assert resultado.estado == "CORRECCION_OCR_SEGURA"
+    assert resultado.valor_resultado == "SB6486"
+
+
+def test_patente_rampla_exacta_jf4288_no_se_modifica():
+    resultado = resolver_patente_canonica(
+        CATALOGO_VEHICULOS_REAL_464511, "JF4288", tipo_esperado="CARRO"
+    )
+
+    assert resultado.estado == "COINCIDENCIA_EXACTA"
+    assert resultado.valor_resultado == "JF4288"
+
+
+def test_patente_candidato_ambiguo_se_abstiene():
+    # "AD1234" (confusión B/D) y "A81234" (confusión B/8) están, cada uno, a
+    # una sola diferencia OCR válida de "AB1234" -> dos candidatos igualmente
+    # plausibles, no puede elegir ninguno sin arriesgarse.
+    catalogo = {
+        "AD1234": {"tipo": "TRACTO"},
+        "A81234": {"tipo": "TRACTO"},
+    }
+
+    resultado = resolver_patente_canonica(catalogo, "AB1234", tipo_esperado="TRACTO")
+
+    assert resultado.estado == "AMBIGUO"
+    assert resultado.valor_resultado == "AB1234"
+
+
+def test_patente_dos_diferencias_no_se_corrige():
+    # "SD64X6" difiere de "SB6486" en dos posiciones (D/B y X/8): no es una
+    # corrección segura aunque cada diferencia individual fuera válida.
+    catalogo = {"SB6486": {"tipo": "TRACTO"}}
+
+    resultado = resolver_patente_canonica(catalogo, "SD64X6", tipo_esperado="TRACTO")
+
+    assert resultado.estado == "SIN_CANDIDATO"
+    assert resultado.valor_resultado == "SD64X6"
+
+
+def test_patente_desconocida_se_conserva():
+    resultado = resolver_patente_canonica(
+        CATALOGO_VEHICULOS_REAL_464511, "ZZ9999", tipo_esperado="TRACTO"
+    )
+
+    assert resultado.estado == "SIN_CANDIDATO"
+    assert resultado.valor_resultado == "ZZ9999"
+
+
+def test_patente_no_aplica_se_preserva_sin_inventar():
+    resultado = resolver_patente_canonica(
+        CATALOGO_VEHICULOS_REAL_464511, "NO_APLICA", tipo_esperado="CARRO"
+    )
+
+    assert resultado.estado == "SIN_CANDIDATO"
+    assert resultado.valor_resultado == "NO_APLICA"
+
+
+def test_patente_no_encontrado_no_se_toca():
+    resultado = resolver_patente_canonica(CATALOGO_VEHICULOS_REAL_464511, "No encontrado")
+
+    assert resultado.estado == "VACIO"
+    assert resultado.valor_resultado == "No encontrado"
+
+
+def test_patente_sin_catalogo_no_inventa():
+    vacio = resolver_patente_canonica({}, "SD6486", tipo_esperado="TRACTO")
+    inexistente = resolver_patente_canonica(
+        Path("no_existe_de_verdad.json"), "SD6486", tipo_esperado="TRACTO"
+    )
+
+    assert vacio.estado == "CATALOGO_VACIO"
+    assert vacio.valor_resultado == "SD6486"
+    assert inexistente.estado == "CATALOGO_VACIO"
+    assert inexistente.valor_resultado == "SD6486"
+
+
+def test_patente_alias_explicito_resuelve_a_canonica():
+    catalogo = {"SB6486": {"tipo": "TRACTO", "alias": ["SD6486", "5B6486"]}}
+
+    resultado = resolver_patente_canonica(catalogo, "SD6486", tipo_esperado="TRACTO")
+
+    assert resultado.estado == "ALIAS"
+    assert resultado.valor_resultado == "SB6486"
+
+
+def test_patente_tipo_esperado_filtra_candidatos_entre_tracto_y_carro():
+    # SD6486 podría confundirse con un carro "SB6486" si no se filtrara por
+    # tipo; al pedir CARRO no debe cruzar hacia el tracto real.
+    catalogo = {
+        "SB6486": {"tipo": "TRACTO"},
+        "SB6489": {"tipo": "CARRO"},
+    }
+
+    resultado = resolver_patente_canonica(catalogo, "SD6489", tipo_esperado="CARRO")
+
+    assert resultado.estado == "CORRECCION_OCR_SEGURA"
+    assert resultado.valor_resultado == "SB6489"

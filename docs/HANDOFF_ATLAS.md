@@ -4,6 +4,19 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-10 — Cierre Patentes P2: homologación conservadora contra catálogo de vehículos
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `0021bde59a9bb2f7b18462377ea6634d5cade781`.
+- **Objetivo cerrado:** homologación canónica de patentes contra el catálogo de vehículos (`vehiculos.json`, vía `carpeta_catalogos`), nueva función `resolver_patente_canonica` en `atlas_core/catalogos.py`, wireada en `procesar_archivo`.
+- **Jerarquía:** (A) coincidencia exacta normalizada, (B) alias explícito declarado en el catálogo, (C) corrección OCR conservadora — solo con un único candidato, misma longitud, y una única diferencia posicional explicada por una confusión OCR documentada (B/D, 0/O, 1/I, 5/S, 8/B). Nunca crea una patente nueva.
+- **Caso real confirmado, guía `464511`:** `patente_tracto` `SD6486 → SB6486` (corrección OCR conservadora, catálogo real); `patente_rampla` `JF4288 → JF4288` (coincidencia exacta, sin cambios). **La corrección no está hardcodeada por archivo** — surge de la jerarquía general aplicada contra el catálogo real.
+- **Política de abstención:** ambigüedad → conserva el valor OCR y marca `REVISAR`; sin catálogo → no inventa nada.
+- PaddleOCR, Desktop y generación de reportes no se tocaron — Desktop y reportes reciben el valor homologado automáticamente al consumir el dict de `procesar_archivo`.
+- Suite final: **581/581 tests** (566 → 581).
+- **Frente de patentes (P1 + P2) queda cerrado.** No hay un próximo microbloque de patentes definido.
+
+---
+
 ## 2026-08-10 — Cierre Patentes P1: recuperación geométrica de patentes compatible con Paddle
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `0bcb43ca56e5ab1cdc6f596bb80af225ce234739`.

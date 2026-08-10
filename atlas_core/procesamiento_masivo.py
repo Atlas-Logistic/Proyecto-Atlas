@@ -16,6 +16,7 @@ from atlas_core.catalogos import (
     cargar_catalogo_json,
     enriquecer_datos_con_catalogos,
     resolver_nombre_chofer_difuso,
+    resolver_patente_canonica,
 )
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
@@ -442,6 +443,7 @@ def procesar_archivo(
     recuperacion_geometrica = False
     recuperacion_chofer = False
     recuperacion_patentes = False
+    homologacion_patente = False
     transporte_corregido = False
     bloques_guia = None
     campos_ausentes = any(
@@ -510,6 +512,39 @@ def procesar_archivo(
         # La geometría puede recuperar valores después de la extracción lineal;
         # reaplicar la misma fuente al final conserva el nombre canónico.
         datos = enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
+
+        # P2: homologación conservadora de patentes contra el catálogo canónico
+        # de vehículos. Se aplica después de la recuperación geométrica (P1) para
+        # cubrir el valor final, sea cual sea su origen. Nunca inventa una
+        # patente nueva; ver jerarquía en resolver_patente_canonica.
+        try:
+            vehiculos = cargar_catalogo_json(Path(carpeta_catalogos) / "vehiculos.json")
+            for campo, tipo_esperado in (
+                ("patente del tracto", "TRACTO"),
+                ("patente del carro", "CARRO"),
+            ):
+                valor_actual = str(datos.get(campo, "No encontrado"))
+                decision_patente = resolver_patente_canonica(
+                    vehiculos, valor_actual, tipo_esperado=tipo_esperado
+                )
+                if decision_patente.estado in {"ALIAS", "CORRECCION_OCR_SEGURA"}:
+                    datos[campo] = decision_patente.valor_resultado
+                    homologacion_patente = True
+                    logger.info(
+                        "%s homologado mediante resolucion-patente-catalogo-v1 (%s): %s -> %s",
+                        campo, decision_patente.estado,
+                        decision_patente.valor_original, decision_patente.valor_resultado,
+                    )
+                elif decision_patente.estado == "COINCIDENCIA_EXACTA":
+                    datos[campo] = decision_patente.valor_resultado
+                elif decision_patente.estado == "AMBIGUO":
+                    homologacion_patente = True
+                    logger.info(
+                        "%s homologacion abstenida por ambiguedad de catalogo: %s",
+                        campo, decision_patente.valor_original,
+                    )
+        except Exception as exc:
+            logger.warning("Homologación de patente omitida: %s: %s", type(exc).__name__, exc)
 
     nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()
     if nombre_chofer not in {"", "No encontrado"}:
@@ -604,6 +639,7 @@ def procesar_archivo(
         or transporte_corregido
         or recuperacion_chofer
         or recuperacion_patentes
+        or homologacion_patente
         or fecha_recuperada_focal
         or _documento_degradado(datos, descripcion)
     )

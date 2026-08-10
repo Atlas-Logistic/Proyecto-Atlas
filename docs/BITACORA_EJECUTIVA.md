@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-10 — Bloque Patentes P2: homologación conservadora contra catálogo de vehículos (CERRADO)
+
+- **Objetivo:** P1 ya recuperaba el valor OCR de la patente (p. ej. `SD6486`), pero no resolvía su identidad canónica cuando el OCR confunde una letra. P2 homologa esa patente contra el catálogo canónico de vehículos, de forma conservadora y sin tocar OCR/Paddle.
+- **Jerarquía de resolución:** (1) coincidencia exacta normalizada contra el catálogo; (2) alias explícito declarado en el registro del vehículo; (3) corrección OCR conservadora, aceptada **solo** si existe un único candidato de catálogo, con la misma longitud, y una única diferencia posicional explicada por una confusión OCR común y documentada (B/D, 0/O, 1/I, 5/S, 8/B). Nunca se crea una patente nueva.
+- **Caso real obligatorio confirmado, guía `464511`:** `patente_tracto` pasa de `SD6486` (valor OCR) a `SB6486` (canónico), porque el catálogo real contiene `SB6486` como único candidato seguro a una diferencia OCR de `SD6486`. **La corrección `SD6486 → SB6486` no está hardcodeada por archivo**: surge únicamente de aplicar la jerarquía general contra el catálogo real. `patente_rampla` (`JF4288`) es coincidencia exacta y se preserva sin cambios.
+- **Política de abstención:** ante dos candidatos igualmente plausibles (ambigüedad), o dos o más diferencias entre el valor OCR y un candidato, la patente se conserva sin corregir y el documento se marca `REVISAR`. Sin catálogo disponible, no se inventa ni se intenta corregir nada.
+- **PaddleOCR, Desktop y generación de reportes no se tocaron.** La homologación vive en `procesar_archivo`, el único punto de propagación; Desktop y reportes reciben el valor homologado automáticamente sin cambios propios.
+- Validación automatizada: **581 tests**, todos verdes (566 → 581).
+- **Frente de patentes queda cerrado** con P1 (recuperación geométrica) + P2 (homologación canónica). No hay un próximo microbloque de patentes definido todavía.
+
+---
+
 ## 2026-08-10 — Bloque Patentes P1: recuperación geométrica de patentes compatible con Paddle (CERRADO)
 
 - **Problema real confirmado:** `buscar_chofer_y_patentes()` exigía la frase contigua `"RETIRA PATENTE FECHA LLEGADA"` en el texto OCR; PaddleOCR reparte esas etiquetas en bloques/líneas separados, por lo que `patente_tracto`/`patente_carro` volvían `"No encontrado"` aunque el valor estuviera presente en el OCR.

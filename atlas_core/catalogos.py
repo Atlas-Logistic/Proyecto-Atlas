@@ -101,6 +101,138 @@ def buscar_vehiculo_por_patente(
     return _buscar_registro(catalogo, patente, normalizar_patente)
 
 
+# Confusiones OCR documentadas y de evidencia conocida en el proyecto (no una
+# tabla amplia inventada). Cada par es simétrico: una B leída como D o una D
+# leída como B se tratan igual.
+_CONFUSIONES_OCR_PATENTE_COMUNES = (
+    frozenset({"B", "D"}),
+    frozenset({"0", "O"}),
+    frozenset({"1", "I"}),
+    frozenset({"5", "S"}),
+    frozenset({"8", "B"}),
+)
+
+
+def _forma_patente_plausible(valor: str) -> bool:
+    return bool(re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6}", valor))
+
+
+def _diferencia_ocr_unica_y_valida(valor_ocr: str, valor_catalogo: str) -> bool:
+    """True si ambos valores difieren en exactamente una posición y esa
+    diferencia corresponde a una confusión OCR común y documentada."""
+    if len(valor_ocr) != len(valor_catalogo):
+        return False
+    diferencias = [
+        (a, b) for a, b in zip(valor_ocr, valor_catalogo) if a != b
+    ]
+    if len(diferencias) != 1:
+        return False
+    a, b = diferencias[0]
+    return frozenset({a, b}) in _CONFUSIONES_OCR_PATENTE_COMUNES
+
+
+@dataclass(frozen=True)
+class ResultadoResolucionPatente:
+    """Decisión trazable y sin efectos laterales de la homologación de patente."""
+
+    estado: str
+    valor_original: str
+    valor_resultado: str
+    candidatos_ambiguos: tuple[str, ...] = ()
+
+
+def resolver_patente_canonica(
+    catalogo: FuenteCatalogo,
+    patente_ocr: str,
+    *,
+    tipo_esperado: str | None = None,
+) -> ResultadoResolucionPatente:
+    """Homologa una patente OCR contra el catálogo canónico de vehículos.
+
+    Nunca inventa una patente nueva: solo acepta un valor que ya existe en el
+    catálogo, y solo cuando la evidencia es inequívoca:
+
+    A. coincidencia exacta normalizada -> acepta.
+    B. alias explícito declarado en el registro del vehículo -> acepta.
+    C. corrección OCR conservadora -> acepta solo si hay un único candidato de
+       catálogo, con la misma longitud, y la diferencia es de una sola
+       posición explicada por una confusión OCR común y documentada
+       (B/D, 0/O, 1/I, 5/S, 8/B). Dos o más diferencias, o dos o más
+       candidatos igualmente plausibles, nunca se corrigen.
+
+    `tipo_esperado` (p. ej. "TRACTO" o "CARRO") filtra los candidatos de la
+    corrección conservadora por el campo `tipo` del registro, cuando ese
+    campo existe; reduce falsos positivos entre tracto y carro sin excluir
+    catálogos que no declaren `tipo`.
+
+    Se abstiene (devuelve el valor OCR sin cambios) ante catálogo vacío,
+    patente vacía/"No encontrado", ambigüedad, o ausencia de candidato.
+    """
+    original = str(patente_ocr or "").strip()
+    if not original or original == "No encontrado":
+        return ResultadoResolucionPatente("VACIO", original, original)
+
+    valor_ocr = normalizar_patente(original)
+    catalogo_dict = _obtener_catalogo(catalogo)
+    if not catalogo_dict:
+        return ResultadoResolucionPatente("CATALOGO_VACIO", original, original)
+
+    registros = [
+        (normalizar_patente(clave), registro)
+        for clave, registro in catalogo_dict.items()
+        if isinstance(registro, dict)
+    ]
+
+    # A. Coincidencia exacta normalizada.
+    for clave_normalizada, _registro in registros:
+        if clave_normalizada == valor_ocr:
+            return ResultadoResolucionPatente("COINCIDENCIA_EXACTA", original, clave_normalizada)
+
+    # B. Alias explícito declarado en el catálogo (no inferido).
+    aliases_encontrados: set[str] = set()
+    for clave_normalizada, registro in registros:
+        alias = registro.get("alias")
+        if not isinstance(alias, list):
+            continue
+        for candidato_alias in alias:
+            if normalizar_patente(str(candidato_alias)) == valor_ocr:
+                aliases_encontrados.add(clave_normalizada)
+                break
+    if len(aliases_encontrados) == 1:
+        return ResultadoResolucionPatente("ALIAS", original, next(iter(aliases_encontrados)))
+    if len(aliases_encontrados) > 1:
+        return ResultadoResolucionPatente(
+            "AMBIGUO", original, original, tuple(sorted(aliases_encontrados))
+        )
+
+    # C. Corrección OCR conservadora: solo si la forma es plausible y hay un
+    # único candidato compatible en el catálogo.
+    if not _forma_patente_plausible(valor_ocr):
+        return ResultadoResolucionPatente("SIN_CANDIDATO", original, original)
+
+    candidatos: set[str] = set()
+    for clave_normalizada, registro in registros:
+        if clave_normalizada == valor_ocr:
+            continue
+        if tipo_esperado is not None:
+            tipo_registro = registro.get("tipo")
+            if (
+                isinstance(tipo_registro, str)
+                and tipo_registro.strip().upper() != tipo_esperado.strip().upper()
+            ):
+                continue
+        if _diferencia_ocr_unica_y_valida(valor_ocr, clave_normalizada):
+            candidatos.add(clave_normalizada)
+
+    if len(candidatos) == 1:
+        return ResultadoResolucionPatente("CORRECCION_OCR_SEGURA", original, next(iter(candidatos)))
+    if len(candidatos) > 1:
+        return ResultadoResolucionPatente(
+            "AMBIGUO", original, original, tuple(sorted(candidatos))
+        )
+    return ResultadoResolucionPatente("SIN_CANDIDATO", original, original)
+
+
 UMBRAL_NOMBRE_CHOFER_DIFUSO = 0.85
 MARGEN_MINIMO_NOMBRE_CHOFER_DIFUSO = 0.05
 

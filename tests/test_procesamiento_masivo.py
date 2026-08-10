@@ -1,4 +1,5 @@
 import csv
+import json
 import sys
 from datetime import date
 from unittest.mock import Mock
@@ -154,6 +155,143 @@ def test_procesar_archivo_patentes_geometricas_recuperan_tracto_y_carro_desde_bl
     resultado = procesar_archivo(ruta)
 
     assert resultado["patente_tracto"] == "SD6486"
+    assert resultado["patente_rampla"] == "JF4288"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+# --- P2: homologación conservadora de patentes contra catálogo de vehículos ---
+
+CATALOGO_VEHICULOS_REAL_464511 = {
+    "SB6486": {"tipo": "TRACTO"},
+    "JF4288": {"tipo": "CARRO"},
+}
+
+
+def _escribir_catalogo_vehiculos(tmp_path, contenido):
+    carpeta = tmp_path / "catalogos"
+    carpeta.mkdir(exist_ok=True)
+    (carpeta / "vehiculos.json").write_text(json.dumps(contenido), encoding="utf-8")
+    return carpeta
+
+
+def test_procesar_archivo_homologa_sd6486_a_sb6486_y_conserva_jf4288(tmp_path, monkeypatch):
+    """P2 end-to-end: la guía real 464511 ya trae SD6486/JF4288 (P1 resuelto);
+    con el catálogo real, el tracto se homologa a SB6486 y la rampla exacta
+    JF4288 no se modifica. Resto de campos sin cambios."""
+    ruta = tmp_path / "guia.jpg"
+    carpeta_catalogos = _escribir_catalogo_vehiculos(tmp_path, CATALOGO_VEHICULOS_REAL_464511)
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["HORMIGON 10MM"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value=_datos_lineales_completos(
+                **{
+                    "número de guía": "464511", "número de transporte": "0000352449",
+                    "cliente": "ARMACERO MATCO SA", "obra destino": "ARMACERO MATCO SA",
+                    "chofer": "RODRIGO NAHUELÑIR",
+                    "patente del tracto": "SD6486", "patente del carro": "JF4288",
+                }
+            )
+        ),
+    )
+
+    resultado = procesar_archivo(ruta, carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["patente_tracto"] == "SB6486"
+    assert resultado["patente_rampla"] == "JF4288"
+    assert resultado["numero_guia"] == "464511"
+    assert resultado["numero_transporte"] == "0000352449"
+    assert resultado["cliente"] == "ARMACERO MATCO SA"
+    assert resultado["chofer"] == "RODRIGO NAHUELÑIR"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_homologacion_ambigua_mantiene_ocr_y_marca_revisar(
+    tmp_path, monkeypatch
+):
+    ruta = tmp_path / "guia.jpg"
+    carpeta_catalogos = _escribir_catalogo_vehiculos(
+        tmp_path,
+        {"AD1234": {"tipo": "TRACTO"}, "A81234": {"tipo": "TRACTO"}},
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["HORMIGON 10MM"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value=_datos_lineales_completos(
+                **{"patente del tracto": "AB1234", "patente del carro": "No encontrado"}
+            )
+        ),
+    )
+
+    resultado = procesar_archivo(ruta, carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["patente_tracto"] == "AB1234"
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_sin_carpeta_catalogos_no_homologa_patente(tmp_path, monkeypatch):
+    """Sin carpeta_catalogos, P2 no se ejecuta: el valor OCR de P1 se
+    conserva tal cual, sin inventar ni intentar homologar."""
+    ruta = tmp_path / "guia.jpg"
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value=_datos_lineales_completos(
+                **{"patente del tracto": "SD6486", "patente del carro": "JF4288"}
+            )
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["patente_tracto"] == "SD6486"
+    assert resultado["patente_rampla"] == "JF4288"
+
+
+def test_procesar_archivo_p1_geometrico_y_p2_homologacion_encadenados(tmp_path, monkeypatch):
+    """No regresión de P1: la recuperación geométrica (bloques Paddle
+    fragmentados) y la homologación de catálogo (P2) operan en secuencia
+    sobre la misma guía sin interferir entre sí."""
+    ruta = tmp_path / "guia.jpg"
+    carpeta_catalogos = _escribir_catalogo_vehiculos(tmp_path, CATALOGO_VEHICULOS_REAL_464511)
+    bloques = [
+        BloqueOCR("RETIRA", ((10, 10), (70, 10), (70, 30), (10, 30)), 0.9),
+        BloqueOCR("PATENTE", ((10, 40), (80, 40), (80, 60), (10, 60)), 0.9),
+        BloqueOCR(":SD6486 CARRO:JF4288", ((10, 70), (230, 70), (230, 90), (10, 90)), 0.85),
+        BloqueOCR("FECHA LLEGADA", ((10, 100), (130, 100), (130, 120), (10, 120)), 0.9),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["HORMIGON 10MM"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(
+            return_value={
+                "número de guía": "464511", "número de transporte": "0000352449",
+                "cliente": "ARMACERO MATCO SA", "obra destino": "ARMACERO MATCO SA",
+                "chofer": "RODRIGO NAHUELÑIR",
+                "patente del tracto": "No encontrado", "patente del carro": "No encontrado",
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta, carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["patente_tracto"] == "SB6486"
     assert resultado["patente_rampla"] == "JF4288"
     assert resultado["indicador_revision"] == "REVISAR"
 
