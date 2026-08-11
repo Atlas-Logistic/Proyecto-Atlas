@@ -21,6 +21,7 @@ from atlas_core.rutas.geocerca import (
     ResultadoGeocercaPlanta,
     resolver_planta_por_posicion,
 )
+from atlas_core.rutas.origen_documental import resolver_origen_documental
 from atlas_core.rutas.posicion_vehiculo import (
     EstadoPosicionVehiculo,
     ProveedorPosicionVehiculo,
@@ -40,4 +41,5 @@ __all__ = [
     "RADIO_GEOCERCA_KM_PREDETERMINADO", "ResultadoGeocercaPlanta", "resolver_planta_por_posicion",
     "EstadoPosicionVehiculo", "ProveedorPosicionVehiculo",
     "ProveedorPosicionVehiculoSimulado", "ResultadoPosicionVehiculo",
+    "resolver_origen_documental",
 ]

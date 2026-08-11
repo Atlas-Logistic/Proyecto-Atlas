@@ -108,12 +108,14 @@ def test_posicion_fuera_de_ambas_geocercas_no_determinada(entorno):
 
 def test_posicion_gps_demasiado_antigua_no_determinada(entorno):
     proveedor = _proveedor_gps("ABCD12", COORD_AZA_RENCA, timestamp=INSTANTE_SALIDA - timedelta(hours=10))
-    planta, motivo = resolver_planta_origen(
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
         patente="ABCD12", instante_salida=INSTANTE_SALIDA,
         proveedor_posicion=proveedor, plantas=entorno["plantas"],
     )
     assert planta is None
     assert motivo == "POSICION_GPS_DEMASIADO_ANTIGUA"
+    assert determinado_por == ""
+    assert evidencia == ""
 
 
 # --- 5: planta válida + destino válido -> ORS ---
@@ -219,6 +221,111 @@ def test_sin_proveedor_posicion_no_falla_se_abstiene(entorno, tmp_path):
 
     assert resultado.estado_ruta == EstadoRuta.ORIGEN_NO_DETERMINADO.value
     assert resultado.motivo_ruta == "SIN_EVIDENCIA_GPS"
+
+
+# --- PLANTA-P1: fallback documental + política de conflicto GPS/documento ---
+
+TEXTO_DOCUMENTAL_RENCA = ["ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE"]
+TEXTO_DOCUMENTAL_COLINA = [
+    "ACEROS AZA S A CASA MATRIZ PLANTA COLINA PANAMERICANA NORTE 18500 COLINA SANTIAGO CHILE"
+]
+
+
+def test_gps_no_alcanza_cae_a_fallback_documental(entorno, tmp_path):
+    """GPS demasiado antiguo (no útil) -> el enriquecimiento recurre al
+    fallback documental y sí determina la planta."""
+    proveedor_gps = _proveedor_gps("ABCD12", COORD_AZA_RENCA, timestamp=INSTANTE_SALIDA - timedelta(hours=10))
+    proveedor_rutas = ProveedorRutasSimulado(
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 7.43, 12.06, "")
+    )
+    servicio = ServicioRutas(proveedor_rutas, RepositorioRutas(tmp_path / "rutas.json"))
+
+    resultado = calcular_ruta_para_viaje(
+        obra_destino_texto="GALVARINO 8501", patente="ABCD12", instante_salida=INSTANTE_SALIDA,
+        catalogo_destinos=entorno["catalogo_destinos"], plantas=entorno["plantas"],
+        proveedor_posicion=proveedor_gps, servicio_rutas=servicio,
+        textos_documento=TEXTO_DOCUMENTAL_RENCA,
+    )
+
+    assert resultado.planta_origen_nombre == "AZA RENCA"
+    assert resultado.origen_determinado_por == "DOCUMENTO"
+    assert resultado.evidencia_origen == "ENCABEZADO_GUIA"
+    assert resultado.estado_ruta == EstadoRuta.RUTA_CALCULADA.value
+
+
+def test_conflicto_gps_vs_documento_gana_gps_siempre(entorno, tmp_path):
+    """Política conservadora ante conflicto: si el GPS SÍ determina una
+    planta, esa gana siempre -- el documento nunca se usa para desempatar
+    ni para contradecir un GPS válido."""
+    proveedor_gps = _proveedor_gps("ABCD12", COORD_AZA_RENCA)  # GPS real: RENCA
+    proveedor_rutas = ProveedorRutasSimulado(
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 7.43, 12.06, "")
+    )
+    servicio = ServicioRutas(proveedor_rutas, RepositorioRutas(tmp_path / "rutas.json"))
+
+    resultado = calcular_ruta_para_viaje(
+        obra_destino_texto="GALVARINO 8501", patente="ABCD12", instante_salida=INSTANTE_SALIDA,
+        catalogo_destinos=entorno["catalogo_destinos"], plantas=entorno["plantas"],
+        proveedor_posicion=proveedor_gps, servicio_rutas=servicio,
+        textos_documento=TEXTO_DOCUMENTAL_COLINA,  # documento dice COLINA
+    )
+
+    assert resultado.planta_origen_nombre == "AZA RENCA"  # gana el GPS
+    assert resultado.origen_determinado_por == "ONELOGIS_GPS"
+
+
+def test_sin_evidencia_gps_ni_documental_origen_no_determinado(entorno, tmp_path):
+    proveedor_rutas = ProveedorRutasSimulado()
+    servicio = ServicioRutas(proveedor_rutas, RepositorioRutas(tmp_path / "rutas.json"))
+
+    resultado = calcular_ruta_para_viaje(
+        obra_destino_texto="GALVARINO 8501", patente=None, instante_salida=None,
+        catalogo_destinos=entorno["catalogo_destinos"], plantas=entorno["plantas"],
+        proveedor_posicion=None, servicio_rutas=servicio,
+        textos_documento=["GUIA SIN NINGUNA MENCION DE PLANTA"],
+    )
+
+    assert resultado.estado_ruta == EstadoRuta.ORIGEN_NO_DETERMINADO.value
+    assert resultado.planta_origen_nombre == ""
+    assert proveedor_rutas.llamadas_ruta == 0
+
+
+def test_planta_determinada_sin_coordenadas_en_catalogo_no_lanza(tmp_path):
+    """Caso real (AZA COLINA sin lat/lon cargados en plantas.json antes de
+    este bloque): la planta se determina (documento) pero su registro de
+    catálogo no tiene coordenadas -- nunca debe lanzar, se trata como
+    origen no determinado."""
+    ruta_plantas = tmp_path / "plantas.json"
+    plantas_repo = CatalogoPlantas(ruta_plantas)
+    planta_sin_coords = plantas_repo.crear(
+        nombre="AZA COLINA", pais="CHILE", fuente="PRUEBA",
+        direccion="AV. PDTE. EDUARDO FREI MONTALVA 18500", comuna="COLINA", region="RM",
+        estado_calidad=EstadoCalidad.CONFIRMADA,
+    )
+    assert planta_sin_coords.latitud is None and planta_sin_coords.longitud is None
+
+    ruta_clientes = tmp_path / "clientes.json"
+    cliente = CatalogoClientes(ruta_clientes).crear(razon_social="CLIENTE PRUEBA", fuente="PRUEBA")
+    destinos_repo = CatalogoDestinos(tmp_path / "destinos.json", ruta_clientes=ruta_clientes)
+    destino = destinos_repo.crear(
+        cliente_id=cliente.cliente_id, nombre_destino="DESTINO PRUEBA",
+        pais="CHILE", fuente="PRUEBA", latitud=-33.45, longitud=-70.65,
+        estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+    )
+
+    proveedor_rutas = ProveedorRutasSimulado()
+    servicio = ServicioRutas(proveedor_rutas, RepositorioRutas(tmp_path / "rutas.json"))
+
+    resultado = calcular_ruta_para_viaje(
+        obra_destino_texto="DESTINO PRUEBA", patente=None, instante_salida=None,
+        catalogo_destinos=destinos_repo, plantas=[planta_sin_coords],
+        proveedor_posicion=None, servicio_rutas=servicio,
+        textos_documento=["ACEROS AZA CASA MATRIZ PLANTA COLINA"],
+    )
+
+    assert resultado.estado_ruta == EstadoRuta.ORIGEN_NO_DETERMINADO.value
+    assert resultado.motivo_ruta == "PLANTA_SIN_COORDENADAS_EN_CATALOGO"
+    assert proveedor_rutas.llamadas_ruta == 0
 
 
 # --- 9: km/min persistidos correctamente (perfil driving-hgv) ---

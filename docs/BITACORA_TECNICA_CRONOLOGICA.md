@@ -78,6 +78,69 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre PLANTA-P1: resolución real de planta origen
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `1a108038fa5a3f7cfe25c13189051980ae8294f9`
+
+### Fase A — Auditoría Onelogis histórico (revisión con aclaración de Javier)
+
+- Se re-auditó `gps_logic.js`/`main.js`/`gps_config.json`/`atlas_viajes.html` buscando explícitamente `history`, `historical`, `trips`, `viajes`, `recorrido`, `positions`, `tracking`, `route`, `fechaDesde`, `fechaHasta` — sin resultados nuevos más allá de lo ya documentado en RUTAS R1 (solo `.../gps/ultimas-posiciones`). Búsqueda repetida en `G:\...\BACKUP_PRE_FORMATEO_20260808` — sin resultados.
+- Javier confirmó (uso manual de su cuenta Onelogis) que la plataforma sí ofrece histórico de viajes por fecha. Se investigó si existe documentación pública de API de Onelogis (`WebSearch`/`WebFetch` sobre `onelogis.com`) — sin resultados (sitio bloquea `WebFetch`, sin documentación de API indexada públicamente).
+- **No se intentó** probar rutas de endpoint no confirmadas contra el sistema en producción, ni automatizar el navegador de Onelogis — ambos explícitamente fuera de alcance. Conclusión: la capacidad existe en la plataforma Onelogis, pero no hay evidencia técnica de que la integración actual de Atlas (ni ninguna alternativa segura de descubrir desde este entorno) pueda consumirla hoy. Queda como gestión pendiente de Javier (revisar su cuenta/soporte Onelogis).
+
+### Fase B — Inspección de `_resolver_origen_documental` (`origin/feature-cobertura-origen-fase1`)
+
+- Leído vía `git show` (sin cherry-pick, sin restaurar archivos) el código completo: `_distancia_token` (Levenshtein acotado a diferencia de longitud ≤1), `_tokens_encabezado_origen` (corta tokens antes de la primera mención tolerante de "SUCURSAL"), `_resolver_origen_documental` (exige que TODOS los tokens del nombre de una planta CONFIRMADA/ACTIVA aparezcan entre los tokens observados, con distancia ≤1 cada uno; exige consenso ≥2 de N lecturas y planta única — 0 o ≥2 candidatas → abstención).
+- Señales: nombre de planta impreso en el propio encabezado de la guía ("CASA MATRIZ PLANTA <NOMBRE>"). Precisión real reportada en el commit de cierre (`2c5c764`): 9 guías reales, cobertura 4/9 → 7/9, **0 falsos positivos** — los 2 casos sin resolver (464107, 464109) fueron por desenfoque/omisión de OCR, no por error de lógica. Generaliza correctamente Renca/Colina (compara contra CUALQUIER planta CONFIRMADA/ACTIVA del catálogo, no hardcodea nombres) — el propio caso que motivó el fix (`2c5c764`) es que el catálogo real confirma ambas plantas a la vez y el directorio de sucursales (que menciona "Colina") generaba una segunda coincidencia sin el corte "SUCURSAL".
+- **Cambio necesario para adaptar a HEAD actual:** `leer_encabezado_origen_focal` (la función que RELEE el encabezado) llama `lector.readtext(..., detail=0, paragraph=False)` — API específica de `easyocr.Reader`, no soportada por `PaddleOCRProvider` (mismo patrón de acoplamiento ya diagnosticado y resuelto para fecha/transporte focal en bloques anteriores). **No se portó esa función.** En su lugar, se comprobó (con la guía real `464170`, ya usada en C1/D1) que el encabezado del emisor ya aparece dentro del texto de página completa que entrega PaddleOCR con confianza alta (`CASAMATRIZPLANTARENCA`, línea 5 del OCR real) — por lo que la relectura focal resulta innecesaria con el proveedor actual. Solo se adaptó/portó la lógica pura de texto (`_distancia_token`, `_tokens_encabezado_origen`, `_resolver_origen_documental`), operando sobre `textos` de página completa en vez de sobre 3 variantes de un recorte focal.
+
+### Fase C — Estrategia elegida: `DOCUMENTAL_PRINCIPAL_GPS_TIEMPO_REAL`
+
+- GPS histórico no disponible técnicamente hoy (Fase A) → no puede ser la vía principal. Evidencia documental ya validada (7/9 real, 0 falsos positivos, general por catálogo) → vía principal. GPS (última posición) queda disponible como señal de mayor prioridad SOLO cuando hay evidencia (patente+instante+proveedor+geocerca+ventana temporal), útil sobre todo para procesamiento cercano al instante real de salida, no para reprocesamiento histórico.
+
+### Diseño (Fase C/E, implementación)
+
+- **`atlas_core/rutas/origen_documental.py`** (nuevo): `resolver_origen_documental(textos, plantas)` — puerto de la lógica pura descrita en Fase B, con `_normalizar`/`_distancia_token`/`_tokens_encabezado_origen` propios (sin depender de `atlas_core.procesamiento_masivo`, evita acoplar el módulo aislado de rutas al extractor). Acepta cualquier objeto `planta` con atributos `nombre`/`estado_calidad`/`estado_vigencia` (duck typing vía `getattr`, compatible con `atlas_core.catalogo_plantas.Planta`).
+- **`atlas_core/rutas/enriquecimiento_viaje.py`:**
+  - `resolver_planta_origen` reestructurado: tramo GPS extraído a `_resolver_planta_por_gps` (misma lógica de RUTAS R1, sin cambios de comportamiento); si GPS no resuelve y se entrega `textos_documento`, se intenta `resolver_origen_documental`. **Política de conflicto conservadora:** el GPS, si resuelve, gana siempre — el documento nunca se evalúa si el GPS ya tuvo éxito (cortocircuito explícito en el código, no una regla de "votación"). **Cambio de firma:** devuelve ahora `(planta, motivo, determinado_por, evidencia)` — 4-tuple en vez del 2-tuple de RUTAS R1; único call-site externo (`tests/test_rutas_enriquecimiento_viaje.py`) actualizado.
+  - `calcular_ruta_para_viaje` gana el parámetro opcional `textos_documento` y propaga `determinado_por`/`evidencia_origen` al resultado (antes hardcodeaba `"ONELOGIS_GPS"`).
+  - **Fix defensivo nuevo:** si la planta determinada (por cualquier vía) no tiene `latitud`/`longitud` cargadas en catálogo, se trata como `ORIGEN_NO_DETERMINADO` (`motivo="PLANTA_SIN_COORDENADAS_EN_CATALOGO"`) en vez de dejar que `Coordenadas.__post_init__` lance `TypeError` — encontrado real al ejecutar la Fase E contra el catálogo real (AZA COLINA sin coordenadas, ver corrección de catálogo).
+  - `ResultadoEnriquecimientoRuta` gana `evidencia_origen` (GPS: `"gps_timestamp=...;distancia_km=..."`; documento: `"ENCABEZADO_GUIA"`).
+- **`atlas_core/reporte_viajes.py`:** `COLUMNAS_VIAJES`/`_CAMPOS_RUTA_VACIOS` ganan `evidencia_origen` al final — mismo criterio backward-compatible de RUTAS R1.
+- **Corrección de catálogo real (`plantas.json`), con respaldo previo:** `AZA COLINA` no tenía `latitud`/`longitud` desde antes de este bloque (bug latente heredado, no introducido aquí — bloqueaba cualquier ruta real con ese origen). Respaldo completo en `Desktop\Atlas\backups_catalogos\20260811_104321_pre_coordenadas_aza_colina\`. Editado vía `CatalogoPlantas.editar(modificacion_manual=True, latitud=-33.137558, longitud=-70.665977, observacion=...)` — reutiliza la coordenada ya geocodificada vía ORS (2026-07-27, fallback, confidence 0.6, nivel calle/comuna) para la misma dirección física, presente en `destinos_maestros.json` bajo "ACEROS AZA SA" (mismo workaround ya documentado en RUTAS R1, ahora aplicado a la fuente correcta). Verificado releyendo desde disco tras escribir; `AZA RENCA` confirmada intacta.
+
+### Validación
+
+- Tests nuevos: 7 en `tests/test_rutas_origen_documental.py` (Renca resuelve, Colina resuelve, ignora directorio de sucursales con el caso real que motivó el fix histórico, sin evidencia abstiene, ambiguo abstiene, ignora plantas no confirmadas, ignora plantas inactivas) + 3 en `tests/test_rutas_enriquecimiento_viaje.py` (GPS no alcanza → cae a documento; conflicto GPS-vs-documento → gana GPS siempre; sin evidencia ninguna → `ORIGEN_NO_DETERMINADO`) + 1 test defensivo (planta determinada sin coordenadas en catálogo → no lanza, `ORIGEN_NO_DETERMINADO`). 1 test existente de RUTAS R1 actualizado para el nuevo 4-tuple de `resolver_planta_origen`.
+- Suite completa: **618 → 629 passed**, 0 failed.
+- **Fase D — matriz real, 12 guías AZA disponibles hoy** (el set histórico original de 9 —`464089`, `462429`, `464106-464110`, `464259`— no existe como archivo de imagen accesible en este equipo; sustituido por el set real disponible en `output/_entrantes_desktop`, superando el mínimo de 9 pedido), PaddleOCR real, catálogo real:
+
+  | archivo | origen_real (lectura humana del encabezado OCR) | resultado_final | correcto | método |
+  |---|---|---|---|---|
+  | 464170.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464511.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464264.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464265.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464367.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464395.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464424.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464479.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464488.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464489.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464491.jpeg | AZA RENCA | AZA RENCA | ✅ | DOCUMENTO |
+  | 464493.jpeg | AZA RENCA | `NO_DETERMINADO` (abstención segura) | ⚠️ abstención, no error | — |
+
+  **11/12 correctas, 1/12 abstención segura, 0 asignaciones incorrectas.** GPS histórico no evaluado en la matriz por no estar disponible (Fase A); ninguna guía real de AZA COLINA estaba disponible para incluir en esta matriz (compensado en Fase E con un patrón real de encabezado, ver abajo). Causa diagnosticada del caso 464493: Paddle leyó "Sucursal" como "ursal"/"Cursal" (perdió el prefijo), fuera de la tolerancia de corte (edición ≤1 y diferencia de longitud ≤1 combinadas) — el corte no se activó, "COLINA" del directorio de sucursales quedó en el texto comparado y generó ambigüedad real junto con "RENCA" (2 coincidencias) → abstención correcta.
+- **Fase E — conectado a ORS real + caché real:** AZA RENCA (documento, texto real de `464170`) → Torres Ocaranza Ltda = **16.683 km / 24.53 min**, `RUTA_CALCULADA` (idéntico al resultado de RUTAS R1 para el mismo par con GPS inyectado — validación cruzada). AZA COLINA (documento, patrón real de encabezado AZA, sin imagen real de guía Colina disponible en este equipo) → Prodalam SA = **41.310 km / 47.35 min**, `RUTA_CALCULADA`. Repetir el primer par → `RESULTADO_DESDE_CACHE`, mismo resultado, 0 llamadas nuevas a ORS.
+- **0 secretos**: `grep` sobre todos los artefactos nuevos de `rutas_eval/` antes de commitear, sin coincidencias.
+- Archivos modificados: `atlas_core/reporte_viajes.py`, `atlas_core/rutas/__init__.py`, `atlas_core/rutas/enriquecimiento_viaje.py`, `tests/test_rutas_enriquecimiento_viaje.py`. Archivos nuevos: `atlas_core/rutas/origen_documental.py`, `tests/test_rutas_origen_documental.py`. Catálogo real modificado fuera del repo: `plantas.json` (respaldo previo). Sin cambios en `atlas_core/rutas/{geocerca,posicion_vehiculo,modelos,proveedor,servicio,repositorio,openrouteservice}.py`, `atlas_core/gestor_viajes.py`, ni Desktop.
+
+### Continuidad
+
+- Sin bloqueo técnico que impida cerrar: se eligió `DOCUMENTAL_PRINCIPAL_GPS_TIEMPO_REAL` como conclusión concreta. Pendiente NO bloqueante: (a) que Javier confirme desde su cuenta Onelogis si existe una vía de API/exportación oficial para histórico — mejoraría cobertura y quitaría dependencia del encabezado de cada guía; (b) validar el mecanismo documental contra guías reales de AZA COLINA (solo probado con patrón sintético en Fase E, no había ninguna imagen real disponible en este equipo).
+
+---
+
 ## 2026-08-11 — Cierre RUTAS R1: km/tiempos conectados al viaje + auditoría Onelogis
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `5f201d418a3fcd6ee1287d1e05b1335efe87e043`

@@ -95,6 +95,7 @@ COLUMNAS_VIAJES = (
     "estado_ruta",
     "motivo_ruta",
     "origen_determinado_por",
+    "evidencia_origen",
 )
 
 
@@ -174,7 +175,7 @@ _CAMPOS_RUTA_VACIOS = {
     "destino_id": "", "destino_nombre": "",
     "distancia_km": "", "duracion_min": "",
     "proveedor_ruta": "", "estado_ruta": "", "motivo_ruta": "",
-    "origen_determinado_por": "",
+    "origen_determinado_por": "", "evidencia_origen": "",
 }
 
 

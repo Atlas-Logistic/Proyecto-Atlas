@@ -20,6 +20,7 @@ from atlas_core.catalogo_destinos import CatalogoDestinos, Destino, EstadoBusque
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.rutas.geocerca import RADIO_GEOCERCA_KM_PREDETERMINADO, resolver_planta_por_posicion
 from atlas_core.rutas.modelos import Coordenadas, EstadoRuta
+from atlas_core.rutas.origen_documental import resolver_origen_documental
 from atlas_core.rutas.posicion_vehiculo import (
     EstadoPosicionVehiculo,
     ProveedorPosicionVehiculo,
@@ -46,7 +47,7 @@ CAMPOS_RESULTADO = (
     "destino_id", "destino_nombre",
     "distancia_km", "duracion_min",
     "proveedor_ruta", "estado_ruta", "motivo_ruta",
-    "origen_determinado_por",
+    "origen_determinado_por", "evidencia_origen",
 )
 
 
@@ -62,6 +63,7 @@ class ResultadoEnriquecimientoRuta:
     estado_ruta: str = ""
     motivo_ruta: str = ""
     origen_determinado_por: str = ""
+    evidencia_origen: str = ""
 
     def a_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -95,44 +97,89 @@ def resolver_destino_canonico(
     return destino, ""
 
 
+def _resolver_planta_por_gps(
+    *,
+    patente: str | None,
+    instante_salida: datetime | None,
+    proveedor_posicion: ProveedorPosicionVehiculo | None,
+    plantas: Iterable[Planta],
+    radio_km: float,
+) -> tuple[Planta | None, str, str]:
+    """Tramo GPS de la jerarquía. Devuelve (planta, motivo_si_falla,
+    evidencia). GPS histórico si el proveedor lo entrega; con la
+    integración auditada hoy (última posición conocida, ver
+    docs/BITACORA_TECNICA_CRONOLOGICA.md bloque RUTAS R1) esto solo aporta
+    evidencia útil para procesamiento cercano al instante real de salida."""
+    patente_limpia = str(patente or "").strip()
+    if not patente_limpia or instante_salida is None or proveedor_posicion is None:
+        return None, "SIN_EVIDENCIA_GPS", ""
+    resultado_posicion = proveedor_posicion.obtener_posicion(patente_limpia, instante_salida)
+    if resultado_posicion.estado != EstadoPosicionVehiculo.POSICION_ENCONTRADA:
+        return None, f"GPS_{resultado_posicion.estado.value}", ""
+    try:
+        timestamp_gps = datetime.fromisoformat(str(resultado_posicion.timestamp_gps))
+    except (TypeError, ValueError):
+        return None, "POSICION_GPS_SIN_TIMESTAMP_VALIDO", ""
+    instante_comparable = instante_salida
+    if timestamp_gps.tzinfo is None or instante_comparable.tzinfo is None:
+        timestamp_gps = timestamp_gps.replace(tzinfo=None)
+        instante_comparable = instante_comparable.replace(tzinfo=None)
+    if abs(timestamp_gps - instante_comparable) > VENTANA_MAXIMA_POSICION_GPS:
+        return None, "POSICION_GPS_DEMASIADO_ANTIGUA", ""
+    resultado_geocerca = resolver_planta_por_posicion(
+        resultado_posicion.coordenadas, plantas, radio_km=radio_km
+    )
+    if not resultado_geocerca.determinada:
+        return None, resultado_geocerca.motivo, ""
+    planta = next(
+        (p for p in plantas if p.planta_id == resultado_geocerca.planta_id), None
+    )
+    if planta is None:
+        return None, "PLANTA_NO_ENCONTRADA_EN_CATALOGO", ""
+    evidencia = (
+        f"gps_timestamp={resultado_posicion.timestamp_gps};"
+        f"distancia_km={resultado_geocerca.distancia_km:.3f}"
+    )
+    return planta, "", evidencia
+
+
 def resolver_planta_origen(
     *,
     patente: str | None,
     instante_salida: datetime | None,
     proveedor_posicion: ProveedorPosicionVehiculo | None,
     plantas: Iterable[Planta],
+    textos_documento: Iterable[str] | None = None,
     radio_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
-) -> tuple[Planta | None, str]:
-    """Jerarquía única soportada hoy: evidencia GPS/geocerca. Sin patente,
-    sin instante o sin proveedor de posición, se abstiene explícitamente
-    -- nunca infiere la planta por conveniencia ni por ruta más corta."""
-    patente_limpia = str(patente or "").strip()
-    if not patente_limpia or instante_salida is None or proveedor_posicion is None:
-        return None, "SIN_EVIDENCIA_GPS"
-    resultado_posicion = proveedor_posicion.obtener_posicion(patente_limpia, instante_salida)
-    if resultado_posicion.estado != EstadoPosicionVehiculo.POSICION_ENCONTRADA:
-        return None, f"GPS_{resultado_posicion.estado.value}"
-    try:
-        timestamp_gps = datetime.fromisoformat(str(resultado_posicion.timestamp_gps))
-    except (TypeError, ValueError):
-        return None, "POSICION_GPS_SIN_TIMESTAMP_VALIDO"
-    instante_comparable = instante_salida
-    if timestamp_gps.tzinfo is None or instante_comparable.tzinfo is None:
-        timestamp_gps = timestamp_gps.replace(tzinfo=None)
-        instante_comparable = instante_comparable.replace(tzinfo=None)
-    if abs(timestamp_gps - instante_comparable) > VENTANA_MAXIMA_POSICION_GPS:
-        return None, "POSICION_GPS_DEMASIADO_ANTIGUA"
-    resultado_geocerca = resolver_planta_por_posicion(
-        resultado_posicion.coordenadas, plantas, radio_km=radio_km
+) -> tuple[Planta | None, str, str, str]:
+    """Jerarquía conservadora (Bloque PLANTA-P1):
+
+    1. GPS histórico/geocerca, si hay evidencia (patente + instante +
+       proveedor + posición dentro de ventana y geocerca válida).
+    2. Evidencia documental (encabezado de la propia guía), como fallback
+       -- **solo se consulta si el GPS no determinó nada**, nunca para
+       "votar" contra el GPS ni para desempatar: si el GPS resuelve, gana
+       el GPS sin excepción (política conservadora ante conflicto).
+    3. `None` (`ORIGEN_NO_DETERMINADO`) si ninguno de los dos alcanza.
+
+    Nunca infiere por conveniencia, por cercanía al destino ni por "ruta
+    más corta". Devuelve (planta, motivo_si_falla, determinado_por,
+    evidencia)."""
+    plantas = list(plantas)
+
+    planta_gps, motivo_gps, evidencia_gps = _resolver_planta_por_gps(
+        patente=patente, instante_salida=instante_salida,
+        proveedor_posicion=proveedor_posicion, plantas=plantas, radio_km=radio_km,
     )
-    if not resultado_geocerca.determinada:
-        return None, resultado_geocerca.motivo
-    planta = next(
-        (p for p in plantas if p.planta_id == resultado_geocerca.planta_id), None
-    )
-    if planta is None:
-        return None, "PLANTA_NO_ENCONTRADA_EN_CATALOGO"
-    return planta, ""
+    if planta_gps is not None:
+        return planta_gps, "", "ONELOGIS_GPS", evidencia_gps
+
+    if textos_documento is not None:
+        planta_doc = resolver_origen_documental(textos_documento, plantas)
+        if planta_doc is not None:
+            return planta_doc, "", "DOCUMENTO", "ENCABEZADO_GUIA"
+
+    return None, motivo_gps, "", ""
 
 
 def calcular_ruta_para_viaje(
@@ -144,12 +191,16 @@ def calcular_ruta_para_viaje(
     plantas: Iterable[Planta],
     proveedor_posicion: ProveedorPosicionVehiculo | None,
     servicio_rutas: ServicioRutas,
+    textos_documento: Iterable[str] | None = None,
     perfil: str = "driving-hgv",
     radio_geocerca_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
 ) -> ResultadoEnriquecimientoRuta:
-    """Orquesta destino -> origen -> ORS. Un fallo en cualquier paso deja
-    campos vacíos y un estado/motivo explicativo -- nunca lanza, nunca
-    inventa, nunca invalida el viaje que lo llama."""
+    """Orquesta destino -> origen (GPS -> documento -> sin determinar) ->
+    ORS. Un fallo en cualquier paso deja campos vacíos y un estado/motivo
+    explicativo -- nunca lanza, nunca inventa, nunca invalida el viaje que
+    lo llama. `textos_documento` (opcional, Bloque PLANTA-P1): texto OCR de
+    página completa de la guía, usado solo como fallback documental cuando
+    el GPS no determina nada."""
     plantas = list(plantas)
 
     destino, motivo_destino = resolver_destino_canonico(obra_destino_texto, catalogo_destinos)
@@ -158,15 +209,25 @@ def calcular_ruta_para_viaje(
             estado_ruta=EstadoRuta.DESTINO_NO_VALIDO.value, motivo_ruta=motivo_destino
         )
 
-    planta, motivo_origen = resolver_planta_origen(
+    planta, motivo_origen, determinado_por, evidencia_origen = resolver_planta_origen(
         patente=patente, instante_salida=instante_salida,
         proveedor_posicion=proveedor_posicion, plantas=plantas,
-        radio_km=radio_geocerca_km,
+        textos_documento=textos_documento, radio_km=radio_geocerca_km,
     )
     if planta is None:
         return ResultadoEnriquecimientoRuta(
             destino_id=destino.destino_id, destino_nombre=destino.nombre_destino,
             estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value, motivo_ruta=motivo_origen,
+        )
+    if planta.latitud is None or planta.longitud is None:
+        # La planta se determinó (GPS o documento) pero su registro de
+        # catálogo no tiene coordenadas cargadas -- nunca se lanza una
+        # excepción por un dato de catálogo incompleto; se trata igual que
+        # "no determinada" para no bloquear el viaje.
+        return ResultadoEnriquecimientoRuta(
+            destino_id=destino.destino_id, destino_nombre=destino.nombre_destino,
+            estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value,
+            motivo_ruta="PLANTA_SIN_COORDENADAS_EN_CATALOGO",
         )
 
     resultado_servicio = servicio_rutas.confirmar_y_calcular(
@@ -186,5 +247,6 @@ def calcular_ruta_para_viaje(
         proveedor_ruta=servicio_rutas.proveedor.nombre,
         estado_ruta=resultado_servicio.estado.value,
         motivo_ruta=resultado_servicio.motivo,
-        origen_determinado_por="ONELOGIS_GPS",
+        origen_determinado_por=determinado_por,
+        evidencia_origen=evidencia_origen,
     )

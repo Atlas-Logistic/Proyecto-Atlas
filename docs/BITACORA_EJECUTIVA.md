@@ -4,6 +4,20 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — PLANTA-P1: resolución real de planta origen (CERRADO)
+
+- **Objetivo:** el bloque anterior (RUTAS R1) dejó la integración de rutas lista pero sin forma automática de saber si un viaje salió de AZA RENCA o AZA COLINA. Este bloque resuelve eso.
+- **Onelogis histórico — auditoría técnica exhaustiva + aclaración de Javier:** Javier confirmó que, entrando manualmente a su cuenta Onelogis, sí puede ver histórico de viajes y recorridos — **la plataforma Onelogis tiene esa capacidad**. Lo que se auditó y confirmó es que **la integración técnica actual de Atlas** (`gps_logic.js`/`main.js`, vía un endpoint propio de Atlas) solo expone la última posición conocida; no hay ningún endpoint histórico configurado ni documentado en el código, backup o búsqueda pública. No se pudo identificar de forma segura un endpoint histórico accesible con la configuración actual (se descartó automatizar navegador o adivinar rutas contra el sistema en vivo, por instrucción explícita). Queda como gestión pendiente que solo Javier puede resolver (revisar configuración/documentación de su cuenta Onelogis).
+- **Fallback documental adaptado y activado:** se recuperó y adaptó `_resolver_origen_documental` (rama remota no fusionada `origin/feature-cobertura-origen-fase1`, validado 7/9 en guías reales, 0 falsos positivos conocidos) para trabajar sobre el texto OCR de página completa que ya produce PaddleOCR — más simple y robusto que el original, que dependía de una relectura focal atada a EasyOCR.
+- **Jerarquía implementada:** GPS (si hay evidencia) → documento (si el GPS no alcanza) → `ORIGEN_NO_DETERMINADO`. Ante conflicto, el GPS siempre gana — nunca se promedia ni se elige por conveniencia.
+- **Validación real:** 12 guías reales de AZA disponibles hoy (el set histórico original de 9 no está accesible como archivo en este equipo) — **11/12 resueltas correctamente a AZA RENCA por documento, 1/12 se abstuvo de forma segura (0 asignaciones incorrectas)**. Conectado a ORS real: AZA RENCA→Torres Ocaranza (16.68 km/24.53 min) y AZA COLINA→Prodalam SA (41.31 km/47.35 min), ambas con caché confirmado.
+- **Corrección de catálogo:** se completaron las coordenadas de AZA COLINA en `plantas.json` (faltaban desde antes de este bloque), reutilizando una coordenada ya geocodificada — con respaldo previo.
+- Validación automatizada: **629 tests**, todos verdes (618 → 629). 0 regresiones.
+- **Conclusión de estrategia: DOCUMENTAL_PRINCIPAL_GPS_TIEMPO_REAL.**
+- **Atlas ya puede calcular km/min automáticamente para la mayoría de guías reales de AZA RENCA** (mecanismo documental validado). Sigue pendiente: confirmar con Onelogis el acceso histórico (mejoraría cobertura y dependería menos del encabezado de la guía) y ampliar la validación a más casos reales de AZA COLINA.
+
+---
+
 ## 2026-08-11 — RUTAS R1: km/tiempos conectados al viaje + auditoría Onelogis (CERRADO)
 
 - **Objetivo:** conectar el módulo de rutas (ya validado con ORS real) al flujo de viajes: destino canónico → planta de origen → ORS → campos en el reporte, sin inventar ningún origen.
