@@ -4,6 +4,23 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre OPERACIÓN O1: peso + hora entrada/salida + permanencia en planta
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `660e5b2f912f9a803c33b94cdb2e60ad98de4293`.
+- **Objetivo cerrado:** `peso_kg`, `hora_entrada_aza`, `hora_salida_aza`, `permanencia_minutos` ya llegan hasta `viajes.csv` -- antes se calculaban internamente en `extraer_datos()` pero nunca salían de ahí.
+- **Semántica confirmada, importante para quien retome esto:** el campo correcto es **"PESO KG"** (neto operacional), nunca "PESO BRUTO" (camión+carga) -- una versión anterior del extractor usaba BRUTO por error, corregido con evidencia visual directa. `hora_entrada_aza`/`hora_salida_aza` = ingreso/egreso real del camión a AZA (ancla "HORA ENTRADA"/"HORA SALIDA", nunca fecha ni Nro. Transporte).
+- **Hallazgo importante sobre el dataset de referencia:** de las 30 guías con ground truth humano usadas para validar (`datos_privados/muestra_fechas_30/`), **6 tenían errores reales de transcripción** (verificados visualmente contra la imagen original antes de aceptar cualquier discrepancia como error de Atlas) -- ver detalle en la bitácora técnica. Si se retoma validación con este dataset, tenerlo presente.
+- **Política multi-guía definida con evidencia real (2 transportes, 2 y 3 guías cada uno):** el peso es **parcial por documento** (materiales/códigos distintos) -- se suma a nivel de viaje SOLO si todos los documentos aportan un valor válido. Las horas se consolidan si coinciden entre documentos; si difieren, `CONFLICTO_HORA_ENTRADA`/`CONFLICTO_HORA_SALIDA`, nunca se elige una arbitrariamente. Permanencia se deriva de las horas ya consolidadas.
+- **Cruce de medianoche:** nunca se asume +24h automáticamente sin evidencia de fecha -- queda `"No determinada"`.
+- **Ausencia de peso/hora nunca invalida un documento por sí sola** -- no participa en `indicador_revision`, decisión explícita para no degradar documentos que antes de este bloque quedaban OK.
+- **Contrato de esquema:** `COLUMNAS_OFICIALES` (= `procesamiento_masivo.COLUMNAS`) ahora exige las 4 columnas nuevas como obligatorias en el CSV de entrada de `generar_reporte_viajes()` -- un CSV generado con el pipeline anterior a este bloque debe **reprocesarse** (no puede alimentarse directo), mismo contrato estricto que ya regía para cualquier otra columna oficial.
+- **1 valor histórico corregido con evidencia directa:** el fallback hardcodeado de la guía `462491` tenía "12.242,000" (Peso Bruto) en vez de "3.282,00" (PESO KG real). **Los otros 6 fallbacks hardcodeados históricos NO se tocaron** -- sin imagen real disponible en este entorno para verificarlos con el mismo rigor; queda como trabajo pendiente si se consiguen esas imágenes.
+- Suite final: **665 → 691 tests** (26 nuevos). 0 regresiones. No se tocó Desktop, ORS, Onelogis, ni `atlas_core/rutas/` (D2/D3/E1 intactos).
+- **¿Listo para UX-R3/R4?** Los datos ya llegan completos y consolidados hasta `viajes.csv`, pero dado el hallazgo de errores en el propio ground truth de referencia, se recomienda una ronda adicional de validación visual antes de conectar a Desktop.
+- **Próximo bloque oficial: UX-R4 — integración operacional.** Mostrar en Desktop peso, entrada, salida y permanencia, junto con Logística/E1/Rutas cuando estén disponibles. No iniciado.
+
+---
+
 ## 2026-08-11 — Cierre ENTREGAS E1: DESPACHAR A como fuente autoritativa de ruta
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `8b59951a9662c88747fa2e09504acbb09a740188`.

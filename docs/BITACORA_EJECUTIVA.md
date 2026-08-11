@@ -4,6 +4,21 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — OPERACIÓN O1: peso + hora entrada/salida + permanencia en planta (CERRADO)
+
+- **Objetivo:** extraer de forma confiable, persistir y propagar `peso_kg`, `hora_entrada_aza`, `hora_salida_aza` y `permanencia_minutos` desde la guía real hasta `viajes.csv`. Estos campos ya se calculaban internamente en `extraer_datos()` desde bloques anteriores, pero nunca salían de ahí — no llegaban ni al CSV masivo ni al reporte.
+- **Semántica de PESO confirmada con evidencia real (30 guías, visual + cruzada):** el campo correcto es **"PESO KG"** (peso neto operacional de la carga) — nunca "PESO BRUTO" (camión + carga). Una versión anterior del extractor priorizaba BRUTO por error; corregido con evidencia directa (guía 464170/462491: Peso Bruto=12.242,000 vs PESO KG real=3.282,00, confirmado contra la imagen).
+- **Hallazgo relevante — calidad del ground truth:** de las 30 guías usadas para validar, **6 tenían errores reales de transcripción humana** en el propio dataset de referencia (copiar valores de la fila vecina, omitir un campo legible marcándolo "ilegible", un archivo mal indexado al número de guía equivocado) — todos detectados y corregidos verificando visualmente la imagen original antes de aceptar cualquier discrepancia como error de Atlas.
+- **Resultado de extracción tras las correcciones:** peso ~26/30 exacto (el resto, abstención segura ante OCR degradado — nunca un valor inventado), horas ~28-29/30 exacto (limitado por confusiones de un solo dígito del propio OCR, no por el algoritmo).
+- **Política de peso/horas multi-guía, definida con evidencia real (2 transportes reales con 2 y 3 guías):** cada documento trae el peso **parcial** de su propia línea de carga (materiales distintos) — se suma a nivel de viaje solo si todos los documentos aportan un peso válido. Las horas de entrada/salida se consolidan cuando coinciden entre documentos del mismo transporte (caso real: 3 guías, misma hora exacta); si difieren, se marca `CONFLICTO_HORA_ENTRADA`/`CONFLICTO_HORA_SALIDA` y nunca se elige una arbitrariamente.
+- **Permanencia** = hora salida − hora entrada, en minutos, consolidada a nivel de viaje. Un cruce de medianoche sin evidencia de fecha nunca se asume automáticamente (+24h) — queda "No determinada" con motivo trazable.
+- Ausencia de peso/hora **nunca** invalida un documento por sí sola — no participa en `indicador_revision`.
+- Validación automatizada: **691 tests**, todos verdes (665 → 691, 26 nuevos). 0 regresiones.
+- **No listo para UX-R3/R4 todavía:** los datos ya llegan completos hasta `viajes.csv` con política multi-guía verificada, pero antes de conectar a Desktop conviene una ronda de validación visual adicional (muestra más amplia) dado el hallazgo de errores en el propio ground truth de referencia.
+- **Próximo bloque oficial: UX-R4 — integración operacional (mostrar en Desktop peso, entrada, salida y permanencia junto con Logística/E1/Rutas).**
+
+---
+
 ## 2026-08-11 — ENTREGAS E1: DESPACHAR A como fuente autoritativa de ruta (CERRADO)
 
 - **Decisión de arquitectura/producto (definida por Javier, prevalece sobre inferencias anteriores de D2/D3/D3.1):** la ruta logística siempre debe ser `PLANTA ORIGEN → DESPACHAR A`, nunca `PLANTA ORIGEN → dirección del cliente/sitio registrado`. `SEÑOR(ES)` es el comprador, `OBRA DESTINO` es el proyecto/receptor comercial (puede tener un nombre completamente distinto del comprador, sin exigir coincidencia), y `DIRECCION`/`COMUNA`/`COD DESTINATARIO` identifican el sitio/obra **registrado** contra el que se emite la guía — útiles para identidad comercial y recurrencia, pero **nunca** deben reemplazar `DESPACHAR A` como destino de una ruta. Caso ejemplo oficial: guía 464170, `DESPACHAR A`="AV. ALMTE. LATORRE 843, MEJILLONES" — la ruta correcta termina ahí, no en Galvarino 8501 (Quilicura).

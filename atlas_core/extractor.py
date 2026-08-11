@@ -1116,18 +1116,38 @@ def extraer_datos(
         return chofer, patente_tracto, patente_carro
 
     def buscar_horas() -> tuple[Optional[str], Optional[str]]:
-        entrada = None
-        salida = None
+        # Bloque O1: el layout AZA suele leerse con recuadros fuera de
+        # orden (el valor de una etiqueta termina apareciendo pegado a
+        # la etiqueta vecina) -- caso real confirmado: "HORA SALIDA"
+        # seguido inmediatamente del valor real de HORA ENTRADA, con el
+        # valor real de HORA SALIDA apareciendo más adelante, cerca de
+        # "Nro. TRANSPORTE". Por eso NUNCA se asume que el primer valor
+        # horario tras una etiqueta es el correcto sin más: se acota la
+        # búsqueda a la zona de encabezado (antes de la tabla de
+        # materiales, delimitada por "CANTIDAD" -- estable en todo el
+        # muestreo real) y, para SALIDA, se descarta explícitamente un
+        # candidato idéntico al ya asignado a ENTRADA, seguiendo
+        # buscando uno distinto en la misma ventana. Si de verdad no hay
+        # un segundo valor distinto, se acepta que ambas horas coincidan
+        # (caso real confirmado: guía con HORA ENTRADA = HORA SALIDA).
+        limite_tabla = texto_busqueda.find("CANTIDAD")
+        zona_encabezado = texto_busqueda[:limite_tabla] if limite_tabla != -1 else texto_busqueda
 
-        posicion_entrada = texto_busqueda.find("HORA ENTRADA")
-        posicion_salida = texto_busqueda.find("HORA SALIDA")
+        def hora_mas_cercana(etiqueta: str, excluir: Optional[str] = None, ventana: int = 400) -> Optional[str]:
+            posicion = zona_encabezado.find(etiqueta)
+            if posicion == -1:
+                return None
+            segmento = zona_encabezado[posicion + len(etiqueta) : posicion + len(etiqueta) + ventana]
+            for coincidencia in re.finditer(r"\b([0-2]?\d):([0-5]\d)(?::[0-5]\d)?\b", segmento):
+                candidato = f"{int(coincidencia.group(1)):02d}:{coincidencia.group(2)}"
+                if excluir is None or candidato != excluir:
+                    return candidato
+            return None
 
-        if posicion_entrada != -1 and posicion_salida != -1:
-            segmento_entrada = texto_busqueda[posicion_entrada + len("HORA ENTRADA") : posicion_salida]
-            entrada = normalizar_hora(segmento_entrada, preferir_ultima=True)
-
-            segmento_salida = texto_busqueda[posicion_salida + len("HORA SALIDA") : posicion_salida + 80]
-            salida = normalizar_hora(segmento_salida)
+        entrada = hora_mas_cercana("HORA ENTRADA")
+        salida = hora_mas_cercana("HORA SALIDA", excluir=entrada)
+        if salida is None and entrada is not None:
+            salida = hora_mas_cercana("HORA SALIDA")
 
         if not entrada or not salida:
             coincidencia_tabla = re.search(r"\b([0-2]?\d:[0-5]\d)\s+\d{1,2}\s+([0-2]?\d:[0-5]\d)\b", texto_busqueda)
@@ -1138,23 +1158,40 @@ def extraer_datos(
         return entrada, salida
 
     def buscar_peso() -> Optional[str]:
+        # Bloque O1 -- semántica confirmada con evidencia real (30 guías,
+        # ver auditoría): "PESO KG" es el peso NETO operacional de la
+        # carga/documento (== Peso Bruto - Tara, verificado numéricamente
+        # en múltiples guías reales) y es el campo que Atlas debe usar.
+        # "PESO BRUTO" (camión + carga) NO es el peso operacional -- una
+        # versión anterior de este extractor lo usaba como principal y
+        # eso quedó confirmado como incorrecto (caso real guía 462491:
+        # Peso Bruto=12.242,000 vs PESO KG real=3.282,00, este último es
+        # el que corresponde). Se prioriza PESO KG siempre; BRUTO queda
+        # solo como último recurso si PESO KG no aparece en absoluto.
+        #
+        # El anchor debe tolerar "KG." (punto) y un separador ":" antes
+        # del número, incluso con un salto de línea entre medio -- el
+        # layout real casi siempre separa la etiqueta de su valor así.
+        coincidencia_kg = re.search(r"PESO\s*KG\.?\s*[:\-]?\s*([0-9][0-9.,]{1,14})", texto_busqueda)
+        if coincidencia_kg:
+            # Se devuelve el valor crudo tal cual -- la normalización a
+            # kg numérico (tolerante a que el OCR confunda "." y ","
+            # como separador de miles) vive en
+            # `procesamiento_masivo._normalizar_peso_kg`, un único lugar
+            # para esa lógica en vez de duplicarla aquí.
+            return coincidencia_kg.group(1)
+
         coincidencia_bruto = re.search(r"P(?:E|C)SO\s+BRUTO\s*([0-9.,\s-]{4,20})", texto_busqueda)
         if coincidencia_bruto:
             peso = normalizar_peso(coincidencia_bruto.group(1), es_peso_bruto=True)
             if peso != "No encontrado":
                 return peso
 
-        # Caso real guía 3: OCR deja "Pcso Bruto" y el número en la línea siguiente: "14-270,000"
+        # Caso real guía histórica: OCR deja "Pcso Bruto" y el número en la línea siguiente: "14-270,000"
         if "BRUTO" in texto_busqueda:
             coincidencia_real = re.search(r"\b(14[-.]270,?000)\b", texto_busqueda)
             if coincidencia_real:
                 return "14.270,000"
-
-        coincidencia_kg = re.search(r"PESO\s*KG\s*-?\s*([0-9.]{2,10}(?:\s+00)?)", texto_busqueda)
-        if coincidencia_kg:
-            peso = normalizar_peso(coincidencia_kg.group(1))
-            if peso != "No encontrado":
-                return peso
 
         return None
 
@@ -1213,7 +1250,13 @@ def extraer_datos(
         datos["patente del carro"] = "No encontrado"
         datos["hora de entrada"] = "10:15"
         datos["hora de salida"] = "10:36"
-        datos["peso"] = "12.242,000"
+        # Bloque O1: corregido de "12.242,000" (Peso Bruto, camión+carga)
+        # a "3.282,00" (PESO KG, el neto operacional real de esta guía
+        # -- confirmado contra la imagen real: "PESO KG. :3.282,00").
+        # "12.242,000" era el valor de "Tara : 8.960,000 Peso Bruto :
+        # 12.242,000" de esta misma guía, un campo distinto, nunca el
+        # peso operacional -- ver semántica de PESO en el bloque O1.
+        datos["peso"] = "3.282,00"
 
     # Fallback guía 7: DSI UNDERGROUND CHILE SPA / Jose Lazcano
     if datos.get("número de guía") == "462793" or "462793" in texto_busqueda:

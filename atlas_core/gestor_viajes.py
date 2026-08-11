@@ -74,6 +74,29 @@ def _documento_marca_revision(fila: Mapping[str, object]) -> bool:
     return str(fila.get("indicador_revision", "")).strip().casefold() == "revisar"
 
 
+def _calcular_permanencia_minutos(hora_entrada: str, hora_salida: str) -> str:
+    """Igual semántica que `procesamiento_masivo._calcular_permanencia_minutos`
+    (duplicada a propósito para no acoplar este módulo a uno de nivel más
+    bajo): permanencia en minutos entre dos horas "HH:MM", o "No
+    determinada" si la salida es anterior a la entrada sin evidencia de
+    cruce de medianoche."""
+    try:
+        hora_e, minuto_e = (int(x) for x in hora_entrada.split(":"))
+        hora_s, minuto_s = (int(x) for x in hora_salida.split(":"))
+    except (ValueError, AttributeError):
+        return ""
+    minutos_entrada = hora_e * 60 + minuto_e
+    minutos_salida = hora_s * 60 + minuto_s
+    if minutos_salida < minutos_entrada:
+        return "No determinada"
+    return str(minutos_salida - minutos_entrada)
+
+
+def _peso_kg_numerico(valor: str) -> int | None:
+    texto = str(valor or "").strip()
+    return int(texto) if texto.isdigit() else None
+
+
 class EstadoViaje(str, Enum):
     CONFIRMADO = "CONFIRMADO"
     REQUIERE_REVISION = "REQUIERE_REVISION"
@@ -90,6 +113,12 @@ class MotivoRevision(str, Enum):
     CONFLICTO_PATENTE_TRACTO = "CONFLICTO_PATENTE_TRACTO"
     CONFLICTO_PATENTE_RAMPLA = "CONFLICTO_PATENTE_RAMPLA"
     DOCUMENTO_REQUIERE_REVISION = "DOCUMENTO_REQUIERE_REVISION"
+    # Bloque O1: horas de planta que deberían referirse al mismo
+    # ingreso/salida del camión cuando varias guías comparten transporte
+    # -- si las horas válidas presentes difieren entre documentos, nunca
+    # se elige una arbitrariamente.
+    CONFLICTO_HORA_ENTRADA = "CONFLICTO_HORA_ENTRADA"
+    CONFLICTO_HORA_SALIDA = "CONFLICTO_HORA_SALIDA"
 
 
 @dataclass(frozen=True)
@@ -106,6 +135,10 @@ class DocumentoViaje:
     patente_rampla: str
     descripcion_material: str
     tipo_carga: str
+    peso_kg: str
+    hora_entrada_aza: str
+    hora_salida_aza: str
+    permanencia_minutos: str
     evidencia: dict[str, str]
 
 
@@ -159,6 +192,43 @@ class Viaje:
     def tipos_carga(self) -> list[str]:
         return _valores_unicos(d.tipo_carga for d in self.documentos)
 
+    @property
+    def peso_total_viaje_kg(self) -> str:
+        """Bloque O1 -- suma de `peso_kg` de todos los documentos del
+        viaje. Evidencia real (2 transportes multi-guía verificados
+        contra la guía impresa): cada documento trae el peso PARCIAL de
+        su propia línea de carga (materiales/códigos distintos, nunca el
+        mismo peso repetido) -- sumarlos no duplica. Solo se calcula si
+        TODOS los documentos del viaje tienen un `peso_kg` numérico
+        válido; si falta en alguno, no puede demostrarse que la suma esté
+        completa, así que se deja vacío en vez de sumar un subconjunto."""
+        pesos = [_peso_kg_numerico(d.peso_kg) for d in self.documentos]
+        if not pesos or any(peso is None for peso in pesos):
+            return ""
+        return str(sum(pesos))
+
+    @property
+    def hora_entrada_aza(self) -> str:
+        """Consolidada solo si todas las horas de entrada válidas
+        presentes coinciden (documentos sin dato no impiden consolidar) —
+        nunca se elige una arbitrariamente ante conflicto."""
+        valores = _valores_unicos(d.hora_entrada_aza for d in self.documentos)
+        return valores[0] if len(valores) == 1 else ""
+
+    @property
+    def hora_salida_aza(self) -> str:
+        valores = _valores_unicos(d.hora_salida_aza for d in self.documentos)
+        return valores[0] if len(valores) == 1 else ""
+
+    @property
+    def permanencia_minutos(self) -> str:
+        """Derivada de las horas ya consolidadas a nivel de viaje --
+        nunca promedia las permanencias de los documentos individuales."""
+        entrada, salida = self.hora_entrada_aza, self.hora_salida_aza
+        if not entrada or not salida:
+            return ""
+        return _calcular_permanencia_minutos(entrada, salida)
+
     def a_dict(self) -> dict[str, object]:
         return {
             "viaje_id": self.viaje_id,
@@ -177,6 +247,10 @@ class Viaje:
             "patentes_rampla": self.patentes_rampla,
             "materiales": self.materiales,
             "tipos_carga": self.tipos_carga,
+            "peso_total_viaje_kg": self.peso_total_viaje_kg,
+            "hora_entrada_aza": self.hora_entrada_aza,
+            "hora_salida_aza": self.hora_salida_aza,
+            "permanencia_minutos": self.permanencia_minutos,
             "evidencias_documentos": [d.evidencia for d in self.documentos],
             "fecha_creacion": self.fecha_creacion,
         }
@@ -208,6 +282,10 @@ def _documento_desde_fila(
         patente_rampla=str(fila.get("patente_rampla", "")).strip(),
         descripcion_material=str(fila.get("descripcion_material", "")).strip(),
         tipo_carga=str(fila.get("tipo_carga", "")).strip(),
+        peso_kg=str(fila.get("peso_kg", "")).strip(),
+        hora_entrada_aza=str(fila.get("hora_entrada_aza", "")).strip(),
+        hora_salida_aza=str(fila.get("hora_salida_aza", "")).strip(),
+        permanencia_minutos=str(fila.get("permanencia_minutos", "")).strip(),
         evidencia=evidencia,
     )
 
@@ -263,6 +341,8 @@ def agrupar_viajes(
             (MotivoRevision.CONFLICTO_ORIGEN, [d.origen for d in documentos]),
             (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos]),
             (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos]),
+            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos]),
+            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos]),
         )
         motivos = [
             motivo for motivo, valores in campos_conflicto

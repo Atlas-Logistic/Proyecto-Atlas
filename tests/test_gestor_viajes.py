@@ -23,6 +23,9 @@ def _fila(**cambios):
         "patente_rampla": "EFGH34",
         "descripcion_material": "BARRAS",
         "tipo_carga": "BARRAS",
+        "peso_kg": "1000",
+        "hora_entrada_aza": "07:00",
+        "hora_salida_aza": "18:00",
     }
     fila.update(cambios)
     return fila
@@ -93,6 +96,8 @@ def test_chofer_canonico_fuzzy_se_conserva():
         ("patente_tracto", "ZZZZ99", MotivoRevision.CONFLICTO_PATENTE_TRACTO),
         ("patente_rampla", "YYYY88", MotivoRevision.CONFLICTO_PATENTE_RAMPLA),
         ("fecha", "2026-07-29", MotivoRevision.CONFLICTO_FECHA),
+        ("hora_entrada_aza", "09:00", MotivoRevision.CONFLICTO_HORA_ENTRADA),
+        ("hora_salida_aza", "19:00", MotivoRevision.CONFLICTO_HORA_SALIDA),
     ],
 )
 def test_contradicciones_activan_revision_y_preservan_evidencia(
@@ -117,7 +122,10 @@ def test_origen_opcional_contradictorio_activa_revision():
 
 def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
     filas = [
-        _fila(archivo="a.jpg", origen="ORIGEN BASE"),
+        _fila(
+            archivo="a.jpg", origen="ORIGEN BASE",
+            hora_entrada_aza="07:00", hora_salida_aza="08:00",
+        ),
         _fila(
             archivo="b.jpg",
             fecha="2026-07-29",
@@ -128,6 +136,7 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
             origen="OTRO ORIGEN",
             patente_tracto="ZZZZ99",
             patente_rampla="YYYY88",
+            hora_entrada_aza="09:00", hora_salida_aza="10:00",
         ),
     ]
     viajes, _ = agrupar_viajes(filas)
@@ -272,6 +281,95 @@ def test_conflicto_multiguia_persiste_con_documentos_ok():
     assert viaje.estado == EstadoViaje.REQUIERE_REVISION
     assert MotivoRevision.CONFLICTO_CHOFER in viaje.motivos_revision
     assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION not in viaje.motivos_revision
+
+
+# --- Bloque O1: política de peso/horas multiguía (evidencia real: 2
+# transportes reales, 0000279246 y 0000297304, ver bitácora técnica) ---
+
+
+def test_horas_coincidentes_entre_documentos_consolidan():
+    # Caso real (transporte 0000297304, 3 guías): las 3 traen la misma
+    # hora de entrada y de salida -- se consolidan a nivel de viaje.
+    filas = [
+        _fila(archivo="a.jpg", hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+        _fila(archivo="b.jpg", hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+        _fila(archivo="c.jpg", hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.hora_entrada_aza == "10:08"
+    assert viaje.hora_salida_aza == "12:27"
+    assert viaje.permanencia_minutos == "139"
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA not in viaje.motivos_revision
+    assert MotivoRevision.CONFLICTO_HORA_SALIDA not in viaje.motivos_revision
+
+
+def test_horas_conflictivas_no_se_eligen_arbitrariamente():
+    filas = [
+        _fila(archivo="a.jpg", hora_entrada_aza="07:00", hora_salida_aza="09:00"),
+        _fila(archivo="b.jpg", hora_entrada_aza="08:00", hora_salida_aza="09:00"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA in viaje.motivos_revision
+    # A nivel de viaje, ninguna de las dos horas contradictorias se elige.
+    assert viaje.hora_entrada_aza == ""
+    assert viaje.permanencia_minutos == ""
+
+
+def test_horas_faltantes_en_algunos_documentos_consolidan_con_los_validos():
+    # Un documento sin hora legible no debe impedir consolidar si TODOS
+    # los que sí tienen dato coinciden.
+    filas = [
+        _fila(archivo="a.jpg", hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+        _fila(archivo="b.jpg", hora_entrada_aza="No encontrado", hora_salida_aza="No encontrado"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.hora_entrada_aza == "10:08"
+    assert viaje.hora_salida_aza == "12:27"
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA not in viaje.motivos_revision
+
+
+def test_peso_multiguia_suma_cuando_todos_los_documentos_tienen_dato():
+    # Caso real (transporte 0000297304): 6.971 + 3.100 + 4.256 = 14.327
+    # kg -- cada documento trae el peso PARCIAL de su propia línea de
+    # carga (materiales distintos), sumar no duplica.
+    filas = [
+        _fila(archivo="a.jpg", peso_kg="6971"),
+        _fila(archivo="b.jpg", peso_kg="3100"),
+        _fila(archivo="c.jpg", peso_kg="4256"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert viajes[0].peso_total_viaje_kg == "14327"
+
+
+def test_fila_sin_columnas_o1_no_rompe_agrupacion():
+    """Una fila que no trae peso_kg/hora_entrada_aza/hora_salida_aza en
+    absoluto (esquema anterior a este bloque, a nivel de `Mapping` crudo,
+    sin pasar por la validación estricta de `generar_reporte_viajes`) no
+    rompe la agrupación -- los campos nuevos quedan vacíos."""
+    fila = _fila()
+    for campo in ("peso_kg", "hora_entrada_aza", "hora_salida_aza"):
+        del fila[campo]
+    viajes, _ = agrupar_viajes([fila])
+    viaje = viajes[0]
+    assert viaje.peso_total_viaje_kg == ""
+    assert viaje.hora_entrada_aza == ""
+    assert viaje.permanencia_minutos == ""
+    assert viaje.clientes == ["CLIENTE ÑUBLE"]
+
+
+def test_peso_multiguia_no_suma_si_falta_en_algun_documento():
+    # Si un documento no aporta peso_kg, no puede demostrarse que la
+    # suma esté completa -- se deja vacío en vez de sumar un subconjunto.
+    filas = [
+        _fila(archivo="a.jpg", peso_kg="6971"),
+        _fila(archivo="b.jpg", peso_kg="No encontrado"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert viajes[0].peso_total_viaje_kg == ""
 
 
 def test_conflicto_y_documento_revisar_coexisten():

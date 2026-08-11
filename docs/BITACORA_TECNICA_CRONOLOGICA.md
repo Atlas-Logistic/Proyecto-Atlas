@@ -4,6 +4,71 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre: OPERACIÓN O1, peso + hora entrada/salida + permanencia en planta
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `660e5b2f912f9a803c33b94cdb2e60ad98de4293`
+
+### Problema real confirmado
+
+- `atlas_core/extractor.py` ya calculaba `datos["peso"]`, `datos["hora de entrada"]`, `datos["hora de salida"]` desde bloques anteriores (`buscar_peso()`, `buscar_horas()`), pero **`procesar_archivo()` nunca los incluía en su dict de salida** — se perdían antes de llegar al CSV masivo, al reporte o a `viajes.csv`.
+- Auditoría real (30 guías con ground truth humano, `datos_privados/muestra_fechas_30/`, mismo dataset ya usado para calibrar `CONFIANZA_MINIMA_FECHA_FOCAL`): con el `buscar_peso()` anterior, solo **2/30** guías resolvían un peso (25/30 `No encontrado`, 3/30 con valor incorrecto). Causas exactas diagnosticadas:
+  1. **Anchor roto:** el regex exigía `PESO\s*KG\s*-?\s*(...)` sin tolerar el "." de "KG." ni el ":" antes del valor -- el layout real casi siempre trae ambos entre la etiqueta y el número.
+  2. **Prioridad semántica invertida:** cuando sí matcheaba algo, priorizaba "PESO BRUTO" (camión+carga) sobre "PESO KG" (neto) -- confirmado incorrecto con evidencia real (ver semántica abajo).
+- `buscar_horas()` (span de texto entre "HORA ENTRADA"/"HORA SALIDA") acertaba en la mayoría de casos, pero fallaba silenciosamente -- sin señal de error -- cuando el layout de Paddle scramblea los recuadros (caso real guía 383548: el valor real de ENTRADA queda pegado a la etiqueta "HORA SALIDA", produciendo una salida incorrecta sin ningún aviso).
+
+### Semántica de PESO (Fase B, con evidencia real)
+
+- **"PESO KG" es el peso NETO operacional de la carga/documento** -- verificado numéricamente en múltiples guías (`PESO KG = Peso Bruto - Tara`, exacto) y confirmado visualmente contra la imagen real de la guía 464170/462491: catálogo/fallback anterior usaba "12.242,000" (Peso Bruto), el valor real impreso en "PESO KG." es "3.282,00".
+- "PESO BRUTO" (camión + carga) y "TARA" (camión vacío) nunca son el peso operacional -- no se usan como principal.
+
+### Auditoría real y hallazgo sobre la calidad del ground truth (Fase A/K)
+
+- 30 guías con ground truth humano (`ground_truth_30_guias.json`, mismo Excel de D3) + verificación visual directa (`Read` sobre la imagen) de cada discrepancia antes de aceptarla como error de Atlas.
+- **6 guías con error real de transcripción en el propio ground truth**, confirmado visualmente contra la imagen original en cada caso:
+  - `410266`: el ground truth copió las horas/peso de la fila vecina (`429061`) -- la imagen real muestra `10:08:00`/`12:27:32`/`3.100,00`.
+  - El archivo etiquetado `410627` en el ground truth es en realidad la guía **`410267`** (visible en la propia imagen).
+  - `452388`: marcado "ilegible" (`None`) en el ground truth -- la imagen es perfectamente legible: `10:36:00`/`12:18:27`/`3.024,00`.
+  - `410925`: ground truth transcribió "25.454297" (formato imposible) -- el valor real impreso es "25.618,00".
+  - `461523`: ground truth transcribió "1997" pese a marcar la imagen como "perfecta" -- el valor real impreso es "10.606,00".
+  - `462598`: marcado `None` por calidad de imagen borrosa en otras zonas -- el campo PESO KG específico es legible: "28.421,00".
+- Tras corregir estas 6 discrepancias con evidencia visual: peso ~26/30 exacto (3 abstenciones seguras por OCR degradado -- "P" de "PESO" perdida, o un dígito insertado que la validación de rango descarta -- 0 valores incorrectos), horas ~28/30 exacto (2 confusiones de un solo dígito del propio OCR, ej. "11:56"→"11:58").
+
+### Diseño e implementación
+
+- **`atlas_core/extractor.py`:**
+  - `buscar_peso()`: reordenado (PESO KG primero, BRUTO como último recurso) y el anchor ahora tolera "KG." + salto de línea + ":" antes del valor: `PESO\s*KG\.?\s*[:\-]?\s*([0-9][0-9.,]{1,14})`. Devuelve el valor crudo tal cual -- la normalización a kg numérico vive en `procesamiento_masivo.py`.
+  - `buscar_horas()`: reescrito con `hora_mas_cercana(etiqueta, excluir=None)`, acotado a la zona de encabezado (antes de "CANTIDAD", límite estable observado en todo el muestreo). Para SALIDA, descarta explícitamente un candidato idéntico al ya asignado a ENTRADA y sigue buscando uno distinto en la misma ventana -- corrige el caso real de intercambio silencioso (guía 383548) sin perder el caso real donde ambas horas genuinamente coinciden (guía 387789, verificado con ground truth).
+  - Corregido un valor histórico incorrecto en el fallback hardcodeado de la guía `462491` (`"12.242,000"` → `"3.282,00"`, con evidencia visual directa). **Los otros 6 fallbacks hardcodeados históricos (462793, 462833, 461878, 462544, 462871, 462395) no se tocaron** -- no hay imagen real disponible en este entorno para verificarlos individualmente con el mismo rigor; se documenta como límite de alcance explícito, no como corrección omitida por descuido.
+- **`atlas_core/procesamiento_masivo.py`:**
+  - `_normalizar_peso_kg()`: tolera que el OCR confunda "." y "," como separador de miles (caso real: "6,971,00" en vez de "6.971,00") -- separa por grupos, descarta el último grupo si son puros ceros de 2-3 dígitos (los decimales, siempre observados en cero). Valida rango operativo plausible `1-60000` kg (generoso a propósito) -- descarta automáticamente el caso real de dígito insertado por OCR ("127.983" kg, imposible para un camión).
+  - `_calcular_permanencia_minutos()`: `salida - entrada` en minutos; si `salida < entrada`, **nunca asume +24h automáticamente** -- devuelve `"No determinada"` (motivo trazable en el propio valor, sin degradar `indicador_revision`).
+  - `COLUMNAS` gana 4 columnas al final: `peso_kg`, `hora_entrada_aza`, `hora_salida_aza`, `permanencia_minutos`. `procesar_archivo()` las incluye en su dict de salida -- **ausencia de estos datos nunca participa en `requiere_revision`** (decisión explícita de Fase I: no degradar documentos que antes de este bloque quedaban OK).
+- **`atlas_core/gestor_viajes.py`** (Fase H, política multi-guía con evidencia real):
+  - `DocumentoViaje` gana `peso_kg`, `hora_entrada_aza`, `hora_salida_aza`, `permanencia_minutos` (por documento, preservados en `evidencia` como el resto de campos).
+  - `Viaje.peso_total_viaje_kg`: suma de `peso_kg` de todos los documentos, **solo si todos aportan un valor numérico válido** -- evidencia real (transporte `0000297304`, 3 guías): cada documento trae el peso parcial de su propia línea de material (códigos distintos: `6.971`, `3.100`, `4.256` kg) -- sumar no duplica.
+  - `Viaje.hora_entrada_aza`/`hora_salida_aza`: consolidadas solo si todas las horas válidas presentes coinciden (`_valores_unicos` ya existente, reutilizado). Dos motivos nuevos en `MotivoRevision`: `CONFLICTO_HORA_ENTRADA`, `CONFLICTO_HORA_SALIDA` -- si difieren, nunca se elige una arbitrariamente.
+  - `Viaje.permanencia_minutos`: derivada de las horas ya consolidadas, nunca promedia permanencias de documentos individuales.
+- **`atlas_core/reporte_viajes.py`:** `COLUMNAS_VIAJES` gana `peso_total_viaje_kg`, `hora_entrada_aza`, `hora_salida_aza`, `permanencia_minutos` al final; `_fila_viaje()` los propaga directo desde `Viaje.a_dict()` (sin callback opcional -- a diferencia de las columnas de ruta, estos campos no dependen de un servicio externo). `COLUMNAS_OFICIALES` (= `procesamiento_masivo.COLUMNAS`) ahora exige estas 4 columnas como obligatorias en el CSV de entrada -- un CSV generado con el pipeline anterior a este bloque debe reprocesarse, no puede alimentar `generar_reporte_viajes()` directamente (mismo contrato de esquema estricto que ya regía para cualquier otra columna oficial faltante).
+
+### Validación real multi-guía (Fase L)
+
+- **Transporte `0000279246`** (guías `384674`, `384675`): pesos parciales `7.756` + `7.945` = **`15.701` kg**; horas coincidentes `10:30`/`12:48` → permanencia **138 min**.
+- **Transporte `0000297304`** (guías `410265`, `410266`, `410267`): pesos parciales `6.971` + `3.100` + `4.256` = **`14.327` kg**; horas coincidentes `10:08`/`12:27` → permanencia **139 min**.
+- Ambos ejecutados con el pipeline real completo (`procesar_archivo` + `agrupar_viajes`), sin inyectar nada.
+
+### Validación
+
+- Tests nuevos: **26** (`tests/test_extractor_peso_horas_o1.py` -- 14; `tests/test_gestor_viajes.py` -- 7 nuevos + 2 casos añadidos al parametrize existente; `tests/test_reporte_viajes.py` -- 3; `tests/test_procesamiento_masivo.py` -- 1; ajuste de 1 test existente con el set de columnas ampliado, y corrección de 1 valor de test que afirmaba el bug de PESO BRUTO como comportamiento esperado).
+- Suite completa: **665 → 691 passed**, 0 failed, 0 regresiones.
+
+### Archivos modificados
+
+- `atlas_core/extractor.py`, `atlas_core/procesamiento_masivo.py`, `atlas_core/gestor_viajes.py`, `atlas_core/reporte_viajes.py`.
+- Tests: `tests/test_extractor_peso_horas_o1.py` (nuevo), `tests/test_extraer_datos.py`, `tests/test_procesamiento_masivo.py`, `tests/test_gestor_viajes.py`, `tests/test_reporte_viajes.py`.
+- Sin cambios: Desktop, ORS, Onelogis, `atlas_core/rutas/` (E1/D2/D3 intactos).
+
+---
+
 ## 2026-08-11 — Cierre: ENTREGAS E1, DESPACHAR A como fuente autoritativa de ruta
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8b59951a9662c88747fa2e09504acbb09a740188`

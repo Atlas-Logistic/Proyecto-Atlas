@@ -1121,7 +1121,9 @@ def probar_guia6():
     assert datos["patente del carro"] == "No encontrado", datos
     assert datos["hora de entrada"] == "10:15", datos
     assert datos["hora de salida"] == "10:36", datos
-    assert datos["peso"] == "12.242,000", datos
+    # Bloque O1: corregido de "12.242,000" (Peso Bruto) a "3.282,00"
+    # (PESO KG, el peso operacional real -- ver semántica de PESO).
+    assert datos["peso"] == "3.282,00", datos
 
 
 

@@ -72,6 +72,69 @@ FECHA_MAXIMA_PLAUSIBLE = date(ANIO_MAXIMO_PLAUSIBLE, 12, 31)
 # muestra antes de tratarse como calibración definitiva.
 CONFIANZA_MINIMA_FECHA_FOCAL = 0.70
 
+# Bloque O1 -- rango operativo plausible de peso de carga (kg), a
+# propósito generoso ("sin usar límites demasiado estrechos"): cubre
+# holgadamente toda carga real observada en la muestra de validación
+# (994-27.983 kg) sin acercarse al límite legal de un camión en Chile
+# (~45.000 kg combinado tracto+rampla+carga). Un valor fuera de este
+# rango se trata como no confiable (posible error de OCR) antes que
+# propagarlo -- abstención preferible a un dato erróneo.
+PESO_KG_MINIMO_PLAUSIBLE = 1
+PESO_KG_MAXIMO_PLAUSIBLE = 60000
+
+
+def _normalizar_peso_kg(peso_crudo: str | None) -> str:
+    """Convierte el peso crudo ya extraído (formato chileno, p. ej.
+    "7.756,00") a un valor numérico limpio en kg ("7756"). Nunca inventa:
+    sin valor, no numérico o fuera del rango operativo plausible ->
+    "No encontrado".
+
+    Tolera que el OCR confunda "." y "," entre sí como separador de
+    miles (caso real confirmado: "6,971,00" en vez de "6.971,00") -- se
+    parte el valor por cualquiera de los dos separadores y, si el último
+    grupo son puros ceros de 2-3 dígitos (los decimales, siempre
+    observados en cero -- kilogramos enteros), se descarta; el resto se
+    concatena como la parte entera, sin importar qué carácter separaba
+    cada grupo."""
+    texto = str(peso_crudo or "").strip()
+    if not texto or texto == "No encontrado":
+        return "No encontrado"
+    grupos = [grupo for grupo in re.split(r"[.,]", texto) if grupo]
+    if not grupos or not all(grupo.isdigit() for grupo in grupos):
+        return "No encontrado"
+    if len(grupos) >= 2 and len(grupos[-1]) in (2, 3) and set(grupos[-1]) <= {"0"}:
+        grupos = grupos[:-1]
+    parte_entera = "".join(grupos)
+    if not parte_entera.isdigit():
+        return "No encontrado"
+    valor = int(parte_entera)
+    if not (PESO_KG_MINIMO_PLAUSIBLE <= valor <= PESO_KG_MAXIMO_PLAUSIBLE):
+        return "No encontrado"
+    return str(valor)
+
+
+def _calcular_permanencia_minutos(hora_entrada: str | None, hora_salida: str | None) -> str:
+    """`permanencia_minutos = hora_salida_aza - hora_entrada_aza`, en
+    minutos, solo si ambas horas son válidas. Bloque O1, Fase E: nunca
+    asume automáticamente un cruce de medianoche (+24h) sin evidencia de
+    fecha que lo respalde -- a nivel de documento no hay evidencia de
+    fechas de entrada/salida distintas disponible, así que una salida
+    anterior a la entrada se marca "No determinada" (motivo trazable) en
+    vez de inventar una permanencia negativa o forzar +24h."""
+    if hora_entrada in (None, "", "No encontrado") or hora_salida in (None, "", "No encontrado"):
+        return "No encontrado"
+    try:
+        hora_e, minuto_e = (int(x) for x in str(hora_entrada).split(":"))
+        hora_s, minuto_s = (int(x) for x in str(hora_salida).split(":"))
+    except (ValueError, AttributeError):
+        return "No encontrado"
+    minutos_entrada = hora_e * 60 + minuto_e
+    minutos_salida = hora_s * 60 + minuto_s
+    if minutos_salida < minutos_entrada:
+        return "No determinada"
+    return str(minutos_salida - minutos_entrada)
+
+
 COLUMNAS = [
     "archivo",
     "estado_procesamiento",
@@ -88,6 +151,14 @@ COLUMNAS = [
     "descripcion_material",
     "tipo_carga",
     "indicador_revision",
+    # Bloque O1: peso y horarios operacionales de planta. Agregadas al
+    # final -- backward-compatible, un lector de CSV por nombre de
+    # columna (csv.DictReader, como usa todo el pipeline) no se ve
+    # afectado por columnas nuevas al final del encabezado.
+    "peso_kg",
+    "hora_entrada_aza",
+    "hora_salida_aza",
+    "permanencia_minutos",
 ]
 
 Procesador = Callable[[Path], Mapping[str, object]]
@@ -664,6 +735,17 @@ def procesar_archivo(
         "descripcion_material": descripcion,
         "tipo_carga": clasificar_material(descripcion).value,
         "indicador_revision": "REVISAR" if requiere_revision else "OK",
+        # Bloque O1: peso y horarios operacionales. La ausencia de estos
+        # datos NUNCA por sí sola invalida el documento (no participan en
+        # `requiere_revision`) -- "No encontrado"/"No determinada" ya es
+        # el motivo trazable, sin degradar documentos que antes de este
+        # bloque quedaban OK.
+        "peso_kg": _normalizar_peso_kg(datos.get("peso")),
+        "hora_entrada_aza": str(datos.get("hora de entrada", "No encontrado")),
+        "hora_salida_aza": str(datos.get("hora de salida", "No encontrado")),
+        "permanencia_minutos": _calcular_permanencia_minutos(
+            datos.get("hora de entrada"), datos.get("hora de salida")
+        ),
     }
 
 

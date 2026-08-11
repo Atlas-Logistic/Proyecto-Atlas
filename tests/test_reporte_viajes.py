@@ -327,3 +327,52 @@ def test_calculador_rutas_propaga_campos_al_csv(tmp_path):
     # sin API key ni secretos en ningún campo persistido
     contenido = (salida / "viajes.csv").read_text(encoding="utf-8-sig")
     assert "api_key" not in contenido.lower() and "authorization" not in contenido.lower()
+
+
+# --- Bloque O1: peso y horarios operacionales end-to-end hasta viajes.csv ---
+
+
+def test_peso_horas_permanencia_llegan_a_viajes_csv(tmp_path):
+    fila = _fila(peso_kg="6971", hora_entrada_aza="10:08", hora_salida_aza="12:27")
+    _, salida, _ = _generar(tmp_path, [fila])
+    viaje = _leer_csv(salida / "viajes.csv")[0]
+    assert viaje["peso_total_viaje_kg"] == "6971"
+    assert viaje["hora_entrada_aza"] == "10:08"
+    assert viaje["hora_salida_aza"] == "12:27"
+    assert viaje["permanencia_minutos"] == "139"
+
+
+def test_peso_multiguia_real_suma_en_viajes_csv(tmp_path):
+    # Caso real: transporte 0000297304, 3 documentos, pesos parciales
+    # distintos (6.971 + 3.100 + 4.256 kg) -- ver bitácora técnica.
+    filas = [
+        _fila(archivo="a.jpg", numero_guia="410265", peso_kg="6971",
+              hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+        _fila(archivo="b.jpg", numero_guia="410266", peso_kg="3100",
+              hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+        _fila(archivo="c.jpg", numero_guia="410267", peso_kg="4256",
+              hora_entrada_aza="10:08", hora_salida_aza="12:27"),
+    ]
+    _, salida, _ = _generar(tmp_path, filas)
+    viaje = _leer_csv(salida / "viajes.csv")[0]
+    assert viaje["peso_total_viaje_kg"] == "14327"
+    assert viaje["hora_entrada_aza"] == "10:08"
+    assert viaje["hora_salida_aza"] == "12:27"
+
+
+def test_csv_sin_columnas_o1_exige_migracion_explicita(tmp_path):
+    """Un CSV de entrada anterior a este bloque (sin peso_kg/hora_entrada_aza/
+    hora_salida_aza/permanencia_minutos) no se acepta en silencio con
+    columnas vacías -- el mismo contrato de esquema estricto que ya regía
+    para cualquier otra columna oficial faltante (`_validar_esquema`)
+    exige reprocesar con el pipeline actual antes de poder reportar."""
+    columnas_antiguas = tuple(
+        c for c in COLUMNAS_OFICIALES
+        if c not in {"peso_kg", "hora_entrada_aza", "hora_salida_aza", "permanencia_minutos"}
+    )
+    origen = tmp_path / "entrada.csv"
+    _escribir_csv(origen, [_fila()], columnas_antiguas)
+    with pytest.raises(ValueError, match="peso_kg"):
+        generar_reporte_viajes(
+            origen, tmp_path / "salida", carpeta_catalogos=tmp_path / "catálogos", reloj=RELOJ
+        )

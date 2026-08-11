@@ -96,6 +96,15 @@ COLUMNAS_VIAJES = (
     "motivo_ruta",
     "origen_determinado_por",
     "evidencia_origen",
+    # Bloque O1: peso y horarios operacionales consolidados a nivel de
+    # viaje. Agregadas al final -- backward-compatible, se calculan
+    # siempre a partir de `Viaje.a_dict()` (sin callback opcional, a
+    # diferencia de las columnas de ruta) pero un reporte generado antes
+    # de este bloque simplemente no tenía estas columnas.
+    "peso_total_viaje_kg",
+    "hora_entrada_aza",
+    "hora_salida_aza",
+    "permanencia_minutos",
 )
 
 
@@ -210,6 +219,10 @@ def _fila_viaje(
             datos["evidencias_documentos"], ensure_ascii=False, sort_keys=True
         ),
         "fecha_creacion": datos["fecha_creacion"],
+        "peso_total_viaje_kg": datos["peso_total_viaje_kg"],
+        "hora_entrada_aza": datos["hora_entrada_aza"],
+        "hora_salida_aza": datos["hora_salida_aza"],
+        "permanencia_minutos": datos["permanencia_minutos"],
         **campos_ruta,
     }
 

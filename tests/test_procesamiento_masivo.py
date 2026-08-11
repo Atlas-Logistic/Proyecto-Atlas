@@ -988,6 +988,10 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "descripcion_material",
         "tipo_carga",
         "indicador_revision",
+        "peso_kg",
+        "hora_entrada_aza",
+        "hora_salida_aza",
+        "permanencia_minutos",
     }
 
 
@@ -1869,3 +1873,13 @@ def test_cli_sin_fechas_mantiene_compatibilidad(monkeypatch, tmp_path):
 
     assert procesar.call_args.kwargs["fecha_desde"] is None
     assert procesar.call_args.kwargs["fecha_hasta"] is None
+
+
+def test_columnas_csv_incluyen_peso_y_horarios_operacionales_o1():
+    """Bloque O1: `peso_kg`/`hora_entrada_aza`/`hora_salida_aza`/
+    `permanencia_minutos` llegan hasta el esquema de `analisis_completo_guias.csv`
+    -- antes de este bloque se calculaban internamente pero nunca salían
+    de `extraer_datos()`."""
+    assert COLUMNAS[-4:] == [
+        "peso_kg", "hora_entrada_aza", "hora_salida_aza", "permanencia_minutos",
+    ]
