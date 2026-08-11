@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — ENTREGAS E1: DESPACHAR A como fuente autoritativa de ruta (CERRADO)
+
+- **Decisión de arquitectura/producto (definida por Javier, prevalece sobre inferencias anteriores de D2/D3/D3.1):** la ruta logística siempre debe ser `PLANTA ORIGEN → DESPACHAR A`, nunca `PLANTA ORIGEN → dirección del cliente/sitio registrado`. `SEÑOR(ES)` es el comprador, `OBRA DESTINO` es el proyecto/receptor comercial (puede tener un nombre completamente distinto del comprador, sin exigir coincidencia), y `DIRECCION`/`COMUNA`/`COD DESTINATARIO` identifican el sitio/obra **registrado** contra el que se emite la guía — útiles para identidad comercial y recurrencia, pero **nunca** deben reemplazar `DESPACHAR A` como destino de una ruta. Caso ejemplo oficial: guía 464170, `DESPACHAR A`="AV. ALMTE. LATORRE 843, MEJILLONES" — la ruta correcta termina ahí, no en Galvarino 8501 (Quilicura).
+- **Auditoría de COMUNA (requisito explícito antes de implementar cualquier regla)**, 14 guías reales: el campo `COMUNA` del formulario coincide con la comuna real de entrega solo cuando la entrega cae dentro de la misma comuna/región que el sitio registrado; en los 3 casos de entrega interregional observados siguió mostrando la comuna del sitio registrado, no la real. **Conclusión operacional: nunca reutilizar `COMUNA` para geocodificar `DESPACHAR A`** — se geocodifica el texto crudo de `DESPACHAR A` directamente.
+- **Implementado:** nuevo módulo de geocodificación de `DESPACHAR A` con abstención (`REVISAR`) ante ambigüedad real — pero distinguiendo, con evidencia real, entre "varios candidatos que son el mismo lugar" (números de casa vecinos sobre la misma calle) y "ubicaciones genuinamente dispersas" (calles homónimas entre comunas/regiones/países) — solo la segunda se marca `REVISAR`. Nunca elige el candidato más cercano a una planta AZA.
+- **Validación real con ORS:** el caso ejemplo (464170) ahora calcula una ruta real de **1433.2 km / ~24 horas** hacia Mejillones — completamente distinta de lo que el catálogo (Galvarino 8501, ~7 km) habría sugerido, confirmando en la práctica por qué esta regla de negocio es necesaria. Un segundo caso (Torres Ocaranza) confirma convergencia con la cifra ya conocida por el catálogo (16.73 km vs 16.68 km) cuando `DESPACHAR A` y el sitio registrado coinciden. Un tercer caso (Armacero) se abstuvo correctamente por ambigüedad real de geocodificación (nombre de calle común, resultados internacionales) — limitación conocida documentada, no oculta.
+- Validación automatizada: **665 tests**, todos verdes (655 → 665, 10 nuevos). 0 regresiones. No se tocó Desktop ni el catálogo `destinos_maestros.json`.
+- **Pendiente real remanente:** afinar la consulta de geocodificación con un filtro territorial estricto (código de país) en vez de solo texto libre, para reducir la tasa de abstención por resultados internacionales; diseñar el catálogo `destino_entrega` (propuesto en D3.1, no implementado) para poder cachear y reutilizar entregas ya confirmadas, tal como anticipa la regla de negocio.
+
+---
+
 ## 2026-08-11 — DESTINOS D3.1: auditoría semántica DIRECCION vs DESPACHAR A (CERRADO)
 
 - **Objetivo:** auditar si las 4 confirmaciones de D3 representan realmente destinos logísticos (lugar de entrega) o solo repetición de un domicilio/sitio registrado del cliente — sin tocar código ni confirmar nada nuevo.

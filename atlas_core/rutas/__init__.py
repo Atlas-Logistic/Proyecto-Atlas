@@ -9,6 +9,14 @@ from atlas_core.rutas.modelos import (
     ResultadoRuta,
     ResultadoServicioRutas,
 )
+from atlas_core.rutas.destino_entrega import (
+    CAMPOS_RESULTADO_RUTA_ENTREGA,
+    UMBRAL_CONFIANZA_MINIMA,
+    ResultadoDestinoEntrega,
+    ResultadoRutaEntrega,
+    calcular_ruta_entrega_para_viaje,
+    resolver_destino_entrega,
+)
 from atlas_core.rutas.destino_estructurado import (
     IdentificadoresDestinoDocumento,
     evaluar_concordancia_despacho,
@@ -51,4 +59,7 @@ __all__ = [
     "resolver_origen_documental",
     "IdentificadoresDestinoDocumento", "evaluar_concordancia_despacho",
     "extraer_identificadores_destino", "resolver_destino_canonico_estructurado",
+    "CAMPOS_RESULTADO_RUTA_ENTREGA", "UMBRAL_CONFIANZA_MINIMA",
+    "ResultadoDestinoEntrega", "ResultadoRutaEntrega",
+    "calcular_ruta_entrega_para_viaje", "resolver_destino_entrega",
 ]

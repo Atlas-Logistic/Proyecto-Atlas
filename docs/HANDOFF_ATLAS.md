@@ -4,6 +4,20 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre ENTREGAS E1: DESPACHAR A como fuente autoritativa de ruta
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `8b59951a9662c88747fa2e09504acbb09a740188`.
+- **REGLA DE NEGOCIO OFICIAL, importante para quien retome esto (prevalece sobre D2/D3/D3.1):** la ruta SIEMPRE debe ser `PLANTA ORIGEN → DESPACHAR A`. `SEÑOR(ES)` es solo el comprador; `OBRA DESTINO` es el proyecto/receptor (puede no tener nada que ver con el nombre del comprador); `DIRECCION`/`COMUNA`/`COD DESTINATARIO` identifican el sitio/obra **registrado**, útiles para identidad comercial (D2/D3) pero **nunca** para reemplazar `DESPACHAR A` como destino de ruta. Ver docstring completo en `atlas_core/rutas/destino_entrega.py` y la bitácora técnica para el texto íntegro de la definición de Javier.
+- **Auditoría de COMUNA (hecha antes de tocar código de reglas, como se pidió):** el campo `COMUNA` del formulario NO es confiable para entregas interregionales -- sigue mostrando la comuna del sitio registrado, no la real (confirmado con 3 casos reales: Mejillones, Coronel, Ñuble). Decisión: nunca reutilizar `COMUNA` para geocodificar `DESPACHAR A`.
+- **Nuevo módulo `atlas_core/rutas/destino_entrega.py`:** `resolver_destino_entrega()` geocodifica `DESPACHAR A` con abstención ante ambigüedad real (nombres de calle homónimos entre comunas/regiones/países) -- pero distingue eso de "varios candidatos que son el mismo lugar" (números de casa vecinos que Pelias no calzó exacto), usando distancia Haversine (margen 1 km) para no abstenerse innecesariamente. `calcular_ruta_entrega_para_viaje()` orquesta planta origen (reutiliza D2 sin cambios) + esta geocodificación + cálculo de ruta directo (**sin caché todavía** -- una entrega no es una entidad de catálogo, ver Fase E de D3.1). Nunca elige el candidato más cercano a una planta AZA.
+- **`calcular_ruta_para_viaje` (D2, basada en catálogo) NO se tocó** -- es una función nueva y aditiva; ambos caminos coexisten (identidad/reporte vs. ruta real).
+- **Validación real con ORS, caso ejemplo oficial (guía 464170):** AZA RENCA → "AV. ALMTE. LATORRE 843, MEJILLONES" = **1433.2 km / ~24 horas** -- confirma en la práctica que la ruta correcta es radicalmente distinta de lo que el catálogo (Galvarino 8501, ~7 km) habría sugerido. Un segundo caso (Torres Ocaranza) converge con la cifra ya conocida del catálogo (16.73 vs 16.68 km) cuando `DESPACHAR A` y el sitio registrado coinciden -- validación cruzada de que ambos caminos son consistentes quando corresponde. Un tercer caso (Armacero, "Santa Isabel") se abstuvo correctamente por ambigüedad real de geocodificación (nombre de calle común, resultados en Perú/Argentina/Puerto Rico).
+- Suite final: **655 → 665 tests** (10 nuevos). 0 regresiones. No se tocó Desktop, ORS (solo lectura/geocodificación ya existente), ni `destinos_maestros.json`.
+- **Pendiente real remanente:** el filtro territorial de la geocodificación es solo texto libre ("... , Chile") -- no un filtro de país estricto (`boundary.country`), por eso nombres de calle comunes (p. ej. "Santa Isabel") devuelven resultados internacionales y se abstienen más de lo ideal. Diseñar el catálogo `destino_entrega` (propuesto en D3.1, no implementado) permitiría cachear entregas ya confirmadas en vez de geocodificar en vivo cada vez.
+- **Próximo bloque oficial pendiente (registrado desde D3):** OPERACIÓN O1 — PESO + HORA ENTRADA + HORA SALIDA. No iniciado.
+
+---
+
 ## 2026-08-11 — Cierre DESTINOS D3.1: auditoría semántica DIRECCION vs DESPACHAR A + revert controlado
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `7c070a81ff4884556625516aae5785744954c93f`.

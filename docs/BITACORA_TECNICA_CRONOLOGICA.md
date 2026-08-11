@@ -4,6 +4,52 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre: ENTREGAS E1, DESPACHAR A como fuente autoritativa de ruta
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8b59951a9662c88747fa2e09504acbb09a740188`
+
+### Decisión de arquitectura/producto (registro formal)
+
+Definición operacional entregada por Javier, **prevalece sobre inferencias anteriores de D2/D3/D3.1**:
+
+1. `SEÑOR(ES)` = comprador. No implica que los materiales se entreguen en sus instalaciones.
+2. `OBRA DESTINO` = obra/proyecto/receptor al que están destinados los materiales. Puede tener un nombre completamente distinto de `SEÑOR(ES)` -- nunca exigir coincidencia.
+3. **`DESPACHAR A` = dirección física real de entrega. Es la fuente PRINCIPAL y AUTORITATIVA del destino geográfico de la ruta.** La ruta debe ser `PLANTA ORIGEN → DESPACHAR A`, nunca `PLANTA ORIGEN → dirección del cliente/sitio registrado` cuando `DESPACHAR A` esté disponible.
+4. `COMUNA` (campo del formulario): no asumir que corresponde universalmente a la comuna de entrega -- auditar antes de usar (ver más abajo).
+5. `COD DESTINATARIO`/`DIRECCION`/otros campos estructurados: siguen siendo evidencia válida de identidad/relación comercial (siguen sirviendo a D2/D3), pero **nunca reemplazan `DESPACHAR A` como punto final de una ruta**.
+6. Aprendizaje futuro permitido: una combinación recurrente `cliente + obra_destino + despachar_a` puede aprenderse y reutilizarse -- pero la **primera** confirmación de una entrega debe venir siempre de evidencia real de `DESPACHAR A`, nunca de la dirección del comprador.
+
+### Fase A/B del bloque -- auditoría de COMUNA (requisito explícito antes de implementar cualquier regla de comuna)
+
+- Se completó la lectura OCR real de las 4 guías del set de 14 que aún faltaban por consolidar en un solo lugar comparativo (ya auditadas individualmente en D3/D3.1): confirmado con las 14, 11 con lectura usable de `COMUNA` + `DESPACHAR A`.
+- **Resultado:** `COMUNA` coincide con la comuna real de entrega en ~8/11 lecturas (incluyendo 2 coincidencias "casuales" donde la calle exacta de `DESPACHAR A` difiere de `DIRECCION` pero la comuna sí coincide) -- pero en los 3 casos de entrega interregional (`464170`→Mejillones/Antofagasta, `464264`/`464265`→Coronel/Biobío, `464367`→aparente Ñuble), `COMUNA` siguió mostrando la comuna RM del sitio registrado, **no** la real. Conclusión operacional: `COMUNA` es *coincidentemente* confiable solo para entregas intra-comuna/región del sitio registrado, y activamente engañosa para las interregionales -- que son precisamente las que más importan corregir (mayor error de distancia). **Decisión: nunca reutilizar `COMUNA` para geocodificar `DESPACHAR A`; geocodificar el texto crudo de `DESPACHAR A` directamente**, dejando que el proveedor de geocodificación determine la localidad con contexto territorial real.
+
+### Diseño e implementación
+
+- **Nuevo módulo `atlas_core/rutas/destino_entrega.py`** (no reemplaza `destino_estructurado.py` de D2 -- lo complementa; identidad comercial y destino de ruta son preguntas distintas, ver D3.1):
+  - `resolver_destino_entrega(despachar_a_crudo, proveedor_geocodificacion, *, contexto_territorial="Chile")`: geocodifica `DESPACHAR A` vía `ProveedorRutas.geocodificar()` (interfaz ya existente desde RUTAS-EVAL R1, reutilizada sin cambios). Preserva siempre el texto crudo original.
+  - **Refinamiento de ambigüedad con evidencia real:** el primer intento (cualquier `RESULTADO_AMBIGUO` -> `REVISAR`) resultó en falsos positivos reales -- "AV. ALMTE. LATORRE 843, MEJILLONES" devolvió 5 candidatos, todos confianza 1.0, todos dentro de ~350 m entre sí (Pelias no calzó el número exacto de casa, devolvió vecinos de la misma cuadra). Se agregó `_candidatos_son_el_mismo_lugar()` (distancia Haversine, reutiliza `geocerca.distancia_km_haversine` ya existente, margen `MARGEN_MISMO_LUGAR_KM=1.0`): si TODOS los candidatos caen dentro del margen del primero, se usa el de mayor confianza (`_mejor_candidato`, nunca el más cercano a AZA); si no, sigue siendo `REVISAR` (`MULTIPLES_UBICACIONES_DISPERSAS`). Caso real confirmado de ambigüedad genuina: "SANTA ISABEL 585" devolvió resultados en Perú, Argentina, Puerto Rico y **dos puntos distintos** dentro de Lampa, RM -- correctamente `REVISAR`.
+  - Confianza mínima (`UMBRAL_CONFIANZA_MINIMA=0.5`) para aceptar un único candidato no ambiguo -- por debajo, también `REVISAR`.
+  - `calcular_ruta_entrega_para_viaje(...)`: orquesta `resolver_planta_origen` (reutilizado sin cambios de `enriquecimiento_viaje.py`, import perezoso para evitar ciclo) -> `resolver_destino_entrega` -> `proveedor_rutas.calcular_ruta()` directo (**sin la capa de caché de `ServicioRutas`/`RepositorioRutas`** -- esa caché indexa por `destino_id` de catálogo, y una entrega geocodificada en vivo no es todavía una entidad de catálogo; ver Fase E de D3.1, propuesta de modelo `destino_entrega` no implementada). Nunca lanza; un fallo en cualquier paso deja `estado_ruta`/`motivo_ruta` explicativos.
+  - Función completamente nueva, aditiva -- **`calcular_ruta_para_viaje` (D2, catálogo) no se modificó**; ambos caminos coexisten para propósitos distintos (identidad/reporte vs. ruta real).
+
+### Validación
+
+- Tests nuevos: **10** en `tests/test_rutas_destino_entrega.py` -- sin dato, candidato único con/sin confianza suficiente, ambigüedad real (nunca elige el más cercano a AZA), candidatos dispersos-pero-cercanos resueltos como el mismo lugar (caso real Mejillones), fallo de geocodificación preserva el texto crudo, ruta real end-to-end, origen no determinado nunca geocodifica, entrega ambigua nunca calcula ruta.
+- Suite completa: **655 → 665 passed**, 0 failed, 0 regresiones.
+- **Validación real (ORS real, catálogo de plantas real, sin inyectar nada):**
+  - **464170 (caso ejemplo oficial):** AZA RENCA → "AV. ALMTE. LATORRE 843, MEJILLONES" = **1433.2 km / 1441.08 min (~24 h)**, confianza 1.0. Confirma que la ruta correcta es radicalmente distinta de lo que el catálogo (Galvarino 8501, Quilicura) habría dado.
+  - **464424 (Torres Ocaranza):** 16.73 km / 24.6 min -- converge con la cifra ya conocida por el camino de catálogo (16.68 km/24.53 min, D2/D3), validación cruzada de que ambos caminos son consistentes cuando `DESPACHAR A` y el sitio registrado coinciden.
+  - **464511 (Armacero):** `REQUIERE_REVISION`/`MULTIPLES_UBICACIONES_DISPERSAS` -- "Santa Isabel" es un nombre de calle común, Pelias devolvió resultados internacionales; abstención correcta, limitación conocida (ver pendientes).
+
+### Archivos modificados
+
+- Nuevo: `atlas_core/rutas/destino_entrega.py`, `tests/test_rutas_destino_entrega.py`.
+- Modificado: `atlas_core/rutas/__init__.py` (exports nuevos).
+- Sin cambios: `atlas_core/rutas/openrouteservice.py`, `atlas_core/rutas/servicio.py`, `atlas_core/rutas/enriquecimiento_viaje.py`, `atlas_core/rutas/destino_estructurado.py`, extractores, Desktop, `destinos_maestros.json`.
+
+---
+
 ## 2026-08-11 — Cierre: DESTINOS D3.1, auditoría semántica DIRECCION vs DESPACHAR A + revert controlado
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `7c070a81ff4884556625516aae5785744954c93f`
