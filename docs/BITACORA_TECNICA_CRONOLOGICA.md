@@ -4,6 +4,56 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre: OPERACIÓN O1.1 (validación ciega, NO APROBADO) + O1.2 (corrección dirigida, APROBADO)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `4822e9e1e31a9b7e42dbd4c887324bdbdf777159` (cierre de O1)
+
+### O1.1 — validación ciega independiente (metodología, sin cambios de código)
+
+- Muestra independiente de **16 guías reales**: 14 reutilizadas de D2/D3/D3.1/E1 (`ux_r2_sincronizacion/entrada_14_guias/`, nunca usadas para calibrar reglas de peso/hora) + **2 genuinamente nuevas**, halladas en `datos/entradas/` de una instalación Desktop real (`463594` Villagra, `463630` Ñancucheo).
+- Metodología: se corrió el pipeline real (`procesar_archivo`) y se **congeló la predicción en JSON antes de mirar cualquier imagen**; solo después se inspeccionó cada imagen visualmente (autoridad final, por encima del ground truth de planillas).
+- **Veredicto: O1 NO APROBADO.** 3 patrones reales de falla:
+  1. **Hora corrupta con dígitos adyacentes** (`464264`, `463630`): el OCR pega un dígito extra al inicio del valor horario ("112:15:18" en vez de "12:15:18"). Causa raíz exacta, trazada carácter por carácter: el regex anterior `\b([0-2]?\d):([0-5]\d)(?::[0-5]\d)?\b` no tiene límite de palabra (`\b`) entre dos dígitos consecutivos, pero **sí** lo tiene justo después de un `:` — el motor de regex "reinicia" el match ahí, capturando el sub-tramo `"15:18"` como si fuera una hora propia y descartando el `"112:"` corrupto en silencio. Mismo patrón produjo `"29:55"` (hora inválida, >23) en 463630.
+  2. **PESO KG con línea intermedia** (`464264`): el ancla exigía adyacencia casi inmediata; una línea no relacionada ("ENTREGA 06.08 08:00 AM") intercalada entre "PESO KG." y su valor real ("17.150,00", que el OCR sí leyó bien) rompía el match — el extractor no encontraba nada (`ERROR_EXTRACTOR`).
+  3. **Error OCR puro** (`464367`): el propio motor OCR leyó un dígito equivocado dentro de un valor por lo demás bien formado ("27.410,00" en vez de "27.610,00", 4 en vez de 6) — confirmado comparando la imagen real contra el texto crudo de PaddleOCR. No es un fallo del extractor.
+- Política **MULTIGUÍA funcionó correctamente** durante O1.1, sin cambios necesarios.
+
+### O1.2 — corrección dirigida (Fases A-I)
+
+- **`atlas_core/extractor.py` — `buscar_horas()` (patrones 1 y 2 de O1.1):** rediseño "token maximal + match completo". En vez de buscar `\b`-anchored en cualquier posición, se toma cada tramo MAXIMAL de `[\d:]+` como un solo candidato y se exige que el token COMPLETO (nunca un sub-match) calce con `_PATRON_HORA_TOKEN_COMPLETO = ^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$`. Si el token no calza entero (dígito de más al inicio o al final), se descarta completo y se sigue con el siguiente tramo de la ventana — nunca se "recorta" para salvarlo. La validación de rango horario (00-23/00-59/00-59) queda estructuralmente garantizada por las clases de caracteres del propio regex, sin lógica adicional.
+  - **Bug adicional descubierto y corregido durante la implementación** (no reportado explícitamente por O1.1, pero expuesto por el fix anterior): el fallback "asumir ENTRADA == SALIDA cuando no hay otro candidato" (ya existente desde O1, legítimo en casos reales como la guía `387789`) reutilizaba ciegamente el valor de ENTRADA también cuando la ventana de SALIDA sí tenía un token, pero corrupto (caso `464264`) — convirtiendo un falso positivo en otro falso positivo distinto (`"09:32"` en vez de `"15:18"`, ambos incorrectos). Corregido con una señal `hubo_corrupto` que solo se activa si el token descartado **contiene ":"** (evidencia real de que se intentó representar una hora) — un tramo de solo dígitos sin ":" (p. ej. un Nro. Transporte cayendo dentro de la ventana, caso real guía `387789`) nunca cuenta como corrupción. Esta distinción fue necesaria porque la primera versión del fix (contar cualquier token no-matcheante como corrupción) introdujo una regresión real en la matriz de 30 guías (387789 pasó de `EXACTO` a abstención) — detectada y corregida antes de cerrar el bloque.
+- **`atlas_core/extractor.py` — `buscar_peso()` (patrón 3 de O1.1, línea intermedia):** tras el ancla `PESO\s*KG\.?`, se busca en una ventana corta y controlada (`_VENTANA_PESO_CARACTERES = 60`) en vez de exigir adyacencia inmediata. `_PATRON_VALOR_PESO` exige al menos un grupo de miles (3 dígitos tras "." o ",") — estructuralmente no matchea fechas ("06.08") ni horas ("08:00") que puedan aparecer en la línea intercalada. Se acepta el valor **solo si hay exactamente 1 candidato** en la ventana; 0 o ≥2 candidatos → abstención (nunca se elige arbitrariamente entre varios).
+- **Caso `464367` (error OCR puro, patrón no corregido por instrucción explícita):** no se introdujo ninguna regla que mapee "27410"→"27610" ni ningún ajuste específico de archivo/guía — el extractor sigue reproduciendo fielmente el dígito que el OCR entregó. Se documenta como `ERROR_OCR_REPRODUCIDO`, distinto de `FALSO_POSITIVO_EXTRACTOR`, sin señal generalizable conocida para detectarlo sin arriesgar cobertura en otros casos reales.
+- **Tests nuevos:** `tests/test_extractor_peso_horas_o1_2.py`, **15 tests** (mínimo pedido: 12) — horario limpio, sub-match por dígito extra al inicio/al final, hora/minuto/segundo fuera de rango, no-regresión de entrada/salida históricas válidas, PESO KG directo y con línea intermedia, abstención ante múltiples candidatos de peso, no-regresión de conflicto multiguía, corrupción de salida con entrada duplicada (no debe reutilizar entrada), entrada==salida legítimo sin corrupción (no debe abstenerse), y documentación explícita del caso `464367` (el extractor NO lo corrige).
+- Suite completa: **691 → 706 passed**, 0 failed.
+- **Verificación amplia (fuera del alcance mínimo pedido, hecha por rigor):** re-ejecución completa de la matriz real de 30 guías (`datos_privados/muestra_fechas_30/`, dataset de O1) contra el código YA corregido — resultado **idéntico** al baseline pre-O1.2 (peso: 24 EXACTO/3 abstención/2 incorrecto/1 falso positivo; entrada: 28 EXACTO/2 incorrecto; salida: **30/30 EXACTO**), confirmando 0 regresiones más allá de lo cubierto por los tests unitarios. Esta corrida fue la que expuso y permitió corregir el bug adicional descrito arriba (387789).
+
+### Revalidación ciega O1.2 (Fase H) — mismas 16 guías de O1.1
+
+- Mismo protocolo: pipeline real ANTES de comparar contra la verdad visual ya congelada en O1.1 (`o1_validacion/prediccion_ciega_congelada.json` / matriz), sin editarla. Resultado en `o1_validacion/o1_2_prediccion.json` y `o1_validacion/matriz_validacion_o1_2.json`.
+- **`464264`:** peso `17150` = EXACTO (antes `ERROR_EXTRACTOR`, ahora resuelto por la ventana de 60 caracteres). Entrada `09:32` EXACTO. Salida: abstención correcta (`No encontrado`, visual real `12:15`) — antes emitía `15:18` (falso positivo); ahora prefiere abstenerse a adivinar mal. A nivel de **viaje** (transporte `0000351135`, multiguía con `464265`), la hora de salida SÍ se recupera correctamente vía el documento hermano (`12:15`), sin conflicto — verificado con `agrupar_viajes()` real.
+- **`463630`:** peso `26857` EXACTO. Entrada `10:05` EXACTO. Salida: abstención correcta (antes emitía `29:55`, hora inválida fuera de rango).
+- **`464367`:** peso `27410` sin cambios (visual real `27610`) — `ERROR_OCR_REPRODUCIDO`, documentado, deliberadamente no corregido. Entrada y salida EXACTO.
+- **Métricas (16 guías):** PESO 15 EXACTO + 1 ERROR_OCR_REPRODUCIDO, 0 falsos positivos del extractor, precisión bruta 93.8% (15/16), precisión atribuible al extractor 100% (15/15, excluyendo el caso OCR exento explícitamente). ENTRADA 16/16 EXACTO, 100%. SALIDA 14 EXACTO + 2 abstención correcta (cobertura 87.5%, precisión sobre emitidos 100%, 0 falsos positivos). PERMANENCIA igual patrón que SALIDA (deriva de las mismas horas).
+- **MULTIGUÍA re-verificada con los 2 transportes reales** tras el fix: `0000351135` (464264+464265) y `0000352241` (464494+464495) — ambos consolidan correctamente (peso sumado, hora única, sin conflicto espurio); el test de conflicto (`CONFLICTO_HORA_SALIDA`) sigue disparando cuando corresponde.
+- **Veredicto Fase I: O1.2 APROBADO** — HORA ENTRADA y HORA SALIDA con 0 falsos positivos y precisión 100% (≥95%); PESO con 0 falsos positivos del extractor y precisión 100% atribuible al extractor (el único caso restante, `464367`, es el error OCR puro explícitamente exento); MULTIGUÍA sigue funcionando correctamente.
+
+### Fase J — reproceso del set reciente (parcial, con hallazgo relevante)
+
+- **Set reciente identificado:** las 2 guías en `datos/entradas/` de la instalación Desktop real (`AppData\Local\Atlas`) aún no reflejadas en `viajes.csv` (`463594`, `463630`) — el resto del CSV masivo (1175 filas / **574 viajes** en `viajes.csv`) es histórico.
+- **Backup completo tomado antes de cualquier cambio:** `backups_reportes/20260811_o1_2_pre_reproceso_reciente/` (`actual/`, `procesamiento/`, `entradas/` de la instalación real).
+- Las 2 guías se reprocesaron con el código O1.2 y dieron **exactamente los mismos valores que la Fase H** (determinismo confirmado): `463594` peso=12367/entrada=07:31/salida=09:26/perm=115; `463630` peso=26857/entrada=10:05/salida=abstención correcta/perm=No determinada.
+- **Hallazgo que detuvo la regeneración completa de `viajes.csv` en producción:** el CSV masivo actual (`analisis_completo_guias.csv`, generado por bloques posteriores de homologación de patentes — commits `0021bde`/`129b459`) tiene **1033/1177 documentos con `indicador_revision="REVISAR"`**, mientras el `viajes.csv` en producción hoy solo refleja **84/574 viajes en `REQUIERE_REVISION`** — un desfase preexistente entre el CSV masivo (más reciente/estricto) y el reporte publicado (más antiguo), **no causado por O1.2 y fuera de su alcance**. Regenerar el reporte completo con el código actual habría reclasificado ~400 viajes ya confirmados como "requiere revisión" — un efecto colateral grande, ajeno al objetivo de este bloque. **No se sobrescribió el `viajes.csv` de producción.** Confirmado con el usuario antes de intentar cualquier escritura sobre el archivo real.
+- Recomendación explícita para un bloque futuro y separado: investigar y reconciliar ese desfase (probablemente requiere decidir si el criterio "REVISAR" post-homologación de patentes debe re-evaluar los 574 viajes ya confirmados, o si necesita su propia migración) antes de intentar de nuevo una regeneración completa de `viajes.csv`.
+
+### Archivos modificados
+
+- `atlas_core/extractor.py` (`buscar_horas()`, `buscar_peso()`, patrones `_PATRON_HORA_TOKEN_COMPLETO`/`_PATRON_VALOR_PESO`/`_VENTANA_PESO_CARACTERES` nuevos).
+- Tests: `tests/test_extractor_peso_horas_o1_2.py` (nuevo, 15 tests).
+- Sin cambios: Desktop (código), ORS, Onelogis, `atlas_core/rutas/`, catálogos, `atlas_core/procesamiento_masivo.py`, `atlas_core/gestor_viajes.py`, `atlas_core/reporte_viajes.py` (todos de O1, no tocados en O1.2).
+
+---
+
 ## 2026-08-11 — Cierre: OPERACIÓN O1, peso + hora entrada/salida + permanencia en planta
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `660e5b2f912f9a803c33b94cdb2e60ad98de4293`

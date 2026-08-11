@@ -33,6 +33,29 @@ def _texto_simple(valor: str) -> str:
     return _normalizar_acentos(texto)
 
 
+# Bloque O1.2: un candidato horario solo es válido si el tramo MAXIMAL de
+# dígitos/dos-puntos que lo contiene calza completo con este patrón (hora
+# 00-23, minuto y segundo opcional 00-59) -- nunca se acepta un sub-match
+# dentro de un tramo más largo (ver `buscar_horas`, caso real de OCR que
+# pega un dígito extra al inicio del valor: "112:15:18").
+_PATRON_HORA_TOKEN_COMPLETO = re.compile(
+    r"^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$"
+)
+
+# Bloque O1.2: ventana corta y controlada tras el ancla "PESO KG" donde se
+# busca el valor (ver `buscar_peso`) -- calibrada sobre el caso real más
+# amplio observado (guía 464264: ~25 caracteres de texto no relacionado
+# intercalado), con margen, sin llegar a "buscar en todo el documento".
+_VENTANA_PESO_CARACTERES = 60
+# Forma de un peso en formato chileno: al menos un grupo de miles
+# (separador "." o ",", exactamente 3 dígitos) y opcionalmente una cola
+# decimal de 2-3 dígitos -- nunca matchea fechas ("06.08") ni horas
+# ("08:00") ni números sueltos sin separador de miles.
+_PATRON_VALOR_PESO = re.compile(
+    r"\b([0-9]{1,3}(?:[.,][0-9]{3})+(?:[.,][0-9]{2,3})?)\b"
+)
+
+
 def _es_etiqueta_senor(texto_simple: str) -> bool:
     """True solo cuando el bloque completo (ya normalizado) ES la etiqueta
     SEÑOR(ES)/SEÑORES/SEÑOR(IES)/SEÑORIES — no cuando "SEÑOR" aparece como
@@ -1130,24 +1153,71 @@ def extraer_datos(
         # buscando uno distinto en la misma ventana. Si de verdad no hay
         # un segundo valor distinto, se acepta que ambas horas coincidan
         # (caso real confirmado: guía con HORA ENTRADA = HORA SALIDA).
+        #
+        # Bloque O1.2 -- corrección de un patrón real de falso positivo:
+        # el OCR a veces pega un dígito extra al inicio del valor
+        # horario ("112:15:18" en vez de "12:15:18"). Un regex que busca
+        # HH:MM(:SS) en cualquier posición puede "rescatar" un sub-match
+        # con forma válida pero equivocada dentro de ese token corrupto
+        # (p. ej. "15:18", leyendo el tramo final como si fuera su propia
+        # hora). Para evitarlo, NUNCA se acepta un sub-match: se toma
+        # cada tramo MAXIMAL de dígitos/dos-puntos como un solo token
+        # candidato y se exige que ese token COMPLETO (no una parte)
+        # calce con un horario válido -- 00-23 / 00-59 / 00-59. Si el
+        # token no calza completo (dígito de más al inicio o al final),
+        # se descarta entero y se sigue con el siguiente tramo de la
+        # ventana; nunca se "recorta" el token para intentar salvarlo.
+        # Preferencia explícita: corrupción -> abstención.
         limite_tabla = texto_busqueda.find("CANTIDAD")
         zona_encabezado = texto_busqueda[:limite_tabla] if limite_tabla != -1 else texto_busqueda
 
-        def hora_mas_cercana(etiqueta: str, excluir: Optional[str] = None, ventana: int = 400) -> Optional[str]:
+        def hora_mas_cercana(
+            etiqueta: str, excluir: Optional[str] = None, ventana: int = 400
+        ) -> tuple[Optional[str], bool]:
+            # Devuelve (candidato, hubo_token_corrupto). El segundo valor
+            # distingue "no había ningún otro token en la ventana" de
+            # "había un token CON FORMA DE HORARIO (contiene ':') que NO
+            # calzó como horario válido" -- esta distinción es la que
+            # permite, más abajo, decidir entre el fallback legítimo
+            # "entrada == salida" y una abstención por corrupción (ver
+            # comentario Bloque O1.2). Un tramo de solo dígitos SIN ':'
+            # (p. ej. un Nro. TRANSPORTE cayendo dentro de la ventana,
+            # caso real guía 387789) nunca se cuenta como corrupción: no
+            # tiene ninguna forma de horario, es simplemente otro dato
+            # numérico del documento.
             posicion = zona_encabezado.find(etiqueta)
             if posicion == -1:
-                return None
+                return None, False
             segmento = zona_encabezado[posicion + len(etiqueta) : posicion + len(etiqueta) + ventana]
-            for coincidencia in re.finditer(r"\b([0-2]?\d):([0-5]\d)(?::[0-5]\d)?\b", segmento):
+            hubo_corrupto = False
+            for tramo in re.finditer(r"[\d:]+", segmento):
+                # Un ":" inicial suelto es el separador etiqueta/valor
+                # habitual (p. ej. "HORA ENTRADA\n:09:40:00") -- no forma
+                # parte de un dígito corrupto, se descarta sin más.
+                token = tramo.group(0).lstrip(":")
+                if not token:
+                    continue
+                coincidencia = _PATRON_HORA_TOKEN_COMPLETO.match(token)
+                if not coincidencia:
+                    if ":" in token:
+                        hubo_corrupto = True
+                    continue
                 candidato = f"{int(coincidencia.group(1)):02d}:{coincidencia.group(2)}"
                 if excluir is None or candidato != excluir:
-                    return candidato
-            return None
+                    return candidato, hubo_corrupto
+            return None, hubo_corrupto
 
-        entrada = hora_mas_cercana("HORA ENTRADA")
-        salida = hora_mas_cercana("HORA SALIDA", excluir=entrada)
-        if salida is None and entrada is not None:
-            salida = hora_mas_cercana("HORA SALIDA")
+        entrada, _ = hora_mas_cercana("HORA ENTRADA")
+        salida, corrupcion_salida = hora_mas_cercana("HORA SALIDA", excluir=entrada)
+        # Bloque O1.2: el fallback "sin exclusión" de abajo asume que
+        # ENTRADA == SALIDA cuando de verdad no hay ningún otro candidato
+        # en la ventana (caso real confirmado). Pero si SÍ había un token
+        # con forma corrupta (dígito extra pegado) que fue descartado, esa
+        # corrupción es evidencia de que el valor real de SALIDA existe y
+        # es distinto -- reutilizar ENTRADA ahí sería adivinar un dato
+        # equivocado en vez de abstenerse. Caso real: guía 464264.
+        if salida is None and entrada is not None and not corrupcion_salida:
+            salida, _ = hora_mas_cercana("HORA SALIDA")
 
         if not entrada or not salida:
             coincidencia_tabla = re.search(r"\b([0-2]?\d:[0-5]\d)\s+\d{1,2}\s+([0-2]?\d:[0-5]\d)\b", texto_busqueda)
@@ -1172,14 +1242,27 @@ def extraer_datos(
         # El anchor debe tolerar "KG." (punto) y un separador ":" antes
         # del número, incluso con un salto de línea entre medio -- el
         # layout real casi siempre separa la etiqueta de su valor así.
-        coincidencia_kg = re.search(r"PESO\s*KG\.?\s*[:\-]?\s*([0-9][0-9.,]{1,14})", texto_busqueda)
-        if coincidencia_kg:
-            # Se devuelve el valor crudo tal cual -- la normalización a
-            # kg numérico (tolerante a que el OCR confunda "." y ","
-            # como separador de miles) vive en
-            # `procesamiento_masivo._normalizar_peso_kg`, un único lugar
-            # para esa lógica en vez de duplicarla aquí.
-            return coincidencia_kg.group(1)
+        #
+        # Bloque O1.2 -- caso real guía 464264: Paddle leyó correctamente
+        # el valor ("17.150,00"), pero entre "PESO KG." y el valor
+        # aparece una línea completa no relacionada ("ENTREGA 06.08
+        # 08:00 AM"), más allá de lo que tolera un separador simple. Se
+        # busca el valor dentro de una ventana corta y controlada tras
+        # el ancla (no en todo el documento) exigiendo que tenga forma
+        # de peso chileno (grupos de miles); si aparece más de un
+        # candidato con esa forma en la ventana, se abstiene en vez de
+        # adivinar cuál es el correcto.
+        ancla_kg = re.search(r"PESO\s*KG\.?", texto_busqueda)
+        if ancla_kg:
+            ventana_peso = texto_busqueda[ancla_kg.end() : ancla_kg.end() + _VENTANA_PESO_CARACTERES]
+            candidatos_peso = _PATRON_VALOR_PESO.findall(ventana_peso)
+            if len(candidatos_peso) == 1:
+                # Se devuelve el valor crudo tal cual -- la normalización
+                # a kg numérico (tolerante a que el OCR confunda "." y
+                # "," como separador de miles) vive en
+                # `procesamiento_masivo._normalizar_peso_kg`, un único
+                # lugar para esa lógica en vez de duplicarla aquí.
+                return candidatos_peso[0]
 
         coincidencia_bruto = re.search(r"P(?:E|C)SO\s+BRUTO\s*([0-9.,\s-]{4,20})", texto_busqueda)
         if coincidencia_bruto:
