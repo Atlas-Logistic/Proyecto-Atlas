@@ -59,6 +59,7 @@ def test_procesar_archivo_no_reemplaza_valores_lineales_correctos(tmp_path, monk
         "cliente": "CLIENTE LINEAL",
         "obra destino": "DESTINO LINEAL",
         "chofer": "MARIO SOTO",
+        "RUT del cliente": "11.111.111-1",
         "patente del tracto": "AB1234",
         "patente del carro": "CD5678",
     }
@@ -375,6 +376,7 @@ def test_procesar_archivo_preserva_chofer_lineal_limpio(tmp_path, monkeypatch):
         Mock(return_value={
             "número de guía": "123456", "número de transporte": "0000123456",
             "cliente": "A", "obra destino": "B", "chofer": "MARIO SOTO",
+            "RUT del cliente": "11.111.111-1",
             "patente del tracto": "AB1234", "patente del carro": "CD5678",
         }),
     )
@@ -422,6 +424,7 @@ def _datos_lineales_completos(**overrides):
         "cliente": "A",
         "obra destino": "B",
         "chofer": "C",
+        "RUT del cliente": "11.111.111-1",
         "patente del tracto": "AB1234",
         "patente del carro": "CD5678",
     }

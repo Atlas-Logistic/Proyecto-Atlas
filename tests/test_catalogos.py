@@ -343,6 +343,87 @@ def test_patente_alias_explicito_resuelve_a_canonica():
     assert resultado.valor_resultado == "SB6486"
 
 
+# --- Bloque C1 Parte D: EBEMA SA ya existe, debe resolver a su canónico ---
+
+
+def test_enriquecer_ebema_sa_resuelve_a_nombre_canonico_del_catalogo(tmp_path):
+    """Caso real obligatorio: con el RUT correcto (83.585.400-0) ya
+    resuelto, el enriquecimiento por catálogo debe fijar el nombre
+    canónico de EBEMA SA (ya activo en el catálogo real de empresas),
+    sobrescribiendo cualquier variante sucia leída por OCR."""
+    (tmp_path / "empresas.json").write_text(
+        json.dumps({"835854000": {"nombre": "EBEMA SA", "codigo_cliente": ""}}),
+        encoding="utf-8",
+    )
+    for nombre_archivo in ("destinos.json", "choferes.json", "vehiculos.json"):
+        (tmp_path / nombre_archivo).write_text("{}", encoding="utf-8")
+
+    datos = {
+        "cliente": "EBEMA S.A. (OCR SUCIO)",
+        "RUT del cliente": "83.585.400-0",
+        "obra destino": "No encontrado",
+        "chofer": "No encontrado",
+        "RUT del chofer": "No encontrado",
+        "patente del tracto": "No encontrado",
+    }
+
+    enriquecidos = enriquecer_datos_con_catalogos(datos, [], tmp_path)
+
+    assert enriquecidos["cliente"] == "EBEMA SA"
+
+
+# --- Bloque C1 Parte A: alta controlada de IVAN ROA (chofer nuevo real) ---
+
+
+def test_ivan_roa_catalogado_resuelve_exacto_por_rut():
+    """Caso real obligatorio: una vez dado de alta, IVAN ROA (RUT
+    10190440-7) debe resolverse exacto por RUT, sin pasar por fuzzy."""
+    catalogo = {"101904407": {"nombre": "IVAN ROA", "activo": True}}
+
+    assert buscar_chofer_por_rut(catalogo, "10190440-7") == catalogo["101904407"]
+    assert buscar_chofer_por_rut(catalogo, "10.190.440-7") == catalogo["101904407"]
+
+
+def test_rut_chofer_10190440_7_asocia_ivan_roa_via_enriquecimiento(tmp_path):
+    """El RUT 10190440-7 debe asociarse correctamente a IVAN ROA a través
+    del mismo camino de enriquecimiento por catálogo que usa el pipeline."""
+    (tmp_path / "choferes.json").write_text(
+        json.dumps({"101904407": {"nombre": "IVAN ROA", "activo": True}}),
+        encoding="utf-8",
+    )
+    for nombre_archivo in ("empresas.json", "destinos.json", "vehiculos.json"):
+        (tmp_path / nombre_archivo).write_text("{}", encoding="utf-8")
+
+    datos = {
+        "cliente": "No encontrado",
+        "RUT del cliente": "No encontrado",
+        "obra destino": "No encontrado",
+        "chofer": "IVAN ROA",
+        "RUT del chofer": "10190440-7",
+        "patente del tracto": "No encontrado",
+    }
+
+    enriquecidos = enriquecer_datos_con_catalogos(datos, [], tmp_path)
+
+    assert enriquecidos["chofer"] == "IVAN ROA"
+
+
+def test_ivan_roa_no_genera_alias_ni_fuzzy_hacia_otro_chofer():
+    """IVAN ROA es un chofer nuevo real, no un alias de otro: el
+    fuzzy-matching sobre choferes existentes similares no debe capturarlo
+    ni reescribir su nombre una vez que ya está catalogado exacto."""
+    catalogo = {
+        "101904407": {"nombre": "IVAN ROA", "activo": True},
+        "1": {"nombre": "LUIS VARAS", "activo": True},
+        "2": {"nombre": "IVAN ROJAS", "activo": True},
+    }
+
+    resultado = resolver_nombre_chofer_difuso(catalogo, "IVAN ROA")
+
+    assert resultado.estado == "SIN_CAMBIO"
+    assert resultado.valor_resultado == "IVAN ROA"
+
+
 def test_patente_tipo_esperado_filtra_candidatos_entre_tracto_y_carro():
     # SD6486 podría confundirse con un carro "SB6486" si no se filtrara por
     # tipo; al pedir CARRO no debe cruzar hacia el tracto real.

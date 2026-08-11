@@ -67,6 +67,13 @@ def _valores_compatibles(valores: Iterable[str]) -> bool:
     return len({_clave_normalizada(v) for v in valores if _valor_presente(v)}) <= 1
 
 
+def _documento_marca_revision(fila: Mapping[str, object]) -> bool:
+    """True si el documento de origen ya viene marcado REVISAR
+    (`indicador_revision`) por el pipeline de extracción/homologación —
+    independiente de si contradice o no a otros documentos del viaje."""
+    return str(fila.get("indicador_revision", "")).strip().casefold() == "revisar"
+
+
 class EstadoViaje(str, Enum):
     CONFIRMADO = "CONFIRMADO"
     REQUIERE_REVISION = "REQUIERE_REVISION"
@@ -82,6 +89,7 @@ class MotivoRevision(str, Enum):
     CONFLICTO_ORIGEN = "CONFLICTO_ORIGEN"
     CONFLICTO_PATENTE_TRACTO = "CONFLICTO_PATENTE_TRACTO"
     CONFLICTO_PATENTE_RAMPLA = "CONFLICTO_PATENTE_RAMPLA"
+    DOCUMENTO_REQUIERE_REVISION = "DOCUMENTO_REQUIERE_REVISION"
 
 
 @dataclass(frozen=True)
@@ -265,6 +273,13 @@ def agrupar_viajes(
             for original, normalizada in zip(fechas_originales, fechas_desktop)
         ):
             motivos.append(MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP)
+        # Un documento marcado REVISAR por el pipeline (campos ausentes,
+        # recuperación geométrica, chofer no homologado, etc.) nunca puede
+        # quedar CONFIRMADO en silencio a nivel de viaje, tenga o no
+        # contradicciones con otros documentos del mismo transporte. Esto es
+        # independiente y se suma a los conflictos ya detectados arriba.
+        if any(_documento_marca_revision(fila) for fila in filas_grupo):
+            motivos.append(MotivoRevision.DOCUMENTO_REQUIERE_REVISION)
         fecha = next((valor for valor in fechas_desktop if valor), "")
         identificador = (
             generador_id()

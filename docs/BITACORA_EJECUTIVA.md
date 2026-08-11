@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — Bloque C1: cliente + chofer nuevo + propagación de REVISAR al viaje (CERRADO)
+
+- **Objetivo:** la guía real `464170` mostraba `cliente` vacío y chofer `NO HOMOLOGADO` pese a que PaddleOCR leía ambos campos correctamente (`SEÑOR(ES): EBEMA SA`, `RETIRA: IVAN ROA`, `RUT CHOFER: 10190440-7`); el viaje además quedaba `CONFIRMADO` en silencio con esos vacíos. C1 corrige las causas generales (sin heurísticas de archivo) y cierra el ciclo end-to-end.
+- **Causas corregidas, todas genéricas:** (1) la normalización de texto usada por `buscar_cliente`/obra destino no convertía Ñ→N — centralizada ahora en un único helper; (2) la etiqueta geométrica `SEÑOR(ES)` matcheaba por subcadena y confundía nombres de destino que contienen la palabra "SEÑOR" (caso real: "SUPERMERCADO SEÑOR DE LOS MI") — ahora exige que el bloque completo sea la etiqueta; (3) nueva extracción **genérica** de RUT cliente por geometría (zona SEÑOR(ES)/R.U.T.), validada contra RUT chileno real, sin hardcodear ningún cliente; (4) el buscador de RUT chofer no toleraba el `:` que Paddle deja pegado al valor; (5) `agrupar_viajes()` ahora respeta el `indicador_revision` de cada documento además de los conflictos entre documentos que ya detectaba — un transporte de un único documento marcado `REVISAR` ya no puede quedar `CONFIRMADO` en silencio.
+- **IVAN ROA (RUT 10190440-7)** se dio de alta como chofer canónico real — confirmado por Javier como chofer nuevo real, no alias de otro — en el catálogo **activo real** (`%LOCALAPPDATA%\Atlas\datos\catalogos_privados\choferes.json`, identificado vía el config del Desktop instalado, no una carpeta de respaldo). Respaldo previo íntegro del catálogo en `Desktop\Atlas\backups_catalogos\`.
+- **Caso real validado end-to-end** (guía `464170`, PaddleOCR GPU, catálogo activo real): `cliente = EBEMA SA`, `rut_cliente = 83.585.400-0`, `chofer = IVAN ROA` (homologado exacto), `rut_chofer = 10190440-7`. El viaje queda `REQUIERE_REVISION` (motivo `DOCUMENTO_REQUIERE_REVISION`) — correcto: el documento siguió necesitando recuperación geométrica, señal conservadora ya existente que no se relajó.
+- Validación automatizada: **594 tests**, todos verdes (581 → 594). **0 regresiones.**
+- **Pendiente conocido, no bloqueante:** `obra_destino` sigue resolviendo mal (`"VENTA AL POR MAYOR D"`, valor de GIRO, en vez de `"SUPERMERCADO SEÑOR DE LOS MI"`).
+- **Siguiente bloque oficial: DESTINO D1** — corregir `obra_destino`/GIRO, prerrequisito directo de rutas/KM/tiempos. No iniciado.
+
+---
+
 ## 2026-08-10 — Bloque Patentes P2: homologación conservadora contra catálogo de vehículos (CERRADO)
 
 - **Objetivo:** P1 ya recuperaba el valor OCR de la patente (p. ej. `SD6486`), pero no resolvía su identidad canónica cuando el OCR confunde una letra. P2 homologa esa patente contra el catálogo canónico de vehículos, de forma conservadora y sin tocar OCR/Paddle.

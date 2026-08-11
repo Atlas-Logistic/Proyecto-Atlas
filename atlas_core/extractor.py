@@ -6,19 +6,40 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from atlas_core.catalogos import enriquecer_datos_con_catalogos
+from atlas_core.modelos import EstadoValidacion
+from atlas_core.validadores import validar_rut_chileno
+
+
+def _normalizar_acentos(texto: str) -> str:
+    """Reemplaza vocales acentuadas y la eñe/Eñe por su forma sin tilde.
+
+    Centraliza esta normalización (antes duplicada e inconsistente entre
+    funciones: algunas reemplazaban Ñ→N y otras no) para que cualquier
+    comparación de texto OCR —lineal o geométrica— trate "SEÑOR" y "SENOR"
+    como equivalentes de forma uniforme.
+    """
+    texto = str(texto or "")
+    for acentuada, simple in (
+        ("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("Ñ", "N"),
+        ("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n"),
+    ):
+        texto = texto.replace(acentuada, simple)
+    return texto
 
 
 def _texto_simple(valor: str) -> str:
     """Normaliza texto OCR para comparaciones, sin corregir su contenido."""
     texto = re.sub(r"\s+", " ", str(valor or "")).strip(" :;,-.").upper()
-    return (
-        texto.replace("Á", "A")
-        .replace("É", "E")
-        .replace("Í", "I")
-        .replace("Ó", "O")
-        .replace("Ú", "U")
-        .replace("Ñ", "N")
-    )
+    return _normalizar_acentos(texto)
+
+
+def _es_etiqueta_senor(texto_simple: str) -> bool:
+    """True solo cuando el bloque completo (ya normalizado) ES la etiqueta
+    SEÑOR(ES)/SEÑORES/SEÑOR(IES)/SEÑORIES — no cuando "SEÑOR" aparece como
+    palabra dentro de otro valor (p. ej. un nombre de destino que contenga
+    "SEÑOR"). Comparación conservadora sobre el contenido completo del
+    bloque, no una búsqueda de subcadena."""
+    return bool(re.fullmatch(r"SENOR(?:\(ES\)|\(IES\)|ES|IES)?", texto_simple))
 
 
 def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
@@ -76,7 +97,7 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     def es_etiqueta(item: Dict[str, Any], campo: str) -> bool:
         texto = item["simple"]
         if campo == "cliente":
-            return bool(re.search(r"\bSENOR(?:ES|IES)?\b", texto)) or texto == "CLIENTE"
+            return _es_etiqueta_senor(texto) or texto == "CLIENTE"
         return "OBRA DESTINO" in texto or texto == "DESTINO"
 
     def nominal(item: Dict[str, Any]) -> bool:
@@ -170,6 +191,52 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     if destino:
         resultado["obra destino"] = destino
     return resultado
+
+
+def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza el RUT del cliente en la zona SEÑOR(ES)/R.U.T., de forma
+    genérica (no depende de clientes hardcodeados, no reemplaza casos por
+    nombre). Solo acepta un candidato que sea un RUT chileno válido (dígito
+    verificador correcto, vía `validar_rut_chileno`) ubicado inmediatamente
+    junto a una etiqueta "R.U.T." que a su vez está justo debajo de la
+    etiqueta SEÑOR(ES). Se abstiene ante ausencia de candidato válido o ante
+    más de un candidato válido distinto (ambigüedad) — nunca inventa un RUT.
+    """
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    etiquetas_cliente = [item for item in items if _es_etiqueta_senor(item["simple"])]
+    if not etiquetas_cliente:
+        return {}
+
+    def es_etiqueta_rut(item: Dict[str, Any]) -> bool:
+        return bool(re.fullmatch(r"R\.?U\.?T\.?", item["simple"]))
+
+    candidatos_validos: set[str] = set()
+    for etiqueta_cliente in etiquetas_cliente:
+        etiquetas_rut = [
+            item for item in items
+            if es_etiqueta_rut(item)
+            and abs(item["x1"] - etiqueta_cliente["x1"]) <= 25
+            and 0 < item["y1"] - etiqueta_cliente["y2"] <= max(etiqueta_cliente["h"], item["h"]) * 1.5
+        ]
+        for etiqueta_rut in etiquetas_rut:
+            for item in items:
+                if item is etiqueta_rut or item is etiqueta_cliente:
+                    continue
+                alto = max(etiqueta_rut["h"], item["h"])
+                diferencia_y = abs(item["cy"] - etiqueta_rut["cy"])
+                if diferencia_y > alto * 1.25 or item["x1"] < etiqueta_rut["x2"] - 8:
+                    continue
+                candidato = re.sub(r"^[:\s]+", "", item["texto"]).strip()
+                resultado = validar_rut_chileno(candidato)
+                if resultado.estado == EstadoValidacion.VALIDO:
+                    candidatos_validos.add(resultado.valor)
+
+    if len(candidatos_validos) == 1:
+        return {"valor": next(iter(candidatos_validos))}
+    return {}
 
 
 def _normalizar_transporte_aza(texto: str) -> Optional[tuple[str, bool]]:
@@ -713,7 +780,7 @@ def extraer_datos(
 ) -> Dict[str, str]:
     texto_completo = "\n".join(textos)
     texto_mayus = texto_completo.upper()
-    texto_busqueda = texto_mayus.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+    texto_busqueda = _normalizar_acentos(texto_mayus)
     lineas = [linea.strip().upper() for linea in texto_completo.splitlines() if linea.strip()]
 
     datos = {
@@ -777,7 +844,7 @@ def extraer_datos(
 
     def normalizar_cliente(valor: str) -> str:
         texto = limpiar_valor(valor).upper()
-        texto_simple = texto.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+        texto_simple = _normalizar_acentos(texto)
 
         if "PRODALA" in texto_simple or "PRODALAK" in texto_simple or "PRODALAM" in texto_simple:
             return "PRODALAM SA"
@@ -790,7 +857,7 @@ def extraer_datos(
 
     def normalizar_obra_destino(valor: str) -> str:
         texto = limpiar_valor(valor).upper()
-        texto_simple = texto.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
+        texto_simple = _normalizar_acentos(texto)
 
         if "SIGRO" in texto_simple:
             return "EMPRESA CONST SIGRO"
@@ -945,7 +1012,10 @@ def extraer_datos(
         return None
 
     def buscar_rut_chofer() -> Optional[str]:
-        coincidencia = re.search(r"RUT\s*CHOFER\s*([0-9.\s-]{7,15})", texto_busqueda)
+        # ":" opcional entre la etiqueta y el valor: el OCR real (PaddleOCR)
+        # suele dejar "RUT CHOFER\n:10190440-7" con dos puntos pegados al
+        # valor, que \s* (solo espacios/saltos de línea) no cubría.
+        coincidencia = re.search(r"RUT\s*CHOFER\s*:?\s*([0-9.\s-]{7,15})", texto_busqueda)
         if coincidencia:
             valor = limpiar_rut(coincidencia.group(1), agregar_dv="-" not in coincidencia.group(1))
             if valor != "No encontrado":

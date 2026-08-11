@@ -4,6 +4,24 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre Bloque C1: cliente + chofer nuevo + propagación de REVISAR al viaje
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `129b459d936d6d05ae0615cc93fa8842440f4d3a`.
+- **Objetivo cerrado:** caso real guía `464170` — `cliente` vacío y chofer `NO HOMOLOGADO` con OCR correcto (`SEÑOR(ES): EBEMA SA`, `RETIRA: IVAN ROA`, `RUT CHOFER: 10190440-7`), viaje `CONFIRMADO` en silencio con esos campos vacíos. Diagnóstico previo ya cerrado; C1 corrige las causas.
+- **Fuente de catálogos activa real, importante para quien retome esto:** NO es ninguna de las carpetas `Desktop\Atlas\Atlas-Viajes-*-Rollback-*` (son respaldos/snapshots). La fuente que el Desktop instalado usa de verdad está en `config_usuario.json` del electron-store (`%APPDATA%\atlas-viajes-desktop\config_usuario.json`, `modoCatalogos: OBLIGATORIO`) y apunta a `%LOCALAPPDATA%\Atlas\datos\catalogos_privados`. Ahí se hizo el alta de IVAN ROA, no en el repo.
+- **Cambios en `atlas_core/extractor.py`:** `_normalizar_acentos()` centraliza Ñ→N (antes solo `_texto_simple` lo hacía; `texto_busqueda` de `extraer_datos` y `normalizar_cliente`/`normalizar_obra_destino` no); `_es_etiqueta_senor()` exige que el bloque completo (no una subcadena) sea la etiqueta SEÑOR(ES)/SEÑORES/SEÑOR(IES)/SEÑORIES, usado por `_extraer_asociaciones_geometricas`; nueva `_extraer_rut_cliente_geometrico()` (zona SEÑOR(ES)/R.U.T., valida con `validar_rut_chileno`, se abstiene ante ambigüedad); `buscar_rut_chofer()` ahora tolera `:` entre la etiqueta y el valor.
+- **`atlas_core/procesamiento_masivo.py`:** `RUT del cliente` se agregó a `campos_ausentes` y se conecta `_extraer_rut_cliente_geometrico` como fallback, mismo patrón que cliente/obra/chofer/transporte/patentes.
+- **`atlas_core/gestor_viajes.py`:** nuevo `MotivoRevision.DOCUMENTO_REQUIERE_REVISION` — si cualquier documento del viaje trae `indicador_revision=REVISAR`, el viaje no puede quedar `CONFIRMADO`, independiente de si hay o no contradicciones con otros documentos del mismo transporte (esos conflictos existentes se preservan intactos).
+- **IVAN ROA dado de alta** en el catálogo activo real como chofer canónico (RUT `10190440-7`, sin alias — es nuevo real, confirmado por Javier). Respaldo íntegro previo en `Desktop\Atlas\backups_catalogos\20260811_063918_pre_alta_ivan_roa\`.
+- **Caso real validado, guía `464170`, PaddleOCR GPU, catálogo activo real:**
+  - Antes: `cliente=No encontrado`, `rut_cliente=No encontrado`, `chofer=IVAN ROA` (sin homologar), `rut_chofer=No encontrado`, viaje `CONFIRMADO` sin motivo.
+  - Después: `cliente=EBEMA SA`, `rut_cliente=83.585.400-0`, `chofer=IVAN ROA` (homologado exacto contra catálogo), `rut_chofer=10190440-7`, viaje `REQUIERE_REVISION` (motivo `DOCUMENTO_REQUIERE_REVISION`, legítimo: el documento siguió necesitando recuperación geométrica).
+- Suite final: **594/594 tests** (581 → 594). 0 regresiones (las 4 fallas transitorias durante el desarrollo eran fixtures de `test_procesamiento_masivo.py` que no incluían `RUT del cliente`; se actualizaron sin tocar su intención original).
+- **Pendiente conocido, no bloqueante:** `obra_destino` sigue devolviendo el valor de GIRO (`"VENTA AL POR MAYOR D"`) en vez del destino real (`"SUPERMERCADO SEÑOR DE LOS MI"`) — mismo tipo de colisión geométrica que motivó C1, pero en el campo obra_destino, no cliente.
+- **Próximo bloque oficial: DESTINO D1** — corregir `obra_destino`/GIRO, prerrequisito directo de rutas/KM/tiempos. No iniciado; no se tocó nada de ese frente en C1.
+
+---
+
 ## 2026-08-10 — Cierre Patentes P2: homologación conservadora contra catálogo de vehículos
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `0021bde59a9bb2f7b18462377ea6634d5cade781`.

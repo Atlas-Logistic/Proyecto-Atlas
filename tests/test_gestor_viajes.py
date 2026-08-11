@@ -134,7 +134,10 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
     viaje = viajes[0]
     assert viaje.estado == EstadoViaje.REQUIERE_REVISION
     assert set(viaje.motivos_revision) == set(MotivoRevision) - {
-        MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP
+        MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP,
+        # Ninguna fila de este escenario trae indicador_revision=REVISAR;
+        # ese motivo es independiente de los conflictos entre documentos.
+        MotivoRevision.DOCUMENTO_REQUIERE_REVISION,
     }
     assert len(viaje.a_dict()["evidencias_documentos"]) == 2
 
@@ -235,3 +238,52 @@ def test_acentos_y_espacios_no_crean_conflicto():
     ]
     viajes, _ = agrupar_viajes(filas)
     assert viajes[0].estado == EstadoViaje.CONFIRMADO
+
+
+# --- Bloque C1 Parte E: indicador_revision del documento a nivel de viaje ---
+
+
+def test_documento_revisar_impide_confirmacion_silenciosa():
+    """Caso real obligatorio (guía 464170): un único documento marcado
+    REVISAR por el pipeline no puede producir un viaje CONFIRMADO en
+    silencio, aunque sea el único documento del transporte."""
+    viajes, _ = agrupar_viajes([_fila(indicador_revision="REVISAR")])
+    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION in viajes[0].motivos_revision
+
+
+def test_documento_ok_simple_puede_quedar_confirmado():
+    """Un documento único sin motivos válidos de revisión (indicador_revision
+    OK, sin contradicciones) sí puede quedar CONFIRMADO."""
+    viajes, _ = agrupar_viajes([_fila(indicador_revision="OK")])
+    assert viajes[0].estado == EstadoViaje.CONFIRMADO
+    assert viajes[0].motivos_revision == []
+
+
+def test_conflicto_multiguia_persiste_con_documentos_ok():
+    """Los conflictos entre documentos (ya existentes) siguen funcionando
+    igual aunque ambos documentos vengan indicador_revision=OK."""
+    filas = [
+        _fila(archivo="a.jpg", indicador_revision="OK"),
+        _fila(archivo="b.jpg", indicador_revision="OK", chofer="OTRO CHOFER"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.CONFLICTO_CHOFER in viaje.motivos_revision
+    assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION not in viaje.motivos_revision
+
+
+def test_conflicto_y_documento_revisar_coexisten():
+    """indicador_revision no elimina motivos de conflicto existentes: un
+    documento REVISAR y una contradicción entre documentos deben quedar
+    ambos registrados como motivos, no uno reemplazando al otro."""
+    filas = [
+        _fila(archivo="a.jpg"),
+        _fila(archivo="b.jpg", chofer="OTRO CHOFER", indicador_revision="REVISAR"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.CONFLICTO_CHOFER in viaje.motivos_revision
+    assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION in viaje.motivos_revision

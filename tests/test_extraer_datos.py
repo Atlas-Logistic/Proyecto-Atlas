@@ -33,6 +33,7 @@ from atlas_core.extractor import (
     _extraer_chofer_geometrico,
     _extraer_fecha_geometrico,
     _extraer_patentes_geometrico,
+    _extraer_rut_cliente_geometrico,
     _extraer_transporte_geometrico,
 )
 from atlas_core.ocr import BloqueOCR
@@ -201,6 +202,83 @@ def test_geometria_cliente_y_destino_simultaneos_no_se_mezclan():
         "cliente": "EMPRESA ANDINA",
         "obra destino": "PLANTA COSTA",
     }
+
+
+# --- Bloque C1: caso real guía 464170 (EBEMA SA / IVAN ROA) ---
+
+
+def test_buscar_cliente_reconoce_senor_es_con_ene_real():
+    """Regresión Parte B: SEÑOR(ES) con eñe real (no 'SENOR' sin tilde) debe
+    resolver el cliente por el camino lineal; antes del fix, la falta de
+    normalización Ñ→N en `texto_busqueda` dejaba esto en 'No encontrado'."""
+    textos = [
+        "GUIA DE DESPACHO N 464170 FECHA DE EMISION 04-08-2026 "
+        "SEÑOR(ES) EBEMA SA RUT 83.585.400-0 GIRO VENTA AL POR MAYOR"
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["cliente"] == "EBEMA SA", datos
+
+
+def test_geometria_supermercado_senor_no_se_interpreta_como_etiqueta():
+    """Regresión Parte C (caso real guía 464170): 'SEÑOR' dentro del nombre
+    de un destino (SUPERMERCADO SEÑOR DE LOS MI) no debe confundirse con la
+    etiqueta real SEÑOR(ES). Antes del fix, el matcher por subcadena
+    generaba una etiqueta falsa que competía con la real y producía
+    ambigüedad -> abstención, aunque el candidato correcto ya fuera el
+    mejor puntuado."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque(": EBEMA SA", 110, 20, 80),
+        _bloque("SOLICITANTE", 400, 20, 90),
+        _bloque(": SUPERMERCADO SEÑOR DE LOS MI", 500, 20, 220),
+        _bloque("ORDEN DE COMPRA", 400, 60, 110),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "EBEMA SA"
+
+
+def test_geometria_rut_cliente_generico_recupera_ebema():
+    """Regresión Parte D (caso real guía 464170): el RUT del cliente se
+    recupera de forma genérica (no hardcodeada) desde la zona
+    SEÑOR(ES)/R.U.T., validando que sea un RUT chileno real (dígito
+    verificador correcto)."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 46, 550, 72, 15),
+        _bloque(": EBEMA SA", 217, 550, 71, 15),
+        _bloque("R.U.T.", 47, 568, 40, 15),
+        _bloque(":83.585.400-0", 216, 568, 103, 15),
+    ]
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {"valor": "83.585.400-0"}
+
+
+def test_buscar_rut_chofer_tolera_dos_puntos_pegados_al_valor():
+    """Corolario necesario para la validación real de la guía 464170:
+    PaddleOCR real entrega 'RUT CHOFER' y ':10190440-7' como líneas
+    separadas; el regex solo toleraba espacios/saltos de línea entre la
+    etiqueta y el valor, no los dos puntos literales que preceden al RUT."""
+    textos = ["RUT CHOFER", ":10190440-7", ": IVAN ROA"]
+
+    datos = extraer_datos(textos)
+
+    assert datos["RUT del chofer"] == "10190440-7", datos
+
+
+def test_geometria_rut_cliente_ambiguo_se_abstiene():
+    """Ante dos candidatos igualmente válidos (dos RUT chilenos reales) en
+    la misma zona, la extracción de RUT cliente debe abstenerse en vez de
+    adivinar."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 46, 550, 72, 15),
+        _bloque(": EBEMA SA", 217, 550, 71, 15),
+        _bloque("R.U.T.", 47, 568, 40, 15),
+        _bloque(":83.585.400-0", 216, 568, 103, 15),
+        _bloque(":76.083.093-3", 216, 568, 103, 15),
+    ]
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {}
 
 
 def _transporte(candidato, etiqueta="NRO. TRANSPORTE"):
