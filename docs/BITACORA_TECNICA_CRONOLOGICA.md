@@ -4,6 +4,60 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre: DESTINOS D3, confirmación humana asistida de destinos frecuentes
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `54f484f043f203926ce5ad4a56c8babda1e90f89`
+
+### Problema real confirmado
+
+- `destinos_maestros.json` real: 47 destinos, 43 `PENDIENTE`, 4 `CONFIRMADO`. El gate de calidad de `ServicioRutas` (ya existente, sin tocar) bloquea el cálculo de ORS para cualquier destino `PENDIENTE` — correcto por diseño, pero deja casi todas las guías reales sin ruta.
+
+### Fuentes de evidencia nuevas
+
+- **`datos_privados/ground_truth/validacion_atlas_30_guias_v1.xlsx`** (hoja "Datos guías"): 30 guías reales con `CLIENTE`, `RUT CLIENTE`, `CÓDIGO DESTINATARIO`, `DIRECCIÓN DESTINO`, `COMUNA`, `CIUDAD` transcritos y validados a mano — no usado en bloques anteriores. Requirió instalar `openpyxl` (no estaba en el entorno).
+- Hallazgo relevante para la jerarquía de D2: dos filas (guías `390486` y `428701`), mismo cliente (TORRES OCARANZA LTDA) y mismo código destinatario (`0001004443`), muestran direcciones de entrega distintas ("VISTA CLARA 391" vs "VISTA CLARA 2351") — confirma con datos humanos independientes la razón por la que D2 dejó de tratar el código como llave autónoma.
+- Cruce de campos detectó una inconsistencia de transcripción: para EBEMA SA, el ground truth registra "CÓDIGO DESTINATARIO" = `0001001424`, pero ese valor coincide con el campo *distinto* "Código Cliente" visible en el encabezado de la guía real 464170 — el código real de `COD DESTINATARIO` en esa guía es `0002013046`. Documentado, no usado como evidencia de código para EBEMA en este bloque.
+
+### Ranking (Fase A)
+
+- Fuente primaria: campo `observacion` de cada destino migrado (`"N viajes en el periodo 01/04/2026-30/06/2026"`, dato real del Excel de origen). Cruzado automáticamente (normalización con `unicodedata`, comparación cliente+dirección+comuna) contra el ground truth y contra la evidencia OCR real ya recolectada en D2 más 2 guías nuevas de este bloque (464494, 464495 — ACEROS COX COMERCIAL SA).
+- Top por frecuencia: ARMACERO MATCO SA/Santa Isabel 585 (94), EBEMA SA/Galvarino 8501 (34), AGF ACEROS DE CHILE SPA/Panamericana Norte 22650 (23), ACEROS COX COMERCIAL SA/Camino Lo Ruiz 2901 (20), AMERICAN SCREW CHILE SPA/Camino a Melipila 10800 (19, sin coordenadas).
+- Artefactos completos: `C:\Users\Jjjc0508\Desktop\Atlas\destinos_revision\ranking_destinos_pendientes.json` (47 destinos con evidencia cruzada) y `fichas_lote_10.md` (10 fichas completas con recomendación individual).
+
+### Fase B/C — validación geográfica y de región
+
+- Confirmados los 4 registros "SAN MIGUEL" con coordenada errónea ya conocida (`lat=-30.81, lon=-70.60`, zona de Ovalle/Coquimbo, ~370 km de RM) -- ninguno estaba en el lote de 10, se documentan igual por instrucción explícita.
+- Detectado (no corregido, fuera de este cliente/lote): varios destinos de la zona industrial de Renca (ACEROS COX y SODIMAC en "Camino Lo Ruiz"; ACMA SA en "Maruri", dos números distintos) comparten coordenada exacta entre sí — geocodificación a nivel de calle, no de número, un límite de precisión conocido del proceso de migración, no un error de identidad.
+- Los 47 destinos actuales son región RM (uno con el texto "REGIÓN METROPOLITANA" en vez de "RM" — inconsistencia de formato en un registro ya `CONFIRMADO` de un bloque anterior, no tocado aquí). El ground truth reveló viajes reales interregionales (Temuco, Coronel) sin destino correspondiente todavía en el catálogo -- no se fabricó ninguno, documentado como brecha real para un bloque futuro.
+
+### Fase D/E/F/G — evidencia, fichas y confirmación
+
+- Criterio aplicado (más estricto que el mínimo pedido por el enunciado): **confirmar solo con ≥2 documentos independientes** (nunca el agregado de migración por sí solo) concordantes en cliente+dirección+comuna.
+- Respaldo previo verificado por checksum: `C:\Users\Jjjc0508\Desktop\Atlas\backups_catalogos\20260811_pre_confirmacion_d3\destinos_maestros.json`.
+- **4 destinos confirmados** vía `CatalogoDestinos.editar(..., modificacion_manual=True, estado_calidad=CONFIRMADO, fuente=..., observacion=...)` — nunca edición manual del JSON. Solo cambian `estado_calidad`, `fuente` (marca `CONFIRMACION_DESTINOS_D3_2026-08-11+EVIDENCIA_MULTIPLE_INDEPENDIENTE`, mismo patrón ya usado por Torres Ocaranza en un bloque anterior) y `observacion` (evidencia apendiada, preservando el texto original de migración) — dirección/comuna/región/código/coordenadas verificados idénticos antes/después, campo por campo, en el propio script de confirmación.
+- 1 candidato (AMERICAN SCREW CHILE SPA) separado explícitamente como `CORREGIR DATOS`: 3 grafías distintas de la misma dirección real entre catálogo/OCR real/ground truth (posible error de tipeo heredado de la migración) + coordenadas ausentes — no confirmado ni corregido en este bloque, para no mezclar corrección de datos con confirmación en la misma operación.
+
+### Fase H — rutas reales
+
+- **AZA RENCA → ARMACERO MATCO SA/Santa Isabel 585** (guía real 464511): `RUTA_CALCULADA`, 12.969 km / 19.71 min.
+- **AZA RENCA → ACEROS COX COMERCIAL SA/Camino Lo Ruiz 2901** (guías reales 464494 y 464495): `RUTA_CALCULADA`, 0.086 km / 0.13 min (segunda consulta → `RESULTADO_DESDE_CACHE`) — distancia real muy corta porque ambos domicilios están en el mismo tramo de la zona industrial de Renca, no es un error.
+- **AZA RENCA → EBEMA SA/Galvarino 8501** (guía real 464170, destino ya confirmado): sigue en `REQUIERE_REVISION`/`DESPACHO_DIVERGENTE_DEL_DESTINO_CANONICO` — el gate de concordancia de D2 protege el viaje individual independientemente del estado de confirmación del destino, exactamente como se diseñó.
+- No hubo ningún destino interregional confirmable en el lote (0 candidatos regionales `PENDIENTE` existían en el catálogo) — el requisito condicional de Fase H ("si algún destino regional queda confirmado") no aplicó; no se fabricó ninguno.
+
+### Validación
+
+- Tests nuevos: **12** en `tests/test_destinos_d3_confirmacion.py` -- destino RM válido por comuna+región, mismo nombre de calle en cliente/comuna/región distinta no colisiona (abstención, nunca elección arbitraria), coordenadas fuera de rango rechazadas, código destinatario concordante resuelve, `DESPACHAR A` divergente bloquea la ruta aun con destino confirmado, destino `PENDIENTE` no enruta, destino `CONFIRMADO`+concordante calcula ruta real, confirmar preserva dirección/comuna/región/código/coordenadas (verificado campo por campo), el catálogo sigue siendo válido (recarga sin `CatalogoDestinosCorruptoError`) tras confirmar, no regresión de la resolución global sin cliente (D1/D2) y de extracción/concordancia (D2).
+- Suite completa: **643 → 655 passed**, 0 failed, 0 regresiones.
+
+### Archivos modificados
+
+- Nuevo: `tests/test_destinos_d3_confirmacion.py`.
+- Sin cambios de código de producción -- D3 reutiliza `atlas_core/rutas/destino_estructurado.py` y `enriquecimiento_viaje.py` de D2 tal cual.
+- Dato: `%LOCALAPPDATA%\Atlas\datos\catalogos_privados\destinos_maestros.json` (4 destinos `PENDIENTE`→`CONFIRMADO`, con respaldo previo verificado).
+- Artefactos nuevos fuera del repo: `C:\Users\Jjjc0508\Desktop\Atlas\destinos_revision\` (ranking + fichas), `C:\Users\Jjjc0508\Desktop\Atlas\backups_catalogos\20260811_pre_confirmacion_d3\`.
+
+---
+
 ## 2026-08-11 — Cierre: DESTINOS D2, resolución canónica de destino estructurada
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `3f28e4cc6876253dc8a528dbd9ef8651e5daa7e7`

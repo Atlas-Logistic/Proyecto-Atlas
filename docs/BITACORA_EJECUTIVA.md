@@ -4,6 +4,20 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — DESTINOS D3: confirmación humana asistida de destinos frecuentes (CERRADO)
+
+- **Objetivo:** D2 dejó la resolución de destino resuelta técnicamente, pero el catálogo real tiene 43/47 destinos `PENDIENTE` — el gate de calidad (ya existente, correcto) bloquea el cálculo de ruta para casi todos. Este bloque aumenta la cobertura de `CONFIRMADO` solo con evidencia real, sin bajar el estándar de seguridad.
+- **Ranking real:** se usó el conteo de viajes ya embebido en `destinos_maestros.json` (migración del Excel original, un trimestre completo) cruzado con un dataset de 30 guías validadas manualmente (`datos_privados/ground_truth/`, hallado y usado por primera vez en este bloque) y con OCR real directo sobre guías disponibles en el repo.
+- **Hallazgo relevante del ground truth:** confirma, con datos humanos independientes (no solo la auditoría técnica de D2), que un mismo cliente y código destinatario puede tener direcciones de entrega distintas entre guías (Torres Ocaranza: "Vista Clara 391" en una guía, "Vista Clara 2351" en otra) — refuerza que D2 hizo bien en no tratar el código como llave autónoma.
+- **Criterio aplicado, más estricto que el mínimo pedido:** confirmar solo con ≥2 documentos independientes (nunca el agregado de migración solo) concordantes en cliente+dirección+comuna. De un lote de 10 candidatos priorizados, **4 se confirmaron** (ARMACERO MATCO SA/Santa Isabel 585, EBEMA SA/Galvarino 8501, ACEROS COX COMERCIAL SA/Camino Lo Ruiz 2901, SALOMÓN SACK SA/Camino Los Pinos 3396); 5 quedan `PENDIENTE` por evidencia insuficiente y 1 (AMERICAN SCREW CHILE SPA) se marca `CORREGIR DATOS` (error tipográfico de dirección + coordenadas ausentes, detectado cruzando 2 fuentes).
+- **0 regiones distintas de RM en el catálogo hoy:** los 47 destinos actuales son RM (uno con la región escrita como texto "REGIÓN METROPOLITANA" en vez de "RM" — inconsistencia de formato, no de contenido, no corregida en este bloque por ser un registro ya `CONFIRMADO` de un bloque anterior). El ground truth reveló viajes reales interregionales (Temuco, Coronel) que **no existen todavía como destino en el catálogo** — no se fabricó ninguno.
+- **Confirmación no destructiva:** los 4 destinos se editaron vía `CatalogoDestinos.editar()` (API validada) cambiando solo `estado_calidad`, `fuente` y `observacion` — dirección/comuna/región/código/coordenadas quedaron byte-idénticos, verificado automáticamente.
+- **3 rutas reales desbloqueadas** (ORS real, `driving-hgv`, sin inyectar destino): AZA RENCA→Armacero/Santa Isabel 585 (12.97 km/19.7 min), AZA RENCA→Aceros Cox/Camino Lo Ruiz 2901 (dos guías reales, 0.09 km — domicilios contiguos en la misma zona industrial, resultado real de ORS, no un error). El gate de concordancia de D2 (`DESPACHAR A`) siguió bloqueando correctamente la guía 464170 (EBEMA) aun con su destino ya confirmado — prueba de que confirmar identidad no relaja la protección por viaje.
+- Validación automatizada: **655 tests**, todos verdes (643 → 655, 12 nuevos). 0 regresiones.
+- **Próximo bloque oficial: OPERACIÓN O1 — PESO + HORA ENTRADA + HORA SALIDA.**
+
+---
+
 ## 2026-08-11 — DESTINOS D2: resolución canónica de destino estructurada (CERRADO)
 
 - **Objetivo:** el motor de rutas ya calculaba km/min reales, pero el emparejamiento de `obra_destino` (texto OCR libre) contra `destinos_maestros.json` (registrado por dirección, no por nombre comercial) dejaba casi todas las guías reales en `DESTINO_NO_HOMOLOGADO` — bloqueo detectado en la auditoría previa (verificación final de rutas) sobre la guía 464170.

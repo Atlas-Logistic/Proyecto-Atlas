@@ -4,6 +4,24 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre DESTINOS D3: confirmación humana asistida de destinos frecuentes
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `54f484f043f203926ce5ad4a56c8babda1e90f89`.
+- **Objetivo cerrado:** aumentar destinos `CONFIRMADO` (43 `PENDIENTE`/4 `CONFIRMADO` al empezar) solo con evidencia real, sin bajar el estándar de seguridad de D2.
+- **Fuente nueva importante para quien retome esto:** `datos_privados/ground_truth/validacion_atlas_30_guias_v1.xlsx` — 30 guías reales validadas a mano (cliente, RUT, código destinatario, dirección, comuna, ciudad), no usado en bloques anteriores. Requiere `openpyxl` (se instaló en este bloque, agregarlo a dependencias si se automatiza su lectura).
+- **Hallazgo relevante:** el ground truth confirma con datos humanos independientes que el mismo cliente+código puede tener direcciones de entrega distintas entre guías (Torres Ocaranza, guías 390486 vs 428701) — refuerza la decisión de D2 de no tratar el código destinatario como llave autónoma.
+- **4 destinos confirmados** (criterio: ≥2 documentos independientes concordantes en cliente+dirección+comuna, más estricto que el mínimo pedido): ARMACERO MATCO SA/Santa Isabel 585 (94 viajes históricos), EBEMA SA/Galvarino 8501 (34), ACEROS COX COMERCIAL SA/Camino Lo Ruiz 2901 (20), SALOMÓN SACK SA/Camino Los Pinos 3396 (3, pero 3 guías independientes de ground truth). Catálogo ahora: 8 `CONFIRMADO` / 39 `PENDIENTE`.
+- **1 candidato marcado `CORREGIR DATOS` sin tocar todavía:** AMERICAN SCREW CHILE SPA — la dirección en catálogo ("CAMINO A MELIPILA 10800") tiene una probable falta de ortografía (comparado con 2 fuentes reales que muestran "MELIPILLA"/"MELIPELLA") y le faltan coordenadas — no se corrigió en este bloque para no mezclar corrección con confirmación.
+- **0 destinos interregionales en el catálogo hoy** (los 47 son RM) — el ground truth reveló viajes reales a Temuco y Coronel que aún no tienen destino en el catálogo. No se fabricó ninguno.
+- **Confirmación 100% no destructiva:** verificado campo por campo (test dedicado) que `CatalogoDestinos.editar()` con `modificacion_manual=True` solo cambió `estado_calidad`/`fuente`/`observacion` en los 4 destinos — dirección/comuna/región/código/coordenadas intactos.
+- **3 rutas reales desbloqueadas, ORS real:** AZA RENCA→Armacero/Santa Isabel 585 (12.97 km/19.7 min), AZA RENCA→Aceros Cox/Camino Lo Ruiz 2901 (2 guías reales, 0.09 km — domicilios contiguos, resultado real). La guía 464170 (EBEMA, destino ya confirmado) **sigue bloqueada** por el gate de concordancia `DESPACHAR A` de D2 — prueba de que confirmar identidad no relaja la protección por viaje individual.
+- Suite final: **643 → 655 tests** (12 nuevos). 0 regresiones. Sin cambios de código de producción — D3 es puramente confirmación de datos usando la maquinaria ya construida en D2.
+- **Respaldo antes de tocar el catálogo:** `C:\Users\Jjjc0508\Desktop\Atlas\backups_catalogos\20260811_pre_confirmacion_d3\destinos_maestros.json`, verificado por checksum.
+- **Artefactos de esta revisión:** `C:\Users\Jjjc0508\Desktop\Atlas\destinos_revision\` (ranking completo de 47 destinos con evidencia cruzada + 10 fichas de revisión con recomendación individual).
+- **Próximo bloque oficial: OPERACIÓN O1 — PESO + HORA ENTRADA + HORA SALIDA.** No iniciado.
+
+---
+
 ## 2026-08-11 — Cierre DESTINOS D2: resolución canónica de destino estructurada
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `3f28e4cc6876253dc8a528dbd9ef8651e5daa7e7`.
