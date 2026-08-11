@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — ORS: migración de endpoint + validación real con credencial (CERRADO)
+
+- **Objetivo:** activar la integración real de OpenRouteService (bloqueada desde RUTAS-EVAL R1 por falta de credencial) y confirmar que el adaptador apunta al host vigente.
+- **Hallazgo crítico de plazo:** `api.openrouteservice.org` (host usado por el adaptador) está deprecado por HeiGIT desde el 28-abr-2026, con **apagado definitivo el 24-ago-2026** — a 13 días al momento de este bloque. Confirmado contra el anuncio oficial y verificado en vivo (ambos hosts responden 401 sin credencial, es decir la ruta existe). Se migró el adaptador (`atlas_core/rutas/openrouteservice.py`) al host vigente `api.heigit.org`, de forma centralizada (solo 2 constantes), sin cambio de credencial ni de contrato.
+- **`OPENROUTESERVICE_API_KEY` configurada** como variable de entorno de **usuario** de Windows en este PC, por el propio Javier, en su terminal, fuera de cualquier canal visible para Claude — nunca fue pegada, mostrada, registrada ni escrita en ningún archivo del repo.
+- **Validación real con credencial real:** prueba mínima (`driving-hgv`) exitosa; 3 rutas reales calculadas AZA RENCA/AZA COLINA → EBEMA SA (Galvarino 8501), TORRES OCARANZA LTDA, DSI UNDERGROUND CHILE SPA — todas `RUTA_CALCULADA`, tiempos de respuesta ~0.8-1.0s. Caché (`RepositorioRutas`) verificado: segunda consulta del mismo par usa el resultado guardado y **no** vuelve a llamar a ORS.
+- Validación automatizada: **603 tests**, todos verdes (601 → 603, 2 nuevos fijando el endpoint vigente).
+- **0 secretos en git** — confirmado antes de commitear.
+- **Siguiente bloque:** integrar km/tiempos en el flujo real de Desktop (explícitamente fuera de alcance de este bloque).
+
+---
+
 ## 2026-08-11 — Bloque D1: separar GIRO de obra_destino (CERRADO)
 
 - **Objetivo:** con cliente/chofer/RUT ya corregidos en C1, `obra_destino` seguía devolviendo el valor de **GIRO** (`"VENTA AL POR MAYOR D"`) en vez del destino real (`"SUPERMERCADO SEÑOR DE LOS MI"`) en la guía real `464170` — prerrequisito directo del próximo frente de rutas/KM/tiempos, que necesita un destino confiable.

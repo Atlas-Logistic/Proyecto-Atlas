@@ -4,6 +4,22 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre: migración de endpoint ORS + validación real con credencial
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `ccc777229cbd072b1f89e5d60efbd5620859731a`.
+- **Endpoint ORS migrado, URGENTE para quien retome esto:** `api.openrouteservice.org` se apaga el **24-ago-2026** (anuncio oficial HeiGIT, 28-abr-2026). El adaptador (`atlas_core/rutas/openrouteservice.py`) ahora usa `api.heigit.org`: direcciones en `/openrouteservice/v2/directions/{perfil}`, geocodificación migró de `/geocode/search` a la estructura Pelias `/pelias/v1/search`. Misma API key sirve para ambos hosts, sin cambio de credencial ni de contrato (`ProveedorRutas` intacto).
+- **`OPENROUTESERVICE_API_KEY` ya está configurada** como variable de entorno de **usuario** de Windows en este PC (no de sistema, no en `.env` del repo). Configurada directamente por Javier en su propia terminal — el valor nunca pasó por Claude en ningún momento (ni se pidió pegarlo en el chat, ni se registró, ni se escribió en archivo alguno).
+- **Nota técnica para quien retome esto:** una variable de entorno de **usuario** recién creada con `[Environment]::SetEnvironmentVariable(...,"User")` no se propaga automáticamente al bloque de entorno de un proceso/shell ya en ejecución (solo la ve `[Environment]::GetEnvironmentVariable(...,"User")`, que lee directo del registro). Para que un proceso hijo (p. ej. `python`) la vea vía `os.getenv(...)`, hace falta puentearla explícitamente en la misma invocación: `$env:OPENROUTESERVICE_API_KEY = [Environment]::GetEnvironmentVariable("OPENROUTESERVICE_API_KEY","User")` antes de lanzar el proceso — o reiniciar la sesión/terminal.
+- **Validación real, con credencial real, perfil `driving-hgv`:**
+  - Prueba mínima (AZA RENCA → EBEMA SA): `RUTA_CALCULADA` (no `SIN_CREDENCIAL`).
+  - 3 rutas reales, coordenadas ya existentes en catálogo (sin geocodificar de nuevo): AZA_RENCA→EBEMA SA/Galvarino 8501 (7.43 km, 12.1 min), AZA_COLINA→Torres Ocaranza Ltda (49.70 km, 59.9 min), AZA_RENCA→DSI Underground Chile SpA (33.17 km, 40.4 min). Tiempos de respuesta 0.80-0.86s.
+  - **Caché (`RepositorioRutas`) verificado end-to-end** vía `ServicioRutas.confirmar_y_calcular`: primera consulta AZA_RENCA→Torres Ocaranza → `RUTA_CALCULADA` (1 llamada real a ORS, contada con un wrapper de conteo, sin tocar el adaptador); segunda consulta idéntica → `RESULTADO_DESDE_CACHE`, **0 llamadas nuevas a ORS**, mismo `distancia_km`/`duracion_estimada_min` que la primera. Clave lógica confirmada: `planta_id + destino_id + perfil + proveedor + version`.
+- Suite final: **603/603 tests** (601 → 603, 2 nuevos que fijan el host vigente y evitan una regresión silenciosa al host deprecado).
+- **0 secretos en git** — el repo solo tiene el cambio de host (2 constantes) y los 2 tests nuevos; ningún archivo de credenciales, `.env` real, ni valor de clave fue tocado o creado dentro del repo.
+- **Próximo bloque:** conectar km/tiempos al flujo real (Desktop, reportes) — explícitamente no iniciado en este bloque.
+
+---
+
 ## 2026-08-11 — Cierre Bloque D1: separar GIRO de obra_destino
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `66d0edabbfd506795dc675f2149e4875dc6fede2`.

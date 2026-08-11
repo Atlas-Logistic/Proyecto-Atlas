@@ -83,6 +83,29 @@ def test_calculo_correcto_convierte_unidades_y_envia_lon_lat():
     assert resultado.duracion_estimada_min == 24
 
 
+def test_direcciones_usa_endpoint_heigit_vigente():
+    """api.openrouteservice.org se apaga 2026-08-24 (anuncio oficial HeiGIT);
+    la integración debe apuntar al host vigente api.heigit.org."""
+    capturas = []
+    proveedor = OpenRouteService(
+        api_key="SECRETO_DE_PRUEBA",
+        transporte=transporte_json({"routes": [{"summary": {"distance": 1000, "duration": 60}}]}, capturas=capturas),
+    )
+    proveedor.calcular_ruta(Coordenadas(-20, -10), Coordenadas(-20.1, -10.1), "driving-hgv")
+    assert capturas[0][0].full_url == "https://api.heigit.org/openrouteservice/v2/directions/driving-hgv"
+
+
+def test_geocodificacion_usa_endpoint_heigit_pelias_vigente():
+    """La geocodificación migró de /geocode/search a la estructura Pelias
+    (/pelias/v1/search) bajo api.heigit.org, según el mismo anuncio."""
+    capturas = []
+    proveedor = OpenRouteService(
+        api_key="SECRETO_DE_PRUEBA", transporte=transporte_json({"features": []}, capturas=capturas)
+    )
+    proveedor.geocodificar("DIRECCION DEMO")
+    assert capturas[0][0].full_url.startswith("https://api.heigit.org/pelias/v1/search")
+
+
 def test_clave_no_aparece_en_resultados_ni_errores():
     secreto = "SECRETO_QUE_NO_DEBE_APARECER"
     proveedor = OpenRouteService(api_key=secreto, transporte=lambda *_: RespuestaHTTP(500, b""))

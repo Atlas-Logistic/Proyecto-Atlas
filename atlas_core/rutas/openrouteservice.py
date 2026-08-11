@@ -37,8 +37,13 @@ def _transporte_urllib(solicitud: Request, timeout: float) -> RespuestaHTTP:
 class OpenRouteService:
     nombre = "openrouteservice"
     version = "v2"
-    URL_GEOCODIFICACION = "https://api.openrouteservice.org/geocode/search"
-    URL_DIRECCIONES = "https://api.openrouteservice.org/v2/directions/{perfil}"
+    # Host vigente HeiGIT (api.heigit.org), confirmado contra el anuncio oficial
+    # de deprecación (ask.openrouteservice.org, 2026-04-28) y verificado en vivo
+    # (ambos hosts responden 401 sin credencial, es decir la ruta existe).
+    # "api.openrouteservice.org" deja de funcionar el 2026-08-24 -- la misma
+    # API key sirve para ambos hosts, no requiere cambio de credencial.
+    URL_GEOCODIFICACION = "https://api.heigit.org/pelias/v1/search"
+    URL_DIRECCIONES = "https://api.heigit.org/openrouteservice/v2/directions/{perfil}"
 
     def __init__(
         self,
