@@ -4,6 +4,31 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre: DESTINOS D3.1, auditoría semántica DIRECCION vs DESPACHAR A + revert controlado
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `7c070a81ff4884556625516aae5785744954c93f`
+
+### Auditoría (solo lectura)
+
+- Se completó la lectura OCR real de las 4 guías del set de 14 que aún no se habían auditado (`464265`, `464367`, `464395`, `464488`), llegando a las 14 con imagen disponible en el repo, todas con `DIRECCION`/`COMUNA`/`COD DESTINATARIO`/`DESPACHAR A` extraídos.
+- **Hallazgo central:** de las 14, 9 tuvieron lectura limpia de `DIRECCION` y `DESPACHAR A` simultáneamente. **5 concordantes** (`464424`, `464479`, `464494`, `464495`, `464511`), **4 divergentes** (`464170` EBEMA→Mejillones vs Quilicura; `464395` Ingemeta→Carmen Mena 529 vs Santa Rosa 5587, mismo cliente, dos sitios registrados distintos observados en dos guías; `464264`/`464265` Sodimac→Coronel vs Renca, **interregional**; `464488` Easy Retail→misma comuna, calle distinta). Conclusión: `DIRECCION`/`COMUNA`/`COD DESTINATARIO` identifican el sitio/obra **registrado** contra el que se emite la guía, no necesariamente el punto físico de entrega — that campo es `DESPACHAR A`. Consistente con, y más granular que, el hallazgo ya usado por D2 (`evaluar_concordancia_despacho`).
+- Auditoría de las 4 confirmaciones de D3 cruzando específicamente evidencia de `DESPACHAR A` (no solo repetición de `DIRECCION`+`COMUNA` como hizo D3): Armacero (2/2 guías con `DESPACHAR A` concordante: `464511`, `464489`) y Aceros Cox (2/2: `464494`, `464495`) quedan con evidencia de entrega real doble e independiente. Ebema (1 sola observación de `DESPACHAR A` disponible, y **diverge**) y Salomón Sack (0 observaciones de `DESPACHAR A` — el ground truth usado en D3 no releva ese campo) quedan sin evidencia positiva de entrega.
+
+### Revert ejecutado (tras confirmación explícita del usuario, tool `AskUserQuestion`)
+
+- Respaldo previo: `C:\Users\Jjjc0508\Desktop\Atlas\backups_catalogos\20260811_pre_revert_d31\destinos_maestros.json`, verificado por checksum contra el catálogo real antes de tocar nada.
+- `CatalogoDestinos.editar(..., modificacion_manual=True, estado_calidad=PENDIENTE, fuente=..., observacion=...)` sobre `32d67fec-...` (EBEMA/Galvarino 8501) y `c25be79a-...` (Salomón Sack/Camino Los Pinos 3396) — únicos campos modificados: `estado_calidad`, `fuente` (marca `REVERSION_DESTINOS_D3.1_2026-08-11+AUDITORIA_SEMANTICA_SIN_EVIDENCIA_DESPACHO`) y `observacion` (motivo apendiado, sin borrar el texto de confirmación de D3 ni el de la migración original). Dirección/comuna/región/código/coordenadas verificados idénticos antes/después.
+- Catálogo tras el revert: recargado sin `CatalogoDestinosCorruptoError`, 47 destinos, **6 CONFIRMADO** (los 4 originales + Armacero + Aceros Cox) / **41 PENDIENTE**.
+- Suite: **655 passed**, sin cambios — este bloque no tocó ningún archivo de código de producción ni de tests (solo el catálogo real, fuera del repo, y las bitácoras).
+
+### Archivos modificados
+
+- Dato: `%LOCALAPPDATA%\Atlas\datos\catalogos_privados\destinos_maestros.json` (2 destinos `CONFIRMADO`→`PENDIENTE`, con respaldo verificado).
+- Repo: solo `docs/BITACORA_EJECUTIVA.md`, `docs/BITACORA_TECNICA_CRONOLOGICA.md`, `docs/HANDOFF_ATLAS.md`. 0 código, 0 tests.
+- Artefactos nuevos fuera del repo: `rutas_eval/d31_evidencia_real_faltante.json` (OCR real de las 4 guías completadas).
+
+---
+
 ## 2026-08-11 — Cierre: DESTINOS D3, confirmación humana asistida de destinos frecuentes
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `54f484f043f203926ce5ad4a56c8babda1e90f89`

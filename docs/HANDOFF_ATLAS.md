@@ -4,6 +4,20 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre DESTINOS D3.1: auditoría semántica DIRECCION vs DESPACHAR A + revert controlado
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `7c070a81ff4884556625516aae5785744954c93f`.
+- **Objetivo cerrado:** auditar si las 4 confirmaciones de D3 eran evidencia de entrega real o solo de un domicilio/sitio registrado del cliente.
+- **Hallazgo importante para quien retome esto — DIRECCION ≠ lugar de entrega:** en el formulario AZA, `DIRECCION`/`COMUNA`/`COD DESTINATARIO` identifican el sitio/obra **registrado** contra el que se emite la guía (puede variar entre guías del mismo cliente), mientras que `DESPACHAR A` es el que mejor representa dónde llegó realmente el camión en ese viaje. Con evidencia real (14 guías, 9 con lectura limpia de ambos campos): **~44-50% de divergencia** entre ambos — no es un caso aislado (incluye un caso interregional: Sodimac, Renca vs Coronel). D2 ya protegía el enrutado con `evaluar_concordancia_despacho`; D3.1 confirma que el fenómeno es frecuente, no una excepción rara.
+- **2 confirmaciones de D3 revertidas a `PENDIENTE`** (tras confirmación explícita del usuario, respaldo previo verificado): EBEMA SA/Galvarino 8501 (su única guía real con `DESPACHAR A` observado diverge — Mejillones vs Quilicura) y SALOMÓN SACK SA/Camino Los Pinos 3396 (0 evidencia de `DESPACHAR A`, las 3 guías de ground truth usadas en D3 no relevan ese campo). Ninguna dirección/comuna/región/código/coordenada se tocó ni se perdió evidencia — el motivo queda documentado en `observacion`/`fuente` de cada registro.
+- **2 confirmaciones de D3 se mantienen, con evidencia reforzada:** ARMACERO MATCO SA/Santa Isabel 585 y ACEROS COX COMERCIAL SA/Camino Lo Ruiz 2901 — ambas con 2 guías reales independientes donde `DESPACHAR A` concuerda exactamente con el destino.
+- **Catálogo real ahora:** 47 destinos, **6 CONFIRMADO** / 41 `PENDIENTE`. Respaldo previo al revert: `C:\Users\Jjjc0508\Desktop\Atlas\backups_catalogos\20260811_pre_revert_d31\`.
+- **Propuesta de modelo pendiente de decisión (no implementada):** separar `destinos_maestros.json` (sitio/obra registrado) de un futuro catálogo `destinos_entrega` (punto real, ganado solo por `DESPACHAR A` concordante) — diseño documentado en el reporte del bloque, no ejecutado.
+- Suite: **655 tests**, sin cambios (este bloque no tocó código ni tests, solo el catálogo real y bitácoras).
+- **Próximo bloque oficial: OPERACIÓN O1 — PESO + HORA ENTRADA + HORA SALIDA.** No iniciado.
+
+---
+
 ## 2026-08-11 — Cierre DESTINOS D3: confirmación humana asistida de destinos frecuentes
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `54f484f043f203926ce5ad4a56c8babda1e90f89`.

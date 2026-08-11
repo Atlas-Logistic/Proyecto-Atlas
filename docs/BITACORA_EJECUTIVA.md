@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — DESTINOS D3.1: auditoría semántica DIRECCION vs DESPACHAR A (CERRADO)
+
+- **Objetivo:** auditar si las 4 confirmaciones de D3 representan realmente destinos logísticos (lugar de entrega) o solo repetición de un domicilio/sitio registrado del cliente — sin tocar código ni confirmar nada nuevo.
+- **Hallazgo central, con evidencia real (14 guías con imagen, 9 con lectura limpia de ambos campos):** `DIRECCION`/`COMUNA`/`COD DESTINATARIO` del formulario AZA identifican el **sitio/obra registrado contra el que está emitida la orden**, no necesariamente el punto físico de entrega — puede variar entre guías del mismo cliente. `DESPACHAR A` es el campo que mejor representa el destino físico real de cada viaje puntual. **~44-50% de divergencia real** entre ambos campos en lecturas limpias — no es un caso aislado (464170/EBEMA ya documentado en D2, más 464395/Ingemeta y 464264-465/Sodimac-Coronel, este último interregional).
+- **Auditoría de las 4 confirmaciones de D3:** 2 con evidencia de entrega real, doble e independiente (Armacero/Santa Isabel 585, Aceros Cox/Camino Lo Ruiz 2901) — se conservan. 2 sin evidencia positiva de entrega — Ebema/Galvarino 8501 (su única observación real de `DESPACHAR A` diverge) y Salomón Sack/Camino Los Pinos 3396 (0 evidencia de `DESPACHAR A`, el ground truth no lo releva) — **revertidas a `PENDIENTE`** tras confirmación explícita del usuario, con respaldo previo verificado y sin borrar evidencia (motivo documentado en `observacion`/`fuente`).
+- **Las 2 rutas ya calculadas en D3 siguen siendo válidas:** el propio gate de concordancia de D2 ya exigía `DESPACHAR A` concordante antes de calcular cualquier ruta — por construcción, ninguna quedó afectada por este hallazgo.
+- **Propuesta de modelo (diseño, no implementado):** separar `destinos_maestros.json` (sitio/obra registrado, identidad) de un futuro catálogo `destinos_entrega` (punto real de entrega, ganado solo por `DESPACHAR A` concordante) — pendiente de decisión, no ejecutado en este bloque.
+- Catálogo real tras el revert: 47 destinos, **6 CONFIRMADO** / 41 `PENDIENTE`. Suite: 655 tests, sin cambios de código, todos verdes.
+- **Próximo bloque oficial: OPERACIÓN O1 — PESO + HORA ENTRADA + HORA SALIDA.**
+
+---
+
 ## 2026-08-11 — DESTINOS D3: confirmación humana asistida de destinos frecuentes (CERRADO)
 
 - **Objetivo:** D2 dejó la resolución de destino resuelta técnicamente, pero el catálogo real tiene 43/47 destinos `PENDIENTE` — el gate de calidad (ya existente, correcto) bloquea el cálculo de ruta para casi todos. Este bloque aumenta la cobertura de `CONFIRMADO` solo con evidencia real, sin bajar el estándar de seguridad.
