@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — DESTINOS D2: resolución canónica de destino estructurada (CERRADO)
+
+- **Objetivo:** el motor de rutas ya calculaba km/min reales, pero el emparejamiento de `obra_destino` (texto OCR libre) contra `destinos_maestros.json` (registrado por dirección, no por nombre comercial) dejaba casi todas las guías reales en `DESTINO_NO_HOMOLOGADO` — bloqueo detectado en la auditoría previa (verificación final de rutas) sobre la guía 464170.
+- **Hallazgo clave (auditoría de 7 guías reales):** el propio documento AZA trae identificadores estructurados — `COD DESTINATARIO`, `DIRECCION`, `COMUNA` — que sí coinciden exactamente con campos ya presentes en el catálogo (`codigo_destino`, `nombre_destino`, `comuna`), aunque el nombre comercial (`obra_destino`) casi nunca coincide por texto. Se implementó `atlas_core/rutas/destino_estructurado.py`: jerarquía conservadora acotada siempre al cliente ya resuelto — (A) código destinatario exacto, (B) dirección+comuna exacta, (C) alias/nombre acotado al cliente, (D) comportamiento histórico global sin cambios, (E) abstención. Nunca fabrica, nunca elige por cercanía ni por "menos ambiguo".
+- **Corrección de rumbo a mitad de bloque (evidencia externa, Codex):** una auditoría independiente de 31 guías reales mostró que `COD DESTINATARIO` **no es una llave segura por sí sola** — el mismo código y cliente puede repetirse con un `DESPACHAR A` (punto de entrega real de ese viaje puntual) distinto del domicilio registrado del cliente. Se añadió `evaluar_concordancia_despacho`: un destino resuelto por identidad **no se enruta a ciegas** — se contrasta contra `DESPACHAR A` del propio documento antes de llamar a ORS; si diverge materialmente, el viaje queda `REQUIERE_REVISION` en vez de calcular una ruta potencialmente incorrecta.
+- **Caso 464170 cerrado:** el destino sí homologa por identidad (dirección+comuna → EBEMA SA/GALVARINO 8501), pero su `DESPACHAR A` real es Mejillones (Región de Antofagasta) — diverge materialmente del domicilio registrado (Quilicura, RM). Correctamente **no** se calcula una ruta automática para esa guía; queda en revisión, con el motivo explícito.
+- **Primer viaje real end-to-end sin ningún dato inyectado (identidad):** guía 464424, cliente TORRES OCARANZA LTDA — código destinatario, dirección y `DESPACHAR A` 100% concordantes, destino ya `CONFIRMADO` → AZA RENCA → Vista Clara 2351 = **16.68 km / 24.53 min** (ORS real). Confirma que la cifra ya reportada en el bloque PLANTA-P1 correspondía a un viaje real y válido, aunque el fraseo de aquel cierre la asoció ambiguamente a la guía 464170.
+- Validación automatizada: **643 tests**, todos verdes (629 → 643, 14 nuevos). 0 regresiones.
+- **Pendiente real remanente (fuera de este bloque):** el extractor lineal de `cliente`/`obra_destino` falla en algunas guías (ej. 464424) incluso con el fallback geométrico — ajeno a la resolución de destino, requeriría su propio bloque. La mayoría de destinos reales siguen en `PENDIENTE` (no `CONFIRMADO`), bloqueando el cálculo de ruta por diseño hasta confirmación humana.
+
+---
+
 ## 2026-08-11 — PLANTA-P1: resolución real de planta origen (CERRADO)
 
 - **Objetivo:** el bloque anterior (RUTAS R1) dejó la integración de rutas lista pero sin forma automática de saber si un viaje salió de AZA RENCA o AZA COLINA. Este bloque resuelve eso.

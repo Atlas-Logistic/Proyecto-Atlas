@@ -4,6 +4,44 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-11 — Cierre: DESTINOS D2, resolución canónica de destino estructurada
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `3f28e4cc6876253dc8a528dbd9ef8651e5daa7e7`
+
+### Problema real confirmado
+
+- La verificación final de rutas (bloque anterior) mostró que `resolver_destino_canonico` (emparejamiento por nombre/alias contra `destinos_maestros.json`) fallaba con `DESTINO_NO_HOMOLOGADO` para prácticamente cualquier guía real, porque `obra_destino` (texto OCR, casi siempre un nombre comercial o de sitio de obra) casi nunca coincide textualmente con `nombre_destino` en el catálogo (que está poblado con direcciones, migradas desde un Excel de estudio de distancias, no desde el texto de las guías).
+- Auditoría de 7 guías reales (`464170`, `464511`, `464489`, `464491`, `464493`, `464264`, `464424`) mostró que el propio documento AZA trae, además de `OBRA DESTINO`, los campos `COD DESTINATARIO`, `DIRECCION` y `COMUNA` -- y que `DIRECCION`+`COMUNA` coinciden **exactamente** (tras normalizar) con `nombre_destino`+`comuna` del catálogo en los casos con OCR limpio. El campo `codigo_destino` del catálogo (vacío en 46/47 registros migrados) coincide exactamente con `COD DESTINATARIO` cuando existe (validado con Torres Ocaranza, guía 464424: mismo código `0001004443` que la observación ya registrada en el catálogo, documentada desde otra guía histórica, 464106).
+- Corrección de rumbo con evidencia externa (auditoría independiente de 31 guías, Codex): `COD DESTINATARIO` no es una llave autónoma segura -- el mismo código/cliente puede repetirse con `DESPACHAR A` (punto de entrega real de ESE viaje) distinto, incluso en otra región (caso documentado: `0001004443`/Torres Ocaranza con `DESPACHAR A` "VISTA CLARA 391" en una guía y "VISTA CLARA 2351" en otra). Confirmado con evidencia propia adicional: guía 464170 (EBEMA SA) homologa correctamente por dirección a GALVARINO 8501 (Quilicura, RM), pero su `DESPACHAR A` real es "AV. ALMTE. LATORRE 843, MEJILLONES" (Región de Antofagasta) -- domicilio registrado y punto de entrega real de este viaje son lugares físicamente distintos.
+
+### Diseño
+
+- **Nuevo módulo `atlas_core/rutas/destino_estructurado.py`** (no reemplaza nada existente):
+  - `extraer_identificadores_destino(textos)`: lee `COD DESTINATARIO`, `DIRECCION`, `COMUNA`, `DESPACHAR A` del texto OCR de página completa ya disponible (mismo texto usado por `resolver_origen_documental`), con regex de límite genérico (un conjunto de etiquetas conocidas marca dónde termina cada valor, sin asumir un orden fijo entre etiquetas -- el orden varía guía a guía). Conservador: si el layout viene degradado por el OCR (etiquetas fuera de orden real, no solo reordenadas), simplemente no captura el campo -- nunca arriesga un valor.
+  - `resolver_destino_canonico_estructurado(...)`: jerarquía **A.** cliente (RUT si se informa, cruzado contra el RUT ya registrado del cliente -- una contradicción de RUT no acota por cliente) + código destinatario exacto y único → **B.** dirección (+comuna si se extrajo) exacta normalizada y única → **C.** alias/nombre acotado al cliente (`CatalogoDestinos.buscar(..., cliente_id=...)`) → **D.** comportamiento histórico global sin cambios (`resolver_destino_canonico`, delegado tal cual). Cada nivel exige coincidencia única; ante 0 o >1 candidatos, cae al siguiente o se abstiene -- nunca fabrica ni "desempata".
+  - `evaluar_concordancia_despacho(destino, identificadores)`: contrasta el destino ya resuelto (identidad/homologación) contra `DESPACHAR A` (punto de entrega real de este viaje) por solape de tokens normalizados (dirección o comuna). Sin `DESPACHAR A` en el documento, se considera concordante (compatible con el comportamiento previo a este campo).
+  - **Refactor sin cambio de comportamiento** en `enriquecimiento_viaje.py`: se extrajo `validar_destino_resoluble` (vigencia/coordenadas/rango RM) de `resolver_destino_canonico`, reutilizado ahora por ambos caminos de resolución -- ningún camino nuevo puede saltarse esos controles.
+  - `calcular_ruta_para_viaje` gana 3 parámetros opcionales (`cliente_texto`, `catalogo_clientes`, `rut_cliente_texto`, todos `None` por defecto): sin ellos, comportamiento **100% idéntico** a antes de este bloque (nivel D global). Con ellos, resuelve por identidad estructurada y, si el destino resuelve pero `DESPACHAR A` diverge materialmente, devuelve `REQUIERE_REVISION`/`DESPACHO_DIVERGENTE_DEL_DESTINO_CANONICO` **antes** de intentar resolver origen/ORS -- nunca calcula una ruta sobre una identidad de destino sin confirmar contra el punto de entrega real.
+  - Import circular evitado con imports perezosos (dentro de función) en ambas direcciones: `destino_estructurado` usa `enriquecimiento_viaje` solo dentro de `resolver_destino_canonico_estructurado`; `enriquecimiento_viaje` usa `destino_estructurado` solo dentro de `calcular_ruta_para_viaje`.
+
+### Validación
+
+- Tests nuevos: **14** en `tests/test_rutas_destino_estructurado.py` -- código exacto, código desconocido cae a dirección, obra_destino sin coincidencia dentro del cliente abstiene, dirección+comuna exacta, alias acotado a cliente, ambigüedad real (entre clientes distintos, la única alcanzable -- `CatalogoDestinos` ya impide duplicados dentro de un mismo cliente en la escritura), cliente no resuelto cae al nivel D histórico, RUT contradictorio no acota por cliente, ruta real calculada con destino confirmado y despacho concordante, destino PENDIENTE bloquea la ruta (gate existente, sin tocar), despacho divergente bloquea la ruta aunque el destino resuelva, extracción robusta a 2 órdenes de etiquetas reales distintos, extracción de `DESPACHAR A`, concordancia por defecto sin evidencia de despacho.
+- Suite completa: **629 → 643 passed**, 0 failed, 0 regresiones.
+- **Validación real (catálogo activo real, 7 guías reales, ORS real):**
+  - 464170 (EBEMA SA): identidad resuelve (`RESUELTO_DIRECCION_COMUNA` → GALVARINO 8501), pero `DESPACHO_DIVERGENTE_DEL_DESTINO_CANONICO` (Mejillones vs Quilicura) -- correctamente **no** calcula ruta.
+  - 464511 (ARMACERO MATCO SA): identidad resuelve (`RESUELTO_DIRECCION_COMUNA` → SANTA ISABEL 585), concordancia con `DESPACHAR A` **sí**, planta AZA RENCA resuelta por documento -- bloqueado por `DESTINO_NO_CONFIRMADO` (destino aún `PENDIENTE`, gate de calidad existente funcionando como se diseñó).
+  - 464424 (TORRES OCARANZA LTDA, destino ya `CONFIRMADO`): identidad resuelve por código destinatario, concordancia con `DESPACHAR A` **sí**, planta AZA RENCA por documento → **ruta real ORS: 16.683 km / 24.53 min**. Cliente de esta guía en particular no lo extrae el pipeline lineal ni el fallback geométrico (falla preexistente y ajena a este bloque, confirmada con `extraer_datos()` puro sin catálogos) -- se usó el texto literal `SEÑOR(ES)` del propio documento como entrada de cliente, documentado explícitamente como diagnóstico, no como sustitución de destino.
+  - Otras 4 guías (464489, 464491, 464493, 464264): abstención correcta (`DESTINO_NO_HOMOLOGADO`) por OCR degradado o catálogo aún sin ese destino -- 0 asignaciones incorrectas.
+
+### Archivos modificados
+
+- Nuevo: `atlas_core/rutas/destino_estructurado.py`, `tests/test_rutas_destino_estructurado.py`.
+- Modificados: `atlas_core/rutas/enriquecimiento_viaje.py` (refactor `validar_destino_resoluble` + parámetros opcionales en `calcular_ruta_para_viaje`), `atlas_core/rutas/__init__.py` (exports nuevos).
+- Sin cambios: `atlas_core/rutas/openrouteservice.py`, `atlas_core/rutas/servicio.py` (ORS y el gate de confirmación no se tocaron), extractores (`atlas_core/extractor.py`), Desktop.
+
+---
+
 ## 2026-08-11 — Cierre: migración de endpoint ORS + validación real con credencial
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `ccc777229cbd072b1f89e5d60efbd5620859731a`

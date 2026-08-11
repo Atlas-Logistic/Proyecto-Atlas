@@ -4,6 +4,19 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre DESTINOS D2: resolución canónica de destino estructurada
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `3f28e4cc6876253dc8a528dbd9ef8651e5daa7e7`.
+- **Objetivo cerrado:** la verificación final de rutas del bloque anterior mostró que casi ninguna guía real homologaba destino, porque `obra_destino` (texto OCR, nombre comercial) casi nunca coincide con `nombre_destino` en el catálogo (poblado con direcciones). Este bloque prioriza identificadores estructurados del propio documento (`COD DESTINATARIO`, `DIRECCION`, `COMUNA`) sobre ese emparejamiento textual débil.
+- **Nuevo módulo `atlas_core/rutas/destino_estructurado.py`**, no invasivo: `resolver_destino_canonico_estructurado(...)` con jerarquía A (código destinatario) → B (dirección+comuna) → C (alias acotado a cliente) → D (comportamiento histórico global, sin cambios) → abstención. `calcular_ruta_para_viaje` gana 3 parámetros opcionales (`cliente_texto`, `catalogo_clientes`, `rut_cliente_texto`) — sin ellos, comportamiento **idéntico** a antes de este bloque.
+- **Corrección de rumbo importante a mitad de bloque (evidencia externa validada con datos propios):** `COD DESTINATARIO` NO es una llave segura por sí sola — el mismo código/cliente puede tener un `DESPACHAR A` (punto de entrega real de ESE viaje) distinto del domicilio registrado. Se agregó `evaluar_concordancia_despacho`: un destino resuelto por identidad se contrasta contra `DESPACHAR A` antes de llamar a ORS; si diverge, `REQUIERE_REVISION`/`DESPACHO_DIVERGENTE_DEL_DESTINO_CANONICO` en vez de una ruta silenciosamente incorrecta.
+- **Caso 464170 (el que motivó este bloque) queda cerrado y explicado:** homologa por identidad a EBEMA SA/Galvarino 8501 (Quilicura, RM), pero su `DESPACHAR A` real es Mejillones (Región de Antofagasta, ~1.400 km de distancia) — **no** se calcula una ruta automática para esa guía; queda correctamente en revisión.
+- **1 viaje real end-to-end, identidad 100% resuelta por código/dirección/concordancia, sin destino inyectado:** guía 464424, TORRES OCARANZA LTDA (destino ya `CONFIRMADO`) → AZA RENCA → Vista Clara 2351 = **16.68 km / 24.53 min** (ORS real). El `cliente` de esta guía puntual no lo extrae el pipeline (falla preexistente y ajena a este bloque, confirmada con `extraer_datos()` puro); se usó el texto literal que trae el propio documento como diagnóstico, declarado explícitamente como tal.
+- Suite final: **629 → 643 tests** (14 nuevos). 0 regresiones.
+- **Pendiente real remanente:** la mayoría de destinos reales del catálogo siguen `PENDIENTE` (no `CONFIRMADO`) — bloquean el cálculo de ruta por diseño hasta confirmación humana explícita, no por un límite de este bloque. El extractor lineal de `cliente`/`obra_destino` sigue fallando en algunas guías (ajeno a destinos, requeriría bloque propio). No se tocó ORS, Desktop, ni ningún extractor.
+
+---
+
 ## 2026-08-11 — Cierre: migración de endpoint ORS + validación real con credencial
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `ccc777229cbd072b1f89e5d60efbd5620859731a`.

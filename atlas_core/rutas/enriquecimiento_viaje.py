@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Iterable
 
+from atlas_core.catalogo_clientes import CatalogoClientes
 from atlas_core.catalogo_destinos import CatalogoDestinos, Destino, EstadoBusquedaDestino
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.rutas.geocerca import RADIO_GEOCERCA_KM_PREDETERMINADO, resolver_planta_por_posicion
@@ -69,6 +70,25 @@ class ResultadoEnriquecimientoRuta:
         return asdict(self)
 
 
+def validar_destino_resoluble(
+    destino: Destino, motivo_exito: str = ""
+) -> tuple[Destino | None, str]:
+    """Controles de vigencia/coordenadas/rango geográfico comunes a
+    cualquier camino de resolución de destino (nombre/alias global -- este
+    módulo -- o identificador estructurado -- `destino_estructurado.py`,
+    Bloque DESTINOS D2). Centralizado para que ningún camino nuevo pueda
+    saltarse estos controles por accidente."""
+    if destino.estado_vigencia != "ACTIVO":
+        return None, "DESTINO_INACTIVO"
+    if destino.latitud is None or destino.longitud is None:
+        return None, "DESTINO_SIN_COORDENADAS"
+    if not (RANGO_LATITUD_RM[0] <= destino.latitud <= RANGO_LATITUD_RM[1]):
+        return None, "DESTINO_COORDENADAS_FUERA_DE_RANGO"
+    if not (RANGO_LONGITUD_RM[0] <= destino.longitud <= RANGO_LONGITUD_RM[1]):
+        return None, "DESTINO_COORDENADAS_FUERA_DE_RANGO"
+    return destino, motivo_exito
+
+
 def resolver_destino_canonico(
     obra_destino_texto: str, catalogo_destinos: CatalogoDestinos
 ) -> tuple[Destino | None, str]:
@@ -85,16 +105,7 @@ def resolver_destino_canonico(
         return None, "DESTINO_AMBIGUO"
     if resultado.estado == EstadoBusquedaDestino.SIN_COINCIDENCIA:
         return None, "DESTINO_NO_HOMOLOGADO"
-    destino = resultado.destino
-    if destino.estado_vigencia != "ACTIVO":
-        return None, "DESTINO_INACTIVO"
-    if destino.latitud is None or destino.longitud is None:
-        return None, "DESTINO_SIN_COORDENADAS"
-    if not (RANGO_LATITUD_RM[0] <= destino.latitud <= RANGO_LATITUD_RM[1]):
-        return None, "DESTINO_COORDENADAS_FUERA_DE_RANGO"
-    if not (RANGO_LONGITUD_RM[0] <= destino.longitud <= RANGO_LONGITUD_RM[1]):
-        return None, "DESTINO_COORDENADAS_FUERA_DE_RANGO"
-    return destino, ""
+    return validar_destino_resoluble(resultado.destino)
 
 
 def _resolver_planta_por_gps(
@@ -194,16 +205,60 @@ def calcular_ruta_para_viaje(
     textos_documento: Iterable[str] | None = None,
     perfil: str = "driving-hgv",
     radio_geocerca_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
+    cliente_texto: str | None = None,
+    catalogo_clientes: CatalogoClientes | None = None,
+    rut_cliente_texto: str | None = None,
 ) -> ResultadoEnriquecimientoRuta:
     """Orquesta destino -> origen (GPS -> documento -> sin determinar) ->
     ORS. Un fallo en cualquier paso deja campos vacíos y un estado/motivo
     explicativo -- nunca lanza, nunca inventa, nunca invalida el viaje que
     lo llama. `textos_documento` (opcional, Bloque PLANTA-P1): texto OCR de
     página completa de la guía, usado solo como fallback documental cuando
-    el GPS no determina nada."""
+    el GPS no determina nada.
+
+    `cliente_texto` + `catalogo_clientes` (opcionales, Bloque DESTINOS D2):
+    cuando ambos se entregan, la resolución de destino prioriza
+    identificadores estructurados del documento (código destinatario,
+    dirección + comuna, alias acotado al cliente) sobre el emparejamiento
+    textual global de `obra_destino_texto` -- ver
+    `destino_estructurado.resolver_destino_canonico_estructurado`. Sin
+    ellos (comportamiento por defecto), la resolución es idéntica a antes
+    de este bloque. Un destino resuelto por identidad tampoco se enruta a
+    ciegas: se contrasta contra DESPACHAR A del propio documento (el punto
+    de entrega real declarado en este viaje, que puede diferir del
+    domicilio registrado del cliente) antes de calcular la ruta."""
     plantas = list(plantas)
 
-    destino, motivo_destino = resolver_destino_canonico(obra_destino_texto, catalogo_destinos)
+    if cliente_texto is not None and catalogo_clientes is not None:
+        from atlas_core.rutas.destino_estructurado import (
+            evaluar_concordancia_despacho,
+            extraer_identificadores_destino,
+            resolver_destino_canonico_estructurado,
+        )
+
+        destino, motivo_destino = resolver_destino_canonico_estructurado(
+            cliente_texto=cliente_texto,
+            obra_destino_texto=obra_destino_texto,
+            textos_documento=textos_documento,
+            catalogo_destinos=catalogo_destinos,
+            catalogo_clientes=catalogo_clientes,
+            rut_cliente_texto=rut_cliente_texto,
+        )
+        if destino is not None:
+            identificadores = extraer_identificadores_destino(textos_documento or [])
+            concordante, motivo_concordancia = evaluar_concordancia_despacho(
+                destino, identificadores
+            )
+            if not concordante:
+                return ResultadoEnriquecimientoRuta(
+                    destino_id=destino.destino_id,
+                    destino_nombre=destino.nombre_destino,
+                    estado_ruta=EstadoRuta.REQUIERE_REVISION.value,
+                    motivo_ruta=motivo_concordancia,
+                )
+    else:
+        destino, motivo_destino = resolver_destino_canonico(obra_destino_texto, catalogo_destinos)
+
     if destino is None:
         return ResultadoEnriquecimientoRuta(
             estado_ruta=EstadoRuta.DESTINO_NO_VALIDO.value, motivo_ruta=motivo_destino
