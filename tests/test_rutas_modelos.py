@@ -11,6 +11,8 @@ def test_estados_minimos_estan_disponibles():
         "SIN_CONEXION", "DIRECCION_NO_ENCONTRADA", "RESULTADO_AMBIGUO",
         "PROVEEDOR_NO_DISPONIBLE", "LIMITE_CUOTA", "RESPUESTA_INVALIDA",
         "REQUIERE_REVISION",
+        # Bloque RUTAS R1: enriquecimiento de ruta a nivel de viaje.
+        "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO",
     }
     assert {estado.value for estado in EstadoRuta} == esperados
 

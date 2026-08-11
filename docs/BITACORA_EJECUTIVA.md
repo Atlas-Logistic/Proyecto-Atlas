@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — RUTAS R1: km/tiempos conectados al viaje + auditoría Onelogis (CERRADO)
+
+- **Objetivo:** conectar el módulo de rutas (ya validado con ORS real) al flujo de viajes: destino canónico → planta de origen → ORS → campos en el reporte, sin inventar ningún origen.
+- **Auditoría Onelogis (Paso 1, hallazgo clave):** Onelogis **sí** está integrado en Atlas, pero solo del lado Desktop (`Atlas-Viajes-Desktop-Restaurado/src/gps_logic.js` + `main.js`), vía un endpoint propio que expone exclusivamente la **última posición conocida** de cada patente (`estado`, `latitude`, `longitud`, `speed`, `timestamp`) — no existe ningún endpoint ni registro histórico consultable por fecha/hora en toda la integración actual. Por diseño, esto significa que **hoy no es posible determinar retroactivamente** en qué planta estaba un camión al momento de una guía ya procesada; solo sería viable para guías procesadas en tiempo real. La documentación del propio proyecto (`CATALOGO_TRANSPORTISTAS_ATLAS.md`) ya señala que ampliar la integración Onelogis requiere autorización y auditoría de privacidad aparte.
+- **Arquitectura implementada:** nuevo contrato `ProveedorPosicionVehiculo` + resolución por geocerca (Haversine, radio conservador 1.5 km, sin ambigüedad entre AZA Renca/Colina) + resolución de destino canónico reutilizando `CatalogoDestinos` (ya existente, sin duplicar lógica) contra `destinos_maestros.json`, con exclusión general (por rango geográfico plausible, no por nombre) de los registros con coordenada errónea detectados en RUTAS-EVAL R1. Todo conectado a `ServicioRutas`/`RepositorioRutas` ya validados con ORS real.
+- **Validación real (catálogo activo real, ORS real, `driving-hgv`):** 3 viajes reales probados. EBEMA SA correctamente bloqueado por una salvaguarda ya existente (destino aún no `CONFIRMADO` en catálogo — no se fuerza nada). Torres Ocaranza Ltda (destino `CONFIRMADO`): planta AZA RENCA (determinada por posición GPS **inyectada/simulada**, ya que no existe consulta histórica real hoy) → **16.68 km / 24.53 min**, y una repetición del mismo par confirma **caché activo, 0 llamadas nuevas a ORS**. Un tercer caso sin evidencia GPS se abstiene correctamente (`ORIGEN_NO_DETERMINADO`) sin invalidar el viaje.
+- Campos propagados a `viajes.csv` de forma **100% backward-compatible** (columnas nuevas al final, vacías por defecto sin el nuevo parámetro opcional).
+- Validación automatizada: **618 tests**, todos verdes (603 → 618). 0 regresiones.
+- **Bloqueo real remanente:** no hay hoy una fuente de posición GPS histórica utilizable para guías ya procesadas. **Siguiente bloque obligatorio antes de mostrar km automáticos en Desktop: PLANTA-P1 / ONELOGIS** — confirmar con Onelogis si existe (o puede habilitarse) un endpoint histórico, o definir una estrategia alternativa de origen documental.
+
+---
+
 ## 2026-08-11 — ORS: migración de endpoint + validación real con credencial (CERRADO)
 
 - **Objetivo:** activar la integración real de OpenRouteService (bloqueada desde RUTAS-EVAL R1 por falta de credencial) y confirmar que el adaptador apunta al host vigente.

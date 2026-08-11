@@ -276,3 +276,54 @@ def test_encabezado_sin_filas_genera_reporte_vacio(tmp_path):
     _, salida, manifest = _generar(tmp_path, [])
     assert manifest["totales"]["filas_leidas"] == 0
     assert _leer_csv(salida / "viajes.csv") == []
+
+
+# --- Bloque RUTAS R1: columnas de ruta backward-compatible ---
+
+_COLUMNAS_RUTA = (
+    "planta_origen_id", "planta_origen_nombre", "destino_id", "destino_nombre",
+    "distancia_km", "duracion_min", "proveedor_ruta", "estado_ruta",
+    "motivo_ruta", "origen_determinado_por",
+)
+
+
+def test_columnas_ruta_vacias_sin_calculador_rutas_no_regresion(tmp_path):
+    """Sin `calculador_rutas` (comportamiento por defecto), el reporte es
+    idéntico al de antes de este bloque salvo por columnas nuevas vacías --
+    no regresión del flujo OCR/reportes existente."""
+    origen, salida, _ = _generar(tmp_path, [_fila()])
+    filas = _leer_csv(salida / "viajes.csv")
+    assert len(filas) == 1
+    for columna in _COLUMNAS_RUTA:
+        assert filas[0][columna] == ""
+    # el resto de columnas y su contenido no cambian
+    assert filas[0]["clientes"] == "CLIENTE ÑUBLE"
+    assert filas[0]["obras_destino"] == "OBRA ÁGUILA"
+
+
+def test_calculador_rutas_propaga_campos_al_csv(tmp_path):
+    def calculador_falso(viaje):
+        return {
+            "planta_origen_id": "planta-1", "planta_origen_nombre": "AZA RENCA",
+            "destino_id": "destino-1", "destino_nombre": "GALVARINO 8501",
+            "distancia_km": "7.43", "duracion_min": "12.06",
+            "proveedor_ruta": "openrouteservice", "estado_ruta": "RUTA_CALCULADA",
+            "motivo_ruta": "", "origen_determinado_por": "ONELOGIS_GPS",
+        }
+
+    origen = tmp_path / "entrada.csv"
+    salida = tmp_path / "reporte_con_rutas"
+    _escribir_csv(origen, [_fila()])
+    generar_reporte_viajes(
+        origen, salida, carpeta_catalogos=tmp_path / "catálogos", reloj=RELOJ,
+        calculador_rutas=calculador_falso,
+    )
+    filas = _leer_csv(salida / "viajes.csv")
+    assert filas[0]["planta_origen_nombre"] == "AZA RENCA"
+    assert filas[0]["distancia_km"] == "7.43"
+    assert filas[0]["duracion_min"] == "12.06"
+    assert filas[0]["estado_ruta"] == "RUTA_CALCULADA"
+    assert filas[0]["origen_determinado_por"] == "ONELOGIS_GPS"
+    # sin API key ni secretos en ningún campo persistido
+    contenido = (salida / "viajes.csv").read_text(encoding="utf-8-sig")
+    assert "api_key" not in contenido.lower() and "authorization" not in contenido.lower()

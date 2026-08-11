@@ -23,6 +23,11 @@ class EstadoRuta(str, Enum):
     LIMITE_CUOTA = "LIMITE_CUOTA"
     RESPUESTA_INVALIDA = "RESPUESTA_INVALIDA"
     REQUIERE_REVISION = "REQUIERE_REVISION"
+    # Bloque RUTAS R1: enriquecimiento de ruta a nivel de viaje (planta
+    # origen/destino canónico). Un error de ruta nunca invalida el viaje —
+    # estos estados solo describen el enriquecimiento logístico opcional.
+    ORIGEN_NO_DETERMINADO = "ORIGEN_NO_DETERMINADO"
+    DESTINO_NO_VALIDO = "DESTINO_NO_VALIDO"
 
 
 @dataclass(frozen=True)

@@ -81,6 +81,20 @@ COLUMNAS_VIAJES = (
     "tipos_carga",
     "evidencias_documentos",
     "fecha_creacion",
+    # Bloque RUTAS R1: enriquecimiento logístico opcional (planta origen +
+    # destino canónico + ORS). Agregadas al final -- backward-compatible:
+    # sin `calculador_rutas`, quedan vacías y el reporte es idéntico al de
+    # antes de este bloque.
+    "planta_origen_id",
+    "planta_origen_nombre",
+    "destino_id",
+    "destino_nombre",
+    "distancia_km",
+    "duracion_min",
+    "proveedor_ruta",
+    "estado_ruta",
+    "motivo_ruta",
+    "origen_determinado_por",
 )
 
 
@@ -155,8 +169,24 @@ def _escribir_csv(
         escritor.writerows(filas)
 
 
-def _fila_viaje(viaje) -> dict[str, object]:
+_CAMPOS_RUTA_VACIOS = {
+    "planta_origen_id": "", "planta_origen_nombre": "",
+    "destino_id": "", "destino_nombre": "",
+    "distancia_km": "", "duracion_min": "",
+    "proveedor_ruta": "", "estado_ruta": "", "motivo_ruta": "",
+    "origen_determinado_por": "",
+}
+
+
+def _fila_viaje(
+    viaje, calculador_rutas: Callable[[object], dict[str, str]] | None = None
+) -> dict[str, object]:
     datos = viaje.a_dict()
+    campos_ruta = dict(_CAMPOS_RUTA_VACIOS)
+    if calculador_rutas is not None:
+        resultado = calculador_rutas(viaje)
+        if resultado:
+            campos_ruta.update({clave: resultado.get(clave, "") for clave in _CAMPOS_RUTA_VACIOS})
     return {
         "viaje_id": datos["viaje_id"],
         "numero_transporte": datos["numero_transporte"],
@@ -179,6 +209,7 @@ def _fila_viaje(viaje) -> dict[str, object]:
             datos["evidencias_documentos"], ensure_ascii=False, sort_keys=True
         ),
         "fecha_creacion": datos["fecha_creacion"],
+        **campos_ruta,
     }
 
 
@@ -292,8 +323,17 @@ def generar_reporte_viajes(
     *,
     carpeta_catalogos: str | Path = "catalogos",
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    calculador_rutas: Callable[[object], dict[str, str]] | None = None,
 ) -> dict[str, object]:
-    """Agrupa viajes sin modificar la entrada ni sobrescribir otro reporte."""
+    """Agrupa viajes sin modificar la entrada ni sobrescribir otro reporte.
+
+    `calculador_rutas` (Bloque RUTAS R1, opcional): función que recibe un
+    `Viaje` y devuelve el enriquecimiento de ruta (ver
+    `atlas_core.rutas.calcular_ruta_para_viaje`/`ResultadoEnriquecimientoRuta.a_dict`).
+    Sin este parámetro (comportamiento por defecto, sin cambios), las
+    columnas de ruta quedan vacías -- 100% compatible con reportes previos
+    a este bloque.
+    """
     origen = Path(ruta_csv)
     salida = Path(directorio_salida)
     _validar_rutas(origen, salida)
@@ -318,7 +358,7 @@ def generar_reporte_viajes(
     _escribir_csv(
         salida / "viajes.csv",
         COLUMNAS_VIAJES,
-        [_fila_viaje(viaje) for viaje in viajes],
+        [_fila_viaje(viaje, calculador_rutas) for viaje in viajes],
     )
     _escribir_csv(
         salida / "documentos_sin_transporte.csv",
