@@ -4,6 +4,23 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-11 — Cierre Bloque D1: separar GIRO de obra_destino
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `66d0edabbfd506795dc675f2149e4875dc6fede2`.
+- **Objetivo cerrado:** `obra_destino` seguía devolviendo el valor de GIRO (`"VENTA AL POR MAYOR D"`) en la guía real `464170`, en vez del destino real (`"SUPERMERCADO SEÑOR DE LOS MI"`) — prerrequisito directo del próximo frente RUTAS/KM/TIEMPOS.
+- **Causa exacta en `_extraer_asociaciones_geometricas` (`atlas_core/extractor.py`):** (1) `nominal()` rechazaba cualquier candidato que contuviera la subcadena "SEÑOR" — incluyendo el propio nombre real del destino, que casualmente contiene esa palabra; (2) sin ese candidato, GIRO (columna vecina, misma fila que OBRA DESTINO — patrón de formulario en dos columnas de este proveedor AZA) quedaba como única opción restante y ganaba por defecto, sin ninguna regla que lo excluyera.
+- **Fix, general y sin heurísticas de guía:**
+  - `nominal()` ya no descarta por subcadena "SEÑOR"; en su lugar descarta solo si el bloque completo *es* la etiqueta SEÑOR(ES) vía `_es_etiqueta_senor` (mismo criterio que C1 ya usa para la etiqueta, ahora aplicado también al lado del candidato).
+  - Nueva identificación explícita de GIRO (`es_etiqueta_giro`) y de "cuál sería el propio valor de GIRO" (`_mejor_candidato`, misma función `puntuar` que usa el resto de la lógica): ese bloque queda excluido, por identidad, de competir como candidato de `obra_destino`. **Deliberadamente no se implementó por comparación de distancias** (primer intento, descartado): en este documento GIRO y OBRA DESTINO son columnas vecinas casi equidistantes de sus respectivos valores, y una comparación de distancia bruta puede perder por márgenes de 1-2 px — la exclusión por identidad es exacta y no depende de umbrales.
+- **Bug colateral encontrado y corregido durante la validación con cajas reales exactas:** `_extraer_rut_cliente_geometrico` (C1, Parte D) nunca se activaba en producción real — exigía gap **estrictamente positivo** entre las etiquetas SEÑOR(ES) y R.U.T., pero PaddleOCR entrega esas dos filas con cajas exactamente adyacentes (gap 0) en este documento. El reporte de cierre de C1 afirmó erróneamente `rut_cliente = 83.585.400-0` como validado en el pipeline real — en realidad esa verificación se hizo solo con coordenadas de test redondeadas que evitaban el caso límite por casualidad, y el campo ni siquiera se expone en el dict que devuelve `procesar_archivo`. Corregido (`>` → `>=`) y confirmado ahora con las cajas reales completas.
+- **Catálogo (solo inspección, sin conectar nada nuevo):** el destino real de EBEMA SA existe en `%LOCALAPPDATA%\Atlas\datos\catalogos_privados\destinos_maestros.json` — registro con `cliente_id` que coincide exactamente con el de EBEMA SA en `clientes.json`, dirección `GALVARINO 8501, QUILICURA, CHILE` ya geocodificada (lat/lon, `GEOCODIFICACION_ORS`, confidence 0.8, match_type=fallback). El nombre canónico ahí es la dirección, no "SUPERMERCADO SEÑOR DE LOS MI" — homologar por `cliente_id` cruzando catálogos es una integración nueva, fuera de alcance de D1; queda para RUTAS.
+- **Caso real validado, guía `464170`, PaddleOCR GPU, catálogo activo real:** `obra_destino`: `"VENTA AL POR MAYOR D"` → **`"SUPERMERCADO SEÑOR DE LOS MI"`**. `cliente=EBEMA SA`, `chofer=IVAN ROA` (homologado), `rut_chofer=10190440-7` sin cambios respecto a C1.
+- **Validación adicional corta (4 guías reales, destino ya conocido antes de este fix): `464511`, `464493`, `464479`, `464494`** — cliente/obra_destino/chofer/indicador_revision idénticos antes y después, 0 regresiones.
+- Suite final: **601/601 tests** (594 → 601).
+- **Próximo bloque oficial: RUTAS-EVAL / RUTAS R1** — comparación corta de proveedores y recuperación de infraestructura de km/tiempos, usando como insumo el destino ya recuperado por este bloque y la dirección canónica ya geocodificada encontrada en `destinos_maestros.json`. No iniciado.
+
+---
+
 ## 2026-08-11 — Cierre Bloque C1: cliente + chofer nuevo + propagación de REVISAR al viaje
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline anterior: `129b459d936d6d05ae0615cc93fa8842440f4d3a`.

@@ -372,6 +372,36 @@ def test_enriquecer_ebema_sa_resuelve_a_nombre_canonico_del_catalogo(tmp_path):
     assert enriquecidos["cliente"] == "EBEMA SA"
 
 
+# --- Bloque D1: obra_destino exacta + catálogo -> canónico ---
+
+
+def test_enriquecer_obra_destino_codigo_destinatario_resuelve_canonico(tmp_path):
+    """Caso real Bloque D1: con un candidato de obra_destino ya extraído
+    (geometría), la homologación por código destinatario debe fijar el
+    nombre canónico del catálogo, sin fabricar nada si el candidato no
+    hubiera existido."""
+    (tmp_path / "destinos.json").write_text(
+        json.dumps({"0002013046": {"nombre": "GALVARINO 8501 QUILICURA", "rut_empresa": "835854000"}}),
+        encoding="utf-8",
+    )
+    for nombre_archivo in ("empresas.json", "choferes.json", "vehiculos.json"):
+        (tmp_path / nombre_archivo).write_text("{}", encoding="utf-8")
+
+    datos = {
+        "cliente": "EBEMA SA",
+        "RUT del cliente": "83.585.400-0",
+        "obra destino": "SUPERMERCADO SEÑOR DE LOS MI",
+        "chofer": "No encontrado",
+        "RUT del chofer": "No encontrado",
+        "patente del tracto": "No encontrado",
+    }
+    textos = ["COD DESTINATARIO: 0002013046"]
+
+    enriquecidos = enriquecer_datos_con_catalogos(datos, textos, tmp_path)
+
+    assert enriquecidos["obra destino"] == "GALVARINO 8501 QUILICURA"
+
+
 # --- Bloque C1 Parte A: alta controlada de IVAN ROA (chofer nuevo real) ---
 
 

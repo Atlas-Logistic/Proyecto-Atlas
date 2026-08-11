@@ -281,6 +281,119 @@ def test_geometria_rut_cliente_ambiguo_se_abstiene():
     assert _extraer_rut_cliente_geometrico(bloques) == {}
 
 
+# --- Bloque D1: separar GIRO de obra_destino (caso real guía 464170) ---
+
+
+def test_geometria_obra_destino_no_confunde_giro_con_destino_real():
+    """Caso real obligatorio guía 464170: SEÑOR(ES): EBEMA SA / GIRO: VENTA
+    AL POR MAYOR D... / OBRA DESTINO: SUPERMERCADO SEÑOR DE LOS MI. Antes
+    del fix, el candidato real de obra_destino quedaba excluido por
+    contener la palabra "SEÑOR" (misma clase de colisión que motivó C1,
+    pero del lado del candidato en vez de la etiqueta), y el valor de GIRO
+    -en la columna vecina, misma fila- terminaba ganando por ser el único
+    candidato restante."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 46, 550, 72, 15),
+        _bloque(": EBEMA SA", 217, 550, 71, 15),
+        _bloque("SOLICITANTE", 482, 554, 84, 14),
+        _bloque(": SUPERMERCADO SEÑOR DE LOS MI", 623, 550, 225, 17),
+        _bloque("GIRO", 46, 585, 37, 18),
+        _bloque(": VENTA AL POR MAYOR D", 216, 589, 160, 13),
+        _bloque("OBRA DESTINO", 482, 587, 95, 14),
+        _bloque(": SUPERMERCADO SEÑOR DE LOS MI", 622, 583, 226, 17),
+    ]
+
+    resultado = _extraer_asociaciones_geometricas(bloques)
+
+    assert resultado["obra destino"] == "SUPERMERCADO SEÑOR DE LOS MI"
+
+
+def test_geometria_giro_nunca_se_devuelve_como_obra_destino():
+    """GIRO es un campo distinto y nunca es elegible como obra/destino,
+    aunque sea el único bloque cercano a la etiqueta OBRA DESTINO."""
+    bloques = [
+        _bloque("GIRO", 46, 585, 40, 18),
+        _bloque(": VENTA AL POR MAYOR D", 216, 589, 165, 14),
+        _bloque("OBRA DESTINO", 482, 587, 95, 15),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques).get("obra destino") is None
+
+
+def test_geometria_solo_giro_sin_obra_destino_no_inventa_nada():
+    """Si el documento solo aporta GIRO, sin ninguna etiqueta de
+    OBRA/DESTINO, no debe inventarse un valor de obra_destino a partir de
+    GIRO ni de ningún otro campo."""
+    bloques = [
+        _bloque("GIRO", 46, 585, 40, 18),
+        _bloque(": VENTA AL POR MAYOR D", 216, 589, 165, 14),
+    ]
+
+    assert "obra destino" not in _extraer_asociaciones_geometricas(bloques)
+
+
+def test_geometria_obra_con_palabra_senor_no_crea_etiqueta_falsa_de_cliente():
+    """Un nombre de obra/destino real que contiene la palabra SEÑOR
+    (SUPERMERCADO SEÑOR DE LOS MI) no debe generar una etiqueta de cliente
+    falsa que interfiera con la resolución correcta de cliente (fix C1,
+    preservado aquí junto con la resolución de obra_destino)."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 46, 550, 72, 15),
+        _bloque(": EBEMA SA", 217, 550, 71, 15),
+        _bloque("OBRA DESTINO", 482, 587, 95, 14),
+        _bloque(": SUPERMERCADO SEÑOR DE LOS MI", 622, 583, 226, 17),
+    ]
+
+    resultado = _extraer_asociaciones_geometricas(bloques)
+
+    assert resultado["cliente"] == "EBEMA SA"
+    assert resultado["obra destino"] == "SUPERMERCADO SEÑOR DE LOS MI"
+
+
+def test_geometria_obra_destino_ambiguo_se_abstiene():
+    """Ante dos candidatos igualmente plausibles de obra_destino, la
+    geometría debe abstenerse en vez de elegir por orden OCR."""
+    bloques = [
+        _bloque("OBRA DESTINO", 100, 50, 105, 18),
+        _bloque("DESTINO NORTE", 220, 40, 110, 18),
+        _bloque("DESTINO SUR", 220, 60, 100, 18),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques).get("obra destino") is None
+
+
+def test_geometria_no_regresion_cliente_chofer_rut_cliente_junto_a_obra_destino():
+    """No regresión (Bloque D1): resolver obra_destino correctamente no
+    altera las resoluciones de cliente/chofer/RUT cliente ya corregidas en
+    C1, usando la geometría real (bounding boxes reales) de la guía 464170."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 46, 553, 72, 17),
+        _bloque(": EBEMA SA", 217, 557, 71, 11),
+        _bloque("R.U.T.", 47, 570, 39, 15),
+        _bloque(":83.585.400-0", 216, 573, 103, 13),
+        _bloque("SOLICITANTE", 482, 554, 84, 14),
+        _bloque(": SUPERMERCADO SEÑOR DE LOS MI", 623, 550, 225, 17),
+        _bloque("GIRO", 46, 585, 37, 18),
+        _bloque(": VENTA AL POR MAYOR D", 216, 589, 160, 13),
+        _bloque("OBRA DESTINO", 482, 587, 95, 14),
+        _bloque(": SUPERMERCADO SEÑOR DE LOS MI", 622, 583, 226, 17),
+        _bloque("RETIRA", 549, 1101, 49, 15),
+        _bloque("RUT CHOFER", 26, 1113, 87, 14),
+        _bloque(":10190440-7", 173, 1114, 91, 15),
+        _bloque(": IVAN ROA", 623, 1107, 74, 11),
+        _bloque("PATENTE", 550, 1118, 61, 14),
+    ]
+
+    asociaciones = _extraer_asociaciones_geometricas(bloques)
+    chofer = _extraer_chofer_geometrico(bloques)
+    rut_cliente = _extraer_rut_cliente_geometrico(bloques)
+
+    assert asociaciones["cliente"] == "EBEMA SA"
+    assert asociaciones["obra destino"] == "SUPERMERCADO SEÑOR DE LOS MI"
+    assert chofer["valor"] == "IVAN ROA"
+    assert rut_cliente["valor"] == "83.585.400-0"
+
+
 def _transporte(candidato, etiqueta="NRO. TRANSPORTE"):
     return _extraer_transporte_geometrico(
         [_bloque(etiqueta, 20, 20, 120), _bloque(candidato, 180, 20, 100)]

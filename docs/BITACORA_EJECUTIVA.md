@@ -4,6 +4,20 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-11 — Bloque D1: separar GIRO de obra_destino (CERRADO)
+
+- **Objetivo:** con cliente/chofer/RUT ya corregidos en C1, `obra_destino` seguía devolviendo el valor de **GIRO** (`"VENTA AL POR MAYOR D"`) en vez del destino real (`"SUPERMERCADO SEÑOR DE LOS MI"`) en la guía real `464170` — prerrequisito directo del próximo frente de rutas/KM/tiempos, que necesita un destino confiable.
+- **Causa exacta:** dos colisiones combinadas en `_extraer_asociaciones_geometricas`. (1) La lista de exclusión de candidatos rechazaba por subcadena cualquier texto que contuviera la palabra "SEÑOR" — el propio nombre real del destino ("SUPERMERCADO SEÑOR DE LOS MI") quedaba descartado como candidato. (2) Sin ese candidato, el único bloque que sobraba cerca de la etiqueta OBRA DESTINO era el valor de GIRO, en la columna vecina de la misma fila (patrón de formulario en dos columnas), y sin ninguna regla que lo excluyera explícitamente, terminaba ganando por ser la única opción.
+- **Corrección, general y sin heurísticas de archivo:** (1) el candidato ya no se descarta por contener la palabra suelta "SEÑOR" — solo se descarta si el bloque completo *es* la etiqueta SEÑOR(ES) (mismo criterio conservador que ya usa C1 para la etiqueta); (2) GIRO queda estructuralmente inelegible como obra/destino: se identifica por identidad cuál sería el propio valor de GIRO y se excluye de competir por cualquier otro campo, sin depender de comparar distancias (frágil cuando GIRO y el destino real son columnas vecinas casi equidistantes).
+- **Hallazgo colateral corregido:** al validar con coordenadas reales exactas se detectó que `_extraer_rut_cliente_geometrico` (Parte D de C1) nunca llegaba a activarse en producción — su ancla exigía una separación positiva estricta entre las etiquetas SEÑOR(ES) y R.U.T., pero en el documento real esas cajas quedan exactamente adyacentes (gap cero). Corregido a `>=` inclusive del gap cero; confirmado con las cajas reales completas.
+- **Catálogo:** el destino real de EBEMA SA (dirección `GALVARINO 8501, QUILICURA`, ya geocodificada) existe en `destinos_maestros.json`, vinculado por `cliente_id` — pero solo se reportó, no se conectó una homologación nueva por esa vía (fuera de alcance de D1; el enriquecimiento existente por código de destinatario contra `destinos.json` sigue funcionando igual, sin fabricar nada).
+- **Caso real validado, guía `464170`:** `obra_destino` pasa de `"VENTA AL POR MAYOR D"` a `"SUPERMERCADO SEÑOR DE LOS MI"`; `cliente=EBEMA SA`, `chofer=IVAN ROA`, `rut_chofer=10190440-7` sin cambios.
+- **Validación adicional corta (4 guías reales con destino ya conocido: `464511`, `464493`, `464479`, `464494`):** resultados idénticos antes/después en cliente, obra_destino, chofer e indicador_revision — 0 regresiones.
+- Validación automatizada: **601 tests**, todos verdes (594 → 601). 0 regresiones.
+- **Siguiente bloque oficial: RUTAS-EVAL / RUTAS R1** — comparación corta de proveedores y recuperación de infraestructura de km/tiempos. No iniciado.
+
+---
+
 ## 2026-08-11 — Bloque C1: cliente + chofer nuevo + propagación de REVISAR al viaje (CERRADO)
 
 - **Objetivo:** la guía real `464170` mostraba `cliente` vacío y chofer `NO HOMOLOGADO` pese a que PaddleOCR leía ambos campos correctamente (`SEÑOR(ES): EBEMA SA`, `RETIRA: IVAN ROA`, `RUT CHOFER: 10190440-7`); el viaje además quedaba `CONFIRMADO` en silencio con esos vacíos. C1 corrige las causas generales (sin heurísticas de archivo) y cierra el ciclo end-to-end.

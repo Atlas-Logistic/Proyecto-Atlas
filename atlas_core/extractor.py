@@ -86,11 +86,17 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     if not items:
         return {}
 
+    # "SENOR" deliberadamente NO está en esta lista: excluir por subcadena
+    # rechazaría también nombres reales de obra/destino que contienen esa
+    # palabra (p. ej. "SUPERMERCADO SEÑOR DE LOS MI"). La etiqueta SEÑOR(ES)
+    # se descarta como candidato aparte, en `nominal()`, comparando el bloque
+    # completo contra `_es_etiqueta_senor` (mismo criterio conservador que
+    # usa `es_etiqueta` para reconocer la etiqueta de cliente).
     exclusiones = (
         "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
         "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
         "SOLICITANTE", "TRANSPORTE", "FECHA", "ENTRADA", "SALIDA",
-        "OBRA DESTINO", "SENOR", "DESPACHAR A", "PESO", "BRUTO",
+        "OBRA DESTINO", "DESPACHAR A", "PESO", "BRUTO",
         "TARA", "TOTAL", "VALOR", "NETO", "IVA",
     )
 
@@ -100,9 +106,14 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
             return _es_etiqueta_senor(texto) or texto == "CLIENTE"
         return "OBRA DESTINO" in texto or texto == "DESTINO"
 
+    def es_etiqueta_giro(item: Dict[str, Any]) -> bool:
+        return item["simple"] == "GIRO"
+
     def nominal(item: Dict[str, Any]) -> bool:
         texto = item["simple"]
         if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
+            return False
+        if _es_etiqueta_senor(texto):
             return False
         if any(palabra in texto for palabra in exclusiones):
             return False
@@ -132,12 +143,43 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                 return 0.34 + (etiqueta["y1"] - candidato["y2"]) / 160
         return None
 
+    etiquetas_giro = [item for item in items if es_etiqueta_giro(item)]
+
+    def _mejor_candidato(etiqueta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """El candidato nominal con mejor (menor) puntaje para esta etiqueta,
+        usando la misma función de puntuación que `seleccionar`. Se usa para
+        identificar qué bloque "pertenece" a GIRO, no para resolver un campo."""
+        mejores = [
+            (puntuar(etiqueta, item), item)
+            for item in items
+            if item is not etiqueta and nominal(item)
+        ]
+        mejores = [(puntuacion, item) for puntuacion, item in mejores if puntuacion is not None and puntuacion <= 1.25]
+        if not mejores:
+            return None
+        return min(mejores, key=lambda par: par[0])[1]
+
+    # GIRO es un campo distinto y nunca es elegible como obra/destino. En vez
+    # de comparar distancias (frágil cuando GIRO y OBRA DESTINO son columnas
+    # vecinas casi equidistantes, caso real guía 464170), se identifica por
+    # identidad el bloque que sería el propio valor de GIRO y se excluye de
+    # ser candidato de cualquier otro campo — garantiza que GIRO nunca gane,
+    # sin depender de umbrales de proximidad.
+    valores_giro = {
+        id(candidato)
+        for etiqueta_giro in etiquetas_giro
+        for candidato in (_mejor_candidato(etiqueta_giro),)
+        if candidato is not None
+    }
+
     def seleccionar(campo: str) -> Optional[str]:
         decisiones = []
         for etiqueta in (item for item in items if es_etiqueta(item, campo)):
             candidatos = []
             for item in items:
                 if item is etiqueta or not nominal(item):
+                    continue
+                if campo == "obra destino" and id(item) in valores_giro:
                     continue
                 puntuacion = puntuar(etiqueta, item)
                 if puntuacion is None or puntuacion > 1.25:
@@ -219,7 +261,11 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             item for item in items
             if es_etiqueta_rut(item)
             and abs(item["x1"] - etiqueta_cliente["x1"]) <= 25
-            and 0 < item["y1"] - etiqueta_cliente["y2"] <= max(etiqueta_cliente["h"], item["h"]) * 1.5
+            # >= 0 (no "> 0"): en OCR real las cajas de filas contiguas de un
+            # formulario suelen quedar exactamente adyacentes (gap 0), no con
+            # un espacio positivo — caso real guía 464170 (SEÑOR(ES) termina
+            # en y=570, R.U.T. empieza en y=570).
+            and 0 <= item["y1"] - etiqueta_cliente["y2"] <= max(etiqueta_cliente["h"], item["h"]) * 1.5
         ]
         for etiqueta_rut in etiquetas_rut:
             for item in items:
