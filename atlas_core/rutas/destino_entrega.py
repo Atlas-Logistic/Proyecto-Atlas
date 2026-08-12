@@ -36,9 +36,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Any, Iterable
 
 from atlas_core.catalogo_plantas import Planta
+from atlas_core.extractor import (
+    _despachar_a_lineal_contaminado,
+    _extraer_despachar_a_geometrico,
+)
 from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
 from atlas_core.rutas.geocerca import RADIO_GEOCERCA_KM_PREDETERMINADO, distancia_km_haversine
 from atlas_core.rutas.modelos import CandidatoGeocodificacion, Coordenadas, EstadoRuta
@@ -106,17 +110,70 @@ class ResultadoDestinoEntrega:
         }
 
 
+def _texto_normalizado_sin_acentos(texto: str) -> str:
+    import unicodedata
+
+    normalizado = unicodedata.normalize("NFD", str(texto or "").upper())
+    return "".join(c for c in normalizado if unicodedata.category(c) != "Mn")
+
+
+def _misma_localidad(a: CandidatoGeocodificacion, b: CandidatoGeocodificacion) -> bool:
+    """True si ambos candidatos declaran la MISMA localidad+región (Pelias
+    ya los nombró igual) -- caso real Coronel/Biobío: dos candidatos del
+    mismo lugar real a ~2 km entre sí (fuera del margen de distancia de
+    `_candidatos_son_el_mismo_lugar`, que asume variación de número de
+    casa, no de localidad completa). Nunca compara localidades distintas
+    por cercanía -- solo por igualdad textual exacta (sin acentos/mayúsculas)."""
+    localidad_a = _texto_normalizado_sin_acentos(a.localidad)
+    localidad_b = _texto_normalizado_sin_acentos(b.localidad)
+    region_a = _texto_normalizado_sin_acentos(a.region)
+    region_b = _texto_normalizado_sin_acentos(b.region)
+    if not localidad_a or not region_a or not localidad_b or not region_b:
+        return False
+    return localidad_a == localidad_b and region_a == region_b
+
+
 def _candidatos_son_el_mismo_lugar(candidatos: tuple[CandidatoGeocodificacion, ...]) -> bool:
     """True si TODOS los candidatos caen dentro de `MARGEN_MISMO_LUGAR_KM`
-    del primero -- es decir, representan el mismo lugar real con
-    variación de número de casa, no ubicaciones distintas."""
+    del primero (variación de número de casa) O TODOS declaran la misma
+    localidad+región exacta (Bloque E2E R1.1 -- ver `_misma_localidad`,
+    caso real Coronel/Biobío) -- en cualquier caso, el mismo lugar real,
+    no ubicaciones distintas."""
     if len(candidatos) <= 1:
         return True
-    base = candidatos[0].coordenadas
-    return all(
-        distancia_km_haversine(base, c.coordenadas) <= MARGEN_MISMO_LUGAR_KM
+    base = candidatos[0]
+    if all(
+        distancia_km_haversine(base.coordenadas, c.coordenadas) <= MARGEN_MISMO_LUGAR_KM
         for c in candidatos[1:]
-    )
+    ):
+        return True
+    return all(_misma_localidad(base, c) for c in candidatos[1:])
+
+
+def _candidatos_con_soporte_textual(
+    candidatos: tuple[CandidatoGeocodificacion, ...], texto_original: str,
+) -> tuple[CandidatoGeocodificacion, ...]:
+    """Bloque E2E R1.1 -- descarta candidatos cuya localidad/región
+    declarada NO aparece mencionada en ningún lugar del propio DESPACHAR A
+    (p. ej. "Ránquil" cuando el documento dice "...CORONEL" -- Pelias
+    ofrece un vecino administrativo sin ningún respaldo textual). Nunca
+    reduce a una lista vacía: si NINGÚN candidato tiene respaldo textual
+    (p. ej. Pelias no devolvió localidad/región en ninguno), se conservan
+    todos -- este filtro solo AYUDA a desambiguar, nunca fabrica evidencia
+    donde no la hay. Funciona para cualquier localidad/región (RM,
+    Coronel, Temuco, Mejillones, ...), no compara contra una lista fija de
+    nombres chilenos."""
+    texto_normalizado = _texto_normalizado_sin_acentos(texto_original)
+
+    def _tiene_soporte(candidato: CandidatoGeocodificacion) -> bool:
+        for campo in (candidato.localidad, candidato.region):
+            for palabra in _texto_normalizado_sin_acentos(campo).split():
+                if len(palabra) >= 4 and palabra in texto_normalizado:
+                    return True
+        return False
+
+    con_soporte = tuple(c for c in candidatos if _tiene_soporte(c))
+    return con_soporte if con_soporte else candidatos
 
 
 def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> CandidatoGeocodificacion:
@@ -150,14 +207,22 @@ def resolver_destino_entrega(
     resultado = proveedor_geocodificacion.geocodificar(consulta)
 
     if resultado.estado == EstadoRuta.RESULTADO_AMBIGUO:
-        if _candidatos_son_el_mismo_lugar(resultado.candidatos):
+        # Bloque E2E R1.1 -- antes de decidir si hay ambigüedad real,
+        # descarta candidatos sin ningún respaldo textual en el propio
+        # DESPACHAR A (p. ej. "Ránquil" cuando el documento dice
+        # "...CORONEL"). Nunca inventa evidencia: si ninguno tiene
+        # respaldo, sigue con el conjunto completo (comportamiento
+        # idéntico al de antes de este bloque).
+        candidatos_relevantes = _candidatos_con_soporte_textual(resultado.candidatos, texto)
+        if _candidatos_son_el_mismo_lugar(candidatos_relevantes):
             # Varios candidatos, pero todos caen dentro de
-            # MARGEN_MISMO_LUGAR_KM entre sí -- p. ej. Pelias no pudo
-            # calzar el número de casa exacto y devolvió vecinos de la
-            # misma cuadra. No es la ambigüedad de calles homónimas que
-            # la regla de negocio pide evitar (ver docstring del
-            # módulo) -- se usa el candidato de mayor confianza.
-            candidato = _mejor_candidato(resultado.candidatos)
+            # MARGEN_MISMO_LUGAR_KM entre sí, o todos declaran la misma
+            # localidad+región -- p. ej. Pelias no pudo calzar el número
+            # de casa exacto y devolvió vecinos de la misma cuadra/zona.
+            # No es la ambigüedad de calles homónimas que la regla de
+            # negocio pide evitar (ver docstring del módulo) -- se usa el
+            # candidato de mayor confianza.
+            candidato = _mejor_candidato(candidatos_relevantes)
         else:
             return ResultadoDestinoEntrega(
                 despachar_a_crudo=texto, estado=ESTADO_REVISAR,
@@ -349,6 +414,7 @@ def resolver_entrega_documento(
     proveedor_rutas: ProveedorRutas | None,
     *,
     perfil: str = "driving-hgv",
+    bloques: Iterable[Any] | None = None,
 ) -> dict[str, str]:
     """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
     persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
@@ -364,10 +430,31 @@ def resolver_entrega_documento(
     (`estado_entrega=SIN_PROVEEDOR_RUTAS` si había `DESPACHAR A` que
     intentar) -- este módulo nunca decide qué proveedor de rutas usar por
     defecto (ver Bloque N, límites multiempresa); quien llama decide si
-    conecta un proveedor real o ninguno."""
+    conecta un proveedor real o ninguno.
+
+    `bloques` (Bloque E2E R1.1, opcional -- coordenadas OCR de la misma
+    imagen): la extracción lineal de DESPACHAR A (regex sobre texto ya
+    unido en una sola línea) puede absorber la etiqueta/valor de OTRO
+    campo estructural cuando PaddleOCR intercala columnas en su orden de
+    lectura (caso real guía 463594: "DESPACHAR A" quedó seguido, en el
+    texto lineal, por "PATENTE : BDFG50"). Si el valor lineal está vacío o
+    contaminado (ver `_despachar_a_lineal_contaminado`) y se entregan
+    `bloques`, se reintenta por posición real en la imagen
+    (`_extraer_despachar_a_geometrico`) -- nunca por el orden de lectura."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
     despachar_a_crudo = (identificadores.despachar_a or "").strip()
+
+    if bloques is not None and (
+        not despachar_a_crudo or _despachar_a_lineal_contaminado(despachar_a_crudo)
+    ):
+        try:
+            decision_geometrica = _extraer_despachar_a_geometrico(list(bloques))
+        except Exception:
+            decision_geometrica = {}
+        candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
+        if candidato_geometrico and not _despachar_a_lineal_contaminado(candidato_geometrico):
+            despachar_a_crudo = candidato_geometrico
 
     resultado = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}
     resultado["despachar_a_crudo"] = despachar_a_crudo

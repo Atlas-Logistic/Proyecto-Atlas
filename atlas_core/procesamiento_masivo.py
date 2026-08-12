@@ -55,6 +55,16 @@ EXTENSIONES_PERMITIDAS = frozenset(
 )
 RUTA_CATALOGO_CHOFERES = Path("catalogos/choferes.json")
 
+# Bloque E2E R1.1: código ISO 3166-1 alfa-2 del país de operación actual de
+# Atlas (documentos AZA, todos chilenos) -- usado como filtro estructurado
+# de geocodificación (`OpenRouteService(pais=...)`, `boundary.country` en
+# Pelias) SOLO cuando `procesar_archivo`/`procesar_carpeta` construyen el
+# proveedor de rutas por defecto. Parámetro explícito y sustituible, no un
+# hardcode enterrado en el geocodificador: cualquier llamador puede pasar
+# `pais_operacion` distinto, o inyectar su propio `proveedor_rutas` y no
+# usar este valor en absoluto (ver límites multiempresa, Bloque N).
+PAIS_OPERACION_PREDETERMINADO = "CL"
+
 # Guarda de plausibilidad temporal: cuando el llamador no entrega
 # fecha_desde/fecha_hasta explícitos, igual se descartan años que ningún
 # documento real de Atlas podría tener (OCR corrompido, p. ej. "7025").
@@ -572,6 +582,7 @@ def procesar_archivo(
     proveedor: object = None,
     carpeta_catalogos: str | Path | None = None,
     proveedor_rutas: object = None,
+    pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
 
@@ -961,10 +972,13 @@ def procesar_archivo(
             if proveedor_rutas_efectivo is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
 
-                proveedor_rutas_efectivo = OpenRouteService()
+                proveedor_rutas_efectivo = OpenRouteService(pais=pais_operacion)
             plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+            if bloques_guia is None:
+                bloques_guia = _leer_bloques()
             resultado_entrega = resolver_entrega_documento(
                 textos, plantas_catalogo, proveedor_rutas_efectivo,
+                bloques=bloques_guia,
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",
@@ -1065,6 +1079,7 @@ def procesar_carpeta(
     proveedor: object = None,
     carpeta_catalogos: str | Path | None = None,
     proveedor_rutas: object = None,
+    pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
 
@@ -1129,7 +1144,7 @@ def procesar_carpeta(
             if proveedor_rutas_compartido is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
 
-                proveedor_rutas_compartido = OpenRouteService()
+                proveedor_rutas_compartido = OpenRouteService(pais=pais_operacion)
                 logger.info(
                     "procesar_carpeta: proveedor de rutas creado una sola vez para todo el lote (%s)",
                     type(proveedor_rutas_compartido).__name__,

@@ -51,6 +51,7 @@ class OpenRouteService:
         api_key: str | None = None,
         timeout: float = 10.0,
         transporte: TransporteHTTP = _transporte_urllib,
+        pais: str | None = None,
     ) -> None:
         self._api_key = (api_key if api_key is not None else os.getenv(
             "OPENROUTESERVICE_API_KEY", ""
@@ -59,6 +60,13 @@ class OpenRouteService:
             raise ValueError("timeout debe ser positivo")
         self.timeout = timeout
         self._transporte = transporte
+        # Bloque E2E R1.1 -- `pais` (código ISO 3166-1 alfa-2, p. ej. "CL")
+        # es un parámetro explícito del contexto operativo de quien
+        # construye el proveedor -- nunca un valor fijo dentro de este
+        # adaptador. Sin `pais`, Pelias busca sin filtro de país, idéntico
+        # al comportamiento de antes de este bloque. Ver
+        # `boundary.country` en `geocodificar`.
+        self._pais = (pais or "").strip().upper() or None
 
     def _solicitar(self, solicitud: Request) -> tuple[EstadoRuta | None, object | None]:
         if not self._api_key:
@@ -89,7 +97,13 @@ class OpenRouteService:
             return ResultadoGeocodificacion(
                 EstadoRuta.DIRECCION_NO_ENCONTRADA, motivo="DIRECCION_VACIA"
             )
-        url = f"{self.URL_GEOCODIFICACION}?{urlencode({'text': direccion, 'size': 5})}"
+        parametros = {"text": direccion, "size": 5}
+        if self._pais:
+            # Filtro estructurado de Pelias (no un simple ", <país>" pegado
+            # al texto de búsqueda) -- reduce candidatos fuera del país de
+            # operación sin depender de que el texto libre lo mencione.
+            parametros["boundary.country"] = self._pais
+        url = f"{self.URL_GEOCODIFICACION}?{urlencode(parametros)}"
         estado, datos = self._solicitar(Request(url, method="GET"))
         if estado:
             return ResultadoGeocodificacion(estado, motivo=estado.value)

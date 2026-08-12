@@ -65,6 +65,20 @@ def _es_etiqueta_senor(texto_simple: str) -> bool:
     return bool(re.fullmatch(r"SENOR(?:\(ES\)|\(IES\)|ES|IES)?", texto_simple))
 
 
+def _es_etiqueta_rut(texto_simple: str) -> bool:
+    """True solo cuando el bloque completo ES la etiqueta R.U.T. (con o sin
+    puntos -- "RUT", "R.U.T", "R.U.T.") -- no cuando "RUT" aparece como
+    subcadena de otra palabra. Caso real guía 463630: la exclusión de
+    `_extraer_asociaciones_geometricas` buscaba la subcadena "RUT" (sin
+    puntos) dentro del texto del bloque, pero el documento imprime
+    "R.U.T." -- la etiqueta nunca calzaba con la exclusión, y ese bloque
+    (justo debajo de SEÑOR(ES) en varios layouts reales) competía como
+    candidato de nombre de cliente, produciendo una ambigüedad falsa que
+    hacía abstenerse al selector aunque el nombre real sí estuviera
+    geométricamente más cerca."""
+    return bool(re.fullmatch(r"R\.?U\.?T\.?", texto_simple))
+
+
 def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
     """Convierte cajas OCR válidas en una representación geométrica estable."""
     items = []
@@ -136,7 +150,7 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         texto = item["simple"]
         if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
             return False
-        if _es_etiqueta_senor(texto):
+        if _es_etiqueta_senor(texto) or _es_etiqueta_rut(texto):
             return False
         if any(palabra in texto for palabra in exclusiones):
             return False
@@ -276,7 +290,7 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         return {}
 
     def es_etiqueta_rut(item: Dict[str, Any]) -> bool:
-        return bool(re.fullmatch(r"R\.?U\.?T\.?", item["simple"]))
+        return _es_etiqueta_rut(item["simple"])
 
     candidatos_validos: set[str] = set()
     for etiqueta_cliente in etiquetas_cliente:
@@ -776,6 +790,149 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     if rivales:
         return {}
     return {"valor": re.sub(r"\s+", " ", mejor).strip()}
+
+
+_ETIQUETAS_ESTRUCTURALES_DESPACHO = (
+    "PATENTE", "CARRO", "RETIRA", "RUT CHOFER", "RUT", "TRANSPORTE",
+    "HORA ENTRADA", "HORA SALIDA", "HORA", "PESO", "FECHA LLEGADA",
+    "FECHA SALIDA", "FECHA", "NOMBRE", "FIRMA", "RECINTO", "TOTAL EXENTO",
+    "TOTAL", "NETO", "IVA", "VALOR", "TARA", "BRUTO", "CLIENTE",
+    "OBRA DESTINO", "DIRECCION", "COMUNA", "CIUDAD", "COD DESTINATARIO",
+    "INDICADOR TRASLADO",
+)
+
+
+def _despachar_a_lineal_contaminado(valor: Any) -> bool:
+    """Detecta cuando la extracción lineal de DESPACHAR A (regex sobre texto
+    ya unido en una sola línea) absorbió por error la etiqueta/valor de OTRO
+    campo estructural -- caso real guía 463594: el orden de lectura de
+    PaddleOCR intercala columnas, y "DESPACHAR A" quedó seguido, en el texto
+    lineal, por "PATENTE : BDFG50" (la dirección real había aparecido antes,
+    fuera de orden). Nunca acepta como dirección un valor que ES (o empieza
+    por) una etiqueta estructural conocida."""
+    texto = _texto_simple(str(valor or ""))
+    if not texto:
+        return False
+    return any(
+        texto == etiqueta or texto.startswith(etiqueta + " ")
+        for etiqueta in _ETIQUETAS_ESTRUCTURALES_DESPACHO
+    )
+
+
+def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza el valor de DESPACHAR A por posición real en la imagen (no
+    por el orden de lectura lineal de PaddleOCR, que puede intercalar
+    columnas -- ver `_despachar_a_lineal_contaminado`). Nunca acepta como
+    candidato un bloque que sea una etiqueta estructural conocida (PATENTE,
+    RETIRA, RUT, HORA, PESO, FECHA, ...). Soporta una dirección partida en
+    2-3 líneas verticales contiguas (misma columna, sin etiqueta estructural
+    entre medio). Se abstiene ante ausencia de candidato o ambigüedad real
+    entre dos zonas -- nunca elige por cercanía ni por orden OCR."""
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    def es_etiqueta_despacho(item: Dict[str, Any]) -> bool:
+        return item["simple"] == "DESPACHAR A" or item["simple"].startswith("DESPACHAR A ")
+
+    def es_estructural(item: Dict[str, Any]) -> bool:
+        return any(
+            item["simple"] == etiqueta or item["simple"].startswith(etiqueta + " ")
+            for etiqueta in _ETIQUETAS_ESTRUCTURALES_DESPACHO
+        )
+
+    def nominal(item: Dict[str, Any]) -> bool:
+        texto = item["simple"]
+        if not 2 <= len(texto) <= 80 or not re.search(r"[A-Z]", texto):
+            return False
+        if es_estructural(item):
+            return False
+        if _patente_valida(texto.replace(" ", "")):
+            # Un valor de patente suelto (p. ej. "BDFG50") nunca es texto de
+            # dirección, aunque tenga suficientes letras para pasar el
+            # filtro de abajo -- caso real guía 463594: el valor de la
+            # etiqueta PATENTE quedaba geométricamente cerca de DESPACHAR A.
+            return False
+        digitos = sum(c.isdigit() for c in texto)
+        letras = sum(c.isalpha() for c in texto)
+        # Una dirección real trae letras (calle/comuna); un bloque de solo
+        # dígitos/puntuación (montos, folios, RUT sin etiqueta) no califica.
+        return letras > 0 and digitos < letras + 4
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+            distancia = max(0.0, candidato["x1"] - etiqueta["x2"])
+            if distancia <= 350:
+                return distancia / 350 + diferencia_y / (alto * 8)
+        diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+        if abs(candidato["cx"] - etiqueta["cx"]) <= 200 and 0 < diferencia_vertical <= 70:
+            return 0.30 + diferencia_vertical / 160
+        return None
+
+    etiquetas = [item for item in items if es_etiqueta_despacho(item)]
+    if not etiquetas:
+        return {}
+
+    decisiones = []
+    for etiqueta in etiquetas:
+        candidatos = [
+            (puntuar(etiqueta, item), item)
+            for item in items
+            if item is not etiqueta and nominal(item)
+        ]
+        candidatos = [(p, item) for p, item in candidatos if p is not None]
+        if not candidatos:
+            continue
+        candidatos.sort(key=lambda par: par[0])
+        mejor_puntaje, mejor_item = candidatos[0]
+        cadena = [mejor_item]
+        # Continuación multilínea: bloques nominales apilados justo debajo
+        # del primer candidato, en la misma columna, sin cruzar una
+        # etiqueta estructural -- se agregan como parte de la MISMA
+        # dirección (p. ej. calle en una línea, comuna en la siguiente).
+        # Solo bloques estrictamente debajo del candidato inicial, en orden
+        # de aparición -- nunca salta líneas intermedias para "buscar" una
+        # continuación más abajo: si la línea inmediatamente siguiente no
+        # encaja, la cadena se corta ahí.
+        restantes = sorted(
+            (
+                item for item in items
+                if item is not etiqueta and item is not mejor_item
+                and item["y1"] >= mejor_item["y1"]
+            ),
+            key=lambda item: (item["y1"], item["x1"]),
+        )
+        for item in restantes:
+            anterior = cadena[-1]
+            mismo_bloque_x = abs(item["cx"] - anterior["cx"]) <= 220 or (
+                item["x1"] < anterior["x2"] and item["x2"] > anterior["x1"]
+            )
+            brecha_y = item["y1"] - anterior["y2"]
+            if not mismo_bloque_x or not 0 <= brecha_y <= 45:
+                break
+            if es_estructural(item) or not nominal(item):
+                break
+            cadena.append(item)
+            if len(cadena) >= 3:
+                break
+        texto_compuesto = re.sub(
+            r"\s+", " ", " ".join(bloque["texto"].strip() for bloque in cadena)
+        ).strip()
+        decisiones.append((mejor_puntaje, texto_compuesto))
+
+    if not decisiones:
+        return {}
+    decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1]))
+    mejor_puntaje, mejor = decisiones[0]
+    rivales = {
+        valor for puntaje, valor in decisiones
+        if abs(puntaje - mejor_puntaje) <= 0.06 and valor != mejor and valor not in mejor
+    }
+    if rivales:
+        return {}
+    return {"valor": mejor}
 
 
 def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
