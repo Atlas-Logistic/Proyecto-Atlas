@@ -103,6 +103,8 @@ class OpenRouteService:
                                 float(item["geometry"]["coordinates"][1])),
                     str(item.get("properties", {}).get("label", "")).strip(),
                     _confianza(item.get("properties", {}).get("confidence")),
+                    str(item.get("properties", {}).get("locality", "")).strip(),
+                    str(item.get("properties", {}).get("region", "")).strip(),
                 )
                 for item in features
             )

@@ -52,6 +52,15 @@ class CandidatoGeocodificacion:
     coordenadas: Coordenadas
     etiqueta: str
     confianza: float | None = None
+    # Bloque E2E R1: Pelias devuelve `locality`/`region` como campos propios
+    # de `properties`, además de la `label` ya combinada -- se capturan por
+    # separado (nunca parseando la etiqueta con regex) para poder persistir
+    # localidad_entrega/region_entrega sin inventar una descomposición de
+    # texto libre. Default "" -- opcional y retrocompatible: código anterior
+    # que construye un `CandidatoGeocodificacion` sin estos argumentos sigue
+    # funcionando igual.
+    localidad: str = ""
+    region: str = ""
 
 
 @dataclass(frozen=True)

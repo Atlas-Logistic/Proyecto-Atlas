@@ -139,6 +139,23 @@ class DocumentoViaje:
     hora_entrada_aza: str
     hora_salida_aza: str
     permanencia_minutos: str
+    # Bloque E2E R1: enriquecimiento logístico por documento (planta origen
+    # + DESPACHAR A + ORS). Igual criterio que peso/horas de Bloque O1: la
+    # ausencia nunca invalida el documento ni el viaje.
+    despachar_a_crudo: str
+    direccion_entrega: str
+    localidad_entrega: str
+    region_entrega: str
+    estado_entrega: str
+    planta_origen_id: str
+    planta_origen_nombre: str
+    origen_determinado_por: str
+    evidencia_origen: str
+    distancia_km: str
+    duracion_min: str
+    proveedor_ruta: str
+    estado_ruta: str
+    motivo_ruta: str
     evidencia: dict[str, str]
 
 
@@ -229,6 +246,72 @@ class Viaje:
             return ""
         return _calcular_permanencia_minutos(entrada, salida)
 
+    def _campo_ruta_consolidado(self, campo: str) -> str:
+        """Bloque E2E R1 -- mismo criterio conservador que hora_entrada_aza/
+        hora_salida_aza: un campo de enriquecimiento logístico (calculado
+        por documento, no por viaje) solo se consolida al nivel de viaje si
+        todos los documentos que lo informan coinciden. Documentos sin dato
+        no impiden consolidar; ante conflicto real, nunca se elige uno
+        arbitrariamente -- se deja vacío."""
+        valores = _valores_unicos(getattr(d, campo) for d in self.documentos)
+        return valores[0] if len(valores) == 1 else ""
+
+    @property
+    def despachar_a(self) -> str:
+        return self._campo_ruta_consolidado("despachar_a_crudo")
+
+    @property
+    def direccion_entrega(self) -> str:
+        return self._campo_ruta_consolidado("direccion_entrega")
+
+    @property
+    def localidad_entrega(self) -> str:
+        return self._campo_ruta_consolidado("localidad_entrega")
+
+    @property
+    def region_entrega(self) -> str:
+        return self._campo_ruta_consolidado("region_entrega")
+
+    @property
+    def estado_entrega(self) -> str:
+        return self._campo_ruta_consolidado("estado_entrega")
+
+    @property
+    def planta_origen_id(self) -> str:
+        return self._campo_ruta_consolidado("planta_origen_id")
+
+    @property
+    def planta_origen_nombre(self) -> str:
+        return self._campo_ruta_consolidado("planta_origen_nombre")
+
+    @property
+    def origen_determinado_por(self) -> str:
+        return self._campo_ruta_consolidado("origen_determinado_por")
+
+    @property
+    def evidencia_origen(self) -> str:
+        return self._campo_ruta_consolidado("evidencia_origen")
+
+    @property
+    def distancia_km(self) -> str:
+        return self._campo_ruta_consolidado("distancia_km")
+
+    @property
+    def duracion_min(self) -> str:
+        return self._campo_ruta_consolidado("duracion_min")
+
+    @property
+    def proveedor_ruta(self) -> str:
+        return self._campo_ruta_consolidado("proveedor_ruta")
+
+    @property
+    def estado_ruta(self) -> str:
+        return self._campo_ruta_consolidado("estado_ruta")
+
+    @property
+    def motivo_ruta(self) -> str:
+        return self._campo_ruta_consolidado("motivo_ruta")
+
     def a_dict(self) -> dict[str, object]:
         return {
             "viaje_id": self.viaje_id,
@@ -251,6 +334,20 @@ class Viaje:
             "hora_entrada_aza": self.hora_entrada_aza,
             "hora_salida_aza": self.hora_salida_aza,
             "permanencia_minutos": self.permanencia_minutos,
+            "despachar_a": self.despachar_a,
+            "direccion_entrega": self.direccion_entrega,
+            "localidad_entrega": self.localidad_entrega,
+            "region_entrega": self.region_entrega,
+            "estado_entrega": self.estado_entrega,
+            "planta_origen_id": self.planta_origen_id,
+            "planta_origen_nombre": self.planta_origen_nombre,
+            "origen_determinado_por": self.origen_determinado_por,
+            "evidencia_origen": self.evidencia_origen,
+            "distancia_km": self.distancia_km,
+            "duracion_min": self.duracion_min,
+            "proveedor_ruta": self.proveedor_ruta,
+            "estado_ruta": self.estado_ruta,
+            "motivo_ruta": self.motivo_ruta,
             "evidencias_documentos": [d.evidencia for d in self.documentos],
             "fecha_creacion": self.fecha_creacion,
         }
@@ -286,6 +383,20 @@ def _documento_desde_fila(
         hora_entrada_aza=str(fila.get("hora_entrada_aza", "")).strip(),
         hora_salida_aza=str(fila.get("hora_salida_aza", "")).strip(),
         permanencia_minutos=str(fila.get("permanencia_minutos", "")).strip(),
+        despachar_a_crudo=str(fila.get("despachar_a_crudo", "")).strip(),
+        direccion_entrega=str(fila.get("direccion_entrega", "")).strip(),
+        localidad_entrega=str(fila.get("localidad_entrega", "")).strip(),
+        region_entrega=str(fila.get("region_entrega", "")).strip(),
+        estado_entrega=str(fila.get("estado_entrega", "")).strip(),
+        planta_origen_id=str(fila.get("planta_origen_id", "")).strip(),
+        planta_origen_nombre=str(fila.get("planta_origen_nombre", "")).strip(),
+        origen_determinado_por=str(fila.get("origen_determinado_por", "")).strip(),
+        evidencia_origen=str(fila.get("evidencia_origen", "")).strip(),
+        distancia_km=str(fila.get("distancia_km", "")).strip(),
+        duracion_min=str(fila.get("duracion_min", "")).strip(),
+        proveedor_ruta=str(fila.get("proveedor_ruta", "")).strip(),
+        estado_ruta=str(fila.get("estado_ruta", "")).strip(),
+        motivo_ruta=str(fila.get("motivo_ruta", "")).strip(),
         evidencia=evidencia,
     )
 

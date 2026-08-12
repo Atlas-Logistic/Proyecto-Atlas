@@ -1024,6 +1024,20 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "hora_entrada_aza",
         "hora_salida_aza",
         "permanencia_minutos",
+        "despachar_a_crudo",
+        "direccion_entrega",
+        "localidad_entrega",
+        "region_entrega",
+        "estado_entrega",
+        "planta_origen_id",
+        "planta_origen_nombre",
+        "origen_determinado_por",
+        "evidencia_origen",
+        "distancia_km",
+        "duracion_min",
+        "proveedor_ruta",
+        "estado_ruta",
+        "motivo_ruta",
     }
 
 
@@ -1911,8 +1925,11 @@ def test_columnas_csv_incluyen_peso_y_horarios_operacionales_o1():
     """Bloque O1: `peso_kg`/`hora_entrada_aza`/`hora_salida_aza`/
     `permanencia_minutos` llegan hasta el esquema de `analisis_completo_guias.csv`
     -- antes de este bloque se calculaban internamente pero nunca salían
-    de `extraer_datos()`."""
-    assert COLUMNAS[-6:] == [
+    de `extraer_datos()`. No se afirma que sean las últimas 6 columnas del
+    CSV (bloques posteriores, p. ej. E2E R1, agregan las suyas después) --
+    solo que aparecen, en orden, inmediatamente después de `indicador_revision`."""
+    indice = COLUMNAS.index("indicador_revision") + 1
+    assert COLUMNAS[indice:indice + 6] == [
         "peso_kg", "hora_entrada_aza", "hora_salida_aza", "permanencia_minutos",
         "motivos_revision_documento", "metodos_recuperacion_documento",
     ]
@@ -1921,6 +1938,9 @@ def test_columnas_csv_incluyen_peso_y_horarios_operacionales_o1():
 def test_columnas_csv_incluyen_motivos_y_metodos_estados_s2():
     """Bloque ESTADOS S2: `motivos_revision_documento` (calidad del dato,
     explícito) y `metodos_recuperacion_documento` (trazabilidad del método)
-    llegan al esquema del CSV masivo, al final -- backward-compatible,
-    `indicador_revision` conserva su semántica REVISAR/OK de siempre."""
-    assert COLUMNAS[-2:] == ["motivos_revision_documento", "metodos_recuperacion_documento"]
+    llegan al esquema del CSV masivo -- backward-compatible,
+    `indicador_revision` conserva su semántica REVISAR/OK de siempre. No se
+    afirma que sean las últimas 2 columnas (bloques posteriores agregan las
+    suyas después)."""
+    indice = COLUMNAS.index("permanencia_minutos") + 1
+    assert COLUMNAS[indice:indice + 2] == ["motivos_revision_documento", "metodos_recuperacion_documento"]

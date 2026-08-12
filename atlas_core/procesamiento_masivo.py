@@ -43,6 +43,8 @@ from atlas_core.ocr import (
     leer_texto_imagen,
 )
 from atlas_core.ocr_provider import crear_proveedor_ocr
+from atlas_core.catalogo_plantas import CatalogoPlantas
+from atlas_core.rutas.destino_entrega import CAMPOS_ENTREGA_DOCUMENTO, resolver_entrega_documento
 
 
 logger = logging.getLogger(__name__)
@@ -168,6 +170,14 @@ COLUMNAS = [
     # `indicador_revision` conserva su semántica REVISAR/OK de siempre.
     "motivos_revision_documento",
     "metodos_recuperacion_documento",
+    # Bloque E2E R1: enriquecimiento logístico por documento (planta origen
+    # documental + DESPACHAR A + geocodificación + ORS driving-hgv).
+    # Agregadas al final -- backward-compatible; sin catálogo de plantas ni
+    # proveedor de rutas conectado, quedan vacías y el CSV es idéntico al
+    # de antes de este bloque. `despachar_a_crudo` es la única de este
+    # grupo que no depende de red: es lectura local del propio OCR, igual
+    # que `obra_destino`.
+    *CAMPOS_ENTREGA_DOCUMENTO,
 ]
 
 Procesador = Callable[[Path], Mapping[str, object]]
@@ -561,6 +571,7 @@ def procesar_archivo(
     fecha_hasta: date | None = None,
     proveedor: object = None,
     carpeta_catalogos: str | Path | None = None,
+    proveedor_rutas: object = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
 
@@ -569,7 +580,18 @@ def procesar_archivo(
     directo. Si no se entrega, el comportamiento es idéntico al anterior
     (EasyOCR vía `lector_ocr`) — no hay cambio de comportamiento por
     defecto.
-    """
+
+    `proveedor_rutas` (Bloque E2E R1, opcional): objeto con el contrato de
+    `atlas_core.rutas.proveedor.ProveedorRutas` (p. ej.
+    `OpenRouteService()`) usado para geocodificar `DESPACHAR A` y calcular
+    la ruta planta->entrega (`driving-hgv`). Sin `carpeta_catalogos` no se
+    intenta nada de esto (no hay catálogo de plantas que resolver contra);
+    con `carpeta_catalogos` pero sin `proveedor_rutas`, se construye un
+    `OpenRouteService()` por defecto (lee `OPENROUTESERVICE_API_KEY` del
+    entorno; sin credencial, se abstiene con motivo explícito -- nunca
+    lanza). Este módulo nunca decide *cuál* proveedor de rutas usar salvo
+    ese valor por defecto explícito y sustituible -- ver límites
+    multiempresa en el bloque E2E R1."""
 
     def _leer_texto() -> list[str]:
         if proveedor is not None:
@@ -926,6 +948,33 @@ def procesar_archivo(
 
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 
+    # Bloque E2E R1: enriquecimiento logístico -- nunca participa de
+    # `requiere_revision` (una ruta no disponible no es un motivo de
+    # revisión documental, ver EstadoRuta.ORIGEN_NO_DETERMINADO/
+    # REQUIERE_REVISION vs MotivoRevisionDocumento): es enriquecimiento
+    # opcional a nivel de documento, igual que peso/horas en Bloque O1.
+    # Nunca bloquea ni invalida el documento si falla o no aplica.
+    resultado_entrega = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}
+    if carpeta_catalogos is not None:
+        try:
+            proveedor_rutas_efectivo = proveedor_rutas
+            if proveedor_rutas_efectivo is None:
+                from atlas_core.rutas.openrouteservice import OpenRouteService
+
+                proveedor_rutas_efectivo = OpenRouteService()
+            plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+            resultado_entrega = resolver_entrega_documento(
+                textos, plantas_catalogo, proveedor_rutas_efectivo,
+            )
+            logger.info(
+                "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",
+                resultado_entrega.get("estado_ruta") or "(vacio)",
+                resultado_entrega.get("motivo_ruta") or "(vacio)",
+                resultado_entrega.get("estado_entrega") or "(vacio)",
+            )
+        except Exception as exc:
+            logger.warning("Enriquecimiento logístico omitido: %s: %s", type(exc).__name__, exc)
+
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
@@ -956,6 +1005,7 @@ def procesar_archivo(
         "permanencia_minutos": _calcular_permanencia_minutos(
             datos.get("hora de entrada"), datos.get("hora de salida")
         ),
+        **resultado_entrega,
     }
 
 
@@ -1014,6 +1064,7 @@ def procesar_carpeta(
     fecha_hasta: date | None = None,
     proveedor: object = None,
     carpeta_catalogos: str | Path | None = None,
+    proveedor_rutas: object = None,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
 
@@ -1023,6 +1074,12 @@ def procesar_carpeta(
     archivo — el modelo no se recarga por imagen. Si se entrega
     `lector_ocr` explícito, se conserva el camino EasyOCR directo de
     siempre, sin pasar por el proveedor (compatibilidad).
+
+    `proveedor_rutas` (Bloque E2E R1, opcional): igual patrón que
+    `proveedor` pero para rutas -- se construye **un solo**
+    `OpenRouteService()` para todo el lote (una sola credencial leída, una
+    sola conexión reutilizada) si hay `carpeta_catalogos` y no se entrega
+    uno explícito.
     """
     if cada < 1:
         raise ValueError("La frecuencia de guardado debe ser mayor que cero")
@@ -1059,15 +1116,25 @@ def procesar_carpeta(
     }
     lector_compartido = lector_ocr
     proveedor_compartido = proveedor
+    proveedor_rutas_compartido = proveedor_rutas
 
     def ejecutar(ruta: Path) -> Mapping[str, object]:
-        nonlocal lector_compartido, proveedor_compartido
+        nonlocal lector_compartido, proveedor_compartido, proveedor_rutas_compartido
         if procesador is not None:
             return procesador(ruta)
 
         argumentos_archivo: dict[str, object] = {}
         if carpeta_catalogos is not None:
             argumentos_archivo["carpeta_catalogos"] = carpeta_catalogos
+            if proveedor_rutas_compartido is None:
+                from atlas_core.rutas.openrouteservice import OpenRouteService
+
+                proveedor_rutas_compartido = OpenRouteService()
+                logger.info(
+                    "procesar_carpeta: proveedor de rutas creado una sola vez para todo el lote (%s)",
+                    type(proveedor_rutas_compartido).__name__,
+                )
+            argumentos_archivo["proveedor_rutas"] = proveedor_rutas_compartido
 
         if lector_ocr is not None:
             # Compatibilidad: EasyOCR explícito, sin pasar por el proveedor.

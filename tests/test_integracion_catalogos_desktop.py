@@ -112,10 +112,18 @@ def test_catalogos_y_proveedor_compartido_se_propagan_juntos(tmp_path, monkeypat
 
     crear.assert_called_once_with()
     assert procesar.call_count == 2
+    # Bloque E2E R1: con `carpeta_catalogos`, `procesar_carpeta` también
+    # construye -- una sola vez, igual que el proveedor OCR -- un proveedor
+    # de rutas compartido y lo propaga a cada llamada.
+    proveedores_rutas = {llamada.kwargs.get("proveedor_rutas") for llamada in procesar.call_args_list}
+    assert len(proveedores_rutas) == 1
+    proveedor_rutas_compartido = proveedores_rutas.pop()
+    assert proveedor_rutas_compartido is not None
     for llamada in procesar.call_args_list:
         assert llamada.kwargs == {
             "proveedor": proveedor,
             "carpeta_catalogos": fuente,
+            "proveedor_rutas": proveedor_rutas_compartido,
         }
 
 

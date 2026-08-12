@@ -39,6 +39,7 @@ from datetime import datetime
 from typing import Iterable
 
 from atlas_core.catalogo_plantas import Planta
+from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
 from atlas_core.rutas.geocerca import RADIO_GEOCERCA_KM_PREDETERMINADO, distancia_km_haversine
 from atlas_core.rutas.modelos import CandidatoGeocodificacion, Coordenadas, EstadoRuta
 from atlas_core.rutas.posicion_vehiculo import ProveedorPosicionVehiculo
@@ -83,6 +84,13 @@ class ResultadoDestinoEntrega:
     confianza: float | None = None
     estado: str = ESTADO_SIN_DATO
     motivo: str = ""
+    # Bloque E2E R1: localidad/región tal como las devuelve el
+    # geocodificador (Pelias) para el candidato aceptado -- nunca
+    # derivadas de `DIRECCION`/`COMUNA` del sitio registrado (ver regla de
+    # negocio del módulo). Vacías si el candidato no las trae o si no hubo
+    # candidato aceptado.
+    localidad: str = ""
+    region: str = ""
 
     def a_dict(self) -> dict[str, str]:
         return {
@@ -93,6 +101,8 @@ class ResultadoDestinoEntrega:
             "confianza_geocodificacion": str(self.confianza) if self.confianza is not None else "",
             "estado_destino_entrega": self.estado,
             "motivo_destino_entrega": self.motivo,
+            "localidad_entrega": self.localidad,
+            "region_entrega": self.region,
         }
 
 
@@ -175,6 +185,8 @@ def resolver_destino_entrega(
             confianza=candidato.confianza,
             estado=ESTADO_REVISAR,
             motivo="CONFIANZA_INSUFICIENTE",
+            localidad=candidato.localidad,
+            region=candidato.region,
         )
     return ResultadoDestinoEntrega(
         despachar_a_crudo=texto,
@@ -183,12 +195,15 @@ def resolver_destino_entrega(
         confianza=candidato.confianza,
         estado=ESTADO_RESUELTO,
         motivo="",
+        localidad=candidato.localidad,
+        region=candidato.region,
     )
 
 
 CAMPOS_RESULTADO_RUTA_ENTREGA = (
     "planta_origen_id", "planta_origen_nombre",
     "despachar_a_crudo", "direccion_entrega_geocodificada",
+    "localidad_entrega", "region_entrega",
     "longitud_entrega", "latitud_entrega", "confianza_geocodificacion",
     "distancia_km", "duracion_min",
     "proveedor_ruta", "estado_ruta", "motivo_ruta",
@@ -212,6 +227,8 @@ class ResultadoRutaEntrega:
     planta_origen_nombre: str = ""
     despachar_a_crudo: str = ""
     direccion_entrega_geocodificada: str = ""
+    localidad_entrega: str = ""
+    region_entrega: str = ""
     longitud_entrega: str = ""
     latitud_entrega: str = ""
     confianza_geocodificacion: str = ""
@@ -269,9 +286,19 @@ def calcular_ruta_entrega_para_viaje(
 
     entrega = resolver_destino_entrega(despachar_a_crudo, proveedor_rutas)
     if entrega.estado != ESTADO_RESUELTO:
+        # Se conserva toda la evidencia parcial ya obtenida (etiqueta,
+        # coordenadas, localidad/región, confianza) aunque la geocodificación
+        # no haya quedado lo bastante segura para calcular ruta -- Fase J
+        # (observabilidad): un motivo explícito sin evidencia no basta para
+        # que una persona revise el caso.
         return ResultadoRutaEntrega(
             planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
             despachar_a_crudo=entrega.despachar_a_crudo,
+            direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
+            localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+            longitud_entrega=str(entrega.coordenadas.longitud) if entrega.coordenadas else "",
+            latitud_entrega=str(entrega.coordenadas.latitud) if entrega.coordenadas else "",
+            confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
             estado_ruta=EstadoRuta.REQUIERE_REVISION.value, motivo_ruta=entrega.motivo,
             origen_determinado_por=determinado_por, evidencia_origen=evidencia_origen,
         )
@@ -284,6 +311,7 @@ def calcular_ruta_entrega_para_viaje(
             planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
             despachar_a_crudo=entrega.despachar_a_crudo,
             direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
+            localidad_entrega=entrega.localidad, region_entrega=entrega.region,
             longitud_entrega=str(entrega.coordenadas.longitud),
             latitud_entrega=str(entrega.coordenadas.latitud),
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -294,6 +322,7 @@ def calcular_ruta_entrega_para_viaje(
         planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
         despachar_a_crudo=entrega.despachar_a_crudo,
         direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
+        localidad_entrega=entrega.localidad, region_entrega=entrega.region,
         longitud_entrega=str(entrega.coordenadas.longitud),
         latitud_entrega=str(entrega.coordenadas.latitud),
         confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -302,3 +331,86 @@ def calcular_ruta_entrega_para_viaje(
         estado_ruta=ruta.estado.value, motivo_ruta="",
         origen_determinado_por=determinado_por, evidencia_origen=evidencia_origen,
     )
+
+
+CAMPOS_ENTREGA_DOCUMENTO = (
+    "despachar_a_crudo", "direccion_entrega", "localidad_entrega",
+    "region_entrega", "estado_entrega",
+    "planta_origen_id", "planta_origen_nombre",
+    "origen_determinado_por", "evidencia_origen",
+    "distancia_km", "duracion_min", "proveedor_ruta",
+    "estado_ruta", "motivo_ruta",
+)
+
+
+def resolver_entrega_documento(
+    textos: Iterable[str],
+    plantas: Iterable[Planta],
+    proveedor_rutas: ProveedorRutas | None,
+    *,
+    perfil: str = "driving-hgv",
+) -> dict[str, str]:
+    """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
+    persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
+    local del propio texto OCR, sin red), planta de origen documental, y --
+    solo si ambos existen -- geocodificación de `DESPACHAR A` + ruta ORS
+    `driving-hgv` (reutiliza `calcular_ruta_entrega_para_viaje`, que ya
+    nunca geocodifica si la planta no se determinó -- ver
+    `test_origen_no_determinado_nunca_geocodifica`).
+
+    Nunca bloquea el documento: cualquier fallo deja campos vacíos con un
+    `estado_ruta`/`motivo_ruta` explicativo en vez de lanzar.
+    `proveedor_rutas=None` dejar todo el enriquecimiento de ruta vacío
+    (`estado_entrega=SIN_PROVEEDOR_RUTAS` si había `DESPACHAR A` que
+    intentar) -- este módulo nunca decide qué proveedor de rutas usar por
+    defecto (ver Bloque N, límites multiempresa); quien llama decide si
+    conecta un proveedor real o ninguno."""
+    textos = list(textos)
+    identificadores = extraer_identificadores_destino(textos)
+    despachar_a_crudo = (identificadores.despachar_a or "").strip()
+
+    resultado = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}
+    resultado["despachar_a_crudo"] = despachar_a_crudo
+    resultado["estado_entrega"] = "SIN_DATO" if not despachar_a_crudo else "NO_INTENTADO"
+
+    plantas = list(plantas)
+    from atlas_core.rutas.enriquecimiento_viaje import resolver_planta_origen
+
+    planta, motivo_origen, determinado_por, evidencia_origen = resolver_planta_origen(
+        patente=None, instante_salida=None, proveedor_posicion=None,
+        plantas=plantas, textos_documento=textos,
+    )
+    if planta is None:
+        resultado["estado_ruta"] = EstadoRuta.ORIGEN_NO_DETERMINADO.value
+        resultado["motivo_ruta"] = motivo_origen
+        return resultado
+
+    resultado["planta_origen_id"] = planta.planta_id
+    resultado["planta_origen_nombre"] = planta.nombre
+    resultado["origen_determinado_por"] = determinado_por
+    resultado["evidencia_origen"] = evidencia_origen
+
+    if not despachar_a_crudo:
+        return resultado
+    if proveedor_rutas is None:
+        resultado["estado_entrega"] = "SIN_PROVEEDOR_RUTAS"
+        return resultado
+
+    ruta_entrega = calcular_ruta_entrega_para_viaje(
+        despachar_a_crudo=despachar_a_crudo,
+        patente=None, instante_salida=None, plantas=plantas,
+        proveedor_posicion=None, proveedor_rutas=proveedor_rutas,
+        textos_documento=textos, perfil=perfil,
+    )
+    resultado["direccion_entrega"] = ruta_entrega.direccion_entrega_geocodificada
+    resultado["localidad_entrega"] = ruta_entrega.localidad_entrega
+    resultado["region_entrega"] = ruta_entrega.region_entrega
+    resultado["distancia_km"] = ruta_entrega.distancia_km
+    resultado["duracion_min"] = ruta_entrega.duracion_min
+    resultado["proveedor_ruta"] = ruta_entrega.proveedor_ruta
+    resultado["estado_ruta"] = ruta_entrega.estado_ruta
+    resultado["motivo_ruta"] = ruta_entrega.motivo_ruta
+    resultado["estado_entrega"] = (
+        "RESUELTO" if ruta_entrega.direccion_entrega_geocodificada else "REVISAR"
+    )
+    return resultado

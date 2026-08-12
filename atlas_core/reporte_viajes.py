@@ -105,6 +105,18 @@ COLUMNAS_VIAJES = (
     "hora_entrada_aza",
     "hora_salida_aza",
     "permanencia_minutos",
+    # Bloque E2E R1: DESPACHAR A (regla de negocio: la ruta termina en
+    # DESPACHAR A, nunca en DIRECCION/COMUNA del sitio registrado) y su
+    # geocodificación -- consolidados desde el/los documento(s) del viaje,
+    # calculados en `procesamiento_masivo.procesar_archivo` (no en este
+    # módulo, que ya no necesita red para producir el reporte -- ver
+    # `_fila_viaje`). `despachar_a` es el nombre que ya lee Atlas Desktop
+    # (`atlas_viajes.html::normalizarFila`) para "Destino entrega".
+    "despachar_a",
+    "direccion_entrega",
+    "localidad_entrega",
+    "region_entrega",
+    "estado_entrega",
 )
 
 
@@ -192,11 +204,26 @@ def _fila_viaje(
     viaje, calculador_rutas: Callable[[object], dict[str, str]] | None = None
 ) -> dict[str, object]:
     datos = viaje.a_dict()
+    # Bloque E2E R1: planta_origen_id/nombre, distancia_km, duracion_min,
+    # proveedor_ruta, estado_ruta, motivo_ruta, origen_determinado_por y
+    # evidencia_origen ya vienen calculados por documento (Bloque
+    # `procesamiento_masivo.procesar_archivo` -> ORS driving-hgv, con
+    # caché implícita: solo se recalculan para archivos nuevos, ver
+    # `_archivos_ya_procesados`) y consolidados a nivel de viaje --
+    # `generar_reporte_viajes` ya no necesita red para producir estas
+    # columnas. `destino_id`/`destino_nombre` (Bloque RUTAS R1, catálogo de
+    # destinos) siguen vacías salvo que se entregue `calculador_rutas`
+    # explícito -- comportamiento anterior sin cambios.
     campos_ruta = dict(_CAMPOS_RUTA_VACIOS)
+    for clave in _CAMPOS_RUTA_VACIOS:
+        if clave in datos and datos[clave]:
+            campos_ruta[clave] = datos[clave]
     if calculador_rutas is not None:
         resultado = calculador_rutas(viaje)
         if resultado:
-            campos_ruta.update({clave: resultado.get(clave, "") for clave in _CAMPOS_RUTA_VACIOS})
+            campos_ruta.update(
+                {clave: resultado.get(clave, "") or campos_ruta[clave] for clave in _CAMPOS_RUTA_VACIOS}
+            )
     return {
         "viaje_id": datos["viaje_id"],
         "numero_transporte": datos["numero_transporte"],
@@ -223,6 +250,11 @@ def _fila_viaje(
         "hora_entrada_aza": datos["hora_entrada_aza"],
         "hora_salida_aza": datos["hora_salida_aza"],
         "permanencia_minutos": datos["permanencia_minutos"],
+        "despachar_a": datos["despachar_a"],
+        "direccion_entrega": datos["direccion_entrega"],
+        "localidad_entrega": datos["localidad_entrega"],
+        "region_entrega": datos["region_entrega"],
+        "estado_entrega": datos["estado_entrega"],
         **campos_ruta,
     }
 
