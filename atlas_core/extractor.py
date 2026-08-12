@@ -802,6 +802,11 @@ _ETIQUETAS_ESTRUCTURALES_DESPACHO = (
 )
 
 
+_PATRON_RUT_COMPLETO = re.compile(
+    r"^\s*(?:[0-9]{1,8}|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+)\s*-\s*[0-9Kk]\s*$"
+)
+
+
 def _despachar_a_lineal_contaminado(valor: Any) -> bool:
     """Detecta cuando la extracción lineal de DESPACHAR A (regex sobre texto
     ya unido en una sola línea) absorbió por error la etiqueta/valor de OTRO
@@ -809,8 +814,21 @@ def _despachar_a_lineal_contaminado(valor: Any) -> bool:
     PaddleOCR intercala columnas, y "DESPACHAR A" quedó seguido, en el texto
     lineal, por "PATENTE : BDFG50" (la dirección real había aparecido antes,
     fuera de orden). Nunca acepta como dirección un valor que ES (o empieza
-    por) una etiqueta estructural conocida."""
-    texto = _texto_simple(str(valor or ""))
+    por) una etiqueta estructural conocida.
+
+    Caso real guías 464631/464641 (Bloque OPERACIÓN REAL R1): la etiqueta
+    contaminante no siempre es una PALABRA -- a veces es el VALOR de otro
+    campo (un RUT, p.ej. "14293816-2") que quedó pegado a "DESPACHAR A" en
+    el texto lineal. Un valor que es integramente un RUT con formato y
+    dígito verificador válidos nunca es una dirección."""
+    texto_crudo = str(valor or "").strip()
+    if not texto_crudo:
+        return False
+    if _PATRON_RUT_COMPLETO.match(texto_crudo):
+        resultado_rut = validar_rut_chileno(texto_crudo)
+        if resultado_rut.estado == EstadoValidacion.VALIDO:
+            return True
+    texto = _texto_simple(texto_crudo)
     if not texto:
         return False
     return any(

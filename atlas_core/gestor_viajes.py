@@ -161,6 +161,8 @@ class DocumentoViaje:
     proveedor_telemetria: str
     estado_telemetria: str
     origen_gps: str
+    planta_gps_id: str
+    planta_gps_nombre: str
     hora_entrada_gps: str
     hora_salida_gps: str
     distancia_gps_km: str
@@ -334,6 +336,14 @@ class Viaje:
         return self._campo_ruta_consolidado("origen_gps")
 
     @property
+    def planta_gps_id(self) -> str:
+        return self._campo_ruta_consolidado("planta_gps_id")
+
+    @property
+    def planta_gps_nombre(self) -> str:
+        return self._campo_ruta_consolidado("planta_gps_nombre")
+
+    @property
     def hora_entrada_gps(self) -> str:
         return self._campo_ruta_consolidado("hora_entrada_gps")
 
@@ -388,6 +398,8 @@ class Viaje:
             "proveedor_telemetria": self.proveedor_telemetria,
             "estado_telemetria": self.estado_telemetria,
             "origen_gps": self.origen_gps,
+            "planta_gps_id": self.planta_gps_id,
+            "planta_gps_nombre": self.planta_gps_nombre,
             "hora_entrada_gps": self.hora_entrada_gps,
             "hora_salida_gps": self.hora_salida_gps,
             "distancia_gps_km": self.distancia_gps_km,
@@ -444,6 +456,8 @@ def _documento_desde_fila(
         proveedor_telemetria=str(fila.get("proveedor_telemetria", "")).strip(),
         estado_telemetria=str(fila.get("estado_telemetria", "")).strip(),
         origen_gps=str(fila.get("origen_gps", "")).strip(),
+        planta_gps_id=str(fila.get("planta_gps_id", "")).strip(),
+        planta_gps_nombre=str(fila.get("planta_gps_nombre", "")).strip(),
         hora_entrada_gps=str(fila.get("hora_entrada_gps", "")).strip(),
         hora_salida_gps=str(fila.get("hora_salida_gps", "")).strip(),
         distancia_gps_km=str(fila.get("distancia_gps_km", "")).strip(),

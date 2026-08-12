@@ -47,9 +47,10 @@ from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.rutas.destino_entrega import (
     CAMPOS_ENTREGA_DOCUMENTO,
-    calcular_ruta_entrega_para_viaje,
+    calcular_ruta_con_planta_conocida,
     resolver_entrega_documento,
 )
+from atlas_core.telemetria.seleccion_recorrido import ORIGEN_GPS_CONFIRMADO
 from atlas_core.telemetria.enriquecimiento import (
     CAMPOS_TELEMETRIA_DOCUMENTO,
     enriquecer_documento_con_telemetria,
@@ -1042,31 +1043,35 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Enriquecimiento logístico omitido: %s: %s", type(exc).__name__, exc)
 
-    # Bloque TELEMETRÍA T2 -- enriquecimiento opcional posterior al de
-    # rutas: solo se consulta si hay `servicio_telemetria` conectado Y
-    # aporta valor real (origen sin determinar, o destino con ambigüedad
-    # real de geocodificación) -- nunca "para todo" indiscriminadamente
-    # (Fase I, política de eficiencia). Nunca bloquea ni invalida el
-    # documento; nunca sobrescribe hora_entrada_aza/hora_salida_aza
-    # documentales (son horas reales registradas en planta, no
-    # aproximadas -- Fase B/H).
+    # Bloque TELEMETRÍA T2 / corregido en OPERACIÓN REAL R1 -- causa raíz
+    # encontrada: el encabezado de una guía AZA siempre imprime la misma
+    # planta matriz ("CASA MATRIZ PLANTA RENCA"), sin importar desde qué
+    # planta despachó realmente el camión -- la guía NO contiene la
+    # dirección real de origen. Por eso, cuando hay `servicio_telemetria`
+    # conectado, el origen SIEMPRE se intenta corroborar por GPS (Fase
+    # G): GPS inequívoco gana siempre, incluso si "coincide" con lo que
+    # ya decía el documento -- nunca se asume una planta por defecto.
+    # Destino, en cambio, solo se reintenta con GPS cuando hace falta
+    # (ambigüedad real de geocodificación) -- política de eficiencia
+    # (Fase I), no toda guía necesita desambiguación de destino.
+    # Nunca bloquea ni invalida el documento; nunca sobrescribe
+    # hora_entrada_aza/hora_salida_aza documentales (son horas reales
+    # registradas en planta, no aproximadas -- Fase B/H).
     resultado_telemetria = {campo: "" for campo in CAMPOS_TELEMETRIA_DOCUMENTO}
     if servicio_telemetria is not None and carpeta_catalogos is not None:
         try:
-            destino_ambiguo = str(resultado_entrega.get("motivo_ruta", "")).startswith(
-                "MULTIPLES_UBICACIONES_DISPERSAS"
-            )
-            origen_sin_determinar = not resultado_entrega.get("planta_origen_id")
             patente_actual = str(datos.get("patente del tracto", "")).strip().upper()
-            if (destino_ambiguo or origen_sin_determinar) and _patente_valida(patente_actual):
+            if _patente_valida(patente_actual):
                 fecha_documento = _parsear_fecha_dd_mm_yyyy(fecha_actual)
-                if fecha_documento is not None:
-                    hora_entrada_dt = _combinar_fecha_hora(
-                        fecha_documento, datos.get("hora de entrada")
-                    )
-                    hora_salida_dt = _combinar_fecha_hora(
-                        fecha_documento, datos.get("hora de salida")
-                    )
+                hora_entrada_dt = (
+                    _combinar_fecha_hora(fecha_documento, datos.get("hora de entrada"))
+                    if fecha_documento is not None else None
+                )
+                hora_salida_dt = (
+                    _combinar_fecha_hora(fecha_documento, datos.get("hora de salida"))
+                    if fecha_documento is not None else None
+                )
+                if fecha_documento is not None and (hora_entrada_dt or hora_salida_dt):
                     resultado_gps = enriquecer_documento_con_telemetria(
                         servicio=servicio_telemetria, patente=patente_actual,
                         fecha=fecha_documento, hora_entrada=hora_entrada_dt,
@@ -1074,42 +1079,109 @@ def procesar_archivo(
                     )
                     resultado_telemetria.update(resultado_gps.campos)
                     logger.info(
-                        "enriquecimiento-telemetria-documento-v1 estado_telemetria=%s origen_gps=%s",
+                        "enriquecimiento-telemetria-documento-v1 estado_telemetria=%s origen_gps=%s planta_gps=%s",
                         resultado_telemetria.get("estado_telemetria") or "(vacio)",
                         resultado_telemetria.get("origen_gps") or "(vacio)",
+                        resultado_telemetria.get("planta_gps_nombre") or "(vacio)",
+                    )
+
+                    planta_gps_id = resultado_telemetria.get("planta_gps_id", "")
+                    if resultado_telemetria.get("origen_gps") == ORIGEN_GPS_CONFIRMADO and planta_gps_id:
+                        planta_origen_id_previo = resultado_entrega.get("planta_origen_id", "")
+                        origen_cambio = planta_gps_id != planta_origen_id_previo
+                        resultado_entrega["planta_origen_id"] = planta_gps_id
+                        resultado_entrega["planta_origen_nombre"] = resultado_telemetria.get(
+                            "planta_gps_nombre", ""
+                        )
+                        resultado_entrega["origen_determinado_por"] = "TELEMETRIA_GPS"
+                        resultado_entrega["evidencia_origen"] = resultado_telemetria.get(
+                            "evidencia_telemetria", ""
+                        ) or "GEOCERCA_PLANTA"
+                        if origen_cambio:
+                            # Fase I -- cualquier ruta ya calculada asumía la
+                            # planta documental (posiblemente equivocada, ver
+                            # causa raíz arriba): se invalida y se recalcula
+                            # con la planta ya corroborada por GPS, nunca se
+                            # reutiliza.
+                            planta_confirmada = next(
+                                (p for p in plantas_catalogo if p.planta_id == planta_gps_id), None
+                            )
+                            despachar_a_actual = resultado_entrega.get("despachar_a_crudo", "")
+                            if planta_confirmada is not None and despachar_a_actual:
+                                ruta_recalculada = calcular_ruta_con_planta_conocida(
+                                    planta=planta_confirmada, despachar_a_crudo=despachar_a_actual,
+                                    proveedor_rutas=proveedor_rutas_efectivo,
+                                    origen_determinado_por="TELEMETRIA_GPS",
+                                    evidencia_origen=resultado_entrega["evidencia_origen"],
+                                    punto_gps_destino=resultado_gps.punto_gps_destino,
+                                )
+                                resultado_entrega.update({
+                                    "direccion_entrega": ruta_recalculada.direccion_entrega_geocodificada,
+                                    "localidad_entrega": ruta_recalculada.localidad_entrega,
+                                    "region_entrega": ruta_recalculada.region_entrega,
+                                    "estado_entrega": (
+                                        "RESUELTO" if ruta_recalculada.direccion_entrega_geocodificada
+                                        else "REVISAR"
+                                    ),
+                                    "distancia_km": ruta_recalculada.distancia_km,
+                                    "duracion_min": ruta_recalculada.duracion_min,
+                                    "proveedor_ruta": ruta_recalculada.proveedor_ruta,
+                                    "estado_ruta": ruta_recalculada.estado_ruta,
+                                    "motivo_ruta": ruta_recalculada.motivo_ruta,
+                                })
+                            else:
+                                # Sin DESPACHAR A o sin coordenadas de planta que
+                                # recalcular -- igual se invalida cualquier
+                                # distancia/duración que hubiera quedado del
+                                # origen equivocado, nunca se deja una ruta
+                                # calculada desde la planta incorrecta.
+                                resultado_entrega["distancia_km"] = ""
+                                resultado_entrega["duracion_min"] = ""
+                                resultado_entrega["estado_ruta"] = "ORIGEN_NO_DETERMINADO" if planta_confirmada is None else resultado_entrega.get("estado_ruta", "")
+                            logger.info(
+                                "telemetria-corrige-origen-v1 planta_antes=%s planta_gps=%s",
+                                planta_origen_id_previo or "(vacio)", planta_gps_id,
+                            )
+
+                    destino_ambiguo = str(resultado_entrega.get("motivo_ruta", "")).startswith(
+                        "MULTIPLES_UBICACIONES_DISPERSAS"
                     )
                     if destino_ambiguo and resultado_gps.punto_gps_destino is not None:
-                        resultado_gps_ruta = calcular_ruta_entrega_para_viaje(
-                            despachar_a_crudo=resultado_entrega.get("despachar_a_crudo", ""),
-                            patente=patente_actual, instante_salida=hora_salida_dt or hora_entrada_dt,
-                            plantas=plantas_catalogo, proveedor_posicion=None,
-                            proveedor_rutas=proveedor_rutas_efectivo,
-                            textos_documento=textos,
-                            punto_gps_destino=resultado_gps.punto_gps_destino,
+                        planta_para_destino = next(
+                            (
+                                p for p in plantas_catalogo
+                                if p.planta_id == resultado_entrega.get("planta_origen_id", "")
+                            ),
+                            None,
                         )
-                        if resultado_gps_ruta.estado_ruta:
-                            resultado_entrega.update({
-                                "direccion_entrega": resultado_gps_ruta.direccion_entrega_geocodificada,
-                                "localidad_entrega": resultado_gps_ruta.localidad_entrega,
-                                "region_entrega": resultado_gps_ruta.region_entrega,
-                                "estado_entrega": (
-                                    "RESUELTO" if resultado_gps_ruta.direccion_entrega_geocodificada
-                                    else resultado_entrega.get("estado_entrega", "")
-                                ),
-                                "planta_origen_id": resultado_gps_ruta.planta_origen_id,
-                                "planta_origen_nombre": resultado_gps_ruta.planta_origen_nombre,
-                                "origen_determinado_por": resultado_gps_ruta.origen_determinado_por,
-                                "evidencia_origen": resultado_gps_ruta.evidencia_origen,
-                                "distancia_km": resultado_gps_ruta.distancia_km,
-                                "duracion_min": resultado_gps_ruta.duracion_min,
-                                "proveedor_ruta": resultado_gps_ruta.proveedor_ruta,
-                                "estado_ruta": resultado_gps_ruta.estado_ruta,
-                                "motivo_ruta": resultado_gps_ruta.motivo_ruta,
-                            })
-                            logger.info(
-                                "telemetria-desambigua-destino-v1 estado_ruta=%s",
-                                resultado_gps_ruta.estado_ruta,
+                        if planta_para_destino is not None:
+                            ruta_desambiguada = calcular_ruta_con_planta_conocida(
+                                planta=planta_para_destino,
+                                despachar_a_crudo=resultado_entrega.get("despachar_a_crudo", ""),
+                                proveedor_rutas=proveedor_rutas_efectivo,
+                                origen_determinado_por=resultado_entrega.get("origen_determinado_por", ""),
+                                evidencia_origen=resultado_entrega.get("evidencia_origen", ""),
+                                punto_gps_destino=resultado_gps.punto_gps_destino,
                             )
+                            if ruta_desambiguada.estado_ruta:
+                                resultado_entrega.update({
+                                    "direccion_entrega": ruta_desambiguada.direccion_entrega_geocodificada,
+                                    "localidad_entrega": ruta_desambiguada.localidad_entrega,
+                                    "region_entrega": ruta_desambiguada.region_entrega,
+                                    "estado_entrega": (
+                                        "RESUELTO" if ruta_desambiguada.direccion_entrega_geocodificada
+                                        else resultado_entrega.get("estado_entrega", "")
+                                    ),
+                                    "distancia_km": ruta_desambiguada.distancia_km,
+                                    "duracion_min": ruta_desambiguada.duracion_min,
+                                    "proveedor_ruta": ruta_desambiguada.proveedor_ruta,
+                                    "estado_ruta": ruta_desambiguada.estado_ruta,
+                                    "motivo_ruta": ruta_desambiguada.motivo_ruta,
+                                })
+                                logger.info(
+                                    "telemetria-desambigua-destino-v1 estado_ruta=%s",
+                                    ruta_desambiguada.estado_ruta,
+                                )
         except Exception as exc:
             logger.warning("Enriquecimiento con telemetría omitido: %s: %s", type(exc).__name__, exc)
 

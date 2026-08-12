@@ -20,7 +20,7 @@ final de un trip a ~20 m del punto inicial del siguiente) -- ver
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Iterable
 
 from atlas_core.catalogo_plantas import Planta
@@ -256,6 +256,70 @@ def detectar_entrada_salida_planta(
         hora_salida_gps=puntos_planta[-1].timestamp,
         distancia_minima_km=round(distancias_minimas[planta_id], 3),
     )
+
+
+# Bloque OPERACIÓN REAL R1 -- causa raíz encontrada: la resolución de
+# planta origen del documento (letterhead "CASA MATRIZ PLANTA RENCA",
+# idéntico en TODAS las guías AZA sin importar desde qué planta despacha
+# cada camión -- ver `origen_documental.py`) siempre "resuelve" a RENCA
+# aunque el camión real haya salido de Colina; y la selección de
+# "recorrido operacional" de T2 (Fase A) exige `distancia_km >= 5` para
+# considerar un trip -- un tramo corto de maniobra DENTRO de la planta
+# (el que realmente pasa por su geocerca) queda descartado, dejando el
+# primer punto útil ya en carretera, lejos de cualquier planta. Esta
+# función corrige ambas cosas: ventana temporal amplia alrededor de la
+# hora documental, SIN filtro de distancia mínima (incluye tramos de
+# maniobra), y solo entra en juego con evidencia GPS real -- nunca
+# asume Renca ni ninguna otra planta por defecto.
+MARGEN_HORAS_PLANTA_PREDETERMINADO = 4.0
+
+
+def resolver_planta_origen_gps(
+    servicio: ServicioTelemetria,
+    *,
+    patente: str,
+    fecha: date,
+    hora_entrada: datetime | None,
+    hora_salida: datetime | None,
+    plantas: Iterable[Planta],
+    radio_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
+    margen_horas: float = MARGEN_HORAS_PLANTA_PREDETERMINADO,
+) -> ResultadoOrigenGPS:
+    """Identifica desde qué planta SALE realmente el camión (Fase B/C),
+    usando una ventana temporal amplia (`margen_horas`, calibrado con
+    margen sobre el mayor hueco real conocido hasta hoy: ~2 h 48 min
+    entre la hora documental y el paso confirmado por geocerca en
+    463630) alrededor del ancla documental -- nunca solo el primer trip
+    "sustancial" de la entrega (ver T2, limitación conocida). Sin hora
+    documental o sin histórico en la ventana, se abstiene explícitamente
+    -- nunca asume una planta por defecto."""
+    ancla = hora_salida or hora_entrada
+    if ancla is None:
+        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="SIN_HORA_DOCUMENTAL")
+
+    resultado_viajes = servicio.buscar_viajes(patente, fecha, fecha)
+    if resultado_viajes.estado not in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
+        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo=resultado_viajes.estado.value)
+
+    margen = timedelta(hours=margen_horas)
+    cercanos = []
+    for viaje in resultado_viajes.viajes:
+        inicio = _instante(viaje.inicio)
+        fin = _instante(viaje.fin)
+        if inicio is None or fin is None:
+            continue
+        if fin >= ancla - margen and inicio <= ancla + margen:
+            cercanos.append(viaje)
+    if not cercanos:
+        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="SIN_TRIPS_EN_VENTANA_TEMPORAL")
+
+    puntos: list[PosicionTelemetria] = []
+    for viaje in sorted(cercanos, key=lambda v: _instante(v.inicio) or datetime.min):
+        resultado_bc = servicio.obtener_breadcrumbs(viaje.proveedor_trip_id)
+        if resultado_bc.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
+            puntos.extend(resultado_bc.puntos)
+
+    return detectar_entrada_salida_planta(tuple(puntos), plantas, radio_km=radio_km)
 
 
 def clasificar_concordancia_hora(

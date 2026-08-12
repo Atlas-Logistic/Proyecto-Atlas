@@ -1041,6 +1041,8 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "proveedor_telemetria",
         "estado_telemetria",
         "origen_gps",
+        "planta_gps_id",
+        "planta_gps_nombre",
         "hora_entrada_gps",
         "hora_salida_gps",
         "distancia_gps_km",

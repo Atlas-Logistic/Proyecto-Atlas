@@ -7,6 +7,9 @@ from pathlib import Path
 
 from atlas_core.procesamiento_masivo import procesar_carpeta
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
+from atlas_core.telemetria.proveedores.onelogis import OnelogisProvider
+from atlas_core.telemetria.repositorio import RepositorioTelemetria
+from atlas_core.telemetria.servicio import ServicioTelemetria
 
 
 def fecha_iso(valor: str) -> date:
@@ -58,6 +61,17 @@ def crear_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Declara explícitamente un procesamiento sin catálogos",
     )
+    parser.add_argument(
+        "--sin-telemetria",
+        action="store_true",
+        help=(
+            "Desactiva la resolución de planta de origen por GPS/telemetría "
+            "(Onelogis). Sin esta bandera, si hay catálogos disponibles se "
+            "intenta siempre -- sin credencial configurada, cada consulta "
+            "se abstiene sola (SIN_CREDENCIAL) y el procesamiento continúa "
+            "igual que antes."
+        ),
+    )
     return parser
 
 
@@ -77,6 +91,22 @@ def main() -> None:
         )
     except ErrorFuenteCatalogos as error:
         parser.error(str(error))
+
+    servicio_telemetria = None
+    if estado_catalogos.ruta is not None and not argumentos.sin_telemetria:
+        # La planta de origen real de un viaje se determina por GPS/geocercas
+        # (Bloque OPERACIÓN REAL R1) -- la guía no trae la dirección de la
+        # planta y no debe usarse para inferirla (ver `origen_documental.py`).
+        # `OnelogisProvider()` lee la credencial desde la variable de entorno
+        # `ATLAS_ONELOGIS_API_KEY` por sí mismo (nunca se imprime ni se
+        # guarda aquí); si falta, cada consulta se abstiene con
+        # SIN_CREDENCIAL y el procesamiento documental sigue igual que
+        # siempre -- esta bandera nunca puede romper un procesamiento.
+        servicio_telemetria = ServicioTelemetria(
+            OnelogisProvider(),
+            RepositorioTelemetria(Path(estado_catalogos.ruta) / "telemetria_cache.json"),
+        )
+
     resumen = procesar_carpeta(
         argumentos.carpeta,
         argumentos.salida,
@@ -84,6 +114,7 @@ def main() -> None:
         fecha_desde=argumentos.fecha_desde,
         fecha_hasta=argumentos.fecha_hasta,
         carpeta_catalogos=estado_catalogos.ruta,
+        servicio_telemetria=servicio_telemetria,
     )
     print("\nResumen final")
     print(f"Total encontrados: {resumen['encontrados']}")

@@ -364,6 +364,85 @@ class ResultadoRutaEntrega:
         return asdict(self)
 
 
+def calcular_ruta_con_planta_conocida(
+    *,
+    planta: Planta,
+    despachar_a_crudo: str,
+    proveedor_rutas: ProveedorRutas,
+    origen_determinado_por: str = "TELEMETRIA_GPS",
+    evidencia_origen: str = "",
+    perfil: str = "driving-hgv",
+    punto_gps_destino: Coordenadas | None = None,
+    radio_gps_destino_km: float = 50.0,
+) -> ResultadoRutaEntrega:
+    """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
+    cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
+    y no hace falta -- ni conviene -- volver a derivarla documentalmente
+    (`resolver_planta_origen` no sirve aquí: el encabezado de la guía
+    siempre menciona la misma planta matriz, sin importar desde cuál
+    despachó realmente el camión -- ver `calcular_ruta_entrega_para_viaje`,
+    que SÍ deriva la planta, para el camino normal donde no hay
+    corroboración GPS todavía). Reutiliza exactamente la misma lógica de
+    geocodificación/ORS que `calcular_ruta_entrega_para_viaje` -- solo se
+    salta el paso de resolución de origen."""
+    if planta.latitud is None or planta.longitud is None:
+        return ResultadoRutaEntrega(
+            planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
+            estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value,
+            motivo_ruta="PLANTA_SIN_COORDENADAS_EN_CATALOGO",
+            origen_determinado_por=origen_determinado_por, evidencia_origen=evidencia_origen,
+        )
+
+    entrega = resolver_destino_entrega(
+        despachar_a_crudo, proveedor_rutas,
+        punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
+    )
+    if entrega.estado != ESTADO_RESUELTO:
+        return ResultadoRutaEntrega(
+            planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
+            despachar_a_crudo=entrega.despachar_a_crudo,
+            direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
+            localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+            longitud_entrega=str(entrega.coordenadas.longitud) if entrega.coordenadas else "",
+            latitud_entrega=str(entrega.coordenadas.latitud) if entrega.coordenadas else "",
+            confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
+            estado_ruta=EstadoRuta.REQUIERE_REVISION.value, motivo_ruta=entrega.motivo,
+            origen_determinado_por=origen_determinado_por, evidencia_origen=evidencia_origen,
+            metodo_confirmacion_destino=entrega.metodo_confirmacion,
+        )
+
+    ruta = proveedor_rutas.calcular_ruta(
+        Coordenadas(planta.longitud, planta.latitud), entrega.coordenadas, perfil
+    )
+    if ruta.estado != EstadoRuta.RUTA_CALCULADA:
+        return ResultadoRutaEntrega(
+            planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
+            despachar_a_crudo=entrega.despachar_a_crudo,
+            direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
+            localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+            longitud_entrega=str(entrega.coordenadas.longitud),
+            latitud_entrega=str(entrega.coordenadas.latitud),
+            confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
+            estado_ruta=ruta.estado.value, motivo_ruta=ruta.motivo,
+            origen_determinado_por=origen_determinado_por, evidencia_origen=evidencia_origen,
+            metodo_confirmacion_destino=entrega.metodo_confirmacion,
+        )
+    return ResultadoRutaEntrega(
+        planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
+        despachar_a_crudo=entrega.despachar_a_crudo,
+        direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
+        localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+        longitud_entrega=str(entrega.coordenadas.longitud),
+        latitud_entrega=str(entrega.coordenadas.latitud),
+        confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
+        distancia_km=str(ruta.distancia_km), duracion_min=str(ruta.duracion_estimada_min),
+        proveedor_ruta=proveedor_rutas.nombre,
+        estado_ruta=ruta.estado.value, motivo_ruta="",
+        origen_determinado_por=origen_determinado_por, evidencia_origen=evidencia_origen,
+        metodo_confirmacion_destino=entrega.metodo_confirmacion,
+    )
+
+
 def calcular_ruta_entrega_para_viaje(
     *,
     despachar_a_crudo: str,
