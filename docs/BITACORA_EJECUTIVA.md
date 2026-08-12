@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — TELEMETRÍA T3: Atlas ahora entiende "detenido" además de "en movimiento" -- y encontró una tercera planta AZA
+
+- **Lo que Javier tenía razón en señalar:** el vehículo SÍ estuvo detenido varias horas en un lugar real durante la ventana de carga -- Atlas antes solo miraba puntos GPS sueltos dentro de una ventana horaria estrecha (anclada en una sola de las dos horas del documento) y nunca consideraba los huecos entre viajes cortos como evidencia de una permanencia real. Corregido: Atlas ahora reconoce cuándo un vehículo estuvo parado en un mismo lugar durante horas (aunque no haya GPS registrado momento a momento durante esa permanencia) y usa AMBAS horas del documento (entrada y salida) para acotar la búsqueda, no solo una.
+- **El hallazgo real, verificado dos veces de forma independiente:** el lugar donde el vehículo (patente AL1879) estuvo detenido más de 6 horas ese día -- solapando casi todo el rango documental -- geocodifica como **"Gerdau Aza, Lampa"**. Gerdau es la empresa matriz de Aceros AZA. Todo indica una TERCERA planta AZA real, en la comuna de Lampa, que hoy no está en el catálogo de Atlas -- ni Renca ni Colina, un lugar distinto de ambas (18 km de Colina, 12,5 km de Renca). Por decisión explícita, **no se agregó todavía al catálogo** -- se necesita confirmar la dirección exacta antes de darla de alta como planta oficial.
+- **Resultado para 464641/464642 (el caso que señaló Javier):** ya no muestra "AZA Renca" (el bug de origen documental que quedaba vivo) -- ahora muestra honestamente que hubo una detención real de 6+ horas en un lugar conocido pero no catalogado, con la coordenada y duración visibles para revisión. Nunca inventa "Colina" (no hay evidencia de que ese lugar sea Colina) ni vuelve a "Renca" por default.
+- **El mecanismo SÍ sabe confirmar Colina cuando la evidencia real cae ahí** -- validado con datos de prueba. El motivo por el que este caso puntual no muestra Colina es que la detención real está en otro lugar (Lampa), no una limitación del algoritmo.
+- **Efecto adicional, no buscado pero real:** al corregir el uso de ambas horas documentales, 2 guías que antes quedaban sin planta confirmada (464534/464535) ahora sí la tienen -- evidencia que ya estaba disponible pero la ventana anterior no alcanzaba a mirar.
+- Suite completa: 825 → **837 tests**, sin regresiones.
+
+---
+
 ## 2026-08-12 — OPERACIÓN REAL R1.1: sin confirmación GPS, ya no se muestra ninguna planta por defecto
 
 - **El bug real que quedaba de R1:** cuando la telemetría corría con datos reales y no lograba confirmar una planta única (ni Renca ni Colina), el sistema seguía mostrando en silencio "AZA RENCA" -- el valor que salía de leer el encabezado impreso de la guía, que dice lo mismo en todas las guías AZA sin importar la planta real de despacho. Corregido: ahora, si la telemetría corrió sobre datos reales y no confirma ninguna planta, el origen queda explícitamente "no determinado" -- nunca Renca por default. Si no hay telemetría conectada en absoluto, el comportamiento de siempre no cambia (no hay ninguna señal GPS real con la que reemplazarlo).

@@ -43,6 +43,19 @@ CAMPOS_TELEMETRIA_DOCUMENTO = (
     "hora_salida_gps",
     "distancia_gps_km",
     "evidencia_telemetria",
+    # Bloque TELEMETRÍA T3: motivo/evidencia de la resolución de ORIGEN
+    # (distinto de `evidencia_telemetria`, que describe el recorrido de
+    # ENTREGA hacia el destino). Poblado siempre que hay una decisión de
+    # origen que explicar (ESTADIA_EN_GEOCERCA, conflicto, etc.).
+    # `latitud_estadia_gps`/`longitud_estadia_gps`/`duracion_estadia_gps_min`
+    # solo se llenan en `ORIGEN_GPS_ESTADIA_SIN_PLANTA`: una detención GPS
+    # real y prolongada cuya coordenada no cae en ninguna geocerca
+    # catalogada -- nunca se le asigna nombre de planta, pero la
+    # evidencia queda visible para revisión humana en vez de perderse.
+    "motivo_origen_gps",
+    "latitud_estadia_gps",
+    "longitud_estadia_gps",
+    "duracion_estadia_gps_min",
 )
 
 
@@ -83,6 +96,7 @@ def enriquecer_documento_con_telemetria(
         # inventa una planta, pero el motivo del porqué queda explícito
         # en `estado_telemetria`).
         campos["origen_gps"] = ORIGEN_GPS_NO_DETERMINADO
+        campos["motivo_origen_gps"] = resultado_viajes.estado.value
         return ResultadoEnriquecimientoTelemetria(campos, None)
     campos["estado_telemetria"] = EstadoSeleccionRecorrido.SELECCIONADO.value
 
@@ -96,6 +110,12 @@ def enriquecer_documento_con_telemetria(
     campos["planta_gps_nombre"] = origen.planta_nombre or ""
     campos["hora_entrada_gps"] = origen.hora_entrada_gps
     campos["hora_salida_gps"] = origen.hora_salida_gps
+    campos["motivo_origen_gps"] = origen.motivo
+    campos["latitud_estadia_gps"] = str(origen.latitud_estadia) if origen.latitud_estadia is not None else ""
+    campos["longitud_estadia_gps"] = str(origen.longitud_estadia) if origen.longitud_estadia is not None else ""
+    campos["duracion_estadia_gps_min"] = (
+        str(origen.duracion_estadia_min) if origen.duracion_estadia_min is not None else ""
+    )
 
     # (2) Recorrido de entrega -- para desambiguar destino (Bloque T1/T2).
     seleccion = seleccionar_recorrido_operacional(

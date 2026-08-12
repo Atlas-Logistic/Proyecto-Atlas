@@ -241,8 +241,14 @@ def test_detecta_entrada_y_salida_distintas_de_la_geocerca(plantas, tmp_path):
         plantas=plantas,
     )
     assert resultado.estado == ORIGEN_GPS_CONFIRMADO
-    assert resultado.hora_entrada_gps == "2026-08-11 09:34:00"
-    assert resultado.hora_salida_gps == "2026-08-11 09:42:11"
+    # Bloque TELEMETRÍA T3: el trip completo queda clasificado como una
+    # única detención estacionaria dentro de la geocerca -- entrada/salida
+    # GPS reflejan el span REAL del trip (evidencia más precisa que solo
+    # los breadcrumbs que cayeron dentro del radio), ver
+    # `tests/test_telemetria_t3.py` para la cobertura dedicada del modelo
+    # de detenciones multi-trip.
+    assert resultado.hora_entrada_gps == "2026-08-11 09:30:00"
+    assert resultado.hora_salida_gps == "2026-08-11 09:50:00"
 
 
 # --- 7: la caché no contamina otro viaje / otra patente ---

@@ -4,6 +4,55 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: TELEMETRÍA T3 (origen por detenciones/estadías GPS, no solo breadcrumbs sueltos)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `aa1b5bb` (OPERACIÓN REAL R1.1).
+
+### Contradicción real que motivó el bloque
+
+R1.1 concluyó `ORIGEN_GPS_NO_DETERMINADO` para AL1879 (464641/464642, 11-08-2026). Javier revisó la UI de Onelogis y vio al vehículo detenido varias horas en "AVENIDA PRESIDENTE EDU...", con confirmación directa de los choferes de que el viaje salió de AZA COLINA. Se investigó la contradicción sin asumir que Javier estaba equivocado ni que la API carecía de evidencia.
+
+### Fase A -- releído `openapi.yaml` real (WebFetch, 2026-08-12)
+
+Confirma lo ya documentado en T1: `Trip` no trae coordenadas de inicio/fin ni dirección (`trip_id, plate, start_time, end_time, distance_km, max_speed, idle_minutes, type`); no existe endpoint de "stops"/detenciones. `BreadcrumbPoint`/`Position` sí traen `event` (valores reales observados: `ENGINE_ON`, `ENGINE_OFF`, `PERIODIC_ON`). La única evidencia de permanencia disponible es indirecta: trips con desplazamiento neto ~0 (ignition-cycling sin movimiento real) y los huecos SIN telemetría entre trips consecutivos cuyos extremos son espacialmente coherentes.
+
+### Fase B/C -- causa raíz real (no una limitación de la API)
+
+Traza completa (sin filtro de distancia) de AL1879, 11-08-2026: 11 trips entre 05:56 y 14:57. Un hueco de **3h08min** entre el trip que termina a las 10:22 y el que empieza a las 13:30 -- con extremos coherentes (~30m de diferencia) -- es evidencia fuerte de permanencia continua. Encadenando TODOS los trips con extremos coherentes entre sí (incluidos los de desplazamiento neto ~0), la permanencia real cubre **08:48:58 → 14:57:22 (6h08min)**, solapando casi todo el rango documental (09:46-14:39).
+
+### Fase E -- auditoría de coordenadas (hallazgo principal del bloque)
+
+La coordenada de esa detención (-33.2947, -70.7281) geocodifica -- dos veces, con métodos independientes (reversa y directa, vía Pelias/ORS) -- como **"Gerdau Aza, Lampa, RM, Chile"** (confianza 0.6-0.8, capa `venue`). Gerdau es la matriz de Aceros AZA; el mismo buscador devuelve por separado "Gerdau, Renca" coincidiendo exacto con el catálogo, y "Gerdau AZA Antofagasta" como tercer sitio conocido. Todo indica una planta AZA real en Lampa, no catalogada, distinta de Colina (18,4 km) y de Renca (12,5 km). **Se consultó al usuario antes de tocar el catálogo** (decisión de alto impacto, no reversible sin más evidencia): se optó por NO agregarla todavía -- el modelo nuevo debía poder reportar la detención honestamente sin nombrarla, no por asumir que es Colina ni inventar un nombre de planta nuevo.
+
+### Cambios de código
+
+- **`atlas_core/telemetria/modelos.py`**: nuevo `DetencionTelemetria` (inicio, fin, duracion_minutos, latitud, longitud, fuente, trip_ids) -- sin depender de `atlas_core.rutas` (mismo criterio que `PosicionTelemetria`).
+- **`atlas_core/telemetria/seleccion_recorrido.py`**:
+  - `ORIGEN_GPS_ESTADIA_SIN_PLANTA` (nuevo estado): hay una detención GPS real y prolongada, pero su coordenada no cae en ninguna geocerca catalogada -- nunca se le asigna nombre de planta.
+  - `ResultadoOrigenGPS` gana `latitud_estadia`/`longitud_estadia`/`duracion_estadia_min` (solo poblados en ese estado).
+  - `RADIO_COHERENCIA_DETENCION_KM = 0.6` (calibrado con el caso real: puntos del mismo lugar de permanencia varían 0.02-0.4 km entre sí) y `DURACION_MINIMA_DETENCION_MIN = 30.0` (paradas más cortas son ruido de maniobra, no evidencia operacional).
+  - `detectar_detenciones(viajes, breadcrumbs_por_trip)`: encadena trips (y sus huecos de telemetría) cuyos extremos son espacialmente coherentes -- un trip es "estacionario" cuando su propio primer y último breadcrumb quedan a `radio_coherencia_km` uno de otro. Exige **al menos 2 breadcrumbs** por trip para juzgar estacionariedad (un solo punto no prueba nada -- podría ser una foto instantánea de un trip real disperso).
+  - `resolver_planta_origen_gps` reescrito: (1) la ventana temporal ahora cubre `[min(entrada,salida), max(entrada,salida)] ± margen_horas` -- antes anclaba solo en `hora_salida` (o `hora_entrada` si faltaba), lo que en casos reales con las dos horas muy separadas (464641/642: 09:46 y 14:39, casi 5h) dejaba fuera trips reales cerca de la otra hora; (2) jerarquía de evidencia (Fase I): detención dentro de geocerca (evidencia máxima, con `solape_documental_min` calculado contra las horas documentales) > breadcrumbs sueltos que pasan por geocerca (comportamiento de R1, sin cambios) > detención real sin planta catalogada (`ORIGEN_GPS_ESTADIA_SIN_PLANTA`, nunca silenciada) > sin evidencia; (3) cruza SIEMPRE la detención confirmada contra el escaneo de breadcrumbs sueltos -- si señalan una planta DISTINTA, es `ORIGEN_GPS_CONFLICTO` explícito, nunca se ignora la señal más débil.
+- **`atlas_core/telemetria/enriquecimiento.py`**: `CAMPOS_TELEMETRIA_DOCUMENTO` pasa de 9 a 13 campos (+ `motivo_origen_gps`, `latitud_estadia_gps`, `longitud_estadia_gps`, `duracion_estadia_gps_min`).
+- **`atlas_core/procesamiento_masivo.py`**: la rama que limpia el fallback documental (R1.1) ahora también dispara con `ORIGEN_GPS_ESTADIA_SIN_PLANTA` (antes solo `CONFLICTO`/`NO_DETERMINADO`) -- una detención sin planta catalogada tampoco debe dejar "AZA RENCA" del encabezado.
+- **`atlas_core/gestor_viajes.py`** / **`atlas_core/reporte_viajes.py`**: propagan los 4 campos nuevos hasta `viajes.csv` (mismo criterio de consolidación "coincide en todos los documentos o vacío").
+
+### Resultado real (Fase F/G/H)
+
+- **464641/464642 (AL1879)**: `ORIGEN_GPS_ESTADIA_SIN_PLANTA` -- detención real de 368,4 / 286,3 min (según la hora documental disponible en cada guía) en (-33.2949, -70.7285) aprox., trips `30585346|30586520|30586682|30586909|30590516|...`. Nunca Renca, nunca Colina sin evidencia.
+- **464424 (SB6486)**: sin cambios -- sigue `ORIGEN_GPS_CONFIRMADO`/AZA RENCA, ahora validado también contra el modelo de detenciones (mismo resultado, evidencia más rica).
+- **Efecto colateral real del fix de ventana (Fase H)**: 464534/464535 (BDFG50, antes sin planta confirmada) ahora resuelven `ORIGEN_GPS_CONFIRMADO`/AZA RENCA -- la evidencia ya existía, la ventana anterior no llegaba a mirarla.
+
+### Datos reales (Fase K/L)
+
+Respaldo previo (`analisis_completo_guias_PRE_T3_20260812_145913.csv`). Reproceso focal (3 guías) validado, luego reproceso de la tanda completa (19 guías, mismo criterio que R1.1 -- todas comparten el esquema de columnas). CSV maestro reemplazado; reporte regenerado en `output/reporte_desktop_20260812_150552_telemetria_t3/`; `config_usuario.json` de Desktop actualizado. Ninguna ruta se recalculó hacia Colina (sin confirmación); las guías que ganaron confirmación de Renca (464534/535) se benefician del cálculo de ruta automático ya existente en `procesamiento_masivo.py` (sin código nuevo).
+
+### Tests
+
+12 nuevos en `tests/test_telemetria_t3.py`: detención encadenada entre trips en la misma posición; estadía dentro de geocerca confirma planta; solape con hora documental se registra en el motivo; salida real (movimiento) corta la cadena de detención; endpoint sin breadcrumbs se ignora sin lanzar; un solo breadcrumb nunca se considera estacionario; validación positiva de que el mecanismo SÍ confirma Colina con evidencia real (no hardcodeado); multiguía comparte la misma resolución; nunca cae a Renca por defecto aunque haya estadía real fuerte; conflicto explícito entre estadía confirmada y breadcrumb aislado de otra planta; la caché de breadcrumbs se reutiliza para detectar detenciones sin llamadas nuevas; no regresión (verificada con la suite completa). `tests/test_operacion_real_r1.py` (1 aserción actualizada -- comportamiento mejorado, ver test) y `tests/test_procesamiento_masivo.py` (conjunto de columnas, mecánico). Suite completa: 825 → **837 passed**, 0 regresiones reales.
+
+
+
 ## 2026-08-12 — Cierre: OPERACIÓN REAL R1.1 (eliminar fallback documental sin confirmación GPS)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `2ec64c9` (OPERACIÓN REAL R1).

@@ -69,6 +69,29 @@ class ViajeTelemetria:
 
 
 @dataclass(frozen=True)
+class DetencionTelemetria:
+    """Bloque TELEMETRÍA T3 -- una permanencia estacionaria real, inferida
+    de trips consecutivos cuyos extremos (inicio/fin de breadcrumbs) son
+    espacialmente coherentes entre sí -- nunca inventada sin esa
+    coherencia. `trip_ids` conserva el/los trip(s) que forman el bloque
+    (uno solo si el propio trip ya es estacionario de punta a punta; 2+ si
+    se encadenan varios trips/huecos de telemetría en el mismo lugar,
+    igual que el hueco real entre "trip A termina en planta" y "trip B
+    empieza en planta" del caso real que motivó este bloque)."""
+
+    inicio: str
+    fin: str
+    duracion_minutos: float
+    latitud: float
+    longitud: float
+    fuente: str = ""
+    trip_ids: tuple[str, ...] = ()
+
+    def a_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class RecorridoTelemetria:
     viaje: ViajeTelemetria
     breadcrumbs: tuple[PosicionTelemetria, ...] = ()

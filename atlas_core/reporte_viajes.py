@@ -130,6 +130,12 @@ COLUMNAS_VIAJES = (
     "hora_salida_gps",
     "distancia_gps_km",
     "evidencia_telemetria",
+    # Bloque TELEMETRÍA T3: detención GPS real (Fase C) -- poblados solo
+    # en ORIGEN_GPS_ESTADIA_SIN_PLANTA.
+    "motivo_origen_gps",
+    "latitud_estadia_gps",
+    "longitud_estadia_gps",
+    "duracion_estadia_gps_min",
 )
 
 
@@ -277,6 +283,10 @@ def _fila_viaje(
         "hora_salida_gps": datos["hora_salida_gps"],
         "distancia_gps_km": datos["distancia_gps_km"],
         "evidencia_telemetria": datos["evidencia_telemetria"],
+        "motivo_origen_gps": datos["motivo_origen_gps"],
+        "latitud_estadia_gps": datos["latitud_estadia_gps"],
+        "longitud_estadia_gps": datos["longitud_estadia_gps"],
+        "duracion_estadia_gps_min": datos["duracion_estadia_gps_min"],
         **campos_ruta,
     }
 

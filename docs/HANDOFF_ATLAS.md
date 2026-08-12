@@ -4,6 +4,17 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — TELEMETRÍA T3: detenciones GPS + una planta AZA real sin catalogar -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `aa1b5bb` (OPERACIÓN REAL R1.1).
+- **Lo más importante:** Javier tenía razón en que el vehículo (AL1879, 464641/642) estuvo detenido varias horas en un lugar real durante la ventana de carga -- el bug era que Atlas nunca miraba los huecos entre viajes cortos como evidencia de permanencia, y solo usaba UNA de las dos horas del documento para acotar la búsqueda GPS. Ambos corregidos.
+- **El hallazgo pendiente de decisión con Javier:** ese lugar geocodifica, dos veces de forma independiente, como **"Gerdau Aza, Lampa"** -- todo indica una TERCERA planta AZA real (Gerdau es la matriz de Aceros AZA), distinta de Renca y de Colina, que hoy NO está en `plantas.json`. Se decidió (con el usuario, explícitamente) no agregarla todavía sin confirmar la dirección exacta. **Si Javier confirma que esa es una planta real (probablemente donde carga contenido para el circuito Colina/Lampa/norte)**, el siguiente paso natural es un bloque corto: dar de alta "AZA LAMPA" (o el nombre correcto) en el catálogo con coordenadas confirmadas -- el modelo de detenciones ya construido en este bloque la reconocería automáticamente de ahí en adelante, sin más cambios de código.
+- **464641/464642 ya NO muestran "AZA Renca"** (el bug real) -- ahora muestran `ORIGEN_GPS_ESTADIA_SIN_PLANTA` con la coordenada y duración de la detención real, visible en el CSV/reporte para revisión humana. Nunca Colina sin evidencia, nunca Renca por default.
+- **Efecto colateral real y bienvenido:** al usar ambas horas documentales para la ventana, 2 guías más (464534/464535) recuperaron su planta confirmada -- la evidencia ya existía, antes no se buscaba lo suficientemente amplio.
+- **Próximo paso natural:** (a) conversar con Javier sobre la planta de Lampa -- si la confirma, es un bloque corto de catálogo; (b) si aparecen más guías reales con patrones similares (detenciones reales sin planta catalogada), revisar si todas apuntan al mismo lugar (reforzaría la hipótesis) o a lugares distintos (podría haber más de una planta sin catalogar).
+
+---
+
 ## 2026-08-12 — OPERACIÓN REAL R1.1: sin GPS no hay planta por defecto -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `2ec64c9` (OPERACIÓN REAL R1).

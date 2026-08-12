@@ -167,6 +167,12 @@ class DocumentoViaje:
     hora_salida_gps: str
     distancia_gps_km: str
     evidencia_telemetria: str
+    # Bloque TELEMETRÍA T3: detención GPS real (Fase C) -- poblados solo
+    # cuando `origen_gps == ORIGEN_GPS_ESTADIA_SIN_PLANTA`.
+    motivo_origen_gps: str
+    latitud_estadia_gps: str
+    longitud_estadia_gps: str
+    duracion_estadia_gps_min: str
     evidencia: dict[str, str]
 
 
@@ -359,6 +365,22 @@ class Viaje:
     def evidencia_telemetria(self) -> str:
         return self._campo_ruta_consolidado("evidencia_telemetria")
 
+    @property
+    def motivo_origen_gps(self) -> str:
+        return self._campo_ruta_consolidado("motivo_origen_gps")
+
+    @property
+    def latitud_estadia_gps(self) -> str:
+        return self._campo_ruta_consolidado("latitud_estadia_gps")
+
+    @property
+    def longitud_estadia_gps(self) -> str:
+        return self._campo_ruta_consolidado("longitud_estadia_gps")
+
+    @property
+    def duracion_estadia_gps_min(self) -> str:
+        return self._campo_ruta_consolidado("duracion_estadia_gps_min")
+
     def a_dict(self) -> dict[str, object]:
         return {
             "viaje_id": self.viaje_id,
@@ -404,6 +426,10 @@ class Viaje:
             "hora_salida_gps": self.hora_salida_gps,
             "distancia_gps_km": self.distancia_gps_km,
             "evidencia_telemetria": self.evidencia_telemetria,
+            "motivo_origen_gps": self.motivo_origen_gps,
+            "latitud_estadia_gps": self.latitud_estadia_gps,
+            "longitud_estadia_gps": self.longitud_estadia_gps,
+            "duracion_estadia_gps_min": self.duracion_estadia_gps_min,
             "evidencias_documentos": [d.evidencia for d in self.documentos],
             "fecha_creacion": self.fecha_creacion,
         }
@@ -462,6 +488,10 @@ def _documento_desde_fila(
         hora_salida_gps=str(fila.get("hora_salida_gps", "")).strip(),
         distancia_gps_km=str(fila.get("distancia_gps_km", "")).strip(),
         evidencia_telemetria=str(fila.get("evidencia_telemetria", "")).strip(),
+        motivo_origen_gps=str(fila.get("motivo_origen_gps", "")).strip(),
+        latitud_estadia_gps=str(fila.get("latitud_estadia_gps", "")).strip(),
+        longitud_estadia_gps=str(fila.get("longitud_estadia_gps", "")).strip(),
+        duracion_estadia_gps_min=str(fila.get("duracion_estadia_gps_min", "")).strip(),
         evidencia=evidencia,
     )
 

@@ -54,6 +54,7 @@ from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.seleccion_recorrido import (
     ORIGEN_GPS_CONFIRMADO,
     ORIGEN_GPS_CONFLICTO,
+    ORIGEN_GPS_ESTADIA_SIN_PLANTA,
     ORIGEN_GPS_NO_DETERMINADO,
 )
 from atlas_core.telemetria.enriquecimiento import (
@@ -1151,7 +1152,7 @@ def procesar_archivo(
                         resultado_telemetria.get("estado_telemetria")
                         == EstadoSeleccionRecorrido.SELECCIONADO.value
                         and resultado_telemetria.get("origen_gps")
-                        in (ORIGEN_GPS_CONFLICTO, ORIGEN_GPS_NO_DETERMINADO)
+                        in (ORIGEN_GPS_CONFLICTO, ORIGEN_GPS_NO_DETERMINADO, ORIGEN_GPS_ESTADIA_SIN_PLANTA)
                     ):
                         # Bloque OPERACIÓN REAL R1.1 -- causa raíz: el
                         # encabezado corporativo ("CASA MATRIZ PLANTA X")

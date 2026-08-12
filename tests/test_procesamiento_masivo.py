@@ -1047,6 +1047,10 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "hora_salida_gps",
         "distancia_gps_km",
         "evidencia_telemetria",
+        "motivo_origen_gps",
+        "latitud_estadia_gps",
+        "longitud_estadia_gps",
+        "duracion_estadia_gps_min",
     }
 
 
