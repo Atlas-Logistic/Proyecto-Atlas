@@ -19,7 +19,11 @@ from typing import Iterable
 from atlas_core.catalogo_clientes import CatalogoClientes
 from atlas_core.catalogo_destinos import CatalogoDestinos, Destino, EstadoBusquedaDestino
 from atlas_core.catalogo_plantas import Planta
-from atlas_core.rutas.geocerca import RADIO_GEOCERCA_KM_PREDETERMINADO, resolver_planta_por_posicion
+from atlas_core.rutas.geocerca import (
+    RADIO_GEOCERCA_KM_PREDETERMINADO,
+    coordenada_ruteo_planta,
+    resolver_planta_por_posicion,
+)
 from atlas_core.rutas.modelos import Coordenadas, EstadoRuta
 from atlas_core.rutas.origen_documental import resolver_origen_documental
 from atlas_core.rutas.posicion_vehiculo import (
@@ -274,7 +278,8 @@ def calcular_ruta_para_viaje(
             destino_id=destino.destino_id, destino_nombre=destino.nombre_destino,
             estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value, motivo_ruta=motivo_origen,
         )
-    if planta.latitud is None or planta.longitud is None:
+    coordenada_origen = coordenada_ruteo_planta(planta)
+    if coordenada_origen is None:
         # La planta se determinó (GPS o documento) pero su registro de
         # catálogo no tiene coordenadas cargadas -- nunca se lanza una
         # excepción por un dato de catálogo incompleto; se trata igual que
@@ -287,7 +292,7 @@ def calcular_ruta_para_viaje(
 
     resultado_servicio = servicio_rutas.confirmar_y_calcular(
         planta, destino, perfil,
-        Coordenadas(planta.longitud, planta.latitud),
+        coordenada_origen,
         Coordenadas(destino.longitud, destino.latitud),
         confirmacion_explicita=True,
     )

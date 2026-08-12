@@ -4,6 +4,15 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — PLANTAS P3: AZA Colina ya es un recinto real, no un punto en el mapa -- y aparece un hallazgo nuevo que requiere revisión de Javier
+
+- **La corrección central:** Atlas ahora puede modelar una planta como un RECINTO (polígono real), no solo como un punto con un radio chico. AZA Colina se corrigió con el perímetro real donde AL1879 estuvo detenido 6 horas (los mismos datos de T3) -- **464641/464642 ya muestran "AZA COLINA" confirmada por GPS**, exactamente lo que Javier confirmó viendo el recinto completo en Onelogis (acceso, estacionamientos, oficinas, zonas de carga). AZA Renca no se tocó -- sigue funcionando exactamente igual (punto + radio, como siempre).
+- **Separación importante:** la coordenada antigua de AZA Colina (la de la dirección de texto, ya demostrada ~18 km lejos del recinto real) se dejó *sin tocar* -- sigue siendo la dirección de referencia. Para calcular rutas se agregó un "punto de acceso" nuevo, real (validado contra la vía pública real que pasa junto al recinto), separado del polígono y de la dirección -- una ruta calculada hoy desde AZA Colina ya parte desde ahí, no desde un punto a 18 km de distancia.
+- **Hallazgo nuevo, honesto, que requiere que Javier revise:** al aplicar el polígono a TODA la tanda reciente, aparecieron **10 guías que antes confirmaban "AZA Renca" limpio y ahora quedan en conflicto explícito** (Renca vs. Colina) -- esos camiones también registran paradas reales de una o más horas en el mismo lugar donde estuvo AL1879, en fechas distintas. Puede ser que esos transportes también pasen por AZA Colina como parte de su ruta real, o puede ser un punto de espera/consolidación compartido junto al cruce de la Panamericana -- Atlas no lo inventa ni lo fuerza a ninguna de las dos plantas: lo deja como conflicto explícito, visible, para que se revise con evidencia adicional (no oculta el problema para "que se vea prolijo").
+- Suite completa: 837 → **849 tests**, sin regresiones.
+
+---
+
 ## 2026-08-12 — TELEMETRÍA T3: Atlas ahora entiende "detenido" además de "en movimiento" -- y encontró una tercera planta AZA
 
 - **Lo que Javier tenía razón en señalar:** el vehículo SÍ estuvo detenido varias horas en un lugar real durante la ventana de carga -- Atlas antes solo miraba puntos GPS sueltos dentro de una ventana horaria estrecha (anclada en una sola de las dos horas del documento) y nunca consideraba los huecos entre viajes cortos como evidencia de una permanencia real. Corregido: Atlas ahora reconoce cuándo un vehículo estuvo parado en un mismo lugar durante horas (aunque no haya GPS registrado momento a momento durante esa permanencia) y usa AMBAS horas del documento (entrada y salida) para acotar la búsqueda, no solo una.

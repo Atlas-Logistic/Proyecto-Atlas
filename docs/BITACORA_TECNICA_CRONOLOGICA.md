@@ -4,6 +4,47 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: PLANTAS P3 (geocercas operacionales poligonales + corrección real de AZA COLINA)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `469cecb` (TELEMETRÍA T3).
+
+### Decisión de producto (contexto)
+
+Javier confirmó visualmente en Onelogis, para AL1879 (464641/464642), que la ubicación de la detención de T3 ("Gerdau Aza, Lampa") ES el recinto operacional real de AZA COLINA (acceso, estacionamientos, oficinas, zonas de carga) -- un punto+radio de 1,5 km nunca puede representar bien un complejo real amplio. Explícito: no crear "AZA LAMPA" -- es la misma planta, con nomenclatura cartográfica de apoyo.
+
+### Fase B -- modelo de geocerca (backward-compatible)
+
+`atlas_core/catalogo_plantas.py`: `Planta` gana `tipo_geocerca` (`TipoGeocerca.CIRCULAR|POLIGONAL`, default `CIRCULAR`) y `vertices: tuple[tuple[float,float],...]` (default `()`), agregados AL FINAL del dataclass. `desde_dict()` ya no exige coincidencia EXACTA de campos -- calcula `faltantes`/`desconocidos` contra `Planta.CAMPOS_OPCIONALES_LEGADO` y rellena los opcionales ausentes con su default (`registro antiguo sin tipo_geocerca/vertices/punto_ruteo_* -> CIRCULAR, comportamiento sin cambios`); campos realmente desconocidos siguen rechazándose (protección contra corrupción). `_validar_geocerca()`: CIRCULAR nunca trae vértices; POLIGONAL exige ≥3. `crear()`/`editar()` aceptan los campos nuevos.
+
+`atlas_core/rutas/geocerca.py`: nueva `punto_en_poligono()` (ray casting determinista sobre lat/lon como plano local -- válido a escala de un recinto real de cientos de metros, sin dependencia GIS). `resolver_planta_por_posicion()` reescrito para separar candidatas POLIGONALES (contención real) de CIRCULARES (distancia/radio, comportamiento intacto) -- un match poligonal junto con cualquier otro es ambigüedad real (no hay medida común de desempate); con solo candidatas circulares, la regla de desempate original (más cercana gana, empate exacto = ambiguo) queda sin tocar.
+
+### Fase C -- polígono real de AZA COLINA (evidencia, no el dibujo de Javier)
+
+Fuente de los vértices: envolvente convexa (10 vértices, algoritmo monótono de Andrew) de los 117 breadcrumbs reales de la detención de T3 (AL1879, 11-08-2026, 08:48:58-14:57:22), reutilizando la caché ya existente -- **0 llamadas nuevas a Onelogis**. Validación cartográfica independiente (ORS/Pelias, 2 métodos): reversa de cada vértice → "Gerdau Aza, Lampa"; búsqueda directa de "Avenida Presidente Eduardo Frei Montalva, Lampa" → coincide (confianza 1.0) a 0,2-0,3 km del polígono; búsqueda de "Ruta 5" → "Cruce Ruta 5 - Av. Américo Vespucio/Costanera Norte" real a ~0,4-0,65 km. Confirma que el recinto linda directamente con la vía que Javier describió.
+
+### Fase E -- jerarquía de evidencia con polígonos (2 correcciones reales durante la validación)
+
+1. **Bug real:** `detectar_entrada_salida_planta()` (chequeo por punto SUELTO, usado como evidencia media/alta) aceptaba un match POLIGONAL de un solo breadcrumb -- un camión que solo ATRAVIESA la vía pública junto al polígono (caso real: SB6486 cruzando en un trip de 30 km) dejaba puntos sueltos "dentro" sin haberse detenido nunca. Corregido: plantas POLIGONALES quedan EXCLUIDAS de este chequeo por punto aislado -- solo se confirman por una detención real (mayoría de puntos, `_resolver_planta_para_detencion`, nueva función: proporción de puntos de la detención dentro del polígono, `PROPORCION_MINIMA_DENTRO_POLIGONO=0.5`, "mayoritariamente" literal, nunca 100%).
+2. **Hallazgo real durante el reproceso completo (no un bug, una ambigüedad real):** 10 guías de la tanda que ya confirmaban AZA RENCA limpio (463594, 463630, 464534/535, 464588, 464601, 464624, 464698/699/700) también muestran detenciones reales (68-98% de puntos dentro, 32min-2h+) en el mismo polígono, en fechas distintas -- se consultó con el usuario (decisión de alto impacto): mantener el polígono tal cual (confiar en la evidencia visual de Javier para AL1879) y dejar estos casos en `ORIGEN_GPS_CONFLICTO` explícito para revisión manual, en vez de forzar Renca o ajustar el polígono a ciegas. Motivo legible: `CONFLICTO_AZA_COLINA_VS_AZA_RENCA(estadia_en=...;breadcrumb_aislado_en=...)`.
+
+### Fase I -- `punto_ruteo` (separado del polígono y de la dirección, decisión explícita del usuario)
+
+`Planta` gana `punto_ruteo_latitud`/`punto_ruteo_longitud` (opcionales, `None` default). Nueva `coordenada_ruteo_planta(planta)` en `geocerca.py`: usa `punto_ruteo_*` si la planta lo trae, si no cae a `latitud`/`longitud` exactamente como siempre (fallback explícito para toda planta sin punto de ruteo propio). Reemplaza los 3 usos directos de `Coordenadas(planta.longitud, planta.latitud)` como origen de ruta (`destino_entrega.py` ×2, `enriquecimiento_viaje.py` ×1) -- Renca sigue usando su único punto de siempre (fallback). Para AZA COLINA: `punto_ruteo` = el breadcrumb real más cercano (0,303 km) a "Avenida Presidente Eduardo Frei Montalva" real -- nunca el centroide del polígono ni la coordenada histórica ya demostrada imprecisa (18,4 km fuera del recinto).
+
+### Catálogo real (`plantas.json`)
+
+AZA COLINA: `tipo_geocerca=POLIGONAL`, 10 vértices reales, `punto_ruteo_latitud/longitud` nuevos: `latitud`/`longitud` (dirección histórica) **sin cambios**. Observación documenta fuente de vértices, validación cartográfica, decisión de no crear "AZA LAMPA", alias asociados ("Gerdau Aza", "Av. Pdte. Eduardo Frei Montalva, Colina/Lampa", "Panamericana Norte 18500"), y el propósito del `punto_ruteo`. AZA RENCA: sin cambios (`CIRCULAR`, sin vértices, sin `punto_ruteo` -- Fase H).
+
+### Datos reales (Fase M)
+
+Respaldo previo (`analisis_completo_guias_PRE_P3_20260812_161332.csv`). Reproceso de la tanda completa (19 guías, mismo criterio de esquema consistente que R1.1/T3). Reporte en `output/reporte_desktop_20260812_162735_plantas_p3/`; `config_usuario.json` actualizado. Ruta real recalculada desde el nuevo `punto_ruteo`: 464577 (TG8925) → AZA COLINA → Galvarino 8501, Quilicura, 13,18 km / 19,06 min (RUTA_CALCULADA) -- confirma que el punto de acceso real, no el centroide ni la dirección antigua, es el que efectivamente alimenta ORS.
+
+### Tests
+
+12 nuevos en `tests/test_plantas_p3_geocercas_poligonales.py`: point-in-polygon dentro/fuera/borde (sin lanzar); planta circular legado (sin `tipo_geocerca`/`vertices`) sigue funcionando igual; estadía mayoritaria dentro confirma; maniobra parcial en el borde no impide confirmar (mayoría, no 100%); dos plantas en conflicto vía detenciones; tránsito aislado por el polígono NO confirma sin detención real (regresión del bug de Fase E); multiguía comparte la misma planta; Renca circular sin regresión; ningún alias cartográfico crea una planta nueva; cambio de planta usa el `punto_ruteo` real, nunca el centroide ni el histórico. Suite completa: 837 → **849 passed**, 0 regresiones de código (10 conflictos nuevos son un hallazgo real de datos, documentado, no un bug).
+
+
+
 ## 2026-08-12 — Cierre: TELEMETRÍA T3 (origen por detenciones/estadías GPS, no solo breadcrumbs sueltos)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `aa1b5bb` (OPERACIÓN REAL R1.1).

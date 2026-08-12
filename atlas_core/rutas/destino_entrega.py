@@ -44,7 +44,11 @@ from atlas_core.extractor import (
     _extraer_despachar_a_geometrico,
 )
 from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
-from atlas_core.rutas.geocerca import RADIO_GEOCERCA_KM_PREDETERMINADO, distancia_km_haversine
+from atlas_core.rutas.geocerca import (
+    RADIO_GEOCERCA_KM_PREDETERMINADO,
+    coordenada_ruteo_planta,
+    distancia_km_haversine,
+)
 from atlas_core.rutas.modelos import CandidatoGeocodificacion, Coordenadas, EstadoRuta
 from atlas_core.rutas.posicion_vehiculo import ProveedorPosicionVehiculo
 from atlas_core.rutas.proveedor import ProveedorRutas
@@ -385,7 +389,8 @@ def calcular_ruta_con_planta_conocida(
     corroboración GPS todavía). Reutiliza exactamente la misma lógica de
     geocodificación/ORS que `calcular_ruta_entrega_para_viaje` -- solo se
     salta el paso de resolución de origen."""
-    if planta.latitud is None or planta.longitud is None:
+    coordenada_origen = coordenada_ruteo_planta(planta)
+    if coordenada_origen is None:
         return ResultadoRutaEntrega(
             planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
             estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value,
@@ -412,7 +417,7 @@ def calcular_ruta_con_planta_conocida(
         )
 
     ruta = proveedor_rutas.calcular_ruta(
-        Coordenadas(planta.longitud, planta.latitud), entrega.coordenadas, perfil
+        coordenada_origen, entrega.coordenadas, perfil
     )
     if ruta.estado != EstadoRuta.RUTA_CALCULADA:
         return ResultadoRutaEntrega(
@@ -486,7 +491,8 @@ def calcular_ruta_entrega_para_viaje(
         return ResultadoRutaEntrega(
             estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value, motivo_ruta=motivo_origen,
         )
-    if planta.latitud is None or planta.longitud is None:
+    coordenada_origen = coordenada_ruteo_planta(planta)
+    if coordenada_origen is None:
         return ResultadoRutaEntrega(
             estado_ruta=EstadoRuta.ORIGEN_NO_DETERMINADO.value,
             motivo_ruta="PLANTA_SIN_COORDENADAS_EN_CATALOGO",
@@ -516,7 +522,7 @@ def calcular_ruta_entrega_para_viaje(
         )
 
     ruta = proveedor_rutas.calcular_ruta(
-        Coordenadas(planta.longitud, planta.latitud), entrega.coordenadas, perfil
+        coordenada_origen, entrega.coordenadas, perfil
     )
     if ruta.estado != EstadoRuta.RUTA_CALCULADA:
         return ResultadoRutaEntrega(

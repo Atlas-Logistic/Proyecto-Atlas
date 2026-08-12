@@ -4,6 +4,16 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — PLANTAS P3: AZA Colina como recinto real -- 10 conflictos nuevos requieren revisión de Javier -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `469cecb` (TELEMETRÍA T3).
+- **Lo bueno primero:** 464641/464642 (el caso que Javier señaló) ya muestran **AZA COLINA confirmada por GPS** -- Atlas ahora modela plantas como recintos reales (polígono), no solo puntos. El polígono de Colina se construyó con evidencia GPS real (117 breadcrumbs de AL1879) validada contra cartografía real (la vía "Eduardo Frei Montalva" y el cruce de Ruta 5 están justo al lado). AZA Renca sigue funcionando exactamente igual que siempre (no se tocó).
+- **Lo que necesita a Javier ahora:** al aplicar el polígono a toda la tanda, aparecieron **10 guías que antes confirmaban Renca limpio y ahora quedan en conflicto explícito** (463594, 463630, 464534, 464535, 464588, 464601, 464624, 464698, 464699, 464700) -- esos camiones también muestran paradas reales de 32 minutos a más de 2 horas en el mismo lugar donde estuvo AL1879, en fechas distintas. Se decidió (con el usuario) NO forzar ninguna conclusión y NO ajustar el polígono a ciegas -- se dejan como conflicto explícito (`CONFLICTO_AZA_COLINA_VS_AZA_RENCA` en el campo `motivo_origen_gps`) para que Javier los revise con más contexto (¿esos transportes realmente pasan por Colina como parte de su ruta? ¿es un punto de espera compartido junto a la Panamericana, sin relación con ninguna de las dos plantas?).
+- **Separación importante para cualquiera que toque rutas de aquí en adelante:** la dirección histórica de una planta (`latitud`/`longitud`) y el punto real desde donde debe partir una ruta (`punto_ruteo_latitud`/`punto_ruteo_longitud`, nuevo) son cosas DISTINTAS -- para AZA Colina difieren en 18 km. Todo código que calcule una ruta ORS debe usar `coordenada_ruteo_planta(planta)` (en `atlas_core/rutas/geocerca.py`), nunca `Coordenadas(planta.longitud, planta.latitud)` directo.
+- **Próximo paso natural:** conversar con Javier sobre los 10 casos en conflicto -- con una guía/patente/fecha concreta que él pueda confirmar como "sí pasó por Colina" o "no, ese es un punto de espera aparte", se puede calibrar el criterio con evidencia real en vez de ajustar a ciegas.
+
+---
+
 ## 2026-08-12 — TELEMETRÍA T3: detenciones GPS + una planta AZA real sin catalogar -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `aa1b5bb` (OPERACIÓN REAL R1.1).

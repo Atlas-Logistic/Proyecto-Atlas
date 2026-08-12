@@ -26,7 +26,9 @@ from typing import Iterable
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.rutas.geocerca import (
     RADIO_GEOCERCA_KM_PREDETERMINADO,
+    ResultadoGeocercaPlanta,
     distancia_km_haversine,
+    punto_en_poligono,
     resolver_planta_por_posicion,
 )
 from atlas_core.rutas.modelos import Coordenadas
@@ -367,13 +369,35 @@ def detectar_entrada_salida_planta(
     PLANTA-P1), nunca un punto exacto. `hora_entrada_gps`/
     `hora_salida_gps` son el primer y último instante del recorrido
     dentro del radio -- evidencia GPS separada, nunca sobrescribe
-    hora_entrada_aza/hora_salida_aza documentales."""
+    hora_entrada_aza/hora_salida_aza documentales.
+
+    Bloque PLANTAS P3 -- esta función evalúa CADA punto de forma
+    independiente ("¿este punto suelto cae cerca de una planta?"), lo
+    que es evidencia razonable para geocercas CIRCULARES pequeñas (1.5
+    km: un vehículo solo pasa "cerca" brevemente si realmente pasa junto
+    a la planta) pero NO para geocercas POLIGONALES del tamaño de un
+    recinto real: un camión que solo viaja por la vía pública ADYACENTE
+    (caso real: SB6486 cruzando cerca de AZA COLINA en un tramo de 30 km
+    hacia otro destino, nunca deteniéndose) puede dejar varios
+    breadcrumbs sueltos DENTRO del polígono sin haber entrado nunca al
+    recinto operacional. Por eso, plantas POLIGONALES quedan EXCLUIDAS
+    de este chequeo por punto aislado -- solo se confirman por una
+    detención real (`resolver_planta_origen_gps` -> `detectar_detenciones`
+    + `_resolver_planta_para_detencion`, que exige mayoría de puntos
+    DENTRO durante una permanencia real, no un tránsito)."""
     if not puntos:
         return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="SIN_BREADCRUMBS")
-    plantas = list(plantas)
+    plantas = [
+        p for p in plantas if getattr(p, "tipo_geocerca", "CIRCULAR") != "POLIGONAL"
+    ]
     por_planta: dict[str, list[PosicionTelemetria]] = {}
     nombres: dict[str, str] = {}
-    distancias_minimas: dict[str, float] = {}
+    # Bloque PLANTAS P3: un match POLIGONAL no trae distancia a un
+    # centroide (`resultado.distancia_km is None`, contención real, no
+    # proximidad) -- se ignora para el mínimo sin romper el cálculo, la
+    # distancia mínima queda `None` si NINGÚN punto tuvo una distancia
+    # numérica (todos los matches fueron poligonales).
+    distancias_minimas: dict[str, float | None] = {}
     for punto in puntos:
         resultado = resolver_planta_por_posicion(
             Coordenadas(punto.longitud, punto.latitud), plantas, radio_km=radio_km
@@ -381,9 +405,12 @@ def detectar_entrada_salida_planta(
         if resultado.determinada:
             por_planta.setdefault(resultado.planta_id, []).append(punto)
             nombres[resultado.planta_id] = resultado.planta_nombre
-            actual = distancias_minimas.get(resultado.planta_id)
-            if actual is None or resultado.distancia_km < actual:
-                distancias_minimas[resultado.planta_id] = resultado.distancia_km
+            if resultado.distancia_km is not None:
+                actual = distancias_minimas.get(resultado.planta_id)
+                if actual is None or resultado.distancia_km < actual:
+                    distancias_minimas[resultado.planta_id] = resultado.distancia_km
+            else:
+                distancias_minimas.setdefault(resultado.planta_id, None)
 
     if not por_planta:
         return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="NINGUN_PUNTO_DENTRO_DE_GEOCERCA")
@@ -394,13 +421,14 @@ def detectar_entrada_salida_planta(
         )
 
     (planta_id, puntos_planta), = por_planta.items()
+    distancia_final = distancias_minimas[planta_id]
     return ResultadoOrigenGPS(
         ORIGEN_GPS_CONFIRMADO,
         planta_id=planta_id,
         planta_nombre=nombres[planta_id],
         hora_entrada_gps=puntos_planta[0].timestamp,
         hora_salida_gps=puntos_planta[-1].timestamp,
-        distancia_minima_km=round(distancias_minimas[planta_id], 3),
+        distancia_minima_km=round(distancia_final, 3) if distancia_final is not None else None,
     )
 
 
@@ -418,6 +446,80 @@ def detectar_entrada_salida_planta(
 # maniobra), y solo entra en juego con evidencia GPS real -- nunca
 # asume Renca ni ninguna otra planta por defecto.
 MARGEN_HORAS_PLANTA_PREDETERMINADO = 4.0
+
+# Bloque PLANTAS P3, Fase E -- una detención dentro de un recinto
+# POLIGONAL nunca exige que el 100% de sus puntos caigan adentro
+# (maniobras cerca de accesos/bordes del recinto son normales, ver caso
+# real AL1879: puntos junto al borde del polígono durante la salida).
+# 0.5 es el umbral literal de "mayoritariamente" pedido -- más de la
+# mitad de los puntos reales observados durante la detención.
+PROPORCION_MINIMA_DENTRO_POLIGONO = 0.5
+
+
+def _resolver_planta_para_detencion(
+    puntos_detencion: tuple[PosicionTelemetria, ...],
+    coordenada_representativa: Coordenadas,
+    plantas: list[Planta],
+    *,
+    radio_km: float,
+    proporcion_minima_poligono: float = PROPORCION_MINIMA_DENTRO_POLIGONO,
+) -> ResultadoGeocercaPlanta:
+    """Variante de `resolver_planta_por_posicion` para EVALUAR una
+    detención completa (no un punto suelto): para plantas POLIGONALES,
+    usa la PROPORCIÓN de los puntos reales de la detención que caen
+    dentro del recinto (`proporcion_minima_poligono`, nunca el 100%) en
+    vez de un solo punto representativo; para plantas CIRCULARES,
+    comportamiento sin cambios (distancia del punto representativo al
+    centroide, igual que `resolver_planta_por_posicion` -- Fase H: no se
+    toca Renca). Un match poligonal junto con cualquier otro match
+    (poligonal o circular) es ambigüedad real -- no hay una medida común
+    con la que desempatar."""
+    poligonales: list[tuple[object, float]] = []
+    circulares: list[tuple[float, object]] = []
+    for planta in plantas:
+        tipo = getattr(planta, "tipo_geocerca", "CIRCULAR")
+        vertices = getattr(planta, "vertices", ()) or ()
+        if tipo == "POLIGONAL" and vertices:
+            if not puntos_detencion:
+                continue
+            dentro = sum(
+                1 for p in puntos_detencion
+                if punto_en_poligono(Coordenadas(p.longitud, p.latitud), vertices)
+            )
+            proporcion = dentro / len(puntos_detencion)
+            if proporcion >= proporcion_minima_poligono:
+                poligonales.append((planta, proporcion))
+            continue
+        latitud = getattr(planta, "latitud", None)
+        longitud = getattr(planta, "longitud", None)
+        if latitud is None or longitud is None:
+            continue
+        distancia = distancia_km_haversine(
+            coordenada_representativa, Coordenadas(longitud, latitud)
+        )
+        if distancia <= radio_km:
+            circulares.append((distancia, planta))
+
+    if not poligonales and not circulares:
+        return ResultadoGeocercaPlanta(None, None, None, False, "FUERA_DE_GEOCERCA")
+    if len(poligonales) > 1 or (poligonales and circulares):
+        return ResultadoGeocercaPlanta(None, None, None, False, "AMBIGUO_ENTRE_PLANTAS")
+    if poligonales:
+        planta, proporcion = poligonales[0]
+        return ResultadoGeocercaPlanta(
+            planta.planta_id, planta.nombre, None, True,
+            f"DENTRO_DE_POLIGONO;proporcion_puntos_dentro={round(proporcion, 3)}",
+        )
+
+    circulares.sort(key=lambda par: par[0])
+    mejor_distancia = circulares[0][0]
+    empatadas = [planta for distancia, planta in circulares if distancia == mejor_distancia]
+    if len(empatadas) > 1:
+        return ResultadoGeocercaPlanta(None, None, mejor_distancia, False, "AMBIGUO_ENTRE_PLANTAS")
+    planta = empatadas[0]
+    return ResultadoGeocercaPlanta(
+        planta.planta_id, planta.nombre, mejor_distancia, True, "DENTRO_DE_GEOCERCA"
+    )
 
 
 def resolver_planta_origen_gps(
@@ -491,14 +593,20 @@ def resolver_planta_origen_gps(
     detenciones = detectar_detenciones(cercanos_ordenados, breadcrumbs_por_trip)
     detenciones_por_planta: dict[str, list[DetencionTelemetria]] = {}
     nombres_planta: dict[str, str] = {}
+    motivo_geocerca_por_planta: dict[str, str] = {}
     mejor_estadia_sin_planta: DetencionTelemetria | None = None
     for detencion in detenciones:
-        resultado_geocerca = resolver_planta_por_posicion(
-            Coordenadas(detencion.longitud, detencion.latitud), plantas, radio_km=radio_km
+        puntos_detencion = tuple(
+            p for trip_id in detencion.trip_ids for p in breadcrumbs_por_trip.get(trip_id, ())
+        )
+        resultado_geocerca = _resolver_planta_para_detencion(
+            puntos_detencion, Coordenadas(detencion.longitud, detencion.latitud),
+            plantas, radio_km=radio_km,
         )
         if resultado_geocerca.determinada:
             detenciones_por_planta.setdefault(resultado_geocerca.planta_id, []).append(detencion)
             nombres_planta[resultado_geocerca.planta_id] = resultado_geocerca.planta_nombre
+            motivo_geocerca_por_planta[resultado_geocerca.planta_id] = resultado_geocerca.motivo
         elif detencion.duracion_minutos >= DURACION_MINIMA_DETENCION_MIN and (
             mejor_estadia_sin_planta is None
             or detencion.duracion_minutos > mejor_estadia_sin_planta.duracion_minutos
@@ -531,25 +639,38 @@ def resolver_planta_origen_gps(
             )
         )
         if breadcrumbs_senalan_otra_planta:
+            nombre_detencion = nombres_planta.get(planta_id, planta_id)
+            nombre_breadcrumb = resultado_breadcrumbs.planta_nombre or resultado_breadcrumbs.motivo
             return ResultadoOrigenGPS(
                 ORIGEN_GPS_CONFLICTO,
                 motivo=(
-                    f"ESTADIA_EN_{planta_id}_VS_BREADCRUMB_AISLADO("
-                    f"{resultado_breadcrumbs.motivo or resultado_breadcrumbs.planta_id})"
-                ),
+                    f"CONFLICTO_{nombre_detencion}_VS_{nombre_breadcrumb}"
+                    f"(estadia_en={nombre_detencion};breadcrumb_aislado_en={nombre_breadcrumb})"
+                ).replace(" ", "_"),
             )
         mejor = max(lista_detenciones, key=lambda d: d.duracion_minutos)
         planta_confirmada = next((p for p in plantas if p.planta_id == planta_id), None)
+        # Bloque PLANTAS P3: para una planta POLIGONAL, "distancia al
+        # centroide" no es la evidencia que confirmó nada (la contención
+        # real en el polígono sí) y puede ser grande y confuso de leer
+        # junto a un CONFIRMADO (ver AZA COLINA: 18 km a la dirección
+        # histórica, sin relación con la detección real) -- se deja en
+        # `None`, la proporción de puntos dentro ya queda en `motivo`.
+        es_poligonal = (
+            planta_confirmada is not None
+            and getattr(planta_confirmada, "tipo_geocerca", "CIRCULAR") == "POLIGONAL"
+        )
         distancia_min = (
             round(distancia_km_haversine(
                 Coordenadas(mejor.longitud, mejor.latitud),
                 Coordenadas(planta_confirmada.longitud, planta_confirmada.latitud),
             ), 3)
-            if planta_confirmada is not None else None
+            if planta_confirmada is not None and not es_poligonal else None
         )
         solape_min = round(
             _solape_minutos(_instante(mejor.inicio), _instante(mejor.fin), hora_entrada, hora_salida), 1
         )
+        motivo_geocerca = motivo_geocerca_por_planta.get(planta_id, "DENTRO_DE_GEOCERCA")
         return ResultadoOrigenGPS(
             ORIGEN_GPS_CONFIRMADO,
             planta_id=planta_id,
@@ -558,7 +679,7 @@ def resolver_planta_origen_gps(
             hora_salida_gps=mejor.fin,
             distancia_minima_km=distancia_min,
             motivo=(
-                f"ESTADIA_EN_GEOCERCA;duracion_min={mejor.duracion_minutos};"
+                f"ESTADIA_EN_GEOCERCA({motivo_geocerca});duracion_min={mejor.duracion_minutos};"
                 f"solape_documental_min={solape_min};trips={'|'.join(mejor.trip_ids)}"
             ),
         )

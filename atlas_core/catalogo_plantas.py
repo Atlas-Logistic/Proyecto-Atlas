@@ -48,6 +48,17 @@ class EstadoVigencia(str, Enum):
     INACTIVA = "INACTIVA"
 
 
+class TipoGeocerca(str, Enum):
+    """Bloque PLANTAS P3 -- una planta puede modelarse como punto+radio
+    (histórico, sigue siendo el default) o como un recinto operacional
+    poligonal cuando un punto+radio pequeño no representa bien un
+    complejo real amplio (accesos, patios, varias naves) -- ver
+    `atlas_core.rutas.geocerca.punto_en_poligono`."""
+
+    CIRCULAR = "CIRCULAR"
+    POLIGONAL = "POLIGONAL"
+
+
 def normalizar_nombre_planta(nombre: str) -> str:
     """Normaliza únicamente para comparar, sin reemplazar el texto original."""
     texto = unicodedata.normalize("NFKD", str(nombre or "").strip())
@@ -101,16 +112,50 @@ class Planta:
     observacion: str
     fecha_creacion: str
     fecha_modificacion: str
+    # Bloque PLANTAS P3 -- opcionales con default, agregados AL FINAL para
+    # no romper catálogos existentes (ver `desde_dict`, que rellena estos
+    # dos con su default cuando un registro antiguo no los trae: "una
+    # planta antigua sin tipo se comporta como CIRCULAR", tal cual antes
+    # de este bloque). `vertices`: secuencia de (latitud, longitud) --
+    # solo tiene sentido con `tipo_geocerca=POLIGONAL`.
+    tipo_geocerca: str = TipoGeocerca.CIRCULAR.value
+    vertices: tuple[tuple[float, float], ...] = ()
+    # Bloque PLANTAS P3 -- separado A PROPÓSITO de `latitud`/`longitud`:
+    # esos dos siguen siendo la dirección/punto histórico de la planta
+    # (pueden quedar imprecisos frente a evidencia real nueva, como pasó
+    # con AZA COLINA -- geocodificado de texto de dirección, 18,4 km del
+    # recinto operacional real evidenciado por telemetría). `punto_ruteo_*`
+    # es el punto REAL desde donde debe iniciar/terminar una ruta ORS --
+    # el acceso de camiones hacia la red vial, validado contra
+    # cartografía/telemetría, nunca inventado. Sin `punto_ruteo_*`
+    # (`None`, default -- toda planta existente antes de este bloque),
+    # el ruteo sigue usando `latitud`/`longitud` exactamente como
+    # siempre (fallback explícito, ver `destino_entrega.py`).
+    punto_ruteo_latitud: float | None = None
+    punto_ruteo_longitud: float | None = None
+
+    # Campos que pueden faltar en un registro serializado antiguo sin
+    # romper la carga -- ver `desde_dict`. Todo campo nuevo agregado
+    # backward-compatible a este dataclass debe listarse aquí también.
+    CAMPOS_OPCIONALES_LEGADO = (
+        "tipo_geocerca", "vertices", "punto_ruteo_latitud", "punto_ruteo_longitud",
+    )
 
     @classmethod
     def desde_dict(cls, datos: object) -> "Planta":
         if not isinstance(datos, dict):
             raise CatalogoCorruptoError("cada planta debe ser un objeto JSON")
         campos = set(cls.__dataclass_fields__)
-        if set(datos) != campos:
+        faltantes = campos - set(datos)
+        desconocidos = set(datos) - campos
+        if desconocidos or (faltantes - set(cls.CAMPOS_OPCIONALES_LEGADO)):
             raise CatalogoCorruptoError(
                 "los campos de una planta no coinciden con el formato vigente"
             )
+        datos = dict(datos)
+        for campo in faltantes:
+            datos[campo] = cls.__dataclass_fields__[campo].default
+        datos["vertices"] = tuple(tuple(vertice) for vertice in (datos["vertices"] or ()))
         try:
             planta = cls(**datos)
             _validar_planta(planta)
@@ -119,6 +164,10 @@ class Planta:
         return planta
 
     def a_dict(self) -> dict[str, object]:
+        # `vertices` se deja como tupla de tuplas (no lista) -- json.dump
+        # serializa tuplas como arreglos igual que listas, y así
+        # `Planta(**planta.a_dict())` (ver `desactivar`) sigue
+        # construyendo un dataclass válido/hasheable sin reconversión.
         return asdict(self)
 
 
@@ -144,8 +193,30 @@ def _validar_planta(planta: Planta) -> None:
     except ValueError as error:
         raise ErrorCatalogoPlantas("estado de calidad o vigencia no permitido") from error
     _validar_coordenadas(planta.latitud, planta.longitud)
+    _validar_coordenadas(planta.punto_ruteo_latitud, planta.punto_ruteo_longitud)
     _validar_fecha_iso(planta.fecha_creacion, "fecha_creacion")
     _validar_fecha_iso(planta.fecha_modificacion, "fecha_modificacion")
+    _validar_geocerca(planta.tipo_geocerca, planta.vertices)
+
+
+def _validar_geocerca(tipo_geocerca: str, vertices: tuple[tuple[float, float], ...]) -> None:
+    try:
+        tipo = TipoGeocerca(tipo_geocerca)
+    except ValueError as error:
+        raise ErrorCatalogoPlantas("tipo_geocerca no permitido") from error
+    if tipo == TipoGeocerca.CIRCULAR:
+        if vertices:
+            raise ErrorCatalogoPlantas("una planta CIRCULAR no debe tener vértices")
+        return
+    # POLIGONAL
+    if len(vertices) < 3:
+        raise ErrorCatalogoPlantas(
+            "una planta POLIGONAL requiere al menos 3 vértices"
+        )
+    for vertice in vertices:
+        if len(vertice) != 2:
+            raise ErrorCatalogoPlantas("cada vértice debe ser [latitud, longitud]")
+        _validar_coordenadas(vertice[0], vertice[1])
 
 
 class CatalogoPlantas:
@@ -185,12 +256,19 @@ class CatalogoPlantas:
         longitud: float | None = None,
         estado_calidad: EstadoCalidad | str = EstadoCalidad.PENDIENTE,
         observacion: str = "",
+        tipo_geocerca: TipoGeocerca | str = TipoGeocerca.CIRCULAR,
+        vertices: Iterable[tuple[float, float]] = (),
+        punto_ruteo_latitud: float | None = None,
+        punto_ruteo_longitud: float | None = None,
     ) -> Planta:
         plantas = self._leer()
         nombre_limpio = _texto_obligatorio(nombre, "nombre")
         normalizado = normalizar_nombre_planta(nombre_limpio)
         self._validar_duplicado(plantas, normalizado)
         latitud, longitud = _validar_coordenadas(latitud, longitud)
+        punto_ruteo_latitud, punto_ruteo_longitud = _validar_coordenadas(
+            punto_ruteo_latitud, punto_ruteo_longitud
+        )
         instante = self._instante_iso()
         planta = Planta(
             planta_id=str(self._generador_id()),
@@ -208,6 +286,10 @@ class CatalogoPlantas:
             observacion=_texto_opcional(observacion),
             fecha_creacion=instante,
             fecha_modificacion=instante,
+            tipo_geocerca=TipoGeocerca(tipo_geocerca).value,
+            vertices=tuple(tuple(v) for v in vertices),
+            punto_ruteo_latitud=punto_ruteo_latitud,
+            punto_ruteo_longitud=punto_ruteo_longitud,
         )
         _validar_planta(planta)
         plantas.append(planta)
@@ -230,6 +312,11 @@ class CatalogoPlantas:
         estado_calidad: EstadoCalidad | str | None = None,
         fuente: str | None = None,
         observacion: str | None = None,
+        tipo_geocerca: TipoGeocerca | str | None = None,
+        vertices: Iterable[tuple[float, float]] | None = None,
+        punto_ruteo_latitud: float | None = None,
+        punto_ruteo_longitud: float | None = None,
+        limpiar_punto_ruteo: bool = False,
     ) -> Planta:
         plantas = self._leer()
         indice = self._indice(plantas, planta_id)
@@ -251,6 +338,19 @@ class CatalogoPlantas:
             latitud_nueva, longitud_nueva = actual.latitud, actual.longitud
         else:
             latitud_nueva, longitud_nueva = _validar_coordenadas(latitud, longitud)
+        if limpiar_punto_ruteo:
+            if punto_ruteo_latitud is not None or punto_ruteo_longitud is not None:
+                raise ErrorCatalogoPlantas(
+                    "no combine limpiar_punto_ruteo con punto_ruteo nuevo"
+                )
+            punto_ruteo_lat_nuevo = punto_ruteo_lon_nuevo = None
+        elif punto_ruteo_latitud is None and punto_ruteo_longitud is None:
+            punto_ruteo_lat_nuevo = actual.punto_ruteo_latitud
+            punto_ruteo_lon_nuevo = actual.punto_ruteo_longitud
+        else:
+            punto_ruteo_lat_nuevo, punto_ruteo_lon_nuevo = _validar_coordenadas(
+                punto_ruteo_latitud, punto_ruteo_longitud
+            )
         planta = Planta(
             planta_id=actual.planta_id,
             nombre=nombre_nuevo,
@@ -267,6 +367,14 @@ class CatalogoPlantas:
             observacion=actual.observacion if observacion is None else _texto_opcional(observacion),
             fecha_creacion=actual.fecha_creacion,
             fecha_modificacion=self._instante_iso(),
+            tipo_geocerca=(
+                actual.tipo_geocerca if tipo_geocerca is None else TipoGeocerca(tipo_geocerca).value
+            ),
+            vertices=(
+                actual.vertices if vertices is None else tuple(tuple(v) for v in vertices)
+            ),
+            punto_ruteo_latitud=punto_ruteo_lat_nuevo,
+            punto_ruteo_longitud=punto_ruteo_lon_nuevo,
         )
         _validar_planta(planta)
         plantas[indice] = planta
