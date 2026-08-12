@@ -4,6 +4,31 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — PRODUCCIÓN P1: punto de partida limpio -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `ecaa927`. Sin cambios de código -- solo datos (instalación real) + un doc nuevo en el repo (`docs/HISTORICO_EXPERIMENTAL_VS_OPERACION.md`, léelo primero si algo de esto no cuadra).
+- **Decisión clave:** los 574 viajes anteriores a 2026-08-12 son **experimentales**, no un histórico operacional que haya que preservar con precisión. Se cierra ahí la línea ESTADOS S3/S3.1 (migración fina de ese corpus) -- no se completó, no hacía falta, el trabajo ya hecho queda como referencia en `estado_revision_eval/s3/` y `s3_1/`.
+- **Dónde está todo ahora** (en la instalación real, `AppData\Local\Atlas\datos\`):
+  - Histórico experimental (574 viajes, esquema viejo): `reportes\historicos\experimental_2026-07-28_574viajes\` y `procesamiento\historico_experimental\analisis_completo_guias_574viajes_experimental.csv`.
+  - **Operación real actual: `reportes\actual\viajes.csv` y `procesamiento\analisis_completo_guias.csv`** -- empieza con 2 viajes (las guías Villagra/Ñancucheo, las mismas usadas en bloques anteriores para validar), esquema completo O1+E1+S2+S2.2+I1.
+- **Muy importante si vas a procesar guías nuevas:** apuntan naturalmente a `reportes\actual\`/`procesamiento\analisis_completo_guias.csv` -- ya son las rutas "actual" de siempre, no hace falta cambiar nada en Desktop ni en scripts. El histórico quedó en carpetas con nombre distinto (`historicos\`, `historico_experimental\`) precisamente para que nadie lo toque por accidente.
+- **El resultado inicial (2 viajes, ambos "requiere revisión") es real, no un placeholder que haya que "arreglar".** Refleja honestamente que esos 2 documentos tienen datos genuinamente sin corroborar (cliente, destino, patente) -- exactamente lo que el modelo S2/I1 está diseñado para mostrar. A medida que entren guías nuevas reales, el dataset operacional crecerá con datos reales, no hace falta ni se debe forzar que se vea "más confirmado" artificialmente.
+- **¿Próximo paso natural?** Empezar a alimentar Atlas con guías reales de operación día a día -- cada una que se procese ya cae en el dataset operacional nuevo automáticamente. Cuando haya volumen real, recién ahí tiene sentido retomar UX-R4 con datos genuinamente operacionales (no de laboratorio).
+
+---
+
+## 2026-08-12 — ESTADOS S3: migración controlada -- simulación aprobada, migración diferida por decisión de negocio
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `ecaa927`. Sin cambios de código, sin commit -- bloque de datos/simulación puro.
+- **Qué se hizo:** se respaldó producción (verificado byte a byte), se clasificaron los 1177 documentos históricos según cuánta evidencia existe sin reprocesar OCR, y se simuló un candidato completo de `viajes.csv` con la semántica actual (O1+E1+S2+S2.2+I1). Resultado: **73 confirmados / 503 requieren revisión** de 576 viajes -- prácticamente igual a lo que ya había anticipado ESTADOS S1 (73/501).
+- **Se validó con evidencia real, no solo con números:** 30 viajes que pasarían de confirmado a revisión, verificados uno por uno contra los datos ya extraídos -- 30/30 con causa real (nada inventado, nada incorrecto).
+- **Si retomas esto, importante:** el candidato validado está en `C:\Users\Jjjc0508\Desktop\Atlas\estado_revision_eval\s3\simulado\viajes.csv`, listo para migrar cuando se decida. El respaldo de producción (para poder comparar o hacer rollback si migran después con otra herramienta) está en `C:\Users\Jjjc0508\Desktop\Atlas\backups_produccion\20260812_084914_pre_s3\`.
+- **Por qué no se migró:** el volumen del cambio (417 de 574 viajes pasan a "requiere revisión" de golpe) es un impacto operativo real y grande para el uso diario de Atlas Desktop -- se preguntó explícitamente antes de escribir producción y la decisión fue esperar. No es una limitación técnica ni un bloqueo -- la simulación está aprobada y lista, es una decisión de cuándo el negocio quiere absorber ese volumen de revisión.
+- **Hallazgo real aparte, sin corregir:** la guía `384674` aparece 3 veces en el CSV histórico (mismo documento, fotos distintas subidas por separado) con datos de transporte inconsistentes entre copias -- sugiere que puede haber más duplicados en el corpus histórico. Vale la pena una auditoría de deduplicación antes o durante una futura migración real.
+- **¿Próximo paso?** Cuando el negocio decida migrar: el candidato ya está simulado y validado, solo falta ejecutar la sustitución real (Fase O de este mismo bloque, ya diseñada) -- no hace falta rehacer el análisis desde cero.
+
+---
+
 ## 2026-08-12 — IDENTIDAD I1: auditoría de normalizaciones hardcodeadas -- APROBADO, cierra la serie ESTADOS S2
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `8029ee4`. **Este bloque SÍ se commitea y pushea** -- ver SHA en el reporte final de la conversación si lo necesitas, o `git log` en la rama.

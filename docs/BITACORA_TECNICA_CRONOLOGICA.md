@@ -4,6 +4,92 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: PRODUCCIÓN P1 (punto de partida limpio) — decisión de producto, cierra la línea de migración S3/S3.1
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `ecaa92746fb30b3b4509fc99ec96842ffc806280`. Cambios: solo datos (instalación real) + documentación (repo). Sin cambios de código en `atlas_core`.
+
+### Decisión de producto (Javier)
+
+Los 574 viajes publicados (generados 2026-07-28) fueron corpus de **prueba y experimentación** durante el desarrollo (validación de funciones, OCR, motores, UX) -- **no histórico operacional real**. Se cierra la línea de trabajo ESTADOS S3/S3.1 (migración/reclasificación fina de ese corpus) sin completarla -- no hacía falta. El análisis técnico ya hecho (simulación completa validada, 0 cambios incorrectos en la muestra) queda preservado como referencia en `estado_revision_eval/s3/` y `s3_1/` del repo, no se descarta, simplemente no se usa como base de la migración productiva.
+
+### Separación ejecutada (instalación real, `AppData\Local\Atlas\datos\`)
+
+- **Backup adicional** antes de mover nada: `C:\Users\Jjjc0508\Desktop\Atlas\backups_produccion\20260812_101500_pre_p1_corte\` -- verificado igual al estado ya respaldado en el backup de ESTADOS S3.
+- **Histórico experimental movido (no copiado, no borrado), verificado byte a byte idéntico tras el movimiento:**
+  - `datos\reportes\actual\*` (574 viajes) -> `datos\reportes\historicos\experimental_2026-07-28_574viajes\`
+  - `datos\procesamiento\analisis_completo_guias.csv` (1177 filas) -> `datos\procesamiento\historico_experimental\analisis_completo_guias_574viajes_experimental.csv`
+  - Cada carpeta histórica incluye su propio `LEEME_HISTORICO_EXPERIMENTAL.md` explicando qué es y por qué no es la fuente productiva.
+- **Fecha de corte: 2026-08-12.**
+- **Dataset operacional nuevo construido, sin OCR masivo:** se reprocesaron con el motor actual (HEAD `ecaa927`, incluye O1+E1+S2+S2.2+I1) las únicas 2 imágenes reales ya presentes en `datos\entradas\` (guías 463594 "Villagra", 463630 "Ñancucheo") -- mismas guías usadas repetidamente como set de validación real en bloques anteriores. Resultado honesto, sin maquillar: **2 viajes, ambos `REQUIERE_REVISION`** con motivos explícitos reales (`CLIENTE_SIN_CORROBORAR`, `OBRA_DESTINO_SIN_CORROBORAR`, `PATENTE_SIN_HOMOLOGAR`, `CLIENTE_AUSENTE`) -- refleja el estado real de esos documentos bajo el modelo actual, no un número elegido para verse bien.
+  - `datos\procesamiento\analisis_completo_guias.csv` (nuevo, 2 filas, esquema completo actual)
+  - `datos\reportes\actual\viajes.csv` (nuevo, 2 viajes, 34 columnas -- esquema O1+E1+S2/S2.2 completo)
+- Verificado estructuralmente: columnas mínimas que exige el parser de Desktop (`viaje_id`, `numero_transporte`, `fecha`, `estado`) presentes; campos O1 (peso/horas) con datos reales; campos E1/ruta vacíos (correcto -- sin `calculador_rutas` conectado a una corrida real todavía, no se inventó evidencia).
+
+### Documentación
+
+- `docs/HISTORICO_EXPERIMENTAL_VS_OPERACION.md` (nuevo, en el repo): tabla de ubicaciones antes/después del corte, fecha de corte, cómo cargar el histórico manualmente si hace falta (el parser de Desktop ya tolera columnas ausentes desde el Bloque O1 -- no se construyó ningún filtro ni vista especial).
+
+### Flujo hacia adelante
+
+Cada imagen nueva en Desktop: motor actual -> `analisis_completo_guias.csv` operacional -> `viajes.csv` operacional. El histórico vive en carpetas separadas (`reportes\historicos\`, `procesamiento\historico_experimental\`) -- `procesar_carpeta`/`generar_reporte_viajes` nunca las tocan salvo que se les apunte explícitamente ahí.
+
+### Tests
+
+Sin cambios de código -- suite completa reconfirmada verde: **742 passed**. Las protecciones de esquema relevantes (`test_rechaza_encabezado_incompatible_sin_modificarlo` y equivalentes) ya existían de bloques anteriores y siguen vigentes sin modificación.
+
+### Producción
+
+Histórico preservado intacto (verificado por hash). Nuevo reporte operacional real, pequeño y honesto, ya activo en `datos\reportes\actual\`.
+
+---
+
+## 2026-08-12 — Cierre: ESTADOS S3 (migración controlada del dataset productivo) — SIMULACIÓN APROBADA, migración diferida por decisión de negocio
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `ecaa92746fb30b3b4509fc99ec96842ffc806280`. **Sin cambios de código -- bloque de datos/simulación, no se commitea nada.**
+
+### Fase A/B: fuentes y respaldo
+
+- CSV documental productivo: `AppData\Local\Atlas\datos\procesamiento\analisis_completo_guias.csv` (1177 filas, sha256 `35eb44d1…`). Reporte productivo: `AppData\Local\Atlas\datos\reportes\actual\` (5 archivos, `viajes.csv` 574 viajes, sha256 `d1ff2d7b…`).
+- Respaldo íntegro en `C:\Users\Jjjc0508\Desktop\Atlas\backups_produccion\20260812_084914_pre_s3\` -- verificado byte a byte por sha256 contra el original, los 6 archivos idénticos.
+
+### Fase C/D/E: clasificación y reclasificación conservadora
+
+- **Hallazgo clave:** con las columnas disponibles en el CSV histórico (sin OCR nuevo) es posible reconstruir con confianza total los motivos de AUSENCIA (`GUIA_AUSENTE`, `TRANSPORTE_AUSENTE`, `CLIENTE_AUSENTE`, `CHOFER_AUSENTE`, `DOCUMENTO_DEGRADADO`, `MATERIAL_AUSENTE`) -- dependen solo del valor final del campo. **No** es posible reconstruir con confianza los motivos de CORROBORACIÓN (`*_SIN_CORROBORAR`, `PATENTE_*`) sin saber cómo se obtuvo cada campo -- esa información no sobrevive en este esquema histórico (mismo hallazgo ya documentado en ESTADOS S2, columnas `_fuente` no confiables).
+- Política aplicada: `indicador_revision_s3 = REVISAR` si hay un motivo de ausencia reconstruible **O** si el documento ya era `REVISAR` en el original (se preserva la cautela histórica sin inventar el motivo fino -- se marca `HISTORICO_SIN_MOTIVO_RECONSTRUIBLE`, explícito, nunca oculto). Nunca se relaja a `OK` sin evidencia.
+- Resultado: **1177 documentos clasificados** -- 915 con motivo de ausencia reconstruible directamente, 262 con revisión histórica preservada explícitamente sin motivo fino. **0 en categoría C (requiere reproceso)** -- la política conservadora hace innecesario reprocesar para no inventar ni perder cautela real.
+
+### Fase F/G: simulación completa
+
+- Candidato generado en `estado_revision_eval\s3\simulado\` con el pipeline real (`generar_reporte_viajes`, código actual `ecaa927`, incluye S2/S2.2/I1).
+- **576 viajes** (574 histórico + 2 del set reciente, que en el CSV histórico tenían `numero_transporte="No encontrado"` y por tanto no formaban viaje -- se usó su fila ya reprocesada con código actual, ver Fase I).
+- **73 CONFIRMADO / 503 REQUIERE_REVISION** -- consistente con el hallazgo ya establecido en ESTADOS S1 (73/501 sobre 574; +2 viajes y +2 REQUIERE_REVISION por el set reciente).
+- **417 viajes cambian CONFIRMADO -> REQUIERE_REVISION, 0 en sentido contrario, 157 sin cambio.**
+
+### Fase H: validación de muestra
+
+- 30 viajes muestreados del grupo `CONFIRMADO -> REQUIERE_REVISION`: **30/30 con motivo real, directamente verificable en los datos ya extraídos** (ausencia de campo clave, documento degradado, o conflicto real entre documentos del mismo transporte -- ej. transporte `0000279246`: `CONFLICTO_CHOFER` + `CONFLICTO_OBRA_DESTINO` real entre 3 documentos). **0 cambios incorrectos, 0 no determinables.**
+
+### Fase I/J/K: O1, rutas, multiguía
+
+- **O1 preservado:** el set reciente (guías 463594, 463630) conserva `peso_total_viaje_kg`/`hora_entrada_aza`/`hora_salida_aza`/`permanencia_minutos` reales. El resto (574 históricos) queda vacío -- nunca se inventó ni se reprocesó para llenar huecos.
+- **E1/rutas:** todos los campos de ruta (`planta_origen_nombre`, `distancia_km`, `estado_ruta`, etc.) quedan vacíos en los 576 viajes -- correcto, nunca hubo un `calculador_rutas` real conectado a una corrida sobre este corpus, no se inventó evidencia.
+- **Multiguía:** verificado con datos reales que la agrupación/conflictos funcionan correctamente (ver caso `0000279246` arriba). **Hallazgo aparte, real, fuera de alcance de este bloque:** la guía `384674` aparece **3 veces** en el CSV histórico bajo archivos distintos (`384674.jpg`, `IMG-20250623-WA0020.jpg`, `IMG-20250624-WA0033.jpg`) con `numero_transporte` inconsistente entre copias -- duplicación real de fotos del mismo documento físico, documentada pero no corregida aquí (requiere su propio bloque de deduplicación).
+
+### Fase L/M: dataset candidato y dry run
+
+- Candidato con esquema completo actual (34 columnas), validado programáticamente contra las columnas mínimas que exige el parser de Desktop (`viaje_id`, `numero_transporte`, `fecha`, `estado`) -- presentes, esquema consistente en las 576 filas.
+- **Dry run limitado a verificación estructural** -- este entorno no permite lanzar la aplicación Electron de Desktop para una prueba visual real; no se afirma haber validado la UI.
+
+### Fase N — decisión: simulación aprobada, migración diferida
+
+Los 10 criterios de cierre técnicos se cumplen (respaldo verificado, simulación completa, 0 cambios incorrectos, 574->576 explicado, esquema válido, candidato estructuralmente legible, suite verde, rollback disponible por backup, sin sorpresas en los datos). **Se consultó explícitamente antes de escribir producción** dado el volumen del cambio (417 viajes pasan a requerir revisión de golpe) -- decisión: **no migrar todavía**, dejar el candidato validado disponible para cuando se decida absorber ese volumen de revisión operativamente.
+
+### Producción
+
+**No modificada.** Hashes idénticos a los de antes de este bloque.
+
+---
+
 ## 2026-08-12 — Cierre: IDENTIDAD I1 (auditoría de normalizaciones hardcodeadas) — APROBADO. Cierra la serie ESTADOS S2/S2.1/S2.2/I1
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8029ee4546305511ac8ad641354fa2b3cc306423`. **Este bloque SÍ committea** (junto con S2/S2.2, ver abajo).

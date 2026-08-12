@@ -4,6 +4,28 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — PRODUCCIÓN P1: punto de partida limpio para operación real
+
+- **Decisión de producto:** los 574 viajes publicados hasta hoy fueron un corpus de prueba durante el desarrollo, no un histórico operacional real -- se dejan de lado sin invertir más tiempo en migrarlos o reclasificarlos uno a uno. Cierra la línea de trabajo de migración (ESTADOS S3/S3.1) sin completarla; el análisis ya hecho queda guardado como referencia, no se pierde.
+- **Qué se hizo:** se preservó ese histórico intacto (movido, no borrado, verificado byte a byte) a una carpeta claramente etiquetada como experimental. Se creó un reporte operacional nuevo, vacío salvo por las dos únicas guías reales que ya existían para pruebas de validación -- reprocesadas con el motor actual completo (peso, horas, estados, identidad corregida).
+- **Resultado inicial honesto:** 2 viajes, ambos marcados "requiere revisión" con la razón explícita de cada uno -- no se ajustó el resultado para que se vea mejor, es el estado real de esos documentos.
+- **Desde hoy (2026-08-12),** cada guía nueva que se procese en Atlas Desktop alimenta este reporte operacional nuevo, con el esquema y las reglas actuales -- nunca se mezcla automáticamente con el histórico de pruebas.
+- El histórico sigue disponible para consulta manual si hace falta (Atlas Desktop ya sabe leer reportes con esquema anterior, campo por campo faltante se muestra como "No disponible").
+- Producción real intacta y verificada; suite completa (742 tests) sin cambios, todos verdes.
+
+---
+
+## 2026-08-12 — ESTADOS S3: migración controlada del dataset productivo -- simulación APROBADA, migración diferida (decisión de negocio)
+
+- Se respaldó íntegramente el reporte productivo actual (574 viajes) y se generó, sin tocar producción, un candidato completo con la semántica corregida de todos los bloques anteriores (O1, E1, S2, S2.2, I1).
+- **Resultado de la simulación: 73 confirmados / 503 requieren revisión** (de 576 viajes) -- consistente con lo ya anticipado en el diagnóstico ESTADOS S1: el reporte que hoy usa Desktop (490 confirmados / 84 en revisión) se generó **antes** de que el sistema propagara correctamente la revisión de documento a viaje, así que nunca reflejó ese volumen real de incertidumbre.
+- **Validación exhaustiva antes de proponer el cambio:** se verificaron con datos reales 30 viajes que pasarían de "confirmado" a "requiere revisión" -- los 30 tienen una causa real y verificable (un dato faltante, un documento degradado, o una contradicción real entre documentos del mismo transporte). **0 cambios incorrectos.**
+- **Se consultó antes de escribir producción**, dado que el cambio implica que ~417 viajes que hoy aparecen "confirmados" pasarían de golpe a "requieren revisión" -- un volumen de trabajo operativo grande para el día a día. **Decisión: no migrar todavía.** El candidato queda validado y disponible (`estado_revision_eval/s3/simulado/`) para cuando se decida absorber ese volumen.
+- Producción **no fue modificada**. Respaldo verificado byte a byte disponible para cualquier necesidad futura.
+- Hallazgo adicional real, documentado aparte: una guía del histórico aparece duplicada 3 veces en el CSV productivo (misma guía, fotos distintas, con datos inconsistentes entre copias) -- no se corrigió en este bloque, queda como trabajo futuro.
+
+---
+
 ## 2026-08-12 — IDENTIDAD I1: auditoría de normalizaciones hardcodeadas -- APROBADO (cierra la serie ESTADOS S2)
 
 - Se auditaron todas las reglas del extractor base que podían reemplazar silenciosamente la identidad de un cliente, chofer o destino por coincidir con una palabra clave (SIGRO, AMERICAN SCREW, POCURO, PRODALA/PRODALAM, ACMA, y un RUT de chofer sin ninguna justificación en el código). **14 reglas en total, confinadas a un único archivo** (`atlas_core/extractor.py`) -- 6 se retiraron, 8 se conservaron con evidencia real de que hacen falta.
