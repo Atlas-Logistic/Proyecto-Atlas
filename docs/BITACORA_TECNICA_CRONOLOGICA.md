@@ -4,6 +4,28 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: E2E R2 (publicación de logística real en el dataset operacional y Desktop)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `514feaa2ffec245ef9675a99f979a44d18bd019a` (TELEMETRÍA T2). **Sin cambios de código en `atlas_core` ni en Desktop** -- este bloque fue de auditoría, regeneración de datos y verificación, no de desarrollo.
+
+### Decisión
+
+La telemetría y ORS ya alimentan automáticamente el dataset operacional consumido por Desktop -- no hacía falta ninguna lógica nueva (Fase A confirmó que todos los campos requeridos ya existían end-to-end desde los bloques E2E R1.1/TELEMETRÍA T1/T2: `planta_origen_nombre`, `despachar_a`, `distancia_km`, `duracion_min`, `estado_ruta`, `motivo_ruta`, `proveedor_telemetria`, `estado_telemetria`, `origen_gps`, `distancia_gps_km` ya recorrían todo el camino documento → `gestor_viajes` → `reporte_viajes` → `viajes.csv`).
+
+### Qué se hizo
+
+Respaldo de la operación actual, luego regeneración focal (solo 463594/463630, motor E2E+T2 completo, sin histórico) de `analisis_completo_guias.csv` y `viajes.csv` en la fuente operacional canónica (`AppData\Local\Atlas\datos\operacion_desktop\` = `Proyecto-Atlas\output\`, mismo junction del Bloque E2E R1.1). `config_usuario.json` (Desktop) actualizado para apuntar al reporte nuevo.
+
+Verificación: se instrumentó el proveedor Onelogis para contar peticiones HTTP reales durante la regeneración -- **0 llamadas nuevas** (toda la telemetría salió de la caché de T1/T2). Se ejecutó `atlas_viajes.html::normalizarFila()` y `formato_operacional.js` REALES (sin modificar Desktop) contra el `viajes.csv` regenerado, vía Node.js directo -- confirma que Desktop, sin ningún cambio de código, ya muestra: Planta origen "AZA RENCA", Destino entrega (DESPACHAR A), Distancia "536,7 km", Tiempo estimado "10 h 07 min", Estado ruta "Ruta calculada" para 463630; y "No disponible"/"Pendiente de revisión" para 463594, sin forzar ningún candidato. Ningún campo técnico de telemetría (trip_id, breadcrumbs, origen_gps) aparece en la UI -- confirmado por búsqueda textual en `atlas_viajes.html`.
+
+`npm start` no pudo abrir una ventana real en este entorno (sin servidor de display) -- limitación del entorno de ejecución, no de Atlas; `npm test` (110 tests, sin necesitar display) sigue verde.
+
+### Tests
+
+806 passed (motor, sin cambios desde T2). Desktop: 110 passed, sin cambios propios de este bloque.
+
+---
+
 ## 2026-08-12 — Cierre: TELEMETRÍA T2 (selección automática de recorrido GPS + integración E2E)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `dd534c505fe4fa455bef317c10e016a53aa84bd9` (TELEMETRÍA T1).

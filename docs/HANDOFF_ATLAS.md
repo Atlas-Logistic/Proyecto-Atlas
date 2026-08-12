@@ -4,6 +4,16 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — E2E R2: logística real ya visible en Desktop -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `514feaa` (TELEMETRÍA T2). Sin cambios de código -- bloque de verificación/regeneración de datos.
+- **Estado actual del dataset operacional** (`AppData\Local\Atlas\datos\operacion_desktop\` = `Proyecto-Atlas\output\`, `config_usuario.json` ya apunta al reporte más reciente): 463630 con ruta real (536,7 km / 10h07min, "Ruta calculada"); 463594 con planta confirmada pero ruta honestamente pendiente (destino ambiguo, sin forzar).
+- **Confirmado con las funciones REALES de Desktop** (`normalizarFila`, `formato_operacional.js`), sin tocar su código: ya leen y muestran estos campos correctamente. Ningún dato técnico de telemetría se filtra a la UI.
+- **Limitación de este entorno, no de Atlas:** no se pudo abrir una ventana real de Electron aquí (sin servidor de display) para una captura visual -- la verificación se hizo ejecutando el código real de Desktop directamente con Node.js sobre el CSV real.
+- **Próximo paso natural:** si aparece una guía real nueva, procesarla con el pipeline ya conectado (motor + telemetría opcional) y confirmar visualmente en una máquina con pantalla que la Logística se ve como se espera.
+
+---
+
 ## 2026-08-12 — TELEMETRÍA T2: selección automática de recorrido GPS -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `dd534c5` (TELEMETRÍA T1).

@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — E2E R2: la logística real ya llega a la pantalla, sin construir nada nuevo
+
+- **Qué se confirmó:** todo lo que se construyó en los bloques anteriores (ruta real, GPS, telemetría) ya llegaba solo hasta el reporte que usa Atlas Desktop -- no hizo falta escribir código nuevo, solo verificarlo con datos reales y dejar la operación al día.
+- **Qué se ve ahora en Desktop, con datos reales, sin ningún ajuste manual:** para la guía a Coronel -- Planta origen AZA Renca, distancia 536,7 km, tiempo estimado 10 h 07 min, estado "Ruta calculada". Para la otra guía -- planta confirmada, pero distancia y tiempo quedan honestamente "No disponible" con el motivo real, porque la dirección de entrega sigue siendo ambigua y el sistema no inventa una respuesta.
+- **Costo:** cero consultas nuevas a Onelogis para regenerar estos dos viajes -- toda la información ya estaba en caché de los bloques anteriores.
+- **Nada técnico (identificadores de viaje GPS, puntos del recorrido) se muestra en pantalla** -- eso queda interno, tal como se pidió.
+- Suite completa del motor (806 tests) y de Desktop (110 tests) verdes.
+
+---
+
 ## 2026-08-12 — TELEMETRÍA T2: selección automática de recorrido GPS, sin intervención manual por guía
 
 - **Qué resolvía:** en el bloque anterior (T1), corroborar planta y desambiguar destino con GPS funcionaba, pero solo analizando a mano cuál viaje de Onelogis correspondía a cada guía -- no era todavía algo que Atlas hiciera solo.
