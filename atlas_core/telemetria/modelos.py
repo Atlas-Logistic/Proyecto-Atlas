@@ -108,3 +108,73 @@ class ResultadoBreadcrumbs:
     puntos: tuple[PosicionTelemetria, ...] = ()
     motivo: str = ""
     desde_cache: bool = False
+
+
+class EstadoSeleccionRecorrido(str, Enum):
+    """Bloque TELEMETRÍA T2 -- nunca lanza ni bloquea la creación del
+    viaje Atlas; cualquier resultado de la selección automática de
+    trips es uno de estos estados."""
+
+    SELECCIONADO = "SELECCIONADO"
+    SIN_HISTORICO_GPS = "SIN_HISTORICO_GPS"
+    SIN_ANCLA_TEMPORAL = "SIN_ANCLA_TEMPORAL"
+    TELEMETRIA_AMBIGUA = "TELEMETRIA_AMBIGUA"
+    PROVEEDOR_NO_DISPONIBLE = "PROVEEDOR_NO_DISPONIBLE"
+
+
+class EstadoConcordanciaHora(str, Enum):
+    """Bloque TELEMETRÍA T2, Fase H -- comparación informativa, nunca
+    sobrescribe la hora documental (hora_entrada_aza/hora_salida_aza son
+    horas reales registradas en planta, no aproximadas)."""
+
+    CONCORDANTE = "HORA_GPS_CONCORDANTE"
+    DIVERGENTE = "HORA_GPS_DIVERGENTE"
+    NO_DISPONIBLE = "HORA_GPS_NO_DISPONIBLE"
+
+
+@dataclass(frozen=True)
+class RecorridoOperacionalTelemetria:
+    """Uno o más `trips` de telemetría, consecutivos y geográfica/
+    temporalmente coherentes, que en conjunto representan UN viaje
+    logístico real (un viaje Atlas puede quedar fragmentado en varios
+    trips de Onelogis -- ver Bloque TELEMETRÍA T2, caso real 463630).
+
+    Nunca guarda breadcrumbs completos aquí (ver Fase A/N) -- solo el
+    primer y último punto, y la distancia GPS total ya sumada. Los
+    breadcrumbs completos viven en la caché de telemetría
+    (`RepositorioTelemetria`), separados de `viajes.csv`.
+    """
+
+    patente: str
+    fecha: str
+    trip_ids: tuple[str, ...]
+    inicio: str = ""
+    fin: str = ""
+    distancia_gps_total_km: float | None = None
+    primer_punto: PosicionTelemetria | None = None
+    ultimo_punto: PosicionTelemetria | None = None
+    huecos_temporales_min: tuple[float, ...] = ()
+    confianza: float = 0.0
+    evidencia_seleccion: str = ""
+
+    def a_dict(self) -> dict[str, object]:
+        return {
+            "patente": self.patente,
+            "fecha": self.fecha,
+            "trip_ids": list(self.trip_ids),
+            "inicio": self.inicio,
+            "fin": self.fin,
+            "distancia_gps_total_km": self.distancia_gps_total_km,
+            "primer_punto": self.primer_punto.a_dict() if self.primer_punto else None,
+            "ultimo_punto": self.ultimo_punto.a_dict() if self.ultimo_punto else None,
+            "huecos_temporales_min": list(self.huecos_temporales_min),
+            "confianza": self.confianza,
+            "evidencia_seleccion": self.evidencia_seleccion,
+        }
+
+
+@dataclass(frozen=True)
+class ResultadoSeleccionRecorrido:
+    estado: EstadoSeleccionRecorrido
+    recorrido: RecorridoOperacionalTelemetria | None = None
+    motivo: str = ""

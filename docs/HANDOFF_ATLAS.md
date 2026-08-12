@@ -4,7 +4,19 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
-## 2026-08-12 — TELEMETRÍA T1: GPS histórico real (Onelogis) -- si retomas esto, empieza aquí
+## 2026-08-12 — TELEMETRÍA T2: selección automática de recorrido GPS -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `dd534c5` (TELEMETRÍA T1).
+- **Ya no hace falta el análisis manual descrito en la entrada T1 de abajo** -- `atlas_core/telemetria/seleccion_recorrido.py` lo automatiza: dado patente + fecha + hora_entrada/hora_salida documental, encuentra solo el/los trip(s) de Onelogis relevantes (incluso si el viaje real quedó partido en varios), sin ningún ID hardcodeado. Validado reproduciendo, automáticamente, la misma selección de 3 trips que T1 había encontrado a mano para 463630.
+- **Cómo se conecta:** `procesar_archivo(..., servicio_telemetria=...)` -- opt-in, `None` por defecto (comportamiento idéntico a sin este bloque). Cuando está conectado, solo se usa si hace falta (planta sin determinar, o destino con ambigüedad real de geocodificación) -- nunca para todo.
+- **Umbrales del algoritmo** (distancia mínima 5 km para considerar un trip "sustancial", hueco máximo 90 min para encadenar) están calibrados contra el único caso real multi-trip conocido (463630) -- si aparecen más casos reales, vale la pena revisar si siguen siendo los correctos.
+- **Límite conocido:** la geocodificación ORS no tiene caché propia todavía (a diferencia de Onelogis, que sí) -- cada regeneración de reporte repite esas llamadas. No se resolvió en este bloque.
+- **Resultado ya aplicado al dataset operacional actual:** 463630 tiene ruta real automática (536,7 km / 606,9 min). 463594 sigue en revisión, correctamente.
+- **Próximo paso natural:** si aparece una guía real nueva con patente/fecha/horas documentales, procesarla con `servicio_telemetria` conectado para seguir validando el algoritmo con más evidencia real (los umbrales calibrados con 1 solo caso se beneficiarían de más datos).
+
+---
+
+## 2026-08-12 — TELEMETRÍA T1: GPS histórico real (Onelogis) -- si retomas esto, empieza aquí (⚠️ ver entrada TELEMETRÍA T2 arriba -- la selección de trips ya quedó automatizada)
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `6afb491` (E2E R1.1).
 - **Fuente operacional vigente (LEE ESTO, la entrada de PRODUCCIÓN P1 más abajo está desactualizada):** `AppData\Local\Atlas\datos\operacion_desktop\` = `Proyecto-Atlas\output\` (mismo directorio físico, junction de Windows, ver Bloque E2E R1.1). `reportes\actual\`/`procesamiento\analisis_completo_guias.csv` (los de P1) quedaron archivados en `superseded_por_e2e_r1_1_20260812\` -- no se usan más.

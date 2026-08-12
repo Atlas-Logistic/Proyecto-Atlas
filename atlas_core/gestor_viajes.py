@@ -156,6 +156,15 @@ class DocumentoViaje:
     proveedor_ruta: str
     estado_ruta: str
     motivo_ruta: str
+    # Bloque TELEMETRÍA T2: enriquecimiento GPS opcional por documento.
+    # Igual criterio -- la ausencia nunca invalida el documento ni el viaje.
+    proveedor_telemetria: str
+    estado_telemetria: str
+    origen_gps: str
+    hora_entrada_gps: str
+    hora_salida_gps: str
+    distancia_gps_km: str
+    evidencia_telemetria: str
     evidencia: dict[str, str]
 
 
@@ -312,6 +321,34 @@ class Viaje:
     def motivo_ruta(self) -> str:
         return self._campo_ruta_consolidado("motivo_ruta")
 
+    @property
+    def proveedor_telemetria(self) -> str:
+        return self._campo_ruta_consolidado("proveedor_telemetria")
+
+    @property
+    def estado_telemetria(self) -> str:
+        return self._campo_ruta_consolidado("estado_telemetria")
+
+    @property
+    def origen_gps(self) -> str:
+        return self._campo_ruta_consolidado("origen_gps")
+
+    @property
+    def hora_entrada_gps(self) -> str:
+        return self._campo_ruta_consolidado("hora_entrada_gps")
+
+    @property
+    def hora_salida_gps(self) -> str:
+        return self._campo_ruta_consolidado("hora_salida_gps")
+
+    @property
+    def distancia_gps_km(self) -> str:
+        return self._campo_ruta_consolidado("distancia_gps_km")
+
+    @property
+    def evidencia_telemetria(self) -> str:
+        return self._campo_ruta_consolidado("evidencia_telemetria")
+
     def a_dict(self) -> dict[str, object]:
         return {
             "viaje_id": self.viaje_id,
@@ -348,6 +385,13 @@ class Viaje:
             "proveedor_ruta": self.proveedor_ruta,
             "estado_ruta": self.estado_ruta,
             "motivo_ruta": self.motivo_ruta,
+            "proveedor_telemetria": self.proveedor_telemetria,
+            "estado_telemetria": self.estado_telemetria,
+            "origen_gps": self.origen_gps,
+            "hora_entrada_gps": self.hora_entrada_gps,
+            "hora_salida_gps": self.hora_salida_gps,
+            "distancia_gps_km": self.distancia_gps_km,
+            "evidencia_telemetria": self.evidencia_telemetria,
             "evidencias_documentos": [d.evidencia for d in self.documentos],
             "fecha_creacion": self.fecha_creacion,
         }
@@ -397,6 +441,13 @@ def _documento_desde_fila(
         proveedor_ruta=str(fila.get("proveedor_ruta", "")).strip(),
         estado_ruta=str(fila.get("estado_ruta", "")).strip(),
         motivo_ruta=str(fila.get("motivo_ruta", "")).strip(),
+        proveedor_telemetria=str(fila.get("proveedor_telemetria", "")).strip(),
+        estado_telemetria=str(fila.get("estado_telemetria", "")).strip(),
+        origen_gps=str(fila.get("origen_gps", "")).strip(),
+        hora_entrada_gps=str(fila.get("hora_entrada_gps", "")).strip(),
+        hora_salida_gps=str(fila.get("hora_salida_gps", "")).strip(),
+        distancia_gps_km=str(fila.get("distancia_gps_km", "")).strip(),
+        evidencia_telemetria=str(fila.get("evidencia_telemetria", "")).strip(),
         evidencia=evidencia,
     )
 

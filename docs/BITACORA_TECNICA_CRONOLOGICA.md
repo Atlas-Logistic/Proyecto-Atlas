@@ -4,6 +4,45 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: TELEMETRÍA T2 (selección automática de recorrido GPS + integración E2E)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `dd534c505fe4fa455bef317c10e016a53aa84bd9` (TELEMETRÍA T1).
+
+### Decisión de arquitectura
+
+**Atlas puede construir un recorrido operacional a partir de múltiples trips de telemetría y usarlo como evidencia, sin reemplazar silenciosamente los datos documentales.** Cierra la limitación explícita de T1 ("Atlas todavía NO selecciona automáticamente qué viaje/tramo Onelogis corresponde a una guía Atlas"): nuevo `atlas_core/telemetria/seleccion_recorrido.py` implementa `RECORRIDO_OPERACIONAL_GPS` -- 1..N trips consecutivos, coherentes en tiempo y espacio, tratados como UN viaje logístico real (un viaje Atlas puede quedar fragmentado en varios trips de Onelogis).
+
+### Algoritmo (`seleccionar_recorrido_operacional`)
+
+Puro, sin red -- opera solo sobre metadatos de trip (inicio/fin/distancia) ya obtenidos vía `ServicioTelemetria` (con caché). Ancla temporal: `hora_salida_aza` si existe (evidencia real más fuerte), si no `hora_entrada_aza` (Fase B -- ambas son horas reales registradas en planta, nunca "aproximadas"). Trips "sustanciales" (`distancia_km >= 5.0`, calibrado contra ruido real observado: -0.03 a 1.71 km) se encadenan hacia adelante mientras el hueco temporal entre el fin de uno y el inicio del siguiente sea ≤ 90 min (calibrado contra el único hueco real conocido: 51 min entre los 2 trips de 463630). Ambigüedad real (dos trips sustanciales casi simultáneos) → `TELEMETRIA_AMBIGUA`, nunca se elige arbitrariamente.
+
+Los breadcrumbs completos SOLO se piden para los trips de la cadena ya seleccionada (nunca para toda la flota/día) -- se cachean vía la misma `RepositorioTelemetria` de T1.
+
+### Conectado al pipeline (Fase I/J, opt-in)
+
+`procesamiento_masivo.procesar_archivo()`/`procesar_carpeta()` aceptan `servicio_telemetria` opcional (nunca se construye uno por defecto -- requiere credencial/configuración explícita). Sin él, comportamiento idéntico a antes de este bloque. Con él conectado, se consulta SOLO si: origen sin determinar, o destino con ambigüedad real de geocodificación (`MULTIPLES_UBICACIONES_DISPERSAS`) -- nunca "para todo". `atlas_core/telemetria/enriquecimiento.py` orquesta: selecciona recorrido → detecta planta por geocerca (reutiliza `resolver_planta_por_posicion`, radio 1.5 km ya calibrado desde Bloque PLANTA-P1) → si el destino estaba ambiguo, reintenta `calcular_ruta_entrega_para_viaje` con el punto final GPS real.
+
+Nuevas columnas (backward-compatible, vacías sin telemetría conectada): `proveedor_telemetria`, `estado_telemetria`, `origen_gps`, `hora_entrada_gps`, `hora_salida_gps`, `distancia_gps_km`, `evidencia_telemetria` -- en `procesamiento_masivo.COLUMNAS`, `gestor_viajes.DocumentoViaje`/`Viaje` (consolidación "coincide en todos los documentos o vacío", igual criterio que O1) y `reporte_viajes.COLUMNAS_VIAJES`. Nunca se guardan breadcrumbs completos aquí. `distancia_gps_km` (recorrido real medido) queda siempre separada de `distancia_km` (estimación ORS) -- Fase M.
+
+### Resultado real, 100% automático, sin ningún tripId hardcodeado
+
+- **463630**: recorrido seleccionado = 3 trips (el mismo conjunto identificado manualmente en T1, encontrado aquí sin conocer los IDs de antemano). Origen GPS confirmado (AZA RENCA, ~1.13 km). Destino desambiguado por GPS (Coronel/Biobío vs Coronel/Maule). **ORS desbloqueado automáticamente: 536,70 km / 606,92 min** -- mismo resultado que el reintento manual de T1, ahora producido por el pipeline sin intervención por guía.
+- **463594**: recorrido seleccionado = 1 trip. Origen GPS confirmado (AZA RENCA, ~1.04 km). GPS no alcanza a desambiguar entre los 4 candidatos RM restantes -- se mantiene `REQUIERE_REVISION`, sin forzar.
+
+### Archivos nuevos/modificados
+
+`atlas_core/telemetria/seleccion_recorrido.py`, `atlas_core/telemetria/enriquecimiento.py` (nuevos); `atlas_core/telemetria/modelos.py` (`RecorridoOperacionalTelemetria`, `EstadoSeleccionRecorrido`, `EstadoConcordanciaHora`); `atlas_core/procesamiento_masivo.py`, `atlas_core/gestor_viajes.py`, `atlas_core/reporte_viajes.py` (columnas nuevas, opt-in); `tests/test_telemetria_t2.py` (19 tests, sin red).
+
+### Límite conocido, no resuelto en este bloque
+
+La geocodificación ORS (a diferencia de Onelogis, ya bien cacheado) no tiene caché propia en `destino_entrega.py` (limitación documentada desde antes de este bloque) -- cada regeneración del reporte repite las llamadas de geocodificación, aunque no las de telemetría.
+
+### Tests
+
+806 passed (787 previos + 19 nuevos), 0 regresiones. Desktop: sin cambios propios de este bloque.
+
+---
+
 ## 2026-08-12 — Cierre: TELEMETRÍA T1 (integración histórica real de Onelogis, multiproveedor)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `6afb491235ed60e3745c7d79495204b70cccf497` (E2E R1.1).

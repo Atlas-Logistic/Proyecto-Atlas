@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — TELEMETRÍA T2: selección automática de recorrido GPS, sin intervención manual por guía
+
+- **Qué resolvía:** en el bloque anterior (T1), corroborar planta y desambiguar destino con GPS funcionaba, pero solo analizando a mano cuál viaje de Onelogis correspondía a cada guía -- no era todavía algo que Atlas hiciera solo.
+- **Qué se hizo:** un algoritmo que, dada la patente y la hora real de entrada/salida de planta que ya trae el documento, encuentra automáticamente el recorrido GPS correcto -- incluso cuando el viaje real quedó dividido en varios tramos por el proveedor de GPS (como pasó con la guía a Coronel: el camión aparece en 3 tramos distintos ese día, y el sistema los reconoce y los une solo, sin que nadie le diga cuáles son).
+- **Resultado real, sin tocar nada a mano:** la guía a Coronel ahora calcula su ruta real automáticamente -- **536,7 km, 10 horas 7 minutos aproximados** -- exactamente igual que cuando se probó a mano en el bloque anterior, pero esta vez el sistema lo encontró solo. La otra guía (con dirección dentro de Santiago) sigue honestamente "requiere revisión": el GPS ayuda a descartar candidatos claramente equivocados, pero no alcanza para elegir con certeza entre los que quedan -- y el sistema no fuerza una elección sin evidencia suficiente.
+- **Sigue siendo opcional:** sin configurar telemetría, Atlas funciona exactamente igual que antes. Cuando está conectada, solo se usa cuando realmente hace falta (planta sin confirmar, o destino ambiguo) -- no se consulta por cada guía sin motivo.
+- Suite completa (806 tests) y Desktop verdes, sin regresiones.
+
+---
+
 ## 2026-08-12 — TELEMETRÍA T1: primera integración real con GPS histórico (Onelogis)
 
 - **Decisión:** telemetría GPS es un proveedor opcional y multiempresa -- Onelogis es el primer adaptador conectado, nunca una dependencia obligatoria del núcleo. Si Onelogis no responde o no hay credencial, Atlas sigue funcionando exactamente igual que hoy.

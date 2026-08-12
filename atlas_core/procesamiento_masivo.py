@@ -31,6 +31,7 @@ from atlas_core.extractor import (
     _extraer_rut_cliente_geometrico,
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
+    _patente_valida,
     extraer_datos,
 )
 from atlas_core.ocr import (
@@ -44,7 +45,15 @@ from atlas_core.ocr import (
 )
 from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.catalogo_plantas import CatalogoPlantas
-from atlas_core.rutas.destino_entrega import CAMPOS_ENTREGA_DOCUMENTO, resolver_entrega_documento
+from atlas_core.rutas.destino_entrega import (
+    CAMPOS_ENTREGA_DOCUMENTO,
+    calcular_ruta_entrega_para_viaje,
+    resolver_entrega_documento,
+)
+from atlas_core.telemetria.enriquecimiento import (
+    CAMPOS_TELEMETRIA_DOCUMENTO,
+    enriquecer_documento_con_telemetria,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -149,6 +158,34 @@ def _calcular_permanencia_minutos(hora_entrada: str | None, hora_salida: str | N
     return str(minutos_salida - minutos_entrada)
 
 
+def _parsear_fecha_dd_mm_yyyy(texto: str | None) -> date | None:
+    """Bloque TELEMETRÍA T2 -- `fecha_actual` ya viene en este formato
+    (DD-MM-YYYY) desde `extraer_fecha`; se parsea solo para consultar
+    telemetría por fecha, nunca para reinterpretar el dato documental."""
+    coincidencia = re.fullmatch(r"(\d{2})-(\d{2})-(\d{4})", str(texto or "").strip())
+    if not coincidencia:
+        return None
+    dia, mes, anio = (int(x) for x in coincidencia.groups())
+    try:
+        return date(anio, mes, dia)
+    except ValueError:
+        return None
+
+
+def _combinar_fecha_hora(fecha: date, hora_texto: str | None):
+    """Bloque TELEMETRÍA T2 -- combina la fecha documental con una hora
+    "HH:MM" ya normalizada (`extraer_datos`); `None` si la hora está
+    ausente/es inválida -- nunca inventa una hora."""
+    from datetime import datetime
+
+    texto = str(hora_texto or "").strip()
+    coincidencia = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", texto)
+    if not coincidencia:
+        return None
+    hora, minuto = (int(x) for x in coincidencia.groups())
+    return datetime(fecha.year, fecha.month, fecha.day, hora, minuto)
+
+
 COLUMNAS = [
     "archivo",
     "estado_procesamiento",
@@ -188,6 +225,12 @@ COLUMNAS = [
     # grupo que no depende de red: es lectura local del propio OCR, igual
     # que `obra_destino`.
     *CAMPOS_ENTREGA_DOCUMENTO,
+    # Bloque TELEMETRÍA T2: enriquecimiento GPS opcional, resumen (sin
+    # breadcrumbs -- viven en la caché de telemetría, no en este CSV).
+    # Agregadas al final -- backward-compatible; sin
+    # `servicio_telemetria` conectado, quedan vacías y el CSV es idéntico
+    # al de antes de este bloque.
+    *CAMPOS_TELEMETRIA_DOCUMENTO,
 ]
 
 Procesador = Callable[[Path], Mapping[str, object]]
@@ -583,8 +626,18 @@ def procesar_archivo(
     carpeta_catalogos: str | Path | None = None,
     proveedor_rutas: object = None,
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
+    servicio_telemetria: object = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
+
+    `servicio_telemetria` (Bloque TELEMETRÍA T2, opcional --
+    `atlas_core.telemetria.servicio.ServicioTelemetria`): sin esto (por
+    defecto), el documento se procesa exactamente igual que antes de este
+    bloque -- telemetría es puramente opt-in, nunca automática por
+    defecto ni obligatoria. Con un servicio conectado, se consulta SOLO
+    cuando aporta valor real (planta sin determinar, o destino con
+    ambigüedad real de geocodificación) -- nunca "para todo" (ver Fase I,
+    política de eficiencia).
 
     `proveedor` (ProveedorOCR, opcional) permite usar cualquier motor OCR
     que cumpla el contrato de atlas_core.ocr_provider en vez de EasyOCR
@@ -989,6 +1042,77 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Enriquecimiento logístico omitido: %s: %s", type(exc).__name__, exc)
 
+    # Bloque TELEMETRÍA T2 -- enriquecimiento opcional posterior al de
+    # rutas: solo se consulta si hay `servicio_telemetria` conectado Y
+    # aporta valor real (origen sin determinar, o destino con ambigüedad
+    # real de geocodificación) -- nunca "para todo" indiscriminadamente
+    # (Fase I, política de eficiencia). Nunca bloquea ni invalida el
+    # documento; nunca sobrescribe hora_entrada_aza/hora_salida_aza
+    # documentales (son horas reales registradas en planta, no
+    # aproximadas -- Fase B/H).
+    resultado_telemetria = {campo: "" for campo in CAMPOS_TELEMETRIA_DOCUMENTO}
+    if servicio_telemetria is not None and carpeta_catalogos is not None:
+        try:
+            destino_ambiguo = str(resultado_entrega.get("motivo_ruta", "")).startswith(
+                "MULTIPLES_UBICACIONES_DISPERSAS"
+            )
+            origen_sin_determinar = not resultado_entrega.get("planta_origen_id")
+            patente_actual = str(datos.get("patente del tracto", "")).strip().upper()
+            if (destino_ambiguo or origen_sin_determinar) and _patente_valida(patente_actual):
+                fecha_documento = _parsear_fecha_dd_mm_yyyy(fecha_actual)
+                if fecha_documento is not None:
+                    hora_entrada_dt = _combinar_fecha_hora(
+                        fecha_documento, datos.get("hora de entrada")
+                    )
+                    hora_salida_dt = _combinar_fecha_hora(
+                        fecha_documento, datos.get("hora de salida")
+                    )
+                    resultado_gps = enriquecer_documento_con_telemetria(
+                        servicio=servicio_telemetria, patente=patente_actual,
+                        fecha=fecha_documento, hora_entrada=hora_entrada_dt,
+                        hora_salida=hora_salida_dt, plantas=plantas_catalogo,
+                    )
+                    resultado_telemetria.update(resultado_gps.campos)
+                    logger.info(
+                        "enriquecimiento-telemetria-documento-v1 estado_telemetria=%s origen_gps=%s",
+                        resultado_telemetria.get("estado_telemetria") or "(vacio)",
+                        resultado_telemetria.get("origen_gps") or "(vacio)",
+                    )
+                    if destino_ambiguo and resultado_gps.punto_gps_destino is not None:
+                        resultado_gps_ruta = calcular_ruta_entrega_para_viaje(
+                            despachar_a_crudo=resultado_entrega.get("despachar_a_crudo", ""),
+                            patente=patente_actual, instante_salida=hora_salida_dt or hora_entrada_dt,
+                            plantas=plantas_catalogo, proveedor_posicion=None,
+                            proveedor_rutas=proveedor_rutas_efectivo,
+                            textos_documento=textos,
+                            punto_gps_destino=resultado_gps.punto_gps_destino,
+                        )
+                        if resultado_gps_ruta.estado_ruta:
+                            resultado_entrega.update({
+                                "direccion_entrega": resultado_gps_ruta.direccion_entrega_geocodificada,
+                                "localidad_entrega": resultado_gps_ruta.localidad_entrega,
+                                "region_entrega": resultado_gps_ruta.region_entrega,
+                                "estado_entrega": (
+                                    "RESUELTO" if resultado_gps_ruta.direccion_entrega_geocodificada
+                                    else resultado_entrega.get("estado_entrega", "")
+                                ),
+                                "planta_origen_id": resultado_gps_ruta.planta_origen_id,
+                                "planta_origen_nombre": resultado_gps_ruta.planta_origen_nombre,
+                                "origen_determinado_por": resultado_gps_ruta.origen_determinado_por,
+                                "evidencia_origen": resultado_gps_ruta.evidencia_origen,
+                                "distancia_km": resultado_gps_ruta.distancia_km,
+                                "duracion_min": resultado_gps_ruta.duracion_min,
+                                "proveedor_ruta": resultado_gps_ruta.proveedor_ruta,
+                                "estado_ruta": resultado_gps_ruta.estado_ruta,
+                                "motivo_ruta": resultado_gps_ruta.motivo_ruta,
+                            })
+                            logger.info(
+                                "telemetria-desambigua-destino-v1 estado_ruta=%s",
+                                resultado_gps_ruta.estado_ruta,
+                            )
+        except Exception as exc:
+            logger.warning("Enriquecimiento con telemetría omitido: %s: %s", type(exc).__name__, exc)
+
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
@@ -1020,6 +1144,7 @@ def procesar_archivo(
             datos.get("hora de entrada"), datos.get("hora de salida")
         ),
         **resultado_entrega,
+        **resultado_telemetria,
     }
 
 
@@ -1080,8 +1205,15 @@ def procesar_carpeta(
     carpeta_catalogos: str | Path | None = None,
     proveedor_rutas: object = None,
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
+    servicio_telemetria: object = None,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
+
+    `servicio_telemetria` (Bloque TELEMETRÍA T2, opcional): se propaga
+    igual que `proveedor_rutas` -- NUNCA se construye uno por defecto
+    aquí (a diferencia de OCR/rutas). Telemetría es opt-in explícito: sin
+    `servicio_telemetria`, el lote se procesa exactamente igual que antes
+    de este bloque.
 
     Sin `procesador` ni `lector_ocr` explícitos, se construye **un solo**
     `ProveedorOCR` (vía `crear_proveedor_ocr()` — PaddleOCR si está
@@ -1150,6 +1282,12 @@ def procesar_carpeta(
                     type(proveedor_rutas_compartido).__name__,
                 )
             argumentos_archivo["proveedor_rutas"] = proveedor_rutas_compartido
+            if servicio_telemetria is not None:
+                # A diferencia del proveedor OCR/rutas, nunca se
+                # construye un servicio de telemetría por defecto aquí --
+                # requiere credencial/configuración explícita del
+                # llamador (Fase J, opt-in).
+                argumentos_archivo["servicio_telemetria"] = servicio_telemetria
 
         if lector_ocr is not None:
             # Compatibilidad: EasyOCR explícito, sin pasar por el proveedor.

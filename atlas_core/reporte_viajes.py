@@ -117,6 +117,17 @@ COLUMNAS_VIAJES = (
     "localidad_entrega",
     "region_entrega",
     "estado_entrega",
+    # Bloque TELEMETRÍA T2: enriquecimiento GPS opcional, resumen (sin
+    # breadcrumbs -- viven en la caché de telemetría). Agregadas al
+    # final -- backward-compatible; sin telemetría conectada, quedan
+    # vacías y el reporte es idéntico al de antes de este bloque.
+    "proveedor_telemetria",
+    "estado_telemetria",
+    "origen_gps",
+    "hora_entrada_gps",
+    "hora_salida_gps",
+    "distancia_gps_km",
+    "evidencia_telemetria",
 )
 
 
@@ -255,6 +266,13 @@ def _fila_viaje(
         "localidad_entrega": datos["localidad_entrega"],
         "region_entrega": datos["region_entrega"],
         "estado_entrega": datos["estado_entrega"],
+        "proveedor_telemetria": datos["proveedor_telemetria"],
+        "estado_telemetria": datos["estado_telemetria"],
+        "origen_gps": datos["origen_gps"],
+        "hora_entrada_gps": datos["hora_entrada_gps"],
+        "hora_salida_gps": datos["hora_salida_gps"],
+        "distancia_gps_km": datos["distancia_gps_km"],
+        "evidencia_telemetria": datos["evidencia_telemetria"],
         **campos_ruta,
     }
 
