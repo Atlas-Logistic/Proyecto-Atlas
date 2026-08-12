@@ -50,7 +50,12 @@ from atlas_core.rutas.destino_entrega import (
     calcular_ruta_con_planta_conocida,
     resolver_entrega_documento,
 )
-from atlas_core.telemetria.seleccion_recorrido import ORIGEN_GPS_CONFIRMADO
+from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
+from atlas_core.telemetria.seleccion_recorrido import (
+    ORIGEN_GPS_CONFIRMADO,
+    ORIGEN_GPS_CONFLICTO,
+    ORIGEN_GPS_NO_DETERMINADO,
+)
 from atlas_core.telemetria.enriquecimiento import (
     CAMPOS_TELEMETRIA_DOCUMENTO,
     enriquecer_documento_con_telemetria,
@@ -1141,6 +1146,51 @@ def procesar_archivo(
                             logger.info(
                                 "telemetria-corrige-origen-v1 planta_antes=%s planta_gps=%s",
                                 planta_origen_id_previo or "(vacio)", planta_gps_id,
+                            )
+                    elif (
+                        resultado_telemetria.get("estado_telemetria")
+                        == EstadoSeleccionRecorrido.SELECCIONADO.value
+                        and resultado_telemetria.get("origen_gps")
+                        in (ORIGEN_GPS_CONFLICTO, ORIGEN_GPS_NO_DETERMINADO)
+                    ):
+                        # Bloque OPERACIÓN REAL R1.1 -- causa raíz: el
+                        # encabezado corporativo ("CASA MATRIZ PLANTA X")
+                        # NUNCA es evidencia de origen operacional (se
+                        # imprime igual sin importar la planta real de
+                        # despacho). Antes de este bloque, cuando la
+                        # telemetría corría con datos reales y no
+                        # confirmaba una planta única (conflicto o sin
+                        # evidencia GPS suficientemente cercana a
+                        # ninguna geocerca conocida), se conservaba en
+                        # silencio el valor que `resolver_origen_documental`
+                        # había sacado del encabezado -- casi siempre
+                        # "AZA RENCA", por ser la planta matriz impresa.
+                        # Se elimina esa conservación: sin confirmación
+                        # GPS, el origen queda explícitamente sin
+                        # determinar, nunca con un valor heredado del
+                        # documento. Solo aplica cuando la telemetría
+                        # efectivamente corrió sobre datos reales
+                        # (`estado_telemetria == SELECCIONADO`) -- si no
+                        # hay servicio conectado, o el proveedor no pudo
+                        # ni conectar (sin credencial, vehículo no
+                        # encontrado), el comportamiento documental
+                        # previo no cambia (no hay señal GPS real que lo
+                        # reemplace).
+                        planta_origen_id_previo = resultado_entrega.get("planta_origen_id", "")
+                        if planta_origen_id_previo:
+                            resultado_entrega["planta_origen_id"] = ""
+                            resultado_entrega["planta_origen_nombre"] = ""
+                            resultado_entrega["origen_determinado_por"] = ""
+                            resultado_entrega["evidencia_origen"] = resultado_telemetria.get("origen_gps", "")
+                            resultado_entrega["distancia_km"] = ""
+                            resultado_entrega["duracion_min"] = ""
+                            resultado_entrega["proveedor_ruta"] = ""
+                            resultado_entrega["estado_ruta"] = "ORIGEN_NO_DETERMINADO"
+                            resultado_entrega["motivo_ruta"] = resultado_telemetria.get("origen_gps", "")
+                            logger.info(
+                                "telemetria-descarta-fallback-documental-v1 "
+                                "planta_documental_descartada=%s origen_gps=%s",
+                                planta_origen_id_previo, resultado_telemetria.get("origen_gps", ""),
                             )
 
                     destino_ambiguo = str(resultado_entrega.get("motivo_ruta", "")).startswith(

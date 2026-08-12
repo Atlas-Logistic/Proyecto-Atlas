@@ -4,6 +4,17 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — OPERACIÓN REAL R1.1: sin GPS no hay planta por defecto -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `2ec64c9` (OPERACIÓN REAL R1).
+- **Lo más importante para conversar con Javier antes de seguir:** se revisó a fondo (2 días de GPS completos, sin filtrar por distancia) la guía 464424 que él identificó como salida de AZA COLINA -- y la evidencia GPS real, repetida varias veces, muestra el camión (patente SB6486) pasando reiteradamente a menos de 1,2 km de **AZA RENCA**, nunca a menos de 17 km de Colina. Esto contradice lo que Javier recuerda. No se forzó ninguna de las dos conclusiones -- se dejó como Renca (que es lo que el GPS realmente muestra) y se reporta la contradicción de frente. Vale la pena confirmar con él si quizás está pensando en otra guía/patente/fecha.
+- **Las guías 464641/464642 (patente AL1879), el otro control positivo que señaló:** revisadas también a fondo (2 días completos) -- no hay evidencia GPS cerca de NINGUNA de las dos plantas. Antes de este bloque mostraban "AZA RENCA" igual (por el bug que se corrigió acá); ahora muestran correctamente "origen no determinado". Sigue sin probarse la observación de Javier sobre esta guía tampoco, pero al menos ya no muestra el dato equivocado (Renca).
+- **El bug real que se corrigió:** cuando la telemetría corría con datos reales y no lograba confirmar ninguna planta, el sistema seguía mostrando en silencio la planta que salía de leer el encabezado de la guía (que dice lo mismo en toda guía AZA). Ahora, en ese caso específico, el origen queda honestamente "no determinado" -- nunca Renca por default. Si no hay telemetría conectada en absoluto, el comportamiento de siempre no cambia (decisión de alcance consultada explícitamente, ver bitácora técnica para el detalle de por qué se acotó así).
+- **Efecto real sobre la tanda actual (19 guías):** 6 guías dejaron de mostrar "AZA RENCA" sin sustento GPS real (ahora "origen no determinado"). Ninguna pasó a mostrar Colina -- no hay ninguna guía, hasta ahora, con evidencia GPS real que confirme Colina. El mecanismo SÍ sabe reconocer Colina cuando hay evidencia (probado con datos sintéticos en los tests) -- simplemente no ha aparecido todavía un caso real con esa evidencia.
+- **Próximo paso natural, si Javier insiste en que hay camiones saliendo de Colina:** la pregunta ya no es "¿el algoritmo funciona?" (funciona, y es conservador -- nunca inventa) sino "¿por qué el GPS de esos camiones específicos no registra el paso por Colina?" -- valdría la pena, con Javier al lado, identificar una guía/patente/fecha muy concreta y mirar el GPS en vivo o casi en vivo de ese viaje puntual, en vez de seguir revisando guías ya despachadas hace días.
+
+---
+
 ## 2026-08-12 — OPERACIÓN REAL R1: origen por GPS, no por letterhead -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `3659740` (E2E R2).

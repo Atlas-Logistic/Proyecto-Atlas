@@ -4,6 +4,41 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: OPERACIÓN REAL R1.1 (eliminar fallback documental sin confirmación GPS)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `2ec64c9` (OPERACIÓN REAL R1).
+
+### Decisión de alcance (consultada explícitamente antes de implementar)
+
+R1.1 pedía eliminar "GPS no determinado + encabezado dice Renca → AZA RENCA" sin especificar si el cambio debía aplicar solo al punto donde corre el bug (telemetría conectada y corrida) o a todo el pipeline (incluyendo cuando no hay telemetría en absoluto, lo que habría tocado `resolver_origen_documental`/`resolver_planta_origen` y ~15 archivos de test existentes que validan ese fallback como comportamiento intencional para arquitectura sin GPS). Se preguntó al usuario; eligió el alcance acotado: el fix vive únicamente en `procesamiento_masivo.py`, en el punto exacto donde el bug ocurre.
+
+### Investigación real (Fase A/B/C/D) antes de tocar código
+
+Traza GPS completa (sin filtro de distancia, múltiples días) para los 2 controles positivos que Javier señaló:
+
+- **464424 / SB6486 (07-08-2026):** 2 trips ese día pasan a 1,14 km y 1,21 km de AZA RENCA -- dentro de la geocerca de 1,5 km. Nunca a menos de 17,7 km de AZA COLINA. Se revisó también el día anterior (06-08-2026): el mismo patrón se repite 4 veces más (0,15-1,2 km de RENCA, 17,7-29 km de COLINA). **Conclusión: la evidencia GPS real, repetida en 2 días, indica RENCA, no Colina, para este vehículo/fecha específicos.** Esto contradice la observación de Javier sobre esta guía puntual -- se reporta así, sin forzar ninguna de las dos plantas artificialmente (ni Colina porque Javier lo dijo, ni descartar su observación como error).
+- **464641/464642 / AL1879 (11-08-2026):** revisados TODOS los trips del día (11 tramos, 05:56-14:57), no solo los cercanos a la hora documental -- ninguno pasa a menos de 10,3 km de RENCA ni de 17,7 km de COLINA. Se revisó también el día anterior (10-08-2026, 6 trips): mismo patrón, el vehículo pasa el día cerca de un punto fijo (~12,5 km de Renca, ~18,3 km de Colina) que no corresponde a ninguna de las dos plantas -- muy probablemente el depósito/base propia del transportista. **Conclusión: no hay evidencia GPS real, en 2 días completos de datos, que confirme ni Renca ni Colina para este transporte.**
+- **Causa raíz de por qué R1 no detectó Colina en estos casos:** no es un bug de geocerca, ventana temporal, ni cache -- las coordenadas GPS reales de estos vehículos, en las fechas revisadas, simplemente no pasan cerca de ninguna de las dos plantas. R1 SÍ tenía razón en abstenerse (`ORIGEN_GPS_NO_DETERMINADO`) para AL1879 -- el bug real era que, a pesar de esa abstención correcta, el resultado final seguía mostrando "AZA RENCA" por la razón documental de siempre (ver Fase E).
+- **Geocerca de Colina confirmada de nuevo:** no se encontró ningún punto real que pase cerca de Colina y quede fuera del radio por poco -- las distancias mínimas observadas (17,7-29 km) descartan que sea un problema de radio insuficiente.
+
+### Cambio de código (Fase E)
+
+`atlas_core/procesamiento_masivo.py::procesar_archivo` -- nueva rama `elif` justo después de la que aplica `ORIGEN_GPS_CONFIRMADO`: si `estado_telemetria == EstadoSeleccionRecorrido.SELECCIONADO` (la telemetría corrió sobre datos reales, no un fallo de conexión/credencial) y `origen_gps` es `ORIGEN_GPS_CONFLICTO` o `ORIGEN_GPS_NO_DETERMINADO`, se limpian `planta_origen_id`/`planta_origen_nombre`/`origen_determinado_por`/`evidencia_origen` y se invalida cualquier ruta (`distancia_km`/`duracion_min`/`proveedor_ruta`/`estado_ruta="ORIGEN_NO_DETERMINADO"`/`motivo_ruta`) que hubiera quedado calculada desde el origen documental descartado. `despachar_a_crudo`/`direccion_entrega`/`localidad_entrega`/`region_entrega`/`estado_entrega` (destino) nunca se tocan -- siguen siendo independientes del origen. Si `servicio_telemetria` es `None`, o el proveedor no pudo ni conectar (`SIN_CREDENCIAL`, `VEHICULO_NO_ENCONTRADO`, etc. -- `estado_telemetria` distinto de `SELECCIONADO`), el comportamiento documental de siempre no cambia.
+
+Imports nuevos: `EstadoSeleccionRecorrido` (`atlas_core.telemetria.modelos`), `ORIGEN_GPS_CONFLICTO`/`ORIGEN_GPS_NO_DETERMINADO` (ya existían en `seleccion_recorrido.py`, ahora también importados aquí).
+
+### Datos reales (Fase L/H)
+
+Respaldo previo (`analisis_completo_guias_PRE_R1_1_20260812_141342.csv`). Reproceso focal de las 3 guías señaladas (464424, 464641, 464642) primero, validado; luego reproceso de la tanda reciente completa (19 guías reales -- creció de 9 a 19 porque Javier ingresó más guías vía Desktop entre R1 y R1.1) para aplicar el fix consistentemente (Fase H). Reporte regenerado en `output/reporte_desktop_20260812_142001_operacion_real_r1_1/`; `config_usuario.json` de Desktop actualizado.
+
+**Clasificación final de la tanda (19 guías):** `RENCA_CONFIRMADA_GPS` (`origen_gps=ORIGEN_GPS_CONFIRMADO`, `origen_determinado_por=TELEMETRIA_GPS`) -- 464424, 464588, 464601, 464624, 464698, 464699, 464700, 463594, 463630 (9). `ORIGEN_GPS_NO_DETERMINADO` (planta vacía, antes mostraban Renca por el bug) -- 464522, 464529, 464534, 464535, 464577, 464640, 464641, 464642 (8). `AZA RENCA` por `DOCUMENTO` (sin patente legible, telemetría nunca corrió) -- 464550, 464631 (2). Ningún caso de `AZA COLINA` confirmada ni de `ORIGEN_GPS_CONFLICTO` en esta tanda.
+
+### Tests
+
+7 nuevos en `tests/test_operacion_real_r1_1.py`: GPS confirma Colina si la evidencia lo sustenta (mecanismo general validado con datos sintéticos); GPS no determinado limpia la planta del encabezado (integración real vía `procesar_archivo`, con mocks de OCR/telemetría/rutas); sin telemetría conectada conserva el comportamiento documental previo (fija el límite del alcance elegido); ruta previa se invalida si GPS deja de confirmar; caché solo guarda datos crudos, nunca una selección derivada (por eso cambiar la lógica de resolución nunca reutiliza una selección vieja incorrecta); multiguía -- ambos documentos del mismo transporte quedan consistentemente sin planta; Renca confirmado sigue funcionando (regresión explícita del camino mayoritario). Suite completa: 818 → **825 passed**, 0 regresiones.
+
+
+
 ## 2026-08-12 — Cierre: OPERACIÓN REAL R1 (origen por GPS, no por letterhead)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `3659740` (E2E R2).

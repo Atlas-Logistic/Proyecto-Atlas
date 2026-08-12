@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — OPERACIÓN REAL R1.1: sin confirmación GPS, ya no se muestra ninguna planta por defecto
+
+- **El bug real que quedaba de R1:** cuando la telemetría corría con datos reales y no lograba confirmar una planta única (ni Renca ni Colina), el sistema seguía mostrando en silencio "AZA RENCA" -- el valor que salía de leer el encabezado impreso de la guía, que dice lo mismo en todas las guías AZA sin importar la planta real de despacho. Corregido: ahora, si la telemetría corrió sobre datos reales y no confirma ninguna planta, el origen queda explícitamente "no determinado" -- nunca Renca por default. Si no hay telemetría conectada en absoluto, el comportamiento de siempre no cambia (no hay ninguna señal GPS real con la que reemplazarlo).
+- **Los dos controles positivos que Javier señaló, con la evidencia real revisada a fondo (varios días, sin filtrar por distancia):** la guía 464424 (patente SB6486) muestra, de forma repetida en 2 días distintos, el camión pasando a menos de 1,2 km de AZA RENCA -- y nunca a menos de 17 km de AZA COLINA. La evidencia GPS real, tal como está disponible hoy, indica RENCA para esta guía específica, no Colina -- esto contradice lo que Javier recuerda haber visto, y se reporta así de frente, sin forzar ni el uno ni el otro: puede que la guía/patente/fecha que Javier tiene en mente no sea exactamente esta, vale la pena confirmarlo con él directamente. Las guías 464641/464642 (patente AL1879), en cambio, no muestran evidencia GPS cerca de NINGUNA de las dos plantas en 2 días completos revisados -- antes de este bloque mostraban "AZA RENCA" igual (por el bug de arriba); ahora muestran correctamente "origen no determinado", sin inventar ninguna de las dos.
+- **Efecto sobre la tanda operativa reciente (19 guías reales):** 6 guías que antes mostraban "AZA RENCA" sin confirmación GPS real ahora muestran honestamente "origen no determinado" -- ninguna cambia a Colina, porque ninguna tiene evidencia GPS real que lo sustente hoy. El resto (incluidas 464424, 464698-700, y las guías previas) mantienen o mejoran su confirmación por GPS real.
+- **Geocercas de Renca y Colina: se auditaron de nuevo con la evidencia real recolectada, siguen correctas -- no se tocaron.**
+- Suite completa: 818 → **825 tests**, sin regresiones.
+
+---
+
 ## 2026-08-12 — OPERACIÓN REAL R1: la planta de origen ya no se lee del papel, se lee del GPS
 
 - **Decisión de negocio confirmada en código:** la guía NO trae la dirección de la planta de origen -- el encabezado impreso de AZA dice "CASA MATRIZ PLANTA RENCA" en TODAS las guías, sin importar desde qué planta salió realmente el camión ese día. Antes de este bloque, Atlas confiaba en ese encabezado como si fuera confiable; ahora la planta de origen se determina primero por GPS/geocercas (Onelogis + catálogo de plantas), y el documento solo se usa como respaldo cuando no hay evidencia GPS disponible.
