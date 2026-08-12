@@ -4,7 +4,19 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
-## 2026-08-12 — PRODUCCIÓN P1: punto de partida limpio -- si retomas esto, empieza aquí
+## 2026-08-12 — TELEMETRÍA T1: GPS histórico real (Onelogis) -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `6afb491` (E2E R1.1).
+- **Fuente operacional vigente (LEE ESTO, la entrada de PRODUCCIÓN P1 más abajo está desactualizada):** `AppData\Local\Atlas\datos\operacion_desktop\` = `Proyecto-Atlas\output\` (mismo directorio físico, junction de Windows, ver Bloque E2E R1.1). `reportes\actual\`/`procesamiento\analisis_completo_guias.csv` (los de P1) quedaron archivados en `superseded_por_e2e_r1_1_20260812\` -- no se usan más.
+- **Telemetría (Onelogis) es opcional y multiempresa** -- nuevo paquete `atlas_core/telemetria/`. `proveedor_telemetria=None` (o simplemente no usar nada de este paquete) deja Atlas funcionando exactamente igual que antes de este bloque. La credencial vive en la variable de entorno `ATLAS_ONELOGIS_API_KEY` -- nunca en archivos ni en bitácoras.
+- **Lo que SÍ quedó automático:** planta origen por GPS, vía `atlas_core.telemetria.adaptador_posicion_vehiculo.AdaptadorPosicionTelemetria`, que implementa el contrato `ProveedorPosicionVehiculo` que ya existía (Bloque RUTAS R1) sin adaptador real conectado.
+- **Lo que NO quedó automático (decisión explícita de alcance):** elegir "cuál viaje Onelogis es el relevante" para desambiguar un destino (caso Coronel) dentro del flujo normal de `procesar_archivo()`. Se hizo un análisis real explícito para 463594/463630 (`telemetria_eval/fase_e_i_*.py`, fuera del repo) y se aplicó el resultado a mano (`telemetria_eval/fase_q_regenerar_operacional.py`). Si se quiere automatizar esto, hace falta diseñar con cuidado la heurística de selección de viaje -- no está resuelto todavía.
+- **Resultado real en el dataset operacional actual:** 463630 ahora tiene ruta calculada (536,7 km / 606,9 min, planta y destino corroborados por GPS real). 463594 sigue en revisión -- el GPS descartó un candidato pero no alcanzó para elegir entre los 4 restantes.
+- **Próximo paso natural:** si se quiere seguir por este camino, diseñar la heurística de selección automática de "viaje relevante" (por ventana horaria del documento + duración/distancia mínima) antes de conectar telemetría al flujo automático de cada guía nueva.
+
+---
+
+## 2026-08-12 — PRODUCCIÓN P1: punto de partida limpio -- si retomas esto, empieza aquí (⚠️ ver entrada TELEMETRÍA T1 arriba -- la ruta operacional cambió)
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `ecaa927`. Sin cambios de código -- solo datos (instalación real) + un doc nuevo en el repo (`docs/HISTORICO_EXPERIMENTAL_VS_OPERACION.md`, léelo primero si algo de esto no cuadra).
 - **Decisión clave:** los 574 viajes anteriores a 2026-08-12 son **experimentales**, no un histórico operacional que haya que preservar con precisión. Se cierra ahí la línea ESTADOS S3/S3.1 (migración fina de ese corpus) -- no se completó, no hacía falta, el trabajo ya hecho queda como referencia en `estado_revision_eval/s3/` y `s3_1/`.

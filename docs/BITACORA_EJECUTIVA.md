@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — TELEMETRÍA T1: primera integración real con GPS histórico (Onelogis)
+
+- **Decisión:** telemetría GPS es un proveedor opcional y multiempresa -- Onelogis es el primer adaptador conectado, nunca una dependencia obligatoria del núcleo. Si Onelogis no responde o no hay credencial, Atlas sigue funcionando exactamente igual que hoy.
+- **Qué se hizo:** se conectó, con la API real de Onelogis (autenticada, credencial nunca expuesta), el historial GPS de los dos camiones de las guías operacionales actuales (463594/463630, 27-07-2026) -- vehículos, viajes del día y el recorrido real punto por punto.
+- **Resultado real:** el recorrido GPS confirma que ambos camiones efectivamente pasaron por la planta AZA Renca ese día (corrobora lo que ya decía el documento). Para la guía 463630, el punto final real del recorrido permitió resolver una ambigüedad que la geocodificación por sí sola no podía: el documento menciona "Coronel", y Chile tiene dos lugares con ese nombre (uno en la Región del Biobío, otro en la Región del Maule) -- el GPS confirma que el camión terminó en el de Biobío y descarta el otro (a más de 470 km de distancia). Con eso, se pudo calcular la ruta real: **536,7 km / 606,9 minutos**, ahora visibles en el reporte operacional.
+- Para la guía 463594, el GPS descartó un candidato claramente incorrecto (a 473 km) pero no alcanzó para elegir entre los 4 restantes, todos dentro de Santiago y muy cercanos entre sí -- se mantuvo honestamente "requiere revisión", sin forzar una elección sin evidencia suficiente.
+- Se implementó una caché local para no volver a pagar la misma consulta histórica cada vez que se abre Atlas Desktop.
+- Suite completa (787 tests) y Desktop (105 tests) verdes, sin regresiones.
+
+---
+
 ## 2026-08-12 — PRODUCCIÓN P1: punto de partida limpio para operación real
 
 - **Decisión de producto:** los 574 viajes publicados hasta hoy fueron un corpus de prueba durante el desarrollo, no un histórico operacional real -- se dejan de lado sin invertir más tiempo en migrarlos o reclasificarlos uno a uno. Cierra la línea de trabajo de migración (ESTADOS S3/S3.1) sin completarla; el análisis ya hecho queda guardado como referencia, no se pierde.

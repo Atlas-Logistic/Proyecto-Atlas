@@ -95,6 +95,11 @@ class ResultadoDestinoEntrega:
     # candidato aceptado.
     localidad: str = ""
     region: str = ""
+    # Bloque TELEMETRÍA T1 -- "TELEMETRIA_GPS" cuando un punto GPS real
+    # (breadcrumb) ayudó a descartar candidatos y dejar uno solo coherente;
+    # vacío en cualquier otro caso (comportamiento idéntico a antes de
+    # este bloque).
+    metodo_confirmacion: str = ""
 
     def a_dict(self) -> dict[str, str]:
         return {
@@ -107,6 +112,7 @@ class ResultadoDestinoEntrega:
             "motivo_destino_entrega": self.motivo,
             "localidad_entrega": self.localidad,
             "region_entrega": self.region,
+            "metodo_confirmacion": self.metodo_confirmacion,
         }
 
 
@@ -176,6 +182,33 @@ def _candidatos_con_soporte_textual(
     return con_soporte if con_soporte else candidatos
 
 
+def descartar_candidatos_lejos_de_gps(
+    candidatos: tuple[CandidatoGeocodificacion, ...],
+    punto_gps: Coordenadas | None,
+    radio_maximo_km: float,
+) -> tuple[CandidatoGeocodificacion, ...]:
+    """Bloque TELEMETRÍA T1 -- usa el punto final real de un recorrido GPS
+    (breadcrumb de Onelogis u otro proveedor de telemetría) como evidencia
+    ADICIONAL para descartar candidatos de geocodificación territorialmente
+    incompatibles (caso real 463630: "Coronel, Región del Maule" a ~470 km
+    del punto final GPS real se descarta; "Coronel, Región del Biobío" a
+    ~7 km se conserva).
+
+    Nunca fabrica una dirección exacta a partir del GPS -- solo DESCARTA;
+    la decisión de aceptar el candidato restante sigue en manos de quien
+    llama (p. ej. `resolver_destino_entrega`, exigiendo que quede
+    exactamente uno). Si el descarte deja la lista vacía o no hay punto
+    GPS, se conserva la lista original completa -- nunca inventa
+    evidencia donde no la hay."""
+    if punto_gps is None or not candidatos:
+        return candidatos
+    compatibles = tuple(
+        c for c in candidatos
+        if distancia_km_haversine(punto_gps, c.coordenadas) <= radio_maximo_km
+    )
+    return compatibles if compatibles else candidatos
+
+
 def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> CandidatoGeocodificacion:
     """Entre candidatos que ya se determinó que son el mismo lugar real,
     el de mayor confianza informada (nunca el más cercano a ninguna
@@ -188,6 +221,8 @@ def resolver_destino_entrega(
     proveedor_geocodificacion: ProveedorRutas,
     *,
     contexto_territorial: str = "Chile",
+    punto_gps_referencia: Coordenadas | None = None,
+    radio_gps_km: float = 50.0,
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -196,6 +231,13 @@ def resolver_destino_entrega(
     una ubicación porque esté más cerca de AZA"). Ante más de un
     candidato, o un único candidato sin confianza suficiente, se
     abstiene (`REVISAR`) en vez de adivinar.
+
+    `punto_gps_referencia` (Bloque TELEMETRÍA T1, opcional): punto final
+    real de un recorrido GPS (breadcrumb de telemetría) -- si se entrega,
+    se usa como evidencia ADICIONAL para descartar candidatos
+    territorialmente incompatibles (ver `descartar_candidatos_lejos_de_gps`)
+    antes de decidir si la ambigüedad es real. Nunca sustituye la
+    geocodificación ni fabrica una dirección -- solo descarta.
     """
     texto = str(despachar_a_crudo or "").strip()
     if not texto:
@@ -205,6 +247,7 @@ def resolver_destino_entrega(
 
     consulta = f"{texto}, {contexto_territorial}" if contexto_territorial else texto
     resultado = proveedor_geocodificacion.geocodificar(consulta)
+    corroborado_por_gps = False
 
     if resultado.estado == EstadoRuta.RESULTADO_AMBIGUO:
         # Bloque E2E R1.1 -- antes de decidir si hay ambigüedad real,
@@ -214,6 +257,14 @@ def resolver_destino_entrega(
         # respaldo, sigue con el conjunto completo (comportamiento
         # idéntico al de antes de este bloque).
         candidatos_relevantes = _candidatos_con_soporte_textual(resultado.candidatos, texto)
+        # Bloque TELEMETRÍA T1 -- evidencia GPS real (opcional), descarta
+        # candidatos territorialmente incompatibles con el recorrido real.
+        if punto_gps_referencia is not None:
+            antes = candidatos_relevantes
+            candidatos_relevantes = descartar_candidatos_lejos_de_gps(
+                candidatos_relevantes, punto_gps_referencia, radio_gps_km
+            )
+            corroborado_por_gps = candidatos_relevantes != antes
         if _candidatos_son_el_mismo_lugar(candidatos_relevantes):
             # Varios candidatos, pero todos caen dentro de
             # MARGEN_MISMO_LUGAR_KM entre sí, o todos declaran la misma
@@ -252,6 +303,7 @@ def resolver_destino_entrega(
             motivo="CONFIANZA_INSUFICIENTE",
             localidad=candidato.localidad,
             region=candidato.region,
+            metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
         )
     return ResultadoDestinoEntrega(
         despachar_a_crudo=texto,
@@ -262,6 +314,7 @@ def resolver_destino_entrega(
         motivo="",
         localidad=candidato.localidad,
         region=candidato.region,
+        metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
     )
 
 
@@ -273,6 +326,7 @@ CAMPOS_RESULTADO_RUTA_ENTREGA = (
     "distancia_km", "duracion_min",
     "proveedor_ruta", "estado_ruta", "motivo_ruta",
     "origen_determinado_por", "evidencia_origen",
+    "metodo_confirmacion_destino",
 )
 
 
@@ -304,6 +358,7 @@ class ResultadoRutaEntrega:
     motivo_ruta: str = ""
     origen_determinado_por: str = ""
     evidencia_origen: str = ""
+    metodo_confirmacion_destino: str = ""
 
     def a_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -320,13 +375,22 @@ def calcular_ruta_entrega_para_viaje(
     textos_documento: Iterable[str] | None = None,
     perfil: str = "driving-hgv",
     radio_geocerca_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
+    punto_gps_destino: Coordenadas | None = None,
+    radio_gps_destino_km: float = 50.0,
 ) -> ResultadoRutaEntrega:
     """Orquesta PLANTA ORIGEN -> DESPACHAR A (Bloque E1). Nunca usa
     `DIRECCION`/`COMUNA`/`COD DESTINATARIO` del cliente como destino de
     ruta -- ver regla de negocio en el docstring del módulo. Un fallo en
     cualquier paso deja campos vacíos y un estado/motivo explicativo --
     nunca lanza, nunca inventa, nunca elige el candidato más cercano a
-    una planta AZA."""
+    una planta AZA.
+
+    `punto_gps_destino` (Bloque TELEMETRÍA T1, opcional): punto final real
+    de un recorrido GPS -- quien llama decide cómo obtenerlo (este módulo
+    nunca golpea un proveedor de telemetría directamente, ver límites
+    multiempresa). Si se entrega, ayuda a descartar candidatos de
+    geocodificación territorialmente incompatibles ante ambigüedad (ver
+    `resolver_destino_entrega`)."""
     # Import perezoso: evita un ciclo de import a nivel de módulo con
     # enriquecimiento_viaje (que a su vez importa este módulo de forma
     # perezosa dentro de `calcular_ruta_para_viaje` -- ver Bloque D2).
@@ -349,7 +413,10 @@ def calcular_ruta_entrega_para_viaje(
             motivo_ruta="PLANTA_SIN_COORDENADAS_EN_CATALOGO",
         )
 
-    entrega = resolver_destino_entrega(despachar_a_crudo, proveedor_rutas)
+    entrega = resolver_destino_entrega(
+        despachar_a_crudo, proveedor_rutas,
+        punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
+    )
     if entrega.estado != ESTADO_RESUELTO:
         # Se conserva toda la evidencia parcial ya obtenida (etiqueta,
         # coordenadas, localidad/región, confianza) aunque la geocodificación
@@ -366,6 +433,7 @@ def calcular_ruta_entrega_para_viaje(
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
             estado_ruta=EstadoRuta.REQUIERE_REVISION.value, motivo_ruta=entrega.motivo,
             origen_determinado_por=determinado_por, evidencia_origen=evidencia_origen,
+            metodo_confirmacion_destino=entrega.metodo_confirmacion,
         )
 
     ruta = proveedor_rutas.calcular_ruta(
@@ -382,6 +450,7 @@ def calcular_ruta_entrega_para_viaje(
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
             estado_ruta=ruta.estado.value, motivo_ruta=ruta.motivo,
             origen_determinado_por=determinado_por, evidencia_origen=evidencia_origen,
+            metodo_confirmacion_destino=entrega.metodo_confirmacion,
         )
     return ResultadoRutaEntrega(
         planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
@@ -395,6 +464,7 @@ def calcular_ruta_entrega_para_viaje(
         proveedor_ruta=proveedor_rutas.nombre,
         estado_ruta=ruta.estado.value, motivo_ruta="",
         origen_determinado_por=determinado_por, evidencia_origen=evidencia_origen,
+        metodo_confirmacion_destino=entrega.metodo_confirmacion,
     )
 
 

@@ -4,6 +4,42 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: TELEMETRÍA T1 (integración histórica real de Onelogis, multiproveedor)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `6afb491235ed60e3745c7d79495204b70cccf497` (E2E R1.1).
+
+### Decisión de arquitectura
+
+**Telemetría es un proveedor opcional y multiempresa. Onelogis es el primer adaptador, no una dependencia del núcleo.** Nuevo paquete `atlas_core/telemetria/` (`modelos.py`, `proveedor.py` — contrato `ProveedorTelemetria` + doble simulado, `servicio.py` — caché, `repositorio.py` — persistencia JSON simple, `proveedores/onelogis.py` — adaptador HTTP real). El núcleo (extractor/rutas/gestor_viajes/Desktop) nunca importa `proveedores/onelogis.py` directamente. `proveedor_telemetria=None` es un caso de primera clase en todo el pipeline: ausencia de GPS nunca rompe Atlas.
+
+Contrato leído completo del OpenAPI real (`https://app.onelogis.com/docs/api/openapi.yaml`), sin adivinar parámetros — resumen fuera del repo en `telemetria_eval/fase_a_openapi_resumen.md`. Base URL real: `https://app.onelogis.com/api/client/v1`. Auth: `Authorization: Bearer <ATLAS_ONELOGIS_API_KEY>` (nunca logueado, nunca persistido, nunca versionado).
+
+### Conexión con lo ya existente (no se abrió un camino nuevo)
+
+`atlas_core/rutas/posicion_vehiculo.py` (Bloque RUTAS R1) ya definía el contrato `ProveedorPosicionVehiculo` para resolver planta origen por GPS, sin ningún adaptador real conectado desde entonces. `atlas_core/telemetria/adaptador_posicion_vehiculo.py` (nuevo) lo implementa sobre cualquier `ServicioTelemetria` — es la ÚNICA vía por la que telemetría entra al pipeline de planta origen ya existente, sin abrir un segundo camino.
+
+Para desambiguación de DESTINO (Bloque E2E R1.1, ambigüedad Coronel/Biobío vs Coronel/Maule): nueva `descartar_candidatos_lejos_de_gps()` en `atlas_core/rutas/destino_entrega.py` — usa el punto final real de un recorrido GPS para descartar candidatos de geocodificación territorialmente incompatibles. Nunca fabrica una dirección exacta a partir del GPS, solo descarta. `resolver_destino_entrega()`/`calcular_ruta_entrega_para_viaje()` aceptan `punto_gps_referencia`/`punto_gps_destino` opcionales — sin ellos, comportamiento idéntico a antes de este bloque.
+
+### Alcance explícitamente NO cubierto en este bloque
+
+No se automatizó la selección de "cuál viaje Onelogis es el relevante" dentro del pipeline genérico de `procesar_archivo()` — elegir el trip correcto entre ~13-15 candidatos de un día requiere heurísticas no validadas todavía (riesgo de conclusión automática incorrecta). Se aplicó, en cambio, un análisis real explícito y documentado (`telemetria_eval/fase_e_i_*.py`) para las 2 guías conocidas. La infraestructura (proveedor/servicio/adaptador/caché) es de producción; la selección de viaje relevante sigue siendo una decisión informada, no una regla automática todavía.
+
+### Resultado real (guías 463594/463630, 27-07-2026)
+
+- Planta origen: confirmada por GPS para ambas — el recorrido real pasa a ~1.0-1.1 km de AZA RENCA (vs. >17 km de AZA COLINA) — corrobora el origen documental.
+- 463630: destino "Coronel" desambiguado con evidencia GPS real (punto final del recorrido a ~7 km de "Coronel, Región del Biobío" vs. >470 km de "Coronel, Región del Maule", que se descarta). ORS driving-hgv desbloqueado: **536.70 km / 606.92 min**.
+- 463594: GPS descarta un candidato fuera de región (Los Ángeles, Biobío, a 473 km) pero no distingue entre los 4 candidatos restantes dentro de RM (4-10 km entre sí, sin margen suficiente) — se mantiene `REQUIERE_REVISION`, sin forzar.
+
+### Archivos nuevos/modificados
+
+`atlas_core/telemetria/` (paquete completo, nuevo), `atlas_core/rutas/destino_entrega.py` (GPS opcional), `atlas_core/rutas/posicion_vehiculo.py` (sin cambios, solo consumido), `tests/test_telemetria_t1.py` (21 tests, sin red real). Dataset operacional regenerado en la fuente canónica (`AppData\Local\Atlas\datos\operacion_desktop\`, ver Bloque E2E R1.1) con el resultado real de 463630 corroborado por GPS.
+
+### Tests
+
+787 passed (766 previos + 21 nuevos), 0 regresiones. Desktop: 105 passed, sin cambios propios de este bloque.
+
+---
+
 ## 2026-08-12 — Cierre: PRODUCCIÓN P1 (punto de partida limpio) — decisión de producto, cierra la línea de migración S3/S3.1
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `ecaa92746fb30b3b4509fc99ec96842ffc806280`. Cambios: solo datos (instalación real) + documentación (repo). Sin cambios de código en `atlas_core`.
