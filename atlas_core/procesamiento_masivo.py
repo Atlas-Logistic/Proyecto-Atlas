@@ -8,6 +8,7 @@ import re
 import time
 import unicodedata
 from datetime import date
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
@@ -18,6 +19,7 @@ from atlas_core.catalogos import (
     resolver_nombre_chofer_difuso,
     resolver_patente_canonica,
 )
+from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
 from atlas_core.extractor import (
@@ -159,6 +161,13 @@ COLUMNAS = [
     "hora_entrada_aza",
     "hora_salida_aza",
     "permanencia_minutos",
+    # Bloque ESTADOS S2: calidad del dato (motivos EXPLÍCITOS de por qué
+    # requiere revisión, si acaso) separada de trazabilidad del método
+    # (cómo se obtuvo el valor final) -- ver `MotivoRevisionDocumento` /
+    # `MetodoObtencionDocumento`. Agregadas al final -- backward-compatible,
+    # `indicador_revision` conserva su semántica REVISAR/OK de siempre.
+    "motivos_revision_documento",
+    "metodos_recuperacion_documento",
 ]
 
 Procesador = Callable[[Path], Mapping[str, object]]
@@ -474,6 +483,77 @@ def _documento_degradado(datos: dict, descripcion: str) -> bool:
     return faltantes >= UMBRAL_CAMPOS_FALTANTES_DOCUMENTO_DEGRADADO
 
 
+# Bloque ESTADOS S2: separa explícitamente CALIDAD DEL DATO (¿requiere
+# revisión humana, y por qué?) de TRAZABILIDAD DEL MÉTODO (¿cómo se obtuvo
+# el valor final?). Antes de este bloque, el mero USO de un método de
+# recuperación conservador (geometría, fuzzy, homologación, consenso focal)
+# forzaba `indicador_revision="REVISAR"` sin dejar rastro de la causa real
+# -- ver auditoría real en estado_revision_eval/ (bloque ESTADOS S1): 442
+# documentos "REVISAR" correspondían a viajes que el reporte productivo
+# consideraba CONFIRMADO, y ~27% de una muestra representativa de esos 442
+# resultaron ser recuperaciones técnicas correctas y ya corroboradas
+# (REVISAR_TECNICO), no problemas reales (REVISAR_LEGITIMO).
+#
+# Un método nunca fuerza revisión por sí solo. Solo la fuerzan: un dato
+# realmente ausente, una ambigüedad real (varios candidatos igual de
+# plausibles), un conflicto, o una recuperación SIN corroboración
+# independiente suficiente (ver cada motivo abajo para su criterio
+# concreto). La trazabilidad del método SIEMPRE se conserva, se haya
+# corroborado o no -- nunca se descarta la evidencia de cómo se obtuvo el
+# valor final.
+class MetodoObtencionDocumento(str, Enum):
+    """Cómo se obtuvo el valor final de uno o más campos -- puramente
+    informativo, nunca decide por sí solo si el documento requiere
+    revisión (ver `MotivoRevisionDocumento`)."""
+
+    GEOMETRICO = "GEOMETRICO"
+    CONTEXTUAL = "CONTEXTUAL"
+    FUZZY = "FUZZY"
+    HOMOLOGADO = "HOMOLOGADO"
+    CORREGIDO = "CORREGIDO"
+    FOCAL = "FOCAL"
+    # Bloque ESTADOS S2.2: `enriquecer_datos_con_catalogos()` (mecanismo
+    # preexistente, anterior a S1/S2) puede cambiar cliente/chofer/obra
+    # destino contra los catálogos maestros -- ver criterio de
+    # corroboración por campo junto a cada uso en `procesar_archivo()`.
+    CATALOGO = "CATALOGO"
+
+
+class MotivoRevisionDocumento(str, Enum):
+    """Motivo EXPLÍCITO por el que un documento requiere revisión humana.
+    Nunca es el nombre de un método (eso vive en
+    `MetodoObtencionDocumento`) -- cada motivo aquí representa una
+    incertidumbre real: un campo clave ausente, una recuperación sin
+    corroboración independiente, una ambigüedad real, o degradación
+    documental."""
+
+    GUIA_AUSENTE = "GUIA_AUSENTE"
+    TRANSPORTE_AUSENTE = "TRANSPORTE_AUSENTE"
+    CLIENTE_AUSENTE = "CLIENTE_AUSENTE"
+    CHOFER_AUSENTE = "CHOFER_AUSENTE"
+    DOCUMENTO_DEGRADADO = "DOCUMENTO_DEGRADADO"
+    # Recuperado (geometría), pero sin una segunda señal independiente que
+    # lo corrobore -- criterio concreto de corroboración documentado junto
+    # a cada uso más abajo (RUT válido para cliente/chofer; catálogo para
+    # patente). Sin esa segunda señal, un error de OCR en la recuperación
+    # geométrica no tendría forma de detectarse.
+    CLIENTE_SIN_CORROBORAR = "CLIENTE_SIN_CORROBORAR"
+    CHOFER_SIN_CORROBORAR = "CHOFER_SIN_CORROBORAR"
+    OBRA_DESTINO_SIN_CORROBORAR = "OBRA_DESTINO_SIN_CORROBORAR"
+    PATENTE_SIN_HOMOLOGAR = "PATENTE_SIN_HOMOLOGAR"
+    # Ambigüedad real (ALIAS con >1 candidato, o corrección OCR con >1
+    # candidato igual de plausible) -- nunca se resuelve arbitrariamente.
+    PATENTE_AMBIGUA = "PATENTE_AMBIGUA"
+    # Informativo únicamente (ver MOTIVOS_NO_BLOQUEANTES) -- mismo
+    # criterio ya establecido en el Bloque O1 para peso/horas: la ausencia
+    # de un campo operacional secundario (no de identidad) se registra
+    # pero nunca por sí sola invalida el documento completo.
+    MATERIAL_AUSENTE = "MATERIAL_AUSENTE"
+
+
+MOTIVOS_NO_BLOQUEANTES = frozenset({MotivoRevisionDocumento.MATERIAL_AUSENTE.value})
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -512,11 +592,21 @@ def procesar_archivo(
         if carpeta_catalogos is not None
         else extraer_datos(textos)
     )
-    recuperacion_geometrica = False
-    recuperacion_chofer = False
-    recuperacion_patentes = False
-    homologacion_patente = False
-    transporte_corregido = False
+    # Bloque ESTADOS S2: `metodos_documento` es puramente informativo
+    # (trazabilidad). `campos_geometricos_sin_corroborar` acumula qué
+    # campos de identidad se recuperaron por geometría en ESTE documento
+    # -- se resuelve más abajo, después de conocer el estado final de
+    # RUT/homologación, si cada uno quedó corroborado o no.
+    metodos_documento: set[str] = set()
+    motivos_documento: list[str] = []
+
+    def _motivo(motivo: MotivoRevisionDocumento) -> None:
+        if motivo.value not in motivos_documento:
+            motivos_documento.append(motivo.value)
+
+    campos_geometricos_sin_corroborar: set[str] = set()
+    chofer_geometrico = False
+    patentes_geometricas_sin_homologar: set[str] = set()
     bloques_guia = None
     campos_ausentes = any(
         datos.get(campo) in {None, "", "No encontrado"}
@@ -532,20 +622,22 @@ def procesar_archivo(
             for campo in ("cliente", "obra destino"):
                 if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
                     datos[campo] = asociaciones[campo]
-                    recuperacion_geometrica = True
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    campos_geometricos_sin_corroborar.add(campo)
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
             if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
                 decision_rut_cliente = _extraer_rut_cliente_geometrico(bloques_guia)
                 if decision_rut_cliente.get("valor"):
                     datos["RUT del cliente"] = decision_rut_cliente["valor"]
-                    recuperacion_geometrica = True
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
                     logger.info("RUT del cliente recuperado mediante rut-cliente-geometrico-conservador-v1")
             chofer_actual = datos.get("chofer", "No encontrado")
             if chofer_actual in {None, "", "No encontrado"} or _chofer_lineal_contaminado(chofer_actual):
                 decision_chofer = _extraer_chofer_geometrico(bloques_guia)
                 if decision_chofer.get("valor"):
                     datos["chofer"] = decision_chofer["valor"]
-                    recuperacion_chofer = True
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    chofer_geometrico = True
                     logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
             transporte_actual = str(datos.get("número de transporte", "No encontrado"))
             if not re.fullmatch(r"\d{10}", transporte_actual):
@@ -566,10 +658,17 @@ def procesar_archivo(
                         )
                         if consenso.get("valor"):
                             datos["número de transporte"] = consenso["valor"]
-                            transporte_corregido = True
+                            # Corroborado por diseño: _consensuar_transporte_focal
+                            # exige >=2 lecturas focales concordantes con
+                            # confianza suficiente (ver su propio umbral) --
+                            # nunca acepta una lectura focal aislada. No
+                            # requiere un motivo de revisión adicional.
+                            metodos_documento.add(MetodoObtencionDocumento.CORREGIDO.value)
+                            metodos_documento.add(MetodoObtencionDocumento.FOCAL.value)
                             logger.info("numero_transporte recuperado mediante consenso-focal-v1")
                     else:
                         datos["número de transporte"] = decision_transporte["valor"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
                         logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
             patente_tracto_actual = str(datos.get("patente del tracto", "No encontrado"))
             patente_carro_actual = str(datos.get("patente del carro", "No encontrado"))
@@ -577,15 +676,28 @@ def procesar_archivo(
                 decision_patentes = _extraer_patentes_geometrico(bloques_guia)
                 if patente_tracto_actual == "No encontrado" and decision_patentes.get("tracto"):
                     datos["patente del tracto"] = decision_patentes["tracto"]
-                    recuperacion_patentes = True
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    patentes_geometricas_sin_homologar.add("patente del tracto")
                     logger.info("patente_tracto recuperado mediante patentes-geometrico-conservador-v1")
                 if patente_carro_actual == "No encontrado" and decision_patentes.get("carro"):
                     datos["patente del carro"] = decision_patentes["carro"]
-                    recuperacion_patentes = True
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    patentes_geometricas_sin_homologar.add("patente del carro")
                     logger.info("patente_carro recuperado mediante patentes-geometrico-conservador-v1")
         except Exception as exc:
             logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
 
+    # Bloque ESTADOS S2.2 -- caso real guía 383295: `enriquecer_datos_con_catalogos`
+    # puede reemplazar cliente/chofer/obra_destino contra los catálogos
+    # maestros por una vía completamente distinta a la recuperación
+    # geométrica (`_extraer_asociaciones_geometricas`), que hasta este
+    # bloque no dejaba ningún rastro de método ni de motivo -- un
+    # documento podía terminar "OK" con un dato introducido por catálogo
+    # sin ninguna corroboración documental. Se compara antes/después para
+    # detectar exactamente qué cambió cada campo.
+    cliente_antes_catalogo = datos.get("cliente")
+    chofer_antes_catalogo = datos.get("chofer")
+    obra_destino_antes_catalogo = datos.get("obra destino")
     if carpeta_catalogos is not None:
         # La geometría puede recuperar valores después de la extracción lineal;
         # reaplicar la misma fuente al final conserva el nombre canónico.
@@ -605,25 +717,36 @@ def procesar_archivo(
                 decision_patente = resolver_patente_canonica(
                     vehiculos, valor_actual, tipo_esperado=tipo_esperado
                 )
-                if decision_patente.estado in {"ALIAS", "CORRECCION_OCR_SEGURA"}:
+                if decision_patente.estado in {"ALIAS", "CORRECCION_OCR_SEGURA", "COINCIDENCIA_EXACTA"}:
                     datos[campo] = decision_patente.valor_resultado
-                    homologacion_patente = True
+                    metodos_documento.add(MetodoObtencionDocumento.HOMOLOGADO.value)
+                    # Corroborado por diseño: catálogo confirma un único
+                    # candidato determinista (coincidencia exacta, alias
+                    # declarado, o corrección OCR de una sola posición sin
+                    # ambigüedad) -- ya no necesita revisión solo por haber
+                    # llegado ahí vía geometría.
+                    patentes_geometricas_sin_homologar.discard(campo)
                     logger.info(
                         "%s homologado mediante resolucion-patente-catalogo-v1 (%s): %s -> %s",
                         campo, decision_patente.estado,
                         decision_patente.valor_original, decision_patente.valor_resultado,
                     )
-                elif decision_patente.estado == "COINCIDENCIA_EXACTA":
-                    datos[campo] = decision_patente.valor_resultado
                 elif decision_patente.estado == "AMBIGUO":
-                    homologacion_patente = True
+                    _motivo(MotivoRevisionDocumento.PATENTE_AMBIGUA)
                     logger.info(
                         "%s homologacion abstenida por ambiguedad de catalogo: %s",
                         campo, decision_patente.valor_original,
                     )
         except Exception as exc:
             logger.warning("Homologación de patente omitida: %s: %s", type(exc).__name__, exc)
+    if patentes_geometricas_sin_homologar:
+        # Recuperada por geometría pero sin confirmación de catálogo (sin
+        # carpeta_catalogos, catálogo vacío, o sin candidato) -- a
+        # diferencia de una homologación exitosa, esta lectura no tiene una
+        # segunda señal independiente que la corrobore.
+        _motivo(MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR)
 
+    chofer_corroborado = False
     nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()
     if nombre_chofer not in {"", "No encontrado"}:
         ruta_choferes = (
@@ -633,12 +756,22 @@ def procesar_archivo(
         )
         catalogo_choferes = cargar_catalogo_json(ruta_choferes)
         rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
-        if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is None:
+        if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is not None:
+            # Corroborado: el RUT del chofer (independiente del nombre)
+            # identifica un único chofer conocido en catálogo.
+            chofer_corroborado = True
+        else:
             decision_fuzzy = resolver_nombre_chofer_difuso(
                 catalogo_choferes, nombre_chofer
             )
             if decision_fuzzy.estado == "COINCIDENCIA_SEGURA":
                 datos["chofer"] = decision_fuzzy.valor_resultado
+                metodos_documento.add(MetodoObtencionDocumento.FUZZY.value)
+                # Corroborado por diseño: resolver_nombre_chofer_difuso solo
+                # marca "COINCIDENCIA_SEGURA" con margen suficiente sobre el
+                # resto de candidatos (ver UMBRAL/MARGEN en catalogos.py) --
+                # nunca aplica un match ambiguo.
+                chofer_corroborado = True
             logger.info(
                 "fuzzy-matching-catalogo-choferes-v1 estado=%s similitud=%s",
                 decision_fuzzy.estado,
@@ -648,6 +781,12 @@ def procesar_archivo(
                     else "n/a"
                 ),
             )
+    if chofer_geometrico and not chofer_corroborado:
+        # Recuperado por geometría pero sin RUT de catálogo ni fuzzy seguro
+        # que lo respalde -- sin esa segunda señal, un error de OCR en la
+        # asociación geométrica no tendría forma de detectarse.
+        _motivo(MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR)
+
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
         try:
@@ -657,6 +796,12 @@ def procesar_archivo(
             candidato_guia = str(decision_guia["valor"])
             if decision_guia["emitida"] and re.fullmatch(r"\d{5,8}", candidato_guia):
                 datos["número de guía"] = candidato_guia
+                # Corroborado por diseño: decidir_bloques_ocr solo "emite" un
+                # candidato cuando hay una cadena única guía->marcador->valor
+                # (ver experimento_numero_guia_contextual.py), y aquí además
+                # se exige formato numérico de 5-8 dígitos.
+                metodos_documento.add(MetodoObtencionDocumento.CONTEXTUAL.value)
+                numero_guia_actual = candidato_guia
                 logger.info("numero_guia recuperado mediante numero-guia-contextual-conservador-v1")
         except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
             logger.warning("Fallback espacial de numero_guia omitido: %s: %s", type(exc).__name__, exc)
@@ -698,29 +843,88 @@ def procesar_archivo(
                 if len(coincidencias) == 1:
                     ((_, votos_ganadores),) = coincidencias.items()
                     fecha_actual = votos_ganadores[0][0]
-                    fecha_recuperada_focal = True
+                    # Corroborado por diseño: exige >=2 lecturas focales
+                    # concordantes con confianza >= CONFIANZA_MINIMA_FECHA_FOCAL
+                    # y una única fecha ganadora sin empate -- nunca acepta
+                    # una lectura focal aislada.
+                    metodos_documento.add(MetodoObtencionDocumento.FOCAL.value)
                     logger.info("fecha recuperada mediante consenso-focal-v1")
         except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
             logger.warning("Recuperación focal de fecha omitida: %s: %s", type(exc).__name__, exc)
 
     descripcion = extraer_descripcion_material(textos)
-    valores_clave = (
-        numero_guia_actual,
-        datos.get("número de transporte"),
-        datos.get("chofer"),
-        datos.get("cliente"),
-    )
-    requiere_revision = (
-        any(not valor or valor == "No encontrado" for valor in valores_clave)
-        or not descripcion
-        or recuperacion_geometrica
-        or transporte_corregido
-        or recuperacion_chofer
-        or recuperacion_patentes
-        or homologacion_patente
-        or fecha_recuperada_focal
-        or _documento_degradado(datos, descripcion)
-    )
+
+    # Bloque ESTADOS S2 -- corroboración de cliente/obra_destino recuperados
+    # por geometría. Único criterio de corroboración disponible hoy para
+    # cliente: un RUT con dígito verificador válido (ver validar_rut_chileno)
+    # identifica de forma prácticamente única a un contribuyente chileno --
+    # mismo criterio que ya usaba `rut_chofer_estado_validacion` en el
+    # esquema histórico. `obra destino` no tiene hoy una señal de
+    # corroboración independiente equivalente (no hay "RUT de destino") --
+    # se mantiene deliberadamente conservador (sigue pidiendo revisión)
+    # hasta que exista una, para no relajar sin evidencia (ver Fase C/D del
+    # bloque ESTADOS S2).
+    if "cliente" in campos_geometricos_sin_corroborar:
+        rut_cliente_valido = (
+            validar_rut_chileno(datos.get("RUT del cliente")).estado
+            == EstadoValidacion.VALIDO
+        )
+        if not rut_cliente_valido:
+            _motivo(MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR)
+    if "obra destino" in campos_geometricos_sin_corroborar:
+        _motivo(MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR)
+
+    # Bloque ESTADOS S2.2 -- trazabilidad y corroboración de lo que cambió
+    # `enriquecer_datos_con_catalogos()` (comparación contra el snapshot
+    # tomado antes de llamarla, ver arriba).
+    #
+    # Cliente/chofer: `buscar_empresa_por_rut`/`buscar_chofer_por_rut` solo
+    # cambian el valor cuando el RUT (ya extraído, por lo demás) calza
+    # EXACTO con un registro del catálogo -- un RUT exacto identifica de
+    # forma prácticamente única a un contribuyente/persona, igual que la
+    # corroboración geométrica por RUT ya usada arriba. Se registra el
+    # método, sin motivo de revisión.
+    if datos.get("cliente") != cliente_antes_catalogo:
+        metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
+    if datos.get("chofer") != chofer_antes_catalogo:
+        metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
+    # Obra destino: `_buscar_destino_en_textos` resuelve por "COD
+    # DESTINATARIO" contra el catálogo de destinos -- a diferencia de
+    # cliente/chofer, esto puede completar (o reemplazar) `obra destino`
+    # SIN que el campo "OBRA DESTINO" del propio documento tuviera nunca
+    # un valor (caso real guía 383295: campo en blanco en la guía, pero
+    # terminaba "OK" con un nombre de catálogo). "OBRA DESTINO" no es lo
+    # mismo que "cliente" ni que "DESPACHAR A" (ver semántica de producto,
+    # bloque E1) -- un código administrativo no es evidencia documental
+    # directa de esa obra en ESTE documento. Deliberadamente conservador:
+    # cualquier cambio de catálogo en este campo pide revisión, sin
+    # excepción, tanto si el campo estaba vacío como si el catálogo
+    # contradice un valor que el documento sí traía.
+    if datos.get("obra destino") != obra_destino_antes_catalogo:
+        metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
+        _motivo(MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR)
+
+    numero_transporte_actual = datos.get("número de transporte")
+    chofer_actual_final = datos.get("chofer")
+    cliente_actual_final = datos.get("cliente")
+    if not numero_guia_actual or numero_guia_actual == "No encontrado":
+        _motivo(MotivoRevisionDocumento.GUIA_AUSENTE)
+    if not numero_transporte_actual or numero_transporte_actual == "No encontrado":
+        _motivo(MotivoRevisionDocumento.TRANSPORTE_AUSENTE)
+    if not chofer_actual_final or chofer_actual_final == "No encontrado":
+        _motivo(MotivoRevisionDocumento.CHOFER_AUSENTE)
+    if not cliente_actual_final or cliente_actual_final == "No encontrado":
+        _motivo(MotivoRevisionDocumento.CLIENTE_AUSENTE)
+    if not descripcion:
+        # Informativo (ver MOTIVOS_NO_BLOQUEANTES): un campo operacional
+        # secundario ausente se registra, pero -- mismo criterio que Bloque
+        # O1 para peso/horas -- nunca por sí solo fuerza revisión completa
+        # del documento si el resto de identidad/operación está resuelto.
+        _motivo(MotivoRevisionDocumento.MATERIAL_AUSENTE)
+    if _documento_degradado(datos, descripcion):
+        _motivo(MotivoRevisionDocumento.DOCUMENTO_DEGRADADO)
+
+    requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
@@ -735,6 +939,12 @@ def procesar_archivo(
         "descripcion_material": descripcion,
         "tipo_carga": clasificar_material(descripcion).value,
         "indicador_revision": "REVISAR" if requiere_revision else "OK",
+        # Bloque ESTADOS S2: calidad del dato (por qué, si acaso, requiere
+        # revisión) separada de trazabilidad del método (cómo se obtuvo el
+        # valor final). Ninguna columna reemplaza a `indicador_revision`
+        # (compatibilidad hacia atrás intacta) -- se agregan al final.
+        "motivos_revision_documento": " | ".join(motivos_documento),
+        "metodos_recuperacion_documento": " | ".join(sorted(metodos_documento)),
         # Bloque O1: peso y horarios operacionales. La ausencia de estos
         # datos NUNCA por sí sola invalida el documento (no participan en
         # `requiere_revision`) -- "No encontrado"/"No determinada" ya es

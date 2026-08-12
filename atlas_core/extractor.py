@@ -925,17 +925,21 @@ def extraer_datos(
         return texto
 
     def normalizar_obra_destino(valor: str) -> str:
-        texto = limpiar_valor(valor).upper()
-        texto_simple = _normalizar_acentos(texto)
-
-        if "SIGRO" in texto_simple:
-            return "EMPRESA CONST SIGRO"
-        if "AMERICAN SCREW" in texto_simple:
-            return "AMERICAN SCREW CHILE SPA"
-        if "POCURO" in texto_simple or "PCCURO" in texto_simple or "CCNSIRUCIO" in texto_simple or "COYSIRUC" in texto_simple:
-            return "CONSTRUCTORA POCURO SPA"
-
-        return texto
+        # Bloque IDENTIDAD I1 -- este campo ya NO reescribe la identidad por
+        # subcadena (antes: "SIGRO"/"AMERICAN SCREW"/"POCURO" forzaban un
+        # nombre fijo de empresa). Caso real que lo demostró incorrecto:
+        # guía 383295, "OBRA DESTINO" impreso "CONSTRUCTORA SIGRO SA" (leído
+        # bien por el OCR) quedaba silenciosamente reemplazado por "EMPRESA
+        # CONST SIGRO" -- una entidad catalogada real, pero no necesariamente
+        # la misma que la impresa en ESE documento (mismo RUT 93.772.000-9
+        # aparece con nombres distintos en empresas.json vs destinos.json,
+        # inconsistencia real detectada en la propia auditoría, no corregida
+        # aquí -- fuera de alcance tocar catálogos). El extractor conserva lo
+        # que dice el documento; la homologación contra catálogo (con su
+        # propia corroboración) ya vive en `enriquecer_datos_con_catalogos`
+        # + el modelo de motivos/métodos de ESTADOS S2/S2.2 -- no se duplica
+        # aquí sin esa misma corroboración.
+        return limpiar_valor(valor).upper()
 
     def normalizar_chofer(valor: str) -> str:
         texto = limpiar_valor(valor).upper()
@@ -1028,12 +1032,24 @@ def extraer_datos(
         return None
 
     def buscar_cliente() -> Optional[str]:
+        # Bloque IDENTIDAD I1 -- antes de este bloque, "AMERICAN SCREW"/
+        # "PRODALA*"/"ACMA" en CUALQUIER parte del documento devolvían de
+        # inmediato un nombre de empresa fijo, sin siquiera pasar por el
+        # campo SEÑOR(ES) real. Se retiró el atajo de ACMA (sin evidencia
+        # de que haga falta -- solo 2 apariciones reales en todo el CSV
+        # masivo, ambas ya resueltas por el regex de abajo). Se
+        # CONSERVARON, acotados, PRODALA* y AMERICAN SCREW -- evidencia
+        # real de que sí hacen falta (guías 464493 y 462474: el campo
+        # SEÑOR(ES) no queda capturable por el regex de layout en esos
+        # documentos reales, pero el nombre de la empresa sí aparece en
+        # el texto). La limpieza de variantes de OCR (PRODALA*, AMERICAN
+        # SCREW, ACMA) sigue viviendo en `normalizar_cliente`, aplicada
+        # sobre el valor ya capturado del campo correcto cuando el regex
+        # de layout sí funciona.
         if "AMERICAN SCREW" in texto_busqueda:
             return "AMERICAN SCREW CHILE SPA"
         if "PRODALA" in texto_busqueda or "PRODALAK" in texto_busqueda or "PRODALAM" in texto_busqueda:
             return "PRODALAM SA"
-        if re.search(r"\bACMA\b", texto_busqueda):
-            return "ACMA SA"
 
         coincidencia = re.search(r"SENOR(?:\(ES\))?\s+(.+?)\s+RUT", texto_busqueda)
         if coincidencia:
@@ -1048,10 +1064,17 @@ def extraer_datos(
             if obra and "HORA ENTRADA" not in obra:
                 return obra
 
-        if "POCURO" in texto_busqueda or "PCCURO" in texto_busqueda or "CCNSIRUCIO" in texto_busqueda:
-            return "CONSTRUCTORA POCURO SPA"
-        if "SIGRO" in texto_busqueda:
-            return "EMPRESA CONST SIGRO"
+        # Bloque IDENTIDAD I1 -- se retiraron los fallbacks de "POCURO"/
+        # "PCCURO"/"CCNSIRUCIO" y "SIGRO" (devolvían un nombre de empresa
+        # fijo con solo encontrar la subcadena en CUALQUIER parte del
+        # documento, sin que "OBRA DESTINO" hubiera aportado ningún valor
+        # propio) -- caso real que demostró el de SIGRO incorrecto: guía
+        # 383295 (ver `normalizar_obra_destino`). Sin evidencia equivalente
+        # de daño real para "AMERICAN SCREW" -- y con evidencia real de
+        # que SÍ hace falta (guía histórica 462474: layout con "OBRA
+        # DESTINO" y su valor en bloques de OCR completamente separados,
+        # sin ningún candidato capturable por el regex de layout de
+        # arriba) -- se conserva, acotado a esta única empresa.
         if "AMERICAN SCREW" in texto_busqueda:
             return "AMERICAN SCREW CHILE SPA"
 
@@ -1074,9 +1097,12 @@ def extraer_datos(
             if coincidencia:
                 return limpiar_rut(coincidencia.group(1), agregar_dv=True, dv_conocido="7")
 
-            # Fallback seguro para ACMA si el OCR separa demasiado el RUT
-            if "ACMA" in texto_busqueda and "92" in texto_busqueda and "190" in texto_busqueda:
-                return "92.190.000-7"
+            # Bloque IDENTIDAD I1 -- se retiró el fallback que aceptaba
+            # "92" y "190" como evidencia con solo aparecer en cualquier
+            # parte del documento (sustrings de 2-3 dígitos, sin ninguna
+            # relación posicional con ACMA -- pueden aparecer en fechas,
+            # precios, teléfonos, etc. por pura coincidencia). Sin el
+            # patrón contextual de arriba, se abstiene.
 
         return None
 
@@ -1095,8 +1121,13 @@ def extraer_datos(
             base = coincidencia_pdte.group(1)
             return limpiar_rut(base, agregar_dv=True).replace(".", "")
 
-        if "18098153" in texto_busqueda:
-            return "18098153-5"
+        # Bloque IDENTIDAD I1 -- se retiró un fallback sin comentario ni
+        # justificación que asignaba el RUT "18098153-5" (un chofer real,
+        # Patricio Villagra) con solo encontrar esa cadena de 8 dígitos en
+        # CUALQUIER parte del documento -- sin garantía de que esté en el
+        # campo RUT CHOFER (podría aparecer en un folio, teléfono, SAP,
+        # etc. por coincidencia). Sin un patrón contextual que lo respalde,
+        # se abstiene.
 
         return None
 

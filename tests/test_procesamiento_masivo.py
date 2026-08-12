@@ -208,7 +208,12 @@ def test_procesar_archivo_homologa_sd6486_a_sb6486_y_conserva_jf4288(tmp_path, m
     assert resultado["numero_transporte"] == "0000352449"
     assert resultado["cliente"] == "ARMACERO MATCO SA"
     assert resultado["chofer"] == "RODRIGO NAHUELÑIR"
-    assert resultado["indicador_revision"] == "REVISAR"
+    # Bloque ESTADOS S2: CORRECCION_OCR_SEGURA es una homologación
+    # corroborada por catálogo (candidato único, determinista) -- ya no
+    # fuerza revisión solo por haber pasado por geometría/homologación.
+    assert resultado["indicador_revision"] == "OK"
+    assert "HOMOLOGADO" in resultado["metodos_recuperacion_documento"]
+    assert resultado["motivos_revision_documento"] == ""
 
 
 def test_procesar_archivo_homologacion_ambigua_mantiene_ocr_y_marca_revisar(
@@ -294,7 +299,13 @@ def test_procesar_archivo_p1_geometrico_y_p2_homologacion_encadenados(tmp_path, 
 
     assert resultado["patente_tracto"] == "SB6486"
     assert resultado["patente_rampla"] == "JF4288"
-    assert resultado["indicador_revision"] == "REVISAR"
+    # Bloque ESTADOS S2: ambas patentes terminan homologadas contra
+    # catálogo (corroboradas) -- la recuperación geométrica previa (P1) no
+    # deja un motivo pendiente una vez que P2 la corrobora.
+    assert resultado["indicador_revision"] == "OK"
+    assert "GEOMETRICO" in resultado["metodos_recuperacion_documento"]
+    assert "HOMOLOGADO" in resultado["metodos_recuperacion_documento"]
+    assert resultado["motivos_revision_documento"] == ""
 
 
 def test_procesar_archivo_consenso_focal_corrige_global_sin_mapa_seis_a_ocho(
@@ -490,7 +501,12 @@ def test_procesar_archivo_fecha_focal_recupera_con_consenso_de_dos_variantes(
     resultado = procesar_archivo(ruta)
 
     assert resultado["fecha"] == "23-06-2025"
-    assert resultado["indicador_revision"] == "REVISAR"
+    # Bloque ESTADOS S2: el consenso focal de fecha exige >=2 lecturas
+    # concordantes con confianza suficiente -- corroborado por diseño, ya
+    # no fuerza revisión por sí solo (la descripción de material ausente,
+    # `MATERIAL_AUSENTE`, tampoco: es informativa, no bloqueante).
+    assert resultado["indicador_revision"] == "OK"
+    assert "FOCAL" in resultado["metodos_recuperacion_documento"]
 
 
 def test_procesar_archivo_fecha_focal_abstiene_si_un_voto_coincidente_tiene_confianza_baja(
@@ -530,7 +546,11 @@ def test_procesar_archivo_fecha_focal_abstiene_si_un_voto_coincidente_tiene_conf
     resultado = procesar_archivo(ruta)
 
     assert resultado["fecha"] == "No encontrado"
-    assert resultado["indicador_revision"] == "REVISAR"
+    # Bloque ESTADOS S2: la fecha ausente nunca formó parte de los campos
+    # clave que fuerzan revisión (ni antes ni después de este bloque); el
+    # único motivo de REVISAR en este escenario era la descripción de
+    # material ausente, ahora informativa/no bloqueante.
+    assert resultado["indicador_revision"] == "OK"
 
 
 def test_procesar_archivo_fecha_focal_acepta_confianza_exactamente_en_el_umbral(
@@ -566,7 +586,8 @@ def test_procesar_archivo_fecha_focal_acepta_confianza_exactamente_en_el_umbral(
     resultado = procesar_archivo(ruta)
 
     assert resultado["fecha"] == "30-09-2025"
-    assert resultado["indicador_revision"] == "REVISAR"
+    assert resultado["indicador_revision"] == "OK"
+    assert "FOCAL" in resultado["metodos_recuperacion_documento"]
 
 
 def test_procesar_archivo_fecha_focal_variantes_discordantes_no_convergen(
@@ -602,7 +623,7 @@ def test_procesar_archivo_fecha_focal_variantes_discordantes_no_convergen(
     resultado = procesar_archivo(ruta)
 
     assert resultado["fecha"] == "No encontrado"
-    assert resultado["indicador_revision"] == "REVISAR"
+    assert resultado["indicador_revision"] == "OK"
 
 
 def test_procesar_archivo_fecha_focal_descarta_anio_absurdo_por_plausibilidad(
@@ -902,7 +923,7 @@ def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
     assert resultado["patente_rampla"] == "EFGH34"
 
 
-def test_fuzzy_se_aplica_al_chofer_del_fallback_y_conserva_revision(
+def test_fuzzy_se_aplica_al_chofer_del_fallback_geometrico_y_corrobora_sin_revision(
     tmp_path, monkeypatch
 ):
     datos = {
@@ -929,7 +950,13 @@ def test_fuzzy_se_aplica_al_chofer_del_fallback_y_conserva_revision(
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 
     assert resultado["chofer"] == "ENRIQUE RAMOS"
-    assert resultado["indicador_revision"] == "REVISAR"
+    # Bloque ESTADOS S2: el chofer llegó por geometría (nombre ausente en
+    # extracción lineal), pero el fuzzy-match "COINCIDENCIA_SEGURA" contra
+    # catálogo lo corrobora -- ya no fuerza revisión solo por el método.
+    assert resultado["indicador_revision"] == "OK"
+    assert "GEOMETRICO" in resultado["metodos_recuperacion_documento"]
+    assert "FUZZY" in resultado["metodos_recuperacion_documento"]
+    assert "CHOFER_SIN_CORROBORAR" not in resultado["motivos_revision_documento"]
 
 
 def test_fuzzy_sin_coincidencia_conserva_nombre_y_revision_actual(
@@ -951,7 +978,10 @@ def test_fuzzy_sin_coincidencia_conserva_nombre_y_revision_actual(
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 
     assert resultado["chofer"] == "NOMBRE ORIGINAL"
-    assert resultado["indicador_revision"] == "REVISAR"
+    # Bloque ESTADOS S2: el chofer vino de extracción lineal limpia (nunca
+    # ausente/contaminado) -- que el fuzzy no encuentre coincidencia no
+    # invalida un dato que nunca necesitó rescate.
+    assert resultado["indicador_revision"] == "OK"
 
 
 def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
@@ -988,6 +1018,8 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "descripcion_material",
         "tipo_carga",
         "indicador_revision",
+        "motivos_revision_documento",
+        "metodos_recuperacion_documento",
         "peso_kg",
         "hora_entrada_aza",
         "hora_salida_aza",
@@ -1880,6 +1912,15 @@ def test_columnas_csv_incluyen_peso_y_horarios_operacionales_o1():
     `permanencia_minutos` llegan hasta el esquema de `analisis_completo_guias.csv`
     -- antes de este bloque se calculaban internamente pero nunca salían
     de `extraer_datos()`."""
-    assert COLUMNAS[-4:] == [
+    assert COLUMNAS[-6:] == [
         "peso_kg", "hora_entrada_aza", "hora_salida_aza", "permanencia_minutos",
+        "motivos_revision_documento", "metodos_recuperacion_documento",
     ]
+
+
+def test_columnas_csv_incluyen_motivos_y_metodos_estados_s2():
+    """Bloque ESTADOS S2: `motivos_revision_documento` (calidad del dato,
+    explícito) y `metodos_recuperacion_documento` (trazabilidad del método)
+    llegan al esquema del CSV masivo, al final -- backward-compatible,
+    `indicador_revision` conserva su semántica REVISAR/OK de siempre."""
+    assert COLUMNAS[-2:] == ["motivos_revision_documento", "metodos_recuperacion_documento"]

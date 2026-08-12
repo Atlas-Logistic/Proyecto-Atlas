@@ -4,6 +4,52 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — IDENTIDAD I1: auditoría de normalizaciones hardcodeadas -- APROBADO (cierra la serie ESTADOS S2)
+
+- Se auditaron todas las reglas del extractor base que podían reemplazar silenciosamente la identidad de un cliente, chofer o destino por coincidir con una palabra clave (SIGRO, AMERICAN SCREW, POCURO, PRODALA/PRODALAM, ACMA, y un RUT de chofer sin ninguna justificación en el código). **14 reglas en total, confinadas a un único archivo** (`atlas_core/extractor.py`) -- 6 se retiraron, 8 se conservaron con evidencia real de que hacen falta.
+- **Confirmado con la imagen real:** la guía 383295 ahora extrae correctamente "CONSTRUCTORA SIGRO SA" (lo que el documento realmente dice), en vez del nombre fijo "EMPRESA CONST SIGRO" que la regla imponía antes -- y queda marcada para revisión humana con el motivo explícito correspondiente, en vez de aparecer confirmada en silencio.
+- **Hallazgo adicional real:** el mismo RUT (93.772.000-9) aparece con nombres distintos en dos catálogos internos (uno lo llama "PRODALAM SA", el otro "EMPRESA CONST SIGRO") -- una inconsistencia de datos real, documentada pero no corregida en este bloque (no se autorizó tocar catálogos).
+- **Validación real, sin reprocesar el corpus completo:** 9 documentos reales verificados de forma focal (no 196, no 1172), más las 5 relajaciones ya conocidas de bloques anteriores. Un caso (guía 464493) pasó de "confirmado" a "requiere revisión" tras el arreglo -- no es un error: el valor sigue siendo correcto, simplemente ahora se declara honestamente que llegó por un camino que necesita corroboración, en vez de esconder esa incertidumbre detrás del atajo que se acaba de retirar.
+- **0 identidades incorrectas encontradas** en toda la validación real de este bloque.
+- Suite completa: 730 → 742 tests, todos verdes, 0 regresiones (se protegió explícitamente un test histórico real que dependía de una de las reglas conservadas).
+- **Veredicto: APROBADO.** Cierra la serie completa ESTADOS S2 → S2.1 → S2.2 → IDENTIDAD I1.
+- Producción intacta durante todo el bloque. **Este bloque sí generó commit** (ver detalle técnico).
+
+---
+
+## 2026-08-11 — ESTADOS S2.2: cubrir enriquecimiento de catálogo -- NO APROBADO, la causa raíz real era otra (CERRADO)
+
+- Se implementó y probó (14 tests nuevos, 730 verdes en total) la cobertura de `enriquecer_datos_con_catalogos()` dentro del modelo de calidad/trazabilidad: cliente y chofer confirmados por catálogo solo cuando el RUT calza exacto (corroboración fuerte, sin revisión); obra destino, en cambio, **nunca** queda confirmado en silencio solo porque el catálogo sugirió un nombre -- si cambia el valor, siempre pide revisión, tenga o no el documento su propio valor de destino.
+- **Al revalidar con datos reales el caso que motivó este bloque (guía 383295), se descubrió que el diagnóstico anterior estaba equivocado.** El problema no viene del enriquecimiento por catálogo -- viene de una regla mucho más antigua, ya existente en el extractor base, que reemplaza automáticamente cualquier destino que contenga la palabra "SIGRO" por un nombre de empresa fijo, sin verificar si es la empresa correcta. Ese reemplazo ocurre antes de que cualquier lógica de este bloque (o del anterior) tenga oportunidad de intervenir.
+- **No se corrigió esa regla bajo presión** -- está fuera del alcance de "cubrir enriquecimiento de catálogo" que se pidió para este bloque, y correrla sin evidencia amplia sería exactamente el tipo de parche apresurado que este proceso está diseñado para evitar. Se documenta como hallazgo y se recomienda un bloque dedicado.
+- **Veredicto: NO APROBADO.** El trabajo pedido para este bloque se completó correctamente (y quedó probado), pero no resuelve el caso real que lo originó -- ese caso necesita su propio bloque, con su propio análisis.
+- Producción intacta. Sin commit ni push.
+
+---
+
+## 2026-08-11 — ESTADOS S2.1: validación a escala sobre corpus real -- NO APROBADO, defecto real encontrado (CERRADO, detenido para S2.2)
+
+- **Se localizó el corpus real completo** que generó el reporte productivo (`G:\Mi unidad\MBT\informe lunes`, 1172 de 1177 imágenes, 99.6% de cobertura) -- no vive en este equipo, solo en Google Drive, y nunca se había usado hasta este bloque.
+- Se procesaron **150 documentos reales nuevos** con el motor S2 (sumados a los 46 ya validados en el bloque anterior, 196 en total). Resultado: **solo 4 relajaciones reales** (REVISAR -> confirmado) en los 196 -- una tasa (~2%) que hace **estructuralmente inalcanzable** la meta de 30 relajaciones, incluso si se hubiera procesado el corpus completo.
+- **Se encontró un defecto real:** de las 4 relajaciones, **3 son correctas** (verificadas contra la imagen) pero **1 no lo es** -- un documento quedó "confirmado sin revisión" con un destino de entrega inventado que no corresponde al campo real (en blanco) de la guía. La causa **no está en la lógica nueva de este bloque**, sino en un mecanismo de enriquecimiento por catálogo que ya existía antes y que nunca quedó cubierto por el sistema de motivos/métodos -- puede cambiar cliente, destino, chofer o patente sin dejar ningún rastro de revisión, ni en el código viejo ni en el nuevo.
+- **Siguiendo la instrucción explícita de este bloque, no se intentó corregir el defecto bajo presión** -- se documenta y se detiene para un bloque dedicado (ESTADOS S2.2).
+- **Veredicto: NO APROBADO.** No es una cuestión de volumen de muestra (eso ya se resolvió, se accedió al corpus real) sino de un defecto de cobertura real encontrado -- exactamente el tipo de hallazgo que este bloque estaba diseñado para detectar antes de tocar producción.
+- Producción (`viajes.csv`, `analisis_completo_guias.csv`) **no fue tocada**. Suite: 716 tests, todos verdes. Sin commit ni push.
+
+---
+
+## 2026-08-11 — ESTADOS S1 (diagnóstico) + ESTADOS S2 (calidad del dato vs. método): NO APROBADO por criterio de muestra, código listo
+
+- **Decisión de arquitectura registrada:** Atlas separa la **calidad del dato** (¿requiere revisión humana, y por qué?) de la **trazabilidad del método** (¿cómo se obtuvo el valor?). Usar geometría, fuzzy, catálogos u otros métodos técnicos **no implica por sí solo** revisión humana -- solo la implica una incertidumbre real: dato ausente, ambigüedad genuina, conflicto entre documentos, o una recuperación sin una segunda señal independiente que la corrobore (RUT válido para cliente/chofer, catálogo para patente, consenso de múltiples lecturas para transporte/fecha/guía).
+- **ESTADOS S1 (diagnóstico):** encontró que el reporte productivo (574 viajes, 490 confirmados) quedó congelado el 2026-07-28, **un día antes** de que el motor empezara a propagar la revisión de documento a viaje -- explica la mayor parte del desfase frente al CSV masivo actual (1177 documentos, 1033 en revisión). Mezcla real de revisiones legítimas (~73% de una muestra representativa) y sobremarcado técnico (~27%).
+- **ESTADOS S2 (corrección):** implementado y testeado -- una patente homologada de forma determinista contra catálogo, un chofer con RUT que coincide en catálogo, o un número de guía/transporte/fecha recuperado con consenso de múltiples lecturas, ya no fuerzan revisión solo por el método. Lo que sí se sigue exigiendo sin excepción: un dato realmente ausente, una ambigüedad real, un conflicto entre documentos del mismo viaje, o una recuperación sin corroboración disponible (el destino de entrega, por ejemplo, se mantuvo deliberadamente conservador -- no existe hoy una señal de corroboración equivalente al RUT).
+- **Validación real:** de las 46 guías reales ya conocidas de bloques anteriores (con imagen disponible localmente), solo 2 pasaron de "requiere revisión" a "confirmado" bajo la nueva política -- ambas verificadas visualmente contra la imagen real, 100% correctas. El impacto práctico resultó más modesto de lo esperado porque el destino de entrega (mantenido conservador a propósito) es, en la práctica, el motivo de revisión más frecuente.
+- **Hallazgo relevante:** las columnas de trazabilidad del CSV masivo histórico (usadas en el diagnóstico de S1) resultaron **no ser un proxy confiable** para reconstruir qué causó la revisión en su momento -- intentar reclasificar los 1177 documentos existentes con esas columnas habría dado un número sin sustento real. Se documentó esta limitación en vez de presentar una cifra poco confiable como si fuera precisa.
+- **Veredicto: NO APROBADO**, estrictamente por no alcanzar la muestra mínima de 30 casos reales revisados (solo 2 disponibles localmente -- el resto del corpus real vive fuera de este entorno). El código y los 8 tests de los casos reales obligatorios (más 10 tests existentes actualizados) están completos, verdes (706 -> 716 tests, 0 regresiones), y verificados sin ningún error en la muestra real disponible -- pero no se commiteó ni se sugiere migrar producción todavía, a la espera de completar la validación de escala con acceso al corpus real completo.
+- Producción (`viajes.csv` de 574 viajes) **no fue tocada** en ningún momento de este bloque.
+
+---
+
 ## 2026-08-11 — OPERACIÓN O1.1 (validación ciega) + O1.2 (corrección dirigida): peso + hora salida (CERRADO, APROBADO)
 
 - **O1.1 (validación ciega independiente, sin cambios de código):** se corrió el pipeline real sobre 16 guías nunca usadas para calibrar reglas de O1 (14 conocidas + 2 genuinamente nuevas), congelando la predicción ANTES de mirar cualquier imagen. **Veredicto: O1 NO APROBADO** — 3 patrones reales de falla: (1) el OCR a veces pega un dígito extra al inicio de una hora ("112:15:18"), y el extractor "rescataba" un sub-tramo con forma válida pero equivocada en vez de detectar la corrupción; en un caso además emitía una hora inválida fuera de rango ("29:55"); (2) "PESO KG" con una línea no relacionada intercalada antes de su valor real rompía la búsqueda; (3) un error de lectura del propio motor OCR (un dígito mal leído) en una guía, ajeno al extractor.

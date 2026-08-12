@@ -4,6 +4,192 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: IDENTIDAD I1 (auditoría de normalizaciones hardcodeadas) — APROBADO. Cierra la serie ESTADOS S2/S2.1/S2.2/I1
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8029ee4546305511ac8ad641354fa2b3cc306423`. **Este bloque SÍ committea** (junto con S2/S2.2, ver abajo).
+
+### Inventario completo de reglas hardcodeadas de identidad (`atlas_core/extractor.py`)
+
+Confinado por completo a `extractor.py` -- no se encontró ningún patrón equivalente en el resto de `atlas_core/` (catalogos.py, procesamiento_masivo.py, gestor_viajes.py, reporte_viajes.py, clasificador_material.py, rutas/).
+
+| Regla | Función | Campo | Condición | Clasificación | Acción |
+|---|---|---|---|---|---|
+| SIGRO → "EMPRESA CONST SIGRO" | `normalizar_obra_destino` | obra_destino | subcadena en valor ya capturado | **E — incorrecta** (probado: guía 383295 real decía "CONSTRUCTORA SIGRO SA") | **Retirada** |
+| SIGRO → "EMPRESA CONST SIGRO" | `buscar_obra_destino` (fallback) | obra_destino | subcadena en TODO el documento | **E — incorrecta** | **Retirada** |
+| POCURO/PCCURO/CCNSIRUCIO/COYSIRUC → "CONSTRUCTORA POCURO SPA" | `normalizar_obra_destino` | obra_destino | subcadena en valor ya capturado | **D — inferencia no corroborada** (mismo patrón de riesgo que SIGRO, sin evidencia real de necesidad) | **Retirada** |
+| POCURO/PCCURO/CCNSIRUCIO → "CONSTRUCTORA POCURO SPA" | `buscar_obra_destino` (fallback) | obra_destino | subcadena en TODO el documento | **D** | **Retirada** |
+| AMERICAN SCREW → "AMERICAN SCREW CHILE SPA" | `normalizar_obra_destino` | obra_destino | subcadena en valor ya capturado | **B — corrección OCR/formato determinista** | Retirada de aquí (redundante; el fallback de abajo la cubre) |
+| AMERICAN SCREW → "AMERICAN SCREW CHILE SPA" | `buscar_obra_destino` (fallback) | obra_destino | subcadena en TODO el documento | **B**, evidencia real: guía histórica 462474 (`tests/test_atlas.py`), layout con etiqueta y valor en bloques de OCR separados | **Conservada**, acotada a esta empresa |
+| AMERICAN SCREW → cliente fijo | `buscar_cliente` (atajo) | cliente | subcadena en TODO el documento, sin pasar por SEÑOR(ES) | **B**, evidencia real: guía 464479 y la 462474 | **Conservada**, acotada |
+| PRODALA/PRODALAK/PRODALAM → "PRODALAM SA" | `normalizar_cliente` | cliente | subcadena en valor ya capturado (campo SEÑOR(ES) real) | **B — corrección OCR determinista**, evidencia real: 21 variantes de OCR distintas confirmadas en el CSV masivo, un solo RUT real detrás (93.772.000, `empresas.json`) | **Conservada** |
+| PRODALA/PRODALAK/PRODALAM → cliente fijo | `buscar_cliente` (atajo) | cliente | subcadena en TODO el documento | **B**, evidencia real: guía 464493 (SEÑOR(ES) no capturable por el regex de layout, pero "PRODALAM SA" sí aparece en el texto) | **Conservada**, acotada |
+| ACMA → "ACMA SA" | `normalizar_cliente` | cliente | `\bACMA\b` sobre valor ya capturado | **A/B — segura**, acotada por límite de palabra, evidencia catalogada (RUT 921900007) | **Conservada** |
+| ACMA → cliente fijo | `buscar_cliente` (atajo) | cliente | `\bACMA\b` en TODO el documento | **D**, sin evidencia real de que haga falta (solo 2 apariciones en todo el CSV masivo, ya resueltas por el regex de layout) | **Retirada** |
+| ACMA RUT "92"+"190" → "92.190.000-7" | `buscar_rut_cliente` | RUT del cliente | co-ocurrencia de 2 subcadenas de 2-3 dígitos en TODO el documento | **E — incorrecta** (subcadenas comunes, sin relación posicional) | **Retirada** (queda el patrón contextual "ACMA...INDUSTRIAS", ese sí conservado) |
+| "18098153" → "18098153-5" | `buscar_rut_chofer` | RUT del chofer | subcadena de 8 dígitos en TODO el documento, sin comentario | **E — incorrecta** | **Retirada** |
+| "PAIRICIO" → "PATRICIO" | `normalizar_chofer` | chofer | corrección de un carácter sobre valor ya identificado como chofer | **A — normalización sintáctica segura** | Conservada (no es sustitución de identidad, es corrección OCR de un nombre ya acotado al campo) |
+| 7 bloques completos por número de guía exacto (462491, 462793, 462833, 461878, 462544, 462871, 462395) | `extraer_datos` (fallbacks históricos) | todos los campos | `numero_guia == "XXXXXX" or "XXXXXX" in texto` | Categoría propia, gateada por número de guía (identificador fuerte, no nombre de empresa por subcadena) | **Fuera de alcance de este bloque** -- reportados, no tocados (mismo criterio ya aplicado en Bloque O1: solo 462491 corregido con evidencia visual directa; los otros 6 requieren imagen real para auditar con el mismo rigor, disponible ahora en el corpus localizado pero no revisada en este bloque) |
+
+**Total: 14 reglas de identidad por subcadena inventariadas** (más los 7 bloques de fallback por guía, categoría aparte) — **6 retiradas, 8 conservadas con evidencia**.
+
+### Caso SIGRO / 383295 -- confirmado y corregido
+
+- Hallazgo real (destinos.json vs empresas.json): el mismo RUT normalizado `93772000` aparece con nombres DISTINTOS en los dos catálogos (`empresas.json` → "PRODALAM SA"; `destinos.json`, código `0002012245` → "EMPRESA CONST SIGRO") -- inconsistencia real de datos, **no corregida aquí** (fuera de alcance tocar catálogos sin autorización explícita).
+- Evidencia real cruzada (`G:\Mi unidad\MBT\informe lunes\`, guía 454346 y 461066, ambas con cliente PRODALAM SA): el documento SÍ imprime literalmente "EMPRESA CONST SIGRO SA" -- la regla no era incorrecta para estos casos.
+- Evidencia real de la guía 383295 (cliente SALOMON SACK SA, no PRODALAM): el documento imprime "CONSTRUCTORA SIGRO SA" -- un texto distinto, que la regla destruía igual.
+- Evidencia real adicional (guías 383738, 462210): la recuperación geométrica post-fix produce un tercer valor real, "EMPRESA CONSTRUCTORA SIGRO S" -- ni el nombre "oficial" del catálogo ni el de 383295, confirmando que colapsar todo en un único string fijo perdía variación real.
+- **Resultado tras el fix (verificado con la imagen real, guía 383295):** `obra_destino = "CONSTRUCTORA SIGRO SA"` (el valor documental real, preservado), `indicador_revision = REVISAR`, `motivos_revision_documento = OBRA_DESTINO_SIN_CORROBORAR`, `metodos_recuperacion_documento = CONTEXTUAL | GEOMETRICO`. Ya no hay sustitución silenciosa.
+
+### AMERICAN SCREW, POCURO, PRODALA/PRODALAM, ACMA -- resultados
+
+- **AMERICAN SCREW:** 15 ocurrencias reales (9 cliente + 6 obra_destino), todas consistentes (empresa que recibe en su propia planta) -- regla conservada, acotada, sin evidencia de daño.
+- **POCURO:** 4 ocurrencias reales en obra_destino, siempre "CONSTRUCTORA POCURO SPA" -- pero sin evidencia de que el fallback por subcadena (a diferencia de AMERICAN SCREW) sea realmente necesario; verificado con 2 guías reales (391473, 391474) que la recuperación geométrica post-fix ya resuelve el valor correcto sin el atajo, con el motivo correspondiente. Retirada.
+- **PRODALA/PRODALAM:** 128 ocurrencias reales de cliente, 21 variantes de OCR distintas confirmadas, un solo RUT real. Regla conservada en `normalizar_cliente` (segura) y, con evidencia real directa (guía 464493), también conservada -- acotada -- como atajo en `buscar_cliente`.
+- **ACMA:** solo 2 ocurrencias reales en todo el CSV masivo, ambas ya resueltas por el regex de layout normal -- el atajo de `buscar_cliente` se retiró sin pérdida de cobertura; el fallback débil de RUT ("92"+"190") se retiró por ser evidentemente inseguro (subcadenas comunes sin relación posicional).
+
+### Validación focal real (sin reprocesar el corpus completo)
+
+9 documentos reales verificados con OCR focal (no 196, no 1172): 383295 (antes/después), 454346, 461066, 383738, 462210, 391473, 391474, más las 5 relajaciones ya conocidas de S2/S2.2 (383620, 462491, 464479, 464493, y la propia 383295). **0 identidades incorrectas encontradas tras el fix.**
+
+### Revalidación de relajaciones S2/S2.2 conocidas
+
+- **383295:** ya NO es una relajación falsa -- pasó a `REVISAR` correctamente, con el valor documental real preservado.
+- **383620, 462491, 464479:** sin cambios, siguen `OK` y correctas.
+- **464493:** cambió de `OK` a `REVISAR` -- **no es una regresión**: el cliente ahora se resuelve correctamente ("PRODALAM SA", antes "No encontrado" por la eliminación inicial del atajo, restaurada tras evidencia real), y el destino ("EMPRESA CONST SIGRO SA", real y probablemente correcto) ahora pasa honestamente por el mismo camino de recuperación geométrica sin corroborar que ya usan el resto de los documentos -- antes quedaba "OK" solo porque el propio hardcode de SIGRO lo resolvía como si fuera texto lineal confiable, ocultando la incertidumbre real. Es el comportamiento correcto, no un defecto.
+
+### Archivos modificados en este bloque
+
+- `atlas_core/extractor.py`: `normalizar_obra_destino`, `buscar_obra_destino`, `buscar_cliente`, `buscar_rut_cliente`, `buscar_rut_chofer`.
+- `tests/test_identidad_i1.py` (nuevo, 12 tests).
+
+### Tests y suite
+
+- 12 tests nuevos, todos verdes. Suite completa: **730 → 742 passed**, 0 regresiones (incluye el test histórico `test_atlas.py::test_formato_segunda_guia`, protegido explícitamente).
+
+### Veredicto: IDENTIDAD I1 APROBADO
+
+Los 11 criterios de cierre se cumplen: inventario completo; cada regla clasificada; SIGRO corregido; 383295 corregida; ninguna sustitución que queda sin justificación explícita en código; regresiones históricas protegidas (test real preservado + nuevos tests); validación focal real con evidencia; relajaciones S2 conocidas revalidadas; 0 cambios incorrectos; suite verde; producción intacta.
+
+### Cierre de la serie ESTADOS S2 / S2.1 / S2.2 / IDENTIDAD I1
+
+Con este bloque se cierra la evolución completa: separación calidad/trazabilidad del dato (S2), validación a escala sobre corpus real localizado en `G:\Mi unidad\MBT\informe lunes\` (S2.1), cobertura del enriquecimiento por catálogo (S2.2), y ahora la causa raíz real (normalizaciones hardcodeadas en el extractor base, I1). El caso 383295, que atravesó las 4 etapas antes de resolverse correctamente, queda documentado de punta a punta como caso de estudio de la disciplina de diagnóstico exigida en todo este arco.
+
+---
+
+## 2026-08-11 — Cierre: ESTADOS S2.2 (cubrir enriquecimiento de catálogo) — NO APROBADO, 383295 tenía otra causa raíz
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8029ee4546305511ac8ad641354fa2b3cc306423`. **Sin commit nuevo.**
+
+### Implementado (funciona correctamente para lo que cubre)
+
+- **`MetodoObtencionDocumento.CATALOGO`** (nuevo) + trazabilidad y corroboración de `enriquecer_datos_con_catalogos()` en `procesar_archivo()`: se toma un snapshot de `cliente`/`chofer`/`obra destino` justo antes de llamarla y se compara contra el valor final.
+  - **Cliente/chofer:** `buscar_empresa_por_rut`/`buscar_chofer_por_rut` solo cambian el valor con coincidencia EXACTA de RUT contra el catálogo -- corroboración fuerte por diseño (mismo criterio que el RUT geométrico ya usado en S2). Se registra método `CATALOGO`, sin motivo de revisión.
+  - **Obra destino:** `_buscar_destino_en_textos` resuelve por "COD DESTINATARIO" -- sin una señal de corroboración equivalente al RUT, y sin que el campo "OBRA DESTINO" del documento tenga por qué haber tenido nunca un valor propio. Deliberadamente conservador: **cualquier cambio de este campo por catálogo agrega `OBRA_DESTINO_SIN_CORROBORAR` y fuerza revisión, sin excepción** (campo vacío o con valor documental contradicho por catálogo, da igual).
+  - Patente: ya cubierta por el bloque P2 existente (se revalida el valor final tras el enriquecimiento).
+- 14 tests nuevos (`tests/test_estados_s2_2.py`), todos verdes: RUT exacto de cliente/chofer confirma sin revisión; sin coincidencia de RUT el catálogo no toca el campo; destino vacío completado por catálogo fuerza revisión; destino documental que coincide con catálogo no agrega motivo; destino documental contradicho por catálogo fuerza revisión; patente exacta/corrección OCR segura/ambigua (no regresión); trazabilidad y motivo persistidos; combinación GEOMETRICO+CATALOGO sin duplicar motivo; regresión sintética del patrón real de 383295. Suite completa: **716 → 730 passed**, 0 regresiones.
+
+### Hallazgo crítico: la hipótesis de causa raíz de ESTADOS S2.1 para la guía 383295 era INCORRECTA
+
+- Se revalidaron los mismos 196 documentos reales (46 de S2 + 150 de S2.1) con el código S2.2. **383295 sigue exactamente igual: `obra_destino="EMPRESA CONST SIGRO"`, `indicador_revision=OK`, sin ningún motivo.**
+- Diagnóstico directo (`extraer_datos()` aislado, sin geometría ni catálogo): la guía 383295 **YA llega con `obra destino = "EMPRESA CONST SIGRO"` desde la extracción lineal pura** -- antes de que corra cualquier lógica de S2/S2.2. La causa real es `atlas_core/extractor.py: normalizar_obra_destino()` (código de un bloque muy anterior, no de ESTADOS S1/S2), que tiene una regla **hardcodeada**: cualquier valor de obra destino que contenga la subcadena `"SIGRO"` se reemplaza incondicionalmente por `"EMPRESA CONST SIGRO"`. La guía real dice literalmente `"OBRA DESTINO: CONSTRUCTORA SIGRO SA"` (leído correctamente por el OCR, confirmado en el texto crudo) -- pero la normalización lo canoniza a una empresa distinta ("EMPRESA CONST SIGRO", que sí existe como entidad real y catalogada, pero no es la misma sociedad que "CONSTRUCTORA SIGRO SA").
+- **Esto está completamente fuera del alcance de `enriquecer_datos_con_catalogos()`** -- ocurre en la primera línea de `procesar_archivo()` (`datos = extraer_datos(textos, ...)`), antes de que exista ningún snapshot ni ninguna lógica de corroboración de S2/S2.2 que pueda interceptarlo. Ninguna corrección dentro del alcance de S2.2 podía resolver este caso.
+- **Riesgo de la misma categoría, no auditado todavía:** `normalizar_obra_destino()` tiene reglas equivalentes para `"AMERICAN SCREW"` y `"POCURO"/"PCCURO"/"CCNSIRUCIO"/"COYSIRUC"`; `normalizar_cliente()`/`buscar_cliente()` tienen reglas equivalentes para `"PRODALA"/"PRODALAK"/"PRODALAM"`, `"AMERICAN SCREW"` y `"ACMA"`. No se auditó su exactitud real en este bloque (fuera de alcance explícito -- "no rediseñar el resto de S2").
+- **No se corrigió bajo presión** -- siguiendo el mismo principio ya aplicado en S2.1, se documenta el hallazgo (con causa raíz correcta esta vez, verificada trazando la ejecución real, no solo leyendo el código) y se detiene.
+
+### Veredicto S2.2: NO APROBADO
+
+1. 383295 corregida: **NO** (causa raíz distinta a la atacada por este bloque).
+2. Todas las relajaciones de los 196+ casos correctas: **NO** (383295 sigue incorrecta; las otras 2 relajaciones encontradas en la revalidación -- guía 383620 y guía de control 462491 -- sí son correctas).
+3. 0 relajaciones incorrectas relevantes: **NO**.
+4. Vías de enriquecimiento de catálogo cubiertas: **SÍ**, para lo que le correspondía a este bloque.
+5. Suite completa verde: **SÍ** (730 passed).
+6. Producción intacta: **SÍ**.
+
+### Propuesta para el siguiente bloque (no numerado aquí -- fuera del alcance de "S2")
+
+Auditar con evidencia real las reglas de normalización hardcodeadas por subcadena en `atlas_core/extractor.py` (`normalizar_obra_destino`, `normalizar_cliente`, `buscar_cliente`) -- verificar si cada una sigue siendo válida (mismo problema exacto que ya se resolvió una vez para "SIGRO" en algún momento anterior podría estar generalizada incorrectamente hoy) y, si corresponde, exigir una señal de corroboración (RUT, código único) antes de aplicar la sustitución, en vez de un simple "contiene la subcadena X".
+
+---
+
+## 2026-08-11 — Cierre: ESTADOS S2.1 (validación de escala sobre corpus real) — NO APROBADO, defecto real encontrado, detenido para S2.2
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8029ee4546305511ac8ad641354fa2b3cc306423` (sin commit de ESTADOS S2 todavía). **Sin commit nuevo.**
+
+### Corpus real localizado
+
+- CSV masivo original (sha256 idéntico al del manifiesto de migración, `39237967e4…`): `G:\Mi unidad\MBT\Proyecto atlas\Proyecto-Atlas-main - copia de Claude\output\analisis_completo_guias.csv`.
+- **Corpus de imágenes real: `G:\Mi unidad\MBT\informe lunes\`** — 1172 archivos, coincidencia exacta de nombre con 1172/1177 filas del CSV masivo (99.6%; los 5 restantes: 3 archivos sin imagen localizada + 2 ya conocidos de otra ruta). `elementos_no_migrados_2026-07-28.md` confirma que las imágenes del corpus nunca se migraron a la instalación Desktop -- solo el CSV extraído sobrevivió ahí.
+
+### Procesamiento real y hallazgo decisivo
+
+- Se procesaron **150 documentos reales** de `informe lunes` con el código S2 (OCR real, PaddleOCR) -- se detuvo antes de completar el corpus completo porque el patrón ya era estadísticamente claro y, más importante, porque apareció un hallazgo que exige detenerse (ver abajo), no seguir acumulando muestra.
+- **Solo 4 relajaciones reales en total** (2 de la muestra de 46 de ESTADOS S2 + 2 de estos 150 nuevos) sobre 196 documentos reales evaluados -- tasa ~2%. A esa tasa, ni el corpus completo (1172) alcanzaría con margen las 30 relajaciones pedidas.
+- **De las 4 relajaciones, 3 se verificaron 100% correctas** contra la imagen real (464479, 464493, guía 383620 -- cliente/destino/chofer/RUT/patentes coinciden exactamente).
+- **1 de las 4 (guía 383295) resultó INCORRECTA**: `obra_destino` quedó como `"EMPRESA CONST SIGRO"` con `indicador_revision=OK` (sin ningún motivo), pero el campo `OBRA DESTINO` de la guía real está **en blanco** -- el valor viene de una vía completamente distinta a la recuperación geométrica que S2 audita.
+- **Causa raíz identificada:** `atlas_core/catalogos.py: enriquecer_datos_con_catalogos()` (mecanismo preexistente, anterior a ESTADOS S1/S2) busca el texto completo del documento contra el catálogo `destinos.json` (`_buscar_destino_en_textos`) y **sobrescribe `obra destino`/`cliente`/`chofer`/`patente` con el nombre canónico del catálogo si encuentra coincidencia -- sin pasar nunca por `_extraer_asociaciones_geometricas` ni por ninguna de las banderas que ESTADOS S2 audita** (`campos_geometricos_sin_corroborar`). Este documento en particular solo se volvió visible como "relajación" porque el fix del bug de variable obsoleta de `numero_guia_actual` (incluido en el mismo cambio de S2, ver abajo) dejó de forzar revisión por guía ausente -- exponiendo un problema de calidad preexistente que **ni el código viejo ni el nuevo S2 detectaban**.
+- **Efecto colateral identificado del propio cambio de S2:** al corregir `procesar_archivo()` para que `valores_clave` use el valor de `numero_guia` YA recuperado por el mecanismo contextual (antes usaba una variable obsolescente, pre-recuperación), documentos con guía recuperada por contexto dejan de forzar `GUIA_AUSENTE` -- correcto en sí mismo, pero como efecto secundario deja de "enmascarar" otros problemas de calidad no relacionados (como el de destino de este caso).
+
+### Decisión: NO corregir silenciosamente -- detener para ESTADOS S2.2
+
+Siguiendo la instrucción explícita de este bloque, no se intentó parchar `enriquecer_datos_con_catalogos()` ni la clasificación de destino bajo presión. Se documenta el hallazgo y se detiene aquí.
+
+### Veredicto S2.1: NO APROBADO
+
+1. Mínimo 30 relajaciones reales: **NO** (4/196, estructuralmente inalcanzable a esta tasa incluso con el corpus completo).
+2. 0 relajaciones incorrectas relevantes: **NO** (1/4 incorrecta, causa real identificada).
+3. Mínimo 15 revisiones conservadas legítimas: **SÍ** (15 revisadas, todas con motivo bloqueante real).
+4. Modelo método/calidad sostenido con evidencia: **parcial** -- sostenido para los métodos que sí audita (geometría de cliente/chofer/patente, fuzzy, homologación, consenso focal); **no cubre** el mecanismo de enriquecimiento por catálogo de `enriquecer_datos_con_catalogos()`, que puede alterar los mismos campos por una vía no auditada.
+5. Suite completa verde: **SÍ** (716 passed).
+6. Producción intacta: **SÍ**.
+
+### Propuesta para ESTADOS S2.2 (siguiente bloque, no implementado aquí)
+
+Extender el modelo de motivos/métodos de S2 para que también cubra `enriquecer_datos_con_catalogos()`: si esa función cambia `cliente`/`obra_destino`/`chofer`/`patente` respecto del valor que traía `datos` al entrar, debe registrar su propio método (`CATALOGO` o similar) y, si el cambio no está corroborado por una señal independiente equivalente a las ya usadas en S2, su propio motivo de revisión -- en vez de dejarlo completamente invisible al indicador de calidad, como ocurre hoy (antes y después de S2). Revisar además si `_buscar_destino_en_textos` debería exigir una correspondencia más estricta antes de sobrescribir un campo que en el documento real está vacío.
+
+---
+
+## 2026-08-11 — Cierre: ESTADOS S1 (diagnóstico) + ESTADOS S2 (separar calidad del dato de trazabilidad del método) — NO APROBADO (criterio de muestra), código y tests listos
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `8029ee4546305511ac8ad641354fa2b3cc306423` (cierre de O1.2). **Sin commit** (ver veredicto).
+
+### ESTADOS S1 — diagnóstico del desfase `indicador_revision` (sin cambios de código)
+
+- Auditoría completa en `estado_revision_eval/` (fuera del repo). Causa raíz identificada con evidencia de commit: `viajes.csv` productivo (574 viajes, 2026-07-28) se generó con una versión de `agrupar_viajes()` que **nunca propagaba** `indicador_revision` de documento a viaje -- el commit `cb6dad4` ("propagar revisión desde documentos a viajes") se hizo **un día después**. El CSV masivo actual (1177 documentos, 1033 REVISAR) refleja el motor de ~2026-08-06, que acumuló ~20 commits de recuperación geométrica/fuzzy entre medio, todos marcando REVISAR por el mero uso del método.
+- Matriz de 4 grupos: 442/730 documentos (60.5%) están `DOCUMENTO_REVISAR / VIAJE_CONFIRMADO` -- el grupo crítico. Muestra de 30: ~73% revisión legítima, ~27% sobremarcado técnico (recuperación correcta y corroborable, pero sin trazabilidad separada de la calidad del dato).
+- Conclusión: **C -- MEZCLA_DE_AMBOS**. Producción no tocada.
+
+### ESTADOS S2 — separar CALIDAD DEL DATO de TRAZABILIDAD DEL MÉTODO
+
+- **`atlas_core/procesamiento_masivo.py`:** nuevos `MetodoObtencionDocumento` (`GEOMETRICO`, `CONTEXTUAL`, `FUZZY`, `HOMOLOGADO`, `CORREGIDO`, `FOCAL` -- puramente informativo) y `MotivoRevisionDocumento` (`GUIA_AUSENTE`, `TRANSPORTE_AUSENTE`, `CLIENTE_AUSENTE`, `CHOFER_AUSENTE`, `DOCUMENTO_DEGRADADO`, `CLIENTE_SIN_CORROBORAR`, `CHOFER_SIN_CORROBORAR`, `OBRA_DESTINO_SIN_CORROBORAR`, `PATENTE_SIN_HOMOLOGAR`, `PATENTE_AMBIGUA`, `MATERIAL_AUSENTE` -- este último informativo/no bloqueante, mismo criterio ya establecido en Bloque O1 para peso/horas).
+- `procesar_archivo()` ya no colapsa el uso de un método en un único booleano: acumula `motivos_documento` (bloqueantes) y `metodos_documento` (trazabilidad) por separado. `indicador_revision` se deriva de si hay algún motivo bloqueante -- conserva exactamente su semántica REVISAR/OK de siempre (compatibilidad).
+- **Criterio de corroboración concreto, por campo** (ninguno relajado sin una segunda señal independiente):
+  - Patente: homologación `ALIAS`/`CORRECCION_OCR_SEGURA`/`COINCIDENCIA_EXACTA` contra catálogo -> corroborada, no fuerza revisión. Solo `AMBIGUO` fuerza `PATENTE_AMBIGUA`. Geométrica sin homologar -> `PATENTE_SIN_HOMOLOGAR`.
+  - Chofer: geométrico + RUT que coincide en catálogo, o fuzzy `COINCIDENCIA_SEGURA` (ya exige margen sobre el resto) -> corroborado. Geométrico sin ninguna de las dos -> `CHOFER_SIN_CORROBORAR`.
+  - Cliente: geométrico + RUT con dígito verificador válido (`validar_rut_chileno`) -> corroborado. Sin RUT válido -> `CLIENTE_SIN_CORROBORAR`.
+  - Número de guía (contextual), transporte (consenso focal), fecha (consenso focal): corroborados por diseño (exigen candidato único/consenso de >=2 lecturas concordantes) -- nunca fuerzan revisión por sí solos.
+  - Obra destino: **deliberadamente sin relajar** -- no existe hoy una señal de corroboración independiente equivalente al RUT de cliente; geométrico siempre fuerza `OBRA_DESTINO_SIN_CORROBORAR`. Queda como trabajo futuro explícito, no una omisión.
+  - Documento degradado (>=5/8 campos clave ausentes) y campos clave ausentes (guía/transporte/cliente/chofer): sin cambios, siguen forzando revisión -- son incertidumbre real, no trazabilidad de método.
+- **`atlas_core/gestor_viajes.py`: sin cambios de código.** `_documento_desde_fila()` ya copiaba toda la fila a `evidencia`, así que `motivos_revision_documento`/`metodos_recuperacion_documento` llegan intactos al viaje sin trabajo adicional (test de confirmación agregado).
+- **Columnas nuevas:** `motivos_revision_documento`, `metodos_recuperacion_documento` -- agregadas al final de `COLUMNAS` (backward-compatible).
+
+### Hallazgo relevante durante Fase I: las columnas `_fuente` del CSV legado no son un proxy confiable
+
+- Al intentar reclasificar los 1177 documentos existentes sin OCR (usando `cliente_fuente`/`obra_destino_fuente`/`chofer_fuente`, ya usadas en ESTADOS S1), se encontró que **129/144 documentos originalmente "OK" ya llevaban fuente `GEOMETRICO`/`CATALOGO_FUZZY`** -- contradice la premisa de que ese método forzaba REVISAR en la versión que generó ese CSV. Conclusión: esas columnas no reflejan de forma confiable qué causó el `indicador_revision` original en este dataset específico -- una reclasificación por columnas proxy sobre este CSV **no es confiable** y se documenta como tal (artefacto igual guardado en `estado_revision_eval/s2/`, con la limitación explícita).
+- **Validación real, confiable, en su lugar:** se reprocesaron con el código S2 real las 46 guías reales ya conocidas de bloques anteriores (30 de `datos_privados/muestra_fechas_30/` + 16 de O1/O1.1), comparando contra el mismo código SIN S2 (vía `git stash`). Resultado: **45 REVISAR / 1 OK (antes) -> 43 REVISAR / 3 OK (después)** -- solo 2 relajaciones reales disponibles localmente (`464479`, `464493`), ambas **verificadas visualmente contra la imagen real**: todos los campos (cliente, obra destino, chofer, RUT, patentes) coinciden exactamente. 0 relajaciones incorrectas. 15 casos REVISAR conservados revisados: todos con motivo bloqueante legítimo y real (ninguno se sostiene solo en `MATERIAL_AUSENTE`).
+- La razón de que el impacto real sea modesto (no las docenas esperadas): `OBRA_DESTINO_SIN_CORROBORAR` -- deliberadamente conservador, sin corroboración disponible -- resultó ser el motivo dominante en la práctica sobre este muestreo real, más que cliente/chofer/patente (que sí tienen corroboración y sí se relajan cuando aplica).
+
+### Tests
+
+- `tests/test_estados_s2.py` (nuevo, 8 tests -- los "casos reales obligatorios" pedidos: geometría corroborada, homologación SD6486->SB6486, chofer antes/después de catálogo, cliente ausente real, conflicto multiguía de patente, peso/hora sin forzar revisión, destino ambiguo sin corroborar).
+- 10 tests existentes actualizados (ya no esperan REVISAR donde la única causa era un método ahora corroborado o `MATERIAL_AUSENTE`) + 1 test nuevo de compatibilidad de columnas + 1 test nuevo en `tests/test_gestor_viajes.py` (motivos/métodos se preservan en `evidencia`).
+- Suite completa: **706 -> 716 passed**, 0 regresiones.
+
+### Veredicto: NO APROBADO (estrictamente, por criterio de muestra) -- implementación y tests listos
+
+Se cumplen 8/10 criterios de cierre obligatorios (calidad != método; motivos explícitos; recuperación corroborada no fuerza revisión; ambigüedad/ausencia/conflicto preservados; 0 relajaciones incorrectas; suite verde; producción intacta; 15 REVISAR conservados revisados). **No se cumple el mínimo de 30 relajaciones reales revisadas** (solo 2 disponibles localmente -- el corpus de 1177 documentos vive en Google Drive externo, no accesible en este entorno) **ni una reclasificación confiable de los 1177** (columnas proxy demostradas no confiables). Sin commit ni push -- código y tests quedan en el árbol de trabajo para revisión.
+
+---
+
 ## 2026-08-11 — Cierre: OPERACIÓN O1.1 (validación ciega, NO APROBADO) + O1.2 (corrección dirigida, APROBADO)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline previo:** `4822e9e1e31a9b7e42dbd4c887324bdbdf777159` (cierre de O1)

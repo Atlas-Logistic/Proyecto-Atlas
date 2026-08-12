@@ -385,3 +385,25 @@ def test_conflicto_y_documento_revisar_coexisten():
     assert viaje.estado == EstadoViaje.REQUIERE_REVISION
     assert MotivoRevision.CONFLICTO_CHOFER in viaje.motivos_revision
     assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION in viaje.motivos_revision
+
+
+def test_motivos_y_metodos_estados_s2_se_preservan_en_evidencia_del_documento():
+    """Bloque ESTADOS S2 (Fase G): `agrupar_viajes` no necesita cambios de
+    código para preservar los motivos/métodos explícitos del documento --
+    `_documento_desde_fila` ya copia toda la fila a `evidencia`, así que
+    `motivos_revision_documento`/`metodos_recuperacion_documento` (si el
+    CSV de origen los trae) llegan intactos hasta el viaje, trazables por
+    documento, sin perderse ni colapsarse en el booleano agregado."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            indicador_revision="REVISAR",
+            motivos_revision_documento="CHOFER_SIN_CORROBORAR",
+            metodos_recuperacion_documento="GEOMETRICO",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION in viaje.motivos_revision
+    assert viaje.documentos[0].evidencia["motivos_revision_documento"] == "CHOFER_SIN_CORROBORAR"
+    assert viaje.documentos[0].evidencia["metodos_recuperacion_documento"] == "GEOMETRICO"
