@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — PATENTES P4: el bug no era el OCR, era la asociación geométrica -- y aparece un segundo caso real de Renca-que-era-Colina, si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: ORIGEN O2 (`3b3189c`).
+- **464631 quedó resuelto de punta a punta:** tracto DD2494, rampla JB8529, RUT del chofer, y con la patente disponible la telemetría GPS confirma AZA COLINA -- coincide con Javier y el chofer. La causa real de la pérdida no era el OCR (PaddleOCR leyó DD2494/JB8529 perfectamente bien) sino que el extractor "geométrico" de patentes no era realmente geométrico -- concatenaba texto y se abstenía por ambigüedad ante cualquier segundo token de 6 caracteres en la zona, sin mirar la distancia real a la etiqueta. Reescrito para asociar cada etiqueta a su valor por posición real, igual que el resto de los extractores del archivo.
+- **Dos variantes reales de error de OCR quedaron cubiertas de forma general** (no hardcodeadas a esta guía): la etiqueta CARRO leída "CARR0" (cero por O), y la etiqueta RETIRA leída "RETRA" (falta la "I") -- esta última bloqueaba TODA la zona de extracción, no solo el CARRO.
+- **Al revisar la tanda reciente por el mismo patrón, apareció un segundo caso real con el mismo problema de fondo:** la guía 464550 (patente BPHR67, perfectamente legible) tenía el bug de "RETRA". Al recuperarla, la telemetría corrió por primera vez para esa guía (antes nunca se activaba porque la patente estaba vacía) y **también confirma AZA COLINA, no AZA RENCA** como mostraba el documento -- con evidencia GPS fuerte (101 min de detención real dentro de la ventana horaria completa de la guía). No se buscó activamente más -- se revisaron las 6 guías de la tanda con patente ausente, esta fue la única con el mismo patrón estructural; las otras 5 genuinamente no imprimen rampla.
+- **Esto refuerza, con un segundo caso independiente, el hallazgo abierto del bloque anterior (ORIGEN O2):** cada vez que se revisa con cuidado un documento que el pipeline daba por "AZA RENCA" solo porque no se pudo confirmar nada más, termina siendo AZA COLINA con evidencia GPS real. La pregunta abierta de si AZA RENCA necesita su propio polígono, o si esta operación real genuinamente no está cargando ahí, sigue sin resolverse -- cada bloque nuevo suma evidencia a favor de investigarlo pronto con Javier.
+- **Separación que se mantiene:** ninguna geocerca se tocó en este bloque -- la corrección es enteramente de extracción de datos (OCR/geometría) y de habilitar la telemetría que ya existía, no de geografía.
+- **Próximo paso natural:** el mismo del bloque anterior -- conversar con Javier sobre AZA RENCA, idealmente con un caso confirmado por él como control positivo real.
+
+---
+
 ## 2026-08-12 — ORIGEN O2: 464424 resuelto, y un hallazgo grande sobre AZA Renca que necesita conversación con Javier -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `e7f5a82` (PLANTAS P3).

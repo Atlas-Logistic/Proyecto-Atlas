@@ -79,6 +79,19 @@ def _es_etiqueta_rut(texto_simple: str) -> bool:
     return bool(re.fullmatch(r"R\.?U\.?T\.?", texto_simple))
 
 
+_PATRON_ANCLA_RETIRA = re.compile(r"^RETI?RA\b")
+
+
+def _es_ancla_retira(texto_colapsado: str) -> bool:
+    """True cuando el bloque (ya colapsado a mayúsculas sin puntuación
+    interna) ES la etiqueta RETIRA, o RETIRA seguida de su valor pegado en
+    el mismo bloque -- tolerante a que el OCR omita la "I" (caso real guía
+    464550: "RETIRA" leído "RETRA"). No es una búsqueda de subcadena: exige
+    que el bloque EMPIECE por RET(I)RA, igual de estricto que antes, solo
+    con esta única variante conocida contemplada."""
+    return bool(_PATRON_ANCLA_RETIRA.match(texto_colapsado))
+
+
 def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
     """Convierte cajas OCR válidas en una representación geométrica estable."""
     items = []
@@ -675,7 +688,7 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     )
 
     def es_retiro(item: Dict[str, Any]) -> bool:
-        return item["simple"] == "RETIRA"
+        return _es_ancla_retira(item["simple"])
 
     def es_contexto(item: Dict[str, Any]) -> bool:
         return item["simple"] in {"PATENTE", "RUT CHOFER"}
@@ -953,15 +966,96 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     return {"valor": mejor}
 
 
-def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
-    """Localiza patente(s) de tracto y carro/rampla en la zona geométrica
-    RETIRA-FECHA LLEGADA, tolerante al orden de bloques que produce PaddleOCR.
+_ETIQUETAS_PATENTE_TRACTO = ("PATENTE", "TRACTO")
+_ETIQUETAS_PATENTE_CARRO = ("CARRO", "RAMPLA", "REMOLQUE")
+_ETIQUETAS_PATENTE_TODAS = _ETIQUETAS_PATENTE_TRACTO + _ETIQUETAS_PATENTE_CARRO
 
-    No corrige el valor OCR leído (p. ej. una B leída como D): solo recupera
-    el valor disponible en la zona en vez de dejarlo en "No encontrado". Se
-    abstiene si no hay ancla RETIRA, si un candidato queda fuera de la zona
-    RETIRA-FECHA LLEGADA, o si hay dos candidatos válidos ambiguos para el
-    mismo campo (no adivina eligiendo el primero por orden OCR).
+
+def _tolerante_o_cero(texto: str) -> str:
+    """Normaliza SOLO para reconocer si un token ES una etiqueta de patente
+    conocida (PATENTE/TRACTO/CARRO/RAMPLA/REMOLQUE) -- el OCR confunde con
+    frecuencia la letra O con el dígito 0 dentro de una palabra (caso real
+    guía 464631: "CARRO" leído "CARR0"). Nunca se usa para interpretar el
+    VALOR de una patente (eso sigue viviendo en `_normalizar_patente`), solo
+    para decidir si un bloque/tramo de texto ES una de estas etiquetas."""
+    return texto.replace("0", "O")
+
+
+def _es_etiqueta_patente(texto_simple: str, etiquetas: tuple[str, ...]) -> bool:
+    """True solo cuando el bloque COMPLETO (no una subcadena) es alguna de
+    las etiquetas dadas, tolerante a la confusión O/0 del OCR."""
+    texto = re.sub(r"[.,:;]", " ", texto_simple)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return _tolerante_o_cero(texto) in etiquetas
+
+
+def _valor_tras_etiqueta_en_bloque(texto: str, etiquetas: tuple[str, ...]) -> Optional[str]:
+    """Busca, DENTRO de un único bloque OCR (nunca concatenando bloques
+    vecinos ni dependiendo de su orden), un patrón "ETIQUETA[:] VALOR" con
+    VALOR de 6 caracteres compatible con patente inmediatamente después de
+    la etiqueta -- caso real guía 464631: PaddleOCR fusionó en un solo
+    bloque ": DD2494 CARR0:JB8529" (el valor de PATENTE seguido, sin
+    separación, del par CARRO:valor). Tolerante a la confusión O/0 del OCR
+    dentro de la propia etiqueta."""
+    texto_tolerante = _tolerante_o_cero(texto)
+    patron = re.compile(r"\b(?:" + "|".join(re.escape(e) for e in etiquetas) + r")\b")
+    coincidencia = patron.search(texto_tolerante)
+    if not coincidencia:
+        return None
+    resto = texto[coincidencia.end():].lstrip(" :;,-.")
+    valor = re.match(r"([A-Z0-9]{6})\b", resto)
+    if valor and _patente_valida(valor.group(1)):
+        return valor.group(1)
+    return None
+
+
+def _valor_unico_residual(texto: str) -> Optional[str]:
+    """Dentro de un bloque de VALOR ya asociado geométricamente a su
+    etiqueta, remueve cualquier segundo par "ETIQUETA:VALOR" (de cualquier
+    campo de patente) que pudiera venir fusionado en el mismo bloque OCR, y
+    devuelve el único token de 6 caracteres compatible con patente que
+    quede. Se abstiene si no queda ninguno o si queda más de uno -- nunca
+    elige por orden de aparición."""
+    texto_tolerante = _tolerante_o_cero(texto)
+    patron = re.compile(
+        r"\b(?:" + "|".join(re.escape(e) for e in _ETIQUETAS_PATENTE_TODAS) + r")\b\s*:?\s*[A-Z0-9]{6}\b"
+    )
+    recortes = [(m.start(), m.end()) for m in patron.finditer(texto_tolerante)]
+    texto_residual = texto
+    for inicio, fin in reversed(recortes):
+        texto_residual = texto_residual[:inicio] + " " + texto_residual[fin:]
+    candidatos = {
+        coincidencia.group(0)
+        for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", texto_residual)
+        if _patente_valida(coincidencia.group(0))
+    }
+    if len(candidatos) == 1:
+        return next(iter(candidatos))
+    return None
+
+
+def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza patente(s) de tracto y carro/rampla/remolque en la zona
+    geométrica RETIRA-FECHA LLEGADA, asociando cada etiqueta (PATENTE/
+    TRACTO, CARRO/RAMPLA/REMOLQUE) a su valor por geometría real -- nunca
+    por el orden en que PaddleOCR concatena los bloques de la zona (Bloque
+    PATENTES P4: el algoritmo anterior buscaba CUALQUIER token de 6
+    caracteres suelto en todo el texto concatenado de la zona, y se
+    abstenía por "ambigüedad" tan pronto había dos, sin considerar cuál
+    estaba realmente junto a su etiqueta -- caso real guía 464631, donde
+    además la etiqueta CARRO fue leída "CARR0").
+
+    Primero intenta un par "ETIQUETA:VALOR" fusionado dentro de un único
+    bloque OCR (ver `_valor_tras_etiqueta_en_bloque`); si la etiqueta y su
+    valor llegaron en bloques separados, cae a asociación geométrica real
+    (bloque etiqueta -> bloque valor más cercano, misma fila a la derecha o
+    alineado debajo -- mismo criterio que el resto de los extractores
+    geométricos de este módulo). No corrige el valor OCR leído (p. ej. una
+    B leída como D): solo recupera el valor disponible. Se abstiene si no
+    hay ancla RETIRA, si el único candidato queda fuera de la zona
+    RETIRA-FECHA LLEGADA, o si dos candidatos quedan igual de cerca de la
+    misma etiqueta (ambigüedad geométrica real, no "existe otro token de 6
+    caracteres en algún lugar de la zona").
     """
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
@@ -971,15 +1065,11 @@ def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         texto = re.sub(r"[.,:;]", " ", item["simple"])
         return re.sub(r"\s+", " ", texto).strip()
 
-    def es_retira(item: Dict[str, Any]) -> bool:
-        texto = _texto_colapsado(item)
-        return texto == "RETIRA" or texto.startswith("RETIRA ")
-
     def es_llegada(item: Dict[str, Any]) -> bool:
         texto = _texto_colapsado(item)
         return bool(re.fullmatch(r"FECHA LLEGADA", texto)) or texto == "LLEGADA"
 
-    anclas_inicio = [item for item in items if es_retira(item)]
+    anclas_inicio = [item for item in items if _es_ancla_retira(_texto_colapsado(item))]
     if not anclas_inicio:
         return {}
     y_inicio = min(item["y1"] for item in anclas_inicio)
@@ -992,31 +1082,153 @@ def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     if not zona:
         return {}
 
-    texto_zona = " ".join(item["simple"] for item in zona)
+    def candidatos_inline(etiquetas: tuple[str, ...]) -> set[str]:
+        return {
+            valor
+            for item in zona
+            for valor in (_valor_tras_etiqueta_en_bloque(item["simple"], etiquetas),)
+            if valor
+        }
 
-    patron_carro = re.compile(r"\b(?:CARRO|RAMPLA)\s*:?\s*([A-Z0-9]{6})\b")
-    carro_valores = {
-        coincidencia.group(1)
-        for coincidencia in patron_carro.finditer(texto_zona)
-        if _patente_valida(coincidencia.group(1))
-    }
+    def resolver_por_geometria(etiquetas: tuple[str, ...], etiquetas_rivales: tuple[str, ...]) -> Optional[str]:
+        etiquetas_items = [item for item in zona if _es_etiqueta_patente(item["simple"], etiquetas)]
+        if not etiquetas_items:
+            return None
+        rivales_items = [item for item in zona if _es_etiqueta_patente(item["simple"], etiquetas_rivales)]
 
-    texto_sin_carro = patron_carro.sub(" ", texto_zona)
-    texto_sin_carro = re.sub(r"\b(RETIRA|PATENTE|FECHA|LLEGADA)\b", " ", texto_sin_carro)
-    tracto_valores = {
-        coincidencia.group(0)
-        for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", texto_sin_carro)
-        if _patente_valida(coincidencia.group(0))
-    }
+        def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+            alto = max(etiqueta["h"], candidato["h"])
+            diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+            if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+                brecha = max(0.0, candidato["x1"] - etiqueta["x2"])
+                if brecha <= 260:
+                    return brecha / 260 + diferencia_y / (alto * 8)
+            diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+            if abs(candidato["cx"] - etiqueta["cx"]) <= 170 and 0 < diferencia_vertical <= 60:
+                return 0.30 + diferencia_vertical / 150
+            return None
+
+        decisiones = []
+        for etiqueta in etiquetas_items:
+            for candidato in zona:
+                if candidato is etiqueta or _es_etiqueta_patente(candidato["simple"], _ETIQUETAS_PATENTE_TODAS):
+                    continue
+                puntuacion = puntuar(etiqueta, candidato)
+                if puntuacion is None:
+                    continue
+                # No atraviesa una etiqueta rival: si este candidato está
+                # geométricamente más cerca de la etiqueta del OTRO campo
+                # (p. ej. CARRO/RAMPLA cuando se busca TRACTO), pertenece a
+                # ese otro campo, no a este -- caso real: PATENTE sin valor
+                # propio junto a RAMPLA con su valor, ambos en la misma
+                # zona (ver test_rampla_unica_geometrica_acepta_etiquetas_sinonimas).
+                if rivales_items:
+                    distancia_propia = abs(candidato["cx"] - etiqueta["cx"]) + abs(candidato["cy"] - etiqueta["cy"])
+                    distancia_rival = min(
+                        abs(candidato["cx"] - rival["cx"]) + abs(candidato["cy"] - rival["cy"])
+                        for rival in rivales_items
+                    )
+                    if distancia_rival + 8 < distancia_propia:
+                        continue
+                valor = _valor_unico_residual(candidato["simple"])
+                if valor is None:
+                    continue
+                decisiones.append((puntuacion, candidato["y1"], candidato["x1"], valor))
+
+        if not decisiones:
+            return None
+        decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1], decision[2]))
+        mejor = decisiones[0]
+        if any(
+            abs(decision[0] - mejor[0]) <= 0.06 and decision[3] != mejor[3]
+            for decision in decisiones[1:]
+        ):
+            return None
+        return mejor[3]
 
     resultado: Dict[str, Any] = {}
-    if len(tracto_valores) == 1:
-        resultado["tracto"] = next(iter(tracto_valores))
-    if len(carro_valores) == 1:
-        carro = next(iter(carro_valores))
+
+    tracto_inline = candidatos_inline(_ETIQUETAS_PATENTE_TRACTO)
+    if len(tracto_inline) == 1:
+        resultado["tracto"] = next(iter(tracto_inline))
+    elif not tracto_inline:
+        candidato = resolver_por_geometria(_ETIQUETAS_PATENTE_TRACTO, _ETIQUETAS_PATENTE_CARRO)
+        if candidato:
+            resultado["tracto"] = candidato
+
+    carro_inline = candidatos_inline(_ETIQUETAS_PATENTE_CARRO)
+    if len(carro_inline) == 1:
+        carro = next(iter(carro_inline))
         if carro != resultado.get("tracto"):
             resultado["carro"] = carro
+    elif not carro_inline:
+        candidato = resolver_por_geometria(_ETIQUETAS_PATENTE_CARRO, _ETIQUETAS_PATENTE_TRACTO)
+        if candidato and candidato != resultado.get("tracto"):
+            resultado["carro"] = candidato
+
     return resultado
+
+
+def _extraer_rut_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Localiza el RUT del chofer por geometría, junto a la etiqueta RUT
+    CHOFER -- no depende del orden lineal del OCR (caso real guía 464631,
+    Bloque PATENTES P4: el layout de dos columnas hace que, en el texto
+    lineal, el valor de RUT CHOFER quede pegado a la etiqueta DESPACHAR A
+    de la fila anterior, mientras que la propia etiqueta RUT CHOFER queda
+    seguida, en el texto lineal, por FECHA LLEGADA -- el mismo patrón de
+    columnas intercaladas ya conocido para DESPACHAR A, ver
+    `_despachar_a_lineal_contaminado`). Solo acepta un candidato con
+    formato de RUT chileno y dígito verificador válido, único en la zona
+    -- se abstiene ante ausencia o ambigüedad, nunca inventa un RUT."""
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    def es_etiqueta(item: Dict[str, Any]) -> bool:
+        texto = re.sub(r"[.,:;]", " ", item["simple"])
+        texto = re.sub(r"\s+", " ", texto).strip()
+        return texto == "RUT CHOFER"
+
+    def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
+        alto = max(etiqueta["h"], candidato["h"])
+        diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+            brecha = max(0.0, candidato["x1"] - etiqueta["x2"])
+            if brecha <= 300:
+                return brecha / 300 + diferencia_y / (alto * 8)
+        diferencia_vertical = candidato["y1"] - etiqueta["y2"]
+        if abs(candidato["cx"] - etiqueta["cx"]) <= 190 and 0 < diferencia_vertical <= 70:
+            return 0.30 + diferencia_vertical / 175
+        return None
+
+    etiquetas = [item for item in items if es_etiqueta(item)]
+    if not etiquetas:
+        return {}
+
+    decisiones = []
+    for etiqueta in etiquetas:
+        for candidato in items:
+            if candidato is etiqueta:
+                continue
+            puntuacion = puntuar(etiqueta, candidato)
+            if puntuacion is None:
+                continue
+            texto_candidato = re.sub(r"^[:\s]+", "", candidato["texto"]).strip()
+            resultado_rut = validar_rut_chileno(texto_candidato)
+            if resultado_rut.estado != EstadoValidacion.VALIDO:
+                continue
+            decisiones.append((puntuacion, candidato["y1"], candidato["x1"], resultado_rut.valor))
+
+    if not decisiones:
+        return {}
+    decisiones.sort(key=lambda decision: (round(decision[0], 6), decision[1], decision[2]))
+    mejor = decisiones[0]
+    if any(
+        abs(decision[0] - mejor[0]) <= 0.06 and decision[3] != mejor[3]
+        for decision in decisiones[1:]
+    ):
+        return {}
+    return {"valor": mejor[3]}
 
 
 def extraer_datos(

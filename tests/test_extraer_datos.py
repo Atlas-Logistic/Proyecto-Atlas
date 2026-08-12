@@ -955,7 +955,17 @@ def test_patentes_candidato_fuera_de_zona_retira_llegada_se_rechaza():
     assert _extraer_patentes_geometrico(bloques) == {}
 
 
-def test_patentes_dos_candidatos_ambiguos_se_abstiene():
+def test_patentes_candidato_lejano_ya_no_bloquea_al_mas_cercano():
+    """Bloque PATENTES P4 -- reescribe la expectativa anterior. El
+    algoritmo previo concatenaba toda la zona RETIRA-FECHA LLEGADA en un
+    solo texto y trataba CUALQUIER segundo token de 6 caracteres como
+    ambigüedad, sin importar su distancia real a la etiqueta -- por eso
+    esta prueba antes esperaba abstención. El algoritmo geométrico actual
+    asocia cada etiqueta a su candidato más cercano: AB1234 está pegado a
+    PATENTE, CD5678 está mucho más lejos en el mismo renglón -- ya no hay
+    ambigüedad real, y CD5678 lejano no debe bloquear el hallazgo (ver
+    `test_patentes_dos_etiquetas_con_valores_igual_de_cercanos_se_abstiene`
+    en tests/test_patentes_p4.py para el caso de ambigüedad genuina)."""
     bloques = [
         _bloque("RETIRA", 20, 20, 60),
         _bloque("PATENTE", 20, 50, 70),
@@ -964,7 +974,7 @@ def test_patentes_dos_candidatos_ambiguos_se_abstiene():
         _bloque("FECHA LLEGADA", 20, 80, 120),
     ]
 
-    assert _extraer_patentes_geometrico(bloques) == {}
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "AB1234"}
 
 
 def test_patentes_solo_tracto_disponible():

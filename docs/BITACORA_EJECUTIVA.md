@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — PATENTES P4: una patente perfectamente legible se estaba perdiendo por un bug de asociación, no de OCR -- y aparece otro caso real de Renca-que-era-Colina
+
+- **El diagnóstico de Javier era correcto y el nuestro estaba equivocado:** la guía 464631 mostraba "patente ausente" pese a que DD2494/JB8529 están impresos con total claridad. PaddleOCR SÍ los leyó bien -- el problema era que el extractor "geométrico" de patentes en realidad no era geométrico: concatenaba todo el texto de la zona en una sola cadena y buscaba por regex, así que cualquier segundo texto de 6 caracteres en la zona (aunque estuviera lejos de la etiqueta PATENTE) producía una abstención total por "ambigüedad". Se reescribió para asociar cada etiqueta a su valor por posición real en la imagen, igual que ya hacían el resto de los extractores del documento.
+- **Dos variantes reales de error de OCR, ahora toleradas de forma general (no solo para esta guía):** la etiqueta CARRO se leyó "CARR0" (cero por O) en 464631, y la etiqueta RETIRA se leyó "RETRA" (falta la "I") en otra guía de la misma tanda (464550) -- ambas bloqueaban toda la extracción antes de este fix. También se agregó recuperación geométrica del RUT del chofer, que se perdía por el mismo motivo que ya se había corregido para DESPACHAR A en un bloque anterior (columnas del documento intercaladas por el orden de lectura del OCR).
+- **464631 ya está resuelto correctamente:** tracto DD2494, rampla JB8529, RUT del chofer recuperado -- y con la patente disponible, la telemetría GPS pudo correr y confirma **AZA COLINA**, coincidiendo con lo que Javier y el chofer ya sabían.
+- **Al revisar la misma tanda reciente por el mismo patrón (sin reprocesar histórico), apareció un segundo caso real con el mismo problema de fondo:** la guía 464550 tampoco tenía patente (BPHR67, perfectamente legible) por el bug de "RETRA". Al recuperarla, la telemetría también pudo correr por primera vez para esa guía -- y **también confirma AZA COLINA**, no AZA RENCA como mostraba el documento. Ninguna de las dos correcciones fue forzada: ambas se confirmaron con evidencia GPS real, con la misma lógica de ventana horaria del bloque anterior.
+- Suite completa: 872 tests (11 nuevos), sin regresiones de código -- 4 tests existentes se ajustaron mecánicamente para incluir un campo (RUT del chofer) que antes no formaba parte de sus datos de prueba.
+
+---
+
 ## 2026-08-12 — ORIGEN O2: la planta se determina por dónde estuvo cargando, no por dónde pasó -- y aparece un hallazgo mayor sobre AZA Renca
 
 - **La pregunta correcta, ya resuelta en código:** Atlas ya no pregunta "¿qué plantas visitó este camión hoy?" -- pregunta "¿en qué planta estuvo cargando durante la ventana de horas de ESTA guía?". Un camión puede pasar cerca de dos plantas en un mismo día; solo la que coincide en el tiempo con la carga cuenta como evidencia real. **464424 (el caso más difícil, señalado por Javier) ya muestra AZA COLINA** -- se encontró que el camión hizo una parada real de 48 minutos en Colina justo durante la ventana de la guía, mientras que su cercanía a Renca esa mañana fue solo un cruce a más de 60 km/h por la carretera, nunca una detención real.

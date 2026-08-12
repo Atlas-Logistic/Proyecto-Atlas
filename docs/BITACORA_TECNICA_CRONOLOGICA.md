@@ -4,6 +4,72 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: PATENTES P4 (recuperar patente/remolque por geometría real + revalidar 464631)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** posterior a ORIGEN O2 (`3b3189c`).
+
+### Fase A -- traza real sobre la imagen 464631 (PaddleOCR, sin mocks)
+
+Bloques OCR reales relevantes:
+- `'PATENTE'` (bloque propio) seguido, en la misma fila, del bloque `': DD2494 CARR0:JB8529'` -- valor de PATENTE y el par CARRO:valor fusionados en un solo bloque, con la etiqueta CARRO leída **"CARR0"** (cero por O).
+- `'RUT CHOFER'` (bloque propio, columna izquierda) mientras que su valor real `':14293816-2'` aparece en el texto lineal pegado a `'DESPACHAR A'` (la etiqueta de la fila anterior) -- el mismo patrón de columnas intercaladas por orden de lectura de PaddleOCR ya documentado para DESPACHAR A en OPERACIÓN REAL R1 (`_despachar_a_lineal_contaminado`).
+
+`extraer_datos()` (la vía lineal, `buscar_chofer_y_patentes()`) exige el substring literal `"RETIRA PATENTE FECHA LLEGADA"` contiguo -- nunca aparece en un layout de dos columnas, así que la vía lineal siempre devuelve `(None, None, None)` para este tipo de documento. La causa real de la pérdida estaba en el fallback "geométrico" (`_extraer_patentes_geometrico`), que pese a su nombre no asociaba etiqueta→valor por posición: concatenaba TODO el texto de la zona RETIRA-FECHA LLEGADA en una sola cadena y buscaba por regex sobre esa cadena. Con `CARRO` leído `CARR0`, el patrón de CARRO nunca matcheaba; al buscar luego cualquier token suelto de 6 caracteres válido como patente en el resto de la zona, encontraba DOS (`DD2494` y `JB8529`, éste liberado por la falla del patrón de CARRO) y se abstenía por "ambigüedad" -- perdiendo ambas patentes.
+
+### Fase B/C -- reescritura de `_extraer_patentes_geometrico` (`atlas_core/extractor.py`)
+
+Nuevo diseño en dos pasos, sin hardcodear ningún valor:
+1. **Inline por bloque** (`_valor_tras_etiqueta_en_bloque`): busca, DENTRO de un único bloque OCR, `ETIQUETA[:] VALOR` de 6 caracteres -- cubre el caso real (label+valor fusionados). Tolerante a confusión O/0 en la ETIQUETA vía `_tolerante_o_cero` (nunca en el valor).
+2. **Fallback geométrico** (`resolver_por_geometria`): si no hay match inline, busca un bloque-etiqueta (`PATENTE`/`TRACTO`/`CARRO`/`RAMPLA`/`REMOLQUE`, comparación de bloque completo tolerante a O/0 vía `_es_etiqueta_patente`) y asocia por proximidad real (misma fila a la derecha, o alineado debajo -- mismo criterio que `_extraer_chofer_geometrico`/`_extraer_transporte_geometrico`) a su valor, excluyendo candidatos más cercanos a la etiqueta RIVAL (TRACTO vs CARRO) para que un valor sin etiqueta propia adyacente no se filtre al campo equivocado.
+3. `_valor_unico_residual`: dentro de un bloque de valor ya asociado, remueve cualquier segundo par `ETIQUETA:VALOR` embebido (p. ej. el `CARRO:JB8529` que viene pegado al valor de PATENTE) y exige que quede exactamente un token de 6 caracteres válido -- se abstiene si queda más de uno.
+4. Ambigüedad real ahora se mide por MARGEN DE SCORE entre candidatos de la MISMA etiqueta (margen 0.06, mismo patrón que el resto del archivo) -- un segundo token válido en la zona que esté claramente más lejos de la etiqueta ya NO bloquea el hallazgo (comportamiento anterior, ver test actualizado `test_patentes_candidato_lejano_ya_no_bloquea_al_mas_cercano`).
+
+**Bug real encontrado durante la implementación** (no en el plan original): el fallback geométrico de TRACTO, al no conocer las etiquetas de CARRO, podía adoptar por descarte el valor de un CARRO/RAMPLA sin candidato propio de TRACTO cerca. Corregido excluyendo explícitamente cualquier candidato geométricamente más cercano a una etiqueta rival (ver `resolver_por_geometria(etiquetas, etiquetas_rivales)`).
+
+**Ancla RETIRA tolerante** (`_es_ancla_retira`, patrón `RETI?RA`): guía real 464550 de la misma tanda, etiqueta RETIRA leída "RETRA" (falta la "I") -- sin esta tolerancia, la zona nunca se delimitaba y la función abortaba antes de llegar a evaluar PATENTE/CARRO, aunque la patente (BPHR67) estuviera perfectamente legible y geométricamente asociada.
+
+### Fase E -- RUT del chofer por geometría (`_extraer_rut_chofer_geometrico`, nuevo)
+
+Mismo patrón que `_extraer_rut_cliente_geometrico`: ancla en el bloque `RUT CHOFER` (bloque completo, sin subcadena), asocia por proximidad (misma fila a la derecha o alineado debajo), exige `validar_rut_chileno` con dígito verificador correcto, se abstiene ante ambigüedad. Cablea en `procesamiento_masivo.py`: se agregó `"RUT del chofer"` a la condición `campos_ausentes` que dispara la lectura de bloques geométricos, y una llamada nueva junto al resto de recuperaciones geométricas (cliente, chofer, transporte).
+
+### Fase D -- homologación (sin cambios de código, verificado)
+
+`DD2494`/`JB8529`/`BPHR67` ya existen en el catálogo real de vehículos (`vehiculos.json`) con el tipo correcto -- homologan a `COINCIDENCIA_EXACTA`, sin motivo `PATENTE_SIN_HOMOLOGAR`. El mecanismo que preserva un valor legible pero no homologado (motivo `PATENTE_SIN_HOMOLOGAR`, nunca "No encontrado") ya existía desde P2 y no requirió cambios -- se agregó un test dedicado (`test_patente_geometrica_sin_homologar_se_conserva_con_motivo`) para dejarlo cubierto explícitamente en este bloque.
+
+### Fase F -- 464631, cronología real (Onelogis, cache real)
+
+Consulta en vivo a Onelogis (bypaseando caché) confirma que la caché NO estaba desactualizada: DD2494 tiene únicamente 2 trips registrados el 11-08-2026, el último terminando a las 10:26:56 -- casi 3 horas antes de la ventana documental (13:10-13:52). Ese último trip incluye una detención real (velocidad 0 en ambos extremos, 10:20:23-10:26:56) dentro del polígono de AZA COLINA; no hay ningún trip ni evidencia de AZA RENCA ese día. `resolver_planta_origen_gps` confirma AZA COLINA como única candidata (`score=0.0` porque la detención no solapa la ventana documental -- regla de "candidato único confirma" de O2, Fase D). Se documenta explícitamente: la cobertura GPS no cubre la ventana exacta de carga, pero es la única evidencia existente y coincide con el terreno confirmado por Javier/chofer.
+
+### Fase G -- ruta
+
+Origen AZA COLINA + destino SANTA ISABEL 585 LAMPA (ya geocodificado) → recalculada con OpenRouteService: 7.49 km / 13.48 min, `RUTA_CALCULADA` (antes: sin resolver, origen documental era AZA RENCA).
+
+### Fase H -- regresión en tanda reciente
+
+Se revisaron visualmente y por extracción las 6 guías de la misma tanda con patente/rampla ausente (`464534`, `464535`, `464550`, `464588`, `464624`, `463594`). Cinco de seis no cambian (ya recuperaban tracto correctamente vía geometría, sin CARRO/RAMPLA visible en el documento -- no es un bug, esos camiones no imprimen rampla). **464550 sí tenía el mismo patrón** (`RETIRA` leído `RETRA`, bloqueando toda la zona) con `BPHR67` claramente impreso -- confirmado visualmente en la imagen real. Al recuperar la patente, la telemetría (antes nunca gateada, `_patente_valida` fallaba con `"No encontrado"`) corrió por primera vez para esta guía: confirma **AZA COLINA** con score alto (0.767, 100% de solape con la ventana documental, 101 min de detención real dentro de la ventana completa) -- reemplaza el fallback documental (`AZA RENCA`, encabezado). Ruta recalculada: 27.75 km / 38.51 min.
+
+### Archivos modificados
+
+- `atlas_core/extractor.py`: `_extraer_patentes_geometrico` reescrito; `_extraer_rut_chofer_geometrico` (nuevo); helpers `_es_ancla_retira`, `_es_etiqueta_patente`, `_valor_tras_etiqueta_en_bloque`, `_valor_unico_residual`, `_tolerante_o_cero`.
+- `atlas_core/procesamiento_masivo.py`: import de `_extraer_rut_chofer_geometrico`; `campos_ausentes` incluye `"RUT del chofer"`; llamada de recuperación geométrica de RUT del chofer.
+- `tests/test_patentes_p4.py` (nuevo, 15 tests incluyendo parametrizados): items 1-10 del bloque (patente junto a RETIRA, CARRO junto a PATENTE, orden intercalado RUT chofer, patente única, rampla única con etiquetas sinónimas, valor sin homologar conservado, ambigüedad real, regresión estructural 464631, patente habilita telemetría, planta GPS reemplaza fallback documental).
+- `tests/test_extraer_datos.py`: `test_patentes_dos_candidatos_ambiguos_se_abstiene` reescrito como `test_patentes_candidato_lejano_ya_no_bloquea_al_mas_cercano` (el algoritmo anterior trataba cualquier segundo token de 6 caracteres en la zona como ambigüedad sin medir distancia real; el nuevo no).
+- `tests/test_procesamiento_masivo.py`: 4 tests existentes actualizados mecánicamente (`_datos_lineales_completos` y 2 diccionarios inline) para incluir `"RUT del chofer"` -- antes ausente del diccionario de prueba, ahora forma parte de `campos_ausentes`.
+
+### Tests y regresión
+
+12 tests nuevos (más 3 variantes parametrizadas) en `test_patentes_p4.py`, 1 reescrito en `test_extraer_datos.py`. Suite completa: **872 passed** (861 antes + 11 netos). 0 regresiones de comportamiento -- los 4 ajustes en `test_procesamiento_masivo.py` son mecánicos (campo faltante en fixture, no en código).
+
+### Reproceso operacional
+
+Backup: `output/_respaldos_reprocesamiento/analisis_completo_guias_PRE_P4_20260812_185912.csv`. Reproceso quirúrgico de únicamente las 2 filas afectadas (`464631.jpeg`, `464550.jpeg`) vía `procesar_archivo()` real (PaddleOCR + catálogo real + `ServicioTelemetria`/Onelogis con caché real + `OpenRouteService` real) -- diff verificado byte a byte contra el backup: únicamente esas 2 filas cambian, las 17 restantes quedan idénticas. Reporte regenerado en `output/reporte_desktop_20260812_190025_patentes_p4/`; `config_usuario.json` del Desktop actualizado.
+
+### Costo
+
+0 llamadas OCR masivas (misma tanda ya presente localmente). Onelogis: 0 llamadas nuevas para 464631 (reutiliza caché de O2); 464550 generó su primera consulta real (nunca antes gateada). ORS: 2 llamadas de ruta (una por guía reprocesada).
+
+---
+
 ## 2026-08-12 — Cierre: ORIGEN O2 (planta por ventana real de carga, no por presencia en el día)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `e7f5a82` (PLANTAS P3).

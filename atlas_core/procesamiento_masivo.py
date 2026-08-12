@@ -28,6 +28,7 @@ from atlas_core.extractor import (
     _extraer_asociaciones_geometricas,
     _extraer_fecha_geometrico,
     _extraer_patentes_geometrico,
+    _extraer_rut_chofer_geometrico,
     _extraer_rut_cliente_geometrico,
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
@@ -706,6 +707,7 @@ def procesar_archivo(
         for campo in (
             "cliente", "obra destino", "número de transporte",
             "patente del tracto", "patente del carro", "RUT del cliente",
+            "RUT del chofer",
         )
     ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
     if campos_ausentes:
@@ -732,6 +734,13 @@ def procesar_archivo(
                     metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
                     chofer_geometrico = True
                     logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
+            rut_chofer_actual = str(datos.get("RUT del chofer", "No encontrado"))
+            if rut_chofer_actual in {"", "No encontrado"}:
+                decision_rut_chofer = _extraer_rut_chofer_geometrico(bloques_guia)
+                if decision_rut_chofer.get("valor"):
+                    datos["RUT del chofer"] = decision_rut_chofer["valor"]
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    logger.info("rut_chofer recuperado mediante rut-chofer-geometrico-conservador-v1")
             transporte_actual = str(datos.get("número de transporte", "No encontrado"))
             if not re.fullmatch(r"\d{10}", transporte_actual):
                 decision_transporte = _extraer_transporte_geometrico(
