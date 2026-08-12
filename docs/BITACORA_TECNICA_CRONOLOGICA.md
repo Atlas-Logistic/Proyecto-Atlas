@@ -4,6 +4,48 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: ORIGEN O2 (planta por ventana real de carga, no por presencia en el día)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** `e7f5a82` (PLANTAS P3).
+
+### Decisión de negocio
+
+`hora_entrada_aza`/`hora_salida_aza` (tiempos reales registrados en planta para ESA carga) son ancla temporal fuerte: la planta de origen se determina por dónde hubo evidencia GPS real DENTRO de `[hora_entrada, hora_salida]`, no por cualquier presencia del vehículo en cualquier momento del día. Una visita a otra planta fuera de esa ventana nunca produce conflicto contra la planta donde ocurrió la carga real.
+
+### Fase C -- causa raíz de por qué T3 perdía paradas reales (bug real, 464424)
+
+`detectar_detenciones` (T3) agrupaba por TRIP: un trip completo era "estacionario" solo si su primer y último punto quedaban cerca entre sí. Con evidencia real (464424, SB6486): el trip 30550165 recorre 29,79 km en total, pero contiene una parada real de ~15-18 min en el medio (velocidad GPS 0-16 km/h) entre una aproximación y una salida a 20-51 km/h -- el trip COMPLETO nunca se detiene de punta a punta, así que T3 nunca la detectaba. Reescrito para agrupar la secuencia COMPLETA y ordenada de breadcrumbs (de todos los trips en la ventana, cruzando límites de trip) en clusters espacio-temporales: un cluster se extiende mientras cada punto nuevo quede a `RADIO_COHERENCIA_DETENCION_KM` (0,6 km) del CENTROIDE corriente del cluster (no un punto fijo -- una detención real de decenas de minutos puede derivar lentamente dentro del mismo patio, comparar contra un punto ya lejano rompía el cluster de a poco). Exige ≥2 puntos por cluster (un solo breadcrumb nunca prueba permanencia).
+
+Segundo filtro real, `VELOCIDAD_MAXIMA_DETENCION_KMH = 18.0` (calibrado con evidencia real: dentro de la parada confirmada de 464424 la velocidad nunca superó 16 km/h; en la aproximación/salida ya estaba en 20-51 km/h): un punto con velocidad reportada por encima del umbral nunca abre ni extiende un cluster -- sin este filtro, el tramo de aproximación/salida (lento pero espacialmente cercano) "puenteaba" dos paradas reales distintas en un cluster diluido. Si el proveedor no informa velocidad (`None`), no bloquea nada -- solo el criterio espacial.
+
+**Bug real encontrado y corregido durante la validación:** `_resolver_planta_para_detencion` recibía "todos los breadcrumbs de los trips tocados por la detención" en vez de los puntos REALES del cluster -- diluía la proporción dentro/fuera con puntos de aproximación/salida ajenos al cluster. `DetencionTelemetria` gana un campo `puntos` (los puntos reales del cluster) para que esto ya no dependa de reconstruir aproximaciones.
+
+### Fase A/C -- `EvidenciaOrigenPlanta` y score (nuevo modelo, `atlas_core/telemetria/modelos.py`)
+
+Por cada planta candidata: `duracion_dentro_min` (solape de sus detenciones con la ventana documental), `porcentaje_ventana`, `porcentaje_puntos`, `entrada_gps`/`salida_gps`, `estadias`, `score`, `motivos`. Score (pesos suman 1.0, ver `PESO_*` en `seleccion_recorrido.py`): 0,50 solape con la ventana + 0,20 continuidad (una sola permanencia real vs. muchos toques fragmentados) + 0,15 proximidad de salida GPS a `hora_salida` + 0,15 proximidad de entrada GPS a `hora_entrada` (decae linealmente a 0 a partir de 60 min de diferencia). Evidencia de breadcrumbs sueltos (Fase I de T3) se incorpora con la MISMA vara de medir -- agrupada por proximidad TEMPORAL real (`GAP_MAXIMO_MIN_PREDETERMINADO`, ya calibrado en T2) para no fusionar dos toques separados por una hora+ en una sola "detención sintética" (bug real encontrado con 463630: dos pases por carretera a 88 km/h, 08:03 y 09:42, se fusionaban en un supuesto span de 99 minutos).
+
+### Fase D -- conflicto real vs. margen suficiente
+
+`MARGEN_SCORE_SUFICIENTE = 0.15`: con 2+ plantas candidatas, si la líder saca esa ventaja o más sobre la siguiente, se confirma con margen amplio; si no, `ORIGEN_GPS_CONFLICTO` explícito (`CONFLICTO_REAL_EN_VENTANA`, con el score y solape de cada una en el motivo). Una detención real y sustancial ya no puede ser invalidada por un breadcrumb aislado de otra planta (comportamiento de T3 corregido) -- pierde por margen, no crea un conflicto automático.
+
+### Fase H -- una hora o ninguna
+
+Con solo una hora documental: ventana = ancla ± `MARGEN_VENTANA_UNA_HORA_MIN` (= `GAP_MAXIMO_MIN_PREDETERMINADO`, 90 min, reutiliza una constante ya calibrada en vez de inventar un número nuevo). Sin ninguna hora: se abstiene igual que siempre (`SIN_HORA_DOCUMENTAL`), sin cambios.
+
+### Hallazgo real que excede el alcance original (consultado con el usuario antes de aplicar)
+
+Al validar contra los 10 casos de conflicto de P3 y contra 464424, la evidencia GPS real de "Renca" en TODOS los casos (incluidos 463630 y 463594, confirmados desde TELEMETRÍA T1, el primer bloque de esta línea de trabajo) resultó ser un cruce por la vía pública cercana a 64-88 km/h -- nunca una detención real -- mientras que en TODOS existe una detención real (45 min-2h+) en el mismo recinto de Colina. Se consultó explícitamente antes de aplicar esta conclusión ampliamente (ver Fase H del bloque, "Renca debe seguir funcionando"): se confirmó que NINGUNA guía de esta tanda real tenía, antes de este bloque, una detención real confirmada en Renca (todas las confirmaciones previas de Renca en esta tanda -- salvo 464424, ya corregido a Colina por decisión explícita -- ya estaban marcadas `CONFLICTO` desde P3, no eran evidencia "limpia" que este bloque estuviera rompiendo). Se aplicó el resultado de O2 a los 19 documentos de la tanda. **Pregunta abierta, no resuelta en este bloque:** si AZA RENCA necesita su propia geocerca poligonal (como Colina en P3) para capturar dónde realmente se detienen los camiones, o si esta tanda real específicamente no incluye cargas en Renca -- no se tocó la geocerca de ninguna planta (Fase K del bloque).
+
+### Datos reales (Fase N)
+
+Respaldo previo (`analisis_completo_guias_PRE_O2_20260812_175004.csv`). Reproceso de la tanda completa (19 guías). Reporte en `output/reporte_desktop_20260812_175433_origen_o2/`; `config_usuario.json` actualizado. Rutas recalculadas desde el origen corregido (Fase J, mecanismo ya existente de R1/T3, sin código nuevo): 464424 pasa de 16,73 km (desde Renca) a 30,77 km (desde Colina, `punto_ruteo` real); 463630 pasa de 536,70 km a 549,73 km; 464700 pasa de 505,08 km a 518,10 km.
+
+### Tests
+
+12 nuevos en `tests/test_origen_o2.py`: visita fuera de ventana no afecta la planta dentro (ambos sentidos); ambas plantas dentro de la misma ventana es conflicto real; estadía prolongada domina sobre punto aislado; salida de geocerca cerca de `hora_salida` corrobora; patrón real 464641/642 (sin hardcodear el número de guía); parada real en medio de un trip largo se detecta (patrón 464424, sin hardcodear); multiguía; una sola hora usa margen simétrico; sin ninguna hora se abstiene; cambio de planta recalcula la ruta desde el `punto_ruteo` correcto; no regresión (suite completa). Suite: 849 → **861 passed**, 0 regresiones de código.
+
+
+
 ## 2026-08-12 — Cierre: PLANTAS P3 (geocercas operacionales poligonales + corrección real de AZA COLINA)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** `469cecb` (TELEMETRÍA T3).

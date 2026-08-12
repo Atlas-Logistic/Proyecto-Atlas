@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — ORIGEN O2: la planta se determina por dónde estuvo cargando, no por dónde pasó -- y aparece un hallazgo mayor sobre AZA Renca
+
+- **La pregunta correcta, ya resuelta en código:** Atlas ya no pregunta "¿qué plantas visitó este camión hoy?" -- pregunta "¿en qué planta estuvo cargando durante la ventana de horas de ESTA guía?". Un camión puede pasar cerca de dos plantas en un mismo día; solo la que coincide en el tiempo con la carga cuenta como evidencia real. **464424 (el caso más difícil, señalado por Javier) ya muestra AZA COLINA** -- se encontró que el camión hizo una parada real de 48 minutos en Colina justo durante la ventana de la guía, mientras que su cercanía a Renca esa mañana fue solo un cruce a más de 60 km/h por la carretera, nunca una detención real.
+- **Segundo hallazgo técnico real:** un viaje registrado por Onelogis puede contener una parada real de varios minutos EN EL MEDIO de un trayecto más largo (el motor nunca se apaga) -- Atlas antes solo miraba si el viaje completo estaba detenido de punta a punta, y se perdía estas paradas. Ahora agrupa los puntos GPS reales por cercanía en tiempo y espacio (usando también la velocidad reportada, cuando está disponible) para encontrarlas donde sea que ocurran.
+- **Hallazgo mayor, más allá del alcance original de este bloque:** al aplicar esta lógica a las 10 guías que quedaron en conflicto en el bloque anterior, TODAS resultan en una detención real en Colina, mientras que la evidencia "Renca" de cada una resultó ser, sistemáticamente, un cruce a alta velocidad por la carretera cercana -- nunca una parada real. Esto incluye viajes que se habían dado por confirmados en Renca desde los primeros bloques de telemetría de esta sesión. **Esto no se aplicó a ciegas a toda la operación** -- se consultó primero, y se investigó con evidencia real (velocidad GPS punto por punto) antes de aceptar la conclusión.
+- **Pregunta abierta para un bloque futuro, NO resuelta aquí:** ¿la geocerca de AZA RENCA necesita el mismo tipo de corrección que tuvo Colina (un polígono real, no un punto con radio chico), o los camiones de esta tanda real genuinamente no cargan en Renca? Se decidió no tocar la geocerca de Renca en este bloque -- la corrección de O2 es sobre lógica temporal, no sobre geografía.
+- Suite completa: 849 → **861 tests**, sin regresiones.
+
+---
+
 ## 2026-08-12 — PLANTAS P3: AZA Colina ya es un recinto real, no un punto en el mapa -- y aparece un hallazgo nuevo que requiere revisión de Javier
 
 - **La corrección central:** Atlas ahora puede modelar una planta como un RECINTO (polígono real), no solo como un punto con un radio chico. AZA Colina se corrigió con el perímetro real donde AL1879 estuvo detenido 6 horas (los mismos datos de T3) -- **464641/464642 ya muestran "AZA COLINA" confirmada por GPS**, exactamente lo que Javier confirmó viendo el recinto completo en Onelogis (acceso, estacionamientos, oficinas, zonas de carga). AZA Renca no se tocó -- sigue funcionando exactamente igual (punto + radio, como siempre).

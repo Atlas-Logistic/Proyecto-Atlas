@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — ORIGEN O2: 464424 resuelto, y un hallazgo grande sobre AZA Renca que necesita conversación con Javier -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: `e7f5a82` (PLANTAS P3).
+- **464424 (el caso más difícil de toda esta línea de trabajo) ya muestra AZA COLINA, correcto según Javier.** Se encontró una parada real de 48 minutos en Colina justo en la ventana de la guía -- antes Atlas solo veía un pase rápido cerca de Renca (88 km/h, nunca una parada) y se quedaba con eso por defecto.
+- **Lo más importante para conversar con Javier antes de seguir:** al revisar TODA la tanda real con el nuevo criterio (¿dónde hubo una parada REAL, no solo presencia?), **ningún viaje de esta tanda de 19 guías tiene evidencia de una parada real en AZA RENCA** -- toda la evidencia "Renca" que existía (incluidos casos confirmados desde el primer bloque de telemetría de esta sesión, 463630 y 463594) resultó ser el camión cruzando una vía cercana a 64-88 km/h, nunca deteniéndose. Todos, en cambio, sí muestran una parada real en el mismo recinto de Colina.
+- **Esto se investigó con cuidado antes de aplicarlo** (se preguntó explícitamente, se verificó velocidad GPS punto por punto) -- no es un bug que se corrigió a ciegas, es un patrón real y repetido en datos de múltiples camiones y fechas distintas.
+- **La pregunta que queda abierta, sin resolver:** ¿AZA RENCA necesita su propio polígono real (como Colina en el bloque anterior) porque su círculo de 1,5 km no alcanza a cubrir dónde realmente paran los camiones? ¿O esta tanda específica de camiones/transportes genuinamente no carga en Renca? No se tocó la geocerca de Renca en este bloque -- valdría la pena, en el próximo bloque, buscar UN viaje real que Javier confirme como "este sí salió de Renca" y usarlo como control positivo, igual que se hizo con AL1879 para Colina en el bloque de detenciones.
+- **Separación que se mantiene:** `punto_ruteo` (de dónde parte una ruta ORS) sigue siendo distinto de la dirección histórica de una planta -- ver bloque PLANTAS P3.
+- **Próximo paso natural:** conversar con Javier sobre el hallazgo de Renca antes de seguir ajustando geocercas -- con un caso real confirmado de Renca en la mano, se puede calibrar con evidencia en vez de adivinar.
+
+---
+
 ## 2026-08-12 — PLANTAS P3: AZA Colina como recinto real -- 10 conflictos nuevos requieren revisión de Javier -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: `469cecb` (TELEMETRÍA T3).

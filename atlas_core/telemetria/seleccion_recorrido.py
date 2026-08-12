@@ -37,6 +37,7 @@ from atlas_core.telemetria.modelos import (
     EstadoConcordanciaHora,
     EstadoSeleccionRecorrido,
     EstadoTelemetria,
+    EvidenciaOrigenPlanta,
     PosicionTelemetria,
     RecorridoOperacionalTelemetria,
     ResultadoSeleccionRecorrido,
@@ -244,27 +245,20 @@ RADIO_COHERENCIA_DETENCION_KM = 0.6
 # paradas más breves siendo operacionalmente significativas, se usa un
 # umbral conservador.
 DURACION_MINIMA_DETENCION_MIN = 30.0
-
-
-def _es_estacionario(
-    viaje: ViajeTelemetria,
-    breadcrumbs_por_trip: dict[str, tuple[PosicionTelemetria, ...]],
-    radio_km: float,
-) -> tuple[bool, PosicionTelemetria | None, PosicionTelemetria | None]:
-    puntos = breadcrumbs_por_trip.get(viaje.proveedor_trip_id) or ()
-    # Un solo breadcrumb es una única foto instantánea -- no alcanza para
-    # distinguir "estuvo detenido" de "iba en movimiento y solo se
-    # registró un punto" (breadcrumbs incompletos/dispersos). Se exige
-    # evidencia de al menos 2 puntos para afirmar estacionariedad; nunca
-    # se infiere de un punto aislado.
-    if len(puntos) < 2:
-        return False, None, None
-    inicio_pt, fin_pt = puntos[0], puntos[-1]
-    distancia = distancia_km_haversine(
-        Coordenadas(inicio_pt.longitud, inicio_pt.latitud),
-        Coordenadas(fin_pt.longitud, fin_pt.latitud),
-    )
-    return distancia <= radio_km, inicio_pt, fin_pt
+# Bloque ORIGEN O2 -- calibrado con evidencia real (464424/SB6486,
+# 07-08-2026): dentro de la parada real confirmada (08:28-08:46 y
+# 09:11-09:19, breadcrumbs con `evento=PERIODIC_ON`), la velocidad
+# reportada por Onelogis nunca superó 16 km/h (maniobra/avance lento
+# dentro del patio); en la aproximación y la salida reales, la
+# velocidad ya estaba en 20-51 km/h. 18 km/h separa ambos grupos con
+# margen. Un punto con velocidad reportada por encima de este umbral
+# nunca extiende ni abre un cluster de detención -- sin este filtro, un
+# tramo de aproximación/salida lento pero espacialmente cercano podía
+# "puentear" dos paradas reales distintas en un solo cluster diluido
+# (ver `detectar_detenciones`). Si el proveedor no informa velocidad
+# (`None` -- no todo proveedor de telemetría la expone), se usa solo el
+# criterio espacial, sin bloquear nada por falta de este dato.
+VELOCIDAD_MAXIMA_DETENCION_KMH = 18.0
 
 
 def detectar_detenciones(
@@ -273,71 +267,96 @@ def detectar_detenciones(
     *,
     radio_coherencia_km: float = RADIO_COHERENCIA_DETENCION_KM,
 ) -> tuple[DetencionTelemetria, ...]:
-    """Bloque TELEMETRÍA T3, Fase C -- infiere permanencias estacionarias
-    reales encadenando trips (y los huecos de telemetría ENTRE ellos, sin
-    breadcrumbs propios) cuyos extremos quedan espacialmente coherentes:
-    un trip es "estacionario" cuando su propio primer y último breadcrumb
-    quedan a `radio_coherencia_km` uno de otro (ignition-cycling sin
-    desplazamiento real); una cadena de trips estacionarios consecutivos
-    cuyos puntos siguen coherentes entre sí forma UNA sola detención,
-    desde el inicio del primer trip de la cadena hasta el fin del
-    último -- el hueco de telemetría entre ellos (sin datos propios)
-    queda cubierto implícitamente, igual que el caso real que motivó
-    este bloque: "trip A termina en planta a las 08:55 + trip B empieza
-    en planta a las 13:35" es evidencia de permanencia continua ahí,
-    aunque no haya ningún breadcrumb entre esas dos horas.
+    """Bloque TELEMETRÍA T3 (Fase C), generalizado en Bloque ORIGEN O2 --
+    infiere permanencias estacionarias reales agrupando la secuencia
+    COMPLETA y ordenada de breadcrumbs de todos los trips en clusters
+    espacio-temporales, sin depender de los límites de un trip
+    individual.
 
-    Nunca infiere una detención sin coherencia espacial real entre los
-    puntos -- un trip de movimiento real (inicio y fin alejados entre sí)
-    siempre corta la cadena."""
-    viajes_con_datos = [
-        v for v in viajes if breadcrumbs_por_trip.get(v.proveedor_trip_id)
-    ]
-    ordenados = sorted(viajes_con_datos, key=lambda v: _instante(v.inicio) or datetime.min)
+    Bloque O2 -- causa raíz encontrada con evidencia real (464424): un
+    trip de Onelogis puede contener una MICRO-DETENCIÓN real en el medio
+    (el camión entra a un recinto, permanece ~10-15 min, sigue) sin que
+    el trip completo alguna vez se detenga en el sentido de "primer y
+    último punto del trip cercanos entre sí" -- el motor nunca se apaga,
+    Onelogis lo registra todo como un único trip largo de "movimiento".
+    La versión anterior (T3) solo miraba si el trip COMPLETO era
+    estacionario de punta a punta, perdiendo estas paradas reales
+    intermedias. Agrupar por CLUSTER de puntos (sin importar a qué trip
+    pertenece cada uno) captura ambos casos: el hueco de telemetría
+    entre trips (sin datos propios, caso real 463630) Y la parada real
+    dentro de un trip más largo (caso real 464424).
+
+    Un cluster se extiende mientras cada punto nuevo quede a
+    `radio_coherencia_km` del PRIMER punto del cluster (referencia fija,
+    evita que una deriva lenta acumulada rompa el cluster de a poco);
+    un punto fuera de ese radio cierra el cluster vigente y abre uno
+    nuevo. Se exige al menos 2 puntos por cluster -- un solo breadcrumb
+    es una única foto instantánea, nunca prueba permanencia. Nunca
+    infiere una detención sin coherencia espacial real entre los
+    puntos."""
+    puntos_con_trip: list[tuple[PosicionTelemetria, str]] = []
+    for viaje in viajes:
+        for punto in breadcrumbs_por_trip.get(viaje.proveedor_trip_id, ()):
+            puntos_con_trip.append((punto, viaje.proveedor_trip_id))
+    puntos_con_trip.sort(key=lambda par: _instante(par[0].timestamp) or datetime.min)
 
     detenciones: list[DetencionTelemetria] = []
-    bloque: list[tuple[ViajeTelemetria, PosicionTelemetria, PosicionTelemetria]] = []
+    cluster: list[tuple[PosicionTelemetria, str]] = []
 
-    def cerrar_bloque() -> None:
-        if not bloque:
+    def cerrar_cluster() -> None:
+        if len(cluster) < 2:
+            cluster.clear()
             return
-        primer_viaje = bloque[0][0]
-        ultimo_viaje, _, ultimo_fin_pt = bloque[-1]
-        inicio_dt = _instante(primer_viaje.inicio)
-        fin_dt = _instante(ultimo_viaje.fin)
+        primer_punto, _ = cluster[0]
+        ultimo_punto, _ = cluster[-1]
+        inicio_dt = _instante(primer_punto.timestamp)
+        fin_dt = _instante(ultimo_punto.timestamp)
         if inicio_dt is not None and fin_dt is not None and fin_dt > inicio_dt:
-            duracion_min = (fin_dt - inicio_dt).total_seconds() / 60.0
+            trip_ids = tuple(dict.fromkeys(tid for _, tid in cluster))
             detenciones.append(DetencionTelemetria(
-                inicio=primer_viaje.inicio,
-                fin=ultimo_viaje.fin,
-                duracion_minutos=round(duracion_min, 1),
-                latitud=ultimo_fin_pt.latitud,
-                longitud=ultimo_fin_pt.longitud,
+                inicio=primer_punto.timestamp,
+                fin=ultimo_punto.timestamp,
+                duracion_minutos=round((fin_dt - inicio_dt).total_seconds() / 60.0, 1),
+                latitud=ultimo_punto.latitud,
+                longitud=ultimo_punto.longitud,
                 fuente=(
-                    "TRIPS_ESTACIONARIOS_ENCADENADOS" if len(bloque) > 1
-                    else "TRIP_UNICO_ESTACIONARIO"
+                    "CLUSTER_MULTI_TRIP" if len(trip_ids) > 1 else "CLUSTER_UNICO_TRIP"
                 ),
-                trip_ids=tuple(v.proveedor_trip_id for v, _, _ in bloque),
+                trip_ids=trip_ids,
+                puntos=tuple(p for p, _ in cluster),
             ))
-        bloque.clear()
+        cluster.clear()
 
-    for viaje in ordenados:
-        estacionario, inicio_pt, fin_pt = _es_estacionario(
-            viaje, breadcrumbs_por_trip, radio_coherencia_km
-        )
-        if not estacionario:
-            cerrar_bloque()
+    for punto, trip_id in puntos_con_trip:
+        # Un punto con velocidad real por encima del umbral es movimiento
+        # real -- nunca abre ni extiende un cluster de detención (caso
+        # real 464424: sin este filtro, la aproximación/salida lenta
+        # pero espacialmente cercana "puenteaba" dos paradas reales
+        # distintas en un único cluster diluido). Sin velocidad
+        # informada por el proveedor (`None`), no se bloquea nada por
+        # este criterio -- solo el espacial.
+        if punto.velocidad is not None and punto.velocidad > VELOCIDAD_MAXIMA_DETENCION_KMH:
+            cerrar_cluster()
             continue
-        if bloque:
-            _, _, punto_referencia = bloque[-1]
-            coherente = distancia_km_haversine(
-                Coordenadas(inicio_pt.longitud, inicio_pt.latitud),
-                Coordenadas(punto_referencia.longitud, punto_referencia.latitud),
-            ) <= radio_coherencia_km
-            if not coherente:
-                cerrar_bloque()
-        bloque.append((viaje, inicio_pt, fin_pt))
-    cerrar_bloque()
+        if not cluster:
+            cluster.append((punto, trip_id))
+            continue
+        # Centroide corriente del cluster (no el primer punto fijo): una
+        # detención real de varias decenas de minutos puede derivar
+        # lentamente dentro del mismo patio (caso real 464424, ~58 min)
+        # -- comparar contra un punto fijo del inicio puede acabar
+        # comparando contra un punto ya lejano del resto del cluster.
+        # El centroide se adapta con el cluster sin perder coherencia.
+        lat_centroide = sum(p.latitud for p, _ in cluster) / len(cluster)
+        lon_centroide = sum(p.longitud for p, _ in cluster) / len(cluster)
+        coherente = distancia_km_haversine(
+            Coordenadas(punto.longitud, punto.latitud),
+            Coordenadas(lon_centroide, lat_centroide),
+        ) <= radio_coherencia_km
+        if not coherente:
+            cerrar_cluster()
+        cluster.append((punto, trip_id))
+    cerrar_cluster()
 
     return tuple(detenciones)
 
@@ -446,6 +465,60 @@ def detectar_entrada_salida_planta(
 # maniobra), y solo entra en juego con evidencia GPS real -- nunca
 # asume Renca ni ninguna otra planta por defecto.
 MARGEN_HORAS_PLANTA_PREDETERMINADO = 4.0
+
+# Bloque ORIGEN O2 -- la pregunta correcta no es "¿qué plantas visitó el
+# vehículo hoy?" sino "¿en qué planta estuvo cargando durante la
+# ventana ENTRADA→SALIDA de ESTE viaje?" (`hora_entrada_aza`/
+# `hora_salida_aza` son horas REALES registradas en planta, ancla
+# temporal fuerte). `MARGEN_HORAS_PLANTA_PREDETERMINADO` (arriba) sigue
+# usándose solo para RECOLECTAR trips/breadcrumbs candidatos (ventana
+# amplia, ±4h) -- nunca para decidir cuál planta ganó, eso ahora lo hace
+# el score por solape con la ventana documental real, no con la ventana
+# de recolección.
+
+# Si solo hay UNA hora documental (falta la otra), se usa como ancla
+# más débil con un margen simétrico configurable alrededor -- nunca se
+# inventa la hora faltante. Reutiliza el mismo margen ya calibrado en
+# T2 para encadenar trips (`GAP_MAXIMO_MIN_PREDETERMINADO`, hueco real
+# más largo conocido ~51 min, con margen amplio) en vez de inventar un
+# número nuevo sin evidencia.
+MARGEN_VENTANA_UNA_HORA_MIN = GAP_MAXIMO_MIN_PREDETERMINADO
+
+# Pesos del score de evidencia por planta (Fase C) -- suman 1.0. El
+# solape con la ventana documental real domina (es la pregunta que
+# Javier pidió responder); continuidad castiga evidencia fragmentada en
+# muchos toques breves frente a una sola permanencia real; la
+# proximidad de entrada/salida GPS a las horas documentales corrobora
+# sin reemplazar al solape.
+PESO_SOLAPE_VENTANA = 0.50
+PESO_CONTINUIDAD = 0.20
+PESO_PROXIMIDAD_SALIDA = 0.15
+PESO_PROXIMIDAD_ENTRADA = 0.15
+
+# Una diferencia de 60+ min entre la hora documental y la entrada/salida
+# GPS ya no aporta nada al score de proximidad (decae linealmente a 0)
+# -- más amplio que la tolerancia de concordancia de hora ya calibrada
+# en T2 (`TOLERANCIA_ANCLA_MIN_PREDETERMINADA`=15 min) porque aquí se
+# usa como señal continua de apoyo, no como corte binario.
+VENTANA_PROXIMIDAD_MIN = 60.0
+
+# Fase D: dos plantas con evidencia real en la MISMA ventana documental
+# son un conflicto real solo si NO hay margen suficiente entre sus
+# scores para preferir una con confianza -- 0.15 exige que la líder
+# saque una ventaja clara (no solo estar técnicamente adelante) antes
+# de descartar la segunda como ruido.
+MARGEN_SCORE_SUFICIENTE = 0.15
+
+
+def _proximidad_score(instante_gps: datetime | None, instante_documental: datetime | None) -> float:
+    """1.0 si coinciden exactamente, decae linealmente a 0.0 a partir de
+    `VENTANA_PROXIMIDAD_MIN` minutos de diferencia -- 0.0 (neutro, nunca
+    penaliza de más) si falta cualquiera de los dos instantes."""
+    if instante_gps is None or instante_documental is None:
+        return 0.0
+    diferencia_min = abs((instante_gps - instante_documental).total_seconds()) / 60.0
+    return max(0.0, 1.0 - diferencia_min / VENTANA_PROXIMIDAD_MIN)
+
 
 # Bloque PLANTAS P3, Fase E -- una detención dentro de un recinto
 # POLIGONAL nunca exige que el 100% de sus puntos caigan adentro
@@ -585,6 +658,19 @@ def resolver_planta_origen_gps(
 
     plantas = list(plantas)
 
+    # Bloque ORIGEN O2, Fase H -- ventana documental REAL de carga: la
+    # pregunta no es "qué plantas visitó el vehículo hoy" sino "en qué
+    # planta estuvo cargando durante ESTA ventana". Con ambas horas,
+    # [entrada, salida] exacto; con solo una, un margen simétrico
+    # alrededor (ancla más débil); nunca se inventa la hora faltante.
+    if hora_entrada is not None and hora_salida is not None:
+        ventana_ini, ventana_fin = min(hora_entrada, hora_salida), max(hora_entrada, hora_salida)
+    else:
+        ancla_unica = hora_entrada or hora_salida
+        margen_unica = timedelta(minutes=MARGEN_VENTANA_UNA_HORA_MIN)
+        ventana_ini, ventana_fin = ancla_unica - margen_unica, ancla_unica + margen_unica
+    duracion_ventana_min = max(1.0, (ventana_fin - ventana_ini).total_seconds() / 60.0)
+
     # Bloque TELEMETRÍA T3, Fase D/I -- jerarquía de evidencia: una
     # detención real (estadía) dentro de la geocerca de una planta es la
     # evidencia MÁS fuerte de origen -- se evalúa antes que los
@@ -593,119 +679,217 @@ def resolver_planta_origen_gps(
     detenciones = detectar_detenciones(cercanos_ordenados, breadcrumbs_por_trip)
     detenciones_por_planta: dict[str, list[DetencionTelemetria]] = {}
     nombres_planta: dict[str, str] = {}
-    motivo_geocerca_por_planta: dict[str, str] = {}
     mejor_estadia_sin_planta: DetencionTelemetria | None = None
     for detencion in detenciones:
-        puntos_detencion = tuple(
-            p for trip_id in detencion.trip_ids for p in breadcrumbs_por_trip.get(trip_id, ())
-        )
         resultado_geocerca = _resolver_planta_para_detencion(
-            puntos_detencion, Coordenadas(detencion.longitud, detencion.latitud),
+            detencion.puntos, Coordenadas(detencion.longitud, detencion.latitud),
             plantas, radio_km=radio_km,
         )
         if resultado_geocerca.determinada:
             detenciones_por_planta.setdefault(resultado_geocerca.planta_id, []).append(detencion)
             nombres_planta[resultado_geocerca.planta_id] = resultado_geocerca.planta_nombre
-            motivo_geocerca_por_planta[resultado_geocerca.planta_id] = resultado_geocerca.motivo
         elif detencion.duracion_minutos >= DURACION_MINIMA_DETENCION_MIN and (
             mejor_estadia_sin_planta is None
             or detencion.duracion_minutos > mejor_estadia_sin_planta.duracion_minutos
         ):
             mejor_estadia_sin_planta = detencion
 
-    # Evidencia media/alta (Fase I): breadcrumbs sueltos que pasan por
-    # una geocerca, igual que antes de este bloque (comportamiento de R1
-    # conservado) -- se calcula SIEMPRE, no solo cuando no hay detención,
-    # porque también sirve para detectar un conflicto entre una estadía
-    # confirmada y evidencia independiente de OTRA planta (Fase M, item
-    # 10: nunca se ignora en silencio la señal más débil).
+    # Evidencia media/alta (Fase I, T3): breadcrumbs sueltos que pasan
+    # por una geocerca CIRCULAR. Si esa planta no tiene ya evidencia por
+    # detención, se incorpora como detención(es) sintética(s) breve(s) --
+    # misma vara de medir que cualquier otra evidencia (Fase C: nunca
+    # depender de un único breadcrumb tratándolo como caso especial); por
+    # su brevedad, casi siempre pierde frente a una detención real más
+    # larga en el score, en vez de disparar un conflicto automático.
+    #
+    # Bug real encontrado (464424): agrupar TODOS los toques de una
+    # planta en un solo span [primer_toque, último_toque] (como hacía
+    # `detectar_entrada_salida_planta`) puede fusionar dos pasadas
+    # rápidas SEPARADAS (velocidad 64-88 km/h -- el camión solo cruza la
+    # vía pública cercana, dos veces, sin detenerse) en una sola
+    # "detención sintética" de casi 100 min, como si hubiera permanecido
+    # ahí todo ese tiempo. Se agrupan los toques por proximidad temporal
+    # real (mismo criterio que encadenar trips, `GAP_MAXIMO_MIN_PREDETERMINADO`)
+    # -- toques separados por más de eso son eventos DISTINTOS, cada uno
+    # con su propia duración mínima, nunca conflados.
     resultado_breadcrumbs = detectar_entrada_salida_planta(tuple(puntos), plantas, radio_km=radio_km)
+    for planta in plantas:
+        if getattr(planta, "tipo_geocerca", "CIRCULAR") == "POLIGONAL":
+            continue
+        if planta.planta_id in detenciones_por_planta:
+            continue
+        if planta.latitud is None or planta.longitud is None:
+            continue
+        coordenada_planta = Coordenadas(planta.longitud, planta.latitud)
+        puntos_planta = sorted(
+            (
+                p for p in puntos
+                if distancia_km_haversine(Coordenadas(p.longitud, p.latitud), coordenada_planta) <= radio_km
+            ),
+            key=lambda p: _instante(p.timestamp) or datetime.min,
+        )
+        if not puntos_planta:
+            continue
+        grupos: list[list[PosicionTelemetria]] = [[puntos_planta[0]]]
+        for punto in puntos_planta[1:]:
+            anterior = _instante(grupos[-1][-1].timestamp)
+            actual = _instante(punto.timestamp)
+            if (
+                anterior is not None and actual is not None
+                and (actual - anterior).total_seconds() / 60.0 <= GAP_MAXIMO_MIN_PREDETERMINADO
+            ):
+                grupos[-1].append(punto)
+            else:
+                grupos.append([punto])
+        sinteticas = []
+        for grupo in grupos:
+            inicio_dt = _instante(grupo[0].timestamp)
+            fin_dt = _instante(grupo[-1].timestamp)
+            if inicio_dt is None or fin_dt is None:
+                continue
+            duracion_grupo = max(0.1, (fin_dt - inicio_dt).total_seconds() / 60.0)
+            sinteticas.append(DetencionTelemetria(
+                inicio=grupo[0].timestamp,
+                fin=grupo[-1].timestamp,
+                duracion_minutos=round(duracion_grupo, 1),
+                latitud=grupo[-1].latitud,
+                longitud=grupo[-1].longitud,
+                fuente="BREADCRUMB_SUELTO",
+                trip_ids=(),
+                puntos=tuple(grupo),
+            ))
+        if sinteticas:
+            detenciones_por_planta[planta.planta_id] = sinteticas
+            nombres_planta[planta.planta_id] = planta.nombre
 
-    if len(detenciones_por_planta) > 1:
-        return ResultadoOrigenGPS(
-            ORIGEN_GPS_CONFLICTO,
-            motivo=(
-                "DETENCION_CERCA_DE_MAS_DE_UNA_PLANTA("
-                + ",".join(sorted(detenciones_por_planta)) + ")"
+    if not detenciones_por_planta:
+        # Los breadcrumbs sueltos por sí solos ya son ambiguos (tocan
+        # 2+ plantas circulares) -- ninguna detención qué comparar
+        # contra qué, esto se conserva tal cual (comportamiento de T2/R1,
+        # sin cambios).
+        if resultado_breadcrumbs.estado == ORIGEN_GPS_CONFLICTO:
+            return resultado_breadcrumbs
+        # Nada calza con ninguna planta catalogada -- si de todas formas
+        # hay una detención real y prolongada en algún otro lugar (Fase
+        # K, "nunca se descarta en silencio"), se reporta honestamente
+        # con su coordenada y duración, sin inventar el nombre de
+        # ninguna planta.
+        if mejor_estadia_sin_planta is not None:
+            return ResultadoOrigenGPS(
+                ORIGEN_GPS_ESTADIA_SIN_PLANTA,
+                motivo=(
+                    "DETENCION_REAL_FUERA_DE_TODA_GEOCERCA;"
+                    f"duracion_min={mejor_estadia_sin_planta.duracion_minutos};"
+                    f"trips={'|'.join(mejor_estadia_sin_planta.trip_ids)}"
+                ),
+                latitud_estadia=mejor_estadia_sin_planta.latitud,
+                longitud_estadia=mejor_estadia_sin_planta.longitud,
+                duracion_estadia_min=mejor_estadia_sin_planta.duracion_minutos,
+            )
+        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="NINGUN_PUNTO_DENTRO_DE_GEOCERCA")
+
+    # Bloque ORIGEN O2, Fase A/C -- una EvidenciaOrigenPlanta por
+    # candidata, puntuada contra la ventana documental real (no contra
+    # la ventana amplia de recolección). Una visita fuera de la ventana
+    # documental no aporta `duracion_dentro_min` (el solape con esa
+    # visita es 0) -- Fase B: nunca produce conflicto contra la planta
+    # donde realmente ocurrió la carga.
+    evidencias: dict[str, EvidenciaOrigenPlanta] = {}
+    for planta_id, lista in detenciones_por_planta.items():
+        solapes = [
+            (max(0.0, _solape_minutos(_instante(d.inicio), _instante(d.fin), ventana_ini, ventana_fin)), d)
+            for d in lista
+        ]
+        duracion_dentro = sum(solape for solape, _ in solapes)
+        mejor_solape = max((solape for solape, _ in solapes), default=0.0)
+        continuidad = (mejor_solape / duracion_dentro) if duracion_dentro > 0 else 0.0
+        porcentaje_ventana = min(100.0, duracion_dentro / duracion_ventana_min * 100)
+        entrada_gps = min((d.inicio for d in lista), default="")
+        salida_gps = max((d.fin for d in lista), default="")
+        total_puntos_planta = sum(len(d.puntos) for d in lista)
+        porcentaje_puntos = (total_puntos_planta / len(puntos) * 100) if puntos else 0.0
+        score = (
+            PESO_SOLAPE_VENTANA * (porcentaje_ventana / 100)
+            + PESO_CONTINUIDAD * continuidad
+            + PESO_PROXIMIDAD_SALIDA * _proximidad_score(_instante(salida_gps), hora_salida)
+            + PESO_PROXIMIDAD_ENTRADA * _proximidad_score(_instante(entrada_gps), hora_entrada)
+        )
+        evidencias[planta_id] = EvidenciaOrigenPlanta(
+            planta_id=planta_id,
+            planta_nombre=nombres_planta[planta_id],
+            duracion_dentro_min=round(duracion_dentro, 1),
+            porcentaje_ventana=round(porcentaje_ventana, 1),
+            porcentaje_puntos=round(porcentaje_puntos, 1),
+            entrada_gps=entrada_gps,
+            salida_gps=salida_gps,
+            estadias=tuple(lista),
+            score=round(score, 4),
+            motivos=(
+                f"solape_ventana={round(porcentaje_ventana, 1)}%",
+                f"duracion_dentro_min={round(duracion_dentro, 1)}",
+                f"continuidad={round(continuidad, 2)}",
             ),
         )
-    if len(detenciones_por_planta) == 1:
-        (planta_id, lista_detenciones), = detenciones_por_planta.items()
-        breadcrumbs_senalan_otra_planta = (
-            resultado_breadcrumbs.estado == ORIGEN_GPS_CONFLICTO
-            or (
-                resultado_breadcrumbs.estado == ORIGEN_GPS_CONFIRMADO
-                and resultado_breadcrumbs.planta_id != planta_id
-            )
-        )
-        if breadcrumbs_senalan_otra_planta:
-            nombre_detencion = nombres_planta.get(planta_id, planta_id)
-            nombre_breadcrumb = resultado_breadcrumbs.planta_nombre or resultado_breadcrumbs.motivo
-            return ResultadoOrigenGPS(
-                ORIGEN_GPS_CONFLICTO,
-                motivo=(
-                    f"CONFLICTO_{nombre_detencion}_VS_{nombre_breadcrumb}"
-                    f"(estadia_en={nombre_detencion};breadcrumb_aislado_en={nombre_breadcrumb})"
-                ).replace(" ", "_"),
-            )
-        mejor = max(lista_detenciones, key=lambda d: d.duracion_minutos)
-        planta_confirmada = next((p for p in plantas if p.planta_id == planta_id), None)
+
+    ranking = sorted(evidencias.values(), key=lambda e: e.score, reverse=True)
+    lider = ranking[0]
+    margen_vs_siguiente = (lider.score - ranking[1].score) if len(ranking) > 1 else None
+
+    if margen_vs_siguiente is None or margen_vs_siguiente >= MARGEN_SCORE_SUFICIENTE:
+        estadia_principal = max(lider.estadias, key=lambda d: d.duracion_minutos)
+        planta_confirmada = next((p for p in plantas if p.planta_id == lider.planta_id), None)
         # Bloque PLANTAS P3: para una planta POLIGONAL, "distancia al
         # centroide" no es la evidencia que confirmó nada (la contención
-        # real en el polígono sí) y puede ser grande y confuso de leer
+        # real en el polígono sí) y puede ser grande y confusa de leer
         # junto a un CONFIRMADO (ver AZA COLINA: 18 km a la dirección
         # histórica, sin relación con la detección real) -- se deja en
-        # `None`, la proporción de puntos dentro ya queda en `motivo`.
+        # `None`. Tampoco aplica si la única evidencia es un breadcrumb
+        # suelto sintético (sin coordenada real propia).
         es_poligonal = (
             planta_confirmada is not None
             and getattr(planta_confirmada, "tipo_geocerca", "CIRCULAR") == "POLIGONAL"
         )
         distancia_min = (
             round(distancia_km_haversine(
-                Coordenadas(mejor.longitud, mejor.latitud),
+                Coordenadas(estadia_principal.longitud, estadia_principal.latitud),
                 Coordenadas(planta_confirmada.longitud, planta_confirmada.latitud),
             ), 3)
-            if planta_confirmada is not None and not es_poligonal else None
+            if planta_confirmada is not None
+            and not es_poligonal
+            and estadia_principal.fuente != "BREADCRUMB_SUELTO"
+            else None
         )
-        solape_min = round(
-            _solape_minutos(_instante(mejor.inicio), _instante(mejor.fin), hora_entrada, hora_salida), 1
+        motivo_margen = (
+            f"margen_vs_siguiente={round(margen_vs_siguiente, 4)};" if margen_vs_siguiente is not None else ""
         )
-        motivo_geocerca = motivo_geocerca_por_planta.get(planta_id, "DENTRO_DE_GEOCERCA")
         return ResultadoOrigenGPS(
             ORIGEN_GPS_CONFIRMADO,
-            planta_id=planta_id,
-            planta_nombre=nombres_planta[planta_id],
-            hora_entrada_gps=mejor.inicio,
-            hora_salida_gps=mejor.fin,
+            planta_id=lider.planta_id,
+            planta_nombre=lider.planta_nombre,
+            hora_entrada_gps=lider.entrada_gps,
+            hora_salida_gps=lider.salida_gps,
             distancia_minima_km=distancia_min,
             motivo=(
-                f"ESTADIA_EN_GEOCERCA({motivo_geocerca});duracion_min={mejor.duracion_minutos};"
-                f"solape_documental_min={solape_min};trips={'|'.join(mejor.trip_ids)}"
+                f"VENTANA_DOCUMENTAL;score={lider.score};solape_ventana={lider.porcentaje_ventana}%;"
+                f"duracion_dentro_min={lider.duracion_dentro_min};{motivo_margen}"
+                f"trips={'|'.join(t for d in lider.estadias for t in d.trip_ids)}"
             ),
         )
 
-    # Sin ninguna detención dentro de una geocerca.
-    if resultado_breadcrumbs.estado in (ORIGEN_GPS_CONFIRMADO, ORIGEN_GPS_CONFLICTO):
-        return resultado_breadcrumbs
-
-    # Nada calza con ninguna planta catalogada -- si de todas formas hay
-    # una detención real y prolongada en algún otro lugar (Fase K, "nunca
-    # se descarta en silencio"), se reporta honestamente con su
-    # coordenada y duración, sin inventar el nombre de ninguna planta.
-    if mejor_estadia_sin_planta is not None:
-        return ResultadoOrigenGPS(
-            ORIGEN_GPS_ESTADIA_SIN_PLANTA,
-            motivo=(
-                "DETENCION_REAL_FUERA_DE_TODA_GEOCERCA;"
-                f"duracion_min={mejor_estadia_sin_planta.duracion_minutos};"
-                f"trips={'|'.join(mejor_estadia_sin_planta.trip_ids)}"
-            ),
-            latitud_estadia=mejor_estadia_sin_planta.latitud,
-            longitud_estadia=mejor_estadia_sin_planta.longitud,
-            duracion_estadia_min=mejor_estadia_sin_planta.duracion_minutos,
-        )
-
-    return resultado_breadcrumbs
+    # Bloque ORIGEN O2, Fase D -- dos o más plantas con evidencia real
+    # dentro de la MISMA ventana documental y sin margen suficiente para
+    # distinguirlas: esto SÍ es un conflicto real (no una visita a otra
+    # hora del mismo día, que ya quedó descartada como evidencia por el
+    # solape con la ventana).
+    top = ranking[:2]
+    return ResultadoOrigenGPS(
+        ORIGEN_GPS_CONFLICTO,
+        motivo=(
+            "CONFLICTO_REAL_EN_VENTANA("
+            + ";".join(f"{e.planta_nombre}:score={e.score},solape={e.porcentaje_ventana}%" for e in top)
+            + ")"
+        ).replace(" ", "_"),
+    )
 
 
 def clasificar_concordancia_hora(

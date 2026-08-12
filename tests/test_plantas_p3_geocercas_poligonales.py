@@ -184,7 +184,11 @@ def test_estadia_mayoritaria_dentro_confirma_colina(plantas, tmp_path):
     )
     assert resultado.estado == ORIGEN_GPS_CONFIRMADO
     assert resultado.planta_nombre == "AZA COLINA"
-    assert "proporcion_puntos_dentro=1.0" in resultado.motivo
+    # Bloque ORIGEN O2: el motivo final ahora describe el score contra la
+    # ventana documental (solape/duración/margen), no la proporción cruda
+    # de puntos del cluster (esa señal sigue existiendo internamente, ver
+    # `_resolver_planta_para_detencion`).
+    assert "VENTANA_DOCUMENTAL" in resultado.motivo
 
 
 # --- 6: maniobra parcial en el borde no rompe la confirmación (mayoría, no 100%) ---
@@ -256,10 +260,14 @@ def test_dos_plantas_en_conflicto_via_detenciones(plantas, tmp_path):
 
 def test_transito_aislado_por_el_poligono_no_confirma_sin_detencion(plantas, tmp_path):
     """Caso real que motivó el fix de exclusión de polígonos del chequeo
-    por punto suelto: un vehículo que solo ATRAVIESA el polígono como
-    parte de un trayecto largo (nunca se detiene ahí) no debe confirmar
-    la planta -- solo una detención real (mayoría de puntos, estacionaria)
-    puede hacerlo."""
+    por punto suelto: un vehículo que solo ATRAVIESA el polígono no debe
+    confirmar la planta con un único breadcrumb aislado -- solo una
+    detención real (2+ puntos coherentes entre sí) puede hacerlo. Nunca
+    confundir con el caso real 464424 (Bloque ORIGEN O2): una parada
+    real de varios minutos DENTRO de un trip más largo SÍ debe confirmar
+    -- ver `test_telemetria_o2.py`. Aquí, en cambio, un solo punto
+    aislado cae dentro del polígono, rodeado de puntos lejanos antes y
+    después -- nunca dos puntos consecutivos coherentes entre sí."""
     _, servicio = _servicio(
         tmp_path,
         viajes_por_patente={
@@ -268,12 +276,9 @@ def test_transito_aislado_por_el_poligono_no_confirma_sin_detencion(plantas, tmp
             ],
         },
         breadcrumbs_por_trip={
-            # Puntos DENTRO del polígono pero con inicio/fin muy separados
-            # entre sí -- un trip de movimiento real, no una detención.
             "transito": (
                 PosicionTelemetria(-33.40, -70.60, "2026-08-07 08:00:00"),
-                PosicionTelemetria(-33.2955, -70.7290, "2026-08-07 08:33:00"),
-                PosicionTelemetria(-33.2949, -70.7285, "2026-08-07 08:39:00"),
+                PosicionTelemetria(-33.2949, -70.7285, "2026-08-07 08:33:00"),  # único punto dentro
                 PosicionTelemetria(-33.30, -70.60, "2026-08-07 08:46:00"),
             ),
         },

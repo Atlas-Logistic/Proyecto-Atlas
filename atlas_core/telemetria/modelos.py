@@ -86,9 +86,51 @@ class DetencionTelemetria:
     longitud: float
     fuente: str = ""
     trip_ids: tuple[str, ...] = ()
+    # Bloque ORIGEN O2 -- los puntos REALES que forman este cluster (no
+    # todos los breadcrumbs de los trips en `trip_ids`, que pueden traer
+    # muchos otros puntos fuera del cluster -- ver bug real encontrado
+    # con 464424: reconstruir "todos los puntos de los trips tocados"
+    # diluía la proporción dentro/fuera con puntos de tramos de
+    # aproximación/salida que nunca fueron parte de esta detención).
+    puntos: tuple[PosicionTelemetria, ...] = ()
 
     def a_dict(self) -> dict[str, object]:
-        return asdict(self)
+        datos = asdict(self)
+        datos.pop("puntos", None)
+        return datos
+
+
+@dataclass(frozen=True)
+class EvidenciaOrigenPlanta:
+    """Bloque ORIGEN O2 -- evidencia GPS acumulada de UNA planta candidata
+    dentro (o cerca) de la ventana documental [hora_entrada, hora_salida]
+    de UN viaje/guía específico. La pregunta que responde no es "¿qué
+    plantas visitó el vehículo hoy?" sino "¿en qué planta estuvo
+    cargando durante ESTA ventana?" -- ver `resolver_planta_origen_gps`."""
+
+    planta_id: str
+    planta_nombre: str
+    duracion_dentro_min: float
+    porcentaje_ventana: float
+    porcentaje_puntos: float
+    entrada_gps: str
+    salida_gps: str
+    estadias: tuple[DetencionTelemetria, ...]
+    score: float
+    motivos: tuple[str, ...]
+
+    def a_dict(self) -> dict[str, object]:
+        return {
+            "planta_id": self.planta_id,
+            "planta_nombre": self.planta_nombre,
+            "duracion_dentro_min": self.duracion_dentro_min,
+            "porcentaje_ventana": self.porcentaje_ventana,
+            "porcentaje_puntos": self.porcentaje_puntos,
+            "entrada_gps": self.entrada_gps,
+            "salida_gps": self.salida_gps,
+            "score": self.score,
+            "motivos": list(self.motivos),
+        }
 
 
 @dataclass(frozen=True)
