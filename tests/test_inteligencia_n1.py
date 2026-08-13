@@ -210,6 +210,95 @@ def test_fuzzy_unico_fuerte_corrobora_cliente():
     assert resultado.valor_resultado == "EBEMA SA"
 
 
+def test_dos_campos_independientes_corroboraan_misma_empresa(tmp_path, monkeypatch):
+    carpeta_catalogos = _escribir_catalogo(
+        tmp_path, "empresas.json", {"781707902": {"nombre": "ARMACERO MATCO SA"}}
+    )
+    _preparar_mocks(
+        monkeypatch,
+        _datos_lineales_completos(
+            cliente="ARMACERO MICO",
+            **{"obra destino": "ARMACERO MATCO", "RUT del cliente": "No encontrado"},
+        ),
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["cliente"] == "ARMACERO MATCO SA"
+    assert "FUZZY" in resultado["metodos_recuperacion_documento"]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in resultado["motivos_revision_documento"]
+
+
+def test_nombre_exacto_unico_de_chofer_completa_rut_desde_catalogo(tmp_path, monkeypatch):
+    carpeta_catalogos = _escribir_catalogo(
+        tmp_path,
+        "choferes.json",
+        {"154542973": {"nombre": "RODRIGO NAHUELÑIR", "activo": True, "aliases": []}},
+    )
+    _preparar_mocks(
+        monkeypatch,
+        _datos_lineales_completos(
+            chofer="RODRIGO NAHUELÑIR", **{"RUT del chofer": "No encontrado"}
+        ),
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["chofer"] == "RODRIGO NAHUELÑIR"
+    assert resultado["rut_chofer"] == "15.454.297-3"
+    assert "CATALOGO" in resultado["metodos_recuperacion_documento"]
+
+
+def test_nombre_exacto_con_rut_catalogo_invalido_no_publica_ni_corrobora(
+    tmp_path, monkeypatch
+):
+    carpeta_catalogos = _escribir_catalogo(
+        tmp_path,
+        "choferes.json",
+        {"154542974": {"nombre": "PERSONA LEGIBLE", "activo": True, "aliases": []}},
+    )
+    _preparar_mocks(
+        monkeypatch,
+        _datos_lineales_completos(
+            chofer="No encontrado", **{"RUT del chofer": "No encontrado"}
+        ),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_extraer_chofer_geometrico",
+        Mock(return_value={"valor": "PERSONA LEGIBLE"}),
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["rut_chofer"] == "No encontrado"
+    assert "CATALOGO" not in resultado["metodos_recuperacion_documento"]
+    assert "CHOFER_SIN_CORROBORAR" in resultado["motivos_revision_documento"]
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_corroboracion_cruzada_se_abstiene_si_obra_apunta_a_otra_empresa(tmp_path, monkeypatch):
+    carpeta_catalogos = _escribir_catalogo(
+        tmp_path,
+        "empresas.json",
+        {
+            "781707902": {"nombre": "ARMACERO MATCO SA"},
+            "909700000": {"nombre": "SALOMON SACK SA"},
+        },
+    )
+    _preparar_mocks(
+        monkeypatch,
+        _datos_lineales_completos(
+            cliente="ARMACERO MICO",
+            **{"obra destino": "SALOMON SACK SA", "RUT del cliente": "No encontrado"},
+        ),
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["cliente"] == "ARMACERO MICO"
+
+
 # --- 10: fuzzy ambiguo -> revisión ---
 
 

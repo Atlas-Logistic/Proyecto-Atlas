@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from atlas_core.catalogos import (
+    buscar_chofer_por_nombre_exacto,
     buscar_chofer_por_rut,
     buscar_destino_por_codigo,
     buscar_empresa_por_rut,
@@ -24,6 +25,26 @@ def test_normalizar_rut():
 def test_normalizar_patente():
     assert normalizar_patente(" ab cd 12 ") == "ABCD12"
     assert normalizar_patente("xyzt99") == "XYZT99"
+
+
+def test_buscar_chofer_por_nombre_exacto_acepta_nombre_o_alias_unico_y_abstiene_ambiguo():
+    catalogo = {
+        "111111111": {"nombre": "PERSONA UNO", "activo": True, "aliases": ["P. UNO"]},
+        "222222222": {"nombre": "PERSONA DOS", "activo": True, "aliases": []},
+    }
+    assert buscar_chofer_por_nombre_exacto(catalogo, "persona uno")[0] == "111111111"
+    assert buscar_chofer_por_nombre_exacto(catalogo, "P. UNO")[0] == "111111111"
+    catalogo["222222222"]["aliases"] = ["P. UNO"]
+    assert buscar_chofer_por_nombre_exacto(catalogo, "P. UNO") is None
+
+
+def test_buscar_chofer_por_nombre_exacto_se_abstiene_inactivo_o_inexistente():
+    catalogo = {
+        "111111111": {"nombre": "PERSONA INACTIVA", "activo": False, "aliases": []},
+    }
+
+    assert buscar_chofer_por_nombre_exacto(catalogo, "PERSONA INACTIVA") is None
+    assert buscar_chofer_por_nombre_exacto(catalogo, "PERSONA AUSENTE") is None
 
 
 def test_cargar_catalogo_json_existente(tmp_path):
@@ -269,6 +290,18 @@ def test_patente_rampla_exacta_jf4288_no_se_modifica():
 
     assert resultado.estado == "COINCIDENCIA_EXACTA"
     assert resultado.valor_resultado == "JF4288"
+
+
+def test_patentes_reales_464522_resuelven_confusiones_ocr_documentadas():
+    tracto = resolver_patente_canonica(
+        CATALOGO_VEHICULOS_REAL_464511, "AL1E79", tipo_esperado="TRACTO"
+    )
+    carro = resolver_patente_canonica(
+        CATALOGO_VEHICULOS_REAL_464511, "JR2501", tipo_esperado="CARRO"
+    )
+
+    assert (tracto.estado, tracto.valor_resultado) == ("CORRECCION_OCR_SEGURA", "AL1879")
+    assert (carro.estado, carro.valor_resultado) == ("CORRECCION_OCR_SEGURA", "JK2501")
 
 
 def test_patente_candidato_ambiguo_se_abstiene():

@@ -96,6 +96,24 @@ def buscar_chofer_por_rut(
     return _buscar_registro(catalogo, rut, normalizar_rut)
 
 
+def buscar_chofer_por_nombre_exacto(
+    catalogo: FuenteCatalogo, nombre: str
+) -> tuple[str, dict[str, Any]] | None:
+    """Resuelve nombre/alias exacto solo si identifica un chofer activo único."""
+    buscado = _normalizar_nombre_entidad(nombre)
+    if not buscado:
+        return None
+    coincidencias: list[tuple[str, dict[str, Any]]] = []
+    for identificador, registro in _obtener_catalogo(catalogo).items():
+        if not isinstance(registro, dict) or registro.get("activo", True) is not True:
+            continue
+        aliases = registro.get("aliases")
+        nombres = [registro.get("nombre", ""), *(aliases if isinstance(aliases, list) else [])]
+        if any(_normalizar_nombre_entidad(str(valor)) == buscado for valor in nombres):
+            coincidencias.append((str(identificador), registro))
+    return coincidencias[0] if len(coincidencias) == 1 else None
+
+
 def buscar_vehiculo_por_patente(
     catalogo: FuenteCatalogo, patente: str
 ) -> dict[str, Any] | None:
@@ -112,6 +130,8 @@ _CONFUSIONES_OCR_PATENTE_COMUNES = (
     frozenset({"1", "I"}),
     frozenset({"5", "S"}),
     frozenset({"8", "B"}),
+    frozenset({"8", "E"}),
+    frozenset({"K", "R"}),
 )
 
 
@@ -159,7 +179,7 @@ def resolver_patente_canonica(
     C. corrección OCR conservadora -> acepta solo si hay un único candidato de
        catálogo, con la misma longitud, y la diferencia es de una sola
        posición explicada por una confusión OCR común y documentada
-       (B/D, 0/O, 1/I, 5/S, 8/B). Dos o más diferencias, o dos o más
+       (B/D, 0/O, 1/I, 5/S, 8/B, 8/E, K/R). Dos o más diferencias, o dos o más
        candidatos igualmente plausibles, nunca se corrigen.
 
     `tipo_esperado` (p. ej. "TRACTO" o "CARRO") filtra los candidatos de la

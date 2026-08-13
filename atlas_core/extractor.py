@@ -62,7 +62,13 @@ def _es_etiqueta_senor(texto_simple: str) -> bool:
     palabra dentro de otro valor (p. ej. un nombre de destino que contenga
     "SEÑOR"). Comparación conservadora sobre el contenido completo del
     bloque, no una búsqueda de subcadena."""
-    return bool(re.fullmatch(r"SENOR(?:\(ES\)|\(IES\)|ES|IES)?", texto_simple))
+    # El borde izquierdo de la etiqueta suele quedar pegado al margen de la
+    # foto. EasyOCR puede perder exclusivamente la ``S`` inicial (caso real
+    # 464522: ``EÑORIES)``), aunque conserve el resto de la palabra. Se tolera
+    # solo esa omisión de borde; la coincidencia sigue abarcando el bloque
+    # completo, por lo que no convierte nombres que contienen "SEÑOR" en
+    # etiquetas falsas.
+    return bool(re.fullmatch(r"S?ENOR(?:\(ES\)|\(IES\)|ES\)?|IES\)?)?", texto_simple))
 
 
 def _es_etiqueta_rut(texto_simple: str) -> bool:
@@ -76,7 +82,10 @@ def _es_etiqueta_rut(texto_simple: str) -> bool:
     candidato de nombre de cliente, produciendo una ambigüedad falsa que
     hacía abstenerse al selector aunque el nombre real sí estuviera
     geométricamente más cerca."""
-    return bool(re.fullmatch(r"R\.?U\.?T\.?", texto_simple))
+    # Igual que SEÑOR(ES), R.U.T. puede perder el primer carácter cuando la
+    # columna izquierda queda cortada por la foto (caso real 464522: ``UT``).
+    # Se acepta solo el bloque completo UT/U.T.; nunca una subcadena.
+    return bool(re.fullmatch(r"R?\.?U\.?T\.?", texto_simple))
 
 
 _PATRON_ANCLA_RETIRA = re.compile(r"^RETI?RA\b")
@@ -130,6 +139,32 @@ def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
     return items
 
 
+_EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO = (
+    "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
+    "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
+    "SOLICITANTE", "TRANSPORTE", "FECHA", "EMISION", "ENTRADA", "SALIDA",
+    "OBRA DESTINO", "DESPACHAR A", "PESO", "BRUTO", "TARA", "TOTAL",
+    "VALOR", "NETO", "IVA",
+)
+
+
+def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:
+    """Política nominal única para asociaciones geométricas de identidad."""
+    texto = item["simple"]
+    if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
+        return False
+    if _es_etiqueta_senor(texto) or _es_etiqueta_rut(texto):
+        return False
+    if texto in {"GIRO", "IRO"}:
+        return False
+    if any(palabra in texto for palabra in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO):
+        return False
+    if re.fullmatch(r"[\d\W_]+", texto) or re.search(r"\b\d{1,2}[:;]\d{2}\b", texto):
+        return False
+    digitos = sum(caracter.isdigit() for caracter in texto)
+    return not (digitos and digitos >= sum(caracter.isalpha() for caracter in texto))
+
+
 def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
     items = _normalizar_bloques_geometricos(bloques)
@@ -142,14 +177,6 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     # se descarta como candidato aparte, en `nominal()`, comparando el bloque
     # completo contra `_es_etiqueta_senor` (mismo criterio conservador que
     # usa `es_etiqueta` para reconocer la etiqueta de cliente).
-    exclusiones = (
-        "RUT", "TELEFONO", "FONO", "CODIGO", "CLIENTE", "HORA",
-        "DIRECCION", "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO",
-        "SOLICITANTE", "TRANSPORTE", "FECHA", "ENTRADA", "SALIDA",
-        "OBRA DESTINO", "DESPACHAR A", "PESO", "BRUTO",
-        "TARA", "TOTAL", "VALOR", "NETO", "IVA",
-    )
-
     def es_etiqueta(item: Dict[str, Any], campo: str) -> bool:
         texto = item["simple"]
         if campo == "cliente":
@@ -157,22 +184,12 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         return "OBRA DESTINO" in texto or texto == "DESTINO"
 
     def es_etiqueta_giro(item: Dict[str, Any]) -> bool:
-        return item["simple"] == "GIRO"
+        # La columna izquierda puede perder la G en fotografías recortadas
+        # (caso real 464522: ``IRO``). Coincidencia de bloque completo.
+        return item["simple"] in {"GIRO", "IRO"}
 
     def nominal(item: Dict[str, Any]) -> bool:
-        texto = item["simple"]
-        if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
-            return False
-        if _es_etiqueta_senor(texto) or _es_etiqueta_rut(texto):
-            return False
-        if any(palabra in texto for palabra in exclusiones):
-            return False
-        if re.fullmatch(r"[\d\W_]+", texto) or re.search(r"\b\d{1,2}[:;]\d{2}\b", texto):
-            return False
-        digitos = sum(caracter.isdigit() for caracter in texto)
-        if digitos and digitos >= sum(caracter.isalpha() for caracter in texto):
-            return False
-        return True
+        return _es_candidato_nominal_geometrico(item)
 
     def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
         alto = max(etiqueta["h"], candidato["h"])
@@ -203,6 +220,12 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
             (puntuar(etiqueta, item), item)
             for item in items
             if item is not etiqueta and nominal(item)
+            # Las filas estructurales avanzan de arriba hacia abajo. Un valor
+            # cuyo centro está materialmente por encima de GIRO pertenece a
+            # una fila documental anterior (p. ej. SEÑOR(ES) o R.U.T.), aunque
+            # por cajas OCR solapadas resulte aritméticamente más cercano.
+            and item["cy"]
+            >= etiqueta["cy"] - max(etiqueta["h"], item["h"]) * 0.25
         ]
         mejores = [(puntuacion, item) for puntuacion, item in mejores if puntuacion is not None and puntuacion <= 1.25]
         if not mejores:
@@ -229,7 +252,9 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
             for item in items:
                 if item is etiqueta or not nominal(item):
                     continue
-                if campo == "obra destino" and id(item) in valores_giro:
+                # GIRO es un dato comercial distinto: su valor no puede ser
+                # ni cliente ni obra destino.
+                if id(item) in valores_giro:
                     continue
                 puntuacion = puntuar(etiqueta, item)
                 if puntuacion is None or puntuacion > 1.25:
@@ -340,6 +365,52 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     if len(candidatos_validos) == 1:
         return {"valor": next(iter(candidatos_validos))}
     return {}
+
+
+def _extraer_identidad_cliente_recortada_geometrica(
+    bloques: List[Any],
+) -> Dict[str, Any]:
+    """Recupera nombre+RUT cuando el margen corta las etiquetas del cliente.
+
+    Exige simultáneamente un sufijo literal de ``SENOR(ES)`` tocando el
+    borde izquierdo, un nombre inmediatamente a su derecha y un RUT chileno
+    válido justo debajo. Se abstiene salvo que la pareja sea única.
+    """
+    items = _normalizar_bloques_geometricos(bloques)
+    etiqueta = "SENOR(ES)"
+    sufijos = {
+        etiqueta[indice:]
+        for indice in range(1, len(etiqueta) - 1)
+        if len(etiqueta[indice:]) >= 2
+    }
+    fragmentos = [
+        item for item in items
+        if item["x1"] <= 3 and item["simple"] in sufijos
+    ]
+    decisiones: set[tuple[str, str]] = set()
+    for fragmento in fragmentos:
+        nombres = [
+            item for item in items
+            if item["x1"] >= fragmento["x2"] - 8
+            and 0 <= item["x1"] - fragmento["x2"] <= 240
+            and abs(item["cy"] - fragmento["cy"])
+            <= max(item["h"], fragmento["h"])
+            and _es_candidato_nominal_geometrico(item)
+        ]
+        for nombre in nombres:
+            for candidato_rut in items:
+                if abs(candidato_rut["x1"] - nombre["x1"]) > 25:
+                    continue
+                brecha = candidato_rut["y1"] - nombre["y2"]
+                if not -3 <= brecha <= max(nombre["h"], candidato_rut["h"]) * 1.5:
+                    continue
+                validacion = validar_rut_chileno(candidato_rut["texto"])
+                if validacion.estado == EstadoValidacion.VALIDO:
+                    decisiones.add((nombre["texto"].strip().upper(), validacion.valor))
+    if len(decisiones) != 1:
+        return {}
+    nombre, rut = next(iter(decisiones))
+    return {"cliente": nombre, "rut": rut}
 
 
 def _normalizar_transporte_aza(texto: str) -> Optional[tuple[str, bool]]:
@@ -1130,12 +1201,18 @@ def _extraer_patentes_geometrico(bloques: List[Any]) -> Dict[str, Any]:
                 # propio junto a RAMPLA con su valor, ambos en la misma
                 # zona (ver test_rampla_unica_geometrica_acepta_etiquetas_sinonimas).
                 if rivales_items:
-                    distancia_propia = abs(candidato["cx"] - etiqueta["cx"]) + abs(candidato["cy"] - etiqueta["cy"])
-                    distancia_rival = min(
-                        abs(candidato["cx"] - rival["cx"]) + abs(candidato["cy"] - rival["cy"])
+                    # Una cercanía euclidiana no basta: en diseños de dos
+                    # columnas el valor del tracto puede quedar físicamente
+                    # más cerca de la etiqueta CARRO, pero a su izquierda.
+                    # Solo se considera rival si también es una asociación
+                    # geométricamente válida según las mismas reglas.
+                    puntuaciones_rivales = [
+                        puntuacion_rival
                         for rival in rivales_items
-                    )
-                    if distancia_rival + 8 < distancia_propia:
+                        for puntuacion_rival in (puntuar(rival, candidato),)
+                        if puntuacion_rival is not None
+                    ]
+                    if puntuaciones_rivales and min(puntuaciones_rivales) + 0.03 < puntuacion:
                         continue
                 valor = _valor_unico_residual(candidato["simple"])
                 if valor is None:

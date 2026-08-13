@@ -32,6 +32,7 @@ from atlas_core.extractor import (
     _extraer_asociaciones_geometricas,
     _extraer_chofer_geometrico,
     _extraer_fecha_geometrico,
+    _extraer_identidad_cliente_recortada_geometrica,
     _extraer_patentes_geometrico,
     _extraer_rut_cliente_geometrico,
     _extraer_transporte_geometrico,
@@ -52,6 +53,96 @@ def test_geometria_cliente_a_la_derecha_de_senores():
     bloques = [_bloque("SEÑOR(ES)", 20, 20, 80), _bloque("ACEROS DEL SUR", 180, 20)]
 
     assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ACEROS DEL SUR"
+
+
+def test_identidad_cliente_recortada_exige_nombre_y_rut_valido_en_borde():
+    bloques = [
+        _bloque("S)", 0, 100, 13, 15),
+        _bloque("EMPRESA SEGURA SA", 90, 98, 120, 12),
+        _bloque("90.970.000-0", 90, 111, 93, 15),
+    ]
+
+    assert _extraer_identidad_cliente_recortada_geometrica(bloques) == {
+        "cliente": "EMPRESA SEGURA SA",
+        "rut": "90.970.000-0",
+    }
+
+
+def test_identidad_cliente_recortada_se_abstiene_sin_rut_valido_o_fuera_del_borde():
+    sin_rut_valido = [
+        _bloque("S)", 0, 100, 13, 15),
+        _bloque("EMPRESA SEGURA SA", 90, 98, 120, 12),
+        _bloque("90.970.000-1", 90, 111, 93, 15),
+    ]
+    fuera_borde = [
+        _bloque("S)", 20, 100, 13, 15),
+        _bloque("EMPRESA SEGURA SA", 90, 98, 120, 12),
+        _bloque("90.970.000-0", 90, 111, 93, 15),
+    ]
+
+    assert _extraer_identidad_cliente_recortada_geometrica(sin_rut_valido) == {}
+    assert _extraer_identidad_cliente_recortada_geometrica(fuera_borde) == {}
+
+
+def test_identidad_cliente_recortada_se_abstiene_ante_dos_parejas_validas():
+    bloques = [
+        _bloque("S)", 0, 100, 13, 15),
+        _bloque("EMPRESA UNO SA", 90, 98, 110, 12),
+        _bloque("90.970.000-0", 90, 111, 93, 15),
+        _bloque("EMPRESA DOS SA", 215, 98, 110, 12),
+        _bloque("12.345.678-5", 215, 111, 93, 15),
+    ]
+
+    assert _extraer_identidad_cliente_recortada_geometrica(bloques) == {}
+
+
+def test_identidad_cliente_recortada_rechaza_campo_estructural_como_nombre():
+    bloques = [
+        _bloque("S)", 0, 100, 13, 15),
+        _bloque("DIRECCION CLIENTE", 90, 98, 130, 12),
+        _bloque("90.970.000-0", 90, 111, 93, 15),
+    ]
+
+    assert _extraer_identidad_cliente_recortada_geometrica(bloques) == {}
+
+
+def test_geometria_cliente_tolera_s_inicial_recortada_de_senores():
+    """Una foto puede recortar solo la S inicial de SEÑOR(ES), sin volver
+    permisivo el reconocimiento de etiquetas por subcadena."""
+    bloques = [_bloque("EÑORIES)", 0, 20, 65), _bloque("ARMACERO MATCO", 180, 20)]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ARMACERO MATCO"
+
+
+def test_geometria_cliente_descarta_rut_con_r_inicial_recortada():
+    bloques = [
+        _bloque("EÑORIES)", 0, 20, 65),
+        _bloque("ARMACERO MATCO", 180, 20),
+        _bloque("UT", 0, 42, 27),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ARMACERO MATCO"
+
+
+def test_geometria_cliente_no_confunde_emision_recortada_con_empresa():
+    bloques = [
+        _bloque("CHA DE EMISIÓN", 0, 0, 118),
+        _bloque("EÑORIES)", 0, 24, 65),
+        _bloque("ARMACERO MATCO", 180, 24),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ARMACERO MATCO"
+
+
+def test_geometria_cliente_no_confunde_valor_de_giro_recortado():
+    bloques = [
+        _bloque("EÑORIES)", 0, 20, 65),
+        _bloque("ARMACERO MATCO", 180, 20),
+        _bloque("IRO", 0, 42, 27),
+        _bloque("FCA OTROS PDR METAL", 180, 42),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ARMACERO MATCO"
 
 
 def test_geometria_cliente_debajo_de_senores():
@@ -201,6 +292,22 @@ def test_geometria_cliente_y_destino_simultaneos_no_se_mezclan():
     assert _extraer_asociaciones_geometricas(bloques) == {
         "cliente": "EMPRESA ANDINA",
         "obra destino": "PLANTA COSTA",
+    }
+
+
+def test_geometria_giro_no_se_apropia_del_nombre_de_fila_anterior():
+    """Una fila GIRO sin valor alineado no debe reservar el nombre legítimo
+    de SEÑOR(ES) situado arriba; un valor real de GIRO situado a su derecha
+    sigue siendo estructural y no puede publicarse como cliente."""
+    bloques = [
+        _bloque("SEÑOR(ES)", 20, 20, 80),
+        _bloque("COMERCIAL DEL PACIFICO SA", 150, 24, 190),
+        _bloque("GIRO", 20, 45, 45),
+        _bloque("VENTA AL POR MENOR", 150, 48, 150),
+    ]
+
+    assert _extraer_asociaciones_geometricas(bloques) == {
+        "cliente": "COMERCIAL DEL PACIFICO SA"
     }
 
 
@@ -942,6 +1049,20 @@ def test_patentes_etiquetas_y_valores_separados_por_bloques():
     ]
 
     assert _extraer_patentes_geometrico(bloques) == {"tracto": "SD6486", "carro": "JF4288"}
+
+
+def test_patentes_dos_columnas_no_asigna_al_carro_el_valor_izquierdo_del_tracto():
+    """Caso real 464522: el valor de PATENTE está entre ambas etiquetas."""
+    bloques = [
+        _bloque("RETIRA", 545, 999, 50),
+        _bloque("PATENTE", 545, 1013, 64),
+        _bloque("AL1e79", 633, 1015, 50),
+        _bloque("CARRO", 697, 1013, 42),
+        _bloque("JR2501", 743, 1013, 50),
+        _bloque("FECHA LLEGADA", 545, 1043, 100),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "AL1E79", "carro": "JR2501"}
 
 
 def test_patentes_candidato_fuera_de_zona_retira_llegada_se_rechaza():

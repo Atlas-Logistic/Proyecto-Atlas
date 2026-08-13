@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from atlas_core.catalogos import (
+    buscar_chofer_por_nombre_exacto,
     buscar_chofer_por_rut,
     buscar_empresa_por_rut,
     cargar_catalogo_json,
@@ -32,6 +33,7 @@ from atlas_core.extractor import (
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_fecha_geometrico,
+    _extraer_identidad_cliente_recortada_geometrica,
     _extraer_patentes_geometrico,
     _extraer_rut_chofer_geometrico,
     _extraer_rut_cliente_geometrico,
@@ -734,6 +736,15 @@ def procesar_archivo(
         try:
             bloques_guia = _leer_bloques()
             asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
+            if datos.get("cliente") in {None, "", "No encontrado"}:
+                identidad_recortada = _extraer_identidad_cliente_recortada_geometrica(
+                    bloques_guia
+                )
+                if identidad_recortada:
+                    asociaciones["cliente"] = identidad_recortada["cliente"]
+                    if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
+                        datos["RUT del cliente"] = identidad_recortada["rut"]
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
             for campo in ("cliente", "obra destino"):
                 if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
                     datos[campo] = asociaciones[campo]
@@ -929,6 +940,33 @@ def procesar_archivo(
                     datos["cliente"] = decision_fuzzy_cliente.valor_resultado
                     metodos_documento.add(MetodoObtencionDocumento.FUZZY.value)
                     cliente_corroborado_n1 = True
+                else:
+                    # OPERACIÓN REAL R2: dos campos impresos e independientes
+                    # pueden corroborar la misma identidad aun cuando el OCR
+                    # del cliente aislado quede justo bajo el umbral normal.
+                    # Solo se acepta si (a) obra destino resuelve de forma
+                    # segura con el umbral normal, (b) cliente resuelve con
+                    # candidato único y margen conservando al menos 0.80, y
+                    # (c) ambos convergen exactamente en la misma empresa.
+                    nombre_obra_para_corroborar = str(
+                        datos.get("obra destino", "No encontrado")
+                    ).strip()
+                    decision_fuzzy_obra = resolver_nombre_empresa_difuso(
+                        catalogo_empresas, nombre_obra_para_corroborar
+                    )
+                    decision_cliente_cruzada = resolver_nombre_empresa_difuso(
+                        catalogo_empresas, nombre_cliente_actual, umbral=0.80
+                    )
+                    estados_seguros = {"SIN_CAMBIO", "ALIAS", "COINCIDENCIA_SEGURA"}
+                    if (
+                        decision_fuzzy_obra.estado in estados_seguros
+                        and decision_cliente_cruzada.estado in estados_seguros
+                        and decision_fuzzy_obra.valor_resultado
+                        == decision_cliente_cruzada.valor_resultado
+                    ):
+                        datos["cliente"] = decision_cliente_cruzada.valor_resultado
+                        metodos_documento.add(MetodoObtencionDocumento.FUZZY.value)
+                        cliente_corroborado_n1 = True
                 logger.info(
                     "fuzzy-matching-catalogo-empresas-v1 estado=%s similitud=%s",
                     decision_fuzzy_cliente.estado,
@@ -940,6 +978,20 @@ def procesar_archivo(
 
             if cliente_corroborado_n1:
                 campos_geometricos_sin_corroborar.discard("cliente")
+                decision_obra_corroborada = resolver_nombre_empresa_difuso(
+                    catalogo_empresas,
+                    str(datos.get("obra destino", "No encontrado")).strip(),
+                )
+                if (
+                    decision_obra_corroborada.estado
+                    in {"SIN_CAMBIO", "ALIAS", "COINCIDENCIA_SEGURA"}
+                    and decision_obra_corroborada.valor_resultado
+                    == datos.get("cliente")
+                ):
+                    # Dos campos impresos independientes convergen en la
+                    # identidad de cliente ya corroborada; no queda una duda
+                    # adicional propia de obra destino.
+                    campos_geometricos_sin_corroborar.discard("obra destino")
             elif (
                 validar_rut_chileno(rut_cliente_actual).estado == EstadoValidacion.VALIDO
                 and "cliente" in campos_geometricos_sin_corroborar
@@ -984,10 +1036,31 @@ def procesar_archivo(
             # identifica un único chofer conocido en catálogo.
             chofer_corroborado = True
         else:
+            coincidencia_exacta = buscar_chofer_por_nombre_exacto(
+                catalogo_choferes, nombre_chofer
+            )
+            if coincidencia_exacta is not None:
+                rut_catalogo, registro_chofer = coincidencia_exacta
+                datos["chofer"] = str(
+                    registro_chofer.get("nombre", nombre_chofer)
+                ).strip()
+                rut_limpio = normalizar_rut(rut_catalogo)
+                rut_con_guion = (
+                    f"{rut_limpio[:-1]}-{rut_limpio[-1]}"
+                    if len(rut_limpio) >= 2 else rut_limpio
+                )
+                rut_validado = validar_rut_chileno(rut_con_guion)
+                if rut_validado.estado == EstadoValidacion.VALIDO:
+                    datos["RUT del chofer"] = rut_validado.valor
+                    metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
+                    chofer_corroborado = True
             decision_fuzzy = resolver_nombre_chofer_difuso(
                 catalogo_choferes, nombre_chofer
             )
-            if decision_fuzzy.estado == "COINCIDENCIA_SEGURA":
+            if (
+                not chofer_corroborado
+                and decision_fuzzy.estado in {"ALIAS", "COINCIDENCIA_SEGURA"}
+            ):
                 datos["chofer"] = decision_fuzzy.valor_resultado
                 metodos_documento.add(MetodoObtencionDocumento.FUZZY.value)
                 # Corroborado por diseño: resolver_nombre_chofer_difuso solo
