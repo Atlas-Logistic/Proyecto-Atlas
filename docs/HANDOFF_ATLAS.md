@@ -4,7 +4,9 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
-## 2026-08-13 — INFRAESTRUCTURA S2.2: Desktop portable, con un bloqueo de verificación real y transparente -- si retomas esto, empieza aquí
+> **Handoff vigente:** leer primero “Cierre vigente — INFRAESTRUCTURA S2.2” al final del archivo. Los registros previos del commit perdido quedaron supersedidos por la reconstrucción publicada.
+
+## 2026-08-13 — INFRAESTRUCTURA S2.2: registro provisional del PC de oficina (supersedido)
 
 - **Rama motor:** `lector-mvp-guia-nueva`. Baseline: INFRAESTRUCTURA S2.1 (`2046f08`).
 - **Repo Desktop real, encontrado y usado:** `https://github.com/Atlas-Logistic/Atlas-Viajes-Desktop.git`, rama `fix-desktop-data-root-drag-drop`. Copia de trabajo local: `C:\Users\corte\Desktop\MBT\Proyecto\Atlas-Viajes-Desktop\` (clon limpio + los 3 commits que solo existían en la copia que S2.1 había preservado en `historico_pre_infra_s2\`, traídos por fast-forward verificado, nunca reescritos). **No se creó ningún repo GitHub nuevo.**
@@ -490,3 +492,33 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 - Ground truth y muestra real viven fuera del repo, en `C:\Users\Jjjc0508\Desktop\Atlas\datos_privados\` (`muestra_fechas_30\`, `ground_truth\validacion_atlas_30_guias_v1.xlsx`) — no están versionados por diseño (datos privados de clientes).
 - Bitácora ejecutiva: `docs/BITACORA_EJECUTIVA.md`. Bitácora técnica: `docs/BITACORA_TECNICA_CRONOLOGICA.md`.
 - Baseline de tests: `python -m pytest -q` → 441 passed.
+## Estado vigente — INFRAESTRUCTURA S2.2 (2026-08-13)
+
+**INFRAESTRUCTURA S2.2: NO CERRADO.**
+
+Todo salvo un bloqueo quedó auditado:
+
+- Motor `lector-mvp-guia-nueva` en `d5098e5`, alineado con remoto; **927/927 tests**.
+- Desktop local preservado en `9622981`; **110/110 tests** con `npm.cmd test`; no publicar esta línea como reemplazo.
+- Importación casa→Drive: **17/17 archivos coinciden por SHA-256**. Inventario post-importación regenerado con **23 filas** en `G:\Mi unidad\Atlas\respaldos\importacion_casa_s2_2_20260813_151013\inventario_post_importacion.csv`.
+- `ATLAS_DATA_DIR`, catálogos y `estado_operacion.json` funcionan contra `G:\Mi unidad\Atlas`.
+- Sin eliminaciones; se preservaron histórico, respaldo, AppData, ambos repos y todos sus `.git`.
+- La configuración persistida de Desktop sigue usando rutas locales existentes de casa. No migrarla manualmente: la convergencia portable pertenece al cambio autoritativo perdido.
+
+Único bloqueo y siguiente acción: recuperar en el PC de oficina el repo `Desktop\MBT\Proyecto\Atlas-Viajes-Desktop` con el commit local `4b94a38`. Transportar el objeto Git o un bundle verificable (preferible a reconstruir a mano), confirmar el SHA completo y su base, ejecutar `npm.cmd test`, inspeccionar el diff y solo entonces publicar normalmente `fix-desktop-data-root-drag-drop`. Si no puede recuperarse exactamente, mantener S2.2 como **NO CERRADO**. Nunca force-push ni sustituirlo por `9622981`.
+
+No iniciar OPERACIÓN REAL R2 como parte de este cierre.
+
+> **Estado supersedido:** ya no se necesita recuperar `4b94a38`; el resultado funcional fue reconstruido, probado y publicado desde casa.
+
+## Cierre vigente — INFRAESTRUCTURA S2.2 (2026-08-13)
+
+**INFRAESTRUCTURA S2.2: CERRADO. LISTO PARA OPERACIÓN REAL R2: SÍ. R2 aún no iniciado.**
+
+- Motor: `lector-mvp-guia-nueva`, `d5098e5`; contrato portable publicado y Drive validado.
+- Desktop: `fix-desktop-data-root-drag-drop`, `859d6bf440fddc925118fa172efe174b6ab75ad6`, publicado en el remoto oficial y limpio.
+- Desktop resuelve `ATLAS_DATA_DIR`, lee exclusivamente el manifiesto vigente, rechaza escapes fuera de raíz, no cae al histórico y migra configuración legacy de reporte/catálogos conservando respaldo.
+- Pruebas Desktop: **126/126**. Validación real: operación actual visible desde `G:\Mi unidad\Atlas\reportes\actual`; dataset y `viajes.csv` accesibles; histórico no usado.
+- Importación canónica: 17/17 hashes coincidentes; inventario post-importación de 23 archivos. Secretos permanecen locales y no fueron incorporados al código ni a la configuración portable.
+- Limpieza automática no pudo materializarse: la política del entorno bloqueó todos los borrados antes de ejecución. Los candidatos demostrados están enumerados en la bitácora técnica; ningún archivo fue eliminado.
+- Para iniciar R2: partir de estos dos HEAD remotos y de la operación vigente del manifiesto. No reprocesar las 19 guías como parte de infraestructura.

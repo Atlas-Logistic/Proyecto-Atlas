@@ -4,7 +4,9 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
-## 2026-08-13 — Cierre: INFRAESTRUCTURA S2.2 (Desktop portable, contrato compartido de operación vigente)
+> **Actualización posterior:** este registro describe el trabajo del PC de oficina. El cierre reconstruido y publicado al final del archivo fija el estado vigente.
+
+## 2026-08-13 — Registro provisional: INFRAESTRUCTURA S2.2 (trabajo local del PC de oficina)
 
 **Rama motor:** `lector-mvp-guia-nueva` · **Baseline:** posterior a INFRAESTRUCTURA S2.1 (`2046f08`).
 
@@ -1596,3 +1598,40 @@ Diagnóstico previo (mismo bloque de trabajo) midió el comportamiento real de `
 ### Estado de cierre
 
 `git status`: `lector-mvp-guia-nueva`, sincronizado con `origin`, working tree con exactamente 5 rutas modificadas/nuevas: `atlas_core/procesamiento_masivo.py`, `tests/test_procesamiento_masivo.py`, `docs/BITACORA_EJECUTIVA.md`, `docs/BITACORA_TECNICA_CRONOLOGICA.md`, `docs/HANDOFF_ATLAS.md`.
+## 2026-08-13 — Auditoría final de INFRAESTRUCTURA S2.2
+
+### Repositorios y pruebas
+
+- Motor: `Proyecto-Atlas`, rama `lector-mvp-guia-nueva`, HEAD `d5098e56bce4e80e5c47703eb47999e1a84c12ce`, remoto `origin=https://github.com/Atlas-Logistic/Proyecto-Atlas.git`, árbol limpio y alineado con `origin/lector-mvp-guia-nueva`. `python -m pytest -q`: **927 passed in 7.47s**.
+- Desktop: `Atlas-Viajes-Desktop-Restaurado`, rama `fix-desktop-data-root-drag-drop`, HEAD `96229813fcae41c5e1ea22ac139c703c616c976a`, remoto `origin=https://github.com/Atlas-Logistic/Atlas-Viajes-Desktop.git`, árbol limpio. El remoto de la rama termina en `139d41f`; este es ancestro del HEAD local. `npm.cmd test`: **110 tests, 110 pass, 0 fail, 0 skipped**.
+- `git cat-file` confirma que `4b94a38` no es un objeto disponible en la copia Desktop. No se hizo reset, cherry-pick, commit, push ni force-push.
+
+### Integridad de la importación y contrato
+
+- Se recalcularon hashes SHA-256 de origen y destino para los 8 catálogos, el dataset operacional, los 5 archivos del reporte N1, las 2 entradas reales y `telemetria_cache.json`: **17/17 coincidencias; 0 discrepancias**.
+- Hashes destacados confirmados: dataset `915939141F8A914B8FAA38860E5F5314DF051D532BE692F64E62F4B04E2A330D`; caché de telemetría `62A84AEE52700E02C63CF20CDD5A170D9B600586225DC879473C6E0113C4D6FA`.
+- Se regeneró `G:\Mi unidad\Atlas\respaldos\importacion_casa_s2_2_20260813_151013\inventario_post_importacion.csv` después del arreglo del comodín: contiene 23 archivos canónicos con bytes, modificación y SHA-256, incluidas las dos entradas, cinco salidas del reporte y `estado_operacion.json`.
+- Validación ejecutada desde el motor: raíz `G:\Mi unidad\Atlas`; fuente `CATALOGOS_VALIDOS`; `leer_estado_operacion()` devolvió schema 1, reporte `reportes/actual`, dataset `operacion/actual/analisis_completo_guias.csv` y origen `importacion_unica_casa_s2_2`.
+- Secretos auditados sin revelar valores: `ATLAS_ONELOGIS_API_KEY` y `OPENROUTESERVICE_API_KEY` están configurados. `ATLAS_DATA_DIR` está configurada a nivel de usuario. No se hallaron rutas personales absolutas activas en el código productivo del motor; las coincidencias Desktop restantes están en tests/documentación. La configuración persistida de la app sí conserva rutas locales de casa existentes y aún no converge al Drive.
+
+### Conservación, limpieza y bloqueo
+
+- Eliminaciones realizadas: **ninguna**. Se intentó eliminar solo cuatro directorios temporales `atlas-config-legado-*` creados por la suite de esta auditoría, pero la política del entorno rechazó la operación; quedaron conservados. No se tocó ningún repo, `.git`, Drive, histórico, respaldo ni AppData vivo.
+- `4b94a38` solo está documentado en `coordinacion/PENDIENTE_PC_CASA.md` como commit local del PC de oficina (`Desktop\MBT\Proyecto\Atlas-Viajes-Desktop`). Esa ruta no existe aquí y el objeto no está en el remoto ni en las copias inspeccionadas. Los 110 tests verdes validan `9622981`, no el cambio perdido.
+- Resultado obligatorio: **INFRAESTRUCTURA S2.2: NO CERRADO**. Único bloqueo: recuperar desde el PC de oficina el objeto/diff exacto de `4b94a38`, verificar su identidad y ejecutar la suite antes de publicarlo sin force-push.
+- OPERACIÓN REAL R2 no fue iniciada.
+
+> **Estado supersedido:** la decisión posterior autorizó reconstruir el resultado arquitectónico verificable sin recuperar `4b94a38`.
+
+## 2026-08-13 — Cierre reconstruido y publicado: INFRAESTRUCTURA S2.2
+
+- Base Desktop: rama `fix-desktop-data-root-drag-drop`, HEAD inicial `96229813fcae41c5e1ea22ac139c703c616c976a`, árbol limpio, remoto oficial `Atlas-Logistic/Atlas-Viajes-Desktop`; Node `v24.19.0`, npm `11.17.0`.
+- Se agregaron `src/atlas_data_dir.js` y `src/estado_operacion.js`, con resolución por override/`ATLAS_DATA_DIR`/configuración local/autodetección, validación de contención y lectura segura del schema 1.
+- `main.js` usa el manifiesto para autocarga, deriva catálogos y rutas operacionales desde la raíz portable, expone IPC acotados de estado/configuración y conserva el repo Python fuera de Drive. `preload.js` mantiene el puente explícito; la UI muestra mensajes humanos ante operación ausente/inválida.
+- `configuracion_usuario.js` migra una sola vez `carpetaReportes` y `carpetaCatalogos` fuera de la raíz, respaldando valores anteriores; nunca mueve `carpetaProyectoPython` ni almacena secretos.
+- Pruebas nuevas: resolución portable, prioridad, autodetección, límite `Atlas`/`Atlas2`, ausencia/corrupción/schema, rutas absolutas o escapadas, dataset nulo y migración idempotente. Suite: **110/110 baseline; 126/126 final**.
+- Validación real con módulos Desktop: raíz `G:\Mi unidad\Atlas`, código `OPERACION_ACTIVA`, reporte `G:\Mi unidad\Atlas\reportes\actual`, dataset `G:\Mi unidad\Atlas\operacion\actual\analisis_completo_guias.csv`, `viajes.csv` presente (55.410 bytes), `historicoUsado=false`.
+- Publicación normal: `859d6bf440fddc925118fa172efe174b6ab75ad6` (`fix: hacer portable la raiz operacional desktop`); SHA local = SHA remoto; árbol Desktop limpio.
+- Limpieza: se identificaron como duplicados/regenerables con copia en `historico_pre_infra_s2` tres snapshots `Atlas-Viajes-*Rollback/PreInstall`, `backups_config`, `ocr_eval`, `ocr_eval_env` y `ocr_eval_gpu_env`. La política de ejecución rechazó tanto el borrado validado en lote como un `Remove-Item` literal individual, antes de modificar el disco. Eliminaciones efectivas: **0**. Se conservaron también respaldos/evaluaciones sin copia equivalente demostrada, datos privados, imágenes, repos activos y Drive.
+- No se modificó código del Motor ni se repitió innecesariamente su suite de 927 pruebas. Se integró únicamente documentación de cierre.
+- **Resultado: INFRAESTRUCTURA S2.2 CERRADO. LISTO PARA OPERACIÓN REAL R2, que aún no fue iniciada.**

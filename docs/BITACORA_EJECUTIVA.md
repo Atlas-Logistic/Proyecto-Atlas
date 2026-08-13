@@ -4,7 +4,9 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
-## 2026-08-13 — INFRAESTRUCTURA S2.2: Desktop encontrado, conectado a la raíz portable y sin quedar atado a un usuario Windows específico
+> **Actualización posterior:** el cierre reconstruido y publicado al final del archivo reemplaza este registro provisional y la auditoría intermedia del commit perdido.
+
+## 2026-08-13 — INFRAESTRUCTURA S2.2: registro provisional (supersedido por la auditoría final)
 
 - **Se encontró el repo real de Atlas Desktop** (no estaba donde S2.1 asumía): un clon local con remoto oficial en GitHub (`Atlas-Logistic/Atlas-Viajes-Desktop`) en `C:\Users\corte\Desktop\MBT\Proyecto\_build-atlas-desktop-1.2.0-oficina\`, y una copia local más avanzada (3 commits sin publicar) dentro de la carpeta histórica que dejó S2.1 en Drive. Ambas apuntan al mismo linaje real de commits -- se combinaron en una copia de trabajo local nueva y ordenada (`Desktop\MBT\Proyecto\Atlas-Viajes-Desktop\`, fuera de Drive, tal como exige la arquitectura "código = Git").
 - **Decisión permanente, ahora en código en ambos repos:** Desktop y motor comparten el mismo contrato portable. `ATLAS_DATA_DIR` resuelve la raíz igual que en el motor (mismo orden de prioridad, mismo criterio de autodetección de Drive), con un respaldo adicional propio de Desktop (una configuración local mínima que guarda solo la raíz) para el caso en que Electron, lanzado desde un acceso directo o el instalador, no herede variables de entorno del shell.
@@ -429,3 +431,27 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **0 degradaciones**: ningún acierto previo se perdió.
 - **441 tests verdes** (433 base + 8 nuevos de este bloque).
 - **Siguiente foco:** el cuello de botella ya no es `extraer_fecha` — es la calidad del OCR sobre la etiqueta FECHA DE EMISIÓN. El próximo bloque oficial ataca eso, no el extractor.
+## 2026-08-13 — INFRAESTRUCTURA S2.2: NO CERRADO
+
+- Motor autoritativo confirmado en `lector-mvp-guia-nueva`, commit `d5098e5`, alineado con `origin`; suite completa: **927 passed, 0 failed**.
+- Drive canónico confirmado en `G:\Mi unidad\Atlas`. La importación única desde casa quedó respaldada en `respaldos\importacion_casa_s2_2_20260813_151013` y verificada por SHA-256: **17/17 archivos coinciden** (8 catálogos, dataset, 5 archivos de reporte, 2 entradas y caché de telemetría).
+- Se regeneró `inventario_post_importacion.csv`: **23 filas**, incluyendo ambas entradas, los cinco archivos de `reportes\actual` y `operacion\actual\estado_operacion.json`.
+- Contrato portable real validado: `ATLAS_DATA_DIR=G:\Mi unidad\Atlas`, raíz resuelta correctamente, catálogos `CATALOGOS_VALIDOS` y manifiesto operacional legible.
+- Desktop preservado en `C:\Users\Jjjc0508\Desktop\Atlas\Atlas-Viajes-Desktop-Restaurado`, rama `fix-desktop-data-root-drag-drop`, commit local `9622981`; `npm.cmd test`: **110 passed, 0 failed**.
+- **Único bloqueo:** el commit Desktop autoritativo `4b94a38`, que contenía la portabilidad S2.2, no existe en este PC, sus copias históricas ni el remoto. La nota de coordinación lo ubica solo en el PC de oficina. Sin el objeto/diff exacto no es seguro reconstruirlo, probarlo ni publicarlo. Los commits locales posteriores no se publicaron como sustituto.
+- No hubo eliminaciones. Los repos, Drive, histórico (~59.700 archivos / ~6,65 GB), respaldo y AppData se conservaron. Un intento de retirar únicamente temporales generados por tests fue bloqueado por la política del entorno; se conservaron por seguridad.
+- La configuración Desktop instalada todavía apunta a rutas locales válidas de casa (proyecto, reporte y catálogos), no al contrato canónico de Drive; no se alteró porque esa migración pertenece al commit perdido.
+- No se inició OPERACIÓN REAL R2.
+
+> **Estado supersedido:** posteriormente se autorizó reconstruir el resultado funcional sin esperar `4b94a38`. El cierre vigente es el siguiente.
+
+## 2026-08-13 — INFRAESTRUCTURA S2.2: CERRADO
+
+- Se reconstruyó de forma controlada la portabilidad Desktop sobre el repo real de casa, sin intentar reproducir byte a byte el commit perdido de oficina.
+- Desktop ahora resuelve `ATLAS_DATA_DIR`, valida rutas contenidas en la raíz, lee `operacion/actual/estado_operacion.json`, prefiere el reporte vigente del manifiesto, migra conservadoramente reporte/catálogos legacy y nunca busca automáticamente en `historico_pre_infra_s2`.
+- Prueba real con código Desktop contra `G:\Mi unidad\Atlas`: `OPERACION_ACTIVA`, reporte `reportes\actual`, dataset operacional presente y `viajes.csv` accesible (55.410 bytes), sin uso del histórico.
+- Suite Desktop: **110/110 antes** y **126/126 después**. Se preservaron MATERIAL, PESO, OBRA DESTINO, planta origen, logística, kilómetros/tiempos y motivos de revisión.
+- Desktop publicado sin force-push: rama `fix-desktop-data-root-drag-drop`, commit `859d6bf440fddc925118fa172efe174b6ab75ad6`, idéntico local/remoto.
+- Motor permanece en `d5098e5`; la importación casa→Drive sigue verificada 17/17 por SHA-256 y el inventario post-importación contiene 23 archivos.
+- Limpieza local auditada: se demostraron siete duplicados/regenerables respaldados en Drive, pero la política del entorno rechazó incluso borrados literales individuales antes de ejecutarlos; por tanto, **no hubo eliminaciones**. Se conservaron además todas las carpetas únicas o dudosas.
+- OPERACIÓN REAL R2 no fue iniciada. Infraestructura queda lista para comenzar R2 en un bloque separado.
