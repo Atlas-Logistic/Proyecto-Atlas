@@ -311,11 +311,18 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             item for item in items
             if es_etiqueta_rut(item)
             and abs(item["x1"] - etiqueta_cliente["x1"]) <= 25
-            # >= 0 (no "> 0"): en OCR real las cajas de filas contiguas de un
-            # formulario suelen quedar exactamente adyacentes (gap 0), no con
-            # un espacio positivo — caso real guía 464170 (SEÑOR(ES) termina
-            # en y=570, R.U.T. empieza en y=570).
-            and 0 <= item["y1"] - etiqueta_cliente["y2"] <= max(etiqueta_cliente["h"], item["h"]) * 1.5
+            # >= -6 (no "> 0" ni ">= 0"): en OCR real las cajas de filas
+            # contiguas de un formulario suelen quedar exactamente
+            # adyacentes (gap 0, caso real guía 464170: SEÑOR(ES) termina
+            # en y=570, R.U.T. empieza en y=570) -- pero en filas muy
+            # apretadas el cuadro de una etiqueta puede además solaparse
+            # unos pocos px con el de la fila siguiente (Bloque
+            # INTELIGENCIA N1, caso real guía 464698: SEÑOR(ES) termina en
+            # y=479, R.U.T. empieza en y=476, gap=-3). Un solapamiento
+            # pequeño sigue siendo "la fila de abajo", nunca se confunde
+            # con una etiqueta lejana porque el resto de la ventana
+            # (<= alto*1.5) sigue acotando el otro extremo.
+            and -6 <= item["y1"] - etiqueta_cliente["y2"] <= max(etiqueta_cliente["h"], item["h"]) * 1.5
         ]
         for etiqueta_rut in etiquetas_rut:
             for item in items:
@@ -1497,7 +1504,17 @@ def extraer_datos(
         # ":" opcional entre la etiqueta y el valor: el OCR real (PaddleOCR)
         # suele dejar "RUT CHOFER\n:10190440-7" con dos puntos pegados al
         # valor, que \s* (solo espacios/saltos de línea) no cubría.
-        coincidencia = re.search(r"RUT\s*CHOFER\s*:?\s*([0-9.\s-]{7,15})", texto_busqueda)
+        #
+        # Bloque INTELIGENCIA N1 -- bug real encontrado: la clase de
+        # caracteres no incluía "K"/"k" (dígito verificador válido de un
+        # RUT chileno), así que un RUT terminado en K quedaba truncado
+        # justo antes de ese carácter (p. ej. "10.833.150-K" capturaba
+        # solo "10.833.150-", perdiendo el verificador) -- `limpiar_rut`
+        # entonces devolvía el RUT SIN dígito verificador, que nunca
+        # calzaba contra el catálogo aunque el chofer sí estuviera
+        # cargado ahí con RUT terminado en K (caso real: JOSE LAZCANO,
+        # clave de catálogo "10833150K").
+        coincidencia = re.search(r"RUT\s*CHOFER\s*:?\s*([0-9.\sKk-]{7,15})", texto_busqueda)
         if coincidencia:
             valor = limpiar_rut(coincidencia.group(1), agregar_dv="-" not in coincidencia.group(1))
             if valor != "No encontrado":

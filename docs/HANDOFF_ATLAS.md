@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-12 — INTELIGENCIA N1: normalización semántica cerrada, con un bug propio encontrado y corregido antes de publicar -- si retomas esto, empieza aquí
+
+- **Rama:** `lector-mvp-guia-nueva`. Baseline: PATENTES P4 (`88645b3`).
+- **Los dos casos con nombre del bloque quedaron resueltos, por reglas generales, no hardcodeadas:** CAUQUBNES y CADQUENES → Cauquenes (comuna real, Región del Maule); "SOC CONETRUCTORA OCL LIMITAD" → "SOC CONSTRUCTORA OCL LIMITADA". Ninguna corrección menciona una guía ni un valor específico en el código -- ambas son consecuencia de un catálogo territorial cerrado (345 comunas) y un vocabulario societario acotado, con margen de seguridad.
+- **Se encontraron y corrigieron tres bugs reales de extracción** (no solo de normalización), todos afectando la tanda real en silencio: un margen geométrico demasiado estricto perdía un RUT de cliente perfectamente legible en formularios con filas apretadas; un RUT de chofer terminado en "K" se truncaba antes del dígito verificador; cliente nunca tenía una vía de corroboración por similitud de nombre (solo chofer la tenía).
+- **Importante para quien siga con esto -- la propia validación encontró un bug real antes de publicar:** la primera versión de la normalización de comunas corrompía la palabra real "CAMINO" en la comuna real "Camiña", y "PARQUE" en "Pirque" (ambos con ~0.83 de similitud). Se encontró auditando el propio resultado del reproceso, se corrigió (umbral más alto + lista de palabras de dirección que nunca son candidatas), y se **repitió el reproceso completo desde cero** antes de aceptar el resultado -- la lección para el futuro: cualquier normalización fuzzy contra un catálogo de cientos de nombres reales necesita validarse contra vocabulario común, no solo contra los casos objetivo.
+- **Aprendizaje controlado ya en funcionamiento real:** `empresas.json` tiene ahora `EBEMA SA` con dos alias aprendidos (`EDMA SA`, `KBEMA SA`) -- la próxima vez que cualquiera de esas corrupciones OCR aparezca, se reconoce al instante.
+- **Lo que se dejó deliberadamente sin tocar:** la corroboración de OBRA DESTINO sigue exigiendo revisión ante cualquier cambio de catálogo (solo se limpia el texto, nunca se corrobora solo por eso) -- es una decisión de diseño previa (Bloque ESTADOS S2) que este bloque no tenía motivo para relajar.
+- **Pendiente, fuera de alcance de este bloque:** la guía 464601 tiene "E EMISIÓN" como cliente (claramente OCR confundiendo con "FECHA DE EMISION") y varios campos vacíos -- causa distinta, necesita su propia investigación. Varias guías con `MULTIPLES_UBICACIONES_DISPERSAS` (464641/464642 entre otras) siguen sin resolver -- ambigüedad real de geocodificación, no un problema de comuna/typo.
+
+---
+
 ## 2026-08-12 — PATENTES P4: el bug no era el OCR, era la asociación geométrica -- y aparece un segundo caso real de Renca-que-era-Colina, si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: ORIGEN O2 (`3b3189c`).

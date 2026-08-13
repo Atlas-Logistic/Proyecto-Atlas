@@ -52,6 +52,7 @@ from atlas_core.rutas.geocerca import (
 from atlas_core.rutas.modelos import CandidatoGeocodificacion, Coordenadas, EstadoRuta
 from atlas_core.rutas.posicion_vehiculo import ProveedorPosicionVehiculo
 from atlas_core.rutas.proveedor import ProveedorRutas
+from atlas_core.territorio_chile import normalizar_direccion_con_comunas
 
 # Confianza mínima (score de Pelias/ORS, 0-1) para aceptar un único
 # candidato sin ambigüedad como resuelto. Por debajo de este umbral, o
@@ -249,7 +250,21 @@ def resolver_destino_entrega(
             despachar_a_crudo="", estado=ESTADO_SIN_DATO, motivo="DESPACHAR_A_NO_INFORMADO"
         )
 
-    consulta = f"{texto}, {contexto_territorial}" if contexto_territorial else texto
+    # Bloque INTELIGENCIA N1 (Fase D/M) -- limpia, SOLO para la consulta al
+    # geocodificador, un token de comuna corrupto por OCR cuando el
+    # catálogo territorial local ya lo resuelve sin ambigüedad (p. ej. dos
+    # campos del documento repiten la comuna -- uno legible, otro
+    # corrompido -- caso real "CATEDRAL 759 CADQUENES CAUQUENES" ->
+    # "CATEDRAL 759 CAUQUENES"). `despachar_a_crudo` en el resultado
+    # siempre conserva el texto documental original tal cual -- esta
+    # limpieza nunca reemplaza la evidencia, solo evita que un typo
+    # bloquee la geocodificación cuando el propio catálogo local ya lo
+    # resolvería (normalización local primero, nunca ORS para corregir
+    # un typo que el catálogo ya resuelve -- Fase N).
+    texto_geocodificable = normalizar_direccion_con_comunas(texto)
+    consulta = (
+        f"{texto_geocodificable}, {contexto_territorial}" if contexto_territorial else texto_geocodificable
+    )
     resultado = proveedor_geocodificacion.geocodificar(consulta)
     corroborado_por_gps = False
 

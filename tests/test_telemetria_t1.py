@@ -212,8 +212,12 @@ def test_descarta_candidato_lejos_de_gps_caso_real_coronel():
 
 
 def test_resolver_destino_entrega_usa_gps_para_desambiguar_de_extremo_a_extremo():
+    # Bloque INTELIGENCIA N1: la consulta real enviada al geocodificador ya
+    # no incluye "CORONE" -- se reconoce como corrupción OCR redundante de
+    # "CORONEL" (legible en el mismo texto) y se descarta antes de
+    # geocodificar (ver `normalizar_direccion_con_comunas`).
     texto = "AV. FORESTAL - MANZANA 1 1014 CORONEL CORONE"
-    consulta = f"{texto}, Chile"
+    consulta = "AV. FORESTAL - MANZANA 1 1014 CORONEL, Chile"
     coronel_bio_bio = CandidatoGeocodificacion(
         Coordenadas(-73.163227, -37.002896), "Coronel, BI, Chile", 0.6, "Coronel", "Del Bio-Bio",
     )
@@ -237,8 +241,12 @@ def test_resolver_destino_entrega_usa_gps_para_desambiguar_de_extremo_a_extremo(
 def test_sin_gps_la_misma_ambiguedad_sigue_sin_resolver():
     """Regresión: si no se entrega punto GPS, el comportamiento es
     idéntico al del bloque anterior (E2E R1.1) -- ambigüedad real, abstención."""
+    # Bloque INTELIGENCIA N1: la consulta real enviada al geocodificador ya
+    # no incluye "CORONE" -- se reconoce como corrupción OCR redundante de
+    # "CORONEL" (legible en el mismo texto) y se descarta antes de
+    # geocodificar (ver `normalizar_direccion_con_comunas`).
     texto = "AV. FORESTAL - MANZANA 1 1014 CORONEL CORONE"
-    consulta = f"{texto}, Chile"
+    consulta = "AV. FORESTAL - MANZANA 1 1014 CORONEL, Chile"
     coronel_bio_bio = CandidatoGeocodificacion(
         Coordenadas(-73.163227, -37.002896), "Coronel, BI, Chile", 0.6, "Coronel", "Del Bio-Bio",
     )

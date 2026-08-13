@@ -14,11 +14,16 @@ from typing import Callable, Iterable, Mapping
 
 from atlas_core.catalogos import (
     buscar_chofer_por_rut,
+    buscar_empresa_por_rut,
     cargar_catalogo_json,
     enriquecer_datos_con_catalogos,
+    normalizar_rut,
+    registrar_alias_seguro,
     resolver_nombre_chofer_difuso,
+    resolver_nombre_empresa_difuso,
     resolver_patente_canonica,
 )
+from atlas_core.normalizacion_semantica import normalizar_nombre_societario
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
@@ -588,6 +593,11 @@ class MetodoObtencionDocumento(str, Enum):
     # destino contra los catálogos maestros -- ver criterio de
     # corroboración por campo junto a cada uso en `procesar_archivo()`.
     CATALOGO = "CATALOGO"
+    # Bloque INTELIGENCIA N1: limpieza estructural de un nombre de entidad
+    # (sufijos societarios/prefijo suelto, ver `normalizar_nombre_societario`)
+    # -- nunca decide identidad, solo corrige una corrupción OCR segura del
+    # propio texto documental.
+    NORMALIZADO = "NORMALIZADO"
 
 
 class MotivoRevisionDocumento(str, Enum):
@@ -620,9 +630,19 @@ class MotivoRevisionDocumento(str, Enum):
     # de un campo operacional secundario (no de identidad) se registra
     # pero nunca por sí sola invalida el documento completo.
     MATERIAL_AUSENTE = "MATERIAL_AUSENTE"
+    # Bloque INTELIGENCIA N1 (Fase I) -- informativo únicamente: el cliente
+    # trae un RUT chileno válido y un nombre documental consistente, pero
+    # ese RUT no existe (todavía) en `empresas.json` ni el nombre calzó por
+    # fuzzy contra ninguna entidad conocida. Nunca se inventa una identidad
+    # -- se distingue explícitamente de "OCR dudoso" (CLIENTE_SIN_CORROBORAR)
+    # porque la evidencia documental en sí es internamente consistente.
+    CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA = "CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA"
 
 
-MOTIVOS_NO_BLOQUEANTES = frozenset({MotivoRevisionDocumento.MATERIAL_AUSENTE.value})
+MOTIVOS_NO_BLOQUEANTES = frozenset({
+    MotivoRevisionDocumento.MATERIAL_AUSENTE.value,
+    MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA.value,
+})
 
 
 def procesar_archivo(
@@ -847,6 +867,107 @@ def procesar_archivo(
         # diferencia de una homologación exitosa, esta lectura no tiene una
         # segunda señal independiente que la corrobore.
         _motivo(MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR)
+
+    # Bloque INTELIGENCIA N1 -- normalización semántica + corroboración
+    # ampliada de CLIENTE. Orden: (1) limpieza estructural de sufijos
+    # societarios/prefijo suelto (Fase E, siempre -- nunca publicar una
+    # deformación OCR evitable, corrobore o no); (2) RUT exacto contra
+    # `empresas.json` (Fase F, NIVEL MUY FUERTE -- ya intentado antes por
+    # `enriquecer_datos_con_catalogos`, pero eso solo dispara si el RUT
+    # extraído calzó ahí; el bug real de extracción geométrica de RUT
+    # cliente se corrigió aparte, ver `_extraer_rut_cliente_geometrico`);
+    # (3) si el RUT no calza, fuzzy contra el nombre canónico (Fase F,
+    # NIVEL FUERTE -- mismo criterio que chofer). RUT exacto que corrobora
+    # también dispara Fase K (alias controlado): si el nombre documental
+    # normalizado difiere del nombre canónico, se aprende como alias del
+    # MISMO registro para no tener que resolver la misma corrupción OCR
+    # de nuevo -- `registrar_alias_seguro` ya exige identidad única y sin
+    # conflicto, así que nunca aprende algo ambiguo.
+    if carpeta_catalogos is not None:
+        ruta_empresas = Path(carpeta_catalogos) / "empresas.json"
+        catalogo_empresas = cargar_catalogo_json(ruta_empresas)
+        nombre_cliente_actual = str(datos.get("cliente", "No encontrado")).strip()
+        if nombre_cliente_actual not in {"", "No encontrado"}:
+            normalizado_cliente = normalizar_nombre_societario(nombre_cliente_actual)
+            if normalizado_cliente.cambio:
+                datos["cliente"] = normalizado_cliente.valor_normalizado
+                metodos_documento.add(MetodoObtencionDocumento.NORMALIZADO.value)
+                logger.info(
+                    "cliente normalizado mediante normalizacion-societaria-v1: %r -> %r",
+                    normalizado_cliente.valor_ocr, normalizado_cliente.valor_normalizado,
+                )
+                nombre_cliente_actual = datos["cliente"]
+
+            rut_cliente_actual = str(datos.get("RUT del cliente", "No encontrado")).strip()
+            cliente_corroborado_n1 = False
+            registro_empresa = buscar_empresa_por_rut(catalogo_empresas, rut_cliente_actual)
+            if registro_empresa is not None:
+                cliente_corroborado_n1 = True
+                # Fase K: el alias a aprender es el texto ORIGINAL antes de
+                # que `enriquecer_datos_con_catalogos` ya lo haya podido
+                # corregir por este mismo RUT (`cliente_antes_catalogo`) --
+                # si se usara `nombre_cliente_actual` aquí, en el camino
+                # normal ya sería idéntico al nombre canónico (nada que
+                # aprender) aunque el documento SÍ trajera una variante
+                # OCR real distinta.
+                variante_ocr = str(cliente_antes_catalogo or "").strip()
+                try:
+                    if variante_ocr and registrar_alias_seguro(
+                        ruta_empresas, normalizar_rut(rut_cliente_actual), variante_ocr
+                    ):
+                        logger.info(
+                            "alias-controlado-v1 aprendido para cliente RUT=%s: %r",
+                            rut_cliente_actual, variante_ocr,
+                        )
+                except OSError as exc:
+                    logger.warning("No se pudo persistir alias de cliente: %s", exc)
+            else:
+                decision_fuzzy_cliente = resolver_nombre_empresa_difuso(
+                    catalogo_empresas, nombre_cliente_actual
+                )
+                if decision_fuzzy_cliente.estado in {"ALIAS", "COINCIDENCIA_SEGURA"}:
+                    datos["cliente"] = decision_fuzzy_cliente.valor_resultado
+                    metodos_documento.add(MetodoObtencionDocumento.FUZZY.value)
+                    cliente_corroborado_n1 = True
+                logger.info(
+                    "fuzzy-matching-catalogo-empresas-v1 estado=%s similitud=%s",
+                    decision_fuzzy_cliente.estado,
+                    (
+                        f"{decision_fuzzy_cliente.similitud:.3f}"
+                        if decision_fuzzy_cliente.similitud is not None else "n/a"
+                    ),
+                )
+
+            if cliente_corroborado_n1:
+                campos_geometricos_sin_corroborar.discard("cliente")
+            elif (
+                validar_rut_chileno(rut_cliente_actual).estado == EstadoValidacion.VALIDO
+                and "cliente" in campos_geometricos_sin_corroborar
+            ):
+                # Fase I -- RUT válido + nombre documental consistente,
+                # pero identidad genuinamente no catalogada: nunca se
+                # inventa (no se toca `datos["cliente"]`), pero tampoco se
+                # trata igual que un OCR dudoso -- motivo informativo
+                # separado, no bloqueante.
+                campos_geometricos_sin_corroborar.discard("cliente")
+                _motivo(MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA)
+
+        # Fase E/H -- limpieza estructural de OBRA DESTINO (nunca decide
+        # identidad ni corrobora: el criterio de corroboración de este
+        # campo se mantiene deliberadamente conservador, ver más abajo).
+        # Fase H: esto es la entidad/proyecto documental (`obra destino`),
+        # nunca el punto físico de entrega (`despachar_a`/DESTINO ENTREGA)
+        # -- esta normalización nunca toca `despachar_a_crudo` ni la ruta.
+        nombre_obra_actual = str(datos.get("obra destino", "No encontrado")).strip()
+        if nombre_obra_actual not in {"", "No encontrado"}:
+            normalizado_obra = normalizar_nombre_societario(nombre_obra_actual)
+            if normalizado_obra.cambio:
+                datos["obra destino"] = normalizado_obra.valor_normalizado
+                metodos_documento.add(MetodoObtencionDocumento.NORMALIZADO.value)
+                logger.info(
+                    "obra_destino normalizado mediante normalizacion-societaria-v1: %r -> %r",
+                    normalizado_obra.valor_ocr, normalizado_obra.valor_normalizado,
+                )
 
     chofer_corroborado = False
     nombre_chofer = str(datos.get("chofer", "No encontrado")).strip()

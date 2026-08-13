@@ -4,6 +4,61 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-12 — Cierre: INTELIGENCIA N1 (normalización semántica controlada de territorios y entidades)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** posterior a PATENTES P4 (`88645b3`).
+
+### Principio de diseño
+
+`VALOR OCR` ≠ `VALOR NORMALIZADO` ≠ `VALOR CANÓNICO CORROBORADO`. Un valor OCR se normaliza SOLO contra un universo/vocabulario cerrado, con candidato único y margen; se corrobora SOLO contra RUT/código/catálogo real. Ninguna corrección es un reemplazo aislado por caso -- todas viven en funciones generales (`normalizar_comuna`, `normalizar_nombre_societario`, `resolver_nombre_empresa_difuso`) sin ninguna guía/valor hardcodeado.
+
+### Fase A -- auditoría real (19 guías, sin reproceso masivo)
+
+Volcado completo de `cliente`/`obra_destino`/`chofer`/`rut_chofer`/`motivos_revision_documento` de las 19 filas del CSV operacional. Hallazgos que definieron el alcance real del bloque (no los del enunciado original, encontrados investigando):
+
+1. **464698/464699** (imágenes reales inspeccionadas): SEÑOR(ES) impreso "EBEMA SA" -- PaddleOCR lo lee "EDMA SA" y "KBEMA SA" en cada guía. R.U.T. impreso "83.585.400-0" (= `835854000`, existe exacto en `empresas.json` como EBEMA SA) -- pero `_extraer_rut_cliente_geometrico` nunca lo encontraba.
+2. **Causa raíz del punto 1 (bug real):** la etiqueta SEÑOR(ES) termina en y=479, R.U.T. empieza en y=476 (gap **-3px**, filas de un formulario apretado que se solapan levemente) -- el filtro geométrico exigía `0 <= gap`, rechazando la etiqueta R.U.T. válida por un margen de 3px.
+3. **OBRA DESTINO** impreso "SOC CONSTRUCTORA OCL LIMITAD" -- PaddleOCR lo lee "I SOC CONETRUCTORA OCL LIMITAD" (un "I" espurio al inicio, más "CONETRUCTORA"/"LIMITAD" corruptos). `COD DESTINATARIO` (0002013090) no existe en `destinos.json` -- destino genuinamente no catalogado, no un bug.
+4. **464522/464642** (JOSE LAZCANO, catálogo `choferes.json` clave `10833150K`): `buscar_rut_chofer()` usaba `[0-9.\s-]` -- sin "K" en la clase de caracteres, el RUT quedaba truncado en "10.833.150-" (perdiendo el verificador), y `buscar_chofer_por_rut` nunca calzaba contra el catálogo aunque el chofer sí estuviera ahí.
+5. **Cliente sin corroborar generalizado:** `resolver_nombre_chofer_difuso` (fuzzy contra catálogo) solo existía para chofer -- cliente nunca tenía una vía de corroboración por similitud de nombre, solo RUT exacto.
+6. **despachar_a_crudo** de 464698/464699: `"CATEDRAL 759 CADQUENES CAUQUENES"` / `"...758 CAUQUBNES CAUQUENES"` -- el documento repite la comuna en dos campos (COMUNA + CIUDAD); el OCR corrompió uno de los dos en cada guía, mientras el otro quedó legible. `estado_ruta=REQUIERE_REVISION`, `motivo=GEOCODIFICACION_DIRECCION_NO_ENCONTRADA`.
+
+### Fase B/C/D/M -- `atlas_core/territorio_chile.py` (nuevo)
+
+Snapshot estático de 16 regiones / 345 comunas (adaptado de un dataset público de GitHub, corregido a mano contra nombres oficiales: `Quilcura→Quilicura`, `Vitcarua→Vitacura`, `Couhaique→Coyhaique`, etc.). `normalizar_comuna(texto)`: EXACTA / NORMALIZADA_SEGURA (único candidato, similitud ≥ umbral, margen sobre el segundo) / AMBIGUA / NO_RECONOCIDA. `normalizar_direccion_con_comunas(texto)`: aplica esto palabra por palabra sobre una dirección completa -- si el token corrupto normaliza a una comuna que YA aparece exacta en otra parte del texto, se **descarta** (no se duplica); si no, se **reemplaza**. Se usa únicamente para construir la consulta al geocodificador -- `despachar_a_crudo` en el resultado nunca pierde el texto documental original.
+
+**Bug real encontrado validando el propio bloque (antes de cerrar, no en producción):** con el umbral inicial (0.82), la palabra real "CAMINO" (de "CAMINO LOS PINOS...") normalizaba a la comuna real "Camiña" (0.833 de similitud), y "PARQUE" a "Pirque" (0.833) -- ambos falsos positivos reales, no hipotéticos. Corregido subiendo el umbral a 0.87 (los dos casos reales del bloque quedan en 0.889 y 0.923, con margen) y agregando una lista cerrada de vocabulario estructural de direcciones (CAMINO, CALLE, AVENIDA, PARQUE, SECTOR, ...) que nunca es candidato a comuna sin importar la similitud -- defensa en profundidad, no solo el umbral.
+
+### Fase E -- `atlas_core/normalizacion_semantica.py` (nuevo)
+
+Vocabulario societario acotado a evidencia real (catálogos + tanda): formas abreviadas cortas (SA/SPA/LTDA/EIRL, ≤4 caracteres) y palabras descriptivas largas (CONSTRUCTORA, INGENIERIA, INMOBILIARIA, ...). `normalizar_token_societario`: las formas cortas solo aceptan sustitución en la MISMA longitud (nunca inserción/eliminación); las largas toleran una distancia de edición completa (1-2 según longitud). **Bug real encontrado y corregido durante la implementación:** una tolerancia de edición uniforme dejaba "SAN" (real, común en topónimos -- "SAN BERNARDO") a distancia 1 de "SA" por eliminación, corrompiendo "SALOMON SACK SA SAN BERNARDO" en "...SA SA BERNARDO". La regla de longitud-exacta-para-formas-cortas lo corrige de raíz. `normalizar_nombre_societario`: aplica esto token por token sobre un nombre completo, más un stripper de prefijo de un solo carácter suelto (artefacto OCR real: "I SOC CONSTRUCTORA...", "I TORRES OCARANZA..." -- probablemente un separador ":"/"|" mal leído).
+
+### Fase F/I/K -- `atlas_core/catalogos.py`
+
+`_resolver_nombre_difuso_generico`: núcleo compartido extraído de `resolver_nombre_chofer_difuso` (comportamiento idéntico, sin romper ningún test existente) + `resolver_nombre_empresa_difuso` (nuevo, mismo criterio contra `empresas.json`). Ambos ahora también consultan `aliases` (lista opcional por registro, ya presente en `choferes.json` pero nunca antes leída por este resolver) como coincidencia EXACTA previa al fuzzy -- evidencia fuerte por diseño. `registrar_alias_seguro(ruta, identificador, alias)` (Fase K): persiste una variante OCR como alias SOLO si identifica un único registro, no es ya su nombre canónico, y no coincide con el nombre/alias de NINGÚN otro registro -- escritura atómica (temp file + `os.replace`, mismo patrón que `catalogo_clientes.py`).
+
+### Fase G/H/L -- `atlas_core/procesamiento_masivo.py`
+
+Bloque nuevo tras la homologación de patentes: (1) normalización societaria de `cliente`/`obra destino` (Fase E, siempre, corrobore o no -- método `NORMALIZADO`, nuevo en `MetodoObtencionDocumento`); (2) RUT exacto contra `empresas.json` -- si corrobora, aprende alias usando el valor OCR **anterior** a `enriquecer_datos_con_catalogos` (`cliente_antes_catalogo`, ya existente para trazabilidad S2.2 -- si se usara el valor ya corregido no habría nada que aprender); (3) si no, fuzzy contra `empresas.json` (Fase F, NIVEL FUERTE). Nuevo motivo informativo `CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA` (no bloqueante, agregado a `MOTIVOS_NO_BLOQUEANTES`): RUT válido + nombre consistente pero sin catálogo que lo confirme -- distinto de "OCR dudoso". **Obra destino se mantiene deliberadamente conservador** (Fase H/L, sin tocar): la corroboración por `COD DESTINATARIO` sigue exigiendo revisión ante cualquier cambio, solo se agregó la limpieza de texto (Fase E) -- nunca se "maquilla" ese estado.
+
+### Fase M -- `atlas_core/rutas/destino_entrega.py`
+
+`resolver_destino_entrega` aplica `normalizar_direccion_con_comunas` SOLO a la cadena de consulta enviada al geocodificador -- `despachar_a_crudo` en el resultado sigue siendo el texto documental sin tocar. Normalización local primero (Fase N): nunca se llama a ORS para "adivinar" un typo que el catálogo local ya resuelve; el proveedor de rutas se sigue llamando exactamente igual de veces que antes (no hay reintento adicional).
+
+### Tests y regresión
+
+20 tests nuevos en `tests/test_inteligencia_n1.py` (cubren los 18 ítems de la Fase Q). 2 tests existentes actualizados con justificación explícita (`test_caso_real_coronel_descarta_localidad_sin_soporte_textual`, `test_resolver_destino_entrega_usa_gps_para_desambiguar_de_extremo_a_extremo`): la consulta real enviada al geocodificador ya no incluye "CORONE" (token duplicado/corrupto de "CORONEL", ya legible en el mismo texto) -- el mock debía reflejar la consulta real. Suite completa: **872 → 892 tests**, 0 regresiones de comportamiento.
+
+### Reproceso operacional
+
+Backup: `output/_respaldos_reprocesamiento/analisis_completo_guias_PRE_N1_20260812_194428.csv`. Reproceso completo de las 19 guías reales (`procesar_archivo` real: PaddleOCR + catálogos reales + `ServicioTelemetria`/Onelogis con caché real + `OpenRouteService` real) -- justificado por el alcance del bloque (cliente/obra_destino/comuna tocan potencialmente cualquier fila, a diferencia de P4 que aisló 2 filas). Reprocesado DOS veces: la primera corrida usó el umbral de comuna sin corregir (0.82) y produjo un falso positivo real (`CAMINO`→`Camiña` en 464641/464642, que coincidentemente dejaba `RUTA_CALCULADA` con un motivo distinto pero geocodificado a un lugar equivocado); se detectó auditando el propio resultado, se corrigió el umbral+lista de exclusión, y se re-ejecutó el reproceso completo desde el backup original antes de aceptar el resultado. Reporte regenerado en `output/reporte_desktop_20260812_195650_inteligencia_n1/`; `config_usuario.json` del Desktop actualizado. Alias aprendidos en `empresas.json` durante el reproceso real: `EBEMA SA` ← `EDMA SA`, `KBEMA SA`.
+
+### Costo
+
+0 llamadas OCR nuevas (misma tanda ya presente localmente). Onelogis: 0 llamadas nuevas (toda la tanda ya estaba cacheada desde O2/P4). ORS: 19 llamadas de geocodificación/ruta (una por guía reprocesada, mismo patrón de costo que P4/O2 -- normalización de comuna es 100% local, nunca agrega una llamada ORS adicional).
+
+---
+
 ## 2026-08-12 — Cierre: PATENTES P4 (recuperar patente/remolque por geometría real + revalidar 464631)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** posterior a ORIGEN O2 (`3b3189c`).

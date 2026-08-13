@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-12 — INTELIGENCIA N1: Atlas deja de tratar el OCR como verdad literal -- y aparece un bug real propio, encontrado y corregido en el camino
+
+- **Principio nuevo, ahora en código:** VALOR OCR ≠ VALOR NORMALIZADO ≠ VALOR CANÓNICO CORROBORADO. Un typo de comuna (CAUQUBNES/CADQUENES) o una razón social deformada (SOC CONETRUCTORA OCL LIMITAD) ya no se publican tal cual ni se "corrigen" a ciegas -- se comparan contra un catálogo territorial cerrado de las 345 comunas de Chile y contra un vocabulario acotado de formas societarias reales, y solo se normalizan cuando hay un candidato único con margen claro. Ambos casos reales del bloque quedan resueltos: **CAUQUBNES y CADQUENES → Cauquenes** (Región del Maule), **SOC CONETRUCTORA OCL LIMITAD → SOC CONSTRUCTORA OCL LIMITADA**.
+- **Encontramos y corregimos tres bugs reales de extracción**, no solo de normalización: un RUT de cliente perfectamente legible se perdía por un margen geométrico demasiado estricto entre filas de un formulario apretado; un RUT de chofer terminado en "K" quedaba truncado antes del dígito verificador (perdiendo la corroboración contra un chofer que sí estaba en catálogo); y un RUT de cliente válido, junto a un nombre bien leído, no tenía ninguna vía de corroboración por similitud de nombre (solo existía para chofer). Los tres ya estaban afectando la tanda real, en silencio.
+- **Un cliente real (EBEMA SA) se estaba mostrando con DOS nombres corruptos distintos** en dos guías del mismo envío (EDMA SA / KBEMA SA) -- ambos ahora corrigen al nombre real por RUT exacto, y esa corrección queda "aprendida": la próxima vez que aparezca cualquiera de esas dos variantes OCR, Atlas la reconoce de inmediato sin tener que volver a calcularla (aprendizaje controlado, nunca automático sobre algo ambiguo).
+- **Autocrítica real, no cosmética:** la primera versión de la normalización de comunas tenía un umbral demasiado permisivo -- corrompía la palabra real "CAMINO" (de una dirección) en la comuna real "Camiña", y "PARQUE" en "Pirque". Se encontró validando el propio bloque contra la tanda, antes de cerrar -- se subió el umbral y se agregó una lista de palabras de dirección que nunca se tratan como comuna, sin importar la similitud.
+- Suite completa: 872 → **892 tests**, sin regresiones de comportamiento.
+
+---
+
 ## 2026-08-12 — PATENTES P4: una patente perfectamente legible se estaba perdiendo por un bug de asociación, no de OCR -- y aparece otro caso real de Renca-que-era-Colina
 
 - **El diagnóstico de Javier era correcto y el nuestro estaba equivocado:** la guía 464631 mostraba "patente ausente" pese a que DD2494/JB8529 están impresos con total claridad. PaddleOCR SÍ los leyó bien -- el problema era que el extractor "geométrico" de patentes en realidad no era geométrico: concatenaba todo el texto de la zona en una sola cadena y buscaba por regex, así que cualquier segundo texto de 6 caracteres en la zona (aunque estuviera lejos de la etiqueta PATENTE) producía una abstención total por "ambigüedad". Se reescribió para asociar cada etiqueta a su valor por posición real en la imagen, igual que ya hacían el resto de los extractores del documento.

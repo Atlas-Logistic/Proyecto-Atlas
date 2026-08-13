@@ -148,7 +148,12 @@ def test_caso_real_coronel_descarta_localidad_sin_soporte_textual():
     assert coronel_bio_bio in filtrados
     assert coronel_maule in filtrados
 
-    consulta = f"{texto}, Chile"
+    # Bloque INTELIGENCIA N1: la consulta real que se envía al
+    # geocodificador ya no incluye "CORONE" -- la normalización
+    # territorial local lo reconoce como una corrupción OCR seguramente
+    # redundante de "CORONEL" (que ya aparece legible en el mismo texto)
+    # y lo descarta antes de geocodificar (ver `normalizar_direccion_con_comunas`).
+    consulta = "AV. FORESTAL - MANZANA 1 1014 CORONEL, Chile"
     proveedor = ProveedorRutasSimulado(geocodificaciones={
         consulta: ResultadoGeocodificacion(EstadoRuta.RESULTADO_AMBIGUO, candidatos, "MULTIPLES_CANDIDATOS")
     })
