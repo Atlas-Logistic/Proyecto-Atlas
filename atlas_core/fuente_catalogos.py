@@ -46,6 +46,16 @@ def resolver_fuente_catalogos(
         if all((predeterminada / nombre).is_file() for nombre in ARCHIVOS_REQUERIDOS):
             valor = predeterminada
     if valor in (None, ""):
+        # INFRAESTRUCTURA S2.1: si no hay override explícito ni carpeta local
+        # "catalogos/" completa, se intenta la raíz portable de Atlas (Drive)
+        # antes de rendirse -- mismo criterio "todos los archivos presentes",
+        # nunca reconstruye ni inventa contenido.
+        from atlas_core.almacenamiento_portable import ruta_catalogos_privados
+
+        candidato_portable = ruta_catalogos_privados()
+        if all((candidato_portable / nombre).is_file() for nombre in ARCHIVOS_REQUERIDOS):
+            valor = candidato_portable
+    if valor in (None, ""):
         if permitir_sin_catalogos:
             return None
         raise ErrorFuenteCatalogos(

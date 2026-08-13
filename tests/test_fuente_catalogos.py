@@ -58,3 +58,44 @@ def test_modo_sin_catalogos_debe_ser_explicito(monkeypatch):
     estado = validar_fuente_catalogos(permitir_sin_catalogos=True)
     assert estado.modo == "SIN_CATALOGOS_EXPLICITO"
     assert estado.ruta is None
+
+
+def test_usa_raiz_portable_si_no_hay_override_ni_catalogos_local(tmp_path, monkeypatch):
+    # INFRAESTRUCTURA S2.1: sin --catalogos, sin ATLAS_CATALOGOS_DIR y sin
+    # `catalogos/` local completo, debe caer en `<ATLAS_DATA_DIR>/catalogos_privados`.
+    monkeypatch.delenv("ATLAS_CATALOGOS_DIR", raising=False)
+    raiz_drive = tmp_path / "Atlas"
+    monkeypatch.setenv("ATLAS_DATA_DIR", str(raiz_drive))
+    (raiz_drive / "catalogos_privados").mkdir(parents=True)
+    _fuente_valida(raiz_drive / "catalogos_privados")
+
+    estado = validar_fuente_catalogos()
+
+    assert estado.modo == "CATALOGOS_VALIDOS"
+    assert estado.ruta == raiz_drive / "catalogos_privados"
+
+
+def test_raiz_portable_incompleta_no_se_usa_y_sigue_fallando(tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_CATALOGOS_DIR", raising=False)
+    raiz_drive = tmp_path / "Atlas"
+    (raiz_drive / "catalogos_privados").mkdir(parents=True)
+    (raiz_drive / "catalogos_privados" / "choferes.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ATLAS_DATA_DIR", str(raiz_drive))
+
+    with pytest.raises(ErrorFuenteCatalogos, match="Falta la fuente"):
+        validar_fuente_catalogos()
+
+
+def test_override_explicito_gana_a_la_raiz_portable(tmp_path, monkeypatch):
+    monkeypatch.delenv("ATLAS_CATALOGOS_DIR", raising=False)
+    raiz_drive = tmp_path / "Atlas"
+    (raiz_drive / "catalogos_privados").mkdir(parents=True)
+    _fuente_valida(raiz_drive / "catalogos_privados")
+    monkeypatch.setenv("ATLAS_DATA_DIR", str(raiz_drive))
+    fuente_explicita = tmp_path / "otra_fuente"
+    fuente_explicita.mkdir(parents=True)
+    _fuente_valida(fuente_explicita)
+
+    estado = validar_fuente_catalogos(fuente_explicita)
+
+    assert estado.ruta == fuente_explicita

@@ -1161,8 +1161,18 @@ def procesar_archivo(
             proveedor_rutas_efectivo = proveedor_rutas
             if proveedor_rutas_efectivo is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
+                from atlas_core.rutas.cache_geocodificacion import (
+                    ProveedorRutasConCacheGeocodificacion,
+                    RepositorioCacheGeocodificacion,
+                )
 
-                proveedor_rutas_efectivo = OpenRouteService(pais=pais_operacion)
+                # INFRAESTRUCTURA S2.1: caché portable (Drive) de
+                # geocodificación -- una dirección ya geocodificada en
+                # casa/oficina no vuelve a pagar otra llamada a Pelias.
+                proveedor_rutas_efectivo = ProveedorRutasConCacheGeocodificacion(
+                    OpenRouteService(pais=pais_operacion),
+                    RepositorioCacheGeocodificacion(),
+                )
             plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
             if bloques_guia is None:
                 bloques_guia = _leer_bloques()
@@ -1528,8 +1538,18 @@ def procesar_carpeta(
             argumentos_archivo["carpeta_catalogos"] = carpeta_catalogos
             if proveedor_rutas_compartido is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
+                from atlas_core.rutas.cache_geocodificacion import (
+                    ProveedorRutasConCacheGeocodificacion,
+                    RepositorioCacheGeocodificacion,
+                )
 
-                proveedor_rutas_compartido = OpenRouteService(pais=pais_operacion)
+                # INFRAESTRUCTURA S2.1: mismo motivo que en
+                # `procesar_archivo` -- caché portable de geocodificación
+                # compartida por todo el lote.
+                proveedor_rutas_compartido = ProveedorRutasConCacheGeocodificacion(
+                    OpenRouteService(pais=pais_operacion),
+                    RepositorioCacheGeocodificacion(),
+                )
                 logger.info(
                     "procesar_carpeta: proveedor de rutas creado una sola vez para todo el lote (%s)",
                     type(proveedor_rutas_compartido).__name__,

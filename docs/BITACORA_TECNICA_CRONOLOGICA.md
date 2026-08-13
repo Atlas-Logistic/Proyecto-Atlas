@@ -4,6 +4,54 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-13 — Cierre: INFRAESTRUCTURA S2 / S2.1 (raíz portable de Drive, caché ORS, saneamiento de la carpeta Drive existente)
+
+**Rama:** `lector-mvp-guia-nueva` · **Baseline:** posterior a INTELIGENCIA N1 (`ed52afb`).
+
+### Decisión de arquitectura
+
+Código = GitHub. Estado operativo portable (catálogos privados, cachés, reportes, respaldos, coordinación) = una única raíz `Atlas\` sincronizada por Drive. Secretos = variables de entorno locales, nunca Drive ni Git. Un solo módulo (`atlas_core/almacenamiento_portable.py`) concentra CÓMO se resuelve esa raíz -- nada más en el repo construye la ruta a mano.
+
+### Fase 0 (S2.1) -- auditoría de la carpeta `Atlas` ya existente en Drive, antes de tocar nada
+
+`G:\Mi unidad\Atlas` (Google Drive for Desktop, detectado vía `HKCU:\Software\Google\DriveFS`) ya existía, pero no era una raíz limpia: resultado de una sesión de incidente del 2026-08-10/11 (rollback/reinstalación de Atlas Desktop 1.4.2→1.4.4, evaluación comparativa PaddleOCR/EasyOCR con GPU). Contenía: dos copias completas de repos Git (`Proyecto-Atlas`, HEAD `129b459` -- ancestro confirmado del HEAD actual, no una rama divergente; `Atlas-Viajes-Desktop-Restaurado`, **sin remoto Git configurado**); dos venvs de Python (`ocr_eval_env`, `ocr_eval_gpu_env` -- este último con PaddlePaddle-GPU 3.3.1 + CUDA 11.8 completo); y cuatro copias no reconciliadas de `analisis_completo_guias.csv` (tres idénticas de 1.178 filas/410.100 bytes fechadas 2026-08-08, una de 15 filas/3.342 bytes fechada 2026-08-11). `REPORTE_RESTAURACION.md` dentro de `datos_privados\` confirmó que ese material vino del PC de casa (usuario Windows `Jjjc0508`).
+
+**Decisión de negocio aplicada, no derivada por heurística:** el histórico de 1.178 filas no se promueve a operación vigente. Se preservó sin borrar nada, moviendo (operación de metadatos de Drive, prácticamente instantánea -- no hay recarga de bytes en un `move` dentro del mismo volumen) todo lo no-portable a `historico_pre_infra_s2\` (snapshots, `ocr_eval`, `IMAGENES`, `backups_config`) y `historico_pre_infra_s2\componentes_no_portables\` (los dos repos Git, los dos venvs), cada uno con su propio `README_HISTORICO.md`/`NO_USAR_COMO_CODIGO_CANONICO.md`.
+
+### Fase 1 -- `atlas_core/almacenamiento_portable.py` (nuevo)
+
+`resolver_raiz_atlas(override=None)`: prioridad `override` explícito → `ATLAS_DATA_DIR` → `autodetectar_raiz_drive()` (solo lectura: prueba `<letra>:\{Mi unidad,My Drive}\Atlas` en D:-Z: y `%USERPROFILE%\Google Drive\Atlas`; nunca crea nada, devuelve `None` si no hay evidencia real) → fallback local `Path(".atlas_local")` (cwd-relativo, gitignored, uso de desarrollo/tests). Expone helpers de subcarpeta (`ruta_operacion`, `ruta_catalogos_privados`, `ruta_cache`, `ruta_reportes`, `ruta_respaldos`, `ruta_datos_privados`, `ruta_coordinacion`) que todos aceptan `raiz=` explícito para tests. También centraliza `escribir_json_atomico` (mismo patrón tempfile+`os.replace` que ya usaban `RepositorioRutas`/`RepositorioTelemetria`) y `bloqueo_sesion` (lock de archivo simple con expiración por antigüedad para locks huérfanos, `SesionOcupadaError` si otra sesión activa sostiene el mismo nombre).
+
+**Aislamiento de tests (`tests/conftest.py`, nuevo):** fixture `autouse` que hace `delenv("ATLAS_DATA_DIR")` y fuerza `autodetectar_raiz_drive` a devolver `None` en cada test -- sin esto, configurar `ATLAS_DATA_DIR` de forma persistente en una máquina de desarrollo (como se hizo en este mismo bloque) rompería silenciosamente `test_fuente_inexistente_incompleta_e_invalida` y cualquier otro test que dependa de que no exista fuente de catálogos por defecto.
+
+### Fase 2 -- `atlas_core/fuente_catalogos.py`
+
+Nueva tercera capa de fallback en `resolver_fuente_catalogos`: si no hay `ruta`/`ATLAS_CATALOGOS_DIR` explícitos ni `catalogos/` local completo, se prueba `ruta_catalogos_privados()` (misma verificación "los 7 archivos requeridos están presentes" que ya se usaba para el fallback local) antes de lanzar `ErrorFuenteCatalogos`. Retrocompatible: si esa carpeta no existe o está incompleta, el comportamiento (y el mensaje de error) es idéntico al de antes de este bloque.
+
+### Fase 3 -- `atlas_core/rutas/cache_geocodificacion.py` (nuevo)
+
+Gap real encontrado: `RepositorioRutas`/`ServicioRutas` ya cacheaban la ruta calculada final (clave lógica planta/destino/perfil/proveedor), pero `ServicioRutas.preparar()` llamaba `proveedor.geocodificar()` en cada ejecución, sin ninguna caché -- exactamente la llamada que Onelogis ya no repetía y ORS sí. `RepositorioCacheGeocodificacion` (JSON, escritura atómica, protegida por `bloqueo_sesion`, ubicación predeterminada `<raíz>\cache\geocodificacion\geocodificacion_cache.json`) cachea por `proveedor.nombre|proveedor.version|dirección_normalizada` (mismo normalizador NFKD-mayúsculas-solo-alfanumérico que `huella_direccion` en `atlas_core/rutas/servicio.py`). `ProveedorRutasConCacheGeocodificacion` (decorador `@dataclass(eq=False)` -- deliberado, para conservar igualdad/hash por identidad y no romper código que guarda instancias de proveedor en un `set`) envuelve cualquier `ProveedorRutas`: cachea `geocodificar()`, delega `calcular_ruta()` sin cambios. Solo se cachean estados estables (`REQUIERE_REVISION`, `RESULTADO_AMBIGUO`, `DIRECCION_NO_ENCONTRADA`) -- fallos transitorios (`SIN_CONEXION`, `LIMITE_CUOTA`, `SIN_CREDENCIAL`) nunca quedan "pegados" en caché.
+
+Wireado en `atlas_core/procesamiento_masivo.py` en los dos puntos donde se construye `OpenRouteService(pais=pais_operacion)` por defecto (`resolver_entrega_documento` en modo un-solo-archivo, y el proveedor compartido de todo un lote) -- ningún test existente ejercía esa rama por defecto (todos inyectan `proveedor_rutas` explícito), así que el cambio no tocó ningún comportamiento cubierto por la suite previa.
+
+**Bug encontrado y corregido durante la implementación:** `ProveedorRutasConCacheGeocodificacion` como `@dataclass` normal generaba `__eq__`/`__hash__` por valor, lo que lo volvía no-hasheable (dataclass con `eq=True` por defecto y sin `frozen=True` pone `__hash__ = None`) -- rompía `test_integracion_catalogos_desktop.py::test_catalogos_y_proveedor_compartido_se_propagan_juntos`, que mete instancias de proveedor en un `set` para verificar que el lote reutiliza la misma instancia. Corregido con `@dataclass(eq=False)`.
+
+### Fase 4 -- migración real en PC de oficina (sin gastar llamadas externas)
+
+Catálogo vivo real encontrado en `C:\Users\corte\AppData\Local\Atlas\datos\catalogos_privados\` (8 archivos, base 2026-07-30, con manifiesto SHA-256 propio ya diseñado con política "versión completa inmutable; activación solo con hashes coincidentes"). Copiado (no movido -- Desktop sigue leyendo del original hasta que se adapte) a `G:\Mi unidad\Atlas\catalogos_privados\`; verificado con `sha256sum` contra las 8 hashes del manifiesto -- coincidencia exacta. `ATLAS_DATA_DIR` configurado a nivel de usuario Windows (`SetEnvironmentVariable(..., "User")`) apuntando a `G:\Mi unidad\Atlas`.
+
+Prueba E2E de bajo costo, sin llamadas externas: `validar_fuente_catalogos()` con `ATLAS_DATA_DIR` real → `CATALOGOS_VALIDOS`, conteos idénticos al manifiesto. Cache hit de geocodificación demostrado con un `ProveedorRutasSimulado` instrumentado contra la ruta real de caché en Drive (`interno.llamadas_geocodificacion == 1` tras dos consultas idénticas); archivo de demostración borrado después de la prueba para no dejar datos sintéticos en la caché real.
+
+### Deliberadamente fuera de alcance
+
+Adaptar `main.js`/`config_usuario.json` de Atlas Desktop (hoy hardcodea `C:\Users\Jjjc0508\...`): la única copia de ese código disponible (`historico_pre_infra_s2\componentes_no_portables\Atlas-Viajes-Desktop-Restaurado\`) no tiene remoto Git -- editarla dentro de Drive habría violado el propio principio "código = Git" de este bloque. Documentado como pendiente en `coordinacion\PENDIENTE_PC_CASA.md`.
+
+### Validación
+
+Suite completa: 892 → **916 tests** (24 nuevos: `tests/test_almacenamiento_portable.py`, `tests/test_cache_geocodificacion.py`, 3 nuevos en `tests/test_fuente_catalogos.py`), sin regresiones -- corrida completa en verde después del fix de hasheabilidad.
+
+---
+
 ## 2026-08-12 — Cierre: INTELIGENCIA N1 (normalización semántica controlada de territorios y entidades)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** posterior a PATENTES P4 (`88645b3`).

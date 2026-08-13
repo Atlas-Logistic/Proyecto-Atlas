@@ -29,3 +29,7 @@ resultado_pruebas.txt
 .pytest_cache/
 .pytest_temp*/
 .tmp_atlas_master_context_verify/
+
+# INFRAESTRUCTURA S2.1: fallback local de la raíz portable cuando no hay
+# ATLAS_DATA_DIR ni Drive detectado (desarrollo/tests) -- nunca es Drive.
+.atlas_local/
