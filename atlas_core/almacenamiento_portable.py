@@ -38,8 +38,9 @@ import os
 import socket
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 VARIABLE_ENTORNO = "ATLAS_DATA_DIR"
 NOMBRE_RAIZ_ATLAS = "Atlas"
@@ -130,6 +131,88 @@ def ruta_datos_privados(subcarpeta: str = "", *, raiz: Path | None = None) -> Pa
 
 def ruta_coordinacion(*, raiz: Path | None = None) -> Path:
     return (raiz if raiz is not None else resolver_raiz_atlas()) / "coordinacion"
+
+
+# INFRAESTRUCTURA S2.2 -- manifiesto de operación vigente, contrato
+# compartido con Atlas Desktop (ver `estado_operacion.js` en el repo
+# Atlas-Viajes-Desktop y `docs/CONTRATO_ESTADO_OPERACION_PORTABLE.md`,
+# versionado en ambos repos). Un único archivo pequeño, con escritura
+# atómica, en vez de que cada lado adivine "la carpeta con timestamp más
+# reciente" -- eso podría seleccionar un reporte incompleto o promover
+# por accidente algo de `historico_pre_infra_s2/`.
+VERSION_SCHEMA_ESTADO_OPERACION = 1
+RUTA_RELATIVA_MANIFIESTO_OPERACION = Path("operacion") / "actual" / "estado_operacion.json"
+
+
+def _ruta_relativa_segura(raiz: Path, ruta: str | Path) -> Path | None:
+    """``ruta`` relativa a ``raiz``, o ``None`` si cae fuera de ``raiz``.
+
+    Nunca se acepta silenciosamente una ruta fuera de la raíz portable en
+    el manifiesto -- evita publicar un manifiesto "mentiroso" que apunte
+    a un CSV/reporte que en realidad vive fuera de Drive.
+    """
+    raiz_resuelta = Path(raiz).resolve()
+    ruta_resuelta = Path(ruta).resolve()
+    try:
+        return ruta_resuelta.relative_to(raiz_resuelta)
+    except ValueError:
+        return None
+
+
+def escribir_estado_operacion(
+    *,
+    reporte_vigente: str | Path,
+    dataset_operacional: str | Path | None = None,
+    origen: str | None = None,
+    raiz: Path | None = None,
+    reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> Path | None:
+    """Publica/actualiza el manifiesto de operación vigente.
+
+    Best-effort y deliberadamente silencioso ante rutas fuera de la raíz
+    portable (devuelve ``None`` sin lanzar) -- generar un reporte fuera
+    de ``ATLAS_DATA_DIR`` (uso local/de desarrollo) sigue funcionando
+    exactamente igual que antes de S2.2, simplemente no publica
+    manifiesto. Escritura atómica (ver `escribir_json_atomico`).
+    """
+    raiz_efectiva = raiz if raiz is not None else resolver_raiz_atlas()
+    ruta_reporte_relativa = _ruta_relativa_segura(raiz_efectiva, reporte_vigente)
+    if ruta_reporte_relativa is None:
+        return None
+    ruta_dataset_relativa = None
+    if dataset_operacional is not None:
+        ruta_dataset_relativa = _ruta_relativa_segura(raiz_efectiva, dataset_operacional)
+        if ruta_dataset_relativa is None:
+            return None
+    contenido = {
+        "schema_version": VERSION_SCHEMA_ESTADO_OPERACION,
+        "reporte_vigente": ruta_reporte_relativa.as_posix(),
+        "dataset_operacional": ruta_dataset_relativa.as_posix() if ruta_dataset_relativa else None,
+        "fecha_actualizacion": reloj().astimezone(timezone.utc).isoformat(),
+        "origen": origen,
+    }
+    ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
+    escribir_json_atomico(ruta_manifiesto, contenido)
+    return ruta_manifiesto
+
+
+def leer_estado_operacion(*, raiz: Path | None = None) -> dict | None:
+    """Lee el manifiesto de operación vigente, o ``None`` si no existe/es inválido.
+
+    Nunca lanza por un manifiesto ausente o corrupto -- ausencia es un
+    caso válido (operación aún no importada/generada).
+    """
+    raiz_efectiva = raiz if raiz is not None else resolver_raiz_atlas()
+    ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
+    if not ruta_manifiesto.is_file():
+        return None
+    try:
+        contenido = json.loads(ruta_manifiesto.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(contenido, dict) or contenido.get("schema_version") != VERSION_SCHEMA_ESTADO_OPERACION:
+        return None
+    return contenido
 
 
 def escribir_json_atomico(ruta: str | Path, contenido: object) -> None:

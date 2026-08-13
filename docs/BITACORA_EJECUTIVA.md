@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-13 — INFRAESTRUCTURA S2.2: Desktop encontrado, conectado a la raíz portable y sin quedar atado a un usuario Windows específico
+
+- **Se encontró el repo real de Atlas Desktop** (no estaba donde S2.1 asumía): un clon local con remoto oficial en GitHub (`Atlas-Logistic/Atlas-Viajes-Desktop`) en `C:\Users\corte\Desktop\MBT\Proyecto\_build-atlas-desktop-1.2.0-oficina\`, y una copia local más avanzada (3 commits sin publicar) dentro de la carpeta histórica que dejó S2.1 en Drive. Ambas apuntan al mismo linaje real de commits -- se combinaron en una copia de trabajo local nueva y ordenada (`Desktop\MBT\Proyecto\Atlas-Viajes-Desktop\`, fuera de Drive, tal como exige la arquitectura "código = Git").
+- **Decisión permanente, ahora en código en ambos repos:** Desktop y motor comparten el mismo contrato portable. `ATLAS_DATA_DIR` resuelve la raíz igual que en el motor (mismo orden de prioridad, mismo criterio de autodetección de Drive), con un respaldo adicional propio de Desktop (una configuración local mínima que guarda solo la raíz) para el caso en que Electron, lanzado desde un acceso directo o el instalador, no herede variables de entorno del shell.
+- **Nuevo manifiesto compartido `operacion/actual/estado_operacion.json`** (documentado en ambos repos): el motor lo publica al generar un reporte dentro de la raíz portable; Desktop lo lee para saber cuál es el reporte vigente, sin depender de "la carpeta con timestamp más reciente" (que podría escoger un reporte incompleto) y sin caer nunca, bajo ninguna circunstancia, en el histórico preservado por S2.1.
+- **Configuración legacy de otro PC ya no se usa en silencio:** si `config_usuario` de Desktop tiene una ruta que no existe en la máquina actual o que pertenece a otra raíz (el caso real encontrado: rutas `C:\Users\Jjjc0508\...` del PC de casa), se respalda automáticamente (nunca se borra) y se reemplaza por el equivalente derivado de la raíz portable.
+- **Bloqueo real y transparente, no maquillado:** este PC/entorno no tiene Node.js instalable, así que no se pudo ejecutar la suite de Desktop (110 tests previos + 16 nuevos) ni abrir Electron para una validación visual. El trabajo quedó completo y comiteado localmente, sin publicar (push) hasta confirmar los tests en verde -- ver `coordinacion\PENDIENTE_PC_CASA.md` en Drive para el paso exacto pendiente.
+- Motor: suite completa 916 → **927 tests**, sin regresiones (todo lo tocado del lado Python se pudo ejecutar y verificar normalmente).
+
+---
+
 ## 2026-08-13 — INFRAESTRUCTURA S2.1: Google Drive pasa a ser la raíz operativa real de Atlas entre casa y oficina, y una auditoría previa evitó mezclar dos historias de datos incompatibles
 
 - **Decisión permanente de arquitectura, ahora en código y documentada:** código = GitHub; estado operativo portable (catálogos privados, caché de geocodificación/telemetría, reportes, respaldos) = una única raíz `Atlas\` sincronizada por Google Drive; secretos = variables de entorno locales, nunca Drive ni Git. El objetivo práctico -- `git pull` → abrir Atlas → trabajar, sin copiar CSV/catálogos/cachés a mano entre PCs -- ya funciona en la oficina.

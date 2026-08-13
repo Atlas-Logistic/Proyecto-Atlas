@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from atlas_core.almacenamiento_portable import escribir_estado_operacion
 from atlas_core.reporte_viajes import generar_reporte_viajes
 
 
@@ -41,6 +42,20 @@ def main() -> None:
     print(f"  Requieren revisión: {totales['viajes_requieren_revision']}")
     print(f"Documentos sin transporte: {totales['documentos_sin_transporte']}")
     print(f"Salida: {argumentos.salida}")
+
+    # INFRAESTRUCTURA S2.2: publica/actualiza el manifiesto portable de
+    # operación vigente para que Atlas Desktop (o cualquier otro PC con
+    # Drive sincronizado) lo descubra sin depender de "la carpeta más
+    # reciente". Best-effort y silencioso: si `--salida`/`csv` no viven
+    # dentro de la raíz portable (uso local/de desarrollo, comportamiento
+    # de siempre), simplemente no se publica nada -- nunca rompe la
+    # generación del reporte, que ya terminó con éxito arriba.
+    try:
+        escribir_estado_operacion(
+            reporte_vigente=argumentos.salida, dataset_operacional=argumentos.csv,
+        )
+    except OSError as error:
+        print(f"(No se pudo publicar el manifiesto de operación vigente: {error})")
 
 
 if __name__ == "__main__":

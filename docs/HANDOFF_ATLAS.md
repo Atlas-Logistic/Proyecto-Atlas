@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-13 — INFRAESTRUCTURA S2.2: Desktop portable, con un bloqueo de verificación real y transparente -- si retomas esto, empieza aquí
+
+- **Rama motor:** `lector-mvp-guia-nueva`. Baseline: INFRAESTRUCTURA S2.1 (`2046f08`).
+- **Repo Desktop real, encontrado y usado:** `https://github.com/Atlas-Logistic/Atlas-Viajes-Desktop.git`, rama `fix-desktop-data-root-drag-drop`. Copia de trabajo local: `C:\Users\corte\Desktop\MBT\Proyecto\Atlas-Viajes-Desktop\` (clon limpio + los 3 commits que solo existían en la copia que S2.1 había preservado en `historico_pre_infra_s2\`, traídos por fast-forward verificado, nunca reescritos). **No se creó ningún repo GitHub nuevo.**
+- **El commit `96229813fcae41c5e1ea22ac139c703c616c976a` (MATERIAL/PESO/OBRA DESTINO en multiguía) no existe en ningún repo/rama accesible** desde este PC (se hizo `git fetch --all` real contra GitHub, 18 ramas, 31 commits totales) ni en la copia histórica de Drive. Lo más cercano es `src/consolidacion_viaje.js` + `test/consolidacion_viaje.test.js`, que viven en la rama `feature-consolidacion-viajes-1` (no fusionada con la rama de portabilidad usada aquí) -- **no se fusionó esa rama en este bloque** (habría sido un merge de feature no relacionado, fuera del alcance "resolver únicamente la portabilidad pendiente"). Si Javier confirma que ese commit debería existir, vale la pena revisar directamente en el PC de casa.
+- **Contrato portable nuevo, compartido entre motor y Desktop:** `docs/CONTRATO_ESTADO_OPERACION_PORTABLE.md` (motor) / `documentacion/CONTRATO_ESTADO_OPERACION_PORTABLE.md` (Desktop) -- mismo archivo, mismo esquema. El motor lo escribe (`atlas_core.almacenamiento_portable.escribir_estado_operacion`, wireado de forma best-effort y silenciosa en `generar_reporte_viajes.py`); Desktop lo lee (`src/estado_operacion.js`).
+- **Bloqueo real, no un blocker inventado:** no hay Node.js instalable en este entorno (sin `node.exe` en PATH ni en ubicaciones conocidas; `node_modules/electron/dist` nunca se descargó). No se pudo correr `npm test` ni abrir Electron para una validación visual. Se revisó el código a mano con mucho cuidado (mismo patrón exacto de funciones puras + `node:test` que ya usa el resto del repo Desktop; balance de llaves/paréntesis verificado sin diferencia neta) y se comiteó localmente (`4b94a38`), **sin publicar**. Próximo paso, en un PC con Node: `npm test` y, si pasa, `git push origin fix-desktop-data-root-drag-drop`.
+- **Motor, cambios sí verificados con la suite completa:** nuevas funciones `escribir_estado_operacion`/`leer_estado_operacion` en `atlas_core/almacenamiento_portable.py`, wireadas de forma best-effort (silenciosa si `--salida`/csv no viven dentro de `ATLAS_DATA_DIR`, comportamiento idéntico a antes de S2.2) en `generar_reporte_viajes.py`. 916 → 927 tests, sin regresiones.
+- **Próximo paso natural:** confirmar `npm test` en Desktop desde un PC con Node (casa, probablemente) y publicar la rama; después, cuando exista una operación real posterior a N1, generarla apuntando `--salida`/`ATLAS_DATA_DIR` a la raíz de Drive para que el manifiesto se publique solo y Desktop la vea sin ningún paso manual.
+
+---
+
 ## 2026-08-13 — INFRAESTRUCTURA S2.1: Drive ya es la raíz operativa portable -- si retomas esto, empieza aquí
 
 - **Rama:** `lector-mvp-guia-nueva`. Baseline: INTELIGENCIA N1 (`ed52afb`).

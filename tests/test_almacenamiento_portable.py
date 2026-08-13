@@ -11,7 +11,9 @@ from atlas_core.almacenamiento_portable import (
     SesionOcupadaError,
     autodetectar_raiz_drive,
     bloqueo_sesion,
+    escribir_estado_operacion,
     escribir_json_atomico,
+    leer_estado_operacion,
     resolver_raiz_atlas,
     ruta_cache,
     ruta_catalogos_privados,
@@ -132,3 +134,93 @@ def test_bloqueo_huerfano_se_reemplaza_tras_expirar(tmp_path):
     _os.utime(ruta_lock, (tiempo_pasado, tiempo_pasado))
     with bloqueo_sesion(tmp_path, "operacion", tiempo_expiracion_segundos=0.01):
         pass
+
+
+# --- INFRAESTRUCTURA S2.2: manifiesto portable de operación vigente ---
+# (contrato compartido con Atlas Desktop -- ver src/estado_operacion.js)
+
+def test_leer_estado_operacion_sin_manifiesto_es_caso_valido(tmp_path):
+    assert leer_estado_operacion(raiz=tmp_path) is None
+
+
+def test_escribir_y_releer_estado_operacion_redondea_bien(tmp_path):
+    raiz = tmp_path
+    (raiz / "reportes" / "actual").mkdir(parents=True)
+    (raiz / "operacion" / "procesamiento").mkdir(parents=True)
+    dataset = raiz / "operacion" / "procesamiento" / "analisis_completo_guias.csv"
+    dataset.write_text("archivo\n", encoding="utf-8")
+
+    ruta_manifiesto = escribir_estado_operacion(
+        reporte_vigente=raiz / "reportes" / "actual",
+        dataset_operacional=dataset,
+        origen="oficina",
+        raiz=raiz,
+    )
+    assert ruta_manifiesto == raiz / "operacion" / "actual" / "estado_operacion.json"
+
+    leido = leer_estado_operacion(raiz=raiz)
+    assert leido["schema_version"] == 1
+    assert leido["reporte_vigente"] == "reportes/actual"
+    assert leido["dataset_operacional"] == "operacion/procesamiento/analisis_completo_guias.csv"
+    assert leido["origen"] == "oficina"
+    assert leido["fecha_actualizacion"]
+
+
+def test_escribir_estado_operacion_fuera_de_raiz_no_escribe_nada(tmp_path):
+    raiz = tmp_path / "Atlas"
+    raiz.mkdir()
+    fuera = tmp_path / "fuera_de_atlas"
+    fuera.mkdir()
+    resultado = escribir_estado_operacion(reporte_vigente=fuera, raiz=raiz)
+    assert resultado is None
+    assert not (raiz / "operacion" / "actual" / "estado_operacion.json").exists()
+
+
+def test_escribir_estado_operacion_dataset_fuera_de_raiz_aborta_todo_el_manifiesto(tmp_path):
+    raiz = tmp_path / "Atlas"
+    (raiz / "reportes" / "actual").mkdir(parents=True)
+    dataset_fuera = tmp_path / "fuera.csv"
+    dataset_fuera.write_text("x", encoding="utf-8")
+    resultado = escribir_estado_operacion(
+        reporte_vigente=raiz / "reportes" / "actual", dataset_operacional=dataset_fuera, raiz=raiz,
+    )
+    assert resultado is None
+    assert not (raiz / "operacion" / "actual" / "estado_operacion.json").exists()
+
+
+def test_escribir_estado_operacion_sin_dataset_es_valido(tmp_path):
+    raiz = tmp_path
+    (raiz / "reportes" / "actual").mkdir(parents=True)
+    escribir_estado_operacion(reporte_vigente=raiz / "reportes" / "actual", raiz=raiz)
+    leido = leer_estado_operacion(raiz=raiz)
+    assert leido["dataset_operacional"] is None
+
+
+def test_leer_estado_operacion_manifiesto_corrupto_se_abstiene(tmp_path):
+    ruta_manifiesto = tmp_path / "operacion" / "actual" / "estado_operacion.json"
+    ruta_manifiesto.parent.mkdir(parents=True)
+    ruta_manifiesto.write_text("{ esto no es json valido", encoding="utf-8")
+    assert leer_estado_operacion(raiz=tmp_path) is None
+
+
+def test_leer_estado_operacion_schema_no_soportada_se_abstiene(tmp_path):
+    ruta_manifiesto = tmp_path / "operacion" / "actual" / "estado_operacion.json"
+    ruta_manifiesto.parent.mkdir(parents=True)
+    ruta_manifiesto.write_text('{"schema_version": 99, "reporte_vigente": "reportes/actual"}', encoding="utf-8")
+    assert leer_estado_operacion(raiz=tmp_path) is None
+
+
+def test_escribir_estado_operacion_es_atomico_nunca_deja_manifiesto_truncado(tmp_path, monkeypatch):
+    raiz = tmp_path
+    (raiz / "reportes" / "actual").mkdir(parents=True)
+    escribir_estado_operacion(reporte_vigente=raiz / "reportes" / "actual", raiz=raiz, origen="v1")
+
+    def _dump_falla(*_args, **_kwargs):
+        raise OSError("disco lleno simulado")
+
+    monkeypatch.setattr("atlas_core.almacenamiento_portable.json.dump", _dump_falla)
+    with pytest.raises(OSError):
+        escribir_estado_operacion(reporte_vigente=raiz / "reportes" / "actual", raiz=raiz, origen="v2")
+
+    leido = leer_estado_operacion(raiz=raiz)
+    assert leido["origen"] == "v1"  # el manifiesto anterior sigue intacto, no quedo truncado

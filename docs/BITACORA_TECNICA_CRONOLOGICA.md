@@ -4,6 +4,46 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-13 — Cierre: INFRAESTRUCTURA S2.2 (Desktop portable, contrato compartido de operación vigente)
+
+**Rama motor:** `lector-mvp-guia-nueva` · **Baseline:** posterior a INFRAESTRUCTURA S2.1 (`2046f08`).
+
+### Fase A -- localizar el repo Desktop real
+
+Búsqueda exhaustiva en el PC de oficina (`package.json`/`atlas_viajes.html`/`consolidacion_viaje.js`/historial Git) encontró `C:\Users\corte\Desktop\MBT\Proyecto\_build-atlas-desktop-1.2.0-oficina\` -- clon con `origin` real (`https://github.com/Atlas-Logistic/Atlas-Viajes-Desktop.git`), HEAD detached en `ef6dfb0`. `git fetch --all` reveló 18 ramas remotas / 31 commits totales. El commit buscado (`96229813fcae41c5e1ea22ac139c703c616c976a`, MATERIAL/PESO/OBRA DESTINO multiguía) **no existe en ninguna rama fetcheada** ni en la copia histórica de Drive; lo más cercano es `src/consolidacion_viaje.js` en la rama `feature-consolidacion-viajes-1` (no fusionada aquí -- fuera de alcance).
+
+La copia que S2.1 había movido a `historico_pre_infra_s2\componentes_no_portables\Atlas-Viajes-Desktop-Restaurado\` resultó tener el mismo linaje real (comparte el commit `139d41f` byte a byte con `origin/fix-desktop-data-root-drag-drop`) más 3 commits locales nunca publicados (`0ec8a3b`, `50b4323`, `b247432`) -- confirmado con `git merge-base --is-ancestor` (fast-forward limpio, sin reescritura). Se creó una copia de trabajo nueva (`Desktop\MBT\Proyecto\Atlas-Viajes-Desktop\`, clon limpio de `origin` + los 3 commits traídos como remoto temporal, luego removido) en vez de desarrollar dentro de Drive o reutilizar el clon viejo desactualizado.
+
+### Fase C/D -- auditoría y contrato portable
+
+`main.js` resolvía `carpetaReportes`/`carpetaProyectoPython`/`carpetaCatalogos` desde `electron-store` (`config_usuario`), poblado por migración desde un `config.json` legado -- mecanismo de almacenamiento ya correcto (sobrevive reinstalaciones), pero los *valores* migrados venían de un PC específico (`C:\Users\Jjjc0508\...`). `carpetaProyectoPython` se dejó deliberadamente fuera de cualquier derivación portable: apunta al repo de código, y S2.1 ya decidió "código = Git, no Drive" -- forzarla a derivar de `ATLAS_DATA_DIR` violaría esa decisión.
+
+`src/atlas_data_dir.js` (nuevo): mismo contrato que `atlas_core/almacenamiento_portable.py` (override > `ATLAS_DATA_DIR` > configuración local mínima > autodetección de Drive > `null`), con un nivel extra (configuración local) inexistente del lado Python -- necesario porque Electron lanzado desde un acceso directo/instalador puede no heredar variables de entorno definidas después del inicio de sesión de Windows.
+
+### Fase F/G -- manifiesto de operación vigente, contrato compartido
+
+El motor (tras S2.1) no tenía ningún mecanismo de "operación vigente" -- solo carpetas. Se definió `operacion/actual/estado_operacion.json` (schema_version 1: `reporte_vigente`, `dataset_operacional` opcional, `fecha_actualizacion`, `origen`), documentado idénticamente en `docs/CONTRATO_ESTADO_OPERACION_PORTABLE.md` (motor) y `documentacion/CONTRATO_ESTADO_OPERACION_PORTABLE.md` (Desktop).
+
+Lado motor: `atlas_core/almacenamiento_portable.py` gana `escribir_estado_operacion`/`leer_estado_operacion` (mismo patrón de escritura atómica). Cualquier ruta relativa que resuelva fuera de la raíz invalida todo el manifiesto (`_ruta_relativa_segura`, usa `Path.relative_to`). Wireado en `generar_reporte_viajes.py` como paso *best-effort* tras generar el reporte: si `--salida`/el CSV no viven dentro de `ATLAS_DATA_DIR`, no se publica nada -- comportamiento idéntico al de antes de S2.2 (verificado con test dedicado).
+
+Lado Desktop: `src/estado_operacion.js` (`leerEstadoOperacion`) -- ausencia de manifiesto es `SIN_OPERACION_ACTIVA` (caso válido, no error); JSON corrupto es `MANIFIESTO_INVALIDO`; `schema_version` no reconocida es `SCHEMA_NO_SOPORTADO`; campo `reporte_vigente` ausente es `MANIFIESTO_INCOMPLETO`; cualquier ruta (relativa) que resuelva fuera de la raíz es `RUTA_FUERA_DE_RAIZ`. Nunca hace `readdir`/glob -- solo lee ese archivo exacto, por lo que estructuralmente no puede "caer" a `historico_pre_infra_s2\`.
+
+`main.js`: `atlas:cargar-automatico` ahora prefiere `estadoOperacion.reporteVigente` sobre `configuracion.carpetaReportes`, cayendo al valor legacy solo si no hay manifiesto -- superset estricto del comportamiento anterior (si no hay manifiesto, se comporta exactamente igual que antes). Dos IPC nuevos, aditivos: `atlas:estado-operacion-vigente` (para un futuro panel de estado) y `atlas:configurar-raiz-atlas` (para una futura pantalla de configuración de la raíz local mínima -- la lectura/escritura ya existen, la UI queda pendiente, deliberadamente fuera de alcance de este bloque).
+
+### Fase H -- migración de config_usuario legacy
+
+`migrarHaciaRaizPortableSiCorresponde` (nuevo en `src/configuracion_usuario.js`): un valor de `carpetaCatalogos`/`carpetaReportes` se trata como legacy si no existe como carpeta real en este PC, o si existe pero no vive dentro de la raíz portable resuelta (comparación por límite de carpeta real, con separador de por medio -- **bug encontrado y corregido durante la implementación**: una comparación por prefijo de texto simple hacía que `G:\Atlas2\...` contara como "dentro de" `G:\Atlas`, falso positivo real corregido con un test dedicado). Se respalda bajo una clave con timestamp antes de reemplazar -- nunca se pierde el valor original. Idempotente (`_migradoHaciaRaizPortable`). `carpetaProyectoPython` explícitamente excluida (ver Fase C).
+
+### Bloqueo real de verificación (Desktop)
+
+Este entorno de ejecución no tiene Node.js instalable: sin `node.exe` en PATH ni en ubicaciones conocidas (`Program Files`, `AppData\Local\Programs`, `nvm`, Chocolatey), y `node_modules/electron/dist` nunca se descargó en ningún clon local encontrado (instalación de dependencias hecha originalmente sin acceso a la descarga del binario de Electron). No se pudo ejecutar `npm test` (110 tests previos reportados + 16 nuevos) ni abrir Electron para validación visual. El código se revisó manualmente con cuidado -- mismo patrón exacto de funciones puras que ya usa el resto del repo, balance de llaves/paréntesis verificado sin diferencia neta introducida (`git show HEAD:main.js` vs versión editada: +36 `(` / +36 `)`) -- y se comiteó localmente (`4b94a38` sobre `fix-desktop-data-root-drag-drop`), **sin publicar**. Ver `coordinacion\PENDIENTE_PC_CASA.md` en Drive para el paso exacto pendiente (`npm test` + `git push` desde un PC con Node).
+
+### Validación (motor)
+
+Suite completa: 916 → **927 tests** (11 nuevos: `tests/test_generar_reporte_viajes_cli.py`, 8 nuevos en `tests/test_almacenamiento_portable.py`), sin regresiones.
+
+---
+
 ## 2026-08-13 — Cierre: INFRAESTRUCTURA S2 / S2.1 (raíz portable de Drive, caché ORS, saneamiento de la carpeta Drive existente)
 
 **Rama:** `lector-mvp-guia-nueva` · **Baseline:** posterior a INTELIGENCIA N1 (`ed52afb`).
