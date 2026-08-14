@@ -532,3 +532,13 @@ No iniciar OPERACIÓN REAL R2 como parte de este cierre.
 - `reportes/actual` y `operacion/actual/estado_operacion.json` fueron regenerados desde el nuevo dataset. El reporte agrupa las 19 guías en 15 viajes: 5 confirmados y 10 que requieren revisión.
 - Pendientes, sin iniciar: obra sin corroborar (10), patente sin homologar (6), cliente nuevo no catalogado (4), cliente sin corroborar (2), material ausente (1).
 - Validación: 0 errores técnicos, 0 regresiones, **987 passed / 0 failed**. Portabilidad casa/oficina: Git para código y Drive bajo `ATLAS_DATA_DIR` para estado operacional.
+
+# Estado vigente — R2 Vehículos V1 promovido (2026-08-13)
+
+- Motor: `lector-mvp-guia-nueva`, HEAD publicado `5296ff96a064b527334a082b526c7eaef7c65eb5`, árbol limpio y local/remoto `0/0`; suite **1019 passed, 0 failed**.
+- Vehículos V1: 17 identidades `CONFIRMADO + ACTIVO`; cinco altas humanas nuevas y una ratificación legacy registradas por la API oficial desde decisiones explícitas de `JAVIER_MBT`. SHA-256 canónico: `0E522AF5A517DD4AC692C45F14C637519D20BFF90110BF8AD46F87E03626AF66`.
+- Dataset operacional promovido: 19 guías, **9 OK / 10 REVISAR**, 0 errores y 0 regresiones; SHA-256 `516A9D5EA8E6632416EB5418756ACB081323FAD66C87D2956B5B28AFCF8A4FFF`. Nuevas OK: 464577 y 464640.
+- Rollback: dataset anterior `A18CE354659D790B37115CD8CA20A662F28258AA4D001319F3FEB55EDAD9F67A` respaldado byte a byte en `ATLAS_DATA_DIR/respaldos/R2_PRE_PROMOCION_VEHICULOS_V1_2026-08-13_20260813_225023`.
+- `reportes/actual` y `operacion/actual/estado_operacion.json` fueron regenerados exclusivamente desde el dataset promovido. Desktop devuelve `OPERACION_ACTIVA`, encuentra dataset y `viajes.csv`, no cae al histórico y puede consumir las nuevas guías.
+- Pendientes actuales: `OBRA_DESTINO_SIN_CORROBORAR` (10), `CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA` (8), `CLIENTE_SIN_CORROBORAR` (2) y `MATERIAL_AUSENTE` (1). El siguiente cuello de botella de mayor impacto es obra/destino sin corroborar.
+- Deuda baja separada: reparar de forma auditable el mojibake de observaciones humanas y mover `telemetria_cache.json` fuera de la fuente `--catalogos`. No corregir ninguno mezclándolo con cambios operacionales.

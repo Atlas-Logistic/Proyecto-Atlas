@@ -464,3 +464,12 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - Dataset anterior respaldado con SHA-256 `915939141F8A914B8FAA38860E5F5314DF051D532BE692F64E62F4B04E2A330D`. Nuevo dataset canónico: SHA-256 `A18CE354659D790B37115CD8CA20A662F28258AA4D001319F3FEB55EDAD9F67A`.
 - Pendientes actuales: obra sin corroborar (10), patente sin homologar (6), cliente nuevo no catalogado (4), cliente sin corroborar (2) y material ausente (1). No se corrigieron en este bloque.
 - Estado portable: código publicado en GitHub; dataset, catálogo y reporte operacional viven bajo `ATLAS_DATA_DIR`/Drive. Suite: **987 passed, 0 failed**.
+
+# 2026-08-13 — R2: Vehículos V1 promovido a operación real
+
+- Se publicó el catálogo auditable Vehículos V1 en `5296ff96a064b527334a082b526c7eaef7c65eb5`. El catálogo privado fue migrado de 12 identidades legacy a V1 y se registraron mediante la API oficial cinco altas y una ratificación legacy basadas exclusivamente en confirmaciones humanas explícitas de `JAVIER_MBT`.
+- El dataset previo, SHA-256 `A18CE354659D790B37115CD8CA20A662F28258AA4D001319F3FEB55EDAD9F67A`, quedó respaldado byte a byte en `respaldos/R2_PRE_PROMOCION_VEHICULOS_V1_2026-08-13_20260813_225023`.
+- Se promovió sin edición manual el CSV aprobado, SHA-256 `516A9D5EA8E6632416EB5418756ACB081323FAD66C87D2956B5B28AFCF8A4FFF`: **19 guías, 9 OK / 10 REVISAR, 0 errores y 0 regresiones**. Las nuevas OK son 464577 y 464640; cuatro guías adicionales eliminaron el motivo de patente sin resolver, pero conservan otros motivos legítimos.
+- Se regeneraron los cinco artefactos de `reportes/actual` y el manifiesto portable `operacion/actual/estado_operacion.json`. Desktop confirmó `OPERACION_ACTIVA`, dataset y `viajes.csv` vigentes, sin fallback histórico.
+- Suite final: **1019 passed, 0 failed**. Pendientes documentales: obra sin corroborar (10), cliente nuevo no catalogado (8), cliente sin corroborar (2) y material ausente (1).
+- Hallazgos bajos pendientes, fuera de este bloque: corregir mojibake ya almacenado en texto libre de las seis decisiones, sin reescribir su semántica, y desacoplar `telemetria_cache.json` de la ruta entregada mediante `--catalogos`.
