@@ -124,6 +124,7 @@ def test_catalogos_y_proveedor_compartido_se_propagan_juntos(tmp_path, monkeypat
             "proveedor": proveedor,
             "carpeta_catalogos": fuente,
             "proveedor_rutas": proveedor_rutas_compartido,
+            "recolector_decisiones": llamada.kwargs["recolector_decisiones"],
         }
 
 

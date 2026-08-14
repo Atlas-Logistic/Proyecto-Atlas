@@ -19,7 +19,6 @@ from atlas_core.catalogos import (
     cargar_catalogo_json,
     enriquecer_datos_con_catalogos,
     normalizar_rut,
-    registrar_alias_seguro,
     resolver_nombre_chofer_difuso,
     resolver_nombre_empresa_difuso,
     resolver_patente_canonica,
@@ -66,6 +65,7 @@ from atlas_core.catalogo_obras_destinos import (
     ErrorCatalogoObrasDestinos,
     ResolucionObraDestino,
 )
+from atlas_core.decisiones_pendientes import detectar_decisiones_documento
 from atlas_core.rutas.destino_entrega import (
     CAMPOS_ENTREGA_DOCUMENTO,
     calcular_ruta_con_planta_conocida,
@@ -742,6 +742,7 @@ def procesar_archivo(
     carpeta_catalogos: str | Path | None = None,
     proveedor_rutas: object = None,
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
+    recolector_decisiones: Callable[[list[dict[str, object]]], None] | None = None,
     servicio_telemetria: object = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
@@ -977,11 +978,9 @@ def procesar_archivo(
     # cliente se corrigió aparte, ver `_extraer_rut_cliente_geometrico`);
     # (3) si el RUT no calza, fuzzy contra el nombre canónico (Fase F,
     # NIVEL FUERTE -- mismo criterio que chofer). RUT exacto que corrobora
-    # también dispara Fase K (alias controlado): si el nombre documental
-    # normalizado difiere del nombre canónico, se aprende como alias del
-    # MISMO registro para no tener que resolver la misma corrupción OCR
-    # de nuevo -- `registrar_alias_seguro` ya exige identidad única y sin
-    # conflicto, así que nunca aprende algo ambiguo.
+    # R3.1: una variante nueva respaldada por RUT exacto ya no se aprende
+    # silenciosamente. La resolución sigue siendo read-only y la variante se
+    # emite después como ALIAS_CANDIDATO para una decisión humana futura.
     if carpeta_catalogos is not None:
         ruta_empresas = Path(carpeta_catalogos) / "empresas.json"
         catalogo_empresas = cargar_catalogo_json(ruta_empresas)
@@ -1012,24 +1011,6 @@ def procesar_archivo(
                 cliente_corroborado_n1 = True
             elif registro_empresa is not None:
                 cliente_corroborado_n1 = True
-                # Fase K: el alias a aprender es el texto ORIGINAL antes de
-                # que `enriquecer_datos_con_catalogos` ya lo haya podido
-                # corregir por este mismo RUT (`cliente_antes_catalogo`) --
-                # si se usara `nombre_cliente_actual` aquí, en el camino
-                # normal ya sería idéntico al nombre canónico (nada que
-                # aprender) aunque el documento SÍ trajera una variante
-                # OCR real distinta.
-                variante_ocr = str(cliente_antes_catalogo or "").strip()
-                try:
-                    if variante_ocr and registrar_alias_seguro(
-                        ruta_empresas, normalizar_rut(rut_cliente_actual), variante_ocr
-                    ):
-                        logger.info(
-                            "alias-controlado-v1 aprendido para cliente RUT=%s: %r",
-                            rut_cliente_actual, variante_ocr,
-                        )
-                except OSError as exc:
-                    logger.warning("No se pudo persistir alias de cliente: %s", exc)
             else:
                 decision_fuzzy_cliente = resolver_nombre_empresa_difuso(
                     catalogo_empresas, nombre_cliente_actual
@@ -1577,6 +1558,20 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Enriquecimiento con telemetría omitido: %s: %s", type(exc).__name__, exc)
 
+    if recolector_decisiones is not None and carpeta_catalogos is not None:
+        try:
+            recolector_decisiones(detectar_decisiones_documento(
+                archivo=Path(ruta).name,
+                datos=datos,
+                carpeta_catalogos=carpeta_catalogos,
+                cliente_documental_original=str(cliente_antes_catalogo or ""),
+            ))
+        except Exception as exc:
+            logger.warning(
+                "Detección de decisiones pendientes omitida: %s: %s",
+                type(exc).__name__, exc,
+            )
+
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
@@ -1713,7 +1708,8 @@ def procesar_carpeta(
     archivos = descubrir_archivos(raiz)
     procesados = set() if reprocesar else _archivos_ya_procesados(ruta_csv)
     pendientes: list[dict[str, str]] = []
-    resumen: dict[str, int | float] = {
+    decisiones_pendientes: list[dict[str, object]] = []
+    resumen: dict[str, object] = {
         "encontrados": len(archivos),
         "procesados": 0,
         "omitidos": 0,
@@ -1724,6 +1720,7 @@ def procesar_carpeta(
         "no_determinados": 0,
         "tiempo_total_segundos": 0.0,
         "promedio_segundos_archivo": 0.0,
+        "decisiones_pendientes": decisiones_pendientes,
     }
     lector_compartido = lector_ocr
     proveedor_compartido = proveedor
@@ -1737,6 +1734,7 @@ def procesar_carpeta(
         argumentos_archivo: dict[str, object] = {}
         if carpeta_catalogos is not None:
             argumentos_archivo["carpeta_catalogos"] = carpeta_catalogos
+            argumentos_archivo["recolector_decisiones"] = decisiones_pendientes.extend
             if proveedor_rutas_compartido is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
                 from atlas_core.rutas.cache_geocodificacion import (

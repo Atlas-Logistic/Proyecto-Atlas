@@ -7,6 +7,7 @@ from pathlib import Path
 
 from atlas_core.almacenamiento_portable import escribir_estado_operacion
 from atlas_core.reporte_viajes import generar_reporte_viajes
+from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 
 
 def crear_parser() -> argparse.ArgumentParser:
@@ -51,8 +52,11 @@ def main() -> None:
     # de siempre), simplemente no se publica nada -- nunca rompe la
     # generación del reporte, que ya terminó con éxito arriba.
     try:
+        ruta_decisiones = argumentos.csv.parent / NOMBRE_ARTEFACTO
         escribir_estado_operacion(
-            reporte_vigente=argumentos.salida, dataset_operacional=argumentos.csv,
+            reporte_vigente=argumentos.salida,
+            dataset_operacional=argumentos.csv,
+            decisiones_pendientes=(ruta_decisiones if ruta_decisiones.is_file() else None),
         )
     except OSError as error:
         print(f"(No se pudo publicar el manifiesto de operación vigente: {error})")

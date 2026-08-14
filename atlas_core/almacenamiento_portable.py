@@ -163,6 +163,7 @@ def escribir_estado_operacion(
     *,
     reporte_vigente: str | Path,
     dataset_operacional: str | Path | None = None,
+    decisiones_pendientes: str | Path | None = None,
     origen: str | None = None,
     raiz: Path | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -184,10 +185,20 @@ def escribir_estado_operacion(
         ruta_dataset_relativa = _ruta_relativa_segura(raiz_efectiva, dataset_operacional)
         if ruta_dataset_relativa is None:
             return None
+    ruta_decisiones_relativa = None
+    if decisiones_pendientes is not None:
+        ruta_decisiones_relativa = _ruta_relativa_segura(
+            raiz_efectiva, decisiones_pendientes
+        )
+        if ruta_decisiones_relativa is None:
+            return None
     contenido = {
         "schema_version": VERSION_SCHEMA_ESTADO_OPERACION,
         "reporte_vigente": ruta_reporte_relativa.as_posix(),
         "dataset_operacional": ruta_dataset_relativa.as_posix() if ruta_dataset_relativa else None,
+        "decisiones_pendientes": (
+            ruta_decisiones_relativa.as_posix() if ruta_decisiones_relativa else None
+        ),
         "fecha_actualizacion": reloj().astimezone(timezone.utc).isoformat(),
         "origen": origen,
     }

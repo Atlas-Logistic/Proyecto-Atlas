@@ -10,6 +10,7 @@ from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_cat
 from atlas_core.telemetria.proveedores.onelogis import OnelogisProvider
 from atlas_core.telemetria.repositorio import RepositorioTelemetria
 from atlas_core.telemetria.servicio import ServicioTelemetria
+from atlas_core.decisiones_pendientes import generar_artefacto
 
 
 def fecha_iso(valor: str) -> date:
@@ -116,6 +117,13 @@ def main() -> None:
         carpeta_catalogos=estado_catalogos.ruta,
         servicio_telemetria=servicio_telemetria,
     )
+    if estado_catalogos.ruta is not None and Path(argumentos.salida).is_file():
+        artefacto = generar_artefacto(
+            ruta_dataset=argumentos.salida,
+            carpeta_catalogos=estado_catalogos.ruta,
+            decisiones=resumen.get("decisiones_pendientes", []),
+        )
+        print(f"Decisiones pendientes: {len(artefacto['decisiones'])}")
     print("\nResumen final")
     print(f"Total encontrados: {resumen['encontrados']}")
     print(f"Procesados: {resumen['procesados']}")

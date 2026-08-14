@@ -357,22 +357,31 @@ def test_alias_que_pertenece_a_otro_registro_no_se_aprende(tmp_path):
     assert "aliases" not in catalogo["11111111"] or "EDMA SA" not in catalogo["11111111"].get("aliases", [])
 
 
-# --- 14: cliente corroborado end-to-end (RUT + alias aprendido) ---
+# --- 14: cliente corroborado end-to-end (RUT + alias propuesto) ---
 
 
-def test_cliente_corroborado_via_rut_aprende_alias_para_la_proxima(tmp_path, monkeypatch):
+def test_cliente_corroborado_via_rut_propone_alias_sin_escribir_catalogo(tmp_path, monkeypatch):
     carpeta_catalogos = _escribir_catalogo(tmp_path, "empresas.json", {"111111111": {"nombre": "EBEMA SA"}})
     _preparar_mocks(
         monkeypatch,
         _datos_lineales_completos(cliente="EDMA SA", **{"RUT del cliente": "11.111.111-1"}),
     )
 
-    resultado = procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos)
+    ruta_empresas = carpeta_catalogos / "empresas.json"
+    antes = ruta_empresas.read_bytes()
+    decisiones = []
+    resultado = procesar_archivo(
+        tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos,
+        recolector_decisiones=decisiones.extend,
+    )
 
     assert resultado["cliente"] == "EBEMA SA"
     assert "FUZZY" not in resultado["metodos_recuperacion_documento"]  # corroboró por RUT, no por fuzzy
-    catalogo_final = json.loads((carpeta_catalogos / "empresas.json").read_text(encoding="utf-8"))
-    assert "EDMA SA" in catalogo_final["111111111"].get("aliases", [])
+    assert ruta_empresas.read_bytes() == antes
+    aliases = [decision for decision in decisiones if decision["tipo"] == "ALIAS_CANDIDATO"]
+    assert len(aliases) == 1
+    assert aliases[0]["valor_documental"] == "EDMA SA"
+    assert aliases[0]["identidad_resuelta"]["valor_canonico"] == "EBEMA SA"
 
 
 # --- 15: obra destino corroborada (mecanismo existente, código destinatario) ---
