@@ -927,7 +927,7 @@ def procesar_archivo(
         # cubrir el valor final, sea cual sea su origen. Nunca inventa una
         # patente nueva; ver jerarquía en resolver_patente_canonica.
         try:
-            vehiculos = cargar_catalogo_json(Path(carpeta_catalogos) / "vehiculos.json")
+            vehiculos = Path(carpeta_catalogos) / "vehiculos.json"
             for campo, tipo_esperado in (
                 ("patente del tracto", "TRACTO"),
                 ("patente del carro", "CARRO"),

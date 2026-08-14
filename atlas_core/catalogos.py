@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from atlas_core.catalogo_vehiculos import ErrorCatalogoVehiculos
+
 
 Catalogo = Mapping[str, dict[str, Any]]
 FuenteCatalogo = Catalogo | str | Path
@@ -163,7 +165,7 @@ class ResultadoResolucionPatente:
     candidatos_ambiguos: tuple[str, ...] = ()
 
 
-def resolver_patente_canonica(
+def _resolver_patente_canonica_legacy(
     catalogo: FuenteCatalogo,
     patente_ocr: str,
     *,
@@ -253,6 +255,26 @@ def resolver_patente_canonica(
             "AMBIGUO", original, original, tuple(sorted(candidatos))
         )
     return ResultadoResolucionPatente("SIN_CANDIDATO", original, original)
+
+
+def resolver_patente_canonica(
+    catalogo: FuenteCatalogo,
+    patente_ocr: str,
+    *,
+    tipo_esperado: str | None = None,
+) -> ResultadoResolucionPatente:
+    """Fachada compatible del resolvedor especializado V0/V1."""
+    from atlas_core.catalogo_vehiculos import resolver_patente
+
+    resultado = resolver_patente(
+        catalogo, patente_ocr, tipo_esperado=tipo_esperado
+    )
+    return ResultadoResolucionPatente(
+        resultado.estado,
+        resultado.valor_original,
+        resultado.valor_resultado,
+        resultado.candidatos_ambiguos,
+    )
 
 
 UMBRAL_NOMBRE_CHOFER_DIFUSO = 0.85
@@ -517,7 +539,7 @@ def enriquecer_datos_con_catalogos(
     empresas = cargar_catalogo_json(carpeta / "empresas.json")
     destinos = cargar_catalogo_json(carpeta / "destinos.json")
     choferes = cargar_catalogo_json(carpeta / "choferes.json")
-    vehiculos = cargar_catalogo_json(carpeta / "vehiculos.json")
+    ruta_vehiculos = carpeta / "vehiculos.json"
 
     datos_enriquecidos = datos.copy()
 
@@ -539,11 +561,18 @@ def enriquecer_datos_con_catalogos(
         if isinstance(nombre_destino, str) and nombre_destino.strip():
             datos_enriquecidos["obra destino"] = nombre_destino.strip()
 
-    for campo_patente in ("patente del tracto", "patente del carro"):
+    for campo_patente, tipo_esperado in (
+        ("patente del tracto", "TRACTO"),
+        ("patente del carro", "CARRO"),
+    ):
         patente = datos.get(campo_patente, "")
-        if buscar_vehiculo_por_patente(vehiculos, patente) is not None:
-            patente_normalizada = normalizar_patente(patente)
-            if patente_normalizada:
-                datos_enriquecidos[campo_patente] = patente_normalizada
+        try:
+            decision = resolver_patente_canonica(
+                ruta_vehiculos, patente, tipo_esperado=tipo_esperado
+            )
+        except ErrorCatalogoVehiculos:
+            continue
+        if decision.estado == "COINCIDENCIA_EXACTA":
+            datos_enriquecidos[campo_patente] = decision.valor_resultado
 
     return datos_enriquecidos

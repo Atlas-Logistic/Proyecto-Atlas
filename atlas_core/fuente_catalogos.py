@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from atlas_core.catalogo_vehiculos import (
+    ErrorCatalogoVehiculos,
+    cargar_catalogo_vehiculos,
+)
+
 
 VARIABLE_CATALOGOS = "ATLAS_CATALOGOS_DIR"
 ARCHIVOS_REQUERIDOS = (
@@ -118,6 +123,15 @@ def validar_fuente_catalogos(
 
     conteos: dict[str, int] = {}
     for nombre in ARCHIVOS_REQUERIDOS:
+        if nombre == "vehiculos.json":
+            try:
+                catalogo_vehiculos = cargar_catalogo_vehiculos(fuente / nombre)
+            except ErrorCatalogoVehiculos as error:
+                raise ErrorFuenteCatalogos(
+                    f"Esquema inválido en {nombre}: {error}"
+                ) from error
+            conteos[nombre] = len(catalogo_vehiculos.vehiculos)
+            continue
         registros = _registros(nombre, _leer_json(fuente / nombre))
         identidades = [identidad.strip().upper() for identidad, _ in registros]
         if any(not identidad for identidad in identidades):
