@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-14 — Handoff vigente: R2 cerrado sobre lote controlado 19/19
+
+- **Código publicado:** rama `lector-mvp-guia-nueva`, commit funcional `093cce923d172cac18cafb5b453c0cef8de95242`. Geometría relativa `SEÑOR(ES)↔R.U.T.` y corroboración conservadora por RUT exacto contra `clientes.json` (`CONFIRMADO` + `ACTIVO`); `empresas.json` permanece como fallback compatible. `464534/464535` quedaron OK sin hardcode. Auditoría Claude aprobada; Motor `1044/1044`.
+- **Operación vigente:** `G:\Mi unidad\Atlas\operacion\actual\analisis_completo_guias.csv`, SHA-256 `3DF7C5BB88FE5C9DEE2CAA14EEBB885DB5A14C90EB1F80989F19536697D87A4B`, `19 filas / 19 guías únicas / 19 OK / 0 REVISAR / 0 errores / 0 duplicados`. Baseline anterior: `B84FD7DB0D7391D93B47B4F5ACA3E4641468CC30374FFC23FD840824A4A62E43`, `17/2`. Cero regresiones.
+- **Rollback:** `G:\Mi unidad\Atlas\respaldos\R2_PRE_PROMOCION_FINAL_19_19_2026-08-14_20260814_115726_-0400`, con dataset previo, hashes, instrucciones y reporte anterior.
+- **Reporte/Desktop:** 19 documentos se agrupan en 15 viajes: 13 confirmados y 2 en revisión por conflictos entre documentos (`464641/642` y `464698/699/700`). Desktop `859d6bf440fddc925118fa172efe174b6ab75ad6` lee `OPERACION_ACTIVA`, dataset y `viajes.csv`, sin fallback; suite `126/126`.
+- **Alcance de 19/19:** valida que todos los documentos del lote controlado R2 carecen de motivos bloqueantes; Atlas no está terminado y los campos opcionales no están todos resueltos. `464699` mantiene `MATERIAL_AUSENTE`; `464601` no tiene peso/dirección; algunas horas y direcciones siguen ausentes.
+- **Deuda baja no abierta:** comentario con mojibake; endurecimiento conservador del fallback exacto por nombre sin RUT.
+- **Siguiente frente recomendado, no iniciado:** consolidación inteligente de viajes, comenzando por normalización semántica segura de identificadores equivalentes y separación de transportes que agrupan entregas realmente distintas.
+
+---
+
 ## 2026-08-14 — Handoff vigente: R2 OBRAS promovido, operación real 17/19
 
 - **Código publicado:** rama `lector-mvp-guia-nueva`, commit funcional `c02aa31ba5044b39a33c8101feea529cbece9f22`. `actualizar_identidad_obra` actualiza identidad/aliases/evidencia preservando IDs, pertenencia, estado e historial; bloquea vacíos, colisiones y evidencia humana mal tipada. Normalización segura: `S.A.` equivale a `SA`, pero letras independientes no se fusionan. Suite Motor: `1027 passed, 0 failed`.

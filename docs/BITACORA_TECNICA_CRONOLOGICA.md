@@ -4,6 +4,24 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-14 — R2 CLIENTES: cierre técnico y promoción final 19/19
+
+**Rama:** `lector-mvp-guia-nueva` · **Commit funcional:** `093cce923d172cac18cafb5b453c0cef8de95242` · **Auditoría Claude:** aprobada.
+
+### Solución general
+
+`atlas_core/extractor.py` reemplaza márgenes absolutos de la relación geométrica `SEÑOR(ES)↔R.U.T.` por límites relativos al alto de las cajas OCR, exige que el centro de RUT quede debajo del centro de cliente y conserva abstenciones ante geometría insegura o DV inválido. `atlas_core/procesamiento_masivo.py` usa `clientes.json` como identidad maestra sólo ante RUT exacto, único, `CONFIRMADO` y `ACTIVO`; conserva el nombre documental y mantiene `empresas.json` como compatibilidad. No hay condiciones por guía, cliente u obra. `464534` y `464535` se recuperaron con esta misma ruta general.
+
+### Validación y promoción
+
+Suite final: `1044 passed, 0 failed`. El CSV aprobado, 19 filas únicas y sin errores, promovió el dataset de SHA `B84FD7DB0D7391D93B47B4F5ACA3E4641468CC30374FFC23FD840824A4A62E43` (`17/2`) a `3DF7C5BB88FE5C9DEE2CAA14EEBB885DB5A14C90EB1F80989F19536697D87A4B` (`19/0`) mediante staging en Drive. Respaldo byte-idéntico y reporte anterior: `G:\Mi unidad\Atlas\respaldos\R2_PRE_PROMOCION_FINAL_19_19_2026-08-14_20260814_115726_-0400`. Cero regresiones.
+
+El reporte oficial agrupa los 19 documentos en 15 viajes: 13 confirmados y 2 `REQUIERE_REVISION`. Persisten conflictos entre documentos en `464641/464642` (`CONFLICTO_RUT_CHOFER`, sólo formato documental distinto) y `464698/464699/464700` (`CONFLICTO_RUT_CHOFER | CONFLICTO_CLIENTE | CONFLICTO_OBRA_DESTINO`). No se alteró la consolidación para forzar una cifra.
+
+`19/19` sólo certifica ausencia de motivos documentales bloqueantes en el lote R2. Campos opcionales conocidos: `464699` conserva `MATERIAL_AUSENTE`; `464601` carece de peso y dirección; hay direcciones y algunas horas ausentes en otras guías. Deuda baja no resuelta: comentario con mojibake y endurecimiento conservador del fallback exacto por nombre sin RUT.
+
+---
+
 ## 2026-08-14 — R2 OBRAS: identidad canónica, promoción 17/19 y publicación operacional
 
 **Rama:** `lector-mvp-guia-nueva` · **Commit funcional:** `c02aa31ba5044b39a33c8101feea529cbece9f22`.

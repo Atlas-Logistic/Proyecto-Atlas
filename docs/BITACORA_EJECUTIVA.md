@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-14 — R2 CERRADO: lote controlado 19/19
+
+- Se publicó el cierre funcional `093cce923d172cac18cafb5b453c0cef8de95242` (`feat: corroborar clientes por rut maestro`), aprobado por auditoría Claude. La geometría `SEÑOR(ES)↔R.U.T.` usa tolerancias relativas y el Motor corrobora identidad por RUT exacto contra clientes confirmados y activos en `clientes.json`; `empresas.json` se conserva como fallback compatible. Las guías `464534` y `464535` quedaron resueltas sin hardcode y sin sustituir el texto documental.
+- El dataset operacional pasó de `17 OK / 2 REVISAR` (SHA-256 `B84FD7DB0D7391D93B47B4F5ACA3E4641468CC30374FFC23FD840824A4A62E43`) a `19 OK / 0 REVISAR` (SHA-256 `3DF7C5BB88FE5C9DEE2CAA14EEBB885DB5A14C90EB1F80989F19536697D87A4B`), con cero regresiones. Respaldo completo: `respaldos/R2_PRE_PROMOCION_FINAL_19_19_2026-08-14_20260814_115726_-0400`.
+- `19/19` significa que los 19 documentos del lote controlado R2 no tienen motivos bloqueantes; no significa que todos los campos opcionales estén poblados. Sigue registrado `MATERIAL_AUSENTE` no bloqueante en `464699`, faltan peso/dirección en `464601`, varias direcciones y algunas horas.
+- La consolidación oficial produjo 15 viajes: 13 confirmados y 2 en revisión por conflictos entre documentos. Motor `1044 passed, 0 failed`; Desktop `126 passed, 0 failed`, `OPERACION_ACTIVA`, sin fallback histórico.
+- Deuda baja, deliberadamente no abordada: corregir un comentario con mojibake y endurecer conservadoramente el fallback exacto por nombre cuando no hay RUT. Siguiente frente recomendado: consolidación inteligente de viajes.
+
+---
+
 ## 2026-08-14 — R2 OBRAS: siete relaciones confirmadas y operación promovida a 17/19
 
 - Se cerró la auditoría Claude del modelo obra↔destino y se publicó el commit funcional `c02aa31ba5044b39a33c8101feea529cbece9f22` (`feat: robustecer identidad canonica de obras`). La nueva API `actualizar_identidad_obra` preserva ID, cliente, estado e historial, usa bloqueo/escritura atómica y rechaza aliases vacíos, colisiones y confirmaciones humanas usadas incorrectamente como evidencia de identidad. La normalización sólo compacta siglas realmente puntuadas (`S.A.`), sin fusionar letras independientes.
