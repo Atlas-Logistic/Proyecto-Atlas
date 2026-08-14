@@ -16,6 +16,7 @@ from atlas_core.catalogo_obras_destinos import (
     Evidencia,
     ResultadoEvidencia,
     TipoEvidencia,
+    normalizar_nombre_obra,
 )
 
 
@@ -77,6 +78,18 @@ def _evidencia(identificador="guia-sintetica-1", *, resultado="SOPORTA"):
         fecha="2026-01-01T00:00:00+00:00",
         actor_proceso="test",
         resultado=resultado,
+    )
+
+
+def _evidencia_externa():
+    return Evidencia(
+        tipo=TipoEvidencia.FUENTE_EXTERNA.value,
+        identificador_fuente="fuente-oficial-sintetica",
+        referencia_hash="b" * 64,
+        campos_observados={"razon_social": "OBRA CANONICA LIMITADA"},
+        fecha="2026-01-01T00:00:00+00:00",
+        actor_proceso="test-identidad",
+        resultado=ResultadoEvidencia.SOPORTA.value,
     )
 
 
@@ -214,6 +227,122 @@ def test_observacion_crea_candidato_y_relacion_pendiente(tmp_path):
     assert catalogo.resolver_obra_destino_confirmada(
         cliente_id=cliente.cliente_id, nombre_obra="OBRA SINTETICA"
     ) is None
+
+
+def test_actualizar_identidad_preserva_id_cliente_estado_e_historial(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    observada = _observar(catalogo, cliente, destino).obra
+    actualizada = catalogo.actualizar_identidad_obra(
+        observada.obra_id,
+        nombre_canonico="OBRA CANONICA LIMITADA",
+        aliases_documentales=("OBRA SINTETICA",),
+        evidencia=_evidencia_externa(),
+    )
+    assert actualizada.obra_id == observada.obra_id
+    assert actualizada.cliente_id == observada.cliente_id
+    assert actualizada.estado == observada.estado
+    assert actualizada.fecha_creacion == observada.fecha_creacion
+    assert actualizada.nombre_canonico == "OBRA CANONICA LIMITADA"
+    assert actualizada.aliases_documentales == ("OBRA SINTETICA",)
+    assert len(actualizada.evidencias) == len(observada.evidencias) + 1
+
+
+def test_actualizar_identidad_no_agrega_alias_equivalente_al_canonico(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    observada = _observar(catalogo, cliente, destino).obra
+    actualizada = catalogo.actualizar_identidad_obra(
+        observada.obra_id,
+        nombre_canonico="OBRA SINTETICA S.A.",
+        aliases_documentales=("OBRA SINTETICA SA",),
+        evidencia=_evidencia_externa(),
+    )
+    assert actualizada.aliases_documentales == ()
+
+
+def test_normalizacion_distingue_sigla_puntuada_de_letras_independientes():
+    assert normalizar_nombre_obra("EMPRESA S.A.") == "EMPRESA SA"
+    assert normalizar_nombre_obra("SECTOR S A NORTE") == "SECTOR S A NORTE"
+
+
+def test_actualizar_identidad_rechaza_confirmacion_humana_sin_escribir(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    observada = _observar(catalogo, cliente, destino).obra
+    antes = catalogo.ruta.read_bytes()
+    evidencia = Evidencia(
+        **{
+            **_evidencia_externa().a_dict(),
+            "tipo": TipoEvidencia.CONFIRMACION_HUMANA.value,
+        }
+    )
+    with pytest.raises(ErrorCatalogoObrasDestinos, match="no decisional"):
+        catalogo.actualizar_identidad_obra(
+            observada.obra_id,
+            nombre_canonico="OBRA CANONICA LIMITADA",
+            evidencia=evidencia,
+        )
+    assert catalogo.ruta.read_bytes() == antes
+
+
+def test_actualizar_identidad_preserva_aliases_y_deduplica_normalizados(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    observada = _observar(catalogo, cliente, destino).obra
+    primera = catalogo.actualizar_identidad_obra(
+        observada.obra_id,
+        nombre_canonico="OBRA CANONICA LIMITADA",
+        aliases_documentales=("ALIAS UNO",),
+        evidencia=_evidencia_externa(),
+    )
+    segunda = catalogo.actualizar_identidad_obra(
+        primera.obra_id,
+        nombre_canonico=primera.nombre_canonico,
+        aliases_documentales=("ALIAS DOS", "alias dos"),
+        evidencia=Evidencia(
+            **{
+                **_evidencia_externa().a_dict(),
+                "identificador_fuente": "otra-fuente-oficial-sintetica",
+            }
+        ),
+    )
+    assert segunda.aliases_documentales == ("ALIAS UNO", "ALIAS DOS")
+
+
+@pytest.mark.parametrize(
+    ("nombre_canonico", "aliases_documentales", "patron"),
+    [("", (), "nombre_canonico"), ("OBRA CANONICA", ("",), "alias_documental")],
+)
+def test_actualizar_identidad_rechaza_identidad_o_alias_vacio_sin_escribir(
+    tmp_path, nombre_canonico, aliases_documentales, patron
+):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    observada = _observar(catalogo, cliente, destino).obra
+    antes = catalogo.ruta.read_bytes()
+    with pytest.raises(ErrorCatalogoObrasDestinos, match=patron):
+        catalogo.actualizar_identidad_obra(
+            observada.obra_id,
+            nombre_canonico=nombre_canonico,
+            aliases_documentales=aliases_documentales,
+            evidencia=_evidencia_externa(),
+        )
+    assert catalogo.ruta.read_bytes() == antes
+
+
+def test_actualizar_identidad_rechaza_colision_del_mismo_cliente(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    primera = _observar(catalogo, cliente, destino).obra
+    segunda = catalogo.registrar_observacion(
+        cliente_id=cliente.cliente_id,
+        nombre_obra="OTRA OBRA",
+        evidencia=_evidencia("guia-sintetica-2"),
+    ).obra
+    antes = catalogo.ruta.read_bytes()
+    with pytest.raises(ErrorCatalogoObrasDestinos, match="colisiona"):
+        catalogo.actualizar_identidad_obra(
+            primera.obra_id,
+            nombre_canonico="OBRA CANONICA LIMITADA",
+            aliases_documentales=(segunda.nombre_canonico,),
+            evidencia=_evidencia_externa(),
+        )
+    assert catalogo.ruta.read_bytes() == antes
 
 
 def test_segunda_observacion_deduplica_y_agrega_evidencia_sin_confirmar(tmp_path):

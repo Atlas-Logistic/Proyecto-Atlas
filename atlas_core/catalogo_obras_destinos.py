@@ -88,6 +88,11 @@ def _ahora_utc() -> datetime:
 def normalizar_nombre_obra(nombre: str) -> str:
     texto = unicodedata.normalize("NFKD", str(nombre or "").strip())
     texto = "".join(c for c in texto if not unicodedata.combining(c)).upper()
+    texto = re.sub(
+        r"(?<![A-Z0-9])(?:[A-Z]\.){2,}",
+        lambda coincidencia: coincidencia.group(0).replace(".", ""),
+        texto,
+    )
     return " ".join(re.findall(r"[A-Z0-9]+", texto))
 
 
@@ -336,6 +341,65 @@ class CatalogoObrasDestinos:
 
     def listar_relaciones(self) -> list[RelacionObraDestino]:
         return list(self._leer()[1])
+
+    def actualizar_identidad_obra(
+        self,
+        obra_id: str,
+        *,
+        nombre_canonico: str,
+        aliases_documentales: Iterable[str] = (),
+        evidencia: Evidencia,
+    ) -> Obra:
+        """Actualiza una identidad auditada sin alterar su pertenencia ni estado."""
+        _validar_evidencia(evidencia)
+        if evidencia.tipo == TipoEvidencia.CONFIRMACION_HUMANA.value:
+            raise ErrorCatalogoObrasDestinos(
+                "la identidad canónica requiere evidencia no decisional"
+            )
+        nombre = _obligatorio(nombre_canonico, "nombre_canonico")
+        aliases_nuevos = tuple(
+            _obligatorio(alias, "alias_documental") for alias in aliases_documentales
+        )
+        with bloqueo_sesion(self.ruta.parent, "obras_destinos"):
+            obras, relaciones = self._leer()
+            obra = self._obra(obras, obra_id)
+            if obra.estado_vigencia != EstadoVigencia.ACTIVO.value:
+                raise ErrorCatalogoObrasDestinos(
+                    "no se puede actualizar la identidad de una obra inactiva"
+                )
+            clave_canonica = normalizar_nombre_obra(nombre)
+            aliases = list(obra.aliases_documentales)
+            claves = {normalizar_nombre_obra(alias) for alias in aliases}
+            for alias in aliases_nuevos:
+                clave = normalizar_nombre_obra(alias)
+                if clave != clave_canonica and clave not in claves:
+                    aliases.append(alias)
+                    claves.add(clave)
+            claves_propuestas = {clave_canonica, *claves}
+            for otra in obras:
+                if (
+                    otra.obra_id != obra.obra_id
+                    and otra.cliente_id == obra.cliente_id
+                    and otra.estado_vigencia == EstadoVigencia.ACTIVO.value
+                    and claves_propuestas.intersection(self._claves_obra(otra))
+                ):
+                    raise ErrorCatalogoObrasDestinos(
+                        "la identidad propuesta colisiona con otra obra activa del cliente"
+                    )
+            instante = self._instante_iso()
+            actualizada = replace(
+                obra,
+                nombre_canonico=nombre,
+                nombre_normalizado=clave_canonica,
+                aliases_documentales=tuple(aliases),
+                evidencias=self._agregar_evidencia(obra.evidencias, evidencia),
+                fecha_modificacion=instante,
+            )
+            _validar_obra(actualizada)
+            obras[obras.index(obra)] = actualizada
+            self._validar_catalogo(obras, relaciones)
+            self._escribir(obras, relaciones)
+            return actualizada
 
     def registrar_observacion(
         self,
