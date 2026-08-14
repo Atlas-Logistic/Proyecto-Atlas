@@ -53,6 +53,18 @@ from atlas_core.ocr import (
 )
 from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.catalogo_plantas import CatalogoPlantas
+from atlas_core.catalogo_clientes import (
+    CatalogoClientes,
+    ErrorCatalogoClientes,
+    EstadoBusquedaCliente,
+    EstadoVigenciaCliente,
+    normalizar_rut_cliente,
+)
+from atlas_core.catalogo_obras_destinos import (
+    CatalogoObrasDestinos,
+    ErrorCatalogoObrasDestinos,
+    ResolucionObraDestino,
+)
 from atlas_core.rutas.destino_entrega import (
     CAMPOS_ENTREGA_DOCUMENTO,
     calcular_ruta_con_planta_conocida,
@@ -595,6 +607,7 @@ class MetodoObtencionDocumento(str, Enum):
     # destino contra los catálogos maestros -- ver criterio de
     # corroboración por campo junto a cada uso en `procesar_archivo()`.
     CATALOGO = "CATALOGO"
+    CATALOGO_OBRA_DESTINO = "CATALOGO_OBRA_DESTINO"
     # Bloque INTELIGENCIA N1: limpieza estructural de un nombre de entidad
     # (sufijos societarios/prefijo suelto, ver `normalizar_nombre_societario`)
     # -- nunca decide identidad, solo corrige una corrupción OCR segura del
@@ -645,6 +658,77 @@ MOTIVOS_NO_BLOQUEANTES = frozenset({
     MotivoRevisionDocumento.MATERIAL_AUSENTE.value,
     MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA.value,
 })
+
+
+def _resolver_cliente_id_corroborado(
+    carpeta_catalogos: str | Path,
+    *,
+    cliente_texto: str,
+    rut_cliente: str,
+    identidad_cliente_corroborada: bool,
+) -> str | None:
+    """Resuelve una identidad ya corroborada al ID maestro, sin fuzzy."""
+    catalogo = CatalogoClientes(Path(carpeta_catalogos) / "clientes.json")
+    clientes = catalogo.listar()
+    try:
+        rut = normalizar_rut_cliente(rut_cliente)
+    except ErrorCatalogoClientes:
+        rut = ""
+    if rut:
+        coincidencias = [
+            cliente for cliente in clientes
+            if cliente.rut == rut
+            and cliente.estado_vigencia == EstadoVigenciaCliente.ACTIVO.value
+        ]
+        return coincidencias[0].cliente_id if len(coincidencias) == 1 else None
+    if not identidad_cliente_corroborada:
+        return None
+    try:
+        resultado = catalogo.buscar(cliente_texto)
+    except ErrorCatalogoClientes:
+        return None
+    if (
+        resultado.estado == EstadoBusquedaCliente.COINCIDENCIA
+        and resultado.cliente is not None
+        and resultado.cliente.estado_vigencia == EstadoVigenciaCliente.ACTIVO.value
+    ):
+        return resultado.cliente.cliente_id
+    return None
+
+
+def _corroborar_obra_destino_confirmada(
+    carpeta_catalogos: str | Path,
+    *,
+    cliente_texto: str,
+    rut_cliente: str,
+    obra_documental: str,
+    identidad_cliente_corroborada: bool,
+) -> ResolucionObraDestino | None:
+    """Consulta read-only una obra confirmada; ante cualquier duda, se abstiene."""
+    obra = str(obra_documental or "").strip()
+    if obra in {"", "No encontrado"}:
+        return None
+    obra = normalizar_nombre_societario(obra).valor_normalizado
+    carpeta = Path(carpeta_catalogos)
+    try:
+        cliente_id = _resolver_cliente_id_corroborado(
+            carpeta,
+            cliente_texto=cliente_texto,
+            rut_cliente=rut_cliente,
+            identidad_cliente_corroborada=identidad_cliente_corroborada,
+        )
+        if cliente_id is None:
+            return None
+        return CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json",
+            ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        ).resolver_obra_destino_confirmada(
+            cliente_id=cliente_id,
+            nombre_obra=obra,
+        )
+    except (OSError, ValueError, ErrorCatalogoObrasDestinos):
+        return None
 
 
 def procesar_archivo(
@@ -721,6 +805,8 @@ def procesar_archivo(
             motivos_documento.append(motivo.value)
 
     campos_geometricos_sin_corroborar: set[str] = set()
+    cliente_corroborado_n1 = False
+    obra_destino_corroborada = None
     chofer_geometrico = False
     patentes_geometricas_sin_homologar: set[str] = set()
     bloques_guia = None
@@ -910,7 +996,6 @@ def procesar_archivo(
                 nombre_cliente_actual = datos["cliente"]
 
             rut_cliente_actual = str(datos.get("RUT del cliente", "No encontrado")).strip()
-            cliente_corroborado_n1 = False
             registro_empresa = buscar_empresa_por_rut(catalogo_empresas, rut_cliente_actual)
             if registro_empresa is not None:
                 cliente_corroborado_n1 = True
@@ -1150,6 +1235,35 @@ def procesar_archivo(
 
     descripcion = extraer_descripcion_material(textos)
 
+    # OPERACION REAL R2: el catálogo relacional solo corrobora una obra
+    # documental que ya existe y que ningún catálogo anterior sustituyó.
+    # La consulta es read-only; cualquier ausencia, corrupción o ambigüedad
+    # termina en abstención conservadora.
+    obra_documental = str(obra_destino_antes_catalogo or "").strip()
+    obra_final = str(datos.get("obra destino", "")).strip()
+    obra_documental_normalizada = (
+        normalizar_nombre_societario(obra_documental).valor_normalizado
+        if obra_documental not in {"", "No encontrado"}
+        else obra_documental
+    )
+    if (
+        carpeta_catalogos is not None
+        and obra_documental not in {"", "No encontrado"}
+        and obra_final == obra_documental_normalizada
+    ):
+        obra_destino_corroborada = _corroborar_obra_destino_confirmada(
+            carpeta_catalogos,
+            cliente_texto=str(datos.get("cliente", "")),
+            rut_cliente=str(datos.get("RUT del cliente", "")),
+            obra_documental=obra_final,
+            identidad_cliente_corroborada=cliente_corroborado_n1,
+        )
+        if obra_destino_corroborada is not None:
+            campos_geometricos_sin_corroborar.discard("obra destino")
+            metodos_documento.add(
+                MetodoObtencionDocumento.CATALOGO_OBRA_DESTINO.value
+            )
+
     # Bloque ESTADOS S2 -- corroboración de cliente/obra_destino recuperados
     # por geometría. Único criterio de corroboración disponible hoy para
     # cliente: un RUT con dígito verificador válido (ver validar_rut_chileno)
@@ -1198,7 +1312,8 @@ def procesar_archivo(
     # contradice un valor que el documento sí traía.
     if datos.get("obra destino") != obra_destino_antes_catalogo:
         metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
-        _motivo(MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR)
+        if obra_destino_corroborada is None:
+            _motivo(MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR)
 
     numero_transporte_actual = datos.get("número de transporte")
     chofer_actual_final = datos.get("chofer")

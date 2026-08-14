@@ -358,6 +358,12 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
                 if diferencia_y > alto * 1.25 or item["x1"] < etiqueta_rut["x2"] - 8:
                     continue
                 candidato = re.sub(r"^[:\s]+", "", item["texto"]).strip()
+                # OCR real puede confundir uno de los puntos de miles por
+                # coma (p. ej. ``50.234,350-5``). Solo se corrige una coma
+                # estrictamente entre dígitos cuando introduce un grupo de
+                # tres cifras; el dígito verificador chileno sigue siendo el
+                # gate final y evita aceptar un número meramente plausible.
+                candidato = re.sub(r"(?<=\d),(?=\d{3}(?:[.\-]|$))", ".", candidato)
                 resultado = validar_rut_chileno(candidato)
                 if resultado.estado == EstadoValidacion.VALIDO:
                     candidatos_validos.add(resultado.valor)
