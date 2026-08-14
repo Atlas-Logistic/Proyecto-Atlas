@@ -4,6 +4,18 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-14 — Handoff vigente: R2 OBRAS promovido, operación real 17/19
+
+- **Código publicado:** rama `lector-mvp-guia-nueva`, commit funcional `c02aa31ba5044b39a33c8101feea529cbece9f22`. `actualizar_identidad_obra` actualiza identidad/aliases/evidencia preservando IDs, pertenencia, estado e historial; bloquea vacíos, colisiones y evidencia humana mal tipada. Normalización segura: `S.A.` equivale a `SA`, pero letras independientes no se fusionan. Suite Motor: `1027 passed, 0 failed`.
+- **Siete relaciones confirmadas:** DEMO/Poeta Pedro Prado 1548; Torres Coronel/Av. Forestal M1 1014; Terratec/Maestra Lidia Torres 92; Level/Av. Lo Blanco 2389; Ignacio Hurtado/Pdte. Riesco 5903; OCL/Catedral 759; EBCO/Av. 4 Norte 1565. Actor `JAVIER_MBT`, decisión `CONFIRMACION_HUMANA_OBRAS_R2_2026-08-14`. Seis destinos creados y Level reutilizado. No existen aliases/destinos para los OCR erróneos `758` o `A65`.
+- **Operación vigente:** `G:\Mi unidad\Atlas\operacion\actual\analisis_completo_guias.csv`, SHA-256 `B84FD7DB0D7391D93B47B4F5ACA3E4641468CC30374FFC23FD840824A4A62E43`, `19 filas / 17 OK / 2 REVISAR / 0 errores / 0 duplicados`. Anterior: `516A9D5EA8E6632416EB5418756ACB081323FAD66C87D2956B5B28AFCF8A4FFF`, `9/10`. Nuevas OK: `463594`, `463630`, `464588`, `464601`, `464624`, `464698`, `464699`, `464700`; cero regresiones.
+- **Rollback:** `G:\Mi unidad\Atlas\respaldos\R2_PRE_PROMOCION_OBRAS_17_19_2026-08-14_20260814_110939_-0400`, con dataset anterior, hashes, README y reporte anterior.
+- **Reporte/Desktop:** `reportes/actual` fue regenerado desde el dataset promovido; `estado_operacion.json` apunta al dataset y reporte vigentes. Desktop `859d6bf440fddc925118fa172efe174b6ab75ad6` devuelve `OPERACION_ACTIVA`, encuentra `viajes.csv`, no usa fallback histórico y pasó `126/126`; repo Desktop limpio.
+- **Catálogos al cierre:** obras `8B3BEA7679ECB20A770A5D4D3FBDED3671A36A46D537B5023C27B475FE475937`; destinos `9B69D77D193F40AC9207953B939417E70817270CC79D2494908A3AD49119D7C4`; clientes `D30F364CB174A2BCA9B136ADF7F58F7C986DACC0668EECCA50897AB6DF7FB3C2`; vehículos `0E522AF5A517DD4AC692C45F14C637519D20BFF90110BF8AD46F87E03626AF66`; telemetría sin cambios `7B4BA64606DC4E51E6356EC740F86526D7FA2BFC8BA3908542FBA94ACF06A012`.
+- **Siguiente bloque único:** diagnóstico conservador de `CLIENTE_SIN_CORROBORAR` en `464534` y `464535`. Ambas siguen además con `OBRA_DESTINO_SIN_CORROBORAR`; no forzar identidad ni corregirlas fuera de ese bloque.
+
+---
+
 > **Handoff vigente:** leer primero “Cierre vigente — INFRAESTRUCTURA S2.2” al final del archivo. Los registros previos del commit perdido quedaron supersedidos por la reconstrucción publicada.
 
 ## 2026-08-13 — INFRAESTRUCTURA S2.2: registro provisional del PC de oficina (supersedido)

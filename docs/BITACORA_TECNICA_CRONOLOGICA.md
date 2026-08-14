@@ -4,6 +4,28 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-14 — R2 OBRAS: identidad canónica, promoción 17/19 y publicación operacional
+
+**Rama:** `lector-mvp-guia-nueva` · **Commit funcional:** `c02aa31ba5044b39a33c8101feea529cbece9f22`.
+
+### API y auditoría
+
+`atlas_core/catalogo_obras_destinos.py` incorpora `actualizar_identidad_obra`: valida evidencia no decisional, conserva `obra_id`, `cliente_id`, estado, vigencia, fecha de creación e historial; une aliases sin duplicar su forma normalizada; rechaza identidad/alias vacíos y colisiones contra otra obra activa del mismo cliente; escribe bajo `bloqueo_sesion` y mediante escritura JSON atómica. `normalizar_nombre_obra` compacta siglas con puntuación explícita (`S.A.`→`SA`) y mantiene separadas letras independientes. `tests/test_catalogo_obras_destinos.py` cubre rechazo sin escritura byte a byte, preservación/deduplicación de aliases, vacíos, colisiones, invariantes y el caso negativo de letras independientes. Auditoría específica `37 passed`; suite `1027 passed, 0 failed`.
+
+### Datos canónicos confirmados
+
+Con decisión `CONFIRMACION_HUMANA_OBRAS_R2_2026-08-14`, actor `JAVIER_MBT`, se confirmaron siete obras y siete relaciones. Identidades externas auditadas: DEMO CONSTRUCCIONES S.A.; INMOBILIARIA Y CONSTRUCTORA TERRATEC LIMITADA (alias AZA conservado); LEVEL INGENIERÍA Y CONSTRUCCIÓN SpA (alias AZA); CONSTRUCTORA IGNACIO HURTADO LIMITADA (alias AZA); SOC CONSTRUCTORA OCL LIMITADA; EBCO S.A. Torres Coronel se conserva como nombre operacional, sin inventar una entidad/RUT. Se crearon seis destinos sin coordenadas inventadas y se reutilizó `f92cbc37-263a-4cca-93fd-74431881a582` para Level, conservando sus coordenadas históricas como aproximadas. Hashes de catálogos al cierre: obras `8B3BEA7679ECB20A770A5D4D3FBDED3671A36A46D537B5023C27B475FE475937`; destinos `9B69D77D193F40AC9207953B939417E70817270CC79D2494908A3AD49119D7C4`.
+
+### Promoción y artefactos
+
+El CSV limpio de 19 filas/19 guías, SHA-256 `B84FD7DB0D7391D93B47B4F5ACA3E4641468CC30374FFC23FD840824A4A62E43`, reemplazó mediante staging en el mismo filesystem al dataset anterior `516A9D5EA8E6632416EB5418756ACB081323FAD66C87D2956B5B28AFCF8A4FFF`. El baseline y el reporte anterior quedaron recuperables en `respaldos/R2_PRE_PROMOCION_OBRAS_17_19_2026-08-14_20260814_110939_-0400`. Resultado documental: `17 OK / 2 REVISAR / 0 errores / 0 duplicados`, ocho nuevas OK y cero OK→REVISAR.
+
+Se regeneró `reportes/actual` con la API oficial: `viajes.csv` `94EC33D30FB72C00869B48CF16496C00744CCA41EF950A2F33978BA5ABB87D93`; `documentos_sin_transporte.csv` `371E32340B678A59089039BEC5B0E549C22932B6A864177A0D8D1D164C097EA0`; `clientes_no_reconocidos.csv` `EBD9C6C5B9E5C2C01E49C5E24791B443035F40A22437AA13CBD321423B3225A0`; `resumen_viajes.md` `01ECCA0CCA5E710CBDBF86BA1B8D2B0C6FAC1E7563DCA87507059254EA533776`; manifest `C017087E98578EB1A5E374041860632AE80B79A1B14B37E22E7B29B5863AFD39`. `estado_operacion.json` apunta a `operacion/actual/analisis_completo_guias.csv` y `reportes/actual` (SHA `91D7277880E7DC5A043FC2B5913A4B430FF1E9BDF733FBE0FFC6C68B4F8FBB64`). Desktop real: `OPERACION_ACTIVA`, sin fallback histórico, repo intacto, `126 passed`.
+
+Pendiente deliberado: `464534` y `464535` siguen `REVISAR` por `CLIENTE_SIN_CORROBORAR | OBRA_DESTINO_SIN_CORROBORAR`; no se modificó esa lógica.
+
+---
+
 > **Actualización posterior:** este registro describe el trabajo del PC de oficina. El cierre reconstruido y publicado al final del archivo fija el estado vigente.
 
 ## 2026-08-13 — Registro provisional: INFRAESTRUCTURA S2.2 (trabajo local del PC de oficina)

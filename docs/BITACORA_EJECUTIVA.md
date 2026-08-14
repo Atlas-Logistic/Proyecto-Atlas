@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-14 — R2 OBRAS: siete relaciones confirmadas y operación promovida a 17/19
+
+- Se cerró la auditoría Claude del modelo obra↔destino y se publicó el commit funcional `c02aa31ba5044b39a33c8101feea529cbece9f22` (`feat: robustecer identidad canonica de obras`). La nueva API `actualizar_identidad_obra` preserva ID, cliente, estado e historial, usa bloqueo/escritura atómica y rechaza aliases vacíos, colisiones y confirmaciones humanas usadas incorrectamente como evidencia de identidad. La normalización sólo compacta siglas realmente puntuadas (`S.A.`), sin fusionar letras independientes.
+- Quedaron confirmadas por `JAVIER_MBT` siete relaciones operacionales: DEMO→Poeta Pedro Prado 1548; Torres Coronel→Av. Forestal M1 1014; Terratec→Maestra Lidia Torres 92; Level→Av. Lo Blanco 2389; Ignacio Hurtado→Pdte. Riesco 5903; OCL→Catedral 759; EBCO→Av. 4 Norte 1565. Se crearon seis destinos y se reutilizó el destino de Level; no se registraron los errores OCR `758` ni `A65`.
+- El dataset canónico pasó de `9 OK / 10 REVISAR` (SHA-256 `516A9D5EA8E6632416EB5418756ACB081323FAD66C87D2956B5B28AFCF8A4FFF`) a `17 OK / 2 REVISAR` (SHA-256 `B84FD7DB0D7391D93B47B4F5ACA3E4641468CC30374FFC23FD840824A4A62E43`), con ocho nuevas OK (`463594`, `463630`, `464588`, `464601`, `464624`, `464698`, `464699`, `464700`) y cero regresiones. Respaldo: `respaldos/R2_PRE_PROMOCION_OBRAS_17_19_2026-08-14_20260814_110939_-0400`.
+- Se regeneraron los artefactos oficiales en `reportes/actual` y se publicó `operacion/actual/estado_operacion.json`. Atlas Desktop confirmó `OPERACION_ACTIVA`, dataset/reporte vigentes y ausencia de fallback histórico; suite Desktop `126/126`. Suite Motor final `1027/1027`.
+- Único cuello de botella documental restante: guías `464534` y `464535`, ambas por `CLIENTE_SIN_CORROBORAR | OBRA_DESTINO_SIN_CORROBORAR`. Próximo bloque: diagnóstico conservador de `CLIENTE_SIN_CORROBORAR`, sin forzar identidad.
+
+---
+
 > **Actualización posterior:** el cierre reconstruido y publicado al final del archivo reemplaza este registro provisional y la auditoría intermedia del commit perdido.
 
 ## 2026-08-13 — INFRAESTRUCTURA S2.2: registro provisional (supersedido por la auditoría final)
