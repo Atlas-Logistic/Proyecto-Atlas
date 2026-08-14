@@ -522,3 +522,13 @@ No iniciar OPERACIÓN REAL R2 como parte de este cierre.
 - Importación canónica: 17/17 hashes coincidentes; inventario post-importación de 23 archivos. Secretos permanecen locales y no fueron incorporados al código ni a la configuración portable.
 - Limpieza automática no pudo materializarse: la política del entorno bloqueó todos los borrados antes de ejecución. Los candidatos demostrados están enumerados en la bitácora técnica; ningún archivo fue eliminado.
 - Para iniciar R2: partir de estos dos HEAD remotos y de la operación vigente del manifiesto. No reprocesar las 19 guías como parte de infraestructura.
+
+# Checkpoint vigente — OPERACIÓN REAL R2 (2026-08-13)
+
+- Código Motor publicado: rama `lector-mvp-guia-nueva`, integración READ-ONLY obra↔destino en `e822b2d` (historia R2 relevante: `4532744` → `3454384` → `e822b2d`).
+- Modelo obra↔destino V1 activo: cuatro relaciones confirmadas por decisión humana explícita; procesamiento estrictamente de lectura y con abstención conservadora.
+- Dataset operacional canónico: `ATLAS_DATA_DIR/operacion/actual/analisis_completo_guias.csv`, 19 guías, **7 OK / 12 REVISAR**, SHA-256 `A18CE354659D790B37115CD8CA20A662F28258AA4D001319F3FEB55EDAD9F67A`.
+- Respaldo reversible anterior: `ATLAS_DATA_DIR/respaldos/R2_PRE_PROMOCION_2026-08-13_20260813_212500`, SHA-256 del CSV `915939141F8A914B8FAA38860E5F5314DF051D532BE692F64E62F4B04E2A330D`.
+- `reportes/actual` y `operacion/actual/estado_operacion.json` fueron regenerados desde el nuevo dataset. El reporte agrupa las 19 guías en 15 viajes: 5 confirmados y 10 que requieren revisión.
+- Pendientes, sin iniciar: obra sin corroborar (10), patente sin homologar (6), cliente nuevo no catalogado (4), cliente sin corroborar (2), material ausente (1).
+- Validación: 0 errores técnicos, 0 regresiones, **987 passed / 0 failed**. Portabilidad casa/oficina: Git para código y Drive bajo `ATLAS_DATA_DIR` para estado operacional.

@@ -1635,3 +1635,13 @@ Diagnóstico previo (mismo bloque de trabajo) midió el comportamiento real de `
 - Limpieza: se identificaron como duplicados/regenerables con copia en `historico_pre_infra_s2` tres snapshots `Atlas-Viajes-*Rollback/PreInstall`, `backups_config`, `ocr_eval`, `ocr_eval_env` y `ocr_eval_gpu_env`. La política de ejecución rechazó tanto el borrado validado en lote como un `Remove-Item` literal individual, antes de modificar el disco. Eliminaciones efectivas: **0**. Se conservaron también respaldos/evaluaciones sin copia equivalente demostrada, datos privados, imágenes, repos activos y Drive.
 - No se modificó código del Motor ni se repitió innecesariamente su suite de 927 pruebas. Se integró únicamente documentación de cierre.
 - **Resultado: INFRAESTRUCTURA S2.2 CERRADO. LISTO PARA OPERACIÓN REAL R2, que aún no fue iniciada.**
+
+# 2026-08-13 — OPERACIÓN REAL R2: promoción del dataset obra ↔ destino
+
+Se consolidó el modelo V1 obra↔destino mediante los checkpoints `4532744`, `3454384` y la integración READ-ONLY `e822b2d`. Cuatro decisiones humanas fueron registradas por `confirmar_relacion(...)`; el Motor reutiliza `CatalogoClientes`, `CatalogoObrasDestinos` y `resolver_obra_destino_confirmada(...)` exclusivamente en lectura, con abstención ante ausencia, ambigüedad, estado no confirmado, destino inactivo, cliente distinto o evidencia `CONTRADICE`.
+
+La corrida final se regeneró desde cero con PaddleOCR real sobre las 19 entradas: 19 procesadas, 0 omitidas, 0 errores, **7 OK / 12 REVISAR**, 0 duplicados y 0 regresiones. Ocho guías usaron una relación confirmada. El CSV limpio produjo SHA-256 `A18CE354659D790B37115CD8CA20A662F28258AA4D001319F3FEB55EDAD9F67A`.
+
+Antes de promover se respaldó byte a byte el dataset previo (SHA-256 `915939141F8A914B8FAA38860E5F5314DF051D532BE692F64E62F4B04E2A330D`) bajo `respaldos/R2_PRE_PROMOCION_2026-08-13_20260813_212500`. El dataset se reemplazó mediante staging en el mismo directorio y renombrado final. Desde el nuevo canónico se regeneraron los cinco artefactos oficiales de `reportes/actual` y `operacion/actual/estado_operacion.json` con origen `R2_PROMOCION_DATASET_2026-08-13`.
+
+Motivos documentales pendientes recalculados: `OBRA_DESTINO_SIN_CORROBORAR` 10; `PATENTE_SIN_HOMOLOGAR` 6; `CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA` 4; `CLIENTE_SIN_CORROBORAR` 2; `MATERIAL_AUSENTE` 1. No se modificaron catálogos. Suite de cierre: **987 passed, 0 failed**.

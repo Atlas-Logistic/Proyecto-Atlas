@@ -455,3 +455,12 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - Motor permanece en `d5098e5`; la importación casa→Drive sigue verificada 17/17 por SHA-256 y el inventario post-importación contiene 23 archivos.
 - Limpieza local auditada: se demostraron siete duplicados/regenerables respaldados en Drive, pero la política del entorno rechazó incluso borrados literales individuales antes de ejecutarlos; por tanto, **no hubo eliminaciones**. Se conservaron además todas las carpetas únicas o dudosas.
 - OPERACIÓN REAL R2 no fue iniciada. Infraestructura queda lista para comenzar R2 en un bloque separado.
+
+# 2026-08-13 — R2: checkpoint operacional obra ↔ destino consolidado
+
+- Se publicó la secuencia R2 del modelo obra↔destino: checkpoint estable `4532744`, hardening/publicación V1 `3454384` e integración READ-ONLY del Motor `e822b2d`.
+- Cuatro relaciones fueron confirmadas mediante decisión humana explícita y la API oficial del catálogo. El procesamiento sólo consulta relaciones `CONFIRMADA`; nunca crea, confirma ni modifica catálogos.
+- Reproceso autoritativo limpio de 19 guías: **7 OK / 12 REVISAR**, 0 errores técnicos y 0 regresiones. Ocho guías fueron corroboradas mediante el catálogo obra↔destino.
+- Dataset anterior respaldado con SHA-256 `915939141F8A914B8FAA38860E5F5314DF051D532BE692F64E62F4B04E2A330D`. Nuevo dataset canónico: SHA-256 `A18CE354659D790B37115CD8CA20A662F28258AA4D001319F3FEB55EDAD9F67A`.
+- Pendientes actuales: obra sin corroborar (10), patente sin homologar (6), cliente nuevo no catalogado (4), cliente sin corroborar (2) y material ausente (1). No se corrigieron en este bloque.
+- Estado portable: código publicado en GitHub; dataset, catálogo y reporte operacional viven bajo `ATLAS_DATA_DIR`/Drive. Suite: **987 passed, 0 failed**.
