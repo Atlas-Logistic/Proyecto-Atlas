@@ -57,6 +57,7 @@ from atlas_core.catalogo_clientes import (
     CatalogoClientes,
     ErrorCatalogoClientes,
     EstadoBusquedaCliente,
+    EstadoCalidadCliente,
     EstadoVigenciaCliente,
     normalizar_rut_cliente,
 )
@@ -669,16 +670,17 @@ def _resolver_cliente_id_corroborado(
 ) -> str | None:
     """Resuelve una identidad ya corroborada al ID maestro, sin fuzzy."""
     catalogo = CatalogoClientes(Path(carpeta_catalogos) / "clientes.json")
-    clientes = catalogo.listar()
     try:
+        clientes = catalogo.listar()
         rut = normalizar_rut_cliente(rut_cliente)
     except ErrorCatalogoClientes:
-        rut = ""
+        return None
     if rut:
         coincidencias = [
             cliente for cliente in clientes
             if cliente.rut == rut
             and cliente.estado_vigencia == EstadoVigenciaCliente.ACTIVO.value
+            and cliente.estado_calidad == EstadoCalidadCliente.CONFIRMADO.value
         ]
         return coincidencias[0].cliente_id if len(coincidencias) == 1 else None
     if not identidad_cliente_corroborada:
@@ -996,8 +998,19 @@ def procesar_archivo(
                 nombre_cliente_actual = datos["cliente"]
 
             rut_cliente_actual = str(datos.get("RUT del cliente", "No encontrado")).strip()
+            cliente_id_maestro = _resolver_cliente_id_corroborado(
+                carpeta_catalogos,
+                cliente_texto=nombre_cliente_actual,
+                rut_cliente=rut_cliente_actual,
+                identidad_cliente_corroborada=False,
+            )
             registro_empresa = buscar_empresa_por_rut(catalogo_empresas, rut_cliente_actual)
-            if registro_empresa is not None:
+            if cliente_id_maestro is not None:
+                # El RUT exacto resuelve una identidad maestra Ãºnica,
+                # CONFIRMADA y ACTIVA. El nombre documental no se sustituye:
+                # el ID se usa solamente para corroboraciÃ³n interna.
+                cliente_corroborado_n1 = True
+            elif registro_empresa is not None:
                 cliente_corroborado_n1 = True
                 # Fase K: el alias a aprender es el texto ORIGINAL antes de
                 # que `enriquecer_datos_con_catalogos` ya lo haya podido

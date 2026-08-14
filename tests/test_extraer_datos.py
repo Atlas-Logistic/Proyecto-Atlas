@@ -388,6 +388,51 @@ def test_geometria_rut_cliente_ambiguo_se_abstiene():
     assert _extraer_rut_cliente_geometrico(bloques) == {}
 
 
+@pytest.mark.parametrize("solapamiento", [-7, -8])
+def test_rut_cliente_geometrico_acepta_solapamiento_relativo_realista(solapamiento):
+    alto_senor = 24
+    y_rut = 100 + alto_senor + solapamiento
+    bloques = [
+        _bloque("SENOR(ES)", 50, 100, 80, alto_senor),
+        _bloque("R.U.T.", 51, y_rut, 45, 20),
+        _bloque(":76.083.093-3", 220, y_rut + 2, 105, 18),
+    ]
+    assert _extraer_rut_cliente_geometrico(bloques) == {"valor": "76.083.093-3"}
+
+
+def test_rut_cliente_geometrico_escala_cajas_y_solapamiento():
+    bloques = [
+        _bloque("SENOR(ES)", 100, 200, 160, 48),
+        _bloque("R.U.T.", 102, 232, 90, 40),
+        _bloque(":76.083.093-3", 440, 236, 210, 36),
+    ]
+    assert _extraer_rut_cliente_geometrico(bloques) == {"valor": "76.083.093-3"}
+
+
+@pytest.mark.parametrize(
+    "bloques",
+    [
+        [_bloque("SENOR(ES)", 50, 100, 80, 24), _bloque("R.U.T.", 51, 94, 45, 20), _bloque(":76.083.093-3", 220, 96, 105, 18)],
+        [_bloque("SENOR(ES)", 50, 100, 80, 20), _bloque("R.U.T.", 51, 155, 45, 20), _bloque(":76.083.093-3", 220, 157, 105, 18)],
+        [_bloque("SENOR(ES)", 50, 100, 80, 20), _bloque("R.U.T.", 100, 116, 45, 20), _bloque(":76.083.093-3", 220, 118, 105, 18)],
+        [_bloque("SENOR(ES)", 50, 100, 80, 20), _bloque("R.U.T.", 51, 116, 45, 20), _bloque(":76.083.093-3", 220, 150, 105, 18)],
+        [_bloque("SENOR(ES)", 50, 100, 80, 20), _bloque("R.U.T.", 51, 116, 45, 20), _bloque(":76.083.093-4", 220, 118, 105, 18)],
+    ],
+)
+def test_rut_cliente_geometrico_se_abstiene_ante_geometria_o_dv_inseguro(bloques):
+    assert _extraer_rut_cliente_geometrico(bloques) == {}
+
+
+@pytest.mark.parametrize("solapamiento", [-3, -5])
+def test_rut_cliente_geometrico_conserva_controles_historicos(solapamiento):
+    bloques = [
+        _bloque("SENOR(ES)", 50, 100, 80, 20),
+        _bloque("R.U.T.", 51, 120 + solapamiento, 45, 18),
+        _bloque(":76.083.093-3", 220, 122 + solapamiento, 105, 16),
+    ]
+    assert _extraer_rut_cliente_geometrico(bloques) == {"valor": "76.083.093-3"}
+
+
 # --- Bloque D1: separar GIRO de obra_destino (caso real guía 464170) ---
 
 

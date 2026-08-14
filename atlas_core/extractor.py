@@ -335,8 +335,10 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         etiquetas_rut = [
             item for item in items
             if es_etiqueta_rut(item)
-            and abs(item["x1"] - etiqueta_cliente["x1"]) <= 25
-            # >= -6 (no "> 0" ni ">= 0"): en OCR real las cajas de filas
+            and abs(item["x1"] - etiqueta_cliente["x1"])
+            <= max(etiqueta_cliente["h"], item["h"]) * 1.25
+            and item["cy"] > etiqueta_cliente["cy"]
+            # Tolerancia relativa: las cajas de filas contiguas pueden
             # contiguas de un formulario suelen quedar exactamente
             # adyacentes (gap 0, caso real guía 464170: SEÑOR(ES) termina
             # en y=570, R.U.T. empieza en y=570) -- pero en filas muy
@@ -346,8 +348,11 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             # y=479, R.U.T. empieza en y=476, gap=-3). Un solapamiento
             # pequeño sigue siendo "la fila de abajo", nunca se confunde
             # con una etiqueta lejana porque el resto de la ventana
-            # (<= alto*1.5) sigue acotando el otro extremo.
-            and -6 <= item["y1"] - etiqueta_cliente["y2"] <= max(etiqueta_cliente["h"], item["h"]) * 1.5
+            # (<= alto*1.5) sigue acotando el otro extremo. El centro de
+            # R.U.T. debe permanecer debajo del centro de SEÃ‘OR(ES).
+            and -max(etiqueta_cliente["h"], item["h"]) * 0.5
+            <= item["y1"] - etiqueta_cliente["y2"]
+            <= max(etiqueta_cliente["h"], item["h"]) * 1.5
         ]
         for etiqueta_rut in etiquetas_rut:
             for item in items:
