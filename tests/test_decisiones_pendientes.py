@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 
 from atlas_core.almacenamiento_portable import escribir_estado_operacion
-from atlas_core.decisiones_pendientes import crear_decision, detectar_decisiones_documento, generar_artefacto
+from atlas_core.decisiones_pendientes import crear_decision, detectar_decisiones_documento, generar_artefacto, regenerar_decisiones_persistidas
 from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
 from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, TipoEvidencia
@@ -82,7 +82,7 @@ def test_cliente_desconocido_con_rut_valido_preserva_texto_evidencia_y_catalogos
     d=next(x for x in ds if x["tipo"]=="CLIENTE_DESCONOCIDO")
     assert d["valor_documental"]=="NOMBRE DOCUMENTAL SPA"
     assert d["evidencias"]==[{"tipo":"RUT_VALIDO","campo":"rut_cliente","valor":"50.234.350-5"}]
-    assert d["acciones_permitidas"]==["CONFIRMAR_NUEVO","ASOCIAR_EXISTENTE","POSPONER"]
+    assert d["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]  # R3.2: simplificado
     assert antes=={p.name:p.read_bytes() for p in carpeta.iterdir()}
 
 
@@ -109,7 +109,38 @@ def test_obra_desconocida_no_se_confunde_con_destino(tmp_path):
     carpeta=_catalogos(tmp_path); _cliente_confirmado(carpeta)
     ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(nombre="CLIENTE CANONICO SA",obra="OBRA NUEVA"),carpeta_catalogos=carpeta)
     assert [x["tipo"] for x in ds if x["entidad"] in {"OBRA","RELACION_OBRA_DESTINO"}]==["OBRA_DESCONOCIDA"]
-    assert next(x for x in ds if x["tipo"]=="OBRA_DESCONOCIDA")["acciones_permitidas"]==["REGISTRAR_OBSERVACION","ASOCIAR_EXISTENTE","POSPONER"]
+    assert next(x for x in ds if x["tipo"]=="OBRA_DESCONOCIDA")["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]  # R3.2: simplificado
+
+
+def test_obra_desconocida_transporta_cliente_reconocido_separado_de_la_obra(tmp_path):
+    carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta,nombre="CLIENTE CANONICO SA")
+    ds=detectar_decisiones_documento(
+        archivo="100.png",
+        datos=_datos_cliente(nombre="CLIENTE CANONICO SA",obra="OBRA NUEVA"),
+        carpeta_catalogos=carpeta,
+    )
+    d=next(x for x in ds if x["tipo"]=="OBRA_DESCONOCIDA")
+    assert d["contexto"]=={"cliente_id":cliente.cliente_id,"cliente_canonico":"CLIENTE CANONICO SA"}
+    assert d["valor_documental"]=="OBRA NUEVA"
+    assert d["valor_documental"]!=d["contexto"]["cliente_canonico"]
+    assert d["identidad_resuelta"] is None  # la obra en sí sigue sin resolverse
+
+
+def test_decision_id_no_cambia_al_agregar_contexto(tmp_path):
+    sin_contexto=_decision()
+    con_contexto=_decision(contexto={"cliente_id":"x","cliente_canonico":"CLIENTE X"})
+    assert sin_contexto["decision_id"]==con_contexto["decision_id"]
+
+
+def test_generar_artefacto_acepta_decision_sin_clave_contexto_para_compatibilidad(tmp_path):
+    carpeta=_catalogos(tmp_path); dataset=tmp_path/"datos.csv"; dataset.write_bytes(b"x\n")
+    vieja=_decision()  # como un artefacto R3.1 anterior a este cambio
+    del vieja["contexto"]
+    antes={p.name:p.read_bytes() for p in carpeta.iterdir()}
+    artefacto=generar_artefacto(ruta_dataset=dataset,carpeta_catalogos=carpeta,decisiones=[vieja])
+    assert len(artefacto["decisiones"])==1
+    assert "contexto" not in artefacto["decisiones"][0]
+    assert antes=={p.name:p.read_bytes() for p in carpeta.iterdir()}
 
 
 def test_obra_existente_sin_relacion_confirmada_y_caso_confirmado(tmp_path):
@@ -125,6 +156,161 @@ def test_obra_existente_sin_relacion_confirmada_y_caso_confirmado(tmp_path):
     obras.confirmar_relacion(pendiente.relacion_id,actor="test")
     ds=detectar_decisiones_documento(archivo="100.png",datos=datos,carpeta_catalogos=carpeta)
     assert not any(x["tipo"] in {"OBRA_DESCONOCIDA","DESTINO_SIN_CONFIRMAR"} for x in ds)
+
+
+# --- R3.2: simplificación operacional ---
+
+def test_cliente_igual_obra_no_genera_obra_desconocida(tmp_path):
+    """Regla de Javier: si Atlas ya conoce la entidad, no pregunta. Cuando el
+    valor documental de "obra" es, normalizado, el mismo nombre (o alias) del
+    cliente ya reconocido, no hay ninguna obra nueva que registrar."""
+    carpeta=_catalogos(tmp_path); _cliente_confirmado(carpeta,nombre="AGF ACEROS DE CHILE SPA")
+    ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(nombre="AGF ACEROS DE CHILE SPA",obra="AGF ACEROS DE CHILE SPA"),carpeta_catalogos=carpeta)
+    assert not any(x["tipo"] in {"OBRA_DESCONOCIDA","DESTINO_SIN_CONFIRMAR"} for x in ds)
+
+
+def test_obra_realmente_desconocida_conserva_solo_registrar_no_registrar(tmp_path):
+    carpeta=_catalogos(tmp_path); _cliente_confirmado(carpeta,nombre="CONSTRUMART SA")
+    ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(nombre="CONSTRUMART SA",obra="CONSTRUCTORA INMOBILIARIA E"),carpeta_catalogos=carpeta)
+    d=next(x for x in ds if x["tipo"]=="OBRA_DESCONOCIDA")
+    assert d["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
+    assert d["motivos"]==["OBRA_NO_EXISTE_PARA_CLIENTE"]
+
+
+def test_obra_global_reconocida_por_otro_cliente_no_genera_obra_desconocida(tmp_path):
+    """R3.3.1: una obra ya observada para el CLIENTE A se reconoce igual
+    cuando el CLIENTE B trae la misma obra -- no hay dos identidades, no se
+    pregunta de nuevo por la obra (sólo, en este caso, por el destino, que
+    es una decisión distinta: DESTINO_SIN_CONFIRMAR)."""
+    carpeta=_catalogos(tmp_path)
+    cliente_a=_cliente_confirmado(carpeta,nombre="CLIENTE A SPA",rut="50.234.350-5")
+    cliente_b=_cliente_confirmado(carpeta,nombre="CLIENTE B SPA",rut="76.123.987-2")
+    obras=CatalogoObrasDestinos(carpeta/"obras_destinos.json",ruta_clientes=carpeta/"clientes.json",ruta_destinos=carpeta/"destinos_maestros.json")
+    resultado=obras.registrar_observacion(cliente_id=cliente_a.cliente_id,nombre_obra="CONSTRUCTORA X",evidencia=_evidencia())
+    ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(nombre="CLIENTE B SPA",rut="76.123.987-2",obra="CONSTRUCTORA X"),carpeta_catalogos=carpeta)
+    assert not any(x["tipo"]=="OBRA_DESCONOCIDA" for x in ds)
+    d=next(x for x in ds if x["tipo"]=="DESTINO_SIN_CONFIRMAR")
+    assert d["identidad_resuelta"]["entidad_id"]==resultado.obra.obra_id  # misma obra_id, no una segunda
+
+
+def test_patente_desconocida_conserva_solo_registrar_no_registrar(tmp_path):
+    ds=detectar_decisiones_documento(archivo="g.png",datos={"número de guía":"1","patente del tracto":"AB1234"},carpeta_catalogos=_catalogos(tmp_path))
+    d=next(x for x in ds if x["tipo"]=="VEHICULO_DESCONOCIDO")
+    assert d["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
+
+
+def test_patente_conocida_no_genera_decision(tmp_path):
+    carpeta=_catalogos(tmp_path)
+    (carpeta/"vehiculos.json").write_text(json.dumps({"version":1,"vehiculos":[{
+        "vehiculo_id":"id-1","patente_canonica":"AB1234","tipo":"TRACTO",
+        "estado_calidad":"CONFIRMADO","estado_vigencia":"ACTIVO","aliases":[],
+        "evidencias":[],"procedencia":"CONFIRMACION_HUMANA","confirmado_por":"test",
+        "fecha_confirmacion":"2026-01-01T00:00:00+00:00","observaciones":"",
+        "fecha_creacion":"2026-01-01T00:00:00+00:00","fecha_modificacion":"2026-01-01T00:00:00+00:00",
+    }]}),encoding="utf-8")
+    ds=detectar_decisiones_documento(archivo="g.png",datos={"número de guía":"1","patente del tracto":"AB1234"},carpeta_catalogos=carpeta)
+    assert not any(x["tipo"]=="VEHICULO_DESCONOCIDO" for x in ds)
+
+
+def test_cliente_desconocido_conserva_solo_registrar_no_registrar(tmp_path):
+    ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(),carpeta_catalogos=_catalogos(tmp_path))
+    d=next(x for x in ds if x["tipo"]=="CLIENTE_DESCONOCIDO")
+    assert d["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
+
+
+def test_chofer_y_vehiculo_conocidos_combinacion_nueva_no_genera_decision(tmp_path):
+    """Documenta la regla de producto: un chofer y un vehículo, ambos
+    conocidos, apareciendo juntos por primera vez en una guía no debe pedir
+    confirmar una relación permanente. Hoy el detector no modela ninguna
+    relación chofer<->vehículo (ni permanente ni por viaje), así que esto ya
+    se cumple de forma trivial -- se deja como test de contrato explícito
+    para que una futura implementación de esa relación no rompa la regla."""
+    carpeta=_catalogos(tmp_path)
+    datos=dict(_datos_cliente(),**{"chofer":"CUALQUIERA","patente del tracto":"AB1234"})
+    ds=detectar_decisiones_documento(archivo="100.png",datos=datos,carpeta_catalogos=carpeta)
+    assert not any("CHOFER" in x["tipo"] or x["entidad"]=="CHOFER" for x in ds)
+
+
+def test_generar_artefacto_no_modifica_catalogos_con_decisiones_r32(tmp_path):
+    carpeta=_catalogos(tmp_path); _cliente_confirmado(carpeta,nombre="CONSTRUMART SA")
+    dataset=tmp_path/"datos.csv"; dataset.write_bytes(b"a,b\n")
+    antes={p.name:p.read_bytes() for p in carpeta.iterdir()}
+    ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(nombre="CONSTRUMART SA",obra="OBRA X"),carpeta_catalogos=carpeta)
+    generar_artefacto(ruta_dataset=dataset,carpeta_catalogos=carpeta,decisiones=ds,ruta_salida=tmp_path/"decisiones_pendientes.json")
+    assert antes=={p.name:p.read_bytes() for p in carpeta.iterdir()}
+
+
+# --- R3.2.1: regeneración read-only de decisiones ya persistidas (sin OCR) ---
+
+def _decision_obra_r31(carpeta, cliente, obra_texto, numero_guia="1"):
+    """Simula una OBRA_DESCONOCIDA tal como la habría dejado un artefacto
+    generado ANTES de R3.2: acciones_permitidas viejas, pero ya con
+    `contexto` (R3.1.3)."""
+    return crear_decision(
+        tipo="OBRA_DESCONOCIDA", entidad="OBRA", archivo=f"{numero_guia}.png",
+        numero_guia=numero_guia, numero_transporte="1", campo="obra_destino",
+        valor_documental=obra_texto, valor_normalizado=obra_texto,
+        identidad_resuelta=None, candidatos=(), motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
+        evidencias=({"tipo":"CLIENTE_RESUELTO","entidad_id":cliente.cliente_id},),
+        acciones_permitidas=("REGISTRAR_OBSERVACION","ASOCIAR_EXISTENTE","POSPONER"),
+        contexto={"cliente_id":cliente.cliente_id,"cliente_canonico":cliente.razon_social},
+    )
+
+
+def test_regenerar_descarta_cliente_igual_obra_de_un_artefacto_r31(tmp_path):
+    carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta,nombre="AGF ACEROS DE CHILE SPA")
+    vieja=_decision_obra_r31(carpeta,cliente,"AGF ACEROS DE CHILE SPA")
+    regeneradas=regenerar_decisiones_persistidas(decisiones=[vieja],carpeta_catalogos=carpeta)
+    assert regeneradas==[]
+
+
+def test_regenerar_conserva_obra_realmente_desconocida_y_normaliza_acciones(tmp_path):
+    carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta,nombre="CONSTRUMART SA")
+    vieja=_decision_obra_r31(carpeta,cliente,"CONSTRUCTORA INMOBILIARIA E",numero_guia="464715")
+    regeneradas=regenerar_decisiones_persistidas(decisiones=[vieja],carpeta_catalogos=carpeta)
+    assert len(regeneradas)==1
+    d=regeneradas[0]
+    assert d["tipo"]=="OBRA_DESCONOCIDA"
+    assert d["valor_documental"]=="CONSTRUCTORA INMOBILIARIA E"
+    assert d["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
+    assert d["decision_id"]==vieja["decision_id"]  # misma decisión semántica: mismo id
+
+
+def test_regenerar_conserva_patente_desconocida_y_normaliza_acciones(tmp_path):
+    carpeta=_catalogos(tmp_path)
+    vieja=_decision(tipo="VEHICULO_DESCONOCIDO",entidad="VEHICULO",campo="patente_tracto",
+                     valor_documental="KN5439",motivos=("SIN_VEHICULO_CONFIRMADO_COMPATIBLE",),
+                     evidencias=({"tipo":"OCR_DOCUMENTAL","campo":"patente_tracto","valor":"KN5439"},),
+                     acciones_permitidas=("CONFIRMAR_NUEVO","ASOCIAR_EXISTENTE","POSPONER"))
+    regeneradas=regenerar_decisiones_persistidas(decisiones=[vieja],carpeta_catalogos=carpeta)
+    assert len(regeneradas)==1
+    d=regeneradas[0]
+    assert d["valor_documental"]=="KN5439"
+    assert d["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
+    assert d["decision_id"]==vieja["decision_id"]
+
+
+def test_regenerar_no_modifica_catalogos(tmp_path):
+    carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta,nombre="CONSTRUMART SA")
+    vieja=_decision_obra_r31(carpeta,cliente,"CONSTRUCTORA INMOBILIARIA E")
+    antes={p.name:p.read_bytes() for p in carpeta.iterdir()}
+    regenerar_decisiones_persistidas(decisiones=[vieja],carpeta_catalogos=carpeta)
+    assert antes=={p.name:p.read_bytes() for p in carpeta.iterdir()}
+
+
+def test_regenerar_conserva_obra_sin_contexto_por_falta_de_base_para_decidir(tmp_path):
+    """Un artefacto anterior a R3.1.3 no trae `contexto`; sin esa identidad
+    de apoyo no hay base para decidir cliente==obra, así que se conserva sin
+    filtrar en vez de asumir algo que el artefacto no dice."""
+    carpeta=_catalogos(tmp_path)
+    vieja=_decision(tipo="OBRA_DESCONOCIDA",entidad="OBRA",campo="obra_destino",
+                     valor_documental="OBRA X",motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
+                     evidencias=({"tipo":"CLIENTE_RESUELTO","entidad_id":"x"},),
+                     acciones_permitidas=("REGISTRAR_OBSERVACION","ASOCIAR_EXISTENTE","POSPONER"))
+    del vieja["contexto"]
+    regeneradas=regenerar_decisiones_persistidas(decisiones=[vieja],carpeta_catalogos=carpeta)
+    assert len(regeneradas)==1
+    assert regeneradas[0]["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
 
 
 def test_artefacto_deduplica_y_controla_cuatro_decisiones(tmp_path):

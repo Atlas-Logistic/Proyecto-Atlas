@@ -183,7 +183,10 @@ def test_integridad_rechaza_cliente_obra_y_destino_huerfanos(tmp_path):
             catalogo.listar_obras()
 
 
-def test_relacion_rechaza_destino_de_otro_cliente(tmp_path):
+def test_relacion_admite_destino_de_otro_cliente_por_ser_obra_global(tmp_path):
+    """R3.3.1: la obra es una identidad global; su relación con un destino
+    ya no exige que ambos "pertenezcan" al mismo cliente -- el destino
+    conserva su propio cliente_id, independiente de quién observó la obra."""
     catalogo, cliente, _ = _entorno(tmp_path)
     otro = CatalogoClientes(catalogo.ruta_clientes, reloj=Reloj()).crear(
         razon_social="OTRO CLIENTE SINTETICO", fuente="PRUEBA"
@@ -198,13 +201,15 @@ def test_relacion_rechaza_destino_de_otro_cliente(tmp_path):
         pais="CHILE",
         fuente="PRUEBA",
     )
-    with pytest.raises(ErrorCatalogoObrasDestinos, match="otro cliente"):
-        catalogo.registrar_observacion(
-            cliente_id=cliente.cliente_id,
-            nombre_obra="OBRA SINTETICA",
-            destino_id=destino_otro.destino_id,
-            evidencia=_evidencia(),
-        )
+    resultado = catalogo.registrar_observacion(
+        cliente_id=cliente.cliente_id,
+        nombre_obra="OBRA SINTETICA",
+        destino_id=destino_otro.destino_id,
+        evidencia=_evidencia(),
+    )
+    assert resultado.relacion is not None
+    assert resultado.relacion.destino_id == destino_otro.destino_id
+    assert resultado.relacion.obra_id == resultado.obra.obra_id
 
 
 def test_relacion_activa_duplicada_se_rechaza(tmp_path):
@@ -558,3 +563,158 @@ def test_fallo_atomico_no_deja_catalogo_parcial(tmp_path, monkeypatch):
         _observar(catalogo, cliente, destino)
     assert not catalogo.ruta.exists()
     assert list(catalogo.ruta.parent.glob(".obras_destinos.json.*.tmp")) == []
+
+
+# ==================================================================
+# R3.3.1: obra como identidad GLOBAL (independiente del cliente)
+# ==================================================================
+
+def _otro_cliente(catalogo, nombre="OTRO CLIENTE SINTETICO"):
+    return CatalogoClientes(catalogo.ruta_clientes, reloj=Reloj()).crear(
+        razon_social=nombre, fuente="PRUEBA"
+    )
+
+
+def test_obra_sin_cliente_id_es_valida(tmp_path):
+    """cliente_id ya no es obligatorio -- una obra puede existir sin él."""
+    catalogo, _, _ = _entorno(tmp_path)
+    from atlas_core.catalogo_obras_destinos import Obra
+    obra = Obra(
+        obra_id="global-1", cliente_id="", nombre_canonico="OBRA SIN DUEÑO",
+        nombre_normalizado=normalizar_nombre_obra("OBRA SIN DUEÑO"),
+        aliases_documentales=(), estado=EstadoObra.OBSERVADA.value,
+        estado_vigencia="ACTIVO", evidencias=(),
+        fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00",
+    )
+    catalogo._escribir([obra], [])
+    recargadas = catalogo.listar_obras()
+    assert len(recargadas) == 1 and recargadas[0].cliente_id == ""
+
+
+def test_dos_clientes_reconocen_la_misma_obra_sin_duplicarla(tmp_path):
+    """Caso Construmart -> X / Easy -> X: la segunda observación reutiliza
+    la MISMA obra_id, no crea una segunda fila."""
+    catalogo, construmart, _ = _entorno(tmp_path)
+    easy = _otro_cliente(catalogo, "EASY RETAIL SA")
+    primera = catalogo.registrar_observacion(
+        cliente_id=construmart.cliente_id, nombre_obra="CONSTRUCTORA X", evidencia=_evidencia("guia-A")
+    )
+    segunda = catalogo.registrar_observacion(
+        cliente_id=easy.cliente_id, nombre_obra="CONSTRUCTORA X", evidencia=_evidencia("guia-B")
+    )
+    assert segunda.obra.obra_id == primera.obra.obra_id
+    assert len(catalogo.listar_obras()) == 1
+    # ambas evidencias quedan conservadas en la misma obra (operacional, no propiedad)
+    fuentes = {e.identificador_fuente for e in segunda.obra.evidencias}
+    assert {"guia-A", "guia-B"} <= fuentes
+
+
+def test_deteccion_de_colision_global_entre_clientes_no_fusiona_automaticamente(tmp_path):
+    """Si -por corrupción externa o carga legacy- dos obras activas
+    comparten nombre/alias normalizado bajo clientes distintos, la
+    detección de colisiones globales las reporta explícitamente: el
+    catálogo nunca las fusiona por su cuenta."""
+    catalogo, construmart, _ = _entorno(tmp_path)
+    easy = _otro_cliente(catalogo, "EASY RETAIL SA")
+    from atlas_core.catalogo_obras_destinos import Obra
+    duplicadas = [
+        Obra(obra_id="o1", cliente_id=construmart.cliente_id, nombre_canonico="CONSTRUCTORA X",
+             nombre_normalizado=normalizar_nombre_obra("CONSTRUCTORA X"), aliases_documentales=(),
+             estado=EstadoObra.OBSERVADA.value, estado_vigencia="ACTIVO", evidencias=(),
+             fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00"),
+        Obra(obra_id="o2", cliente_id=easy.cliente_id, nombre_canonico="CONSTRUCTORA X",
+             nombre_normalizado=normalizar_nombre_obra("CONSTRUCTORA X"), aliases_documentales=(),
+             estado=EstadoObra.OBSERVADA.value, estado_vigencia="ACTIVO", evidencias=(),
+             fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00"),
+    ]
+    colisiones = catalogo._colisiones_globales(duplicadas)
+    assert set(colisiones[normalizar_nombre_obra("CONSTRUCTORA X")]) == {"o1", "o2"}
+
+
+def test_actualizar_identidad_obra_colisiona_globalmente_no_solo_por_cliente(tmp_path):
+    catalogo, construmart, _ = _entorno(tmp_path)
+    easy = _otro_cliente(catalogo, "EASY RETAIL SA")
+    obra_x = catalogo.registrar_observacion(cliente_id=construmart.cliente_id, nombre_obra="CONSTRUCTORA X", evidencia=_evidencia("guia-A")).obra
+    obra_y = catalogo.registrar_observacion(cliente_id=easy.cliente_id, nombre_obra="OBRA Y", evidencia=_evidencia("guia-B")).obra
+    with pytest.raises(ErrorCatalogoObrasDestinos, match="colisiona con otra obra activa"):
+        catalogo.actualizar_identidad_obra(
+            obra_y.obra_id, nombre_canonico="CONSTRUCTORA X", evidencia=_evidencia_externa(),
+        )
+
+
+def test_resolver_obra_destino_confirmada_reconoce_confirmacion_de_otro_cliente(tmp_path):
+    """R3.3.1: una obra confirmada y con destino confirmado para el cliente
+    que la registró se reconoce igual cuando OTRO cliente la consulta."""
+    catalogo, construmart, destino = _entorno(tmp_path)
+    easy = _otro_cliente(catalogo, "EASY RETAIL SA")
+    pendiente = _observar(catalogo, construmart, destino).relacion
+    catalogo.confirmar_relacion(pendiente.relacion_id, actor="test")
+    resuelto_easy = catalogo.resolver_obra_destino_confirmada(
+        cliente_id=easy.cliente_id, nombre_obra="OBRA SINTETICA"
+    )
+    assert resuelto_easy is not None
+    assert resuelto_easy.obra.cliente_id == construmart.cliente_id  # procedencia historica, informativa
+    assert resuelto_easy.destino.destino_id == destino.destino_id
+
+
+# --- migración a identidad global (read-only + escritura controlada) ---
+
+def test_migrar_a_identidad_global_recertifica_sin_transformar_datos(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    _observar(catalogo, cliente, destino)
+    antes = catalogo.ruta.read_bytes()
+    reporte = catalogo.migrar_a_identidad_global()
+    assert reporte["migrado"] is True
+    assert reporte["total_obras"] == 1
+    assert reporte["colisiones_detectadas"] == 0
+    assert catalogo.ruta.read_bytes() == antes  # ningún dato cambia de valor
+
+
+def test_migrar_a_identidad_global_se_abstiene_si_hay_colision(tmp_path):
+    catalogo, construmart, _ = _entorno(tmp_path)
+    easy = _otro_cliente(catalogo, "EASY RETAIL SA")
+    from atlas_core.catalogo_obras_destinos import Obra
+    contenido = {
+        "version_formato": 1,
+        "obras": [
+            Obra(obra_id="o1", cliente_id=construmart.cliente_id, nombre_canonico="CONSTRUCTORA X",
+                 nombre_normalizado=normalizar_nombre_obra("CONSTRUCTORA X"), aliases_documentales=(),
+                 estado=EstadoObra.OBSERVADA.value, estado_vigencia="ACTIVO", evidencias=(),
+                 fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00").a_dict(),
+            Obra(obra_id="o2", cliente_id=easy.cliente_id, nombre_canonico="CONSTRUCTORA X",
+                 nombre_normalizado=normalizar_nombre_obra("CONSTRUCTORA X"), aliases_documentales=(),
+                 estado=EstadoObra.OBSERVADA.value, estado_vigencia="ACTIVO", evidencias=(),
+                 fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00").a_dict(),
+        ],
+        "relaciones": [],
+    }
+    # Escribe directamente para simular datos ya-corruptos antes de la migración
+    # (bypaseando la validación de escritura normal, sólo para el fixture).
+    catalogo.ruta.write_text(json.dumps(contenido), encoding="utf-8")
+    reporte = catalogo.migrar_a_identidad_global()
+    assert reporte["migrado"] is False
+    assert reporte["colisiones_detectadas"] == 1
+    assert set(reporte["colisiones"][normalizar_nombre_obra("CONSTRUCTORA X")]) == {"o1", "o2"}
+
+
+def test_migracion_sintetica_12_obras_preserva_ids_relaciones_y_destinos(tmp_path):
+    """Fixture con 12 obras (como el catálogo real), 0 colisiones -- la
+    migración conserva 12/12 IDs, evidencias, relaciones y destinos."""
+    catalogo, cliente, destino = _entorno(tmp_path)
+    ids_creados = []
+    for i in range(12):
+        resultado = catalogo.registrar_observacion(
+            cliente_id=cliente.cliente_id, nombre_obra=f"OBRA NUMERO {i}",
+            destino_id=destino.destino_id if i == 0 else None,
+            evidencia=_evidencia(f"guia-{i}"),
+        )
+        ids_creados.append(resultado.obra.obra_id)
+    antes_obras = {o.obra_id: o.a_dict() for o in catalogo.listar_obras()}
+    antes_relaciones = {r.relacion_id: r.a_dict() for r in catalogo.listar_relaciones()}
+    reporte = catalogo.migrar_a_identidad_global()
+    assert reporte["migrado"] is True and reporte["total_obras"] == 12
+    despues_obras = {o.obra_id: o.a_dict() for o in catalogo.listar_obras()}
+    despues_relaciones = {r.relacion_id: r.a_dict() for r in catalogo.listar_relaciones()}
+    assert set(antes_obras) == set(despues_obras) == set(ids_creados)
+    assert antes_obras == despues_obras
+    assert antes_relaciones == despues_relaciones

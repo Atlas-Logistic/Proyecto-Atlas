@@ -37,6 +37,14 @@ TIPOS_SOPORTADOS = frozenset({
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
 
+# R3.2/R3.2.1: pregunta operacional única para una entidad realmente
+# desconocida -- registrarla, no registrarla o decidir después. Se usa tal
+# cual para OBRA_DESCONOCIDA, VEHICULO_DESCONOCIDO y CLIENTE_DESCONOCIDO.
+ACCIONES_ENTIDAD_DESCONOCIDA = ("REGISTRAR", "NO_REGISTRAR", "POSPONER")
+TIPOS_ENTIDAD_DESCONOCIDA = frozenset({
+    "OBRA_DESCONOCIDA", "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO",
+})
+
 
 def _sha256(ruta: Path) -> str:
     digest = hashlib.sha256()
@@ -68,7 +76,15 @@ def crear_decision(
     valor_normalizado: str, identidad_resuelta: dict[str, object] | None,
     candidatos: Iterable[Mapping[str, object]], motivos: Iterable[str],
     evidencias: Iterable[Mapping[str, object]], acciones_permitidas: Iterable[str],
+    contexto: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    """`contexto` (R3.1.3, opcional y aditivo): identidad de una entidad DE
+    APOYO que Motor ya resolvió antes de emitir la decisión -- distinta de
+    `identidad_resuelta`, que es la identidad de la propia entidad del
+    campo (`valor_documental`). No participa en `decision_id`: la entidad
+    de apoyo ya queda capturada en `evidencias` (p. ej. CLIENTE_RESUELTO),
+    así que agregar/quitar sólo su nombre legible aquí no cambia qué
+    pregunta representa la decisión."""
     if tipo not in TIPOS_SOPORTADOS:
         raise ValueError(f"tipo de decisión no soportado: {tipo}")
     documento = {
@@ -90,6 +106,7 @@ def crear_decision(
         "valor_documental": str(valor_documental),
         "valor_normalizado": str(valor_normalizado),
         "identidad_resuelta": identidad_resuelta,
+        "contexto": dict(contexto) if contexto is not None else None,
         "candidatos": [dict(candidato) for candidato in candidatos],
         "motivos": [str(motivo) for motivo in motivos],
         "evidencias": evidencias_lista,
@@ -134,13 +151,21 @@ def detectar_decisiones_documento(
             carpeta / "vehiculos.json", valor, tipo_esperado=tipo_esperado
         )
         if resultado.estado in {"SIN_CANDIDATO", "CATALOGO_VACIO"}:
+            # R3.2: "esta patente no está registrada en Atlas" es toda la
+            # pregunta -- Atlas no conoce la entidad, así que sólo tiene
+            # sentido Registrar/No registrar (regla de Javier). Una posible
+            # corrección OCR contra una patente YA existente (estado
+            # CORRECCION_OCR_SEGURA de resolver_patente) es un caso distinto
+            # que hoy no genera ninguna decisión -- deliberadamente no se
+            # mezcla aquí; quedaría para un tipo de decisión futuro y
+            # específico.
             decisiones.append(crear_decision(
                 tipo="VEHICULO_DESCONOCIDO", entidad="VEHICULO", campo=campo,
                 valor_documental=valor, valor_normalizado=resultado.valor_resultado,
                 identidad_resuelta=None, candidatos=(),
                 motivos=("SIN_VEHICULO_CONFIRMADO_COMPATIBLE",),
                 evidencias=({"tipo": "OCR_DOCUMENTAL", "campo": campo, "valor": valor},),
-                acciones_permitidas=("CONFIRMAR_NUEVO", "ASOCIAR_EXISTENTE", "POSPONER"),
+                acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
                 **comunes,
             ))
 
@@ -201,6 +226,8 @@ def detectar_decisiones_documento(
                     **comunes,
                 ))
         else:
+            # R3.2: cliente realmente nuevo (RUT válido, no existe en ningún
+            # catálogo maestro) -- Registrar/No registrar, nada más.
             decisiones.append(crear_decision(
                 tipo="CLIENTE_DESCONOCIDO", entidad="CLIENTE", campo="cliente",
                 valor_documental=cliente_documental,
@@ -208,7 +235,7 @@ def detectar_decisiones_documento(
                 identidad_resuelta=None, candidatos=(),
                 motivos=("RUT_VALIDO_NO_EXISTE_EN_CATALOGO_MAESTRO",),
                 evidencias=({"tipo": "RUT_VALIDO", "campo": "rut_cliente", "valor": rut_cliente},),
-                acciones_permitidas=("CONFIRMAR_NUEVO", "ASOCIAR_EXISTENTE", "POSPONER"),
+                acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
                 **comunes,
             ))
 
@@ -221,26 +248,55 @@ def detectar_decisiones_documento(
                 ruta_destinos=carpeta / "destinos_maestros.json",
             )
             clave = normalizar_nombre_obra(obra_texto)
+            # R3.3.1: obra = identidad GLOBAL -- la búsqueda ya NO filtra por
+            # cliente_id. Una obra observada antes para cualquier cliente se
+            # reconoce igual para éste (comparación exacta normalizada,
+            # sin fuzzy).
             obras = [
                 obra for obra in catalogo_obras.listar_obras()
-                if obra.cliente_id == cliente.cliente_id
-                and obra.estado_vigencia == EstadoVigencia.ACTIVO.value
+                if obra.estado_vigencia == EstadoVigencia.ACTIVO.value
                 and clave in {
                     normalizar_nombre_obra(obra.nombre_canonico),
                     *(normalizar_nombre_obra(alias) for alias in obra.aliases_documentales),
                 }
             ]
-            if not obras:
+            # R3.2: si el valor documental de "obra" es, en realidad, el
+            # propio cliente ya reconocido (comparación exacta normalizada,
+            # sin fuzzy -- misma normalización que ya usa este bloque para
+            # `clave`), no hay ninguna obra nueva que preguntar: es el mismo
+            # hecho dos veces, no dos entidades. Genérico para cualquier
+            # cliente, sin hardcode.
+            claves_cliente = {
+                normalizar_nombre_obra(cliente.razon_social),
+                *(normalizar_nombre_obra(alias) for alias in cliente.aliases),
+            }
+            if not obras and clave in claves_cliente:
+                pass
+            elif not obras:
                 decisiones.append(crear_decision(
                     tipo="OBRA_DESCONOCIDA", entidad="OBRA", campo="obra_destino",
                     valor_documental=obra_texto, valor_normalizado=clave,
                     identidad_resuelta=None, candidatos=(),
                     motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
                     evidencias=({"tipo": "CLIENTE_RESUELTO", "entidad_id": cliente.cliente_id},),
-                    acciones_permitidas=("REGISTRAR_OBSERVACION", "ASOCIAR_EXISTENTE", "POSPONER"),
+                    acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
+                    # R3.1.3: nombre legible de la identidad de cliente que
+                    # YA resolvió Motor (misma fuente que `identidad_cliente`
+                    # más arriba, nunca inferido de `obra_texto`) -- se
+                    # conserva como evidencia operacional de quién observó
+                    # esta obra, no como su propietario.
+                    contexto={
+                        "cliente_id": cliente.cliente_id,
+                        "cliente_canonico": cliente.razon_social,
+                    },
                     **comunes,
                 ))
-            elif len(obras) == 1 and catalogo_obras.resolver_obra_destino_confirmada(
+            elif len(obras) > 1:
+                # Ambigüedad global (no debería ocurrir tras la migración a
+                # unicidad global -- ver CatalogoObrasDestinos): Atlas se
+                # abstiene en vez de adivinar cuál es la obra correcta.
+                pass
+            elif catalogo_obras.resolver_obra_destino_confirmada(
                 cliente_id=cliente.cliente_id, nombre_obra=obra_texto
             ) is None:
                 obra = obras[0]
@@ -262,6 +318,92 @@ def detectar_decisiones_documento(
     return decisiones
 
 
+def regenerar_decisiones_persistidas(
+    *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
+    ids_resueltos: Iterable[str] = (),
+) -> list[dict[str, object]]:
+    """R3.2.1: reclasifica decisiones YA PERSISTIDAS (p. ej. las de un
+    artefacto `decisiones_pendientes.json` generado antes de R3.2) sin volver
+    a leer datos documentales ni ejecutar OCR.
+
+    Fuente de verdad: el propio contenido de cada decisión (`valor_documental`,
+    `contexto`, `evidencias`) más una lectura read-only de catálogos para
+    validar que la identidad de apoyo siga vigente. No inventa nada que la
+    decisión no traiga ya: una `OBRA_DESCONOCIDA` sin `contexto` (artefactos
+    previos a R3.1.3) se conserva sin filtrar -- no hay base para decidir
+    cliente==obra sin ese dato.
+
+    Efectos:
+    - Cliente==obra (comparación exacta normalizada): la decisión se
+      descarta -- Atlas ya conoce el hecho, no hay pregunta que hacer.
+    - Para las decisiones de entidad realmente desconocida que se conservan
+      (OBRA_DESCONOCIDA, VEHICULO_DESCONOCIDO, CLIENTE_DESCONOCIDO),
+      `acciones_permitidas` se normaliza a REGISTRAR/NO_REGISTRAR/POSPONER,
+      reemplazando códigos R3.1 (ASOCIAR_EXISTENTE, CONFIRMAR_NUEVO,
+      REGISTRAR_OBSERVACION, ...).
+    - Ningún otro campo se modifica. `decision_id` no cambia para las
+      decisiones conservadas: su identidad (tipo, documento, campo,
+      valor_documental, evidencias) es la misma de antes.
+    """
+    carpeta = Path(carpeta_catalogos)
+    try:
+        clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
+    except (OSError, ValueError):
+        clientes_por_id = {}
+
+    ids_terminales = {str(valor) for valor in ids_resueltos}
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json",
+            ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        obras_existentes = catalogo_obras.listar_obras()
+    except (OSError, ValueError):
+        obras_existentes = []
+    resultado: list[dict[str, object]] = []
+    for original in decisiones:
+        decision = dict(original)
+        if str(decision.get("decision_id", "")) in ids_terminales:
+            continue
+        tipo = decision.get("tipo")
+
+        if tipo == "OBRA_DESCONOCIDA":
+            contexto = decision.get("contexto") or {}
+            cliente_canonico = contexto.get("cliente_canonico")
+            cliente_id = contexto.get("cliente_id")
+            if cliente_canonico:
+                claves_cliente = {normalizar_nombre_obra(str(cliente_canonico))}
+                cliente_vigente = clientes_por_id.get(str(cliente_id)) if cliente_id else None
+                if cliente_vigente is not None:
+                    claves_cliente.add(normalizar_nombre_obra(cliente_vigente.razon_social))
+                    claves_cliente.update(
+                        normalizar_nombre_obra(alias) for alias in cliente_vigente.aliases
+                    )
+                obra_texto = str(decision.get("valor_documental", ""))
+                if normalizar_nombre_obra(obra_texto) in claves_cliente:
+                    continue  # cliente==obra: no hay obra nueva que preguntar
+                # R3.3.1: obra = identidad GLOBAL -- ya no se filtra por
+                # cliente_id. Si la obra ya existe para CUALQUIER cliente
+                # (p. ej. otro cliente la registró después de que este
+                # artefacto se generó), se descarta la pregunta.
+                if any(
+                    obra.estado_vigencia == EstadoVigencia.ACTIVO.value
+                    and normalizar_nombre_obra(obra_texto) in {
+                        normalizar_nombre_obra(obra.nombre_canonico),
+                        *(normalizar_nombre_obra(alias) for alias in obra.aliases_documentales),
+                    }
+                    for obra in obras_existentes
+                ):
+                    continue
+
+        if tipo in TIPOS_ENTIDAD_DESCONOCIDA:
+            decision["acciones_permitidas"] = list(ACCIONES_ENTIDAD_DESCONOCIDA)
+
+        resultado.append(decision)
+    return resultado
+
+
 def generar_artefacto(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     decisiones: Iterable[Mapping[str, object]], ruta_salida: str | Path | None = None,
@@ -278,11 +420,23 @@ def generar_artefacto(
     }.items():
         ruta = catalogos / nombre
         hashes[clave] = _sha256(ruta) if ruta.is_file() else None
+    ids_terminales: set[str] = set()
+    ruta_ledger = salida.parent / "decisiones_aplicadas.json"
+    try:
+        ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
+        ids_terminales = {
+            str(item.get("decision_id", "")) for item in ledger.get("aplicaciones", [])
+            if item.get("accion") in {"REGISTRAR", "NO_REGISTRAR"}
+        }
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
     decisiones_unicas: list[dict[str, object]] = []
     ids_vistos: set[str] = set()
     for decision_original in decisiones:
         decision = dict(decision_original)
         decision_id = str(decision.get("decision_id", ""))
+        if decision_id in ids_terminales:
+            continue
         if decision_id and decision_id in ids_vistos:
             continue
         if decision_id:

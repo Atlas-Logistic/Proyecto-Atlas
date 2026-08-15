@@ -135,16 +135,16 @@ def test_mismo_nombre_de_calle_en_region_distinta_no_colisiona(entorno):
     assert destino is None
     assert motivo == "DESTINO_AMBIGUO"
 
-    # Acotado al cliente correcto (ARMACERO), sí resuelve al SUYO -- la
-    # comuna/región de un cliente distinto nunca contamina la búsqueda.
+    # El cliente tampoco debe actuar como propietario/desambiguador del lugar:
+    # sin comuna/región documental, la identidad física sigue siendo ambigua.
     destino_acotado, motivo_acotado = resolver_destino_canonico_estructurado(
         cliente_texto="ARMACERO MATCO SA", obra_destino_texto="SANTA ISABEL 585",
         textos_documento=["GUIA SIN ENCABEZADO RECONOCIBLE"],
         catalogo_destinos=entorno["catalogo_destinos"],
         catalogo_clientes=entorno["catalogo_clientes"],
     )
-    assert destino_acotado.destino_id == entorno["destino_armacero"].destino_id
-    assert destino_acotado.comuna == "LAMPA"
+    assert destino_acotado is None
+    assert motivo_acotado == "DESTINO_AMBIGUO"
 
 
 # --- 3: coordenadas fuera del rango geográfico plausible -> rechazo ---

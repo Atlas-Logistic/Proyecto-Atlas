@@ -189,7 +189,8 @@ def resolver_destino_canonico_estructurado(
     if cliente_id is not None:
         destinos_cliente = [
             d
-            for d in catalogo_destinos.listar(cliente_id=cliente_id)
+            for d in catalogo_destinos.listar()
+            if d.estado_vigencia == "ACTIVO"
             if d.estado_vigencia == "ACTIVO"
         ]
 
@@ -235,7 +236,7 @@ def resolver_destino_canonico_estructurado(
         # restringido a este cliente en vez de a todo el catálogo.
         texto_obra = str(obra_destino_texto or "").strip()
         if texto_obra and texto_obra.casefold() != "no encontrado":
-            resultado_alias = catalogo_destinos.buscar(texto_obra, cliente_id=cliente_id)
+            resultado_alias = catalogo_destinos.buscar(texto_obra)
             if resultado_alias.estado == EstadoBusquedaDestino.COINCIDENCIA:
                 return validar_destino_resoluble(
                     resultado_alias.destino, "RESUELTO_ALIAS_CLIENTE"

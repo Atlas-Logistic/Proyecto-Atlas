@@ -89,6 +89,14 @@ def _texto_direccion_normalizado(texto: str) -> str:
     return normalizar_nombre_destino(texto)
 
 
+def clave_fisica_destino(direccion: str, comuna: str = "", region: str = "") -> tuple[str, str, str]:
+    """Clave global exacta y conservadora; nunca fuzzy."""
+    direccion_n = _texto_direccion_normalizado(direccion)
+    if not direccion_n:
+        raise ErrorCatalogoDestinos("dirección insuficiente para una identidad física")
+    return direccion_n, normalizar_nombre_destino(comuna), normalizar_nombre_destino(region)
+
+
 def _ahora_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -176,7 +184,7 @@ def _claves_identidad(destino: Destino) -> set[str]:
 
 def _validar_destino(destino: Destino) -> None:
     _obligatorio(destino.destino_id, "destino_id")
-    _obligatorio(destino.cliente_id, "cliente_id")
+    # `cliente_id` queda como procedencia histórica opcional; no es identidad.
     nombre = _obligatorio(destino.nombre_destino, "nombre_destino")
     if destino.nombre_normalizado != normalizar_nombre_destino(nombre):
         raise ErrorCatalogoDestinos("nombre_normalizado no corresponde a nombre_destino")
@@ -230,7 +238,7 @@ class CatalogoDestinos:
         self, texto: str, *, cliente_id: str | None = None
     ) -> ResultadoBusquedaDestino:
         clave = normalizar_nombre_destino(_obligatorio(texto, "texto"))
-        destinos = self.listar(cliente_id=cliente_id)
+        destinos = [d for d in self.listar() if d.estado_vigencia == EstadoVigenciaDestino.ACTIVO.value]
         coincidencias = [destino for destino in destinos if clave in _claves_identidad(destino)]
         if len(coincidencias) == 1:
             return ResultadoBusquedaDestino(
@@ -241,6 +249,23 @@ class CatalogoDestinos:
                 EstadoBusquedaDestino.AMBIGUA, None, len(coincidencias)
             )
         return ResultadoBusquedaDestino(EstadoBusquedaDestino.SIN_COINCIDENCIA)
+
+    def resolver_direccion_global(self, direccion: str, *, comuna: str = "", region: str = "") -> ResultadoBusquedaDestino:
+        clave = clave_fisica_destino(direccion, comuna, region)
+        coincidencias = [d for d in self.listar() if d.estado_vigencia == EstadoVigenciaDestino.ACTIVO.value and clave_fisica_destino(d.direccion, d.comuna, d.region) == clave]
+        if len(coincidencias) == 1:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.COINCIDENCIA, coincidencias[0], 1)
+        if len(coincidencias) > 1:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, len(coincidencias))
+        return ResultadoBusquedaDestino(EstadoBusquedaDestino.SIN_COINCIDENCIA)
+
+    def crear_o_reutilizar_global(self, *, nombre_destino: str, direccion: str, comuna: str = "", region: str = "", pais: str = "CHILE", fuente: str, latitud: float | None = None, longitud: float | None = None) -> Destino:
+        resuelto = self.resolver_direccion_global(direccion, comuna=comuna, region=region)
+        if resuelto.estado == EstadoBusquedaDestino.COINCIDENCIA:
+            return resuelto.destino
+        if resuelto.estado == EstadoBusquedaDestino.AMBIGUA:
+            raise ErrorCatalogoDestinos("dirección global ambigua")
+        return self.crear(cliente_id="", nombre_destino=nombre_destino, direccion=direccion, comuna=comuna, region=region, pais=pais, fuente=fuente, latitud=latitud, longitud=longitud)
 
     def crear(
         self,
@@ -260,7 +285,7 @@ class CatalogoDestinos:
         observacion: str = "",
     ) -> Destino:
         destinos = self._leer()
-        cliente_limpio = self._validar_cliente_activo(cliente_id)
+        cliente_limpio = self._validar_cliente_activo(cliente_id) if str(cliente_id or "").strip() else ""
         nombre = _obligatorio(nombre_destino, "nombre_destino")
         latitud, longitud = _validar_coordenadas(latitud, longitud)
         instante = self._instante_iso()
@@ -313,7 +338,7 @@ class CatalogoDestinos:
         indice = self._indice(destinos, destino_id)
         actual = destinos[indice]
         self._proteger(actual, modificacion_manual)
-        cliente_nuevo = actual.cliente_id if cliente_id is None else self._validar_cliente_activo(cliente_id)
+        cliente_nuevo = actual.cliente_id if cliente_id is None else (self._validar_cliente_activo(cliente_id) if str(cliente_id).strip() else "")
         nombre = actual.nombre_destino if nombre_destino is None else _obligatorio(nombre_destino, "nombre_destino")
         if limpiar_coordenadas:
             if latitud is not None or longitud is not None:
@@ -471,18 +496,24 @@ class CatalogoDestinos:
         error_alias: bool = False,
     ) -> None:
         for existente in destinos:
-            if existente.destino_id == excluir_id or existente.cliente_id != candidato.cliente_id:
+            if existente.destino_id == excluir_id:
                 continue
-            if _claves_identidad(candidato) & _claves_identidad(existente):
-                error = AliasDestinoDuplicadoError if error_alias else DestinoDuplicadoError
-                raise error("El nombre o alias ya pertenece a otro destino del cliente")
-            if candidato.codigo_destino and candidato.codigo_destino == existente.codigo_destino:
-                raise DestinoDuplicadoError("El código ya pertenece a otro destino del cliente")
+            if candidato.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value or existente.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value:
+                continue
+            # Compatibilidad V1: los nombres/codigos/aliases no pueden chocar
+            # dentro de una misma procedencia historica. Entre clientes no
+            # definen identidad fisica y una busqueda textual se abstiene.
+            if candidato.cliente_id and candidato.cliente_id == existente.cliente_id:
+                if _claves_identidad(candidato) & _claves_identidad(existente):
+                    error = AliasDestinoDuplicadoError if error_alias else DestinoDuplicadoError
+                    raise error("El nombre, codigo o alias ya identifica otro destino")
             if (
                 candidato.direccion and existente.direccion
                 and _texto_direccion_normalizado(candidato.direccion)
                 == _texto_direccion_normalizado(existente.direccion)
                 and normalizar_nombre_destino(candidato.comuna)
                 == normalizar_nombre_destino(existente.comuna)
+                and normalizar_nombre_destino(candidato.region)
+                == normalizar_nombre_destino(existente.region)
             ):
-                raise DestinoDuplicadoError("La dirección ya pertenece a otro destino del cliente")
+                raise DestinoDuplicadoError("La dirección ya pertenece a otro destino global activo")

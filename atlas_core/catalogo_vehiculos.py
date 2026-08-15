@@ -54,6 +54,14 @@ class VehiculoDuplicadoError(ErrorCatalogoVehiculos):
 class TipoVehiculo(str, Enum):
     TRACTO = "TRACTO"
     CARRO = "CARRO"
+    # R3.2: preparación de contrato -- adición aditiva y compatible (un
+    # nuevo miembro de enum no invalida catálogos V0/V1 existentes, que sólo
+    # usan TRACTO/CARRO). Registrar un vehículo con este tipo no está
+    # habilitado todavía en ningún flujo: falta que el pipeline de
+    # extracción tenga un campo documental para una patente única de camión
+    # rígido (hoy sólo existen "patente_tracto"/"patente_rampla", pensados
+    # para un tracto+rampla articulado). Ver auditoría R3.2 para el detalle.
+    CAMION_RIGIDO = "CAMION_RIGIDO"
 
 
 class EstadoCalidadVehiculo(str, Enum):

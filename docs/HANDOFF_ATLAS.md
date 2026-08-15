@@ -566,3 +566,41 @@ No iniciar OPERACIÓN REAL R2 como parte de este cierre.
 - `reportes/actual` y `operacion/actual/estado_operacion.json` fueron regenerados exclusivamente desde el dataset promovido. Desktop devuelve `OPERACION_ACTIVA`, encuentra dataset y `viajes.csv`, no cae al histórico y puede consumir las nuevas guías.
 - Pendientes actuales: `OBRA_DESTINO_SIN_CORROBORAR` (10), `CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA` (8), `CLIENTE_SIN_CORROBORAR` (2) y `MATERIAL_AUSENTE` (1). El siguiente cuello de botella de mayor impacto es obra/destino sin corroborar.
 - Deuda baja separada: reparar de forma auditable el mojibake de observaciones humanas y mover `telemetria_cache.json` fuera de la fuente `--catalogos`. No corregir ninguno mezclándolo con cambios operacionales.
+
+# Estado vigente — R3.3.1: obra global (2026-08-14)
+
+- **Obra pasa de identidad dependiente de cliente a identidad global.** `atlas_core/catalogo_obras_destinos.py`: `cliente_id` en `Obra` ya no es obligatorio ni filtro de resolución (se conserva como procedencia histórica informativa); la unicidad de nombre/alias normalizado de una obra activa es global, no por cliente; la relación obra↔destino ya no exige que ambos "pertenezcan" al mismo cliente. Nuevo método `migrar_a_identidad_global()` (recertificación + escritura atómica, se abstiene si detecta colisión).
+- `atlas_core/decisiones_pendientes.py` y `atlas_core/aplicacion_decisiones.py` actualizados para buscar/registrar obra globalmente (sin filtrar por `cliente_id`); la evidencia de REGISTRAR ahora guarda `cliente_id_observado`/`cliente_canonico_observado`/`numero_guia` como dato operacional, no como propiedad.
+- Migración real ejecutada sobre `obras_destinos.json`: **12/12 obras y 11/11 relaciones preservadas, 0 colisiones**, contenido byte-idéntico (SHA-256 `8B3BEA7679ECB20A770A5D4D3FBDED3671A36A46D537B5023C27B475FE475937` sin cambio). Respaldo formal en `G:\Mi unidad\Atlas\respaldos\obras_destinos.antes-r331.json`. Ningún otro archivo (`dataset`, `clientes.json`, `vehiculos.json`, `destinos_maestros.json`, `decisiones_pendientes.json`, `estado_operacion.json`) fue tocado.
+- Toda la infraestructura R3.3 (IPC, CLI, ledger, idempotencia, obsolescencia por hash, UX Desktop Registrar/No registrar/Decidir después) se conserva sin cambios; Desktop no requirió ningún ajuste de código (contrato JSON sin cambio de forma).
+- E2E TEMP validado: Construmart registra "CONSTRUCTORA X" → Easy la reconoce sin OCR, sin segunda obra, sin pregunta de vínculo manual.
+- Suite Motor: **1089 passed, 0 failed**. Suite Desktop: **174 passed, 0 failed**. Sin commit, sin push.
+- **Próximo paso para Javier:** abrir Atlas Desarrollo y pulsar **Registrar** en UNA sola obra real (p. ej. guía 464715, "CONSTRUCTORA INMOBILIARIA E") como primera prueba real del modelo global -- ver instrucción exacta en el reporte de cierre de este bloque. Las otras 3 `OBRA_DESCONOCIDA` reales quedan pendientes hasta validar esa primera.
+
+# Estado vigente — R3.4.1: destino físico global (2026-08-14)
+
+- **Destino pasa de identidad dependiente de cliente a identidad física global.** La identidad usa dirección normalizada + comuna + región; `cliente_id` permanece opcional/informativo por compatibilidad y no filtra resolución ni permite duplicar una dirección.
+- Catálogo real migrado con respaldo formal en `ATLAS_DATA_DIR/respaldos/R3_4_1_DESTINOS_GLOBALES_20260815_000036`: 53→53 registros, 53 IDs preservados, 42 coordenadas preservadas, tres duplicados físicos exactos conservados como históricos inactivos y cero colisiones ambiguas.
+- SHA-256 `destinos_maestros.json`: antes `9B69D77D193F40AC9207953B939417E70817270CC79D2494908A3AD49119D7C4`; después `A6ABE355AA8E1A261C699846D2519F81BA2EF1B638C9BAF2D4748425782E68EE`. `obras_destinos.json` no cambió y sus 11 referencias apuntan a destinos activos.
+- Construmart/Easy reutilizan el mismo destino global y la misma obra/relación confirmada. GPS/km/rutas conservan IDs y coordenadas y no requieren rediseño.
+- Suite Motor: **1093 passed, 0 failed**. Desktop no fue modificado. Dataset, reportes, clientes, vehículos, decisiones y telemetría intactos. Sin commit ni push.
+- **Próximo bloque único:** retomar R3.4 para implementar las decisiones `DESTINO_SIN_CONFIRMAR`; no aplicar todavía la decisión real 464715 hasta completar ese bloque.
+
+# ESTADO AL CIERRE — Jornada 2026-08-14
+
+- **R2**: lote controlado 19/19 cerrado.
+- **R3.1**: Revisión de Atlas integrada en Desktop (pestaña, caso por caso, Registrar/No registrar/Decidir después preparatorio).
+- **R3.2**: decisiones simplificadas (regla "sólo preguntar lo que Atlas no puede determinar solo"); cliente==obra suprimido; UX fija Registrar/No registrar/Decidir después.
+- **R3.3**: infraestructura de aplicar decisiones de obra implementada (IPC, CLI, ledger idempotente, obsolescencia por hash, reversión atómica).
+- **Primera obra real registrada desde Desktop**: **CONSTRUCTORA INMOBILIARIA E** (guía 464715, cliente CONSTRUMART SA) -- reconocida automáticamente también en la guía 464740 por ser la misma obra global.
+- **Modelo de obra corregido a identidad global** (R3.3.1): `cliente_id` ya no es propietario ni filtro de resolución.
+- **Modelo de destino corregido a identidad física global** (R3.4.1): identidad por dirección normalizada + comuna + región, `cliente_id` opcional/informativo.
+- **53 destinos migrados, 3 duplicados históricos inactivos**, 0 colisiones ambiguas, 53/53 IDs y 42/42 coordenadas preservados.
+- **R3.4 detenido antes de implementar confirmación real de destino** -- diseño de UX (Confirmar/No confirmar/Decidir después) discutido pero NO implementado.
+- **Guía 464715**: obra conocida (global, `OBSERVADA`/`ACTIVO`); destino "AV. VICUÑA MACKENNA 3451" todavía sin confirmar (no existe en `destinos_maestros.json`, cero relaciones obra↔destino); `OBRA_DESTINO_SIN_CORROBORAR` sigue siendo una incertidumbre real y vigente, no un error de reporte.
+- **NO registrar todavía** KN5439, JF6468 ni XF3629 (vehículos reales pendientes de la primera prueba de vehículos, aún no iniciada).
+- **CAMION_RIGIDO** está admitido por el catálogo (`TipoVehiculo`), pero el pipeline documental todavía no modela correctamente una patente única de camión rígido (sólo tiene `patente_tracto`/`patente_rampla`) -- no usarlo operacionalmente todavía.
+
+## PRIMER PASO MAÑANA
+
+Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir después → actualización operacional sin OCR → probar primero en la guía 464715 real desde Atlas Desarrollo.

@@ -10,6 +10,7 @@ from atlas_core.catalogo_vehiculos import (
     CatalogoVehiculosCorruptoError,
     ErrorCatalogoVehiculos,
     EvidenciaVehiculo,
+    TipoVehiculo,
     VehiculoDuplicadoError,
     VersionCatalogoVehiculosDesconocidaError,
     cargar_catalogo_vehiculos,
@@ -340,3 +341,29 @@ def test_v0_parcialmente_corrupto_invalida_catalogo_completo(v0_corrupto):
         cargar_catalogo_vehiculos(v0_corrupto)
     with pytest.raises(CatalogoVehiculosCorruptoError):
         resolver_patente(v0_corrupto, "AB1234")
+
+
+# --- R3.2: preparación de contrato para CAMION_RIGIDO (sin registrar ninguno real) ---
+
+def test_camion_rigido_es_tipo_valido_sin_afectar_catalogos_existentes():
+    """La adición del enum es aditiva: catálogos V1 que sólo usan
+    TRACTO/CARRO siguen cargando y homologando exactamente igual."""
+    assert TipoVehiculo.CAMION_RIGIDO.value == "CAMION_RIGIDO"
+    cargado = cargar_catalogo_vehiculos(catalogo_v1(vehiculo(tipo="TRACTO")))
+    assert cargado.formato == "V1"
+    assert resolver_patente(catalogo_v1(vehiculo(tipo="TRACTO")), "AB1234", tipo_esperado="TRACTO").estado == "COINCIDENCIA_EXACTA"
+
+
+def test_camion_rigido_puede_confirmarse_como_tercer_tipo(tmp_path):
+    """El modelo admite un vehículo CAMION_RIGIDO (contrato listo), pero
+    esto no registra ningún vehículo real del mundo -- es sintético, y
+    ningún flujo del pipeline hoy produce este tipo automáticamente porque
+    la extracción sólo tiene los campos patente_tracto/patente_rampla."""
+    ruta = tmp_path / "vehiculos.json"
+    ruta.write_text(json.dumps(catalogo_v1()), encoding="utf-8")
+    vehiculo_confirmado = confirmar_vehiculo(
+        ruta, patente="ZZ9999", tipo=TipoVehiculo.CAMION_RIGIDO, actor="test",
+        fuente_decision="test-camion-rigido", fecha=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert vehiculo_confirmado.tipo == "CAMION_RIGIDO"
+    assert cargar_catalogo_vehiculos(ruta).formato == "V1"

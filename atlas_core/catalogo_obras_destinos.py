@@ -1,8 +1,15 @@
 """Catálogo privado y portable de obras documentales y destinos físicos.
 
-El catálogo no duplica identidades: ``cliente_id`` referencia
-``clientes.json`` y ``destino_id`` referencia ``destinos_maestros.json``.
-Las observaciones automáticas nunca confirman obras ni relaciones.
+``destino_id`` referencia ``destinos_maestros.json`` y sigue perteneciendo a
+un cliente. Una ``Obra`` es, en cambio, una identidad GLOBAL (R3.3.1): su
+``cliente_id`` ya NO es propietario ni filtro de resolución -- se conserva
+únicamente como procedencia histórica informativa (qué cliente la observó
+primero), y puede quedar vacío. La unicidad de nombre/alias normalizado de
+una obra ACTIVA es global, no por cliente: dos clientes distintos que
+mencionan la misma obra deben resolver a la MISMA fila ``Obra``, y esa
+aparición conjunta se conserva sólo como evidencia operacional del
+documento, no como una relación de pertenencia. Las observaciones
+automáticas nunca confirman obras ni relaciones.
 """
 
 from __future__ import annotations
@@ -252,7 +259,12 @@ def _validar_evidencia(evidencia: Evidencia) -> None:
 
 def _validar_obra(obra: Obra) -> None:
     _obligatorio(obra.obra_id, "obra_id")
-    _obligatorio(obra.cliente_id, "cliente_id")
+    # R3.3.1: cliente_id deja de ser obligatorio -- una obra es una
+    # identidad global; cliente_id, cuando está presente, es sólo
+    # procedencia histórica informativa (qué cliente la observó primero),
+    # nunca una condición de existencia ni de resolución.
+    if not isinstance(obra.cliente_id, str):
+        raise ErrorCatalogoObrasDestinos("cliente_id debe ser texto")
     nombre = _obligatorio(obra.nombre_canonico, "nombre_canonico")
     if obra.nombre_normalizado != normalizar_nombre_obra(nombre):
         raise ErrorCatalogoObrasDestinos("nombre_normalizado no corresponde")
@@ -376,15 +388,16 @@ class CatalogoObrasDestinos:
                     aliases.append(alias)
                     claves.add(clave)
             claves_propuestas = {clave_canonica, *claves}
+            # R3.3.1: colisión GLOBAL -- una obra es una identidad única en
+            # todo Atlas, no sólo frente a las demás obras del mismo cliente.
             for otra in obras:
                 if (
                     otra.obra_id != obra.obra_id
-                    and otra.cliente_id == obra.cliente_id
                     and otra.estado_vigencia == EstadoVigencia.ACTIVO.value
                     and claves_propuestas.intersection(self._claves_obra(otra))
                 ):
                     raise ErrorCatalogoObrasDestinos(
-                        "la identidad propuesta colisiona con otra obra activa del cliente"
+                        "la identidad propuesta colisiona con otra obra activa"
                     )
             instante = self._instante_iso()
             actualizada = replace(
@@ -410,7 +423,15 @@ class CatalogoObrasDestinos:
         destino_id: str | None = None,
         alias_documental: str = "",
     ) -> ResultadoObservacion:
-        """Registra evidencia sin confirmar implícitamente ninguna entidad."""
+        """Registra evidencia sin confirmar implícitamente ninguna entidad.
+
+        R3.3.1: la obra se busca/crea GLOBALMENTE por nombre normalizado,
+        sin filtrar por `cliente_id` -- una obra ya observada para CUALQUIER
+        cliente se reutiliza tal cual para éste. `cliente_id` sigue siendo
+        obligatorio como identidad del cliente que hace esta observación
+        (queda como evidencia operacional del documento), pero deja de ser
+        una condición de pertenencia de la obra.
+        """
         _validar_evidencia(evidencia)
         if evidencia.tipo == TipoEvidencia.CONFIRMACION_HUMANA.value:
             raise ErrorCatalogoObrasDestinos(
@@ -422,11 +443,12 @@ class CatalogoObrasDestinos:
             clave = normalizar_nombre_obra(_obligatorio(nombre_obra, "nombre_obra"))
             compatibles = [
                 o for o in obras
-                if o.cliente_id == cliente.cliente_id
-                and o.estado_vigencia == EstadoVigencia.ACTIVO.value
+                if o.estado_vigencia == EstadoVigencia.ACTIVO.value
                 and clave in self._claves_obra(o)
             ]
             if len(compatibles) > 1:
+                # Ambigüedad global: el catálogo se abstiene en vez de
+                # adivinar cuál de las obras activas es la correcta.
                 raise ErrorCatalogoObrasDestinos("obra observada ambigua")
             instante = self._instante_iso()
             if compatibles:
@@ -449,6 +471,9 @@ class CatalogoObrasDestinos:
                 obras[obras.index(obra)] = obra_nueva
                 obra = obra_nueva
             else:
+                # cliente_id queda registrado como procedencia informativa
+                # (primer observador) -- no vuelve a usarse para filtrar
+                # búsquedas futuras de esta obra.
                 obra = Obra(
                     obra_id=str(self._generador_id()),
                     cliente_id=cliente.cliente_id,
@@ -466,11 +491,11 @@ class CatalogoObrasDestinos:
 
             relacion = None
             if destino_id not in (None, ""):
+                # R3.3.1: ya no se exige que destino.cliente_id coincida con
+                # el (ex) "cliente de la obra" -- la obra es global, así que
+                # esa coherencia dejó de tener sentido. El destino_id sigue
+                # validándose como existente y activo en `_destino_activo`.
                 destino = self._destino_activo(str(destino_id))
-                if destino.cliente_id != obra.cliente_id:
-                    raise ErrorCatalogoObrasDestinos(
-                        "destino_id pertenece a otro cliente"
-                    )
                 coincidentes = [
                     r for r in relaciones
                     if r.obra_id == obra.obra_id
@@ -605,13 +630,18 @@ class CatalogoObrasDestinos:
     def resolver_obra_destino_confirmada(
         self, *, cliente_id: str, nombre_obra: str
     ) -> ResolucionObraDestino | None:
+        """R3.3.1: la obra se busca GLOBALMENTE por nombre normalizado, sin
+        filtrar por `cliente_id` -- una obra confirmada para cualquier
+        cliente se reconoce igual para éste. `cliente_id` se sigue
+        validando (debe ser un cliente real y activo) porque el llamador
+        siempre lo tiene disponible como contexto del documento, pero ya no
+        participa en la búsqueda de la obra."""
         obras, relaciones = self._leer()
-        cliente = self._cliente_activo(cliente_id)
+        self._cliente_activo(cliente_id)  # valida el contexto; no filtra la obra
         clave = normalizar_nombre_obra(nombre_obra)
         candidatas = [
             o for o in obras
-            if o.cliente_id == cliente.cliente_id
-            and o.estado == EstadoObra.CONFIRMADA.value
+            if o.estado == EstadoObra.CONFIRMADA.value
             and o.estado_vigencia == EstadoVigencia.ACTIVO.value
             and clave in self._claves_obra(o)
         ]
@@ -637,6 +667,40 @@ class CatalogoObrasDestinos:
         except ErrorCatalogoObrasDestinos:
             return None
         return ResolucionObraDestino(obra, relacion, destino)
+
+    def migrar_a_identidad_global(self) -> dict[str, object]:
+        """R3.3.1: recertifica el catálogo bajo el modelo de obra global.
+
+        No transforma ningún dato -- `cliente_id` se conserva tal cual en
+        cada obra, como procedencia histórica informativa; sólo deja de
+        interpretarse como propietario. Es, en esencia, una lectura +
+        validación (con la nueva regla de unicidad GLOBAL) + reescritura
+        atómica bajo el mismo candado de sesión que usa el resto del
+        catálogo -- sirve como checkpoint verificado de que el archivo es
+        100% compatible con el código nuevo.
+
+        Se ABSTIENE de escribir (y reporta `migrado: False`) si detecta
+        cualquier colisión de nombre/alias normalizado entre obras activas
+        de clientes distintos -- una migración no destructiva nunca fusiona
+        identidades ambiguas por su cuenta.
+        """
+        with bloqueo_sesion(self.ruta.parent, "obras_destinos"):
+            obras, relaciones = self._leer()
+            colisiones = self._colisiones_globales(obras)
+            reporte: dict[str, object] = {
+                "total_obras": len(obras),
+                "total_relaciones": len(relaciones),
+                "obra_ids": sorted(o.obra_id for o in obras),
+                "colisiones_detectadas": len(colisiones),
+                "colisiones": colisiones,
+            }
+            if colisiones:
+                reporte["migrado"] = False
+                return reporte
+            self._validar_catalogo(obras, relaciones)
+            self._escribir(obras, relaciones)
+            reporte["migrado"] = True
+            return reporte
 
     def _decidir_no_confirmada(
         self,
@@ -727,7 +791,10 @@ class CatalogoObrasDestinos:
             ids_obras = {o.obra_id for o in obras}
             for obra in obras:
                 _validar_obra(obra)
-                if obra.cliente_id not in clientes:
+                # cliente_id es opcional (R3.3.1); si está presente, debe
+                # seguir siendo un cliente real -- pero su ausencia ya no es
+                # un error, porque la obra no depende de él para existir.
+                if obra.cliente_id and obra.cliente_id not in clientes:
                     raise ErrorCatalogoObrasDestinos("obra referencia cliente inexistente")
             activas: set[tuple[str, str]] = set()
             for relacion in relaciones:
@@ -736,14 +803,13 @@ class CatalogoObrasDestinos:
                     raise ErrorCatalogoObrasDestinos("relación referencia obra inexistente")
                 if relacion.destino_id not in destinos:
                     raise ErrorCatalogoObrasDestinos("relación referencia destino inexistente")
-                obra = next(o for o in obras if o.obra_id == relacion.obra_id)
-                destino = CatalogoDestinos(
-                    self.ruta_destinos, ruta_clientes=self.ruta_clientes
-                ).obtener(relacion.destino_id)
-                if destino.cliente_id != obra.cliente_id:
-                    raise ErrorCatalogoObrasDestinos(
-                        "relación conecta clientes incompatibles"
-                    )
+                # R3.3.1: la obra ya no "pertenece" a un cliente, así que la
+                # validez de la relación obra<->destino ya no depende de qué
+                # cliente compró el material -- sólo de que ambos existan y
+                # estén activos (ya verificado arriba). El destino conserva
+                # su propio cliente_id (es un lugar físico registrado para
+                # ese cliente); eso es independiente de la identidad global
+                # de la obra.
                 if relacion.estado not in {
                     EstadoRelacion.RECHAZADA.value, EstadoRelacion.INACTIVA.value
                 }:
@@ -791,6 +857,24 @@ class CatalogoObrasDestinos:
         return {
             normalizar_nombre_obra(x)
             for x in (obra.nombre_canonico, *obra.aliases_documentales)
+        }
+
+    @classmethod
+    def _colisiones_globales(cls, obras: Iterable[Obra]) -> dict[str, list[str]]:
+        """R3.3.1: detecta (sin lanzar) nombres/alias normalizados que
+        coinciden entre DOS O MÁS obras activas -- comparación exacta
+        normalizada, sin fuzzy. No se usa para bloquear lecturas normales
+        (el catálogo real de hoy no tiene ninguna), sólo como preflight de
+        `migrar_a_identidad_global` -- una migración no destructiva nunca
+        fusiona automáticamente una ambigüedad así detectada."""
+        por_clave: dict[str, set[str]] = {}
+        for obra in obras:
+            if obra.estado_vigencia != EstadoVigencia.ACTIVO.value:
+                continue
+            for clave in cls._claves_obra(obra):
+                por_clave.setdefault(clave, set()).add(obra.obra_id)
+        return {
+            clave: sorted(ids) for clave, ids in por_clave.items() if len(ids) > 1
         }
 
     @staticmethod

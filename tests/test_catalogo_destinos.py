@@ -125,7 +125,7 @@ def test_previene_nombre_duplicado_dentro_del_cliente(entorno):
 def test_mismo_nombre_es_permitido_en_clientes_distintos(entorno):
     destinos, _, cliente_uno, cliente_dos = entorno
     primero = crear_demo(destinos, cliente_uno.cliente_id)
-    segundo = crear_demo(destinos, cliente_dos.cliente_id)
+    segundo = crear_demo(destinos, cliente_dos.cliente_id, direccion="AVENIDA FICTICIA 201")
 
     assert primero.nombre_normalizado == segundo.nombre_normalizado
 
@@ -167,7 +167,7 @@ def test_alias_duplicado_dentro_del_cliente_se_rechaza(entorno):
 def test_busqueda_ambigua_global_se_abstiene(entorno):
     destinos, _, cliente_uno, cliente_dos = entorno
     crear_demo(destinos, cliente_uno.cliente_id, nombre_destino="DESTINO DEMO COMÚN")
-    crear_demo(destinos, cliente_dos.cliente_id, nombre_destino="DESTINO DEMO COMÚN")
+    crear_demo(destinos, cliente_dos.cliente_id, nombre_destino="DESTINO DEMO COMÚN", direccion="AVENIDA FICTICIA 201")
 
     resultado = destinos.buscar("DESTINO DEMO COMUN")
     assert resultado.estado == EstadoBusquedaDestino.AMBIGUA
@@ -175,14 +175,14 @@ def test_busqueda_ambigua_global_se_abstiene(entorno):
     assert resultado.cantidad_coincidencias == 2
 
 
-def test_busqueda_filtrada_resuelve_nombre_compartido(entorno):
+def test_busqueda_no_usa_cliente_para_desambiguar_nombre_compartido(entorno):
     destinos, _, cliente_uno, cliente_dos = entorno
     primero = crear_demo(destinos, cliente_uno.cliente_id, nombre_destino="DESTINO DEMO COMÚN")
-    crear_demo(destinos, cliente_dos.cliente_id, nombre_destino="DESTINO DEMO COMÚN")
+    crear_demo(destinos, cliente_dos.cliente_id, nombre_destino="DESTINO DEMO COMÚN", direccion="AVENIDA FICTICIA 201")
 
     resultado = destinos.buscar("DESTINO DEMO COMUN", cliente_id=cliente_uno.cliente_id)
-    assert resultado.estado == EstadoBusquedaDestino.COINCIDENCIA
-    assert resultado.destino == primero
+    assert resultado.estado == EstadoBusquedaDestino.AMBIGUA
+    assert resultado.destino is None
 
 
 def test_edicion_explicita_y_fechas(entorno):
@@ -301,7 +301,7 @@ def test_archivo_corrupto_genera_error(tmp_path, contenido):
 def test_filtro_por_cliente(entorno):
     destinos, _, cliente_uno, cliente_dos = entorno
     primero = crear_demo(destinos, cliente_uno.cliente_id)
-    crear_demo(destinos, cliente_dos.cliente_id)
+    crear_demo(destinos, cliente_dos.cliente_id, direccion="AVENIDA FICTICIA 201")
 
     assert destinos.listar(cliente_id=cliente_uno.cliente_id) == [primero]
 
