@@ -111,6 +111,93 @@ def test_contradicciones_activan_revision_y_preservan_evidencia(
     assert viaje.documentos[0].evidencia[campo] != viaje.documentos[1].evidencia[campo]
 
 
+@pytest.mark.parametrize(
+    ("rut_a", "rut_b"),
+    [
+        ("10.833.150-K", "10833150-K"),  # caso real: 464641/464642, transporte 0000352752
+        ("10.833.150-K", "10833150-k"),  # dígito verificador en minúscula
+        ("10.833.150-k", "10833150-K"),
+        ("  10.833.150-K  ", "10833150-K"),  # espacios exteriores
+    ],
+)
+def test_rut_chofer_equivalente_en_formato_no_genera_conflicto(rut_a, rut_b):
+    filas = [
+        _fila(archivo="a.jpg", rut_chofer=rut_a),
+        _fila(archivo="b.jpg", rut_chofer=rut_b),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert MotivoRevision.CONFLICTO_RUT_CHOFER not in viaje.motivos_revision
+    assert viaje.estado == EstadoViaje.CONFIRMADO
+    # La evidencia documental original -- con o sin puntuación -- se
+    # preserva byte a byte; sólo cambia si se considera conflicto.
+    assert viaje.documentos[0].evidencia["rut_chofer"] == rut_a
+    assert viaje.documentos[1].evidencia["rut_chofer"] == rut_b
+
+
+def test_rut_chofer_realmente_distinto_sigue_generando_conflicto():
+    filas = [
+        _fila(archivo="a.jpg", rut_chofer="10.833.150-K"),
+        _fila(archivo="b.jpg", rut_chofer="12.345.678-5"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.CONFLICTO_RUT_CHOFER in viaje.motivos_revision
+
+
+@pytest.mark.parametrize("rut_ausente", ["", "No encontrado", "REVISAR", "ILEGIBLE"])
+def test_rut_chofer_ausente_en_un_documento_no_genera_conflicto(rut_ausente):
+    # Mismo comportamiento previo: un valor ausente nunca compite con el
+    # valor presente del otro documento.
+    filas = [
+        _fila(archivo="a.jpg", rut_chofer="10.833.150-K"),
+        _fila(archivo="b.jpg", rut_chofer=rut_ausente),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert MotivoRevision.CONFLICTO_RUT_CHOFER not in viajes[0].motivos_revision
+
+
+def test_rut_chofer_no_parseable_distinto_sigue_generando_conflicto():
+    # Texto sin ningún dígito/"K": no tiene forma de RUT, así que se
+    # compara literalmente (normalizado por acentos/mayúsculas, igual que
+    # antes) en vez de intentar normalizar como RUT -- no se oculta el
+    # conflicto ni se degrada a una igualdad artificial.
+    filas = [
+        _fila(archivo="a.jpg", rut_chofer="SIN RUT VISIBLE"),
+        _fila(archivo="b.jpg", rut_chofer="OTRO TEXTO SIN RUT"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert MotivoRevision.CONFLICTO_RUT_CHOFER in viajes[0].motivos_revision
+
+
+def test_rut_chofer_no_parseable_identico_no_genera_conflicto():
+    # Mismo texto no-RUT en ambos documentos: ya era compatible antes del
+    # cambio (misma clave normalizada) y sigue siéndolo -- el fallback a
+    # comparación literal no introduce una regresión aquí.
+    filas = [
+        _fila(archivo="a.jpg", rut_chofer="SIN RUT VISIBLE"),
+        _fila(archivo="b.jpg", rut_chofer="sin rut visible"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert MotivoRevision.CONFLICTO_RUT_CHOFER not in viajes[0].motivos_revision
+
+
+def test_otros_campos_de_conflicto_no_cambian_su_comparacion():
+    # La tolerancia de formato es exclusiva de rut_chofer: dos valores de
+    # chofer que sólo difieren en puntuación/formato (no en contenido real)
+    # deben seguir comparándose tal como antes -- literalmente (salvo
+    # acentos/mayúsculas/espacios, como ya hacía _clave_normalizada).
+    filas = [
+        _fila(archivo="a.jpg", chofer="JOSE LAZCANO"),
+        _fila(archivo="b.jpg", chofer="JOSE  LAZCANO."),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    # "JOSE  LAZCANO." (con punto final) no es la misma clave normalizada
+    # que "JOSE LAZCANO" -- el comportamiento de chofer no cambió.
+    assert MotivoRevision.CONFLICTO_CHOFER in viajes[0].motivos_revision
+
+
 def test_origen_opcional_contradictorio_activa_revision():
     filas = [
         _fila(archivo="a.jpg", origen="PLANTA NORTE"),

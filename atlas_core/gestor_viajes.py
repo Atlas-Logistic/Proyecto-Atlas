@@ -15,6 +15,8 @@ from enum import Enum
 from typing import Callable, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from atlas_core.catalogos import normalizar_rut
+
 
 _AUSENTES = {"", "no encontrado", "revisar", "ilegible"}
 _PATRON_TRANSPORTE = re.compile(r"^\d+$")
@@ -65,6 +67,25 @@ def _valores_unicos(valores: Iterable[str]) -> list[str]:
 
 def _valores_compatibles(valores: Iterable[str]) -> bool:
     return len({_clave_normalizada(v) for v in valores if _valor_presente(v)}) <= 1
+
+
+def _valores_compatibles_rut(valores: Iterable[str]) -> bool:
+    """Como `_valores_compatibles`, pero tolerante al formato de RUT
+    (puntos, guion, mayúscula/minúscula del dígito verificador) mediante la
+    misma normalización canónica que Atlas ya usa para corroborar RUT de
+    chofer contra catálogo (`atlas_core.catalogos.normalizar_rut`). Sólo se
+    usa para `rut_chofer` -- ningún otro campo de conflicto cambia.
+
+    Si un valor no contiene ningún dígito ni "K" tras normalizar (no tiene
+    forma de RUT -- p. ej. texto libre, un error de OCR sin dígitos), se
+    compara por su forma literal (`_clave_normalizada`) en vez de por RUT
+    normalizado, para no fusionar dos textos distintos que no son RUT en
+    una igualdad artificial. Esto conserva exactamente el comportamiento
+    previo para valores ausentes/inválidos/no parseables como RUT."""
+    return len({
+        normalizar_rut(v) or _clave_normalizada(v)
+        for v in valores if _valor_presente(v)
+    }) <= 1
 
 
 def _documento_marca_revision(fila: Mapping[str, object]) -> bool:
@@ -539,20 +560,20 @@ def agrupar_viajes(
         fechas_originales = [str(f.get("fecha", "")).strip() for f in filas_grupo]
         fechas_desktop = [_fecha_para_desktop(valor) for valor in fechas_originales]
         campos_conflicto = (
-            (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop]),
-            (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos]),
-            (MotivoRevision.CONFLICTO_RUT_CHOFER, [d.rut_chofer for d in documentos]),
-            (MotivoRevision.CONFLICTO_CLIENTE, [d.cliente for d in documentos]),
-            (MotivoRevision.CONFLICTO_OBRA_DESTINO, [d.obra_destino for d in documentos]),
-            (MotivoRevision.CONFLICTO_ORIGEN, [d.origen for d in documentos]),
-            (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos]),
-            (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos]),
-            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos]),
-            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos]),
+            (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_RUT_CHOFER, [d.rut_chofer for d in documentos], _valores_compatibles_rut),
+            (MotivoRevision.CONFLICTO_CLIENTE, [d.cliente for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_OBRA_DESTINO, [d.obra_destino for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_ORIGEN, [d.origen for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos], _valores_compatibles),
         )
         motivos = [
-            motivo for motivo, valores in campos_conflicto
-            if not _valores_compatibles(valores)
+            motivo for motivo, valores, comparador in campos_conflicto
+            if not comparador(valores)
         ]
         if any(
             _valor_presente(original) and normalizada is None
