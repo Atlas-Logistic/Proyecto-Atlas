@@ -529,3 +529,9 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - El buscador Desktop quedó validado para chofer, N.º de transporte y N.º de guía (caso real 464715). La patente está excluida del índice de búsqueda.
 - Cierre técnico: Motor **1114 passed, 0 failed**; Desktop **184 passed, 0 failed**. Drive coherente y sin residuos `.tmp`, staging ni `_respaldos` operacionales.
 - Vehículos continúa pendiente para el bloque siguiente; no se modificó en este cierre.
+## 2026-08-17 — Checkpoint R3.5/R3.6.1 validado en operación real
+
+- R3.5/R3.5.1 aprobado: Javier aplicó varias decisiones consecutivas y la bandeja se regeneró sin obsolescencia encadenada.
+- R3.6.1 aprobado desde Atlas Desarrollo: KN5439 y JF6468 se clasificaron inequívocamente; XF3629 solicitó tipo humano y quedó registrada como `CAMION_RIGIDO`. La experiencia visual fue aprobada y Revisión de Atlas quedó en **0 pendientes**.
+- R3.6.2 queda **PENDIENTE, no implementado ni publicado**. Hallazgo para el próximo bloque: algunos Viajes conservan motivos posiblemente obsoletos, especialmente `PATENTE_SIN_HOMOLOGAR` en la guía 464740 después de registrar XF3629.
+- Este checkpoint no ejecutó OCR ni modificó Drive.

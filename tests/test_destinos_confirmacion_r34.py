@@ -338,3 +338,173 @@ def test_confirmar_integra_revalidacion_automaticamente_y_reporte_vigente_cambia
     fila = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
     assert "OBRA_DESTINO_SIN_CORROBORAR" not in fila["motivos_revision_documento"]
     assert fila["indicador_revision"] == "OK"
+
+
+# --- R3.5: regeneración automática encadenada sin OCR ---
+
+def _agregar_caso_destino(catalogos, cliente, *, guia, obra_texto, destino_texto):
+    obras = CatalogoObrasDestinos(
+        ruta=catalogos/"obras_destinos.json", ruta_clientes=catalogos/"clientes.json",
+        ruta_destinos=catalogos/"destinos_maestros.json",
+    )
+    evidencia = Evidencia(
+        tipo=TipoEvidencia.GUIA.value, identificador_fuente=guia,
+        referencia_hash=(guia * 64)[:64], campos_observados={"obra": obra_texto},
+        fecha="2026-01-01T00:00:00+00:00", actor_proceso="TEST",
+        resultado=ResultadoEvidencia.SOPORTA.value,
+    )
+    obra = obras.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra=obra_texto, evidencia=evidencia,
+    ).obra
+    return crear_decision(
+        tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO",
+        archivo=f"{guia}.jpeg", numero_guia=guia, numero_transporte=f"T-{guia}",
+        campo="destino_entrega", valor_documental=destino_texto,
+        valor_normalizado=destino_texto, identidad_resuelta={
+            "entidad_id": obra.obra_id, "valor_canonico": obra_texto,
+        }, candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
+        evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
+        acciones_permitidas=("CONFIRMAR", "NO_CONFIRMAR", "POSPONER"),
+        contexto={
+            "cliente_id": cliente.cliente_id, "cliente_canonico": "CONSTRUMART SA",
+            "obra_id": obra.obra_id, "obra_canonica": obra_texto,
+            "destino_documental": destino_texto,
+        },
+    )
+
+
+def test_r35_e2e_aplica_a_regenera_y_aplica_b_inmediatamente_sin_ocr(tmp_path):
+    fila_b = _fila_csv(
+        numero_guia="464716", numero_transporte="T-464716", obra_destino="OBRA B",
+        despachar_a_crudo="CALLE B 200", motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR",
+    )
+    raiz, catalogos, actual, cliente, obra, decision_a = _entorno(
+        tmp_path, filas_csv=[_fila_csv(), fila_b],
+    )
+    decision_b = _agregar_caso_destino(
+        catalogos, cliente, guia="464716", obra_texto="OBRA B", destino_texto="CALLE B 200",
+    )
+    decision_b["contexto"]["cliente_canonico"] = "CONTEXTO ANTIGUO"
+    generar_artefacto(
+        ruta_dataset=actual/"analisis_completo_guias.csv", carpeta_catalogos=catalogos,
+        decisiones=[decision_a, decision_b], ruta_salida=actual/"decisiones_pendientes.json",
+    )
+
+    resultado_a = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_a["decision_id"], accion="CONFIRMAR",
+    )
+    artefacto_tras_a = json.loads((actual/"decisiones_pendientes.json").read_text(encoding="utf-8"))
+    assert resultado_a["ok"] and resultado_a["revalidacion"]["guias_actualizadas"] == ["464715"]
+    assert [d["decision_id"] for d in artefacto_tras_a["decisiones"]] == [decision_b["decision_id"]]
+    assert artefacto_tras_a["decisiones"][0]["contexto"]["cliente_canonico"] == "CONSTRUMART SA"
+    assert artefacto_tras_a["dataset_sha256"] == modulo._sha(actual/"analisis_completo_guias.csv")
+
+    resultado_b = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
+    )
+    assert resultado_b["ok"] and _pendientes(actual) == []
+    ledger = json.loads((actual/"decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    assert [a["decision_id"] for a in ledger["aplicaciones"]] == [
+        decision_a["decision_id"], decision_b["decision_id"],
+    ]
+
+
+def test_r35_si_a_resuelve_indirectamente_b_b_desaparece(tmp_path):
+    raiz, catalogos, actual, cliente, obra, decision_a = _entorno(
+        tmp_path, filas_csv=[_fila_csv(), _fila_csv(numero_guia="464740")],
+    )
+    decision_b = crear_decision(
+        tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO",
+        archivo="464740.jpeg", numero_guia="464740", numero_transporte="T2",
+        campo="destino_entrega", valor_documental=DESTINO_TEXTO,
+        valor_normalizado=DESTINO_TEXTO,
+        identidad_resuelta={"entidad_id": obra.obra_id, "valor_canonico": OBRA_TEXTO},
+        candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
+        evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
+        acciones_permitidas=("CONFIRMAR", "NO_CONFIRMAR", "POSPONER"),
+        contexto={"cliente_id": cliente.cliente_id, "cliente_canonico": "CONSTRUMART SA",
+                  "obra_id": obra.obra_id, "obra_canonica": OBRA_TEXTO,
+                  "destino_documental": DESTINO_TEXTO},
+    )
+    generar_artefacto(
+        ruta_dataset=actual/"analisis_completo_guias.csv", carpeta_catalogos=catalogos,
+        decisiones=[decision_a, decision_b], ruta_salida=actual/"decisiones_pendientes.json",
+    )
+    aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision_a["decision_id"], accion="CONFIRMAR")
+    assert _pendientes(actual) == []
+
+
+def test_r35_fallo_al_publicar_bandeja_revierte_dataset_estado_reporte_y_ledger(tmp_path, monkeypatch):
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
+    rutas = [
+        catalogos/"obras_destinos.json", catalogos/"destinos_maestros.json",
+        actual/"analisis_completo_guias.csv", actual/"decisiones_pendientes.json",
+    ]
+    antes = {p: p.read_bytes() for p in rutas}
+    monkeypatch.setattr(modulo, "generar_artefacto", lambda **k: (_ for _ in ()).throw(OSError("fallo R3.5")))
+    with pytest.raises(OSError, match="fallo R3.5"):
+        aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
+    assert antes == {p: p.read_bytes() for p in rutas}
+    assert not (actual/"decisiones_aplicadas.json").exists()
+    assert not (actual/"estado_operacion.json").exists()
+    assert list((raiz/"reportes").iterdir()) == []
+
+
+def _entorno_dos_destinos(tmp_path):
+    fila_b = _fila_csv(
+        numero_guia="464716", numero_transporte="T-464716", obra_destino="OBRA B",
+        despachar_a_crudo="CALLE B 200", motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR",
+    )
+    raiz, catalogos, actual, cliente, obra, decision_a = _entorno(
+        tmp_path, filas_csv=[_fila_csv(), fila_b],
+    )
+    decision_b = _agregar_caso_destino(
+        catalogos, cliente, guia="464716", obra_texto="OBRA B", destino_texto="CALLE B 200",
+    )
+    generar_artefacto(
+        ruta_dataset=actual/"analisis_completo_guias.csv", carpeta_catalogos=catalogos,
+        decisiones=[decision_a, decision_b], ruta_salida=actual/"decisiones_pendientes.json",
+    )
+    return raiz, catalogos, actual, decision_a, decision_b
+
+
+def _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch):
+    import atlas_core.revalidacion_documental as revalidacion
+    real = revalidacion.revalidar_y_regenerar_reporte
+    monkeypatch.setattr(
+        revalidacion, "revalidar_y_regenerar_reporte",
+        lambda **k: {"guias_actualizadas": [], "reporte_regenerado": False},
+    )
+    aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision_a["decision_id"], accion="CONFIRMAR")
+    monkeypatch.setattr(revalidacion, "revalidar_y_regenerar_reporte", real)
+    # Secuencia exacta R3.4 real: bandeja ya publicada; después cambia el CSV
+    # y se publica reporte/estado, pero la bandeja conserva el hash anterior.
+    real(raiz_atlas=raiz, nombre_carpeta_reporte="reporte_revalidacion_legacy")
+    artefacto = json.loads((actual/"decisiones_pendientes.json").read_text(encoding="utf-8"))
+    assert artefacto["dataset_sha256"] != modulo._sha(actual/"analisis_completo_guias.csv")
+
+
+def test_r351_reproduce_bandeja_real_legacy_y_aplica_siguiente_decision(tmp_path, monkeypatch):
+    raiz, catalogos, actual, decision_a, decision_b = _entorno_dos_destinos(tmp_path)
+    _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch)
+
+    # Antes de R3.5.1 esta llamada fallaba por hash stale, igual que SIGRO.
+    resultado_b = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
+    )
+    assert resultado_b["ok"] and _pendientes(actual) == []
+    ledger = json.loads((actual/"decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    assert [a["decision_id"] for a in ledger["aplicaciones"]] == [
+        decision_a["decision_id"], decision_b["decision_id"],
+    ]
+
+
+def test_r351_cambio_externo_despues_del_reporte_publicado_sigue_obsoleto(tmp_path, monkeypatch):
+    raiz, catalogos, actual, decision_a, decision_b = _entorno_dos_destinos(tmp_path)
+    _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch)
+    dataset = actual/"analisis_completo_guias.csv"
+    dataset.write_bytes(dataset.read_bytes() + b"\n")
+    with pytest.raises(DecisionObsoletaError):
+        aplicar_decision_obra(
+            raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
+        )

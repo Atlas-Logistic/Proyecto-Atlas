@@ -614,3 +614,9 @@ No iniciar OPERACIÓN REAL R2 como parte de este cierre.
 ## PRIMER PASO MAÑANA
 
 Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir después → actualización operacional sin OCR → probar primero en la guía 464715 real desde Atlas Desarrollo.
+## Checkpoint 2026-08-17
+
+- **R3.5/R3.5.1 validado real:** decisiones consecutivas aplicadas sin obsolescencia encadenada.
+- **R3.6.1 validado real:** clasificación automática cuando el tipo es inequívoco; selector Tracto/Camión rígido cuando es ambiguo; KN5439, JF6468 y XF3629 aplicadas correctamente (XF3629 como `CAMION_RIGIDO`). Revisión de Atlas terminó en **0 pendientes** y el flujo visual fue aprobado.
+- **Pendiente deliberado:** R3.6.2 no está implementado/publicado. Revisar motivos catalogales posiblemente obsoletos en Viajes, en particular `PATENTE_SIN_HOMOLOGAR` de 464740 tras registrar XF3629.
+- No ejecutar OCR ni reprocesar para retomar este pendiente.

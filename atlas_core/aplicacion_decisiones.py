@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +12,14 @@ from pathlib import Path
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogo_destinos import CatalogoDestinos
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
-from atlas_core.decisiones_pendientes import generar_artefacto, regenerar_decisiones_persistidas
+from atlas_core.catalogo_vehiculos import (
+    TipoVehiculo, cargar_catalogo_vehiculos,
+    confirmar_vehiculo, normalizar_patente_vehiculo,
+)
+from atlas_core.decisiones_pendientes import (
+    actualizar_contrato_vehiculos_persistidos, generar_artefacto,
+    regenerar_decisiones_persistidas,
+)
 
 ACCIONES = frozenset({"REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR", "POSPONER"})
 LEDGER = "decisiones_aplicadas.json"
@@ -23,10 +30,8 @@ LEDGER = "decisiones_aplicadas.json"
 ACCIONES_POR_TIPO = {
     "OBRA_DESCONOCIDA": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
     "DESTINO_SIN_CONFIRMAR": frozenset({"CONFIRMAR", "NO_CONFIRMAR", "POSPONER"}),
+    "VEHICULO_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
 }
-
-logger = logging.getLogger(__name__)
-
 
 class ErrorAplicacionDecision(ValueError): pass
 class DecisionObsoletaError(ErrorAplicacionDecision): pass
@@ -48,12 +53,97 @@ def _restaurar(ruta: Path, contenido: bytes | None) -> None:
         if temporal is not None: temporal.unlink(missing_ok=True)
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def _instante_iso(valor: object) -> datetime | None:
+    try:
+        instante = datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+        return instante if instante.tzinfo is not None else instante.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reconciliar_bandeja_legacy_publicada(
+    *, raiz: Path, actual: Path, catalogos: Path, dataset: Path,
+    artefacto_ruta: Path, artefacto: dict[str, object], ledger: dict[str, object], reloj,
+) -> dict[str, object]:
+    """R3.5.1: repara exclusivamente la ventana legacy R3.4 demostrable.
+
+    R3.4 publicaba la bandeja y luego revalidaba dataset/reporte. Para no
+    debilitar la barrera de obsolescencia, no basta con que el hash difiera:
+    estado_operacion + manifest del reporte deben acreditar el dataset actual,
+    los catálogos deben seguir iguales a la bandeja y el ledger debe enlazar
+    cronológicamente una CONFIRMAR de destino contra el hash anterior.
+    Cualquier cambio externo posterior hace fallar al menos una condición y
+    se conserva el rechazo normal.
+    """
+    hash_actual = _sha(dataset)
+    hash_artefacto = str(artefacto.get("dataset_sha256") or "").upper()
+    if not hash_artefacto or hash_actual == hash_artefacto:
+        return artefacto
+
+    for clave, nombre in {
+        "clientes": "clientes.json", "vehiculos": "vehiculos.json",
+        "obras_destinos": "obras_destinos.json", "destinos_maestros": "destinos_maestros.json",
+    }.items():
+        ruta = catalogos / nombre
+        actual_hash = _sha(ruta) if ruta.is_file() else None
+        if artefacto.get("catalogos_sha256", {}).get(clave) != actual_hash:
+            return artefacto
+
+    try:
+        estado = json.loads((actual / "estado_operacion.json").read_text(encoding="utf-8"))
+        dataset_estado = (raiz / str(estado["dataset_operacional"])).resolve()
+        decisiones_estado = (raiz / str(estado["decisiones_pendientes"])).resolve()
+        reporte = (raiz / str(estado["reporte_vigente"])).resolve()
+        manifest = json.loads((reporte / "manifest_reporte_viajes.json").read_text(encoding="utf-8"))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return artefacto
+    if dataset_estado != dataset.resolve() or decisiones_estado != artefacto_ruta.resolve():
+        return artefacto
+    try:
+        reporte.relative_to((raiz / "reportes").resolve())
+    except ValueError:
+        return artefacto
+    if not reporte.name.startswith("reporte_revalidacion_"):
+        return artefacto
+    origen = manifest.get("origen") or {}
+    try:
+        origen_ruta = Path(str(origen.get("ruta"))).resolve()
+    except (OSError, ValueError):
+        return artefacto
+    if origen_ruta != dataset.resolve() or str(origen.get("sha256") or "").upper() != hash_actual:
+        return artefacto
+
+    generado_bandeja = _instante_iso(artefacto.get("generado_en"))
+    generado_reporte = _instante_iso(manifest.get("fecha_generacion"))
+    if generado_bandeja is None or generado_reporte is None or generado_reporte <= generado_bandeja:
+        return artefacto
+    aplicaciones_legacy = [
+        item for item in ledger.get("aplicaciones", [])
+        if item.get("tipo") == "DESTINO_SIN_CONFIRMAR"
+        and item.get("accion") == "CONFIRMAR"
+        and str(item.get("dataset_sha256") or "").upper() == hash_artefacto
+        and (_instante_iso(item.get("fecha")) or generado_reporte) <= generado_bandeja
+    ]
+    if not aplicaciones_legacy:
+        return artefacto
+
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=artefacto.get("decisiones", []), carpeta_catalogos=catalogos,
+    )
+    return generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=restantes,
+        ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+
+
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
     catalogo_obras_ruta = catalogos / "obras_destinos.json"
     catalogo_destinos_ruta = catalogos / "destinos_maestros.json"
+    catalogo_vehiculos_ruta = catalogos / "vehiculos.json"
+    estado_operacion_ruta = actual / "estado_operacion.json"
     accion = str(accion).upper(); decision_id = str(decision_id).strip()
     if accion not in ACCIONES or not decision_id: raise ErrorAplicacionDecision("Solicitud de decisión inválida.")
     with bloqueo_sesion(actual, "aplicar_decision_obra"):
@@ -65,6 +155,12 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             return {"ok": True, "idempotente": True, "accion": previas[-1]["accion"], "mensaje": "Esta decisión ya fue aplicada."}
         try: artefacto = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error: raise ErrorAplicacionDecision("No se pudo leer la bandeja vigente.") from error
+        coincidencias = [d for d in artefacto.get("decisiones", []) if d.get("decision_id") == decision_id]
+        if len(coincidencias) != 1: raise ErrorAplicacionDecision("La decisión ya no está pendiente.")
+        artefacto = _reconciliar_bandeja_legacy_publicada(
+            raiz=raiz, actual=actual, catalogos=catalogos, dataset=dataset,
+            artefacto_ruta=artefacto_ruta, artefacto=artefacto, ledger=ledger, reloj=reloj,
+        )
         coincidencias = [d for d in artefacto.get("decisiones", []) if d.get("decision_id") == decision_id]
         if len(coincidencias) != 1: raise ErrorAplicacionDecision("La decisión ya no está pendiente.")
         decision = coincidencias[0]
@@ -81,10 +177,37 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             actual_hash = _sha(ruta) if ruta.is_file() else None
             if esperado != actual_hash: raise DecisionObsoletaError("La decisión quedó obsoleta porque cambiaron los catálogos.")
 
+        # R3.6.1: las bandejas creadas antes del contrato estructurado de
+        # vehículos pueden tener hashes vigentes pero carecer de clasificación
+        # de tipo. Sólo después de superar la barrera de obsolescencia se
+        # actualiza el contrato desde las decisiones/documentos ya persistidos,
+        # sin OCR ni lectura de imágenes.
+        regeneradas_contrato = actualizar_contrato_vehiculos_persistidos(
+            artefacto.get("decisiones", []),
+        )
+        if regeneradas_contrato != artefacto.get("decisiones", []):
+            artefacto = generar_artefacto(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                decisiones=regeneradas_contrato, ruta_salida=artefacto_ruta, reloj=reloj,
+            )
+            coincidencias = [d for d in artefacto.get("decisiones", []) if d.get("decision_id") == decision_id]
+            if len(coincidencias) != 1:
+                raise ErrorAplicacionDecision("La decisión ya no está pendiente.")
+            decision = coincidencias[0]
+            tipo = decision.get("tipo")
+
         contexto = decision.get("contexto") or {}
         cliente_id = str(contexto.get("cliente_id", ""))
-        respaldos = {ruta: ruta.read_bytes() if ruta.exists() else None for ruta in (catalogo_obras_ruta, catalogo_destinos_ruta, ledger_ruta, artefacto_ruta)}
+        respaldos = {
+            ruta: ruta.read_bytes() if ruta.exists() else None
+            for ruta in (
+                catalogo_obras_ruta, catalogo_destinos_ruta, ledger_ruta,
+                catalogo_vehiculos_ruta, artefacto_ruta, dataset, estado_operacion_ruta,
+            )
+        }
         resultado_extra: dict[str, object] = {}
+        reporte_salida: Path | None = None
+        reporte_salida_existia = False
         try:
             if tipo == "OBRA_DESCONOCIDA":
                 obra_texto = str(decision.get("valor_documental", "")).strip()
@@ -170,38 +293,94 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "destino_id": resultado_extra.get("destino_id"), "relacion_id": resultado_extra.get("relacion_id"),
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo == "VEHICULO_DESCONOCIDO":
+                patente = normalizar_patente_vehiculo(str(decision.get("valor_documental") or ""))
+                resolucion = decision.get("tipo_resolucion")
+                propuesto = decision.get("tipo_vehiculo_propuesto")
+                recibido = str(tipo_vehiculo or "").strip().upper()
+                if accion != "REGISTRAR" and recibido:
+                    raise ErrorAplicacionDecision("El tipo de vehículo sólo corresponde al registrar.")
+                tipo_final = None
+                vehiculo_id = None
+                if accion == "REGISTRAR":
+                    if resolucion == "INEQUIVOCO" and propuesto in {"TRACTO", "CARRO"}:
+                        if recibido and recibido != propuesto:
+                            raise ErrorAplicacionDecision("El tipo recibido contradice el tipo documental inequívoco.")
+                        tipo_final = str(propuesto)
+                    elif resolucion == "REQUIERE_CONFIRMACION_HUMANA":
+                        if recibido not in {"TRACTO", "CAMION_RIGIDO"}:
+                            raise ErrorAplicacionDecision("Seleccione Tracto o Camión rígido para registrar esta patente.")
+                        tipo_final = recibido
+                    else:
+                        raise ErrorAplicacionDecision("La decisión no contiene una clasificación de vehículo segura.")
+                    cargado = cargar_catalogo_vehiculos(catalogo_vehiculos_ruta)
+                    existente = next((v for v in cargado.homologables() if v.patente_canonica == patente), None)
+                    if existente is not None:
+                        if existente.tipo != tipo_final:
+                            raise ErrorAplicacionDecision("La patente ya existe con un tipo diferente.")
+                        vehiculo = existente
+                    else:
+                        vehiculo = confirmar_vehiculo(
+                            catalogo_vehiculos_ruta, patente=patente,
+                            tipo=TipoVehiculo(tipo_final), actor="JAVIER_MBT",
+                            fuente_decision=f"DECISION_HUMANA_R3_6:{decision_id}",
+                            fecha=reloj(), referencia_hash=decision_id,
+                            observaciones=f"Guía {(decision.get('documento') or {}).get('numero_guia', '')}; campo {decision.get('campo', '')}",
+                        )
+                    vehiculo_id = vehiculo.vehiculo_id
+                    resultado_extra.update({"vehiculo_id": vehiculo_id, "tipo_vehiculo": tipo_final})
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion,
+                    "actor": "JAVIER_MBT", "fecha": reloj().astimezone(timezone.utc).isoformat(),
+                    "documento": decision.get("documento"), "campo": decision.get("campo"),
+                    "valor_documental": patente, "vehiculo_id": vehiculo_id,
+                    "tipo_vehiculo": tipo_final, "dataset_sha256": artefacto.get("dataset_sha256"),
+                    "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
             else:
                 raise ErrorAplicacionDecision("Esta decisión no puede aplicarse en este bloque.")
 
-            ledger.setdefault("aplicaciones", []).append(aplicacion); escribir_json_atomico(ledger_ruta, ledger)
-            restantes = regenerar_decisiones_persistidas(decisiones=artefacto.get("decisiones", []), carpeta_catalogos=catalogos, ids_resueltos={decision_id})
-            generar_artefacto(ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj)
-        except Exception:
-            for ruta, contenido in respaldos.items(): _restaurar(ruta, contenido)
-            raise
+            ledger.setdefault("aplicaciones", []).append(aplicacion)
+            escribir_json_atomico(ledger_ruta, ledger)
 
-        if tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR":
-            # R3.4 obligatorio: revalidar el dataset y refrescar el reporte
-            # oficial SIN OCR para que "Viajes" deje de mostrar
-            # OBRA_DESTINO_SIN_CORROBORAR cuando ya quedó resuelto. Best-effort
-            # y nunca revierte la confirmación ya persistida arriba -- mismo
-            # criterio que usa el resto del pipeline para enriquecimiento
-            # secundario (GPS/rutas): nunca bloquea ni invalida lo principal.
-            try:
+            # R3.5: cualquier revalidación que cambie el dataset debe ocurrir
+            # ANTES de publicar la nueva bandeja. Así el artefacto restante
+            # nace con los hashes finales del flujo canónico y la siguiente
+            # decisión puede aplicarse inmediatamente, sin debilitar la
+            # comprobación de obsolescencia realizada al entrar.
+            if tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR":
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
-                nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S')}"
+                nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
+                reporte_salida = raiz / "reportes" / nombre_carpeta
+                reporte_salida_existia = reporte_salida.exists()
                 resultado_extra["revalidacion"] = revalidar_y_regenerar_reporte(
                     raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
                 )
-            except Exception as error:
-                logger.warning("Revalidación/regeneración de reporte omitida: %s: %s", type(error).__name__, error)
+
+            restantes = regenerar_decisiones_persistidas(
+                decisiones=artefacto.get("decisiones", []),
+                carpeta_catalogos=catalogos,
+                ids_resueltos={decision_id},
+            )
+            bandeja = generar_artefacto(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+            )
+            resultado_extra["decisiones_pendientes"] = len(bandeja["decisiones"])
+        except Exception:
+            for ruta, contenido in respaldos.items(): _restaurar(ruta, contenido)
+            if reporte_salida is not None and not reporte_salida_existia and reporte_salida.exists():
+                shutil.rmtree(reporte_salida)
+            raise
 
         mensajes = {
             ("OBRA_DESCONOCIDA", "REGISTRAR"): "Obra registrada. Atlas podrá reconocerla en documentos futuros.",
             ("OBRA_DESCONOCIDA", "NO_REGISTRAR"): "Decisión guardada. Atlas no registrará esta observación como obra.",
             ("DESTINO_SIN_CONFIRMAR", "CONFIRMAR"): "Destino confirmado. Atlas podrá reconocer esta obra y destino en documentos futuros.",
             ("DESTINO_SIN_CONFIRMAR", "NO_CONFIRMAR"): "Decisión guardada. Atlas no confirmará esta observación como destino.",
+            ("VEHICULO_DESCONOCIDO", "REGISTRAR"): "Vehículo registrado. Atlas reconocerá esta patente en documentos futuros.",
+            ("VEHICULO_DESCONOCIDO", "NO_REGISTRAR"): "Decisión guardada. Atlas no registrará esta observación como vehículo.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}

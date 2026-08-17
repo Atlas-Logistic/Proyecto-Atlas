@@ -1,4 +1,8 @@
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from datetime import datetime, timezone
 
 import pytest
@@ -61,6 +65,21 @@ def test_estado_obsoleto_se_abstiene_sin_escribir(tmp_path):
     raiz,catalogos,actual,_,decision=_entorno(tmp_path); (actual/"analisis_completo_guias.csv").write_text("cambio",encoding="utf-8"); antes=(catalogos/"obras_destinos.json").read_bytes()
     with pytest.raises(DecisionObsoletaError): aplicar_decision_obra(raiz_atlas=raiz,decision_id=decision["decision_id"],accion="REGISTRAR")
     assert (catalogos/"obras_destinos.json").read_bytes()==antes
+
+
+def test_cli_entrega_mensaje_de_obsolescencia_unicode_correcto_a_desktop(tmp_path):
+    raiz,catalogos,actual,_,decision=_entorno(tmp_path)
+    (actual/"analisis_completo_guias.csv").write_text("cambio externo",encoding="utf-8")
+    script=Path(__file__).resolve().parents[1]/"aplicar_decision_pendiente.py"
+    entorno={**os.environ,"PYTHONIOENCODING":"cp1252"}
+    proceso=subprocess.run(
+        [sys.executable,str(script),"--raiz-atlas",str(raiz),"--decision-id",decision["decision_id"],"--accion","REGISTRAR"],
+        cwd=script.parent,env=entorno,capture_output=True,check=True,
+    )
+    # El transporte es ASCII JSON aun si Windows fuerza cp1252; JSON.parse
+    # reconstruye el texto Unicode correcto para la UI.
+    respuesta=json.loads(proceso.stdout.decode("ascii"))
+    assert respuesta=={"ok":False,"error":"La decisión quedó obsoleta porque cambió el dataset."}
 
 
 def _decision_obra(archivo,numero_guia,cliente,obra):

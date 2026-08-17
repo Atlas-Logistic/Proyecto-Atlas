@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -25,7 +26,7 @@ from atlas_core.catalogo_obras_destinos import (
     EstadoVigencia,
     normalizar_nombre_obra,
 )
-from atlas_core.catalogo_vehiculos import resolver_patente
+from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, normalizar_patente_vehiculo, resolver_patente
 from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 
@@ -82,6 +83,8 @@ def crear_decision(
     candidatos: Iterable[Mapping[str, object]], motivos: Iterable[str],
     evidencias: Iterable[Mapping[str, object]], acciones_permitidas: Iterable[str],
     contexto: dict[str, object] | None = None,
+    tipo_resolucion: str | None = None,
+    tipo_vehiculo_propuesto: str | None = None,
 ) -> dict[str, object]:
     """`contexto` (R3.1.3, opcional y aditivo): identidad de una entidad DE
     APOYO que Motor ya resolvió antes de emitir la decisión -- distinta de
@@ -117,7 +120,44 @@ def crear_decision(
         "evidencias": evidencias_lista,
         "acciones_permitidas": [str(accion) for accion in acciones_permitidas],
     }
+    if tipo == "VEHICULO_DESCONOCIDO":
+        decision["tipo_resolucion"] = tipo_resolucion
+        decision["tipo_vehiculo_propuesto"] = tipo_vehiculo_propuesto
     return decision
+
+
+def _patente_documental_valida(valor: object) -> bool:
+    patente = normalizar_patente_vehiculo(str(valor or ""))
+    return bool(re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6}", patente))
+
+
+def actualizar_contrato_vehiculos_persistidos(
+    decisiones: Iterable[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Añade la clasificación R3.6.1 sin resolver ni descartar preguntas."""
+    salida = [dict(d) for d in decisiones]
+    documentos_con_rampla_valida = {
+        tuple(sorted((d.get("documento") or {}).items()))
+        for d in salida
+        if d.get("tipo") == "VEHICULO_DESCONOCIDO"
+        and d.get("campo") == "patente_rampla"
+        and _patente_documental_valida(d.get("valor_documental"))
+    }
+    for decision in salida:
+        if decision.get("tipo") != "VEHICULO_DESCONOCIDO":
+            continue
+        campo = decision.get("campo")
+        documento = tuple(sorted((decision.get("documento") or {}).items()))
+        if campo == "patente_rampla":
+            decision["tipo_resolucion"] = "INEQUIVOCO"
+            decision["tipo_vehiculo_propuesto"] = "CARRO"
+        elif campo == "patente_tracto" and documento in documentos_con_rampla_valida:
+            decision["tipo_resolucion"] = "INEQUIVOCO"
+            decision["tipo_vehiculo_propuesto"] = "TRACTO"
+        elif campo == "patente_tracto":
+            decision["tipo_resolucion"] = "REQUIERE_CONFIRMACION_HUMANA"
+            decision["tipo_vehiculo_propuesto"] = None
+    return salida
 
 
 def _identidad_cliente_por_rut(carpeta: Path, rut: str):
@@ -144,6 +184,7 @@ def detectar_decisiones_documento(
     transporte = str(datos.get("número de transporte", ""))
     comunes = {"archivo": archivo, "numero_guia": guia, "numero_transporte": transporte}
     decisiones: list[dict[str, object]] = []
+    rampla_documental_valida = _patente_documental_valida(datos.get("patente del carro", ""))
 
     for campo, clave_dato, tipo_esperado in (
         ("patente_tracto", "patente del tracto", "TRACTO"),
@@ -171,6 +212,14 @@ def detectar_decisiones_documento(
                 motivos=("SIN_VEHICULO_CONFIRMADO_COMPATIBLE",),
                 evidencias=({"tipo": "OCR_DOCUMENTAL", "campo": campo, "valor": valor},),
                 acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
+                tipo_resolucion=(
+                    "INEQUIVOCO" if campo == "patente_rampla" or rampla_documental_valida
+                    else "REQUIERE_CONFIRMACION_HUMANA"
+                ),
+                tipo_vehiculo_propuesto=(
+                    "CARRO" if campo == "patente_rampla"
+                    else ("TRACTO" if rampla_documental_valida else None)
+                ),
                 **comunes,
             ))
 
@@ -363,9 +412,11 @@ def regenerar_decisiones_persistidas(
       `acciones_permitidas` se normaliza a REGISTRAR/NO_REGISTRAR/POSPONER,
       reemplazando códigos R3.1 (ASOCIAR_EXISTENTE, CONFIRMAR_NUEVO,
       REGISTRAR_OBSERVACION, ...).
-    - Ningún otro campo se modifica. `decision_id` no cambia para las
-      decisiones conservadas: su identidad (tipo, documento, campo,
-      valor_documental, evidencias) es la misma de antes.
+    - El contexto canónico de apoyo se refresca por ID desde los catálogos
+      vigentes cuando existe. `decision_id` no cambia para las decisiones
+      conservadas: su identidad (tipo, documento, campo, valor_documental,
+      evidencias) es la misma de antes; contexto y hashes no forman parte de
+      esa identidad.
     """
     carpeta = Path(carpeta_catalogos)
     try:
@@ -384,15 +435,28 @@ def regenerar_decisiones_persistidas(
     except (OSError, ValueError):
         catalogo_obras = None
         obras_existentes = []
+    try:
+        patentes_homologables = {
+            v.patente_canonica
+            for v in cargar_catalogo_vehiculos(carpeta / "vehiculos.json").homologables()
+        }
+    except (OSError, ValueError):
+        patentes_homologables = set()
+    decisiones_lista = actualizar_contrato_vehiculos_persistidos(decisiones)
     resultado: list[dict[str, object]] = []
-    for original in decisiones:
+    for original in decisiones_lista:
         decision = dict(original)
         if str(decision.get("decision_id", "")) in ids_terminales:
             continue
         tipo = decision.get("tipo")
+        contexto = dict(decision.get("contexto") or {})
+        cliente_id_contexto = str(contexto.get("cliente_id") or "")
+        cliente_vigente_contexto = clientes_por_id.get(cliente_id_contexto)
+        if cliente_vigente_contexto is not None:
+            contexto["cliente_canonico"] = cliente_vigente_contexto.razon_social
+            decision["contexto"] = contexto
 
         if tipo == "OBRA_DESCONOCIDA":
-            contexto = decision.get("contexto") or {}
             cliente_canonico = contexto.get("cliente_canonico")
             cliente_id = contexto.get("cliente_id")
             if cliente_canonico:
@@ -433,6 +497,24 @@ def regenerar_decisiones_persistidas(
             if nombre_obra and catalogo_obras is not None and catalogo_obras.resolver_obra_destino_confirmada_global(
                 nombre_obra=nombre_obra
             ) is not None:
+                continue
+            obra_actual = next((o for o in obras_existentes if o.obra_id == entidad_id), None)
+            if obra_actual is not None:
+                identidad = dict(decision.get("identidad_resuelta") or {})
+                identidad.update({
+                    "entidad_id": obra_actual.obra_id,
+                    "valor_canonico": obra_actual.nombre_canonico,
+                })
+                decision["identidad_resuelta"] = identidad
+                contexto.update({
+                    "obra_id": obra_actual.obra_id,
+                    "obra_canonica": obra_actual.nombre_canonico,
+                })
+                decision["contexto"] = contexto
+
+        if tipo == "VEHICULO_DESCONOCIDO":
+            patente = normalizar_patente_vehiculo(str(decision.get("valor_documental") or ""))
+            if patente in patentes_homologables:
                 continue
 
         if tipo in TIPOS_ENTIDAD_DESCONOCIDA:
