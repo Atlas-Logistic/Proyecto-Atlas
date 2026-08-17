@@ -4,6 +4,16 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-17 — Handoff vigente: R3.4 + buscador cerrados
+
+- **Validación real R3.4:** Javier confirmó desde Desktop el destino de la guía 464715. Obra, relación y destino quedaron confirmados; 464715 está `OK`, ya no requiere revisión y no conserva `OBRA_DESTINO_SIN_CORROBORAR`.
+- **Revalidación:** dataset y reporte vigente se refrescaron correctamente sin OCR. **OCR ejecutado: NO**.
+- **Buscador Desktop:** busca por chofer, N.º de transporte y N.º de guía; validación real por guía 464715 correcta. Patente excluida.
+- **Verificación:** Motor `1114 passed, 0 failed`; Desktop `184 passed, 0 failed`; Drive coherente y sin residuos/staging.
+- **Siguiente bloque recomendado, no iniciado:** VEHÍCULOS — cerrar el modelo operacional de patente desconocida y `CAMION_RIGIDO`/cajita antes de habilitar Registrar.
+
+---
+
 ## 2026-08-14 — Handoff vigente: R2 cerrado sobre lote controlado 19/19
 
 - **Código publicado:** rama `lector-mvp-guia-nueva`, commit funcional `093cce923d172cac18cafb5b453c0cef8de95242`. Geometría relativa `SEÑOR(ES)↔R.U.T.` y corroboración conservadora por RUT exacto contra `clientes.json` (`CONFIRMADO` + `ACTIVO`); `empresas.json` permanece como fallback compatible. `464534/464535` quedaron OK sin hardcode. Auditoría Claude aprobada; Motor `1044/1044`.

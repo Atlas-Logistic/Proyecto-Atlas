@@ -150,12 +150,48 @@ def test_obra_existente_sin_relacion_confirmada_y_caso_confirmado(tmp_path):
     datos=_datos_cliente(nombre="CLIENTE CANONICO SA",obra="OBRA UNO")
     ds=detectar_decisiones_documento(archivo="100.png",datos=datos,carpeta_catalogos=carpeta)
     assert [x["tipo"] for x in ds if x["entidad"] in {"OBRA","RELACION_OBRA_DESTINO"}]==["DESTINO_SIN_CONFIRMAR"]
-    assert next(x for x in ds if x["tipo"]=="DESTINO_SIN_CONFIRMAR")["acciones_permitidas"]==["CONFIRMAR_RELACION","RECHAZAR","POSPONER"]
+    assert next(x for x in ds if x["tipo"]=="DESTINO_SIN_CONFIRMAR")["acciones_permitidas"]==["CONFIRMAR","NO_CONFIRMAR","POSPONER"]
     destino=CatalogoDestinos(carpeta/"destinos_maestros.json",ruta_clientes=carpeta/"clientes.json").crear(cliente_id=cliente.cliente_id,nombre_destino="DESTINO UNO",pais="CHILE",fuente="PRUEBA",estado_calidad=EstadoCalidadDestino.CONFIRMADO)
     pendiente=obras.registrar_observacion(cliente_id=cliente.cliente_id,nombre_obra="OBRA UNO",destino_id=destino.destino_id,evidencia=Evidencia(**{**_evidencia().a_dict(),"identificador_fuente":"guia-101"})).relacion
     obras.confirmar_relacion(pendiente.relacion_id,actor="test")
     ds=detectar_decisiones_documento(archivo="100.png",datos=datos,carpeta_catalogos=carpeta)
     assert not any(x["tipo"] in {"OBRA_DESCONOCIDA","DESTINO_SIN_CONFIRMAR"} for x in ds)
+
+
+# --- R3.4: contrato enriquecido de DESTINO_SIN_CONFIRMAR ---
+
+def test_destino_sin_confirmar_transporta_cliente_obra_y_destino_documental(tmp_path):
+    carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta,nombre="CONSTRUMART SA")
+    obras=CatalogoObrasDestinos(carpeta/"obras_destinos.json",ruta_clientes=carpeta/"clientes.json",ruta_destinos=carpeta/"destinos_maestros.json")
+    obra=obras.registrar_observacion(cliente_id=cliente.cliente_id,nombre_obra="CONSTRUCTORA INMOBILIARIA E",evidencia=_evidencia()).obra
+    datos=_datos_cliente(nombre="CONSTRUMART SA",obra="CONSTRUCTORA INMOBILIARIA E")
+    ds=detectar_decisiones_documento(
+        archivo="464715.png",datos=datos,carpeta_catalogos=carpeta,
+        despachar_a_documental="AV. VICUNA MACKENNA 3451 SAN JOAQUIN",
+    )
+    d=next(x for x in ds if x["tipo"]=="DESTINO_SIN_CONFIRMAR")
+    assert d["campo"]=="destino_entrega"
+    assert d["valor_documental"]=="AV. VICUNA MACKENNA 3451 SAN JOAQUIN"
+    assert d["identidad_resuelta"]=={"entidad_id":obra.obra_id,"valor_canonico":"CONSTRUCTORA INMOBILIARIA E"}
+    assert d["contexto"]=={
+        "cliente_id":cliente.cliente_id,"cliente_canonico":"CONSTRUMART SA",
+        "obra_id":obra.obra_id,"obra_canonica":"CONSTRUCTORA INMOBILIARIA E",
+        "destino_documental":"AV. VICUNA MACKENNA 3451 SAN JOAQUIN",
+    }
+    assert d["acciones_permitidas"]==["CONFIRMAR","NO_CONFIRMAR","POSPONER"]
+    # nunca se confunde destino con obra en el campo de valor
+    assert d["valor_documental"]!=d["contexto"]["obra_canonica"]
+
+
+def test_destino_sin_confirmar_sin_despachar_a_no_rompe_y_usa_obra_como_respaldo(tmp_path):
+    """Compatibilidad: un llamador que todavía no pasa despachar_a_documental
+    (parámetro opcional) sigue generando una decisión válida."""
+    carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta)
+    obras=CatalogoObrasDestinos(carpeta/"obras_destinos.json",ruta_clientes=carpeta/"clientes.json",ruta_destinos=carpeta/"destinos_maestros.json")
+    obras.registrar_observacion(cliente_id=cliente.cliente_id,nombre_obra="OBRA UNO",evidencia=_evidencia())
+    ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(nombre="CLIENTE CANONICO SA",obra="OBRA UNO"),carpeta_catalogos=carpeta)
+    d=next(x for x in ds if x["tipo"]=="DESTINO_SIN_CONFIRMAR")
+    assert d["valor_documental"]=="OBRA UNO"  # respaldo, sin destino documental disponible
 
 
 # --- R3.2: simplificación operacional ---

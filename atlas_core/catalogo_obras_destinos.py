@@ -636,8 +636,19 @@ class CatalogoObrasDestinos:
         validando (debe ser un cliente real y activo) porque el llamador
         siempre lo tiene disponible como contexto del documento, pero ya no
         participa en la búsqueda de la obra."""
-        obras, relaciones = self._leer()
         self._cliente_activo(cliente_id)  # valida el contexto; no filtra la obra
+        return self.resolver_obra_destino_confirmada_global(nombre_obra=nombre_obra)
+
+    def resolver_obra_destino_confirmada_global(
+        self, *, nombre_obra: str
+    ) -> ResolucionObraDestino | None:
+        """R3.4: idéntico a `resolver_obra_destino_confirmada`, pero sin
+        exigir `cliente_id` en absoluto -- obra, relación y destino son
+        identidades globales, así que la resolución no depende de qué
+        cliente aparece (o no) en el documento. Necesario para revalidar
+        documentos con cliente ausente/desconocido cuya obra y destino ya
+        están confirmados por otra vía."""
+        obras, relaciones = self._leer()
         clave = normalizar_nombre_obra(nombre_obra)
         candidatas = [
             o for o in obras

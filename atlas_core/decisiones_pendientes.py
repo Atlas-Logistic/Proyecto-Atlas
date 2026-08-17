@@ -19,6 +19,7 @@ from atlas_core.catalogo_clientes import (
     normalizar_nombre_cliente,
     normalizar_rut_cliente,
 )
+from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos,
     EstadoVigencia,
@@ -44,6 +45,10 @@ ACCIONES_ENTIDAD_DESCONOCIDA = ("REGISTRAR", "NO_REGISTRAR", "POSPONER")
 TIPOS_ENTIDAD_DESCONOCIDA = frozenset({
     "OBRA_DESCONOCIDA", "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO",
 })
+# R3.4: para DESTINO_SIN_CONFIRMAR la entidad (obra) ya se conoce; lo único
+# pendiente es confirmar la relación obra<->destino -- pregunta distinta a
+# "registrar una entidad nueva", por eso usa su propio set de acciones.
+ACCIONES_DESTINO_SIN_CONFIRMAR = ("CONFIRMAR", "NO_CONFIRMAR", "POSPONER")
 
 
 def _sha256(ruta: Path) -> str:
@@ -131,7 +136,7 @@ def _identidad_cliente_por_rut(carpeta: Path, rut: str):
 
 def detectar_decisiones_documento(
     *, archivo: str, datos: Mapping[str, object], carpeta_catalogos: str | Path,
-    cliente_documental_original: str = "",
+    cliente_documental_original: str = "", despachar_a_documental: str = "",
 ) -> list[dict[str, object]]:
     """Detecta incertidumbres por el estado final, no por la ruta OCR usada."""
     carpeta = Path(carpeta_catalogos)
@@ -300,17 +305,34 @@ def detectar_decisiones_documento(
                 cliente_id=cliente.cliente_id, nombre_obra=obra_texto
             ) is None:
                 obra = obras[0]
+                destino_texto = str(despachar_a_documental or "").strip()
+                # R3.4: la obra ya se conoce (identidad_resuelta); lo único
+                # pendiente es confirmar la relación con ESTE destino. El
+                # valor de la decisión pasa a ser el destino documental (lo
+                # que Atlas todavía no sabe), no la obra (lo que ya sabe) --
+                # `contexto` transporta cliente y obra ya resueltos, tal como
+                # ya usa OBRA_DESCONOCIDA para el cliente.
                 decisiones.append(crear_decision(
                     tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO",
-                    campo="obra_destino", valor_documental=obra_texto,
-                    valor_normalizado=clave,
+                    campo="destino_entrega",
+                    valor_documental=destino_texto or obra_texto,
+                    valor_normalizado=(
+                        normalizar_nombre_destino(destino_texto) if destino_texto else clave
+                    ),
                     identidad_resuelta={
                         "entidad_id": obra.obra_id,
                         "valor_canonico": obra.nombre_canonico,
                     },
                     candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
                     evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
-                    acciones_permitidas=("CONFIRMAR_RELACION", "RECHAZAR", "POSPONER"),
+                    acciones_permitidas=ACCIONES_DESTINO_SIN_CONFIRMAR,
+                    contexto={
+                        "cliente_id": cliente.cliente_id,
+                        "cliente_canonico": cliente.razon_social,
+                        "obra_id": obra.obra_id,
+                        "obra_canonica": obra.nombre_canonico,
+                        "destino_documental": destino_texto,
+                    },
                     **comunes,
                 ))
         except (OSError, ValueError):
@@ -360,6 +382,7 @@ def regenerar_decisiones_persistidas(
         )
         obras_existentes = catalogo_obras.listar_obras()
     except (OSError, ValueError):
+        catalogo_obras = None
         obras_existentes = []
     resultado: list[dict[str, object]] = []
     for original in decisiones:
@@ -397,8 +420,25 @@ def regenerar_decisiones_persistidas(
                 ):
                     continue
 
+        if tipo == "DESTINO_SIN_CONFIRMAR":
+            # R3.4: si la obra referenciada ya tiene una relación CONFIRMADA
+            # con algún destino (global -- sin exigir cliente), la pregunta
+            # ya quedó resuelta -- por esta guía o por cualquier otra.
+            entidad_id = (decision.get("identidad_resuelta") or {}).get("entidad_id")
+            obra_canonica = (decision.get("contexto") or {}).get("obra_canonica")
+            nombre_obra = str(obra_canonica or "")
+            if not nombre_obra and entidad_id:
+                obra_actual = next((o for o in obras_existentes if o.obra_id == entidad_id), None)
+                nombre_obra = obra_actual.nombre_canonico if obra_actual is not None else ""
+            if nombre_obra and catalogo_obras is not None and catalogo_obras.resolver_obra_destino_confirmada_global(
+                nombre_obra=nombre_obra
+            ) is not None:
+                continue
+
         if tipo in TIPOS_ENTIDAD_DESCONOCIDA:
             decision["acciones_permitidas"] = list(ACCIONES_ENTIDAD_DESCONOCIDA)
+        elif tipo == "DESTINO_SIN_CONFIRMAR":
+            decision["acciones_permitidas"] = list(ACCIONES_DESTINO_SIN_CONFIRMAR)
 
         resultado.append(decision)
     return resultado
@@ -426,7 +466,7 @@ def generar_artefacto(
         ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
         ids_terminales = {
             str(item.get("decision_id", "")) for item in ledger.get("aplicaciones", [])
-            if item.get("accion") in {"REGISTRAR", "NO_REGISTRAR"}
+            if item.get("accion") in {"REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR"}
         }
     except (OSError, json.JSONDecodeError, AttributeError):
         pass

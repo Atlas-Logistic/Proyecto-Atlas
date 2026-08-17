@@ -522,3 +522,10 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **No debe registrarse todavía** KN5439/JF6468/XF3629 (vehículos reales pendientes) ni tocarse `CAMION_RIGIDO` operacionalmente: el catálogo ya admite el tipo, pero el pipeline documental aún no distingue una patente única de camión rígido.
 - Motor: commit de checkpoint creado y publicado en `origin/lector-mvp-guia-nueva` (código + tests + bitácoras; sin catálogos/CSV/imágenes/Drive/caches/secretos). Desktop: commit de checkpoint creado y publicado en `origin/fix-desktop-data-root-drag-drop`. Detalle de SHA en el reporte de cierre de este bloque.
 - **Próximo paso único mañana:** retomar R3.4 -- implementar `DESTINO_SIN_CONFIRMAR` con el ciclo Confirmar/No confirmar/Decidir después, sin OCR, y probarlo primero sobre la guía 464715 real desde Atlas Desarrollo.
+# 2026-08-17 — Cierre funcional R3.4 + buscador
+
+- R3.4 quedó validado en operación real desde Atlas Desarrollo: Javier confirmó desde Desktop el destino de la guía 464715 mediante la decisión `DESTINO_SIN_CONFIRMAR`.
+- La revalidación documental sin OCR funcionó: 464715 quedó `OK`, sin `OBRA_DESTINO_SIN_CORROBORAR`, dejó de requerir revisión y Viajes se refrescó con el reporte vigente. **OCR ejecutado: NO**.
+- El buscador Desktop quedó validado para chofer, N.º de transporte y N.º de guía (caso real 464715). La patente está excluida del índice de búsqueda.
+- Cierre técnico: Motor **1114 passed, 0 failed**; Desktop **184 passed, 0 failed**. Drive coherente y sin residuos `.tmp`, staging ni `_respaldos` operacionales.
+- Vehículos continúa pendiente para el bloque siguiente; no se modificó en este cierre.

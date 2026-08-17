@@ -1565,6 +1565,11 @@ def procesar_archivo(
                 datos=datos,
                 carpeta_catalogos=carpeta_catalogos,
                 cliente_documental_original=str(cliente_antes_catalogo or ""),
+                # R3.4: dirección documental ya resuelta por
+                # `resolver_entrega_documento` más arriba (nunca una nueva
+                # extracción) -- permite que DESTINO_SIN_CONFIRMAR muestre
+                # "Destino leído" sin que Desktop infiera nada.
+                despachar_a_documental=str(resultado_entrega.get("despachar_a_crudo", "")),
             ))
         except Exception as exc:
             logger.warning(
