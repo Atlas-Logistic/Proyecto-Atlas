@@ -343,12 +343,18 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ledger.setdefault("aplicaciones", []).append(aplicacion)
             escribir_json_atomico(ledger_ruta, ledger)
 
-            # R3.5: cualquier revalidación que cambie el dataset debe ocurrir
-            # ANTES de publicar la nueva bandeja. Así el artefacto restante
-            # nace con los hashes finales del flujo canónico y la siguiente
-            # decisión puede aplicarse inmediatamente, sin debilitar la
-            # comprobación de obsolescencia realizada al entrar.
-            if tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR":
+            # R3.5/R3.6.2: cualquier revalidación que cambie el dataset debe
+            # ocurrir ANTES de publicar la nueva bandeja. Así el artefacto
+            # restante nace con los hashes finales del flujo canónico y la
+            # siguiente decisión puede aplicarse inmediatamente, sin
+            # debilitar la comprobación de obsolescencia realizada al
+            # entrar. R3.6.2 añade el disparo cuando REGISTRAR confirma
+            # canónicamente una patente -- puede resolver PATENTE_SIN_HOMOLOGAR
+            # en cualquier fila del dataset, no sólo en la guía de origen de
+            # la decisión (misma política ya vigente para obra/destino).
+            if (tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR") or (
+                tipo == "VEHICULO_DESCONOCIDO" and accion == "REGISTRAR"
+            ):
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"

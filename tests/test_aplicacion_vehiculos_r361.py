@@ -1,3 +1,4 @@
+import csv
 import json
 from datetime import datetime, timezone
 
@@ -7,6 +8,7 @@ import atlas_core.aplicacion_decisiones as modulo
 from atlas_core.aplicacion_decisiones import DecisionObsoletaError, ErrorAplicacionDecision, aplicar_decision_obra
 from atlas_core.catalogo_vehiculos import TipoVehiculo, cargar_catalogo_vehiculos, confirmar_vehiculo
 from atlas_core.decisiones_pendientes import detectar_decisiones_documento, generar_artefacto
+from atlas_core.procesamiento_masivo import COLUMNAS
 
 
 def _entorno(tmp_path, *, tracto="KN5439", rampla="JF6468"):
@@ -22,7 +24,22 @@ def _entorno(tmp_path, *, tracto="KN5439", rampla="JF6468"):
     }.items():
         (catalogos / nombre).write_text(json.dumps(contenido), encoding="utf-8")
     dataset = actual / "analisis_completo_guias.csv"
-    dataset.write_text("guia;estado\n100;REVISAR\n", encoding="utf-8")
+    # R3.6.2: REGISTRAR ahora puede disparar la revalidación de
+    # PATENTE_SIN_HOMOLOGAR (ver aplicacion_decisiones.py), que exige el
+    # esquema oficial de columnas -- no el CSV mínimo histórico de este
+    # archivo. Sin ningún motivo catalogal en la fila, la revalidación es
+    # deliberadamente un no-op (no cambia nada) y no afecta las
+    # aserciones de este módulo, que versan sobre el catálogo/bandeja.
+    fila = {columna: "" for columna in COLUMNAS}
+    fila.update({
+        "archivo": "100.png", "estado_procesamiento": "OK", "numero_guia": "100",
+        "numero_transporte": "T1", "patente_tracto": tracto, "patente_rampla": rampla,
+        "indicador_revision": "REVISAR",
+    })
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerow(fila)
     datos = {
         "número de guía": "100", "número de transporte": "T1",
         "patente del tracto": tracto, "patente del carro": rampla,
