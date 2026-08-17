@@ -1812,3 +1812,39 @@ Dataset final: 25 OK / 3 REVISAR (antes 24/4); motivos `MATERIAL_AUSENTE`(1)/`OB
 **Impacto:** confirmado que sólo cambió la comparación de `rut_chofer` -- ningún otro campo de conflicto, ninguna otra guía, ningún catálogo. Desktop no fue tocado. Drive no fue modificado (todas las lecturas fueron read-only; el resultado de la validación no se escribió al dataset real). Sin commit ni push -- working tree con `atlas_core/gestor_viajes.py` y `tests/test_gestor_viajes.py`.
 
 **Estado: LISTO PARA VALIDACIÓN REAL.** Aplicación controlada sobre Drive (con backup/rollback, mismo procedimiento de R3.6.2) queda para el siguiente bloque.
+## 2026-08-17 — Diagnóstico Viajes ↔ Revisión de Atlas
+
+Auditoría 100% read-only (sin código, sin Drive escrito) para diagnosticar por qué Atlas puede mostrar viajes `REQUIERE_REVISION` mientras Revisión de Atlas muestra 0 pendientes, antes de tocar nada.
+
+**Inventario canónico**: 12 `MotivoRevisionDocumento` (nivel documento, `procesamiento_masivo.py:619-655`) + 12 `MotivoRevision` (nivel viaje, `gestor_viajes.py:126-142`, 8 de ellos `CONFLICTO_*`). `TIPOS_SOPORTADOS` (`decisiones_pendientes.py:36-39`) declara 6 tipos de decisión; `ACCIONES_POR_TIPO` (`aplicacion_decisiones.py:30-34`) sólo implementa 3. **Confirmado por grep exhaustivo**: `CLIENTE_CANDIDATO` es código muerto -- aparece una única vez en todo el repo, sólo en la declaración del set, nunca generado por ningún flujo.
+
+**Tres causas raíz de la desconexión**, todas verificadas con datos reales del dataset/catálogos vigentes:
+1. `decisiones_pendientes.json` real tiene `"decisiones": []` -- correcto por diseño respecto del artefacto, pero incompleto respecto de la operación real.
+2. **Brecha estructural confirmada con evidencia concreta**: `decisiones_aplicadas.json` real registra `OBRA_DESCONOCIDA→REGISTRAR` aplicada a las guías `464718` (16:03:50) y `464746` (16:05:16); ambas obras (`c3304fe6...`, `c7fcb561...`) existen en `obras_destinos.json` con `estado=OBSERVADA`/`ACTIVO`, pero con `relaciones: []` -- ninguna relación destino, porque `registrar_observacion` sin `destino_id` nunca crea una (`catalogo_obras_destinos.py:492-553`). `detectar_decisiones_documento` sólo corre en el OCR original (`procesamiento_masivo.py:1563`); nunca se re-ejecuta sobre un documento ya persistido. Ambas guías, en el dataset real de hoy, siguen `OBRA_DESTINO_SIN_CORROBORAR`/`REVISAR` -- callejón sin salida confirmado, no teórico.
+3. Ningún `CONFLICTO_*` de nivel viaje (`gestor_viajes.py`) tiene tipo de decisión asociado en `TIPOS_SOPORTADOS`.
+
+**Hallazgo adicional en Desktop, confirmado con código y dato real**: `src/atlas_viajes.html:1222-1224` (`renderDatosAuxiliares`) usa `motivosPresentables = motivosDocumentales.length ? motivosDocumentales : viaje.motivos` -- si CUALQUIER documento del viaje trae un motivo (incluso no bloqueante como `MATERIAL_AUSENTE`), oculta los `CONFLICTO_*` reales de nivel viaje. Confirmado con el caso real `0000352376`: la guía `464699` trae `MATERIAL_AUSENTE`, lo que en Desktop tapa `CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO`, los motivos que realmente bloquean ese viaje.
+
+**Estado persistido antes de este bloque**: 5/24 viajes `REQUIERE_REVISION` (`0000352752`, `0000352376`, `0000353081`, `0000353164`, `0000353160`). **Recalculado con el Motor `2cb67cb` en memoria** (sin escribir): 4/24 -- `0000352752` se resuelve por completo, `0000352376` conserva sus 2 conflictos reales.
+
+Clasificación A–E completa de los 24 motivos, matriz motivo↔decisión, y plan de 7 bloques derivado de la evidencia (no de nomenclatura previa): (1) aplicar fix de RUT al dataset real, (2) cerrar ciclo `OBRA_DESCONOCIDA→DESTINO_SIN_CONFIRMAR` para documentos ya procesados, (3) alinear Desktop con el motivo real, (4) aplicación real de `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO`, (5) inspección guiada para cliente/chofer sin corroborar, (6) conflictos de viaje, (7) `PATENTE_AMBIGUA`. Próximo bloque recomendado: el (1), por ser el único ya resuelto en código y sin necesidad de diseño de producto -- ejecutado en el bloque siguiente.
+
+## 2026-08-17 — Paso 1: fix de RUT (`2cb67cb`) aplicado realmente al reporte vigente
+
+**Mecanismo canónico identificado y verificado antes de escribir**: `generar_reporte_viajes.py` (CLI de producción) invoca `generar_reporte_viajes` (`reporte_viajes.py:398`), que internamente llama `agrupar_viajes` -- la misma función que ya contiene el fix de RUT desde `2cb67cb`. Alcance de escritura confirmado por lectura de código: `generar_reporte_viajes` **nunca escribe** `analisis_completo_guias.csv` (sólo lo lee, con guardia SHA-256 pre/post que aborta con `RuntimeError` si cambia durante la lectura -- nunca escribe en ese caso tampoco); crea una carpeta nueva de reporte (`_validar_rutas` rechaza sobrescribir una existente); y el CLI publica el manifiesto (`escribir_estado_operacion`, reescritura atómica de `operacion/actual/estado_operacion.json`). Ningún catálogo, decisión o imagen es tocado por este mecanismo.
+
+**Backup**: `respaldos/FIX_RUT_ROLLBACK_PRE_APLICACION_20260817_193719/` con `MANIFIESTO_ROLLBACK_FIX_RUT.json` -- copia de `estado_operacion.json` (único archivo existente modificado in-place; SHA-256 `34452E8E...E44976`, verificado idéntico tras copiar) y referencia SHA-256 de `analisis_completo_guias.csv` (`5FE0F384...D5810B71`) para demostrar después que nunca cambió.
+
+**Dry-run** sobre copia temporal fuera de Drive (`generar_reporte_viajes.py` corrido contra una copia del CSV y catálogos reales) reprodujo exactamente el resultado esperado antes de tocar Drive: 24 viajes, 20 confirmados / 4 requieren revisión.
+
+**Aplicación real**: `python generar_reporte_viajes.py "operacion/actual/analisis_completo_guias.csv" "reportes/reporte_fix_rut_chofer_20260817_233840" --catalogos "catalogos_privados"`, ejecutado contra `G:\Mi unidad\Atlas` real. Resultado idéntico al dry-run: 28 filas leídas, 24 viajes, 20 confirmados, 4 requieren revisión.
+
+**Validación exhaustiva fila por fila** (comparación completa entre el `viajes.csv` del reporte anterior y el nuevo, excluyendo `fecha_creacion` que cambia en las 24 filas por ser timestamp de regeneración, no dato de viaje): columnas idénticas, 24→24 filas, mismo conjunto exacto de `numero_transporte`. **Exactamente 2 cambios semánticos**, ninguno más:
+- `0000352752`: `estado` `REQUIERE_REVISION`→`CONFIRMADO`, `motivos_revision` `CONFLICTO_RUT_CHOFER`→`''`.
+- `0000352376`: `motivos_revision` `CONFLICTO_RUT_CHOFER | CONFLICTO_CLIENTE | CONFLICTO_OBRA_DESTINO`→`CONFLICTO_CLIENTE | CONFLICTO_OBRA_DESTINO`; `estado` sin cambio (`REQUIERE_REVISION`).
+
+**Integridad de lo que no debía cambiar, verificada por SHA-256/`mtime` exacto**: `analisis_completo_guias.csv` SHA-256 idéntico antes/después (`5FE0F384...D5810B71`) -- nunca escrito. Los 11 archivos de `catalogos_privados/`, `decisiones_pendientes.json`/`decisiones_aplicadas.json`, `cache/`, `datos_privados/` (imágenes), `coordinacion/` y todos los reportes históricos previos (`reporte_desktop_20260814_130625`, `reporte_revalidacion_20260817_142555`, `reporte_revalidacion_20260817_205408_942731`, `historicos/`) conservaron su `mtime` exacto -- ninguno tocado. Sólo cambiaron `respaldos/` (backup nuevo) y `reportes/` (carpeta nueva). `estado_operacion.json` actualizado, apuntando a `reportes/reporte_fix_rut_chofer_20260817_233840`.
+
+**Rollback**: no requerido -- cero diferencias inesperadas en toda la validación. Backup preservado, no eliminado. Motor y Desktop verificados sin cambios de código tras la operación (`git status --short` vacío en ambos, HEAD `2cb67cb`/`87b9c8c` intactos) -- el único cambio en el working tree del Motor son estas tres entradas de bitácora, sin commit.
+
+**Estado: FIX RUT APLICADO REALMENTE -- LISTO PARA PASO 2.**
