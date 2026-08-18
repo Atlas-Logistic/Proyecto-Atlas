@@ -964,3 +964,14 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Próximo paso recomendado, no iniciado:** investigar el umbral de "tramo sustancial" de Onelogis que bloquea la desambiguación de destino por GPS -- causa dominante de kilómetros faltantes ya identificada, independiente de este fix.
 - **Qué debe decidir Javier ahora:** revisar y autorizar publicar (commit + push) este fix; si prioriza el siguiente frente (destino/umbral Onelogis) o el resto de hallazgos pendientes (relectura focal de RUT para cliente `464265`, demás hallazgos del lote de 15).
 - **Estado: FIX ORIGEN DE VIAJE + CONFLICTO_ORIGEN VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18 — Bloque ONELOGIS / DESTINO / KM (diagnóstico, sin fix)
+
+- **Publicado antes de empezar:** fix de origen de viaje en `feb5afb` (push confirmado, local=remoto, working tree limpio).
+- **Pregunta:** ¿el umbral "tramo sustancial" (≥5 km) de Onelogis es la causa de que 17/38 viajes reales queden `MULTIPLES_UBICACIONES_DISPERSAS` sin kilómetros?
+- **Respuesta con evidencia real (CSVs + cachés ya pagadas de geocodificación y telemetría, cero llamadas nuevas a ORS/Onelogis): NO, no es una única causa.** De los 17 viajes: 7 tienen el trip ya cacheado pero el CSV persistido perdió la conexión de telemetría (gap de reprocesamiento, no el umbral); 2 no tienen ningún trip de Onelogis ese día (cobertura ausente); 4 tienen origen confirmado por GPS pero ningún movimiento sustancial cerca de la hora de salida documental ese día -- **verificado bajando el umbral a 0.5 km contra los trips reales: no cambia nada**, la causa es la ventana temporal, no el valor del umbral; los últimos 4 sí tuvieron el punto GPS disponible y aun así siguen ambiguos porque los candidatos de geocodificación están dispersos dentro de la misma región (más allá de lo que un radio de 50 km puede discriminar).
+- **Onelogis nunca fue, en este dataset real, el factor que resolvió un destino** -- los 13 viajes con km hoy se resolvieron con un único candidato de geocodificación desde el principio. **ORS: 0 fallos reales**, nunca se invoca en los casos ambiguos.
+- **Decisión:** no se implementa fix -- 4 causas raíz distintas, ninguna corrección única, pequeña y segura las cubre todas. Detalle completo con cifras y casos reales en `BITACORA_TECNICA_CRONOLOGICA.md`.
+- **Drive:** no modificado. **Desktop:** no modificado. **Git:** sin commit, sin push de este bloque.
+- **Qué debe decidir Javier ahora:** cuál(es) de las 4 causas atacar primero -- se recomienda empezar por el gap de reprocesamiento (telemetría ya cacheada pero no conectada en el CSV vigente), por ser el más simple de confirmar y no requerir ningún cambio de lógica de negocio.
+- **Estado: DIAGNÓSTICO ONELOGIS / DESTINO / KM COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
