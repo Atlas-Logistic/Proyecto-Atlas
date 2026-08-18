@@ -1257,6 +1257,28 @@ def procesar_archivo(
             metodos_documento.add(
                 MetodoObtencionDocumento.CATALOGO_OBRA_DESTINO.value
             )
+        else:
+            # FIX falso-OK (lote controlado 20260818, guías 464395/464479):
+            # una obra_destino leída limpiamente (sin fallback geométrico,
+            # sin que el catálogo la reescribiera) nunca pasaba por ESTE
+            # bloque salvo para *retirar* la sospecha -- si el cliente SÍ
+            # resuelve a una identidad maestra concreta (hay contra qué
+            # preguntar) pero ninguna obra/destino confirmada la respalda
+            # todavía, la extracción correcta no equivale a corroboración
+            # (ver comentario ESTADOS S2 más abajo) y el documento no puede
+            # quedar OK silencioso. Mismo criterio de "cliente resoluble"
+            # que ya usa `detectar_decisiones_documento` para decidir si
+            # corresponde preguntar por la obra -- si el cliente no resuelve
+            # (ver `_resolver_cliente_id_corroborado`), no hay base para
+            # juzgar la obra y se conserva la abstención previa.
+            cliente_id_para_obra = _resolver_cliente_id_corroborado(
+                carpeta_catalogos,
+                cliente_texto=str(datos.get("cliente", "")),
+                rut_cliente=str(datos.get("RUT del cliente", "")),
+                identidad_cliente_corroborada=cliente_corroborado_n1,
+            )
+            if cliente_id_para_obra is not None:
+                campos_geometricos_sin_corroborar.add("obra destino")
 
     # Bloque ESTADOS S2 -- corroboración de cliente/obra_destino recuperados
     # por geometría. Único criterio de corroboración disponible hoy para
