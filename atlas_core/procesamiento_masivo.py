@@ -662,6 +662,11 @@ class MotivoRevisionDocumento(str, Enum):
     CLIENTE_SIN_CORROBORAR = "CLIENTE_SIN_CORROBORAR"
     CHOFER_SIN_CORROBORAR = "CHOFER_SIN_CORROBORAR"
     OBRA_DESTINO_SIN_CORROBORAR = "OBRA_DESTINO_SIN_CORROBORAR"
+    # El candidato geométrico (anclado inequívocamente a FECHA DE EMISIÓN,
+    # ver `_extraer_fecha_geometrico`) difiere del valor lineal ya
+    # aceptado, y la relectura focal con consenso no logró confirmar cuál
+    # de los dos es correcto -- ninguno se descarta a ciegas.
+    FECHA_SIN_CORROBORAR = "FECHA_SIN_CORROBORAR"
     PATENTE_SIN_HOMOLOGAR = "PATENTE_SIN_HOMOLOGAR"
     # Ambigüedad real (ALIAS con >1 candidato, o corrección OCR con >1
     # candidato igual de plausible) -- nunca se resuelve arbitrariamente.
@@ -1251,6 +1256,102 @@ def procesar_archivo(
                     logger.info("fecha recuperada mediante consenso-focal-v1")
         except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
             logger.warning("Recuperación focal de fecha omitida: %s: %s", type(exc).__name__, exc)
+
+    # Corroboración geométrica de una fecha lineal YA presente (caso real
+    # 464367): el orden de lectura del OCR puede asociar el candidato
+    # correcto de FECHA DE EMISIÓN con una etiqueta vecina (FECHA SALIDA/
+    # LLEGADA) cuando esa etiqueta y su propio valor quedan invertidos en
+    # el texto linealizado de un layout de dos columnas -- `extraer_fecha`
+    # (lineal) pierde ese candidato frente a un rival cuya etiqueta sí
+    # quedó adyacente. `_extraer_fecha_geometrico` ubica por posición real
+    # en la imagen (inmune al orden de lectura) y está diseñado
+    # específicamente para anclarse sólo a FECHA DE EMISIÓN, abstenerse
+    # ante cualquier candidato rival (FECHA SALIDA/LLEGADA) y ante
+    # ambigüedad -- ver `test_fecha_geometrica_prioriza_emision_sobre_
+    # salida_cercana` y `test_fecha_geometrica_no_toma_candidato_mas_
+    # cercano_a_salida_que_a_emision`. Auditoría real read-only sobre 43
+    # guías del histórico disponible (2026-08-18): 38 coinciden, 4 sin
+    # candidato geométrico (sin cambio), 1 discrepancia real (464367) --
+    # el candidato geométrico fue el correcto, verificado contra la
+    # imagen. Nunca se confía en el texto geométrico bruto por sí solo:
+    # se exige la MISMA relectura focal con doble confirmación ya usada
+    # arriba para el caso "No encontrado" antes de aceptar el cambio.
+    #
+    # Alcance deliberadamente acotado: sólo se corrobora si `bloques_guia`
+    # YA está cargado (por necesitarse para otro campo ausente/contaminado
+    # más arriba en esta misma función) -- nunca se fuerza una carga nueva
+    # sólo para esto. Preserva el invariante ya existente y ya probado de
+    # que un documento cuyo texto lineal resuelve todos los campos nunca
+    # toca bloques/geometría (ver `test_procesar_archivo_preserva_chofer_
+    # lineal_limpio`, `test_procesar_archivo_fecha_global_valida_no_
+    # dispara_focal`). En evidencia real, el único caso encontrado
+    # (464367) ya cumple esta condición (tenía cliente/patentes ausentes),
+    # así que no se pierde cobertura del caso demostrado.
+    if fecha_actual != "No encontrado" and bloques_guia is not None:
+        try:
+            decision_fecha_corrob = _extraer_fecha_geometrico(bloques_guia)
+            fecha_geo_comparable = (
+                _valor_fecha_a_date(str(decision_fecha_corrob["valor"]))
+                if decision_fecha_corrob.get("caja")
+                else None
+            )
+            fecha_lineal_comparable = _valor_fecha_a_date(fecha_actual)
+            if (
+                fecha_geo_comparable is not None
+                and fecha_lineal_comparable is not None
+                and fecha_geo_comparable != fecha_lineal_comparable
+            ):
+                evidencia_focal_corrob = _leer_focal(
+                    decision_fecha_corrob["caja"], ALLOWLIST_FECHA, _leer_fecha_focal
+                )
+                votos_por_fecha_corrob: dict[date, list[tuple[str, object]]] = {}
+                for lectura in evidencia_focal_corrob["lecturas"]:
+                    valor_focal = extraer_fecha(
+                        [str(lectura.get("texto", ""))],
+                        fecha_desde=fecha_desde,
+                        fecha_hasta=fecha_hasta,
+                    )
+                    if valor_focal == "No encontrado":
+                        continue
+                    fecha_comparable = _valor_fecha_a_date(valor_focal)
+                    if fecha_comparable is None:
+                        continue
+                    votos_por_fecha_corrob.setdefault(fecha_comparable, []).append(
+                        (valor_focal, lectura.get("confianza"))
+                    )
+                coincidencias_corrob = {
+                    fecha: votos
+                    for fecha, votos in votos_por_fecha_corrob.items()
+                    if len(votos) >= 2
+                    and all(
+                        isinstance(confianza, (int, float))
+                        and confianza >= CONFIANZA_MINIMA_FECHA_FOCAL
+                        for _, confianza in votos
+                    )
+                }
+                if len(coincidencias_corrob) == 1:
+                    ((fecha_confirmada, votos_ganadores_corrob),) = coincidencias_corrob.items()
+                    if fecha_confirmada == fecha_geo_comparable:
+                        # Confirmado con la misma exigencia de consenso que
+                        # la recuperación: el candidato geométrico
+                        # (semánticamente anclado a FECHA DE EMISIÓN)
+                        # reemplaza al lineal, que en este layout quedó
+                        # asociado al candidato equivocado.
+                        fecha_actual = votos_ganadores_corrob[0][0]
+                        metodos_documento.add(MetodoObtencionDocumento.FOCAL.value)
+                        logger.info("fecha corregida mediante corroboracion-geometrica-focal-v1")
+                    elif fecha_confirmada == fecha_lineal_comparable:
+                        pass  # confirma el valor lineal ya aceptado -- la discrepancia inicial no era real
+                    else:
+                        # Consenso en una tercera fecha distinta a ambos
+                        # candidatos -- ninguno de los tres se elige a ciegas.
+                        _motivo(MotivoRevisionDocumento.FECHA_SIN_CORROBORAR)
+                else:
+                    # Sin consenso único -- la discrepancia queda sin
+                    # resolver, se conserva el valor lineal tal cual.
+                    _motivo(MotivoRevisionDocumento.FECHA_SIN_CORROBORAR)
+        except Exception as exc:  # El OCR secundario nunca invalida el procesamiento principal.
+            logger.warning("Corroboración geométrica de fecha omitida: %s: %s", type(exc).__name__, exc)
 
     descripcion = extraer_descripcion_material(textos)
 

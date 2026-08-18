@@ -84,6 +84,37 @@ def _recortar_variantes(Image, ImageEnhance, ImageOps, ruta, caja):
         )
 
 
+def _a_array_rgb(variante, np):
+    """Normaliza una variante PIL a un array (H, W, 3) antes de pasarla a
+    PaddleOCR.predict() -- exige canal de color; un array 2D (H, W), que
+    resulta de convertir directamente una imagen en modo "L"/escala de
+    grises, se rechaza siempre con "ValueError: not enough values to
+    unpack (expected 3, got 2)". `.convert("RGB")` sólo normaliza el
+    formato de canales (un gris ya es R=G=B replicado) -- nunca altera el
+    contenido visual, y es no-op para variantes ya en RGB."""
+    return np.asarray(variante.convert("RGB"))
+
+
+def _ejecutar_focal(ocr, ruta, caja, Image, ImageEnhance, ImageOps, np):
+    """Ejecuta las 4 variantes focales contra un `ocr` ya inicializado
+    (con `.predict()`) -- extraído de la rama "focal" de `main()` para
+    poder probarlo con un doble de OCR, sin depender de PaddleOCR real."""
+    recorte, variantes = _recortar_variantes(Image, ImageEnhance, ImageOps, ruta, caja)
+    lecturas = []
+    for nombre, variante in variantes:
+        arreglo = _a_array_rgb(variante, np)
+        paginas = list(ocr.predict(arreglo))
+        bloques = _paginas_a_bloques(paginas)
+        texto = " ".join(b["texto"] for b in bloques)
+        confianzas = [b["confianza"] for b in bloques if isinstance(b["confianza"], (int, float))]
+        lecturas.append({
+            "variante": nombre,
+            "texto": texto,
+            "confianza": min(confianzas) if confianzas else None,
+        })
+    return {"recorte": list(recorte), "lecturas": lecturas}
+
+
 def main():
     PaddleOCR, Image, ImageEnhance, ImageOps, np = _cargar_dependencias()
 
@@ -111,20 +142,7 @@ def main():
                     resultado = bloques
             elif op == "focal":
                 caja = comando["caja"]
-                recorte, variantes = _recortar_variantes(Image, ImageEnhance, ImageOps, ruta, caja)
-                lecturas = []
-                for nombre, variante in variantes:
-                    arreglo = np.asarray(variante)
-                    paginas = list(ocr.predict(arreglo))
-                    bloques = _paginas_a_bloques(paginas)
-                    texto = " ".join(b["texto"] for b in bloques)
-                    confianzas = [b["confianza"] for b in bloques if isinstance(b["confianza"], (int, float))]
-                    lecturas.append({
-                        "variante": nombre,
-                        "texto": texto,
-                        "confianza": min(confianzas) if confianzas else None,
-                    })
-                resultado = {"recorte": list(recorte), "lecturas": lecturas}
+                resultado = _ejecutar_focal(ocr, ruta, caja, Image, ImageEnhance, ImageOps, np)
             else:
                 raise ValueError(f"Operación desconocida: {op}")
             print(json.dumps({"ok": True, "resultado": resultado}), flush=True)

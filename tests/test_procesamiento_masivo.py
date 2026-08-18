@@ -682,6 +682,227 @@ def test_procesar_archivo_fecha_focal_sin_caja_geometrica_se_abstiene(tmp_path, 
     fecha_focal.assert_not_called()
 
 
+# ---- Corroboración geométrica de fecha lineal ya presente (caso real 464367) ----
+#
+# El alcance del fix exige `bloques_guia` YA cargado por otro campo ausente
+# (ver comentario junto al código) -- estos tests usan `cliente="No
+# encontrado"` para reproducir esa precondición real (en 464367, el cliente
+# también estaba ausente), disparando la carga de bloques ya existente
+# antes de llegar a la corroboración de fecha.
+
+
+def test_procesar_archivo_fecha_corrige_via_geometria_cuando_lineal_asocia_fecha_salida(
+    tmp_path, monkeypatch
+):
+    """Reproducción estructural real de 464367: el texto lineal asocia el
+    único candidato de fecha con FECHA SALIDA (mismo patrón real: el orden
+    de lectura del OCR invierte la etiqueta FECHA DE EMISIÓN y su propio
+    valor, perdiendo la comparación de contexto frente a un candidato
+    rival cuya etiqueta sí quedó adyacente). La geometría ubica sin
+    ambigüedad la FECHA DE EMISIÓN real (distinta), y la relectura focal
+    con el mismo consenso ya usado para recuperación la confirma -- la
+    fecha final debe ser la de FECHA DE EMISIÓN, nunca la de FECHA SALIDA."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("04-08-2026", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.93),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA SALIDA 06-08-2026"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(cliente="No encontrado")),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 04-08-2026", "confianza": 0.95},
+                    {"variante": "grises", "texto": "FECHA DE EMISION 04-08-2026", "confianza": 0.90},
+                    {"variante": "ampliada_2x", "texto": "", "confianza": None},
+                    {"variante": "ampliada_2x_contraste", "texto": "", "confianza": None},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "04-08-2026"
+    assert "FOCAL" in resultado["metodos_recuperacion_documento"]
+    assert "FECHA_SIN_CORROBORAR" not in resultado["motivos_revision_documento"]
+
+
+def test_procesar_archivo_fecha_no_corrige_si_geometria_es_ambigua(tmp_path, monkeypatch):
+    """Negativo: dos candidatos geométricos igual de plausibles junto a
+    FECHA DE EMISIÓN -- `_extraer_fecha_geometrico` ya se abstiene por
+    diseño (ver `test_fecha_geometrica_se_abstiene_ante_dos_candidatos_
+    equivalentes`), así que la corroboración nunca llega a activarse: el
+    valor lineal se conserva sin cambios ni relectura focal."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((20, 50), (170, 50), (170, 68), (20, 68)), 0.9),
+        BloqueOCR("04-08-2026", ((190, 40), (280, 40), (280, 58), (190, 58)), 0.9),
+        BloqueOCR("05-08-2026", ((190, 60), (280, 60), (280, 78), (190, 78)), 0.9),
+    ]
+    fecha_focal = Mock()
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA SALIDA 06-08-2026"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "_leer_fecha_focal", fecha_focal)
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(cliente="No encontrado")),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "06-08-2026"
+    fecha_focal.assert_not_called()
+
+
+def test_procesar_archivo_fecha_no_corrige_si_etiqueta_emision_ausente_en_bloques(
+    tmp_path, monkeypatch
+):
+    """Negativo: sólo FECHA SALIDA es localizable geométricamente (la
+    etiqueta FECHA DE EMISIÓN no aparece en los bloques) -- sin ancla,
+    `_extraer_fecha_geometrico` se abstiene, y la corroboración nunca se
+    activa: se conserva el comportamiento actual (fallback D)."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA SALIDA", ((10, 10), (140, 10), (140, 28), (10, 28)), 0.9),
+        BloqueOCR("06-08-2026", ((150, 10), (250, 10), (250, 28), (150, 28)), 0.9),
+    ]
+    fecha_focal = Mock()
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA SALIDA 06-08-2026"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "_leer_fecha_focal", fecha_focal)
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(cliente="No encontrado")),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "06-08-2026"
+    fecha_focal.assert_not_called()
+
+
+def test_procesar_archivo_fecha_marca_sin_corroborar_si_discrepancia_no_se_resuelve(
+    tmp_path, monkeypatch
+):
+    """Negativo central: existe discrepancia real (lineal vs. geométrico),
+    pero la relectura focal no logra un consenso único (una lectura con
+    confianza insuficiente, otra discordante) -- ninguno de los dos
+    valores se elige a ciegas. El valor lineal se conserva tal cual y el
+    documento queda marcado para revisión humana, nunca autocorregido
+    sobre una base débil."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("04-08-2026", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.93),
+    ]
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA SALIDA 06-08-2026"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(cliente="No encontrado")),
+    )
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "_leer_fecha_focal",
+        Mock(
+            return_value={
+                "lecturas": [
+                    {"variante": "original", "texto": "FECHA DE EMISION 04-08-2026", "confianza": 0.40},
+                    {"variante": "grises", "texto": "FECHA DE EMISION 05-08-2026", "confianza": 0.90},
+                    {"variante": "ampliada_2x", "texto": "", "confianza": None},
+                    {"variante": "ampliada_2x_contraste", "texto": "", "confianza": None},
+                ]
+            }
+        ),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "06-08-2026"
+    assert "FECHA_SIN_CORROBORAR" in resultado["motivos_revision_documento"]
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_procesar_archivo_fecha_geometrica_coincidente_no_dispara_relectura_focal(
+    tmp_path, monkeypatch
+):
+    """Control de no-regresión: cuando la fecha geométrica ya coincide con
+    la lineal (caso A, la inmensa mayoría de las guías reales: 38 de 43 en
+    la auditoría real de este bloque), no hay discrepancia que corroborar
+    -- no se dispara ninguna relectura focal adicional ni cambia nada."""
+    ruta = tmp_path / "guia.jpg"
+    bloques = [
+        BloqueOCR("FECHA DE EMISION", ((10, 10), (160, 10), (160, 28), (10, 28)), 0.9),
+        BloqueOCR("06-08-2026", ((180, 10), (280, 10), (280, 28), (180, 28)), 0.93),
+    ]
+    fecha_focal = Mock()
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA DE EMISION 06-08-2026"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=bloques))
+    monkeypatch.setattr(procesamiento_masivo, "_leer_fecha_focal", fecha_focal)
+    monkeypatch.setattr(
+        procesamiento_masivo,
+        "extraer_datos",
+        Mock(return_value=_datos_lineales_completos(cliente="No encontrado")),
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "06-08-2026"
+    assert "FECHA_SIN_CORROBORAR" not in resultado["motivos_revision_documento"]
+    fecha_focal.assert_not_called()
+
+
+def test_procesar_archivo_fecha_no_corrige_si_bloques_no_se_cargaron_por_otro_campo(
+    tmp_path, monkeypatch
+):
+    """Alcance deliberado del fix, cubierto explícitamente: cuando todos
+    los demás campos ya resuelven por texto lineal (sin necesidad de
+    geometría), `bloques_guia` nunca se carga -- ni siquiera para
+    corroborar fecha. Preserva el invariante ya existente de que un
+    documento cuyo texto lineal resuelve todo nunca toca bloques/geometría
+    (mismo patrón que `test_procesar_archivo_preserva_chofer_lineal_
+    limpio`, `test_procesar_archivo_fecha_global_valida_no_dispara_focal`)."""
+    ruta = tmp_path / "guia.jpg"
+    leer_bloques = Mock()
+    fecha_focal = Mock()
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA SALIDA 06-08-2026"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", leer_bloques)
+    monkeypatch.setattr(procesamiento_masivo, "_leer_fecha_focal", fecha_focal)
+    monkeypatch.setattr(
+        procesamiento_masivo, "extraer_datos", Mock(return_value=_datos_lineales_completos())
+    )
+
+    resultado = procesar_archivo(ruta)
+
+    assert resultado["fecha"] == "06-08-2026"
+    leer_bloques.assert_not_called()
+    fecha_focal.assert_not_called()
+
+
 # ---- Bloque M1: proveedor OCR (numero_guia robusto, focal generalizado, guarda documental) ----
 
 class _ProveedorFalso:

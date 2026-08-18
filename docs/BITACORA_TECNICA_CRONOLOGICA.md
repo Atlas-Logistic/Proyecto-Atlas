@@ -2597,3 +2597,158 @@ Ninguna de las cuatro es tan claramente "la única opción segura" como lo fuero
 **Pendientes explícitos, sin iniciar:** decisión de Javier sobre las 4 variantes de fecha `464367`; relectura focal de RUT para cliente `464265` (FIX_B, registrado); demás hallazgos del lote de 15.
 
 **Estado: DIAGNÓSTICO FECHA 464367 COMPLETADO -- REQUIERE DECISIÓN.**
+
+## 2026-08-18 — Publicación (`b343a41`) + corroboración geométrica de fecha de emisión
+
+**Publicación:** commit `b343a41` ("docs: registrar diagnostico fecha emision 464367") -- 3 archivos exactos (tres bitácoras). Push sin force: `74c1478..b343a41`. Post-push: local `b343a41` == remoto `b343a41`, `git status -sb` sin ahead/behind, working tree limpio. Desktop verificado sin tocar: HEAD `fba95ac`, working tree limpio.
+
+**Checkpoint verificado antes de auditar:** Motor HEAD `b343a41`, local=remoto, working tree limpio.
+
+**Pregunta central del bloque:** ¿la salida de `_extraer_fecha_geometrico()`, cuando está anclada inequívocamente a FECHA DE EMISIÓN, constituye evidencia documental suficiente para corroborar (y eventualmente reemplazar) un valor lineal ya presente?
+
+**Auditoría semántica de ambos extractores (sin asumir "geometría gana"):**
+- `extraer_fecha()` (lineal, `procesamiento_masivo.py:407`): "el mejor candidato que representa una fecha de calendario válida" -- genérico, prioriza por contexto (`_clasificar_contexto_fecha`) entre FECHA DE EMISION (prioridad 0) / FECHA SALIDA (1) / FECHA LLEGADA (2) / otra etiqueta (2) / GLOBAL (3), pero no está anclado exclusivamente a un campo -- puede devolver cualquiera de ellos si su contexto gana.
+- `_extraer_fecha_geometrico()` (`extractor.py:662`): diseñado específicamente para FECHA DE EMISIÓN -- `es_etiqueta_emision()` sólo reconoce esa etiqueta; `es_etiqueta_fecha_rival()` excluye explícitamente FECHA SALIDA/LLEGADA de los candidatos; se abstiene (retorna `{}`) ante ambigüedad (margen 0.06 entre el mejor candidato y cualquier otro) o ausencia de etiqueta/candidato.
+- **¿Puede alguna vez devolver SALIDA/LLEGADA por error?** No, por diseño y por test: `test_fecha_geometrica_prioriza_emision_sobre_salida_cercana` y `test_fecha_geometrica_no_toma_candidato_mas_cercano_a_salida_que_a_emision` (`tests/test_extraer_datos.py:777,789`) ya prueban exactamente esto -- incluso cuando un candidato está geométricamente más cerca de FECHA SALIDA, la función se abstiene en vez de robarlo.
+- **¿Es fallback histórico o restricción deliberada?** El uso actual (sólo si `fecha_actual == "No encontrado"`) es histórico -- la función en sí (`_extraer_fecha_geometrico`) no impone esa restricción, es el *call site* en `procesar_archivo()` el que la limita a recuperación, nunca a corroboración. No hay ninguna razón de diseño documentada que impida ampliar el trigger; sólo no se había hecho.
+
+**Auditoría real amplia, read-only (`atlas_core.ocr_provider.crear_proveedor_ocr("paddleocr")`, sin escribir nada), sobre las **43 guías reales** disponibles en Drive** (las 15 del lote actual + 28 de lotes históricos anteriores, `operacion/entradas/*`, duplicados por nombre de archivo alternativo descartados por SHA-256 idéntico):
+
+| Categoría | Guías | Detalle |
+|---|---|---|
+| A. Lineal == Geométrico | 38 | Sin conflicto -- incluye `464264` (05-08-2026, conf. 0.928) y `464265` (05-08-2024, conf. 0.804 -- ambos coinciden en el valor erróneo ya diagnosticado por la mancha física, sin relación con este bloque) |
+| B. Discrepan, geométrico inequívoco | 1 | `464367` -- lineal `06-08-2026`, geométrico `04-08-2026` conf. 0.935, ya verificado correcto contra la imagen |
+| C. Discrepan, geométrico ambiguo | 0 | No observado -- estructuralmente casi imposible: `_extraer_fecha_geometrico` sólo devuelve un valor no vacío cuando ya pasó su propio filtro de ambigüedad, así que cualquier resultado no vacío es, por construcción, ya "B" |
+| D. Geométrico ausente | 4 | `464493`, `464522`, `464601` (sin ancla localizable) y `464529` (candidato geométrico bruto `"110-08-2026"`, no parseable como fecha -- tratado igual que ausente) -- comportamiento actual preservado sin cambios |
+| E. Lineal ausente, geométrico presente | 0 | No observado en esta muestra -- `extraer_fecha()` nunca devolvió `"No encontrado"` en las 43 guías |
+
+**Fiabilidad medida:** de 39 guías donde ambos mecanismos producen una fecha comparable, 38/39 coinciden (97.4%) y en la única discrepancia el geométrico fue el correcto -- 0 falsos positivos observados en la muestra real disponible.
+
+**Decisión: OPCIÓN A -- autocorrección segura, con la misma exigencia de verificación que ya usa el resto de esta auditoría.** No basta con la confianza reportada por el bloque geométrico (464265 ya demostró que un valor con confianza 0.80 puede ser un error real) -- se exige la MISMA relectura focal con doble confirmación (≥2 lecturas concordantes, confianza ≥ `CONFIANZA_MINIMA_FECHA_FOCAL`) ya usada para recuperar una fecha ausente, antes de aceptar cualquier cambio.
+
+**Implementación** (`atlas_core/procesamiento_masivo.py`):
+- Nuevo motivo `MotivoRevisionDocumento.FECHA_SIN_CORROBORAR` (no incluido en `MOTIVOS_NO_BLOQUEANTES` -- bloqueante por defecto, mismo criterio que `OBRA_DESTINO_SIN_CORROBORAR`/`CLIENTE_SIN_CORROBORAR`).
+- Nuevo bloque, deliberadamente SEPARADO del bloque existente de recuperación "No encontrado" (sin tocarlo, cero riesgo de regresión sobre código ya probado): si `fecha_actual != "No encontrado"` y `bloques_guia` ya está cargado (ver alcance abajo), compara la fecha geométrica (vía `_valor_fecha_a_date`) contra la lineal; si difieren, ejecuta la misma relectura focal + votación de consenso (código duplicado deliberadamente, no refactorizado a un helper compartido, para no arriesgar el camino ya probado); si el consenso confirma el candidato geométrico, reemplaza `fecha_actual` (mismo tag `MetodoObtencionDocumento.FOCAL`); si confirma el lineal, no hay nada que corregir; si no hay consenso único o confirma una tercera fecha distinta, `FECHA_SIN_CORROBORAR` y se conserva el valor lineal intacto.
+- **Alcance deliberadamente acotado:** la corroboración sólo corre si `bloques_guia is not None` -- es decir, sólo si YA se cargó por necesitarse para otro campo ausente/contaminado en el mismo documento (cliente, obra_destino, RUT, chofer, patentes, número de guía). Nunca fuerza una carga nueva de bloques sólo para esto. Esta restricción se agregó tras encontrar, en la primera versión de la implementación, que rompía 4 tests ya existentes que verifican explícitamente que un documento cuyo texto lineal resuelve todo **nunca** toca `leer_bloques_imagen` (`test_procesar_archivo_preserva_chofer_lineal_limpio`, `test_procesar_archivo_fecha_global_valida_no_dispara_focal`, `test_procesar_archivo_no_reemplaza_valores_lineales_correctos`, `test_procesar_archivo_sin_proveedor_usa_easyocr_directo_como_antes`) -- invariante de rendimiento ya existente y deliberado, preservado sin excepción. `464367` cumple la condición igualmente (cliente y patentes ausentes en el dataset real), así que no se pierde cobertura del único caso real evidenciado.
+
+**10 tests nuevos** (`tests/test_procesamiento_masivo.py`):
+- `test_procesar_archivo_fecha_corrige_via_geometria_cuando_lineal_asocia_fecha_salida`: reproducción estructural exacta de 464367, corrección confirmada.
+- `test_procesar_archivo_fecha_no_corrige_si_geometria_es_ambigua`, `test_procesar_archivo_fecha_no_corrige_si_etiqueta_emision_ausente_en_bloques`: negativos, casos D.
+- `test_procesar_archivo_fecha_marca_sin_corroborar_si_discrepancia_no_se_resuelve`: negativo central -- discrepancia real sin consenso focal, `FECHA_SIN_CORROBORAR` + valor lineal conservado.
+- `test_procesar_archivo_fecha_geometrica_coincidente_no_dispara_relectura_focal`: control de no-regresión, caso A.
+- `test_procesar_archivo_fecha_no_corrige_si_bloques_no_se_cargaron_por_otro_campo`: cubre explícitamente el alcance acotado -- preserva el invariante de los 4 tests que motivaron la restricción.
+- Los 4 tests preexistentes que fallaron en la primera iteración (antes de acotar el alcance) -- confirmados verdes sin ninguna modificación de sus aserciones tras el ajuste.
+
+Suite focalizada: `test_procesamiento_masivo.py` + `test_extraer_datos.py` -- 313 passed. Grupo fecha/extracción/procesamiento/consolidación (+ `test_gestor_viajes.py`, `test_reporte_viajes.py`, `test_atlas.py`, `test_ocr.py`, `test_ocr_provider.py`, `test_paddle_runtime.py`, `test_e2e_r1_pipeline_logistico.py`, `test_e2e_r1_1_cierre_pipeline.py`, `test_operacion_real_r1.py`, `test_operacion_real_r1_1.py`, `test_validadores_fecha.py`) -- 517 passed. Suite completa: **1216 passed, 0 failed** (baseline 1210 + 6).
+
+**Validación real en TEMP (464367 + controles `464264`/`464488`/`464494`/`464493`/`464265`, SHA-256 verificado contra el manifiesto, catálogos reales copiados read-only, `--sin-telemetria`):** comparación campo a campo antes/después -- **cero cambios en las 6 guías, incluida `464367`** (`fecha` se mantuvo `06-08-2026`).
+
+**Hallazgo nuevo, significativo, NO relacionado con la lógica de este fix, aislado y caracterizado con precisión (solo lectura, entorno de runtime aislado de PaddleOCR, sin tocar Drive ni el código de producción):** el worker de PaddleOCR (`atlas_core/paddleocr_worker.py`, operación `"focal"`) **falla siempre** para cualquier caja/imagen -- reproducido de forma idéntica en dos guías sin relación (`464367` y `464264`). Causa exacta aislada variante por variante: de las 4 variantes que genera `_recortar_variantes()` ("original", "grises", "ampliada_2x", "ampliada_2x_contraste"), las dos en escala de grises ("grises", "ampliada_2x_contraste") producen un array NumPy de 2 dimensiones (`(H, W)`, sin canal de color) que `PaddleOCR.predict()` no acepta -- `ValueError: not enough values to unpack (expected 3, got 2)`. Como el bucle de variantes dentro del worker no captura errores por variante (sólo el try/except externo, que envuelve todo el comando), la primera variante en escala de grises ("grises", segunda en la lista) hace fallar el comando `"focal"` completo, siempre, con cualquier caja. Confirmado ejecutando `_recortar_variantes` + `ocr.predict()` variante por variante con el intérprete real del runtime aislado (`C:\Users\Jjjc0508\AppData\Local\Atlas\runtime\paddleocr\Scripts\python.exe`): "original" y "ampliada_2x" (RGB, 3 canales) -- OK; "grises" y "ampliada_2x_contraste" (2 canales) -- fallan exactamente con ese error.
+
+**Impacto real de este hallazgo, verificado:** el mecanismo de relectura focal con consenso -- usado hoy por la recuperación de FECHA (bloque "F2", ya publicado) y de NÚMERO DE TRANSPORTE (mismo worker, mismo patrón) -- está **silenciosamente inactivo en producción** con el proveedor activo actual (PaddleOCR). Se degrada de forma segura (el try/except en `procesamiento_masivo.py` evita que rompa el resto del procesamiento; ambos mecanismos ya diseñados para abstenerse ante cualquier excepción del OCR secundario), pero nunca puede recuperar ni corroborar nada. Verificado que esto no ha causado pérdida de datos visible hasta ahora: **0 guías en `operacion/actual` tienen `fecha == "No encontrado"`** -- el extractor lineal ha sido suficiente en el 100% de los casos reales hasta la fecha, así que el disparador `"No encontrado"` de la recuperación nunca se había ejercitado de verdad con OCR real en producción.
+
+**Por qué no se corrigió aquí:** es un bug de infraestructura separado, de mayor alcance que el objetivo único de este bloque (afecta también la recuperación ya publicada de fecha/transporte ausentes, no sólo la corroboración nueva) -- corregirlo aquí habría mezclado dos hallazgos distintos, exactamente lo que este bloque de auditoría pidió evitar.
+
+**Fix implementado: SÍ** (código + 10 tests, todos verdes). **Validado de extremo a extremo con OCR real: NO** -- bloqueado por el hallazgo del worker, no por un defecto en la lógica del fix (que se comportó exactamente como está diseñado: al fallar la relectura focal, se abstiene y conserva el valor lineal, sin corromper nada).
+
+**Drive:** no modificado -- toda la validación fue lectura (imágenes vía TEMP con SHA-256 verificado, catálogos, y el diagnóstico aislado del worker en su propio runtime, también sin escribir nada). `PREDICCION_CONGELADA.sha256` -- `OK`. `mtime` de `operacion/actual/analisis_completo_guias.csv` sin cambios. Todas las carpetas TEMP eliminadas al terminar.
+
+**Git:** Motor con `atlas_core/procesamiento_masivo.py` y `tests/test_procesamiento_masivo.py` modificados. Sin commit, sin push de este bloque. Desktop sin cambios, HEAD `fba95ac`.
+
+**Cliente `464265`:** cerrado sin fix, no reabierto.
+
+**Pendientes explícitos, sin iniciar:** decisión de Javier sobre publicar este fix ya (correcto y seguro, inactivo hasta que se corrija el worker) o priorizar primero el bug del worker de PaddleOCR (mayor impacto, desbloquea también fecha/transporte "No encontrado" ya publicados); relectura focal de RUT para cliente `464265` (FIX_B, registrado); demás hallazgos del lote de 15.
+
+**Estado: DIAGNÓSTICO DE CORROBORACIÓN DE FECHA COMPLETADO -- REQUIERE DECISIÓN.**
+
+## 2026-08-18 — P1: reparación de la relectura focal de PaddleOCR + validación real de la corroboración de fecha `464367`
+
+**Checkpoint verificado antes de tocar código:** Motor HEAD `b343a41`, local=remoto, working tree exclusivamente con `atlas_core/procesamiento_masivo.py`, `tests/test_procesamiento_masivo.py` y tres bitácoras (fix funcional de corroboración de fecha, todavía sin publicar) -- confirmado con `git status`/`git diff --check`, nada ajeno. Desktop HEAD `fba95ac`, working tree limpio. No se descartó el trabajo pendiente.
+
+### 1. Reproducción aislada del bug, variante por variante
+
+Reproducido con el intérprete real del runtime aislado (`C:\Users\Jjjc0508\AppData\Local\Atlas\runtime\paddleocr\Scripts\python.exe`), replicando exactamente `_recortar_variantes()` + el bucle "focal" de `paddleocr_worker.py`, sobre dos imágenes reales sin relación entre sí (`464367`, `464264`):
+
+| Variante | shape | ndim | modo PIL | `PaddleOCR.predict()` |
+|---|---|---|---|---|
+| `original` | (25, 82, 3) | 3 | RGB | ACEPTADA |
+| `grises` | (25, 82) | 2 | L | **RECHAZADA**: `ValueError: not enough values to unpack (expected 3, got 2)` |
+| `ampliada_2x` | (50, 164, 3) | 3 | RGB | ACEPTADA |
+| `ampliada_2x_contraste` | (50, 164) | 2 | L | **RECHAZADA**: mismo error |
+
+Hipótesis confirmada exactamente: las dos variantes en escala de grises llegan como array 2D (sin canal de color) a `predict()`, que exige 3 dimensiones. Como el bucle de variantes dentro del worker no captura errores por variante individual (sólo el try/except externo, que envuelve el comando completo), la primera variante en escala de grises ("grises", segunda de la lista fija) hace fallar el comando `"focal"` **completo, siempre**, con cualquier caja -- confirmado en dos imágenes sin relación.
+
+### 2. Auditoría exhaustiva de call-sites (`grep` completo, sin resultados fuera de los ya conocidos)
+
+Todos enrutados a través del mismo closure `_leer_focal()` (`procesamiento_masivo.py:817`) → `proveedor.leer_focal()` → (PaddleOCR) worker `"focal"` / (EasyOCR) `_leer_region_focal()` (`atlas_core/ocr.py:107`, confirmado **no afectado** -- `EasyOCR.readtext()` acepta arrays 2D directamente, sin necesitar canal de color):
+
+| Capacidad | Línea | Categoría | Estado antes del fix |
+|---|---|---|---|
+| Recuperación de número de transporte ausente | `procesamiento_masivo.py:894-912` | A -- publicada y activa en código | B -- nunca alcanzada con éxito en producción real (0 guías reales necesitaron esto hasta ahora, pero el mecanismo en sí ya estaba roto) |
+| Recuperación de fecha ausente ("No encontrado", bloque "F2") | `procesamiento_masivo.py:1209-1226` | A -- publicada y activa en código | B -- misma situación (0 guías reales con fecha ausente hasta ahora) |
+| Corroboración de fecha lineal ya presente | `procesamiento_masivo.py:1295-1345` (bloque anterior, sin publicar) | C -- capacidad nueva, todavía no publicada | Bloqueada por el mismo bug, confirmado en el bloque anterior con `464367` |
+
+No se encontró ningún otro call-site de `"focal"`/`leer_focal`/`_leer_region_focal` en todo el repo fuera de `atlas_core/ocr.py`, `atlas_core/ocr_provider.py`, `atlas_core/procesamiento_masivo.py` y `atlas_core/paddleocr_worker.py`.
+
+### 3. Fix mínimo, dentro de la infraestructura OCR, sin heurísticas nuevas
+
+Verificado antes de implementar (mismo runtime aislado) que convertir la variante a RGB (`variante.convert("RGB")`, PIL) o replicar el canal manualmente con NumPy (`np.stack([arr]*3, axis=-1)`) producen **el mismo array exacto** (`np.array_equal` -- confirmado) y ambos son aceptados por `predict()`. Se eligió `.convert("RGB")` por ser la opción más simple, usando únicamente Pillow (ya importado en el worker) sin agregar NumPy manual ni una dependencia nueva (se descartó OpenCV/`cv2`, no usado hoy en el worker).
+
+**Cambios en `atlas_core/paddleocr_worker.py`:**
+- Nueva función `_a_array_rgb(variante, np)`: `np.asarray(variante.convert("RGB"))` -- no-op visual para variantes ya en RGB (`R=G=B` replicado para las que eran escala de grises, verificado).
+- Nueva función `_ejecutar_focal(ocr, ruta, caja, Image, ImageEnhance, ImageOps, np)`: extrae la rama `"focal"` de `main()` a una función independiente (dependencia inyectada, no importa nada a nivel de módulo) -- permite probarla con un doble de `ocr` sin necesitar PaddleOCR real, sin cambiar el protocolo JSON/IPC del worker (mismo formato `{"recorte": [...], "lecturas": [...]}`, mismo manejo de excepciones vía el try/except ya existente en `main()`).
+- `main()` ahora sólo llama `_ejecutar_focal(...)` en la rama `"focal"` -- sin otro cambio de comportamiento.
+
+### 4. Tests del worker (`tests/test_paddleocr_worker.py`, archivo nuevo, sin cobertura previa)
+
+El módulo se importa directamente en el entorno principal -- sus imports de `paddleocr` están diferidos dentro de `_cargar_dependencias()` (nunca a nivel de módulo) y `Image`/`ImageEnhance`/`ImageOps`/`np` se inyectan como parámetros, así que Pillow/NumPy reales (ya dependencias del entorno principal) bastan para probar la lógica sin el runtime aislado:
+
+- `test_a_array_rgb_convierte_grayscale_2d_a_3_canales`, `test_a_array_rgb_grayscale_replica_canal_r_g_b_identicos`, `test_a_array_rgb_no_altera_variante_ya_rgb`: la normalización en sí.
+- `test_recortar_variantes_grises_y_contraste_son_2d_antes_de_normalizar`: confirma la precondición exacta del bug real (dos de las cuatro variantes SÍ son 2D antes de normalizar).
+- `test_recortar_variantes_caja_invalida_lanza_value_error`: preserva la validación ya existente, sin tocarla.
+- `test_ejecutar_focal_todas_las_variantes_llegan_con_canal_de_color`: **regresión central** -- con un doble de OCR configurado para fallar exactamente como PaddleOCR real ante un array 2D, confirma que las 4 llamadas a `predict()` reciben siempre `ndim == 3`. Verificado deliberadamente que este test SÍ habría fallado contra el código original (se generó una copia temporal con el bug reintroducido, se ejecutó fuera de la suite, se confirmó el mismo `ValueError` real, y se eliminó la copia sin dejar rastro).
+- `test_ejecutar_focal_preserva_protocolo_de_resultado`: el formato de `resultado` no cambia.
+- `test_ejecutar_focal_propaga_excepcion_real_de_ocr_sin_convertirla_en_exito`: un fallo genuino de OCR (no relacionado con canales) se sigue propagando -- nunca se convierte en un resultado silenciosamente exitoso.
+- `test_worker_module_importable_sin_paddleocr_instalado`: confirma que la separación de entorno aislado sigue intacta.
+
+Suite focalizada: `test_paddleocr_worker.py` + `test_ocr.py` + `test_ocr_provider.py` + `test_paddle_runtime.py` + `test_procesamiento_masivo.py` -- 211 passed. Grupo extracción/consolidación (`test_extraer_datos.py`, `test_gestor_viajes.py`, `test_reporte_viajes.py`, `test_atlas.py`, `test_e2e_r1_pipeline_logistico.py`, `test_e2e_r1_1_cierre_pipeline.py`) -- 272 passed. **Suite completa: 1225 passed, 0 failed** (baseline 1216 + 9).
+
+### 5. Validación real con PaddleOCR (no simulada) -- worker focal funciona: SÍ
+
+Ejecutado directamente contra el proveedor PaddleOCR real (`crear_proveedor_ocr("paddleocr")`), sobre las imágenes canónicas reales (SHA-256 verificado contra el manifiesto del lote), en TEMP:
+
+- `proveedor.leer_focal(ruta_464367, caja_fecha_emision, allowlist=ALLOWLIST_FECHA)` → **ya no falla** -- devuelve 4 lecturas reales: `original` "04-08-2026" (conf. 0.9245), `grises` "04-08-2024" (conf. 0.9217, año distinto -- ruido real de OCR en esa variante específica), `ampliada_2x` "04-08-2026" (conf. 0.8211), `ampliada_2x_contraste` "04 08-2026" (conf. 0.8556, espacio en vez de guion -- no parseable por `extraer_fecha`, descartado limpiamente).
+- `proveedor.leer_focal(ruta_464264, caja_transporte, allowlist=ALLOWLIST_TRANSPORTE)` → tampoco falla -- confirma que el fix generaliza al call-site de número de transporte, con datos reales.
+
+### 6. `464367` con OCR real de extremo a extremo
+
+Reprocesado en TEMP (mismo CLI de producción, `--sin-telemetria`, catálogos reales copiados read-only):
+
+- **Antes** (worker roto, corroboración presente pero bloqueada): `fecha = "06-08-2026"`.
+- **Después** (worker reparado): `fecha = "04-08-2026"`.
+- **Fuente de la corrección:** candidato geométrico anclado inequívocamente a FECHA DE EMISIÓN (`_extraer_fecha_geometrico`, conf. 0.935) + relectura focal real (paso 5) + consenso: dos lecturas concordantes en `date(2026, 8, 4)` (`original` 0.9245, `ampliada_2x` 0.8211, ambas ≥ `CONFIANZA_MINIMA_FECHA_FOCAL`); la lectura `"grises"` (`2024`, año distinto) **no** contamina el consenso porque queda sola en su propio grupo, sin alcanzar el mínimo de 2 votos -- exactamente el diseño ya existente, sin ninguna concesión.
+- **Ground truth:** `04-08-2026` (confirmado visualmente contra la imagen en el bloque de diagnóstico anterior).
+- `motivos_revision_documento` de `464367` **no** incluye `FECHA_SIN_CORROBORAR` (consenso limpio, sin ambigüedad) -- `metodos_recuperacion_documento` gana `FOCAL`.
+
+### 7. Controles reales, aislando el efecto de este bloque específico
+
+Comparación con `git stash` temporal de sólo `atlas_core/paddleocr_worker.py` (el fix de corroboración del bloque anterior se mantuvo aplicado en ambas corridas, para aislar exclusivamente el efecto del fix del worker): reprocesadas `464367`, `464264`, `464265`, `464488`, `464493`, `464494` -- comparación de las 49 columnas.
+
+- **`464367`:** único cambio -- `fecha` (`06-08-2026` → `04-08-2026`) y `metodos_recuperacion_documento` (gana `FOCAL`, aditivo).
+- **`464264`, `464488`, `464493`, `464494`:** **cero cambios en cualquier campo** -- no hay discrepancia lineal/geométrico en ninguna, así que la corroboración correctamente no interviene (número de transporte tampoco regresa en ninguna).
+- **`464265`:** **cero cambios** -- su propia fecha equivocada (`05-08-2024`, diagnosticada en un bloque anterior) no tiene discrepancia entre lineal y geométrico (ambos leen la misma mancha física, coinciden en el mismo valor erróneo) -- la corroboración no tiene nada que corregir ahí, comportamiento correcto y ya esperado.
+
+### 8. Capacidades focales preexistentes -- validadas con caso real/fixture extremo a extremo, no sólo con tests unitarios
+
+- **Fecha ausente:** reconstruido el disparador real "No encontrado" sobre la imagen real de `464367` (geometría + relectura focal + consenso, exactamente el código de producción, sin mocks para esas tres etapas) -- alcanza el mismo consenso limpio en `04-08-2026`. Antes del fix del worker, este mismo camino habría fallado en la llamada a `leer_focal` (confirmado en el bloque anterior).
+- **Número de transporte ausente:** llamada real `proveedor.leer_focal(...)` con `ALLOWLIST_TRANSPORTE` sobre `464264`/`464367` -- ya no falla, devuelve lecturas reales (aunque en `464367` el candidato geométrico de transporte resultó ser un número de colada, no el transporte real -- limitación separada y preexistente del extractor geométrico de transporte, **no** de la relectura focal en sí, fuera de alcance de este bloque).
+
+**Fix implementado: SÍ, en dos partes** -- el fix del worker (este bloque) y la corroboración de fecha (bloque anterior, ahora desbloqueada). **Validado de extremo a extremo con OCR real: SÍ**, incluidas las dos capacidades ya publicadas que dependían del mismo mecanismo.
+
+**Drive:** no modificado -- toda la validación fue lectura (imágenes vía TEMP con SHA-256 verificado, catálogos, ejecución del worker en su propio runtime aislado, todo sin escribir nada). `PREDICCION_CONGELADA.sha256` -- `OK`. `mtime` de `operacion/actual/analisis_completo_guias.csv` sin cambios. Todas las carpetas TEMP eliminadas al terminar, incluida la copia temporal con el bug reintroducido usada sólo para confirmar la regresión.
+
+**Git:** Motor con `atlas_core/paddleocr_worker.py` (nuevo), `atlas_core/procesamiento_masivo.py` y `tests/test_procesamiento_masivo.py` (bloque anterior), `tests/test_paddleocr_worker.py` (nuevo), más estas tres bitácoras. **Sin commit, sin push -- Javier pidió revisar el resultado antes de publicar.** Desktop sin cambios, HEAD `fba95ac`.
+
+**Temas de continuidad ya registrados en bloques anteriores, mantenidos, no iniciados aquí:** Incidencias Documentales genéricas; patente documental vs. vehículo canónico; sugerencia chofer↔vehículo sin autocorrección; transportista documental incorrecto (caso MBT ya visto); Analítica/IA; kilometraje operacional obligatorio; **planta de origen + rutas + kilómetros, próximo frente operacional identificado, no iniciado**.
+
+**Estado: P1 RELECTURA FOCAL REPARADO + FECHA 464367 VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**
