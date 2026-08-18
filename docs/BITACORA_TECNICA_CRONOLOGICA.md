@@ -2522,3 +2522,78 @@ Consistente con el comportamiento ya implementado y auditado en todos los bloque
 **Drive/Desktop:** sin cambios. **Git:** working tree del Motor con sólo estas tres bitácoras, listo para publicarse como cierre documental de FASE 0.
 
 **Estado: CLIENTE 464265 CERRADO SIN FIX -- LISTO PARA PUBLICAR.**
+
+## 2026-08-18 — Diagnóstico dirigido de `464367`: FECHA EMISIÓN vs. FECHA SALIDA
+
+**Publicado antes de empezar:** commit `74c1478` ("docs: registrar diagnostico de cliente 464265") -- 3 archivos exactos (tres bitácoras). Push sin force: `d22829d..74c1478`. Post-push: local `74c1478` == remoto `74c1478` (confirmado por `git rev-parse origin/lector-mvp-guia-nueva`), `git status -sb` sin ahead/behind, working tree limpio. Desktop verificado sin tocar: HEAD `fba95ac`, working tree limpio.
+
+**Checkpoint verificado antes de diagnosticar:** Motor HEAD `74c1478`, local=remoto, working tree limpio.
+
+**Ground truth desde la imagen canónica de `464367`** (SHA-256 verificado contra el manifiesto), recortes ampliados de cabecera y de la zona RETIRA/PATENTE/FECHA:
+- FECHA DE EMISIÓN: **`04-08-2026`**.
+- FECHA SALIDA: **`06-08-2026`**.
+- Otra fecha presente: FECHA LLEGADA `08-08-2026` (además de una nota de entrega suelta "06.08 ... Hrs Cristian ..." dentro del campo MOTIVO de la tabla TIPO DE DOCUMENTO/FOLIO/FECHA/MOTIVO, sin etiqueta de fecha propia).
+
+**Objetivo único:** determinar por qué `extraer_fecha()` devuelve `06-08-2026` (FECHA SALIDA) en vez de `04-08-2026` (FECHA DE EMISIÓN, campo canónico) para esta guía.
+
+**Trazado completo con OCR real dirigido, TEMP:**
+
+1. **Orden lineal OCR real** (`atlas_core.ocr_provider.crear_proveedor_ocr("paddleocr").leer_texto()`, exactamente lo que recibe `extraer_datos()`/`extraer_fecha()` como `textos`):
+   ```
+   [013] '04-08-2026'
+   [014] 'ORDEN DE COMPRA'
+   [015] '1052,530822 / 0030021561'
+   [016] 'FECHA DE EMISIÓN'
+   ...
+   [107] 'FECHA SALIDA'
+   [108] '06-08-2026'
+   ```
+   El **valor** de FECHA DE EMISIÓN aparece en la posición 013, tres bloques **antes** que su propia **etiqueta** (posición 016) -- orden invertido. FECHA SALIDA, en cambio, aparece con su etiqueta (107) inmediatamente antes de su valor (108) -- orden normal.
+2. **`extraer_fecha()` real** (`procesamiento_masivo.py:407`): devuelve `'06-08-2026'`.
+3. **`_clasificar_contexto_fecha()` real** (línea 302, ventana de 120 caracteres hacia atrás y 40 hacia adelante alrededor de cada candidato) aplicada a cada candidato del texto lineal real:
+   - `'04-08-2026'` → prioridad **3 (`GLOBAL`)** -- el contexto (`...CODIGO CTIENTE\n0001004741\n04-08-2026\nORDEN DE COMPRA\n1052,530822 / 003002156...`) no contiene "FECHA DE EMISION" en absoluto. Medido con precisión: entre el candidato y su propia etiqueta hay **42 caracteres** ("ORDEN DE COMPRA\n1052,530822 / 0030021561\n") -- **2 caracteres más que el límite de 40 hacia adelante** de la ventana.
+   - `'06-08-2026'` → prioridad **1 (`FECHA SALIDA`)** -- el contexto sí contiene "FECHA SALIDA" inmediatamente antes.
+   - Al comparar prioridades (menor = mejor), `06-08-2026` (prioridad 1) le gana a `04-08-2026` (prioridad 3) -- de ahí el resultado incorrecto.
+4. **`_extraer_fecha_geometrico()` real** (`atlas_core/extractor.py:662`, ubica por posición 2D real en la imagen, inmune al orden de lectura): `{'valor': '04-08-2026', 'caja': (205.0, 353.0, 271.0, 368.0), 'confianza': 0.9348}` -- **encuentra correctamente la FECHA DE EMISIÓN real**, con alta confianza, sin ambigüedad (esta función además excluye explícitamente FECHA SALIDA/LLEGADA como candidatos rivales, `es_etiqueta_fecha_rival`, línea 679).
+5. **Por qué el respaldo geométrico nunca se ejecuta:** en `procesamiento_masivo.py:1184-1228`, el bloque que invoca `_extraer_fecha_geometrico()` + relectura focal con consenso sólo se dispara `if fecha_actual == "No encontrado":`. Como `extraer_fecha()` ya devolvió `'06-08-2026'` (no vacío), ese bloque nunca se ejecuta -- el candidato correcto, ya localizado con alta confianza por geometría, queda calculable pero sin usarse.
+
+**Respuestas exactas a las 9 preguntas del bloque:**
+1. ¿FECHA DE EMISIÓN aparece correctamente en OCR? Sí, la etiqueta se leyó bien (conf. alta).
+2. ¿Su valor aparece correctamente? Sí, `'04-08-2026'` se leyó bien (conf. 0.935 según el bloque geométrico).
+3. ¿FECHA SALIDA aparece correctamente? Sí.
+4. ¿Su valor aparece correctamente? Sí, `'06-08-2026'`.
+5. ¿Qué fecha captura primero el extractor lineal? Ninguna "primero" en el sentido de posición -- el extractor evalúa TODOS los candidatos y elige por prioridad de contexto; gana `06-08-2026` por tener mejor prioridad (1 vs. 3).
+6. ¿Existe respaldo geométrico para fecha? Sí, `_extraer_fecha_geometrico()`, y encuentra el valor correcto.
+7. ¿El respaldo geométrico encuentra la fecha correcta? Sí, `04-08-2026`, alta confianza, sin ambigüedad.
+8. ¿Se bloquea porque ya existe una fecha lineal no vacía? Sí -- exactamente igual que el hueco ya documentado en el bloque de fecha de `464265` (el trigger es sólo `"No encontrado"`).
+9. ¿Es el mismo patrón estructural que produjo COMUNA en `464264`, o sólo se parece superficialmente? **Comparten el mismo origen** (el orden de lectura del OCR no preserva la adyacencia label→valor en un layout de dos columnas), **pero el mecanismo de fallo en código es distinto**: en COMUNA, un regex de captura (`.+?` sin cruzar líneas) terminó atrapando una etiqueta vecina ajena como si fuera el valor (`buscar_obra_destino`). Aquí, el candidato correcto SÍ se captura como texto -- lo que falla es la CLASIFICACIÓN DE CONTEXTO por ventana de caracteres fija (`_clasificar_contexto_fecha`), que pierde de vista la etiqueta propia por sólo 2 caracteres y deja ganar a un candidato rival con contexto correctamente adyacente.
+
+**Causa raíz clasificada: B. ORDEN_LINEAL_OCR** (primaria -- la inversión de orden label/valor es la causa física) → cascada a **D. CANDIDATO_CORRECTO_DESCARTADO** (pierde la comparación de prioridad de contexto por la ventana fija) → **E. FALLBACK_GEOMETRICO_BLOQUEADO** (el mecanismo que sí acierta nunca se ejecuta porque el trigger exige `"No encontrado"`).
+
+**Controles (mínimo 3, layout AZA, lote actual):** `464264`, `464488`, `464494` -- en los tres, confirmado con OCR real, la etiqueta "FECHA DE EMISIÓN" aparece **siempre inmediatamente antes** de su valor en el orden de lectura (`extraer_fecha()` y `_extraer_fecha_geometrico()` coinciden exactamente en los tres, sin inversión). `464367` es el único caso de los 4 examinados (y de los ya auditados en el bloque de fecha anterior) con esta inversión específica de orden.
+
+**Semántica canónica del campo `fecha` -- auditada, sin ambigüedad:** `docs/HANDOFF_ATLAS.md` (checkpoint histórico "F2 completado y auditado") documenta explícitamente que el mecanismo de recuperación OCR focal fue construido específicamente para **FECHA DE EMISIÓN** -- confirmado además por el propio código: `_extraer_fecha_geometrico()` sólo reconoce la etiqueta "FECHA (DE) EMISION" como ancla válida y excluye explícitamente "FECHA SALIDA"/"FECHA LLEGADA" como candidatos rivales (`es_etiqueta_fecha_rival`). No hay ambigüedad histórica que resolver -- el campo `fecha` representa FECHA DE EMISIÓN.
+
+**Variantes de corrección evaluadas, con riesgos distintos entre sí -- ninguna implementada:**
+1. **Comprobación barata de corroboración (sin llamadas OCR adicionales):** calcular siempre `_extraer_fecha_geometrico()` (no cuesta OCR extra -- opera sobre los bloques ya obtenidos) y comparar contra `fecha_actual`; si difieren en la fecha calendario real, añadir un motivo nuevo tipo `FECHA_SIN_CORROBORAR` (mismo patrón que `OBRA_DESTINO_SIN_CORROBORAR`/`CLIENTE_SIN_CORROBORAR`) **sin cambiar el valor guardado**. Riesgo principal: la tasa de falsos positivos sobre el histórico completo no está medida (sólo se dispone de 5 guías reales de evidencia en este bloque) -- podría señalar guías sin problema real si la geometría produce candidatos discordantes por otras razones no vistas todavía.
+2. **Verificación profunda con autocorrección condicionada:** ampliar el disparador de la relectura focal con consenso (ya usada para el caso "No encontrado") para que también se ejecute ante discrepancia lineal/geométrica, y si el consenso confirma la fecha geométrica, usarla en vez de la lineal. Más caro (relecturas OCR adicionales en documentos con discrepancia) y de mayor riesgo -- cambia automáticamente un valor ya "presente", algo que esta auditoría ha evitado deliberadamente en todos los bloques anteriores salvo con evidencia inequívoca.
+3. **Ampliar la ventana de caracteres de `_clasificar_contexto_fecha`** (de 120/40 a un valor mayor): la más simple de implementar, pero es exactamente el tipo de "heurística temporal" que este bloque pidió explícitamente no asumir como solución -- un valor de ventana mayor sigue siendo arbitrario y podría generar coincidencias de contexto nuevas e incorrectas en otras guías no evidenciadas aquí.
+4. **No implementar nada:** `464367` ya está cerrada por su hallazgo de patente, no bloquea ninguna promoción, y no tiene un documento hermano en su viaje (transporte `0000351370` sólo tiene esta guía) que ya la señale como `CONFLICTO_FECHA` -- a diferencia de `464265`, aquí no hay una red de seguridad ya activa cubriendo este caso específico.
+
+Ninguna de las cuatro es tan claramente "la única opción segura" como lo fueron los fixes ya publicados de material (evidencia repetida, mecanismo ya vetado) y obra_destino (una única solución que reutilizaba infraestructura exacta sin alternativas plausibles). Siguiendo el mismo criterio conservador aplicado en todo este bloque de auditoría, se presentan las cuatro variantes para decisión de Javier en vez de elegir una arbitrariamente.
+
+**Fix implementado: NO.**
+
+**Tests:** ninguno nuevo -- no hubo cambio de código.
+
+**Suite:** sin cambios -- se mantiene 1210 passed, 0 failed (no se repitió, código byte-idéntico a `74c1478`).
+
+**Drive:** no modificado -- bloque 100% lectura (imagen vía TEMP con SHA-256 verificado, catálogos). `PREDICCION_CONGELADA.sha256` -- `OK`. `mtime` de `operacion/actual/analisis_completo_guias.csv` sin cambios. Carpeta TEMP eliminada al terminar.
+
+**Git:** Motor sin cambios de código -- working tree con sólo estas tres bitácoras. Sin commit, sin push de este bloque.
+
+**Cliente `464265`:** cerrado sin fix en el bloque anterior, no reabierto aquí.
+
+**Pendientes explícitos, sin iniciar:** decisión de Javier sobre las 4 variantes de fecha `464367`; relectura focal de RUT para cliente `464265` (FIX_B, registrado); demás hallazgos del lote de 15.
+
+**Estado: DIAGNÓSTICO FECHA 464367 COMPLETADO -- REQUIERE DECISIÓN.**
