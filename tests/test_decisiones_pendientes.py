@@ -120,7 +120,7 @@ def test_obra_desconocida_transporta_cliente_reconocido_separado_de_la_obra(tmp_
         carpeta_catalogos=carpeta,
     )
     d=next(x for x in ds if x["tipo"]=="OBRA_DESCONOCIDA")
-    assert d["contexto"]=={"cliente_id":cliente.cliente_id,"cliente_canonico":"CLIENTE CANONICO SA"}
+    assert d["contexto"]=={"cliente_id":cliente.cliente_id,"cliente_canonico":"CLIENTE CANONICO SA","destino_documental":""}
     assert d["valor_documental"]=="OBRA NUEVA"
     assert d["valor_documental"]!=d["contexto"]["cliente_canonico"]
     assert d["identidad_resuelta"] is None  # la obra en sí sigue sin resolverse

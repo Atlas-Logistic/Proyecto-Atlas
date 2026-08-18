@@ -1848,3 +1848,150 @@ Clasificación A–E completa de los 24 motivos, matriz motivo↔decisión, y pl
 **Rollback**: no requerido -- cero diferencias inesperadas en toda la validación. Backup preservado, no eliminado. Motor y Desktop verificados sin cambios de código tras la operación (`git status --short` vacío en ambos, HEAD `2cb67cb`/`87b9c8c` intactos) -- el único cambio en el working tree del Motor son estas tres entradas de bitácora, sin commit.
 
 **Estado: FIX RUT APLICADO REALMENTE -- LISTO PARA PASO 2.**
+## 2026-08-17 — Paso 2: R3.4.2, cierre del ciclo `OBRA_DESCONOCIDA→DESTINO_SIN_CONFIRMAR→REVALIDACIÓN`
+
+**Checkpoint verificado antes de tocar código:** Motor `lector-mvp-guia-nueva` HEAD `f770958`, local=remoto, ahead/behind 0/0, working tree limpio. Desktop `fix-desktop-data-root-drag-drop` HEAD `87b9c8c`, working tree limpio. Drive accesible en `G:\Mi unidad\Atlas`, tratado READ-ONLY durante todo el desarrollo.
+
+**Fase A -- reproducción y auditoría (antes de modificar nada):** se leyeron completos `aplicacion_decisiones.py`, `decisiones_pendientes.py`, `revalidacion_documental.py` y `catalogo_obras_destinos.py`, y se confirmó contra Drive real (read-only) el estado exacto de los dos casos reales:
+
+| guía | obra_id | estado obra | `relaciones` | `motivos_revision_documento` (CSV real) |
+|---|---|---|---|---|
+| 464718 | `c3304fe6-6138-42a1-b0ee-5234b64d70e3` | `OBSERVADA`/`ACTIVO` | `[]` | `OBRA_DESTINO_SIN_CORROBORAR` |
+| 464746 | `c7fcb561-cff0-4893-a2a2-5990c965a972` | `OBSERVADA`/`ACTIVO` | `[]` | `OBRA_DESTINO_SIN_CORROBORAR` |
+
+Ambos ledger entries (`decisiones_aplicadas.json` real) confirman `OBRA_DESCONOCIDA`→`REGISTRAR` aplicado por `JAVIER_DESKTOP`, sin `destino_id`. Ambas filas del CSV real tienen `despachar_a_crudo` no vacío (`RICARDO MORALES 3369 SAN MIGUEL SAN MIGUEL` / `CAM. EL NOVICIADO LAMPA LAMPA`) -- destino documental SÍ existe, así que los dos casos reales caen en CASO B (confirmación humana), no en CASO C.
+
+**Causa raíz exacta (dos factores, no uno):**
+1. `detectar_decisiones_documento` (`decisiones_pendientes.py:296-386`) sólo puede emitir `DESTINO_SIN_CONFIRMAR` dentro del `elif` que exige `obras` no vacío (línea ~353) -- necesita un `obra_id` ya resuelto. Cuando la obra es realmente desconocida (`not obras`, línea 329), sólo se emite `OBRA_DESCONOCIDA`; la dirección documental (`despachar_a_documental`, ya resuelta por `resolver_entrega_documento` y disponible en ese momento) se **descartaba** -- no se guardaba en ningún lado.
+2. `aplicar_decision_obra` (`aplicacion_decisiones.py:212-243`), al aplicar `OBRA_DESCONOCIDA`/`REGISTRAR`, llama `registrar_observacion(cliente_id=..., nombre_obra=...)` **sin** `destino_id` -- la obra queda creada pero sin relación. Y el único mecanismo que corre después de aplicar una decisión, `regenerar_decisiones_persistidas`, **reclasifica decisiones ya persistidas** (filtra/actualiza contexto) pero nunca **sintetiza un tipo nuevo** a partir de datos ya observados -- no existía ninguna vía, ni al aplicar ni al regenerar, para que apareciera la pregunta de destino. Documento y obra quedan en un callejón sin salida real, confirmado con evidencia (no supuesto).
+
+**Fix implementado, aditivo sobre el contrato de R3.4:**
+1. `detectar_decisiones_documento`: el `contexto` de `OBRA_DESCONOCIDA` ahora incluye `destino_documental` (mismo valor de `despachar_a_documental`, sin nueva extracción) -- dato que antes se perdía. No cambia `decision_id` (contexto no participa de la identidad).
+2. Nueva función `decision_destino_para_obra_registrada(*, obra, cliente_id, cliente_canonico, destino_documental, documento, catalogo_obras)` en `decisiones_pendientes.py`. Reconstruye, sin OCR, la misma decisión `DESTINO_SIN_CONFIRMAR` que `detectar_decisiones_documento` habría generado si la obra ya hubiera existido:
+   - **CASO A** (destino ya corroborable): si `catalogo_obras.resolver_obra_destino_confirmada_global(nombre_obra=obra.nombre_canonico)` ya resuelve, devuelve `None` -- nada redundante que preguntar.
+   - **CASO B** (confirmación humana): si hay `destino_documental` no ausente, genera la decisión `DESTINO_SIN_CONFIRMAR` completa (mismo `campo`, `evidencias`, `acciones_permitidas`, `contexto` que generaría la detección en vivo).
+   - **CASO C** (información insuficiente): `destino_documental` ausente/vacío -- o decisión persistida de antes de este cambio, sin el campo -- devuelve `None`. Nunca inventa.
+3. Conectado en dos puntos:
+   - `aplicar_decision_obra`, rama `OBRA_DESCONOCIDA`/`REGISTRAR`: justo después de `registrar_observacion`, calcula `decision_siguiente` con la función anterior y, si no es `None`, la agrega a `restantes` antes de `generar_artefacto` -- entra a la bandeja publicada en la misma transacción que registra la obra.
+   - `regenerar_decisiones_persistidas`, en el punto donde ya hacía `continue` silencioso al encontrar que una `OBRA_DESCONOCIDA` persistida referencia una obra que **ya existe** (por cualquier vía, no sólo la propia decisión) -- ahora, antes de descartarla, intenta sintetizar su propia pregunta de destino con la misma función y la agrega al resultado. Cubre el caso general (otra guía, misma obra, registrada por un camino distinto) sin reparar nada a mano.
+
+**Idempotencia y no-resurrección, por diseño existente, no por código nuevo:** `decision_id` de la decisión sintetizada es determinístico (hash de tipo+documento+campo+valor_documental+evidencias, igual que si se hubiera generado en vivo). `generar_artefacto` ya filtra contra `decisiones_aplicadas.json` (`ids_terminales`) antes de publicar -- así que si `regenerar_decisiones_persistidas` vuelve a sintetizar una decisión ya `CONFIRMAR`/`NO_CONFIRMAR`, `generar_artefacto` la descarta igual: nunca resucita. Verificado con test explícito (`test_rechazo_terminal_de_la_nueva_decision_no_resucita_al_regenerar`). R3.5/R3.5.1 (regeneración encadenada A→B, ventana legacy de bandeja) no se tocaron.
+
+**Desktop:** verificado ANTES de tocar Motor que `decisiones_pendientes_ui.js` ya renderiza y aplica `DESTINO_SIN_CONFIRMAR` de forma completamente genérica (mismo mecanismo que `OBRA_DESCONOCIDA`/`VEHICULO_DESCONOCIDO`, opciones `Confirmar`/`No confirmar`/`Decidir después`, tarjeta con "Obra reconocida"). No hace falta ninguna brecha que cerrar del lado Desktop -- se dejó intacto, tal como exige el roadmap.
+
+**Tests (`tests/test_ciclo_obra_destino_r342.py`, 13 nuevos):** CASO B genera la decisión siguiente con todos los campos correctos; CASO C (destino vacío y "No encontrado") no inventa; CASO A (obra ya corroborable por otra vía) no genera decisión redundante ni duplica obra/relación; decisión consecutiva obra→destino sin `DecisionObsoletaError`, con revalidación automática y motivo retirado del CSV; decidir después (POSPONER) permanece pendiente sin escribir nada; rechazo terminal no resucita al regenerar; idempotencia (repetir regeneración y reaplicar REGISTRAR no duplican); motivos independientes preservados; regeneración general sintetiza para otra guía con la misma obra (Path 2) y se abstiene sobre decisiones legado sin el campo nuevo; obsolescencia normal preservada también para la decisión sintetizada. Más 1 test existente actualizado (`test_obra_desconocida_transporta_cliente_reconocido_separado_de_la_obra`, contexto esperado ahora incluye `destino_documental`).
+
+**Suites ejecutadas:** focalizados (`test_ciclo_obra_destino_r342.py`) **13 passed**. Grupo relacionado (obra/destino/decisión/vehículo R3.6/revalidación, `-k "obra or destino or decision or vehiculo_r36 or revalidacion"`) **265 passed**. Suite completa del Motor: **1170 passed, 0 failed** (baseline 1157 + 13).
+
+**Validación real read-only sobre 464718 y 464746** (sin escribir en Drive; hash de `obras_destinos.json`/`destinos_maestros.json` verificado idéntico antes/después): se llamó `decision_destino_para_obra_registrada` directamente con la obra real ya cargada de `obras_destinos.json` y el `despachar_a_crudo` real de cada guía leído del CSV real.
+- 464718: obra `CONSULTORES EN ARQUITECTURA` (`OBSERVADA`) → decisión `DESTINO_SIN_CONFIRMAR`, `valor_documental="RICARDO MORALES 3369 SAN MIGUEL SAN MIGUEL"`, `identidad_resuelta.entidad_id="c3304fe6-6138-42a1-b0ee-5234b64d70e3"`, `acciones_permitidas=["CONFIRMAR","NO_CONFIRMAR","POSPONER"]`.
+- 464746: obra `EMPRESA CONSTRUCTORA MENA Y` (`OBSERVADA`) → decisión `DESTINO_SIN_CONFIRMAR`, `valor_documental="CAM. EL NOVICIADO LAMPA LAMPA"`, `identidad_resuelta.entidad_id="c7fcb561-cff0-4893-a2a2-5990c965a972"`, misma `acciones_permitidas`.
+
+Confirma que el fix general produce exactamente el siguiente paso correcto para ambos casos reales, sin código específico para ninguno de los dos. **No se reparó el histórico real** -- 464718/464746 siguen atrapados hoy en Drive; la reconciliación real (aplicar esto contra Drive, con backup/rollback) queda deliberadamente para el bloque siguiente, tal como instruye el roadmap.
+
+**Estructura:** todo el desarrollo permaneció dentro de `Proyecto-Atlas/` (código) y el scratchpad de sesión (validación read-only temporal, eliminado). Sin clones, sin carpetas de prueba permanentes, sin `v2`.
+
+**Drive modificado: NO.** Sin commit ni push en ningún repo -- working tree del Motor con `atlas_core/decisiones_pendientes.py`, `atlas_core/aplicacion_decisiones.py`, `tests/test_ciclo_obra_destino_r342.py` (nuevo) y `tests/test_decisiones_pendientes.py` modificados, más estas tres bitácoras.
+
+**Estado: LISTO PARA VALIDACIÓN REAL** (aplicación controlada sobre Drive para 464718/464746 -- y cualquier otra guía real en el mismo estado -- queda para el bloque siguiente, con el mismo procedimiento de backup/rollback ya usado en bloques anteriores).
+## 2026-08-17 — Paso 3: R3.4.3, reconciliación histórica del ciclo obra→destino aplicada realmente
+
+**Checkpoint verificado antes de continuar:** Motor `f770958`, working tree con exactamente el diff del Paso 2 (`git diff --stat` idéntico), Desktop `87b9c8c` limpio, suite `1170 passed, 0 failed` sin cambios desde el cierre del Paso 2.
+
+**Intento inicial de validación real -- descubrió una brecha real, no asumida:** copié (read-only) los archivos reales relevantes a TEMP y ejecuté exactamente el mecanismo implementado en el Paso 2 contra el estado real: (1) reaplicar la decisión original `OBRA_DESCONOCIDA` de 464718 vía `aplicar_decision_obra` → `{'idempotente': True}`, sin efecto (el ledger corta la ejecución antes de llegar al bloque de síntesis); (2) regenerar la bandeja pendiente real actual (`decisiones_pendientes.json`, que hoy tiene `"decisiones": []`) vía `regenerar_decisiones_persistidas` + `generar_artefacto` → 0 decisiones resultantes. Causa exacta: las dos vías del Paso 2 (síntesis inline al `REGISTRAR`, y reclasificación de decisiones *todavía pendientes*) no cubren una `OBRA_DESCONOCIDA` que ya fue aplicada *antes* de que el fix existiera -- el `contexto.destino_documental` nunca se persistió para esas dos aplicaciones ya hechas, y el ledger (`decisiones_aplicadas.json`) no guarda `contexto`. Reportado como `BLOQUEADO` y consultado a Javier antes de continuar.
+
+**Autorización recibida:** diseñar y, sólo si resulta determinístico/conservador (sin OCR, sin fuzzy, sin heurísticas, reutilizando exclusivamente identidad canónica ya persistida), implementar una reconciliación histórica general -- 464718/464746 deben entrar por la regla general, no por excepción en código.
+
+**Diseño de la regla de elegibilidad (validado primero con un scan read-only sobre el ledger real completo, antes de escribir código):** para cada aplicación `OBRA_DESCONOCIDA`/`REGISTRAR` en `decisiones_aplicadas.json` -- 3 en el ledger real -- se reconstruye `DESTINO_SIN_CONFIRMAR` si y sólo si: (1) la obra referenciada por `obra_id` (del ledger, nunca inferido) existe y sigue `ACTIVA`; (2) el cliente referenciado por `cliente_id` (ídem) existe y sigue `ACTIVO`; (3) existe EXACTAMENTE una fila en el dataset con el mismo `numero_guia` que el ledger asocia a esa aplicación; (4) el `obra_destino` documental de esa fila normaliza EXACTO (sin fuzzy, `normalizar_nombre_obra`, misma regla que usa todo el resto del módulo) al nombre/alias de la MISMA obra -- si no coincide, se descarta sin adivinar; (5) esa fila trae `despachar_a_crudo` no ausente (CASO B; si no lo trae, CASO C, se abstiene); (6) delega en `decision_destino_para_obra_registrada` (ya existente de R3.4.2) para el chequeo CASO A (obra ya corroborada -> se abstiene). Scan real sobre el ledger completo (3 aplicaciones): 464715 se excluye correctamente (relación ya `CONFIRMADA`), sólo 464718/464746 pasan la regla -- **confirmado antes de escribir una sola línea de código de producción**.
+
+**Implementación:** dos funciones nuevas en `atlas_core/revalidacion_documental.py` (mismo módulo que ya hace "leer dataset + reconciliar contra catálogos vigentes, sin OCR" para los otros dos motivos de R3.4/R3.6.2):
+- `detectar_decisiones_destino_historicas_sin_ocr(*, raiz_atlas)` -- pura lectura, devuelve la lista de decisiones candidatas. Reutiliza `_leer_filas`/`_AUSENTES` ya existentes en el módulo y `decision_destino_para_obra_registrada` de `decisiones_pendientes.py` (import diferido dentro de la función, mismo patrón ya usado en `revalidar_y_regenerar_reporte` para `NOMBRE_ARTEFACTO` -- sin ciclo de imports, verificado).
+- `reconciliar_decisiones_destino_historicas(*, raiz_atlas, reloj=...)` -- combina la bandeja pendiente vigente con las candidatas (vía `regenerar_decisiones_persistidas` + `generar_artefacto`, igual patrón que el resto del sistema) y publica. Sólo escribe `decisiones_pendientes.json`; no toca catálogos, CSV ni ledger. Idempotencia y no-resurrección de decisiones terminales garantizadas por el mismo filtro contra el ledger que ya usa `generar_artefacto` -- no hay lógica nueva de deduplicación.
+
+**Tests (`tests/test_reconciliacion_historica_destino_r343.py`, 14 nuevos):** candidato básico con todos los campos correctos; CASO A (obra ya confirmada, sin candidato); CASO C (destino ausente, sin candidato); fila de dataset ausente; fila ambigua (2 filas con mismo `numero_guia`); `obra_destino` de la fila no coincide con la obra del ledger (correlación no confiable, se descarta); obra inactiva; cliente inactivo; otros tipos/acciones del ledger ignorados (`VEHICULO_DESCONOCIDO`, `NO_REGISTRAR`); reproducción genérica del caso real completo (3 obras, 2 generan candidato, 1 ya confirmada no); publicación sin tocar catálogos/CSV/ledger; idempotencia (repetir no duplica); no resurrección de decisión terminal (simulando un `NO_CONFIRMAR` previo con el mismo `decision_id` determinístico); preserva otras decisiones pendientes no relacionadas. Suite completa: **1184 passed, 0 failed** (baseline 1170 + 14), sin regresiones.
+
+**Dry-run real (no simulado, la función real contra los datos reales, read-only):** `detectar_decisiones_destino_historicas_sin_ocr(raiz_atlas="G:\Mi unidad\Atlas")` → exactamente 2 candidatas, `464718` (destino "RICARDO MORALES 3369 SAN MIGUEL SAN MIGUEL") y `464746` (destino "CAM. EL NOVICIADO LAMPA LAMPA"), cada `decision_id` reproducible byte a byte al repetir la llamada (determinismo verificado con dos corridas idénticas).
+
+**Backup:** `respaldos/CICLO_OBRA_DESTINO_ROLLBACK_PRE_APLICACION_20260817_210220/` con `MANIFIESTO_ROLLBACK_CICLO_OBRA_DESTINO.json` -- copia de `decisiones_pendientes.json` (único archivo real que la operación modificaría in-place), SHA-256 `10379C4F...38BD847` verificado idéntico entre original y copia antes de escribir.
+
+**Aplicación real:** `reconciliar_decisiones_destino_historicas(raiz_atlas="G:\Mi unidad\Atlas")` → `{'decisiones_candidatas': 2, 'decisiones_publicadas': 2}`. `decisiones_pendientes.json` real pasó de `"decisiones": []` a 2 decisiones `DESTINO_SIN_CONFIRMAR`, cada una con `identidad_resuelta.entidad_id`/`contexto.obra_id` apuntando a la obra real ya registrada (`c3304fe6...`/`c7fcb561...`) y `contexto.cliente_id` al cliente real (`fb859a71...`/`840418bf...`), `acciones_permitidas=["CONFIRMAR","NO_CONFIRMAR","POSPONER"]`.
+
+**Integridad verificada, dos formas independientes:** (1) SHA-256 de `obras_destinos.json`, `destinos_maestros.json`, `clientes.json`, `vehiculos.json`, `analisis_completo_guias.csv`, `decisiones_aplicadas.json` y `estado_operacion.json` idénticos antes/después. (2) Escaneo de `mtime` de **todo** el árbol de `G:\Mi unidad\Atlas` en la ventana de los últimos 5 minutos del bloque: únicamente aparecen el backup nuevo y `operacion/actual/decisiones_pendientes.json` -- ningún otro archivo en todo Drive fue tocado.
+
+**No se aplicó ni confirmó ninguna decisión en este bloque** -- ninguna llamada a `aplicar_decision_obra` contra Drive real; las dos decisiones quedan `PENDIENTE`, listas para que Javier las revise/aplique desde Desktop.
+
+**Desktop:** sin cambios de código. Verificado en el Paso 2 que ya renderiza/aplica `DESTINO_SIN_CONFIRMAR` genéricamente -- las dos decisiones nuevas deberían aparecer en Revisión de Atlas sin ningún cambio adicional.
+
+**Drive modificado: SÍ -- únicamente `operacion/actual/decisiones_pendientes.json` y el backup nuevo.** Rollback: no requerido (resultado exactamente igual al dry-run). Backup preservado, no eliminado.
+
+**Estructura:** sin carpetas nuevas fuera de `respaldos/` (backup) y sin tocar `Proyecto-Atlas/` fuera de los archivos ya listados. TEMP del dry-run inicial eliminado al terminar.
+
+**Git:** sin commit, sin push. Working tree del Motor: `atlas_core/revalidacion_documental.py` modificado (+2 funciones) y `tests/test_reconciliacion_historica_destino_r343.py` nuevo, sobre el diff ya existente del Paso 2, más estas tres bitácoras.
+
+**Estado: DECISIONES RECONCILIADAS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.** Próximo paso: Javier abre Atlas Viajes DESARROLLO → Revisión de Atlas y confirma visualmente que 464718/464746 aparecen como `DESTINO_SIN_CONFIRMAR` con el destino documental correcto -- sin confirmar nada todavía.
+## 2026-08-17 — Cierre de jornada: validación visual manual confirmada
+
+**Validación de Javier, reportada y registrada tal cual:** abrió Atlas Viajes DESARROLLO → Revisión de Atlas y confirmó manualmente, contra las guías físicas:
+- **464718:** decisión visible en Revisión de Atlas; obra mostrada correcta (`CONSULTORES EN ARQUITECTURA`); destino mostrado (`RICARDO MORALES 3369 SAN MIGUEL SAN MIGUEL`) coincide con la guía física.
+- **464746:** decisión visible en Revisión de Atlas; obra mostrada correcta (`EMPRESA CONSTRUCTORA MENA Y`); destino mostrado (`CAM. EL NOVICIADO LAMPA LAMPA`) coincide con la guía física.
+
+**Ninguna decisión fue aplicada.** Ambas siguen `PENDIENTE` -- no se ejecutó `CONFIRMAR`/`NO_CONFIRMAR`/`POSPONER` sobre ninguna de las dos, ni desde Desktop ni desde script.
+
+**Verificación de continuidad al cierre (read-only):**
+- `decisiones_pendientes.json` real: 2 decisiones, ambas `DESTINO_SIN_CONFIRMAR` (464718, 464746), sin cambios desde la reconciliación del bloque anterior (hash `99CEE79B...E166BD96`).
+- SHA-256 de `obras_destinos.json`, `destinos_maestros.json`, `clientes.json`, `vehiculos.json`, `analisis_completo_guias.csv`, `decisiones_aplicadas.json`, `estado_operacion.json`: idénticos a los verificados al cierre del bloque anterior -- nada cambió.
+- Backups preservados en `respaldos/`: `R3_6_2_ROLLBACK_PRE_APLICACION_20260817_165251/`, `FIX_RUT_ROLLBACK_PRE_APLICACION_20260817_193719/`, `CICLO_OBRA_DESTINO_ROLLBACK_PRE_APLICACION_20260817_210220/` -- ninguno eliminado.
+- Motor: `git status --short` idéntico al del bloque anterior (mismo diff sin código nuevo). Desktop: `git status --short` vacío, HEAD `87b9c8c` intacto.
+
+**No se hizo commit ni push** -- pendiente hasta validar el ciclo completo (aplicar realmente ambas decisiones y confirmar que la relación obra↔destino se crea, la revalidación corre y `OBRA_DESTINO_SIN_CORROBORAR` desaparece del dataset real cuando corresponde).
+
+**Continuidad para la siguiente sesión, registrada explícitamente:**
+1. Abrir Atlas Viajes DESARROLLO.
+2. Aplicar `464718` y `464746` desde Revisión de Atlas (no por script).
+3. Verificar que se creen las relaciones obra↔destino en `obras_destinos.json` (vía la misma validación read-only ya usada en bloques anteriores).
+4. Verificar que la revalidación documental automática (`revalidacion` en la respuesta de `aplicar_decision_obra`, disparada por R3.4.2 al `CONFIRMAR`) corra sin error.
+5. Confirmar que `OBRA_DESTINO_SIN_CORROBORAR` desaparezca de las filas `464718`/`464746` del dataset real cuando corresponda.
+6. Regenerar/revisar el reporte de viajes vigente y confirmar el nuevo conteo `CONFIRMADO`/`REQUIERE_REVISION`.
+7. Si el ciclo completo queda correcto: commit + push del bloque completo (Paso 2 R3.4.2 + Paso 3 R3.4.3), incluyendo código, tests y bitácoras.
+
+**Estado: JORNADA CERRADA -- LISTO PARA CONTINUAR MAÑANA DESDE VALIDACIÓN FINAL DEL CICLO OBRA→DESTINO.**
+## 2026-08-18 — Validación técnica final del ciclo obra→destino tras las dos aplicaciones reales de Javier
+
+**Contexto:** Javier aplicó realmente, desde Atlas Viajes DESARROLLO → Revisión de Atlas, `CONFIRMAR` sobre las dos decisiones `DESTINO_SIN_CONFIRMAR` reconciliadas en el Paso 3 (464718, 464746), cada una una sola vez, con verificación visual previa contra las guías físicas. Este bloque es verificación técnica read-only de ese resultado -- ningún cambio de código.
+
+**1. Ledger (`decisiones_aplicadas.json`), 10 aplicaciones totales, sin duplicados:**
+- `07be45c6...` `OBRA_DESCONOCIDA`/`REGISTRAR` 464718 (Paso 2, previo).
+- `8230f78d...` `OBRA_DESCONOCIDA`/`REGISTRAR` 464746 (Paso 2, previo).
+- `0813d038...` `DESTINO_SIN_CONFIRMAR`/`CONFIRMAR` 464718, actor `JAVIER_DESKTOP`, `2026-08-18T12:47:37Z`, `destino_id=f733b08b-...`, `relacion_id=a5c857e1-...`.
+- `93b8059d...` `DESTINO_SIN_CONFIRMAR`/`CONFIRMAR` 464746, actor `JAVIER_DESKTOP`, `2026-08-18T12:51:41Z`, `destino_id=99b148c8-...`, `relacion_id=861e21d9-...`.
+- Nótese que `dataset_sha256` de la segunda aplicación (`6378F695...`) difiere del de la primera (`5FE0F384...`) -- confirma que la revalidación automática de la primera aplicación corrió y cambió el dataset ANTES de que la segunda decisión se aplicara, sin `DecisionObsoletaError` -- exactamente la garantía de "decisión consecutiva sin obsolescencia" de R3.4.2/R3.5, ahora verificada con datos reales, no sólo con tests.
+- `decisiones_pendientes.json`: 0 decisiones.
+
+**2. Relaciones obra↔destino (`obras_destinos.json`/`destinos_maestros.json`), verificado por ID:**
+- 464718: obra `c3304fe6-...` `nombre_canonico="CONSULTORES EN ARQUITECTURA"`, `estado=CONFIRMADA`; relación `a5c857e1-...` `estado=CONFIRMADA`, `fuente_confirmacion=CONFIRMACION_HUMANA`, `confirmado_por=JAVIER_DESKTOP`; destino `f733b08b-...` `direccion="RICARDO MORALES 3369 SAN MIGUEL SAN MIGUEL"`. Unicidad: 1 obra con ese ID, 1 relación para esa obra.
+- 464746: obra `c7fcb561-...` `nombre_canonico="EMPRESA CONSTRUCTORA MENA Y"`, `estado=CONFIRMADA`; relación `861e21d9-...` `estado=CONFIRMADA`, misma fuente/actor; destino `99b148c8-...` `direccion="CAM. EL NOVICIADO LAMPA LAMPA"`. Unicidad: 1 obra, 1 relación.
+- Ambas relaciones traen evidencia `CONFIRMACION_HUMANA`/`SOPORTA` con `identificador_fuente` igual al `decision_id` de su `CONFIRMAR` -- trazabilidad completa decisión → relación.
+
+**3. Revalidación documental (`analisis_completo_guias.csv` real):**
+- 464718: `estado_procesamiento=OK`, `indicador_revision=OK`, `motivos_revision_documento=""` (antes `OBRA_DESTINO_SIN_CORROBORAR`).
+- 464746: mismo resultado -- `OK`/`OK`/`""` (antes `OBRA_DESTINO_SIN_CORROBORAR`).
+- Dataset completo: 28 filas, **27 OK / 1 REVISAR** (antes de las dos aplicaciones: 25/3). La única fila que sigue `REVISAR` trae `CLIENTE_AUSENTE` (motivo ajeno, no tocado por este flujo) -- no se asumió `OK` donde hay otro motivo legítimo.
+- Se generaron automáticamente 2 carpetas `reportes/reporte_revalidacion_2026081[8]_...` (una por cada `CONFIRMAR`, disparo ya implementado en R3.4.2), la segunda quedó publicada como `reporte_vigente` en `estado_operacion.json` (`fecha_actualizacion` `2026-08-18T12:51:45Z`).
+
+**4. Integridad -- dos verificaciones independientes:**
+- SHA-256 de `clientes.json`/`vehiculos.json`: idénticos a los capturados antes de las dos aplicaciones -- ningún catálogo ajeno al flujo fue tocado.
+- Escaneo de `mtime` de **todo** el árbol `G:\Mi unidad\Atlas` en la ventana de las dos aplicaciones: únicamente aparecen `obras_destinos.json`, `destinos_maestros.json`, `decisiones_aplicadas.json`, `decisiones_pendientes.json`, `analisis_completo_guias.csv`, `estado_operacion.json` y los archivos de las 2 carpetas de reporte nuevas -- nada más en todo Drive (choferes, empresas, plantas, rutas, destinos, telemetría, imágenes, caché, reportes históricos previos: todos intactos).
+
+**5. Viajes -- ya reflejaba la revalidación sin intervención manual, verificado sin asumirlo:** ejecuté `generar_reporte_viajes` como dry-run independiente (salida a TEMP fuera de Drive, eliminado al terminar) contra el dataset y catálogos reales actuales, y comparé columna por columna (excepto `fecha_creacion`, que cambia por ser timestamp de regeneración) contra el `viajes.csv` del reporte ya publicado como vigente -- **coinciden exactamente, cero diferencias**. Resultado: **24 viajes, 22 CONFIRMADO / 2 REQUIERE_REVISION** (antes de este bloque: 20/4). Los 2 que siguen `REQUIERE_REVISION`, ajenos a este bloque:
+- `0000352376`: `CONFLICTO_CLIENTE | CONFLICTO_OBRA_DESTINO` (conflicto real ya documentado, pendiente del bloque futuro "consolidación inteligente de viajes").
+- `0000353164`: `DOCUMENTO_REQUIERE_REVISION` (motivo documental sin relación con obra/destino, no investigado en este bloque -- fuera de alcance).
+
+No hizo falta regenerar nada realmente -- el reporte vigente ya estaba correcto.
+
+**Tests:** ningún cambio de código en este bloque; se conserva **1184 passed, 0 failed** sin repetir la suite.
+
+**Git:** working tree del Motor sin cambios de código adicionales -- sólo estas tres bitácoras. Desktop limpio, HEAD `87b9c8c` intacto.
+
+**Drive modificado: SÍ, exclusivamente por las dos aplicaciones reales de Javier desde Desktop** (no por ninguna acción de este bloque de verificación, que fue 100% read-only más un dry-run en TEMP fuera de Drive).
+
+**Estado: CICLO OBRA→DESTINO VALIDADO COMPLETAMENTE -- LISTO PARA PUBLICAR.** Queda pendiente, para el bloque siguiente y sólo si se autoriza explícitamente: commit + push del bloque completo (R3.4.2 + R3.4.3 -- código, tests, bitácoras).

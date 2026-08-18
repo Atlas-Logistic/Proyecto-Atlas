@@ -20,12 +20,15 @@ byte por byte igual.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
-from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+from atlas_core.catalogo_clientes import CatalogoClientes
+from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_vehiculos import (
     CatalogoVehiculosAusenteError,
     CatalogoVehiculosCorruptoError,
@@ -282,3 +285,159 @@ def revalidar_y_regenerar_reporte(
         raiz=raiz,
     )
     return {**resultado_revalidacion, "reporte_regenerado": True, "reporte_vigente": str(salida)}
+
+
+def detectar_decisiones_destino_historicas_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, object]]:
+    """R3.4.3: reconciliación histórica, READ-ONLY -- nunca escribe nada.
+
+    Para cada aplicación ``OBRA_DESCONOCIDA``/``REGISTRAR`` ya persistida en
+    el ledger (``decisiones_aplicadas.json``) -- una obra que Atlas ya
+    conoce porque Javier la registró, antes de que R3.4.2 existiera --
+    reconstruye, si corresponde, la decisión ``DESTINO_SIN_CONFIRMAR`` que
+    R3.4.2 habría generado en el momento de aplicar si el fix ya hubiera
+    existido. Reutiliza exclusivamente identidad canónica ya persistida por
+    Atlas: ``obra_id``/``cliente_id`` vienen del propio ledger (nunca se
+    infieren por nombre); el destino documental viene de la fila del
+    dataset con el MISMO ``numero_guia`` que el ledger asocia a esa
+    aplicación -- la misma clave exacta que todo el resto del sistema usa
+    para correlacionar decisión <-> documento, nunca coincidencia de texto
+    ni heurística. Sin OCR, sin volver a leer nada del documento original.
+
+    Elegibilidad (todas deben cumplirse; ante cualquier duda se abstiene,
+    nunca inventa ni adivina):
+      - la obra referenciada por el ledger existe y sigue ``ACTIVA``;
+      - el cliente referenciado por el ledger existe y sigue ``ACTIVO``;
+      - existe EXACTAMENTE una fila en el dataset con ese ``numero_guia``
+        (cero o varias -> correlación no confiable, se descarta);
+      - esa fila trae ``obra_destino`` documental que normaliza EXACTO (sin
+        fuzzy, misma comparación que usa el resto del módulo obra/destino)
+        al nombre canónico o a un alias de la MISMA obra que el ledger
+        asoció -- si no coincide, la fila no corrobora ser el mismo hecho
+        y se descarta (nunca se asume);
+      - esa fila trae ``despachar_a_crudo`` no ausente -- si no lo trae, no
+        hay destino documental que preguntar (CASO C, no se inventa nada);
+      - CASO A (la obra ya tiene una relación ``CONFIRMADA`` única): se
+        delega en `decision_destino_para_obra_registrada`, que se abstiene
+        -- no hay pregunta redundante que hacer.
+
+    No decide ni publica nada por sí sola: sólo devuelve decisiones
+    candidatas. Igual que el resto del sistema, la idempotencia y la
+    no-resurrección de decisiones ya terminales las garantiza
+    `generar_artefacto` al publicar (filtra contra el ledger) -- no esta
+    función.
+    """
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    ledger_ruta = actual / "decisiones_aplicadas.json"
+
+    try:
+        ledger = json.loads(ledger_ruta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    registros_obra = [
+        a for a in ledger.get("aplicaciones", [])
+        if a.get("tipo") == "OBRA_DESCONOCIDA" and a.get("accion") == "REGISTRAR"
+        and a.get("obra_id") and a.get("cliente_id")
+    ]
+    if not registros_obra:
+        return []
+
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+    filas_por_guia: dict[str, list[dict[str, str]]] = {}
+    for fila in filas:
+        filas_por_guia.setdefault(str(fila.get("numero_guia", "")), []).append(fila)
+
+    catalogo_obras = CatalogoObrasDestinos(
+        ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+        ruta_destinos=catalogos / "destinos_maestros.json",
+    )
+    try:
+        obras_por_id = {o.obra_id: o for o in catalogo_obras.listar_obras()}
+    except (OSError, ValueError):
+        return []
+    try:
+        clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(catalogos / "clientes.json").listar()}
+    except (OSError, ValueError):
+        clientes_por_id = {}
+
+    from atlas_core.decisiones_pendientes import decision_destino_para_obra_registrada
+
+    candidatas: list[dict[str, object]] = []
+    for aplicacion in registros_obra:
+        obra = obras_por_id.get(str(aplicacion.get("obra_id")))
+        if obra is None or obra.estado_vigencia != "ACTIVO":
+            continue
+        cliente = clientes_por_id.get(str(aplicacion.get("cliente_id")))
+        if cliente is None or cliente.estado_vigencia != "ACTIVO":
+            continue
+        guia = str((aplicacion.get("documento") or {}).get("numero_guia") or "")
+        filas_guia = filas_por_guia.get(guia, [])
+        if len(filas_guia) != 1:
+            continue  # sin fila, o ambigua entre varias -- no se adivina
+        fila = filas_guia[0]
+        obra_documental = str(fila.get("obra_destino", "")).strip()
+        if obra_documental in _AUSENTES:
+            continue
+        claves_obra = {
+            normalizar_nombre_obra(obra.nombre_canonico),
+            *(normalizar_nombre_obra(alias) for alias in obra.aliases_documentales),
+        }
+        if normalizar_nombre_obra(obra_documental) not in claves_obra:
+            continue  # la fila no corrobora ser la MISMA obra que registró el ledger
+        decision = decision_destino_para_obra_registrada(
+            obra=obra, cliente_id=cliente.cliente_id, cliente_canonico=cliente.razon_social,
+            destino_documental=fila.get("despachar_a_crudo", ""),
+            documento={
+                "archivo": fila.get("archivo", ""), "numero_guia": guia,
+                "numero_transporte": fila.get("numero_transporte", ""),
+            },
+            catalogo_obras=catalogo_obras,
+        )
+        if decision is not None:
+            candidatas.append(decision)
+    return candidatas
+
+
+def reconciliar_decisiones_destino_historicas(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Publica en `decisiones_pendientes.json` la unión de la bandeja
+    pendiente vigente con las decisiones reconciliadas desde el histórico
+    (ver `detectar_decisiones_destino_historicas_sin_ocr`). No toca ningún
+    catálogo, el CSV documental ni el ledger -- sólo (re)escribe la bandeja,
+    igual que cualquier otra regeneración del sistema. Misma garantía de
+    idempotencia y no-resurrección de decisiones terminales que el resto
+    del sistema: `generar_artefacto` filtra contra el ledger al publicar.
+    """
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+
+    try:
+        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+        pendientes_actuales = artefacto_actual.get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes_actuales = []
+
+    candidatas = detectar_decisiones_destino_historicas_sin_ocr(raiz_atlas=raiz)
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+    )
+    bandeja = generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+    return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}

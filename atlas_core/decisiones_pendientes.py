@@ -339,9 +339,18 @@ def detectar_decisiones_documento(
                     # más arriba, nunca inferido de `obra_texto`) -- se
                     # conserva como evidencia operacional de quién observó
                     # esta obra, no como su propietario.
+                    # R3.4.2: `destino_documental` (dirección ya resuelta por
+                    # `resolver_entrega_documento`, la misma fuente que ya usa
+                    # DESTINO_SIN_CONFIRMAR más abajo) viaja aquí también --
+                    # la obra todavía no existe, así que hoy no puede
+                    # generarse la pregunta de destino, pero cuando Javier
+                    # REGISTRE esta obra, `aplicar_decision_obra` la necesita
+                    # para poder generar el siguiente paso sin volver a leer
+                    # el documento (ver decision_destino_para_obra_registrada).
                     contexto={
                         "cliente_id": cliente.cliente_id,
                         "cliente_canonico": cliente.razon_social,
+                        "destino_documental": str(despachar_a_documental or "").strip(),
                     },
                     **comunes,
                 ))
@@ -387,6 +396,67 @@ def detectar_decisiones_documento(
         except (OSError, ValueError):
             pass
     return decisiones
+
+
+def decision_destino_para_obra_registrada(
+    *, obra, cliente_id: str, cliente_canonico: str, destino_documental: str,
+    documento: Mapping[str, object] | None, catalogo_obras: CatalogoObrasDestinos,
+) -> dict[str, object] | None:
+    """R3.4.2: cierra el ciclo OBRA_DESCONOCIDA -> DESTINO_SIN_CONFIRMAR.
+
+    Cuando `detectar_decisiones_documento` emitió OBRA_DESCONOCIDA, la obra
+    todavía no existía -- por eso no pudo generar también la pregunta de
+    destino (ese bloque exige `obras` no vacío). Una vez que la obra queda
+    registrada (`obra` ya resuelta, con `obra_id`), esta función reconstruye
+    exactamente esa pregunta pendiente, usando SÓLO datos ya observados y
+    persistidos (`destino_documental`, capturado en el `contexto` de la
+    decisión original en el momento del procesamiento) -- sin OCR, sin volver
+    a leer el documento ni el dataset.
+
+    CASO A -- destino ya corroborable: si la relación obra<->destino global
+    ya puede resolverse sin decisión adicional (p.ej. la obra resultó
+    coincidir por nombre con una obra ya CONFIRMADA con una única relación
+    CONFIRMADA), se abstiene -- no hay pregunta redundante que hacer.
+
+    CASO B -- confirmación humana: si hay destino documental, genera la
+    decisión DESTINO_SIN_CONFIRMAR (idéntica en forma a la que habría
+    emitido `detectar_decisiones_documento` si la obra ya hubiera existido).
+
+    CASO C -- información insuficiente: si no hay destino documental
+    capturado (ausente, o decisión persistida antes de este cambio y por
+    tanto sin el campo), se abstiene -- nunca inventa un destino que el
+    documento no trajo.
+    """
+    try:
+        if catalogo_obras.resolver_obra_destino_confirmada_global(
+            nombre_obra=obra.nombre_canonico
+        ) is not None:
+            return None  # CASO A: ya corroborada, nada que preguntar
+    except (OSError, ValueError):
+        pass
+    destino_texto = str(destino_documental or "").strip()
+    if destino_texto in _AUSENTES:
+        return None  # CASO C: sin destino documental, no se inventa nada
+    comunes = {
+        "archivo": str((documento or {}).get("archivo", "")),
+        "numero_guia": str((documento or {}).get("numero_guia", "")),
+        "numero_transporte": str((documento or {}).get("numero_transporte", "")),
+    }
+    return crear_decision(
+        tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO",
+        campo="destino_entrega", valor_documental=destino_texto,
+        valor_normalizado=normalizar_nombre_destino(destino_texto),
+        identidad_resuelta={"entidad_id": obra.obra_id, "valor_canonico": obra.nombre_canonico},
+        candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
+        evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
+        acciones_permitidas=ACCIONES_DESTINO_SIN_CONFIRMAR,
+        contexto={
+            "cliente_id": cliente_id, "cliente_canonico": cliente_canonico,
+            "obra_id": obra.obra_id, "obra_canonica": obra.nombre_canonico,
+            "destino_documental": destino_texto,
+        },
+        **comunes,
+    )
 
 
 def regenerar_decisiones_persistidas(
@@ -474,14 +544,36 @@ def regenerar_decisiones_persistidas(
                 # cliente_id. Si la obra ya existe para CUALQUIER cliente
                 # (p. ej. otro cliente la registró después de que este
                 # artefacto se generó), se descarta la pregunta.
-                if any(
-                    obra.estado_vigencia == EstadoVigencia.ACTIVO.value
-                    and normalizar_nombre_obra(obra_texto) in {
-                        normalizar_nombre_obra(obra.nombre_canonico),
-                        *(normalizar_nombre_obra(alias) for alias in obra.aliases_documentales),
-                    }
-                    for obra in obras_existentes
-                ):
+                obra_coincidente = next(
+                    (
+                        o for o in obras_existentes
+                        if o.estado_vigencia == EstadoVigencia.ACTIVO.value
+                        and normalizar_nombre_obra(obra_texto) in {
+                            normalizar_nombre_obra(o.nombre_canonico),
+                            *(normalizar_nombre_obra(alias) for alias in o.aliases_documentales),
+                        }
+                    ),
+                    None,
+                )
+                if obra_coincidente is not None:
+                    # R3.4.2: la obra ya no es la pregunta -- pero puede
+                    # faltar la pregunta de destino que
+                    # `detectar_decisiones_documento` no pudo generar en su
+                    # momento porque, cuando se procesó este documento, la
+                    # obra todavía no existía. `generar_artefacto` filtra
+                    # después contra el ledger, así que una decisión ya
+                    # terminal (CONFIRMAR/NO_CONFIRMAR) nunca resucita aquí.
+                    if catalogo_obras is not None:
+                        siguiente = decision_destino_para_obra_registrada(
+                            obra=obra_coincidente,
+                            cliente_id=str(cliente_id or ""),
+                            cliente_canonico=str(cliente_canonico or obra_coincidente.nombre_canonico),
+                            destino_documental=contexto.get("destino_documental", ""),
+                            documento=decision.get("documento"),
+                            catalogo_obras=catalogo_obras,
+                        )
+                        if siguiente is not None:
+                            resultado.append(siguiente)
                     continue
 
         if tipo == "DESTINO_SIN_CONFIRMAR":

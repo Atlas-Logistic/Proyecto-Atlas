@@ -17,8 +17,8 @@ from atlas_core.catalogo_vehiculos import (
     confirmar_vehiculo, normalizar_patente_vehiculo,
 )
 from atlas_core.decisiones_pendientes import (
-    actualizar_contrato_vehiculos_persistidos, generar_artefacto,
-    regenerar_decisiones_persistidas,
+    actualizar_contrato_vehiculos_persistidos, decision_destino_para_obra_registrada,
+    generar_artefacto, regenerar_decisiones_persistidas,
 )
 
 ACCIONES = frozenset({"REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR", "POSPONER"})
@@ -208,6 +208,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
         resultado_extra: dict[str, object] = {}
         reporte_salida: Path | None = None
         reporte_salida_existia = False
+        decision_siguiente: dict[str, object] | None = None
         try:
             if tipo == "OBRA_DESCONOCIDA":
                 obra_texto = str(decision.get("valor_documental", "")).strip()
@@ -233,8 +234,23 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         },
                         fecha=reloj().astimezone(timezone.utc).isoformat(), actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
                     )
-                    resultado_obs = CatalogoObrasDestinos(ruta=catalogo_obras_ruta, ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogo_destinos_ruta).registrar_observacion(cliente_id=cliente_id, nombre_obra=obra_texto, evidencia=evidencia)
+                    catalogo_obras_destinos = CatalogoObrasDestinos(ruta=catalogo_obras_ruta, ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogo_destinos_ruta)
+                    resultado_obs = catalogo_obras_destinos.registrar_observacion(cliente_id=cliente_id, nombre_obra=obra_texto, evidencia=evidencia)
                     resultado_extra["obra_id"] = resultado_obs.obra.obra_id
+                    # R3.4.2: registrar la obra responde "¿qué obra es?", pero
+                    # no "¿a qué destino corresponde?". Si ese destino todavía
+                    # no puede corroborarse sin intervención humana (CASO A) y
+                    # el documento sí trajo un destino (CASO B), Atlas debe
+                    # generar esa siguiente pregunta accionable -- si no hay
+                    # destino documental capturado (CASO C), se abstiene: no
+                    # inventa. Ver decision_destino_para_obra_registrada.
+                    decision_siguiente = decision_destino_para_obra_registrada(
+                        obra=resultado_obs.obra, cliente_id=cliente_id,
+                        cliente_canonico=str(contexto.get("cliente_canonico", "")),
+                        destino_documental=contexto.get("destino_documental", ""),
+                        documento=decision.get("documento"),
+                        catalogo_obras=catalogo_obras_destinos,
+                    )
                 aplicacion = {
                     "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
@@ -369,6 +385,12 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 carpeta_catalogos=catalogos,
                 ids_resueltos={decision_id},
             )
+            if decision_siguiente is not None:
+                # R3.4.2: la nueva pregunta de destino entra a la bandeja
+                # igual que cualquier otra -- `generar_artefacto` la
+                # deduplica/filtra contra el ledger como a cualquier decisión
+                # (idempotente; nunca resucita una ya decidida terminalmente).
+                restantes.append(decision_siguiente)
             bandeja = generar_artefacto(
                 ruta_dataset=dataset, carpeta_catalogos=catalogos,
                 decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
