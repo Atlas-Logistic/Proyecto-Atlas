@@ -794,3 +794,19 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Drive:** no modificado. **Desktop:** no modificado. **Git:** working tree sin cambios adicionales al bloque anterior (mismo diff: `atlas_core/extractor.py`, `tests/test_patentes_p4.py`, tres bitácoras). Sin commit, sin push.
 - No se aplicó ninguna decisión. No se modificaron catálogos. No se reprocesó el lote completo. No se inició Incidencias Documentales, Mobile ni Multiempresa.
 - **Estado: 464367 REQUIERE CONFIRMACIÓN HUMANA -- COMPORTAMIENTO SEGURO VALIDADO.**
+
+## Checkpoint 2026-08-18 — Fix estructural de patentes publicado (`b86e280`) -- checkpoint limpio
+
+- **Commit `b86e280`** ("fix: tolerar ruido OCR en etiquetas vehiculares") publicado en `origin/lector-mvp-guia-nueva` (`793b240..b86e280`). Verificado post-push: local == remoto `b86e280`, ahead/behind 0/0, working tree limpio. Diff revisado completo antes de commitear: exactamente los 5 archivos esperados, sin hardcode de `464367`/`TZWR86`/`JU5478`/`CARLOS ÑANCUCHEO` (sólo citados en comentarios, igual que la guía 464631 ya documentada), tabla de confusiones limitada a `0→O`/`B→R`, abstención ante ambigüedad intacta, valores documentales nunca alterados por la tolerancia de etiqueta.
+- **Puntos de continuidad, explícitos:**
+  1. El fallo estructural `CARRO→CARBO` está **corregido y publicado**.
+  2. `464367` **todavía requiere resolución humana** de sus dos patentes -- `T2MN86`/`J35478` no son homologables con seguridad (exceden `_diferencia_ocr_segura`).
+  3. La evidencia visual documental es `TZWR86`/`JU5478` -- **no** lo que Atlas logró extraer.
+  4. No se forzó ninguna autocorrección.
+  5. El siguiente bloque **no** es Incidencias Documentales.
+  6. Seguimos cerrando los hallazgos reales de lectura/extracción del lote de 15 antes de ampliar funcionalidad.
+  7. Diseño futuro (patente documental / vehículo canónico / asociación histórica chofer↔vehículo / sugerencias humanas / Incidencias Documentales genéricas) -- **registrado, no implementado**.
+- **Nueva decisión de producto registrada en continuidad (pendiente de roadmap, no auditada ni implementada en este bloque):** **KILOMETRAJE OPERACIONAL** es un dato obligatorio de Atlas, no opcional. ORS (rutas) y Onelogis (telemetría) son las fuentes/herramientas actuales. Si su cobertura no permite obtener kilómetros de forma fiable para todos los viajes aplicables, deberá auditarse el problema e incorporarse una alternativa adecuada -- **no auditado ni implementado en este bloque**, sólo preservado como pendiente.
+- **Drive:** no modificado. **Desktop:** no modificado, HEAD `fba95ac` intacto.
+- No se reprocesó el lote real, no se aplicó ninguna decisión, no se modificaron catálogos, no se inició Incidencias Documentales, Analítica/IA, Mobile ni Multiempresa.
+- **Estado: CHECKPOINT LIMPIO -- FIX ESTRUCTURAL DE PATENTES PUBLICADO -- LISTO PARA CONTINUAR AUDITORÍA DEL LOTE 15.**

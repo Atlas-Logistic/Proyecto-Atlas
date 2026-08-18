@@ -2257,3 +2257,28 @@ Comparación campo a campo contra el resultado ya promovido en `operacion/actual
 **Drive:** no modificado. **Desktop:** no modificado. **Git:** working tree sin cambios adicionales al bloque anterior (mismo diff). Sin commit, sin push.
 
 **Estado: 464367 REQUIERE CONFIRMACIÓN HUMANA -- COMPORTAMIENTO SEGURO VALIDADO.**
+
+## 2026-08-18 — Publicación del fix estructural de patentes (`b86e280`)
+
+**Verificación pre-commit:** diff revisado línea por línea (`git diff atlas_core/extractor.py`) -- exactamente el rename `_tolerante_o_cero`→`_tolerante_confusion_ocr_etiqueta` + tabla `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR = {"0": "O", "B": "R"}` + 3 llamadas actualizadas + docstrings, sin ningún otro cambio de comportamiento. `git diff tests/test_patentes_p4.py` confirmado sin literales `TZWR86`/`JU5478`/`CARLOS ÑANCUCHEO` -- `464367` aparece únicamente en comentarios/docstrings citando la guía real que motivó el test (mismo patrón que la cita de 464631 ya existente), nunca como dato de prueba. `git diff --check` limpio. Tests focalizados (`tests/test_patentes_p4.py`) -- 17 passed -- ejecutados antes de commitear; no se repitió la suite completa por ser código byte-idéntico al que ya dio 1197 passed, 0 failed.
+
+**Commit:** `b86e280` -- "fix: tolerar ruido OCR en etiquetas vehiculares" -- 5 archivos exactos (`atlas_core/extractor.py`, `tests/test_patentes_p4.py`, tres bitácoras).
+
+**Push:** `git push origin lector-mvp-guia-nueva` -- `793b240..b86e280`, sin force. Verificado post-push: local `b86e280` == remoto `b86e280`, ahead/behind 0/0, working tree limpio.
+
+**Continuidad explícita (7 puntos):**
+1. Fallo estructural `CARRO→CARBO`: **corregido y publicado**.
+2. `464367` **requiere resolución humana** de sus dos patentes -- `T2MN86`/`J35478` exceden `_diferencia_ocr_segura` (3 posiciones distintas para tracto; par no vetado + sin candidato de catálogo para rampla).
+3. Evidencia visual documental real: `TZWR86`/`JU5478` -- distinta de lo que Atlas logró extraer.
+4. Ninguna autocorrección forzada.
+5. Próximo bloque **no** es Incidencias Documentales.
+6. Seguimos cerrando hallazgos reales de lectura/extracción del lote de 15 antes de ampliar funcionalidad.
+7. Diseño futuro (patente documental / vehículo canónico / asociación histórica chofer↔vehículo / sugerencias humanas / Incidencias Documentales genéricas) -- registrado en el bloque anterior de esta misma bitácora, **no implementado**.
+
+**Nueva decisión de producto registrada en continuidad (no auditada ni implementada en este bloque):** **KILOMETRAJE OPERACIONAL** -- dato obligatorio de Atlas, no opcional. ORS (rutas) y Onelogis (telemetría) son las fuentes/herramientas actuales. Si su cobertura no permite obtener kilómetros de forma fiable para todos los viajes aplicables, deberá auditarse el problema e incorporarse una alternativa adecuada -- pendiente de roadmap, sin auditar ni implementar aquí.
+
+**Drive:** no modificado -- `operacion/actual` (con `464367` todavía en `"No encontrado"`, tal como quedó promovido) no se tocó; el fix de extracción no se aplicó todavía al lote real. **Desktop:** no modificado, HEAD `fba95ac`.
+
+**Git:** Motor publicado y limpio (`b86e280`, local=remoto, 0/0). Desktop limpio, HEAD `fba95ac`.
+
+**Estado: CHECKPOINT LIMPIO -- FIX ESTRUCTURAL DE PATENTES PUBLICADO -- LISTO PARA CONTINUAR AUDITORÍA DEL LOTE 15.**

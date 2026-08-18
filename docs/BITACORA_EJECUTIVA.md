@@ -731,3 +731,13 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Diseño de producto futuro, documentado en detalle en la bitácora técnica y en HANDOFF -- NO implementado en este bloque ni en ninguno anterior:** separar patente documental / vehículo canónico operacional / asociación histórica chofer↔vehículo (nunca chofer→un único vehículo; sólo evidencia para sugerir, nunca autocorrección) / incidencias documentales genéricas (no "errores AZA" -- válido para cualquier emisor futuro, incluye el caso ya observado por Javier de guías MBT con otra empresa transportista documental incorrecta, p. ej. Transportes Carwork en vez de Transportes MBT).
 - **Drive:** no modificado. **Desktop:** no modificado. **Git:** working tree sin cambios adicionales a los del bloque anterior (mismo diff: `atlas_core/extractor.py`, `tests/test_patentes_p4.py`, tres bitácoras). Sin commit, sin push.
 - **Estado: 464367 REQUIERE CONFIRMACIÓN HUMANA -- COMPORTAMIENTO SEGURO VALIDADO.**
+
+---
+
+## 2026-08-18 — Publicado el fix estructural de patentes (`b86e280`) -- checkpoint limpio
+
+- **Commit `b86e280`** ("fix: tolerar ruido OCR en etiquetas vehiculares") publicado en `origin/lector-mvp-guia-nueva`. Verificado local=remoto, 0/0, working tree limpio. Diff revisado completo antes de commitear: exactamente los 5 archivos esperados, sin hardcode de guía/patente/chofer, tabla de confusiones limitada a `0→O`/`B→R`, abstención ante ambigüedad intacta.
+- **Confirmado para continuidad:** el fallo estructural `CARRO→CARBO` queda corregido y publicado; `464367` sigue requiriendo resolución humana de sus dos patentes (`T2MN86`/`J35478` no homologables con seguridad; evidencia visual real es `TZWR86`/`JU5478`); no se forzó ninguna autocorrección; el siguiente bloque no es Incidencias Documentales -- seguimos cerrando hallazgos reales de lectura/extracción del lote de 15; el diseño futuro (patente documental/canónica, asociación histórica chofer↔vehículo, Incidencias Documentales) queda registrado, no implementado.
+- **Nueva decisión de producto registrada (pendiente de roadmap, no auditada aquí):** **kilometraje operacional** es un dato obligatorio de Atlas (no opcional); ORS/Onelogis son las fuentes actuales; si su cobertura no permite obtenerlo de forma fiable para todos los viajes aplicables, deberá auditarse una alternativa -- sin auditar ni implementar en este bloque.
+- **Drive/Desktop:** sin cambios.
+- **Estado: CHECKPOINT LIMPIO -- FIX ESTRUCTURAL DE PATENTES PUBLICADO -- LISTO PARA CONTINUAR AUDITORÍA DEL LOTE 15.**
