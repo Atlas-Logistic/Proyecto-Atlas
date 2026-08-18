@@ -546,6 +546,92 @@ def test_geometria_no_regresion_cliente_chofer_rut_cliente_junto_a_obra_destino(
     assert rut_cliente["valor"] == "83.585.400-0"
 
 
+def test_buscar_obra_destino_lineal_no_captura_etiqueta_vecina_comuna():
+    """Reproducción real guía 464264: en el orden de lectura del OCR, la
+    etiqueta "COMUNA" (columna izquierda) queda intercalada entre "OBRA
+    DESTINO" y "COD DESTINATARIO" (columna derecha, misma franja Y) como
+    línea OCR propia -- y como el regex de `buscar_obra_destino` no puede
+    cruzar líneas completas (usa `.` sin DOTALL), termina capturando esa
+    etiqueta vecina en vez de valor real, que en el orden de lectura
+    apareció recién DESPUÉS de "COD DESTINATARIO". Antes del fix, esto
+    devolvía "COMUNA"; ahora se descarta y el valor real se recupera por
+    geometría en `procesar_archivo` (ver `test_procesamiento_masivo.py`)."""
+    textos = [
+        "FECHA DE EMISIÓN :05-08-2026",
+        "SEÑOR(ES) : SODIMAC SA",
+        "ORDEN DE COMPRA :17402312 / 0030020999",
+        "R.U.T. 96.792.430-K",
+        "SOLICITANTE : SODIMAC SA CORONEL",
+        "GIRO : VTA AL X MENOR MAT C",
+        "OBRA DESTINO",
+        "COMUNA",
+        "COD DESTINATARIO",
+        ": SODIMAC SA CORONEL",
+        "DIRECCION : AV PDTE EDUARDO FREI 3092",
+        "HORA ENTRADA 09:32:00",
+        "CIUDAD : RENCA",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["obra destino"] != "COMUNA", datos
+    # `buscar_obra_destino` se abstiene (no captura la etiqueta vecina); el
+    # valor real sólo llega por geometría, que `extraer_datos` (fase
+    # puramente lineal, sin bounding boxes) no ejecuta -- por eso aquí el
+    # resultado esperado es la abstención, no el valor real.
+    assert datos["obra destino"] == "No encontrado", datos
+
+
+@pytest.mark.parametrize(
+    "etiqueta_vecina",
+    ["COMUNA", "CIUDAD", "DIRECCION", "GIRO", "TOTAL", "RUT"],
+)
+def test_buscar_obra_destino_lineal_descarta_cualquier_etiqueta_estructural_conocida(etiqueta_vecina):
+    """Generalización: cualquier etiqueta de la lista canónica ya usada por
+    la asociación geométrica (`_EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO`)
+    debe descartarse igual si queda intercalada sola entre "OBRA DESTINO" y
+    "COD DESTINATARIO" -- no es un caso especial de "COMUNA"."""
+    textos = [
+        "OBRA DESTINO",
+        etiqueta_vecina,
+        "COD DESTINATARIO",
+        ": CONSTRUCTORA REAL SPA",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["obra destino"] != etiqueta_vecina, datos
+
+
+def test_buscar_obra_destino_lineal_sigue_capturando_valor_real_sin_etiqueta_intercalada():
+    """No regresión: cuando el valor real está directamente entre "OBRA
+    DESTINO" y "COD DESTINATARIO" (sin ninguna etiqueta intercalada), sigue
+    capturándose normalmente -- el fix no afecta el camino que ya
+    funcionaba (mismo patrón que `probar_guia1`/`probar_guia2`)."""
+    textos = [
+        "TELEFONO OBRA DESTINO EMPRESA CONST SIGRO COD DESTINATARIO 0002012245",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["obra destino"] == "EMPRESA CONST SIGRO", datos
+
+
+def test_buscar_obra_destino_lineal_no_descarta_valor_real_que_contiene_palabra_de_la_lista():
+    """Negativo: un valor real y legítimo de obra_destino que sólo
+    CONTIENE una de las palabras de la lista canónica (no que ES esa
+    palabra exacta) no debe descartarse -- la comparación es de igualdad
+    exacta tras normalizar, nunca de subcadena, para no perder nombres
+    reales de obra/destino (p. ej. "TOTAL" dentro de un nombre comercial)."""
+    textos = [
+        "OBRA DESTINO CONSTRUCTORA TOTAL SPA COD DESTINATARIO 0002000001",
+    ]
+
+    datos = extraer_datos(textos)
+
+    assert datos["obra destino"] == "CONSTRUCTORA TOTAL SPA", datos
+
+
 def _transporte(candidato, etiqueta="NRO. TRANSPORTE"):
     return _extraer_transporte_geometrico(
         [_bloque(etiqueta, 20, 20, 120), _bloque(candidato, 180, 20, 100)]

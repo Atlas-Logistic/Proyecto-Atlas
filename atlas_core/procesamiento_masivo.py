@@ -287,6 +287,24 @@ def _normalizar(texto: object) -> str:
     return "".join(c for c in valor if unicodedata.category(c) != "Mn").upper()
 
 
+# Confusiones de OCR ya confirmadas contra guías reales para la palabra
+# HORMIGON: {H,B} y {M,H} (guía 464265, "BORHIGON"), {R,M} (guía 464264,
+# "HOMMIGON"). Igual que `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR` en
+# extractor.py, es una tabla pequeña y acotada -- nunca distancia de edición
+# abierta -- y sólo decide si una línea se CONSERVA como evidencia de
+# material; nunca reescribe el texto OCR que termina en descripcion_material.
+_CONFUSIONES_OCR_MATERIAL = tuple(map(frozenset, ({"H", "B"}, {"M", "H"}, {"R", "M"})))
+
+
+def _coincide_con_tolerancia_ocr(token: str, termino: str) -> bool:
+    if len(token) != len(termino):
+        return False
+    diferencias = [(a, b) for a, b in zip(token, termino) if a != b]
+    if not diferencias or len(diferencias) > 2:
+        return False
+    return all(frozenset(par) in _CONFUSIONES_OCR_MATERIAL for par in diferencias)
+
+
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
     """Conserva líneas OCR con evidencia explícita de material."""
     terminos = re.compile(r"\b(HORMIGON|BARRAS?|ROLLOS?|ALAMBRON|BOBINAS?)\b")
@@ -294,7 +312,14 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
     for bloque in textos:
         for linea in str(bloque).splitlines():
             limpia = re.sub(r"\s+", " ", linea).strip()
-            if limpia and terminos.search(_normalizar(limpia)):
+            if not limpia:
+                continue
+            normalizada = _normalizar(limpia)
+            tiene_evidencia = terminos.search(normalizada) or any(
+                _coincide_con_tolerancia_ocr(token, "HORMIGON")
+                for token in re.findall(r"[A-Z]+", normalizada)
+            )
+            if tiene_evidencia:
                 encontradas.append(limpia)
     return " | ".join(dict.fromkeys(encontradas))
 

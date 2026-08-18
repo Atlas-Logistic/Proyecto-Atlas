@@ -1567,6 +1567,22 @@ def extraer_datos(
         coincidencia = re.search(r"OBRA\s+DESTINO\s+(.+?)\s+COD\s+DESTINATARIO", texto_busqueda)
         if coincidencia:
             obra = normalizar_obra_destino(coincidencia.group(1))
+            # Caso real 464264: "OBRA DESTINO"/"COD DESTINATARIO" son
+            # etiquetas de la columna derecha, pero el orden de lectura del
+            # OCR intercaló entre ambas una etiqueta suelta de la columna
+            # izquierda ("COMUNA", fila con Y casi coincidente) -- como
+            # `.+?` no cruza líneas OCR completas, el regex de arriba sólo
+            # puede capturar ESA etiqueta, nunca el valor real (que en el
+            # orden de lectura terminó apareciendo después de "COD
+            # DESTINATARIO"). Se descarta una captura que sea, ella misma,
+            # una etiqueta estructural ya conocida -- reutilizando la misma
+            # lista canónica que ya usa la asociación geométrica para lo
+            # mismo (`_EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO`), nunca una
+            # lista nueva ni fuzzy. Al descartarla, la función cae a "sin
+            # match" y `_extraer_asociaciones_geometricas` (que sí ubica el
+            # valor real por geometría) queda libre de completarlo después.
+            if obra and obra in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO:
+                obra = None
             if obra and "HORA ENTRADA" not in obra:
                 return obra
 

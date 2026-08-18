@@ -1260,6 +1260,40 @@ def test_no_inventa_material_sin_evidencia():
     assert extraer_descripcion_material(["ACERO 16 MM", "TOTAL 100"]) == ""
 
 
+def test_extrae_material_tolerando_confusion_ocr_h_por_b_y_m_por_h():
+    # Reproducción real guía 464265: OCR leyó "HORMIGON" como "BORHIGON"
+    # (H->B y M->H simultáneos) y la línea se perdía por completo antes del
+    # fix -- no distancia de edición abierta, sólo los 3 pares ya
+    # confirmados en `_CONFUSIONES_OCR_MATERIAL`.
+    texto = "9.221 110002948 BORHIGON 22MM 12M A630-420H (N)"
+    assert extraer_descripcion_material([texto]) == texto
+
+
+def test_extrae_material_tolerando_confusion_ocr_r_por_m():
+    # Reproducción real guía 464264, segunda línea de material: OCR leyó
+    # "HORMIGON" como "HOMMIGON" (R->M) -- se perdía en silencio junto a la
+    # primera línea (que sí calzaba exacto), quedando descripcion_material
+    # incompleta.
+    texto = "B HOMMIGON 12MM 12M A630-420N (N)"
+    assert extraer_descripcion_material([texto]) == texto
+
+
+def test_no_tolera_mas_de_dos_diferencias_ni_pares_no_vetados():
+    # Palabras de igual longitud a "HORMIGON" (8) pero con diferencias fuera
+    # de la tabla vetada, o con más de 2 diferencias, nunca deben colarse --
+    # prueba negativa explícita de que la tolerancia no es fuzzy abierto.
+    assert extraer_descripcion_material(["ZORZIGON 16 MM"]) == ""  # 2 diferencias, ningún par vetado
+    assert extraer_descripcion_material(["BOMBIGON 16 MM"]) == ""  # 3 diferencias con HORMIGON
+
+
+def test_tolerancia_ocr_material_no_afecta_otros_terminos_ni_texto_ajeno():
+    # La tolerancia sólo aplica a HORMIGON (única palabra con evidencia real
+    # de confusión); BARRAS/ROLLOS/ALAMBRON/BOBINAS siguen exigiendo
+    # coincidencia exacta, y el texto conservado nunca se reescribe.
+    assert extraer_descripcion_material(["PRODUCTO HORMIGSN 16 MM"]) == ""
+    assert extraer_descripcion_material(["ACERO ESTRUCTURAL 16MM"]) == ""
+
+
 def test_fecha_descarta_primera_imposible_y_usa_segunda_valida():
     textos = ["FECHAS 31-02-2026 y 28-02-2026"]
 
