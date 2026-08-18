@@ -1995,3 +1995,28 @@ No hizo falta regenerar nada realmente -- el reporte vigente ya estaba correcto.
 **Drive modificado: SÍ, exclusivamente por las dos aplicaciones reales de Javier desde Desktop** (no por ninguna acción de este bloque de verificación, que fue 100% read-only más un dry-run en TEMP fuera de Drive).
 
 **Estado: CICLO OBRA→DESTINO VALIDADO COMPLETAMENTE -- LISTO PARA PUBLICAR.** Queda pendiente, para el bloque siguiente y sólo si se autoriza explícitamente: commit + push del bloque completo (R3.4.2 + R3.4.3 -- código, tests, bitácoras).
+
+*(Nota de continuidad: ese commit + push se ejecutó en el bloque siguiente -- Motor publicado como `831fb2b` sobre `origin/lector-mvp-guia-nueva`, verificado local=remoto 0/0. Ver checkpoint del bloque de abajo.)*
+## 2026-08-18 — Bloque 3 (Desktop): Viajes deja de ocultar conflictos reales de nivel viaje
+
+**Checkpoint verificado antes de tocar código:** Motor `lector-mvp-guia-nueva` HEAD `831fb2b` (ya publicado en el bloque anterior), local=remoto, 0/0, working tree limpio. Desktop `fix-desktop-data-root-drag-drop` HEAD base `87b9c8c`, local=remoto, 0/0, working tree limpio.
+
+**Causa reproducida antes de implementar, con evidencia concreta (no sólo lectura de código):** se ejecutó en Node, con `require("./src/formato_operacional")`, la lógica EXACTA de `atlas_viajes.html:1223-1224` (`motivosDocumentales.length ? motivosDocumentales : viaje.motivos`) contra los datos del caso real `0000352376` (`viaje.motivos=["CONFLICTO_CLIENTE","CONFLICTO_OBRA_DESTINO"]`, un documento del mismo transporte con `MATERIAL_AUSENTE`) -- resultado confirmado: `motivosPresentables = ["MATERIAL_AUSENTE"]`, los dos conflictos reales desaparecían por completo. `renderDatosAuxiliares` es la única función que decide qué motivos se presentan en "Datos auxiliares"; no hay otra ruta de renderizado para viajes de detalle.
+
+**Regla de presentación diseñada (Sección 3 del roadmap), derivada del modelo actual, no un parche puntual para `MATERIAL_AUSENTE`:** nueva `AtlasFormatoOperacional.motivosPresentables(motivosViaje, motivosDocumentales)` en `src/formato_operacional.js` -- unión deduplicada (`[...new Set([...viaje, ...documentales])]`), motivos de viaje primero (son la causa canónica de `REQUIERE_REVISION`, calculada por `agrupar_viajes` en el Motor), documentales después como información adicional. Ningún nivel reemplaza al otro; sin duplicados cuando un motivo coincide en ambos niveles (p.ej. `DOCUMENTO_REQUIERE_REVISION` repetido); array vacío cuando ambos lo están (viaje `CONFIRMADO`, sin motivos falsos). `renderDatosAuxiliares` (`atlas_viajes.html`) se actualizó para llamar a esta función en vez del ternario -- el resto de la función (`motivosHumanos`, `filaMotivos`, los chips) no cambió, así que la regresión de UX-R4 (`motivos se muestran debajo como chips y la fila desaparece sin motivos`) sigue pasando sin tocarla.
+
+**Mensajes humanos (Sección 6):** `motivoRevision()` ganó 6 entradas nuevas para los `CONFLICTO_*` de viaje que carecían de traducción explícita y dependían del fallback genérico -- `CONFLICTO_CLIENTE` → "Cliente en conflicto", `CONFLICTO_OBRA_DESTINO` → "Obra o destino en conflicto", `CONFLICTO_CHOFER` → "Chofer en conflicto", `CONFLICTO_RUT_CHOFER` → "RUT de chofer en conflicto", `CONFLICTO_FECHA` → "Fecha en conflicto", `CONFLICTO_ORIGEN` → "Origen en conflicto" -- mismo estilo ya usado (`CONFLICTO_PATENTE_TRACTO` → "Patente de tracto en conflicto"). `FECHA_NO_COMPATIBLE_DESKTOP` (el único de los 12 `MotivoRevision` del Motor sin traducción explícita) se dejó deliberadamente fuera -- no bloqueante, ajeno al bug reportado; sigue con la humanización genérica de respaldo.
+
+**Alcance:** exclusivamente Desktop. Motor sin cambios funcionales -- el bug era 100% de presentación en `atlas_viajes.html`/`formato_operacional.js`; ninguna decisión, catálogo ni dataset participa.
+
+**Tests (`test/viajes_motivos_reales.test.js`, 13 nuevos):** CASO 1 (sólo motivos de viaje) a CASO 8 (`DOCUMENTO_REQUIERE_REVISION` legítimo, caso real `0000353164`), más entradas no-array (defensivo, sin lanzar error), traducciones humanas nuevas, los dos casos reales de punta a punta (`motivosDocumentos` + `motivosPresentables` + `motivoRevision` encadenados, tal como los usa `renderDatosAuxiliares`), y una regresión de wiring que confirma que el HTML usa la función nueva y ya NO contiene el ternario viejo. `npm test` completo: **199 passed, 0 failed** (baseline 186 + 13), incluidos los 13 tests preexistentes de `ux_r4.test.js` sin ninguna regresión.
+
+**Validación real read-only** (sin escribir Drive; volcado temporal en TEMP fuera de Drive, eliminado al terminar): se extrajeron `motivos_revision`/`evidencias_documentos` reales de `viajes.csv` del reporte vigente para `0000352376` y `0000353164`, y se corrió la lógica ANTES/DESPUÉS exactamente como la ejecutaría Desktop:
+- `0000352376`: ANTES → `["Material ausente"]`. DESPUÉS → `["Cliente en conflicto", "Obra o destino en conflicto", "Material ausente"]`.
+- `0000353164`: ANTES → `["Cliente ausente"]`. DESPUÉS → `["Documento requiere revisión", "Cliente ausente"]`.
+
+**Validación visual real de Javier, confirmada tal cual reportada:** en Atlas Viajes DESARROLLO, `0000352376` muestra "Cliente en conflicto", "Obra o destino en conflicto" y "Material ausente" -- los conflictos reales ya no quedan ocultos. `0000353164` muestra "Documento requiere revisión" y "Cliente ausente". Resultado visual aprobado, coincide exactamente con la predicción de la validación read-only.
+
+**Drive:** no modificado en ningún momento de este bloque (sólo lecturas de verificación).
+
+**Estado: BLOQUE 3 VALIDADO VISUALMENTE -- LISTO PARA PUBLICAR.**

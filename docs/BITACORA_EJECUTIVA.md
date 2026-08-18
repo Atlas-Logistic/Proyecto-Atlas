@@ -638,3 +638,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Drive modificado: SÍ -- exclusivamente por las dos aplicaciones reales de Javier desde Desktop**, no por ninguna acción de este bloque (que fue enteramente de verificación read-only + un dry-run en TEMP eliminado al terminar).
 - Sin cambios de código en este bloque (no hizo falta -- el comportamiento fue exactamente el diseñado en el Paso 2/Paso 3). Suite conservada: **1184 passed, 0 failed**, sin necesidad de repetirla.
 - **Estado: CICLO OBRA→DESTINO VALIDADO COMPLETAMENTE -- LISTO PARA PUBLICAR.**
+
+---
+
+## 2026-08-18 — Bloque 3 (Desktop): Viajes deja de ocultar conflictos reales detrás de motivos documentales benignos
+
+- **Bug real confirmado con evidencia concreta:** `renderDatosAuxiliares` en `atlas_viajes.html` decidía qué motivos mostrar con `motivosDocumentales.length ? motivosDocumentales : viaje.motivos` -- si CUALQUIER documento del viaje traía un motivo documental (incluso no bloqueante, como `MATERIAL_AUSENTE`), Desktop mostraba SÓLO ese motivo y ocultaba por completo los `CONFLICTO_*` reales de nivel viaje. Caso real: transporte `0000352376` (`CONFLICTO_CLIENTE | CONFLICTO_OBRA_DESTINO`, real, con evidencia de dos documentos del mismo transporte con cliente/obra distintos) mostraba únicamente "Material ausente" porque la guía `464699` de ese transporte trae ese motivo no bloqueante.
+- **Corrección:** nueva `AtlasFormatoOperacional.motivosPresentables(motivosViaje, motivosDocumentales)` en `src/formato_operacional.js` -- unión deduplicada de ambos niveles (motivos de viaje primero), en vez de que uno reemplace al otro. Se agregaron traducciones humanas para los `CONFLICTO_*` de viaje que antes carecían de ellas (`CONFLICTO_CLIENTE`, `CONFLICTO_OBRA_DESTINO`, `CONFLICTO_CHOFER`, `CONFLICTO_RUT_CHOFER`, `CONFLICTO_FECHA`, `CONFLICTO_ORIGEN`).
+- **13 tests nuevos** (`test/viajes_motivos_reales.test.js`, casos 1-8 más extras y regresión de wiring HTML). `npm test` completo: **199 passed, 0 failed** (baseline 186 + 13).
+- **Validación real read-only** contra los datos reales del reporte vigente (sin escribir Drive): `0000352376` pasa de mostrar sólo "Material ausente" a mostrar "Cliente en conflicto", "Obra o destino en conflicto" y "Material ausente"; `0000353164` pasa de mostrar sólo "Cliente ausente" a mostrar "Documento requiere revisión" y "Cliente ausente" juntos.
+- **Validación visual real de Javier, confirmada:** en Atlas Viajes DESARROLLO, el transporte `0000352376` muestra los tres motivos esperados y los conflictos reales ya no quedan ocultos; el transporte `0000353164` muestra los dos motivos esperados. Resultado visual aprobado.
+- **Drive no fue modificado en ningún momento de este bloque** (sólo lecturas de verificación read-only, con un volcado temporal fuera de Drive eliminado al terminar).
+- Motor sin cambios de código -- el bug y el fix eran exclusivamente de Desktop.
+- **Estado: BLOQUE 3 VALIDADO VISUALMENTE -- LISTO PARA PUBLICAR.**

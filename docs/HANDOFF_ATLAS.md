@@ -709,3 +709,15 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Git:** Motor sin cambios adicionales de código (sólo bitácoras), Desktop limpio HEAD `87b9c8c`. **Sin commit ni push todavía** -- pendiente de autorización explícita para publicar el bloque completo (R3.4.2 + R3.4.3: código, tests, bitácoras).
 - **Próximo paso (si se autoriza):** commit + push del bloque completo sobre `lector-mvp-guia-nueva`. Nada más pendiente del ciclo obra→destino -- validado de punta a punta con datos reales. No iniciar Multiempresa, no tocar clientes/choferes/conflictos de viaje sin instrucción nueva.
 - **Estado: CICLO OBRA→DESTINO VALIDADO COMPLETAMENTE -- LISTO PARA PUBLICAR.**
+- *(Continuidad: publicado como commit `831fb2b` sobre `origin/lector-mvp-guia-nueva`, verificado local=remoto 0/0 en el bloque siguiente.)*
+
+## Checkpoint 2026-08-18 — Bloque 3 (Desktop): Viajes ya no oculta conflictos reales -- validado visualmente por Javier
+
+- **Causa:** `renderDatosAuxiliares` (`atlas_viajes.html`) mostraba SÓLO los motivos documentales cuando existían, ocultando por completo los `CONFLICTO_*` reales de nivel viaje si cualquier documento del transporte traía un motivo (incluso no bloqueante, como `MATERIAL_AUSENTE`). Caso real confirmado: transporte `0000352376` mostraba "Material ausente" en vez de sus dos conflictos reales (`CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO`).
+- **Corrección, exclusivamente Desktop:** nueva `AtlasFormatoOperacional.motivosPresentables()` en `src/formato_operacional.js` -- unión deduplicada de motivos de viaje + documentales (nunca uno reemplaza al otro), más 6 traducciones humanas nuevas para `CONFLICTO_*` de viaje. `atlas_viajes.html` actualizado para usarla.
+- **13 tests nuevos** (`test/viajes_motivos_reales.test.js`). `npm test` completo: **199 passed, 0 failed** (baseline 186 + 13).
+- **Validación visual real de Javier, confirmada:** `0000352376` muestra ahora "Cliente en conflicto", "Obra o destino en conflicto" y "Material ausente" -- los conflictos reales ya no quedan ocultos. `0000353164` muestra "Documento requiere revisión" y "Cliente ausente". Coincide exactamente con lo predicho.
+- **Drive:** no modificado en ningún momento del bloque.
+- **Motor:** sin cambios de código (el bug era 100% Desktop). Estas tres bitácoras se actualizaron en Motor como documentación coordinada del bloque.
+- **Próximo paso oficial:** nuevo lote controlado de guías reales (según lo ya evaluado: el único pendiente obligatorio antes del lote -- este mismo Bloque 3 -- queda cerrado con esta validación).
+- **Estado: BLOQUE 3 VALIDADO VISUALMENTE -- LISTO PARA PUBLICAR.**
