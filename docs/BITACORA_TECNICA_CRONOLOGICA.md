@@ -2456,3 +2456,69 @@ Resultado: `estado=REQUIERE_REVISION`, `motivos_revision=['CONFLICTO_FECHA', 'CO
 **Pendientes explícitos, sin iniciar:** señal de fecha dudosa a nivel de documento individual (diseño FIX_B, registrado); fecha de `464367` (registrado, guía ya cerrada por patente); cliente de `464265`; demás hallazgos del lote de 15.
 
 **Estado: DIAGNÓSTICO FECHA 464265 COMPLETADO -- REQUIERE DECISIÓN.**
+
+## 2026-08-18 — Publicación (`d22829d`) + diagnóstico dirigido de `CLIENTE_AUSENTE` en `464265`
+
+**Publicación:** commit `d22829d` ("docs: registrar diagnostico de fecha 464265") -- exactamente 3 archivos (las tres bitácoras, 0 líneas eliminadas, sólo el diagnóstico ya cerrado de fecha). `git push origin lector-mvp-guia-nueva` sin force: `9aabce2..d22829d`. Post-push: local `d22829d` == remoto `d22829d` (confirmado por `git rev-parse origin/lector-mvp-guia-nueva` y por la salida del propio push), `git status -sb` sin ahead/behind, working tree limpio. Desktop verificado sin tocar: HEAD `fba95ac`, working tree limpio.
+
+**Checkpoint verificado antes de diagnosticar cliente:** Motor HEAD `d22829d`, local=remoto, working tree limpio.
+
+**Objetivo único:** `464265` produce `cliente = "No encontrado"` (motivo `CLIENTE_AUSENTE`), mientras la inspección física del documento confirma "SODIMAC SA" (RUT `96.792.430-K`, mismo cliente que `464264`, mismo viaje).
+
+**Ground truth desde la imagen** (recortes ampliados, canales realzados): nombre "SODIMAC SA" y RUT "96.792.430-K" son legibles bajo la sombra de la mancha física ya documentada en el bloque de fecha -- degradados, no ilegibles para un humano.
+
+**Trazado completo con OCR real dirigido, TEMP** (SHA-256 verificado contra el manifiesto para `464264`/`464265`):
+
+1. **Bloques OCR crudos, zona SEÑOR(ES)/R.U.T.** (`atlas_core.ocr_provider.crear_proveedor_ocr("paddleocr").leer_bloques()`):
+   - `464264`: etiqueta `'SEÑOR(ES)'` conf=0.9975 y, en la posición de su valor (x=285-360, y=422-439), bloque `'SODIMAC SA'` conf=**0.9335**. RUT: bloque `'196.752.430-K'` conf=0.8821.
+   - `464265`: etiqueta `'SEÑOR(ES)'` conf=0.9898 y, en la posición equivalente de su valor (x=305-377, y=415-429), **bloque vacío `''` conf=0.0000** -- el detector no propuso ninguna caja de texto ahí, no es una lectura de baja calidad, es ausencia total. RUT: bloque `'196.792.430-X'` conf=0.8751.
+2. **`_extraer_asociaciones_geometricas()` real** (`atlas_core/extractor.py:168`): para `464264` devuelve `{'cliente': 'SODIMAC SA', 'obra destino': 'SODIMAC SA CORONEL'}`. Para `464265` devuelve únicamente `{'obra destino': 'SODIMAC SA COROBEL'}` -- **sin clave `cliente`**, porque el bloque vacío en esa posición nunca pasa el filtro `_es_candidato_nominal_geometrico` (exige `2 <= len(texto) <= 60`) -- no hay ningún candidato nominal que evaluar cerca de la etiqueta SEÑOR(ES).
+3. **`_extraer_identidad_cliente_recortada_geometrica()` real** (línea 381, fallback para etiqueta cortada por margen de foto): `{}` en ambas guías -- no aplica, exige que la etiqueta SEÑOR(ES) toque el borde izquierdo de la imagen (`x1 <= 3`), y en ambas guías la etiqueta está completa (`x1=131` / `x1=158`).
+4. **`_extraer_rut_cliente_geometrico()` real** (línea 313): `{}` en **ambas** guías. Verificado con `validar_rut_chileno()` directamente: `'196.752.430-K'` (464264) → `INVALIDO` ("longitud inválida" -- un dígito de más); `'196.792.430-X'` (464265) → `INVALIDO` ("formato inválido" -- "X" no es un dígito verificador chileno válido, que sólo admite 0-9/K). El ground truth real `'96.792.430-K'` → `VALIDO`. Confirmado: **el mecanismo de RUT ya existe y ya se ejecuta, pero se abstiene correctamente en ambos casos** porque el RUT capturado por OCR no pasa el dígito verificador -- comportamiento seguro, no un bug. Nótese que la corrupción del RUT (un "1" de más al inicio) aparece en **ambas** guías, incluida `464264` sin mancha -- no es causada por la mancha, es un artefacto de OCR distinto y no relacionado con la ausencia de nombre en `464265`.
+5. **Mecanismos de relectura focal existentes, auditados:** sólo hay dos, ambos con `allowlist` de caracteres restringido -- `ALLOWLIST_FECHA` (`atlas_core/ocr.py:104`, dígitos y separadores de fecha) y `ALLOWLIST_TRANSPORTE` (línea 103, dígitos y letras confundibles con dígitos). **No existe ningún mecanismo de relectura focal para nombres de cliente** (texto libre, sin alfabeto restringido natural) -- no es que falle o no se active, es que no está construido para este tipo de campo.
+
+**Respuestas exactas a las 7 preguntas del bloque:**
+1. ¿SODIMAC SA aparece en OCR bruto de `464265`? **NO** -- caja de texto ausente, confianza 0.
+2. ¿Aparece el RUT? **SÍ**, pero corrupto (`196.792.430-X`), formato inválido.
+3. ¿Se genera bounding box para SEÑOR(ES)? **SÍ**, para la etiqueta (conf. 0.99) -- el problema es exclusivamente el valor.
+4. ¿La mancha impide detección o sólo reduce confianza? **Impide la detección por completo** en la zona del nombre (confianza 0, no un valor bajo). El RUT, más abajo, sí fue detectado (con otra corrupción, no causada por la mancha).
+5. ¿Existe OCR focal/secundario para cliente? **NO** -- sólo existe para fecha y número de transporte.
+6. ¿Por qué no se activa/falla? No aplica "por qué falla" -- **no existe la infraestructura** para este tipo de campo.
+7. ¿El problema ocurre antes o después de la resolución contra catálogo? **Antes** -- nunca llega a generarse ningún candidato (ni nombre ni RUT válido) que pasar a `_resolver_cliente_id_corroborado` (`procesamiento_masivo.py:664`) o a `CatalogoClientes.buscar()`.
+
+**Causa raíz clasificada: A. OCR_BRUTO_NO_DETECTA_TEXTO** (para el nombre) -- la caja de texto simplemente no se generó, no hay ningún candidato que una lógica de selección/normalización/corroboración pudiera haber tratado mal. El camino de RUT (F en el listado de causas) **no es un caso de "RUT no aprovechado"** -- el RUT sí se evalúa, se abstiene correctamente porque el valor capturado es inválido (mismo patrón de corrupción, no relacionado con la mancha, presente también en el control sin mancha).
+
+**Comparación 464264 vs 464265 (sección 5, obligatoria):** misma etiqueta SEÑOR(ES), misma posición relativa, mismo layout, mismo cliente real. Único cambio real: la mancha física cae exactamente sobre la zona del nombre en `464265` y ahí el detector de PaddleOCR no genera ninguna caja (mecanismo de detección, previo a cualquier reconocimiento de caracteres) -- en `464264`, sin mancha en esa zona, el detector sí genera la caja y el reconocimiento la lee con confianza 0.93. El RUT de ambas guías comparte el mismo artefacto de corrupción (dígito de más), independiente de la mancha, y en ninguna de las dos sirve como ancla porque ambos fallan el dígito verificador chileno.
+
+**Vía investigada explícitamente y descartada -- SOLICITANTE como sustituto de cliente:** `464265` sí trae un bloque OCR legible en el campo SOLICITANTE (`'SODIMAC SA CORWEL'`, conf=0.7311, con su propia corrupción de "CORONEL"→"CORWEL", distinta de la de OBRA DESTINO "CORONEL"→"COROBEL" en el mismo documento -- evidencia adicional de ruido de OCR generalizado en esta guía, no un patrón único). Se descarta usarlo como respaldo automático de cliente: es un campo documental distinto, con semántica propia -- en el propio `464264` (control), SOLICITANTE trae `"SODIMAC SA CORONEL"`, no el texto simple `"SODIMAC SA"` del campo cliente -- confirma que ambos campos no siempre coinciden literalmente, así que sustituir uno por otro produciría a veces un valor incorrecto sin evidencia real de que sea el mismo dato.
+
+**¿Existe evidencia documental suficiente para recuperar "SODIMAC SA" con seguridad hoy? NO.** No hay texto de nombre detectado (nada que seleccionar), y el único candidato adicional (RUT) es inválido tal como fue leído. Ninguna corrección de código puede generar evidencia donde el motor de OCR no detectó ninguna.
+
+**Vía plausible para diseño futuro, evaluada y NO implementada:** relectura focal del recorte de RUT con `allowlist` numérico (`0123456789.-Kk`, mismo patrón exacto que `ALLOWLIST_FECHA`/`ALLOWLIST_TRANSPORTE`), activada cuando el RUT geométrico capturado falla `validar_rut_chileno` (no sólo cuando está ausente), con el mismo esquema de consenso (≥2 lecturas concordantes con confianza mínima) ya usado para fecha. Si produce un RUT válido con consenso, se enrutaría por el camino YA EXISTENTE y seguro de coincidencia EXACTA de RUT contra catálogo (`_resolver_cliente_id_corroborado`) -- nunca por nombre aproximado ni fuzzy. **Riesgo mayor que el caso de fecha:** una relectura de RUT parcialmente errónea podría producir un RUT válido (pasa el dígito verificador) pero perteneciente a un cliente equivocado -- mucho más delicado que una fecha equivocada, porque asigna una identidad de cliente completa. Requiere su propia validación de tasa de acierto/riesgo contra el histórico -- **clasificado como diseño independiente (FIX_B), no implementado en este bloque.**
+
+**Fix implementado: NO.**
+
+**Tests:** ninguno nuevo -- no hubo cambio de código.
+
+**Suite:** sin cambios -- se mantiene 1210 passed, 0 failed (no se repitió, código byte-idéntico a `d22829d`).
+
+**Drive:** no modificado -- bloque 100% lectura (imágenes vía TEMP con SHA-256 verificado, catálogos). `PREDICCION_CONGELADA.sha256` -- `OK`. `mtime` de `operacion/actual/analisis_completo_guias.csv` sin cambios. Carpeta TEMP eliminada al terminar.
+
+**Git:** Motor sin cambios adicionales a `d22829d` -- working tree limpio, sólo estas tres bitácoras. Sin commit, sin push de este bloque. Desktop sin cambios, HEAD `fba95ac`.
+
+**Pendientes explícitos, sin iniciar:** relectura focal de RUT para cliente (diseño futuro FIX_B, registrado); demás hallazgos del lote de 15; fecha de `464367` (registrado en el bloque anterior).
+
+**Estado: DIAGNÓSTICO CLIENTE 464265 COMPLETADO -- REQUIERE DECISIÓN.**
+
+## 2026-08-18 — Cierre aceptado de `CLIENTE_AUSENTE 464265` + principio operacional ratificado
+
+**Cierre:** diagnóstico de `464265` ACEPTADO, sin fix de código. Aclaración explícita de continuidad, ya presente implícitamente en el bloque de diagnóstico anterior pero ratificada aquí sin ambigüedad: `CLIENTE_AUSENTE` en este caso significa "Atlas no logró extraer un dato que el documento sí trae" (nombre y RUT verificados visualmente en la imagen, bajo la sombra de la mancha física) -- **no** "el documento carece del campo cliente". El motivo `CLIENTE_AUSENTE` es genérico y hoy no distingue estos dos casos (dato realmente ausente del documento vs. dato presente pero no extraído) -- diferencia relevante para el futuro diseño de Incidencias Documentales, no resuelta aquí.
+
+**Principio operacional ratificado por Javier, registrado formalmente en esta bitácora:**
+> Cuando Atlas tiene evidencia suficiente, actúa. Cuando existe una duda material, consulta. Cuando no existe evidencia suficiente, se abstiene. Atlas nunca debe adivinar para evitar una revisión humana. Esto no significa preguntar innecesariamente: si una identidad está inequívocamente corroborada, Atlas debe resolverla sin intervención.
+
+Consistente con el comportamiento ya implementado y auditado en todos los bloques de esta sesión: abstención conservadora ante ambigüedad o evidencia insuficiente (fecha/cliente de `464265`, obra_destino sin corroborar), resolución automática sin fricción cuando la evidencia es inequívoca (RUT exacto contra catálogo `CONFIRMADO`/`ACTIVO`, patentes homologadas, tolerancias de OCR acotadas a pares ya vetados). No se trata de una regla nueva de comportamiento -- es la primera vez que se registra como principio explícito y citable.
+
+**Drive/Desktop:** sin cambios. **Git:** working tree del Motor con sólo estas tres bitácoras, listo para publicarse como cierre documental de FASE 0.
+
+**Estado: CLIENTE 464265 CERRADO SIN FIX -- LISTO PARA PUBLICAR.**

@@ -807,3 +807,35 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Git:** sin cambios de código en este bloque -- working tree del Motor limpio (idéntico a `9aabce2`), sólo estas tres bitácoras. Sin commit, sin push.
 - **Pendientes explícitos, sin iniciar:** fecha de `464265` a nivel de documento individual (queda "05-08-2024" en `analisis_completo_guias.csv`, honestamente sin corroborar, con la discrepancia ya visible a nivel de viaje); cliente de `464265`; demás hallazgos del lote de 15; diseño de relectura focal ampliada (registrado, no iniciado); fecha de `464367` (registrado, no iniciado).
 - **Estado: DIAGNÓSTICO FECHA 464265 COMPLETADO -- REQUIERE DECISIÓN.**
+
+---
+
+## 2026-08-18 — Publicado (`d22829d`) + diagnóstico dirigido de `CLIENTE_AUSENTE` en `464265`
+
+- **Publicación:** el diagnóstico de fecha (sin cambio de código) quedó documentado y publicado en `d22829d` sobre `origin/lector-mvp-guia-nueva` (`9aabce2..d22829d`), verificado post-push local=remoto, working tree limpio. Desktop sin cambios, HEAD `fba95ac`.
+- **Objetivo de este bloque:** `464265` devuelve `cliente = "No encontrado"` aunque la inspección física confirma que el documento sí dice "SODIMAC SA" (RUT `96.792.430-K`, mismo cliente que `464264`).
+- **Ground truth confirmado desde la imagen, con recortes ampliados:** nombre "SODIMAC SA" y RUT "96.792.430-K" son legibles bajo la sombra de la mancha física -- no son ilegibles para un ojo humano, sólo están degradados.
+- **Causa raíz, con evidencia directa (OCR real dirigido, TEMP):** en la posición exacta donde debería estar el nombre del cliente, el motor de OCR **no generó ninguna caja de texto** -- confianza 0 (ausencia total, no una lectura de mala calidad). Se comparó directamente con `464264` (mismo cliente, mismo viaje, mismo layout): ahí el OCR sí detectó "SODIMAC SA" con buena confianza (0,93) en la posición equivalente, sin ninguna mancha encima. El RUT de `464265` sí fue detectado, pero salió corrupto de una forma que **no pasa la validación de RUT chileno** (dígito verificador "X", que ni siquiera es un dígito verificador válido) -- y esto no es un caso aislado de la mancha: `464264` (sin mancha) también trae su RUT con el mismo tipo de corrupción (un dígito de más al principio), así que ese RUT tampoco habría servido de ancla en ese control.
+- **Se investigó explícitamente si el RUT ofrece una vía sería de recuperación:** hoy, no -- el mecanismo que ya existe para esto (`_extraer_rut_cliente_geometrico`) exige que el RUT capturado pase el dígito verificador chileno completo, y correctamente se abstiene ante un RUT inválido (comportamiento correcto, no un bug). Tampoco existe hoy un mecanismo de relectura focal para nombres de cliente -- ese tipo de relectura (usado para fecha y número de transporte) sólo existe para campos de alfabeto restringido (dígitos), no para texto libre.
+- **Se evaluó y se descartó explícitamente usar el campo SOLICITANTE (que sí trae "SODIMAC SA CORWEL", con OCR) como sustituto de cliente:** es un campo distinto del documento, con su propio significado -- en el propio `464264` SOLICITANTE trae "SODIMAC SA CORONEL", no el mismo texto simple que el campo cliente ("SODIMAC SA") -- usarlo como respaldo automático mezclaría dos campos que no siempre coinciden.
+- **¿Existe evidencia documental suficiente para recuperar "SODIMAC SA" con seguridad hoy? NO.** El nombre no fue detectado en absoluto (no hay texto que "seleccionar mal"), y el RUT capturado es inválido. No hay ninguna corrección de código pequeña y segura que resuelva esto sin depender del documento hermano o del catálogo por contexto -- ambos explícitamente prohibidos.
+- **Vía plausible identificada para el futuro, NO implementada:** una relectura focal del recorte del RUT (mismo patrón ya usado para fecha y transporte, con una lista de caracteres restringida a dígitos/puntos/guión/K), que si logra un RUT válido con consenso, se usaría por la vía YA EXISTENTE y segura de coincidencia exacta contra catálogo por RUT -- nunca por nombre aproximado. Se descarta implementarla en este bloque por ser una capacidad nueva (no una corrección puntual) que necesita su propia validación de riesgo (una relectura de RUT parcialmente incorrecta podría producir un RUT válido pero equivocado, mucho más delicado que el caso de fecha). **Queda registrado como diseño futuro (FIX_B), no implementado.**
+- **Fix implementado: NO.**
+- **Drive:** no modificado -- bloque 100% lectura. **Desktop:** no modificado.
+- **Git:** sin cambios de código -- working tree del Motor limpio (idéntico a `d22829d`). Sin commit, sin push de este bloque.
+- **Pendientes explícitos, sin iniciar:** relectura focal de RUT para cliente (diseño futuro, registrado); demás hallazgos del lote de 15; fecha de `464367` (registrado en el bloque anterior).
+- **Estado: DIAGNÓSTICO CLIENTE 464265 COMPLETADO -- REQUIERE DECISIÓN.**
+
+---
+
+## 2026-08-18 — Cierre aceptado de `CLIENTE_AUSENTE 464265` + principio operacional ratificado por Javier
+
+- **Diagnóstico de `464265` ACEPTADO y CERRADO, sin fix de código.** Confirmado explícitamente para que quede sin ambigüedad en continuidad: **el campo cliente SÍ existe en el documento físico de `464265`** ("SODIMAC SA", RUT `96.792.430-K`, confirmado visualmente con recorte ampliado) -- `CLIENTE_AUSENTE` describe que **Atlas no logró extraerlo** (el detector de OCR no generó ninguna caja de texto en esa posición), no que el documento carezca del campo. Esta distinción -- "el dato existe en el papel pero Atlas no pudo leerlo" vs. "el documento realmente no trae el dato" -- es relevante para el futuro diseño de motivos/Incidencias Documentales y queda registrada aquí explícitamente.
+- **Principio operacional ratificado por Javier, registrado formalmente:**
+  > Cuando Atlas tiene evidencia suficiente, actúa. Cuando existe una duda material, consulta. Cuando no existe evidencia suficiente, se abstiene. Atlas nunca debe adivinar para evitar una revisión humana.
+  >
+  > Esto no significa preguntar innecesariamente: si una identidad está inequívocamente corroborada, Atlas debe resolverla sin intervención humana.
+
+  Este principio ya gobernaba de hecho el comportamiento de Atlas en todos los bloques de esta auditoría (abstención en `464265` cliente/fecha, abstención en `obra_destino` ante corroboración fallida, resolución automática cuando el RUT corrobora exactamente contra catálogo) -- queda ahora expresado como regla explícita de producto/ingeniería, no sólo como comportamiento observado caso a caso.
+- **Drive/catálogos/Desktop:** sin cambios. **Git:** sólo estas tres bitácoras en el working tree del Motor, listas para publicarse como cierre documental de FASE 0.
+- **Estado: CLIENTE 464265 CERRADO SIN FIX -- LISTO PARA PUBLICAR Y CONTINUAR CON EL SIGUIENTE HALLAZGO DEL LOTE.**

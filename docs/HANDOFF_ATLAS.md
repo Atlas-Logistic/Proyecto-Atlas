@@ -866,3 +866,26 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Qué debe decidir Javier ahora:** si prioriza el diseño futuro de relectura focal ampliada (detección a nivel de documento individual, no sólo de viaje) para un bloque dedicado; y si el hallazgo colateral de fecha en `464367` amerita su propio diagnóstico.
 - No se tocó Desktop, catálogos, decisiones, patentes, cliente, Mobile ni Multiempresa. No se aplicó ninguna decisión del lote ni se promovió nada.
 - **Estado: DIAGNÓSTICO FECHA 464265 COMPLETADO -- REQUIERE DECISIÓN.**
+
+## Checkpoint 2026-08-18 — Publicado (`d22829d`) + diagnóstico dirigido de `CLIENTE_AUSENTE` en `464265`
+
+- **Publicación:** commit `d22829d` (diagnóstico de fecha, sólo documentación) publicado en `origin/lector-mvp-guia-nueva` (`9aabce2..d22829d`, sin force). Verificado post-push: local == remoto `d22829d`, working tree limpio. Desktop verificado sin tocar, HEAD `fba95ac`.
+- **Objetivo de este bloque:** `464265` devuelve `cliente = "No encontrado"` aunque el documento real dice "SODIMAC SA" (RUT `96.792.430-K`, mismo cliente que `464264`, mismo viaje).
+- **Ground truth desde la imagen:** nombre y RUT son legibles bajo la mancha física ya conocida (degradados, no ilegibles para un humano).
+- **Hallazgo principal, verificado con OCR real dirigido:** en la posición exacta donde debería estar "SODIMAC SA", el motor de OCR **no generó ninguna caja de texto** -- ausencia total (confianza 0), no una lectura de mala calidad. Comparado con `464264` (mismo cliente, sin mancha en esa zona): ahí el OCR sí detecta el nombre con confianza 0,93. El RUT de `464265` sí se detectó, pero no pasa el dígito verificador chileno (formato inválido) -- y esa misma corrupción del RUT (no la ausencia, otra distinta: un dígito de más al inicio) también aparece en `464264`, así que tampoco habría servido de ancla ahí.
+- **Se investigó explícitamente si el RUT ofrece una ruta segura hoy: NO.** El mecanismo que ya existe para esto se abstiene correctamente porque el RUT capturado no es válido -- comportamiento correcto, no un bug. Tampoco existe hoy relectura focal para nombres de cliente (sólo existe para fecha y número de transporte, campos de alfabeto restringido).
+- **Se evaluó y descartó usar el campo SOLICITANTE como sustituto de cliente:** es un campo distinto con su propio significado -- en el propio `464264`, SOLICITANTE trae un texto distinto al de cliente ("SODIMAC SA CORONEL" vs. "SODIMAC SA"), así que sustituir uno por otro produciría a veces un valor incorrecto.
+- **¿Existe evidencia documental suficiente para recuperar "SODIMAC SA" con seguridad? NO.** No hay texto de nombre detectado y el RUT capturado es inválido -- ninguna corrección de código puede generar evidencia donde el OCR no detectó nada.
+- **Vía plausible para el futuro, NO implementada:** relectura focal del recorte de RUT (mismo patrón ya usado para fecha/transporte, alfabeto restringido a dígitos), que si logra un RUT válido se usaría por la vía ya existente y segura de coincidencia exacta contra catálogo -- nunca por nombre aproximado. Descartada para este bloque por ser una capacidad nueva con más riesgo que el caso de fecha (una relectura de RUT parcialmente errónea podría asignar un cliente equivocado, no sólo una fecha equivocada) -- **queda registrada como diseño futuro (FIX_B).**
+- **Fix implementado: NO.**
+- **Drive:** no modificado. **Desktop:** no modificado, HEAD `fba95ac`. **Git:** sin cambios de código -- working tree del Motor limpio (idéntico a `d22829d`). Sin commit, sin push de este bloque.
+- **Qué debe decidir Javier ahora:** si prioriza el diseño futuro de relectura focal de RUT para cliente (con su propia validación de riesgo) para un bloque dedicado; qué hacer con el resto de hallazgos del lote de 15 todavía pendientes.
+- No se tocó Desktop, catálogos, decisiones, patentes, fecha, Mobile ni Multiempresa. No se aplicó ninguna decisión del lote ni se promovió nada.
+- **Estado: DIAGNÓSTICO CLIENTE 464265 COMPLETADO -- REQUIERE DECISIÓN.**
+
+## Checkpoint 2026-08-18 — Cierre aceptado de `CLIENTE_AUSENTE 464265` + principio operacional ratificado por Javier
+
+- **Cierre:** diagnóstico de `464265` ACEPTADO, sin fix de código. **Aclaración de continuidad:** el campo cliente SÍ existe en el documento físico ("SODIMAC SA" / RUT `96.792.430-K`, verificado visualmente) -- `CLIENTE_AUSENTE` significa que Atlas no logró extraerlo (el detector de OCR no generó caja de texto ahí), no que el documento carezca del dato. Diferencia relevante para el futuro diseño de Incidencias Documentales.
+- **Principio operacional ratificado por Javier, registrado formalmente:** *"Cuando Atlas tiene evidencia suficiente, actúa. Cuando existe una duda material, consulta. Cuando no existe evidencia suficiente, se abstiene. Atlas nunca debe adivinar para evitar una revisión humana. Esto no significa preguntar innecesariamente: si una identidad está inequívocamente corroborada, Atlas debe resolverla sin intervención."* Ya gobernaba de hecho el comportamiento observado en toda esta auditoría; queda ahora como regla explícita.
+- **Drive/Desktop:** sin cambios. **Git:** sólo estas tres bitácoras, listas para publicarse.
+- **Estado: CLIENTE 464265 CERRADO SIN FIX -- LISTO PARA PUBLICAR Y CONTINUAR CON EL SIGUIENTE HALLAZGO DEL LOTE (FECHA 464367).**
