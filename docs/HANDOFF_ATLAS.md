@@ -987,3 +987,16 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Git:** working tree con `atlas_core/revalidacion_documental.py`, `atlas_core/telemetria/proveedor.py`, `tests/test_revalidacion_telemetria_gap.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
 - **Qué debe decidir Javier ahora:** si autoriza aplicar `revalidar_telemetria_sin_ocr()` contra `operacion/actual` real (no se hizo en este bloque); y si prioriza después un bloque de recálculo ORS para los 4 viajes ya listos.
 - **Estado: FIX RE-ENRIQUECIMIENTO TELEMETRÍA VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18 — Bloque APLICACIÓN REAL: revalidación telemetría en `operacion/actual`
+
+- **Publicado antes de empezar:** commit funcional `fb370ff`, push confirmado, local=remoto, working tree limpio.
+- **Primera escritura real en Drive de esta cadena de bloques.** Backup previo verificado por SHA-256 en `respaldos/REVALIDACION_TELEMETRIA_ROLLBACK_PRE_APLICACION_20260818_185739/`. Dry-run final sin sorpresas (coincidencia exacta con validación previa) antes de aplicar.
+- **Aplicado:** `revalidar_telemetria_sin_ocr()` contra el CSV real -- 19 documentos recuperan telemetría, 0 llamadas Onelogis, 0 llamadas ORS. Reporte regenerado (mecanismo canónico existente) en `reportes/reporte_revalidacion_20260818_225946_039407/`; `estado_operacion.json` apunta ahí ahora.
+- **Integridad: 0 violaciones documentales.** Catálogos y decisiones intactos (verificado por mtime).
+- **17 documentos corrigen origen** AZA RENCA→AZA COLINA. 1 (464529) queda honestamente sin determinar. 0 conflictos nuevos.
+- **6 transportes con km inválido, invalidados correctamente** (nunca se dejó un número equivocado ni se recalculó con ORS). **4 quedan `LISTOS_PARA_RECALCULO_RUTA`**: 0000351956, 0000352552, 0000352568, 0000352584.
+- **Desktop:** sin cambios de código; ya muestra "No disponible" para km vacío.
+- **Drive:** modificado exclusivamente por esta revalidación controlada (2 archivos + 1 reporte nuevo). **Git:** working tree sólo con las tres bitácoras.
+- **Qué debe decidir Javier ahora:** autorizar un bloque aparte, con ORS, para recalcular ruta/km de los 4 viajes ya listos.
+- **Estado: REVALIDACIÓN TELEMETRÍA APLICADA Y PUBLICADA -- LISTO PARA RECÁLCULO CONTROLADO DE RUTAS/KM.**

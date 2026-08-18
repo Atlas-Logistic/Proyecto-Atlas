@@ -952,3 +952,19 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Drive:** no modificado. **Git:** working tree con `atlas_core/revalidacion_documental.py`, `atlas_core/telemetria/proveedor.py` y `tests/test_revalidacion_telemetria_gap.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
 - **Próximo paso recomendado:** decisión de Javier sobre aplicar esto contra `operacion/actual` real (todavía no se hizo) y, después, un bloque aparte para recalcular con ORS los 4 viajes ya listos.
 - **Estado: FIX RE-ENRIQUECIMIENTO TELEMETRÍA VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Bloque APLICACIÓN REAL — revalidación telemetría en `operacion/actual` -- 2026-08-18
+
+- **Publicado antes de empezar:** commit funcional `fb370ff` (fix ya en producción), push confirmado, local=remoto, working tree limpio.
+- **Backup obligatorio:** `respaldos/REVALIDACION_TELEMETRIA_ROLLBACK_PRE_APLICACION_20260818_185739/` (`analisis_completo_guias.csv` + `estado_operacion.json`), verificado byte a byte por SHA-256, manifiesto incluido. Backups previos intactos.
+- **Dry-run final** contra copia TEMP exacta del dato real vigente: coincidencia exacta con lo esperado (19 documentos, 18 mejoran origen, 17 RENCA→COLINA, 6 transportes con km a invalidar) -- sin sorpresas, se procedió.
+- **Aplicación real** de `revalidar_telemetria_sin_ocr()` contra `G:\Mi unidad\Atlas\operacion\actual\analisis_completo_guias.csv`: **19 documentos recuperaron telemetría**, resultado idéntico al dry-run. **0 llamadas a Onelogis, 0 llamadas a ORS** (garantizado por `ProveedorTelemetriaSoloCache`).
+- Reporte regenerado con el mecanismo canónico existente (`generar_reporte_viajes`, sin ORS) en `reportes/reporte_revalidacion_20260818_225946_039407/`; `estado_operacion.json` actualizado para apuntar ahí.
+- **Integridad documental: 0 violaciones** -- ningún campo documental (guía, transporte, fecha, cliente, obra, patentes, material, horas) cambió; catálogos y decisiones sin tocar (mtimes verificados).
+- **17 documentos corrigen origen** de `AZA RENCA` (documental, encabezado matriz -- causa raíz conocida) a `AZA COLINA` (real, GPS). **1 documento (464529)** queda honestamente sin determinar (antes tenía "AZA RENCA" heredado sin corroborar). **0 conflictos nuevos** (el único `ORIGEN_GPS_CONFLICTO` visto, 464730, ya existía antes de este bloque).
+- **6 transportes con km calculado sobre origen incorrecto, invalidados correctamente** (nunca se dejó un número que ya no correspondía). **4 quedan `LISTOS_PARA_RECALCULO_RUTA`** (origen coherente + destino ya resuelto, sin conflicto): 0000351956, 0000352552, 0000352568, 0000352584 -- confirmado contra el reporte real regenerado, no hardcodeado.
+- **Desktop:** no se tocó código; verificado que ya muestra "No disponible" para `distancia_km` vacío (`formatearDistancia`) -- funcionará correctamente en cuanto se abra con el reporte vigente actualizado.
+- **Drive:** modificado, exclusivamente por esta revalidación controlada (2 archivos existentes + 1 reporte nuevo + puntero de estado).
+- **Git:** working tree con sólo las tres bitácoras -- fix funcional ya publicado antes de esta aplicación.
+- **Próximo paso recomendado:** bloque aparte, con autorización explícita, para recalcular con ORS los 4 viajes ya listos.
+- **Estado: REVALIDACIÓN TELEMETRÍA APLICADA Y PUBLICADA -- LISTO PARA RECÁLCULO CONTROLADO DE RUTAS/KM.**

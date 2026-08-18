@@ -3002,3 +3002,44 @@ No se recalculó ninguna ruta ni se llamó a ORS/Onelogis. `distancia_km`/`estad
 **Drive:** no modificado. **Git:** working tree con `atlas_core/revalidacion_documental.py`, `atlas_core/telemetria/proveedor.py`, `tests/test_revalidacion_telemetria_gap.py` modificados/nuevos. Sin commit, sin push de este bloque.
 
 **Estado: FIX RE-ENRIQUECIMIENTO TELEMETRÍA VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Bloque APLICACIÓN REAL — revalidación telemetría en `operacion/actual` -- 2026-08-18
+
+**Checkpoint:** commit funcional `fb370ff` publicado y verificado (local=remoto, working tree limpio) antes de empezar.
+
+**Snapshot ANTES (lectura, sin modificar nada):** 43 documentos, 23 con telemetría / 20 sin, `origen_determinado_por` = {DOCUMENTO: 25, vacío: 5, TELEMETRIA_GPS: 13}. Reporte vigente (`reporte_promocion_lote15_20260818_153512/viajes.csv`): 38 viajes, 13 con `distancia_km`, `origen_determinado_por` = {DOCUMENTO: 20, vacío: 6, TELEMETRIA_GPS: 12}. Los 19 documentos previstos y los 6 transportes con km potencialmente inválido confirmados presentes con el estado exacto esperado (ver detalle en el turno de conversación; omitido aquí por extensión).
+
+**Backup:** `G:\Mi unidad\Atlas\respaldos\REVALIDACION_TELEMETRIA_ROLLBACK_PRE_APLICACION_20260818_185739\` -- contiene `operacion_actual/analisis_completo_guias.csv` y `operacion_actual/estado_operacion.json` (únicos dos archivos de `operacion/actual` que esta operación podía modificar: `analisis_completo_guias.csv` in-place, `estado_operacion.json` reescrito por el puntero de reporte vigente; `decisiones_pendientes.json`/`decisiones_aplicadas.json`/catálogos no son tocados por `revalidar_telemetria_sin_ocr` ni por `generar_reporte_viajes`, no se incluyeron). Verificado SHA-256 byte a byte antes de escribir (idéntico al original en ambos archivos). `MANIFIESTO_SHA256.txt` incluido. Ningún backup previo eliminado.
+
+**Dry-run final:** copia TEMP exacta del `analisis_completo_guias.csv` + `telemetria_cache.json` + `plantas.json` vigentes, `revalidar_telemetria_sin_ocr()` ejecutada sobre la copia. Resultado: 19 guías actualizadas (lista idéntica a la prevista), 18 mejoran origen a `TELEMETRIA_GPS`, 17 `AZA RENCA`→`AZA COLINA`, 6 transportes con `distancia_km` invalidado (`0000351956, 0000352376, 0000352537, 0000352552, 0000352568, 0000352584`). Coincidencia exacta con la validación TEMP del bloque anterior -- sin diferencias que explicar, se procedió a la aplicación real.
+
+**Aplicación real:** `revalidar_telemetria_sin_ocr(ruta_dataset=G:\Mi unidad\Atlas\operacion\actual\analisis_completo_guias.csv, carpeta_catalogos=G:\Mi unidad\Atlas\catalogos_privados)` -- usa `ProveedorTelemetriaSoloCache` internamente (nunca llamado con proveedor real): **0 llamadas a Onelogis, 0 llamadas a ORS**. Resultado: 43 filas totales, 19 guías actualizadas, exactamente igual al dry-run.
+
+**Regeneración del reporte (mecanismo canónico, sin ORS):** `generar_reporte_viajes(dataset, reportes/reporte_revalidacion_20260818_225946_039407, carpeta_catalogos=catalogos_privados)` (mismo patrón usado por `revalidar_y_regenerar_reporte` para las otras dos revalidaciones ya existentes -- sin `calculador_rutas`, columnas de ruta quedan tal como las dejó el CSV, ninguna llamada de red). `escribir_estado_operacion()` actualiza `operacion/actual/estado_operacion.json` para apuntar `reporte_vigente` al nuevo reporte -- mismo mecanismo atómico ya usado en el resto del sistema.
+
+**Integridad documental (comparación antes/después, 43 filas):** 0 violaciones en `numero_guia, numero_transporte, fecha, chofer, rut_chofer, cliente, obra_destino, patente_tracto, patente_rampla, descripcion_material, tipo_carga, peso_kg, hora_entrada_aza, hora_salida_aza, permanencia_minutos, despachar_a_crudo, direccion_entrega, localidad_entrega, region_entrega`. Catálogos (`vehiculos.json, plantas.json, clientes.json, obras_destinos.json, destinos_maestros.json, empresas.json`) y decisiones (`decisiones_aplicadas.json, decisiones_pendientes.json`) verificados por `mtime`: ninguno tocado por este bloque.
+
+**Orígenes:** 17 documentos `DOCUMENTO(AZA RENCA)` → `TELEMETRIA_GPS(AZA COLINA)`: 463594, 463630, 464424, 464534, 464535, 464550, 464577, 464588, 464601, 464624, 464631, 464640, 464641, 464642, 464698, 464699, 464700. 1 documento (464529) queda sin determinar (antes "AZA RENCA" heredado sin corroborar; GPS corrió sobre datos reales y no confirmó ninguna planta). 0 conflictos `ORIGEN_GPS_CONFLICTO` nuevos -- el único visto (464730) ya existía con telemetría conectada antes de este bloque, confirmado comparando contra el backup.
+
+**Kilómetros -- tabla de invalidación:**
+
+| Transporte | Origen anterior | Origen corregido | Km anterior | Nuevo estado |
+|---|---|---|---|---|
+| 0000351956 | AZA RENCA | AZA COLINA | 16.7276 | REQUIERE_REVISION / ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA |
+| 0000352376 | AZA RENCA | AZA COLINA | 361.3855 / 505.0767 (por doc) | REQUIERE_REVISION / ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA |
+| 0000352537 | AZA RENCA | (sin determinar) | 16.7276 | REQUIERE_REVISION / ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA |
+| 0000352552 | AZA RENCA | AZA COLINA | 7.8476 | REQUIERE_REVISION / ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA |
+| 0000352568 | AZA RENCA | AZA COLINA | 7.4307 | REQUIERE_REVISION / ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA |
+| 0000352584 | AZA RENCA | AZA COLINA | 13.96 | REQUIERE_REVISION / ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA |
+
+Ningún km nuevo fue calculado (0 llamadas ORS); nunca se reemplazó por distancia en línea recta.
+
+**Viajes `LISTOS_PARA_RECALCULO_RUTA`** (calculado contra el reporte real regenerado, no hardcodeado -- origen coherente, `despachar_a` único ya resuelto, sin `CONFLICTO_*` bloqueante, sin km): **0000351956, 0000352552, 0000352568, 0000352584** (4 de los 6 invalidados; 0000352537 excluido por origen sin determinar, 0000352376 excluido por `CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO` preexistente y no relacionado).
+
+**Cobertura km del reporte regenerado:** 8 de 38 viajes con `distancia_km` (antes 13; 5 de los 6 transportes invalidados restaban un km viaje-level -- el sexto, 0000352376, ya no consolidaba km antes por el conflicto documental preexistente).
+
+**Desktop:** código no modificado; verificado que `formatearDistancia()` (`src/atlas_viajes.html:1163`) ya renderiza "No disponible" para `distancia_km` vacío -- compatible sin cambios en cuanto se abra apuntando al reporte vigente actualizado.
+
+**Drive:** modificado -- exclusivamente `operacion/actual/analisis_completo_guias.csv` (in-place), `operacion/actual/estado_operacion.json` (puntero), y el nuevo directorio `reportes/reporte_revalidacion_20260818_225946_039407/` (no sobrescribe ningún reporte previo). **Git:** working tree con únicamente las tres bitácoras -- el fix funcional ya estaba publicado antes de esta aplicación.
+
+**Estado: REVALIDACIÓN TELEMETRÍA APLICADA Y PUBLICADA -- LISTO PARA RECÁLCULO CONTROLADO DE RUTAS/KM.**
