@@ -968,3 +968,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Git:** working tree con sólo las tres bitácoras -- fix funcional ya publicado antes de esta aplicación.
 - **Próximo paso recomendado:** bloque aparte, con autorización explícita, para recalcular con ORS los 4 viajes ya listos.
 - **Estado: REVALIDACIÓN TELEMETRÍA APLICADA Y PUBLICADA -- LISTO PARA RECÁLCULO CONTROLADO DE RUTAS/KM.**
+
+## Bloque RECÁLCULO CONTROLADO DE RUTAS/KM -- 2026-08-18
+
+- **Publicado antes de empezar:** checkpoint `e4a354d` (Motor) / `fba95ac` (Desktop) verificados limpios.
+- **Candidatos determinados programáticamente** (origen resoluble + destino ya resuelto + sin conflicto a nivel documento NI a nivel viaje + km ausente): **4 transportes / 5 documentos** -- coincide exactamente con la expectativa (0000351956, 0000352552, 0000352568, 0000352584), verificado, no asumido.
+- **Backup:** `respaldos/RECALCULO_RUTAS_KM_ROLLBACK_PRE_APLICACION_20260818_190921/`, verificado byte a byte por SHA-256.
+- **Dry-run con ORS real** (autorizado explícitamente sólo para estos 4 pares origen/destino): 4 rutas calculadas, todas `RUTA_CALCULADA`, todas con distancia > 0 y coherentes con el área metropolitana de Santiago. **Verificación cruzada:** la ruta AZA COLINA→VISTA CLARA 2351 CERRILLOS coincidió EXACTO (30.7719 km) con la misma ruta ya calculada antes para otra guía (464763) -- confirma correctness sin ambigüedad.
+- **Aplicación real:** los 4 resultados del dry-run (no se llamó ORS una segunda vez) se persistieron en las 5 filas candidatas. Reporte regenerado (mecanismo canónico, sin ORS adicional) en `reportes/reporte_revalidacion_20260818_231011_223069/`.
+- **0 otros documentos modificados. 0 violaciones de integridad** (documental + origen/telemetría). Catálogos y decisiones intactos (verificado por mtime).
+- **Cobertura km final: 12/38 viajes (31.6%)**, antes 8/38 (21.1%). Los 26 restantes sin km, todos con causa explicada: 17 `MULTIPLES_UBICACIONES_DISPERSAS`, 6 origen no determinado (incluye 1 conflicto GPS ya conocido), 1 `GEOCODIFICACION_DIRECCION_NO_ENCONTRADA`, 1 conflicto documental preexistente, 1 sin `despachar_a`.
+- **Desktop:** no se tocó código; `estado_operacion.json` ya apunta al reporte con los km nuevos, Javier podrá verlo al abrir Desktop.
+- **Drive:** modificado, exclusivamente por este recálculo controlado. **Git:** working tree con sólo las tres bitácoras (no hubo cambios de código en este bloque).
+- **Próximo paso recomendado:** ninguno urgente -- los 22 viajes restantes sin km requieren decisiones de negocio ya identificadas en bloques anteriores (umbral Onelogis, radio GPS destino, conflictos documentales), no un recálculo mecánico más.
+- **Estado: RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**

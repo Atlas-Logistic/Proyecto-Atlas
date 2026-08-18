@@ -1000,3 +1000,17 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Drive:** modificado exclusivamente por esta revalidación controlada (2 archivos + 1 reporte nuevo). **Git:** working tree sólo con las tres bitácoras.
 - **Qué debe decidir Javier ahora:** autorizar un bloque aparte, con ORS, para recalcular ruta/km de los 4 viajes ya listos.
 - **Estado: REVALIDACIÓN TELEMETRÍA APLICADA Y PUBLICADA -- LISTO PARA RECÁLCULO CONTROLADO DE RUTAS/KM.**
+
+## Checkpoint 2026-08-18 — Bloque RECÁLCULO CONTROLADO DE RUTAS/KM
+
+- **Publicado antes de empezar:** Motor `e4a354d`, Desktop `fba95ac`, ambos limpios.
+- **4 transportes / 5 documentos candidatos**, determinados programáticamente (origen resoluble + destino ya resuelto + sin conflicto documento/viaje + km ausente) -- coincide exacto con la expectativa previa, verificado no asumido.
+- **Backup:** `respaldos/RECALCULO_RUTAS_KM_ROLLBACK_PRE_APLICACION_20260818_190921/`, verificado SHA-256.
+- **Dry-run con ORS real** (sólo estos 4 pares, autorizado explícitamente): 4 rutas válidas, todas coherentes; verificación cruzada exacta contra una ruta ya existente (464763, mismo par origen/destino) confirma correctness.
+- **Aplicado:** los 4 resultados del dry-run persistidos (sin llamar ORS de nuevo) en las 5 filas. Reporte regenerado en `reportes/reporte_revalidacion_20260818_231011_223069/`.
+- **0 otros documentos modificados. 0 violaciones de integridad.** Catálogos y decisiones intactos.
+- **Cobertura km: 12/38 (31.6%)**, antes 8/38. Los 26 restantes sin km, todos con causa explicada (17 MULTIPLES_UBICACIONES_DISPERSAS, 6 origen no determinado, 1 OCR corrupto en destino, 1 conflicto documental preexistente, 1 sin despachar_a).
+- **Desktop:** sin cambios de código; ya apunta al reporte con los km nuevos.
+- **Drive:** modificado exclusivamente por este recálculo controlado. **Git:** working tree sólo con las tres bitácoras (sin código nuevo este bloque).
+- **Qué debe decidir Javier ahora:** revisar visualmente en Desktop los 4 viajes con km nuevo; decidir si los 22 viajes restantes sin km (fuera de los ya explicados por conflicto/OCR/sin-despachar_a) ameritan abrir el bloque de umbral Onelogis/radio GPS destino ya diagnosticado.
+- **Estado: RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**

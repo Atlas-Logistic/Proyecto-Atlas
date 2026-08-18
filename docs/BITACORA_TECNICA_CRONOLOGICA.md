@@ -3043,3 +3043,44 @@ Ningún km nuevo fue calculado (0 llamadas ORS); nunca se reemplazó por distanc
 **Drive:** modificado -- exclusivamente `operacion/actual/analisis_completo_guias.csv` (in-place), `operacion/actual/estado_operacion.json` (puntero), y el nuevo directorio `reportes/reporte_revalidacion_20260818_225946_039407/` (no sobrescribe ningún reporte previo). **Git:** working tree con únicamente las tres bitácoras -- el fix funcional ya estaba publicado antes de esta aplicación.
 
 **Estado: REVALIDACIÓN TELEMETRÍA APLICADA Y PUBLICADA -- LISTO PARA RECÁLCULO CONTROLADO DE RUTAS/KM.**
+
+## Bloque RECÁLCULO CONTROLADO DE RUTAS/KM -- 2026-08-18
+
+**Checkpoint:** Motor `e4a354d` (local=remoto, 0/0, limpio), Desktop `fba95ac` (limpio) -- ambos verificados antes de empezar.
+
+**Candidatos reales (determinados programáticamente contra `analisis_completo_guias.csv` + `viajes.csv` vigentes, no hardcodeados):** origen resoluble (`planta_origen_id` + `origen_determinado_por` presentes) AND destino resoluble (`despachar_a_crudo` presente, `estado_entrega=RESUELTO`, `direccion_entrega` presente) AND sin conflicto (ni `CONFLICTO_*` en `motivos_revision_documento`, ni `ORIGEN_GPS_CONFLICTO`, ni `CONFLICTO_*` en `motivos_revision` a nivel viaje) AND `distancia_km` vacío. Primera pasada a nivel documento dio 8 filas/5 transportes (incluía 464698/699/700, transporte `0000352376`); al cruzar contra el conflicto a NIVEL VIAJE (`CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO`, invisible en el CSV por documento) se excluyó correctamente, quedando **4 transportes / 5 documentos**: 0000351956 (464424), 0000352552 (464534, 464535), 0000352568 (464577), 0000352584 (464550) -- coincide exacto con la expectativa del bloque anterior.
+
+**Snapshot previo (lectura, sin escribir):** los 5 documentos candidatos tenían `distancia_km` vacío, `estado_ruta=REQUIERE_REVISION`, `motivo_ruta=ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA`, origen `AZA COLINA`/`TELEMETRIA_GPS` (coordenadas de catálogo: -33.137558, -70.665977), destino ya geocodificado y cacheado (`estado_entrega=RESUELTO`) pero sin coordenadas persistidas en el esquema del CSV (el esquema documental nunca guarda lat/lon de entrega, sólo la etiqueta resuelta) -- se recuperaron desde `cache/geocodificacion/geocodificacion_cache.json` vía `RepositorioCacheGeocodificacion.buscar()` real, confirmando 1-2 candidatos por dirección, todos ya "el mismo lugar" (`_candidatos_son_el_mismo_lugar`), sin necesidad de nueva geocodificación.
+
+**Dry-run (ORS real, autorizado explícitamente sólo para estos 4 pares):** `calcular_ruta_con_planta_conocida(planta=AZA COLINA, despachar_a_crudo=<texto>, proveedor_rutas=ProveedorRutasConCacheGeocodificacion(OpenRouteService(pais="CL"), RepositorioCacheGeocodificacion(cache real)))` -- mismo mecanismo canónico que usa `procesamiento_masivo.py` para recalcular ruta tras un cambio de origen (Fase I). 4 llamadas reales a ORS (una por par único origen/destino; 464534 y 464535 comparten destino, deduplicado antes de llamar). Resultado: las 4, `RUTA_CALCULADA`, `distancia_km > 0`, coherentes con Santiago metropolitano (13-31 km). Verificación de sanidad: AZA COLINA→VISTA CLARA 2351 CERRILLOS dio 30.7719 km, EXACTAMENTE el mismo valor ya persistido para la guía 464763 (misma ruta real, calculada independientemente antes) -- ninguna de las reglas de seguridad de la sección 5 se violó (origen canónico CONFIRMADA/ACTIVA, destino no ambiguo, sin conflicto, coordenadas presentes, respuesta ORS válida, distancia > 0, par origen/destino correspondiente verificado).
+
+**Backup:** `G:\Mi unidad\Atlas\respaldos\RECALCULO_RUTAS_KM_ROLLBACK_PRE_APLICACION_20260818_190921\` (`analisis_completo_guias.csv` + `estado_operacion.json`, únicos archivos que esta operación podía modificar), verificado SHA-256 byte a byte, manifiesto incluido, backups previos intactos.
+
+**Aplicación real:** los 4 resultados del dry-run se reutilizaron sin llamar a ORS una segunda vez (misma coordenada origen/destino, cómputo determinista) -- se persistieron `distancia_km`/`duracion_min`/`proveedor_ruta`/`estado_ruta`/`motivo_ruta` en las 5 filas candidatas, vía `_leer_filas`/`_escribir_filas_completas`/`bloqueo_sesion` (mismos primitivos ya publicados en `atlas_core/revalidacion_documental.py`, sin código nuevo). Reporte regenerado con `generar_reporte_viajes` (sin `calculador_rutas`, cero llamadas de red adicionales) en `reportes/reporte_revalidacion_20260818_231011_223069/`; `estado_operacion.json` actualizado.
+
+**Verificación post-aplicación:** comparación completa de las 43 filas contra el backup -- **0 documentos fuera de los 5 candidatos modificados en ningún campo**. **0 violaciones de integridad** en campos documentales + origen/telemetría (verificado explícitamente, no sólo asumido). Catálogos (`vehiculos.json, plantas.json, clientes.json, obras_destinos.json, destinos_maestros.json, empresas.json`) y decisiones (`decisiones_aplicadas.json, decisiones_pendientes.json`) sin tocar (mtime).
+
+**Tabla de recálculo:**
+
+| Transporte | Guía(s) | Origen→Destino | Km antes | Km después | Estado antes → después | Fuente |
+|---|---|---|---|---|---|---|
+| 0000351956 | 464424 | AZA COLINA → Vista Clara, Cerrillos | (vacío) | 30.7719 | REQUIERE_REVISION → RUTA_CALCULADA | openrouteservice |
+| 0000352552 | 464534, 464535 | AZA COLINA → Maestra Lidia Torres, Recoleta | (vacío) | 22.9378 | REQUIERE_REVISION → RUTA_CALCULADA | openrouteservice |
+| 0000352584 | 464550 | AZA COLINA → Av. Irarrázaval, Ñuñoa | (vacío) | 27.7469 | REQUIERE_REVISION → RUTA_CALCULADA | openrouteservice |
+| 0000352568 | 464577 | AZA COLINA → Galvarino, Quilicura | (vacío) | 13.1788 | REQUIERE_REVISION → RUTA_CALCULADA | openrouteservice |
+
+**Cobertura km:** 12/38 viajes con km válido (31.6%), antes 8/38 (21.1%). Los 26 restantes sin km, TODOS con causa explicada (ninguno "sin km" sin justificación):
+
+| Causa | Viajes |
+|---|---|
+| `MULTIPLES_UBICACIONES_DISPERSAS` | 17 |
+| Origen no determinado (incluye `ORIGEN_GPS_NO_DETERMINADO`, `ORIGEN_GPS_ESTADIA_SIN_PLANTA` x2, `ORIGEN_GPS_CONFLICTO` (preexistente), y el caso 0000352537 donde GPS corrió y no confirmó ninguna planta) | 6 |
+| `GEOCODIFICACION_DIRECCION_NO_ENCONTRADA` (OCR corrupto en destino, 464367) | 1 |
+| Conflicto documental preexistente (`CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO`, 0000352376) | 1 |
+| Sin `despachar_a` (0000352629) | 1 |
+
+**Desktop:** código no modificado; `estado_operacion.json` apunta al reporte con los km nuevos -- Desktop los mostrará al abrir sin ningún cambio de UI.
+
+**Drive:** modificado, exclusivamente por este recálculo controlado. **Git:** working tree con únicamente las tres bitácoras -- ningún cambio de código en este bloque (se reutilizaron mecanismos ya publicados).
+
+**Estado: RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
