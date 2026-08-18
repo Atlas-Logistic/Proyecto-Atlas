@@ -2752,3 +2752,110 @@ Comparación con `git stash` temporal de sólo `atlas_core/paddleocr_worker.py` 
 **Temas de continuidad ya registrados en bloques anteriores, mantenidos, no iniciados aquí:** Incidencias Documentales genéricas; patente documental vs. vehículo canónico; sugerencia chofer↔vehículo sin autocorrección; transportista documental incorrecto (caso MBT ya visto); Analítica/IA; kilometraje operacional obligatorio; **planta de origen + rutas + kilómetros, próximo frente operacional identificado, no iniciado**.
 
 **Estado: P1 RELECTURA FOCAL REPARADO + FECHA 464367 VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## 2026-08-18 — Diagnóstico READ-ONLY: planta de origen / rutas / kilómetros
+
+**Publicación previa (FASE A de este mismo bloque):** commit `3929174` ("fix: restaurar relectura focal y corroborar fecha de emision") -- 7 archivos exactos (worker + corroboración de fecha + tests + 3 bitácoras). Push sin force: `b343a41..3929174`. Post-push: local `3929174` == remoto `3929174`, working tree limpio. Desktop verificado sin tocar: HEAD `fba95ac`, working tree limpio.
+
+**FASE B, checkpoint verificado antes de empezar:** Motor HEAD `3929174`, local=remoto, working tree limpio. Bloque 100% READ-ONLY: ningún archivo de código tocado, ninguna escritura en Drive, sin llamadas a ORS/Onelogis (todo el análisis usa datos ya calculados y persistidos, sin gastar cuota).
+
+### 1. Semántica actual de "planta de origen" -- auditada en el código real, sin asumir que todos los conceptos comparten fuente
+
+Confirmado que hay **tres fuentes distintas**, con jerarquía de confianza explícita en el propio código:
+
+1. **Origen documental** (`atlas_core/rutas/origen_documental.py::resolver_origen_documental`): tokeniza el encabezado del emisor (antes de la lista de sucursales) y matchea contra el catálogo de plantas confirmadas -- **causa raíz ya documentada en el bloque "OPERACIÓN REAL R1" (2026-08-12)**: el encabezado de AZA imprime siempre la misma planta matriz ("CASA MATRIZ PLANTA RENCA"), sin importar la planta real de despacho -- por diseño, este método resuelve casi siempre "AZA RENCA", nunca genuinamente "AZA COLINA". Es un **fallback legítimo únicamente cuando no hay evidencia GPS**, nunca una fuente confiable por sí sola.
+2. **Origen por GPS/telemetría** (`atlas_core/telemetria/`, integración real con Onelogis desde los bloques TELEMETRÍA T1/T2/T3 y OPERACIÓN REAL R1/R1.1, 2026-08-12): reúne los trips reales del vehículo ese día, encadena los coherentes en tiempo/espacio, detecta detenciones/estadías reales, y confirma la planta sólo si una geocerca (radio 1.5 km, `atlas_core/rutas/geocerca.py`) la identifica sin ambigüedad. Fuente de mayor confianza -- cuando corre y confirma, **siempre gana sobre el documento** (`origen_determinado_por="TELEMETRIA_GPS"`), incluso si "coincide" con lo que ya decía el documento.
+3. **Planta canónica/maestra** (`atlas_core/catalogo_plantas.py`, `plantas.json`): registro confirmado con coordenadas -- ambas fuentes anteriores sólo pueden devolver una planta que ya exista ahí como `CONFIRMADA`/`ACTIVA`; ninguna crea una planta nueva.
+
+**Persistencia y propagación (confirmada leyendo el código, no asumida):** documento (`analisis_completo_guias.csv`, columnas `planta_origen_id`/`planta_origen_nombre`/`origen_determinado_por`/`evidencia_origen`) → consolidación por viaje (`atlas_core/gestor_viajes.py::Viaje`, propiedad `planta_origen_nombre` vía `_campo_ruta_consolidado`, mismo criterio "coincide en todos los documentos del viaje o vacío" que el resto de campos de ruta) → `viajes.csv` (mismas columnas) → Desktop (`atlas_viajes.html`, línea 1055: `planta_origen: f.planta_origen_nombre || f.planta_origen`, línea 1174-1179: `valorPlantaOrigen()`, muestra el valor si existe o `"No disponible"` si no).
+
+**Nota histórica importante:** `docs/DISEÑO_RUTAS_ATLAS.md` y `docs/MODULO_RUTAS_ATLAS.md` describen una fase muy anterior del módulo ("no se integra con OCR, extractor, procesamiento masivo, viajes ni reportes", "la CLI no habilita OpenRouteService real") -- **desactualizados respecto al código real actual**, que sí integra todo esto de forma automática desde los bloques RUTAS R1 (11-08) hasta TELEMETRÍA T3 (12-08). No se corrigieron esos documentos en este bloque (fuera de alcance, sólo lectura).
+
+### 2. Ground truth real -- 43 documentos, 38 viajes (`operacion/actual`, reporte vigente `reporte_promocion_lote15_20260818_153512`, verificado contra `estado_operacion.json`)
+
+**A nivel documento (43 filas):**
+
+| Campo | Valores | Conteo |
+|---|---|---|
+| `planta_origen_nombre` | AZA RENCA / AZA COLINA / vacío | 25 / 13 / 5 |
+| `origen_determinado_por` | DOCUMENTO / TELEMETRIA_GPS / vacío | 25 / 13 / 5 |
+| `estado_telemetria` | vacío (nunca conectado) / SELECCIONADO / VEHICULO_NO_ENCONTRADO / SIN_HISTORICO | 20 / 17 / 4 / 2 |
+| `distancia_km` presente | sí / no | 17 / 26 |
+
+**Cruce clave:** de los 25 documentos con `origen_determinado_por=DOCUMENTO` (el método menos confiable), **19 tienen `estado_telemetria` vacío** -- telemetría nunca se conectó para esa corrida de procesamiento, así que nunca tuvieron oportunidad real de confirmarse por GPS (no es un fallo, es ausencia de intento). Sólo **6 sí tuvieron un intento real** (`VEHICULO_NO_ENCONTRADO`×4, `SIN_HISTORICO`×2) y cayeron al documento legítimamente, según la regla ya vigente desde R1.1.
+
+**A nivel viaje (38 filas, `viajes.csv`):** 25 `CONFIRMADO` / 13 `REQUIERE_REVISION`. 13 de 38 viajes ya traen `distancia_km` real.
+
+### 3. Caso concreto de origen incorrecto, trazado con precisión
+
+| Transporte | Documento | `planta_origen_nombre` | `origen_determinado_por` | Causa exacta |
+|---|---|---|---|---|
+| `0000351135` | `464264` | AZA COLINA | TELEMETRIA_GPS | GPS confirma correctamente (bloque OPERACIÓN REAL R1) |
+| `0000351135` | `464265` | AZA RENCA | DOCUMENTO | `estado_telemetria=VEHICULO_NO_ENCONTRADO` -- Onelogis no encuentra el vehículo porque `patente_tracto` de este documento (`VP6521`) ya está diagnosticada como incorrecta en un bloque anterior de esta misma auditoría (canónica real `VP8521`, la misma que trae `464264`) |
+
+**Etapa donde falla:** la resolución de origen corre **por documento**, nunca a nivel de viaje completo -- `464265` nunca "hereda" la confirmación GPS ya lograda por `464264`, su propio documento hermano del mismo transporte, aunque ambos representen físicamente el mismo camión saliendo de la misma planta el mismo día.
+
+### 4. Hallazgo de código real: `CONFLICTO_ORIGEN` nunca puede dispararse contra datos reales
+
+`atlas_core/gestor_viajes.py:471`: `origen = str(fila.get("origen", fila.get("planta_origen", "")))` -- busca una columna llamada literalmente `"origen"` o `"planta_origen"`. **Ninguna de las dos existe** en el esquema real de `analisis_completo_guias.csv` (la columna real es `planta_origen_nombre`, leída correctamente y por separado dos líneas más abajo, línea 495, hacia `DocumentoViaje.planta_origen_nombre`). Consecuencia: `DocumentoViaje.origen` es **siempre cadena vacía** para cualquier documento real -- y `MotivoRevision.CONFLICTO_ORIGEN` (línea 568, `(MotivoRevision.CONFLICTO_ORIGEN, [d.origen for d in documentos], _valores_compatibles)`) nunca tiene evidencia con la cual comparar, así que **nunca se dispara**, sin importar cuán distintas sean las plantas reales de dos documentos del mismo viaje. Confirmado con el caso real de la sección 3: el viaje `0000351135` (464264 AZA COLINA vs. 464265 AZA RENCA) no trae `CONFLICTO_ORIGEN` entre sus motivos en `viajes.csv`, a pesar de la discrepancia real y demostrada. La propiedad `Viaje.origenes` (línea 224, misma fuente rota) tiene el mismo problema. **No corregido en este bloque** (FASE B es estrictamente diagnóstico).
+
+### 5. Rutas -- pipeline trazado completo
+
+```
+obra_destino (OCR homologado) -> destino canónico (destinos_maestros.json,
+  resolver_destino_canonico / resolver_destino_canonico_estructurado)
+  -> planta de origen (jerarquía GPS->documento, sección 1)
+  -> ServicioRutas.confirmar_y_calcular (atlas_core/rutas/servicio.py)
+  -> OpenRouteService real (atlas_core/rutas/openrouteservice.py),
+     envuelto en ProveedorRutasConCacheGeocodificacion
+     (atlas_core/rutas/cache_geocodificacion.py, Bloque INFRAESTRUCTURA S2)
+  -> RepositorioRutas cachea la ruta calculada final (clave lógica
+     planta+destino+perfil+proveedor+versión)
+  -> resultado_entrega (procesamiento_masivo.py) -> documento -> viaje -> viajes.csv -> Desktop
+```
+
+**Onelogis (telemetría) interviene en dos puntos independientes:** (a) confirma/reemplaza la planta de origen (sección 1); (b) si el destino queda con geocodificación ambigua (`MULTIPLES_UBICACIONES_DISPERSAS`), puede reintentarse con el punto final de un recorrido GPS real -- **pero exige un tramo "sustancial"** (`seleccionar_recorrido_operacional`, `distancia_km_trip >= 5.0`, Bloque TELEMETRÍA T2), una condición más estricta que la usada para confirmar origen. Rastreado en código exacto: `atlas_core/telemetria/enriquecimiento.py:120-138` -- `punto_gps_destino` queda `None` si `seleccionar_recorrido_operacional` no encuentra un tramo sustancial encadenado, y sin ese punto, el reintento de desambiguación en `procesamiento_masivo.py:1666-1667` (`if destino_ambiguo and resultado_gps.punto_gps_destino is not None:`) nunca se ejecuta.
+
+### 6. Matriz real de causas -- lote de 15 más reciente (representativo, ya con telemetría/ORS reales conectados en su procesamiento)
+
+| Guía | `estado_ruta` | `motivo_ruta` | Causa real |
+|---|---|---|---|
+| 464036, 464170, 464488, 464854 | `RUTA_CALCULADA` | -- | Éxito completo (4/15) |
+| 464479, 464892 | `ORIGEN_NO_DETERMINADO` | `ORIGEN_GPS_NO_DETERMINADO` / `ORIGEN_GPS_ESTADIA_SIN_PLANTA` | Telemetría corrió, sin evidencia suficiente -- abstención honesta, no un error (2/15) |
+| 464265, 464367 | `REQUIERE_REVISION` | `GEOCODIFICACION_DIRECCION_NO_ENCONTRADA` | Ambas guías ya tienen hallazgos propios diagnosticados en bloques anteriores de esta auditoría (cliente/patente/fecha) que probablemente degradan también la dirección de entrega (2/15) |
+| 464395, 464491, 464493, 464494, 464511, 464781 | `REQUIERE_REVISION` | `MULTIPLES_UBICACIONES_DISPERSAS(5)` | **Causa dominante (6/15, 40%)** -- geocodificación de `despachar_a_crudo` devuelve 5 candidatos dispersos; telemetría confirma origen correctamente en estos 6 casos, pero el tramo de entrega no alcanza el umbral "sustancial" (≥5 km) necesario para desambiguar -- ver sección 5 |
+
+Verificado explícitamente: **464170 (1.433 km) y 464854 (1.383 km)** no son errores de geocodificación -- ambos destinos están en la Región de Antofagasta (`localidad_entrega=Mejillones`/`Antofagasta`), una distancia interregional real y plausible por carretera desde Santiago. No se calculó ninguna distancia auxiliar en línea recta para verificar esto -- se usó únicamente el campo `localidad_entrega`/`region_entrega` ya persistido.
+
+### 7. ORS -- auditoría sin gastar cuota nueva
+
+Ningún caso observado de `SIN_CREDENCIAL`, `SIN_CONEXION`, `LIMITE_CUOTA` ni `RESPUESTA_INVALIDA` en los datos reales ya persistidos -- **0 fallos propios de ORS observados** en toda la operación vigente. Caché de rutas (`RepositorioRutas`) y caché de geocodificación (`RepositorioCacheGeocodificacion`, Bloque INFRAESTRUCTURA S2) ya activas -- confirmado en código, no se hizo ninguna llamada nueva para verificarlo. El problema real, en los 25/38 viajes sin kilómetros, es siempre **aguas arriba de ORS** (origen o destino sin resolver todavía) -- ORS nunca llega a consultarse para esos casos, no es que falle al consultarse.
+
+### 8. Onelogis -- auditoría sin gastar cuota nueva
+
+**Cobertura real para origen:** 13/38 viajes con `TELEMETRIA_GPS` confirmado; 0 casos de `ORIGEN_GPS_CONFLICTO` en el lote de 15 más reciente. Onelogis SÍ da servicio -- el problema no es su disponibilidad, es que **19/43 documentos nunca lo consultaron en absoluto** (telemetría no conectada en esa corrida). **Cobertura real para destino (desambiguación):** el mismo servicio, misma cuenta, misma cuota -- pero la condición de "tramo sustancial" es más estricta, y en 6/15 guías reales el tramo de entrega disponible en el momento de la consulta no la alcanza. **No se determina aquí** si esto es una limitación real de cobertura de Onelogis (el tramo de entrega todavía no estaba en su base al momento de la consulta) o del umbral/heurística de Atlas (`>=5.0 km`, calibrado en T2 contra un solo caso real) -- requiere su propia investigación dedicada, no resuelta en este bloque de diagnóstico.
+
+### 9. Desktop -- read-only, confirmado sin cambios
+
+`src/atlas_viajes.html`: lee `planta_origen_nombre`/`distancia_km`/`duracion_min`/`estado_ruta` directamente de `viajes.csv`, sin transformación que oculte datos ya presentes. `valorPlantaOrigen()`/`formatearDistancia()`/`formatearMinutos()` (líneas 1158-1179) devuelven el valor real si existe, `"No disponible"` si está vacío -- comportamiento ya confirmado end-to-end con datos reales en el bloque histórico "E2E R2" (2026-08-12). **No se encontró ningún caso de un dato ya calculado por el Motor que Desktop no esté mostrando.**
+
+### 10. Relación con Analítica/IA -- registrado, no implementado
+
+Confirmado explícitamente para continuidad: planta/origen, destino, ruta y kilómetros son infraestructura previa obligatoria para las consultas futuras por chofer/cliente/patente/empresa/planta/ruta/destino (cantidad de viajes, toneladas, kilómetros acumulados, frecuencia de rutas, etc.) -- **no implementado aquí**.
+
+### Clasificación final
+
+- **¿Hay errores de código? SÍ:** `CONFLICTO_ORIGEN` roto (sección 4, columna inexistente, nunca se dispara) -- el único bug de código confirmado con evidencia directa de este bloque.
+- **¿Hay problemas de datos/catálogo? SÍ, indirectos:** la patente incorrecta de `464265` (ya diagnosticada en bloque anterior) impide que su origen se confirme por GPS aunque el de su documento hermano sí se confirma; el `obra_destino` corrupto de `464264` (`"COMUNA"`, ya diagnosticado) no impidió su ruta porque la resolución estructurada de destino (`COD DESTINATARIO`) la resolvió por otra vía -- evidencia de que el sistema ya es parcialmente resiliente a ese tipo de error.
+- **¿Hay problemas de proveedor? PARCIALMENTE, sin determinar con certeza:** ORS sin fallos propios observados; Onelogis sin fallos duros observados para origen, pero con cobertura insuficiente o umbral demasiado estricto para desambiguación de destino en 6/15 guías reales -- requiere investigación dedicada para separar ambas causas.
+- **¿Se necesita otra fuente de routing/km? NO, con la evidencia disponible hoy (Opción A: ORS + Onelogis son suficientes pero la implementación actual está incompleta).** Ningún fallo propio de proveedor observado que justifique un tercer proveedor; los huecos identificados son de integración (consolidación por viaje, umbral de desambiguación, conflicto de origen roto), no de cobertura fundamental de las herramientas ya integradas.
+
+### Próximo bloque recomendado (no iniciado)
+
+Consolidar la resolución de planta de origen a nivel de **viaje completo**, no sólo por documento -- es el hallazgo de mayor impacto con causa más clara y concreta de este diagnóstico (caso real 464264/464265 ya trazado de punta a punta). Reparar `CONFLICTO_ORIGEN` sería parte natural del mismo bloque. Investigar el umbral de "tramo sustancial" para desambiguación de destino queda como un segundo frente, independiente.
+
+**Temas de continuidad ya registrados en bloques anteriores, mantenidos, no iniciados aquí:** Incidencias Documentales genéricas; patente documental vs. vehículo canónico; sugerencia chofer↔vehículo sin autocorrección; transportista documental incorrecto; Analítica/IA; kilometraje operacional obligatorio (reafirmado en este bloque como infraestructura previa necesaria, no opcional).
+
+**Drive:** no modificado -- bloque 100% lectura directa, sin copias a TEMP, sin llamadas a ORS/Onelogis. **Desktop:** no modificado. **Git:** sin commit, sin push de FASE B.
+
+**Estado: DIAGNÓSTICO PLANTA / RUTAS / KILÓMETROS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
