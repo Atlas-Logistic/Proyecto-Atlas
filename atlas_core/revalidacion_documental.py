@@ -29,6 +29,7 @@ from pathlib import Path
 from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.catalogo_clientes import CatalogoClientes
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
+from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import (
     CatalogoVehiculosAusenteError,
     CatalogoVehiculosCorruptoError,
@@ -38,12 +39,26 @@ from atlas_core.catalogo_vehiculos import (
     cargar_catalogo_vehiculos,
     normalizar_patente_vehiculo,
 )
+from atlas_core.extractor import _patente_valida
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     MOTIVOS_NO_BLOQUEANTES,
     MotivoRevisionDocumento,
+    _combinar_fecha_hora,
+    _parsear_fecha_dd_mm_yyyy,
 )
 from atlas_core.reporte_viajes import generar_reporte_viajes
+from atlas_core.telemetria.enriquecimiento import enriquecer_documento_con_telemetria
+from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
+from atlas_core.telemetria.proveedor import ProveedorTelemetriaSoloCache
+from atlas_core.telemetria.repositorio import RepositorioTelemetria
+from atlas_core.telemetria.seleccion_recorrido import (
+    ORIGEN_GPS_CONFIRMADO,
+    ORIGEN_GPS_CONFLICTO,
+    ORIGEN_GPS_ESTADIA_SIN_PLANTA,
+    ORIGEN_GPS_NO_DETERMINADO,
+)
+from atlas_core.telemetria.servicio import ServicioTelemetria
 
 SEPARADOR_MOTIVOS = " | "
 _AUSENTES = {"", "No encontrado"}
@@ -224,6 +239,141 @@ def revalidar_patente_sin_homologar_sin_ocr(
             fila["indicador_revision"] = (
                 "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
             )
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def revalidar_telemetria_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    proveedor_nombre: str = "onelogis",
+    servicio_telemetria: ServicioTelemetria | None = None,
+) -> dict[str, object]:
+    """Bloque ONELOGIS/DESTINO/KM -- conecta a filas YA procesadas la
+    telemetría GPS que ya existe en `telemetria_cache.json` pero nunca
+    llegó a persistirse en el dataset (causa raíz documentada en
+    `docs/BITACORA_TECNICA_CRONOLOGICA.md`: un reprocesamiento posterior
+    de un documento en particular, sin telemetría conectada, puede
+    sobrescribir su fila con columnas de telemetría vacías aunque el
+    proveedor ya tenga sus trips en caché). Sin OCR, sin volver a extraer
+    ningún campo documental -- sólo lee el dataset y la caché de
+    telemetría ya persistidos.
+
+    Nunca llama a la red: usa `ProveedorTelemetriaSoloCache`, que se
+    abstiene con `SIN_CONEXION` ante cualquier consulta no ya resuelta
+    por la caché -- una fila cuya patente/fecha no tiene ningún trip
+    cacheado queda intacta (abstención real, nunca inventa telemetría ni
+    persiste un estado engañoso). Idempotente: una fila que ya tiene
+    `estado_telemetria` poblado (por esta función o por el procesamiento
+    original) se conserva tal cual, nunca se reconsulta.
+
+    Deliberadamente NO recalcula ruta/kilómetros (nunca llama a ORS):
+    sólo actualiza las columnas de telemetría y, si la telemetría
+    confirma o descarta origen por GPS, las columnas de planta de origen
+    -- misma regla ya vigente en `procesamiento_masivo.procesar_archivo`
+    (Bloque OPERACIÓN REAL R1/R1.1: GPS inequívoco gana siempre; sin
+    confirmación GPS con telemetría que sí corrió sobre datos reales, el
+    origen documental heredado se descarta explícitamente, nunca se
+    conserva en silencio). Si el origen cambia y la fila YA traía una
+    ruta/km calculados con el origen ANTERIOR (posiblemente la planta
+    matriz documental, no la real), esos campos se INVALIDAN (nunca se
+    deja un kilometraje que ya no corresponde al origen vigente) pero NO
+    se recalculan -- eso sí requeriría ORS, fuera de alcance de este
+    bloque; queda `estado_ruta=REQUIERE_REVISION`,
+    `motivo_ruta=ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA`. Si el
+    origen no cambia (o no había ruta previa), `distancia_km`/
+    `estado_ruta`/`motivo_ruta`/`proveedor_ruta` quedan intactos.
+
+    `servicio_telemetria` (opcional, uso en tests): inyecta un
+    `ServicioTelemetria` ya construido en vez del `ProveedorTelemetriaSoloCache`
+    + `RepositorioTelemetria(carpeta_catalogos/telemetria_cache.json)`
+    predeterminado -- permite verificar en tests que la caché real nunca
+    se toca de más."""
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    servicio = servicio_telemetria or ServicioTelemetria(
+        ProveedorTelemetriaSoloCache(nombre=proveedor_nombre),
+        RepositorioTelemetria(carpeta / "telemetria_cache.json"),
+    )
+    plantas_catalogo = CatalogoPlantas(carpeta / "plantas.json").listar()
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("estado_telemetria", "")).strip():
+                continue  # ya tiene telemetría -- idempotente, no se reconsulta
+
+            patente = str(fila.get("patente_tracto", "")).strip().upper()
+            if not _patente_valida(patente):
+                continue
+            fecha_doc = _parsear_fecha_dd_mm_yyyy(fila.get("fecha"))
+            if fecha_doc is None:
+                continue
+            hora_entrada_dt = _combinar_fecha_hora(fecha_doc, fila.get("hora_entrada_aza"))
+            hora_salida_dt = _combinar_fecha_hora(fecha_doc, fila.get("hora_salida_aza"))
+            if hora_entrada_dt is None and hora_salida_dt is None:
+                continue
+
+            # Chequeo de caché ANTES de invocar el enriquecimiento: si no
+            # hay ningún trip cacheado para esta patente/fecha exacta, se
+            # abstiene sin dejar rastro -- nunca persiste un estado
+            # sintético (p. ej. SIN_CONEXION) que pueda confundirse con un
+            # fallo real de conectividad.
+            if servicio.repositorio.buscar_viajes(
+                servicio.proveedor.nombre, patente, fecha_doc, fecha_doc
+            ) is None:
+                continue
+
+            resultado_gps = enriquecer_documento_con_telemetria(
+                servicio=servicio, patente=patente, fecha=fecha_doc,
+                hora_entrada=hora_entrada_dt, hora_salida=hora_salida_dt,
+                plantas=plantas_catalogo,
+            )
+            campos = resultado_gps.campos
+            for campo, valor in campos.items():
+                fila[campo] = valor
+
+            planta_origen_id_previo = str(fila.get("planta_origen_id", "")).strip()
+            planta_gps_id = campos.get("planta_gps_id", "")
+            origen_cambio = False
+            if campos.get("origen_gps") == ORIGEN_GPS_CONFIRMADO and planta_gps_id:
+                origen_cambio = planta_gps_id != planta_origen_id_previo
+                fila["planta_origen_id"] = planta_gps_id
+                fila["planta_origen_nombre"] = campos.get("planta_gps_nombre", "")
+                fila["origen_determinado_por"] = "TELEMETRIA_GPS"
+                fila["evidencia_origen"] = campos.get("evidencia_telemetria", "") or "GEOCERCA_PLANTA"
+            elif (
+                campos.get("estado_telemetria") == EstadoSeleccionRecorrido.SELECCIONADO.value
+                and campos.get("origen_gps")
+                in (ORIGEN_GPS_CONFLICTO, ORIGEN_GPS_NO_DETERMINADO, ORIGEN_GPS_ESTADIA_SIN_PLANTA)
+                and planta_origen_id_previo
+            ):
+                # Fase R1.1 (ya vigente en procesamiento_masivo): sin
+                # confirmación GPS con telemetría que sí corrió sobre datos
+                # reales, un origen heredado del documento nunca se
+                # conserva en silencio.
+                origen_cambio = True
+                fila["planta_origen_id"] = ""
+                fila["planta_origen_nombre"] = ""
+                fila["origen_determinado_por"] = ""
+                fila["evidencia_origen"] = campos.get("origen_gps", "")
+
+            # El origen cambió y había una ruta/km ya calculados con el
+            # origen ANTERIOR (posiblemente equivocado, p. ej. la planta
+            # matriz documental) -- se invalida (nunca se deja un km
+            # numérico que ya no corresponde al origen vigente) pero no se
+            # recalcula: eso requeriría ORS, explícitamente fuera de
+            # alcance de esta revalidación (Bloque ONELOGIS/DESTINO/KM).
+            if origen_cambio and str(fila.get("distancia_km", "")).strip():
+                fila["distancia_km"] = ""
+                fila["duracion_min"] = ""
+                fila["proveedor_ruta"] = ""
+                fila["estado_ruta"] = "REQUIERE_REVISION"
+                fila["motivo_ruta"] = "ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA"
+
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)

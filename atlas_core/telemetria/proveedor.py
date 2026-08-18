@@ -83,3 +83,54 @@ class ProveedorTelemetriaSimulado:
                 EstadoTelemetria.TRIP_NO_ENCONTRADO, motivo="TRIP_ID_NO_ENCONTRADO"
             )
         return ResultadoBreadcrumbs(EstadoTelemetria.OK, tuple(puntos))
+
+
+@dataclass
+class ProveedorTelemetriaSoloCache:
+    """Proveedor que NUNCA toca la red -- cualquier consulta que no quede
+    ya resuelta por la caché de `ServicioTelemetria` (Bloque ONELOGIS/
+    DESTINO/KM) se abstiene explícitamente con `SIN_CONEXION`, nunca
+    lanza, nunca llama a ningún proveedor real.
+
+    Uso: revalidación/reenriquecimiento de datos ya procesados que debe
+    reutilizar EXCLUSIVAMENTE lo que ya está persistido en
+    `telemetria_cache.json` -- sin gastar cuota del proveedor real ni
+    arriesgar una llamada en vivo por un breadcrumb individual que no
+    haya quedado cacheado aunque el resto del día sí (ver
+    `atlas_core.revalidacion_documental.revalidar_telemetria_sin_ocr`).
+    `nombre` debe coincidir con el proveedor real (p. ej. `"onelogis"`)
+    para que las claves de caché calcen -- este objeto en sí mismo jamás
+    abre una conexión. Los contadores `llamadas_*` (mismo patrón que
+    `ProveedorTelemetriaSimulado`) permiten a los tests verificar que,
+    pese a existir, este objeto nunca fue realmente invocado -- toda
+    consulta quedó resuelta por la caché antes de llegar aquí."""
+
+    nombre: str = "onelogis"
+    llamadas_vehiculos: int = 0
+    llamadas_posicion: int = 0
+    llamadas_viajes: int = 0
+    llamadas_breadcrumbs: int = 0
+
+    def listar_vehiculos(self) -> ResultadoVehiculos:
+        self.llamadas_vehiculos += 1
+        return ResultadoVehiculos(
+            EstadoTelemetria.SIN_CONEXION, motivo="REVALIDACION_SOLO_CACHE_SIN_RED"
+        )
+
+    def obtener_posicion_actual(self, patente: str) -> ResultadoPosicion:
+        self.llamadas_posicion += 1
+        return ResultadoPosicion(
+            EstadoTelemetria.SIN_CONEXION, motivo="REVALIDACION_SOLO_CACHE_SIN_RED"
+        )
+
+    def buscar_viajes(self, patente: str, desde: date, hasta: date) -> ResultadoViajes:
+        self.llamadas_viajes += 1
+        return ResultadoViajes(
+            EstadoTelemetria.SIN_CONEXION, motivo="REVALIDACION_SOLO_CACHE_SIN_RED"
+        )
+
+    def obtener_breadcrumbs(self, trip_id: str) -> ResultadoBreadcrumbs:
+        self.llamadas_breadcrumbs += 1
+        return ResultadoBreadcrumbs(
+            EstadoTelemetria.SIN_CONEXION, motivo="REVALIDACION_SOLO_CACHE_SIN_RED"
+        )

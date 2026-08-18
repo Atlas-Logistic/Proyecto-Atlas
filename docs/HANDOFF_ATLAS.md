@@ -975,3 +975,15 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Drive:** no modificado. **Desktop:** no modificado. **Git:** sin commit, sin push de este bloque.
 - **Qué debe decidir Javier ahora:** cuál(es) de las 4 causas atacar primero -- se recomienda empezar por el gap de reprocesamiento (telemetría ya cacheada pero no conectada en el CSV vigente), por ser el más simple de confirmar y no requerir ningún cambio de lógica de negocio.
 - **Estado: DIAGNÓSTICO ONELOGIS / DESTINO / KM COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18 — Bloque GAP TELEMETRÍA CACHEADA (fix, validado, sin publicar)
+
+- **Publicado antes de empezar:** commit documental `7ea1a1b` (diagnóstico Onelogis/destino/km), push confirmado, local=remoto, working tree limpio.
+- **Causa raíz:** un reprocesamiento puntual posterior de un documento (sin telemetría conectada) puede sobrescribir su fila con columnas de telemetría vacías, aunque el trip de esa patente/fecha exacta ya esté en `telemetria_cache.json` de una corrida anterior. Confirmado con evidencia real para los 7 casos conocidos.
+- **Fix:** nueva `revalidar_telemetria_sin_ocr()` en `atlas_core/revalidacion_documental.py`, siguiendo el mismo patrón canónico ya usado para otros dos motivos en ese módulo (sin OCR, sin duplicar pipeline) -- reutiliza `enriquecer_documento_con_telemetria` existente. Nuevo `ProveedorTelemetriaSoloCache` garantiza, por construcción, cero llamadas reales a Onelogis. No recalcula rutas/km (fuera de alcance, requiere ORS) -- pero SÍ invalida explícitamente cualquier km ya calculado con un origen que resulta incorrecto, en vez de dejarlo silenciosamente desactualizado.
+- **12 tests nuevos. Suite completa: 1247 passed, 0 failed** (baseline 1235 + 12).
+- **Validación real en TEMP (43 documentos, sin tocar Drive):** 19 documentos recuperan telemetría (más de los 7 esperados). 18 quedan con origen confirmado por GPS (17 corrigen "AZA RENCA" documental a "AZA COLINA" real). **Hallazgo importante no anticipado:** 6 de los 14 transportes que hoy muestran algún km ya calculado lo tenían calculado con el origen incorrecto -- se invalida correctamente; 4 de esos 6 quedan listos para reintentar ORS de inmediato en un futuro bloque.
+- **Desktop:** no necesita cambios. **Drive:** no modificado, re-verificado sin cambios.
+- **Git:** working tree con `atlas_core/revalidacion_documental.py`, `atlas_core/telemetria/proveedor.py`, `tests/test_revalidacion_telemetria_gap.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
+- **Qué debe decidir Javier ahora:** si autoriza aplicar `revalidar_telemetria_sin_ocr()` contra `operacion/actual` real (no se hizo en este bloque); y si prioriza después un bloque de recálculo ORS para los 4 viajes ya listos.
+- **Estado: FIX RE-ENRIQUECIMIENTO TELEMETRÍA VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
