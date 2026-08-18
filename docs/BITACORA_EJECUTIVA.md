@@ -982,3 +982,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Drive:** modificado, exclusivamente por este recálculo controlado. **Git:** working tree con sólo las tres bitácoras (no hubo cambios de código en este bloque).
 - **Próximo paso recomendado:** ninguno urgente -- los 22 viajes restantes sin km requieren decisiones de negocio ya identificadas en bloques anteriores (umbral Onelogis, radio GPS destino, conflictos documentales), no un recálculo mecánico más.
 - **Estado: RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## Bloque DIAGNÓSTICO DESTINOS AMBIGUOS (MULTIPLES_UBICACIONES_DISPERSAS) -- 2026-08-18
+
+- **Checkpoint verificado, 100% lectura** -- ningún archivo de Drive tocado (mtimes re-verificados sin cambios).
+- **17 casos inventariados programáticamente** (coincide exacto, no hardcodeado), con evidencia real: candidatos de geocodificación ya cacheados, TODOS los breadcrumbs GPS cacheados de cada patente/fecha (no sólo los que el algoritmo actual usa), y cruce contra `obras_destinos.json`/`destinos_maestros.json`.
+- **Clasificación final: 7 resolubles automáticamente con evidencia inequívoca (A), 6 resolubles con confirmación humana asistida (B), 4 no resolubles con datos actuales (C).**
+- **Hallazgo clave:** en varios casos A, el GPS real (usando TODOS los breadcrumbs disponibles, no sólo la ventana estrecha que usa hoy el algoritmo) sí discrimina con claridad -- confirmando que el problema no es "falta de evidencia" sino que el mecanismo actual no la está aprovechando toda. En 3 casos A además hay una entrada `CONFIRMADA` en `destinos_maestros.json` con la MISMA dirección exacta y coordenadas -- evidencia independiente adicional, no sólo GPS.
+- **2 de los 4 casos C** muestran que el geocodificador (Pelias/ORS) devuelve candidatos en regiones completamente equivocadas para direcciones donde el documento SÍ nombra la comuna real correctamente (p. ej. "LA CISTERNA" nunca aparece entre los candidatos) -- esto es una limitación del geocodificador, no de la lógica de desambiguación de Atlas.
+- **Cobertura potencial (sin ejecutar ORS, sólo calculada):** actual 12/38 (31.6%) → sólo con A: 19/38 (50.0%) → con A+B confirmados por Javier: 25/38 (65.8%).
+- **ORS sigue siendo suficiente para el routing** (100% de éxito en cada llamada real hecha hasta ahora); el cuello de botella real está en la geocodificación de un subconjunto de direcciones, no en el ruteo.
+- **No se implementó ningún fix.** No se tocó Drive, catálogos, ni Desktop.
+- **Próximo paso recomendado:** decisión de Javier sobre cómo tratar los casos A (¿confiar en GPS+catálogo automáticamente, o seguir pidiendo confirmación?) y los B (diseñar la sugerencia con evidencia, sin adivinar).
+- **Estado: DIAGNÓSTICO DE DESTINOS AMBIGUOS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**

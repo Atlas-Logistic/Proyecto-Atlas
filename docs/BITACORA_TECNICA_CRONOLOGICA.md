@@ -3084,3 +3084,57 @@ Ningún km nuevo fue calculado (0 llamadas ORS); nunca se reemplazó por distanc
 **Drive:** modificado, exclusivamente por este recálculo controlado. **Git:** working tree con únicamente las tres bitácoras -- ningún cambio de código en este bloque (se reutilizaron mecanismos ya publicados).
 
 **Estado: RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## Bloque DIAGNÓSTICO DESTINOS AMBIGUOS (MULTIPLES_UBICACIONES_DISPERSAS) -- 2026-08-18
+
+**Checkpoint:** Motor `9671834`, Desktop `fba95ac`, ambos limpios. **100% lectura en todo el bloque** -- catálogos y dataset re-verificados sin cambios de mtime al terminar.
+
+**Metodología:** para cada uno de los 17 transportes (detectados programáticamente por `motivo_ruta` conteniendo `MULTIPLES_UBICACIONES_DISPERSAS`, coincide exacto con el bloque anterior): (1) candidatos de geocodificación reales desde `cache/geocodificacion/geocodificacion_cache.json` vía `RepositorioCacheGeocodificacion.buscar()` + `_candidatos_con_soporte_textual()` reales del código; (2) TODOS los `trip_id` mencionados en `motivo_origen_gps` de cada documento del viaje, y TODOS sus breadcrumbs cacheados en `telemetria_cache.json` (deliberadamente más amplio que lo que usa hoy `seleccionar_recorrido_operacional`, para medir qué evidencia existe aunque el algoritmo actual no la use); (3) distancia haversine real de CADA breadcrumb a CADA candidato, tomando el mínimo; (4) cruce contra `obras_destinos.json` (relaciones cliente↔obra, evidencia por guía) y `destinos_maestros.json` (57 entradas, 42 con coordenadas, 13 `CONFIRMADO`) buscando coincidencia de dirección exacta.
+
+**Matriz completa (17 casos):**
+
+| Transporte | Guía(s) | Despachar a | Candidatos (con soporte) | Mejor evidencia GPS (breadcrumbs totales) | Catálogo | Clase | Motivo |
+|---|---|---|---|---|---|---|---|
+| 0000349648 | 463594 | POETA PEDRO PRADO 1548 | 4 | 3.85 km (Lo Prado) vs 4.85 km -- margen estrecho | -- | **B** | Distancia y margen insuficientes para automático |
+| 0000349298 | 463630 | AV. FORESTAL CORONEL | 2 | 300.8 km / 430.3 km -- ningún candidato cerca | -- | **C** | Breadcrumbs no cubren la zona real de entrega |
+| 0000351884 | 464395 | CARMEN MENA 529 SAN MIGUEL | 5 | 11.1 km (RM) vs 53-1054 km (otras regiones) | entrada con coordenadas erróneas (circulares, mismo fallo de Pelias) -- descartada | **A** | Margen regional decisivo (~5x); única región compatible |
+| 0000352203 | 464491 | URUGUAY 15 LA CISTERNA | 5 | 411-615 km -- TODOS los candidatos lejísimos | -- | **C** | Geocodificador nunca devolvió "La Cisterna" real -- falla de cobertura, no de desambiguación |
+| 0000352242 | 464493 | AV SAN JOSE ESCRIVA DE BALG | 5 | 8.29 km (Chicureo) vs 23.56 km (San Bernardo), ambos en RM | -- | **B** | Mismo margen regional, comuna sigue sin decidirse con confianza |
+| 0000352241 | 464494 | CAMINO LO RUIZ 2901 RENCA | 5 | 0.03-0.14 km a TODOS los candidatos (cluster) | `CAMINO LO RUIZ 2901, RENCA` **CONFIRMADO**, coordenadas idénticas al candidato ganador | **A** | GPS + catálogo confirmado coinciden exacto |
+| 0000352449 | 464511 | SANTA ISABEL 585 LAMPA (+ref) | 4 | 0.12 km (Lampa) vs 1.61 km (Lampa) vs 2.07+ km (Santiago) | `SANTA ISABEL 585, LAMPA` **CONFIRMADO**, coordenadas idénticas | **A** | GPS + catálogo confirmado coinciden exacto |
+| 0000352600 | 464588 | POETA PEDRO PRADO 1548 | 4 | 3.43 km vs 4.87 km -- margen estrecho | -- | **B** | Mismo patrón que 463594 (misma dirección) |
+| 0000352804 | 464624 | PDTE. RIESCO 5903 LAS CONDES | 5 | 0.77/1.21/1.44/2.5 km (4 candidatos RM agrupados) vs 21.0 km (Padre Hurtado) | -- | **B** | Descarta Padre Hurtado con claridad, pero no distingue entre los 4 restantes |
+| 0000352802 | 464631 | SANTA ISABEL 585 LAMPA | 4 | sólo 5 breadcrumbs (1 trip): 1.93 km (Lampa) vs 2.76 km (Santiago) -- margen débil | `SANTA ISABEL 585, LAMPA` **CONFIRMADO**, coincide exacto | **A** | Evidencia GPS débil mejorada por catálogo confirmado independiente |
+| 0000352780 | 464640 | SANTA ISABEL 585 LAMPA | 4 | 1.13/2.42 km (Lampa) vs 17.5/19.6 km (Santiago) -- brecha regional clara | `SANTA ISABEL 585, LAMPA` **CONFIRMADO** | **A** | Brecha GPS decisiva + catálogo confirmado |
+| 0000352752 | 464641, 464642 | CAMINO LOS PINOS SAN BERNARDO | 3 | 16.0/28.4/34.0 km -- ningún candidato cerca | entrada PENDIENTE con coordenadas iguales al candidato "San Bernardo" -- no confirmada | **C** | Breadcrumbs no cubren la zona real; catálogo no confirmado |
+| 0000353028 | 464706 | PANAMERICANA NORTE LAMPA | 5 | sin telemetría (`SIN_HISTORICO`) | entrada PENDIENTE, dirección EXACTA, con coordenadas (Lampa real) -- no confirmada | **C** | Sin GPS; geocodificador devolvió sólo regiones equivocadas (Copiapó/Arica/Coquimbo); el catálogo (no confirmado) es la única pista real |
+| 0000353055 | 464715 | AV. VICUÑA MACKENNA SAN JOAQUÍN | 5 | 5.89 km (Santiago RM) vs 83.7-480 km (otras regiones) | -- | **A** | Margen regional decisivo (~14x) |
+| 0000353091 | 464726 | SANTA ISABEL 585 LAMPA | 4 | 1.77/3.36 km (Lampa) vs 19.1/21.3 km (Santiago) | `SANTA ISABEL 585, LAMPA` **CONFIRMADO** | **A** | Mismo patrón que 464640 |
+| 0000353164 | 464740 | AV. VICUÑA MACKENNA SAN JOAQUÍN | 5 | sin telemetría (`SIN_HISTORICO`) | -- | **B** | Misma dirección exacta que 464715 (SÍ resuelta con GPS) -- sugerencia histórica, nunca evidencia propia de este viaje |
+| 0000353312 | 464781 | PDTE. RIESCO 5903 LAS CONDES | 5 | 7.25/9.95/10.36/11.67 km -- márgenes estrechos entre sí | -- | **B** | Ninguna opción se separa con claridad de las demás |
+
+**Resumen:** A = 7 (0000351884, 0000352241, 0000352449, 0000352802, 0000352780, 0000353055, 0000353091) · B = 6 (0000349648, 0000352242, 0000352600, 0000352804, 0000353164, 0000353312) · C = 4 (0000349298, 0000352203, 0000352752, 0000353028).
+
+**GPS/Onelogis:**
+- **Aprovechable con evidencia real (7 casos A + varios B):** usando TODOS los breadcrumbs cacheados (no sólo la ventana estrecha actual) el GPS discrimina con claridad en varios casos que hoy quedan igual de ambiguos que los demás -- el problema no es falta de datos, es que `seleccionar_recorrido_operacional`/`punto_gps_destino` sólo usa el ÚLTIMO punto de un recorrido con filtro de 5 km y ventana de ±15 min, perdiendo evidencia que SÍ existe en la caché.
+- **No aprovechable en 4 casos:** 2 casos (463630, 464641/642) tienen breadcrumbs cacheados pero NINGUNO cae cerca de ningún candidato (el rango horario capturado no cubre la zona real de entrega); 2 casos (464706, 464740) no tienen ningún trip cacheado ese día (`SIN_HISTORICO`, cobertura real ausente de Onelogis).
+- Ningún caso se resolvió simplemente "por el más cercano" -- en todos los casos A el margen frente a la segunda opción es grande (regional) o hay corroboración de catálogo independiente.
+
+**Historial/catálogo:**
+- **`obras_destinos.json`:** 15 obras registradas, todas con evidencia por guía (incluye varias de los 17 casos, p. ej. SALOMON SACK SA↔"DEMO CONSTRUCCIONES S.A." para 463594/464588) -- pero no aporta coordenadas propias, sólo confirma la relación cliente-obra-`despachar_a` ya conocida por el propio documento. No es evidencia geográfica independiente.
+- **`destinos_maestros.json`:** 57 entradas, 42 con coordenadas, 13 `CONFIRMADO`. **3 coincidencias EXACTAS de dirección con estado `CONFIRMADO`** y coordenadas idénticas a un candidato de geocodificación (Camino Lo Ruiz 2901 Renca; Santa Isabel 585 Lampa, dos veces) -- usadas como evidencia genuina en los casos A correspondientes. 2 coincidencias con estado `PENDIENTE` (Panamericana Norte 22650 Lampa; Camino Los Pinos 3394 San Bernardo) -- tratadas como `SUGERENCIA_HISTORICA`, nunca como evidencia canónica, consistente con la regla de negocio ya establecida (`despachar_a` es la fuente autoritativa, el catálogo de destino registrado nunca la reemplaza). 1 coincidencia (Carmen Mena 529 San Miguel) descartada explícitamente por tener coordenadas idénticas al candidato regional erróneo de Pelias -- probable artefacto circular de la misma migración, no evidencia confiable.
+- Ninguna sugerencia histórica se convirtió automáticamente en decisión -- se preserva el principio "Atlas sugiere, Javier decide" (ver docstring de `destino_entrega.py`: "nunca escoger una ubicación porque esté más cerca de AZA" ni por ninguna otra referencia externa sin evidencia propia del viaje).
+
+**Cobertura potencial (calculada, sin ejecutar ORS):**
+- Actual: 12/38 (31.6%)
+- Sólo resolviendo A: 19/38 (50.0%)
+- A + B con confirmación de Javier: 25/38 (65.8%)
+- C (4 casos) permanecería sin resolver con los datos actuales, independientemente de cualquier heurística.
+
+**Geocodificación:** **insuficiente en al menos 2/17 casos** (464491, 464706) -- Pelias/ORS nunca devuelve el candidato correcto ni siquiera entre las opciones, pese a que el documento nombra la comuna real correctamente ("LA CISTERNA", "LAMPA"). Limitación exacta: cobertura/relevancia de resultados para direcciones específicas chilenas con nombres de calle poco comunes o comunas menos pobladas -- no es un problema de desambiguación (Atlas no tiene entre qué elegir), es que la opción correcta simplemente no está en la respuesta.
+
+**ORS (routing):** sigue siendo **suficiente** -- 100% de éxito en todas las llamadas reales hechas hasta ahora (17/17 acumulado en bloques anteriores + este). El cuello de botella no está en el cálculo de ruta, está en resolver el destino antes de poder llamarlo.
+
+**Fix implementado:** NINGUNO. Sin cambios de código, catálogos, Drive ni Desktop en este bloque.
+
+**Estado: DIAGNÓSTICO DE DESTINOS AMBIGUOS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**

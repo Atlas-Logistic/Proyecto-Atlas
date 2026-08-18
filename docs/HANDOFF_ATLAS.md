@@ -1014,3 +1014,15 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Drive:** modificado exclusivamente por este recálculo controlado. **Git:** working tree sólo con las tres bitácoras (sin código nuevo este bloque).
 - **Qué debe decidir Javier ahora:** revisar visualmente en Desktop los 4 viajes con km nuevo; decidir si los 22 viajes restantes sin km (fuera de los ya explicados por conflicto/OCR/sin-despachar_a) ameritan abrir el bloque de umbral Onelogis/radio GPS destino ya diagnosticado.
 - **Estado: RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## Checkpoint 2026-08-18 — Bloque DIAGNÓSTICO DESTINOS AMBIGUOS (MULTIPLES_UBICACIONES_DISPERSAS)
+
+- **100% lectura** -- Motor `9671834`, Desktop `fba95ac`, Drive re-verificado sin cambios al terminar.
+- **17 casos inventariados y clasificados con evidencia real** (candidatos de geocodificación cacheados, TODOS los breadcrumbs GPS disponibles -- no sólo la ventana estrecha del algoritmo actual -- y cruce contra `destinos_maestros.json`/`obras_destinos.json`): **7 resolubles automáticamente (A)**, **6 resolubles con confirmación humana asistida (B)**, **4 no resolubles con los datos actuales (C)**.
+- **Hallazgo clave:** en 3 de los 7 casos A, además del GPS, existe una entrada `CONFIRMADO` en `destinos_maestros.json` con la dirección EXACTA y coordenadas idénticas al candidato ganador -- doble evidencia independiente.
+- **2 de los 4 casos C revelan una limitación real del geocodificador** (Pelias/ORS): nunca devuelve el candidato correcto pese a que el documento nombra la comuna real correctamente (p. ej. "LA CISTERNA").
+- **Cobertura potencial (calculada, sin ORS):** actual 12/38 (31.6%) → sólo A: 19/38 (50.0%) → A+B con Javier: 25/38 (65.8%).
+- **ORS (routing) sigue siendo suficiente** -- el cuello de botella está en geocodificación, no en ruteo.
+- **Sin fix implementado.** Sin cambios de código, catálogos, Drive ni Desktop.
+- **Qué debe decidir Javier ahora:** si autoriza tratar los 7 casos A como resolubles automáticamente (o prefiere seguir pidiendo confirmación siempre); cómo debe verse la sugerencia con evidencia para los 6 casos B (concepto ya descrito, sin implementar UI); si vale la pena investigar un geocodificador complementario para los 2 casos con falla de cobertura confirmada.
+- **Estado: DIAGNÓSTICO DE DESTINOS AMBIGUOS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
