@@ -2400,3 +2400,59 @@ Suite focalizada: `tests/test_extraer_datos.py` -- 169 passed. Grupo de obra/des
 No se aplicó ninguna decisión del lote. No se promovió nada a `operacion/actual`. No se tocó Desktop, catálogos, patentes, fecha, cliente, Mobile ni Multiempresa. No se inició Incidencias Documentales.
 
 **Estado: FIX OBRA_DESTINO 464264 VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## 2026-08-18 — Publicación (`9aabce2`) + diagnóstico de fecha `464265`
+
+**Publicación:** commit `9aabce2` ("fix: robustecer lectura de material y obra destino") -- exactamente 7 archivos (`atlas_core/extractor.py`, `atlas_core/procesamiento_masivo.py`, `tests/test_extraer_datos.py`, `tests/test_procesamiento_masivo.py`, tres bitácoras). `git push origin lector-mvp-guia-nueva` sin force: `e88849b..9aabce2`. Post-push: local `9aabce2` == remoto `9aabce2` (confirmado por la salida del propio push y por `git rev-parse origin/lector-mvp-guia-nueva`; `git fetch` explícito fue bloqueado por el clasificador de auto-modo de la sesión, verificación alternativa suficiente), `git status -sb` sin ahead/behind, working tree limpio. Desktop verificado sin tocar: HEAD `fba95ac`, working tree limpio.
+
+**Checkpoint verificado antes de diagnosticar fecha:** Motor HEAD `9aabce2`, local=remoto, working tree limpio -- confirmado antes de leer nada más.
+
+**Objetivo único:** `464265` produjo `fecha = "05-08-2024"` (ground truth documental `05-08-2026`, dígitos parcialmente cubiertos por una mancha física real). No es una abstención -- es un valor sintácticamente válido y equivocado. Se buscaba una forma general, conservadora y auditable de recuperar o al menos señalar esto.
+
+**Trazado completo con OCR real dirigido, TEMP** (SHA-256 verificado contra el manifiesto para `464264`, `464265`, `464367`, `464488`, `464494`):
+
+1. **OCR bruto de la zona de FECHA DE EMISIÓN, `464265`:** bloque `'05-08-2024'`, confianza **0.8041**, bbox `(307, 403, 377, 417)`. Comparado con `464264` (mismo viaje): bloque `':05-08-2026'`, confianza **0.9280**, bbox `(286, 409, 361, 425)`. La caída de confianza (0.80 vs 0.93) es consistente con la mancha física ya documentada en el bloque de diagnóstico original de `464265`, que cubre parcialmente esos dígitos.
+2. **`_extraer_fecha_geometrico()` real** (localiza el mismo bloque por geometría, sin decidir el valor): reproduce exactamente el mismo resultado que el OCR bruto para ambas guías -- confirma que no hay pérdida ni contaminación geométrica, el problema es puramente el reconocimiento de caracteres sobre la mancha.
+3. **`extraer_fecha()` real** (`atlas_core/procesamiento_masivo.py:407`, sobre el texto lineal completo): devuelve `'05-08-2024'` para `464265` sin más candidatos en conflicto. La ventana de plausibilidad (`ANIO_MINIMO_PLAUSIBLE=2015`, `ANIO_MAXIMO_PLAUSIBLE=2035`, línea 110-111) es la única guarda temporal activa -- "2024" la pasa sin problema.
+4. **Relectura focal con consenso** (`procesamiento_masivo.py:1184-1228`): existe, y su diseño (≥2 lecturas focales concordantes con confianza ≥ `CONFIANZA_MINIMA_FECHA_FOCAL=0.7`) es exactamente el tipo de verificación independiente que serviría aquí -- pero el trigger es literalmente `if fecha_actual == "No encontrado":` (línea 1186). Como `extraer_fecha()` YA devolvió un valor no vacío, el bloque completo de relectura focal nunca se ejecuta para `464265`. Confirmado leyendo el código, no infiriendo.
+
+**Causa raíz clasificada: D. VALIDACIÓN_TEMPORAL_INSUFICIENTE combinada con E. RELECTURA_FOCAL_NO_ACTIVADA** -- no es A (el OCR hizo lo que pudo con una imagen dañada, confianza baja pero no cero, ni tampoco un error de reconocimiento "gratuito"), no es B (la geometría ubicó la caja correcta), no es C (no hay normalización que reescriba el valor). La ventana de plausibilidad (2015-2035, 21 años) es demasiado amplia para servir de guarda real contra un error de un solo dígito del año, y el único mecanismo capaz de corroborar independientemente (relectura focal) está diseñado para recuperar campos ausentes, no para auditar campos ya presentes pero de confianza dudosa.
+
+**Distinción explícita pedida por el bloque -- ERROR DE LECTURA vs. HUECO DE DETECCIÓN DE INCONSISTENCIA:**
+- A nivel de **documento individual** (`analisis_completo_guias.csv`, fila de `464265` sola): es un hueco de detección real -- ningún motivo de revisión menciona hoy que la fecha sea dudosa (los que sí aparecen, `PATENTE_SIN_HOMOLOGAR`/`OBRA_DESTINO_SIN_CORROBORAR`/`CLIENTE_AUSENTE`/`MATERIAL_AUSENTE`, son de otros campos).
+- A nivel de **viaje** (consolidación por `numero_transporte`): **NO hay hueco -- la detección ya existe y ya está activa.**
+
+**Mecanismo ya existente, auditado sin duplicar nada** (`atlas_core/gestor_viajes.py`): `agrupar_viajes()` agrupa documentos por `numero_transporte` (línea 533) y calcula, entre otros, `MotivoRevision.CONFLICTO_FECHA` (línea 563) comparando todas las fechas del grupo con `_valores_compatibles()` (línea 68: compatible si, tras normalizar, hay como máximo un valor distinto presente). `_fecha_para_desktop()` (línea 41) normaliza cada fecha a `dd-mm-aaaa` antes de comparar -- sin adivinar cuál es la correcta, sólo detecta si coinciden o no. Cobertura de test ya existente y genérica (no ligada a ninguna guía real): `tests/test_gestor_viajes.py:98`.
+
+**Verificación real, 100% lectura, contra el dataset y el reporte YA PROMOVIDOS** (sin escribir nada):
+```python
+filas = [fila for fila in analisis_completo_guias.csv si numero_transporte == '0000351135']  # 464264 + 464265
+viajes, _ = agrupar_viajes(filas)
+```
+Resultado: `estado=REQUIERE_REVISION`, `motivos_revision=['CONFLICTO_FECHA', 'CONFLICTO_OBRA_DESTINO', 'CONFLICTO_PATENTE_TRACTO', 'CONFLICTO_PATENTE_RAMPLA', 'DOCUMENTO_REQUIERE_REVISION']`. **Confirmado además directamente en el reporte YA PUBLICADO y vigente** (`reportes/reporte_promocion_lote15_20260818_153512/viajes.csv`, el que señala `estado_operacion.json` como `reporte_vigente`): la fila del viaje `0000351135` ya trae `CONFLICTO_FECHA` entre sus motivos hoy, en producción, sin ningún cambio de este bloque. El campo `fecha` mostrado a nivel de viaje (`05-08-2026`) es simplemente el primer valor no vacío encontrado (línea 590, `next(... if valor)`) -- una conveniencia de visualización, no una resolución del conflicto; el conflicto real sigue expuesto en `motivos_revision` para revisión humana, sin autocorrección silenciosa.
+
+**Controles:**
+- `464264` (mismo viaje): `extraer_fecha()` y `_extraer_fecha_geometrico()` coinciden en `'05-08-2026'`, confianza 0.928 -- consistente, sin mancha.
+- `464488`, `464494` (guías no relacionadas del lote): ambas con `extraer_fecha()`/`_extraer_fecha_geometrico()` coincidentes, confianzas 0.99+.
+- **Hallazgo colateral en el control `464367`** (ya cerrado en un bloque anterior por su patente, reutilizado aquí sólo como control de fecha): `extraer_fecha()` devuelve `'06-08-2026'`, pero `_extraer_fecha_geometrico()` (la caja real bajo la etiqueta FECHA DE EMISIÓN) da `'04-08-2026'` -- verificado contra la imagen: el documento real trae FECHA DE EMISIÓN `04-08-2026`, FECHA SALIDA `06-08-2026`, FECHA LLEGADA `08-08-2026` (tres fechas reales distintas). El extractor lineal terminó asociando el candidato con el contexto "FECHA SALIDA" en vez de "FECHA DE EMISIÓN", porque en el orden de lectura del OCR la etiqueta "FECHA DE EMISIÓN" y su valor real (`04-08-2026`) quedaron separados por más de la ventana de contexto de `_clasificar_contexto_fecha` (120 caracteres antes / 40 después) -- misma familia estructural de causa que el bug de `obra_destino`/`COMUNA` de `464264` ya corregido (orden de lectura OCR no preserva el layout de dos columnas), pero aquí afecta la clasificación de contexto de fecha, no la asociación geométrica. **No diagnosticado a fondo ni corregido en este bloque** -- registrado para continuidad, guía ya cerrada por otro motivo.
+
+**Vías evaluadas y descartadas explícitamente (con evidencia, no por conveniencia):**
+- **Recuperar `2026` con seguridad usando la fecha de `464264` (mismo viaje):** descartado -- prohibido explícitamente por el bloque, y no existe ninguna regla estructural que garantice que dos documentos del mismo transporte comparten fecha de emisión (podrían emitirse en días distintos aunque viajen juntos).
+- **Acotar la ventana de plausibilidad (`fecha_desde`/`fecha_hasta`, ya soportada por `extraer_fecha()` y expuesta como `--fecha-desde`/`--fecha-hasta` en `analizar_guias_masivo.py`, pero nunca usada en el procesamiento real del lote) al rango del lote actual:** técnicamente ya existe como parámetro opcional, pero aplicarla automáticamente equivaldría a la heurística "todas las guías son de 2026" que el bloque pidió explícitamente no usar -- descartado.
+- **Ampliar el trigger de la relectura focal para que también corrobore fechas ya aceptadas** (p. ej. usando la confianza del bloque geométrico como disparador, sin necesidad de ejecutarla en todos los documentos) **y añadir un motivo nuevo tipo `FECHA_SIN_CORROBORAR`** (mismo patrón que `OBRA_DESTINO_SIN_CORROBORAR`/`CLIENTE_SIN_CORROBORAR` ya existentes) si la relectura focal contradice el valor ya aceptado: la única vía que sigue siendo plausible y coherente con la arquitectura existente, pero requiere calibrar un umbral de confianza con más evidencia que las ~5 guías disponibles en este bloque, y validar su impacto de rendimiento (relecturas OCR adicionales) contra el histórico completo -- **clasificado como diseño independiente (FIX_B), no una corrección puntual pequeña. No implementado.**
+
+**Fix implementado: NO.** El resultado que se pedía demostrar -- "¿se puede detectar 2024 como no confiable?" -- ya es cierto hoy, sin ningún cambio de código, verificado con datos reales ya promovidos y ya publicados. No hay nada que corregir en ese sentido; ampliar la detección a nivel de documento individual es una mejora futura razonable pero de mayor alcance (FIX_B), no justificada como corrección puntual en este bloque.
+
+**Tests:** ninguno nuevo -- no hubo cambio de código. Cobertura ya existente de `CONFLICTO_FECHA` confirmada en `tests/test_gestor_viajes.py:98`.
+
+**Suite:** sin cambios -- se mantiene 1210 passed, 0 failed (no se repitió, código byte-idéntico a `9aabce2`).
+
+**Drive:** no modificado -- bloque 100% lectura (imágenes vía TEMP con SHA-256 verificado, CSV real, catálogos, reporte ya publicado). `PREDICCION_CONGELADA.sha256` -- `OK`. `mtime` de `operacion/actual/analisis_completo_guias.csv` sin cambios. Carpeta TEMP eliminada al terminar.
+
+**Git:** Motor sin cambios adicionales a `9aabce2` -- working tree limpio, sólo estas tres bitácoras. Sin commit, sin push. Desktop sin cambios, HEAD `fba95ac`.
+
+**Cliente de `464265`:** no tocado.
+
+**Pendientes explícitos, sin iniciar:** señal de fecha dudosa a nivel de documento individual (diseño FIX_B, registrado); fecha de `464367` (registrado, guía ya cerrada por patente); cliente de `464265`; demás hallazgos del lote de 15.
+
+**Estado: DIAGNÓSTICO FECHA 464265 COMPLETADO -- REQUIERE DECISIÓN.**
