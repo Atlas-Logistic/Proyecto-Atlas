@@ -754,3 +754,43 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Qué debe hacer Javier ahora:** decidir si autoriza publicar este bloque (commit + push) y si autoriza reaplicar el fix sobre el lote congelado real (generando una predicción corregida, sin sobrescribir la original) o promoverlo de otra forma. También decidir si el hueco funcional de `464479` (REVISAR sin tarjeta accionable) amerita un bloque de diseño futuro.
 - No se tocó `464265`/`464367`, catálogo YOLITO/TOLITO, consolidación, Multiempresa ni Mobile. No se aplicó ninguna decisión ni se promovió el lote.
 - **Estado: FIX FALSOS OK VALIDADO REALMENTE -- LISTO PARA PUBLICAR.**
+
+## Checkpoint 2026-08-18 — Publicado (`793b240`) y lote de 15 promovido a operación vigente
+
+- **Push real:** `793b240` en `origin/lector-mvp-guia-nueva`, local=remoto 0/0.
+- **Lote promovido:** 43 documentos totales en `operacion/actual` (28 previos intactos + 15 nuevos, sin duplicados), 30 OK / 13 REVISAR, 38 viajes (25 CONFIRMADO / 13 REQUIERE_REVISION), 15 decisiones pendientes (8 `VEHICULO_DESCONOCIDO` + 7 `OBRA_DESCONOCIDA`) publicadas sin aplicar ninguna. Backup de rollback en `respaldos/PROMOCION_LOTE15_ROLLBACK_PRE_APLICACION_20260818_153220/`.
+- **Qué debe hacer Javier ahora (en ese momento):** abrir Atlas Viajes DESARROLLO y Revisión de Atlas para validar visualmente las 15 guías nuevas y sus decisiones, sin aplicar nada todavía.
+- **Estado: LOTE DE 15 PROMOVIDO -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## Checkpoint 2026-08-18 — Javier validó visualmente: 2 hallazgos de patente confirmados, 1 error real de Atlas diagnosticado
+
+- **Auditoría de patentes de las 15 guías (ground truth desde la imagen):** 23/25 correctas (92%). Único error real de Atlas: `464367`.
+- **Patrick Ortiz (464036):** documental `XF3662`, canónica confirmada `XF3629` -- error de AZA, no de Atlas. No registrar `XF3662`.
+- **Carlos Simón (464264/464265, mismo viaje):** tracto canónico confirmado `VP8521`; `VP6521` no registrar. **Rampla sin confirmar** (candidatos de Javier `JE8659`/`JE8650` no coinciden con lo auditado `JD6659`/`JD0659`) -- no elegir ninguna todavía.
+- **Diagnóstico de 464367:** OCR bruto sí trae la patente (`': T2MN86 CARBO:J35478'`), pero la etiqueta `CARRO` salió corrompida `CARBO` -- el extractor geométrico no logra separar dos candidatos de patente y se abstiene (diseño correcto). Control real `464511`, estructura idéntica pero `CARRO` bien leído, confirma la causa con precisión.
+- **Concepto de producto pendiente, NO implementado:** módulo genérico de INCIDENCIAS DOCUMENTALES (patente documental / canónica / incidencia confirmada humanamente), aplicable a cualquier emisor futuro, no sólo AZA.
+- **Próximo paso (siguiente bloque, ya ejecutado -- ver checkpoint siguiente):** decidir e implementar, si es seguro, un fix conservador para el error real de 464367.
+- **Estado: DIAGNÓSTICO COMPLETADO -- REQUIERE DECISIÓN.**
+
+## Checkpoint 2026-08-18 — Fix conservador de extracción de patentes validado -- LISTO PARA REVISIÓN CON JAVIER
+
+- **Fix:** tabla explícita y acotada de confusiones de OCR ya confirmadas con guías reales, `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR = {"0": "O", "B": "R"}` (generaliza la tolerancia 0↔O ya existente, que resolvió la guía real 464631, al nuevo caso real 464367 -- `CARRO` leído `CARBO`). Sólo se usa para reconocer si un token ES una etiqueta vehicular conocida -- nunca para interpretar el valor de la patente, nunca distancia de edición abierta. Ninguna de las 5 etiquetas contiene "0" ni "B", así que la sustitución sólo puede habilitar coincidencias nuevas, nunca romper una correcta ya existente -- verificado con test negativo explícito (`BPHR67` no se corrompe).
+- **6 tests nuevos** (`tests/test_patentes_p4.py`): reproducción real de 464367 (unitaria + end-to-end), y 4 negativos (`CARGO` no tolerado, sin etiqueta rival, ambigüedad genuina preexistente, valor con "B" legítimo no se corrompe). Suite completa: **1197 passed, 0 failed** (baseline 1191 + 6).
+- **Validado con OCR real en TEMP sobre la imagen canónica de 464367:** `patente_tracto`/`patente_rampla` pasan de `"No encontrado"` a un valor documental real (`T2MN86`/`J35478`), generando `VEHICULO_DESCONOCIDO`/`PATENTE_SIN_HOMOLOGAR` -- mismo patrón honesto que el resto del lote. Todos los demás campos idénticos al resultado ya promovido.
+- **Límite explícito:** el fix corrige la EXTRACCIÓN (el campo ya no se pierde) -- no corrige el ruido de OCR dentro del propio valor (`T2MN86`/`J35478` siguen sin coincidir con la lectura visual `TZWR86`/`JU5478`). Deliberadamente no se fuerza ese valor a coincidir con nada -- queda como una limitación de calidad de OCR distinta, fuera de alcance.
+- **Drive:** no modificado -- validación 100% en TEMP, eliminada al terminar. `operacion/actual` (con el lote ya promovido) sigue con los valores originales de 464367 (`"No encontrado"`) -- este fix **no se aplicó todavía al lote real**, sólo se validó en TEMP.
+- **Git:** Motor con `atlas_core/extractor.py` y `tests/test_patentes_p4.py` modificados, más estas tres bitácoras. **Sin commit, sin push.** Desktop sin cambios, HEAD `fba95ac`.
+- **Qué debe decidir Javier ahora:** si aprueba este fix, y si además autoriza reprocesar `464367` (o el lote completo) con el Motor ya corregido para que `operacion/actual` refleje el valor documental real en vez de `"No encontrado"` -- eso sería un bloque nuevo, no iniciado.
+- No se tocó Desktop, catálogos, decisiones, Mobile ni Multiempresa. No se inició el módulo de Incidencias Documentales.
+- **Estado: FIX VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18 — 464367 cerrado como "requiere confirmación humana" -- sin corrección automática forzada
+
+- **Trazado completo verificado con código real** (imagen → OCR bruto → extracción geométrica → candidato → normalización → homologación → corroboración → valor final → motivo → decisión): `T2MN86` (tracto) difiere de `TZWR86` (vehículo canónico ya confirmado en catálogo) en **3 caracteres** -- muy por encima de la única regla de corrección segura que existe hoy (`_diferencia_ocr_segura`: exactamente 1 carácter, y sólo si ese par está en una tabla pequeña ya vetada). `J35478` (rampla) difiere de `JU5478` en 1 solo carácter, pero ese par (`3↔U`) no está vetado, y además `JU5478` **no existe** en el catálogo real como candidato.
+- **Clasificación:** ambas patentes -- **categoría C, NO_RECUPERABLE_CON_SEGURIDAD.** No se implementó ninguna corrección automática -- forzarla habría requerido una distancia de edición abierta o usar la asociación chofer↔vehículo como autocorrección, ambas explícitamente fuera de lo permitido.
+- **Comportamiento actual confirmado como correcto, sin cambios:** el valor documental se conserva (`T2MN86`/`J35478`, nunca "No encontrado", nunca inventado), con `PATENTE_SIN_HOMOLOGAR` y decisión `VEHICULO_DESCONOCIDO` -- exactamente el mismo patrón que las otras 8 decisiones ya auditadas del lote.
+- **Diseño de producto futuro documentado en detalle** (bitácora técnica), **NO implementado:** patente documental vs. vehículo canónico vs. asociación histórica chofer↔vehículo (sólo evidencia para sugerir, nunca autocorrección; un chofer puede tener varios vehículos) vs. incidencias documentales genéricas (no "Errores AZA" -- aplicable a cualquier emisor futuro; incluye el caso ya visto por Javier de guías MBT con otra transportista documental incorrecta).
+- **Qué debe decidir Javier ahora:** si el diseño futuro registrado (asociación chofer↔vehículo + incidencias documentales) se prioriza para un bloque de diseño explícito más adelante -- no antes de cerrar el resto de hallazgos de lectura/extracción del lote de 15.
+- **Drive:** no modificado. **Desktop:** no modificado. **Git:** working tree sin cambios adicionales al bloque anterior (mismo diff: `atlas_core/extractor.py`, `tests/test_patentes_p4.py`, tres bitácoras). Sin commit, sin push.
+- No se aplicó ninguna decisión. No se modificaron catálogos. No se reprocesó el lote completo. No se inició Incidencias Documentales, Mobile ni Multiempresa.
+- **Estado: 464367 REQUIERE CONFIRMACIÓN HUMANA -- COMPORTAMIENTO SEGURO VALIDADO.**

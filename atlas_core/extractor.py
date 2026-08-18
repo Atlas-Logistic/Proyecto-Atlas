@@ -1060,22 +1060,41 @@ _ETIQUETAS_PATENTE_CARRO = ("CARRO", "RAMPLA", "REMOLQUE")
 _ETIQUETAS_PATENTE_TODAS = _ETIQUETAS_PATENTE_TRACTO + _ETIQUETAS_PATENTE_CARRO
 
 
-def _tolerante_o_cero(texto: str) -> str:
+# Confusiones de OCR YA CONFIRMADAS con una guía real cada una -- nunca una
+# distancia de edición abierta. Cada par es (carácter observado -> carácter
+# canónico de la etiqueta) y sólo se usa para decidir si un token OBSERVADO
+# ES una etiqueta vehicular conocida (PATENTE/TRACTO/CARRO/RAMPLA/REMOLQUE);
+# jamás para interpretar el VALOR de una patente (eso sigue viviendo en
+# `_normalizar_patente`). Ninguna de las 5 etiquetas contiene "0" ni "B" --
+# por construcción, cada sustitución sólo puede HABILITAR una coincidencia
+# nueva, nunca romper una coincidencia exacta ya correcta.
+#   "0"->"O": dígito cero por letra O (guía 464631: "CARRO" leído "CARR0").
+#   "B"->"R": guía 464367: "CARRO" leído "CARBO".
+_CONFUSIONES_OCR_ETIQUETA_VEHICULAR = {"0": "O", "B": "R"}
+
+
+def _tolerante_confusion_ocr_etiqueta(texto: str) -> str:
     """Normaliza SOLO para reconocer si un token ES una etiqueta de patente
-    conocida (PATENTE/TRACTO/CARRO/RAMPLA/REMOLQUE) -- el OCR confunde con
-    frecuencia la letra O con el dígito 0 dentro de una palabra (caso real
-    guía 464631: "CARRO" leído "CARR0"). Nunca se usa para interpretar el
-    VALOR de una patente (eso sigue viviendo en `_normalizar_patente`), solo
-    para decidir si un bloque/tramo de texto ES una de estas etiquetas."""
-    return texto.replace("0", "O")
+    conocida (PATENTE/TRACTO/CARRO/RAMPLA/REMOLQUE), tolerando un conjunto
+    pequeño y explícito de confusiones de OCR ya confirmadas con guías
+    reales (ver `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`) -- nunca una
+    distancia de edición genérica aplicada a cualquier palabra. Nunca se usa
+    para interpretar el VALOR de una patente (eso sigue viviendo en
+    `_normalizar_patente`), solo para decidir si un bloque/tramo de texto ES
+    una de estas etiquetas."""
+    resultado = texto
+    for observado, canonico in _CONFUSIONES_OCR_ETIQUETA_VEHICULAR.items():
+        resultado = resultado.replace(observado, canonico)
+    return resultado
 
 
 def _es_etiqueta_patente(texto_simple: str, etiquetas: tuple[str, ...]) -> bool:
     """True solo cuando el bloque COMPLETO (no una subcadena) es alguna de
-    las etiquetas dadas, tolerante a la confusión O/0 del OCR."""
+    las etiquetas dadas, tolerante a las confusiones de OCR conocidas
+    (ver `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`)."""
     texto = re.sub(r"[.,:;]", " ", texto_simple)
     texto = re.sub(r"\s+", " ", texto).strip()
-    return _tolerante_o_cero(texto) in etiquetas
+    return _tolerante_confusion_ocr_etiqueta(texto) in etiquetas
 
 
 def _valor_tras_etiqueta_en_bloque(texto: str, etiquetas: tuple[str, ...]) -> Optional[str]:
@@ -1084,9 +1103,10 @@ def _valor_tras_etiqueta_en_bloque(texto: str, etiquetas: tuple[str, ...]) -> Op
     VALOR de 6 caracteres compatible con patente inmediatamente después de
     la etiqueta -- caso real guía 464631: PaddleOCR fusionó en un solo
     bloque ": DD2494 CARR0:JB8529" (el valor de PATENTE seguido, sin
-    separación, del par CARRO:valor). Tolerante a la confusión O/0 del OCR
-    dentro de la propia etiqueta."""
-    texto_tolerante = _tolerante_o_cero(texto)
+    separación, del par CARRO:valor). Tolerante a las confusiones de OCR
+    conocidas dentro de la propia etiqueta (ver
+    `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`)."""
+    texto_tolerante = _tolerante_confusion_ocr_etiqueta(texto)
     patron = re.compile(r"\b(?:" + "|".join(re.escape(e) for e in etiquetas) + r")\b")
     coincidencia = patron.search(texto_tolerante)
     if not coincidencia:
@@ -1104,8 +1124,12 @@ def _valor_unico_residual(texto: str) -> Optional[str]:
     campo de patente) que pudiera venir fusionado en el mismo bloque OCR, y
     devuelve el único token de 6 caracteres compatible con patente que
     quede. Se abstiene si no queda ninguno o si queda más de uno -- nunca
-    elige por orden de aparición."""
-    texto_tolerante = _tolerante_o_cero(texto)
+    elige por orden de aparición. La tolerancia de OCR sólo se usa para
+    ENCONTRAR el par a remover (ver `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`)
+    -- el texto removido y el residual devuelto siempre vienen del texto
+    ORIGINAL sin sustituir, así que un valor documental que legítimamente
+    contenga "0" o "B" nunca se corrompe."""
+    texto_tolerante = _tolerante_confusion_ocr_etiqueta(texto)
     patron = re.compile(
         r"\b(?:" + "|".join(re.escape(e) for e in _ETIQUETAS_PATENTE_TODAS) + r")\b\s*:?\s*[A-Z0-9]{6}\b"
     )

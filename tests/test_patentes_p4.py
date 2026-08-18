@@ -344,4 +344,118 @@ def test_planta_gps_reemplaza_fallback_documental_una_vez_recuperada_la_patente(
     assert resultado["origen_determinado_por"] == "TELEMETRIA_GPS"
 
 
+# --- 12: patente/carro fusionados con CARRO leído CARBO (guía real 464367) ---
+
+
+def test_patente_unica_geometrica_tolera_carbo():
+    """Tercera variante real de OCR confirmada sobre el mismo mecanismo de
+    la etiqueta CARRO/RAMPLA/REMOLQUE (guía 464367: "CARRO" leído "CARBO",
+    B por R) -- mismo patrón estructural que el test de CARR0 (0 por O,
+    guía 464631): valor de PATENTE fusionado en un solo bloque junto al par
+    CARRO:valor, con la etiqueta CARRO corrompida. La tolerancia vive en
+    una tabla pequeña y explícita de confusiones ya confirmadas
+    (`_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`), no en una distancia de edición
+    abierta -- ver los negativos más abajo."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque(": AB1234 CARBO:CD5678", 20, 80, 220),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "AB1234", "carro": "CD5678"}
+
+
+def test_regresion_464367_patente_y_rampla_fusionados_con_carro_mal_leido(tmp_path, monkeypatch):
+    """Reproduce la estructura completa de la guía real 464367 (PATENTE
+    como etiqueta propia, valor de tracto fusionado con CARRO:valor y
+    CARRO leído CARBO) end-to-end vía `procesar_archivo`, con valores
+    sintéticos -- nunca los reales."""
+    ruta = tmp_path / "guia.jpg"
+    carpeta_catalogos = tmp_path / "catalogos"
+    carpeta_catalogos.mkdir()
+    (carpeta_catalogos / "vehiculos.json").write_text("{}", encoding="utf-8")
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60), _bloque("CHOFER PRUEBA", 90, 20, 120),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque(": AB1234 CARBO:CD5678", 90, 51, 220),
+        _bloque("FECHA LLEGADA", 20, 80, 120),
+    ]
+    _preparar_mocks(monkeypatch, bloques, _datos_lineales())
+
+    resultado = procesar_archivo(ruta, carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["patente_tracto"] == "AB1234"
+    assert resultado["patente_rampla"] == "CD5678"
+    # sin catálogo que las reconozca, quedan como valor documental legible,
+    # no "No encontrado" -- mismo criterio que el resto del bloque P4.
+    assert "PATENTE_SIN_HOMOLOGAR" in resultado["motivos_revision_documento"]
+
+
+# --- 13: negativos -- la tolerancia no se vuelve fuzzy abierta ---
+
+
+def test_palabra_parecida_a_carro_no_tolerada_fuera_de_la_tabla_se_abstiene():
+    """"CARGO" es, para un humano, una palabra real y visualmente parecida
+    a CARRO -- pero NO está en la tabla explícita de confusiones conocidas
+    (`_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`, sólo 0->O y B->R, ambas
+    confirmadas con guías reales). Debe seguir sin reconocerse como
+    etiqueta: quedan dos tokens de 6 caracteres sin ninguna etiqueta que
+    los distinga -> ambigüedad real, abstención."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque(": AB1234 CARGO:CD5678", 20, 80, 220),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {}
+
+
+def test_dos_patentes_sin_ninguna_etiqueta_rival_reconocible_se_abstiene():
+    """Dos tokens de 6 caracteres con formato de patente en el mismo
+    bloque, sin ningún resto de etiqueta CARRO/RAMPLA/REMOLQUE (ni exacta
+    ni tolerada) que permita separar cuál es cuál -- ambigüedad genuina,
+    igual que antes de este bloque."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque(": AB1234 XY5678", 20, 80, 220),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {}
+
+
+def test_ambiguedad_geometrica_genuina_sigue_abstenida_tras_el_fix():
+    """No regresión del test 7 (dos etiquetas PATENTE con valores igual de
+    cerca): la tolerancia nueva no relaja la abstención ante ambigüedad
+    geométrica real, que no depende de la tabla de confusiones."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70), _bloque("AB1234", 120, 50, 70),
+        _bloque("PATENTE", 20, 90, 70), _bloque("CD5678", 120, 90, 70),
+        _bloque("FECHA LLEGADA", 20, 120, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {}
+
+
+def test_valor_documental_con_b_legitima_no_se_corrompe_con_carro_bien_leido():
+    """La tolerancia B->R sólo se aplica para ENCONTRAR el par
+    "CARRO:valor" a remover -- el texto removido y el residual devuelto
+    siempre vienen del texto ORIGINAL sin sustituir (ver docstring de
+    `_valor_unico_residual`). Un valor de patente que legítimamente
+    contenga la letra "B" (con CARRO correctamente escrito, sin
+    corrupción) nunca debe alterarse a "R"."""
+    bloques = [
+        _bloque("RETIRA", 20, 20, 60),
+        _bloque("PATENTE", 20, 50, 70),
+        _bloque(":BPHR67 CARRO:JB8529", 20, 80, 220),
+        _bloque("FECHA LLEGADA", 20, 110, 120),
+    ]
+
+    assert _extraer_patentes_geometrico(bloques) == {"tracto": "BPHR67", "carro": "JB8529"}
+
+
 # --- 11: no regresión -- ver `python -m pytest -q` (suite completa) ---

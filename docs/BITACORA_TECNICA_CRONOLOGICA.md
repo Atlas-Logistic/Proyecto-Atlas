@@ -2115,3 +2115,145 @@ No hizo falta regenerar nada realmente -- el reporte vigente ya estaba correcto.
 **Fuera de alcance, no tocado:** desarrollo nuevo, Mobile, Multiempresa, corrección de `464265`/`464367`, aplicación de decisiones, modificación de catálogos, promoción del lote a `operacion/actual`.
 
 **Estado: FIX FALSOS OK VALIDADO REALMENTE -- LISTO PARA PUBLICAR.**
+
+## 2026-08-18 — Publicación (`793b240`) + promoción del lote de 15 a `operacion/actual`
+
+**Push real:** `git push origin lector-mvp-guia-nueva` -- `6755d90..793b240`. Verificado post-push: local `793b240` == remoto `793b240`, ahead/behind 0/0, working tree limpio.
+
+**Promoción, mecanismo canónico, sin escritura manual de CSV/JSON:**
+1. Dry-run en TEMP: copia de `operacion/actual/analisis_completo_guias.csv` (28 filas) + `decisiones_aplicadas.json` (ledger, 10 aplicaciones) + copia completa de `catalogos_privados/` + las 15 imágenes canónicas (SHA-256 verificado contra `MANIFIESTO_SHA256.csv` de `operacion/entradas/lote_controlado_15_guias_20260818_100841/`).
+2. `analizar_guias_masivo.py` (mismo CLI de producción, con telemetría real -- credenciales `ATLAS_ONELOGIS_API_KEY`/`OPENROUTESERVICE_API_KEY` ya presentes en el entorno) contra la copia TEMP: **43 filas resultantes, 0 duplicados por `archivo` ni `numero_guia`**, las 28 filas previas **byte a byte idénticas** a las originales (comparación programática, no visual). Único cambio en las 15 nuevas frente a la predicción congelada: `464395`/`464479` ahora `REVISAR`/`OBRA_DESTINO_SIN_CORROBORAR` (ya validado en el bloque anterior) -- las 13 filas restantes, incluida `464367`, idénticas a la congelada (ese error de patente **no** se tocó en este bloque, tal como se pidió).
+3. `generar_reporte_viajes` en dry-run contra el CSV combinado: **38 viajes** (24 antiguos sin cambio, verificado que ninguno se mezcla con los 14 nuevos por `numero_transporte` -- cálculo real, no supuesto) -- **25 CONFIRMADO / 13 REQUIERE_REVISION**. `464264`+`464265` (mismo transporte `0000351135`) quedan en el mismo viaje con `CONFLICTO_FECHA | CONFLICTO_OBRA_DESTINO | CONFLICTO_PATENTE_TRACTO | CONFLICTO_PATENTE_RAMPLA` visibles, sin resolver.
+4. Backup previo: `respaldos/PROMOCION_LOTE15_ROLLBACK_PRE_APLICACION_20260818_153220/` -- `analisis_completo_guias.csv`, `decisiones_pendientes.json`, `estado_operacion.json` (únicos tres archivos que la promoción iba a modificar), SHA-256 verificado byte a byte antes de escribir.
+5. Aplicación real: se copiaron los artefactos ya validados en TEMP a `operacion/actual/` (mismo contenido, verificado `cmp` byte a byte contra el TEMP validado); `generar_reporte_viajes.py` real generó `reportes/reporte_promocion_lote15_20260818_153512/` y publicó `estado_operacion.json` vía `escribir_estado_operacion` (mecanismo canónico, no escritura manual).
+
+**Resultado final verificado en los archivos reales:** 43 documentos (30 OK / 13 REVISAR), 15 decisiones pendientes (8 `VEHICULO_DESCONOCIDO` + 7 `OBRA_DESCONOCIDA`, ninguna aplicada, ninguna colisiona con el ledger de terminales), 38 viajes (25/13). `decisiones_aplicadas.json` sin cambio de `mtime` (no se aplicó nada). Catálogos, predicción congelada, procesamiento original e imágenes de entrada -- `mtime` idéntico al observado antes de escribir.
+
+**Tests:** sin cambios de código en este bloque -- se conserva 1191 passed, 0 failed.
+
+**Git:** Motor publicado y limpio (`793b240`, local=remoto, 0/0). Desktop sin cambios, HEAD `fba95ac`.
+
+**Estado: LOTE DE 15 PROMOVIDO -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## 2026-08-18 — Auditoría de patentes de las 15 guías + diagnóstico dirigido de 464367
+
+**Auditoría completa, ground truth desde la imagen (nunca desde CSV/catálogo/decisión):** 25 patentes documentales evaluables (15 tracto + 10 rampla) -- **23 coinciden exactamente con lo extraído por Atlas (92%)**. Cruce read-only contra `vehiculos.json` real usado sólo como evidencia de apoyo (nunca como ground truth): 11 de las 15 patentes de tracto ya eran conocidas antes del lote, lo que sirvió para corroborar independientemente varias lecturas visuales (p. ej. `BKYK63`, `BPHR67`, `TZWR86` confirmados como vehículos reales ya existentes).
+
+**Evidencia operacional humana, registrada, sin aplicar a ningún catálogo/decisión:**
+- **Patrick Ortiz / guía 464036:** documental `XF3662` (Atlas leyó correctamente), canónica confirmada por el propio Ortiz `XF3629`. Clasificación: `ERROR_DOCUMENTAL_AZA_CONFIRMADO` -- no imputable a Atlas.
+- **Carlos Simón / guías 464264 (`VP8521`/`JD6659`) y 464265 (`VP6521`/`JD0659`), mismo transporte `0000351135`:** Javier confirmó tracto canónico `VP8521` (coincide con 464264, ya conocido en catálogo); `VP6521` no se registra. Rampla **sin confirmar** -- candidatos recordados por Javier (`JE8659`/`JE8650`) no coinciden literalmente con lo auditado documentalmente (`JD6659`/`JD0659`); no se elige ninguna.
+
+**Diagnóstico dirigido de 464367 (único error real de extracción, OCR ejecutado sólo sobre esta guía, aislado en TEMP, con el proveedor real PaddleOCR):**
+- Texto OCR bruto capturado en un único bloque geométrico: `': T2MN86 CARBO:J35478'` (confianza 0.870), geométricamente bien asociado a la etiqueta `PATENTE` (bloque separado, confianza 1.000).
+- `_valor_unico_residual` (dentro de `_extraer_patentes_geometrico`) intenta remover el par fusionado `CARRO:valor` de ese bloque mediante una regex que exige literalmente la palabra `CARRO` (tolerancia previa sólo 0↔O) -- como el OCR corrompió `CARRO`→`CARBO` (B por R), la regex no encuentra nada que remover y quedan DOS tokens de 6 caracteres con formato válido de patente (`T2MN86` y `J35478`) en el mismo bloque -- la función se abstiene por diseño (nunca elige por posición) y ambos campos quedan `No encontrado`.
+- **Control real perfecto: guía 464511** -- estructura de bloque IDÉNTICA (`':SD6486 CARRO:JF4288'`, PATENTE como etiqueta separada) pero con `CARRO` correctamente leído -- la misma función SÍ separa el par y resuelve `{'tracto': 'SD6486', 'carro': 'JF4288'}`. Esta comparación aísla la causa con precisión: única variable que cambia es si el OCR corrompió o no la palabra CARRO.
+- Causa raíz: **C. CANDIDATO_DETECTADO_PERO_FILTRO_RECHAZA.**
+
+**Concepto de producto identificado, registrado para roadmap, NO diseñado ni implementado:** módulo genérico de **INCIDENCIAS DOCUMENTALES** (origen/emisor, documento, campo, valor documental, valor canónico, tipo de incidencia, evidencia, quién confirmó, fecha) -- deliberadamente genérico, no "errores AZA". Debe poder distinguir patente documental / patente canónica / incidencia documental confirmada humanamente sin atribuir automáticamente un error a un tercero.
+
+**Drive/catálogos/Desktop:** sin cambios -- diagnóstico 100% read-only, TEMP eliminado al terminar.
+
+**Estado: DIAGNÓSTICO COMPLETADO -- REQUIERE DECISIÓN.**
+
+## 2026-08-18 — Fix conservador: tolerancia de OCR para etiquetas vehiculares (`CARRO` leído `CARBO`)
+
+**Fase 1 -- análisis de seguridad antes de modificar (inventario completo):** toda la lógica de reconocimiento de etiquetas vehiculares vive exclusivamente en `atlas_core/extractor.py`, en un clúster de funciones ya identificado: `_ETIQUETAS_PATENTE_TRACTO`/`_ETIQUETAS_PATENTE_CARRO`/`_ETIQUETAS_PATENTE_TODAS` (vocabulario), `_tolerante_o_cero` (única tolerancia existente, sólo dígito 0 → letra O), `_es_etiqueta_patente` (bloque completo == etiqueta, tolerante), `_valor_tras_etiqueta_en_bloque` (par ETIQUETA:VALOR fusionado en un solo bloque), `_valor_unico_residual` (remueve pares ya conocidos de un bloque de valor y exige que quede exactamente un candidato), `_extraer_patentes_geometrico` (orquestador). Tolerancia hoy existente: sólo 0↔O, justificada por un caso real ya resuelto (guía 464631, "CARR0"). Búsqueda en tests (`tests/test_patentes_p4.py`) y en el lote real confirmó un segundo caso real (464367, "CARBO") con la MISMA estructura de bloque que un control ya correcto (464511) -- evidencia suficiente para una tabla de confusiones (no una heurística de un solo caso).
+
+**Solución elegida:** generalizar `_tolerante_o_cero` (renombrada `_tolerante_confusion_ocr_etiqueta`) de un reemplazo fijo a una **tabla explícita y acotada**, `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR = {"0": "O", "B": "R"}`, documentada con la guía real que motivó cada par. Se usa exactamente en los mismos 3 puntos donde ya se usaba la tolerancia anterior (`_es_etiqueta_patente`, `_valor_tras_etiqueta_en_bloque`, `_valor_unico_residual`) -- ningún nuevo punto de entrada, ninguna distancia de edición genérica.
+
+**Por qué es conservadora (verificado, no sólo argumentado):**
+- Ninguna de las 5 etiquetas (`PATENTE`,`TRACTO`,`CARRO`,`RAMPLA`,`REMOLQUE`) contiene "0" ni "B" -- por construcción, cada sustitución sólo puede HABILITAR una coincidencia nueva, nunca deshacer una coincidencia exacta ya correcta.
+- `_valor_unico_residual` calcula las posiciones a remover sobre el texto TOLERANTE, pero recorta y devuelve el texto ORIGINAL en esas mismas posiciones (sustitución 1 carácter → 1 carácter, nunca cambia longitudes/offsets) -- un valor documental que legítimamente contenga "B" (p. ej. `BPHR67`) nunca se corrompe a "R". Verificado explícitamente (test negativo).
+- `"CARGO"` (palabra real, visualmente parecida a CARRO, pero fuera de la tabla) sigue sin reconocerse -- verificado explícitamente (test negativo): sigue en ambigüedad/abstención.
+- Ambigüedad geométrica genuina preexistente (dos etiquetas PATENTE igual de cerca) no se ve afectada -- test de regresión explícito.
+
+**Archivos modificados:** `atlas_core/extractor.py` (+52/-14 líneas: renombrado + tabla + 3 llamadas actualizadas + docstrings), `tests/test_patentes_p4.py` (+114 líneas, 6 tests nuevos).
+
+**Tests nuevos (`tests/test_patentes_p4.py`):**
+- `test_patente_unica_geometrica_tolera_carbo` -- reproduce la estructura real de 464367 con datos sintéticos, unitaria sobre `_extraer_patentes_geometrico`.
+- `test_regresion_464367_patente_y_rampla_fusionados_con_carro_mal_leido` -- misma estructura, end-to-end vía `procesar_archivo`, verifica además `PATENTE_SIN_HOMOLOGAR` sin catálogo.
+- `test_palabra_parecida_a_carro_no_tolerada_fuera_de_la_tabla_se_abstiene` -- negativo: `CARGO` no tolerado.
+- `test_dos_patentes_sin_ninguna_etiqueta_rival_reconocible_se_abstiene` -- negativo: sin ningún resto de etiqueta, ambigüedad genuina.
+- `test_ambiguedad_geometrica_genuina_sigue_abstenida_tras_el_fix` -- no regresión del test 7 preexistente (dos etiquetas PATENTE igual de cerca).
+- `test_valor_documental_con_b_legitima_no_se_corrompe_con_carro_bien_leido` -- negativo: `BPHR67` + `CARRO` bien escrito no se corrompe.
+
+**Ejecución de tests:** focalizados `tests/test_patentes_p4.py` -- **17 passed** (11 preexistentes + 6 nuevos). Grupo extracción/patentes/vehículos (`test_extraer_datos.py`, `test_patentes_p4.py`, `test_catalogo_vehiculos_v1.py`, `test_aplicacion_vehiculos_r361.py`, `test_revalidacion_patente_r362.py`, `test_estados_s2.py`, `test_estados_s2_2.py`, `test_inteligencia_n1.py`) -- **282 passed**. Suite completa: **1197 passed, 0 failed** (baseline 1191 + 6).
+
+**Validación real en TEMP (imagen canónica de 464367, SHA-256 verificado, catálogos copiados sólo lectura, `--sin-telemetria` porque no afecta los campos bajo prueba):**
+```
+OCR bruto:              ': T2MN86 CARBO:J35478'                (sin cambio -- el fix no toca OCR)
+extracción geométrica:  {} -> {'tracto': 'T2MN86', 'carro': 'J35478'}
+patente documental:     "No encontrado"/"No encontrado" -> "T2MN86"/"J35478"
+homologación/catálogo:  ninguna (no existen en vehiculos.json real) -> decisión VEHICULO_DESCONOCIDO
+                        + motivo PATENTE_SIN_HOMOLOGAR para ambos campos (mismo patrón que las
+                        otras 8 decisiones ya auditadas del lote)
+```
+Comparación campo a campo contra el resultado ya promovido en `operacion/actual` para esta misma guía: **todos los demás campos idénticos** (`numero_guia`, `numero_transporte`, `fecha`, `chofer`, `rut_chofer`, `cliente`, `obra_destino`, `descripcion_material`, `tipo_carga`) -- único cambio: `patente_tracto`/`patente_rampla` (de `"No encontrado"` a valor real) y `motivos_revision_documento` (gana `PATENTE_SIN_HOMOLOGAR`, aditivo). `indicador_revision` se mantiene `REVISAR` (ya lo estaba por `OBRA_DESTINO_SIN_CORROBORAR`/`CLIENTE_AUSENTE`).
+
+**Límite explícito, fuera de alcance de este bloque:** el fix corrige la etapa de EXTRACCIÓN (candidato ya no se descarta) -- no corrige el ruido de OCR dentro del propio VALOR. `T2MN86`/`J35478` (documental recuperado) siguen siendo distintos de la lectura visual del documento físico (`TZWR86`/`JU5478` según la auditoría anterior). Corregir eso es un problema de calidad de OCR carácter a carácter, deliberadamente NO abordado aquí -- el valor deliberadamente NO se corrigió para "hacerlo calzar" con el catálogo o con la lectura visual, tal como exigía el bloque.
+
+**Drive:** no modificado -- validación 100% en TEMP, eliminado al terminar. `operacion/actual`, catálogos, predicción congelada, decisiones -- sin tocar.
+
+**Desktop:** sin cambios.
+
+**Git:** working tree del Motor con `atlas_core/extractor.py` y `tests/test_patentes_p4.py` modificados, más estas tres bitácoras. `git diff --check` limpio. **Sin commit, sin push.**
+
+**Estado: FIX VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## 2026-08-18 — 464367: trazado completo del ruido de OCR a nivel de carácter -- sin corrección automática segura disponible
+
+**Checkpoint:** Motor HEAD `793b240`, working tree con exactamente el mismo diff dejado por el bloque anterior (`atlas_core/extractor.py`, `tests/test_patentes_p4.py`, tres bitácoras). Desktop `fba95ac`, limpio.
+
+**Trazado exacto, sin modificar código:**
+1. **Imagen** → **OCR bruto** (PaddleOCR, ya ejecutado en el bloque de diagnóstico anterior, no repetido aquí): bloque fusionado `': T2MN86 CARBO:J35478'`, confianza 0.870.
+2. **Extracción geométrica** (`_extraer_patentes_geometrico`, ya con el fix de este mismo bloque de trabajo): `{'tracto': 'T2MN86', 'carro': 'J35478'}` -- el candidato ya no se pierde.
+3. **Candidato** → **normalización** (`_normalizar_patente`): sin cambio para ambos valores -- ninguno contiene la letra "O" (única sustitución que hace esa función sobre el valor, O→0), y no calzan con la corrección histórica hardcodeada de "guía 3" (`2DRG50`→`BDFG50`, ajena a este caso).
+4. **Homologación contra catálogo** (`resolver_patente_canonica`, fachada de `resolver_patente` en `atlas_core/catalogo_vehiculos.py`, ejecutada real y directamente contra `catalogos_privados/vehiculos.json`, sólo lectura):
+   - `resolver_patente(..., 'T2MN86', tipo_esperado='TRACTO')` → **`SIN_CANDIDATO`**.
+   - `resolver_patente(..., 'J35478', tipo_esperado='CARRO')` → **`SIN_CANDIDATO`**.
+5. **Corroboración:** ninguna -- sin homologación, no hay corroboración posterior que evaluar.
+6. **Valor final:** se conserva el valor documental tal cual (`T2MN86`/`J35478`) -- nunca "No encontrado" (eso ya lo corrigió el bloque anterior) ni tampoco un valor inventado.
+7. **Motivo de revisión:** `PATENTE_SIN_HOMOLOGAR` (ya confirmado en la validación TEMP del bloque anterior).
+8. **Decisión generada:** `VEHICULO_DESCONOCIDO` para ambos campos (`patente_tracto`, `patente_carro`), acciones `REGISTRAR`/`NO_REGISTRAR`/`POSPONER` -- exactamente el mismo patrón que las demás 8 decisiones de vehículo ya auditadas del lote.
+
+**Respuestas a las 8 preguntas del bloque, verificadas con código real (no supuestas):**
+1. ¿`TZWR86` existe como vehículo canónico confirmado? **Sí** (`catalogos_privados/vehiculos.json` real, verificado por lectura directa).
+2. ¿Por qué `T2MN86` no homologa a `TZWR86`? Difieren en **3 posiciones** (`('2','Z')`, `('M','W')`, `('N','R')`, verificado con `_diferencia_ocr_segura('T2MN86','TZWR86')` → `False`) -- la única regla de corrección segura que existe hoy exige exactamente 1 posición distinta.
+3. ¿`JU5478` existe en catálogo? **No** (verificado por lectura directa del catálogo real).
+4. ¿`J35478` tiene homologación inequívoca posible? **No** -- `_diferencia_ocr_segura('J35478','JU5478')` → `False`: aunque sólo difieren en 1 posición (`('3','U')`), ese par no está en `_CONFUSIONES_OCR` (`{B,D}`,`{0,O}`,`{1,I}`,`{5,S}`,`{8,B}`,`{8,E}`,`{K,R}`), y de todos modos no hay ningún candidato de catálogo contra el cual aplicar la regla.
+5. ¿Qué reglas de corrección/homologación existen hoy? `_diferencia_ocr_segura` (`atlas_core/catalogo_vehiculos.py:294`) -- longitud igual, exactamente 1 posición distinta, y ese par debe pertenecer a la tabla `_CONFUSIONES_OCR` ya vetada. Aplicada únicamente cuando ya existe un candidato exacto de tipo correcto en catálogo (`resolver_patente`, línea 299).
+6. ¿Por qué `SD6486→SB6486` sí funciona y esto no? Ese caso cumple los TRES requisitos a la vez: 1 sola posición distinta (`('D','B')` en la posición 2), el par `{B,D}` sí está en la tabla vetada, y `SB6486` ya existe como vehículo `CONFIRMADO`/`ACTIVO` en el catálogo real. `464367` no cumple ninguno de los tres para tracto (3 posiciones) y sólo el primero para rampla (posición única, pero par no vetado y sin candidato de catálogo).
+7. ¿La diferencia `T2MN86→TZWR86` excede el umbral seguro? **Sí, ampliamente** -- 3 posiciones contra el máximo de 1 que la regla actual permite.
+8. ¿Existe evidencia adicional no basada en adivinar? La única fuente adicional posible sería una asociación histórica chofer↔vehículo (si "CARLOS ÑANCUCHEO" tuviera ya un vehículo confirmado antes) -- explícitamente prohibida como mecanismo de autocorrección en este bloque, y en todo caso Atlas hoy **no mantiene ese tipo de asociación en absoluto** (confirmado en bloques anteriores).
+
+**Clasificación (Fase 2):** tracto `T2MN86` → **C. NO_RECUPERABLE_CON_SEGURIDAD**. Rampla `J35478` → **C. NO_RECUPERABLE_CON_SEGURIDAD**. Ninguna corrección pequeña, generalizable y demostrablemente segura existe para ninguno de los dos campos -- no se implementó nada.
+
+**Fix adicional implementado: NO.** El comportamiento actual (valor documental conservado, `PATENTE_SIN_HOMOLOGAR`, decisión `VEHICULO_DESCONOCIDO`, sin inventar ni forzar una corrección) ya es exactamente el comportamiento seguro deseado -- se verificó, no se modificó.
+
+**Tests:** sin cambios de código en este bloque -- se conserva 1197 passed, 0 failed sin repetir la suite.
+
+---
+
+### Registro de diseño futuro (consolidado en las tres bitácoras) -- NO IMPLEMENTAR
+
+**1. Patente documental:** lo que realmente aparece en el documento -- debe preservarse siempre como evidencia, nunca sobrescribirse.
+
+**2. Patente/vehículo canónico operacional:** el vehículo confirmado mediante evidencia operacional/humana -- no necesariamente coincide con el documento.
+
+**3. Asociación histórica chofer↔vehículo (futura, no implementada):** relaciones históricas/auditables **chofer ↔ vehículos confirmados previamente** -- nunca modelar "chofer → un único vehículo" (un chofer puede operar distintos vehículos). Sirven exclusivamente como **evidencia para sugerir**, nunca como autocorrección automática. Ejemplo real ya confirmado (Patrick Ortiz, guía 464036): documento dice `XF3662`, vehículo asociado/confirmado es `XF3629` -- Atlas debería poder mostrar ambos valores y la posible discrepancia, y ofrecer una decisión humana (`USAR_VEHICULO_ASOCIADO` / `REGISTRAR_PATENTE_DOCUMENTAL` / `REGISTRAR_INCIDENCIA_DOCUMENTAL` / `POSPONER`), nunca reemplazar automáticamente.
+
+**4. Incidencias documentales (futura, genérica, no implementada):** capacidad de Atlas para representar una diferencia CONFIRMADA entre `valor_documental` y `valor_operacional_confirmado`. Deliberadamente **genérica** -- no "Errores AZA", sin incrustar MBT/AZA en la arquitectura; debe servir para cualquier empresa/mandante/emisor/cliente/fuente documental futura. El documento original nunca se altera; Atlas conserva evidencia documental + verdad operacional confirmada + la incidencia que explica la diferencia. Atlas puede detectar una `POSIBLE_INCONSISTENCIA_DOCUMENTAL`, pero nunca atribuye automáticamente un error a un tercero -- la incidencia pasa a `CONFIRMADA` únicamente mediante validación humana.
+
+**5. Tipos de incidencia (extensible por campo, no implementado):** `PATENTE_DOCUMENTAL_INCORRECTA`, `EMPRESA_TRANSPORTISTA_DOCUMENTAL_INCORRECTA` (caso real ya observado por Javier: guías de la operación MBT donde el emisor/mandante indicó otra transportista documental -- p. ej. "Transportes Carwork" -- cuando la operacional correcta era Transportes MBT), y potencialmente chofer/cliente/destino/fecha/número de transporte/otros campos operacionales.
+
+**6. Estructura conceptual mínima (no implementada, ni siquiera como esquema):** `id`, origen/emisor, documento/guía, campo afectado, valor documental, valor operacional confirmado, tipo de incidencia, evidencia, estado (`POSIBLE`/`CONFIRMADA`/etc.), `confirmado_por`, `confirmado_en`, trazabilidad/auditoría.
+
+**Evidencia humana vigente, sin aplicar:**
+- Patrick Ortiz: `XF3629` canónica confirmada; `464036` imprime `XF3662`; no registrar `XF3662` automáticamente; candidato futuro a incidencia documental confirmada.
+- Carlos Simón: `VP8521` tracto canónico confirmado; `VP6521` no registrar; rampla **sin confirmar** (Javier duda entre `JE8659`/`JE8650`; la auditoría documental leyó `JD6659`/`JD0659`); no elegir ni registrar ninguna.
+
+**Regla de rumbo:** todo lo anterior queda **documentado únicamente**. No se inicia su implementación. El rumbo vigente sigue siendo cerrar los problemas reales de lectura/extracción revelados por el lote de 15 antes de ampliar funcionalidades -- no Mobile, no Multiempresa, no pestaña nueva, no cambios en Desktop.
+
+**Drive:** no modificado. **Desktop:** no modificado. **Git:** working tree sin cambios adicionales al bloque anterior (mismo diff). Sin commit, sin push.
+
+**Estado: 464367 REQUIERE CONFIRMACIÓN HUMANA -- COMPORTAMIENTO SEGURO VALIDADO.**
