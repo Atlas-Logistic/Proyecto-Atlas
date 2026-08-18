@@ -197,6 +197,89 @@ class DocumentoViaje:
     evidencia: dict[str, str]
 
 
+# Bloque ORIGEN DE VIAJE: jerarquía de confianza de la fuente que determinó
+# la planta de origen de un documento -- menor número, mayor confianza.
+# GPS/telemetría real siempre gana sobre el encabezado documental (causa
+# raíz ya demostrada en el Bloque OPERACIÓN REAL R1: el encabezado AZA
+# imprime siempre la misma planta matriz, sin importar la planta real de
+# despacho -- nunca es evidencia confiable por sí sola). "ONELOGIS_GPS" es
+# la fuente que devolvería `atlas_core/rutas/enriquecimiento_viaje.py` (sin
+# proveedor real conectado en producción hoy, ver Bloque RUTAS R1) -- se
+# incluye en el mismo nivel que "TELEMETRIA_GPS" para no duplicar la
+# jerarquía si se conecta en el futuro. Cualquier fuente no listada
+# (incluida "DOCUMENTO" si algún día se retira, o vacía) queda al final.
+_JERARQUIA_FUENTE_ORIGEN: dict[str, int] = {
+    "TELEMETRIA_GPS": 0,
+    "ONELOGIS_GPS": 0,
+    "DOCUMENTO": 1,
+}
+
+
+def _nivel_fuente_origen(fuente: str) -> int:
+    return _JERARQUIA_FUENTE_ORIGEN.get(str(fuente or "").strip().upper(), 99)
+
+
+def _resolver_origen_viaje(
+    documentos: Iterable["DocumentoViaje"],
+) -> tuple[str, str, str, str, bool]:
+    """Consolida la planta de origen a nivel de VIAJE completo, no por
+    documento aislado (Bloque ORIGEN DE VIAJE). Caso real que lo motivó:
+    transporte `0000351135` -- un documento confirma su planta por GPS
+    real, su documento hermano del mismo viaje cae al respaldo documental
+    (menos confiable) porque su propia patente no permitió ubicar el
+    vehículo en telemetría. Sin este mecanismo, el fallback documental del
+    segundo documento degradaba en silencio el origen ya confirmado del
+    viaje completo.
+
+    Regla (deriva directamente la jerarquía GPS > documento > sin
+    determinar ya vigente, aplicada ahora al conjunto del viaje en vez de
+    a cada documento por separado):
+
+    1. Sólo participan documentos con origen presente (`planta_origen_id`
+       y `planta_origen_nombre` no vacíos) -- un documento sin origen no
+       impide ni degrada la consolidación de los demás.
+    2. Entre los documentos con origen presente, se conserva únicamente la
+       fuente de MAYOR confianza disponible (`_nivel_fuente_origen`, menor
+       número gana) -- un origen documental nunca compite contra uno ya
+       confirmado por GPS en el mismo viaje.
+    3. Si todos los documentos de esa mejor fuente coinciden en la misma
+       planta (comparados por `planta_origen_id`, el identificador
+       canónico estable del catálogo -- nunca por nombre, para no generar
+       un conflicto falso por diferencias de formato/mayúsculas), el viaje
+       usa esa planta, con esa fuente y la evidencia del documento que la
+       aportó.
+    4. Si discrepan entre sí (mismo nivel de confianza, plantas
+       distintas), es un conflicto real -- nunca se elige una
+       arbitrariamente (`CONFLICTO_ORIGEN`).
+    5. Sin ningún documento con origen presente, el viaje queda sin
+       determinar -- igual que hoy.
+
+    Devuelve (planta_origen_id, planta_origen_nombre, origen_determinado_por,
+    evidencia_origen, hay_conflicto)."""
+    candidatos = [
+        d for d in documentos
+        if _valor_presente(d.planta_origen_id) and _valor_presente(d.planta_origen_nombre)
+    ]
+    if not candidatos:
+        return "", "", "", "", False
+
+    mejor_nivel = min(_nivel_fuente_origen(d.origen_determinado_por) for d in candidatos)
+    mejores = [d for d in candidatos if _nivel_fuente_origen(d.origen_determinado_por) == mejor_nivel]
+
+    ids_unicos = {_clave_normalizada(d.planta_origen_id) for d in mejores}
+    if len(ids_unicos) > 1:
+        return "", "", "", "", True
+
+    ganador = mejores[0]
+    return (
+        ganador.planta_origen_id,
+        ganador.planta_origen_nombre,
+        ganador.origen_determinado_por,
+        ganador.evidencia_origen,
+        False,
+    )
+
+
 @dataclass
 class Viaje:
     viaje_id: str
@@ -316,19 +399,26 @@ class Viaje:
 
     @property
     def planta_origen_id(self) -> str:
-        return self._campo_ruta_consolidado("planta_origen_id")
+        # Bloque ORIGEN DE VIAJE: a diferencia del resto de campos de ruta
+        # (que exigen coincidencia exacta entre TODOS los documentos, ver
+        # `_campo_ruta_consolidado`), la planta de origen se consolida con
+        # jerarquía de fuente (GPS > documento) -- un origen documental
+        # discrepante en un documento no degrada el origen ya confirmado
+        # por GPS de otro documento del mismo viaje. Ver
+        # `_resolver_origen_viaje`.
+        return _resolver_origen_viaje(self.documentos)[0]
 
     @property
     def planta_origen_nombre(self) -> str:
-        return self._campo_ruta_consolidado("planta_origen_nombre")
+        return _resolver_origen_viaje(self.documentos)[1]
 
     @property
     def origen_determinado_por(self) -> str:
-        return self._campo_ruta_consolidado("origen_determinado_por")
+        return _resolver_origen_viaje(self.documentos)[2]
 
     @property
     def evidencia_origen(self) -> str:
-        return self._campo_ruta_consolidado("evidencia_origen")
+        return _resolver_origen_viaje(self.documentos)[3]
 
     @property
     def distancia_km(self) -> str:
@@ -468,7 +558,14 @@ def _documento_desde_fila(
         if normalizador_chofer and _valor_presente(chofer_original)
         else chofer_original
     )
-    origen = str(fila.get("origen", fila.get("planta_origen", "")))
+    # Bloque ORIGEN DE VIAJE: antes leía columnas "origen"/"planta_origen",
+    # ninguna existente en el esquema real (la columna real, ya poblada por
+    # el enriquecimiento logístico, es "planta_origen_nombre") -- `origen`
+    # quedaba siempre vacío, y con eso tanto `Viaje.origenes` (lista de
+    # auditoría, todas las plantas distintas vistas en los documentos del
+    # viaje) como el conflicto de origen (ver `_resolver_origen_viaje` más
+    # abajo, que ya no depende de este campo) perdían su única fuente real.
+    origen = str(fila.get("planta_origen_nombre", ""))
     return DocumentoViaje(
         archivo=str(fila.get("archivo", "")).strip(),
         numero_guia=str(fila.get("numero_guia", "")).strip(),
@@ -559,13 +656,23 @@ def agrupar_viajes(
         ]
         fechas_originales = [str(f.get("fecha", "")).strip() for f in filas_grupo]
         fechas_desktop = [_fecha_para_desktop(valor) for valor in fechas_originales]
+        # Bloque ORIGEN DE VIAJE: CONFLICTO_ORIGEN antes comparaba `d.origen`
+        # (columna inexistente en el esquema real -- siempre vacío, nunca se
+        # disparaba, ver comentario en `_documento_desde_fila`). Ahora usa la
+        # misma resolución con jerarquía de fuente (GPS > documento) que ya
+        # consolida `planta_origen_*` a nivel de viaje -- sólo es conflicto
+        # real cuando dos o más documentos coinciden en la MEJOR fuente
+        # disponible y aun así discrepan en la planta; un origen documental
+        # discrepante que ya perdió frente a un GPS confirmado no cuenta
+        # como conflicto (jerarquía, no empate).
+        _, _, _, _, hay_conflicto_origen = _resolver_origen_viaje(documentos)
         campos_conflicto = (
             (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop], _valores_compatibles),
             (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_RUT_CHOFER, [d.rut_chofer for d in documentos], _valores_compatibles_rut),
             (MotivoRevision.CONFLICTO_CLIENTE, [d.cliente for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_OBRA_DESTINO, [d.obra_destino for d in documentos], _valores_compatibles),
-            (MotivoRevision.CONFLICTO_ORIGEN, [d.origen for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_ORIGEN, [], lambda _valores, _c=hay_conflicto_origen: not _c),
             (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos], _valores_compatibles),

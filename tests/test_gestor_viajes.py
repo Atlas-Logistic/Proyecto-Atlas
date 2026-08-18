@@ -199,9 +199,21 @@ def test_otros_campos_de_conflicto_no_cambian_su_comparacion():
 
 
 def test_origen_opcional_contradictorio_activa_revision():
+    """`origen=...` (columna sintética, nunca existió en el esquema real)
+    reemplazado por los campos reales que sí llegan de
+    `analisis_completo_guias.csv` -- mismo escenario, misma fuente
+    (DOCUMENTO en ambos, mismo nivel de jerarquía) pero plantas distintas."""
     filas = [
-        _fila(archivo="a.jpg", origen="PLANTA NORTE"),
-        _fila(archivo="b.jpg", origen="PLANTA SUR"),
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-NORTE", planta_origen_nombre="PLANTA NORTE",
+            origen_determinado_por="DOCUMENTO",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-SUR", planta_origen_nombre="PLANTA SUR",
+            origen_determinado_por="DOCUMENTO",
+        ),
     ]
     viajes, _ = agrupar_viajes(filas)
     assert MotivoRevision.CONFLICTO_ORIGEN in viajes[0].motivos_revision
@@ -210,7 +222,9 @@ def test_origen_opcional_contradictorio_activa_revision():
 def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
     filas = [
         _fila(
-            archivo="a.jpg", origen="ORIGEN BASE",
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-BASE", planta_origen_nombre="ORIGEN BASE",
+            origen_determinado_por="DOCUMENTO",
             hora_entrada_aza="07:00", hora_salida_aza="08:00",
         ),
         _fila(
@@ -220,7 +234,8 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
             rut_chofer="9.999.999-9",
             cliente="OTRO CLIENTE",
             obra_destino="OTRA OBRA",
-            origen="OTRO ORIGEN",
+            planta_origen_id="PLANTA-OTRA", planta_origen_nombre="OTRO ORIGEN",
+            origen_determinado_por="DOCUMENTO",
             patente_tracto="ZZZZ99",
             patente_rampla="YYYY88",
             hora_entrada_aza="09:00", hora_salida_aza="10:00",
@@ -236,6 +251,223 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
         MotivoRevision.DOCUMENTO_REQUIERE_REVISION,
     }
     assert len(viaje.a_dict()["evidencias_documentos"]) == 2
+
+
+# ---- Bloque ORIGEN DE VIAJE: consolidación jerárquica GPS > documento ----
+
+
+def test_origen_dos_documentos_gps_misma_planta_sin_conflicto():
+    """CASO 1: dos documentos confirman la misma planta por GPS -- el
+    viaje la usa, sin conflicto."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_nombre == "AZA COLINA"
+    assert viaje.origen_determinado_por == "TELEMETRIA_GPS"
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origen_gps_gana_sobre_documental_distinto_sin_degradarse():
+    """CASO 2 (y CASO REAL, estructuralmente equivalente a 0000351135,
+    sin hardcodear guía/transporte/planta reales): un documento confirma
+    por GPS, el otro cae al respaldo documental con una planta distinta
+    (p. ej. porque su propia patente no permitió ubicar el vehículo) -- el
+    viaje debe conservar la planta GPS, nunca degradarse a la documental."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-GPS", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-DOC", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="DOCUMENTO",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_id == "PLANTA-GPS"
+    assert viaje.planta_origen_nombre == "AZA COLINA"
+    assert viaje.origen_determinado_por == "TELEMETRIA_GPS"
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origen_dos_gps_distintos_genera_conflicto_real():
+    """CASO 3: dos documentos, ambos confirmados por GPS, pero en plantas
+    distintas -- conflicto real, ninguna se elige arbitrariamente."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-B", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_nombre == ""
+    assert MotivoRevision.CONFLICTO_ORIGEN in viaje.motivos_revision
+
+
+def test_origen_sin_gps_documentos_coinciden_usa_origen_documental():
+    """CASO 4: sin evidencia GPS en ningún documento, pero todos los
+    orígenes documentales coinciden -- el viaje usa ese origen común, con
+    fuente DOCUMENTO."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="DOCUMENTO",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="DOCUMENTO",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_nombre == "AZA RENCA"
+    assert viaje.origen_determinado_por == "DOCUMENTO"
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origen_sin_gps_documentos_discrepan_genera_conflicto():
+    """CASO 5: sin GPS, orígenes documentales discrepan -- conflicto real."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="DOCUMENTO",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-B", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="DOCUMENTO",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_nombre == ""
+    assert MotivoRevision.CONFLICTO_ORIGEN in viaje.motivos_revision
+
+
+def test_origen_un_documento_sin_origen_otro_con_gps_usa_gps():
+    """CASO 6: un documento no tiene origen resuelto en absoluto (campos
+    vacíos), el otro sí lo confirma por GPS -- el viaje usa el GPS, el
+    documento vacío no impide ni degrada la consolidación."""
+    filas = [
+        _fila(archivo="a.jpg"),  # sin planta_origen_id/nombre/determinado_por
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_nombre == "AZA COLINA"
+    assert viaje.origen_determinado_por == "TELEMETRIA_GPS"
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origen_ningun_documento_resuelve_queda_no_determinado():
+    """CASO 7: ningún documento del viaje tiene origen -- el viaje queda
+    honestamente sin determinar, sin conflicto (no hay nada que comparar)."""
+    filas = [_fila(archivo="a.jpg"), _fila(archivo="b.jpg")]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.planta_origen_id == ""
+    assert viaje.planta_origen_nombre == ""
+    assert viaje.origen_determinado_por == ""
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origen_diferencias_de_formato_en_id_no_crean_conflicto_falso():
+    """Negativo: el mismo identificador de planta con diferencias de
+    mayúsculas/espacios (ruido de formato, nunca de identidad real) no
+    genera un conflicto -- la comparación usa la misma normalización
+    canónica ya usada para el resto de campos de este módulo."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="planta-colina", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="  PLANTA-COLINA  ", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origen_no_se_hereda_entre_viajes_distintos():
+    """Negativo: dos transportes distintos, cada uno con su propio origen
+    -- nunca se mezclan ni se hereda evidencia de un viaje a otro."""
+    filas = [
+        _fila(
+            archivo="a.jpg", numero_transporte="00002001",
+            planta_origen_id="PLANTA-A", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+        _fila(
+            archivo="b.jpg", numero_transporte="00002002",
+            planta_origen_id="PLANTA-B", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert len(viajes) == 2
+    por_transporte = {v.numero_transporte: v for v in viajes}
+    assert por_transporte["00002001"].planta_origen_nombre == "AZA COLINA"
+    assert por_transporte["00002002"].planta_origen_nombre == "AZA RENCA"
+    for viaje in viajes:
+        assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+
+
+def test_origenes_lista_auditoria_ahora_refleja_las_plantas_reales_vistas():
+    """`Viaje.origenes` (lista de auditoría, todas las plantas distintas
+    vistas en los documentos del viaje -- nunca el origen ya resuelto del
+    viaje) dependía de la misma columna inexistente que `CONFLICTO_ORIGEN`
+    -- confirma que ahora sí refleja los valores reales, incluso cuando el
+    origen consolidado del viaje (jerarquía GPS) elige sólo uno de ellos."""
+    filas = [
+        _fila(
+            archivo="a.jpg",
+            planta_origen_id="PLANTA-GPS", planta_origen_nombre="AZA COLINA",
+            origen_determinado_por="TELEMETRIA_GPS",
+        ),
+        _fila(
+            archivo="b.jpg",
+            planta_origen_id="PLANTA-DOC", planta_origen_nombre="AZA RENCA",
+            origen_determinado_por="DOCUMENTO",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert set(viaje.origenes) == {"AZA COLINA", "AZA RENCA"}
+    # ... pero el origen consolidado del viaje sigue siendo el de GPS, no una mezcla.
+    assert viaje.planta_origen_nombre == "AZA COLINA"
 
 
 def test_ausencia_no_copia_valor_ni_genera_conflicto():

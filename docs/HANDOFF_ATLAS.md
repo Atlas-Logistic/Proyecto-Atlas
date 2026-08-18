@@ -949,3 +949,18 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Qué debe decidir Javier ahora:** revisar este diagnóstico; decidir si autoriza el bloque de consolidación de origen por viaje (incluye reparar `CONFLICTO_ORIGEN`); qué hacer con el resto de hallazgos pendientes (relectura focal de RUT para cliente `464265`, demás hallazgos del lote de 15).
 - **Git:** sin commit, sin push de este bloque -- Javier pidió revisar primero.
 - **Estado: DIAGNÓSTICO PLANTA / RUTAS / KILÓMETROS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18 — Bloque ORIGEN DE VIAJE: consolidación jerárquica + `CONFLICTO_ORIGEN` reparado
+
+- **Publicado antes de empezar:** diagnóstico de origen/rutas/km en `51fa504`, verificado local=remoto, working tree limpio. Desktop verificado sin tocar, HEAD `fba95ac`.
+- **Objetivo:** el origen se resolvía documento por documento -- un documento cuya propia patente impedía confirmarse por GPS podía degradar en silencio el origen ya confirmado por su documento hermano del mismo viaje. Se corrigió, y de paso se reparó `CONFLICTO_ORIGEN`, que nunca podía dispararse (comparaba una columna inexistente).
+- **Regla implementada:** entre los documentos de un viaje con origen presente, se usa sólo la fuente más confiable disponible (GPS siempre gana sobre documento); si esos coinciden en la misma planta, esa es la del viaje; si discrepan entre sí (mismo nivel de confianza), es conflicto real, nunca se elige a ciegas. Documentos sin origen no impiden ni degradan la consolidación de los demás.
+- **Caso real validado, sin hardcodear nada:** el viaje ya conocido (mismo transporte de `464264`/`464265`) pasa de origen vacío (perdido por la discrepancia) a mostrar correctamente la planta ya confirmada por GPS.
+- **12 tests nuevos/actualizados.** Suite completa: **1235 passed, 0 failed** (baseline 1225 + 10).
+- **Validado con los 38 viajes reales:** sólo 1 viaje cambia (el caso ya conocido). Cero conflictos nuevos, cero conflictos falsos.
+- **Impacto directo en kilómetros: ninguno todavía** -- este fix corrige cómo se consolida el origen ya calculado, no recalcula rutas. Deja al viaje corregido con la base necesaria (no suficiente) para que un futuro bloque de destino/ruta pueda intentar calcularla.
+- **Desktop:** no necesita ningún cambio -- ya lee las mismas columnas que este fix corrigió, mostrará el origen correcto en cuanto se reprocese el dato real (no se hizo en este bloque).
+- **Drive:** no modificado. **Git:** working tree con `atlas_core/gestor_viajes.py` y `tests/test_gestor_viajes.py` modificados. **Sin commit, sin push -- Javier pidió revisar antes.**
+- **Próximo paso recomendado, no iniciado:** investigar el umbral de "tramo sustancial" de Onelogis que bloquea la desambiguación de destino por GPS -- causa dominante de kilómetros faltantes ya identificada, independiente de este fix.
+- **Qué debe decidir Javier ahora:** revisar y autorizar publicar (commit + push) este fix; si prioriza el siguiente frente (destino/umbral Onelogis) o el resto de hallazgos pendientes (relectura focal de RUT para cliente `464265`, demás hallazgos del lote de 15).
+- **Estado: FIX ORIGEN DE VIAJE + CONFLICTO_ORIGEN VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**

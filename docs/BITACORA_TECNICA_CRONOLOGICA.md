@@ -2859,3 +2859,88 @@ Consolidar la resolución de planta de origen a nivel de **viaje completo**, no 
 **Drive:** no modificado -- bloque 100% lectura directa, sin copias a TEMP, sin llamadas a ORS/Onelogis. **Desktop:** no modificado. **Git:** sin commit, sin push de FASE B.
 
 **Estado: DIAGNÓSTICO PLANTA / RUTAS / KILÓMETROS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## 2026-08-18 — Bloque ORIGEN DE VIAJE: consolidación jerárquica de planta de origen + reparación de `CONFLICTO_ORIGEN`
+
+**Publicación previa (FASE 0):** commit `51fa504` ("docs: registrar diagnostico de origen rutas y kilometros") -- 3 archivos exactos (tres bitácoras). Push sin force: `3929174..51fa504`. Post-push: local `51fa504` == remoto `51fa504`, working tree limpio. Desktop verificado sin tocar: HEAD `fba95ac`.
+
+**Checkpoint verificado antes de tocar código:** Motor HEAD `51fa504`, local=remoto, working tree limpio.
+
+### 1. Esquema real de origen que llega a `gestor_viajes.py` -- auditado antes de implementar
+
+Confirmado en `DocumentoViaje` (`atlas_core/gestor_viajes.py:146-197`, ya existente, sin cambios de estructura): cada documento ya trae `planta_origen_id`, `planta_origen_nombre`, `origen_determinado_por` (valores reales observados: `"TELEMETRIA_GPS"`, `"DOCUMENTO"`, o vacío), `evidencia_origen` -- **valor y fuente ya están separados en el modelo actual**, no hizo falta ninguna columna nueva (cumple la sección 6 del bloque: "si hoy el modelo ya tiene una fuente equivalente, reutilizarla"). El único campo roto era `DocumentoViaje.origen` (ver sección 2).
+
+### 2. Causa raíz de `CONFLICTO_ORIGEN`, confirmada con precisión
+
+`atlas_core/gestor_viajes.py:471` (antes del fix): `origen = str(fila.get("origen", fila.get("planta_origen", "")))`. Ni `"origen"` ni `"planta_origen"` existen como nombre de columna en `analisis_completo_guias.csv` -- la columna real es `planta_origen_nombre` (leída correctamente, por separado, dos líneas más abajo hacia `DocumentoViaje.planta_origen_nombre`). Consecuencia: `DocumentoViaje.origen` siempre cadena vacía para cualquier documento real, y `MotivoRevision.CONFLICTO_ORIGEN` (línea 568, comparaba `[d.origen for d in documentos]` vía `_valores_compatibles`) nunca tenía evidencia con la cual comparar -- nunca se disparaba. Mismo problema heredado por `Viaje.origenes` (línea 224, lista de auditoría de todas las plantas distintas vistas en los documentos del viaje, también siempre vacía) y por la columna `"origenes"` de `viajes.csv` (`reporte_viajes.py:75,257`).
+
+### 3. Regla de consolidación implementada -- derivada del modelo real, no adoptada literalmente
+
+Nueva función módulo `_resolver_origen_viaje(documentos) -> tuple[str, str, str, str, bool]` (`atlas_core/gestor_viajes.py`, justo después de `DocumentoViaje`):
+
+1. Sólo participan documentos con origen presente (`planta_origen_id` y `planta_origen_nombre` no vacíos, vía `_valor_presente` ya existente) -- un documento sin origen no impide ni degrada la consolidación de los demás (mismo criterio ya usado en `_campo_ruta_consolidado` para el resto de campos de ruta).
+2. Nueva tabla `_JERARQUIA_FUENTE_ORIGEN = {"TELEMETRIA_GPS": 0, "ONELOGIS_GPS": 0, "DOCUMENTO": 1}` (`"ONELOGIS_GPS"` incluida por si se conecta en el futuro un proveedor real al puerto de `atlas_core/rutas/enriquecimiento_viaje.py`, hoy sin adaptador real -- ver diagnóstico anterior; cualquier fuente no listada queda al final, nivel 99). Entre los documentos con origen presente, se conserva sólo la fuente de MEJOR nivel (menor número) disponible en ese viaje.
+3. Si todos los documentos de esa mejor fuente coinciden en la misma planta -- comparados por `planta_origen_id` normalizado vía `_clave_normalizada` (la misma función NFKD+casefold ya usada para el resto de comparaciones de este archivo, nunca una lista nueva) -- el viaje usa esa planta, con esa fuente y la evidencia (`evidencia_origen`) del documento que la aportó.
+4. Si discrepan entre sí (mismo nivel de confianza, plantas distintas), es conflicto real -- nunca se elige una arbitrariamente.
+5. Sin ningún documento con origen presente, el viaje queda sin determinar, igual que antes.
+
+**Este único algoritmo cubre los 6 casos pedidos (A-F) sin ramas separadas:** dos GPS coincidentes (A) → mejor nivel único, un solo id; GPS vs. documento discrepante (D) → mejor nivel = sólo GPS, el documento queda excluido del cálculo, sin voto; dos GPS discrepantes (B) → mismo nivel, dos ids → conflicto; sin GPS, documentos coinciden (C) → mejor nivel = DOCUMENTO, un solo id; sin GPS, documentos discrepan (E) → mismo nivel, dos ids → conflicto; ningún origen (F) → sin candidatos, sin conflicto.
+
+**`Viaje.planta_origen_id`/`planta_origen_nombre`/`origen_determinado_por`/`evidencia_origen`** (líneas 401-421): reemplazadas de `self._campo_ruta_consolidado(campo)` (exige coincidencia exacta entre TODOS los documentos, igual que el resto de campos de ruta) a `_resolver_origen_viaje(self.documentos)` -- única diferencia de comportamiento respecto al resto de campos de ruta (destino, distancia, etc., que **no se tocaron**, siguen exigiendo coincidencia exacta sin jerarquía, tal como pidió la sección 10 del bloque: "no tocar destino todavía").
+
+**`campos_conflicto` en `agrupar_viajes()`** (línea ~659): la entrada de `CONFLICTO_ORIGEN` pasa de `([d.origen for d in documentos], _valores_compatibles)` (roto) a `([], lambda _valores, _c=hay_conflicto_origen: not _c)`, con `hay_conflicto_origen` calculado una sola vez por grupo, vía la misma `_resolver_origen_viaje(documentos)` -- sin duplicar la lógica de jerarquía.
+
+**`_documento_desde_fila()`** (línea 471): `origen` corregido para leer la columna real `planta_origen_nombre` -- arregla de raíz tanto `Viaje.origenes` como la columna `"origenes"` de `viajes.csv`, ambas ahora reflejan las plantas realmente vistas en los documentos (lista de auditoría cruda, nunca el origen ya resuelto por jerarquía -- ver test dedicado).
+
+### 4. Caso real 0000351135 -- sin hardcodear guía, transporte ni planta en el código
+
+Ningún literal `464264`/`464265`/`0000351135`/`AZA COLINA`/`AZA RENCA` aparece en `atlas_core/gestor_viajes.py` -- sólo en comentarios explicativos (mismo patrón ya establecido en todo este proyecto) y en la validación real contra datos (sección 6). La regla es completamente general.
+
+### 5. Tests (`tests/test_gestor_viajes.py`)
+
+**2 tests existentes corregidos** (usaban `origen="..."` -- una columna sintética que nunca existió en el esquema real, sólo coincidía por casualidad con la clave literal del diccionario de prueba): `test_origen_opcional_contradictorio_activa_revision`, `test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia` -- reescritos con `planta_origen_id`/`planta_origen_nombre`/`origen_determinado_por` reales, misma intención de cada test preservada.
+
+**10 tests nuevos**, uno por caso pedido + negativos:
+- `test_origen_dos_documentos_gps_misma_planta_sin_conflicto` (CASO 1)
+- `test_origen_gps_gana_sobre_documental_distinto_sin_degradarse` (CASO 2, estructuralmente equivalente al caso real, sin hardcodear valores reales)
+- `test_origen_dos_gps_distintos_genera_conflicto_real` (CASO 3)
+- `test_origen_sin_gps_documentos_coinciden_usa_origen_documental` (CASO 4)
+- `test_origen_sin_gps_documentos_discrepan_genera_conflicto` (CASO 5)
+- `test_origen_un_documento_sin_origen_otro_con_gps_usa_gps` (CASO 6)
+- `test_origen_ningun_documento_resuelve_queda_no_determinado` (CASO 7)
+- `test_origen_diferencias_de_formato_en_id_no_crean_conflicto_falso` (negativo: mayúsculas/espacios en el ID no generan conflicto falso)
+- `test_origen_no_se_hereda_entre_viajes_distintos` (negativo: aislamiento entre transportes distintos)
+- `test_origenes_lista_auditoria_ahora_refleja_las_plantas_reales_vistas` (confirma el arreglo de `Viaje.origenes`/columna `"origenes"`, distinto del origen ya resuelto por jerarquía)
+
+Suite focalizada: `tests/test_gestor_viajes.py` -- 65 passed. Grupo consolidación/rutas/telemetría (`test_reporte_viajes.py`, `test_generar_reporte_viajes_cli.py`, `test_rutas_enriquecimiento_viaje.py`, `test_rutas_modelos.py`, `test_rutas_repositorio.py`, `test_rutas_servicio.py`, `test_operacion_real_r1.py`, `test_operacion_real_r1_1.py`, `test_telemetria_t1/t2/t3.py`) -- 207 passed. **Suite completa: 1235 passed, 0 failed** (baseline 1225 + 10).
+
+### 6. Validación real contra los 38 viajes vigentes (100% lectura, `agrupar_viajes()` real sobre `analisis_completo_guias.csv` ya promovido, sin mocks)
+
+Comparación con `git stash` temporal de sólo `atlas_core/gestor_viajes.py` (aísla exclusivamente el efecto de este fix):
+
+| | Antes | Después |
+|---|---|---|
+| Viajes con origen resoluble | 32/38 | 33/38 |
+| Viajes con `CONFLICTO_ORIGEN` | 0/38 | 0/38 |
+
+**Único viaje que cambia** (matriz before/after completa, sin ocultar nada):
+
+| Transporte | Guías | Origen antes | Fuente antes | Origen después | Fuente después | Motivo |
+|---|---|---|---|---|---|---|
+| `0000351135` | `464264`, `464265` | `""` (vacío) | `""` | `AZA COLINA` | `TELEMETRIA_GPS` | Antes, dos documentos con planta distinta (uno GPS, otro documento) hacían que la coincidencia exacta exigida por `_campo_ruta_consolidado` fallara y quedara vacío. Ahora, la jerarquía descarta el valor documental (nivel inferior) y usa el único valor de mejor nivel disponible (GPS) -- sin conflicto, porque sólo hay un candidato en el nivel ganador. |
+
+**Cero conflictos nuevos, cero conflictos falsos** -- ningún otro de los 38 viajes cambió de estado, y `CONFLICTO_ORIGEN` sigue en 0 (el único caso real conocido se resuelve por jerarquía, no por conflicto, porque las dos fuentes no son de igual nivel de confianza).
+
+### 7. Impacto en rutas/km -- medido, no asumido
+
+No se recalculó ninguna ruta ni se llamó a ORS/Onelogis. `distancia_km`/`estado_ruta`/`motivo_ruta` a nivel de viaje siguen usando `_campo_ruta_consolidado` sin cambios (fuera de alcance de este bloque, sección 10). El viaje `0000351135` sigue sin kilómetros a nivel de viaje después de este fix -- los documentos `464264`/`464265` ya traían `estado_ruta`/`distancia_km` distintos entre sí ANTES de este bloque (documento por documento, sin relación con el origen), así que la consolidación de ruta seguía exigiendo coincidencia exacta y quedaba vacía, exactamente igual que antes. **Impacto directo en kilómetros de este bloque: 0 viajes adicionales con km.** El valor de este fix es que el viaje `0000351135` ahora tiene, por primera vez, un origen de viaje confiable y auditable -- prerrequisito necesario (no suficiente) para que un futuro bloque de consolidación de ruta/destino pueda intentar recalcularla con esa base.
+
+### 8. Desktop -- verificado sin modificar
+
+`src/atlas_viajes.html` lee `planta_origen_nombre` directamente de `viajes.csv` (columna generada por `reporte_viajes.py` a partir de `Viaje.planta_origen_nombre`, la propiedad corregida en este bloque) -- **no requiere ningún cambio de presentación**: en cuanto el dato real se reprocese (no se hizo en este bloque), Desktop mostrará el origen corregido automáticamente con el código ya existente.
+
+**Drive:** no modificado -- validación 100% contra datos ya promovidos, sin escribir nada, sin llamadas a ORS/Onelogis. **Desktop:** no modificado. **Git:** Motor con `atlas_core/gestor_viajes.py` y `tests/test_gestor_viajes.py` modificados. Sin commit, sin push de este bloque. Desktop sin cambios, HEAD `fba95ac`.
+
+**Próximo paso recomendado (no iniciado, debe confirmarse con evidencia, no asumirse):** investigar el umbral de "tramo sustancial" (`>=5.0 km`) que bloquea la desambiguación de destino por GPS -- causa dominante de kilómetros faltantes ya identificada en el bloque de diagnóstico anterior (6/15 guías del lote más reciente), independiente de este fix de origen.
+
+**Estado: FIX ORIGEN DE VIAJE + CONFLICTO_ORIGEN VALIDADO -- LISTO PARA REVISIÓN CON JAVIER.**
