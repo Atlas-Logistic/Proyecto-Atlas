@@ -1026,3 +1026,16 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Sin fix implementado.** Sin cambios de código, catálogos, Drive ni Desktop.
 - **Qué debe decidir Javier ahora:** si autoriza tratar los 7 casos A como resolubles automáticamente (o prefiere seguir pidiendo confirmación siempre); cómo debe verse la sugerencia con evidencia para los 6 casos B (concepto ya descrito, sin implementar UI); si vale la pena investigar un geocodificador complementario para los 2 casos con falla de cobertura confirmada.
 - **Estado: DIAGNÓSTICO DE DESTINOS AMBIGUOS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18 — Bloque RESOLUCIÓN SEGURA DE DESTINOS CLASE A (mecanismo general, validado, sin publicar)
+
+- **Mecanismo general nuevo** (`resolver_destino_ambiguo_con_evidencia_inequivoca`, `atlas_core/rutas/destino_entrega.py`): dos vías -- catálogo `destinos_maestros.json` `CONFIRMADO` con dirección exacta, y GPS (recorrido COMPLETO de la ventana, no sólo el último punto) que descarta a todos los rivales dentro del radio de 50 km YA EXISTENTE. **Cero umbrales nuevos inventados** -- todo reutiliza constantes ya calibradas y en producción.
+- **Escenario "brecha geográfica fuerte" (B en el diseño) deliberadamente NO implementado como regla independiente** -- calibrar ese umbral con sólo 7 casos habría sido inventar un número; los casos reales que lo necesitaban ya resuelven por la vía GPS existente sin él.
+- **Validado contra los 17 casos reales, sin tocar Drive:** **6 de 7 casos A resueltos automáticamente, 0 falsos positivos en los 10 B/C.** El 7º caso (Camino Lo Ruiz) se abstiene correctamente -- 4 de sus 5 candidatos caen dentro del margen "mismo lugar", ni catálogo ni GPS pueden decidir cuál casa exacta. **No se forzó el código para llegar a 7/7** -- se reporta tal cual, según instrucción explícita.
+- **Refactor puro sin regresión** en `seleccion_recorrido.py` (extrae `recolectar_puntos_ventana_origen()`, reutilizada por el mecanismo nuevo) -- 84/84 tests de telemetría en verde, comportamiento idéntico.
+- **18 tests nuevos. Suite completa: 1265 passed, 0 failed** (baseline 1247 + 18).
+- **0 llamadas ORS. Los 12 viajes con km válido no se tocaron** (código standalone, no conectado a producción todavía).
+- **Drive:** no modificado. **Desktop:** no modificado.
+- **Git:** working tree con `atlas_core/rutas/destino_entrega.py`, `atlas_core/telemetria/seleccion_recorrido.py`, `tests/test_desambiguacion_destino_inequivoca.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
+- **Qué debe decidir Javier ahora:** si autoriza publicar este mecanismo; si autoriza, en un bloque aparte, conectarlo al pipeline real SOLO para los casos que efectivamente resuelva (nunca forzando los B/C); qué hacer con el caso 7 que sigue necesitando confirmación humana pese a tener doble evidencia parcial.
+- **Estado: RESOLUCIÓN SEGURA DE DESTINOS CLASE A VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**

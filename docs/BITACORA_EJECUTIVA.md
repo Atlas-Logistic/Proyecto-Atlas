@@ -995,3 +995,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **No se implementó ningún fix.** No se tocó Drive, catálogos, ni Desktop.
 - **Próximo paso recomendado:** decisión de Javier sobre cómo tratar los casos A (¿confiar en GPS+catálogo automáticamente, o seguir pidiendo confirmación?) y los B (diseñar la sugerencia con evidencia, sin adivinar).
 - **Estado: DIAGNÓSTICO DE DESTINOS AMBIGUOS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Bloque RESOLUCIÓN SEGURA DE DESTINOS CLASE A (mecanismo general, validado, sin publicar) -- 2026-08-18
+
+- **Publicado antes de empezar:** commit documental del diagnóstico anterior, push confirmado, limpio.
+- **Mecanismo general implementado** (`resolver_destino_ambiguo_con_evidencia_inequivoca`, nuevo): dos vías independientes, **sin inventar ningún umbral nuevo** -- reutiliza exclusivamente constantes/funciones ya calibradas y en producción (`MARGEN_MISMO_LUGAR_KM=1.0`, radio GPS `50.0` ya usado en `resolver_destino_entrega`). Vía A: catálogo `destinos_maestros.json` con estado `CONFIRMADO` (nunca `PENDIENTE`) y dirección exacta. Vía B: recorrido GPS COMPLETO de la ventana documental (no sólo el último punto, como hace hoy el mecanismo de producción) descarta a todos los rivales. Si ambas vías responden distinto, se abstiene -- nunca prioriza una fuente en silencio.
+- **Validado contra los 17 casos reales, sin tocar Drive:** **6 de los 7 casos A se resolvieron automáticamente, 0 falsos positivos entre los 6 B y 4 C** (los 10 siguen correctamente en abstención). El 7º caso A (candidatos casi idénticos, a metros entre sí) se abstiene correctamente -- ni el catálogo ni el GPS pueden distinguir CUÁL candidato exacto es el correcto, coincide con la regla explícita "candidatos cercanos entre sí: abstenerse". **No se forzó el código para llegar a 7/7.**
+- **18 tests nuevos** (11 controles negativos, 7 positivos). Suite completa: **1265 passed, 0 failed** (baseline 1247 + 18).
+- **0 llamadas a ORS** en todo el bloque -- selección de destino y cálculo de ruta quedan estrictamente separados, verificado con test dedicado.
+- **Los 12 viajes con km válido no fueron tocados** -- el mecanismo nuevo es código standalone, no está conectado todavía al pipeline de producción.
+- **Drive: no modificado.** **Desktop: no modificado.**
+- **Git:** working tree con `atlas_core/rutas/destino_entrega.py`, `atlas_core/telemetria/seleccion_recorrido.py` (refactor puro, sin cambio de comportamiento, 84 tests de telemetría siguen en verde) y `tests/test_desambiguacion_destino_inequivoca.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
+- **Próximo paso recomendado:** decisión de Javier sobre publicar este mecanismo y, en un bloque aparte, conectarlo al pipeline real (sólo para los casos que de verdad resuelva -- nunca forzando los B/C).
+- **Estado: RESOLUCIÓN SEGURA DE DESTINOS CLASE A VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**

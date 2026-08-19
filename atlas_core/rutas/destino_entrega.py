@@ -38,6 +38,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Iterable
 
+from atlas_core.catalogo_destinos import Destino
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
@@ -212,6 +213,199 @@ def descartar_candidatos_lejos_de_gps(
         if distancia_km_haversine(punto_gps, c.coordenadas) <= radio_maximo_km
     )
     return compatibles if compatibles else candidatos
+
+
+def _descartar_lejos_de_todo_el_recorrido(
+    candidatos: tuple[CandidatoGeocodificacion, ...],
+    puntos_gps: tuple[Coordenadas, ...],
+    radio_maximo_km: float,
+) -> tuple[CandidatoGeocodificacion, ...]:
+    """Variante de `descartar_candidatos_lejos_de_gps` para un RECORRIDO
+    completo (varios puntos, no un único `punto_gps_destino` elegido por
+    una ventana estrecha) -- conserva un candidato si está dentro del
+    radio de AL MENOS UNO de los puntos (evidencia de que el vehículo
+    pasó cerca en algún momento de la ventana documental), lo descarta
+    sólo si está lejos de TODOS. Mismo radio ya calibrado y en uso en
+    producción (`radio_gps_km`/`radio_gps_destino_km`, 50.0 km por
+    defecto) -- nunca un umbral nuevo. Misma garantía que la función que
+    generaliza: si el descarte deja la lista vacía o no hay puntos, se
+    conserva la lista original completa."""
+    if not puntos_gps or not candidatos:
+        return candidatos
+    compatibles = tuple(
+        c for c in candidatos
+        if any(distancia_km_haversine(p, c.coordenadas) <= radio_maximo_km for p in puntos_gps)
+    )
+    return compatibles if compatibles else candidatos
+
+
+def _destino_confirmado_coincide_texto(destino: Destino, despachar_a_crudo: str) -> bool:
+    """True si la CALLE del destino CONFIRMADO aparece literalmente
+    (normalizada, sin acentos/mayúsculas, nunca fuzzy) dentro del texto
+    documental crudo -- misma exigencia conservadora que el resto del
+    catálogo (`clave_fisica_destino` nunca es fuzzy). `direccion` en
+    `destinos_maestros.json` es "CALLE NÚMERO, COMUNA[, REGIÓN], PAÍS" (el
+    propio catálogo la persiste así, ver `migracion_excel_estudio_distancias`)
+    -- comparar la cadena COMPLETA fallaría siempre porque el documento
+    nunca repite la coletilla ", CHILE"; se usa sólo el primer segmento
+    (la calle+número, antes de la primera coma), que es la parte que
+    realmente identifica el punto físico. Una dirección vacía nunca
+    "coincide" con nada."""
+    calle = destino.direccion.split(",", 1)[0]
+    calle_normalizada = _texto_normalizado_sin_acentos(calle)
+    if not calle_normalizada:
+        return False
+    return calle_normalizada in _texto_normalizado_sin_acentos(despachar_a_crudo)
+
+
+def _candidato_respaldado_por_destino_confirmado(
+    destino: Destino, candidatos: tuple[CandidatoGeocodificacion, ...],
+) -> CandidatoGeocodificacion | None:
+    """Entre los candidatos de geocodificación, el que cae dentro de
+    `MARGEN_MISMO_LUGAR_KM` (ya calibrado, no nuevo) de las coordenadas
+    del destino confirmado -- sólo si es EXACTAMENTE uno (dos candidatos
+    igual de cerca del mismo destino confirmado no aportan evidencia de
+    cuál es el correcto; se abstiene)."""
+    if destino.latitud is None or destino.longitud is None:
+        return None
+    coordenada_destino = Coordenadas(destino.longitud, destino.latitud)
+    coincidencias = [
+        c for c in candidatos
+        if distancia_km_haversine(coordenada_destino, c.coordenadas) <= MARGEN_MISMO_LUGAR_KM
+    ]
+    return coincidencias[0] if len(coincidencias) == 1 else None
+
+
+VIA_CATALOGO_CONFIRMADO = "CATALOGO_CONFIRMADO"
+VIA_GPS_DESCARTA_RIVALES = "GPS_DESCARTA_RIVALES"
+
+
+@dataclass(frozen=True)
+class ResultadoDesambiguacionInequivoca:
+    """Resultado de intentar resolver, SIN adivinar, una ambigüedad de
+    destino ya declarada (`MULTIPLES_UBICACIONES_DISPERSAS`).
+    `resuelto=False` es siempre una abstención legítima -- nunca un
+    error ni un fallo del mecanismo; simplemente no hay evidencia
+    suficientemente fuerte para actuar sin consultar a un humano."""
+
+    resuelto: bool = False
+    candidato: CandidatoGeocodificacion | None = None
+    motivo: str = ""
+    vias: tuple[str, ...] = ()
+
+
+def resolver_destino_ambiguo_con_evidencia_inequivoca(
+    despachar_a_crudo: str,
+    candidatos_ambiguos: tuple[CandidatoGeocodificacion, ...],
+    *,
+    breadcrumbs: tuple[Coordenadas, ...] = (),
+    destinos_confirmados: Iterable[Destino] = (),
+    radio_gps_km: float = 50.0,
+) -> ResultadoDesambiguacionInequivoca:
+    """Bloque DESTINOS D1 -- intenta resolver, de forma general y sin
+    hardcodear ningún caso concreto, una ambigüedad de destino ya
+    declarada (`candidatos_ambiguos`: los candidatos de geocodificación
+    que `resolver_destino_entrega` no pudo colapsar a uno solo -- YA
+    filtrados por soporte textual, ver `_candidatos_con_soporte_textual`).
+
+    Principio (Javier, verbatim): "Atlas puede sugerir. Atlas no debe
+    adivinar." -- esta función SÓLO resuelve cuando la evidencia es
+    inequívoca; en cualquier otro caso se abstiene explícitamente
+    (`resuelto=False`), dejando `MULTIPLES_UBICACIONES_DISPERSAS`
+    intacto para que un humano decida. Nunca implementa "elegir el
+    candidato más cercano" como regla general -- eso sigue prohibido por
+    la regla de negocio del módulo.
+
+    Dos vías independientes, cada una reutilizando exclusivamente
+    mecanismos e infraestructura YA EXISTENTES y calibrados -- ningún
+    umbral nuevo se define en esta función:
+
+    **Vía A -- catálogo confirmado.** Si existe una entrada de
+    `destinos_maestros.json` con `estado_calidad=CONFIRMADO` (nunca
+    `PENDIENTE` -- una relación pendiente jamás autoriza una resolución
+    automática) cuya `direccion` aparece literalmente dentro del texto
+    documental (`_destino_confirmado_coincide_texto`, comparación exacta,
+    nunca fuzzy) Y cuyas coordenadas caen dentro de
+    `MARGEN_MISMO_LUGAR_KM` (ya calibrado en este mismo módulo) de
+    EXACTAMENTE un candidato de geocodificación -- ese candidato queda
+    resuelto. Si dos entradas confirmadas distintas respaldan candidatos
+    DISTINTOS, es un conflicto real -- se abstiene, nunca elige una al
+    azar.
+
+    **Vía B -- GPS descarta a todos los rivales.** Si se entrega el
+    recorrido GPS completo de la ventana documental (`breadcrumbs`,
+    TODOS los puntos disponibles -- nunca sólo el último punto de un
+    recorrido "sustancial" con ventana estrecha, ver limitación conocida
+    de T2/`seleccionar_recorrido_operacional` -- y nunca de otro
+    día/patente) y, al descartar por el radio YA EXISTENTE (`radio_gps_km`,
+    mismo valor que ya usan `resolver_destino_entrega`/
+    `calcular_ruta_con_planta_conocida`) contra CADA candidato, sobrevive
+    EXACTAMENTE uno -- ese candidato queda resuelto. Esto nunca es "el
+    más cercano": un candidato sobrevive por estar DENTRO del radio ya
+    calibrado, no por ser relativamente el mejor entre varios lejanos: si
+    dos o más candidatos sobreviven el descarte (todos dentro del radio,
+    aunque uno esté más cerca que otro), o si ninguno sobrevive (todos
+    fuera -- la función de descarte conserva la lista original completa,
+    ver `_descartar_lejos_de_todo_el_recorrido`), la función se abstiene.
+
+    Si ambas vías producen una respuesta y DISCREPAN entre sí, se
+    abstiene explícitamente (`CATALOGO_Y_GPS_DISCREPAN`) -- nunca se
+    prioriza una fuente sobre otra en silencio."""
+    if len(candidatos_ambiguos) < 2:
+        return ResultadoDesambiguacionInequivoca(motivo="NO_ES_UNA_AMBIGUEDAD_REAL")
+
+    texto = str(despachar_a_crudo or "").strip()
+    candidato_via_a: CandidatoGeocodificacion | None = None
+    conflicto_via_a = False
+    if texto:
+        for destino in destinos_confirmados:
+            if destino.estado_calidad != "CONFIRMADO" or destino.estado_vigencia != "ACTIVO":
+                continue
+            if not _destino_confirmado_coincide_texto(destino, texto):
+                continue
+            respaldado = _candidato_respaldado_por_destino_confirmado(destino, candidatos_ambiguos)
+            if respaldado is None:
+                continue
+            if candidato_via_a is not None and respaldado is not candidato_via_a:
+                conflicto_via_a = True
+            candidato_via_a = respaldado
+    if conflicto_via_a:
+        return ResultadoDesambiguacionInequivoca(
+            motivo="CONFLICTO_ENTRE_DESTINOS_CONFIRMADOS", vias=(VIA_CATALOGO_CONFIRMADO,)
+        )
+
+    candidato_via_b: CandidatoGeocodificacion | None = None
+    if breadcrumbs:
+        sobrevivientes = _descartar_lejos_de_todo_el_recorrido(
+            candidatos_ambiguos, breadcrumbs, radio_gps_km
+        )
+        if len(sobrevivientes) == 1 and len(sobrevivientes) < len(candidatos_ambiguos):
+            candidato_via_b = sobrevivientes[0]
+
+    if candidato_via_a is not None and candidato_via_b is not None:
+        if candidato_via_a is not candidato_via_b:
+            return ResultadoDesambiguacionInequivoca(
+                motivo="CATALOGO_Y_GPS_DISCREPAN",
+                vias=(VIA_CATALOGO_CONFIRMADO, VIA_GPS_DESCARTA_RIVALES),
+            )
+        return ResultadoDesambiguacionInequivoca(
+            resuelto=True, candidato=candidato_via_a,
+            motivo="CATALOGO_CONFIRMADO_Y_GPS_COINCIDEN",
+            vias=(VIA_CATALOGO_CONFIRMADO, VIA_GPS_DESCARTA_RIVALES),
+        )
+    if candidato_via_a is not None:
+        return ResultadoDesambiguacionInequivoca(
+            resuelto=True, candidato=candidato_via_a,
+            motivo="CATALOGO_CONFIRMADO_COINCIDE_GEOCODIFICACION",
+            vias=(VIA_CATALOGO_CONFIRMADO,),
+        )
+    if candidato_via_b is not None:
+        return ResultadoDesambiguacionInequivoca(
+            resuelto=True, candidato=candidato_via_b,
+            motivo="GPS_DESCARTA_TODO_RIVAL_FUERA_DE_RADIO",
+            vias=(VIA_GPS_DESCARTA_RIVALES,),
+        )
+    return ResultadoDesambiguacionInequivoca(motivo="SIN_EVIDENCIA_INEQUIVOCA")
 
 
 def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> CandidatoGeocodificacion:

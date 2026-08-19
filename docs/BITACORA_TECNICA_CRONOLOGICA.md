@@ -3138,3 +3138,49 @@ Ningún km nuevo fue calculado (0 llamadas ORS); nunca se reemplazó por distanc
 **Fix implementado:** NINGUNO. Sin cambios de código, catálogos, Drive ni Desktop en este bloque.
 
 **Estado: DIAGNÓSTICO DE DESTINOS AMBIGUOS COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Bloque RESOLUCIÓN SEGURA DE DESTINOS CLASE A (mecanismo general, validado, sin publicar) -- 2026-08-18
+
+**Checkpoint:** commit documental del diagnóstico previo publicado y verificado antes de empezar.
+
+**Auditoría previa (Fase 2, antes de escribir código):** se revisaron las funciones ya existentes reutilizables -- `descartar_candidatos_lejos_de_gps`/`_candidatos_son_el_mismo_lugar`/`_candidatos_con_soporte_textual` (`destino_entrega.py`), `resolver_planta_origen_gps` (`seleccion_recorrido.py`, ventana amplia ya calibrada pero interna/no reutilizable tal cual), `CatalogoDestinos`/`Destino` (`catalogo_destinos.py`, ya modela `destinos_maestros.json` con `estado_calidad`/coordenadas). No existía ningún mecanismo que combinara catálogo confirmado + recorrido GPS completo para desambiguar destino -- se construyó reutilizando estas piezas, sin duplicar ninguna.
+
+**Refactor puro (sin cambio de comportamiento) en `atlas_core/telemetria/seleccion_recorrido.py`:** se extrajo `recolectar_puntos_ventana_origen()` (nueva, pública) del cuerpo de `resolver_planta_origen_gps()` -- misma ventana temporal amplia ya calibrada (`margen_horas`), mismos trips/breadcrumbs, ahora expuesta para que otros consumidores de evidencia GPS la reutilicen sin volver a pedir red ni inventar una ventana nueva. `resolver_planta_origen_gps()` ahora LLAMA a esta función en vez de duplicar su lógica. Verificado sin regresión: 84/84 tests de telemetría/operación real en verde, comportamiento byte-idéntico.
+
+**Regla de seguridad implementada (Fase 3), evaluada explícitamente contra los 8 escenarios pedidos:**
+- **A (GPS + catálogo confirmado coinciden):** implementado -- Vía A y Vía B, si ambas responden, deben coincidir o se abstiene.
+- **B (separación geográfica muy fuerte):** **NO implementado como regla independiente** -- calibrar "qué tan fuerte es fuerte" (¿3x? ¿10x? ¿20 km de margen absoluto?) con sólo 7 casos reales de referencia es exactamente lo que la instrucción prohíbe inventar. En cambio, los casos reales que mostraban esta separación (region-level: 5x-14x) ya se resuelven correctamente por la Vía B (descarte GPS con el radio de 50 km YA EXISTENTE) sin necesitar ningún umbral nuevo -- ver resultado abajo.
+- **C (comuna/región documental descarta rivales):** ya cubierto por infraestructura existente reutilizada tal cual (`_candidatos_con_soporte_textual`, aplicado ANTES de que esta función reciba los candidatos) -- no se agregó nada nuevo.
+- **D (convergencia de 2+ fuentes):** propiedad emergente de ejecutar Vía A y Vía B y exigir que coincidan -- sin regla especial adicional.
+- **E/F/G/H (candidatos cercanos, GPS lejos de todos, sólo histórico PENDIENTE, sólo "más cercano" sin margen):** cubiertos como abstención explícita en el diseño -- ver controles negativos.
+
+**Diseño final (`resolver_destino_ambiguo_con_evidencia_inequivoca`, `atlas_core/rutas/destino_entrega.py`):**
+- **Vía A -- catálogo confirmado:** busca en `destinos_maestros.json` (vía `CatalogoDestinos`) una entrada `estado_calidad=CONFIRMADO` + `estado_vigencia=ACTIVO` cuya CALLE (primer segmento antes de la coma del campo `direccion` -- el catálogo real persiste `"CALLE NUMERO, COMUNA, PAIS"`, comparar la cadena completa fallaría siempre porque el documento nunca repite ", CHILE"; hallazgo encontrado y corregido durante la validación real, ver abajo) aparece literalmente en el texto documental, Y cuyas coordenadas caen dentro de `MARGEN_MISMO_LUGAR_KM` (1.0 km, ya existente) de EXACTAMENTE un candidato de geocodificación. Dos destinos confirmados que respaldan candidatos distintos → conflicto, abstención.
+- **Vía B -- GPS descarta rivales:** nueva `_descartar_lejos_de_todo_el_recorrido()` (variante de `descartar_candidatos_lejos_de_gps` para múltiples puntos en vez de uno solo) -- conserva un candidato si está dentro del radio YA EXISTENTE (`radio_gps_km=50.0`, mismo valor que `resolver_destino_entrega`) de AL MENOS UN punto del recorrido documental completo (obtenido con `recolectar_puntos_ventana_origen`, no sólo el último punto de un recorrido "sustancial"). Resuelve sólo si sobrevive EXACTAMENTE uno.
+- Si ambas vías responden y discrepan → abstención explícita (`CATALOGO_Y_GPS_DISCREPAN`), nunca se prioriza una fuente en silencio.
+- Nunca toca `distancia_km`/ORS -- separación estricta entre selección de destino y routing (verificado con test dedicado).
+
+**18 tests nuevos** (`tests/test_desambiguacion_destino_inequivoca.py`): 11 controles negativos (dos candidatos GPS casi equivalentes, candidatos agrupados a pocos km sin catálogo, GPS lejos de todos, catálogo `PENDIENTE`, dirección histórica repetida sin evidencia propia, candidato fuera de la comuna correcta, ausencia de GPS, breadcrumbs insuficientes, múltiples candidatos aún plausibles, dos destinos confirmados en conflicto, catálogo y GPS discrepan) + 7 controles positivos (GPS+catálogo coinciden, brecha geográfica inequívoca sólo-GPS, evidencia canónica convergente sólo-catálogo, catálogo no relacionado nunca se usa, formato real del catálogo calle/comuna/país, separación estricta de routing). Suite completa: **1265 passed, 0 failed** (baseline 1247 + 18).
+
+**Validación real sobre los 17 casos (TEMP, sin escribir Drive, usando `ProveedorTelemetriaSoloCache` -- 0 llamadas Onelogis, 0 llamadas ORS):**
+
+| Transporte | Clase previa | Resultado del mecanismo | Vía |
+|---|---|---|---|
+| 0000351884 | A | **RESUELTO** | GPS descarta rivales (región) |
+| 0000352449 | A | **RESUELTO** | Catálogo confirmado |
+| 0000352802 | A | **RESUELTO** | Catálogo confirmado |
+| 0000352780 | A | **RESUELTO** | Catálogo confirmado |
+| 0000353055 | A | **RESUELTO** | GPS descarta rivales (región) |
+| 0000353091 | A | **RESUELTO** | Catálogo confirmado |
+| 0000352241 | A | Abstención | 4/5 candidatos dentro de `MARGEN_MISMO_LUGAR_KM` del punto confirmado -- ambigüedad real de casa exacta, ni catálogo ni GPS distinguen cuál |
+| 10 casos B/C | B/C | Abstención (los 10) | -- |
+
+**Resumen: 6/7 casos A resueltos automáticamente, 0/10 falsos positivos entre B y C.** El 7º caso no se forzó -- se reporta la abstención tal cual, consistente con la instrucción explícita de priorizar seguridad sobre alcanzar la cifra esperada.
+
+**Regresión:** los 12 viajes con km válido no fueron tocados -- el mecanismo nuevo es código standalone (no conectado a `procesamiento_masivo.py` ni a ningún flujo de escritura), verificado además por mtime de Drive sin cambios al cierre del bloque.
+
+**Desktop:** no modificado; no aplica todavía verificación de esquema (nada se persiste aún).
+
+**Drive:** no modificado (mtimes de `analisis_completo_guias.csv`, `destinos_maestros.json`, `telemetria_cache.json`, `geocodificacion_cache.json` y `estado_operacion.json` verificados idénticos al inicio del bloque). **Git:** working tree con `atlas_core/rutas/destino_entrega.py`, `atlas_core/telemetria/seleccion_recorrido.py`, `tests/test_desambiguacion_destino_inequivoca.py`. Sin commit, sin push.
+
+**Estado: RESOLUCIÓN SEGURA DE DESTINOS CLASE A VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**

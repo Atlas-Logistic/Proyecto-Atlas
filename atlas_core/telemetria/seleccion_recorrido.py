@@ -19,7 +19,7 @@ final de un trip a ~20 m del punto inicial del siguiente) -- ver
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Iterable
 
@@ -595,6 +595,75 @@ def _resolver_planta_para_detencion(
     )
 
 
+@dataclass(frozen=True)
+class RecoleccionVentanaOrigen:
+    """Resultado puro (sin decidir nada) de recolectar trips/breadcrumbs en
+    la ventana amplia ya usada por `resolver_planta_origen_gps` -- expuesto
+    para que otros consumidores de evidencia GPS (p. ej. desambiguación de
+    destino, Bloque DESTINOS D1) reutilicen EXACTAMENTE la misma ventana ya
+    calibrada, sin inventar una nueva ni volver a pedir red. `motivo` sólo
+    se puebla cuando la recolección se abstuvo (tuplas vacías)."""
+
+    trips: tuple[ViajeTelemetria, ...] = ()
+    breadcrumbs_por_trip: "dict[str, tuple[PosicionTelemetria, ...]]" = field(default_factory=dict)
+    puntos: tuple[PosicionTelemetria, ...] = ()
+    motivo: str = ""
+
+
+def recolectar_puntos_ventana_origen(
+    servicio: ServicioTelemetria,
+    *,
+    patente: str,
+    fecha: date,
+    hora_entrada: datetime | None,
+    hora_salida: datetime | None,
+    margen_horas: float = MARGEN_HORAS_PLANTA_PREDETERMINADO,
+) -> RecoleccionVentanaOrigen:
+    """Recolecta TODOS los trips y breadcrumbs dentro de la ventana amplia
+    `[hora_entrada, hora_salida] ± margen_horas` -- misma ventana ya
+    calibrada y en uso por `resolver_planta_origen_gps` (Fase B/C), nunca
+    reducida a un único punto por un filtro de distancia mínima (ver
+    limitación conocida de T2/`seleccionar_recorrido_operacional`, Bloque
+    OPERACIÓN REAL R1). Se abstiene explícitamente (motivo poblado, tuplas
+    vacías) sin hora documental o sin histórico en la ventana -- nunca
+    inventa evidencia ni toca breadcrumbs de otro día/patente."""
+    anclas = [instante for instante in (hora_entrada, hora_salida) if instante is not None]
+    if not anclas:
+        return RecoleccionVentanaOrigen(motivo="SIN_HORA_DOCUMENTAL")
+    ancla_desde, ancla_hasta = min(anclas), max(anclas)
+
+    resultado_viajes = servicio.buscar_viajes(patente, fecha, fecha)
+    if resultado_viajes.estado not in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
+        return RecoleccionVentanaOrigen(motivo=resultado_viajes.estado.value)
+
+    margen = timedelta(hours=margen_horas)
+    ventana_desde, ventana_hasta = ancla_desde - margen, ancla_hasta + margen
+    cercanos = []
+    for viaje in resultado_viajes.viajes:
+        inicio = _instante(viaje.inicio)
+        fin = _instante(viaje.fin)
+        if inicio is None or fin is None:
+            continue
+        if fin >= ventana_desde and inicio <= ventana_hasta:
+            cercanos.append(viaje)
+    if not cercanos:
+        return RecoleccionVentanaOrigen(motivo="SIN_TRIPS_EN_VENTANA_TEMPORAL")
+
+    cercanos_ordenados = sorted(cercanos, key=lambda v: _instante(v.inicio) or datetime.min)
+    breadcrumbs_por_trip: dict[str, tuple[PosicionTelemetria, ...]] = {}
+    puntos: list[PosicionTelemetria] = []
+    for viaje in cercanos_ordenados:
+        resultado_bc = servicio.obtener_breadcrumbs(viaje.proveedor_trip_id)
+        if resultado_bc.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
+            breadcrumbs_por_trip[viaje.proveedor_trip_id] = resultado_bc.puntos
+            puntos.extend(resultado_bc.puntos)
+
+    return RecoleccionVentanaOrigen(
+        trips=tuple(cercanos_ordenados), breadcrumbs_por_trip=breadcrumbs_por_trip,
+        puntos=tuple(puntos), motivo="OK",
+    )
+
+
 def resolver_planta_origen_gps(
     servicio: ServicioTelemetria,
     *,
@@ -625,36 +694,17 @@ def resolver_planta_origen_gps(
     la ventana cubre `[entrada, salida]` completo (o el único ancla
     disponible) con `margen_horas` de margen a cada lado, nunca solo un
     punto."""
-    anclas = [instante for instante in (hora_entrada, hora_salida) if instante is not None]
-    if not anclas:
-        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="SIN_HORA_DOCUMENTAL")
-    ancla_desde, ancla_hasta = min(anclas), max(anclas)
-
-    resultado_viajes = servicio.buscar_viajes(patente, fecha, fecha)
-    if resultado_viajes.estado not in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
-        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo=resultado_viajes.estado.value)
-
-    margen = timedelta(hours=margen_horas)
-    ventana_desde, ventana_hasta = ancla_desde - margen, ancla_hasta + margen
-    cercanos = []
-    for viaje in resultado_viajes.viajes:
-        inicio = _instante(viaje.inicio)
-        fin = _instante(viaje.fin)
-        if inicio is None or fin is None:
-            continue
-        if fin >= ventana_desde and inicio <= ventana_hasta:
-            cercanos.append(viaje)
-    if not cercanos:
-        return ResultadoOrigenGPS(ORIGEN_GPS_NO_DETERMINADO, motivo="SIN_TRIPS_EN_VENTANA_TEMPORAL")
-
-    cercanos_ordenados = sorted(cercanos, key=lambda v: _instante(v.inicio) or datetime.min)
-    breadcrumbs_por_trip: dict[str, tuple[PosicionTelemetria, ...]] = {}
-    puntos: list[PosicionTelemetria] = []
-    for viaje in cercanos_ordenados:
-        resultado_bc = servicio.obtener_breadcrumbs(viaje.proveedor_trip_id)
-        if resultado_bc.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
-            breadcrumbs_por_trip[viaje.proveedor_trip_id] = resultado_bc.puntos
-            puntos.extend(resultado_bc.puntos)
+    recoleccion = recolectar_puntos_ventana_origen(
+        servicio, patente=patente, fecha=fecha,
+        hora_entrada=hora_entrada, hora_salida=hora_salida, margen_horas=margen_horas,
+    )
+    if not recoleccion.trips:
+        return ResultadoOrigenGPS(
+            ORIGEN_GPS_NO_DETERMINADO, motivo=recoleccion.motivo or "SIN_HORA_DOCUMENTAL"
+        )
+    cercanos_ordenados = list(recoleccion.trips)
+    breadcrumbs_por_trip = dict(recoleccion.breadcrumbs_por_trip)
+    puntos = list(recoleccion.puntos)
 
     plantas = list(plantas)
 
