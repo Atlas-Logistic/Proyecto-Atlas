@@ -4,6 +4,56 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA FASE 2: entidades/clientes/obras + verificación externa + Incidencias Documentales
+
+**Rama motor:** `lector-mvp-guia-nueva` · Sin commit funcional todavía (código nuevo, no aplicado a Drive -- pendiente de revisión de Javier, ver FASE 17 de la instrucción de este bloque).
+
+### FASE 0 -- checkpoint
+
+`git status`/`git log` en Motor y Desktop: `ab7e16f`/`a55a726`, `local=remoto`, `0/0`, working trees limpios -- coincide exactamente con lo reportado al cierre del bloque anterior. Drive verificado: JD8659 CARRO/CONFIRMADO/ACTIVO, 13 decisiones pendientes, 2 aplicaciones reales con `patente_canonica=JD8659` (464264, 464265) en el ledger -- sin discrepancia. Se buscó la frase "15 revisiones antes → 6" en las 3 bitácoras: no existe -- la única mención real dice "15 → 13", correcta. Sin sorpresas -- se continuó.
+
+### FASE 1 -- capa genérica, reutilización sin refactor
+
+`atlas_core/motor_evidencia.py` (nuevo): extrae el patrón OBSERVACIÓN→CANDIDATOS→EVIDENCIAS→CONTRADICCIONES→CONFIRMACIONES→RESULTADO→EXPLICACIÓN ya validado en producción para vehículos, como dataclasses reutilizables (`CandidatoEvidencia`, `ResultadoEvidencia`) y una jerarquía de precedencia por niveles (`NIVEL_CONFIRMACION_HUMANA` > `NIVEL_EXTERNO_OFICIAL` > `NIVEL_EXTERNO_CORPORATIVO` > `NIVEL_DOCUMENTAL_INDEPENDIENTE` > `NIVEL_EXTERNO_DIRECTORIO` > `NIVEL_EXTERNO_AUXILIAR` > `NIVEL_DOCUMENTAL_DEBIL`), más `elegir_mejor_candidato`/`hay_empate_en_el_tope` (nunca elige arbitrariamente). Vocabulario de resultado ampliado a 5 estados (`RESUELTO_AUTOMATICAMENTE`, `SUGERENCIA_HUMANA`, `CONTRADICCION_DOCUMENTAL`, `ALTA_NUEVA`, `ABSTENCION_REAL`) -- el motor de vehículos (3 estados) NO se reescribió para adoptar este vocabulario (evitar refactor de una pieza ya validada en producción); la reutilización es de patrón, no de código forzado a compartirse.
+
+### Verificación externa
+
+`atlas_core/verificacion_externa.py` (nuevo): `EvidenciaExterna` (fuente, tipo_fuente, url, fecha_consulta, campos_corroborados, contradicciones -- trazabilidad completa, nunca contenido web masivo), `ProveedorVerificacionEntidades` (Protocol, nunca acoplado a un buscador concreto), `ProveedorVerificacionFijo` (fixtures/caché, sin red -- el único proveedor que corre hoy), `CacheVerificacionExterna`. Auditado el entorno real: HTTP de salida SÍ funciona desde Python (`urllib.request` contra `api.github.com`, 200 OK), pero no hay ningún proveedor de búsqueda/registro empresarial configurado (sin API key/servicio contratado) -- componente real faltante para producción autónoma, reportado explícitamente, no fingido.
+
+**2 evidencias reales, no simuladas**, obtenidas por el agente con sus propias herramientas de búsqueda (fuera del proceso Python) y guardadas en `tests/fixtures_verificacion_externa.py`: SIGRO (directorio Mercantil.com: razón social "Empresa Constructora Sigro S.A.", RUT 89.037.500-6, dirección Las Condes; sitio corporativo `web.sigro.cl`: "SIGRO S.A.", dirección Vitacura) y Supermercado Señor de los Milagros (búsqueda real en Mejillones -- 0 resultados; hallazgo colateral real: dos supermercados confirmados en la misma calle, Av. Almirante Latorre, con OTRO nombre -- documentado como referencia, nunca usado para forzar una conclusión).
+
+### Confirmaciones independientes -- aprendizaje operacional
+
+`atlas_core/evidencia_entidades.py` (nuevo, almacén aditivo -- `catalogos_privados/evidencia_entidades.json`, NUNCA una migración de `clientes.json`/`obras_destinos.json`, cuyos dataclasses validan el conjunto EXACTO de campos): `ConfirmacionIdentidad`, `AlmacenEvidenciaEntidades.registrar_confirmacion`/`confirmaciones_para` (idempotente por `confirmacion_id` determinista), `transportes_independientes()` (mismo principio "repetición no equivale a independencia" ya validado para vehículos -- cuenta transportes distintos, nunca documentos). `UMBRAL_CONFIRMACIONES_PARA_CONOCIMIENTO_FUERTE = 2`, una única constante nombrada, nunca repetida como número mágico.
+
+### Incidencias Documentales
+
+`atlas_core/incidencias_documentales.py` (nuevo): `IncidenciaDocumental`, `AlmacenIncidenciasDocumentales.registrar` (idempotente; rechaza explícitamente `MOTIVO_PROBLEMA_LECTURA`/`MOTIVO_CALIDAD_DOCUMENTAL_O_IMAGEN` como `tipo_incidencia` -- la frontera OCR/calidad != incidencia documental está protegida en el propio código, no sólo en la documentación). Taxonomía inicial pequeña y extensible (`PATENTE_DOCUMENTAL_INCORRECTA`, `IDENTIDAD_CLIENTE_INCONSISTENTE`, `RUT_NO_CORRESPONDE_A_RAZON_SOCIAL`, `DIRECCION_NO_CORRESPONDE_A_ENTIDAD`, `OBRA_DOCUMENTAL_INCONSISTENTE`, `COMUNA_DOCUMENTAL_INCORRECTA`, `TRANSPORTISTA_DOCUMENTAL_INCORRECTO`, `HORA_DOCUMENTAL_INCONSISTENTE`). Estados `DETECTADA`/`CONFIRMADA`/`DESCARTADA`. Sin ningún mecanismo de bloqueo -- verificado también por test (`test_incidencias_documentales_no_tiene_ningun_mecanismo_de_bloqueo`).
+
+### Motor de Evidencia -- Clientes
+
+`atlas_core/motor_evidencia_clientes.py` (nuevo): `clasificar_rut_documental` distingue `RUT_AUSENTE`/`RUT_INVALIDO`/`RUT_VALIDADO`/`RUT_CANONICO`. `evaluar_evidencia_cliente` se invoca DESPUÉS del paso determinista ya existente (`_identidad_cliente_por_rut`, RUT exacto contra `clientes.json` `CONFIRMADO`/`ACTIVO`) -- nunca lo reemplaza. Árbol de decisión: RUT canónico sin contradicción de texto -> `RESUELTO_AUTOMATICAMENTE`; RUT canónico CON contradicción y sin confirmaciones acumuladas -> `CONTRADICCION_DOCUMENTAL` (CASO B del bloque: "PPP CONSTRUCCIONES" con el RUT de EBEMA sugiere EBEMA, nunca registra PPP); RUT canónico CON contradicción y >=2 confirmaciones independientes de esa misma relación -> `RESUELTO_AUTOMATICAMENTE` (CASO C); fuente externa oficial/corporativa -> `CONTRADICCION_DOCUMENTAL`; fuente externa débil o confirmación única -> `SUGERENCIA_HUMANA`; sin ningún candidato ni evidencia en contra -> `ALTA_NUEVA`; RUT inválido/ausente y sin nada más -> `ABSTENCION_REAL`. Empate real en el nivel más alto -> `SUGERENCIA_HUMANA`, nunca una elección arbitraria.
+
+**No se conectó** a `aplicar_decision_obra`/`detectar_decisiones_documento` en este bloque (deliberado -- "no aplicar todavía el nuevo motor", instrucción explícita FASE 17): el `CONFIRMAR_ALIAS` real todavía no registra `ConfirmacionIdentidad`; esa integración queda para el bloque de aplicación controlada, después de la revisión de Javier.
+
+### Motor de Evidencia -- Obras (caso SIGRO)
+
+`atlas_core/motor_evidencia_obras.py` (nuevo): `coincide_salvo_sufijo_societario` (calibrada, sufijos `SA`/`LTDA`/`SPA`/`EIRL`/`LIMITADA`, nunca decide identidad sola -- sólo sugiere). Deliberadamente NO se modificó `normalizar_nombre_obra` (`atlas_core.catalogo_obras_destinos`, ya validada en producción para deduplicar el catálogo real) -- ensancharla para ignorar sufijos societarios habría arriesgado fusionar en silencio dos obras legalmente distintas; se agregó una función nueva y acotada en su lugar, mismo principio que `_diferencia_ocr_segura` para vehículos. `evaluar_evidencia_obra`: coincidencia por sufijo contra obras confirmadas del mismo cliente -> `SUGERENCIA_HUMANA`; + evidencia externa oficial/corporativa -> `CONTRADICCION_DOCUMENTAL`; sin nada -> `ALTA_NUEVA`. Ninguna fuente disponible para obras alcanza hoy `RESUELTO_AUTOMATICAMENTE` sin confirmación humana estructural -- misma decisión de producto ya tomada para VP6521→VP8521 en el bloque anterior.
+
+### FASE 14 -- validación contra el dataset real completo (sólo lectura)
+
+Copiado a TEMP (`clientes.json`, `obras_destinos.json`, `destinos_maestros.json`, `analisis_completo_guias.csv`, `decisiones_pendientes.json`); nunca escrito de vuelta. **Hallazgo real de alcance:** el CSV consolidado NO retiene el RUT documental por guía (sólo el nombre de cliente ya resuelto o el texto tal cual) -- el RUT crudo sólo vive en la extracción OCR original de cada documento, fuera de esta pasada (evitar lectura/OCR masivo, fuera de alcance). Por eso la validación de clientes contra el dataset completo usó una comparación nombre-only (más débil, sólo para priorizar candidatos a revisar), no el motor RUT-based completo -- reportado con honestidad, no maquillado.
+
+**Clientes:** 14 nombres documentales únicos, 13 ya exactos, 1 candidato real (`TORRES OCARANEA LTDA`, variante de `TORRES OCARANZA LTDA`, ya `CONFIRMADO`/`ACTIVO` con el alias `IORRSS OCARANZA` -- este bloque no lo agrega, sólo lo señala). **Obras:** 28 valores únicos, 15 ya exactos, 12 `ALTA_NUEVA` sin ninguna duda, 1 `SUGERENCIA_HUMANA` -- exactamente el caso SIGRO, encontrado por el motor sin indicarle dónde buscar (nada hardcodeado).
+
+### Tests
+
+55 tests nuevos, 0 regresiones: `test_motor_evidencia.py` (8, capa genérica), `test_verificacion_externa.py` (6), `test_evidencia_entidades.py` (7), `test_incidencias_documentales.py` (7, incluida la frontera OCR/calidad protegida por código), `test_motor_evidencia_clientes.py` (16, incluye CASO B/C completos y los 2 casos reales SIGRO/RUT-exacto), `test_motor_evidencia_obras.py` (9, SIGRO real con evidencia de directorio y de sitio corporativo), `test_motor_evidencia_integracion.py` (2, cierre del ciclo motor->incidencia + ausencia de bloqueo). Suite completa: **1333 → 1388 passed, 0 failed.**
+
+**Drive:** no modificado (0 escrituras). **Catálogos reales:** sin cambios. **Decisiones reales:** ninguna aplicada. **Git:** sin commit funcional -- código nuevo en working tree, pendiente de la revisión única de Javier antes de conectar el motor al flujo en vivo.
+
+---
+
 ## 2026-08-19 — PUESTA EN PRODUCCIÓN CONTROLADA del Motor de Evidencia de Vehículos
 
 **Rama motor:** `lector-mvp-guia-nueva`, commits `335c59c` (motor de evidencia) + `87d49b2` (fix candidatos congelados) · **Rama Desktop:** `fix-desktop-data-root-drag-drop`, commit `a55a726` · Ambos publicados en `origin`.

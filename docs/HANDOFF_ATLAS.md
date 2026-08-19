@@ -4,7 +4,25 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
-## 2026-08-19 — Handoff vigente: Motor de Evidencia de Vehículos EN PRODUCCIÓN — JD8659 registrada, 13/15 decisiones reales pendientes
+## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA FASE 2 (clientes/obras/verificación externa/Incidencias Documentales) validado — sin aplicar, pendiente de UNA revisión de Javier
+
+- **Qué es:** el mismo patrón que ya funciona en producción para vehículos (evidencia estructurada por niveles, nunca autocorrección) se extiende a clientes y obras, formalizado en una capa reutilizable (`atlas_core/motor_evidencia.py`). Se agregan además: verificación externa (Internet como fuente explícita, con jerarquía de fuentes), confirmaciones humanas independientes (Atlas deja de repetir la misma pregunta a la 3ª aparición equivalente), e Incidencias Documentales (errores reales del contenido, nunca de OCR/calidad).
+- **2 casos reales validados con evidencia genuina (no simulada):** SIGRO (guía 464493) -- Internet corrobora que "EMPRESA CONST SIGRO SA" es la misma "EMPRESA CONST SIGRO" ya confirmada, sugerencia fuerte, nunca forzada. Supermercado Señor de los Milagros (guía 464170) -- búsqueda real sin resultados, Atlas se abstiene honestamente.
+- **Validado contra el dataset real completo, sólo lectura:** obras -- 15/28 ya resueltas, 12 altas nuevas sin duda, 1 sugerencia (SIGRO, encontrado solo). Clientes -- 13/14 ya exactos, 1 candidato real a revisar (`TORRES OCARANEA LTDA` vs `TORRES OCARANZA LTDA`, ya confirmado).
+- **Hallazgo de alcance real, no un bug:** el CSV consolidado no guarda el RUT documental por guía -- sólo vive en la extracción OCR original. La validación de clientes contra el dataset completo se hizo por nombre (más débil); el motor completo (RUT-based) sólo se probó con datos sintéticos + los 2 casos reales de obra/verificación externa.
+- **Código, sin publicar todavía (pendiente de revisión):** 6 módulos nuevos en Motor (`motor_evidencia.py`, `verificacion_externa.py`, `evidencia_entidades.py`, `incidencias_documentales.py`, `motor_evidencia_clientes.py`, `motor_evidencia_obras.py`), 7 archivos de test nuevos (55 tests). **Deliberadamente NO conectado** a `aplicar_decision_obra`/`detectar_decisiones_documento` -- eso es la próxima decisión de Javier, no algo que este bloque decidiera solo.
+- **Validación:** Motor `1388 passed, 0 failed` (1333 + 55 nuevos, 0 regresiones). Desktop: sin cambios este bloque.
+- **Drive, catálogos, decisiones reales: sin tocar.** Nada de esto se aplicó a producción.
+- **Próxima decisión para Javier:**
+  1. ¿Conectar `evaluar_evidencia_cliente`/`evaluar_evidencia_obra` al flujo real de detección de decisiones (`detectar_decisiones_documento`)?
+  2. ¿Wireear `CONFIRMAR_ALIAS` para que registre `ConfirmacionIdentidad` (necesario para que el aprendizaje progresivo empiece a acumularse)?
+  3. ¿Contratar/configurar un proveedor real de verificación externa (API de registro empresarial o búsqueda), o seguir usando evidencia capturada puntualmente por el agente?
+  4. ¿Aplicar la sugerencia SIGRO (linkear la obra existente en vez de crear una nueva) y revisar `TORRES OCARANEA LTDA`?
+- **Siguiente frente recomendado, no iniciado por instrucción explícita:** clientes/Internet en producción, obras inteligentes en producción, analítica/IA, mobile, multiempresa.
+
+---
+
+## 2026-08-19 — Handoff previo: Motor de Evidencia de Vehículos EN PRODUCCIÓN — JD8659 registrada, 13/15 decisiones reales pendientes
 
 - **Publicado:** Motor `87d49b2` (incluye `335c59c`), Desktop `a55a726`. Ambos en `origin`, working trees limpios. Motor `1333 passed`; Desktop `221 passed`.
 - **JD8659 registrada en Drive real**, CARRO/CONFIRMADO/ACTIVO, asociada al RUT de Carlos Simón. JE8659/VP8521 intactas.

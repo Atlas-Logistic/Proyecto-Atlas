@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA FASE 2: clientes, obras, verificación externa e Incidencias Documentales -- construido y validado, sin aplicar a producción
+
+- **Cambio de etapa:** el mismo patrón que resolvió vehículos (evidencia estructurada, nunca autocorrección silenciosa) se extendió a clientes y obras, y se formalizó como capa reutilizable (`atlas_core/motor_evidencia.py`) para que el próximo dominio (destinos, y más adelante otros) no tenga que reinventarlo.
+- **Internet es ahora una fuente explícita de evidencia -- probado con dos casos reales, no simulados:** se consultaron fuentes públicas reales para "EMPRESA CONST SIGRO SA" (guía 464493) y "Supermercado Señor de los Milagros" (guía 464170). El primero corroboró, con la razón social y RUT reales de la empresa (Empresa Constructora Sigro S.A., RUT 89.037.500-6, sitio corporativo `sigro.cl`), que la obra ya confirmada "EMPRESA CONST SIGRO" es la misma entidad, sólo con un sufijo societario de más -- Atlas la marca como sugerencia fuerte, nunca resuelta sola. El segundo, honestamente, no encontró ningún negocio con ese nombre exacto en Mejillones -- Atlas se abstiene, sin inventar una respuesta, y deja anotado (sólo como referencia para Javier, nunca como conclusión propia) que existen otros dos supermercados reales confirmados en la misma calle.
+- **Aprendizaje operacional, nuevo:** Atlas ahora puede recordar que un humano ya confirmó, en dos o más ocasiones independientes (nunca el mismo documento repetido), que un RUT corresponde a una entidad -- a la tercera aparición equivalente, aunque el documento traiga un texto nunca visto antes, Atlas ya no vuelve a preguntar: resuelve solo y registra una Incidencia Documental, sin bloquear el viaje.
+- **Incidencias Documentales, capacidad nueva y obligatoria:** un registro auditable para errores reales del CONTENIDO de una guía (cliente equivocado, patente que no corresponde, obra inconsistente, etc.) -- explícitamente separado, y protegido por tests, de cualquier problema de foto borrosa, mancha o confusión de OCR, que nunca debe aparecer ahí.
+- **Validado contra el dataset real completo (sólo lectura, nunca escrito a Drive):** de 14 nombres de cliente documentales únicos, 13 ya coinciden exactos y 1 (`TORRES OCARANEA LTDA`) es un candidato real a revisar (variante de `TORRES OCARANZA LTDA`, ya confirmado). De 28 nombres de obra únicos, 15 ya coinciden, 12 son altas genuinamente nuevas sin ninguna duda, y 1 es el caso SIGRO ya descrito -- el motor lo encontró sin que nadie le dijera dónde buscar.
+- **Nada de esto se aplicó a producción:** Drive, catálogos y decisiones reales quedan intactos. Motor `1388 passed, 0 failed` (55 tests nuevos). Queda pendiente de una única revisión de Javier antes de: aplicar cualquier resolución, empezar a acumular confirmaciones reales, o conectar el motor al flujo de decisiones en vivo.
+
+---
+
 ## 2026-08-19 — PUESTA EN PRODUCCIÓN CONTROLADA del Motor de Evidencia de Vehículos: JD8659 registrada, 2 de 15 decisiones reales resueltas sin preguntarle a Javier
 
 - **Motor y Desktop publicados:** `335c59c` + `87d49b2` (Motor) y `a55a726` (Desktop), ambos en `origin`, working trees limpios. Motor `1333 passed`; Desktop `221 passed`.
