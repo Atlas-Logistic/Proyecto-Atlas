@@ -4,6 +4,19 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-19 — Handoff vigente: primer ciclo real aplicado — 12 decisiones esperando a Javier en Desktop, aprendizaje en cero (punto de partida)
+
+- **Se aplicó, sobre Drive real, un único caso** (464036, Ortiz): `NO_REGISTRAR` con motivo estructurado `ERROR_DOCUMENTAL_MANDANTE` -- ya confirmado por Javier en una auditoría anterior. Documento original intacto.
+- **Nada más se aplicó**, a propósito: ni Simón (VP8521 sigue siendo sugerencia, no confirmación), ni las 6 obras administrativas, ni SIGRO -- ninguna tenía una confirmación de Javier lo bastante inequívoca. Quedan las 12 en Desktop para que él las confirme.
+- **Bandeja real:** 13 → **12**. Backup completo y verificado antes de escribir (`respaldos/PRIMER_CICLO_CONFIRMACIONES_ROLLBACK_PRE_APLICACION_20260819_191818/`).
+- **Gap real encontrado y reportado, sin parche apurado:** cerrar un vehículo con `NO_REGISTRAR` todavía no genera una Incidencia Documental (ese enganche sólo existe para clientes hoy). La trazabilidad completa igual queda en el ledger.
+- **Punto de partida real para medir aprendizaje:** 0 confirmaciones independientes acumuladas, 0 auto-resoluciones, 0 incidencias -- exactamente lo esperado, porque `NO_REGISTRAR` no alimenta ese mecanismo (sólo `CONFIRMAR_ALIAS` lo hace).
+- **Sin cambios de código en este bloque** -- todo se hizo con el CLI ya publicado (`aplicar_decision_pendiente.py`) y la función ya publicada (`reconciliar_bandeja_decisiones`). Commit documental únicamente.
+- **Próximo paso real:** Javier confirma desde Desktop -- las 12 decisiones restantes (2 sugerencias fuertes explicadas, 4 sin ninguna pista, 6 altas administrativas) ya están ahí, con su explicación visible.
+- **Siguiente frente recomendado, no iniciado por instrucción explícita:** esquema CSV para canónico en reportes/Excel, proveedor externo de verificación, Incidencias Documentales para vehículos/obras, mobile, multiempresa.
+
+---
+
 ## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA FASE 4 -- auto-resolución activada y probada, código listo, sin activar sobre datos reales
 
 - **La decisión de producto de Javier ya está implementada:** `RESUELTO_AUTOMATICAMENTE` (hoy sólo alcanzable por `ALIAS_CANDIDATO`, vía confirmaciones humanas independientes) se aplica solo al reconciliar la bandeja -- reutiliza `aplicar_decision_obra` con `actor="ATLAS_AUTOMATICO"`, nunca un segundo camino de escritura. La decisión deja de aparecer pendiente; queda auditable en catálogo + ledger + Incidencia Documental.

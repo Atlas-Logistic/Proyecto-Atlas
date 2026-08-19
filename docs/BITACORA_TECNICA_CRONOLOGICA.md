@@ -4,6 +4,47 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19 — PRIMER CICLO OPERACIONAL DE CONFIRMACIONES: aplicación real controlada (sin cambios de código)
+
+**Rama motor:** `lector-mvp-guia-nueva`, `e58af39` -- sin cambios de código en este bloque, sólo operación real sobre Drive vía el CLI ya publicado.
+
+### FASE 0/1 -- checkpoint y backup
+
+`e58af39`/`93352cf`, `local=remoto`, `0/0`, limpios en ambos repos. Backup completo antes de escribir: `respaldos/PRIMER_CICLO_CONFIRMACIONES_ROLLBACK_PRE_APLICACION_20260819_191818/` (`vehiculos.json`, `clientes.json`, `obras_destinos.json`, `analisis_completo_guias.csv`, `decisiones_pendientes.json`, `decisiones_aplicadas.json`, `estado_operacion.json`), manifiesto SHA-256, verificado byte a byte contra el origen tras crearlo. Confirmado que `evidencia_entidades.json`/`incidencias_documentales.json` todavía no existen en Drive real (el primer ciclo de aprendizaje real no había empezado).
+
+### FASE 2 -- bandeja real reconstruida (sin asumir 13)
+
+Leída directamente: **sigue siendo 13**, idéntica en contenido a la del bloque anterior (mismos `decision_id`). Clasificación re-verificada con una corrida TEMP de solo lectura: `SUGERENCIA_HUMANA=2` (Ortiz/XF3662-tracto; Simón/VP6521-tracto), `ABSTENCION=4` (464170×2, 464854×2), `ALTA_NUEVA=6` (obras), `CONTRADICCION_DOCUMENTAL=1` (SIGRO, sólo en TEMP con el caché de evidencia externa -- ver FASE 3, en Drive real ese caché nunca se escribió).
+
+### FASE 3 -- aplicación real, sólo lo inequívocamente confirmado
+
+**Único caso aplicado:** 464036 (Ortiz), `VEHICULO_DESCONOCIDO`/`patente_tracto`/`XF3662` → `NO_REGISTRAR` con `--motivo-rechazo ERROR_DOCUMENTAL_MANDANTE`, vía `aplicar_decision_pendiente.py` (mismo CLI que usaría Desktop). Justificación: Javier ya había confirmado esto explícitamente en la auditoría de un bloque anterior (`fb8ba95`) -- no es una inferencia de este bloque, es una confirmación ya registrada.
+
+**Deliberadamente NO aplicado, con razón explícita para cada uno:**
+- 464265 (Simón, VP6521-tracto): clasificación actual `SUGERENCIA_HUMANA`, no `RESUELTO_AUTOMATICAMENTE` -- por diseño (ver bloque "MOTOR DE EVIDENCIA FASE 2", decisión de producto de no auto-resolver evidencia puramente documental sin confirmación humana estructural). No es "inequívoco" en el sentido que exige la instrucción de este bloque.
+- Las 6 `OBRA_DESCONOCIDA` "administrativas" y el resto de vehículos en `ABSTENCION`: ninguna tiene una confirmación de Javier específica y registrada en esta sesión -- "Javier dijo que varias obras estaban bien" (memoria general) no se tradujo en ninguna aplicación puntual, exactamente como exige FASE 4 de la instrucción.
+- 464493 (SIGRO): sigue como sugerencia -- ninguna confirmación humana real existe todavía.
+
+### FASE 5 -- aprendizaje: cero generado, correctamente
+
+`NO_REGISTRAR` no pasa por `CONFIRMAR_ALIAS` -- no registra `ConfirmacionIdentidad` ni incidencia. El aprendizaje real (confirmaciones independientes) sigue en cero tras este bloque; es exactamente lo esperado, ya que ninguna decisión aplicada fue del tipo que alimenta ese mecanismo.
+
+### FASE 6 -- Incidencias Documentales: gap real, reportado sin parche
+
+Confirmado por lectura de código: hoy sólo `ALIAS_CANDIDATO`/`CONFIRMAR_ALIAS` (clientes) registra una Incidencia Documental automáticamente. `VEHICULO_DESCONOCIDO`/`NO_REGISTRAR` (el caso Ortiz) NO tiene ese enganche todavía -- por instrucción explícita de este bloque, **no se construyó un microfix**. La trazabilidad de por qué se rechazó igual queda completa en el ledger (`motivo_rechazo`, `candidatos_previos`, evidencia completa) -- sólo falta el registro específico en `incidencias_documentales.json`. Queda como gap conocido para un bloque futuro, cuando se generalice el enganche de incidencias a más tipos.
+
+### FASE 7 -- regeneración real
+
+`reconciliar_bandeja_decisiones(raiz_atlas=Drive real)`: `decisiones_antes=12` (ya reflejaba la aplicación de Ortiz, hecha por el CLI un paso antes), `conservadas=12`, `publicadas=12`, `aplicadas_automaticamente=0` (correcto -- sin confirmaciones nuevas, nada cruza el umbral).
+
+### FASE 9 -- baseline de arranque
+
+Confirmaciones independientes acumuladas por entidad: **0**. Decisiones evitadas hasta ahora (aplicadas por confirmación ya conocida, sin pasar por Desktop): **1** (Ortiz). Decisiones aún pendientes: **12** (2 `SUGERENCIA_HUMANA`, 4 `ABSTENCION`, 6 `ALTA_NUEVA`). Auto-resoluciones producidas: **0**. Incidencias creadas: **0**. Este es el punto cero real para medir, en bloques futuros, si el aprendizaje efectivamente reduce las preguntas.
+
+**Drive modificado:** `decisiones_pendientes.json` (13→12), `decisiones_aplicadas.json` (+1). `analisis_completo_guias.csv` verificado byte a byte idéntico al respaldo -- nunca se reescribió. Catálogos: sin cambios (Ortiz no registró ningún vehículo). **Git:** sin cambios de código -- commit documental únicamente (bitácoras).
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA FASE 4: activación controlada de auto-resolución + Incidencias Documentales en Desktop
 
 **Rama motor:** `lector-mvp-guia-nueva`. Sin commit al momento de redactar (se comitea al cierre).

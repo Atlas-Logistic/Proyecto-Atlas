@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-19 — PRIMER CICLO OPERACIONAL: Ortiz cerrado con motivo estructurado; bandeja real 13 → 12; ningún aprendizaje inventado
+
+- **Se aplicó, sobre Drive real, únicamente el caso que ya estaba inequívocamente confirmado:** el tracto de la guía 464036 (Patrick Ortiz, XF3662) se cierra con `NO_REGISTRAR` y el motivo estructurado `ERROR_DOCUMENTAL_MANDANTE` -- exactamente lo que Javier ya había confirmado en una auditoría anterior de esta misma sesión. El documento original (`XF3662`) nunca se tocó.
+- **Deliberadamente NO se aplicó nada más.** Ni la sugerencia de Carlos Simón (VP8521 sigue siendo sólo una sugerencia fuerte, no una confirmación), ni ninguna de las 6 obras "administrativas", ni el caso SIGRO -- ninguno tiene, en este momento, una confirmación de Javier lo bastante inequívoca como para aplicarla sin él. Se prefirió dejarlas pendientes en Desktop antes que inventar una confirmación que no existe.
+- **Bandeja real: 13 → 12.** El aprendizaje (confirmaciones independientes) sigue en cero -- este bloque no generó ninguna, porque cerrar con `NO_REGISTRAR` no es lo mismo que confirmar un alias; ese mecanismo (`CONFIRMAR_ALIAS`) es justamente el que Javier puede empezar a usar ahora desde Desktop.
+- **Hallazgo honesto, no una falla:** cerrar una decisión de vehículo por error documental todavía no genera una Incidencia Documental (ese enganche sólo existe hoy para clientes) -- quedó reportado como un límite conocido, no se construyó un parche apurado para cubrirlo en este bloque.
+- **Backup completo y verificado byte a byte antes de escribir**, con manifiesto y rollback documentado.
+- **Este es el punto de partida real para medir si Atlas empieza a preguntar menos:** 0 confirmaciones acumuladas, 0 auto-resoluciones, 12 decisiones esperando a Javier en Desktop.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA FASE 4: auto-resolución activada (código listo, sin activar sobre datos reales)
 
 - **Decisión de producto de Javier, ya implementada:** cuando Atlas tiene evidencia suficiente para un cliente/obra (`RESUELTO_AUTOMATICAMENTE`), ya no pide un clic -- aplica la entidad canónica sola, deja registrada la evidencia completa (qué decía la guía, qué usó Atlas, por qué) y crea automáticamente una Incidencia Documental. Javier sólo interviene cuando persiste una duda real.
