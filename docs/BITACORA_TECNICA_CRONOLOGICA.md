@@ -3647,3 +3647,83 @@ Copia de `analisis_completo_guias.csv`, `decisiones_pendientes.json`, `decisione
 **Drive:** no modificado -- 0 escrituras a `operacion/actual`, 0 escrituras a catálogos. **Catálogos:** sin cambios (`vehiculos.json` verificado en 20 entradas antes/después, sin JD8659). **15 decisiones reales:** sin aplicar. **Desktop:** sólo wording, sin cambios de lógica. **Git:** commit funcional de este bloque (ver hash real en el checkpoint siguiente). **ORS: 0 llamadas. Onelogis red: 0 llamadas. OCR: no se re-ejecutó.**
 
 **Estado: REVISIÓN ATLAS RECONCILIADA A NIVEL DE CÓDIGO -- LISTO PARA REGENERACIÓN CONTROLADA DE BANDEJA REAL.**
+
+## Bloque REGENERACIÓN CONTROLADA DE BANDEJA REAL DE REVISIÓN -- 2026-08-19
+
+**FASE 0:** `git status`/`git rev-parse` en ambos repos -- Motor `2b43452fb49e7bbd463a428d725ea1377640c18a`, local=remoto, limpio. Desktop `7ad5cc9e6f1b020bd3427cb65671557b9f628ae4`, local=remoto, limpio.
+
+**FASE 1 -- snapshot ANTES (lectura real, Drive):**
+```
+documentos: 43
+viajes: 38 (25 CONFIRMADO, 13 REQUIERE_REVISION)
+decisiones pendientes: 15 (VEHICULO_DESCONOCIDO: 8, OBRA_DESCONOCIDA: 7)
+dataset_sha256 artefacto: BAC093AB7316EF60EF4E7D6B5E47778B026FF5ECF4D1A65DE3983AAC487FCA24
+dataset_sha256 real:      5BE0179099DC820BCFB58BD6AFBEA21234E445EE33CC7CB56DA62E18E5EA0BEE
+coinciden: False
+```
+Las 15 decisiones -- mismos `decision_id`/guía/transporte/tipo/campo/valor documental ya inventariados en el bloque de auditoría anterior, confirmados sin cambios: 464036×2 (Ortiz), 464170×3 (Iván Roa), 464264+464265×3 (Carlos Simón), 464395/464488/464491/464493 (obras), 464854×3 (Carlos Farías).
+
+**FASE 2 -- backup, mecanismo auditado antes de decidir el alcance (no asumido):** lectura de `reconciliar_bandeja_decisiones` confirma que `regenerar_decisiones_persistidas` y `enriquecer_decisiones_vehiculo` son puras (ninguna llamada de escritura a disco en su cuerpo) y `generar_artefacto` llama `escribir_json_atomico(salida, artefacto)` una única vez, con `salida = ruta_salida` (`decisiones_pendientes.json`) -- ningún otro archivo puede cambiar. Backup y manifiesto SHA-256 acotados a ese único archivo: `respaldos/RECONCILIACION_BANDEJA_ROLLBACK_PRE_APLICACION_20260819_134448/operacion_actual/decisiones_pendientes.json`, verificado idéntico byte a byte contra el original antes de continuar.
+
+**FASE 3 -- dry-run TEMP, reconciliación completa (script dedicado, comparación decisión por decisión contra un snapshot `bandeja_ANTES.json`):**
+```
+reconciliar_bandeja_decisiones(raiz_atlas=TEMP)
+-> antes=15, conservadas=15, publicadas=15
+```
+Para las 15: `decision_id` idéntico en el 100% de los casos (ninguna desaparece, ninguna nueva). Diff campo a campo:
+- **4 decisiones ganan `candidatos` + `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`** (antes `[]`/3 acciones, después 1 candidato/5 acciones, `REGISTRAR`/`NO_REGISTRAR`/`POSPONER` siempre presentes): 464036 patente_tracto (XF3662→XF3629), 464264 patente_rampla (JD6659→JE8659), 464265 patente_tracto (VP6521→VP8521), 464265 patente_rampla (JD0659→JE8659).
+- **11 decisiones sin ningún cambio de contenido** (candidatos `[]`→`[]`, acciones idénticas): 464036 obra, 464170×3, 464395, 464488, 464491, 464493, 464854×3.
+- `dataset_sha256`/`catalogos_sha256` del artefacto: refrescados, coinciden con el real tras reconciliar.
+
+**FASE 4 -- los 4 casos, auditados con evidencia real:**
+
+**A) Carlos Simón:** las 3 decisiones sobreviven con JE8659 como única candidata sugerida (nunca forzada -- `acciones_permitidas` incluye `REGISTRAR`/`NO_REGISTRAR`/`USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`/`POSPONER`, las 5, sin preferencia). Verificado en copia aislada (`Atlas_dryrun_apply`, subcopia de TEMP, nunca promovida a Drive): `aplicar_decision_obra(..., accion="SELECCIONAR_OTRA_PATENTE", patente_elegida="JD8659")` → `ErrorAplicacionDecision("La patente indicada no existe o no está confirmada/activa.")` -- **JD8659 sigue, correctamente, sin poder aplicarse** (no está en catálogo real). Distinción explícita: **VALOR_DOCUMENTAL** = lo que Atlas guarda como `valor_documental` en cada una de las 3 decisiones (JD6659/VP6521/JD0659); **VALOR OCR** = idéntico al anterior en este caso (Atlas no re-extrae, el valor documental ES lo que OCR leyó); **VALOR CANÓNICO CONFIRMADO** = JD8659 (chofer, verbal, bloque anterior) para la rampla y VP8521 (catálogo, ya `CONFIRMADO`) para el tracto -- **ninguno de los 3 valores leídos por OCR se convirtió en vehículo real.** Pregunta exacta que Atlas debería hacerle a Javier: para cada una de las 3, ¿usar JE8659 (única opción hoy disponible en catálogo, con la reserva de que puede ser un error sistemático de EBEMA) o posponer hasta que él autorice registrar JD8659?
+
+**B) Ortiz:** verificado en la misma copia aislada: `aplicar_decision_obra(..., accion="NO_REGISTRAR", motivo_rechazo="ERROR_DOCUMENTAL_MANDANTE")` → `ok=True`, mensaje esperado. Catálogo de vehículos verificado en 20 entradas ANTES y DESPUÉS de esa prueba (sin cambio) -- confirma que la acción, cuando Javier la ejecute de verdad, no contamina catálogo ni CSV.
+
+**C) Supermercado Señor de los Milagros:** decisión `be58458d017b...` sin cambios -- `cliente_canonico="EBEMA SA"`, `destino_documental="AV. ALMTE. LATORRE 843 MEJILLONES MEJILLONES"`, `candidatos=[]` (obras no reciben el mecanismo de sugerencia en este bloque, sólo vehículos), `motivos=["OBRA_NO_EXISTE_PARA_CLIENTE"]`. Sigue sin ninguna evidencia de haber sido resuelta antes (confirmado de nuevo contra el ledger real, 0 coincidencias).
+
+**D) 464717 -- hallazgo honesto, verificado con datos reales, no anticipado en el guion original del bloque:**
+```
+analisis_completo_guias.csv (fila 464717, real, tras esta reconciliación):
+  planta_origen_nombre=AZA COLINA, origen_determinado_por=CONFIRMACION_HUMANA   (correcto, ya lo era)
+  estado_ruta=ORIGEN_NO_DETERMINADO, motivo_ruta=ORIGEN_GPS_ESTADIA_SIN_PLANTA  (SIGUE OBSOLETO)
+```
+Confirmado por auditoría de código que `reconciliar_bandeja_decisiones` NUNCA toca `analisis_completo_guias.csv` (sólo `decisiones_pendientes.json`) -- 464717 ni siquiera es una de las 15 decisiones pendientes (su origen se confirmó y cerró en un bloque anterior), así que este bloque no tenía forma de tocarlo aunque quisiera. Verificado directamente, llamando la función real sobre la fila real:
+```
+derivar_estado_ruta_tras_cambio_origen(fila_real_464717)
+-> {'estado_ruta': 'REQUIERE_REVISION', 'motivo_ruta': 'DESTINO_REVISAR'}
+```
+**La función sabe corregirlo perfectamente** -- el problema es que el mecanismo es **prospectivo, no retroactivo**: sólo se invoca automáticamente DENTRO de una aplicación NUEVA de `ORIGEN_NO_CONFIRMADO` (`aplicar_decision_obra`) o de una corrida NUEVA de `revalidar_telemetria_sin_ocr` -- ninguna de las dos vuelve a ejecutarse sobre una fila cuyo origen ya quedó `CONFIRMACION_HUMANA` de forma terminal desde antes de que este mecanismo existiera. **No se corrigió en este bloque** -- estaba fuera de su alcance explícito ("aplicar ÚNICAMENTE la regeneración de la bandeja real"); se reporta la causa exacta en vez de darlo por resuelto o de forzar una corrección no autorizada.
+
+**FASE 5 -- contadores, sin cambios (`viajes.csv` no se toca):** 38/25/13 (totales); 36/23/13 (dentro de "Este mes", filtro activo -- 2 viajes de julio excluidos); documentos 43 (41 dentro de agosto); Revisión de Atlas → 15 decisiones (ahora reconciliadas). Explicación 13 vs 15 sin cambios respecto al bloque anterior (8 viajes cubren las 15 decisiones, 5 viajes bloqueados por otros motivos sin decisión accionable, 0 huérfanas) -- no se intentó igualar los números, sólo mantener el texto ya clarificado.
+
+**FASE 6 -- aplicación real:** dry-run cumple los 5 criterios (coherente, no pierde válidas, reconcilia obsoletas, no introduce espurias, mantiene catálogos/datos intactos) → `reconciliar_bandeja_decisiones(raiz_atlas=r"G:\Mi unidad\Atlas")` ejecutado. Verificación posterior campo a campo:
+```
+15 decision_id reales idénticos a los de antes (comparación de conjuntos completa)
+dataset_sha256 artefacto == hashlib.sha256(dataset real)  ->  True
+```
+Mtimes verificados: `analisis_completo_guias.csv`, `decisiones_aplicadas.json`, `estado_operacion.json`, `vehiculos.json`, `obras_destinos.json`, `clientes.json` -- todos idénticos al inicio del bloque. `vehiculos.json`: 20 entradas (sin cambio, sin JD8659). `obras_destinos.json`: 15 entradas (sin cambio). Único archivo con mtime nuevo: `decisiones_pendientes.json` -- exactamente el esperado.
+
+**Lista completa, orden real del artefacto (para Javier):**
+| N° | Guía | Chofer | Tipo | Campo | Valor documental | Candidata sugerida |
+|---|---|---|---|---|---|---|
+| 1 | 464036 | Patrick Ortiz | VEHICULO_DESCONOCIDO | patente_tracto | XF3662 | XF3629 (débil -- 1 doc, tipo distinto) |
+| 2 | 464036 | Patrick Ortiz | OBRA_DESCONOCIDA | obra_destino | CONSTRUCTORA CERRO APOQUINDO | -- |
+| 3 | 464170 | Iván Roa | VEHICULO_DESCONOCIDO | patente_tracto | TVXJ33 | -- |
+| 4 | 464170 | Iván Roa | VEHICULO_DESCONOCIDO | patente_rampla | PXHH32 | -- |
+| 5 | 464170 | Iván Roa | OBRA_DESCONOCIDA | obra_destino | SUPERMERCADO SEÑOR DE LOS MI | -- |
+| 6 | 464264 | Carlos Simón | VEHICULO_DESCONOCIDO | patente_rampla | JD6659 | JE8659 |
+| 7 | 464265 | Carlos Simón | VEHICULO_DESCONOCIDO | patente_tracto | VP6521 | VP8521 |
+| 8 | 464265 | Carlos Simón | VEHICULO_DESCONOCIDO | patente_rampla | JD0659 | JE8659 |
+| 9 | 464395 | José Lazcano | OBRA_DESCONOCIDA | obra_destino | ING Y METALURGICA INGEMETA | -- |
+| 10 | 464488 | Patricio Villagra Muñoz | OBRA_DESCONOCIDA | obra_destino | CONSTRUCTORA E INMOBILIARIA | -- |
+| 11 | 464491 | Leandro Toledo | OBRA_DESCONOCIDA | obra_destino | CONSTRUCTORA ALTIUS SPA | -- |
+| 12 | 464493 | Cristopher Retamal | OBRA_DESCONOCIDA | obra_destino | EMPRESA CONST SIGRO SA | (ya existe casi idéntica en catálogo, ver auditoría anterior) |
+| 13 | 464854 | Carlos Farías | VEHICULO_DESCONOCIDO | patente_tracto | TVKT21 | -- |
+| 14 | 464854 | Carlos Farías | VEHICULO_DESCONOCIDO | patente_rampla | PXHH31 | -- |
+| 15 | 464854 | Carlos Farías | OBRA_DESCONOCIDA | obra_destino | CONST GRUPO COLOSO LTDA | -- |
+
+**Drive:** modificado -- exclusivamente `decisiones_pendientes.json`. **Catálogos:** sin cambios. **CSV documental:** sin cambios. **15 decisiones reales:** sin aplicar. **Backup:** creado y verificado, **rollback NO requerido**. **Desktop:** no modificado en este bloque. **Git:** commit documental de las tres bitácoras (ver hash real abajo). **ORS: 0 llamadas. Onelogis red: 0 llamadas. OCR: no se re-ejecutó.**
+
+**Estado: BANDEJA REAL DE REVISIÓN ATLAS REGENERADA Y RECONCILIADA -- LISTA PARA QUE JAVIER RESUELVA LAS DECISIONES UNA POR UNA.**
