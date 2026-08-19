@@ -4,7 +4,20 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
-## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA DE VEHÍCULOS validado — listo para revisión con Javier antes de producción
+## 2026-08-19 — Handoff vigente: Motor de Evidencia de Vehículos EN PRODUCCIÓN — JD8659 registrada, 13/15 decisiones reales pendientes
+
+- **Publicado:** Motor `87d49b2` (incluye `335c59c`), Desktop `a55a726`. Ambos en `origin`, working trees limpios. Motor `1333 passed`; Desktop `221 passed`.
+- **JD8659 registrada en Drive real**, CARRO/CONFIRMADO/ACTIVO, asociada al RUT de Carlos Simón. JE8659/VP8521 intactas.
+- **2 de las 15 decisiones reales se resolvieron y aplicaron sin preguntarle a Javier:** 464264 y 464265 (rampla), JD6659/JD0659 → JD8659, vía `SELECCIONAR_OTRA_PATENTE`. CSV documental sin tocar; ledger con la evidencia completa de por qué.
+- **13 decisiones reales siguen pendientes**, ahora clasificadas: 2 `SUGERENCIA_HUMANA` fuertes con un candidato único listo para confirmar en un clic (464265-tracto VP6521→VP8521; 464493-obra "EMPRESA CONST SIGRO SA", probable duplicado de una obra ya confirmada); 9 `ALTA_ADMINISTRATIVA` (vehículos/obras genuinamente nuevos, ninguna duda); 1 `INCIDENCIA_DOCUMENTAL` (464036 Ortiz, ya señalado en la auditoría previa como error del mandante, no aplicado unilateralmente); 1 `ABSTENCION_REAL` (464170-obra, discrepancia sin resolver con la memoria de Javier).
+- **Bug real encontrado y corregido en el camino:** los candidatos de una decisión quedaban congelados para siempre tras la primera vez que se calculaban -- una confirmación humana nueva (como JD8659) nunca llegaba a reflejarse. Corregido de forma general (`enriquecer_decisiones_vehiculo` siempre recalcula), no como parche puntual.
+- **Decisión de producto explícita, no técnica:** VP6521→VP8521 tiene evidencia documental fuerte (2 transportes independientes, 2 mandantes distintos, sin rival) pero se dejó como sugerencia, no como resolución automática -- la línea sigue en la confirmación humana estructural, nunca en "cuántos documentos coinciden".
+- **Drive modificado:** `catalogos_privados/vehiculos.json`, `operacion/actual/decisiones_pendientes.json`, `operacion/actual/decisiones_aplicadas.json`. `analisis_completo_guias.csv` sin cambios. 3 respaldos con manifiesto SHA-256 en `respaldos/` (`REGISTRO_JD8659_...`, `PUESTA_EN_PRODUCCION_MOTOR_VEHICULOS_...`, más el `JD8659_Y_REFRESCO_464717_...` del bloque anterior, sin usar).
+- **Siguiente frente recomendado:** Javier revisa en Desktop las 2 sugerencias fuertes y decide con un clic; después, generalizar el mismo patrón de evidencia estructurada (nunca autocorrección silenciosa) a obras/destinos -- empezando posiblemente por el caso 464493, que ya mostró el mismo patrón que vehículos (variantes de un mismo dato ya confirmado).
+
+---
+
+## 2026-08-19 — Handoff previo: MOTOR DE EVIDENCIA DE VEHÍCULOS validado — listo para revisión con Javier antes de producción
 
 - **Qué es y qué NO es:** primera pieza de razonamiento determinista de Atlas sobre `VEHICULO_DESCONOCIDO` -- reglas explicables (RUT del chofer, tipo de vehículo, corrección OCR calibrada, confirmación humana estructurada), nunca IA generativa/LLM, nunca red externa. No se le llama "IA" porque todavía no lo es.
 - **Por qué existe:** el bloque anterior (JD8659 canónica) se detuvo al descubrir que el mecanismo viejo sólo podía sugerir una patente si otro documento ya la había leído literalmente -- JD8659 nunca fue leída así por ningún documento, pese a que el chofer la confirmó directamente a Javier. Se corrigió la capacidad general, no el caso puntual.

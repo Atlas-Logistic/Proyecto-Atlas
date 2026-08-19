@@ -4,6 +4,40 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19 — PUESTA EN PRODUCCIÓN CONTROLADA del Motor de Evidencia de Vehículos
+
+**Rama motor:** `lector-mvp-guia-nueva`, commits `335c59c` (motor de evidencia) + `87d49b2` (fix candidatos congelados) · **Rama Desktop:** `fix-desktop-data-root-drag-drop`, commit `a55a726` · Ambos publicados en `origin`.
+
+### FASE 0 — checkpoint y publicación
+
+Working trees verificados byte a byte contra lo reportado al cierre del bloque anterior (sólo los archivos ya descritos, nada ajeno). Motor `1332 passed`, Desktop `221 passed` antes de comitear. Commit + push normales en ambos repos; `git fetch` posterior confirmó `local=remoto`, `ahead/behind 0/0`, working trees limpios.
+
+### FASE 1 — JD8659 canónica en Drive real
+
+Backup escoped (`respaldos/REGISTRO_JD8659_ROLLBACK_PRE_APLICACION_20260819_163138/`, manifiesto SHA-256) + dry-run en TEMP contra una copia exacta del catálogo real (20→21 vehículos, JE8659/VP8521 preservados byte a byte) antes de tocar Drive. Escritura real vía `confirmar_vehiculo(patente="JD8659", tipo=CARRO, rut_chofer_asociado=<RUT normalizado de Carlos Simón>, fuente_decision="CONFIRMACION_CHOFER_CARLOS_SIMON_2026-08-19", actor="JAVIER_MBT")`. Verificado post-escritura: 20→21, ninguna patente previa cambió de estado.
+
+### Bug real encontrado y corregido: candidatos congelados
+
+Al reconciliar la bandeja real en TEMP tras registrar JD8659, `reconciliar_bandeja_decisiones` NO hizo aparecer JD8659 como candidata en 464264/464265. Causa raíz: `enriquecer_decisiones_vehiculo` sólo evaluaba una decisión si ésta *todavía no traía* `candidatos` -- las 4 decisiones de vehículo ya tenían candidatos persistidos desde una corrida anterior del mecanismo viejo (antes de este bloque), así que nunca se les daba la oportunidad de reevaluarse con el catálogo nuevo. Confirmado que `decision_id` (`_decision_id`) no depende de `candidatos` -- recalcular es seguro, nunca resucita una decisión ya cerrada en el ledger.
+
+**Fix (`atlas_core/decisiones_pendientes.py`):** `enriquecer_decisiones_vehiculo` ahora siempre reevalúa cada `VEHICULO_DESCONOCIDO` con `evaluar_evidencia_patente`, y reconstruye `acciones_permitidas` desde una base limpia en cada corrida (evita acumular duplicados; permite que una candidata que deja de ser válida también retire su acción). Idempotente por construcción. Test nuevo `test_enriquecer_decisiones_vehiculo_refresca_candidatos_ya_presentes` reproduce el escenario real exacto (candidato documental congelado → aparece confirmación humana nueva → debe reflejarse en la siguiente corrida). `_confirmar` (helper de test) ganó `rut_chofer_asociado` opcional. Suite completa tras el fix: `1333 passed, 0 failed`.
+
+### FASE 2 — VP6521→VP8521: ¿el motor general ya tiene evidencia suficiente?
+
+Auditado programáticamente contra el dataset real: RUT de Simón coincide, tipo compatible (TRACTO), VP8521 confirmada/activa, **2 transportes independientes** (`0000351135` con SODIMAC, `0000352376` con EBEMA/PRODALAM -- dos mandantes distintos, no el mismo cliente repitiendo), sin ningún tracto rival para ese RUT, sin confirmación humana directamente asociada (a diferencia de JD8659, VP8521 se confirmó en un bloque anterior sin `rut_chofer_asociado`).
+
+**Decisión de producto, explícita y razonada:** no se bajó el umbral. Un patrón general "≥N transportes independientes + tipo compatible + sin rival ⇒ `RESUELTO_AUTOMATICAMENTE`" seguiría siendo, en el fondo, "más documentos que coinciden = más certeza" -- exactamente el razonamiento que este bloque existe para evitar (`JE8659` también tenía evidencia documental repetida y era la respuesta equivocada). La línea que separa `RESUELTO_AUTOMATICAMENTE` de `SUGERENCIA_HUMANA` se mantiene en la confirmación humana estructural, no en el conteo de corroboraciones documentales, sin importar cuán fuertes. **La arquitectura ya producía la clasificación correcta -- no se modificó.** VP6521→VP8521 queda como `SUGERENCIA_HUMANA` fuerte (nivel `DOCUMENTAL_INDEPENDIENTE`, candidata única, cero conflictos salvo `OCR_ACTUAL_DIFIERE`), resoluble por Javier con un clic (`USAR_PATENTE_EXISTENTE`, ya wireado de punta a punta).
+
+### FASE 3/4 — clasificación completa de las 15 decisiones reales y medición
+
+Ver reporte final para la matriz completa. Resumen: **A (RESUELTO_AUTOMATICAMENTE) = 2** (464264, 464265-rampla); **B (SUGERENCIA_HUMANA) = 2** (464265-tracto VP6521→VP8521; 464493-obra, probable duplicado de una obra ya confirmada con otro sufijo corporativo); **C (ALTA_ADMINISTRATIVA) = 9** (vehículos/obras genuinamente nuevos, sin ninguna evidencia en contra); **D (INCIDENCIA_DOCUMENTAL) = 1** (464036 Ortiz -- diferencia de 2 dígitos, no 1, y Javier ya había señalado independientemente que es un error documental del mandante en la auditoría previa (`fb8ba95`); no se aplicó unilateralmente en este bloque, sin una confirmación fresca); **E (ABSTENCION_REAL) = 1** (464170-obra "Supermercado Señor de los Milagros" -- discrepancia sin resolver con la memoria de Javier, sin evidencia documental en ningún sentido).
+
+### FASE 5 — aplicación real, sólo lo inequívoco
+
+Backup adicional (`respaldos/PUESTA_EN_PRODUCCION_MOTOR_VEHICULOS_ROLLBACK_PRE_APLICACION_20260819_164133/`) antes de escribir. `reconciliar_bandeja_decisiones(raiz_atlas=Drive real)`: 15 conservadas, 15 publicadas, candidatos refrescados (JD8659 visible por primera vez). Aplicadas por CLI real (`aplicar_decision_pendiente.py`, el mismo binario que invoca Desktop): `SELECCIONAR_OTRA_PATENTE --patente-elegida JD8659` para 464264 y 464265 (rampla) -- ambas con 2 candidatos persistidos (JD8659 nivel `CONFIRMACION_HUMANA`, JE8659 nivel `DOCUMENTAL_INDEPENDIENTE`), por lo que `USAR_PATENTE_EXISTENTE` (que exige exactamente 1 candidato) no aplicaba. Verificado: `analisis_completo_guias.csv` byte a byte sin cambios en las columnas de patente (JD6659/JD0659 siguen ahí, tal como los leyó OCR); `decisiones_pendientes.json` 15→13; `decisiones_aplicadas.json` 13→15, cada entrada con `candidatos_previos` completo (evidencias, conflictos, `razon_legible`) para auditoría permanente. No se aplicó ninguna de las 13 restantes -- ninguna era inequívoca sin intervención de Javier, y `REGISTRAR` de vehículos nuevos quedó explícitamente fuera de alcance de este bloque por instrucción. `estado_operacion.json`/`reportes/actual` no requirieron regeneración (apuntan por ruta, no por conteo; el ledger de vehículo es un consumidor futuro separado del reporte, scope ya delimitado en el bloque anterior). ORS/Onelogis: 0 llamadas.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA DE VEHÍCULOS: razonamiento determinista (no IA) para VEHICULO_DESCONOCIDO
 
 **Rama motor:** `lector-mvp-guia-nueva` · **Rama Desktop:** `fix-desktop-data-root-drag-drop` · **Estado:** sin commit funcional (pendiente de revisión con Javier) · Drive/catálogos/decisiones reales: **sin tocar**.

@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-19 — PUESTA EN PRODUCCIÓN CONTROLADA del Motor de Evidencia de Vehículos: JD8659 registrada, 2 de 15 decisiones reales resueltas sin preguntarle a Javier
+
+- **Motor y Desktop publicados:** `335c59c` + `87d49b2` (Motor) y `a55a726` (Desktop), ambos en `origin`, working trees limpios. Motor `1333 passed`; Desktop `221 passed`.
+- **JD8659 registrada en el catálogo real:** CARRO, CONFIRMADO, ACTIVO, asociada al RUT de Carlos Simón, fuente `CONFIRMACION_HUMANA`, actor `JAVIER_MBT`. JE8659 y VP8521 quedaron exactamente igual que antes -- ninguna se borró, fusionó ni reinterpretó.
+- **Bug real encontrado y corregido antes de aplicar nada:** el mecanismo que actualiza los candidatos de una decisión (`enriquecer_decisiones_vehiculo`) sólo actuaba si la decisión todavía no tenía ninguno -- una decisión con candidatos "viejos" (de antes de que JD8659 existiera) quedaba congelada para siempre, y JD8659 nunca habría llegado a aparecer como candidata real. Corregido de forma general (siempre recalcula), no como parche puntual.
+- **2 de las 15 decisiones reales se resolvieron solas, sin preguntarle nada a Javier:** las dos guías de Carlos Simón con rampla mal leída (464264: JD6659→JD8659; 464265: JD0659→JD8659) tenían evidencia suficiente (confirmación humana directa asociada al RUT del chofer) -- Atlas las cerró con `SELECCIONAR_OTRA_PATENTE`, preservando intacta la lectura OCR original en el CSV y dejando el razonamiento completo auditable en el ledger.
+- **El resto de la bandeja se clasificó, no se forzó:** el caso VP6521→VP8521 (mismo Carlos Simón, tracto) quedó deliberadamente como sugerencia -- aunque la evidencia documental es fuerte (2 transportes independientes, 2 mandantes distintos, sin rival), Atlas decidió no autorresolver sin una confirmación humana explícita, para no mover el umbral de "documentos que coinciden" a "verdad". El caso Ortiz (XF3662) y el de la obra "EMPRESA CONST SIGRO SA" (que probablemente ya existe con otro sufijo) quedan señalados con toda la evidencia a la vista, listos para un clic de Javier -- ninguno se resolvió unilateralmente.
+- **Bandeja real: 15 → 13 pendientes.** Drive: sólo `vehiculos.json`, `decisiones_pendientes.json` y `decisiones_aplicadas.json` cambiaron; `analisis_completo_guias.csv` (los datos documentales) no se tocó. 3 respaldos completos con manifiesto SHA-256 quedaron en `respaldos/`.
+- **Siguiente frente recomendado:** que Javier revise en Desktop las 2 sugerencias fuertes (VP8521, EMPRESA CONST SIGRO) y decida si aplicarlas con un clic; después, generalizar el mismo patrón (evidencia estructurada, nunca autocorrección silenciosa) a obras/destinos.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA DE VEHÍCULOS: primera capa de razonamiento determinista de Atlas (no "IA" todavía) — validado, sin tocar Drive, pendiente de revisión con Javier
 
 - **Origen del bloque:** al preparar el registro canónico de JD8659 (la rampla de Carlos Simón, confirmada directamente por el chofer a Javier), se descubrió que el mecanismo existente (`sugerir_vehiculos_por_chofer`) sólo podía sugerir una patente si OTRO documento ya la había leído literalmente por OCR — y ningún documento leyó nunca "JD8659". Javier detuvo el registro puntual y pidió corregir la **capacidad general**, no parchear este caso.
