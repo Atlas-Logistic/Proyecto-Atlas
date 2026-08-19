@@ -575,6 +575,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "valor_documental": razon_social_doc, "rut_documental": rut_doc, "cliente_id": cliente_id_nuevo,
                     "motivo_rechazo": (str(motivo_rechazo).strip() if motivo_rechazo and accion == "NO_REGISTRAR" else None),
+                    "evaluacion_evidencia_previa": decision.get("evaluacion_evidencia"),
+                    "candidatos_evidencia_previos": decision.get("candidatos_evidencia"),
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
             elif tipo == "ALIAS_CANDIDATO":
@@ -630,6 +632,15 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "valor_documental": valor_documental_alias, "cliente_id": cliente_id_alias if accion == "CONFIRMAR_ALIAS" else None,
                     "valor_canonico": valor_canonico if accion == "CONFIRMAR_ALIAS" else None,
+                    # MOTOR DE EVIDENCIA FASE 4 -- trazabilidad completa
+                    # exigida por Javier: la evidencia y el nivel de
+                    # resultado que motivaron esta aplicación quedan en el
+                    # ledger, nunca sólo en la bandeja transitoria. Permite
+                    # reconstruir "qué decía la guía" vs "qué usó Atlas" vs
+                    # "por qué", incluso mucho después de que la decisión
+                    # ya no esté pendiente.
+                    "evaluacion_evidencia_previa": decision.get("evaluacion_evidencia"),
+                    "candidatos_evidencia_previos": decision.get("candidatos_evidencia"),
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
             else:

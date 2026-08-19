@@ -4,6 +4,20 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA FASE 4 -- auto-resolución activada y probada, código listo, sin activar sobre datos reales
+
+- **La decisión de producto de Javier ya está implementada:** `RESUELTO_AUTOMATICAMENTE` (hoy sólo alcanzable por `ALIAS_CANDIDATO`, vía confirmaciones humanas independientes) se aplica solo al reconciliar la bandeja -- reutiliza `aplicar_decision_obra` con `actor="ATLAS_AUTOMATICO"`, nunca un segundo camino de escritura. La decisión deja de aparecer pendiente; queda auditable en catálogo + ledger + Incidencia Documental.
+- **Nunca se toca el CSV documental.** Auditados los consumidores reales (consolidación de viajes, reportes, Excel, Desktop) -- todos dependen de `DocumentoViaje`, que lee directo del CSV. Escribir ahí la entidad canónica es un cambio transversal real, no menor -- se decidió, por consistencia con el mismo criterio ya usado para vehículos, NO tocarlo en este bloque. La trazabilidad completa (documental vs. canónico vs. por qué) vive en el catálogo/ledger, que ya cumple lo que pedía la sección de seguridad de la instrucción.
+- **Probado de punta a punta con acciones reales:** la curva completa (preguntar → aprender → preguntar menos → resolver solo → volver a preguntar si hay contradicción nueva) tiene un test real por etapa.
+- **Nueva pestaña Desktop: Incidencias Documentales**, primera versión funcional con filtros básicos.
+- **Sobre los 13 casos reales:** hoy nada se resuelve solo -- el catálogo de confirmaciones humanas reales sigue vacío (nadie ha usado `CONFIRMAR_ALIAS` en producción todavía). No es un error, es el punto de partida esperado.
+- **Verificación externa:** sin proveedor contratado (recomendación: API Gateway, sobre BaseAPI, por exponer los servicios por separado). No bloqueó nada de este bloque.
+- **Drive, catálogos, decisiones reales: sin tocar.** Motor `1402 passed`; Desktop `242 passed`.
+- **Próxima decisión para Javier:** ¿activar esto sobre la operación real (empezar a confirmar alias reales desde Desktop para que el aprendizaje arranque)? ¿extender la auto-resolución/Incidencias a más campos (patente, obra) cuando tengan su propio mecanismo de confirmación? ¿contratar un proveedor de verificación externa? ¿dar el paso más grande -- hacer que el resto de Atlas (reportes, Excel, consolidación) empiece a usar el nombre canónico en vez del documental?
+- **Siguiente frente recomendado, no iniciado por instrucción explícita:** analítica/IA conversacional, mobile, multiempresa.
+
+---
+
 ## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA FASE 3 integrado al flujo real — sin activar en producción, pendiente de la decisión de Javier
 
 - **El motor ya está conectado donde Desktop realmente lee/escribe** (`reconciliar_bandeja_decisiones`), no en un flujo paralelo. `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` tienen aplicación real por primera vez -- antes eran sólo UX preparatoria pese a mostrar opciones.

@@ -4,6 +4,67 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA FASE 4: activación controlada de auto-resolución + Incidencias Documentales en Desktop
+
+**Rama motor:** `lector-mvp-guia-nueva`. Sin commit al momento de redactar (se comitea al cierre).
+
+### FASE 0 -- checkpoint
+
+`d1b6439`/`7c03553`, `local=remoto`, `0/0`, limpios. Suite Motor `1399 passed` antes de empezar.
+
+### FASE 1 -- auditoría de consumidores downstream (una sola vez, acotada)
+
+Consumidores reales de la columna `cliente`/`obra_destino` del CSV consolidado, confirmados por lectura de código: `atlas_core/gestor_viajes.py` (`DocumentoViaje.cliente`/`.obra_destino`, el modelo central de consolidación de viajes, del que dependen reportes/Desktop/Excel), `atlas_core/reporte_viajes.py` (agrupación `clientes_no_reconocidos.csv`), `atlas_core/storage.py`, más Desktop (tabla principal, detalle, exportación Excel -- todos leen el `Viaje` ya consolidado, nunca el CSV directamente).
+
+**Respuesta a la pregunta de FASE 1:** técnicamente sí podrían coexistir `cliente_documental`/`cliente_canonico` como columnas nuevas, pero el CSV tiene un esquema estrictamente cerrado (`_leer_filas` compara `fieldnames` contra `COLUMNAS` exacto -- cualquier columna nueva exige migrar el CSV real de producción) y, aunque se agregaran, CADA consumidor listado tendría que actualizarse explícitamente para preferir el canónico -- un cambio transversal real, no una extensión menor. Vehículos ya enfrentó esta misma decisión hace dos bloques y **deliberadamente no tocó el CSV** -- "usar operacionalmente" la patente confirmada quedó fuera de alcance, con la trazabilidad completa viviendo sólo en el catálogo y el ledger. Se aplicó el mismo criterio aquí, por consistencia y por acotar el riesgo: **el CSV no se tocó en este bloque.**
+
+### FASE 2 -- modelo de persistencia (decisión: sin nuevas columnas CSV)
+
+En vez de extender el esquema del CSV, la resolución automática se apoya en la infraestructura YA construida en los bloques anteriores -- que además ya cumple exactamente lo que pide la sección "SEGURIDAD Y TRAZABILIDAD" de la instrucción de Javier:
+- `OBSERVACION_DOCUMENTAL`/`VALOR_CANONICO`/`FUENTE_RESOLUCION`/`EVIDENCIAS`/`NIVEL_RESULTADO`/`TIMESTAMP` -> el ledger (`decisiones_aplicadas.json`), que ya guarda `valor_documental` + `valor_canonico` + `evaluacion_evidencia_previa` + `candidatos_evidencia_previos` (nuevo en este bloque, ver abajo) + `fecha`.
+- El catálogo (`clientes.json`, vía `agregar_alias`) queda con el alias vinculado -- el documento nunca se edita.
+- La Incidencia Documental (`incidencias_documentales.json`) conserva ambos valores lado a lado.
+
+`atlas_core/aplicacion_decisiones.py`: los ledgers de `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` ganan `evaluacion_evidencia_previa`/`candidatos_evidencia_previos` -- antes sólo vehículos guardaba ese detalle (`candidatos_previos`); ahora clientes lo iguala.
+
+### FASE 3 -- auto-aplicación real
+
+`atlas_core/revalidacion_documental.py`: `reconciliar_bandeja_decisiones` gana un paso 4 -- después de publicar la bandeja enriquecida, identifica las decisiones `ALIAS_CANDIDATO` con `evaluacion_evidencia.resultado == RESUELTO_AUTOMATICAMENTE` y las aplica **reutilizando `aplicar_decision_obra` tal cual** (`accion="CONFIRMAR_ALIAS"`, `actor="ATLAS_AUTOMATICO"`) -- nunca un segundo camino de escritura. Punto fijo acotado (`MAX_ITERACIONES_AUTO_RESOLUCION = 10`): cada aplicación puede desbloquear otra (una confirmación nueva puede cruzar el umbral de independencia de una decisión hermana en la MISMA corrida), así que se repite hasta que una pasada no aplique nada más. Como la aplicación pasa por el mismo camino que una confirmación humana, hereda gratis: verificación de vigencia (hash de dataset/catálogos), transacción con respaldo/rollback, filtrado terminal contra el ledger (la decisión ya no vuelve a aparecer -- **"no genera tarjeta pendiente" se resuelve con el mecanismo YA existente, sin código nuevo para eso**).
+
+Hoy sólo `ALIAS_CANDIDATO` puede alcanzar `RESUELTO_AUTOMATICAMENTE` (ni `CLIENTE_DESCONOCIDO` ni `OBRA_DESCONOCIDA` tienen todavía una fuente de evidencia calibrada para ese nivel -- ver bloques anteriores); el mecanismo ya cubre cualquier tipo que lo alcance en el futuro, sin cambios.
+
+### FASE 4 -- Incidencia Documental automática
+
+Ya se resolvía desde el bloque anterior (`CONFIRMAR_ALIAS` siempre registra una), incluida la aplicación automática (mismo código, mismo camino). Alcance actual: sólo el campo `cliente`. Extender a otros campos (patente, obra, dirección) queda para cuando esos dominios tengan su propio mecanismo de confirmación -- reportado, no implementado a la fuerza aquí.
+
+### FASE 5 -- aprendizaje real, punta a punta
+
+Tests nuevos (`tests/test_motor_evidencia_auto_resolucion.py`, 3) prueban con acciones reales (no sólo funciones puras): `SUGERENCIA_HUMANA` nunca se aplica sola; reconciliar dos veces seguidas tras una auto-resolución es idempotente (no duplica ledger, la decisión ya cerrada nunca resucita); dos decisiones pueden desbloquearse en cadena dentro de una sola corrida. `tests/test_cliente_documental_canonico.py` actualizado: el test que antes esperaba "queda pendiente, RESUELTO_AUTOMATICAMENTE con 1 clic" ahora verifica el comportamiento nuevo -- ya no aparece en la bandeja, el alias quedó vinculado de verdad, el ledger y la incidencia son reconstruibles, el CSV nunca cambió.
+
+### FASE 6 -- verificación externa: opciones reales, sin bloquear
+
+Confirmado en el bloque anterior: BaseAPI/API Gateway exponen datos reales del SII pero requieren cuenta/token propios; no existe hoy una opción gratuita y confiable sin credenciales para Chile. **Recomendación breve:** de las dos, **API Gateway** (`apigateway.cl`) por ofrecer explícitamente situación tributaria + verificación de eRUT como servicios separados (más fácil de acotar el consumo/costo que un paquete todo-en-uno); evaluación de costo/contrato queda para cuando Javier decida avanzar -- no se contrató nada. La interfaz (`ProveedorVerificacionEntidades`) y el caché ya están listos para inyectar cualquiera de las dos sin cambios de arquitectura.
+
+### FASE 7 -- benchmark real (TEMP, sólo lectura)
+
+Bandeja real de 13 pendientes, con y sin el paso 4 (auto-resolución) activo: **resultado idéntico -- 0 decisiones aplicadas automáticamente en ambos casos.** No es un error: el catálogo de confirmaciones humanas reales (`evidencia_entidades.json`) está vacío en la operación real -- nadie ha usado `CONFIRMAR_ALIAS` todavía. El mecanismo está probado y listo (ver FASE 5/8); sólo necesita que Javier empiece a confirmar alias reales desde Desktop para que el aprendizaje arranque. SIGRO sigue en `CONTRADICCION_DOCUMENTAL` (evidencia externa real, sin confirmación humana estructural); Supermercado Señor de los Milagros sigue `ALTA_NUEVA`; `TORRES OCARANEA LTDA` sigue como candidato de nombre a revisar (no forma parte de las 13 decisiones pendientes -- es un cliente ya resuelto en el dataset, señalado aparte).
+
+### FASE 8 -- benchmark de madurez (controlado)
+
+Exactamente la curva pedida, demostrada con tests reales (no un mock aislado): 0 confirmaciones -> `SUGERENCIA_HUMANA` con 1 confirmación previa (`test_sugerencia_humana_nunca_se_aplica_sola...`) -> 2 confirmaciones independientes elevan a conocimiento fuerte -> 3ª aparición se `RESUELTO_AUTOMATICAMENTE` y se aplica sola (`test_dos_confirmaciones_independientes_elevan...`) -> una fuente contradictoria nueva reabre la duda (`test_contradiccion_nueva_vuelve_a_abrir_duda_cuando_corresponde`, bloque anterior). PREGUNTAR -> APRENDER -> PREGUNTAR MENOS -> RESOLVER -> VOLVER A PREGUNTAR SI HAY CONTRADICCIÓN NUEVA: las 5 etapas, cada una con su propio test.
+
+### FASE 9 -- Desktop: pestaña Incidencias Documentales (primera versión funcional)
+
+Nuevo `src/incidencias_documentales.js` (lectura de `catalogos_privados/incidencias_documentales.json`, mismo patrón que `estado_operacion.js`: un archivo ausente no es error, significa "todavía ninguna incidencia"). Nuevo `src/incidencias_documentales_ui.js` (funciones puras: `analizar`/`filtrar`/`camposUnicos`/`estadosUnicos`/`renderizar`, mismo estilo testable que `decisiones_pendientes_ui.js`). Nueva pestaña en `atlas_viajes.html`: tabla con fecha/guía/transporte/campo/valor documental/valor canónico/tipo/estado, filtros por campo/estado/texto libre. `main.js`/`preload.js`: nuevo canal IPC de sólo lectura `atlas:cargar-incidencias-documentales`. Nunca mezcla problemas de OCR/calidad -- por contrato, `incidencias_documentales.json` nunca contiene esos motivos (frontera protegida en Motor, bloque anterior).
+
+### Tests
+
+Motor: 4 tests nuevos (`test_motor_evidencia_auto_resolucion.py` x3, ajuste de 1 en `test_cliente_documental_canonico.py`). Suite completa: **1399 → 1402 passed, 0 failed.** Desktop: 16 tests nuevos (`incidencias_documentales.test.js` x6, `incidencias_documentales_ui.test.js` x10). Suite completa: **226 → 242 passed, 0 failed.**
+
+**Drive:** no modificado durante el desarrollo (todas las corridas de FASE 7/8 fueron TEMP, sólo lectura de Drive real). **Catálogos reales:** sin cambios. La integración de código, por sí misma, no modifica ningún dato real -- nunca se invocó contra la raíz real en este bloque.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA FASE 3: integración al flujo real
 
 **Rama motor:** `lector-mvp-guia-nueva`. Sin commit todavía al momento de redactar esta entrada (se comitea al cierre del bloque).

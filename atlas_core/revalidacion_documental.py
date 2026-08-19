@@ -721,6 +721,12 @@ def reconciliar_decisiones_origen(
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
+# MOTOR DE EVIDENCIA FASE 4 -- tope del punto fijo de auto-resolución en
+# `reconciliar_bandeja_decisiones`: nunca un bucle infinito, aunque las
+# aplicaciones se desbloqueen en cadena unas a otras.
+MAX_ITERACIONES_AUTO_RESOLUCION = 10
+
+
 def reconciliar_bandeja_decisiones(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
 ) -> dict[str, object]:
@@ -756,9 +762,26 @@ def reconciliar_bandeja_decisiones(
        cerrada, de cualquier tipo, resucita mientras su `decision_id` --
        que depende de la evidencia -- no cambie) y publica con los hashes
        actuales.
+    4. MOTOR DE EVIDENCIA FASE 4 -- decisión de producto de Javier:
+       `RESUELTO_AUTOMATICAMENTE` se aplica SOLO, sin pedir un clic.
+       Reutiliza `aplicar_decision_obra` (nunca un segundo camino de
+       escritura), `actor="ATLAS_AUTOMATICO"` -- auditable y
+       distinguible de una confirmación humana en el ledger. Hoy sólo
+       `ALIAS_CANDIDATO` puede alcanzar `RESUELTO_AUTOMATICAMENTE`
+       (`OBRA_DESCONOCIDA`/`CLIENTE_DESCONOCIDO` todavía no tienen una
+       fuente de evidencia calibrada para ese nivel -- ver
+       `atlas_core.motor_evidencia_obras`/`motor_evidencia_clientes`);
+       cuando la tengan, este mismo mecanismo las cubre sin cambios.
+       Punto fijo acotado (`MAX_ITERACIONES_AUTO_RESOLUCION`): una
+       aplicación puede desbloquear otra (una confirmación nueva puede
+       cruzar el umbral de independencia para una decisión hermana), así
+       que se repite hasta que una pasada no aplique nada más.
 
-    No modifica ningún catálogo ni el CSV documental -- sólo
-    (re)escribe `decisiones_pendientes.json`."""
+    No modifica ningún catálogo ni el CSV documental por sí sola (el paso
+    4 SÍ escribe catálogos/ledger -- exactamente lo mismo que ya hace
+    `aplicar_decision_obra` para una confirmación humana, con el mismo
+    respaldo/rollback transaccional)."""
+    from atlas_core.aplicacion_decisiones import aplicar_decision_obra
     from atlas_core.catalogo_clientes import CatalogoClientes
     from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
     from atlas_core.decisiones_pendientes import (
@@ -774,63 +797,98 @@ def reconciliar_bandeja_decisiones(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
+    def _regenerar_enriquecer_publicar(pendientes: list[dict[str, object]]) -> dict[str, object]:
+        vigentes_locales = regenerar_decisiones_persistidas(
+            decisiones=pendientes, carpeta_catalogos=catalogos,
+        )
+        filas = _leer_filas(dataset)
+        try:
+            vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
+        except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
+            vehiculos = ()
+        enriquecidas_locales = enriquecer_decisiones_vehiculo(decisiones=vigentes_locales, filas=filas, vehiculos=vehiculos)
+
+        try:
+            clientes_confirmados = [
+                c for c in CatalogoClientes(catalogos / "clientes.json").listar()
+                if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+            ]
+        except (OSError, ValueError):
+            clientes_confirmados = ()
+        try:
+            confirmaciones = AlmacenEvidenciaEntidades(catalogos / "evidencia_entidades.json").listar()
+        except (OSError, ValueError):
+            confirmaciones = ()
+        try:
+            cache_externa = CacheVerificacionExterna.desde_dict(
+                json.loads((catalogos / "verificacion_externa_cache.json").read_text(encoding="utf-8"))
+            )
+        except (OSError, json.JSONDecodeError, ValueError):
+            cache_externa = CacheVerificacionExterna()
+        evidencia_externa_clientes = {clave: cache_externa.obtener(clave) or () for clave in cache_externa.entradas}
+        enriquecidas_locales = enriquecer_decisiones_cliente(
+            decisiones=enriquecidas_locales, clientes=clientes_confirmados, confirmaciones=confirmaciones,
+            evidencia_externa_por_clave=evidencia_externa_clientes,
+        )
+        try:
+            obras_vigentes = CatalogoObrasDestinos(
+                ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+                ruta_destinos=catalogos / "destinos_maestros.json",
+            ).listar_obras()
+        except (OSError, ValueError):
+            obras_vigentes = ()
+        enriquecidas_locales = enriquecer_decisiones_obra(
+            decisiones=enriquecidas_locales, obras=obras_vigentes, evidencia_externa_por_clave=evidencia_externa_clientes,
+        )
+
+        bandeja_local = generar_artefacto(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=enriquecidas_locales, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
+        return {"vigentes": vigentes_locales, "bandeja": bandeja_local}
+
     try:
         artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
         pendientes_actuales = artefacto_actual.get("decisiones", [])
     except (OSError, json.JSONDecodeError):
         pendientes_actuales = []
 
-    vigentes = regenerar_decisiones_persistidas(
-        decisiones=pendientes_actuales, carpeta_catalogos=catalogos,
-    )
+    resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)
+    vigentes = resultado_primero["vigentes"]
+    bandeja = resultado_primero["bandeja"]
 
-    filas = _leer_filas(dataset)
-    try:
-        vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
-    except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
-        vehiculos = ()
-    enriquecidas = enriquecer_decisiones_vehiculo(decisiones=vigentes, filas=filas, vehiculos=vehiculos)
-
-    try:
-        clientes_confirmados = [
-            c for c in CatalogoClientes(catalogos / "clientes.json").listar()
-            if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+    aplicadas_automaticamente: list[dict[str, object]] = []
+    for _ in range(MAX_ITERACIONES_AUTO_RESOLUCION):
+        candidatas = [
+            d for d in bandeja["decisiones"]
+            # Hoy sólo ALIAS_CANDIDATO tiene una acción de aplicación
+            # capaz de vincular la canónica sugerida sin más datos que
+            # los que ya trae la propia decisión (CONFIRMAR_ALIAS) --
+            # ver docstring. Nunca CLIENTE_DESCONOCIDO/OBRA_DESCONOCIDA
+            # con REGISTRAR: eso crearía una entidad nueva, no aplicaría
+            # una ya conocida, y no es lo que este resultado significa.
+            if d.get("tipo") == "ALIAS_CANDIDATO"
+            and (d.get("evaluacion_evidencia") or {}).get("resultado") == "RESUELTO_AUTOMATICAMENTE"
         ]
-    except (OSError, ValueError):
-        clientes_confirmados = ()
-    try:
-        confirmaciones = AlmacenEvidenciaEntidades(catalogos / "evidencia_entidades.json").listar()
-    except (OSError, ValueError):
-        confirmaciones = ()
-    try:
-        cache_externa = CacheVerificacionExterna.desde_dict(
-            json.loads((catalogos / "verificacion_externa_cache.json").read_text(encoding="utf-8"))
-        )
-    except (OSError, json.JSONDecodeError, ValueError):
-        cache_externa = CacheVerificacionExterna()
-    evidencia_externa_clientes = {clave: cache_externa.obtener(clave) or () for clave in cache_externa.entradas}
-    enriquecidas = enriquecer_decisiones_cliente(
-        decisiones=enriquecidas, clientes=clientes_confirmados, confirmaciones=confirmaciones,
-        evidencia_externa_por_clave=evidencia_externa_clientes,
-    )
-    try:
-        obras_vigentes = CatalogoObrasDestinos(
-            ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
-            ruta_destinos=catalogos / "destinos_maestros.json",
-        ).listar_obras()
-    except (OSError, ValueError):
-        obras_vigentes = ()
-    enriquecidas = enriquecer_decisiones_obra(
-        decisiones=enriquecidas, obras=obras_vigentes, evidencia_externa_por_clave=evidencia_externa_clientes,
-    )
+        if not candidatas:
+            break
+        for decision in candidatas:
+            resultado_aplicacion = aplicar_decision_obra(
+                raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR_ALIAS",
+                actor="ATLAS_AUTOMATICO", reloj=reloj,
+            )
+            aplicadas_automaticamente.append({
+                "decision_id": decision["decision_id"], "documento": decision.get("documento"),
+                "valor_documental": decision.get("valor_documental"), "resultado": resultado_aplicacion,
+            })
+        pendientes_tras_aplicar = json.loads(artefacto_ruta.read_text(encoding="utf-8")).get("decisiones", [])
+        resultado_pasada = _regenerar_enriquecer_publicar(pendientes_tras_aplicar)
+        bandeja = resultado_pasada["bandeja"]
 
-    bandeja = generar_artefacto(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones=enriquecidas, ruta_salida=artefacto_ruta, reloj=reloj,
-    )
     return {
         "decisiones_antes": len(pendientes_actuales),
         "decisiones_conservadas": len(vigentes),
         "decisiones_publicadas": len(bandeja["decisiones"]),
+        "decisiones_aplicadas_automaticamente": aplicadas_automaticamente,
         "bandeja": bandeja,
     }

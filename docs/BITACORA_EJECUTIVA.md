@@ -4,6 +4,19 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA FASE 4: auto-resolución activada (código listo, sin activar sobre datos reales)
+
+- **Decisión de producto de Javier, ya implementada:** cuando Atlas tiene evidencia suficiente para un cliente/obra (`RESUELTO_AUTOMATICAMENTE`), ya no pide un clic -- aplica la entidad canónica sola, deja registrada la evidencia completa (qué decía la guía, qué usó Atlas, por qué) y crea automáticamente una Incidencia Documental. Javier sólo interviene cuando persiste una duda real.
+- **Nunca se pierde nada:** el documento original nunca se toca. El CSV, la lectura OCR, el RUT documental, todo queda exactamente igual -- lo único que cambia es que el catálogo aprende la relación real y la decisión deja de aparecer como pendiente.
+- **Auditoría de consumidores reales:** escribir la entidad canónica directamente en el CSV consolidado tocaría varios sistemas (consolidación de viajes, reportes, Excel, Desktop) que hoy no están preparados para eso -- se decidió NO tocar el CSV en este bloque (mismo criterio ya usado para vehículos desde hace dos bloques) y en cambio dejar la resolución completamente auditable en el catálogo y el historial. Que el resto de Atlas empiece a "ver" el nombre canónico en vez del documental queda como una decisión de producto separada, explícita, para cuando Javier la pida.
+- **Encontrado y corregido: un bug real que habría degradado la clasificación de vehículos si se hubiera dejado pasar** -- ya corregido en el bloque anterior, esta vez validado que sigue funcionando correctamente con la auto-resolución activa.
+- **Probado de punta a punta, con acciones reales:** primera confirmación → segunda independiente → tercera aparición se resuelve sola, sin pedir nada. Corrido dos veces seguidas sin duplicar nada. Nunca aplica una simple "sugerencia" -- sólo lo que de verdad ya está resuelto.
+- **Nueva pestaña en Desktop: Incidencias Documentales** -- primera versión funcional, con filtros básicos, mostrando exactamente lo que Motor ya registra.
+- **Sobre los 13 casos reales pendientes de la operación:** hoy nada se resuelve solo todavía, porque el catálogo de confirmaciones humanas reales sigue vacío -- exactamente lo esperado, no un error. En cuanto Javier empiece a confirmar alias reales desde Desktop, el aprendizaje arranca solo.
+- **Nada se aplicó a Drive real.** Motor `1402 passed`; Desktop `242 passed`.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA FASE 3: conectado al flujo real (sin aplicar a producción) — y un bug real de tipo de vehículo encontrado y corregido
 
 - **El motor de clientes/obras del bloque anterior ya está conectado al flujo real** que usa Desktop (`reconciliar_bandeja_decisiones`), no a un flujo paralelo. Además, **por primera vez, `CLIENTE_DESCONOCIDO` y `ALIAS_CANDIDATO` tienen una aplicación real** -- hasta este bloque, aunque Desktop mostraba sus opciones, el botón "Aplicar" nunca hacía nada (sólo UX preparatoria). Ahora sí: registrar un cliente nuevo, o confirmar que un texto documental corresponde a una entidad ya conocida, funciona de punta a punta.

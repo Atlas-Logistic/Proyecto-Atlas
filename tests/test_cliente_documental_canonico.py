@@ -238,8 +238,9 @@ def test_dos_confirmaciones_independientes_elevan_decision_futura_a_resuelto_aut
     """CASO C del bloque anterior, ahora de punta a punta con acciones
     reales: dos CONFIRMAR_ALIAS en transportes distintos elevan la
     relación RUT->EBEMA a conocimiento fuerte; una tercera aparición
-    equivalente (nunca vista antes) debe llegar RESUELTO_AUTOMATICAMENTE
-    tras reconciliar la bandeja."""
+    equivalente (nunca vista antes) debe resolverse SOLA al reconciliar
+    la bandeja (MOTOR DE EVIDENCIA FASE 4 -- decisión de producto de
+    Javier: RESUELTO_AUTOMATICAMENTE se aplica sin pedir un clic)."""
     entorno = _entorno(
         tmp_path,
         filas_csv=[_fila_csv(numero_guia="1"), _fila_csv(numero_guia="2", numero_transporte="T-2")],
@@ -275,9 +276,39 @@ def test_dos_confirmaciones_independientes_elevan_decision_futura_a_resuelto_aut
 
     resultado = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
     publicada = resultado["bandeja"]
-    decision_3_publicada = next(d for d in publicada["decisiones"] if d["decision_id"] == decision_3["decision_id"])
-    assert decision_3_publicada["evaluacion_evidencia"]["resultado"] == "RESUELTO_AUTOMATICAMENTE"
-    assert decision_3_publicada["candidatos_evidencia"][0]["valor_canonico"] == "EBEMA SA"
+
+    # Ya NO queda pendiente -- se aplicó sola, sin pedir un clic.
+    assert all(d["decision_id"] != decision_3["decision_id"] for d in publicada["decisiones"])
+
+    aplicadas_auto = resultado["decisiones_aplicadas_automaticamente"]
+    assert len(aplicadas_auto) == 1
+    assert aplicadas_auto[0]["decision_id"] == decision_3["decision_id"]
+    assert aplicadas_auto[0]["resultado"]["ok"] is True
+    assert aplicadas_auto[0]["resultado"]["cliente_id"] == "cliente-ebema"
+
+    # El alias quedó vinculado de verdad en el catálogo -- no sólo en el
+    # ledger -- y el valor documental original ("XYZ CONSTRUCCIONES")
+    # sigue siendo reconstruible desde el ledger/incidencia, nunca se
+    # perdió.
+    clientes_finales = CatalogoClientes(entorno["catalogos"] / "clientes.json").listar()
+    assert "XYZ CONSTRUCCIONES" in clientes_finales[0].aliases
+
+    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    aplicacion_3 = next(a for a in ledger["aplicaciones"] if a["decision_id"] == decision_3["decision_id"])
+    assert aplicacion_3["actor"] == "ATLAS_AUTOMATICO"
+    assert aplicacion_3["valor_documental"] == "XYZ CONSTRUCCIONES"
+    assert aplicacion_3["valor_canonico"] == "EBEMA SA"
+    assert aplicacion_3["evaluacion_evidencia_previa"]["resultado"] == "RESUELTO_AUTOMATICAMENTE"
+
+    incidencias = AlmacenIncidenciasDocumentales(entorno["catalogos"] / "incidencias_documentales.json").listar()
+    incidencia_3 = next(i for i in incidencias if i.numero_guia == "3")
+    assert incidencia_3.valor_documental == "XYZ CONSTRUCCIONES"
+    assert incidencia_3.valor_canonico == "EBEMA SA"
+
+    # El CSV documental nunca se toca -- "XYZ CONSTRUCCIONES" sigue
+    # siendo lo que dice la guía, incluso después de la auto-resolución.
+    fila_3 = next(f for f in _leer_csv(entorno["dataset"]) if f["numero_guia"] == "3")
+    assert fila_3["cliente"] == "EBEMA SA"  # valor original de _fila_csv, ajeno a esta decisión
 
 
 # ============================================================
