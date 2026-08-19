@@ -1039,3 +1039,16 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Git:** working tree con `atlas_core/rutas/destino_entrega.py`, `atlas_core/telemetria/seleccion_recorrido.py`, `tests/test_desambiguacion_destino_inequivoca.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
 - **Qué debe decidir Javier ahora:** si autoriza publicar este mecanismo; si autoriza, en un bloque aparte, conectarlo al pipeline real SOLO para los casos que efectivamente resuelva (nunca forzando los B/C); qué hacer con el caso 7 que sigue necesitando confirmación humana pese a tener doble evidencia parcial.
 - **Estado: RESOLUCIÓN SEGURA DE DESTINOS CLASE A VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-18/19 — Bloque PUBLICACIÓN + APLICACIÓN REAL: resolución clase A + ORS controlado
+
+- **Publicado:** commit `515d9ef`, push confirmado, local=remoto, limpio -- antes de tocar Drive.
+- **Backup:** `respaldos/RESOLUCION_DESTINOS_A_ROLLBACK_PRE_APLICACION_20260818_203757/`, verificado SHA-256, con `LEEME_ROLLBACK.md`.
+- **Detección programática (no hardcodeada):** de los 17 `MULTIPLES_UBICACIONES_DISPERSAS` vigentes, el mecanismo resolvió exactamente **6** -- idéntico a la validación previa, sin sorpresas.
+- **Dry-run ORS real:** 6/6 `RUTA_CALCULADA`, coherentes. **Aplicación real:** mismos valores ya verificados copiados al dataset real -- **0 llamadas ORS adicionales** (nunca se recalculó dos veces). Reporte regenerado, `estado_operacion.json` actualizado.
+- **Integridad exacta:** sólo las 6 guías esperadas cambiaron, 0 documentos ajenos, 0 violaciones documentales. Catálogos/decisiones intactos (mtime).
+- **Cobertura: 18/38 (47.4%)**, antes 12/38 (31.6%). 11 viajes siguen correctamente ambiguos; `0000352241` confirmado en abstención también en producción, no sólo en la validación.
+- **Desktop:** sin cambios de código; km/destino nuevos ya visibles en el esquema existente.
+- **Drive:** modificado exclusivamente por esta aplicación controlada. **Git:** working tree sólo con las tres bitácoras.
+- **Qué debe decidir Javier ahora:** validar visualmente en Desktop los 6 viajes con destino/km nuevo; priorizar el próximo frente entre: casos B (confirmación humana asistida), casos C (nueva evidencia/geocodificador complementario), u otro de los pendientes explícitos (Incidencias Documentales, patente vs vehículo canónico, Analítica/IA, Mobile, Multiempresa -- ninguno iniciado).
+- **Estado: RESOLUCIÓN SEGURA CLASE A APLICADA + RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**

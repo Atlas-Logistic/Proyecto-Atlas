@@ -1008,3 +1008,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Git:** working tree con `atlas_core/rutas/destino_entrega.py`, `atlas_core/telemetria/seleccion_recorrido.py` (refactor puro, sin cambio de comportamiento, 84 tests de telemetría siguen en verde) y `tests/test_desambiguacion_destino_inequivoca.py`. **Sin commit, sin push -- Javier pidió revisar antes.**
 - **Próximo paso recomendado:** decisión de Javier sobre publicar este mecanismo y, en un bloque aparte, conectarlo al pipeline real (sólo para los casos que de verdad resuelva -- nunca forzando los B/C).
 - **Estado: RESOLUCIÓN SEGURA DE DESTINOS CLASE A VALIDADA -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Bloque PUBLICACIÓN + APLICACIÓN REAL: resolución clase A + ORS controlado -- 2026-08-18/19
+
+- **Publicado:** commit funcional `515d9ef` ("fix: resolver destinos ambiguos con evidencia inequivoca"), push confirmado, local=remoto, working tree limpio antes de tocar Drive.
+- **Backup:** `respaldos/RESOLUCION_DESTINOS_A_ROLLBACK_PRE_APLICACION_20260818_203757/`, verificado byte a byte por SHA-256, con `LEEME_ROLLBACK.md`. Backups previos intactos.
+- **Detección programática (no hardcodeada):** de los 17 viajes `MULTIPLES_UBICACIONES_DISPERSAS` vigentes, el mecanismo publicado resolvió exactamente **6** -- mismo resultado que la validación previa, sin sorpresas, confirmado antes de escribir Drive.
+- **Dry-run ORS real** (sólo para esos 6 pares origen/destino): 6/6 `RUTA_CALCULADA`, todas coherentes (distancia > 0, coordenadas de origen del punto de ruteo real documentado en `plantas.json` para AZA COLINA).
+- **Aplicación real:** los mismos valores ya calculados y verificados en TEMP se copiaron al dataset real -- **0 llamadas ORS adicionales** (nunca se recalculó dos veces la misma ruta). Reporte regenerado (mecanismo canónico) en `reportes/reporte_revalidacion_20260819_004409_246309/`; `estado_operacion.json` actualizado.
+- **Integridad: exactamente las 6 guías esperadas cambiaron, 0 documentos ajenos modificados, 0 violaciones de campos documentales.** Catálogos y decisiones intactos (verificado por mtime).
+- **Cobertura: 18/38 (47.4%)**, antes 12/38 (31.6%). 11 viajes siguen correctamente `MULTIPLES_UBICACIONES_DISPERSAS` (0 casos B/C promovidos automáticamente). El caso límite (Camino Lo Ruiz, 0000352241) se sigue absteniendo tal como se validó.
+- **Desktop:** no se tocó código; los km/destino nuevos ya están disponibles en el esquema que Desktop consume.
+- **Drive:** modificado -- exclusivamente `analisis_completo_guias.csv` (6 filas), `estado_operacion.json` (puntero) y el nuevo reporte (no sobrescribe ninguno anterior).
+- **Git:** working tree con sólo las tres bitácoras -- el fix funcional ya estaba publicado antes de esta aplicación.
+- **Pendiente explícito, no iniciado en este bloque:** casos B (confirmación humana asistida con sugerencia), casos C (requieren nueva evidencia/fuente), geocodificador complementario, Incidencias Documentales, patente documental vs vehículo canónico, Analítica/IA, Mobile, Multiempresa.
+- **Estado: RESOLUCIÓN SEGURA CLASE A APLICADA + RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
