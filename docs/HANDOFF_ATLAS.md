@@ -4,6 +4,22 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA DE VEHÍCULOS validado — listo para revisión con Javier antes de producción
+
+- **Qué es y qué NO es:** primera pieza de razonamiento determinista de Atlas sobre `VEHICULO_DESCONOCIDO` -- reglas explicables (RUT del chofer, tipo de vehículo, corrección OCR calibrada, confirmación humana estructurada), nunca IA generativa/LLM, nunca red externa. No se le llama "IA" porque todavía no lo es.
+- **Por qué existe:** el bloque anterior (JD8659 canónica) se detuvo al descubrir que el mecanismo viejo sólo podía sugerir una patente si otro documento ya la había leído literalmente -- JD8659 nunca fue leída así por ningún documento, pese a que el chofer la confirmó directamente a Javier. Se corrigió la capacidad general, no el caso puntual.
+- **Código, sin publicar todavía (pendiente de revisión):** Motor -- `atlas_core/catalogo_vehiculos.py` (`confirmar_vehiculo` gana `rut_chofer_asociado` opcional), `atlas_core/decisiones_pendientes.py` (`evaluar_evidencia_patente`, nuevo), `aplicar_decision_pendiente.py` (CLI wireado con las 2 acciones que faltaban). Desktop -- `src/decisiones_pendientes_ui.js`, `preload.js`, `main.js`, `src/atlas_viajes.html` (el bug que impedía usar `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE` desde la UI, cerrado).
+- **Validación:** Motor `1332 passed, 0 failed`; Desktop `221 passed, 0 failed`. FASE 12 (TEMP, sin escribir Drive): de las 8 decisiones `VEHICULO_DESCONOCIDO` reales vigentes, el motor clasifica 4 como `SUGERENCIA_HUMANA` (Carlos Simón) y 4 como `ABSTENCION` (464170, 464854) -- cero `RESUELTO_AUTOMATICAMENTE`, porque JD8659 todavía no está registrado.
+- **Drive, catálogos, decisiones reales: sin tocar.** JD8659 **no** se registró. `respaldos/JD8659_Y_REFRESCO_464717_ROLLBACK_PRE_APLICACION_20260819_145323/` (del bloque anterior) sigue vigente y sin usar, por si se retoma esa aplicación después.
+- **Próxima decisión para Javier** (ninguna se tomó sola en este bloque):
+  1. ¿Registrar JD8659 real en `vehiculos.json` con `rut_chofer_asociado` de Carlos Simón?
+  2. ¿Regenerar la bandeja real (`reconciliar_bandeja_decisiones`) para que las 4 decisiones de Simón pasen a mostrar el candidato JD8659?
+  3. ¿Confirmar que el motor puede sugerir/resolver Simón correctamente en Desktop antes de usarlo con las demás revisiones?
+  4. ¿Empezar a vaciar las 15 revisiones reales desde Desktop usando esta infraestructura?
+- **Siguiente bloque recomendado, no iniciado:** el que Javier autorice de la lista anterior. Ningún commit funcional se publicó (push) -- código local, en working tree, esperando revisión.
+
+---
+
 ## 2026-08-17 — Handoff vigente: R3.4 + buscador cerrados
 
 - **Validación real R3.4:** Javier confirmó desde Desktop el destino de la guía 464715. Obra, relación y destino quedaron confirmados; 464715 está `OK`, ya no requiere revisión y no conserva `OBRA_DESTINO_SIN_CORROBORAR`.

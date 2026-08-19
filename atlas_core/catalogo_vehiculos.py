@@ -376,7 +376,7 @@ def migrar_v0_a_v1(contenido_v0: Mapping[str, object], *, fecha: datetime, refer
 def confirmar_vehiculo(
     ruta: str | Path | None = None, *, patente: str, tipo: TipoVehiculo | str, actor: str,
     fuente_decision: str, fecha: datetime, referencia_hash: str = "",
-    observaciones: str = "",
+    observaciones: str = "", rut_chofer_asociado: str = "",
 ) -> Vehiculo:
     if not actor.strip():
         raise ErrorCatalogoVehiculos("actor obligatorio")
@@ -390,15 +390,26 @@ def confirmar_vehiculo(
     except ValueError as error:
         raise ErrorCatalogoVehiculos("tipo inválido") from error
     instante = fecha.astimezone(timezone.utc).isoformat()
+    # Bloque VEHÍCULO E1 -- campo opcional y aditivo (no rompe ningún
+    # llamador existente, que sigue sin pasarlo): cuando una confirmación
+    # humana se origina específicamente para un chofer/RUT determinado
+    # (p. ej. el chofer mismo confirmó su patente a Javier), se registra
+    # aquí para que el motor de evidencia pueda reconocerla como
+    # CONFIRMACION_HUMANA_ASOCIADA en decisiones futuras de ESE mismo
+    # RUT -- nunca se infiere, sólo se persiste lo que el llamador ya
+    # sabía con certeza al confirmar.
+    campos_observados: dict[str, object] = {
+        "patente": canonica,
+        "tipo": tipo_valido,
+        "observacion": observaciones.strip(),
+    }
+    if rut_chofer_asociado.strip():
+        campos_observados["rut_chofer_asociado"] = rut_chofer_asociado.strip()
     evidencia = EvidenciaVehiculo(
         tipo="CONFIRMACION_HUMANA",
         identificador_fuente=fuente_decision.strip(),
         referencia_hash=str(referencia_hash or "").strip(),
-        campos_observados={
-            "patente": canonica,
-            "tipo": tipo_valido,
-            "observacion": observaciones.strip(),
-        },
+        campos_observados=campos_observados,
         fecha=instante,
         actor_proceso=actor.strip(),
         resultado="SOPORTA",

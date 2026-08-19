@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -137,7 +139,7 @@ def test_sugiere_patente_existente_asociada_al_mismo_rut(tmp_path):
     assert len(candidatos) == 1
     assert candidatos[0]["patente"] == "VP8521"
     assert candidatos[0]["tipo_vehiculo"] == "TRACTO"
-    assert "1 documento" in candidatos[0]["evidencia_resumen"]
+    assert candidatos[0]["transportes_independientes"] == 1
 
 
 def test_sugerencia_compara_rut_normalizado_no_el_string_crudo(tmp_path):
@@ -210,8 +212,8 @@ def test_repeticion_documental_nunca_decide_por_mayoria_reporta_cada_candidata_i
     )
     por_patente = {c["patente"]: c for c in candidatos}
     assert set(por_patente) == {"JE8659", "JD8659"}
-    assert "3 documento(s)" in por_patente["JE8659"]["evidencia_resumen"]
-    assert "1 documento(s)" in por_patente["JD8659"]["evidencia_resumen"]
+    assert por_patente["JE8659"]["transportes_independientes"] == 3
+    assert por_patente["JD8659"]["transportes_independientes"] == 1
     # Ambas aparecen como candidatas -- Atlas NUNCA elige JE8659 sólo
     # porque aparece más veces.
 
@@ -672,3 +674,79 @@ def test_aplicar_confirmacion_origen_refresca_estado_ruta_automaticamente(tmp_pa
     # bloqueo real (destino ambiguo).
     assert fila["estado_ruta"] == "REQUIERE_REVISION"
     assert fila["motivo_ruta"] == "DESTINO_REVISAR"
+
+
+# ============================================================
+# CLI (aplicar_decision_pendiente.py) -- lo que Desktop invoca en vivo
+# ============================================================
+
+
+def _ejecutar_cli(raiz, decision_id, accion, **extra):
+    script = Path(__file__).resolve().parents[1] / "aplicar_decision_pendiente.py"
+    argumentos = [sys.executable, str(script), "--raiz-atlas", str(raiz), "--decision-id", decision_id, "--accion", accion]
+    for bandera, valor in extra.items():
+        if valor:
+            argumentos += [f"--{bandera}", valor]
+    proceso = subprocess.run(argumentos, cwd=script.parent, capture_output=True, check=True)
+    return json.loads(proceso.stdout.decode("ascii"))
+
+
+def test_cli_usar_patente_existente_de_punta_a_punta(tmp_path):
+    entorno, decision = _entorno_con_decision_enriquecida(
+        tmp_path,
+        filas_csv=[
+            _fila_csv(numero_guia="1", patente_tracto="VP6521"),
+            _fila_csv(numero_guia="2", patente_tracto="VP8521", numero_transporte="T-2"),
+        ],
+        decision_base=_decision_vehiculo(guia="1", campo="patente_tracto", valor_documental="VP6521"),
+    )
+    _confirmar(entorno["catalogos"], "VP8521", TipoVehiculo.TRACTO)
+    filas = _leer_csv(entorno["dataset"])
+    vehiculos = cargar_catalogo_vehiculos(entorno["catalogos"] / "vehiculos.json").homologables()
+    enriquecidas = enriquecer_decisiones_vehiculo(decisiones=[decision], filas=filas, vehiculos=vehiculos)
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=enriquecidas, ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+    respuesta = _ejecutar_cli(entorno["raiz"], enriquecidas[0]["decision_id"], "USAR_PATENTE_EXISTENTE")
+    assert respuesta["ok"] is True
+    assert respuesta["patente_canonica"] == "VP8521"
+
+
+def test_cli_seleccionar_otra_patente_y_no_registrar_con_motivo_de_punta_a_punta(tmp_path):
+    entorno, decision = _entorno_con_decision_enriquecida(
+        tmp_path,
+        filas_csv=[
+            _fila_csv(numero_guia="1", patente_rampla="JD6659"),
+            _fila_csv(numero_guia="2", patente_rampla="JE8659", numero_transporte="T-2"),
+        ],
+        decision_base=_decision_vehiculo(guia="1", campo="patente_rampla", valor_documental="JD6659"),
+    )
+    _confirmar(entorno["catalogos"], "JE8659", TipoVehiculo.CARRO)
+    filas = _leer_csv(entorno["dataset"])
+    vehiculos = cargar_catalogo_vehiculos(entorno["catalogos"] / "vehiculos.json").homologables()
+    enriquecidas = enriquecer_decisiones_vehiculo(decisiones=[decision], filas=filas, vehiculos=vehiculos)
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=enriquecidas, ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+    respuesta = _ejecutar_cli(
+        entorno["raiz"], enriquecidas[0]["decision_id"], "SELECCIONAR_OTRA_PATENTE", **{"patente-elegida": "JE8659"},
+    )
+    assert respuesta["ok"] is True
+    assert respuesta["patente_canonica"] == "JE8659"
+
+
+def test_cli_no_registrar_con_motivo_rechazo_de_punta_a_punta(tmp_path):
+    entorno = _entorno(tmp_path, filas_csv=[_fila_csv(numero_guia="1", patente_tracto="XF3662")])
+    decision = _decision_vehiculo(guia="1", campo="patente_tracto", valor_documental="XF3662")
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=[decision], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+    respuesta = _ejecutar_cli(
+        entorno["raiz"], decision["decision_id"], "NO_REGISTRAR", **{"motivo-rechazo": "ERROR_DOCUMENTAL_MANDANTE"},
+    )
+    assert respuesta["ok"] is True
+    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    assert ledger["aplicaciones"][0]["motivo_rechazo"] == "ERROR_DOCUMENTAL_MANDANTE"

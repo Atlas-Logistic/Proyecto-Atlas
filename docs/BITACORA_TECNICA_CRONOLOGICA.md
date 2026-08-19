@@ -4,6 +4,40 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA DE VEHÍCULOS: razonamiento determinista (no IA) para VEHICULO_DESCONOCIDO
+
+**Rama motor:** `lector-mvp-guia-nueva` · **Rama Desktop:** `fix-desktop-data-root-drag-drop` · **Estado:** sin commit funcional (pendiente de revisión con Javier) · Drive/catálogos/decisiones reales: **sin tocar**.
+
+### Detonante y decisión de diseño
+
+El bloque anterior (JD8659 canónica + reconciliación final) se detuvo en FASE 4 al descubrir que `sugerir_vehiculos_por_chofer` sólo podía proponer una patente ya leída literalmente por OCR en algún otro documento del dataset — JD8659 nunca lo fue (los tres documentos de Carlos Simón leyeron JD6659/JD0659/VP6521). Javier pidió corregir la **capacidad general**, explícitamente prohibiendo hardcodear el caso (`Carlos Simón`, `JD8659`, `VP8521`, `Ortiz`, `XF3662`, números de guía) en lógica de producción, LLM/IA externa, y cualquier cambio de umbral sin evidencia.
+
+### Modelo implementado
+
+`atlas_core/catalogo_vehiculos.py`: `confirmar_vehiculo()` gana el parámetro opcional `rut_chofer_asociado: str = ""`, guardado en `campos_observados` sólo si no está vacío (aditivo, sin romper el JSON existente ni ningún dataclass).
+
+`atlas_core/decisiones_pendientes.py`: nueva función `evaluar_evidencia_patente(*, campo, valor_documental, rut_chofer, tipo_esperado, numero_transporte_actual, filas, vehiculos)` — el motor completo. Jerarquía de precedencia por niveles (no pesos arbitrarios): `NIVEL_CONFIRMACION_HUMANA` > `NIVEL_DOCUMENTAL_INDEPENDIENTE` > `NIVEL_DOCUMENTAL_DEBIL`. Helpers privados: `_transportes_por_patente_de_chofer` (agrupa candidatas por `numero_transporte`, nunca por conteo de documentos — implementa "repetición no equivale a independencia"), `_vehiculos_confirmados_para_rut` (cruza `rut_chofer_asociado` normalizado contra el RUT del documento), `_razon_legible_candidato` (arma la explicación en español, plantillada, sin LLM). Reutiliza `_diferencia_ocr_segura`/`_CONFUSIONES_OCR` ya calibrados (deliberadamente NO se agregó `"6"↔"8"` al set — sería un cambio de umbral motivado por un solo caso). Produce siempre `{"resultado": RESUELTO_AUTOMATICAMENTE|SUGERENCIA_HUMANA|ABSTENCION, "candidatos": [...], "explicacion": str}`; `RESUELTO_AUTOMATICAMENTE` es puramente clasificatorio — nunca escribe nada por sí solo, la aplicación real sigue exigiendo `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE` (acción humana ya existente).
+
+`sugerir_vehiculos_por_chofer` queda como envoltorio compatible hacia atrás sobre el motor nuevo; `enriquecer_decisiones_vehiculo` pasa a usar `tipo_esperado`/`numero_transporte_actual` reales y adjunta `decision["evaluacion_evidencia"]`.
+
+`aplicar_decision_pendiente.py` (CLI Motor): agrega `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE` a `--accion` (faltaban desde el bloque anterior, nunca se habían wireado) y los argumentos `--patente-elegida`/`--motivo-rechazo`.
+
+### Integración Desktop (gap encontrado y cerrado)
+
+`src/decisiones_pendientes_ui.js`: `opcionesAccion()` trataba `VEHICULO_DESCONOCIDO` siempre como "entidad desconocida" (Registrar/No registrar/Decidir después), sin mirar `candidatos` — por lo que `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`, aunque ya implementadas en Motor desde el bloque anterior, nunca fueron clickeables. Se agregó una rama previa (mismo patrón que `ORIGEN_NO_CONFIRMADO`: un candidato → "Usar patente sugerida"; dos o más → "Elegir otra patente", nunca ambas a la vez, nunca se ofrece "Registrar" cuando ya hay evidencia). Nuevo `selectorPatente` en `nodoAcciones` (radios sobre `decision.candidatos`, mismo patrón que `selectorPlanta`). Nuevo bloque "Patente sugerida"/"Patentes candidatas" con `razon_legible` en `nodoTarjetaCaso` (mismo patrón que las plantas candidatas de origen).
+
+`preload.js`/`main.js`: `aplicarDecisionObra` gana un 5º argumento posicional fijo `patenteElegida` (siempre presente, `null` cuando no aplica — igual que `plantaIdElegida`); `ACCIONES_DECISION_OBRA` suma las dos acciones nuevas; validación superficial `PATRON_PATENTE` antes de invocar el CLI (la autoridad real sigue siendo `aplicar_decision_obra` en Motor). `src/atlas_viajes.html` propaga el 5º argumento en el callback `aplicar`.
+
+### Validación
+
+13 tests nuevos en `tests/test_motor_evidencia_vehiculos.py` (los 10 obligatorios de la especificación + 2 extra + el control de formato de RUT con/sin puntos, hallazgo real del propio dataset): los 3 casos reales de Carlos Simón (JD6659→JD8659, JD0659→JD8659, VP6521→VP8521, cada uno clasificado honestamente, no forzado igual), el control negativo de Ortiz (XF3662 nunca autocorrige a XF3629), candidatos empatados, tipo incorrecto, repetición-vs-independencia (documental y transporte), precedencia de confirmación humana, auditabilidad del valor OCR, abstención sin evidencia. 3 tests CLI nuevos en `tests/test_vehiculo_documental_canonico.py` ejercitan `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`/`NO_REGISTRAR` de punta a punta vía `aplicar_decision_pendiente.py`. Motor: `1332 passed, 0 failed`. Desktop: 7 tests nuevos (candidatos de vehículo + wiring de `patenteElegida`) más el ajuste de 5 assertions existentes al nuevo 5º argumento posicional; `221 passed, 0 failed`.
+
+**FASE 12 — validación TEMP contra las 15 decisiones reales vigentes** (copia de Drive a TEMP, sólo lectura, nunca escrita de vuelta): de las 8 decisiones `VEHICULO_DESCONOCIDO` reales, el motor nuevo clasifica hoy 4 como `SUGERENCIA_HUMANA` (las 4 de Carlos Simón — 464264 rampla, 464265 tracto y rampla) y 4 como `ABSTENCION` (464170 tracto/rampla, 464854 tracto/rampla — sin ningún vehículo confirmado asociado a esos RUT). **Cero `RESUELTO_AUTOMATICAMENTE`**, porque JD8659 todavía no está registrado con `rut_chofer_asociado` — exactamente el comportamiento esperado mientras Javier no autorice el registro real. Confirma además, contra datos reales (no sintéticos), que JE8659 corrobora por 1 transporte independiente, no 3 documentos.
+
+Ningún archivo de `G:\Mi unidad\Atlas` fue modificado en este bloque.
+
+---
+
 ## 2026-08-14 — R2 CLIENTES: cierre técnico y promoción final 19/19
 
 **Rama:** `lector-mvp-guia-nueva` · **Commit funcional:** `093cce923d172cac18cafb5b453c0cef8de95242` · **Auditoría Claude:** aprobada.

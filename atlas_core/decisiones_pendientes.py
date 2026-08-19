@@ -27,7 +27,12 @@ from atlas_core.catalogo_obras_destinos import (
     normalizar_nombre_obra,
 )
 from atlas_core.catalogo_plantas import Planta
-from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, normalizar_patente_vehiculo, resolver_patente
+from atlas_core.catalogo_vehiculos import (
+    _diferencia_ocr_segura,
+    cargar_catalogo_vehiculos,
+    normalizar_patente_vehiculo,
+    resolver_patente,
+)
 from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json, normalizar_rut
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
@@ -199,78 +204,252 @@ def actualizar_contrato_vehiculos_persistidos(
     return salida
 
 
-def sugerir_vehiculos_por_chofer(
-    *, rut_chofer: str, campo: str, valor_documental: str,
-    filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
-) -> list[dict[str, object]]:
-    """Bloque VEHÍCULO D1 -- sugiere (nunca autocorrige) una patente ya
-    CONFIRMADA/ACTIVA en catálogo, asociada al mismo RUT de chofer en
-    OTRO documento del dataset (`estado_procesamiento == "OK"`, evidencia
-    real, no un intento fallido). Nunca decide por mayoría ni por
-    repetición -- reporta CADA candidata encontrada con su propia
-    evidencia (guías + cantidad de veces observada), incluso si sólo
-    aparece una vez y aunque otra candidata aparezca más veces: la
-    repetición documental puede ser el mismo error repetido por un
-    mandante (caso real que motivó este bloque), nunca prueba por sí
-    sola cuál es la canónica -- eso siempre lo decide un humano."""
-    # El RUT documental llega con formato inconsistente entre guías del
-    # MISMO chofer (con/sin puntos -- caso real: 464699 sin puntos entre
-    # dos guías con puntos del mismo Carlos Simón) -- se compara
-    # normalizado (mismo `normalizar_rut` ya usado para clientes), nunca
-    # por el string crudo.
-    rut_normalizado = normalizar_rut(rut_chofer)
-    if not rut_normalizado:
-        return []
-    valor_documental_norm = normalizar_patente_vehiculo(str(valor_documental or ""))
-    conteos: dict[str, int] = {}
-    guias_por_patente: dict[str, list[str]] = {}
+# Bloque VEHÍCULO E1 -- Motor de Evidencia de Vehículos. Primera capa de
+# razonamiento determinista (NUNCA IA generativa/LLM) que combina señales
+# YA existentes en el sistema -- catálogo, historial documental del
+# dataset, confirmaciones humanas ya registradas, la corrección OCR ya
+# calibrada de `resolver_patente` -- para explicar, con evidencia
+# nombrada y auditable, por qué Atlas considera (o no) una patente
+# candidata cuando la lectura documental no homologa. Nunca decide "por
+# puntaje": cada candidata expone qué señales la respaldan y qué
+# conflictos tiene; la clasificación final es una jerarquía de
+# precedencia explicable, no una suma de pesos inventados.
+NIVEL_CONFIRMACION_HUMANA = "CONFIRMACION_HUMANA"
+NIVEL_DOCUMENTAL_INDEPENDIENTE = "DOCUMENTAL_INDEPENDIENTE"
+NIVEL_DOCUMENTAL_DEBIL = "DOCUMENTAL_DEBIL"
+_ORDEN_NIVEL_EVIDENCIA = {
+    NIVEL_CONFIRMACION_HUMANA: 0, NIVEL_DOCUMENTAL_INDEPENDIENTE: 1, NIVEL_DOCUMENTAL_DEBIL: 2,
+}
+
+RESULTADO_RESUELTO_AUTOMATICAMENTE = "RESUELTO_AUTOMATICAMENTE"
+RESULTADO_SUGERENCIA_HUMANA = "SUGERENCIA_HUMANA"
+RESULTADO_ABSTENCION = "ABSTENCION"
+
+
+def _transportes_por_patente_de_chofer(
+    *, campo: str, filas: Iterable[Mapping[str, object]], rut_normalizado: str,
+) -> dict[str, dict[str, set[str]]]:
+    """Para cada patente observada del mismo RUT en `campo`, agrupa las
+    guías por `numero_transporte` -- REGLA CRÍTICA (caso real Carlos
+    Simón): la independencia de una evidencia se mide en TRANSPORTES
+    distintos, nunca en documentos sueltos. Varios documentos del MISMO
+    transporte son el mismo evento operacional (p. ej. 3 fotos de guías
+    de un solo despacho) -- un mandante puede repetir el mismo error en
+    cada una sin que eso sume tres verificaciones independientes.
+    Repetición no equivale a independencia."""
+    resultado: dict[str, dict[str, set[str]]] = {}
     for fila in filas:
         if normalizar_rut(str(fila.get("rut_chofer", ""))) != rut_normalizado:
             continue
         if str(fila.get("estado_procesamiento", "")).strip() != "OK":
             continue
-        candidata = normalizar_patente_vehiculo(str(fila.get(campo, "")))
-        if not candidata or candidata == valor_documental_norm:
+        patente = normalizar_patente_vehiculo(str(fila.get(campo, "")))
+        if not patente:
             continue
-        conteos[candidata] = conteos.get(candidata, 0) + 1
-        guias_por_patente.setdefault(candidata, []).append(str(fila.get("numero_guia", "")))
+        transporte = str(fila.get("numero_transporte", "")).strip()
+        guia = str(fila.get("numero_guia", "")).strip()
+        resultado.setdefault(patente, {}).setdefault(transporte, set()).add(guia)
+    return resultado
 
-    candidatos: list[dict[str, object]] = []
-    for patente in sorted(conteos):
-        vehiculo = next(
-            (
-                v for v in vehiculos
-                if v.patente_canonica == patente
-                and v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
-            ),
-            None,
-        )
-        if vehiculo is None:
+
+def _vehiculos_confirmados_para_rut(
+    *, rut_normalizado: str, tipo_esperado: str | None, vehiculos: Iterable[object],
+) -> set[str]:
+    """Patentes CONFIRMADO/ACTIVO cuya evidencia de confirmación humana
+    quedó explícitamente asociada a este RUT (`rut_chofer_asociado`, ver
+    `confirmar_vehiculo`) -- nunca inferido: sólo lo que un humano ya
+    dejó dicho explícitamente al confirmar ese vehículo."""
+    resultado: set[str] = set()
+    for v in vehiculos:
+        if tipo_esperado and v.tipo != tipo_esperado:
             continue
-        cuenta = conteos[patente]
-        guias = ", ".join(sorted(set(guias_por_patente[patente])))
+        for e in v.evidencias:
+            if (
+                e.tipo == "CONFIRMACION_HUMANA"
+                and normalizar_rut(str(e.campos_observados.get("rut_chofer_asociado", ""))) == rut_normalizado
+            ):
+                resultado.add(v.patente_canonica)
+                break
+    return resultado
+
+
+def _razon_legible_candidato(*, patente: str, evidencias: tuple[str, ...], conflictos: tuple[str, ...], valor_documental: str) -> str:
+    frases_evidencia = {
+        "RUT_CHOFER_COINCIDE": "corresponde al mismo chofer/RUT",
+        "TIPO_COMPATIBLE": "es un tipo de vehículo compatible",
+        "CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER": "fue confirmada directamente por un humano para este chofer",
+        "SIMILITUD_OCR_CALIBRADA": f"difiere de \"{valor_documental}\" en un solo carácter, dentro de las confusiones OCR ya conocidas",
+    }
+    frases_conflicto = {
+        "OCR_ACTUAL_DIFIERE": f"el OCR de este documento leyó \"{valor_documental}\", un valor distinto",
+        "TIPO_NO_DETERMINADO_SIN_CONFIRMACION": "el tipo de vehículo esperado en este documento todavía no está confirmado",
+    }
+    razones = [frases_evidencia[e] for e in evidencias if e in frases_evidencia]
+    razones += [f"corroborada por {e.split('(')[1].rstrip(')')} transporte(s) independiente(s)" for e in evidencias if e.startswith("CORROBORACION_TRANSPORTE_INDEPENDIENTE")]
+    if any(e == "CORROBORACION_MISMO_TRANSPORTE" for e in evidencias):
+        razones.append("aparece en otro documento del mismo transporte (no es una fuente independiente)")
+    texto = f"Atlas considera \"{patente}\" porque " + "; ".join(razones) + "." if razones else f"Atlas encontró \"{patente}\" sin evidencia suficiente."
+    if conflictos:
+        texto += " Sin embargo, " + "; ".join(frases_conflicto.get(c, c) for c in conflictos) + "."
+    return texto
+
+
+def evaluar_evidencia_patente(
+    *, campo: str, valor_documental: str, rut_chofer: str, tipo_esperado: str | None,
+    numero_transporte_actual: str, filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
+) -> dict[str, object]:
+    """Bloque VEHÍCULO E1 -- combina, de forma determinista y auditable,
+    todas las señales ya disponibles en el sistema para explicar (nunca
+    autocorregir) una patente documental que no homologa con el
+    catálogo. Devuelve SIEMPRE uno de tres resultados:
+
+    - `RESUELTO_AUTOMATICAMENTE`: existe una única candidata con
+      evidencia de más alto nivel (`CONFIRMACION_HUMANA` -- un humano ya
+      confirmó explícitamente esa patente PARA este mismo chofer/RUT) y
+      ninguna otra candidata compite en ese mismo nivel. Esta
+      clasificación es puramente informativa/explicativa -- NUNCA aplica
+      nada por sí sola; la escritura sigue exigiendo la acción humana ya
+      existente (`USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`).
+    - `SUGERENCIA_HUMANA`: existe evidencia real pero no alcanza el
+      nivel anterior sin ambigüedad (un único candidato documental, o
+      candidatos empatados en el mismo nivel -- nunca se elige entre
+      ellos arbitrariamente).
+    - `ABSTENCION`: no hay ningún candidato con evidencia relevante.
+
+    Nunca usa repetición documental como prueba de verdad (un mandante
+    puede repetir el mismo error en cada documento de un único
+    transporte -- ver `_transportes_por_patente_de_chofer`), nunca
+    convierte similitud de texto en autocorrección por sí sola (la
+    corrección OCR seguro-calibrada de `resolver_patente`/
+    `_diferencia_ocr_segura` es sólo UNA evidencia adicional entre
+    varias, nunca decide sola)."""
+    rut_normalizado = normalizar_rut(rut_chofer)
+    valor_norm = normalizar_patente_vehiculo(str(valor_documental or ""))
+    if not rut_normalizado or not valor_norm:
+        return {
+            "resultado": RESULTADO_ABSTENCION, "candidatos": [],
+            "explicacion": "Sin RUT de chofer o valor documental disponible -- no hay evidencia con la que razonar.",
+        }
+
+    vehiculos = list(vehiculos)
+    filas = list(filas)
+    transportes_por_patente = _transportes_por_patente_de_chofer(
+        campo=campo, filas=filas, rut_normalizado=rut_normalizado,
+    )
+    confirmadas_para_rut = _vehiculos_confirmados_para_rut(
+        rut_normalizado=rut_normalizado, tipo_esperado=tipo_esperado, vehiculos=vehiculos,
+    )
+    homologables_por_patente = {
+        v.patente_canonica: v for v in vehiculos
+        if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
+    }
+
+    patentes_candidatas = (set(transportes_por_patente) | confirmadas_para_rut) - {valor_norm}
+    candidatos: list[dict[str, object]] = []
+    for patente in sorted(patentes_candidatas):
+        vehiculo = homologables_por_patente.get(patente)
+        if vehiculo is None:
+            continue  # no confirmado/activo -- ruido documental, no candidata real
+        if tipo_esperado and vehiculo.tipo != tipo_esperado:
+            continue  # tipo incompatible -- nunca gana, aunque tenga otra evidencia
+
+        transportes = transportes_por_patente.get(patente, {})
+        independientes = {t for t in transportes if t and t != numero_transporte_actual}
+        n_independientes = len(independientes)
+        guias = sorted({g for grupo in transportes.values() for g in grupo})
+
+        evidencias: list[str] = ["RUT_CHOFER_COINCIDE", "TIPO_COMPATIBLE"]
+        conflictos: list[str] = ["OCR_ACTUAL_DIFIERE"]
+        if not tipo_esperado:
+            conflictos.append("TIPO_NO_DETERMINADO_SIN_CONFIRMACION")
+        if n_independientes >= 1:
+            evidencias.append(f"CORROBORACION_TRANSPORTE_INDEPENDIENTE({n_independientes})")
+        elif transportes:
+            evidencias.append("CORROBORACION_MISMO_TRANSPORTE")
+        es_confirmacion_directa = patente in confirmadas_para_rut
+        if es_confirmacion_directa:
+            evidencias.append("CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER")
+        if _diferencia_ocr_segura(valor_norm, patente):
+            evidencias.append("SIMILITUD_OCR_CALIBRADA")
+
+        if es_confirmacion_directa:
+            nivel = NIVEL_CONFIRMACION_HUMANA
+        elif n_independientes >= 1:
+            nivel = NIVEL_DOCUMENTAL_INDEPENDIENTE
+        else:
+            nivel = NIVEL_DOCUMENTAL_DEBIL
+
         candidatos.append({
-            "vehiculo_id": vehiculo.vehiculo_id,
-            "patente": patente,
-            "tipo_vehiculo": vehiculo.tipo,
-            "evidencia_resumen": (
-                f"Vehículo confirmado ({vehiculo.tipo}) asociado a este RUT de chofer "
-                f"en {cuenta} documento(s) del dataset (guías: {guias})"
+            "patente": patente, "vehiculo_id": vehiculo.vehiculo_id, "tipo_vehiculo": vehiculo.tipo,
+            "nivel": nivel, "evidencias": tuple(evidencias), "conflictos": tuple(conflictos),
+            "guias": guias, "transportes_independientes": n_independientes,
+            "razon_legible": _razon_legible_candidato(
+                patente=patente, evidencias=tuple(evidencias), conflictos=tuple(conflictos), valor_documental=valor_documental,
+            ),
+            # Compatibilidad con el contrato ya publicado (Bloque VEHÍCULO D1):
+            # mismas claves que ya consumen aplicar_decision_obra/Desktop.
+            "evidencia_resumen": _razon_legible_candidato(
+                patente=patente, evidencias=tuple(evidencias), conflictos=tuple(conflictos), valor_documental=valor_documental,
             ),
         })
-    return candidatos
+
+    candidatos.sort(key=lambda c: (_ORDEN_NIVEL_EVIDENCIA[c["nivel"]], -c["transportes_independientes"], c["patente"]))
+
+    if not candidatos:
+        return {
+            "resultado": RESULTADO_ABSTENCION, "candidatos": [],
+            "explicacion": f"No puedo determinarlo con seguridad: ningún vehículo confirmado/activo asociado a este RUT tiene evidencia relevante para \"{valor_documental}\".",
+        }
+
+    mejor_nivel = candidatos[0]["nivel"]
+    competidores_mejor_nivel = [c for c in candidatos if c["nivel"] == mejor_nivel]
+    if mejor_nivel == NIVEL_CONFIRMACION_HUMANA and len(competidores_mejor_nivel) == 1:
+        resultado = RESULTADO_RESUELTO_AUTOMATICAMENTE
+        explicacion = candidatos[0]["razon_legible"]
+    else:
+        resultado = RESULTADO_SUGERENCIA_HUMANA
+        if len(competidores_mejor_nivel) > 1:
+            nombres = ", ".join(f'"{c["patente"]}"' for c in competidores_mejor_nivel)
+            explicacion = f"Hay {len(competidores_mejor_nivel)} candidatas con evidencia comparable ({nombres}) -- Atlas no elige entre ellas, requiere confirmación humana."
+        else:
+            explicacion = candidatos[0]["razon_legible"]
+
+    return {"resultado": resultado, "candidatos": candidatos, "explicacion": explicacion}
+
+
+def sugerir_vehiculos_por_chofer(
+    *, rut_chofer: str, campo: str, valor_documental: str,
+    filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
+) -> list[dict[str, object]]:
+    """Envoltorio de compatibilidad (Bloque VEHÍCULO D1, ya publicado):
+    devuelve sólo la lista de `candidatos` del motor de evidencia
+    (Bloque VEHÍCULO E1, `evaluar_evidencia_patente`), sin `tipo_esperado`
+    ni `numero_transporte_actual` (se asumen desconocidos -- comportamiento
+    más permisivo que el motor completo, preservado para no romper
+    llamadores existentes)."""
+    resultado = evaluar_evidencia_patente(
+        campo=campo, valor_documental=valor_documental, rut_chofer=rut_chofer,
+        tipo_esperado=None, numero_transporte_actual="",
+        filas=filas, vehiculos=vehiculos,
+    )
+    return [dict(c) for c in resultado["candidatos"]]
 
 
 def enriquecer_decisiones_vehiculo(
     *, decisiones: Iterable[Mapping[str, object]],
     filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
 ) -> list[dict[str, object]]:
-    """Bloque VEHÍCULO D1 -- añade `candidatos`/acciones adicionales a
+    """Bloque VEHÍCULO D1/E1 -- añade `candidatos`/acciones adicionales a
     decisiones `VEHICULO_DESCONOCIDO` YA generadas (nunca las crea desde
     cero: reutiliza exactamente lo que `detectar_decisiones_documento` ya
     produjo). Sólo actúa sobre decisiones que todavía no traen
     `candidatos` -- una decisión que ya los trae (de cualquier fuente)
-    no se toca. Decisiones de otros tipos pasan sin cambios."""
+    no se toca. Decisiones de otros tipos pasan sin cambios. Usa el motor
+    de evidencia completo (`evaluar_evidencia_patente`), con `tipo_esperado`
+    tomado de `tipo_vehiculo_propuesto` (ya calculado por
+    `actualizar_contrato_vehiculos_persistidos`) y el `numero_transporte`
+    real del documento -- nunca se abstiene de aplicar el filtro de tipo
+    ni de excluir el propio transporte como "evidencia independiente"."""
     filas = list(filas)
     vehiculos = list(vehiculos)
     filas_por_guia: dict[str, dict[str, object]] = {}
@@ -283,17 +462,23 @@ def enriquecer_decisiones_vehiculo(
     for decision_original in decisiones:
         decision = dict(decision_original)
         if decision.get("tipo") == "VEHICULO_DESCONOCIDO" and not decision.get("candidatos"):
-            guia = str((decision.get("documento") or {}).get("numero_guia", ""))
+            documento = decision.get("documento") or {}
+            guia = str(documento.get("numero_guia", ""))
+            transporte = str(documento.get("numero_transporte", ""))
             fila = filas_por_guia.get(guia)
             rut = str(fila.get("rut_chofer", "")).strip() if fila else ""
             if rut:
-                sugeridos = sugerir_vehiculos_por_chofer(
-                    rut_chofer=rut, campo=str(decision.get("campo", "")),
-                    valor_documental=str(decision.get("valor_documental", "")),
-                    filas=filas, vehiculos=vehiculos,
+                evaluacion = evaluar_evidencia_patente(
+                    campo=str(decision.get("campo", "")), valor_documental=str(decision.get("valor_documental", "")),
+                    rut_chofer=rut, tipo_esperado=decision.get("tipo_vehiculo_propuesto"),
+                    numero_transporte_actual=transporte, filas=filas, vehiculos=vehiculos,
                 )
+                sugeridos = evaluacion["candidatos"]
                 if sugeridos:
                     decision["candidatos"] = sugeridos
+                    decision["evaluacion_evidencia"] = {
+                        "resultado": evaluacion["resultado"], "explicacion": evaluacion["explicacion"],
+                    }
                     acciones = list(decision.get("acciones_permitidas") or ACCIONES_ENTIDAD_DESCONOCIDA)
                     nuevas = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in acciones]
                     if "POSPONER" in acciones:
