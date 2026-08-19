@@ -421,6 +421,88 @@ def test_cambio_de_planta_por_o2_recalcula_ruta(plantas):
     assert origenes_capturados[0] != origenes_capturados[1]
 
 
+# --- Bloque VISITA_A_PLANTA -- validación adicional (sin cambios de
+# comportamiento): esta función YA ES el mecanismo de detección y
+# asociación de "visitas a planta" que ese bloque pidió diseñar. Cierra
+# dos huecos de cobertura reales encontrados al auditar el histórico:
+# dos visitas separadas a la MISMA planta el mismo día, y el patrón
+# exacto del caso real 464730 (ventana documental degenerada
+# hora_entrada==hora_salida, evidencia real para dos plantas). ---
+
+
+def test_dos_visitas_a_la_misma_planta_mismo_dia_elige_la_que_cae_en_la_ventana(plantas, tmp_path):
+    """Dos permanencias reales y separadas en AZA COLINA el mismo día
+    (p. ej. carga matutina + retiro de repuestos por la tarde) -- la
+    guía debe asociarse a la que realmente solapa su ventana documental,
+    nunca a "la primera" ni a "la más larga" por defecto."""
+    _, servicio = _servicio(
+        tmp_path,
+        viajes_por_patente={
+            "XX0000": [
+                ViajeTelemetria("colina_manana", "XX0000", "2026-08-11 07:00:00", "2026-08-11 07:10:00", 0.0),
+                ViajeTelemetria("colina_tarde", "XX0000", "2026-08-11 13:00:00", "2026-08-11 13:30:00", 0.0),
+            ],
+        },
+        breadcrumbs_por_trip={
+            "colina_manana": _puntos_estacionarios(*COORD_COLINA_DENTRO, "2026-08-11 07:00:00", n=11),
+            "colina_tarde": _puntos_estacionarios(*COORD_COLINA_DENTRO, "2026-08-11 13:00:00", n=31),
+        },
+    )
+    resultado = resolver_planta_origen_gps(
+        servicio, patente="XX0000", fecha=FECHA,
+        hora_entrada=datetime(2026, 8, 11, 12, 58), hora_salida=datetime(2026, 8, 11, 13, 32),
+        plantas=plantas,
+    )
+    assert resultado.estado == ORIGEN_GPS_CONFIRMADO
+    assert resultado.planta_nombre == "AZA COLINA"
+    # La visita elegida es la de la tarde (dentro de la ventana), no la
+    # matutina -- se verifica por la hora de entrada/salida GPS devuelta.
+    assert resultado.hora_entrada_gps.startswith("2026-08-11 13:")
+
+
+def test_ventana_documental_degenerada_464730_no_se_auto_resuelve_a_una_planta(plantas, tmp_path):
+    """Réplica sintética del patrón real 464730: `hora_entrada_aza ==
+    hora_salida_aza` (documento sin ventana real, sólo un instante) con
+    evidencia GPS real para AMBAS plantas ese día -- una termina justo
+    antes del instante documental, la otra ocurre después. Con el
+    instante degenerado, el solape contra la ventana es 0% para
+    cualquier detención (nunca hay ventana real que solapar) -- el único
+    desempate posible es la proximidad de entrada/salida GPS al
+    instante, señal débil por diseño (30% del score combinado). Atlas
+    debe concluir CONFLICTO (requiere humano), nunca forzar una planta
+    por estar "más cerca en el tiempo" -- exactamente lo que Javier
+    confirmó que habría sido la planta incorrecta en el caso real."""
+    _, servicio = _servicio(
+        tmp_path,
+        viajes_por_patente={
+            "XX0000": [
+                ViajeTelemetria("colina", "XX0000", "2026-08-11 07:19:00", "2026-08-11 08:24:00", 0.0),
+                ViajeTelemetria("renca", "XX0000", "2026-08-11 10:21:00", "2026-08-11 12:01:00", 0.0),
+            ],
+        },
+        breadcrumbs_por_trip={
+            # Pocos puntos (mismo orden de magnitud que el resto de los
+            # tests del archivo): con `_puntos_estacionarios` cada punto
+            # sucesivo se desplaza un poco (deriva realista) -- demasiados
+            # puntos sobre un polígono de prueba pequeño terminarían
+            # saliéndose de él. `paso_seg` se ajusta para cubrir el mismo
+            # rango horario real con menos puntos.
+            "colina": _puntos_estacionarios(*COORD_COLINA_DENTRO, "2026-08-11 07:19:00", n=7, paso_seg=650),
+            "renca": _puntos_estacionarios(
+                COORD_AZA_RENCA.latitud, COORD_AZA_RENCA.longitud, "2026-08-11 10:21:00", n=11, paso_seg=600,
+            ),
+        },
+    )
+    instante_documental = datetime(2026, 8, 11, 8, 18)
+    resultado = resolver_planta_origen_gps(
+        servicio, patente="XX0000", fecha=FECHA,
+        hora_entrada=instante_documental, hora_salida=instante_documental,
+        plantas=plantas,
+    )
+    assert resultado.estado == ORIGEN_GPS_CONFLICTO
+    assert "CONFLICTO_REAL_EN_VENTANA" in resultado.motivo
+
+
 # --- 12: no regresión T1/T2/T3/P3 -- cubierta por la suite completa ---
 
 
