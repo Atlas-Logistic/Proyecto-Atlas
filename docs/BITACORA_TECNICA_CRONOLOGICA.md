@@ -3212,3 +3212,125 @@ Ningún km nuevo fue calculado (0 llamadas ORS); nunca se reemplazó por distanc
 **Pendiente explícito para bloques futuros (no iniciado):** casos B (6, confirmación humana asistida con sugerencia razonada -- concepto ya descrito en el diagnóstico previo, sin UI), casos C (4, requieren nueva evidencia/fuente -- 2 de ellos con limitación de geocodificador ya confirmada), geocodificador complementario para direcciones chilenas específicas, Incidencias Documentales (genéricas), patente documental vs vehículo canónico / asociación histórica chofer↔vehículo como sugerencia, Analítica/IA, Mobile, Multiempresa.
 
 **Estado: RESOLUCIÓN SEGURA CLASE A APLICADA + RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## Bloque AUDITORÍA VIAJES SIN PLANTA DE ORIGEN (diagnóstico, sin fix) -- 2026-08-19
+
+**Checkpoint:** Motor `1f3746a` (local=remoto, 0/0, limpio), Desktop `fba95ac` (limpio). Reporte vigente: `reportes/reporte_revalidacion_20260819_004409_246309`. 100% lectura en todo el bloque -- Drive re-verificado sin cambios de mtime al cierre.
+
+**FASE 1 -- inventario (programático, `viajes.csv` vigente):** `planta_origen_nombre` vacía en **5/38 viajes**, todos de un único documento: `0000352394`(464479), `0000352537`(464529), `0000353062`(464717), `0000353118`(464730), `0000353543`(464892). No hay ningún viaje multi-documento con evidencia contradictoria entre hermanos -- FASE 5 (documentos hermanos) no aplica a ninguno de los 5.
+
+**FASE 3 -- trazado del pipeline (reproducido con `resolver_planta_origen_gps`/`recolectar_puntos_ventana_origen`/`detectar_detenciones`/`_resolver_planta_para_detencion` reales, contra `telemetria_cache.json` real vía `ProveedorTelemetriaSoloCache`, 0 llamadas de red):**
+
+| Viaje | Patente | Trips cacheados | Breadcrumbs (ventana ±4h) | Detención más relevante | % dentro de geocerca | Resultado real |
+|---|---|---|---|---|---|---|
+| 464529 | DD2494 | 1 | 5 | 11.5 min, 2 pts | 0% (AZA COLINA), lejos de AZA RENCA | `NINGUN_PUNTO_DENTRO_DE_GEOCERCA` |
+| 464479 | DD2494 | 1 | 5 | misma detención que 464529 (mismo día/patente) | 0% | `NINGUN_PUNTO_DENTRO_DE_GEOCERCA` |
+| 464717 | TG8925 | 7 | 95 | **287.7 min, 57 pts** | **28/57 = 49.1%** dentro de AZA COLINA | `DETENCION_REAL_FUERA_DE_TODA_GEOCERCA` (por debajo del umbral `PROPORCION_MINIMA_DENTRO_POLIGONO=0.5`, YA calibrado, no nuevo) |
+| 464730 | AL1879 | 9 | 325 | 65.3 min/91 pts (76.9% AZA COLINA) **Y** 99.5 min/54 pts (100% AZA RENCA) | ambas por encima del umbral, plantas DISTINTAS | `CONFLICTO_REAL_EN_VENTANA` -- **agravado**: `hora_entrada_aza == hora_salida_aza == "08:18"` (mismo valor exacto), ventana documental de duración cero, `solape_ventana=0.0%` para ambas plantas -- el score no tiene contra qué comparar y no logra desempatar (0.1366 vs 0.0) |
+| 464892 | TG8925 | 10 | 148 | 87.8 min/51 pts (39.2% AZA COLINA) y 87.9 min/38 pts (0%, la de mayor duración, la que se reporta) | 39.2% y 44.4% (otra detención de 11.5min/9pts), ambas <50% | `DETENCION_REAL_FUERA_DE_TODA_GEOCERCA` |
+
+**FASE 4 -- clasificación por causa raíz (categorías construidas desde la evidencia, ninguna forzada):**
+- **Categoría C (`VEHICULO_NO_ENCONTRADO`) y D (`PATENTE_DOCUMENTAL/OCR_INCORRECTA`): 0 casos.** Verificado contra `vehiculos.json`: DD2494, TG8925 y AL1879 están los tres `CONFIRMADO`/`ACTIVO` -- la identidad del vehículo nunca es la causa aquí.
+- **`GPS_EXISTE_PERO_ES_INSUFICIENTE` (variante de E, cobertura escasa): 464479, 464529** -- sólo 1 trip/5 puntos GPS en la ventana ±4h; la telemetría de Onelogis simplemente no cubrió la salida real de planta ese día. No corregible con datos ya existentes (no es un gap de cache: el trip que existe ya se usó).
+- **`GPS_EXISTE_PERO_NO_IDENTIFICA_PLANTA_CON_SEGURIDAD` (E, casi-umbral): 464717 (49.1%), 464892 (39.2%/44.4%)** -- detenciones reales, largas, cerca del polígono conocido, pero por debajo del 50% ya calibrado (no se propone bajar el umbral -- ver Fase 7).
+- **`CONFLICTO_DE_ORIGEN_ENTRE_DOCUMENTOS`... en este caso entre EVIDENCIA GPS de un único documento (F, adaptada): 464730** -- visita real y confirmada a dos plantas distintas en la misma ventana documental, agravada por una ventana documental de duración cero (hora_entrada=hora_salida=08:18, posible defecto de extracción a revisar contra la imagen original -- no se re-ejecutó OCR en este bloque).
+- **`BUG_PIPELINE` (H, hallazgo real pero de tipo observabilidad, no de cálculo incorrecto):** para 464479 y 464892, `motivo_ruta` se sobrescribe con el motivo de ORIGEN (`ORIGEN_GPS_NO_DETERMINADO`/`ORIGEN_GPS_ESTADIA_SIN_PLANTA`) cuando en realidad el DESTINO de esos mismos documentos también está sin resolver (`estado_entrega=REVISAR`, `direccion_entrega=""`) -- un campo de un solo valor no puede representar dos motivos de bloqueo simultáneos. Consecuencia demostrada: el diagnóstico de destinos ambiguos del bloque anterior (17 casos `MULTIPLES_UBICACIONES_DISPERSAS`) **no incluyó estos 2 transportes**, aunque su destino documental tiene exactamente el mismo problema que los 17 sí detectados. No es un cálculo incorrecto (cada campo persistido es honesto por sí solo), es una limitación de representación -- se reporta, no se corrige en este bloque.
+
+**FASE 5 -- información ya disponible pero no aprovechada, hallazgo más importante:** **464892** tiene `despachar_a_crudo="SANTA ISABEL 585 SANTIAGO LAMPA"` -- EXACTAMENTE la misma dirección que 464511/464631/464640/464726, ya resuelta automáticamente por `resolver_destino_ambiguo_con_evidencia_inequivoca()` (Vía A, catálogo `CONFIRMADO`) en el bloque anterior. Si el origen de 464892 se resolviera (evidencia insuficiente hoy, ver arriba), su destino YA tiene camino de resolución automática demostrado -- sin evidencia adicional que inventar, sólo pendiente de que el origen deje de bloquear el pipeline antes de llegar a esa etapa.
+
+**FASE 6 -- impacto en rutas/km (sin ejecutar ORS):**
+
+| Viaje | Origen resoluble | Destino | Si se resuelve origen, ¿listo para ORS? |
+|---|---|---|---|
+| 464529 | No (evidencia insuficiente) | `RESUELTO` (Vista Clara) | Sí, EN CUANTO se resuelva origen -- pero origen no es resoluble hoy |
+| 464479 | No (evidencia insuficiente) | Ambiguo (oculto por el motivo de origen) | No -- seguiría bloqueado por destino |
+| 464717 | Casi (49.1%, requiere confirmación) | Ambiguo (oculto) | No -- seguiría bloqueado por destino |
+| 464730 | Conflicto real (requiere decisión de Javier) | `RESUELTO` (Maipú) | Sí, si Javier resuelve el conflicto |
+| 464892 | Casi (39-44%, requiere confirmación) | Resoluble (mismo mecanismo Clase A ya publicado) | **Sí, si Javier confirma origen** |
+
+Cobertura: actual **18/38 (47.4%)**. Categorías A+D combinadas (automáticas/bug) = 0 -- no hay incremento automático. Si Javier confirma los 2 casos límite (B): +1 viaje listo para routing (464892; 464717 seguiría bloqueado por destino) → **19/38 (50.0%)**. Si además resuelve el conflicto de 464730 → potencial +1 adicional (destino ya resuelto) → **20/38 (52.6%)**, sujeto a decisión humana en los tres casos, nunca automático.
+
+**FASE 7 -- respuestas:**
+1. *¿Bugs reales?* Uno, de tipo observabilidad (motivo_ruta de un solo valor oculta el motivo de destino cuando origen también falla) -- no afecta la corrección de los datos persistidos, sólo la capacidad de encontrarlos por consulta.
+2. *¿Información desaprovechada?* Sí, en 464892 (destino ya resoluble por el mecanismo Clase A publicado, esperando sólo a que el origen deje de bloquear el flujo).
+3. *¿Cuántos recuperan origen automáticamente sin adivinar?* 0 hoy -- los 2 casos más cercanos (49.1%, 44.4%) están por debajo del umbral ya calibrado.
+4. *¿Cuántos requieren confirmación de Javier?* 3 (464717, 464892, 464730).
+5. *¿Cuántos no son resolubles con datos actuales?* 2 (464479, 464529) -- límite real de cobertura de Onelogis ese día.
+6. *¿Causa dominante?* Evidencia GPS real pero insuficiente/al límite del umbral -- no hay un patrón único (2 casos de cobertura escasa, 2 casos de umbral límite, 1 conflicto real).
+7. *¿Corrección pequeña y segura?* **No hay una única.** Bajar el umbral de 50% sería inventar un número calibrado con sólo 2 casos de referencia -- expresamente prohibido por las reglas de este bloque. Corregir el gap de observabilidad (motivo_ruta) es seguro y pequeño, pero no resuelve ningún origen por sí solo, sólo mejora la visibilidad del problema de destino ya existente.
+8. *¿Debe corregirse antes de destinos B/C?* No es prerrequisito técnico -- son casos independientes; queda a criterio de priorización de Javier.
+
+**Desktop:** verificado -- el "No disponible" que Javier observa corresponde exactamente a `planta_origen_nombre` vacía en el reporte vigente real, no a un problema de render (Desktop lee la columna tal cual).
+
+**Drive:** no modificado (mtimes verificados idénticos al inicio del bloque). **Git:** working tree con las tres bitácoras únicamente -- código sin cambios. **ORS: 0 llamadas. Onelogis red: 0 llamadas.**
+
+**Estado: AUDITORÍA DE VIAJES SIN PLANTA DE ORIGEN COMPLETADA -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Bloque EVIDENCIA HUMANA PARA RESOLUCIÓN DE ORIGEN -- 464717 / 464892 / 464730 -- 2026-08-19
+
+**Checkpoint:** Motor `1f3746a` (working tree con las tres bitácoras pendientes del diagnóstico anterior, preservadas). Desktop `fba95ac`. 100% lectura -- Drive re-verificado sin cambios de mtime al cierre.
+
+**Metodología:** para cada caso, `servicio.buscar_viajes(patente, fecha, fecha)` (día completo, no sólo la ventana ±4h) contra `telemetria_cache.json` real vía `ProveedorTelemetriaSoloCache` (0 llamadas de red), listando TODOS los trips del día con su distancia; `recolectar_puntos_ventana_origen` + `detectar_detenciones` para las detenciones reales; para cada detención, distancia del centroide a AZA COLINA/RENCA y porcentaje de sus puntos individuales dentro del polígono real de COLINA (`punto_en_poligono` con los 10 vértices reales) o del radio de RENCA (1.5 km, ya calibrado).
+
+**464717 (TG8925, 12-08-2026, doc 12:42-14:38):** 7 trips cacheados el día completo. Tras las 10:03:30 el vehículo queda prácticamente inmóvil hasta las 14:51:14 (**287.7 min continuos**, agrupando varios "trips" cortos consecutivos de maniobra) -- ventana que **contiene por completo** la hora documental. De 57 puntos, **28 (49.1%) dentro del polígono de AZA COLINA** -- 0.9 puntos porcentuales bajo `PROPORCION_MINIMA_DENTRO_POLIGONO=0.5`. Las otras 4 detenciones del día (8.9/6.0/1.6/1.0 min, antes de las 10:03) están a 19-20 km del punto de referencia, sin relación con ninguna planta -- transición matinal previa, no relevante. **Cero puntos de cualquier detención del día dentro del radio de AZA RENCA (0.0% en las 5).**
+
+**464892 (TG8925, 17-08-2026, doc 07:22-08:55):** 10 trips el día completo. Detención de 07:30:31-08:58:22 (**87.8 min**, 51 pts, **39.2% dentro de COLINA**) que se alinea con la ventana documental con un desfase de sólo 8/3 minutos en el inicio/fin. Segunda detención relevante 10:57-11:09 (11.5 min, 9 pts, 44.4% dentro de COLINA) -- posterior, más corta, mismo patrón. Las 6 detenciones restantes del día están a 18-20 km de la referencia, sin relación con ninguna planta. **Cero evidencia de RENCA en las 8 detenciones del día.**
+
+**464730 (AL1879, 13-08-2026, doc hora_entrada=hora_salida=08:18):** 9 trips el día completo, incluyendo dos tramos largos reales (36.42 km entre 08:09-09:22, 20.13 km entre 09:51-10:35) que conectan dos detenciones geográficamente distantes: **(1) 07:19-08:24 (65.3 min, 91 pts, 76.9% dentro de AZA COLINA)** -- termina a las 08:24, 6 minutos después de la hora documental única (08:18); **(2) 10:21-12:01 (99.5 min, 54 pts, 100% dentro del radio de AZA RENCA)** -- comienza casi 2 horas después de esa misma hora documental. Entre ambas, el vehículo recorrió realmente ~56 km (dos trips reales encadenados), consistente con un desplazamiento genuino entre plantas, no con ruido. **Hallazgo documental:** `hora_entrada_aza == hora_salida_aza == "08:18"` en el dataset persistido -- no se puede confirmar sin la imagen original si es así en el documento o un defecto de extracción; no se re-ejecutó OCR en este bloque (no estrictamente indispensable para completar el análisis GPS). Se registra como candidata a futura Incidencia Documental, sin crearla.
+
+**Interpretación (nunca aplicada, sólo para la conversación con Javier):** en los tres casos, AZA RENCA queda descartada por completo como alternativa para 464717/464892 (cero evidencia en absoluto ese día), y para 464730 la secuencia temporal real (Colina termina justo a la hora documental; Renca ocurre casi 2 horas después) sugiere que la visita a Renca corresponde a un desplazamiento posterior no relacionado con esta guía -- sin que eso autorice a Atlas a decidirlo solo.
+
+**Explicación humana por caso, nivel de evidencia y planta sugerida:** ver reporte de conversación (no se transcribe aquí íntegro por extensión) -- resumen: 464717 moderada-fuerte/COLINA, 464892 moderada/COLINA, 464730 contradictoria a nivel algorítmico pero secuencia temporal favorece COLINA.
+
+**FASE 6 -- propuesta conceptual de UX `ORIGEN_NO_CONFIRMADO`** (sin implementar, sin tocar Desktop): tarjeta con planta sugerida, motivo de la duda, evidencia GPS (duración/horario/porcentaje/alternativas descartadas) y tres acciones -- `CONFIRMAR PLANTA SUGERIDA` / `SELECCIONAR OTRA PLANTA` / `NO PUEDO DETERMINAR`.
+
+**464479/464529:** preservados sin tocar, sin intento de resolución -- siguen clasificados como evidencia insuficiente (bloque anterior).
+
+**Drive:** no modificado (mtimes verificados). **Desktop:** no modificado. **Git:** working tree con las tres bitácoras (pendientes del bloque anterior + este). **ORS: 0 llamadas. Onelogis red: 0 llamadas. OCR: no se re-ejecutó.**
+
+**Estado: EVIDENCIA DE ORIGEN PREPARADA -- ESPERANDO DECISIÓN DE JAVIER.**
+
+## Bloque INCORPORAR CONFIRMACIONES HUMANAS DE ORIGEN + DISEÑO DE CIERRE SEGURO -- 2026-08-19
+
+**Checkpoint:** Motor `1f3746a` (working tree con las tres bitácoras pendientes de los dos bloques anteriores, preservadas, cero cambios de código). Desktop `fba95ac`. 100% lectura/diseño -- Drive re-verificado sin cambios de mtime al cierre.
+
+**Confirmaciones humanas registradas (NO aplicadas a `operacion/actual` en este bloque):**
+- 464717 (0000353062, TG8925, chofer Salomón Pizarro) → **AZA COLINA** (Javier).
+- 464892 (0000353543, TG8925, chofer Salomón Pizarro) → **AZA COLINA** (Javier).
+- 464730 (0000353118, AL1879, chofer José Lazcano) → **AZA RENCA** (Javier) -- contradice la sugerencia basada en secuencia temporal del bloque anterior (Colina). Se preserva explícitamente: **planta documental** (letterhead AZA, no confiable, ya conocido) ≠ **evidencia GPS** (COLINA 76.9%/91pts/65.3min y RENCA 100%/54pts/99.5min, ambas reales) ≠ **sugerencia algorítmica previa** (Colina, por cronología) ≠ **planta canónica confirmada por humano** (RENCA). Ninguna capa se sobrescribe silenciosamente sobre otra.
+
+**FASE 2 -- auditoría del mecanismo de decisión existente** (`atlas_core/decisiones_pendientes.py` + `atlas_core/aplicacion_decisiones.py`, leídos íntegros):
+- `TIPOS_SOPORTADOS` = `{VEHICULO_DESCONOCIDO, CLIENTE_DESCONOCIDO, CLIENTE_CANDIDATO, OBRA_DESCONOCIDA, DESTINO_SIN_CONFIRMAR, ALIAS_CANDIDATO}` -- **no existe `ORIGEN_NO_CONFIRMADO`**.
+- `crear_decision()` ya genera un `decision_id` determinista (hash sobre tipo+documento+campo+valor+evidencias), con `candidatos`/`motivos`/`evidencias`/`acciones_permitidas` -- exactamente la forma que necesita una decisión de origen, sin cambios de contrato.
+- `aplicar_decision_obra()` (en `aplicacion_decisiones.py`, pese al nombre ya maneja 3 tipos distintos) es transaccional: respaldo en memoria de todos los archivos afectados antes de escribir (`respaldos = {ruta: ruta.read_bytes()...}`), ledger auditable (`decisiones_aplicadas.json`) con protección de obsolescencia (`_sha(dataset) != artefacto.get("dataset_sha256")` → `DecisionObsoletaError`), e idempotencia (una `decision_id` ya aplicada devuelve `{"idempotente": True}` sin reaplicar).
+- Sólo `(DESTINO_SIN_CONFIRMAR, CONFIRMAR)` y `(VEHICULO_DESCONOCIDO, REGISTRAR)` disparan `revalidar_y_regenerar_reporte` (regenera `viajes.csv`+`estado_operacion.json`) -- mecanismo directamente reutilizable para un nuevo `(ORIGEN_NO_CONFIRMADO, CONFIRMAR_PLANTA)`/`(ORIGEN_NO_CONFIRMADO, SELECCIONAR_OTRA_PLANTA)`.
+- **Diferencia estructural real con `DESTINO_SIN_CONFIRMAR`:** ese tipo escribe a un CATÁLOGO GLOBAL (`destinos_maestros.json`/`obras_destinos.json`) porque confirma una identidad reutilizable entre documentos. Una confirmación de origen es un hecho específico DE ESE documento/viaje -- el patrón reutilizable correcto es el de `revalidar_telemetria_sin_ocr` (ya publicado): escritura directa y auditable sobre la fila vía `_leer_filas`/`_escribir_filas_completas`/`bloqueo_sesion`, no creación de catálogo.
+- **Lo que falta, con precisión:** (1) el tipo `ORIGEN_NO_CONFIRMADO` en `TIPOS_SOPORTADOS`/`ACCIONES_POR_TIPO`; (2) un nivel superior en `_JERARQUIA_FUENTE_ORIGEN` (ya publicada en `gestor_viajes.py`, hoy `{TELEMETRIA_GPS:0, ONELOGIS_GPS:0, DOCUMENTO:1}`) para `CONFIRMACION_HUMANA`; (3) un guard en `revalidar_telemetria_sin_ocr` (`if fila.get("origen_determinado_por")=="CONFIRMACION_HUMANA": continue`) para que una revalidación futura NUNCA sobrescriba silenciosamente una confirmación humana -- hoy no existe ningún valor de `origen_determinado_por` que represente "ya lo confirmó un humano", por lo que técnicamente nada la distingue todavía de `TELEMETRIA_GPS`/`DOCUMENTO`.
+
+**FASE 3 -- semántica `ORIGEN_NO_CONFIRMADO` (diseño, no implementado):** payload con `documento`, `campo="planta_origen"`, `candidatos` (uno por planta con evidencia GPS resumida cuantitativa: % dentro de geocerca, duración, horario), `motivos` (reutiliza los ya existentes: `ORIGEN_GPS_CONFLICTO`/`ORIGEN_GPS_ESTADIA_SIN_PLANTA`/etc.), `acciones_permitidas=("CONFIRMAR_PLANTA","SELECCIONAR_OTRA_PLANTA","NO_PUEDO_DETERMINAR","POSPONER")`. La acción registra en el ledger: `decision_id, actor, fecha, documento/guía/transporte, planta_id elegida, evidencia_previa completa (nunca se borra), valor_anterior, fuente="CONFIRMACION_HUMANA"`.
+
+**FASE 4 -- propagación trazada:** decisión → escritura auditable en el/los documento(s) del viaje (reutilizando primitivos ya publicados, sin nuevo código de persistencia) → ledger → `_JERARQUIA_FUENTE_ORIGEN` consolida a nivel viaje con el nuevo nivel más alto → `revalidar_y_regenerar_reporte` (mecanismo ya existente, sin cambios) → `viajes.csv` → Desktop (mismo esquema, sin cambios). Documentos múltiples del mismo viaje: la jerarquía ya publicada resuelve el caso sin ambigüedad (confirmación humana > GPS > documento). Routing/km deliberadamente NO automático tras confirmar origen -- paso separado, igual que en el bloque de destinos Clase A.
+
+**FASE 5 -- 464730 como control negativo, verificado conceptualmente contra el diseño:** ambas evidencias GPS se conservarían íntegras en `evidencia_origen`/ledger; se registraría RENCA como origen confirmado con `fuente=CONFIRMACION_HUMANA`; ningún umbral global cambia; COLINA NO se convierte en incidencia documental sólo por haber sido la sugerencia descartada; el routing usaría RENCA; la auditoría permite reconstruir exactamente por qué (ambas detenciones documentadas, decisión humana explícita con actor/fecha). El diseño cumple los 6 puntos exigidos por la FASE 5 del bloque.
+
+**FASE 6 -- ¿implementar ahora?** Existe una extensión pequeña y generalizable (3-4 archivos: `decisiones_pendientes.py`, `aplicacion_decisiones.py`, `gestor_viajes.py`, `revalidacion_documental.py`), pero **no se implementa en este bloque**, por instrucción explícita -- el diseño queda listo para una futura autorización.
+
+**FASE 7 -- simulación de las 3 confirmaciones (conceptual, sin escribir TEMP ni Drive, sin ORS):**
+
+| Guía | Origen resultante | Destino actual | ¿Listo para ORS? |
+|---|---|---|---|
+| 464717 | AZA COLINA | Ambiguo (mismo patrón que otros 17, hoy oculto por el motivo de origen) | No |
+| 464892 | AZA COLINA | Misma dirección ya resuelta para 4 viajes (Class A), pero este transporte no pasó por ese mecanismo porque su `motivo_ruta` no lo mostraba como `MULTIPLES_UBICACIONES_DISPERSAS` | No todavía -- requiere un paso adicional (ya publicado, no automático) |
+| 464730 | AZA RENCA | Ya `RESUELTO` ("Maipú, RM") | **Sí**, el único listo de inmediato |
+
+**FASE 8 -- 464479/464529:** preservados sin ninguna acción, tal como quedaron clasificados (evidencia insuficiente, no se les pide nada a Javier).
+
+**FASE 9 -- alcance real del problema de `motivo_ruta` (auditado en los 38 viajes, no sólo intuido):** dos problemas distintos y ambos demostrados:
+1. **Enmascaramiento** (el motivo de origen oculta una ambigüedad de destino igual de real y verificable hoy): **3 viajes** -- 464479, 464717, 464892 (verificado geocodificando de nuevo contra la caché real cada `despachar_a_crudo` de los 9 documentos con `estado_ruta`/`motivo_ruta` relacionado a origen).
+2. **Texto obsoleto** (el motivo sigue diciendo "origen no determinado" pese a que el origen YA se corrigió en el bloque de revalidación de telemetría, porque en ese momento no había `distancia_km` que invalidar y por tanto nada disparó una actualización de `estado_ruta`/`motivo_ruta`): **1 viaje -- 464522** (`planta_origen_nombre=AZA COLINA`, `origen_determinado_por=TELEMETRIA_GPS`, pero `motivo_ruta=SIN_EVIDENCIA_GPS`, `estado_ruta=ORIGEN_NO_DETERMINADO`, ambos obsoletos). Verificado que 464698/699/700 y 464529, aunque también mencionan `ORIGEN_*` en su motivo, SÍ describen correctamente su estado actual (no son casos de texto obsoleto).
+
+Total: **4/38 viajes con `motivo_ruta`/`estado_ruta` no fiable como única fuente de verdad para Javier o para cualquier consulta automatizada.** Se registra como deuda funcional -- no se corrige en este bloque.
+
+**Drive:** no modificado (mtimes verificados idénticos). **Desktop:** no modificado. **Git:** working tree con las tres bitácoras (pendientes de los dos bloques anteriores + este). **ORS: 0 llamadas. Onelogis red: 0 llamadas. OCR: no se re-ejecutó. Código: 0 cambios.**
+
+**Estado: DISEÑO DE CONFIRMACIÓN HUMANA DE ORIGEN COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**

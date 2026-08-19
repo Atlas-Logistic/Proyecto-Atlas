@@ -1052,3 +1052,40 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Drive:** modificado exclusivamente por esta aplicación controlada. **Git:** working tree sólo con las tres bitácoras.
 - **Qué debe decidir Javier ahora:** validar visualmente en Desktop los 6 viajes con destino/km nuevo; priorizar el próximo frente entre: casos B (confirmación humana asistida), casos C (nueva evidencia/geocodificador complementario), u otro de los pendientes explícitos (Incidencias Documentales, patente vs vehículo canónico, Analítica/IA, Mobile, Multiempresa -- ninguno iniciado).
 - **Estado: RESOLUCIÓN SEGURA CLASE A APLICADA + RUTAS/KM RECALCULADOS -- LISTO PARA VALIDACIÓN VISUAL DE JAVIER.**
+
+## Checkpoint 2026-08-19 — Bloque AUDITORÍA VIAJES SIN PLANTA DE ORIGEN (diagnóstico, sin fix)
+
+- **100% lectura** -- Motor `1f3746a`, Desktop `fba95ac`, Drive re-verificado sin cambios.
+- **5 viajes sin planta de origen** (todos de 1 solo documento): 464479, 464529, 464717, 464730, 464892. Patentes (DD2494, TG8925, AL1879) confirmadas y activas en catálogo -- nunca es un problema de identidad de vehículo.
+- **0 resolubles automáticamente hoy.** 2 casos (464717 49.1%, 464892 39-44%) tienen una detención GPS real y prolongada justo por DEBAJO del umbral ya calibrado (50%) -- no se propone bajar el umbral con sólo 2 casos de referencia. 1 caso (464730) es un conflicto real: visitó ambas plantas confirmadas, agravado porque el documento registra hora de entrada = hora de salida (08:18=08:18), sin ventana real contra la cual comparar. 2 casos (464479/464529) tienen telemetría genuinamente escasa (1 trip, 5 puntos) -- límite real de cobertura de Onelogis, no corregible con datos existentes.
+- **Hallazgo clave:** **464892 usa la misma dirección ("Santa Isabel 585, Lampa") ya resuelta automáticamente para otros 4 viajes** en el bloque anterior -- si Javier confirma su origen, su destino ya tiene camino de resolución demostrado, sin evidencia nueva que inventar.
+- **Hallazgo de observabilidad (no un bug de cálculo):** en 2 casos, `motivo_ruta` queda ocupado por el motivo de ORIGEN y oculta que el DESTINO de esos mismos documentos también está sin resolver -- por eso el diagnóstico de destinos del bloque anterior no los detectó entre los 17.
+- **Cobertura:** actual 18/38 (47.4%) → potencial si Javier confirma los 2 casos límite = 19/38 (50.0%) → + conflicto de 464730 resuelto = 20/38 (52.6%). Todo sujeto a decisión humana, nada automático.
+- **0 llamadas ORS. 0 llamadas Onelogis red.** Sin fix. Drive y Desktop no modificados.
+- **Git:** working tree con las tres bitácoras. **Sin commit, sin push.**
+- **Qué debe decidir Javier ahora:** revisar caso por caso (no hay una corrección única para los 5); si confirma origen para 464717/464892/resuelve el conflicto de 464730; si vale la pena corregir el gap de observabilidad de `motivo_ruta` (mejora visibilidad, no resuelve ningún origen por sí sola); si prioriza esto o los pendientes de destino B/C ya identificados.
+- **Estado: AUDITORÍA DE VIAJES SIN PLANTA DE ORIGEN COMPLETADA -- LISTO PARA REVISIÓN CON JAVIER.**
+
+## Checkpoint 2026-08-19 (continuación) — Bloque EVIDENCIA HUMANA PARA RESOLUCIÓN DE ORIGEN: 464717 / 464892 / 464730
+
+- **100% lectura**, sin fix, sin cambios en Drive/Desktop/código. Cronología GPS completa del día reconstruida para los 3 casos con `telemetria_cache.json` real.
+- **464717:** detención de ~5h que contiene la ventana horaria de la guía; 49.1% dentro de AZA Colina (justo bajo umbral); 0% Renca. Sugerencia: **AZA COLINA**, evidencia moderada-fuerte.
+- **464892:** detención de 88min casi exacta con la guía; 39.2% dentro de Colina; 0% Renca. Sugerencia: **AZA COLINA**, evidencia moderada. Destino ya resoluble automáticamente -- confirmar origen lo dejaría listo para ruta.
+- **464730:** visitó AMBAS plantas ese día con evidencia fuerte para las dos, pero Colina termina justo a la hora documental (08:18) y Renca ocurre ~2h después -- secuencia temporal favorece Colina. Detectado que el documento registra la misma hora de entrada y salida (08:18=08:18) -- candidata a futura Incidencia Documental, no creada.
+- **3 preguntas concretas preparadas para Javier** (una por caso) + propuesta conceptual de UX `ORIGEN_NO_CONFIRMADO` (sin implementar).
+- 464479/464529 preservados sin tocar.
+- **Git:** working tree con las tres bitácoras (pendientes del bloque anterior + este). **Sin commit, sin push.**
+- **Qué debe decidir Javier ahora:** responder las 3 preguntas de origen (464717, 464892, 464730); considerar revisar la imagen original de 464730 para la anomalía de hora; luego decidir próximo frente entre destinos B/C, el gap de observabilidad de `motivo_ruta`, u otro pendiente.
+- **Estado: EVIDENCIA DE ORIGEN PREPARADA -- ESPERANDO DECISIÓN DE JAVIER.**
+
+## Checkpoint 2026-08-19 (continuación) — Bloque INCORPORAR CONFIRMACIONES HUMANAS DE ORIGEN + DISEÑO DE CIERRE SEGURO
+
+- **Javier confirmó:** 464717 → AZA COLINA, 464892 → AZA COLINA, **464730 → AZA RENCA** (contradice la sugerencia por secuencia temporal del bloque anterior -- lección de producto explícita: GPS/cronología son evidencia, nunca verdad canónica automática). **Ninguna se aplicó todavía a Drive** -- sólo diseño y auditoría en este bloque.
+- **Mecanismo existente auditado a fondo** (`decisiones_pendientes.py`/`aplicacion_decisiones.py`): sistema transaccional y auditable ya probado para 3 tipos (obra, destino, vehículo); **falta el tipo `ORIGEN_NO_CONFIRMADO`**, un nivel de jerarquía "confirmación humana" por encima de GPS/documento, y un guard para que revalidaciones futuras nunca sobrescriban una confirmación humana ya aplicada.
+- **Diseño completo preparado** (payload, 4 acciones, auditoría, propagación hasta Desktop) -- una extensión pequeña y generalizable (3-4 archivos), **no implementada, por instrucción explícita**.
+- **Simulación conceptual:** de las 3 confirmaciones, sólo 464730 quedaría listo para calcular ruta de inmediato (destino ya resuelto); 464717/464892 seguirían bloqueados por destino ambiguo.
+- **464479/464529:** preservados sin ninguna acción.
+- **Nuevo hallazgo de observabilidad:** además del enmascaramiento ya conocido (3 viajes), se confirmó que **464522 tiene `motivo_ruta` obsoleto** -- su origen ya se corrigió a AZA Colina en un bloque anterior, pero el motivo sigue diciendo "sin evidencia GPS" porque no había km que invalidar en ese momento. Total: 4/38 viajes con `motivo_ruta` no fiable.
+- **Git:** working tree con las tres bitácoras (dos bloques anteriores + este). **Sin commit, sin push.**
+- **Qué debe decidir Javier ahora:** si autoriza implementar el mecanismo `ORIGEN_NO_CONFIRMADO` diseñado (y entonces aplicar las 3 confirmaciones a través de él, con auditoría completa); o si prefiere otro camino. También: priorizar entre esto, destinos B/C, y la deuda de observabilidad de `motivo_ruta` (4 casos, incluye el hallazgo nuevo de 464522).
+- **Estado: DISEÑO DE CONFIRMACIÓN HUMANA DE ORIGEN COMPLETADO -- LISTO PARA REVISIÓN CON JAVIER.**
