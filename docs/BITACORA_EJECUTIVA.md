@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA FASE 3: conectado al flujo real (sin aplicar a producción) — y un bug real de tipo de vehículo encontrado y corregido
+
+- **El motor de clientes/obras del bloque anterior ya está conectado al flujo real** que usa Desktop (`reconciliar_bandeja_decisiones`), no a un flujo paralelo. Además, **por primera vez, `CLIENTE_DESCONOCIDO` y `ALIAS_CANDIDATO` tienen una aplicación real** -- hasta este bloque, aunque Desktop mostraba sus opciones, el botón "Aplicar" nunca hacía nada (sólo UX preparatoria). Ahora sí: registrar un cliente nuevo, o confirmar que un texto documental corresponde a una entidad ya conocida, funciona de punta a punta.
+- **El aprendizaje operacional ya es real, no sólo diseño:** cada vez que un humano confirma un alias, Atlas lo recuerda (asociado al RUT, nunca al mismo documento repetido). A la segunda confirmación independiente, la relación queda como conocimiento fuerte; una tercera aparición equivalente se resuelve sola y queda registrada como Incidencia Documental -- probado de punta a punta, no sólo en teoría.
+- **Hallazgo real importante, encontrado validando contra los datos reales (no en un test sintético):** una vez que la rampla de un documento se resolvía, su tracto hermano perdía la clasificación de tipo y podía llegar a sugerir una patente del tipo equivocado (una rampla como si fuera un tracto). Corregido antes de tocar nada real -- una clasificación de tipo ya establecida nunca vuelve a degradarse.
+- **Validado contra las 13 decisiones reales vigentes (sólo lectura, nunca aplicado):** con el caché de evidencia externa real de SIGRO conectado, esa decisión mejoró de "sugerencia" a "contradicción documental" (evidencia más fuerte). El resto se mantiene exactamente como el bloque anterior lo había clasificado -- nada se resuelve solo todavía porque el historial de confirmaciones humanas recién empieza en cero.
+- **Desktop ya puede mostrar y aplicar estas decisiones:** las tarjetas de cliente/obra ahora explican, en lenguaje humano, por qué Atlas sugiere una entidad -- nunca un puntaje sin explicar.
+- **Nada se aplicó a Drive real.** Motor `1399 passed, 0 failed` (12 nuevos, incluida la corrección del bug de tipo). Código publicado (no modifica datos reales por sí mismo); pendiente de que Javier decida activar la integración sobre la operación real.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA FASE 2: clientes, obras, verificación externa e Incidencias Documentales -- construido y validado, sin aplicar a producción
 
 - **Cambio de etapa:** el mismo patrón que resolvió vehículos (evidencia estructurada, nunca autocorrección silenciosa) se extendió a clientes y obras, y se formalizó como capa reutilizable (`atlas_core/motor_evidencia.py`) para que el próximo dominio (destinos, y más adelante otros) no tenga que reinventarlo.

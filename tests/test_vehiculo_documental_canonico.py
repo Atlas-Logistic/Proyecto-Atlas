@@ -564,6 +564,54 @@ def test_reconciliar_bandeja_enriquece_vehiculos_con_candidatos(tmp_path):
     assert "USAR_PATENTE_EXISTENTE" in dec["acciones_permitidas"]
 
 
+def test_resolver_rampla_no_degrada_clasificacion_tracto_del_mismo_documento(tmp_path):
+    """Bug real encontrado en validación TEMP (MOTOR DE EVIDENCIA FASE 3,
+    caso real 464265): `actualizar_contrato_vehiculos_persistidos`
+    clasificaba `patente_tracto` como INEQUIVOCO/TRACTO sólo si el
+    documento TODAVÍA tenía una decisión `patente_rampla` PENDIENTE en la
+    misma corrida -- una vez que la rampla se resolvía y salía de la
+    bandeja, el tracto hermano perdía su clasificación (quedaba
+    tipo_vehiculo_propuesto=None), lo que a su vez desactivaba el filtro
+    de tipo del motor de evidencia y permitía que una patente CARRO
+    apareciera como candidata para un campo TRACTO. Una clasificación
+    INEQUIVOCO/TRACTO ya establecida nunca debe degradarse sólo porque un
+    hermano ya fue respondido."""
+    entorno = _entorno(tmp_path, filas_csv=[
+        _fila_csv(numero_guia="1", patente_tracto="VP6521", patente_rampla="JD6659"),
+    ])
+    decision_tracto = _decision_vehiculo(guia="1", campo="patente_tracto", valor_documental="VP6521")
+    decision_rampla = _decision_vehiculo(guia="1", campo="patente_rampla", valor_documental="JD6659")
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=[decision_tracto, decision_rampla], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+    # Con ambos hermanos pendientes, la reconciliación ya clasifica el
+    # tracto como INEQUIVOCO/TRACTO (comportamiento previo, sin cambios).
+    reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
+    artefacto = json.loads((entorno["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    tracto_antes = next(d for d in artefacto["decisiones"] if d["campo"] == "patente_tracto")
+    assert tracto_antes["tipo_vehiculo_propuesto"] == "TRACTO"
+
+    # Se resuelve (y sale de la bandeja) la decisión hermana de rampla.
+    aplicar_decision_obra(raiz_atlas=entorno["raiz"], decision_id=decision_rampla["decision_id"], accion="NO_REGISTRAR")
+
+    # El tracto, todavía pendiente, debe conservar su clasificación --
+    # nunca perderla sólo porque el hermano ya se respondió.
+    artefacto_despues = json.loads((entorno["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    tracto_despues = next(d for d in artefacto_despues["decisiones"] if d["campo"] == "patente_tracto")
+    assert tracto_despues["tipo_vehiculo_propuesto"] == "TRACTO"
+    assert tracto_despues["tipo_resolucion"] == "INEQUIVOCO"
+
+    # Y el motor de evidencia sigue filtrando por tipo correctamente: un
+    # candidato CARRO nunca debe aparecer para este campo TRACTO.
+    _confirmar(entorno["catalogos"], "JD8659", TipoVehiculo.CARRO)
+    filas = _leer_csv(entorno["dataset"])
+    vehiculos = cargar_catalogo_vehiculos(entorno["catalogos"] / "vehiculos.json").homologables()
+    enriquecidas = enriquecer_decisiones_vehiculo(decisiones=[tracto_despues], filas=filas, vehiculos=vehiculos)
+    patentes_candidatas = [c["patente"] for c in (enriquecidas[0].get("candidatos") or [])]
+    assert "JD8659" not in patentes_candidatas
+
+
 def test_reconciliar_bandeja_no_reabre_decision_ya_cerrada(tmp_path):
     entorno = _entorno(tmp_path, filas_csv=[_fila_csv(numero_guia="1", patente_tracto="ZZ0000")])
     decision = _decision_vehiculo(guia="1", campo="patente_tracto", valor_documental="ZZ0000")

@@ -4,7 +4,22 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
-## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA FASE 2 (clientes/obras/verificación externa/Incidencias Documentales) validado — sin aplicar, pendiente de UNA revisión de Javier
+## 2026-08-19 — Handoff vigente: MOTOR DE EVIDENCIA FASE 3 integrado al flujo real — sin activar en producción, pendiente de la decisión de Javier
+
+- **El motor ya está conectado donde Desktop realmente lee/escribe** (`reconciliar_bandeja_decisiones`), no en un flujo paralelo. `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` tienen aplicación real por primera vez -- antes eran sólo UX preparatoria pese a mostrar opciones.
+- **Aprendizaje operacional real:** `CONFIRMAR_ALIAS` ahora registra la confirmación (por RUT, nunca por documento repetido) y una Incidencia Documental. A la 2ª confirmación independiente, la relación queda fuerte; a la 3ª aparición equivalente, se resuelve sola -- probado de punta a punta.
+- **Bug real encontrado y corregido:** resolver la rampla de un documento podía hacer que su tracto hermano sugiriera una patente del tipo equivocado (rampla como si fuera tracto). Corregido antes de validar nada más -- una clasificación de tipo ya establecida nunca se degrada.
+- **Validado contra las 13 decisiones reales (sólo lectura):** con el caché real de SIGRO conectado, esa decisión mejoró a `CONTRADICCION_DOCUMENTAL`. El resto igual que antes -- `RESUELTO_AUTOMATICAMENTE=0` porque el historial de confirmaciones humanas recién empieza en cero (honesto, no forzado).
+- **Verificación externa real para producción:** existen APIs reales (BaseAPI, API Gateway) que exponen datos del SII, pero requieren cuenta/token propios -- no hay opción gratuita sin credenciales con cobertura confiable para Chile. No se inventó ninguna credencial. La interfaz ya está lista para cualquiera de esas opciones.
+- **Desktop:** `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` ya no muestran "próximo bloque"; ambos tipos, más `OBRA_DESCONOCIDA`, muestran ahora la explicación en lenguaje humano de por qué Atlas sugiere una entidad.
+- **Drive, catálogos, decisiones reales: sin tocar.** Motor `1399 passed`; Desktop `226 passed`.
+- **Decisión pendiente para Javier, la más importante de este bloque:** para `RESUELTO_AUTOMATICAMENTE` (clientes/obras, igual que vehículos), Atlas sigue exigiendo un clic humano (mismo patrón que `USAR_PATENTE_EXISTENTE`) en vez de aplicar solo y no mostrar tarjeta -- hacerlo de verdad "sin tarjeta" requeriría escribir la entidad canónica en el CSV consolidado, del que dependen varios consumidores no auditados todavía (consolidación de viaje, reportes). No se decidió solo -- se reporta para que Javier elija.
+- **Otras decisiones pendientes:** ¿activar la integración sobre la operación real? ¿contratar un proveedor de verificación externa? ¿aplicar la sugerencia SIGRO y revisar `TORRES OCARANEA LTDA`?
+- **Siguiente frente recomendado, no iniciado por instrucción explícita:** analítica/IA conversacional, mobile, multiempresa.
+
+---
+
+## 2026-08-19 — Handoff previo: MOTOR DE EVIDENCIA FASE 2 (clientes/obras/verificación externa/Incidencias Documentales) validado — sin aplicar, pendiente de UNA revisión de Javier
 
 - **Qué es:** el mismo patrón que ya funciona en producción para vehículos (evidencia estructurada por niveles, nunca autocorrección) se extiende a clientes y obras, formalizado en una capa reutilizable (`atlas_core/motor_evidencia.py`). Se agregan además: verificación externa (Internet como fuente explícita, con jerarquía de fuentes), confirmaciones humanas independientes (Atlas deja de repetir la misma pregunta a la 3ª aparición equivalente), e Incidencias Documentales (errores reales del contenido, nunca de OCR/calidad).
 - **2 casos reales validados con evidencia genuina (no simulada):** SIGRO (guía 464493) -- Internet corrobora que "EMPRESA CONST SIGRO SA" es la misma "EMPRESA CONST SIGRO" ya confirmada, sugerencia fuerte, nunca forzada. Supermercado Señor de los Milagros (guía 464170) -- búsqueda real sin resultados, Atlas se abstiene honestamente.

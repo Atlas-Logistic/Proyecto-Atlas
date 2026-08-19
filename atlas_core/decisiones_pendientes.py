@@ -34,9 +34,13 @@ from atlas_core.catalogo_vehiculos import (
     resolver_patente,
 )
 from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json, normalizar_rut
+from atlas_core.evidencia_entidades import ConfirmacionIdentidad
+from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
+from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
+from atlas_core.verificacion_externa import EvidenciaExterna
 
 
 SCHEMA_VERSION = 1
@@ -195,12 +199,25 @@ def actualizar_contrato_vehiculos_persistidos(
         if campo == "patente_rampla":
             decision["tipo_resolucion"] = "INEQUIVOCO"
             decision["tipo_vehiculo_propuesto"] = "CARRO"
-        elif campo == "patente_tracto" and documento in documentos_con_rampla_valida:
-            decision["tipo_resolucion"] = "INEQUIVOCO"
-            decision["tipo_vehiculo_propuesto"] = "TRACTO"
         elif campo == "patente_tracto":
-            decision["tipo_resolucion"] = "REQUIERE_CONFIRMACION_HUMANA"
-            decision["tipo_vehiculo_propuesto"] = None
+            # Bug real encontrado en producción (MOTOR DE EVIDENCIA FASE 3):
+            # `documentos_con_rampla_valida` sólo mira las decisiones
+            # `patente_rampla` TODAVÍA PENDIENTES en esta misma corrida --
+            # si la decisión hermana de rampla ya se resolvió y salió de
+            # la bandeja (caso real: 464265, rampla resuelta en el bloque
+            # anterior), el tracto perdía su clasificación INEQUIVOCO y
+            # dejaba de filtrar candidatos por tipo, permitiendo que una
+            # patente CARRO apareciera como candidata para un campo
+            # TRACTO. Una vez INEQUIVOCO/TRACTO, la clasificación nunca
+            # se degrada -- sólo puede confirmarse o mantenerse, jamás
+            # perderse porque un hermano ya fue respondido.
+            si_ya_era_tracto_inequivoco = decision.get("tipo_vehiculo_propuesto") == "TRACTO"
+            if documento in documentos_con_rampla_valida or si_ya_era_tracto_inequivoco:
+                decision["tipo_resolucion"] = "INEQUIVOCO"
+                decision["tipo_vehiculo_propuesto"] = "TRACTO"
+            else:
+                decision["tipo_resolucion"] = "REQUIERE_CONFIRMACION_HUMANA"
+                decision["tipo_vehiculo_propuesto"] = None
     return salida
 
 
@@ -503,6 +520,88 @@ def enriquecer_decisiones_vehiculo(
                     else:
                         base.extend(nuevas)
                 decision["acciones_permitidas"] = base
+        salida.append(decision)
+    return salida
+
+
+def rut_documental_de_decision_cliente(decision: Mapping[str, object]) -> str:
+    """Extrae el RUT documental crudo que `detectar_decisiones_documento`
+    ya guardó en `evidencias` (tipo `RUT_EXACTO`/`RUT_VALIDO`) de una
+    decisión `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` -- el CSV consolidado
+    NO retiene RUT de cliente por guía (sólo el nombre ya resuelto), así
+    que ésta es la única fuente disponible al reconciliar la bandeja."""
+    for evidencia in decision.get("evidencias") or ():
+        if evidencia.get("tipo") in ("RUT_EXACTO", "RUT_VALIDO") and evidencia.get("campo") == "rut_cliente":
+            return str(evidencia.get("valor", ""))
+    return ""
+
+
+def enriquecer_decisiones_cliente(
+    *, decisiones: Iterable[Mapping[str, object]], clientes: Iterable[object],
+    confirmaciones: Iterable[ConfirmacionIdentidad] = (),
+    evidencia_externa_por_clave: Mapping[str, tuple[EvidenciaExterna, ...]] | None = None,
+) -> list[dict[str, object]]:
+    """Bloque MOTOR DE EVIDENCIA FASE 3 -- enriquece decisiones
+    `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` YA generadas por
+    `detectar_decisiones_documento` (nunca las crea desde cero, nunca
+    reemplaza `_identidad_cliente_por_rut`) con la clasificación completa
+    del motor de evidencia -- puramente informativo (`evaluacion_evidencia`/
+    `candidatos_evidencia`), nunca cambia qué acciones puede aplicar el
+    humano: `ALIAS_CANDIDATO` ya tiene `CONFIRMAR_ALIAS` para vincular la
+    canónica sugerida (ver `aplicar_decision_obra`, que ahora usa la
+    evidencia para decidir SI además registra una Incidencia Documental).
+    SIEMPRE recalcula (mismo motivo que `enriquecer_decisiones_vehiculo`:
+    una confirmación humana nueva debe reflejarse la próxima vez que se
+    reconcilie la bandeja, no quedar congelada)."""
+    evidencia_externa_por_clave = evidencia_externa_por_clave or {}
+    confirmaciones = list(confirmaciones)
+    salida: list[dict[str, object]] = []
+    for decision_original in decisiones:
+        decision = dict(decision_original)
+        if decision.get("entidad") == "CLIENTE" and decision.get("tipo") in ("CLIENTE_DESCONOCIDO", "ALIAS_CANDIDATO"):
+            rut_doc = rut_documental_de_decision_cliente(decision)
+            documental = str(decision.get("valor_documental", ""))
+            evidencia_externa = evidencia_externa_por_clave.get(normalizar_nombre_cliente(documental), ())
+            evaluacion = evaluar_evidencia_cliente(
+                razon_social_documental=documental, rut_documental=rut_doc,
+                numero_guia=str((decision.get("documento") or {}).get("numero_guia", "")),
+                numero_transporte=str((decision.get("documento") or {}).get("numero_transporte", "")),
+                clientes=clientes, confirmaciones=confirmaciones, evidencia_externa=evidencia_externa,
+            )
+            decision["evaluacion_evidencia"] = {"resultado": evaluacion.resultado, "explicacion": evaluacion.explicacion}
+            decision["candidatos_evidencia"] = [c.a_dict() for c in evaluacion.candidatos]
+        salida.append(decision)
+    return salida
+
+
+def enriquecer_decisiones_obra(
+    *, decisiones: Iterable[Mapping[str, object]], obras: Iterable[object],
+    evidencia_externa_por_clave: Mapping[str, tuple[EvidenciaExterna, ...]] | None = None,
+) -> list[dict[str, object]]:
+    """Mismo patrón que `enriquecer_decisiones_cliente`, para
+    `OBRA_DESCONOCIDA`. `obras` es la lista completa del catálogo -- se
+    filtra aquí por `contexto.cliente_id` de cada decisión (misma obra
+    global, evidencia por cliente)."""
+    evidencia_externa_por_clave = evidencia_externa_por_clave or {}
+    obras = list(obras)
+    salida: list[dict[str, object]] = []
+    for decision_original in decisiones:
+        decision = dict(decision_original)
+        if decision.get("tipo") == "OBRA_DESCONOCIDA":
+            contexto = decision.get("contexto") or {}
+            cliente_id = str(contexto.get("cliente_id", ""))
+            documental = str(decision.get("valor_documental", ""))
+            obras_mismo_cliente = tuple(
+                o for o in obras
+                if getattr(o, "cliente_id", None) == cliente_id and getattr(o, "estado_vigencia", None) == "ACTIVO"
+            )
+            evidencia_externa = evidencia_externa_por_clave.get(normalizar_nombre_obra(documental), ())
+            evaluacion = evaluar_evidencia_obra(
+                nombre_documental=documental, obras_confirmadas_mismo_cliente=obras_mismo_cliente,
+                evidencia_externa=evidencia_externa,
+            )
+            decision["evaluacion_evidencia"] = {"resultado": evaluacion.resultado, "explicacion": evaluacion.explicacion}
+            decision["candidatos_evidencia"] = [c.a_dict() for c in evaluacion.candidatos]
         salida.append(decision)
     return salida
 

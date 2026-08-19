@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
+from atlas_core.catalogo_clientes import CatalogoClientes, ClienteDuplicadoError, EstadoCalidadCliente, normalizar_rut_cliente
 from atlas_core.catalogo_destinos import CatalogoDestinos
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
 from atlas_core.catalogo_plantas import CatalogoPlantas
@@ -19,7 +20,11 @@ from atlas_core.catalogo_vehiculos import (
 )
 from atlas_core.decisiones_pendientes import (
     actualizar_contrato_vehiculos_persistidos, decision_destino_para_obra_registrada,
-    generar_artefacto, regenerar_decisiones_persistidas,
+    generar_artefacto, regenerar_decisiones_persistidas, rut_documental_de_decision_cliente,
+)
+from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
+from atlas_core.incidencias_documentales import (
+    AlmacenIncidenciasDocumentales, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
 )
 
 # Bloque ORIGEN D1: fuente de origen que representa una confirmación humana
@@ -37,6 +42,14 @@ ACCIONES = frozenset({
     # antes); estas dos son nuevas, análogas a CONFIRMAR_PLANTA/
     # SELECCIONAR_OTRA_PLANTA pero para vehículos.
     "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
+    # MOTOR DE EVIDENCIA FASE 3: primera aplicación real para
+    # CLIENTE_DESCONOCIDO/ALIAS_CANDIDATO -- hasta este bloque ninguna de
+    # las dos tenía backend, sólo UX preparatoria (ver
+    # ACCIONES_POR_TIPO/rama final `else` más abajo). REGISTRAR/
+    # NO_REGISTRAR/POSPONER se reutilizan tal cual para CLIENTE_DESCONOCIDO
+    # (mismo patrón que OBRA_DESCONOCIDA); CONFIRMAR_ALIAS/RECHAZAR son
+    # nuevas.
+    "CONFIRMAR_ALIAS", "RECHAZAR",
 })
 LEDGER = "decisiones_aplicadas.json"
 
@@ -50,6 +63,8 @@ ACCIONES_POR_TIPO = {
         "REGISTRAR", "NO_REGISTRAR", "POSPONER",
         "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
     }),
+    "CLIENTE_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
+    "ALIAS_CANDIDATO": frozenset({"CONFIRMAR_ALIAS", "RECHAZAR", "POSPONER"}),
     "ORIGEN_NO_CONFIRMADO": frozenset({
         "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
     }),
@@ -57,6 +72,17 @@ ACCIONES_POR_TIPO = {
 
 class ErrorAplicacionDecision(ValueError): pass
 class DecisionObsoletaError(ErrorAplicacionDecision): pass
+
+
+def normalizar_rut_cliente_o_vacio(rut: str) -> str:
+    """Igual que `normalizar_rut_cliente`, pero nunca lanza -- un RUT
+    documental inválido nunca debe interrumpir la aplicación de una
+    decisión, sólo tratarse como ausente (ver
+    `atlas_core.motor_evidencia_clientes`: RUT inválido nunca es verdad)."""
+    try:
+        return normalizar_rut_cliente(rut)
+    except ValueError:
+        return ""
 
 
 def _sha(ruta: Path) -> str:
@@ -166,6 +192,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
     catalogo_destinos_ruta = catalogos / "destinos_maestros.json"
     catalogo_vehiculos_ruta = catalogos / "vehiculos.json"
     catalogo_plantas_ruta = catalogos / "plantas.json"
+    catalogo_clientes_ruta = catalogos / "clientes.json"
+    evidencia_entidades_ruta = catalogos / "evidencia_entidades.json"
+    incidencias_documentales_ruta = catalogos / "incidencias_documentales.json"
     estado_operacion_ruta = actual / "estado_operacion.json"
     accion = str(accion).upper(); decision_id = str(decision_id).strip()
     if accion not in ACCIONES or not decision_id: raise ErrorAplicacionDecision("Solicitud de decisión inválida.")
@@ -226,6 +255,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             for ruta in (
                 catalogo_obras_ruta, catalogo_destinos_ruta, ledger_ruta,
                 catalogo_vehiculos_ruta, artefacto_ruta, dataset, estado_operacion_ruta,
+                catalogo_clientes_ruta, evidencia_entidades_ruta, incidencias_documentales_ruta,
             )
         }
         resultado_extra: dict[str, object] = {}
@@ -518,6 +548,90 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "dataset_sha256": artefacto.get("dataset_sha256"),
                     "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo == "CLIENTE_DESCONOCIDO":
+                # MOTOR DE EVIDENCIA FASE 3 -- primera aplicación real para
+                # este tipo (antes sólo UX preparatoria). Mismo patrón que
+                # OBRA_DESCONOCIDA: REGISTRAR crea la entidad; el valor
+                # documental (`cliente` en el CSV) nunca se toca.
+                razon_social_doc = str(decision.get("valor_documental", "")).strip()
+                rut_doc = rut_documental_de_decision_cliente(decision)
+                if not razon_social_doc:
+                    raise ErrorAplicacionDecision("La decisión no contiene una razón social documental.")
+                cliente_id_nuevo = None
+                if accion == "REGISTRAR":
+                    rut_valido = normalizar_rut_cliente_o_vacio(rut_doc)
+                    catalogo_clientes = CatalogoClientes(catalogo_clientes_ruta)
+                    try:
+                        cliente_creado = catalogo_clientes.crear(
+                            razon_social=razon_social_doc, fuente=f"DECISION_HUMANA:{decision_id}",
+                            rut=rut_valido, estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+                        )
+                    except ClienteDuplicadoError as error:
+                        raise ErrorAplicacionDecision(str(error)) from error
+                    cliente_id_nuevo = cliente_creado.cliente_id
+                    resultado_extra["cliente_id"] = cliente_id_nuevo
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
+                    "valor_documental": razon_social_doc, "rut_documental": rut_doc, "cliente_id": cliente_id_nuevo,
+                    "motivo_rechazo": (str(motivo_rechazo).strip() if motivo_rechazo and accion == "NO_REGISTRAR" else None),
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
+            elif tipo == "ALIAS_CANDIDATO":
+                # MOTOR DE EVIDENCIA FASE 3: CONFIRMAR_ALIAS ahora hace 3
+                # cosas donde antes no hacía ninguna (era sólo UX
+                # preparatoria) -- (1) vincula el alias documental al
+                # cliente ya identificado por RUT exacto (mismo mecanismo
+                # ya usado por confirmaciones manuales anteriores,
+                # `CatalogoClientes.agregar_alias`); (2) registra una
+                # `ConfirmacionIdentidad` (aprendizaje operacional --
+                # FASE 4); (3) como un humano acaba de confirmar
+                # explícitamente que el texto documental NO es la entidad
+                # real, registra una Incidencia Documental -- el documento
+                # nunca se toca, sólo queda auditado.
+                identidad = decision.get("identidad_resuelta") or {}
+                if str(identidad.get("catalogo", "")) == "empresas.json":
+                    raise ErrorAplicacionDecision(
+                        "Esta variante de alias (identidad resuelta contra empresas.json, sin registro "
+                        "formal en clientes.json) todavía no se puede confirmar en este bloque."
+                    )
+                cliente_id_alias = str(identidad.get("entidad_id", ""))
+                valor_canonico = str(identidad.get("valor_canonico", ""))
+                valor_documental_alias = str(decision.get("valor_documental", "")).strip()
+                if accion == "CONFIRMAR_ALIAS":
+                    if not cliente_id_alias or not valor_canonico or not valor_documental_alias:
+                        raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para confirmar el alias.")
+                    catalogo_clientes = CatalogoClientes(catalogo_clientes_ruta)
+                    catalogo_clientes.agregar_alias(cliente_id_alias, valor_documental_alias, modificacion_manual=True)
+                    documento_decision = decision.get("documento") or {}
+                    rut_ctx = rut_documental_de_decision_cliente(decision) or str(identidad.get("rut", ""))
+                    rut_normalizado_ctx = normalizar_rut_cliente_o_vacio(rut_ctx)
+                    if rut_normalizado_ctx:
+                        AlmacenEvidenciaEntidades(evidencia_entidades_ruta).registrar_confirmacion(
+                            dominio="CLIENTE", contexto_clave=rut_normalizado_ctx,
+                            valor_documental=valor_documental_alias, valor_confirmado=valor_canonico,
+                            identificador_confirmado=cliente_id_alias,
+                            numero_guia=str(documento_decision.get("numero_guia", "")),
+                            numero_transporte=str(documento_decision.get("numero_transporte", "")),
+                            actor=actor, fuente_decision=f"CONFIRMAR_ALIAS:{decision_id}", fecha=reloj(),
+                        )
+                    incidencia = AlmacenIncidenciasDocumentales(incidencias_documentales_ruta).registrar(
+                        contexto=valor_canonico, numero_guia=str(documento_decision.get("numero_guia", "")),
+                        numero_transporte=str(documento_decision.get("numero_transporte", "")), campo="cliente",
+                        valor_documental=valor_documental_alias, valor_canonico=valor_canonico,
+                        tipo_incidencia=TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
+                        evidencia=("RUT_EXACTO_COINCIDE", f"CONFIRMADO_POR_HUMANO:{decision_id}"),
+                        fecha=reloj(), fuente_resolucion="CONFIRMAR_ALIAS", actor=actor, decision_id=decision_id,
+                    )
+                    resultado_extra["cliente_id"] = cliente_id_alias
+                    resultado_extra["incidencia_id"] = incidencia.incidencia_id
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
+                    "valor_documental": valor_documental_alias, "cliente_id": cliente_id_alias if accion == "CONFIRMAR_ALIAS" else None,
+                    "valor_canonico": valor_canonico if accion == "CONFIRMAR_ALIAS" else None,
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
             else:
                 raise ErrorAplicacionDecision("Esta decisión no puede aplicarse en este bloque.")
 
@@ -602,6 +716,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("ORIGEN_NO_CONFIRMADO", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este origen mientras la evidencia no cambie.",
             ("VEHICULO_DESCONOCIDO", "USAR_PATENTE_EXISTENTE"): "Patente canónica confirmada. Queda registrada en el historial de este documento sin modificar el valor documental leído.",
             ("VEHICULO_DESCONOCIDO", "SELECCIONAR_OTRA_PATENTE"): "Patente canónica confirmada con la elegida. Queda registrada en el historial de este documento sin modificar el valor documental leído.",
+            ("CLIENTE_DESCONOCIDO", "REGISTRAR"): "Cliente registrado. Atlas podrá reconocerlo en documentos futuros.",
+            ("CLIENTE_DESCONOCIDO", "NO_REGISTRAR"): "Decisión guardada. Atlas no registrará esta observación como cliente.",
+            ("ALIAS_CANDIDATO", "CONFIRMAR_ALIAS"): "Alias confirmado. Atlas reconocerá este texto como la misma entidad en documentos futuros, y queda registrada una Incidencia Documental.",
+            ("ALIAS_CANDIDATO", "RECHAZAR"): "Decisión guardada. Atlas no vinculará este texto documental a la entidad sugerida.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}

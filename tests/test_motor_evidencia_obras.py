@@ -92,6 +92,23 @@ def test_sin_ninguna_coincidencia_es_alta_nueva():
     assert resultado.resultado == RESULTADO_ALTA_NUEVA
 
 
+def test_evidencia_externa_corrobora_direccion_y_comuna_visible_en_el_candidato():
+    """La evidencia externa real de SIGRO trae dirección/comuna
+    corroboradas -- deben quedar visibles en el candidato (nunca sólo la
+    razón social), auditable por Javier."""
+    resultado = evaluar_evidencia_obra(
+        nombre_documental="EMPRESA CONST SIGRO SA", obras_confirmadas_mismo_cliente=(),
+        evidencia_externa=(EVIDENCIA_SIGRO_CORPORATIVA,),
+    )
+    candidato = resultado.candidatos[0]
+    assert candidato.metadatos.get("fuente") == "web.sigro.cl"
+    assert "EVIDENCIA_EXTERNA" in candidato.evidencias[0]
+    assert candidato.metadatos.get("direccion") == "Narciso Goycolea 4040 Piso 1"
+    assert candidato.metadatos.get("comuna") == "Vitacura"
+    assert EVIDENCIA_SIGRO_CORPORATIVA.direccion == "Narciso Goycolea 4040 Piso 1"
+    assert EVIDENCIA_SIGRO_CORPORATIVA.comuna == "Vitacura"
+
+
 def test_direccion_web_sola_no_demuestra_obra_operacional():
     """Evidencia corporativa (el sitio propio de SIGRO) corrobora la
     EMPRESA, no que exista una obra/proyecto operacional en curso -- el

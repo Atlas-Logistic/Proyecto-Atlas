@@ -4,6 +4,56 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19 — MOTOR DE EVIDENCIA FASE 3: integración al flujo real
+
+**Rama motor:** `lector-mvp-guia-nueva`. Sin commit todavía al momento de redactar esta entrada (se comitea al cierre del bloque).
+
+### FASE 0 -- checkpoint
+
+`65f537b`/`a55a726`, `local=remoto`, `0/0`, limpios en ambos repos -- coincide exactamente con lo reportado. Suite Motor `1388 passed` antes de empezar.
+
+### FASE 1 -- mapeo de integración
+
+Auditado el punto de entrada real de vehículos: `enriquecer_decisiones_vehiculo` NO se llama desde `detectar_decisiones_documento` (el pipeline de extracción por documento), sino desde `reconciliar_bandeja_decisiones` (el mismo mecanismo que ya usa Desktop para refrescar la bandeja tras cualquier cambio de catálogo). Se replicó exactamente ese punto de entrada para clientes/obras -- nunca se tocó `detectar_decisiones_documento`, evitando el mayor riesgo de regresión (esa función corre para CADA documento procesado).
+
+**Hallazgo mayor no anticipado:** `CLIENTE_DESCONOCIDO` y `ALIAS_CANDIDATO` nunca tuvieron una rama en `aplicar_decision_obra` -- pese a que Desktop mostraba sus opciones (`ETIQUETAS_ACCION` ya traducía `CONFIRMAR_ALIAS`/`RECHAZAR`), el botón "Aplicar" siempre caía en el mensaje "próximo bloque" (whitelist de `nodoAcciones` en `decisiones_pendientes_ui.js` no las incluía). Sin esto, `CONFIRMACIONES_INDEPENDIENTES` (FASE 4) no tenía ninguna acción real que las generara. Se decidió construirlo en este mismo bloque (no diferirlo) porque es la base sin la cual el resto de la integración no tiene efecto real -- documentado explícitamente como hallazgo, no como scope creep silencioso.
+
+### FASE 2/3 -- integración clientes y obras
+
+`atlas_core/decisiones_pendientes.py`: nuevas `enriquecer_decisiones_cliente`/`enriquecer_decisiones_obra` (mismo patrón que `enriquecer_decisiones_vehiculo`: siempre recalculan, nunca crean decisiones desde cero, nunca reemplazan el paso determinista existente). Añaden `evaluacion_evidencia`/`candidatos_evidencia` -- puramente informativo, nunca cambian `acciones_permitidas` (a diferencia de vehículos, no se agregó una acción nueva tipo "CONFIRMAR_CANONICA": `ALIAS_CANDIDATO` ya tenía `CONFIRMAR_ALIAS`, que ahora hace más que antes -- ver FASE 4/5). Nuevo helper `rut_documental_de_decision_cliente` -- el RUT documental de cliente no vive en el CSV consolidado (hallazgo del bloque anterior), pero SÍ vive en `evidencias` de la decisión persistida (`{"tipo":"RUT_EXACTO"|"RUT_VALIDO","campo":"rut_cliente","valor":...}`), guardado ahí desde que `detectar_decisiones_documento` crea la decisión.
+
+`atlas_core/revalidacion_documental.py`: `reconciliar_bandeja_decisiones` gana los pasos 2b (enriquecer clientes/obras) entre el paso de vehículos y `generar_artefacto` -- lee `clientes.json` (confirmados/activos), `evidencia_entidades.json` (confirmaciones, si existe), `verificacion_externa_cache.json` (evidencia externa cacheada, si existe) y `obras_destinos.json`, todo con fallback silencioso a vacío si el archivo no existe (nunca rompe la reconciliación por falta de un archivo nuevo y opcional).
+
+### FASE 4/5 -- aprendizaje operacional + Incidencias Documentales en `aplicar_decision_obra`
+
+`atlas_core/aplicacion_decisiones.py`: primera aplicación real de `CLIENTE_DESCONOCIDO` (`REGISTRAR`/`NO_REGISTRAR`, vía `CatalogoClientes.crear`, `estado_calidad=CONFIRMADO` -- mismo criterio que `confirmar_vehiculo`: una confirmación humana explícita basta) y `ALIAS_CANDIDATO` (`CONFIRMAR_ALIAS`/`RECHAZAR`). `CONFIRMAR_ALIAS` hace 3 cosas donde antes no hacía ninguna: (1) `CatalogoClientes.agregar_alias(..., modificacion_manual=True)`; (2) `AlmacenEvidenciaEntidades.registrar_confirmacion` (aprendizaje -- sólo si el RUT documental es válido); (3) `AlmacenIncidenciasDocumentales.registrar` SIEMPRE (un humano acaba de confirmar explícitamente que el texto documental no es la entidad real -- eso ya es "suficientemente confirmado" para FASE 5, sin esperar una segunda ocasión). El caso `identidad_resuelta.catalogo == "empresas.json"` (RUT coincide con `empresas.json` pero no hay `Cliente` formal todavía) se rechaza explícitamente con un mensaje claro -- deliberadamente fuera de alcance de este bloque, no silenciosamente mal manejado. `aplicar_decision_pendiente.py`: `CONFIRMAR_ALIAS`/`RECHAZAR` sumados a `--accion`.
+
+### Bug real encontrado y corregido: clasificación de tipo de vehículo se degradaba
+
+Validando en TEMP contra la bandeja real (FASE 9), la decisión `patente_tracto` de 464265 (Carlos Simón, VP6521) sugería **JD8659 -- una rampla (CARRO), no un tracto** -- una candidata de tipo incorrecto para el campo. Causa raíz: `actualizar_contrato_vehiculos_persistidos` clasifica un `patente_tracto` como `INEQUIVOCO`/`TRACTO` sólo si el documento TODAVÍA tiene una decisión `patente_rampla` PENDIENTE en la misma corrida (`documentos_con_rampla_valida`, construido sólo desde las decisiones vigentes). La rampla de 464265 ya se había resuelto y salido de la bandeja en el bloque anterior (`SELECCIONAR_OTRA_PATENTE`→JD8659) -- al perder su hermana pendiente, el tracto perdía la clasificación, `tipo_esperado` pasaba a `None` en `evaluar_evidencia_patente`, y el filtro de tipo (ya probado con `test_candidato_de_tipo_incorrecto_no_gana`) simplemente no tenía nada que filtrar.
+
+**Fix:** una clasificación `INEQUIVOCO`/`TRACTO` ya establecida nunca vuelve a degradarse -- `elif campo == "patente_tracto": if documento in documentos_con_rampla_valida or decision.get("tipo_vehiculo_propuesto") == "TRACTO": ...`. Test de regresión nuevo (`test_resolver_rampla_no_degrada_clasificacion_tracto_del_mismo_documento`) reproduce el escenario real exacto y verifica además que, tras el fix, ningún candidato CARRO aparece para el campo tracto. Confirmado en TEMP: tras el fix, 464265 vuelve a sugerir correctamente VP8521 (TRACTO).
+
+### Desktop
+
+`src/decisiones_pendientes_ui.js`: whitelist de `nodoAcciones` ampliada con `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO` (antes mostraban opciones pero el botón siempre caía en "próximo bloque"). Nuevo bloque de explicabilidad (`candidatos_evidencia[].razon_legible`) para `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO`/`OBRA_DESCONOCIDA`, mismo patrón que el bloque de vehículos ("Atlas cree que es X porque..."). 5 tests nuevos.
+
+### FASE 6/7 -- verificación externa real
+
+Auditado: hay APIs reales que exponen datos del SII (razón social/RUT/dirección) -- BaseAPI, API Gateway -- pero mediadas por proveedores de terceros que requieren su propio token/cuenta; no existe hoy una opción gratuita y sin credenciales con cobertura confiable para Chile. **No se inventaron credenciales.** La interfaz (`ProveedorVerificacionEntidades`) queda lista para cualquiera de esas opciones sin acoplarse a ninguna. El caché (`CacheVerificacionExterna`) ya está conectado a `reconciliar_bandeja_decisiones` (lee `verificacion_externa_cache.json` si existe) -- probado en TEMP con la evidencia real de SIGRO ya capturada en el bloque anterior.
+
+### FASE 9/10 -- validación TEMP
+
+Bandeja real de 13 pendientes, copiada a TEMP con el caché de SIGRO poblado: **ABSTENCION=4, ALTA_NUEVA=6, CONTRADICCION_DOCUMENTAL=1 (SIGRO, mejoró de SUGERENCIA_HUMANA gracias a la evidencia externa real), SUGERENCIA_HUMANA=2 (Ortiz, VP8521-tracto), RESUELTO_AUTOMATICAMENTE=0** (honesto: sin historial de confirmaciones humanas todavía, el aprendizaje recién puede empezar a acumularse cuando Javier empiece a usar `CONFIRMAR_ALIAS` real). Dataset completo: mismos resultados que el bloque anterior (15/28 obras ya resueltas, 12 altas nuevas, 1 sugerencia SIGRO; 13/14 clientes exactos, 1 candidato real `TORRES OCARANEA LTDA`) -- la integración no cambia los datos, sólo el camino por el que se calculan.
+
+### Tests
+
+12 tests nuevos: `test_cliente_documental_canonico.py` (9, aplicación real de punta a punta, incluida la integración con `reconciliar_bandeja_decisiones` para la 3ª aparición equivalente), `test_vehiculo_documental_canonico.py` (+1, regresión del bug de tipo), `test_motor_evidencia_obras.py` (+2, metadatos de dirección/comuna en evidencia externa). Suite completa: **1388 → 1399 passed, 0 failed.** Desktop: **226 passed** (+5).
+
+**Drive:** no modificado. **Catálogos reales:** sin cambios. **Decisiones reales:** ninguna aplicada. La integración de código no modifica datos reales por sí misma (nunca se invocó `reconciliar_bandeja_decisiones`/`aplicar_decision_obra` contra la raíz real en este bloque) -- código listo para publicarse sin activar nada en producción.
+
+---
+
 ## 2026-08-19 — MOTOR DE EVIDENCIA FASE 2: entidades/clientes/obras + verificación externa + Incidencias Documentales
 
 **Rama motor:** `lector-mvp-guia-nueva` · Sin commit funcional todavía (código nuevo, no aplicado a Drive -- pendiente de revisión de Javier, ver FASE 17 de la instrucción de este bloque).

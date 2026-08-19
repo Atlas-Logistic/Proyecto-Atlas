@@ -92,6 +92,10 @@ def evaluar_evidencia_obra(
                 f"{', '.join(evidencia.campos_corroborados) or 'esta identidad'} -- pero una dirección o "
                 "sitio web corporativo por sí solo no demuestra que exista una obra operacional en curso."
             ),
+            metadatos={
+                "fuente": evidencia.fuente, "url": evidencia.url, "rut": evidencia.rut,
+                "direccion": evidencia.direccion, "comuna": evidencia.comuna,
+            },
         ))
 
     if not candidatos:

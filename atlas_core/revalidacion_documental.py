@@ -746,6 +746,12 @@ def reconciliar_bandeja_decisiones(
        que todavía no traigan ninguno, sumando `USAR_PATENTE_EXISTENTE`/
        `SELECCIONAR_OTRA_PATENTE` a las acciones ya normalizadas. Nunca
        autocorrige, nunca decide por mayoría/repetición documental.
+    2b. MOTOR DE EVIDENCIA FASE 3 -- `enriquecer_decisiones_cliente`/
+       `enriquecer_decisiones_obra`: añaden `evaluacion_evidencia`/
+       `candidatos_evidencia` (informativo -- nunca cambia qué acciones
+       puede aplicar el humano) a `CLIENTE_DESCONOCIDO`/`ALIAS_CANDIDATO`/
+       `OBRA_DESCONOCIDA`, usando confirmaciones humanas independientes ya
+       registradas y evidencia externa cacheada, si existen.
     3. `generar_artefacto` -- filtra contra el ledger (ninguna decisión ya
        cerrada, de cualquier tipo, resucita mientras su `decision_id` --
        que depende de la evidencia -- no cambie) y publica con los hashes
@@ -753,10 +759,14 @@ def reconciliar_bandeja_decisiones(
 
     No modifica ningún catálogo ni el CSV documental -- sólo
     (re)escribe `decisiones_pendientes.json`."""
+    from atlas_core.catalogo_clientes import CatalogoClientes
+    from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, enriquecer_decisiones_vehiculo,
-        generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, enriquecer_decisiones_cliente, enriquecer_decisiones_obra,
+        enriquecer_decisiones_vehiculo, generar_artefacto, regenerar_decisiones_persistidas,
     )
+    from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
+    from atlas_core.verificacion_externa import CacheVerificacionExterna
 
     raiz = Path(raiz_atlas)
     catalogos = raiz / "catalogos_privados"
@@ -780,6 +790,39 @@ def reconciliar_bandeja_decisiones(
     except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
         vehiculos = ()
     enriquecidas = enriquecer_decisiones_vehiculo(decisiones=vigentes, filas=filas, vehiculos=vehiculos)
+
+    try:
+        clientes_confirmados = [
+            c for c in CatalogoClientes(catalogos / "clientes.json").listar()
+            if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+        ]
+    except (OSError, ValueError):
+        clientes_confirmados = ()
+    try:
+        confirmaciones = AlmacenEvidenciaEntidades(catalogos / "evidencia_entidades.json").listar()
+    except (OSError, ValueError):
+        confirmaciones = ()
+    try:
+        cache_externa = CacheVerificacionExterna.desde_dict(
+            json.loads((catalogos / "verificacion_externa_cache.json").read_text(encoding="utf-8"))
+        )
+    except (OSError, json.JSONDecodeError, ValueError):
+        cache_externa = CacheVerificacionExterna()
+    evidencia_externa_clientes = {clave: cache_externa.obtener(clave) or () for clave in cache_externa.entradas}
+    enriquecidas = enriquecer_decisiones_cliente(
+        decisiones=enriquecidas, clientes=clientes_confirmados, confirmaciones=confirmaciones,
+        evidencia_externa_por_clave=evidencia_externa_clientes,
+    )
+    try:
+        obras_vigentes = CatalogoObrasDestinos(
+            ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+            ruta_destinos=catalogos / "destinos_maestros.json",
+        ).listar_obras()
+    except (OSError, ValueError):
+        obras_vigentes = ()
+    enriquecidas = enriquecer_decisiones_obra(
+        decisiones=enriquecidas, obras=obras_vigentes, evidencia_externa_por_clave=evidencia_externa_clientes,
+    )
 
     bandeja = generar_artefacto(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
