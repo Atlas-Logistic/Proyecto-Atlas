@@ -31,6 +31,12 @@ FUENTE_ORIGEN_CONFIRMACION_HUMANA = "CONFIRMACION_HUMANA"
 ACCIONES = frozenset({
     "REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR", "POSPONER",
     "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR",
+    # Bloque VEHÍCULO D1: patrón documental->canónico para vehículos --
+    # reutiliza REGISTRAR/NO_REGISTRAR/POSPONER ya existentes (una patente
+    # sin ninguna sugerencia se sigue tratando exactamente igual que
+    # antes); estas dos son nuevas, análogas a CONFIRMAR_PLANTA/
+    # SELECCIONAR_OTRA_PLANTA pero para vehículos.
+    "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
 })
 LEDGER = "decisiones_aplicadas.json"
 
@@ -40,7 +46,10 @@ LEDGER = "decisiones_aplicadas.json"
 ACCIONES_POR_TIPO = {
     "OBRA_DESCONOCIDA": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
     "DESTINO_SIN_CONFIRMAR": frozenset({"CONFIRMAR", "NO_CONFIRMAR", "POSPONER"}),
-    "VEHICULO_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
+    "VEHICULO_DESCONOCIDO": frozenset({
+        "REGISTRAR", "NO_REGISTRAR", "POSPONER",
+        "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
+    }),
     "ORIGEN_NO_CONFIRMADO": frozenset({
         "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
     }),
@@ -149,7 +158,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -332,6 +341,52 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     raise ErrorAplicacionDecision("El tipo de vehículo sólo corresponde al registrar.")
                 tipo_final = None
                 vehiculo_id = None
+                patente_canonica_elegida = None
+                motivo_rechazo_final = None
+                # Bloque VEHÍCULO D1 -- patrón documental->canónico: NUNCA
+                # modifica el valor documental (`patente`, arriba, sigue
+                # siendo exactamente lo que leyó OCR) ni escribe el CSV --
+                # sólo el catálogo (ya existente, sin cambios) y el ledger,
+                # que es lo que preserva de forma auditable la asociación
+                # documento->vehículo canónico. La operación de "usar
+                # operacionalmente" esa patente para el viaje queda para un
+                # consumidor futuro del ledger (fuera de alcance de este
+                # bloque, ver bitácora).
+                if accion in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE"):
+                    candidatos_decision = decision.get("candidatos") or []
+                    if accion == "USAR_PATENTE_EXISTENTE":
+                        if len(candidatos_decision) != 1:
+                            raise ErrorAplicacionDecision(
+                                "Esta decisión tiene más de una candidata -- use SELECCIONAR_OTRA_PATENTE para indicar cuál."
+                            )
+                        patente_objetivo = normalizar_patente_vehiculo(str(candidatos_decision[0].get("patente") or ""))
+                    else:
+                        patente_objetivo = normalizar_patente_vehiculo(str(patente_elegida or ""))
+                        if not patente_objetivo:
+                            raise ErrorAplicacionDecision("Indique la patente canónica elegida.")
+                    cargado = cargar_catalogo_vehiculos(catalogo_vehiculos_ruta)
+                    vehiculo_canonico = next(
+                        (
+                            v for v in cargado.homologables()
+                            if v.patente_canonica == patente_objetivo
+                        ),
+                        None,
+                    )
+                    if vehiculo_canonico is None:
+                        raise ErrorAplicacionDecision("La patente indicada no existe o no está confirmada/activa.")
+                    vehiculo_id = vehiculo_canonico.vehiculo_id
+                    patente_canonica_elegida = vehiculo_canonico.patente_canonica
+                    tipo_final = vehiculo_canonico.tipo
+                    resultado_extra.update({
+                        "vehiculo_id": vehiculo_id, "patente_canonica": patente_canonica_elegida,
+                        "tipo_vehiculo": tipo_final,
+                    })
+                elif accion == "NO_REGISTRAR":
+                    # Preserva, si se entrega, el motivo humano del rechazo
+                    # (p. ej. "ERROR_DOCUMENTAL_MANDANTE") -- puramente
+                    # informativo en el ledger, nunca obligatorio (no rompe
+                    # la firma ya usada por Desktop hoy).
+                    motivo_rechazo_final = str(motivo_rechazo).strip() if motivo_rechazo else None
                 if accion == "REGISTRAR":
                     if resolucion == "INEQUIVOCO" and propuesto in {"TRACTO", "CARRO"}:
                         if recibido and recibido != propuesto:
@@ -364,7 +419,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "actor": "JAVIER_MBT", "fecha": reloj().astimezone(timezone.utc).isoformat(),
                     "documento": decision.get("documento"), "campo": decision.get("campo"),
                     "valor_documental": patente, "vehiculo_id": vehiculo_id,
-                    "tipo_vehiculo": tipo_final, "dataset_sha256": artefacto.get("dataset_sha256"),
+                    "patente_canonica": patente_canonica_elegida,
+                    "tipo_vehiculo": tipo_final, "motivo_rechazo": motivo_rechazo_final,
+                    "candidatos_previos": decision.get("candidatos") or None,
+                    "dataset_sha256": artefacto.get("dataset_sha256"),
                     "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
             elif tipo == "ORIGEN_NO_CONFIRMADO":
@@ -407,7 +465,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     )
                     if planta_confirmada is None:
                         raise ErrorAplicacionDecision("La planta indicada no existe o no está confirmada/activa.")
-                    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+                    from atlas_core.revalidacion_documental import (
+                        _escribir_filas_completas, _leer_filas,
+                        derivar_estado_ruta_tras_cambio_origen,
+                    )
                     filas_dataset = _leer_filas(dataset)
                     fila_objetivo = next(
                         (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
@@ -428,6 +489,13 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     fila_objetivo["planta_origen_nombre"] = planta_confirmada.nombre
                     fila_objetivo["origen_determinado_por"] = FUENTE_ORIGEN_CONFIRMACION_HUMANA
                     fila_objetivo["evidencia_origen"] = f"DECISION_HUMANA:{decision_id}"
+                    # Bloque OBSERVABILIDAD D1 -- si el destino de este
+                    # mismo documento sigue sin resolver, `estado_ruta`/
+                    # `motivo_ruta` dejan de describir el origen que
+                    # acaba de confirmarse (caso real 464717) y pasan a
+                    # expresar el bloqueo de destino vigente. Nunca llama
+                    # ORS/geocodificación, nunca fuerza RUTA_CALCULADA.
+                    fila_objetivo.update(derivar_estado_ruta_tras_cambio_origen(fila_objetivo))
                     _escribir_filas_completas(dataset, filas_dataset)
                     planta_confirmada_id = planta_confirmada.planta_id
                     planta_confirmada_nombre = planta_confirmada.nombre
@@ -532,6 +600,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"): "Origen confirmado. La planta elegida queda como origen canónico de este viaje.",
             ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"): "Origen confirmado con la planta indicada. Queda como origen canónico de este viaje.",
             ("ORIGEN_NO_CONFIRMADO", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este origen mientras la evidencia no cambie.",
+            ("VEHICULO_DESCONOCIDO", "USAR_PATENTE_EXISTENTE"): "Patente canónica confirmada. Queda registrada en el historial de este documento sin modificar el valor documental leído.",
+            ("VEHICULO_DESCONOCIDO", "SELECCIONAR_OTRA_PATENTE"): "Patente canónica confirmada con la elegida. Queda registrada en el historial de este documento sin modificar el valor documental leído.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}

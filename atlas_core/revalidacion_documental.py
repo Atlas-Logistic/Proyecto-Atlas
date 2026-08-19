@@ -25,6 +25,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.catalogo_clientes import CatalogoClientes
@@ -73,6 +74,40 @@ _ERRORES_CATALOGO_VEHICULOS = (
     OSError,
     ValueError,
 )
+
+
+def derivar_estado_ruta_tras_cambio_origen(fila: Mapping[str, object]) -> dict[str, str]:
+    """Bloque OBSERVABILIDAD D1 -- deriva `estado_ruta`/`motivo_ruta` desde
+    el estado REAL ya persistido (origen + destino), sin llamar ORS ni
+    Onelogis. Corrige el hallazgo real (464717/464522): un origen resuelto
+    DESPUÉS de que `motivo_ruta` quedó fijado en un texto relacionado a
+    origen (por `revalidar_telemetria_sin_ocr` o por una confirmación
+    humana de `ORIGEN_NO_CONFIRMADO`, ninguna de las dos toca estas dos
+    columnas) deja esas columnas describiendo un problema que ya no
+    existe -- y, peor, oculta que el destino de ese mismo documento
+    también puede seguir bloqueado (enmascaramiento ya conocido).
+
+    Función pura: recibe una fila y devuelve sólo los campos que deberían
+    cambiar (`{}` si no hay nada que corregir) -- quien llama decide si
+    y cómo fusionarlos. Reglas, en orden:
+    - Si el origen sigue sin determinar: no hay nada que derivar -- el
+      bloqueo real HOY es el origen, el texto ya es correcto tal cual.
+    - Si ya existe una ruta calculada (`distancia_km` no vacío): no hay
+      nada que derivar -- ya está correcto.
+    - Si el origen ya está determinado pero el destino todavía no
+      (`estado_entrega` distinto de `RESUELTO`): el texto pasa a
+      expresar el bloqueo de DESTINO -- nunca inventa el detalle exacto
+      (para eso habría que volver a geocodificar, fuera de alcance
+      aquí); se deriva directamente de `estado_entrega`, que ya es la
+      fuente de verdad confiable de si el destino está resuelto."""
+    if not str(fila.get("planta_origen_nombre", "")).strip():
+        return {}
+    if str(fila.get("distancia_km", "")).strip():
+        return {}
+    estado_entrega = str(fila.get("estado_entrega", "")).strip()
+    if not estado_entrega or estado_entrega == "RESUELTO":
+        return {}
+    return {"estado_ruta": "REQUIERE_REVISION", "motivo_ruta": f"DESTINO_{estado_entrega}"}
 
 
 def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
@@ -382,6 +417,15 @@ def revalidar_telemetria_sin_ocr(
                 fila["proveedor_ruta"] = ""
                 fila["estado_ruta"] = "REQUIERE_REVISION"
                 fila["motivo_ruta"] = "ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA"
+            elif origen_cambio:
+                # Bloque OBSERVABILIDAD D1 -- no había ruta que invalidar
+                # (el destino nunca se había resuelto), pero si SIGUE sin
+                # resolverse tras este cambio de origen, `estado_ruta`/
+                # `motivo_ruta` no deben seguir describiendo el origen que
+                # ya cambió (caso real 464522: origen resuelto por GPS,
+                # motivo_ruta seguía diciendo "sin evidencia GPS" para
+                # siempre). Nunca fuerza RUTA_CALCULADA.
+                fila.update(derivar_estado_ruta_tras_cambio_origen(fila))
 
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
@@ -675,3 +719,75 @@ def reconciliar_decisiones_origen(
         decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
     )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
+
+
+def reconciliar_bandeja_decisiones(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque RECONCILIACIÓN D1 -- re-publica la bandeja de decisiones
+    pendientes vigente con un `dataset_sha256`/`catalogos_sha256` frescos,
+    sin re-ejecutar OCR ni tocar el CSV documental. Necesario después de
+    cualquier escritura controlada del dataset que no haya pasado por
+    `generar_artefacto` (p. ej. la aplicación directa de ruta/km de un
+    bloque anterior, que deja el `dataset_sha256` del artefacto desalineado
+    del dataset real -- `aplicar_decision_obra` seguiría rechazando
+    correctamente CUALQUIER decisión con `DecisionObsoletaError` hasta
+    reconciliar).
+
+    Reutiliza exclusivamente mecanismos ya existentes, en este orden:
+    1. `regenerar_decisiones_persistidas` -- conserva sólo las decisiones
+       todavía vigentes (descarta, por ejemplo, cualquier
+       `VEHICULO_DESCONOCIDO` cuya patente documental ya homologó por otra
+       vía), refresca contexto de apoyo (cliente/obra) por ID, y normaliza
+       `acciones_permitidas` a la base de cada tipo.
+    2. `enriquecer_decisiones_vehiculo` -- SÓLO DESPUÉS del paso anterior
+       (que resetea `acciones_permitidas`): añade candidatos por
+       asociación histórica de RUT de chofer a las `VEHICULO_DESCONOCIDO`
+       que todavía no traigan ninguno, sumando `USAR_PATENTE_EXISTENTE`/
+       `SELECCIONAR_OTRA_PATENTE` a las acciones ya normalizadas. Nunca
+       autocorrige, nunca decide por mayoría/repetición documental.
+    3. `generar_artefacto` -- filtra contra el ledger (ninguna decisión ya
+       cerrada, de cualquier tipo, resucita mientras su `decision_id` --
+       que depende de la evidencia -- no cambie) y publica con los hashes
+       actuales.
+
+    No modifica ningún catálogo ni el CSV documental -- sólo
+    (re)escribe `decisiones_pendientes.json`."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, enriquecer_decisiones_vehiculo,
+        generar_artefacto, regenerar_decisiones_persistidas,
+    )
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+
+    try:
+        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+        pendientes_actuales = artefacto_actual.get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes_actuales = []
+
+    vigentes = regenerar_decisiones_persistidas(
+        decisiones=pendientes_actuales, carpeta_catalogos=catalogos,
+    )
+
+    filas = _leer_filas(dataset)
+    try:
+        vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
+    except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
+        vehiculos = ()
+    enriquecidas = enriquecer_decisiones_vehiculo(decisiones=vigentes, filas=filas, vehiculos=vehiculos)
+
+    bandeja = generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones=enriquecidas, ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+    return {
+        "decisiones_antes": len(pendientes_actuales),
+        "decisiones_conservadas": len(vigentes),
+        "decisiones_publicadas": len(bandeja["decisiones"]),
+        "bandeja": bandeja,
+    }

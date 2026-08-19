@@ -28,7 +28,7 @@ from atlas_core.catalogo_obras_destinos import (
 )
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, normalizar_patente_vehiculo, resolver_patente
-from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json
+from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json, normalizar_rut
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
@@ -64,6 +64,16 @@ ACCIONES_DESTINO_SIN_CONFIRMAR = ("CONFIRMAR", "NO_CONFIRMAR", "POSPONER")
 ACCIONES_ORIGEN_NO_CONFIRMADO = (
     "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
 )
+
+# Bloque VEHÍCULO D1 -- cuando una patente documental (probable error de
+# OCR o del mandante) no homologa con ningún vehículo del catálogo, PERO
+# el mismo RUT de chofer ya tiene, en otro documento del dataset, una
+# patente CONFIRMADA/ACTIVA distinta, esas dos acciones se SUMAN a las
+# tres ya existentes de `ACCIONES_ENTIDAD_DESCONOCIDA` (nunca las
+# reemplazan: seguir pudiendo registrar la lectura tal cual, o no
+# registrar nada, sigue siendo válido). Nunca autocorrige -- ver
+# `sugerir_vehiculos_por_chofer`.
+ACCIONES_PATENTE_SUGERIDA = ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
 
 # Radio dentro del cual una detención real sin planta identificada
 # (`ORIGEN_GPS_ESTADIA_SIN_PLANTA`) se considera candidata plausible para
@@ -186,6 +196,113 @@ def actualizar_contrato_vehiculos_persistidos(
         elif campo == "patente_tracto":
             decision["tipo_resolucion"] = "REQUIERE_CONFIRMACION_HUMANA"
             decision["tipo_vehiculo_propuesto"] = None
+    return salida
+
+
+def sugerir_vehiculos_por_chofer(
+    *, rut_chofer: str, campo: str, valor_documental: str,
+    filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
+) -> list[dict[str, object]]:
+    """Bloque VEHÍCULO D1 -- sugiere (nunca autocorrige) una patente ya
+    CONFIRMADA/ACTIVA en catálogo, asociada al mismo RUT de chofer en
+    OTRO documento del dataset (`estado_procesamiento == "OK"`, evidencia
+    real, no un intento fallido). Nunca decide por mayoría ni por
+    repetición -- reporta CADA candidata encontrada con su propia
+    evidencia (guías + cantidad de veces observada), incluso si sólo
+    aparece una vez y aunque otra candidata aparezca más veces: la
+    repetición documental puede ser el mismo error repetido por un
+    mandante (caso real que motivó este bloque), nunca prueba por sí
+    sola cuál es la canónica -- eso siempre lo decide un humano."""
+    # El RUT documental llega con formato inconsistente entre guías del
+    # MISMO chofer (con/sin puntos -- caso real: 464699 sin puntos entre
+    # dos guías con puntos del mismo Carlos Simón) -- se compara
+    # normalizado (mismo `normalizar_rut` ya usado para clientes), nunca
+    # por el string crudo.
+    rut_normalizado = normalizar_rut(rut_chofer)
+    if not rut_normalizado:
+        return []
+    valor_documental_norm = normalizar_patente_vehiculo(str(valor_documental or ""))
+    conteos: dict[str, int] = {}
+    guias_por_patente: dict[str, list[str]] = {}
+    for fila in filas:
+        if normalizar_rut(str(fila.get("rut_chofer", ""))) != rut_normalizado:
+            continue
+        if str(fila.get("estado_procesamiento", "")).strip() != "OK":
+            continue
+        candidata = normalizar_patente_vehiculo(str(fila.get(campo, "")))
+        if not candidata or candidata == valor_documental_norm:
+            continue
+        conteos[candidata] = conteos.get(candidata, 0) + 1
+        guias_por_patente.setdefault(candidata, []).append(str(fila.get("numero_guia", "")))
+
+    candidatos: list[dict[str, object]] = []
+    for patente in sorted(conteos):
+        vehiculo = next(
+            (
+                v for v in vehiculos
+                if v.patente_canonica == patente
+                and v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
+            ),
+            None,
+        )
+        if vehiculo is None:
+            continue
+        cuenta = conteos[patente]
+        guias = ", ".join(sorted(set(guias_por_patente[patente])))
+        candidatos.append({
+            "vehiculo_id": vehiculo.vehiculo_id,
+            "patente": patente,
+            "tipo_vehiculo": vehiculo.tipo,
+            "evidencia_resumen": (
+                f"Vehículo confirmado ({vehiculo.tipo}) asociado a este RUT de chofer "
+                f"en {cuenta} documento(s) del dataset (guías: {guias})"
+            ),
+        })
+    return candidatos
+
+
+def enriquecer_decisiones_vehiculo(
+    *, decisiones: Iterable[Mapping[str, object]],
+    filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
+) -> list[dict[str, object]]:
+    """Bloque VEHÍCULO D1 -- añade `candidatos`/acciones adicionales a
+    decisiones `VEHICULO_DESCONOCIDO` YA generadas (nunca las crea desde
+    cero: reutiliza exactamente lo que `detectar_decisiones_documento` ya
+    produjo). Sólo actúa sobre decisiones que todavía no traen
+    `candidatos` -- una decisión que ya los trae (de cualquier fuente)
+    no se toca. Decisiones de otros tipos pasan sin cambios."""
+    filas = list(filas)
+    vehiculos = list(vehiculos)
+    filas_por_guia: dict[str, dict[str, object]] = {}
+    for fila in filas:
+        guia = str(fila.get("numero_guia", ""))
+        if guia and guia not in filas_por_guia:
+            filas_por_guia[guia] = fila
+
+    salida: list[dict[str, object]] = []
+    for decision_original in decisiones:
+        decision = dict(decision_original)
+        if decision.get("tipo") == "VEHICULO_DESCONOCIDO" and not decision.get("candidatos"):
+            guia = str((decision.get("documento") or {}).get("numero_guia", ""))
+            fila = filas_por_guia.get(guia)
+            rut = str(fila.get("rut_chofer", "")).strip() if fila else ""
+            if rut:
+                sugeridos = sugerir_vehiculos_por_chofer(
+                    rut_chofer=rut, campo=str(decision.get("campo", "")),
+                    valor_documental=str(decision.get("valor_documental", "")),
+                    filas=filas, vehiculos=vehiculos,
+                )
+                if sugeridos:
+                    decision["candidatos"] = sugeridos
+                    acciones = list(decision.get("acciones_permitidas") or ACCIONES_ENTIDAD_DESCONOCIDA)
+                    nuevas = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in acciones]
+                    if "POSPONER" in acciones:
+                        indice = acciones.index("POSPONER")
+                        acciones[indice:indice] = nuevas
+                    else:
+                        acciones.extend(nuevas)
+                    decision["acciones_permitidas"] = acciones
+        salida.append(decision)
     return salida
 
 
@@ -750,7 +867,18 @@ def regenerar_decisiones_persistidas(
                 continue
 
         if tipo in TIPOS_ENTIDAD_DESCONOCIDA:
-            decision["acciones_permitidas"] = list(ACCIONES_ENTIDAD_DESCONOCIDA)
+            # Bloque VEHÍCULO D1 -- si esta decisión ya trae `candidatos`
+            # (sugerencia por asociación histórica de RUT, ver
+            # `enriquecer_decisiones_vehiculo`), las acciones adicionales
+            # se conservan -- nunca se pierden sólo porque OTRA decisión
+            # no relacionada se aplicó y disparó esta regeneración (ver
+            # `aplicar_decision_obra`, que llama esta función tras CADA
+            # aplicación exitosa).
+            base = list(ACCIONES_ENTIDAD_DESCONOCIDA)
+            if tipo == "VEHICULO_DESCONOCIDO" and decision.get("candidatos"):
+                indice = base.index("POSPONER") if "POSPONER" in base else len(base)
+                base[indice:indice] = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in base]
+            decision["acciones_permitidas"] = base
         elif tipo == "DESTINO_SIN_CONFIRMAR":
             decision["acciones_permitidas"] = list(ACCIONES_DESTINO_SIN_CONFIRMAR)
 
@@ -787,8 +915,12 @@ def generar_artefacto(
                 # (forma parte del decision_id) y no pudo decidir; no debe
                 # volver a preguntarse lo mismo mientras la evidencia no
                 # cambie. "CONFIRMAR_PLANTA"/"SELECCIONAR_OTRA_PLANTA" son
-                # terminales igual que "CONFIRMAR".
+                # terminales igual que "CONFIRMAR". Bloque VEHÍCULO D1:
+                # "USAR_PATENTE_EXISTENTE"/"SELECCIONAR_OTRA_PATENTE" son
+                # terminales por el mismo motivo -- confirmación humana
+                # sobre evidencia ya vista.
                 "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR",
+                "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
             }
         }
     except (OSError, json.JSONDecodeError, AttributeError):
