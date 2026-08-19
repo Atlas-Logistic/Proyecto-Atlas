@@ -442,14 +442,26 @@ def enriquecer_decisiones_vehiculo(
     """Bloque VEHÍCULO D1/E1 -- añade `candidatos`/acciones adicionales a
     decisiones `VEHICULO_DESCONOCIDO` YA generadas (nunca las crea desde
     cero: reutiliza exactamente lo que `detectar_decisiones_documento` ya
-    produjo). Sólo actúa sobre decisiones que todavía no traen
-    `candidatos` -- una decisión que ya los trae (de cualquier fuente)
-    no se toca. Decisiones de otros tipos pasan sin cambios. Usa el motor
+    produjo). Decisiones de otros tipos pasan sin cambios. Usa el motor
     de evidencia completo (`evaluar_evidencia_patente`), con `tipo_esperado`
     tomado de `tipo_vehiculo_propuesto` (ya calculado por
     `actualizar_contrato_vehiculos_persistidos`) y el `numero_transporte`
     real del documento -- nunca se abstiene de aplicar el filtro de tipo
-    ni de excluir el propio transporte como "evidencia independiente"."""
+    ni de excluir el propio transporte como "evidencia independiente".
+
+    SIEMPRE recalcula (nunca se detiene sólo porque la decisión ya trae
+    `candidatos` de una corrida anterior): el catálogo puede haber ganado
+    una confirmación humana nueva (p. ej. una patente recién confirmada y
+    asociada a este RUT de chofer) desde la última vez que se enriqueció
+    esta misma decisión, y esa evidencia nueva debe reflejarse la próxima
+    vez que se reconcilie la bandeja -- sin esto, una decisión que ya
+    tenía candidatos documentales débiles quedaría congelada para
+    siempre en esa clasificación, aunque después aparezca una
+    confirmación humana directa. `decision_id` no depende de `candidatos`
+    (ver `_decision_id`/`crear_decision`), así que recalcularlos nunca
+    resucita una decisión ya cerrada en el ledger ni le cambia identidad.
+    Idempotente: recalcular con los mismos datos produce el mismo
+    resultado."""
     filas = list(filas)
     vehiculos = list(vehiculos)
     filas_por_guia: dict[str, dict[str, object]] = {}
@@ -461,7 +473,7 @@ def enriquecer_decisiones_vehiculo(
     salida: list[dict[str, object]] = []
     for decision_original in decisiones:
         decision = dict(decision_original)
-        if decision.get("tipo") == "VEHICULO_DESCONOCIDO" and not decision.get("candidatos"):
+        if decision.get("tipo") == "VEHICULO_DESCONOCIDO":
             documento = decision.get("documento") or {}
             guia = str(documento.get("numero_guia", ""))
             transporte = str(documento.get("numero_transporte", ""))
@@ -474,19 +486,23 @@ def enriquecer_decisiones_vehiculo(
                     numero_transporte_actual=transporte, filas=filas, vehiculos=vehiculos,
                 )
                 sugeridos = evaluacion["candidatos"]
+                decision["candidatos"] = sugeridos
+                decision["evaluacion_evidencia"] = {
+                    "resultado": evaluacion["resultado"], "explicacion": evaluacion["explicacion"],
+                }
+                # Base limpia -- nunca acumula sobre acciones ya agregadas
+                # en una corrida anterior (evita duplicados y permite que
+                # unas candidatas que desaparecieron también retiren las
+                # acciones que ya no corresponden).
+                base = [a for a in (decision.get("acciones_permitidas") or ACCIONES_ENTIDAD_DESCONOCIDA) if a not in ACCIONES_PATENTE_SUGERIDA]
                 if sugeridos:
-                    decision["candidatos"] = sugeridos
-                    decision["evaluacion_evidencia"] = {
-                        "resultado": evaluacion["resultado"], "explicacion": evaluacion["explicacion"],
-                    }
-                    acciones = list(decision.get("acciones_permitidas") or ACCIONES_ENTIDAD_DESCONOCIDA)
-                    nuevas = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in acciones]
-                    if "POSPONER" in acciones:
-                        indice = acciones.index("POSPONER")
-                        acciones[indice:indice] = nuevas
+                    nuevas = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in base]
+                    if "POSPONER" in base:
+                        indice = base.index("POSPONER")
+                        base[indice:indice] = nuevas
                     else:
-                        acciones.extend(nuevas)
-                    decision["acciones_permitidas"] = acciones
+                        base.extend(nuevas)
+                decision["acciones_permitidas"] = base
         salida.append(decision)
     return salida
 

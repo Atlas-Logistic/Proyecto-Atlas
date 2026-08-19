@@ -98,10 +98,11 @@ def _entorno(tmp_path, *, filas_csv):
     return {"raiz": raiz, "catalogos": catalogos, "actual": actual, "dataset": dataset}
 
 
-def _confirmar(catalogos, patente, tipo):
+def _confirmar(catalogos, patente, tipo, *, rut_chofer_asociado=""):
     return confirmar_vehiculo(
         catalogos / "vehiculos.json", patente=patente, tipo=tipo,
         actor="JAVIER_MBT", fuente_decision="PREVIA", fecha=datetime.now(timezone.utc),
+        rut_chofer_asociado=rut_chofer_asociado,
     )
 
 
@@ -248,6 +249,46 @@ def test_enriquecer_decisiones_vehiculo_agrega_candidatos_y_acciones(tmp_path):
     assert "REGISTRAR" in enriquecida["acciones_permitidas"]
     assert "NO_REGISTRAR" in enriquecida["acciones_permitidas"]
     assert "POSPONER" in enriquecida["acciones_permitidas"]
+
+
+def test_enriquecer_decisiones_vehiculo_refresca_candidatos_ya_presentes(tmp_path):
+    """Bug real encontrado al llevar el motor a producción: una decisión
+    que YA traía candidatos de una corrida anterior (p. ej. sólo JE8659,
+    documental) quedaba congelada para siempre -- ni una confirmación
+    humana nueva (JD8659, asociada al RUT) llegaba a reflejarse la
+    siguiente vez que se reconciliaba la bandeja, porque el guard
+    original se detenía en cuanto veía `candidatos` no vacíos. Ahora
+    SIEMPRE recalcula."""
+    entorno = _entorno(tmp_path, filas_csv=[
+        _fila_csv(numero_guia="1", patente_rampla="JD6659"),
+        _fila_csv(numero_guia="2", patente_rampla="JE8659", numero_transporte="T-2"),
+    ])
+    _confirmar(entorno["catalogos"], "JE8659", TipoVehiculo.CARRO)
+    vehiculos = cargar_catalogo_vehiculos(entorno["catalogos"] / "vehiculos.json").homologables()
+    decision = _decision_vehiculo(guia="1", campo="patente_rampla", valor_documental="JD6659")
+    filas = _leer_csv(entorno["dataset"])
+    # Primera corrida: sólo JE8659, documental -- simula el estado real
+    # persistido antes de que JD8659 existiera en el catálogo.
+    primera = enriquecer_decisiones_vehiculo(decisiones=[decision], filas=filas, vehiculos=vehiculos)[0]
+    assert [c["patente"] for c in primera["candidatos"]] == ["JE8659"]
+
+    # Ahora aparece una confirmación humana nueva, directamente asociada
+    # al RUT del chofer de este documento -- exactamente el caso real de
+    # Carlos Simón/JD8659.
+    _confirmar(entorno["catalogos"], "JD8659", TipoVehiculo.CARRO, rut_chofer_asociado=RUT_CHOFER)
+    vehiculos_actualizados = cargar_catalogo_vehiculos(entorno["catalogos"] / "vehiculos.json").homologables()
+
+    # Segunda corrida SOBRE LA MISMA decisión ya enriquecida (como hace
+    # `reconciliar_bandeja_decisiones` en producción) -- debe reflejar la
+    # confirmación nueva, no quedar congelada en el primer resultado.
+    segunda = enriquecer_decisiones_vehiculo(decisiones=[primera], filas=filas, vehiculos=vehiculos_actualizados)[0]
+    assert segunda["candidatos"][0]["patente"] == "JD8659"
+    assert segunda["candidatos"][0]["nivel"] == "CONFIRMACION_HUMANA"
+    assert segunda["evaluacion_evidencia"]["resultado"] == "RESUELTO_AUTOMATICAMENTE"
+    # JE8659 sigue apareciendo, en un nivel menor -- nunca desaparece.
+    assert "JE8659" in [c["patente"] for c in segunda["candidatos"]]
+    # decision_id no depende de candidatos -- sigue siendo la misma decisión.
+    assert segunda["decision_id"] == primera["decision_id"] == decision["decision_id"]
 
 
 # ============================================================
