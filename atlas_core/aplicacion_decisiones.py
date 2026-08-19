@@ -12,6 +12,7 @@ from pathlib import Path
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogo_destinos import CatalogoDestinos
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
+from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import (
     TipoVehiculo, cargar_catalogo_vehiculos,
     confirmar_vehiculo, normalizar_patente_vehiculo,
@@ -21,7 +22,16 @@ from atlas_core.decisiones_pendientes import (
     generar_artefacto, regenerar_decisiones_persistidas,
 )
 
-ACCIONES = frozenset({"REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR", "POSPONER"})
+# Bloque ORIGEN D1: fuente de origen que representa una confirmación humana
+# explícita para UN documento/viaje -- máxima precedencia posible (ver
+# `atlas_core.gestor_viajes._JERARQUIA_FUENTE_ORIGEN`). Se define aquí (no
+# sólo en gestor_viajes) porque es este módulo el que la escribe.
+FUENTE_ORIGEN_CONFIRMACION_HUMANA = "CONFIRMACION_HUMANA"
+
+ACCIONES = frozenset({
+    "REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR", "POSPONER",
+    "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR",
+})
 LEDGER = "decisiones_aplicadas.json"
 
 # R3.4: qué acciones son válidas para cada tipo de decisión -- una acción de
@@ -31,6 +41,9 @@ ACCIONES_POR_TIPO = {
     "OBRA_DESCONOCIDA": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
     "DESTINO_SIN_CONFIRMAR": frozenset({"CONFIRMAR", "NO_CONFIRMAR", "POSPONER"}),
     "VEHICULO_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
+    "ORIGEN_NO_CONFIRMADO": frozenset({
+        "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
+    }),
 }
 
 class ErrorAplicacionDecision(ValueError): pass
@@ -136,13 +149,14 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
     catalogo_obras_ruta = catalogos / "obras_destinos.json"
     catalogo_destinos_ruta = catalogos / "destinos_maestros.json"
     catalogo_vehiculos_ruta = catalogos / "vehiculos.json"
+    catalogo_plantas_ruta = catalogos / "plantas.json"
     estado_operacion_ruta = actual / "estado_operacion.json"
     accion = str(accion).upper(); decision_id = str(decision_id).strip()
     if accion not in ACCIONES or not decision_id: raise ErrorAplicacionDecision("Solicitud de decisión inválida.")
@@ -353,6 +367,89 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "tipo_vehiculo": tipo_final, "dataset_sha256": artefacto.get("dataset_sha256"),
                     "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo == "ORIGEN_NO_CONFIRMADO":
+                # Bloque ORIGEN D1 -- confirmación humana AUDITABLE de la
+                # planta de origen de UN documento/viaje. Nunca modifica
+                # plantas.json (sólo lo lee para validar); nunca aprende una
+                # asociación chofer->planta ni vehículo->planta. Preserva
+                # siempre la evidencia anterior (GPS/documento) -- sólo
+                # cambia cuál queda como origen CANÓNICO.
+                documento_decision = decision.get("documento") or {}
+                numero_guia_decision = str(documento_decision.get("numero_guia") or "")
+                if not numero_guia_decision:
+                    raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para confirmar el origen.")
+
+                planta_id_objetivo = None
+                if accion == "CONFIRMAR_PLANTA":
+                    candidatos_decision = decision.get("candidatos") or []
+                    if len(candidatos_decision) != 1:
+                        raise ErrorAplicacionDecision(
+                            "Esta decisión tiene más de un candidato -- use SELECCIONAR_OTRA_PLANTA para indicar cuál."
+                        )
+                    planta_id_objetivo = str(candidatos_decision[0].get("planta_id") or "")
+                elif accion == "SELECCIONAR_OTRA_PLANTA":
+                    planta_id_objetivo = str(planta_id_elegida or "").strip()
+                    if not planta_id_objetivo:
+                        raise ErrorAplicacionDecision("Debe indicar qué planta corresponde.")
+
+                valor_anterior = None
+                planta_confirmada_id = None
+                planta_confirmada_nombre = None
+                if accion in ("CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA"):
+                    plantas_vigentes = CatalogoPlantas(catalogo_plantas_ruta).listar()
+                    planta_confirmada = next(
+                        (
+                            p for p in plantas_vigentes
+                            if p.planta_id == planta_id_objetivo
+                            and p.estado_calidad == "CONFIRMADA" and p.estado_vigencia == "ACTIVA"
+                        ),
+                        None,
+                    )
+                    if planta_confirmada is None:
+                        raise ErrorAplicacionDecision("La planta indicada no existe o no está confirmada/activa.")
+                    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+                    filas_dataset = _leer_filas(dataset)
+                    fila_objetivo = next(
+                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                    )
+                    if fila_objetivo is None:
+                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                    valor_anterior = {
+                        "planta_origen_id": fila_objetivo.get("planta_origen_id", ""),
+                        "planta_origen_nombre": fila_objetivo.get("planta_origen_nombre", ""),
+                        "origen_determinado_por": fila_objetivo.get("origen_determinado_por", ""),
+                        "evidencia_origen": fila_objetivo.get("evidencia_origen", ""),
+                    }
+                    # La evidencia GPS/documental original NUNCA se borra --
+                    # queda íntegra en `motivo_origen_gps`/`evidencia_telemetria`/
+                    # etc., columnas que este bloque no toca. Sólo cambian
+                    # las 4 columnas de origen canónico.
+                    fila_objetivo["planta_origen_id"] = planta_confirmada.planta_id
+                    fila_objetivo["planta_origen_nombre"] = planta_confirmada.nombre
+                    fila_objetivo["origen_determinado_por"] = FUENTE_ORIGEN_CONFIRMACION_HUMANA
+                    fila_objetivo["evidencia_origen"] = f"DECISION_HUMANA:{decision_id}"
+                    _escribir_filas_completas(dataset, filas_dataset)
+                    planta_confirmada_id = planta_confirmada.planta_id
+                    planta_confirmada_nombre = planta_confirmada.nombre
+                    resultado_extra["planta_id"] = planta_confirmada_id
+                    resultado_extra["planta_nombre"] = planta_confirmada_nombre
+                # NO_PUEDO_DETERMINAR: no se toca el dataset -- sólo queda
+                # registrado en el ledger (ver más abajo), lo que basta para
+                # que `generar_artefacto` no vuelva a preguntar lo mismo
+                # mientras la evidencia no cambie (acción terminal, ver
+                # `decisiones_pendientes.generar_artefacto`).
+
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(),
+                    "documento": decision.get("documento"),
+                    "planta_id": planta_confirmada_id, "planta_nombre": planta_confirmada_nombre,
+                    "valor_anterior": valor_anterior, "evidencia_previa": decision.get("evidencias"),
+                    "candidatos_previos": decision.get("candidatos"),
+                    "fuente": FUENTE_ORIGEN_CONFIRMACION_HUMANA if planta_confirmada_id else None,
+                    "dataset_sha256": artefacto.get("dataset_sha256"),
+                    "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
             else:
                 raise ErrorAplicacionDecision("Esta decisión no puede aplicarse en este bloque.")
 
@@ -379,6 +476,29 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 resultado_extra["revalidacion"] = revalidar_y_regenerar_reporte(
                     raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
                 )
+            elif tipo == "ORIGEN_NO_CONFIRMADO" and accion in ("CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA"):
+                # Bloque ORIGEN D1 -- a diferencia de DESTINO_SIN_CONFIRMAR/
+                # VEHICULO_DESCONOCIDO, aquí ya sabemos que el dataset
+                # cambió (se acaba de escribir arriba, en el bloque de
+                # aplicación) -- no hace falta una revalidación condicional
+                # que decida si algo cambió, sólo regenerar el reporte con
+                # el mecanismo canónico ya existente.
+                from atlas_core.almacenamiento_portable import escribir_estado_operacion
+                from atlas_core.reporte_viajes import generar_reporte_viajes
+                instante = reloj()
+                nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
+                reporte_salida = raiz / "reportes" / nombre_carpeta
+                reporte_salida_existia = reporte_salida.exists()
+                generar_reporte_viajes(
+                    dataset, reporte_salida, carpeta_catalogos=catalogos, reloj=lambda: instante,
+                )
+                ruta_decisiones_operacion = actual / "decisiones_pendientes.json"
+                escribir_estado_operacion(
+                    reporte_vigente=reporte_salida, dataset_operacional=dataset,
+                    decisiones_pendientes=(ruta_decisiones_operacion if ruta_decisiones_operacion.is_file() else None),
+                    raiz=raiz,
+                )
+                resultado_extra["reporte_regenerado"] = True
 
             restantes = regenerar_decisiones_persistidas(
                 decisiones=artefacto.get("decisiones", []),
@@ -409,6 +529,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("DESTINO_SIN_CONFIRMAR", "NO_CONFIRMAR"): "Decisión guardada. Atlas no confirmará esta observación como destino.",
             ("VEHICULO_DESCONOCIDO", "REGISTRAR"): "Vehículo registrado. Atlas reconocerá esta patente en documentos futuros.",
             ("VEHICULO_DESCONOCIDO", "NO_REGISTRAR"): "Decisión guardada. Atlas no registrará esta observación como vehículo.",
+            ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"): "Origen confirmado. La planta elegida queda como origen canónico de este viaje.",
+            ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"): "Origen confirmado con la planta indicada. Queda como origen canónico de este viaje.",
+            ("ORIGEN_NO_CONFIRMADO", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este origen mientras la evidencia no cambie.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}

@@ -208,7 +208,19 @@ class DocumentoViaje:
 # incluye en el mismo nivel que "TELEMETRIA_GPS" para no duplicar la
 # jerarquía si se conecta en el futuro. Cualquier fuente no listada
 # (incluida "DOCUMENTO" si algún día se retira, o vacía) queda al final.
+#
+# Bloque ORIGEN D1: "CONFIRMACION_HUMANA" (ver
+# `atlas_core.aplicacion_decisiones.FUENTE_ORIGEN_CONFIRMACION_HUMANA`) gana
+# sobre CUALQUIER evidencia automática, incluida GPS -- caso real 464730:
+# el GPS mostraba visitas reales y fuertes a DOS plantas (AZA Colina y AZA
+# Renca) en la misma ventana documental; Javier confirmó operacionalmente
+# que el origen real fue Renca, contradiciendo la secuencia que la propia
+# evidencia GPS sugería como más plausible. Ni GPS ni historial son
+# autoridad absoluta -- una confirmación humana explícita sí lo es para ese
+# documento/viaje, y nunca debe quedar por debajo de una fuente automática
+# en esta jerarquía.
 _JERARQUIA_FUENTE_ORIGEN: dict[str, int] = {
+    "CONFIRMACION_HUMANA": -1,
     "TELEMETRIA_GPS": 0,
     "ONELOGIS_GPS": 0,
     "DOCUMENTO": 1,

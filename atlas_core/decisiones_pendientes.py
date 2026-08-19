@@ -26,8 +26,11 @@ from atlas_core.catalogo_obras_destinos import (
     EstadoVigencia,
     normalizar_nombre_obra,
 )
+from atlas_core.catalogo_plantas import Planta
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, normalizar_patente_vehiculo, resolver_patente
 from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json
+from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
+from atlas_core.rutas.modelos import Coordenadas
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 
 
@@ -36,6 +39,7 @@ NOMBRE_ARTEFACTO = "decisiones_pendientes.json"
 TIPOS_SOPORTADOS = frozenset({
     "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
     "OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR", "ALIAS_CANDIDATO",
+    "ORIGEN_NO_CONFIRMADO",
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
 
@@ -50,6 +54,31 @@ TIPOS_ENTIDAD_DESCONOCIDA = frozenset({
 # pendiente es confirmar la relación obra<->destino -- pregunta distinta a
 # "registrar una entidad nueva", por eso usa su propio set de acciones.
 ACCIONES_DESTINO_SIN_CONFIRMAR = ("CONFIRMAR", "NO_CONFIRMAR", "POSPONER")
+# Bloque ORIGEN D1: distinta otra vez -- aquí no se registra ni se confirma
+# una entidad de catálogo, se elige entre plantas YA CONOCIDAS cuál es el
+# origen canónico de ESTE documento/viaje. "NO_PUEDO_DETERMINAR" es
+# deliberadamente distinto de "POSPONER": un humano que ya miró la
+# evidencia y no puede decidir no debe volver a recibir la misma pregunta
+# mientras la evidencia no cambie (ver `crear_decision`/`_decision_id`,
+# la evidencia forma parte del hash -- nueva evidencia, nueva pregunta).
+ACCIONES_ORIGEN_NO_CONFIRMADO = (
+    "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
+)
+
+# Radio dentro del cual una detención real sin planta identificada
+# (`ORIGEN_GPS_ESTADIA_SIN_PLANTA`) se considera candidata plausible para
+# SUGERIR una planta a un humano -- deliberadamente más amplio que el
+# umbral usado para RESOLVER automáticamente (proporción de puntos dentro
+# del polígono, o el radio de geocerca circular ya calibrado): una
+# sugerencia para revisión humana nunca decide por sí sola, así que puede
+# permitirse más candidatos plausibles sin ningún riesgo de adivinar. Se
+# reutiliza el mismo valor (50.0 km) ya usado en todo
+# `atlas_core.rutas.destino_entrega` como radio genérico de relevancia GPS
+# -- no es un umbral nuevo, es el mismo ya establecido en este código base,
+# reutilizado para un propósito distinto (sugerir, nunca resolver).
+RADIO_CANDIDATO_ORIGEN_SUGERIDO_KM = 50.0
+
+_PATRON_CONFLICTO_ORIGEN = re.compile(r"([A-Za-z0-9_]+):score=([\d.]+),solape=([\d.]+)%")
 
 
 def _sha256(ruta: Path) -> str:
@@ -398,6 +427,117 @@ def detectar_decisiones_documento(
     return decisiones
 
 
+def detectar_decision_origen_no_confirmado(
+    *, archivo: str, fila: Mapping[str, str], plantas: Iterable[Planta],
+) -> dict[str, object] | None:
+    """Bloque ORIGEN D1: genera una pregunta `ORIGEN_NO_CONFIRMADO` para UN
+    documento YA PROCESADO cuya planta de origen quedó sin determinar --
+    SÓLO cuando existe evidencia GPS real y suficiente para formular una
+    sugerencia útil. Opera exclusivamente sobre columnas YA PERSISTIDAS en
+    el dataset (`fila`) y el catálogo de plantas -- nunca OCR, nunca red,
+    nunca vuelve a consultar telemetría.
+
+    Se abstiene (devuelve `None`, no genera ninguna pregunta) en dos
+    familias de caso, deliberadamente:
+    - el documento YA tiene origen (`planta_origen_id` presente) -- nada
+      que preguntar;
+    - la evidencia GPS es demasiado escasa para ofrecer siquiera un
+      candidato razonable (p. ej. `SIN_HISTORICO`, `NINGUN_PUNTO_DENTRO_DE_GEOCERCA`
+      sin ninguna coordenada de estadía, o cualquier motivo no reconocido)
+      -- caso real 464479/464529: 1 solo trip/5 puntos GPS ese día, sin
+      relación con ninguna planta. Preguntarle a Javier sin nada que
+      mostrarle sería la misma adivinanza que se le prohíbe a Atlas, sólo
+      que delegada a un humano sin necesidad.
+
+    Reconoce dos formas de evidencia YA CALCULADA por el pipeline
+    existente (nunca inventa un cálculo nuevo):
+    1. `motivo_origen_gps` empieza con `CONFLICTO_REAL_EN_VENTANA` (Fase D
+       de `resolver_planta_origen_gps`) -- ya trae, en el propio texto,
+       cada planta candidata con su `score`/`solape` ya calculados; se
+       parsean tal cual, sin recalcular nada. Caso real: 464730 (AZA
+       COLINA Y AZA RENCA, ambas con evidencia real).
+    2. `motivo_origen_gps` empieza con `DETENCION_REAL_FUERA_DE_TODA_GEOCERCA`
+       (Fase K) -- ya trae la coordenada de la detención real
+       (`latitud_estadia_gps`/`longitud_estadia_gps`) y su duración. Se
+       ofrece como candidata cualquier planta CONFIRMADA+ACTIVA dentro de
+       `RADIO_CANDIDATO_ORIGEN_SUGERIDO_KM`. Casos reales: 464717, 464892
+       (ambos AZA COLINA, con evidencia real aunque por debajo del umbral
+       de resolución automática)."""
+    if str(fila.get("estado_ruta", "")).strip() != "ORIGEN_NO_DETERMINADO":
+        return None
+    if str(fila.get("planta_origen_id", "")).strip():
+        return None  # ya tiene origen -- nada que preguntar
+
+    motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
+    plantas_activas = [
+        p for p in plantas
+        if getattr(p, "estado_calidad", "") == "CONFIRMADA" and getattr(p, "estado_vigencia", "") == "ACTIVA"
+    ]
+    candidatos: list[dict[str, object]] = []
+    motivo_decision = ""
+
+    if motivo_origen_gps.startswith("CONFLICTO_REAL_EN_VENTANA"):
+        motivo_decision = "ORIGEN_GPS_CONFLICTO"
+        for nombre_token, score, solape in _PATRON_CONFLICTO_ORIGEN.findall(motivo_origen_gps):
+            nombre_normalizado = nombre_token.replace("_", " ").strip().upper()
+            planta = next(
+                (p for p in plantas_activas if p.nombre.strip().upper() == nombre_normalizado), None,
+            )
+            if planta is None:
+                continue
+            candidatos.append({
+                "planta_id": planta.planta_id, "planta_nombre": planta.nombre,
+                "evidencia_resumen": f"score={score}, solape con la ventana documental={solape}%",
+            })
+    elif motivo_origen_gps.startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA"):
+        motivo_decision = "ORIGEN_GPS_ESTADIA_SIN_PLANTA"
+        try:
+            lat = float(fila.get("latitud_estadia_gps", ""))
+            lon = float(fila.get("longitud_estadia_gps", ""))
+        except (TypeError, ValueError):
+            return None
+        duracion = str(fila.get("duracion_estadia_gps_min", "")).strip()
+        punto = Coordenadas(lon, lat)
+        cercanas: list[tuple[float, Planta]] = []
+        for planta in plantas_activas:
+            coordenada_planta = coordenada_ruteo_planta(planta)
+            if coordenada_planta is None:
+                continue
+            distancia = distancia_km_haversine(punto, coordenada_planta)
+            if distancia <= RADIO_CANDIDATO_ORIGEN_SUGERIDO_KM:
+                cercanas.append((distancia, planta))
+        cercanas.sort(key=lambda par: par[0])
+        for distancia, planta in cercanas:
+            candidatos.append({
+                "planta_id": planta.planta_id, "planta_nombre": planta.nombre,
+                "evidencia_resumen": (
+                    f"detención real de {duracion} min, a {round(distancia, 1)} km de esta planta"
+                ),
+            })
+    else:
+        return None  # otro motivo (SIN_HISTORICO, NINGUN_PUNTO_DENTRO_DE_GEOCERCA, etc.) -- evidencia insuficiente
+
+    if not candidatos:
+        return None
+
+    documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
+    evidencias = [{
+        "tipo": "GPS_ORIGEN",
+        "motivo_origen_gps": motivo_origen_gps,
+        "estado_telemetria": str(fila.get("estado_telemetria", "")),
+        "evidencia_telemetria": str(fila.get("evidencia_telemetria", "")),
+        "duracion_estadia_gps_min": str(fila.get("duracion_estadia_gps_min", "")),
+    }]
+    return crear_decision(
+        tipo="ORIGEN_NO_CONFIRMADO", entidad="ORIGEN", archivo=str(archivo),
+        numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
+        campo="planta_origen", valor_documental="",
+        valor_normalizado="", identidad_resuelta=None,
+        candidatos=candidatos, motivos=[motivo_decision],
+        evidencias=evidencias, acciones_permitidas=ACCIONES_ORIGEN_NO_CONFIRMADO,
+    )
+
+
 def decision_destino_para_obra_registrada(
     *, obra, cliente_id: str, cliente_canonico: str, destino_documental: str,
     documento: Mapping[str, object] | None, catalogo_obras: CatalogoObrasDestinos,
@@ -640,7 +780,16 @@ def generar_artefacto(
         ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
         ids_terminales = {
             str(item.get("decision_id", "")) for item in ledger.get("aplicaciones", [])
-            if item.get("accion") in {"REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR"}
+            if item.get("accion") in {
+                "REGISTRAR", "NO_REGISTRAR", "CONFIRMAR", "NO_CONFIRMAR",
+                # Bloque ORIGEN D1: "NO_PUEDO_DETERMINAR" es terminal como
+                # "NO_CONFIRMAR" -- un humano ya miró esta evidencia exacta
+                # (forma parte del decision_id) y no pudo decidir; no debe
+                # volver a preguntarse lo mismo mientras la evidencia no
+                # cambie. "CONFIRMAR_PLANTA"/"SELECCIONAR_OTRA_PLANTA" son
+                # terminales igual que "CONFIRMAR".
+                "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR",
+            }
         }
     except (OSError, json.JSONDecodeError, AttributeError):
         pass

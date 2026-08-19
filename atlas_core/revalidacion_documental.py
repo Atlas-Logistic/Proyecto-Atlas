@@ -303,6 +303,15 @@ def revalidar_telemetria_sin_ocr(
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
         for fila in filas:
+            # Bloque ORIGEN D1 -- una confirmación humana explícita
+            # (`atlas_core.aplicacion_decisiones.FUENTE_ORIGEN_CONFIRMACION_HUMANA`)
+            # nunca se sobrescribe silenciosamente: se comprueba ANTES de
+            # cualquier otro chequeo, incluso si `estado_telemetria` llegara
+            # vacío por cualquier motivo futuro. Sólo una NUEVA decisión
+            # humana explícita puede cambiarla -- nunca un reprocesamiento
+            # automático.
+            if str(fila.get("origen_determinado_por", "")).strip() == "CONFIRMACION_HUMANA":
+                continue
             if str(fila.get("estado_telemetria", "")).strip():
                 continue  # ya tiene telemetría -- idempotente, no se reconsulta
 
@@ -583,6 +592,81 @@ def reconciliar_decisiones_destino_historicas(
         pendientes_actuales = []
 
     candidatas = detectar_decisiones_destino_historicas_sin_ocr(raiz_atlas=raiz)
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+    )
+    bandeja = generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+    return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
+
+
+def detectar_decisiones_origen_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, object]]:
+    """Bloque ORIGEN D1 -- READ-ONLY, nunca escribe nada. Recorre el
+    dataset vigente (ya persistido, sin OCR, sin red) y devuelve una
+    decisión `ORIGEN_NO_CONFIRMADO` candidata por cada documento que hoy
+    quedó sin planta de origen pero SÍ trae evidencia GPS suficiente para
+    formular una sugerencia útil -- ver
+    `atlas_core.decisiones_pendientes.detectar_decision_origen_no_confirmado`
+    para el criterio exacto de abstención (nunca genera nada para un
+    documento con telemetría demasiado escasa, tipo 464479/464529)."""
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.decisiones_pendientes import detectar_decision_origen_no_confirmado
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+    try:
+        plantas = CatalogoPlantas(catalogos / "plantas.json").listar()
+    except (OSError, ValueError):
+        return []
+
+    candidatas: list[dict[str, object]] = []
+    for fila in filas:
+        decision = detectar_decision_origen_no_confirmado(
+            archivo=fila.get("archivo", ""), fila=fila, plantas=plantas,
+        )
+        if decision is not None:
+            candidatas.append(decision)
+    return candidatas
+
+
+def reconciliar_decisiones_origen(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque ORIGEN D1 -- publica en `decisiones_pendientes.json` la unión
+    de la bandeja pendiente vigente con las decisiones `ORIGEN_NO_CONFIRMADO`
+    recién detectadas (mismo patrón que `reconciliar_decisiones_destino_historicas`).
+    No toca ningún catálogo, el CSV documental ni el ledger -- sólo
+    (re)escribe la bandeja. `generar_artefacto` filtra contra el ledger al
+    publicar, así que una decisión ya aplicada (CONFIRMAR_PLANTA/
+    SELECCIONAR_OTRA_PLANTA/NO_PUEDO_DETERMINAR, todas terminales) nunca
+    resucita mientras la evidencia (parte del `decision_id`) no cambie."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+
+    try:
+        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+        pendientes_actuales = artefacto_actual.get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes_actuales = []
+
+    candidatas = detectar_decisiones_origen_sin_ocr(raiz_atlas=raiz)
     restantes = regenerar_decisiones_persistidas(
         decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
     )
