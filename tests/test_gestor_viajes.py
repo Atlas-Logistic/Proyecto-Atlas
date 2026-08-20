@@ -726,3 +726,111 @@ def test_motivos_y_metodos_estados_s2_se_preservan_en_evidencia_del_documento():
     assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION in viaje.motivos_revision
     assert viaje.documentos[0].evidencia["motivos_revision_documento"] == "CHOFER_SIN_CORROBORAR"
     assert viaje.documentos[0].evidencia["metodos_recuperacion_documento"] == "GEOMETRICO"
+
+
+# Bloque VEHÍCULO D1 (cierre, G1) -- `resolver_patente` es el "consumidor
+# futuro del ledger" que la propia `aplicacion_decisiones.aplicar_decision_obra`
+# dejó pendiente: una decisión humana ya aplicada (`USAR_PATENTE_EXISTENTE`/
+# `SELECCIONAR_OTRA_PATENTE`) debe convertirse en el VALOR OPERACIONAL del
+# viaje, sin tocar nunca la evidencia documental. Caso real que motivó esto:
+# transporte 0000351135 (464264/464265).
+
+def test_resolver_patente_produce_valor_operacional_resuelto_t1():
+    """T1: documento con patente incorrecta A + decisión humana selecciona
+    B -> resultado operacional = B; la evidencia documental A sigue
+    disponible/trazable en `evidencia`."""
+
+    def resolver(numero_guia, campo, valor_documental):
+        if campo == "patente_rampla" and valor_documental == "JD6659":
+            return "JD8659"
+        return valor_documental
+
+    viajes, _ = agrupar_viajes(
+        [_fila(patente_rampla="JD6659")], resolver_patente=resolver,
+    )
+    viaje = viajes[0]
+    assert viaje.patentes_rampla == ["JD8659"]
+    assert viaje.documentos[0].patente_rampla == "JD8659"
+    assert viaje.documentos[0].evidencia["patente_rampla"] == "JD6659"
+
+
+def test_resolver_patente_multiguia_consolida_sin_publicar_variantes_t2():
+    """T2 -- caso real 0000351135: dos guías del mismo viaje traen variantes
+    conflictivas de patente rampla (JD6659/JD0659); Javier seleccionó
+    JD8659 como canónica para ambas. La consolidación final debe usar
+    JD8659 -- nunca "JD0659 | JD6659" como si la decisión no hubiese
+    ocurrido -- y el conflicto correspondiente no debe dispararse (ambos
+    documentos ya resuelven al mismo valor operacional)."""
+
+    def resolver(numero_guia, campo, valor_documental):
+        if campo == "patente_rampla" and valor_documental in ("JD6659", "JD0659"):
+            return "JD8659"
+        return valor_documental
+
+    filas = [
+        _fila(archivo="464264.jpeg", numero_guia="464264", patente_rampla="JD6659"),
+        _fila(archivo="464265.jpeg", numero_guia="464265", patente_rampla="JD0659"),
+    ]
+    viajes, _ = agrupar_viajes(filas, resolver_patente=resolver)
+    assert len(viajes) == 1
+    viaje = viajes[0]
+    assert viaje.patentes_rampla == ["JD8659"]
+    assert MotivoRevision.CONFLICTO_PATENTE_RAMPLA not in viaje.motivos_revision
+    evidencias = {d.numero_guia: d.evidencia["patente_rampla"] for d in viaje.documentos}
+    assert evidencias == {"464264": "JD6659", "464265": "JD0659"}
+
+
+@pytest.mark.parametrize(
+    ("campo", "propiedad"),
+    [
+        ("patente_tracto", "patentes_tracto"),
+        ("patente_rampla", "patentes_rampla"),
+    ],
+)
+def test_resolver_patente_es_generico_para_tracto_y_rampla_t3_t4(campo, propiedad):
+    """T3/T4: el mismo mecanismo, sin ningún caso hardcodeado, funciona
+    igual para TRACTO que para CARRO/RAMPLA -- no cambia ninguna regla de
+    clasificación vehicular, sólo qué texto se publica como operacional."""
+
+    def resolver(numero_guia, campo_resuelto, valor_documental):
+        return "CANONICA99" if campo_resuelto == campo else valor_documental
+
+    viajes, _ = agrupar_viajes(
+        [_fila(**{campo: "OCR-ERRADO"})], resolver_patente=resolver,
+    )
+    assert getattr(viajes[0], propiedad) == ["CANONICA99"]
+
+
+def test_patente_sin_decision_humana_conserva_comportamiento_actual_t5():
+    """T5: sin `resolver_patente`, o con uno que no tiene ninguna decisión
+    aplicable a este caso exacto, el comportamiento es idéntico al de
+    siempre -- nunca se convierte automáticamente cualquier discrepancia
+    en una corrección."""
+    viajes_sin_resolver, _ = agrupar_viajes([_fila(patente_rampla="JD6659")])
+    assert viajes_sin_resolver[0].patentes_rampla == ["JD6659"]
+
+    def resolver_sin_coincidencia(numero_guia, campo, valor_documental):
+        return valor_documental  # ninguna decisión humana aplica aquí
+
+    viajes_con_resolver, _ = agrupar_viajes(
+        [_fila(patente_rampla="JD6659")], resolver_patente=resolver_sin_coincidencia,
+    )
+    assert viajes_con_resolver[0].patentes_rampla == ["JD6659"]
+
+
+def test_resolver_patente_no_afecta_otros_campos_de_consolidacion_t7():
+    """T7 (alcance de gestor_viajes): `resolver_patente` sólo toca
+    patente_tracto/patente_rampla -- cliente, chofer, obra/destino,
+    material y peso siguen consolidando exactamente igual."""
+
+    def resolver(numero_guia, campo, valor_documental):
+        return "CANONICA99" if valor_documental == "OCR-ERRADO" else valor_documental
+
+    viajes, _ = agrupar_viajes(
+        [_fila(patente_tracto="OCR-ERRADO")], resolver_patente=resolver,
+    )
+    viaje = viajes[0]
+    assert viaje.clientes == ["CLIENTE ÑUBLE"]
+    assert viaje.choferes == ["JOSÉ PÉREZ"]
+    assert viaje.obras_destino == ["OBRA ÁGUILA"]
+    assert viaje.materiales == ["BARRAS"]

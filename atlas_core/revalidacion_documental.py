@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
+from atlas_core.aplicacion_decisiones import resolver_patentes_confirmadas_por_ledger
 from atlas_core.catalogo_clientes import CatalogoClientes
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_plantas import CatalogoPlantas
@@ -204,40 +205,6 @@ def _vehiculo_homologado(
     return None
 
 
-def _confirmaciones_ledger_por_guia_campo(ruta_ledger: Path) -> dict[tuple[str, str, str], str]:
-    """Índice de solo lectura del ledger: `(numero_guia, campo, valor_documental)`
-    -> `patente_canonica`, sólo para aplicaciones `VEHICULO_DESCONOCIDO` con
-    `accion` en {`USAR_PATENTE_EXISTENTE`, `SELECCIONAR_OTRA_PATENTE`} --
-    las dos acciones que confirman una canónica SIN modificar el valor
-    documental leído (ver `atlas_core.aplicacion_decisiones`). Nunca
-    incluye `NO_REGISTRAR` (rechazo explícito, sin canónica -- p. ej. un
-    error documental del mandante, ver caso real 464036) ni `REGISTRAR`
-    (ese caso ya lo cubre `_vehiculo_homologado` directamente, porque el
-    propio valor documental pasa a ser la canónica). Ausencia/corrupción
-    del ledger se trata como "sin confirmaciones" -- nunca bloquea la
-    revalidación del resto."""
-    indice: dict[tuple[str, str, str], str] = {}
-    try:
-        ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return indice
-    for aplicacion in ledger.get("aplicaciones", []):
-        if aplicacion.get("tipo") != "VEHICULO_DESCONOCIDO":
-            continue
-        if aplicacion.get("accion") not in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE"):
-            continue
-        patente_canonica = str(aplicacion.get("patente_canonica") or "").strip()
-        if not patente_canonica:
-            continue
-        clave = (
-            str((aplicacion.get("documento") or {}).get("numero_guia", "")),
-            str(aplicacion.get("campo", "")),
-            str(aplicacion.get("valor_documental", "")),
-        )
-        indice[clave] = patente_canonica
-    return indice
-
-
 def revalidar_patente_sin_homologar_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, ruta_ledger: str | Path | None = None,
 ) -> dict[str, object]:
@@ -280,7 +247,7 @@ def revalidar_patente_sin_homologar_sin_ocr(
     carpeta = Path(carpeta_catalogos)
     motivo_objetivo = MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR.value
     confirmaciones_ledger = (
-        _confirmaciones_ledger_por_guia_campo(Path(ruta_ledger)) if ruta_ledger is not None else {}
+        resolver_patentes_confirmadas_por_ledger(Path(ruta_ledger)) if ruta_ledger is not None else {}
     )
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
@@ -540,7 +507,7 @@ def revalidar_y_regenerar_reporte(
     from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 
     salida = raiz / "reportes" / nombre_carpeta_reporte
-    kwargs = {"carpeta_catalogos": catalogos}
+    kwargs = {"carpeta_catalogos": catalogos, "ruta_ledger": actual / "decisiones_aplicadas.json"}
     if reloj is not None:
         kwargs["reloj"] = reloj
     manifest = generar_reporte_viajes(dataset, salida, **kwargs)

@@ -691,6 +691,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 reporte_salida_existia = reporte_salida.exists()
                 generar_reporte_viajes(
                     dataset, reporte_salida, carpeta_catalogos=catalogos, reloj=lambda: instante,
+                    ruta_ledger=ledger_ruta,
                 )
                 ruta_decisiones_operacion = actual / "decisiones_pendientes.json"
                 escribir_estado_operacion(
@@ -741,3 +742,52 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}
+
+
+def resolver_patentes_confirmadas_por_ledger(
+    ruta_ledger: str | Path,
+) -> dict[tuple[str, str, str], str]:
+    """Bloque VEHÍCULO D1 (cierre, G1) -- índice de solo lectura del ledger:
+    ``(numero_guia, campo, valor_documental)`` -> ``patente_canonica``, sólo
+    para aplicaciones ``VEHICULO_DESCONOCIDO`` con ``accion`` en
+    {``USAR_PATENTE_EXISTENTE``, ``SELECCIONAR_OTRA_PATENTE``} -- las dos
+    acciones que confirman una canónica SIN modificar el valor documental
+    leído (ver rama ``VEHICULO_DESCONOCIDO`` de `aplicar_decision_obra`,
+    arriba, y su comentario "queda para un consumidor futuro del ledger").
+
+    Este índice ES ese consumidor: quien genera el reporte de viajes
+    (`atlas_core.reporte_viajes.generar_reporte_viajes`, vía
+    `atlas_core.gestor_viajes.agrupar_viajes(resolver_patente=...)`) lo usa
+    para que el VALOR OPERACIONAL consolidado de un viaje sea la patente
+    canónica ya decidida, sin tocar nunca el dataset documental
+    (`analisis_completo_guias.csv` conserva la evidencia original tal
+    cual, igual que `evidencias_documentos` por viaje).
+
+    Nunca incluye `NO_REGISTRAR` (rechazo explícito, sin canónica -- p. ej.
+    un error documental del mandante, caso real 464036: ese caso queda
+    deliberadamente sin resolución operacional aquí, es responsabilidad de
+    un estado terminal todavía no implementado -- ver G2, fuera de
+    alcance) ni `REGISTRAR` (esa patente pasa a ser la propia canónica vía
+    catálogo -- ya resuelto directamente por la homologación normal, sin
+    necesitar este índice). Ausencia/corrupción del ledger se trata como
+    "sin confirmaciones" -- nunca bloquea nada aguas abajo."""
+    indice: dict[tuple[str, str, str], str] = {}
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return indice
+    for aplicacion in ledger.get("aplicaciones", []):
+        if aplicacion.get("tipo") != "VEHICULO_DESCONOCIDO":
+            continue
+        if aplicacion.get("accion") not in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE"):
+            continue
+        patente_canonica = str(aplicacion.get("patente_canonica") or "").strip()
+        if not patente_canonica:
+            continue
+        clave = (
+            str((aplicacion.get("documento") or {}).get("numero_guia", "")),
+            str(aplicacion.get("campo", "")),
+            str(aplicacion.get("valor_documental", "")),
+        )
+        indice[clave] = patente_canonica
+    return indice

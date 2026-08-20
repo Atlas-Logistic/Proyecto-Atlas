@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import escribir_estado_operacion
+from atlas_core.aplicacion_decisiones import LEDGER
 from atlas_core.reporte_viajes import generar_reporte_viajes
 from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 
@@ -34,6 +35,7 @@ def main() -> None:
         argumentos.csv,
         argumentos.salida,
         carpeta_catalogos=argumentos.catalogos,
+        ruta_ledger=argumentos.csv.parent / LEDGER,
     )
     totales = manifest["totales"]
     print("Reporte de viajes generado")

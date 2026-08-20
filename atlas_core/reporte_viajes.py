@@ -21,8 +21,9 @@ import json
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
+from atlas_core.aplicacion_decisiones import resolver_patentes_confirmadas_por_ledger
 from atlas_core.catalogo_clientes import (
     CatalogoClientes,
     EstadoVigenciaCliente,
@@ -359,6 +360,22 @@ def _normalizador_chofer_desde_catalogo(catalogo):
     return normalizar
 
 
+def _resolver_patente_desde_ledger(
+    ledger_patentes: Mapping[tuple[str, str, str], str],
+) -> Callable[[str, str, str], str]:
+    """Bloque VEHÍCULO D1 (cierre, G1) -- traduce una patente documental a su
+    canónica operacional cuando existe una decisión humana ya aplicada y
+    confirmada para esa guía/campo/valor exactos (ver
+    `atlas_core.aplicacion_decisiones.resolver_patentes_confirmadas_por_ledger`).
+    Sin decisión para esa combinación exacta, devuelve el valor documental
+    sin cambios -- mismo comportamiento que sin ningún resolver."""
+
+    def resolver(numero_guia: str, campo: str, valor_documental: str) -> str:
+        return ledger_patentes.get((numero_guia, campo, valor_documental), valor_documental)
+
+    return resolver
+
+
 def _resumen_markdown(
     viajes,
     sin_transporte,
@@ -400,6 +417,7 @@ def generar_reporte_viajes(
     directorio_salida: str | Path,
     *,
     carpeta_catalogos: str | Path = "catalogos",
+    ruta_ledger: str | Path | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     calculador_rutas: Callable[[object], dict[str, str]] | None = None,
 ) -> dict[str, object]:
@@ -411,6 +429,16 @@ def generar_reporte_viajes(
     Sin este parámetro (comportamiento por defecto, sin cambios), las
     columnas de ruta quedan vacías -- 100% compatible con reportes previos
     a este bloque.
+
+    `ruta_ledger` (Bloque VEHÍCULO D1 -- cierre, G1 -- opcional): ruta a
+    `decisiones_aplicadas.json`. Si se entrega y contiene confirmaciones
+    `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE` ya aplicadas, el
+    VALOR OPERACIONAL de `patentes_tracto`/`patentes_rampla` en `viajes.csv`
+    usa la patente canónica ya decidida por Javier en vez de la variante
+    documental cruda -- sin tocar nunca `ruta_csv` (la evidencia original
+    permanece intacta ahí y en `evidencias_documentos` de cada viaje). Sin
+    este parámetro (comportamiento por defecto, sin cambios), o sin ninguna
+    confirmación aplicable, el comportamiento es idéntico al de siempre.
     """
     origen = Path(ruta_csv)
     salida = Path(directorio_salida)
@@ -425,9 +453,14 @@ def generar_reporte_viajes(
     normalizador = _normalizador_chofer_desde_catalogo(
         cargar_catalogo_json(catalogos / "choferes.json")
     )
+    ledger_patentes = (
+        resolver_patentes_confirmadas_por_ledger(ruta_ledger) if ruta_ledger is not None else {}
+    )
+    resolver_patente = _resolver_patente_desde_ledger(ledger_patentes) if ledger_patentes else None
     instante = reloj()
     viajes, sin_transporte = agrupar_viajes(
-        filas, normalizador_chofer=normalizador, reloj=lambda: instante
+        filas, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
+        reloj=lambda: instante,
     )
     no_reconocidos = _construir_clientes_no_reconocidos(filas, catalogos)
     fecha_generacion = instante.isoformat()

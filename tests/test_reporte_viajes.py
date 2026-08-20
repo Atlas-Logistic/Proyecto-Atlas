@@ -376,3 +376,127 @@ def test_csv_sin_columnas_o1_exige_migracion_explicita(tmp_path):
         generar_reporte_viajes(
             origen, tmp_path / "salida", carpeta_catalogos=tmp_path / "catálogos", reloj=RELOJ
         )
+
+
+# Bloque VEHÍCULO D1 (cierre, G1) -- `ruta_ledger` end-to-end: una decisión
+# humana ya aplicada (`decisiones_aplicadas.json`) debe reflejarse como
+# valor operacional en `viajes.csv`, sin tocar nunca el CSV de entrada.
+# Caso real que motivó esto: transporte 0000351135 (464264/464265).
+
+def _escribir_ledger(ruta, aplicaciones):
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text(
+        json.dumps({"schema_version": 1, "aplicaciones": aplicaciones}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _aplicacion_patente(numero_guia, campo, valor_documental, patente_canonica, accion="SELECCIONAR_OTRA_PATENTE"):
+    return {
+        "decision_id": f"dec-{numero_guia}-{campo}",
+        "tipo": "VEHICULO_DESCONOCIDO",
+        "accion": accion,
+        "actor": "JAVIER_MBT",
+        "fecha": "2026-08-19T20:41:55+00:00",
+        "documento": {"numero_guia": numero_guia},
+        "campo": campo,
+        "valor_documental": valor_documental,
+        "patente_canonica": patente_canonica,
+    }
+
+
+def test_ledger_propaga_patente_canonica_a_viajes_csv_sin_tocar_entrada(tmp_path):
+    """T1 (integración): con `ruta_ledger`, `viajes.csv` publica la patente
+    canónica ya decidida -- el CSV de entrada (evidencia documental)
+    permanece byte a byte igual."""
+    fila = _fila(patente_rampla="JD6659")
+    origen = tmp_path / "entrada.csv"
+    _escribir_csv(origen, [fila])
+    contenido_antes = origen.read_bytes()
+
+    ledger = tmp_path / "decisiones_aplicadas.json"
+    _escribir_ledger(ledger, [
+        _aplicacion_patente("000101", "patente_rampla", "JD6659", "JD8659"),
+    ])
+
+    salida = tmp_path / "reporte"
+    generar_reporte_viajes(
+        origen, salida, carpeta_catalogos=tmp_path / "catálogos",
+        ruta_ledger=ledger, reloj=RELOJ,
+    )
+    assert origen.read_bytes() == contenido_antes
+    viaje = _leer_csv(salida / "viajes.csv")[0]
+    assert viaje["patentes_rampla"] == "JD8659"
+    evidencias = json.loads(viaje["evidencias_documentos"])
+    assert evidencias[0]["patente_rampla"] == "JD6659"
+
+
+def test_ledger_resuelve_caso_real_0000351135(tmp_path):
+    """T2 (integración) -- caso real: transporte 0000351135, guías
+    464264/464265. Documentalmente traen variantes conflictivas de
+    patente_rampla (JD6659/JD0659) y patente_tracto (VP8521/VP6521);
+    Javier ya seleccionó JD8659/VP8521 como canónicas. `viajes.csv` debe
+    publicar las canónicas -- nunca "JD0659 | JD6659" -- y el conflicto de
+    patente correspondiente no debe seguir señalado como abierto."""
+    filas = [
+        _fila(
+            archivo="464264.jpeg", numero_guia="464264", numero_transporte="0000351135",
+            patente_tracto="VP8521", patente_rampla="JD6659",
+        ),
+        _fila(
+            archivo="464265.jpeg", numero_guia="464265", numero_transporte="0000351135",
+            patente_tracto="VP6521", patente_rampla="JD0659",
+        ),
+    ]
+    origen = tmp_path / "entrada.csv"
+    _escribir_csv(origen, filas)
+
+    ledger = tmp_path / "decisiones_aplicadas.json"
+    _escribir_ledger(ledger, [
+        _aplicacion_patente("464264", "patente_rampla", "JD6659", "JD8659"),
+        _aplicacion_patente("464265", "patente_rampla", "JD0659", "JD8659"),
+        _aplicacion_patente(
+            "464265", "patente_tracto", "VP6521", "VP8521", accion="USAR_PATENTE_EXISTENTE",
+        ),
+    ])
+
+    salida = tmp_path / "reporte"
+    generar_reporte_viajes(
+        origen, salida, carpeta_catalogos=tmp_path / "catálogos",
+        ruta_ledger=ledger, reloj=RELOJ,
+    )
+    viaje = _leer_csv(salida / "viajes.csv")[0]
+    assert viaje["patentes_rampla"] == "JD8659"
+    assert viaje["patentes_tracto"] == "VP8521"
+    assert "CONFLICTO_PATENTE_RAMPLA" not in viaje["motivos_revision"]
+    assert "CONFLICTO_PATENTE_TRACTO" not in viaje["motivos_revision"]
+
+
+def test_sin_ruta_ledger_conserva_comportamiento_actual_t5(tmp_path):
+    """T5: sin `ruta_ledger` (valor por defecto), el reporte es idéntico al
+    de antes de este bloque -- ninguna regresión para quien no lo use."""
+    filas = [
+        _fila(archivo="464264.jpeg", numero_guia="464264", patente_rampla="JD6659"),
+        _fila(archivo="464265.jpeg", numero_guia="464265", patente_rampla="JD0659"),
+    ]
+    _, salida, _ = _generar(tmp_path, filas)
+    viaje = _leer_csv(salida / "viajes.csv")[0]
+    assert viaje["patentes_rampla"] == "JD0659 | JD6659"
+    assert "CONFLICTO_PATENTE_RAMPLA" in viaje["motivos_revision"]
+
+
+def test_ledger_ausente_o_corrupto_no_bloquea_el_reporte(tmp_path):
+    """Ausencia/corrupción del ledger se trata como "sin confirmaciones" --
+    nunca bloquea ni cambia el resto del reporte."""
+    _, salida, manifest = _generar(tmp_path, [_fila()])  # sin ruta_ledger
+    assert manifest["totales"]["viajes"] == 1
+
+    origen = tmp_path / "entrada2.csv"
+    _escribir_csv(origen, [_fila()])
+    ledger_corrupto = tmp_path / "decisiones_aplicadas_corrupto.json"
+    ledger_corrupto.write_text("{ esto no es json", encoding="utf-8")
+    manifest2 = generar_reporte_viajes(
+        origen, tmp_path / "reporte2", carpeta_catalogos=tmp_path / "catálogos",
+        ruta_ledger=ledger_corrupto, reloj=RELOJ,
+    )
+    assert manifest2["totales"]["viajes"] == 1

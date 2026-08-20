@@ -562,6 +562,7 @@ def _documento_desde_fila(
     fila: Mapping[str, object],
     *,
     normalizador_chofer: Callable[[str], str] | None,
+    resolver_patente: Callable[[str, str, str], str] | None = None,
 ) -> DocumentoViaje:
     evidencia = {str(clave): str(valor or "") for clave, valor in fila.items()}
     chofer_original = str(fila.get("chofer", "")).strip()
@@ -569,6 +570,32 @@ def _documento_desde_fila(
         normalizador_chofer(chofer_original)
         if normalizador_chofer and _valor_presente(chofer_original)
         else chofer_original
+    )
+    # Bloque VEHÍCULO D1 (cierre, G1) -- `evidencia` (arriba) ya capturó la
+    # fila documental tal cual, byte a byte, ANTES de este bloque: la
+    # evidencia original (p. ej. "JD6659") sigue disponible íntegra en
+    # `evidencias_documentos` del viaje pase lo que pase aquí. Lo que se
+    # resuelve abajo es sólo el VALOR OPERACIONAL de `DocumentoViaje`
+    # (usado por `Viaje.patentes_tracto`/`patentes_rampla` y por la
+    # detección de `CONFLICTO_PATENTE_TRACTO`/`CONFLICTO_PATENTE_RAMPLA`
+    # más abajo en `agrupar_viajes`) -- mismo patrón ya usado arriba para
+    # `chofer`/`normalizador_chofer`. Sin `resolver_patente` (compatible
+    # hacia atrás, comportamiento idéntico al de siempre), o sin una
+    # decisión humana ya aplicada para esta guía/campo/valor exactos, el
+    # valor operacional es el mismo documental sin cambios -- nunca
+    # inventa ni asume una corrección que nadie confirmó.
+    numero_guia_doc = str(fila.get("numero_guia", "")).strip()
+    patente_tracto_doc = str(fila.get("patente_tracto", "")).strip()
+    patente_rampla_doc = str(fila.get("patente_rampla", "")).strip()
+    patente_tracto = (
+        resolver_patente(numero_guia_doc, "patente_tracto", patente_tracto_doc)
+        if resolver_patente and _valor_presente(patente_tracto_doc)
+        else patente_tracto_doc
+    )
+    patente_rampla = (
+        resolver_patente(numero_guia_doc, "patente_rampla", patente_rampla_doc)
+        if resolver_patente and _valor_presente(patente_rampla_doc)
+        else patente_rampla_doc
     )
     # Bloque ORIGEN DE VIAJE: antes leía columnas "origen"/"planta_origen",
     # ninguna existente en el esquema real (la columna real, ya poblada por
@@ -587,8 +614,8 @@ def _documento_desde_fila(
         chofer=str(chofer).strip(),
         chofer_original=chofer_original,
         rut_chofer=str(fila.get("rut_chofer", "")).strip(),
-        patente_tracto=str(fila.get("patente_tracto", "")).strip(),
-        patente_rampla=str(fila.get("patente_rampla", "")).strip(),
+        patente_tracto=patente_tracto,
+        patente_rampla=patente_rampla,
         descripcion_material=str(fila.get("descripcion_material", "")).strip(),
         tipo_carga=str(fila.get("tipo_carga", "")).strip(),
         peso_kg=str(fila.get("peso_kg", "")).strip(),
@@ -643,6 +670,7 @@ def agrupar_viajes(
     filas: Iterable[Mapping[str, object]],
     *,
     normalizador_chofer: Callable[[str], str] | None = None,
+    resolver_patente: Callable[[str, str, str], str] | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     generador_id: Callable[[], str] | None = None,
 ) -> tuple[list[Viaje], list[dict[str, object]]]:
@@ -662,7 +690,7 @@ def agrupar_viajes(
     for clave_transporte, filas_grupo in grupos.items():
         documentos = [
             _documento_desde_fila(
-                fila, normalizador_chofer=normalizador_chofer
+                fila, normalizador_chofer=normalizador_chofer, resolver_patente=resolver_patente,
             )
             for fila in filas_grupo
         ]
