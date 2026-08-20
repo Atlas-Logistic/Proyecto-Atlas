@@ -42,8 +42,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from atlas_core.atlas_ia.adaptadores import contexto_desde_resultado_evaluar_evidencia_patente
 from atlas_core.atlas_ia.proveedor import ProveedorModeloIA
-from atlas_core.atlas_ia.proveedor_anthropic import CredencialProveedorIAAusente, ProveedorModeloIAAnthropic
+from atlas_core.atlas_ia.proveedor_anthropic import ErrorProveedorModeloIA, ProveedorModeloIAAnthropic
 from atlas_core.atlas_ia.proveedor_ollama import ProveedorModeloIAOllama
+from atlas_core.atlas_ia.proveedor_openrouter import ProveedorModeloIAOpenRouter
 from atlas_core.atlas_ia.shadow import ejecutar_shadow
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
 from atlas_core.decisiones_pendientes import evaluar_evidencia_patente
@@ -197,7 +198,7 @@ def ejecutar_experimento(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark real Atlas IA en SHADOW")
-    parser.add_argument("--proveedor", choices=("anthropic", "ollama"), default="anthropic")
+    parser.add_argument("--proveedor", choices=("anthropic", "ollama", "openrouter"), default="anthropic")
     parser.add_argument("--modelo", default=None)
     parser.add_argument("--salida", type=Path, default=None)
     args = parser.parse_args()
@@ -205,13 +206,16 @@ def main() -> int:
     if args.proveedor == "ollama":
         proveedor = ProveedorModeloIAOllama(modelo=args.modelo or "qwen3:4b")
         ruta_salida = args.salida or (RUTA_RESULTADOS / "lote_vehiculos_a2_ollama_qwen3_4b.json")
+    elif args.proveedor == "openrouter":
+        proveedor = ProveedorModeloIAOpenRouter(modelo=args.modelo or "z-ai/glm-5.2:free")
+        ruta_salida = args.salida or (RUTA_RESULTADOS / "lote_vehiculos_a2_openrouter_glm_5_2_free.json")
     else:
         proveedor = ProveedorModeloIAAnthropic(modelo=args.modelo or "claude-sonnet-5")
         ruta_salida = args.salida
     try:
         resultados = ejecutar_experimento(proveedor=proveedor, ruta_salida=ruta_salida)
-    except CredencialProveedorIAAusente as error:
-        print("BLOQUEADO -- no se ejecutó ninguna llamada real.")
+    except ErrorProveedorModeloIA as error:
+        print("BLOQUEADO -- el lote no se completó.")
         print(str(error))
         return 1
     for resultado in resultados:
