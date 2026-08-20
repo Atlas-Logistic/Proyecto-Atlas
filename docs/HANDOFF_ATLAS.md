@@ -4,6 +4,51 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-20 — CIERRE OFICINA → CASA: G1 cerrado, Atlas IA A1/A2 publicados hasta el borde de la primera llamada real
+
+**Motor:** rama `lector-mvp-guia-nueva`, HEAD `572eba8ffe42631f037d17135576e0c2fd64209f`, publicado en `origin` (verificar `local=remoto`, `0/0`, limpio al retomar).
+**Desktop:** rama `fix-desktop-data-root-drag-drop`, HEAD `93352cf` -- sin cambios desde el checkpoint anterior; A1/A2 no lo tocaron.
+**Drive canónico:** `G:\Mi unidad\Atlas` (o equivalente sincronizado en casa) -- sin modificaciones por Atlas IA; G1 sí aplicó sobre Drive real (ver más abajo).
+
+**Suite:** `1471 passed, 0 failed` en el HEAD de arriba.
+
+### G1 — CERRADO, funcional y operacional
+
+Propagación end-to-end de decisiones humanas de vehículo/patente al valor operacional del viaje. Publicado (`c1359d1` + bitácoras) y **aplicado sobre la operación real**: reporte vigente actual es `reportes/reporte_revalidacion_20260820_150518_051875`, `estado_operacion.json` ya apunta ahí. Caso real `0000351135` verificado: publica `VP8521`/`JD8659` (antes `VP6521|VP8521` / `JD0659|JD6659`), evidencia documental original intacta, cero regresiones en los otros 37 viajes. Detalle completo en `docs/BITACORA_TECNICA_CRONOLOGICA.md`, bloques "FIX G1" y "G1 CIERRE OPERACIONAL".
+
+### Atlas IA — A1 y A2, publicados
+
+- **A1** (`20f2d03`): infraestructura aislada `atlas_core/atlas_ia/` -- contratos propios (`EvidenciaIA`/`ContextoRazonamiento`/`HipotesisIA`/`ResultadoValidacionHipotesis`/`ResultadoShadow`), proveedor simulado, adaptador real desde `evaluar_evidencia_patente`, validadores anti-alucinación (V1-V4), shadow harness de sólo lectura (`persistir=False` por defecto). Nunca tocó `motor_evidencia.CandidatoEvidencia` ni agregó ningún nivel nuevo a la jerarquía productiva.
+- **A2** (`ea303b7`): proveedor **real** -- `ProveedorModeloIAAnthropic` (Anthropic/Claude, HTTP directo sin SDK, mismo patrón que `OpenRouteService`/`OnelogisProvider`), política de sistema versionada (`atlas-ia-politica-v1`, en `atlas_core/atlas_ia/politica_prompt.py`), y un lote de **6 casos reales** de vehículos ya construidos con evidencia real (`experimentos_atlas_ia/lote_vehiculos_a2.py`).
+
+### BLOQUEO ÚNICO ACTUAL -- por qué A2 no terminó de demostrarse
+
+**No existe `ANTHROPIC_API_KEY` configurada en el computador de oficina.** Se verificó explícitamente (variables de usuario/máquina/proceso de Windows, `.env`, config del repo) antes de construir nada -- no se inventó ni se pidió por otro canal. El runner se ejecutó de punta a punta hasta ese borde exacto: construyó los 6 contextos reales, intentó la llamada, y se detuvo limpiamente con `CredencialProveedorIAAusente`, sin escribir ningún artefacto parcial y sin tocar Drive (verificado por `mtime`).
+
+**IMPORTANTE -- no interpretar A2 como IA cognitiva ya probada.** Hasta ahora CERO llamadas reales a un modelo se han ejecutado. No hay ningún acierto, error ni abstención real que reportar. Todo lo construido (proveedor, prompt, validadores, lote de casos) está probado con **transporte HTTP simulado**, nunca con el modelo real -- eso prueba que el enchufe funciona, no que la IA razona bien.
+
+### SIGUIENTE PASO EN CASA (en este orden, sin desviarse)
+
+1. Sincronizar/verificar Motor en `572eba8` (`git fetch && git status -sb`).
+2. Verificar Desktop en `93352cf` (sin tocar).
+3. Configurar `ANTHROPIC_API_KEY` como variable de entorno de **usuario** de Windows, en la propia terminal de quien la configura -- nunca en el repo, nunca en Drive, nunca pegada en el chat. Instrucciones exactas: `experimentos_atlas_ia/README.md`.
+4. Ejecutar directamente:
+   ```
+   python experimentos_atlas_ia/lote_vehiculos_a2.py
+   ```
+5. Analizar los resultados reales de los 6 casos ya preparados (Ortiz 464036 + 5 más -- tabla completa con ground truth en `docs/BITACORA_TECNICA_CRONOLOGICA.md`, bloque "ATLAS IA A2").
+
+**No repetir:** otra auditoría arquitectónica, volver al proveedor simulado como sustituto de la prueba real, ni construir A3 (tool-calling) antes de ver estos resultados reales.
+
+**Comandos mínimos de verificación:**
+```
+cd Proyecto-Atlas && git fetch origin && git status -sb   # esperar: limpio, 0/0, 572eba8
+cd Atlas-Viajes-Desktop && git fetch origin && git status -sb   # esperar: limpio, 0/0, 93352cf
+py -3 -m pytest tests/ -q   # esperar: 1471 passed (NO es obligatorio repetir en este cierre)
+```
+
+---
+
 ## 2026-08-19/20 — INICIO RÁPIDO OFICINA — 2026-08-20
 
 **Motor:** rama `lector-mvp-guia-nueva`, HEAD `5141621` ("fix: revalidar PATENTE_SIN_HOMOLOGAR reconoce confirmaciones via ledger"), publicado en `origin`.
