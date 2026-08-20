@@ -27,6 +27,7 @@ cualquier IA intervenga.
 from __future__ import annotations
 
 import csv
+import argparse
 import json
 import shutil
 import sys
@@ -42,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from atlas_core.atlas_ia.adaptadores import contexto_desde_resultado_evaluar_evidencia_patente
 from atlas_core.atlas_ia.proveedor import ProveedorModeloIA
 from atlas_core.atlas_ia.proveedor_anthropic import CredencialProveedorIAAusente, ProveedorModeloIAAnthropic
+from atlas_core.atlas_ia.proveedor_ollama import ProveedorModeloIAOllama
 from atlas_core.atlas_ia.shadow import ejecutar_shadow
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
 from atlas_core.decisiones_pendientes import evaluar_evidencia_patente
@@ -194,9 +196,20 @@ def ejecutar_experimento(
 
 
 def main() -> int:
-    proveedor = ProveedorModeloIAAnthropic()  # lee ANTHROPIC_API_KEY del entorno
+    parser = argparse.ArgumentParser(description="Benchmark real Atlas IA en SHADOW")
+    parser.add_argument("--proveedor", choices=("anthropic", "ollama"), default="anthropic")
+    parser.add_argument("--modelo", default=None)
+    parser.add_argument("--salida", type=Path, default=None)
+    args = parser.parse_args()
+
+    if args.proveedor == "ollama":
+        proveedor = ProveedorModeloIAOllama(modelo=args.modelo or "qwen3:4b")
+        ruta_salida = args.salida or (RUTA_RESULTADOS / "lote_vehiculos_a2_ollama_qwen3_4b.json")
+    else:
+        proveedor = ProveedorModeloIAAnthropic(modelo=args.modelo or "claude-sonnet-5")
+        ruta_salida = args.salida
     try:
-        resultados = ejecutar_experimento(proveedor=proveedor)
+        resultados = ejecutar_experimento(proveedor=proveedor, ruta_salida=ruta_salida)
     except CredencialProveedorIAAusente as error:
         print("BLOQUEADO -- no se ejecutó ninguna llamada real.")
         print(str(error))
@@ -208,7 +221,7 @@ def main() -> int:
             f"validacion={'ACEPTADA' if resultado.validacion.aceptada else resultado.validacion.motivo_rechazo} "
             f"ground_truth={resultado.ground_truth_humano!r}"
         )
-    print(f"Resultados guardados en: {RUTA_RESULTADOS / 'lote_vehiculos_a2.json'}")
+    print(f"Resultados guardados en: {ruta_salida or (RUTA_RESULTADOS / 'lote_vehiculos_a2.json')}")
     return 0
 
 
