@@ -4,6 +4,57 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — ATLAS IA A2: PRIMER RAZONAMIENTO CON MODELO REAL EN SHADOW -- BLOQUEADO POR CREDENCIAL AUSENTE
+
+**Rama motor:** `lector-mvp-guia-nueva`, checkpoint de partida `520081d` (local=remoto, 0/0, limpio -- ahead 2 sobre origin en ese momento, sin push aún de A1, exactamente lo que anticipaba el bloque). Commit funcional: `ea303b7`.
+
+**Resultado honesto de este bloque:** NO hubo ninguna llamada real a un modelo de IA. Se verificó el entorno (variables de usuario/máquina/proceso de Windows, `.env`, archivos de configuración del repo) y no existe ninguna credencial de proveedor de IA configurada -- se detuvo exactamente en ese punto, como pedía el bloque, después de construir todo lo demás.
+
+### 1 -- Proveedor real
+
+`atlas_core/atlas_ia/proveedor_anthropic.py`: `ProveedorModeloIAAnthropic`, mismo patrón `Protocol` + transporte HTTP inyectable ya usado en producción por `OpenRouteService`/`OnelogisProvider` (`urllib` directo, sin SDK). Llama a `POST https://api.anthropic.com/v1/messages` con `tool_choice` forzado a una única herramienta (`reportar_hipotesis`, esquema JSON con `resultado`/`valor_propuesto`/`evidencia_usada`/`evidencia_en_contra`/`explicacion`/`herramienta_faltante`/`posible_incidencia_documental`/`confianza_declarada`) -- salida estructurada garantizada por la API, nunca prosa parseada a mano. `temperatura=0.0` por defecto. Credencial: `ANTHROPIC_API_KEY` (env) o parámetro explícito, nunca impresa/logueada; `CredencialProveedorIAAusente` si falta, con el mensaje exacto de qué configurar. Si el modelo viola su propio contrato de salida (p. ej. `PROPUESTA` sin `valor_propuesto`), se degrada a una `ABSTENCION` auditada -- nunca tumba el caso ni inventa un valor.
+
+### 2 -- Genérico por diseño
+
+El proveedor no conoce "patente" ni ningún campo específico -- sólo consume/produce `ContextoRazonamiento`/`HipotesisIA`, exactamente los mismos contratos de A1. Extender a otro campo (cliente, fecha, obra) no exige tocar este archivo.
+
+### 3 -- Prompt de sistema
+
+`atlas_core/atlas_ia/politica_prompt.py`: `POLITICA_PROMPT_SISTEMA` + `POLITICA_PROMPT_VERSION="atlas-ia-politica-v1"`. ~350 palabras, 12 reglas (razonar sólo sobre evidencia entregada; distinguir observación documental/conocimiento corroborado; distinguir inferencia/hecho; señalar contradicciones; abstenerse o pedir herramienta sin penalización; CONFIRMADO no es garantía; una relación observada una vez no es universal; priorizar decisión humana ya confirmada; señalar posible Incidencia Documental separada de calidad de captura; nunca proponer un valor que no aparezca literalmente en la evidencia; responder únicamente vía la herramienta estructurada). Cada `HipotesisIA` real queda etiquetada con la versión de política vigente (`metadata["politica_prompt_version"]`).
+
+### 4 -- Caso Ortiz (464036) y lote real
+
+`experimentos_atlas_ia/lote_vehiculos_a2.py`: copia read-only de `analisis_completo_guias.csv`/`vehiculos.json` desde Drive a un directorio temporal del sistema (nunca dentro del repo, borrado al terminar), construye 6 `ContextoRazonamiento` reales llamando exactamente a `evaluar_evidencia_patente` (el Motor determinista ya en producción) sobre esos datos, elegidos empíricamente consultando el propio Motor contra los 69 pares guía/campo con patente presente en la operación real vigente (no fabricados):
+
+| Guía | Campo | Categoría | Resultado del Motor determinista (ya, sin IA) | Ground truth (nunca entregado al modelo) |
+|---|---|---|---|---|
+| 464036 | patente_tracto | corrección esperada, pero declinada por el humano | `SUGERENCIA_HUMANA` (candidato XF3629) | `NO_REGISTRAR`/`ERROR_DOCUMENTAL_MANDANTE` -- Javier declinó explícitamente sustituir, no "XF3629 es correcta" |
+| 464265 | patente_tracto | corrección esperada | `SUGERENCIA_HUMANA` (candidato VP8521) | `VP8521` (ya confirmado, `USAR_PATENTE_EXISTENTE`) |
+| 464264 | patente_rampla | ya resuelto por el Motor | `RESUELTO_AUTOMATICAMENTE` (JD8659) | `JD8659` (coincide) |
+| 464698 | patente_rampla | ya resuelto por el Motor | `RESUELTO_AUTOMATICAMENTE` (JD8659) | `JD8659` (coincide) |
+| 463594 | patente_tracto | abstención esperada | `ABSTENCION` (0 candidatos) | sin decisión humana registrada -- nunca hizo falta |
+| 464424 | patente_tracto | abstención esperada | `ABSTENCION` (0 candidatos) | sin decisión humana registrada -- nunca hizo falta |
+
+`tipo_esperado` por campo se reconstruye con la misma regla ya vigente en `revalidar_patente_sin_homologar_sin_ocr` (rampla presente -> tracto espera `TRACTO`, rampla espera `CARRO`) -- documentado explícitamente en el código como aproximación de experimento, no autoritativa (producción real lee `tipo_vehiculo_propuesto` ya calculado al crear la decisión pendiente). Hallazgo del propio proceso de selección: con `tipo_esperado=None` (permisivo) 464698 devolvía un candidato de tipo incompatible (`JD8659`, CARRO, sugerido para un campo de TRACTO) -- corregido usando el `tipo_esperado` correcto antes de fijar el lote, para no exponer al modelo una evidencia que ni la propia producción generaría.
+
+### 5 -- Ejecución real intentada
+
+`python experimentos_atlas_ia/lote_vehiculos_a2.py`: construye los 6 contextos reales (confirmado, ver arriba), intenta `ProveedorModeloIAAnthropic().razonar(...)` para el primer caso, recibe `CredencialProveedorIAAusente`, imprime el mensaje exacto y termina con código de salida 1 -- **sin escribir ningún artefacto parcial** (la excepción se propaga antes de que `ejecutar_shadow` llegue a la rama `persistir`) y **sin tocar Drive**, verificado explícitamente por `mtime`: `analisis_completo_guias.csv`/`vehiculos.json`/`decisiones_aplicadas.json` -- 2026-08-19, sin cambios; único archivo con `mtime` de hoy es `estado_operacion.json`, y corresponde al cierre operacional de G1 de este mismo día, anterior a este bloque.
+
+### 6 -- Tests (20 nuevos; suite completa 1451 → 1471 passed, 0 failed)
+
+`tests/test_atlas_ia_proveedor_anthropic.py`, mismo patrón que `tests/test_rutas_openrouteservice.py` (transporte HTTP simulado, nunca red real, ninguna clave real usada -- literal `sk-ant-CLAVE-DE-PRUEBA-NUNCA-REAL`): credencial ausente no invoca transporte; credencial explícita nunca lee el entorno; la solicitud incluye la política de sistema y fuerza `tool_choice`; el mensaje al modelo nunca incluye `ground_truth`/la decisión humana real; parseo correcto de `PROPUESTA`/`ABSTENCION`/`REQUIERE_HERRAMIENTA`; `confianza_declarada`/`posible_incidencia_documental` quedan en `metadata`; `hipotesis_id` reproducible igual que con el proveedor simulado; degradación seguridad ante respuesta sin `tool_use` o con estructura inválida (nunca excepción no controlada, nunca valor inventado); errores de red/HTTP (timeout, sin conexión, códigos 401/403/429/500) se traducen a `ProveedorIANoDisponible`.
+
+### 7 -- Alcance NO cubierto en este bloque (explícito)
+
+Ningún caso se ejecutó realmente contra un modelo -- **no hay ningún resultado cognitivo que reportar todavía**, ni acierto ni error ni abstención real del modelo. No se conectó tool-calling (los 6 contextos se construyeron con evidencia ya reunida por el Motor determinista, sin que la IA pidiera nada más). No se cubrió un segundo tipo de campo (cliente/fecha) -- se completaron primero, como pedía el bloque, los casos vehiculares reales.
+
+### Repositorios
+
+Motor: `ea303b7`, `lector-mvp-guia-nueva`, ahead de origin (sin push, por instrucción explícita del bloque), working tree limpio salvo los archivos de este commit. Desktop: `93352cf`, sin cambios. Drive: sin cambios, verificado.
+
+---
+
 ## 2026-08-20 — ATLAS IA A1: CONTRATOS AISLADOS + SHADOW HARNESS, VERTICAL VEHÍCULOS -- INFRAESTRUCTURA SHADOW, SIN MODELO REAL
 
 **Rama motor:** `lector-mvp-guia-nueva`, checkpoint de partida `f4f32923a73d5063700460c698ce356b6af02e42` (local=remoto, 0/0, limpio). **Desktop:** `fix-desktop-data-root-drag-drop`, `93352cf`, sin cambios. Commit funcional: `20f2d03`.

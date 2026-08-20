@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — ATLAS IA A2: proveedor real conectado -- BLOQUEADO por falta de credencial, todo lo demás listo
+
+- **Se conectó un proveedor de IA real (Anthropic/Claude) al mismo enchufe genérico construido en A1** -- ningún cambio a los contratos ni a las barreras de seguridad ya construidas. Se preparó un lote de 6 casos reales (incluido Ortiz) con evidencia real de Atlas, listo para ejecutarse.
+- **La ejecución real quedó bloqueada en un único punto, exactamente donde debía:** no existe hoy ninguna credencial de un proveedor de IA configurada en este computador. Se verificó explícitamente (variables de entorno, archivos de configuración) antes de construir nada -- no se inventó, no se pidió por otro canal, no se intentó rodear.
+- **Acción concreta pendiente de Javier:** configurar `ANTHROPIC_API_KEY` como variable de entorno de **usuario** de Windows, en su propia terminal -- mismo mecanismo ya usado para las claves de rutas/telemetría. Instrucciones exactas en `experimentos_atlas_ia/README.md`. En cuanto exista, el experimento ya está listo para correr con un solo comando -- no hace falta escribir código nuevo.
+- **Todo lo demás quedó construido y probado:** el prompt de sistema de Atlas IA (pequeño, versionado, sin lógica de negocio), el proveedor real completo (probado con conexiones simuladas, nunca red real en los tests), y el lote de 6 casos reales -- 2 donde se espera una corrección, 2 que el propio Motor determinista ya resuelve solo, 2 donde se espera abstención.
+- **Cero efectos sobre la operación real**, verificado explícitamente por fecha de modificación de los archivos reales de Drive -- ninguno cambió.
+- **Motor `1451 → 1471 passed, 0 failed`** (20 tests nuevos). Commit local únicamente, sin publicar todavía.
+
+---
+
 ## 2026-08-20 — ATLAS IA A1: infraestructura shadow aislada, sin modelo real (vertical vehículos)
 
 - **Primer bloque de Atlas IA, deliberadamente pequeño y sin riesgo operacional.** Se construyó una capa nueva (`atlas_core/atlas_ia/`) con los contratos y el "arnés" necesarios para que, el día que se conecte un modelo de razonamiento real, Atlas pueda recibir sus propuestas, validarlas contra evidencia real y auditarlas -- sin que ese modelo pueda, hoy ni en el futuro, inventar un dato operacional.
