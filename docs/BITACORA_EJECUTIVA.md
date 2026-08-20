@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-19 — CIERRE OPERACIONAL DEL DÍA: Javier vació la Revisión de Atlas; los 7 viajes que siguen en "Revisar" son todos reales
+
+- **Javier resolvió manualmente todas las decisiones pendientes** desde Desktop -- la bandeja quedó en cero. Quedaron 7 viajes (de 38) que el sistema sigue marcando "Requiere revisión". Se auditó cada uno, con evidencia, para saber por qué.
+- **Resultado honesto: los 7 son reales.** Ninguno es un simple "olvido" del sistema -- cada uno tiene al menos un motivo genuino que todavía necesita a Javier o a más información del documento original: conflictos entre documentos del mismo transporte (fechas, obras o patentes que no coinciden entre sí), clientes que la guía nunca llegó a identificar, o destinos con varias direcciones posibles sin poder elegir cuál es la correcta.
+- **Sí se encontró y corrigió un detalle real, más chico:** dos guías de Carlos Simón (464264, 464265) seguían mostrando "patente sin homologar" aunque Javier YA había confirmado la patente correcta -- el sistema nunca se enteró de esa confirmación al calcular ese motivo en particular. Se corrigió de forma general (no sólo para esas dos guías) para que esto no vuelva a pasar. Ninguno de los 7 viajes cambió de estado por esto -- cada uno sigue en revisión por sus propias razones reales, sólo que ahora las razones que se muestran son las verdaderas.
+- **Nada se inventó ni se forzó.** No se resolvió ningún conflicto real por Atlas -- todos quedan esperando el criterio de Javier.
+- **Jornada cerrada de forma portable:** Motor y Desktop publicados, Drive verificado, respaldo completo con manifiesto antes de tocar cualquier dato real, bitácoras al día. Javier puede continuar mañana desde la oficina sin depender de nada de esta máquina.
+
+---
+
 ## 2026-08-19 — PRIMER CICLO OPERACIONAL: Ortiz cerrado con motivo estructurado; bandeja real 13 → 12; ningún aprendizaje inventado
 
 - **Se aplicó, sobre Drive real, únicamente el caso que ya estaba inequívocamente confirmado:** el tracto de la guía 464036 (Patrick Ortiz, XF3662) se cierra con `NO_REGISTRAR` y el motivo estructurado `ERROR_DOCUMENTAL_MANDANTE` -- exactamente lo que Javier ya había confirmado en una auditoría anterior de esta misma sesión. El documento original (`XF3662`) nunca se tocó.

@@ -204,8 +204,42 @@ def _vehiculo_homologado(
     return None
 
 
+def _confirmaciones_ledger_por_guia_campo(ruta_ledger: Path) -> dict[tuple[str, str, str], str]:
+    """Índice de solo lectura del ledger: `(numero_guia, campo, valor_documental)`
+    -> `patente_canonica`, sólo para aplicaciones `VEHICULO_DESCONOCIDO` con
+    `accion` en {`USAR_PATENTE_EXISTENTE`, `SELECCIONAR_OTRA_PATENTE`} --
+    las dos acciones que confirman una canónica SIN modificar el valor
+    documental leído (ver `atlas_core.aplicacion_decisiones`). Nunca
+    incluye `NO_REGISTRAR` (rechazo explícito, sin canónica -- p. ej. un
+    error documental del mandante, ver caso real 464036) ni `REGISTRAR`
+    (ese caso ya lo cubre `_vehiculo_homologado` directamente, porque el
+    propio valor documental pasa a ser la canónica). Ausencia/corrupción
+    del ledger se trata como "sin confirmaciones" -- nunca bloquea la
+    revalidación del resto."""
+    indice: dict[tuple[str, str, str], str] = {}
+    try:
+        ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return indice
+    for aplicacion in ledger.get("aplicaciones", []):
+        if aplicacion.get("tipo") != "VEHICULO_DESCONOCIDO":
+            continue
+        if aplicacion.get("accion") not in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE"):
+            continue
+        patente_canonica = str(aplicacion.get("patente_canonica") or "").strip()
+        if not patente_canonica:
+            continue
+        clave = (
+            str((aplicacion.get("documento") or {}).get("numero_guia", "")),
+            str(aplicacion.get("campo", "")),
+            str(aplicacion.get("valor_documental", "")),
+        )
+        indice[clave] = patente_canonica
+    return indice
+
+
 def revalidar_patente_sin_homologar_sin_ocr(
-    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, ruta_ledger: str | Path | None = None,
 ) -> dict[str, object]:
     """R3.6.2: relee cada fila del dataset y reevalúa ÚNICAMENTE el motivo
     ``PATENTE_SIN_HOMOLOGAR`` contra el estado VIGENTE del catálogo de
@@ -221,6 +255,23 @@ def revalidar_patente_sin_homologar_sin_ocr(
       - ``patente_tracto`` presente y aislada (sin rampla documental
         relevante) puede resolver a TRACTO o a CAMION_RIGIDO -- ambas
         resuelven el motivo si el vehículo está CONFIRMADO y ACTIVO.
+
+    Bloque CIERRE OPERACIONAL D1 -- ``ruta_ledger`` (opcional, compatible
+    hacia atrás): cuando la patente documental NUNCA va a homologar por sí
+    sola (p. ej. ``JD6659``, una lectura OCR de una rampla cuya canónica
+    real es ``JD8659``, confirmada por `USAR_PATENTE_EXISTENTE`/
+    `SELECCIONAR_OTRA_PATENTE`), se consulta el ledger para esa fila/campo
+    exactos -- si existe una confirmación humana ya aplicada, se trata
+    igual que si la propia canónica confirmada hubiera homologado
+    directamente. Caso real que motivó esto: 464265 (Carlos Simón, tracto
+    VP6521->VP8521 confirmado por Javier) seguía mostrando
+    `PATENTE_SIN_HOMOLOGAR` después de la confirmación -- el valor
+    documental jamás iba a homologar solo, la revalidación anterior nunca
+    podía resolverlo. Un `NO_REGISTRAR` (p. ej. 464036, error documental
+    sin canónica -- ver `_confirmaciones_ledger_por_guia_campo`) NUNCA
+    entra en este índice, así que sigue conservando el motivo, tal como
+    corresponde a un caso real sin resolución.
+
     Se abstiene fila por fila ante cualquier duda: patente ausente pero
     relevante sin resolver, catálogo ambiguo/inactivo/no confirmado, tipo
     incompatible con el rol documental, o error de catálogo. Nunca crea
@@ -228,6 +279,9 @@ def revalidar_patente_sin_homologar_sin_ocr(
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     motivo_objetivo = MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR.value
+    confirmaciones_ledger = (
+        _confirmaciones_ledger_por_guia_campo(Path(ruta_ledger)) if ruta_ledger is not None else {}
+    )
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
@@ -249,10 +303,16 @@ def revalidar_patente_sin_homologar_sin_ocr(
             if not tracto_presente and not rampla_presente:
                 continue  # sin ninguna patente documental relevante -> conservar
 
+            numero_guia = str(fila.get("numero_guia", ""))
+
             if rampla_presente:
                 rampla_resuelta = _vehiculo_homologado(
                     vehiculos_homologables, normalizar_patente_vehiculo(rampla_doc)
                 )
+                if rampla_resuelta is None:
+                    canonica = confirmaciones_ledger.get((numero_guia, "patente_rampla", rampla_doc))
+                    if canonica:
+                        rampla_resuelta = _vehiculo_homologado(vehiculos_homologables, normalizar_patente_vehiculo(canonica))
                 if rampla_resuelta is None or rampla_resuelta.tipo != _TIPO_CARRO:
                     continue  # rampla sin resolver o tipo incompatible -> conservar
 
@@ -260,6 +320,10 @@ def revalidar_patente_sin_homologar_sin_ocr(
                 tracto_resuelto = _vehiculo_homologado(
                     vehiculos_homologables, normalizar_patente_vehiculo(tracto_doc)
                 )
+                if tracto_resuelto is None:
+                    canonica = confirmaciones_ledger.get((numero_guia, "patente_tracto", tracto_doc))
+                    if canonica:
+                        tracto_resuelto = _vehiculo_homologado(vehiculos_homologables, normalizar_patente_vehiculo(canonica))
                 if tracto_resuelto is None:
                     continue  # tracto sin resolver -> conservar
                 tipos_compatibles = (
@@ -458,7 +522,7 @@ def revalidar_y_regenerar_reporte(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
     resultado_patente = revalidar_patente_sin_homologar_sin_ocr(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"]) | set(resultado_patente["guias_actualizadas"])

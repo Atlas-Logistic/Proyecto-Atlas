@@ -337,6 +337,95 @@ def test_no_registrar_no_dispara_revalidacion(tmp_path):
     assert "PATENTE_SIN_HOMOLOGAR" in fila_final["motivos_revision_documento"]
 
 
+# --- Bloque CIERRE OPERACIONAL D1: USAR_PATENTE_EXISTENTE/SELECCIONAR_OTRA_PATENTE ---
+# Caso real que motiva este bloque: guía 464265 (Carlos Simón), patente_tracto
+# documental "VP6521" -- Javier confirmó USAR_PATENTE_EXISTENTE (canónica
+# VP8521, ya en catálogo) desde Desktop, pero el dataset seguía mostrando
+# PATENTE_SIN_HOMOLOGAR: el valor documental "VP6521" JAMÁS iba a
+# homologar por sí solo (no es la canónica, sólo una lectura OCR distinta)
+# y nada disparaba la revalidación para estas dos acciones.
+
+
+def test_usar_patente_existente_dispara_revalidacion_via_ledger(tmp_path):
+    fila = _fila_csv(
+        numero_guia="464265", patente_tracto="VP6521", patente_rampla="No encontrado",
+        motivos_revision_documento="PATENTE_SIN_HOMOLOGAR | CLIENTE_AUSENTE",
+    )
+    raiz, catalogos, actual, dataset = _entorno(tmp_path, filas_csv=[fila])
+    _confirmar(catalogos, patente="VP8521", tipo=TipoVehiculo.TRACTO.value)
+
+    from atlas_core.decisiones_pendientes import enriquecer_decisiones_vehiculo
+
+    decision = {
+        "decision_id": "d-vp6521", "estado": "PENDIENTE", "tipo": "VEHICULO_DESCONOCIDO",
+        "entidad": "VEHICULO", "documento": {"archivo": "464265.jpeg", "numero_guia": "464265", "numero_transporte": "T1"},
+        "campo": "patente_tracto", "valor_documental": "VP6521", "valor_normalizado": "VP6521",
+        "identidad_resuelta": None, "contexto": None, "candidatos": [],
+        "motivos": ["SIN_VEHICULO_CONFIRMADO_COMPATIBLE"],
+        "evidencias": [{"tipo": "OCR_DOCUMENTAL", "campo": "patente_tracto", "valor": "VP6521"}],
+        "acciones_permitidas": ["REGISTRAR", "NO_REGISTRAR", "POSPONER"],
+        "tipo_resolucion": "REQUIERE_CONFIRMACION_HUMANA", "tipo_vehiculo_propuesto": None,
+    }
+    filas_csv = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))
+    from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
+    vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
+    # numero_transporte real de 464265 comparte transporte con 464264 --
+    # aquí basta con que exista al menos un vehiculo homologable para que
+    # USAR_PATENTE_EXISTENTE tenga sentido; el candidato exacto no importa
+    # para este test (se fuerza directamente abajo).
+    enriquecidas = enriquecer_decisiones_vehiculo(decisiones=[decision], filas=filas_csv, vehiculos=vehiculos)
+    decision_final = enriquecidas[0]
+    if not decision_final.get("candidatos"):
+        # Sin historial de otro documento del mismo RUT, el motor de
+        # evidencia no propone nada por su cuenta (correcto, nunca
+        # autocorrige) -- se simula aquí la sugerencia ya publicada tal
+        # como quedó realmente en la bandeja real antes de que Javier la
+        # confirmara, para poder ejercitar USAR_PATENTE_EXISTENTE.
+        decision_final["candidatos"] = [{"patente": "VP8521", "vehiculo_id": vehiculos[0].vehiculo_id, "tipo_vehiculo": "TRACTO"}]
+        decision_final["acciones_permitidas"] = ["REGISTRAR", "NO_REGISTRAR", "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE", "POSPONER"]
+    generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=[decision_final],
+        ruta_salida=actual / "decisiones_pendientes.json",
+    )
+
+    resultado = aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision_final["decision_id"], accion="USAR_PATENTE_EXISTENTE")
+    assert resultado["ok"] is True
+    assert resultado["patente_canonica"] == "VP8521"
+    assert "revalidacion" in resultado
+    assert resultado["revalidacion"]["guias_actualizadas"] == ["464265"]
+
+    fila_final = _leer_filas(dataset)["464265"]
+    assert "PATENTE_SIN_HOMOLOGAR" not in fila_final["motivos_revision_documento"]
+    assert fila_final["motivos_revision_documento"] == "CLIENTE_AUSENTE"
+    # El valor documental original nunca se toca.
+    assert fila_final["patente_tracto"] == "VP6521"
+
+
+def test_no_registrar_sigue_sin_disparar_revalidacion_ni_falsamente_resolver_patente(tmp_path):
+    """Control negativo del mismo bloque: NO_REGISTRAR (caso real 464036,
+    error documental sin canónica) NUNCA debe entrar al índice del
+    ledger que usa la revalidación -- un rechazo explícito no es una
+    confirmación."""
+    fila = _fila_csv(numero_guia="464036", patente_tracto="XF3662", patente_rampla="No encontrado")
+    raiz, catalogos, actual, dataset = _entorno(tmp_path, filas_csv=[fila])
+    datos = {
+        "número de guía": "464036", "número de transporte": "T1",
+        "patente del tracto": "XF3662", "patente del carro": "No encontrado",
+    }
+    decisiones = detectar_decisiones_documento(archivo="464036.jpeg", datos=datos, carpeta_catalogos=catalogos)
+    decision = next(d for d in decisiones if d["tipo"] == "VEHICULO_DESCONOCIDO")
+    generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=[decision],
+        ruta_salida=actual / "decisiones_pendientes.json",
+    )
+    resultado = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="NO_REGISTRAR", motivo_rechazo="ERROR_DOCUMENTAL_MANDANTE",
+    )
+    assert "revalidacion" not in resultado
+    fila_final = _leer_filas(dataset)["464036"]
+    assert "PATENTE_SIN_HOMOLOGAR" in fila_final["motivos_revision_documento"]
+
+
 # --- Orquestador combinado (obra/destino + patente en la misma pasada) ---
 
 def test_revalidar_y_regenerar_reporte_combina_ambas_revalidaciones(tmp_path):

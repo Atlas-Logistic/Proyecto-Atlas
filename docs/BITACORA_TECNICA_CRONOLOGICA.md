@@ -4,6 +4,56 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-19/20 — CIERRE OPERACIONAL DEL DÍA: auditoría de los 7 REQUIERE_REVISION + revalidación de patentes consciente del ledger
+
+**Rama motor:** `lector-mvp-guia-nueva`. **Rama Desktop:** `fix-desktop-data-root-drag-drop` (sin cambios).
+
+### FASE 0 -- checkpoint
+
+`0b7a908`/`93352cf`, `local=remoto`, `0/0`, limpios. `decisiones_pendientes=0` confirmado (Javier vació la bandeja desde Desktop; ledger real con 35 aplicaciones, actor mezcla `JAVIER_DESKTOP`/`JAVIER_MBT`).
+
+### FASE 1/2 -- detección y trazado de los 7
+
+`reportes/actual/viajes.csv`: **38 viajes, 31 `CONFIRMADO`, 7 `REQUIERE_REVISION`** -- coincide exactamente con lo reportado por Javier. Trazado documento -> `indicador_revision`/`motivos_revision_documento` -> ledger -> `estado_ruta`/`motivo_ruta` -> consolidación, para cada uno de los 7:
+
+| Transporte | Guía(s) | Causa raíz (primera, no el texto final) |
+|---|---|---|
+| 0000350797 | 464036 | `PATENTE_SIN_HOMOLOGAR` -- XF3662 sin sustituto (rechazo explícito ya registrado) |
+| 0000351135 | 464264, 464265 | `CONFLICTO_FECHA`/`CONFLICTO_OBRA_DESTINO`/`CONFLICTO_PATENTE_TRACTO`/`CONFLICTO_PATENTE_RAMPLA` -- los 2 documentos hermanos del mismo transporte discrepan entre sí en fecha, obra y patentes documentales |
+| 0000351370 | 464367 | `CLIENTE_AUSENTE` -- ningún nombre/RUT de cliente extraído del documento |
+| 0000352394 | 464479 | `ORIGEN_GPS_NO_DETERMINADO` (ya auditado como real en un bloque muy anterior, sin cambios desde entonces) + `OBRA_DESTINO_SIN_CORROBORAR` |
+| 0000352241 | 464494 | `MULTIPLES_UBICACIONES_DISPERSAS(5)` -- destino genuinamente ambiguo |
+| 0000352376 | 464698, 464699, 464700 | `CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO` -- EBEMA SA vs PRODALAM SA / EBCO SA vs SOC CONSTRUCTORA OCL, inconsistencia real entre documentos del mismo transporte (ya señalada en una auditoría muy anterior, nunca forzada) |
+| 0000353164 | 464740 | `CLIENTE_AUSENTE` + `MULTIPLES_UBICACIONES_DISPERSAS(5)` |
+
+### FASE 3/4/5 -- clasificación
+
+**A (revisión real vigente) = 4** (0000351135, 0000352394, 0000352241, 0000352376) -- conflictos de consolidación o ambigüedad de destino genuinos, requieren el criterio de Javier. **B (estado obsoleto) = 0** -- no se encontró ningún caso donde el motivo fuera simplemente incorrecto/no regenerado; ver más abajo el hallazgo parcial (afecta un motivo, no cambia el estado del viaje). **C (revisión real sin decisión accionable) = 2** (0000351370, 0000353164) -- `CLIENTE_AUSENTE`: hoy no existe ningún tipo de decisión que Atlas pueda ofrecer cuando ni siquiera hay un nombre/RUT que evaluar. **D (otro) = 1** (0000350797) -- Ortiz ya fue decidido explícitamente por Javier (`NO_REGISTRAR`/`ERROR_DOCUMENTAL_MANDANTE`), pero el modelo de estados no distingue "todavía sin revisar" de "revisado y confirmado como error sin sustituto conocido" -- gap de modelado real, reportado, no parcheado silenciosamente (cambiar `indicador_revision` a `OK` para un dato que se SABE incorrecto sería engañoso para cualquier reporte futuro).
+
+### Hallazgo real y fix generalizable (afecta un motivo, no el conteo de 7)
+
+Validando 464265 en detalle: Javier ya había confirmado `VP6521`→`VP8521` vía `USAR_PATENTE_EXISTENTE` desde Desktop, pero el dataset seguía mostrando `PATENTE_SIN_HOMOLOGAR`. Causa: `revalidar_patente_sin_homologar_sin_ocr` sólo revalida contra el valor DOCUMENTAL homologando directamente -- un valor que por definición nunca va a homologar solo (es una lectura OCR distinta de la canónica) nunca se resolvía, sin importar cuántas veces se revalidara. Además, `aplicar_decision_obra` sólo disparaba la revalidación automática para `VEHICULO_DESCONOCIDO`/`REGISTRAR`, nunca para `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`.
+
+**Fix, generalizable, en `atlas_core/revalidacion_documental.py`:**
+- Nueva `_confirmaciones_ledger_por_guia_campo(ruta_ledger)`: índice de solo lectura `(numero_guia, campo, valor_documental) -> patente_canonica`, construido ÚNICAMENTE desde aplicaciones `VEHICULO_DESCONOCIDO` con `accion` en `{USAR_PATENTE_EXISTENTE, SELECCIONAR_OTRA_PATENTE}` -- nunca `NO_REGISTRAR` (rechazo explícito, sin canónica) ni `REGISTRAR` (ya cubierto por el camino existente).
+- `revalidar_patente_sin_homologar_sin_ocr` gana `ruta_ledger: Path | None = None` (compatible hacia atrás): si el valor documental no homologa directamente, consulta este índice antes de conservar el motivo.
+- `revalidar_y_regenerar_reporte` pasa `ruta_ledger=actual/"decisiones_aplicadas.json"` automáticamente.
+- `atlas_core/aplicacion_decisiones.py`: el disparo automático de revalidación se extiende a `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE` (antes sólo `REGISTRAR`) -- para que este mismo caso, en el futuro, se autocorrija en el momento de la confirmación, sin necesitar otro bloque de cierre.
+
+**Tests nuevos** (`tests/test_revalidacion_patente_r362.py`, +2): `test_usar_patente_existente_dispara_revalidacion_via_ledger` (reproduce 464265 exacto) y `test_no_registrar_sigue_sin_disparar_revalidacion_ni_falsamente_resolver_patente` (control negativo, reproduce 464036 -- `NO_REGISTRAR` nunca entra al índice). Suite completa: **1402 → 1404 passed, 0 failed.**
+
+### FASE 7/8 -- validación TEMP y aplicación real
+
+TEMP (copia de Drive, sólo lectura hasta confirmar): `revalidar_y_regenerar_reporte` limpia `PATENTE_SIN_HOMOLOGAR` en 464264 Y 464265 (ambas ramplas/tracto de Carlos Simón ya confirmadas); 464036 no cambia (control); **los 7 viajes siguen `REQUIERE_REVISION`** (cada uno por sus otras causas reales, independientes de este motivo); `decisiones_pendientes` sigue en 0; ningún viaje `CONFIRMADO` cambia. Coherente -- se aplicó igual sobre Drive real.
+
+**Backup:** `respaldos/CIERRE_DIA_REVALIDACION_LEDGER_ROLLBACK_PRE_APLICACION_20260819_204042/` (CSV + decisiones + ledger + estado_operación), manifiesto SHA-256, verificado byte a byte antes de escribir. **Aplicado real:** mismo resultado que TEMP, exacto -- sólo 2 de 43 filas del CSV cambiaron (únicamente el campo `motivos_revision_documento`, nada más), diff verificado explícitamente. Reporte nuevo: `reportes/reporte_revalidacion_20260820_004115_520675`, `estado_operacion.json` actualizado.
+
+**Contadores finales (reales):** 38 viajes, 31 `CONFIRMADO`, 7 `REQUIERE_REVISION` (idénticos, ahora con motivos verdaderos), 0 decisiones pendientes.
+
+**Drive:** modificado -- `analisis_completo_guias.csv` (2 filas, sólo `motivos_revision_documento`), `estado_operacion.json`, nuevo reporte. Catálogos: sin cambios. Ninguna decisión real fue resuelta a la fuerza.
+
+---
+
 ## 2026-08-19 — PRIMER CICLO OPERACIONAL DE CONFIRMACIONES: aplicación real controlada (sin cambios de código)
 
 **Rama motor:** `lector-mvp-guia-nueva`, `e58af39` -- sin cambios de código en este bloque, sólo operación real sobre Drive vía el CLI ya publicado.

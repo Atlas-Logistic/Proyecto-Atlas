@@ -4,6 +4,38 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-19/20 — INICIO RÁPIDO OFICINA — 2026-08-20
+
+**Motor:** rama `lector-mvp-guia-nueva`, HEAD tras este cierre (ver commit "cierre operacional del día" -- el commit inmediatamente posterior a `0b7a908`), publicado en `origin`.
+**Desktop:** rama `fix-desktop-data-root-drag-drop`, HEAD `93352cf` (sin cambios en este bloque), publicado en `origin`.
+
+**Drive canónico:** `G:\Mi unidad\Atlas` (o el equivalente sincronizado en el computador de oficina -- mismo mecanismo portable de siempre, `ATLAS_DATA_DIR`/autodetección, ninguna ruta de este computador es una dependencia).
+
+**Estado operacional real, verificado:** 38 viajes -- **31 confirmados, 7 en revisión real** (los 7 tienen causa verdadera, auditada una por una, ver bitácora técnica). **0 decisiones pendientes.** `estado_operacion.json` apunta a `reportes/reporte_revalidacion_20260820_004115_520675`.
+
+**Qué se terminó hoy:**
+- Javier vació la Revisión de Atlas completa desde Desktop.
+- Se auditaron, con evidencia real (no memoria), los 7 viajes que siguen en revisión -- los 7 son genuinos, ninguno es un descuido del sistema.
+- Se encontró y corrigió un motivo obsoleto real (`PATENTE_SIN_HOMOLOGAR` en 464264/464265, ya confirmadas por Javier pero no reflejado) con un fix generalizable -- no cambió el conteo de 7, pero ahora los motivos que se muestran son ciertos.
+- Aplicado sobre Drive real, con backup previo verificado byte a byte.
+
+**Qué NO repetir mañana:**
+- No volver a auditar los 7 desde cero -- ya están clasificados (4 conflictos de consolidación reales, 2 sin cliente extraído, 1 ya decidido por Javier sin sustituto). Sólo reabrir si aparece evidencia nueva.
+- No intentar "cerrar" 464036 (Ortiz) -- ya fue decidido; el gap es de modelado (falta un estado terminal "revisado, sin sustituto"), no una tarea pendiente.
+- No re-derivar `PATENTE_SIN_HOMOLOGAR` a mano -- el fix ya es automático hacia adelante (se dispara solo con `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`).
+
+**Primer bloque recomendado mañana:** dos frentes reales, a elección de Javier -- (1) los 4 conflictos de consolidación reales (0000351135, 0000352394, 0000352241, 0000352376) necesitan su criterio directo (cuál fecha/obra/cliente es la correcta entre documentos que discrepan) -- ninguno es automatizable con la evidencia actual; (2) diseñar el estado terminal que falta para casos tipo Ortiz ("revisado, error documental confirmado, sin sustituto conocido") si se quiere que ese tipo de caso deje de aparecer como "Revisar" sin ocultar que el dato es incorrecto.
+
+**Comandos mínimos de verificación en la oficina:**
+```
+cd Proyecto-Atlas && git fetch origin && git status -sb   # esperar: limpio, 0/0, HEAD de este cierre
+cd Atlas-Viajes-Desktop-Restaurado && git fetch origin && git status -sb   # esperar: limpio, 0/0, 93352cf
+py -3 -m pytest tests/ -q   # esperar: 1404 passed
+```
+Sin pasos manuales de sincronización de datos -- Drive ya está al día vía el mecanismo portable existente.
+
+---
+
 ## 2026-08-19 — Handoff vigente: primer ciclo real aplicado — 12 decisiones esperando a Javier en Desktop, aprendizaje en cero (punto de partida)
 
 - **Se aplicó, sobre Drive real, un único caso** (464036, Ortiz): `NO_REGISTRAR` con motivo estructurado `ERROR_DOCUMENTAL_MANDANTE` -- ya confirmado por Javier en una auditoría anterior. Documento original intacto.

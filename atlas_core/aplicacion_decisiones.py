@@ -658,8 +658,15 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # canónicamente una patente -- puede resolver PATENTE_SIN_HOMOLOGAR
             # en cualquier fila del dataset, no sólo en la guía de origen de
             # la decisión (misma política ya vigente para obra/destino).
+            # Bloque CIERRE OPERACIONAL D1 -- USAR_PATENTE_EXISTENTE/
+            # SELECCIONAR_OTRA_PATENTE también confirman una canónica (sin
+            # tocar el valor documental) y ahora `revalidar_patente_sin_homologar_sin_ocr`
+            # sabe reconocerlas vía el ledger -- caso real que lo motivó:
+            # 464265 (VP6521->VP8521, confirmado por Javier) seguía
+            # mostrando PATENTE_SIN_HOMOLOGAR después de confirmarse.
             if (tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR") or (
-                tipo == "VEHICULO_DESCONOCIDO" and accion == "REGISTRAR"
+                tipo == "VEHICULO_DESCONOCIDO"
+                and accion in ("REGISTRAR", "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
             ):
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
