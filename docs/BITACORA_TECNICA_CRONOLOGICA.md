@@ -4,6 +4,56 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — PRIMER RAZONAMIENTO REAL DE ATLAS IA — COMPLETADO
+
+**Partida:** rama `lector-mvp-guia-nueva`, HEAD publicado `374a07807831f292a04b7925dd7a021e82e59ad5`. Se encontró y preservó un cambio manual en `proveedor_anthropic.py`: omisión de `temperature` y lectura del body de `HTTPError`. No se tocó Desktop.
+
+### Fix definitivo del proveedor
+
+`ProveedorModeloIAAnthropic` ya no acepta ni conserva un parámetro interno `temperatura`, ni envía `temperature` a Anthropic. El body JSON de un error HTTP se conserva como diagnóstico, con límite de 4000 caracteres y saneamiento recursivo de `api_key`, `x-api-key`, `authorization` y cookies; también se reemplaza defensivamente el valor exacto de la credencial activa. Nunca se incluyen headers en la excepción. El tool-use estructurado continúa forzado. Se aclaró en el schema que `resultado_previo_del_motor_deterministico` es contexto y nunca debe copiarse como conclusión.
+
+### RUN REAL #1 — 2026-08-20 14:55 local
+
+Modelo `claude-sonnet-5`, política `atlas-ia-politica-v1`, artefacto original SHA-256 `8B504725D5D71B6C94A31CEDB29292FD5EEF5EC51508B9CDA1AF563418F7D9E3`.
+
+| Guía | Hipótesis | Validación | Ground truth / evaluación |
+|---|---|---|---|
+| 464036 | ABSTENCION | ACEPTADA | Correcta: SIN_SUSTITUTO |
+| 464265 | ABSTENCION por estructura inválida | ACEPTADA | Debía ser VP8521 |
+| 464264 | PROPUESTA JD8659 | ACEPTADA | Correcta |
+| 464698 | PROPUESTA JD8659 | ACEPTADA | Correcta |
+| 463594 | ABSTENCION | ACEPTADA | Correcta, sin evidencia |
+| 464424 | ABSTENCION | ACEPTADA | Correcta, sin evidencia |
+
+La causa exacta de 464265 no fue falta de razonamiento: el tool input devolvió `resultado="SUGERENCIA_HUMANA"`, fuera del enum `PROPUESTA/ABSTENCION/REQUIERE_HERRAMIENTA`; el adaptador lo degradó de forma segura. Por eso el RUN #1 no contiene explicación, evidencia usada, confianza ni solicitud de herramienta de Claude para ese caso.
+
+### Evidencia conectada
+
+El Motor ya retenía en cada candidato las guías que respaldaban el valor, pero el adaptador A1 las descartaba y sólo exponía el conteo agregado. `evaluar_evidencia_patente` ahora publica `referencias_fuente` con guía, transporte y relación de evento; `EvidenciaIA` las preserva y el proveedor las entrega al modelo. El mecanismo es genérico y reutilizable para documentos/eventos relacionados de vehículos, cliente, obra, fecha u otros campos. Para 464265: guía 464264, mismo transporte `0000351135`; guías 464698/699/700, transporte independiente `0000352376`. El valor `VP8521` ya pertenecía a evidencia real; nunca se inyectó el ground truth.
+
+### RUN REAL #2 — 2026-08-20 15:03 local
+
+Artefacto SHA-256 `B9E629885FC20A4B7EB8DD1A178987944127F9886CC122075343830F45AEB382`.
+
+| Guía | Hipótesis | Confianza | Resultado |
+|---|---|---:|---|
+| 464036 | ABSTENCION | 0.35 | Correcta, sin regresión |
+| 464265 | PROPUESTA VP8521 | 0.62 | Correcta, mejoró |
+| 464264 | PROPUESTA JD8659 | 0.72 | Correcta, sin regresión |
+| 464698 | PROPUESTA JD8659 | 0.75 | Correcta, sin regresión |
+| 463594 | ABSTENCION | 0.20 | Correcta, sin regresión |
+| 464424 | ABSTENCION | 0.30 | Correcta, sin regresión |
+
+No hubo propuestas incorrectas ni valores inventados. Hubo una afirmación narrativa errónea: 464265 describió las tres guías 464698/699/700 como “3 transportes independientes” aunque comparten `0000352376`; la evidencia estructurada decía correctamente `independencia=1`. Los validadores actuales controlan estructura, formato, respaldo literal y contradicción con evidencia humana, no la fidelidad de cada afirmación de la prosa.
+
+### Tests y operación
+
+Tests focales: `57 passed`. Suite completa: `1472 passed, 0 failed` (baseline 1471 + 1 regresión nueva neta). Los resultados crudos RUN #1/#2 se preservaron en archivos separados dentro del directorio deliberadamente gitignored. Cero escrituras a `viajes.csv`, ledger, catálogos, `estado_operacion.json` o Desktop. Atlas IA permanece en SHADOW.
+
+**Siguiente salto recomendado (no ejecutado):** validar o generar explicaciones auditables a partir de metadatos estructurados para impedir que la prosa multiplique documentos como si fueran eventos independientes.
+
+---
+
 ## 2026-08-20 — ATLAS IA A2: PRIMER RAZONAMIENTO CON MODELO REAL EN SHADOW -- BLOQUEADO POR CREDENCIAL AUSENTE
 
 **Rama motor:** `lector-mvp-guia-nueva`, checkpoint de partida `520081d` (local=remoto, 0/0, limpio -- ahead 2 sobre origin en ese momento, sin push aún de A1, exactamente lo que anticipaba el bloque). Commit funcional: `ea303b7`.

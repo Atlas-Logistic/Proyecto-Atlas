@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — PRIMER RAZONAMIENTO REAL DE ATLAS IA — COMPLETADO
+
+- **Claude real razonó sobre seis casos reales en SHADOW, sin cambios operacionales.** Modelo `claude-sonnet-5`, política `atlas-ia-politica-v1`; no se modificaron CSV, ledger, catálogos, estado operacional ni Desktop.
+- **RUN REAL #1 (14:55 local):** 464036 abstención correcta; 464265 degradado a abstención porque Claude copió el estado interno no válido `SUGERENCIA_HUMANA`; 464264 y 464698 propuestas correctas `JD8659`; 463594 y 464424 abstenciones correctas. Total: 2 propuestas correctas, 3 abstenciones correctas, 1 salida fuera de contrato, 0 valores inventados aceptados.
+- **Iteración mínima:** se eliminó `temperature` (deprecado por el modelo), se saneó el detalle JSON de errores HTTP y se conectaron referencias auditables de documentos/eventos relacionados que el Motor ya poseía. Para 464265 llegaron ahora la guía 464264 del mismo transporte y las guías 464698/699/700 de otro transporte; esta capacidad es genérica para evidencias de cualquier campo.
+- **RUN REAL #2 (15:03 local):** 464265 mejoró a propuesta correcta `VP8521`; los otros cinco casos conservaron el resultado esperado. Total: 3 propuestas correctas y 3 abstenciones correctas; 0 propuestas incorrectas, 0 valores inventados y 0 regresiones de resultado.
+- **Limitación observada:** en la explicación de 464265 Claude llamó erróneamente “3 transportes independientes” a tres guías que pertenecen a un solo transporte. El contexto estructurado indicaba correctamente `independencia=1`; el valor propuesto siguió siendo real y correcto. Validar afirmaciones narrativas contra metadatos estructurados es el siguiente salto recomendado, no ejecutado aquí.
+- **Regresión:** 57 tests focales y suite completa `1472 passed, 0 failed`. Los artefactos crudos RUN #1/#2 se preservaron localmente bajo `experimentos_atlas_ia/resultados/`, manteniendo su política gitignored deliberada.
+
+---
+
 ## 2026-08-20 — ATLAS IA A2: proveedor real conectado -- BLOQUEADO por falta de credencial, todo lo demás listo
 
 - **Se conectó un proveedor de IA real (Anthropic/Claude) al mismo enchufe genérico construido en A1** -- ningún cambio a los contratos ni a las barreras de seguridad ya construidas. Se preparó un lote de 6 casos reales (incluido Ortiz) con evidencia real de Atlas, listo para ejecutarse.
