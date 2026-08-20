@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — ATLAS IA GROQ FREE + GPT-OSS 120B — BENCHMARK 6/6
+
+- **Groq Free completó el mismo benchmark real de seis casos con `openai/gpt-oss-120b`:** 464036 abstención correcta; 464265 propuesta `VP8521`; 464264 y 464698 propuestas `JD8659`; 463594 y 464424 abstenciones correctas. Total: 3 propuestas correctas, 3 abstenciones correctas, 0 incorrectas, 0 bloqueos del validador.
+- **Igualó a Claude RUN #2 en decisiones.** Confianzas Groq: 0.00, 0.60, 0.90, 0.90, 0.00, 0.00. No hubo valores inventados ni afirmaciones fácticas graves; en 464036 citó `OCR_actual_XF3662` como etiqueta de evidencia usada aunque no es un identificador formal de `EvidenciaIA`, sin afectar la conclusión.
+- **Velocidad remota:** Groq reportó ~0,92–2,31 s de servicio por caso (11,06 s acumulados). Extremo a extremo fueron 2,43–20,72 s por caso (78,16 s acumulados) debido a esperas TPM automáticas del Free Plan. Claude había demorado ~44 s para el lote, por lo que Groq fue más rápido en inferencia pura pero el throttling hizo el lote completo más lento.
+- **Uso/costo observado:** 7.864 tokens de prompt + 5.028 de completion = 12.892 totales. La API no devolvió campo `cost`; la cuenta siguió en Free Plan, sin compra de créditos ni habilitación de facturación. No se afirma un saldo descontado porque Chat Completions no expuso ese dato.
+- **Integración robusta:** JSON Schema strict, todos los campos requeridos, `additionalProperties:false`, errores saneados, reasoning no persistido y reintento acotado respetando 429. El primer 403 se resolvió agregando `User-Agent`; un 429 TPM se trató como limitación técnica, no como fallo cognitivo.
+- **Recomendación B:** Groq/GPT-OSS 120B como IA primaria gratuita y Claude como fallback ante cuota, disponibilidad o casos futuros donde el modelo gratuito degrade. Atlas permanece completamente en SHADOW.
+- **Tests:** 62 focales del conjunto proveedor/shadow; suite completa `1502 passed, 0 failed`. Ollama vacío, GPU local no usada, Drive/operación/Desktop intactos.
+
+---
+
 ## 2026-08-20 — ATLAS IA REMOTA GRATUITA — OPENROUTER FREE-TIER
 
 - **Se incorporaron dos proveedores intercambiables sin alterar contratos, validadores ni SHADOW:** Ollama local y OpenRouter remoto. El trabajo Ollama interrumpido quedó preservado en un commit propio; no se volvió a ejecutar Qwen3 y `ollama ps` permaneció vacío durante las llamadas remotas.

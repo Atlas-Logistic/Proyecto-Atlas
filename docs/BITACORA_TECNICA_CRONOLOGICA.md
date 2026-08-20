@@ -4,6 +4,63 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — ATLAS IA GROQ FREE + GPT-OSS 120B — BENCHMARK REAL COMPLETO
+
+**Precheck:** rama `lector-mvp-guia-nueva`, HEAD `637fc3b`, local/remoto `0/0`, worktree limpio. `GROQ_API_KEY` presente como variable de usuario, nunca impresa. `ollama ps` vacío antes y después; inferencia totalmente remota.
+
+### Proveedor
+
+`atlas_core/atlas_ia/proveedor_groq.py`: `ProveedorModeloIAGroq`, HTTP estándar hacia `POST https://api.groq.com/openai/v1/chat/completions`, modelo por defecto `openai/gpt-oss-120b`. Mismo `ContextoRazonamiento`, política `atlas-ia-politica-v1`, `HipotesisIA`, validadores y shadow harness existentes. `response_format=json_schema`, `strict=true`; las ocho propiedades son requeridas y el objeto declara `additionalProperties:false`. `include_reasoning=false`, `reasoning_effort=medium`; no se guarda chain-of-thought.
+
+Credencial sólo en header Bearer. Errores HTTP saneados a message/type/code; identificadores, headers y key nunca se persisten. `usage.cost` o costo superior, si aparece y es distinto de cero, aborta antes de parsear/continuar. 429 con espera explícita se reintenta hasta dos veces, con espera máxima de 60 s por intento.
+
+### Correcciones técnicas previas al RUN cognitivo
+
+1. Primer Chat request: HTTP 403 sin inferencia. La misma key listó correctamente ambos modelos desde `/models`; diferencia localizada en ausencia de `User-Agent`. Agregado `Atlas-IA/1.0`.
+2. Siguiente request: HTTP 429 TPM (`Limit 8000`, espera indicada 24 s), sin respuesta cognitiva. Se implementó retry acotado conforme a la indicación de Groq. Prompt, schema, modelo, evidencia y ground truth no cambiaron.
+
+### RUN GROQ #1 preservado
+
+Artefacto gitignored: `experimentos_atlas_ia/resultados/lote_vehiculos_a2_groq_gpt_oss_120b_run1.json`; SHA-256 `4FFD233489A6AFABEAB21C2EFBD329C03EB1F0A7723969C17EA20C3671EA0BB9`.
+
+| Caso | Groq | Confianza | Atlas | Ground truth | Clasificación |
+|---|---|---:|---|---|---|
+| 464036 | ABSTENCION | 0.00 | ACEPTADA | SIN_SUSTITUTO | Abstención correcta |
+| 464265 | PROPUESTA VP8521 | 0.60 | ACEPTADA | VP8521 | Propuesta correcta |
+| 464264 | PROPUESTA JD8659 | 0.90 | ACEPTADA | JD8659 | Propuesta correcta |
+| 464698 | PROPUESTA JD8659 | 0.90 | ACEPTADA | JD8659 | Propuesta correcta |
+| 463594 | ABSTENCION | 0.00 | ACEPTADA | sin evidencia | Abstención correcta |
+| 464424 | ABSTENCION | 0.00 | ACEPTADA | sin evidencia | Abstención correcta |
+
+**Resultado:** 3 propuestas correctas + 3 abstenciones correctas; 0 propuestas incorrectas, 0 abstenciones conservadoras, 0 inválidas y 0 bloqueadas. Igualdad exacta de decisiones con Claude RUN #2.
+
+| Caso | Claude RUN #2 | Groq GPT-OSS 120B | Ground truth | Ganador |
+|---|---|---|---|---|
+| 464036 | ABSTENCION | ABSTENCION | SIN_SUSTITUTO | Empate |
+| 464265 | VP8521 | VP8521 | VP8521 | Empate |
+| 464264 | JD8659 | JD8659 | JD8659 | Empate |
+| 464698 | JD8659 | JD8659 | JD8659 | Empate |
+| 463594 | ABSTENCION | ABSTENCION | sin evidencia | Empate |
+| 464424 | ABSTENCION | ABSTENCION | sin evidencia | Empate |
+
+### Calidad narrativa
+
+No se detectaron conteos falsos de independencia como en Claude RUN #2. Las explicaciones distinguieron OCR, evidencia histórica y decisión humana. Imperfección menor: 464036 incluyó `OCR_actual_XF3662` en `evidencia_usada`, etiqueta descriptiva que no corresponde a un ID formal; 463594 usó `valor_documental_observado` del mismo modo. Los valores y conclusiones siguieron totalmente respaldados.
+
+### Latencia, uso y costo
+
+Groq usage: 7.864 prompt + 5.028 completion = 12.892 tokens. Tiempo `usage.total_time`: 11,06 s acumulados (0,92–2,31 s/caso). Tiempo extremo a extremo medido por Atlas: 78,16 s (2,43–20,72 s/caso), incluyendo esperas TPM. La corrida Claude previa tardó ~44,2 s para seis casos: Groq fue mucho más veloz procesando, pero la cuota gratuita aumentó el wall time del lote.
+
+La respuesta Groq no incluyó `cost` ni otro cargo monetario. La cuenta permaneció Free Plan; no se compraron créditos, no se habilitó Developer Plan ni facturación. La API de Chat no expuso saldo, por lo que no se afirma una verificación contable fuera de esos hechos.
+
+### Tests y operación
+
+10 tests focales nuevos Groq: credencial, endpoint/schema strict, normalización, usage sin costo inventado, costo no cero, saneamiento, timeout/conexión, JSON inválido y retry 429. Conjunto focal proveedor/shadow: 62 passed. Suite completa `1502 passed, 0 failed` (baseline 1492 + 10). Cero escrituras a viajes, dataset, ledger, decisiones, catálogos, estado operacional o Desktop. Commit funcional: `a8fc6c7`.
+
+**Conclusión:** GPT-OSS 120B vía Groq Free es **SÍ** suficiente cognitivamente para ser primario en este benchmark. Recomendación operacional **B: Groq primario + Claude fallback**, por TPM/disponibilidad del Free Plan. No se ejecutó el siguiente salto.
+
+---
+
 ## 2026-08-20 — ATLAS IA REMOTA GRATUITA — OPENROUTER FREE-TIER
 
 **Precheck:** rama `lector-mvp-guia-nueva`, HEAD inicial `57d3b0d`, local/remoto `0/0`. Cambios pendientes encontrados: `proveedor_ollama.py`, sus tests y selector del runner. Se preservaron sin reactivar el modelo local. `ollama ps` vacío antes, durante y después del experimento remoto.
