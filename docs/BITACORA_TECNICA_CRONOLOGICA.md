@@ -4,6 +4,53 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — ATLAS IA REMOTA GRATUITA — OPENROUTER FREE-TIER
+
+**Precheck:** rama `lector-mvp-guia-nueva`, HEAD inicial `57d3b0d`, local/remoto `0/0`. Cambios pendientes encontrados: `proveedor_ollama.py`, sus tests y selector del runner. Se preservaron sin reactivar el modelo local. `ollama ps` vacío antes, durante y después del experimento remoto.
+
+### Proveedor Ollama preservado
+
+`ProveedorModeloIAOllama` usa `/api/chat`, JSON Schema nativo, sin credencial ni cloud y sin persistir thinking. El intento histórico Qwen3 4B no produjo artefactos: el primer caso excedió primero 300 s y luego 900 s con GPU al 100%; una tercera corrida fue cancelada por orden del usuario y el modelo se descargó mediante `ollama stop qwen3:4b`. No se ejecutó ninguna inferencia local en este bloque. Commit: `096119e`.
+
+### Selección OpenRouter actual
+
+Se consultó `GET https://openrouter.ai/api/v1/models?supported_parameters=structured_outputs&sort=intelligence-high-to-low` con la credencial de usuario, nunca impresa. Filtro: sufijo `:free`, `pricing.prompt=0`, `pricing.completion=0` y `structured_outputs` declarado. Primer modelo: `z-ai/glm-5.2:free`; segundo y último: `nvidia/nemotron-3-super-120b-a12b:free`. Ambos declaraban además `response_format`, tools y razonamiento.
+
+### Implementación
+
+`ProveedorModeloIAOpenRouter` llama por HTTP directo a `POST https://openrouter.ai/api/v1/chat/completions`. Envía la misma política y el mismo `ContextoRazonamiento` del RUN Claude #2, con `response_format.type=json_schema`, `strict=true`, `provider.require_parameters=true`, `provider.max_price.prompt/completion=0`, `include_reasoning=false` y temperatura cero. Exige slug `:free`; normaliza a `HipotesisIA`; valida el costo antes de interpretar el contenido y aborta ante cualquier `usage.cost != 0`. Los errores HTTP se reducen a código, proveedor y retry seguro: nunca key, headers, user id ni body completo. Commit: `1d068a3`.
+
+### Ejecución real
+
+| Intento | Modelo | Caso alcanzado | Resultado | Latencia observada | Costo auditable |
+|---|---|---|---|---:|---:|
+| OPENROUTER RUN #1 | `z-ai/glm-5.2:free` | 464036 | HTTP 429 upstream, pool Decart | ~1 s | sin uso |
+| Reintento disponibilidad | `z-ai/glm-5.2:free` | 464036 | HTTP 429 upstream nuevamente | ~1 s | sin uso |
+| Segundo modelo (máximo autorizado) | `nvidia/nemotron-3-super-120b-a12b:free` | 464036 | respuesta JSON inválida; bloqueada antes de `HipotesisIA` | ~11 s extremo a extremo | no preservado en artefacto |
+
+No se modificó prompt, schema, evidencia ni ground truth entre modelos. No hubo propuesta, abstención, valor inventado ni hipótesis aceptada: ninguno superó estabilidad/transporte para completar el primer caso. El proveedor actual ya inspecciona `usage.cost` antes del parser; durante esta corrida, la versión inicial llegaba al parser primero, por lo que no corresponde afirmar un costo reportado para la respuesta Nemotron malformada. El precio de catálogo de ambos modelos sí era cero.
+
+### Comparación posible
+
+| Caso | Claude RUN #2 | OpenRouter free | Ground truth | Resultado |
+|---|---|---|---|---|
+| 464036 | ABSTENCION correcta | sin hipótesis: GLM 429 / Nemotron inválida | SIN_SUSTITUTO | Claude gana |
+| 464265 | VP8521 correcta | no ejecutado | VP8521 | no comparable |
+| 464264 | JD8659 correcta | no ejecutado | JD8659 | no comparable |
+| 464698 | JD8659 correcta | no ejecutado | JD8659 | no comparable |
+| 463594 | ABSTENCION correcta | no ejecutado | sin evidencia | no comparable |
+| 464424 | ABSTENCION correcta | no ejecutado | sin evidencia | no comparable |
+
+**Clasificación:** Claude 6/6 resultados apropiados; GLM 0 respuestas válidas (disponibilidad); Nemotron 0 respuestas válidas (estructura). OpenRouter free actual: **NO** puede ser IA primaria de Atlas con esta evidencia.
+
+### Tests, hardware y operación
+
+47 tests focales proveedor/shadow; suite completa `1492 passed, 0 failed` (baseline 1472 + 9 Ollama + 11 OpenRouter). Suite sin red, Ollama ni credenciales. Durante OpenRouter no hubo modelo Ollama cargado ni inferencia GPU local. Cero escrituras a dataset, viajes, ledger, decisiones, catálogos, estado operacional o Desktop. No se generaron resultados crudos completos porque ningún lote llegó al punto de persistencia.
+
+**Recomendación:** C — probar otra API/free-tier antes de decidir. No ejecutado en este bloque.
+
+---
+
 ## 2026-08-20 — PRIMER RAZONAMIENTO REAL DE ATLAS IA — COMPLETADO
 
 **Partida:** rama `lector-mvp-guia-nueva`, HEAD publicado `374a07807831f292a04b7925dd7a021e82e59ad5`. Se encontró y preservó un cambio manual en `proveedor_anthropic.py`: omisión de `temperature` y lectura del body de `HTTPError`. No se tocó Desktop.

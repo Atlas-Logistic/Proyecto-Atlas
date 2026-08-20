@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — ATLAS IA REMOTA GRATUITA — OPENROUTER FREE-TIER
+
+- **Se incorporaron dos proveedores intercambiables sin alterar contratos, validadores ni SHADOW:** Ollama local y OpenRouter remoto. El trabajo Ollama interrumpido quedó preservado en un commit propio; no se volvió a ejecutar Qwen3 y `ollama ps` permaneció vacío durante las llamadas remotas.
+- **Catálogo OpenRouter consultado en tiempo real:** se eligieron como máximo dos slugs explícitos `:free`, con entrada/salida a precio cero y structured outputs declarado. `z-ai/glm-5.2:free` fue el mejor listado por inteligencia; `nvidia/nemotron-3-super-120b-a12b:free`, el segundo.
+- **Resultado honesto:** GLM 5.2 devolvió dos `HTTP 429` consecutivos del pool compartido antes de inferir. Nemotron respondió en aproximadamente 11 segundos, pero entregó JSON inválido pese al schema estricto; Atlas lo bloqueó antes de crear una hipótesis. Ninguno completó el primer caso 464036, por lo que no existe una tabla cognitiva de seis casos que comparar con Claude.
+- **Costo:** el catálogo indicó USD 0 para input/output de ambos slugs. Los 429 no produjeron uso. La respuesta malformada no quedó convertida en artefacto de uso, por lo que su `usage.cost` no puede afirmarse desde el resultado preservado; futuras respuestas se detienen automáticamente si reportan costo distinto de cero.
+- **Conclusión:** estos endpoints free-tier no son hoy una IA primaria confiable para Atlas. Recomendación **C: probar otro free-tier/API antes de decidir**; Claude conserva el único benchmark completo y correcto (3 propuestas + 3 abstenciones).
+- **Seguridad y regresión:** schema estricto, precio máximo cero, slug `:free` obligatorio, credencial saneada, thinking no persistido y 47 tests focales. Suite completa: `1492 passed, 0 failed`. Cero cambios en Drive, operación o Desktop; cero carga de GPU local para OpenRouter.
+
+---
+
 ## 2026-08-20 — PRIMER RAZONAMIENTO REAL DE ATLAS IA — COMPLETADO
 
 - **Claude real razonó sobre seis casos reales en SHADOW, sin cambios operacionales.** Modelo `claude-sonnet-5`, política `atlas-ia-politica-v1`; no se modificaron CSV, ledger, catálogos, estado operacional ni Desktop.
