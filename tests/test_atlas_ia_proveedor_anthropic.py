@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import socket
+from io import BytesIO
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -100,7 +101,7 @@ def test_solicitud_incluye_politica_de_sistema_y_fuerza_la_herramienta():
     cuerpo = json.loads(solicitud.data)
     assert "Razona únicamente con la evidencia entregada" in cuerpo["system"]
     assert cuerpo["tool_choice"] == {"type": "tool", "name": "reportar_hipotesis"}
-    assert cuerpo["temperature"] == 0.0
+    assert "temperature" not in cuerpo
 
 
 def test_mensaje_al_modelo_nunca_incluye_ground_truth():
@@ -236,6 +237,30 @@ def test_http_error_se_traduce_a_proveedor_no_disponible():
     proveedor = ProveedorModeloIAAnthropic(api_key=CLAVE_DE_PRUEBA, transporte=fallar)
     with pytest.raises(ProveedorIANoDisponible):
         proveedor.razonar(_contexto())
+
+
+def test_http_error_json_entrega_detalle_util_sin_exponer_credencial():
+    cuerpo = json.dumps({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "temperature is deprecated",
+            "api_key": CLAVE_DE_PRUEBA,
+        },
+    }).encode("utf-8")
+
+    def fallar(*_):
+        raise HTTPError("url", 400, "bad request", {}, BytesIO(cuerpo))
+
+    proveedor = ProveedorModeloIAAnthropic(api_key=CLAVE_DE_PRUEBA, transporte=fallar)
+    with pytest.raises(ProveedorIANoDisponible) as excinfo:
+        proveedor.razonar(_contexto())
+
+    mensaje = str(excinfo.value)
+    assert "HTTP 400" in mensaje
+    assert "temperature is deprecated" in mensaje
+    assert CLAVE_DE_PRUEBA not in mensaje
+    assert "[REDACTADO]" in mensaje
 
 
 def test_respuesta_no_json_se_traduce_a_proveedor_no_disponible():

@@ -51,6 +51,10 @@ def evidencias_ia_desde_candidatos_vehiculo(
     for candidato in candidatos:
         evidencias_codigos = tuple(candidato.get("evidencias") or ())
         tipo_fuente = _tipo_fuente_desde_evidencias(evidencias_codigos)
+        referencias_fuente = tuple(
+            "guia={numero_guia};transporte={numero_transporte};relacion={relacion_evento}".format(**referencia)
+            for referencia in (candidato.get("referencias_fuente") or ())
+        )
         resultado.append(EvidenciaIA(
             identificador=str(candidato.get("vehiculo_id", "")),
             campo=campo,
@@ -62,6 +66,7 @@ def evidencias_ia_desde_candidatos_vehiculo(
             independencia=int(candidato.get("transportes_independientes", 0) or 0),
             es_decision_humana=(tipo_fuente == "DECISION_HUMANA"),
             procedencia=_PROCEDENCIA_MOTOR_VEHICULOS,
+            referencias_fuente=referencias_fuente,
         ))
     return tuple(resultado)
 

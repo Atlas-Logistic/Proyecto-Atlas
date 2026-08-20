@@ -374,6 +374,18 @@ def evaluar_evidencia_patente(
         independientes = {t for t in transportes if t and t != numero_transporte_actual}
         n_independientes = len(independientes)
         guias = sorted({g for grupo in transportes.values() for g in grupo})
+        referencias_fuente = [
+            {
+                "numero_guia": guia,
+                "numero_transporte": transporte,
+                "relacion_evento": (
+                    "MISMO_TRANSPORTE" if transporte == numero_transporte_actual
+                    else "TRANSPORTE_INDEPENDIENTE"
+                ),
+            }
+            for transporte, guias_transporte in sorted(transportes.items())
+            for guia in sorted(guias_transporte)
+        ]
 
         evidencias: list[str] = ["RUT_CHOFER_COINCIDE", "TIPO_COMPATIBLE"]
         conflictos: list[str] = ["OCR_ACTUAL_DIFIERE"]
@@ -400,6 +412,7 @@ def evaluar_evidencia_patente(
             "patente": patente, "vehiculo_id": vehiculo.vehiculo_id, "tipo_vehiculo": vehiculo.tipo,
             "nivel": nivel, "evidencias": tuple(evidencias), "conflictos": tuple(conflictos),
             "guias": guias, "transportes_independientes": n_independientes,
+            "referencias_fuente": referencias_fuente,
             "razon_legible": _razon_legible_candidato(
                 patente=patente, evidencias=tuple(evidencias), conflictos=tuple(conflictos), valor_documental=valor_documental,
             ),

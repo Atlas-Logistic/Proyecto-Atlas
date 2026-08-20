@@ -64,6 +64,7 @@ class EvidenciaIA:
     independencia: int = 0  # transportes/eventos independientes, si el Motor lo calculó
     es_decision_humana: bool = False  # True sólo si, trazablemente, viene del ledger
     procedencia: str = ""  # qué función/módulo determinista la produjo
+    referencias_fuente: tuple[str, ...] = ()  # referencias auditables (documento/evento), sin semántica de dominio
 
     def __post_init__(self) -> None:
         if self.tipo_fuente not in TIPOS_FUENTE_IA:
@@ -77,7 +78,7 @@ class EvidenciaIA:
             "tipo_fuente": self.tipo_fuente, "nivel": self.nivel,
             "a_favor": list(self.a_favor), "en_contra": list(self.en_contra),
             "independencia": self.independencia, "es_decision_humana": self.es_decision_humana,
-            "procedencia": self.procedencia,
+            "procedencia": self.procedencia, "referencias_fuente": list(self.referencias_fuente),
         }
 
 

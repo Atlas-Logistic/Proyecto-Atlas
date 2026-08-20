@@ -95,6 +95,9 @@ def test_t9_adaptador_convierte_resultado_real_a_contexto(tmp_path):
     # nada se oculta: la cantidad de evidencias del contexto coincide con
     # la cantidad de candidatos que el Motor determinista reunió.
     assert len(contexto.evidencias) == len(resultado["candidatos"])
+    assert contexto.evidencias[0].referencias_fuente == (
+        "guia=2;transporte=T-2;relacion=TRANSPORTE_INDEPENDIENTE",
+    )
     # el candidato es circunstancial (sin confirmación humana) -- nunca se
     # reclasifica aquí como DECISION_HUMANA.
     assert all(not e.es_decision_humana for e in contexto.evidencias)
