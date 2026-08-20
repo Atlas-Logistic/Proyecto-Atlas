@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — ATLAS IA B1 — ASISTENCIA OPERACIONAL MULTICAMPO
+
+- **Atlas IA dejó de estar limitada a patentes:** el contrato compatible ahora transporta identidad documental/operacional, evidencia, resultado previo, herramientas y restricciones; el orquestador reusable cubre patente, chofer/RUT, cliente/RUT, obra/destino, fecha y cualquier campo que el Motor genérico represente limpiamente.
+- **Separación preservada:** el Motor determinista sigue resolviendo lo inequívoco; sólo los problemas restantes llegan a Groq. La IA devuelve propuesta, abstención o solicitud de evidencia; nunca escribe CSV, catálogos, ledger ni decisiones. El valor documental original permanece intacto.
+- **Tool/evidence calling mínimo real:** `DOCUMENTOS_RELACIONADOS` consulta otras guías del mismo transporte, aporta evidencia débil/no independiente y permite una segunda pasada. Límite absoluto de dos rondas, sin framework agente ni loops.
+- **Seguridad multicampo:** valor fuera de evidencia, contradicción humana, contexto incorrecto o formato inválido de patente/RUT/fecha se bloquean. Caída, timeout, 429 o cuota Groq se convierten en `ERROR_PROVEEDOR` clase D; Atlas determinista continúa operativo.
+- **Muestra real vigente, read-only, Groq `openai/gpt-oss-120b`:** 6 problemas (2 patente, 1 fecha, 1 cliente, 2 obra/destino). Resultado: **A=0, B=1, C=5, D=0**. La propuesta B fue `VP8521` para 464265; Ortiz y los conflictos documentales se abstuvieron correctamente. Fecha pidió documentos relacionados y agotó las dos rondas sin inventar una resolución. **0 intervenciones evitables todavía**, porque B1 no autoriza escrituras y no apareció evidencia fuerte nueva. **0 incidencias documentales propuestas por el modelo** en esta muestra.
+- **Ruta mínima al primer ingreso — bloqueadores para cobrar (máximo 5):** (1) contrato operativo de entrada/salida y alcance por transportista; (2) configuración aislada mínima de catálogos/reglas del segundo cliente sin construir SaaS multiempresa; (3) lote piloto real con criterios de aceptación y ground truth revisado por Javier; (4) reporte profesional entregable de viajes/incidencias más checklist de control de calidad; (5) procedimiento operativo de excepciones, respaldo y trazabilidad de correcciones. **Mejoras posteriores:** autoservicio, Mobile, UI nueva, cloud y multiempresa completa.
+- **Validación:** 11 pruebas focales B1 dentro de 22 pruebas IA focales; suite completa **1513 passed, 0 failed**. Drive operacional y Desktop no se modificaron. Artefacto real únicamente en `experimentos_atlas_ia/resultados/` (gitignored). Commit funcional `8e0f2cf`.
+
+---
+
 ## 2026-08-20 — ATLAS IA GROQ FREE + GPT-OSS 120B — BENCHMARK 6/6
 
 - **Groq Free completó el mismo benchmark real de seis casos con `openai/gpt-oss-120b`:** 464036 abstención correcta; 464265 propuesta `VP8521`; 464264 y 464698 propuestas `JD8659`; 463594 y 464424 abstenciones correctas. Total: 3 propuestas correctas, 3 abstenciones correctas, 0 incorrectas, 0 bloqueos del validador.

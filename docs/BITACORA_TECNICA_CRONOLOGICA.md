@@ -1,5 +1,36 @@
 # Bitácora Técnica Cronológica — Proyecto Atlas
 
+## 2026-08-20 — ATLAS IA B1 — ORQUESTADOR MULTICAMPO + MUESTRA REAL
+
+Checkpoint inicial: rama `lector-mvp-guia-nueva`, HEAD `06328b689b...`, origin 0/0 y árbol limpio. No se abrió Desktop, Mobile, SaaS, cloud ni otro benchmark.
+
+**Arquitectura.** `ContextoRazonamiento` se extendió de forma compatible con identidad documental/operacional, herramientas y restricciones. `contexto_desde_resultado_evidencia` adapta el `ResultadoEvidencia` genérico sin modificar contratos productivos. Los proveedores reciben el mismo contexto; Groq/GPT-OSS 120B sigue primario. `OrquestadorAtlasIA` omite IA si el Motor ya resolvió, permite una herramienta y segunda pasada, valida y devuelve los seis estados B1. A sólo queda identificada; nunca aplica cambios.
+
+**Routing real.** Vehículo: desconocido/patente ambigua y catálogo-historial-ledger. Chofer/RUT: ausente, sin corroborar o conflicto. Cliente/RUT: ausente, sin corroborar o conflicto, con catálogos/relaciones. Obra/destino: ausente, sin corroborar o conflicto. Fecha: ausente, sin corroborar o conflicto. El Motor conserva prioridad y no existe arquitectura separada por campo.
+
+**Herramienta.** `DOCUMENTOS_RELACIONADOS` busca el mismo campo en otras guías del transporte, read-only, conserva referencias y marca la evidencia `DOCUMENTAL_DEBIL`, `independencia=0`. Máximo dos rondas.
+
+**Validación.** Barreras universales: contexto exacto, propuesta contenida en evidencia y no contradicción humana. Se reutilizan `_patente_valida`, `normalizar_rut_cliente` y `validar_fecha`; no se inventaron reglas de cliente/chofer/obra. Error, timeout, 429 o cuota del proveedor retorna D controlado y el Motor sigue operativo. La bandera de incidencia documental conserva separada la calidad física/OCR.
+
+**Muestra real read-only.** El runner copia dataset/catálogo a TEMP y lee el reporte vigente. Seleccionó sólo casos presentes: 464036/464265 (patente), 0000351135 (fecha y obra) y 0000352376 (cliente y obra). No había conflicto real de chofer/RUT; no se fabricó. Groq se cargó desde variable de usuario sólo en memoria. Ollama no se inició; GPU local no usada.
+
+| Caso | Motor previo | IA | Clase | Rondas/herramienta | Confianza |
+|---|---|---|---|---|---:|
+| 464036 patente_tracto | SUGERENCIA_HUMANA | abstención | C | 1 / — | 0.00 |
+| 464265 patente_tracto | SUGERENCIA_HUMANA | propone VP8521 | B | 1 / — | 0.60 |
+| 0000351135 fecha | contradicción documental | requiere evidencia | C | 2 / DOCUMENTOS_RELACIONADOS | 0.00 |
+| 0000351135 obra_destino | contradicción documental | abstención | C | 1 / — | 0.00 |
+| 0000352376 cliente | contradicción documental | abstención | C | 1 / — | 0.00 |
+| 0000352376 obra_destino | contradicción documental | abstención | C | 1 / — | 0.00 |
+
+Totales: **A=0, B=1, C=5, D=0**; 0 valores inventados, 0 bloqueos, 0 incidencias propuestas y 0 intervenciones evitables en B1. Ground truth no se entregó ni inventó. Artefacto gitignored: `experimentos_atlas_ia/resultados/muestra_multicampo_b1_groq.json`.
+
+**Pruebas/seguridad.** Routing, A/B/C/D, herramienta read-only, segunda ronda, límite, abstención, caída Groq, valor inventado y formatos patente/RUT/fecha. Focal IA: **22 passed**. Suite completa: **1513 passed, 0 failed**. Drive, operación, catálogos, decisiones, estado y Desktop intactos. Commit funcional `8e0f2cf`.
+
+**Ruta mínima a servicio operado:** contrato de entrada/salida; configuración aislada mínima del segundo cliente; piloto real con aceptación; reporte profesional/checklist QA; procedimiento de excepciones/respaldo/trazabilidad. Mobile, SaaS, cloud, UI y multiempresa completa son posteriores. Siguiente bloque: piloto de segunda transportista, no otro benchmark.
+
+---
+
 Registro técnico, en orden cronológico, de cambios de código sobre el lector de guías. Un bloque por entrada, con archivos modificados, decisión de diseño y validación.
 
 ---
