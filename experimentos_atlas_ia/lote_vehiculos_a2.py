@@ -45,6 +45,7 @@ from atlas_core.atlas_ia.proveedor import ProveedorModeloIA
 from atlas_core.atlas_ia.proveedor_anthropic import ErrorProveedorModeloIA, ProveedorModeloIAAnthropic
 from atlas_core.atlas_ia.proveedor_ollama import ProveedorModeloIAOllama
 from atlas_core.atlas_ia.proveedor_openrouter import ProveedorModeloIAOpenRouter
+from atlas_core.atlas_ia.proveedor_groq import ProveedorModeloIAGroq
 from atlas_core.atlas_ia.shadow import ejecutar_shadow
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
 from atlas_core.decisiones_pendientes import evaluar_evidencia_patente
@@ -198,7 +199,7 @@ def ejecutar_experimento(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark real Atlas IA en SHADOW")
-    parser.add_argument("--proveedor", choices=("anthropic", "ollama", "openrouter"), default="anthropic")
+    parser.add_argument("--proveedor", choices=("anthropic", "ollama", "openrouter", "groq"), default="anthropic")
     parser.add_argument("--modelo", default=None)
     parser.add_argument("--salida", type=Path, default=None)
     args = parser.parse_args()
@@ -209,6 +210,9 @@ def main() -> int:
     elif args.proveedor == "openrouter":
         proveedor = ProveedorModeloIAOpenRouter(modelo=args.modelo or "z-ai/glm-5.2:free")
         ruta_salida = args.salida or (RUTA_RESULTADOS / "lote_vehiculos_a2_openrouter_glm_5_2_free.json")
+    elif args.proveedor == "groq":
+        proveedor = ProveedorModeloIAGroq(modelo=args.modelo or "openai/gpt-oss-120b")
+        ruta_salida = args.salida or (RUTA_RESULTADOS / "lote_vehiculos_a2_groq_gpt_oss_120b.json")
     else:
         proveedor = ProveedorModeloIAAnthropic(modelo=args.modelo or "claude-sonnet-5")
         ruta_salida = args.salida
