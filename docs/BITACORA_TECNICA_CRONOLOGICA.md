@@ -4,6 +4,69 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — G1 CIERRE OPERACIONAL: aplicación controlada sobre operación real
+
+**Rama motor:** `lector-mvp-guia-nueva`, `65877202e20bce6b0bebfd4c7aa95a2edaf1e300` (fix G1 `c1359d1` + bitácoras `6587720`, ya publicados en origin, `local=remoto`, `0/0`, limpio). **Desktop:** `fix-desktop-data-root-drag-drop`, `93352cf`, sin cambios.
+
+### FASE 0 -- checkpoint
+
+Motor y Desktop verificados 0/0, limpios, coincidentes con lo esperado. Sin desviaciones -- se procedió.
+
+### FASE 1/2 -- operación vigente y snapshot ANTES
+
+Manifiesto: `operacion/actual/estado_operacion.json` → reporte vigente `reportes/reporte_revalidacion_20260820_004115_520675`. Snapshot capturado antes de escribir: hashes de `viajes.csv` (`ac25fe65...`), `analisis_completo_guias.csv` (`c47e8943...`), `decisiones_aplicadas.json` (`cf050c24...`), `decisiones_pendientes.json` (`dd087750...`), `estado_operacion.json` (`954c1409...`); copia completa de `viajes.csv` y `manifest_reporte_viajes.json`; detalle completo del viaje `0000351135` (2 documentos, `patentes_tracto: VP6521 | VP8521`, `patentes_rampla: JD0659 | JD6659`, motivos incluyendo `CONFLICTO_PATENTE_TRACTO`/`CONFLICTO_PATENTE_RAMPLA`).
+
+### FASE 3 -- respaldo
+
+`respaldos/G1_PRE_APLICACION_REAL_20260820_110231/` -- `analisis_completo_guias.csv`, `decisiones_aplicadas.json`, `decisiones_pendientes.json`, `estado_operacion.json`. Verificado byte a byte (hashes idénticos al snapshot). Ningún respaldo anterior tocado.
+
+### FASE 4 -- hallazgo sobre el mecanismo canónico (antes de ejecutar nada)
+
+Dry-run de `revalidar_y_regenerar_reporte` contra una copia de control: `guias_actualizadas` vacío en ambas pasadas (`obra_destino` y `patente`) -- `PATENTE_SIN_HOMOLOGAR` ya se había limpiado ayer, así que ninguna pasada de revalidación de motivos encuentra nada que cambiar hoy. Resultado: `reporte_regenerado: False` -- ese mecanismo habría sido un no-op silencioso, porque su compuerta sólo regenera cuando un motivo documental cambia, y el efecto de G1 vive en consolidación (patentes operacionales), no en motivos. **Se usó en su lugar `generar_reporte_viajes.py`** (CLI ya publicado, ahora consciente del ledger por el wiring de G1), que regenera incondicionalmente y no ejecuta las pasadas de revalidación de motivos -- evita además cualquier cambio fuera del alcance de G1 (p. ej. `OBRA_DESTINO_SIN_CORROBORAR`).
+
+### FASE 5 -- regeneración real
+
+```
+python generar_reporte_viajes.py \
+  "G:/Mi unidad/Atlas/operacion/actual/analisis_completo_guias.csv" \
+  "G:/Mi unidad/Atlas/reportes/reporte_revalidacion_20260820_150518_051875" \
+  --catalogos "G:/Mi unidad/Atlas/catalogos_privados"
+```
+
+Salida: 43 filas leídas, 38 viajes, 31 confirmados, 7 en revisión, 0 sin transporte -- totales idénticos al reporte anterior. `estado_operacion.json` actualizado automáticamente (mecanismo portable ya existente) apuntando al nuevo reporte.
+
+### FASE 6 -- validación del caso real
+
+`0000351135`: `patentes_tracto` → `VP8521` (antes `VP6521 | VP8521`); `patentes_rampla` → `JD8659` (antes `JD0659 | JD6659`); `motivos_revision` → `CONFLICTO_FECHA | CONFLICTO_OBRA_DESTINO | DOCUMENTO_REQUIERE_REVISION` (antes incluía además `CONFLICTO_PATENTE_TRACTO | CONFLICTO_PATENTE_RAMPLA`); `estado` sigue `REQUIERE_REVISION` (correcto, no forzado). Evidencia por documento verificada intacta: `evidencias_documentos` conserva `464264 -> patente_rampla=JD6659` y `464265 -> patente_tracto=VP6521, patente_rampla=JD0659`, sin ninguna reescritura.
+
+### FASE 7 -- comparación global (38 viajes, todas las columnas)
+
+Comparación campo por campo, `viajes.csv` completo antes vs. después (excluyendo únicamente `fecha_creacion`, metadato de generación): **exactamente 1 viaje con diferencias (`0000351135`), exactamente 3 campos (`motivos_revision`, `patentes_tracto`, `patentes_rampla`)** -- los tres esperados por G1, clasificación **A** en los tres casos. Cero cambios tipo B o C. `evidencias_documentos` comparado como JSON estructurado en los 38 viajes: 0 diferencias. `viajes perdidos`/`viajes nuevos inesperados`: conjuntos vacíos en ambos casos.
+
+### FASE 8 -- invariantes
+
+43 documentos, 38 viajes, 31 `CONFIRMADO`, 7 `REQUIERE_REVISION`, 0 sin transporte, 1 cliente no reconocido -- idénticos al reporte anterior (`sha256` del dataset origen también idéntico en ambos manifiestos: `5eb4cd6980482cb3b81e11a3d96c36442264af8315f74236f519f594e26daeaa`). `decisiones_aplicadas.json`/`decisiones_pendientes.json`/`analisis_completo_guias.csv`: hash idéntico antes/después -- ninguno de los tres fue escrito por este bloque.
+
+### FASE 9 -- Desktop, sólo lectura
+
+`resolverRaizAtlas`/`leerEstadoOperacion` (código real de Desktop, sin modificar) resuelven correctamente el nuevo reporte contra el Drive real. Simulado el parseo exacto de Desktop (`partes()`, mismo separador `|`) sobre el `viajes.csv` real ya publicado: `0000351135` produce `['VP8521']`/`['JD8659']`. Ningún archivo de Desktop tocado.
+
+### FASE 10 -- repositorios
+
+Motor `65877202e20bce6b0bebfd4c7aa95a2edaf1e300`, Desktop `93352cf` -- ambos `0/0`, `working tree` limpio, sin cambios versionados generados por la regeneración operacional (que sólo escribe en Drive, fuera de ambos repos).
+
+### Drive -- archivos efectivamente modificados/creados
+
+**Creados:** `reportes/reporte_revalidacion_20260820_150518_051875/` (5 archivos: `viajes.csv`, `documentos_sin_transporte.csv`, `clientes_no_reconocidos.csv`, `resumen_viajes.md`, `manifest_reporte_viajes.json`); `respaldos/G1_PRE_APLICACION_REAL_20260820_110231/` (4 archivos). **Modificado:** `operacion/actual/estado_operacion.json` (sólo `reporte_vigente`/`fecha_actualizacion`). **Sin cambios:** `analisis_completo_guias.csv`, `decisiones_aplicadas.json`, `decisiones_pendientes.json`, catálogos, el reporte anterior (`reporte_revalidacion_20260820_004115_520675`, conservado intacto como histórico).
+
+### Veredicto
+
+**G1 CERRADO: SÍ** -- fix publicado, aplicado a operación real, caso `0000351135` verificado exacto, evidencia preservada, cero regresiones, Desktop lo resuelve sin cambios, repositorios limpios.
+
+**Pendiente, deliberadamente fuera de alcance:** G2 (464036/Ortiz), G3, `CONFLICTO_FECHA`/`CONFLICTO_OBRA_DESTINO` de `0000351135` (decisión de negocio de Javier, no de código).
+
+---
+
 ## 2026-08-20 — FIX G1: propagación end-to-end de decisiones de vehículo al valor operacional del viaje
 
 **Rama motor:** `lector-mvp-guia-nueva`, checkpoint de partida `dba4b6e` (local=remoto, 0/0, limpio). **Rama Desktop:** `fix-desktop-data-root-drag-drop`, `93352cf` (sin cambios, ver más abajo). Commit de este bloque: `c1359d1`.

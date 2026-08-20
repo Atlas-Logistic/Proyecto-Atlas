@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — G1 APLICADO A OPERACIÓN REAL: el reporte vigente ya publica las patentes que Javier confirmó
+
+- **El fix G1 de hoy ya está reflejado en la operación real, no sólo en el código.** Se regeneró el reporte vigente sobre `G:\Mi unidad\Atlas` con el Motor corregido -- el transporte `0000351135` (Carlos Simón) ya publica `VP8521` (tracto) y `JD8659` (rampla) como valores operacionales, en vez de las dos variantes documentales sin resolver.
+- **Cambio quirúrgico, verificado uno por uno:** de los 38 viajes, exactamente **uno** cambió, y sólo en los tres campos que G1 debía tocar (motivos de revisión y las dos patentes). Los otros 37 viajes -- cliente, chofer, RUT, obra, material, peso, evidencia -- quedaron byte a byte iguales. El dataset documental, el historial de decisiones y la bandeja de pendientes tampoco cambiaron.
+- **El viaje sigue en revisión, como corresponde:** `0000351135` no se marcó `CONFIRMADO` -- todavía tiene un conflicto real de fecha y de obra/destino entre sus dos guías, sin relación con G1, esperando el criterio de Javier.
+- **Nada se perdió:** las patentes documentales originales (`VP6521`, `JD0659`, `JD6659`) siguen disponibles íntegras como evidencia de cada guía.
+- **Hallazgo del propio proceso, sin impacto en el resultado:** el mecanismo que se usa normalmente tras aplicar una decisión (`revalidar_y_regenerar_reporte`) no habría regenerado nada hoy -- sólo actúa cuando encuentra un motivo documental que limpiar, y ese ya se había limpiado ayer. Se usó en su lugar el generador de reportes ya publicado, que sí construye siempre el reporte más reciente. Documentado como hallazgo técnico, no como problema a resolver en este bloque.
+- **Respaldo creado antes de escribir**, con los mismos archivos y hashes verificados antes/después.
+
+---
+
 ## 2026-08-20 — FIX G1: las decisiones de patente ya confirmadas ahora se ven en el viaje publicado
 
 - **Hallazgo de la auditoría READ-ONLY de esta mañana, corregido hoy:** cuando Javier confirmaba una patente incorrecta (tracto o rampla) desde Desktop, la decisión quedaba guardada de forma auditable pero **nunca llegaba al viaje que ve el operador** -- `viajes.csv` seguía publicando el texto documental crudo (p. ej. "JD0659 | JD6659") como si la decisión nunca hubiera ocurrido. Era un límite ya documentado explícitamente en el propio código desde el bloque anterior ("queda para un consumidor futuro del ledger") -- ese consumidor no existía todavía.
