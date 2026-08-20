@@ -4,6 +4,72 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — FIX G1: propagación end-to-end de decisiones de vehículo al valor operacional del viaje
+
+**Rama motor:** `lector-mvp-guia-nueva`, checkpoint de partida `dba4b6e` (local=remoto, 0/0, limpio). **Rama Desktop:** `fix-desktop-data-root-drag-drop`, `93352cf` (sin cambios, ver más abajo). Commit de este bloque: `c1359d1`.
+
+### Origen
+
+Hallazgo G1 de la auditoría READ-ONLY de esta mañana: `viajes.csv` seguía publicando la patente documental cruda (p. ej. `JD0659 | JD6659`) para transportes donde Javier ya había confirmado la canónica (`JD8659`) vía `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`. Caso real: transporte `0000351135`, guías 464264/464265.
+
+### Causa raíz (reconstruida antes de tocar código)
+
+`atlas_core/aplicacion_decisiones.py`, rama `VEHICULO_DESCONOCIDO` de `aplicar_decision_obra`, ya documentaba explícitamente la brecha desde que se escribió (comentario "Bloque VEHÍCULO D1"): una confirmación de patente **nunca modifica el valor documental ni escribe el CSV** -- sólo el catálogo y el ledger -- y "la operación de usar operacionalmente esa patente para el viaje queda para un consumidor futuro del ledger". Ese consumidor nunca se implementó:
+
+- `revalidar_patente_sin_homologar_sin_ocr` (bloque de ayer) ya consultaba el ledger, pero únicamente para retirar el motivo `PATENTE_SIN_HOMOLOGAR` -- nunca para corregir el valor publicado.
+- `gestor_viajes._documento_desde_fila` construía `patente_tracto`/`patente_rampla` directamente desde `fila.get(...)` (texto documental crudo), sin ningún punto de inyección -- a diferencia de `chofer`, que ya tenía `normalizador_chofer` desde antes.
+- `reporte_viajes.generar_reporte_viajes` no recibía ni conocía el ledger en absoluto.
+
+Clasificación (Paso 3 del bloque): **B+ampliado** -- el documento SÍ queda correctamente revalidado (motivo retirado), pero la consolidación seguía usando evidencia cruda porque no existía ningún mecanismo para que conociera la resolución; no es un fallo de "capa equivocada" sino de "capa faltante".
+
+### Diseño de la corrección (capa Motor, no Desktop)
+
+Desktop (`atlas_viajes.html::normalizarFila`) ya consume `patentes_tracto`/`patentes_rampla` directamente de `viajes.csv`, sin lógica de resolución propia -- confirmado por lectura del código antes de decidir dónde corregir. Corregir ahí habría significado una segunda implementación del Motor de resolución, explícitamente prohibido por el bloque. El artefacto operacional del Motor debe ser semánticamente correcto por sí solo; Desktop sólo lo presenta. **No se modificó ningún archivo de Desktop.**
+
+**Archivos modificados (Motor):**
+
+- **`atlas_core/aplicacion_decisiones.py`** -- nueva función pública `resolver_patentes_confirmadas_por_ledger(ruta_ledger)`: índice de solo lectura `(numero_guia, campo, valor_documental) -> patente_canonica`, construido únicamente desde `VEHICULO_DESCONOCIDO`/`{USAR_PATENTE_EXISTENTE, SELECCIONAR_OTRA_PATENTE}` -- nunca `NO_REGISTRAR` (G2, caso 464036 Ortiz, queda deliberadamente sin resolución operacional) ni `REGISTRAR` (ya cubierto por homologación directa). Es el mismo índice que ya existía, privado y duplicado, en `revalidacion_documental.py` -- se consolidó en un solo lugar para no tener dos implementaciones divergentes del mismo concepto. También se actualizó la rama `ORIGEN_NO_CONFIRMADO` de `aplicar_decision_obra` (que regenera el reporte incondicionalmente) para pasar `ruta_ledger=ledger_ruta` -- sin este cambio, aplicar una decisión de origen habría podido "revertir" en apariencia el fix hasta la siguiente revalidación.
+- **`atlas_core/gestor_viajes.py`** -- `_documento_desde_fila`/`agrupar_viajes` ganan un parámetro opcional `resolver_patente(numero_guia, campo, valor_documental) -> str`, mismo patrón ya usado por `normalizador_chofer`. Se aplica **antes** de construir `DocumentoViaje`, así que tanto el valor operacional (`Viaje.patentes_tracto`/`patentes_rampla`) como la detección de `CONFLICTO_PATENTE_TRACTO`/`CONFLICTO_PATENTE_RAMPLA` ven el valor ya resuelto -- un conflicto entre dos variantes documentales que resuelven a la misma canónica desaparece solo, sin lógica adicional de supresión. `evidencia` (capturada al inicio de la función, antes de resolver) sigue siendo la fila documental sin cambios -- la evidencia nunca se pierde, queda íntegra en `evidencias_documentos` de cada viaje.
+- **`atlas_core/reporte_viajes.py`** -- `generar_reporte_viajes` gana `ruta_ledger: str | Path | None = None`; construye el resolver (`_resolver_patente_desde_ledger`) y lo pasa a `agrupar_viajes`. Sin este parámetro, comportamiento 100% idéntico al de antes de este bloque.
+- **`atlas_core/revalidacion_documental.py`** -- se elimina la implementación privada duplicada (`_confirmaciones_ledger_por_guia_campo`), reemplazada por un import de la función pública consolidada; `revalidar_y_regenerar_reporte` ahora también pasa `ruta_ledger` a `generar_reporte_viajes` (antes sólo se lo pasaba a la revalidación de motivos, nunca a la generación del reporte).
+- **`generar_reporte_viajes.py`** (CLI) -- pasa `ruta_ledger=argumentos.csv.parent / LEDGER` para que una regeneración completa desde cero también quede consciente del ledger, no sólo el camino de revalidación incremental.
+
+**`analisis_completo_guias.csv` nunca se modifica** -- sigue siendo la única fuente de verdad de "qué decía el documento", junto con `evidencias_documentos` por viaje. No se tocó clasificación vehicular (`TRACTO`/`CARRO`/`CAMION_RIGIDO`), no se implementó el estado terminal de G2, no se tocó Desktop, no se regeneró el reporte real en `G:\Mi unidad\Atlas`.
+
+### Trazabilidad conservada
+
+`documento observado` (fila cruda, intacta en el CSV y en `evidencia`) → `decisión humana` (`decisiones_aplicadas.json`, sin cambios) → `valor operacional resuelto` (`DocumentoViaje.patente_tracto`/`patente_rampla`, sólo si hay decisión aplicable) → `Viaje.patentes_tracto`/`patentes_rampla` (deduplicado, consolidado) → `viajes.csv`. Las tres capas quedan simultáneamente disponibles, nunca una sustituye a la otra en el mismo artefacto.
+
+### Tests nuevos (10; suite completa 1404 → 1414 passed, 0 failed)
+
+`tests/test_gestor_viajes.py` (+6, unitarios sobre `agrupar_viajes`): valor operacional resuelto (T1), multiguía consolida sin publicar variantes y sin conflicto falso (T2, reproduce 0000351135), genérico para tracto y rampla parametrizado (T3/T4), sin decisión humana conserva el comportamiento actual (T5), no afecta cliente/chofer/obra/material (T7 parcial).
+
+`tests/test_reporte_viajes.py` (+4, integración con `generar_reporte_viajes(ruta_ledger=...)`): propagación end-to-end sin tocar el CSV de entrada, caso real `0000351135` completo (tracto + rampla, dos decisiones), sin `ruta_ledger` conserva el comportamiento anterior (T5), ledger ausente/corrupto no bloquea el reporte.
+
+### Caso real 0000351135 -- verificado, sin tocar Drive
+
+Se copiaron los artefactos reales (`analisis_completo_guias.csv`, `decisiones_aplicadas.json`, `catalogos_privados/`) a una carpeta de scratch fuera de la operación canónica; se corrió `generar_reporte_viajes` ahí, con y sin `ruta_ledger`, y se comparó:
+
+| | Sin ledger (bloque anterior) | Con ledger (este fix) |
+|---|---|---|
+| `patentes_tracto` | `VP6521 \| VP8521` | `VP8521` |
+| `patentes_rampla` | `JD0659 \| JD6659` | `JD8659` |
+| `motivos_revision` | incluye `CONFLICTO_PATENTE_TRACTO`/`CONFLICTO_PATENTE_RAMPLA` | sin esos dos -- desaparecen solos |
+| `estado` | `REQUIERE_REVISION` | `REQUIERE_REVISION` (correcto: `CONFLICTO_FECHA`/`CONFLICTO_OBRA_DESTINO` siguen abiertos, son conflictos reales no relacionados) |
+| totales (38/31/7) | idénticos | idénticos |
+
+`G:\Mi unidad\Atlas` verificado sin cambios (hash y `mtime` de `analisis_completo_guias.csv`/`decisiones_aplicadas.json`/`estado_operacion.json` idénticos antes y después; ningún reporte nuevo creado).
+
+### Desktop
+
+Sin cambios. `atlas_viajes.html:1060-1061` ya lee `patentes_tracto`/`patentes_rampla` de `viajes.csv` tal cual (`partes("patentes_tracto")`/`partes("patentes_rampla")`) -- con el Motor corregido, el operador ve el valor canónico sin ninguna modificación en Desktop. `93352cf`, `local=remoto`, `0/0`, limpio, sin tocar.
+
+### Limitación restante (fuera de alcance de este bloque, explícitamente)
+
+G2 (464036/Ortiz) sigue sin estado terminal -- `NO_REGISTRAR` nunca entra al índice de `resolver_patentes_confirmadas_por_ledger` por diseño, así que ese caso sigue en `REQUIERE_REVISION` con el mismo motivo de siempre. No se hizo push. Working tree contiene únicamente los 7 archivos de este fix.
+
+---
+
 ## 2026-08-19/20 — CIERRE OPERACIONAL DEL DÍA: auditoría de los 7 REQUIERE_REVISION + revalidación de patentes consciente del ledger
 
 **Rama motor:** `lector-mvp-guia-nueva`. **Rama Desktop:** `fix-desktop-data-root-drag-drop` (sin cambios).

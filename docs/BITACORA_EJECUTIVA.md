@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — FIX G1: las decisiones de patente ya confirmadas ahora se ven en el viaje publicado
+
+- **Hallazgo de la auditoría READ-ONLY de esta mañana, corregido hoy:** cuando Javier confirmaba una patente incorrecta (tracto o rampla) desde Desktop, la decisión quedaba guardada de forma auditable pero **nunca llegaba al viaje que ve el operador** -- `viajes.csv` seguía publicando el texto documental crudo (p. ej. "JD0659 | JD6659") como si la decisión nunca hubiera ocurrido. Era un límite ya documentado explícitamente en el propio código desde el bloque anterior ("queda para un consumidor futuro del ledger") -- ese consumidor no existía todavía.
+- **Caso real que lo expuso:** transporte `0000351135` (guías 464264/464265, Carlos Simón). Javier ya había seleccionado `JD8659` (rampla) y `VP8521` (tracto) el 19-08; el viaje seguía mostrando ambas variantes documentales sin resolver.
+- **Corregido en el Motor, no en Desktop.** Desktop ya consumía `patentes_tracto`/`patentes_rampla` directamente del reporte, sin lógica propia -- no necesitó ningún cambio. El fix vive donde corresponde: en la consolidación de viajes, que ahora consulta el historial de decisiones ya aplicadas para publicar la patente canónica como valor operacional.
+- **Nada de la evidencia original se pierde ni se reescribe.** El documento leído (`analisis_completo_guias.csv`) permanece byte a byte igual; la evidencia de cada guía sigue disponible íntegra en el propio viaje. Sólo cambia qué patente se publica como la vigente para operar.
+- **Verificado contra los datos reales de Drive, sin tocar Drive:** se generó el reporte con una copia controlada de la operación real (fuera de `G:\Mi unidad\Atlas`, nunca escrito) -- el transporte `0000351135` pasa a publicar `VP8521`/`JD8659` únicos, sin los conflictos de patente ya resueltos, conservando correctamente en revisión los dos conflictos reales que siguen sin decidir (fecha, obra/destino). El conteo de 7 viajes en revisión no cambió -- exactamente lo esperado, ya que ese caso sigue teniendo motivos legítimos pendientes por otras razones.
+- **Sigue pendiente, deliberadamente fuera de este bloque (G2):** el caso Ortiz (464036, patente rechazada como error documental del mandante) no tiene todavía un estado terminal que lo saque de "Requiere revisión" -- este fix no lo toca.
+- **Motor `1414 passed, 0 failed`** (10 tests nuevos). Nada aplicado a Drive real; commit local únicamente, sin push.
+
+---
+
 ## 2026-08-19 — CIERRE OPERACIONAL DEL DÍA: Javier vació la Revisión de Atlas; los 7 viajes que siguen en "Revisar" son todos reales
 
 - **Javier resolvió manualmente todas las decisiones pendientes** desde Desktop -- la bandeja quedó en cero. Quedaron 7 viajes (de 38) que el sistema sigue marcando "Requiere revisión". Se auditó cada uno, con evidencia, para saber por qué.
