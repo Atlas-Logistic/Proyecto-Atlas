@@ -6,7 +6,7 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ## 2026-08-19/20 — INICIO RÁPIDO OFICINA — 2026-08-20
 
-**Motor:** rama `lector-mvp-guia-nueva`, HEAD tras este cierre (ver commit "cierre operacional del día" -- el commit inmediatamente posterior a `0b7a908`), publicado en `origin`.
+**Motor:** rama `lector-mvp-guia-nueva`, HEAD `5141621` ("fix: revalidar PATENTE_SIN_HOMOLOGAR reconoce confirmaciones via ledger"), publicado en `origin`.
 **Desktop:** rama `fix-desktop-data-root-drag-drop`, HEAD `93352cf` (sin cambios en este bloque), publicado en `origin`.
 
 **Drive canónico:** `G:\Mi unidad\Atlas` (o el equivalente sincronizado en el computador de oficina -- mismo mecanismo portable de siempre, `ATLAS_DATA_DIR`/autodetección, ninguna ruta de este computador es una dependencia).
