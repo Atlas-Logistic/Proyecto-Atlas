@@ -33,3 +33,9 @@ resultado_pruebas.txt
 # INFRAESTRUCTURA S2.1: fallback local de la raíz portable cuando no hay
 # ATLAS_DATA_DIR ni Drive detectado (desarrollo/tests) -- nunca es Drive.
 .atlas_local/
+
+# ATLAS IA A2: artefactos reales de experimentos (contienen evidencia real
+# de guías -- RUT, chofer, patente) -- el runner y el formato sí se
+# versionan, los resultados de cada corrida real no.
+experimentos_atlas_ia/resultados/*
+!experimentos_atlas_ia/resultados/.gitkeep

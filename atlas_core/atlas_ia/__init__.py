@@ -20,7 +20,14 @@ from atlas_core.atlas_ia.contratos import (
     ResultadoValidacionHipotesis,
     calcular_hipotesis_id,
 )
+from atlas_core.atlas_ia.politica_prompt import POLITICA_PROMPT_SISTEMA, POLITICA_PROMPT_VERSION
 from atlas_core.atlas_ia.proveedor import ProveedorModeloIA, ProveedorModeloIASimulado, RespuestaSimulada
+from atlas_core.atlas_ia.proveedor_anthropic import (
+    CredencialProveedorIAAusente,
+    ErrorProveedorModeloIA,
+    ProveedorIANoDisponible,
+    ProveedorModeloIAAnthropic,
+)
 from atlas_core.atlas_ia.shadow import ejecutar_caso_shadow, ejecutar_shadow
 from atlas_core.atlas_ia.validadores import validar_hipotesis_vehiculo
 
@@ -28,6 +35,9 @@ __all__ = [
     "ContextoRazonamiento", "EvidenciaIA", "HipotesisIA", "ResultadoShadow",
     "ResultadoValidacionHipotesis", "calcular_hipotesis_id",
     "ProveedorModeloIA", "ProveedorModeloIASimulado", "RespuestaSimulada",
+    "ProveedorModeloIAAnthropic", "ErrorProveedorModeloIA",
+    "CredencialProveedorIAAusente", "ProveedorIANoDisponible",
+    "POLITICA_PROMPT_SISTEMA", "POLITICA_PROMPT_VERSION",
     "contexto_desde_resultado_evaluar_evidencia_patente",
     "evidencias_ia_desde_candidatos_vehiculo",
     "validar_hipotesis_vehiculo",
