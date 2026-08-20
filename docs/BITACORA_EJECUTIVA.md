@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — MOBILE M1 — CONEXIÓN REAL MOBILE → MOTOR
+
+- Se implementó `POST /api/mobile/login` y `POST /api/mobile/envios` conservando el contrato ya instalado en iPhone: Bearer token, foto, `envio_id`, timestamp, una de cinco incidencias operacionales y flag de guía firmada por correo. El chofer nunca elige guía, transporte ni viaje.
+- Cada envío queda durable e idempotente en `operacion/mobile/envios/<envio_id>/`: foto original inmutable más `envio.json`. Estados: `RECIBIDO`, `PROCESANDO`, `ASOCIADO`, `REQUIERE_REVISION`, `ERROR`. Un retry devuelve `ACEPTADO` sin duplicar.
+- La imagen pasa por `procesar_archivo`, el mismo OCR/extractor del Motor. Asociación automática sólo por coincidencia exacta de guía/transporte con la operación vigente; ante insuficiencia se abstiene y publica la excepción. Las cinco novedades son incidencias operacionales, nunca documentales.
+- Desktop incorporó dentro de Revisión de Atlas una bandeja mínima para ver foto, chofer, hora, incidencia, OCR, candidatos y motivo, y confirmar un transporte existente mediante el CLI del Motor.
+- Prueba real en TEMP con la foto 464265: recepción 0,023 s; OCR/asociación CPU 47,493 s; resultado `ASOCIADO`, guía 464265, transporte 0000351135; devolución parcial y flag correo preservados. Drive real sólo leído.
+
+---
+
 ## 2026-08-20 — ATLAS IA B1 — ASISTENCIA OPERACIONAL MULTICAMPO
 
 - **Atlas IA dejó de estar limitada a patentes:** el contrato compatible ahora transporta identidad documental/operacional, evidencia, resultado previo, herramientas y restricciones; el orquestador reusable cubre patente, chofer/RUT, cliente/RUT, obra/destino, fecha y cualquier campo que el Motor genérico represente limpiamente.

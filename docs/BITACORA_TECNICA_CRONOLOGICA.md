@@ -1,5 +1,23 @@
 # Bitácora Técnica Cronológica — Proyecto Atlas
 
+## 2026-08-20 — MOBILE M1 — API, INGESTA, OCR Y ASOCIACIÓN
+
+Precheck: Mobile `main@f8bcf6f` 0/0 limpio; Motor `lector-mvp-guia-nueva@7f39fe6` 0/0 limpio; Desktop real localizado como `Atlas-Viajes-Desktop-Restaurado`, rama `fix-desktop-data-root-drag-drop@93352cf`, 0/0 limpio.
+
+Contrato preservado: login JSON `{usuario,password}` → `{token,chofer_id}`; envío multipart Bearer con `envio_id`, `schema_version=1`, `capturado_en`, `tipo_novedad`, `guia_firmada_correo`, `imagen`; respuesta HTTP 202 `{resultado:"ACEPTADO",envio_id,estado,duplicado}`. Mobile no envía guía/viaje/transporte.
+
+`servidor_mobile.py` usa exclusivamente stdlib, soporta CORS/preflight y TLS opcional. Autenticación: credenciales administradas con PBKDF2 en `catalogos_privados/usuarios_mobile.json`; token HMAC expirado, secreto exclusivamente en `ATLAS_MOBILE_TOKEN_SECRET`. Límites: JPEG/PNG/WebP, 15 MiB, ID seguro, filename ignorado, escritura fsync+replace e idempotencia bajo lock.
+
+Zona canónica: `operacion/mobile/envios/<envio_id>/original.<ext>` + `envio.json`. La foto nunca se sustituye. El registro conserva chofer, captura/recepción, incidencia operacional, correo, hashes, OCR, asociación y error. `procesar_envio_mobile` llama al `procesar_archivo` existente; no existe OCR Mobile paralelo. Asociación determinista por guía exacta y luego transporte exacto; sólo un transporte produce `ASOCIADO_AUTOMATICAMENTE`. Sin evidencia o con ambigüedad → `REQUIERE_REVISION`. Atlas IA B1 no se invocó en la corrida real: la coincidencia fue inequívoca y B1 no agrega autoridad a documentos contradictorios.
+
+Desktop lee pendientes de esa zona, muestra foto/chofer/hora/incidencia/OCR/candidatos/motivo y llama `resolver_envio_mobile.py`. El CLI verifica que el transporte exista antes de registrar `ASOCIADO_MANUALMENTE`; el renderer no escribe archivos.
+
+Prueba real controlada, toda escritura en TEMP: imagen canónica 464265, dataset vigente copiado read-only. Resultado: recepción 0,023 s, OCR/asociación CPU 47,493 s, total 47,516 s; guía 464265, transporte 0000351135, estado `ASOCIADO`; `DEVOLUCION_PARCIAL` y correo `true` intactos. No se probó físicamente el POST desde iPhone porque requiere instalar en el teléfono la URL/certificado de esta nueva sesión; el circuito servidor→Motor sí quedó probado con HTTP focal y OCR real por separado.
+
+Arranque: crear usuario con `python crear_usuario_mobile.py --raiz-atlas <RAIZ> --usuario <USUARIO> --chofer-id <ID>`; configurar `ATLAS_MOBILE_TOKEN_SECRET`; ejecutar `python servidor_mobile.py --host 0.0.0.0 --puerto 8765 --cert <PEM> --key <PEM>`; poner `https://<IP-LAN>:8765` en `ATLAS_CONFIG.apiBaseUrl` de Mobile y confiar el certificado en el iPhone.
+
+---
+
 ## 2026-08-20 — ATLAS IA B1 — ORQUESTADOR MULTICAMPO + MUESTRA REAL
 
 Checkpoint inicial: rama `lector-mvp-guia-nueva`, HEAD `06328b689b...`, origin 0/0 y árbol limpio. No se abrió Desktop, Mobile, SaaS, cloud ni otro benchmark.
