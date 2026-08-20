@@ -9,6 +9,7 @@ proponer en `decisiones_pendientes.json` ni tocar ningún catálogo. Ver
 Motor determinista que esta capa consume -- nunca reemplaza."""
 
 from atlas_core.atlas_ia.adaptadores import (
+    contexto_desde_resultado_evidencia,
     contexto_desde_resultado_evaluar_evidencia_patente,
     evidencias_ia_desde_candidatos_vehiculo,
 )
@@ -29,7 +30,8 @@ from atlas_core.atlas_ia.proveedor_anthropic import (
     ProveedorModeloIAAnthropic,
 )
 from atlas_core.atlas_ia.shadow import ejecutar_caso_shadow, ejecutar_shadow
-from atlas_core.atlas_ia.validadores import validar_hipotesis_vehiculo
+from atlas_core.atlas_ia.orquestador import OrquestadorAtlasIA, ResultadoOrquestacion
+from atlas_core.atlas_ia.validadores import validar_hipotesis_multicampo, validar_hipotesis_vehiculo
 
 __all__ = [
     "ContextoRazonamiento", "EvidenciaIA", "HipotesisIA", "ResultadoShadow",
@@ -39,7 +41,9 @@ __all__ = [
     "CredencialProveedorIAAusente", "ProveedorIANoDisponible",
     "POLITICA_PROMPT_SISTEMA", "POLITICA_PROMPT_VERSION",
     "contexto_desde_resultado_evaluar_evidencia_patente",
+    "contexto_desde_resultado_evidencia",
     "evidencias_ia_desde_candidatos_vehiculo",
-    "validar_hipotesis_vehiculo",
+    "validar_hipotesis_vehiculo", "validar_hipotesis_multicampo",
+    "OrquestadorAtlasIA", "ResultadoOrquestacion",
     "ejecutar_caso_shadow", "ejecutar_shadow",
 ]

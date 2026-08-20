@@ -26,6 +26,55 @@ from atlas_core.atlas_ia.contratos import (
     ResultadoValidacionHipotesis,
 )
 from atlas_core.extractor import _patente_valida
+from atlas_core.catalogo_clientes import normalizar_rut_cliente
+from atlas_core.validadores import EstadoValidacion, validar_fecha
+
+
+def validar_hipotesis_multicampo(
+    hipotesis: HipotesisIA, contexto: ContextoRazonamiento,
+) -> ResultadoValidacionHipotesis:
+    """Barrera universal y reglas específicas sólo cuando ya existen."""
+    if hipotesis.campo != contexto.campo or hipotesis.valor_observado != contexto.valor_documental:
+        return ResultadoValidacionHipotesis(
+            aceptada=False, motivo_rechazo=MOTIVO_ESTRUCTURA_INVALIDA,
+            detalle="La hipótesis no corresponde al contexto recibido.",
+        )
+    if hipotesis.resultado != RESULTADO_HIPOTESIS_PROPUESTA:
+        return ResultadoValidacionHipotesis(aceptada=True)
+    if hipotesis.valor_propuesto not in contexto.valores_evidencia():
+        return ResultadoValidacionHipotesis(
+            aceptada=False, motivo_rechazo=MOTIVO_VALOR_NO_RESPALDADO,
+            detalle=f'"{hipotesis.valor_propuesto}" no aparece en la evidencia del caso.',
+        )
+    for evidencia in contexto.evidencias:
+        if evidencia.es_decision_humana and evidencia.valor != hipotesis.valor_propuesto:
+            return ResultadoValidacionHipotesis(
+                aceptada=False, motivo_rechazo=MOTIVO_CONTRADICE_EVIDENCIA_SUPERIOR,
+                detalle=f'La propuesta contradice la decisión humana "{evidencia.valor}".',
+            )
+
+    campo = contexto.campo.lower()
+    if campo in ("patente_tracto", "patente_rampla") and not _patente_valida(hipotesis.valor_propuesto):
+        return ResultadoValidacionHipotesis(
+            aceptada=False, motivo_rechazo=MOTIVO_FORMATO_INVALIDO,
+            detalle="La propuesta no tiene formato de patente válido.",
+        )
+    if campo in ("rut_chofer", "rut_cliente"):
+        try:
+            normalizar_rut_cliente(hipotesis.valor_propuesto)
+        except ValueError:
+            return ResultadoValidacionHipotesis(
+                aceptada=False, motivo_rechazo=MOTIVO_FORMATO_INVALIDO,
+                detalle="La propuesta no tiene un RUT chileno válido.",
+            )
+    if campo == "fecha":
+        valor_fecha = hipotesis.valor_propuesto.replace("-", "/")
+        if validar_fecha(valor_fecha, formato_esperado="DD/MM/YYYY").estado != EstadoValidacion.VALIDO:
+            return ResultadoValidacionHipotesis(
+                aceptada=False, motivo_rechazo=MOTIVO_FORMATO_INVALIDO,
+                detalle="La propuesta no tiene una fecha DD-MM-YYYY válida.",
+            )
+    return ResultadoValidacionHipotesis(aceptada=True)
 
 
 def validar_hipotesis_vehiculo(

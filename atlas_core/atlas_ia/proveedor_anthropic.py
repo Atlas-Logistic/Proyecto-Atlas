@@ -201,6 +201,10 @@ def _mensaje_usuario_desde_contexto(
             "explicacion_previa_del_motor_deterministico": (
                 contexto.explicacion_motor
             ),
+            "identidad_documento": contexto.identidad_documento,
+            "identidad_operacional": dict(contexto.identidad_operacional),
+            "herramientas_disponibles": list(contexto.herramientas_disponibles),
+            "restricciones_dominio": list(contexto.restricciones_dominio),
         },
         ensure_ascii=False,
         indent=2,

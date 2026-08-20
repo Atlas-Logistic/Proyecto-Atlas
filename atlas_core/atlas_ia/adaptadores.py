@@ -20,8 +20,57 @@ from __future__ import annotations
 from typing import Iterable, Mapping
 
 from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
+from atlas_core.motor_evidencia import CandidatoEvidencia, ResultadoEvidencia
 
 _PROCEDENCIA_MOTOR_VEHICULOS = "atlas_core.decisiones_pendientes.evaluar_evidencia_patente"
+
+
+def _tipo_fuente_generico(candidato: CandidatoEvidencia) -> str:
+    if candidato.nivel == "CONFIRMACION_HUMANA":
+        return "DECISION_HUMANA"
+    if candidato.nivel.startswith("EXTERNO_"):
+        return "EXTERNO"
+    if candidato.nivel == "DOCUMENTAL_INDEPENDIENTE":
+        return "HISTORICO"
+    return "CATALOGO"
+
+
+def contexto_desde_resultado_evidencia(
+    *, campo: str, valor_documental: str, numero_guia: str,
+    numero_transporte: str, resultado_evidencia: ResultadoEvidencia,
+    rut_chofer: str = "", identidad_documento: str = "",
+    identidad_operacional: Mapping[str, str] | None = None,
+    herramientas_disponibles: tuple[str, ...] = (),
+    restricciones_dominio: tuple[str, ...] = (),
+    procedencia: str = "atlas_core.motor_evidencia",
+) -> ContextoRazonamiento:
+    """Adapta cualquier ``ResultadoEvidencia`` genérico sin perder metadatos."""
+    evidencias = tuple(
+        EvidenciaIA(
+            identificador=candidato.identificador,
+            campo=campo,
+            valor=candidato.valor_canonico,
+            tipo_fuente=_tipo_fuente_generico(candidato),
+            nivel=candidato.nivel,
+            a_favor=candidato.evidencias,
+            en_contra=candidato.conflictos,
+            independencia=int(candidato.metadatos.get("transportes_independientes", 0) or 0),
+            es_decision_humana=candidato.nivel == "CONFIRMACION_HUMANA",
+            procedencia=procedencia,
+            referencias_fuente=tuple(str(valor) for valor in candidato.metadatos.get("guias", ())),
+        )
+        for candidato in resultado_evidencia.candidatos
+    )
+    return ContextoRazonamiento(
+        campo=campo, valor_documental=valor_documental, rut_chofer=rut_chofer,
+        numero_guia=numero_guia, numero_transporte=numero_transporte,
+        evidencias=evidencias, resultado_motor=resultado_evidencia.resultado,
+        explicacion_motor=resultado_evidencia.explicacion,
+        identidad_documento=identidad_documento or numero_guia,
+        identidad_operacional=dict(identidad_operacional or {}),
+        herramientas_disponibles=herramientas_disponibles,
+        restricciones_dominio=restricciones_dominio,
+    )
 
 
 def _tipo_fuente_desde_evidencias(evidencias: tuple[str, ...]) -> str:

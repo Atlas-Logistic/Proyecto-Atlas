@@ -102,6 +102,10 @@ class ContextoRazonamiento:
     evidencias: tuple[EvidenciaIA, ...] = ()
     resultado_motor: str = ""  # el resultado que ya devolvió el Motor determinista (p.ej. SUGERENCIA_HUMANA)
     explicacion_motor: str = ""  # la explicación en lenguaje humano que ya generó el Motor
+    identidad_documento: str = ""
+    identidad_operacional: Mapping[str, str] = field(default_factory=dict)
+    herramientas_disponibles: tuple[str, ...] = ()
+    restricciones_dominio: tuple[str, ...] = ()
 
     def valores_evidencia(self) -> tuple[str, ...]:
         """Todos los valores presentes en la evidencia reunida -- única
@@ -117,6 +121,10 @@ class ContextoRazonamiento:
             "numero_transporte": self.numero_transporte,
             "evidencias": [e.a_dict() for e in self.evidencias],
             "resultado_motor": self.resultado_motor, "explicacion_motor": self.explicacion_motor,
+            "identidad_documento": self.identidad_documento,
+            "identidad_operacional": dict(self.identidad_operacional),
+            "herramientas_disponibles": list(self.herramientas_disponibles),
+            "restricciones_dominio": list(self.restricciones_dominio),
         }
 
 

@@ -89,6 +89,10 @@ def _mensaje_usuario(contexto: ContextoRazonamiento) -> str:
         "evidencia_disponible": [evidencia.a_dict() for evidencia in contexto.evidencias],
         "resultado_previo_del_motor_deterministico": contexto.resultado_motor,
         "explicacion_previa_del_motor_deterministico": contexto.explicacion_motor,
+        "identidad_documento": contexto.identidad_documento,
+        "identidad_operacional": dict(contexto.identidad_operacional),
+        "herramientas_disponibles": list(contexto.herramientas_disponibles),
+        "restricciones_dominio": list(contexto.restricciones_dominio),
     }, ensure_ascii=False, indent=2)
 
 
