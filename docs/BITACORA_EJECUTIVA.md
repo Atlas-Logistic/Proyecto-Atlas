@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-20 — ATLAS IA A1: infraestructura shadow aislada, sin modelo real (vertical vehículos)
+
+- **Primer bloque de Atlas IA, deliberadamente pequeño y sin riesgo operacional.** Se construyó una capa nueva (`atlas_core/atlas_ia/`) con los contratos y el "arnés" necesarios para que, el día que se conecte un modelo de razonamiento real, Atlas pueda recibir sus propuestas, validarlas contra evidencia real y auditarlas -- sin que ese modelo pueda, hoy ni en el futuro, inventar un dato operacional.
+- **Todavía NO hay ningún modelo de IA conectado.** Este bloque usa exclusivamente un "doble" simulado y determinista para probar que el mecanismo funciona -- no mide, y no debe interpretarse como, capacidad de razonamiento de ninguna IA real. El benchmark cognitivo empieza cuando exista un proveedor real, no antes.
+- **La barrera central ya está construida y probada:** una propuesta que no aparezca en la evidencia ya reunida por el Motor determinista se rechaza automáticamente, sin excepción -- Atlas IA no puede convertir una ocurrencia del modelo en un hecho operacional. También se rechaza cualquier propuesta que contradiga una decisión humana ya confirmada.
+- **El Motor determinista existente no se tocó.** El caso de Patrick Ortiz (464036) se usó como ejemplo para demostrar que, si un futuro modelo llegara a sugerir la misma patente que Atlas ya venía razonando por su cuenta, la nueva arquitectura sabría recibirla correctamente -- eso no significa que Atlas ya "resolvió" ese caso; sigue exactamente igual que antes, sin ninguna decisión aplicada.
+- **Cero efectos sobre la operación real:** nada de este bloque toca Drive, catálogos, el historial de decisiones ni el reporte vigente -- confirmado explícitamente con pruebas automáticas.
+- **Motor `1414 → 1451 passed, 0 failed`** (37 tests nuevos). Commit local únicamente, sin publicar todavía.
+
+---
+
 ## 2026-08-20 — G1 APLICADO A OPERACIÓN REAL: el reporte vigente ya publica las patentes que Javier confirmó
 
 - **El fix G1 de hoy ya está reflejado en la operación real, no sólo en el código.** Se regeneró el reporte vigente sobre `G:\Mi unidad\Atlas` con el Motor corregido -- el transporte `0000351135` (Carlos Simón) ya publica `VP8521` (tracto) y `JD8659` (rampla) como valores operacionales, en vez de las dos variantes documentales sin resolver.

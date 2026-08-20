@@ -4,6 +4,48 @@ Registro técnico, en orden cronológico, de cambios de código sobre el lector 
 
 ---
 
+## 2026-08-20 — ATLAS IA A1: CONTRATOS AISLADOS + SHADOW HARNESS, VERTICAL VEHÍCULOS -- INFRAESTRUCTURA SHADOW, SIN MODELO REAL
+
+**Rama motor:** `lector-mvp-guia-nueva`, checkpoint de partida `f4f32923a73d5063700460c698ce356b6af02e42` (local=remoto, 0/0, limpio). **Desktop:** `fix-desktop-data-root-drag-drop`, `93352cf`, sin cambios. Commit funcional: `20f2d03`.
+
+**Advertencia explícita (para cualquier lectura futura de este bloque):** este bloque NO da a Atlas capacidad de razonamiento. NO existe ningún proveedor de modelo real conectado. NO se midió ni se reporta ninguna "precisión" de Atlas IA -- el único proveedor usado es un doble determinista y simulado, construido para probar que la arquitectura funciona, nunca para demostrar inteligencia.
+
+### Contexto y ajustes sobre A0
+
+A0 (bloque anterior, mismo día) quedó aprobado con tres ajustes obligatorios para A1: (1) no tocar `atlas_core.motor_evidencia.CandidatoEvidencia` -- contratos propios en una capa nueva; (2) no escribir shadow en `G:\Mi unidad\Atlas` -- `persistir=False` por defecto, ruta explícita si se pide lo contrario; (3) el proveedor simulado no es un benchmark de IA.
+
+### Estructura nueva
+
+`atlas_core/atlas_ia/` (paquete nuevo, aislado):
+
+- **`contratos.py`** -- `EvidenciaIA` (evidencia ya reunida por el Motor determinista, traducida de sólo lectura: identificador, campo, valor, `tipo_fuente` ∈ {DOCUMENTAL, HISTORICO, CATALOGO, DECISION_HUMANA, EXTERNO}, nivel, a_favor/en_contra, independencia, `es_decision_humana`, procedencia); `ContextoRazonamiento` (lo mínimo por caso: campo, valor documental, RUT, guía, transporte, evidencias, resultado/explicación ya calculados por el Motor); `HipotesisIA` (salida validable del proveedor: `hipotesis_id`, resultado ∈ {PROPUESTA, ABSTENCION, REQUIERE_HERRAMIENTA}, valor propuesto, evidencia usada/en contra, herramienta faltante, proveedor/modelo, metadata); `ResultadoValidacionHipotesis`; `ResultadoShadow`. `calcular_hipotesis_id`: SHA-256 sobre un payload JSON canónico documentado en el propio código -- campo, valor documental, RUT, guía, transporte, evidencia considerada (identificador+valor+nivel, ordenada) y valor propuesto; mismo problema + misma evidencia = mismo id, cualquier cambio en la evidencia considerada cambia el id.
+- **`proveedor.py`** -- `ProveedorModeloIA` (Protocol, un único método `razonar`) + `ProveedorModeloIASimulado` (doble determinista, configurado por `RespuestaSimulada` indexada por `valor_documental`; sin respuesta configurada, se abstiene; sin red, sin SDK, sin credenciales, sin acceso a Drive). Mismo patrón `Protocol` + doble ya en producción en `ProveedorOCR`/`ProveedorRutas`/`ProveedorTelemetria`/`ProveedorVerificacionEntidades`.
+- **`adaptadores.py`** -- `contexto_desde_resultado_evaluar_evidencia_patente`: traduce el `dict` REAL (no un `CandidatoEvidencia`) que devuelve `atlas_core.decisiones_pendientes.evaluar_evidencia_patente` a `ContextoRazonamiento`, clasificando `tipo_fuente` a partir de los códigos de evidencia que el Motor ya calculó (`CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER` → `DECISION_HUMANA`; `CORROBORACION_*` → `HISTORICO`; resto → `DOCUMENTAL`). Nunca recalcula ni reinterpreta nada.
+- **`validadores.py`** -- `validar_hipotesis_vehiculo`: V1 formato (reutiliza `atlas_core.extractor._patente_valida`, no duplicada), V2 valor no respaldado por evidencia recuperada (`contexto.valores_evidencia()` es la única fuente autorizada de "candidatos reales" -- barrera central anti-alucinación), V3 contradicción con evidencia `es_decision_humana=True` previa, V4 estructura (campo/valor observado deben corresponder al contexto). Una `ABSTENCION`/`REQUIERE_HERRAMIENTA` se acepta siempre estructuralmente -- nunca se convierte una abstención en error.
+- **`shadow.py`** -- `ejecutar_caso_shadow`/`ejecutar_shadow`: orquestador de sólo lectura, recibe casos ya construidos (nunca los descubre solo), `persistir=False` por defecto (resultado íntegro en memoria), `persistir=True` exige `ruta_salida` explícita (`ValueError` si falta) -- nunca autodetecta `ATLAS_DATA_DIR`/Drive/`operacion/actual` (verificado con un test que analiza el AST del módulo: no importa `atlas_core.almacenamiento_portable` ni `os`, no referencia `.environ`).
+
+### Tests nuevos (37; suite completa 1414 → 1451 passed, 0 failed)
+
+`test_atlas_ia_contratos.py` (identidad reproducible de `hipotesis_id` -- T7 y sus variantes: mismo caso/misma evidencia → mismo id; valor propuesto distinto, evidencia nueva, o nivel de una evidencia que cambió → id distinto; e invariantes de construcción de cada dataclass). `test_atlas_ia_proveedor.py` (determinismo, abstención por defecto, trazabilidad de contextos recibidos, ausencia de credenciales). `test_atlas_ia_validadores.py` (T1-T6 completos, más V4 estructura). `test_atlas_ia_shadow.py` (T8 sin efectos laterales -- catálogo de fixture byte a byte igual antes/después, error explícito si se pide persistir sin ruta, escritura sólo en la ruta indicada, verificación AST de ausencia de importaciones de Drive; T9 adaptador real, usando el mismo fixture de `evaluar_evidencia_patente` que `tests/test_motor_evidencia_vehiculos.py`; T10 caso Ortiz).
+
+### Caso Ortiz (T10) -- aclaración explícita
+
+Se reprodujo exactamente el fixture real de `test_ortiz_xf3662_nunca_se_autocorrige_a_xf3629` (mismo chofer/RUT, mismo par de transportes, catálogo sin `rut_chofer_asociado`) -- el Motor determinista produce `SUGERENCIA_HUMANA` con XF3629 como único candidato circunstancial, exactamente igual que en producción. El proveedor simulado se configuró A MANO para proponer XF3629; el validador lo acepta porque XF3629 SÍ está en la evidencia recuperada. **Esto no es Atlas IA acertando Ortiz** -- es la demostración de que, si un modelo real llegara algún día a esa misma conclusión, la arquitectura ya sabe recibirla, validarla y auditarla. El caso real 464036 sigue exactamente igual que antes de este bloque: sin ninguna decisión aplicada, sin estado terminal (G2 sigue abierto).
+
+### Efectos sobre operación real
+
+Cero. Ningún test de este bloque toca `G:\Mi unidad\Atlas`, ningún módulo nuevo importa `atlas_core.almacenamiento_portable` ni construye una ruta hacia Drive. `atlas_core/motor_evidencia.py`: sin diff. Desktop: sin cambios, `93352cf`, `0/0`, limpio.
+
+### Commits
+
+`20f2d03` -- fix funcional A1 (10 archivos: 6 de código + 4 de tests). Sin push.
+
+### Limitación/alcance, explícito
+
+No hay tool-calling (A2), no hay Assisted Mode, no hay ningún proveedor real, no se seleccionó modelo/proveedor. G2/G3 siguen abiertos, sin tocar.
+
+---
+
 ## 2026-08-20 — G1 CIERRE OPERACIONAL: aplicación controlada sobre operación real
 
 **Rama motor:** `lector-mvp-guia-nueva`, `65877202e20bce6b0bebfd4c7aa95a2edaf1e300` (fix G1 `c1359d1` + bitácoras `6587720`, ya publicados en origin, `local=remoto`, `0/0`, limpio). **Desktop:** `fix-desktop-data-root-drag-drop`, `93352cf`, sin cambios.
