@@ -33,7 +33,12 @@ from atlas_core.catalogo_vehiculos import (
     normalizar_patente_vehiculo,
     resolver_patente,
 )
-from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json, normalizar_rut
+from atlas_core.catalogos import (
+    buscar_empresa_por_rut,
+    cargar_catalogo_json,
+    normalizar_rut,
+    resolver_nombre_cliente_difuso,
+)
 from atlas_core.evidencia_entidades import ConfirmacionIdentidad
 from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra
@@ -63,6 +68,19 @@ TIPOS_ENTIDAD_DESCONOCIDA = frozenset({
 # pendiente es confirmar la relación obra<->destino -- pregunta distinta a
 # "registrar una entidad nueva", por eso usa su propio set de acciones.
 ACCIONES_DESTINO_SIN_CONFIRMAR = ("CONFIRMAR", "NO_CONFIRMAR", "POSPONER")
+# Bloque CLIENTE_CANDIDATO (R4.8) -- tipo reservado en TIPOS_SOPORTADOS desde
+# R3.1 y nunca implementado hasta ahora. Distinto de ALIAS_CANDIDATO (que
+# exige RUT exacto como anclaje) y de CLIENTE_DESCONOCIDO (registrar una
+# entidad genuinamente nueva): aquí el nombre documental coincide -- difuso
+# o por alias, mismo motor ya calibrado para chofer/empresa -- con un
+# cliente YA CONFIRMADO/ACTIVO, pero el documento no trae un RUT que lo
+# corrobore. Mismas tres acciones que DESTINO_SIN_CONFIRMAR (confirmar/
+# rechazar/posponer una relación ya sugerida, no registrar nada nuevo).
+ACCIONES_CLIENTE_CANDIDATO = ("CONFIRMAR", "NO_CONFIRMAR", "POSPONER")
+# Coincidencias de `resolver_nombre_cliente_difuso`/`resolver_nombre_empresa_difuso`
+# que representan evidencia real de identidad, no una adivinanza -- mismo
+# set ya usado en `procesamiento_masivo.py` para corroboración cruzada.
+_ESTADOS_NOMBRE_SEGUROS = {"SIN_CAMBIO", "ALIAS", "COINCIDENCIA_SEGURA"}
 # Bloque ORIGEN D1: distinta otra vez -- aquí no se registra ni se confirma
 # una entidad de catálogo, se elige entre plantas YA CONOCIDAS cuál es el
 # origen canónico de ESTE documento/viaje. "NO_PUEDO_DETERMINAR" es
@@ -633,6 +651,125 @@ def _identidad_cliente_por_rut(carpeta: Path, rut: str):
         return None
 
 
+def _decisiones_obra_para_cliente(
+    *, carpeta: Path, cliente_id: str, cliente_razon_social: str,
+    cliente_aliases: Iterable[str], obra_texto: str, despachar_a_documental: str,
+    comunes: Mapping[str, str],
+) -> list[dict[str, object]]:
+    """Bloque OBRA_DESCONOCIDA/DESTINO_SIN_CONFIRMAR -- extraído de
+    `detectar_decisiones_documento` (R4.8) para poder reutilizarse tal
+    cual desde la reconciliación `sin_ocr` que encadena la pregunta de
+    obra/destino DESPUÉS de que un `CLIENTE_CANDIDATO` se confirma (ver
+    `revalidacion_documental.detectar_decisiones_obra_para_cliente_confirmado_sin_ocr`).
+    Recibe la identidad de cliente YA RESUELTA (por RUT en la corrida
+    original, o por confirmación humana posterior) -- nunca decide
+    identidad, sólo la pregunta de obra/destino que depende de ella."""
+    decisiones: list[dict[str, object]] = []
+    if obra_texto in _AUSENTES:
+        return decisiones
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json",
+            ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        clave = normalizar_nombre_obra(obra_texto)
+        # R3.3.1: obra = identidad GLOBAL -- la búsqueda ya NO filtra por
+        # cliente_id. Una obra observada antes para cualquier cliente se
+        # reconoce igual para éste (comparación exacta normalizada,
+        # sin fuzzy).
+        obras = [
+            obra for obra in catalogo_obras.listar_obras()
+            if obra.estado_vigencia == EstadoVigencia.ACTIVO.value
+            and clave in {
+                normalizar_nombre_obra(obra.nombre_canonico),
+                *(normalizar_nombre_obra(alias) for alias in obra.aliases_documentales),
+            }
+        ]
+        # R3.2: si el valor documental de "obra" es, en realidad, el
+        # propio cliente ya reconocido (comparación exacta normalizada,
+        # sin fuzzy -- misma normalización que ya usa este bloque para
+        # `clave`), no hay ninguna obra nueva que preguntar: es el mismo
+        # hecho dos veces, no dos entidades. Genérico para cualquier
+        # cliente, sin hardcode.
+        claves_cliente = {
+            normalizar_nombre_obra(cliente_razon_social),
+            *(normalizar_nombre_obra(alias) for alias in cliente_aliases),
+        }
+        if not obras and clave in claves_cliente:
+            pass
+        elif not obras:
+            decisiones.append(crear_decision(
+                tipo="OBRA_DESCONOCIDA", entidad="OBRA", campo="obra_destino",
+                valor_documental=obra_texto, valor_normalizado=clave,
+                identidad_resuelta=None, candidatos=(),
+                motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
+                evidencias=({"tipo": "CLIENTE_RESUELTO", "entidad_id": cliente_id},),
+                acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
+                # R3.1.3: nombre legible de la identidad de cliente que
+                # YA resolvió Motor (misma fuente que `identidad_cliente`
+                # más arriba, nunca inferido de `obra_texto`) -- se
+                # conserva como evidencia operacional de quién observó
+                # esta obra, no como su propietario.
+                # R3.4.2: `destino_documental` (dirección ya resuelta por
+                # `resolver_entrega_documento`, la misma fuente que ya usa
+                # DESTINO_SIN_CONFIRMAR más abajo) viaja aquí también --
+                # la obra todavía no existe, así que hoy no puede
+                # generarse la pregunta de destino, pero cuando Javier
+                # REGISTRE esta obra, `aplicar_decision_obra` la necesita
+                # para poder generar el siguiente paso sin volver a leer
+                # el documento (ver decision_destino_para_obra_registrada).
+                contexto={
+                    "cliente_id": cliente_id,
+                    "cliente_canonico": cliente_razon_social,
+                    "destino_documental": str(despachar_a_documental or "").strip(),
+                },
+                **comunes,
+            ))
+        elif len(obras) > 1:
+            # Ambigüedad global (no debería ocurrir tras la migración a
+            # unicidad global -- ver CatalogoObrasDestinos): Atlas se
+            # abstiene en vez de adivinar cuál es la obra correcta.
+            pass
+        elif catalogo_obras.resolver_obra_destino_confirmada(
+            cliente_id=cliente_id, nombre_obra=obra_texto
+        ) is None:
+            obra = obras[0]
+            destino_texto = str(despachar_a_documental or "").strip()
+            # R3.4: la obra ya se conoce (identidad_resuelta); lo único
+            # pendiente es confirmar la relación con ESTE destino. El
+            # valor de la decisión pasa a ser el destino documental (lo
+            # que Atlas todavía no sabe), no la obra (lo que ya sabe) --
+            # `contexto` transporta cliente y obra ya resueltos, tal como
+            # ya usa OBRA_DESCONOCIDA para el cliente.
+            decisiones.append(crear_decision(
+                tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO",
+                campo="destino_entrega",
+                valor_documental=destino_texto or obra_texto,
+                valor_normalizado=(
+                    normalizar_nombre_destino(destino_texto) if destino_texto else clave
+                ),
+                identidad_resuelta={
+                    "entidad_id": obra.obra_id,
+                    "valor_canonico": obra.nombre_canonico,
+                },
+                candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
+                evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
+                acciones_permitidas=ACCIONES_DESTINO_SIN_CONFIRMAR,
+                contexto={
+                    "cliente_id": cliente_id,
+                    "cliente_canonico": cliente_razon_social,
+                    "obra_id": obra.obra_id,
+                    "obra_canonica": obra.nombre_canonico,
+                    "destino_documental": destino_texto,
+                },
+                **comunes,
+            ))
+    except (OSError, ValueError):
+        pass
+    return decisiones
+
+
 def detectar_decisiones_documento(
     *, archivo: str, datos: Mapping[str, object], carpeta_catalogos: str | Path,
     cliente_documental_original: str = "", despachar_a_documental: str = "",
@@ -786,109 +923,62 @@ def detectar_decisiones_documento(
                 acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
                 **comunes,
             ))
+    elif cliente_documental not in _AUSENTES:
+        # R4.8 -- Bloque CLIENTE_CANDIDATO: sin RUT corroborable (ausente o
+        # con dígito verificador inválido), Atlas no puede confirmar
+        # identidad por RUT -- pero el motivo documental `CLIENTE_SIN_CORROBORAR`
+        # SÍ requiere intervención humana, y silenciarlo aquí (como antes de
+        # este bloque) dejaba ese motivo sin ninguna ruta accionable en
+        # Revisión de Atlas -- caso real 472037/464981. Si el nombre
+        # documental coincide (difuso o por alias, mismo motor ya calibrado
+        # para chofer/`empresas.json`, nunca una heurística nueva) con un
+        # cliente YA CONFIRMADO/ACTIVO, se presenta esa coincidencia como
+        # pregunta -- nunca se autoconfirma (nombre solo, sin RUT, nunca es
+        # prueba suficiente en este módulo). Si no hay ningún candidato
+        # claro, se abstiene -- el motivo documental queda como revisión no
+        # accionable, honesto en vez de forzar una sugerencia sin evidencia.
+        try:
+            clientes_confirmados = [
+                c for c in CatalogoClientes(carpeta / "clientes.json").listar()
+                if c.estado_calidad == EstadoCalidadCliente.CONFIRMADO.value
+                and c.estado_vigencia == EstadoVigenciaCliente.ACTIVO.value
+            ]
+        except (OSError, ValueError):
+            clientes_confirmados = []
+        coincidencia = resolver_nombre_cliente_difuso(clientes_confirmados, cliente_documental)
+        if coincidencia.estado in _ESTADOS_NOMBRE_SEGUROS:
+            candidato = next(
+                (c for c in clientes_confirmados if c.razon_social == coincidencia.valor_resultado), None,
+            )
+            if candidato is not None:
+                identidad_candidata = {
+                    "entidad_id": candidato.cliente_id,
+                    "valor_canonico": candidato.razon_social,
+                    "rut": candidato.rut,
+                }
+                decisiones.append(crear_decision(
+                    tipo="CLIENTE_CANDIDATO", entidad="CLIENTE", campo="cliente",
+                    valor_documental=cliente_documental,
+                    valor_normalizado=normalizar_nombre_cliente(cliente_documental),
+                    identidad_resuelta=identidad_candidata,
+                    candidatos=(identidad_candidata,),
+                    motivos=("NOMBRE_SIN_RUT_CORROBORABLE",),
+                    evidencias=({
+                        "tipo": "NOMBRE_" + coincidencia.estado, "campo": "cliente",
+                        "valor": cliente_documental,
+                    },),
+                    acciones_permitidas=ACCIONES_CLIENTE_CANDIDATO,
+                    **comunes,
+                ))
 
     obra_texto = str(datos.get("obra destino", "")).strip()
-    if identidad_cliente is not None and obra_texto not in _AUSENTES:
-        try:
-            catalogo_obras = CatalogoObrasDestinos(
-                ruta=carpeta / "obras_destinos.json",
-                ruta_clientes=carpeta / "clientes.json",
-                ruta_destinos=carpeta / "destinos_maestros.json",
-            )
-            clave = normalizar_nombre_obra(obra_texto)
-            # R3.3.1: obra = identidad GLOBAL -- la búsqueda ya NO filtra por
-            # cliente_id. Una obra observada antes para cualquier cliente se
-            # reconoce igual para éste (comparación exacta normalizada,
-            # sin fuzzy).
-            obras = [
-                obra for obra in catalogo_obras.listar_obras()
-                if obra.estado_vigencia == EstadoVigencia.ACTIVO.value
-                and clave in {
-                    normalizar_nombre_obra(obra.nombre_canonico),
-                    *(normalizar_nombre_obra(alias) for alias in obra.aliases_documentales),
-                }
-            ]
-            # R3.2: si el valor documental de "obra" es, en realidad, el
-            # propio cliente ya reconocido (comparación exacta normalizada,
-            # sin fuzzy -- misma normalización que ya usa este bloque para
-            # `clave`), no hay ninguna obra nueva que preguntar: es el mismo
-            # hecho dos veces, no dos entidades. Genérico para cualquier
-            # cliente, sin hardcode.
-            claves_cliente = {
-                normalizar_nombre_obra(cliente.razon_social),
-                *(normalizar_nombre_obra(alias) for alias in cliente.aliases),
-            }
-            if not obras and clave in claves_cliente:
-                pass
-            elif not obras:
-                decisiones.append(crear_decision(
-                    tipo="OBRA_DESCONOCIDA", entidad="OBRA", campo="obra_destino",
-                    valor_documental=obra_texto, valor_normalizado=clave,
-                    identidad_resuelta=None, candidatos=(),
-                    motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
-                    evidencias=({"tipo": "CLIENTE_RESUELTO", "entidad_id": cliente.cliente_id},),
-                    acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
-                    # R3.1.3: nombre legible de la identidad de cliente que
-                    # YA resolvió Motor (misma fuente que `identidad_cliente`
-                    # más arriba, nunca inferido de `obra_texto`) -- se
-                    # conserva como evidencia operacional de quién observó
-                    # esta obra, no como su propietario.
-                    # R3.4.2: `destino_documental` (dirección ya resuelta por
-                    # `resolver_entrega_documento`, la misma fuente que ya usa
-                    # DESTINO_SIN_CONFIRMAR más abajo) viaja aquí también --
-                    # la obra todavía no existe, así que hoy no puede
-                    # generarse la pregunta de destino, pero cuando Javier
-                    # REGISTRE esta obra, `aplicar_decision_obra` la necesita
-                    # para poder generar el siguiente paso sin volver a leer
-                    # el documento (ver decision_destino_para_obra_registrada).
-                    contexto={
-                        "cliente_id": cliente.cliente_id,
-                        "cliente_canonico": cliente.razon_social,
-                        "destino_documental": str(despachar_a_documental or "").strip(),
-                    },
-                    **comunes,
-                ))
-            elif len(obras) > 1:
-                # Ambigüedad global (no debería ocurrir tras la migración a
-                # unicidad global -- ver CatalogoObrasDestinos): Atlas se
-                # abstiene en vez de adivinar cuál es la obra correcta.
-                pass
-            elif catalogo_obras.resolver_obra_destino_confirmada(
-                cliente_id=cliente.cliente_id, nombre_obra=obra_texto
-            ) is None:
-                obra = obras[0]
-                destino_texto = str(despachar_a_documental or "").strip()
-                # R3.4: la obra ya se conoce (identidad_resuelta); lo único
-                # pendiente es confirmar la relación con ESTE destino. El
-                # valor de la decisión pasa a ser el destino documental (lo
-                # que Atlas todavía no sabe), no la obra (lo que ya sabe) --
-                # `contexto` transporta cliente y obra ya resueltos, tal como
-                # ya usa OBRA_DESCONOCIDA para el cliente.
-                decisiones.append(crear_decision(
-                    tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO",
-                    campo="destino_entrega",
-                    valor_documental=destino_texto or obra_texto,
-                    valor_normalizado=(
-                        normalizar_nombre_destino(destino_texto) if destino_texto else clave
-                    ),
-                    identidad_resuelta={
-                        "entidad_id": obra.obra_id,
-                        "valor_canonico": obra.nombre_canonico,
-                    },
-                    candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
-                    evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
-                    acciones_permitidas=ACCIONES_DESTINO_SIN_CONFIRMAR,
-                    contexto={
-                        "cliente_id": cliente.cliente_id,
-                        "cliente_canonico": cliente.razon_social,
-                        "obra_id": obra.obra_id,
-                        "obra_canonica": obra.nombre_canonico,
-                        "destino_documental": destino_texto,
-                    },
-                    **comunes,
-                ))
-        except (OSError, ValueError):
-            pass
+    if identidad_cliente is not None:
+        decisiones.extend(_decisiones_obra_para_cliente(
+            carpeta=carpeta, cliente_id=cliente.cliente_id,
+            cliente_razon_social=cliente.razon_social, cliente_aliases=cliente.aliases,
+            obra_texto=obra_texto, despachar_a_documental=despachar_a_documental,
+            comunes=comunes,
+        ))
     return decisiones
 
 

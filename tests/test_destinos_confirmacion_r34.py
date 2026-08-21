@@ -304,6 +304,56 @@ def test_revalidar_ignora_fila_con_cliente_ausente_si_obra_destino_resuelve(tmp_
     assert resultado["guias_actualizadas"] == ["464740"]
 
 
+def _catalogos_minimos(tmp_path):
+    catalogos = tmp_path / "catalogos"; catalogos.mkdir()
+    for nombre, contenido in {
+        "clientes.json": {"version_formato": 1, "clientes": []}, "empresas.json": {}, "vehiculos.json": {},
+        "obras_destinos.json": {"version_formato": 1, "obras": [], "relaciones": []},
+        "destinos_maestros.json": {"version_formato": 1, "destinos": []},
+    }.items():
+        (catalogos / nombre).write_text(json.dumps(contenido), encoding="utf-8")
+    return catalogos
+
+
+def test_revalidar_retira_motivo_cuando_obra_es_el_mismo_cliente(tmp_path):
+    """R4.8, caso real 464981: obra_destino == cliente (mismo texto exacto
+    en la misma fila) -- Motor ya se abstiene de preguntar en la detección
+    original (`detectar_decisiones_documento`, "es el mismo hecho dos
+    veces"), pero antes de este fix el motivo documental quedaba fijado
+    sin ninguna vía para retirarse. Nunca consulta obras_destinos.json --
+    catálogo vacío a propósito, para probar que la comparación es
+    puramente textual dentro de la fila."""
+    catalogos = _catalogos_minimos(tmp_path)
+    fila = _fila_csv(
+        numero_guia="464981", cliente="AMERICAN SCREW CHILE SPA", obra_destino="AMERICAN SCREW CHILE SPA",
+    )
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [fila])
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == ["464981"]
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in fila_final["motivos_revision_documento"]
+    assert fila_final["indicador_revision"] == "OK"
+
+
+def test_revalidar_no_retira_motivo_si_obra_y_cliente_son_realmente_distintos(tmp_path):
+    """Control -- misma fila, pero obra_destino y cliente son textos
+    genuinamente distintos y la obra no está registrada en ningún catálogo
+    (caso real 472037: cliente COMERCIAL A Y B LTDA, obra ING Y CONST
+    FUNDAMENTA SPA): el motivo se conserva, no se inventa una equivalencia
+    que no existe."""
+    catalogos = _catalogos_minimos(tmp_path)
+    fila = _fila_csv(
+        numero_guia="472037", cliente="COMERCIAL A Y B LTDA", obra_destino="ING Y CONST FUNDAMENTA SPA",
+    )
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [fila])
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == []
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" in fila_final["motivos_revision_documento"]
+
+
 def test_revalidar_no_modifica_catalogos(tmp_path):
     raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
     _confirmar_relacion_directamente(catalogos, cliente, obra)

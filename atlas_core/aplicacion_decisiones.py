@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
-from atlas_core.catalogo_clientes import CatalogoClientes, ClienteDuplicadoError, EstadoCalidadCliente, normalizar_rut_cliente
+from atlas_core.catalogo_clientes import (
+    CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
+    EstadoCalidadCliente, normalizar_rut_cliente,
+)
 from atlas_core.catalogo_destinos import CatalogoDestinos
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
 from atlas_core.catalogo_plantas import CatalogoPlantas
@@ -19,8 +22,9 @@ from atlas_core.catalogo_vehiculos import (
     confirmar_vehiculo, normalizar_patente_vehiculo,
 )
 from atlas_core.decisiones_pendientes import (
-    actualizar_contrato_vehiculos_persistidos, decision_destino_para_obra_registrada,
-    generar_artefacto, regenerar_decisiones_persistidas, rut_documental_de_decision_cliente,
+    _decisiones_obra_para_cliente, actualizar_contrato_vehiculos_persistidos,
+    decision_destino_para_obra_registrada, generar_artefacto,
+    regenerar_decisiones_persistidas, rut_documental_de_decision_cliente,
 )
 from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
 from atlas_core.incidencias_documentales import (
@@ -64,6 +68,7 @@ ACCIONES_POR_TIPO = {
         "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
     }),
     "CLIENTE_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
+    "CLIENTE_CANDIDATO": frozenset({"CONFIRMAR", "NO_CONFIRMAR", "POSPONER"}),
     "ALIAS_CANDIDATO": frozenset({"CONFIRMAR_ALIAS", "RECHAZAR", "POSPONER"}),
     "ORIGEN_NO_CONFIRMADO": frozenset({
         "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
@@ -579,6 +584,74 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "candidatos_evidencia_previos": decision.get("candidatos_evidencia"),
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo == "CLIENTE_CANDIDATO":
+                # R4.8 -- primera aplicación real para este tipo (reservado
+                # desde R3.1, sin backend hasta ahora). A diferencia de
+                # ALIAS_CANDIDATO/CONFIRMAR_ALIAS, aquí el texto documental
+                # ya coincide (difuso o por alias) con el nombre canónico --
+                # no hay ningún alias nuevo que aprender, sólo una identidad
+                # SIN RUT que un humano corrobora o rechaza. CONFIRMAR nunca
+                # escribe el catálogo de clientes (nada que registrar: la
+                # entidad ya existe tal cual) -- sólo deja constancia
+                # auditable en el ledger, consumida después por
+                # `revalidar_cliente_sin_corroborar_sin_ocr` (retira el
+                # motivo documental) y por
+                # `detectar_decisiones_obra_para_cliente_confirmado_sin_ocr`
+                # (encadena, sin OCR, la pregunta de obra/destino que
+                # `detectar_decisiones_documento` no pudo generar en su
+                # momento por falta de identidad de cliente confirmada --
+                # mismo patrón ya usado por R3.4.2 para OBRA_DESCONOCIDA).
+                identidad_candidata = decision.get("identidad_resuelta") or {}
+                cliente_id_candidato = str(identidad_candidata.get("entidad_id", ""))
+                valor_documental_cliente = str(decision.get("valor_documental", "")).strip()
+                if accion == "CONFIRMAR" and not cliente_id_candidato:
+                    raise ErrorAplicacionDecision("La decisión no contiene una identidad de cliente candidata.")
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
+                    "campo": decision.get("campo"), "valor_documental": valor_documental_cliente,
+                    "cliente_id": cliente_id_candidato if accion == "CONFIRMAR" else None,
+                    "valor_canonico": str(identidad_candidata.get("valor_canonico", "")) if accion == "CONFIRMAR" else None,
+                    "motivo_rechazo": (str(motivo_rechazo).strip() if motivo_rechazo and accion == "NO_CONFIRMAR" else None),
+                    "candidatos_previos": decision.get("candidatos"),
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
+                if accion == "CONFIRMAR":
+                    resultado_extra["cliente_id"] = cliente_id_candidato
+                    # R4.8 -- encadena, sin OCR, la pregunta de obra/destino
+                    # que `detectar_decisiones_documento` no pudo generar en
+                    # su momento por falta de identidad de cliente confirmada
+                    # (mismo patrón ya usado por OBRA_DESCONOCIDA/REGISTRAR
+                    # más arriba, vía `decision_siguiente`): ahora que un
+                    # humano confirmó la identidad, se relee ÚNICAMENTE la
+                    # fila ya persistida de ESTE documento (numero_guia) --
+                    # nunca OCR -- y se reutiliza el mismo motor de
+                    # `_decisiones_obra_para_cliente` (Bloque OBRA_DESCONOCIDA/
+                    # DESTINO_SIN_CONFIRMAR) que ya usa la detección inicial.
+                    numero_guia_doc = str((decision.get("documento") or {}).get("numero_guia") or "")
+                    if numero_guia_doc:
+                        from atlas_core.revalidacion_documental import _leer_filas
+                        try:
+                            candidato_confirmado = CatalogoClientes(catalogo_clientes_ruta).obtener(cliente_id_candidato)
+                        except ClienteNoEncontradoError:
+                            candidato_confirmado = None
+                        fila_guia = next(
+                            (f for f in _leer_filas(dataset) if str(f.get("numero_guia", "")) == numero_guia_doc), None,
+                        )
+                        if candidato_confirmado is not None and fila_guia is not None:
+                            siguientes = _decisiones_obra_para_cliente(
+                                carpeta=catalogos, cliente_id=candidato_confirmado.cliente_id,
+                                cliente_razon_social=candidato_confirmado.razon_social,
+                                cliente_aliases=candidato_confirmado.aliases,
+                                obra_texto=str(fila_guia.get("obra_destino", "")).strip(),
+                                despachar_a_documental=str(fila_guia.get("despachar_a_crudo", "")).strip(),
+                                comunes={
+                                    "archivo": str((decision.get("documento") or {}).get("archivo", "")),
+                                    "numero_guia": numero_guia_doc,
+                                    "numero_transporte": str((decision.get("documento") or {}).get("numero_transporte", "")),
+                                },
+                            )
+                            decision_siguiente = siguientes[0] if siguientes else None
             elif tipo == "ALIAS_CANDIDATO":
                 # MOTOR DE EVIDENCIA FASE 3: CONFIRMAR_ALIAS ahora hace 3
                 # cosas donde antes no hacía ninguna (era sólo UX
@@ -667,6 +740,12 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             if (tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR") or (
                 tipo == "VEHICULO_DESCONOCIDO"
                 and accion in ("REGISTRAR", "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
+            ) or (
+                # R4.8 -- confirmar un CLIENTE_CANDIDATO resuelve el motivo
+                # documental CLIENTE_SIN_CORROBORAR de este mismo documento
+                # (ver `revalidar_cliente_sin_corroborar_sin_ocr`), igual que
+                # las otras dos revalidaciones ya wireadas aquí.
+                tipo == "CLIENTE_CANDIDATO" and accion == "CONFIRMAR"
             ):
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
@@ -739,6 +818,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("CLIENTE_DESCONOCIDO", "NO_REGISTRAR"): "Decisión guardada. Atlas no registrará esta observación como cliente.",
             ("ALIAS_CANDIDATO", "CONFIRMAR_ALIAS"): "Alias confirmado. Atlas reconocerá este texto como la misma entidad en documentos futuros, y queda registrada una Incidencia Documental.",
             ("ALIAS_CANDIDATO", "RECHAZAR"): "Decisión guardada. Atlas no vinculará este texto documental a la entidad sugerida.",
+            ("CLIENTE_CANDIDATO", "CONFIRMAR"): "Identidad de cliente confirmada. Atlas dejará de pedir revisión por falta de RUT en este documento.",
+            ("CLIENTE_CANDIDATO", "NO_CONFIRMAR"): "Decisión guardada. Atlas no vinculará este documento a la identidad sugerida.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}
@@ -790,4 +871,32 @@ def resolver_patentes_confirmadas_por_ledger(
             str(aplicacion.get("valor_documental", "")),
         )
         indice[clave] = patente_canonica
+    return indice
+
+
+def resolver_clientes_confirmados_por_ledger(
+    ruta_ledger: str | Path,
+) -> dict[str, str]:
+    """R4.8 -- índice de solo lectura del ledger análogo a
+    `resolver_patentes_confirmadas_por_ledger`: ``numero_guia`` ->
+    ``valor_canonico``, sólo para aplicaciones `CLIENTE_CANDIDATO` con
+    ``accion=CONFIRMAR``. Único consumidor hoy:
+    `atlas_core.revalidacion_documental.revalidar_cliente_sin_corroborar_sin_ocr`,
+    para retirar el motivo `CLIENTE_SIN_CORROBORAR` de la fila exacta que
+    un humano ya confirmó -- nunca de otras filas con el mismo texto
+    documental (la confirmación es por documento, no por texto suelto).
+    Ausencia/corrupción del ledger se trata como "sin confirmaciones"."""
+    indice: dict[str, str] = {}
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return indice
+    for aplicacion in ledger.get("aplicaciones", []):
+        if aplicacion.get("tipo") != "CLIENTE_CANDIDATO" or aplicacion.get("accion") != "CONFIRMAR":
+            continue
+        valor_canonico = str(aplicacion.get("valor_canonico") or "").strip()
+        numero_guia = str((aplicacion.get("documento") or {}).get("numero_guia", ""))
+        if not valor_canonico or not numero_guia:
+            continue
+        indice[numero_guia] = valor_canonico
     return indice

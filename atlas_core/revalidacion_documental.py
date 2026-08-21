@@ -28,8 +28,11 @@ from pathlib import Path
 from typing import Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
-from atlas_core.aplicacion_decisiones import resolver_patentes_confirmadas_por_ledger
-from atlas_core.catalogo_clientes import CatalogoClientes
+from atlas_core.aplicacion_decisiones import (
+    resolver_clientes_confirmados_por_ledger,
+    resolver_patentes_confirmadas_por_ledger,
+)
+from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import (
@@ -150,7 +153,19 @@ def revalidar_obra_destino_sin_ocr(
     de esa fila y recalcula `indicador_revision`; nunca toca ningún otro
     campo. No ejecuta OCR ni vuelve a extraer nada -- sólo lee el dataset ya
     persistido y los catálogos vigentes. Se abstiene fila por fila ante
-    cualquier duda (obra ausente/"No encontrado", error de catálogo, etc.)."""
+    cualquier duda (obra ausente/"No encontrado", error de catálogo, etc.).
+
+    R4.8 -- además, retira el motivo cuando el texto de `obra_destino` de
+    ESA misma fila normaliza EXACTO (sin fuzzy, misma comparación que ya
+    usa `detectar_decisiones_documento`) al `cliente` de esa misma fila:
+    "es el mismo hecho documental dos veces, no dos entidades" -- Motor ya
+    reconoce este caso en detección (se abstiene de generar una pregunta,
+    ver el bloque `claves_cliente`/`pass` de `detectar_decisiones_documento`),
+    pero antes de este fix el motivo documental seguía fijado en el CSV sin
+    ninguna vía para retirarse -- caso real 464981 (obra_destino ==
+    cliente == "AMERICAN SCREW CHILE SPA"). Comparación puramente textual
+    dentro del mismo documento, sin consultar catálogo -- no hace falta: si
+    ambos campos ya dicen lo mismo, no hay identidad que corroborar."""
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     catalogo_obras = CatalogoObrasDestinos(
@@ -170,20 +185,74 @@ def revalidar_obra_destino_sin_ocr(
             obra_documental = str(fila.get("obra_destino", "")).strip()
             if obra_documental in _AUSENTES:
                 continue
-            try:
-                resuelto = catalogo_obras.resolver_obra_destino_confirmada_global(
-                    nombre_obra=obra_documental
-                )
-            except (OSError, ValueError):
-                continue
-            if resuelto is None:
-                continue
+            cliente_documental = str(fila.get("cliente", "")).strip()
+            mismo_hecho_que_cliente = (
+                cliente_documental not in _AUSENTES
+                and normalizar_nombre_obra(obra_documental) == normalizar_nombre_obra(cliente_documental)
+            )
+            if not mismo_hecho_que_cliente:
+                try:
+                    resuelto = catalogo_obras.resolver_obra_destino_confirmada_global(
+                        nombre_obra=obra_documental
+                    )
+                except (OSError, ValueError):
+                    continue
+                if resuelto is None:
+                    continue
             motivos = [m for m in motivos if m != motivo_objetivo]
             fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
             fila["indicador_revision"] = (
                 "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
             )
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def revalidar_cliente_sin_corroborar_sin_ocr(
+    *, ruta_dataset: str | Path, ruta_ledger: str | Path,
+) -> dict[str, object]:
+    """R4.8: relee cada fila del dataset y reevalúa ÚNICAMENTE el motivo
+    ``CLIENTE_SIN_CORROBORAR`` contra el ledger (`resolver_clientes_confirmados_por_ledger`)
+    -- sin OCR, sin volver a extraer nada, sin tocar catálogos. Este motivo
+    (documento sin RUT de cliente corroborable) nunca lo puede resolver un
+    recálculo automático por sí solo -- la única forma de que deje de ser
+    válido es que un humano confirme explícitamente la identidad candidata
+    (`CLIENTE_CANDIDATO`/`CONFIRMAR`, ver `aplicar_decision_obra`). Retira
+    el motivo de una fila sólo cuando el ledger tiene una confirmación para
+    ESE `numero_guia` exacto (nunca por coincidencia de texto con otra
+    fila) y el `cliente` ya persistido en esa fila coincide (comparación
+    exacta normalizada, sin fuzzy -- la confirmación humana ya hizo el
+    trabajo difuso una sola vez) con el nombre canónico confirmado. Se
+    abstiene fila por fila ante cualquier duda."""
+    ruta = Path(ruta_dataset)
+    motivo_objetivo = MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR.value
+    confirmados_por_guia = resolver_clientes_confirmados_por_ledger(Path(ruta_ledger))
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            motivos = [m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m]
+            if motivo_objetivo not in motivos:
+                continue
+            numero_guia = str(fila.get("numero_guia", ""))
+            valor_canonico_confirmado = confirmados_por_guia.get(numero_guia)
+            if valor_canonico_confirmado is None:
+                continue
+            cliente_documental = str(fila.get("cliente", "")).strip()
+            if cliente_documental in _AUSENTES:
+                continue
+            if normalizar_nombre_cliente(cliente_documental) != normalizar_nombre_cliente(valor_canonico_confirmado):
+                continue
+            motivos = [m for m in motivos if m != motivo_objetivo]
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
+            fila["indicador_revision"] = (
+                "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            )
+            guias_actualizadas.append(numero_guia)
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
 
@@ -491,14 +560,22 @@ def revalidar_y_regenerar_reporte(
     resultado_patente = revalidar_patente_sin_homologar_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+    # R4.8: mismo patrón, restringido a CLIENTE_SIN_CORROBORAR -- ver
+    # `revalidar_cliente_sin_corroborar_sin_ocr`.
+    resultado_cliente = revalidar_cliente_sin_corroborar_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json",
+    )
     guias_actualizadas = sorted(
-        set(resultado_obra_destino["guias_actualizadas"]) | set(resultado_patente["guias_actualizadas"])
+        set(resultado_obra_destino["guias_actualizadas"])
+        | set(resultado_patente["guias_actualizadas"])
+        | set(resultado_cliente["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
         "guias_actualizadas": guias_actualizadas,
         "obra_destino": resultado_obra_destino,
         "patente": resultado_patente,
+        "cliente": resultado_cliente,
     }
     if not guias_actualizadas:
         return {**resultado_revalidacion, "reporte_regenerado": False}
@@ -667,6 +744,98 @@ def reconciliar_decisiones_destino_historicas(
         pendientes_actuales = []
 
     candidatas = detectar_decisiones_destino_historicas_sin_ocr(raiz_atlas=raiz)
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+    )
+    bandeja = generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+    return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
+
+
+def detectar_decisiones_cliente_candidato_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, object]]:
+    """R4.8 -- READ-ONLY, nunca escribe nada, sin OCR. A diferencia de
+    `VEHICULO_DESCONOCIDO` (donde la decisión SIEMPRE existió y sólo había
+    que reconciliarla contra el catálogo vigente, ver
+    `regenerar_decisiones_persistidas`), `CLIENTE_CANDIDATO` nunca llegó a
+    generarse para documentos ya procesados ANTES de este bloque -- no hay
+    nada que reconciliar, hay que reconstruir la decisión desde cero, sólo
+    con datos YA PERSISTIDOS (el dataset no retiene el RUT documental del
+    cliente por guía, pero `CLIENTE_CANDIDATO` no lo necesita: opera
+    exclusivamente sobre el nombre ya persistido en `cliente`).
+
+    Para cada fila con el motivo `CLIENTE_SIN_CORROBORAR`, reconstruye un
+    `datos` sintético mínimo (guía, transporte, cliente) y llama
+    directamente a `detectar_decisiones_documento` -- el mismo mecanismo
+    canónico de detección, nunca una segunda regla en paralelo -- filtrando
+    sólo las decisiones `CLIENTE_CANDIDATO` que produce. Idéntico
+    resultado, byte a byte, al que habría generado el procesamiento
+    original si esta función ya hubiera existido entonces."""
+    from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    motivo_objetivo = MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR.value
+
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+
+    candidatas: list[dict[str, object]] = []
+    for fila in filas:
+        motivos = [m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m]
+        if motivo_objetivo not in motivos:
+            continue
+        cliente_documental = str(fila.get("cliente", "")).strip()
+        if cliente_documental in _AUSENTES:
+            continue
+        datos_sinteticos = {
+            "número de guía": fila.get("numero_guia", ""),
+            "número de transporte": fila.get("numero_transporte", ""),
+            "cliente": cliente_documental,
+            "RUT del cliente": "",
+        }
+        try:
+            decisiones = detectar_decisiones_documento(
+                archivo=str(fila.get("archivo", "")), datos=datos_sinteticos, carpeta_catalogos=catalogos,
+            )
+        except (OSError, ValueError):
+            continue
+        candidatas.extend(d for d in decisiones if d.get("tipo") == "CLIENTE_CANDIDATO")
+    return candidatas
+
+
+def reconciliar_decisiones_cliente_candidato_historico(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Publica en `decisiones_pendientes.json` la unión de la bandeja
+    pendiente vigente con las decisiones `CLIENTE_CANDIDATO` reconstruidas
+    desde el histórico (ver `detectar_decisiones_cliente_candidato_sin_ocr`)
+    -- mismo patrón que `reconciliar_decisiones_destino_historicas`/
+    `reconciliar_decisiones_origen`. No toca ningún catálogo, el CSV
+    documental ni el ledger -- sólo (re)escribe la bandeja."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+
+    try:
+        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+        pendientes_actuales = artefacto_actual.get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes_actuales = []
+
+    candidatas = detectar_decisiones_cliente_candidato_sin_ocr(raiz_atlas=raiz)
     restantes = regenerar_decisiones_persistidas(
         decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
     )

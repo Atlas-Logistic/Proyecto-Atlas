@@ -436,6 +436,33 @@ def resolver_nombre_empresa_difuso(
     )
 
 
+def resolver_nombre_cliente_difuso(
+    clientes: Any,
+    nombre: str,
+    *,
+    umbral: float = UMBRAL_NOMBRE_EMPRESA_DIFUSO,
+    margen_ambiguedad: float = MARGEN_MINIMO_NOMBRE_EMPRESA_DIFUSO,
+) -> ResultadoCoincidenciaChofer:
+    """Mismo núcleo de resolución difusa (Bloque INTELIGENCIA N1, Fase F,
+    ya usado para chofer/`empresas.json`) aplicado ahora a `clientes.json`
+    (R3.1+) -- Bloque CLIENTE_CANDIDATO: cuando un documento no trae un RUT
+    corroborable, el nombre documental puede seguir siendo evidencia real
+    de identidad si coincide (difuso o por alias, mismo umbral/margen ya
+    calibrados) con un cliente YA CONFIRMADO/ACTIVO -- nunca decide por sí
+    solo (`aplicar_decision_obra` sigue exigiendo confirmación humana),
+    sólo evita que la ausencia de RUT deje la pregunta sin ninguna
+    sugerencia. `clientes` recibe la lista ya filtrada (típicamente
+    `CatalogoClientes(...).listar()` restringida a CONFIRMADO+ACTIVO) --
+    esta función nunca decide qué contar como vigente."""
+    catalogo_adaptado = {
+        cliente.cliente_id: {"nombre": cliente.razon_social, "aliases": list(cliente.aliases)}
+        for cliente in clientes
+    }
+    return _resolver_nombre_difuso_generico(
+        catalogo_adaptado, nombre, umbral=umbral, margen_ambiguedad=margen_ambiguedad,
+    )
+
+
 def registrar_alias_seguro(
     ruta_catalogo: str | Path, identificador: str, alias_nuevo: str
 ) -> bool:
