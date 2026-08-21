@@ -129,6 +129,81 @@ def test_planta_y_despachar_a_resueltos_ejecuta_ors_driving_hgv(plantas_renca):
     assert proveedor.llamadas_ruta == 1
 
 
+def test_geocodificacion_contradice_comuna_documental_no_expone_destino_incorrecto(plantas_renca):
+    """Bloque F (R4.10), caso real 460807: DESPACHAR A menciona "SAN
+    BERNARDO" (comuna Metropolitana) dos veces, pero el geocodificador
+    devolvió un único candidato confiado (0.8) en Angol, La Araucanía --
+    región completamente distinta. `GEOCODIFICACION_CONTRADICE_COMUNA_
+    DOCUMENTAL` ya descartaba la ruta (distancia/tiempo); este fix además
+    retira la etiqueta/localidad/región incorrectas de los campos que
+    Desktop muestra como destino operacional -- antes de este fix, "Angol"
+    seguía llegando a `direccion_entrega` pese a estar marcado REVISAR."""
+    textos = [
+        "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
+        "SEÑOR(ES) : MATERIALES Y SOLUCIONES SA",
+        "OBRA DESTINO : AUSIN SAN BERNARDO",
+        "DESPACHAR A : INTERIOR NUEVA O1148 SAN BERNARDO SAN BERNAR",
+    ]
+    consulta = "INTERIOR NUEVA O1148 SAN BERNARDO SAN BERNAR, Chile"
+    proveedor = ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(
+                    Coordenadas(-72.69, -37.80), "Nueva Rancagua Interior, Angol, AR, Chile", 0.8,
+                    "Angol", "De La Araucania",
+                ),),
+                "REQUIERE_CONFIRMACION_HUMANA",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 650.0, 480.0, "SINTETICO"),
+    )
+    resultado = resolver_entrega_documento(textos, plantas_renca, proveedor)
+    assert resultado["estado_ruta"] == EstadoRuta.REQUIERE_REVISION.value
+    assert "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL" in resultado["motivo_ruta"]
+    assert resultado["distancia_km"] == ""
+    assert resultado["duracion_min"] == ""
+    assert resultado["direccion_entrega"] == ""
+    assert resultado["localidad_entrega"] == ""
+    assert resultado["region_entrega"] == ""
+    # DESPACHAR A crudo (lectura documental local) nunca se pierde.
+    assert "SAN BERNARDO" in resultado["despachar_a_crudo"]
+
+
+def test_calle_homonima_de_una_comuna_de_otra_region_no_bloquea_un_destino_correcto(plantas_renca):
+    """Control crítico -- caso real 472002: DESPACHAR A "GALVARINO 8501
+    QUILICURA" -- "Galvarino" es la calle, pero también existe una comuna
+    real llamada Galvarino (La Araucanía), ajena a este documento. Con dos
+    comunas reales mencionadas (Galvarino, Quilicura), la evidencia
+    documental es ambigua -- nunca debe rechazar un geocode correcto a
+    Quilicura sólo por esa coincidencia léxica del catálogo territorial."""
+    textos = [
+        "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
+        "SEÑOR(ES) : EBEMA SA",
+        "OBRA DESTINO : EBEMA SA",
+        "DESPACHAR A : GALVARINO 8501 QUILICURA",
+    ]
+    consulta = "GALVARINO 8501 QUILICURA, Chile"
+    proveedor = ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(
+                    Coordenadas(-70.73, -33.36), "Galvarino, Quilicura, RM, Chile", 1.0,
+                    "Quilicura", "Metropolitana",
+                ),),
+                "REQUIERE_CONFIRMACION_HUMANA",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 13.1788, 19.058, "SINTETICO"),
+    )
+    resultado = resolver_entrega_documento(textos, plantas_renca, proveedor)
+    assert resultado["estado_ruta"] == EstadoRuta.RUTA_CALCULADA.value
+    assert resultado["distancia_km"] == "13.1788"
+    assert resultado["direccion_entrega"] == "Galvarino, Quilicura, RM, Chile"
+    assert resultado["localidad_entrega"] == "Quilicura"
+
+
 def test_geocodificacion_ambigua_deja_ruta_en_revision_y_conserva_evidencia(plantas_renca):
     consulta = "AV FORESTAL 1014 CORONEL, Chile"
     proveedor = ProveedorRutasSimulado(

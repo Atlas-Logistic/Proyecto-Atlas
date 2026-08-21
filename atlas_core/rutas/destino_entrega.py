@@ -537,6 +537,65 @@ def resolver_destino_entrega(
     )
 
 
+def resolver_destino_entrega_validado(
+    despachar_a_crudo: str | None,
+    proveedor_geocodificacion: ProveedorRutas,
+    *,
+    contexto_territorial: str = "Chile",
+    punto_gps_referencia: Coordenadas | None = None,
+    radio_gps_km: float = 50.0,
+) -> ResultadoDestinoEntrega:
+    """Bloque F (destinos degradados/absurdos) -- igual que
+    `resolver_destino_entrega`, con una validación adicional: un resultado
+    RESUELTO nunca se acepta sólo porque el proveedor respondió con
+    confianza suficiente, se contrasta contra la evidencia documental
+    disponible. Si el propio `despachar_a_crudo` menciona de forma
+    INEQUÍVOCA (`_comuna_documental_inequivoca` -- exactamente una comuna
+    real distinta identificada, nunca varias en conflicto; ver su
+    docstring, caso real 472002 "GALVARINO 8501 QUILICURA") una comuna del
+    catálogo territorial cerrado (345 comunas/16 regiones, sin fuzzy) que
+    CONTRADICE la localidad devuelta por el geocodificador -- caso real
+    460807: el documento dice "SAN BERNARDO" dos veces, sin ninguna otra
+    comuna mencionada, el proveedor devolvió "Angol, La Araucanía" -- se
+    rechaza (`REVISAR`/`GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL`)
+    ANTES de calcular ninguna ruta, en vez de calcularla y descartarla
+    después. Coordenadas/confianza se conservan como evidencia técnica de
+    auditoría; etiqueta/localidad/región del destino rechazado NUNCA se
+    exponen -- nunca aceptar un destino degradado sólo porque hubo alguna
+    respuesta. Sin mención inequívoca de comuna en el texto (ausente, o
+    ambigua entre dos comunas reales), no hay evidencia documental segura
+    con la que contradecir -- se acepta igual que antes (nunca fabrica
+    evidencia donde no la hay, ni arriesga un falso rechazo por una
+    ambigüedad léxica del propio catálogo territorial)."""
+    resultado = resolver_destino_entrega(
+        despachar_a_crudo, proveedor_geocodificacion,
+        contexto_territorial=contexto_territorial,
+        punto_gps_referencia=punto_gps_referencia, radio_gps_km=radio_gps_km,
+    )
+    if resultado.estado != ESTADO_RESUELTO:
+        return resultado
+    comuna_documental = _comuna_documental_inequivoca(despachar_a_crudo or "")
+    if (
+        comuna_documental and resultado.localidad
+        and _texto_normalizado_sin_acentos(comuna_documental)
+        != _texto_normalizado_sin_acentos(resultado.localidad)
+    ):
+        return ResultadoDestinoEntrega(
+            despachar_a_crudo=resultado.despachar_a_crudo,
+            coordenadas=resultado.coordenadas,
+            etiqueta_geocodificada="",
+            confianza=resultado.confianza,
+            estado=ESTADO_REVISAR,
+            motivo=(
+                "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
+                f"{comuna_documental} != {resultado.localidad}"
+            ),
+            localidad="", region="",
+            metodo_confirmacion=resultado.metodo_confirmacion,
+        )
+    return resultado
+
+
 CAMPOS_RESULTADO_RUTA_ENTREGA = (
     "planta_origen_id", "planta_origen_nombre",
     "despachar_a_crudo", "direccion_entrega_geocodificada",
@@ -613,16 +672,23 @@ def calcular_ruta_con_planta_conocida(
             origen_determinado_por=origen_determinado_por, evidencia_origen=evidencia_origen,
         )
 
-    entrega = resolver_destino_entrega(
+    entrega = resolver_destino_entrega_validado(
         despachar_a_crudo, proveedor_rutas,
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
     )
     if entrega.estado != ESTADO_RESUELTO:
+        # Bloque F (destinos degradados/absurdos): un destino RECHAZADO
+        # (confianza insuficiente, ambiguo, etc.) nunca debe exponerse como
+        # si fuera el destino operacional -- antes de este fix,
+        # `direccion_entrega_geocodificada`/`localidad`/`region` seguían
+        # llevando la etiqueta descartada (p. ej. "Chile" a confianza 0.1)
+        # hasta la columna que Desktop muestra como "Destino operacional".
+        # Las coordenadas/confianza SÍ se conservan -- son evidencia técnica
+        # de auditoría (Fase J), nunca "el destino", y `motivo_ruta` ya
+        # explica por qué se descartó.
         return ResultadoRutaEntrega(
             planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
             despachar_a_crudo=entrega.despachar_a_crudo,
-            direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
-            localidad_entrega=entrega.localidad, region_entrega=entrega.region,
             longitud_entrega=str(entrega.coordenadas.longitud) if entrega.coordenadas else "",
             latitud_entrega=str(entrega.coordenadas.latitud) if entrega.coordenadas else "",
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -713,21 +779,21 @@ def calcular_ruta_entrega_para_viaje(
             motivo_ruta="PLANTA_SIN_COORDENADAS_EN_CATALOGO",
         )
 
-    entrega = resolver_destino_entrega(
+    entrega = resolver_destino_entrega_validado(
         despachar_a_crudo, proveedor_rutas,
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
     )
     if entrega.estado != ESTADO_RESUELTO:
-        # Se conserva toda la evidencia parcial ya obtenida (etiqueta,
-        # coordenadas, localidad/región, confianza) aunque la geocodificación
-        # no haya quedado lo bastante segura para calcular ruta -- Fase J
-        # (observabilidad): un motivo explícito sin evidencia no basta para
-        # que una persona revise el caso.
+        # Bloque F: coordenadas/confianza SÍ se conservan (evidencia
+        # técnica de auditoría, Fase J -- `motivo_ruta` ya explica por qué
+        # se descartó), pero la ETIQUETA/localidad/región de un destino
+        # RECHAZADO nunca se expone como si fuera el destino operacional --
+        # ver `calcular_ruta_con_planta_conocida` (mismo criterio, casos
+        # reales 460807/472008: "Angol"/"Chile" a confianza insuficiente o
+        # contradiciendo la comuna documental seguían llegando a Desktop).
         return ResultadoRutaEntrega(
             planta_origen_id=planta.planta_id, planta_origen_nombre=planta.nombre,
             despachar_a_crudo=entrega.despachar_a_crudo,
-            direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
-            localidad_entrega=entrega.localidad, region_entrega=entrega.region,
             longitud_entrega=str(entrega.coordenadas.longitud) if entrega.coordenadas else "",
             latitud_entrega=str(entrega.coordenadas.latitud) if entrega.coordenadas else "",
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -787,6 +853,45 @@ def _comuna_explicita(texto: str) -> str:
             if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna:
                 return resultado.comuna
     return ""
+
+
+def _comunas_explicitas(texto: str) -> tuple[str, ...]:
+    """Todas las comunas DISTINTAS del catálogo territorial cerrado que
+    aparecen como frase exacta en `texto` (sin fuzzy) -- a diferencia de
+    `_comuna_explicita` (que se detiene en la primera coincidencia por
+    ventana más larga), aquí se recogen TODAS las que aparecen, para
+    poder distinguir una mención inequívoca de una genuinamente ambigua
+    -- ver `_comuna_documental_inequivoca`."""
+    tokens = re.findall(r"[A-ZÁÉÍÓÚÜÑ]+", str(texto or "").upper())
+    encontradas: list[str] = []
+    for largo in range(min(4, len(tokens)), 0, -1):
+        for inicio in range(len(tokens) - largo + 1):
+            resultado = normalizar_comuna(" ".join(tokens[inicio:inicio + largo]))
+            if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna and resultado.comuna not in encontradas:
+                encontradas.append(resultado.comuna)
+    return tuple(encontradas)
+
+
+def _comuna_documental_inequivoca(texto: str) -> str:
+    """Bloque F -- una comuna documental sólo sirve como evidencia para
+    CONTRADECIR un resultado de geocodificación cuando el texto la
+    menciona de forma INEQUÍVOCA: exactamente una comuna real distinta
+    identificada, nunca varias en conflicto.
+
+    Caso real 472002 ("GALVARINO 8501 QUILICURA"): "Galvarino" es aquí el
+    nombre de la CALLE, no la comuna -- pero también existe una comuna
+    real llamada Galvarino (La Araucanía), completamente ajena a este
+    documento; "Quilicura" (la comuna real de entrega, ya geocodificada
+    correctamente) es la otra mención. Con dos comunas reales en el mismo
+    texto, no hay forma determinista y segura de saber cuál es la comuna
+    de entrega -- se abstiene (cadena vacía) en vez de arriesgarse a
+    rechazar un destino correcto por una ambigüedad léxica del propio
+    catálogo territorial (dos comunas reales que comparten nombre con una
+    calle). Con una sola comuna mencionada (caso real 460807: "SAN
+    BERNARDO" repetido, ninguna otra comuna en el texto), la evidencia sí
+    es inequívoca y puede contradecir con seguridad."""
+    comunas = _comunas_explicitas(texto)
+    return comunas[0] if len(comunas) == 1 else ""
 
 
 def resolver_entrega_documento(
@@ -881,18 +986,12 @@ def resolver_entrega_documento(
     resultado["estado_entrega"] = (
         "RESUELTO" if ruta_entrega.direccion_entrega_geocodificada else "REVISAR"
     )
-    comuna_documental = _comuna_explicita(despachar_a_crudo)
-    if (
-        comuna_documental and ruta_entrega.localidad_entrega
-        and _texto_normalizado_sin_acentos(comuna_documental)
-        != _texto_normalizado_sin_acentos(ruta_entrega.localidad_entrega)
-    ):
-        resultado["estado_entrega"] = "REVISAR"
-        resultado["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
-        resultado["motivo_ruta"] = (
-            "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
-            f"{comuna_documental} != {ruta_entrega.localidad_entrega}"
-        )
-        resultado["distancia_km"] = ""
-        resultado["duracion_min"] = ""
+    # Bloque F: la contradicción contra la comuna documental (p. ej.
+    # "Angol" cuando el documento dice "SAN BERNARDO") ya se valida DENTRO
+    # de `calcular_ruta_entrega_para_viaje` -- vía
+    # `resolver_destino_entrega_validado`, ANTES de calcular ninguna ruta
+    # -- así que `ruta_entrega` ya llega limpia (sin etiqueta/localidad/
+    # región cuando hubo contradicción, con `motivo_ruta` explicando por
+    # qué). No se repite la regla aquí -- un solo lugar, sin arquitectura
+    # paralela.
     return resultado

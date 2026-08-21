@@ -14,6 +14,8 @@ from atlas_core.rutas.destino_entrega import (
     ESTADO_REVISAR,
     ESTADO_RESUELTO,
     ESTADO_SIN_DATO,
+    _comuna_documental_inequivoca,
+    _comunas_explicitas,
     calcular_ruta_entrega_para_viaje,
     resolver_destino_entrega,
 )
@@ -202,6 +204,60 @@ def test_entrega_ambigua_nunca_calcula_ruta(planta_renca):
     assert resultado.estado_ruta == EstadoRuta.REQUIERE_REVISION.value
     assert "MULTIPLES_UBICACIONES_DISPERSAS" in resultado.motivo_ruta
     assert proveedor.llamadas_ruta == 0
+
+
+def test_destino_rechazado_por_confianza_no_expone_etiqueta_ni_localidad(planta_renca):
+    """Bloque F (R4.10), caso real 472008: un candidato a confianza
+    insuficiente (0.1, "Chile" sin localidad/región) no debe exponer su
+    etiqueta como si fuera el destino operacional resuelto -- coordenadas/
+    confianza sí se conservan (evidencia técnica), pero
+    direccion_entrega_geocodificada/localidad/región quedan vacías."""
+    plantas, _ = planta_renca
+    consulta = "DIRECCION ILEGIBLE 999, Chile"
+    proveedor = ProveedorRutasSimulado(geocodificaciones={
+        consulta: ResultadoGeocodificacion(
+            EstadoRuta.REQUIERE_REVISION,
+            (CandidatoGeocodificacion(Coordenadas(-72.27, -38.17), "Chile", 0.1, localidad="", region=""),),
+            "REQUIERE_CONFIRMACION_HUMANA",
+        )
+    })
+    resultado = calcular_ruta_entrega_para_viaje(
+        despachar_a_crudo="DIRECCION ILEGIBLE 999",
+        patente=None, instante_salida=None, plantas=plantas,
+        proveedor_posicion=None, proveedor_rutas=proveedor,
+        textos_documento=[TEXTOS_ENCABEZADO_RENCA],
+    )
+    assert resultado.estado_ruta == EstadoRuta.REQUIERE_REVISION.value
+    assert resultado.motivo_ruta == "CONFIANZA_INSUFICIENTE"
+    assert resultado.direccion_entrega_geocodificada == ""
+    assert resultado.localidad_entrega == ""
+    assert resultado.region_entrega == ""
+    # Evidencia técnica de auditoría -- se conserva.
+    assert resultado.confianza_geocodificacion == "0.1"
+    assert resultado.longitud_entrega and resultado.latitud_entrega
+
+
+def test_comuna_documental_inequivoca_encuentra_una_comuna_repetida():
+    """Caso real 460807: "SAN BERNARDO" aparece dos veces (misma comuna) --
+    una sola comuna DISTINTA, evidencia inequívoca."""
+    texto = "INTERIOR NUEVA O1148 SAN BERNARDO SAN BERNAR"
+    assert _comunas_explicitas(texto) == ("San Bernardo",)
+    assert _comuna_documental_inequivoca(texto) == "San Bernardo"
+
+
+def test_comuna_documental_inequivoca_se_abstiene_ante_dos_comunas_reales_distintas():
+    """Caso real 472002: "Galvarino" (calle, mas también comuna real de
+    La Araucanía) y "Quilicura" (comuna real de la entrega) -- dos comunas
+    reales distintas en el mismo texto, ambigüedad léxica del catálogo
+    territorial -- nunca se usa como evidencia para contradecir nada."""
+    texto = "GALVARINO 8501 QUILICURA"
+    comunas = _comunas_explicitas(texto)
+    assert set(comunas) == {"Galvarino", "Quilicura"}
+    assert _comuna_documental_inequivoca(texto) == ""
+
+
+def test_comuna_documental_inequivoca_vacia_sin_ninguna_comuna_reconocida():
+    assert _comuna_documental_inequivoca("DIRECCION SIN NINGUNA COMUNA VALIDA 123") == ""
 
 
 def test_caso_real_464170_apunta_a_mejillones_no_a_galvarino(planta_renca):

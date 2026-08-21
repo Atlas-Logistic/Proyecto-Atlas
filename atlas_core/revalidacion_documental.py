@@ -53,6 +53,7 @@ from atlas_core.procesamiento_masivo import (
     _parsear_fecha_dd_mm_yyyy,
 )
 from atlas_core.reporte_viajes import generar_reporte_viajes
+from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.telemetria.enriquecimiento import enriquecer_documento_con_telemetria
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.proveedor import ProveedorTelemetriaSoloCache
@@ -578,6 +579,178 @@ def revalidar_telemetria_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_destino_contra_comuna_documental_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque F (R4.10) -- limpieza retroactiva, sin OCR y sin red: releé
+    cada fila con `direccion_entrega` YA persistida (de una corrida
+    anterior al fix de `resolver_destino_entrega_validado`, que ahora
+    aplica estas mismas reglas ANTES de calcular la ruta) y la retira si
+    demuestra ser un destino degradado/absurdo -- mismos criterios ya
+    usados en vivo, nunca una regla nueva. Nunca vuelve a golpear el
+    geocodificador -- trabaja sólo con columnas ya escritas.
+
+    Dos motivos, cada uno restringido a su propia evidencia:
+    - `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL`: el propio
+      `despachar_a_crudo` menciona de forma INEQUÍVOCA (exactamente una
+      comuna real distinta, nunca varias en conflicto -- ver
+      `_comuna_documental_inequivoca`, caso real 472002 "GALVARINO 8501
+      QUILICURA": "Galvarino" es la calle, pero también existe una comuna
+      real con ese nombre en otra región -- ambigüedad léxica, nunca se
+      usa como evidencia) una comuna del catálogo territorial cerrado que
+      NO coincide con la localidad geocodificada -- caso real 460807
+      ("SAN BERNARDO" documental, sin ninguna otra comuna en el texto, vs
+      "Angol" geocodificado).
+    - `GEOCODIFICACION_DEMASIADO_GENERICA`: el resultado no trae
+      localidad NI región (coincidencia a nivel país, p. ej. la etiqueta
+      "Chile" sola) -- nunca un destino operacional útil, sin importar la
+      confianza informada. Restringido a filas que NO quedaron
+      `RUTA_CALCULADA` (nunca toca una ruta ya completa y confiable) --
+      caso real 472008 (misma obra que 460807, degradado a "Chile").
+
+    Cualquiera sea el estado actual (incluso si una corrida anterior a
+    este fix llegó a calcular una ruta completa hasta el destino
+    contradicho), se retira por completo: nunca se deja un km/tiempo
+    calculado hacia un destino ya demostrado incorrecto. Se abstiene fila
+    por fila si no hay evidencia demostrable (nunca inventa una)."""
+    from atlas_core.rutas.destino_entrega import _comuna_documental_inequivoca, _texto_normalizado_sin_acentos
+
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            direccion = str(fila.get("direccion_entrega", "")).strip()
+            if not direccion:
+                continue
+            localidad = str(fila.get("localidad_entrega", "")).strip()
+            region = str(fila.get("region_entrega", "")).strip()
+            despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+            estado_ruta_actual = str(fila.get("estado_ruta", "")).strip()
+
+            motivo_rechazo = ""
+            if despachar_a and localidad:
+                comuna_documental = _comuna_documental_inequivoca(despachar_a)
+                if (
+                    comuna_documental
+                    and _texto_normalizado_sin_acentos(comuna_documental)
+                    != _texto_normalizado_sin_acentos(localidad)
+                ):
+                    motivo_rechazo = (
+                        "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
+                        f"{comuna_documental} != {localidad}"
+                    )
+            if (
+                not motivo_rechazo and not localidad and not region
+                and estado_ruta_actual != EstadoRuta.RUTA_CALCULADA.value
+            ):
+                motivo_rechazo = "GEOCODIFICACION_DEMASIADO_GENERICA"
+            if not motivo_rechazo:
+                continue
+
+            fila["direccion_entrega"] = ""
+            fila["localidad_entrega"] = ""
+            fila["region_entrega"] = ""
+            fila["distancia_km"] = ""
+            fila["duracion_min"] = ""
+            fila["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
+            fila["motivo_ruta"] = motivo_rechazo
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def revalidar_ruta_sin_destino_calculado_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    proveedor_rutas=None, perfil: str = "driving-hgv",
+) -> dict[str, object]:
+    """Bloque H (R4.10) -- para filas con planta de origen y
+    `despachar_a_crudo` YA persistidos (documento ya procesado, sin OCR
+    aquí) pero sin ruta calculada, reintenta geocodificación/ruta con las
+    reglas ya corregidas (`resolver_destino_entrega_validado`, vía
+    `calcular_ruta_con_planta_conocida`) -- nunca vuelve a leer el
+    documento, pero SÍ puede consultar el proveedor de geocodificación/
+    rutas real: con caché (una dirección ya geocodificada, como en el
+    caso real que motivó esto, no vuelve a pagar la consulta).
+
+    Caso real 464991: DESPACHAR A menciona "PROVIDENCIA" Y "SANTIAGO" --
+    dos comunas reales en el mismo texto (ver
+    `_comuna_documental_inequivoca`) -- así que la comuna documental es
+    ambigua y nunca contradice nada; el candidato geocodificado
+    (confianza 1.0, "Avenida Providencia, Santiago, RM, Chile") ya era
+    válido, sólo que el código anterior lo rechazaba por error (comparaba
+    contra la primera comuna mencionada, "Providencia", sin considerar la
+    ambigüedad). Corregido ese error, la ruta sí puede calcularse.
+
+    Ejecutar DESPUÉS de `revalidar_destino_contra_comuna_documental_sin_ocr`
+    (que ya retira cualquier destino degradado/absurdo persistido): filas
+    con un motivo de rechazo real (comuna inequívocamente contradicha,
+    resultado demasiado genérico, múltiples ubicaciones dispersas, origen
+    no determinado) vuelven a fallar exactamente igual y quedan intactas
+    -- nunca inventa, nunca fuerza un resultado. `proveedor_rutas=None`
+    (por defecto) usa `OpenRouteService` + caché de geocodificación real,
+    igual que el pipeline en vivo -- inyectable para tests."""
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
+
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    if proveedor_rutas is None:
+        from atlas_core.rutas.cache_geocodificacion import (
+            ProveedorRutasConCacheGeocodificacion,
+            RepositorioCacheGeocodificacion,
+        )
+        from atlas_core.rutas.openrouteservice import OpenRouteService
+
+        proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
+            OpenRouteService(), RepositorioCacheGeocodificacion(),
+        )
+    try:
+        plantas_por_id = {p.planta_id: p for p in CatalogoPlantas(carpeta / "plantas.json").listar()}
+    except (OSError, ValueError):
+        plantas_por_id = {}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+            planta_id = str(fila.get("planta_origen_id", "")).strip()
+            if not despachar_a or not planta_id:
+                continue
+            planta = plantas_por_id.get(planta_id)
+            if planta is None:
+                continue
+            try:
+                resultado = calcular_ruta_con_planta_conocida(
+                    planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
+                    origen_determinado_por=str(fila.get("origen_determinado_por", "")),
+                    evidencia_origen=str(fila.get("evidencia_origen", "")),
+                    perfil=perfil,
+                )
+            except (OSError, ValueError):
+                continue
+            if resultado.estado_ruta != EstadoRuta.RUTA_CALCULADA.value:
+                continue  # sigue sin resolver con evidencia suficiente -- nunca inventa
+            fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
+            fila["localidad_entrega"] = resultado.localidad_entrega
+            fila["region_entrega"] = resultado.region_entrega
+            fila["distancia_km"] = resultado.distancia_km
+            fila["duracion_min"] = resultado.duracion_min
+            fila["proveedor_ruta"] = resultado.proveedor_ruta
+            fila["estado_ruta"] = resultado.estado_ruta
+            fila["motivo_ruta"] = ""
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None,
 ) -> dict[str, object]:
@@ -609,10 +782,17 @@ def revalidar_y_regenerar_reporte(
     resultado_cliente = revalidar_cliente_sin_corroborar_sin_ocr(
         ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+    # Bloque F (R4.10): limpieza retroactiva de destinos degradados/
+    # absurdos que quedaron persistidos antes del fix de
+    # `resolver_destino_entrega_validado` -- sin OCR, sin red.
+    resultado_destino_contradicho = revalidar_destino_contra_comuna_documental_sin_ocr(
+        ruta_dataset=dataset,
+    )
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
         | set(resultado_cliente["guias_actualizadas"])
+        | set(resultado_destino_contradicho["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -620,6 +800,7 @@ def revalidar_y_regenerar_reporte(
         "obra_destino": resultado_obra_destino,
         "patente": resultado_patente,
         "cliente": resultado_cliente,
+        "destino_contradicho": resultado_destino_contradicho,
     }
     if not guias_actualizadas:
         return {**resultado_revalidacion, "reporte_regenerado": False}
