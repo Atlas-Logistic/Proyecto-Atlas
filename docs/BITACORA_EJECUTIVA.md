@@ -1635,3 +1635,81 @@ silencio).
 
 **Estado: BLOQUE R6 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R7 -- B1 universal: capa cognitiva transversal (2026-08-21)
+
+**Limitación anterior:** `procesamiento_masivo._ejecutar_ia_operacional`
+escalaba a B1 sólo para 4 motivos hardcodeados en un diccionario fijo
+(`OBRA_DESTINO_SIN_CORROBORAR`/`CHOFER_SIN_CORROBORAR`/
+`PATENTE_SIN_HOMOLOGAR`/`CLIENTE_SIN_CORROBORAR`). El orquestador
+(`atlas_ia/orquestador.py`) y los contratos (`contratos.py`,
+`validadores.py`) ya eran genéricos por diseño -- el cuello de botella
+vivía enteramente en ese diccionario del punto de entrada, nunca en la
+capa de razonamiento.
+
+**Arquitectura universal implementada:** nuevo
+`atlas_core/atlas_ia/registro_problemas.py` -- un REGISTRO de
+`TipoProblemaIA` (código(s) de motivo activador, dominio, campo,
+recolector de evidencia propio, herramientas relevantes, si se auto-
+aplica o sólo asiste). `_ejecutar_ia_operacional` se reescribió para
+despachar por este registro (`detectar_problemas_elegibles`) en vez del
+diccionario fijo -- agregar un problema nuevo es agregar UNA entrada,
+nunca tocar el bucle. Puerta de entrada generalizada
+(`_fila_requiere_atencion_operacional`): ya no depende sólo de
+`indicador_revision == REVISAR` (que nunca veía problemas de ruta/
+origen) -- también mira `estado_ruta`.
+
+**Dominios habilitados:** los 4 de siempre (comportamiento IDÉNTICO,
+verificado por regresión) + 2 nuevos: DESTINO (Bloque R6, evidencia por
+obra relacionada con entrega ya resuelta) y PLANTA_ORIGEN (Bloque R5,
+reutiliza EXACTAMENTE los candidatos que ya calcula
+`detectar_decision_origen_no_confirmado` -- nunca un cálculo nuevo).
+Ninguno de los 2 nuevos se auto-aplica -- sólo alimentan, como evidencia
+adicional, la decisión humana ya existente (`DESTINO_NO_RESUELTO`/
+`ORIGEN_NO_CONFIRMADO`) -- Motor y confirmación humana siguen mandando.
+`NO_ELEGIBLE_IA` explícito para motivos técnicos externos
+(`MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES`: sin credencial/conexión/proveedor
+caído/límite de cuota/etc.) y para evidencia genuinamente insuficiente
+(p.ej. `SIN_EVIDENCIA_GPS`) -- nunca un silencio de "0 llamadas" sin
+explicación.
+
+**Prueba E2E real (Groq, `openai/gpt-oss-120b`), 2 dominios distintos,
+sin tocar producción (copia controlada):**
+- DESTINO: guías reales 460807 + 472008 (ambas con problema real de
+  geocodificación) + 1 documento fixture representativo de la misma obra
+  real "AUSIN SAN BERNARDO" con entrega ya resuelta (política explícita
+  del bloque: "si no existen dos casos reales, uno real + fixture"). 2
+  llamadas reales, ambas B_ASISTENCIA -- propuesta razonada, evidencia
+  usada, validador aceptó la hipótesis, nunca se auto-aplicó
+  (`despachar_a_crudo` intacto en ambas).
+- CLIENTE_SIN_CORROBORAR: fixture representativo (hoy sin caso real
+  pendiente -- los 9 viajes reales están confirmados), mismo patrón
+  exacto que ya usa producción. 1 llamada real, B_ASISTENCIA, tampoco se
+  auto-aplicó (evidencia nivel DOCUMENTO_RELACIONADO nunca alcanza clase
+  A -- mismo límite que ya regía antes de este bloque).
+- Total: 3 llamadas reales a Groq, 0 escrituras indebidas, validadores
+  gobernando la aceptación en los 3 casos.
+
+**Aprendizaje:** cada llamada queda trazada en `resultado_atlas_ia_json`
+(dominio/campo/elegible/llamada_realizada/clasificación/evidencia/
+validación) -- ninguna memoria paralela; el aprendizaje de decisiones
+humanas sigue viviendo en los mecanismos ya existentes (ledger,
+catálogos, `catalogo_obras_destinos`).
+
+**Compatibilidad:** 464959/464960, XF3629, 9 confirmados/0 revisión,
+decisiones R5/R6, Incidencias Documentales -- sin cambios de código en
+esas rutas; Desktop no requirió ningún cambio (consume
+`resultado_atlas_ia_json` sin parsear su forma interna).
+
+17 tests focales nuevos + toda la suite existente sin cambios de
+comportamiento para los 4 dominios de siempre. Suite completa: 1608
+passed (antes 1591).
+
+**No se aplicó nada a Drive real en este bloque** -- el registro es
+código nuevo que empieza a operar en el próximo procesamiento real; no
+había ninguna escritura retroactiva segura que hacer (los 2 dominios
+nuevos nunca escriben solos, y los 4 de siempre no cambiaron de
+comportamiento).
+
+**Estado: BLOQUE R7 CERRADO EN CÓDIGO, VALIDADO END-TO-END CON GROQ
+REAL EN 2 DOMINIOS. Sin push en ninguno de los dos repos.**

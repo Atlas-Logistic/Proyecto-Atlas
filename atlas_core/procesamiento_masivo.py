@@ -75,6 +75,7 @@ from atlas_core.rutas.destino_entrega import (
     calcular_ruta_con_planta_conocida,
     resolver_entrega_documento,
 )
+from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.seleccion_recorrido import (
     ORIGEN_GPS_CONFIRMADO,
@@ -2062,58 +2063,79 @@ def _crear_orquestador_ia_configurado():
     return OrquestadorAtlasIA(proveedor=ProveedorModeloIAGroq())
 
 
+def _fila_requiere_atencion_operacional(fila: Mapping[str, str]) -> bool:
+    """Bloque R7 -- puerta de entrada barata (sin red, sin B1) para decidir
+    si vale la pena siquiera preguntarle al registro universal de
+    problemas: algún motivo documental presente, o una ruta/origen que
+    todavía no llegó a un estado resuelto. Reemplaza la puerta anterior
+    (`indicador_revision == "REVISAR"`), que sólo veía motivos
+    documentales y dejaba invisibles los de ruta/origen (causa raíz de
+    "B1 nunca interviene en destino/planta", Bloque R7)."""
+    if str(fila.get("motivos_revision_documento", "")).strip():
+        return True
+    if str(fila.get("estado_ruta", "")).strip() not in ("", EstadoRuta.RUTA_CALCULADA.value):
+        return True
+    return False
+
+
 def _ejecutar_ia_operacional(
     ruta_csv: Path, archivos_objetivo: set[str], orquestador: object,
+    carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, int | float]:
-    """Escala a B1 tras el determinista y aplica sólo autonomía A permitida."""
-    from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
+    """Bloque R7 -- escala a B1 CUALQUIER problema elegible (Motor primero
+    siempre; ver `atlas_core.atlas_ia.registro_problemas`), no sólo los 4
+    motivos documentales de antes. Aplica sólo autonomía A permitida por
+    tipo de problema (`TipoProblemaIA.aplicable_automaticamente`); el
+    resto (hoy: planta origen, destino) sólo aporta evidencia adicional a
+    la decisión humana que ya existe (Bloque R5/R6) -- nunca se auto-
+    aplica una planta o una dirección."""
+    from atlas_core.atlas_ia.contratos import ContextoRazonamiento
+    from atlas_core.atlas_ia.registro_problemas import (
+        MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
+        detectar_problemas_elegibles,
+        motivo_ruta_base,
+    )
 
     resumen: dict[str, int | float] = {"llamadas": 0, "A": 0, "B": 0, "C": 0, "D": 0, "latencia_segundos": 0.0}
-    if orquestador is None or not ruta_csv.is_file():
+    if not ruta_csv.is_file():
         return resumen
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         filas = list(csv.DictReader(archivo, delimiter=";"))
-    campos = {
-        "OBRA_DESTINO_SIN_CORROBORAR": "obra_destino",
-        "CHOFER_SIN_CORROBORAR": "rut_chofer",
-        "PATENTE_SIN_HOMOLOGAR": "patente_tracto",
-        "CLIENTE_SIN_CORROBORAR": "cliente",
-    }
     cambio = False
     for fila in filas:
-        if fila.get("archivo") not in archivos_objetivo or fila.get("indicador_revision") != "REVISAR":
+        if fila.get("archivo") not in archivos_objetivo or not _fila_requiere_atencion_operacional(fila):
             continue
         resultados = []
-        motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|")}
-        for motivo, campo in campos.items():
-            if motivo not in motivos:
+        motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()}
+        codigos_atendidos: set[str] = set()
+        for tipo, codigo in detectar_problemas_elegibles(fila):
+            codigos_atendidos.add(codigo)
+            if orquestador is None:
+                # B1 desactivado/sin credencial: el problema SIGUE siendo
+                # elegible (hay evidencia potencial que analizar), pero no
+                # hay con qué llamar -- explícito, nunca un silencio de
+                # "0 llamadas" sin razón.
+                resultados.append({
+                    "problema": codigo, "dominio": tipo.dominio, "campo": tipo.campo,
+                    "elegible_ia": True, "llamada_realizada": False,
+                    "razon_no_elegible": "SIN_PROVEEDOR_IA_CONFIGURADO",
+                })
                 continue
-            evidencias = []
-            for otra in filas:
-                if otra is fila or otra.get(campo) in {"", "No encontrado"}:
-                    continue
-                senales = sum((
-                    otra.get("fecha") == fila.get("fecha"),
-                    otra.get("numero_transporte") == fila.get("numero_transporte"),
-                    _normalizar(otra.get("chofer")) == _normalizar(fila.get("chofer")),
-                    otra.get("patente_tracto") == fila.get("patente_tracto"),
-                    _normalizar(otra.get("obra_destino")) == _normalizar(fila.get("obra_destino")),
-                ))
-                if senales >= 3:
-                    evidencias.append(EvidenciaIA(
-                        identificador=f"documento:{otra.get('archivo')}", campo=campo,
-                        valor=otra[campo], tipo_fuente="HISTORICO", nivel="DOCUMENTO_RELACIONADO",
-                        independencia=1, procedencia="procesamiento_masivo",
-                        referencias_fuente=(otra.get("archivo", ""),),
-                    ))
+            evidencias = tipo.recopilar_evidencia(fila, filas, carpeta_catalogos=carpeta_catalogos)
             if not evidencias:
+                resultados.append({
+                    "problema": codigo, "dominio": tipo.dominio, "campo": tipo.campo,
+                    "elegible_ia": True, "llamada_realizada": False,
+                    "razon_no_elegible": "SIN_EVIDENCIA_PARA_RAZONAR",
+                })
                 continue
             contexto = ContextoRazonamiento(
-                campo=campo, valor_documental=fila.get(campo, ""),
+                campo=tipo.campo, valor_documental=fila.get(tipo.campo, ""),
                 rut_chofer=fila.get("rut_chofer", ""), numero_guia=fila.get("numero_guia", ""),
-                numero_transporte=fila.get("numero_transporte", ""), evidencias=tuple(evidencias),
-                resultado_motor="REQUIERE_REVISION", explicacion_motor=motivo,
+                numero_transporte=fila.get("numero_transporte", ""), evidencias=evidencias,
+                resultado_motor="REQUIERE_REVISION", explicacion_motor=codigo,
                 identidad_documento=fila.get("archivo", ""),
+                herramientas_disponibles=tipo.herramientas,
                 restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_DOS_RONDAS"),
             )
             inicio = time.perf_counter()
@@ -2124,16 +2146,19 @@ def _ejecutar_ia_operacional(
             clase = str(resultado.clasificacion)[:1]
             resumen[clase] = int(resumen.get(clase, 0)) + 1
             traza = resultado.a_dict()
-            traza["problema"] = motivo
-            traza["latencia_segundos"] = round(latencia, 6)
+            traza.update({
+                "problema": codigo, "dominio": tipo.dominio, "campo": tipo.campo,
+                "elegible_ia": True, "llamada_realizada": True,
+                "latencia_segundos": round(latencia, 6),
+            })
             aplicable_a = (
-                clase == "A" and resultado.hipotesis is not None
+                tipo.aplicable_automaticamente and tipo.aplicar is not None
+                and clase == "A" and resultado.hipotesis is not None
                 and resultado.hipotesis.resultado == "PROPUESTA"
-                and campo in {"cliente", "obra_destino", "rut_chofer", "patente_tracto", "patente_rampla"}
             )
             if aplicable_a:
-                fila[campo] = resultado.hipotesis.valor_propuesto
-                motivos.discard(motivo)
+                tipo.aplicar(fila, resultado.hipotesis.valor_propuesto)
+                motivos.discard(codigo)
                 fila["motivos_revision_documento"] = " | ".join(sorted(m for m in motivos if m))
                 fila["indicador_revision"] = "REVISAR" if any(
                     m not in MOTIVOS_NO_BLOQUEANTES for m in motivos if m
@@ -2142,10 +2167,30 @@ def _ejecutar_ia_operacional(
             traza["aplicado_operacionalmente"] = aplicable_a
             traza["evito_intervencion_humana"] = aplicable_a and fila["indicador_revision"] == "OK"
             resultados.append(traza)
+        # Bloque R7 -- casos técnicos donde B1 no tiene nada que razonar
+        # (proveedor caído, timeout, sin conexión, ...): NUNCA un silencio
+        # de "0 llamadas" sin explicación. Cualquier motivo_ruta presente
+        # que NO haya sido atendido arriba se registra con su razón
+        # explícita -- técnica (sin razonamiento posible) o evidencia
+        # insuficiente (mismo criterio que el resto de Atlas: nunca
+        # preguntar sin nada que mostrar).
+        codigo_ruta = motivo_ruta_base(str(fila.get("motivo_ruta", "")))
+        if codigo_ruta and codigo_ruta not in codigos_atendidos:
+            razon = (
+                "FALLA_TECNICA_EXTERNA_SIN_RAZONAMIENTO_POSIBLE"
+                if codigo_ruta in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
+                else "EVIDENCIA_INSUFICIENTE_PARA_FORMULAR_PREGUNTA"
+            )
+            resultados.append({
+                "problema": codigo_ruta, "dominio": "RUTA", "campo": "motivo_ruta",
+                "elegible_ia": False, "llamada_realizada": False, "razon_no_elegible": razon,
+            })
         if resultados:
             fila["resultado_atlas_ia_json"] = json.dumps(resultados, ensure_ascii=False, sort_keys=True)
             metricas = json.loads(fila.get("metricas_procesamiento_json") or "{}")
-            metricas["atlas_ia_segundos"] = round(sum(r["latencia_segundos"] for r in resultados), 6)
+            metricas["atlas_ia_segundos"] = round(
+                sum(r.get("latencia_segundos", 0) for r in resultados), 6
+            )
             fila["metricas_procesamiento_json"] = json.dumps(metricas, sort_keys=True)
             cambio = True
     if cambio:
@@ -2159,9 +2204,11 @@ def _ejecutar_ia_operacional(
 
 def escalar_resultado_ia_en_memoria(
     datos: Mapping[str, object], historial: Iterable[Mapping[str, object]],
-    *, orquestador_ia: object = None,
+    *, orquestador_ia: object = None, carpeta_catalogos: str | Path | None = None,
 ) -> tuple[dict[str, str], dict[str, int | float]]:
-    """Entrada común para Mobile: reutiliza exactamente el escalamiento B1 del lote."""
+    """Entrada común para Mobile: reutiliza exactamente el escalamiento B1
+    del lote (Bloque R7: el mismo registro universal, nunca un segundo
+    camino de escalamiento para Mobile)."""
     fila = {columna: str(datos.get(columna, "")) for columna in COLUMNAS}
     fila["archivo"] = fila.get("archivo") or "__mobile_actual__"
     filas = [{columna: str(f.get(columna, "")) for columna in COLUMNAS} for f in historial]
@@ -2172,7 +2219,7 @@ def escalar_resultado_ia_en_memoria(
             escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
             escritor.writeheader(); escritor.writerows(filas)
         orquestador = orquestador_ia if orquestador_ia is not None else _crear_orquestador_ia_configurado()
-        resumen = _ejecutar_ia_operacional(ruta, {fila["archivo"]}, orquestador)
+        resumen = _ejecutar_ia_operacional(ruta, {fila["archivo"]}, orquestador, carpeta_catalogos)
         with ruta.open(newline="", encoding="utf-8-sig") as archivo:
             salida = list(csv.DictReader(archivo, delimiter=";"))[-1]
     return salida, resumen
@@ -2376,7 +2423,7 @@ def procesar_carpeta(
     resumen["documentos_relacionados_corroborados"] = corroborados
     if orquestador_ia is None:
         orquestador_ia = _crear_orquestador_ia_configurado()
-    resumen["atlas_ia"] = _ejecutar_ia_operacional(ruta_csv, archivos_procesados_ahora, orquestador_ia)
+    resumen["atlas_ia"] = _ejecutar_ia_operacional(ruta_csv, archivos_procesados_ahora, orquestador_ia, carpeta_catalogos)
 
     tiempo_total = time.perf_counter() - inicio
     resumen["tiempo_total_segundos"] = tiempo_total
