@@ -1462,3 +1462,53 @@ sobre los valores reales del CSS). 242 tests, 0 failing.
 
 **Estado: CASO 472037 CERRADO POR COMPLETO. Sin push en ninguno de los dos
 repos.**
+# 2026-08-21 — Bloque afinación operacional: rutas + orden + peso + badges
+
+Causa raíz #1: un destino RECHAZADO (confianza insuficiente o comuna
+documental contradicha) seguía escribiendo su etiqueta en
+`direccion_entrega` -- lo que Desktop muestra como destino -- aunque
+`estado_ruta` ya lo marcaba sin resolver. Casos reales: 460807 ("Angol"
+en vez de San Bernardo) y 472008 (degradado a "Chile").
+
+Causa raíz #2, hallada por el propio dry-run antes de tocar producción:
+la detección de "comuna documental" tomaba la PRIMERA coincidencia contra
+el catálogo territorial (345 comunas) -- caso real 472002 "GALVARINO 8501
+QUILICURA": "Galvarino" es la calle, pero también existe una comuna real
+con ese nombre en otra región, así que el chequeo iba a rechazar un
+destino YA CORRECTO. Corregido con `_comuna_documental_inequivoca`:
+sólo contradice cuando el texto menciona EXACTAMENTE una comuna real
+distinta, nunca la primera de varias en conflicto.
+
+Fix (commit `fd31579`): destino rechazado nunca expone etiqueta/localidad
+(coordenadas se conservan como auditoría); limpieza retroactiva sin OCR/
+sin red para datos ya persistidos; `revalidar_ruta_sin_destino_calculado_
+sin_ocr` reintenta ruta (con caché real) para filas con planta+destino ya
+persistidos sin ruta -- recuperó 464991 (7,38 km / 11,78 min reales, vía
+ORS), bloqueado antes por la misma ambigüedad de comuna que 472002. 19
+tests focales. Suite completa: 1569 passed.
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/BLOQUE_RUTAS_ORDEN_PESO_BADGES_R410_20260821_120950/`) →
+`revalidar_y_regenerar_reporte` + `revalidar_ruta_sin_destino_calculado_
+sin_ocr`. Métricas del dataset real (9 viajes):
+
+| | Antes | Después |
+|---|---|---|
+| Con km/tiempo | 3 (464945, 464959\|464960, 472002) | 4 (+464991) |
+| Destino degradado/absurdo | 2 (460807="Angol", 472008="Chile") | 0 |
+| Con planta origen | 7/9 | 7/9 (sin cambio -- 464981/472037 sin evidencia GPS, correctamente vacíos) |
+| Falsos positivos introducidos | — | 0 (472002 protegido explícitamente) |
+
+Catálogos y ledger sin cambios (verificado SHA-256); 0 decisiones
+pendientes espurias; XF3629 sigue sin reaparecer.
+
+**Desktop (commit `98ccc5c`, rama `fix-desktop-data-root-drag-drop`):**
+badges de pestaña con fondo SÓLIDO + texto blanco (~6,6:1, ya no
+pastilla pálida-sobre-pálida); orden por afinidad (chofer/RUT/patente
+tracto) deja 460807/472008 contiguos sin fusionarlos; "Viaje consolidado"
+agrega "Total del viaje" en multiguía (464959/464960 = 11.429 kg,
+regresión positiva verificada) y ya no se repite en Información
+operacional. 24 tests focales/actualizados. 252 tests, 0 failing.
+
+**Estado: BLOQUE RUTAS/ORDEN/PESO/BADGES CERRADO EN CÓDIGO Y EN DRIVE
+REAL. Sin push en ninguno de los dos repos.**
