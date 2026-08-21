@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -52,6 +54,7 @@ from atlas_core.ocr import (
 )
 from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.catalogo_plantas import CatalogoPlantas
+from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
 from atlas_core.catalogo_clientes import (
     CatalogoClientes,
     ErrorCatalogoClientes,
@@ -245,6 +248,11 @@ COLUMNAS = [
     # `indicador_revision` conserva su semántica REVISAR/OK de siempre.
     "motivos_revision_documento",
     "metodos_recuperacion_documento",
+    "estado_documental",
+    "estado_operacional",
+    "metricas_procesamiento_json",
+    "resultado_atlas_ia_json",
+    "evidencia_documentos_relacionados",
     # Bloque E2E R1: enriquecimiento logístico por documento (planta origen
     # documental + DESPACHAR A + geocodificación + ORS driving-hgv).
     # Agregadas al final -- backward-compatible; sin catálogo de plantas ni
@@ -260,6 +268,12 @@ COLUMNAS = [
     # al de antes de este bloque.
     *CAMPOS_TELEMETRIA_DOCUMENTO,
 ]
+
+_COLUMNAS_R4_NUEVAS = {
+    "estado_documental", "estado_operacional", "metricas_procesamiento_json",
+    "resultado_atlas_ia_json", "evidencia_documentos_relacionados",
+}
+COLUMNAS_PRE_R4 = [columna for columna in COLUMNAS if columna not in _COLUMNAS_R4_NUEVAS]
 
 Procesador = Callable[[Path], Mapping[str, object]]
 
@@ -307,7 +321,10 @@ def _coincide_con_tolerancia_ocr(token: str, termino: str) -> bool:
 
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
     """Conserva líneas OCR con evidencia explícita de material."""
-    terminos = re.compile(r"\b(HORMIGON|BARRAS?|ROLLOS?|ALAMBRON|BOBINAS?)\b")
+    terminos = re.compile(
+        r"\b(HORMIGON|BARRAS?|ROLLOS?|ALAMBRON|BOBINAS?|"
+        r"ANGULOS?|REDONDOS?|CUADRADOS?|PLANAS?|PERFILES?|VIGAS?|MALLAS?)\b"
+    )
     encontradas: list[str] = []
     for bloque in textos:
         for linea in str(bloque).splitlines():
@@ -320,8 +337,27 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
                 for token in re.findall(r"[A-Z]+", normalizada)
             )
             if tiene_evidencia:
+                # Confusiones OCR acotadas al contexto inequívoco de una línea
+                # de acero: B/3/D al inicio y 8/B antes de MM.
+                limpia = re.sub(r"^[D3]\s+(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
+                limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
                 encontradas.append(limpia)
     return " | ".join(dict.fromkeys(encontradas))
+
+
+def extraer_peso_kg_etiquetado(textos: Iterable[str]) -> str:
+    """Recupera PESO KG desde su etiqueta estructural, no desde números libres."""
+    lineas = [re.sub(r"\s+", " ", str(t)).strip() for t in textos]
+    for indice, linea in enumerate(lineas):
+        if not re.search(r"\b(?:PESO|ESO)\s*KG\b", _normalizar(linea)):
+            continue
+        ventana = " ".join(lineas[indice: indice + 4])
+        cola = re.split(r"(?:PESO|ESO)\s*KG\.?", _normalizar(ventana), maxsplit=1)[-1]
+        for candidato in re.findall(r"\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2,3})?|\d{3,5}", cola):
+            normalizado = _normalizar_peso_kg(candidato)
+            if normalizado != "No encontrado":
+                return normalizado
+    return "No encontrado"
 
 
 def _clasificar_contexto_fecha(
@@ -572,6 +608,18 @@ def extraer_fecha(
                 int(candidato["posicion"]),
             ),
         )
+        fecha_sel = _valor_fecha_a_date(str(seleccionado["valor"]))
+        if fecha_sel is not None:
+            conteos: dict[date, int] = {}
+            for candidato in candidatos:
+                if candidato is seleccionado or int(candidato["prioridad"]) not in (1, 2):
+                    continue
+                fecha_otra = _valor_fecha_a_date(str(candidato["valor"]))
+                if fecha_otra is not None and (fecha_otra.day, fecha_otra.month) == (fecha_sel.day, fecha_sel.month):
+                    conteos[fecha_otra] = conteos.get(fecha_otra, 0) + 1
+            consensos = [fecha for fecha, cantidad in conteos.items() if cantidad >= 2 and fecha != fecha_sel]
+            if len(consensos) == 1:
+                return consensos[0].strftime("%d-%m-%Y")
         return str(seleccionado["valor"])
     return "No encontrado"
 
@@ -763,6 +811,34 @@ def _corroborar_obra_destino_confirmada(
         return None
 
 
+def _corroborar_destino_historico_repetido(
+    carpeta_catalogos: str | Path, *, cliente_id: str, textos: Iterable[str],
+) -> dict[str, object] | None:
+    """Corrobora por identidad exacta + dirección repetida; una observación aislada no basta."""
+    ruta = Path(carpeta_catalogos) / "destinos_maestros.json"
+    try:
+        contenido = json.loads(ruta.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError):
+        return None
+    texto = _normalizar(" ".join(str(t) for t in textos))
+    candidatos = []
+    for destino in contenido.get("destinos", []):
+        if destino.get("cliente_id") != cliente_id or destino.get("estado_vigencia") != "ACTIVO":
+            continue
+        nombre = _normalizar(destino.get("nombre_destino", ""))
+        observacion = _normalizar(destino.get("observacion", ""))
+        repeticion = re.search(r"\b(\d+)\s+VIAJES?\b", observacion)
+        if nombre and nombre in texto and repeticion and int(repeticion.group(1)) >= 2:
+            candidatos.append(destino)
+    if len(candidatos) != 1:
+        return None
+    return {
+        "destino_id": candidatos[0].get("destino_id", ""),
+        "fuente": "DESTINO_HISTORICO_REPETIDO",
+        "viajes_historicos": int(re.search(r"\b(\d+)\s+VIAJES?\b", _normalizar(candidatos[0]["observacion"])).group(1)),
+    }
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -804,6 +880,8 @@ def procesar_archivo(
     ese valor por defecto explícito y sustituible -- ver límites
     multiempresa en el bloque E2E R1."""
 
+    inicio_documento = time.perf_counter()
+
     def _leer_texto() -> list[str]:
         if proveedor is not None:
             return proveedor.leer_texto(ruta)
@@ -819,12 +897,15 @@ def procesar_archivo(
             return proveedor.leer_focal(ruta, caja, allowlist=allowlist)
         return funcion_easyocr(ruta, caja, lector=lector_ocr)
 
+    inicio_ocr = time.perf_counter()
     textos = _leer_texto()
+    fin_ocr = time.perf_counter()
     datos = (
         extraer_datos(textos, carpeta_catalogos)
         if carpeta_catalogos is not None
         else extraer_datos(textos)
     )
+    fin_extraccion = time.perf_counter()
     # Bloque ESTADOS S2: `metodos_documento` es puramente informativo
     # (trazabilidad). `campos_geometricos_sin_corroborar` acumula qué
     # campos de identidad se recuperaron por geometría en ESTE documento
@@ -961,13 +1042,32 @@ def procesar_archivo(
         # patente nueva; ver jerarquía en resolver_patente_canonica.
         try:
             vehiculos = Path(carpeta_catalogos) / "vehiculos.json"
+            catalogo_vehiculos = cargar_catalogo_vehiculos(vehiculos)
+            por_patente = {v.patente_canonica: v for v in catalogo_vehiculos.homologables()}
+            rampla_documental_valida = _patente_valida(
+                str(datos.get("patente del carro", "No encontrado"))
+            )
             for campo, tipo_esperado in (
                 ("patente del tracto", "TRACTO"),
                 ("patente del carro", "CARRO"),
             ):
                 valor_actual = str(datos.get(campo, "No encontrado"))
+                # Una patente aislada puede ser TRACTO o CAMION_RIGIDO. La
+                # identidad exacta conocida prevalece sobre la expectativa
+                # provisional del campo, pero CARRO nunca es compatible.
+                decision_sin_tipo = resolver_patente_canonica(vehiculos, valor_actual)
+                vehiculo_exacto = por_patente.get(decision_sin_tipo.valor_resultado)
+                tipo_efectivo = tipo_esperado
+                if (
+                    campo == "patente del tracto"
+                    and not rampla_documental_valida
+                    and decision_sin_tipo.estado in {"COINCIDENCIA_EXACTA", "ALIAS"}
+                    and vehiculo_exacto is not None
+                    and vehiculo_exacto.tipo in {"TRACTO", "CAMION_RIGIDO"}
+                ):
+                    tipo_efectivo = vehiculo_exacto.tipo
                 decision_patente = resolver_patente_canonica(
-                    vehiculos, valor_actual, tipo_esperado=tipo_esperado
+                    vehiculos, valor_actual, tipo_esperado=tipo_efectivo
                 )
                 if decision_patente.estado in {"ALIAS", "CORRECCION_OCR_SEGURA", "COINCIDENCIA_EXACTA"}:
                     datos[campo] = decision_patente.valor_resultado
@@ -1378,6 +1478,17 @@ def procesar_archivo(
             obra_documental=obra_final,
             identidad_cliente_corroborada=cliente_corroborado_n1,
         )
+        if obra_destino_corroborada is None:
+            cliente_id_historico = _resolver_cliente_id_corroborado(
+                carpeta_catalogos,
+                cliente_texto=str(datos.get("cliente", "")),
+                rut_cliente=str(datos.get("RUT del cliente", "")),
+                identidad_cliente_corroborada=cliente_corroborado_n1,
+            )
+            if cliente_id_historico is not None:
+                obra_destino_corroborada = _corroborar_destino_historico_repetido(
+                    carpeta_catalogos, cliente_id=cliente_id_historico, textos=textos,
+                )
         if obra_destino_corroborada is not None:
             campos_geometricos_sin_corroborar.discard("obra destino")
             metodos_documento.add(
@@ -1485,6 +1596,8 @@ def procesar_archivo(
     # REQUIERE_REVISION vs MotivoRevisionDocumento): es enriquecimiento
     # opcional a nivel de documento, igual que peso/horas en Bloque O1.
     # Nunca bloquea ni invalida el documento si falla o no aplica.
+    fin_resolucion = time.perf_counter()
+    inicio_rutas = fin_resolucion
     resultado_entrega = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}
     if carpeta_catalogos is not None:
         try:
@@ -1518,6 +1631,7 @@ def procesar_archivo(
             )
         except Exception as exc:
             logger.warning("Enriquecimiento logístico omitido: %s: %s", type(exc).__name__, exc)
+    fin_rutas = time.perf_counter()
 
     # Bloque TELEMETRÍA T2 / corregido en OPERACIÓN REAL R1 -- causa raíz
     # encontrada: el encabezado de una guía AZA siempre imprime la misma
@@ -1533,6 +1647,7 @@ def procesar_archivo(
     # Nunca bloquea ni invalida el documento; nunca sobrescribe
     # hora_entrada_aza/hora_salida_aza documentales (son horas reales
     # registradas en planta, no aproximadas -- Fase B/H).
+    inicio_telemetria = time.perf_counter()
     resultado_telemetria = {campo: "" for campo in CAMPOS_TELEMETRIA_DOCUMENTO}
     if servicio_telemetria is not None and carpeta_catalogos is not None:
         try:
@@ -1705,6 +1820,7 @@ def procesar_archivo(
                                 )
         except Exception as exc:
             logger.warning("Enriquecimiento con telemetría omitido: %s: %s", type(exc).__name__, exc)
+    fin_telemetria = time.perf_counter()
 
     if recolector_decisiones is not None and carpeta_catalogos is not None:
         try:
@@ -1725,6 +1841,26 @@ def procesar_archivo(
                 type(exc).__name__, exc,
             )
 
+    estado_documental = "REQUIERE_REVISION" if requiere_revision else "OK"
+    estado_operacional = (
+        "REQUIERE_REVISION"
+        if requiere_revision or str(resultado_entrega.get("estado_ruta", "")) in {
+            "REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"
+        }
+        else "OK"
+    )
+    fin_documento = time.perf_counter()
+    metricas = {
+        "carga_preprocesamiento_seg": 0.0,
+        "ocr_seg": round(fin_ocr - inicio_ocr, 4),
+        "extraccion_parsing_seg": round(fin_extraccion - fin_ocr, 4),
+        "resolucion_corroboracion_seg": round(fin_resolucion - fin_extraccion, 4),
+        "atlas_ia_seg": 0.0,
+        "geocodificacion_routing_seg": round(fin_rutas - inicio_rutas, 4),
+        "telemetria_seg": round(fin_telemetria - inicio_telemetria, 4),
+        "total_documento_seg": round(fin_documento - inicio_documento, 4),
+    }
+
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
@@ -1744,12 +1880,21 @@ def procesar_archivo(
         # (compatibilidad hacia atrás intacta) -- se agregan al final.
         "motivos_revision_documento": " | ".join(motivos_documento),
         "metodos_recuperacion_documento": " | ".join(sorted(metodos_documento)),
+        "estado_documental": estado_documental,
+        "estado_operacional": estado_operacional,
+        "metricas_procesamiento_json": json.dumps(metricas, ensure_ascii=False, sort_keys=True),
+        "resultado_atlas_ia_json": "",
+        "evidencia_documentos_relacionados": "",
         # Bloque O1: peso y horarios operacionales. La ausencia de estos
         # datos NUNCA por sí sola invalida el documento (no participan en
         # `requiere_revision`) -- "No encontrado"/"No determinada" ya es
         # el motivo trazable, sin degradar documentos que antes de este
         # bloque quedaban OK.
-        "peso_kg": _normalizar_peso_kg(datos.get("peso")),
+        "peso_kg": (
+            _normalizar_peso_kg(datos.get("peso"))
+            if _normalizar_peso_kg(datos.get("peso")) != "No encontrado"
+            else extraer_peso_kg_etiquetado(textos)
+        ),
         "hora_entrada_aza": str(datos.get("hora de entrada", "No encontrado")),
         "hora_salida_aza": str(datos.get("hora de salida", "No encontrado")),
         "permanencia_minutos": _calcular_permanencia_minutos(
@@ -1779,14 +1924,84 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
         raise ValueError(f"La salida existente no es un archivo: {ruta_csv}")
 
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
-        lector = csv.reader(archivo, delimiter=";")
-        encabezado = next(lector, None)
-        if encabezado != COLUMNAS:
+        lector = csv.DictReader(archivo, delimiter=";")
+        filas = list(lector)
+        encabezado = list(lector.fieldnames or [])
+    if encabezado != COLUMNAS:
+        if encabezado != COLUMNAS_PRE_R4:
             raise ValueError(
                 "El CSV existente tiene un esquema incompatible. "
                 "Se esperaba el encabezado exacto separado por ';'."
             )
-        return next(lector, None) is not None
+        temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".r4.tmp")
+        with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+            escritor.writeheader()
+            escritor.writerows(filas)
+        temporal.replace(ruta_csv)
+    return bool(filas)
+
+
+def _corroborar_documentos_relacionados(ruta_csv: Path, archivos_objetivo: set[str]) -> int:
+    """Propaga sólo RUT de chofer con cuatro señales fuertes coincidentes."""
+    if not archivos_objetivo or not ruta_csv.is_file():
+        return 0
+    with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    cambios = 0
+    for fila in filas:
+        if fila.get("archivo") not in archivos_objetivo:
+            continue
+        motivos = [m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()]
+        if "CHOFER_SIN_CORROBORAR" not in motivos:
+            continue
+        candidatas = []
+        for otra in filas:
+            if otra is fila or otra.get("rut_chofer") in {"", "No encontrado"}:
+                continue
+            senales = {
+                "fecha": otra.get("fecha") == fila.get("fecha"),
+                "chofer": _normalizar(otra.get("chofer")) == _normalizar(fila.get("chofer")),
+                "patente": otra.get("patente_tracto") == fila.get("patente_tracto"),
+                "obra": _normalizar(otra.get("obra_destino")) == _normalizar(fila.get("obra_destino")),
+                "transporte": otra.get("numero_transporte") == fila.get("numero_transporte"),
+            }
+            if senales["chofer"] and senales["patente"] and sum(senales.values()) >= 4:
+                candidatas.append((otra, senales))
+        ruts = {normalizar_rut(c[0].get("rut_chofer", "")) for c in candidatas}
+        ruts.discard("")
+        if len(ruts) != 1:
+            continue
+        fuente, senales = candidatas[0]
+        fila["rut_chofer"] = fuente["rut_chofer"]
+        fila["motivos_revision_documento"] = " | ".join(m for m in motivos if m != "CHOFER_SIN_CORROBORAR")
+        fila["indicador_revision"] = "REVISAR" if any(
+            m not in MOTIVOS_NO_BLOQUEANTES for m in fila["motivos_revision_documento"].split(" | ") if m
+        ) else "OK"
+        fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+        ruta_requiere_revision = fila.get("estado_ruta") in {
+            "REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"
+        }
+        fila["estado_operacional"] = (
+            "REQUIERE_REVISION"
+            if fila["estado_documental"] == "REQUIERE_REVISION" or ruta_requiere_revision
+            else "OK"
+        )
+        metodos = {m.strip() for m in fila.get("metodos_recuperacion_documento", "").split("|") if m.strip()}
+        metodos.add("DOCUMENTO_RELACIONADO")
+        fila["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
+        fila["evidencia_documentos_relacionados"] = json.dumps({
+            "campo": "rut_chofer", "archivo_fuente": fuente["archivo"],
+            "senales": [nombre for nombre, coincide in senales.items() if coincide],
+        }, ensure_ascii=False, sort_keys=True)
+        cambios += 1
+    if cambios:
+        temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".relacionados.tmp")
+        with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+            escritor.writeheader(); escritor.writerows(filas)
+        temporal.replace(ruta_csv)
+    return cambios
 
 
 def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
@@ -1801,6 +2016,96 @@ def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
         if not existe_con_contenido:
             escritor.writeheader()
         escritor.writerows(filas)
+
+
+def _crear_orquestador_ia_configurado():
+    """Activa B1 sólo con credencial explícita; nunca es requisito del lote."""
+    if not os.getenv("GROQ_API_KEY", "").strip() or os.getenv("ATLAS_IA_B1_OPERACIONAL", "1") == "0":
+        return None
+    from atlas_core.atlas_ia.orquestador import OrquestadorAtlasIA
+    from atlas_core.atlas_ia.proveedor_groq import ProveedorModeloIAGroq
+    return OrquestadorAtlasIA(proveedor=ProveedorModeloIAGroq())
+
+
+def _ejecutar_ia_shadow(
+    ruta_csv: Path, archivos_objetivo: set[str], orquestador: object,
+) -> dict[str, int | float]:
+    """Consulta B1 sólo tras la fase determinista y conserva la salida como shadow."""
+    from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
+
+    resumen: dict[str, int | float] = {"llamadas": 0, "A": 0, "B": 0, "C": 0, "D": 0, "latencia_segundos": 0.0}
+    if orquestador is None or not ruta_csv.is_file():
+        return resumen
+    with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    campos = {
+        "OBRA_DESTINO_SIN_CORROBORAR": "obra_destino",
+        "CHOFER_SIN_CORROBORAR": "rut_chofer",
+        "PATENTE_SIN_HOMOLOGAR": "patente_tracto",
+        "CLIENTE_SIN_CORROBORAR": "cliente",
+    }
+    cambio = False
+    for fila in filas:
+        if fila.get("archivo") not in archivos_objetivo or fila.get("indicador_revision") != "REVISAR":
+            continue
+        resultados = []
+        motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|")}
+        for motivo, campo in campos.items():
+            if motivo not in motivos:
+                continue
+            evidencias = []
+            for otra in filas:
+                if otra is fila or otra.get(campo) in {"", "No encontrado"}:
+                    continue
+                senales = sum((
+                    otra.get("fecha") == fila.get("fecha"),
+                    otra.get("numero_transporte") == fila.get("numero_transporte"),
+                    _normalizar(otra.get("chofer")) == _normalizar(fila.get("chofer")),
+                    otra.get("patente_tracto") == fila.get("patente_tracto"),
+                    _normalizar(otra.get("obra_destino")) == _normalizar(fila.get("obra_destino")),
+                ))
+                if senales >= 3:
+                    evidencias.append(EvidenciaIA(
+                        identificador=f"documento:{otra.get('archivo')}", campo=campo,
+                        valor=otra[campo], tipo_fuente="HISTORICO", nivel="DOCUMENTO_RELACIONADO",
+                        independencia=1, procedencia="procesamiento_masivo",
+                        referencias_fuente=(otra.get("archivo", ""),),
+                    ))
+            if not evidencias:
+                continue
+            contexto = ContextoRazonamiento(
+                campo=campo, valor_documental=fila.get(campo, ""),
+                rut_chofer=fila.get("rut_chofer", ""), numero_guia=fila.get("numero_guia", ""),
+                numero_transporte=fila.get("numero_transporte", ""), evidencias=tuple(evidencias),
+                resultado_motor="REQUIERE_REVISION", explicacion_motor=motivo,
+                identidad_documento=fila.get("archivo", ""),
+                restricciones_dominio=("SHADOW_READ_ONLY", "NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS"),
+            )
+            inicio = time.perf_counter()
+            resultado = orquestador.resolver(contexto)
+            latencia = time.perf_counter() - inicio
+            resumen["llamadas"] += 1
+            resumen["latencia_segundos"] += latencia
+            clase = str(resultado.clasificacion)[:1]
+            resumen[clase] = int(resumen.get(clase, 0)) + 1
+            traza = resultado.a_dict()
+            traza["problema"] = motivo
+            traza["latencia_segundos"] = round(latencia, 6)
+            traza["evito_intervencion_humana"] = False
+            resultados.append(traza)
+        if resultados:
+            fila["resultado_atlas_ia_json"] = json.dumps(resultados, ensure_ascii=False, sort_keys=True)
+            metricas = json.loads(fila.get("metricas_procesamiento_json") or "{}")
+            metricas["atlas_ia_segundos"] = round(sum(r["latencia_segundos"] for r in resultados), 6)
+            fila["metricas_procesamiento_json"] = json.dumps(metricas, sort_keys=True)
+            cambio = True
+    if cambio:
+        temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".ia.tmp")
+        with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+            escritor.writeheader(); escritor.writerows(filas)
+        temporal.replace(ruta_csv)
+    return resumen
 
 
 def procesar_carpeta(
@@ -1818,6 +2123,7 @@ def procesar_carpeta(
     proveedor_rutas: object = None,
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
     servicio_telemetria: object = None,
+    orquestador_ia: object = None,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
 
@@ -1860,6 +2166,7 @@ def procesar_carpeta(
         )
     archivos = descubrir_archivos(raiz)
     procesados = set() if reprocesar else _archivos_ya_procesados(ruta_csv)
+    archivos_procesados_ahora: set[str] = set()
     pendientes: list[dict[str, str]] = []
     decisiones_pendientes: list[dict[str, object]] = []
     resumen: dict[str, object] = {
@@ -1981,6 +2288,7 @@ def procesar_carpeta(
             resumen[contador_tipo] += 1
 
             pendientes.append(fila)
+            archivos_procesados_ahora.add(identificador)
             resumen["procesados"] += 1
             if len(pendientes) >= cada:
                 _escribir_filas(ruta_csv, pendientes)
@@ -1988,6 +2296,17 @@ def procesar_carpeta(
     finally:
         _escribir_filas(ruta_csv, pendientes)
         pendientes.clear()
+
+    corroborados = 0
+    for _ in range(len(archivos_procesados_ahora)):
+        nuevos = _corroborar_documentos_relacionados(ruta_csv, archivos_procesados_ahora)
+        corroborados += nuevos
+        if not nuevos:
+            break
+    resumen["documentos_relacionados_corroborados"] = corroborados
+    if orquestador_ia is None:
+        orquestador_ia = _crear_orquestador_ia_configurado()
+    resumen["atlas_ia"] = _ejecutar_ia_shadow(ruta_csv, archivos_procesados_ahora, orquestador_ia)
 
     tiempo_total = time.perf_counter() - inicio
     resumen["tiempo_total_segundos"] = tiempo_total

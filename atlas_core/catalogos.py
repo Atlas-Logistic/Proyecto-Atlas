@@ -133,6 +133,7 @@ _CONFUSIONES_OCR_PATENTE_COMUNES = (
     frozenset({"5", "S"}),
     frozenset({"8", "B"}),
     frozenset({"8", "E"}),
+    frozenset({"2", "B"}),
     frozenset({"K", "R"}),
 )
 

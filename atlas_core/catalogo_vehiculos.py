@@ -280,7 +280,7 @@ def _validar_unicidad(vehiculos: tuple[Vehiculo, ...]) -> None:
         raise VehiculoDuplicadoError("alias colisiona con patente canónica")
 
 
-_CONFUSIONES_OCR = tuple(map(frozenset, ({"B", "D"}, {"0", "O"}, {"1", "I"}, {"5", "S"}, {"8", "B"}, {"8", "E"}, {"K", "R"})))
+_CONFUSIONES_OCR = tuple(map(frozenset, ({"B", "D"}, {"0", "O"}, {"1", "I"}, {"5", "S"}, {"8", "B"}, {"8", "E"}, {"2", "B"}, {"K", "R"})))
 
 
 @dataclass(frozen=True)

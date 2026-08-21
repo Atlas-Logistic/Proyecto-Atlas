@@ -34,6 +34,8 @@ Chile) determine la localidad.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Iterable
@@ -53,7 +55,11 @@ from atlas_core.rutas.geocerca import (
 from atlas_core.rutas.modelos import CandidatoGeocodificacion, Coordenadas, EstadoRuta
 from atlas_core.rutas.posicion_vehiculo import ProveedorPosicionVehiculo
 from atlas_core.rutas.proveedor import ProveedorRutas
-from atlas_core.territorio_chile import normalizar_direccion_con_comunas
+from atlas_core.territorio_chile import (
+    ESTADO_COMUNA_EXACTA,
+    normalizar_comuna,
+    normalizar_direccion_con_comunas,
+)
 
 # Confianza mínima (score de Pelias/ORS, 0-1) para aceptar un único
 # candidato sin ambigüedad como resuelto. Por debajo de este umbral, o
@@ -772,6 +778,17 @@ CAMPOS_ENTREGA_DOCUMENTO = (
 )
 
 
+def _comuna_explicita(texto: str) -> str:
+    """Detecta sólo comunas exactas expresadas en la dirección OCR."""
+    tokens = re.findall(r"[A-ZÁÉÍÓÚÜÑ]+", str(texto or "").upper())
+    for largo in range(min(4, len(tokens)), 0, -1):
+        for inicio in range(len(tokens) - largo + 1):
+            resultado = normalizar_comuna(" ".join(tokens[inicio:inicio + largo]))
+            if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna:
+                return resultado.comuna
+    return ""
+
+
 def resolver_entrega_documento(
     textos: Iterable[str],
     plantas: Iterable[Planta],
@@ -864,4 +881,18 @@ def resolver_entrega_documento(
     resultado["estado_entrega"] = (
         "RESUELTO" if ruta_entrega.direccion_entrega_geocodificada else "REVISAR"
     )
+    comuna_documental = _comuna_explicita(despachar_a_crudo)
+    if (
+        comuna_documental and ruta_entrega.localidad_entrega
+        and _texto_normalizado_sin_acentos(comuna_documental)
+        != _texto_normalizado_sin_acentos(ruta_entrega.localidad_entrega)
+    ):
+        resultado["estado_entrega"] = "REVISAR"
+        resultado["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
+        resultado["motivo_ruta"] = (
+            "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
+            f"{comuna_documental} != {ruta_entrega.localidad_entrega}"
+        )
+        resultado["distancia_km"] = ""
+        resultado["duracion_min"] = ""
     return resultado

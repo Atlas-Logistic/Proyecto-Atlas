@@ -315,7 +315,11 @@ def test_idempotencia_no_duplica_motivos_ni_decisiones_y_preserva_motivos_indepe
         assert motivos.count("MATERIAL_AUSENTE") == 1
         assert resultado["indicador_revision"] == "REVISAR"
 
-    assert resultado_1 == resultado_2
+    # Las métricas de duración son observabilidad y naturalmente varían entre
+    # ejecuciones; el resultado funcional debe seguir siendo idempotente.
+    funcional_1 = {k: v for k, v in resultado_1.items() if k != "metricas_procesamiento_json"}
+    funcional_2 = {k: v for k, v in resultado_2.items() if k != "metricas_procesamiento_json"}
+    assert funcional_1 == funcional_2
     assert [d["decision_id"] for d in decisiones_1] == [d["decision_id"] for d in decisiones_2]
     assert len(decisiones_1) == len(set(d["decision_id"] for d in decisiones_1))
     # read-only: los catálogos reales nunca se tocan al procesar
