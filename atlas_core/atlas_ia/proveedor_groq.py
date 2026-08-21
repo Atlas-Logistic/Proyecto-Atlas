@@ -47,6 +47,22 @@ class RespuestaHTTP:
 TransporteHTTP = Callable[[Request, float], RespuestaHTTP]
 
 
+def resolver_groq_api_key(api_key: str | None = None) -> str:
+    """Resuelve la credencial del proceso o del perfil Windows, sin persistirla."""
+    if api_key is not None:
+        return api_key.strip()
+    valor = os.getenv("GROQ_API_KEY", "").strip()
+    if valor or os.name != "nt":
+        return valor
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as clave:
+            valor, _ = winreg.QueryValueEx(clave, "GROQ_API_KEY")
+        return str(valor or "").strip()
+    except (FileNotFoundError, OSError):
+        return ""
+
+
 def _transporte_urllib(solicitud: Request, timeout: float) -> RespuestaHTTP:
     with urlopen(solicitud, timeout=timeout) as respuesta:  # nosec: B310 - endpoint fijo HTTPS
         return RespuestaHTTP(respuesta.status, respuesta.read())
@@ -182,7 +198,7 @@ class ProveedorModeloIAGroq:
         timeout: float = 180.0,
         transporte: TransporteHTTP = _transporte_urllib,
     ) -> None:
-        self._api_key = (api_key if api_key is not None else os.getenv("GROQ_API_KEY", "")).strip()
+        self._api_key = resolver_groq_api_key(api_key)
         self._modelo = modelo
         self._timeout = timeout
         self._transporte = transporte

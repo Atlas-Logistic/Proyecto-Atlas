@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+import tempfile
 import unicodedata
 from datetime import date
 from enum import Enum
@@ -2019,18 +2020,20 @@ def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
 
 
 def _crear_orquestador_ia_configurado():
-    """Activa B1 sólo con credencial explícita; nunca es requisito del lote."""
-    if not os.getenv("GROQ_API_KEY", "").strip() or os.getenv("ATLAS_IA_B1_OPERACIONAL", "1") == "0":
+    """Activa B1 con la credencial segura que también ve Desktop en Windows."""
+    if os.getenv("ATLAS_IA_B1_OPERACIONAL", "1") == "0":
         return None
     from atlas_core.atlas_ia.orquestador import OrquestadorAtlasIA
-    from atlas_core.atlas_ia.proveedor_groq import ProveedorModeloIAGroq
+    from atlas_core.atlas_ia.proveedor_groq import ProveedorModeloIAGroq, resolver_groq_api_key
+    if not resolver_groq_api_key():
+        return None
     return OrquestadorAtlasIA(proveedor=ProveedorModeloIAGroq())
 
 
-def _ejecutar_ia_shadow(
+def _ejecutar_ia_operacional(
     ruta_csv: Path, archivos_objetivo: set[str], orquestador: object,
 ) -> dict[str, int | float]:
-    """Consulta B1 sólo tras la fase determinista y conserva la salida como shadow."""
+    """Escala a B1 tras el determinista y aplica sólo autonomía A permitida."""
     from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
 
     resumen: dict[str, int | float] = {"llamadas": 0, "A": 0, "B": 0, "C": 0, "D": 0, "latencia_segundos": 0.0}
@@ -2079,7 +2082,7 @@ def _ejecutar_ia_shadow(
                 numero_transporte=fila.get("numero_transporte", ""), evidencias=tuple(evidencias),
                 resultado_motor="REQUIERE_REVISION", explicacion_motor=motivo,
                 identidad_documento=fila.get("archivo", ""),
-                restricciones_dominio=("SHADOW_READ_ONLY", "NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS"),
+                restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_DOS_RONDAS"),
             )
             inicio = time.perf_counter()
             resultado = orquestador.resolver(contexto)
@@ -2091,7 +2094,21 @@ def _ejecutar_ia_shadow(
             traza = resultado.a_dict()
             traza["problema"] = motivo
             traza["latencia_segundos"] = round(latencia, 6)
-            traza["evito_intervencion_humana"] = False
+            aplicable_a = (
+                clase == "A" and resultado.hipotesis is not None
+                and resultado.hipotesis.resultado == "PROPUESTA"
+                and campo in {"cliente", "obra_destino", "rut_chofer", "patente_tracto", "patente_rampla"}
+            )
+            if aplicable_a:
+                fila[campo] = resultado.hipotesis.valor_propuesto
+                motivos.discard(motivo)
+                fila["motivos_revision_documento"] = " | ".join(sorted(m for m in motivos if m))
+                fila["indicador_revision"] = "REVISAR" if any(
+                    m not in MOTIVOS_NO_BLOQUEANTES for m in motivos if m
+                ) else "OK"
+                fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+            traza["aplicado_operacionalmente"] = aplicable_a
+            traza["evito_intervencion_humana"] = aplicable_a and fila["indicador_revision"] == "OK"
             resultados.append(traza)
         if resultados:
             fila["resultado_atlas_ia_json"] = json.dumps(resultados, ensure_ascii=False, sort_keys=True)
@@ -2106,6 +2123,27 @@ def _ejecutar_ia_shadow(
             escritor.writeheader(); escritor.writerows(filas)
         temporal.replace(ruta_csv)
     return resumen
+
+
+def escalar_resultado_ia_en_memoria(
+    datos: Mapping[str, object], historial: Iterable[Mapping[str, object]],
+    *, orquestador_ia: object = None,
+) -> tuple[dict[str, str], dict[str, int | float]]:
+    """Entrada común para Mobile: reutiliza exactamente el escalamiento B1 del lote."""
+    fila = {columna: str(datos.get(columna, "")) for columna in COLUMNAS}
+    fila["archivo"] = fila.get("archivo") or "__mobile_actual__"
+    filas = [{columna: str(f.get(columna, "")) for columna in COLUMNAS} for f in historial]
+    filas.append(fila)
+    with tempfile.TemporaryDirectory(prefix="atlas_b1_") as temporal:
+        ruta = Path(temporal) / "contexto.csv"
+        with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+            escritor.writeheader(); escritor.writerows(filas)
+        orquestador = orquestador_ia if orquestador_ia is not None else _crear_orquestador_ia_configurado()
+        resumen = _ejecutar_ia_operacional(ruta, {fila["archivo"]}, orquestador)
+        with ruta.open(newline="", encoding="utf-8-sig") as archivo:
+            salida = list(csv.DictReader(archivo, delimiter=";"))[-1]
+    return salida, resumen
 
 
 def procesar_carpeta(
@@ -2306,7 +2344,7 @@ def procesar_carpeta(
     resumen["documentos_relacionados_corroborados"] = corroborados
     if orquestador_ia is None:
         orquestador_ia = _crear_orquestador_ia_configurado()
-    resumen["atlas_ia"] = _ejecutar_ia_shadow(ruta_csv, archivos_procesados_ahora, orquestador_ia)
+    resumen["atlas_ia"] = _ejecutar_ia_operacional(ruta_csv, archivos_procesados_ahora, orquestador_ia)
 
     tiempo_total = time.perf_counter() - inicio
     resumen["tiempo_total_segundos"] = tiempo_total

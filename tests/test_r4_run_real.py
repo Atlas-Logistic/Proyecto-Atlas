@@ -7,7 +7,7 @@ from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     _corroborar_destino_historico_repetido,
     _corroborar_documentos_relacionados,
-    _ejecutar_ia_shadow,
+    _ejecutar_ia_operacional,
     extraer_descripcion_material,
     extraer_fecha,
     extraer_peso_kg_etiquetado,
@@ -114,7 +114,7 @@ def test_ia_entra_despues_del_motor_y_puede_abstenerse_sin_escribir_dato(tmp_pat
     proveedor = ProveedorModeloIASimulado(respuestas_por_valor_documental={
         "No encontrado": RespuestaSimulada(resultado=RESULTADO_HIPOTESIS_ABSTENCION),
     })
-    resumen = _ejecutar_ia_shadow(
+    resumen = _ejecutar_ia_operacional(
         ruta, {"objetivo.jpg"}, OrquestadorAtlasIA(proveedor=proveedor)
     )
     with ruta.open(encoding="utf-8-sig", newline="") as archivo:

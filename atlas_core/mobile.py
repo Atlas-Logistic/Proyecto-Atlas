@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
-from atlas_core.procesamiento_masivo import COLUMNAS, procesar_archivo
+from atlas_core.procesamiento_masivo import (
+    COLUMNAS, escalar_resultado_ia_en_memoria, procesar_archivo,
+)
 
 ESTADOS = ("RECIBIDO", "PROCESANDO", "ASOCIADO", "REQUIERE_REVISION", "ERROR")
 TIPOS_NOVEDAD = (
@@ -177,10 +179,12 @@ def procesar_envio_mobile(
         if dataset and dataset.is_file():
             with dataset.open(encoding="utf-8-sig", newline="") as archivo:
                 filas = list(csv.DictReader(archivo, delimiter=";"))
+        datos, resumen_ia = escalar_resultado_ia_en_memoria(datos, filas)
         asociacion = asociar_documento(datos, filas)
         registro.update({
             "estado": "ASOCIADO" if asociacion["estado"] == "ASOCIADO_AUTOMATICAMENTE" else "REQUIERE_REVISION",
             "datos_ocr": datos, "resultado_asociacion": asociacion,
+            "atlas_ia": resumen_ia,
             "procesado_en": datetime.now(timezone.utc).isoformat(), "error": "",
         })
     except Exception as error:

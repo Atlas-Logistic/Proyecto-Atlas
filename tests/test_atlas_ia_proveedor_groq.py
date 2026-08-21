@@ -62,7 +62,7 @@ def test_sin_credencial_no_hace_llamada(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     llamadas = []
     with pytest.raises(CredencialGroqAusente):
-        ProveedorModeloIAGroq(transporte=lambda *_: llamadas.append(True)).razonar(_contexto())
+        ProveedorModeloIAGroq(api_key="", transporte=lambda *_: llamadas.append(True)).razonar(_contexto())
     assert llamadas == []
 
 

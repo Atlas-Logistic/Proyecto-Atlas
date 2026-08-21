@@ -95,6 +95,7 @@ def test_pipeline_real_adaptado_asocia_guia_inequivoca(tmp_path: Path) -> None:
         procesador=lambda ruta: {"numero_guia": "464265", "numero_transporte": "0000351135"},
     )
     assert registro["estado"] == "ASOCIADO"
+    assert registro["atlas_ia"]["llamadas"] == 0
     assert registro["resultado_asociacion"]["numero_transporte"] == "0000351135"
     assert registro["tipo_novedad"] == "TIENE_ESTADIA" and registro["guia_firmada_correo"] is True
 
