@@ -14,8 +14,11 @@ from atlas_core.catalogo_clientes import (
     CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
     EstadoCalidadCliente, normalizar_rut_cliente,
 )
-from atlas_core.catalogo_destinos import CatalogoDestinos
-from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
+from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError
+from atlas_core.catalogo_obras_destinos import (
+    CatalogoObrasDestinos, ErrorCatalogoObrasDestinos, EstadoVigencia,
+    Evidencia, ResultadoEvidencia, TipoEvidencia,
+)
 from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import (
     TipoVehiculo, cargar_catalogo_vehiculos,
@@ -54,6 +57,9 @@ ACCIONES = frozenset({
     # (mismo patrón que OBRA_DESCONOCIDA); CONFIRMAR_ALIAS/RECHAZAR son
     # nuevas.
     "CONFIRMAR_ALIAS", "RECHAZAR",
+    # Bloque R6 A/B/E: única acción nueva de DESTINO_NO_RESUELTO -- las
+    # otras dos (NO_PUEDO_DETERMINAR/POSPONER) ya existen arriba.
+    "REGISTRAR_DIRECCION",
 })
 LEDGER = "decisiones_aplicadas.json"
 
@@ -72,6 +78,9 @@ ACCIONES_POR_TIPO = {
     "ALIAS_CANDIDATO": frozenset({"CONFIRMAR_ALIAS", "RECHAZAR", "POSPONER"}),
     "ORIGEN_NO_CONFIRMADO": frozenset({
         "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
+    }),
+    "DESTINO_NO_RESUELTO": frozenset({
+        "REGISTRAR_DIRECCION", "NO_PUEDO_DETERMINAR", "POSPONER",
     }),
 }
 
@@ -189,7 +198,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, proveedor_rutas: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -553,6 +562,144 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "dataset_sha256": artefacto.get("dataset_sha256"),
                     "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo == "DESTINO_NO_RESUELTO":
+                # Bloque R6 A/B/E -- con origen ya resuelto, el documento
+                # nunca trajo una dirección de entrega utilizable (o
+                # geocodificaba de forma contradictoria/ambigua/genérica).
+                # Un humano escribe la dirección real; se valida con el
+                # MISMO mecanismo determinista ya existente
+                # (`revalidar_ruta_sin_destino_calculado_sin_ocr`, con su
+                # rechazo de comuna contradicha/resultado genérico/
+                # múltiples ubicaciones intacto) -- nunca se acepta a
+                # ciegas lo que el humano escribió. Si la ruta SÍ se
+                # calcula, la relación obra<->destino queda registrada y
+                # CONFIRMADA en el catálogo ya existente -- documentos
+                # futuros de la misma obra resuelven solos, sin volver a
+                # preguntar (ver `resolver_obra_destino_confirmada_global`,
+                # ya usado por `decision_destino_para_obra_registrada`).
+                documento_decision = decision.get("documento") or {}
+                numero_guia_decision = str(documento_decision.get("numero_guia") or "")
+                if not numero_guia_decision:
+                    raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para resolver el destino.")
+                ruta_resuelta = False
+                relacion_id_nueva = None
+                destino_id_nuevo = None
+                if accion == "REGISTRAR_DIRECCION":
+                    direccion_final = str(direccion_manual or "").strip()
+                    if not direccion_final:
+                        raise ErrorAplicacionDecision("Debe indicar la dirección de entrega.")
+                    from atlas_core.revalidacion_documental import (
+                        _escribir_filas_completas, _leer_filas,
+                        revalidar_ruta_sin_destino_calculado_sin_ocr,
+                    )
+                    filas_dataset = _leer_filas(dataset)
+                    fila_objetivo = next(
+                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                    )
+                    if fila_objetivo is None:
+                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                    # Se limpia el bloqueo anterior (nunca inventa un
+                    # resultado): la dirección nueva reemplaza la que
+                    # faltaba/contradecía, `revalidar_ruta_sin_destino_
+                    # calculado_sin_ocr` decide desde cero si esta sí
+                    # geocodifica de forma confiable.
+                    fila_objetivo["despachar_a_crudo"] = direccion_final
+                    fila_objetivo["estado_ruta"] = ""
+                    fila_objetivo["motivo_ruta"] = ""
+                    fila_objetivo["estado_entrega"] = ""
+                    _escribir_filas_completas(dataset, filas_dataset)
+                    resultado_revalidacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
+                        ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+                    )
+                    ruta_resuelta = numero_guia_decision in resultado_revalidacion.get("guias_actualizadas", [])
+                    resultado_extra["ruta_resuelta"] = ruta_resuelta
+                    if not ruta_resuelta:
+                        filas_tras_intento = _leer_filas(dataset)
+                        fila_tras_intento = next(
+                            (f for f in filas_tras_intento if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                        )
+                        resultado_extra["motivo_ruta_tras_intento"] = (
+                            fila_tras_intento.get("motivo_ruta", "") if fila_tras_intento is not None else ""
+                        )
+                    else:
+                        contexto_decision = decision.get("contexto") or {}
+                        obra_canonica = str(contexto_decision.get("obra_canonica", "")).strip()
+                        cliente_canonico_decision = str(contexto_decision.get("cliente_canonico", "")).strip()
+                        try:
+                            filas_confirmadas = _leer_filas(dataset)
+                            fila_confirmada = next(
+                                (f for f in filas_confirmadas if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                            )
+                            cliente_objetivo = next(
+                                (
+                                    c for c in CatalogoClientes(catalogo_clientes_ruta).listar()
+                                    if c.razon_social == cliente_canonico_decision
+                                ),
+                                None,
+                            ) if cliente_canonico_decision else None
+                            catalogo_obras = CatalogoObrasDestinos(
+                                ruta=catalogo_obras_ruta, ruta_clientes=catalogo_clientes_ruta,
+                                ruta_destinos=catalogo_destinos_ruta,
+                            )
+                            obra_objetivo = next(
+                                (
+                                    o for o in catalogo_obras.listar_obras()
+                                    if o.nombre_canonico == obra_canonica and o.estado_vigencia == EstadoVigencia.ACTIVO.value
+                                ),
+                                None,
+                            ) if obra_canonica else None
+                            if fila_confirmada is not None and cliente_objetivo is not None and obra_objetivo is not None:
+                                destino_creado = CatalogoDestinos(
+                                    catalogo_destinos_ruta, ruta_clientes=catalogo_clientes_ruta,
+                                ).crear_o_reutilizar_global(
+                                    nombre_destino=fila_confirmada.get("direccion_entrega") or direccion_final,
+                                    direccion=fila_confirmada.get("direccion_entrega") or direccion_final,
+                                    comuna=fila_confirmada.get("localidad_entrega", ""),
+                                    region=fila_confirmada.get("region_entrega", ""),
+                                    fuente=f"DECISION_HUMANA_R6:{decision_id}",
+                                )
+                                evidencia_destino = Evidencia(
+                                    tipo=TipoEvidencia.GUIA.value,
+                                    identificador_fuente=numero_guia_decision, referencia_hash=decision_id,
+                                    campos_observados={
+                                        "obra": obra_canonica, "destino": direccion_final,
+                                        "decision_id": decision_id, "cliente_id_observado": cliente_objetivo.cliente_id,
+                                        "cliente_canonico_observado": cliente_canonico_decision,
+                                        "numero_guia": numero_guia_decision,
+                                    },
+                                    fecha=reloj().astimezone(timezone.utc).isoformat(),
+                                    actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
+                                )
+                                resultado_obs = catalogo_obras.registrar_observacion(
+                                    cliente_id=cliente_objetivo.cliente_id, nombre_obra=obra_canonica,
+                                    destino_id=destino_creado.destino_id, evidencia=evidencia_destino,
+                                )
+                                if resultado_obs.relacion is not None:
+                                    relacion = resultado_obs.relacion
+                                    if relacion.estado == "PENDIENTE":
+                                        relacion = catalogo_obras.confirmar_relacion(
+                                            relacion.relacion_id, actor=actor, identificador_fuente=decision_id,
+                                        )
+                                    relacion_id_nueva = relacion.relacion_id
+                                destino_id_nuevo = destino_creado.destino_id
+                        except (OSError, ValueError, ErrorCatalogoObrasDestinos, ClienteDuplicadoError, DestinoDuplicadoError):
+                            # El aprendizaje reutilizable es una mejora
+                            # aditiva -- si falla, la ruta de ESTE
+                            # documento ya quedó calculada y persistida
+                            # arriba; nunca se revierte por esto.
+                            pass
+                    resultado_extra["destino_id"] = destino_id_nuevo
+                    resultado_extra["relacion_id"] = relacion_id_nueva
+                # NO_PUEDO_DETERMINAR/POSPONER: no tocan el dataset -- el
+                # ledger basta para que no vuelva a preguntarse lo mismo
+                # mientras la evidencia no cambie.
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
+                    "direccion_manual": str(direccion_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
+                    "ruta_resuelta": ruta_resuelta, "destino_id": destino_id_nuevo, "relacion_id": relacion_id_nueva,
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
             elif tipo == "CLIENTE_DESCONOCIDO":
                 # MOTOR DE EVIDENCIA FASE 3 -- primera aplicación real para
                 # este tipo (antes sólo UX preparatoria). Mismo patrón que
@@ -755,7 +902,17 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 resultado_extra["revalidacion"] = revalidar_y_regenerar_reporte(
                     raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
                 )
-            elif tipo == "ORIGEN_NO_CONFIRMADO" and accion in ("CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA"):
+            elif (
+                (tipo == "ORIGEN_NO_CONFIRMADO" and accion in ("CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA"))
+                # Bloque R6 A/B/E -- mismo caso: REGISTRAR_DIRECCION ya
+                # escribió el dataset arriba (`despachar_a_crudo` y, si
+                # `revalidar_ruta_sin_destino_calculado_sin_ocr` tuvo
+                # éxito, también estado_ruta/distancia/duración) -- se
+                # regenera el reporte tanto si la ruta quedó calculada
+                # como si sigue bloqueada (con un motivo ya reevaluado,
+                # nunca uno obsoleto).
+                or (tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION")
+            ):
                 # Bloque ORIGEN D1 -- a diferencia de DESTINO_SIN_CONFIRMAR/
                 # VEHICULO_DESCONOCIDO, aquí ya sabemos que el dataset
                 # cambió (se acaba de escribir arriba, en el bloque de
@@ -820,6 +977,12 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("ALIAS_CANDIDATO", "RECHAZAR"): "Decisión guardada. Atlas no vinculará este texto documental a la entidad sugerida.",
             ("CLIENTE_CANDIDATO", "CONFIRMAR"): "Identidad de cliente confirmada. Atlas dejará de pedir revisión por falta de RUT en este documento.",
             ("CLIENTE_CANDIDATO", "NO_CONFIRMAR"): "Decisión guardada. Atlas no vinculará este documento a la identidad sugerida.",
+            ("DESTINO_NO_RESUELTO", "REGISTRAR_DIRECCION"): (
+                "Dirección registrada. Ruta calculada y km/tiempo actualizados; Atlas reconocerá esta obra en documentos futuros."
+                if resultado_extra.get("ruta_resuelta")
+                else "Dirección registrada, pero sigue sin poder calcularse una ruta confiable con ella -- revise el detalle del motivo."
+            ),
+            ("DESTINO_NO_RESUELTO", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este destino mientras la evidencia no cambie.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}

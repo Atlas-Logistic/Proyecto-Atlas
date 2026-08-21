@@ -53,7 +53,7 @@ NOMBRE_ARTEFACTO = "decisiones_pendientes.json"
 TIPOS_SOPORTADOS = frozenset({
     "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
     "OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR", "ALIAS_CANDIDATO",
-    "ORIGEN_NO_CONFIRMADO",
+    "ORIGEN_NO_CONFIRMADO", "DESTINO_NO_RESUELTO",
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
 
@@ -91,6 +91,87 @@ _ESTADOS_NOMBRE_SEGUROS = {"SIN_CAMBIO", "ALIAS", "COINCIDENCIA_SEGURA"}
 ACCIONES_ORIGEN_NO_CONFIRMADO = (
     "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
 )
+
+# Bloque R6 A/B/E -- distinta de DESTINO_SIN_CONFIRMAR (que confirma/rechaza
+# un valor YA OBSERVADO en el documento) y de ORIGEN_NO_CONFIRMADO (elige
+# entre plantas YA CONOCIDAS): aquí, con origen ya resuelto, el documento
+# no trae ninguna dirección de entrega utilizable (ausente, o geocodifica
+# de forma contradictoria/demasiado genérica/ambigua) y Atlas agotó toda
+# fuente automática (documento, obra, histórico, relación confirmada,
+# catálogos) sin encontrar una dirección confiable. "REGISTRAR_DIRECCION"
+# es la única acción que aporta un dato nuevo -- un humano escribe la
+# dirección real de entrega, que se valida con el MISMO mecanismo
+# determinista de geocodificación/ruta ya existente (nunca se acepta a
+# ciegas). "NO_PUEDO_DETERMINAR" es terminal, igual que en
+# ORIGEN_NO_CONFIRMADO: no vuelve a preguntar mientras la evidencia no
+# cambie.
+ACCIONES_DESTINO_NO_RESUELTO = ("REGISTRAR_DIRECCION", "NO_PUEDO_DETERMINAR", "POSPONER")
+
+# Motivos de `motivo_ruta` que representan, específicamente, un problema de
+# DESTINO (nunca de origen) con evidencia documental insuficiente o
+# contradictoria -- el conjunto que hoy puede producir la ruta de un
+# documento real (`resolver_destino_entrega_validado`/
+# `calcular_ruta_con_planta_conocida`/`resolver_entrega_documento`).
+# Deliberadamente una lista cerrada y explícita, no "cualquier
+# REQUIERE_REVISION": un estado de ruta nuevo, no reconocido aquí, se trata
+# como evidencia insuficiente para preguntar (mismo criterio conservador
+# que `detectar_decision_origen_no_confirmado`), nunca como oportunidad
+# automática de generar una pregunta.
+MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
+    "DESTINO_SIN_DATO",
+    "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL",
+    "GEOCODIFICACION_DEMASIADO_GENERICA",
+    "MULTIPLES_UBICACIONES_DISPERSAS",
+})
+
+
+def detectar_decision_destino_no_resuelto(
+    *, archivo: str, fila: Mapping[str, str],
+) -> dict[str, object] | None:
+    """Bloque R6 A/B/E: genera una pregunta `DESTINO_NO_RESUELTO` para UN
+    documento YA PROCESADO cuyo origen ya está resuelto (`planta_origen_id`
+    presente -- preguntar por destino antes de tener origen no aporta nada)
+    pero cuya ruta quedó bloqueada por un problema de DESTINO reconocido
+    (ver `MOTIVOS_DESTINO_NO_RESUELTO`). Opera exclusivamente sobre columnas
+    YA PERSISTIDAS (`fila`) -- nunca OCR, nunca red.
+
+    Se abstiene (`None`) cuando:
+    - ya hay ruta calculada (`estado_ruta == RUTA_CALCULADA`) -- nada que
+      preguntar;
+    - no hay planta de origen todavía -- ese es un problema de ORIGEN,
+      cubierto aparte por `detectar_decision_origen_no_confirmado`;
+    - el motivo de ruta no es uno de los reconocidos como "problema de
+      destino" (p. ej. `ORIGEN_NO_DETERMINADO`, o cualquier motivo técnico
+      transitorio como proveedor caído/sin credencial -- eso no es una
+      pregunta para un humano, es un problema de infraestructura)."""
+    if not str(fila.get("planta_origen_id", "")).strip():
+        return None
+    estado_ruta = str(fila.get("estado_ruta", "")).strip()
+    if estado_ruta != "REQUIERE_REVISION":
+        return None
+    motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
+    motivo_base = motivo_ruta.split(":", 1)[0].split("(", 1)[0].strip()
+    if motivo_base not in MOTIVOS_DESTINO_NO_RESUELTO:
+        return None
+    documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
+    evidencias = [{
+        "tipo": "RUTA_BLOQUEADA", "motivo_ruta": motivo_ruta,
+        "despachar_a_crudo": str(fila.get("despachar_a_crudo", "")),
+        "planta_origen_nombre": str(fila.get("planta_origen_nombre", "")),
+    }]
+    return crear_decision(
+        tipo="DESTINO_NO_RESUELTO", entidad="DESTINO", archivo=str(archivo),
+        numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
+        campo="despachar_a_crudo", valor_documental=str(fila.get("despachar_a_crudo", "")),
+        valor_normalizado="", identidad_resuelta=None,
+        candidatos=(), motivos=[motivo_base],
+        evidencias=evidencias, acciones_permitidas=ACCIONES_DESTINO_NO_RESUELTO,
+        contexto={
+            "obra_canonica": str(fila.get("obra_destino", "")),
+            "cliente_canonico": str(fila.get("cliente", "")),
+            "planta_origen_id": str(fila.get("planta_origen_id", "")),
+        },
+    )
 
 # Bloque VEHÍCULO D1 -- cuando una patente documental (probable error de
 # OCR o del mandante) no homologa con ningún vehículo del catálogo, PERO

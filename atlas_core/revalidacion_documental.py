@@ -1152,6 +1152,67 @@ def reconciliar_decisiones_origen(
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
+def detectar_decisiones_destino_no_resuelto_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, object]]:
+    """Bloque R6 A/B/E -- READ-ONLY, nunca escribe nada. Recorre el
+    dataset vigente y devuelve una decisión `DESTINO_NO_RESUELTO`
+    candidata por cada documento con origen ya resuelto pero cuya ruta
+    quedó bloqueada por un problema de destino reconocido -- ver
+    `atlas_core.decisiones_pendientes.detectar_decision_destino_no_resuelto`."""
+    from atlas_core.decisiones_pendientes import detectar_decision_destino_no_resuelto
+
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+    candidatas: list[dict[str, object]] = []
+    for fila in filas:
+        decision = detectar_decision_destino_no_resuelto(
+            archivo=fila.get("archivo", ""), fila=fila,
+        )
+        if decision is not None:
+            candidatas.append(decision)
+    return candidatas
+
+
+def reconciliar_decisiones_destino_no_resuelto(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque R6 A/B/E -- publica en `decisiones_pendientes.json` la unión
+    de la bandeja pendiente vigente con las decisiones `DESTINO_NO_RESUELTO`
+    recién detectadas (mismo patrón que `reconciliar_decisiones_origen`). No
+    toca el CSV documental, el ledger ni ningún catálogo -- sólo
+    (re)escribe la bandeja."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+
+    try:
+        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+        pendientes_actuales = artefacto_actual.get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes_actuales = []
+
+    candidatas = detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz)
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+    )
+    bandeja = generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+    return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
+
+
 def detectar_incidencias_transporte_ausente_sin_ocr(
     *, raiz_atlas: str | Path,
 ) -> list[dict[str, str]]:

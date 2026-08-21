@@ -1572,3 +1572,66 @@ REAL. Sin push en ninguno de los dos repos.**
 
 **Estado: BLOQUE R5 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R6 A/B/E -- ciclo de vida completo origen→destino→ruta (2026-08-21)
+
+**Causa raíz de los 5 viajes sin km/tiempo:** ninguna es la misma.
+460807/472008/472018 ya tenían un problema real de geocodificación
+(comuna contradicha/resultado genérico/ubicaciones dispersas) desde antes
+de este bloque -- correctamente rechazados, nunca expuestos como ruta
+inventada. 472037 es distinto: origen se confirmó bien
+(`ORIGEN_NO_CONFIRMADO`, Bloque R5), pero el documento nunca trajo
+ninguna dirección de entrega (`DESTINO_SIN_DATO`) -- ni catálogo, ni
+histórico, ni relación confirmada tenían nada que ofrecer (la obra "ING Y
+CONST FUNDAMENTA SPA" se registró sin destino asociado). 464981 sigue sin
+planta -- telemetría no encontró ningún trip en la ventana documental
+(`SIN_EVIDENCIA_GPS`), evidencia insuficiente incluso para sugerir una
+candidata; se mantiene la abstención ya diseñada (mismo criterio que
+464479/464529) -- preguntar sin nada que mostrar sería adivinar delegado
+a un humano.
+
+**El gap real (los 4 con planta ya resuelta):** el mecanismo determinista
+ya rechazaba correctamente cada destino degradado/ambiguo, pero ninguno
+de esos rechazos se convertía en una decisión accionable -- el humano
+nunca veía nada en Revisión de Atlas, sólo "No disponible" en Desktop.
+Se cierra con `DESTINO_NO_RESUELTO` (detección + aplicación +
+reconciliación, mismo patrón que `ORIGEN_NO_CONFIRMADO`): con origen
+resuelto y un motivo de destino reconocido, Atlas pregunta. Al escribir
+la dirección real, se revalida con el MISMO mecanismo determinista ya
+existente (`revalidar_ruta_sin_destino_calculado_sin_ocr`, con su
+rechazo de comuna/genérico/disperso intacto) -- nunca se acepta a
+ciegas. Si la ruta se calcula, la relación obra↔destino queda CONFIRMADA
+en el catálogo ya existente -- documentos futuros de la misma obra
+resuelven solos, sin volver a preguntar.
+
+**Atlas IA B1:** 0 llamadas para el problema de destino en los 5 casos,
+explicado -- la escalada a B1 (`_ejecutar_ia_operacional`) está acotada,
+por diseño, a 4 motivos de corroboración documental (obra/chofer/
+patente/cliente), nunca a `motivo_ruta`. Verificado en datos reales: 2 de
+los 5 (460807, 472008) sí tuvieron una llamada B1 real, pero para
+`OBRA_DESTINO_SIN_CORROBORAR` (ya resuelto aparte), nunca para el
+problema de ruta. No se extendió el alcance de B1 en este bloque (fuera
+de alcance -- "no refactor grande", "no nuevo proveedor IA").
+
+**Aprendizaje:** cada `REGISTRAR_DIRECCION` exitoso registra la relación
+obra↔destino en `catalogo_obras_destinos` (mismo catálogo que ya usa
+`resolver_obra_destino_confirmada_global`) -- nunca una memoria paralela.
+
+29 tests focales nuevos (12 Motor + 6 Desktop UI/wiring + 11 ya
+existentes actualizados). Suite completa: Motor 1591 passed (antes
+1579); Desktop 270 passed (antes 264).
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/R6_AB_20260821_150352/`), dry-run previo,
+`reconciliar_decisiones_destino_no_resuelto` ejecutado. CSV/catálogos/
+ledger sin cambios (SHA-256 verificado); bandeja: 4 decisiones nuevas
+(460807, 472008, 472018, 472037), 0 sin causa real. 9 viajes/9
+confirmados/0 revisión sin degradar; 464959+464960 intactos (11.429 kg/
+22,94 km/32,96 min); XF3629 correctamente resuelto (CONFIRMADO), no
+stuck en la bandeja. No se escribió ninguna dirección real para 472037
+-- Atlas no la conoce y no se inventa; queda como decisión accionable
+pendiente de que Javier la escriba (outcome B del bloque, nunca
+silencio).
+
+**Estado: BLOQUE R6 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**
