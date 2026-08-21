@@ -155,6 +155,39 @@ def test_confirmar_cliente_candidato_no_escribe_catalogo_y_encadena_obra(tmp_pat
     assert aplicacion["valor_canonico"] == "COMERCIAL A Y B LTDA"
 
 
+def test_flujo_completo_472037_termina_sin_estado_intermedio_no_accionable(tmp_path):
+    """R4.9, caso real 472037 de punta a punta: CONFIRMAR el cliente
+    candidato encadena la obra; REGISTRAR la obra (sin destino documental,
+    CASO C -- no genera una decisión siguiente) no debe dejar el viaje en
+    un limbo "REVISAR pero nadie puede hacer nada" -- `revalidar_y_
+    regenerar_reporte` retira OBRA_DESTINO_SIN_CORROBORAR usando la señal
+    del ledger (ver `resolver_obras_resueltas_por_ledger`), y no queda
+    ninguna decisión pendiente."""
+    from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
+    obra_pendiente = next(d for d in _pendientes(actual) if d["tipo"] == "OBRA_DESCONOCIDA")
+
+    resultado = aplicar_decision_obra(raiz_atlas=raiz, decision_id=obra_pendiente["decision_id"], accion="REGISTRAR")
+    assert resultado["ok"] is True
+    # REGISTRAR sin destino documental -- CASO C, ninguna decisión siguiente.
+    assert not any(d["tipo"] == "DESTINO_SIN_CONFIRMAR" for d in _pendientes(actual))
+
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open(encoding="utf-8-sig") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert "OBRA_DESTINO_SIN_CORROBORAR" in fila["motivos_revision_documento"]  # todavía no revalidado
+
+    revalidar_y_regenerar_reporte(raiz_atlas=raiz, nombre_carpeta_reporte="reporte_r49")
+
+    with dataset.open(encoding="utf-8-sig") as archivo:
+        fila_final = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila_final["motivos_revision_documento"] == ""
+    assert fila_final["indicador_revision"] == "OK"
+    assert _pendientes(actual) == []
+
+
 def test_confirmar_cliente_candidato_limpia_motivo_csv(tmp_path):
     raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
     aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")

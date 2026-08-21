@@ -10,7 +10,9 @@ from atlas_core.catalogo_destinos import CatalogoDestinos
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
 from atlas_core.decisiones_pendientes import crear_decision, detectar_decisiones_documento, generar_artefacto
 from atlas_core.procesamiento_masivo import COLUMNAS
-from atlas_core.revalidacion_documental import revalidar_obra_destino_sin_ocr, revalidar_y_regenerar_reporte
+from atlas_core.revalidacion_documental import (
+    resolver_obras_resueltas_por_ledger, revalidar_obra_destino_sin_ocr, revalidar_y_regenerar_reporte,
+)
 
 OBRA_TEXTO = "CONSTRUCTORA INMOBILIARIA E"
 DESTINO_TEXTO = "AV. VICUNA MACKENNA 3451 SAN JOAQUIN"
@@ -352,6 +354,82 @@ def test_revalidar_no_retira_motivo_si_obra_y_cliente_son_realmente_distintos(tm
     assert resultado["guias_actualizadas"] == []
     fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
     assert "OBRA_DESTINO_SIN_CORROBORAR" in fila_final["motivos_revision_documento"]
+
+
+def test_resolver_obras_resueltas_por_ledger_incluye_registrar_y_no_registrar(tmp_path):
+    ledger = tmp_path / "decisiones_aplicadas.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "aplicaciones": [
+        {"tipo": "OBRA_DESCONOCIDA", "accion": "REGISTRAR", "documento": {"numero_guia": "1"}},
+        {"tipo": "OBRA_DESCONOCIDA", "accion": "NO_REGISTRAR", "documento": {"numero_guia": "2"}},
+        {"tipo": "DESTINO_SIN_CONFIRMAR", "accion": "CONFIRMAR", "documento": {"numero_guia": "3"}},
+        {"tipo": "DESTINO_SIN_CONFIRMAR", "accion": "NO_CONFIRMAR", "documento": {"numero_guia": "4"}},
+        {"tipo": "OBRA_DESCONOCIDA", "accion": "POSPONER", "documento": {"numero_guia": "5"}},
+        {"tipo": "VEHICULO_DESCONOCIDO", "accion": "REGISTRAR", "documento": {"numero_guia": "6"}},
+    ]}), encoding="utf-8")
+    assert resolver_obras_resueltas_por_ledger(ledger) == {"1", "2", "3", "4"}
+
+
+def test_resolver_obras_resueltas_por_ledger_ausente_no_lanza(tmp_path):
+    assert resolver_obras_resueltas_por_ledger(tmp_path / "no_existe.json") == set()
+
+
+def test_revalidar_retira_motivo_cuando_obra_registrada_sin_destino_documental(tmp_path):
+    """R4.9, caso real 472037: OBRA_DESCONOCIDA/REGISTRAR sin destino
+    documental (CASO C -- nunca genera una decisión siguiente, ver
+    decision_destino_para_obra_registrada) dejaba OBRA_DESTINO_SIN_CORROBORAR
+    fijado para siempre, aunque un humano ya revisó y registró la obra de
+    ESTE documento exacto -- no hay ninguna pregunta pendiente que un
+    humano pueda responder. Catálogo de obras vacío a propósito: la señal
+    viene del ledger, no de una relación confirmada."""
+    catalogos = _catalogos_minimos(tmp_path)
+    fila = _fila_csv(
+        numero_guia="472037", cliente="COMERCIAL A Y B LTDA", obra_destino="ING Y CONST FUNDAMENTA SPA",
+        despachar_a_crudo="",
+    )
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [fila])
+    ledger = tmp_path / "decisiones_aplicadas.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "aplicaciones": [
+        {"tipo": "OBRA_DESCONOCIDA", "accion": "REGISTRAR", "documento": {"numero_guia": "472037"}},
+    ]}), encoding="utf-8")
+
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=ledger)
+    assert resultado["guias_actualizadas"] == ["472037"]
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in fila_final["motivos_revision_documento"]
+    assert fila_final["indicador_revision"] == "OK"
+
+
+def test_revalidar_sin_ledger_ni_relacion_conserva_el_motivo(tmp_path):
+    """Control -- sin `ruta_ledger` (comportamiento anterior) y sin
+    relación confirmada, el motivo se conserva: nadie ha revisado este
+    documento todavía."""
+    catalogos = _catalogos_minimos(tmp_path)
+    fila = _fila_csv(
+        numero_guia="472037", cliente="COMERCIAL A Y B LTDA", obra_destino="ING Y CONST FUNDAMENTA SPA",
+    )
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [fila])
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == []
+
+
+def test_revalidar_no_retira_motivo_de_otra_guia_por_ledger_de_una_distinta(tmp_path):
+    """Control -- la señal del ledger es por `numero_guia` exacto, nunca
+    por texto de obra suelto: una guía distinta con la misma obra pero sin
+    su propia entrada en el ledger conserva el motivo."""
+    catalogos = _catalogos_minimos(tmp_path)
+    fila = _fila_csv(
+        numero_guia="999999", cliente="COMERCIAL A Y B LTDA", obra_destino="ING Y CONST FUNDAMENTA SPA",
+    )
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [fila])
+    ledger = tmp_path / "decisiones_aplicadas.json"
+    ledger.write_text(json.dumps({"schema_version": 1, "aplicaciones": [
+        {"tipo": "OBRA_DESCONOCIDA", "accion": "REGISTRAR", "documento": {"numero_guia": "472037"}},
+    ]}), encoding="utf-8")
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=ledger)
+    assert resultado["guias_actualizadas"] == []
 
 
 def test_revalidar_no_modifica_catalogos(tmp_path):

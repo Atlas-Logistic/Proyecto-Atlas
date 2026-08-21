@@ -144,8 +144,41 @@ def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> No
         raise
 
 
+def resolver_obras_resueltas_por_ledger(ruta_ledger: str | Path) -> set[str]:
+    """R4.9 -- índice de solo lectura del ledger: `numero_guia` de todo
+    documento con AL MENOS una aplicación TERMINAL de `OBRA_DESCONOCIDA`
+    (`REGISTRAR`/`NO_REGISTRAR`) o `DESTINO_SIN_CONFIRMAR`
+    (`CONFIRMAR`/`NO_CONFIRMAR`) -- cualquiera sea el resultado, un humano
+    ya revisó y decidió sobre la obra/destino de ESE documento exacto.
+
+    Necesario porque `REGISTRAR` sin destino documental capturado (CASO C
+    de `decision_destino_para_obra_registrada`: el documento nunca trajo
+    un destino que preguntar) es, por diseño, terminal -- no genera ninguna
+    decisión siguiente. Sin este índice, `OBRA_DESTINO_SIN_CORROBORAR`
+    quedaba fijado para siempre en esa fila aunque la obra ya estuviera
+    registrada y no hubiera ninguna pregunta pendiente que un humano
+    pudiera responder -- caso real 472037 (`REGISTRAR` de "ING Y CONST
+    FUNDAMENTA SPA", sin `despachar_a_crudo`)."""
+    guias: set[str] = set()
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return guias
+    terminales = {
+        ("OBRA_DESCONOCIDA", "REGISTRAR"), ("OBRA_DESCONOCIDA", "NO_REGISTRAR"),
+        ("DESTINO_SIN_CONFIRMAR", "CONFIRMAR"), ("DESTINO_SIN_CONFIRMAR", "NO_CONFIRMAR"),
+    }
+    for aplicacion in ledger.get("aplicaciones", []):
+        if (aplicacion.get("tipo"), aplicacion.get("accion")) not in terminales:
+            continue
+        numero_guia = str((aplicacion.get("documento") or {}).get("numero_guia", ""))
+        if numero_guia:
+            guias.add(numero_guia)
+    return guias
+
+
 def revalidar_obra_destino_sin_ocr(
-    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, ruta_ledger: str | Path | None = None,
 ) -> dict[str, object]:
     """Relee cada fila del dataset y reevalúa ÚNICAMENTE el motivo
     ``OBRA_DESTINO_SIN_CORROBORAR`` contra `resolver_obra_destino_confirmada_global`
@@ -165,7 +198,13 @@ def revalidar_obra_destino_sin_ocr(
     ninguna vía para retirarse -- caso real 464981 (obra_destino ==
     cliente == "AMERICAN SCREW CHILE SPA"). Comparación puramente textual
     dentro del mismo documento, sin consultar catálogo -- no hace falta: si
-    ambos campos ya dicen lo mismo, no hay identidad que corroborar."""
+    ambos campos ya dicen lo mismo, no hay identidad que corroborar.
+
+    R4.9 -- `ruta_ledger` (opcional, compatible hacia atrás): si YA hay una
+    aplicación terminal de obra/destino para ESTE `numero_guia` exacto (ver
+    `resolver_obras_resueltas_por_ledger`), el motivo se retira aunque no
+    exista relación destino CONFIRMADA -- un humano ya revisó este
+    documento y no queda ninguna pregunta pendiente que responder."""
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     catalogo_obras = CatalogoObrasDestinos(
@@ -174,6 +213,9 @@ def revalidar_obra_destino_sin_ocr(
         ruta_destinos=carpeta / "destinos_maestros.json",
     )
     motivo_objetivo = MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR.value
+    guias_resueltas_ledger = (
+        resolver_obras_resueltas_por_ledger(Path(ruta_ledger)) if ruta_ledger is not None else set()
+    )
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
@@ -185,12 +227,14 @@ def revalidar_obra_destino_sin_ocr(
             obra_documental = str(fila.get("obra_destino", "")).strip()
             if obra_documental in _AUSENTES:
                 continue
+            numero_guia = str(fila.get("numero_guia", ""))
             cliente_documental = str(fila.get("cliente", "")).strip()
             mismo_hecho_que_cliente = (
                 cliente_documental not in _AUSENTES
                 and normalizar_nombre_obra(obra_documental) == normalizar_nombre_obra(cliente_documental)
             )
-            if not mismo_hecho_que_cliente:
+            ya_revisado_por_humano = numero_guia in guias_resueltas_ledger
+            if not mismo_hecho_que_cliente and not ya_revisado_por_humano:
                 try:
                     resuelto = catalogo_obras.resolver_obra_destino_confirmada_global(
                         nombre_obra=obra_documental
@@ -555,7 +599,7 @@ def revalidar_y_regenerar_reporte(
     # conmutativas/idempotentes entre sí, así que el orden no importa. Se
     # combina el resultado para decidir si hace falta regenerar el reporte.
     resultado_obra_destino = revalidar_obra_destino_sin_ocr(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
     resultado_patente = revalidar_patente_sin_homologar_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
