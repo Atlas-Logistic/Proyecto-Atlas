@@ -1713,3 +1713,61 @@ comportamiento).
 
 **Estado: BLOQUE R7 CERRADO EN CÓDIGO, VALIDADO END-TO-END CON GROQ
 REAL EN 2 DOMINIOS. Sin push en ninguno de los dos repos.**
+
+## Bloque R8 -- evidencia operacional real de AZA RENCA (2026-08-21)
+
+**Investigación previa (sin código nuevo):** se localizó, en la propia
+caché real de telemetría (`cache/telemetria/telemetria_cache.json`), el
+patrón GPS real que corresponde a la evidencia que Javier describió --
+patente SB6486, 2026-08-06: permanencia real cerca de AZA RENCA de
+~10:26 a ~12:22, con 2 ciclos reales ENGINE_OFF/ENGINE_ON dentro de esa
+permanencia y salida definitiva confirmada a las 13:48:46 -- puntos con
+velocidad 0 a 0,22-0,44 km del punto documental ya confirmado (LA UNION
+3070, RENCA). Se comprobó, contra esta evidencia real, que el mecanismo
+YA existente (`resolver_planta_origen_gps`, Bloque TELEMETRÍA T3;
+`atlas_ia.registro_problemas`, Bloque R7) discrimina correctamente RENCA
+vs COLINA usando permanencia real (no un ping aislado) -- CERO cambios
+de código hicieron falta en la lógica de resolución.
+
+**Incorporación al catálogo real (mismo mecanismo que ya usa AZA COLINA,
+Bloque PLANTAS P3 -- ninguna memoria paralela):** `latitud`/`longitud`
+de AZA RENCA quedan SIN CAMBIAR (ya exactas, confidence=1.0); se agregó
+`punto_ruteo_latitud/longitud` con el centroide real de los puntos de
+permanencia (0,29 km del punto documental, dentro de la geocerca
+circular por defecto de 1,5 km -- no hizo falta ampliarla ni convertir a
+poligonal); `observacion` documenta fuente (CONFIRMACION_HUMANA +
+EVIDENCIA_GPS_OPERACIONAL), autoridad (alta), evidencia (trips
+OneLogis reales 30539854/30540537/30542187/30543835) y trazabilidad
+completa, mismo formato ya usado en AZA COLINA.
+
+**Prueba real (3 casos, datos GPS reales, sin tocar producción hasta
+validar):**
+- Caso 1 (patrón real de RENCA): `resolver_planta_origen_gps` identifica
+  AZA RENCA con esta evidencia real, favoreciendo la permanencia larga
+  sobre el paso corto y anterior por COLINA que cae en la misma ventana.
+- Caso 2 (mismo vehículo, sólo tramo real de COLINA): identifica AZA
+  COLINA, nunca fuerza RENCA; y sin evidencia cerca de ninguna planta,
+  no determina nada (nunca inventa).
+- Caso 3 (ambiguo real, guía 472037, `motivo_origen_gps` real ya
+  persistido en producción): B1 recibe evidencia estructurada (2
+  candidatos con score/solape, nunca un dump de GPS), se abstiene con
+  motivo trazable, nunca autoaplica planta.
+
+**Aprendizaje:** vive en `catalogos_privados/plantas.json` (mismo
+catálogo que ya consumen Motor y B1) -- reutilizable por cualquier
+vehículo/documento futuro compatible con esta geocerca, nunca ligado a
+SB6486, esta guía ni este chofer.
+
+5 tests focales nuevos con datos reales (`fixtures_telemetria_renca_r8.py`).
+Suite completa: 1613 passed (antes 1608).
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/R8_RENCA_20260821_155659/`), dry-run previo. Sólo
+`catalogos_privados/plantas.json` (AZA RENCA) escrito; AZA COLINA,
+dataset, ledger y bandeja verificados sin cambios por este bloque
+(SHA-256). No se reprocesaron las 10 guías. 9 viajes/9 confirmados/0
+revisión intacto; 464959+464960 en 11.429 kg/22,94 km/32,96 min; XF3629
+correctamente resuelto.
+
+**Estado: BLOQUE R8 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**
