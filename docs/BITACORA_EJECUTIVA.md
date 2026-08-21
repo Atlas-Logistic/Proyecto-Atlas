@@ -1844,3 +1844,71 @@ guías nuevas.
 
 **Estado: BLOQUE R9 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R10 -- decisión aplicada → revalidación → viaje OK → routing (2026-08-21)
+
+**Caso real (encontrado por ledger/timestamps, no preguntado a Javier):**
+guía 472163 -- Javier aplicó `OBRA_DESCONOCIDA`/`REGISTRAR` desde Desktop
+(última aplicación real del ledger, 21:02:59); la decisión desapareció
+correctamente de Revisión de Atlas, pero el documento seguía con
+`motivos_revision_documento=OBRA_DESTINO_SIN_CORROBORAR` e
+`indicador_revision=REVISAR` -- el viaje seguía REVISAR en Viajes.
+
+**Causa raíz (general, no de esta guía):** `aplicar_decision_obra`
+disparaba `revalidar_y_regenerar_reporte` (que YA sabe retirar el motivo
+vía el índice del ledger, R4.9) sólo para una lista blanca cerrada de
+3 tipos de decisión (`ORIGEN_NO_CONFIRMADO`, `DESTINO_NO_RESUELTO`,
+`CLIENTE_AUSENTE`) -- cualquier otro tipo (obra, cliente, vehículo,
+alias...) cerraba la decisión sin revalidar nunca el motivo documental
+de ese mismo documento.
+
+**Fix general:** se invirtió la condición -- ahora CUALQUIER acción que
+cierre una decisión (todas salvo `POSPONER`/`NO_PUEDO_DETERMINAR`, que no
+escriben nada) dispara `revalidar_y_regenerar_reporte` automáticamente,
+salvo los 3 tipos que ya regeneran directo (evitar trabajo redundante,
+no por riesgo). Cubre obra/cliente/destino/vehículo/alias hoy y
+cualquier tipo nuevo mañana sin volver a tocar esta lista. Nuevo archivo
+`test_invariante_revision_huerfana_r10.py` (5 tests): prueba el
+invariante -- decisión cerrada + único motivo resuelto → indicador OK y
+sin decisión pendiente -- contra los dominios obra, vehículo y cliente
+por separado (destino/planta ya cubiertos en sus propios archivos), más
+el control inverso (otro motivo legítimo → REVISAR se mantiene con causa
+explícita).
+
+**472163 antes → después:** `motivos_revision_documento`
+`OBRA_DESTINO_SIN_CORROBORAR`→`""`, `indicador_revision`
+`REVISAR`→`OK`, viaje (transporte 0000354328) `REQUIERE_REVISION`→
+`CONFIRMADO`.
+
+**Routing después (Parte F):** `estado_ruta` sigue `REQUIERE_REVISION`
+(`GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: Vitacura != Santiago`,
+km/tiempo vacíos) -- causa técnica explícita y ya con decisión
+`DESTINO_NO_RESUELTO` accionable en Revisión de Atlas desde R9; el
+badge REVISAR del viaje y el estado de ruta son señales independientes
+por diseño (Desktop ya muestra ambas) -- no se confunden ni se ocultan.
+
+**B1 (Parte E):** sin cambios en R7 -- no hay fallo de integración
+demostrado. `resultado_atlas_ia_json` del reporte confirma ambos
+problemas restantes de 472163 como `elegible_ia=true`,
+`llamada_realizada=false`, `razon_no_elegible=SIN_EVIDENCIA_PARA_RAZONAR`
+(sin documento hermano para corroborar) -- abstención correcta y
+explícita, nunca un corte silencioso.
+
+**Tests:** 5 nuevos + 5 archivos existentes corregidos (fixtures con CSV
+mínimo/aserciones que asumían la revalidación selectiva vieja). Motor
+completo: 1632 passed (antes 1627). Desktop: sin cambios, nada que
+correr.
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/R10_PRE_RECONCILIACION_20260821_213140/`), dry-run contra
+copia temporal (confirmó que sólo 472163 cambiaba) antes de aplicar.
+Catch-up único de `revalidar_y_regenerar_reporte` contra producción real
+(sin reprocesar, sin OCR): sólo 472163 actualizado; las otras 10
+decisiones pendientes, ledger y catálogos verificados byte-idénticos
+(SHA-256) al backup. Nuevo `reporte_vigente` publicado
+(`reporte_revalidacion_r10_20260821_213141_022921`). Ningún futuro caso
+como éste va a requerir este catch-up manual -- el fix lo hace
+automático desde ahora.
+
+**Estado: BLOQUE R10 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

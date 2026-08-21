@@ -332,7 +332,14 @@ def test_no_registrar_no_dispara_revalidacion(tmp_path):
     )
 
     resultado = aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="NO_REGISTRAR")
-    assert "revalidacion" not in resultado
+    # Bloque R10: la revalidación ahora corre siempre (fix de la revisión
+    # huérfana) -- pero NO_REGISTRAR nunca queda en el índice del ledger
+    # que usa `revalidar_patente_sin_homologar_sin_ocr`
+    # (`resolver_patentes_confirmadas_por_ledger`, sólo USAR_PATENTE_
+    # EXISTENTE/SELECCIONAR_OTRA_PATENTE), así que corre sin encontrar
+    # nada que retirar -- nunca resuelve falsamente la patente.
+    assert "revalidacion" in resultado
+    assert resultado["revalidacion"]["guias_actualizadas"] == []
     fila_final = _leer_filas(dataset)["464740"]
     assert "PATENTE_SIN_HOMOLOGAR" in fila_final["motivos_revision_documento"]
 
@@ -405,7 +412,9 @@ def test_no_registrar_sigue_sin_disparar_revalidacion_ni_falsamente_resolver_pat
     """Control negativo del mismo bloque: NO_REGISTRAR (caso real 464036,
     error documental sin canónica) NUNCA debe entrar al índice del
     ledger que usa la revalidación -- un rechazo explícito no es una
-    confirmación."""
+    confirmación. Bloque R10: la revalidación en sí corre siempre (fix de
+    la revisión huérfana), pero al no estar en ese índice nunca retira
+    PATENTE_SIN_HOMOLOGAR."""
     fila = _fila_csv(numero_guia="464036", patente_tracto="XF3662", patente_rampla="No encontrado")
     raiz, catalogos, actual, dataset = _entorno(tmp_path, filas_csv=[fila])
     datos = {
@@ -421,7 +430,10 @@ def test_no_registrar_sigue_sin_disparar_revalidacion_ni_falsamente_resolver_pat
     resultado = aplicar_decision_obra(
         raiz_atlas=raiz, decision_id=decision["decision_id"], accion="NO_REGISTRAR", motivo_rechazo="ERROR_DOCUMENTAL_MANDANTE",
     )
-    assert "revalidacion" not in resultado
+    # Bloque R10: la revalidación corre siempre ahora -- el control real es
+    # que nunca resuelva falsamente la patente, no que se abstenga de correr.
+    assert "revalidacion" in resultado
+    assert resultado["revalidacion"]["guias_actualizadas"] == []
     fila_final = _leer_filas(dataset)["464036"]
     assert "PATENTE_SIN_HOMOLOGAR" in fila_final["motivos_revision_documento"]
 

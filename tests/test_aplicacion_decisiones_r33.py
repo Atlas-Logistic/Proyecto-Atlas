@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 from pathlib import Path
@@ -12,13 +13,24 @@ from atlas_core.aplicacion_decisiones import DecisionObsoletaError, aplicar_deci
 from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, ResultadoEvidencia, TipoEvidencia
 from atlas_core.decisiones_pendientes import crear_decision, detectar_decisiones_documento, generar_artefacto
+from atlas_core.procesamiento_masivo import COLUMNAS
 
 
 def _entorno(tmp_path):
     raiz=tmp_path/"Atlas"; catalogos=raiz/"catalogos_privados"; actual=raiz/"operacion"/"actual"; catalogos.mkdir(parents=True); actual.mkdir(parents=True)
     for nombre,contenido in {"clientes.json":{"version_formato":1,"clientes":[]},"empresas.json":{},"vehiculos.json":{},"obras_destinos.json":{"version_formato":1,"obras":[],"relaciones":[]},"destinos_maestros.json":{"version_formato":1,"destinos":[]}}.items():(catalogos/nombre).write_text(json.dumps(contenido),encoding="utf-8")
     cliente=CatalogoClientes(catalogos/"clientes.json").crear(razon_social="CLIENTE CANONICO SA",rut="50.234.350-5",fuente="TEST",estado_calidad=EstadoCalidadCliente.CONFIRMADO)
-    dataset=actual/"analisis_completo_guias.csv"; dataset.write_text("guia;estado\n100;OK\n",encoding="utf-8")
+    dataset=actual/"analisis_completo_guias.csv"
+    # Bloque R10: fila con esquema completo (COLUMNAS) -- ya no una fila
+    # mínima de 2 columnas, porque REGISTRAR ahora dispara
+    # `revalidar_y_regenerar_reporte` (fix de la revisión huérfana, caso
+    # real 472163), que sí lee y valida el esquema del dataset completo.
+    fila={c:"" for c in COLUMNAS}
+    fila.update({"archivo":"100.png","estado_procesamiento":"OK","numero_guia":"100","numero_transporte":"T1",
+                 "fecha":"01-08-2026","cliente":"CLIENTE CANONICO SA","obra_destino":"OBRA NUEVA",
+                 "indicador_revision":"REVISAR","motivos_revision_documento":"OBRA_DESTINO_SIN_CORROBORAR"})
+    with dataset.open("w",newline="",encoding="utf-8-sig") as archivo:
+        escritor=csv.DictWriter(archivo,fieldnames=COLUMNAS,delimiter=";"); escritor.writeheader(); escritor.writerow(fila)
     decision=crear_decision(tipo="OBRA_DESCONOCIDA",entidad="OBRA",archivo="100.png",numero_guia="100",numero_transporte="T1",campo="obra_destino",valor_documental="OBRA NUEVA",valor_normalizado="OBRA NUEVA",identidad_resuelta=None,candidatos=(),motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),evidencias=({"tipo":"CLIENTE_RESUELTO","entidad_id":cliente.cliente_id},),acciones_permitidas=("REGISTRAR","NO_REGISTRAR","POSPONER"),contexto={"cliente_id":cliente.cliente_id,"cliente_canonico":cliente.razon_social})
     generar_artefacto(ruta_dataset=dataset,carpeta_catalogos=catalogos,decisiones=[decision],ruta_salida=actual/"decisiones_pendientes.json")
     return raiz,catalogos,actual,cliente,decision

@@ -179,7 +179,12 @@ def test_decision_consecutiva_obra_luego_destino_sin_obsolescencia(tmp_path):
 
     resultado_destino = aplicar_decision_obra(raiz_atlas=raiz, decision_id=siguiente["decision_id"], accion="CONFIRMAR")
     assert resultado_destino["ok"]
-    assert resultado_destino["revalidacion"]["reporte_regenerado"] is True
+    # Bloque R10: REGISTRAR (arriba) ya dispara revalidar_y_regenerar_reporte
+    # (fix de la revisión huérfana) -- el motivo documental ya puede quedar
+    # retirado ANTES de esta segunda decisión, así que esta llamada puede
+    # no tener nada nuevo que regenerar. Lo que importa (líneas 194-196
+    # abajo) es el estado final, no cuál de las dos llamadas lo logró.
+    assert "reporte_regenerado" in resultado_destino["revalidacion"]
     assert _pendientes(actual) == []
 
     obras_cat = CatalogoObrasDestinos(ruta=catalogos/"obras_destinos.json", ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogos/"destinos_maestros.json")

@@ -952,15 +952,33 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # sabe reconocerlas vía el ledger -- caso real que lo motivó:
             # 464265 (VP6521->VP8521, confirmado por Javier) seguía
             # mostrando PATENTE_SIN_HOMOLOGAR después de confirmarse.
-            if (tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR") or (
-                tipo == "VEHICULO_DESCONOCIDO"
-                and accion in ("REGISTRAR", "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
-            ) or (
-                # R4.8 -- confirmar un CLIENTE_CANDIDATO resuelve el motivo
-                # documental CLIENTE_SIN_CORROBORAR de este mismo documento
-                # (ver `revalidar_cliente_sin_corroborar_sin_ocr`), igual que
-                # las otras dos revalidaciones ya wireadas aquí.
-                tipo == "CLIENTE_CANDIDATO" and accion == "CONFIRMAR"
+            # Bloque R10 -- causa raíz de "decisión cerrada pero el viaje
+            # sigue REQUIERE_REVISION" (caso real 472163: OBRA_DESCONOCIDA/
+            # REGISTRAR sólo escribía el catálogo de obras -- nunca se
+            # revalidaba el motivo documental `OBRA_DESTINO_SIN_CORROBORAR`
+            # de ESE mismo documento, así que quedaba fijado para siempre
+            # aunque `revalidar_obra_destino_sin_ocr` ya sabía retirarlo vía
+            # el ledger, R4.9). Antes de este bloque, cada tipo de decisión
+            # necesitaba agregarse A MANO a esta condición para heredar la
+            # revalidación -- la misma clase de "whitelist cerrada" que R7
+            # ya eliminó para B1. Ahora es al revés: CUALQUIER acción que
+            # cierre una decisión (nunca POSPONER/NO_PUEDO_DETERMINAR, que
+            # no escriben nada) dispara `revalidar_y_regenerar_reporte`
+            # -- sin OCR, sin red, idempotente (sólo regenera si algo
+            # cambió) -- salvo los 3 tipos que ya regeneran directo más
+            # abajo porque SABEN que el dataset cambió (evitar el trabajo
+            # redundante, no por riesgo). Cubre obra/cliente/destino/
+            # vehículo/alias hoy y cualquier tipo de decisión nuevo mañana,
+            # sin volver a tocar esta lista.
+            ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET = ("POSPONER", "NO_PUEDO_DETERMINAR")
+            TIPOS_CON_REGENERACION_DIRECTA = {
+                ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"), ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"),
+                ("DESTINO_NO_RESUELTO", "REGISTRAR_DIRECCION"),
+                ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"),
+            }
+            if (
+                accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
+                and (tipo, accion) not in TIPOS_CON_REGENERACION_DIRECTA
             ):
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
