@@ -1428,3 +1428,37 @@ motivo específico (caso 472037). 238 tests, 0 failing.
 
 **Estado: CASO 472037/464981 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push
 en ninguno de los dos repos.**
+# 2026-08-21 — Cierre final 472037 (obra registrada sin destino) + badges de pestaña
+
+Tras confirmar el `CLIENTE_CANDIDATO` de 472037, Javier registró la obra
+encadenada ("ING Y CONST FUNDAMENTA SPA") -- pero sin destino documental
+capturado (`despachar_a_crudo` vacío), `REGISTRAR` es terminal por diseño
+(CASO C, no genera decisión siguiente) y `OBRA_DESTINO_SIN_CORROBORAR`
+quedaba fijado en el CSV sin vía de salida: viaje en revisión, 0
+decisiones pendientes -- el limbo "REVISAR pero nadie puede hacer nada".
+
+Fix general (commit `3b30076`): `revalidar_obra_destino_sin_ocr` gana un
+`ruta_ledger` opcional -- cualquier aplicación terminal de OBRA_DESCONOCIDA
+o DESTINO_SIN_CONFIRMAR para ese `numero_guia` exacto retira el motivo
+(mismo patrón que los índices de ledger ya usados para patente/cliente).
+6 tests focales, incluido un end-to-end del flujo real completo. Suite
+completa: 1551 passed.
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/CIERRE_472037_OBRA_SIN_DESTINO_R49_20260821_105557/`) →
+`revalidar_y_regenerar_reporte`. 472037: motivo retirado, `OK`, 0
+decisiones pendientes (correcto -- nada más que preguntar). Catálogos y
+ledger sin cambios; XF3629 sigue sin reaparecer; control con patente
+desconocida sigue generando decisión.
+
+**Desktop (commit `09b23b2`, rama `fix-desktop-data-root-drag-drop`):**
+contraste de los contadores de pestaña ("Sin número de transporte",
+"Revisión de Atlas") corregido -- `--amber` pasa de `#b45309` (~4,5:1
+sobre `--amber-bg`, al límite de WCAG AA y perceptualmente lavado contra
+el fondo general de la app) a `#805312` (~5,9:1), el mismo tono ya usado
+y probado en `.motivo-chip` de la misma página -- ningún color nuevo, sólo
+el ya validado en la UI. 4 tests focales de contraste (WCAG calculado
+sobre los valores reales del CSS). 242 tests, 0 failing.
+
+**Estado: CASO 472037 CERRADO POR COMPLETO. Sin push en ninguno de los dos
+repos.**
