@@ -1359,3 +1359,32 @@ sin correcciones posteriores. Detalle en `R4_RUN_REAL_Y_HOLDOUT_20260820.md`.
 B1 quedó integrado al pipeline común Desktop/Mobile. E2E real Groq: una llamada,
 B_ASISTENCIA validada, 1,727 s. Reset preparado y probado sólo en aislamiento;
 operación real intacta. Ver `R4_7_B1_OPERACIONAL_Y_RESET.md`.
+# 2026-08-21 — Cierre VEHICULO_DESCONOCIDO/CAMION_RIGIDO (caso Ortiz/XF3629)
+
+Causa: `detectar_decisiones_documento` seguía filtrando `patente_tracto`
+aislada exclusivamente por `TRACTO`, sin reconocer `CAMION_RIGIDO` --
+inconsistente con la homologación documental (P2) y con
+`revalidar_patente_sin_homologar_sin_ocr`, que ya trataban ambos tipos como
+compatibles para ese rol. Una patente ya `CONFIRMADO`/`ACTIVO` volvía a
+generar `VEHICULO_DESCONOCIDO` en cada reproceso -- Viajes mostraba OK,
+Revisión de Atlas seguía pidiendo registrarla. Reproducido con datos reales
+del checkpoint R4 (guía 472073).
+
+Fix general (commit `3632ff3`): mismo criterio TRACTO/CAMION_RIGIDO ya
+establecido en los otros dos lugares del pipeline, aplicado también en
+detección. `patente_rampla` no se toca. 4 tests focales nuevos; suite
+completa 1533 passed.
+
+**Aplicado a Drive real:** `regenerar_decisiones_persistidas` +
+`generar_artefacto` sobre `operacion/actual/decisiones_pendientes.json`
+(mecanismo canónico, sin OCR, sin reprocesar el lote). Backup previo
+verificado byte a byte en
+`respaldos/LIMPIEZA_VEHICULO_DESCONOCIDO_XF3629_R4_20260821_090507/`.
+Bandeja real: **3 → 2 decisiones** -- `VEHICULO_DESCONOCIDO`/XF3629 (guía
+464991, chofer Ortiz) cerrada; las 2 `OBRA_DESCONOCIDA` legítimas se
+conservan con `decision_id` idéntico. Verificado por SHA-256: catálogos,
+CSV documental, ledger y `estado_operacion.json` sin cambios -- sólo se
+escribió `decisiones_pendientes.json`. Control con patente realmente
+desconocida, contra el catálogo real: sigue generando su decisión.
+
+**Estado: CASO ORTIZ/XF3629 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push.**

@@ -4507,3 +4507,33 @@ Resolución segura de GROQ_API_KEY desde proceso/perfil Windows, escalamiento B1
 operacional compartido por lote Desktop y envío Mobile, política A/B/C/D y reset
 con marcador de aislamiento. E2E remoto real y rollback documentados en
 `R4_7_B1_OPERACIONAL_Y_RESET.md`.
+# 2026-08-21 — Fix general VEHICULO_DESCONOCIDO/CAMION_RIGIDO + limpieza real
+
+`detectar_decisiones_documento` (`atlas_core/decisiones_pendientes.py`) filtraba
+`patente_tracto` sin rampla documental exclusivamente por tipo `TRACTO`; P2
+(`procesamiento_masivo.py`) y `revalidar_patente_sin_homologar_sin_ocr` ya
+aceptaban `CAMION_RIGIDO` para ese mismo rol documental. Con XF3629 ya
+`CONFIRMADO`/`ACTIVO` como `CAMION_RIGIDO` (guía 464740, 2026-08-17), cualquier
+documento reprocesado después (472073 en el replay R4; 464991/Ortiz en real)
+volvía a generar `VEHICULO_DESCONOCIDO` -- `regenerar_decisiones_persistidas`
+ya era agnóstico al tipo (no era el problema); la detección fresca sí tenía la
+regla equivocada. Fix: se resuelve primero la identidad exacta sin tipo; sólo
+si es `TRACTO`/`CAMION_RIGIDO` se usa como filtro efectivo -- `patente_rampla`
+intacta. Commit `3632ff3`. 4 tests focales; suite completa 1533 passed.
+
+Validado antes de tocar Drive: replay `R4_REPLAY_AISLADO_20260820` (catálogo
+real, read-only) -- 472073/XF3629 deja de generar decisión; control
+ZZ0000/desconocida sigue generándola.
+
+**Aplicación real:** backup SHA-256 verificado
+(`respaldos/LIMPIEZA_VEHICULO_DESCONOCIDO_XF3629_R4_20260821_090507/`, 5
+archivos) → `regenerar_decisiones_persistidas` + `generar_artefacto` sobre
+`operacion/actual/decisiones_pendientes.json` (raíz real `G:\Mi unidad\Atlas`).
+Bandeja: 3 → 2 (`89a5ff0df5b3…`/460807 y `6f96032ef3a0…`/472008,
+`OBRA_DESCONOCIDA`, `decision_id` idéntico antes/después; `7b1eaed81355…`
+`VEHICULO_DESCONOCIDO`/XF3629/464991 removida). SHA-256 idéntico antes/después
+en `vehiculos.json`, `analisis_completo_guias.csv` y `decisiones_aplicadas.json`
+-- sólo se escribió `decisiones_pendientes.json`. `estado_operacion.json` sin
+cambios. Control con patente desconocida repetido contra el catálogo real
+(read-only, sin escritura): sigue generando decisión. Ninguna de las 10 guías
+del replay se reprocesó. Git: commit hecho, **sin push**.
