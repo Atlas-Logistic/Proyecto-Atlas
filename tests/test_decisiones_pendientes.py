@@ -248,6 +248,89 @@ def test_patente_conocida_no_genera_decision(tmp_path):
     assert not any(x["tipo"]=="VEHICULO_DESCONOCIDO" for x in ds)
 
 
+def _vehiculo_v1(patente, tipo, vehiculo_id="id-1"):
+    return {
+        "vehiculo_id": vehiculo_id, "patente_canonica": patente, "tipo": tipo,
+        "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "aliases": [],
+        "evidencias": [], "procedencia": "CONFIRMACION_HUMANA", "confirmado_por": "test",
+        "fecha_confirmacion": "2026-01-01T00:00:00+00:00", "observaciones": "",
+        "fecha_creacion": "2026-01-01T00:00:00+00:00", "fecha_modificacion": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def test_patente_tracto_camion_rigido_conocida_sin_rampla_no_genera_decision(tmp_path):
+    """R4: caso real -- una patente_tracto AISLADA (sin rampla documental,
+    camión rígido) ya CONFIRMADA/ACTIVA en el catálogo como CAMION_RIGIDO no
+    debe generar VEHICULO_DESCONOCIDO -- mismo criterio de compatibilidad ya
+    aplicado en `procesamiento_masivo.procesar_archivo` (P2) y en
+    `revalidar_patente_sin_homologar_sin_ocr`. Antes de este fix, esta
+    función seguía filtrando patente_tracto por TRACTO exclusivo y volvía a
+    pedir "registrar" una patente que Atlas ya conoce -- contradiciendo al
+    dataset/reporte, que ya la trata como homologada."""
+    carpeta = _catalogos(tmp_path)
+    (carpeta / "vehiculos.json").write_text(
+        json.dumps({"version": 1, "vehiculos": [_vehiculo_v1("XF3629", "CAMION_RIGIDO")]}),
+        encoding="utf-8",
+    )
+    ds = detectar_decisiones_documento(
+        archivo="g.png", datos={"número de guía": "1", "patente del tracto": "XF3629"},
+        carpeta_catalogos=carpeta,
+    )
+    assert not any(x["tipo"] == "VEHICULO_DESCONOCIDO" for x in ds)
+
+
+def test_patente_tracto_camion_rigido_conocida_con_rampla_documental_si_genera_decision(tmp_path):
+    """Control -- la compatibilidad TRACTO/CAMION_RIGIDO es SOLO para el
+    tracto AISLADO. Si el documento SÍ trae una rampla documental válida (es
+    un tracto+rampla articulado), una patente_tracto que en catálogo es
+    CAMION_RIGIDO sigue sin ser candidata: el rol documental exige TRACTO
+    exclusivo, así que la decisión debe seguir generándose."""
+    carpeta = _catalogos(tmp_path)
+    (carpeta / "vehiculos.json").write_text(
+        json.dumps({"version": 1, "vehiculos": [_vehiculo_v1("XF3629", "CAMION_RIGIDO")]}),
+        encoding="utf-8",
+    )
+    ds = detectar_decisiones_documento(
+        archivo="g.png",
+        datos={"número de guía": "1", "patente del tracto": "XF3629", "patente del carro": "AB1234"},
+        carpeta_catalogos=carpeta,
+    )
+    assert any(x["tipo"] == "VEHICULO_DESCONOCIDO" and x["campo"] == "patente_tracto" for x in ds)
+
+
+def test_patente_tracto_realmente_desconocida_sigue_generando_decision(tmp_path):
+    """Control -- una patente_tracto aislada que NO existe en ningún
+    catálogo (ni como TRACTO ni como CAMION_RIGIDO) debe seguir generando su
+    VEHICULO_DESCONOCIDO normal; el fix de compatibilidad nunca se convierte
+    en una abstención general."""
+    carpeta = _catalogos(tmp_path)
+    (carpeta / "vehiculos.json").write_text(
+        json.dumps({"version": 1, "vehiculos": [_vehiculo_v1("ZZ9999", "CAMION_RIGIDO", "id-otro")]}),
+        encoding="utf-8",
+    )
+    ds = detectar_decisiones_documento(
+        archivo="g.png", datos={"número de guía": "1", "patente del tracto": "XF3629"},
+        carpeta_catalogos=carpeta,
+    )
+    assert [(d["tipo"], d["valor_documental"]) for d in ds] == [("VEHICULO_DESCONOCIDO", "XF3629")]
+
+
+def test_patente_rampla_camion_rigido_conocida_no_se_acepta_como_carro(tmp_path):
+    """Control -- la compatibilidad TRACTO/CAMION_RIGIDO es exclusiva del
+    campo patente_tracto; patente_rampla nunca acepta CAMION_RIGIDO (ni
+    TRACTO) como candidata."""
+    carpeta = _catalogos(tmp_path)
+    (carpeta / "vehiculos.json").write_text(
+        json.dumps({"version": 1, "vehiculos": [_vehiculo_v1("XF3629", "CAMION_RIGIDO")]}),
+        encoding="utf-8",
+    )
+    ds = detectar_decisiones_documento(
+        archivo="g.png", datos={"número de guía": "1", "patente del carro": "XF3629"},
+        carpeta_catalogos=carpeta,
+    )
+    assert any(x["tipo"] == "VEHICULO_DESCONOCIDO" and x["campo"] == "patente_rampla" for x in ds)
+
+
 def test_cliente_desconocido_conserva_solo_registrar_no_registrar(tmp_path):
     ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(),carpeta_catalogos=_catalogos(tmp_path))
     d=next(x for x in ds if x["tipo"]=="CLIENTE_DESCONOCIDO")

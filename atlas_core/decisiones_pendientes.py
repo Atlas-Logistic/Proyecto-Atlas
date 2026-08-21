@@ -644,6 +644,16 @@ def detectar_decisiones_documento(
     comunes = {"archivo": archivo, "numero_guia": guia, "numero_transporte": transporte}
     decisiones: list[dict[str, object]] = []
     rampla_documental_valida = _patente_documental_valida(datos.get("patente del carro", ""))
+    # R4: mismo catálogo que ya carga `resolver_patente` más abajo, leído
+    # una sola vez aquí -- sólo para poder mirar el TIPO de una identidad ya
+    # exacta antes de decidir el filtro, nunca para elegir entre candidatos.
+    try:
+        vehiculos_por_patente_tracto = {
+            v.patente_canonica: v
+            for v in cargar_catalogo_vehiculos(carpeta / "vehiculos.json").homologables()
+        }
+    except (OSError, ValueError):
+        vehiculos_por_patente_tracto = {}
 
     for campo, clave_dato, tipo_esperado in (
         ("patente_tracto", "patente del tracto", "TRACTO"),
@@ -652,8 +662,33 @@ def detectar_decisiones_documento(
         valor = str(datos.get(clave_dato, "")).strip()
         if valor in _AUSENTES:
             continue
+        # R4 (paridad con `procesamiento_masivo.procesar_archivo` P2 y con
+        # `revalidar_patente_sin_homologar_sin_ocr`): una patente_tracto
+        # AISLADA (sin rampla documental) puede ser un TRACTO articulado o
+        # un CAMION_RIGIDO -- las otras dos capas del pipeline ya tratan
+        # ambos tipos como compatibles con ese rol documental. Antes de
+        # este fix, sólo esta función seguía filtrando por TRACTO exclusivo,
+        # así que una patente YA CONFIRMADA como CAMION_RIGIDO (documento ya
+        # homologado a OK por P2) volvía a generar aquí una decisión
+        # VEHICULO_DESCONOCIDO -- Revisión de Atlas contradiciendo a Viajes
+        # para el mismo documento en la misma corrida. Se resuelve primero
+        # SIN restricción de tipo (sólo para leer la identidad EXACTA ya
+        # conocida, nunca para elegir entre varias) y sólo si esa identidad
+        # exacta es TRACTO o CAMION_RIGIDO se usa como filtro efectivo --
+        # nunca se afloja el filtro para una coincidencia ambigua ni para
+        # aceptar CARRO en este campo.
+        tipo_efectivo = tipo_esperado
+        if campo == "patente_tracto" and not rampla_documental_valida:
+            identidad_sin_tipo = resolver_patente(carpeta / "vehiculos.json", valor)
+            vehiculo_exacto = vehiculos_por_patente_tracto.get(identidad_sin_tipo.valor_resultado)
+            if (
+                identidad_sin_tipo.estado in {"COINCIDENCIA_EXACTA", "ALIAS"}
+                and vehiculo_exacto is not None
+                and vehiculo_exacto.tipo in {"TRACTO", "CAMION_RIGIDO"}
+            ):
+                tipo_efectivo = vehiculo_exacto.tipo
         resultado = resolver_patente(
-            carpeta / "vehiculos.json", valor, tipo_esperado=tipo_esperado
+            carpeta / "vehiculos.json", valor, tipo_esperado=tipo_efectivo
         )
         if resultado.estado in {"SIN_CANDIDATO", "CATALOGO_VACIO"}:
             # R3.2: "esta patente no está registrada en Atlas" es toda la
