@@ -1522,14 +1522,35 @@ def extraer_datos(
         return None
 
     def buscar_numero_transporte() -> Optional[str]:
+        # Bloque R5 I -- además del número, deja constancia (en `datos`,
+        # nunca en el valor devuelto) de si la ETIQUETA "NRO...TRANSPORTE"
+        # se encontró en el texto OCR, exista o no un número válido cerca.
+        # Es la señal que distingue, después, un campo genuinamente ausente
+        # del documento (la etiqueta nunca aparece -- omisión del mandante)
+        # de un campo presente que Atlas no logró leer (la etiqueta aparece,
+        # pero ningún patrón numérico válido la acompaña) -- ver
+        # `atlas_core.procesamiento_masivo._clasificar_transporte_ausente`.
+        # Puramente informativo: nunca cambia qué número se devuelve aquí.
+        # Sin texto que buscar (documento vacío/sin OCR), no hay evidencia
+        # de ningún tipo -- ni "encontrada" ni "no encontrada" -- se omite
+        # la señal por completo en vez de afirmar una ausencia que nunca
+        # se llegó a comprobar contra un documento real.
+        if not texto_busqueda.strip():
+            return None
+
+        etiqueta_encontrada = False
         posicion = texto_busqueda.find("NRO")
         while posicion != -1:
             bloque = texto_busqueda[posicion : posicion + 500]
             if "TRANSPORTE" in bloque:
+                etiqueta_encontrada = True
                 candidatos = re.findall(r"\b0{4}\d{4,10}\b", bloque)
                 if candidatos:
+                    datos["_etiqueta_transporte_documental"] = "SI"
                     return candidatos[-1]
             posicion = texto_busqueda.find("NRO", posicion + 1)
+
+        datos["_etiqueta_transporte_documental"] = "SI" if etiqueta_encontrada else "NO"
 
         candidatos = re.findall(r"\b0{4}\d{4,10}\b", texto_busqueda)
         if candidatos:

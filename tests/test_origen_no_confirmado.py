@@ -180,6 +180,41 @@ def test_genera_decision_con_ambas_plantas_en_conflicto(tmp_path):
     assert decision["motivos"] == ["ORIGEN_GPS_CONFLICTO"]
 
 
+def test_caso_real_472037_genera_decision_con_ambas_plantas(tmp_path):
+    """Bloque R5 A/B -- caso real 472037 (CRISTOPHER RETAMAL, BPHR67,
+    18-08-2026): motivo_origen_gps real persistido en producción,
+    `CONFLICTO_REAL_EN_VENTANA(AZA_RENCA:score=0.104,solape=0.0%;
+    AZA_COLINA:score=0.0559,solape=0.0%)`. Antes de este bloque, el
+    mecanismo existía (detección + aplicación + reconciliación) pero
+    nunca se invocaba desde ningún punto de entrada real -- la guía
+    quedaba con origen vacío sin ninguna pregunta visible en Revisión de
+    Atlas. Este test fija el comportamiento correcto: ambas plantas se
+    ofrecen como candidatas, con sus scores reales, sin forzar ninguna."""
+    catalogo = CatalogoPlantas(tmp_path / "plantas.json")
+    colina = catalogo.crear(
+        nombre="AZA COLINA", pais="CHILE", fuente="TEST",
+        latitud=COORD_COLINA[0], longitud=COORD_COLINA[1], estado_calidad=EstadoCalidad.CONFIRMADA,
+    )
+    renca = catalogo.crear(
+        nombre="AZA RENCA", pais="CHILE", fuente="TEST",
+        latitud=COORD_RENCA[0], longitud=COORD_RENCA[1], estado_calidad=EstadoCalidad.CONFIRMADA,
+    )
+    fila = _fila_csv(
+        numero_guia="472037", numero_transporte="0000354034", chofer="CRISTOPHER RETAMAL",
+        patente_tracto="BPHR67", motivo_ruta="ORIGEN_NO_DETERMINADO",
+        motivo_origen_gps=(
+            "CONFLICTO_REAL_EN_VENTANA(AZA_RENCA:score=0.104,solape=0.0%;"
+            "AZA_COLINA:score=0.0559,solape=0.0%)"
+        ),
+    )
+    decision = detectar_decision_origen_no_confirmado(archivo="472037.jpeg", fila=fila, plantas=[colina, renca])
+    assert decision is not None
+    candidatos_por_nombre = {c["planta_nombre"]: c for c in decision["candidatos"]}
+    assert set(candidatos_por_nombre) == {"AZA RENCA", "AZA COLINA"}
+    assert "0.104" in candidatos_por_nombre["AZA RENCA"]["evidencia_resumen"]
+    assert "0.0559" in candidatos_por_nombre["AZA COLINA"]["evidencia_resumen"]
+
+
 def test_no_genera_decision_sin_evidencia_suficiente(tmp_path):
     """Patrón real 464479/464529: telemetría demasiado escasa -- ni
     conflicto nombrado ni coordenada de estadía que ofrecer."""

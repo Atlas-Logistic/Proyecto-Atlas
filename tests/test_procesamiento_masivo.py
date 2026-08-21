@@ -1077,6 +1077,72 @@ def test_procesar_archivo_documento_degradado_queda_revisar(tmp_path, monkeypatc
     assert resultado["indicador_revision"] == "REVISAR"
 
 
+def _datos_base_transporte_ausente(**overrides):
+    datos = {
+        "número de guía": "123456", "número de transporte": "No encontrado",
+        "cliente": "ACEROS SUR", "obra destino": "OBRA X",
+        "chofer": "JUAN PEREZ", "patente del tracto": "ABCD12",
+        "patente del carro": "AB1234",
+    }
+    datos.update(overrides)
+    return datos
+
+
+def _procesar_con_datos_mock(tmp_path, monkeypatch, datos):
+    ruta = tmp_path / "guia.jpg"
+    monkeypatch.setattr(
+        procesamiento_masivo, "leer_texto_imagen", Mock(return_value=["FECHA DE EMISIÓN 23-06-2025"])
+    )
+    monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
+    monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=datos))
+    return procesar_archivo(ruta)
+
+
+def test_transporte_ausente_sin_etiqueta_no_bloquea_revision(tmp_path, monkeypatch):
+    """Bloque R5 I -- la etiqueta 'NRO...TRANSPORTE' nunca aparece en el
+    OCR y el resto del documento está completo: omisión documental
+    (Caso 1), nunca un problema de lectura de Atlas. No debe forzar
+    'REVISAR' -- se resuelve aparte, como Incidencia Documental."""
+    datos = _datos_base_transporte_ausente(_etiqueta_transporte_documental="NO")
+    resultado = _procesar_con_datos_mock(tmp_path, monkeypatch, datos)
+    motivos = {m.strip() for m in resultado["motivos_revision_documento"].split("|")}
+    assert "TRANSPORTE_AUSENTE_SIN_ETIQUETA" in motivos
+    assert "TRANSPORTE_AUSENTE" not in motivos
+    assert resultado["indicador_revision"] == "OK"
+
+
+def test_transporte_ausente_con_etiqueta_sigue_bloqueando_revision(tmp_path, monkeypatch):
+    """Caso 2 -- la etiqueta SÍ aparece en el OCR pero ningún número válido
+    la acompaña: Atlas no logró leerlo, sigue siendo TRANSPORTE_AUSENTE
+    normal, bloqueante en Revisión de Atlas (comportamiento sin cambios)."""
+    datos = _datos_base_transporte_ausente(_etiqueta_transporte_documental="SI")
+    resultado = _procesar_con_datos_mock(tmp_path, monkeypatch, datos)
+    motivos = {m.strip() for m in resultado["motivos_revision_documento"].split("|")}
+    assert "TRANSPORTE_AUSENTE" in motivos
+    assert "TRANSPORTE_AUSENTE_SIN_ETIQUETA" not in motivos
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
+def test_transporte_ausente_documento_degradado_no_usa_sin_etiqueta(tmp_path, monkeypatch):
+    """Caso 3 -- documento degradado en general (varios campos ausentes a
+    la vez): el problema es de calidad/captura del documento completo, no
+    específico de este campo -- se mantiene TRANSPORTE_AUSENTE normal (+
+    DOCUMENTO_DEGRADADO), nunca la variante SIN_ETIQUETA, aunque la
+    etiqueta tampoco se haya encontrado."""
+    datos = {
+        "número de guía": "No encontrado", "número de transporte": "No encontrado",
+        "cliente": "No encontrado", "obra destino": "No encontrado",
+        "chofer": "JUAN PEREZ", "patente del tracto": "No encontrado",
+        "patente del carro": "No encontrado",
+        "_etiqueta_transporte_documental": "NO",
+    }
+    resultado = _procesar_con_datos_mock(tmp_path, monkeypatch, datos)
+    assert "TRANSPORTE_AUSENTE_SIN_ETIQUETA" not in resultado["motivos_revision_documento"]
+    assert "TRANSPORTE_AUSENTE" in resultado["motivos_revision_documento"]
+    assert "DOCUMENTO_DEGRADADO" in resultado["motivos_revision_documento"]
+    assert resultado["indicador_revision"] == "REVISAR"
+
+
 def test_procesar_archivo_sin_proveedor_usa_easyocr_directo_como_antes(tmp_path, monkeypatch):
     """No degradar comportamiento existente: sin `proveedor`, la ruta sigue
     siendo exactamente la de EasyOCR directo, sin tocar bloques si no hace falta."""

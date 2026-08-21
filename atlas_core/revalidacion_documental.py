@@ -45,6 +45,12 @@ from atlas_core.catalogo_vehiculos import (
     normalizar_patente_vehiculo,
 )
 from atlas_core.extractor import _patente_valida
+from atlas_core.incidencias_documentales import (
+    TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL,
+    VALOR_CANONICO_CAMPO_REQUERIDO,
+    VALOR_DOCUMENTAL_CAMPO_AUSENTE,
+    AlmacenIncidenciasDocumentales,
+)
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     MOTIVOS_NO_BLOQUEANTES,
@@ -1144,6 +1150,66 @@ def reconciliar_decisiones_origen(
         decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
     )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
+
+
+def detectar_incidencias_transporte_ausente_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, str]]:
+    """Bloque R5 I -- READ-ONLY, nunca escribe nada. Recorre el dataset
+    vigente (ya persistido, sin OCR, sin red) y devuelve un candidato por
+    cada documento marcado `TRANSPORTE_AUSENTE_SIN_ETIQUETA` (la etiqueta
+    "NRO...TRANSPORTE" nunca apareció en el texto OCR y el documento no
+    está degradado en general -- ver
+    `atlas_core.procesamiento_masivo.MotivoRevisionDocumento`): omisión
+    documental atribuible al mandante, candidata a Incidencia Documental."""
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+    candidatas = []
+    for fila in filas:
+        motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|")}
+        if MotivoRevisionDocumento.TRANSPORTE_AUSENTE_SIN_ETIQUETA.value not in motivos:
+            continue
+        candidatas.append({
+            "numero_guia": str(fila.get("numero_guia", "")),
+            "numero_transporte": str(fila.get("numero_transporte", "")),
+            "cliente": str(fila.get("cliente", "")),
+        })
+    return candidatas
+
+
+def reconciliar_incidencias_transporte_documental(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque R5 I -- registra, en el almacén ya existente de Incidencias
+    Documentales (`atlas_core.incidencias_documentales`), una incidencia
+    por cada documento detectado por
+    `detectar_incidencias_transporte_ausente_sin_ocr`. Idempotente
+    (`AlmacenIncidenciasDocumentales.registrar` no duplica por
+    `incidencia_id`). No toca el CSV documental, el ledger de decisiones ni
+    ningún catálogo -- sólo agrega al almacén de incidencias, que ya
+    alimenta la pestaña Incidencias Documentales. `actor=""` porque la
+    detección es automática, sin intervención humana puntual (mismo
+    criterio documentado en `AlmacenIncidenciasDocumentales.registrar`)."""
+    raiz = Path(raiz_atlas)
+    ruta_incidencias = raiz / "catalogos_privados" / "incidencias_documentales.json"
+    almacen = AlmacenIncidenciasDocumentales(ruta_incidencias)
+    candidatas = detectar_incidencias_transporte_ausente_sin_ocr(raiz_atlas=raiz)
+    registradas = []
+    for candidata in candidatas:
+        incidencia = almacen.registrar(
+            contexto=candidata["cliente"], numero_guia=candidata["numero_guia"],
+            numero_transporte=candidata["numero_transporte"], campo="numero_transporte",
+            valor_documental=VALOR_DOCUMENTAL_CAMPO_AUSENTE, valor_canonico=VALOR_CANONICO_CAMPO_REQUERIDO,
+            tipo_incidencia=TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL,
+            evidencia=("ETIQUETA_NRO_TRANSPORTE_NO_ENCONTRADA_EN_OCR", "DOCUMENTO_NO_DEGRADADO"),
+            fecha=reloj(), fuente_resolucion="DETECCION_AUTOMATICA_SIN_ETIQUETA",
+        )
+        registradas.append(incidencia.incidencia_id)
+    return {"candidatas": len(candidatas), "incidencias_registradas": registradas}
 
 
 # MOTOR DE EVIDENCIA FASE 4 -- tope del punto fijo de auto-resolución en

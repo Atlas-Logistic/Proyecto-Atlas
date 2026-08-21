@@ -700,6 +700,14 @@ class MotivoRevisionDocumento(str, Enum):
 
     GUIA_AUSENTE = "GUIA_AUSENTE"
     TRANSPORTE_AUSENTE = "TRANSPORTE_AUSENTE"
+    # Bloque R5 I -- variante NO bloqueante de TRANSPORTE_AUSENTE: la
+    # etiqueta "NRO...TRANSPORTE" nunca aparece en el texto OCR (no un
+    # número ilegible, la etiqueta misma) y el documento no está degradado
+    # en general -- omisión documental atribuible al mandante, se registra
+    # como Incidencia Documental (ver `incidencias_documentales`), nunca
+    # como pendiente de Revisión de Atlas. Ver criterio exacto de
+    # abstención junto al punto donde se dispara, más abajo.
+    TRANSPORTE_AUSENTE_SIN_ETIQUETA = "TRANSPORTE_AUSENTE_SIN_ETIQUETA"
     CLIENTE_AUSENTE = "CLIENTE_AUSENTE"
     CHOFER_AUSENTE = "CHOFER_AUSENTE"
     DOCUMENTO_DEGRADADO = "DOCUMENTO_DEGRADADO"
@@ -737,6 +745,10 @@ class MotivoRevisionDocumento(str, Enum):
 MOTIVOS_NO_BLOQUEANTES = frozenset({
     MotivoRevisionDocumento.MATERIAL_AUSENTE.value,
     MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA.value,
+    # Bloque R5 I: no bloquea Revisión de Atlas -- se resuelve como
+    # Incidencia Documental, un flujo separado (ver
+    # `revalidacion_documental.detectar_incidencias_transporte_ausente_sin_ocr`).
+    MotivoRevisionDocumento.TRANSPORTE_AUSENTE_SIN_ETIQUETA.value,
 })
 
 
@@ -1572,10 +1584,30 @@ def procesar_archivo(
     numero_transporte_actual = datos.get("número de transporte")
     chofer_actual_final = datos.get("chofer")
     cliente_actual_final = datos.get("cliente")
+    documento_degradado = _documento_degradado(datos, descripcion)
     if not numero_guia_actual or numero_guia_actual == "No encontrado":
         _motivo(MotivoRevisionDocumento.GUIA_AUSENTE)
     if not numero_transporte_actual or numero_transporte_actual == "No encontrado":
-        _motivo(MotivoRevisionDocumento.TRANSPORTE_AUSENTE)
+        # Bloque R5 I -- causa raíz: "sin número de transporte" mezclaba
+        # tres situaciones muy distintas bajo un único motivo (una pestaña
+        # manual, aparte de todo lo demás, que sólo mostraba el síntoma).
+        # Un documento degradado en general (`documento_degradado`, ya
+        # calculado arriba) ya lo cubre `DOCUMENTO_DEGRADADO` -- un problema
+        # de calidad/captura del documento completo, no específico de este
+        # campo. Descartado eso: si la propia etiqueta "NRO...TRANSPORTE"
+        # nunca aparece en el texto OCR, el campo simplemente no está
+        # impreso en el documento -- omisión atribuible al mandante, nunca
+        # un problema de lectura de Atlas (ver
+        # `atlas_core.incidencias_documentales` para la distinción y
+        # `revalidacion_documental.detectar_incidencias_transporte_ausente_sin_ocr`
+        # para el registro correspondiente). Si la etiqueta SÍ aparece pero
+        # ningún número válido la acompaña, es Atlas quien no logró leerlo
+        # -- eso sigue siendo `TRANSPORTE_AUSENTE` normal, bloqueante en
+        # Revisión de Atlas, igual que siempre.
+        if not documento_degradado and datos.get("_etiqueta_transporte_documental") == "NO":
+            _motivo(MotivoRevisionDocumento.TRANSPORTE_AUSENTE_SIN_ETIQUETA)
+        else:
+            _motivo(MotivoRevisionDocumento.TRANSPORTE_AUSENTE)
     if not chofer_actual_final or chofer_actual_final == "No encontrado":
         _motivo(MotivoRevisionDocumento.CHOFER_AUSENTE)
     if not cliente_actual_final or cliente_actual_final == "No encontrado":
@@ -1586,7 +1618,7 @@ def procesar_archivo(
         # O1 para peso/horas -- nunca por sí solo fuerza revisión completa
         # del documento si el resto de identidad/operación está resuelto.
         _motivo(MotivoRevisionDocumento.MATERIAL_AUSENTE)
-    if _documento_degradado(datos, descripcion):
+    if documento_degradado:
         _motivo(MotivoRevisionDocumento.DOCUMENTO_DEGRADADO)
 
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)

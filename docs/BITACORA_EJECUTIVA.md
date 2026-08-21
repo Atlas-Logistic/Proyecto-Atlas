@@ -1512,3 +1512,63 @@ operacional. 24 tests focales/actualizados. 252 tests, 0 failing.
 
 **Estado: BLOQUE RUTAS/ORDEN/PESO/BADGES CERRADO EN CÓDIGO Y EN DRIVE
 REAL. Sin push en ninguno de los dos repos.**
+
+## Bloque R5 -- Producto integral: planta origen + Envíos Mobile + jerarquía visual (2026-08-21)
+
+**Motor (`Proyecto-Atlas`):**
+- **Planta origen (Parte A/B):** el mecanismo `ORIGEN_NO_CONFIRMADO`
+  (detección + aplicación + reconciliación) ya existía completo desde un
+  bloque anterior pero nunca se invocaba desde ningún punto de entrada
+  real -- caso real 472037 quedaba con origen vacío sin ninguna pregunta
+  visible. Se conectó (`reconciliar_decisiones_origen`, sin cambios de
+  código, sólo aplicación real) -- 472037 ahora ofrece AZA RENCA/AZA
+  COLINA como candidatas con su evidencia GPS real (score=0.104/0.0559),
+  nunca fuerza una. 464981 sigue correctamente sin pregunta (evidencia
+  demasiado escasa -- `SIN_TRIPS_EN_VENTANA_TEMPORAL`). Ninguna
+  arquitectura nueva.
+- **"Sin número de transporte" (Parte I):** clasificación general de 3
+  causas, nunca por guía/cliente: si la etiqueta "NRO...TRANSPORTE" nunca
+  aparece en el OCR y el documento no está degradado -> omisión
+  documental, registrada automáticamente como Incidencia Documental
+  (`TRANSPORTE_AUSENTE_DOCUMENTAL`, `reconciliar_incidencias_transporte_
+  documental`), nunca bloquea Revisión de Atlas. Si la etiqueta aparece
+  pero Atlas no logra leer el número -> `TRANSPORTE_AUSENTE` normal,
+  sigue bloqueando (sin cambios). Si el documento está degradado en
+  general -> ya cubierto por `DOCUMENTO_DEGRADADO` existente. 0 casos
+  reales hoy (los 10 documentos actuales tienen transporte); mecanismo
+  queda listo hacia adelante. 9 tests focales.
+- Suite completa: 1579 passed (antes 1569).
+- Aplicado a Drive real: backup verificado
+  (`respaldos/R5_AB_20260821_131053/`) → `reconciliar_decisiones_origen`.
+  CSV/catálogos/ledger sin cambios (SHA-256 verificado); bandeja pasó de
+  0 a 1 decisión pendiente (472037, legítima); 9 viajes/9 confirmados/0
+  revisión sin degradar; 464959+464960 siguen en 11.429 kg / 22,94 km /
+  32,96 min; XF3629 sigue sin reaparecer.
+
+**Desktop (`Atlas-Viajes-Desktop-Restaurado`):**
+- **Envíos Mobile (Parte E/F):** pestaña nueva, historial completo de
+  todos los envíos Mobile de todos los choferes en cualquier estado
+  (`cargarEnviosMobileHistorial`, IPC nuevo en `main.js`/`preload.js`,
+  misma carpeta/contrato M1 que ya usa `cargarEnviosMobilePendientes` --
+  ningún flujo paralelo). Filtros: chofer, estado, período, texto libre.
+  Un envío ASOCIADO queda sólo aquí, como historial; uno
+  REQUIERE_REVISION aparece aquí Y en Revisión de Atlas mientras esté
+  pendiente.
+- **Navegación (Parte G):** pestañas rediseñadas de subrayado-sobre-texto
+  a módulos con borde/relieve propio y estado activo de fondo lleno.
+- **Indicadores (Parte H):** las 4 tarjetas altas se comprimieron en una
+  franja compacta en línea -- mismas 4 métricas, mismos colores de
+  estado.
+- **"Sin número de transporte" (Parte I):** pestaña de carga manual de
+  CSV eliminada por completo (código muerto, sin relación con datos
+  Mobile en vivo); sus casos reales quedan cubiertos por Incidencias
+  Documentales (ya genérica, sin cambios de renderizado) y Revisión de
+  Atlas.
+- **Total del viaje (Parte K):** movido del resumen superior (junto a N°
+  transporte/RUT/planta) al pie de la propia tabla de materiales/peso,
+  como fila de cierre (`<tfoot>`) -- 464959/464960 siguen en 11.429 kg.
+- 20 tests focales nuevos/actualizados. Suite completa: 264 passed (antes
+  252).
+
+**Estado: BLOQUE R5 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

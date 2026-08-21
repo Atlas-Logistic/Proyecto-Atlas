@@ -55,6 +55,18 @@ TIPO_OBRA_DOCUMENTAL_INCONSISTENTE = "OBRA_DOCUMENTAL_INCONSISTENTE"
 TIPO_COMUNA_DOCUMENTAL_INCORRECTA = "COMUNA_DOCUMENTAL_INCORRECTA"
 TIPO_TRANSPORTISTA_DOCUMENTAL_INCORRECTO = "TRANSPORTISTA_DOCUMENTAL_INCORRECTO"
 TIPO_HORA_DOCUMENTAL_INCONSISTENTE = "HORA_DOCUMENTAL_INCONSISTENTE"
+# Bloque R5 I -- omisión, no contradicción: la guía nunca imprimió el
+# número de transporte (la etiqueta "NRO...TRANSPORTE" no aparece en el
+# texto OCR, y el documento no está degradado en general -- ver
+# `atlas_core.procesamiento_masivo._documento_degradado` /
+# `MotivoRevisionDocumento.TRANSPORTE_AUSENTE_SIN_ETIQUETA`). `registrar()`
+# exige `valor_documental` != `valor_canonico`, ambos no vacíos -- para una
+# ausencia (no hay dos valores que contrastar) se usan los sentinelas fijos
+# de abajo, que documentan la ausencia sin fingir un valor documental que
+# nunca existió.
+TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL = "TRANSPORTE_AUSENTE_DOCUMENTAL"
+VALOR_DOCUMENTAL_CAMPO_AUSENTE = "(campo ausente en el documento)"
+VALOR_CANONICO_CAMPO_REQUERIDO = "número de transporte requerido, no impreso en la guía"
 
 # Lo que NUNCA es una incidencia documental -- código explícito para que
 # el resto del código (y los tests) puedan afirmarlo positivamente, en
