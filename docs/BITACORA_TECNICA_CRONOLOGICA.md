@@ -4492,3 +4492,12 @@ Control determinístico: se copió `operacion/` y `catalogos_privados/` a una ra
 No hubo aplicación canónica posible, regeneración real, OCR, cambios de catálogos/dataset/ledger, incidencia nueva ni modificación funcional. Mobile y `LOTE_NUEVO_20260820_01` quedaron fuera de alcance. Al no existir cambio funcional, no se agregaron tests ni se repitieron suites.
 
 **BASELINE OPERACIONAL LIMPIO: SÍ.**
+# 2026-08-20 — R4
+
+- Se amplió parsing de materiales y peso etiquetado, consenso temporal y
+  reconciliación OCR de patentes.
+- Se incorporó evidencia trazable entre documentos e histórico repetido.
+- Se separaron estados documental, operacional y routing; se añadieron métricas
+  JSON por documento y B1 shadow post-determinista.
+- Focales y suite completa verdes (1.526). Replay y holdout preservados fuera
+  de `ATLAS_DATA_DIR` canónico.

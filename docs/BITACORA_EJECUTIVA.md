@@ -1347,3 +1347,10 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - Desktop se comprobó visualmente con el filtro `Requiere revisión`: 7 viajes / 10 documentos, coherente con el reporte vigente.
 - No se ejecutó OCR, no se modificaron catálogos, dataset, ledger, Mobile ni el lote nuevo. No hubo cambio funcional ni tests aplicables.
 - **Estado: BASELINE OPERACIONAL LIMPIO: SÍ** — las 7 revisiones restantes representan evidencia ausente, contradictoria o un error documental ya rechazado sin sustituto seguro.
+# 2026-08-20 — R4 basado en RUN real
+
+R4 corrigió extracción crítica, uso conservador de documentos relacionados e
+histórico, semántica de vehículos, estados documental/routing separados e
+integración shadow de Atlas IA. Suite completa: 1.526 pruebas. Replay aislado:
+112,17 s para diez documentos; holdout 472044/472073 ejecutado una sola vez y
+sin correcciones posteriores. Detalle en `R4_RUN_REAL_Y_HOLDOUT_20260820.md`.

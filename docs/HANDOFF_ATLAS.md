@@ -1369,3 +1369,10 @@ Retomar R3.4: `DESTINO_SIN_CONFIRMAR` → ciclo Confirmar/No confirmar/Decidir d
 - **Git:** Motor y Desktop -- commit documental de las tres bitácoras al final de este bloque (ver hashes reales abajo).
 - **Qué debe decidir Javier ahora:** revisar las 15 decisiones una por una en Desktop (bandeja ya reconciliada y funcional); decidir JD8659 vs JE8659 para Carlos Simón; aclarar Supermercado Señor de los Milagros; autorizar un pequeño bloque de seguimiento para el refresco retroactivo de `estado_ruta`/`motivo_ruta` de 464717 (y cualquier caso equivalente futuro).
 - **Estado: BANDEJA REAL DE REVISIÓN ATLAS REGENERADA Y RECONCILIADA -- LISTA PARA QUE JAVIER RESUELVA LAS DECISIONES UNA POR UNA.**
+# Handoff R4 — 2026-08-20
+
+Motor R4 validado en entorno aislado. El contrato CSV incorpora estados
+documental/operacional, métricas, trazabilidad relacionada y salida Atlas IA
+shadow. Desktop y Mobile no fueron modificados. Antes de exponer las nuevas
+dimensiones en Desktop debe diseñarse el bloque de presentación correspondiente;
+no es un bloqueo del contrato actual. Ver `R4_RUN_REAL_Y_HOLDOUT_20260820.md`.
