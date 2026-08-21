@@ -4501,3 +4501,9 @@ No hubo aplicación canónica posible, regeneración real, OCR, cambios de catá
   JSON por documento y B1 shadow post-determinista.
 - Focales y suite completa verdes (1.526). Replay y holdout preservados fuera
   de `ATLAS_DATA_DIR` canónico.
+# 2026-08-20 — R4.7
+
+Resolución segura de GROQ_API_KEY desde proceso/perfil Windows, escalamiento B1
+operacional compartido por lote Desktop y envío Mobile, política A/B/C/D y reset
+con marcador de aislamiento. E2E remoto real y rollback documentados en
+`R4_7_B1_OPERACIONAL_Y_RESET.md`.

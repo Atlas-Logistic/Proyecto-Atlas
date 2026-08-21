@@ -1376,3 +1376,9 @@ documental/operacional, métricas, trazabilidad relacionada y salida Atlas IA
 shadow. Desktop y Mobile no fueron modificados. Antes de exponer las nuevas
 dimensiones en Desktop debe diseñarse el bloque de presentación correspondiente;
 no es un bloqueo del contrato actual. Ver `R4_RUN_REAL_Y_HOLDOUT_20260820.md`.
+# Handoff R4.7
+
+Atlas IA ya no está desacoplada del pipeline operacional: Desktop y Mobile
+convergen en el mismo escalador B1. El reset real sigue pendiente de autorización
+explícita; existe respaldo rollback y prueba aislada. Consultar
+`R4_7_B1_OPERACIONAL_Y_RESET.md` antes de autorizarlo.

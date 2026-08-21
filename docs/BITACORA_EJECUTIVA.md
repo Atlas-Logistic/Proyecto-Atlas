@@ -1354,3 +1354,8 @@ histórico, semántica de vehículos, estados documental/routing separados e
 integración shadow de Atlas IA. Suite completa: 1.526 pruebas. Replay aislado:
 112,17 s para diez documentos; holdout 472044/472073 ejecutado una sola vez y
 sin correcciones posteriores. Detalle en `R4_RUN_REAL_Y_HOLDOUT_20260820.md`.
+# 2026-08-20 — R4.7 B1 operacional
+
+B1 quedó integrado al pipeline común Desktop/Mobile. E2E real Groq: una llamada,
+B_ASISTENCIA validada, 1,727 s. Reset preparado y probado sólo en aislamiento;
+operación real intacta. Ver `R4_7_B1_OPERACIONAL_Y_RESET.md`.
