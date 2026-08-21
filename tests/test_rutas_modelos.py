@@ -13,6 +13,9 @@ def test_estados_minimos_estan_disponibles():
         "REQUIERE_REVISION",
         # Bloque RUTAS R1: enriquecimiento de ruta a nivel de viaje.
         "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO",
+        # Bloque R9: punto geocodificado sin acceso vial cercano (evidencia
+        # real de destino impreciso, nunca una falla técnica).
+        "SIN_ACCESO_VIAL",
     }
     assert {estado.value for estado in EstadoRuta} == esperados
 

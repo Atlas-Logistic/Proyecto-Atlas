@@ -1771,3 +1771,76 @@ correctamente resuelto.
 
 **Estado: BLOQUE R8 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R9 -- lote nuevo (10 guías) como E2E real: routing, huérfana, B1, performance (2026-08-21)
+
+**472099 (caso obligatorio) y las otras 6 guías sin km/tiempo:** todas
+tenían origen+destino ya resueltos pero un rechazo real de destino
+(comuna contradicha/genérico/disperso -- protecciones R4.10 funcionando
+correctamente) sin NINGUNA decisión asociada -- el mecanismo
+`DESTINO_NO_RESUELTO` (Bloque R6) existía pero nunca se había
+reconciliado contra este lote. Reconciliado: 7 decisiones nuevas
+(472044, 472073, 472099, 472163, 472227, 472238, 472239). 472099 queda
+con causa explícita y trazable (`GEOCODIFICACION_CONTRADICE_COMUNA_
+DOCUMENTAL: Cerrillos != Santiago`) y accionable en Revisión de Atlas --
+nunca una ruta inventada.
+
+**472044 -- causa real distinta, encontrada:** `estado_ruta` quedó en
+`PROVEEDOR_NO_DISPONIBLE` durante el procesamiento original, pero el
+proveedor SÍ respondía al reintentar -- con un 404 propio de ORS
+(código 2010, "no routable point") para el punto geocodificado
+(confianza 0.6, "Las Condes, RM, Chile", comuna sin dirección precisa).
+Nunca era una falla técnica: es evidencia real de destino impreciso.
+Nuevo `EstadoRuta.SIN_ACCESO_VIAL`, distinguido explícitamente de
+`PROVEEDOR_NO_DISPONIBLE` en `openrouteservice.py`; sumado a
+`MOTIVOS_DESTINO_NO_RESUELTO` (R6) y al registro B1 (R7). También
+corregido: `revalidar_ruta_sin_destino_calculado_sin_ocr` ahora
+actualiza la etiqueta de un motivo técnico obsoleto cuando el reintento
+trae una causa real distinta (antes quedaba pegada la etiqueta técnica
+vieja).
+
+**Revisión huérfana (3 REVISAR vs 2 en Revisión de Atlas):** causa real
+encontrada -- `CLIENTE_AUSENTE` (motivo bloqueante real,
+`motivos_revision_documento`) nunca tuvo NINGUNA decisión asociada desde
+que existe, a diferencia de CLIENTE_DESCONOCIDO/CLIENTE_CANDIDATO/
+ALIAS_CANDIDATO (los 3 exigen algún texto documental de partida). Nuevo
+tipo `CLIENTE_AUSENTE`/acción `REGISTRAR_CLIENTE_MANUAL` (mismo patrón
+que `DESTINO_NO_RESUELTO`): un humano escribe la razón social real,
+Atlas la registra en el catálogo ya existente y resuelve el documento.
+472238/472239 (mismo transporte, huérfanas reales) ahora tienen decisión
+-- los 3 viajes REVISAR (472163, 472238+472239, 472247) quedan con
+decisión accionable, 0 huérfanas.
+
+**B1 (Parte 7):** telemetría de R7 ya funcionando en producción sin
+ningún cambio de código -- cada problema no resuelto del lote (destino
+x6, patente, obra) trae `elegible_ia`/`razon_no_elegible` explícitos
+(mayoría `SIN_EVIDENCIA_PARA_RAZONAR`: sin documento hermano con destino
+ya resuelto para la misma obra); 472044 correctamente `NO_ELEGIBLE_IA`
+(`FALLA_TECNICA_EXTERNA_SIN_RAZONAMIENTO_POSIBLE`) antes del fix de
+reclasificación. Cero "0 llamadas" sin explicación.
+
+**Aprendizaje reutilizado:** catálogo de plantas (Renca/Colina, R8),
+relaciones obra↔destino y catálogo de clientes -- ningún mecanismo
+paralelo; `revalidar_y_regenerar_reporte` ya usa todo esto (confirmó
+472247 con AMERICAN SCREW CHILE SPA vía alias ya conocido).
+
+**Performance:** lote nuevo 130,5 s/10 guías vs lote anterior 58,9 s/10
+-- diferencia casi enteramente en telemetría (75,1 s vs 12,2 s, ~88% de
+la diferencia total). Medido por documento: la mayoría de las guías
+nuevas pagó una consulta OneLogis FRESCA (8-14 s cada una, sin caché
+previa); un documento del mismo transporte que reutilizó caché tardó
+0,52 s. Causa concreta: más combinaciones patente+fecha nuevas en este
+lote, no una regresión de código -- no se optimizó a ciegas.
+
+30 tests focales nuevos. Suite completa: Motor 1627 passed (antes 1613);
+Desktop 275 passed (antes 270).
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/R9_LOTE_NUEVO_20260821_162538/`), dry-run previo. CSV/
+catálogos actualizados sólo donde correspondía (472247, 472044,
+bandeja); 464959+464960 y XF3629 intactos; 18 viajes/15 confirmados/3
+revisión, las 3 con decisión accionable. No se reprocesaron las 10
+guías nuevas.
+
+**Estado: BLOQUE R9 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

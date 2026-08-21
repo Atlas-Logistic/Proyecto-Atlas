@@ -170,3 +170,73 @@ def test_usa_proveedor_real_por_defecto_sin_lanzar_sin_credencial(tmp_path):
     finally:
         if valor_previo is not None:
             os.environ["OPENROUTESERVICE_API_KEY"] = valor_previo
+
+
+def test_bloque_r9_motivo_tecnico_obsoleto_se_corrige_aunque_el_reintento_siga_rechazado(tmp_path):
+    """Caso real 472044: `estado_ruta` había quedado en
+    PROVEEDOR_NO_DISPONIBLE (falla técnica durante el procesamiento
+    original). Al reintentar, el proveedor responde (ya no está caído)
+    pero con confianza insuficiente -- un resultado real, distinto de la
+    falla técnica vieja. La fila debe reflejar la causa VIGENTE, nunca
+    quedar con la etiqueta técnica obsoleta."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    fila = _fila_csv(
+        planta, numero_guia="472044",
+        despachar_a_crudo="PUERTA DEL SOL 83 LAS CONDES LAS CONDES",
+        direccion_entrega="", localidad_entrega="", region_entrega="",
+        estado_ruta="PROVEEDOR_NO_DISPONIBLE", motivo_ruta="PROVEEDOR_NO_DISPONIBLE",
+    )
+    _escribir_csv(dataset, [fila])
+    consulta = "PUERTA DEL SOL 83 LAS CONDES LAS CONDES, Chile"
+    proveedor = ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(Coordenadas(-70.6, -33.4), "Las Condes, RM, Chile", 0.3, "Las Condes", "Metropolitana"),),
+                "",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 10.0, 15.0, "SINTETICO"),
+    )
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+    )
+    assert resultado["guias_actualizadas"] == ["472044"]
+    fila_final = _leer(dataset)[0]
+    assert fila_final["estado_ruta"] != "PROVEEDOR_NO_DISPONIBLE"
+    assert fila_final["motivo_ruta"] == "CONFIANZA_INSUFICIENTE"
+    assert fila_final["distancia_km"] == ""  # nunca inventa una ruta
+
+
+def test_bloque_r9_motivo_de_evidencia_real_nunca_se_reescribe(tmp_path):
+    """Control -- un rechazo YA basado en evidencia real (comuna
+    contradicha) no es ruido técnico: no se reintenta ni se reescribe
+    aunque el proveedor responda distinto esta vez."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    fila = _fila_csv(
+        planta, numero_guia="460807",
+        despachar_a_crudo="INTERIOR NUEVA O1148 SAN BERNARDO SAN BERNAR",
+        direccion_entrega="", localidad_entrega="", region_entrega="",
+        estado_ruta="REQUIERE_REVISION",
+        motivo_ruta="GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: San Bernardo != Angol",
+    )
+    _escribir_csv(dataset, [fila])
+    consulta = "INTERIOR NUEVA O1148 SAN BERNARDO SAN BERNAR, Chile"
+    proveedor = ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(Coordenadas(-70.6, -33.4), "Otra cosa, Chile", 0.9, "Otra Comuna", "Metropolitana"),),
+                "",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 5.0, 8.0, "SINTETICO"),
+    )
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+    )
+    assert resultado["guias_actualizadas"] == []
+    fila_final = _leer(dataset)[0]
+    assert fila_final["motivo_ruta"] == "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: San Bernardo != Angol"

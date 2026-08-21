@@ -183,6 +183,17 @@ def test_genera_decision_para_cada_motivo_de_destino_reconocido():
         assert decision is not None, motivo
 
 
+def test_genera_decision_para_sin_acceso_vial_caso_real_472044():
+    """Bloque R9 -- distinto de los otros 4: SIN_ACCESO_VIAL es un
+    rechazo a nivel de ROUTING (no de geocodificación de destino), así
+    que `estado_ruta` queda igual a su propio motivo crudo, nunca
+    normalizado a REQUIERE_REVISION -- debe seguir siendo elegible."""
+    fila = _fila_csv(estado_ruta="SIN_ACCESO_VIAL", motivo_ruta="SIN_ACCESO_VIAL")
+    decision = detectar_decision_destino_no_resuelto(archivo="472044.jpeg", fila=fila)
+    assert decision is not None
+    assert decision["motivos"] == ["SIN_ACCESO_VIAL"]
+
+
 def test_no_genera_decision_sin_planta_origen():
     """Ese es un problema de ORIGEN, no de destino -- cubierto por
     detectar_decision_origen_no_confirmado."""

@@ -12,7 +12,7 @@ from pathlib import Path
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogo_clientes import (
     CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
-    EstadoCalidadCliente, normalizar_rut_cliente,
+    EstadoCalidadCliente, normalizar_nombre_cliente, normalizar_rut_cliente,
 )
 from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError
 from atlas_core.catalogo_obras_destinos import (
@@ -60,6 +60,8 @@ ACCIONES = frozenset({
     # Bloque R6 A/B/E: única acción nueva de DESTINO_NO_RESUELTO -- las
     # otras dos (NO_PUEDO_DETERMINAR/POSPONER) ya existen arriba.
     "REGISTRAR_DIRECCION",
+    # Bloque R9: única acción nueva de CLIENTE_AUSENTE.
+    "REGISTRAR_CLIENTE_MANUAL",
 })
 LEDGER = "decisiones_aplicadas.json"
 
@@ -81,6 +83,9 @@ ACCIONES_POR_TIPO = {
     }),
     "DESTINO_NO_RESUELTO": frozenset({
         "REGISTRAR_DIRECCION", "NO_PUEDO_DETERMINAR", "POSPONER",
+    }),
+    "CLIENTE_AUSENTE": frozenset({
+        "REGISTRAR_CLIENTE_MANUAL", "NO_PUEDO_DETERMINAR", "POSPONER",
     }),
 }
 
@@ -198,7 +203,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, proveedor_rutas: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, proveedor_rutas: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -700,6 +705,69 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "ruta_resuelta": ruta_resuelta, "destino_id": destino_id_nuevo, "relacion_id": relacion_id_nueva,
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo == "CLIENTE_AUSENTE":
+                # Bloque R9 -- el campo cliente está genuinamente vacío
+                # (nada que corroborar ni comparar, a diferencia de
+                # CLIENTE_DESCONOCIDO/CLIENTE_CANDIDATO/ALIAS_CANDIDATO,
+                # que siempre parten de un texto documental). Un humano
+                # mirando el documento físico escribe la razón social
+                # real -- se confía igual que en CLIENTE_DESCONOCIDO/
+                # REGISTRAR (mismo nivel de autoridad: una acción humana
+                # explícita, no una inferencia).
+                documento_decision = decision.get("documento") or {}
+                numero_guia_decision = str(documento_decision.get("numero_guia") or "")
+                if not numero_guia_decision:
+                    raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para registrar el cliente.")
+                cliente_id_nuevo = None
+                if accion == "REGISTRAR_CLIENTE_MANUAL":
+                    razon_social_final = str(razon_social_manual or "").strip()
+                    if not razon_social_final:
+                        raise ErrorAplicacionDecision("Debe indicar la razón social del cliente.")
+                    rut_valido = normalizar_rut_cliente_o_vacio(rut_manual or "")
+                    catalogo_clientes = CatalogoClientes(catalogo_clientes_ruta)
+                    try:
+                        cliente_creado = catalogo_clientes.crear(
+                            razon_social=razon_social_final, fuente=f"DECISION_HUMANA_R9:{decision_id}",
+                            rut=rut_valido, estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+                        )
+                    except ClienteDuplicadoError:
+                        cliente_creado = next(
+                            (
+                                c for c in catalogo_clientes.listar()
+                                if c.nombre_normalizado == normalizar_nombre_cliente(razon_social_final)
+                            ),
+                            None,
+                        )
+                        if cliente_creado is None:
+                            raise
+                    cliente_id_nuevo = cliente_creado.cliente_id
+                    resultado_extra["cliente_id"] = cliente_id_nuevo
+                    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+                    filas_dataset = _leer_filas(dataset)
+                    fila_objetivo = next(
+                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                    )
+                    if fila_objetivo is None:
+                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                    fila_objetivo["cliente"] = cliente_creado.razon_social
+                    motivos_fila = {
+                        m.strip() for m in str(fila_objetivo.get("motivos_revision_documento", "")).split("|") if m.strip()
+                    }
+                    motivos_fila.discard("CLIENTE_AUSENTE")
+                    fila_objetivo["motivos_revision_documento"] = " | ".join(sorted(motivos_fila))
+                    fila_objetivo["indicador_revision"] = "REVISAR" if any(
+                        m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_fila
+                    ) else "OK"
+                    fila_objetivo["estado_documental"] = "REQUIERE_REVISION" if fila_objetivo["indicador_revision"] == "REVISAR" else "OK"
+                    _escribir_filas_completas(dataset, filas_dataset)
+                # NO_PUEDO_DETERMINAR/POSPONER: no tocan el dataset.
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
+                    "razon_social_manual": str(razon_social_manual or "").strip() if accion == "REGISTRAR_CLIENTE_MANUAL" else None,
+                    "cliente_id": cliente_id_nuevo,
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
             elif tipo == "CLIENTE_DESCONOCIDO":
                 # MOTOR DE EVIDENCIA FASE 3 -- primera aplicación real para
                 # este tipo (antes sólo UX preparatoria). Mismo patrón que
@@ -912,6 +980,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 # como si sigue bloqueada (con un motivo ya reevaluado,
                 # nunca uno obsoleto).
                 or (tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION")
+                # Bloque R9 -- mismo caso: REGISTRAR_CLIENTE_MANUAL ya
+                # escribió el dataset arriba (cliente + motivos_revision_
+                # documento/indicador_revision).
+                or (tipo == "CLIENTE_AUSENTE" and accion == "REGISTRAR_CLIENTE_MANUAL")
             ):
                 # Bloque ORIGEN D1 -- a diferencia de DESTINO_SIN_CONFIRMAR/
                 # VEHICULO_DESCONOCIDO, aquí ya sabemos que el dataset
@@ -983,6 +1055,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 else "Dirección registrada, pero sigue sin poder calcularse una ruta confiable con ella -- revise el detalle del motivo."
             ),
             ("DESTINO_NO_RESUELTO", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este destino mientras la evidencia no cambie.",
+            ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"): "Cliente registrado. Atlas reconocerá esta razón social en documentos futuros.",
+            ("CLIENTE_AUSENTE", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este cliente mientras la evidencia no cambie.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
         return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}

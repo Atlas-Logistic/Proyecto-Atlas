@@ -53,7 +53,7 @@ NOMBRE_ARTEFACTO = "decisiones_pendientes.json"
 TIPOS_SOPORTADOS = frozenset({
     "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
     "OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR", "ALIAS_CANDIDATO",
-    "ORIGEN_NO_CONFIRMADO", "DESTINO_NO_RESUELTO",
+    "ORIGEN_NO_CONFIRMADO", "DESTINO_NO_RESUELTO", "CLIENTE_AUSENTE",
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
 
@@ -122,6 +122,11 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
     "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL",
     "GEOCODIFICACION_DEMASIADO_GENERICA",
     "MULTIPLES_UBICACIONES_DISPERSAS",
+    # Bloque R9 -- caso real 472044: el punto geocodificado no tiene
+    # acceso vial cercano (evidencia real de imprecisión del destino,
+    # nunca una falla técnica del proveedor -- ver
+    # atlas_core.rutas.openrouteservice/EstadoRuta.SIN_ACCESO_VIAL).
+    "SIN_ACCESO_VIAL",
 })
 
 
@@ -146,11 +151,18 @@ def detectar_decision_destino_no_resuelto(
       pregunta para un humano, es un problema de infraestructura)."""
     if not str(fila.get("planta_origen_id", "")).strip():
         return None
-    estado_ruta = str(fila.get("estado_ruta", "")).strip()
-    if estado_ruta != "REQUIERE_REVISION":
-        return None
     motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
     motivo_base = motivo_ruta.split(":", 1)[0].split("(", 1)[0].strip()
+    estado_ruta = str(fila.get("estado_ruta", "")).strip()
+    # Bloque R9 -- los 4 motivos originales (rechazo de destino/
+    # geocodificación) siempre normalizan `estado_ruta` a
+    # "REQUIERE_REVISION" (ver `resolver_destino_entrega`/`_validado`).
+    # Un rechazo a nivel de ROUTING (p. ej. `SIN_ACCESO_VIAL`, caso real
+    # 472044) en cambio deja `estado_ruta` igual a su propio motivo crudo
+    # -- se acepta también esa forma, nunca una lista fija de estados
+    # nueva por cada motivo.
+    if estado_ruta not in ("REQUIERE_REVISION", motivo_base):
+        return None
     if motivo_base not in MOTIVOS_DESTINO_NO_RESUELTO:
         return None
     documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
@@ -172,6 +184,46 @@ def detectar_decision_destino_no_resuelto(
             "planta_origen_id": str(fila.get("planta_origen_id", "")),
         },
     )
+
+# Bloque R9 -- distinto de CLIENTE_DESCONOCIDO/CLIENTE_CANDIDATO/
+# ALIAS_CANDIDATO (los tres exigen ALGÚN texto documental de partida,
+# `cliente_documental not in _AUSENTES`): aquí el campo "cliente" está
+# genuinamente vacío -- ningún nombre que registrar, corroborar ni
+# comparar. Caso real 472238/472239: `CLIENTE_AUSENTE` (motivo
+# bloqueante en `motivos_revision_documento`) nunca tenía ninguna
+# decisión asociada -- el documento quedaba huérfano en REQUIERE_REVISION
+# para siempre, invisible en Revisión de Atlas. La única acción que
+# aporta un dato nuevo es que un humano escriba la razón social real
+# (mirando el documento físico) -- "REGISTRAR_CLIENTE_MANUAL".
+ACCIONES_CLIENTE_AUSENTE = ("REGISTRAR_CLIENTE_MANUAL", "NO_PUEDO_DETERMINAR", "POSPONER")
+
+
+def detectar_decision_cliente_ausente(
+    *, archivo: str, fila: Mapping[str, str],
+) -> dict[str, object] | None:
+    """Bloque R9: genera una pregunta `CLIENTE_AUSENTE` para UN documento
+    YA PROCESADO cuyo campo cliente quedó genuinamente vacío (nunca para
+    un nombre presente pero no corroborable -- eso ya lo cubren
+    CLIENTE_CANDIDATO/CLIENTE_DESCONOCIDO/ALIAS_CANDIDATO). Opera
+    exclusivamente sobre columnas YA PERSISTIDAS (`fila`) -- nunca OCR,
+    nunca red. Se abstiene si el cliente ya trae algún valor (incluso
+    dudoso) o si el motivo bloqueante ya se resolvió."""
+    if str(fila.get("cliente", "")).strip() not in _AUSENTES:
+        return None
+    motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()}
+    if "CLIENTE_AUSENTE" not in motivos:
+        return None
+    documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
+    return crear_decision(
+        tipo="CLIENTE_AUSENTE", entidad="CLIENTE", archivo=str(archivo),
+        numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
+        campo="cliente", valor_documental="",
+        valor_normalizado="", identidad_resuelta=None,
+        candidatos=(), motivos=("CLIENTE_AUSENTE",),
+        evidencias=({"tipo": "CAMPO_VACIO", "campo": "cliente"},),
+        acciones_permitidas=ACCIONES_CLIENTE_AUSENTE,
+    )
+
 
 # Bloque VEHÍCULO D1 -- cuando una patente documental (probable error de
 # OCR o del mandante) no homologa con ningún vehículo del catálogo, PERO

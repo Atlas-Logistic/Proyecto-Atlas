@@ -260,6 +260,8 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({
             "DESTINO_SIN_DATO", "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL",
             "GEOCODIFICACION_DEMASIADO_GENERICA", "MULTIPLES_UBICACIONES_DISPERSAS",
+            # Bloque R9 -- caso real 472044.
+            "SIN_ACCESO_VIAL",
         }),
         fuente="MOTIVO_RUTA", campo="despachar_a_crudo", dominio="DESTINO",
         herramientas=("DOCUMENTOS_RELACIONADOS",), aplicable_automaticamente=False,

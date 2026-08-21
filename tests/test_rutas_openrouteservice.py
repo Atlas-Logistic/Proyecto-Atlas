@@ -111,3 +111,29 @@ def test_clave_no_aparece_en_resultados_ni_errores():
     proveedor = OpenRouteService(api_key=secreto, transporte=lambda *_: RespuestaHTTP(500, b""))
     resultado = proveedor.geocodificar("DIRECCION DEMO")
     assert secreto not in repr(resultado)
+
+
+def test_error_2010_de_ors_se_distingue_de_proveedor_no_disponible():
+    """Bloque R9 -- caso real 472044: un 404 con el código propio de ORS
+    2010 ("no routable point") es evidencia real de destino impreciso,
+    nunca una falla técnica del proveedor."""
+    cuerpo_ors = {"error": {"code": 2010, "message": "no routable point"}}
+    proveedor = OpenRouteService(
+        api_key="SECRETO_DE_PRUEBA",
+        transporte=transporte_json(cuerpo_ors, 404),
+    )
+    resultado = proveedor.calcular_ruta(
+        Coordenadas(-70.665977, -33.137558), Coordenadas(-70.636597, -33.344296), perfil="driving-hgv",
+    )
+    assert resultado.estado == EstadoRuta.SIN_ACCESO_VIAL
+
+
+def test_404_generico_sin_codigo_2010_sigue_siendo_proveedor_no_disponible():
+    proveedor = OpenRouteService(
+        api_key="SECRETO_DE_PRUEBA",
+        transporte=transporte_json({"error": "not found"}, 404),
+    )
+    resultado = proveedor.calcular_ruta(
+        Coordenadas(-70.665977, -33.137558), Coordenadas(-70.636597, -33.344296), perfil="driving-hgv",
+    )
+    assert resultado.estado == EstadoRuta.PROVEEDOR_NO_DISPONIBLE

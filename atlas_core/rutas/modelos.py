@@ -28,6 +28,15 @@ class EstadoRuta(str, Enum):
     # estos estados solo describen el enriquecimiento logístico opcional.
     ORIGEN_NO_DETERMINADO = "ORIGEN_NO_DETERMINADO"
     DESTINO_NO_VALIDO = "DESTINO_NO_VALIDO"
+    # Bloque R9 -- caso real 472044: el proveedor de routing respondía
+    # 404 con su propio código de error 2010 ("no se encontró un punto
+    # ruteable cerca de la coordenada") -- antes se clasificaba junto con
+    # cualquier otro 4xx/5xx como PROVEEDOR_NO_DISPONIBLE (falla técnica
+    # externa), aunque la causa real es que el punto geocodificado
+    # (confianza 0.6, "Las Condes, RM, Chile" -- comuna, no dirección
+    # precisa) no tiene acceso vial cercano. Nunca una falla técnica: es
+    # evidencia real de que el destino sigue siendo demasiado impreciso.
+    SIN_ACCESO_VIAL = "SIN_ACCESO_VIAL"
 
 
 @dataclass(frozen=True)

@@ -697,7 +697,24 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     no determinado) vuelven a fallar exactamente igual y quedan intactas
     -- nunca inventa, nunca fuerza un resultado. `proveedor_rutas=None`
     (por defecto) usa `OpenRouteService` + caché de geocodificación real,
-    igual que el pipeline en vivo -- inyectable para tests."""
+    igual que el pipeline en vivo -- inyectable para tests.
+
+    Bloque R9 -- caso real 472044: `estado_ruta` había quedado en
+    `PROVEEDOR_NO_DISPONIBLE` (el proveedor externo falló durante el
+    procesamiento original) y, al reintentar aquí, el proveedor SÍ
+    respondía pero con confianza insuficiente (un resultado real, no una
+    falla técnica). Antes de este bloque la fila quedaba con el motivo
+    técnico viejo, aunque la causa real ya hubiera cambiado -- confundía
+    "proveedor caído" con "evidencia insuficiente" (exactamente lo que
+    Bloque 6.3/R7 exige distinguir). Ahora, si el motivo YA persistido es
+    una falla puramente técnica conocida (`MOTIVOS_RUTA_TECNICOS_NO_
+    ELEGIBLES`, mismo catálogo que ya usa `atlas_ia.registro_problemas`
+    para B1) y el reintento no llega a `RUTA_CALCULADA`, se actualiza
+    igual el motivo al resultado FRESCO del reintento -- nunca se inventa
+    una ruta, sólo se corrige la etiqueta para que diga la verdad
+    vigente. Un motivo de rechazo YA basado en evidencia real (comuna
+    contradicha, genérico, disperso) nunca se reintenta ni se reescribe
+    aquí -- es estable por diseño, no ruido técnico."""
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
 
@@ -718,6 +735,11 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     except (OSError, ValueError):
         plantas_por_id = {}
 
+    from atlas_core.atlas_ia.registro_problemas import (
+        MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
+        motivo_ruta_base,
+    )
+
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
@@ -731,6 +753,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             planta = plantas_por_id.get(planta_id)
             if planta is None:
                 continue
+            motivo_previo_tecnico = motivo_ruta_base(
+                str(fila.get("motivo_ruta", ""))
+            ) in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
@@ -741,7 +766,21 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             except (OSError, ValueError):
                 continue
             if resultado.estado_ruta != EstadoRuta.RUTA_CALCULADA.value:
-                continue  # sigue sin resolver con evidencia suficiente -- nunca inventa
+                # Bloque R9 -- sigue sin resolver con evidencia suficiente
+                # -- nunca inventa. Pero si el motivo YA persistido era
+                # una falla puramente técnica (proveedor caído/sin
+                # credencial/etc.) y el reintento sí llegó a una
+                # respuesta real (aunque rechazada), esa etiqueta técnica
+                # quedó obsoleta -- se corrige para que nunca se confunda
+                # "proveedor no disponible" con "evidencia insuficiente".
+                # Un rechazo YA basado en evidencia real nunca se toca.
+                if motivo_previo_tecnico and resultado.motivo_ruta:
+                    motivo_nuevo = motivo_ruta_base(resultado.motivo_ruta)
+                    if motivo_nuevo != motivo_ruta_base(str(fila.get("motivo_ruta", ""))):
+                        fila["estado_ruta"] = resultado.estado_ruta
+                        fila["motivo_ruta"] = resultado.motivo_ruta
+                        guias_actualizadas.append(str(fila.get("numero_guia", "")))
+                continue
             fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
             fila["localidad_entrega"] = resultado.localidad_entrega
             fila["region_entrega"] = resultado.region_entrega
@@ -1203,6 +1242,65 @@ def reconciliar_decisiones_destino_no_resuelto(
         pendientes_actuales = []
 
     candidatas = detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz)
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+    )
+    bandeja = generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+    )
+    return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
+
+
+def detectar_decisiones_cliente_ausente_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, object]]:
+    """Bloque R9 -- READ-ONLY, nunca escribe nada. Recorre el dataset
+    vigente y devuelve una decisión `CLIENTE_AUSENTE` candidata por cada
+    documento con el campo cliente genuinamente vacío y el motivo
+    bloqueante todavía presente -- ver
+    `atlas_core.decisiones_pendientes.detectar_decision_cliente_ausente`."""
+    from atlas_core.decisiones_pendientes import detectar_decision_cliente_ausente
+
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+    candidatas: list[dict[str, object]] = []
+    for fila in filas:
+        decision = detectar_decision_cliente_ausente(archivo=fila.get("archivo", ""), fila=fila)
+        if decision is not None:
+            candidatas.append(decision)
+    return candidatas
+
+
+def reconciliar_decisiones_cliente_ausente(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque R9 -- publica en `decisiones_pendientes.json` la unión de la
+    bandeja pendiente vigente con las decisiones `CLIENTE_AUSENTE` recién
+    detectadas (mismo patrón que `reconciliar_decisiones_destino_no_
+    resuelto`). No toca el CSV documental, el ledger ni ningún catálogo
+    -- sólo (re)escribe la bandeja."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+
+    try:
+        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+        pendientes_actuales = artefacto_actual.get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes_actuales = []
+
+    candidatas = detectar_decisiones_cliente_ausente_sin_ocr(raiz_atlas=raiz)
     restantes = regenerar_decisiones_persistidas(
         decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
     )

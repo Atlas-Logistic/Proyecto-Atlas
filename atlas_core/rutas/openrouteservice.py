@@ -29,6 +29,17 @@ class RespuestaHTTP:
 TransporteHTTP = Callable[[Request, float], RespuestaHTTP]
 
 
+def _es_error_sin_acceso_vial(cuerpo: bytes) -> bool:
+    """Bloque R9 -- True sólo si el cuerpo de un 404 de ORS confirma
+    explícitamente su código de error propio 2010 ("no routable point
+    within a radius..."). Nunca infiere esto de un 404 vacío/no-JSON --
+    esos siguen siendo PROVEEDOR_NO_DISPONIBLE genérico."""
+    try:
+        return json.loads(cuerpo.decode("utf-8")).get("error", {}).get("code") == 2010
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return False
+
+
 def _transporte_urllib(solicitud: Request, timeout: float) -> RespuestaHTTP:
     with urlopen(solicitud, timeout=timeout) as respuesta:  # nosec: B310 - URL fija del adaptador
         return RespuestaHTTP(respuesta.status, respuesta.read())
@@ -78,6 +89,14 @@ class OpenRouteService:
         except HTTPError as error:
             if error.code in (403, 429):
                 return EstadoRuta.LIMITE_CUOTA, None
+            if error.code == 404:
+                try:
+                    cuerpo_error = error.read()
+                except (OSError, AttributeError):
+                    cuerpo_error = b""
+                if _es_error_sin_acceso_vial(cuerpo_error):
+                    return EstadoRuta.SIN_ACCESO_VIAL, None
+                return EstadoRuta.PROVEEDOR_NO_DISPONIBLE, None
             return EstadoRuta.PROVEEDOR_NO_DISPONIBLE, None
         except (TimeoutError, socket.timeout):
             return EstadoRuta.SIN_CONEXION, None
@@ -86,6 +105,17 @@ class OpenRouteService:
         if respuesta.estado in (403, 429):
             return EstadoRuta.LIMITE_CUOTA, None
         if not 200 <= respuesta.estado < 300:
+            # Bloque R9 -- caso real 472044: distingue el 404 genérico
+            # (proveedor caído/endpoint inválido) del 404 específico de
+            # ORS "no se encontró un punto ruteable cerca de la
+            # coordenada" (código de error propio 2010) -- ese NO es una
+            # falla técnica externa, es evidencia real de que el punto
+            # geocodificado (p. ej. un centroide de comuna, confianza
+            # baja) es demasiado impreciso para calcular ruta. Nunca se
+            # asume: sólo se reclasifica si el propio cuerpo de la
+            # respuesta lo confirma explícitamente.
+            if respuesta.estado == 404 and _es_error_sin_acceso_vial(respuesta.cuerpo):
+                return EstadoRuta.SIN_ACCESO_VIAL, None
             return EstadoRuta.PROVEEDOR_NO_DISPONIBLE, None
         try:
             return None, json.loads(respuesta.cuerpo.decode("utf-8"))

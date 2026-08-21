@@ -15,11 +15,13 @@ def main():
     # REGISTRAR/NO_REGISTRAR/POSPONER ya existentes para CLIENTE_DESCONOCIDO.
     # Bloque R6 A/B/E: REGISTRAR_DIRECCION se suma a las ya soportadas;
     # --direccion-manual sólo es obligatorio para esa acción (aplicar_
-    # decision_obra ya valida eso).
-    parser=argparse.ArgumentParser(); parser.add_argument("--raiz-atlas",required=True); parser.add_argument("--decision-id",required=True); parser.add_argument("--accion",choices=("REGISTRAR","NO_REGISTRAR","CONFIRMAR","NO_CONFIRMAR","POSPONER","CONFIRMAR_PLANTA","SELECCIONAR_OTRA_PLANTA","NO_PUEDO_DETERMINAR","USAR_PATENTE_EXISTENTE","SELECCIONAR_OTRA_PATENTE","CONFIRMAR_ALIAS","RECHAZAR","REGISTRAR_DIRECCION"),required=True); parser.add_argument("--tipo-vehiculo",choices=("TRACTO","CARRO","CAMION_RIGIDO")); parser.add_argument("--planta-id-elegida"); parser.add_argument("--patente-elegida"); parser.add_argument("--motivo-rechazo"); parser.add_argument("--direccion-manual")
+    # decision_obra ya valida eso). Bloque R9: REGISTRAR_CLIENTE_MANUAL,
+    # con --razon-social-manual (obligatorio para esa acción) y
+    # --rut-manual (opcional).
+    parser=argparse.ArgumentParser(); parser.add_argument("--raiz-atlas",required=True); parser.add_argument("--decision-id",required=True); parser.add_argument("--accion",choices=("REGISTRAR","NO_REGISTRAR","CONFIRMAR","NO_CONFIRMAR","POSPONER","CONFIRMAR_PLANTA","SELECCIONAR_OTRA_PLANTA","NO_PUEDO_DETERMINAR","USAR_PATENTE_EXISTENTE","SELECCIONAR_OTRA_PATENTE","CONFIRMAR_ALIAS","RECHAZAR","REGISTRAR_DIRECCION","REGISTRAR_CLIENTE_MANUAL"),required=True); parser.add_argument("--tipo-vehiculo",choices=("TRACTO","CARRO","CAMION_RIGIDO")); parser.add_argument("--planta-id-elegida"); parser.add_argument("--patente-elegida"); parser.add_argument("--motivo-rechazo"); parser.add_argument("--direccion-manual"); parser.add_argument("--razon-social-manual"); parser.add_argument("--rut-manual")
     args=parser.parse_args()
     try:
-        resultado=aplicar_decision_obra(raiz_atlas=args.raiz_atlas,decision_id=args.decision_id,accion=args.accion,tipo_vehiculo=args.tipo_vehiculo,planta_id_elegida=args.planta_id_elegida,patente_elegida=args.patente_elegida,motivo_rechazo=args.motivo_rechazo,direccion_manual=args.direccion_manual)
+        resultado=aplicar_decision_obra(raiz_atlas=args.raiz_atlas,decision_id=args.decision_id,accion=args.accion,tipo_vehiculo=args.tipo_vehiculo,planta_id_elegida=args.planta_id_elegida,patente_elegida=args.patente_elegida,motivo_rechazo=args.motivo_rechazo,direccion_manual=args.direccion_manual,razon_social_manual=args.razon_social_manual,rut_manual=args.rut_manual)
     except ErrorAplicacionDecision as error:
         resultado={"ok":False,"error":str(error)}
     # Salida ASCII JSON: evita que la consola Windows recodifique los
