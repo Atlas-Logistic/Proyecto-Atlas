@@ -4472,3 +4472,23 @@ Mtimes verificados: `analisis_completo_guias.csv`, `decisiones_aplicadas.json`, 
 **Drive:** modificado -- exclusivamente `decisiones_pendientes.json`. **Catálogos:** sin cambios. **CSV documental:** sin cambios. **15 decisiones reales:** sin aplicar. **Backup:** creado y verificado, **rollback NO requerido**. **Desktop:** no modificado en este bloque. **Git:** commit documental de las tres bitácoras (ver hash real abajo). **ORS: 0 llamadas. Onelogis red: 0 llamadas. OCR: no se re-ejecutó.**
 
 **Estado: BANDEJA REAL DE REVISIÓN ATLAS REGENERADA Y RECONCILIADA -- LISTA PARA QUE JAVIER RESUELVA LAS DECISIONES UNA POR UNA.**
+
+## 2026-08-20 — Baseline operacional limpio: reevaluación exhaustiva de los 7 viajes
+
+Alcance cerrado sobre los 7 transportes vigentes en revisión. Se congelaron hashes de dataset, bandeja, ledger y catálogos antes de evaluar. Atlas IA B1 se ejecutó con el proveedor Groq y el modelo `openai/gpt-oss-120b`, usando únicamente herramientas de lectura. Resultado B1: 2 asistencias B (`464036:patente_tracto`, `464265:patente_tracto`) y 4 abstenciones C (`0000351135:fecha`, `0000351135:obra_destino`, `0000352376:cliente`, `0000352376:obra_destino`); 0 candidatos de autonomía A. La sugerencia XF3629 para 464036 contradice la decisión humana terminal `NO_REGISTRAR/ERROR_DOCUMENTAL_MANDANTE` y no se aplicó; VP8521 para 464265 ya estaba resuelta por ledger y tampoco se reabrió.
+
+Clasificación final por transporte:
+
+- `0000350797` / guía 464036 — `AMBIGUEDAD_REAL`: error documental de patente ya rechazado por Javier, sin sustituto inequívoco.
+- `0000351135` / guías 464264–464265 — `AMBIGUEDAD_REAL`: fechas 2026/2024 y obra/destino contradictorios; patentes ya resueltas, no reabiertas.
+- `0000351370` / guía 464367 — `AMBIGUEDAD_REAL`: cliente ausente y obra/destino sin corroboración independiente.
+- `0000352394` / guía 464479 — `AMBIGUEDAD_REAL`: obra/destino sin corroborar y origen sin evidencia suficiente.
+- `0000352241` / guía 464494 — `AMBIGUEDAD_REAL`: destino con cinco ubicaciones dispersas, sin evidencia para seleccionar una.
+- `0000352376` / guías 464698–464700 — `AMBIGUEDAD_REAL`: clientes y obras incompatibles dentro del viaje; B1 se abstuvo.
+- `0000353164` / guía 464740 — `AMBIGUEDAD_REAL`: cliente ausente y destino con cinco ubicaciones dispersas.
+
+Control determinístico: se copió `operacion/` y `catalogos_privados/` a una raíz TEMP y se invocó `revalidar_y_regenerar_reporte` allí. Resultado exacto: `filas_totales=43`, `guias_actualizadas=[]`, obra/destino `[]`, patente `[]`, `reporte_regenerado=false`. La raíz real no se invocó para escritura. Verificación visual Desktop: filtro `Requiere revisión` = 7 viajes, 0 confirmados, 10 documentos; aparecen los siete transportes esperados.
+
+No hubo aplicación canónica posible, regeneración real, OCR, cambios de catálogos/dataset/ledger, incidencia nueva ni modificación funcional. Mobile y `LOTE_NUEVO_20260820_01` quedaron fuera de alcance. Al no existir cambio funcional, no se agregaron tests ni se repitieron suites.
+
+**BASELINE OPERACIONAL LIMPIO: SÍ.**

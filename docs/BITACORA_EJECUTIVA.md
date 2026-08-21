@@ -1338,3 +1338,12 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 - **Git:** Motor y Desktop -- commit documental de bitácoras al final (ver hashes reales en el checkpoint siguiente).
 - **Pendiente explícito, no iniciado:** que Javier resuelva las 15 decisiones una por una en Desktop; refresco retroactivo de `estado_ruta`/`motivo_ruta` para 464717 (paso pequeño, separado, no autorizado en este bloque); decidir JD8659 vs JE8659 en catálogo real; destinos B/C; Incidencias Documentales; Analítica/IA; Mobile; Multiempresa.
 - **Estado: BANDEJA REAL DE REVISIÓN ATLAS REGENERADA Y RECONCILIADA -- LISTA PARA QUE JAVIER RESUELVA LAS DECISIONES UNA POR UNA.**
+
+## Baseline operacional limpio — reevaluación de los 7 viajes — 2026-08-20
+
+- Se reevaluaron exclusivamente los 7 viajes vigentes en `REQUIERE_REVISION` con Motor determinístico, catálogos, ledger/histórico y Atlas IA B1 sobre Groq (`openai/gpt-oss-120b`).
+- Resultado: **0 `RESOLUBLE_HOY`; 7 `AMBIGUEDAD_REAL`**. B1 produjo 2 asistencias de nivel B y 4 abstenciones de nivel C; ninguna propuesta alcanzó evidencia suficiente para aplicación autónoma.
+- La revalidación canónica se ejecutó sobre una copia aislada de los datos reales: 43 filas, 0 guías actualizadas y 0 reportes regenerados. Por ello no se escribió la operación real ni se publicó un reporte artificialmente distinto.
+- Desktop se comprobó visualmente con el filtro `Requiere revisión`: 7 viajes / 10 documentos, coherente con el reporte vigente.
+- No se ejecutó OCR, no se modificaron catálogos, dataset, ledger, Mobile ni el lote nuevo. No hubo cambio funcional ni tests aplicables.
+- **Estado: BASELINE OPERACIONAL LIMPIO: SÍ** — las 7 revisiones restantes representan evidencia ausente, contradictoria o un error documental ya rechazado sin sustituto seguro.
