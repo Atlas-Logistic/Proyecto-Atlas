@@ -1388,3 +1388,43 @@ escribió `decisiones_pendientes.json`. Control con patente realmente
 desconocida, contra el catálogo real: sigue generando su decisión.
 
 **Estado: CASO ORTIZ/XF3629 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push.**
+# 2026-08-21 — Coherencia Viaje ↔ Revisión de Atlas + limpieza de detalle (472037/464981)
+
+Causa: un motivo de revisión (`CLIENTE_SIN_CORROBORAR`, `OBRA_DESTINO_SIN_CORROBORAR`)
+podía quedar fijado en el dataset sin ningún mecanismo capaz de generar una
+decisión accionable ni de retirarlo -- el viaje quedaba eternamente en
+`REQUIERE_REVISION` sin aparecer en Revisión de Atlas. Casos reales: 472037
+(cliente sin RUT documental corroborable) y 464981 (`obra_destino` ==
+`cliente`, "mismo hecho documental dos veces" -- Motor ya se abstenía en
+detección pero el motivo del dataset no tenía vía de salida).
+
+Fix general (commit `208372a`): (1) `CLIENTE_CANDIDATO` -- tipo reservado
+desde R3.1, nunca implementado -- ahora genera una decisión accionable
+cuando el nombre documental coincide (difuso o por alias, mismo motor ya
+calibrado para chofer/`empresas.json`) con un cliente `CONFIRMADO`/`ACTIVO`,
+con backend completo (detección, aplicación, revalidación, reconstrucción
+histórica sin OCR) y encadena la pregunta de obra/destino tras confirmarse.
+(2) `revalidar_obra_destino_sin_ocr` retira el motivo cuando obra y cliente
+de la misma fila son el mismo texto. 14 tests focales; suite completa 1545
+passed.
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/COHERENCIA_REVISION_ATLAS_R48_20260821_102802/`) →
+`revalidar_y_regenerar_reporte` (464981: motivo retirado, `OK`) +
+`reconciliar_decisiones_cliente_candidato_historico` (472037: decisión
+`CLIENTE_CANDIDATO` reconstruida sin OCR, apuntando a "COMERCIAL A Y B
+LTDA"). Catálogos y ledger sin cambios (verificado SHA-256); XF3629 sigue
+sin reaparecer; control con patente desconocida sigue generando decisión.
+
+**Desktop (commit `36411aa`, rama `fix-desktop-data-root-drag-drop`):**
+detalle de viaje ya no repite fecha/N° guía/cliente único/chofer único
+(la fila principal ya los trae); cliente(s)/chofer(es) sólo reaparecen con
+más de un valor real (multiguía 464959/464960 verificado: mismo cliente y
+chofer en ambos documentos, no se repite). Logística retira el rótulo
+"Estado ruta"/"Ruta calculada"; aviso discreto sólo si la ausencia de
+km/tiempo es operacional (origen/destino sin determinar), nunca por un
+problema técnico. `DOCUMENTO_REQUIERE_REVISION` se retira cuando ya hay un
+motivo específico (caso 472037). 238 tests, 0 failing.
+
+**Estado: CASO 472037/464981 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push
+en ninguno de los dos repos.**
