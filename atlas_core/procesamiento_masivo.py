@@ -2091,9 +2091,9 @@ def _ejecutar_ia_operacional(
     aplica una planta o una dirección."""
     from atlas_core.atlas_ia.contratos import ContextoRazonamiento
     from atlas_core.atlas_ia.registro_problemas import (
-        MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
+        clasificar_motivo_no_registrado,
+        codigos_residuales_no_registrados,
         detectar_problemas_elegibles,
-        motivo_ruta_base,
     )
 
     resumen: dict[str, int | float] = {"llamadas": 0, "A": 0, "B": 0, "C": 0, "D": 0, "latencia_segundos": 0.0}
@@ -2107,9 +2107,7 @@ def _ejecutar_ia_operacional(
             continue
         resultados = []
         motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()}
-        codigos_atendidos: set[str] = set()
         for tipo, codigo in detectar_problemas_elegibles(fila):
-            codigos_atendidos.add(codigo)
             if orquestador is None:
                 # B1 desactivado/sin credencial: el problema SIGUE siendo
                 # elegible (hay evidencia potencial que analizar), pero no
@@ -2167,23 +2165,23 @@ def _ejecutar_ia_operacional(
             traza["aplicado_operacionalmente"] = aplicable_a
             traza["evito_intervencion_humana"] = aplicable_a and fila["indicador_revision"] == "OK"
             resultados.append(traza)
-        # Bloque R7 -- casos técnicos donde B1 no tiene nada que razonar
-        # (proveedor caído, timeout, sin conexión, ...): NUNCA un silencio
-        # de "0 llamadas" sin explicación. Cualquier motivo_ruta presente
-        # que NO haya sido atendido arriba se registra con su razón
-        # explícita -- técnica (sin razonamiento posible) o evidencia
-        # insuficiente (mismo criterio que el resto de Atlas: nunca
-        # preguntar sin nada que mostrar).
-        codigo_ruta = motivo_ruta_base(str(fila.get("motivo_ruta", "")))
-        if codigo_ruta and codigo_ruta not in codigos_atendidos:
-            razon = (
-                "FALLA_TECNICA_EXTERNA_SIN_RAZONAMIENTO_POSIBLE"
-                if codigo_ruta in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
-                else "EVIDENCIA_INSUFICIENTE_PARA_FORMULAR_PREGUNTA"
-            )
+        # Bloque R12 -- red de seguridad UNIVERSAL (generaliza el bloque R7
+        # que sólo cubría `motivo_ruta`): NUNCA un silencio de "0 llamadas"
+        # sin explicación, para NINGUNA de las tres fuentes (documental,
+        # ruta, origen GPS) -- incluye cualquier motivo/código que
+        # `REGISTRO_PROBLEMAS_IA` todavía no reconozca hoy, o que se
+        # agregue mañana sin haber sido registrado todavía. Antes de este
+        # bloque, un motivo documental (p. ej. CLIENTE_AUSENTE/CHOFER_
+        # AUSENTE antes de tener entrada propia) o de origen GPS sin
+        # registro pasaba en absoluto silencio -- ni evaluado ni
+        # explicado, el bypass real que este bloque cierra.
+        for fuente, codigo in codigos_residuales_no_registrados(fila):
+            dominio = {"MOTIVO_RUTA": "RUTA", "MOTIVO_ORIGEN_GPS": "PLANTA_ORIGEN"}.get(fuente, "DOCUMENTAL")
+            campo = {"MOTIVO_RUTA": "motivo_ruta", "MOTIVO_ORIGEN_GPS": "motivo_origen_gps"}.get(fuente, "motivos_revision_documento")
             resultados.append({
-                "problema": codigo_ruta, "dominio": "RUTA", "campo": "motivo_ruta",
-                "elegible_ia": False, "llamada_realizada": False, "razon_no_elegible": razon,
+                "problema": codigo, "dominio": dominio, "campo": campo,
+                "elegible_ia": False, "llamada_realizada": False,
+                "razon_no_elegible": clasificar_motivo_no_registrado(fuente=fuente, codigo=codigo),
             })
         if resultados:
             fila["resultado_atlas_ia_json"] = json.dumps(resultados, ensure_ascii=False, sort_keys=True)

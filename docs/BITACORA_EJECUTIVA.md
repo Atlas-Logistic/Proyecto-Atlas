@@ -1985,3 +1985,83 @@ aplicada automáticamente.
 
 **Estado: BLOQUE R11 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R12 -- auditoría y cierre de universalidad real de B1 (2026-08-22)
+
+**Pregunta:** ¿todo problema residual pasa por elegibilidad IA antes de
+llegar a Javier? **Respuesta: NO (bypass real encontrado), corregido en
+este bloque.**
+
+**Bypass 1 -- colisión de clave silenciosa:** `REGISTRO_PROBLEMAS_IA`
+guardaba una única entrada por `(fuente, código)` -- `PATENTE_SIN_
+HOMOLOGAR` sólo podía registrar UN campo (`patente_tracto`); la entrada
+de `patente_rampla` nunca pudo agregarse (causa raíz real de que B1
+nunca evaluara la rampla de 472247, Bloque R11). Fix: el registro ahora
+guarda una TUPLA por clave; `detectar_problemas_elegibles` itera todas.
+
+**Bypass 2 -- 10 de 14 motivos documentales sin ninguna entrada NI
+fallback:** sólo 4 motivos (los originales de R7) tenían registro; los
+otros 10 (`GUIA_AUSENTE`, `TRANSPORTE_AUSENTE`, `CLIENTE_AUSENTE`,
+`CHOFER_AUSENTE`, `DOCUMENTO_DEGRADADO`, `FECHA_SIN_CORROBORAR`,
+`PATENTE_AMBIGUA`, `MATERIAL_AUSENTE`, `CLIENTE_NUEVA_ENTIDAD_NO_
+CATALOGADA`, `TRANSPORTE_AUSENTE_SIN_ETIQUETA`) no producían NINGUNA
+traza -- ni evaluados ni explicados. El más grave: `CLIENTE_AUSENTE`
+tiene decisión humana accionable desde Bloque R9 (`REGISTRAR_CLIENTE_
+MANUAL`) y llegaba a Revisión de Atlas sin haber pasado nunca por B1.
+El mismo vacío existía para `motivo_origen_gps` (sólo `motivo_ruta`
+tenía red de seguridad, Bloque R7).
+
+**Fix general (nunca una whitelist más grande):** 6 motivos con campo
+real se registraron (`CLIENTE_AUSENTE`, `CHOFER_AUSENTE`, `FECHA_SIN_
+CORROBORAR`, `MATERIAL_AUSENTE`, `PATENTE_AMBIGUA` ×2 campos,
+`CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA`) con el mismo adaptador genérico
+ya existente (`recopilar_evidencia_documentos_relacionados`). Además --
+el fix estructural real -- se agregó `codigos_residuales_no_
+registrados`/`clasificar_motivo_no_registrado`: cualquier código de
+CUALQUIERA de las 3 fuentes (documental/ruta/origen GPS) que el
+registro no reconozca hoy, o que se agregue mañana sin registrar,
+produce igual una traza explícita (técnico/estructural o evidencia
+insuficiente) -- generaliza la red de seguridad que antes sólo existía
+para `motivo_ruta`. Agregar un motivo nuevo mañana sigue sin tocar el
+dispatcher; si además nadie lo registra, ya no desaparece en silencio.
+
+**Dominios cubiertos:** los 14 motivos documentales + los ya existentes
+de ruta/origen GPS -- ver `test_todo_motivo_documental_conocido_tiene_
+clasificacion_explicita` (recorre el enum completo) y `test_todo_
+motivo_documental_bloqueante_produce_traza_end_to_end` (E2E real por
+motivo). Fuera de alcance, documentado no oculto: conflictos de
+consolidación a nivel VIAJE (`CONFLICTO_FECHA`/`CONFLICTO_CHOFER`/etc.,
+`gestor_viajes.py`) son señales de reporte, no decisiones accionables
+-- dominio arquitectónicamente distinto (post-agrupación, no por
+documento), no tocado en este bloque.
+
+**Desktop/Mobile:** confirmado un único gate -- `_ejecutar_ia_
+operacional`, con exactamente 2 llamadores (`procesar_carpeta` para
+Desktop/lote, `escalar_resultado_ia_en_memoria` para Mobile), ningún
+camino paralelo.
+
+**Orden determinista → B1 → humano:** verificado -- `analizar_guias_
+masivo.py` corre `procesar_carpeta` (incluye B1) completo ANTES de
+`generar_artefacto` (bandeja). Auto-aplicación (clase A) sigue
+estructuralmente inalcanzable con el único recolector de evidencia
+genérico hoy (`DOCUMENTO_RELACIONADO` nunca alcanza el nivel exigido,
+`CONFIRMACION_HUMANA`/`EXTERNO_OFICIAL`) -- comportamiento preexistente
+y ya documentado (casos reales 460807/472008), no una regresión.
+
+**E2E real:** 5 casos contra fixtures de integración (nunca producción)
+-- determinista resuelve (0 llamadas); llamada REAL a Groq (2 llamadas
+reales ejecutadas, clasificación B_ASISTENCIA, traza completa);
+NO_ELEGIBLE_IA explícito sin llamada; dominio nuevo (MATERIAL) llega al
+mismo gate sin tocar el dispatcher durante la prueba; Mobile confirma
+mismo mecanismo.
+
+**Tests:** `test_b1_universal_r7.py` corregido (estructura tupla) +6
+tests nuevos (cobertura arquitectónica, patente sin colisión,
+CLIENTE_AUSENTE real, motivos estructurales, origen GPS no registrado).
+Motor completo: 1647 passed (antes 1640). Desktop: sin cambios.
+
+**B1 UNIVERSAL REAL: SÍ** (tras el fix de este bloque).
+
+**Estado: BLOQUE R12 CERRADO EN CÓDIGO. Sin cambios en Drive real (nada
+que reconciliar -- el fix es de dispatch, no de datos). Sin push en
+ninguno de los dos repos.**

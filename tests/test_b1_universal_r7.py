@@ -19,8 +19,10 @@ from atlas_core.atlas_ia.contratos import (
 from atlas_core.atlas_ia.orquestador import OrquestadorAtlasIA
 from atlas_core.atlas_ia.proveedor import ProveedorModeloIASimulado, RespuestaSimulada
 from atlas_core.atlas_ia.registro_problemas import (
+    MOTIVOS_DOCUMENTALES_TECNICOS_NO_ELEGIBLES,
     MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
     REGISTRO_PROBLEMAS_IA,
+    codigos_residuales_no_registrados,
     detectar_problemas_elegibles,
     motivo_ruta_base,
 )
@@ -59,17 +61,51 @@ def _leer(ruta):
 # ============================================================
 
 
+def _todos_los_tipos():
+    """Bloque R12: `REGISTRO_PROBLEMAS_IA` ahora guarda una TUPLA de
+    entradas por clave (varios campos pueden compartir un mismo código,
+    p. ej. PATENTE_SIN_HOMOLOGAR en tracto y rampla) -- aplanar antes de
+    inspeccionar."""
+    return [tipo for entradas in REGISTRO_PROBLEMAS_IA.values() for tipo in entradas]
+
+
 def test_registro_cubre_los_4_dominios_documentales_de_siempre_mas_2_nuevos():
-    dominios = {tipo.dominio for tipo in REGISTRO_PROBLEMAS_IA.values()}
+    dominios = {tipo.dominio for tipo in _todos_los_tipos()}
     assert {"OBRA_DESTINO", "CHOFER", "PATENTE", "CLIENTE"} <= dominios
     assert "DESTINO" in dominios and "PLANTA_ORIGEN" in dominios
 
 
-def test_solo_los_4_dominios_documentales_de_siempre_se_auto_aplican():
-    aplicables = {tipo.dominio for tipo in REGISTRO_PROBLEMAS_IA.values() if tipo.aplicable_automaticamente}
-    assert aplicables == {"OBRA_DESTINO", "CHOFER", "PATENTE", "CLIENTE"}
-    no_aplicables = {tipo.dominio for tipo in REGISTRO_PROBLEMAS_IA.values() if not tipo.aplicable_automaticamente}
-    assert no_aplicables == {"DESTINO", "PLANTA_ORIGEN"}
+def test_registro_cubre_los_dominios_agregados_en_bloque_r12():
+    """Bloque R12 -- cierre del bypass real: CLIENTE_AUSENTE (con decisión
+    humana accionable desde R9) y FECHA_SIN_CORROBORAR/MATERIAL_AUSENTE
+    nunca tuvieron entrada en el registro; ahora sí."""
+    dominios = {tipo.dominio for tipo in _todos_los_tipos()}
+    assert {"FECHA", "MATERIAL"} <= dominios
+    todos_los_codigos = {codigo for tipo in _todos_los_tipos() for codigo in tipo.codigos}
+    assert {
+        "CLIENTE_AUSENTE", "CHOFER_AUSENTE", "FECHA_SIN_CORROBORAR",
+        "MATERIAL_AUSENTE", "PATENTE_AMBIGUA", "CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA",
+    } <= todos_los_codigos
+
+
+def test_patente_sin_homologar_cubre_tracto_y_rampla_sin_colision():
+    """Caso real 472247: antes, dos entradas con el mismo (fuente, código)
+    colisionaban en la misma clave -- sólo la última sobrevivía y B1
+    nunca evaluaba patente_rampla. Ahora ambas coexisten."""
+    entradas = REGISTRO_PROBLEMAS_IA[("MOTIVO_DOCUMENTAL", "PATENTE_SIN_HOMOLOGAR")]
+    campos = {tipo.campo for tipo in entradas}
+    assert campos == {"patente_tracto", "patente_rampla"}
+
+
+def test_solo_los_dominios_curados_se_auto_aplican():
+    aplicables = {tipo.dominio for tipo in _todos_los_tipos() if tipo.aplicable_automaticamente}
+    # OBRA_DESTINO/CHOFER/PATENTE/CLIENTE (de siempre) + FECHA/MATERIAL
+    # (Bloque R12, mismo patrón "documentos relacionados").
+    assert aplicables == {"OBRA_DESTINO", "CHOFER", "PATENTE", "CLIENTE", "FECHA", "MATERIAL"}
+    no_aplicables = {tipo.dominio for tipo in _todos_los_tipos() if not tipo.aplicable_automaticamente}
+    # DESTINO/PLANTA_ORIGEN (de siempre, R7) -- nunca auto-aplican una
+    # dirección o planta sin confirmación humana.
+    assert {"DESTINO", "PLANTA_ORIGEN"} <= no_aplicables
 
 
 def test_motivo_ruta_base_ignora_detalle_parentetico_y_de_dos_puntos():
@@ -91,9 +127,22 @@ def test_detectar_problemas_elegibles_combina_las_3_fuentes_de_una_fila():
     }
 
 
-def test_un_motivo_no_registrado_no_produce_ningun_match():
-    fila = {"motivos_revision_documento": "MATERIAL_AUSENTE", "motivo_ruta": "SIN_EVIDENCIA_GPS", "motivo_origen_gps": ""}
+def test_un_motivo_no_registrado_no_produce_ningun_match_pero_queda_marcado_residual():
+    """Bloque R12: MATERIAL_AUSENTE ya está registrado (ver bloque de
+    arriba) -- el ejemplo de "no registrado" pasa a ser un código
+    inventado, que jamás podrá tener entrada real. `detectar_problemas_
+    elegibles` sigue sin producir ningún match para él (nunca inventa una
+    evaluación), pero `codigos_residuales_no_registrados` -- el
+    complemento exacto que ahora usa el dispatcher -- SÍ lo marca, así
+    que nunca desaparece en silencio."""
+    fila = {
+        "motivos_revision_documento": "PESO_DUDOSO_NUEVO",
+        "motivo_ruta": "SIN_EVIDENCIA_GPS", "motivo_origen_gps": "",
+    }
     assert detectar_problemas_elegibles(fila) == []
+    assert codigos_residuales_no_registrados(fila) == [
+        ("MOTIVO_DOCUMENTAL", "PESO_DUDOSO_NUEVO"), ("MOTIVO_RUTA", "SIN_EVIDENCIA_GPS"),
+    ]
 
 
 # ============================================================
@@ -162,8 +211,12 @@ def test_dominio_documental_de_siempre_SI_auto_aplica_ante_evidencia_de_clase_a(
             procedencia="test",
         ),)
     clave = ("MOTIVO_DOCUMENTAL", "OBRA_DESTINO_SIN_CORROBORAR")
-    tipo_modificado = dataclasses.replace(registro_mod.REGISTRO_PROBLEMAS_IA[clave], recopilar_evidencia=evidencia_fuerte)
-    monkeypatch.setitem(registro_mod.REGISTRO_PROBLEMAS_IA, clave, tipo_modificado)
+    # Bloque R12: el registro guarda una TUPLA por clave -- OBRA_DESTINO_
+    # SIN_CORROBORAR sigue teniendo una única entrada, así que se
+    # reemplaza esa y se vuelve a envolver en una tupla de 1.
+    (entrada_original,) = registro_mod.REGISTRO_PROBLEMAS_IA[clave]
+    tipo_modificado = dataclasses.replace(entrada_original, recopilar_evidencia=evidencia_fuerte)
+    monkeypatch.setitem(registro_mod.REGISTRO_PROBLEMAS_IA, clave, (tipo_modificado,))
     ruta = tmp_path / "datos.csv"
     filas = [_fila(archivo="objetivo.jpg", obra_destino="No encontrado", motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR")]
     _escribir(ruta, filas)
@@ -297,6 +350,59 @@ def test_motivo_ruta_no_registrado_ni_tecnico_se_registra_como_evidencia_insufic
     assert traza["razon_no_elegible"] == "EVIDENCIA_INSUFICIENTE_PARA_FORMULAR_PREGUNTA"
 
 
+def test_motivo_documental_estructural_se_registra_como_no_elegible_sin_llamar(tmp_path):
+    """Bloque R12 -- bypass real cerrado: GUIA_AUSENTE/TRANSPORTE_AUSENTE/
+    DOCUMENTO_DEGRADADO (documento sin sustrato para razonar) antes NUNCA
+    producían ninguna traza -- ni evaluados ni explicados. Ahora usan el
+    mismo mecanismo de dos niveles que ya existía sólo para motivo_ruta."""
+    for motivo_tecnico in MOTIVOS_DOCUMENTALES_TECNICOS_NO_ELEGIBLES:
+        ruta = tmp_path / f"datos_{motivo_tecnico}.csv"
+        filas = [_fila(archivo="x.jpg", indicador_revision="REVISAR", motivos_revision_documento=motivo_tecnico)]
+        _escribir(ruta, filas)
+        resumen = _ejecutar_ia_operacional(ruta, {"x.jpg"}, OrquestadorAtlasIA(proveedor=ProveedorModeloIASimulado(respuestas_por_valor_documental={})))
+        assert resumen["llamadas"] == 0
+        traza = json.loads(_leer(ruta)["x.jpg"]["resultado_atlas_ia_json"])[0]
+        assert traza["problema"] == motivo_tecnico
+        assert traza["elegible_ia"] is False
+        assert traza["razon_no_elegible"] == "FALLA_ESTRUCTURAL_SIN_RAZONAMIENTO_POSIBLE"
+
+
+def test_motivo_origen_gps_no_registrado_tambien_deja_constancia(tmp_path):
+    """Bloque R12: antes, un `motivo_origen_gps` sin entrada registrada
+    (a diferencia de `motivo_ruta`) desaparecía en silencio -- las tres
+    fuentes ahora comparten el mismo mecanismo."""
+    ruta = tmp_path / "datos.csv"
+    filas = [_fila(archivo="x.jpg", indicador_revision="OK", estado_ruta="ORIGEN_NO_DETERMINADO", motivo_origen_gps="MOTIVO_GPS_FUTURO_INVENTADO")]
+    _escribir(ruta, filas)
+    resumen = _ejecutar_ia_operacional(ruta, {"x.jpg"}, OrquestadorAtlasIA(proveedor=ProveedorModeloIASimulado(respuestas_por_valor_documental={})))
+    assert resumen["llamadas"] == 0
+    traza = json.loads(_leer(ruta)["x.jpg"]["resultado_atlas_ia_json"])[0]
+    assert traza["problema"] == "MOTIVO_GPS_FUTURO_INVENTADO"
+    assert traza["dominio"] == "PLANTA_ORIGEN"
+    assert traza["elegible_ia"] is False
+    assert traza["razon_no_elegible"] == "EVIDENCIA_INSUFICIENTE_PARA_FORMULAR_PREGUNTA"
+
+
+def test_cliente_ausente_ahora_escala_a_b1_caso_real_472238(tmp_path):
+    """Bloque R12 -- caso real 472238/472239: CLIENTE_AUSENTE tiene
+    decisión humana accionable (REGISTRAR_CLIENTE_MANUAL, Bloque R9)
+    desde hace varios bloques, pero nunca tuvo entrada en el registro --
+    B1 nunca lo evaluaba pese a ser plenamente accionable."""
+    ruta = tmp_path / "datos.csv"
+    filas = [
+        _fila(archivo="fuente.jpg", cliente="CLIENTE REAL SA", indicador_revision="OK", numero_transporte="T1"),
+        _fila(archivo="objetivo.jpg", cliente="No encontrado", motivos_revision_documento="CLIENTE_AUSENTE", numero_transporte="T1"),
+    ]
+    _escribir(ruta, filas)
+    proveedor = ProveedorModeloIASimulado(respuestas_por_valor_documental={
+        "No encontrado": RespuestaSimulada(resultado=RESULTADO_HIPOTESIS_PROPUESTA, valor_propuesto="CLIENTE REAL SA"),
+    })
+    resumen = _ejecutar_ia_operacional(ruta, {"objetivo.jpg"}, OrquestadorAtlasIA(proveedor=proveedor))
+    assert resumen["llamadas"] == 1
+    traza = json.loads(_leer(ruta)["objetivo.jpg"]["resultado_atlas_ia_json"])[0]
+    assert traza["dominio"] == "CLIENTE" and traza["problema"] == "CLIENTE_AUSENTE"
+
+
 def test_sin_proveedor_configurado_sigue_dejando_constancia_de_elegibilidad(tmp_path):
     ruta = tmp_path / "datos.csv"
     filas = [
@@ -310,6 +416,69 @@ def test_sin_proveedor_configurado_sigue_dejando_constancia_de_elegibilidad(tmp_
     assert traza["elegible_ia"] is True
     assert traza["llamada_realizada"] is False
     assert traza["razon_no_elegible"] == "SIN_PROVEEDOR_IA_CONFIGURADO"
+
+
+# ============================================================
+# Bloque R12 -- prueba de cobertura arquitectónica: TODOS los motivos
+# documentales conocidos por Atlas quedan explícitamente clasificados.
+# Protege contra el bypass real de este bloque (10 de 14 motivos sin
+# ninguna entrada ni fallback) Y contra el que describe la Parte D del
+# ticket: si mañana alguien agrega PESO_DUDOSO_NUEVO al enum y olvida
+# integrarlo cognitivamente, este test debe fallar.
+# ============================================================
+
+
+def test_todo_motivo_documental_conocido_tiene_clasificacion_explicita():
+    from atlas_core.atlas_ia.registro_problemas import MOTIVOS_DOCUMENTALES_TECNICOS_NO_ELEGIBLES
+    from atlas_core.procesamiento_masivo import MOTIVOS_NO_BLOQUEANTES, MotivoRevisionDocumento
+
+    codigos_registrados = {
+        codigo for tipo in _todos_los_tipos() for codigo in tipo.codigos
+    }
+    sin_clasificar = []
+    for motivo in MotivoRevisionDocumento:
+        codigo = motivo.value
+        clasificado = (
+            codigo in codigos_registrados
+            or codigo in MOTIVOS_DOCUMENTALES_TECNICOS_NO_ELEGIBLES
+            # Los no bloqueantes puros que además quedaron registrados
+            # arriba (MATERIAL_AUSENTE) ya cuentan por la primera
+            # condición; los que no tienen registro real (por ahora
+            # ninguno) también deben quedar explícitos aquí.
+            or codigo in MOTIVOS_NO_BLOQUEANTES
+        )
+        if not clasificado:
+            sin_clasificar.append(codigo)
+    assert sin_clasificar == [], (
+        f"Motivo(s) sin clasificación de elegibilidad IA: {sin_clasificar} -- "
+        "deben quedar registrados en REGISTRO_PROBLEMAS_IA, en "
+        "MOTIVOS_DOCUMENTALES_TECNICOS_NO_ELEGIBLES, o justificar por qué "
+        "no aplica ninguno de los dos."
+    )
+
+
+def test_todo_motivo_documental_bloqueante_produce_traza_end_to_end(tmp_path):
+    """Complemento del test anterior, pero end-to-end real: para cada
+    motivo BLOQUEANTE (los no bloqueantes nunca entran a Revisión de
+    Atlas, ver `_fila_requiere_atencion_operacional`/`MOTIVOS_NO_
+    BLOQUEANTES`), correr `_ejecutar_ia_operacional` y exigir que
+    `resultado_atlas_ia_json` tenga al menos una entrada con ese código
+    -- nunca una fila REVISAR sin ningún rastro de evaluación IA."""
+    from atlas_core.procesamiento_masivo import MOTIVOS_NO_BLOQUEANTES, MotivoRevisionDocumento
+
+    for motivo in MotivoRevisionDocumento:
+        codigo = motivo.value
+        if codigo in MOTIVOS_NO_BLOQUEANTES:
+            continue
+        ruta = tmp_path / f"cobertura_{codigo}.csv"
+        _escribir(ruta, [_fila(archivo="x.jpg", indicador_revision="REVISAR", motivos_revision_documento=codigo)])
+        resumen = _ejecutar_ia_operacional(
+            ruta, {"x.jpg"}, OrquestadorAtlasIA(proveedor=ProveedorModeloIASimulado(respuestas_por_valor_documental={})),
+        )
+        salida = _leer(ruta)["x.jpg"]
+        assert salida.get("resultado_atlas_ia_json"), f"{codigo}: fila REVISAR sin ningún rastro de evaluación IA"
+        codigos_en_traza = {r["problema"] for r in json.loads(salida["resultado_atlas_ia_json"])}
+        assert codigo in codigos_en_traza, f"{codigo}: no aparece en su propia traza ({codigos_en_traza})"
 
 
 # ============================================================
