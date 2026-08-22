@@ -284,7 +284,18 @@ def test_registrar_direccion_exitosa_calcula_ruta_y_aprende_la_relacion(tmp_path
     assert (entorno["raiz"] / "operacion" / "actual" / "estado_operacion.json").exists()
 
 
-def test_registrar_direccion_sigue_ambigua_no_inventa_una_ruta(tmp_path):
+def test_registrar_direccion_sigue_ambigua_no_inventa_una_ruta_pero_si_aprende_la_direccion(tmp_path):
+    """Bloque R13 -- caso real 472099/472163 (VISTA CLARA 2351 CERRILLOS /
+    VIA MORADA 6480 VITACURA): "¿es correcta esta dirección?" (confirmación
+    humana) y "¿el proveedor externo puede geocodificarla?" (limitación de
+    terceros) son dos preguntas distintas. Antes, el aprendizaje
+    reutilizable (Destino + relación obra<->destino) sólo se persistía
+    cuando la ruta SÍ se calculaba -- si el proveedor no podía ubicarla
+    (ambigua, genérica, comuna contradicha), la confirmación humana se
+    perdía por completo y la MISMA dirección en otra guía volvía a
+    preguntarse desde cero. Ahora el aprendizaje persiste siempre que un
+    humano confirma explícitamente, calcule o no la ruta -- km/tiempo
+    siguen sin inventarse jamás (eso sigue exigiendo geocodificación real)."""
     entorno = _entorno(
         tmp_path, filas_csv=[_fila_csv()],
         clientes=[_cliente_dict()], obras=[_obra_dict()],
@@ -300,10 +311,12 @@ def test_registrar_direccion_sigue_ambigua_no_inventa_una_ruta(tmp_path):
     )
     assert resultado["ok"] is True
     assert resultado["ruta_resuelta"] is False
-    assert resultado["destino_id"] is None
-    assert resultado["relacion_id"] is None
+    # El aprendizaje reutilizable SÍ se persiste -- caso real corregido.
+    assert resultado["destino_id"] is not None
+    assert resultado["relacion_id"] is not None
 
     fila = _leer_csv(entorno["dataset"])[0]
+    # Nunca inventa km/tiempo sin geocodificación real -- invariante intacto.
     assert fila["distancia_km"] == ""
     assert fila["duracion_min"] == ""
     # La dirección que escribió el humano igual queda registrada -- el
@@ -316,9 +329,12 @@ def test_registrar_direccion_sigue_ambigua_no_inventa_una_ruta(tmp_path):
         ruta_clientes=entorno["catalogos"] / "clientes.json",
         ruta_destinos=entorno["catalogos"] / "destinos_maestros.json",
     )
+    # La relación obra<->destino queda CONFIRMADA globalmente -- otra guía
+    # (misma u otra obra/cliente) con la misma obra ya no vuelve a
+    # preguntar, aunque el proveedor de rutas siga sin poder geocodificarla.
     assert catalogo_obras.resolver_obra_destino_confirmada_global(
         nombre_obra="ING Y CONST FUNDAMENTA SPA"
-    ) is None
+    ) is not None
 
 
 def test_registrar_direccion_sin_texto_falla(tmp_path):

@@ -2065,3 +2065,95 @@ Motor completo: 1647 passed (antes 1640). Desktop: sin cambios.
 **Estado: BLOQUE R12 CERRADO EN CÓDIGO. Sin cambios en Drive real (nada
 que reconciliar -- el fix es de dispatch, no de datos). Sin push en
 ninguno de los dos repos.**
+
+## Bloque R13 -- reconciliación global post-aprendizaje + cliente leído + UX + coherencia Viajes↔Revisión (2026-08-22)
+
+**Causa repetición de destinos:** el aprendizaje reutilizable (Destino +
+relación obra↔destino) sólo se persistía cuando el proveedor de rutas
+SÍ lograba geocodificar la dirección (`ruta_resuelta`). "¿Es correcta
+esta dirección?" (confirmación humana) y "¿el proveedor externo puede
+ubicarla?" (limitación de terceros) se trataban como la misma pregunta
+-- si el proveedor fallaba, la confirmación de Javier se perdía por
+completo y la misma dirección en otra guía (misma u otra obra/cliente)
+volvía a preguntarse desde cero.
+
+**Fix reconciliación global:** (1) la persistencia de Destino/relación
+en `aplicar_decision_obra` ahora corre SIEMPRE que hay dirección manual,
+geocodifique o no -- km/tiempo siguen sin inventarse jamás. (2)
+`regenerar_decisiones_persistidas` ahora también descarta
+`DESTINO_NO_RESUELTO` cuando la obra ya tiene relación CONFIRMADA
+(mismo criterio ya usado para `DESTINO_SIN_CONFIRMAR`). (3) nuevo
+`ruta_dataset` (opcional, aditivo) en `regenerar_decisiones_persistidas`:
+descarta cualquier decisión cuyo motivo declarado sea un código real de
+`motivos_revision_documento` que ya no está en la fila actual -- cierra
+la revisión huérfana para CUALQUIER tipo futuro que use ese mismo
+vocabulario, sin agregar casos por tipo.
+
+**VISTA CLARA / VIA MORADA antes → después:** ambas quedaban pidiendo
+confirmación en cada guía nueva pese a que Javier ya las había
+confirmado dentro del mismo ciclo. "TORRES OCARANZA LTDA" (VISTA CLARA)
+YA tenía relación CONFIRMADA en el catálogo desde antes (R2,
+2026-08-13/14) -- el bug real era que `regenerar_decisiones_persistidas`
+nunca lo comprobaba para `DESTINO_NO_RESUELTO`. "CONSTRUCTORA SAN
+CRISTOBAL L" (VIA MORADA) no tenía ninguna relación -- se persistió
+retroactivamente usando la misma evidencia que Javier ya dejó en el
+ledger real (`REGISTRAR_DIRECCION`, guía 472163). Después: ninguna de
+las dos vuelve a preguntarse; el proveedor de rutas sigue sin poder
+geocodificarlas (visible aparte, vía `estado_ruta`, nunca oculto).
+
+**Causa CLIENTE_AUSENTE (TORRES OCARANZA):** el campo `cliente` quedó
+genuinamente vacío en la extracción original, pero `obra_destino` de la
+misma fila ("TORRES OCARANZA LTDA") ya coincidía EXACTO con un cliente
+CONFIRMADO/ACTIVO del catálogo -- nunca se aprovechó ese cruce (mismo
+patrón "cliente == obra" ya usado en sentido inverso para retirar
+`OBRA_DESTINO_SIN_CORROBORAR`). Nuevo `revalidar_cliente_ausente_por_
+obra_coincidente_sin_ocr`, sin OCR, sin inventar nada -- se abstiene sin
+coincidencia exacta. **472238/472239 antes → después:** cliente
+`No encontrado` → `TORRES OCARANZA LTDA`; `CLIENTE_AUSENTE` retirado.
+
+**17/1/5 antes → después:** el dataset real ya tenía 20 guías (no 18 --
+el reporte vigente estaba desactualizado respecto al dataset,
+independiente de este bloque); tras reconciliar: 20 viajes / 20
+confirmados / 0 requieren revisión / 0 decisiones pendientes. Ledger,
+catálogos de vehículos y las demás guías (464959/464960, XF3629)
+verificados intactos.
+
+**UX post-decisión (Desktop):** causa real -- sin decisiones pendientes,
+el panel de Revisión de Atlas quedaba `hidden` sin ningún mensaje
+propio; dependía por completo de un elemento externo (acoplado al
+conteo combinado de Envíos Mobile) para mostrar algo, y cualquier
+demora/fallo ahí dejaba el panel en blanco -- indistinguible de haber
+sido expulsado de la pestaña. Fix: `renderizar()` es ahora autosuficiente
+(siempre muestra "Sin decisiones pendientes." si no hay ninguna, nunca
+queda oculto); el refresco de Envíos Mobile ya no puede impedir que el
+resto del refresco se complete. Funciona igual para cualquier tipo de
+decisión -- corregido en el único punto compartido.
+
+**B1:** sin cambios -- universalidad ya confirmada en R12; determinista
+resuelve cliente/destino sin ambigüedad en los casos reales, 0 llamadas
+necesarias.
+
+**Aprendizaje:** todo vía mecanismos ya existentes (catálogo de
+clientes/obras/destinos, ledger) -- ninguna memoria paralela.
+
+**Tests:** Motor -- `test_reconciliacion_global_r13.py` (8 tests
+nuevos) + `test_destino_no_resuelto_r6.py` corregido (1 test, invariante
+real actualizado). Motor completo: 1655 passed (antes 1647). Desktop --
+`decisiones_pendientes.test.js` corregido (1 test, comportamiento
+nuevo correcto). Desktop completo: 275 passed.
+
+**E2E:** en copia de producción real -- CASO 1/2 (destinos ya
+confirmados no repreguntan), CASO 3 (TORRES OCARANZA resuelto sin
+inventar), CASO 5 (reporte regenerado, Viajes↔Revisión coherente, 0
+decisiones obsoletas) -- todos confirmados antes de aplicar a real.
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/R13_PRE_RECONCILIACION_20260822_020854/`). Relación
+CONSTRUCTORA SAN CRISTOBAL L↔VIA MORADA persistida retroactivamente;
+`revalidar_y_regenerar_reporte` aplicado; ledger y catálogo de vehículos
+verificados byte-idénticos (SHA-256) al backup -- nada aplicado
+automáticamente por Atlas, todo aprendizaje ya provenía de confirmaciones
+humanas reales (ledger + catálogo R2).
+
+**Estado: BLOQUE R13 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

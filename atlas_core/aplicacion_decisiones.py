@@ -675,73 +675,90 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         resultado_extra["motivo_ruta_tras_intento"] = (
                             fila_tras_intento.get("motivo_ruta", "") if fila_tras_intento is not None else ""
                         )
-                    else:
-                        contexto_decision = decision.get("contexto") or {}
-                        obra_canonica = str(contexto_decision.get("obra_canonica", "")).strip()
-                        cliente_canonico_decision = str(contexto_decision.get("cliente_canonico", "")).strip()
-                        try:
-                            filas_confirmadas = _leer_filas(dataset)
-                            fila_confirmada = next(
-                                (f for f in filas_confirmadas if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                    # Bloque R13 -- causa raíz real de "Atlas vuelve a preguntar
+                    # un destino que Javier ya confirmó" (casos reales 472099/
+                    # VISTA CLARA 2351 CERRILLOS y 472163/VIA MORADA 6480
+                    # VITACURA): esta persistencia SÓLO corría dentro de
+                    # `else: (ruta_resuelta)` -- si el proveedor de rutas no
+                    # podía geocodificar la dirección (una limitación externa,
+                    # de terceros), la confirmación humana de la dirección se
+                    # perdía por completo: nunca quedaba un Destino/Relación
+                    # reutilizable en el catálogo, así que la MISMA dirección
+                    # en otra guía (misma u otra obra/cliente) volvía a
+                    # preguntarse desde cero. "¿Es correcta esta dirección?"
+                    # (una confirmación humana) y "¿el proveedor externo puede
+                    # ubicarla?" (una limitación de geocodificación) son dos
+                    # preguntas distintas -- la primera debe persistir
+                    # siempre que un humano confirme explícitamente, la
+                    # segunda sigue gobernando sólo km/tiempo/estado_ruta
+                    # (nunca inventados). Se corre siempre que hay dirección
+                    # manual, geocodifique o no.
+                    contexto_decision = decision.get("contexto") or {}
+                    obra_canonica = str(contexto_decision.get("obra_canonica", "")).strip()
+                    cliente_canonico_decision = str(contexto_decision.get("cliente_canonico", "")).strip()
+                    try:
+                        filas_confirmadas = _leer_filas(dataset)
+                        fila_confirmada = next(
+                            (f for f in filas_confirmadas if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                        )
+                        cliente_objetivo = next(
+                            (
+                                c for c in CatalogoClientes(catalogo_clientes_ruta).listar()
+                                if c.razon_social == cliente_canonico_decision
+                            ),
+                            None,
+                        ) if cliente_canonico_decision else None
+                        catalogo_obras = CatalogoObrasDestinos(
+                            ruta=catalogo_obras_ruta, ruta_clientes=catalogo_clientes_ruta,
+                            ruta_destinos=catalogo_destinos_ruta,
+                        )
+                        obra_objetivo = next(
+                            (
+                                o for o in catalogo_obras.listar_obras()
+                                if o.nombre_canonico == obra_canonica and o.estado_vigencia == EstadoVigencia.ACTIVO.value
+                            ),
+                            None,
+                        ) if obra_canonica else None
+                        if fila_confirmada is not None and cliente_objetivo is not None and obra_objetivo is not None:
+                            destino_creado = CatalogoDestinos(
+                                catalogo_destinos_ruta, ruta_clientes=catalogo_clientes_ruta,
+                            ).crear_o_reutilizar_global(
+                                nombre_destino=fila_confirmada.get("direccion_entrega") or direccion_final,
+                                direccion=fila_confirmada.get("direccion_entrega") or direccion_final,
+                                comuna=fila_confirmada.get("localidad_entrega", ""),
+                                region=fila_confirmada.get("region_entrega", ""),
+                                fuente=f"DECISION_HUMANA_R6:{decision_id}",
                             )
-                            cliente_objetivo = next(
-                                (
-                                    c for c in CatalogoClientes(catalogo_clientes_ruta).listar()
-                                    if c.razon_social == cliente_canonico_decision
-                                ),
-                                None,
-                            ) if cliente_canonico_decision else None
-                            catalogo_obras = CatalogoObrasDestinos(
-                                ruta=catalogo_obras_ruta, ruta_clientes=catalogo_clientes_ruta,
-                                ruta_destinos=catalogo_destinos_ruta,
+                            evidencia_destino = Evidencia(
+                                tipo=TipoEvidencia.GUIA.value,
+                                identificador_fuente=numero_guia_decision, referencia_hash=decision_id,
+                                campos_observados={
+                                    "obra": obra_canonica, "destino": direccion_final,
+                                    "decision_id": decision_id, "cliente_id_observado": cliente_objetivo.cliente_id,
+                                    "cliente_canonico_observado": cliente_canonico_decision,
+                                    "numero_guia": numero_guia_decision,
+                                },
+                                fecha=reloj().astimezone(timezone.utc).isoformat(),
+                                actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
                             )
-                            obra_objetivo = next(
-                                (
-                                    o for o in catalogo_obras.listar_obras()
-                                    if o.nombre_canonico == obra_canonica and o.estado_vigencia == EstadoVigencia.ACTIVO.value
-                                ),
-                                None,
-                            ) if obra_canonica else None
-                            if fila_confirmada is not None and cliente_objetivo is not None and obra_objetivo is not None:
-                                destino_creado = CatalogoDestinos(
-                                    catalogo_destinos_ruta, ruta_clientes=catalogo_clientes_ruta,
-                                ).crear_o_reutilizar_global(
-                                    nombre_destino=fila_confirmada.get("direccion_entrega") or direccion_final,
-                                    direccion=fila_confirmada.get("direccion_entrega") or direccion_final,
-                                    comuna=fila_confirmada.get("localidad_entrega", ""),
-                                    region=fila_confirmada.get("region_entrega", ""),
-                                    fuente=f"DECISION_HUMANA_R6:{decision_id}",
-                                )
-                                evidencia_destino = Evidencia(
-                                    tipo=TipoEvidencia.GUIA.value,
-                                    identificador_fuente=numero_guia_decision, referencia_hash=decision_id,
-                                    campos_observados={
-                                        "obra": obra_canonica, "destino": direccion_final,
-                                        "decision_id": decision_id, "cliente_id_observado": cliente_objetivo.cliente_id,
-                                        "cliente_canonico_observado": cliente_canonico_decision,
-                                        "numero_guia": numero_guia_decision,
-                                    },
-                                    fecha=reloj().astimezone(timezone.utc).isoformat(),
-                                    actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
-                                )
-                                resultado_obs = catalogo_obras.registrar_observacion(
-                                    cliente_id=cliente_objetivo.cliente_id, nombre_obra=obra_canonica,
-                                    destino_id=destino_creado.destino_id, evidencia=evidencia_destino,
-                                )
-                                if resultado_obs.relacion is not None:
-                                    relacion = resultado_obs.relacion
-                                    if relacion.estado == "PENDIENTE":
-                                        relacion = catalogo_obras.confirmar_relacion(
-                                            relacion.relacion_id, actor=actor, identificador_fuente=decision_id,
-                                        )
-                                    relacion_id_nueva = relacion.relacion_id
-                                destino_id_nuevo = destino_creado.destino_id
-                        except (OSError, ValueError, ErrorCatalogoObrasDestinos, ClienteDuplicadoError, DestinoDuplicadoError):
-                            # El aprendizaje reutilizable es una mejora
-                            # aditiva -- si falla, la ruta de ESTE
-                            # documento ya quedó calculada y persistida
-                            # arriba; nunca se revierte por esto.
-                            pass
+                            resultado_obs = catalogo_obras.registrar_observacion(
+                                cliente_id=cliente_objetivo.cliente_id, nombre_obra=obra_canonica,
+                                destino_id=destino_creado.destino_id, evidencia=evidencia_destino,
+                            )
+                            if resultado_obs.relacion is not None:
+                                relacion = resultado_obs.relacion
+                                if relacion.estado == "PENDIENTE":
+                                    relacion = catalogo_obras.confirmar_relacion(
+                                        relacion.relacion_id, actor=actor, identificador_fuente=decision_id,
+                                    )
+                                relacion_id_nueva = relacion.relacion_id
+                            destino_id_nuevo = destino_creado.destino_id
+                    except (OSError, ValueError, ErrorCatalogoObrasDestinos, ClienteDuplicadoError, DestinoDuplicadoError):
+                        # El aprendizaje reutilizable es una mejora
+                        # aditiva -- si falla, la ruta de ESTE
+                        # documento ya quedó calculada y persistida
+                        # arriba; nunca se revierte por esto.
+                        pass
                     resultado_extra["destino_id"] = destino_id_nuevo
                     resultado_extra["relacion_id"] = relacion_id_nueva
                 # NO_PUEDO_DETERMINAR/POSPONER: no tocan el dataset -- el
@@ -1080,6 +1097,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 decisiones=artefacto.get("decisiones", []),
                 carpeta_catalogos=catalogos,
                 ids_resueltos={decision_id},
+                ruta_dataset=dataset,
             )
             if decision_siguiente is not None:
                 # R3.4.2: la nueva pregunta de destino entra a la bandeja

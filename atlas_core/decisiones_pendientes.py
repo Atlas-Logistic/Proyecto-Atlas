@@ -1330,7 +1330,7 @@ def decision_destino_para_obra_registrada(
 
 def regenerar_decisiones_persistidas(
     *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
-    ids_resueltos: Iterable[str] = (),
+    ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
 ) -> list[dict[str, object]]:
     """R3.2.1: reclasifica decisiones YA PERSISTIDAS (p. ej. las de un
     artefacto `decisiones_pendientes.json` generado antes de R3.2) sin volver
@@ -1356,8 +1356,42 @@ def regenerar_decisiones_persistidas(
       conservadas: su identidad (tipo, documento, campo, valor_documental,
       evidencias) es la misma de antes; contexto y hashes no forman parte de
       esa identidad.
-    """
+
+    `ruta_dataset` (Bloque R13, opcional y aditivo -- compatible hacia
+    atrás): si se entrega, descarta ADEMÁS cualquier decisión cuyo
+    `motivos` declarado sea íntegramente un código de
+    `MotivoRevisionDocumento` (obra/cliente/patente/etc. -- nunca un
+    motivo interno propio de la decisión, como
+    `OBRA_SIN_RELACION_CONFIRMADA_UNICA` o
+    `SIN_VEHICULO_CONFIRMADO_COMPATIBLE`, que no viven en esa columna)
+    que YA NO está presente en `motivos_revision_documento` de la fila
+    actual de ese documento -- caso real 472238/472239: una revalidación
+    `sin_ocr` (p. ej. `revalidar_cliente_ausente_por_obra_coincidente_
+    sin_ocr`) puede retirar el motivo del dataset sin que este mecanismo
+    lo supiera nunca, dejando la tarjeta de Revisión de Atlas huérfana
+    indefinidamente. Genérico por construcción -- cualquier tipo de
+    decisión futuro cuyo motivo coincida con la columna documental queda
+    cubierto automáticamente, sin agregar un caso por tipo."""
     carpeta = Path(carpeta_catalogos)
+    motivos_por_guia: dict[str, set[str]] | None = None
+    codigos_motivo_documental: frozenset[str] = frozenset()
+    if ruta_dataset is not None:
+        import csv as _csv
+
+        from atlas_core.procesamiento_masivo import MotivoRevisionDocumento as _MotivoRevisionDocumento
+        codigos_motivo_documental = frozenset(m.value for m in _MotivoRevisionDocumento)
+        motivos_por_guia = {}
+        try:
+            with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo:
+                for _fila in _csv.DictReader(_archivo, delimiter=";"):
+                    _guia = str(_fila.get("numero_guia", "")).strip()
+                    if not _guia:
+                        continue
+                    motivos_por_guia[_guia] = {
+                        m.strip() for m in str(_fila.get("motivos_revision_documento", "")).split("|") if m.strip()
+                    }
+        except (OSError, UnicodeDecodeError):
+            motivos_por_guia = None
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -1387,6 +1421,13 @@ def regenerar_decisiones_persistidas(
         decision = dict(original)
         if str(decision.get("decision_id", "")) in ids_terminales:
             continue
+        if motivos_por_guia is not None:
+            motivos_decision = {str(m) for m in (decision.get("motivos") or [])}
+            if motivos_decision and motivos_decision <= codigos_motivo_documental:
+                numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+                motivos_fila = motivos_por_guia.get(numero_guia_decision)
+                if motivos_fila is not None and not (motivos_decision & motivos_fila):
+                    continue  # el motivo que originó esta decisión ya no está en el dataset
         tipo = decision.get("tipo")
         contexto = dict(decision.get("contexto") or {})
         cliente_id_contexto = str(contexto.get("cliente_id") or "")
@@ -1472,6 +1513,25 @@ def regenerar_decisiones_persistidas(
                     "obra_canonica": obra_actual.nombre_canonico,
                 })
                 decision["contexto"] = contexto
+
+        if tipo == "DESTINO_NO_RESUELTO":
+            # Bloque R13 -- caso real 472238/472239 (VISTA CLARA 2351
+            # CERRILLOS, misma obra que 472099, ya confirmada por Javier):
+            # "¿es correcta esta dirección?" ya tiene respuesta humana
+            # (la obra global ya tiene una relación CONFIRMADA con algún
+            # destino) -- no hace falta preguntarlo otra vez sólo porque
+            # el proveedor de rutas siga sin poder geocodificarla (eso
+            # sigue visible aparte, vía `estado_ruta`/`motivo_ruta` en el
+            # reporte, nunca oculto). Mismo criterio ya usado arriba para
+            # DESTINO_SIN_CONFIRMAR -- global, sin exigir cliente_id.
+            obra_canonica_destino = str((decision.get("contexto") or {}).get("obra_canonica", ""))
+            if (
+                obra_canonica_destino and catalogo_obras is not None
+                and catalogo_obras.resolver_obra_destino_confirmada_global(
+                    nombre_obra=obra_canonica_destino
+                ) is not None
+            ):
+                continue
 
         if tipo == "VEHICULO_DESCONOCIDO":
             patente = normalizar_patente_vehiculo(str(decision.get("valor_documental") or ""))

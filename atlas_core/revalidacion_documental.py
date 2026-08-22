@@ -310,6 +310,62 @@ def revalidar_cliente_sin_corroborar_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_cliente_ausente_por_obra_coincidente_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Bloque R13 -- caso real 472238/472239 (TORRES OCARANZA LTDA): el
+    campo `cliente` quedó genuinamente vacío en la extracción original
+    (`CLIENTE_AUSENTE`, nada que corroborar), pero `obra_destino` de ESA
+    MISMA fila -- resuelto por catálogo (`CATALOGO_OBRA_DESTINO`) -- ya
+    normaliza EXACTO (sin fuzzy) contra un cliente CONFIRMADO/ACTIVO del
+    catálogo: el mismo patrón de autodespacho ("cliente == obra") que
+    `revalidar_obra_destino_sin_ocr` ya reconoce en sentido inverso (obra
+    == cliente retira `OBRA_DESTINO_SIN_CORROBORAR`), aplicado aquí para
+    RELLENAR un cliente genuinamente ausente -- nunca para corregir uno
+    ya presente mal leído (eso es `CLIENTE_SIN_CORROBORAR`, dominio
+    distinto). Sin esa coincidencia exacta, se abstiene -- nunca inventa
+    un cliente a partir de una obra distinta."""
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    motivo_objetivo = MotivoRevisionDocumento.CLIENTE_AUSENTE.value
+    try:
+        clientes_confirmados = {
+            normalizar_nombre_cliente(c.razon_social): c
+            for c in CatalogoClientes(carpeta / "clientes.json").listar()
+            if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+        }
+    except (OSError, ValueError):
+        clientes_confirmados = {}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            motivos = [m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m]
+            if motivo_objetivo not in motivos:
+                continue
+            cliente_actual = str(fila.get("cliente", "")).strip()
+            if cliente_actual not in _AUSENTES:
+                continue  # ya no está genuinamente ausente -- otra vía ya lo resolvió
+            obra_documental = str(fila.get("obra_destino", "")).strip()
+            if obra_documental in _AUSENTES:
+                continue
+            cliente_coincidente = clientes_confirmados.get(normalizar_nombre_cliente(obra_documental))
+            if cliente_coincidente is None:
+                continue
+            fila["cliente"] = cliente_coincidente.razon_social
+            motivos = [m for m in motivos if m != motivo_objetivo]
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
+            fila["indicador_revision"] = (
+                "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            )
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def _vehiculo_homologado(
     vehiculos_homologables: tuple[Vehiculo, ...], patente_normalizada: str,
 ) -> Vehiculo | None:
@@ -812,6 +868,14 @@ def revalidar_y_regenerar_reporte(
     catalogos = raiz / "catalogos_privados"
     dataset = actual / "analisis_completo_guias.csv"
 
+    # Bloque R13 -- caso real 472238/472239 (TORRES OCARANZA LTDA): corre
+    # ANTES que `revalidar_obra_destino_sin_ocr` a propósito -- si esta
+    # rellena `cliente` desde `obra_destino` en esta misma pasada, la
+    # comparación "obra == cliente" de abajo ya puede aprovecharlo sin
+    # esperar un segundo ciclo de reconciliación.
+    resultado_cliente_ausente = revalidar_cliente_ausente_por_obra_coincidente_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     # R3.6.2: cada revalidación es un pase atómico independiente que sólo
     # toca su propio motivo -- se ejecutan en secuencia (no anidadas) y son
     # conmutativas/idempotentes entre sí, así que el orden no importa. Se
@@ -838,6 +902,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_patente["guias_actualizadas"])
         | set(resultado_cliente["guias_actualizadas"])
         | set(resultado_destino_contradicho["guias_actualizadas"])
+        | set(resultado_cliente_ausente["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -846,6 +911,7 @@ def revalidar_y_regenerar_reporte(
         "patente": resultado_patente,
         "cliente": resultado_cliente,
         "destino_contradicho": resultado_destino_contradicho,
+        "cliente_ausente": resultado_cliente_ausente,
     }
 
     # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió
@@ -875,6 +941,7 @@ def revalidar_y_regenerar_reporte(
         if bandeja_previa is not None:
             restantes = regenerar_decisiones_persistidas(
                 decisiones=bandeja_previa.get("decisiones", []), carpeta_catalogos=catalogos,
+                ruta_dataset=dataset,
             )
             kwargs_artefacto = {"reloj": reloj} if reloj is not None else {}
             generar_artefacto(
@@ -1483,7 +1550,7 @@ def reconciliar_bandeja_decisiones(
 
     def _regenerar_enriquecer_publicar(pendientes: list[dict[str, object]]) -> dict[str, object]:
         vigentes_locales = regenerar_decisiones_persistidas(
-            decisiones=pendientes, carpeta_catalogos=catalogos,
+            decisiones=pendientes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
         )
         filas = _leer_filas(dataset)
         try:
