@@ -2157,3 +2157,73 @@ humanas reales (ledger + catálogo R2).
 
 **Estado: BLOQUE R13 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R14 (LOGÍSTICA L1) -- destino específico + km + tiempo (2026-08-22)
+
+**Causas de los 3 destinos degradados (472044/472227/472247):** el
+geocodificador a veces sólo resuelve hasta nivel comuna (p. ej. "Las
+Condes, RM, Chile"); `resolver_destino_entrega` tomaba esa etiqueta tal
+cual como destino OPERACIONAL, perdiendo calle+número que el propio
+documento sí traía ("PUERTA DEL SOL 83 LAS CONDES"). Fix general: nueva
+`_etiqueta_geocodificada_o_texto_documental` (proxy barato: presencia de
+número de calle) -- si el documento trae número y la etiqueta del
+proveedor no, se conserva el texto documental como destino operacional;
+coordenadas/localidad/km/tiempo siguen viniendo del geocodificador, sin
+cambios. Como la mayoría de las filas YA tenían ruta calculada (nunca
+vuelven a pasar por geocodificación), se agregó
+`revalidar_direccion_entrega_degradada_sin_ocr` -- corrige sólo la
+ETIQUETA persistida, nunca km/tiempo/coordenadas. **Destinos antes →
+después:** 9 filas degradadas (detectadas con el mismo criterio) → 1
+(residual, en una fila que ya no está `RUTA_CALCULADA`, sin impacto
+operacional).
+
+**Los 11 sin km/tiempo:** `revalidar_ruta_sin_destino_calculado_sin_ocr`
+ya existía (reintenta geocodificación/routing sin OCR, con caché) pero
+nunca estaba conectada a `revalidar_y_regenerar_reporte` -- dependía de
+un script manual. Conectada al final del pipeline de reconciliación
+(única revalidación con red, siempre con caché). Además: un motivo en
+blanco (dejado por un intento anterior que nunca persistió causa) NO
+se actualizaba con el resultado fresco del reintento -- sólo lo hacía un
+motivo técnico ya conocido. Corregido: un motivo en blanco se trata
+igual (nunca es una causa estable, a diferencia de un rechazo ya
+explicado por evidencia real). **Km/tiempo antes → después:** 11 sin
+km/tiempo → siguen 11 (ninguno era genuinamente resoluble hoy), pero
+**0 causas silenciosas → 11/11 con causa explícita** (`MULTIPLES_
+UBICACIONES_DISPERSAS`, `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL`,
+`SIN_ACCESO_VIAL`, `SIN_EVIDENCIA_GPS`).
+
+**B1:** evaluado explícitamente para los 11 (antes 5 no tenían ninguna
+traza IA -- el motivo fresco nunca había pasado por B1, que sólo corre
+en el procesamiento por lote). Ejecutado directo contra el dataset ya
+persistido (sin OCR): 0 llamadas reales -- todas correctamente
+`SIN_EVIDENCIA_PARA_RAZONAR` (ningún documento hermano con la misma obra
+ya resuelta). 0 sin explicación.
+
+**Desktop:** `renderLogistica` ocultaba TODO aviso para cualquier causa
+que no fuera `ORIGEN_NO_DETERMINADO`/`DESTINO_NO_VALIDO` -- ni siquiera
+"No disponible" para `SIN_ACCESO_VIAL`/`MULTIPLES_UBICACIONES_
+DISPERSAS`/etc., pese a que Atlas ya conocía la causa. Fix mínimo:
+nuevo `motivo_ruta` en el contrato de viaje + `causaLogisticaTexto`
+-- siempre muestra la causa real cuando falta km/tiempo, nunca oculta
+silenciosamente.
+
+**Performance:** revalidación de rutas usa caché de geocodificación
+existente (misma dirección no se paga dos veces); sin refactor de
+performance. 16 filas reconciliadas en una sola pasada.
+
+**Regresiones:** 464959/464960 (11.429 kg, ruta 22.9378 km/32.955 min),
+XF3629, JF4288, Renca/Colina, 20/20/0 documental, B1 universal --
+verificados intactos.
+
+**Tests:** Motor -- `test_logistica_l1.py` (9 nuevos) + 2 archivos
+existentes corregidos (etiquetas ya no degradan). Motor completo: 1664
+passed (antes 1655). Desktop -- `ux_r4.test.js` corregido (1 test).
+Desktop completo: 275 passed.
+
+**Aplicado a Drive real:** 2 backups verificados
+(`respaldos/R14_PRE_LOGISTICA_.../`, `respaldos/R14_PRE_B1_11_.../`).
+Reconciliación de rutas + etiquetas + B1 aplicadas; ledger/catálogos de
+clientes/vehículos verificados byte-idénticos al backup.
+
+**Estado: BLOQUE R14 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

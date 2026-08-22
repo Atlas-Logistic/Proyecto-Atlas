@@ -91,7 +91,12 @@ def test_resuelve_caso_real_464991_tras_corregir_la_ambiguedad_de_comuna(tmp_pat
     assert fila["estado_ruta"] == "RUTA_CALCULADA"
     assert fila["distancia_km"] == "8.4"
     assert fila["duracion_min"] == "15.2"
-    assert fila["direccion_entrega"] == "Avenida Providencia, Santiago, RM, Chile"
+    # Bloque LOGÍSTICA L1: "Avenida Providencia, Santiago, RM, Chile" (sin
+    # número) es MENOS específica que el texto documental ("AV PROVIDENCIA
+    # 1550 SANTIAGO PROVIDENCIA", con número de calle) -- se conserva el
+    # texto documental como destino operacional; la localidad/ruta siguen
+    # viniendo del geocodificador, sin cambios.
+    assert fila["direccion_entrega"] == "AV PROVIDENCIA 1550 SANTIAGO PROVIDENCIA"
     assert fila["localidad_entrega"] == "Santiago"
 
 

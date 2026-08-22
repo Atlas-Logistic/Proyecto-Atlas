@@ -421,6 +421,32 @@ def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> Candid
     return max(candidatos, key=lambda c: c.confianza if c.confianza is not None else -1.0)
 
 
+_PATRON_NUMERO_CALLE = re.compile(r"\b\d{1,6}\b")
+
+
+def _trae_numero_calle(texto: str) -> bool:
+    """Proxy barato y genérico de "tiene una dirección específica" --
+    al menos un token numérico de 1-6 dígitos (número de casa/local).
+    Nunca depende de un formato fijo ni de nombres de comuna concretos."""
+    return bool(_PATRON_NUMERO_CALLE.search(texto))
+
+
+def _etiqueta_geocodificada_o_texto_documental(*, etiqueta: str, texto_documental: str) -> str:
+    """Bloque LOGÍSTICA L1 -- jerarquía de especificidad del destino
+    (dirección específica > comuna > ciudad > región > país): el
+    proveedor de geocodificación a veces sólo puede resolver hasta nivel
+    comuna (p. ej. "Las Condes, RM, Chile" cuando el documento trae
+    "PUERTA DEL SOL 83 LAS CONDES") -- esa etiqueta sigue siendo válida
+    para VALIDAR territorialmente y para las coordenadas de ruteo, pero
+    nunca debe reemplazar una dirección con calle+número ya disponible en
+    el propio documento como destino OPERACIONAL mostrado/persistido.
+    Comparación barata (presencia de número de calle), nunca compara
+    nombres de calle ni depende de una lista de comunas."""
+    if _trae_numero_calle(texto_documental) and not _trae_numero_calle(etiqueta):
+        return texto_documental
+    return etiqueta
+
+
 def resolver_destino_entrega(
     despachar_a_crudo: str | None,
     proveedor_geocodificacion: ProveedorRutas,
@@ -512,11 +538,12 @@ def resolver_destino_entrega(
         # confianza suficiente antes de darlo por resuelto -- ver abajo.
         candidato = resultado.candidatos[0]
 
+    etiqueta_final = _etiqueta_geocodificada_o_texto_documental(etiqueta=candidato.etiqueta, texto_documental=texto)
     if candidato.confianza is None or candidato.confianza < UMBRAL_CONFIANZA_MINIMA:
         return ResultadoDestinoEntrega(
             despachar_a_crudo=texto,
             coordenadas=candidato.coordenadas,
-            etiqueta_geocodificada=candidato.etiqueta,
+            etiqueta_geocodificada=etiqueta_final,
             confianza=candidato.confianza,
             estado=ESTADO_REVISAR,
             motivo="CONFIANZA_INSUFICIENTE",
@@ -527,7 +554,7 @@ def resolver_destino_entrega(
     return ResultadoDestinoEntrega(
         despachar_a_crudo=texto,
         coordenadas=candidato.coordenadas,
-        etiqueta_geocodificada=candidato.etiqueta,
+        etiqueta_geocodificada=etiqueta_final,
         confianza=candidato.confianza,
         estado=ESTADO_RESUELTO,
         motivo="",

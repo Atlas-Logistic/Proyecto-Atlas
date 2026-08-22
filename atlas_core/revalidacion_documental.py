@@ -809,9 +809,21 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             planta = plantas_por_id.get(planta_id)
             if planta is None:
                 continue
-            motivo_previo_tecnico = motivo_ruta_base(
-                str(fila.get("motivo_ruta", ""))
-            ) in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
+            motivo_previo_crudo = str(fila.get("motivo_ruta", "")).strip()
+            motivo_previo_tecnico = motivo_ruta_base(motivo_previo_crudo) in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
+            # Bloque LOGÍSTICA L1 -- caso real (460807/472008/472018/
+            # 472037/472073/472099/472163): `motivo_ruta` había quedado
+            # en blanco (reset por un intento anterior -- p. ej.
+            # REGISTRAR_DIRECCION, ver `aplicar_decision_obra` -- que
+            # nunca llegó a persistir un motivo fresco si el reintento
+            # fallaba). Un motivo en blanco NUNCA es una causa estable
+            # basada en evidencia real (a diferencia de un rechazo ya
+            # explicado) -- "Atlas no sabe por qué" no es lo mismo que
+            # "Atlas ya investigó y rechazó por evidencia real". Se
+            # trata igual que un motivo técnico obsoleto: el resultado
+            # FRESCO del reintento (sea cual sea) se registra siempre,
+            # nunca se deja un "No disponible" silencioso.
+            motivo_previo_sin_causa = not motivo_previo_crudo
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
@@ -830,9 +842,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                 # quedó obsoleta -- se corrige para que nunca se confunda
                 # "proveedor no disponible" con "evidencia insuficiente".
                 # Un rechazo YA basado en evidencia real nunca se toca.
-                if motivo_previo_tecnico and resultado.motivo_ruta:
+                if (motivo_previo_tecnico or motivo_previo_sin_causa) and resultado.motivo_ruta:
                     motivo_nuevo = motivo_ruta_base(resultado.motivo_ruta)
-                    if motivo_nuevo != motivo_ruta_base(str(fila.get("motivo_ruta", ""))):
+                    if motivo_previo_sin_causa or motivo_nuevo != motivo_ruta_base(motivo_previo_crudo):
                         fila["estado_ruta"] = resultado.estado_ruta
                         fila["motivo_ruta"] = resultado.motivo_ruta
                         guias_actualizadas.append(str(fila.get("numero_guia", "")))
@@ -852,8 +864,46 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_direccion_entrega_degradada_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+    """Bloque LOGÍSTICA L1 -- caso real (472044/472227/472247 y otras
+    filas con ruta YA calculada antes del fix de especificidad): filas
+    con `estado_ruta == RUTA_CALCULADA` nunca pasan por `revalidar_ruta_
+    sin_destino_calculado_sin_ocr` (se saltan por diseño -- ya no
+    necesitan reintentar geocodificación/routing), así que una etiqueta
+    degradada (p. ej. "Las Condes, RM, Chile" en vez de "PUERTA DEL SOL
+    83 LAS CONDES") que quedó persistida ANTES de ese fix nunca se
+    corregía sola. Esta revalidación es puramente de ETIQUETA -- nunca
+    toca coordenadas/km/tiempo/localidad/región (esos ya son válidos, la
+    ruta no cambia) -- sin OCR, sin red, sólo relee lo ya persistido y
+    aplica el mismo criterio de especificidad
+    (`_etiqueta_geocodificada_o_texto_documental`)."""
+    from atlas_core.rutas.destino_entrega import _etiqueta_geocodificada_o_texto_documental
+
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            entrega_actual = str(fila.get("direccion_entrega", "")).strip()
+            crudo = str(fila.get("despachar_a_crudo", "")).strip()
+            if not entrega_actual or not crudo:
+                continue
+            entrega_corregida = _etiqueta_geocodificada_o_texto_documental(
+                etiqueta=entrega_actual, texto_documental=crudo,
+            )
+            if entrega_corregida != entrega_actual:
+                fila["direccion_entrega"] = entrega_corregida
+                guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_y_regenerar_reporte(
-    *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None,
+    *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
 ) -> dict[str, object]:
     """Orquesta la revalidación del dataset (R3.4 obra/destino + R3.6.2
     patente de vehículo, cada una restringida a su propio motivo) y, sólo
@@ -897,12 +947,32 @@ def revalidar_y_regenerar_reporte(
     resultado_destino_contradicho = revalidar_destino_contra_comuna_documental_sin_ocr(
         ruta_dataset=dataset,
     )
+    # Bloque LOGÍSTICA L1 -- caso real (11 viajes sin km/tiempo pese a
+    # tener origen+destino documental ya persistidos): a diferencia de
+    # las revalidaciones anteriores, ÉSTA sí puede tocar red (geocodificación/
+    # routing, con caché -- nunca vuelve a leer el documento). Se ejecuta
+    # AL FINAL, después de que cliente/obra/destino ya quedaron al día en
+    # esta misma pasada (una obra recién corroborada puede ser la que
+    # faltaba para intentar de nuevo con datos frescos). Origen+destino
+    # confiables nunca deben depender de que alguien corra un script
+    # aparte -- "Atlas debe automáticamente".
+    resultado_ruta = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+    )
+    # Bloque LOGÍSTICA L1 -- caso real 472044/472227/472247: filas YA con
+    # `RUTA_CALCULADA` nunca pasan por la revalidación anterior (no lo
+    # necesitan) -- si su etiqueta quedó degradada (persistida antes del
+    # fix de especificidad), sólo esta pasada la corrige. Nunca toca
+    # km/tiempo/coordenadas -- sólo la etiqueta.
+    resultado_direccion_degradada = revalidar_direccion_entrega_degradada_sin_ocr(ruta_dataset=dataset)
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
         | set(resultado_cliente["guias_actualizadas"])
         | set(resultado_destino_contradicho["guias_actualizadas"])
         | set(resultado_cliente_ausente["guias_actualizadas"])
+        | set(resultado_ruta["guias_actualizadas"])
+        | set(resultado_direccion_degradada["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -910,8 +980,10 @@ def revalidar_y_regenerar_reporte(
         "obra_destino": resultado_obra_destino,
         "patente": resultado_patente,
         "cliente": resultado_cliente,
+        "direccion_degradada": resultado_direccion_degradada,
         "destino_contradicho": resultado_destino_contradicho,
         "cliente_ausente": resultado_cliente_ausente,
+        "ruta": resultado_ruta,
     }
 
     # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió

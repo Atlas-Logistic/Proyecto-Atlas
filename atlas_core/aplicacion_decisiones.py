@@ -33,6 +33,7 @@ from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
 from atlas_core.incidencias_documentales import (
     AlmacenIncidenciasDocumentales, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
 )
+from atlas_core.rutas.modelos import EstadoRuta
 
 # Bloque ORIGEN D1: fuente de origen que representa una confirmación humana
 # explícita para UN documento/viaje -- máxima precedencia posible (ver
@@ -665,13 +666,23 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     resultado_revalidacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
                         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
                     )
-                    ruta_resuelta = numero_guia_decision in resultado_revalidacion.get("guias_actualizadas", [])
+                    # Bloque LOGÍSTICA L1 -- `guias_actualizadas` ya NO es un
+                    # proxy fiable de "ruta resuelta": desde este bloque
+                    # también incluye filas cuyo intento falló pero cuyo
+                    # motivo se refrescó (nunca se deja un "No disponible"
+                    # silencioso, ver `revalidar_ruta_sin_destino_calculado_
+                    # sin_ocr`). `ruta_resuelta` se verifica directo contra el
+                    # estado real de la fila tras el intento.
+                    filas_tras_intento = _leer_filas(dataset)
+                    fila_tras_intento = next(
+                        (f for f in filas_tras_intento if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                    )
+                    ruta_resuelta = (
+                        fila_tras_intento is not None
+                        and str(fila_tras_intento.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+                    )
                     resultado_extra["ruta_resuelta"] = ruta_resuelta
                     if not ruta_resuelta:
-                        filas_tras_intento = _leer_filas(dataset)
-                        fila_tras_intento = next(
-                            (f for f in filas_tras_intento if str(f.get("numero_guia", "")) == numero_guia_decision), None,
-                        )
                         resultado_extra["motivo_ruta_tras_intento"] = (
                             fila_tras_intento.get("motivo_ruta", "") if fila_tras_intento is not None else ""
                         )

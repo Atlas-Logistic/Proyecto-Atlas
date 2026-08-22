@@ -200,7 +200,15 @@ def test_calle_homonima_de_una_comuna_de_otra_region_no_bloquea_un_destino_corre
     resultado = resolver_entrega_documento(textos, plantas_renca, proveedor)
     assert resultado["estado_ruta"] == EstadoRuta.RUTA_CALCULADA.value
     assert resultado["distancia_km"] == "13.1788"
-    assert resultado["direccion_entrega"] == "Galvarino, Quilicura, RM, Chile"
+    # Bloque LOGÍSTICA L1: el geocodificador sólo resolvió hasta nivel
+    # calle/comuna sin el número -- la etiqueta ("Galvarino, Quilicura,
+    # RM, Chile") es MENOS específica que el propio texto documental
+    # ("GALVARINO 8501 QUILICURA", con número de calle). El destino
+    # operacional conserva el texto documental completo -- nunca lo
+    # degrada a una forma más genérica -- mientras que la localidad y las
+    # coordenadas/ruta siguen viniendo del geocodificador (Quilicura,
+    # 13.1788 km, sin cambios).
+    assert resultado["direccion_entrega"] == "GALVARINO 8501 QUILICURA"
     assert resultado["localidad_entrega"] == "Quilicura"
 
 
