@@ -241,7 +241,56 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             raise ErrorAplicacionDecision("Esta decisión no puede aplicarse en este bloque.")
         if accion not in decision.get("acciones_permitidas", []): raise ErrorAplicacionDecision("La acción no está permitida para esta decisión.")
         if accion == "POSPONER": return {"ok": True, "idempotente": False, "accion": accion, "mensaje": "La decisión permanece pendiente."}
-        if _sha(dataset) != artefacto.get("dataset_sha256"): raise DecisionObsoletaError("La decisión quedó obsoleta porque cambió el dataset.")
+        if _sha(dataset) != artefacto.get("dataset_sha256"):
+            # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque
+            # cambió el dataset" reapareciendo indefinidamente incluso
+            # después de "Refrescar datos" (Desktop sólo relee archivos,
+            # nunca revalida): el hash del dataset a nivel de ARCHIVO
+            # COMPLETO puede cambiar por un motivo ajeno a ESTA decisión --
+            # p. ej. otra guía revalidada por separado (caso real: catch-up
+            # de R10 aplicado directo contra producción). La protección en
+            # sí es correcta (nunca se aplica sobre datos que no vio); lo
+            # que faltaba era reconciliar la bandeja aquí mismo, en vez de
+            # dejar al usuario atrapado con una tarjeta muerta. Se
+            # revalida/republica la bandeja contra el dataset actual (mismo
+            # mecanismo que ya usa `revalidar_y_regenerar_reporte`, sin
+            # memoria paralela) y se reevalúa ESTA decisión exacta contra el
+            # resultado fresco:
+            #   - si sigue idéntica y ya vigente -> el cambio era ajeno,
+            #     se continúa aplicándola tal cual, sin exigir un segundo
+            #     intento;
+            #   - si ya no está o cambió de verdad -> se rechaza igual que
+            #     antes (nunca se aplica la decisión vieja), pero la bandeja
+            #     ya quedó fresca para que Revisión de Atlas muestre la
+            #     pregunta vigente (o la ausencia de ella) en el siguiente
+            #     refresco, sin que Atlas vuelva a quedarse atascado.
+            from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
+            try:
+                revalidar_y_regenerar_reporte(
+                    raiz_atlas=raiz,
+                    nombre_carpeta_reporte=f"reporte_revalidacion_{reloj().strftime('%Y%m%d_%H%M%S_%f')}",
+                    reloj=reloj,
+                )
+                artefacto_fresco = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                # El propio intento de reconciliar falló (dataset realmente
+                # corrupto/incompatible, catálogo ilegible, etc.) -- nunca
+                # se enmascara con un error distinto ni se deja a medio
+                # escribir; se conserva el mensaje original de siempre.
+                raise DecisionObsoletaError("La decisión quedó obsoleta porque cambió el dataset.")
+            coincidencias_frescas = [d for d in artefacto_fresco.get("decisiones", []) if d.get("decision_id") == decision_id]
+            sigue_identica = (
+                len(coincidencias_frescas) == 1
+                and coincidencias_frescas[0] == decision
+                and _sha(dataset) == artefacto_fresco.get("dataset_sha256")
+            )
+            if not sigue_identica:
+                mensaje = (
+                    "La decisión quedó obsoleta porque cambió el dataset. Atlas ya actualizó Revisión de Atlas -- "
+                    + ("revise la tarjeta vigente." if coincidencias_frescas else "esta pregunta ya no aplica.")
+                )
+                raise DecisionObsoletaError(mensaje)
+            artefacto = artefacto_fresco
         for clave, nombre in {"clientes":"clientes.json","vehiculos":"vehiculos.json","obras_destinos":"obras_destinos.json","destinos_maestros":"destinos_maestros.json"}.items():
             esperado = artefacto.get("catalogos_sha256", {}).get(clave)
             ruta = catalogos / nombre

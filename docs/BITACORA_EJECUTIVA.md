@@ -1912,3 +1912,76 @@ automático desde ahora.
 
 **Estado: BLOQUE R10 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R11 -- decisiones obsoletas autorregenerables + reconciliación OCR de patente (2026-08-22)
+
+**A. Decisión obsoleta atrapando al usuario:** causa real -- el propio
+catch-up de R10 (`revalidar_y_regenerar_reporte`, llamado standalone
+contra producción, sin pasar por `aplicar_decision_obra`) cambió el
+dataset pero nunca republicó `decisiones_pendientes.json`: su
+`dataset_sha256` grabado quedó apuntando al dataset ANTERIOR. La barrera
+de obsolescencia (correcta en sí) empezó a rechazar las 11 decisiones
+reales pendientes, no sólo la guía que cambió -- "Refrescar datos" en
+Desktop sólo relee archivos, nunca revalida, así que el usuario quedaba
+atrapado para siempre reintentando una tarjeta muerta.
+
+**Fix general (dos capas, sin mecanismo paralelo):**
+1. `revalidar_y_regenerar_reporte` ahora republica la bandeja ella misma
+   cada vez que corre (vía `regenerar_decisiones_persistidas` +
+   `generar_artefacto`), sin condicionarlo a si ESA corrida cambió algo
+   -- el hash pudo quedar desincronizado en una corrida anterior.
+2. `aplicar_decision_obra` se autorrepara en el punto exacto de la
+   comprobación: si el dataset cambió, revalida/republica y reevalúa la
+   MISMA decisión contra el resultado fresco -- si sigue idéntica y
+   vigente, continúa aplicándola sin exigir un segundo intento; si
+   realmente cambió o ya no aplica, rechaza con un mensaje claro y la
+   bandeja ya queda fresca para el siguiente refresco. Se descubrió
+   además `reconciliar_bandeja_decisiones` (Bloque RECONCILIACIÓN D1,
+   preexistente, nunca conectado a ningún flujo real) -- ahora
+   `aplicar_decision_pendiente.py` (el CLI que usa Desktop) lo invoca
+   como reintento único tras cualquier obsolescencia genuina, reutilizando
+   enriquecimiento vehículo/cliente/obra y auto-resolución ya existentes.
+
+**B. Patente JE4288 (472247, Rodrigo Nahuelñir):** causa real -- sin
+ningún documento hermano de este RUT (ni en el dataset ni en el ledger),
+`evaluar_evidencia_patente` sólo buscaba candidatos en el historial de
+ESE chofer; nunca ampliaba al catálogo completo, aunque "JF4288" ya
+estuviera CONFIRMADO/ACTIVO como CARRO (mismo rol documental) a una
+única confusión OCR (E/F) de distancia -- confusión real, ausente del
+set calibrado hasta ahora.
+
+**Fix general:** `{"E","F"}` sumado al set de confusiones OCR calibradas
+(documentado, no ampliado a ciegas). `evaluar_evidencia_patente` ahora
+también considera patentes CONFIRMADAS/ACTIVAS de todo el catálogo a una
+confusión OCR calibrada de distancia -- sólo cuando el tipo de vehículo
+ya es INEQUIVOCO (nunca sin tipo conocido, para no ampliar demasiado el
+universo). Nunca alcanza `RESUELTO_AUTOMATICAMENTE` (exige
+`CONFIRMACION_HUMANA` real); si más de un vehículo del catálogo compite,
+ninguno gana solo. **JE4288 antes → después:** VEHICULO_DESCONOCIDO sin
+ningún candidato → VEHICULO_DESCONOCIDO con JF4288 como único candidato,
+`USAR_PATENTE_EXISTENTE` disponible; JE4288 nunca se registra como
+entidad nueva.
+
+**B1:** sin cambios en R7 -- el determinista ya resuelve 472247 sin
+ambigüedad, no hace falta escalar. Aprendizaje: el ledger indexa por
+`(numero_guia, campo, valor_documental)` -- confirmar JF4288 para esta
+guía nunca crea una regla universal "JE significa JF".
+
+**Tests/E2E:** 8 tests focales nuevos (2 en decisiones obsoletas, 6 en
+reconciliación de patente) + 3 archivos existentes corregidos (asumían
+la ventana de obsolescencia vieja). Motor completo: 1640 passed (antes
+1632). Desktop: sin cambios, nada que correr. E2E sobre copia de
+producción real: CASO 1 (472044) se autorreparó y aplicó sin ningún paso
+manual, resto de la bandeja intacto; CASO 2 confirmó JF4288 como único
+candidato de 472247.
+
+**Aplicado a Drive real:** backup verificado
+(`respaldos/R11_PRE_RECONCILIACION_20260822_010437/`). `reconciliar_
+bandeja_decisiones` aplicado una vez contra producción real: dataset/
+catálogos/ledger verificados byte-idénticos (SHA-256) al backup -- sólo
+`decisiones_pendientes.json` se republicó (hash fresco; 472247 ahora con
+JF4288). Las 11 decisiones pendientes reales preservadas, ninguna
+aplicada automáticamente.
+
+**Estado: BLOQUE R11 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

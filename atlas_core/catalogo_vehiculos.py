@@ -280,7 +280,14 @@ def _validar_unicidad(vehiculos: tuple[Vehiculo, ...]) -> None:
         raise VehiculoDuplicadoError("alias colisiona con patente canónica")
 
 
-_CONFUSIONES_OCR = tuple(map(frozenset, ({"B", "D"}, {"0", "O"}, {"1", "I"}, {"5", "S"}, {"8", "B"}, {"8", "E"}, {"2", "B"}, {"K", "R"})))
+_CONFUSIONES_OCR = tuple(map(frozenset, (
+    {"B", "D"}, {"0", "O"}, {"1", "I"}, {"5", "S"}, {"8", "B"}, {"8", "E"}, {"2", "B"}, {"K", "R"},
+    # Bloque R11 -- caso real 472247 (Rodrigo Nahuelñir): OCR leyó "JE4288"
+    # para patente_rampla; la patente real, confirmada por Javier, es
+    # "JF4288" -- E/F es una confusión de trazo real y documentada (no una
+    # tabla ampliada a ciegas), igual que las demás de este set.
+    {"E", "F"},
+)))
 
 
 @dataclass(frozen=True)

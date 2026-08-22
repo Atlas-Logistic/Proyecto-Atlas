@@ -135,6 +135,11 @@ _CONFUSIONES_OCR_PATENTE_COMUNES = (
     frozenset({"8", "E"}),
     frozenset({"2", "B"}),
     frozenset({"K", "R"}),
+    # Bloque R11 -- misma confusión documentada agregada en
+    # `catalogo_vehiculos._CONFUSIONES_OCR` (caso real 472247, JE4288 ->
+    # JF4288); se mantiene igual aquí para no dejar las dos tablas
+    # desincronizadas.
+    frozenset({"E", "F"}),
 )
 
 

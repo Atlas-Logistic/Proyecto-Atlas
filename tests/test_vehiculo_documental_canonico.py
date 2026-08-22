@@ -526,10 +526,6 @@ def test_reconciliar_bandeja_refresca_dataset_sha256_sin_tocar_csv_ni_catalogos(
     antes_bytes_csv = entorno["dataset"].read_bytes()
     antes_bytes_catalogo = (entorno["catalogos"] / "vehiculos.json").read_bytes()
 
-    # Sin reconciliar, aplicar_decision_obra debe rechazar por obsolescencia.
-    with pytest.raises(DecisionObsoletaError):
-        aplicar_decision_obra(raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"], accion="NO_REGISTRAR")
-
     resultado = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
     assert resultado["decisiones_conservadas"] == 1
     assert resultado["decisiones_publicadas"] == 1
@@ -543,6 +539,29 @@ def test_reconciliar_bandeja_refresca_dataset_sha256_sin_tocar_csv_ni_catalogos(
     # Y ahora sí puede aplicarse.
     resultado_aplicar = aplicar_decision_obra(raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"], accion="NO_REGISTRAR")
     assert resultado_aplicar["ok"] is True
+
+
+def test_aplicar_decision_obra_autorepara_dataset_sha256_desalineado_sin_reconciliar_a_mano(tmp_path):
+    """Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque
+    cambió el dataset" reapareciendo indefinidamente aunque el usuario
+    reintentara ("Refrescar datos" en Desktop sólo relee archivos, nunca
+    revalida): ya no hace falta llamar `reconciliar_bandeja_decisiones` a
+    mano primero (como en el test anterior) -- `aplicar_decision_obra` se
+    autorepara ella misma cuando el cambio del dataset es ajeno a la
+    decisión que se está aplicando, sin exigirle al usuario un segundo
+    intento."""
+    entorno = _entorno(tmp_path, filas_csv=[_fila_csv(numero_guia="1", patente_tracto="ZZ0000")])
+    decision = _decision_vehiculo(guia="1", campo="patente_tracto", valor_documental="ZZ0000")
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=[decision], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+    filas = _leer_csv(entorno["dataset"])
+    filas[0]["distancia_km"] = "12.3"
+    _escribir_csv(entorno["dataset"], filas)
+
+    resultado = aplicar_decision_obra(raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"], accion="NO_REGISTRAR")
+    assert resultado["ok"] is True
 
 
 def test_reconciliar_bandeja_enriquece_vehiculos_con_candidatos(tmp_path):

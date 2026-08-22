@@ -847,18 +847,52 @@ def revalidar_y_regenerar_reporte(
         "cliente": resultado_cliente,
         "destino_contradicho": resultado_destino_contradicho,
     }
+
+    # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió
+    # el dataset" reapareciendo indefinidamente (caso real: catch-up de R10
+    # aplicado directo contra producción, sin pasar por `aplicar_decision_obra`):
+    # esta función podía cambiar el dataset (arriba) sin nunca republicar
+    # `decisiones_pendientes.json` -- su `dataset_sha256` grabado quedaba
+    # apuntando al dataset ANTERIOR, y la comprobación de obsolescencia de
+    # `aplicar_decision_obra` (que compara ese hash contra el dataset actual,
+    # a nivel de archivo completo -- nunca por documento) empezaba a
+    # rechazar TODAS las decisiones pendientes, no sólo las de la guía que
+    # cambió. "Refrescar datos" en Desktop sólo relee archivos -- nunca
+    # revalida -- así que sin este bloque el usuario quedaba atrapado para
+    # siempre. Se regenera SIEMPRE que se llega hasta aquí (barato, sin OCR,
+    # sin red, idempotente si nada cambió) -- nunca condicionado a
+    # `guias_actualizadas`: el hash pudo quedar desincronizado en una
+    # corrida ANTERIOR de esta misma función, no sólo en la actual.
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+    ruta_decisiones = actual / NOMBRE_ARTEFACTO
+    if ruta_decisiones.is_file():
+        try:
+            bandeja_previa = json.loads(ruta_decisiones.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            bandeja_previa = None
+        if bandeja_previa is not None:
+            restantes = regenerar_decisiones_persistidas(
+                decisiones=bandeja_previa.get("decisiones", []), carpeta_catalogos=catalogos,
+            )
+            kwargs_artefacto = {"reloj": reloj} if reloj is not None else {}
+            generar_artefacto(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=restantes,
+                ruta_salida=ruta_decisiones, **kwargs_artefacto,
+            )
+            resultado_revalidacion["bandeja_republicada"] = True
+
     if not guias_actualizadas:
         return {**resultado_revalidacion, "reporte_regenerado": False}
 
     from atlas_core.almacenamiento_portable import escribir_estado_operacion
-    from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 
     salida = raiz / "reportes" / nombre_carpeta_reporte
     kwargs = {"carpeta_catalogos": catalogos, "ruta_ledger": actual / "decisiones_aplicadas.json"}
     if reloj is not None:
         kwargs["reloj"] = reloj
     manifest = generar_reporte_viajes(dataset, salida, **kwargs)
-    ruta_decisiones = actual / NOMBRE_ARTEFACTO
     escribir_estado_operacion(
         reporte_vigente=salida,
         dataset_operacional=dataset,

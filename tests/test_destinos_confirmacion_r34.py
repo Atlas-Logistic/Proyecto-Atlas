@@ -606,17 +606,26 @@ def _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch):
     aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision_a["decision_id"], accion="CONFIRMAR")
     monkeypatch.setattr(revalidacion, "revalidar_y_regenerar_reporte", real)
     # Secuencia exacta R3.4 real: bandeja ya publicada; después cambia el CSV
-    # y se publica reporte/estado, pero la bandeja conserva el hash anterior.
+    # y se publica reporte/estado por fuera de `aplicar_decision_obra` --
+    # antes de Bloque R11 esto dejaba `decisiones_pendientes.json` con el
+    # hash del dataset ANTERIOR (causa raíz real de "la decisión quedó
+    # obsoleta porque cambió el dataset" reapareciendo indefinidamente,
+    # incluso con "Refrescar datos"). Ahora `revalidar_y_regenerar_reporte`
+    # republica la bandeja ella misma cada vez que corre -- el hash queda
+    # fresco de inmediato, no hay ninguna ventana que reproducir.
     real(raiz_atlas=raiz, nombre_carpeta_reporte="reporte_revalidacion_legacy")
     artefacto = json.loads((actual/"decisiones_pendientes.json").read_text(encoding="utf-8"))
-    assert artefacto["dataset_sha256"] != modulo._sha(actual/"analisis_completo_guias.csv")
+    assert artefacto["dataset_sha256"] == modulo._sha(actual/"analisis_completo_guias.csv")
 
 
 def test_r351_reproduce_bandeja_real_legacy_y_aplica_siguiente_decision(tmp_path, monkeypatch):
     raiz, catalogos, actual, decision_a, decision_b = _entorno_dos_destinos(tmp_path)
     _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch)
 
-    # Antes de R3.5.1 esta llamada fallaba por hash stale, igual que SIGRO.
+    # Antes de R3.5.1 (y ahora, de forma general, gracias a Bloque R11) esta
+    # llamada fallaba por hash stale, igual que SIGRO -- la bandeja ya
+    # quedó republicada dentro de `_crear_ventana_legacy_r34`, así que esto
+    # aplica sin ningún reintento ni reconciliación adicional.
     resultado_b = aplicar_decision_obra(
         raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
     )
@@ -627,12 +636,34 @@ def test_r351_reproduce_bandeja_real_legacy_y_aplica_siguiente_decision(tmp_path
     ]
 
 
-def test_r351_cambio_externo_despues_del_reporte_publicado_sigue_obsoleto(tmp_path, monkeypatch):
+def test_r351_cambio_externo_dataset_ajeno_a_la_decision_se_autorepara(tmp_path, monkeypatch):
+    """Bloque R11: un cambio EXTERNO más al dataset, posterior a la
+    reconciliación, que no toca nada de lo que trae `decision_b`, ya no
+    deja al usuario atrapado -- `aplicar_decision_obra` se autorepara (la
+    misma decisión, con el mismo contenido, sigue vigente) y aplica sin
+    exigir un segundo intento manual."""
     raiz, catalogos, actual, decision_a, decision_b = _entorno_dos_destinos(tmp_path)
     _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch)
     dataset = actual/"analisis_completo_guias.csv"
     dataset.write_bytes(dataset.read_bytes() + b"\n")
-    with pytest.raises(DecisionObsoletaError):
+    resultado_b = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
+    )
+    assert resultado_b["ok"] and _pendientes(actual) == []
+
+
+def test_r351_cambio_externo_en_catalogos_sigue_obsoleto(tmp_path, monkeypatch):
+    """Control -- la reconciliación de Bloque R11 es sólo para el hash del
+    DATASET; un cambio real en los catálogos después de publicada la
+    bandeja sigue rechazándose tal cual (barrera intacta, nunca
+    debilitada)."""
+    raiz, catalogos, actual, decision_a, decision_b = _entorno_dos_destinos(tmp_path)
+    _crear_ventana_legacy_r34(raiz, actual, decision_a, monkeypatch)
+    CatalogoClientes(catalogos/"clientes.json").crear(
+        razon_social="OTRO CLIENTE AJENO SA", rut="11.111.111-1", fuente="TEST",
+        estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+    )
+    with pytest.raises(DecisionObsoletaError, match="catálogos"):
         aplicar_decision_obra(
             raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
         )

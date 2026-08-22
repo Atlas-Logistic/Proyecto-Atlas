@@ -451,6 +451,12 @@ def _razon_legible_candidato(*, patente: str, evidencias: tuple[str, ...], confl
     frases_conflicto = {
         "OCR_ACTUAL_DIFIERE": f"el OCR de este documento leyó \"{valor_documental}\", un valor distinto",
         "TIPO_NO_DETERMINADO_SIN_CONFIRMACION": "el tipo de vehículo esperado en este documento todavía no está confirmado",
+        # Bloque R11 -- honesto sobre la ausencia de historial de ESTE
+        # chofer/RUT cuando la única evidencia es la similitud OCR contra
+        # el catálogo completo (caso real 472247/JE4288 -> JF4288): nunca
+        # se etiqueta como "RUT_CHOFER_COINCIDE" algo que no corroboró
+        # ningún documento de este chofer.
+        "SIN_HISTORIAL_PARA_ESTE_RUT": "ningún otro documento de este chofer corrobora esta patente todavía",
     }
     razones = [frases_evidencia[e] for e in evidencias if e in frases_evidencia]
     razones += [f"corroborada por {e.split('(')[1].rstrip(')')} transporte(s) independiente(s)" for e in evidencias if e.startswith("CORROBORACION_TRANSPORTE_INDEPENDIENTE")]
@@ -484,6 +490,17 @@ def evaluar_evidencia_patente(
       ellos arbitrariamente).
     - `ABSTENCION`: no hay ningún candidato con evidencia relevante.
 
+    Bloque R11: además del historial de este chofer/RUT, también se
+    consideran patentes CONFIRMADAS/ACTIVAS de todo el catálogo cuya única
+    diferencia con el valor documental es una confusión OCR calibrada
+    (`_diferencia_ocr_segura`) -- sólo cuando el tipo de vehículo esperado
+    ya es INEQUIVOCO (nunca sin tipo conocido). Nunca alcanzan
+    `RESUELTO_AUTOMATICAMENTE` por sí solas (ese nivel exige evidencia de
+    `CONFIRMACION_HUMANA` asociada al RUT, que estas no tienen) -- siempre
+    quedan como `SUGERENCIA_HUMANA`, auditables (`SIN_HISTORIAL_PARA_ESTE_RUT`
+    como conflicto explícito), y compiten entre sí igual que cualquier otra
+    candidata si más de una patente del catálogo calza.
+
     Nunca usa repetición documental como prueba de verdad (un mandante
     puede repetir el mismo error en cada documento de un único
     transporte -- ver `_transportes_por_patente_de_chofer`), nunca
@@ -512,7 +529,28 @@ def evaluar_evidencia_patente(
         if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
     }
 
-    patentes_candidatas = (set(transportes_por_patente) | confirmadas_para_rut) - {valor_norm}
+    # Bloque R11 -- caso real 472247 (Rodrigo Nahuelñir, JE4288 -> JF4288):
+    # hasta este bloque, un chofer SIN ningún documento hermano (ni en este
+    # dataset ni en el ledger) nunca podía recibir ninguna candidata --
+    # `_diferencia_ocr_segura` ya existía como señal, pero sólo se
+    # evaluaba sobre candidatas que YA venían del historial de RUT, nunca
+    # ampliaba el universo por sí sola. Ahora también se consideran las
+    # patentes CONFIRMADAS/ACTIVAS de TODO el catálogo que difieren del
+    # valor documental en una única confusión OCR calibrada -- sólo
+    # cuando el tipo de vehículo esperado ya es INEQUIVOCO (nunca a
+    # ciegas, sin tipo conocido: demasiado universo, demasiado riesgo de
+    # ambigüedad). Si más de una patente del catálogo compite en este
+    # nivel, ninguna gana sola -- misma regla de empate ya vigente más
+    # abajo (nunca elige por Atlas).
+    patentes_ocr_similares = (
+        {
+            patente for patente, vehiculo in homologables_por_patente.items()
+            if vehiculo.tipo == tipo_esperado and _diferencia_ocr_segura(valor_norm, patente)
+        }
+        if tipo_esperado else set()
+    )
+
+    patentes_candidatas = (set(transportes_por_patente) | confirmadas_para_rut | patentes_ocr_similares) - {valor_norm}
     candidatos: list[dict[str, object]] = []
     for patente in sorted(patentes_candidatas):
         vehiculo = homologables_por_patente.get(patente)
@@ -538,8 +576,11 @@ def evaluar_evidencia_patente(
             for guia in sorted(guias_transporte)
         ]
 
-        evidencias: list[str] = ["RUT_CHOFER_COINCIDE", "TIPO_COMPATIBLE"]
+        tiene_historial_rut = bool(transportes) or patente in confirmadas_para_rut
+        evidencias: list[str] = (["RUT_CHOFER_COINCIDE"] if tiene_historial_rut else []) + ["TIPO_COMPATIBLE"]
         conflictos: list[str] = ["OCR_ACTUAL_DIFIERE"]
+        if not tiene_historial_rut:
+            conflictos.append("SIN_HISTORIAL_PARA_ESTE_RUT")
         if not tipo_esperado:
             conflictos.append("TIPO_NO_DETERMINADO_SIN_CONFIRMACION")
         if n_independientes >= 1:
