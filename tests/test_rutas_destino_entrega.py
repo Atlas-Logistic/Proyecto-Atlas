@@ -245,15 +245,18 @@ def test_comuna_documental_inequivoca_encuentra_una_comuna_repetida():
     assert _comuna_documental_inequivoca(texto) == "San Bernardo"
 
 
-def test_comuna_documental_inequivoca_se_abstiene_ante_dos_comunas_reales_distintas():
-    """Caso real 472002: "Galvarino" (calle, mas también comuna real de
-    La Araucanía) y "Quilicura" (comuna real de la entrega) -- dos comunas
-    reales distintas en el mismo texto, ambigüedad léxica del catálogo
-    territorial -- nunca se usa como evidencia para contradecir nada."""
+def test_comuna_documental_inequivoca_ya_no_confunde_calle_con_comuna():
+    """Bloque TERRITORIAL T1 -- caso real 472002: "Galvarino" es aquí el
+    nombre de la CALLE (antes del número), nunca una comuna documental --
+    aunque también exista una comuna real con ese nombre en otra región,
+    su posición ANTES del número la excluye por construcción (formato
+    chileno convencional CALLE NÚMERO COMUNA). "Quilicura" (después del
+    número) es la única comuna real candidata -- ya no hay ambigüedad
+    que forzara la abstención de antes; se resuelve directo."""
     texto = "GALVARINO 8501 QUILICURA"
     comunas = _comunas_explicitas(texto)
-    assert set(comunas) == {"Galvarino", "Quilicura"}
-    assert _comuna_documental_inequivoca(texto) == ""
+    assert comunas == ("Quilicura",)
+    assert _comuna_documental_inequivoca(texto) == "Quilicura"
 
 
 def test_comuna_documental_inequivoca_vacia_sin_ninguna_comuna_reconocida():

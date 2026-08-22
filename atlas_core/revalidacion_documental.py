@@ -675,7 +675,9 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
     contradicho), se retira por completo: nunca se deja un km/tiempo
     calculado hacia un destino ya demostrado incorrecto. Se abstiene fila
     por fila si no hay evidencia demostrable (nunca inventa una)."""
-    from atlas_core.rutas.destino_entrega import _comuna_documental_inequivoca, _texto_normalizado_sin_acentos
+    from atlas_core.rutas.destino_entrega import (
+        _comuna_documental_inequivoca, _comunas_territorialmente_compatibles, _texto_normalizado_sin_acentos,
+    )
 
     ruta = Path(ruta_dataset)
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
@@ -697,6 +699,7 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
                     comuna_documental
                     and _texto_normalizado_sin_acentos(comuna_documental)
                     != _texto_normalizado_sin_acentos(localidad)
+                    and not _comunas_territorialmente_compatibles(comuna_documental, localidad)
                 ):
                     motivo_rechazo = (
                         "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
@@ -824,6 +827,20 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             # FRESCO del reintento (sea cual sea) se registra siempre,
             # nunca se deja un "No disponible" silencioso.
             motivo_previo_sin_causa = not motivo_previo_crudo
+            # Bloque TERRITORIAL T1 -- caso real 472037 (VICUÑA MACKENNA):
+            # `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL` no es una
+            # respuesta externa del proveedor -- es la comparación
+            # TERRITORIAL propia de Atlas (`_comuna_documental_
+            # inequivoca`/`_comunas_territorialmente_compatibles`), que
+            # este mismo bloque acaba de corregir (nombres compuestos de
+            # calle, jerarquía Santiago/comuna). Un rechazo con esta causa
+            # exacta merece un reintento con la lógica FRESCA, a
+            # diferencia de un rechazo por evidencia real e inmutable
+            # (comuna genuinamente distinta, SIN_ACCESO_VIAL) -- reintentar
+            # una contradicción real de todas formas da el mismo resultado
+            # (nunca se afloja la protección), sólo cuesta una consulta
+            # más, ya cacheada.
+            motivo_previo_reevaluable = motivo_ruta_base(motivo_previo_crudo) == "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL"
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
@@ -842,9 +859,12 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                 # quedó obsoleta -- se corrige para que nunca se confunda
                 # "proveedor no disponible" con "evidencia insuficiente".
                 # Un rechazo YA basado en evidencia real nunca se toca.
-                if (motivo_previo_tecnico or motivo_previo_sin_causa) and resultado.motivo_ruta:
+                if (motivo_previo_tecnico or motivo_previo_sin_causa or motivo_previo_reevaluable) and resultado.motivo_ruta:
                     motivo_nuevo = motivo_ruta_base(resultado.motivo_ruta)
-                    if motivo_previo_sin_causa or motivo_nuevo != motivo_ruta_base(motivo_previo_crudo):
+                    if (
+                        motivo_previo_sin_causa
+                        or motivo_nuevo != motivo_ruta_base(motivo_previo_crudo)
+                    ):
                         fila["estado_ruta"] = resultado.estado_ruta
                         fila["motivo_ruta"] = resultado.motivo_ruta
                         guias_actualizadas.append(str(fila.get("numero_guia", "")))

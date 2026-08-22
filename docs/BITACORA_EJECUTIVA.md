@@ -2227,3 +2227,84 @@ clientes/vehículos verificados byte-idénticos al backup.
 
 **Estado: BLOQUE R14 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R15 (TERRITORIAL T1) -- corrección de validación territorial + recuperación de rutas bloqueadas (2026-08-22)
+
+**Causa raíz:** dos comparaciones territoriales mal construidas en
+`resolver_destino_entrega_validado` (comuna documental vs comuna
+geocodificada). (1) `_comuna_explicita`/`_comunas_explicitas` escaneaban
+TODO el texto de `despachar_a_crudo`, así que la primera palabra de una
+calle compuesta ("Vicuña Mackenna") se leía como comuna real "Vicuña"
+-- caso real 472037. (2) La comparación no tenía ningún concepto de
+jerarquía territorial: "Santiago" usado como etiqueta de ciudad/área
+metropolitana por el geocodificador se comparaba, a nivel comuna, contra
+la comuna real específica documental ("Cerrillos") como si fueran
+incompatibles -- caso real 472238/472239/472099. Fix general, reutiliza
+el catálogo territorial ya existente (`territorio_chile.normalizar_
+comuna`, sin lista propia): `_texto_candidato_a_comuna` restringe el
+escaneo al texto DESPUÉS del último número reconocido (nunca antes,
+donde vive la calle); nueva `_comunas_territorialmente_compatibles`
+acepta comuna real vs "Santiago" sólo cuando ambas están en la MISMA
+región (Metropolitana) -- cualquier otra discrepancia (San Bernardo vs
+Angol, Renca vs Maipú) sigue bloqueada igual que antes.
+
+**Bonus (hallado por E2E, no hardcodeado):** al corregir el falso
+positivo de "Vicuña Mackenna", el proveedor real geocodificó la
+dirección a Córdoba, Argentina -- nunca antes detectado porque nada
+validaba la región resultante contra el universo cerrado de regiones
+chilenas. Nueva verificación independiente en `resolver_destino_entrega`
+(reutiliza `region_valida` del mismo catálogo): rechaza cualquier región
+geocodificada fuera de Chile con motivo explícito
+`GEOCODIFICACION_FUERA_DE_CHILE`, sin importar si hay o no comuna
+documental con la que contrastar.
+
+**Reconciliación retroactiva:** las filas YA bloqueadas antes de este
+fix con `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL` nunca se
+reintentaban (esa causa se trataba como evidencia externa inmutable).
+Como la causa es la propia lógica de comparación de Atlas -- la que este
+bloque acaba de corregir --, se agregó `motivo_previo_reevaluable` en
+`revalidar_ruta_sin_destino_calculado_sin_ocr`: permite el reintento con
+la lógica fresca (nunca afloja una contradicción real; sólo cuesta una
+consulta más, ya cacheada) y sólo persiste si el CÓDIGO base del motivo
+cambia (evita reescrituras ruidosas cuando la conclusión es la misma,
+mismo criterio de motivos técnicos del Bloque R9).
+
+**Falsos positivos antes → después:** 4 →
+0 (`GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL`). 472099/472238/472239
+recuperaron km/tiempo automáticamente (~30.77 km); 472037 pasó de un
+motivo territorial FALSO a uno real y explícito
+(`GEOCODIFICACION_FUERA_DE_CHILE: Cordoba`).
+
+**SIN_ACCESO_VIAL (Parte G):** revisados individualmente los 3 casos
+(472044/472073/472163) tras el fix territorial -- no eran ambigüedad
+territorial. El geocodificador nunca encontró la dirección a nivel de
+calle (confianza 0.6, centroide de comuna genérico); ORS routing sigue
+devolviendo, en vivo, el error real 2010 ("no hay punto ruteable cerca
+de la coordenada") contra ese centroide. Sin evidencia de un punto de
+acceso mejor -- se conservan sin cambios, ninguna ruta inventada.
+
+**B1:** sin cambios de código -- el registro genérico de `motivo_ruta`
+(Bloque R7/R12) y el fallback `codigos_residuales_no_registrados` ya
+cubren cualquier código nuevo (`GEOCODIFICACION_FUERA_DE_CHILE`) sin
+registro explícito. No quedó ninguna ambigüedad territorial genuina
+(dos comunas plausibles, jerarquía inconsistente) que requiriera
+intervención de B1 tras el fix determinístico.
+
+**Regresiones:** 464959/464960 (22.9378 km), San Bernardo vs Angol,
+comunas compuestas (Pedro Aguirre Cerda) -- verificados intactos.
+
+**Tests:** Motor -- `test_territorial_t1.py` (11 nuevos) + 4 archivos
+existentes corregidos (fixtures con región no canónica, motivo ahora
+reevaluable). Motor completo: 1676 passed. E2E en copia de producción
+real (proveedor real, caché real): confirma 4→0 antes de aplicar.
+Desktop: sin cambios (contrato `motivo_ruta` del Bloque R14 ya muestra
+cualquier causa nueva sin código adicional).
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/R15_PRE_TERRITORIAL_T1_.../`, SHA-256 antes/después).
+Reconciliación de rutas aplicada (472037/472099/472238/472239);
+ledger/catálogos de clientes/vehículos/obras verificados
+byte-idénticos al backup.
+
+**Estado: BLOQUE R15 (TERRITORIAL T1) CERRADO EN CÓDIGO Y EN DRIVE REAL.
+Sin push en ninguno de los dos repos.**

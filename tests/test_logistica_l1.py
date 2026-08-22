@@ -118,10 +118,14 @@ def test_motivo_ruta_en_blanco_se_refresca_con_causa_real_del_reintento(tmp_path
     assert fila["distancia_km"] == ""  # nunca inventa una ruta
 
 
-def test_motivo_ya_basado_en_evidencia_real_nunca_se_reescribe(tmp_path):
-    """Control -- un rechazo YA explicado por evidencia real (comuna
-    contradicha) es estable por diseño: un segundo reintento que vuelve a
-    fallar (aunque con un motivo técnicamente distinto) no lo sobrescribe."""
+def test_motivo_de_comuna_contradicha_es_reevaluable_con_causa_fresca(tmp_path):
+    """Bloque TERRITORIAL T1 -- a diferencia de un rechazo por evidencia
+    EXTERNA e inmutable (ver test siguiente), `GEOCODIFICACION_CONTRADICE_
+    COMUNA_DOCUMENTAL` es la comparación TERRITORIAL propia de Atlas --
+    si un reintento con la lógica ya corregida produce una causa
+    distinta (aquí: confianza insuficiente, nada que ver con territorio),
+    el motivo se refresca -- nunca queda una etiqueta de comuna obsoleta
+    describiendo un problema que en realidad es otro."""
     carpeta, planta = _catalogos(tmp_path)
     dataset = tmp_path / "dataset.csv"
     _escribir_csv(dataset, [_fila_csv(
@@ -142,9 +146,41 @@ def test_motivo_ya_basado_en_evidencia_real_nunca_se_reescribe(tmp_path):
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
     )
+    assert resultado["guias_actualizadas"] == ["1"]
+    fila = _leer(dataset)[0]
+    assert fila["motivo_ruta"] == "CONFIANZA_INSUFICIENTE"
+    assert fila["distancia_km"] == ""  # nunca inventa una ruta
+
+
+def test_motivo_de_evidencia_externa_inmutable_nunca_se_reescribe(tmp_path):
+    """Control -- un rechazo basado en evidencia EXTERNA e inmutable del
+    propio proveedor (múltiples ubicaciones dispersas, nada que ver con
+    la comparación territorial de Atlas) sigue siendo estable por
+    diseño: un segundo reintento que vuelve a fallar (con un motivo
+    técnicamente distinto) no lo sobrescribe."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv(
+        planta, motivo_ruta="MULTIPLES_UBICACIONES_DISPERSAS(4)",
+        estado_ruta="REQUIERE_REVISION",
+    )])
+    consulta = "PUERTA DEL SOL 83 LAS CONDES, Chile"
+    proveedor = ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(Coordenadas(-70.57, -33.41), "Las Condes, RM, Chile", 0.3, "Las Condes", "Metropolitana"),),
+                "CONFIANZA_BAJA",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 20.0, 30.0, "SINTETICO"),
+    )
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+    )
     assert resultado["guias_actualizadas"] == []
     fila = _leer(dataset)[0]
-    assert fila["motivo_ruta"] == "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: Cerrillos != Santiago"
+    assert fila["motivo_ruta"] == "MULTIPLES_UBICACIONES_DISPERSAS(4)"
 
 
 # --- 2b. Retroactivo: ruta YA calculada con etiqueta degradada de antes ---

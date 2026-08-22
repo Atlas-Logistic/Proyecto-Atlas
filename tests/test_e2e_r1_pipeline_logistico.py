@@ -151,7 +151,12 @@ def test_geocodificacion_contradice_comuna_documental_no_expone_destino_incorrec
                 EstadoRuta.REQUIERE_REVISION,
                 (CandidatoGeocodificacion(
                     Coordenadas(-72.69, -37.80), "Nueva Rancagua Interior, Angol, AR, Chile", 0.8,
-                    "Angol", "De La Araucania",
+                    # Bloque TERRITORIAL T1: región REAL y reconocida
+                    # (para ejercitar específicamente el rechazo por
+                    # comuna contradicha, no el nuevo rechazo por región
+                    # fuera de Chile -- ver test_geocodificacion_fuera_
+                    # de_chile_se_rechaza_aunque_no_haya_comuna_documental).
+                    "Angol", "La Araucanía",
                 ),),
                 "REQUIERE_CONFIRMACION_HUMANA",
             )

@@ -59,6 +59,7 @@ from atlas_core.territorio_chile import (
     ESTADO_COMUNA_EXACTA,
     normalizar_comuna,
     normalizar_direccion_con_comunas,
+    region_valida,
 )
 
 # Confianza mínima (score de Pelias/ORS, 0-1) para aceptar un único
@@ -538,6 +539,33 @@ def resolver_destino_entrega(
         # confianza suficiente antes de darlo por resuelto -- ver abajo.
         candidato = resultado.candidatos[0]
 
+    # Bloque TERRITORIAL T1 -- caso real 472037 (VICUÑA MACKENNA 655):
+    # descubierto al corregir el falso positivo de comuna -- sin ninguna
+    # comuna documental que contradecir, el resultado del geocodificador
+    # se aceptaba tal cual, y en este caso real el proveedor resolvió a
+    # "Córdoba" (Argentina) -- una confusión real del propio proveedor
+    # con una localidad homónima fuera de Chile, nunca detectada porque
+    # nada validaba la REGIÓN devuelta contra el universo cerrado de
+    # regiones chilenas (Atlas opera en Chile, ver docstring de
+    # `territorio_chile`). Reutiliza el mismo catálogo territorial ya
+    # existente (`region_valida`) -- nunca una lista propia de países o
+    # regiones extranjeras a excluir. Protección independiente de la
+    # comparación de comuna: corre siempre que se opera en contexto
+    # Chile, exista o no evidencia documental de comuna.
+    if (
+        str(contexto_territorial or "").strip().casefold() == "chile"
+        and candidato.region and not region_valida(candidato.region)
+    ):
+        return ResultadoDestinoEntrega(
+            despachar_a_crudo=texto,
+            coordenadas=candidato.coordenadas,
+            etiqueta_geocodificada="",
+            confianza=candidato.confianza,
+            estado=ESTADO_REVISAR,
+            motivo=f"GEOCODIFICACION_FUERA_DE_CHILE: {candidato.region}",
+            localidad="", region="",
+            metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
+        )
     etiqueta_final = _etiqueta_geocodificada_o_texto_documental(etiqueta=candidato.etiqueta, texto_documental=texto)
     if candidato.confianza is None or candidato.confianza < UMBRAL_CONFIANZA_MINIMA:
         return ResultadoDestinoEntrega(
@@ -561,6 +589,35 @@ def resolver_destino_entrega(
         localidad=candidato.localidad,
         region=candidato.region,
         metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
+    )
+
+
+def _comunas_territorialmente_compatibles(comuna_documental: str, comuna_geocodificada: str) -> bool:
+    """Bloque TERRITORIAL T1 -- caso real 472238/472239 (VISTA CLARA 2351
+    CERRILLOS): "Santiago" se usa a menudo -- tanto en el propio
+    documento como en la respuesta del geocodificador -- como etiqueta
+    de CIUDAD/ÁREA METROPOLITANA, no como la comuna específica "Santiago"
+    (Región Metropolitana también tiene una comuna con ese nombre exacto,
+    lo que agrava la confusión). Que un lado diga "Cerrillos" y el otro
+    "Santiago" NO es una contradicción real -- son dos niveles
+    territoriales distintos describiendo el mismo lugar, mientras ambos
+    pertenezcan a la misma región. Reutiliza el catálogo territorial ya
+    existente (`normalizar_comuna`, comuna -> región) -- nunca una lista
+    propia de "comunas del Gran Santiago" a mantener aparte. Cualquier
+    otra discrepancia entre dos comunas reales (regiones distintas, o
+    misma región sin que ninguna sea "Santiago") sigue siendo una
+    contradicción real -- caso real 460807: "San Bernardo" vs "Angol"
+    (regiones distintas, ninguna es "Santiago") sigue bloqueada."""
+    documental = normalizar_comuna(comuna_documental)
+    geocodificada = normalizar_comuna(comuna_geocodificada)
+    if (
+        documental.estado != ESTADO_COMUNA_EXACTA or geocodificada.estado != ESTADO_COMUNA_EXACTA
+        or documental.region != geocodificada.region
+    ):
+        return False
+    return "SANTIAGO" in (
+        _texto_normalizado_sin_acentos(documental.comuna or "").upper(),
+        _texto_normalizado_sin_acentos(geocodificada.comuna or "").upper(),
     )
 
 
@@ -606,6 +663,7 @@ def resolver_destino_entrega_validado(
         comuna_documental and resultado.localidad
         and _texto_normalizado_sin_acentos(comuna_documental)
         != _texto_normalizado_sin_acentos(resultado.localidad)
+        and not _comunas_territorialmente_compatibles(comuna_documental, resultado.localidad)
     ):
         return ResultadoDestinoEntrega(
             despachar_a_crudo=resultado.despachar_a_crudo,
@@ -871,9 +929,34 @@ CAMPOS_ENTREGA_DOCUMENTO = (
 )
 
 
+_PATRON_NUMERO_DIRECCION = re.compile(r"\d+")
+
+
+def _texto_candidato_a_comuna(texto: str) -> str:
+    """Bloque TERRITORIAL T1 -- causa raíz real de "VICUÑA MACKENNA" leído
+    como comuna "Vicuña" (472037): una dirección chilena convencional
+    sigue el orden CALLE NÚMERO COMUNA -- la comuna, cuando el documento
+    la trae, va DESPUÉS del número. Escanear el texto COMPLETO en busca
+    de una comuna (como hacía este módulo antes) trata el nombre de una
+    calle como un conjunto de tokens sueltos sin distinguir su posición:
+    "Vicuña" es, de forma completamente real, una comuna de la región de
+    Coquimbo -- pero aquí es sólo la primera palabra de una calle
+    compuesta ("Vicuña Mackenna"), nunca una mención de comuna. Restringir
+    la búsqueda al texto que sigue al ÚLTIMO número reconocible excluye
+    por construcción el nombre de la calle, sin ninguna lista de nombres
+    compuestos que mantener. Sin ningún número reconocible en el texto
+    (p. ej. un OCR que fusionó letra y dígitos, caso real 460807
+    "O1148" -- igual contiene el dígito "1148", así que esto no lo
+    afecta; sólo direcciones verdaderamente sin ningún dígito), se
+    conserva el texto completo -- mismo comportamiento de siempre, nunca
+    se debilita una protección real por falta de evidencia posicional."""
+    coincidencias = list(_PATRON_NUMERO_DIRECCION.finditer(str(texto or "")))
+    return texto[coincidencias[-1].end():] if coincidencias else (texto or "")
+
+
 def _comuna_explicita(texto: str) -> str:
     """Detecta sólo comunas exactas expresadas en la dirección OCR."""
-    tokens = re.findall(r"[A-ZÁÉÍÓÚÜÑ]+", str(texto or "").upper())
+    tokens = re.findall(r"[A-ZÁÉÍÓÚÜÑ]+", _texto_candidato_a_comuna(texto).upper())
     for largo in range(min(4, len(tokens)), 0, -1):
         for inicio in range(len(tokens) - largo + 1):
             resultado = normalizar_comuna(" ".join(tokens[inicio:inicio + largo]))
@@ -888,8 +971,10 @@ def _comunas_explicitas(texto: str) -> tuple[str, ...]:
     `_comuna_explicita` (que se detiene en la primera coincidencia por
     ventana más larga), aquí se recogen TODAS las que aparecen, para
     poder distinguir una mención inequívoca de una genuinamente ambigua
-    -- ver `_comuna_documental_inequivoca`."""
-    tokens = re.findall(r"[A-ZÁÉÍÓÚÜÑ]+", str(texto or "").upper())
+    -- ver `_comuna_documental_inequivoca`. Restringido al texto después
+    del último número (ver `_texto_candidato_a_comuna`) -- nunca busca
+    comuna dentro del nombre de la calle."""
+    tokens = re.findall(r"[A-ZÁÉÍÓÚÜÑ]+", _texto_candidato_a_comuna(texto).upper())
     encontradas: list[str] = []
     for largo in range(min(4, len(tokens)), 0, -1):
         for inicio in range(len(tokens) - largo + 1):

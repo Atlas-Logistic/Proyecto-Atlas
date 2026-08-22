@@ -128,8 +128,14 @@ def test_no_toca_fila_sin_planta_origen(tmp_path):
 
 def test_no_inventa_resultado_cuando_sigue_habiendo_una_contradiccion_real(tmp_path):
     """Control -- caso real 460807 (comuna inequívoca "San Bernardo" vs
-    "Angol"): el reintento vuelve a fallar exactamente igual, la fila
-    queda intacta."""
+    "Angol"): el reintento vuelve a fallar exactamente igual (nunca
+    inventa una ruta de 650 km). El CÓDIGO base del motivo (`GEOCODIFICACION_
+    CONTRADICE_COMUNA_DOCUMENTAL`) es el mismo que ya traía la fila
+    (heredado del fixture) -- aunque el detalle textual sea de otra
+    comuna, el código base sin cambios evita una reescritura ruidosa
+    (mismo criterio ya usado para motivos técnicos, Bloque R9); la
+    conclusión (bloqueado por evidencia territorial real) sigue siendo
+    correcta de todas formas."""
     carpeta, planta = _catalogos(tmp_path)
     fila = _fila_csv(
         planta, numero_guia="460807",
@@ -143,7 +149,7 @@ def test_no_inventa_resultado_cuando_sigue_habiendo_una_contradiccion_real(tmp_p
         geocodificaciones={
             consulta: ResultadoGeocodificacion(
                 EstadoRuta.REQUIERE_REVISION,
-                (CandidatoGeocodificacion(Coordenadas(-72.69, -37.80), "Nueva Rancagua Interior, Angol, AR, Chile", 0.8, "Angol", "De La Araucania"),),
+                (CandidatoGeocodificacion(Coordenadas(-72.69, -37.80), "Nueva Rancagua Interior, Angol, AR, Chile", 0.8, "Angol", "La Araucanía"),),
                 "REQUIERE_CONFIRMACION_HUMANA",
             )
         },
@@ -154,14 +160,20 @@ def test_no_inventa_resultado_cuando_sigue_habiendo_una_contradiccion_real(tmp_p
     )
     assert resultado["guias_actualizadas"] == []
     fila_final = _leer(dataset)[0]
-    assert fila_final["distancia_km"] == ""
+    assert fila_final["distancia_km"] == ""  # nunca inventa la ruta de 650 km
     assert fila_final["direccion_entrega"] == ""
+    assert "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL" in fila_final["motivo_ruta"]
 
 
 def test_usa_proveedor_real_por_defecto_sin_lanzar_sin_credencial(tmp_path):
     """Sin proveedor inyectado, construye OpenRouteService()+caché real --
     sin credencial configurada se abstiene sola (SIN_CREDENCIAL), nunca
-    lanza ni bloquea la revalidación de otras filas."""
+    lanza ni bloquea la revalidación de otras filas. El fixture parte con
+    el motivo genérico heredado de `_fila_csv` (comuna contradicha) --
+    como ese motivo es reevaluable (Bloque TERRITORIAL T1), sí se
+    refresca con la causa técnica real y explícita (nunca queda un motivo
+    de comuna obsoleto describiendo lo que en realidad es un proveedor
+    sin credencial)."""
     carpeta, planta = _catalogos(tmp_path)
     dataset = tmp_path / "dataset.csv"
     _escribir_csv(dataset, [_fila_csv(planta)])
@@ -171,7 +183,10 @@ def test_usa_proveedor_real_por_defecto_sin_lanzar_sin_credencial(tmp_path):
         resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=carpeta,
         )
-        assert resultado["guias_actualizadas"] == []
+        assert resultado["guias_actualizadas"] == ["464991"]
+        fila_final = _leer(dataset)[0]
+        assert fila_final["distancia_km"] == ""
+        assert "SIN_CREDENCIAL" in fila_final["motivo_ruta"]
     finally:
         if valor_previo is not None:
             os.environ["OPENROUTESERVICE_API_KEY"] = valor_previo
