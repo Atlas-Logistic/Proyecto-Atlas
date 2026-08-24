@@ -499,11 +499,33 @@ def _comuna_confirma_candidato(comuna_confirmada: str, comuna_candidato: str) ->
     return _comunas_territorialmente_compatibles(comuna_confirmada, comuna_candidato)
 
 
+_PATRON_PALABRA = re.compile(r"[A-ZÁÉÍÓÚÜÑ]+")
+
+
+def _texto_menciona_comuna_como_palabra_completa(texto: str, comuna: str) -> bool:
+    """True si `comuna` aparece en `texto` como PALABRA COMPLETA (nunca
+    substring dentro de otra palabra, nunca fuzzy) -- comparación por
+    tokens, no por `in` sobre el string crudo. Sirve para leer evidencia
+    YA PERSISTIDA (nunca nueva investigación) en busca de una mención
+    territorial reconocible, sin el riesgo de coincidencias espurias de
+    un `in` ingenuo (p. ej. "Colina" dentro de otra palabra)."""
+    palabras = set(_PATRON_PALABRA.findall(_texto_normalizado_sin_acentos(texto).upper()))
+    comuna_normalizada = _texto_normalizado_sin_acentos(comuna).upper()
+    tokens_comuna = comuna_normalizada.split()
+    if len(tokens_comuna) == 1:
+        return comuna_normalizada in palabras
+    # Comunas de más de una palabra (p. ej. "SAN BERNARDO"): exige la
+    # frase completa como subsecuencia contigua de tokens, no sólo que
+    # cada palabra suelta aparezca en cualquier parte del texto.
+    return comuna_normalizada in " ".join(_PATRON_PALABRA.findall(_texto_normalizado_sin_acentos(texto).upper()))
+
+
 def resolver_destino_con_fallback_estructurado(
     despachar_a_crudo: str,
     *,
     proveedor_fallback: ProveedorRutas,
     destinos_confirmados: Iterable[Destino] = (),
+    contexto_evidencia_b1: str = "",
 ) -> ResultadoDesambiguacionInequivoca:
     """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C": cuando el
     proveedor PRINCIPAL deja una ambigüedad sin resolver y ni Vía A
@@ -518,14 +540,21 @@ def resolver_destino_con_fallback_estructurado(
     1. es el ÚNICO candidato cuyo número de calle coincide literalmente
        con el texto documental (`_candidato_unico_con_numero_de_calle`
        -- nunca "el primero"/"el más cercano");
-    2. Y existe un destino ya CONFIRMADO para esta misma dirección
-       (identidad ya resuelta -- nunca se investiga de nuevo) cuya comuna
-       propia es territorialmente compatible con la comuna que devuelve
-       el respaldo (mismo criterio ya calibrado, Bloque TERRITORIAL T1).
+    2. Y corrobora contra evidencia YA CONFIRMADA/PERSISTIDA (nunca
+       nueva), por cualquiera de estas dos vías equivalentes:
+       a) un destino ya CONFIRMADO para esta misma dirección trae comuna
+          propia territorialmente compatible con la comuna del
+          candidato (mismo criterio ya calibrado, Bloque TERRITORIAL T1);
+       b) o la evidencia de B1 YA PERSISTIDA (`contexto_evidencia_b1`,
+          nunca una llamada nueva) menciona "Santiago" como ciudad/área
+          metropolitana, y esa mención es territorialmente compatible
+          con la comuna del candidato (mismo criterio T1 -- "Santiago"
+          y una comuna específica de la misma región no son una
+          contradicción, ver Bloque VALIDACIÓN TERRITORIAL T2).
 
-    Sin una comuna CONFIRMADA que corrobore al candidato, un número de
-    calle coincidente por sí solo NO es "evidencia inequívoca" -- podría
-    ser una calle homónima en una comuna real distinta (caso conocido:
+    Sin ninguna de las dos corroboraciones, un número de calle
+    coincidente por sí solo NO es "evidencia inequívoca" -- podría ser
+    una calle homónima en una comuna real distinta (caso conocido:
     nombres de calle que se repiten en Chile) -- se abstiene en vez de
     adivinar, dejando el candidato visible sólo en el motivo técnico para
     que un humano o B1 lo revise si hace falta (Bloque F: "B1 puede
@@ -570,7 +599,28 @@ def resolver_destino_con_fallback_estructurado(
         ),
         None,
     )
-    if destino_corroborante is None:
+    corroborado_por_evidencia_b1 = (
+        destino_corroborante is None and candidato.localidad
+        # Bloque VALIDACIÓN TERRITORIAL T2 -- caso real 472037: el
+        # destino CONFIRMADO no siempre trae comuna estructurada propia
+        # (Bloque CONFIRMACIÓN D2 -- se confirmó sin que la ruta llegara
+        # a calcularse), pero B1 ya investigó y dejó, en su evidencia YA
+        # PERSISTIDA (nunca una llamada nueva), una mención territorial
+        # de nivel ciudad/área metropolitana ("Santiago") -- el mismo
+        # criterio YA calibrado (`_comunas_territorialmente_compatibles`,
+        # Bloque TERRITORIAL T1) ya sabe que "Santiago" como ciudad/área
+        # metropolitana es compatible con cualquier comuna real de la
+        # MISMA región (p. ej. Maipú, RM) -- nunca exige que coincidan
+        # literalmente. Nunca escanea la evidencia buscando cualquier
+        # comuna del catálogo (345 nombres, muchos coinciden con
+        # palabras comunes del español -- riesgo real de falso positivo,
+        # ver `_comunas_explicitas`); se limita, a propósito, a esta
+        # única mención de nivel ciudad ya reconocida como caso especial
+        # en el resto del sistema.
+        and _texto_menciona_comuna_como_palabra_completa(contexto_evidencia_b1, "Santiago")
+        and _comunas_territorialmente_compatibles("Santiago", candidato.localidad)
+    )
+    if destino_corroborante is None and not corroborado_por_evidencia_b1:
         return ResultadoDesambiguacionInequivoca(
             motivo=f"FALLBACK_SIN_CORROBORACION_TERRITORIAL: {candidato.etiqueta}",
             candidato=candidato, vias=(VIA_FALLBACK_ESTRUCTURADO,),
@@ -653,6 +703,7 @@ def resolver_destino_entrega(
     radio_gps_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
+    contexto_evidencia_b1: str = "",
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -764,6 +815,7 @@ def resolver_destino_entrega(
                 fallback := resolver_destino_con_fallback_estructurado(
                     texto, proveedor_fallback=proveedor_geocodificacion_fallback,
                     destinos_confirmados=destinos_confirmados,
+                    contexto_evidencia_b1=contexto_evidencia_b1,
                 )
             ).resuelto and fallback.candidato is not None:
                 # Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C",
@@ -902,6 +954,7 @@ def resolver_destino_entrega_validado(
     radio_gps_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
+    contexto_evidencia_b1: str = "",
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -931,6 +984,7 @@ def resolver_destino_entrega_validado(
         punto_gps_referencia=punto_gps_referencia, radio_gps_km=radio_gps_km,
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+        contexto_evidencia_b1=contexto_evidencia_b1,
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado
@@ -1066,6 +1120,7 @@ def calcular_ruta_con_planta_conocida(
     radio_gps_destino_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
+    contexto_evidencia_b1: str = "",
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -1091,6 +1146,7 @@ def calcular_ruta_con_planta_conocida(
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+        contexto_evidencia_b1=contexto_evidencia_b1,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO

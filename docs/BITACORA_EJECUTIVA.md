@@ -3078,8 +3078,50 @@ reprocesaron retroactivamente las 13 guías ya existentes (evita
 "auditoría general").
 
 **Estado: BLOQUE B1 OBSERVADOR + FALLBACK GEOGRÁFICO CERRADO EN CÓDIGO
-Y EN DRIVE REAL. Único pendiente real: 472037 sigue sin punto ruteable
--- requeriría, si Javier lo decide, confirmar/registrar la comuna del
-destino ya confirmado (dato estructurado que hoy falta) para que la
-misma Vía C lo resuelva sin ninguna investigación nueva. Sin push en
-ninguno de los dos repos.**
+Y EN DRIVE REAL. Sin push en ninguno de los dos repos.**
+
+## Bloque VALIDACIÓN TERRITORIAL T2 -- Santiago (área metro) vs Maipú (comuna) ya no son incompatibles (2026-08-24)
+
+**Causa:** Vía C (fallback geográfico) sólo corroboraba un candidato
+contra la comuna PROPIA de un destino confirmado -- 472037 no tiene
+comuna estructurada (se confirmó sin ruta calculada, Bloque
+CONFIRMACIÓN D2), así que el candidato de Nominatim (Maipú, número de
+calle exacto, confianza 0.9) nunca podía corroborarse, aunque B1 ya
+había dejado "Santiago" en su evidencia persistida.
+
+**Validación Santiago/Maipú:** `resolver_destino_con_fallback_
+estructurado` ahora también corrobora contra la evidencia B1 YA
+PERSISTIDA (`resultado_atlas_ia_json`, nunca una llamada nueva): si
+menciona "Santiago" (palabra completa, nunca un `in` ingenuo) y esa
+mención es territorialmente compatible con la comuna del candidato
+(`_comunas_territorialmente_compatibles`, criterio YA calibrado en
+Bloque TERRITORIAL T1 -- "Santiago" ciudad/área metropolitana vs
+cualquier comuna real de la MISMA región no es una contradicción),
+corrobora igual que una comuna confirmada estructurada. Nunca
+hardcodea "Maipú" -- funciona para cualquier comuna de la RM que el
+catálogo territorial reconozca.
+
+**472037 antes → después:** `COORDENADA_NO_CONFIRMADA(5)` sin
+km/tiempo → **`RUTA_CALCULADA`**, comuna "Maipú", `direccion_entrega`
+"Pasaje Vicuña Mackenna 655". **km/tiempo: 35.50 km / 48.78 min**
+(AZA COLINA -> Maipú, ORS real).
+
+**Tests:** Motor -- `tests/test_fallback_geografico_estructurado.py`
+(5 nuevos: corroboración por evidencia B1, control fuera de RM, control
+sin mención, control substring-no-cuenta, E2E en `resolver_destino_
+entrega`), `tests/test_confirmacion_d2_reevaluacion_ambiguedad.py` (1
+nuevo: E2E real completo hasta `RUTA_CALCULADA` vía `revalidar_ruta_
+sin_destino_calculado_sin_ocr`). Suite completa: 1771 passed (antes
+1765). E2E en copia real de Drive: confirmado con la evidencia B1 y el
+candidato Nominatim YA cacheados en producción.
+
+**Aplicado a Drive real:** 1 backup verificado (`respaldos/
+B1_OBSERVADOR_FALLBACK_PRE_20260824_185851/`, SHA-256 antes/después).
+`guias_actualizadas: [472037]` -- única fila que cambió; catálogos/
+ledger/`decisiones_pendientes.json` byte-idénticos al backup. Reporte
+oficial regenerado y publicado (`reportes/reporte_b1_observador_
+fallback_20260824_185851/`) -- verificado en `viajes.csv`:
+`RUTA_CALCULADA`, 35.50 km, 48.78 min.
+
+**Estado: BLOQUE VALIDACIÓN TERRITORIAL T2 CERRADO EN CÓDIGO Y EN
+DRIVE REAL. Sin push en ninguno de los dos repos.**

@@ -50,11 +50,9 @@ def _proveedor_fallback(candidatos, *, consulta="VICUÑA MACKENNA 655, Chile"):
 # ============================================================
 
 
-def test_caso_real_472037_sin_comuna_confirmada_se_abstiene():
-    """Caso real: Nominatim encuentra exactamente un candidato con
-    número de calle coincidente (Maipú), pero el destino CONFIRMADO de
-    esta obra no tiene comuna propia registrada -- nada que corrobore,
-    Atlas se abstiene (nunca adivina)."""
+def test_caso_real_472037_sin_comuna_confirmada_ni_evidencia_b1_se_abstiene():
+    """Control -- sin comuna confirmada NI evidencia B1 que mencione
+    "Santiago": nada que corrobore, Atlas se abstiene (nunca adivina)."""
     candidatos = (
         _candidato(-33.52, -70.75, "Pasaje Vicuña Mackenna 655", localidad="Maipú", region="Metropolitana"),
         _candidato(-33.05, -71.62, "Vicuña Mackenna", confianza=0.2, localidad="Valparaíso", region="Valparaíso"),
@@ -67,6 +65,80 @@ def test_caso_real_472037_sin_comuna_confirmada_se_abstiene():
     assert r.resuelto is False
     assert r.identidad_confirmada is True
     assert "FALLBACK_SIN_CORROBORACION_TERRITORIAL" in r.motivo
+
+
+def test_caso_real_472037_evidencia_b1_menciona_santiago_corrobora_maipu():
+    """Bloque VALIDACIÓN TERRITORIAL T2 -- caso real 472037 exacto: el
+    destino confirmado no tiene comuna propia, pero la evidencia YA
+    PERSISTIDA de B1 (nunca una llamada nueva) menciona "Santiago" como
+    ciudad/área metropolitana -- territorialmente compatible con Maipú
+    (misma región RM, criterio ya calibrado). "Santiago" y "Maipú" NO
+    son automáticamente incompatibles -- Atlas compara niveles
+    territoriales equivalentes, nunca exige coincidencia literal."""
+    candidatos = (
+        _candidato(-33.52, -70.75, "Pasaje Vicuña Mackenna 655", localidad="Maipú", region="Metropolitana"),
+        _candidato(-33.05, -71.62, "Vicuña Mackenna", confianza=0.2, localidad="Valparaíso", region="Valparaíso"),
+    )
+    destino = _destino_confirmado("VICUÑA MACKENNA 655", comuna="")
+    evidencia_b1 = (
+        'Los dos registros externos consultados confirman que la dirección Vicuña Mackenna 655 '
+        'existe y está asociada al proyecto "Vicuña Mackenna 655" en Santiago.'
+    )
+    r = resolver_destino_con_fallback_estructurado(
+        "VICUÑA MACKENNA 655", proveedor_fallback=_proveedor_fallback(candidatos),
+        destinos_confirmados=(destino,), contexto_evidencia_b1=evidencia_b1,
+    )
+    assert r.resuelto is True
+    assert r.candidato.localidad == "Maipú"
+    assert r.motivo == "FALLBACK_ESTRUCTURADO_CORROBORADO"
+
+
+def test_evidencia_b1_menciona_comuna_fuera_de_rm_no_corrobora():
+    """Control -- "Santiago" en la evidencia B1 sólo corrobora comunas de
+    la MISMA región (RM); un candidato en otra región sigue bloqueado
+    -- nunca "cualquier mención de Santiago basta"."""
+    candidatos = (
+        _candidato(-36.6, -72.1, "Vicuña Mackenna 655", localidad="Chillán", region="Ñuble"),
+    )
+    destino = _destino_confirmado("VICUÑA MACKENNA 655", comuna="")
+    evidencia_b1 = 'La dirección está asociada al proyecto en Santiago.'
+    r = resolver_destino_con_fallback_estructurado(
+        "VICUÑA MACKENNA 655", proveedor_fallback=_proveedor_fallback(candidatos),
+        destinos_confirmados=(destino,), contexto_evidencia_b1=evidencia_b1,
+    )
+    assert r.resuelto is False
+
+
+def test_evidencia_b1_sin_mencion_de_santiago_no_corrobora():
+    """Control -- evidencia B1 real pero que NUNCA menciona "Santiago"
+    (ni ninguna comuna): no hay nada que corroborar, se abstiene igual
+    que sin evidencia."""
+    candidatos = (
+        _candidato(-33.52, -70.75, "Pasaje Vicuña Mackenna 655", localidad="Maipú", region="Metropolitana"),
+    )
+    destino = _destino_confirmado("VICUÑA MACKENNA 655", comuna="")
+    evidencia_b1 = "Se encontró una referencia al proyecto asociado a Fundamenta."
+    r = resolver_destino_con_fallback_estructurado(
+        "VICUÑA MACKENNA 655", proveedor_fallback=_proveedor_fallback(candidatos),
+        destinos_confirmados=(destino,), contexto_evidencia_b1=evidencia_b1,
+    )
+    assert r.resuelto is False
+
+
+def test_mencion_de_santiago_dentro_de_otra_palabra_no_cuenta():
+    """Nunca un `in` ingenuo sobre el string crudo -- "Santiago" debe
+    aparecer como palabra completa, no como substring de otra palabra
+    (evita falsos positivos)."""
+    candidatos = (
+        _candidato(-33.52, -70.75, "Pasaje Vicuña Mackenna 655", localidad="Maipú", region="Metropolitana"),
+    )
+    destino = _destino_confirmado("VICUÑA MACKENNA 655", comuna="")
+    evidencia_b1 = "El chofer se llama Santiagocarlos Pérez."  # nunca "Santiago" como palabra
+    r = resolver_destino_con_fallback_estructurado(
+        "VICUÑA MACKENNA 655", proveedor_fallback=_proveedor_fallback(candidatos),
+        destinos_confirmados=(destino,), contexto_evidencia_b1=evidencia_b1,
+    )
+    assert r.resuelto is False
 
 
 def test_comuna_confirmada_compatible_resuelve():
@@ -203,10 +275,10 @@ def test_resolver_destino_entrega_usa_el_fallback_cuando_hay_corroboracion():
 
 
 def test_resolver_destino_entrega_sin_corroboracion_conserva_motivo_correcto():
-    """Caso real 472037 exacto, dentro de `resolver_destino_entrega`
-    completo: el respaldo encuentra un candidato, pero sin comuna
-    confirmada que lo corrobore -- Atlas se abstiene con el motivo
-    correcto (identidad confirmada, sólo falta el punto), nunca inventa."""
+    """Control -- sin comuna confirmada NI evidencia B1: el respaldo
+    encuentra un candidato, pero nada lo corrobora -- Atlas se abstiene
+    con el motivo correcto (identidad confirmada, sólo falta el punto),
+    nunca inventa."""
     consulta = "VICUÑA MACKENNA 655, Chile"
     principal = ProveedorRutasSimulado(geocodificaciones={
         consulta: ResultadoGeocodificacion(
@@ -230,3 +302,37 @@ def test_resolver_destino_entrega_sin_corroboracion_conserva_motivo_correcto():
     assert resultado.estado == "REVISAR"
     assert resultado.coordenadas is None  # nunca inventa un punto
     assert resultado.motivo == "COORDENADA_NO_CONFIRMADA(2)"
+
+
+def test_resolver_destino_entrega_caso_real_472037_con_evidencia_b1_resuelve():
+    """Caso real 472037 exacto, dentro de `resolver_destino_entrega`
+    completo: destino confirmado SIN comuna propia, pero con la
+    evidencia B1 YA PERSISTIDA (nunca una llamada nueva) que menciona
+    "Santiago" -- ahora SÍ corrobora al candidato único del respaldo
+    (Maipú, misma región RM) y resuelve el punto."""
+    consulta = "VICUÑA MACKENNA 655, Chile"
+    principal = ProveedorRutasSimulado(geocodificaciones={
+        consulta: ResultadoGeocodificacion(
+            EstadoRuta.RESULTADO_AMBIGUO,
+            (
+                CandidatoGeocodificacion(Coordenadas(-70.60, -33.45), "Vicuña Mackenna, Providencia", 0.6, "Providencia", "Metropolitana"),
+                CandidatoGeocodificacion(Coordenadas(-72.6, -38.7), "Vicuña Mackenna, Temuco", 0.6, "Temuco", "La Araucanía"),
+            ),
+            "MULTIPLES_CANDIDATOS",
+        )
+    })
+    fallback_candidatos = (
+        CandidatoGeocodificacion(Coordenadas(-70.75, -33.52), "Pasaje Vicuña Mackenna 655", 0.9, "Maipú", "Metropolitana"),
+    )
+    fallback = _proveedor_fallback(fallback_candidatos)
+    destino = _destino_confirmado("VICUÑA MACKENNA 655", comuna="")  # sin comuna registrada
+    evidencia_b1 = 'La dirección Vicuña Mackenna 655 está asociada al proyecto en Santiago.'
+    resultado = resolver_destino_entrega(
+        "VICUÑA MACKENNA 655", principal,
+        destinos_confirmados=(destino,), proveedor_geocodificacion_fallback=fallback,
+        contexto_evidencia_b1=evidencia_b1,
+    )
+    assert resultado.estado == "RESUELTO"
+    assert resultado.coordenadas == Coordenadas(-70.75, -33.52)
+    assert resultado.localidad == "Maipú"
+    assert resultado.motivo == ""

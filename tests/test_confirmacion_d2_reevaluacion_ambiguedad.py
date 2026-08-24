@@ -17,6 +17,7 @@ decisión humana ni de una auditoría general."""
 from __future__ import annotations
 
 import csv
+import json
 
 from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
 from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
@@ -161,6 +162,67 @@ def test_multiples_ubicaciones_dispersas_se_resuelve_con_fallback_estructurado_c
     assert fila["distancia_km"] == "8.4"
     assert fila["duracion_min"] == "15.2"
     assert fila["localidad_entrega"] == "Providencia"
+
+
+def test_472037_real_evidencia_b1_ya_persistida_corrobora_maipu_y_calcula_ruta(tmp_path):
+    """Bloque VALIDACIÓN TERRITORIAL T2 -- caso real 472037 EXACTO:
+    destino confirmado SIN comuna propia (igual que en Drive real), pero
+    con `resultado_atlas_ia_json` (evidencia B1 YA PERSISTIDA, nunca una
+    llamada nueva) mencionando "Santiago" -- `revalidar_ruta_sin_destino_
+    calculado_sin_ocr` debe extraerla, corroborar el candidato único del
+    respaldo (Maipú, misma región RM) y llegar a RUTA_CALCULADA de punta
+    a punta, sin ninguna decisión humana nueva ni investigación nueva."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    resultado_atlas_ia_json = json.dumps([{
+        "campo": "despachar_a_crudo", "dominio": "DESTINO", "elegible_ia": True,
+        "llamada_realizada": True, "estado": "BLOQUEADO_POR_VALIDACION", "clasificacion": "B_ASISTENCIA",
+        "hipotesis": {
+            "campo": "despachar_a_crudo",
+            "explicacion": (
+                "Los dos registros externos consultados confirman que la dirección "
+                'Vicuña Mackenna 655 existe y está asociada al proyecto "Vicuña Mackenna 655" '
+                "en Santiago."
+            ),
+            "valor_propuesto": "Vicuña Mackenna 655", "resultado": "PROPUESTA",
+        },
+        "contexto_final": {
+            "campo": "despachar_a_crudo",
+            "evidencias": [{
+                "tipo_fuente": "EXTERNO", "campo": "despachar_a_crudo",
+                "referencias_fuente": ["Fundamenta <https://www.fundamenta.cl/urban>"],
+                "valor": "Sí: Vicuña Mackenna 655 aparece como dirección del proyecto en Santiago.",
+            }],
+        },
+    }])
+    _escribir_csv(dataset, [_fila_csv(planta, resultado_atlas_ia_json=resultado_atlas_ia_json)])
+    CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json").crear(
+        cliente_id="", nombre_destino="VICUÑA MACKENNA 655", pais="CHILE", fuente="TEST",
+        direccion="VICUÑA MACKENNA 655", estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+        # sin comuna -- exactamente como quedó el destino real de 472037
+    )
+    proveedor = _proveedor_vicuna_mackenna_dispersa()
+    fallback = ProveedorRutasSimulado(geocodificaciones={
+        "VICUÑA MACKENNA 655, Chile": ResultadoGeocodificacion(
+            EstadoRuta.RESULTADO_AMBIGUO,
+            (CandidatoGeocodificacion(Coordenadas(-70.7578666, -33.5212618), "Pasaje Vicuña Mackenna 655", 0.9, "Maipú", "Metropolitana"),),
+            "MULTIPLES_CANDIDATOS",
+        )
+    }, resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 25.0, 35.0, "SINTETICO"))
+
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=fallback,
+    )
+    assert resultado["guias_actualizadas"] == ["472037"]
+    fila = _leer(dataset)[0]
+    assert fila["estado_ruta"] == "RUTA_CALCULADA"
+    # El routing real (km/tiempo) lo calcula el proveedor PRINCIPAL (ORS)
+    # hacia el punto que Vía C determinó -- Nominatim es sólo
+    # geocodificador de respaldo, nunca calcula rutas.
+    assert fila["distancia_km"] == "8.4"
+    assert fila["duracion_min"] == "15.2"
+    assert fila["localidad_entrega"] == "Maipú"
 
 
 def test_multiples_ubicaciones_dispersas_sin_confirmacion_se_mantiene_estable(tmp_path):

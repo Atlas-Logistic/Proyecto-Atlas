@@ -965,6 +965,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
         motivo_ruta_base,
     )
+    from atlas_core.decisiones_pendientes import resumen_hallazgo_b1
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
@@ -1024,6 +1025,19 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             motivo_previo_reevaluable = motivo_ruta_base(motivo_previo_crudo) in (
                 "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL", "GEOCODIFICACION_FUERA_DE_CHILE",
             )
+            # Bloque VALIDACIÓN TERRITORIAL T2 -- caso real 472037: B1 ya
+            # investigó y dejó evidencia PERSISTIDA (`resultado_atlas_ia_
+            # json`, misma fuente de verdad que usa `decisiones_pendientes.
+            # resumen_hallazgo_b1`, nunca una llamada nueva) -- se lee aquí
+            # para que la Vía C del fallback estructurado pueda corroborar
+            # un candidato contra una mención territorial de nivel ciudad
+            # ("Santiago") cuando el destino confirmado no trae comuna
+            # propia. Texto compacto (explicación + resumen de evidencia),
+            # nunca un dump de la fila completa.
+            hallazgo_b1 = resumen_hallazgo_b1(fila, dominio="DESTINO", campo="despachar_a_crudo")
+            contexto_evidencia_b1 = " ".join(
+                str(hallazgo_b1.get(clave, "")) for clave in ("b1_resumen_hallazgo", "b1_evidencia_resumida")
+            ) if hallazgo_b1 else ""
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
@@ -1031,6 +1045,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     evidencia_origen=str(fila.get("evidencia_origen", "")),
                     perfil=perfil, destinos_confirmados=destinos_confirmados,
                     proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
+                    contexto_evidencia_b1=contexto_evidencia_b1,
                 )
             except (OSError, ValueError):
                 continue
