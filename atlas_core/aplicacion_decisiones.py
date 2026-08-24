@@ -14,7 +14,7 @@ from atlas_core.catalogo_clientes import (
     CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
     EstadoCalidadCliente, normalizar_nombre_cliente, normalizar_rut_cliente,
 )
-from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError
+from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError, EstadoCalidadDestino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos, ErrorCatalogoObrasDestinos, EstadoVigencia,
     Evidencia, ResultadoEvidencia, TipoEvidencia,
@@ -391,8 +391,17 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # dirección normalizada => mismo destino_id).
                     numero_guia = str(decision.get("documento", {}).get("numero_guia") or "")
                     fuente = f"DECISION_HUMANA_R3_4:{decision_id}"
+                    # Bloque RESOLUCIÓN R16 -- una confirmación humana
+                    # explícita ("CONFIRMAR") es exactamente la evidencia
+                    # que `estado_calidad=CONFIRMADO` representa; antes de
+                    # este bloque el destino quedaba en PENDIENTE para
+                    # siempre (nunca promovido en ningún otro lugar),
+                    # dejando la Vía A de desambiguación
+                    # (`resolver_destino_ambiguo_con_evidencia_inequivoca`)
+                    # sin ningún destino real que pudiera usar.
                     destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
                         nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
+                        estado_calidad=EstadoCalidadDestino.CONFIRMADO,
                     )
                     # B/C. Reutilizar la obra global existente (por nombre
                     # canónico, nunca crea una segunda) y crear/reutilizar la
@@ -731,6 +740,23 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                             None,
                         ) if obra_canonica else None
                         if fila_confirmada is not None and cliente_objetivo is not None and obra_objetivo is not None:
+                            # Bloque RESOLUCIÓN R16 -- causa raíz de que Vía A
+                            # (`resolver_destino_ambiguo_con_evidencia_
+                            # inequivoca`, catálogo confirmado) nunca pudiera
+                            # actuar en la práctica: esta confirmación NUNCA
+                            # persistía latitud/longitud, aunque la fila ya
+                            # las tuviera resueltas (revalidada arriba, línea
+                            # ~666) -- el destino quedaba "confirmado" sin
+                            # ningún punto reutilizable. Sólo se persiste si
+                            # la ruta quedó efectivamente calculada (nunca un
+                            # centroide degradado ni una coordenada a medias).
+                            latitud_confirmada = longitud_confirmada = None
+                            if str(fila_confirmada.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                                try:
+                                    latitud_confirmada = float(fila_confirmada.get("latitud_entrega") or "")
+                                    longitud_confirmada = float(fila_confirmada.get("longitud_entrega") or "")
+                                except (TypeError, ValueError):
+                                    latitud_confirmada = longitud_confirmada = None
                             destino_creado = CatalogoDestinos(
                                 catalogo_destinos_ruta, ruta_clientes=catalogo_clientes_ruta,
                             ).crear_o_reutilizar_global(
@@ -738,7 +764,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                                 direccion=fila_confirmada.get("direccion_entrega") or direccion_final,
                                 comuna=fila_confirmada.get("localidad_entrega", ""),
                                 region=fila_confirmada.get("region_entrega", ""),
+                                latitud=latitud_confirmada, longitud=longitud_confirmada,
                                 fuente=f"DECISION_HUMANA_R6:{decision_id}",
+                                estado_calidad=EstadoCalidadDestino.CONFIRMADO,
                             )
                             evidencia_destino = Evidencia(
                                 tipo=TipoEvidencia.GUIA.value,

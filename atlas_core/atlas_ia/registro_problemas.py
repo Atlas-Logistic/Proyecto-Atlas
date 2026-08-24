@@ -348,6 +348,11 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
             "GEOCODIFICACION_DEMASIADO_GENERICA", "MULTIPLES_UBICACIONES_DISPERSAS",
             # Bloque R9 -- caso real 472044.
             "SIN_ACCESO_VIAL",
+            # Bloque RESOLUCIÓN R16 -- caso real 472037: un candidato fuera
+            # de Chile tampoco es "nada que razonar" -- un documento
+            # hermano de la misma obra ya resuelto en Chile sigue siendo
+            # evidencia real de dónde debería quedar el destino correcto.
+            "GEOCODIFICACION_FUERA_DE_CHILE",
         }),
         fuente="MOTIVO_RUTA", campo="despachar_a_crudo", dominio="DESTINO",
         herramientas=("DOCUMENTOS_RELACIONADOS",), aplicable_automaticamente=False,

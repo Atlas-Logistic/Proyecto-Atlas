@@ -774,7 +774,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     vigente. Un motivo de rechazo YA basado en evidencia real (comuna
     contradicha, genérico, disperso) nunca se reintenta ni se reescribe
     aquí -- es estable por diseño, no ruido técnico."""
+    from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
     from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
     from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
 
     ruta = Path(ruta_dataset)
@@ -786,9 +788,29 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         )
         from atlas_core.rutas.openrouteservice import OpenRouteService
 
+        # Bloque RESOLUCIÓN R16 -- causa raíz real del caso 472037 (VICUÑA
+        # MACKENNA resuelto en Córdoba, Argentina): esta reconciliación
+        # retroactiva construía el proveedor SIN el filtro de país que ya
+        # usa el procesamiento en vivo (`procesamiento_masivo.py`, mismo
+        # `OpenRouteService(pais=pais_operacion)`) -- la búsqueda quedaba
+        # sin restricción territorial alguna, dejando competir candidatos
+        # de cualquier país contra los chilenos. `GEOCODIFICACION_FUERA_
+        # DE_CHILE` (Bloque TERRITORIAL T1) sigue como red de seguridad
+        # para cualquier proveedor que no respete el filtro, pero la
+        # consulta ahora ya llega restringida a Chile por diseño, igual
+        # que el resto del sistema -- un solo criterio, sin ruta paralela.
         proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
-            OpenRouteService(), RepositorioCacheGeocodificacion(),
+            OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
         )
+    try:
+        destinos_confirmados = [
+            d for d in CatalogoDestinos(
+                carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json",
+            ).listar()
+            if d.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
+        ]
+    except (OSError, ValueError):
+        destinos_confirmados = []
     try:
         plantas_por_id = {p.planta_id: p for p in CatalogoPlantas(carpeta / "plantas.json").listar()}
     except (OSError, ValueError):
@@ -846,7 +868,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
                     origen_determinado_por=str(fila.get("origen_determinado_por", "")),
                     evidencia_origen=str(fila.get("evidencia_origen", "")),
-                    perfil=perfil,
+                    perfil=perfil, destinos_confirmados=destinos_confirmados,
                 )
             except (OSError, ValueError):
                 continue

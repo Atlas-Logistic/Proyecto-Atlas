@@ -2308,3 +2308,98 @@ byte-idénticos al backup.
 
 **Estado: BLOQUE R15 (TERRITORIAL T1) CERRADO EN CÓDIGO Y EN DRIVE REAL.
 Sin push en ninguno de los dos repos.**
+
+## Bloque R16 (RESOLUCIÓN AVANZADA) -- destinos difíciles agotan fuentes antes de rendirse (2026-08-24)
+
+**Causas raíz encontradas (nunca asumidas, todas trazadas):** (1)
+`resolver_destino_ambiguo_con_evidencia_inequivoca` (Vía A catálogo
+CONFIRMADO / Vía B GPS completo, Bloque DESTINOS D1) existía, estaba
+probada, y NUNCA estuvo conectada a `resolver_destino_entrega` -- ante
+`MULTIPLES_UBICACIONES_DISPERSAS` Atlas se rendía sin ni siquiera
+intentar la evidencia que ya sabía calcular. (2) La reconciliación
+retroactiva (`revalidar_ruta_sin_destino_calculado_sin_ocr`, usada en
+R10-R15) construía `OpenRouteService()` SIN el filtro de país que el
+procesamiento en vivo sí usa -- causa real de que 472037 geocodificara
+en Córdoba, Argentina. (3) Los destinos que un humano CONFIRMA
+(`DESTINO_SIN_CONFIRMAR`/R6 `REGISTRAR_DIRECCION`) quedaban con
+`estado_calidad=PENDIENTE` para siempre y SIN coordenadas -- la Vía A
+nunca podría usarlos aunque se conectara: no había ni un solo destino
+`CONFIRMADO` con coordenadas en todo el catálogo real.
+
+**Fix (Motor, reutiliza infraestructura existente, cero validador
+degradado):** `resolver_destino_entrega` ahora intenta Vía A/B antes de
+declarar `MULTIPLES_UBICACIONES_DISPERSAS` final; `calcular_ruta_con_
+planta_conocida`/`calcular_ruta_entrega_para_viaje` propagan
+`destinos_confirmados`. Nueva `_reintentar_ruta_sin_acceso_vial_con_
+destino_confirmado`: si `SIN_ACCESO_VIAL` y un destino YA CONFIRMADO
+(coincidencia literal, mismo criterio que Vía A) aporta un punto
+distinto del centroide fallido, reintenta el ruteo desde ahí -- nunca
+inventa una coordenada. `revalidar_ruta_sin_destino_calculado_sin_ocr`
+ahora construye `OpenRouteService(pais="CL")` (mismo criterio que
+`procesamiento_masivo`) y carga los destinos `CONFIRMADO` del catálogo
+real. `catalogo_destinos.crear_o_reutilizar_global` ahora PROMUEVE un
+destino ya existente a `CONFIRMADO` cuando se confirma con evidencia
+nueva, y completa coordenadas ausentes sin sobrescribir las existentes
+-- las dos confirmaciones humanas (`aplicacion_decisiones.py`) ahora
+persisten `estado_calidad=CONFIRMADO` y, si la fila ya tenía ruta
+calculada, sus coordenadas reales. `GEOCODIFICACION_FUERA_DE_CHILE` se
+agregó al dominio DESTINO ya elegible para B1 (evidencia de documentos
+hermanos) -- nunca "no elegible" sólo porque el geocodificador falló.
+
+**Prueba real (Parte K, caso AUSIN SAN BERNARDO -- 460807/472008,
+misma obra, mismo texto documental "INTERIOR NUEVA O1148 SAN
+BERNARDO"):** verificado externamente contra el registro oficial SII
+(portalchile.org, corroborado con una segunda fuente independiente) --
+"Interior Nueva 01148, San Bernardo" es una sucursal real y
+registrada de AUSIN HNOS S.A. El geocodificador principal (reintentado
+con `pais=CL`, y con variantes de consulta) NUNCA resuelve esta
+dirección a nivel de calle -- limitación real de cobertura del
+proveedor, no un error de Atlas. Con la infraestructura de este bloque,
+se demostró en una COPIA aislada (nunca en producción real) que UNA
+sola confirmación humana futura de esta dirección resolvería
+AUTOMÁTICAMENTE ambas guías vía Vía A (27.5 km / 41.4 km) -- prueba
+concreta de "conocimiento nuevo se reutiliza, nunca se vuelve a
+investigar desde cero". No se persistió ningún dato sintético en Drive
+real: la precisión exacta de la coordenada (centroide de comuna vs.
+punto de calle) sigue siendo una confirmación humana genuina.
+
+**Casos actuales (Parte J, 8/20 sin km/tiempo):** 3
+`MULTIPLES_UBICACIONES_DISPERSAS` (460807/472008/472018, familia AUSIN/
+SALOMON SACK, San Bernardo -- limitación real de cobertura del
+geocodificador, confirmada arriba), 1 `GEOCODIFICACION_FUERA_DE_CHILE`
+(472037, causa real y trazable, ya no un falso positivo territorial),
+3 `SIN_ACCESO_VIAL` (472044/472073/472163, Las Condes/Vitacura --
+mismos 3 de R15, re-verificados: geocodificador nunca encuentra calle,
+sólo centroide sin acceso vial cercano; probado con `pais=CL` y
+variantes de consulta, sin resultado mejor), 1 `ORIGEN_NO_DETERMINADO`
+(464981, sin evidencia GPS -- fuera del alcance de este bloque,
+capa de origen no de destino). Los 8 quedan con causa 100% explícita y
+trazable -- ninguno silencioso.
+
+**Tests:** Motor -- `test_resolucion_r16.py` (8 nuevos: Vía A resuelve
+dispersas con catálogo confirmado y control de abstención sin catálogo;
+`SIN_ACCESO_VIAL` se recupera con destino confirmado distinto y control
+sin catálogo; `pais=CL` verificado en el proveedor por defecto de la
+revalidación retroactiva; `GEOCODIFICACION_FUERA_DE_CHILE` elegible
+para B1; promoción a CONFIRMADO + coordenadas nunca sobrescritas).
+Motor completo: 1684 passed (antes 1676). E2E en copia real de
+producción (proveedor real, `pais=CL`): 0 regresiones
+(464959/464960, 472099/472238/472239 intactos); demostración Vía A
+aislada en la misma copia, revertida antes de aplicar a real.
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/R16_PRE_RESOLUCION_AVANZADA_.../`, SHA-256 antes/después).
+`revalidar_y_regenerar_reporte` corrido contra producción real con la
+infraestructura nueva activa: 0 cambios inmediatos (esperado -- ningún
+destino confirmado con coordenadas existía aún para los 8 casos
+restantes), catálogos/ledger verificados byte-idénticos al backup.
+
+**Pendiente real (no bloqueante, requiere decisión humana genuina):**
+las 8 guías restantes necesitan que Javier confirme al menos UNA
+dirección por familia (AUSIN/SALOMON SACK San Bernardo, Las Condes,
+Vitacura, VICUÑA MACKENNA) vía Desktop -- con la infraestructura de
+este bloque, esa única confirmación se propaga sola a cualquier
+guía hermana futura o ya persistida de la misma obra.
+
+**Estado: BLOQUE R16 (RESOLUCIÓN AVANZADA) CERRADO EN CÓDIGO Y EN DRIVE
+REAL. Sin push en ninguno de los dos repos.**

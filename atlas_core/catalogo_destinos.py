@@ -259,13 +259,49 @@ class CatalogoDestinos:
             return ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, len(coincidencias))
         return ResultadoBusquedaDestino(EstadoBusquedaDestino.SIN_COINCIDENCIA)
 
-    def crear_o_reutilizar_global(self, *, nombre_destino: str, direccion: str, comuna: str = "", region: str = "", pais: str = "CHILE", fuente: str, latitud: float | None = None, longitud: float | None = None) -> Destino:
+    def crear_o_reutilizar_global(
+        self, *, nombre_destino: str, direccion: str, comuna: str = "", region: str = "",
+        pais: str = "CHILE", fuente: str, latitud: float | None = None, longitud: float | None = None,
+        estado_calidad: EstadoCalidadDestino | str = EstadoCalidadDestino.PENDIENTE,
+    ) -> Destino:
         resuelto = self.resolver_direccion_global(direccion, comuna=comuna, region=region)
         if resuelto.estado == EstadoBusquedaDestino.COINCIDENCIA:
-            return resuelto.destino
+            destino = resuelto.destino
+            # Bloque RESOLUCIÓN R16 -- una dirección global ya existente
+            # (misma clave física) que un llamador confirma ahora con
+            # evidencia humana/externa nueva debe promoverse a CONFIRMADO
+            # -- nunca quedarse en PENDIENTE para siempre sólo porque ya
+            # existía. Nunca DEGRADA un destino (sólo promueve PENDIENTE/
+            # REQUIERE_REVISION -> CONFIRMADO; jamás CONFIRMADO -> otra
+            # cosa aquí), y sólo agrega coordenadas cuando el destino
+            # existente aún no las tenía -- nunca sobrescribe una
+            # coordenada ya presente con una nueva silenciosamente.
+            estado_calidad_valor = EstadoCalidadDestino(estado_calidad).value
+            necesita_coordenadas = (
+                latitud is not None and longitud is not None
+                and destino.latitud is None and destino.longitud is None
+            )
+            if (
+                estado_calidad_valor == EstadoCalidadDestino.CONFIRMADO.value
+                and destino.estado_calidad != EstadoCalidadDestino.CONFIRMADO.value
+            ) or necesita_coordenadas:
+                destino = self.editar(
+                    destino.destino_id, modificacion_manual=True,
+                    estado_calidad=(
+                        EstadoCalidadDestino.CONFIRMADO
+                        if estado_calidad_valor == EstadoCalidadDestino.CONFIRMADO.value else None
+                    ),
+                    latitud=latitud if necesita_coordenadas else None,
+                    longitud=longitud if necesita_coordenadas else None,
+                )
+            return destino
         if resuelto.estado == EstadoBusquedaDestino.AMBIGUA:
             raise ErrorCatalogoDestinos("dirección global ambigua")
-        return self.crear(cliente_id="", nombre_destino=nombre_destino, direccion=direccion, comuna=comuna, region=region, pais=pais, fuente=fuente, latitud=latitud, longitud=longitud)
+        return self.crear(
+            cliente_id="", nombre_destino=nombre_destino, direccion=direccion, comuna=comuna,
+            region=region, pais=pais, fuente=fuente, latitud=latitud, longitud=longitud,
+            estado_calidad=estado_calidad,
+        )
 
     def crear(
         self,

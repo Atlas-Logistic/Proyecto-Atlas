@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import re
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -455,6 +455,7 @@ def resolver_destino_entrega(
     contexto_territorial: str = "Chile",
     punto_gps_referencia: Coordenadas | None = None,
     radio_gps_km: float = 50.0,
+    destinos_confirmados: Iterable[Destino] = (),
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -470,6 +471,17 @@ def resolver_destino_entrega(
     territorialmente incompatibles (ver `descartar_candidatos_lejos_de_gps`)
     antes de decidir si la ambigüedad es real. Nunca sustituye la
     geocodificación ni fabrica una dirección -- solo descarta.
+
+    `destinos_confirmados` (Bloque RESOLUCIÓN R16, opcional): catálogo de
+    destinos ya CONFIRMADOS -- si la ambigüedad persiste después de los
+    descartes anteriores, se intenta resolver con evidencia inequívoca ya
+    existente (`resolver_destino_ambiguo_con_evidencia_inequivoca`, Bloque
+    DESTINOS D1 -- función ya probada, nunca antes conectada a este
+    módulo). Nunca "el candidato más cercano": sólo actúa cuando el
+    catálogo confirmado o el recorrido GPS completo dejan exactamente un
+    candidato compatible; en cualquier otro caso, la ambigüedad
+    `MULTIPLES_UBICACIONES_DISPERSAS` se preserva intacta para revisión
+    humana/B1, exactamente igual que antes de este bloque.
     """
     texto = str(despachar_a_crudo or "").strip()
     if not texto:
@@ -521,10 +533,28 @@ def resolver_destino_entrega(
             # candidato de mayor confianza.
             candidato = _mejor_candidato(candidatos_relevantes)
         else:
-            return ResultadoDestinoEntrega(
-                despachar_a_crudo=texto, estado=ESTADO_REVISAR,
-                motivo=f"MULTIPLES_UBICACIONES_DISPERSAS({len(resultado.candidatos)})",
+            # Bloque RESOLUCIÓN R16 -- antes de rendirse ante
+            # `MULTIPLES_UBICACIONES_DISPERSAS`, agota la evidencia
+            # INEQUÍVOCA ya disponible (nunca "el más cercano"): catálogo
+            # de destinos CONFIRMADOS para la misma obra/cliente, o el
+            # punto GPS real de este mismo recorrido como único breadcrumb
+            # disponible aquí (ver docstring del parámetro). Si ninguna vía
+            # produce una respuesta inequívoca, la abstención original se
+            # preserva sin cambios.
+            breadcrumbs = (punto_gps_referencia,) if punto_gps_referencia is not None else ()
+            desambiguacion = resolver_destino_ambiguo_con_evidencia_inequivoca(
+                texto, candidatos_relevantes,
+                breadcrumbs=breadcrumbs, destinos_confirmados=destinos_confirmados,
+                radio_gps_km=radio_gps_km,
             )
+            if desambiguacion.resuelto and desambiguacion.candidato is not None:
+                candidato = desambiguacion.candidato
+                corroborado_por_gps = corroborado_por_gps or VIA_GPS_DESCARTA_RIVALES in desambiguacion.vias
+            else:
+                return ResultadoDestinoEntrega(
+                    despachar_a_crudo=texto, estado=ESTADO_REVISAR,
+                    motivo=f"MULTIPLES_UBICACIONES_DISPERSAS({len(resultado.candidatos)})",
+                )
     elif resultado.estado != EstadoRuta.REQUIERE_REVISION or not resultado.candidatos:
         # Cualquier otro estado (SIN_CREDENCIAL, SIN_CONEXION,
         # DIRECCION_NO_ENCONTRADA, LIMITE_CUOTA, PROVEEDOR_NO_DISPONIBLE,
@@ -628,6 +658,7 @@ def resolver_destino_entrega_validado(
     contexto_territorial: str = "Chile",
     punto_gps_referencia: Coordenadas | None = None,
     radio_gps_km: float = 50.0,
+    destinos_confirmados: Iterable[Destino] = (),
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -655,6 +686,7 @@ def resolver_destino_entrega_validado(
         despachar_a_crudo, proveedor_geocodificacion,
         contexto_territorial=contexto_territorial,
         punto_gps_referencia=punto_gps_referencia, radio_gps_km=radio_gps_km,
+        destinos_confirmados=destinos_confirmados,
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado
@@ -727,6 +759,57 @@ class ResultadoRutaEntrega:
         return asdict(self)
 
 
+def _reintentar_ruta_sin_acceso_vial_con_destino_confirmado(
+    *,
+    ruta: "ResultadoRuta",
+    entrega: ResultadoDestinoEntrega,
+    coordenada_origen: Coordenadas,
+    proveedor_rutas: ProveedorRutas,
+    perfil: str,
+    despachar_a_crudo: str,
+    destinos_confirmados: Iterable[Destino],
+) -> tuple["ResultadoRuta", ResultadoDestinoEntrega]:
+    """Bloque RESOLUCIÓN R16 -- Parte F (`SIN_ACCESO_VIAL`): investigado
+    contra 3 casos reales (472044/472073/472163) -- el punto que ORS
+    rechaza casi nunca es "la calle no existe": el geocodificador no
+    encontró coincidencia a nivel de calle y devolvió sólo un centroide
+    de comuna (confianza baja, sin número de calle), que efectivamente
+    puede caer sin ningún acceso vial cercano. Si existe un destino ya
+    CONFIRMADO (evidencia humana o externa previa -- nunca un candidato
+    nuevo, nunca inventado aquí) cuya dirección coincide LITERALMENTE con
+    el texto documental (mismo criterio exacto que Vía A,
+    `_destino_confirmado_coincide_texto`) y cuyas coordenadas son
+    DISTINTAS del centroide que falló, se reintenta el ruteo desde ese
+    punto ya confirmado. Si el reintento también falla, o no hay ningún
+    destino confirmado que coincida, `SIN_ACCESO_VIAL` se conserva con su
+    causa explícita -- nunca se inventa un snap vial ni una coordenada."""
+    if ruta.estado != EstadoRuta.SIN_ACCESO_VIAL or entrega.coordenadas is None:
+        return ruta, entrega
+    texto = str(despachar_a_crudo or "")
+    for destino in destinos_confirmados:
+        if destino.estado_calidad != "CONFIRMADO" or destino.estado_vigencia != "ACTIVO":
+            continue
+        if destino.latitud is None or destino.longitud is None:
+            continue
+        if not _destino_confirmado_coincide_texto(destino, texto):
+            continue
+        coordenada_confirmada = Coordenadas(destino.longitud, destino.latitud)
+        if distancia_km_haversine(coordenada_confirmada, entrega.coordenadas) <= MARGEN_MISMO_LUGAR_KM:
+            continue  # mismo punto que ya falló -- no aporta evidencia nueva
+        ruta_reintentada = proveedor_rutas.calcular_ruta(coordenada_origen, coordenada_confirmada, perfil)
+        if ruta_reintentada.estado == EstadoRuta.RUTA_CALCULADA:
+            entrega_actualizada = replace(
+                entrega,
+                coordenadas=coordenada_confirmada,
+                etiqueta_geocodificada=destino.direccion or entrega.etiqueta_geocodificada,
+                localidad=destino.comuna or entrega.localidad,
+                region=destino.region or entrega.region,
+                metodo_confirmacion="CATALOGO_CONFIRMADO_SIN_ACCESO_VIAL",
+            )
+            return ruta_reintentada, entrega_actualizada
+    return ruta, entrega
+
+
 def calcular_ruta_con_planta_conocida(
     *,
     planta: Planta,
@@ -737,6 +820,7 @@ def calcular_ruta_con_planta_conocida(
     perfil: str = "driving-hgv",
     punto_gps_destino: Coordenadas | None = None,
     radio_gps_destino_km: float = 50.0,
+    destinos_confirmados: Iterable[Destino] = (),
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -760,6 +844,7 @@ def calcular_ruta_con_planta_conocida(
     entrega = resolver_destino_entrega_validado(
         despachar_a_crudo, proveedor_rutas,
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
+        destinos_confirmados=destinos_confirmados,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO
@@ -784,6 +869,11 @@ def calcular_ruta_con_planta_conocida(
 
     ruta = proveedor_rutas.calcular_ruta(
         coordenada_origen, entrega.coordenadas, perfil
+    )
+    ruta, entrega = _reintentar_ruta_sin_acceso_vial_con_destino_confirmado(
+        ruta=ruta, entrega=entrega, coordenada_origen=coordenada_origen,
+        proveedor_rutas=proveedor_rutas, perfil=perfil,
+        despachar_a_crudo=despachar_a_crudo, destinos_confirmados=destinos_confirmados,
     )
     if ruta.estado != EstadoRuta.RUTA_CALCULADA:
         return ResultadoRutaEntrega(
@@ -827,6 +917,7 @@ def calcular_ruta_entrega_para_viaje(
     radio_geocerca_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
     punto_gps_destino: Coordenadas | None = None,
     radio_gps_destino_km: float = 50.0,
+    destinos_confirmados: Iterable[Destino] = (),
 ) -> ResultadoRutaEntrega:
     """Orquesta PLANTA ORIGEN -> DESPACHAR A (Bloque E1). Nunca usa
     `DIRECCION`/`COMUNA`/`COD DESTINATARIO` del cliente como destino de
@@ -867,6 +958,7 @@ def calcular_ruta_entrega_para_viaje(
     entrega = resolver_destino_entrega_validado(
         despachar_a_crudo, proveedor_rutas,
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
+        destinos_confirmados=destinos_confirmados,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F: coordenadas/confianza SÍ se conservan (evidencia
@@ -889,6 +981,11 @@ def calcular_ruta_entrega_para_viaje(
 
     ruta = proveedor_rutas.calcular_ruta(
         coordenada_origen, entrega.coordenadas, perfil
+    )
+    ruta, entrega = _reintentar_ruta_sin_acceso_vial_con_destino_confirmado(
+        ruta=ruta, entrega=entrega, coordenada_origen=coordenada_origen,
+        proveedor_rutas=proveedor_rutas, perfil=perfil,
+        despachar_a_crudo=despachar_a_crudo, destinos_confirmados=destinos_confirmados,
     )
     if ruta.estado != EstadoRuta.RUTA_CALCULADA:
         return ResultadoRutaEntrega(
