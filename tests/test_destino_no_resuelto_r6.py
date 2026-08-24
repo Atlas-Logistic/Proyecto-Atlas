@@ -378,10 +378,20 @@ def test_registrar_direccion_confirmada_nunca_queda_degradada_por_etiqueta_vieja
     _publicar(entorno, decision)
 
     direccion = "PUERTA DEL SOL 83 LAS CONDES"
+    # Bloque CIERRE LOGÍSTICA RESIDUAL -- fallback explícito (mismo doble
+    # determinista que el proveedor principal, sin más candidatos que el
+    # ya definido): sin esto, `aplicar_decision_obra` construiría por
+    # defecto un `NominatimGeocoder` REAL, y esta dirección es una
+    # dirección real que el respaldo estructurado ahora sabe resolver
+    # (ver `atlas_core/rutas/nominatim.py`) -- volvería esta prueba no
+    # determinista en vez de ejercitar el escenario sintético de
+    # "confianza insuficiente" que deliberadamente prueba.
+    proveedor_confianza_insuficiente = _proveedor_confianza_insuficiente(direccion, etiqueta="Las Condes, RM, Chile")
     resultado = aplicar_decision_obra(
         raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
         accion="REGISTRAR_DIRECCION", direccion_manual=direccion,
-        proveedor_rutas=_proveedor_confianza_insuficiente(direccion, etiqueta="Las Condes, RM, Chile"),
+        proveedor_rutas=proveedor_confianza_insuficiente,
+        proveedor_rutas_fallback=proveedor_confianza_insuficiente,
     )
     assert resultado["ok"] is True
     assert resultado["ruta_resuelta"] is False

@@ -3186,3 +3186,78 @@ no se ejecutara.
 DRIVE REAL. Todos los pendientes actuales tienen causa final
 demostrada (Sección 8B) o ruta calculada (Sección 8A); ninguno conserva
 un motivo obsoleto. Sin push en ninguno de los dos repos.**
+
+## Bloque CIERRE DEFINITIVO DE LOGÍSTICA RESIDUAL ACTUAL (2026-08-24)
+
+**Generalizaciones (nunca por guía):** (1) `NominatimGeocoder` ahora
+intenta consulta ESTRUCTURADA (`street=`/`city=`, con comuna
+auto-detectada del catálogo territorial cerrado en los últimos 1-3
+tokens del texto) antes de la libre (`q=`) -- verificado en vivo:
+significativamente más precisa para número de calle exacto. (2) Si la
+calle completa no encuentra el número, reintenta progresivamente con
+menos palabras al principio (nunca inventa un nombre nuevo, sólo
+subconjuntos del texto ya presente) -- resuelve abreviaturas como
+"PDTE." sin una lista de abreviaturas hardcodeada. (3) Vía C
+(`resolver_destino_con_fallback_estructurado`) gana una TERCERA vía de
+corroboración: si el propio texto documental confirmado ya menciona,
+explícitamente, la comuna del candidato (`_comunas_explicitas`, catálogo
+cerrado), corrobora -- sin depender de un destino aparte o de B1. (4)
+Nueva `revalidar_destino_confirmado_desde_ledger_sin_ocr`: corrige
+retroactivamente la etiqueta de un destino CONFIRMADO cuando el ledger
+(`REGISTRAR_DIRECCION`) ya registra una dirección más específica que la
+persistida en el catálogo -- general, recorre todo el ledger, no una
+guía. (5) `NominatimGeocoder.version` subida a "v2" -- la consulta
+estructurada cambia materialmente los resultados; sin esto, caché vieja
+serviría respuestas obsoletas para siempre.
+
+**6 casos (antes -> después):**
+- **472044** (`PUERTA DEL SOL 83`): catálogo tenía la etiqueta degradada
+  ("Las Condes, RM, Chile") de un bug anterior nunca corregido
+  retroactivamente -- corregida vía ledger, luego geocodificada
+  (estructurada) y corroborada por el propio texto documental.
+  `RUTA_CALCULADA`, 26.058 km.
+- **472073** (`PDTE. RIESCO 5903 LAS CONDES`): consulta libre encontraba
+  sólo avenidas sin número; la estructurada con reintento sí encuentra
+  "Avenida Presidente Riesco 5903" exacto, corroborado por "LAS CONDES"
+  en el propio texto. `RUTA_CALCULADA`, 14.7369 km.
+- **472163** (`VIA MORADA 6480 VITACURA`): mismo mecanismo, "Vía Morada
+  6480" exacto, corroborado por "VITACURA" en el texto. `RUTA_CALCULADA`,
+  29.9961 km.
+- **460807/472008** (`INTERIOR NUEVA O1148 SAN BERNARDO`): estructurada y
+  libre agotadas -- Nominatim no tiene ese número indexado en San
+  Bernardo. `COORDENADA_NO_CONFIRMADA(3)` real, causa específica ya
+  verificada, no genérica.
+- **464981** (origen): `planta_origen_id` sigue vacío -- bloqueo es de
+  origen/GPS, nunca llega a geocodificar destino; no existe en el
+  código ningún mecanismo calibrado de inferencia de planta por
+  patrón histórico de chofer/vehículo (verificado, no se inventó uno
+  nuevo en este bloque). `SIN_EVIDENCIA_GPS`/`ORIGEN_NO_DETERMINADO`
+  real.
+- **Control 472037:** permanece `RUTA_CALCULADA`, 35.5038 km -- no se
+  degradó.
+
+**Tests:** Motor -- `tests/test_rutas_nominatim.py` (+5: detección de
+comuna final, reintento con calle reducida, control sin comuna
+reconocible, fallback a libre); `tests/test_destino_confirmado_desde_ledger.py`
+(nuevo, 5 tests: corrección desde ledger, control ya-específico,
+control tipo/acción distinto, control ledger ausente, control
+destino_id inexistente); 4 tests existentes ajustados para inyectar
+`proveedor_rutas_fallback` explícito (antes construían por defecto un
+`NominatimGeocoder` real -- no determinista una vez que "Puerta del Sol
+83, Las Condes" pasó a ser resoluble de verdad). Suite completa: 1787
+passed (antes 1778).
+
+**Aplicado a Drive real:** backup verificado (`respaldos/
+CIERRE_LOGISTICA_RESIDUAL_PRE_20260824_203826/`, SHA-256 antes/después
+de 4 archivos). `guias_actualizadas: ["472044", "472073", "472163"]`.
+Dataset: 20 viajes, 17 con ruta (antes 14), 3 sin ruta (antes 6).
+Catálogo: 2 destinos corregidos vía ledger. Reporte regenerado
+(`reportes/reporte_cierre_logistica_residual/`), `reporte_vigente`
+publicado, `decisiones_pendientes.json` en 0, hash del dataset
+sincronizado.
+
+**Estado: BLOQUE CIERRE LOGÍSTICA RESIDUAL CERRADO EN CÓDIGO Y EN DRIVE
+REAL. 3 de 6 casos resueltos con ruta calculada y dirección específica;
+3 quedan en causa final genuinamente demostrada (no premature). Ninguna
+dirección canónica degradada en las 20 guías. Sin push en ninguno de
+los dos repos.**

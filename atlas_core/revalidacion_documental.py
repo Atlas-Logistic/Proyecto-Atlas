@@ -852,6 +852,70 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
     return {"destinos_actualizados": destinos_actualizados}
 
 
+def revalidar_destino_confirmado_desde_ledger_sin_ocr(
+    *, carpeta_catalogos: str | Path, ruta_ledger: str | Path,
+) -> dict[str, object]:
+    """Bloque CIERRE LOGÍSTICA RESIDUAL -- caso real 472044 (destino
+    ``0036d792-...``): una confirmación humana histórica
+    (``REGISTRAR_DIRECCION`` sobre ``DESTINO_NO_RESUELTO``, actor
+    JAVIER_DESKTOP) quedó persistida en el catálogo con la etiqueta
+    degradada a nivel comuna ("Las Condes, RM, Chile") en vez de la
+    dirección específica que el propio ledger ya registra como
+    ``direccion_manual`` ("PUERTA DEL SOL 83") -- un residuo de un bug de
+    especificidad corregido en un bloque anterior para la fila del
+    dataset (`revalidar_direccion_entrega_degradada_sin_ocr`) pero nunca
+    aplicado retroactivamente al CATÁLOGO, porque esta entrada se creó
+    ANTES de ese fix. Consecuencia real: `_destino_confirmado_coincide_
+    texto` nunca puede volver a emparejar este destino CONFIRMADO contra
+    el texto documental real ("PUERTA DEL SOL 83"), así que Vía A/Vía C
+    quedan permanentemente ciegas a un destino que un humano YA confirmó.
+
+    El ledger es la fuente de verdad de esa confirmación (mismo
+    `destino_id` que `CatalogoDestinos` usa) -- nunca inventa nada, sólo
+    reescribe la etiqueta con el mismo texto que el propio Javier
+    confirmó, y sólo cuando esa reescritura es estrictamente MÁS
+    específica (misma regla de especificidad que ya usa
+    `revalidar_direccion_entrega_degradada_sin_ocr`,
+    `_etiqueta_geocodificada_o_texto_documental` -- calle+número gana a
+    una etiqueta sin número). Nunca toca un destino cuya dirección actual
+    ya sea igual o más específica que la del ledger. General -- recorre
+    TODAS las aplicaciones `REGISTRAR_DIRECCION` del ledger, no una guía
+    en particular."""
+    from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoNoEncontradoError
+    from atlas_core.rutas.destino_entrega import _etiqueta_geocodificada_o_texto_documental
+
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"destinos_corregidos": []}
+    carpeta = Path(carpeta_catalogos)
+    catalogo = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
+    destinos_corregidos: list[str] = []
+    for aplicacion in ledger.get("aplicaciones", []):
+        if aplicacion.get("tipo") != "DESTINO_NO_RESUELTO" or aplicacion.get("accion") != "REGISTRAR_DIRECCION":
+            continue
+        destino_id = str(aplicacion.get("destino_id") or "").strip()
+        direccion_manual = str(aplicacion.get("direccion_manual") or "").strip()
+        if not destino_id or not direccion_manual:
+            continue
+        try:
+            destino = catalogo.obtener(destino_id)
+        except (DestinoNoEncontradoError, OSError, ValueError):
+            continue
+        direccion_corregida = _etiqueta_geocodificada_o_texto_documental(
+            etiqueta=destino.direccion, texto_documental=direccion_manual,
+        )
+        if direccion_corregida == destino.direccion:
+            continue
+        catalogo.editar(
+            destino.destino_id, modificacion_manual=True,
+            direccion=direccion_corregida,
+            nombre_destino=direccion_corregida if destino.nombre_destino == destino.direccion else None,
+        )
+        destinos_corregidos.append(destino.destino_id)
+    return {"destinos_corregidos": destinos_corregidos}
+
+
 def revalidar_ruta_sin_destino_calculado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -1225,6 +1289,15 @@ def revalidar_y_regenerar_reporte(
     resultado_destino_sin_numero = revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(
         ruta_dataset=dataset,
     )
+    # Bloque CIERRE LOGÍSTICA RESIDUAL -- corre ANTES que R18 y que la
+    # revalidación de ruta a propósito: si la propia etiqueta del destino
+    # CONFIRMADO quedó degradada en el catálogo (caso real 472044), Vía
+    # A/Vía C nunca podrán emparejarlo contra el texto documental sin
+    # importar cuántas veces se reintente geocodificación después -- hay
+    # que corregir la IDENTIDAD antes de intentar resolver la RUTA.
+    resultado_destino_confirmado_ledger = revalidar_destino_confirmado_desde_ledger_sin_ocr(
+        carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
+    )
     # Bloque RESOLUCIÓN R18 -- corre ANTES que la revalidación de ruta a
     # propósito: un destino recién geocodificado aquí (confirmado por
     # Javier, pero sin coordenadas hasta ahora) es exactamente lo que Vía
@@ -1271,6 +1344,7 @@ def revalidar_y_regenerar_reporte(
         "destino_contradicho": resultado_destino_contradicho,
         "destino_sin_numero": resultado_destino_sin_numero,
         "cliente_ausente": resultado_cliente_ausente,
+        "destino_confirmado_ledger": resultado_destino_confirmado_ledger,
         "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
         "ruta": resultado_ruta,
     }

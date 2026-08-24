@@ -224,7 +224,10 @@ def test_bloque_r9_motivo_tecnico_obsoleto_se_corrige_aunque_el_reintento_siga_r
         resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 10.0, 15.0, "SINTETICO"),
     )
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- fallback explícito, ver
+        # comentario equivalente más abajo en este mismo archivo.
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=proveedor,
     )
     assert resultado["guias_actualizadas"] == ["472044"]
     fila_final = _leer(dataset)[0]
@@ -265,7 +268,18 @@ def test_bloque_confirmacion_d2_limpia_direccion_entrega_degradada_al_reescribir
         resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 10.0, 15.0, "SINTETICO"),
     )
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- `proveedor_rutas_fallback`
+        # explícito (el mismo doble determinista, sin entrada geocodificada
+        # para esta consulta salvo la ya definida arriba): sin esto, la
+        # función construye por defecto un `NominatimGeocoder` REAL -- y
+        # "Puerta del Sol 83, Las Condes" es una dirección real que el
+        # respaldo estructurado ahora sí sabe resolver (ver
+        # `atlas_core/rutas/nominatim.py`), lo que volvería esta prueba no
+        # determinista (dependiente del estado actual de un servicio
+        # externo) en vez de ejercitar el escenario sintético que
+        # deliberadamente prueba.
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=proveedor,
     )
     assert resultado["guias_actualizadas"] == ["472044"]
     fila_final = _leer(dataset)[0]

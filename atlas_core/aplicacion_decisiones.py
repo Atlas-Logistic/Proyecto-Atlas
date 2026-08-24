@@ -204,7 +204,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, proveedor_rutas: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -674,6 +674,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     _escribir_filas_completas(dataset, filas_dataset)
                     resultado_revalidacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
                         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+                        proveedor_rutas_fallback=proveedor_rutas_fallback,
                     )
                     # Bloque LOGÍSTICA L1 -- `guias_actualizadas` ya NO es un
                     # proxy fiable de "ruta resuelta": desde este bloque

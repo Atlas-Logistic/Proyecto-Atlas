@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from dataclasses import dataclass
 from typing import Callable
@@ -87,9 +88,53 @@ def _localidad_y_region(direccion: dict) -> tuple[str, str]:
     return "", ""
 
 
+def _calle_y_comuna(direccion: str) -> tuple[str, str] | None:
+    """Intenta separar 'CALLE NUMERO ... COMUNA' de un texto de consulta ya
+    construido -- SOLO si puede identificar, con el catálogo territorial
+    cerrado (`normalizar_comuna`, EXACTA, nunca fuzzy), una comuna real en
+    los ÚLTIMOS 1-3 tokens del texto (convención habitual de direcciones
+    chilenas: la comuna va al final, p. ej. "PDTE. RIESCO 5903, Las
+    Condes, Chile"). Devuelve `(calle, comuna)` o `None` si no hay comuna
+    reconocible ahí -- en ese caso `geocodificar` usa la búsqueda libre de
+    siempre, nunca fuerza una estructura que no está presente."""
+    texto = direccion.split(",")[0].strip()
+    tokens = texto.split()
+    for largo in (3, 2, 1):
+        if len(tokens) <= largo:
+            continue
+        candidato_comuna = " ".join(tokens[-largo:])
+        resultado = normalizar_comuna(candidato_comuna)
+        if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna:
+            calle = " ".join(tokens[:-largo]).strip()
+            if calle:
+                return calle, resultado.comuna
+    return None
+
+
+_PATRON_NUMERO_FINAL = re.compile(r"(\d+)\s*$")
+
+
+def _numero_final(calle: str) -> str:
+    """Número de casa al final de `calle`, si lo hay -- misma convención
+    ya usada en todo el sistema (el número siempre va al final del
+    segmento de calle). Nunca inventa un número, sólo lo lee del texto ya
+    presente."""
+    coincidencia = _PATRON_NUMERO_FINAL.search(calle.strip())
+    return coincidencia.group(1) if coincidencia else ""
+
+
 class NominatimGeocoder:
     nombre = "nominatim"
-    version = "v1"
+    # Bloque CIERRE LOGÍSTICA RESIDUAL -- v2: la consulta ESTRUCTURADA
+    # (`_calle_y_comuna`/`_buscar_estructurada_con_reintento`) cambia
+    # materialmente qué candidatos devuelve este proveedor para el MISMO
+    # texto de entrada (caso real 472073: "v1" había cacheado un
+    # `RESULTADO_AMBIGUO` sin número de calle; la lógica nueva sí lo
+    # encuentra). La clave de caché
+    # (`atlas_core.rutas.cache_geocodificacion._clave`) incluye la
+    # versión exactamente para esto -- subirla es lo que fuerza a
+    # re-consultar en vez de servir para siempre un resultado obsoleto.
+    version = "v2"
     URL_BUSQUEDA = "https://nominatim.openstreetmap.org/search"
 
     def __init__(
@@ -131,20 +176,16 @@ class NominatimGeocoder:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return EstadoRuta.RESPUESTA_INVALIDA, None
 
-    def geocodificar(self, direccion: str) -> ResultadoGeocodificacion:
-        if not str(direccion).strip():
-            return ResultadoGeocodificacion(
-                EstadoRuta.DIRECCION_NO_ENCONTRADA, motivo="DIRECCION_VACIA"
-            )
-        parametros = {
-            "q": direccion, "format": "jsonv2", "addressdetails": "1", "limit": "8",
-        }
+    def _consultar(self, parametros: dict) -> tuple[EstadoRuta | None, tuple[CandidatoGeocodificacion, ...] | None]:
+        """Ejecuta una consulta ya armada (estructurada o libre) y la
+        traduce a candidatos -- nunca decide sola cuál forma de consulta
+        usar, sólo la ejecuta."""
         if self._pais:
-            parametros["countrycodes"] = self._pais
+            parametros = {**parametros, "countrycodes": self._pais}
         url = f"{self.URL_BUSQUEDA}?{urlencode(parametros)}"
         estado, datos = self._solicitar(Request(url, method="GET"))
         if estado:
-            return ResultadoGeocodificacion(estado, motivo=estado.value)
+            return estado, None
         try:
             if not isinstance(datos, list):
                 raise TypeError
@@ -160,11 +201,84 @@ class NominatimGeocoder:
                     Coordenadas(float(item["lon"]), float(item["lat"])),
                     etiqueta, confianza, localidad, region,
                 ))
-            candidatos = tuple(candidatos_lista)
+            return None, tuple(candidatos_lista)
         except (KeyError, TypeError, ValueError, IndexError):
+            return EstadoRuta.RESPUESTA_INVALIDA, None
+
+    def geocodificar(self, direccion: str) -> ResultadoGeocodificacion:
+        if not str(direccion).strip():
             return ResultadoGeocodificacion(
-                EstadoRuta.RESPUESTA_INVALIDA, motivo="RESPUESTA_GEOCODIFICACION_INVALIDA"
+                EstadoRuta.DIRECCION_NO_ENCONTRADA, motivo="DIRECCION_VACIA"
             )
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- casos reales 472073/472163
+        # (PDTE. RIESCO 5903 LAS CONDES / VIA MORADA 6480 VITACURA): la
+        # búsqueda LIBRE (`q=`, un solo campo de texto) de Nominatim no
+        # siempre encuentra el punto exacto -- verificado en vivo: para
+        # estas dos direcciones devolvía sólo segmentos de calle SIN
+        # número. La búsqueda ESTRUCTURADA (`street=`/`city=`, la misma
+        # API pública, un modo de consulta distinto y MÁS preciso cuando
+        # se conoce la comuna) SÍ encuentra el número exacto -- verificado
+        # en vivo contra las mismas dos direcciones. Se detecta la comuna
+        # con el MISMO catálogo territorial cerrado ya usado en todo el
+        # sistema (`normalizar_comuna`, nunca fuzzy) -- si no hay comuna
+        # reconocible, se usa directamente la búsqueda libre de siempre
+        # (comportamiento idéntico a antes de este bloque).
+        estructurada = _calle_y_comuna(direccion)
+        if estructurada is not None:
+            calle, comuna = estructurada
+            candidatos_estructurados = self._buscar_estructurada_con_reintento(calle, comuna)
+            if candidatos_estructurados is not None:
+                return self._resultado_desde_candidatos(candidatos_estructurados)
+            # Sin resultado estructurado útil (comuna no cubierta en OSM
+            # con ese nivel de detalle, número inexistente, o error
+            # técnico) -- se agota también la búsqueda libre antes de
+            # rendirse, nunca se abandona tras un solo intento.
+        estado, candidatos = self._consultar({
+            "q": direccion, "format": "jsonv2", "addressdetails": "1", "limit": "8",
+        })
+        if estado:
+            return ResultadoGeocodificacion(estado, motivo=estado.value)
+        return self._resultado_desde_candidatos(candidatos or ())
+
+    def _buscar_estructurada_con_reintento(
+        self, calle: str, comuna: str,
+    ) -> tuple[CandidatoGeocodificacion, ...] | None:
+        """Bloque CIERRE LOGÍSTICA RESIDUAL -- caso real 472073 (PDTE.
+        RIESCO 5903 LAS CONDES): verificado en vivo que la consulta
+        estructurada con la calle COMPLETA a veces no encuentra el número
+        exacto cuando el texto documental usa una forma abreviada
+        ("PDTE." en vez de "Presidente") que el índice de Nominatim no
+        reconoce como equivalente -- pero la MISMA consulta SÍ lo
+        encuentra si se reduce el texto a sus últimas palabras ("RIESCO
+        5903" ya alcanza un único resultado exacto). Nunca inventa un
+        nombre de calle nuevo -- sólo prueba subconjuntos cada vez más
+        cortos del mismo texto documental ya presente, de derecha a
+        izquierda (el número siempre va al final; la parte que sobra al
+        principio es la que puede estar abreviada o ser prescindible).
+        Se detiene en el primer intento que produce un único candidato
+        con el número buscado -- nunca elige entre varios named a ciegas.
+        Devuelve `None` si ningún intento estructurado fue útil."""
+        numero = _numero_final(calle)
+        tokens = calle.split()
+        for inicio in range(len(tokens)):
+            calle_intento = " ".join(tokens[inicio:]).strip()
+            if not calle_intento:
+                continue
+            estado, candidatos = self._consultar({
+                "street": calle_intento, "city": comuna, "format": "jsonv2",
+                "addressdetails": "1", "limit": "8",
+            })
+            if estado is not None or not candidatos:
+                continue
+            if numero:
+                candidatos = tuple(c for c in candidatos if numero in c.etiqueta)
+            if len(candidatos) == 1:
+                return candidatos
+        return None
+
+    def _resultado_desde_candidatos(
+        self, candidatos: tuple[CandidatoGeocodificacion, ...],
+    ) -> ResultadoGeocodificacion:
         if not candidatos:
             return ResultadoGeocodificacion(
                 EstadoRuta.DIRECCION_NO_ENCONTRADA, motivo="SIN_CANDIDATOS"

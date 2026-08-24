@@ -519,6 +519,21 @@ def _comuna_confirma_candidato(comuna_confirmada: str, comuna_candidato: str) ->
     return _comunas_territorialmente_compatibles(comuna_confirmada, comuna_candidato)
 
 
+def _comuna_candidato_en_texto(texto_documental: str, comuna_candidato: str) -> bool:
+    """Bloque CIERRE LOGÍSTICA RESIDUAL -- True si `comuna_candidato`
+    coincide (mismo criterio de `_comuna_confirma_candidato`: exacta o
+    territorialmente compatible) con ALGUNA de las comunas reales que
+    `texto_documental` menciona explícitamente (`_comunas_explicitas`,
+    catálogo territorial cerrado, nunca fuzzy). El texto documental ya
+    forma parte de la identidad CONFIRMADA (es el mismo texto que
+    `_destino_confirmado_coincide_texto` ya usa) -- una comuna que el
+    propio documento nombra es evidencia real, nunca inventada."""
+    for comuna_mencionada in _comunas_explicitas(texto_documental):
+        if _comuna_confirma_candidato(comuna_mencionada, comuna_candidato):
+            return True
+    return False
+
+
 _PATRON_PALABRA = re.compile(r"[A-ZÁÉÍÓÚÜÑ]+")
 
 
@@ -640,7 +655,23 @@ def resolver_destino_con_fallback_estructurado(
         and _texto_menciona_comuna_como_palabra_completa(contexto_evidencia_b1, "Santiago")
         and _comunas_territorialmente_compatibles("Santiago", candidato.localidad)
     )
-    if destino_corroborante is None and not corroborado_por_evidencia_b1:
+    # Bloque CIERRE LOGÍSTICA RESIDUAL -- casos reales 460807/472008
+    # ("...SAN BERNARDO") y 464981 ("...SANTIAGO MAIPU"): la comuna real
+    # del candidato a veces ya está escrita, LITERALMENTE, en el propio
+    # texto documental confirmado -- evidencia todavía más directa que un
+    # destino confirmado aparte o que B1 (es el mismo texto que la
+    # identidad ya confirmada). Reutiliza el catálogo territorial cerrado
+    # ya existente (`_comunas_explicitas`, nunca fuzzy, nunca una lista
+    # propia) -- corrobora si el candidato cae en CUALQUIERA de las
+    # comunas reales que el texto menciona explícitamente, incluso si
+    # menciona más de una (p. ej. "Santiago" como área metropolitana +
+    # "Maipú" como comuna específica -- Bloque TERRITORIAL T1: eso no es
+    # una contradicción, son dos niveles del mismo lugar).
+    corroborado_por_texto_documental = (
+        destino_corroborante is None and not corroborado_por_evidencia_b1 and candidato.localidad
+        and _comuna_candidato_en_texto(texto, candidato.localidad)
+    )
+    if destino_corroborante is None and not corroborado_por_evidencia_b1 and not corroborado_por_texto_documental:
         return ResultadoDesambiguacionInequivoca(
             motivo=f"FALLBACK_SIN_CORROBORACION_TERRITORIAL: {candidato.etiqueta}",
             candidato=candidato, vias=(VIA_FALLBACK_ESTRUCTURADO,),

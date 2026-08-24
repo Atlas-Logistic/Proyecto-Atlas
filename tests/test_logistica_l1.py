@@ -110,7 +110,14 @@ def test_motivo_ruta_en_blanco_se_refresca_con_causa_real_del_reintento(tmp_path
         resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 20.0, 30.0, "SINTETICO"),
     )
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- fallback explícito (mismo
+        # doble determinista): sin esto se construiría por defecto un
+        # `NominatimGeocoder` REAL, y "Puerta del Sol 83, Las Condes" es
+        # una dirección real que el respaldo estructurado ahora resuelve
+        # (ver `atlas_core/rutas/nominatim.py`) -- volvería esta prueba
+        # no determinista en vez de ejercitar el escenario sintético.
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=proveedor,
     )
     assert resultado["guias_actualizadas"] == ["1"]
     fila = _leer(dataset)[0]
@@ -145,7 +152,14 @@ def test_motivo_de_comuna_contradicha_es_reevaluable_con_causa_fresca(tmp_path):
         resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 20.0, 30.0, "SINTETICO"),
     )
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- fallback explícito (mismo
+        # doble determinista): sin esto se construiría por defecto un
+        # `NominatimGeocoder` REAL, y "Puerta del Sol 83, Las Condes" es
+        # una dirección real que el respaldo estructurado ahora resuelve
+        # (ver `atlas_core/rutas/nominatim.py`) -- volvería esta prueba
+        # no determinista en vez de ejercitar el escenario sintético.
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=proveedor,
     )
     assert resultado["guias_actualizadas"] == ["1"]
     fila = _leer(dataset)[0]
@@ -177,7 +191,14 @@ def test_motivo_de_evidencia_externa_inmutable_nunca_se_reescribe(tmp_path):
         resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 20.0, 30.0, "SINTETICO"),
     )
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- fallback explícito (mismo
+        # doble determinista): sin esto se construiría por defecto un
+        # `NominatimGeocoder` REAL, y "Puerta del Sol 83, Las Condes" es
+        # una dirección real que el respaldo estructurado ahora resuelve
+        # (ver `atlas_core/rutas/nominatim.py`) -- volvería esta prueba
+        # no determinista en vez de ejercitar el escenario sintético.
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=proveedor,
     )
     assert resultado["guias_actualizadas"] == []
     fila = _leer(dataset)[0]
@@ -356,7 +377,14 @@ def test_sin_acceso_vial_sigue_sin_ruta_causa_correcta(tmp_path):
         },
     )
     resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        # Bloque CIERRE LOGÍSTICA RESIDUAL -- fallback explícito (mismo
+        # doble determinista): sin esto se construiría por defecto un
+        # `NominatimGeocoder` REAL, y "Puerta del Sol 83, Las Condes" es
+        # una dirección real que el respaldo estructurado ahora resuelve
+        # (ver `atlas_core/rutas/nominatim.py`) -- volvería esta prueba
+        # no determinista en vez de ejercitar el escenario sintético.
         ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=proveedor,
     )
     fila = _leer(dataset)[0]
     assert fila["distancia_km"] == ""
