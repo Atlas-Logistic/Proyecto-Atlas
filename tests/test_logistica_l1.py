@@ -87,6 +87,28 @@ def test_texto_documental_sin_numero_no_fuerza_nada():
     assert resultado == "Las Condes, RM, Chile"
 
 
+def test_numero_de_calle_corrompido_por_ocr_tambien_se_preserva():
+    """Bloque FIX DE ACEPTACION -- caso real 472247: "CAMINO A MELIFILLA
+    1OBOD SANTIAGO MAIPU" -- el OCR mezcló letras dentro del número de
+    casa ("1OBOD" en vez de un número limpio), así que el proxy anterior
+    (sólo dígitos puros) no lo reconocía como específico y dejaba pasar
+    la etiqueta genérica del geocodificador ("Maipú, RM, Chile")."""
+    resultado = _etiqueta_geocodificada_o_texto_documental(
+        etiqueta="Maipú, RM, Chile", texto_documental="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+    )
+    assert resultado == "CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU"
+
+
+def test_token_alfanumerico_corto_sin_digitos_no_se_confunde_con_numero():
+    """Control -- un token corto puramente alfabético (comuna, palabra
+    estructural) nunca se confunde con un número de casa ruidoso: la
+    forma exige AL MENOS un dígito, nunca sólo letras."""
+    resultado = _etiqueta_geocodificada_o_texto_documental(
+        etiqueta="Maipú, RM, Chile", texto_documental="SECTOR RURAL MAIPU",
+    )
+    assert resultado == "Maipú, RM, Chile"
+
+
 # --- 2. "No disponible" nunca silencioso -- motivo en blanco se refresca ---
 
 def test_motivo_ruta_en_blanco_se_refresca_con_causa_real_del_reintento(tmp_path):
@@ -226,6 +248,30 @@ def test_direccion_entrega_degradada_se_corrige_sin_tocar_km_ni_ruta(tmp_path):
     assert fila["distancia_km"] == "30.6809"
     assert fila["duracion_min"] == "41.09"
     assert fila["localidad_entrega"] == "Ñuñoa"
+
+
+def test_direccion_entrega_degradada_por_numero_ocr_ruidoso_se_corrige(tmp_path):
+    """Caso real 472247: ruta YA calculada (34,9 km / 48 min) con la
+    etiqueta genérica "Maipú, RM, Chile" pese a que el documento trae un
+    número de casa ("1OBOD") corrompido por OCR -- la especificidad se
+    restaura sin tocar km/tiempo."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv(
+        planta, numero_guia="472247",
+        despachar_a_crudo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU", direccion_entrega="Maipú, RM, Chile",
+        localidad_entrega="Maipú", region_entrega="Metropolitana",
+        estado_ruta="RUTA_CALCULADA", distancia_km="34.8694", duracion_min="47.61",
+    )])
+    resultado = revalidar_direccion_entrega_degradada_sin_ocr(ruta_dataset=dataset)
+    assert resultado["guias_actualizadas"] == ["472247"]
+    fila = _leer(dataset)[0]
+    assert fila["direccion_entrega"] == "CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU"
+    # Nunca toca km/tiempo/localidad -- la ruta ya era válida, nunca se
+    # reintenta routing.
+    assert fila["distancia_km"] == "34.8694"
+    assert fila["duracion_min"] == "47.61"
+    assert fila["localidad_entrega"] == "Maipú"
 
 
 def test_direccion_entrega_ya_especifica_no_se_toca(tmp_path):

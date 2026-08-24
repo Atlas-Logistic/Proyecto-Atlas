@@ -3306,3 +3306,34 @@ no repregunta destino; revalidacion_documental: retroactivo + 4
 controles). Suite completa: 1807 passed (antes 1787). E2E contra copia
 real + aplicado a Drive real con backup+SHA-256 (`respaldos/
 FIX_ACEPTACION_460861_PRE_20260824_222951/`). Sin push.
+
+## Bloque FIX DE ACEPTACION -- número de casa corrompido por OCR ya no degrada la dirección canónica (2026-08-24)
+
+**Causa:** `_trae_numero_calle` (proxy de "tiene dirección específica",
+usado por `_etiqueta_geocodificada_o_texto_documental`) sólo reconocía
+dígitos PUROS (`\b\d{1,6}\b`). Caso real 472247: el documento trae
+"CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU" -- el OCR mezcló letras
+DENTRO del número de casa ("1OBOD"), un patrón de ruido distinto del ya
+cubierto (letra pegada ADELANTE de dígitos, "O1148"). Sin un token
+reconocible como número, la etiqueta genérica del geocoder ("Maipú, RM,
+Chile") ganaba pese a que el destino operacional ya tenía ruta
+calculada (34,9 km / 47,6 min).
+
+**Regla general:** `_trae_numero_calle` ahora también reconoce
+cualquier token corto (2-6 caracteres) que mezcle dígitos y letras en
+CUALQUIER posición -- nunca decodifica ni asume el valor real, sólo
+reconoce la FORMA (mismo principio barato ya documentado). Un token
+puramente alfabético (comuna, palabra estructural) sigue sin calificar
+-- exige al menos un dígito. Aplica a CUALQUIER guía con esta forma de
+ruido OCR, no sólo 472247 (472212, con el mismo patrón "10B00" en la
+misma calle, se corrigió en la misma pasada).
+
+**472247 (antes -> después):** `direccion_entrega` "Maipú, RM, Chile"
+-> "CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU"; 34.8694 km / 47.61 min
+intactos (nunca se reintentó routing); `estado_ruta` sin cambios.
+
+**Tests/commit:** 5 tests focales nuevos en `test_logistica_l1.py`
+(unidad: caso real + control alfabético puro; integración: 472247
+completo con km/tiempo intactos). Suite completa: 1810 passed (antes
+1807). Aplicado a Drive real con backup+SHA-256 (`respaldos/
+FIX_DIRECCION_CANONICA_472247_PRE_20260824_224353/`). Sin push.

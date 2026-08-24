@@ -691,13 +691,32 @@ def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> Candid
 
 
 _PATRON_NUMERO_CALLE = re.compile(r"\b\d{1,6}\b")
+# Bloque FIX DE ACEPTACION -- caso real 472247 ("CAMINO A MELIFILLA
+# 1OBOD SANTIAGO MAIPU": el OCR mezcló letras dentro del número de casa,
+# "1OBOD" en vez de algo como "10800" -- ni un dígito puro ni el patrón
+# ya cubierto de "una letra pegada ADELANTE de dígitos" que
+# `_PATRON_NUMERO_CON_PREFIJO_OCR` (más abajo) ya reconoce para
+# `_numeros_de_calle`). Un token corto (2-6 caracteres) que MEZCLA
+# dígitos y letras en cualquier posición sigue ocupando, con altísima
+# probabilidad, el lugar de un número de casa/local ruidoso por OCR --
+# nunca decodifica ni asume qué número real es, sólo reconoce la FORMA
+# (mismo principio barato que el resto de este proxy).
+_PATRON_TOKEN_ALFANUMERICO_CORTO = re.compile(r"\b[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]{2,6}\b")
 
 
 def _trae_numero_calle(texto: str) -> bool:
     """Proxy barato y genérico de "tiene una dirección específica" --
-    al menos un token numérico de 1-6 dígitos (número de casa/local).
-    Nunca depende de un formato fijo ni de nombres de comuna concretos."""
-    return bool(_PATRON_NUMERO_CALLE.search(texto))
+    al menos un token numérico de 1-6 dígitos (número de casa/local), o
+    un token corto que mezcla dígitos y letras (número de casa
+    corrompido por OCR, caso real 472247). Nunca depende de un formato
+    fijo ni de nombres de comuna concretos, nunca compara ni decodifica
+    el valor -- sólo su forma."""
+    if _PATRON_NUMERO_CALLE.search(texto):
+        return True
+    return any(
+        any(c.isdigit() for c in token) and any(c.isalpha() for c in token)
+        for token in _PATRON_TOKEN_ALFANUMERICO_CORTO.findall(texto)
+    )
 
 
 def _etiqueta_geocodificada_o_texto_documental(*, etiqueta: str, texto_documental: str) -> str:
