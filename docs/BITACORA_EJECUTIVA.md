@@ -2472,3 +2472,91 @@ confirmación humana futura a guías hermanas de la misma obra.
 
 **Estado: BLOQUE R17 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R18 -- decisiones logísticas accionables para los 7 casos irresueltos (2026-08-24)
+
+**Causa raíz real de "requiere humano + 0 decisiones":** tres
+mecanismos ya existían, ya probados, cada uno con su propio
+`detectar_decisiones_*_sin_ocr`/`reconciliar_decisiones_*`
+(`ORIGEN_NO_CONFIRMADO`, `DESTINO_NO_RESUELTO`, `CLIENTE_AUSENTE`) --
+pero NINGUNO estaba conectado al auto-republicado de la bandeja que
+`revalidar_y_regenerar_reporte` corre siempre después de cada
+revalidación retroactiva. Sólo se PODABAN decisiones ya publicadas;
+nunca se DESCUBRÍAN candidatas nuevas que la revalidación acababa de
+habilitar. Además, `GEOCODIFICACION_FUERA_DE_CHILE` (Bloque R16) nunca
+se había agregado al conjunto `MOTIVOS_DESTINO_NO_RESUELTO` -- ni
+siquiera detectable.
+
+**Segunda causa real, encontrada al investigar por qué sólo 1 de 6
+casos generaba una decisión al conectar lo anterior:** la mayoría de
+los 6 YA TENÍAN respuesta humana -- Javier ya había confirmado la
+dirección/relación obra↔destino (vía `DESTINO_SIN_CONFIRMAR` o una
+reconciliación anterior), pero ese flujo NUNCA geocodifica, así que el
+destino queda `CONFIRMADO` para siempre SIN coordenadas -- "¿es
+correcta esta dirección?" ya está contestada, pero Vía A (Bloque
+RESOLUCIÓN R16) nunca podía usarlo para rutear. Y, al revés, la
+supresión de una decisión ya contestada (Bloque R13) sólo comprobaba
+que la OBRA tuviera ALGUNA relación confirmada -- sin verificar que
+fuera la MISMA dirección: caso real 472044 (EMPRESA CONSTRUCTORA MENA
+Y), cuya obra ya tenía confirmado "CAM. EL NOVICIADO LAMPA LAMPA" (guía
+distinta) mientras ÉSTA trae "PUERTA DEL SOL 83 LAS CONDES" -- una
+pregunta genuina quedaba silenciada por una confirmación de OTRO lugar.
+
+**Fix general (tres piezas, todas reutilizan mecanismos existentes):**
+(1) `revalidar_y_regenerar_reporte` ahora fusiona, en su auto-republicado
+de bandeja, las candidatas frescas de `detectar_decisiones_origen_sin_ocr`
+/`_destino_no_resuelto_sin_ocr`/`_cliente_ausente_sin_ocr` -- corre
+siempre, sin script manual; `generar_artefacto` deduplica por
+`decision_id`, nunca produce una tarjeta repetida ni resucita una ya
+cerrada. (2) `GEOCODIFICACION_FUERA_DE_CHILE` agregado a
+`MOTIVOS_DESTINO_NO_RESUELTO`. (3) Nueva
+`revalidar_destinos_confirmados_sin_coordenadas_sin_ocr`: geocodifica
+(con caché, `pais=CL`, mismo mecanismo determinista ya calibrado) todo
+destino `CONFIRMADO` sin coordenadas -- corre ANTES de la revalidación
+de ruta, para que Vía A pueda usarlo en la MISMA pasada; nunca vuelve a
+preguntar nada, sólo completa un dato que Atlas puede obtener solo. (4)
+La supresión de `DESTINO_NO_RESUELTO` (Bloque R13) ahora exige que la
+dirección CONFIRMADA de la obra coincida LITERALMENTE (mismo criterio
+exacto de Vía A) con el texto documental de la guía -- nunca suprime
+sólo porque la obra tiene alguna relación confirmada, sea cual sea.
+
+**Los 7 clasificados uno a uno:**
+- **472008/472037/472044** -- decisión `DESTINO_NO_RESUELTO` publicada
+  (3 nuevas, cada una representa una familia/obra distinta): Javier
+  puede resolverlas desde Desktop con `REGISTRAR_DIRECCION`.
+- **460807/472073/472163** -- dirección YA confirmada por Javier (dos
+  desde este mismo catálogo, una desde Bloque R13); Atlas intentó
+  geocodificarla sola (Parte 3) y no pudo -- limitación real del
+  proveedor (mismo hallazgo del Bloque R17), causa técnica final, no
+  decisión. Bonus real: un destino confirmado de OTRA obra
+  ("MAESTRA LIDIA TORRES 92, RECOLETA") sí se geocodificó solo.
+- **464981** -- `SIN_TRIPS_EN_VENTANA_TEMPORAL`: sin ningún candidato de
+  planta que ofrecer (criterio ya establecido, Bloque ORIGEN D1), causa
+  técnica final confirmada, no decisión.
+
+**B1:** sin nueva ambigüedad elegible para razonar más allá de la ya
+confirmada en Bloque R16 (`SIN_EVIDENCIA_PARA_RAZONAR` vigente, sin
+documentos hermanos con la misma obra ya resueltos). No se repitió la
+llamada (0 evidencia nueva desde el último bloque, mismo resultado
+garantizado -- ver criterio de performance).
+
+**Post-decisión:** ya cubierto por infraestructura existente
+(`aplicar_decision_obra` ya dispara `revalidar_y_regenerar_reporte`
+tras cada aplicación, ahora con las 4 piezas de arriba activas) --
+confirmado con test E2E (`test_decision_hermana_desaparece_sola_tras_
+confirmar_una_familia`): responder una guía resuelve la ruta y hace
+desaparecer sola la decisión de su hermana, sin responder por Javier.
+
+**Tests:** Motor -- `test_resolucion_r18.py` (7 nuevos). Motor
+completo: 1696 passed (antes 1689). E2E en copia real de producción
+(proveedor real): 3 decisiones descubiertas, 0 regresiones de ruta.
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/R18_PRE_DECISIONES_ACCIONABLES_.../`, SHA-256 antes/después).
+3 decisiones `DESTINO_NO_RESUELTO` publicadas en Revisión de Atlas
+(472008/472037/472044); 1 destino confirmado ajeno geocodificado
+solo; catálogos de clientes/vehículos/obras/ledger verificados
+byte-idénticos al backup.
+
+**Estado: BLOQUE R18 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

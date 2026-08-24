@@ -727,6 +727,74 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
+    *, carpeta_catalogos: str | Path, proveedor_rutas=None,
+) -> dict[str, object]:
+    """Bloque RESOLUCIÓN R18 -- causa raíz real de que Vía A (Bloque
+    RESOLUCIÓN R16) nunca pudiera desbloquear guías hermanas pese a que
+    Javier YA había confirmado la dirección (casos reales 460807/472008
+    -- AUSIN SAN BERNARDO; 472073/472163): la confirmación humana de un
+    destino (`DESTINO_SIN_CONFIRMAR`/CONFIRMAR, o una reconciliación
+    anterior) sólo registra identidad -- nunca geocodifica, así que el
+    destino queda `estado_calidad=CONFIRMADO` para siempre SIN
+    coordenadas. "¿Es correcta esta dirección?" ya tiene respuesta
+    humana real; lo único que falta es un dato que Atlas puede obtener
+    solo, sin volver a preguntar nada.
+
+    Geocodifica (con caché, restringido a Chile -- mismo criterio que el
+    resto del sistema) cada destino `CONFIRMADO` sin coordenadas, con el
+    mismo mecanismo determinista ya calibrado
+    (`resolver_destino_entrega_validado` -- nunca lógica nueva). Si
+    resuelve con confianza suficiente, persiste latitud/longitud; si no
+    resuelve (limitación real del proveedor, ambigüedad, etc.), el
+    destino queda exactamente como estaba -- nunca inventa un punto,
+    nunca sobreescribe una coordenada ya presente."""
+    from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
+    from atlas_core.rutas.destino_entrega import ESTADO_RESUELTO, resolver_destino_entrega_validado
+
+    carpeta = Path(carpeta_catalogos)
+    if proveedor_rutas is None:
+        from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
+        from atlas_core.rutas.cache_geocodificacion import (
+            ProveedorRutasConCacheGeocodificacion,
+            RepositorioCacheGeocodificacion,
+        )
+        from atlas_core.rutas.openrouteservice import OpenRouteService
+
+        proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
+            OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+        )
+    catalogo = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
+    destinos_actualizados: list[str] = []
+    try:
+        destinos = catalogo.listar()
+    except (OSError, ValueError):
+        return {"destinos_actualizados": destinos_actualizados}
+    for destino in destinos:
+        if destino.estado_calidad != EstadoCalidadDestino.CONFIRMADO.value:
+            continue
+        if destino.estado_vigencia != "ACTIVO":
+            continue
+        if destino.latitud is not None or destino.longitud is not None:
+            continue
+        texto = destino.direccion.strip()
+        if not texto:
+            continue
+        if destino.comuna and destino.comuna.upper() not in texto.upper():
+            texto = f"{texto}, {destino.comuna}"
+        try:
+            resultado = resolver_destino_entrega_validado(texto, proveedor_rutas, contexto_territorial="Chile")
+        except (OSError, ValueError):
+            continue
+        if resultado.estado == ESTADO_RESUELTO and resultado.coordenadas is not None:
+            catalogo.editar(
+                destino.destino_id, modificacion_manual=True,
+                latitud=resultado.coordenadas.latitud, longitud=resultado.coordenadas.longitud,
+            )
+            destinos_actualizados.append(destino.destino_id)
+    return {"destinos_actualizados": destinos_actualizados}
+
+
 def revalidar_ruta_sin_destino_calculado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -989,6 +1057,14 @@ def revalidar_y_regenerar_reporte(
     resultado_destino_contradicho = revalidar_destino_contra_comuna_documental_sin_ocr(
         ruta_dataset=dataset,
     )
+    # Bloque RESOLUCIÓN R18 -- corre ANTES que la revalidación de ruta a
+    # propósito: un destino recién geocodificado aquí (confirmado por
+    # Javier, pero sin coordenadas hasta ahora) es exactamente lo que Vía
+    # A necesita para desbloquear, en esta misma pasada, cualquier guía
+    # hermana que comparta esa dirección -- ver docstring de la función.
+    resultado_destinos_confirmados = revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
+        carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+    )
     # Bloque LOGÍSTICA L1 -- caso real (11 viajes sin km/tiempo pese a
     # tener origen+destino documental ya persistidos): a diferencia de
     # las revalidaciones anteriores, ÉSTA sí puede tocar red (geocodificación/
@@ -1025,6 +1101,7 @@ def revalidar_y_regenerar_reporte(
         "direccion_degradada": resultado_direccion_degradada,
         "destino_contradicho": resultado_destino_contradicho,
         "cliente_ausente": resultado_cliente_ausente,
+        "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
         "ruta": resultado_ruta,
     }
 
@@ -1053,9 +1130,31 @@ def revalidar_y_regenerar_reporte(
         except (OSError, json.JSONDecodeError):
             bandeja_previa = None
         if bandeja_previa is not None:
+            # Bloque RESOLUCIÓN R18 -- causa raíz real de "requiere
+            # confirmación humana + 0 decisiones en Revisión de Atlas"
+            # (casos 460807/472008/472037/472044/472073/472163):
+            # `detectar_decisiones_origen_sin_ocr`/`_destino_no_resuelto_
+            # sin_ocr`/`_cliente_ausente_sin_ocr` (Bloques ORIGEN D1/R6
+            # A-B-E/R9) ya existían, ya probadas, cada una con su propia
+            # función `reconciliar_decisiones_*` -- pero NINGUNA de esas
+            # tres estaba conectada al auto-republicado de la bandeja que
+            # esta función SÍ corre siempre (después de cada revalidación
+            # retroactiva de ruta/destino/origen). Sólo se PODABAN
+            # decisiones ya publicadas; nunca se DESCUBRÍAN candidatas
+            # nuevas que la revalidación de arriba acababa de habilitar.
+            # Mismo patrón ya usado 3 veces por separado -- unificado aquí
+            # para que corra siempre, automáticamente, sin script manual.
+            # `generar_artefacto` deduplica por `decision_id` (determinista
+            # por evidencia) -- nunca produce una tarjeta repetida ni
+            # resucita una ya cerrada en el ledger.
+            candidatas_nuevas = [
+                *detectar_decisiones_origen_sin_ocr(raiz_atlas=raiz),
+                *detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz),
+                *detectar_decisiones_cliente_ausente_sin_ocr(raiz_atlas=raiz),
+            ]
             restantes = regenerar_decisiones_persistidas(
-                decisiones=bandeja_previa.get("decisiones", []), carpeta_catalogos=catalogos,
-                ruta_dataset=dataset,
+                decisiones=[*bandeja_previa.get("decisiones", []), *candidatas_nuevas],
+                carpeta_catalogos=catalogos, ruta_dataset=dataset,
             )
             kwargs_artefacto = {"reloj": reloj} if reloj is not None else {}
             generar_artefacto(
@@ -1063,6 +1162,7 @@ def revalidar_y_regenerar_reporte(
                 ruta_salida=ruta_decisiones, **kwargs_artefacto,
             )
             resultado_revalidacion["bandeja_republicada"] = True
+            resultado_revalidacion["decisiones_candidatas_descubiertas"] = len(candidatas_nuevas)
 
     if not guias_actualizadas:
         return {**resultado_revalidacion, "reporte_regenerado": False}

@@ -127,6 +127,15 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
     # nunca una falla técnica del proveedor -- ver
     # atlas_core.rutas.openrouteservice/EstadoRuta.SIN_ACCESO_VIAL).
     "SIN_ACCESO_VIAL",
+    # Bloque RESOLUCIÓN R18 -- caso real 472037 (VICUÑA MACKENNA 655):
+    # un candidato geocodificado fuera de Chile (Bloque TERRITORIAL T1)
+    # es exactamente el mismo tipo de problema de DESTINO que los demás
+    # -- evidencia insuficiente/contradictoria, nunca una falla técnica
+    # externa. Sin esta entrada, el documento quedaba bloqueado sin
+    # ninguna decisión accionable en Revisión de Atlas -- mismo criterio
+    # ya aplicado a la elegibilidad de B1 (Bloque R16,
+    # atlas_ia.registro_problemas).
+    "GEOCODIFICACION_FUERA_DE_CHILE",
 })
 
 
@@ -1524,14 +1533,33 @@ def regenerar_decisiones_persistidas(
             # sigue visible aparte, vía `estado_ruta`/`motivo_ruta` en el
             # reporte, nunca oculto). Mismo criterio ya usado arriba para
             # DESTINO_SIN_CONFIRMAR -- global, sin exigir cliente_id.
+            #
+            # Bloque RESOLUCIÓN R18 -- causa raíz real de una supresión
+            # FALSA (caso real 472044, obra "EMPRESA CONSTRUCTORA MENA Y"):
+            # una obra puede despachar a MÁS DE UN destino real distinto
+            # (esta misma obra ya tenía "CAM. EL NOVICIADO LAMPA LAMPA"
+            # confirmado para OTRA guía, mientras ÉSTA trae "PUERTA DEL SOL
+            # 83 LAS CONDES" -- un lugar completamente distinto). Suprimir
+            # sólo porque la obra TIENE alguna relación confirmada,
+            # cualquiera sea, silenciaba una pregunta genuina sobre una
+            # dirección que Javier NUNCA confirmó. Ahora sólo se suprime
+            # cuando el destino confirmado coincide LITERALMENTE (mismo
+            # criterio exacto que Vía A,
+            # `rutas.destino_entrega._destino_confirmado_coincide_texto`)
+            # con el texto documental de ESTA decisión -- si no coincide,
+            # sigue siendo una pregunta real y distinta.
             obra_canonica_destino = str((decision.get("contexto") or {}).get("obra_canonica", ""))
-            if (
-                obra_canonica_destino and catalogo_obras is not None
-                and catalogo_obras.resolver_obra_destino_confirmada_global(
+            if obra_canonica_destino and catalogo_obras is not None:
+                resolucion_obra = catalogo_obras.resolver_obra_destino_confirmada_global(
                     nombre_obra=obra_canonica_destino
-                ) is not None
-            ):
-                continue
+                )
+                if resolucion_obra is not None:
+                    calle_confirmada = normalizar_nombre_destino(
+                        resolucion_obra.destino.direccion.split(",", 1)[0]
+                    )
+                    texto_documental = normalizar_nombre_destino(str(decision.get("valor_documental", "")))
+                    if calle_confirmada and calle_confirmada in texto_documental:
+                        continue
 
         if tipo == "VEHICULO_DESCONOCIDO":
             patente = normalizar_patente_vehiculo(str(decision.get("valor_documental") or ""))
