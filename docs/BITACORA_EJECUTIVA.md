@@ -2958,3 +2958,70 @@ invisible en Desktop pese a estar correcto en el dataset (verificado:
 
 **Estado: BLOQUE CONFIRMACIÓN D2 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin
 push en ninguno de los dos repos.**
+
+## Bloque CIERRE POST-CONFIRMACIÓN -- dirección canónica preservada tras confirmar (2026-08-24)
+
+**Caso real: 472044.** Javier confirmó "PUERTA DEL SOL 83" (Bloque
+CONFIRMACIÓN D2 anterior), pero tras refrescar, el destino operacional
+seguía mostrando "Las Condes, RM, Chile" -- una etiqueta de comuna
+degradada, sin número de calle.
+
+**Causa raíz:** `direccion_entrega` quedó persistida con esa etiqueta de
+una corrida ANTERIOR a Bloque F (que ya impide exponer un candidato
+rechazado como destino operacional). `revalidar_ruta_sin_destino_
+calculado_sin_ocr` sólo refresca esa columna cuando el MOTIVO cambia
+entre reintentos -- aquí no cambiaba (seguía siendo `CONFIANZA_
+INSUFICIENTE`, una causa técnica ya correcta), así que la etiqueta vieja
+sobrevivía para siempre a cualquier confirmación humana posterior. Esa
+misma clase de bug YA tenía una limpieza retroactiva hermana
+(`revalidar_direccion_entrega_degradada_sin_ocr`, Bloque LOGÍSTICA L1),
+pero sólo cubría filas con `RUTA_CALCULADA` -- 472044 nunca llegó ahí.
+
+**Fix:** `revalidar_destino_operacional_sin_numero_de_calle_sin_ocr`
+(nueva, hermana de la anterior): mismo criterio EXACTO ya usado
+prospectivamente (`_etiqueta_geocodificada_o_texto_documental` --
+calle+número documental gana sobre una etiqueta sin número), aplicado
+retroactivamente a filas SIN ruta calculada -- limpia `direccion_
+entrega`/`localidad_entrega`/`region_entrega` (nunca sólo la etiqueta:
+sin ruta calculada esos tres describen un candidato ya RECHAZADO,
+Bloque F) y NUNCA toca `motivo_ruta`/`estado_ruta` (ya correctos --
+cambiarlos resucitaría una pregunta sobre una identidad ya confirmada).
+Conectada a `revalidar_y_regenerar_reporte` junto a su hermana. También
+se sincronizan las mismas 3 columnas en la rama de reescritura de
+`revalidar_ruta_sin_destino_calculado_sin_ocr` (motivo técnico obsoleto/
+sin causa/reevaluable/identidad-recién-confirmada) para que un caso
+futuro no vuelva a depender de esta limpieza retroactiva.
+
+**472044 antes → después (Drive real):** destino operacional "Las
+Condes, RM, Chile" → vacío (Desktop cae de vuelta a `despachar_a_crudo`,
+"PUERTA DEL SOL 83", verificado en `viajes.csv` del reporte vigente
+regenerado); `motivo_ruta` intacto (`CONFIANZA_INSUFICIENTE`, ya
+correcto); sin km/tiempo inventado. 472037 sin tocar en este bloque
+(`COORDENADA_NO_CONFIRMADA(5)`, ya correcto desde el bloque anterior).
+
+**Tests:** Motor -- `tests/test_logistica_l1.py` (3 nuevos: limpieza sin
+ruta calculada, control con etiqueta ya específica, control con fila
+vacía/ya calculada). Suite completa: 1735 passed (antes 1732). E2E en
+copia real de Drive: 472044 confirmado con la respuesta YA cacheada en
+producción ("PUERTA DEL SOL 83, Chile" -> "Chile", confianza 0.1) --
+etiqueta degradada limpiada, motivo intacto.
+
+**Aplicado a Drive real:** 1 backup verificado (`respaldos/
+CIERRE_CONFIRMACION_PRE_.../`, SHA-256 antes/después). Sólo limpieza
+retroactiva (sin OCR, sin red -- ninguna consulta nueva, sólo columnas ya
+persistidas) -- catálogos/ledger/`decisiones_pendientes.json` byte-
+idénticos al backup; `guias_actualizadas: [472044]`. Reporte oficial
+regenerado y publicado (`reportes/reporte_cierre_confirmacion_.../`) --
+verificado en `viajes.csv`: `direccion_entrega` vacío, `despachar_a`
+"PUERTA DEL SOL 83".
+
+**Pendiente real (fuera de alcance de este bloque):** 472037 sigue sin
+punto ruteable (`COORDENADA_NO_CONFIRMADA(5)`) -- B1 sólo aporta comuna
+("Santiago") en texto libre, y NINGUNO de los 5 candidatos geocodificados
+cae en esa comuna; forzar una elección sin evidencia estructurada sería
+adivinar. Requiere, si Javier lo decide, una nueva búsqueda dirigida
+(fuera del alcance "sin investigar de nuevo" de este bloque) o esperar
+más evidencia.
+
+**Estado: BLOQUE CIERRE POST-CONFIRMACIÓN CERRADO EN CÓDIGO Y EN DRIVE
+REAL. Sin push en ninguno de los dos repos.**

@@ -233,6 +233,51 @@ def test_bloque_r9_motivo_tecnico_obsoleto_se_corrige_aunque_el_reintento_siga_r
     assert fila_final["distancia_km"] == ""  # nunca inventa una ruta
 
 
+def test_bloque_confirmacion_d2_limpia_direccion_entrega_degradada_al_reescribir_motivo(tmp_path):
+    """Bloque CONFIRMACIÓN D2 -- caso real 472044 (PUERTA DEL SOL 83 LAS
+    CONDES): la fila ya traía, de un intento ANTERIOR, `direccion_entrega`
+    degradada a nivel comuna ("Las Condes, RM, Chile") -- esta rama sólo
+    reescribía `estado_ruta`/`motivo_ruta` cuando el motivo previo era
+    técnico obsoleto, dejando la etiqueta vieja intacta para siempre (la
+    rama RUTA_CALCULADA, más abajo, es la única que la tocaba). Con el fix,
+    siempre que se reescribe el motivo también se sincronizan `direccion_
+    entrega`/`localidad_entrega`/`region_entrega` con el resultado FRESCO
+    -- que Bloque F ya deja vacío cuando el candidato no queda resuelto."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    fila = _fila_csv(
+        planta, numero_guia="472044",
+        despachar_a_crudo="PUERTA DEL SOL 83 LAS CONDES LAS CONDES",
+        direccion_entrega="Las Condes, RM, Chile", localidad_entrega="Las Condes",
+        region_entrega="Metropolitana",
+        estado_ruta="PROVEEDOR_NO_DISPONIBLE", motivo_ruta="PROVEEDOR_NO_DISPONIBLE",
+    )
+    _escribir_csv(dataset, [fila])
+    consulta = "PUERTA DEL SOL 83 LAS CONDES LAS CONDES, Chile"
+    proveedor = ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(Coordenadas(-70.6, -33.4), "Las Condes, RM, Chile", 0.3, "Las Condes", "Metropolitana"),),
+                "",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 10.0, 15.0, "SINTETICO"),
+    )
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+    )
+    assert resultado["guias_actualizadas"] == ["472044"]
+    fila_final = _leer(dataset)[0]
+    assert fila_final["motivo_ruta"] == "CONFIANZA_INSUFICIENTE"
+    # La etiqueta vieja degradada ("Las Condes, RM, Chile") ya no
+    # sobrevive -- un candidato rechazado (confianza 0.3) nunca se expone
+    # como destino operacional.
+    assert fila_final["direccion_entrega"] == ""
+    assert fila_final["localidad_entrega"] == ""
+    assert fila_final["region_entrega"] == ""
+
+
 def test_bloque_r9_motivo_de_evidencia_real_nunca_se_reescribe(tmp_path):
     """Control -- un rechazo YA basado en evidencia real (comuna
     contradicha) no es ruido técnico: no se reintenta ni se reescribe

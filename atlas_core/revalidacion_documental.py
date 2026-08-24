@@ -727,6 +727,63 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque CONFIRMACIÓN D2 -- limpieza retroactiva, sin OCR y sin red,
+    hermana de `revalidar_destino_contra_comuna_documental_sin_ocr`: caso
+    real 472044 (PUERTA DEL SOL 83 LAS CONDES), donde `direccion_entrega`
+    quedó persistida a nivel comuna ("Las Condes, RM, Chile", sin número
+    de calle) de una corrida ANTERIOR a Bloque F (que ya impide que un
+    candidato rechazado se exponga como destino operacional) -- ese valor
+    sobrevivía para siempre a cualquier confirmación humana posterior,
+    porque `revalidar_ruta_sin_destino_calculado_sin_ocr` sólo reescribe
+    esta columna cuando el MOTIVO cambia (aquí no cambiaba: seguía siendo
+    `CONFIANZA_INSUFICIENTE`, una causa técnica ya correcta -- el problema
+    era sólo la etiqueta, no el motivo).
+
+    Mismo criterio EXACTO ya usado prospectivamente por
+    `_etiqueta_geocodificada_o_texto_documental` (dentro de
+    `resolver_destino_entrega`, nunca duplicado aquí): si `despachar_a_
+    crudo` trae un número de calle y `direccion_entrega` NO, la etiqueta
+    geocodificada es MENOS específica que lo documental -- se retira.
+    Nunca inventa un reemplazo: `despachar_a_crudo` (columna separada,
+    intacta) sigue siendo la evidencia documental; Desktop ya cae de
+    vuelta a ella cuando `direccion_entrega` queda vacía (mismo mecanismo
+    que usa ahora mismo para cualquier fila sin ruta calculada).
+
+    A propósito, NUNCA toca `motivo_ruta`/`estado_ruta` -- a diferencia de
+    `revalidar_destino_contra_comuna_documental_sin_ocr` (que sí describe
+    una causa de rechazo nueva), aquí el motivo YA persistido sigue siendo
+    la causa técnica correcta (p. ej. `CONFIANZA_INSUFICIENTE`); cambiarlo
+    a algo de `MOTIVOS_DESTINO_NO_RESUELTO` resucitaría una pregunta sobre
+    una identidad que un humano ya confirmó -- exactamente lo que este
+    bloque existe para evitar."""
+    from atlas_core.rutas.destino_entrega import _trae_numero_calle
+
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            direccion = str(fila.get("direccion_entrega", "")).strip()
+            if not direccion:
+                continue
+            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+            if not (despachar_a and _trae_numero_calle(despachar_a) and not _trae_numero_calle(direccion)):
+                continue
+            fila["direccion_entrega"] = ""
+            fila["localidad_entrega"] = ""
+            fila["region_entrega"] = ""
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
     *, carpeta_catalogos: str | Path, proveedor_rutas=None,
 ) -> dict[str, object]:
@@ -998,6 +1055,28 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     ):
                         fila["estado_ruta"] = resultado.estado_ruta
                         fila["motivo_ruta"] = resultado.motivo_ruta
+                        # Bloque CONFIRMACIÓN D2 -- caso real 472044
+                        # (PUERTA DEL SOL 83 LAS CONDES): estas tres
+                        # columnas quedaban SIN TOCAR en esta rama (sólo
+                        # se escribían en el camino RUTA_CALCULADA, más
+                        # abajo) -- un valor DEGRADADO que quedó
+                        # persistido en un intento anterior (p. ej. "Las
+                        # Condes, RM, Chile", de antes del fix de Bloque F
+                        # que ya impide que un candidato descartado se
+                        # exponga como destino operacional) sobrevivía
+                        # para siempre a cualquier reintento posterior,
+                        # incluida una confirmación humana nueva -- porque
+                        # `calcular_ruta_con_planta_conocida` YA calcula
+                        # el valor fresco correcto (vacío cuando el
+                        # candidato no queda resuelto, per Bloque F;
+                        # `_etiqueta_geocodificada_o_texto_documental`
+                        # cuando sí), pero nadie lo escribía aquí. Se
+                        # sincroniza siempre que se reescribe el motivo --
+                        # mismos tres campos que ya escribe la rama
+                        # RUTA_CALCULADA, nunca inventa nada nuevo.
+                        fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
+                        fila["localidad_entrega"] = resultado.localidad_entrega
+                        fila["region_entrega"] = resultado.region_entrega
                         guias_actualizadas.append(str(fila.get("numero_guia", "")))
                 continue
             fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
@@ -1098,6 +1177,18 @@ def revalidar_y_regenerar_reporte(
     resultado_destino_contradicho = revalidar_destino_contra_comuna_documental_sin_ocr(
         ruta_dataset=dataset,
     )
+    # Bloque CONFIRMACIÓN D2 -- caso real 472044: hermana de la anterior,
+    # misma filosofía (limpieza retroactiva, sin OCR, sin red, nunca toca
+    # motivo_ruta/estado_ruta), para filas SIN ruta calculada cuya
+    # `direccion_entrega` quedó a nivel comuna (sin número de calle)
+    # mientras `despachar_a_crudo` sí lo trae -- `revalidar_ruta_sin_
+    # destino_calculado_sin_ocr` sólo refresca esta columna cuando el
+    # MOTIVO cambia entre reintentos; una fila estable en el mismo motivo
+    # técnico (p. ej. `CONFIANZA_INSUFICIENTE`) podía quedar con la
+    # etiqueta degradada para siempre.
+    resultado_destino_sin_numero = revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(
+        ruta_dataset=dataset,
+    )
     # Bloque RESOLUCIÓN R18 -- corre ANTES que la revalidación de ruta a
     # propósito: un destino recién geocodificado aquí (confirmado por
     # Javier, pero sin coordenadas hasta ahora) es exactamente lo que Vía
@@ -1129,6 +1220,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_patente["guias_actualizadas"])
         | set(resultado_cliente["guias_actualizadas"])
         | set(resultado_destino_contradicho["guias_actualizadas"])
+        | set(resultado_destino_sin_numero["guias_actualizadas"])
         | set(resultado_cliente_ausente["guias_actualizadas"])
         | set(resultado_ruta["guias_actualizadas"])
         | set(resultado_direccion_degradada["guias_actualizadas"])
@@ -1141,6 +1233,7 @@ def revalidar_y_regenerar_reporte(
         "cliente": resultado_cliente,
         "direccion_degradada": resultado_direccion_degradada,
         "destino_contradicho": resultado_destino_contradicho,
+        "destino_sin_numero": resultado_destino_sin_numero,
         "cliente_ausente": resultado_cliente_ausente,
         "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
         "ruta": resultado_ruta,

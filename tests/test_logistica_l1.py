@@ -10,6 +10,7 @@ from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import (
     revalidar_direccion_entrega_degradada_sin_ocr,
+    revalidar_destino_operacional_sin_numero_de_calle_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr, revalidar_y_regenerar_reporte,
 )
 from atlas_core.rutas.destino_entrega import _etiqueta_geocodificada_o_texto_documental
@@ -216,6 +217,72 @@ def test_direccion_entrega_ya_especifica_no_se_toca(tmp_path):
         estado_ruta="RUTA_CALCULADA", distancia_km="16.1517", duracion_min="22.32",
     )])
     resultado = revalidar_direccion_entrega_degradada_sin_ocr(ruta_dataset=dataset)
+    assert resultado["guias_actualizadas"] == []
+
+
+def test_direccion_entrega_degradada_sin_ruta_calculada_se_limpia(tmp_path):
+    """Bloque CONFIRMACIÓN D2 -- caso real 472044 (PUERTA DEL SOL 83 LAS
+    CONDES): a diferencia del caso anterior, aquí la ruta NUNCA llegó a
+    calcularse (`CONFIANZA_INSUFICIENTE`, un motivo técnico ya correcto
+    que no cambia entre reintentos) -- `revalidar_direccion_entrega_
+    degradada_sin_ocr` sólo cubre filas `RUTA_CALCULADA`;
+    `revalidar_destino_operacional_sin_numero_de_calle_sin_ocr` es su
+    hermana para este caso. A diferencia de la anterior, aquí SÍ se
+    limpia `localidad_entrega`/`region_entrega` (nunca sólo la etiqueta):
+    sin ruta calculada, esos valores describen un candidato ya
+    RECHAZADO (Bloque F), no un punto real confirmado."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv(
+        planta, despachar_a_crudo="PUERTA DEL SOL 83", direccion_entrega="Las Condes, RM, Chile",
+        localidad_entrega="Las Condes", region_entrega="Metropolitana",
+        estado_ruta="REQUIERE_REVISION", motivo_ruta="CONFIANZA_INSUFICIENTE",
+    )])
+    resultado = revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(ruta_dataset=dataset)
+    assert resultado["guias_actualizadas"] == ["1"]
+    fila = _leer(dataset)[0]
+    assert fila["direccion_entrega"] == ""
+    assert fila["localidad_entrega"] == ""
+    assert fila["region_entrega"] == ""
+    # El motivo/estado técnico YA correcto nunca se toca -- nunca
+    # resucita una pregunta sobre una identidad ya confirmada.
+    assert fila["estado_ruta"] == "REQUIERE_REVISION"
+    assert fila["motivo_ruta"] == "CONFIANZA_INSUFICIENTE"
+    assert fila["despachar_a_crudo"] == "PUERTA DEL SOL 83"
+
+
+def test_direccion_entrega_con_numero_sin_ruta_calculada_no_se_toca(tmp_path):
+    """Control -- una etiqueta que YA trae número de calle (tan específica
+    como el documento) no se limpia, tenga o no ruta calculada."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv(
+        planta, despachar_a_crudo="MARURI 1942 RENCA", direccion_entrega="Maruri 1942, Renca, RM, Chile",
+        localidad_entrega="Renca", region_entrega="Metropolitana",
+        estado_ruta="REQUIERE_REVISION", motivo_ruta="CONFIANZA_INSUFICIENTE",
+    )])
+    resultado = revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(ruta_dataset=dataset)
+    assert resultado["guias_actualizadas"] == []
+
+
+def test_direccion_entrega_vacia_o_ruta_calculada_no_se_toca(tmp_path):
+    """Control -- fila sin `direccion_entrega` (nada que limpiar) y fila
+    con `RUTA_CALCULADA` (fuera de alcance -- esa la cubre `revalidar_
+    direccion_entrega_degradada_sin_ocr`) quedan intactas."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [
+        _fila_csv(
+            planta, numero_guia="1", despachar_a_crudo="PUERTA DEL SOL 83", direccion_entrega="",
+            estado_ruta="REQUIERE_REVISION", motivo_ruta="CONFIANZA_INSUFICIENTE",
+        ),
+        _fila_csv(
+            planta, numero_guia="2", despachar_a_crudo="PUERTA DEL SOL 83", direccion_entrega="Las Condes, RM, Chile",
+            localidad_entrega="Las Condes", region_entrega="Metropolitana",
+            estado_ruta="RUTA_CALCULADA", distancia_km="5.0", duracion_min="8.0",
+        ),
+    ])
+    resultado = revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(ruta_dataset=dataset)
     assert resultado["guias_actualizadas"] == []
 
 

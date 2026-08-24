@@ -139,6 +139,27 @@ def _proveedor_direccion_valida(direccion):
     )
 
 
+def _proveedor_confianza_insuficiente(direccion, *, etiqueta):
+    """Bloque CONFIRMACIÓN D2 -- caso real 472044 (PUERTA DEL SOL 83 LAS
+    CONDES): un único candidato, pero con confianza por debajo del umbral
+    -- el proveedor sólo resolvió hasta nivel comuna (`etiqueta` sin
+    número de calle), exactamente el escenario que degradaba el destino
+    operacional."""
+    consulta = f"{direccion}, Chile"
+    return ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(
+                    Coordenadas(-70.57, -33.41), etiqueta, 0.3, "Las Condes", "Metropolitana",
+                ),),
+                "",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 12.0, 20.0, "SINTETICO"),
+    )
+
+
 def _proveedor_direccion_ambigua(direccion):
     consulta = f"{direccion}, Chile"
     return ProveedorRutasSimulado(
@@ -335,6 +356,56 @@ def test_registrar_direccion_sigue_ambigua_no_inventa_una_ruta_pero_si_aprende_l
     assert catalogo_obras.resolver_obra_destino_confirmada_global(
         nombre_obra="ING Y CONST FUNDAMENTA SPA"
     ) is not None
+
+
+def test_registrar_direccion_confirmada_nunca_queda_degradada_por_etiqueta_vieja(tmp_path):
+    """Bloque CONFIRMACIÓN D2 -- caso real 472044 (PUERTA DEL SOL 83 LAS
+    CONDES): la fila ya traía, de un intento ANTERIOR, `direccion_entrega`
+    degradada a nivel comuna ("Las Condes, RM, Chile") -- nadie la
+    limpiaba al confirmar una dirección nueva. Javier confirma "PUERTA DEL
+    SOL 83 LAS CONDES"; el proveedor sigue sin poder geocodificarla con
+    confianza suficiente (limitación real, no inventa). El destino
+    operacional (columna `direccion_entrega`, y el nombre/dirección del
+    Destino recién CONFIRMADO en el catálogo) debe reflejar la dirección
+    que Javier confirmó -- nunca la etiqueta vieja de comuna."""
+    fila = _fila_csv(
+        despachar_a_crudo="PUERTA DEL SOL 83", direccion_entrega="Las Condes, RM, Chile",
+        localidad_entrega="Las Condes", region_entrega="Metropolitana",
+        estado_ruta="REQUIERE_REVISION", motivo_ruta="GEOCODIFICACION_DEMASIADO_GENERICA",
+    )
+    entorno = _entorno(tmp_path, filas_csv=[fila], clientes=[_cliente_dict()], obras=[_obra_dict()])
+    decision = detectar_decision_destino_no_resuelto(archivo="472037.jpeg", fila=fila)
+    _publicar(entorno, decision)
+
+    direccion = "PUERTA DEL SOL 83 LAS CONDES"
+    resultado = aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
+        accion="REGISTRAR_DIRECCION", direccion_manual=direccion,
+        proveedor_rutas=_proveedor_confianza_insuficiente(direccion, etiqueta="Las Condes, RM, Chile"),
+    )
+    assert resultado["ok"] is True
+    assert resultado["ruta_resuelta"] is False
+
+    fila_final = _leer_csv(entorno["dataset"])[0]
+    # La etiqueta degradada vieja ya no sobrevive -- un candidato
+    # rechazado nunca se expone como destino operacional (Bloque F).
+    assert fila_final["direccion_entrega"] == ""
+    assert fila_final["despachar_a_crudo"] == direccion
+
+    catalogo_obras = CatalogoObrasDestinos(
+        ruta=entorno["catalogos"] / "obras_destinos.json",
+        ruta_clientes=entorno["catalogos"] / "clientes.json",
+        ruta_destinos=entorno["catalogos"] / "destinos_maestros.json",
+    )
+    relacion = catalogo_obras.resolver_obra_destino_confirmada_global(
+        nombre_obra="ING Y CONST FUNDAMENTA SPA"
+    )
+    assert relacion is not None
+    destino_confirmado = relacion.destino
+    # El destino aprendido debe llevar la dirección CONFIRMADA por
+    # Javier -- nunca la etiqueta de comuna descartada.
+    assert destino_confirmado.direccion == direccion
+    assert destino_confirmado.nombre_destino == direccion
 
 
 def test_registrar_direccion_sin_texto_falla(tmp_path):
