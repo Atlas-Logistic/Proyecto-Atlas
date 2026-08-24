@@ -293,12 +293,26 @@ class ResultadoDesambiguacionInequivoca:
     destino ya declarada (`MULTIPLES_UBICACIONES_DISPERSAS`).
     `resuelto=False` es siempre una abstención legítima -- nunca un
     error ni un fallo del mecanismo; simplemente no hay evidencia
-    suficientemente fuerte para actuar sin consultar a un humano."""
+    suficientemente fuerte para actuar sin consultar a un humano.
+
+    `identidad_confirmada` (Bloque CONFIRMACIÓN D2, caso real 472037 --
+    VICUÑA MACKENNA 655 CONFIRMADA por Javier en Revisión de Atlas, ruta
+    seguía sin resolverse): True cuando existe una entrada CONFIRMADA de
+    `destinos_maestros.json` cuya `direccion` coincide textualmente
+    (`_destino_confirmado_coincide_texto`) con `despachar_a_crudo`,
+    **independiente** de si esa entrada tiene coordenadas propias que
+    permitan resolver el candidato (Vía A puede fallar por falta de
+    coordenadas -- ver docstring del módulo de aplicación de decisiones,
+    R16 -- y aun así la IDENTIDAD del destino ya está resuelta). Distingue
+    "todavía no sabemos cuál lugar es" (ambigüedad de identidad genuina)
+    de "ya sabemos cuál lugar es, sólo falta el punto geográfico exacto"
+    (un problema técnico posterior, nunca la misma pregunta otra vez)."""
 
     resuelto: bool = False
     candidato: CandidatoGeocodificacion | None = None
     motivo: str = ""
     vias: tuple[str, ...] = ()
+    identidad_confirmada: bool = False
 
 
 def resolver_destino_ambiguo_con_evidencia_inequivoca(
@@ -358,10 +372,29 @@ def resolver_destino_ambiguo_con_evidencia_inequivoca(
     Si ambas vías producen una respuesta y DISCREPAN entre sí, se
     abstiene explícitamente (`CATALOGO_Y_GPS_DISCREPAN`) -- nunca se
     prioriza una fuente sobre otra en silencio."""
-    if len(candidatos_ambiguos) < 2:
-        return ResultadoDesambiguacionInequivoca(motivo="NO_ES_UNA_AMBIGUEDAD_REAL")
-
     texto = str(despachar_a_crudo or "").strip()
+    # Bloque CONFIRMACIÓN D2 -- se calcula SIEMPRE, independiente de si
+    # Vía A logra resolver un candidato: un destino CONFIRMADO cuya
+    # dirección coincide textualmente con `despachar_a_crudo` significa
+    # que un humano ya validó esa IDENTIDAD, aunque esa entrada del
+    # catálogo no tenga coordenadas propias (p. ej. quedó confirmada sin
+    # que la ruta llegara a calcularse -- ver `aplicar_decision_obra`,
+    # Bloque R16) y por lo tanto Vía A no pueda respaldar ningún
+    # candidato. Nunca decide el candidato -- sólo distingue "identidad
+    # ya resuelta" de "identidad todavía ambigua" para el motivo que
+    # `resolver_destino_entrega` deja si de todos modos no logra pinchar
+    # un único punto.
+    identidad_confirmada = texto and any(
+        destino.estado_calidad == "CONFIRMADO" and destino.estado_vigencia == "ACTIVO"
+        and _destino_confirmado_coincide_texto(destino, texto)
+        for destino in destinos_confirmados
+    )
+
+    if len(candidatos_ambiguos) < 2:
+        return ResultadoDesambiguacionInequivoca(
+            motivo="NO_ES_UNA_AMBIGUEDAD_REAL", identidad_confirmada=identidad_confirmada,
+        )
+
     candidato_via_a: CandidatoGeocodificacion | None = None
     conflicto_via_a = False
     if texto:
@@ -378,7 +411,8 @@ def resolver_destino_ambiguo_con_evidencia_inequivoca(
             candidato_via_a = respaldado
     if conflicto_via_a:
         return ResultadoDesambiguacionInequivoca(
-            motivo="CONFLICTO_ENTRE_DESTINOS_CONFIRMADOS", vias=(VIA_CATALOGO_CONFIRMADO,)
+            motivo="CONFLICTO_ENTRE_DESTINOS_CONFIRMADOS", vias=(VIA_CATALOGO_CONFIRMADO,),
+            identidad_confirmada=identidad_confirmada,
         )
 
     candidato_via_b: CandidatoGeocodificacion | None = None
@@ -394,25 +428,31 @@ def resolver_destino_ambiguo_con_evidencia_inequivoca(
             return ResultadoDesambiguacionInequivoca(
                 motivo="CATALOGO_Y_GPS_DISCREPAN",
                 vias=(VIA_CATALOGO_CONFIRMADO, VIA_GPS_DESCARTA_RIVALES),
+                identidad_confirmada=identidad_confirmada,
             )
         return ResultadoDesambiguacionInequivoca(
             resuelto=True, candidato=candidato_via_a,
             motivo="CATALOGO_CONFIRMADO_Y_GPS_COINCIDEN",
             vias=(VIA_CATALOGO_CONFIRMADO, VIA_GPS_DESCARTA_RIVALES),
+            identidad_confirmada=identidad_confirmada,
         )
     if candidato_via_a is not None:
         return ResultadoDesambiguacionInequivoca(
             resuelto=True, candidato=candidato_via_a,
             motivo="CATALOGO_CONFIRMADO_COINCIDE_GEOCODIFICACION",
             vias=(VIA_CATALOGO_CONFIRMADO,),
+            identidad_confirmada=identidad_confirmada,
         )
     if candidato_via_b is not None:
         return ResultadoDesambiguacionInequivoca(
             resuelto=True, candidato=candidato_via_b,
             motivo="GPS_DESCARTA_TODO_RIVAL_FUERA_DE_RADIO",
             vias=(VIA_GPS_DESCARTA_RIVALES,),
+            identidad_confirmada=identidad_confirmada,
         )
-    return ResultadoDesambiguacionInequivoca(motivo="SIN_EVIDENCIA_INEQUIVOCA")
+    return ResultadoDesambiguacionInequivoca(
+        motivo="SIN_EVIDENCIA_INEQUIVOCA", identidad_confirmada=identidad_confirmada,
+    )
 
 
 def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> CandidatoGeocodificacion:
@@ -584,9 +624,28 @@ def resolver_destino_entrega(
                 candidato = desambiguacion.candidato
                 corroborado_por_gps = corroborado_por_gps or VIA_GPS_DESCARTA_RIVALES in desambiguacion.vias
             else:
+                # Bloque CONFIRMACIÓN D2 -- caso real 472037 (VICUÑA
+                # MACKENNA 655): Javier ya confirmó esta dirección en
+                # Revisión de Atlas (`identidad_confirmada`, ver
+                # docstring de `ResultadoDesambiguacionInequivoca`) pero
+                # ninguna vía logró pinchar un único punto geográfico
+                # entre los candidatos dispersos. `MULTIPLES_UBICACIONES_
+                # DISPERSAS` implica que la IDENTIDAD del destino sigue
+                # sin resolver -- eso ya no es cierto, y repetirlo
+                # contradice una decisión humana ya aplicada (nunca debe
+                # volver a sonar como si Atlas no supiera qué dirección
+                # es). El problema real ahora es puramente geográfico/
+                # técnico -- no está en `MOTIVOS_DESTINO_NO_RESUELTO`
+                # (`decisiones_pendientes.py`), así que nunca vuelve a
+                # generar una pregunta para Javier sobre algo que ya
+                # respondió.
+                motivo_base = (
+                    "COORDENADA_NO_CONFIRMADA" if desambiguacion.identidad_confirmada
+                    else "MULTIPLES_UBICACIONES_DISPERSAS"
+                )
                 return ResultadoDestinoEntrega(
                     despachar_a_crudo=texto, estado=ESTADO_REVISAR,
-                    motivo=f"MULTIPLES_UBICACIONES_DISPERSAS({len(resultado.candidatos)})",
+                    motivo=f"{motivo_base}({len(resultado.candidatos)})",
                 )
     elif resultado.estado != EstadoRuta.REQUIERE_REVISION or not resultado.candidatos:
         # Cualquier otro estado (SIN_CREDENCIAL, SIN_CONEXION,

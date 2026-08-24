@@ -99,6 +99,67 @@ def test_multiples_ubicaciones_dispersas_sin_destino_confirmado_sigue_en_revisio
     assert resultado.motivo.startswith("MULTIPLES_UBICACIONES_DISPERSAS")
 
 
+def test_identidad_confirmada_sin_coordenadas_usa_motivo_coordenada_no_confirmada():
+    """Bloque CONFIRMACIÓN D2 -- caso real 472037 (VICUÑA MACKENNA 655):
+    Javier confirmó explícitamente esta dirección en Revisión de Atlas, y
+    `aplicar_decision_obra` sí registra el destino como CONFIRMADO en el
+    catálogo -- pero SIN coordenadas propias, porque la ruta no llegó a
+    calcularse en el momento de la confirmación (Bloque R16: nunca se
+    persiste una coordenada a medias). Vía A no puede respaldar ningún
+    candidato (no hay lat/lon con qué comparar), así que la ambigüedad
+    geográfica sigue sin resolver -- pero el motivo NUNCA debe volver a
+    decir `MULTIPLES_UBICACIONES_DISPERSAS`: esa etiqueta implica que la
+    IDENTIDAD del destino sigue sin aclarar, y eso ya no es cierto.
+    `COORDENADA_NO_CONFIRMADA` distingue el problema real (técnico/
+    geográfico) sin contradecir la decisión humana ya aplicada."""
+    proveedor = ProveedorRutasSimulado(geocodificaciones={
+        "VICUÑA MACKENNA 655, Chile": ResultadoGeocodificacion(
+            EstadoRuta.RESULTADO_AMBIGUO,
+            (
+                _candidato(-33.45, -70.60, "Vicuña Mackenna 655, Providencia"),
+                _candidato(-33.60, -70.65, "Vicuña Mackenna 655, La Florida"),
+                _candidato(-36.6, -72.1, "Vicuña Mackenna 655, Chillán"),
+                _candidato(-38.7, -72.6, "Vicuña Mackenna 655, Temuco"),
+                _candidato(-41.5, -72.9, "Vicuña Mackenna 655, Puerto Montt"),
+            ),
+            "MULTIPLES_CANDIDATOS",
+        )
+    })
+    destino_confirmado_sin_coordenadas = _destino_confirmado("VICUÑA MACKENNA 655", None, None)
+    resultado = resolver_destino_entrega(
+        "VICUÑA MACKENNA 655", proveedor,
+        destinos_confirmados=(destino_confirmado_sin_coordenadas,),
+    )
+    assert resultado.estado == "REVISAR"
+    assert resultado.coordenadas is None  # nunca inventa un punto
+    assert resultado.motivo == "COORDENADA_NO_CONFIRMADA(5)"
+    assert "MULTIPLES_UBICACIONES_DISPERSAS" not in resultado.motivo
+
+
+def test_identidad_no_confirmada_sin_coordenadas_conserva_motivo_original():
+    """Control -- el mismo escenario (destino sin coordenadas), pero la
+    dirección del catálogo NO coincide con `despachar_a_crudo`: la
+    identidad sigue genuinamente ambigua, así que el motivo original
+    (`MULTIPLES_UBICACIONES_DISPERSAS`) se preserva sin cambios."""
+    proveedor = ProveedorRutasSimulado(geocodificaciones={
+        "VICUÑA MACKENNA 655, Chile": ResultadoGeocodificacion(
+            EstadoRuta.RESULTADO_AMBIGUO,
+            (
+                _candidato(-33.45, -70.60, "Vicuña Mackenna 655, Providencia"),
+                _candidato(-33.60, -70.65, "Vicuña Mackenna 655, La Florida"),
+            ),
+            "MULTIPLES_CANDIDATOS",
+        )
+    })
+    destino_no_relacionado = _destino_confirmado("OTRA DIRECCION TOTALMENTE DISTINTA", None, None)
+    resultado = resolver_destino_entrega(
+        "VICUÑA MACKENNA 655", proveedor,
+        destinos_confirmados=(destino_no_relacionado,),
+    )
+    assert resultado.estado == "REVISAR"
+    assert resultado.motivo == "MULTIPLES_UBICACIONES_DISPERSAS(2)"
+
+
 # ---------------------------------------------------------------------
 # Parte F -- SIN_ACCESO_VIAL intenta un punto CONFIRMADO distinto antes
 # de rendirse, nunca inventa una coordenada nueva.

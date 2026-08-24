@@ -965,7 +965,32 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                 # quedó obsoleta -- se corrige para que nunca se confunda
                 # "proveedor no disponible" con "evidencia insuficiente".
                 # Un rechazo YA basado en evidencia real nunca se toca.
-                if (motivo_previo_tecnico or motivo_previo_sin_causa or motivo_previo_reevaluable) and resultado.motivo_ruta:
+                #
+                # Bloque CONFIRMACIÓN D2 -- una única excepción, estrecha
+                # a propósito (nunca se agregó `MULTIPLES_UBICACIONES_
+                # DISPERSAS` al conjunto general de arriba: ese motivo
+                # sigue siendo estable frente a cualquier reintento que
+                # simplemente vuelva a fallar distinto, ver `test_
+                # motivo_de_evidencia_externa_inmutable_nunca_se_
+                # reescribe`). Caso real 472037: Javier confirmó la
+                # dirección en Revisión de Atlas DESPUÉS de que esta
+                # función ya había persistido `MULTIPLES_UBICACIONES_
+                # DISPERSAS` -- el catálogo confirmado no existía todavía
+                # en ese reintento. La ÚNICA transición que se acepta aquí
+                # es exactamente esa: de `MULTIPLES_UBICACIONES_DISPERSAS`
+                # a `COORDENADA_NO_CONFIRMADA` (`resolver_destino_entrega`
+                # sólo produce ese motivo cuando encuentra, en el
+                # catálogo, un destino CONFIRMADO cuya dirección coincide
+                # textualmente -- evidencia real de una decisión humana,
+                # nunca una respuesta distinta del proveedor por azar).
+                identidad_recien_confirmada = (
+                    motivo_ruta_base(motivo_previo_crudo) == "MULTIPLES_UBICACIONES_DISPERSAS"
+                    and motivo_ruta_base(resultado.motivo_ruta or "") == "COORDENADA_NO_CONFIRMADA"
+                )
+                if (
+                    motivo_previo_tecnico or motivo_previo_sin_causa
+                    or motivo_previo_reevaluable or identidad_recien_confirmada
+                ) and resultado.motivo_ruta:
                     motivo_nuevo = motivo_ruta_base(resultado.motivo_ruta)
                     if (
                         motivo_previo_sin_causa

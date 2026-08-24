@@ -2887,3 +2887,74 @@ visible).
 
 **Estado: BLOQUE REGENERACIÓN B1 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin
 push en ninguno de los dos repos.**
+
+## Bloque CONFIRMACIÓN D2 -- confirmación humana cierra ambigüedad de identidad + Desktop no sale de Revisión de Atlas (2026-08-24)
+
+**Caso real: 472037.** Javier confirmó "VICUÑA MACKENNA 655" en Revisión
+de Atlas; la decisión desapareció, pero Viajes seguía mostrando
+`MULTIPLES_UBICACIONES_DISPERSAS(5)` sin km/tiempo, y aplicar cualquier
+decisión sacaba a Javier de la pestaña Revisión de Atlas.
+
+**Causa raíz #1 (Motor):** `aplicar_decision_obra` registra el destino
+como `CONFIRMADO` en el catálogo aunque la ruta no llegue a calcularse
+(Bloque R16, nunca persiste coordenadas a medias) -- Vía A
+(`resolver_destino_ambiguo_con_evidencia_inequivoca`) exige coordenadas
+propias para respaldar un candidato, así que nunca podía actuar sobre
+ESTE destino; el motivo dejado era `MULTIPLES_UBICACIONES_DISPERSAS`, el
+mismo que implica "identidad sin resolver" -- contradiciendo la
+confirmación humana ya aplicada. **Fix:** `ResultadoDesambiguacionInequivoca`
+ahora expone `identidad_confirmada` (coincidencia textual con un destino
+`CONFIRMADO`, independiente de si tiene coordenadas); cuando la
+ambigüedad geográfica persiste pero la identidad ya está confirmada,
+`resolver_destino_entrega` deja `COORDENADA_NO_CONFIRMADA(N)` en vez de
+`MULTIPLES_UBICACIONES_DISPERSAS(N)` -- nunca inventa un punto, sólo dice
+la verdad vigente. `revalidar_ruta_sin_destino_calculado_sin_ocr` reevalúa
+esa transición exacta (y sólo esa) para filas YA persistidas con el
+motivo viejo, sin tocar la estabilidad general de motivos con evidencia
+real (control ya existente, `test_logistica_l1.py`, sigue en verde).
+`COORDENADA_NO_CONFIRMADA` no entra a `MOTIVOS_DESTINO_NO_RESUELTO` --
+nunca vuelve a preguntarle a Javier algo que ya respondió.
+
+**Causa raíz #2 (Desktop):** `cargarArchivo` (usada tanto por el input
+manual como por el refresco automático tras aplicar cualquier decisión,
+`intentarCargaAutomatica`) forzaba `vista-datos`/`vista-vacia` sin
+condición -- ganándole en silencio a la pestaña realmente activa.
+**Fix:** única función `actualizarVisibilidadViajes()` (misma regla que
+ya usaba `cambiarPestana`, ahora compartida) -- `cargarArchivo` nunca
+vuelve a decidir la pestaña visible por su cuenta.
+
+**472037 antes → después (Drive real):** `MULTIPLES_UBICACIONES_
+DISPERSAS(5)`, sin km/tiempo → `COORDENADA_NO_CONFIRMADA(5)`, sigue sin
+km/tiempo (ninguna evidencia nueva permite pinchar el punto exacto entre
+5 comunas homónimas) -- pero ya no contradice la confirmación de Javier.
+Mismo efecto, correctamente generalizado, en 460807/472008 (AUSIN SAN
+BERNARDO, mismo patrón real).
+
+**Tests:** Motor -- `tests/test_desambiguacion_destino_inequivoca.py` (3
+nuevos: `identidad_confirmada` con/sin coordenadas, con/sin match),
+`tests/test_resolucion_r16.py` (2 nuevos: motivo correcto con/sin
+identidad confirmada), `tests/test_confirmacion_d2_reevaluacion_
+ambiguedad.py` (2 nuevos: reevaluación real vía `revalidar_ruta_sin_
+destino_calculado_sin_ocr`, control de estabilidad sin confirmación).
+Motor completo: 1730 passed (antes 1723). Desktop --
+`test/confirmacion_d2_permanece_en_revision.test.js` (4 nuevos, misma
+convención textual ya usada en `ux_r5.test.js`). Desktop completo: 285
+passed (antes 281). E2E en copia real de Drive: `analisis_completo_
+guias.csv` + `catalogos_privados/*` copiados, proveedor con la misma
+respuesta de 5 candidatos ya cacheada en producción -- 472037 transiciona
+correctamente, nunca inventa km/tiempo.
+
+**Aplicado a Drive real:** 2 backups verificados (`respaldos/
+CONFIRMACION_D2_PRE_.../`, `respaldos/CONFIRMACION_D2_REPORTE_PRE_.../`,
+SHA-256 antes/después). Paso 1: `revalidar_ruta_sin_destino_calculado_
+sin_ocr` con el proveedor real+caché (0 llamadas de red nuevas, consulta
+ya cacheada) -- `guias_actualizadas: [460807, 472008, 472037]`; catálogos/
+ledger/`decisiones_pendientes.json` byte-idénticos al backup. Paso 2:
+reporte oficial regenerado (`reportes/reporte_confirmacion_d2_.../`) y
+publicado en `estado_operacion.json` -- Desktop leía `viajes.csv` del
+reporte vigente, no el dataset directo; sin este paso el fix quedaba
+invisible en Desktop pese a estar correcto en el dataset (verificado:
+`viajes.csv` nuevo trae `COORDENADA_NO_CONFIRMADA(5)` para 472037).
+
+**Estado: BLOQUE CONFIRMACIÓN D2 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin
+push en ninguno de los dos repos.**

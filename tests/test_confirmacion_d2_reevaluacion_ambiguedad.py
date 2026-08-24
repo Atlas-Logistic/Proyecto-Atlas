@@ -1,0 +1,135 @@
+"""Bloque CONFIRMACIÓN D2 -- caso real 472037 (VICUÑA MACKENNA 655):
+Javier confirmó la dirección en Revisión de Atlas (`aplicar_decision_obra`
+registra el destino como CONFIRMADO en el catálogo), pero esa
+confirmación llega DESPUÉS del reintento de ruta que la propia aplicación
+de la decisión dispara -- en ese momento el catálogo confirmado todavía
+no existía, así que la fila queda persistida con
+`MULTIPLES_UBICACIONES_DISPERSAS(N)`, una etiqueta que ya no es cierta
+(implica identidad sin resolver) y que la reconciliación automática
+normal nunca reintentaba (motivo estable por diseño).
+
+Este bloque hace `MULTIPLES_UBICACIONES_DISPERSAS` reevaluable en
+`revalidar_ruta_sin_destino_calculado_sin_ocr` -- mismo criterio ya usado
+para `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL`/
+`GEOCODIFICACION_FUERA_DE_CHILE` -- para que una fila ya bloqueada se
+autocorrija en la siguiente revalidación, sin depender de una nueva
+decisión humana ni de una auditoría general."""
+from __future__ import annotations
+
+import csv
+
+from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
+from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
+from atlas_core.procesamiento_masivo import COLUMNAS
+from atlas_core.revalidacion_documental import revalidar_ruta_sin_destino_calculado_sin_ocr
+from atlas_core.rutas.modelos import (
+    CandidatoGeocodificacion, Coordenadas, EstadoRuta, ResultadoGeocodificacion, ResultadoRuta,
+)
+from atlas_core.rutas.proveedor import ProveedorRutasSimulado
+
+COORD_AZA_RENCA = Coordenadas(-70.685226, -33.401595)
+
+
+def _catalogos(tmp_path):
+    carpeta = tmp_path / "catalogos"; carpeta.mkdir()
+    plantas = CatalogoPlantas(carpeta / "plantas.json")
+    planta = plantas.crear(
+        nombre="AZA RENCA", pais="CHILE", fuente="TEST",
+        direccion="LA UNION 3070", comuna="RENCA", region="RM",
+        latitud=COORD_AZA_RENCA.latitud, longitud=COORD_AZA_RENCA.longitud,
+        estado_calidad=EstadoCalidad.CONFIRMADA,
+    )
+    return carpeta, planta
+
+
+def _fila_csv(planta, **overrides):
+    fila = {c: "" for c in COLUMNAS}
+    fila.update({
+        "archivo": "472037.jpeg", "estado_procesamiento": "OK", "numero_guia": "472037",
+        "numero_transporte": "0000354034", "fecha": "22/08/2026",
+        "despachar_a_crudo": "VICUÑA MACKENNA 655",
+        "direccion_entrega": "", "localidad_entrega": "", "region_entrega": "",
+        "planta_origen_id": planta.planta_id, "planta_origen_nombre": planta.nombre,
+        "origen_determinado_por": "TELEMETRIA_GPS", "evidencia_origen": "GEOCERCA_PLANTA",
+        "estado_ruta": "REQUIERE_REVISION", "motivo_ruta": "MULTIPLES_UBICACIONES_DISPERSAS(5)",
+        "distancia_km": "", "duracion_min": "", "indicador_revision": "OK",
+    })
+    fila.update(overrides)
+    return fila
+
+
+def _escribir_csv(ruta, filas):
+    with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+
+def _leer(ruta):
+    with ruta.open(encoding="utf-8-sig") as archivo:
+        return list(csv.DictReader(archivo, delimiter=";"))
+
+
+def _candidato(lat, lon, etiqueta):
+    return CandidatoGeocodificacion(Coordenadas(lon, lat), etiqueta, 0.7)
+
+
+def _proveedor_vicuna_mackenna_dispersa():
+    consulta = "VICUÑA MACKENNA 655, Chile"
+    return ProveedorRutasSimulado(
+        geocodificaciones={
+            consulta: ResultadoGeocodificacion(
+                EstadoRuta.RESULTADO_AMBIGUO,
+                (
+                    _candidato(-33.45, -70.60, "Vicuña Mackenna 655, Providencia"),
+                    _candidato(-33.60, -70.65, "Vicuña Mackenna 655, La Florida"),
+                    _candidato(-36.6, -72.1, "Vicuña Mackenna 655, Chillán"),
+                    _candidato(-38.7, -72.6, "Vicuña Mackenna 655, Temuco"),
+                    _candidato(-41.5, -72.9, "Vicuña Mackenna 655, Puerto Montt"),
+                ),
+                "MULTIPLES_CANDIDATOS",
+            )
+        },
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 8.4, 15.2, "SINTETICO"),
+    )
+
+
+def test_multiples_ubicaciones_dispersas_se_corrige_a_coordenada_no_confirmada_tras_confirmacion(tmp_path):
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv(planta)])
+    # El destino queda CONFIRMADO en el catálogo (Javier ya confirmó la
+    # dirección) pero SIN coordenadas propias -- exactamente como lo deja
+    # `aplicar_decision_obra` cuando la ruta no llegó a calcularse en el
+    # momento de la confirmación (Bloque R16: nunca se persiste una
+    # coordenada a medias).
+    CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json").crear(
+        cliente_id="", nombre_destino="VICUÑA MACKENNA 655", pais="CHILE", fuente="TEST",
+        direccion="VICUÑA MACKENNA 655", estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+    )
+    proveedor = _proveedor_vicuna_mackenna_dispersa()
+
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+    )
+    assert resultado["guias_actualizadas"] == ["472037"]
+    fila = _leer(dataset)[0]
+    assert fila["motivo_ruta"] == "COORDENADA_NO_CONFIRMADA(5)"
+    assert fila["distancia_km"] == ""  # nunca inventa la ruta sin punto resuelto
+
+
+def test_multiples_ubicaciones_dispersas_sin_confirmacion_se_mantiene_estable(tmp_path):
+    """Control -- sin ningún destino CONFIRMADO en el catálogo (la
+    situación normal, sin intervención humana), el motivo sigue siendo
+    estable: nunca se reescribe ni se reintenta de forma ruidosa."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv(planta)])
+    proveedor = _proveedor_vicuna_mackenna_dispersa()
+
+    resultado = revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, proveedor_rutas=proveedor,
+    )
+    assert resultado["guias_actualizadas"] == []
+    fila = _leer(dataset)[0]
+    assert fila["motivo_ruta"] == "MULTIPLES_UBICACIONES_DISPERSAS(5)"

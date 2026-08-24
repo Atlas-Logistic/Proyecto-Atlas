@@ -286,6 +286,55 @@ def test_catalogo_confirmado_con_formato_real_calle_comuna_pais_resuelve():
     assert r.candidato is ganador
 
 
+# ============================================================
+# Bloque CONFIRMACIÓN D2 -- `identidad_confirmada` se calcula SIEMPRE,
+# independiente de si Vía A logra resolver un candidato (caso real
+# 472037: destino CONFIRMADO sin coordenadas propias).
+# ============================================================
+
+
+def test_identidad_confirmada_true_aunque_destino_no_tenga_coordenadas():
+    """Un destino CONFIRMADO cuya dirección coincide con el texto, pero
+    SIN latitud/longitud propias (nunca pudo respaldar un candidato),
+    igual marca `identidad_confirmada=True` -- la abstención geográfica
+    sigue siendo legítima (`resuelto=False`), pero ya no es una
+    ambigüedad de IDENTIDAD."""
+    candidatos = (
+        _candidato(-33.10, -70.60, "A"), _candidato(-33.50, -70.90, "B"),
+        _candidato(-38.0, -72.0, "C"),
+    )
+    destino_sin_coordenadas = _destino_confirmado("VICUÑA MACKENNA 655", None, None)
+    r = resolver_destino_ambiguo_con_evidencia_inequivoca(
+        "VICUÑA MACKENNA 655", candidatos, destinos_confirmados=(destino_sin_coordenadas,),
+    )
+    assert r.resuelto is False
+    assert r.identidad_confirmada is True
+
+
+def test_identidad_confirmada_false_sin_destino_que_coincida():
+    """Control -- sin ningún destino CONFIRMADO cuya dirección coincida
+    textualmente, `identidad_confirmada` se mantiene False (comportamiento
+    idéntico al de antes de este bloque)."""
+    candidatos = (_candidato(-33.10, -70.60, "A"), _candidato(-33.50, -70.90, "B"))
+    r = resolver_destino_ambiguo_con_evidencia_inequivoca("CALLE SIN CATALOGO 1", candidatos)
+    assert r.resuelto is False
+    assert r.identidad_confirmada is False
+
+
+def test_identidad_confirmada_true_cuando_via_a_si_resuelve():
+    """`identidad_confirmada` también es True en el camino feliz (Vía A
+    con coordenadas que sí respaldan un candidato) -- nunca sólo en la
+    abstención."""
+    ganador = _candidato(-33.31, -70.75, "Lampa")
+    rival = _candidato(-33.45, -70.63, "Santiago")
+    destino = _destino_confirmado("SANTA ISABEL 585", -33.31, -70.75)
+    r = resolver_destino_ambiguo_con_evidencia_inequivoca(
+        "SANTA ISABEL 585 SANTIAGO LAMPA", (ganador, rival), destinos_confirmados=(destino,),
+    )
+    assert r.resuelto is True
+    assert r.identidad_confirmada is True
+
+
 def test_no_recalcula_ruta_ni_toca_km():
     """El resultado nunca incluye distancia/duración/ruta -- selección de
     destino y routing quedan estrictamente separados (Fase 8)."""
