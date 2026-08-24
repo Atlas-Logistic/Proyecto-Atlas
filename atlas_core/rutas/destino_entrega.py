@@ -735,6 +735,86 @@ def _etiqueta_geocodificada_o_texto_documental(*, etiqueta: str, texto_documenta
     return etiqueta
 
 
+# --- Bloque FIX FINAL DE ACEPTACION -- caso real 472247/472212 --------
+#
+# "CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU" es específico (tiene forma
+# de dirección con número, `_trae_numero_calle` ya lo preserva sobre una
+# etiqueta genérica), pero el propio OCR corrompió DOS de sus tokens
+# (nombre de calle + número). Atlas no necesita "leer" el OCR para
+# corregirlo: otro documento del MISMO cliente (464981, misma obra real)
+# ya trae la MISMA dirección sin ruido -- "CAMINO A MELIPILLA 10800
+# SANTIAGO MAIPU". Comparar contra ese documento hermano (o contra un
+# destino ya CONFIRMADO compatible) es evidencia real, nunca un mapeo de
+# caracteres inventado ("MELIFILLA -> MELIPILLA" no existe en ningún
+# lado del código -- se descubre comparando textos, no traduciéndolos).
+
+_PATRON_TOKEN_DIRECCION = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+")
+
+
+def _tokens_direccion(texto: str) -> tuple[str, ...]:
+    return tuple(t.upper() for t in _PATRON_TOKEN_DIRECCION.findall(str(texto or "")))
+
+
+def _token_con_ruido_ocr(token: str) -> bool:
+    """Mismo criterio que `_trae_numero_calle` para "número corrompido"
+    -- dígitos y letras mezclados en un token corto."""
+    return 2 <= len(token) <= 6 and any(c.isdigit() for c in token) and any(c.isalpha() for c in token)
+
+
+def _cantidad_tokens_con_ruido_ocr(texto: str) -> int:
+    return sum(1 for token in _tokens_direccion(texto) if _token_con_ruido_ocr(token))
+
+
+def _variante_documental_mas_limpia(candidato: str, objetivo: str) -> bool:
+    """True si `candidato` es una variante de la MISMA dirección que
+    `objetivo` (misma cantidad de tokens, la mayoría idénticos -- nunca
+    menos de la mitad, para no confundir direcciones genuinamente
+    distintas) y tiene MENOS ruido OCR que `objetivo`. Comparación
+    puramente estructural (cantidad y posición de tokens iguales/
+    distintos) -- nunca decodifica ni traduce ningún token."""
+    tokens_candidato = _tokens_direccion(candidato)
+    tokens_objetivo = _tokens_direccion(objetivo)
+    if not tokens_candidato or len(tokens_candidato) != len(tokens_objetivo):
+        return False
+    diferencias = sum(1 for a, b in zip(tokens_candidato, tokens_objetivo) if a != b)
+    if diferencias == 0:
+        return False  # idéntico -- nada que ganar
+    if len(tokens_candidato) - diferencias < len(tokens_candidato) / 2:
+        return False  # menos de la mitad coincide -- no es la misma dirección
+    return _cantidad_tokens_con_ruido_ocr(candidato) < _cantidad_tokens_con_ruido_ocr(objetivo)
+
+
+def resolver_direccion_canonica_mas_limpia(*, texto_objetivo: str, candidatos: Iterable[str]) -> str | None:
+    """Bloque FIX FINAL DE ACEPTACION -- entre `candidatos` (documentos
+    hermanos del mismo cliente/obra, o direcciones de destinos ya
+    CONFIRMADOS compatibles), busca una variante de la MISMA dirección
+    con MENOS ruido OCR que `texto_objetivo`.
+
+    Bloque SEGURIDAD (mismo principio ya calibrado para obras -- ver
+    `resolver_obra_por_variacion_ortografica_menor`): sólo actúa si
+    `texto_objetivo` en sí tiene ruido detectable (nunca toca un texto
+    ya limpio); entre los candidatos compatibles, prefiere los que
+    quedan SIN ningún ruido; si sobrevive más de una variante DISTINTA
+    igualmente limpia, se abstiene -- nunca elige arbitrariamente entre
+    dos direcciones reales parecidas ("dirección realmente nueva -> no
+    sustituir por parecido débil")."""
+    objetivo = str(texto_objetivo or "").strip()
+    if not objetivo or _cantidad_tokens_con_ruido_ocr(objetivo) == 0:
+        return None
+    compatibles = [
+        candidato for candidato in (str(c or "").strip() for c in candidatos)
+        if candidato and _variante_documental_mas_limpia(candidato, objetivo)
+    ]
+    if not compatibles:
+        return None
+    limpios = [c for c in compatibles if _cantidad_tokens_con_ruido_ocr(c) == 0]
+    fuente = limpios if limpios else compatibles
+    unicos = set(fuente)
+    if len(unicos) != 1:
+        return None
+    return next(iter(unicos))
+
+
 _PATRON_TOKEN_SANTIAGO = re.compile(r"(?i)\bSANTIAGO\b")
 
 

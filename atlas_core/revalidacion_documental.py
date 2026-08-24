@@ -1328,6 +1328,75 @@ def revalidar_direccion_entrega_degradada_sin_ocr(*, ruta_dataset: str | Path) -
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Bloque FIX FINAL DE ACEPTACION -- caso real 472247/472212: el OCR
+    corrompió DOS tokens de la misma dirección real ("CAMINO A MELIFILLA
+    1OBOD SANTIAGO MAIPU" / "CAMINO A MELIPILLA 10B00 SANTIAGO MAIPU")
+    -- `revalidar_direccion_entrega_degradada_sin_ocr` ya preserva un
+    texto documental específico sobre una etiqueta genérica, pero no
+    tiene forma de saber que ESE texto específico está, a su vez,
+    corrompido. Otro documento del mismo cliente (464981) ya trae la
+    misma dirección real sin ruido -- comparar contra ese "documento
+    hermano" (y contra cualquier destino ya CONFIRMADO compatible) es
+    evidencia real, nunca un mapeo de caracteres inventado.
+
+    Restringida a filas con `estado_ruta == RUTA_CALCULADA` (mismo
+    alcance que su función hermana) -- nunca toca coordenadas/km/tiempo/
+    ruta, sólo la ETIQUETA `direccion_entrega`; `despachar_a_crudo`
+    (evidencia documental original) nunca se modifica. Sin OCR, sin red
+    -- sólo relee el dataset y catálogos ya persistidos."""
+    from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
+    from atlas_core.rutas.destino_entrega import resolver_direccion_canonica_mas_limpia
+
+    ruta = Path(ruta_dataset)
+    catalogos = Path(carpeta_catalogos)
+    candidatos_catalogo: list[str] = []
+    try:
+        candidatos_catalogo = [
+            d.direccion for d in CatalogoDestinos(
+                catalogos / "destinos_maestros.json", ruta_clientes=catalogos / "clientes.json",
+            ).listar()
+            if d.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
+            and d.estado_vigencia == "ACTIVO" and d.direccion.strip()
+        ]
+    except (OSError, ValueError):
+        pass
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        # Candidatos "documento hermano": texto documental de CUALQUIER
+        # otra fila del mismo cliente -- el propio dataset ya persistido
+        # es el histórico, sin necesidad de un catálogo aparte.
+        crudos_por_cliente: dict[str, list[str]] = {}
+        for fila in filas:
+            cliente = str(fila.get("cliente", "")).strip()
+            crudo = str(fila.get("despachar_a_crudo", "")).strip()
+            if cliente and crudo:
+                crudos_por_cliente.setdefault(cliente, []).append(crudo)
+
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            entrega_actual = str(fila.get("direccion_entrega", "")).strip()
+            cliente = str(fila.get("cliente", "")).strip()
+            if not entrega_actual:
+                continue
+            candidatos = [*candidatos_catalogo, *crudos_por_cliente.get(cliente, ())]
+            entrega_corregida = resolver_direccion_canonica_mas_limpia(
+                texto_objetivo=entrega_actual, candidatos=candidatos,
+            )
+            if entrega_corregida is not None and entrega_corregida != entrega_actual:
+                fila["direccion_entrega"] = entrega_corregida
+                guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
 ) -> dict[str, object]:
@@ -1420,6 +1489,15 @@ def revalidar_y_regenerar_reporte(
     # fix de especificidad), sólo esta pasada la corrige. Nunca toca
     # km/tiempo/coordenadas -- sólo la etiqueta.
     resultado_direccion_degradada = revalidar_direccion_entrega_degradada_sin_ocr(ruta_dataset=dataset)
+    # Bloque FIX FINAL DE ACEPTACION -- caso real 472247/472212: corre
+    # DESPUÉS de la anterior a propósito (esa ya deja `direccion_entrega`
+    # igual al texto documental específico cuando corresponde; ésta
+    # revisa si ESE texto, a su vez, tiene una variante más limpia entre
+    # los documentos hermanos del mismo cliente o los destinos ya
+    # CONFIRMADOS).
+    resultado_direccion_hermanos = revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
@@ -1429,6 +1507,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_cliente_ausente["guias_actualizadas"])
         | set(resultado_ruta["guias_actualizadas"])
         | set(resultado_direccion_degradada["guias_actualizadas"])
+        | set(resultado_direccion_hermanos["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -1437,6 +1516,7 @@ def revalidar_y_regenerar_reporte(
         "patente": resultado_patente,
         "cliente": resultado_cliente,
         "direccion_degradada": resultado_direccion_degradada,
+        "direccion_hermanos": resultado_direccion_hermanos,
         "destino_contradicho": resultado_destino_contradicho,
         "destino_sin_numero": resultado_destino_sin_numero,
         "cliente_ausente": resultado_cliente_ausente,

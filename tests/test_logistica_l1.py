@@ -10,10 +10,14 @@ from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import (
     revalidar_direccion_entrega_degradada_sin_ocr,
+    revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr,
     revalidar_destino_operacional_sin_numero_de_calle_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr, revalidar_y_regenerar_reporte,
 )
-from atlas_core.rutas.destino_entrega import _etiqueta_geocodificada_o_texto_documental
+from atlas_core.rutas.destino_entrega import (
+    _etiqueta_geocodificada_o_texto_documental,
+    resolver_direccion_canonica_mas_limpia,
+)
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion, Coordenadas, EstadoRuta, ResultadoGeocodificacion, ResultadoRuta,
 )
@@ -107,6 +111,68 @@ def test_token_alfanumerico_corto_sin_digitos_no_se_confunde_con_numero():
         etiqueta="Maipú, RM, Chile", texto_documental="SECTOR RURAL MAIPU",
     )
     assert resultado == "Maipú, RM, Chile"
+
+
+# --- 1b. Dirección canónica desde documentos hermanos -- unidad -------
+
+def test_ocr_corrupto_con_hermano_limpio_compatible_gana_la_canonica():
+    """Caso real 472247: el documento hermano 464981 (mismo cliente) ya
+    trae la dirección real sin ruido -- gana sobre el texto OCR-corrupto
+    aunque éste ya sea "específico" (tiene número, sólo que corrompido)."""
+    resultado = resolver_direccion_canonica_mas_limpia(
+        texto_objetivo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+        candidatos=["CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"],
+    )
+    assert resultado == "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"
+
+
+def test_caso_real_472212_mismo_patron_distinto_token_corrompido():
+    resultado = resolver_direccion_canonica_mas_limpia(
+        texto_objetivo="CAMINO A MELIPILLA 10B00 SANTIAGO MAIPU",
+        candidatos=["CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"],
+    )
+    assert resultado == "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"
+
+
+def test_direccion_realmente_nueva_no_se_sustituye_por_parecido_debil():
+    """Regresión -- un candidato que no comparte la mayoría de los
+    tokens (o pertenece a una dirección genuinamente distinta) nunca se
+    usa como reemplazo, por parecido que tenga algún token suelto."""
+    resultado = resolver_direccion_canonica_mas_limpia(
+        texto_objetivo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+        candidatos=["AV IRARRAZAVAL 5497 NUNOA"],
+    )
+    assert resultado is None
+
+
+def test_dos_candidatos_limpios_pero_distintos_es_ambiguo_y_se_abstiene():
+    """Bloque SEGURIDAD -- si sobreviven dos variantes limpias DISTINTAS
+    (dos direcciones reales parecidas, no la misma con ruido), Atlas se
+    abstiene en vez de elegir arbitrariamente."""
+    resultado = resolver_direccion_canonica_mas_limpia(
+        texto_objetivo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+        candidatos=[
+            "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+            "CAMINO A MELIPILLA 12345 SANTIAGO MAIPU",
+        ],
+    )
+    assert resultado is None
+
+
+def test_texto_ya_limpio_nunca_se_toca():
+    """Control -- si el texto objetivo ya no tiene ruido OCR detectable,
+    nunca se reemplaza (nada que ganar)."""
+    resultado = resolver_direccion_canonica_mas_limpia(
+        texto_objetivo="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+        candidatos=["CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU"],
+    )
+    assert resultado is None
+
+
+def test_sin_candidatos_no_falla():
+    assert resolver_direccion_canonica_mas_limpia(
+        texto_objetivo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU", candidatos=(),
+    ) is None
 
 
 # --- 2. "No disponible" nunca silencioso -- motivo en blanco se refresca ---
@@ -272,6 +338,79 @@ def test_direccion_entrega_degradada_por_numero_ocr_ruidoso_se_corrige(tmp_path)
     assert fila["distancia_km"] == "34.8694"
     assert fila["duracion_min"] == "47.61"
     assert fila["localidad_entrega"] == "Maipú"
+
+
+def test_direccion_canonica_desde_documento_hermano_reemplaza_ocr_corrupto(tmp_path):
+    """Caso real 472247/472212/464981: ambas 472247 y 472212 traen la
+    misma dirección real que 464981 (mismo cliente), cada una con un
+    token distinto corrompido por OCR -- las dos ganan la forma limpia
+    de 464981 sin tocar km/tiempo/ruta."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [
+        _fila_csv(
+            planta, numero_guia="472247", cliente="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+            direccion_entrega="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+            estado_ruta="RUTA_CALCULADA", distancia_km="34.8694", duracion_min="47.61",
+        ),
+        _fila_csv(
+            planta, numero_guia="472212", cliente="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo="CAMINO A MELIPILLA 10B00 SANTIAGO MAIPU",
+            direccion_entrega="CAMINO A MELIPILLA 10B00 SANTIAGO MAIPU",
+            estado_ruta="RUTA_CALCULADA", distancia_km="35.3246", duracion_min="49.4317",
+        ),
+        _fila_csv(
+            planta, numero_guia="464981", cliente="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+            direccion_entrega="", estado_ruta="ORIGEN_NO_DETERMINADO", motivo_ruta="SIN_EVIDENCIA_GPS",
+        ),
+    ])
+    resultado = revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta,
+    )
+    assert set(resultado["guias_actualizadas"]) == {"472247", "472212"}
+    filas = {f["numero_guia"]: f for f in _leer(dataset)}
+    assert filas["472247"]["direccion_entrega"] == "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"
+    assert filas["472212"]["direccion_entrega"] == "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"
+    # Nunca toca km/tiempo/ruta/despachar_a_crudo -- sólo la etiqueta.
+    assert filas["472247"]["distancia_km"] == "34.8694"
+    assert filas["472247"]["duracion_min"] == "47.61"
+    assert filas["472247"]["despachar_a_crudo"] == "CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU"
+    assert filas["472212"]["distancia_km"] == "35.3246"
+    # 464981 (el hermano limpio, sin ruta calculada) nunca se toca --
+    # fuera del alcance (sin RUTA_CALCULADA) y ya no tiene ruido que
+    # corregir.
+    assert filas["464981"]["direccion_entrega"] == ""
+    assert filas["464981"]["estado_ruta"] == "ORIGEN_NO_DETERMINADO"
+
+
+def test_documentos_hermanos_no_sustituye_por_direccion_de_otro_cliente(tmp_path):
+    """Control -- un candidato con la misma forma pero de OTRO cliente
+    nunca corrobora (contexto de cliente como evidencia real, no un
+    detalle ignorable)."""
+    carpeta, planta = _catalogos(tmp_path)
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [
+        _fila_csv(
+            planta, numero_guia="472247", cliente="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+            direccion_entrega="CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
+            estado_ruta="RUTA_CALCULADA", distancia_km="34.8694", duracion_min="47.61",
+        ),
+        _fila_csv(
+            planta, numero_guia="999999", cliente="OTRO CLIENTE DISTINTO SPA",
+            despachar_a_crudo="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+            direccion_entrega="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+            estado_ruta="RUTA_CALCULADA", distancia_km="10.0", duracion_min="15.0",
+        ),
+    ])
+    resultado = revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta,
+    )
+    assert resultado["guias_actualizadas"] == []
+    fila = next(f for f in _leer(dataset) if f["numero_guia"] == "472247")
+    assert fila["direccion_entrega"] == "CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU"
 
 
 def test_direccion_entrega_ya_especifica_no_se_toca(tmp_path):

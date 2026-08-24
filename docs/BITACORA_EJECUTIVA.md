@@ -3337,3 +3337,39 @@ intactos (nunca se reintentó routing); `estado_ruta` sin cambios.
 completo con km/tiempo intactos). Suite completa: 1810 passed (antes
 1807). Aplicado a Drive real con backup+SHA-256 (`respaldos/
 FIX_DIRECCION_CANONICA_472247_PRE_20260824_224353/`). Sin push.
+
+## Bloque FIX FINAL DE ACEPTACION -- dirección canónica gana sobre OCR corrupto vía documentos hermanos (2026-08-24)
+
+**Causa:** el fix anterior preserva texto documental ESPECÍFICO sobre
+una etiqueta genérica, pero no distingue un texto específico LIMPIO de
+uno específico pero CORROMPIDO por OCR ("CAMINO A MELIFILLA 1OBOD
+SANTIAGO MAIPU" -- calle Y número corrompidos). Sin comparación contra
+otra fuente, Atlas no tiene forma de saber que ese texto, aunque
+específico, no es el correcto.
+
+**Regla general:** nueva `resolver_direccion_canonica_mas_limpia`
+(`destino_entrega.py`) compara el texto objetivo contra candidatos
+(documentos hermanos del mismo cliente + destinos ya CONFIRMADOS) por
+alineación de tokens -- misma cantidad de tokens, mayoría idéntica,
+MENOS tokens con forma de ruido OCR (dígito+letra mezclados, mismo
+criterio ya calibrado). Nunca mapea caracteres ("MELIFILLA->MELIPILLA"
+no existe en el código); si sobreviven dos candidatos limpios DISTINTOS,
+se abstiene (nunca elige entre direcciones reales parecidas). Nueva
+`revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr`, wireada
+DESPUÉS de la revalidación anterior, mismo alcance (sólo `RUTA_
+CALCULADA`, nunca toca km/tiempo/ruta/`despachar_a_crudo`).
+
+**472247/472212 (antes -> después):** ambas mostraban su propio texto
+OCR-corrupto ("...MELIFILLA 1OBOD..." / "...MELIPILLA 10B00...") --
+ahora ambas muestran "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU" (la
+forma limpia del documento hermano 464981, mismo cliente AMERICAN SCREW
+CHILE SPA). km/tiempo/ruta intactos en ambas (34.8694/47.61 y
+35.3246/49.43).
+
+**Tests/commit:** 8 tests focales nuevos en `test_logistica_l1.py`
+(unidad: caso real + regresión "no sustituir por parecido débil" +
+ambigüedad + control ya-limpio + sin candidatos; integración: 472247+
+472212+464981 juntos + control de aislamiento por cliente). Suite
+completa: 1818 passed (antes 1810). Aplicado a Drive real con
+backup+SHA-256 (`respaldos/FIX_DIRECCION_CANONICA_HERMANOS_PRE_20260824_230054/`).
+Sin push.
