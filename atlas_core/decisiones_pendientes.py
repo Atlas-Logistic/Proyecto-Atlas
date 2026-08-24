@@ -139,6 +139,104 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
 })
 
 
+def _evidencia_externa_resumida(evidencias: list) -> tuple[str, tuple[str, ...]]:
+    """Bloque B1 EXPOSICIÓN -- traduce evidencia `EXTERNO` (Bloque B1
+    INVESTIGADOR) a un resumen compacto para la tarjeta de Revisión de
+    Atlas -- nunca un dump de URLs. `referencias_fuente` ya trae
+    "Título <url>" (ver `atlas_ia.herramientas.herramienta_verificacion_
+    externa`); aquí sólo se cuenta y se recortan los títulos."""
+    externas = [e for e in evidencias if isinstance(e, dict) and e.get("tipo_fuente") == "EXTERNO"]
+    if not externas:
+        return "", ()
+    total_fuentes = sum(len(e.get("referencias_fuente") or []) for e in externas) or len(externas)
+    plural = "s" if total_fuentes != 1 else ""
+    resumen = f"Evidencia externa: {total_fuentes} fuente{plural} concordante{plural}"
+    fuentes: list[str] = []
+    for evidencia in externas:
+        for referencia in (evidencia.get("referencias_fuente") or [])[:2]:
+            titulo = str(referencia).split(" <", 1)[0].strip()
+            if titulo and titulo not in fuentes:
+                fuentes.append(titulo)
+    return resumen, tuple(fuentes[:4])
+
+
+def _propuesta_b1_confirmable(valor_propuesto: str, valor_documental: str) -> bool:
+    """Bloque B1 EXPOSICIÓN -- `valor_propuesto` sólo es "confirmable con
+    un clic" si tiene forma de dato real (nunca "Sí"/"No"/una palabra
+    suelta que a veces devuelve el modelo cuando el problema no era
+    literalmente proponer un valor) -- con un número (probable número de
+    calle) o compartiendo texto real con lo documental. Conservador a
+    propósito: cuando hay duda, se cae al flujo existente de "Registrar
+    dirección" -- nunca se ofrece "Confirmar" sobre algo dudoso."""
+    valor = str(valor_propuesto or "").strip()
+    if len(valor) < 8:
+        return False
+    if re.search(r"\d", valor):
+        return True
+    tokens_doc = {t for t in re.findall(r"[A-ZÁÉÍÓÚÜÑ0-9]{4,}", str(valor_documental or "").upper())}
+    tokens_val = {t for t in re.findall(r"[A-ZÁÉÍÓÚÜÑ0-9]{4,}", valor.upper())}
+    return bool(tokens_doc & tokens_val)
+
+
+def resumen_hallazgo_b1(fila: Mapping[str, str], *, dominio: str, campo: str) -> dict[str, object] | None:
+    """Bloque B1 EXPOSICIÓN -- lee `resultado_atlas_ia_json` (YA
+    persistido por `procesamiento_masivo._ejecutar_ia_operacional`,
+    misma fuente de verdad, nunca una memoria paralela) y traduce el
+    resultado de B1 a lenguaje operacional para una tarjeta de Revisión
+    de Atlas. `None` si B1 nunca se llamó para este dominio, o si se
+    llamó pero no dejó ni explicación ni evidencia externa (caso 7:
+    B1 realmente se abstuvo sin nada útil que mostrar)."""
+    crudo = str(fila.get("resultado_atlas_ia_json", "")).strip()
+    if not crudo:
+        return None
+    try:
+        trazas = json.loads(crudo)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(trazas, list):
+        return None
+    traza = next(
+        (
+            t for t in trazas if isinstance(t, dict)
+            and t.get("dominio") == dominio and t.get("campo") == campo and t.get("llamada_realizada")
+        ),
+        None,
+    )
+    if traza is None:
+        return None
+    hipotesis = traza.get("hipotesis") or {}
+    explicacion = str(hipotesis.get("explicacion", "")).strip()
+    contexto_final = traza.get("contexto_final") or {}
+    evidencias = contexto_final.get("evidencias")
+    resumen_evidencia, fuentes = _evidencia_externa_resumida(evidencias if isinstance(evidencias, list) else [])
+    if not explicacion and not resumen_evidencia:
+        return None
+    valor_documental = str(fila.get(campo, ""))
+    valor_propuesto = str(hipotesis.get("valor_propuesto", "")).strip()
+    confirmable = _propuesta_b1_confirmable(valor_propuesto, valor_documental)
+    estado = str(traza.get("estado", ""))
+    clasificacion = str(traza.get("clasificacion", ""))
+    if estado == "BLOQUEADO_POR_VALIDACION":
+        motivo_no_autoaplicable = "La evidencia encontrada no cumple el formato exacto que Atlas exige para aplicarse sola -- necesita su confirmación."
+    elif clasificacion == "C_ABSTENCION":
+        motivo_no_autoaplicable = "Atlas investigó, pero la evidencia encontrada no alcanza para confirmar el destino por sí sola."
+    elif clasificacion == "B_ASISTENCIA":
+        motivo_no_autoaplicable = "La evidencia es fuerte, pero Atlas nunca aplica un destino nuevo sin confirmación humana."
+    else:
+        motivo_no_autoaplicable = "Atlas no puede confirmar este destino por sí solo con la evidencia disponible."
+    return {
+        "b1_resumen_hallazgo": explicacion,
+        "b1_propuesta": valor_propuesto if confirmable else "",
+        "b1_evidencia_resumida": resumen_evidencia,
+        "b1_fuentes_resumidas": list(fuentes),
+        "b1_motivo_no_autoaplicable": motivo_no_autoaplicable,
+        "b1_pregunta_humana": (
+            "¿Confirma que este es el destino correcto?" if confirmable
+            else "¿Puede indicar la dirección real de entrega?"
+        ),
+    }
+
+
 def detectar_decision_destino_no_resuelto(
     *, archivo: str, fila: Mapping[str, str],
 ) -> dict[str, object] | None:
@@ -180,6 +278,21 @@ def detectar_decision_destino_no_resuelto(
         "despachar_a_crudo": str(fila.get("despachar_a_crudo", "")),
         "planta_origen_nombre": str(fila.get("planta_origen_nombre", "")),
     }]
+    contexto = {
+        "obra_canonica": str(fila.get("obra_destino", "")),
+        "cliente_canonico": str(fila.get("cliente", "")),
+        "planta_origen_id": str(fila.get("planta_origen_id", "")),
+    }
+    # Bloque B1 EXPOSICIÓN -- si B1 (Bloque B1 INVESTIGADOR) ya investigó
+    # este mismo problema y dejó una explicación/evidencia útil en
+    # `resultado_atlas_ia_json` (misma fuente de verdad, nunca una
+    # memoria paralela), se traduce y se adjunta al contexto -- Desktop
+    # la usa para mostrar qué encontró Atlas en vez de un mensaje
+    # genérico. Sin resultado B1 útil, `contexto` queda exactamente
+    # como antes (caso 7: sin hipótesis, flujo sin cambios).
+    hallazgo = resumen_hallazgo_b1(fila, dominio="DESTINO", campo="despachar_a_crudo")
+    if hallazgo:
+        contexto.update(hallazgo)
     return crear_decision(
         tipo="DESTINO_NO_RESUELTO", entidad="DESTINO", archivo=str(archivo),
         numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
@@ -187,11 +300,7 @@ def detectar_decision_destino_no_resuelto(
         valor_normalizado="", identidad_resuelta=None,
         candidatos=(), motivos=[motivo_base],
         evidencias=evidencias, acciones_permitidas=ACCIONES_DESTINO_NO_RESUELTO,
-        contexto={
-            "obra_canonica": str(fila.get("obra_destino", "")),
-            "cliente_canonico": str(fila.get("cliente", "")),
-            "planta_origen_id": str(fila.get("planta_origen_id", "")),
-        },
+        contexto=contexto,
     )
 
 # Bloque R9 -- distinto de CLIENTE_DESCONOCIDO/CLIENTE_CANDIDATO/
@@ -1396,6 +1505,15 @@ def regenerar_decisiones_persistidas(
     # bloque de arriba (R13), aplicado a `motivo_ruta` en vez de
     # `motivos_revision_documento`.
     motivo_ruta_por_guia: dict[str, str] | None = None
+    # Bloque B1 EXPOSICIÓN -- fila completa por guía (misma lectura de
+    # arriba, sin un segundo paso por el CSV) para poder refrescar el
+    # hallazgo B1 (`resumen_hallazgo_b1`) de una decisión `DESTINO_NO_
+    # RESUELTO` YA PUBLICADA -- si no se refrescara aquí, una decisión
+    # publicada ANTES de que B1 investigara se quedaría con el contexto
+    # viejo (sin hallazgo) para siempre, porque `decision_id` no cambia
+    # sólo por eso (el hallazgo no participa del hash) y la próxima
+    # detección quedaría descartada como duplicado por `generar_artefacto`.
+    filas_por_guia: dict[str, dict[str, str]] | None = None
     if ruta_dataset is not None:
         import csv as _csv
 
@@ -1404,6 +1522,7 @@ def regenerar_decisiones_persistidas(
         codigos_motivo_documental = frozenset(m.value for m in _MotivoRevisionDocumento)
         motivos_por_guia = {}
         motivo_ruta_por_guia = {}
+        filas_por_guia = {}
         try:
             with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo:
                 for _fila in _csv.DictReader(_archivo, delimiter=";"):
@@ -1414,9 +1533,11 @@ def regenerar_decisiones_persistidas(
                         m.strip() for m in str(_fila.get("motivos_revision_documento", "")).split("|") if m.strip()
                     }
                     motivo_ruta_por_guia[_guia] = _motivo_ruta_base(str(_fila.get("motivo_ruta", "")))
+                    filas_por_guia[_guia] = dict(_fila)
         except (OSError, UnicodeDecodeError):
             motivos_por_guia = None
             motivo_ruta_por_guia = None
+            filas_por_guia = None
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -1556,6 +1677,26 @@ def regenerar_decisiones_persistidas(
                     and motivo_actual_fila not in motivos_decision_ruta
                 ):
                     continue
+            # Bloque B1 EXPOSICIÓN -- refresca el hallazgo B1 de una
+            # decisión YA PUBLICADA: si B1 investigó DESPUÉS de que esta
+            # tarjeta se publicó (`resultado_atlas_ia_json` cambió), el
+            # contexto viejo (sin hallazgo, o con uno desactualizado) se
+            # reemplaza -- `decision_id` no cambia por esto (el hallazgo
+            # nunca participa del hash), así que nunca aparece como una
+            # tarjeta duplicada.
+            if filas_por_guia is not None:
+                numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+                fila_actual = filas_por_guia.get(numero_guia_decision)
+                for clave in tuple(contexto):
+                    if clave.startswith("b1_"):
+                        del contexto[clave]
+                if fila_actual is not None:
+                    hallazgo = resumen_hallazgo_b1(
+                        fila_actual, dominio="DESTINO", campo=str(decision.get("campo", "despachar_a_crudo")),
+                    )
+                    if hallazgo:
+                        contexto.update(hallazgo)
+                decision["contexto"] = contexto
             # Bloque R13 -- caso real 472238/472239 (VISTA CLARA 2351
             # CERRILLOS, misma obra que 472099, ya confirmada por Javier):
             # "¿es correcta esta dirección?" ya tiene respuesta humana

@@ -2731,3 +2731,86 @@ esta vez -- ver arriba). Desktop sin cambios.
 
 **Estado: BLOQUE B1 INVESTIGADOR CERRADO EN CÓDIGO. Sin push en
 ninguno de los dos repos.**
+
+## Bloque B1 EXPOSICIÓN -- Revisión de Atlas muestra lo que B1 ya encontró (2026-08-24)
+
+**Causa de la desconexión:** el resultado completo de B1 (hipótesis,
+evidencia `EXTERNO`, explicación en lenguaje natural, fuentes) YA
+quedaba persistido en `resultado_atlas_ia_json` (misma columna de
+siempre) -- pero `detectar_decision_destino_no_resuelto` nunca lo leía,
+así que la tarjeta de Revisión de Atlas sólo mostraba el mensaje
+genérico por motivo. Ningún dato faltaba; sólo no estaba conectado.
+
+**Contrato/flujo conectado (reutiliza `resultado_atlas_ia_json`, cero
+memoria paralela):** nueva `resumen_hallazgo_b1` (Motor) lee la traza
+B1 del dominio DESTINO y la traduce a `contexto.b1_*` (resumen_hallazgo,
+propuesta, evidencia_resumida, fuentes_resumidas, motivo_no_
+autoaplicable, pregunta_humana) -- `None` si B1 no dejó nada útil (caso
+7 intacto). `regenerar_decisiones_persistidas` refresca este hallazgo
+en decisiones YA publicadas (mismo `decision_id`, nunca una tarjeta
+duplicada). `_propuesta_b1_confirmable` es conservadora a propósito:
+sólo ofrece "Confirmar destino" cuando el valor tiene forma real
+(número o texto compartido con lo documental) -- nunca sobre un "Sí"
+suelto. Desktop (`decisiones_pendientes_ui.js`): mensaje traducido a
+lenguaje operacional, pregunta humana visible, evidencia resumida como
+"N fuentes concordantes" (URLs sólo en "Ver detalles técnicos"); con
+propuesta confirmable, las opciones pasan a "Confirmar destino"/"No
+corresponde" -- MISMA acción de backend (`REGISTRAR_DIRECCION`/`NO_
+PUEDO_DETERMINAR`, cero camino nuevo), con el valor pre-llenado (nunca
+se le pide a Javier reescribir lo que Atlas ya encontró).
+
+**472037 antes → después:** antes, "La dirección de la guía coincide
+con varios lugares distintos y dispersos...". Después (catch-up real,
+caché de búsqueda reusada, 0 búsquedas nuevas): "Atlas encontró
+evidencia que vincula 'ING Y CONST FUNDAMENTA SPA' con este destino:
+[explicación real de B1, cita el proyecto 'Vicuña Mackenna 655' y
+SNIFA] La evidencia es fuerte, pero Atlas nunca aplica un destino nuevo
+sin confirmación humana." + pregunta "¿Confirma que este es el destino
+correcto?" + botón "Confirmar destino" pre-llenado con "Vicuña Mackenna
+655".
+
+**472044 antes → después:** antes, "Atlas detectó un elemento que puede
+ayudarle...". Después: "Atlas investigó este destino y encontró
+evidencia externa: Puerta del Sol es una calle real en Las Condes,
+pero ninguna fuente confirma el número exacto ni el acceso vial." +
+"Evidencia externa: 11 fuentes concordantes" -- sin propuesta
+confirmable (B1 no llegó a un valor con forma de dirección), así que
+conserva "Registrar dirección"/"No puedo determinar" -- nunca inventa
+una propuesta sólo para mejorar la UI.
+
+**Post-decisión:** sin cambios -- "Confirmar destino" viaja por el
+mismo `REGISTRAR_DIRECCION` que ya usa `aplicar_decision_obra`
+(revalidación/routing/km/tiempo/reconciliación ya encadenados desde
+Bloque R13/R18).
+
+**Hallazgo real durante el catch-up (no una regresión de este bloque):**
+al aplicar, reaparecieron 2 decisiones más (460807/472008, familia
+AUSIN SAN BERNARDO) -- la confirmación de 472008 (Bloque R19) creó una
+SEGUNDA relación obra↔destino confirmada para la misma obra (texto
+ligeramente distinto al de 460807, confirmado en R13), y
+`resolver_obra_destino_confirmada_global` correctamente trata dos
+relaciones confirmadas distintas como ambigüedad real -- deja de
+suprimir. Dato coherente, comportamiento por diseño (abstenerse ante
+evidencia ambigua), pero requiere que Javier reconcilie cuál de las
+dos direcciones es la canónica -- pendiente real, fuera de alcance de
+este bloque (no es un problema de exposición B1→UI).
+
+**Tests:** Motor -- `test_b1_exposicion_ui.py` (8 nuevos). Motor
+completo: 1719 passed (antes 1711). Desktop -- 6 tests nuevos en
+`decisiones_pendientes.test.js` (confirmable/no-confirmable/sin
+hallazgo). Desktop completo: 281 passed (antes 275).
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/B1_EXPOSICION_PRE_.../`, SHA-256 antes/después). Catch-up
+de B1 con caché de búsqueda reusada (0 búsquedas web nuevas) persistido
+en `resultado_atlas_ia_json` para 472037/472044; catálogos/ledger
+verificados byte-idénticos al backup; 0 regresiones de ruta
+(464959/464960 intactos, 13/20 con km igual que antes).
+
+**Pendiente real:** Javier debe reconciliar la ambigüedad AUSIN SAN
+BERNARDO (460807/472008, dos relaciones confirmadas para la misma
+obra) desde Desktop; y confirmar/rechazar 472037/472044 con el
+hallazgo B1 ya visible.
+
+**Estado: BLOQUE B1 EXPOSICIÓN CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin
+push en ninguno de los dos repos.**
