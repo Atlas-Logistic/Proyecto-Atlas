@@ -1721,18 +1721,33 @@ def regenerar_decisiones_persistidas(
             # `rutas.destino_entrega._destino_confirmado_coincide_texto`)
             # con el texto documental de ESTA decisión -- si no coincide,
             # sigue siendo una pregunta real y distinta.
+            #
+            # Bloque REGENERACIÓN B1 -- causa raíz real de la reaparición
+            # de 460807/472008 (familia AUSIN SAN BERNARDO): dos
+            # confirmaciones humanas/de evidencia DISTINTAS (Bloques R13 y
+            # R19) sobre variantes de texto OCR de la MISMA dirección real
+            # dejaron a la obra con DOS relaciones CONFIRMADAS -- evidencia
+            # REDUNDANTE, nunca una contradicción. `resolver_obra_destino_
+            # confirmada_global` exige EXACTAMENTE una relación confirmada
+            # (correcto para elegir UN destino operacional a usar en
+            # rutas), así que ante dos empezó a devolver `None` -- "no hay
+            # relación confirmada" es lo opuesto de lo que pasó realmente
+            # (hay DOS). Se reemplaza por `listar_destinos_confirmados_
+            # para_obra` (sin exigir unicidad) y se suprime si CUALQUIERA
+            # de los destinos confirmados coincide literalmente -- nunca
+            # sólo "el primero" ni "el más nuevo".
             obra_canonica_destino = str((decision.get("contexto") or {}).get("obra_canonica", ""))
             if obra_canonica_destino and catalogo_obras is not None:
-                resolucion_obra = catalogo_obras.resolver_obra_destino_confirmada_global(
+                texto_documental = normalizar_nombre_destino(str(decision.get("valor_documental", "")))
+                destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(
                     nombre_obra=obra_canonica_destino
                 )
-                if resolucion_obra is not None:
-                    calle_confirmada = normalizar_nombre_destino(
-                        resolucion_obra.destino.direccion.split(",", 1)[0]
-                    )
-                    texto_documental = normalizar_nombre_destino(str(decision.get("valor_documental", "")))
-                    if calle_confirmada and calle_confirmada in texto_documental:
-                        continue
+                if any(
+                    (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                    and calle in texto_documental
+                    for destino in destinos_confirmados_obra
+                ):
+                    continue
 
         if tipo == "VEHICULO_DESCONOCIDO":
             patente = normalizar_patente_vehiculo(str(decision.get("valor_documental") or ""))

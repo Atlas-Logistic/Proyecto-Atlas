@@ -2814,3 +2814,76 @@ hallazgo B1 ya visible.
 
 **Estado: BLOQUE B1 EXPOSICIÓN CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin
 push en ninguno de los dos repos.**
+
+## Bloque REGENERACIÓN B1 -- fix: no revivir decisiones resueltas + preservar contexto B1 (2026-08-24)
+
+**Causa raíz #1 (confirmada en vivo, reproducible): AUSIN revive.**
+`resolver_obra_destino_confirmada_global` exige EXACTAMENTE una
+relación obra↔destino CONFIRMADA -- correcto para elegir un único
+destino operacional a usar en rutas, pero demasiado estricto para
+decidir si una pregunta ya está contestada. La obra "AUSIN SAN
+BERNARDO" acumuló DOS relaciones confirmadas reales y legítimas (460807
+en Bloque R13, 472008 en Bloque R19), cada una con su propio `Destino`
+de texto ligeramente distinto (misma dirección real, dos variantes de
+OCR) -- evidencia REDUNDANTE, nunca una contradicción. Ante dos
+relaciones, el resolver empezó a devolver `None` ("no hay relación
+confirmada", justo lo opuesto de lo que pasó), y la supresión de
+`DESTINO_NO_RESUELTO` que depende de él dejó de funcionar -- ambas
+guías reaparecieron en Revisión de Atlas.
+
+**Fix #1:** nueva `CatalogoObrasDestinos.listar_destinos_confirmados_
+para_obra` (sin exigir unicidad, mismo filtro de confirmación/no-
+contradicción que el resolver original) -- la supresión de `DESTINO_
+NO_RESUELTO` ahora suprime si CUALQUIERA de los destinos confirmados de
+la obra coincide literalmente con el texto documental, nunca sólo "el
+primero" ni "el más nuevo". Reutiliza el mismo catálogo, cero
+arquitectura paralela.
+
+**Causa raíz #2 (hallazgo defensivo, no reproducida con certeza como el
+disparador exacto reportado, pero real y corregida): posible pérdida de
+contexto B1.** `aplicar_decision_obra` regenera la bandeja sobre
+`artefacto`, la copia en memoria leída al PRINCIPIO de la función. Si
+una rama anterior de la MISMA llamada ya invocó `revalidar_y_
+regenerar_reporte` (que republica `decisiones_pendientes.json` en
+disco, incluyendo cualquier hallazgo B1 fresco de OTRAS decisiones),
+regenerar sobre esa copia vieja y reescribir con `generar_artefacto`
+más abajo podía descartar silenciosamente lo que el disco ya tenía --
+"usa snapshot/artefacto anterior", exactamente la hipótesis del
+bloque. **Fix #2:** se relee `decisiones_pendientes.json` justo antes
+de la regeneración final -- nunca se opera sobre una copia en memoria
+que pudo quedar desactualizada por una escritura propia de la misma
+llamada.
+
+**AUSIN antes → después:** 460807/472008 reaparecidas (4 decisiones
+totales) → suprimidas de nuevo, ninguna pregunta nueva a Javier (2
+decisiones: 472037/472044).
+
+**B1 context antes → después:** verificado en Drive real -- 472037 y
+472044 mantienen `b1_resumen_hallazgo`/`propuesta`/`evidencia_
+resumida`/`fuentes_resumidas`/`motivo_no_autoaplicable` intactos tras
+la regeneración; nunca se volvió a llamar a Groq ni a la búsqueda web
+para este bloque (0 investigación nueva).
+
+**Idempotencia:** verificada -- regenerar dos veces seguidas sobre el
+mismo estado produce el mismo conjunto de decisiones, mismos
+`decision_id`, mismo contexto B1 (test dedicado + verificado en vivo
+contra producción real).
+
+**Tests:** Motor -- `tests/test_regeneracion_b1.py` (4 nuevos: contexto
+B1 sobrevive una regeneración disparada por otra decisión; dos
+relaciones confirmadas redundantes suprimen ambas guías hermanas;
+control -- una relación confirmada de un lugar REALMENTE distinto NO
+suprime; regenerar dos veces es idempotente). Motor completo: 1723
+passed (antes 1719). E2E en copia real de producción: AUSIN suprimida,
+472037/472044 con contexto B1 intacto, 0 regresiones de ruta.
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/REGENERACION_B1_PRE_.../`, SHA-256 antes/después).
+Reconciliación pura (sin OCR, sin red, sin B1 nuevo) -- catálogos/
+ledger verificados byte-idénticos al backup; `guias_actualizadas: []`
+(ningún dato de ruta cambió, sólo la bandeja de decisiones).
+**Revisión de Atlas: 4 → 2** (472037/472044, ambos con hallazgo B1
+visible).
+
+**Estado: BLOQUE REGENERACIÓN B1 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin
+push en ninguno de los dos repos.**

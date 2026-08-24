@@ -679,6 +679,49 @@ class CatalogoObrasDestinos:
             return None
         return ResolucionObraDestino(obra, relacion, destino)
 
+    def listar_destinos_confirmados_para_obra(self, *, nombre_obra: str) -> list:
+        """Bloque REGENERACIÓN B1 -- variante de `resolver_obra_destino_
+        confirmada_global` SIN exigir que exista una única relación
+        confirmada: devuelve TODOS los destinos con relación CONFIRMADA
+        (sin evidencia CONTRADICE) para la obra, en vez de abstenerse
+        (`None`) ante dos o más. Necesario porque una obra puede acumular
+        legítimamente más de una relación confirmada para la MISMA
+        dirección real (dos confirmaciones humanas/de evidencia distintas
+        sobre variantes de texto OCR del mismo lugar -- caso real AUSIN
+        SAN BERNARDO, 460807 confirmado en un bloque y 472008 en otro,
+        cada uno con su propio `Destino` de texto ligeramente distinto) --
+        eso es evidencia REDUNDANTE, nunca una contradicción real, y
+        preguntar por eso de nuevo sería ignorar aprendizaje ya vigente.
+        Quien llama decide cómo usar la lista (p. ej. suprimir una
+        pregunta si CUALQUIERA coincide literalmente con el texto
+        documental -- nunca "el primero", nunca "el más nuevo")."""
+        obras, relaciones = self._leer()
+        clave = normalizar_nombre_obra(nombre_obra)
+        candidatas = [
+            o for o in obras
+            if o.estado == EstadoObra.CONFIRMADA.value
+            and o.estado_vigencia == EstadoVigencia.ACTIVO.value
+            and clave in self._claves_obra(o)
+        ]
+        if len(candidatas) != 1:
+            return []
+        obra = candidatas[0]
+        if any(evidencia.resultado == ResultadoEvidencia.CONTRADICE.value for evidencia in obra.evidencias):
+            return []
+        confirmadas = [
+            r for r in relaciones
+            if r.obra_id == obra.obra_id
+            and r.estado == EstadoRelacion.CONFIRMADA.value
+            and not any(e.resultado == ResultadoEvidencia.CONTRADICE.value for e in r.evidencias)
+        ]
+        destinos = []
+        for relacion in confirmadas:
+            try:
+                destinos.append(self._destino_activo(relacion.destino_id))
+            except ErrorCatalogoObrasDestinos:
+                continue
+        return destinos
+
     def migrar_a_identidad_global(self) -> dict[str, object]:
         """R3.3.1: recertifica el catálogo bajo el modelo de obra global.
 

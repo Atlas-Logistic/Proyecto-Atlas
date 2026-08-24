@@ -1132,6 +1132,24 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 )
                 resultado_extra["reporte_regenerado"] = True
 
+            # Bloque REGENERACIÓN B1 -- causa raíz real de que 472037/
+            # 472044 perdieran el contexto B1 enriquecido: `artefacto` es
+            # la bandeja leída al PRINCIPIO de esta función (antes de
+            # aplicar nada) -- si la rama de arriba ya llamó a
+            # `revalidar_y_regenerar_reporte` (que republica
+            # `decisiones_pendientes.json` en disco, con cualquier
+            # hallazgo B1 fresco de OTRAS decisiones), regenerar aquí
+            # sobre ese `artefacto` VIEJO y volver a escribir con
+            # `generar_artefacto` más abajo descartaba silenciosamente lo
+            # que el disco ya tenía -- "usa snapshot/artefacto anterior",
+            # exactamente el síntoma reportado. Se relee el archivo justo
+            # antes de regenerar -- nunca opera sobre una copia en memoria
+            # que pudo quedar desactualizada por una escritura propia de
+            # esta misma llamada.
+            try:
+                artefacto = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass  # conserva la copia en memoria si el disco no se puede leer justo ahora
             restantes = regenerar_decisiones_persistidas(
                 decisiones=artefacto.get("decisiones", []),
                 carpeta_catalogos=catalogos,
