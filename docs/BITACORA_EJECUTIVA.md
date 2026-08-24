@@ -2560,3 +2560,88 @@ byte-idénticos al backup.
 
 **Estado: BLOQUE R18 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque R19 -- las 3 revisiones de destino, con evidencia externa real (2026-08-24)
+
+**Causa raíz nueva, real y grave, encontrada al investigar por qué el
+fix `pais=CL` (Bloque R16) nunca cambió el resultado de 472037 pese a
+estar aplicado:** `RepositorioCacheGeocodificacion` cachea por
+`(proveedor_nombre, proveedor_version, dirección)` -- `OpenRouteService.
+version` era un atributo de CLASE fijo ("v2"), idéntico sin importar
+`pais`. Una consulta restringida a Chile y una sin restringir
+compartían la MISMA entrada de caché: cualquier dirección ya
+geocodificada (a veces meses atrás, sin restricción) seguía sirviendo
+su resultado viejo -- incluido Córdoba, Argentina -- para siempre,
+sin importar cuántas veces se corrigiera la consulta. Fix: `version`
+pasa a ser de instancia e incluye el país (`"v2:pais=CL"` vs
+`"v2:pais=SIN_RESTRICCION"`) -- una entrada cacheada bajo la
+configuración vieja queda invisible para la nueva (se re-consulta una
+vez, con caché real después).
+
+**Segunda causa real:** una vez que `motivo_ruta` se refresca (p. ej.
+472037 pasa de `GEOCODIFICACION_FUERA_DE_CHILE` a `MULTIPLES_
+UBICACIONES_DISPERSAS`), la decisión `DESTINO_NO_RESUELTO` YA
+publicada -- construida sobre la evidencia VIEJA -- nunca se
+invalidaba (su hash de identidad cambia con el motivo, así que la
+próxima detección genera una tarjeta NUEVA, dejando la vieja
+huérfana). Fix: `regenerar_decisiones_persistidas` descarta una
+decisión `DESTINO_NO_RESUELTO` cuyo motivo declarado ya no coincide
+(por código base) con el `motivo_ruta` vigente de la fila -- mismo
+criterio exacto que el descarte ya existente para motivos
+documentales (Bloque R13), generalizado a motivos de ruta.
+
+**Los 3 casos, investigados con evidencia externa real (WebSearch/
+WebFetch, nunca un solo resultado dudoso):**
+- **472008** (AUSIN SAN BERNARDO) -- corroborado con DOS fuentes
+  independientes: registro oficial SII (portalchile.org, ya usado en
+  Bloque R16) + verificación de mapa aportada en el propio bloque
+  (proximidad real a AUSIN HNOS). "INTERIOR" es, en la convención de
+  direcciones chilenas, un calificador de predio interior -- no un
+  error, no se reescribe el texto documental. La dirección se
+  confirma (`REGISTRAR_DIRECCION`, mecanismo existente, actor
+  `ATLAS_EVIDENCIA_EXTERNA_R19` para trazabilidad -- nunca se hace
+  pasar por un clic humano) con el texto documental verbatim: el
+  proveedor real geocodifica varias calles reales homónimas
+  ("Nueva", "Nueva Espejino", "Nueva Dos"...) en San Bernardo -- la
+  ambigüedad de CALLE exacta persiste (nunca se inventa una
+  coordenada), pero la decisión de identidad/dirección queda resuelta
+  y fuera de Revisión de Atlas -- aprendizaje reutilizable para 460807
+  (misma obra, mismo texto como prefijo).
+- **472037** (VICUÑA MACKENNA 655) -- confirmado definitivamente FUERA
+  de la contradicción "Argentina" (el bug de caché era la causa real).
+  La calle SÍ cruza múltiples comunas reales de la RM (Santiago,
+  Renca, Peñaflor, La Florida, Macul...) -- ni el geocodificador real
+  ni la evidencia externa (que la propia ticket reporta con
+  "Santiago/Ñuñoa", ella misma ambigua) permiten elegir una comuna con
+  confianza -- ambigüedad territorial GENUINA, correctamente vigente
+  para B1/humano, ahora con causa exacta y fresca (nunca la etiqueta
+  vieja/engañosa de Argentina).
+- **472044** (PUERTA DEL SOL 83 LAS CONDES) -- confirmado como edificio
+  real y documentado (Edificio Puerta del Sol, cerca de Metro Escuela
+  Militar) mediante búsqueda externa, pero el proveedor de
+  geocodificación real no tiene cobertura a nivel de calle para esa
+  dirección NI para "Escuela Militar" (verificado con múltiples
+  variantes de consulta) -- limitación real y demostrada del
+  proveedor, no inventable con un centroide. `SIN_ACCESO_VIAL` se
+  mantiene con causa técnica real.
+
+**B1:** sin nueva ambigüedad elegible más allá de lo ya cubierto
+(Bloque R16); no se invocó de nuevo sin evidencia nueva que aportarle.
+
+**Tests:** Motor -- `test_resolucion_r19.py` (3 nuevos) +
+`test_rutas_openrouteservice.py` (1 nuevo, versión-por-país). Motor
+completo: 1700 passed (antes 1699 tras R18 + 1 del fix de caché). E2E
+en copia real de producción (proveedor real): 472037 refrescado sin
+duplicar tarjeta, 472008 resuelto con evidencia externa, 0
+regresiones.
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/R19_PRE_EVIDENCIA_EXTERNA_.../`, SHA-256 antes/después).
+472037 refrescado (causa real, sin Argentina); 472008 confirmado con
+evidencia externa (aprendizaje persistido, ruta sigue ambigua);
+**Revisión de Atlas: 3 → 2** (472044/472037, ambos con causa técnica
+real demostrada). Catálogos de clientes/vehículos verificados
+byte-idénticos al backup.
+
+**Estado: BLOQUE R19 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**

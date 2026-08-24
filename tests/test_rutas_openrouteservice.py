@@ -16,6 +16,22 @@ def transporte_json(datos, estado=200, capturas=None):
     return transportar
 
 
+def test_version_incluye_el_pais_para_no_compartir_cache():
+    """Bloque RESOLUCIÓN R19 -- caso real 472037: sin esto, una consulta
+    restringida a Chile (`pais="CL"`) y una sin restringir comparten la
+    MISMA entrada de `RepositorioCacheGeocodificacion` (clave =
+    proveedor+VERSION+dirección) -- el fix `pais=CL` (Bloque RESOLUCIÓN
+    R16) nunca tenía efecto sobre una dirección ya cacheada antes de él."""
+    sin_pais = OpenRouteService(api_key="X")
+    con_chile = OpenRouteService(api_key="X", pais="CL")
+    con_argentina = OpenRouteService(api_key="X", pais="AR")
+    assert sin_pais.version != con_chile.version
+    assert con_chile.version != con_argentina.version
+    # Misma restricción -> misma versión (para SÍ reutilizar caché real
+    # entre instancias equivalentes, nunca invalidar de más).
+    assert con_chile.version == OpenRouteService(api_key="X", pais="cl").version
+
+
 def test_falta_de_clave_no_invoca_transporte(monkeypatch):
     monkeypatch.delenv("OPENROUTESERVICE_API_KEY", raising=False)
     llamadas = []

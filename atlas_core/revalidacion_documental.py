@@ -930,7 +930,23 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             # una contradicción real de todas formas da el mismo resultado
             # (nunca se afloja la protección), sólo cuesta una consulta
             # más, ya cacheada.
-            motivo_previo_reevaluable = motivo_ruta_base(motivo_previo_crudo) == "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL"
+            #
+            # Bloque RESOLUCIÓN R19 -- mismo criterio, extendido a
+            # `GEOCODIFICACION_FUERA_DE_CHILE` (Bloque TERRITORIAL T1):
+            # también es una verificación propia de Atlas (`region_valida`
+            # contra el candidato del proveedor), no evidencia externa
+            # inmutable. Caso real 472037: antes de este bloque, el
+            # proveedor construía la consulta SIN restricción de país
+            # (Bloque RESOLUCIÓN R16 lo corrigió, `pais=CL`), así que la
+            # fila quedó persistida con "GEOCODIFICACION_FUERA_DE_CHILE:
+            # Cordoba" -- un candidato que, reintentado con la consulta ya
+            # restringida a Chile, ya NO vuelve a aparecer. Sin esta
+            # extensión, esa fila quedaba con una causa obsoleta/engañosa
+            # para siempre (la reconciliación automática nunca la
+            # reintentaba).
+            motivo_previo_reevaluable = motivo_ruta_base(motivo_previo_crudo) in (
+                "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL", "GEOCODIFICACION_FUERA_DE_CHILE",
+            )
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,

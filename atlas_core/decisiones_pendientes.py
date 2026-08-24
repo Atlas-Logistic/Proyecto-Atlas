@@ -1384,12 +1384,26 @@ def regenerar_decisiones_persistidas(
     carpeta = Path(carpeta_catalogos)
     motivos_por_guia: dict[str, set[str]] | None = None
     codigos_motivo_documental: frozenset[str] = frozenset()
+    # Bloque RESOLUCIÓN R19 -- caso real 472037: cuando una revalidación
+    # `sin_ocr` refresca `motivo_ruta` (p. ej. `GEOCODIFICACION_FUERA_
+    # DE_CHILE` -> `MULTIPLES_UBICACIONES_DISPERSAS`, tras corregir un
+    # bug de caché), la evidencia que originó la decisión `DESTINO_NO_
+    # RESUELTO` ya publicada queda desactualizada -- `crear_decision`
+    # incluye el `motivo_ruta` crudo en su hash, así que un motivo fresco
+    # produce un `decision_id` DISTINTO en la próxima detección, dejando
+    # la tarjeta VIEJA huérfana junto a una nueva (una dirección visible
+    # dos veces, con una razón obsoleta). Mismo criterio exacto que el
+    # bloque de arriba (R13), aplicado a `motivo_ruta` en vez de
+    # `motivos_revision_documento`.
+    motivo_ruta_por_guia: dict[str, str] | None = None
     if ruta_dataset is not None:
         import csv as _csv
 
+        from atlas_core.atlas_ia.registro_problemas import motivo_ruta_base as _motivo_ruta_base
         from atlas_core.procesamiento_masivo import MotivoRevisionDocumento as _MotivoRevisionDocumento
         codigos_motivo_documental = frozenset(m.value for m in _MotivoRevisionDocumento)
         motivos_por_guia = {}
+        motivo_ruta_por_guia = {}
         try:
             with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo:
                 for _fila in _csv.DictReader(_archivo, delimiter=";"):
@@ -1399,8 +1413,10 @@ def regenerar_decisiones_persistidas(
                     motivos_por_guia[_guia] = {
                         m.strip() for m in str(_fila.get("motivos_revision_documento", "")).split("|") if m.strip()
                     }
+                    motivo_ruta_por_guia[_guia] = _motivo_ruta_base(str(_fila.get("motivo_ruta", "")))
         except (OSError, UnicodeDecodeError):
             motivos_por_guia = None
+            motivo_ruta_por_guia = None
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -1524,6 +1540,22 @@ def regenerar_decisiones_persistidas(
                 decision["contexto"] = contexto
 
         if tipo == "DESTINO_NO_RESUELTO":
+            # Bloque RESOLUCIÓN R19 -- caso real 472037: si `motivo_ruta`
+            # de la fila actual ya no coincide (por código base) con el
+            # motivo que originó ESTA decisión, la evidencia quedó
+            # obsoleta -- se descarta; si el problema de destino sigue
+            # vigente con causa fresca, la próxima detección publica una
+            # tarjeta nueva con evidencia al día (nunca deja dos tarjetas
+            # para la misma guía, una viva y una fantasma).
+            if motivo_ruta_por_guia is not None:
+                numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+                motivos_decision_ruta = {str(m) for m in (decision.get("motivos") or [])}
+                motivo_actual_fila = motivo_ruta_por_guia.get(numero_guia_decision)
+                if (
+                    motivos_decision_ruta and motivo_actual_fila is not None
+                    and motivo_actual_fila not in motivos_decision_ruta
+                ):
+                    continue
             # Bloque R13 -- caso real 472238/472239 (VISTA CLARA 2351
             # CERRILLOS, misma obra que 472099, ya confirmada por Javier):
             # "¿es correcta esta dirección?" ya tiene respuesta humana

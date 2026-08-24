@@ -78,6 +78,21 @@ class OpenRouteService:
         # al comportamiento de antes de este bloque. Ver
         # `boundary.country` en `geocodificar`.
         self._pais = (pais or "").strip().upper() or None
+        # Bloque RESOLUCIÓN R19 -- causa raíz real de que el fix `pais=CL`
+        # (Bloque RESOLUCIÓN R16) nunca tuviera efecto sobre una dirección
+        # YA CACHEADA (caso real 472037: seguía devolviendo Córdoba,
+        # Argentina, desde caché, mucho después de restringir la consulta
+        # a Chile): `RepositorioCacheGeocodificacion` cachea por
+        # `(proveedor_nombre, proveedor_version, dirección)` -- `version`
+        # era un atributo de CLASE fijo ("v2"), idéntico sin importar
+        # `pais`, así que una consulta restringida y una sin restringir
+        # compartían la MISMA entrada de caché. Ahora `version` es de
+        # INSTANCIA e incluye el contexto de país -- una entrada cacheada
+        # ANTES de restringir por país queda invisible para las consultas
+        # YA restringidas (se re-consulta una vez, con caché real
+        # después); nunca hay dos configuraciones distintas del
+        # proveedor compartiendo caché por error.
+        self.version = f"v2:pais={self._pais or 'SIN_RESTRICCION'}"
 
     def _solicitar(self, solicitud: Request) -> tuple[EstadoRuta | None, object | None]:
         if not self._api_key:
