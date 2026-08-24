@@ -3025,3 +3025,61 @@ más evidencia.
 
 **Estado: BLOQUE CIERRE POST-CONFIRMACIÓN CERRADO EN CÓDIGO Y EN DRIVE
 REAL. Sin push en ninguno de los dos repos.**
+
+## Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO ESTRUCTURADO (2026-08-24)
+
+**1. Fallback geográfico estructurado ("Vía C").** Nuevo
+`atlas_core/rutas/nominatim.py` (`NominatimGeocoder`, sin credencial,
+mismo patrón HTTP que `OpenRouteService`) -- geocodificador de RESPALDO,
+consultado por `resolver_destino_entrega` SÓLO cuando el principal (ORS)
+deja ambigüedad sin resolver y ni Vía A (catálogo confirmado) ni Vía B
+(GPS) desambiguan ("sólo si A falla"). Se acepta el candidato SÓLO si:
+(1) es el ÚNICO con número de calle coincidente
+(`_candidato_unico_con_numero_de_calle`), Y (2) un destino ya CONFIRMADO
+trae comuna propia territorialmente compatible con la comuna del
+candidato -- sin corroboración, se abstiene (nunca adivina). Comparte
+caché de geocodificación con ORS.
+
+**2. B1 observador.** `_ejecutar_ia_operacional` ahora deja, para
+CUALQUIER guía que el Motor resuelva sin ningún problema elegible, una
+traza OBSERVACIONAL compacta en `resultado_atlas_ia_json` (misma
+columna, 0 llamadas LLM, idempotente -- sólo la primera vez) --
+reutilizable después vía `decisiones_pendientes.
+resumen_observacion_operacional` ("¿qué pasó con una guía similar?").
+
+**Caso real 472037.** El respaldo SÍ encuentra un candidato con número
+de calle coincidente ("655 Pasaje Vicuña Mackenna", Maipú, confianza
+0.9) -- verificado en vivo. Pero el destino ya CONFIRMADO de esta obra
+no tiene comuna propia registrada (Bloque CONFIRMACIÓN D2: se confirmó
+sin que la ruta llegara a calcularse) -- nada que corrobore el
+candidato del respaldo contra el hallazgo B1 (comuna "Santiago", en
+texto libre, no estructurado). Atlas se abstiene -- **antes → después:
+sin cambio, `COORDENADA_NO_CONFIRMADA(5)`**, honestamente demostrado
+(no inventado): el ÚNICO candidato estructurado disponible no coincide
+con la comuna que la evidencia ya conocida sugiere, y ninguna fuente
+adicional lo corrobora.
+
+**Tests:** Motor -- `tests/test_rutas_nominatim.py` (14 nuevos:
+adaptador HTTP), `tests/test_fallback_geografico_estructurado.py` (9
+nuevos: Vía C unidad + integración en `resolver_destino_entrega`),
+`tests/test_confirmacion_d2_reevaluacion_ambiguedad.py` (1 nuevo: E2E
+con corroboración -> `RUTA_CALCULADA` real), `tests/test_b1_observador.py`
+(6 nuevos: observación sin llamada, idempotencia, lectura). Suite
+completa: 1765 passed (antes 1735).
+
+**Aplicado a Drive real:** 1 backup verificado (`respaldos/
+B1_OBSERVADOR_FALLBACK_PRE_.../`, SHA-256 antes/después). El fallback
+corrió de verdad contra Nominatim (1 consulta real para 472037, ahora
+cacheada -- 0 llamadas nuevas en corridas futuras); `guias_actualizadas:
+[]` -- ninguna fila cambió (honesto: el fallback no encontró
+corroboración para nada pendiente hoy). El observador B1 sólo aplica
+hacia adelante (guías nuevas que entren al pipeline) -- no se
+reprocesaron retroactivamente las 13 guías ya existentes (evita
+"auditoría general").
+
+**Estado: BLOQUE B1 OBSERVADOR + FALLBACK GEOGRÁFICO CERRADO EN CÓDIGO
+Y EN DRIVE REAL. Único pendiente real: 472037 sigue sin punto ruteable
+-- requeriría, si Javier lo decide, confirmar/registrar la comuna del
+destino ya confirmado (dato estructurado que hoy falta) para que la
+misma Vía C lo resuelva sin ninguna investigación nueva. Sin push en
+ninguno de los dos repos.**

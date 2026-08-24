@@ -855,6 +855,7 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
 def revalidar_ruta_sin_destino_calculado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
+    proveedor_rutas_fallback=None,
 ) -> dict[str, object]:
     """Bloque H (R4.10) -- para filas con planta de origen y
     `despachar_a_crudo` YA persistidos (documento ya procesado, sin OCR
@@ -926,6 +927,25 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         # que el resto del sistema -- un solo criterio, sin ruta paralela.
         proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
             OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+        )
+    if proveedor_rutas_fallback is None:
+        # Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- geocodificador de
+        # RESPALDO estructurado (Nominatim/OSM, sin credencial, con la
+        # MISMA caché de geocodificación -- nunca paga dos veces la misma
+        # consulta), consultado por `resolver_destino_entrega` SÓLO
+        # cuando el principal (ORS) deja una ambigüedad sin resolver y
+        # ni el catálogo confirmado ni GPS pueden desambiguar ("sólo si A
+        # falla", Bloque J). Reutiliza `ProveedorRutasConCacheGeocodificacion`
+        # -- la clave de caché ya incluye `proveedor_nombre`, así que
+        # comparte archivo con ORS sin colisionar.
+        from atlas_core.rutas.cache_geocodificacion import (
+            ProveedorRutasConCacheGeocodificacion as _ProveedorConCache,
+            RepositorioCacheGeocodificacion as _RepositorioCache,
+        )
+        from atlas_core.rutas.nominatim import NominatimGeocoder
+
+        proveedor_rutas_fallback = _ProveedorConCache(
+            NominatimGeocoder(pais=PAIS_OPERACION_PREDETERMINADO), _RepositorioCache(),
         )
     try:
         destinos_confirmados = [
@@ -1010,6 +1030,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     origen_determinado_por=str(fila.get("origen_determinado_por", "")),
                     evidencia_origen=str(fila.get("evidencia_origen", "")),
                     perfil=perfil, destinos_confirmados=destinos_confirmados,
+                    proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
                 )
             except (OSError, ValueError):
                 continue

@@ -2125,7 +2125,34 @@ def _ejecutar_ia_operacional(
         filas = list(csv.DictReader(archivo, delimiter=";"))
     cambio = False
     for fila in filas:
-        if fila.get("archivo") not in archivos_objetivo or not _fila_requiere_atencion_operacional(fila):
+        if fila.get("archivo") not in archivos_objetivo:
+            continue
+        if not _fila_requiere_atencion_operacional(fila):
+            # Bloque B1 OBSERVADOR -- el Motor resolvió esta guía sin
+            # ningún problema elegible: 0 llamadas LLM (nunca se invoca
+            # al orquestador), pero se deja un registro OBSERVACIONAL
+            # compacto en la MISMA columna/contrato ya existente
+            # (`resultado_atlas_ia_json`, nunca una memoria paralela)
+            # para que B1 pueda, más adelante, consultar "¿qué pasó con
+            # una guía similar?" sin tener que releer el CSV completo ni
+            # volver a razonar nada. Idempotente por diseño: sólo se
+            # escribe la PRIMERA vez (columna todavía vacía) -- una
+            # revalidación posterior de la MISMA guía ya resuelta nunca
+            # vuelve a tocarla ni gasta ciclos de más.
+            if not str(fila.get("resultado_atlas_ia_json", "")).strip():
+                fila["resultado_atlas_ia_json"] = json.dumps([{
+                    "problema": "OBSERVACION_OPERACIONAL", "dominio": "CICLO_GUIA",
+                    "campo": "resultado_final", "elegible_ia": False, "llamada_realizada": False,
+                    "resultado_motor": "RESUELTO",
+                    "resumen": {
+                        "estado_ruta": str(fila.get("estado_ruta", "")),
+                        "origen_determinado_por": str(fila.get("origen_determinado_por", "")),
+                        "planta_origen_nombre": str(fila.get("planta_origen_nombre", "")),
+                        "obra_destino": str(fila.get("obra_destino", "")),
+                        "cliente": str(fila.get("cliente", "")),
+                    },
+                }], ensure_ascii=False, sort_keys=True)
+                cambio = True
             continue
         resultados = []
         motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()}

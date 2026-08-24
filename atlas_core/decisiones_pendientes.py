@@ -237,6 +237,37 @@ def resumen_hallazgo_b1(fila: Mapping[str, str], *, dominio: str, campo: str) ->
     }
 
 
+def resumen_observacion_operacional(fila: Mapping[str, str]) -> dict[str, object] | None:
+    """Bloque B1 OBSERVADOR -- lee la traza OBSERVACIONAL que
+    `procesamiento_masivo._ejecutar_ia_operacional` deja en
+    `resultado_atlas_ia_json` para una guía que el Motor resolvió SIN
+    ningún problema elegible (0 llamadas LLM) -- misma fuente de verdad
+    que `resumen_hallazgo_b1`, nunca una memoria paralela. Permite que
+    B1 (o cualquier código futuro) consulte "¿qué pasó con esta guía?"
+    sin tener que reprocesarla ni volver a razonar nada. `None` si la
+    fila no trae ninguna traza (nunca procesada, o procesada antes de
+    este bloque -- comportamiento idéntico a `resumen_hallazgo_b1` en el
+    mismo caso)."""
+    crudo = str(fila.get("resultado_atlas_ia_json", "")).strip()
+    if not crudo:
+        return None
+    try:
+        trazas = json.loads(crudo)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(trazas, list):
+        return None
+    traza = next(
+        (t for t in trazas if isinstance(t, dict) and t.get("dominio") == "CICLO_GUIA"), None,
+    )
+    if traza is None:
+        return None
+    return {
+        "resultado_motor": str(traza.get("resultado_motor", "")),
+        "resumen": dict(traza.get("resumen") or {}),
+    }
+
+
 def detectar_decision_destino_no_resuelto(
     *, archivo: str, fila: Mapping[str, str],
 ) -> dict[str, object] | None:

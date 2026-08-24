@@ -455,6 +455,133 @@ def resolver_destino_ambiguo_con_evidencia_inequivoca(
     )
 
 
+VIA_FALLBACK_ESTRUCTURADO = "FALLBACK_GEOCODER_ESTRUCTURADO"
+
+
+def _candidato_unico_con_numero_de_calle(
+    despachar_a_crudo: str, candidatos: tuple[CandidatoGeocodificacion, ...],
+) -> CandidatoGeocodificacion | None:
+    """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- entre los candidatos
+    de un geocodificador de RESPALDO, el ÚNICO cuya etiqueta reproduce
+    literalmente el mismo número de calle presente en el texto documental
+    -- nunca "el primero" ni "el más cercano". Un número de casa exacto es
+    evidencia mucho más específica que un mero nombre de calle/comuna
+    (que puede repetirse en decenas de lugares reales de Chile); dos
+    candidatos con el mismo número (calles homónimas distintas, cada una
+    con esa numeración) siguen sin ser evidencia inequívoca -- se
+    abstiene."""
+    numeros_documento = set(_PATRON_NUMERO_CALLE.findall(despachar_a_crudo))
+    if not numeros_documento:
+        return None
+    coincidencias = [
+        c for c in candidatos
+        if set(_PATRON_NUMERO_CALLE.findall(c.etiqueta)) & numeros_documento
+    ]
+    return coincidencias[0] if len(coincidencias) == 1 else None
+
+
+def _comuna_confirma_candidato(comuna_confirmada: str, comuna_candidato: str) -> bool:
+    """True si ambas comunas identifican la MISMA comuna real del
+    catálogo territorial cerrado (comparación exacta tras normalizar --
+    nunca fuzzy), o si son compatibles bajo el criterio YA calibrado de
+    `_comunas_territorialmente_compatibles` (caso "Santiago" como
+    ciudad/área metropolitana vs comuna específica, Bloque TERRITORIAL
+    T1) -- esa función por sí sola NO cubre "son la misma comuna", sólo
+    el caso especial de Santiago; aquí se agrega primero el caso general
+    (obvio pero no cubierto ahí) antes de delegar al caso especial."""
+    documental = normalizar_comuna(comuna_confirmada)
+    candidato = normalizar_comuna(comuna_candidato)
+    if (
+        documental.estado == ESTADO_COMUNA_EXACTA and candidato.estado == ESTADO_COMUNA_EXACTA
+        and documental.comuna == candidato.comuna
+    ):
+        return True
+    return _comunas_territorialmente_compatibles(comuna_confirmada, comuna_candidato)
+
+
+def resolver_destino_con_fallback_estructurado(
+    despachar_a_crudo: str,
+    *,
+    proveedor_fallback: ProveedorRutas,
+    destinos_confirmados: Iterable[Destino] = (),
+) -> ResultadoDesambiguacionInequivoca:
+    """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C": cuando el
+    proveedor PRINCIPAL deja una ambigüedad sin resolver y ni Vía A
+    (catálogo confirmado) ni Vía B (GPS) tienen evidencia para
+    desambiguar, se consulta UN proveedor de geocodificación de RESPALDO
+    (sólo uno -- nunca "15 fuentes web", estructurado, restringido a
+    Chile, nunca scraping frágil -- ver `NominatimGeocoder`) ANTES de
+    escalar a investigación B1 compleja (Javier, Bloque D: "Sólo después:
+    B1 investigación compleja").
+
+    Se acepta el candidato del respaldo SÓLO cuando:
+    1. es el ÚNICO candidato cuyo número de calle coincide literalmente
+       con el texto documental (`_candidato_unico_con_numero_de_calle`
+       -- nunca "el primero"/"el más cercano");
+    2. Y existe un destino ya CONFIRMADO para esta misma dirección
+       (identidad ya resuelta -- nunca se investiga de nuevo) cuya comuna
+       propia es territorialmente compatible con la comuna que devuelve
+       el respaldo (mismo criterio ya calibrado, Bloque TERRITORIAL T1).
+
+    Sin una comuna CONFIRMADA que corrobore al candidato, un número de
+    calle coincidente por sí solo NO es "evidencia inequívoca" -- podría
+    ser una calle homónima en una comuna real distinta (caso conocido:
+    nombres de calle que se repiten en Chile) -- se abstiene en vez de
+    adivinar, dejando el candidato visible sólo en el motivo técnico para
+    que un humano o B1 lo revise si hace falta (Bloque F: "B1 puede
+    validar semánticamente el candidato cuando haga falta")."""
+    texto = str(despachar_a_crudo or "").strip()
+    if not texto:
+        return ResultadoDesambiguacionInequivoca(motivo="SIN_TEXTO_DOCUMENTAL")
+    identidad_confirmada = any(
+        d.estado_calidad == "CONFIRMADO" and d.estado_vigencia == "ACTIVO"
+        and _destino_confirmado_coincide_texto(d, texto)
+        for d in destinos_confirmados
+    )
+    if not _PATRON_NUMERO_CALLE.search(texto):
+        # Nunca gasta una consulta de red (Bloque J: "no gastar si no
+        # hace falta") cuando el propio texto documental no tiene ningún
+        # número de calle con el que un candidato del respaldo pudiera
+        # siquiera coincidir -- `_candidato_unico_con_numero_de_calle`
+        # abstendría igual, pero después de pagar la llamada.
+        return ResultadoDesambiguacionInequivoca(
+            motivo="SIN_NUMERO_DE_CALLE_EN_TEXTO_DOCUMENTAL",
+            identidad_confirmada=identidad_confirmada,
+        )
+    try:
+        resultado_fallback = proveedor_fallback.geocodificar(f"{texto}, Chile")
+    except (OSError, ValueError):
+        return ResultadoDesambiguacionInequivoca(
+            motivo="FALLBACK_ESTRUCTURADO_NO_DISPONIBLE", vias=(VIA_FALLBACK_ESTRUCTURADO,),
+            identidad_confirmada=identidad_confirmada,
+        )
+    candidato = _candidato_unico_con_numero_de_calle(texto, resultado_fallback.candidatos or ())
+    if candidato is None:
+        return ResultadoDesambiguacionInequivoca(
+            motivo="FALLBACK_SIN_CANDIDATO_UNICO", vias=(VIA_FALLBACK_ESTRUCTURADO,),
+            identidad_confirmada=identidad_confirmada,
+        )
+    destino_corroborante = next(
+        (
+            d for d in destinos_confirmados
+            if d.estado_calidad == "CONFIRMADO" and d.estado_vigencia == "ACTIVO"
+            and _destino_confirmado_coincide_texto(d, texto) and d.comuna and candidato.localidad
+            and _comuna_confirma_candidato(d.comuna, candidato.localidad)
+        ),
+        None,
+    )
+    if destino_corroborante is None:
+        return ResultadoDesambiguacionInequivoca(
+            motivo=f"FALLBACK_SIN_CORROBORACION_TERRITORIAL: {candidato.etiqueta}",
+            candidato=candidato, vias=(VIA_FALLBACK_ESTRUCTURADO,),
+            identidad_confirmada=identidad_confirmada,
+        )
+    return ResultadoDesambiguacionInequivoca(
+        resuelto=True, candidato=candidato, motivo="FALLBACK_ESTRUCTURADO_CORROBORADO",
+        vias=(VIA_FALLBACK_ESTRUCTURADO,), identidad_confirmada=identidad_confirmada,
+    )
+
+
 def _mejor_candidato(candidatos: tuple[CandidatoGeocodificacion, ...]) -> CandidatoGeocodificacion:
     """Entre candidatos que ya se determinó que son el mismo lugar real,
     el de mayor confianza informada (nunca el más cercano a ninguna
@@ -525,6 +652,7 @@ def resolver_destino_entrega(
     punto_gps_referencia: Coordenadas | None = None,
     radio_gps_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
+    proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -551,7 +679,15 @@ def resolver_destino_entrega(
     candidato compatible; en cualquier otro caso, la ambigüedad
     `MULTIPLES_UBICACIONES_DISPERSAS` se preserva intacta para revisión
     humana/B1, exactamente igual que antes de este bloque.
-    """
+
+    `proveedor_geocodificacion_fallback` (Bloque B1 OBSERVADOR + FALLBACK
+    GEOGRÁFICO, opcional): un ÚNICO geocodificador de respaldo
+    estructurado (nunca varios, nunca scraping) -- se consulta SÓLO si
+    Vía A/Vía B tampoco resolvieron, ANTES de rendirse ante
+    `MULTIPLES_UBICACIONES_DISPERSAS`/`COORDENADA_NO_CONFIRMADA` (ver
+    `resolver_destino_con_fallback_estructurado`, "Vía C"). Nunca se
+    llama si el proveedor principal ya resolvió sin ambigüedad -- "sólo
+    si A falla" (Javier)."""
     texto = str(despachar_a_crudo or "").strip()
     if not texto:
         return ResultadoDestinoEntrega(
@@ -579,6 +715,7 @@ def resolver_destino_entrega(
     )
     resultado = proveedor_geocodificacion.geocodificar(consulta)
     corroborado_por_gps = False
+    metodo_confirmacion_fallback = ""
 
     if resultado.estado == EstadoRuta.RESULTADO_AMBIGUO:
         # Bloque E2E R1.1 -- antes de decidir si hay ambigüedad real,
@@ -623,6 +760,19 @@ def resolver_destino_entrega(
             if desambiguacion.resuelto and desambiguacion.candidato is not None:
                 candidato = desambiguacion.candidato
                 corroborado_por_gps = corroborado_por_gps or VIA_GPS_DESCARTA_RIVALES in desambiguacion.vias
+            elif proveedor_geocodificacion_fallback is not None and (
+                fallback := resolver_destino_con_fallback_estructurado(
+                    texto, proveedor_fallback=proveedor_geocodificacion_fallback,
+                    destinos_confirmados=destinos_confirmados,
+                )
+            ).resuelto and fallback.candidato is not None:
+                # Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C",
+                # sólo se consulta cuando A/B ya fallaron ("sólo si A
+                # falla"). El candidato, si corrobora, sigue pasando por
+                # los MISMOS controles de abajo (territorio/confianza) --
+                # nunca un camino paralelo con reglas propias.
+                candidato = fallback.candidato
+                metodo_confirmacion_fallback = "FALLBACK_ESTRUCTURADO_CORROBORADO"
             else:
                 # Bloque CONFIRMACIÓN D2 -- caso real 472037 (VICUÑA
                 # MACKENNA 655): Javier ya confirmó esta dirección en
@@ -686,7 +836,7 @@ def resolver_destino_entrega(
             estado=ESTADO_REVISAR,
             motivo=f"GEOCODIFICACION_FUERA_DE_CHILE: {candidato.region}",
             localidad="", region="",
-            metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
+            metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
         )
     etiqueta_final = _etiqueta_geocodificada_o_texto_documental(etiqueta=candidato.etiqueta, texto_documental=texto)
     if candidato.confianza is None or candidato.confianza < UMBRAL_CONFIANZA_MINIMA:
@@ -699,7 +849,7 @@ def resolver_destino_entrega(
             motivo="CONFIANZA_INSUFICIENTE",
             localidad=candidato.localidad,
             region=candidato.region,
-            metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
+            metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
         )
     return ResultadoDestinoEntrega(
         despachar_a_crudo=texto,
@@ -710,7 +860,7 @@ def resolver_destino_entrega(
         motivo="",
         localidad=candidato.localidad,
         region=candidato.region,
-        metodo_confirmacion="TELEMETRIA_GPS" if corroborado_por_gps else "",
+        metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
     )
 
 
@@ -751,6 +901,7 @@ def resolver_destino_entrega_validado(
     punto_gps_referencia: Coordenadas | None = None,
     radio_gps_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
+    proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -779,6 +930,7 @@ def resolver_destino_entrega_validado(
         contexto_territorial=contexto_territorial,
         punto_gps_referencia=punto_gps_referencia, radio_gps_km=radio_gps_km,
         destinos_confirmados=destinos_confirmados,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado
@@ -913,6 +1065,7 @@ def calcular_ruta_con_planta_conocida(
     punto_gps_destino: Coordenadas | None = None,
     radio_gps_destino_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
+    proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -937,6 +1090,7 @@ def calcular_ruta_con_planta_conocida(
         despachar_a_crudo, proveedor_rutas,
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
         destinos_confirmados=destinos_confirmados,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO
