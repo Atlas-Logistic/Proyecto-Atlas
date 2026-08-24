@@ -61,7 +61,11 @@ def _leer(ruta):
 
 
 def _proveedor_providencia_santiago():
-    consulta = "AV PROVIDENCIA 1550 SANTIAGO PROVIDENCIA, Chile"
+    # Bloque RESOLUCIÓN R17 -- "SANTIAGO" se quita SÓLO de la consulta al
+    # geocodificador (nunca del texto documental almacenado, ver
+    # `direccion_entrega` más abajo) cuando el texto ya trae otra comuna
+    # real distinta ("Providencia") -- caso real 472018/464981.
+    consulta = "AV PROVIDENCIA 1550 PROVIDENCIA, Chile"
     return ProveedorRutasSimulado(
         geocodificaciones={
             consulta: ResultadoGeocodificacion(

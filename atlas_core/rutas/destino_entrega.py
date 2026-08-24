@@ -448,6 +448,35 @@ def _etiqueta_geocodificada_o_texto_documental(*, etiqueta: str, texto_documenta
     return etiqueta
 
 
+_PATRON_TOKEN_SANTIAGO = re.compile(r"(?i)\bSANTIAGO\b")
+
+
+def _texto_geocodificable_sin_etiqueta_ciudad_santiago(texto: str) -> str:
+    """Bloque RESOLUCIÓN R17 -- casos reales 472018 (CAMINO LOS PINOS 3396
+    SANTIAGO SAN BERNARDO) y 464981 (CAMINO A MELIPILLA 10800 SANTIAGO
+    MAIPU): cuando el texto documental YA menciona, con el catálogo
+    territorial cerrado, una comuna real DISTINTA de "Santiago", el token
+    "SANTIAGO" que aparece junto a ella es, con altísima probabilidad, la
+    etiqueta de CIUDAD/ÁREA METROPOLITANA que el propio documento repite
+    (mismo principio ya establecido en `_comunas_territorialmente_
+    compatibles`, Bloque TERRITORIAL T1 -- "Santiago" y una comuna
+    específica de la misma región no son una contradicción, son dos
+    niveles territoriales del mismo lugar) -- nunca un segundo componente
+    real de la calle. Enviado tal cual al geocodificador, ese token
+    compite como si fuera una comuna real distinta y dispersa candidatos
+    (verificado: 5 candidatos -> 1 al quitarlo para 472018). Se elimina
+    SÓLO el token "SANTIAGO" -- nunca ningún otro texto -- y SÓLO cuando
+    el catálogo ya identificó, en el propio texto, al menos otra comuna
+    real distinta; si "Santiago" es la ÚNICA comuna mencionada, se
+    conserva intacta (podría ser genuinamente la comuna real). Nunca toca
+    el texto ALMACENADO (`despachar_a_crudo`) -- sólo la consulta que se
+    envía al proveedor de geocodificación."""
+    comunas = _comunas_explicitas(texto)
+    if "Santiago" not in comunas or len(comunas) < 2:
+        return texto
+    return " ".join(_PATRON_TOKEN_SANTIAGO.sub(" ", texto).split())
+
+
 def resolver_destino_entrega(
     despachar_a_crudo: str | None,
     proveedor_geocodificacion: ProveedorRutas,
@@ -501,6 +530,10 @@ def resolver_destino_entrega(
     # resolvería (normalización local primero, nunca ORS para corregir
     # un typo que el catálogo ya resuelve -- Fase N).
     texto_geocodificable = normalizar_direccion_con_comunas(texto)
+    # Bloque RESOLUCIÓN R17 -- ver docstring de la función: quita SÓLO
+    # para la consulta un token "SANTIAGO" redundante cuando el texto ya
+    # trae otra comuna real distinta.
+    texto_geocodificable = _texto_geocodificable_sin_etiqueta_ciudad_santiago(texto_geocodificable)
     consulta = (
         f"{texto_geocodificable}, {contexto_territorial}" if contexto_territorial else texto_geocodificable
     )

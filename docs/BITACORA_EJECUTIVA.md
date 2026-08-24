@@ -2403,3 +2403,72 @@ guía hermana futura o ya persistida de la misma obra.
 
 **Estado: BLOQUE R16 (RESOLUCIÓN AVANZADA) CERRADO EN CÓDIGO Y EN DRIVE
 REAL. Sin push en ninguno de los dos repos.**
+
+## Bloque R17 -- cierre de los viajes reales sin km/tiempo (2026-08-24)
+
+**Causa raíz nueva encontrada (revisando los 8 casos uno a uno, ninguno
+asumido):** en 2 de los 8 (472018/464981), el texto documental repite
+"SANTIAGO" como etiqueta de ciudad ANTES de la comuna real específica
+("...SANTIAGO SAN BERNARDO", "...SANTIAGO MAIPU") -- enviado tal cual
+al geocodificador, ese token competía como si fuera una comuna real
+distinta y dispersaba los candidatos (verificado en vivo: 5 candidatos
+para 472018). Fix general (reutiliza el mismo principio de Bloque
+TERRITORIAL T1 -- "Santiago" como etiqueta de ciudad/metro, no como
+comuna): nueva `_texto_geocodificable_sin_etiqueta_ciudad_santiago`
+quita el token "SANTIAGO" SÓLO de la consulta al proveedor, y SÓLO
+cuando el catálogo territorial ya identificó otra comuna real distinta
+en el mismo texto -- nunca toca el texto documental almacenado, nunca
+actúa si "Santiago" es la única comuna mencionada.
+
+**Los 8 revisados individualmente (fuentes agotadas antes de rendirse):**
+- **472018** (SALOMON SACK, CAMINO LOS PINOS 3396 SAN BERNARDO) --
+  RESUELTO: 5 candidatos dispersos -> 1 inequívoco, **35.62 km / tiempo
+  calculado**, verificado con el proveedor real antes de aplicar.
+- **460807/472008** (AUSIN SAN BERNARDO, INTERIOR NUEVA O1148) --
+  verificado externamente contra el registro oficial SII
+  (portalchile.org, corroborado con segunda fuente): "Interior Nueva
+  01148" es una sucursal real. El geocodificador (reintentado con
+  variantes de consulta) nunca resuelve a nivel de calle -- limitación
+  real de cobertura del proveedor. La infraestructura del Bloque R16
+  (Vía A) ya está lista: una futura confirmación humana resuelve ambas
+  guías automáticamente.
+- **472037** (VICUÑA MACKENNA 655) -- variantes de consulta confirman
+  que "Vicuña Mackenna" es una avenida real que cruza VARIAS comunas
+  distintas de la RM (Santiago/Renca/Peñaflor/La Florida); sin comuna
+  documental y sin confirmación externa fiable del número exacto, es
+  ambigüedad territorial GENUINA -- correcto que quede para B1/humano,
+  nunca adivinada.
+- **472044/472073/472163** (Las Condes/Vitacura) -- re-verificados con
+  múltiples variantes de consulta: el proveedor sólo devuelve
+  centroides de comuna (0.6 confianza, sin calle) -- limitación real de
+  cobertura, no un error de Atlas; `SIN_ACCESO_VIAL` sigue siendo la
+  causa correcta.
+- **464981** (AMERICAN SCREW, origen no determinado) -- consulta en
+  vivo (no masiva, sólo esta patente/ventana) a Onelogis confirma CERO
+  viajes GPS en la ventana documental (14:15-15:56); el viaje real más
+  cercano ese día es a las 06:29 -- vacío real de telemetría, no un
+  bug de selección de recorrido. `SIN_TRIPS_EN_VENTANA_TEMPORAL`
+  confirmado como causa real y vigente.
+
+**Tests:** Motor -- `test_resolucion_r17.py` (5 nuevos) + 1 fixture
+existente corregido (`test_revalidar_ruta_sin_destino_r410.py`, consulta
+ya no incluye "SANTIAGO" redundante). Motor completo: 1689 passed
+(antes 1684). E2E en copia real de producción (proveedor real): 472018
+recuperado (35.62 km), 0 regresiones.
+
+**Aplicado a Drive real:** 1 backup verificado
+(`respaldos/R17_PRE_CIERRE_7_SIN_KM_.../`, SHA-256 antes/después).
+472018 con km/tiempo real; catálogos/ledger verificados
+byte-idénticos al backup. **Con km/tiempo: 13/20** (antes 12/20).
+
+**Pendiente real (no bloqueante, requiere decisión humana genuina):** 7
+guías (460807/472008/472037/472044/472073/472163/464981) agotaron toda
+fuente razonable disponible hoy -- 6 son limitación real de cobertura
+del proveedor de geocodificación/telemetría (confirmada en vivo, no
+asumida), 1 es ambigüedad territorial genuina (calle que cruza varias
+comunas). Ninguna requiere una nueva investigación desde cero: la
+infraestructura del Bloque R16 ya propaga automáticamente cualquier
+confirmación humana futura a guías hermanas de la misma obra.
+
+**Estado: BLOQUE R17 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
+ninguno de los dos repos.**
