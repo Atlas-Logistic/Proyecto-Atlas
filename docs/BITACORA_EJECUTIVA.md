@@ -3373,3 +3373,60 @@ ambigüedad + control ya-limpio + sin candidatos; integración: 472247+
 completa: 1818 passed (antes 1810). Aplicado a Drive real con
 backup+SHA-256 (`respaldos/FIX_DIRECCION_CANONICA_HERMANOS_PRE_20260824_230054/`).
 Sin push.
+
+## Bloque FINAL CORE V1 -- cierre de los 3 históricos residuales sin ruta (2026-08-24)
+
+**460807/472008 (AUSIN SAN BERNARDO):** identidad ya conocida, nunca
+reinvestigada -- ningún geocodificador indexa "INTERIOR NUEVA O1148 SAN
+BERNARDO" a nivel de número. Nueva `revalidar_ruta_por_convergencia_
+gps_historica_sin_ocr`: para cada obra, calcula `punto_gps_destino`
+(recorrido de entrega ya cacheado por telemetría -- `enriquecer_
+documento_con_telemetria`, sin red) de TODAS sus filas; si al menos DOS
+observaciones históricas independientes convergen dentro de
+`MARGEN_MISMO_LUGAR_KM` (1 km, ya calibrado), ese punto se acepta como
+operacional/ruteable -- nunca con una sola observación. Caso real: las
+DOS entregas históricas (460807 18-08, 472008 18/19-08) convergen en la
+MISMA coordenada exacta (-33.543683,-70.704833). Punto persistido en el
+destino ya CONFIRMADO (`05b006b6-...`) para reuso automático futuro.
+**Antes -> después:** ambas `COORDENADA_NO_CONFIRMADA(3)` -> `RUTA_
+CALCULADA` (460807: 18.45 km/26.72 min desde AZA RENCA; 472008: 51.47
+km/62.07 min desde AZA COLINA).
+
+**464981 (origen sin GPS):** "sin GPS en SU ventana" no es lo mismo que
+"sin evidencia de origen". Nueva `revalidar_origen_por_vecinos_
+temporales_gps_sin_ocr`: busca, para el MISMO vehículo, viajes vecinos
+(±5 días) cuyo origen ya fue CONFIRMADO por GPS (nunca por documento,
+menos confiable por diseño ya vigente del resto del sistema) -- si TODOS
+convergen en una misma planta (nunca "el chofer normalmente carga en
+X": exige ≥2 observaciones GPS reales, cero en desacuerdo), esa planta
+se acepta. Caso real: 3 viajes GPS-confirmados inmediatamente
+posteriores (472018/472099/472162, mismo vehículo DD2494) convergen en
+AZA COLINA -- material también consistente (ALAMBRON AZA 1006). Con la
+planta resuelta, `revalidar_ruta_sin_destino_calculado_sin_ocr` (ya
+existente) calcula la ruta en la MISMA pasada. **Antes -> después:**
+`ORIGEN_NO_DETERMINADO`/`SIN_EVIDENCIA_GPS` -> `RUTA_CALCULADA` (35.32
+km/49.43 min, dirección canónica "CAMINO A MELIPILLA 10800 SANTIAGO
+MAIPU" ya aprendida en el bloque anterior).
+
+**B1:** no se invocó -- ambos casos resueltos con evidencia
+estructurada determinística ya cacheada (Motor-level), sin necesitar
+discriminación adicional.
+
+**Rutas finales:** 23/23 viajes con `RUTA_CALCULADA` (100%). 0
+decisiones pendientes. Control 472037 intacto (RUTA_CALCULADA, 35.50
+km/48.78 min, sin cambios).
+
+**Tests/commit:** 11 tests focales nuevos en `test_final_core_v1.py`
+(vecinos temporales: caso real + 5 regresiones -- una sola observación,
+dos plantas plausibles, vecino documental no cuenta, fuera de ventana,
+planta ya resuelta no se reinvestiga; convergencia GPS: caso real +
+control una sola observación + puntos no convergentes + ruta ya
+calculada intacta + aprendizaje persistido). Suite completa: 1829
+passed (antes 1818). E2E contra copia real + aplicado a Drive real con
+backup+SHA-256 (`respaldos/FINAL_CORE_V1_PRE_20260824_234320/`). Sin
+push.
+
+**ATLAS CORE V1 -- TÉCNICAMENTE CERRABLE: SÍ.** Los 3 históricos
+residuales quedaron con `RUTA_CALCULADA` real (no un límite aceptado);
+0 decisiones pendientes; 0 regresiones; identidades/aprendizaje
+reutilizados sin reinvestigar; B1 no necesitó intervenir.

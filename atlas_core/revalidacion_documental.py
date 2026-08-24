@@ -641,6 +641,87 @@ def revalidar_telemetria_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+# Bloque FINAL CORE V1 -- caso real 464981: ventana en días para
+# considerar un viaje del MISMO vehículo "vecino temporal" -- calibrada
+# sobre el caso real (los vecinos GPS-confirmados quedaron a 1-2 días),
+# nunca "el patrón habitual del chofer" sin límite temporal.
+_VENTANA_DIAS_VECINOS_TEMPORALES = 5
+
+
+def revalidar_origen_por_vecinos_temporales_gps_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque FINAL CORE V1 -- caso real 464981 (SIN_EVIDENCIA_GPS: sin
+    trips telemetría en la ventana documental exacta de ESE viaje) --
+    "no tener GPS en esa ventana no significa que no se pueda inferir el
+    origen": si el MISMO vehículo tiene viajes vecinos (dentro de
+    `_VENTANA_DIAS_VECINOS_TEMPORALES`) cuyo origen SÍ fue confirmado
+    por GPS (nunca por documento -- ese origen ya es, por diseño del
+    resto del sistema, menos confiable que uno GPS-confirmado), y TODOS
+    esos vecinos convergen en la MISMA planta, esa planta se acepta como
+    hipótesis fuerte -- nunca "el chofer normalmente carga en X" (no hay
+    umbral de frecuencia ni promedio: exige convergencia ABSOLUTA entre
+    al menos 2 observaciones GPS reales, y CERO vecinos GPS-confirmados
+    en desacuerdo). Con una sola observación, sin vecinos, o con
+    vecinos que no coinciden entre sí, se abstiene -- la fila queda
+    exactamente como estaba (`ORIGEN_NO_DETERMINADO`/`SIN_EVIDENCIA_GPS`
+    siguen siendo la causa final honesta).
+
+    Sólo resuelve la PLANTA -- nunca toca ruta/km/tiempo aquí (eso lo
+    hace, en la misma pasada de revalidación, `revalidar_ruta_sin_
+    destino_calculado_sin_ocr`, que ya sabe reintentar en cuanto
+    `planta_origen_id` deja de estar vacío). Sin OCR, sin red -- sólo
+    relee el dataset ya persistido."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        gps_confirmados_por_patente: dict[str, list[tuple]] = {}
+        for fila in filas:
+            if str(fila.get("origen_determinado_por", "")).strip() != "TELEMETRIA_GPS":
+                continue
+            patente = str(fila.get("patente_tracto", "")).strip().upper()
+            planta_id = str(fila.get("planta_origen_id", "")).strip()
+            if patente in ("", "NO ENCONTRADO") or not planta_id:
+                continue
+            fecha = _parsear_fecha_dd_mm_yyyy(fila.get("fecha"))
+            if fecha is None:
+                continue
+            gps_confirmados_por_patente.setdefault(patente, []).append(
+                (fecha, planta_id, str(fila.get("planta_origen_nombre", "")), str(fila.get("numero_guia", "")))
+            )
+
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("planta_origen_id", "")).strip():
+                continue  # ya tiene origen -- nunca se reinvestiga
+            patente = str(fila.get("patente_tracto", "")).strip().upper()
+            if patente in ("", "NO ENCONTRADO"):
+                continue
+            fecha_objetivo = _parsear_fecha_dd_mm_yyyy(fila.get("fecha"))
+            if fecha_objetivo is None:
+                continue
+            vecinos = [
+                registro for registro in gps_confirmados_por_patente.get(patente, ())
+                if abs((registro[0] - fecha_objetivo).days) <= _VENTANA_DIAS_VECINOS_TEMPORALES
+            ]
+            plantas_distintas = {registro[1] for registro in vecinos}
+            if len(vecinos) < 2 or len(plantas_distintas) != 1:
+                continue  # sin convergencia real (o dos plantas plausibles) -- se abstiene
+            planta_id, planta_nombre = vecinos[0][1], vecinos[0][2]
+            fila["planta_origen_id"] = planta_id
+            fila["planta_origen_nombre"] = planta_nombre
+            fila["origen_determinado_por"] = "PATRON_VEHICULO_GPS_VECINOS"
+            fila["evidencia_origen"] = (
+                f"vecinos_gps_confirmados={len(vecinos)};ventana_dias={_VENTANA_DIAS_VECINOS_TEMPORALES};"
+                f"guias_vecinas={','.join(sorted({r[3] for r in vecinos}))}"
+            )
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_destino_contra_comuna_documental_sin_ocr(
     *, ruta_dataset: str | Path,
 ) -> dict[str, object]:
@@ -1010,6 +1091,178 @@ def revalidar_destino_confirmado_desde_ledger_sin_ocr(
         )
         destinos_corregidos.append(destino.destino_id)
     return {"destinos_corregidos": destinos_corregidos}
+
+
+def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    proveedor_rutas=None, perfil: str = "driving-hgv",
+    servicio_telemetria: ServicioTelemetria | None = None, proveedor_nombre: str = "onelogis",
+) -> dict[str, object]:
+    """Bloque FINAL CORE V1 -- caso real 460807/472008 (obra ya
+    CONFIRMADA "AUSIN SAN BERNARDO", dirección postal "INTERIOR NUEVA
+    O1148 SAN BERNARDO" que ningún geocodificador indexa a nivel de
+    número): cuando el destino no es geocodificable, el punto real de
+    entrega puede seguir siendo derivable de evidencia GPS ya cacheada,
+    SI converge entre entregas HISTÓRICAS independientes -- "una sola
+    observación GPS aislada no basta" (Bloque C del bloque).
+
+    Para cada `obra_destino` (identidad ya conocida, nunca se
+    reinvestiga), calcula `punto_gps_destino` (recorrido de entrega
+    seleccionado por telemetría YA CACHEADA -- `enriquecer_documento_
+    con_telemetria`, `ProveedorTelemetriaSoloCache`, nunca red) para
+    CADA fila de esa obra con patente/fecha/horas y telemetría cacheada
+    -- resueltas o no, cualquier entrega histórica cuenta como
+    evidencia. Si al menos DOS observaciones caen dentro de
+    `MARGEN_MISMO_LUGAR_KM` (mismo criterio ya calibrado que usa Vía A
+    para "mismo lugar"), ese punto convergente se acepta como PUNTO
+    OPERACIONAL/RUTEABLE real -- nunca con una sola observación.
+
+    Con el punto ya validado, calcula ruta real (ORS) SOLO para las
+    filas de esa obra que siguen sin `RUTA_CALCULADA` -- nunca
+    recalcula una fila ya resuelta por otra vía. Persiste también el
+    punto en cualquier destino ya CONFIRMADO de esa misma obra sin
+    coordenadas (`CatalogoDestinos.editar`, evidencia GPS -- nunca
+    `CONFIRMACION_HUMANA`) para que futuras guías de la misma obra lo
+    reutilicen directo, sin volver a calcular convergencia."""
+    from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
+    from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.rutas.destino_entrega import MARGEN_MISMO_LUGAR_KM
+    from atlas_core.rutas.geocerca import distancia_km_haversine
+    from atlas_core.rutas.modelos import Coordenadas
+
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    if proveedor_rutas is None:
+        from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
+        from atlas_core.rutas.cache_geocodificacion import (
+            ProveedorRutasConCacheGeocodificacion, RepositorioCacheGeocodificacion,
+        )
+        from atlas_core.rutas.openrouteservice import OpenRouteService
+        proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
+            OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+        )
+    servicio = servicio_telemetria or ServicioTelemetria(
+        ProveedorTelemetriaSoloCache(nombre=proveedor_nombre),
+        RepositorioTelemetria(carpeta / "telemetria_cache.json"),
+    )
+    try:
+        plantas_por_id = {p.planta_id: p for p in CatalogoPlantas(carpeta / "plantas.json").listar()}
+    except (OSError, ValueError):
+        plantas_por_id = {}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        filas_por_obra: dict[str, list[dict[str, str]]] = {}
+        for fila in filas:
+            obra = normalizar_nombre_obra(str(fila.get("obra_destino", "")))
+            if obra:
+                filas_por_obra.setdefault(obra, []).append(fila)
+
+        guias_actualizadas: list[str] = []
+        destinos_aprendidos: list[str] = []
+        for obra_clave, filas_obra in filas_por_obra.items():
+            if len(filas_obra) < 2:
+                continue  # nunca converge con una sola fila de esa obra
+            puntos: list[tuple[dict[str, str], object]] = []
+            for fila in filas_obra:
+                patente = str(fila.get("patente_tracto", "")).strip().upper()
+                if patente in ("", "NO ENCONTRADO"):
+                    continue
+                fecha_doc = _parsear_fecha_dd_mm_yyyy(fila.get("fecha"))
+                if fecha_doc is None:
+                    continue
+                hora_entrada_dt = _combinar_fecha_hora(fecha_doc, fila.get("hora_entrada_aza"))
+                hora_salida_dt = _combinar_fecha_hora(fecha_doc, fila.get("hora_salida_aza"))
+                if hora_entrada_dt is None and hora_salida_dt is None:
+                    continue
+                if servicio.repositorio.buscar_viajes(
+                    servicio.proveedor.nombre, patente, fecha_doc, fecha_doc
+                ) is None:
+                    continue  # sin trip cacheado -- nunca llama a la red aquí
+                resultado_gps = enriquecer_documento_con_telemetria(
+                    servicio=servicio, patente=patente, fecha=fecha_doc,
+                    hora_entrada=hora_entrada_dt, hora_salida=hora_salida_dt,
+                    plantas=list(plantas_por_id.values()),
+                )
+                if resultado_gps.punto_gps_destino is not None:
+                    puntos.append((fila, resultado_gps.punto_gps_destino))
+
+            if len(puntos) < 2:
+                continue  # una sola observación GPS no basta
+            base_fila, base_punto = puntos[0]
+            convergentes = [
+                punto for _fila, punto in puntos
+                if distancia_km_haversine(base_punto, punto) <= MARGEN_MISMO_LUGAR_KM
+            ]
+            if len(convergentes) < 2:
+                continue  # sin convergencia real -- se abstiene, nunca elige un punto aislado
+            punto_convergente = base_punto
+
+            for fila in filas_obra:
+                if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                    continue
+                planta_id = str(fila.get("planta_origen_id", "")).strip()
+                planta = plantas_por_id.get(planta_id)
+                if planta is None:
+                    continue
+                origen = Coordenadas(planta.longitud, planta.latitud)
+                try:
+                    resultado_ruta = proveedor_rutas.calcular_ruta(origen, punto_convergente, perfil)
+                except (OSError, ValueError):
+                    continue
+                if resultado_ruta.estado != EstadoRuta.RUTA_CALCULADA:
+                    continue
+                fila["distancia_km"] = str(resultado_ruta.distancia_km)
+                fila["duracion_min"] = str(resultado_ruta.duracion_estimada_min)
+                fila["proveedor_ruta"] = proveedor_rutas.nombre
+                fila["estado_ruta"] = EstadoRuta.RUTA_CALCULADA.value
+                fila["motivo_ruta"] = ""
+                despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+                if despachar_a:
+                    fila["direccion_entrega"] = despachar_a
+                guias_actualizadas.append(str(fila.get("numero_guia", "")))
+
+            # Aprendizaje -- persiste el punto convergente en cualquier
+            # destino ya CONFIRMADO de esta obra que aún no tenga
+            # coordenadas, para que futuras guías lo reutilicen directo.
+            try:
+                catalogo_obras = CatalogoObrasDestinos(
+                    ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
+                    ruta_destinos=carpeta / "destinos_maestros.json",
+                )
+                obra_registro = next(
+                    (o for o in catalogo_obras.listar_obras() if o.nombre_normalizado == obra_clave), None,
+                )
+                if obra_registro is not None:
+                    catalogo_destinos = CatalogoDestinos(
+                        carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json",
+                    )
+                    destino_ids = {
+                        r.destino_id for r in catalogo_obras.listar_relaciones()
+                        if r.obra_id == obra_registro.obra_id and r.estado == "CONFIRMADA"
+                    }
+                    for destino_id in destino_ids:
+                        try:
+                            destino = catalogo_destinos.obtener(destino_id)
+                        except (OSError, ValueError):
+                            continue
+                        if (
+                            destino.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
+                            and destino.latitud is None and destino.longitud is None
+                        ):
+                            catalogo_destinos.editar(
+                                destino_id, modificacion_manual=True,
+                                latitud=punto_convergente.latitud, longitud=punto_convergente.longitud,
+                            )
+                            destinos_aprendidos.append(destino_id)
+            except (OSError, ValueError):
+                pass
+
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"guias_actualizadas": guias_actualizadas, "destinos_aprendidos": destinos_aprendidos}
 
 
 def revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -1463,6 +1716,21 @@ def revalidar_y_regenerar_reporte(
     resultado_destino_confirmado_ledger = revalidar_destino_confirmado_desde_ledger_sin_ocr(
         carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+    # Bloque FINAL CORE V1 -- caso real 464981: corre ANTES que la
+    # revalidación de ruta a propósito -- resuelve la PLANTA (vecinos
+    # temporales GPS del mismo vehículo) para que la revalidación de
+    # ruta, más abajo, ya tenga `planta_origen_id` con qué intentar
+    # geocodificación/routing en esta MISMA pasada.
+    resultado_origen_vecinos = revalidar_origen_por_vecinos_temporales_gps_sin_ocr(ruta_dataset=dataset)
+    # Bloque FINAL CORE V1 -- caso real 460807/472008 (AUSIN SAN
+    # BERNARDO): corre ANTES también -- resuelve un punto operacional
+    # por convergencia GPS histórica cuando la dirección postal no es
+    # geocodificable por ningún proveedor, calculando la ruta
+    # directamente (no depende de la revalidación de ruta genérica de
+    # abajo, que sí necesita un candidato geocodificado).
+    resultado_ruta_convergencia_gps = revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+    )
     # Bloque RESOLUCIÓN R18 -- corre ANTES que la revalidación de ruta a
     # propósito: un destino recién geocodificado aquí (confirmado por
     # Javier, pero sin coordenadas hasta ahora) es exactamente lo que Vía
@@ -1508,6 +1776,8 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_ruta["guias_actualizadas"])
         | set(resultado_direccion_degradada["guias_actualizadas"])
         | set(resultado_direccion_hermanos["guias_actualizadas"])
+        | set(resultado_origen_vecinos["guias_actualizadas"])
+        | set(resultado_ruta_convergencia_gps["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -1521,6 +1791,8 @@ def revalidar_y_regenerar_reporte(
         "destino_sin_numero": resultado_destino_sin_numero,
         "cliente_ausente": resultado_cliente_ausente,
         "destino_confirmado_ledger": resultado_destino_confirmado_ledger,
+        "origen_vecinos_temporales_gps": resultado_origen_vecinos,
+        "ruta_convergencia_gps_historica": resultado_ruta_convergencia_gps,
         "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
         "ruta": resultado_ruta,
     }
