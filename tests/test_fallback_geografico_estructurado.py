@@ -12,12 +12,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from atlas_core.catalogo_destinos import Destino
+from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.rutas.destino_entrega import (
+    _numeros_de_calle,
+    calcular_ruta_con_planta_conocida,
     resolver_destino_con_fallback_estructurado,
     resolver_destino_entrega,
 )
 from atlas_core.rutas.modelos import (
-    CandidatoGeocodificacion, Coordenadas, EstadoRuta, ResultadoGeocodificacion,
+    CandidatoGeocodificacion, Coordenadas, EstadoRuta,
+    ResultadoGeocodificacion, ResultadoRuta,
 )
 from atlas_core.rutas.proveedor import ProveedorRutasSimulado
 
@@ -336,3 +340,187 @@ def test_resolver_destino_entrega_caso_real_472037_con_evidencia_b1_resuelve():
     assert resultado.coordenadas == Coordenadas(-70.75, -33.52)
     assert resultado.localidad == "Maipú"
     assert resultado.motivo == ""
+
+
+# ============================================================
+# Bloque CATCH-UP LOGÍSTICO -- el fallback también se intenta cuando el
+# principal deja UN ÚNICO candidato de confianza insuficiente (nunca
+# sólo en el camino ambiguo) y cuando la ruta queda SIN_ACCESO_VIAL.
+# ============================================================
+
+
+def test_caso_real_472044_candidato_unico_insuficiente_usa_fallback():
+    """Caso real 472044 (PUERTA DEL SOL 83): el principal NUNCA queda
+    ambiguo -- resuelve un único candidato degradado a nivel país
+    ("Chile", confianza 0.1). Antes, esto terminaba directo en
+    `CONFIANZA_INSUFICIENTE` sin intentar el respaldo. Con corroboración
+    disponible (comuna confirmada), el respaldo debe intentarse igual
+    que en el camino ambiguo -- "sólo si A falla" cubre cualquier forma
+    de que A falle."""
+    consulta = "PUERTA DEL SOL 83, Chile"
+    principal = ProveedorRutasSimulado(geocodificaciones={
+        consulta: ResultadoGeocodificacion(
+            EstadoRuta.REQUIERE_REVISION,
+            (CandidatoGeocodificacion(Coordenadas(-72.27, -38.17), "Chile", 0.1),),
+            "REQUIERE_CONFIRMACION_HUMANA",
+        )
+    })
+    fallback = _proveedor_fallback(
+        (CandidatoGeocodificacion(Coordenadas(-70.57, -33.41), "Puerta del Sol 83", 0.9, "Las Condes", "Metropolitana"),),
+        consulta="PUERTA DEL SOL 83, Chile",
+    )
+    destino = _destino_confirmado("PUERTA DEL SOL 83", comuna="Las Condes")
+    resultado = resolver_destino_entrega(
+        "PUERTA DEL SOL 83", principal,
+        destinos_confirmados=(destino,), proveedor_geocodificacion_fallback=fallback,
+    )
+    assert resultado.estado == "RESUELTO"
+    assert resultado.coordenadas == Coordenadas(-70.57, -33.41)
+    assert resultado.localidad == "Las Condes"
+
+
+def test_candidato_unico_insuficiente_sin_corroboracion_conserva_motivo():
+    """Control -- mismo escenario, pero sin nada que corrobore al
+    respaldo: se conserva `CONFIANZA_INSUFICIENTE`, nunca inventa."""
+    consulta = "PUERTA DEL SOL 83, Chile"
+    principal = ProveedorRutasSimulado(geocodificaciones={
+        consulta: ResultadoGeocodificacion(
+            EstadoRuta.REQUIERE_REVISION,
+            (CandidatoGeocodificacion(Coordenadas(-72.27, -38.17), "Chile", 0.1),),
+            "REQUIERE_CONFIRMACION_HUMANA",
+        )
+    })
+    fallback = _proveedor_fallback(
+        (CandidatoGeocodificacion(Coordenadas(-70.57, -33.41), "Puerta del Sol 83", 0.9, "Las Condes", "Metropolitana"),),
+        consulta="PUERTA DEL SOL 83, Chile",
+    )
+    resultado = resolver_destino_entrega(
+        "PUERTA DEL SOL 83", principal, proveedor_geocodificacion_fallback=fallback,
+    )
+    assert resultado.estado == "REVISAR"
+    assert resultado.motivo == "CONFIANZA_INSUFICIENTE"
+
+
+def test_caso_real_472073_sin_acceso_vial_usa_fallback_con_destino_confirmado(tmp_path):
+    """Caso real 472073 (PDTE. RIESCO 5903 LAS CONDES): el destino ya
+    CONFIRMADO trae comuna propia ("Las Condes") pero SIN coordenadas
+    (Bloque CONFIRMACIÓN D2) -- el reintento clásico de SIN_ACCESO_VIAL
+    exige coordenadas YA presentes en el destino confirmado y nunca
+    podía usarlo. Con el fallback estructurado corroborado por esa misma
+    comuna, se reintenta el ruteo desde el punto que SÍ resuelve."""
+    plantas = CatalogoPlantas(tmp_path / "plantas.json")
+    planta = plantas.crear(
+        nombre="AZA RENCA", pais="CHILE", fuente="TEST",
+        direccion="LA UNION 3070", comuna="RENCA", region="RM",
+        latitud=-33.401595, longitud=-70.685226, estado_calidad=EstadoCalidad.CONFIRMADA,
+    )
+    centroide = Coordenadas(-70.57, -33.40)
+    punto_fallback = Coordenadas(-70.55, -33.42)  # a ~2.7 km del centroide -- evidencia nueva real
+    consulta = "PDTE. RIESCO 5903 LAS CONDES, Chile"
+
+    class _ProveedorSinAccesoEnCentroide:
+        nombre = "simulado_sin_acceso"
+        version = "1"
+
+        def geocodificar(self, direccion):
+            return ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(centroide, "Las Condes, RM, Chile", 0.6, "Las Condes", "Metropolitana"),),
+                "REQUIERE_CONFIRMACION_HUMANA",
+            )
+
+        def calcular_ruta(self, origen, destino, perfil):
+            if (round(destino.longitud, 4), round(destino.latitud, 4)) == (round(punto_fallback.longitud, 4), round(punto_fallback.latitud, 4)):
+                return ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 18.0, 25.0, "SINTETICO")
+            return ResultadoRuta(EstadoRuta.SIN_ACCESO_VIAL, motivo="SIN_ACCESO_VIAL")
+
+    fallback = _proveedor_fallback(
+        (CandidatoGeocodificacion(punto_fallback, "Avenida Manquehue 5903", 0.9, "Las Condes", "Metropolitana"),),
+        consulta=consulta,
+    )
+    destino = _destino_confirmado("PDTE. RIESCO 5903", comuna="Las Condes")
+    resultado = calcular_ruta_con_planta_conocida(
+        planta=planta, despachar_a_crudo="PDTE. RIESCO 5903 LAS CONDES",
+        proveedor_rutas=_ProveedorSinAccesoEnCentroide(),
+        destinos_confirmados=(destino,), proveedor_geocodificacion_fallback=fallback,
+    )
+    assert resultado.estado_ruta == "RUTA_CALCULADA"
+    assert resultado.distancia_km == "18.0"
+    assert resultado.metodo_confirmacion_destino == "FALLBACK_ESTRUCTURADO_SIN_ACCESO_VIAL"
+
+
+def test_sin_acceso_vial_sin_corroboracion_conserva_motivo(tmp_path):
+    """Control -- sin comuna confirmada que corrobore, `SIN_ACCESO_VIAL`
+    se conserva -- nunca inventa un snap vial."""
+    plantas = CatalogoPlantas(tmp_path / "plantas.json")
+    planta = plantas.crear(
+        nombre="AZA RENCA", pais="CHILE", fuente="TEST",
+        direccion="LA UNION 3070", comuna="RENCA", region="RM",
+        latitud=-33.401595, longitud=-70.685226, estado_calidad=EstadoCalidad.CONFIRMADA,
+    )
+    centroide = Coordenadas(-70.57, -33.40)
+    consulta = "PDTE. RIESCO 5903 LAS CONDES, Chile"
+
+    class _ProveedorSinAcceso:
+        nombre = "simulado_sin_acceso"
+        version = "1"
+
+        def geocodificar(self, direccion):
+            return ResultadoGeocodificacion(
+                EstadoRuta.REQUIERE_REVISION,
+                (CandidatoGeocodificacion(centroide, "Las Condes, RM, Chile", 0.6, "Las Condes", "Metropolitana"),),
+                "REQUIERE_CONFIRMACION_HUMANA",
+            )
+
+        def calcular_ruta(self, origen, destino, perfil):
+            return ResultadoRuta(EstadoRuta.SIN_ACCESO_VIAL, motivo="SIN_ACCESO_VIAL")
+
+    fallback = _proveedor_fallback(
+        (CandidatoGeocodificacion(Coordenadas(-70.5694134, -33.4025444), "Avenida Manquehue 5903", 0.9, "Las Condes", "Metropolitana"),),
+        consulta=consulta,
+    )
+    resultado = calcular_ruta_con_planta_conocida(
+        planta=planta, despachar_a_crudo="PDTE. RIESCO 5903 LAS CONDES",
+        proveedor_rutas=_ProveedorSinAcceso(), proveedor_geocodificacion_fallback=fallback,
+    )
+    assert resultado.estado_ruta == "SIN_ACCESO_VIAL"
+
+
+# ============================================================
+# Bloque CATCH-UP LOGÍSTICO -- generalización de detección de número de
+# calle: un patrón OCR real (símbolo de numeral "Nº"/"N°" perdido/
+# confundido con una letra pegada al número, caso real 460807/472008
+# "INTERIOR NUEVA O1148 SAN BERNARDO") también cuenta como número.
+# ============================================================
+
+
+def test_numero_con_prefijo_ocr_se_detecta():
+    assert _numeros_de_calle("INTERIOR NUEVA O1148 SAN BERNARDO") == {"1148"}
+
+
+def test_numero_con_prefijo_ocr_coincide_con_candidato_sin_prefijo():
+    """El destino confirmado hereda el MISMO texto glueado que quedó
+    persistido al confirmarse (caso real 460807/472008: `direccion_final`
+    es literalmente lo que Javier/la evidencia externa confirmó, con el
+    mismo artefacto OCR) -- `_destino_confirmado_coincide_texto` compara
+    literal, así que el candidato del respaldo (sin el prefijo, como lo
+    devuelve un geocodificador estructurado real) debe seguir corroborando
+    vía el número ya normalizado, no vía el texto crudo con el prefijo."""
+    candidatos = (
+        CandidatoGeocodificacion(Coordenadas(-70.7, -33.6), "Interior Nueva 1148", 0.9, "San Bernardo", "Metropolitana"),
+    )
+    destino = _destino_confirmado("INTERIOR NUEVA O1148 SAN BERNARDO", comuna="San Bernardo")
+    r = resolver_destino_con_fallback_estructurado(
+        "INTERIOR NUEVA O1148 SAN BERNARDO",
+        proveedor_fallback=_proveedor_fallback(candidatos, consulta="INTERIOR NUEVA O1148 SAN BERNARDO, Chile"),
+        destinos_confirmados=(destino,),
+    )
+    assert r.resuelto is True
+    assert r.candidato.localidad == "San Bernardo"
+
+
+def test_numero_normal_sin_prefijo_no_se_duplica():
+    """Control -- un texto con número normal (sin prefijo OCR) sigue
+    detectándose exactamente igual que antes -- la generalización no
+    cambia el caso ya cubierto."""
+    assert _numeros_de_calle("PUERTA DEL SOL 83") == {"83"}

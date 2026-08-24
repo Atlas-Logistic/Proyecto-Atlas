@@ -3125,3 +3125,64 @@ fallback_20260824_185851/`) -- verificado en `viajes.csv`:
 
 **Estado: BLOQUE VALIDACIÓN TERRITORIAL T2 CERRADO EN CÓDIGO Y EN
 DRIVE REAL. Sin push en ninguno de los dos repos.**
+
+## Bloque CATCH-UP LOGÍSTICO RETROACTIVO -- pipeline actual aplicado a todos los pendientes (2026-08-24)
+
+**Generalizaciones (nunca por guía):** (1) Vía C (fallback estructurado)
+ahora también se intenta cuando el principal deja UN ÚNICO candidato de
+confianza insuficiente (antes sólo en el camino ambiguo) -- "sólo si A
+falla" cubre cualquier forma de que A falle. (2) `SIN_ACCESO_VIAL`
+también reintenta con el candidato del fallback (mismas reglas de
+corroboración de Vía C), no sólo con coordenadas ya presentes en un
+destino confirmado. (3) Detección de número de calle generalizada
+(`_numeros_de_calle`) para reconocer un patrón OCR real (símbolo de
+numeral "Nº"/"N°" pegado como una letra al número, p. ej. "O1148") sin
+volver a leer el documento.
+
+**Diagnóstico automático (sin asumir la lista conocida):** 6 viajes con
+`estado_ruta != RUTA_CALCULADA` detectados en el dataset real: 460807,
+464981, 472008, 472044, 472073, 472163.
+
+**Resultado E2E (copia real + Drive real, idéntico):**
+`guias_actualizadas: []` -- ninguno cambió, con causa demostrada caso
+por caso (nunca inventado):
+- **472044** (`PUERTA DEL SOL 83`): fallback consultado, Nominatim sólo
+  devuelve "Chile" (sin número) -- `CONFIANZA_INSUFICIENTE` real tras
+  agotar candidatos.
+- **472073** (`PDTE. RIESCO 5903 LAS CONDES`): fallback consultado, dos
+  candidatos sin número de calle coincidente -- `SIN_ACCESO_VIAL` real
+  tras fallback.
+- **460807/472008** (`INTERIOR NUEVA O1148 SAN BERNARDO`): número ya
+  detectado generalizadamente, pero Nominatim no encuentra ningún
+  candidato con ese número en esa comuna -- `COORDENADA_NO_CONFIRMADA`
+  real tras agotar candidatos.
+- **472163** (`VIA MORADA 6480 VITACURA`): Nominatim SÍ encuentra un
+  candidato exacto (confianza 0.9), pero el destino de esta dirección
+  está `PENDIENTE` (nunca `CONFIRMADO`) y B1 nunca investigó -- ninguna
+  corroboración disponible; aceptar igual sería exactamente "adivinar".
+  Queda `SIN_ACCESO_VIAL` real, con la evidencia estructurada visible
+  para una futura decisión humana o investigación B1 explícita.
+- **464981** (origen, `SIN_EVIDENCIA_GPS`): `estado_telemetria` ya
+  poblado (`SELECCIONADO`) -- la reconciliación de telemetría ya corrió
+  sin encontrar trips en la ventana; ningún viaje del dataset real quedó
+  con telemetría sin conectar. Causa final ya demostrada, no un "nunca
+  se intentó".
+- **Control 472037:** permanece `RUTA_CALCULADA`, 35.50 km / 48.78 min
+  -- no se degradó.
+
+**Tests:** Motor -- `tests/test_fallback_geografico_estructurado.py` (7
+nuevos: candidato único con confianza insuficiente + control,
+SIN_ACCESO_VIAL con fallback + control, generalización de número OCR +
+2 controles). Suite completa: 1778 passed (antes 1771).
+
+**Aplicado a Drive real:** 1 backup verificado (`respaldos/
+B1_OBSERVADOR_FALLBACK_PRE_20260824_192352/`, SHA-256 antes/después).
+`guias_actualizadas: []` -- honesto: el catch-up ya corrió sobre estos
+mismos pendientes en el bloque anterior; ningún dato cambió porque cada
+causa restante ya está genuinamente demostrada, no porque el pipeline
+no se ejecutara.
+
+**Estado: BLOQUE CATCH-UP LOGÍSTICO RETROACTIVO CERRADO EN CÓDIGO Y EN
+DRIVE REAL. Todos los pendientes actuales tienen causa final
+demostrada (Sección 8B) o ruta calculada (Sección 8A); ninguno conserva
+un motivo obsoleto. Sin push en ninguno de los dos repos.**

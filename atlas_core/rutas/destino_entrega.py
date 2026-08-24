@@ -457,6 +457,26 @@ def resolver_destino_ambiguo_con_evidencia_inequivoca(
 
 VIA_FALLBACK_ESTRUCTURADO = "FALLBACK_GEOCODER_ESTRUCTURADO"
 
+# Bloque CATCH-UP LOGÍSTICO -- caso real 460807/472008 ("INTERIOR NUEVA
+# O1148 SAN BERNARDO"): un patrón OCR real y recurrente pierde/confunde
+# el símbolo de numeral ("Nº"/"N°") con una única letra pegada al número
+# ("O1148" en vez de "Nº 1148") -- `_PATRON_NUMERO_CALLE` (con `\b` a
+# ambos lados) nunca lo detecta como número porque no hay borde de
+# palabra entre la letra y los dígitos. Nunca vuelve a leer el
+# documento/OCR -- sólo interpreta mejor el texto YA extraído.
+_PATRON_NUMERO_CON_PREFIJO_OCR = re.compile(r"\b[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]\d{1,6}\b")
+
+
+def _numeros_de_calle(texto: str) -> set[str]:
+    """Números de calle presentes en `texto` -- tokens numéricos
+    completos, MÁS tokens con un único carácter pegado adelante
+    (`_PATRON_NUMERO_CON_PREFIJO_OCR`) interpretados por su parte
+    numérica (nunca por el prefijo, que un geocodificador estructurado
+    tampoco trae en su propio `house_number`)."""
+    numeros = set(_PATRON_NUMERO_CALLE.findall(texto))
+    numeros.update(token[1:] for token in _PATRON_NUMERO_CON_PREFIJO_OCR.findall(texto))
+    return numeros
+
 
 def _candidato_unico_con_numero_de_calle(
     despachar_a_crudo: str, candidatos: tuple[CandidatoGeocodificacion, ...],
@@ -470,12 +490,12 @@ def _candidato_unico_con_numero_de_calle(
     candidatos con el mismo número (calles homónimas distintas, cada una
     con esa numeración) siguen sin ser evidencia inequívoca -- se
     abstiene."""
-    numeros_documento = set(_PATRON_NUMERO_CALLE.findall(despachar_a_crudo))
+    numeros_documento = _numeros_de_calle(despachar_a_crudo)
     if not numeros_documento:
         return None
     coincidencias = [
         c for c in candidatos
-        if set(_PATRON_NUMERO_CALLE.findall(c.etiqueta)) & numeros_documento
+        if _numeros_de_calle(c.etiqueta) & numeros_documento
     ]
     return coincidencias[0] if len(coincidencias) == 1 else None
 
@@ -567,7 +587,7 @@ def resolver_destino_con_fallback_estructurado(
         and _destino_confirmado_coincide_texto(d, texto)
         for d in destinos_confirmados
     )
-    if not _PATRON_NUMERO_CALLE.search(texto):
+    if not _numeros_de_calle(texto):
         # Nunca gasta una consulta de red (Bloque J: "no gastar si no
         # hace falta") cuando el propio texto documental no tiene ningún
         # número de calle con el que un candidato del respaldo pudiera
@@ -892,17 +912,39 @@ def resolver_destino_entrega(
         )
     etiqueta_final = _etiqueta_geocodificada_o_texto_documental(etiqueta=candidato.etiqueta, texto_documental=texto)
     if candidato.confianza is None or candidato.confianza < UMBRAL_CONFIANZA_MINIMA:
-        return ResultadoDestinoEntrega(
-            despachar_a_crudo=texto,
-            coordenadas=candidato.coordenadas,
-            etiqueta_geocodificada=etiqueta_final,
-            confianza=candidato.confianza,
-            estado=ESTADO_REVISAR,
-            motivo="CONFIANZA_INSUFICIENTE",
-            localidad=candidato.localidad,
-            region=candidato.region,
-            metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
-        )
+        # Bloque CATCH-UP LOGÍSTICO -- caso real 472044: un ÚNICO
+        # candidato con confianza insuficiente (nunca ambiguo -- Pelias
+        # sólo resolvió hasta nivel comuna/país) es exactamente el mismo
+        # problema que la ambigüedad para efectos del fallback: "sólo si
+        # A falla" cubre CUALQUIER forma de que A falle, no sólo la
+        # ambigüedad de varios candidatos. Mismas reglas de corroboración
+        # que Vía C ya exige en el camino ambiguo (número único +
+        # catálogo confirmado o evidencia B1 ya persistida) -- nunca un
+        # camino paralelo más permisivo.
+        if proveedor_geocodificacion_fallback is not None and (
+            fallback_unico := resolver_destino_con_fallback_estructurado(
+                texto, proveedor_fallback=proveedor_geocodificacion_fallback,
+                destinos_confirmados=destinos_confirmados,
+                contexto_evidencia_b1=contexto_evidencia_b1,
+            )
+        ).resuelto and fallback_unico.candidato is not None:
+            candidato = fallback_unico.candidato
+            etiqueta_final = _etiqueta_geocodificada_o_texto_documental(
+                etiqueta=candidato.etiqueta, texto_documental=texto,
+            )
+            metodo_confirmacion_fallback = "FALLBACK_ESTRUCTURADO_CORROBORADO"
+        else:
+            return ResultadoDestinoEntrega(
+                despachar_a_crudo=texto,
+                coordenadas=candidato.coordenadas,
+                etiqueta_geocodificada=etiqueta_final,
+                confianza=candidato.confianza,
+                estado=ESTADO_REVISAR,
+                motivo="CONFIANZA_INSUFICIENTE",
+                localidad=candidato.localidad,
+                region=candidato.region,
+                metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
+            )
     return ResultadoDestinoEntrega(
         despachar_a_crudo=texto,
         coordenadas=candidato.coordenadas,
@@ -1066,6 +1108,8 @@ def _reintentar_ruta_sin_acceso_vial_con_destino_confirmado(
     perfil: str,
     despachar_a_crudo: str,
     destinos_confirmados: Iterable[Destino],
+    proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
+    contexto_evidencia_b1: str = "",
 ) -> tuple["ResultadoRuta", ResultadoDestinoEntrega]:
     """Bloque RESOLUCIÓN R16 -- Parte F (`SIN_ACCESO_VIAL`): investigado
     contra 3 casos reales (472044/472073/472163) -- el punto que ORS
@@ -1105,6 +1149,38 @@ def _reintentar_ruta_sin_acceso_vial_con_destino_confirmado(
                 metodo_confirmacion="CATALOGO_CONFIRMADO_SIN_ACCESO_VIAL",
             )
             return ruta_reintentada, entrega_actualizada
+    # Bloque CATCH-UP LOGÍSTICO -- caso real 472073 (PDTE. RIESCO 5903 LAS
+    # CONDES): un destino ya CONFIRMADO puede traer comuna/región propias
+    # pero SIN coordenadas (Bloque CONFIRMACIÓN D2 -- se confirmó sin que
+    # la ruta llegara a calcularse) -- el bucle de arriba nunca puede
+    # usarlo (exige `latitud`/`longitud` ya presentes). Mismo mecanismo
+    # que ya resolvió 472037 (Vía C, mismas reglas de corroboración
+    # -- catálogo confirmado con comuna, o evidencia B1 ya persistida) --
+    # reutilizado aquí, nunca una ruta paralela nueva.
+    if proveedor_geocodificacion_fallback is not None:
+        fallback = resolver_destino_con_fallback_estructurado(
+            texto, proveedor_fallback=proveedor_geocodificacion_fallback,
+            destinos_confirmados=destinos_confirmados, contexto_evidencia_b1=contexto_evidencia_b1,
+        )
+        if (
+            fallback.resuelto and fallback.candidato is not None
+            and distancia_km_haversine(fallback.candidato.coordenadas, entrega.coordenadas) > MARGEN_MISMO_LUGAR_KM
+        ):
+            ruta_reintentada = proveedor_rutas.calcular_ruta(
+                coordenada_origen, fallback.candidato.coordenadas, perfil,
+            )
+            if ruta_reintentada.estado == EstadoRuta.RUTA_CALCULADA:
+                entrega_actualizada = replace(
+                    entrega,
+                    coordenadas=fallback.candidato.coordenadas,
+                    etiqueta_geocodificada=_etiqueta_geocodificada_o_texto_documental(
+                        etiqueta=fallback.candidato.etiqueta, texto_documental=texto,
+                    ),
+                    localidad=fallback.candidato.localidad or entrega.localidad,
+                    region=fallback.candidato.region or entrega.region,
+                    metodo_confirmacion="FALLBACK_ESTRUCTURADO_SIN_ACCESO_VIAL",
+                )
+                return ruta_reintentada, entrega_actualizada
     return ruta, entrega
 
 
@@ -1176,6 +1252,8 @@ def calcular_ruta_con_planta_conocida(
         ruta=ruta, entrega=entrega, coordenada_origen=coordenada_origen,
         proveedor_rutas=proveedor_rutas, perfil=perfil,
         despachar_a_crudo=despachar_a_crudo, destinos_confirmados=destinos_confirmados,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+        contexto_evidencia_b1=contexto_evidencia_b1,
     )
     if ruta.estado != EstadoRuta.RUTA_CALCULADA:
         return ResultadoRutaEntrega(
