@@ -23,6 +23,7 @@ from atlas_core.catalogo_clientes import (
 from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos,
+    EstadoObra,
     EstadoVigencia,
     normalizar_nombre_obra,
 )
@@ -41,7 +42,7 @@ from atlas_core.catalogos import (
 )
 from atlas_core.evidencia_entidades import ConfirmacionIdentidad
 from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
-from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra
+from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra, resolver_obra_por_variacion_ortografica_menor
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
@@ -1019,6 +1020,31 @@ def _decisiones_obra_para_cliente(
             normalizar_nombre_obra(cliente_razon_social),
             *(normalizar_nombre_obra(alias) for alias in cliente_aliases),
         }
+        # Bloque FIX DE ACEPTACION -- caso real 460861 (SALOMON SACK SA
+        # SAN BERNGARDO vs la obra ya CONFIRMADA "SALOMON SACK SA SAN
+        # BERNARDO"): antes de concluir "obra nueva", se compara contra
+        # las obras ya CONFIRMADAS de ESTE MISMO cliente (contexto como
+        # evidencia auxiliar, Bloque SEGURIDAD) usando una variación
+        # ortográfica/OCR MÍNIMA de un solo token
+        # (`resolver_obra_por_variacion_ortografica_menor` --
+        # deliberadamente estrecho, nunca "fuzzy matching" agresivo; se
+        # abstiene solo si hay más de un candidato plausible). Sólo se
+        # intenta cuando la comparación exacta de arriba (incluye alias
+        # ya aprendidos) y la comparación cliente==obra ya fallaron --
+        # nunca reemplaza esas vías, sólo se agrega después de ellas.
+        if not obras and clave not in claves_cliente:
+            obras_confirmadas_mismo_cliente = tuple(
+                obra for obra in catalogo_obras.listar_obras()
+                if obra.cliente_id == cliente_id
+                and obra.estado == EstadoObra.CONFIRMADA.value
+                and obra.estado_vigencia == EstadoVigencia.ACTIVO.value
+            )
+            obra_por_variacion = resolver_obra_por_variacion_ortografica_menor(
+                nombre_documental=obra_texto,
+                obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+            )
+            if obra_por_variacion is not None:
+                obras = [obra_por_variacion]
         if not obras and clave in claves_cliente:
             pass
         elif not obras:
@@ -1054,8 +1080,16 @@ def _decisiones_obra_para_cliente(
             # unicidad global -- ver CatalogoObrasDestinos): Atlas se
             # abstiene en vez de adivinar cuál es la obra correcta.
             pass
+        # Bloque FIX DE ACEPTACION -- se consulta con el nombre CANÓNICO
+        # de la obra ya resuelta (`obras[0]`), nunca con `obra_texto` sin
+        # procesar: cuando la obra se resolvió por variación ortográfica
+        # menor (arriba), `obra_texto` sigue siendo el texto documental
+        # ORIGINAL (con el typo) -- una búsqueda exacta con ese texto
+        # fallaría de nuevo y generaría una pregunta de destino
+        # redundante pese a que la obra (y, en este caso real, la ruta)
+        # ya están resueltas.
         elif catalogo_obras.resolver_obra_destino_confirmada(
-            cliente_id=cliente_id, nombre_obra=obra_texto
+            cliente_id=cliente_id, nombre_obra=obras[0].nombre_canonico
         ) is None:
             obra = obras[0]
             destino_texto = str(despachar_a_documental or "").strip()

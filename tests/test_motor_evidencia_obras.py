@@ -7,7 +7,12 @@ from __future__ import annotations
 
 from atlas_core.catalogo_obras_destinos import Obra
 from atlas_core.motor_evidencia import RESULTADO_ALTA_NUEVA, RESULTADO_CONTRADICCION_DOCUMENTAL, RESULTADO_SUGERENCIA_HUMANA
-from atlas_core.motor_evidencia_obras import coincide_salvo_sufijo_societario, evaluar_evidencia_obra
+from atlas_core.motor_evidencia_obras import (
+    coincide_salvo_sufijo_societario,
+    coincide_salvo_variacion_ortografica_menor,
+    evaluar_evidencia_obra,
+    resolver_obra_por_variacion_ortografica_menor,
+)
 from tests.fixtures_verificacion_externa import EVIDENCIA_SIGRO_CORPORATIVA, EVIDENCIA_SIGRO_DIRECTORIO
 
 
@@ -119,3 +124,130 @@ def test_direccion_web_sola_no_demuestra_obra_operacional():
         evidencia_externa=(EVIDENCIA_SIGRO_DIRECTORIO,),
     )
     assert resultado.resultado != "RESUELTO_AUTOMATICAMENTE"
+
+
+# ============================================================
+# Bloque FIX DE ACEPTACION -- caso real 460861: "SALOMON SACK SA SAN
+# BERNGARDO" (OCR) vs la obra ya CONFIRMADA "SALOMON SACK SA SAN
+# BERNARDO" -- variación ortográfica/OCR MÍNIMA de un solo token.
+# ============================================================
+
+
+def _obra_salomon_sack() -> Obra:
+    return Obra(
+        obra_id="obra-salomon-sack", cliente_id="cliente-salomon-sack",
+        nombre_canonico="SALOMON SACK SA SAN BERNARDO",
+        nombre_normalizado="SALOMON SACK SA SAN BERNARDO", aliases_documentales=(),
+        estado="CONFIRMADA", estado_vigencia="ACTIVO", evidencias=(),
+        fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00",
+    )
+
+
+def test_coincide_salvo_variacion_ortografica_caso_real_460861():
+    assert coincide_salvo_variacion_ortografica_menor(
+        "SALOMON SACK SA SAN BERNGARDO", "SALOMON SACK SA SAN BERNARDO",
+    ) is True
+
+
+def test_no_coincide_variacion_ortografica_si_ya_son_identicos():
+    assert coincide_salvo_variacion_ortografica_menor(
+        "SALOMON SACK SA SAN BERNARDO", "SALOMON SACK SA SAN BERNARDO",
+    ) is False
+
+
+def test_no_coincide_variacion_ortografica_con_numero_de_tokens_distinto():
+    """Nunca compensa una palabra de más/de menos -- ese es el dominio de
+    `coincide_salvo_sufijo_societario`, no de este chequeo."""
+    assert coincide_salvo_variacion_ortografica_menor(
+        "EMPRESA CONST SIGRO SA", "EMPRESA CONST SIGRO",
+    ) is False
+
+
+def test_no_coincide_variacion_ortografica_con_dos_tokens_distintos():
+    """Dos o más tokens distintos ya no es una variación menor -- Atlas
+    se abstiene en vez de adivinar."""
+    assert coincide_salvo_variacion_ortografica_menor(
+        "CONSTRUCTORA DELTA NORTE", "CONSTRUCTORA OMEGA SUR",
+    ) is False
+
+
+def test_no_coincide_variacion_ortografica_token_corto():
+    """Piso de seguridad: un token corto con distancia de edición 1 es
+    demasiado inespecífico (p.ej. "SAL"/"SAN", 3 letras) para
+    autorresolver -- nunca una coincidencia por azar entre palabras
+    cortas."""
+    assert coincide_salvo_variacion_ortografica_menor(
+        "OBRA CENTRO SAL", "OBRA CENTRO SAN",
+    ) is False
+
+
+def test_no_coincide_variacion_ortografica_distancia_mayor_a_uno():
+    assert coincide_salvo_variacion_ortografica_menor(
+        "SALOMON SACK SA SAN BERNGARDOX", "SALOMON SACK SA SAN BERNARDO",
+    ) is False
+
+
+# --- REGRESIONES (Sección 6 del bloque) --------------------------------
+
+
+def test_regresion_a_typo_ocr_pequeno_con_unico_candidato_autorresuelve():
+    obra = _obra_salomon_sack()
+    resuelto = resolver_obra_por_variacion_ortografica_menor(
+        nombre_documental="SALOMON SACK SA SAN BERNGARDO",
+        obras_confirmadas_mismo_cliente=(obra,),
+    )
+    assert resuelto is obra
+
+
+def test_regresion_b_dos_entidades_realmente_similares_no_autorresuelve():
+    """Caso genuinamente ambiguo: el texto documental está a distancia de
+    edición 1 de DOS obras reales distintas del mismo cliente -- ninguna
+    es claramente superior, así que Atlas se abstiene (Bloque SEGURIDAD:
+    "si hay dos candidatos plausibles -> B1/humano") en vez de elegir
+    arbitrariamente."""
+    obra_bernardo = _obra_salomon_sack()  # "...SAN BERNARDO"
+    obra_bernardq = Obra(
+        obra_id="obra-bernardq", cliente_id="cliente-salomon-sack",
+        nombre_canonico="SALOMON SACK SA SAN BERNARDQ",
+        nombre_normalizado="SALOMON SACK SA SAN BERNARDQ", aliases_documentales=(),
+        estado="CONFIRMADA", estado_vigencia="ACTIVO", evidencias=(),
+        fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00",
+    )
+    resuelto = resolver_obra_por_variacion_ortografica_menor(
+        nombre_documental="SALOMON SACK SA SAN BERNARDX",
+        obras_confirmadas_mismo_cliente=(obra_bernardo, obra_bernardq),
+    )
+    assert resuelto is None
+
+
+def test_regresion_c_entidad_realmente_nueva_no_autorresuelve():
+    obra = _obra_salomon_sack()
+    resuelto = resolver_obra_por_variacion_ortografica_menor(
+        nombre_documental="CONSTRUCTORA TOTALMENTE DISTINTA LTDA",
+        obras_confirmadas_mismo_cliente=(obra,),
+    )
+    assert resuelto is None
+
+
+def test_regresion_d_aprendizaje_previo_reutiliza_alias_por_coincidencia_exacta():
+    """El "aprendizaje" (alias persistido) se prueba aquí a nivel de la
+    función de resolución: una vez que el texto documental exacto ya es
+    un alias de la obra, la variación ortográfica ni siquiera hace falta
+    -- el alias por sí solo ya la identifica como candidata."""
+    obra = _obra_salomon_sack()
+    obra_con_alias = Obra(**{**obra.__dict__, "aliases_documentales": ("SALOMON SACK SA SAN BERNGARDO",)})
+    # Una variación NUEVA, distinta de la ya aprendida, contra la MISMA
+    # obra -- el alias aprendido no bloquea que otras variaciones sigan
+    # resolviendo por el mecanismo de variación ortográfica.
+    resuelto = resolver_obra_por_variacion_ortografica_menor(
+        nombre_documental="SALOMON SACK SA SAN BERNARFO",
+        obras_confirmadas_mismo_cliente=(obra_con_alias,),
+    )
+    assert resuelto is obra_con_alias
+
+
+def test_sin_candidatos_no_autorresuelve():
+    assert resolver_obra_por_variacion_ortografica_menor(
+        nombre_documental="SALOMON SACK SA SAN BERNGARDO",
+        obras_confirmadas_mismo_cliente=(),
+    ) is None

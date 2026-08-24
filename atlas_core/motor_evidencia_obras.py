@@ -126,3 +126,108 @@ def evaluar_evidencia_obra(
     return ResultadoEvidencia(
         resultado=RESULTADO_SUGERENCIA_HUMANA, candidatos=tuple(candidatos), explicacion=mejor.razon_legible,
     )
+
+
+# --- Bloque FIX DE ACEPTACION -- caso real 460861 ---------------------
+#
+# "SALOMON SACK SA SAN BERNGARDO" (OCR) vs "SALOMON SACK SA SAN
+# BERNARDO" (obra ya CONFIRMADA, mismo cliente): un solo carácter
+# insertado en un solo token, el resto idéntico palabra por palabra --
+# una variación ortográfica/OCR menor, no una obra nueva.
+#
+# A diferencia de `evaluar_evidencia_obra` (evidencia EXTERNA -- nunca
+# resuelve sola, sólo sugiere: ver la decisión de producto ya tomada
+# para VP6521->VP8521 arriba), esto es evidencia INTERNA/determinística
+# contra el propio catálogo -- mismo principio ya probado en producción
+# para patentes de vehículo (`catalogo_vehiculos._diferencia_ocr_segura`
+# + `resolver_patente`: una diferencia de UN carácter, único candidato,
+# se corrige sola sin pedir confirmación humana). Este bloque agrega el
+# equivalente para obras: deliberadamente estrecho, nunca "fuzzy
+# matching" general.
+
+def _distancia_edicion(a: str, b: str) -> int:
+    """Distancia de Levenshtein clásica (programación dinámica, sin
+    dependencias externas) -- usada sólo para detectar variaciones
+    ortográficas MÍNIMAS de un único token (ver
+    `coincide_salvo_variacion_ortografica_menor`), nunca para comparar
+    nombres completos ni para "fuzzy matching" general."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    anterior = list(range(len(b) + 1))
+    for i, letra_a in enumerate(a, start=1):
+        actual = [i] + [0] * len(b)
+        for j, letra_b in enumerate(b, start=1):
+            costo = 0 if letra_a == letra_b else 1
+            actual[j] = min(
+                anterior[j] + 1,  # eliminar
+                actual[j - 1] + 1,  # insertar
+                anterior[j - 1] + costo,  # sustituir
+            )
+        anterior = actual
+    return anterior[-1]
+
+
+# Piso de seguridad: un token más corto que esto es demasiado
+# inespecífico para que una distancia de edición de 1 sea evidencia
+# confiable (p.ej. "SA" vs "SA" ya sería idéntico, pero "SAN" vs "SAL"
+# con sólo 3 letras es mucho menos concluyente que "BERNGARDO" vs
+# "BERNARDO" con 8-9). Calibrado sobre el caso real del bloque, no
+# arbitrario.
+_LONGITUD_MINIMA_VARIACION_ORTOGRAFICA = 6
+
+
+def coincide_salvo_variacion_ortografica_menor(nombre_a: str, nombre_b: str) -> bool:
+    """True si dos nombres, ya normalizados por `normalizar_nombre_obra`,
+    son IDÉNTICOS salvo por una diferencia ortográfica MÍNIMA en un
+    único token -- caso real 460861. Deliberadamente estrecho:
+
+    - mismo número de tokens en ambos nombres (nunca compensa una
+      palabra de más/de menos);
+    - TODOS los tokens idénticos salvo exactamente UNO (dos o más
+      tokens distintos ya no es "variación menor", es abstención);
+    - ese único token distinto tiene distancia de edición == 1 (una
+      sola inserción/eliminación/sustitución, nunca una diferencia
+      mayor);
+    - el token más corto de ese par alcanza
+      `_LONGITUD_MINIMA_VARIACION_ORTOGRAFICA` caracteres."""
+    tokens_a = tuple(normalizar_nombre_obra(nombre_a).split())
+    tokens_b = tuple(normalizar_nombre_obra(nombre_b).split())
+    if not tokens_a or not tokens_b or tokens_a == tokens_b or len(tokens_a) != len(tokens_b):
+        return False
+    diferencias = [(x, y) for x, y in zip(tokens_a, tokens_b) if x != y]
+    if len(diferencias) != 1:
+        return False
+    token_a, token_b = diferencias[0]
+    if min(len(token_a), len(token_b)) < _LONGITUD_MINIMA_VARIACION_ORTOGRAFICA:
+        return False
+    return _distancia_edicion(token_a, token_b) == 1
+
+
+def resolver_obra_por_variacion_ortografica_menor(
+    *, nombre_documental: str, obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
+) -> Obra | None:
+    """Bloque SEGURIDAD -- a diferencia de `evaluar_evidencia_obra`, esta
+    función SÍ autoriza resolución automática (sin pasar por B1 ni por
+    Javier), pero sólo bajo las condiciones más estrictas: exactamente
+    UN candidato entre las obras ya CONFIRMADAS del mismo cliente
+    (contexto/histórico compatible, Bloque SEGURIDAD) cuya única
+    diferencia con el texto documental es una variación ortográfica
+    menor de un solo token (`coincide_salvo_variacion_ortografica_menor`,
+    contra el nombre canónico o cualquier alias ya aprendido). Con dos o
+    más candidatos igualmente plausibles, o ninguno, se abstiene --
+    nunca elige arbitrariamente entre obras reales similares."""
+    documental = str(nombre_documental or "").strip()
+    if not documental:
+        return None
+    candidatos = [
+        obra for obra in obras_confirmadas_mismo_cliente
+        if coincide_salvo_variacion_ortografica_menor(documental, obra.nombre_canonico)
+        or any(coincide_salvo_variacion_ortografica_menor(documental, alias) for alias in obra.aliases_documentales)
+    ]
+    if len(candidatos) != 1:
+        return None
+    return candidatos[0]

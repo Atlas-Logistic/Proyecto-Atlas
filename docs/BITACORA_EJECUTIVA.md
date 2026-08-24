@@ -3261,3 +3261,48 @@ REAL. 3 de 6 casos resueltos con ruta calculada y dirección específica;
 3 quedan en causa final genuinamente demostrada (no premature). Ninguna
 dirección canónica degradada en las 20 guías. Sin push en ninguno de
 los dos repos.**
+
+## Bloque FIX DE ACEPTACION -- variación ortográfica/OCR menor no pide registrar entidad conocida (2026-08-24)
+
+**Causa:** la resolución de OBRA_DESCONOCIDA (`_decisiones_obra_para_
+cliente`) sólo comparaba por igualdad EXACTA normalizada (nombre
+canónico + alias) -- sin ningún paso de similitud, un typo de UN solo
+carácter en un solo token ("SALOMON SACK SA SAN BERNGARDO" vs la obra
+ya CONFIRMADA "SALOMON SACK SA SAN BERNARDO") bastaba para generar una
+pregunta a Javier sobre una entidad que Atlas ya conocía.
+
+**Regla general:** nueva `coincide_salvo_variacion_ortografica_menor`
+(`motor_evidencia_obras.py`, distancia de Levenshtein, sin dependencias
+externas) -- calibrada y estrecha, mismo principio ya probado en
+producción para patentes de vehículo (`_diferencia_ocr_segura`): mismo
+número de tokens, TODOS idénticos salvo uno, ese token a distancia de
+edición == 1 y con al menos 6 caracteres (piso de seguridad contra
+palabras cortas). `resolver_obra_por_variacion_ortografica_menor` sólo
+autorresuelve si hay exactamente UN candidato CONFIRMADO del mismo
+cliente -- con dos o más, se abstiene (sigue yendo a Javier). Wireado
+en `_decisiones_obra_para_cliente` (detección, antes de crear la
+decisión) y en nueva `revalidar_obra_desconocida_por_variacion_
+ortografica_sin_ocr` (retira retroactivamente decisiones YA
+persistidas, aprende el alias vía `actualizar_identidad_obra` con
+evidencia GUIA -- nunca CONFIRMACION_HUMANA, nunca una regla global de
+texto). No hardcodea BERNGARDO->BERNARDO -- funciona para cualquier
+variación de un token que cumpla el mismo criterio calibrado.
+
+**460861 (antes -> después):** 1 decisión OBRA_DESCONOCIDA pendiente ->
+0. Obra canónica = "SALOMON SACK SA SAN BERNARDO" (no se creó entidad
+nueva); alias "SALOMON SACK SA SAN BERNGARDO" aprendido en el catálogo
+real (`obra_id e177cdfd-...`); ruta/destino ya estaban calculados
+(RUTA_CALCULADA, 21.7619 km) y se conservaron intactos.
+
+**B1/aprendizaje:** este bloque resuelve por evidencia INTERNA
+determinística (catálogo propio), nunca invoca B1 -- eficiencia
+(Sección 7). El aprendizaje es el alias persistido, atado a esta obra
+específica, reutilizable por cualquier guía futura con el mismo texto
+exacto (comparación EXACTA, sin recalcular la variación).
+
+**Tests/commit:** 15 tests focales nuevos (motor_evidencia_obras:
+casos A/B/C/D + controles; decisiones_pendientes: detección en vivo +
+no repregunta destino; revalidacion_documental: retroactivo + 4
+controles). Suite completa: 1807 passed (antes 1787). E2E contra copia
+real + aplicado a Drive real con backup+SHA-256 (`respaldos/
+FIX_ACEPTACION_460861_PRE_20260824_222951/`). Sin push.

@@ -6,7 +6,7 @@ from atlas_core.almacenamiento_portable import escribir_estado_operacion
 from atlas_core.decisiones_pendientes import crear_decision, detectar_decisiones_documento, generar_artefacto, regenerar_decisiones_persistidas
 from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
 from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
-from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, TipoEvidencia
+from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, Evidencia, TipoEvidencia, normalizar_nombre_obra
 
 
 def _catalogos(tmp_path):
@@ -227,6 +227,116 @@ def test_obra_global_reconocida_por_otro_cliente_no_genera_obra_desconocida(tmp_
     assert not any(x["tipo"]=="OBRA_DESCONOCIDA" for x in ds)
     d=next(x for x in ds if x["tipo"]=="DESTINO_SIN_CONFIRMAR")
     assert d["identidad_resuelta"]["entidad_id"]==resultado.obra.obra_id  # misma obra_id, no una segunda
+
+
+# --- Bloque FIX DE ACEPTACION -- caso real 460861 --------------------
+
+def _obra_confirmada_json(cliente_id, *, nombre_canonico, obra_id="obra-confirmada"):
+    """Escribe directo en `obras_destinos.json` una obra ya CONFIRMADA
+    para `cliente_id` -- evita repetir el flujo completo de
+    `confirmar_relacion` (que exige destino real) cuando el foco del
+    test es sólo la resolución por variación ortográfica. Incluye la
+    evidencia CONFIRMACION_HUMANA que `_validar_obra` exige para
+    cualquier obra en estado CONFIRMADA."""
+    return {
+        "obra_id": obra_id, "cliente_id": cliente_id,
+        "nombre_canonico": nombre_canonico,
+        "nombre_normalizado": normalizar_nombre_obra(nombre_canonico),
+        "aliases_documentales": [], "estado": "CONFIRMADA", "estado_vigencia": "ACTIVO",
+        "evidencias": [{
+            "tipo": TipoEvidencia.CONFIRMACION_HUMANA.value, "identificador_fuente": obra_id,
+            "referencia_hash": "", "campos_observados": {"decision": "CONFIRMADA"},
+            "fecha": "2026-01-01T00:00:00+00:00", "actor_proceso": "test", "resultado": "SOPORTA",
+        }],
+        "fecha_creacion": "2026-01-01T00:00:00+00:00",
+        "fecha_modificacion": "2026-01-01T00:00:00+00:00",
+    }
+
+
+def _escribir_obra_confirmada(carpeta, cliente_id, *, nombre_canonico, obra_id="obra-confirmada"):
+    ruta = carpeta / "obras_destinos.json"
+    contenido = json.loads(ruta.read_text(encoding="utf-8"))
+    contenido["obras"].append(_obra_confirmada_json(cliente_id, nombre_canonico=nombre_canonico, obra_id=obra_id))
+    ruta.write_text(json.dumps(contenido), encoding="utf-8")
+
+
+def test_variacion_ortografica_menor_no_genera_obra_desconocida(tmp_path):
+    """Caso real 460861: "SALOMON SACK SA SAN BERNGARDO" (OCR) contra la
+    obra ya CONFIRMADA "SALOMON SACK SA SAN BERNARDO" del mismo cliente
+    -- Atlas no debe preguntar, la resuelve sola."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="SALOMON SACK SA")
+    _escribir_obra_confirmada(carpeta, cliente.cliente_id, nombre_canonico="SALOMON SACK SA SAN BERNARDO")
+    ds = detectar_decisiones_documento(
+        archivo="460861.png",
+        datos=_datos_cliente(nombre="SALOMON SACK SA", obra="SALOMON SACK SA SAN BERNGARDO"),
+        carpeta_catalogos=carpeta,
+    )
+    assert not any(x["tipo"] == "OBRA_DESCONOCIDA" for x in ds)
+
+
+def test_variacion_ortografica_menor_ambigua_entre_dos_obras_sigue_preguntando(tmp_path):
+    """Regresión B: si el texto documental está a distancia de edición 1
+    de DOS obras confirmadas reales del mismo cliente, Atlas se
+    abstiene -- sigue generando OBRA_DESCONOCIDA en vez de elegir."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="SALOMON SACK SA")
+    _escribir_obra_confirmada(
+        carpeta, cliente.cliente_id, obra_id="obra-bernardo", nombre_canonico="SALOMON SACK SA SAN BERNARDO",
+    )
+    _escribir_obra_confirmada(
+        carpeta, cliente.cliente_id, obra_id="obra-bernardq", nombre_canonico="SALOMON SACK SA SAN BERNARDQ",
+    )
+    ds = detectar_decisiones_documento(
+        archivo="460861.png",
+        datos=_datos_cliente(nombre="SALOMON SACK SA", obra="SALOMON SACK SA SAN BERNARDX"),
+        carpeta_catalogos=carpeta,
+    )
+    assert any(x["tipo"] == "OBRA_DESCONOCIDA" for x in ds)
+
+
+def test_entidad_realmente_nueva_sin_candidato_similar_sigue_generando_decision(tmp_path):
+    """Regresión C: sin ningún candidato confirmado remotamente parecido,
+    el comportamiento no cambia -- sigue siendo una obra nueva real."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="SALOMON SACK SA")
+    _escribir_obra_confirmada(carpeta, cliente.cliente_id, nombre_canonico="SALOMON SACK SA SAN BERNARDO")
+    ds = detectar_decisiones_documento(
+        archivo="460861.png",
+        datos=_datos_cliente(nombre="SALOMON SACK SA", obra="CONSTRUCTORA TOTALMENTE DISTINTA LTDA"),
+        carpeta_catalogos=carpeta,
+    )
+    d = next(x for x in ds if x["tipo"] == "OBRA_DESCONOCIDA")
+    assert d["valor_documental"] == "CONSTRUCTORA TOTALMENTE DISTINTA LTDA"
+
+
+def test_variacion_ortografica_menor_no_pide_confirmar_destino_de_nuevo(tmp_path):
+    """La obra resuelta por variación ortográfica se trata exactamente
+    como una obra ya conocida para el resto del flujo -- si la relación
+    obra<->destino de ESE cliente ya está confirmada, tampoco debe
+    generar `DESTINO_SIN_CONFIRMAR` (nunca una pregunta redundante sólo
+    porque `obra_texto` crudo, con el typo, no vuelve a calzar exacto)."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="SALOMON SACK SA")
+    catalogo_destinos = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
+    destino = catalogo_destinos.crear(
+        cliente_id=cliente.cliente_id, nombre_destino="CAMINO LOS PINOS 3396 SAN BERNARDO",
+        direccion="CAMINO LOS PINOS 3396 SAN BERNARDO", pais="CHILE", fuente="TEST",
+        estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+    )
+    obras = CatalogoObrasDestinos(carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json", ruta_destinos=carpeta / "destinos_maestros.json")
+    resultado_obs = obras.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra="SALOMON SACK SA SAN BERNARDO",
+        destino_id=destino.destino_id, evidencia=_evidencia(),
+    )
+    relacion = next(r for r in obras.listar_relaciones() if r.obra_id == resultado_obs.obra.obra_id)
+    obras.confirmar_relacion(relacion.relacion_id, actor="test")
+    ds = detectar_decisiones_documento(
+        archivo="460861.png",
+        datos=_datos_cliente(nombre="SALOMON SACK SA", obra="SALOMON SACK SA SAN BERNGARDO"),
+        carpeta_catalogos=carpeta,
+    )
+    assert not any(x["tipo"] in {"OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR"} for x in ds)
 
 
 def test_patente_desconocida_conserva_solo_registrar_no_registrar(tmp_path):

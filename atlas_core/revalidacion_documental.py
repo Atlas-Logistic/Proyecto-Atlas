@@ -852,6 +852,102 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
     return {"destinos_actualizados": destinos_actualizados}
 
 
+def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
+    *, ruta_decisiones: str | Path, carpeta_catalogos: str | Path, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque FIX DE ACEPTACION -- caso real 460861: "SALOMON SACK SA SAN
+    BERNGARDO" (OCR) vs la obra ya CONFIRMADA "SALOMON SACK SA SAN
+    BERNARDO" (mismo cliente). `_decisiones_obra_para_cliente` ya evita
+    generar la pregunta para procesamiento NUEVO (Bloque SEGURIDAD, ver
+    `resolver_obra_por_variacion_ortografica_menor`), pero una decisión
+    `OBRA_DESCONOCIDA` YA PERSISTIDA de una corrida anterior a este fix
+    no se corrige sola -- esta función revisa cada decisión pendiente de
+    ese tipo contra el mismo mecanismo y, si resuelve, la retira.
+
+    Aprendizaje reutilizable (Bloque APRENDIZAJE): el texto documental
+    exacto que motivó la decisión se persiste como ALIAS de la obra ya
+    confirmada (`actualizar_identidad_obra`, evidencia tipo GUIA -- no
+    decisional, nunca `CONFIRMACION_HUMANA`) -- la MISMA guía u otra con
+    idéntico texto resuelve por comparación EXACTA la próxima vez, sin
+    recalcular la variación ortográfica. Nunca una regla global de texto
+    -- el alias queda atado a ESTA obra, nunca a un patrón de caracteres."""
+    from atlas_core.catalogo_obras_destinos import EstadoObra, Evidencia, ResultadoEvidencia, TipoEvidencia
+    from atlas_core.decisiones_pendientes import generar_artefacto
+    from atlas_core.motor_evidencia_obras import resolver_obra_por_variacion_ortografica_menor
+
+    ruta = Path(ruta_decisiones)
+    catalogos = Path(carpeta_catalogos)
+    try:
+        bandeja = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"decisiones_resueltas": []}
+
+    catalogo_obras = CatalogoObrasDestinos(
+        ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+        ruta_destinos=catalogos / "destinos_maestros.json",
+    )
+    try:
+        obras_activas = catalogo_obras.listar_obras()
+    except (OSError, ValueError):
+        return {"decisiones_resueltas": []}
+
+    decisiones_restantes: list[dict[str, object]] = []
+    decisiones_resueltas: list[dict[str, object]] = []
+    for decision in bandeja.get("decisiones", []):
+        if decision.get("tipo") != "OBRA_DESCONOCIDA" or decision.get("estado", "PENDIENTE") != "PENDIENTE":
+            decisiones_restantes.append(decision)
+            continue
+        contexto = decision.get("contexto") or {}
+        cliente_id = str(contexto.get("cliente_id", ""))
+        documental = str(decision.get("valor_documental", ""))
+        obras_confirmadas_mismo_cliente = tuple(
+            obra for obra in obras_activas
+            if obra.cliente_id == cliente_id
+            and obra.estado == EstadoObra.CONFIRMADA.value
+            and obra.estado_vigencia == "ACTIVO"
+        )
+        obra = resolver_obra_por_variacion_ortografica_menor(
+            nombre_documental=documental, obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+        )
+        if obra is None:
+            decisiones_restantes.append(decision)
+            continue
+        numero_guia = str((decision.get("documento") or {}).get("numero_guia") or "")
+        evidencia = Evidencia(
+            tipo=TipoEvidencia.GUIA.value,
+            identificador_fuente=numero_guia or str((decision.get("documento") or {}).get("archivo") or ""),
+            referencia_hash=str(decision.get("decision_id", "")),
+            campos_observados={
+                "obra_documental": documental, "obra_canonica": obra.nombre_canonico,
+                "numero_guia": numero_guia, "decision_id": str(decision.get("decision_id", "")),
+            },
+            fecha=datetime.now(timezone.utc).isoformat(),
+            actor_proceso="RESOLUCION_AUTOMATICA_VARIACION_ORTOGRAFICA_MENOR",
+            resultado=ResultadoEvidencia.SOPORTA.value,
+        )
+        try:
+            catalogo_obras.actualizar_identidad_obra(
+                obra.obra_id, nombre_canonico=obra.nombre_canonico,
+                aliases_documentales=(documental,), evidencia=evidencia,
+            )
+        except (OSError, ValueError):
+            decisiones_restantes.append(decision)
+            continue
+        decisiones_resueltas.append({
+            "decision_id": decision.get("decision_id"), "numero_guia": numero_guia,
+            "obra_documental": documental, "obra_canonica": obra.nombre_canonico,
+        })
+
+    if not decisiones_resueltas:
+        return {"decisiones_resueltas": []}
+
+    generar_artefacto(
+        ruta_dataset=ruta_dataset, carpeta_catalogos=catalogos,
+        decisiones=decisiones_restantes, ruta_salida=ruta,
+    )
+    return {"decisiones_resueltas": decisiones_resueltas}
+
+
 def revalidar_destino_confirmado_desde_ledger_sin_ocr(
     *, carpeta_catalogos: str | Path, ruta_ledger: str | Path,
 ) -> dict[str, object]:
@@ -1369,6 +1465,18 @@ def revalidar_y_regenerar_reporte(
     )
     ruta_decisiones = actual / NOMBRE_ARTEFACTO
     if ruta_decisiones.is_file():
+        # Bloque FIX DE ACEPTACION -- caso real 460861: una `OBRA_
+        # DESCONOCIDA` YA PERSISTIDA (de una corrida anterior a este fix)
+        # cuya única causa era una variación ortográfica/OCR menor contra
+        # una obra ya CONFIRMADA del mismo cliente se retira aquí, ANTES
+        # de la regeneración de abajo (para que la lista base que ésta
+        # recibe ya no la incluya). Sin OCR, sin red -- sólo catálogo y
+        # decisiones ya persistidas.
+        resultado_obra_por_variacion = revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
+            ruta_decisiones=ruta_decisiones, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+        )
+        if resultado_obra_por_variacion["decisiones_resueltas"]:
+            resultado_revalidacion["obra_por_variacion_ortografica"] = resultado_obra_por_variacion
         try:
             bandeja_previa = json.loads(ruta_decisiones.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
