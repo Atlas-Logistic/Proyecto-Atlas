@@ -2060,7 +2060,29 @@ def _crear_orquestador_ia_configurado():
     from atlas_core.atlas_ia.proveedor_groq import ProveedorModeloIAGroq, resolver_groq_api_key
     if not resolver_groq_api_key():
         return None
-    return OrquestadorAtlasIA(proveedor=ProveedorModeloIAGroq())
+    return OrquestadorAtlasIA(proveedor=ProveedorModeloIAGroq(), herramientas=_herramientas_b1_disponibles())
+
+
+def _herramientas_b1_disponibles() -> dict[str, object]:
+    """Bloque B1 INVESTIGADOR -- herramientas reales que B1 puede
+    solicitar en operación (nunca sólo durante desarrollo). Ausencia de
+    credencial de búsqueda (`OPENROUTER_API_KEY`) no bloquea el resto de
+    B1: la herramienta simplemente no queda registrada -- B1 sigue
+    pudiendo razonar sobre evidencia ya reunida por el Motor, sólo no
+    puede investigar más allá de eso (mismo criterio ya usado para
+    GROQ_API_KEY ausente: B1 se desactiva, nunca lanza)."""
+    import os as _os
+
+    herramientas: dict[str, object] = {}
+    if _os.getenv("OPENROUTER_API_KEY", "").strip():
+        from atlas_core.atlas_ia.buscador_web import (
+            BuscadorWebConCache, BuscadorWebOpenRouter, RepositorioCacheBusquedaWeb,
+        )
+        from atlas_core.atlas_ia.herramientas import herramienta_verificacion_externa
+
+        buscador = BuscadorWebConCache(BuscadorWebOpenRouter(), RepositorioCacheBusquedaWeb())
+        herramientas["VERIFICACION_EXTERNA"] = herramienta_verificacion_externa(buscador)
+    return herramientas
 
 
 def _fila_requiere_atencion_operacional(fila: Mapping[str, str]) -> bool:
@@ -2120,7 +2142,19 @@ def _ejecutar_ia_operacional(
                 })
                 continue
             evidencias = tipo.recopilar_evidencia(fila, filas, carpeta_catalogos=carpeta_catalogos)
-            if not evidencias:
+            # Bloque B1 INVESTIGADOR -- causa raíz real de que B1 nunca
+            # investigara nada (0 llamadas reales, siempre
+            # SIN_EVIDENCIA_PARA_RAZONAR): esta puerta terminaba el
+            # problema ANTES de siquiera invocar a B1 cuando el Motor no
+            # había pre-reunido evidencia -- sin importar si el propio
+            # dominio tenía una herramienta capaz de INVESTIGAR y
+            # producir evidencia nueva (p. ej. "VERIFICACION_EXTERNA").
+            # Ahora sólo se descarta sin llamar cuando NO hay evidencia
+            # previa NI ninguna herramienta disponible que pudiera
+            # aportarla -- B1 recibe el problema con evidencia vacía y
+            # puede solicitar la herramienta él mismo (ver
+            # `atlas_ia.orquestador`, ya soporta esta ronda).
+            if not evidencias and not tipo.herramientas:
                 resultados.append({
                     "problema": codigo, "dominio": tipo.dominio, "campo": tipo.campo,
                     "elegible_ia": True, "llamada_realizada": False,
@@ -2133,8 +2167,18 @@ def _ejecutar_ia_operacional(
                 numero_transporte=fila.get("numero_transporte", ""), evidencias=evidencias,
                 resultado_motor="REQUIERE_REVISION", explicacion_motor=codigo,
                 identidad_documento=fila.get("archivo", ""),
+                # Bloque B1 INVESTIGADOR -- contexto operacional mínimo y
+                # genérico (nunca un volcado completo de la fila) para
+                # que una herramienta de investigación pueda vincular el
+                # problema con obra/cliente -- "Regla crítica para
+                # destinos": nunca investigar una dirección como string
+                # aislado si Atlas ya conoce su obra/cliente.
+                identidad_operacional={
+                    "obra_destino": str(fila.get("obra_destino", "")),
+                    "cliente": str(fila.get("cliente", "")),
+                },
                 herramientas_disponibles=tipo.herramientas,
-                restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_DOS_RONDAS"),
+                restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_RONDAS_B1"),
             )
             inicio = time.perf_counter()
             resultado = orquestador.resolver(contexto)

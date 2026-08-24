@@ -265,7 +265,15 @@ def test_destino_con_evidencia_de_obra_relacionada_escala_a_b1_y_nunca_se_auto_a
     assert traza["aplicado_operacionalmente"] is False
 
 
-def test_destino_sin_ninguna_obra_relacionada_resuelta_no_llama_a_b1(tmp_path):
+def test_destino_sin_evidencia_previa_igual_llama_a_b1_porque_puede_investigar(tmp_path):
+    """Bloque B1 INVESTIGADOR -- caso real 472037: antes de este bloque,
+    sin evidencia PRE-reunida por el Motor, B1 nunca se llamaba -- ni
+    siquiera se le daba la oportunidad de pedir una herramienta de
+    investigación (0 llamadas, "SIN_EVIDENCIA_PARA_RAZONAR" silencioso).
+    El dominio DESTINO ahora declara una herramienta
+    (`VERIFICACION_EXTERNA`) capaz de aportar evidencia nueva -- B1 debe
+    recibir el problema igual, con evidencia vacía, y decidir él mismo
+    si investiga o se abstiene."""
     ruta = tmp_path / "datos.csv"
     filas = [_fila(
         archivo="472037.jpg", obra_destino="ING Y CONST FUNDAMENTA SPA", indicador_revision="OK",
@@ -274,13 +282,47 @@ def test_destino_sin_ninguna_obra_relacionada_resuelta_no_llama_a_b1(tmp_path):
     _escribir(ruta, filas)
     proveedor = ProveedorModeloIASimulado(respuestas_por_valor_documental={})
     resumen = _ejecutar_ia_operacional(ruta, {"472037.jpg"}, OrquestadorAtlasIA(proveedor=proveedor))
-    assert resumen["llamadas"] == 0  # sin evidencia, nunca se llama a B1 para nada
+    assert resumen["llamadas"] == 1
     salida = _leer(ruta)
     traza = json.loads(salida["472037.jpg"]["resultado_atlas_ia_json"])[0]
-    assert traza == {
-        "problema": "DESTINO_SIN_DATO", "dominio": "DESTINO", "campo": "despachar_a_crudo",
-        "elegible_ia": True, "llamada_realizada": False, "razon_no_elegible": "SIN_EVIDENCIA_PARA_RAZONAR",
-    }
+    assert traza["problema"] == "DESTINO_SIN_DATO"
+    assert traza["dominio"] == "DESTINO"
+    assert traza["llamada_realizada"] is True
+    # El proveedor simulado, sin plantilla configurada, se abstiene --
+    # comportamiento correcto cuando ni siquiera investigar ayuda, pero
+    # ahora es una abstención INFORMADA (B1 tuvo la oportunidad), nunca
+    # un descarte silencioso antes de intentarlo.
+    assert traza["estado"] == "ABSTENCION_IA"
+
+
+def test_destino_sin_evidencia_previa_y_sin_ninguna_herramienta_no_llama_a_b1(tmp_path):
+    """Control -- un dominio SIN ninguna herramienta declarada (ni
+    evidencia pre-reunida) sigue sin llamar a B1: no hay ninguna vía,
+    ni pasiva ni investigadora, con la que pudiera razonar algo real."""
+    from atlas_core.atlas_ia.registro_problemas import REGISTRO_PROBLEMAS_IA
+
+    clave = ("MOTIVO_RUTA", "DESTINO_SIN_DATO")
+    original = REGISTRO_PROBLEMAS_IA[clave]
+    from dataclasses import replace as _replace
+    REGISTRO_PROBLEMAS_IA[clave] = tuple(_replace(t, herramientas=()) for t in original)
+    try:
+        ruta = tmp_path / "datos.csv"
+        filas = [_fila(
+            archivo="472037.jpg", obra_destino="ING Y CONST FUNDAMENTA SPA", indicador_revision="OK",
+            planta_origen_id="planta-1", estado_ruta="REQUIERE_REVISION", motivo_ruta="DESTINO_SIN_DATO",
+        )]
+        _escribir(ruta, filas)
+        proveedor = ProveedorModeloIASimulado(respuestas_por_valor_documental={})
+        resumen = _ejecutar_ia_operacional(ruta, {"472037.jpg"}, OrquestadorAtlasIA(proveedor=proveedor))
+        assert resumen["llamadas"] == 0
+        salida = _leer(ruta)
+        traza = json.loads(salida["472037.jpg"]["resultado_atlas_ia_json"])[0]
+        assert traza == {
+            "problema": "DESTINO_SIN_DATO", "dominio": "DESTINO", "campo": "despachar_a_crudo",
+            "elegible_ia": True, "llamada_realizada": False, "razon_no_elegible": "SIN_EVIDENCIA_PARA_RAZONAR",
+        }
+    finally:
+        REGISTRO_PROBLEMAS_IA[clave] = original
 
 
 def test_planta_origen_con_conflicto_gps_escala_a_b1(tmp_path):

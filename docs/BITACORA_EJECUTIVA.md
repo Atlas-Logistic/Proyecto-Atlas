@@ -2645,3 +2645,89 @@ byte-idénticos al backup.
 
 **Estado: BLOQUE R19 CERRADO EN CÓDIGO Y EN DRIVE REAL. Sin push en
 ninguno de los dos repos.**
+
+## Bloque B1 INVESTIGADOR -- ciclo de investigación real con herramientas (2026-08-24)
+
+**Limitación real encontrada (dos causas, no una):** (1)
+`OrquestadorAtlasIA.resolver` YA implementaba el ciclo "razona -> pide
+herramienta -> Motor la ejecuta -> reevalúa -> concluye" (2 rondas,
+`RESULTADO_HIPOTESIS_REQUIERE_HERRAMIENTA` ya en el contrato) -- pero
+NINGUNA herramienta de investigación externa real existía nunca
+(`EvidenciaIA.tipo_fuente="EXTERNO"` estaba documentado desde el
+principio como "hoy sin proveedor real conectado"). (2) Causa raíz más
+grave: `_ejecutar_ia_operacional` NUNCA llamaba a B1 cuando el Motor no
+había reunido evidencia previa (`if not evidencias: continue`, "SIN_
+EVIDENCIA_PARA_RAZONAR") -- sin importar si el dominio tenía una
+herramienta capaz de INVESTIGAR y producir esa evidencia. B1 nunca
+llegaba a tener la oportunidad de pedir nada.
+
+**Fix (reutiliza el ciclo ya existente, no crea arquitectura
+paralela):** (1) Nueva `atlas_ia/buscador_web.py` -- herramienta REAL
+de búsqueda web (OpenRouter + Perplexity Sonar, misma credencial
+`OPENROUTER_API_KEY` ya presente y ya usada por otro proveedor del
+sistema; costo real y pequeño, ~USD 0.005/consulta, verificado; caché
+real, misma consulta nunca se paga dos veces). (2) Nueva
+`herramienta_verificacion_externa` (`herramientas.py`) -- construye
+consultas vinculando SIEMPRE dirección+obra/cliente (nunca la
+dirección como string aislado, "regla crítica"), máximo 2 búsquedas
+reales por invocación; produce `EvidenciaIA(tipo_fuente="EXTERNO")` --
+nunca decide nada, sólo trae texto+citas para que B1 los lea. (3)
+`_ejecutar_ia_operacional` ya no descarta el problema sin llamar a B1
+cuando el dominio tiene AL MENOS una herramienta declarada -- B1 recibe
+el problema con evidencia vacía y decide él mismo si investiga.
+(4) `RONDAS_MAXIMAS` de 2 a 4 (varias rondas de herramienta antes de
+concluir, con protección: si la MISMA herramienta no aporta evidencia
+nueva, se detiene en vez de agotar rondas sin avanzar). (5) `VERIFICACION_
+EXTERNA` declarada permitida para el dominio DESTINO
+(`registro_problemas.py`, mismo mecanismo declarativo por dominio ya
+usado para `DOCUMENTOS_RELACIONADOS` -- "cada dominio define sus
+herramientas", nunca un dispatcher nuevo). (6) Política de sistema
+(v2): reglas explícitas sobre cuándo/cómo pedir una herramienta
+disponible y sobre nunca investigar una dirección aislada de su
+contexto empresarial.
+
+**E2E real (Groq + OpenRouter, llamadas reales, NO simuladas) contra
+los 3 casos reales:**
+- **472008** (AUSIN SAN BERNARDO) -- B1 razonó directo desde
+  identidad_operacional (sin pedir herramienta) y propuso el valor
+  documental; el validador existente lo BLOQUEÓ (`D_BLOQUEO`) por no
+  estar respaldado por evidencia formal -- la protección "B1 nunca
+  inventa" funcionando exactamente como debe, incluso cuando B1 mismo
+  se equivoca de camino.
+- **472037** (VICUÑA MACKENNA 655) -- ciclo completo demostrado: Motor
+  falla -> B1 pide `VERIFICACION_EXTERNA` -> Motor ejecuta 2 búsquedas
+  reales -> encuentra evidencia real nueva (proyecto inmobiliario real
+  registrado en SNIFA en esa dirección exacta, desarrollado por
+  "Fundamenta" -- coincide con el nombre de la obra "ING Y CONST
+  FUNDAMENTA SPA", nunca antes detectado) -> B1 reevalúa en una segunda
+  ronda -> concluye "Sí, existe, comuna Santiago" -- el validador
+  bloqueó el valor propuesto por no ser un formato de dirección válido
+  (fallo de forma, no de investigación: la investigación en sí
+  funcionó).
+- **472044** (PUERTA DEL SOL 83 LAS CONDES) -- ciclo completo: Motor
+  falla -> B1 pide `VERIFICACION_EXTERNA` -> 2 búsquedas reales
+  confirman que es una calle real en Las Condes -> B1 concluye
+  `ABSTENCION` honesta (ninguna fuente vincula la dirección con la
+  obra ni confirma acceso vial) -- exactamente el comportamiento
+  correcto, nunca inventa un punto ruteable.
+- Control: cuando el Motor ya resuelve, B1 no se invoca (0 llamadas) --
+  cubierto por tests ya existentes del orquestador.
+
+**Aprendizaje:** ninguna de las 3 investigaciones produjo una
+`HipotesisIA` aceptada por los validadores existentes -- por diseño,
+nada se aplicó a catálogos/producción esta vez (nunca forzar una
+resolución). El aprendizaje real de 472008 (dirección confirmada) ya
+había quedado persistido en el Bloque R19 por la vía humana/evidencia
+externa existente -- este bloque no la duplica.
+
+**Tests:** Motor -- `test_atlas_ia_buscador_web.py` (9 nuevos),
+`test_atlas_ia_orquestador_b1.py` (+2 rondas reales), `test_b1_
+universal_r7.py` (1 test reescrito para reflejar la conducta correcta,
+1 control nuevo). Motor completo: 1711 passed (antes 1701). E2E real
+(no simulado) contra 472008/472037/472044 documentado arriba.
+
+**Sin cambios en Drive real** (ningún aprendizaje seguro que aplicar
+esta vez -- ver arriba). Desktop sin cambios.
+
+**Estado: BLOQUE B1 INVESTIGADOR CERRADO EN CÓDIGO. Sin push en
+ninguno de los dos repos.**

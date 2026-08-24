@@ -150,16 +150,18 @@ def test_segunda_ronda_usa_herramienta_read_only() -> None:
     assert filas[1]["cliente"] == "SODIMAC SA"
 
 
-def test_no_supera_dos_rondas() -> None:
-    proveedor = _proveedor(RESULTADO_HIPOTESIS_REQUIERE_HERRAMIENTA)
-    # El doble requiere un nombre; se configura directamente para este caso.
+def test_se_detiene_si_la_misma_herramienta_no_aporta_evidencia_nueva() -> None:
+    """Bloque B1 INVESTIGADOR -- pedir la MISMA herramienta dos veces sin
+    que aporte nada nuevo (misma consulta, misma evidencia -- p. ej.
+    cacheada) nunca produce progreso: se detiene en vez de agotar
+    `RONDAS_MAXIMAS` sin avanzar."""
     proveedor = ProveedorModeloIASimulado(respuestas_por_valor_documental={
         "No encontrado": RespuestaSimulada(
             resultado=RESULTADO_HIPOTESIS_REQUIERE_HERRAMIENTA,
             herramienta_faltante="DOCUMENTOS_RELACIONADOS",
         ),
     })
-    herramienta = herramienta_documentos_relacionados(())
+    herramienta = herramienta_documentos_relacionados(())  # sin filas -> nunca aporta evidencia
     resultado = OrquestadorAtlasIA(
         proveedor=proveedor, herramientas={herramienta.nombre: herramienta},
     ).resolver(_contexto(herramientas_disponibles=(herramienta.nombre,)))
@@ -167,6 +169,43 @@ def test_no_supera_dos_rondas() -> None:
         REQUIERE_HERRAMIENTA, CLASIFICACION_C, 2,
     )
     assert len(proveedor.contextos_recibidos) == 2
+
+
+class _ProveedorInvestigadorPersistente:
+    """Cada ronda pide la MISMA herramienta, pero el contexto (evidencia
+    ya acumulada) crece de verdad en cada vuelta -- nunca se detiene por
+    "sin evidencia nueva", así que debe agotar `RONDAS_MAXIMAS` real."""
+
+    def __init__(self) -> None:
+        self.rondas_vistas = 0
+
+    def razonar(self, contexto: ContextoRazonamiento) -> HipotesisIA:
+        self.rondas_vistas += 1
+        return HipotesisIA(
+            hipotesis_id=calcular_hipotesis_id(contexto, ""), campo=contexto.campo,
+            valor_observado=contexto.valor_documental, valor_propuesto="",
+            resultado=RESULTADO_HIPOTESIS_REQUIERE_HERRAMIENTA, herramienta_faltante="CRECIENTE",
+        )
+
+
+def test_limite_real_de_rondas_maximas() -> None:
+    from atlas_core.atlas_ia.herramientas import HerramientaEvidencia
+    from atlas_core.atlas_ia.orquestador import RONDAS_MAXIMAS
+
+    contador = {"n": 0}
+
+    def consultar(contexto: ContextoRazonamiento) -> tuple[EvidenciaIA, ...]:
+        contador["n"] += 1
+        return (_evidencia(f"valor-{contador['n']}", identificador=f"e-creciente-{contador['n']}"),)
+
+    herramienta = HerramientaEvidencia(nombre="CRECIENTE", descripcion="test", consultar=consultar)
+    proveedor = _ProveedorInvestigadorPersistente()
+    resultado = OrquestadorAtlasIA(
+        proveedor=proveedor, herramientas={"CRECIENTE": herramienta},
+    ).resolver(_contexto(evidencias=(), herramientas_disponibles=("CRECIENTE",)))
+    assert resultado.estado == REQUIERE_HERRAMIENTA
+    assert resultado.rondas == RONDAS_MAXIMAS
+    assert proveedor.rondas_vistas == RONDAS_MAXIMAS
 
 
 @pytest.mark.parametrize(

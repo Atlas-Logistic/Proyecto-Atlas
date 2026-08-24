@@ -355,7 +355,13 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
             "GEOCODIFICACION_FUERA_DE_CHILE",
         }),
         fuente="MOTIVO_RUTA", campo="despachar_a_crudo", dominio="DESTINO",
-        herramientas=("DOCUMENTOS_RELACIONADOS",), aplicable_automaticamente=False,
+        # Bloque B1 INVESTIGADOR -- "VERIFICACION_EXTERNA" (búsqueda web
+        # real, ver atlas_ia.buscador_web/herramientas) declarada aquí
+        # como permitida para el dominio DESTINO -- mismo mecanismo de
+        # permiso por dominio ya usado para DOCUMENTOS_RELACIONADOS,
+        # nunca un dispatcher nuevo. Casos reales 472008/472037/472044.
+        herramientas=("DOCUMENTOS_RELACIONADOS", "VERIFICACION_EXTERNA"),
+        aplicable_automaticamente=False,
         recopilar_evidencia=recopilar_evidencia_destino_por_obra_relacionada,
     ),
     # Bloque R7 -- dominio nuevo: PLANTA ORIGEN (Bloque R5, `motivo_origen_

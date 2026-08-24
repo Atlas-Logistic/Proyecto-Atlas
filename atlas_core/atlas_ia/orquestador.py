@@ -30,6 +30,14 @@ CLASIFICACION_B = "B_ASISTENCIA"
 CLASIFICACION_C = "C_ABSTENCION"
 CLASIFICACION_D = "D_BLOQUEO"
 
+# Bloque B1 INVESTIGADOR -- antes 2 rondas fijas (una sola oportunidad de
+# pedir UNA herramienta). El ciclo "investigo -> observo -> vuelvo a
+# investigar si hace falta -> concluyo" necesita más de una ronda de
+# herramienta antes de la respuesta final -- acotado (nunca sin límite,
+# ver Bloque "Performance/costo"): hasta 3 rondas de herramienta + 1
+# ronda final de conclusión.
+RONDAS_MAXIMAS = 4
+
 
 @dataclass(frozen=True)
 class ResultadoOrquestacion:
@@ -76,7 +84,7 @@ class OrquestadorAtlasIA:
 
         actual = contexto
         usadas: list[str] = []
-        for ronda in (1, 2):
+        for ronda in range(1, RONDAS_MAXIMAS + 1):
             try:
                 hipotesis = self._proveedor.razonar(actual)
             except ErrorProveedorModeloIA as error:
@@ -88,7 +96,7 @@ class OrquestadorAtlasIA:
             if hipotesis.resultado == RESULTADO_HIPOTESIS_REQUIERE_HERRAMIENTA:
                 nombre = hipotesis.herramienta_faltante.strip()
                 herramienta = self._herramientas.get(nombre)
-                if ronda == 2 or herramienta is None or nombre not in actual.herramientas_disponibles:
+                if ronda == RONDAS_MAXIMAS or herramienta is None or nombre not in actual.herramientas_disponibles:
                     return ResultadoOrquestacion(
                         REQUIERE_HERRAMIENTA, CLASIFICACION_C, actual, hipotesis=hipotesis,
                         rondas=ronda, herramientas_usadas=tuple(usadas),
@@ -97,6 +105,18 @@ class OrquestadorAtlasIA:
                 nuevas = herramienta.consultar(actual)
                 existentes = {e.identificador for e in actual.evidencias}
                 agregadas = tuple(e for e in nuevas if e.identificador not in existentes)
+                # Bloque B1 INVESTIGADOR -- si esta misma herramienta ya se
+                # usó y esta vuelta no aportó NADA nuevo (mismo contexto,
+                # misma consulta -- cacheada), volver a preguntarle al
+                # proveedor sería la misma pregunta con la misma evidencia:
+                # nunca produce progreso, sólo gasta rondas. Se detiene
+                # aquí, en vez de agotar `RONDAS_MAXIMAS` sin avanzar.
+                if not agregadas and nombre in usadas:
+                    return ResultadoOrquestacion(
+                        REQUIERE_HERRAMIENTA, CLASIFICACION_C, actual, hipotesis=hipotesis,
+                        rondas=ronda, herramientas_usadas=tuple(usadas),
+                        detalle=f"La herramienta {nombre} ya se agotó sin evidencia nueva.",
+                    )
                 usadas.append(nombre)
                 actual = replace(actual, evidencias=(*actual.evidencias, *agregadas))
                 continue
@@ -120,4 +140,4 @@ class OrquestadorAtlasIA:
                     herramientas_usadas=tuple(usadas),
                 )
 
-        raise AssertionError("El orquestador excedió el máximo de dos rondas")
+        raise AssertionError(f"El orquestador excedió el máximo de {RONDAS_MAXIMAS} rondas")
