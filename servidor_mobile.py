@@ -19,9 +19,21 @@ from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_cat
 from atlas_core.mobile import AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_envio_mobile
 
 
+MAX_PAYLOAD_BYTES = 30 * 1024 * 1024  # ver atlas_core.mobile.MAX_IMAGEN_BYTES -- mismo motivo/margen.
+
+
 def _multipart(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], bytes, str]:
     largo = int(handler.headers.get("Content-Length", "0"))
-    if largo <= 0 or largo > 16 * 1024 * 1024:
+    if largo <= 0 or largo > MAX_PAYLOAD_BYTES:
+        # Bloque MOBILE ENVÍO REAL (fix puntual, 2do round): evidencia
+        # real (log de diagnóstico) confirmó que el 400 real del iPhone
+        # era "payload vacío o demasiado grande", no el MIME -- una foto
+        # HEIC de alta resolución (iPhone moderno) supera fácilmente los
+        # 16 MiB que tenía este límite. Se sube a 30 MiB (mismo límite
+        # que ya usa RepositorioEnviosMobile.recibir) y además el
+        # celular ahora recomprime/redimensiona antes de subir (ver
+        # Atlas-Conductores-Mobile/src/camera.js) -- doble margen.
+        _log_envio_debug(f"400 -- Content-Length={largo} (límite {MAX_PAYLOAD_BYTES})")
         raise ErrorEnvioMobile("payload vacío o demasiado grande")
     tipo = handler.headers.get("Content-Type", "")
     if not tipo.startswith("multipart/form-data;"):

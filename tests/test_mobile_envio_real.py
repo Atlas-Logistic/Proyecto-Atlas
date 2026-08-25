@@ -103,3 +103,29 @@ def test_jpeg_real_sigue_aceptandose_sin_regresion(tmp_path: Path) -> None:
         assert not respuesta["duplicado"]
     finally:
         servidor.shutdown(); servidor.server_close()
+
+
+def test_foto_grande_realista_de_iphone_ya_no_vuelve_400(tmp_path: Path) -> None:
+    # Bloque MOBILE ENVÍO REAL (2do round): causa real confirmada con
+    # log de diagnóstico -- "payload vacío o demasiado grande", no el
+    # MIME. Una foto de ~20 MB (realista para un iPhone moderno de alta
+    # resolución) superaba el límite viejo de 16 MiB; con el nuevo
+    # límite (30 MiB en servidor_mobile.MAX_PAYLOAD_BYTES) debe pasar.
+    servidor = crear_servidor("127.0.0.1", 0, raiz=tmp_path, autenticador=_auth(), procesar=False)
+    hilo = threading.Thread(target=servidor.serve_forever, daemon=True); hilo.start()
+    try:
+        token = _token(servidor)
+        envio_id = str(uuid.uuid4())
+        contenido_20mb = b"x" * (20 * 1024 * 1024)
+        cuerpo, tipo = _multipart(
+            {"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z"},
+            contenido_20mb, mime="image/jpeg",
+        )
+        solicitud = urllib.request.Request(
+            f"http://127.0.0.1:{servidor.server_port}/api/mobile/envios",
+            data=cuerpo, headers={"Content-Type": tipo, "Authorization": f"Bearer {token}"}, method="POST",
+        )
+        respuesta = json.load(urllib.request.urlopen(solicitud))
+        assert respuesta["resultado"] == "ACEPTADO"
+    finally:
+        servidor.shutdown(); servidor.server_close()

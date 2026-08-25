@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from atlas_core.mobile import (
-    AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
+    MAX_IMAGEN_BYTES, AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
     asociar_documento, hash_password, procesar_envio_mobile,
 )
 from servidor_mobile import crear_servidor
@@ -72,7 +72,11 @@ def test_recepcion_http_valida_e_idempotente(tmp_path: Path) -> None:
 @pytest.mark.parametrize("caso", ("tipo", "grande"))
 def test_archivo_invalido_o_grande_se_rechaza(tmp_path: Path, caso: str) -> None:
     mime = "application/pdf" if caso == "tipo" else "image/jpeg"
-    contenido = b"x" if caso == "tipo" else b"x" * (15 * 1024 * 1024 + 1)
+    # Bloque MOBILE ENVÍO REAL: el límite subió (evidencia real: una
+    # foto HEIC de alta resolución lo superaba) -- se calcula contra la
+    # constante real en vez de un número hardcodeado, para que este test
+    # no se rompa (ni deje de probar nada) si el límite vuelve a cambiar.
+    contenido = b"x" if caso == "tipo" else b"x" * (MAX_IMAGEN_BYTES + 1)
     with pytest.raises(ErrorEnvioMobile):
         RepositorioEnviosMobile(tmp_path).recibir(
             envio_id=str(uuid.uuid4()), imagen=contenido, mime=mime,

@@ -28,7 +28,14 @@ TIPOS_NOVEDAD = (
     "DEVOLUCION_PARCIAL", "DOBLE_VUELTA",
 )
 MIME_PERMITIDOS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-MAX_IMAGEN_BYTES = 15 * 1024 * 1024
+# Bloque MOBILE ENVÍO REAL (fix puntual, 2do round): evidencia real (log
+# de diagnóstico) confirmó que el 400 real del iPhone era por tamaño, no
+# por MIME -- una foto HEIC de alta resolución (iPhone moderno) supera
+# fácilmente los 15 MiB que tenía este límite. Sube a 28 MiB (mismo
+# espíritu que servidor_mobile.MAX_PAYLOAD_BYTES=30 MiB, con margen para
+# el resto del multipart). El celular además ahora recomprime/
+# redimensiona antes de subir (ver Atlas-Conductores-Mobile/src/camera.js).
+MAX_IMAGEN_BYTES = 28 * 1024 * 1024
 _ID_SEGURO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 
 
