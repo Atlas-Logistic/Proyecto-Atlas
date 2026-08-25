@@ -3430,3 +3430,79 @@ push.
 residuales quedaron con `RUTA_CALCULADA` real (no un límite aceptado);
 0 decisiones pendientes; 0 regresiones; identidades/aprendizaje
 reutilizados sin reinvestigar; B1 no necesitó intervenir.
+
+## Bloque CONSULTAS ATLAS V1 -- preguntas en lenguaje natural sobre la operación real (2026-08-25)
+
+**Arquitectura (Bloque 1/22):** separación estricta interpretación/
+cálculo. `atlas_core/consultas_atlas.py` -- contrato `ConsultaAtlas`
+(métrica/filtros/agrupación/orden/límite), `validar_consulta` (rechaza
+cualquier campo inventado) y `ejecutar_consulta_atlas`, única autoridad
+de cálculo -- lee `viajes.csv` (el mismo reporte que ya consume
+Desktop), nunca inventa un dato. `atlas_core/interpretador_consultas.py`
+-- camino rápido determinístico: vocabulario de palabras clave (nunca
+una función por pregunta) + `resolver_entidad_por_palabras` (reutiliza
+el mismo criterio de coincidencia parcial que ya usa Desktop, aplicado
+a chofer/cliente/obra/tipo de carga/comuna construidos desde el propio
+dataset cargado -- nunca un catálogo paralelo). `atlas_core/
+proveedor_interpretacion_consultas.py` -- B1 real (misma mecánica HTTP/
+credencial que `atlas_ia.proveedor_anthropic`, esquema propio vía
+tool-use forzado) sólo si el camino rápido no reconoce ninguna métrica;
+su salida pasa por el MISMO validador antes de ejecutarse.
+`atlas_core/responder_consulta_atlas.py` orquesta todo y formatea la
+respuesta breve (Bloque 11). `consultar_atlas.py` (raíz) -- CLI que
+Desktop invoca por IPC, JSON ASCII (mismo criterio ya establecido para
+consola Windows), columnas de soporte recortadas a lo que la UI
+muestra.
+
+**Métricas/filtros:** COUNT_VIAJES, COUNT_GUIAS, SUM_PESO, SUM_KM,
+SUM_TIEMPO, LISTAR_VIAJES; filtros chofer/cliente/obra/destino/comuna/
+material/tipo_carga/patente_tracto/patente_rampla/estado/numero_guia/
+numero_transporte/período; agrupación por chofer/cliente/obra/destino/
+comuna/material/tipo_carga/día/semana/mes. `tipo_carga` (enumeración
+cerrada) exige coincidencia exacta; `material` (texto libre) usa
+subcadena -- nunca se mezclan (Bloque 7). Bug real encontrado y
+corregido durante el desarrollo: una coincidencia débil de una familia
+(p. ej. "Salomon" con el chofer "SALOMÓN PIZARRO") podía sobre-
+restringir una consulta ya resuelta por una familia más fuerte
+(cliente "SALOMON SACK SA") -- ahora la evidencia más fuerte
+"reclama" sus palabras y la más débil, subsumida, se descarta. Segundo
+bug: un nombre propio no reconocido ("Lazcano") se ignoraba en
+silencio y la consulta respondía sobre TODOS los viajes -- ahora se
+detecta y se reporta explícitamente en vez de adivinar.
+
+**B1/costo (Bloque 21):** cero llamadas B1 en los 6 casos E2E
+requeridos -- todos deterministas. B1 sólo se conecta si hay
+`ANTHROPIC_API_KEY`; sin ella, o si aun así se abstiene, la respuesta
+es "no interpretable", nunca un error de proceso ni un número
+inventado.
+
+**Desktop:** nueva pestaña "Pregúntale a Atlas" (mismo estilo de
+navegación ya cerrado), caja de pregunta + botón Consultar, respuesta
+breve + filtros interpretados + tabla de viajes soporte expandible.
+IPC `atlas:consultar-atlas` (mismo patrón `spawn('py', ['-3', '-u', ...])`
+ya usado para el resto del pipeline) -- read-only, nunca escribe nada.
+
+**Resultados E2E reales (Bloque 19, contra los 21 viajes vigentes):**
+A) Villagra este mes: 3 viajes. B) Listar viajes de Villagra: 3 filas
+reales. C) Con rollos: 6 viajes. D) Toneladas por chofer: 9 choferes,
+top LUIS VARAS 137.05 t. E) Para Salomon Sack: 2 viajes. F) Villagra +
+rollos + este mes: 0 (Villagra sólo transportó BARRAS este mes -- cero
+resultados, no error). Los 6 verificados directamente contra el
+dataset real, cifra por cifra.
+
+**Seguridad/trazabilidad (Bloque 9/13/14/18/20):** toda cifra sale del
+ejecutor determinístico, nunca del LLM; toda respuesta trae
+`viajes_soporte` real e inspeccionable; cero resultados nunca es error;
+ambigüedad real (dos choferes "Juan") nunca se resuelve sola --
+devuelve opciones; read-only estricto, ninguna función escribe dataset/
+catálogos/decisiones.
+
+**Tests:** Motor -- 68 tests focales nuevos (contrato/validador/
+períodos/métricas/filtros/agrupaciones en `test_consultas_atlas.py`;
+resolución de entidades/vocabulario/ambigüedad/colisión entre familias
+en `test_interpretador_consultas.py`; orquestador/B1 en
+`test_responder_consulta_atlas.py`; mecánica HTTP de B1 en
+`test_proveedor_interpretacion_consultas.py`; CLI en
+`test_cli_consulta_atlas.py`) + 7 E2E reales en
+`test_consultas_atlas_e2e.py`. Suite completa: 1897 passed (antes
+1829).
