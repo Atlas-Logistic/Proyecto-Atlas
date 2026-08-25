@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
+from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_envio_mobile
 
 
@@ -45,6 +46,15 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
     ejecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atlas-mobile")
     estado = leer_estado_operacion(raiz=raiz) or {}
     dataset = raiz / estado.get("dataset_operacional", "operacion/actual/analisis_completo_guias.csv")
+    # Bloque GUÍAS MÓVILES V1 (Sección 2): misma fuente de catálogos que ya
+    # usa Desktop/analizar_guias_masivo.py (ATLAS_CATALOGOS_DIR) -- nunca
+    # una configuración paralela para Mobile. Sin catálogos configurados,
+    # se procesa igual que antes (sólo OCR, se abstiene del resto), nunca
+    # se rompe el servidor.
+    try:
+        carpeta_catalogos = validar_fuente_catalogos(None, permitir_sin_catalogos=True).ruta
+    except ErrorFuenteCatalogos:
+        carpeta_catalogos = None
 
     class Handler(BaseHTTPRequestHandler):
         def _json(self, codigo: int, contenido: object) -> None:
@@ -93,7 +103,10 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                     },
                 )
                 if nuevo and procesar:
-                    ejecutor.submit(procesar_envio_mobile, repositorio, registro["envio_id"], dataset=dataset)
+                    ejecutor.submit(
+                        procesar_envio_mobile, repositorio, registro["envio_id"],
+                        dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                    )
                 self._json(202, {"resultado": "ACEPTADO", "envio_id": registro["envio_id"], "estado": registro["estado"], "duplicado": not nuevo})
             except ErrorEnvioMobile as error:
                 self._json(400, {"error": str(error)})

@@ -3506,3 +3506,61 @@ en `test_interpretador_consultas.py`; orquestador/B1 en
 `test_cli_consulta_atlas.py`) + 7 E2E reales en
 `test_consultas_atlas_e2e.py`. Suite completa: 1897 passed (antes
 1829).
+
+## Bloque GUÍAS MÓVILES V1 -- Mobile entra al mismo Motor que Desktop (2026-08-25)
+
+**Diagnóstico (inspección mínima):** el backend Mobile (`atlas_core/mobile.py`,
+`servidor_mobile.py`, `resolver_envio_mobile.py`) y la bandeja Desktop
+("Guías móviles" + "Revisión de Atlas") ya existían y eran reales -- HTTP
+real, autenticación, almacenamiento durable idempotente, procesamiento
+automático en segundo plano. El hueco real: `procesar_envio_mobile`
+llamaba a `procesar_archivo` SIN catálogos/decisiones/recolector y NUNCA
+escribía la fila resultante en el dataset compartido -- una guía Mobile
+genuinamente nueva quedaba encerrada para siempre en su propio JSON,
+sin ruta posible hacia Viajes salvo que alguien la volviera a cargar a
+mano por Desktop (lo que habría duplicado el OCR).
+
+**Fix (mismo Core, no uno paralelo):** `procesar_envio_mobile` ahora
+llama a `procesar_archivo` con `carpeta_catalogos`/`recolector_decisiones`
+(mismos argumentos que usa `procesar_carpeta` por archivo) y persiste la
+fila resultante en el dataset real vía `_escribir_filas`/`COLUMNAS` --
+la MISMA función que ya usa el lote de Desktop. `asociar_documento` gana
+`documento_ya_existe` (coincidencia exacta por número de guía): si el
+documento ya está representado, nunca se agrega una fila duplicada
+(Sección 9). Las decisiones nuevas se fusionan (nunca pisan) con
+`decisiones_pendientes.json` ya publicado por Desktop.
+
+**Captura vs. Incidencia Documental (Sección 10):** si el OCR no logra
+leer ni guía ni transporte (foto ilegible/cortada), se marca
+`problema_captura=true` y NO se escribe fila en blanco -- nunca se
+confunde con una Incidencia Documental. Si el propio Core marca
+`indicador_revision=REVISAR` (regla ya existente, igual que Desktop), el
+envío pasa a REQUIERE_REVISION con la fila igual persistida.
+
+**B1/trazabilidad:** sin cambios de mecanismo -- sigue usando
+`escalar_resultado_ia_en_memoria`/`_ejecutar_ia_operacional`, la misma
+función que ya usa el lote (0 llamadas si el Core resuelve solo).
+`servidor_mobile.py` resuelve catálogos vía `ATLAS_CATALOGOS_DIR` (misma
+variable que usa `analizar_guias_masivo.py`, nunca una config paralela).
+
+**Desktop:** ajuste mínimo en las 2 vistas que ya mostraban el motivo de
+revisión (Revisión de Atlas + historial "Guías móviles"): si
+`problema_captura` es true, el mensaje dice "pedir foto nueva" en vez del
+motivo genérico de asociación. El resto de la bandeja (foto, OCR,
+"Ver viaje asociado", filtros) no cambió -- ya cumplía la Sección 5/6.
+
+**Tests:** Motor -- 9 tests focales nuevos en `test_mobile_guias_v1.py`
+(persistencia de guía nueva, no duplicar guía ya existente, no duplicar
+por reproceso del mismo envío, captura ilegible vs. indicador_revision
+del Core, dataset de esquema reducido nunca recibe escritura completa,
+decisiones pendientes de Desktop no se pierden, envio_id con traversal
+rechazado, E2E HTTP real con reintento). Suite completa: 1906 passed
+(antes 1897). Desktop -- 2 tests focales nuevos en
+`guias_moviles_v1.test.js`. Suite completa: 322 passed. Mobile
+(`Atlas-Conductores-Mobile`) -- sin cambios de código; no se corrió su
+suite (regla de la Sección 20: sólo suites de repos modificados).
+
+**Pendiente real:** telemetría GPS/rutas (`servicio_telemetria`) no se
+conecta desde Mobile (opt-in, mismo criterio que Desktop sin bandera
+explícita -- no bloquea ningún caso E2E); la app Mobile en sí no
+necesitó cambios (Sección 13/14 ya estaban cerradas).
