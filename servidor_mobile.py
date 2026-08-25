@@ -7,6 +7,7 @@ import json
 import os
 import ssl
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +40,15 @@ def _multipart(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], bytes, 
         elif nombre:
             campos[nombre] = contenido.decode("utf-8")
     return campos, imagen, mime
+
+
+# Bloque MOBILE ENVÍO REAL (fix puntual): log de diagnóstico TEMPORAL y
+# seguro -- timestamp, envio_id, chofer_id, content-type, nombres de
+# campo recibidos, tamaño/mime de la imagen, y el motivo exacto de un
+# 400. NUNCA token completo, password ni contenido binario.
+def _log_envio_debug(mensaje: str) -> None:
+    ahora = datetime.now(timezone.utc).isoformat()
+    print(f"[{ahora}] [mobile-envio-debug] {mensaje}")
 
 
 def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: AutenticadorMobile, procesar: bool = True, origen_permitido: str = "*") -> ThreadingHTTPServer:
@@ -93,6 +103,11 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                 self._json(401, {"error": "token_invalido"}); return
             try:
                 campos, imagen, mime = _multipart(self)
+                _log_envio_debug(
+                    f"POST /api/mobile/envios envio_id={campos.get('envio_id', '')!r} "
+                    f"chofer_id={identidad['chofer_id']!r} content-type_header={self.headers.get('Content-Type', '')!r} "
+                    f"campos_recibidos={sorted(campos.keys())} imagen_mime={mime!r} imagen_bytes={len(imagen)}"
+                )
                 registro, nuevo = repositorio.recibir(
                     envio_id=campos.get("envio_id", ""), imagen=imagen, mime=mime,
                     metadata={
@@ -107,8 +122,10 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                         procesar_envio_mobile, repositorio, registro["envio_id"],
                         dataset=dataset, carpeta_catalogos=carpeta_catalogos,
                     )
+                _log_envio_debug(f"envio_id={registro['envio_id']!r} ACEPTADO (nuevo={nuevo}, estado={registro['estado']!r})")
                 self._json(202, {"resultado": "ACEPTADO", "envio_id": registro["envio_id"], "estado": registro["estado"], "duplicado": not nuevo})
             except ErrorEnvioMobile as error:
+                _log_envio_debug(f"400 -- motivo exacto: {error}")
                 self._json(400, {"error": str(error)})
 
         def log_message(self, formato: str, *args: object) -> None:
