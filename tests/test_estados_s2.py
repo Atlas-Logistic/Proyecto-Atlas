@@ -35,7 +35,7 @@ def _datos_base(**overrides):
         "cliente": "ACEROS SUR",
         "obra destino": "PLANTA CENTRAL",
         "chofer": "RODRIGO NAHUELÑIR",
-        "RUT del cliente": "11.111.111-1",
+        "RUT del cliente": "12.345.678-5",
         "patente del tracto": "AB1234",
         "patente del carro": "CD5678",
     }

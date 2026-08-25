@@ -144,11 +144,11 @@ def test_rut_chofer_se_recupera_pese_a_orden_lineal_intercalado():
     bloques = [
         _bloque("DESPACHAR A", 20, 20, 100),
         _bloque("RUT CHOFER", 20, 50, 90),
-        _bloque("11.111.111-1", 130, 50, 100),  # geométricamente junto a RUT CHOFER
+        _bloque("12.345.678-5", 130, 50, 100),  # geométricamente junto a RUT CHOFER
         _bloque("FECHA SALIDA", 20, 80, 100),
     ]
 
-    assert _extraer_rut_chofer_geometrico(bloques) == {"valor": "11.111.111-1"}
+    assert _extraer_rut_chofer_geometrico(bloques) == {"valor": "12.345.678-5"}
 
 
 # --- 4: patente única geométrica (tolerante a CARRO leído CARR0 y RETIRA leído RETRA) ---
@@ -249,7 +249,7 @@ def test_regresion_464631_patente_y_carro_fusionados_con_carro_mal_leido(tmp_pat
     bloques = [
         _bloque("DESPACHAR A", 20, 20, 100), _bloque("CALLE FALSA 123", 130, 20, 120),
         _bloque("RETIRA", 400, 20, 60), _bloque("JUAN PEREZ", 470, 20, 100),
-        _bloque("RUT CHOFER", 20, 55, 90), _bloque("11.111.111-1", 130, 55, 100),
+        _bloque("RUT CHOFER", 20, 55, 90), _bloque("12.345.678-5", 130, 55, 100),
         _bloque("PATENTE", 400, 55, 70), _bloque(": AB1234 CARR0:CD5678", 470, 55, 220),
         _bloque("FECHA SALIDA", 20, 90, 100), _bloque("11-08-2026", 130, 90, 100),
         _bloque("FECHA", 400, 90, 60), _bloque("LLEGADA", 400, 105, 60), _bloque("12-08-2026", 470, 105, 100),
@@ -260,7 +260,7 @@ def test_regresion_464631_patente_y_carro_fusionados_con_carro_mal_leido(tmp_pat
 
     assert resultado["patente_tracto"] == "AB1234"
     assert resultado["patente_rampla"] == "CD5678"
-    assert resultado["rut_chofer"] == "11.111.111-1"
+    assert resultado["rut_chofer"] == "12.345.678-5"
 
 
 # --- 9: la patente recuperada geométricamente habilita la telemetría ---

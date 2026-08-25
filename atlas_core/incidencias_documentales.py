@@ -67,6 +67,17 @@ TIPO_HORA_DOCUMENTAL_INCONSISTENTE = "HORA_DOCUMENTAL_INCONSISTENTE"
 TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL = "TRANSPORTE_AUSENTE_DOCUMENTAL"
 VALOR_DOCUMENTAL_CAMPO_AUSENTE = "(campo ausente en el documento)"
 VALOR_CANONICO_CAMPO_REQUERIDO = "número de transporte requerido, no impreso en la guía"
+# Bloque FIX RUT DOCUMENTAL -- el RUT SÍ está impreso en la guía, pero no
+# pasa validación estructural (dígito verificador incorrecto, o cuerpo
+# implausible como dígitos repetidos -- ver
+# `atlas_core.validadores._cuerpo_implausible`; caso real: guía de
+# WLADIMIR AGUILAR con "55.555.555-5"). Distinto de
+# TIPO_RUT_NO_CORRESPONDE_A_RAZON_SOCIAL (ese es un RUT bien formado que
+# le pertenece a otra entidad); acá el RUT en sí es documentalmente
+# inválido. Cuando no existe un RUT canónico confiable para sustituirlo
+# se usa el sentinela de abajo -- nunca se inventa un valor.
+TIPO_RUT_DOCUMENTAL_INVALIDO = "RUT_DOCUMENTAL_INVALIDO"
+VALOR_CANONICO_RUT_NO_CONFIRMADO = "RUT canónico no confirmado -- requiere revisión humana"
 
 # Lo que NUNCA es una incidencia documental -- código explícito para que
 # el resto del código (y los tests) puedan afirmarlo positivamente, en

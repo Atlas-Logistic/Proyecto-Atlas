@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-25 — FIX RUT DOCUMENTAL INVÁLIDO → VALOR CANÓNICO + INCIDENCIA DOCUMENTAL
+
+- **Causa real:** `validar_rut_chileno` sólo comprobaba el dígito verificador (módulo 11), que no distingue un RUT real de un cuerpo de dígitos repetidos (p. ej. "55.555.555-5" calza matemáticamente). Un documento de WLADIMIR AGUILAR traía ese valor impreso; al procesarse junto a su guía hermana, el mecanismo existente de corroboración por documentos relacionados confirmó ese RUT inválido contra sí mismo (dos lecturas iguales, ninguna validada), dejándolo silenciosamente como dato operacional sin motivo ni incidencia.
+- **Regla general (sin hardcodear el caso):** se agregó un chequeo de plausibilidad de cuerpo (dígito repetido) al validador compartido, usado ya por todo el extractor; `buscar_rut_chofer`/`buscar_rut_cliente` ahora exigen validación antes de aceptar cualquier RUT como operacional, conservando el valor documental como evidencia. Se distingue duda de OCR (dígito verificador no calza) de error documental confirmado (dígito verificador calza, cuerpo implausible) -- sólo el segundo dispara `RUT_CHOFER_INVALIDO`/`RUT_CLIENTE_INVALIDO`, no bloqueante, resuelto vía Incidencia Documental. Se cerró además el hueco en `_corroborar_documentos_relacionados`: ya no acepta como corroboración un RUT fuente que él mismo sea inválido.
+- **Catch-up (sin OCR):** `detectar_incidencias_rut_chofer_invalido_sin_ocr`/`reconciliar_incidencias_rut_chofer_documental` (mismo patrón que transporte-ausente R5 I) revalidan el dataset ya persistido, buscan RUT canónico en catálogo o histórico consistente, corrigen el dato operacional sólo si hay canónico confiable y registran la Incidencia Documental (`TIPO_RUT_DOCUMENTAL_INVALIDO`) -- nunca inventan.
+- **Aplicado a producción (472238/472239, WLADIMIR AGUILAR):** único caso real detectado. `rut_chofer` corregido de "55.555.555-5" a "26.646.499-1" (histórico consistente de otros dos viajes, catálogo aún sin RUT confirmado); 2 Incidencias Documentales registradas, visibles en la pestaña existente sin cambios de Desktop (vista genérica por columnas). Backup + SHA-256 antes/después en `backups/rut_documental_invalido_*`.
+- **Tests:** 18 focales nuevos (`tests/test_rut_documental_invalido.py`, casos A-E de regresión) + suite completa Motor **1927 passed**. B1 no fue necesario -- el Motor resolvió determinísticamente. Desktop no se modificó.
+
+---
+
 ## 2026-08-20 — MOBILE M1 — CONEXIÓN REAL MOBILE → MOTOR
 
 - Se implementó `POST /api/mobile/login` y `POST /api/mobile/envios` conservando el contrato ya instalado en iPhone: Bearer token, foto, `envio_id`, timestamp, una de cinco incidencias operacionales y flag de guía firmada por correo. El chofer nunca elige guía, transporte ni viaje.

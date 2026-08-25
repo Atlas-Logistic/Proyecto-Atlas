@@ -44,13 +44,17 @@ from atlas_core.catalogo_vehiculos import (
     cargar_catalogo_vehiculos,
     normalizar_patente_vehiculo,
 )
+from atlas_core.catalogos import buscar_chofer_por_nombre_exacto, cargar_catalogo_json
 from atlas_core.extractor import _patente_valida
 from atlas_core.incidencias_documentales import (
+    TIPO_RUT_DOCUMENTAL_INVALIDO,
     TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL,
     VALOR_CANONICO_CAMPO_REQUERIDO,
+    VALOR_CANONICO_RUT_NO_CONFIRMADO,
     VALOR_DOCUMENTAL_CAMPO_AUSENTE,
     AlmacenIncidenciasDocumentales,
 )
+from atlas_core.modelos import EstadoValidacion
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     MOTIVOS_NO_BLOQUEANTES,
@@ -71,6 +75,7 @@ from atlas_core.telemetria.seleccion_recorrido import (
     ORIGEN_GPS_NO_DETERMINADO,
 )
 from atlas_core.telemetria.servicio import ServicioTelemetria
+from atlas_core.validadores import rut_documentalmente_confirmado_invalido, validar_rut_chileno
 
 SEPARADOR_MOTIVOS = " | "
 _AUSENTES = {"", "No encontrado"}
@@ -2388,6 +2393,152 @@ def reconciliar_incidencias_transporte_documental(
         )
         registradas.append(incidencia.incidencia_id)
     return {"candidatas": len(candidatas), "incidencias_registradas": registradas}
+
+
+def _rut_canonico_para_chofer(
+    *, nombre_chofer: str, filas: list[dict[str, str]], numero_guia_excluir: str,
+    catalogo_choferes: dict[str, object],
+) -> str | None:
+    """Bloque FIX RUT DOCUMENTAL -- busca un RUT canónico confiable para
+    `nombre_chofer` -- primero en el catálogo (nombre/alias exacto, único
+    match, RUT confirmado -- nunca un placeholder `PENDIENTE...`), si no
+    en el histórico del propio dataset (otras filas del MISMO nombre
+    exacto de chofer cuyo `rut_chofer` persistido SÍ pasa validación
+    estructural). Sólo lo usa si hay un único valor válido consistente
+    entre los candidatos; nunca inventa, nunca promedia ni elige por
+    mayoría entre valores distintos."""
+    coincidencia = buscar_chofer_por_nombre_exacto(catalogo_choferes, nombre_chofer)
+    if coincidencia is not None:
+        identificador, _registro = coincidencia
+        if len(identificador) >= 2 and not identificador.upper().startswith("PENDIENTE"):
+            candidato = validar_rut_chileno(f"{identificador[:-1]}-{identificador[-1]}")
+            if candidato.estado == EstadoValidacion.VALIDO:
+                return candidato.valor
+
+    vistos: set[str] = set()
+    for fila in filas:
+        if str(fila.get("numero_guia", "")) == numero_guia_excluir:
+            continue
+        if str(fila.get("chofer", "")).strip() != nombre_chofer:
+            continue
+        candidato = validar_rut_chileno(str(fila.get("rut_chofer", "")).strip())
+        if candidato.estado == EstadoValidacion.VALIDO:
+            vistos.add(candidato.valor)
+    return next(iter(vistos)) if len(vistos) == 1 else None
+
+
+def detectar_incidencias_rut_chofer_invalido_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, str]]:
+    """Bloque FIX RUT DOCUMENTAL -- READ-ONLY, nunca escribe nada, nunca
+    OCR ni red. A diferencia de `detectar_incidencias_transporte_ausente_
+    sin_ocr` (que lee un motivo ya fijado por el pipeline al momento del
+    procesamiento), ésta RE-VALIDA directamente el `rut_chofer` ya
+    persistido en el dataset -- necesario porque documentos procesados
+    ANTES de que `atlas_core.validadores.validar_rut_chileno` incorporara
+    el chequeo de plausibilidad nunca tuvieron oportunidad de fijar
+    `RUT_CHOFER_INVALIDO` en `motivos_revision_documento` (caso real:
+    guía de WLADIMIR AGUILAR con "55.555.555-5", dígito verificador
+    correcto pero cuerpo implausible).
+
+    Devuelve un candidato por cada fila con chofer identificado por
+    nombre pero `rut_chofer` inválido, junto con el RUT canónico
+    encontrado (catálogo o histórico del propio dataset), si lo hay --
+    `rut_canonico` viene vacío cuando no hay ninguno confiable."""
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    catalogo_ruta = raiz / "catalogos_privados" / "choferes.json"
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return []
+    catalogo_choferes = cargar_catalogo_json(catalogo_ruta)
+
+    candidatas = []
+    for fila in filas:
+        nombre_chofer = str(fila.get("chofer", "")).strip()
+        rut_chofer = str(fila.get("rut_chofer", "")).strip()
+        if not nombre_chofer or nombre_chofer == "No encontrado" or not rut_chofer:
+            continue
+        # Sección 2 del bloque: sólo se trata como error documental
+        # confirmado (nunca duda de OCR) -- mismo criterio que el
+        # tiempo real en `procesamiento_masivo`.
+        if not rut_documentalmente_confirmado_invalido(rut_chofer):
+            continue
+        canonico = _rut_canonico_para_chofer(
+            nombre_chofer=nombre_chofer, filas=filas,
+            numero_guia_excluir=str(fila.get("numero_guia", "")),
+            catalogo_choferes=catalogo_choferes,
+        )
+        candidatas.append({
+            "numero_guia": str(fila.get("numero_guia", "")),
+            "numero_transporte": str(fila.get("numero_transporte", "")),
+            "cliente": str(fila.get("cliente", "")),
+            "chofer": nombre_chofer,
+            "rut_documental": rut_chofer,
+            "rut_canonico": canonico or "",
+        })
+    return candidatas
+
+
+def reconciliar_incidencias_rut_chofer_documental(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque FIX RUT DOCUMENTAL -- registra, en el almacén ya existente
+    de Incidencias Documentales (`atlas_core.incidencias_documentales`),
+    una incidencia por cada documento detectado por
+    `detectar_incidencias_rut_chofer_invalido_sin_ocr`. Idempotente
+    (`AlmacenIncidenciasDocumentales.registrar` no duplica por
+    `incidencia_id`). Cuando hay un RUT canónico confiable (catálogo o
+    histórico consistente), además CORRIGE ese `rut_chofer` en el
+    dataset -- el valor documental inválido queda conservado como
+    evidencia sólo en la incidencia, nunca en el dato operacional (ver
+    Sección 3 del bloque: nunca se contamina catálogo/dataset con el
+    valor inválido). Cuando no hay RUT canónico confiable, el dataset se
+    deja intacto -- nunca se inventa un valor -- y la incidencia queda
+    para revisión humana. `actor=""` porque la detección es automática."""
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    ruta_incidencias = raiz / "catalogos_privados" / "incidencias_documentales.json"
+    almacen = AlmacenIncidenciasDocumentales(ruta_incidencias)
+    candidatas = detectar_incidencias_rut_chofer_invalido_sin_ocr(raiz_atlas=raiz)
+
+    registradas = []
+    corregidas = []
+    filas: list[dict[str, str]] = []
+    por_guia: dict[str, dict[str, str]] = {}
+    if candidatas:
+        filas = _leer_filas(dataset)
+        por_guia = {str(fila.get("numero_guia", "")): fila for fila in filas}
+
+    for candidata in candidatas:
+        valor_canonico = candidata["rut_canonico"] or VALOR_CANONICO_RUT_NO_CONFIRMADO
+        incidencia = almacen.registrar(
+            contexto=candidata["cliente"], numero_guia=candidata["numero_guia"],
+            numero_transporte=candidata["numero_transporte"], campo="RUT del chofer",
+            valor_documental=candidata["rut_documental"], valor_canonico=valor_canonico,
+            tipo_incidencia=TIPO_RUT_DOCUMENTAL_INVALIDO,
+            evidencia=(
+                f"CHOFER_IDENTIFICADO_POR_NOMBRE:{candidata['chofer']}",
+                "RUT_CANONICO_CORROBORADO_CATALOGO_O_HISTORICO" if candidata["rut_canonico"]
+                else "SIN_CANDIDATO_CANONICO_CONFIABLE",
+            ),
+            fecha=reloj(), fuente_resolucion="DETECCION_AUTOMATICA_RUT_INVALIDO",
+        )
+        registradas.append(incidencia.incidencia_id)
+        if candidata["rut_canonico"]:
+            fila = por_guia.get(candidata["numero_guia"])
+            if fila is not None and fila.get("rut_chofer") == candidata["rut_documental"]:
+                fila["rut_chofer"] = candidata["rut_canonico"]
+                corregidas.append(candidata["numero_guia"])
+
+    if corregidas:
+        _escribir_filas_completas(dataset, filas)
+
+    return {
+        "candidatas": len(candidatas), "incidencias_registradas": registradas,
+        "rut_corregido_en_dataset": corregidas,
+    }
 
 
 # MOTOR DE EVIDENCIA FASE 4 -- tope del punto fijo de auto-resolución en

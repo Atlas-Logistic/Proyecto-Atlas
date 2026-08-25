@@ -361,10 +361,10 @@ def test_alias_que_pertenece_a_otro_registro_no_se_aprende(tmp_path):
 
 
 def test_cliente_corroborado_via_rut_propone_alias_sin_escribir_catalogo(tmp_path, monkeypatch):
-    carpeta_catalogos = _escribir_catalogo(tmp_path, "empresas.json", {"111111111": {"nombre": "EBEMA SA"}})
+    carpeta_catalogos = _escribir_catalogo(tmp_path, "empresas.json", {"123456785": {"nombre": "EBEMA SA"}})
     _preparar_mocks(
         monkeypatch,
-        _datos_lineales_completos(cliente="EDMA SA", **{"RUT del cliente": "11.111.111-1"}),
+        _datos_lineales_completos(cliente="EDMA SA", **{"RUT del cliente": "12.345.678-5"}),
     )
 
     ruta_empresas = carpeta_catalogos / "empresas.json"

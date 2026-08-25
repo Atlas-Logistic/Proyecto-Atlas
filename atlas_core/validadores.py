@@ -21,6 +21,49 @@ def _digito_verificador(rut_base: str) -> str:
     return str(resto)
 
 
+def _cuerpo_implausible(rut_base: str) -> bool:
+    """Un cuerpo de un solo dígito repetido (11111111, 55555555, ...)
+    pasa el dígito verificador matemáticamente -- módulo 11 no distingue
+    esto de un RUT real -- pero nunca es una asignación real de RUT
+    chileno (caso real: guía de WLADIMIR AGUILAR con "55.555.555-5"
+    impreso, dígito verificador correcto pero cuerpo evidentemente
+    ficticio). Criterio general -- cualquier dígito repetido, nunca un
+    valor concreto hardcodeado -- consistente con los validadores de
+    RUT ya usados en la práctica en Chile."""
+    return len(rut_base) > 1 and len(set(rut_base)) == 1
+
+
+def rut_documentalmente_confirmado_invalido(valor: object) -> bool:
+    """Bloque FIX RUT DOCUMENTAL -- True SÓLO cuando el RUT es
+    estructuralmente inválido de una forma que NO es explicable por un
+    simple error de lectura OCR: el dígito verificador CALZA
+    matemáticamente (una lectura OCR con un carácter mal leído
+    prácticamente nunca preserva el dígito verificador por azar -- 1 en
+    11 posibilidades, y encima requiere que el cuerpo resultante sea
+    justo un patrón implausible) pero el cuerpo es implausible (dígitos
+    repetidos -- ver `_cuerpo_implausible`; caso real: guía de WLADIMIR
+    AGUILAR con "55.555.555-5"). Esta es la distinción exigida antes de
+    registrar una Incidencia Documental (evidencia de que la guía viene
+    realmente impresa así) en vez de tratarlo como duda de OCR (dígito
+    verificador que NO calza -- comúnmente un solo carácter mal leído --
+    queda para Revisión de Atlas / B1, nunca una incidencia automática)."""
+    if not isinstance(valor, str):
+        return False
+    coincidencia = re.fullmatch(
+        r"\s*((?:[0-9]{1,8}|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+))\s*-\s*([0-9Kk])\s*",
+        valor,
+    )
+    if coincidencia is None:
+        return False
+    rut_base = re.sub(r"[. ]", "", coincidencia.group(1))
+    digito_recibido = coincidencia.group(2).upper()
+    if not 1 <= len(rut_base) <= 8:
+        return False
+    if digito_recibido != _digito_verificador(rut_base):
+        return False
+    return _cuerpo_implausible(rut_base)
+
+
 def _formato_canonico(rut_base: str, digito: str) -> str:
     if len(rut_base) <= 3:
         base_formateada = rut_base
@@ -116,6 +159,17 @@ def validar_rut_chileno(
             confianza,
             revision_humana,
             f"El dígito verificador es incorrecto; se esperaba {digito_esperado}",
+        )
+
+    if _cuerpo_implausible(rut_base):
+        return _campo_invalido(
+            nombre,
+            valor,
+            fuente,
+            confianza,
+            revision_humana,
+            "El RUT tiene un patrón implausible (dígitos repetidos) -- el dígito "
+            "verificador calza matemáticamente pero nunca es una asignación real",
         )
 
     valor_canonico = _formato_canonico(rut_base, digito_esperado)

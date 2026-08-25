@@ -27,7 +27,11 @@ from atlas_core.catalogos import (
     resolver_patente_canonica,
 )
 from atlas_core.normalizacion_semantica import normalizar_nombre_societario
-from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
+from atlas_core.validadores import (
+    EstadoValidacion,
+    rut_documentalmente_confirmado_invalido,
+    validar_rut_chileno,
+)
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
 from atlas_core.extractor import (
@@ -741,6 +745,19 @@ class MotivoRevisionDocumento(str, Enum):
     # -- se distingue explícitamente de "OCR dudoso" (CLIENTE_SIN_CORROBORAR)
     # porque la evidencia documental en sí es internamente consistente.
     CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA = "CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA"
+    # Bloque FIX RUT DOCUMENTAL -- caso real: guía de WLADIMIR AGUILAR con
+    # "55.555.555-5" impreso (dígito verificador correcto, cuerpo
+    # implausible -- ver `validar_rut_chileno`/`_cuerpo_implausible`).
+    # Distinto de CHOFER_SIN_CORROBORAR/CLIENTE_SIN_CORROBORAR: ahí la
+    # identidad misma es incierta (podría ser un error de OCR en el
+    # nombre); acá la identidad de la entidad SÍ está establecida
+    # (nombre coincide exacto en catálogo o histórico), el problema es
+    # específicamente que el RUT documental no pasa validación
+    # estructural. Nunca se usa el valor documental como dato
+    # operacional; se conserva sólo como evidencia del error real de la
+    # guía.
+    RUT_CHOFER_INVALIDO = "RUT_CHOFER_INVALIDO"
+    RUT_CLIENTE_INVALIDO = "RUT_CLIENTE_INVALIDO"
 
 
 MOTIVOS_NO_BLOQUEANTES = frozenset({
@@ -750,6 +767,13 @@ MOTIVOS_NO_BLOQUEANTES = frozenset({
     # Incidencia Documental, un flujo separado (ver
     # `revalidacion_documental.detectar_incidencias_transporte_ausente_sin_ocr`).
     MotivoRevisionDocumento.TRANSPORTE_AUSENTE_SIN_ETIQUETA.value,
+    # Bloque FIX RUT DOCUMENTAL: mismo criterio -- sólo se dispara cuando
+    # la identidad (chofer/cliente) YA está establecida por nombre; nunca
+    # bloquea Revisión de Atlas (esa cola es para incertidumbre de
+    # identidad, no para un error documental ya identificado y
+    # evidenciado). Se resuelve como Incidencia Documental.
+    MotivoRevisionDocumento.RUT_CHOFER_INVALIDO.value,
+    MotivoRevisionDocumento.RUT_CLIENTE_INVALIDO.value,
 })
 
 
@@ -1305,6 +1329,41 @@ def procesar_archivo(
         # que lo respalde -- sin esa segunda señal, un error de OCR en la
         # asociación geométrica no tendría forma de detectarse.
         _motivo(MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR)
+
+    # Bloque FIX RUT DOCUMENTAL -- caso real WLADIMIR AGUILAR: el RUT
+    # documental de la guía no pasó validación estructural (dígito
+    # verificador correcto pero cuerpo implausible, o dígito verificador
+    # incorrecto -- ver buscar_rut_chofer()/validar_rut_chileno). La
+    # identidad del chofer YA está establecida por nombre (nombre_chofer
+    # coincide exacto en catálogo, o al menos fue leído) -- esto nunca
+    # reemplaza CHOFER_SIN_CORROBORAR (identidad incierta), es un motivo
+    # distinto para un problema distinto: el RUT impreso en ESTE
+    # documento es el que está mal, con o sin RUT canónico disponible
+    # para sustituirlo. `_corroborar_documentos_relacionados` (batch)
+    # puede corroborar un RUT canónico cruzando otros documentos del
+    # mismo chofer si el catálogo todavía no tiene uno confirmado.
+    #
+    # Sólo se dispara cuando `rut_documentalmente_confirmado_invalido`
+    # confirma que NO es explicable por una simple duda de OCR (dígito
+    # verificador calza pero cuerpo implausible) -- un dígito verificador
+    # que no calza queda para Revisión de Atlas/B1, nunca una Incidencia
+    # Documental automática (Sección 2 del bloque).
+    rut_chofer_invalido_documental = datos.get("RUT del chofer (documento, invalido)")
+    if (
+        rut_chofer_invalido_documental
+        and nombre_chofer not in {"", "No encontrado"}
+        and rut_documentalmente_confirmado_invalido(rut_chofer_invalido_documental)
+    ):
+        _motivo(MotivoRevisionDocumento.RUT_CHOFER_INVALIDO)
+
+    rut_cliente_invalido_documental = datos.get("RUT del cliente (documento, invalido)")
+    nombre_cliente_actual = str(datos.get("cliente", "No encontrado")).strip()
+    if (
+        rut_cliente_invalido_documental
+        and nombre_cliente_actual not in {"", "No encontrado"}
+        and rut_documentalmente_confirmado_invalido(rut_cliente_invalido_documental)
+    ):
+        _motivo(MotivoRevisionDocumento.RUT_CLIENTE_INVALIDO)
 
     numero_guia_actual = str(datos.get("número de guía", "No encontrado")).strip()
     if numero_guia_actual in {"", "No encontrado"}:
@@ -1992,6 +2051,17 @@ def _corroborar_documentos_relacionados(ruta_csv: Path, archivos_objetivo: set[s
         candidatas = []
         for otra in filas:
             if otra is fila or otra.get("rut_chofer") in {"", "No encontrado"}:
+                continue
+            # Bloque FIX RUT DOCUMENTAL -- causa raíz real (WLADIMIR
+            # AGUILAR, 472230/472239.jpeg): dos documentos hermanos con
+            # el MISMO RUT documental inválido ("55.555.555-5")
+            # coincidían entre sí y esa mera coincidencia se aceptaba
+            # como corroboración -- sin validar nunca que el valor
+            # propagado fuera en sí un RUT estructuralmente válido. Se
+            # exige ahora que el RUT de la fila FUENTE sea válido antes
+            # de contar su coincidencia como corroboración; dos lecturas
+            # igualmente inválidas nunca se confirman entre sí.
+            if validar_rut_chileno(otra.get("rut_chofer", "")).estado != EstadoValidacion.VALIDO:
                 continue
             senales = {
                 "fecha": otra.get("fecha") == fila.get("fecha"),

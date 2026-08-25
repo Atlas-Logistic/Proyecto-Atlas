@@ -1623,22 +1623,40 @@ def extraer_datos(
 
         return None
 
-    def buscar_rut_cliente(cliente: str) -> Optional[str]:
+    def buscar_rut_cliente(cliente: str) -> tuple[Optional[str], Optional[str]]:
+        """Devuelve (rut_valido, rut_documental_invalido) -- mismo criterio
+        que buscar_rut_chofer(): nunca se acepta un RUT sin validar."""
+        def _validar_o_evidencia(candidato: str) -> tuple[Optional[str], Optional[str]]:
+            if "-" not in candidato:
+                # Sin dígito verificador capturado -- nada que validar
+                # estructuralmente (distinto de un RUT documentalmente
+                # inválido, que SÍ trae un dígito verificador impreso y
+                # no calza o es implausible). Comportamiento histórico
+                # preservado: se conserva el valor parcial como dato
+                # informativo del campo; nunca se usa sin dígito
+                # verificador para corroborar identidad (ver
+                # `validar_rut_chileno` en el bloque de corroboración de
+                # `procesamiento_masivo.py`).
+                return candidato, None
+            if validar_rut_chileno(candidato).estado == EstadoValidacion.VALIDO:
+                return candidato, None
+            return None, candidato
+
         if cliente == "PRODALAM SA":
             coincidencia = re.search(r"PRODALA\w*\s+RUT\.?\s*([0-9.,\s-]{6,20})\s+GIRO", texto_busqueda)
             if coincidencia:
-                return limpiar_rut(coincidencia.group(1))
+                return _validar_o_evidencia(limpiar_rut(coincidencia.group(1)))
 
         if cliente == "AMERICAN SCREW CHILE SPA":
             coincidencia = re.search(r"AMERICAN\s+SCREW\s+CHILE\s+SPA\s+RUT\s*([0-9.,\s-]{6,20})\s+GIRO", texto_busqueda)
             if coincidencia:
-                return limpiar_rut(coincidencia.group(1))
+                return _validar_o_evidencia(limpiar_rut(coincidencia.group(1)))
 
         if cliente == "ACMA SA":
             # Caso real guía 3: "ACMA 92 ,190 , 000 INDUSTRIAS..."
             coincidencia = re.search(r"\bACMA\b\s*([0-9.,\s-]{6,30})\s+INDUSTRIAS", texto_busqueda)
             if coincidencia:
-                return limpiar_rut(coincidencia.group(1), agregar_dv=True, dv_conocido="7")
+                return _validar_o_evidencia(limpiar_rut(coincidencia.group(1), agregar_dv=True, dv_conocido="7"))
 
             # Bloque IDENTIDAD I1 -- se retiró el fallback que aceptaba
             # "92" y "190" como evidencia con solo aparecer en cualquier
@@ -1647,9 +1665,21 @@ def extraer_datos(
             # precios, teléfonos, etc. por pura coincidencia). Sin el
             # patrón contextual de arriba, se abstiene.
 
-        return None
+        return None, None
 
-    def buscar_rut_chofer() -> Optional[str]:
+    def buscar_rut_chofer() -> tuple[Optional[str], Optional[str]]:
+        """Devuelve (rut_valido, rut_documental_invalido) -- nunca ambos a
+        la vez. Bloque FIX RUT DOCUMENTAL: antes esta función reformateaba
+        lo que el OCR capturó SIN validar dígito verificador ni
+        plausibilidad -- un RUT documentalmente inválido (dígito
+        verificador correcto pero cuerpo implausible, p. ej. "55.555.555-5"
+        -- caso real WLADIMIR AGUILAR) se aceptaba como si fuera un dato
+        operacional válido. Ahora se valida con `validar_rut_chileno`
+        (misma regla que ya usa el resto del extractor); si no es válido,
+        NUNCA se acepta como RUT operacional -- pero se conserva el valor
+        documental crudo como evidencia (nunca se descarta en silencio),
+        para que el llamador pueda registrar la Incidencia Documental
+        correspondiente y buscar un RUT canónico corroborado."""
         # ":" opcional entre la etiqueta y el valor: el OCR real (PaddleOCR)
         # suele dejar "RUT CHOFER\n:10190440-7" con dos puntos pegados al
         # valor, que \s* (solo espacios/saltos de línea) no cubría.
@@ -1667,12 +1697,18 @@ def extraer_datos(
         if coincidencia:
             valor = limpiar_rut(coincidencia.group(1), agregar_dv="-" not in coincidencia.group(1))
             if valor != "No encontrado":
-                return valor.replace(".", "")
+                candidato = valor.replace(".", "")
+                if validar_rut_chileno(candidato).estado == EstadoValidacion.VALIDO:
+                    return candidato, None
+                return None, candidato
 
         coincidencia_pdte = re.search(r"PDTE\s+([0-9]{7,8})\s+\d{2}[-/]\d{2}[-/]\d{4}", texto_busqueda)
         if coincidencia_pdte:
             base = coincidencia_pdte.group(1)
-            return limpiar_rut(base, agregar_dv=True).replace(".", "")
+            candidato = limpiar_rut(base, agregar_dv=True).replace(".", "")
+            if validar_rut_chileno(candidato).estado == EstadoValidacion.VALIDO:
+                return candidato, None
+            return None, candidato
 
         # Bloque IDENTIDAD I1 -- se retiró un fallback sin comentario ni
         # justificación que asignaba el RUT "18098153-5" (un chofer real,
@@ -1682,7 +1718,7 @@ def extraer_datos(
         # etc. por coincidencia). Sin un patrón contextual que lo respalde,
         # se abstiene.
 
-        return None
+        return None, None
 
     def buscar_chofer_y_patentes() -> tuple[Optional[str], Optional[str], Optional[str]]:
         posicion = texto_busqueda.find("RETIRA PATENTE FECHA LLEGADA")
@@ -1878,13 +1914,20 @@ def extraer_datos(
     if obra_destino:
         datos["obra destino"] = obra_destino
 
-    rut_cliente = buscar_rut_cliente(datos["cliente"])
+    rut_cliente, rut_cliente_documental_invalido = buscar_rut_cliente(datos["cliente"])
     if rut_cliente:
         datos["RUT del cliente"] = rut_cliente
+    if rut_cliente_documental_invalido:
+        datos["RUT del cliente (documento, invalido)"] = rut_cliente_documental_invalido
 
-    rut_chofer = buscar_rut_chofer()
+    rut_chofer, rut_chofer_documental_invalido = buscar_rut_chofer()
     if rut_chofer:
         datos["RUT del chofer"] = rut_chofer
+    if rut_chofer_documental_invalido:
+        # Bloque FIX RUT DOCUMENTAL: evidencia conservada, nunca usada
+        # como dato operacional -- ver buscar_rut_chofer() y el
+        # tratamiento de corroboración/incidencia en procesamiento_masivo.py.
+        datos["RUT del chofer (documento, invalido)"] = rut_chofer_documental_invalido
 
     chofer, patente_tracto, patente_carro = buscar_chofer_y_patentes()
     if chofer:
