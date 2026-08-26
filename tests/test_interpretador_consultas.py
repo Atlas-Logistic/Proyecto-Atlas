@@ -4,8 +4,14 @@ en `tests/test_consultas_atlas_e2e.py`."""
 from __future__ import annotations
 
 from atlas_core.consultas_atlas import (
+    DOMINIO_INCIDENCIAS_DOCUMENTALES,
+    DOMINIO_VIAJES,
+    ConsultaAtlas,
+    METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_VIAJES,
     METRICA_LISTAR_VIAJES,
+    METRICA_SUM_KM,
     METRICA_SUM_PESO,
     PERIODO_ESTE_MES,
 )
@@ -16,6 +22,7 @@ from atlas_core.interpretador_consultas import (
     CatalogosConsulta,
     interpretar_consulta_determinista,
     resolver_entidad_por_palabras,
+    validar_compatibilidad_semantica,
 )
 
 CATALOGOS = CatalogosConsulta(
@@ -161,3 +168,110 @@ def test_nombre_propio_no_reconocido_no_se_ignora():
 def test_pregunta_sin_metrica_reconocible_devuelve_none():
     consulta, avisos = interpretar_consulta_determinista("Hola, ¿cómo estás?", catalogos=CATALOGOS)
     assert consulta is None
+
+
+# --- Bloque B1 V2 -- Caso real A: "incidencias documentales" NUNCA cae
+# a COUNT_VIAJES (Bloque 4.A/9 del ticket) ---
+
+def test_incidencias_documentales_activa_dominio_propio_no_viajes():
+    consulta, _ = interpretar_consulta_determinista("¿Cuántas incidencias documentales hay?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES
+    assert consulta.metrica == METRICA_COUNT_INCIDENCIAS
+
+
+def test_sinonimo_errores_documentales_activa_incidencias():
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos errores documentales tenemos?", catalogos=CATALOGOS)
+    assert consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES
+
+
+# --- Bloque B1 V2 -- Caso real B: "kms" (plural) reconoce SUM_KM,
+# nunca cae a COUNT_VIAJES por falta de sinónimo (Bloque 10 del ticket) ---
+
+def test_kms_plural_reconoce_sum_km():
+    catalogos = CatalogosConsulta(choferes=("CRISTOPHER RETAMAL",), clientes=(), obras=(), tipos_carga=(), comunas=())
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos kms recorridos tiene Retamal?", catalogos=catalogos)
+    assert consulta is not None
+    assert consulta.metrica == METRICA_SUM_KM
+    assert consulta.filtros["chofer"] == "CRISTOPHER RETAMAL"
+
+
+def test_distancia_de_apellido_reconoce_sum_km():
+    catalogos = CatalogosConsulta(choferes=("CRISTOPHER RETAMAL",), clientes=(), obras=(), tipos_carga=(), comunas=())
+    consulta, _ = interpretar_consulta_determinista("distancia de cristopher retamal", catalogos=catalogos)
+    assert consulta.metrica == METRICA_SUM_KM
+
+
+# --- Bloque B1 V2 -- Caso real C: "choferes"/"conductores" en plural
+# pide CANTIDAD DE PERSONAS, nunca cuenta viajes (Bloque 4.C) ---
+
+def test_cuantos_choferes_trabajaron_activa_count_distinct_chofer():
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos choferes trabajaron este mes?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER
+    assert consulta.filtros["periodo"] == PERIODO_ESTE_MES
+
+
+def test_cuantos_conductores_cargaron_activa_count_distinct_chofer():
+    consulta, _ = interpretar_consulta_determinista("cuántos conductores cargaron este mes", catalogos=CATALOGOS)
+    assert consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER
+
+
+def test_cada_chofer_sigue_siendo_agrupacion_no_count_distinct():
+    """Nunca romper el V1 existente: "cada chofer"/"por chofer" (singular)
+    sigue siendo agrupación, no dispara la cuenta de personas."""
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos viajes hizo cada chofer?", catalogos=CATALOGOS)
+    assert consulta.agrupacion == "chofer"
+    assert consulta.metrica == METRICA_COUNT_VIAJES
+
+
+# --- Bloque B1 V2 (Bloque 7) -- el bug arquitectónico: "cuántos X" sin
+# métrica reconocible YA NO cae en silencio a COUNT_VIAJES; cede a B1 ---
+
+def test_cuantos_sin_metrica_ni_viaje_cede_a_b1_en_vez_de_asumir_viajes():
+    consulta, _ = interpretar_consulta_determinista("¿Cuánto hizo Juan Perez?", catalogos=CATALOGOS)
+    assert consulta is None
+
+
+def test_cuantos_viajes_explicito_sigue_siendo_determinista():
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos viajes hay?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.metrica == METRICA_COUNT_VIAJES
+
+
+# --- Bloque B1 V2 (Bloque 6) -- validador semántico: red de seguridad ---
+
+def test_semantica_rechaza_km_con_count_viajes():
+    consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES)
+    motivo = validar_compatibilidad_semantica("¿Cuántos km hizo Juan Perez?", consulta)
+    assert motivo is not None
+
+
+def test_semantica_rechaza_incidencias_con_dominio_viajes():
+    consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES, dominio=DOMINIO_VIAJES)
+    motivo = validar_compatibilidad_semantica("¿Cuántas incidencias documentales hay?", consulta)
+    assert motivo is not None
+
+
+def test_semantica_rechaza_choferes_cantidad_con_count_viajes():
+    consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES)
+    motivo = validar_compatibilidad_semantica("¿Cuántos choferes trabajaron este mes?", consulta)
+    assert motivo is not None
+
+
+def test_semantica_rechaza_peso_con_count_viajes():
+    consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES)
+    motivo = validar_compatibilidad_semantica("¿Cuántas toneladas transportó Juan Perez?", consulta)
+    assert motivo is not None
+
+
+def test_semantica_acepta_consulta_compatible():
+    consulta = ConsultaAtlas(metrica=METRICA_SUM_KM)
+    assert validar_compatibilidad_semantica("¿Cuántos km hizo Juan Perez?", consulta) is None
+
+
+def test_semantica_no_rechaza_agrupacion_por_chofer():
+    """"por chofer" (agrupación V1) nunca se confunde con la pregunta de
+    cantidad de personas."""
+    consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES, agrupacion="chofer")
+    assert validar_compatibilidad_semantica("¿Cuántos viajes hizo cada chofer?", consulta) is None

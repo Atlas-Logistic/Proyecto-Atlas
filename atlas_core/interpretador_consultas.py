@@ -20,8 +20,12 @@ from typing import Iterable, Mapping
 
 from atlas_core.consultas_atlas import (
     AGRUPACIONES_SOPORTADAS,
+    DOMINIO_INCIDENCIAS_DOCUMENTALES,
+    DOMINIO_VIAJES,
     ConsultaAtlas,
+    METRICA_COUNT_DISTINCT_CHOFER,
     METRICA_COUNT_GUIAS,
+    METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_VIAJES,
     METRICA_LISTAR_VIAJES,
     METRICA_SUM_KM,
@@ -150,14 +154,38 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
 
 
 # --- Bloque 3/11: vocabulario de métrica -- palabras clave, no frases
-# fijas (nunca "una función por cada pregunta"). ---
+# fijas (nunca "una función por cada pregunta"). Bloque B1 V2 (Bloque
+# 10 del ticket): "KMS" (plural coloquial) faltaba -- `\bKM\b` nunca
+# calzaba contra "KMS" por falta de límite de palabra, así que "¿cuántos
+# KMS recorridos...?" caía silenciosamente a COUNT_VIAJES. Se agregan
+# aquí, explícitamente, todas las variantes singular/plural reales en
+# vez de inventar un stemmer genérico de español (mismo criterio ya
+# usado por el resto de esta tabla: cada keyword se lista tal cual). ---
+_PALABRAS_PESO = ("TONELADA", "TONELADAS", "PESO", "KILOS", "KG")
+_PALABRAS_KM = ("KM", "KMS", "KILOMETRO", "KILOMETROS", "DISTANCIA", "RECORRIDO", "RECORRIDOS")
+_PALABRAS_TIEMPO = ("MINUTOS", "TIEMPO", "DURACION")
+
 _PALABRAS_METRICA = (
-    (METRICA_SUM_PESO, ("TONELADA", "TONELADAS", "PESO", "KILOS", "KG")),
-    (METRICA_SUM_KM, ("KM", "KILOMETROS", "DISTANCIA")),
-    (METRICA_SUM_TIEMPO, ("MINUTOS", "TIEMPO", "DURACION")),
+    (METRICA_SUM_PESO, _PALABRAS_PESO),
+    (METRICA_SUM_KM, _PALABRAS_KM),
+    (METRICA_SUM_TIEMPO, _PALABRAS_TIEMPO),
     (METRICA_COUNT_GUIAS, ("GUIA", "GUIAS")),
     (METRICA_LISTAR_VIAJES, ("MUESTRAME", "MUESTRA", "LISTA", "LISTAME", "LISTAR", "DETALLE")),
 )
+
+# Bloque B1 V2 (Bloque 4.A del ticket) -- dominio INCIDENCIAS_DOCUMENTALES,
+# nunca el dominio VIAJES por defecto. Se revisa ANTES que cualquier otra
+# cosa: el resto de esta función está pensada para `viajes.csv`, y una
+# pregunta sobre incidencias nunca debería pasar por la resolución de
+# entidades de chofer/cliente/obra de ese dominio.
+_PALABRAS_INCIDENCIA = ("INCIDENCIA", "INCIDENCIAS", "ERROR DOCUMENTAL", "ERRORES DOCUMENTALES")
+
+# Bloque B1 V2 (Bloque 4.C del ticket) -- "choferes"/"conductores" en
+# PLURAL, sin ir precedido de "por"/"cada" (esa es la agrupación V1 ya
+# existente, "¿cuántos viajes hizo cada chofer?"), es casi siempre una
+# pregunta por CANTIDAD DE PERSONAS, nunca de viajes/filas.
+_PALABRAS_CHOFER_PLURAL = ("CHOFERES", "CONDUCTORES")
+_PATRON_AGRUPACION_CHOFER = re.compile(r"\bPOR CHOFER(ES)?\b|\bCADA CHOFER\b|\bPOR CONDUCTOR(ES)?\b|\bCADA CONDUCTOR\b")
 
 _PALABRAS_PERIODO = (
     (PERIODO_SEMANA_PASADA, ("SEMANA PASADA", "LA SEMANA PASADA")),
@@ -189,11 +217,13 @@ _PALABRAS_ESTRUCTURA_PREGUNTA = frozenset({
     "HIZO", "HICIERON", "FUE", "FUERON", "PARA", "CON", "DE", "DEL", "LA", "EL",
     "LOS", "LAS", "ESTE", "ESTA", "MES", "SEMANA", "HOY", "AYER", "PASADA",
     "PASADO", "MUESTRAME", "MUESTRA", "LISTA", "LISTAME", "LISTAR", "CADA",
-    "POR", "TONELADAS", "TONELADA", "PESO", "KILOS", "KM", "KILOMETROS",
-    "MINUTOS", "TIEMPO", "DURACION", "DISTANCIA", "TRANSPORTO", "MOVIO",
-    "MOVIMOS", "CHOFER", "CHOFERES", "CLIENTE", "CLIENTES", "OBRA", "OBRAS",
+    "POR", "TONELADAS", "TONELADA", "PESO", "KILOS", "KM", "KMS", "KILOMETRO", "KILOMETROS",
+    "RECORRIDO", "RECORRIDOS", "MINUTOS", "TIEMPO", "DURACION", "DISTANCIA", "TRANSPORTO", "MOVIO",
+    "MOVIMOS", "CHOFER", "CHOFERES", "CONDUCTOR", "CONDUCTORES", "CLIENTE", "CLIENTES", "OBRA", "OBRAS",
     "DESTINO", "DESTINOS", "COMUNA", "COMUNAS", "MATERIAL", "MATERIALES",
     "TIPO", "TIPOS", "CARGA", "DETALLE", "SEMANAL", "MENSUAL", "DIARIO", "DIAS", "DIA",
+    "INCIDENCIA", "INCIDENCIAS", "ERROR", "ERRORES", "DOCUMENTAL", "DOCUMENTALES",
+    "TRABAJARON", "TRABAJO", "CARGARON", "CARGO", "REGISTRADAS", "REGISTRADOS", "TENEMOS",
 })
 _PATRON_PALABRA_CAPITALIZADA = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+")
 
@@ -227,16 +257,46 @@ def interpretar_consulta_determinista(
     normalizado = normalizar_texto_atlas(texto)
     avisos: list[str] = []
 
+    # Bloque B1 V2 (Bloque 4.A/9 del ticket) -- dominio
+    # INCIDENCIAS_DOCUMENTALES, resuelto ANTES que nada: es una fuente
+    # de datos distinta a `viajes.csv`, así que el resto de esta función
+    # (resolución de entidades chofer/cliente/obra, agrupación, etc, todo
+    # pensado para el reporte de viajes) no aplica en absoluto.
+    if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_INCIDENCIA):
+        return ConsultaAtlas(
+            metrica=METRICA_COUNT_INCIDENCIAS, dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES, filtros={},
+        ), tuple(avisos)
+
+    # Bloque B1 V2 (Bloque 4.C del ticket) -- "cuántos choferes/
+    # conductores [trabajaron/hicieron viajes/cargaron]..." pregunta por
+    # CANTIDAD DE PERSONAS, nunca por cantidad de viajes/filas. Se separa
+    # de "por chofer"/"cada chofer" (agrupación V1 ya existente).
+    if (
+        any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_CHOFER_PLURAL)
+        and not _PATRON_AGRUPACION_CHOFER.search(normalizado)
+    ):
+        filtros_chofer: dict[str, str] = {}
+        for nombre_periodo, frases in _PALABRAS_PERIODO:
+            if any(frase in normalizado for frase in frases):
+                filtros_chofer["periodo"] = nombre_periodo
+                break
+        return ConsultaAtlas(metrica=METRICA_COUNT_DISTINCT_CHOFER, filtros=filtros_chofer), tuple(avisos)
+
     metrica = METRICA_COUNT_VIAJES
-    tiene_cuantos = bool(re.search(r"\bCUANT[OA]S?\b", normalizado))
     for candidata, palabras in _PALABRAS_METRICA:
         if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in palabras):
             metrica = candidata
             break
     else:
-        if not tiene_cuantos and not any(
-            re.search(rf"\b{re.escape(p)}\b", normalizado) for p in ("VIAJE", "VIAJES")
-        ):
+        # Bloque B1 V2 (Bloque 7 del ticket) -- "el determinístico
+        # construyó algo válido -> B1 no interviene" era el bug: antes,
+        # cualquier "cuántos X" sin métrica reconocible caía aquí
+        # igual y se aceptaba en silencio como COUNT_VIAJES. Ahora sólo
+        # se acepta ese default cuando el texto realmente menciona
+        # "viaje(s)" -- cualquier otro "cuántos X" sin evidencia de
+        # métrica se cede a B1 (o "no interpretable" sin B1 configurado),
+        # nunca se adivina.
+        if not any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in ("VIAJE", "VIAJES")):
             return None, avisos  # ninguna señal de métrica reconocible -- intentar B1
 
     filtros: dict[str, str] = {}
@@ -316,3 +376,34 @@ def interpretar_consulta_determinista(
         return None, (*avisos, "SIN_COINCIDENCIA:" + ", ".join(sin_explicar))
 
     return ConsultaAtlas(metrica=metrica, filtros=filtros, agrupacion=agrupacion), tuple(avisos)
+
+
+def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> str | None:
+    """Bloque 6/7 -- red de seguridad semántica, NUNCA un solucionador
+    completo de la pregunta. Una `ConsultaAtlas` estructuralmente válida
+    (pasa `validar_consulta`) no es necesariamente CORRECTA: "¿cuántos
+    kms recorridos tiene Retamal?" con `metrica=COUNT_VIAJES` es válida
+    y absurda a la vez. Detecta sólo las contradicciones fuertes que el
+    Bloque 6 del ticket exige (KM/PESO/CHOFERES-cantidad/INCIDENCIAS
+    contra la métrica u dominio efectivamente elegidos); cualquier otra
+    cosa se deja pasar -- el llamador escala a B1 cuando esto devuelve
+    un motivo no-`None` (Bloque 7: "cambiar el criterio de cuándo entra
+    B1"), nunca ejecuta la consulta rechazada tal cual."""
+    normalizado = normalizar_texto_atlas(pregunta)
+
+    def _menciona(palabras: tuple[str, ...]) -> bool:
+        return any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in palabras)
+
+    if _menciona(_PALABRAS_KM) and consulta.metrica != METRICA_SUM_KM:
+        return "la pregunta pide distancia/km, pero la consulta no calcula distancia"
+    if _menciona(_PALABRAS_PESO) and consulta.metrica != METRICA_SUM_PESO:
+        return "la pregunta pide peso/toneladas, pero la consulta no suma peso"
+    if _menciona(_PALABRAS_INCIDENCIA) and consulta.dominio != DOMINIO_INCIDENCIAS_DOCUMENTALES:
+        return "la pregunta pide incidencias documentales, pero la consulta consulta viajes"
+    if (
+        _menciona(_PALABRAS_CHOFER_PLURAL)
+        and not _PATRON_AGRUPACION_CHOFER.search(normalizado)
+        and consulta.metrica == METRICA_COUNT_VIAJES
+    ):
+        return "la pregunta pide cantidad de choferes (personas), pero la consulta cuenta viajes"
+    return None

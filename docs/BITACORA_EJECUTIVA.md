@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — PREGÚNTALE A ATLAS / B1 V2: COMPRENSIÓN SEMÁNTICA REAL
+
+- **Problema real:** Javier probó preguntas naturales y Atlas devolvió respuestas estructuralmente válidas pero semánticamente equivocadas -- "¿cuántas incidencias documentales hay?" y "¿cuántos choferes trabajaron este mes?" respondían "22 viajes"; "¿cuántos kms recorridos tiene Retamal?" respondía "3 viajes" en vez de la distancia.
+- **Causa raíz:** dos bugs concretos, no uno solo. (1) `interpretar_consulta_determinista` nunca podía devolver `None` (la señal para intentar B1) cuando la pregunta traía "cuántos/cuántas", sin importar si reconocía algo -- B1 quedaba arquitectónicamente inalcanzable justo para el tipo de pregunta donde más hacía falta. (2) faltaba el sinónimo "KMS" (plural) para SUM_KM, y no existían el dominio INCIDENCIAS_DOCUMENTALES ni una métrica de choferes distintos.
+- **Arquitectura antes→después:** `ConsultaAtlas` gana `dominio` (VIAJES por defecto, 100% compatible; nuevo INCIDENCIAS_DOCUMENTALES sobre el repositorio canónico `AlmacenIncidenciasDocumentales`, nunca inferido contando viajes REVISAR) y dos métricas nuevas (`COUNT_DISTINCT_CHOFER`, personas únicas, nunca filas; `COUNT_INCIDENCIAS`). Nueva `validar_compatibilidad_semantica(pregunta, consulta)`: red de seguridad que rechaza KM+COUNT_VIAJES, PESO+COUNT_VIAJES, CHOFERES(cantidad)+COUNT_VIAJES, INCIDENCIAS+dominio VIAJES. El orquestador (`responder_consulta_atlas`) cambia el criterio de cuándo entra B1: ya no es sólo "el determinístico no devolvió nada", también "lo que devolvió es semánticamente incompatible" -- y la validación se aplica igual a la salida de B1, que sigue sin poder producir jamás una cifra final.
+- **Las 3 preguntas reales, contra producción (G:\Mi unidad\Atlas):** "¿Cuántas incidencias documentales hay?" → *"Hay 3 incidencias documentales registradas. Corresponden a 2 viajes."*; "¿Cuántos kms recorridos tiene Retamal?" → *"86.88 km calculados (chofer CRISTOPHER RETAMAL)."*; "¿Cuántos choferes trabajaron este mes?" → *"10 choferes (este mes)."* -- ninguna cae ya en "N viajes".
+- **Tests:** 33 focales nuevos (`test_consultas_atlas.py`, `test_interpretador_consultas.py`, `test_responder_consulta_atlas.py`) + 9 E2E reales permanentes nuevos (`test_consultas_atlas_e2e.py`, incluyen las 3 preguntas exactas + variantes de lenguaje natural) + suite completa Motor **2041 passed**. Desktop: `main.js` pasa la ruta real de incidencias al CLI (mismo patrón ya usado por `atlas:cargar-incidencias-documentales`) -- suite completa **411 passed**, sin tests nuevos (ningún contrato de UI cambió).
+- **Pendiente real:** ninguno de código para las 3 preguntas del bloque. El validador semántico es deliberadamente una red de seguridad puntual (Bloque 6 del ticket), no un solver completo -- cubre las contradicciones ya conocidas, extensible cuando aparezca una nueva.
+
+---
+
 ## 2026-08-26 — CATÁLOGOS VEHÍCULOS: SEPARAR CONFIRMADOS DE OBSERVADOS/AMBIGUOS
 
 - **Problema real:** Catálogos → Vehículos mezclaba en una sola lista confirmados/observados/ambiguos, haciendo parecer que había errores sin resolver aunque Motor ya había decidido correctamente no fusionar nada.

@@ -9,9 +9,12 @@ from datetime import date
 import pytest
 
 from atlas_core.consultas_atlas import (
+    DOMINIO_INCIDENCIAS_DOCUMENTALES,
+    DOMINIO_VIAJES,
     ConsultaAtlas,
     ErrorConsultaAtlas,
     ejecutar_consulta_atlas,
+    ejecutar_consulta_incidencias_documentales,
     resolver_periodo,
     validar_consulta,
 )
@@ -208,3 +211,119 @@ def test_limite_restringe_agrupacion():
     viajes = [_viaje(choferes="A"), _viaje(choferes="B"), _viaje(choferes="C")]
     r = ejecutar_consulta_atlas(ConsultaAtlas(metrica="COUNT_VIAJES", agrupacion="chofer", limite=1), viajes)
     assert len(r.resultado) == 1
+
+
+# --- Bloque B1 V2 -- COUNT_DISTINCT_CHOFER: personas, nunca filas ---
+
+def test_count_distinct_chofer_no_duplica_por_multiples_viajes():
+    viajes = [
+        _viaje(choferes="JUAN PEREZ"), _viaje(choferes="JUAN PEREZ"), _viaje(choferes="PEDRO GOMEZ"),
+    ]
+    r = ejecutar_consulta_atlas(ConsultaAtlas(metrica="COUNT_DISTINCT_CHOFER"), viajes)
+    assert r.resultado == 2
+
+
+def test_count_distinct_chofer_no_duplica_por_guia_multivalor():
+    """Un viaje con dos choferes consolidados (SEP) cuenta cada uno una
+    sola vez, nunca dos veces por la misma fila."""
+    viajes = [_viaje(choferes=f"JUAN PEREZ{SEP}PEDRO GOMEZ"), _viaje(choferes="JUAN PEREZ")]
+    r = ejecutar_consulta_atlas(ConsultaAtlas(metrica="COUNT_DISTINCT_CHOFER"), viajes)
+    assert r.resultado == 2
+
+
+def test_count_distinct_chofer_excluye_ausentes():
+    viajes = [_viaje(choferes="JUAN PEREZ"), _viaje(choferes="No encontrado"), _viaje(choferes="")]
+    r = ejecutar_consulta_atlas(ConsultaAtlas(metrica="COUNT_DISTINCT_CHOFER"), viajes)
+    assert r.resultado == 1
+
+
+def test_count_distinct_chofer_respeta_filtro_periodo():
+    viajes = [
+        _viaje(choferes="JUAN PEREZ", fecha="24-08-2026"),
+        _viaje(choferes="PEDRO GOMEZ", fecha="01-01-2026"),
+    ]
+    r = ejecutar_consulta_atlas(
+        ConsultaAtlas(metrica="COUNT_DISTINCT_CHOFER", filtros={"fecha_desde": "2026-08-01", "fecha_hasta": "2026-08-31"}),
+        viajes,
+    )
+    assert r.resultado == 1
+
+
+def test_count_distinct_chofer_rechaza_agrupacion():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_DISTINCT_CHOFER", agrupacion="chofer"))
+
+
+# --- Bloque B1 V2 -- dominio: VIAJES sigue siendo el default (Bloque 3) ---
+
+def test_dominio_por_defecto_es_viajes():
+    assert ConsultaAtlas(metrica="COUNT_VIAJES").dominio == DOMINIO_VIAJES
+
+
+def test_validar_consulta_rechaza_dominio_inventado():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_VIAJES", dominio="PLANETAS"))
+
+
+def test_validar_consulta_rechaza_metrica_incompatible_con_dominio():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_INCIDENCIAS", dominio=DOMINIO_VIAJES))
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_VIAJES", dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES))
+
+
+def test_ejecutar_consulta_atlas_rechaza_dominio_incidencias():
+    with pytest.raises(ErrorConsultaAtlas):
+        ejecutar_consulta_atlas(
+            ConsultaAtlas(metrica="COUNT_INCIDENCIAS", dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES), [],
+        )
+
+
+# --- Bloque B1 V2 (Bloque 4.A/9) -- dominio INCIDENCIAS_DOCUMENTALES:
+# cuenta registros del repositorio canónico, nunca infiere de viajes ---
+
+def _incidencia(**overrides):
+    base = {
+        "incidencia_id": "abc", "contexto": "CLIENTE X", "numero_guia": "1", "numero_transporte": "T1",
+        "campo": "obra_destino", "valor_documental": "X", "valor_canonico": "Y",
+        "tipo_incidencia": "OBRA_DOCUMENTAL_INCONSISTENTE", "evidencia": [], "fecha_deteccion": "2026-08-01T00:00:00+00:00",
+        "estado": "DETECTADA", "fuente_resolucion": "", "actor": "", "decision_id": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_count_incidencias_cuenta_registros_no_viajes():
+    incidencias = [_incidencia(numero_guia="1"), _incidencia(numero_guia="2")]
+    r = ejecutar_consulta_incidencias_documentales(
+        ConsultaAtlas(metrica="COUNT_INCIDENCIAS", dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES), incidencias,
+    )
+    assert r.resultado == 2
+    assert r.unidades == "incidencias"
+
+
+def test_count_incidencias_sin_ninguna_es_cero_sin_error():
+    r = ejecutar_consulta_incidencias_documentales(
+        ConsultaAtlas(metrica="COUNT_INCIDENCIAS", dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES), [],
+    )
+    assert r.resultado == 0
+
+
+def test_count_incidencias_avisa_cuando_varias_guias_comparten_viaje():
+    """Caso real: dos guías del mismo `numero_transporte` con la misma
+    incidencia (WLADIMIR AGUILAR, RUT inválido, guías 472238/472239)."""
+    incidencias = [
+        _incidencia(numero_guia="472238", numero_transporte="T1"),
+        _incidencia(numero_guia="472239", numero_transporte="T1"),
+        _incidencia(numero_guia="472339", numero_transporte="T2"),
+    ]
+    r = ejecutar_consulta_incidencias_documentales(
+        ConsultaAtlas(metrica="COUNT_INCIDENCIAS", dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES), incidencias,
+    )
+    assert r.resultado == 3  # registros, nunca colapsados en silencio
+    assert any("2 viajes" in a for a in r.advertencias)
+
+
+def test_ejecutar_consulta_incidencias_rechaza_dominio_viajes():
+    with pytest.raises(ErrorConsultaAtlas):
+        ejecutar_consulta_incidencias_documentales(ConsultaAtlas(metrica="COUNT_VIAJES"), [])

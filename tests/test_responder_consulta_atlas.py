@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import csv
+import json
 
-from atlas_core.consultas_atlas import ConsultaAtlas
+from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES, ConsultaAtlas
 from atlas_core.proveedor_interpretacion_consultas import (
     ProveedorInterpretacionConsultaSimulado,
     RespuestaSimuladaInterpretacion,
@@ -154,3 +155,110 @@ def test_b1_abstencion_no_inventa_consulta(tmp_path):
     )
     r = responder_consulta_atlas(pregunta, ruta_viajes=ruta, proveedor_interpretacion=proveedor)
     assert r.estado == ESTADO_NO_INTERPRETABLE
+
+
+# --- Bloque B1 V2 -- Bloque 6/7: la consulta determinística válida pero
+# semánticamente incompatible se descarta y escala a B1 en vez de
+# ejecutarse tal cual (el bug real: "22 viajes" para una pregunta de km) ---
+
+def test_pregunta_de_kms_plural_se_resuelve_determinista_sin_gastar_b1(tmp_path):
+    """Bloque 10/17 -- "kms" (plural) ya está en el vocabulario: se
+    resuelve determinísticamente, sin gastar una llamada a B1."""
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [_fila(choferes="JUAN PEREZ", distancia_km="12.5")])
+    pregunta = "cuantos kms hizo juan perez"
+    proveedor = ProveedorInterpretacionConsultaSimulado(respuestas_por_pregunta={})
+    r = responder_consulta_atlas(pregunta, ruta_viajes=ruta, proveedor_interpretacion=proveedor)
+    assert proveedor.preguntas_recibidas == []
+    assert "12.5 km calculados" in r.texto_respuesta
+
+
+def test_semantica_incompatible_fuerza_b1_en_vez_de_responder_viajes(tmp_path):
+    """Bloque 7 -- un nombre propio no reconocido (aquí "Retamal", ajeno
+    al catálogo de esta fixture) cede a B1 (ya lo hacía en V1); si B1
+    identifica bien la métrica de distancia, la respuesta final usa esa
+    métrica corregida, nunca COUNT_VIAJES."""
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [_fila(choferes="JUAN PEREZ", distancia_km="12.5")])
+    pregunta = "¿Cuántos km recorrió Retamal?"
+    proveedor = ProveedorInterpretacionConsultaSimulado(respuestas_por_pregunta={
+        pregunta: RespuestaSimuladaInterpretacion(
+            consulta=ConsultaAtlas(metrica="SUM_KM", filtros={"chofer": "JUAN PEREZ"}),
+        ),
+    })
+    r = responder_consulta_atlas(pregunta, ruta_viajes=ruta, proveedor_interpretacion=proveedor)
+    assert proveedor.preguntas_recibidas == [pregunta]
+    assert r.estado == ESTADO_OK
+    assert "12.5 km calculados" in r.texto_respuesta
+
+
+def test_b1_tampoco_puede_producir_consulta_semanticamente_incompatible(tmp_path):
+    """Bloque 6/7 -- el validador semántico se aplica también a la
+    salida de B1, no sólo a la del determinístico: si B1 devuelve
+    COUNT_VIAJES para una pregunta de km, nunca se ejecuta tal cual."""
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [_fila(choferes="JUAN PEREZ")])
+    pregunta = "¿Cuántos km recorrió Retamal?"
+    proveedor = ProveedorInterpretacionConsultaSimulado(respuestas_por_pregunta={
+        pregunta: RespuestaSimuladaInterpretacion(
+            consulta=ConsultaAtlas(metrica="COUNT_VIAJES", filtros={"chofer": "JUAN PEREZ"}),
+        ),
+    })
+    r = responder_consulta_atlas(pregunta, ruta_viajes=ruta, proveedor_interpretacion=proveedor)
+    assert r.estado == ESTADO_NO_INTERPRETABLE
+    assert "Retamal" in r.texto_respuesta
+
+
+# --- Bloque B1 V2 -- Caso real C: COUNT_DISTINCT_CHOFER, nunca viajes ---
+
+def test_cuantos_choferes_trabajaron_cuenta_personas_no_viajes(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(numero_transporte="T1", choferes="JUAN PEREZ"),
+        _fila(numero_transporte="T2", choferes="JUAN PEREZ"),
+        _fila(numero_transporte="T3", choferes="PEDRO GOMEZ"),
+    ])
+    r = responder_consulta_atlas("¿Cuántos choferes trabajaron este mes?", ruta_viajes=ruta)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == 2
+    assert "2 choferes" in r.texto_respuesta
+    assert "viaje" not in r.texto_respuesta.split("(")[0]  # nunca "N viajes" en el cuerpo principal
+
+
+# --- Bloque B1 V2 -- dominio INCIDENCIAS_DOCUMENTALES: repositorio
+# canónico real, nunca contando viajes REVISAR (Bloque 4.A/9) ---
+
+def _escribir_incidencias(ruta, registros):
+    ruta.write_text(json.dumps({"version_formato": 1, "incidencias": registros}), encoding="utf-8")
+
+
+def _incidencia(**overrides):
+    base = {
+        "incidencia_id": "abc", "contexto": "CLIENTE X", "numero_guia": "1", "numero_transporte": "T1",
+        "campo": "obra_destino", "valor_documental": "X", "valor_canonico": "Y",
+        "tipo_incidencia": "OBRA_DOCUMENTAL_INCONSISTENTE", "evidencia": [], "fecha_deteccion": "2026-08-01T00:00:00+00:00",
+        "estado": "DETECTADA", "fuente_resolucion": "", "actor": "", "decision_id": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_cuantas_incidencias_documentales_hay_lee_repositorio_canonico(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila(estado="REQUIERE_REVISION")] * 22)  # nunca 22 viajes
+    ruta_incidencias = tmp_path / "incidencias_documentales.json"
+    _escribir_incidencias(ruta_incidencias, [_incidencia(numero_guia="1"), _incidencia(numero_guia="2")])
+    r = responder_consulta_atlas(
+        "¿Cuántas incidencias documentales hay?", ruta_viajes=ruta_viajes, ruta_incidencias=ruta_incidencias,
+    )
+    assert r.estado == ESTADO_OK
+    assert r.resultado.consulta_interpretada.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES
+    assert "2 incidencias documentales registradas" in r.texto_respuesta
+    assert "22" not in r.texto_respuesta
+
+
+def test_incidencias_sin_archivo_responde_cero_no_error(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila()])
+    r = responder_consulta_atlas("¿Cuántas incidencias documentales hay?", ruta_viajes=ruta_viajes, ruta_incidencias=None)
+    assert r.resultado.resultado == 0

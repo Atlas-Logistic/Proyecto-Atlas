@@ -17,6 +17,7 @@ import json
 import os
 import sys
 
+from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES
 from atlas_core.responder_consulta_atlas import RespuestaConsultaAtlas, responder_consulta_atlas
 
 
@@ -54,21 +55,28 @@ def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
     if respuesta.resultado is not None:
         r = respuesta.resultado
         consulta = r.consulta_interpretada
+        # Bloque B1 V2 -- dominio INCIDENCIAS_DOCUMENTALES no viene de
+        # `viajes.csv`: sus filas de soporte son incidencias, no viajes,
+        # y recortarlas con las columnas de un viaje sólo produciría
+        # columnas vacías. Se pasan tal cual (nunca un secreto/prompt --
+        # ver `atlas_core.incidencias_documentales.IncidenciaDocumental`).
+        es_incidencias = consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES
+        recorte = (lambda v: dict(v)) if es_incidencias else _viaje_recortado
         resultado_bruto = r.resultado
         if isinstance(resultado_bruto, tuple):
             # LISTAR_VIAJES: la propia lista de viajes es el "resultado".
-            resultado_serializado = [_viaje_recortado(dict(v)) for v in resultado_bruto]
+            resultado_serializado = [recorte(dict(v)) for v in resultado_bruto]
         else:
             resultado_serializado = resultado_bruto
         salida["resultado"] = {
             "consulta_interpretada": {
-                "metrica": consulta.metrica, "filtros": dict(consulta.filtros),
+                "metrica": consulta.metrica, "dominio": consulta.dominio, "filtros": dict(consulta.filtros),
                 "agrupacion": consulta.agrupacion, "orden": consulta.orden, "limite": consulta.limite,
             },
             "resultado": resultado_serializado,
             "unidades": r.unidades,
             "total_coincidencias": r.total_coincidencias,
-            "viajes_soporte": [_viaje_recortado(dict(v)) for v in r.viajes_soporte],
+            "viajes_soporte": [recorte(dict(v)) for v in r.viajes_soporte],
             "advertencias": list(r.advertencias),
         }
     return salida
@@ -78,11 +86,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Consultas Atlas V1 -- responde una pregunta operacional.")
     parser.add_argument("pregunta")
     parser.add_argument("--viajes", required=True, help="Ruta a viajes.csv del reporte vigente.")
+    # Bloque B1 V2 -- dominio INCIDENCIAS_DOCUMENTALES (Bloque 4.A/9 del
+    # ticket). Opcional: sin ella, ese dominio simplemente responde "0
+    # incidencias" (mismo criterio ya usado por
+    # `src/incidencias_documentales.js` -- archivo ausente no es error).
+    parser.add_argument("--incidencias", default=None, help="Ruta a catalogos_privados/incidencias_documentales.json.")
     args = parser.parse_args(argv)
 
     try:
         respuesta = responder_consulta_atlas(
-            args.pregunta, ruta_viajes=args.viajes,
+            args.pregunta, ruta_viajes=args.viajes, ruta_incidencias=args.incidencias,
             proveedor_interpretacion=_proveedor_interpretacion_opcional(),
         )
     except Exception as error:  # nunca deja el proceso sin salida JSON parseable

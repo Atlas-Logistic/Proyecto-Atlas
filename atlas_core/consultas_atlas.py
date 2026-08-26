@@ -33,14 +33,43 @@ METRICA_SUM_PESO = "SUM_PESO"
 METRICA_SUM_KM = "SUM_KM"
 METRICA_SUM_TIEMPO = "SUM_TIEMPO"
 METRICA_LISTAR_VIAJES = "LISTAR_VIAJES"
+# Bloque B1 V2 -- "cuántos choferes trabajaron" NO es COUNT_VIAJES: cuenta
+# personas distintas, nunca filas/guías (Bloque 4.C del ticket).
+METRICA_COUNT_DISTINCT_CHOFER = "COUNT_DISTINCT_CHOFER"
+# Bloque B1 V2 -- dominio INCIDENCIAS_DOCUMENTALES, nunca calculado
+# contando viajes REVISAR (Bloque 4.A/9 del ticket).
+METRICA_COUNT_INCIDENCIAS = "COUNT_INCIDENCIAS"
 METRICAS_SOPORTADAS = frozenset({
     METRICA_COUNT_VIAJES, METRICA_COUNT_GUIAS, METRICA_SUM_PESO,
     METRICA_SUM_KM, METRICA_SUM_TIEMPO, METRICA_LISTAR_VIAJES,
+    METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_INCIDENCIAS,
 })
 _UNIDADES_POR_METRICA = {
     METRICA_COUNT_VIAJES: "viajes", METRICA_COUNT_GUIAS: "guías",
-    METRICA_SUM_PESO: "kg", METRICA_SUM_KM: "km", METRICA_SUM_TIEMPO: "min",
-    METRICA_LISTAR_VIAJES: "viajes",
+    # Bloque 10 -- "km calculados", nunca "km" a secas: `distancia_km`
+    # sale del ruteo (ORS driving-hgv), no de un GPS real de recorrido
+    # (Ruta GPS V1 no existe todavía) -- nunca sugerir lo contrario.
+    METRICA_SUM_PESO: "kg", METRICA_SUM_KM: "km calculados", METRICA_SUM_TIEMPO: "min",
+    METRICA_LISTAR_VIAJES: "viajes", METRICA_COUNT_DISTINCT_CHOFER: "choferes",
+    METRICA_COUNT_INCIDENCIAS: "incidencias",
+}
+
+# --- Bloque B1 V2 (Bloque 3 del ticket): DOMINIO -- una ConsultaAtlas ya
+# no asume implícitamente "viajes.csv". VIAJES sigue siendo el default
+# (compatibilidad total con toda consulta V1 existente, que nunca fija
+# `dominio`); INCIDENCIAS_DOCUMENTALES es el único dominio adicional que
+# este bloque implementa realmente -- sin sobrediseñar dominios que
+# ningún caso real pide todavía (CHOFERES/VEHICULOS/CLIENTES/
+# OBRAS_DESTINOS del Bloque 3 del ticket son, hoy, siempre una MÉTRICA o
+# un FILTRO sobre el dominio VIAJES, nunca un dominio propio -- extender
+# esto a un dominio real de verdad es la misma mecánica, cuando haga
+# falta)."""
+DOMINIO_VIAJES = "VIAJES"
+DOMINIO_INCIDENCIAS_DOCUMENTALES = "INCIDENCIAS_DOCUMENTALES"
+DOMINIOS_SOPORTADOS = frozenset({DOMINIO_VIAJES, DOMINIO_INCIDENCIAS_DOCUMENTALES})
+_METRICAS_POR_DOMINIO = {
+    DOMINIO_VIAJES: METRICAS_SOPORTADAS - {METRICA_COUNT_INCIDENCIAS},
+    DOMINIO_INCIDENCIAS_DOCUMENTALES: frozenset({METRICA_COUNT_INCIDENCIAS}),
 }
 
 # --- Bloque 2: filtros V1 -- sólo campos que `viajes.csv` realmente
@@ -106,6 +135,7 @@ class ConsultaAtlas:
     agrupacion: str | None = None
     orden: str = "DESC"
     limite: int | None = None
+    dominio: str = DOMINIO_VIAJES
 
 
 @dataclass(frozen=True)
@@ -130,8 +160,16 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
     que el dataset real no soporte. Se llama SIEMPRE antes de ejecutar,
     tanto si la consulta la armó el interpretador determinístico como
     si la armó B1."""
+    if consulta.dominio not in DOMINIOS_SOPORTADOS:
+        raise ErrorConsultaAtlas(f"Dominio no soportado: {consulta.dominio!r}")
     if consulta.metrica not in METRICAS_SOPORTADAS:
         raise ErrorConsultaAtlas(f"Métrica no soportada: {consulta.metrica!r}")
+    if consulta.metrica not in _METRICAS_POR_DOMINIO[consulta.dominio]:
+        raise ErrorConsultaAtlas(
+            f"Métrica {consulta.metrica!r} no es válida para el dominio {consulta.dominio!r}"
+        )
+    if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER and consulta.agrupacion is not None:
+        raise ErrorConsultaAtlas("COUNT_DISTINCT_CHOFER no soporta agrupación todavía.")
     for campo in consulta.filtros:
         if campo not in FILTROS_SOPORTADOS:
             raise ErrorConsultaAtlas(f"Filtro no soportado: {campo!r}")
@@ -272,6 +310,8 @@ def _valor_metrica(viaje: Mapping[str, str], metrica: str) -> float:
     return 0.0
 
 
+_CHOFERES_AUSENTES = frozenset({"", "NO ENCONTRADO"})
+
 _COLUMNA_AGRUPACION = {
     "chofer": "choferes", "cliente": "clientes", "obra": "obras_destino",
     "destino": "direccion_entrega", "comuna": "localidad_entrega",
@@ -305,11 +345,35 @@ def ejecutar_consulta_atlas(
     """Bloque 8 -- ejecutor determinístico. Única autoridad de cálculo
     de Atlas: filtra, agrupa, suma/cuenta, ordena y devuelve las filas
     soporte reales -- nunca un número que no pueda inspeccionarse
-    (Bloque 9). Nunca escribe nada (Bloque 18: read-only)."""
+    (Bloque 9). Nunca escribe nada (Bloque 18: read-only). Resuelve
+    únicamente el dominio VIAJES -- INCIDENCIAS_DOCUMENTALES tiene su
+    propio ejecutor (`ejecutar_consulta_incidencias_documentales`), otra
+    fuente de datos por completo (Bloque 9 del ticket)."""
     validar_consulta(consulta)
+    if consulta.dominio != DOMINIO_VIAJES:
+        raise ErrorConsultaAtlas(
+            f"ejecutar_consulta_atlas sólo resuelve el dominio {DOMINIO_VIAJES!r} "
+            f"-- {consulta.dominio!r} no corresponde a viajes.csv."
+        )
     rango_fecha = _rango_fecha_de_consulta(consulta)
     coincidencias = [v for v in viajes if _fila_coincide(v, consulta, rango_fecha)]
     unidades = _UNIDADES_POR_METRICA[consulta.metrica]
+
+    if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER:
+        # Bloque 4.C/11 -- personas distintas, nunca filas: normaliza
+        # identidad (mismo `normalizar_texto_atlas` de todo Atlas, nunca
+        # una tercera variante) y excluye valores ausentes/"No
+        # encontrado" -- un chofer sin resolver nunca cuenta como uno más.
+        choferes = {
+            normalizar_texto_atlas(c)
+            for v in coincidencias
+            for c in _valores_multivalor(v, "choferes")
+            if normalizar_texto_atlas(c) not in _CHOFERES_AUSENTES
+        }
+        return ResultadoConsultaAtlas(
+            consulta_interpretada=consulta, resultado=len(choferes), unidades=unidades,
+            total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
+        )
 
     if consulta.metrica == METRICA_LISTAR_VIAJES:
         filas = list(coincidencias)
@@ -357,4 +421,41 @@ def ejecutar_consulta_atlas(
     return ResultadoConsultaAtlas(
         consulta_interpretada=consulta, resultado=tuple(filas_resultado), unidades=unidades,
         total_coincidencias=len(coincidencias), viajes_soporte=tuple(soporte),
+    )
+
+
+def ejecutar_consulta_incidencias_documentales(
+    consulta: ConsultaAtlas, incidencias: Sequence[Mapping[str, object]],
+) -> ResultadoConsultaAtlas:
+    """Bloque 9 -- ejecutor determinístico del dominio
+    INCIDENCIAS_DOCUMENTALES. Lee EXCLUSIVAMENTE lo que el repositorio
+    canónico ya entrega (`atlas_core.incidencias_documentales.
+    AlmacenIncidenciasDocumentales.listar()`, convertido a dict por el
+    llamador) -- nunca infiere una incidencia contando viajes en estado
+    REVISAR. Cuenta REGISTROS individuales tal como el repositorio los
+    entrega (Bloque 4.A: "seguir el contrato real del repositorio", el
+    mismo criterio que ya usa el contador "Total" de la pestaña
+    Incidencias Documentales de Desktop). Si varias guías comparten el
+    mismo `numero_transporte` (mismo viaje, la misma incidencia real
+    duplicada en más de una guía), lo señala en `advertencias` -- nunca
+    lo oculta ni recalcula con una regla de agrupación paralela."""
+    validar_consulta(consulta)
+    if consulta.dominio != DOMINIO_INCIDENCIAS_DOCUMENTALES:
+        raise ErrorConsultaAtlas(
+            f"ejecutar_consulta_incidencias_documentales sólo resuelve el dominio "
+            f"{DOMINIO_INCIDENCIAS_DOCUMENTALES!r}."
+        )
+    registros = list(incidencias)
+    unidades = _UNIDADES_POR_METRICA[consulta.metrica]
+    transportes = {
+        str(r.get("numero_transporte", "")).strip()
+        for r in registros if str(r.get("numero_transporte", "")).strip()
+    }
+    advertencias: tuple[str, ...] = ()
+    if transportes and len(transportes) != len(registros):
+        advertencias = (f"Corresponden a {len(transportes)} viaje{'s' if len(transportes) != 1 else ''}.",)
+    return ResultadoConsultaAtlas(
+        consulta_interpretada=consulta, resultado=len(registros), unidades=unidades,
+        total_coincidencias=len(registros), viajes_soporte=tuple(registros),
+        advertencias=advertencias,
     )

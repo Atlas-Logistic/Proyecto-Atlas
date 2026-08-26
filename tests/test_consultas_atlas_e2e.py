@@ -116,3 +116,81 @@ def test_total_viajes_actuales_coincide_con_23_reportados():
     r = responder_consulta_atlas("¿Cuántos viajes hay?", ruta_viajes=RUTA_VIAJES_REAL)
     assert r.estado == ESTADO_OK
     assert r.resultado.resultado == len(viajes)
+
+
+# --- Bloque B1 V2 -- PREGÚNTALE A ATLAS / B1 V2: las 3 preguntas reales
+# de Javier que antes devolvían "22 viajes" (Bloque 19/13 del ticket).
+# Regresiones permanentes, contra el archivo real de incidencias. ---
+
+def _ruta_incidencias_real() -> Path | None:
+    ruta = RAIZ_DRIVE / "catalogos_privados" / "incidencias_documentales.json"
+    return ruta if ruta.is_file() else None
+
+
+RUTA_INCIDENCIAS_REAL = _ruta_incidencias_real()
+
+
+def test_a_incidencias_documentales_nunca_responde_en_viajes():
+    """Caso real A -- antes: "22 viajes". Ahora: cuenta el repositorio
+    canónico de incidencias, nunca infiere contando REVISAR."""
+    r = responder_consulta_atlas(
+        "¿Cuántas incidencias documentales hay?",
+        ruta_viajes=RUTA_VIAJES_REAL, ruta_incidencias=RUTA_INCIDENCIAS_REAL,
+    )
+    assert r.estado == ESTADO_OK
+    assert "incidencia" in r.texto_respuesta.lower()
+    assert "viaje" not in r.texto_respuesta.lower().split("corresponden")[0]
+    if RUTA_INCIDENCIAS_REAL is not None:
+        incidencias = json.loads(RUTA_INCIDENCIAS_REAL.read_text(encoding="utf-8"))["incidencias"]
+        assert r.resultado.resultado == len(incidencias)
+
+
+def test_b_km_de_retamal_nunca_responde_en_viajes():
+    """Caso real B -- antes: "3 viajes". Ahora: SUM_KM del chofer real."""
+    viajes = _leer_viajes_real()
+    esperado = sum(
+        float(v.get("distancia_km") or 0) for v in viajes if "RETAMAL" in v.get("choferes", "").upper()
+    )
+    r = responder_consulta_atlas("¿Cuántos kms recorridos tiene Retamal?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert "km calculados" in r.texto_respuesta
+    assert r.resultado.resultado == esperado
+
+
+def test_c_choferes_que_trabajaron_este_mes_nunca_responde_en_viajes():
+    """Caso real C -- antes: "22 viajes". Ahora: COUNT_DISTINCT_CHOFER,
+    personas distintas, nunca filas."""
+    r = responder_consulta_atlas("¿Cuántos choferes trabajaron este mes?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert "chofer" in r.texto_respuesta.lower()
+    assert r.resultado.resultado != 22 or r.resultado.consulta_interpretada.metrica != "COUNT_VIAJES"
+    assert r.resultado.consulta_interpretada.metrica == "COUNT_DISTINCT_CHOFER"
+
+
+# --- Variantes de lenguaje natural (Bloque 14) -- mismas 3 intenciones ---
+
+def test_variante_cuantos_km_hizo_retamal():
+    r = responder_consulta_atlas("cuantos km hizo retamal", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.resultado.consulta_interpretada.metrica == "SUM_KM"
+
+
+def test_variante_distancia_de_cristopher_retamal():
+    r = responder_consulta_atlas("distancia de cristopher retamal", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.resultado.consulta_interpretada.metrica == "SUM_KM"
+
+
+def test_variante_errores_documentales_que_tenemos():
+    r = responder_consulta_atlas(
+        "errores documentales que tenemos", ruta_viajes=RUTA_VIAJES_REAL, ruta_incidencias=RUTA_INCIDENCIAS_REAL,
+    )
+    assert r.resultado.consulta_interpretada.dominio == "INCIDENCIAS_DOCUMENTALES"
+
+
+def test_variante_cuantos_conductores_cargaron_este_mes():
+    r = responder_consulta_atlas("cuántos conductores cargaron este mes", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.resultado.consulta_interpretada.metrica == "COUNT_DISTINCT_CHOFER"
+
+
+def test_variante_choferes_con_viajes_este_mes():
+    r = responder_consulta_atlas("choferes con viajes este mes", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.resultado.consulta_interpretada.metrica == "COUNT_DISTINCT_CHOFER"

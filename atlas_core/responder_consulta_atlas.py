@@ -10,11 +10,16 @@ acoplar renderer directamente a CSV con lógica duplicada")."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from atlas_core.consultas_atlas import (
+    DOMINIO_INCIDENCIAS_DOCUMENTALES,
+    DOMINIO_VIAJES,
+    METRICA_COUNT_DISTINCT_CHOFER,
     METRICA_COUNT_GUIAS,
+    METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_VIAJES,
     METRICA_LISTAR_VIAJES,
     METRICA_SUM_KM,
@@ -25,14 +30,24 @@ from atlas_core.consultas_atlas import (
     ResultadoConsultaAtlas,
     cargar_viajes,
     ejecutar_consulta_atlas,
+    ejecutar_consulta_incidencias_documentales,
     validar_consulta,
 )
+from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales
 from atlas_core.interpretador_consultas import (
     CatalogosConsulta,
     construir_catalogos_consulta,
     interpretar_consulta_determinista,
+    validar_compatibilidad_semantica,
 )
 from atlas_core.proveedor_interpretacion_consultas import ProveedorInterpretacionConsulta
+
+# Bloque B1 V2 (Bloque 16 del ticket) -- observabilidad SÓLO en logs
+# internos de depuración, nunca en la UI principal ni en el JSON que
+# recibe Desktop. Nunca registra la credencial ni el prompt completo de
+# B1 -- sólo la decisión (intención propuesta, incompatibilidades,
+# si escaló a B1).
+_registro = logging.getLogger(__name__)
 
 ESTADO_OK = "OK"
 ESTADO_AMBIGUA = "AMBIGUA"
@@ -84,12 +99,49 @@ def _filtros_legibles(consulta: ConsultaAtlas) -> str:
     return ", ".join(partes)
 
 
+def _nota_cobertura_km(resultado: ResultadoConsultaAtlas) -> str | None:
+    """Bloque 10 -- si sólo ALGUNOS de los viajes que cumplen el filtro
+    tienen distancia calculada, decirlo brevemente en vez de sumar en
+    silencio sólo sobre los que sí la tienen (Bloque 12: "responder con
+    los datos disponibles y anotar la cobertura si es relevante")."""
+    total = resultado.total_coincidencias
+    if total <= 1:
+        return None
+    con_distancia = sum(
+        1 for v in resultado.viajes_soporte
+        if str(v.get("distancia_km", "")).strip() not in ("", "0", "0.0")
+    )
+    if con_distancia and con_distancia != total:
+        return f"Disponible en {con_distancia} de {total} viaje{'s' if total != 1 else ''}."
+    return None
+
+
+def _formatear_respuesta_incidencias(resultado: ResultadoConsultaAtlas) -> str:
+    """Bloque 4.A/12 -- dominio INCIDENCIAS_DOCUMENTALES: cuenta
+    registros, tal como el repositorio canónico los entrega (nunca
+    infiere contando viajes REVISAR)."""
+    n = resultado.resultado
+    texto = f"Hay {n} incidencia{'s' if n != 1 else ''} documental{'es' if n != 1 else ''} registrada{'s' if n != 1 else ''}."
+    if resultado.advertencias:
+        texto += f" {resultado.advertencias[0]}"
+    return texto
+
+
 def _formatear_respuesta(resultado: ResultadoConsultaAtlas) -> str:
     """Bloque 11 -- respuesta breve y operacional, nunca un párrafo de
     razonamiento B1. Bloque 13 -- cero resultados nunca es un error."""
     consulta = resultado.consulta_interpretada
+    if consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES:
+        return _formatear_respuesta_incidencias(resultado)
+
     contexto = _filtros_legibles(consulta)
     sufijo_contexto = f" ({contexto})" if contexto else ""
+
+    if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER:
+        n = resultado.resultado
+        if n == 0:
+            return f"No encontré choferes con viajes que cumplan esos criterios{sufijo_contexto}."
+        return f"{n} chofer{'es' if n != 1 else ''}{sufijo_contexto}."
 
     if consulta.metrica == METRICA_LISTAR_VIAJES:
         n = resultado.total_coincidencias
@@ -122,7 +174,14 @@ def _formatear_respuesta(resultado: ResultadoConsultaAtlas) -> str:
         toneladas = total / 1000.0
         return f"{_formatear_numero(toneladas)} toneladas ({_formatear_numero(total)} kg){sufijo_contexto}."
     if consulta.metrica == METRICA_SUM_KM:
-        return f"{_formatear_numero(total)} km{sufijo_contexto}."
+        # Bloque 10 -- `distancia_km` es la distancia RUTEADA (ORS
+        # driving-hgv, ver `reporte_viajes.py`), nunca un GPS real de
+        # recorrido (eso no existe todavía -- Ruta GPS V1 no implementada).
+        # Se nombra explícitamente "km calculados", nunca "km recorridos
+        # reales".
+        texto = f"{_formatear_numero(total)} km calculados{sufijo_contexto}."
+        cobertura = _nota_cobertura_km(resultado)
+        return f"{texto} {cobertura}" if cobertura else texto
     if consulta.metrica == METRICA_SUM_TIEMPO:
         return f"{_formatear_numero(total)} minutos{sufijo_contexto}."
     return f"{_formatear_numero(total)} {resultado.unidades}{sufijo_contexto}."
@@ -134,12 +193,30 @@ def _formatear_numero(valor: object) -> str:
     return f"{float(valor):.2f}".rstrip("0").rstrip(".")
 
 
+def _cargar_incidencias(ruta_incidencias: str | Path | None) -> list[dict[str, object]]:
+    """Read-only (Bloque 18/9): usa el repositorio canónico, nunca una
+    lectura paralela del JSON. Un archivo ausente no es un error --
+    significa "todavía no hay ninguna Incidencia Documental registrada"
+    (mismo criterio ya usado por `src/incidencias_documentales.js`)."""
+    if ruta_incidencias is None or not Path(ruta_incidencias).is_file():
+        return []
+    return [i.a_dict() for i in AlmacenIncidenciasDocumentales(ruta_incidencias).listar()]
+
+
 def responder_consulta_atlas(
-    pregunta: str, *, ruta_viajes: str | Path,
+    pregunta: str, *, ruta_viajes: str | Path, ruta_incidencias: str | Path | None = None,
     proveedor_interpretacion: ProveedorInterpretacionConsulta | None = None,
 ) -> RespuestaConsultaAtlas:
     """Punto de entrada único de Consultas Atlas V1. Read-only (Bloque
-    18): nunca escribe nada, sólo lee `viajes.csv`."""
+    18): nunca escribe nada, sólo lee `viajes.csv` y (dominio
+    INCIDENCIAS_DOCUMENTALES) el repositorio canónico de incidencias.
+
+    Pipeline (Bloque 7 del ticket):
+        determinístico -> [validador semántico] -> B1 (sólo si hace
+        falta) -> [validador semántico] -> validador estructural ->
+        ejecutor determinístico -> presentación.
+    Toda cifra sigue saliendo siempre del ejecutor -- B1 nunca produce
+    una respuesta numérica final, sólo una `ConsultaAtlas`."""
     viajes = cargar_viajes(ruta_viajes)
     catalogos = construir_catalogos_consulta(viajes)
 
@@ -159,10 +236,39 @@ def responder_consulta_atlas(
             opciones_aclaracion=candidatos,
         )
 
+    # Bloque 6/7 -- "estructuralmente válida" no basta: si el
+    # determinístico propuso algo semánticamente incompatible con la
+    # pregunta (Bloque 2: KM+COUNT_VIAJES, CHOFERES+COUNT_VIAJES,
+    # INCIDENCIAS+dominio VIAJES, PESO+COUNT_VIAJES), se descarta esa
+    # propuesta y se cede a B1 en vez de responder con un número que no
+    # corresponde -- este es EXACTAMENTE el criterio que antes hacía que
+    # B1 nunca interviniera.
+    motivo_incompatibilidad: str | None = None
+    if consulta is not None:
+        motivo_incompatibilidad = validar_compatibilidad_semantica(pregunta, consulta)
+        if motivo_incompatibilidad is not None:
+            _registro.debug(
+                "Consulta determinística descartada por incompatibilidad semántica: %s (métrica=%s dominio=%s)",
+                motivo_incompatibilidad, consulta.metrica, consulta.dominio,
+            )
+            consulta = None
+        else:
+            _registro.debug(
+                "Consulta determinística aceptada sin B1: métrica=%s dominio=%s", consulta.metrica, consulta.dominio,
+            )
+
     if consulta is None:
         sin_coincidencia = next((a for a in avisos if a.startswith("SIN_COINCIDENCIA:")), None)
         if proveedor_interpretacion is not None:
+            _registro.debug("Escalando a B1 (proveedor=%s)", getattr(proveedor_interpretacion, "nombre", "?"))
             consulta = proveedor_interpretacion.interpretar(pregunta, catalogos)
+            if consulta is not None:
+                motivo_b1 = validar_compatibilidad_semantica(pregunta, consulta)
+                if motivo_b1 is not None:
+                    _registro.debug("Consulta de B1 también incompatible: %s", motivo_b1)
+                    consulta = None
+                else:
+                    _registro.debug("Consulta de B1 validada: métrica=%s dominio=%s", consulta.metrica, consulta.dominio)
         if consulta is None:
             if sin_coincidencia is not None:
                 nombres = sin_coincidencia.split(":", 1)[1]
@@ -180,7 +286,12 @@ def responder_consulta_atlas(
     except ErrorConsultaAtlas as error:
         return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
 
-    resultado = ejecutar_consulta_atlas(consulta, viajes)
+    if consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES:
+        incidencias = _cargar_incidencias(ruta_incidencias)
+        resultado = ejecutar_consulta_incidencias_documentales(consulta, incidencias)
+    else:
+        resultado = ejecutar_consulta_atlas(consulta, viajes)
     texto = _formatear_respuesta(resultado)
     estado = ESTADO_SIN_RESULTADOS if resultado.total_coincidencias == 0 else ESTADO_OK
+    _registro.debug("Consulta ejecutada: métrica=%s dominio=%s resultado=%r", consulta.metrica, consulta.dominio, resultado.resultado)
     return RespuestaConsultaAtlas(estado=estado, texto_respuesta=texto, resultado=resultado)
