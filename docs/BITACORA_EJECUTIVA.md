@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — BARRIDO GENERAL DE PATENTES SOSPECHOSAS: CATCH-UP FOCAL DEL CATÁLOGO
+
+- **Herramienta nueva (read-only):** `atlas_core.catalogo_vehiculos_catchup` -- construye el universo real de patentes (catálogo confirmado + histórico documental vigente + histórico adicional opcional), detecta pares con distancia de edición de 1 carácter y rol compatible, y clasifica cada uno en 4 clases (A. OCR_INEQUIVOCO, B. ERROR_DOCUMENTAL_CONFIRMADO, C. VEHICULO_REAL, D. AMBIGUO) usando la MISMA tabla de confusiones OCR ya calibrada -- nunca hardcodea equivalencias, nunca decide por frecuencia baja sola.
+- **Revalidación de los 2 casos ya resueltos:** BPHF67→BPHR67 y BKYX63→BKYK63 siguen clasificando correctamente como OCR_INEQUIVOCO -- sin regresión.
+- **Hallazgo real más importante:** el barrido encontró 3 pares estructuralmente sospechosos adicionales (JD8659/JE8659, PXHH31/PXHH32, JF9565/JF9575) que la herramienta correctamente clasifica como VEHICULO_REAL/AMBIGUO -- nunca los pliega, porque los catálogos reales ya traen `procedencia=CONFIRMACION_HUMANA` explícita de Javier (JD8659 confirmado contra imágenes reales 464264/464265, registrado deliberadamente como entidad DISTINTA de JE8659 -- ver `respaldos/JD8659_Y_REFRESCO_464717_.../LEEME_ROLLBACK.md`; PXHH31/PXHH32 confirmadas cada una contra una guía real distinta). Validación real y contundente de que "NO asumir que todas son errores" era necesario.
+- **Candidatos adicionales (5, sólo en histórico archivado, sin visibilidad actual):** BDEG50→BDFG50, JE9565→JF9565, JR2501→JK2501, JX2501→JK2501, XE3629→XF3629 -- clasifican correctamente como OCR_INEQUIVOCO con evidencia real (chofer/RUT en común, confusión OCR calibrada, frecuencia lopsided), pero ninguno aparece hoy en el catálogo ni en el dataset vigente -- nada que reconciliar en producción; el mecanismo genérico ya existente los cubriría automáticamente si ese histórico se reprocesara alguna vez.
+- **Tests:** 9 focales nuevos (`tests/test_catalogo_vehiculos_catchup.py`) + suite completa Motor **1994 passed**.
+- **Producción:** sin cambios -- ninguna canonicalización nueva demostrada requiere escritura; no hizo falta backup. Desktop sin cambios (no cambia contrato de datos).
+- **Pendiente real:** ninguno de código. JF9565/JF9575 queda abierto para que Javier confirme manualmente si son dos ramplas reales o la misma, si algún día quiere cerrarlo -- Atlas no elige por él.
+
+---
+
 ## 2026-08-26 — 472339/CASA HELSINSKI: RECONCILIACIÓN DE OBRA + B1 + PROMOCIÓN AUTOMÁTICA
 
 - **Evidencia real reconstruida:** B1 NUNCA confirmó "Casa Helsinski" -- su único intento sobre `obra_destino` abortó por falta de la herramienta DOCUMENTOS_RELACIONADOS (`REQUIERE_HERRAMIENTA`, sin evidencia usada); la única mención real de RELSINSKI/HELSINSKI en la evidencia persistida es una nota de B1 sobre el dominio DESTINO, rechazada por el validador. Investigación externa real (fuera del proceso Python, guardada como fixture -- mismo patrón ya documentado para el caso SIGRO) confirmó que "Casa Helsinski" es un proyecto real de Inmobiliaria IKNOW en Helsinski 5810, La Reina (inmobiliariaiknow.cl).
