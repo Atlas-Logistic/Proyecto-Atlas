@@ -10,6 +10,7 @@ import re
 import time
 import tempfile
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from enum import Enum
 from pathlib import Path
@@ -2226,17 +2227,35 @@ def _ejecutar_ia_operacional(
             continue
         resultados = []
         motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()}
+        # Bloque PERFORMANCE V1 -- causa real (caso 472339: 4 llamadas B1
+        # de un mismo documento, ~38.7 s sumados porque se disparaban una
+        # tras otra) -- cada problema elegible de ESTE documento es
+        # independiente de los demás (campo distinto, evidencia propia,
+        # ninguno depende del resultado de otro) así que la espera de red
+        # de cada `orquestador.resolver(...)` nunca necesitaba ser
+        # secuencial. Se arma primero la lista completa de tareas (sin
+        # llamar a nadie todavía -- esto NUNCA cambia: sigue siendo
+        # puramente determinista y sin red), después se disparan EN
+        # PARALELO sólo las que sí requieren una llamada real (I/O de
+        # red, no CPU -- un hilo por llamada es seguro y barato), y por
+        # último se aplican los resultados en el MISMO ORDEN de siempre,
+        # de a uno, en el hilo principal -- la mutación de `fila`/
+        # `motivos` (y por lo tanto qué motivo puede quedar resuelto
+        # automáticamente y con qué explicación) es idéntica a la versión
+        # secuencial, byte a byte; sólo cambia CUÁNDO se esperó la red,
+        # nunca el resultado ni el orden en que se decide.
+        tareas: list[tuple[object, str, object, dict | None]] = []
         for tipo, codigo in detectar_problemas_elegibles(fila):
             if orquestador is None:
                 # B1 desactivado/sin credencial: el problema SIGUE siendo
                 # elegible (hay evidencia potencial que analizar), pero no
                 # hay con qué llamar -- explícito, nunca un silencio de
                 # "0 llamadas" sin razón.
-                resultados.append({
+                tareas.append((tipo, codigo, None, {
                     "problema": codigo, "dominio": tipo.dominio, "campo": tipo.campo,
                     "elegible_ia": True, "llamada_realizada": False,
                     "razon_no_elegible": "SIN_PROVEEDOR_IA_CONFIGURADO",
-                })
+                }))
                 continue
             evidencias = tipo.recopilar_evidencia(fila, filas, carpeta_catalogos=carpeta_catalogos)
             # Bloque B1 INVESTIGADOR -- causa raíz real de que B1 nunca
@@ -2252,11 +2271,11 @@ def _ejecutar_ia_operacional(
             # puede solicitar la herramienta él mismo (ver
             # `atlas_ia.orquestador`, ya soporta esta ronda).
             if not evidencias and not tipo.herramientas:
-                resultados.append({
+                tareas.append((tipo, codigo, None, {
                     "problema": codigo, "dominio": tipo.dominio, "campo": tipo.campo,
                     "elegible_ia": True, "llamada_realizada": False,
                     "razon_no_elegible": "SIN_EVIDENCIA_PARA_RAZONAR",
-                })
+                }))
                 continue
             contexto = ContextoRazonamiento(
                 campo=tipo.campo, valor_documental=fila.get(tipo.campo, ""),
@@ -2277,9 +2296,33 @@ def _ejecutar_ia_operacional(
                 herramientas_disponibles=tipo.herramientas,
                 restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_RONDAS_B1"),
             )
+            tareas.append((tipo, codigo, contexto, None))
+
+        indices_con_llamada = [i for i, (_, _, ctx, _) in enumerate(tareas) if ctx is not None]
+        resultados_llamada: dict[int, tuple[object, float]] = {}
+        if len(indices_con_llamada) == 1:
+            # Una sola llamada -- ningún beneficio de un hilo aparte, y
+            # evita el costo fijo de crear un executor para el caso más
+            # común (un solo problema elegible).
+            i = indices_con_llamada[0]
             inicio = time.perf_counter()
-            resultado = orquestador.resolver(contexto)
-            latencia = time.perf_counter() - inicio
+            resultado = orquestador.resolver(tareas[i][2])
+            resultados_llamada[i] = (resultado, time.perf_counter() - inicio)
+        elif indices_con_llamada:
+            def _resolver_con_tiempo(indice: int) -> tuple[int, object, float]:
+                inicio_hilo = time.perf_counter()
+                resultado_hilo = orquestador.resolver(tareas[indice][2])
+                return indice, resultado_hilo, time.perf_counter() - inicio_hilo
+
+            with ThreadPoolExecutor(max_workers=len(indices_con_llamada)) as pool:
+                for indice, resultado, latencia in pool.map(_resolver_con_tiempo, indices_con_llamada):
+                    resultados_llamada[indice] = (resultado, latencia)
+
+        for indice, (tipo, codigo, contexto, traza_previa) in enumerate(tareas):
+            if contexto is None:
+                resultados.append(traza_previa)
+                continue
+            resultado, latencia = resultados_llamada[indice]
             resumen["llamadas"] += 1
             resumen["latencia_segundos"] += latencia
             clase = str(resultado.clasificacion)[:1]

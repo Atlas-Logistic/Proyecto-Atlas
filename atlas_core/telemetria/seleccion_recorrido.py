@@ -185,10 +185,14 @@ def obtener_breadcrumbs_recorrido(
     seleccionada (nunca de toda la flota/día), reutilizando la caché de
     T1 (`ServicioTelemetria`) -- una guía ya procesada no vuelve a pedir
     los mismos breadcrumbs al regenerar el reporte."""
+    # Bloque PERFORMANCE V1 -- mismo criterio que
+    # `recolectar_puntos_ventana_origen`: los trips de la cadena son
+    # independientes entre sí, se piden todos de una vez.
+    resultados = servicio.obtener_breadcrumbs_de_varios(recorrido.trip_ids)
     puntos: list[PosicionTelemetria] = []
     for trip_id in recorrido.trip_ids:
-        resultado = servicio.obtener_breadcrumbs(trip_id)
-        if resultado.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
+        resultado = resultados.get(trip_id)
+        if resultado is not None and resultado.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
             puntos.extend(resultado.puntos)
     return tuple(puntos)
 
@@ -650,11 +654,18 @@ def recolectar_puntos_ventana_origen(
         return RecoleccionVentanaOrigen(motivo="SIN_TRIPS_EN_VENTANA_TEMPORAL")
 
     cercanos_ordenados = sorted(cercanos, key=lambda v: _instante(v.inicio) or datetime.min)
+    # Bloque PERFORMANCE V1 -- los breadcrumbs de cada trip de la ventana
+    # son independientes entre sí; se piden todos de una vez
+    # (`obtener_breadcrumbs_de_varios` ya resuelve caché primero y
+    # paraleliza sólo lo que falta pedir a la red) en vez de uno por uno.
+    # `puntos` se sigue construyendo en el MISMO orden cronológico de
+    # `cercanos_ordenados` -- nunca en el orden en que la red respondió.
+    resultados_bc = servicio.obtener_breadcrumbs_de_varios(v.proveedor_trip_id for v in cercanos_ordenados)
     breadcrumbs_por_trip: dict[str, tuple[PosicionTelemetria, ...]] = {}
     puntos: list[PosicionTelemetria] = []
     for viaje in cercanos_ordenados:
-        resultado_bc = servicio.obtener_breadcrumbs(viaje.proveedor_trip_id)
-        if resultado_bc.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
+        resultado_bc = resultados_bc.get(viaje.proveedor_trip_id)
+        if resultado_bc is not None and resultado_bc.estado in (EstadoTelemetria.OK, EstadoTelemetria.RESULTADO_DESDE_CACHE):
             breadcrumbs_por_trip[viaje.proveedor_trip_id] = resultado_bc.puntos
             puntos.extend(resultado_bc.puntos)
 

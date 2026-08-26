@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — PERFORMANCE V1: PARALELIZACIÓN SEGURA DE B1 Y TELEMETRÍA (472339 ~4 min → segundos)
+
+- **Baseline instrumentado real** (guía 472339, PaddleOCR/GPU + ORS + Groq + Onelogis reales, copia aislada, nunca `G:\Mi unidad\Atlas`): con los fixes de patente/destino ya aplicados, el caso ya no dispara 4 problemas B1 sino 2 (`OBRA_DESTINO_SIN_CORROBORAR`, `SIN_ACCESO_VIAL`) — baseline limpio 24.1 s totales (`ocr_seg` 7.3, `telemetria_seg` 6.5, `atlas_ia` 6.5 llamado secuencial). El ~4 min original se explica, con evidencia real, por: 2 llamadas B1 de patente ya eliminadas (una de ellas sola, 20.5 s, por reintento de límite de cuota de Groq) + ejecución secuencial de las llamadas B1/telemetría restantes.
+- **Causa de los 2 cuellos reales confirmados por profiling:** (1) `_ejecutar_ia_operacional` llamaba cada problema B1 de un documento uno tras otro aunque son independientes entre sí; (2) `recolectar_puntos_ventana_origen`/`obtener_breadcrumbs_recorrido` pedían los breadcrumbs de cada trip GPS candidato (hasta 6 en el caso real) uno tras otro a Onelogis, también independientes.
+- **Fix (mismo patrón en ambos, nunca cambia resultado/orden):** se arma la lista de tareas primero (sin red), se disparan EN PARALELO sólo las llamadas de red reales (`ThreadPoolExecutor`), y los resultados se aplican en el mismo orden secuencial de siempre, en el hilo principal -- mutación de `fila`/caché nunca concurrente (`RepositorioTelemetria` no soporta escritura concurrente; se detectó y evitó ese riesgo antes de paralelizar). Un solo problema/trip nunca paga el costo de un executor.
+- **Medido:** B1 -- tiempo de pared pasó de ser igual a la suma de latencias (ejecución secuencial demostrada) a ser menor que la suma (paralelo demostrado matemáticamente); test controlado con reloj real confirma paralelo ~0.5s vs secuencial ~1.0s para 2 llamadas. Telemetría -- test controlado confirma paralelo ~0.3s vs secuencial ~0.9s para 3 trips. E2E real (462339 aislado): 24.1s → 9.0s (mismos resultados operacionales exactos: chofer, cliente, obra, patente BPHR67, destino, motivos, indicador_revision).
+- **Nunca se tocó:** OCR (PaddleOCR, fuera de alcance), validadores, B1 (mismo razonamiento, mismas restricciones), caché existente (se reutiliza, nunca se recrea), orden semántico de aplicación de resultados.
+- **Tests:** 7 focales nuevos (`tests/test_performance_v1_b1_paralelo.py`, `tests/test_performance_v1_telemetria_paralela.py`) + suite completa Motor **1947 passed**.
+
+---
+
 ## 2026-08-26 — FIX DE AUTONOMÍA DE DESTINO: HELSINSKI 5810 YA NO QUEDA EN SIN_ACCESO_VIAL SIN AGOTAR EL PIPELINE
 
 - **Causa real:** el proveedor principal (ORS) sólo resolvió dos centroides genéricos de la misma comuna ("La Reina, RM, Chile", >1 km entre sí) -- correctamente tratados como "el mismo lugar real" (regla ya calibrada, caso Coronel/Biobío) y aceptados como resuelto, pero el punto elegido no tenía acceso vial. El reintento con el respaldo estructurado (Nominatim) SÍ ubicó la calle real ("Helsinski"), pero como su etiqueta nunca trae el número de casa exacto (hueco real de cobertura del geocodificador en calles chilenas menos densamente mapeadas), `_candidato_unico_con_numero_de_calle` lo descartaba igual que si no hubiera encontrado nada -- sólo aceptaba un calce EXACTO de número.
