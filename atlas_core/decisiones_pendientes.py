@@ -978,9 +978,16 @@ def enriquecer_decisiones_obra(
                 if getattr(o, "cliente_id", None) == cliente_id and getattr(o, "estado_vigencia", None) == "ACTIVO"
             )
             evidencia_externa = evidencia_externa_por_clave.get(normalizar_nombre_obra(documental), ())
+            # Bloque 472339/CASA HELSINSKI -- la misma dirección
+            # documental ya resuelta que `OBRA_DESCONOCIDA` transporta
+            # para poder generar, después de REGISTRAR, la pregunta de
+            # destino (`decision_destino_para_obra_registrada`); acá se
+            # reutiliza como corroboración cruzada contra evidencia
+            # externa, nunca se vuelve a resolver ni a leer el documento.
             evaluacion = evaluar_evidencia_obra(
                 nombre_documental=documental, obras_confirmadas_mismo_cliente=obras_mismo_cliente,
                 evidencia_externa=evidencia_externa,
+                direccion_documental_resuelta=str(contexto.get("destino_documental", "")),
             )
             decision["evaluacion_evidencia"] = {"resultado": evaluacion.resultado, "explicacion": evaluacion.explicacion}
             decision["candidatos_evidencia"] = [c.a_dict() for c in evaluacion.candidatos]

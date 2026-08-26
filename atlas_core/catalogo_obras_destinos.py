@@ -474,12 +474,21 @@ class CatalogoObrasDestinos:
                 # cliente_id queda registrado como procedencia informativa
                 # (primer observador) -- no vuelve a usarse para filtrar
                 # búsquedas futuras de esta obra.
+                # Bloque 472339/CASA HELSINSKI -- si esta observación YA
+                # trae un alias documental (p.ej. el texto OCR aproximado
+                # que motivó registrar la obra bajo su nombre canónico
+                # real, nunca al revés), se guarda desde la creación --
+                # mismo criterio que el alias que ya se agrega cuando la
+                # obra existe (rama de arriba); nunca crea una entidad
+                # aparte para el alias.
+                alias_inicial = str(alias_documental or "").strip()
+                aliases_iniciales = (alias_inicial,) if alias_inicial and normalizar_nombre_obra(alias_inicial) != clave else ()
                 obra = Obra(
                     obra_id=str(self._generador_id()),
                     cliente_id=cliente.cliente_id,
                     nombre_canonico=str(nombre_obra).strip(),
                     nombre_normalizado=clave,
-                    aliases_documentales=(),
+                    aliases_documentales=aliases_iniciales,
                     estado=EstadoObra.OBSERVADA.value,
                     estado_vigencia=EstadoVigencia.ACTIVO.value,
                     evidencias=(evidencia,),

@@ -16,13 +16,52 @@ coincidencia -- nunca decide identidad por sí sola. Mismo principio ya
 usado para vehículos (`_diferencia_ocr_segura` sugiere, nunca autocorrige)."""
 from __future__ import annotations
 
+import re
+import unicodedata
+
 from atlas_core.catalogo_obras_destinos import Obra, normalizar_nombre_obra
 from atlas_core.motor_evidencia import (
     NIVEL_DOCUMENTAL_DEBIL, NIVEL_EXTERNO_CORPORATIVO, NIVEL_EXTERNO_DIRECTORIO, NIVEL_EXTERNO_OFICIAL,
-    RESULTADO_ALTA_NUEVA, RESULTADO_CONTRADICCION_DOCUMENTAL, RESULTADO_SUGERENCIA_HUMANA,
+    RESULTADO_ALTA_NUEVA, RESULTADO_CONTRADICCION_DOCUMENTAL, RESULTADO_RESUELTO_AUTOMATICAMENTE, RESULTADO_SUGERENCIA_HUMANA,
     CandidatoEvidencia, ResultadoEvidencia, elegir_mejor_candidato, hay_empate_en_el_tope,
 )
 from atlas_core.verificacion_externa import TIPO_FUENTE_CORPORATIVO, TIPO_FUENTE_DIRECTORIO, TIPO_FUENTE_OFICIAL, EvidenciaExterna
+
+# Bloque 472339/CASA HELSINSKI -- nombre OCR aproximado ("INMOB CASA
+# RELSINSKI SPA") + dirección documental ya resuelta por el pipeline
+# determinista ("HELSINSKI 5810 LA REINA SANTIAGO", RUTA_CALCULADA) +
+# fuente externa de alta confianza (sitio corporativo del desarrollador,
+# inmobiliariaiknow.cl: "Casa Helsinski", Helsinski 5810, La Reina) que
+# corrobora EXACTAMENTE esa misma dirección: la conjunción de una
+# dirección documental YA demostrada real (no inventada por la fuente
+# externa) con una fuente externa de alto nivel que corrobora esa misma
+# dirección es más fuerte que cualquiera de las dos por separado --
+# nunca se resuelve sola sólo por evidencia externa (ver más abajo).
+# Palabras administrativas genéricas que nunca aportan a la comparación
+# de una dirección (comuna/región/país repetidos de formas distintas
+# entre el documento y la fuente externa).
+_PALABRAS_ADMINISTRATIVAS_IGNORADAS = frozenset({"SANTIAGO", "REGION", "METROPOLITANA", "CHILE", "RM"})
+
+
+def _normalizar_direccion_obra(valor: str) -> str:
+    sin_tildes = unicodedata.normalize("NFD", str(valor or ""))
+    sin_tildes = "".join(c for c in sin_tildes if unicodedata.category(c) != "Mn")
+    solo_alfanumerico = re.sub(r"[^A-Za-z0-9]+", " ", sin_tildes).upper().strip()
+    tokens = [t for t in solo_alfanumerico.split() if t not in _PALABRAS_ADMINISTRATIVAS_IGNORADAS]
+    return " ".join(tokens)
+
+
+def _direccion_obra_coincide(direccion_a: str, direccion_b: str) -> bool:
+    """True sólo si ambas direcciones, normalizadas (sin tildes/puntuación/
+    palabras administrativas genéricas), son la misma calle+número -- una
+    coincide dentro de la otra. Nunca "misma comuna" ni "mismo texto
+    parcial" -- eso no demuestra la misma dirección (Sección 8, caso B:
+    nombre parecido pero dirección distinta nunca debe corroborar)."""
+    normalizada_a = _normalizar_direccion_obra(direccion_a)
+    normalizada_b = _normalizar_direccion_obra(direccion_b)
+    if not normalizada_a or not normalizada_b:
+        return False
+    return normalizada_a == normalizada_b or normalizada_a in normalizada_b or normalizada_b in normalizada_a
 
 # Sufijos societarios chilenos habituales -- lista pequeña y explícita,
 # nunca "cualquier última palabra". Un único sufijo removido de CADA lado
@@ -56,13 +95,29 @@ def coincide_salvo_sufijo_societario(nombre_a: str, nombre_b: str) -> bool:
 
 def evaluar_evidencia_obra(
     *, nombre_documental: str, obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
-    evidencia_externa: tuple[EvidenciaExterna, ...] = (),
+    evidencia_externa: tuple[EvidenciaExterna, ...] = (), direccion_documental_resuelta: str = "",
 ) -> ResultadoEvidencia:
     """Se invoca DESPUÉS de que la coincidencia exacta
     (`normalizar_nombre_obra`, ya usada por `regenerar_decisiones_persistidas`)
     falló -- nunca la reemplaza. Busca coincidencias por sufijo societario
     contra obras ya confirmadas del mismo cliente, y considera evidencia
-    externa si se le entrega."""
+    externa si se le entrega.
+
+    `direccion_documental_resuelta` (Bloque 472339/CASA HELSINSKI, Sección
+    2 del bloque): la dirección de ESTE documento ya resuelta por el
+    pipeline determinista (geocoding/routing -- p.ej. `despachar_a_crudo`
+    con `estado_ruta=RUTA_CALCULADA`), no la de la fuente externa. Cuando
+    un candidato de evidencia externa OFICIAL/CORPORATIVO, sin
+    contradicciones, corrobora exactamente esa misma dirección
+    (`_direccion_obra_coincide`), y es el único candidato en el nivel más
+    alto, la evidencia converge sin ambigüedad -- dos fuentes
+    INDEPENDIENTES (el documento+routing propio de Atlas, y la fuente
+    externa) coinciden en la misma dirección física, lo cual es
+    estructuralmente más fuerte que cualquiera de las dos por separado.
+    Sin esa corroboración de dirección (o sin `direccion_documental_
+    resuelta` disponible), el techo sigue siendo CONTRADICCION_DOCUMENTAL
+    -- nunca se resuelve sola sólo por existir un sitio corporativo
+    (Sección 8, caso D: fuente débil/no corroborada nunca promueve)."""
     documental = str(nombre_documental or "").strip()
     if not documental:
         return ResultadoEvidencia(resultado=RESULTADO_SUGERENCIA_HUMANA, explicacion="Sin nombre documental que evaluar.")
@@ -80,21 +135,39 @@ def evaluar_evidencia_obra(
                 ),
             ))
 
+    direccion_resuelta = str(direccion_documental_resuelta or "").strip()
     for evidencia in evidencia_externa:
         nivel = _NIVEL_POR_TIPO_FUENTE_EXTERNA.get(evidencia.tipo_fuente, NIVEL_DOCUMENTAL_DEBIL)
-        candidatos.append(CandidatoEvidencia(
-            identificador=evidencia.rut or evidencia.razon_social, valor_canonico=evidencia.razon_social,
-            nivel=nivel, evidencias=("EVIDENCIA_EXTERNA:" + evidencia.tipo_fuente,),
-            conflictos=tuple(evidencia.contradicciones),
-            razon_legible=(
+        direccion_corroborada = bool(
+            direccion_resuelta and not evidencia.contradicciones
+            and evidencia.tipo_fuente in (TIPO_FUENTE_OFICIAL, TIPO_FUENTE_CORPORATIVO)
+            and _direccion_obra_coincide(evidencia.direccion, direccion_resuelta)
+        )
+        evidencias_candidato = ("EVIDENCIA_EXTERNA:" + evidencia.tipo_fuente,)
+        if direccion_corroborada:
+            evidencias_candidato += ("DIRECCION_DOCUMENTAL_CORROBORADA",)
+            razon = (
+                f'Atlas encontró "{evidencia.razon_social}" en una fuente externa '
+                f"({evidencia.tipo_fuente.lower()}: {evidencia.fuente}) cuya dirección "
+                f'("{evidencia.direccion}") coincide exactamente con la dirección ya resuelta de este '
+                f'documento ("{direccion_resuelta}") -- dos fuentes independientes convergen en la misma '
+                "dirección física, sin candidatas alternativas."
+            )
+        else:
+            razon = (
                 f'Atlas encontró "{evidencia.razon_social}" en una fuente externa '
                 f"({evidencia.tipo_fuente.lower()}: {evidencia.fuente}) que corrobora "
                 f"{', '.join(evidencia.campos_corroborados) or 'esta identidad'} -- pero una dirección o "
                 "sitio web corporativo por sí solo no demuestra que exista una obra operacional en curso."
-            ),
+            )
+        candidatos.append(CandidatoEvidencia(
+            identificador=evidencia.rut or evidencia.razon_social, valor_canonico=evidencia.razon_social,
+            nivel=nivel, evidencias=evidencias_candidato, conflictos=tuple(evidencia.contradicciones),
+            razon_legible=razon,
             metadatos={
                 "fuente": evidencia.fuente, "url": evidencia.url, "rut": evidencia.rut,
                 "direccion": evidencia.direccion, "comuna": evidencia.comuna,
+                "direccion_corroborada": direccion_corroborada,
             },
         ))
 
@@ -112,13 +185,22 @@ def evaluar_evidencia_obra(
 
     mejor = elegir_mejor_candidato(tuple(candidatos))
     assert mejor is not None
-    # Ninguna fuente disponible para obras alcanza hoy el nivel de
-    # confirmación humana estructural -- el resultado más fuerte posible
-    # es CONTRADICCION_DOCUMENTAL (sugerir con fuerza, nunca resolver
-    # solo) cuando la fuente es de alta confianza; el resto queda como
-    # sugerencia. Nunca RESUELTO_AUTOMATICAMENTE sin una confirmación
-    # humana real -- ver la misma decisión de producto tomada para
-    # VP6521->VP8521 en el bloque anterior.
+    # Bloque 472339/CASA HELSINSKI -- única vía que alcanza
+    # RESUELTO_AUTOMATICAMENTE para obras: fuente externa OFICIAL/
+    # CORPORATIVO, sin contradicciones, corroborando exactamente la
+    # dirección ya resuelta del documento, Y sin empate en el tope (ya
+    # descartado arriba). Fuera de esa combinación exacta, ninguna fuente
+    # disponible para obras alcanza hoy el nivel de confirmación humana
+    # estructural -- el resultado más fuerte posible es
+    # CONTRADICCION_DOCUMENTAL (sugerir con fuerza, nunca resolver solo)
+    # cuando la fuente es de alta confianza; el resto queda como
+    # sugerencia. Ver la misma decisión de producto tomada para
+    # VP6521->VP8521 en el bloque anterior -- esto no la afloja, agrega
+    # una vía nueva y estrecha, calibrada sobre evidencia real.
+    if mejor.nivel in (NIVEL_EXTERNO_OFICIAL, NIVEL_EXTERNO_CORPORATIVO) and mejor.metadatos.get("direccion_corroborada"):
+        return ResultadoEvidencia(
+            resultado=RESULTADO_RESUELTO_AUTOMATICAMENTE, candidatos=tuple(candidatos), explicacion=mejor.razon_legible,
+        )
     if mejor.nivel in (NIVEL_EXTERNO_OFICIAL, NIVEL_EXTERNO_CORPORATIVO):
         return ResultadoEvidencia(
             resultado=RESULTADO_CONTRADICCION_DOCUMENTAL, candidatos=tuple(candidatos), explicacion=mejor.razon_legible,

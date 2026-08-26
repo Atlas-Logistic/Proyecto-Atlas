@@ -31,7 +31,7 @@ from atlas_core.decisiones_pendientes import (
 )
 from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
 from atlas_core.incidencias_documentales import (
-    AlmacenIncidenciasDocumentales, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
+    AlmacenIncidenciasDocumentales, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE, TIPO_OBRA_DOCUMENTAL_INCONSISTENTE,
 )
 from atlas_core.rutas.modelos import EstadoRuta
 
@@ -337,6 +337,41 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 if not cliente_id or not obra_texto:
                     raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para aplicar la obra.")
                 if accion == "REGISTRAR":
+                    # Bloque 472339/CASA HELSINSKI -- si el motor de
+                    # evidencia ya clasificó esta OBRA_DESCONOCIDA como
+                    # RESUELTO_AUTOMATICAMENTE (evidencia externa OFICIAL/
+                    # CORPORATIVO cuya dirección corrobora exactamente la
+                    # dirección documental ya resuelta -- ver
+                    # `evaluar_evidencia_obra`, marcador
+                    # "DIRECCION_DOCUMENTAL_CORROBORADA"), REGISTRAR usa el
+                    # nombre CANÓNICO de esa evidencia -- nunca el texto OCR
+                    # aproximado -- y conserva ese texto documental como
+                    # alias (`registrar_observacion(alias_documental=...)`,
+                    # mecanismo ya existente). Fuera de esa clasificación
+                    # exacta (SUGERENCIA_HUMANA/CONTRADICCION_DOCUMENTAL/
+                    # sin evidencia), el comportamiento es IDÉNTICO al de
+                    # siempre: se registra tal cual el texto documental.
+                    evaluacion_evidencia_obra = decision.get("evaluacion_evidencia") or {}
+                    candidatos_evidencia_obra = decision.get("candidatos_evidencia") or []
+                    candidato_obra_resuelta = None
+                    if evaluacion_evidencia_obra.get("resultado") == "RESUELTO_AUTOMATICAMENTE":
+                        candidato_obra_resuelta = next(
+                            (
+                                c for c in candidatos_evidencia_obra
+                                if "DIRECCION_DOCUMENTAL_CORROBORADA" in (c.get("evidencias") or [])
+                            ),
+                            None,
+                        )
+                    nombre_obra_registro = obra_texto
+                    alias_documental_registro = ""
+                    if candidato_obra_resuelta is not None:
+                        canonico_evidencia = str(candidato_obra_resuelta.get("valor_canonico") or "").strip()
+                        if canonico_evidencia and canonico_evidencia != obra_texto:
+                            nombre_obra_registro = canonico_evidencia
+                            alias_documental_registro = obra_texto
+                        else:
+                            candidato_obra_resuelta = None  # nada que corregir: no hay Incidencia que registrar
+
                     # R3.3.1: la evidencia guarda quién observó la obra en esta
                     # guía (cliente_id_observado/cliente_canonico_observado) como
                     # dato operacional del documento -- NO como propiedad de la
@@ -344,12 +379,13 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # GLOBALMENTE por nombre; si ya existe (para este u otro
                     # cliente) la reutiliza en vez de duplicarla.
                     numero_guia = str(decision.get("documento", {}).get("numero_guia") or "")
+                    numero_transporte_obra = str(decision.get("documento", {}).get("numero_transporte") or "")
                     evidencia = Evidencia(
                         tipo=TipoEvidencia.GUIA.value,
                         identificador_fuente=str(decision.get("documento", {}).get("numero_guia") or decision.get("documento", {}).get("archivo")),
                         referencia_hash=decision_id,
                         campos_observados={
-                            "obra": obra_texto, "decision_id": decision_id,
+                            "obra": nombre_obra_registro, "decision_id": decision_id,
                             "cliente_id_observado": cliente_id,
                             "cliente_canonico_observado": str(contexto.get("cliente_canonico", "")),
                             "numero_guia": numero_guia,
@@ -357,15 +393,67 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         fecha=reloj().astimezone(timezone.utc).isoformat(), actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
                     )
                     catalogo_obras_destinos = CatalogoObrasDestinos(ruta=catalogo_obras_ruta, ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogo_destinos_ruta)
-                    resultado_obs = catalogo_obras_destinos.registrar_observacion(cliente_id=cliente_id, nombre_obra=obra_texto, evidencia=evidencia)
+                    # Bloque 472339/CASA HELSINSKI -- cuando la evidencia ya
+                    # resolvió la obra Y hay una dirección documental
+                    # capturada, la relación obra<->destino se crea y
+                    # confirma en la MISMA aplicación (nunca deja una
+                    # pregunta pendiente redundante sobre algo que la
+                    # evidencia ya demostró) -- mismo mecanismo que
+                    # DESTINO_SIN_CONFIRMAR/CONFIRMAR más abajo, reutilizado
+                    # tal cual.
+                    destino_texto_obra = str(contexto.get("destino_documental", "")).strip()
+                    destino_id_resuelto = None
+                    if candidato_obra_resuelta is not None and destino_texto_obra and destino_texto_obra != "No encontrado":
+                        metadatos_evidencia = candidato_obra_resuelta.get("metadatos") or {}
+                        destino_obj = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos / "clientes.json").crear_o_reutilizar_global(
+                            nombre_destino=destino_texto_obra, direccion=destino_texto_obra,
+                            comuna=str(metadatos_evidencia.get("comuna") or ""),
+                            fuente=f"ATLAS_AUTOMATICO_EVIDENCIA_EXTERNA:{decision_id}",
+                            estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+                        )
+                        destino_id_resuelto = destino_obj.destino_id
+                        resultado_obs = catalogo_obras_destinos.registrar_observacion(
+                            cliente_id=cliente_id, nombre_obra=nombre_obra_registro, evidencia=evidencia,
+                            destino_id=destino_id_resuelto, alias_documental=alias_documental_registro,
+                        )
+                        relacion_obra_destino = resultado_obs.relacion
+                        if relacion_obra_destino is not None and relacion_obra_destino.estado == "PENDIENTE":
+                            catalogo_obras_destinos.confirmar_relacion(
+                                relacion_obra_destino.relacion_id, actor=actor, identificador_fuente=decision_id,
+                                fuente_confirmacion="EVIDENCIA_EXTERNA_DIRECCION_CORROBORADA",
+                            )
+                    else:
+                        resultado_obs = catalogo_obras_destinos.registrar_observacion(
+                            cliente_id=cliente_id, nombre_obra=nombre_obra_registro, evidencia=evidencia,
+                            alias_documental=alias_documental_registro,
+                        )
                     resultado_extra["obra_id"] = resultado_obs.obra.obra_id
+                    if candidato_obra_resuelta is not None:
+                        # Conserva RELSINSKI como evidencia OCR/contextual --
+                        # nunca como entidad canónica aparte -- vía el mismo
+                        # mecanismo ya usado para RUT/patente documentales.
+                        metadatos_evidencia = candidato_obra_resuelta.get("metadatos") or {}
+                        AlmacenIncidenciasDocumentales(incidencias_documentales_ruta).registrar(
+                            contexto=str(contexto.get("cliente_canonico", "")), numero_guia=numero_guia,
+                            numero_transporte=numero_transporte_obra, campo="obra_destino",
+                            valor_documental=obra_texto, valor_canonico=nombre_obra_registro,
+                            tipo_incidencia=TIPO_OBRA_DOCUMENTAL_INCONSISTENTE,
+                            evidencia=(
+                                f"EVIDENCIA_EXTERNA:{metadatos_evidencia.get('fuente', '')}",
+                                "DIRECCION_DOCUMENTAL_CORROBORADA",
+                            ),
+                            fecha=reloj(), fuente_resolucion="EVIDENCIA_EXTERNA_DIRECCION_CORROBORADA", actor="", decision_id=decision_id,
+                        )
                     # R3.4.2: registrar la obra responde "¿qué obra es?", pero
                     # no "¿a qué destino corresponde?". Si ese destino todavía
                     # no puede corroborarse sin intervención humana (CASO A) y
                     # el documento sí trajo un destino (CASO B), Atlas debe
                     # generar esa siguiente pregunta accionable -- si no hay
                     # destino documental capturado (CASO C), se abstiene: no
-                    # inventa. Ver decision_destino_para_obra_registrada.
+                    # inventa. Ver decision_destino_para_obra_registrada. Si
+                    # la relación ya quedó CONFIRMADA arriba, esta función
+                    # devuelve None por su propio CASO A -- no hay pregunta
+                    # redundante que encadenar.
                     decision_siguiente = decision_destino_para_obra_registrada(
                         obra=resultado_obs.obra, cliente_id=cliente_id,
                         cliente_canonico=str(contexto.get("cliente_canonico", "")),

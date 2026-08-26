@@ -267,6 +267,84 @@ def revalidar_obra_destino_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def regenerar_decisiones_obra_faltantes_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    decisiones_pendientes: list[dict[str, object]], ruta_ledger: str | Path | None = None,
+) -> list[dict[str, object]]:
+    """Bloque 472339/CASA HELSINSKI -- red de seguridad GENERAL contra la
+    "revisión huérfana": un motivo ``OBRA_DESTINO_SIN_CORROBORAR`` vigente
+    en una fila SIEMPRE debe tener una decisión pendiente correspondiente
+    (``OBRA_DESCONOCIDA`` o ``DESTINO_SIN_CONFIRMAR``) para ESA guía
+    exacta -- si por cualquier razón (p.ej. la decisión original nunca se
+    persistió, o se perdió en una republicación anterior) no la tiene, se
+    regenera aquí usando ÚNICAMENTE datos ya extraídos y persistidos en el
+    dataset (`cliente`/`obra_destino`/`despachar_a_crudo` de esa misma
+    fila, vía `_decisiones_obra_para_cliente` -- el mismo motor que ya usa
+    `detectar_decisiones_documento`) -- nunca OCR, nunca vuelve a leer el
+    documento ni llama a B1. Caso real: guía 472339 mostraba el motivo
+    vigente pero ninguna tarjeta -- Javier no podía confirmarla aunque
+    quisiera.
+
+    Nunca duplica: se abstiene si esa guía ya tiene una decisión pendiente
+    de obra/destino, o si el ledger ya tiene una aplicación TERMINAL para
+    ella (`resolver_obras_resueltas_por_ledger` -- un humano ya decidió,
+    nada que regenerar). Se abstiene fila por fila ante cualquier duda
+    (cliente ausente/no confirmado, obra ausente, error de catálogo)."""
+    from atlas_core.decisiones_pendientes import _decisiones_obra_para_cliente
+
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    try:
+        filas = _leer_filas(ruta)
+    except (OSError, ValueError):
+        return list(decisiones_pendientes)
+
+    motivo_objetivo = MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR.value
+    guias_con_decision_obra = {
+        str((d.get("documento") or {}).get("numero_guia", ""))
+        for d in decisiones_pendientes
+        if d.get("tipo") in ("OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR")
+    }
+    guias_resueltas_ledger = (
+        resolver_obras_resueltas_por_ledger(Path(ruta_ledger)) if ruta_ledger is not None else set()
+    )
+    try:
+        clientes_confirmados = {
+            normalizar_nombre_cliente(c.razon_social): c
+            for c in CatalogoClientes(carpeta / "clientes.json").listar()
+            if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+        }
+    except (OSError, ValueError):
+        clientes_confirmados = {}
+
+    regeneradas: list[dict[str, object]] = []
+    for fila in filas:
+        motivos = {m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m}
+        if motivo_objetivo not in motivos:
+            continue
+        numero_guia = str(fila.get("numero_guia", ""))
+        if not numero_guia or numero_guia in guias_con_decision_obra or numero_guia in guias_resueltas_ledger:
+            continue
+        obra_documental = str(fila.get("obra_destino", "")).strip()
+        cliente_documental = str(fila.get("cliente", "")).strip()
+        if obra_documental in _AUSENTES or cliente_documental in _AUSENTES:
+            continue
+        cliente = clientes_confirmados.get(normalizar_nombre_cliente(cliente_documental))
+        if cliente is None:
+            continue
+        comunes = {
+            "archivo": str(fila.get("archivo", "")), "numero_guia": numero_guia,
+            "numero_transporte": str(fila.get("numero_transporte", "")),
+        }
+        regeneradas.extend(_decisiones_obra_para_cliente(
+            carpeta=carpeta, cliente_id=cliente.cliente_id, cliente_razon_social=cliente.razon_social,
+            cliente_aliases=cliente.aliases, obra_texto=obra_documental,
+            despachar_a_documental=str(fila.get("despachar_a_crudo", "")).strip(),
+            comunes=comunes,
+        ))
+    return list(decisiones_pendientes) + regeneradas
+
+
 def revalidar_cliente_sin_corroborar_sin_ocr(
     *, ruta_dataset: str | Path, ruta_ledger: str | Path,
 ) -> dict[str, object]:
@@ -2587,16 +2665,19 @@ def reconciliar_bandeja_decisiones(
        Reutiliza `aplicar_decision_obra` (nunca un segundo camino de
        escritura), `actor="ATLAS_AUTOMATICO"` -- auditable y
        distinguible de una confirmación humana en el ledger.
-       `ALIAS_CANDIDATO` (CONFIRMAR_ALIAS) y, desde Bloque VEHÍCULO E2,
-       `VEHICULO_DESCONOCIDO` (USAR_PATENTE_EXISTENTE -- sólo cuando
-       `evaluar_evidencia_patente` encuentra un único candidato con
-       corroboración documental independiente Y similitud OCR calibrada,
-       ver `decisiones_pendientes.evaluar_evidencia_patente`) pueden
-       alcanzar `RESUELTO_AUTOMATICAMENTE` hoy (`OBRA_DESCONOCIDA`/
-       `CLIENTE_DESCONOCIDO` todavía no tienen una fuente de evidencia
-       calibrada para ese nivel -- ver
-       `atlas_core.motor_evidencia_obras`/`motor_evidencia_clientes`);
-       cuando la tengan, este mismo mecanismo las cubre sin cambios.
+       `ALIAS_CANDIDATO` (CONFIRMAR_ALIAS), `VEHICULO_DESCONOCIDO`
+       (USAR_PATENTE_EXISTENTE -- sólo cuando `evaluar_evidencia_patente`
+       encuentra un único candidato con corroboración documental
+       independiente Y similitud OCR calibrada, ver
+       `decisiones_pendientes.evaluar_evidencia_patente`) y, desde Bloque
+       472339/CASA HELSINSKI, `OBRA_DESCONOCIDA` (REGISTRAR -- sólo
+       cuando `evaluar_evidencia_obra` encuentra evidencia externa
+       OFICIAL/CORPORATIVO, sin contradicciones, que corrobora EXACTAMENTE
+       la dirección documental ya resuelta del mismo documento, sin
+       ambigüedad) pueden alcanzar `RESUELTO_AUTOMATICAMENTE` hoy
+       (`CLIENTE_DESCONOCIDO` todavía no tiene una fuente de evidencia
+       calibrada para ese nivel -- ver `atlas_core.motor_evidencia_clientes`);
+       cuando la tenga, este mismo mecanismo la cubre sin cambios.
        Punto fijo acotado (`MAX_ITERACIONES_AUTO_RESOLUCION`): una
        aplicación puede desbloquear otra (una confirmación nueva puede
        cruzar el umbral de independencia para una decisión hermana), así
@@ -2678,6 +2759,17 @@ def reconciliar_bandeja_decisiones(
     except (OSError, json.JSONDecodeError):
         pendientes_actuales = []
 
+    # Bloque 472339/CASA HELSINSKI -- red de seguridad GENERAL: antes de
+    # reconciliar, se completa cualquier decisión de obra/destino
+    # faltante para una fila que todavía tiene el motivo
+    # OBRA_DESTINO_SIN_CORROBORAR vigente pero ninguna tarjeta pendiente
+    # (nunca motivo sin decisión) -- sin OCR, ver
+    # `regenerar_decisiones_obra_faltantes_sin_ocr`.
+    pendientes_actuales = regenerar_decisiones_obra_faltantes_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        decisiones_pendientes=pendientes_actuales, ruta_ledger=actual / "decisiones_aplicadas.json",
+    )
+
     resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)
     vigentes = resultado_primero["vigentes"]
     bandeja = resultado_primero["bandeja"]
@@ -2689,10 +2781,25 @@ def reconciliar_bandeja_decisiones(
     # `decision["candidatos"]" -- garantizado por
     # `evaluar_evidencia_patente`, que sólo alcanza
     # RESUELTO_AUTOMATICAMENTE con un único competidor en el nivel más
-    # alto). Nunca CLIENTE_DESCONOCIDO/OBRA_DESCONOCIDA con REGISTRAR:
-    # eso crearía una entidad nueva, no aplicaría una ya conocida, y no
-    # es lo que este resultado significa.
-    _ACCION_AUTO_POR_TIPO = {"ALIAS_CANDIDATO": "CONFIRMAR_ALIAS", "VEHICULO_DESCONOCIDO": "USAR_PATENTE_EXISTENTE"}
+    # alto). Nunca CLIENTE_DESCONOCIDO con REGISTRAR: eso crearía una
+    # entidad nueva sin ninguna fuente de evidencia calibrada para ese
+    # nivel todavía (ver `atlas_core.motor_evidencia_clientes`).
+    #
+    # Bloque 472339/CASA HELSINSKI -- OBRA_DESCONOCIDA SÍ se agrega aquí
+    # con REGISTRAR, a diferencia de CLIENTE_DESCONOCIDO: a partir de este
+    # bloque `evaluar_evidencia_obra` SÍ tiene una fuente calibrada para
+    # RESUELTO_AUTOMATICAMENTE (evidencia externa OFICIAL/CORPORATIVO,
+    # sin contradicciones, que corrobora EXACTAMENTE la dirección
+    # documental ya resuelta del mismo documento). REGISTRAR sí crea una
+    # entidad nueva aquí -- a diferencia del resto de esta tabla -- pero
+    # `aplicar_decision_obra` usa el nombre CANÓNICO de esa evidencia
+    # (nunca el texto OCR aproximado) y conserva el texto documental como
+    # alias, exactamente como haría un humano que REGISTRA a mano viendo
+    # la misma evidencia.
+    _ACCION_AUTO_POR_TIPO = {
+        "ALIAS_CANDIDATO": "CONFIRMAR_ALIAS", "VEHICULO_DESCONOCIDO": "USAR_PATENTE_EXISTENTE",
+        "OBRA_DESCONOCIDA": "REGISTRAR",
+    }
 
     aplicadas_automaticamente: list[dict[str, object]] = []
     for _ in range(MAX_ITERACIONES_AUTO_RESOLUCION):
