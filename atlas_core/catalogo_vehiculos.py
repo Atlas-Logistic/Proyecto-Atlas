@@ -293,6 +293,13 @@ _CONFUSIONES_OCR = tuple(map(frozenset, (
     # -- F/R es una confusión de trazo real y documentada en este
     # documento (no una tabla ampliada a ciegas), igual que las demás.
     {"F", "R"},
+    # Bloque PULIDO OPERACIONAL -- caso real "BKYX63" en el catálogo
+    # legacy: 13 guías del histórico documentan "BKYK63" para LEANDRO
+    # TOLEDO (RUT 18611137-0), incluyendo una el mismo día (02-07-2026,
+    # guía 462377) que la única guía que documenta "BKYX63" (462429,
+    # mismo chofer/RUT) -- K/X es una confusión de trazo real y
+    # documentada en este caso, igual que las demás.
+    {"K", "X"},
 )))
 
 

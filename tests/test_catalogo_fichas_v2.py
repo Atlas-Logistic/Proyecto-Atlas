@@ -13,6 +13,7 @@ from atlas_core.catalogo_clientes import Cliente
 from atlas_core.catalogo_destinos import Destino
 from atlas_core.catalogo_fichas import (
     _resumen_rut_historico,
+    _vehiculos_plegables_por_confusion_ocr,
     construir_ficha_chofer,
     construir_ficha_cliente,
     construir_ficha_obra,
@@ -166,6 +167,94 @@ def test_patente_confusion_ocr_ambigua_entre_dos_canonicas_nunca_se_pliega_en_si
     assert len(ficha["vehiculos"]) == 1
     assert ficha["vehiculos"][0]["patente"] == "BPHF67"
     assert ficha["vehiculos"][0]["estado_catalogo"] == "SIN_CATALOGAR"
+
+
+def test_vehiculo_canonico_sin_evidencia_vigente_que_es_ocr_de_otro_con_evidencia_se_pliega():
+    # Caso real: "BKYX63" existe como vehículo CONFIRMADO/ACTIVO en el
+    # catálogo (migración legacy) pero ninguna guía del histórico
+    # vigente lo documenta; "BKYK63" sí tiene evidencia real (LEANDRO
+    # TOLEDO) y es su única confusión OCR posible (K/X) -- se pliega,
+    # nunca se lista como vehículo aparte.
+    filas = [
+        _fila(numero_guia="1", chofer="LEANDRO TOLEDO", patente_tracto="BKYK63", patente_rampla=""),
+        _fila(numero_guia="2", chofer="LEANDRO TOLEDO", patente_tracto="BKYK63", patente_rampla=""),
+    ]
+    vehiculos_por_patente = {"BKYK63": _vehiculo("BKYK63"), "BKYX63": _vehiculo("BKYX63")}
+    plegables = _vehiculos_plegables_por_confusion_ocr(vehiculos_por_patente, filas)
+    assert plegables == {"BKYX63"}
+
+
+def test_vehiculo_canonico_ambiguo_nunca_se_pliega_en_silencio():
+    # "BPHF67" (sin evidencia vigente propia) es una confusión OCR válida
+    # de DOS canónicas distintas con evidencia real -- "BPHR67" (F/R) y
+    # "BPHE67" (F/E) -- nunca se pliega ninguna ante esa ambigüedad.
+    filas = [
+        _fila(numero_guia="1", chofer="A", patente_tracto="BPHR67", patente_rampla=""),
+        _fila(numero_guia="2", chofer="B", patente_tracto="BPHE67", patente_rampla=""),
+    ]
+    vehiculos_por_patente = {
+        "BPHR67": _vehiculo("BPHR67"), "BPHE67": _vehiculo("BPHE67"), "BPHF67": _vehiculo("BPHF67"),
+    }
+    plegables = _vehiculos_plegables_por_confusion_ocr(vehiculos_por_patente, filas)
+    assert plegables == set()
+
+
+def test_vehiculo_canonico_con_evidencia_vigente_propia_nunca_se_pliega_aunque_se_parezca_a_otro():
+    # Si "BKYX63" SÍ tuviera su propia evidencia real en el vigente,
+    # nunca se pliega -- podría ser un vehículo real distinto.
+    filas = [
+        _fila(numero_guia="1", chofer="LEANDRO TOLEDO", patente_tracto="BKYK63", patente_rampla=""),
+        _fila(numero_guia="2", chofer="OTRO CHOFER", patente_tracto="BKYX63", patente_rampla=""),
+    ]
+    vehiculos_por_patente = {"BKYK63": _vehiculo("BKYK63"), "BKYX63": _vehiculo("BKYX63")}
+    plegables = _vehiculos_plegables_por_confusion_ocr(vehiculos_por_patente, filas)
+    assert plegables == set()
+
+
+def test_snapshot_de_vehiculos_excluye_los_plegados_pero_mantiene_la_canonica():
+    from atlas_core.catalogo_fichas import construir_snapshot_fichas
+    import json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        raiz = Path(tmp)
+        (raiz / "operacion" / "actual").mkdir(parents=True)
+        (raiz / "catalogos_privados").mkdir(parents=True)
+        filas = [
+            _fila(numero_guia="1", chofer="LEANDRO TOLEDO", rut_chofer="18.611.137-0", patente_tracto="BKYK63", patente_rampla=""),
+            _fila(numero_guia="2", chofer="LEANDRO TOLEDO", rut_chofer="18.611.137-0", patente_tracto="BKYK63", patente_rampla=""),
+        ]
+        import csv
+        with (raiz / "operacion" / "actual" / "analisis_completo_guias.csv").open("w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+            escritor.writeheader()
+            escritor.writerows(filas)
+        (raiz / "catalogos_privados" / "choferes.json").write_text("{}", encoding="utf-8")
+
+        def _vehiculo_legacy(patente):
+            # Mismo formato que la migración legacy real (CONFIRMADO sin
+            # confirmación humana puntual -- ver `procedencia`/evidencia
+            # de migración, igual que catalogos_privados/vehiculos.json
+            # real).
+            return {
+                "vehiculo_id": f"v-{patente}", "patente_canonica": patente, "tipo": "TRACTO",
+                "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "aliases": [],
+                "evidencias": [{
+                    "tipo": "MIGRACION_LEGACY", "identificador_fuente": "vehiculos.json",
+                    "referencia_hash": "x", "campos_observados": {"patente": patente, "tipo": "TRACTO"},
+                    "fecha": FECHA, "actor_proceso": "PROCESO_MIGRACION", "resultado": "SOPORTA",
+                }],
+                "procedencia": "CATALOGO_LEGACY", "confirmado_por": "", "fecha_confirmacion": "",
+                "observaciones": "", "fecha_creacion": FECHA, "fecha_modificacion": FECHA,
+            }
+        (raiz / "catalogos_privados" / "vehiculos.json").write_text(json.dumps({
+            "version": 1,
+            "vehiculos": [_vehiculo_legacy("BKYK63"), _vehiculo_legacy("BKYX63")],
+        }), encoding="utf-8")
+        snapshot = construir_snapshot_fichas(raiz_atlas=raiz)
+        patentes = {v["patente"] for v in snapshot["vehiculos"]}
+        assert patentes == {"BKYK63"}
 
 
 def test_ficha_de_vehiculo_incluye_guias_cuya_patente_es_una_confusion_ocr_resuelta():

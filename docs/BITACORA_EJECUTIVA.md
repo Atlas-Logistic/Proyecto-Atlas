@@ -4,6 +4,18 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — PULIDO OPERACIONAL DESKTOP + CANONICALIZACIÓN BKYX63 → BKYK63
+
+- **Choferes:** la ficha ya no muestra observaciones técnicas largas (fusiones, aliases OCR, reconciliación) en la vista principal -- quedan en "Ver detalles técnicos" (mismo patrón que Incidencias V2). Nueva fila "Última actividad", conceptualmente separada del Estado de catálogo (Activo/Inactivo, nunca se modifica): ≤30 días desde la última guía real → "hace N días" (badge verde); >30 días → "Sin actividad reciente · N días" (badge ámbar); sin histórico → "Sin actividad registrada" (nunca inventa una fecha). 100% Desktop -- el dato ya existía en la ficha (`historico.ultima_aparicion`).
+- **BKYX63 → BKYK63 (mismo mecanismo que BPHF67 → BPHR67):** trazado en el histórico real -- BKYX63 aparece UNA sola vez en todo el histórico (guía legacy 462429), mientras BKYK63 tiene 13 apariciones consistentes del mismo chofer/RUT (LEANDRO TOLEDO, 18.611.137-0), incluyendo una el mismo día. Nueva confusión OCR documentada K/X (`catalogo_vehiculos._CONFUSIONES_OCR`) + nueva función general `_vehiculos_plegables_por_confusion_ocr`: un vehículo CONFIRMADO/ACTIVO del catálogo SIN evidencia en el histórico vigente, que es la única confusión OCR posible de otra canónica que SÍ tiene evidencia real, se excluye del listado de Vehículos (nunca se muta el catálogo, nunca se elige ante ambigüedad -- ver tests). BKYX63 ya no aparece en Catálogos → Vehículos; BKYK63 permanece con sus 2 guías reales.
+- **Viajes:** contador "X de Y viajes" (se quitó el prefijo "Mostrando"), más pequeño y secundario. Período por defecto cambiado de "Hoy" a "Últimos 15 días" (resto de opciones intactas, ningún dato se borra).
+- **Incidencias -- agrupación por viaje:** varias guías del MISMO transporte con exactamente el mismo error (tipo + campo + entidad + valor documental + valor canónico) se muestran como UNA tarjeta con "N guías afectadas" plegable; el detalle técnico conserva cada incidencia individual íntegra. Sin transporte confiable, nunca se agrupa. Caso real: transporte 0000354443 (guías 472238/472239, RUT de WLADIMIR AGUILAR) pasa de 2 tarjetas a 1. Tipografía de la vista principal ahora es la misma tipográfica normal de Desktop (monospace sólo dentro de "Ver detalles técnicos"); fecha principal sin hora ("25 ago 2026").
+- **Tests:** Motor 4 focales nuevos (`tests/test_catalogo_fichas_v2.py`) + suite completa **1972 passed**. Desktop 30 focales nuevos (`test/microajustes_desktop_v2.test.js` + ajustes en tests existentes) + suite completa **397 passed**.
+- **E2E real (G:\Mi unidad\Atlas):** PATRICIO VILLAGRA MUÑOZ (sin observación técnica visible, "Última actividad: hace 6 días"), BKYX63 (ya no listado)/BKYK63 (2 guías), Wladimir/transporte 0000354443 (1 tarjeta, "2 guías afectadas", ambas incidencias íntegras en detalles). Ningún chofer real tiene hoy >30 días sin viajes -- lógica cubierta por tests unitarios.
+- **Pendiente real:** ninguno de código.
+
+---
+
 ## 2026-08-26 — MICROAJUSTES DESKTOP: CATÁLOGOS + REVISIÓN DE ATLAS + INCIDENCIAS
 
 - **Problema real:** CRISTOPHER RETAMAL mostraba BPHF67 como si fuera un segundo vehículo real (era BPHR67 mal leído por OCR); la ficha de chofer saturaba la vista principal con aliases OCR y una fila "Estado del RUT" aparte; la tabla de Destinos mostraba una columna Fuente de poco valor para un jefe/mandante; "Guías móviles sin asociación" y la revisión normal se apilaban en una página vertical muy larga.

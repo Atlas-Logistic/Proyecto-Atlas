@@ -161,6 +161,48 @@ def _vehiculos_asociados(filas: list[dict[str, str]], vehiculos_por_patente: Map
     return salida
 
 
+def _patentes_con_evidencia_vigente(filas: list[dict[str, str]]) -> set[str]:
+    vistas: set[str] = set()
+    for fila in filas:
+        for campo in ("patente_tracto", "patente_rampla"):
+            valor = str(fila.get(campo, "")).strip()
+            if valor and valor not in _AUSENTES:
+                vistas.add(normalizar_patente_vehiculo(valor))
+    return vistas
+
+
+def _vehiculos_plegables_por_confusion_ocr(
+    vehiculos_por_patente: Mapping[str, object], filas: list[dict[str, str]],
+) -> set[str]:
+    """Bloque PULIDO OPERACIONAL -- un vehículo CONFIRMADO/ACTIVO del
+    catálogo (`vehiculos_por_patente` ya viene filtrada por
+    `.homologables()`) que (a) NUNCA aparece en el histórico vigente
+    (ninguna fila del dataset actual lo documenta) y (b) es una
+    confusión OCR inequívoca -- un único candidato, del mismo tipo
+    (TRACTO/CARRO) -- de OTRA patente canónica que SÍ tiene evidencia
+    real en el vigente, se considera un duplicado espurio de migración/
+    OCR: no se lista como entidad de vehículo independiente (caso real
+    "BKYX63" -- catálogo legacy, sin ninguna guía vigente que lo
+    respalde -- resuelto a "BKYK63", con evidencia real y consistente).
+    Nunca se pliega ante ambigüedad (2+ candidatos posibles); nunca muta
+    el catálogo ni borra su evidencia -- sigue existiendo internamente,
+    sólo deja de mostrarse como entidad aparte."""
+    con_evidencia = _patentes_con_evidencia_vigente(filas)
+    plegables: set[str] = set()
+    for patente, vehiculo in vehiculos_por_patente.items():
+        if patente in con_evidencia:
+            continue
+        candidatos = {
+            otra for otra, otro_vehiculo in vehiculos_por_patente.items()
+            if otra != patente and otra in con_evidencia
+            and getattr(otro_vehiculo, "tipo", None) == getattr(vehiculo, "tipo", None)
+            and es_confusion_ocr_de_patente(patente, otra)
+        }
+        if len(candidatos) == 1:
+            plegables.add(patente)
+    return plegables
+
+
 def _top(contador: Mapping[str, int], n: int = 5) -> list[dict[str, object]]:
     ordenado = sorted(contador.items(), key=lambda kv: (-kv[1], kv[0]))[:n]
     return [{"nombre": nombre, "apariciones": cantidad} for nombre, cantidad in ordenado]
@@ -342,9 +384,10 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
     ] if catalogo_obras is not None else []
     fichas_obras.sort(key=lambda f: f["nombre_canonico"])
 
+    plegables = _vehiculos_plegables_por_confusion_ocr(vehiculos_por_patente, filas)
     fichas_vehiculos = [
         construir_ficha_vehiculo(vehiculo=v, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
-        for v in vehiculos_por_patente.values()
+        for patente, v in vehiculos_por_patente.items() if patente not in plegables
     ]
     fichas_vehiculos.sort(key=lambda f: f["patente"])
 

@@ -140,6 +140,10 @@ _CONFUSIONES_OCR_PATENTE_COMUNES = (
     # JF4288); se mantiene igual aquí para no dejar las dos tablas
     # desincronizadas.
     frozenset({"E", "F"}),
+    # Bloque PULIDO OPERACIONAL -- misma confusión agregada en
+    # `catalogo_vehiculos._CONFUSIONES_OCR` (caso real "BKYX63" ->
+    # "BKYK63", LEANDRO TOLEDO).
+    frozenset({"K", "X"}),
 )
 
 
