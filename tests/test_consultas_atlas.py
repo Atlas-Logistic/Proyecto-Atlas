@@ -9,11 +9,14 @@ from datetime import date
 import pytest
 
 from atlas_core.consultas_atlas import (
+    DOMINIO_EVENTOS,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
+    PERIODO_ULTIMOS_N_DIAS,
     ConsultaAtlas,
     ErrorConsultaAtlas,
     ejecutar_consulta_atlas,
+    ejecutar_consulta_eventos,
     ejecutar_consulta_incidencias_documentales,
     resolver_periodo,
     validar_consulta,
@@ -327,3 +330,144 @@ def test_count_incidencias_avisa_cuando_varias_guias_comparten_viaje():
 def test_ejecutar_consulta_incidencias_rechaza_dominio_viajes():
     with pytest.raises(ErrorConsultaAtlas):
         ejecutar_consulta_incidencias_documentales(ConsultaAtlas(metrica="COUNT_VIAJES"), [])
+
+
+# --- Bloque UNIVERSAL V1 -- LIST_RELACION: proyecta valores distintos
+# de un campo relacionado, un solo camino para cualquier combinación
+# entidad-relación (Bloque 8/18 del ticket) ---
+
+def test_list_relacion_vehiculo_combina_tracto_y_rampla():
+    viajes = [
+        _viaje(choferes="JUAN PEREZ", patentes_tracto="AA1111", patentes_rampla="BB2222"),
+        _viaje(choferes="JUAN PEREZ", patentes_tracto="AA1111", patentes_rampla=""),
+    ]
+    r = ejecutar_consulta_atlas(
+        ConsultaAtlas(metrica="LIST_RELACION", relacion="vehiculo", filtros={"chofer": "JUAN PEREZ"}), viajes,
+    )
+    assert r.resultado == ("AA1111", "BB2222")
+
+
+def test_list_relacion_chofer_vinculado_a_patente():
+    viajes = [_viaje(choferes="JUAN PEREZ", patentes_rampla="JF4288"), _viaje(choferes="PEDRO GOMEZ", patentes_rampla="")]
+    r = ejecutar_consulta_atlas(
+        ConsultaAtlas(metrica="LIST_RELACION", relacion="chofer", filtros={"patente": "JF4288"}), viajes,
+    )
+    assert r.resultado == ("JUAN PEREZ",)
+
+
+def test_list_relacion_cliente_del_viaje():
+    viajes = [_viaje(numero_transporte="T1", clientes="CLIENTE A"), _viaje(numero_transporte="T2", clientes="CLIENTE B")]
+    r = ejecutar_consulta_atlas(
+        ConsultaAtlas(metrica="LIST_RELACION", relacion="cliente", filtros={"numero_transporte": "T1"}), viajes,
+    )
+    assert r.resultado == ("CLIENTE A",)
+
+
+def test_list_relacion_rechaza_relacion_no_soportada():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="LIST_RELACION", relacion="planeta"))
+
+
+def test_list_relacion_exige_dominio_viajes():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="LIST_RELACION", relacion="chofer", dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES))
+
+
+def test_relacion_sin_list_relacion_es_invalida():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_VIAJES", relacion="chofer"))
+
+
+# --- Bloque UNIVERSAL V1 -- filtro virtual "patente": coincide contra
+# CUALQUIERA de tracto/rampla (Bloque 7/18 del ticket) ---
+
+def test_filtro_patente_coincide_con_tracto_o_rampla():
+    viajes = [
+        _viaje(numero_transporte="T1", patentes_tracto="JB8529", patentes_rampla=""),
+        _viaje(numero_transporte="T2", patentes_tracto="", patentes_rampla="JB8529"),
+        _viaje(numero_transporte="T3", patentes_tracto="ZZ0000", patentes_rampla=""),
+    ]
+    r = ejecutar_consulta_atlas(ConsultaAtlas(metrica="LISTAR_VIAJES", filtros={"patente": "JB8529"}), viajes)
+    assert {v["numero_transporte"] for v in r.resultado} == {"T1", "T2"}
+
+
+# --- Bloque UNIVERSAL V1 -- período paramétrico "últimos N días"
+# (Bloque 12 del ticket) ---
+
+def test_resolver_periodo_ultimos_n_dias():
+    hoy = date(2026, 8, 26)
+    assert resolver_periodo(PERIODO_ULTIMOS_N_DIAS, hoy=hoy, dias=7) == (date(2026, 8, 20), hoy)
+
+
+def test_ultimos_n_dias_exige_dias_positivo():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_VIAJES", filtros={"periodo": PERIODO_ULTIMOS_N_DIAS}))
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_VIAJES", filtros={"periodo": PERIODO_ULTIMOS_N_DIAS, "dias": "0"}))
+
+
+# --- Bloque UNIVERSAL V1 -- dominio EVENTOS: ejecutor genérico, nunca
+# valida `tipo_evento` contra una lista cerrada (Bloque 9/20/21) ---
+
+def _evento(**overrides):
+    base = {
+        "evento_id": "e1", "tipo_evento": "TIENE_ESTADIA", "numero_transporte": "T1", "numero_guia": "1",
+        "chofer": "JUAN PEREZ", "cliente": "CLIENTE A", "obra": "OBRA A", "fecha": "20-08-2026", "recibido_en": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_count_eventos_filtra_por_tipo_y_chofer():
+    eventos = [_evento(tipo_evento="TIENE_ESTADIA", chofer="JUAN PEREZ"), _evento(tipo_evento="DOBLE_VUELTA", chofer="JUAN PEREZ")]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": "TIENE_ESTADIA", "chofer": "JUAN PEREZ"}),
+        eventos,
+    )
+    assert r.resultado == 1
+
+
+def test_count_eventos_prefijo_generico_incluye_subtipos():
+    eventos = [_evento(tipo_evento="DEVOLUCION_TOTAL"), _evento(tipo_evento="DEVOLUCION_PARCIAL"), _evento(tipo_evento="DOBLE_VUELTA")]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": "DEVOLUCION"}), eventos,
+    )
+    assert r.resultado == 2
+
+
+def test_count_eventos_agrupacion_top1():
+    eventos = [
+        _evento(tipo_evento="DEVOLUCION_TOTAL", chofer="JUAN PEREZ"),
+        _evento(tipo_evento="DEVOLUCION_TOTAL", chofer="JUAN PEREZ"),
+        _evento(tipo_evento="DEVOLUCION_TOTAL", chofer="PEDRO GOMEZ"),
+    ]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": "DEVOLUCION"}, agrupacion="chofer", limite=1),
+        eventos,
+    )
+    assert r.resultado == ({"grupo": "JUAN PEREZ", "valor": 2},)
+
+
+def test_count_eventos_sin_ninguno_es_cero_sin_error():
+    r = ejecutar_consulta_eventos(ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS), [])
+    assert r.resultado == 0
+
+
+def test_ejecutar_consulta_eventos_rechaza_dominio_viajes():
+    with pytest.raises(ErrorConsultaAtlas):
+        ejecutar_consulta_eventos(ConsultaAtlas(metrica="COUNT_VIAJES"), [])
+
+
+def test_count_eventos_acepta_tipo_evento_de_otro_rubro_sin_lista_cerrada():
+    """Bloque 20/21 -- anti-hardcode: un tipo de evento de un rubro
+    completamente distinto (nunca visto por este Motor) se cuenta igual,
+    sin que el ejecutor lo rechace ni necesite conocerlo de antemano."""
+    eventos = [_evento(tipo_evento="RECHAZO_TEMPERATURA", cliente="SUPERMERCADO EJEMPLO")]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(
+            metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS,
+            filtros={"tipo_evento": "RECHAZO_TEMPERATURA", "cliente": "SUPERMERCADO EJEMPLO"},
+        ),
+        eventos,
+    )
+    assert r.resultado == 1

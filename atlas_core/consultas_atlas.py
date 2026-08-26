@@ -39,10 +39,23 @@ METRICA_COUNT_DISTINCT_CHOFER = "COUNT_DISTINCT_CHOFER"
 # Bloque B1 V2 -- dominio INCIDENCIAS_DOCUMENTALES, nunca calculado
 # contando viajes REVISAR (Bloque 4.A/9 del ticket).
 METRICA_COUNT_INCIDENCIAS = "COUNT_INCIDENCIAS"
+# Bloque UNIVERSAL V1 (Bloque 9/19 del ticket) -- dominio EVENTOS
+# (estadías, devoluciones, doble vuelta, y CUALQUIER tipo de evento
+# futuro -- el ejecutor nunca valida `tipo_evento` contra una lista
+# cerrada, ver `eventos_operacionales.py`).
+METRICA_COUNT_EVENTOS = "COUNT_EVENTOS"
+# Bloque UNIVERSAL V1 (Bloque 8 del ticket) -- RELACIÓN genérica sobre
+# el dominio VIAJES: "qué patentes ha usado Retamal", "con qué chofer
+# está vinculada JF4288", "qué cliente aparece en el viaje X" son todas
+# la MISMA operación (proyectar los valores distintos de un campo
+# relacionado sobre los viajes que cumplen el filtro) -- nunca un
+# comando nuevo por combinación. Ver `relacion` en `ConsultaAtlas`.
+METRICA_LIST_RELACION = "LIST_RELACION"
 METRICAS_SOPORTADAS = frozenset({
     METRICA_COUNT_VIAJES, METRICA_COUNT_GUIAS, METRICA_SUM_PESO,
     METRICA_SUM_KM, METRICA_SUM_TIEMPO, METRICA_LISTAR_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_INCIDENCIAS,
+    METRICA_COUNT_EVENTOS, METRICA_LIST_RELACION,
 })
 _UNIDADES_POR_METRICA = {
     METRICA_COUNT_VIAJES: "viajes", METRICA_COUNT_GUIAS: "guías",
@@ -51,7 +64,8 @@ _UNIDADES_POR_METRICA = {
     # (Ruta GPS V1 no existe todavía) -- nunca sugerir lo contrario.
     METRICA_SUM_PESO: "kg", METRICA_SUM_KM: "km calculados", METRICA_SUM_TIEMPO: "min",
     METRICA_LISTAR_VIAJES: "viajes", METRICA_COUNT_DISTINCT_CHOFER: "choferes",
-    METRICA_COUNT_INCIDENCIAS: "incidencias",
+    METRICA_COUNT_INCIDENCIAS: "incidencias", METRICA_COUNT_EVENTOS: "eventos",
+    METRICA_LIST_RELACION: "valores",
 }
 
 # --- Bloque B1 V2 (Bloque 3 del ticket): DOMINIO -- una ConsultaAtlas ya
@@ -66,10 +80,17 @@ _UNIDADES_POR_METRICA = {
 # falta)."""
 DOMINIO_VIAJES = "VIAJES"
 DOMINIO_INCIDENCIAS_DOCUMENTALES = "INCIDENCIAS_DOCUMENTALES"
-DOMINIOS_SOPORTADOS = frozenset({DOMINIO_VIAJES, DOMINIO_INCIDENCIAS_DOCUMENTALES})
+# Bloque UNIVERSAL V1 -- eventos operacionales (estadía, espera
+# autorización, devolución total/parcial, doble vuelta, y cualquier
+# tipo futuro que Javier empiece a registrar) -- otra fuente de datos
+# por completo (Mobile, ver `eventos_operacionales.py`), igual que
+# INCIDENCIAS_DOCUMENTALES ya lo es.
+DOMINIO_EVENTOS = "EVENTOS"
+DOMINIOS_SOPORTADOS = frozenset({DOMINIO_VIAJES, DOMINIO_INCIDENCIAS_DOCUMENTALES, DOMINIO_EVENTOS})
 _METRICAS_POR_DOMINIO = {
-    DOMINIO_VIAJES: METRICAS_SOPORTADAS - {METRICA_COUNT_INCIDENCIAS},
+    DOMINIO_VIAJES: METRICAS_SOPORTADAS - {METRICA_COUNT_INCIDENCIAS, METRICA_COUNT_EVENTOS},
     DOMINIO_INCIDENCIAS_DOCUMENTALES: frozenset({METRICA_COUNT_INCIDENCIAS}),
+    DOMINIO_EVENTOS: frozenset({METRICA_COUNT_EVENTOS}),
 }
 
 # --- Bloque 2: filtros V1 -- sólo campos que `viajes.csv` realmente
@@ -94,8 +115,14 @@ _COLUMNAS_MULTIVALOR = frozenset({
 # catálogo finito de valores posibles -- Bloque 7: "material" es
 # descripción libre, nunca una enumeración cerrada como tipo_carga).
 _FILTROS_SUBCADENA = frozenset({"material", "destino"})
+# Bloque UNIVERSAL V1 (Bloque 7/18 del ticket) -- "patente" es un filtro
+# VIRTUAL: un usuario que pregunta por una patente no sabe (ni debería
+# saber) si es tracto o rampla -- coincide contra CUALQUIERA de las dos
+# columnas reales (ver `_fila_coincide`). "tipo_evento" sólo aplica al
+# dominio EVENTOS (ver `eventos_operacionales.py`) -- se declara aquí
+# para que `validar_consulta` lo acepte con el mismo mecanismo único.
 FILTROS_SOPORTADOS = frozenset(_CAMPO_A_COLUMNA) | frozenset({
-    "periodo", "fecha_desde", "fecha_hasta",
+    "periodo", "fecha_desde", "fecha_hasta", "patente", "tipo_evento", "dias",
 })
 
 # --- Bloque 4: agrupaciones V1. ---
@@ -103,6 +130,20 @@ AGRUPACIONES_SOPORTADAS = frozenset({
     "chofer", "cliente", "obra", "destino", "comuna", "material",
     "tipo_carga", "dia", "semana", "mes",
 })
+
+# --- Bloque UNIVERSAL V1 (Bloque 8 del ticket): RELACIÓN -- proyecta
+# los valores DISTINTOS de un campo relacionado sobre los viajes que
+# cumplen el filtro (dominio VIAJES únicamente). "vehiculo" es la única
+# relación compuesta (tracto + rampla combinados, un usuario nunca
+# distingue cuál usó); el resto reutiliza las mismas columnas reales ya
+# usadas por filtros/agrupación -- nunca una tabla paralela. ---
+_COLUMNA_RELACION = {
+    "chofer": "choferes", "cliente": "clientes", "obra": "obras_destino",
+    "destino": "direccion_entrega", "comuna": "localidad_entrega",
+    "material": "materiales", "tipo_carga": "tipos_carga", "guia": "numeros_guia",
+    "patente_tracto": "patentes_tracto", "patente_rampla": "patentes_rampla",
+}
+RELACIONES_SOPORTADAS = frozenset(_COLUMNA_RELACION) | frozenset({"vehiculo"})
 
 # --- Bloque 5: períodos V1 -- resueltos de forma determinística, nunca
 # por el LLM (Bloque 5 del ticket: "no dejar que B1 invente fechas"). ---
@@ -112,9 +153,13 @@ PERIODO_ESTA_SEMANA = "ESTA_SEMANA"
 PERIODO_SEMANA_PASADA = "SEMANA_PASADA"
 PERIODO_ESTE_MES = "ESTE_MES"
 PERIODO_MES_PASADO = "MES_PASADO"
+# Bloque UNIVERSAL V1 (Bloque 12 del ticket) -- "últimos N días": el
+# único período PARAMÉTRICO, el número vive en `filtros["dias"]` (nunca
+# un token nuevo por cada N -- eso sí sería una explosión combinatoria).
+PERIODO_ULTIMOS_N_DIAS = "ULTIMOS_N_DIAS"
 PERIODOS_SOPORTADOS = frozenset({
     PERIODO_HOY, PERIODO_AYER, PERIODO_ESTA_SEMANA, PERIODO_SEMANA_PASADA,
-    PERIODO_ESTE_MES, PERIODO_MES_PASADO,
+    PERIODO_ESTE_MES, PERIODO_MES_PASADO, PERIODO_ULTIMOS_N_DIAS,
 })
 
 
@@ -136,6 +181,11 @@ class ConsultaAtlas:
     orden: str = "DESC"
     limite: int | None = None
     dominio: str = DOMINIO_VIAJES
+    # Bloque UNIVERSAL V1 -- sólo se usa con `METRICA_LIST_RELACION`
+    # (Bloque 8 del ticket): qué campo relacionado proyectar. Un único
+    # campo nuevo, reutilizable para cualquier combinación entidad-
+    # relación futura -- nunca "un comando por combinación".
+    relacion: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +220,13 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
         )
     if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER and consulta.agrupacion is not None:
         raise ErrorConsultaAtlas("COUNT_DISTINCT_CHOFER no soporta agrupación todavía.")
+    if consulta.metrica == METRICA_LIST_RELACION:
+        if consulta.dominio != DOMINIO_VIAJES:
+            raise ErrorConsultaAtlas("LIST_RELACION sólo está soportado en el dominio VIAJES.")
+        if consulta.relacion not in RELACIONES_SOPORTADAS:
+            raise ErrorConsultaAtlas(f"Relación no soportada: {consulta.relacion!r}")
+    elif consulta.relacion is not None:
+        raise ErrorConsultaAtlas("`relacion` sólo se usa junto con LIST_RELACION.")
     for campo in consulta.filtros:
         if campo not in FILTROS_SOPORTADOS:
             raise ErrorConsultaAtlas(f"Filtro no soportado: {campo!r}")
@@ -178,6 +235,10 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
     periodo = consulta.filtros.get("periodo")
     if periodo is not None and periodo not in PERIODOS_SOPORTADOS:
         raise ErrorConsultaAtlas(f"Período no soportado: {periodo!r}")
+    if periodo == PERIODO_ULTIMOS_N_DIAS:
+        dias = consulta.filtros.get("dias")
+        if dias is None or not str(dias).strip().isdigit() or int(dias) <= 0:
+            raise ErrorConsultaAtlas(f"'dias' inválido para ULTIMOS_N_DIAS: {dias!r}")
     if consulta.orden not in ("ASC", "DESC"):
         raise ErrorConsultaAtlas(f"Orden no soportado: {consulta.orden!r}")
     for clave in ("fecha_desde", "fecha_hasta"):
@@ -186,10 +247,13 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
             raise ErrorConsultaAtlas(f"{clave} inválida: {valor!r}")
 
 
-def resolver_periodo(nombre: str, *, hoy: date) -> tuple[date, date]:
+def resolver_periodo(nombre: str, *, hoy: date, dias: int | None = None) -> tuple[date, date]:
     """Bloque 5 -- resolución determinística de período, siempre
     después de interpretar la intención (nunca antes: el LLM nunca ve
-    ni produce una fecha concreta, sólo el NOMBRE del período)."""
+    ni produce una fecha concreta, sólo el NOMBRE del período). `dias`
+    sólo se usa (y es obligatorio) para `PERIODO_ULTIMOS_N_DIAS` (Bloque
+    12 del ticket) -- semántica calendario: los `dias` días hasta hoy
+    inclusive."""
     if nombre == PERIODO_HOY:
         return hoy, hoy
     if nombre == PERIODO_AYER:
@@ -208,6 +272,10 @@ def resolver_periodo(nombre: str, *, hoy: date) -> tuple[date, date]:
     if nombre == PERIODO_MES_PASADO:
         fin_mes_pasado = hoy.replace(day=1) - timedelta(days=1)
         return fin_mes_pasado.replace(day=1), fin_mes_pasado
+    if nombre == PERIODO_ULTIMOS_N_DIAS:
+        if not dias or dias <= 0:
+            raise ErrorConsultaAtlas(f"'dias' inválido para ULTIMOS_N_DIAS: {dias!r}")
+        return hoy - timedelta(days=dias - 1), hoy
     raise ErrorConsultaAtlas(f"Período no soportado: {nombre!r}")
 
 
@@ -261,7 +329,8 @@ def _num(texto: str) -> float:
 def _rango_fecha_de_consulta(consulta: ConsultaAtlas) -> tuple[date, date] | None:
     periodo = consulta.filtros.get("periodo")
     if periodo is not None:
-        return resolver_periodo(periodo, hoy=date.today())
+        dias = consulta.filtros.get("dias")
+        return resolver_periodo(periodo, hoy=date.today(), dias=int(dias) if dias is not None else None)
     desde = consulta.filtros.get("fecha_desde")
     hasta = consulta.filtros.get("fecha_hasta")
     if desde is None and hasta is None:
@@ -279,14 +348,22 @@ def _fila_coincide(
         if fecha is None or not (rango_fecha[0] <= fecha <= rango_fecha[1]):
             return False
     for campo, valor in consulta.filtros.items():
-        if campo in ("periodo", "fecha_desde", "fecha_hasta"):
+        if campo in ("periodo", "fecha_desde", "fecha_hasta", "dias"):
             continue
-        columna = _CAMPO_A_COLUMNA[campo]
+        if campo == "tipo_evento":
+            continue  # Bloque UNIVERSAL V1 -- sólo aplica al dominio EVENTOS
         valor_normalizado = normalizar_texto_atlas(valor)
-        if columna in _COLUMNAS_MULTIVALOR:
-            valores = _valores_multivalor(viaje, columna)
+        if campo == "patente":
+            # Bloque UNIVERSAL V1 (Bloque 7/18) -- filtro virtual: coincide
+            # contra CUALQUIERA de las dos columnas reales, nunca exige
+            # que el usuario sepa si es tracto o rampla.
+            valores = _valores_multivalor(viaje, "patentes_tracto") + _valores_multivalor(viaje, "patentes_rampla")
         else:
-            valores = (str(viaje.get(columna, "")).strip(),)
+            columna = _CAMPO_A_COLUMNA[campo]
+            if columna in _COLUMNAS_MULTIVALOR:
+                valores = _valores_multivalor(viaje, columna)
+            else:
+                valores = (str(viaje.get(columna, "")).strip(),)
         if campo in _FILTROS_SUBCADENA:
             if not any(valor_normalizado in normalizar_texto_atlas(v) for v in valores):
                 return False
@@ -375,6 +452,31 @@ def ejecutar_consulta_atlas(
             total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
         )
 
+    if consulta.metrica == METRICA_LIST_RELACION:
+        # Bloque UNIVERSAL V1 (Bloque 8 del ticket) -- proyecta los
+        # valores DISTINTOS del campo relacionado sobre los viajes que
+        # cumplen el filtro; UN solo camino de código para cualquier
+        # combinación entidad-relación ("qué patentes ha usado X", "con
+        # qué chofer está vinculada Y", "qué cliente aparece en Z").
+        valores: set[str] = set()
+        for v in coincidencias:
+            if consulta.relacion == "vehiculo":
+                valores.update(_valores_multivalor(v, "patentes_tracto"))
+                valores.update(_valores_multivalor(v, "patentes_rampla"))
+            else:
+                columna = _COLUMNA_RELACION[consulta.relacion]
+                if columna in _COLUMNAS_MULTIVALOR:
+                    valores.update(_valores_multivalor(v, columna))
+                else:
+                    valor_col = str(v.get(columna, "")).strip()
+                    if valor_col:
+                        valores.add(valor_col)
+        lista = tuple(sorted(valores))
+        return ResultadoConsultaAtlas(
+            consulta_interpretada=consulta, resultado=lista, unidades=unidades,
+            total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
+        )
+
     if consulta.metrica == METRICA_LISTAR_VIAJES:
         filas = list(coincidencias)
         filas.sort(key=lambda v: _parsear_fecha_dataset(v.get("fecha", "")) or date.min, reverse=(consulta.orden == "DESC"))
@@ -420,6 +522,103 @@ def ejecutar_consulta_atlas(
 
     return ResultadoConsultaAtlas(
         consulta_interpretada=consulta, resultado=tuple(filas_resultado), unidades=unidades,
+        total_coincidencias=len(coincidencias), viajes_soporte=tuple(soporte),
+    )
+
+
+def _parsear_fecha_evento(evento: Mapping[str, object]) -> date | None:
+    """Bloque 12 -- misma semántica calendario que viajes: prefiere la
+    `fecha` del viaje asociado (DD-MM-YYYY); si el evento no llegó a
+    asociarse a ningún viaje, usa la fecha de recepción real
+    (`recibido_en`, ISO) -- nunca deja un evento real sin fecha
+    consultable sólo porque no se pudo enlazar a un viaje."""
+    fecha_viaje = _parsear_fecha_dataset(str(evento.get("fecha", "")))
+    if fecha_viaje is not None:
+        return fecha_viaje
+    recibido = str(evento.get("recibido_en", "")).strip()
+    if not recibido:
+        return None
+    try:
+        return datetime.fromisoformat(recibido.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def ejecutar_consulta_eventos(
+    consulta: ConsultaAtlas, eventos: Sequence[Mapping[str, object]],
+) -> ResultadoConsultaAtlas:
+    """Bloque UNIVERSAL V1 (Bloque 9/19 del ticket) -- ejecutor
+    determinístico del dominio EVENTOS. Domain-agnóstico A PROPÓSITO
+    (Bloque 21: anti-hardcode): `tipo_evento` NUNCA se valida contra una
+    lista cerrada de eventos conocidos de MBT/AZA -- cuenta/agrupa lo
+    que exista en los datos, sea "TIENE_ESTADIA" o "RECHAZO_TEMPERATURA"
+    de un rubro completamente distinto (Bloque 20 del ticket). Recibe
+    `eventos` ya construidos (`eventos_operacionales.
+    construir_eventos_operacionales`) -- nunca lee Mobile directamente."""
+    validar_consulta(consulta)
+    if consulta.dominio != DOMINIO_EVENTOS:
+        raise ErrorConsultaAtlas(f"ejecutar_consulta_eventos sólo resuelve el dominio {DOMINIO_EVENTOS!r}.")
+    if consulta.metrica != METRICA_COUNT_EVENTOS:
+        raise ErrorConsultaAtlas(f"Métrica no soportada para EVENTOS: {consulta.metrica!r}")
+    rango_fecha = _rango_fecha_de_consulta(consulta)
+
+    def _coincide(evento: Mapping[str, object]) -> bool:
+        if rango_fecha is not None:
+            fecha = _parsear_fecha_evento(evento)
+            if fecha is None or not (rango_fecha[0] <= fecha <= rango_fecha[1]):
+                return False
+        tipo_filtro = consulta.filtros.get("tipo_evento")
+        if tipo_filtro is not None:
+            tipo_evento_normalizado = normalizar_texto_atlas(str(evento.get("tipo_evento", "")))
+            tipo_filtro_normalizado = normalizar_texto_atlas(tipo_filtro)
+            # Bloque UNIVERSAL V1 (Bloque 19 caso B del ticket) -- filtro
+            # JERÁRQUICO por prefijo: "DEVOLUCION" (genérico, "cuántas
+            # devoluciones tuvo X") coincide con "DEVOLUCION_TOTAL" y
+            # "DEVOLUCION_PARCIAL" (mismo convenio de nombres ya usado
+            # por `mobile.TIPOS_NOVEDAD`) -- nunca sólo igualdad exacta,
+            # que dejaría fuera las subcategorías. Un tipo exacto
+            # ("DEVOLUCION_TOTAL") sigue exigiendo igualdad exacta.
+            if tipo_evento_normalizado != tipo_filtro_normalizado and not tipo_evento_normalizado.startswith(
+                tipo_filtro_normalizado + "_"
+            ):
+                return False
+        for campo in ("chofer", "cliente", "obra"):
+            valor = consulta.filtros.get(campo)
+            if valor is None:
+                continue
+            if normalizar_texto_atlas(str(evento.get(campo, ""))) != normalizar_texto_atlas(valor):
+                return False
+        return True
+
+    coincidencias = [e for e in eventos if _coincide(e)]
+    unidades = _UNIDADES_POR_METRICA[METRICA_COUNT_EVENTOS]
+
+    if consulta.agrupacion is None:
+        return ResultadoConsultaAtlas(
+            consulta_interpretada=consulta, resultado=len(coincidencias), unidades=unidades,
+            total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
+        )
+
+    acumulado: dict[str, int] = {}
+    por_grupo: dict[str, list[Mapping[str, object]]] = {}
+    for evento in coincidencias:
+        clave = str(evento.get(consulta.agrupacion, "")).strip()
+        if not clave:
+            continue  # Bloque 11 -- nunca agrupar bajo una clave vacía/sin resolver
+        acumulado[clave] = acumulado.get(clave, 0) + 1
+        por_grupo.setdefault(clave, []).append(evento)
+
+    filas = [{"grupo": clave, "valor": valor} for clave, valor in acumulado.items()]
+    filas.sort(key=lambda f: f["valor"], reverse=(consulta.orden == "DESC"))
+    if consulta.limite is not None:
+        filas = filas[: consulta.limite]
+    grupos_incluidos = {f["grupo"] for f in filas}
+    soporte: list[Mapping[str, object]] = []
+    for grupo in grupos_incluidos:
+        soporte.extend(por_grupo.get(grupo, ()))
+
+    return ResultadoConsultaAtlas(
+        consulta_interpretada=consulta, resultado=tuple(filas), unidades=unidades,
         total_coincidencias=len(coincidencias), viajes_soporte=tuple(soporte),
     )
 

@@ -198,3 +198,72 @@ def test_variante_cuantos_conductores_cargaron_este_mes():
 def test_variante_choferes_con_viajes_este_mes():
     r = responder_consulta_atlas("choferes con viajes este mes", ruta_viajes=RUTA_VIAJES_REAL)
     assert r.resultado.consulta_interpretada.metrica == "COUNT_DISTINCT_CHOFER"
+
+
+def test_toneladas_movio_nahuelnir_nunca_responde_en_viajes():
+    """Bloque 17 del ticket -- regresión permanente #4."""
+    viajes = _leer_viajes_real()
+    esperado_kg = sum(
+        float(v.get("peso_total_viaje_kg") or 0) for v in viajes if "NAHUEL" in v.get("choferes", "").upper()
+    )
+    r = responder_consulta_atlas("¿Cuántas toneladas movió Nahuelñir?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.resultado.consulta_interpretada.metrica == "SUM_PESO"
+    assert r.resultado.resultado == esperado_kg
+
+
+# --- Bloque UNIVERSAL V1 -- E2E RELACIONALES (Bloque 18 del ticket),
+# motor genérico, patentes reales de producción (JB8529/JF4288) ---
+
+def _raiz_atlas_real() -> Path | None:
+    return RAIZ_DRIVE if RAIZ_DRIVE.is_dir() else None
+
+
+RAIZ_ATLAS_REAL = _raiz_atlas_real()
+
+
+def test_relacional_en_que_viajes_aparece_jb8529():
+    viajes = _leer_viajes_real()
+    esperados = {
+        v["numero_transporte"] for v in viajes
+        if "JB8529" in v.get("patentes_tracto", "").upper().split(" | ") + v.get("patentes_rampla", "").upper().split(" | ")
+    }
+    r = responder_consulta_atlas("¿En qué viajes aparece la patente JB8529?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert {v["numero_transporte"] for v in r.resultado.viajes_soporte} == esperados
+
+
+def test_relacional_con_que_chofer_esta_vinculada_jf4288():
+    r = responder_consulta_atlas("¿Con qué chofer está vinculada JF4288?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.consulta_interpretada.relacion == "chofer"
+    assert "NAHUEL" in "".join(r.resultado.resultado).upper()
+
+
+def test_relacional_que_patentes_ha_usado_retamal():
+    r = responder_consulta_atlas("¿Qué patentes ha usado Retamal?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == ("BPHR67",)
+
+
+def test_relacional_en_que_guias_aparece_jf4288():
+    r = responder_consulta_atlas("¿En qué guías aparece JF4288?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == ("472247",)
+
+
+def test_relacional_que_cliente_aparece_en_el_viaje_0000354805():
+    r = responder_consulta_atlas("¿Qué cliente aparece en el viaje 0000354805?", ruta_viajes=RUTA_VIAJES_REAL)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == ("YOLITO BALART HNOS LTDA",)
+
+
+# --- Bloque UNIVERSAL V1 -- dominio EVENTOS contra producción real:
+# hoy no hay envíos Mobile con novedad todavía -- cero real, nunca
+# "fuente no disponible" (Bloque 14), con la raíz sí indicada. ---
+
+def test_eventos_dominio_real_es_cero_real_no_fuente_no_disponible():
+    r = responder_consulta_atlas(
+        "¿Cuántas estadías tuvo Retamal?", ruta_viajes=RUTA_VIAJES_REAL, raiz_atlas=RAIZ_ATLAS_REAL,
+    )
+    assert r.resultado.consulta_interpretada.dominio == "EVENTOS"
+    assert r.estado in (ESTADO_OK, ESTADO_SIN_RESULTADOS)  # nunca FUENTE_NO_DISPONIBLE con raíz indicada

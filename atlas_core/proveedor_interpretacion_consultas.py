@@ -26,9 +26,12 @@ from urllib.request import Request, urlopen
 
 from atlas_core.consultas_atlas import (
     AGRUPACIONES_SOPORTADAS,
+    DOMINIO_VIAJES,
+    DOMINIOS_SOPORTADOS,
     FILTROS_SOPORTADOS,
     METRICAS_SOPORTADAS,
     PERIODOS_SOPORTADOS,
+    RELACIONES_SOPORTADAS,
     ConsultaAtlas,
     ErrorConsultaAtlas,
 )
@@ -79,21 +82,38 @@ def _herramienta_consulta_atlas() -> dict:
         "name": _NOMBRE_HERRAMIENTA,
         "description": (
             "Convierte una pregunta operacional en lenguaje natural sobre "
-            "viajes de Atlas a una consulta estructurada. Nunca calcules "
-            "ningún número -- sólo identifica métrica, filtros, "
-            "agrupación y período."
+            "la operación de Atlas a una consulta estructurada. Nunca "
+            "calcules ningún número -- sólo identifica dominio, métrica, "
+            "relación, filtros, agrupación y período. Los enums de este "
+            "esquema se derivan automáticamente de lo que el Motor ya "
+            "soporta -- se extienden solos si el Motor agrega algo nuevo."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                # Bloque UNIVERSAL V1 (Bloque 5/7 del ticket) -- B1 debe
+                # poder expresar el DOMINIO explícitamente: VIAJES
+                # (default), INCIDENCIAS_DOCUMENTALES o EVENTOS. Antes de
+                # este bloque, B1 nunca podía construir ningún dominio
+                # más allá de VIAJES -- el esquema no lo exponía.
+                "dominio": {"type": "string", "enum": sorted(DOMINIOS_SOPORTADOS)},
                 "metrica": {"type": "string", "enum": sorted(METRICAS_SOPORTADAS)},
                 "filtros": {
                     "type": "object",
-                    "description": "Sólo campos con evidencia real en la pregunta.",
+                    "description": (
+                        "Sólo campos con evidencia real en la pregunta. "
+                        "`tipo_evento` sólo aplica a dominio EVENTOS -- usa "
+                        "el nombre de evento real más específico que la "
+                        "pregunta sugiera."
+                    ),
                     "properties": {campo: {"type": "string"} for campo in sorted(FILTROS_SOPORTADOS)},
                     "additionalProperties": False,
                 },
                 "agrupacion": {"type": ["string", "null"], "enum": [*sorted(AGRUPACIONES_SOPORTADAS), None]},
+                # Bloque UNIVERSAL V1 (Bloque 8 del ticket) -- sólo se usa
+                # junto con `metrica=LIST_RELACION` ("qué patentes ha
+                # usado X", "con qué chofer está vinculada X").
+                "relacion": {"type": ["string", "null"], "enum": [*sorted(RELACIONES_SOPORTADAS), None]},
                 "limite": {"type": ["integer", "null"]},
                 "abstencion": {
                     "type": "boolean",
@@ -107,19 +127,35 @@ def _herramienta_consulta_atlas() -> dict:
 
 def _prompt_sistema(catalogos: CatalogosConsulta) -> str:
     return (
-        "Eres el intérprete de Consultas Atlas. Tu única tarea es traducir "
-        "una pregunta en lenguaje natural sobre la operación de transporte "
-        "a los campos de una consulta estructurada. NUNCA calcules ni "
-        "inventes un número de respuesta -- eso lo hace el Motor "
-        "determinístico después. Usa filtros SÓLO cuando la pregunta "
-        "mencione algo compatible con estos valores reales del dataset "
-        "ya cargado (nunca inventes un valor que no esté en estas listas):\n"
+        "Eres el intérprete de Consultas Atlas -- una plataforma UNIVERSAL, "
+        "no específica de ninguna empresa/rubro: MBT/AZA (si aparecen en los "
+        "datos) son sólo datos operacionales, nunca lógica especial. Tu "
+        "única tarea es traducir una pregunta en lenguaje natural a los "
+        "campos de una consulta estructurada -- entidad, relación, evento, "
+        "métrica, período, filtros. NUNCA calcules ni inventes un número de "
+        "respuesta -- eso lo hace el Motor determinístico después. Usa "
+        "filtros SÓLO cuando la pregunta mencione algo compatible con estos "
+        "valores reales del dataset ya cargado (nunca inventes un valor que "
+        "no esté en estas listas):\n"
         f"choferes: {', '.join(catalogos.choferes) or '(ninguno)'}\n"
         f"clientes: {', '.join(catalogos.clientes) or '(ninguno)'}\n"
         f"obras: {', '.join(catalogos.obras) or '(ninguno)'}\n"
         f"tipos_carga: {', '.join(catalogos.tipos_carga) or '(ninguno)'}\n"
         f"comunas: {', '.join(catalogos.comunas) or '(ninguno)'}\n"
+        f"patentes (tracto y rampla): {', '.join(catalogos.patentes) or '(ninguna)'}\n"
         f"períodos válidos: {', '.join(sorted(PERIODOS_SOPORTADOS))}\n"
+        "Dominios: VIAJES (default, viajes.csv) -- INCIDENCIAS_DOCUMENTALES "
+        "(sólo métrica COUNT_INCIDENCIAS, sin filtros) -- EVENTOS (estadías, "
+        "devoluciones, doble vuelta, y cualquier otro tipo de evento "
+        "operacional real; usa `filtros.tipo_evento` con el nombre de "
+        "evento más específico que la pregunta sugiera; un tipo genérico "
+        "como 'DEVOLUCION' también coincide con sus subtipos "
+        "'DEVOLUCION_TOTAL'/'DEVOLUCION_PARCIAL'). "
+        "Relaciones (sólo con metrica=LIST_RELACION): proyecta los valores "
+        "distintos de un campo relacionado sobre los viajes filtrados -- "
+        "p. ej. 'qué patentes ha usado X' es filtros={chofer:X}, "
+        "relacion=vehiculo; 'con qué chofer está vinculada X' (X una "
+        "patente) es filtros={patente:X}, relacion=chofer. "
         "Si la pregunta no es una consulta operacional interpretable con "
         "esta evidencia, responde abstencion=true."
     )
@@ -182,12 +218,16 @@ def _consulta_desde_entrada_herramienta(entrada: dict) -> ConsultaAtlas | None:
     if not isinstance(filtros, dict):
         return None
     agrupacion = entrada.get("agrupacion") or None
+    relacion = entrada.get("relacion") or None
+    dominio = entrada.get("dominio") or None
     limite = entrada.get("limite")
     try:
         return ConsultaAtlas(
             metrica=str(entrada.get("metrica", "")),
             filtros={str(k): str(v) for k, v in filtros.items()},
             agrupacion=str(agrupacion) if agrupacion else None,
+            relacion=str(relacion) if relacion else None,
+            dominio=str(dominio) if dominio else DOMINIO_VIAJES,
             limite=int(limite) if isinstance(limite, (int, float)) else None,
         )
     except (TypeError, ValueError):

@@ -17,7 +17,7 @@ import json
 import os
 import sys
 
-from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES
+from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES, DOMINIO_VIAJES, METRICA_LIST_RELACION
 from atlas_core.responder_consulta_atlas import RespuestaConsultaAtlas, responder_consulta_atlas
 
 
@@ -55,16 +55,33 @@ def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
     if respuesta.resultado is not None:
         r = respuesta.resultado
         consulta = r.consulta_interpretada
-        # Bloque B1 V2 -- dominio INCIDENCIAS_DOCUMENTALES no viene de
-        # `viajes.csv`: sus filas de soporte son incidencias, no viajes,
-        # y recortarlas con las columnas de un viaje sólo produciría
-        # columnas vacías. Se pasan tal cual (nunca un secreto/prompt --
-        # ver `atlas_core.incidencias_documentales.IncidenciaDocumental`).
-        es_incidencias = consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES
-        recorte = (lambda v: dict(v)) if es_incidencias else _viaje_recortado
+        # Bloque B1 V2/UNIVERSAL V1 -- las filas de SOPORTE (`viajes_
+        # soporte`) son siempre del dominio real de la consulta: viajes
+        # para VIAJES, incidencias para INCIDENCIAS_DOCUMENTALES, eventos
+        # para EVENTOS -- recortarlas con las columnas de un viaje fuera
+        # del dominio VIAJES sólo produciría columnas vacías. Se pasan
+        # tal cual fuera de VIAJES (nunca un secreto/prompt -- ver
+        # `IncidenciaDocumental`/`eventos_operacionales`).
+        recorte = _viaje_recortado if consulta.dominio == DOMINIO_VIAJES else (lambda v: dict(v))
         resultado_bruto = r.resultado
-        if isinstance(resultado_bruto, tuple):
-            # LISTAR_VIAJES: la propia lista de viajes es el "resultado".
+        if consulta.metrica == METRICA_LIST_RELACION:
+            # LIST_RELACION: el "resultado" es una lista de VALORES
+            # (strings), no de filas -- nunca pasa por un recorte de
+            # columnas de viaje/incidencia (Bug real encontrado en este
+            # bloque: el recorte de abajo, pensado sólo para
+            # LISTAR_VIAJES, se aplicaba también a agrupaciones y hubiera
+            # aplicado a listas de strings, vaciando el resultado).
+            resultado_serializado = list(resultado_bruto)
+        elif isinstance(resultado_bruto, tuple) and consulta.agrupacion is not None:
+            # Agrupación (Bug real encontrado en este bloque): son filas
+            # `{"grupo":..., "valor":...}`, NUNCA viajes/incidencias --
+            # `_viaje_recortado` las vaciaba en silencio (todas las
+            # columnas quedaban "") porque ninguna coincide con
+            # "grupo"/"valor". Se pasan tal cual, ya son pequeñas.
+            resultado_serializado = [dict(f) for f in resultado_bruto]
+        elif isinstance(resultado_bruto, tuple):
+            # LISTAR_VIAJES (o el listado de soporte de otro dominio): la
+            # propia lista de filas es el "resultado".
             resultado_serializado = [recorte(dict(v)) for v in resultado_bruto]
         else:
             resultado_serializado = resultado_bruto
@@ -91,12 +108,16 @@ def main(argv: list[str] | None = None) -> int:
     # incidencias" (mismo criterio ya usado por
     # `src/incidencias_documentales.js` -- archivo ausente no es error).
     parser.add_argument("--incidencias", default=None, help="Ruta a catalogos_privados/incidencias_documentales.json.")
+    # Bloque UNIVERSAL V1 -- dominio EVENTOS (Bloque 9/13 del ticket).
+    # Opcional: sin ella, ese dominio responde "no pude verificar" en
+    # vez de "0" (Bloque 14, mismo criterio que INCIDENCIAS_DOCUMENTALES).
+    parser.add_argument("--raiz-atlas", default=None, help="Raíz de datos Atlas (para operacion/mobile/envios).")
     args = parser.parse_args(argv)
 
     try:
         respuesta = responder_consulta_atlas(
             args.pregunta, ruta_viajes=args.viajes, ruta_incidencias=args.incidencias,
-            proveedor_interpretacion=_proveedor_interpretacion_opcional(),
+            raiz_atlas=args.raiz_atlas, proveedor_interpretacion=_proveedor_interpretacion_opcional(),
         )
     except Exception as error:  # nunca deja el proceso sin salida JSON parseable
         # Salida ASCII JSON: evita que la consola Windows recodifique los

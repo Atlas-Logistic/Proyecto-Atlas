@@ -4,6 +4,19 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — ATLAS/B1 UNIVERSAL V1: MOTOR RELACIONAL UNIVERSAL
+
+- **Problema de fondo:** Consultas Atlas venía creciendo por capacidad específica (patentes, choferes, incidencias, viajes...) -- no escala, y ata el Core a MBT/AZA. Se rediseña como plataforma UNIVERSAL: entidad + relación + evento + métrica + período + filtros, sin romper V2.
+- **Contrato mínimo extendido, no reescrito:** `ConsultaAtlas` gana `relacion` (un solo campo nuevo) y un dominio adicional `EVENTOS`; `dominio` ya existía desde V2. Tres piezas nuevas, cada una un adaptador sobre datos YA existentes (Bloque 13: "fachada universal", nunca una DB nueva): (1) `METRICA_LIST_RELACION` -- proyecta valores distintos de un campo relacionado ("qué patentes ha usado X", "con qué chofer está vinculada X", "qué cliente aparece en el viaje X"), un solo camino de código para cualquier combinación entidad-relación, con un filtro virtual nuevo "patente" (coincide contra tracto o rampla); (2) dominio `EVENTOS` (`eventos_operacionales.py`) -- une cada envío Mobile con `tipo_novedad` real al viaje real por `numero_transporte` (chofer/cliente/obra vienen SIEMPRE del viaje, nunca del `chofer_id` opaco de Mobile); el ejecutor (`ejecutar_consulta_eventos`) NUNCA valida `tipo_evento` contra una lista cerrada -- cuenta/agrupa lo que exista en los datos, con coincidencia jerárquica por prefijo ("DEVOLUCION" cuenta TOTAL+PARCIAL); (3) período paramétrico `ULTIMOS_N_DIAS`.
+- **Bug real encontrado de paso:** `cli_consulta_atlas.py` recortaba TODA fila de resultado con las columnas de un viaje -- una consulta agrupada ("¿cuántas toneladas transportó cada chofer?") le llegaba a Desktop con todas las columnas vacías desde V1. Corregido junto con el nuevo soporte no-viaje (incidencias/eventos/relación).
+- **B1:** el esquema/prompt nunca exponían `dominio` ni `relacion` -- B1 no podía construir nada fuera de VIAJES aunque el Motor ya lo soportara desde V2. Corregido; B1 sigue sin poder producir una cifra final.
+- **E2E reales (G:\Mi unidad\Atlas):** las 4 preguntas V2 siguen intactas; las 5 relacionales -- "¿En qué viajes aparece JB8529?" → 5 viajes; "¿Con qué chofer está vinculada JF4288?" → RODRIGO NAHUELÑIR; "¿Qué patentes ha usado Retamal?" → BPHR67; "¿En qué guías aparece JF4288?" → 472247; "¿Qué cliente aparece en el viaje 0000354805?" → YOLITO BALART HNOS LTDA -- todas correctas. Eventos: producción real no tiene envíos Mobile con novedad todavía -- responde "0 estadías" (cero real, nunca "fuente no disponible", ver V2.1), validado con fixtures fieles (A-D del ticket, incluida devolución genérica sin confundir cliente/chofer).
+- **Prueba arquitectónica anti-hardcode:** fixture de transporte de ALIMENTOS (chofer/cliente supermercado/evento "RECHAZO_TEMPERATURA") consultado con el MISMO `ejecutar_consulta_eventos`, sin código nuevo -- sweep confirma cero hardcode real de MBT/AZA/rubro en las rutas nuevas.
+- **Tests:** ~60 focales nuevos + 15 E2E reales permanentes + suite completa Motor **2091 passed**. Desktop: `main.js` pasa `--raiz-atlas`; `renderTablaSoporte`/etiqueta de soporte generalizados para incidencias/eventos -- suite completa **414 passed**.
+- **Pendiente real:** ninguno de código para lo pedido. Multiempresa completa, GPS/Rutas y Mobile UI siguen fuera de alcance, deliberadamente.
+
+---
+
 ## 2026-08-26 — PREGÚNTALE A ATLAS V2.1: REGRESIÓN "3 → 0 INCIDENCIAS"
 
 - **Reporte:** después de B1 V2, "¿Cuántas incidencias documentales hay?" pasó de responder correctamente "3" a responder "Hay 0 incidencias documentales registradas." sin que Javier hubiera borrado nada.

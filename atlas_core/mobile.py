@@ -177,6 +177,23 @@ class RepositorioEnviosMobile:
                 continue
         return sorted(salida, key=lambda r: r.get("recibido_en", ""))
 
+    def historial(self) -> list[dict]:
+        """Bloque UNIVERSAL V1 -- TODOS los envíos, cualquier estado
+        (mismo criterio de lectura que ya usa `main.js`,
+        `atlas:cargar-envios-mobile-historial` -- registro tal cual,
+        sin decodificar la foto, que Motor nunca necesita). Read-only,
+        base para el dominio EVENTOS (`eventos_operacionales.py`): un
+        envío inválido/corrupto se omite, nunca rompe la consulta."""
+        salida = []
+        if not self.raiz.is_dir():
+            return salida
+        for ruta in self.raiz.glob("*/envio.json"):
+            try:
+                salida.append(json.loads(ruta.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return sorted(salida, key=lambda r: r.get("recibido_en", ""))
+
 
 def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) -> dict[str, object]:
     guia = str(datos.get("numero_guia", "")).strip()

@@ -20,13 +20,16 @@ from typing import Iterable, Mapping
 
 from atlas_core.consultas_atlas import (
     AGRUPACIONES_SOPORTADAS,
+    DOMINIO_EVENTOS,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
     ConsultaAtlas,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_VIAJES,
+    METRICA_LIST_RELACION,
     METRICA_LISTAR_VIAJES,
     METRICA_SUM_KM,
     METRICA_SUM_PESO,
@@ -117,6 +120,29 @@ def resolver_entidad_por_palabras(texto: str, valores_conocidos: Iterable[str]) 
     return ResolucionEntidad(AMBIGUA, candidatos=tuple(mejores), palabras_coincidentes=palabras_union)
 
 
+def resolver_patente_por_texto(texto: str, valores_conocidos: Iterable[str]) -> ResolucionEntidad:
+    """Bloque UNIVERSAL V1 (Bloque 7/18 del ticket) -- resolución de
+    entidad para patentes: a diferencia de chofer/cliente/obra (nombres
+    largos, coincidencia por PALABRAS significativas), una patente es un
+    único token alfanumérico corto -- coincidencia EXACTA de token,
+    nunca por subcadena (evita que "JB8" coincida con "JB8529"). Reusa
+    el mismo tokenizador `_palabras` (ya separa "JB8529" como un token
+    completo)."""
+    palabras_texto = _palabras(texto)
+    conocidas = {normalizar_texto_atlas(v): str(v).strip() for v in valores_conocidos if str(v).strip()}
+    encontradas = sorted({conocidas[p] for p in palabras_texto if p in conocidas})
+    if not encontradas:
+        return ResolucionEntidad(SIN_COINCIDENCIA)
+    if len(encontradas) == 1:
+        return ResolucionEntidad(
+            RESUELTA, valor=encontradas[0], palabras_coincidentes=frozenset({normalizar_texto_atlas(encontradas[0])}),
+        )
+    return ResolucionEntidad(
+        AMBIGUA, candidatos=tuple(encontradas),
+        palabras_coincidentes=frozenset(normalizar_texto_atlas(v) for v in encontradas),
+    )
+
+
 @dataclass(frozen=True)
 class CatalogosConsulta:
     """Valores reales YA presentes en el `viajes.csv` cargado -- nunca
@@ -128,6 +154,10 @@ class CatalogosConsulta:
     obras: tuple[str, ...]
     tipos_carga: tuple[str, ...]
     comunas: tuple[str, ...]
+    # Bloque UNIVERSAL V1 (Bloque 7 del ticket) -- tracto + rampla
+    # combinados: un usuario que pregunta por una patente no sabe (ni
+    # debería saber) cuál de las dos es.
+    patentes: tuple[str, ...] = ()
 
 
 def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> CatalogosConsulta:
@@ -138,18 +168,21 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
     obras: set[str] = set()
     tipos_carga: set[str] = set()
     comunas: set[str] = set()
+    patentes: set[str] = set()
     for viaje in viajes:
         choferes.update(_valores_multivalor(viaje, "choferes"))
         clientes.update(_valores_multivalor(viaje, "clientes"))
         obras.update(_valores_multivalor(viaje, "obras_destino"))
         tipos_carga.update(_valores_multivalor(viaje, "tipos_carga"))
+        patentes.update(_valores_multivalor(viaje, "patentes_tracto"))
+        patentes.update(_valores_multivalor(viaje, "patentes_rampla"))
         comuna = str(viaje.get("localidad_entrega", "")).strip()
         if comuna:
             comunas.add(comuna)
     return CatalogosConsulta(
         choferes=tuple(sorted(choferes)), clientes=tuple(sorted(clientes)),
         obras=tuple(sorted(obras)), tipos_carga=tuple(sorted(tipos_carga)),
-        comunas=tuple(sorted(comunas)),
+        comunas=tuple(sorted(comunas)), patentes=tuple(sorted(patentes)),
     )
 
 
@@ -186,6 +219,45 @@ _PALABRAS_INCIDENCIA = ("INCIDENCIA", "INCIDENCIAS", "ERROR DOCUMENTAL", "ERRORE
 # pregunta por CANTIDAD DE PERSONAS, nunca de viajes/filas.
 _PALABRAS_CHOFER_PLURAL = ("CHOFERES", "CONDUCTORES")
 _PATRON_AGRUPACION_CHOFER = re.compile(r"\bPOR CHOFER(ES)?\b|\bCADA CHOFER\b|\bPOR CONDUCTOR(ES)?\b|\bCADA CONDUCTOR\b")
+
+# Bloque UNIVERSAL V1 (Bloque 9 del ticket) -- vocabulario de EVENTOS
+# operacionales. Orden = especificidad: los tipos específicos
+# (ESPERA_AUTORIZACION_ESTADIA, DEVOLUCION_TOTAL/PARCIAL, DOBLE_VUELTA)
+# se revisan ANTES que el genérico "DEVOLUCION" (Bloque 19, caso B:
+# "cuántas devoluciones tuvo Cliente X" debe contar TOTAL + PARCIAL
+# juntas) -- primer match gana, mismo criterio que `_PALABRAS_METRICA`.
+# Los códigos son EXACTAMENTE los de `atlas_core.mobile.TIPOS_NOVEDAD`
+# (única fuente real hoy), pero el ejecutor (`ejecutar_consulta_eventos`)
+# nunca valida contra esta lista -- cualquier `tipo_evento` presente en
+# los datos es consultable, incluido uno de un rubro futuro que esta
+# tabla no conoce (Bloque 20/21: anti-hardcode).
+_PALABRAS_EVENTO = (
+    ("ESPERA_AUTORIZACION_ESTADIA", ("ESPERA DE AUTORIZACION", "ESPERA AUTORIZACION")),
+    ("DEVOLUCION_TOTAL", ("DEVOLUCION TOTAL", "DEVOLUCIONES TOTALES")),
+    ("DEVOLUCION_PARCIAL", ("DEVOLUCION PARCIAL", "DEVOLUCIONES PARCIALES")),
+    ("DOBLE_VUELTA", ("DOBLE VUELTA", "DOBLES VUELTAS")),
+    ("TIENE_ESTADIA", ("ESTADIA", "ESTADIAS")),
+    ("DEVOLUCION", ("DEVOLUCION", "DEVOLUCIONES")),
+)
+_PALABRAS_EVENTO_AGRUPACION = (
+    ("chofer", ("CHOFER", "CHOFERES")),
+    ("cliente", ("CLIENTE", "CLIENTES")),
+    ("obra", ("OBRA", "OBRAS")),
+)
+_PATRON_TOP = re.compile(r"\bMAS\b|\bMAYOR\b")
+
+# Bloque UNIVERSAL V1 (Bloque 8/18 del ticket) -- vocabulario de
+# preguntas RELACIONALES: "en qué VIAJES/GUÍAS aparece", "con qué
+# CHOFER/CLIENTE está vinculada", "qué PATENTES/VEHÍCULOS ha usado".
+_PATRON_APARECE = re.compile(r"\bAPARECE(N)?\b")
+_PATRON_VINCULAD = re.compile(r"\bVINCULAD[OA]S?\b")
+_PATRON_HA_USADO = re.compile(r"\bHAN? (USADO|UTILIZADO)\b|\bUSO\b|\bUTILIZO\b")
+_PATRON_PATENTE_KW = re.compile(r"\bPATENTES?\b|\bVEHICULOS?\b")
+_PATRON_GUIA_KW = re.compile(r"\bGUIAS?\b")
+_PATRON_CHOFER_KW = re.compile(r"\bCHOFER(ES)?\b|\bCONDUCTOR(ES)?\b")
+_PATRON_CLIENTE_KW = re.compile(r"\bCLIENTES?\b")
+_PATRON_VIAJE_KW = re.compile(r"\bVIAJES?\b")
+_PATRON_NUMERO_TRANSPORTE = re.compile(r"\b(\d{6,})\b")
 
 _PALABRAS_PERIODO = (
     (PERIODO_SEMANA_PASADA, ("SEMANA PASADA", "LA SEMANA PASADA")),
@@ -224,6 +296,10 @@ _PALABRAS_ESTRUCTURA_PREGUNTA = frozenset({
     "TIPO", "TIPOS", "CARGA", "DETALLE", "SEMANAL", "MENSUAL", "DIARIO", "DIAS", "DIA",
     "INCIDENCIA", "INCIDENCIAS", "ERROR", "ERRORES", "DOCUMENTAL", "DOCUMENTALES",
     "TRABAJARON", "TRABAJO", "CARGARON", "CARGO", "REGISTRADAS", "REGISTRADOS", "TENEMOS",
+    "PATENTE", "PATENTES", "VEHICULO", "VEHICULOS", "VINCULADA", "VINCULADO", "VINCULADAS",
+    "VINCULADOS", "APARECE", "APARECEN", "USADO", "UTILIZADO", "USO", "UTILIZO", "HAN", "HA",
+    "ESTADIA", "ESTADIAS", "DEVOLUCION", "DEVOLUCIONES", "TOTAL", "TOTALES", "PARCIAL",
+    "PARCIALES", "VUELTA", "VUELTAS", "DOBLE", "DOBLES", "MAS", "MAYOR", "AUTORIZACION", "ESPERA",
 })
 _PATRON_PALABRA_CAPITALIZADA = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+")
 
@@ -246,6 +322,59 @@ def _palabras_capitalizadas_sin_explicar(texto: str, palabras_reclamadas: set[st
     return tuple(sospechosas)
 
 
+def _intentar_consulta_relacional(
+    texto: str, normalizado: str, catalogos: CatalogosConsulta,
+) -> tuple[ConsultaAtlas | None, tuple[str, ...]] | None:
+    """Bloque UNIVERSAL V1 (Bloque 8/18 del ticket) -- detecta preguntas
+    RELACIONALES ("en qué viajes aparece X", "con qué chofer está
+    vinculada X", "qué patentes ha usado X", "en qué guías aparece X",
+    "qué cliente aparece en el viaje N") y las traduce al MISMO
+    `METRICA_LIST_RELACION`/`LISTAR_VIAJES` genéricos -- nunca un
+    comando nuevo por combinación entidad-relación. Devuelve `None`
+    (nunca `(None, avisos)`) cuando el texto no calza con ninguna forma
+    relacional conocida -- el llamador sigue con el resto del flujo."""
+    # E) "qué cliente aparece en el viaje <numero_transporte>"
+    if _PATRON_CLIENTE_KW.search(normalizado) and _PATRON_APARECE.search(normalizado) and _PATRON_VIAJE_KW.search(normalizado):
+        numero = _PATRON_NUMERO_TRANSPORTE.search(normalizado)
+        if numero:
+            return ConsultaAtlas(
+                metrica=METRICA_LIST_RELACION, relacion="cliente", filtros={"numero_transporte": numero.group(1)},
+            ), ()
+
+    resolucion_patente = (
+        resolver_patente_por_texto(texto, catalogos.patentes) if catalogos.patentes else ResolucionEntidad(SIN_COINCIDENCIA)
+    )
+    if resolucion_patente.estado == AMBIGUA:
+        return None, ("AMBIGUO:patente:" + " | ".join(resolucion_patente.candidatos),)
+
+    if resolucion_patente.estado == RESUELTA and _PATRON_APARECE.search(normalizado):
+        # A) "en qué viajes aparece la patente X"
+        # D) "en qué guías aparece X"
+        if _PATRON_GUIA_KW.search(normalizado):
+            return ConsultaAtlas(
+                metrica=METRICA_LIST_RELACION, relacion="guia", filtros={"patente": resolucion_patente.valor},
+            ), ()
+        return ConsultaAtlas(metrica=METRICA_LISTAR_VIAJES, filtros={"patente": resolucion_patente.valor}), ()
+
+    # B) "con qué chofer está vinculada X"
+    if resolucion_patente.estado == RESUELTA and _PATRON_VINCULAD.search(normalizado) and _PATRON_CHOFER_KW.search(normalizado):
+        return ConsultaAtlas(
+            metrica=METRICA_LIST_RELACION, relacion="chofer", filtros={"patente": resolucion_patente.valor},
+        ), ()
+
+    # C) "qué patentes ha usado <chofer>"
+    if _PATRON_HA_USADO.search(normalizado) and _PATRON_PATENTE_KW.search(normalizado):
+        resolucion_chofer = resolver_entidad_por_palabras(texto, catalogos.choferes)
+        if resolucion_chofer.estado == RESUELTA:
+            return ConsultaAtlas(
+                metrica=METRICA_LIST_RELACION, relacion="vehiculo", filtros={"chofer": resolucion_chofer.valor},
+            ), ()
+        if resolucion_chofer.estado == AMBIGUA:
+            return None, ("AMBIGUO:chofer:" + " | ".join(resolucion_chofer.candidatos),)
+
+    return None
+
+
 def interpretar_consulta_determinista(
     texto: str, *, catalogos: CatalogosConsulta,
 ) -> tuple[ConsultaAtlas | None, tuple[str, ...]]:
@@ -265,6 +394,77 @@ def interpretar_consulta_determinista(
     if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_INCIDENCIA):
         return ConsultaAtlas(
             metrica=METRICA_COUNT_INCIDENCIAS, dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES, filtros={},
+        ), tuple(avisos)
+
+    # Bloque UNIVERSAL V1 (Bloque 8/18 del ticket) -- preguntas
+    # RELACIONALES ("en qué viajes aparece X", "qué patentes ha usado
+    # X"...). Se revisa ANTES que el resto: estas preguntas casi nunca
+    # contienen "cuántos" y su métrica (LIST_RELACION/LISTAR_VIAJES) no
+    # tiene nada que ver con el conteo por defecto de más abajo.
+    relacional = _intentar_consulta_relacional(texto, normalizado, catalogos)
+    if relacional is not None:
+        return relacional
+
+    # Bloque UNIVERSAL V1 (Bloque 9/19 del ticket) -- dominio EVENTOS
+    # (estadía, espera autorización, devolución total/parcial, doble
+    # vuelta -- y cualquier tipo futuro, nunca una lista cerrada en el
+    # EJECUTOR; sólo esta tabla de vocabulario conoce los nombres de hoy).
+    # Se revisa ANTES que el resto por la misma razón que INCIDENCIAS:
+    # es una fuente de datos distinta a `viajes.csv`.
+    tipo_evento_detectado: str | None = None
+    for tipo, palabras in _PALABRAS_EVENTO:
+        if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in palabras):
+            tipo_evento_detectado = tipo
+            break
+    if tipo_evento_detectado is not None:
+        filtros_evento: dict[str, str] = {"tipo_evento": tipo_evento_detectado}
+        for nombre_periodo, frases in _PALABRAS_PERIODO:
+            if any(frase in normalizado for frase in frases):
+                filtros_evento["periodo"] = nombre_periodo
+                break
+        agrupacion_evento: str | None = None
+        limite_evento: int | None = None
+        for campo_agrupacion, palabras_campo in _PALABRAS_EVENTO_AGRUPACION:
+            patrones_agrup = [rf"\bPOR {pal}\b" for pal in palabras_campo] + [rf"\bCADA {pal}\b" for pal in palabras_campo]
+            patrones_top = [rf"\bQUE {pal}\b" for pal in palabras_campo]
+            if any(re.search(p, normalizado) for p in patrones_agrup):
+                agrupacion_evento = campo_agrupacion
+                break
+            if any(re.search(p, normalizado) for p in patrones_top):
+                agrupacion_evento = campo_agrupacion
+                if _PATRON_TOP.search(normalizado):
+                    limite_evento = 1
+                break
+        # Bloque 6/12 -- misma lógica que el flujo de viajes: resuelve
+        # las 3 familias primero, sin comprometer nada, y sólo acepta de
+        # más fuerte a más débil (evita el mismo cruce real "Salomon
+        # Sack" -> coincide 1 palabra con el chofer "SALOMÓN PIZARRO" Y
+        # 2 palabras con el cliente "SALOMON SACK SA"; sin este orden,
+        # ganaría el primero que se probara, casi siempre el equivocado).
+        candidatos_evento: dict[str, ResolucionEntidad] = {}
+        for campo, valores, activa in (
+            ("chofer", catalogos.choferes, agrupacion_evento != "chofer"),
+            ("cliente", catalogos.clientes, agrupacion_evento != "cliente"),
+            ("obra", catalogos.obras, agrupacion_evento != "obra"),
+        ):
+            if not activa or not valores:
+                continue
+            resolucion = resolver_entidad_por_palabras(texto, valores)
+            if resolucion.estado in (RESUELTA, AMBIGUA):
+                candidatos_evento[campo] = resolucion
+        palabras_reclamadas_evento: set[str] = set()
+        for campo, resolucion in sorted(
+            candidatos_evento.items(), key=lambda item: -len(item[1].palabras_coincidentes)
+        ):
+            if resolucion.palabras_coincidentes and resolucion.palabras_coincidentes <= palabras_reclamadas_evento:
+                continue
+            if resolucion.estado == AMBIGUA:
+                return None, (f"AMBIGUO:{campo}:" + " | ".join(resolucion.candidatos),)
+            filtros_evento[campo] = resolucion.valor
+            palabras_reclamadas_evento |= resolucion.palabras_coincidentes
+        return ConsultaAtlas(
+            metrica=METRICA_COUNT_EVENTOS, dominio=DOMINIO_EVENTOS, filtros=filtros_evento,
+            agrupacion=agrupacion_evento, limite=limite_evento,
         ), tuple(avisos)
 
     # Bloque B1 V2 (Bloque 4.C del ticket) -- "cuántos choferes/
@@ -406,4 +606,12 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
         and consulta.metrica == METRICA_COUNT_VIAJES
     ):
         return "la pregunta pide cantidad de choferes (personas), pero la consulta cuenta viajes"
+    # Bloque UNIVERSAL V1 (Bloque 6/9 del ticket) -- eventos operacionales
+    # (estadía/devolución/doble vuelta/espera autorización) piden el
+    # dominio EVENTOS, nunca VIAJES ni INCIDENCIAS_DOCUMENTALES.
+    if (
+        any(_menciona(palabras) for _, palabras in _PALABRAS_EVENTO)
+        and consulta.dominio != DOMINIO_EVENTOS
+    ):
+        return "la pregunta pide un evento operacional (estadía/devolución/doble vuelta), pero la consulta no usa ese dominio"
     return None

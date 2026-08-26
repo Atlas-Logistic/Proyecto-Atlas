@@ -284,3 +284,66 @@ def test_incidencias_sin_ruta_indicada_nunca_afirma_cero_con_confianza(tmp_path)
     assert r.resultado is None
     assert "0" not in r.texto_respuesta
     assert "no significa que no existan" in r.texto_respuesta
+
+
+# --- Bloque UNIVERSAL V1 -- dominio EVENTOS de extremo a extremo ---
+
+def _escribir_envio(raiz_atlas, envio_id, registro):
+    directorio = raiz_atlas / "operacion" / "mobile" / "envios" / envio_id
+    directorio.mkdir(parents=True, exist_ok=True)
+    (directorio / "envio.json").write_text(json.dumps(registro), encoding="utf-8")
+
+
+def test_cuantas_estadias_tuvo_retamal_de_extremo_a_extremo(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [
+        _fila(numero_transporte="T1", choferes="CRISTOPHER RETAMAL"),
+        _fila(numero_transporte="T2", choferes="CRISTOPHER RETAMAL"),
+        _fila(numero_transporte="T3", choferes="PEDRO GOMEZ"),
+    ])
+    _escribir_envio(tmp_path, "e1", {
+        "envio_id": "e1", "tipo_novedad": "TIENE_ESTADIA",
+        "resultado_asociacion": {"numero_transporte": "T1"}, "recibido_en": "2026-08-20T10:00:00+00:00",
+    })
+    _escribir_envio(tmp_path, "e2", {
+        "envio_id": "e2", "tipo_novedad": "TIENE_ESTADIA",
+        "resultado_asociacion": {"numero_transporte": "T2"}, "recibido_en": "2026-08-21T10:00:00+00:00",
+    })
+    _escribir_envio(tmp_path, "e3", {
+        "envio_id": "e3", "tipo_novedad": "DOBLE_VUELTA",
+        "resultado_asociacion": {"numero_transporte": "T3"}, "recibido_en": "2026-08-21T10:00:00+00:00",
+    })
+    r = responder_consulta_atlas(
+        "¿Cuántas estadías tuvo Retamal?", ruta_viajes=ruta_viajes, raiz_atlas=tmp_path,
+    )
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == 2
+    assert "CRISTOPHER RETAMAL tuvo 2 estadías" in r.texto_respuesta
+
+
+def test_eventos_sin_raiz_atlas_nunca_afirma_cero_con_confianza(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila()])
+    r = responder_consulta_atlas("¿Cuántas estadías tuvo Juan Perez?", ruta_viajes=ruta_viajes, raiz_atlas=None)
+    assert r.estado == ESTADO_FUENTE_NO_DISPONIBLE
+    assert r.resultado is None
+    assert "no significa que no existan" in r.texto_respuesta
+
+
+def test_eventos_sin_envios_es_cero_real_no_fuente_no_disponible(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila(choferes="JUAN PEREZ")])
+    r = responder_consulta_atlas("¿Cuántas estadías tuvo Juan Perez?", ruta_viajes=ruta_viajes, raiz_atlas=tmp_path)
+    assert r.estado == ESTADO_SIN_RESULTADOS
+    assert r.resultado.resultado == 0
+
+
+# --- Bloque UNIVERSAL V1 -- RELACIÓN de extremo a extremo ---
+
+def test_que_patentes_ha_usado_retamal_de_extremo_a_extremo(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila(choferes="CRISTOPHER RETAMAL", patentes_tracto="BPHR67")])
+    r = responder_consulta_atlas("¿Qué patentes ha usado Retamal?", ruta_viajes=ruta_viajes)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == ("BPHR67",)
+    assert "BPHR67" in r.texto_respuesta

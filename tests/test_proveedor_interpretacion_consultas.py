@@ -76,3 +76,51 @@ def test_http_error_no_expone_la_credencial():
     with pytest.raises(InterpretacionNoDisponible) as excinfo:
         proveedor.interpretar("¿Cuántos viajes?", CATALOGOS)
     assert "clave-secreta-123" not in str(excinfo.value)
+
+
+# --- Bloque UNIVERSAL V1 -- B1 debe poder expresar dominio/relación,
+# no sólo VIAJES/filtros -- antes de este bloque el esquema ni siquiera
+# los exponía (Bloque 5/7 del ticket: "B1 interpreta hacia un contrato
+# universal") ---
+
+def test_esquema_expone_dominio_y_relacion():
+    from atlas_core.proveedor_interpretacion_consultas import _herramienta_consulta_atlas
+    propiedades = _herramienta_consulta_atlas()["input_schema"]["properties"]
+    assert "dominio" in propiedades
+    assert "EVENTOS" in propiedades["dominio"]["enum"]
+    assert "INCIDENCIAS_DOCUMENTALES" in propiedades["dominio"]["enum"]
+    assert "relacion" in propiedades
+    assert "vehiculo" in propiedades["relacion"]["enum"]
+
+
+def test_interpreta_dominio_eventos_desde_tool_use():
+    entrada = {
+        "dominio": "EVENTOS", "metrica": "COUNT_EVENTOS",
+        "filtros": {"tipo_evento": "TIENE_ESTADIA", "chofer": "JUAN PEREZ"},
+        "agrupacion": None, "abstencion": False,
+    }
+    proveedor = ProveedorInterpretacionConsultaAnthropic(api_key="clave-test", transporte=_transporte_tool_use(entrada))
+    consulta = proveedor.interpretar("¿Cuántas estadías tuvo Juan?", CATALOGOS)
+    assert consulta is not None
+    assert consulta.dominio == "EVENTOS"
+    assert consulta.filtros["tipo_evento"] == "TIENE_ESTADIA"
+
+
+def test_interpreta_relacion_desde_tool_use():
+    entrada = {
+        "metrica": "LIST_RELACION", "relacion": "vehiculo",
+        "filtros": {"chofer": "JUAN PEREZ"}, "agrupacion": None, "abstencion": False,
+    }
+    proveedor = ProveedorInterpretacionConsultaAnthropic(api_key="clave-test", transporte=_transporte_tool_use(entrada))
+    consulta = proveedor.interpretar("¿Qué patentes ha usado Juan?", CATALOGOS)
+    assert consulta is not None
+    assert consulta.relacion == "vehiculo"
+
+
+def test_dominio_ausente_en_tool_use_sigue_siendo_viajes_por_defecto():
+    """Compatibilidad V2: B1 no está obligado a mandar `dominio` --
+    sigue significando VIAJES, igual que antes de este bloque."""
+    entrada = {"metrica": "COUNT_VIAJES", "filtros": {}, "agrupacion": None, "abstencion": False}
+    proveedor = ProveedorInterpretacionConsultaAnthropic(api_key="clave-test", transporte=_transporte_tool_use(entrada))
+    consulta = proveedor.interpretar("¿Cuántos viajes hay?", CATALOGOS)
+    assert consulta.dominio == "VIAJES"

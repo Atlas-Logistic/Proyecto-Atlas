@@ -15,12 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from atlas_core.consultas_atlas import (
+    DOMINIO_EVENTOS,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_VIAJES,
+    METRICA_LIST_RELACION,
     METRICA_LISTAR_VIAJES,
     METRICA_SUM_KM,
     METRICA_SUM_PESO,
@@ -30,9 +33,11 @@ from atlas_core.consultas_atlas import (
     ResultadoConsultaAtlas,
     cargar_viajes,
     ejecutar_consulta_atlas,
+    ejecutar_consulta_eventos,
     ejecutar_consulta_incidencias_documentales,
     validar_consulta,
 )
+from atlas_core.eventos_operacionales import construir_eventos_operacionales
 from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales
 from atlas_core.interpretador_consultas import (
     CatalogosConsulta,
@@ -40,6 +45,7 @@ from atlas_core.interpretador_consultas import (
     interpretar_consulta_determinista,
     validar_compatibilidad_semantica,
 )
+from atlas_core.mobile import RepositorioEnviosMobile
 from atlas_core.proveedor_interpretacion_consultas import ProveedorInterpretacionConsulta
 
 # Bloque B1 V2 (Bloque 16 del ticket) -- observabilidad SÓLO en logs
@@ -84,7 +90,7 @@ _NOMBRE_FILTRO_LEGIBLE = {
     "comuna": "comuna", "material": "material", "tipo_carga": "tipo de carga",
     "patente_tracto": "patente tracto", "patente_rampla": "patente rampla",
     "estado": "estado", "numero_guia": "guía", "numero_transporte": "transporte",
-    "periodo": "período",
+    "periodo": "período", "patente": "patente",
 }
 _NOMBRE_PERIODO_LEGIBLE = {
     "HOY": "hoy", "AYER": "ayer", "ESTA_SEMANA": "esta semana",
@@ -95,6 +101,34 @@ _NOMBRE_AGRUPACION_LEGIBLE = {
     "comuna": "comuna", "material": "material", "tipo_carga": "tipo de carga",
     "dia": "día", "semana": "semana", "mes": "mes",
 }
+# Bloque UNIVERSAL V1 (Bloque 9/16 del ticket) -- nombre humano de cada
+# tipo de evento (singular, plural). Un `tipo_evento` desconocido por
+# esta tabla (rubro futuro, Bloque 20/21: anti-hardcode) usa un
+# fallback genérico (ver `_etiqueta_evento`), nunca revienta.
+_NOMBRE_EVENTO_LEGIBLE = {
+    "TIENE_ESTADIA": ("estadía", "estadías"),
+    "ESPERA_AUTORIZACION_ESTADIA": ("espera de autorización de estadía", "esperas de autorización de estadía"),
+    "DEVOLUCION_TOTAL": ("devolución total", "devoluciones totales"),
+    "DEVOLUCION_PARCIAL": ("devolución parcial", "devoluciones parciales"),
+    "DEVOLUCION": ("devolución", "devoluciones"),
+    "DOBLE_VUELTA": ("doble vuelta", "dobles vueltas"),
+}
+# Bloque UNIVERSAL V1 (Bloque 8/16 del ticket) -- nombre humano de cada
+# RELACIÓN (singular, plural).
+_NOMBRE_RELACION_LEGIBLE = {
+    "chofer": ("chofer", "choferes"), "cliente": ("cliente", "clientes"), "obra": ("obra", "obras"),
+    "destino": ("destino", "destinos"), "comuna": ("comuna", "comunas"), "material": ("material", "materiales"),
+    "tipo_carga": ("tipo de carga", "tipos de carga"), "guia": ("guía", "guías"),
+    "patente_tracto": ("patente tracto", "patentes tracto"), "patente_rampla": ("patente rampla", "patentes rampla"),
+    "vehiculo": ("patente", "patentes"),
+}
+
+
+def _etiqueta_evento(tipo_evento: str | None, n: int) -> str:
+    par = _NOMBRE_EVENTO_LEGIBLE.get(tipo_evento or "")
+    if par is not None:
+        return par[0] if n == 1 else par[1]
+    return (tipo_evento or "evento").replace("_", " ").lower()
 
 
 def _filtros_legibles(consulta: ConsultaAtlas) -> str:
@@ -136,12 +170,60 @@ def _formatear_respuesta_incidencias(resultado: ResultadoConsultaAtlas) -> str:
     return texto
 
 
+def _formatear_respuesta_eventos(resultado: ResultadoConsultaAtlas) -> str:
+    """Bloque 9/16 -- dominio EVENTOS: "Retamal tuvo 2 estadías.",
+    "Salomon Sack tuvo 2 devoluciones.", o el ranking cuando la pregunta
+    pidió el TOP ("X tuvo más devoluciones")."""
+    consulta = resultado.consulta_interpretada
+    tipo_evento = consulta.filtros.get("tipo_evento")
+    sujeto = consulta.filtros.get("chofer") or consulta.filtros.get("cliente") or consulta.filtros.get("obra")
+
+    if consulta.agrupacion is not None:
+        filas = resultado.resultado
+        etiqueta_plural = _etiqueta_evento(tipo_evento, 2)
+        if not filas:
+            return f"No encontré {etiqueta_plural} para agrupar por {_NOMBRE_AGRUPACION_LEGIBLE.get(consulta.agrupacion, consulta.agrupacion)}."
+        if consulta.limite == 1:
+            top = filas[0]
+            return f"{top['grupo']} tuvo más {etiqueta_plural} ({_formatear_numero(top['valor'])})."
+        nombres = tuple(f["grupo"] for f in filas)
+        verbo = "tuvo" if len(nombres) == 1 else "tuvieron"
+        return f"{', '.join(nombres)} {verbo} {etiqueta_plural}."
+
+    n = resultado.resultado
+    etiqueta = _etiqueta_evento(tipo_evento, n)
+    if sujeto:
+        return f"{sujeto} tuvo {n} {etiqueta}."
+    return f"Se registraron {n} {etiqueta}."
+
+
+def _formatear_respuesta_relacion(resultado: ResultadoConsultaAtlas) -> str:
+    """Bloque 8/16 -- "qué patentes ha usado X", "con qué chofer está
+    vinculada X", "qué cliente aparece en el viaje X": proyecta valores
+    distintos, respuesta breve nombrando el sujeto de la pregunta."""
+    consulta = resultado.consulta_interpretada
+    valores = resultado.resultado
+    par = _NOMBRE_RELACION_LEGIBLE.get(consulta.relacion or "", (consulta.relacion or "valor", (consulta.relacion or "valores") + "s"))
+    etiqueta = par[0] if len(valores) == 1 else par[1]
+    sujeto = next(iter(consulta.filtros.values()), "")
+    if not valores:
+        return f"No encontré {etiqueta} asociad{'a' if len(valores) == 1 else 'as'} a {sujeto}." if sujeto else f"No encontré {etiqueta}."
+    lista = ", ".join(valores)
+    if sujeto:
+        return f"{sujeto}: {etiqueta} {lista}."
+    return f"{etiqueta.capitalize()}: {lista}."
+
+
 def _formatear_respuesta(resultado: ResultadoConsultaAtlas) -> str:
     """Bloque 11 -- respuesta breve y operacional, nunca un párrafo de
     razonamiento B1. Bloque 13 -- cero resultados nunca es un error."""
     consulta = resultado.consulta_interpretada
     if consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES:
         return _formatear_respuesta_incidencias(resultado)
+    if consulta.dominio == DOMINIO_EVENTOS:
+        return _formatear_respuesta_eventos(resultado)
+    if consulta.metrica == METRICA_LIST_RELACION:
+        return _formatear_respuesta_relacion(resultado)
 
     contexto = _filtros_legibles(consulta)
     sufijo_contexto = f" ({contexto})" if contexto else ""
@@ -212,13 +294,28 @@ def _cargar_incidencias(ruta_incidencias: str | Path | None) -> list[dict[str, o
     return [i.a_dict() for i in AlmacenIncidenciasDocumentales(ruta_incidencias).listar()]
 
 
+def _cargar_eventos(raiz_atlas: str | Path | None, viajes: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Read-only (Bloque 9/13/18) -- usa el repositorio Mobile ya
+    existente (`RepositorioEnviosMobile.historial()`), nunca una lectura
+    paralela. Una raíz sin envíos todavía (carpeta ausente) no es un
+    error -- significa "todavía no hay ningún evento operacional
+    registrado" (mismo criterio ya establecido para incidencias)."""
+    if raiz_atlas is None:
+        return []
+    envios = RepositorioEnviosMobile(Path(raiz_atlas)).historial()
+    return construir_eventos_operacionales(envios, viajes)
+
+
 def responder_consulta_atlas(
     pregunta: str, *, ruta_viajes: str | Path, ruta_incidencias: str | Path | None = None,
+    raiz_atlas: str | Path | None = None,
     proveedor_interpretacion: ProveedorInterpretacionConsulta | None = None,
 ) -> RespuestaConsultaAtlas:
     """Punto de entrada único de Consultas Atlas V1. Read-only (Bloque
-    18): nunca escribe nada, sólo lee `viajes.csv` y (dominio
-    INCIDENCIAS_DOCUMENTALES) el repositorio canónico de incidencias.
+    18): nunca escribe nada, sólo lee `viajes.csv`, (dominio
+    INCIDENCIAS_DOCUMENTALES) el repositorio canónico de incidencias, y
+    (dominio EVENTOS, Bloque UNIVERSAL V1) los envíos Mobile bajo
+    `raiz_atlas` -- misma raíz que ya usa Desktop para todo lo demás.
 
     Pipeline (Bloque 7 del ticket):
         determinístico -> [validador semántico] -> B1 (sólo si hace
@@ -312,6 +409,22 @@ def responder_consulta_atlas(
             )
         incidencias = _cargar_incidencias(ruta_incidencias)
         resultado = ejecutar_consulta_incidencias_documentales(consulta, incidencias)
+    elif consulta.dominio == DOMINIO_EVENTOS:
+        if raiz_atlas is None:
+            # Bloque UNIVERSAL V1 (Bloque 14 del ticket) -- mismo
+            # criterio que INCIDENCIAS_DOCUMENTALES: nunca afirmar "0
+            # eventos" con la misma confianza que una fuente real y
+            # vacía cuando ni siquiera se indicó dónde buscarla.
+            _registro.debug("Dominio EVENTOS sin raiz_atlas -- fuente no disponible")
+            return RespuestaConsultaAtlas(
+                estado=ESTADO_FUENTE_NO_DISPONIBLE,
+                texto_respuesta=(
+                    "No pude verificar los eventos operacionales -- no se indicó dónde está la "
+                    "raíz de datos en este entorno. Esto no significa que no existan."
+                ),
+            )
+        eventos = _cargar_eventos(raiz_atlas, viajes)
+        resultado = ejecutar_consulta_eventos(consulta, eventos)
     else:
         resultado = ejecutar_consulta_atlas(consulta, viajes)
     texto = _formatear_respuesta(resultado)
