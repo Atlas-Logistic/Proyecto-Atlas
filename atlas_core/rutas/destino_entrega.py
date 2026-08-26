@@ -489,7 +489,30 @@ def _candidato_unico_con_numero_de_calle(
     (que puede repetirse en decenas de lugares reales de Chile); dos
     candidatos con el mismo número (calles homónimas distintas, cada una
     con esa numeración) siguen sin ser evidencia inequívoca -- se
-    abstiene."""
+    abstiene.
+
+    Bloque DESTINOS E1 -- caso real 472339 (HELSINSKI 5810 LA REINA): el
+    respaldo a veces ubica la CALLE pero no interpola el número exacto
+    (hueco real y frecuente de cobertura de un geocodificador sobre
+    calles chilenas menos densamente mapeadas) -- su etiqueta entonces
+    NUNCA trae ningún número con el que calzar, aunque el respaldo haya
+    devuelto un ÚNICO resultado total (nunca varios candidatos en
+    competencia). Un único resultado total, sin ningún rival, sigue
+    siendo evidencia real -- MUCHO más específica que un centroide de
+    comuna genérico del proveedor principal -- se usa como segundo
+    nivel, siempre detrás del calce exacto de número, y sigue exigiendo
+    exactamente la misma corroboración territorial que ya exige el
+    llamador para CUALQUIER candidato de este respaldo (nunca "único
+    total" por sí solo, nunca un candidato sin ninguna localidad que
+    corroborar).
+
+    Crítico: este segundo nivel exige ADEMÁS que la etiqueta no sea
+    ELLA MISMA sólo el nombre de la comuna (`_etiqueta_es_solo_
+    localidad`) -- un candidato "Las Condes, RM, Chile" no aporta nada
+    que el propio documento no dijera ya (la comuna, sin ninguna calle
+    identificada) y nunca debe tratarse como si hubiera encontrado la
+    calle real; sólo "Helsinski" (un nombre propio distinto de la
+    comuna) cuenta como evidencia de calle."""
     numeros_documento = _numeros_de_calle(despachar_a_crudo)
     if not numeros_documento:
         return None
@@ -497,7 +520,31 @@ def _candidato_unico_con_numero_de_calle(
         c for c in candidatos
         if _numeros_de_calle(c.etiqueta) & numeros_documento
     ]
-    return coincidencias[0] if len(coincidencias) == 1 else None
+    if len(coincidencias) == 1:
+        return coincidencias[0]
+    if coincidencias:
+        return None  # más de un candidato con el mismo número -- ambigüedad real
+    if (
+        len(candidatos) == 1 and not _numeros_de_calle(candidatos[0].etiqueta)
+        and candidatos[0].localidad and not _etiqueta_es_solo_localidad(candidatos[0])
+    ):
+        return candidatos[0]
+    return None
+
+
+def _etiqueta_es_solo_localidad(candidato: CandidatoGeocodificacion) -> bool:
+    """True si el primer segmento de la etiqueta (antes de la primera
+    coma -- la parte más específica de un label tipo Pelias/Nominatim,
+    "Algo específico, Localidad, Región, País") es exactamente la
+    localidad declarada -- el geocodificador no encontró nada más
+    específico que el propio nombre de la comuna (un centroide genérico,
+    mismo patrón que `_candidatos_son_el_mismo_lugar`/caso real
+    Coronel/Biobío). Nunca es evidencia nueva por sí sola: no aporta
+    nada que el texto documental no dijera ya."""
+    if not candidato.localidad:
+        return False
+    primer_segmento = candidato.etiqueta.split(",", 1)[0]
+    return _texto_normalizado_sin_acentos(primer_segmento) == _texto_normalizado_sin_acentos(candidato.localidad)
 
 
 def _comuna_confirma_candidato(comuna_confirmada: str, comuna_candidato: str) -> bool:

@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — FIX DE AUTONOMÍA DE DESTINO: HELSINSKI 5810 YA NO QUEDA EN SIN_ACCESO_VIAL SIN AGOTAR EL PIPELINE
+
+- **Causa real:** el proveedor principal (ORS) sólo resolvió dos centroides genéricos de la misma comuna ("La Reina, RM, Chile", >1 km entre sí) -- correctamente tratados como "el mismo lugar real" (regla ya calibrada, caso Coronel/Biobío) y aceptados como resuelto, pero el punto elegido no tenía acceso vial. El reintento con el respaldo estructurado (Nominatim) SÍ ubicó la calle real ("Helsinski"), pero como su etiqueta nunca trae el número de casa exacto (hueco real de cobertura del geocodificador en calles chilenas menos densamente mapeadas), `_candidato_unico_con_numero_de_calle` lo descartaba igual que si no hubiera encontrado nada -- sólo aceptaba un calce EXACTO de número.
+- **Dirección/candidato:** se agregó un segundo nivel de aceptación -- único candidato TOTAL del respaldo (sin rivales), cuya etiqueta identifica algo más específico que la sola comuna (nunca un centroide genérico) -- sigue exigiendo exactamente la misma corroboración territorial ya vigente (la comuna debe aparecer en el propio texto documental, en un destino confirmado, o en evidencia B1 ya persistida). Candidato: "Helsinski", comuna "La Reina" (coincide con el texto documental) -- coordenada -70.5705666,-33.4565182, confirmada ruteable por ORS.
+- **472339 antes→después:** `estado_ruta` SIN_ACCESO_VIAL → RUTA_CALCULADA (20.7 km, 28.9 min, proveedor openrouteservice); `despachar_a_crudo`/`direccion_entrega` nunca se reescriben (evidencia documental intacta); `estado_operacional` sigue REQUIERE_REVISION por el motivo no relacionado `OBRA_DESTINO_SIN_CORROBORAR` (fuera de este bloque).
+- **B1/aprendizaje:** 0 llamadas B1 nuevas -- Motor resolvió determinísticamente reutilizando el mecanismo ya existente (Vía C + reintento SIN_ACCESO_VIAL). La asociación queda persistida en la caché de geocodificación real (documento→coordenada), no como regla global de sustitución de nombres de calle.
+- **Tests/commit:** 7 tests focales nuevos (`tests/test_destino_autonomia_e1.py`, casos A-E) + suite completa Motor **1940 passed**. Aplicado a producción -- sólo la fila 472339, con backup + SHA-256 en `backups/destino_autonomia_*`.
+
+---
+
 ## 2026-08-26 — FIX DE AUTONOMÍA: PATENTE OCR CON ERROR MENOR NO ESCALA A JAVIER
 
 - **Causa real:** el Motor de Evidencia de Vehículos ya combinaba histórico del chofer + similitud OCR calibrada en candidatos, pero `RESUELTO_AUTOMATICAMENTE` (la única clasificación que se aplica sola, sin tarjeta) sólo era alcanzable con `CONFIRMACION_HUMANA` previa asociada a ese RUT exacto -- un único candidato con corroboración documental independiente (dos transportes distintos del mismo chofer) siempre quedaba en `SUGERENCIA_HUMANA`, sin importar cuán inequívoco fuera.
