@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — CATÁLOGOS V2: FICHAS COMPLETAS DE ENTIDADES (CHOFERES, CLIENTES, OBRAS, VEHÍCULOS)
+
+- **Problema real:** la pestaña Catálogos sólo mostraba nombres en 3 listas planas -- buscando WLADIMIR AGUILAR, Javier no podía ver su RUT ni nada operacional que Atlas ya sabía (vehículos asociados, histórico de viajes, etc.).
+- **Fix:** nuevo módulo Motor read-only (`atlas_core/catalogo_fichas.py` + CLI `construir_fichas_catalogos.py`, mismo patrón IPC ya usado por `consultar_atlas.py`) que arma, en una sola pasada del dataset y de los catálogos ya existentes (sin releer Drive por click, sin B1), una ficha completa por entidad: IDENTIDAD, VEHÍCULOS/RELACIONES asociadas, HISTÓRICO operacional y TRAZABILIDAD. Desktop reemplaza las 3 listas planas por: buscador único (nombre/RUT/patente) → lista de resultados → ficha detallada por secciones, con estados técnicos traducidos a lenguaje humano (Confirmado/Observado/Pendiente) y "Conflicto de datos" explícito cuando hay 2 valores incompatibles -- nunca se elige uno silenciosamente. Bloque 100% de sólo lectura (Motor Core y catálogos no se tocan; nada se edita, fusiona ni borra desde acá).
+- **Caso real Wladimir Aguilar:** ficha muestra RUT `26.646.499-1` como "Observado / histórico" (nunca como "Confirmado" -- el catálogo formal aún lo tiene como `PENDIENTE`), con sus 4 guías de respaldo y el vehículo `AL1879` asociado. Validado además con Cristopher Retamal/BPHR67 (vehículo con tipo, choferes y apariciones), SALOMON SACK SA (RUT + histórico) y AUSIN SAN BERNARDO (dirección/comuna aprendidas, reutilizando `listar_destinos_confirmados_para_obra`).
+- **Tests:** Motor 11 focales nuevos (`tests/test_catalogo_fichas_v2.py`) + suite completa **1965 passed**. Desktop 16 focales nuevos (`test/catalogos_fichas_ui.test.js`) + suite completa **355 passed**.
+- **Pendiente real:** ninguno de código para este bloque -- edición de fichas (RUT/patente/fusión de entidades) queda explícitamente diferida a un bloque posterior, tal como pidió el ticket.
+
+---
+
 ## 2026-08-26 — MOBILE V1: SELECTOR DE PLANTA DE ORIGEN (COLINA/RENCA) EN ATLAS CONDUCTORES
 
 - **Selector:** interruptor grande de dos posiciones (radios nativos ocultos + etiquetas estilizadas, nunca `<select>`) en la pantalla de captura, antes de "Fotografiar guía". Sin selección previa, ningún lado viene marcado -- el chofer debe elegir antes del primer envío.
