@@ -287,6 +287,12 @@ _CONFUSIONES_OCR = tuple(map(frozenset, (
     # "JF4288" -- E/F es una confusión de trazo real y documentada (no una
     # tabla ampliada a ciegas), igual que las demás de este set.
     {"E", "F"},
+    # Bloque VEHÍCULO E2 -- caso real 472339 (Cristopher Retamal): OCR
+    # leyó "BPHF67" para patente_tracto; la patente real, con dos
+    # transportes independientes previos que la corroboran, es "BPHR67"
+    # -- F/R es una confusión de trazo real y documentada en este
+    # documento (no una tabla ampliada a ciegas), igual que las demás.
+    {"F", "R"},
 )))
 
 

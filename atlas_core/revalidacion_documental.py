@@ -2586,10 +2586,15 @@ def reconciliar_bandeja_decisiones(
        `RESUELTO_AUTOMATICAMENTE` se aplica SOLO, sin pedir un clic.
        Reutiliza `aplicar_decision_obra` (nunca un segundo camino de
        escritura), `actor="ATLAS_AUTOMATICO"` -- auditable y
-       distinguible de una confirmación humana en el ledger. Hoy sólo
-       `ALIAS_CANDIDATO` puede alcanzar `RESUELTO_AUTOMATICAMENTE`
-       (`OBRA_DESCONOCIDA`/`CLIENTE_DESCONOCIDO` todavía no tienen una
-       fuente de evidencia calibrada para ese nivel -- ver
+       distinguible de una confirmación humana en el ledger.
+       `ALIAS_CANDIDATO` (CONFIRMAR_ALIAS) y, desde Bloque VEHÍCULO E2,
+       `VEHICULO_DESCONOCIDO` (USAR_PATENTE_EXISTENTE -- sólo cuando
+       `evaluar_evidencia_patente` encuentra un único candidato con
+       corroboración documental independiente Y similitud OCR calibrada,
+       ver `decisiones_pendientes.evaluar_evidencia_patente`) pueden
+       alcanzar `RESUELTO_AUTOMATICAMENTE` hoy (`OBRA_DESCONOCIDA`/
+       `CLIENTE_DESCONOCIDO` todavía no tienen una fuente de evidencia
+       calibrada para ese nivel -- ver
        `atlas_core.motor_evidencia_obras`/`motor_evidencia_clientes`);
        cuando la tengan, este mismo mecanismo las cubre sin cambios.
        Punto fijo acotado (`MAX_ITERACIONES_AUTO_RESOLUCION`): una
@@ -2677,24 +2682,31 @@ def reconciliar_bandeja_decisiones(
     vigentes = resultado_primero["vigentes"]
     bandeja = resultado_primero["bandeja"]
 
+    # Bloque VEHÍCULO E2 -- acción de aplicación automática por tipo:
+    # ALIAS_CANDIDATO vincula la canónica sugerida vía CONFIRMAR_ALIAS
+    # (ya existente); VEHICULO_DESCONOCIDO hace lo mismo vía
+    # USAR_PATENTE_EXISTENTE (exige exactamente un candidato en
+    # `decision["candidatos"]" -- garantizado por
+    # `evaluar_evidencia_patente`, que sólo alcanza
+    # RESUELTO_AUTOMATICAMENTE con un único competidor en el nivel más
+    # alto). Nunca CLIENTE_DESCONOCIDO/OBRA_DESCONOCIDA con REGISTRAR:
+    # eso crearía una entidad nueva, no aplicaría una ya conocida, y no
+    # es lo que este resultado significa.
+    _ACCION_AUTO_POR_TIPO = {"ALIAS_CANDIDATO": "CONFIRMAR_ALIAS", "VEHICULO_DESCONOCIDO": "USAR_PATENTE_EXISTENTE"}
+
     aplicadas_automaticamente: list[dict[str, object]] = []
     for _ in range(MAX_ITERACIONES_AUTO_RESOLUCION):
         candidatas = [
             d for d in bandeja["decisiones"]
-            # Hoy sólo ALIAS_CANDIDATO tiene una acción de aplicación
-            # capaz de vincular la canónica sugerida sin más datos que
-            # los que ya trae la propia decisión (CONFIRMAR_ALIAS) --
-            # ver docstring. Nunca CLIENTE_DESCONOCIDO/OBRA_DESCONOCIDA
-            # con REGISTRAR: eso crearía una entidad nueva, no aplicaría
-            # una ya conocida, y no es lo que este resultado significa.
-            if d.get("tipo") == "ALIAS_CANDIDATO"
+            if d.get("tipo") in _ACCION_AUTO_POR_TIPO
             and (d.get("evaluacion_evidencia") or {}).get("resultado") == "RESUELTO_AUTOMATICAMENTE"
         ]
         if not candidatas:
             break
         for decision in candidatas:
             resultado_aplicacion = aplicar_decision_obra(
-                raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR_ALIAS",
+                raiz_atlas=raiz, decision_id=decision["decision_id"],
+                accion=_ACCION_AUTO_POR_TIPO[decision["tipo"]],
                 actor="ATLAS_AUTOMATICO", reloj=reloj,
             )
             aplicadas_automaticamente.append({

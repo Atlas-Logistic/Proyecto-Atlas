@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — FIX DE AUTONOMÍA: PATENTE OCR CON ERROR MENOR NO ESCALA A JAVIER
+
+- **Causa real:** el Motor de Evidencia de Vehículos ya combinaba histórico del chofer + similitud OCR calibrada en candidatos, pero `RESUELTO_AUTOMATICAMENTE` (la única clasificación que se aplica sola, sin tarjeta) sólo era alcanzable con `CONFIRMACION_HUMANA` previa asociada a ese RUT exacto -- un único candidato con corroboración documental independiente (dos transportes distintos del mismo chofer) siempre quedaba en `SUGERENCIA_HUMANA`, sin importar cuán inequívoco fuera.
+- **Regla general:** `NIVEL_DOCUMENTAL_INDEPENDIENTE` ahora también resuelve solo -- pero SÓLO cuando es el único candidato Y trae `SIMILITUD_OCR_CALIBRADA` (el valor documental de ESTE documento es una lectura OCR plausible de la canónica, no sólo "un vehículo que el chofer usó alguna vez" -- evita forzar histórico viejo si el chofer cambió de vehículo). `reconciliar_bandeja_decisiones` (Fase 4) extendido para aplicar también `VEHICULO_DESCONOCIDO` vía `USAR_PATENTE_EXISTENTE`, mismo mecanismo ya usado por `ALIAS_CANDIDATO`, `actor="ATLAS_AUTOMATICO"`.
+- **472339 (Cristopher Retamal) antes→después:** OCR "BPHF67" generaba una tarjeta `VEHICULO_DESCONOCIDO` pendiente para Javier. F/R se agregó como confusión OCR calibrada (evidencia real de este caso, mismo criterio que E/F de 472247) → único candidato "BPHR67" (2 transportes independientes previos, confirmada/activa) → se resolvió y aplicó solo; la decisión desapareció de la bandeja; `PATENTE_SIN_HOMOLOGAR` se limpió del CSV vía la revalidación ya existente que corre dentro de la propia aplicación. `patente_tracto` documental nunca se reescribió (sigue "BPHF67", evidencia preservada en el ledger). Catálogo de vehículos sin cambios (sin alias nuevo, sin vehículo nuevo).
+- **B1/aprendizaje:** 0 llamadas B1 -- determinístico. Nada se aprendió como regla global ("F siempre es R"); sólo se calibró una confusión de trazo general y se vinculó documento→canónica en el ledger, igual que cualquier confirmación humana. Desktop no se modificó (la bandeja ya refleja decisiones aplicadas vía el mecanismo existente).
+- **Tests:** 6 focales nuevos (`tests/test_vehiculo_autonomia_e2.py`, casos A-E + end-to-end) + suite completa Motor **1933 passed**. Aplicado a producción con backup + SHA-256 en `backups/vehiculo_autonomia_*`; idempotente verificado.
+
+---
+
 ## 2026-08-25 — FIX RUT DOCUMENTAL INVÁLIDO → VALOR CANÓNICO + INCIDENCIA DOCUMENTAL
 
 - **Causa real:** `validar_rut_chileno` sólo comprobaba el dígito verificador (módulo 11), que no distingue un RUT real de un cuerpo de dígitos repetidos (p. ej. "55.555.555-5" calza matemáticamente). Un documento de WLADIMIR AGUILAR traía ese valor impreso; al procesarse junto a su guía hermana, el mecanismo existente de corroboración por documentos relacionados confirmó ese RUT inválido contra sí mismo (dos lecturas iguales, ninguna validada), dejándolo silenciosamente como dato operacional sin motivo ni incidencia.

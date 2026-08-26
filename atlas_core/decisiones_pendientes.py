@@ -775,7 +775,34 @@ def evaluar_evidencia_patente(
 
     mejor_nivel = candidatos[0]["nivel"]
     competidores_mejor_nivel = [c for c in candidatos if c["nivel"] == mejor_nivel]
-    if mejor_nivel == NIVEL_CONFIRMACION_HUMANA and len(competidores_mejor_nivel) == 1:
+    # Bloque VEHÍCULO E2 -- caso real 472339 (Cristopher Retamal, RUT
+    # 17576134-9): OCR leyó "BPHF67"; el chofer tiene DOS transportes
+    # independientes previos (472037, 472227) con "BPHR67" -- evidencia
+    # DOCUMENTAL_INDEPENDIENTE genuina, no repetición del mismo documento
+    # -- y "BPHF67"/"BPHR67" difieren en una única confusión OCR
+    # calibrada. Antes de este bloque, DOCUMENTAL_INDEPENDIENTE nunca
+    # podía resolver solo (sólo CONFIRMACION_HUMANA lo hacía), así que
+    # esta patente quedaba siempre en SUGERENCIA_HUMANA aunque no hubiera
+    # ningún candidato competidor.
+    #
+    # Se agrega DOCUMENTAL_INDEPENDIENTE como segundo nivel que también
+    # puede resolver solo -- pero SÓLO cuando, además de ser el único
+    # candidato en el nivel más alto, el propio candidato trae
+    # `SIMILITUD_OCR_CALIBRADA`: el valor documental de ESTE documento
+    # tiene que ser una lectura OCR plausible del canónico, no sólo "un
+    # vehículo que este chofer usó alguna vez". Esto es deliberado --
+    # evita que un histórico viejo se imponga cuando el chofer
+    # simplemente cambió de vehículo (la patente nueva, genuina, no se
+    # parece a ninguna anterior y por lo tanto nunca gana
+    # `SIMILITUD_OCR_CALIBRADA` contra sí misma).
+    resuelve_automaticamente = len(competidores_mejor_nivel) == 1 and (
+        mejor_nivel == NIVEL_CONFIRMACION_HUMANA
+        or (
+            mejor_nivel == NIVEL_DOCUMENTAL_INDEPENDIENTE
+            and "SIMILITUD_OCR_CALIBRADA" in competidores_mejor_nivel[0]["evidencias"]
+        )
+    )
+    if resuelve_automaticamente:
         resultado = RESULTADO_RESUELTO_AUTOMATICAMENTE
         explicacion = candidatos[0]["razon_legible"]
     else:
