@@ -28,6 +28,11 @@ from atlas_core.catalogo_vehiculos import (
     es_confusion_ocr_de_patente,
     normalizar_patente_vehiculo,
 )
+from atlas_core.catalogo_vehiculos_catchup import (
+    clasificar_par,
+    construir_universo_patentes,
+    detectar_pares_sospechosos,
+)
 from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
@@ -313,11 +318,27 @@ def construir_ficha_obra(*, obra, catalogo_obras: CatalogoObrasDestinos, cliente
     }
 
 
-def construir_ficha_vehiculo(*, vehiculo, filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object]) -> dict[str, object]:
+def construir_ficha_vehiculo(
+    *, vehiculo, filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object],
+    patentes_ambiguas: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     """Las guías cuya patente documental es una confusión OCR de esta
     canónica (ver `_patente_canonica_o_plegada`) se incluyen igual --
     nunca faltan relaciones/histórico sólo porque el documento tenía un
-    error de lectura ya resuelto en la ficha del chofer."""
+    error de lectura ya resuelto en la ficha del chofer.
+
+    Bloque CATÁLOGOS VEHÍCULOS -- SEPARAR CONFIRMADOS: `clasificacion_
+    visual` (Sección 1 del bloque) usa exclusivamente evidencia real ya
+    disponible en el catálogo -- nunca inventa un estado nuevo:
+    CONFIRMADO si hubo confirmación humana explícita (`confirmado_por`/
+    `procedencia`, mismo criterio ya usado por
+    `catalogo_vehiculos_catchup.clasificar_par`) O evidencia operacional
+    real (al menos una guía relacionada, ya sea propia o plegada);
+    AMBIGUO si el barrido de patentes sospechosas (`patentes_ambiguas`,
+    Sección 6 del bloque) todavía no encuentra corroboración suficiente
+    para esta patente puntual (caso real JF9565/JF9575); OBSERVADO en
+    cualquier otro caso (migración legacy, sin evidencia operacional
+    vigente, sin ambigüedad detectada)."""
     patente = vehiculo.patente_canonica
     filas_vehiculo = [
         f for f in filas
@@ -330,6 +351,18 @@ def construir_ficha_vehiculo(*, vehiculo, filas: list[dict[str, str]], vehiculos
         if nombre and nombre not in _AUSENTES:
             choferes[nombre] = choferes.get(nombre, 0) + 1
     primera, ultima = _primera_ultima(str(f.get("fecha", "")) for f in filas_vehiculo)
+    guias_relacionadas = sorted({str(f.get("numero_guia", "")) for f in filas_vehiculo if f.get("numero_guia") not in _AUSENTES})
+
+    confirmacion_fuerte = bool(vehiculo.confirmado_por) or vehiculo.procedencia == "CONFIRMACION_HUMANA"
+    if confirmacion_fuerte:
+        clasificacion_visual = "CONFIRMADO"
+    elif patente in patentes_ambiguas:
+        clasificacion_visual = "AMBIGUO"
+    elif guias_relacionadas:
+        clasificacion_visual = "CONFIRMADO"
+    else:
+        clasificacion_visual = "OBSERVADO"
+
     return {
         "tipo": "VEHICULO",
         "identificador": vehiculo.vehiculo_id,
@@ -337,12 +370,14 @@ def construir_ficha_vehiculo(*, vehiculo, filas: list[dict[str, str]], vehiculos
         "tipo_vehiculo": vehiculo.tipo,
         "estado_calidad": vehiculo.estado_calidad,
         "estado_vigencia": vehiculo.estado_vigencia,
+        "procedencia": vehiculo.procedencia,
+        "clasificacion_visual": clasificacion_visual,
         "aliases": list(vehiculo.aliases),
         "confirmado_por": vehiculo.confirmado_por,
         "choferes_asociados": _top(choferes, n=10),
         "primera_aparicion": primera,
         "ultima_aparicion": ultima,
-        "guias_relacionadas": sorted({str(f.get("numero_guia", "")) for f in filas_vehiculo if f.get("numero_guia") not in _AUSENTES}),
+        "guias_relacionadas": guias_relacionadas,
     }
 
 
@@ -385,8 +420,29 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
     fichas_obras.sort(key=lambda f: f["nombre_canonico"])
 
     plegables = _vehiculos_plegables_por_confusion_ocr(vehiculos_por_patente, filas)
+    # Bloque CATÁLOGOS VEHÍCULOS -- SEPARAR CONFIRMADOS: patentes AMBIGUO
+    # se detectan SÓLO entre las que ya sobrevivieron el pliegue OCR de
+    # arriba (nunca se recalcula BPHF67/BKYX63 -- ya resueltas y
+    # excluidas -- con evidencia débil, lo que las volvería a marcar
+    # ambiguas por error). Sin filas documentales (`filas=()`): sólo
+    # compara metadatos de catálogo (confirmación humana, confusión OCR
+    # calibrada) -- mismo motor ya usado para el barrido general
+    # (`catalogo_vehiculos_catchup`), nunca uno nuevo.
+    vehiculos_visibles = {k: v for k, v in vehiculos_por_patente.items() if k not in plegables}
+    universo_visible = construir_universo_patentes(filas=[], vehiculos_por_patente=vehiculos_visibles)
+    patentes_ambiguas: set[str] = set()
+    for par in detectar_pares_sospechosos(universo_visible):
+        clasificacion = clasificar_par(par, universo_visible)
+        if clasificacion.clase == "AMBIGUO":
+            # Ninguno de los dos lados es claramente canónico -- ambos
+            # quedan "Por verificar" (Sección 6 del bloque), nunca sólo
+            # uno con el otro tratado como ganador implícito.
+            patentes_ambiguas.update(par)
+    patentes_ambiguas = frozenset(patentes_ambiguas)
     fichas_vehiculos = [
-        construir_ficha_vehiculo(vehiculo=v, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
+        construir_ficha_vehiculo(
+            vehiculo=v, filas=filas, vehiculos_por_patente=vehiculos_por_patente, patentes_ambiguas=patentes_ambiguas,
+        )
         for patente, v in vehiculos_por_patente.items() if patente not in plegables
     ]
     fichas_vehiculos.sort(key=lambda f: f["patente"])

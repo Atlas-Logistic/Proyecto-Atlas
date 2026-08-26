@@ -18,6 +18,7 @@ from atlas_core.catalogo_fichas import (
     construir_ficha_cliente,
     construir_ficha_obra,
     construir_ficha_vehiculo,
+    construir_snapshot_fichas,
 )
 from atlas_core.catalogo_obras_destinos import Obra
 from atlas_core.catalogo_vehiculos import EvidenciaVehiculo, Vehiculo
@@ -39,11 +40,11 @@ def _fila(**cambios):
     return fila
 
 
-def _vehiculo(patente="AB1234", tipo="TRACTO", estado_calidad="CONFIRMADO"):
+def _vehiculo(patente="AB1234", tipo="TRACTO", estado_calidad="CONFIRMADO", procedencia="TEST", confirmado_por=""):
     return Vehiculo(
         vehiculo_id=f"v-{patente}", patente_canonica=patente, tipo=tipo,
         estado_calidad=estado_calidad, estado_vigencia="ACTIVO", aliases=(), evidencias=(),
-        procedencia="TEST", confirmado_por="", fecha_confirmacion="",
+        procedencia=procedencia, confirmado_por=confirmado_por, fecha_confirmacion="",
         observaciones="", fecha_creacion=FECHA, fecha_modificacion=FECHA,
     )
 
@@ -266,6 +267,89 @@ def test_ficha_de_vehiculo_incluye_guias_cuya_patente_es_una_confusion_ocr_resue
     ]
     ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=filas, vehiculos_por_patente={"BPHR67": vehiculo})
     assert ficha["guias_relacionadas"] == ["472037", "472227", "472339"]
+
+
+# ============================================================
+# Bloque CATÁLOGOS VEHÍCULOS -- SEPARAR CONFIRMADOS: clasificacion_visual
+# ============================================================
+
+
+def test_vehiculo_con_confirmacion_humana_es_confirmado_aunque_no_tenga_guias_vigentes():
+    vehiculo = _vehiculo("JD8659", procedencia="CONFIRMACION_HUMANA", confirmado_por="JAVIER_MBT")
+    ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=[], vehiculos_por_patente={"JD8659": vehiculo})
+    assert ficha["clasificacion_visual"] == "CONFIRMADO"
+    assert ficha["procedencia"] == "CONFIRMACION_HUMANA"
+
+
+def test_vehiculo_legacy_con_evidencia_operacional_real_es_confirmado():
+    # BPHR67 real: procedencia CATALOGO_LEGACY, sin confirmado_por, pero
+    # con guías reales -- "evidencia equivalente fuerte" (Sección 1 del
+    # bloque), no queda relegado a "Observado".
+    vehiculo = _vehiculo("BPHR67", procedencia="CATALOGO_LEGACY")
+    filas = [_fila(numero_guia="1", patente_tracto="BPHR67", patente_rampla="")]
+    ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=filas, vehiculos_por_patente={"BPHR67": vehiculo})
+    assert ficha["clasificacion_visual"] == "CONFIRMADO"
+
+
+def test_vehiculo_legacy_sin_evidencia_ni_ambiguedad_queda_observado():
+    vehiculo = _vehiculo("ZZ0000", procedencia="CATALOGO_LEGACY")
+    ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=[], vehiculos_por_patente={"ZZ0000": vehiculo})
+    assert ficha["clasificacion_visual"] == "OBSERVADO"
+
+
+def test_vehiculo_marcado_ambiguo_por_el_barrido_nunca_aparece_como_confirmado():
+    vehiculo = _vehiculo("JF9565", procedencia="CATALOGO_LEGACY")
+    ficha = construir_ficha_vehiculo(
+        vehiculo=vehiculo, filas=[], vehiculos_por_patente={"JF9565": vehiculo},
+        patentes_ambiguas=frozenset({"JF9565", "JF9575"}),
+    )
+    assert ficha["clasificacion_visual"] == "AMBIGUO"
+
+
+def test_snapshot_marca_ambiguo_solo_al_lado_sin_confirmacion_ni_evidencia():
+    """Caso real JF9565/JF9575: ambas patentes son estructuralmente
+    sospechosas entre sí (comparten catálogo, sin confusión OCR
+    calibrada entre "6"/"7"), pero JF9575 tiene confirmación humana
+    explícita -- sólo JF9565 queda "Por verificar"."""
+    import csv
+    import json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        raiz = Path(tmp)
+        (raiz / "operacion" / "actual").mkdir(parents=True)
+        (raiz / "catalogos_privados").mkdir(parents=True)
+        with (raiz / "operacion" / "actual" / "analisis_completo_guias.csv").open("w", newline="", encoding="utf-8-sig") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+            escritor.writeheader()
+        (raiz / "catalogos_privados" / "choferes.json").write_text("{}", encoding="utf-8")
+        (raiz / "catalogos_privados" / "vehiculos.json").write_text(json.dumps({
+            "version": 1,
+            "vehiculos": [
+                {
+                    "vehiculo_id": "v-JF9565", "patente_canonica": "JF9565", "tipo": "CARRO",
+                    "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "aliases": [],
+                    "evidencias": [{
+                        "tipo": "MIGRACION_LEGACY", "identificador_fuente": "vehiculos.json",
+                        "referencia_hash": "x", "campos_observados": {"patente": "JF9565", "tipo": "CARRO"},
+                        "fecha": FECHA, "actor_proceso": "PROCESO_MIGRACION", "resultado": "SOPORTA",
+                    }],
+                    "procedencia": "CATALOGO_LEGACY", "confirmado_por": "", "fecha_confirmacion": "",
+                    "observaciones": "", "fecha_creacion": FECHA, "fecha_modificacion": FECHA,
+                },
+                {
+                    "vehiculo_id": "v-JF9575", "patente_canonica": "JF9575", "tipo": "CARRO",
+                    "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "aliases": [], "evidencias": [],
+                    "procedencia": "CONFIRMACION_HUMANA", "confirmado_por": "JAVIER_MBT", "fecha_confirmacion": FECHA,
+                    "observaciones": "", "fecha_creacion": FECHA, "fecha_modificacion": FECHA,
+                },
+            ],
+        }), encoding="utf-8")
+        snapshot = construir_snapshot_fichas(raiz_atlas=raiz)
+        por_patente = {v["patente"]: v for v in snapshot["vehiculos"]}
+        assert por_patente["JF9565"]["clasificacion_visual"] == "AMBIGUO"
+        assert por_patente["JF9575"]["clasificacion_visual"] == "CONFIRMADO"
 
 
 def test_patente_documental_sin_catalogar_igual_se_muestra_nunca_se_oculta():

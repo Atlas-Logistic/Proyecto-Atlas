@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — CATÁLOGOS VEHÍCULOS: SEPARAR CONFIRMADOS DE OBSERVADOS/AMBIGUOS
+
+- **Problema real:** Catálogos → Vehículos mezclaba en una sola lista confirmados/observados/ambiguos, haciendo parecer que había errores sin resolver aunque Motor ya había decidido correctamente no fusionar nada.
+- **Contrato mínimo en Motor:** `construir_ficha_vehiculo` agrega `procedencia` y `clasificacion_visual` (CONFIRMADO/OBSERVADO/AMBIGUO) -- usa evidencia real ya existente (confirmación humana, evidencia operacional real, o el barrido de patentes sospechosas ya construido en el bloque anterior, `catalogo_vehiculos_catchup`, restringido a comparar sólo catálogo-contra-catálogo YA excluido de pliegues OCR -- nunca revive BPHF67/BKYX63 como ambiguos por evidencia débil). Ninguna lógica de canonicalización nueva.
+- **Desktop:** `Catálogos → Vehículos` ahora muestra "Vehículos confirmados: X · Por verificar: Y", lista principal sólo Confirmados, bloque plegable "Por verificar" (Observado/"Pendiente de corroborar"), que se abre solo si la búsqueda activa encontró algo ahí. Ficha usa `clasificacion_visual` como Estado, nunca el `estado_calidad` crudo del catálogo (que hoy marca CONFIRMADO a todo por igual). Búsqueda por vehículo ahora también encuentra por chofer asociado.
+- **E2E real (G:\Mi unidad\Atlas):** 23 confirmados / 1 por verificar. BPHR67/BKYK63 confirmados y visibles; BPHF67/BKYX63 nunca aparecen; JD8659/JE8659 y PXHH31/PXHH32 confirmados y SEPARADOS; JF9565 "Pendiente de corroborar" en Por verificar, JF9575 confirmado en principal -- clasificación real preservada, sin elegir a ciegas.
+- **Tests:** Motor 5 focales nuevos (`tests/test_catalogo_fichas_v2.py`) + suite completa **1999 passed**. Desktop 14 focales nuevos (`test/catalogos_vehiculos_confirmados_ui.test.js`) + suite completa **411 passed**.
+- **Pendiente real:** ninguno de código -- bloque de presentación, sin borrar datos ni fusionar patentes ambiguas.
+
+---
+
 ## 2026-08-26 — BARRIDO GENERAL DE PATENTES SOSPECHOSAS: CATCH-UP FOCAL DEL CATÁLOGO
 
 - **Herramienta nueva (read-only):** `atlas_core.catalogo_vehiculos_catchup` -- construye el universo real de patentes (catálogo confirmado + histórico documental vigente + histórico adicional opcional), detecta pares con distancia de edición de 1 carácter y rol compatible, y clasifica cada uno en 4 clases (A. OCR_INEQUIVOCO, B. ERROR_DOCUMENTAL_CONFIRMADO, C. VEHICULO_REAL, D. AMBIGUO) usando la MISMA tabla de confusiones OCR ya calibrada -- nunca hardcodea equivalencias, nunca decide por frecuencia baja sola.
