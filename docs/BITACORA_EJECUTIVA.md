@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — INCIDENCIAS DOCUMENTALES V2: VISTA HUMANA DE CONTROL DE CALIDAD DOCUMENTAL
+
+- **Problema real:** la pestaña era una tabla técnica (ISO largo, enums crudos, sin jerarquía) -- no quedaba claro en segundos qué dato venía mal en una guía, qué usó Atlas en su lugar, ni por qué. Poco usable como herramienta de control de calidad para operación/mandante.
+- **Fix (100% Desktop, sólo lectura -- Motor no cambió, el JSON ya se leía completo):** `src/incidencias_documentales_ui.js` reescrito -- cada incidencia se traduce a un título operacional humano (patrón general por `tipo_incidencia`, nunca hardcodeado a un caso), con "Dato emitido" vs "Dato usado por Atlas" como contraste visual (ámbar/verde), "Origen del problema" (Emisión de la guía / Error documental / Pendiente de determinar -- nunca afirma "emisión" fuera de lo que Motor ya confirmó como error de contenido), "Corroborado por" en lenguaje humano (nunca nombres de función), fecha compacta ("25 ago 2026 · 13:58") y categoría operacional (Datos del chofer/Cliente/Obra-destino/Vehículo-patente/Dirección/Horario-fecha/Peso-material/Otros). Detalles técnicos (ID, tipo interno, ISO completo, evidencia cruda) quedan plegados en "Ver detalles técnicos", nunca en la vista principal. Filtros nuevos: categoría y período (Hoy/7 días/30 días), sumados a campo/estado/búsqueda libre ya existentes. Resumen superior compacto (mostradas, errores de emisión, pendientes, categoría más frecuente). Segunda capa de seguridad: cualquier `PROBLEMA_DE_LECTURA`/`CALIDAD_DOCUMENTAL_O_IMAGEN` que llegara al almacén se excluye igual en la UI (nunca sólo confiando en que Motor no lo escriba).
+- **Caso real Wladimir Aguilar (E2E contra producción):** guías 472238/472239 -- "Error en la emisión de la guía · RUT del chofer incorrecto", Chofer: WLADIMIR AGUILAR, Cliente: TORRES OCARANZA LTDA, Dato emitido 55.555.555-5 → Dato usado por Atlas 26.646.499-1, Corroborado por "Catálogo confirmado o histórico consistente", Detectado 25 ago 2026 · 13:58. Se entiende en segundos sin conocer Atlas por dentro; el enum `RUT_DOCUMENTAL_INVALIDO` y el ISO completo sólo aparecen en "Ver detalles técnicos".
+- **Tests:** Desktop 25 focales nuevos (`test/incidencias_documentales_ui.test.js`, reescrito) + suite completa **370 passed**. Sin cambios de código Motor -- suite Motor no requiere re-ejecución.
+- **Pendiente real:** ninguno de código para este bloque -- edición/cierre manual de incidencias queda explícitamente diferida, tal como pidió el ticket (bloque sigue siendo 100% de sólo lectura).
+
+---
+
 ## 2026-08-26 — CATÁLOGOS V2: FICHAS COMPLETAS DE ENTIDADES (CHOFERES, CLIENTES, OBRAS, VEHÍCULOS)
 
 - **Problema real:** la pestaña Catálogos sólo mostraba nombres en 3 listas planas -- buscando WLADIMIR AGUILAR, Javier no podía ver su RUT ni nada operacional que Atlas ya sabía (vehículos asociados, histórico de viajes, etc.).
