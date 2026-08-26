@@ -62,7 +62,7 @@ def test_heic_real_devuelve_400_con_motivo_exacto_tipo_no_permitido(tmp_path: Pa
     try:
         token = _token(servidor)
         cuerpo, tipo = _multipart(
-            {"envio_id": str(uuid.uuid4()), "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z"},
+            {"envio_id": str(uuid.uuid4()), "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z", "planta_origen_informada": "AZA_COLINA"},
             b"contenido-heic-simulado", mime="image/heic",
         )
         solicitud = urllib.request.Request(
@@ -90,7 +90,7 @@ def test_jpeg_real_sigue_aceptandose_sin_regresion(tmp_path: Path) -> None:
         token = _token(servidor)
         envio_id = str(uuid.uuid4())
         cuerpo, tipo = _multipart(
-            {"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z"},
+            {"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z", "planta_origen_informada": "AZA_COLINA"},
             b"contenido-jpeg-simulado", mime="image/jpeg",
         )
         solicitud = urllib.request.Request(
@@ -118,7 +118,7 @@ def test_foto_grande_realista_de_iphone_ya_no_vuelve_400(tmp_path: Path) -> None
         envio_id = str(uuid.uuid4())
         contenido_20mb = b"x" * (20 * 1024 * 1024)
         cuerpo, tipo = _multipart(
-            {"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z"},
+            {"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T18:00:00Z", "planta_origen_informada": "AZA_COLINA"},
             contenido_20mb, mime="image/jpeg",
         )
         solicitud = urllib.request.Request(

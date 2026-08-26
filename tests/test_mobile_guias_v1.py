@@ -40,7 +40,7 @@ def _recibir(tmp_path: Path) -> tuple[RepositorioEnviosMobile, str]:
     envio_id = str(uuid.uuid4())
     repo.recibir(
         envio_id=envio_id, imagen=b"foto", mime="image/jpeg",
-        metadata={"chofer_id": "c1", "tipo_novedad": "", "guia_firmada_correo": False},
+        metadata={"chofer_id": "c1", "tipo_novedad": "", "guia_firmada_correo": False, "planta_origen_informada": "AZA_COLINA"},
     )
     return repo, envio_id
 
@@ -151,7 +151,7 @@ def test_envio_id_con_traversal_o_caracteres_no_seguros_se_rechaza(tmp_path: Pat
         try:
             repo.recibir(
                 envio_id=envio_id_malicioso, imagen=b"foto", mime="image/jpeg",
-                metadata={"tipo_novedad": "", "guia_firmada_correo": False},
+                metadata={"tipo_novedad": "", "guia_firmada_correo": False, "planta_origen_informada": "AZA_COLINA"},
             )
             assert False, f"debió rechazar {envio_id_malicioso!r}"
         except ErrorEnvioMobile:
@@ -197,7 +197,7 @@ def test_e2e_http_real_con_procesamiento_automatico_y_reintento_sin_duplicar(tmp
         )
         token = json.load(urllib.request.urlopen(login))["token"]
         envio_id = str(uuid.uuid4())
-        cuerpo, tipo = _multipart({"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T12:00:00Z"}, b"no-es-una-imagen-real")
+        cuerpo, tipo = _multipart({"envio_id": envio_id, "schema_version": "1", "capturado_en": "2026-08-25T12:00:00Z", "planta_origen_informada": "AZA_COLINA"}, b"no-es-una-imagen-real")
         solicitud = lambda: urllib.request.Request(
             f"http://127.0.0.1:{servidor.server_port}/api/mobile/envios",
             data=cuerpo, headers={"Content-Type": tipo, "Authorization": f"Bearer {token}"}, method="POST",

@@ -51,6 +51,7 @@ def test_recepcion_http_valida_e_idempotente(tmp_path: Path) -> None:
             "envio_id": envio_id, "schema_version": "1",
             "capturado_en": "2026-08-20T18:00:00Z",
             "tipo_novedad": "DEVOLUCION_PARCIAL", "guia_firmada_correo": "true",
+            "planta_origen_informada": "AZA_COLINA",
         }, b"foto-original")
         solicitud = lambda: urllib.request.Request(
             f"http://127.0.0.1:{servidor.server_port}/api/mobile/envios",
@@ -80,7 +81,7 @@ def test_archivo_invalido_o_grande_se_rechaza(tmp_path: Path, caso: str) -> None
     with pytest.raises(ErrorEnvioMobile):
         RepositorioEnviosMobile(tmp_path).recibir(
             envio_id=str(uuid.uuid4()), imagen=contenido, mime=mime,
-            metadata={"tipo_novedad": "", "guia_firmada_correo": False},
+            metadata={"tipo_novedad": "", "guia_firmada_correo": False, "planta_origen_informada": "AZA_COLINA"},
         )
 
 
@@ -89,7 +90,7 @@ def test_pipeline_real_adaptado_asocia_guia_inequivoca(tmp_path: Path) -> None:
     envio_id = str(uuid.uuid4())
     repo.recibir(
         envio_id=envio_id, imagen=b"foto", mime="image/jpeg",
-        metadata={"chofer_id": "c1", "tipo_novedad": "TIENE_ESTADIA", "guia_firmada_correo": True},
+        metadata={"chofer_id": "c1", "tipo_novedad": "TIENE_ESTADIA", "guia_firmada_correo": True, "planta_origen_informada": "AZA_COLINA"},
     )
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
     dataset.parent.mkdir(parents=True)
@@ -109,7 +110,7 @@ def test_ambigua_o_sin_asociacion_va_a_bandeja(tmp_path: Path) -> None:
     envio_id = str(uuid.uuid4())
     repo.recibir(
         envio_id=envio_id, imagen=b"foto", mime="image/jpeg",
-        metadata={"chofer_id": "c1", "tipo_novedad": "DOBLE_VUELTA", "guia_firmada_correo": False},
+        metadata={"chofer_id": "c1", "tipo_novedad": "DOBLE_VUELTA", "guia_firmada_correo": False, "planta_origen_informada": "AZA_COLINA"},
     )
     registro = procesar_envio_mobile(
         repo, envio_id, procesador=lambda ruta: {"numero_guia": "No encontrado", "numero_transporte": "No encontrado"},

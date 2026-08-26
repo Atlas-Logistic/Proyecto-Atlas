@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — MOBILE V1: SELECTOR DE PLANTA DE ORIGEN (COLINA/RENCA) EN ATLAS CONDUCTORES
+
+- **Selector:** interruptor grande de dos posiciones (radios nativos ocultos + etiquetas estilizadas, nunca `<select>`) en la pantalla de captura, antes de "Fotografiar guía". Sin selección previa, ningún lado viene marcado -- el chofer debe elegir antes del primer envío.
+- **Persistencia local:** nueva tienda IndexedDB `preferencias` (separada de `sesion`, sobrevive a cerrar sesión) -- la última planta elegida se recuerda entre capturas, reintentos y cierres/reaperturas de la app.
+- **Dato enviado:** `planta_origen_informada` (`AZA_COLINA`/`AZA_RENCA`, ID canónico -- nunca texto libre) viaja en el mismo `POST /api/mobile/envios` de siempre, validado en `sync-core.js` igual que `tipo_novedad`.
+- **Core/trazabilidad:** `atlas_core.mobile.RepositorioEnviosMobile.recibir` exige y persiste el dato (mismo criterio que `tipo_novedad`, defensa en profundidad -- nunca confía sólo en el cliente); queda junto a `chofer_id`/timestamp en el mismo `envio.json`. Nunca contamina `datos`/`planta_origen_id`/`planta_origen_nombre` del dataset -- esos siguen siendo exclusivamente del pipeline determinista GPS/documento (verificado con test dedicado). Evidencia informada, nunca verdad absoluta -- cruzarla con GPS/histórico queda para un bloque posterior. 0 llamadas B1 nuevas.
+- **Tests:** Mobile 20 focales nuevos (`test/planta-origen-v1.test.js`) + suite completa **78 passed**. Motor 7 focales nuevos (`tests/test_mobile_planta_origen_v1.py`) + suite completa **1954 passed**.
+- **Pendiente real para la prueba de mañana:** ningún cambio de código -- Javier prueba con choferes reales (login real, selector, envío real); GPS automático/roles/multiempresa siguen fuera de alcance, explícitamente diferidos por este bloque.
+
+---
+
 ## 2026-08-26 — PERFORMANCE V1: PARALELIZACIÓN SEGURA DE B1 Y TELEMETRÍA (472339 ~4 min → segundos)
 
 - **Baseline instrumentado real** (guía 472339, PaddleOCR/GPU + ORS + Groq + Onelogis reales, copia aislada, nunca `G:\Mi unidad\Atlas`): con los fixes de patente/destino ya aplicados, el caso ya no dispara 4 problemas B1 sino 2 (`OBRA_DESTINO_SIN_CORROBORAR`, `SIN_ACCESO_VIAL`) — baseline limpio 24.1 s totales (`ocr_seg` 7.3, `telemetria_seg` 6.5, `atlas_ia` 6.5 llamado secuencial). El ~4 min original se explica, con evidencia real, por: 2 llamadas B1 de patente ya eliminadas (una de ellas sola, 20.5 s, por reintento de límite de cuota de Groq) + ejecución secuencial de las llamadas B1/telemetría restantes.

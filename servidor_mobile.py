@@ -127,6 +127,10 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                         "capturado_en": campos.get("capturado_en", ""),
                         "tipo_novedad": campos.get("tipo_novedad", ""),
                         "guia_firmada_correo": campos.get("guia_firmada_correo") == "true",
+                        # Bloque MOBILE V1 -- planta de origen informada
+                        # por el chofer (evidencia, no verdad absoluta;
+                        # ver atlas_core.mobile.PLANTAS_ORIGEN_MOBILE).
+                        "planta_origen_informada": campos.get("planta_origen_informada", ""),
                     },
                 )
                 if nuevo and procesar:

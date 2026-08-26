@@ -27,6 +27,20 @@ TIPOS_NOVEDAD = (
     "", "ESPERA_AUTORIZACION_ESTADIA", "TIENE_ESTADIA", "DEVOLUCION_TOTAL",
     "DEVOLUCION_PARCIAL", "DOBLE_VUELTA",
 )
+# Bloque MOBILE V1 -- selector de planta de origen (COLINA/RENCA) en la
+# app del chofer (ver Atlas-Conductores-Mobile/src/sync-core.js,
+# PLANTAS_ORIGEN_VALIDAS -- mismos dos códigos, nunca texto libre).
+# Igual que `TIPOS_NOVEDAD`, esto es la validación de CONTRATO
+# (¿el dato que llegó es uno de los válidos?) -- nunca decide identidad
+# operacional por sí sola. La planta que el chofer informa es evidencia
+# operacional, NO verdad absoluta (Sección 6 del bloque): se persiste
+# en el envío tal cual, nunca sobrescribe `planta_origen_id`/
+# `planta_origen_nombre` del dataset (esos siguen viniendo del
+# pipeline determinista ya existente -- GPS/documento, ver
+# `atlas_core.procesamiento_masivo`/`rutas.origen_documental`). Cruzar
+# ambas fuentes y resolver contradicciones queda para un bloque
+# posterior, no para este.
+PLANTAS_ORIGEN_MOBILE = ("AZA_COLINA", "AZA_RENCA")
 MIME_PERMITIDOS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 # Bloque MOBILE ENVÍO REAL (fix puntual, 2do round): evidencia real (log
 # de diagnóstico) confirmó que el 400 real del iPhone era por tamaño, no
@@ -112,6 +126,14 @@ class RepositorioEnviosMobile:
         tipo = str(metadata.get("tipo_novedad", ""))
         if tipo not in TIPOS_NOVEDAD:
             raise ErrorEnvioMobile("tipo_novedad inválido")
+        # Bloque MOBILE V1 -- a diferencia de tipo_novedad (donde "" es
+        # una respuesta válida, "ninguna aplica"), la planta de origen es
+        # obligatoria: la propia app ya bloquea el envío sin ella (ver
+        # Sección 9 del bloque), y Core nunca confía sólo en esa
+        # validación del cliente.
+        planta = str(metadata.get("planta_origen_informada", ""))
+        if planta not in PLANTAS_ORIGEN_MOBILE:
+            raise ErrorEnvioMobile("planta_origen_informada inválida")
         directorio = self.raiz / envio_id
         registro_path = directorio / "envio.json"
         with bloqueo_sesion(self.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=300):
