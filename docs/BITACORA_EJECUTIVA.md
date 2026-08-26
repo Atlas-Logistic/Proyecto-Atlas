@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — MICROAJUSTES DESKTOP: CATÁLOGOS + REVISIÓN DE ATLAS + INCIDENCIAS
+
+- **Problema real:** CRISTOPHER RETAMAL mostraba BPHF67 como si fuera un segundo vehículo real (era BPHR67 mal leído por OCR); la ficha de chofer saturaba la vista principal con aliases OCR y una fila "Estado del RUT" aparte; la tabla de Destinos mostraba una columna Fuente de poco valor para un jefe/mandante; "Guías móviles sin asociación" y la revisión normal se apilaban en una página vertical muy larga.
+- **Fix Motor (mínimo, sólo lectura):** nueva función pública `catalogo_vehiculos.es_confusion_ocr_de_patente` (reutiliza la tabla de confusiones OCR ya existente) usada por `catalogo_fichas._patente_canonica_o_plegada` -- una patente documental que sólo difiere de una canónica CONFIRMADA/ACTIVA en una confusión OCR conocida y compatible con el rol (TRACTO/CARRO) se resuelve a la canónica en la ficha (chofer y vehículo), sin tocar el dato documental ni el catálogo; nunca se pliega ante ambigüedad. Caso real: BPHF67 (guía 472339) se pliega en BPHR67 -- 3 apariciones, nunca aparece como vehículo aparte.
+- **Fix Desktop:** ficha de chofer/vehículo con Identidad reducida a lo esencial (Nombre/RUT/Estado, Patente/Tipo/Estado) -- aliases OCR y "Estado del RUT" como fila aparte ya no se muestran (el RUT observado/histórico sigue visible, ahora inline con su valor); badge verde ("ok", mismo lenguaje visual que el resto de Desktop) para estados confirmados, ámbar para pendientes/observados; tabla de Destinos sin columna Fuente, Dirección ~65% de ancho (nunca cortada en 5-6 líneas); Revisión de Atlas en layout de dos columnas (grid `auto-fit`, Mobile a la izquierda, revisión normal a la derecha, colapsa a una columna si no hay Mobile pendiente, se apila en pantallas angostas) -- el flujo secuencial "Caso X de N / Anterior / Siguiente" ya existía en `decisiones_pendientes_ui.js` y no se tocó.
+- **Tests:** Motor 3 focales nuevos (`tests/test_catalogo_fichas_v2.py`) + suite completa **1968 passed**. Desktop 12 focales nuevos (`test/microajustes_desktop_v1.test.js`) + suite completa **382 passed**.
+- **E2E real (G:\Mi unidad\Atlas):** Cristopher Retamal (sólo BPHR67, 3 guías), Wladimir Aguilar (RUT observado/histórico inline, sin aliases), AUSIN SAN BERNARDO (Destinos sin Fuente, badges), BPHR67/JF9575 (ficha vehículo mínima), incidencias Wladimir (fecha "25 ago 2026 · 13:58", sin N.º transporte visible).
+- **Pendiente real:** ninguno de código -- bloque puramente de presentación, sin cambios de lógica de detección ni de decisiones.
+
+---
+
 ## 2026-08-26 — INCIDENCIAS DOCUMENTALES V2: VISTA HUMANA DE CONTROL DE CALIDAD DOCUMENTAL
 
 - **Problema real:** la pestaña era una tabla técnica (ISO largo, enums crudos, sin jerarquía) -- no quedaba claro en segundos qué dato venía mal en una guía, qué usó Atlas en su lugar, ni por qué. Poco usable como herramienta de control de calidad para operación/mandante.

@@ -133,6 +133,52 @@ def test_chofer_con_multiples_vehiculos_muestra_todos_sin_borrar_historico():
     assert ficha["vehiculos"][0]["patente"] == "AB1234"
 
 
+def test_patente_confusion_ocr_de_una_canonica_confirmada_se_pliega_nunca_es_un_segundo_vehiculo():
+    # Caso real 472339, Cristopher Retamal: BPHF67 es BPHR67 mal leído
+    # por OCR (F/R), no un segundo tracto real.
+    filas = [
+        _fila(numero_guia="1", numero_transporte="T-1", chofer="CRISTOPHER RETAMAL", patente_tracto="BPHR67", patente_rampla=""),
+        _fila(numero_guia="2", numero_transporte="T-2", chofer="CRISTOPHER RETAMAL", patente_tracto="BPHR67", patente_rampla=""),
+        _fila(numero_guia="3", numero_transporte="T-3", chofer="CRISTOPHER RETAMAL", patente_tracto="BPHF67", patente_rampla=""),
+    ]
+    vehiculos_por_patente = {"BPHR67": _vehiculo("BPHR67")}
+    ficha = construir_ficha_chofer(
+        identificador="175761349",
+        registro_catalogo={"nombre": "CRISTOPHER RETAMAL", "activo": True, "aliases": []},
+        filas=filas, vehiculos_por_patente=vehiculos_por_patente,
+    )
+    assert len(ficha["vehiculos"]) == 1
+    assert ficha["vehiculos"][0]["patente"] == "BPHR67"
+    assert ficha["vehiculos"][0]["apariciones"] == 3
+    assert ficha["vehiculos"][0]["estado_catalogo"] == "CONFIRMADO"
+
+
+def test_patente_confusion_ocr_ambigua_entre_dos_canonicas_nunca_se_pliega_en_silencio():
+    # Si BPHF67 pudiera confundirse con dos patentes canónicas distintas,
+    # nunca se elige una -- se muestra tal cual, sin catalogar.
+    filas = [_fila(numero_guia="1", patente_tracto="BPHF67", patente_rampla="")]
+    vehiculos_por_patente = {"BPHR67": _vehiculo("BPHR67"), "BPHE67": _vehiculo("BPHE67")}
+    ficha = construir_ficha_chofer(
+        identificador="PENDIENTE00000003",
+        registro_catalogo={"nombre": "PERSONA EJEMPLO", "activo": True, "aliases": []},
+        filas=filas, vehiculos_por_patente=vehiculos_por_patente,
+    )
+    assert len(ficha["vehiculos"]) == 1
+    assert ficha["vehiculos"][0]["patente"] == "BPHF67"
+    assert ficha["vehiculos"][0]["estado_catalogo"] == "SIN_CATALOGAR"
+
+
+def test_ficha_de_vehiculo_incluye_guias_cuya_patente_es_una_confusion_ocr_resuelta():
+    vehiculo = _vehiculo("BPHR67")
+    filas = [
+        _fila(numero_guia="472037", patente_tracto="BPHR67", patente_rampla=""),
+        _fila(numero_guia="472227", patente_tracto="BPHR67", patente_rampla=""),
+        _fila(numero_guia="472339", patente_tracto="BPHF67", patente_rampla=""),
+    ]
+    ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=filas, vehiculos_por_patente={"BPHR67": vehiculo})
+    assert ficha["guias_relacionadas"] == ["472037", "472227", "472339"]
+
+
 def test_patente_documental_sin_catalogar_igual_se_muestra_nunca_se_oculta():
     filas = [_fila(numero_guia="1", patente_tracto="XX0000", patente_rampla="")]
     ficha = construir_ficha_chofer(
@@ -246,7 +292,7 @@ def test_ficha_vehiculo_incluye_tipo_choferes_asociados_y_apariciones():
         _fila(numero_guia="2", chofer="CRISTOPHER RETAMAL", patente_tracto="BPHR67", patente_rampla=""),
         _fila(numero_guia="3", chofer="OTRA PERSONA", patente_tracto="ZZ0000", patente_rampla=""),
     ]
-    ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=filas)
+    ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=filas, vehiculos_por_patente={"BPHR67": vehiculo})
     assert ficha["tipo_vehiculo"] == "TRACTO"
     assert ficha["choferes_asociados"] == [{"nombre": "CRISTOPHER RETAMAL", "apariciones": 2}]
     assert ficha["guias_relacionadas"] == ["1", "2"]

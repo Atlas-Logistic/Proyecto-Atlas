@@ -25,6 +25,7 @@ from atlas_core.catalogo_vehiculos import (
     VehiculoDuplicadoError,
     VersionCatalogoVehiculosDesconocidaError,
     cargar_catalogo_vehiculos,
+    es_confusion_ocr_de_patente,
     normalizar_patente_vehiculo,
 )
 from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json
@@ -98,17 +99,39 @@ def _resumen_rut_historico(filas: list[dict[str, str]], *, campo_rut: str) -> di
     return {"estado": "CONFLICTO", "valor": None, "candidatos": candidatos}
 
 
+def _patente_canonica_o_plegada(patente_observada: str, rol: str, vehiculos_por_patente: Mapping[str, object]) -> str:
+    """Bloque MICROAJUSTES DESKTOP -- una patente documental que sólo
+    difiere de una patente canónica CONFIRMADA/ACTIVA (`vehiculos_por_
+    patente` ya viene filtrada por `.homologables()`) en una confusión
+    OCR conocida y compatible con el rol observado (TRACTO/CARRO) NUNCA
+    se muestra como un segundo vehículo real: se resuelve a la canónica
+    (caso real 472339, Cristopher Retamal: BPHF67 es BPHR67 mal leído,
+    no un segundo tracto). Nunca se resuelve ante ambigüedad (más de un
+    candidato posible) -- se devuelve tal cual, nunca se elige en
+    silencio."""
+    if patente_observada in vehiculos_por_patente:
+        return patente_observada
+    candidatos = {
+        canonica for canonica, vehiculo in vehiculos_por_patente.items()
+        if getattr(vehiculo, "tipo", None) == rol and es_confusion_ocr_de_patente(patente_observada, canonica)
+    }
+    return next(iter(candidatos)) if len(candidatos) == 1 else patente_observada
+
+
 def _vehiculos_asociados(filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object]) -> list[dict[str, object]]:
     """Sección 4 -- nunca "una patente fija": todas las asociadas,
     tracto y rampla, con apariciones/primera/última -- nunca borra
-    histórico aunque el catálogo no las tenga confirmadas."""
+    histórico aunque el catálogo no las tenga confirmadas. Una patente
+    que sólo es una confusión OCR de una canónica confirmada se resuelve
+    a esa canónica antes de agregar (ver `_patente_canonica_o_plegada`);
+    nunca aparece como un segundo vehículo aparte."""
     por_patente: dict[str, dict[str, object]] = {}
     for fila in filas:
         for campo, rol in (("patente_tracto", "TRACTO"), ("patente_rampla", "CARRO")):
             valor = str(fila.get(campo, "")).strip()
             if not valor or valor in _AUSENTES:
                 continue
-            patente = normalizar_patente_vehiculo(valor)
+            patente = _patente_canonica_o_plegada(normalizar_patente_vehiculo(valor), rol, vehiculos_por_patente)
             registro = por_patente.setdefault(patente, {
                 "patente": patente, "roles_documentales": set(), "apariciones": 0,
                 "fechas": [], "transportes": set(),
@@ -248,12 +271,16 @@ def construir_ficha_obra(*, obra, catalogo_obras: CatalogoObrasDestinos, cliente
     }
 
 
-def construir_ficha_vehiculo(*, vehiculo, filas: list[dict[str, str]]) -> dict[str, object]:
+def construir_ficha_vehiculo(*, vehiculo, filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object]) -> dict[str, object]:
+    """Las guías cuya patente documental es una confusión OCR de esta
+    canónica (ver `_patente_canonica_o_plegada`) se incluyen igual --
+    nunca faltan relaciones/histórico sólo porque el documento tenía un
+    error de lectura ya resuelto en la ficha del chofer."""
     patente = vehiculo.patente_canonica
     filas_vehiculo = [
         f for f in filas
-        if normalizar_patente_vehiculo(str(f.get("patente_tracto", ""))) == patente
-        or normalizar_patente_vehiculo(str(f.get("patente_rampla", ""))) == patente
+        if _patente_canonica_o_plegada(normalizar_patente_vehiculo(str(f.get("patente_tracto", ""))), "TRACTO", vehiculos_por_patente) == patente
+        or _patente_canonica_o_plegada(normalizar_patente_vehiculo(str(f.get("patente_rampla", ""))), "CARRO", vehiculos_por_patente) == patente
     ]
     choferes: dict[str, int] = {}
     for f in filas_vehiculo:
@@ -315,7 +342,10 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
     ] if catalogo_obras is not None else []
     fichas_obras.sort(key=lambda f: f["nombre_canonico"])
 
-    fichas_vehiculos = [construir_ficha_vehiculo(vehiculo=v, filas=filas) for v in vehiculos_por_patente.values()]
+    fichas_vehiculos = [
+        construir_ficha_vehiculo(vehiculo=v, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
+        for v in vehiculos_por_patente.values()
+    ]
     fichas_vehiculos.sort(key=lambda f: f["patente"])
 
     return {

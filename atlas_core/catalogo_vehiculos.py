@@ -309,6 +309,18 @@ def _diferencia_ocr_segura(a: str, b: str) -> bool:
     return len(a) == len(b) and len(diferencias) == 1 and frozenset(diferencias[0]) in _CONFUSIONES_OCR
 
 
+def es_confusion_ocr_de_patente(observada: str, canonica: str) -> bool:
+    """Público, sólo lectura -- True si `observada` difiere de `canonica`
+    en exactamente una posición y esa diferencia es una confusión OCR
+    documentada (ver `_CONFUSIONES_OCR`). Reutilizado por
+    `catalogo_fichas` para plegar, sólo en la FICHA (nunca en el
+    catálogo ni en el dato documental), una patente mal leída dentro de
+    su patente canónica -- nunca la muestra como un segundo vehículo
+    real (caso real 472339, Cristopher Retamal: BPHF67 no es un
+    vehículo aparte, es BPHR67 mal leído)."""
+    return _diferencia_ocr_segura(normalizar_patente_vehiculo(observada), normalizar_patente_vehiculo(canonica))
+
+
 def resolver_patente(fuente: str | Path | Mapping[str, object], patente_observada: str, *, tipo_esperado: str | None = None) -> ResultadoResolucionPatente:
     original = str(patente_observada or "").strip()
     if not original or original == "No encontrado":
