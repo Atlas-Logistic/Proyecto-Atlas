@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-26 — PREGÚNTALE A ATLAS V2.1: REGRESIÓN "3 → 0 INCIDENCIAS"
+
+- **Reporte:** después de B1 V2, "¿Cuántas incidencias documentales hay?" pasó de responder correctamente "3" a responder "Hay 0 incidencias documentales registradas." sin que Javier hubiera borrado nada.
+- **Trazado:** dominio/métrica siguen resolviendo bien (`INCIDENCIAS_DOCUMENTALES`/`COUNT_INCIDENCIAS`); el repositorio canónico (`G:\Mi unidad\Atlas\catalogos_privados\incidencias_documentales.json`) sigue intacto con sus 3 registros reales (2 guías del mismo viaje por RUT inválido de WLADIMIR AGUILAR + 1 de CASA HELSINSKI, 2 viajes afectados). Ejecutado con la ruta de incidencias que Desktop ya calcula (`main.js`, commit anterior) el CLI responde "3" correctamente; sin esa ruta, "0" -- **no es un bug de lectura, es que "0" y "no se pudo verificar" eran indistinguibles**, así que cualquier entorno donde el llamador no llegue a pasar `--incidencias` (proceso Desktop sin reiniciar tras el fix anterior, raíz Atlas todavía sin resolver, etc.) parecía silenciosamente "cero incidencias reales".
+- **Fix general:** `responder_consulta_atlas` ya no afirma "0 incidencias" con la misma confianza en ambos casos -- nuevo estado `FUENTE_NO_DISPONIBLE` cuando `ruta_incidencias` nunca se indicó ("No pude verificar... esto no significa que no existan"), reservando "Hay 0 incidencias documentales registradas." para cuando la fuente SÍ se indicó y el repositorio real está genuinamente vacío (mismo criterio que ya usa `src/incidencias_documentales.js`: archivo ausente no es error). Desktop no necesitó cambios -- `renderResultadoConsulta` ya maneja cualquier `estado` no reconocido mostrando el texto tal cual, sin romper.
+- **E2E real:** "¿Cuántas incidencias documentales hay?" → *"Hay 3 incidencias documentales registradas. Corresponden a 2 viajes."*; "¿Cuántos errores documentales tenemos?" → mismo resultado. Regresiones revalidadas: Retamal *"86.88 km calculados"*, choferes este mes *"10 choferes"*.
+- **Tests:** 2 focales nuevos + 1 ajustado (`test_responder_consulta_atlas.py`) + suite completa Motor **2042 passed**. Desktop sin cambios de código (contrato JSON gana un valor de `estado` aditivo, ya cubierto por el manejo genérico existente) -- sin commit Desktop.
+
+---
+
 ## 2026-08-26 — PREGÚNTALE A ATLAS / B1 V2: COMPRENSIÓN SEMÁNTICA REAL
 
 - **Problema real:** Javier probó preguntas naturales y Atlas devolvió respuestas estructuralmente válidas pero semánticamente equivocadas -- "¿cuántas incidencias documentales hay?" y "¿cuántos choferes trabajaron este mes?" respondían "22 viajes"; "¿cuántos kms recorridos tiene Retamal?" respondía "3 viajes" en vez de la distancia.

@@ -122,9 +122,13 @@ def test_total_viajes_actuales_coincide_con_23_reportados():
 # de Javier que antes devolvían "22 viajes" (Bloque 19/13 del ticket).
 # Regresiones permanentes, contra el archivo real de incidencias. ---
 
-def _ruta_incidencias_real() -> Path | None:
-    ruta = RAIZ_DRIVE / "catalogos_privados" / "incidencias_documentales.json"
-    return ruta if ruta.is_file() else None
+def _ruta_incidencias_real() -> Path:
+    # Bloque B1 V2.1 -- SIEMPRE se computa la ruta una vez que la raíz
+    # Atlas existe (mismo criterio que `main.js`: la raíz resuelta basta,
+    # nunca se exige que el archivo ya exista) -- si el archivo aún no
+    # existe, `responder_consulta_atlas` ya lo trata como "cero real",
+    # nunca como "fuente no indicada".
+    return RAIZ_DRIVE / "catalogos_privados" / "incidencias_documentales.json"
 
 
 RUTA_INCIDENCIAS_REAL = _ruta_incidencias_real()

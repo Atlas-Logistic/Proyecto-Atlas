@@ -54,6 +54,15 @@ ESTADO_AMBIGUA = "AMBIGUA"
 ESTADO_SIN_RESULTADOS = "SIN_RESULTADOS"
 ESTADO_NO_INTERPRETABLE = "NO_INTERPRETABLE"
 ESTADO_CONSULTA_INVALIDA = "CONSULTA_INVALIDA"
+# Bloque B1 V2.1 (regresión "3 -> 0 incidencias sin cambio real de
+# datos") -- distingue "la fuente de incidencias nunca se indicó" (el
+# llamador -- Desktop -- no pasó `ruta_incidencias`, casi siempre una
+# raíz Atlas sin resolver o un proceso Desktop desactualizado) de
+# "el repositorio real está vacío" (`ruta_incidencias` sí se indicó,
+# el archivo simplemente no existe todavía -- eso SÍ es cero real,
+# mismo criterio que ya usa `src/incidencias_documentales.js`).
+# Nunca responder "0" con la misma confianza en ambos casos.
+ESTADO_FUENTE_NO_DISPONIBLE = "FUENTE_NO_DISPONIBLE"
 
 
 @dataclass(frozen=True)
@@ -287,6 +296,20 @@ def responder_consulta_atlas(
         return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
 
     if consulta.dominio == DOMINIO_INCIDENCIAS_DOCUMENTALES:
+        if ruta_incidencias is None:
+            # Bloque B1 V2.1 -- nunca afirmar "0 incidencias" con la
+            # misma confianza que un repositorio real y vacío: el
+            # llamador ni siquiera indicó dónde está el repositorio
+            # (Desktop sin raíz Atlas resuelta, o un proceso
+            # desactualizado que todavía no pasa `--incidencias`).
+            _registro.debug("Dominio INCIDENCIAS_DOCUMENTALES sin ruta_incidencias -- fuente no disponible")
+            return RespuestaConsultaAtlas(
+                estado=ESTADO_FUENTE_NO_DISPONIBLE,
+                texto_respuesta=(
+                    "No pude verificar las incidencias documentales -- no se indicó dónde está el "
+                    "repositorio en este entorno. Esto no significa que no existan."
+                ),
+            )
         incidencias = _cargar_incidencias(ruta_incidencias)
         resultado = ejecutar_consulta_incidencias_documentales(consulta, incidencias)
     else:

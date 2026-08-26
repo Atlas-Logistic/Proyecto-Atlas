@@ -12,6 +12,7 @@ from atlas_core.proveedor_interpretacion_consultas import (
 )
 from atlas_core.responder_consulta_atlas import (
     ESTADO_AMBIGUA,
+    ESTADO_FUENTE_NO_DISPONIBLE,
     ESTADO_NO_INTERPRETABLE,
     ESTADO_OK,
     ESTADO_SIN_RESULTADOS,
@@ -257,8 +258,29 @@ def test_cuantas_incidencias_documentales_hay_lee_repositorio_canonico(tmp_path)
     assert "22" not in r.texto_respuesta
 
 
-def test_incidencias_sin_archivo_responde_cero_no_error(tmp_path):
+def test_incidencias_con_archivo_ausente_es_cero_real(tmp_path):
+    """`ruta_incidencias` SÍ se indicó (raíz Atlas resuelta), pero el
+    archivo todavía no existe -- eso es cero real (mismo criterio que
+    `src/incidencias_documentales.js`: "archivo ausente no es error")."""
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila()])
+    ruta_incidencias_inexistente = tmp_path / "no_existe" / "incidencias_documentales.json"
+    r = responder_consulta_atlas(
+        "¿Cuántas incidencias documentales hay?", ruta_viajes=ruta_viajes, ruta_incidencias=ruta_incidencias_inexistente,
+    )
+    assert r.estado == ESTADO_SIN_RESULTADOS
+    assert r.resultado.resultado == 0
+
+
+# --- Bloque B1 V2.1 (regresión "3 -> 0 sin cambio real de datos") --
+# nunca afirmar "0 incidencias" con la misma confianza cuando la fuente
+# ni siquiera se indicó (Desktop sin raíz resuelta o desactualizado) ---
+
+def test_incidencias_sin_ruta_indicada_nunca_afirma_cero_con_confianza(tmp_path):
     ruta_viajes = tmp_path / "viajes.csv"
     _escribir_viajes(ruta_viajes, [_fila()])
     r = responder_consulta_atlas("¿Cuántas incidencias documentales hay?", ruta_viajes=ruta_viajes, ruta_incidencias=None)
-    assert r.resultado.resultado == 0
+    assert r.estado == ESTADO_FUENTE_NO_DISPONIBLE
+    assert r.resultado is None
+    assert "0" not in r.texto_respuesta
+    assert "no significa que no existan" in r.texto_respuesta
