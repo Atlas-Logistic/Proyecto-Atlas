@@ -4,6 +4,58 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-27 — CIERRE DE JORNADA OFICINA: primera prueba Mobile real (foto → Motor → Desktop) + hallazgos, sin corregir nada todavía
+
+**Estado de partida de este bloque:** Pregúntale a Atlas Universal V1.1 ya cerrado (Motor `e1a30ba`, Desktop `bc68fa9`, ambos publicados y `0/0`). Este bloque agrega la primera prueba end-to-end real de Mobile (foto real desde iPhone en planta → OCR → Motor → Desktop) y documenta lo encontrado -- **nada de lo listado abajo se corrigió hoy**, queda para mañana.
+
+### 1 -- Prueba Mobile real (documentada, no repetir desde cero)
+
+`envio_id` `36e7aa53-214e-48b0-a96c-14989b60e9aa` -- guía `472593`, transporte `0000355419`, chofer OCR `LEANDRO TOLEDO`, RUT `18.611.137-0`, cliente `PRODALAM SA`, patente tracto `BKYK63`, peso `12.434 kg`, tipo carga `BARRAS`. Foto real (iPhone, en planta) → Mobile aceptó la subida con HTTP 202 → Desktop mostró la guía en "Guías móviles". Tiempos reales (CPU, sin GPU en este PC): OCR `40,7181 s`, resolución/corroboración `35,9177 s`, routing `3,1097 s`, **total documento `79,9102 s`** -- primera cifra real de latencia de punta a punta con hardware de oficina, útil como referencia para cualquier conversación de UX/expectativa de espera.
+
+### 2 -- BUG REAL, prioridad alta para mañana: planta de origen
+
+Mobile informó `planta_origen_informada = AZA_COLINA`; Atlas terminó publicando `planta_origen_nombre = AZA RENCA`, `origen_determinado_por = DOCUMENTO`, `evidencia_origen = ENCABEZADO_GUIA`. **Es incorrecto** -- hecho operacional confirmado por Javier: todas las guías pueden mostrar RENCA en el encabezado porque es la casa matriz societaria; ese encabezado NO indica desde qué planta salió físicamente el material. Regla a investigar/implementar mañana: la planta de origen real es un dato OPERACIONAL (Mobile puede informar COLINA/RENCA, GPS puede corroborar) -- el encabezado societario fijo del documento nunca debe sobrescribir un origen operacional ya informado. No hardcodear AZA/MBT en el Core universal al resolver esto.
+
+### 3 -- Bug/UX Mobile: "1 envío pendiente de subir" no se limpia
+
+El teléfono siguió mostrando "1 envío pendiente de subir" después de que el backend ya recibió el POST, respondió 202, persistió el envío, terminó el procesamiento y la guía ya apareció en Desktop. Investigar mañana: cola IndexedDB que no se limpia, UI que no refresca, falta de ACK local, u otra causa. No se tocó hoy.
+
+### 4 -- Desktop: estado aparentemente contradictorio en Guías móviles
+
+La tarjeta de la guía 472593 muestra "Transporte asociado 0000355419" **y**, al mismo tiempo, "Sin coincidencia inequívoca en la operación vigente", con el resumen superior marcando "0 Asociados / 1 Requiere revisión". Investigar mañana si "Transporte asociado" en realidad significa "transporte leído por OCR" (etiqueta engañosa) o si hay una inconsistencia real de estado entre esos dos indicadores. No se modificó hoy.
+
+### 5 -- Requisito funcional pendiente: Mobile multiguía
+
+Registrado como requisito, sin diseñar todavía: Mobile debe permitir tomar VARIAS fotos para un mismo viaje/envío, porque un viaje real puede tener varias guías -- nunca asumir `1 envío = 1 foto = 1 guía = 1 viaje`. A diseñar después: captura de varias fotos, mismo contexto de viaje, reintentos, asociación, UX clara, procesamiento individual por guía con agrupación por viaje cuando corresponda.
+
+### 6 -- B1/IA en la oficina: sin proveedor configurado
+
+Durante la prueba real, `resultado_atlas_ia` fue `SIN_PROVEEDOR_IA_CONFIGURADO` -- B1 no intervino en la resolución de obra/destino. Pendiente: configurar un proveedor/credencial de IA en este PC de oficina de forma segura y portable (mismo mecanismo ya usado para otras credenciales -- variable de entorno de usuario de Windows, nunca en git, nunca hardcodeada). No configurado hoy.
+
+### 7 -- GPS en la oficina: sin configurar
+
+Desktop GPS local todavía no tiene, en este PC, el endpoint ni la API key configurados. Debe recuperarse/configurarse de forma segura cuando corresponda, sin versionar secretos. No configurado hoy.
+
+### 8 -- Pregúntale a Atlas V1.1: CERRADO, validado manualmente
+
+Validación manual real completada sobre el cierre de este mismo día (Motor `e1a30ba`/Desktop `bc68fa9`, ver bitácora técnica para el detalle de la implementación): `JD8659`/`JE8659` ya no degradan a universo completo; "¿cuántas patentes...?" → 16 patentes (dimensión correcta); "¿cuántas barras...?" ya no inventa una conversión a toneladas; km de Villagra con soporte redondeado; incidencias con soporte humano agrupado; botón "Ver soporte" genérico correcto; vaciar la pregunta limpia respuesta y soporte. Motor y Desktop estaban publicados y `0/0` antes de iniciar la prueba Mobile de este bloque.
+
+### 9 -- Estado Git al cierre (verificado, los tres repos)
+
+| Repo | Ruta | Rama | HEAD | ahead/behind | working tree |
+|---|---|---|---|---|---|
+| Motor | `Proyecto-Atlas-lector-mvp-oficina` | `lector-mvp-guia-nueva` | `e1a30bab04fa25420ed86248ef25a84e734f10d4` | 0/0 | limpio |
+| Desktop | `Atlas-Viajes-Desktop` | `fix-desktop-data-root-drag-drop` | `bc68fa909e83caf8267c99487165fea2d1830f26` | 0/0 | limpio |
+| Mobile | `Atlas-Conductores-Mobile` | `fix-mobile-login-ux` | `03c33e65b7e30bb0cd0d9da7d6464f39467c5b0a` | 0/0 | limpio |
+
+Los tres repos ya estaban publicados y sincronizados al empezar este cierre -- este bloque sólo agrega la actualización de este mismo handoff (Motor). Commit documental de cierre después de este bloque; sin código nuevo mezclado.
+
+### Próximo bloque recomendado (no ejecutar hoy)
+
+En orden de impacto operacional, a elección de Javier: (1) planta de origen -- COLINA/RENCA (bug real, prioridad alta); (2) cola Mobile que no se limpia (UX, confunde al chofer); (3) estado contradictorio en Guías móviles (aclarar etiqueta o corregir inconsistencia); (4) diseño de Mobile multiguía; (5) configurar GPS/B1 de oficina cuando haya credenciales disponibles. **No mezclar estos frentes en un solo bloque.**
+
+---
+
 ## 2026-08-20 — CIERRE OFICINA → CASA: G1 cerrado, Atlas IA A1/A2 publicados hasta el borde de la primera llamada real
 
 **Motor:** rama `lector-mvp-guia-nueva`, HEAD `572eba8ffe42631f037d17135576e0c2fd64209f`, publicado en `origin` (verificar `local=remoto`, `0/0`, limpio al retomar).

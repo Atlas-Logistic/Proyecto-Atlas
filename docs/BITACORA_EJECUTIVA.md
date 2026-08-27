@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-27 — CIERRE DE JORNADA: primera prueba Mobile real de punta a punta, hallazgos documentados sin corregir
+
+- **Primera prueba real de Mobile completa, de punta a punta:** una foto real tomada en planta desde un iPhone llegó, se procesó (guía 472593, ~80 segundos totales en el hardware de oficina, sin GPU) y apareció correctamente en Desktop -- confirma que el circuito Mobile → Motor → Desktop funciona con datos reales, no sólo en pruebas sintéticas.
+- **Encontrado un bug real de prioridad alta, sin corregir todavía:** Atlas usó la planta que aparece impresa en el encabezado de la guía (RENCA, la casa matriz societaria) en vez de la planta que Mobile realmente informó (COLINA) -- Javier confirmó que el encabezado nunca indica desde dónde salió físicamente el material. Queda como el primer frente recomendado para mañana.
+- **Otros tres hallazgos de UX/estado, también sin tocar hoy:** el aviso de "envío pendiente" en el teléfono no se limpia después de una subida ya exitosa; la tarjeta de la guía en Desktop muestra a la vez "transporte asociado" y "sin coincidencia" (aclarar si es sólo una etiqueta confusa o un estado real inconsistente); y se registró como requisito futuro que Mobile permita varias fotos para un mismo viaje (hoy asume una foto = una guía = un viaje).
+- **Dos configuraciones de oficina siguen pendientes, sin credenciales todavía:** el proveedor de IA (B1) y el GPS local -- ninguno se configuró hoy, ninguno se resolverá hasta tener una credencial de forma segura.
+- **Pregúntale a Atlas Universal V1.1 (bloque anterior del mismo día) quedó cerrado y validado manualmente** antes de esta prueba Mobile -- los 7 casos reales reportados como bug ya responden correctamente.
+- **Los tres repositorios (Motor, Desktop, Mobile) terminan la jornada publicados y sincronizados**, sin código nuevo -- este cierre es únicamente documentación.
+
+---
+
 ## 2026-08-26 — ATLAS/B1 UNIVERSAL V1: MOTOR RELACIONAL UNIVERSAL
 
 - **Problema de fondo:** Consultas Atlas venía creciendo por capacidad específica (patentes, choferes, incidencias, viajes...) -- no escala, y ata el Core a MBT/AZA. Se rediseña como plataforma UNIVERSAL: entidad + relación + evento + métrica + período + filtros, sin romper V2.
