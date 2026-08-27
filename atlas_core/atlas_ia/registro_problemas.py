@@ -242,9 +242,45 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
     # Los 4 motivos documentales ya existentes desde antes de este bloque
     # -- comportamiento idéntico, ahora expresado como datos, no como un
     # diccionario fijo dentro del dispatcher.
+    # Bloque VERIFICACIÓN EXTERNA B1 V1 -- `VERIFICACION_EXTERNA`
+    # (búsqueda web real, `atlas_core.atlas_ia.herramientas.
+    # herramienta_verificacion_externa`) ya estaba implementada,
+    # credenciada (OPENROUTER_API_KEY) y registrada en el diccionario de
+    # herramientas del orquestador (`_herramientas_b1_disponibles`), pero
+    # NINGÚN `TipoProblemaIA` la listaba en `herramientas` -- el
+    # orquestador exige `nombre in contexto.herramientas_disponibles`
+    # antes de dejar usar una herramienta aunque exista (ver
+    # `orquestador.py`), así que B1 nunca podía pedirla para
+    # OBRA_DESTINO_SIN_CORROBORAR (caso real: guía 472593). Conectada
+    # aquí -- sólo para este dominio, el mínimo necesario -- nunca puede
+    # producir autonomía A por sí sola: la evidencia que aporta siempre
+    # queda en nivel "EXTERNO_WEB" (ver herramientas.py), y
+    # `_clasificar_propuesta` sólo otorga clasificación A a
+    # "CONFIRMACION_HUMANA"/"EXTERNO_OFICIAL" -- una fuente web real
+    # sigue siendo, como máximo, asistencia (B), nunca escritura directa.
+    #
+    # "DOCUMENTOS_RELACIONADOS" se retira de `herramientas` (aunque el
+    # recolector de evidencia sigue corriendo igual, SIEMPRE, antes de
+    # llamar a B1 -- ver `recopilar_evidencia` más abajo): nunca fue una
+    # herramienta invocable de verdad -- `_herramientas_b1_disponibles`
+    # jamás la registró en el diccionario que usa el orquestador (sólo
+    # "VERIFICACION_EXTERNA" existe ahí). Listarla como "disponible"
+    # dejaba a B1 con una opción prometida por el prompt (ver
+    # `politica_prompt.py`, punto 13) pero inexistente en la práctica --
+    # si el modelo la pedía, `orquestador.py` cortaba la ronda de
+    # inmediato (`herramienta is None`) SIN darle nunca la oportunidad de
+    # intentar "VERIFICACION_EXTERNA" en su lugar (confirmado con la
+    # llamada real sobre 472593 antes de este ajuste: B1 pidió
+    # DOCUMENTOS_RELACIONADOS -- ya disponible como evidencia, no como
+    # herramienta -- y el orquestador se detuvo ahí mismo). La evidencia
+    # de documentos relacionados sigue llegando exactamente igual que
+    # siempre, ya reunida en `contexto.evidencias` antes de la primera
+    # llamada -- lo único que cambia es que el prompt ya no ofrece pedir
+    # de nuevo algo que nunca se pudo volver a pedir.
     TipoProblemaIA(
         codigos=frozenset({"OBRA_DESTINO_SIN_CORROBORAR"}), fuente="MOTIVO_DOCUMENTAL",
-        campo="obra_destino", dominio="OBRA_DESTINO", herramientas=("DOCUMENTOS_RELACIONADOS",),
+        campo="obra_destino", dominio="OBRA_DESTINO",
+        herramientas=("VERIFICACION_EXTERNA",),
         aplicable_automaticamente=True,
         recopilar_evidencia=recopilar_evidencia_documentos_relacionados("obra_destino"),
         aplicar=aplicar_valor_documental_directo("obra_destino"),

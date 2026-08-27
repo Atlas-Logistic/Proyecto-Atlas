@@ -118,13 +118,21 @@ def herramienta_verificacion_externa(buscador) -> HerramientaEvidencia:
             if not respuesta.respuesta_texto.strip():
                 continue
             identificador = "externo:" + hashlib.sha256(consulta.encode("utf-8")).hexdigest()[:16]
+            # Bloque VERIFICACIÓN EXTERNA B1 V1 (Sección 5 -- trazabilidad):
+            # `EvidenciaIA` no tiene un campo `fecha` propio (contrato
+            # compartido por todas las fuentes, no sólo externas -- no se
+            # amplía sólo para esta), pero la fecha/hora REAL de la
+            # consulta (`respuesta.fecha`, nunca la de la caché) sigue
+            # siendo obligatoria de conservar -- se agrega como una
+            # referencia más, mismo lugar donde ya viven las citas/URLs.
+            referencias = tuple(f"{c.titulo} <{c.url}>" for c in respuesta.citas if c.url) or (respuesta.consulta,)
             evidencias.append(EvidenciaIA(
                 identificador=identificador, campo=contexto.campo,
                 valor=respuesta.respuesta_texto.strip()[:600],
                 tipo_fuente="EXTERNO", nivel="EXTERNO_WEB",
                 independencia=len(respuesta.citas),
                 procedencia="atlas_ia.herramientas.verificacion_externa",
-                referencias_fuente=tuple(f"{c.titulo} <{c.url}>" for c in respuesta.citas if c.url) or (respuesta.consulta,),
+                referencias_fuente=(*referencias, f"consultado_en={respuesta.fecha}"),
             ))
         return tuple(evidencias)
 
