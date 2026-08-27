@@ -110,8 +110,26 @@ def recopilar_evidencia_documentos_relacionados(
         fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
     ) -> tuple[EvidenciaIA, ...]:
         evidencias: list[EvidenciaIA] = []
+        # Bloque B1 OPERACIONAL V1 -- caso real guía 472593: al REVALIDAR/
+        # REPROCESAR un documento ya persistido (mismo mecanismo que
+        # `atlas_core.mobile.procesar_envio_mobile` reutiliza para
+        # correcciones focales), la propia fila anterior de ESTE
+        # documento ya vive en `filas` (el historial que arma
+        # `escalar_resultado_ia_en_memoria`) -- como un dict RECONSTRUIDO
+        # a partir del CSV, nunca el mismo objeto que `fila` (`is` nunca
+        # lo detecta). Comparte exactamente las mismas señales consigo
+        # mismo, así que sin este chequeo terminaba contando como
+        # "documento histórico independiente" la lectura anterior del
+        # PROPIO documento -- evidencia circular, nunca corroboración
+        # real. Se excluye también por `numero_guia` cuando está
+        # presente (misma guía = mismo documento físico, mismo criterio
+        # que ya usa `documento_ya_existe` en
+        # `atlas_core.mobile.asociar_documento`).
+        guia_actual = str(fila.get("numero_guia", "")).strip()
         for otra in filas:
             if otra is fila or otra.get(campo) in {"", "No encontrado"}:
+                continue
+            if guia_actual and str(otra.get("numero_guia", "")).strip() == guia_actual:
                 continue
             señales = sum((
                 otra.get("fecha") == fila.get("fecha"),
