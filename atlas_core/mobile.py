@@ -18,6 +18,7 @@ from typing import Callable, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.decisiones_pendientes import generar_artefacto
+from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.procesamiento_masivo import (
     COLUMNAS, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
 )
@@ -196,6 +197,28 @@ class RepositorioEnviosMobile:
 
 
 def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) -> dict[str, object]:
+    """Distingue tres conceptos que ANTES de Asociación Mobile V2 se
+    confundían bajo un solo resultado/etiqueta (caso real 472593, guía y
+    transporte OCR limpios que terminaban en SIN_ASOCIACION):
+
+    1. Transporte LEÍDO por OCR (`datos.get("numero_transporte")`, dato
+       crudo -- puede no existir/ser dudoso).
+    2. Transporte que EXISTE en la operación vigente (hay OTRA fila en
+       `filas` -- otro documento, de este mismo envío o de cualquier
+       otro -- con el mismo transporte o la misma guía).
+    3. Documento ASOCIADO inequívocamente (`ASOCIADO_AUTOMATICAMENTE`,
+       lo único que Desktop debe rotular "Transporte asociado").
+
+    Sección 13.2 del bloque, explícita: transporte leído + NINGUNA
+    coincidencia todavía en la operación vigente → nunca inventar una
+    asociación sólo porque el texto se lea limpio (eso sería "mismo
+    texto → asociación ciega", prohibido en Sección 3). Ser el PRIMER
+    documento conocido de un transporte es un estado legítimo, no un
+    error -- se resuelve solo, sin intervención humana, en cuanto
+    aparece un segundo documento con el mismo transporte (Multiguía,
+    Sección 4) vía `revalidar_asociacion_mobile_sin_ocr` (Sección 7),
+    nunca reescribiendo esta función para adivinar antes de tiempo.
+    """
     guia = str(datos.get("numero_guia", "")).strip()
     transporte = str(datos.get("numero_transporte", "")).strip()
     # Bloque GUÍAS MÓVILES V1 (Sección 9): si ya existe una fila con el
@@ -210,13 +233,38 @@ def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) 
         candidatas = [f for f in filas if f.get("numero_transporte") == transporte]
     transportes = sorted({f.get("numero_transporte", "") for f in candidatas if f.get("numero_transporte")})
     documento_ya_existe = bool(candidatas_por_guia)
+
     if len(transportes) == 1:
         return {"estado": "ASOCIADO_AUTOMATICAMENTE", "numero_transporte": transportes[0], "numero_guia": guia, "candidatos": transportes, "motivo": "Coincidencia exacta determinista de guía/transporte.", "documento_ya_existe": documento_ya_existe}
+    if len(transportes) > 1:
+        return {
+            "estado": "PROPUESTA_REQUIERE_REVISION", "numero_transporte": "", "numero_guia": guia,
+            "candidatos": transportes, "motivo": "Múltiples transportes compatibles.",
+            "documento_ya_existe": documento_ya_existe,
+        }
+
+    # Bloque ASOCIACIÓN MOBILE V2 -- el motivo anterior ("Sin coincidencia
+    # INEQUÍVOCA en la operación vigente") mezclaba dos situaciones muy
+    # distintas bajo el mismo texto: cero coincidencias (este bloque) y
+    # varias coincidencias contradictorias (el `if len(transportes) > 1`
+    # de arriba) -- literalmente decía lo contrario de lo que pasaba (no
+    # hubo NINGUNA coincidencia, ni ambigua ni clara). `transporte_valido`
+    # es el MISMO criterio (sólo dígitos, presente) que ya usa
+    # `gestor_viajes.agrupar_viajes` para decidir si un transporte es
+    # agrupable -- se reutiliza para distinguir, dentro de SIN_ASOCIACION,
+    # bucket A (TRANSPORTE_NO_LEIDO) de bucket B (TRANSPORTE_LEIDO_SIN_
+    # COINCIDENCIA, Sección 2) -- nunca se inventa un estado nuevo
+    # (Sección 2: "no crear estados nuevos si los actuales ya
+    # representan correctamente estas situaciones").
+    if transporte_valido(transporte):
+        motivo = "Transporte leído, pero todavía sin ninguna otra coincidencia en la operación vigente."
+    elif transporte:
+        motivo = "El número de transporte leído no tiene un formato confiable para asociar."
+    else:
+        motivo = "El documento no informa número de transporte."
     return {
-        "estado": "PROPUESTA_REQUIERE_REVISION" if transportes else "SIN_ASOCIACION",
-        "numero_transporte": "", "numero_guia": guia, "candidatos": transportes,
-        "motivo": "Múltiples transportes compatibles." if transportes else "Sin coincidencia inequívoca en la operación vigente.",
-        "documento_ya_existe": documento_ya_existe,
+        "estado": "SIN_ASOCIACION", "numero_transporte": "", "numero_guia": guia, "candidatos": [],
+        "motivo": motivo, "documento_ya_existe": documento_ya_existe,
     }
 
 
@@ -230,6 +278,25 @@ def _captura_ilegible(datos: Mapping[str, object]) -> bool:
     guia = str(datos.get("numero_guia", "")).strip()
     transporte = str(datos.get("numero_transporte", "")).strip()
     return guia in ("", "No encontrado") and transporte in ("", "No encontrado")
+
+
+def _estado_final_mobile(datos: Mapping[str, object], asociacion: Mapping[str, object], captura_ilegible: bool) -> str:
+    """Deriva el `estado` final del envío a partir de la asociación y de
+    las mismas señales documentales que ya respeta Desktop. Extraída de
+    `procesar_envio_mobile` (Asociación Mobile V2) para que
+    `revalidar_asociacion_mobile_sin_ocr` pueda recalcular el estado tras
+    una reevaluación sin duplicar esta decisión en dos lugares."""
+    if captura_ilegible:
+        return "REQUIERE_REVISION"
+    if asociacion["estado"] == "PROPUESTA_REQUIERE_REVISION":
+        return "REQUIERE_REVISION"
+    if str(datos.get("indicador_revision", "")).strip().casefold() == "revisar":
+        # Sección 7/11: el propio Core ya marcó esta guía para revisión
+        # (regla existente, p. ej. chofer sin corroborar o dato
+        # documental incoherente) -- Mobile no inventa una regla
+        # especial, sólo respeta la señal que Desktop también respeta.
+        return "REQUIERE_REVISION"
+    return "ASOCIADO"
 
 
 def procesar_envio_mobile(
@@ -330,18 +397,7 @@ def procesar_envio_mobile(
                 decisiones=previas + decisiones_nuevas,
             )
 
-        if captura_ilegible:
-            estado_final = "REQUIERE_REVISION"
-        elif asociacion["estado"] == "PROPUESTA_REQUIERE_REVISION":
-            estado_final = "REQUIERE_REVISION"
-        elif str(datos.get("indicador_revision", "")).strip().casefold() == "revisar":
-            # Sección 7/11: el propio Core ya marcó esta guía para
-            # revisión (regla existente, p. ej. chofer sin corroborar o
-            # dato documental incoherente) -- Mobile no inventa una regla
-            # especial, sólo respeta la señal que Desktop también respeta.
-            estado_final = "REQUIERE_REVISION"
-        else:
-            estado_final = "ASOCIADO"
+        estado_final = _estado_final_mobile(datos, asociacion, captura_ilegible)
 
         registro.update({
             "estado": estado_final,
@@ -355,3 +411,66 @@ def procesar_envio_mobile(
         registro.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
     repositorio.guardar(envio_id, registro)
     return registro
+
+
+def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *, dataset: Path) -> dict[str, object]:
+    """Bloque ASOCIACIÓN MOBILE V2, Sección 7 -- reevaluación: relee la
+    operación vigente (`dataset`, ya persistida) y vuelve a intentar
+    `asociar_documento` para los envíos que quedaron SIN_ASOCIACION o
+    PROPUESTA_REQUIERE_REVISION, usando el `datos_ocr` YA GUARDADO -- sin
+    volver a correr OCR, sin recrear el envío, sin escribir una fila nueva
+    en el dataset (la fila de un documento válido ya se escribió, si
+    correspondía, la primera vez que se procesó -- ver `procesar_envio_
+    mobile`). Mismo patrón que `revalidar_*_sin_ocr` de
+    `atlas_core.revalidacion_documental`: sólo actualiza lo que
+    corresponde a SU propio motivo (aquí, la asociación), nunca toca
+    `datos_ocr` ni otros campos.
+
+    Pensado para la evidencia nueva que aparece con el tiempo: otro
+    documento del mismo transporte llega más tarde, o un supervisor
+    corrige en Desktop la fila que generaba la ambigüedad -- en ambos
+    casos el envío mobile original quedó con una `resultado_asociacion`
+    desactualizada hasta que algo vuelve a evaluarla.
+
+    Nunca DEGRADA un envío ya `ASOCIADO_AUTOMATICAMENTE` (conservador:
+    una asociación ya resuelta no se revisita) ni uno con
+    `problema_captura` (sin más OCR no hay nada nuevo que evaluar -- ver
+    `_captura_ilegible`). Devuelve un resumen, mismo criterio que el
+    resto de `revalidar_*_sin_ocr`."""
+    filas: list[dict[str, str]] = []
+    if dataset and dataset.is_file():
+        with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+            filas = list(csv.DictReader(archivo, delimiter=";"))
+
+    revisados = 0
+    actualizados: list[str] = []
+    for registro in repositorio.historial():
+        asociacion_previa = registro.get("resultado_asociacion") or {}
+        if asociacion_previa.get("estado") not in ("SIN_ASOCIACION", "PROPUESTA_REQUIERE_REVISION"):
+            continue  # nada que reevaluar: sin procesar todavía, ya asociado, o en error.
+        if registro.get("problema_captura"):
+            continue  # sin OCR no hay evidencia nueva que pueda cambiar esto.
+        datos = registro.get("datos_ocr") or {}
+        if not datos:
+            continue
+        revisados += 1
+        # A diferencia de `procesar_envio_mobile` (que evalúa ANTES de
+        # escribir su propia fila), acá `filas` ya incluye la fila que
+        # este MISMO documento escribió la primera vez que se procesó --
+        # sin excluirla, un documento se "auto-matchearía" por su propia
+        # guía y quedaría ASOCIADO_AUTOMATICAMENTE sin ninguna evidencia
+        # real nueva (justo lo que Sección 13.2 prohíbe). Se excluye por
+        # `archivo`, el mismo identificador que ya usa `procesar_envio_
+        # mobile` para saber si una fila es "de este documento".
+        identificador_propio = f"mobile/{registro['envio_id']}/{registro.get('foto_original', '')}"
+        filas_sin_propia = [f for f in filas if f.get("archivo") != identificador_propio]
+        asociacion_nueva = asociar_documento(datos, filas_sin_propia)
+        if asociacion_nueva == asociacion_previa:
+            continue
+        estado_nuevo = _estado_final_mobile(datos, asociacion_nueva, False)
+        registro["resultado_asociacion"] = asociacion_nueva
+        registro["estado"] = estado_nuevo
+        repositorio.guardar(registro["envio_id"], registro)
+        actualizados.append(registro["envio_id"])
+
+    return {"revisados": revisados, "actualizados": actualizados}

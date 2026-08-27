@@ -16,7 +16,10 @@ from urllib.parse import urlparse
 
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
-from atlas_core.mobile import AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_envio_mobile
+from atlas_core.mobile import (
+    AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
+    procesar_envio_mobile, revalidar_asociacion_mobile_sin_ocr,
+)
 
 
 MAX_PAYLOAD_BYTES = 30 * 1024 * 1024  # ver atlas_core.mobile.MAX_IMAGEN_BYTES -- mismo motivo/margen.
@@ -61,6 +64,21 @@ def _multipart(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], bytes, 
 def _log_envio_debug(mensaje: str) -> None:
     ahora = datetime.now(timezone.utc).isoformat()
     print(f"[{ahora}] [mobile-envio-debug] {mensaje}")
+
+
+# Bloque ASOCIACIÓN MOBILE V2 (Sección 4 -- Multiguía; Sección 7 --
+# reevaluación): procesa el envío nuevo y, en el MISMO worker (el
+# ejecutor sigue siendo de 1 hilo -- nunca se agrega concurrencia/cola
+# nueva), reintenta la asociación de cualquier otro envío que hubiera
+# quedado SIN_ASOCIACION/PROPUESTA_REQUIERE_REVISION. Es el mecanismo
+# real por el que, en una tanda con Doc A y Doc B del mismo transporte,
+# Doc A (que se procesó primero, sin nada todavía con qué asociarse)
+# termina asociado igual que Doc B apenas éste se persiste -- sin volver
+# a correr OCR, sin recrear ningún envío.
+def _procesar_y_revalidar(repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path, carpeta_catalogos) -> None:
+    procesar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+    if dataset:
+        revalidar_asociacion_mobile_sin_ocr(repositorio, dataset=dataset)
 
 
 def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: AutenticadorMobile, procesar: bool = True, origen_permitido: str = "*") -> ThreadingHTTPServer:
@@ -147,7 +165,7 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                 )
                 if nuevo and procesar:
                     ejecutor.submit(
-                        procesar_envio_mobile, repositorio, registro["envio_id"],
+                        _procesar_y_revalidar, repositorio, registro["envio_id"],
                         dataset=dataset, carpeta_catalogos=carpeta_catalogos,
                     )
                 _log_envio_debug(f"envio_id={registro['envio_id']!r} ACEPTADO (nuevo={nuevo}, estado={registro['estado']!r})")

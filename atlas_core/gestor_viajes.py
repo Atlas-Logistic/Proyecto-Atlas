@@ -33,7 +33,12 @@ def _clave_normalizada(valor: object) -> str:
     return "".join(c for c in sin_acentos if not unicodedata.combining(c))
 
 
-def _transporte_valido(valor: object) -> bool:
+def transporte_valido(valor: object) -> bool:
+    """Único criterio de "número de transporte utilizable" en todo Atlas:
+    presente y puramente numérico. Pública (sin `_`) porque Asociación
+    Mobile V2 la reutiliza (`atlas_core.mobile.asociar_documento`) para
+    decidir cuándo un transporte leído por OCR es evidencia suficiente
+    para asociación automática -- nunca se duplica este criterio."""
     texto = str(valor or "").strip()
     return _valor_presente(texto) and _PATRON_TRANSPORTE.fullmatch(texto) is not None
 
@@ -687,7 +692,7 @@ def agrupar_viajes(
 
     for fila in _deduplicar_filas(filas):
         transporte = str(fila.get("numero_transporte", "")).strip()
-        if not _transporte_valido(transporte):
+        if not transporte_valido(transporte):
             sin_transporte.append(dict(fila))
             continue
         grupos.setdefault(_clave_normalizada(transporte), []).append(fila)
