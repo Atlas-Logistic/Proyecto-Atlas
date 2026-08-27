@@ -274,6 +274,20 @@ COLUMNAS = [
     # `servicio_telemetria` conectado, quedan vacías y el CSV es idéntico
     # al de antes de este bloque.
     *CAMPOS_TELEMETRIA_DOCUMENTO,
+    # Bloque RUT CLIENTE V1: el RUT del cliente/destinatario YA se
+    # extraía, validaba y usaba internamente para corroboración (ver
+    # `datos["RUT del cliente"]`, `_extraer_rut_cliente_geometrico`,
+    # `MotivoRevisionDocumento.RUT_CLIENTE_INVALIDO`), pero nunca se
+    # exponía como su propia columna estructurada -- se perdía antes de
+    # persistir (caso real guía 472593/PRODALAM SA). Mismo criterio que
+    # `rut_chofer`: el valor final (RUT canónico validado, o "No
+    # encontrado"); estado de validación/corroboración y método de
+    # recuperación ya viajan en `motivos_revision_documento`/
+    # `metodos_recuperacion_documento` -- no se duplica esa
+    # información en una columna aparte. Agregada al final --
+    # backward-compatible, un dataset existente sin esta columna sigue
+    # leyéndose igual (csv.DictReader por nombre de columna).
+    "rut_cliente",
 ]
 
 _COLUMNAS_R4_NUEVAS = {
@@ -759,6 +773,18 @@ class MotivoRevisionDocumento(str, Enum):
     # guía.
     RUT_CHOFER_INVALIDO = "RUT_CHOFER_INVALIDO"
     RUT_CLIENTE_INVALIDO = "RUT_CLIENTE_INVALIDO"
+    # Bloque RUT CLIENTE V1 -- distinto de RUT_CLIENTE_INVALIDO: acá el RUT
+    # documental SÍ es estructuralmente válido (dígito verificador
+    # correcto) y SÍ existe en `empresas.json`, pero identifica una
+    # empresa DISTINTA de la que dice el nombre impreso en la guía (Sección
+    # 5 del bloque: "nombre coincide pero RUT válido contradice al
+    # catálogo -> conflicto real"). A diferencia de RUT_CHOFER_INVALIDO/
+    # RUT_CLIENTE_INVALIDO (identidad ya establecida por nombre, sólo el
+    # RUT está mal -> Incidencia Documental automática), acá no hay forma
+    # segura de saber cuál de los dos datos documentales es el correcto --
+    # requiere revisión humana, nunca se resuelve solo. BLOQUEANTE (no
+    # está en MOTIVOS_NO_BLOQUEANTES).
+    RUT_CLIENTE_CONTRADICE_CATALOGO = "RUT_CLIENTE_CONTRADICE_CATALOGO"
 
 
 MOTIVOS_NO_BLOQUEANTES = frozenset({
@@ -1189,7 +1215,44 @@ def procesar_archivo(
                 # el ID se usa solamente para corroboraciÃ³n interna.
                 cliente_corroborado_n1 = True
             elif registro_empresa is not None:
-                cliente_corroborado_n1 = True
+                # Bloque RUT CLIENTE V1 (Sección 5) -- el RUT documental es
+                # válido y existe en el catálogo, pero eso NO corrobora la
+                # identidad por sí solo si el nombre ORIGINALMENTE impreso
+                # (`cliente_antes_catalogo` -- ANTES de que
+                # `enriquecer_datos_con_catalogos`, arriba, ya haya
+                # sustituido `datos["cliente"]` por el nombre del catálogo;
+                # comparar contra el valor YA sustituido sería comparar un
+                # texto contra sí mismo) es confiablemente OTRA empresa (RUT
+                # correcto de un tercero impreso por error, por ejemplo).
+                # Sólo se compara cuando la resolución difusa del nombre
+                # documental original es lo bastante segura como para
+                # nombrar una empresa CONCRETA Y DISTINTA (mismos estados
+                # "seguros" que ya usa el resto de esta función) -- un
+                # simple typo/variante OCR del mismo nombre (p. ej. "EDMA
+                # SA" por "EBEMA SA") resuelve al MISMO registro y sigue
+                # corroborando en silencio, exactamente como antes de este
+                # bloque (ver `test_cliente_corroborado_via_rut_propone_
+                # alias_sin_escribir_catalogo`); ante una lectura ambigua/no
+                # catalogada, se sigue confiando en el RUT (no hay una
+                # segunda lectura confiable con la que contradecirlo).
+                nombre_catalogo_por_rut = str(registro_empresa.get("nombre", "")).strip()
+                nombre_documental_original = str(cliente_antes_catalogo or "").strip()
+                decision_nombre_vs_rut = resolver_nombre_empresa_difuso(
+                    catalogo_empresas, nombre_documental_original
+                )
+                if (
+                    nombre_catalogo_por_rut
+                    and decision_nombre_vs_rut.estado in {"SIN_CAMBIO", "ALIAS", "COINCIDENCIA_SEGURA"}
+                    and decision_nombre_vs_rut.valor_resultado != nombre_catalogo_por_rut
+                ):
+                    _motivo(MotivoRevisionDocumento.RUT_CLIENTE_CONTRADICE_CATALOGO)
+                    logger.info(
+                        "RUT del cliente valido resuelve a una empresa distinta del nombre documental: "
+                        "rut=%s nombre_documental=%r nombre_catalogo=%r",
+                        rut_cliente_actual, nombre_documental_original, nombre_catalogo_por_rut,
+                    )
+                else:
+                    cliente_corroborado_n1 = True
             else:
                 decision_fuzzy_cliente = resolver_nombre_empresa_difuso(
                     catalogo_empresas, nombre_cliente_actual
@@ -2013,6 +2076,14 @@ def procesar_archivo(
         ),
         **resultado_entrega,
         **resultado_telemetria,
+        # Bloque RUT CLIENTE V1 -- mismo criterio que `rut_chofer`: valor
+        # final ya validado (dígito verificador correcto) o "No
+        # encontrado". El estado de validación/corroboración vive en
+        # `motivos_revision_documento` (RUT_CLIENTE_INVALIDO,
+        # CLIENTE_SIN_CORROBORAR, CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA) y
+        # el método de recuperación en `metodos_recuperacion_documento`
+        # -- no se duplica esa información acá.
+        "rut_cliente": str(datos.get("RUT del cliente", "No encontrado")),
     }
 
 

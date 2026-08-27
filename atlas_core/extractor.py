@@ -310,6 +310,74 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     return resultado
 
 
+def _normalizar_candidato_rut(texto: str) -> str:
+    """Limpieza compartida de un candidato de RUT antes de validar
+    dígito verificador -- extraída para reutilizarla también sobre
+    candidatos concatenados de varios bloques (ver
+    `_candidatos_rut_multibloque`)."""
+    candidato = re.sub(r"^[:\s]+", "", texto).strip()
+    # OCR real puede confundir uno de los puntos de miles por coma (p. ej.
+    # ``50.234,350-5``). Solo se corrige una coma estrictamente entre
+    # dígitos cuando introduce un grupo de tres cifras; el dígito
+    # verificador chileno sigue siendo el gate final y evita aceptar un
+    # número meramente plausible.
+    return re.sub(r"(?<=\d),(?=\d{3}(?:[.\-]|$))", ".", candidato)
+
+
+def _candidatos_rut_multibloque(fila: List[Dict[str, Any]]) -> List[str]:
+    """Bloque RUT CLIENTE V1 -- caso real guía 472593 (PRODALAM SA): el
+    RUT del cliente estaba impreso, legible y en la posición correcta
+    (justo debajo de R.U.T./SEÑOR(ES)), pero EasyOCR (paragraph=False,
+    usado para geometría) lo partió en TRES cajas separadas -- "93",
+    "772", "000-9" -- en vez de un único bloque. Evaluar cada caja por
+    separado (como ya hacía esta función) nunca iba a validar ninguna
+    como RUT completo.
+
+    `fila` ya viene filtrada por cercanía vertical a la etiqueta R.U.T.,
+    pero con una tolerancia generosa (``alto * 1.25``, la misma que usa
+    el resto de esta función) que puede incluir texto de la fila de
+    ARRIBA (p. ej. el nombre del cliente, "PRODALAM SA") cuando los
+    renglones del formulario están apretados -- concatenar a ciegas por
+    sólo cercanía horizontal pegaría ese nombre al RUT. Primero se
+    agrupa por RENGLÓN real (cajas cuyo centro vertical difiere en
+    menos de medio alto de línea -- mucho más estricto, pensado para
+    fragmentos de una MISMA palabra/número, no para dos renglones
+    distintos del formulario), y sólo se concatenan cajas CONTIGUAS
+    dentro de un mismo renglón (huelgo horizontal angosto entre el
+    borde derecho de una y el izquierdo de la siguiente). Un huelgo
+    grande (otra columna del formulario, p. ej. TELEFONO) corta la
+    cadena. No depende de ningún cliente/formato hardcodeado -- sólo de
+    que las cajas estén geométricamente contiguas."""
+    if len(fila) < 2:
+        return []
+
+    ordenados_por_y = sorted(fila, key=lambda item: item["cy"])
+    renglones: List[List[Dict[str, Any]]] = [[ordenados_por_y[0]]]
+    for anterior, actual in zip(ordenados_por_y, ordenados_por_y[1:]):
+        alto = max(anterior["h"], actual["h"])
+        if abs(actual["cy"] - anterior["cy"]) <= alto * 0.5:
+            renglones[-1].append(actual)
+        else:
+            renglones.append([actual])
+
+    candidatos: List[str] = []
+    for renglon in renglones:
+        ordenado_x = sorted(renglon, key=lambda item: item["x1"])
+        corrida = ordenado_x[:1]
+        for anterior, actual in zip(ordenado_x, ordenado_x[1:]):
+            alto = max(anterior["h"], actual["h"])
+            huelgo = actual["x1"] - anterior["x2"]
+            if huelgo <= alto * 1.25:
+                corrida.append(actual)
+                continue
+            if len(corrida) > 1:
+                candidatos.append("".join(item["texto"] for item in corrida))
+            corrida = [actual]
+        if len(corrida) > 1:
+            candidatos.append("".join(item["texto"] for item in corrida))
+    return candidatos
+
+
 def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     """Localiza el RUT del cliente en la zona SEÑOR(ES)/R.U.T., de forma
     genérica (no depende de clientes hardcodeados, no reemplaza casos por
@@ -355,20 +423,16 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             <= max(etiqueta_cliente["h"], item["h"]) * 1.5
         ]
         for etiqueta_rut in etiquetas_rut:
-            for item in items:
-                if item is etiqueta_rut or item is etiqueta_cliente:
-                    continue
-                alto = max(etiqueta_rut["h"], item["h"])
-                diferencia_y = abs(item["cy"] - etiqueta_rut["cy"])
-                if diferencia_y > alto * 1.25 or item["x1"] < etiqueta_rut["x2"] - 8:
-                    continue
-                candidato = re.sub(r"^[:\s]+", "", item["texto"]).strip()
-                # OCR real puede confundir uno de los puntos de miles por
-                # coma (p. ej. ``50.234,350-5``). Solo se corrige una coma
-                # estrictamente entre dígitos cuando introduce un grupo de
-                # tres cifras; el dígito verificador chileno sigue siendo el
-                # gate final y evita aceptar un número meramente plausible.
-                candidato = re.sub(r"(?<=\d),(?=\d{3}(?:[.\-]|$))", ".", candidato)
+            fila_valor = [
+                item for item in items
+                if item is not etiqueta_rut and item is not etiqueta_cliente
+                and abs(item["cy"] - etiqueta_rut["cy"]) <= max(etiqueta_rut["h"], item["h"]) * 1.25
+                and item["x1"] >= etiqueta_rut["x2"] - 8
+            ]
+            candidatos_texto = [item["texto"] for item in fila_valor]
+            candidatos_texto.extend(_candidatos_rut_multibloque(fila_valor))
+            for texto in candidatos_texto:
+                candidato = _normalizar_candidato_rut(texto)
                 resultado = validar_rut_chileno(candidato)
                 if resultado.estado == EstadoValidacion.VALIDO:
                     candidatos_validos.add(resultado.valor)

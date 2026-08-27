@@ -413,6 +413,16 @@ MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES = frozenset({
 # "evidencia insuficiente de un campo puntual", una categoría distinta.
 MOTIVOS_DOCUMENTALES_TECNICOS_NO_ELEGIBLES = frozenset({
     "GUIA_AUSENTE", "TRANSPORTE_AUSENTE", "DOCUMENTO_DEGRADADO",
+    # Bloque RUT CLIENTE V1, Sección 15 del bloque: "no conectar B1 en
+    # este bloque... no incluir reglas específicas en prompt de IA". La
+    # evidencia estructurada (RUT documental, nombre catalogado, RUT
+    # canónico) ya queda disponible para una futura conexión -- pero
+    # decidir si un RUT válido que resuelve a otra empresa es un error
+    # de tipeo, un tercero real, o fraude documental es exactamente el
+    # tipo de juicio que este bloque decidió dejar fuera de B1 por
+    # ahora, no una falla estructural sin sustrato -- se marca no
+    # elegible deliberadamente, no por descuido.
+    "RUT_CLIENTE_CONTRADICE_CATALOGO",
 })
 
 

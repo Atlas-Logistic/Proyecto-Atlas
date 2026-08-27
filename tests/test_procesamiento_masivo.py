@@ -1345,6 +1345,8 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "latitud_estadia_gps",
         "longitud_estadia_gps",
         "duracion_estadia_gps_min",
+        # Bloque RUT CLIENTE V1 -- mismo criterio que rut_chofer, ver COLUMNAS.
+        "rut_cliente",
     }
 
 
