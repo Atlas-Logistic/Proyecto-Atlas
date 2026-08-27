@@ -131,6 +131,18 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                         # por el chofer (evidencia, no verdad absoluta;
                         # ver atlas_core.mobile.PLANTAS_ORIGEN_MOBILE).
                         "planta_origen_informada": campos.get("planta_origen_informada", ""),
+                        # Bloque MOBILE MULTIGUÍA V1 -- identificador
+                        # administrativo de TANDA (varias fotos capturadas
+                        # juntas antes de "Enviar N guías", ver
+                        # Atlas-Conductores-Mobile/src/app.js). Puramente
+                        # informativo/trazabilidad -- NUNCA se usa para
+                        # agrupar/consolidar viajes (eso sigue siendo
+                        # exclusivamente numero_transporte, ver
+                        # atlas_core.gestor_viajes). Ausente en envíos
+                        # Mobile V1 históricos (una sola foto, sin tanda) --
+                        # `repositorio.recibir` ya tolera cualquier
+                        # metadata ausente/nueva sin cambios.
+                        "lote_id": campos.get("lote_id", ""),
                     },
                 )
                 if nuevo and procesar:
