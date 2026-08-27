@@ -2377,9 +2377,24 @@ def _ejecutar_ia_operacional(
                 # problema con obra/cliente -- "Regla crítica para
                 # destinos": nunca investigar una dirección como string
                 # aislado si Atlas ya conoce su obra/cliente.
+                #
+                # Bloque OBRA/DESTINO V2 -- causa raíz real (caso 472593):
+                # faltaba aquí la dirección de entrega documental
+                # (`despachar_a_crudo`/`direccion_entrega`) -- sin ella,
+                # una herramienta que investiga OBRA_DESTINO (un NOMBRE,
+                # nunca una dirección) no tenía con qué relacionar ese
+                # nombre a un punto de entrega real, y terminaba
+                # comparando domicilios corporativos genéricos entre sí
+                # (empresa vs. cliente) en vez de la relación real
+                # empresa/obra <-> dirección de entrega. Se agrega el
+                # mismo campo ya oficial del destino operacional (ver
+                # `atlas_core.rutas.destino_entrega`, DESPACHAR A es la
+                # fuente autoritativa del punto de entrega -- nunca la
+                # sede corporativa del cliente/receptor).
                 identidad_operacional={
                     "obra_destino": str(fila.get("obra_destino", "")),
                     "cliente": str(fila.get("cliente", "")),
+                    "direccion_entrega": str(fila.get("despachar_a_crudo") or fila.get("direccion_entrega") or ""),
                 },
                 herramientas_disponibles=tipo.herramientas,
                 restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_RONDAS_B1"),

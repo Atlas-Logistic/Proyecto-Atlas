@@ -64,29 +64,87 @@ def herramienta_documentos_relacionados(
 MAXIMO_CONSULTAS_POR_INVOCACION = 2
 
 
+_AUSENTE = {"", "NO ENCONTRADO"}
+
+# Campos cuyo `valor_documental` YA ES una dirección (nunca un nombre de
+# empresa/obra/persona) -- sólo para estos tiene sentido preguntar "¿es
+# una dirección real?". Cualquier otro campo (obra_destino, cliente,
+# chofer, etc.) trae un NOMBRE/IDENTIDAD, nunca una dirección -- ver
+# Bloque OBRA/DESTINO V2.
+_CAMPOS_DIRECCION = {"despachar_a_crudo", "direccion_entrega"}
+
+
 def _construir_consultas_investigacion(contexto: ContextoRazonamiento) -> tuple[str, ...]:
     """Regla crítica (Bloque B1 INVESTIGADOR): la dirección NUNCA se
     investiga como string aislado si Atlas ya dispone de contexto
     empresarial/operacional -- se vincula SIEMPRE calle↔empresa↔obra↔
     comuna/región/país desde la PRIMERA consulta, en vez de variantes
     ciegas de la sola dirección. Genérico por construcción: usa
-    cualquier campo presente en `identidad_operacional` (obra/cliente),
-    nunca hardcodea un nombre de empresa u obra concreto."""
+    cualquier campo presente en `identidad_operacional` (obra/cliente/
+    dirección de entrega), nunca hardcodea un nombre de empresa u obra
+    concreto.
+
+    Bloque OBRA/DESTINO V2 -- causa raíz real (caso 472593): esta
+    función asumía que `contexto.valor_documental` SIEMPRE era una
+    dirección ("¿es una dirección real?"), pero para
+    OBRA_DESTINO_SIN_CORROBORAR (`campo="obra_destino"`) ese valor es un
+    NOMBRE de empresa/obra ("EMPRESA CONST SIGRO"), nunca una dirección
+    -- la pregunta resultante ("¿es 'EMPRESA CONST SIGRO' una dirección
+    real?") no tenía sentido y sólo traía el domicilio corporativo
+    genérico de esa empresa (identidad, no relación). La pregunta
+    correcta para un NOMBRE es sobre la RELACIÓN con la dirección de
+    entrega YA CONOCIDA (`identidad_operacional["direccion_entrega"]`,
+    la misma fuente autoritativa de destino que ya usa
+    `atlas_core.rutas.destino_entrega` -- DESPACHAR A, nunca la sede
+    corporativa del cliente/receptor): "¿existe evidencia de que
+    [nombre] tenga/haya tenido una obra/proyecto/sucursal/destino
+    operacional relacionado con [dirección]?" -- nunca "¿es [nombre]
+    una dirección?". Sólo los campos que SÍ son direcciones
+    (`_CAMPOS_DIRECCION`) conservan la pregunta original."""
     valor = str(contexto.valor_documental or "").strip()
     if not valor:
         return ()
     obra = str(contexto.identidad_operacional.get("obra_destino", "") or "").strip()
     cliente = str(contexto.identidad_operacional.get("cliente", "") or "").strip()
+    direccion = str(contexto.identidad_operacional.get("direccion_entrega", "") or "").strip()
     consultas: list[str] = []
-    if obra and obra.upper() not in ("NO ENCONTRADO", ""):
-        consultas.append(f"{valor}, empresa/obra {obra}, Chile -- ¿es una dirección real y en qué comuna?")
-    if cliente and cliente.upper() not in ("NO ENCONTRADO", "") and cliente != obra:
-        consultas.append(f"{valor}, cliente {cliente}, Región Metropolitana, Chile -- ¿es una dirección real y en qué comuna?")
-    if not consultas:
-        # Sin obra/cliente utilizable -- único caso donde se investiga la
-        # dirección sola, con contexto territorial explícito (nunca sin
-        # país/región, ver Bloque TERRITORIAL T1/RESOLUCIÓN R16).
-        consultas.append(f"{valor}, Santiago, Región Metropolitana, Chile -- ¿es una dirección real y en qué comuna?")
+
+    if contexto.campo.lower() in _CAMPOS_DIRECCION:
+        # `valor` ya es una dirección -- comportamiento histórico, sin
+        # cambios: vincularla a la obra/cliente conocidos, nunca
+        # investigarla sola.
+        if obra and obra.upper() not in _AUSENTE:
+            consultas.append(f"{valor}, empresa/obra {obra}, Chile -- ¿es una dirección real y en qué comuna?")
+        if cliente and cliente.upper() not in _AUSENTE and cliente != obra:
+            consultas.append(f"{valor}, cliente {cliente}, Región Metropolitana, Chile -- ¿es una dirección real y en qué comuna?")
+        if not consultas:
+            # Sin obra/cliente utilizable -- único caso donde se investiga
+            # la dirección sola, con contexto territorial explícito
+            # (nunca sin país/región, ver Bloque TERRITORIAL T1/
+            # RESOLUCIÓN R16).
+            consultas.append(f"{valor}, Santiago, Región Metropolitana, Chile -- ¿es una dirección real y en qué comuna?")
+    else:
+        # `valor` es un NOMBRE (empresa/obra/destino) -- la pregunta es
+        # sobre la RELACIÓN con la dirección de entrega ya conocida,
+        # nunca sobre si el nombre "es una dirección".
+        if direccion and direccion.upper() not in _AUSENTE:
+            consultas.append(
+                f"¿Existe evidencia pública de que \"{valor}\" tenga o haya tenido una obra, proyecto, "
+                f"sucursal o destino operacional relacionado con la dirección \"{direccion}\", Chile? "
+                "Responde específicamente sobre esa relación (obra/entrega), no sólo sobre la sede "
+                "corporativa general de la empresa."
+            )
+        if cliente and cliente.upper() not in _AUSENTE and cliente != valor:
+            consultas.append(
+                f"¿Existe evidencia pública de una relación operacional (obra, proyecto, despacho, cliente) "
+                f"entre \"{valor}\" y \"{cliente}\", Chile?"
+            )
+        if not consultas:
+            # Sin dirección ni cliente con qué relacionar el nombre --
+            # último recurso: identidad general de la entidad (nunca se
+            # inventa una dirección/relación que no se puede preguntar).
+            consultas.append(f"\"{valor}\", empresa o proyecto, Chile -- ¿qué evidencia pública existe?")
+
     return tuple(consultas[:MAXIMO_CONSULTAS_POR_INVOCACION])
 
 
