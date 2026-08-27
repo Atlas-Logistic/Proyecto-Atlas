@@ -223,7 +223,14 @@ _JERARQUIA_FUENTE_ORIGEN: dict[str, int] = {
     "CONFIRMACION_HUMANA": -1,
     "TELEMETRIA_GPS": 0,
     "ONELOGIS_GPS": 0,
-    "DOCUMENTO": 1,
+    # Bloque ORIGEN OPERACIONAL V2 -- dato operacional explícito (Mobile
+    # informa la planta donde está cargando/saliendo), ya fusionado
+    # contra el encabezado documental y la regla de compatibilidad
+    # planta<->categoría (ver `atlas_core.rutas.origen_evidencia`) antes
+    # de llegar aquí -- nunca compite "en bruto" contra GPS ni documento,
+    # sólo participa en la consolidación a nivel de viaje.
+    "MOBILE": 1,
+    "DOCUMENTO": 2,
 }
 
 

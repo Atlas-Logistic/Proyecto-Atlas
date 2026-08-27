@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-08-27 — ORIGEN OPERACIONAL V2: bug real de planta de origen corregido, reglas configurables
+
+- **Bug real corregido:** la guía Mobile 472593 publicó "AZA RENCA" (la casa matriz societaria, siempre impresa en el encabezado) en vez de "AZA COLINA" (lo que el chofer realmente informó al capturar) -- Atlas nunca cruzaba lo que Mobile informa con el documento; ahora sí, y el encabezado ya no gana automáticamente cuando contradice evidencia operacional real.
+- **Reglas configurables, no hardcodeadas:** se agregó la capacidad de definir, por planta, qué categorías de material realmente despacha (dato del contexto operacional actual, nunca lógica fija de MBT/AZA) -- validado con un rubro completamente distinto (alimentos) sin ningún código nuevo, prueba de que la capacidad es genuinamente reutilizable.
+- **Contradicciones reales nunca se resuelven a ciegas:** si la evidencia disponible se contradice sin que ninguna regla pueda desempatar, Atlas no inventa ni corrige solo -- queda como pregunta para confirmación humana, reutilizando el mismo mecanismo ya existente para conflictos de GPS.
+- **Aplicado a producción de forma segura:** sólo se agregó la regla de compatibilidad a las 2 plantas ya existentes (con respaldo verificado); el envío/foto real de la prueba de ayer no se tocó ni se confirmó.
+- **Suite completa Motor: 2140 passed.** Desktop y Mobile no necesitaron ningún cambio -- el bug era exclusivamente del Motor.
+
+---
+
 ## 2026-08-27 — CIERRE DE JORNADA: primera prueba Mobile real de punta a punta, hallazgos documentados sin corregir
 
 - **Primera prueba real de Mobile completa, de punta a punta:** una foto real tomada en planta desde un iPhone llegó, se procesó (guía 472593, ~80 segundos totales en el hardware de oficina, sin GPU) y apareció correctamente en Desktop -- confirma que el circuito Mobile → Motor → Desktop funciona con datos reales, no sólo en pruebas sintéticas.

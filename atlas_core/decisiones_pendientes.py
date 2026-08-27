@@ -45,6 +45,7 @@ from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra, resolver_obra_por_variacion_ortografica_menor
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
+from atlas_core.rutas.origen_evidencia import MOTIVO_CONTRADICCION_OPERACIONAL
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 from atlas_core.verificacion_externa import EvidenciaExterna
 
@@ -399,6 +400,15 @@ ACCIONES_PATENTE_SUGERIDA = ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE
 RADIO_CANDIDATO_ORIGEN_SUGERIDO_KM = 50.0
 
 _PATRON_CONFLICTO_ORIGEN = re.compile(r"([A-Za-z0-9_]+):score=([\d.]+),solape=([\d.]+)%")
+
+# Bloque ORIGEN OPERACIONAL V2 -- parsea el motivo que deja
+# `atlas_core.rutas.origen_evidencia.fusionar_evidencia_origen` cuando
+# Mobile/documento discrepan sin que ninguna regla de compatibilidad
+# pueda desempatar (`ResultadoFusionOrigen.motivo`, persistido en
+# `motivo_ruta`, mismo criterio ya usado por `motivo_origen_gps` arriba).
+_PATRON_CONTRADICCION_ORIGEN = re.compile(
+    r"(MOBILE|DOCUMENTO)=([A-Z0-9_]+):(COMPATIBLE|INCOMPATIBLE|SIN_REGLA)"
+)
 
 
 def _sha256(ruta: Path) -> str:
@@ -1414,11 +1424,47 @@ def detectar_decision_origen_no_confirmado(
     if str(fila.get("planta_origen_id", "")).strip():
         return None  # ya tiene origen -- nada que preguntar
 
-    motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
     plantas_activas = [
         p for p in plantas
         if getattr(p, "estado_calidad", "") == "CONFIRMADA" and getattr(p, "estado_vigencia", "") == "ACTIVA"
     ]
+
+    # Bloque ORIGEN OPERACIONAL V2 -- contradicción real entre Mobile y
+    # documento que ninguna regla de compatibilidad configurada pudo
+    # desempatar (`atlas_core.rutas.origen_evidencia.
+    # fusionar_evidencia_origen`, persistido en `motivo_ruta` -- nunca en
+    # `motivo_origen_gps`, que es exclusivo de telemetría). Se revisa
+    # ANTES que la evidencia GPS: son fuentes de motivo distintas, nunca
+    # se mezclan.
+    motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
+    if motivo_ruta.startswith(MOTIVO_CONTRADICCION_OPERACIONAL):
+        candidatos_contradiccion: list[dict[str, object]] = []
+        for fuente, nombre_token, veredicto in _PATRON_CONTRADICCION_ORIGEN.findall(motivo_ruta):
+            nombre_normalizado = nombre_token.replace("_", " ").strip().upper()
+            planta = next((p for p in plantas_activas if p.nombre.strip().upper() == nombre_normalizado), None)
+            if planta is None:
+                continue
+            candidatos_contradiccion.append({
+                "planta_id": planta.planta_id, "planta_nombre": planta.nombre,
+                "evidencia_resumen": f"fuente={fuente.lower()}, compatibilidad con la regla configurada={veredicto.lower()}",
+            })
+        if not candidatos_contradiccion:
+            return None
+        documento_contradiccion = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
+        return crear_decision(
+            tipo="ORIGEN_NO_CONFIRMADO", entidad="ORIGEN", archivo=str(archivo),
+            numero_guia=str(documento_contradiccion[0]), numero_transporte=str(documento_contradiccion[1]),
+            campo="planta_origen", valor_documental="",
+            valor_normalizado="", identidad_resuelta=None,
+            candidatos=candidatos_contradiccion, motivos=["CONTRADICCION_OPERACIONAL_ORIGEN"],
+            evidencias=[{
+                "tipo": "CONTRADICCION_OPERACIONAL_ORIGEN", "motivo_ruta": motivo_ruta,
+                "tipo_carga": str(fila.get("tipo_carga", "")),
+            }],
+            acciones_permitidas=ACCIONES_ORIGEN_NO_CONFIRMADO,
+        )
+
+    motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
     candidatos: list[dict[str, object]] = []
     motivo_decision = ""
 

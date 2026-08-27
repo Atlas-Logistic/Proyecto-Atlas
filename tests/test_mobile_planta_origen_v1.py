@@ -5,9 +5,14 @@ tipo_novedad -- Core nunca confía sólo en la validación del cliente), la
 persiste tal cual en el envío (trazabilidad -- Sección 8 del bloque:
 planta informada + timestamp + chofer_id, sin mezclarla con la planta
 operacional final), y NUNCA la usa para decidir `planta_origen_id`/
-`planta_origen_nombre` de la fila que termina en el dataset -- esos
-siguen viniendo exclusivamente del pipeline determinista ya existente
-(GPS/documento). "Mobile informa, nunca decide" (Sección 6)."""
+`planta_origen_nombre` DIRECTAMENTE -- esos siguen viniendo exclusivamente
+del pipeline determinista (GPS/documento/Mobile YA FUSIONADOS, ver Bloque
+ORIGEN OPERACIONAL V2, `atlas_core.rutas.origen_evidencia`). "Mobile
+informa, nunca decide sola" (Sección 6) -- desde el bloque ORIGEN
+OPERACIONAL V2, "informa" significa "aporta evidencia que se evalúa",
+nunca "sobrescribe sin evaluación": antes de ese bloque, el valor ni
+siquiera llegaba a participar en la resolución (causa raíz real del caso
+472593)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -82,20 +87,28 @@ def test_reintento_con_el_mismo_envio_id_conserva_la_misma_planta(tmp_path: Path
     assert primero["planta_origen_informada"] == segundo["planta_origen_informada"] == "AZA_RENCA"
 
 
-def test_planta_informada_nunca_se_mezcla_en_datos_del_documento(tmp_path: Path) -> None:
-    """Sección 6/8: evidencia informada por el chofer, NUNCA verdad
-    absoluta -- `procesar_envio_mobile` arma la fila del dataset
-    exclusivamente desde `datos` (salida de `procesar_archivo`, el
-    pipeline determinista GPS/documento); `planta_origen_informada`
-    vive sólo en el envío (registro), nunca se mezcla en `datos` ni
-    puede sobrescribir `planta_origen_id`/`planta_origen_nombre`."""
+def test_planta_informada_se_pasa_como_evidencia_pero_fila_solo_usa_datos_evaluados(tmp_path: Path) -> None:
+    """Sección 6/8, actualizado en el Bloque ORIGEN OPERACIONAL V2: Mobile
+    SIGUE sin decidir directamente -- antes de este bloque,
+    `planta_origen_informada` no llegaba en absoluto al motor de origen
+    (causa raíz real del caso 472593: el encabezado documental ganaba
+    siempre por defecto). Ahora se pasa a `procesar_archivo` como
+    EVIDENCIA DE ENTRADA -- se fusiona con el documento y la regla de
+    compatibilidad configurada (`atlas_core.rutas.origen_evidencia`),
+    nunca se copia a ciegas. La construcción de la fila del CSV sigue
+    leyendo EXCLUSIVAMENTE `datos` (la salida YA evaluada de
+    `procesar_archivo`) -- nunca `registro` directamente, y nunca
+    `planta_origen_informada` tal cual."""
     import inspect
 
     from atlas_core.mobile import procesar_envio_mobile
 
     codigo = inspect.getsource(procesar_envio_mobile)
-    # La construcción de la fila del CSV usa únicamente `datos` -- nunca
-    # `registro`/metadata (donde vive planta_origen_informada).
+    indice_llamada = codigo.index("datos = dict(procesar_archivo(imagen, **argumentos))")
     indice_fila = codigo.index('fila = {columna: str(datos.get(columna, "")) for columna in COLUMNAS}')
-    assert "registro.get(\"planta_origen_informada\"" not in codigo[:indice_fila + 200]
+    # Se pasa como evidencia de ENTRADA, ANTES de invocar procesar_archivo
+    # -- nunca después, nunca directamente a la fila.
+    assert 'registro.get("planta_origen_informada"' in codigo[:indice_llamada]
+    # La fila del CSV sigue sin leer `registro` en absoluto -- sólo `datos`.
+    assert "registro.get(" not in codigo[indice_fila:indice_fila + 400]
     assert "planta_origen_informada" not in codigo[indice_fila:indice_fila + 400]

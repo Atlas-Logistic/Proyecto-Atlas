@@ -134,11 +134,22 @@ class Planta:
     punto_ruteo_latitud: float | None = None
     punto_ruteo_longitud: float | None = None
 
+    # Bloque ORIGEN OPERACIONAL V2 -- reglas de compatibilidad planta<->
+    # categoría, DATOS de este contexto/empresa, nunca lógica de Core
+    # (ver `atlas_core.rutas.origen_evidencia`). Tupla de valores de
+    # `tipo_carga` que esta planta despacha realmente -- vacía (default,
+    # toda planta existente antes de este bloque) significa "sin regla
+    # configurada para esta planta": el motor de evidencia nunca bloquea
+    # ni contradice por una categoría que nadie configuró (degradación
+    # seguro, Sección "COMPATIBILIDAD HACIA ATRÁS" del ticket).
+    categorias_permitidas: tuple[str, ...] = ()
+
     # Campos que pueden faltar en un registro serializado antiguo sin
     # romper la carga -- ver `desde_dict`. Todo campo nuevo agregado
     # backward-compatible a este dataclass debe listarse aquí también.
     CAMPOS_OPCIONALES_LEGADO = (
         "tipo_geocerca", "vertices", "punto_ruteo_latitud", "punto_ruteo_longitud",
+        "categorias_permitidas",
     )
 
     @classmethod
@@ -156,6 +167,7 @@ class Planta:
         for campo in faltantes:
             datos[campo] = cls.__dataclass_fields__[campo].default
         datos["vertices"] = tuple(tuple(vertice) for vertice in (datos["vertices"] or ()))
+        datos["categorias_permitidas"] = tuple(str(c) for c in (datos["categorias_permitidas"] or ()))
         try:
             planta = cls(**datos)
             _validar_planta(planta)
@@ -260,6 +272,7 @@ class CatalogoPlantas:
         vertices: Iterable[tuple[float, float]] = (),
         punto_ruteo_latitud: float | None = None,
         punto_ruteo_longitud: float | None = None,
+        categorias_permitidas: Iterable[str] = (),
     ) -> Planta:
         plantas = self._leer()
         nombre_limpio = _texto_obligatorio(nombre, "nombre")
@@ -290,6 +303,7 @@ class CatalogoPlantas:
             vertices=tuple(tuple(v) for v in vertices),
             punto_ruteo_latitud=punto_ruteo_latitud,
             punto_ruteo_longitud=punto_ruteo_longitud,
+            categorias_permitidas=tuple(str(c).strip().upper() for c in categorias_permitidas if str(c).strip()),
         )
         _validar_planta(planta)
         plantas.append(planta)
@@ -317,6 +331,7 @@ class CatalogoPlantas:
         punto_ruteo_latitud: float | None = None,
         punto_ruteo_longitud: float | None = None,
         limpiar_punto_ruteo: bool = False,
+        categorias_permitidas: Iterable[str] | None = None,
     ) -> Planta:
         plantas = self._leer()
         indice = self._indice(plantas, planta_id)
@@ -375,6 +390,10 @@ class CatalogoPlantas:
             ),
             punto_ruteo_latitud=punto_ruteo_lat_nuevo,
             punto_ruteo_longitud=punto_ruteo_lon_nuevo,
+            categorias_permitidas=(
+                actual.categorias_permitidas if categorias_permitidas is None
+                else tuple(str(c).strip().upper() for c in categorias_permitidas if str(c).strip())
+            ),
         )
         _validar_planta(planta)
         plantas[indice] = planta

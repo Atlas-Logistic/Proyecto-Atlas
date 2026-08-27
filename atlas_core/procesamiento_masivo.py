@@ -889,6 +889,7 @@ def procesar_archivo(
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
     recolector_decisiones: Callable[[list[dict[str, object]]], None] | None = None,
     servicio_telemetria: object = None,
+    planta_origen_informada: str | None = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
 
@@ -917,7 +918,16 @@ def procesar_archivo(
     entorno; sin credencial, se abstiene con motivo explícito -- nunca
     lanza). Este módulo nunca decide *cuál* proveedor de rutas usar salvo
     ese valor por defecto explícito y sustituible -- ver límites
-    multiempresa en el bloque E2E R1."""
+    multiempresa en el bloque E2E R1.
+
+    `planta_origen_informada` (Bloque ORIGEN OPERACIONAL V2, opcional):
+    código de planta que Mobile informó al capturar la foto (ver
+    `atlas_core.mobile.PLANTAS_ORIGEN_MOBILE`) -- se fusiona con el
+    encabezado documental y la regla de compatibilidad planta<->categoría
+    configurada (ver `atlas_core.rutas.origen_evidencia`) en vez de dejar
+    que el encabezado societario lo sustituya sin más. Sin este valor
+    (Desktop/procesamiento por lote, sin Mobile), comportamiento IDÉNTICO
+    a antes de este bloque."""
 
     inicio_documento = time.perf_counter()
 
@@ -1528,6 +1538,11 @@ def procesar_archivo(
             logger.warning("Corroboración geométrica de fecha omitida: %s: %s", type(exc).__name__, exc)
 
     descripcion = extraer_descripcion_material(textos)
+    # Bloque ORIGEN OPERACIONAL V2 -- calculado aquí (no en la construcción
+    # final de `datos`, más abajo) para poder cruzarlo con la fusión de
+    # evidencia de origen (Mobile/documento) más adelante en esta misma
+    # función -- función pura, sin efecto en el resultado ya existente.
+    tipo_carga_preliminar = clasificar_material(descripcion).value
 
     # OPERACION REAL R2: el catálogo relacional solo corrobora una obra
     # documental que ya existe y que ningún catálogo anterior sustituyó.
@@ -1716,6 +1731,8 @@ def procesar_archivo(
             resultado_entrega = resolver_entrega_documento(
                 textos, plantas_catalogo, proveedor_rutas_efectivo,
                 bloques=bloques_guia,
+                codigo_planta_mobile=planta_origen_informada,
+                categoria_documento=tipo_carga_preliminar,
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",
@@ -1966,7 +1983,7 @@ def procesar_archivo(
         "patente_tracto": str(datos.get("patente del tracto", "No encontrado")),
         "patente_rampla": str(datos.get("patente del carro", "No encontrado")),
         "descripcion_material": descripcion,
-        "tipo_carga": clasificar_material(descripcion).value,
+        "tipo_carga": tipo_carga_preliminar,
         "indicador_revision": "REVISAR" if requiere_revision else "OK",
         # Bloque ESTADOS S2: calidad del dato (por qué, si acaso, requiere
         # revisión) separada de trazabilidad del método (cómo se obtuvo el

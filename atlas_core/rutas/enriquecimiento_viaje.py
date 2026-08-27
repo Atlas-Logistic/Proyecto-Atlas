@@ -26,6 +26,7 @@ from atlas_core.rutas.geocerca import (
 )
 from atlas_core.rutas.modelos import Coordenadas, EstadoRuta
 from atlas_core.rutas.origen_documental import resolver_origen_documental
+from atlas_core.rutas.origen_evidencia import fusionar_evidencia_origen, resolver_planta_por_codigo_mobile
 from atlas_core.rutas.posicion_vehiculo import (
     EstadoPosicionVehiculo,
     ProveedorPosicionVehiculo,
@@ -166,16 +167,31 @@ def resolver_planta_origen(
     plantas: Iterable[Planta],
     textos_documento: Iterable[str] | None = None,
     radio_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
+    codigo_planta_mobile: str | None = None,
+    categoria_documento: str | None = None,
 ) -> tuple[Planta | None, str, str, str]:
-    """Jerarquía conservadora (Bloque PLANTA-P1):
+    """Jerarquía conservadora (Bloque PLANTA-P1), extendida en el Bloque
+    ORIGEN OPERACIONAL V2 (`codigo_planta_mobile`/`categoria_documento`,
+    ambos opcionales -- sin ellos, comportamiento IDÉNTICO a antes):
 
     1. GPS histórico/geocerca, si hay evidencia (patente + instante +
-       proveedor + posición dentro de ventana y geocerca válida).
-    2. Evidencia documental (encabezado de la propia guía), como fallback
-       -- **solo se consulta si el GPS no determinó nada**, nunca para
-       "votar" contra el GPS ni para desempatar: si el GPS resuelve, gana
-       el GPS sin excepción (política conservadora ante conflicto).
-    3. `None` (`ORIGEN_NO_DETERMINADO`) si ninguno de los dos alcanza.
+       proveedor + posición dentro de ventana y geocerca válida). Sigue
+       siendo el tramo más confiable -- SIN CAMBIOS en este bloque: ya
+       es evidencia física directa, conservadora por diseño (margen de
+       score, nunca elige a ciegas entre plantas -- ver
+       `atlas_core.telemetria.seleccion_recorrido`).
+    2. Si el GPS no determinó nada: fusión MOBILE/DOCUMENTO cruzada con
+       la regla de compatibilidad planta<->categoría configurada (ver
+       `atlas_core.rutas.origen_evidencia.fusionar_evidencia_origen` --
+       el encabezado documental YA NO se acepta ciegamente cuando
+       Mobile informó un origen operacional distinto y compatible con
+       la categoría real transportada; el caso real que lo motiva es la
+       guía 472593, encabezado societario "AZA RENCA" sustituyendo un
+       "AZA COLINA" informado por Mobile y compatible con la carga).
+    3. Sin evidencia suficiente, o evidencia contradictoria que ninguna
+       regla puede desempatar: `None` (`ORIGEN_NO_DETERMINADO`, o
+       `CONTRADICCION_OPERACIONAL_ORIGEN` cuando hay evidencia real en
+       conflicto) -- nunca se elige a ciegas, nunca se inventa origen.
 
     Nunca infiere por conveniencia, por cercanía al destino ni por "ruta
     más corta". Devuelve (planta, motivo_si_falla, determinado_por,
@@ -189,12 +205,18 @@ def resolver_planta_origen(
     if planta_gps is not None:
         return planta_gps, "", "ONELOGIS_GPS", evidencia_gps
 
-    if textos_documento is not None:
-        planta_doc = resolver_origen_documental(textos_documento, plantas)
-        if planta_doc is not None:
-            return planta_doc, "", "DOCUMENTO", "ENCABEZADO_GUIA"
+    planta_doc = resolver_origen_documental(textos_documento, plantas) if textos_documento is not None else None
+    planta_mobile = resolver_planta_por_codigo_mobile(codigo_planta_mobile, plantas)
 
-    return None, motivo_gps, "", ""
+    if planta_mobile is None and planta_doc is None:
+        return None, motivo_gps, "", ""
+
+    fusion = fusionar_evidencia_origen(
+        planta_mobile=planta_mobile, planta_documento=planta_doc, categoria=categoria_documento,
+    )
+    if fusion.contradiccion:
+        return None, fusion.motivo, "", ""
+    return fusion.planta, "", fusion.fuente, fusion.evidencia
 
 
 def calcular_ruta_para_viaje(

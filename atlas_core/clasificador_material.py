@@ -12,6 +12,7 @@ class TipoCarga(str, Enum):
 
     BARRAS = "BARRAS"
     ROLLOS = "ROLLOS"
+    ANGULOS = "ANGULOS"
     MIXTO = "MIXTO"
     NO_DETERMINADO = "NO DETERMINADO"
 
@@ -36,6 +37,16 @@ _TERMINOS_ROLLOS = (
     "ALAMBRON",
     "BOBINA",
     "BOBINAS",
+)
+
+# Bloque ORIGEN OPERACIONAL V2 -- categoría propia, nunca confundida con
+# "PERFIL"/"PERFILES" (que sí cuenta como BARRAS): un ángulo es su propio
+# producto real, distinto de una barra de hormigón, y la evidencia
+# operacional confirmada por Javier depende de distinguirlos (ver
+# `atlas_core.rutas.origen_evidencia`).
+_TERMINOS_ANGULOS = (
+    "ANGULO",
+    "ANGULOS",
 )
 
 
@@ -65,9 +76,8 @@ def clasificar_material(descripcion: object) -> TipoCarga:
     Clasifica una descripción de material.
 
     Reglas:
-    - Si aparecen términos de barras y rollos: MIXTO.
-    - Si aparecen solo términos de barras: BARRAS.
-    - Si aparecen solo términos de rollos: ROLLOS.
+    - Si aparece más de una categoría a la vez: MIXTO.
+    - Si aparece sólo una categoría (barras, rollos o ángulos): esa.
     - Si no hay evidencia suficiente: NO DETERMINADO.
     """
 
@@ -83,7 +93,12 @@ def clasificar_material(descripcion: object) -> TipoCarga:
         for termino in _TERMINOS_ROLLOS
     )
 
-    if contiene_barras and contiene_rollos:
+    contiene_angulos = any(
+        termino in texto
+        for termino in _TERMINOS_ANGULOS
+    )
+
+    if sum((contiene_barras, contiene_rollos, contiene_angulos)) > 1:
         return TipoCarga.MIXTO
 
     if contiene_barras:
@@ -91,5 +106,8 @@ def clasificar_material(descripcion: object) -> TipoCarga:
 
     if contiene_rollos:
         return TipoCarga.ROLLOS
+
+    if contiene_angulos:
+        return TipoCarga.ANGULOS
 
     return TipoCarga.NO_DETERMINADO

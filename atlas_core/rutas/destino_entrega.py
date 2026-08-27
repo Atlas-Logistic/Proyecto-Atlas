@@ -1475,6 +1475,8 @@ def calcular_ruta_entrega_para_viaje(
     punto_gps_destino: Coordenadas | None = None,
     radio_gps_destino_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
+    codigo_planta_mobile: str | None = None,
+    categoria_documento: str | None = None,
 ) -> ResultadoRutaEntrega:
     """Orquesta PLANTA ORIGEN -> DESPACHAR A (Bloque E1). Nunca usa
     `DIRECCION`/`COMUNA`/`COD DESTINATARIO` del cliente como destino de
@@ -1500,6 +1502,7 @@ def calcular_ruta_entrega_para_viaje(
         patente=patente, instante_salida=instante_salida,
         proveedor_posicion=proveedor_posicion, plantas=plantas,
         textos_documento=textos_documento, radio_km=radio_geocerca_km,
+        codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
     )
     if planta is None:
         return ResultadoRutaEntrega(
@@ -1667,6 +1670,8 @@ def resolver_entrega_documento(
     *,
     perfil: str = "driving-hgv",
     bloques: Iterable[Any] | None = None,
+    codigo_planta_mobile: str | None = None,
+    categoria_documento: str | None = None,
 ) -> dict[str, str]:
     """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
     persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
@@ -1718,6 +1723,7 @@ def resolver_entrega_documento(
     planta, motivo_origen, determinado_por, evidencia_origen = resolver_planta_origen(
         patente=None, instante_salida=None, proveedor_posicion=None,
         plantas=plantas, textos_documento=textos,
+        codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
     )
     if planta is None:
         resultado["estado_ruta"] = EstadoRuta.ORIGEN_NO_DETERMINADO.value
@@ -1740,6 +1746,7 @@ def resolver_entrega_documento(
         patente=None, instante_salida=None, plantas=plantas,
         proveedor_posicion=None, proveedor_rutas=proveedor_rutas,
         textos_documento=textos, perfil=perfil,
+        codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
     )
     resultado["direccion_entrega"] = ruta_entrega.direccion_entrega_geocodificada
     resultado["localidad_entrega"] = ruta_entrega.localidad_entrega

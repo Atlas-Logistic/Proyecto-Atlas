@@ -262,6 +262,17 @@ def procesar_envio_mobile(
             if carpeta_catalogos is not None:
                 argumentos["carpeta_catalogos"] = carpeta_catalogos
                 argumentos["recolector_decisiones"] = decisiones_nuevas.extend
+            # Bloque ORIGEN OPERACIONAL V2 -- la planta que el chofer
+            # informó al capturar (Sección 6 de Mobile V1: "evidencia
+            # operacional, NO verdad absoluta") ahora SÍ llega al motor de
+            # evidencia de origen, para que se fusione con el encabezado
+            # documental y la regla de compatibilidad -- ver
+            # `atlas_core.rutas.origen_evidencia`. Antes de este bloque
+            # nunca se pasaba, así que el encabezado societario siempre
+            # ganaba por defecto (causa raíz real del caso 472593).
+            planta_informada = str(registro.get("planta_origen_informada", "")).strip()
+            if planta_informada:
+                argumentos["planta_origen_informada"] = planta_informada
             datos = dict(procesar_archivo(imagen, **argumentos))
 
         filas: list[dict[str, str]] = []

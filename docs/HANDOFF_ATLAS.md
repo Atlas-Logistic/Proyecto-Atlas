@@ -4,6 +4,29 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-08-27 — ORIGEN OPERACIONAL V2: jerarquía de evidencias + reglas planta↔material configurables (caso real 472593 corregido)
+
+**Causa raíz del bug #2 del bloque anterior:** `planta_origen_informada` (lo que Mobile informa) nunca llegaba al motor de resolución de origen -- `procesar_archivo`/`resolver_entrega_documento`/`resolver_planta_origen` no tenían ningún parámetro para recibirlo. El encabezado documental (siempre la misma planta matriz societaria, "AZA RENCA", sin importar la planta física real) era la única evidencia disponible cuando GPS no alcanzaba (siempre el caso en una captura Mobile recién hecha, sin histórico de telemetría todavía) -- por eso 472593 publicó "AZA RENCA" pese a que Mobile informó "AZA COLINA".
+
+**Arquitectura nueva, reutilizando lo existente (nunca infraestructura paralela):**
+- `atlas_core.catalogo_plantas.Planta` gana `categorias_permitidas` (campo opcional, backward-compatible, mismo patrón ya usado para `tipo_geocerca`/`vertices`) -- DATO del contexto/empresa, nunca lógica de Core.
+- `atlas_core.clasificador_material.TipoCarga` gana `ANGULOS` (antes sólo BARRAS/ROLLOS/MIXTO/NO_DETERMINADO -- necesario para representar la regla real).
+- Módulo nuevo `atlas_core.rutas.origen_evidencia` (`fusionar_evidencia_origen`): cruza Mobile/documento contra la regla de compatibilidad configurada -- ninguna evidencia gana sólo por existir; el encabezado societario nunca sobrescribe un origen operacional compatible con la regla; una contradicción real sin evidencia que la resuelva NUNCA se autocorrige ni se acepta a ciegas, queda para `ORIGEN_NO_CONFIRMADO` (extendido, mismo mecanismo ya existente para conflictos GPS).
+- `_JERARQUIA_FUENTE_ORIGEN` (`gestor_viajes.py`) gana `MOBILE` (nivel 1, entre GPS=0 y DOCUMENTO=2) -- GPS sigue siendo el tramo más confiable, sin cambios.
+- Hilo completo: `mobile.py` (`procesar_envio_mobile`) → `procesamiento_masivo.py` (`procesar_archivo`, nuevo parámetro opcional) → `destino_entrega.py` (`resolver_entrega_documento`/`calcular_ruta_entrega_para_viaje`) → `enriquecimiento_viaje.py` (`resolver_planta_origen`) → `origen_evidencia.fusionar_evidencia_origen`.
+
+**Caso real 472593, verificado contra el catálogo real de producción:** con la regla aplicada (`AZA COLINA: BARRAS,ROLLOS` / `AZA RENCA: ANGULOS`), Mobile=COLINA + encabezado=RENCA + material=BARRAS ahora resuelve `planta_origen_nombre=AZA COLINA`, `origen_determinado_por=MOBILE`, `evidencia_origen=MOBILE_COMPATIBLE_DOCUMENTO_CONTRADICE_REGLA`. El envío/foto real (`36e7aa53-214e-48b0-a96c-14989b60e9aa`) no se tocó ni se confirmó -- sigue `REQUIRES_REVISION` tal cual.
+
+**Producción:** `catalogos_privados/plantas.json` editado vía `CatalogoPlantas.editar(..., modificacion_manual=True)` -- sólo `categorias_permitidas`/`fecha_modificacion` cambiaron en las 2 plantas existentes, ningún otro campo/planta. Backup + SHA-256 en `respaldos/ORIGEN_OPERACIONAL_V2_PLANTAS_ROLLBACK_20260827_153032/` (Drive).
+
+**Generalización:** fixture de otro rubro (alimentos, PLANTA_NORTE=REFRIGERADOS/PLANTA_SUR=SECOS) pasa con el mismo motor, cero código nuevo -- prueba arquitectónica de que nada quedó atado a MBT/AZA/COLINA/RENCA/BARRAS.
+
+**Tests:** ~50 focales nuevos (`test_origen_evidencia.py`, `test_origen_operacional_v2.py`, más ajustes en `test_mobile_planta_origen_v1.py` por el cambio de contrato esperado). Suite completa Motor: **2140 passed**. Desktop y Mobile: sin cambios de código (verificado, `git status` limpio en ambos) -- el bug era exclusivamente de Motor.
+
+**Estado: ORIGEN OPERACIONAL V2 IMPLEMENTADO Y APLICADO A PRODUCCIÓN -- LISTO PARA REVISIÓN CON JAVIER.**
+
+---
+
 ## 2026-08-27 — CIERRE DE JORNADA OFICINA: primera prueba Mobile real (foto → Motor → Desktop) + hallazgos, sin corregir nada todavía
 
 **Estado de partida de este bloque:** Pregúntale a Atlas Universal V1.1 ya cerrado (Motor `e1a30ba`, Desktop `bc68fa9`, ambos publicados y `0/0`). Este bloque agrega la primera prueba end-to-end real de Mobile (foto real desde iPhone en planta → OCR → Motor → Desktop) y documenta lo encontrado -- **nada de lo listado abajo se corrigió hoy**, queda para mañana.

@@ -1,0 +1,228 @@
+"""Bloque ORIGEN OPERACIONAL V2 -- fusión de evidencia MOBILE/DOCUMENTO
+cruzada con reglas de compatibilidad planta<->categoría configurables.
+Fixtures sintéticas propias, universales (nunca acopladas a MBT/AZA
+salvo en los nombres de ejemplo, que son datos, no lógica)."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from atlas_core.catalogo_plantas import Planta
+from atlas_core.rutas.origen_evidencia import (
+    COMPATIBLE,
+    FUENTE_DOCUMENTO,
+    FUENTE_MOBILE,
+    INCOMPATIBLE,
+    MOTIVO_CONTRADICCION_OPERACIONAL,
+    SIN_REGLA,
+    evaluar_compatibilidad_planta_categoria,
+    fusionar_evidencia_origen,
+)
+
+_AHORA = datetime.now(timezone.utc).isoformat()
+
+
+def _planta(nombre: str, categorias: tuple[str, ...] = (), planta_id: str | None = None) -> Planta:
+    return Planta(
+        planta_id=planta_id or nombre.replace(" ", "_"), nombre=nombre,
+        nombre_normalizado=nombre.upper(), direccion="", comuna="", region="", pais="CL",
+        latitud=None, longitud=None, estado_calidad="CONFIRMADA", estado_vigencia="ACTIVA",
+        fuente="TEST", observacion="", fecha_creacion=_AHORA, fecha_modificacion=_AHORA,
+        categorias_permitidas=categorias,
+    )
+
+
+COLINA = _planta("AZA COLINA", ("BARRAS", "ROLLOS"))
+RENCA = _planta("AZA RENCA", ("ANGULOS",))
+SIN_REGLAS = _planta("PLANTA SIN REGLAS")
+
+
+# --- Bloque 3/6 -- evaluación de compatibilidad, degradación segura ---
+
+def test_compatibilidad_sin_planta_es_sin_regla():
+    assert evaluar_compatibilidad_planta_categoria(None, "BARRAS") == SIN_REGLA
+
+
+def test_compatibilidad_sin_categorias_configuradas_es_sin_regla():
+    assert evaluar_compatibilidad_planta_categoria(SIN_REGLAS, "BARRAS") == SIN_REGLA
+
+
+def test_compatibilidad_sin_categoria_informada_es_sin_regla():
+    assert evaluar_compatibilidad_planta_categoria(COLINA, None) == SIN_REGLA
+    assert evaluar_compatibilidad_planta_categoria(COLINA, "") == SIN_REGLA
+
+
+def test_compatibilidad_categoria_permitida():
+    assert evaluar_compatibilidad_planta_categoria(COLINA, "BARRAS") == COMPATIBLE
+    assert evaluar_compatibilidad_planta_categoria(COLINA, "barras") == COMPATIBLE  # nunca sensible a mayúsculas
+
+
+def test_compatibilidad_categoria_no_permitida():
+    assert evaluar_compatibilidad_planta_categoria(COLINA, "ANGULOS") == INCOMPATIBLE
+    assert evaluar_compatibilidad_planta_categoria(RENCA, "BARRAS") == INCOMPATIBLE
+
+
+# --- Caso real 472593 -- Mobile COLINA + BARRAS + encabezado societario RENCA ---
+
+def test_caso_real_472593_mobile_colina_no_es_sobrescrito_por_encabezado_renca():
+    r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=RENCA, categoria="BARRAS")
+    assert r.contradiccion is False
+    assert r.planta is COLINA
+    assert r.fuente == FUENTE_MOBILE
+    assert r.compatibilidad_mobile == COMPATIBLE
+    assert r.compatibilidad_documento == INCOMPATIBLE
+
+
+# --- Contradicción real: una sola fuente (Mobile) viola la regla, sin
+# corroboración -- nunca se corrige sola ni se acepta a ciegas ---
+
+def test_mobile_renca_barras_regla_incompatible_es_contradiccion():
+    r = fusionar_evidencia_origen(planta_mobile=RENCA, planta_documento=None, categoria="BARRAS")
+    assert r.contradiccion is True
+    assert r.planta is None
+    assert r.motivo.startswith(MOTIVO_CONTRADICCION_OPERACIONAL)
+    assert "MOBILE=AZA_RENCA:INCOMPATIBLE" in r.motivo
+
+
+def test_mobile_colina_angulos_regla_incompatible_es_contradiccion():
+    r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=None, categoria="ANGULOS")
+    assert r.contradiccion is True
+
+
+def test_mobile_renca_angulos_es_consistente():
+    r = fusionar_evidencia_origen(planta_mobile=RENCA, planta_documento=None, categoria="ANGULOS")
+    assert r.contradiccion is False
+    assert r.planta is RENCA
+
+
+def test_mobile_colina_rollos_es_consistente():
+    r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=None, categoria="ROLLOS")
+    assert r.contradiccion is False
+    assert r.planta is COLINA
+
+
+# --- Ausencia de reglas configuradas -- degradación segura ---
+
+def test_sin_reglas_configuradas_mobile_gana_sin_bloquear():
+    r = fusionar_evidencia_origen(planta_mobile=SIN_REGLAS, planta_documento=None, categoria="BARRAS")
+    assert r.contradiccion is False
+    assert r.planta is SIN_REGLAS
+
+
+def test_sin_reglas_configuradas_documento_gana_sin_bloquear():
+    r = fusionar_evidencia_origen(planta_mobile=None, planta_documento=SIN_REGLAS, categoria="BARRAS")
+    assert r.contradiccion is False
+    assert r.planta is SIN_REGLAS
+    assert r.fuente == FUENTE_DOCUMENTO
+
+
+def test_sin_ninguna_evidencia_sin_origen_sin_contradiccion():
+    r = fusionar_evidencia_origen(planta_mobile=None, planta_documento=None, categoria="BARRAS")
+    assert r.planta is None
+    assert r.contradiccion is False
+
+
+# --- Encabezado societario nunca se trata automáticamente como origen
+# físico cuando contradice la regla y no hay corroboración ---
+
+def test_solo_documento_incompatible_es_contradiccion_no_aceptacion_ciega():
+    r = fusionar_evidencia_origen(planta_mobile=None, planta_documento=RENCA, categoria="BARRAS")
+    assert r.contradiccion is True
+    assert r.planta is None
+
+
+def test_solo_documento_compatible_sigue_funcionando_igual_que_hoy():
+    """Compatibilidad hacia atrás: documentos históricos sin Mobile,
+    cuya planta documental SÍ es compatible con la categoría (o sin
+    regla configurada), siguen resolviendo exactamente igual que antes
+    de este bloque."""
+    r = fusionar_evidencia_origen(planta_mobile=None, planta_documento=COLINA, categoria="BARRAS")
+    assert r.contradiccion is False
+    assert r.planta is COLINA
+    assert r.fuente == FUENTE_DOCUMENTO
+    assert r.evidencia == "ENCABEZADO_GUIA"
+
+
+# --- Ambas coinciden: consistente ---
+
+def test_mobile_y_documento_coinciden_en_la_misma_planta():
+    r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=COLINA, categoria="BARRAS")
+    assert r.contradiccion is False
+    assert r.planta is COLINA
+    assert r.fuente == FUENTE_MOBILE
+
+
+# --- Ambas discrepan y NINGUNA regla desempata (ambas compatibles, o
+# ambas incompatibles, o sin regla) -- contradicción real ---
+
+def test_discrepancia_sin_regla_que_desempate_es_contradiccion():
+    otra_planta_sin_reglas = _planta("PLANTA OTRA")
+    r = fusionar_evidencia_origen(planta_mobile=SIN_REGLAS, planta_documento=otra_planta_sin_reglas, categoria="BARRAS")
+    assert r.contradiccion is True
+
+
+def test_mobile_incompatible_documento_compatible_no_se_acepta_el_documento_a_ciegas():
+    """Aunque el documento resulte "compatible" con la regla, el
+    encabezado societario sigue siendo estructuralmente poco confiable
+    -- nunca se usa para CORREGIR una discrepancia con Mobile, sólo
+    para reforzar cuando Mobile ya es compatible (Sección
+    CONTRADICCIONES del ticket: no autocorregir sólo por la regla)."""
+    r = fusionar_evidencia_origen(planta_mobile=RENCA, planta_documento=COLINA, categoria="BARRAS")
+    assert r.contradiccion is True
+    assert r.planta is None
+
+
+# --- Bloque GENERALIZACIÓN del ticket -- PRUEBA ARQUITECTÓNICA: otro
+# rubro (alimentos), CERO código específico nuevo. Si esto pasa, el
+# motor de evidencia de origen es universal de verdad, no MBT/AZA con
+# otro nombre encima. ---
+
+PLANTA_NORTE = _planta("PLANTA NORTE", ("REFRIGERADOS",))
+PLANTA_SUR = _planta("PLANTA SUR", ("SECOS",))
+
+
+def test_otro_rubro_alimentos_refrigerados_planta_norte_es_compatible():
+    r = fusionar_evidencia_origen(planta_mobile=PLANTA_NORTE, planta_documento=None, categoria="REFRIGERADOS")
+    assert r.contradiccion is False
+    assert r.planta is PLANTA_NORTE
+
+
+def test_otro_rubro_alimentos_refrigerados_planta_sur_es_contradiccion():
+    r = fusionar_evidencia_origen(planta_mobile=PLANTA_SUR, planta_documento=None, categoria="REFRIGERADOS")
+    assert r.contradiccion is True
+    assert r.planta is None
+
+
+def test_a_dict_expone_ambas_fuentes_y_compatibilidad_para_b1():
+    """Bloque "B1/ATLAS IA" del ticket: B1 debe poder recibir origen
+    informado, evidencia documental, categoría y compatibilidades ya
+    evaluadas -- nunca AZA/COLINA/RENCA/BARRAS como claves, sólo como
+    VALORES de este contexto."""
+    r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=RENCA, categoria="BARRAS")
+    datos = r.a_dict()
+    assert datos["mobile"]["planta_nombre"] == "AZA COLINA"
+    assert datos["mobile"]["compatibilidad"] == COMPATIBLE
+    assert datos["documento"]["planta_nombre"] == "AZA RENCA"
+    assert datos["documento"]["compatibilidad"] == INCOMPATIBLE
+    assert datos["resultado"]["planta_nombre"] == "AZA COLINA"
+    assert datos["categoria"] == "BARRAS"
+    assert datos["contradiccion"] is False
+
+
+def test_a_dict_en_contradiccion_no_pierde_evidencia_de_ninguna_fuente():
+    r = fusionar_evidencia_origen(planta_mobile=RENCA, planta_documento=None, categoria="BARRAS")
+    datos = r.a_dict()
+    assert datos["contradiccion"] is True
+    assert datos["mobile"]["planta_nombre"] == "AZA RENCA"
+    assert datos["mobile"]["compatibilidad"] == INCOMPATIBLE
+    assert datos["documento"] == {"compatibilidad": SIN_REGLA}
+
+
+def test_otro_rubro_alimentos_encabezado_no_fisico_no_sobrescribe_mobile():
+    """Réplica exacta del caso real 472593, con un rubro y nombres de
+    planta completamente distintos -- misma mecánica, mismo resultado:
+    Mobile compatible gana sobre un documento incompatible con la
+    regla."""
+    r = fusionar_evidencia_origen(planta_mobile=PLANTA_NORTE, planta_documento=PLANTA_SUR, categoria="REFRIGERADOS")
+    assert r.contradiccion is False
+    assert r.planta is PLANTA_NORTE
+    assert r.fuente == FUENTE_MOBILE
