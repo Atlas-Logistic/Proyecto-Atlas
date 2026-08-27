@@ -9,6 +9,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_VIAJES,
     ConsultaAtlas,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_VIAJES,
@@ -390,3 +391,137 @@ def test_evento_semantica_rechaza_dominio_viajes():
     consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES)
     motivo = validar_compatibilidad_semantica("¿Cuántas estadías tuvo Retamal?", consulta)
     assert motivo is not None
+
+
+# ============================================================
+# Bloque UNIVERSAL V1.1 -- coherencia semántica + soporte contextual
+# ============================================================
+
+# --- Bloque 1/10 del ticket: "filtro no resuelto ≠ quitar filtro" ---
+# Casos reales: "¿En qué viajes aparece JD8659?"/"JE8659?" respondían "23
+# viajes" genéricos -- el token tiene forma de patente pero no coincide
+# con ninguna real.
+
+def test_patente_con_forma_valida_pero_desconocida_nunca_se_pierde():
+    c, avisos = interpretar_consulta_determinista(
+        "¿En qué viajes aparece JD8659?", catalogos=CATALOGOS_UNIVERSAL,
+    )
+    assert c is None
+    assert avisos == ("SIN_COINCIDENCIA_PATENTE:JD8659",)
+
+
+def test_patente_desconocida_variante_je8659():
+    c, avisos = interpretar_consulta_determinista(
+        "¿En qué viajes aparece JE8659?", catalogos=CATALOGOS_UNIVERSAL,
+    )
+    assert c is None
+    assert avisos == ("SIN_COINCIDENCIA_PATENTE:JE8659",)
+
+
+def test_resolver_patente_conserva_token_no_reconocido_con_forma_valida():
+    r = resolver_patente_por_texto("¿En qué viajes aparece JD8659?", CATALOGOS_UNIVERSAL.patentes)
+    assert r.estado == SIN_COINCIDENCIA
+    assert r.token_no_reconocido == "JD8659"
+
+
+def test_resolver_patente_sin_forma_valida_no_reporta_token():
+    """Un token que NO tiene forma de patente (p. ej. "JB85", ya cubierto
+    arriba) nunca se reporta como candidato -- evita falsos positivos
+    sobre cualquier palabra corta."""
+    r = resolver_patente_por_texto("JB85", CATALOGOS_UNIVERSAL.patentes)
+    assert r.token_no_reconocido == ""
+
+
+# --- Bloque 2 del ticket: la dimensión contada es la que sigue a
+# CUÁNTOS/CUÁNTAS. Caso real: "¿Cuántas patentes están vinculadas
+# correctamente a choferes?" respondía "10 choferes". ---
+
+def test_cuantas_patentes_cuenta_vehiculo_nunca_chofer():
+    c, _ = interpretar_consulta_determinista(
+        "¿Cuántas patentes están vinculadas correctamente a choferes?", catalogos=CATALOGOS_UNIVERSAL,
+    )
+    assert c.metrica == METRICA_COUNT_DISTINCT_RELACION
+    assert c.relacion == "vehiculo"
+    assert c.filtros == {}
+
+
+def test_cuantos_vehiculos_tambien_cuenta_vehiculo():
+    c, _ = interpretar_consulta_determinista("¿Cuántos vehículos tenemos?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.metrica == METRICA_COUNT_DISTINCT_RELACION
+    assert c.relacion == "vehiculo"
+
+
+def test_cuantos_clientes_cuenta_cliente():
+    c, _ = interpretar_consulta_determinista("¿Cuántos clientes tenemos registrados?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.metrica == METRICA_COUNT_DISTINCT_RELACION
+    assert c.relacion == "cliente"
+
+
+def test_cuantos_choferes_sigue_intacto_no_lo_toca_el_dispatch_nuevo():
+    """`chofer` queda deliberadamente fuera de la tabla de dispatch --
+    este caso lo sigue resolviendo, sin cambios, COUNT_DISTINCT_CHOFER
+    (regresión explícita del bloque)."""
+    c, _ = interpretar_consulta_determinista("¿Cuántos choferes trabajaron este mes?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.metrica == METRICA_COUNT_DISTINCT_CHOFER
+
+
+def test_semantica_rechaza_patentes_con_count_distinct_chofer():
+    consulta = ConsultaAtlas(metrica=METRICA_COUNT_DISTINCT_CHOFER)
+    motivo = validar_compatibilidad_semantica(
+        "¿Cuántas patentes están vinculadas correctamente a choferes?", consulta,
+    )
+    assert motivo is not None
+
+
+# --- Bloque 3/12 del ticket: unidad solicitada ≠ unidad disponible.
+# Caso real: "¿Cuántas barras de hormigón se movieron?" respondía
+# toneladas como si fueran unidades/piezas. ---
+
+def test_cuantas_barras_no_se_convierte_silenciosamente_a_peso():
+    c, avisos = interpretar_consulta_determinista(
+        "¿Cuántas barras de hormigón se movieron?", catalogos=CATALOGOS,
+    )
+    assert c.metrica == METRICA_SUM_PESO
+    assert c.filtros.get("tipo_carga") == "BARRAS"
+    assert avisos == ("UNIDAD_NO_DISPONIBLE:BARRAS",)
+
+
+def test_cuantas_toneladas_de_barras_no_dispara_el_aviso_de_unidad():
+    """Pedir explícitamente TONELADAS sigue funcionando igual que
+    siempre -- el aviso sólo aplica cuando la dimensión contada (después
+    de CUÁNTOS/CUÁNTAS) es la unidad física, nunca cuando ya se pidió
+    peso explícitamente."""
+    c, avisos = interpretar_consulta_determinista(
+        "¿Cuántas toneladas de barras se movieron?", catalogos=CATALOGOS,
+    )
+    assert c.metrica == METRICA_SUM_PESO
+    assert avisos == ()
+
+
+def test_regresion_rollos_como_filtro_no_activa_aviso_de_unidad():
+    """Regresión real encontrada al implementar este bloque: "rollos"
+    usado como FILTRO de tipo de carga (no como dimensión contada) nunca
+    debe secuestrar la consulta -- "cuántos VIAJES ... con rollos" sigue
+    contando viajes, con chofer/tipo_carga/periodo intactos."""
+    c, avisos = interpretar_consulta_determinista(
+        "¿Cuántos viajes hizo Villagra con rollos este mes?", catalogos=CATALOGOS,
+    )
+    assert c.metrica == METRICA_COUNT_VIAJES
+    assert c.filtros == {
+        "chofer": "PATRICIO VILLAGRA MUÑOZ", "tipo_carga": "ROLLOS", "periodo": PERIODO_ESTE_MES,
+    }
+    assert avisos == ()
+
+
+def test_semantica_rechaza_piezas_con_sum_peso_sin_aviso_previo():
+    """Red de seguridad para cuando B1 (no el determinístico) propone
+    SUM_PESO ante una pregunta de piezas/unidades."""
+    consulta = ConsultaAtlas(metrica=METRICA_SUM_PESO)
+    motivo = validar_compatibilidad_semantica("¿Cuántas barras se movieron?", consulta)
+    assert motivo is not None
+
+
+def test_semantica_no_rechaza_peso_cuando_la_pregunta_ya_pide_peso():
+    consulta = ConsultaAtlas(metrica=METRICA_SUM_PESO)
+    motivo = validar_compatibilidad_semantica("¿Cuántas toneladas de barras se movieron?", consulta)
+    assert motivo is None

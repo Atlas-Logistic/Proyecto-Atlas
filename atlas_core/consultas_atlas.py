@@ -51,11 +51,21 @@ METRICA_COUNT_EVENTOS = "COUNT_EVENTOS"
 # relacionado sobre los viajes que cumplen el filtro) -- nunca un
 # comando nuevo por combinación. Ver `relacion` en `ConsultaAtlas`.
 METRICA_LIST_RELACION = "LIST_RELACION"
+# Bloque UNIVERSAL V1.1 (Bloque 2 del ticket) -- "cuántas patentes/
+# clientes/obras/destinos/comunas/materiales", genérico sobre cualquier
+# RELACIÓN ya soportada (`RELACIONES_SOPORTADAS`): cuenta los valores
+# DISTINTOS proyectados, en vez de listarlos (`METRICA_LIST_RELACION` ya
+# hace la proyección; esta métrica reutiliza exactamente el mismo camino
+# de código y sólo cambia qué se devuelve -- el largo, no la lista).
+# Deliberadamente NO reemplaza `METRICA_COUNT_DISTINCT_CHOFER` (ese
+# camino queda intacto, ya probado en producción) -- cubre las demás
+# dimensiones para las que hoy no existe ningún conteo dedicado.
+METRICA_COUNT_DISTINCT_RELACION = "COUNT_DISTINCT_RELACION"
 METRICAS_SOPORTADAS = frozenset({
     METRICA_COUNT_VIAJES, METRICA_COUNT_GUIAS, METRICA_SUM_PESO,
     METRICA_SUM_KM, METRICA_SUM_TIEMPO, METRICA_LISTAR_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_INCIDENCIAS,
-    METRICA_COUNT_EVENTOS, METRICA_LIST_RELACION,
+    METRICA_COUNT_EVENTOS, METRICA_LIST_RELACION, METRICA_COUNT_DISTINCT_RELACION,
 })
 _UNIDADES_POR_METRICA = {
     METRICA_COUNT_VIAJES: "viajes", METRICA_COUNT_GUIAS: "guías",
@@ -65,7 +75,7 @@ _UNIDADES_POR_METRICA = {
     METRICA_SUM_PESO: "kg", METRICA_SUM_KM: "km calculados", METRICA_SUM_TIEMPO: "min",
     METRICA_LISTAR_VIAJES: "viajes", METRICA_COUNT_DISTINCT_CHOFER: "choferes",
     METRICA_COUNT_INCIDENCIAS: "incidencias", METRICA_COUNT_EVENTOS: "eventos",
-    METRICA_LIST_RELACION: "valores",
+    METRICA_LIST_RELACION: "valores", METRICA_COUNT_DISTINCT_RELACION: "valores",
 }
 
 # --- Bloque B1 V2 (Bloque 3 del ticket): DOMINIO -- una ConsultaAtlas ya
@@ -220,13 +230,13 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
         )
     if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER and consulta.agrupacion is not None:
         raise ErrorConsultaAtlas("COUNT_DISTINCT_CHOFER no soporta agrupación todavía.")
-    if consulta.metrica == METRICA_LIST_RELACION:
+    if consulta.metrica in (METRICA_LIST_RELACION, METRICA_COUNT_DISTINCT_RELACION):
         if consulta.dominio != DOMINIO_VIAJES:
-            raise ErrorConsultaAtlas("LIST_RELACION sólo está soportado en el dominio VIAJES.")
+            raise ErrorConsultaAtlas(f"{consulta.metrica} sólo está soportado en el dominio VIAJES.")
         if consulta.relacion not in RELACIONES_SOPORTADAS:
             raise ErrorConsultaAtlas(f"Relación no soportada: {consulta.relacion!r}")
     elif consulta.relacion is not None:
-        raise ErrorConsultaAtlas("`relacion` sólo se usa junto con LIST_RELACION.")
+        raise ErrorConsultaAtlas("`relacion` sólo se usa junto con LIST_RELACION/COUNT_DISTINCT_RELACION.")
     for campo in consulta.filtros:
         if campo not in FILTROS_SOPORTADOS:
             raise ErrorConsultaAtlas(f"Filtro no soportado: {campo!r}")
@@ -452,12 +462,15 @@ def ejecutar_consulta_atlas(
             total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
         )
 
-    if consulta.metrica == METRICA_LIST_RELACION:
+    if consulta.metrica in (METRICA_LIST_RELACION, METRICA_COUNT_DISTINCT_RELACION):
         # Bloque UNIVERSAL V1 (Bloque 8 del ticket) -- proyecta los
         # valores DISTINTOS del campo relacionado sobre los viajes que
         # cumplen el filtro; UN solo camino de código para cualquier
         # combinación entidad-relación ("qué patentes ha usado X", "con
         # qué chofer está vinculada Y", "qué cliente aparece en Z").
+        # Bloque UNIVERSAL V1.1 (Bloque 2 del ticket) -- el mismo
+        # conjunto de valores distintos, cuando la pregunta pide CUÁNTOS
+        # en vez de CUÁLES, se devuelve como cantidad (nunca como lista).
         valores: set[str] = set()
         for v in coincidencias:
             if consulta.relacion == "vehiculo":
@@ -471,6 +484,11 @@ def ejecutar_consulta_atlas(
                     valor_col = str(v.get(columna, "")).strip()
                     if valor_col:
                         valores.add(valor_col)
+        if consulta.metrica == METRICA_COUNT_DISTINCT_RELACION:
+            return ResultadoConsultaAtlas(
+                consulta_interpretada=consulta, resultado=len(valores), unidades=unidades,
+                total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
+            )
         lista = tuple(sorted(valores))
         return ResultadoConsultaAtlas(
             consulta_interpretada=consulta, resultado=lista, unidades=unidades,

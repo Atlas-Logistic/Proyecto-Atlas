@@ -19,6 +19,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_INCIDENCIAS,
@@ -214,6 +215,22 @@ def _formatear_respuesta_relacion(resultado: ResultadoConsultaAtlas) -> str:
     return f"{etiqueta.capitalize()}: {lista}."
 
 
+def _formatear_respuesta_count_distinct_relacion(resultado: ResultadoConsultaAtlas) -> str:
+    """Bloque UNIVERSAL V1.1 (Bloque 2 del ticket) -- "cuántas patentes/
+    clientes/obras/...": mismo vocabulario humano por relación que ya
+    usa `_formatear_respuesta_relacion` (`_NOMBRE_RELACION_LEGIBLE`),
+    pero devolviendo la CANTIDAD, nunca la lista de valores."""
+    consulta = resultado.consulta_interpretada
+    n = resultado.resultado
+    par = _NOMBRE_RELACION_LEGIBLE.get(consulta.relacion or "", (consulta.relacion or "valor", (consulta.relacion or "valores") + "s"))
+    etiqueta = par[0] if n == 1 else par[1]
+    contexto = _filtros_legibles(consulta)
+    sufijo = f" ({contexto})" if contexto else ""
+    if n == 0:
+        return f"No encontré {etiqueta}{sufijo}."
+    return f"{n} {etiqueta}{sufijo}."
+
+
 def _formatear_respuesta(resultado: ResultadoConsultaAtlas) -> str:
     """Bloque 11 -- respuesta breve y operacional, nunca un párrafo de
     razonamiento B1. Bloque 13 -- cero resultados nunca es un error."""
@@ -224,6 +241,8 @@ def _formatear_respuesta(resultado: ResultadoConsultaAtlas) -> str:
         return _formatear_respuesta_eventos(resultado)
     if consulta.metrica == METRICA_LIST_RELACION:
         return _formatear_respuesta_relacion(resultado)
+    if consulta.metrica == METRICA_COUNT_DISTINCT_RELACION:
+        return _formatear_respuesta_count_distinct_relacion(resultado)
 
     contexto = _filtros_legibles(consulta)
     sufijo_contexto = f" ({contexto})" if contexto else ""
@@ -342,6 +361,20 @@ def responder_consulta_atlas(
             opciones_aclaracion=candidatos,
         )
 
+    # Bloque UNIVERSAL V1.1 (Bloque 1/10 del ticket) -- "filtro no
+    # resuelto ≠ quitar filtro": la patente mencionada tiene forma válida
+    # pero no existe en ninguna patente real de la operación. Es una
+    # respuesta DEFINITIVA (nada que B1 pueda reinterpretar mejor -- el
+    # token, literalmente, no aparece en ningún viaje) -- nunca se
+    # degrada a un conteo sin filtro ni se intenta B1.
+    sin_coincidencia_patente = next((a for a in avisos if a.startswith("SIN_COINCIDENCIA_PATENTE:")), None)
+    if sin_coincidencia_patente is not None:
+        token = sin_coincidencia_patente.split(":", 1)[1]
+        return RespuestaConsultaAtlas(
+            estado=ESTADO_SIN_RESULTADOS,
+            texto_respuesta=f"No encontré viajes asociados a {token}.",
+        )
+
     # Bloque 6/7 -- "estructuralmente válida" no basta: si el
     # determinístico propuso algo semánticamente incompatible con la
     # pregunta (Bloque 2: KM+COUNT_VIAJES, CHOFERES+COUNT_VIAJES,
@@ -349,8 +382,16 @@ def responder_consulta_atlas(
     # propuesta y se cede a B1 en vez de responder con un número que no
     # corresponde -- este es EXACTAMENTE el criterio que antes hacía que
     # B1 nunca interviniera.
+    # Bloque UNIVERSAL V1.1 (Bloque 3 del ticket) -- excepción explícita:
+    # un `UNIDAD_NO_DISPONIBLE` ya es el propio determinístico
+    # reconociendo, a propósito, "pediste piezas, te doy peso con
+    # aviso" -- la regla de PESO+unidades-físicas de
+    # `validar_compatibilidad_semantica` existe para atrapar ese MISMO
+    # patrón cuando lo propone B1 sin darse cuenta; nunca debe rechazar
+    # la propia respuesta ya correcta y ya avisada del determinístico.
+    unidad_ya_avisada = any(a.startswith("UNIDAD_NO_DISPONIBLE:") for a in avisos)
     motivo_incompatibilidad: str | None = None
-    if consulta is not None:
+    if consulta is not None and not unidad_ya_avisada:
         motivo_incompatibilidad = validar_compatibilidad_semantica(pregunta, consulta)
         if motivo_incompatibilidad is not None:
             _registro.debug(
@@ -428,6 +469,15 @@ def responder_consulta_atlas(
     else:
         resultado = ejecutar_consulta_atlas(consulta, viajes)
     texto = _formatear_respuesta(resultado)
+    # Bloque UNIVERSAL V1.1 (Bloque 3 del ticket) -- "unidad solicitada ≠
+    # unidad disponible -> explicar la limitación": la consulta SÍ se
+    # ejecuta (peso, la unidad que Atlas realmente tiene) pero la
+    # respuesta deja explícito, primero, que no es la unidad pedida --
+    # nunca se presenta el peso como si fuera la cantidad de piezas.
+    unidad_no_disponible = next((a for a in avisos if a.startswith("UNIDAD_NO_DISPONIBLE:")), None)
+    if unidad_no_disponible is not None:
+        palabra = unidad_no_disponible.split(":", 1)[1].lower()
+        texto = f"No tengo registrada la cantidad de {palabra} por unidad. Sí puedo verificar el peso: {texto}"
     estado = ESTADO_SIN_RESULTADOS if resultado.total_coincidencias == 0 else ESTADO_OK
     _registro.debug("Consulta ejecutada: métrica=%s dominio=%s resultado=%r", consulta.metrica, consulta.dominio, resultado.resultado)
     return RespuestaConsultaAtlas(estado=estado, texto_respuesta=texto, resultado=resultado)

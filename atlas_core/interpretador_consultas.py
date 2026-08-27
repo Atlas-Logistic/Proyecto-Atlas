@@ -25,6 +25,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_VIAJES,
     ConsultaAtlas,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_INCIDENCIAS,
@@ -40,8 +41,10 @@ from atlas_core.consultas_atlas import (
     PERIODO_HOY,
     PERIODO_MES_PASADO,
     PERIODO_SEMANA_PASADA,
+    RELACIONES_SOPORTADAS,
     normalizar_texto_atlas,
 )
+from atlas_core.extractor import _patente_valida
 
 RESUELTA = "RESUELTA"
 AMBIGUA = "AMBIGUA"
@@ -69,6 +72,14 @@ class ResolucionEntidad:
     valor: str = ""
     candidatos: tuple[str, ...] = ()
     palabras_coincidentes: frozenset[str] = frozenset()
+    # Bloque UNIVERSAL V1.1 -- sólo lo usa `resolver_patente_por_texto`:
+    # cuando el estado es SIN_COINCIDENCIA pero el texto trae un token con
+    # FORMA de patente (misma regla que ya usa el resto de Atlas,
+    # `atlas_core.extractor._patente_valida` -- nunca una regla nueva)
+    # que no coincide con ninguna patente conocida, se conserva aquí para
+    # poder responder "no encontré viajes asociados a X" en vez de perder
+    # el filtro en silencio (Bloque 1 del ticket UNIVERSAL V1.1).
+    token_no_reconocido: str = ""
 
 
 _PATRON_PALABRA = re.compile(r"[A-Z0-9]+")
@@ -132,7 +143,14 @@ def resolver_patente_por_texto(texto: str, valores_conocidos: Iterable[str]) -> 
     conocidas = {normalizar_texto_atlas(v): str(v).strip() for v in valores_conocidos if str(v).strip()}
     encontradas = sorted({conocidas[p] for p in palabras_texto if p in conocidas})
     if not encontradas:
-        return ResolucionEntidad(SIN_COINCIDENCIA)
+        # Bloque UNIVERSAL V1.1 (Bloque 1 del ticket) -- "filtro no
+        # resuelto ≠ quitar filtro": si ningún token conocido coincidió
+        # pero el texto SÍ trae un token con forma de patente (misma
+        # validación que ya usa el resto de Atlas), se conserva para que
+        # el llamador pueda responder "no encontré viajes asociados a
+        # X" en vez de degradar silenciosamente a un conteo sin filtro.
+        candidato = next((p for p in sorted(palabras_texto) if _patente_valida(p)), "")
+        return ResolucionEntidad(SIN_COINCIDENCIA, token_no_reconocido=candidato)
     if len(encontradas) == 1:
         return ResolucionEntidad(
             RESUELTA, valor=encontradas[0], palabras_coincidentes=frozenset({normalizar_texto_atlas(encontradas[0])}),
@@ -197,6 +215,39 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
 _PALABRAS_PESO = ("TONELADA", "TONELADAS", "PESO", "KILOS", "KG")
 _PALABRAS_KM = ("KM", "KMS", "KILOMETRO", "KILOMETROS", "DISTANCIA", "RECORRIDO", "RECORRIDOS")
 _PALABRAS_TIEMPO = ("MINUTOS", "TIEMPO", "DURACION")
+# Bloque UNIVERSAL V1.1 (Bloque 3 del ticket) -- unidad de PIEZAS/UNIDADES
+# físicas, que `viajes.csv` NUNCA registra (sólo `peso_total_viaje_kg`,
+# nunca un conteo de piezas) -- caso real: "¿Cuántas barras de hormigón
+# se movieron?" no puede responderse con toneladas como si fuera lo
+# mismo. Lista abierta a cualquier unidad física de pieza, no sólo
+# "barras" (Bloque 12: "no hardcodear frases" -- esto es vocabulario de
+# UNIDAD, igual que _PALABRAS_PESO/_PALABRAS_KM ya existentes, no una
+# frase fija).
+_PALABRAS_UNIDADES_FISICAS = (
+    "BARRA", "BARRAS", "PIEZA", "PIEZAS", "UNIDAD", "UNIDADES",
+    "ROLLO", "ROLLOS", "PLANCHA", "PLANCHAS", "PAQUETE", "PAQUETES",
+)
+# Bloque UNIVERSAL V1.1 (Bloque 2 del ticket) -- "la entidad después de
+# CUÁNTOS/CUÁNTAS debe corresponder a la dimensión contada": caso real
+# "¿Cuántas patentes están vinculadas correctamente a choferes?"
+# respondía "10 choferes" porque el chequeo de CHOFERES en plural (ver
+# `_PALABRAS_CHOFER_PLURAL` más abajo) no distinguía "cuántos choferes"
+# (cuenta personas) de "cuántas patentes...a choferes" (cuenta
+# patentes, "choferes" es sólo un calificador). Reutiliza las mismas
+# columnas ya declaradas como RELACIÓN (`RELACIONES_SOPORTADAS`) --
+# nunca una dimensión nueva por fuera de ese contrato. "chofer" queda
+# deliberadamente FUERA de esta tabla: ese caso ya lo resuelve
+# `_PALABRAS_CHOFER_PLURAL`/`METRICA_COUNT_DISTINCT_CHOFER`, no se toca
+# para no arriesgar ninguna regresión ya probada.
+_SUSTANTIVO_CUANTOS_A_RELACION = {
+    "PATENTE": "vehiculo", "PATENTES": "vehiculo", "VEHICULO": "vehiculo", "VEHICULOS": "vehiculo",
+    "CLIENTE": "cliente", "CLIENTES": "cliente",
+    "OBRA": "obra", "OBRAS": "obra",
+    "DESTINO": "destino", "DESTINOS": "destino",
+    "COMUNA": "comuna", "COMUNAS": "comuna",
+    "MATERIAL": "material", "MATERIALES": "material",
+}
+_PATRON_CUANTOS_SUSTANTIVO = re.compile(r"\bCUANT[OA]S?\b\s+([A-Z]+)")
 
 _PALABRAS_METRICA = (
     (METRICA_SUM_PESO, _PALABRAS_PESO),
@@ -347,6 +398,28 @@ def _intentar_consulta_relacional(
     if resolucion_patente.estado == AMBIGUA:
         return None, ("AMBIGUO:patente:" + " | ".join(resolucion_patente.candidatos),)
 
+    # Bloque UNIVERSAL V1.1 (Bloque 1/10 del ticket) -- casos reales
+    # "¿En qué viajes aparece JD8659?"/"JE8659?": el token SÍ tiene forma
+    # de patente pero no existe en ninguna patente real del dataset. Sin
+    # esto, el resto de esta función nunca calza (exige RESUELTA) y el
+    # texto cae al flujo genérico de más abajo -- que tampoco lo explica
+    # (un token alfanumérico nunca activa `_palabras_capitalizadas_sin_explicar`,
+    # esa función sólo mira letras) -- terminando en un COUNT_VIAJES SIN
+    # FILTRO ("universo completo"), exactamente el bug reportado. Se
+    # exige evidencia de que la pregunta SÍ es sobre una patente
+    # (keyword de patente/vehículo, o "aparece"/"vinculada" + guía/chofer)
+    # para no interceptar cualquier token de 6 caracteres suelto.
+    if (
+        resolucion_patente.estado == SIN_COINCIDENCIA
+        and resolucion_patente.token_no_reconocido
+        and (
+            _PATRON_PATENTE_KW.search(normalizado)
+            or _PATRON_APARECE.search(normalizado)
+            or _PATRON_VINCULAD.search(normalizado)
+        )
+    ):
+        return None, (f"SIN_COINCIDENCIA_PATENTE:{resolucion_patente.token_no_reconocido}",)
+
     if resolucion_patente.estado == RESUELTA and _PATRON_APARECE.search(normalizado):
         # A) "en qué viajes aparece la patente X"
         # D) "en qué guías aparece X"
@@ -466,6 +539,62 @@ def interpretar_consulta_determinista(
             metrica=METRICA_COUNT_EVENTOS, dominio=DOMINIO_EVENTOS, filtros=filtros_evento,
             agrupacion=agrupacion_evento, limite=limite_evento,
         ), tuple(avisos)
+
+    # Bloque UNIVERSAL V1.1 (Bloque 2 del ticket) -- "cuántas patentes/
+    # vehículos/clientes/obras/destinos/comunas/materiales...": la
+    # dimensión contada es la que sigue a CUÁNTOS/CUÁNTAS, nunca otra
+    # entidad que la frase sólo mencione como calificador (caso real:
+    # "cuántas patentes están vinculadas correctamente a CHOFERES" cuenta
+    # patentes, no choferes). Se revisa ANTES que el chequeo de CHOFERES
+    # en plural de más abajo, precisamente para que ese chequeo no se
+    # dispare por error cuando "choferes" aparece pero no es la
+    # dimensión pedida. "chofer" no está en la tabla de dispatch a
+    # propósito -- ese caso lo sigue resolviendo, sin cambios, el
+    # chequeo de CHOFERES en plural.
+    coincidencia_cuantos = _PATRON_CUANTOS_SUSTANTIVO.search(normalizado)
+    if coincidencia_cuantos is not None:
+        relacion_contada = _SUSTANTIVO_CUANTOS_A_RELACION.get(coincidencia_cuantos.group(1))
+        if relacion_contada is not None:
+            filtros_relacion: dict[str, str] = {}
+            for nombre_periodo, frases in _PALABRAS_PERIODO:
+                if any(frase in normalizado for frase in frases):
+                    filtros_relacion["periodo"] = nombre_periodo
+                    break
+            return ConsultaAtlas(
+                metrica=METRICA_COUNT_DISTINCT_RELACION, relacion=relacion_contada, filtros=filtros_relacion,
+            ), tuple(avisos)
+
+    # Bloque UNIVERSAL V1.1 (Bloque 3 del ticket) -- unidad de piezas/
+    # unidades físicas que `viajes.csv` no registra (caso real: "¿Cuántas
+    # barras de hormigón se movieron?"). Mismo principio que el bloque
+    # anterior (Bloque 2): sólo dispara cuando la unidad física es la
+    # dimensión CONTADA (el sustantivo justo después de CUÁNTOS/CUÁNTAS)
+    # -- nunca cuando sólo aparece como filtro/calificador ("¿Cuántos
+    # VIAJES hizo Villagra con rollos...?" sigue contando viajes, sin
+    # esto "rollos" hubiera secuestrado esa consulta entera, regresión
+    # real encontrada al implementar este bloque). Nunca reinterpreta en
+    # silencio como peso: construye la consulta de peso que SÍ puede
+    # responder (filtrada por tipo de carga si el propio texto lo nombra,
+    # p. ej. "BARRAS" ya es un valor real de `tipos_carga`) y dispara un
+    # aviso `UNIDAD_NO_DISPONIBLE` para que la presentación explique la
+    # limitación en vez de mostrar toneladas como si fuera la cantidad
+    # de piezas pedida (Bloque 22: la explicación vive en la
+    # presentación, aquí sólo se señala el hecho).
+    sustantivo_contado = coincidencia_cuantos.group(1) if coincidencia_cuantos is not None else None
+    if (
+        sustantivo_contado in _PALABRAS_UNIDADES_FISICAS
+        and not any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_PESO)
+    ):
+        filtros_unidad: dict[str, str] = {}
+        resolucion_tipo_carga = resolver_entidad_por_palabras(texto, catalogos.tipos_carga)
+        if resolucion_tipo_carga.estado == RESUELTA:
+            filtros_unidad["tipo_carga"] = resolucion_tipo_carga.valor
+        for nombre_periodo, frases in _PALABRAS_PERIODO:
+            if any(frase in normalizado for frase in frases):
+                filtros_unidad["periodo"] = nombre_periodo
+                break
+        avisos.append(f"UNIDAD_NO_DISPONIBLE:{sustantivo_contado}")
+        return ConsultaAtlas(metrica=METRICA_SUM_PESO, filtros=filtros_unidad), tuple(avisos)
 
     # Bloque B1 V2 (Bloque 4.C del ticket) -- "cuántos choferes/
     # conductores [trabajaron/hicieron viajes/cargaron]..." pregunta por
@@ -598,6 +727,28 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
         return "la pregunta pide distancia/km, pero la consulta no calcula distancia"
     if _menciona(_PALABRAS_PESO) and consulta.metrica != METRICA_SUM_PESO:
         return "la pregunta pide peso/toneladas, pero la consulta no suma peso"
+    # Bloque UNIVERSAL V1.1 (Bloque 3/12 del ticket) -- red de seguridad
+    # para cuando B1 (no el determinístico, que ya no comete este error
+    # desde este bloque) reinterpreta "cuántas piezas/unidades/barras" como
+    # SUM_PESO sin que la pregunta mencione peso en absoluto: se rechaza
+    # como respuesta directa -- nunca se ejecuta un peso como si fuera un
+    # conteo de piezas.
+    if (
+        _menciona(_PALABRAS_UNIDADES_FISICAS)
+        and not _menciona(_PALABRAS_PESO)
+        and consulta.metrica == METRICA_SUM_PESO
+    ):
+        return "la pregunta pide cantidad de piezas/unidades, pero la consulta suma peso (unidad distinta)"
+    # Bloque UNIVERSAL V1.1 (Bloque 2/12 del ticket) -- "cuántas patentes/
+    # vehículos" nunca debe resolverse como cantidad de choferes (mismo
+    # caso real de `_PATRON_CUANTOS_SUSTANTIVO`, aplicado también a lo
+    # que B1 pudiera proponer).
+    if (
+        _PATRON_PATENTE_KW.search(normalizado)
+        and re.search(r"\bCUANT[OA]S?\b", normalizado)
+        and consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER
+    ):
+        return "la pregunta pide cantidad de patentes/vehículos, pero la consulta cuenta choferes"
     if _menciona(_PALABRAS_INCIDENCIA) and consulta.dominio != DOMINIO_INCIDENCIAS_DOCUMENTALES:
         return "la pregunta pide incidencias documentales, pero la consulta consulta viajes"
     if (

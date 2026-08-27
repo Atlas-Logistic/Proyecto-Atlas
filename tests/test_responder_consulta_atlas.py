@@ -347,3 +347,53 @@ def test_que_patentes_ha_usado_retamal_de_extremo_a_extremo(tmp_path):
     assert r.estado == ESTADO_OK
     assert r.resultado.resultado == ("BPHR67",)
     assert "BPHR67" in r.texto_respuesta
+
+
+# ============================================================
+# Bloque UNIVERSAL V1.1 -- extremo a extremo (casos reales del bug report)
+# ============================================================
+
+def test_patente_inexistente_nunca_responde_universo_completo(tmp_path):
+    """Casos reales A/B: "¿En qué viajes aparece JD8659?"/"JE8659?"
+    respondían "23 viajes" (todo el dataset, sin filtro). Debe responder
+    una negativa explícita, nunca degradar a un conteo sin filtro."""
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [
+        _fila(numero_transporte="T1", patentes_tracto="AA1111"),
+        _fila(numero_transporte="T2", patentes_tracto="BB2222"),
+    ])
+    r = responder_consulta_atlas("¿En qué viajes aparece JD8659?", ruta_viajes=ruta_viajes)
+    assert r.estado == ESTADO_SIN_RESULTADOS
+    assert r.texto_respuesta == "No encontré viajes asociados a JD8659."
+    assert r.resultado is None  # nunca ejecuta un conteo sin filtro por detrás
+
+
+def test_cuantas_patentes_vinculadas_a_choferes_de_extremo_a_extremo(tmp_path):
+    """Caso real C: respondía "10 choferes" -- debe contar patentes."""
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [
+        _fila(numero_transporte="T1", choferes="JUAN PEREZ", patentes_tracto="AA1111"),
+        _fila(numero_transporte="T2", choferes="PEDRO GOMEZ", patentes_tracto="BB2222"),
+        _fila(numero_transporte="T3", choferes="JUAN PEREZ", patentes_tracto="AA1111"),
+    ])
+    r = responder_consulta_atlas(
+        "¿Cuántas patentes están vinculadas correctamente a choferes?", ruta_viajes=ruta_viajes,
+    )
+    assert r.estado == ESTADO_OK
+    assert r.texto_respuesta == "2 patentes."
+
+
+def test_cuantas_barras_de_extremo_a_extremo_explica_la_limitacion(tmp_path):
+    """Caso real D: respondía toneladas como si fuera cantidad de
+    barras. Debe explicar la limitación de unidad Y seguir dando la
+    cifra de peso disponible, en una sola respuesta."""
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [
+        _fila(numero_transporte="T1", tipos_carga="BARRAS", peso_total_viaje_kg="1000"),
+        _fila(numero_transporte="T2", tipos_carga="ROLLOS", peso_total_viaje_kg="500"),
+    ])
+    r = responder_consulta_atlas("¿Cuántas barras de hormigón se movieron?", ruta_viajes=ruta_viajes)
+    assert r.estado == ESTADO_OK
+    assert r.texto_respuesta.startswith("No tengo registrada la cantidad de barras por unidad.")
+    assert "1 tonelada" in r.texto_respuesta or "1000 kg" in r.texto_respuesta
+    assert r.resultado.consulta_interpretada.filtros.get("tipo_carga") == "BARRAS"
