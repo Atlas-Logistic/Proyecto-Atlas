@@ -16,7 +16,10 @@ import pytest
 
 from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.procesamiento_masivo import COLUMNAS
-from atlas_core.revalidacion_documental import revalidar_telemetria_sin_ocr
+from atlas_core.revalidacion_documental import (
+    revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr,
+    revalidar_telemetria_sin_ocr,
+)
 from atlas_core.rutas.modelos import Coordenadas
 from atlas_core.telemetria.modelos import PosicionTelemetria, ViajeTelemetria
 from atlas_core.telemetria.proveedor import ProveedorTelemetriaSoloCache
@@ -468,3 +471,175 @@ def test_caso7_dos_documentos_revalidados_permiten_consolidar_origen_del_viaje(e
 
     assert viaje.origen_determinado_por == "TELEMETRIA_GPS"
     assert viaje.planta_origen_nombre == "AZA RENCA"
+
+
+# ============================================================
+# Bloque CIERRE ORIGEN GPS -- revalidación general del bug de
+# "candidato único sin contacto real con la ventana documental"
+# (caso real 472224: RENCA confirmada con solape_ventana=0.0%, un
+# cluster real pero horas antes de la ventana documental).
+# ============================================================
+
+
+def test_candidato_unico_sin_contacto_se_revalida_a_planta_correcta(entorno):
+    """Reproduce 472224: un cluster antiguo (fuera de ventana) en RENCA
+    quedó persistido como origen; con la lógica corregida y un cluster
+    contemporáneo real en COLINA ya en caché, la revalidación general
+    corrige el origen -- sin enumerar la guía a mano."""
+    repo = _repositorio(entorno["catalogos"])
+    repo.guardar_viajes(
+        "onelogis", "BDFG50", FECHA_ISO, FECHA_ISO,
+        (
+            ViajeTelemetria("lejos", "BDFG50", "2026-08-11 07:17:00", "2026-08-11 07:23:00", 0.0),
+            ViajeTelemetria("cerca", "BDFG50", "2026-08-11 09:55:00", "2026-08-11 10:45:00", 0.0),
+        ),
+    )
+    repo.guardar_breadcrumbs(
+        "onelogis", "lejos",
+        (
+            PosicionTelemetria(COORD_AZA_RENCA.latitud, COORD_AZA_RENCA.longitud, "2026-08-11 07:17:00"),
+            PosicionTelemetria(COORD_AZA_RENCA.latitud, COORD_AZA_RENCA.longitud, "2026-08-11 07:23:00"),
+        ),
+    )
+    repo.guardar_breadcrumbs(
+        "onelogis", "cerca",
+        (
+            PosicionTelemetria(COORD_AZA_COLINA.latitud, COORD_AZA_COLINA.longitud, "2026-08-11 09:55:00"),
+            PosicionTelemetria(COORD_AZA_COLINA.latitud, COORD_AZA_COLINA.longitud, "2026-08-11 10:45:00"),
+        ),
+    )
+    planta_renca_id = next(
+        p.planta_id for p in CatalogoPlantas(entorno["catalogos"] / "plantas.json").listar()
+        if p.nombre == "AZA RENCA"
+    )
+    _escribir_csv(entorno["dataset"], [_fila_csv(
+        hora_entrada_aza="09:52", hora_salida_aza="10:50",
+        planta_origen_id=planta_renca_id, planta_origen_nombre="AZA RENCA",
+        origen_determinado_por="TELEMETRIA_GPS", evidencia_origen="ancla=...",
+        estado_telemetria="SELECCIONADO", origen_gps="ORIGEN_GPS_CONFIRMADO",
+        planta_gps_id=planta_renca_id, planta_gps_nombre="AZA RENCA",
+        motivo_origen_gps="VENTANA_DOCUMENTAL;score=0.0;solape_ventana=0.0%;duracion_dentro_min=0.0;trips=lejos",
+        distancia_km="14.18", duracion_min="21.3", proveedor_ruta="openrouteservice",
+        estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+    )])
+
+    resultado = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+    )
+
+    assert resultado["guias_actualizadas"] == ["464624"]
+    fila = _leer_csv(entorno["dataset"])[0]
+    assert fila["planta_origen_nombre"] == "AZA COLINA"
+    assert fila["origen_determinado_por"] == "TELEMETRIA_GPS"
+    # Origen cambió y había ruta previa -> se invalida, nunca se deja un
+    # km que ya no corresponde al origen vigente (no se recalcula aquí).
+    assert fila["distancia_km"] == ""
+    assert fila["estado_ruta"] == "REQUIERE_REVISION"
+    assert fila["motivo_ruta"] == "ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA"
+
+
+def test_candidato_unico_sin_contacto_sin_evidencia_de_reemplazo_queda_no_determinado(entorno):
+    """Sin ningún cluster contemporáneo real disponible (nada en caché
+    cerca de la ventana documental), la revalidación NUNCA inventa un
+    reemplazo -- el origen queda limpio (ORIGEN_NO_DETERMINADO), listo
+    para revisión humana."""
+    repo = _repositorio(entorno["catalogos"])
+    repo.guardar_viajes(
+        "onelogis", "BDFG50", FECHA_ISO, FECHA_ISO,
+        (ViajeTelemetria("lejos", "BDFG50", "2026-08-11 07:17:00", "2026-08-11 07:23:00", 0.0),),
+    )
+    repo.guardar_breadcrumbs(
+        "onelogis", "lejos",
+        (
+            PosicionTelemetria(COORD_AZA_RENCA.latitud, COORD_AZA_RENCA.longitud, "2026-08-11 07:17:00"),
+            PosicionTelemetria(COORD_AZA_RENCA.latitud, COORD_AZA_RENCA.longitud, "2026-08-11 07:23:00"),
+        ),
+    )
+    planta_renca_id = next(
+        p.planta_id for p in CatalogoPlantas(entorno["catalogos"] / "plantas.json").listar()
+        if p.nombre == "AZA RENCA"
+    )
+    _escribir_csv(entorno["dataset"], [_fila_csv(
+        hora_entrada_aza="09:52", hora_salida_aza="10:50",
+        planta_origen_id=planta_renca_id, planta_origen_nombre="AZA RENCA",
+        origen_determinado_por="TELEMETRIA_GPS", evidencia_origen="ancla=...",
+        estado_telemetria="SELECCIONADO", origen_gps="ORIGEN_GPS_CONFIRMADO",
+        planta_gps_id=planta_renca_id, planta_gps_nombre="AZA RENCA",
+        motivo_origen_gps="VENTANA_DOCUMENTAL;score=0.0;solape_ventana=0.0%;duracion_dentro_min=0.0;trips=lejos",
+        distancia_km="14.18", duracion_min="21.3", proveedor_ruta="openrouteservice",
+        estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+    )])
+
+    resultado = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+    )
+
+    assert resultado["guias_actualizadas"] == ["464624"]
+    fila = _leer_csv(entorno["dataset"])[0]
+    assert fila["planta_origen_id"] == ""
+    assert fila["planta_origen_nombre"] == ""
+    assert fila["origen_determinado_por"] == ""
+    assert fila["distancia_km"] == ""
+    assert fila["estado_ruta"] == "REQUIERE_REVISION"
+
+
+def test_candidato_unico_sin_contacto_nunca_toca_confirmacion_humana(entorno):
+    """Una decisión humana explícita (CONFIRMACION_HUMANA) nunca se
+    sobrescribe, aunque el `motivo_origen_gps` histórico tenga la firma
+    del bug."""
+    planta_renca_id = next(
+        p.planta_id for p in CatalogoPlantas(entorno["catalogos"] / "plantas.json").listar()
+        if p.nombre == "AZA RENCA"
+    )
+    _escribir_csv(entorno["dataset"], [_fila_csv(
+        hora_entrada_aza="09:52", hora_salida_aza="10:50",
+        planta_origen_id=planta_renca_id, planta_origen_nombre="AZA RENCA",
+        origen_determinado_por="CONFIRMACION_HUMANA",
+        motivo_origen_gps="VENTANA_DOCUMENTAL;score=0.0;solape_ventana=0.0%;duracion_dentro_min=0.0;trips=lejos",
+        distancia_km="14.18", estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+    )])
+
+    resultado = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+    )
+
+    assert resultado["guias_actualizadas"] == []
+    fila = _leer_csv(entorno["dataset"])[0]
+    assert fila["planta_origen_nombre"] == "AZA RENCA"
+
+
+def test_candidato_unico_sin_contacto_es_idempotente(entorno):
+    """Una segunda pasada sobre una fila ya revalidada no la vuelve a
+    tocar -- la firma exacta del bug ya no está presente."""
+    repo = _repositorio(entorno["catalogos"])
+    repo.guardar_viajes(
+        "onelogis", "BDFG50", FECHA_ISO, FECHA_ISO,
+        (ViajeTelemetria("cerca", "BDFG50", "2026-08-11 09:55:00", "2026-08-11 10:45:00", 0.0),),
+    )
+    repo.guardar_breadcrumbs(
+        "onelogis", "cerca",
+        (
+            PosicionTelemetria(COORD_AZA_COLINA.latitud, COORD_AZA_COLINA.longitud, "2026-08-11 09:55:00"),
+            PosicionTelemetria(COORD_AZA_COLINA.latitud, COORD_AZA_COLINA.longitud, "2026-08-11 10:45:00"),
+        ),
+    )
+    planta_renca_id = next(
+        p.planta_id for p in CatalogoPlantas(entorno["catalogos"] / "plantas.json").listar()
+        if p.nombre == "AZA RENCA"
+    )
+    _escribir_csv(entorno["dataset"], [_fila_csv(
+        hora_entrada_aza="09:52", hora_salida_aza="10:50",
+        planta_origen_id=planta_renca_id, planta_origen_nombre="AZA RENCA",
+        origen_determinado_por="TELEMETRIA_GPS",
+        motivo_origen_gps="VENTANA_DOCUMENTAL;score=0.0;solape_ventana=0.0%;duracion_dentro_min=0.0;trips=lejos",
+        estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+    )])
+
+    primera = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+    )
+    assert primera["guias_actualizadas"] == ["464624"]
+    segunda = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+    )
+    assert segunda["guias_actualizadas"] == []

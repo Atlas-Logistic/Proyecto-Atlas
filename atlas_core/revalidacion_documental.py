@@ -834,6 +834,130 @@ def revalidar_telemetria_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+# Bloque CIERRE ORIGEN GPS -- causa raíz real (472224): antes de este
+# bloque, `resolver_planta_origen_gps` confirmaba un ÚNICO candidato de
+# geocerca aunque no tuviera NINGÚN contacto temporal real con la
+# ventana documental (`solape_ventana=0.0%`, sin margen contra un
+# segundo candidato con quien compararlo -- "único" se trataba como
+# sinónimo de "válido"). El motivo persistido de ese resultado tiene una
+# firma reconocible SIN ambigüedad: formato `VENTANA_DOCUMENTAL;
+# score=...;solape_ventana=0.0%;...` y SIN el segmento
+# `margen_vs_siguiente=` (que sólo aparece cuando hubo un segundo
+# candidato real con quien comparar). Detectable de forma general -- sin
+# enumerar guías a mano.
+_FIRMA_ORIGEN_GPS_UNICO_SIN_CONTACTO = (
+    "VENTANA_DOCUMENTAL;", "solape_ventana=0.0%",
+)
+
+
+def _motivo_origen_gps_es_candidato_unico_sin_contacto(motivo_origen_gps: str) -> bool:
+    return (
+        motivo_origen_gps.startswith(_FIRMA_ORIGEN_GPS_UNICO_SIN_CONTACTO[0])
+        and _FIRMA_ORIGEN_GPS_UNICO_SIN_CONTACTO[1] in motivo_origen_gps
+        and "margen_vs_siguiente=" not in motivo_origen_gps
+    )
+
+
+def revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    proveedor_nombre: str = "onelogis",
+    servicio_telemetria: ServicioTelemetria | None = None,
+) -> dict[str, object]:
+    """Bloque CIERRE ORIGEN GPS -- revalida, de forma general (nunca
+    enumerando guías a mano), toda fila cuyo origen quedó determinado por
+    `TELEMETRIA_GPS` bajo la firma exacta del bug de "candidato único sin
+    contacto real con la ventana documental" (ver `_motivo_origen_gps_es_
+    candidato_unico_sin_contacto`). Vuelve a ejecutar el MISMO `resolver_
+    planta_origen_gps` ya corregido -- fuente de verdad única, nunca una
+    copia paralela de su lógica -- contra la caché de telemetría YA
+    persistida (sin red) y el catálogo de plantas VIGENTE (incluida
+    cualquier geocerca ya enriquecida). El resultado puede ser: la MISMA
+    planta con evidencia ahora genuina, una planta DISTINTA, o ningún
+    origen determinable -- se persiste tal cual, sin forzar ni preferir
+    ningún desenlace.
+
+    Nunca toca una fila cuyo origen ya fue fijado por una decisión
+    humana explícita (`CONFIRMACION_HUMANA`) -- misma regla ya vigente en
+    `revalidar_telemetria_sin_ocr`. Idempotente: una fila ya revalidada
+    pierde la firma exacta del bug (deja de tener `solape_ventana=0.0%`
+    sin `margen_vs_siguiente=`), así que una segunda pasada no la vuelve
+    a tocar."""
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    servicio = servicio_telemetria or ServicioTelemetria(
+        ProveedorTelemetriaSoloCache(nombre=proveedor_nombre),
+        RepositorioTelemetria(carpeta / "telemetria_cache.json"),
+    )
+    plantas_catalogo = CatalogoPlantas(carpeta / "plantas.json").listar()
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("origen_determinado_por", "")).strip() != "TELEMETRIA_GPS":
+                continue
+            motivo_previo = str(fila.get("motivo_origen_gps", "")).strip()
+            if not _motivo_origen_gps_es_candidato_unico_sin_contacto(motivo_previo):
+                continue
+
+            patente = str(fila.get("patente_tracto", "")).strip().upper()
+            if not _patente_valida(patente):
+                continue
+            fecha_doc = _parsear_fecha_dd_mm_yyyy(fila.get("fecha"))
+            if fecha_doc is None:
+                continue
+            hora_entrada_dt = _combinar_fecha_hora(fecha_doc, fila.get("hora_entrada_aza"))
+            hora_salida_dt = _combinar_fecha_hora(fecha_doc, fila.get("hora_salida_aza"))
+            if hora_entrada_dt is None and hora_salida_dt is None:
+                continue
+
+            resultado_gps = enriquecer_documento_con_telemetria(
+                servicio=servicio, patente=patente, fecha=fecha_doc,
+                hora_entrada=hora_entrada_dt, hora_salida=hora_salida_dt,
+                plantas=plantas_catalogo,
+            )
+            campos = resultado_gps.campos
+            planta_origen_id_previo = str(fila.get("planta_origen_id", "")).strip()
+            planta_gps_id = campos.get("planta_gps_id", "")
+            origen_cambio = False
+            for campo, valor in campos.items():
+                fila[campo] = valor
+            if campos.get("origen_gps") == ORIGEN_GPS_CONFIRMADO and planta_gps_id:
+                origen_cambio = planta_gps_id != planta_origen_id_previo
+                fila["planta_origen_id"] = planta_gps_id
+                fila["planta_origen_nombre"] = campos.get("planta_gps_nombre", "")
+                fila["origen_determinado_por"] = "TELEMETRIA_GPS"
+                fila["evidencia_origen"] = campos.get("evidencia_telemetria", "") or "GEOCERCA_PLANTA"
+            else:
+                # Ya no confirma -- nunca se conserva en silencio un
+                # origen que la propia lógica corregida ya no sostiene
+                # (mismo criterio R1.1 vigente en revalidar_telemetria_
+                # sin_ocr, aplicado aquí aunque `estado_telemetria` YA
+                # estuviera poblado -- por diseño, es justo lo que este
+                # bloque debe poder corregir).
+                if planta_origen_id_previo:
+                    origen_cambio = True
+                fila["planta_origen_id"] = ""
+                fila["planta_origen_nombre"] = ""
+                fila["origen_determinado_por"] = ""
+                fila["evidencia_origen"] = campos.get("origen_gps", "")
+
+            if origen_cambio and str(fila.get("distancia_km", "")).strip():
+                fila["distancia_km"] = ""
+                fila["duracion_min"] = ""
+                fila["proveedor_ruta"] = ""
+                fila["estado_ruta"] = "REQUIERE_REVISION"
+                fila["motivo_ruta"] = "ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA"
+            elif origen_cambio:
+                fila.update(derivar_estado_ruta_tras_cambio_origen(fila))
+
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 # Bloque FINAL CORE V1 -- caso real 464981: ventana en días para
 # considerar un viaje del MISMO vehículo "vecino temporal" -- calibrada
 # sobre el caso real (los vecinos GPS-confirmados quedaron a 1-2 días),
