@@ -819,6 +819,42 @@ def _patente_valida(valor: str) -> bool:
     return bool(re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6}", valor))
 
 
+# Bloque M3 -- causa raíz real (472623/472624, transporte 0000355433,
+# rampla): NO es un bug de extracción/normalización/selección -- el OCR
+# leyó de forma limpia, consistente e independiente (extracción lineal Y
+# geométrica coinciden dentro de cada documento) "JB6878" en una guía y
+# "J36878" en la otra; el texto crudo de CADA documento ya trae
+# exactamente ese valor (impresión dot-matrix real, con otras confusiones
+# de OCR visibles en el mismo documento: "IRANSPORTES", "GASA MATRIZ").
+# `_patente_valida` (arriba) es deliberadamente laxa (cualquier letra +
+# cualquier dígito, 6 caracteres) para no rechazar formatos que Atlas
+# todavía no conoce -- nunca se endurece acá, evitar romper aceptaciones
+# ya vigentes. Pero SÍ existe un hecho general, verificable y ajeno a
+# esta guía en particular: una patente chilena real tiene exactamente
+# una de dos formas (2 letras + 4 dígitos, formato histórico; o 4 letras
+# + 2 dígitos, formato vigente desde 2007) -- "J36878" (1 letra + 5
+# dígitos) no calza con NINGUNA de las dos, mientras "JB6878" (2 letras +
+# 4 dígitos) sí. Esto nunca decide por sí solo cuál valor es el
+# correcto -- se expone como EVIDENCIA CONTEXTUAL adicional (ver
+# `atlas_core.atlas_ia.registro_problemas.recopilar_evidencia_
+# documentos_relacionados`) para que B1 pueda razonar con un hecho
+# determinista y general, en vez de sólo con "conocimiento general del
+# mundo" (que la política de sistema le prohíbe usar, ver
+# `atlas_core.atlas_ia.politica_prompt`).
+_FORMATOS_PATENTE_CHILE = (
+    re.compile(r"^[A-Z]{2}\d{4}$"),  # formato histórico (p. ej. JB6878)
+    re.compile(r"^[A-Z]{4}\d{2}$"),  # formato vigente desde 2007 (p. ej. BDFG50)
+)
+
+
+def patente_tiene_formato_chileno_estandar(valor: str) -> bool:
+    """True si `valor` calza con alguna de las dos formas reales de
+    patente chilena -- nunca con conocimiento de una patente/guía
+    concreta, sólo la estructura general (letras/dígitos/posición)."""
+    valor = str(valor or "").upper()
+    return any(patron.fullmatch(valor) for patron in _FORMATOS_PATENTE_CHILE)
+
+
 def _chofer_lineal_contaminado(valor: Any) -> bool:
     """Detecta etiquetas ajenas incorporadas inequívocamente al chofer lineal."""
     texto = _texto_simple(str(valor or ""))

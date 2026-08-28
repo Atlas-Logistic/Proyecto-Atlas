@@ -29,6 +29,15 @@ from dataclasses import dataclass
 from typing import Callable, Mapping, MutableMapping
 
 from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
+from atlas_core.extractor import patente_tiene_formato_chileno_estandar
+
+# Bloque M3 -- código de evidencia general (nunca ligado a una patente o
+# guía en particular): expone el hecho determinista "esta forma calza
+# con una patente chilena real" como evidencia CONTEXTUAL adicional --
+# ver `atlas_core.extractor.patente_tiene_formato_chileno_estandar` para
+# la causa raíz completa (472623/472624, confusión OCR B/3 real, nunca
+# un bug de extracción/normalización/selección).
+FORMATO_PATENTE_CHILENA_ESTANDAR = "FORMATO_PATENTE_CHILENA_ESTANDAR"
 
 # `carpeta_catalogos` (keyword, opcional): la mayoría de los recolectores
 # la ignoran (evidencia ya persistida en `filas` les basta); el de planta
@@ -152,9 +161,22 @@ def recopilar_evidencia_documentos_relacionados(
                 _normalizar_texto(otra.get("obra_destino")) == _normalizar_texto(fila.get("obra_destino")),
             ))
             if señales >= señales_minimas:
+                # Bloque M3 -- caso real 472623/472624: sólo para los
+                # campos de patente, agrega la evidencia CONTEXTUAL de
+                # formato (nunca decide sola, ver `patente_tiene_
+                # formato_chileno_estandar`) -- un hecho general sobre
+                # la estructura real de una patente chilena, no una
+                # regla sobre esta guía en particular.
+                a_favor = (
+                    (FORMATO_PATENTE_CHILENA_ESTANDAR,)
+                    if campo in ("patente_tracto", "patente_rampla")
+                    and patente_tiene_formato_chileno_estandar(str(otra.get(campo)))
+                    else ()
+                )
                 evidencias.append(EvidenciaIA(
                     identificador=f"documento:{otra.get('archivo')}", campo=campo,
                     valor=str(otra.get(campo)), tipo_fuente="HISTORICO", nivel="DOCUMENTO_RELACIONADO",
+                    a_favor=a_favor,
                     independencia=1, procedencia="atlas_ia.registro_problemas.documentos_relacionados",
                     referencias_fuente=(str(otra.get("archivo", "")),),
                 ))

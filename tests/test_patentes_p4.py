@@ -31,6 +31,7 @@ from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.extractor import (
     _extraer_patentes_geometrico,
     _extraer_rut_chofer_geometrico,
+    patente_tiene_formato_chileno_estandar,
 )
 from atlas_core.ocr import BloqueOCR
 from atlas_core.procesamiento_masivo import procesar_archivo
@@ -466,6 +467,38 @@ def test_valor_documental_con_b_legitima_no_se_corrompe_con_carro_bien_leido():
     ]
 
     assert _extraer_patentes_geometrico(bloques) == {"tracto": "BPHR67", "carro": "JB8529"}
+
+
+# ============================================================
+# Bloque M3 -- caso real 472623/472624: OCR leyó, de forma limpia e
+# independiente dentro de cada documento, "JB6878" y "J36878" -- ningún
+# bug de extracción/normalización/selección (ambos caminos, lineal y
+# geométrico, coinciden con el texto crudo de CADA documento). Hecho
+# general y determinista: "J36878" (1 letra + 5 dígitos) no calza con
+# ninguna forma real de patente chilena; "JB6878" (2 letras + 4 dígitos)
+# sí -- evidencia contextual, nunca decide sola.
+# ============================================================
+
+
+def test_patente_tiene_formato_chileno_estandar_formato_historico():
+    assert patente_tiene_formato_chileno_estandar("JB6878") is True  # 2 letras + 4 dígitos
+
+
+def test_patente_tiene_formato_chileno_estandar_formato_vigente():
+    assert patente_tiene_formato_chileno_estandar("BDFG50") is True  # 4 letras + 2 dígitos
+
+
+def test_patente_tiene_formato_chileno_estandar_caso_real_472624_no_calza():
+    assert patente_tiene_formato_chileno_estandar("J36878") is False  # 1 letra + 5 dígitos
+
+
+def test_patente_tiene_formato_chileno_estandar_no_distingue_mayusculas():
+    assert patente_tiene_formato_chileno_estandar("jb6878") is True
+
+
+def test_patente_tiene_formato_chileno_estandar_vacio_o_ruido_es_false():
+    assert patente_tiene_formato_chileno_estandar("") is False
+    assert patente_tiene_formato_chileno_estandar("123456") is False  # sin ninguna letra
 
 
 # --- 11: no regresión -- ver `python -m pytest -q` (suite completa) ---
