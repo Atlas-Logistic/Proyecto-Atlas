@@ -150,6 +150,101 @@ def recopilar_evidencia_documentos_relacionados(
     return recolectar
 
 
+def recopilar_evidencia_catalogo_obras_destinos(campo: str) -> RecolectorEvidencia:
+    """Bloque DESTINOS INTERNOS V1 -- expone, como evidencia estructurada
+    para B1, las relaciones obra<->destino que `CatalogoObrasDestinos`
+    YA conoce para el nombre de obra documental -- catálogo interno
+    ANTES de Internet (Sección 2/9 del bloque).
+
+    Nunca intenta resolver por sí sola (eso ya lo hizo, determinística y
+    primero, `atlas_core.procesamiento_masivo._corroborar_obra_destino_
+    confirmada` -- si esta función corre, es porque esa resolución
+    estricta+redundante YA NO alcanzó): sólo empaqueta lo que el
+    catálogo sabe (candidatos con relación confirmada, aunque sean más
+    de uno -- p. ej. una obra con destinos en distintas comunas
+    legítimamente) para que B1 lo lea, lo cruce con la dirección
+    documental y decida.
+
+    Rol de cada evidencia (Sección 8, sin taxonomía nueva -- reutiliza
+    `TIPOS_FUENTE_IA`/`nivel` ya existentes de `EvidenciaIA`):
+    - relación con `fuente` que empieza con CONFIRMACION_HUMANA/
+      DECISION_HUMANA -> `tipo_fuente="DECISION_HUMANA"`,
+      `es_decision_humana=True`, `nivel="CANONICO_CONFIRMADO"`
+      (CONCEPTUAL: "CANONICO_CONFIRMADO" del bloque).
+    - cualquier otra relación confirmada -> `tipo_fuente="CATALOGO"`,
+      `nivel="CATALOGO_CONFIRMADO"` (CONCEPTUAL: "OBSERVADO_REPETIDO"/
+      "OBSERVADO_UNICO" según corresponda -- el propio catálogo ya
+      decide cuándo una relación pasa a CONFIRMADA)."""
+
+    def recolectar(
+        fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
+    ) -> tuple[EvidenciaIA, ...]:
+        if campo != "obra_destino" or not carpeta_catalogos:
+            return ()
+        nombre_obra = str(fila.get("obra_destino", "")).strip()
+        if nombre_obra in {"", "No encontrado"}:
+            return ()
+        from pathlib import Path as _Path
+
+        from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, ErrorCatalogoObrasDestinos
+
+        carpeta = _Path(carpeta_catalogos)
+        try:
+            catalogo = CatalogoObrasDestinos(
+                ruta=carpeta / "obras_destinos.json",
+                ruta_clientes=carpeta / "clientes.json",
+                ruta_destinos=carpeta / "destinos_maestros.json",
+            )
+            destinos = catalogo.listar_destinos_confirmados_para_obra(nombre_obra=nombre_obra)
+        except (OSError, ValueError, ErrorCatalogoObrasDestinos):
+            return ()
+
+        evidencias: list[EvidenciaIA] = []
+        for destino in destinos:
+            fuente = str(destino.fuente or "").upper()
+            es_humana = fuente.startswith("CONFIRMACION_HUMANA") or fuente.startswith("DECISION_HUMANA")
+            evidencias.append(EvidenciaIA(
+                identificador=f"catalogo_destino:{destino.destino_id}", campo=campo,
+                valor=str(destino.direccion or destino.nombre_destino),
+                tipo_fuente="DECISION_HUMANA" if es_humana else "CATALOGO",
+                nivel="CANONICO_CONFIRMADO" if es_humana else "CATALOGO_CONFIRMADO",
+                independencia=1, es_decision_humana=es_humana,
+                procedencia="atlas_ia.registro_problemas.catalogo_obras_destinos",
+                referencias_fuente=(
+                    f"destino_id={destino.destino_id}",
+                    f"comuna={destino.comuna}" if destino.comuna else "",
+                    f"region={destino.region}" if destino.region else "",
+                    f"estado_calidad={destino.estado_calidad}",
+                    f"fuente={destino.fuente}",
+                ),
+            ))
+        return tuple(evidencias)
+
+    return recolectar
+
+
+def recopilar_evidencia_obra_destino(campo: str) -> RecolectorEvidencia:
+    """Bloque DESTINOS INTERNOS V1 -- combina, en el orden de prioridad
+    del bloque (interno antes que nada), la evidencia de catálogo
+    (`recopilar_evidencia_catalogo_obras_destinos`) con la de documentos
+    relacionados del mismo lote (`recopilar_evidencia_documentos_
+    relacionados`, ya existente, sin cambios) -- nunca reemplaza a
+    ninguna, las junta para que B1 vea todo lo interno disponible antes
+    de pedir Internet."""
+    recolector_catalogo = recopilar_evidencia_catalogo_obras_destinos(campo)
+    recolector_historial = recopilar_evidencia_documentos_relacionados(campo)
+
+    def recolectar(
+        fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
+    ) -> tuple[EvidenciaIA, ...]:
+        return (
+            *recolector_catalogo(fila, filas, carpeta_catalogos=carpeta_catalogos),
+            *recolector_historial(fila, filas, carpeta_catalogos=carpeta_catalogos),
+        )
+
+    return recolectar
+
+
 def recopilar_evidencia_destino_por_obra_relacionada(
     fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
 ) -> tuple[EvidenciaIA, ...]:
@@ -277,12 +372,18 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
     # siempre, ya reunida en `contexto.evidencias` antes de la primera
     # llamada -- lo único que cambia es que el prompt ya no ofrece pedir
     # de nuevo algo que nunca se pudo volver a pedir.
+    # Bloque DESTINOS INTERNOS V1 -- `recopilar_evidencia` pasa de sólo
+    # documentos relacionados a `recopilar_evidencia_obra_destino`
+    # (catálogo interno + documentos relacionados juntos, catálogo
+    # primero) -- agota conocimiento interno (CatalogoObrasDestinos,
+    # relaciones confirmadas, confirmaciones humanas) antes de que B1
+    # necesite pedir VERIFICACION_EXTERNA (Sección 2/9/11 del bloque).
     TipoProblemaIA(
         codigos=frozenset({"OBRA_DESTINO_SIN_CORROBORAR"}), fuente="MOTIVO_DOCUMENTAL",
         campo="obra_destino", dominio="OBRA_DESTINO",
         herramientas=("VERIFICACION_EXTERNA",),
         aplicable_automaticamente=True,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("obra_destino"),
+        recopilar_evidencia=recopilar_evidencia_obra_destino("obra_destino"),
         aplicar=aplicar_valor_documental_directo("obra_destino"),
     ),
     TipoProblemaIA(

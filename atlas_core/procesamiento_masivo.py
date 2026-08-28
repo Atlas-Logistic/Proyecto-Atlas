@@ -69,6 +69,7 @@ from atlas_core.catalogo_clientes import (
     EstadoVigenciaCliente,
     normalizar_rut_cliente,
 )
+from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos,
     ErrorCatalogoObrasDestinos,
@@ -80,6 +81,7 @@ from atlas_core.rutas.destino_entrega import (
     calcular_ruta_con_planta_conocida,
     resolver_entrega_documento,
 )
+from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
 from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.seleccion_recorrido import (
@@ -848,8 +850,26 @@ def _corroborar_obra_destino_confirmada(
     rut_cliente: str,
     obra_documental: str,
     identidad_cliente_corroborada: bool,
-) -> ResolucionObraDestino | None:
-    """Consulta read-only una obra confirmada; ante cualquier duda, se abstiene."""
+    direccion_documental: str = "",
+) -> object | None:
+    """Consulta read-only una obra confirmada; ante cualquier duda, se abstiene.
+
+    Bloque DESTINOS INTERNOS V1 -- causa raíz real (caso 472593: la obra
+    "EMPRESA CONST SIGRO", para PRODALAM SA, YA tiene DOS relaciones
+    CONFIRMADAS por Javier -- guías históricas 464550 y 472227 -- ambas
+    hacia el mismo lugar real (Avda Irarrázaval 5497, Ñuñoa), sólo que
+    quedaron como dos `Destino` de texto ligeramente distinto -- mismo
+    patrón ya documentado y resuelto para AUSIN SAN BERNARDO, ver
+    `decisiones_pendientes.py`). `resolver_obra_destino_confirmada`
+    exige EXACTAMENTE una relación confirmada -- ante DOS (evidencia
+    REDUNDANTE, nunca una contradicción real) devuelve `None` como si no
+    hubiera ninguna, y 472593 escalaba a B1/Internet por algo que Javier
+    ya había confirmado dos veces. Mismo fix ya aplicado en
+    `decisiones_pendientes.py` (Bloque REGENERACIÓN B1): si la búsqueda
+    estricta no resuelve, se prueba `listar_destinos_confirmados_para_
+    obra` (sin exigir unicidad) y se acepta si la dirección documental
+    coincide LITERALMENTE (normalizada, nunca fuzzy) con CUALQUIERA de
+    los destinos confirmados -- nunca "el primero" ni "el más nuevo"."""
     obra = str(obra_documental or "").strip()
     if obra in {"", "No encontrado"}:
         return None
@@ -864,14 +884,27 @@ def _corroborar_obra_destino_confirmada(
         )
         if cliente_id is None:
             return None
-        return CatalogoObrasDestinos(
+        catalogo_obras = CatalogoObrasDestinos(
             ruta=carpeta / "obras_destinos.json",
             ruta_clientes=carpeta / "clientes.json",
             ruta_destinos=carpeta / "destinos_maestros.json",
-        ).resolver_obra_destino_confirmada(
+        )
+        resolucion = catalogo_obras.resolver_obra_destino_confirmada(
             cliente_id=cliente_id,
             nombre_obra=obra,
         )
+        if resolucion is not None:
+            return resolucion
+        direccion = str(direccion_documental or "").strip()
+        if direccion in {"", "No encontrado"}:
+            return None
+        texto_documental = normalizar_nombre_destino(direccion)
+        destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra)
+        for destino in destinos_confirmados_obra:
+            calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
+            if calle and calle in texto_documental:
+                return destino
+        return None
     except (OSError, ValueError, ErrorCatalogoObrasDestinos):
         return None
 
@@ -1623,12 +1656,21 @@ def procesar_archivo(
         and obra_documental not in {"", "No encontrado"}
         and obra_final == obra_documental_normalizada
     ):
+        # Bloque DESTINOS INTERNOS V1 -- lectura de sólo texto, barata
+        # (mismo `textos` ya en memoria, sin OCR ni red nueva), para que
+        # el fallback de "destinos confirmados redundantes" (ver
+        # docstring de `_corroborar_obra_destino_confirmada`) pueda
+        # comparar contra la dirección de entrega REAL del documento --
+        # la resolución de ruta/geocodificación todavía no corrió a esta
+        # altura de la función.
+        direccion_documental_temprana = (extraer_identificadores_destino(textos).despachar_a or "").strip()
         obra_destino_corroborada = _corroborar_obra_destino_confirmada(
             carpeta_catalogos,
             cliente_texto=str(datos.get("cliente", "")),
             rut_cliente=str(datos.get("RUT del cliente", "")),
             obra_documental=obra_final,
             identidad_cliente_corroborada=cliente_corroborado_n1,
+            direccion_documental=direccion_documental_temprana,
         )
         if obra_destino_corroborada is None:
             cliente_id_historico = _resolver_cliente_id_corroborado(
