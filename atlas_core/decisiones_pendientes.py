@@ -27,7 +27,7 @@ from atlas_core.catalogo_obras_destinos import (
     EstadoVigencia,
     normalizar_nombre_obra,
 )
-from atlas_core.catalogo_plantas import Planta
+from atlas_core.catalogo_plantas import CatalogoPlantas, Planta
 from atlas_core.catalogo_vehiculos import (
     _diferencia_ocr_segura,
     cargar_catalogo_vehiculos,
@@ -45,7 +45,10 @@ from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra, resolver_obra_por_variacion_ortografica_menor
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
-from atlas_core.rutas.origen_evidencia import MOTIVO_CONTRADICCION_OPERACIONAL
+from atlas_core.rutas.origen_evidencia import (
+    MOTIVO_CONTRADICCION_OPERACIONAL,
+    MOTIVO_ENCABEZADO_NO_CONFIABLE,
+)
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 from atlas_core.verificacion_externa import EvidenciaExterna
 
@@ -1464,18 +1467,32 @@ def detectar_decision_origen_no_confirmado(
     # ANTES que la evidencia GPS: son fuentes de motivo distintas, nunca
     # se mezclan.
     motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
-    if motivo_ruta.startswith(MOTIVO_CONTRADICCION_OPERACIONAL):
+    if motivo_ruta.startswith(MOTIVO_CONTRADICCION_OPERACIONAL) or motivo_ruta == MOTIVO_ENCABEZADO_NO_CONFIABLE:
         candidatos_contradiccion: list[dict[str, object]] = []
+        hubo_senal = motivo_ruta == MOTIVO_ENCABEZADO_NO_CONFIABLE
         for fuente, nombre_token, veredicto in _PATRON_CONTRADICCION_ORIGEN.findall(motivo_ruta):
             nombre_normalizado = nombre_token.replace("_", " ").strip().upper()
             planta = next((p for p in plantas_activas if p.nombre.strip().upper() == nombre_normalizado), None)
             if planta is None:
                 continue
+            hubo_senal = True
+            if veredicto == "INCOMPATIBLE":
+                # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA --
+                # una planta que la propia regla de compatibilidad ya
+                # marcó incompatible con la categoría documental NUNCA
+                # puede aparecer como "planta sugerida": mostrarla
+                # induciría a confirmar exactamente lo que Atlas ya
+                # determinó implausible (caso real 472648: "AZA RENCA"
+                # aparecía como candidato pese a que la propia regla ya
+                # la había descartado). La señal queda igual registrada en
+                # `evidencias` para trazabilidad -- nunca como candidato
+                # accionable con "Confirmar planta sugerida".
+                continue
             candidatos_contradiccion.append({
                 "planta_id": planta.planta_id, "planta_nombre": planta.nombre,
                 "evidencia_resumen": f"fuente={fuente.lower()}, compatibilidad con la regla configurada={veredicto.lower()}",
             })
-        if not candidatos_contradiccion:
+        if not hubo_senal:
             return None
         documento_contradiccion = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
         return crear_decision(
@@ -1483,9 +1500,9 @@ def detectar_decision_origen_no_confirmado(
             numero_guia=str(documento_contradiccion[0]), numero_transporte=str(documento_contradiccion[1]),
             campo="planta_origen", valor_documental="",
             valor_normalizado="", identidad_resuelta=None,
-            candidatos=candidatos_contradiccion, motivos=["CONTRADICCION_OPERACIONAL_ORIGEN"],
+            candidatos=candidatos_contradiccion, motivos=[motivo_ruta.split("[", 1)[0] or motivo_ruta],
             evidencias=[{
-                "tipo": "CONTRADICCION_OPERACIONAL_ORIGEN", "motivo_ruta": motivo_ruta,
+                "tipo": motivo_ruta.split("[", 1)[0] or motivo_ruta, "motivo_ruta": motivo_ruta,
                 "tipo_carga": str(fila.get("tipo_carga", "")),
             }],
             acciones_permitidas=ACCIONES_ORIGEN_NO_CONFIRMADO,
@@ -1733,6 +1750,14 @@ def regenerar_decisiones_persistidas(
         }
     except (OSError, ValueError):
         patentes_homologables = set()
+    # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- catálogo de
+    # plantas vivo, para poder recalcular (nunca sólo conservar tal cual)
+    # los `candidatos` de una decisión `ORIGEN_NO_CONFIRMADO` YA
+    # PUBLICADA. Ver bloque de reconciliación más abajo.
+    try:
+        plantas_vigentes = CatalogoPlantas(carpeta / "plantas.json").listar()
+    except (OSError, ValueError):
+        plantas_vigentes = []
     decisiones_lista = actualizar_contrato_vehiculos_persistidos(decisiones)
     resultado: list[dict[str, object]] = []
     for original in decisiones_lista:
@@ -1951,6 +1976,35 @@ def regenerar_decisiones_persistidas(
                     for destino in destinos_confirmados_obra
                 ):
                     continue
+
+        if tipo == "ORIGEN_NO_CONFIRMADO" and filas_por_guia is not None:
+            # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA --
+            # causa raíz real (472648): a diferencia de
+            # DESTINO_NO_RESUELTO/R19 arriba, aquí el propio `motivo_ruta`
+            # de la fila NO cambió de texto (sigue siendo la misma
+            # contradicción ya detectada) -- lo que cambió fue la
+            # POLÍTICA de `detectar_decision_origen_no_confirmado` sobre
+            # cómo interpretarlo (una planta INCOMPATIBLE ya no se ofrece
+            # como candidato). Comparar sólo el código de motivo, como
+            # hace R19, no habría detectado nada obsoleto. En vez de eso,
+            # se vuelve a ejecutar el MISMO detector -- fuente de verdad
+            # única, nunca una copia paralela de su lógica -- contra la
+            # fila y el catálogo de plantas VIGENTES; si sigue habiendo
+            # una pregunta real, se adopta su resultado completo
+            # (candidatos/motivos/evidencias ya recalculados, nunca sólo
+            # los campos de presentación); si la evidencia ya no sostiene
+            # ninguna pregunta (`None`), la tarjeta se retira -- nunca
+            # queda una sugerencia ya descartada por la propia regla.
+            numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+            fila_actual = filas_por_guia.get(numero_guia_decision)
+            if fila_actual is not None:
+                decision_fresca = detectar_decision_origen_no_confirmado(
+                    archivo=str((decision.get("documento") or {}).get("archivo", numero_guia_decision)),
+                    fila=fila_actual, plantas=plantas_vigentes,
+                )
+                if decision_fresca is None:
+                    continue
+                decision = decision_fresca
 
         if tipo == "CLIENTE_CANDIDATO":
             # Bloque REVISIÓN DE ATLAS -- AUDITORÍA Y RESOLUCIÓN AUTÓNOMA V1

@@ -44,6 +44,17 @@ SIN_REGLA = "SIN_REGLA"
 # paralela.
 MOTIVO_CONTRADICCION_OPERACIONAL = "CONTRADICCION_OPERACIONAL_ORIGEN"
 
+# Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- motivo
+# persistido por `revalidacion_documental.revalidar_origen_encabezado_no_
+# confiable_sin_ocr` cuando un origen quedó determinado ÚNICAMENTE por
+# `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz societaria,
+# nunca la planta real de despacho -- ver `rutas.origen_documental`) y se
+# revierte a sin-determinar. Reconocido igual por `detectar_decision_
+# origen_no_confirmado` para ofrecer una pregunta `ORIGEN_NO_CONFIRMADO`
+# NEUTRAL (sin candidato -- Atlas nunca vuelve a proponer la misma planta
+# que acaba de invalidar).
+MOTIVO_ENCABEZADO_NO_CONFIABLE = "ENCABEZADO_GUIA_NO_CONFIABLE"
+
 
 def resolver_planta_por_codigo_mobile(codigo: str | None, plantas: Iterable[Planta]) -> Planta | None:
     """Traduce el código que Mobile informa (p. ej. `AZA_COLINA` --

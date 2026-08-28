@@ -30,7 +30,7 @@ from atlas_core.rutas.proveedor import ProveedorRutasSimulado
 
 COORD_AZA_RENCA = Coordenadas(-70.685226, -33.401595)
 TEXTOS_ENCABEZADO_RENCA = [
-    "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
+    "GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
     "SEÑOR(ES) : CLIENTE DEMO SA",
     "OBRA DESTINO : OBRA DEMO",
     "DESPACHAR A : AV FORESTAL 1014 CORONEL",
@@ -139,7 +139,7 @@ def test_geocodificacion_contradice_comuna_documental_no_expone_destino_incorrec
     Desktop muestra como destino operacional -- antes de este fix, "Angol"
     seguía llegando a `direccion_entrega` pese a estar marcado REVISAR."""
     textos = [
-        "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
+        "GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
         "SEÑOR(ES) : MATERIALES Y SOLUCIONES SA",
         "OBRA DESTINO : AUSIN SAN BERNARDO",
         "DESPACHAR A : INTERIOR NUEVA O1148 SAN BERNARDO SAN BERNAR",
@@ -183,7 +183,7 @@ def test_calle_homonima_de_una_comuna_de_otra_region_no_bloquea_un_destino_corre
     documental es ambigua -- nunca debe rechazar un geocode correcto a
     Quilicura sólo por esa coincidencia léxica del catálogo territorial."""
     textos = [
-        "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
+        "GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",
         "SEÑOR(ES) : EBEMA SA",
         "OBRA DESTINO : EBEMA SA",
         "DESPACHAR A : GALVARINO 8501 QUILICURA",

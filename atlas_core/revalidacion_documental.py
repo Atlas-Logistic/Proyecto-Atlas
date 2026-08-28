@@ -1058,6 +1058,62 @@ def revalidar_rut_cliente_desde_mobile_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_origen_encabezado_no_confiable_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+    """Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- revierte
+    todo origen que quedó determinado ÚNICAMENTE por
+    `evidencia_origen="ENCABEZADO_GUIA"` (`atlas_core.rutas.
+    origen_documental.resolver_origen_documental`, sin Mobile, sin GPS) --
+    sin OCR, sin red: sólo relee columnas ya persistidas.
+
+    Causa raíz real (472647/472648, transporte 0000355231): "CASA MATRIZ
+    PLANTA RENCA..." es el domicilio legal/societario del EMISOR
+    (terminología SII estándar, idéntica en cada guía de esa empresa),
+    nunca la planta física real de despacho -- Javier confirma que el
+    membrete/encabezado corporativo NUNCA debe tratarse como evidencia de
+    origen, bajo ningún contexto. `resolver_origen_documental` ya se
+    corrigió para dejar de producir este resultado en documentos NUEVOS
+    (excluye la zona de casa matriz/sucursales, ver
+    `rutas.origen_documental._tokens_encabezado_origen`) -- pero un
+    origen YA PERSISTIDO con esta firma exacta (`origen_determinado_por
+    ="DOCUMENTO"` + `evidencia_origen="ENCABEZADO_GUIA"`, sin excepción:
+    esa firma nunca distinguió CUÁL porción del encabezado produjo el
+    match) quedó con el mismo problema estructural, sin ninguna vía para
+    resincronizar. Genérico por diseño -- nunca compara contra un nombre
+    de planta ni de empresa en particular, sólo contra la firma de
+    evidencia ya persistida.
+
+    Si ya existía una ruta calculada con ese origen (posiblemente
+    equivocado), se invalida -- nunca se recalcula aquí (exigiría ORS,
+    fuera de alcance) ni se conserva un km que ya no corresponde a un
+    origen que Atlas acaba de dejar de creer."""
+    from atlas_core.rutas.origen_evidencia import MOTIVO_ENCABEZADO_NO_CONFIABLE
+
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if (
+                str(fila.get("origen_determinado_por", "")).strip() != "DOCUMENTO"
+                or str(fila.get("evidencia_origen", "")).strip() != "ENCABEZADO_GUIA"
+            ):
+                continue
+            fila["planta_origen_id"] = ""
+            fila["planta_origen_nombre"] = ""
+            fila["origen_determinado_por"] = ""
+            fila["evidencia_origen"] = ""
+            fila["distancia_km"] = ""
+            fila["duracion_min"] = ""
+            fila["proveedor_ruta"] = ""
+            fila["estado_ruta"] = "ORIGEN_NO_DETERMINADO"
+            fila["motivo_ruta"] = MOTIVO_ENCABEZADO_NO_CONFIABLE
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_destino_contra_comuna_documental_sin_ocr(
     *, ruta_dataset: str | Path,
 ) -> dict[str, object]:

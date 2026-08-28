@@ -51,19 +51,45 @@ def _distancia_token(a: str, b: str) -> int:
 
 
 def _tokens_encabezado_origen(texto: str) -> list[str]:
-    """Recorta los tokens al encabezado del emisor, antes del directorio de
-    sucursales. El encabezado de una guía AZA suele continuar con un listado
-    fijo de sucursales ("Sucursal <ciudad>...") impreso como información de
-    contacto, no como planta de despacho. Si esas ciudades también existen
-    como plantas confirmadas en el catálogo (p. ej. "Sucursal Colina"),
-    comparar contra el texto completo genera una segunda coincidencia y
-    anula el voto de la planta real. Se conserva únicamente el tramo
-    anterior a la primera mención tolerante a ruido OCR de "SUCURSAL"."""
+    """Recorta los tokens a la porción del encabezado que SÍ podría traer
+    evidencia real de origen -- nunca el domicilio legal/casa matriz
+    societaria ni el listado de sucursales de contacto, ninguno de los
+    dos es la planta física real de despacho (Bloque CORRECCIÓN
+    ESTRUCTURAL DE ORIGEN DOCUMENTAL -- caso real 472647/472648: guía
+    AZA con "... CASA MATRIZ PLANTA RENCA, LA UNIÓN 3070, RENCA
+    SANTIAGO..." impreso arriba, IDÉNTICO en cada guía que emite esa
+    empresa, sin importar la planta real de despacho -- Javier confirma
+    que el membrete/encabezado corporativo NUNCA debe tratarse como
+    evidencia de origen, bajo ningún contexto).
+
+    "CASA MATRIZ" es terminología SII/comercial chilena estándar (RUT +
+    razón social + domicilio registrado), no un dato propio de ninguna
+    empresa -- excluirla es universal, nunca específico de AZA/RENCA.
+    El encabezado de una guía también suele continuar con un listado
+    fijo de sucursales ("Sucursal <ciudad>...") impreso como información
+    de contacto, no como planta de despacho -- si esas ciudades también
+    existen como plantas confirmadas en el catálogo (p. ej. "Sucursal
+    Colina"), comparar contra el texto completo genera una segunda
+    coincidencia y anula el voto de la planta real.
+
+    Se conserva únicamente el tramo ANTERIOR a la primera mención
+    tolerante a ruido OCR de "CASA MATRIZ" o de "SUCURSAL" -- lo que
+    aparezca primero. Nunca infiere que "no hay nada antes" signifique
+    buscar más abajo: sin texto utilizable antes de cualquiera de esos
+    dos marcadores, no hay encabezado de origen que evaluar."""
     tokens_completos = re.findall(r"[A-Z0-9]+", _normalizar(texto))
+
+    def _es_inicio_casa_matriz(indice: int) -> bool:
+        return (
+            indice + 1 < len(tokens_completos)
+            and _distancia_token(tokens_completos[indice], "CASA") <= 1
+            and _distancia_token(tokens_completos[indice + 1], "MATRIZ") <= 1
+        )
+
     limite = next(
         (
             indice for indice, token in enumerate(tokens_completos)
-            if _distancia_token(token, "SUCURSAL") <= 1
+            if _distancia_token(token, "SUCURSAL") <= 1 or _es_inicio_casa_matriz(indice)
         ),
         len(tokens_completos),
     )

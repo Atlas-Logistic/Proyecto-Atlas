@@ -315,7 +315,7 @@ def test_planta_gps_reemplaza_fallback_documental_una_vez_recuperada_la_patente(
         _bloque("FECHA LLEGADA", 20, 80, 120),
     ]
     texto_encabezado = (
-        "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE "
+        "GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE "
         "GUIA DE DESPACHO ELECTRONICA"
     )
     _preparar_mocks(monkeypatch, bloques, _datos_lineales(), texto_lineal=texto_encabezado)

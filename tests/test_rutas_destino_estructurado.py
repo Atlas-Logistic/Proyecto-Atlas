@@ -90,7 +90,7 @@ def _servicio(tmp_path, resultado_ruta=None):
     return ServicioRutas(proveedor, RepositorioRutas(tmp_path / "cache_rutas.json"))
 
 
-TEXTOS_ENCABEZADO_RENCA = "ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE"
+TEXTOS_ENCABEZADO_RENCA = "GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE"
 
 
 # --- 1: cliente + código destinatario exacto ---

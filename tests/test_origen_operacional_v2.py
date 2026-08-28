@@ -20,11 +20,27 @@ from atlas_core.rutas.proveedor import ProveedorRutasSimulado
 COORD_AZA_COLINA = Coordenadas(-70.6739, -33.1975)
 COORD_AZA_RENCA = Coordenadas(-70.685226, -33.401595)
 
-# Mismo texto de encabezado real ya usado en `test_rutas_destino_entrega.py`
-# para el mismo emisor -- letterhead societario real de AZA, casa matriz
-# RENCA, presente en TODAS sus guías sin importar la planta física real de
+# Mismo texto de encabezado ya usado en `test_rutas_destino_entrega.py` para
+# el mismo emisor -- letterhead societario real de AZA, casa matriz RENCA,
+# presente en TODAS sus guías sin importar la planta física real de
 # despacho (confirmado por Javier).
-TEXTOS_ENCABEZADO_RENCA = ("ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",)
+#
+# Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA: el texto real de
+# 472593 es EXACTAMENTE "...CASA MATRIZ PLANTA RENCA..." (sin ningún campo
+# explícito de origen) -- con la corrección de ese bloque,
+# `resolver_origen_documental` ya NO resuelve NADA a partir de esa porción
+# (Javier confirmó que el membrete/casa matriz nunca es evidencia de
+# origen, bajo ningún contexto -- ver `test_rutas_origen_documental.py`).
+# Se antepone aquí "GUIA DESPACHO PLANTA ORIGEN RENCA" -- un campo
+# explícito sintético, NO parte del documento real -- únicamente para
+# seguir pudiendo ejercitar la lógica de FUSIÓN Mobile/Documento
+# (`fusionar_evidencia_origen`, sin cambios, sigue siendo código general y
+# válido) con un `planta_documento` ya resuelto como entrada. El caso real
+# 472593, reprocesado hoy, ya NO tiene esta rama disponible en absoluto:
+# el documento no aporta ningún candidato (nunca "RENCA vía documento"),
+# así que Mobile (COLINA) resuelve directo, sin fusión ni contradicción
+# que resolver -- un resultado más simple y más correcto todavía.
+TEXTOS_ENCABEZADO_RENCA = ("GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE",)
 
 
 @pytest.fixture
@@ -139,8 +155,16 @@ def test_contradiccion_operacional_genera_decision_origen_no_confirmado(plantas_
     """La contradicción real (Mobile RENCA + BARRAS, sin documento que
     corrobore) deja `motivo_ruta` listo para que
     `detectar_decision_origen_no_confirmado` -- el MISMO mecanismo ya
-    usado para conflictos GPS -- la ofrezca como pregunta humana, con
-    ambas plantas evaluadas como candidatas y su compatibilidad real."""
+    usado para conflictos GPS -- la ofrezca como pregunta humana.
+
+    Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA: una planta
+    que la propia regla ya marcó INCOMPATIBLE (aquí, RENCA vs BARRAS)
+    NUNCA se ofrece como candidato -- ni siquiera si es la única fuente
+    disponible (Mobile) -- mostrarla induciría a confirmar justo lo que
+    Atlas ya determinó implausible. La decisión igual se genera (hay una
+    señal real que investigar), pero sin candidato falso: el humano
+    elige libremente vía SELECCIONAR_OTRA_PLANTA (nunca limitado a una
+    lista, mismo contrato ya usado por ORIGEN_GPS_CONFLICTO)."""
     plantas, colina, renca = plantas_colina_renca
     resultado = resolver_entrega_documento(
         (), plantas, ProveedorRutasSimulado(), codigo_planta_mobile="AZA_RENCA", categoria_documento="BARRAS",
@@ -154,22 +178,19 @@ def test_contradiccion_operacional_genera_decision_origen_no_confirmado(plantas_
     assert decision is not None
     assert decision["tipo"] == "ORIGEN_NO_CONFIRMADO"
     assert decision["motivos"] == ["CONTRADICCION_OPERACIONAL_ORIGEN"]
-    # Única fuente real (Mobile) -- se ofrece como candidata con su
-    # compatibilidad ya evaluada; el humano sigue pudiendo elegir otra
-    # planta del catálogo vía SELECCIONAR_OTRA_PLANTA (nunca se limita a
-    # los candidatos sugeridos -- mismo contrato ya usado por
-    # ORIGEN_GPS_CONFLICTO/ESTADIA_SIN_PLANTA).
-    assert {c["planta_nombre"] for c in decision["candidatos"]} == {"AZA RENCA"}
-    assert "incompatible" in decision["candidatos"][0]["evidencia_resumen"]
+    assert decision["candidatos"] == []
     assert set(decision["acciones_permitidas"]) == {
         "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR", "POSPONER",
     }
 
 
-def test_contradiccion_con_dos_fuentes_ofrece_ambas_plantas_como_candidatas(plantas_colina_renca):
-    """Mobile y documento discrepan y la categoría no está configurada
-    para ninguna regla que desempate -- ambas plantas quedan como
-    candidatas reales, ninguna se descarta en silencio."""
+def test_contradiccion_con_ambas_plantas_incompatibles_no_ofrece_ninguna(plantas_colina_renca):
+    """Mobile y documento discrepan y, para esta categoría puntual,
+    NINGUNA de las dos plantas está configurada como compatible -- ambas
+    quedan marcadas INCOMPATIBLE, así que ninguna se ofrece como
+    candidato (Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA) --
+    la decisión igual se genera, para que un humano elija con
+    conocimiento real, nunca a partir de una sugerencia ya descartada."""
     plantas, colina, renca = plantas_colina_renca
     resultado = resolver_entrega_documento(
         TEXTOS_ENCABEZADO_RENCA, plantas, ProveedorRutasSimulado(),
@@ -182,7 +203,7 @@ def test_contradiccion_con_dos_fuentes_ofrece_ambas_plantas_como_candidatas(plan
     }
     decision = detectar_decision_origen_no_confirmado(archivo="999999.jpg", fila=fila, plantas=plantas)
     assert decision is not None
-    assert {c["planta_nombre"] for c in decision["candidatos"]} == {"AZA COLINA", "AZA RENCA"}
+    assert decision["candidatos"] == []
 
 
 def test_documento_con_origen_ya_resuelto_no_genera_decision(plantas_colina_renca):

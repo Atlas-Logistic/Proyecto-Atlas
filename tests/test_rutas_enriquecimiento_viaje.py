@@ -225,9 +225,9 @@ def test_sin_proveedor_posicion_no_falla_se_abstiene(entorno, tmp_path):
 
 # --- PLANTA-P1: fallback documental + política de conflicto GPS/documento ---
 
-TEXTO_DOCUMENTAL_RENCA = ["ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE"]
+TEXTO_DOCUMENTAL_RENCA = ["GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A CASA MATRIZ PLANTA RENCA LA UNION 3070 RENCA SANTIAGO CHILE"]
 TEXTO_DOCUMENTAL_COLINA = [
-    "ACEROS AZA S A CASA MATRIZ PLANTA COLINA PANAMERICANA NORTE 18500 COLINA SANTIAGO CHILE"
+    "GUIA DESPACHO PLANTA ORIGEN COLINA ACEROS AZA S A CASA MATRIZ PLANTA COLINA PANAMERICANA NORTE 18500 COLINA SANTIAGO CHILE"
 ]
 
 
@@ -320,7 +320,7 @@ def test_planta_determinada_sin_coordenadas_en_catalogo_no_lanza(tmp_path):
         obra_destino_texto="DESTINO PRUEBA", patente=None, instante_salida=None,
         catalogo_destinos=destinos_repo, plantas=[planta_sin_coords],
         proveedor_posicion=None, servicio_rutas=servicio,
-        textos_documento=["ACEROS AZA CASA MATRIZ PLANTA COLINA"],
+        textos_documento=["GUIA DESPACHO PLANTA ORIGEN COLINA ACEROS AZA CASA MATRIZ PLANTA COLINA"],
     )
 
     assert resultado.estado_ruta == EstadoRuta.ORIGEN_NO_DETERMINADO.value
