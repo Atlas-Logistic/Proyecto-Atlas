@@ -1,6 +1,7 @@
 """CLI para procesar masivamente guías de despacho."""
 
 import argparse
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -10,7 +11,11 @@ from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_cat
 from atlas_core.telemetria.proveedores.onelogis import OnelogisProvider
 from atlas_core.telemetria.repositorio import RepositorioTelemetria
 from atlas_core.telemetria.servicio import ServicioTelemetria
-from atlas_core.decisiones_pendientes import generar_artefacto
+from atlas_core.decisiones_pendientes import (
+    NOMBRE_ARTEFACTO,
+    generar_artefacto,
+    regenerar_decisiones_persistidas,
+)
 
 
 def fecha_iso(valor: str) -> date:
@@ -118,10 +123,42 @@ def main() -> None:
         servicio_telemetria=servicio_telemetria,
     )
     if estado_catalogos.ruta is not None and Path(argumentos.salida).is_file():
+        # Bloque BUG: PÉRDIDA DE DECISIÓN PENDIENTE AL AGREGAR OTRA GUÍA AL
+        # MISMO VIAJE -- causa raíz real: este CLI publicaba la bandeja con
+        # ÚNICAMENTE las decisiones detectadas en ESTE lote (`resumen
+        # ["decisiones_pendientes"]`, sólo de los archivos NUEVOS que
+        # `procesar_carpeta` acaba de procesar -- los ya presentes en el CSV
+        # se omiten, ver `_archivos_ya_procesados`) -- nunca leía la bandeja
+        # YA PERSISTIDA antes de sobrescribirla, así que cada corrida
+        # (p.ej. Desktop arrastrando una guía nueva al mismo viaje que otra
+        # ya tenía decisiones pendientes legítimas) descartaba en silencio
+        # TODO lo que hubiera antes. Caso real: 472647 (2 decisiones ya
+        # auditadas) perdidas al agregar 472648 al mismo transporte.
+        # Mismo patrón ya correcto en `atlas_core.mobile.procesar_envio_
+        # mobile`/`revalidar_y_regenerar_reporte` (nunca pisan la bandeja,
+        # siempre la funden con lo ya persistido). Se reconcilia además con
+        # `regenerar_decisiones_persistidas` -- así, si evidencia real de
+        # ESTE mismo lote (u otra ya vigente) demuestra que una decisión
+        # anterior quedó resuelta, se retira igual que en cualquier otra
+        # vía oficial; si no hay ninguna razón demostrable, sobrevive
+        # intacta. `generar_artefacto` deduplica por `decision_id` y filtra
+        # contra el ledger -- nunca resucita una ya cerrada ni duplica una
+        # ya vigente.
+        ruta_artefacto = Path(argumentos.salida).parent / NOMBRE_ARTEFACTO
+        decisiones_previas: list[dict[str, object]] = []
+        try:
+            decisiones_previas = json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pass
+        decisiones_reconciliadas = regenerar_decisiones_persistidas(
+            decisiones=[*decisiones_previas, *resumen.get("decisiones_pendientes", [])],
+            carpeta_catalogos=estado_catalogos.ruta,
+            ruta_dataset=argumentos.salida,
+        )
         artefacto = generar_artefacto(
             ruta_dataset=argumentos.salida,
             carpeta_catalogos=estado_catalogos.ruta,
-            decisiones=resumen.get("decisiones_pendientes", []),
+            decisiones=decisiones_reconciliadas,
         )
         print(f"Decisiones pendientes: {len(artefacto['decisiones'])}")
     print("\nResumen final")
