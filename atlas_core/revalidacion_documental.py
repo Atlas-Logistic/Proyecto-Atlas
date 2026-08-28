@@ -643,6 +643,44 @@ def revalidar_patente_sin_homologar_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_tipo_carga_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+    """Bloque MATERIALES Y COHERENCIA OPERACIONAL V1 -- releé cada fila del
+    dataset y reevalúa `tipo_carga` contra `clasificador_material.
+    clasificar_material` aplicado al `descripcion_material` YA persistido
+    -- sin OCR, sin volver a extraer nada. `clasificar_material` es una
+    función pura del texto documental (nunca cambia sola); cualquier
+    discrepancia entre el `tipo_carga` ya persistido y lo que el
+    clasificador VIGENTE produce hoy sólo puede deberse a que el propio
+    clasificador ganó categorías/alias nuevos después de que esa fila se
+    procesó -- nunca a una diferencia de evidencia. Resincronizar es
+    aplicar conocimiento ya existente, no inventar uno nuevo.
+
+    Caso real 460861/460807: "ANGULO"/"PLANA" ya identifican la categoría
+    ANGULOS (`_TERMINOS_ANGULOS`, Bloque ORIGEN OPERACIONAL V2), pero
+    ambas guías se procesaron antes de que esa categoría existiera y
+    quedaron con `tipo_carga=NO DETERMINADO` para siempre -- sin ninguna
+    vía para resincronizar contra el conocimiento ya vigente. Universal
+    por diseño: nunca compara contra un valor de guía específico, sólo
+    contra lo que el clasificador (configurable, ver `clasificador_
+    material.py`) produce para el texto documental de CADA fila."""
+    from atlas_core.clasificador_material import clasificar_material
+
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            actual = str(fila.get("tipo_carga", "")).strip()
+            nuevo = clasificar_material(fila.get("descripcion_material", "")).value
+            if nuevo != actual:
+                fila["tipo_carga"] = nuevo
+                guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_telemetria_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_nombre: str = "onelogis",
