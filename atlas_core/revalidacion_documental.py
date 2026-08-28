@@ -1064,15 +1064,27 @@ def revalidar_origen_por_evidencia_mobile_sin_ocr(
     origen siga reflejando sólo el encabezado queda cubierto igual.
 
     Nunca revisita GPS (`TELEMETRIA_GPS`/`ONELOGIS_GPS`, más confiable en
-    la jerarquía existente), confirmación humana
-    (`CONFIRMACION_HUMANA`) ni un origen ya fusionado con Mobile antes
-    -- sólo el caso `DOCUMENTO` puro. Ante una fusión CONTRADICTORIA
-    (evidencia real incompatible, `fusionar_evidencia_origen` así lo
-    determina) o si el resultado coincide con el origen ya persistido, la
-    fila se conserva intacta -- nunca se fuerza ni se inventa. Si cambia
-    el origen y ya había una ruta/km calculados con el origen ANTERIOR,
-    se invalidan (mismo patrón ya usado en `revalidar_telemetria_sin_ocr`)
-    -- nunca se recalculan aquí (eso exigiría ORS, fuera de alcance)."""
+    la jerarquía existente) ni confirmación humana (`CONFIRMACION_
+    HUMANA`). Ante una fusión CONTRADICTORIA (evidencia real
+    incompatible, `fusionar_evidencia_origen` así lo determina) o si el
+    resultado coincide con el origen ya persistido, la fila se conserva
+    intacta -- nunca se fuerza ni se inventa. Si cambia el origen y ya
+    había una ruta/km calculados con el origen ANTERIOR, se invalidan
+    (mismo patrón ya usado en `revalidar_telemetria_sin_ocr`) -- nunca
+    se recalculan aquí (eso exigiría ORS, fuera de alcance).
+
+    Bloque M2 -- causa raíz real (472624, prueba Mobile end-to-end):
+    antes sólo se revalidaba el caso `origen_determinado_por ==
+    "DOCUMENTO"` (encabezado ganó por defecto, Mobile nunca llegó a
+    fusionarse). Pero una fusión Mobile-SOLO marcada como contradicción
+    por un bug hoy corregido (`evaluar_compatibilidad_planta_categoria`
+    trataba "NO DETERMINADO" -- el centinela de material no determinado
+    -- como si fuera una categoría real incompatible, nunca como
+    ausencia de evidencia) deja el origen COMPLETAMENTE VACÍO
+    (`origen_determinado_por == ""`), no `"DOCUMENTO"`. Se generaliza a
+    ambos estados de partida -- misma operación conceptual (re-fusionar
+    con la lógica de HOY la evidencia Mobile ya persistida), nunca una
+    función paralela."""
     ruta = Path(ruta_dataset)
     try:
         plantas = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
@@ -1095,19 +1107,20 @@ def revalidar_origen_por_evidencia_mobile_sin_ocr(
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
         for fila in filas:
-            if str(fila.get("origen_determinado_por", "")).strip() != "DOCUMENTO":
+            if str(fila.get("origen_determinado_por", "")).strip() not in ("DOCUMENTO", ""):
                 continue
             planta_informada = informada_por_archivo.get(str(fila.get("archivo", "")).strip())
             if not planta_informada:
                 continue  # sin evidencia Mobile persistida para este documento
             planta_mobile = resolver_planta_por_codigo_mobile(planta_informada, plantas)
-            planta_doc = plantas_por_id.get(str(fila.get("planta_origen_id", "")).strip())
-            if planta_mobile is None or planta_doc is None:
+            if planta_mobile is None:
                 continue
+            planta_doc_id_previo = str(fila.get("planta_origen_id", "")).strip()
+            planta_doc = plantas_por_id.get(planta_doc_id_previo) if planta_doc_id_previo else None
             fusion = fusionar_evidencia_origen(
                 planta_mobile=planta_mobile, planta_documento=planta_doc, categoria=fila.get("tipo_carga"),
             )
-            if fusion.contradiccion or fusion.planta is None or fusion.planta.planta_id == planta_doc.planta_id:
+            if fusion.contradiccion or fusion.planta is None or fusion.planta.planta_id == planta_doc_id_previo:
                 continue  # sin cambio real, o evidencia incompatible -- nunca se fuerza
 
             origen_cambio = True

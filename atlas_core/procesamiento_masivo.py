@@ -2253,25 +2253,51 @@ def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
         escritor.writerows(filas)
 
 
-def _crear_orquestador_ia_configurado():
-    """Activa B1 con la credencial segura que también ve Desktop en Windows."""
+def _crear_orquestador_ia_configurado(
+    *, filas: Iterable[Mapping[str, object]] = (), carpeta_catalogos: str | Path | None = None,
+):
+    """Activa B1 con la credencial segura que también ve Desktop en Windows.
+
+    Bloque M2-C -- `filas`/`carpeta_catalogos` (opcionales, aditivos):
+    únicos datos que le faltaban a `_herramientas_b1_disponibles` para
+    poder registrar de verdad las herramientas de investigación de
+    ORIGEN (`EVIDENCIA_HISTORIAL_ORIGEN`/`EVIDENCIA_CATALOGO_PLANTAS`)
+    ya declaradas como disponibles para B1 en `atlas_ia.registro_
+    problemas` -- sin este dato, quedaban declaradas pero no
+    registradas (bug real confirmado: B1 pedía `EVIDENCIA_HISTORIAL_
+    ORIGEN` y el orquestador respondía "herramienta no disponible").
+    Ausentes (valor por defecto): comportamiento idéntico al de
+    siempre, nunca un error."""
     if os.getenv("ATLAS_IA_B1_OPERACIONAL", "1") == "0":
         return None
     from atlas_core.atlas_ia.orquestador import OrquestadorAtlasIA
     from atlas_core.atlas_ia.proveedor_groq import ProveedorModeloIAGroq, resolver_groq_api_key
     if not resolver_groq_api_key():
         return None
-    return OrquestadorAtlasIA(proveedor=ProveedorModeloIAGroq(), herramientas=_herramientas_b1_disponibles())
+    return OrquestadorAtlasIA(
+        proveedor=ProveedorModeloIAGroq(),
+        herramientas=_herramientas_b1_disponibles(filas=filas, carpeta_catalogos=carpeta_catalogos),
+    )
 
 
-def _herramientas_b1_disponibles() -> dict[str, object]:
+def _herramientas_b1_disponibles(
+    *, filas: Iterable[Mapping[str, object]] = (), carpeta_catalogos: str | Path | None = None,
+) -> dict[str, object]:
     """Bloque B1 INVESTIGADOR -- herramientas reales que B1 puede
     solicitar en operación (nunca sólo durante desarrollo). Ausencia de
     credencial de búsqueda (`OPENROUTER_API_KEY`) no bloquea el resto de
     B1: la herramienta simplemente no queda registrada -- B1 sigue
     pudiendo razonar sobre evidencia ya reunida por el Motor, sólo no
     puede investigar más allá de eso (mismo criterio ya usado para
-    GROQ_API_KEY ausente: B1 se desactiva, nunca lanza)."""
+    GROQ_API_KEY ausente: B1 se desactiva, nunca lanza).
+
+    Bloque M2-C -- fuente única de registro: cualquier herramienta que
+    `atlas_ia.registro_problemas` declare como disponible para algún
+    `TipoProblemaIA` debe tener aquí, en el mismo lugar, su conexión
+    real -- nunca una segunda lista manual desincronizada. `filas`/
+    `carpeta_catalogos` ausentes (valor por defecto `()`/`None`) sólo
+    dejan sin registrar las dos herramientas que los necesitan -- nunca
+    lanza, mismo criterio que el resto de esta función."""
     import os as _os
 
     herramientas: dict[str, object] = {}
@@ -2283,6 +2309,27 @@ def _herramientas_b1_disponibles() -> dict[str, object]:
 
         buscador = BuscadorWebConCache(BuscadorWebOpenRouter(), RepositorioCacheBusquedaWeb())
         herramientas["VERIFICACION_EXTERNA"] = herramienta_verificacion_externa(buscador)
+
+    filas_lista = list(filas)
+    if filas_lista:
+        from atlas_core.atlas_ia.herramientas import herramienta_evidencia_historial_origen
+
+        herramienta = herramienta_evidencia_historial_origen(filas_lista)
+        herramientas[herramienta.nombre] = herramienta
+
+    if carpeta_catalogos is not None:
+        try:
+            from atlas_core.catalogo_plantas import CatalogoPlantas
+
+            plantas = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+        except (OSError, ValueError):
+            plantas = []
+        if plantas:
+            from atlas_core.atlas_ia.herramientas import herramienta_evidencia_catalogo_plantas
+
+            herramienta = herramienta_evidencia_catalogo_plantas(plantas)
+            herramientas[herramienta.nombre] = herramienta
+
     return herramientas
 
 
@@ -2545,7 +2592,9 @@ def escalar_resultado_ia_en_memoria(
         with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
             escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
             escritor.writeheader(); escritor.writerows(filas)
-        orquestador = orquestador_ia if orquestador_ia is not None else _crear_orquestador_ia_configurado()
+        orquestador = orquestador_ia if orquestador_ia is not None else _crear_orquestador_ia_configurado(
+            filas=filas, carpeta_catalogos=carpeta_catalogos,
+        )
         resumen = _ejecutar_ia_operacional(ruta, {fila["archivo"]}, orquestador, carpeta_catalogos)
         with ruta.open(newline="", encoding="utf-8-sig") as archivo:
             salida = list(csv.DictReader(archivo, delimiter=";"))[-1]
@@ -2749,7 +2798,15 @@ def procesar_carpeta(
             break
     resumen["documentos_relacionados_corroborados"] = corroborados
     if orquestador_ia is None:
-        orquestador_ia = _crear_orquestador_ia_configurado()
+        # Bloque M2-C -- `ruta_csv` ya tiene TODO el lote volcado a disco
+        # en este punto (ver el `finally` arriba); se relee fresco para
+        # que las herramientas de investigación de origen vean el
+        # dataset completo, nunca una foto vieja de antes del lote.
+        filas_lote: list[dict[str, str]] = []
+        if ruta_csv.is_file():
+            with ruta_csv.open("r", newline="", encoding="utf-8-sig") as _archivo:
+                filas_lote = list(csv.DictReader(_archivo, delimiter=";"))
+        orquestador_ia = _crear_orquestador_ia_configurado(filas=filas_lote, carpeta_catalogos=carpeta_catalogos)
     resumen["atlas_ia"] = _ejecutar_ia_operacional(ruta_csv, archivos_procesados_ahora, orquestador_ia, carpeta_catalogos)
 
     tiempo_total = time.perf_counter() - inicio

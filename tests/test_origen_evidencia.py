@@ -61,6 +61,19 @@ def test_compatibilidad_categoria_no_permitida():
     assert evaluar_compatibilidad_planta_categoria(RENCA, "BARRAS") == INCOMPATIBLE
 
 
+# --- Bloque M2-A -- causa raíz real (472624, Mobile): "NO DETERMINADO"
+# (el centinela real que persiste `atlas_core.clasificador_material`
+# cuando el OCR no logró determinar el material) NUNCA es una categoría
+# real -- ausencia de evidencia != evidencia de incompatibilidad. ---
+
+def test_compatibilidad_categoria_no_determinada_es_sin_regla_no_incompatible():
+    """Caso real 472624: OCR no determinó material -- ninguna planta
+    puede quedar marcada INCOMPATIBLE sólo por eso."""
+    assert evaluar_compatibilidad_planta_categoria(COLINA, "NO DETERMINADO") == SIN_REGLA
+    assert evaluar_compatibilidad_planta_categoria(RENCA, "NO DETERMINADO") == SIN_REGLA
+    assert evaluar_compatibilidad_planta_categoria(COLINA, "no determinado") == SIN_REGLA  # sin distinguir mayúsculas
+
+
 # --- Caso real 472593 -- Mobile COLINA + BARRAS + encabezado societario RENCA ---
 
 def test_caso_real_472593_mobile_colina_no_es_sobrescrito_por_encabezado_renca():
@@ -86,6 +99,21 @@ def test_mobile_renca_barras_regla_incompatible_es_contradiccion():
 def test_mobile_colina_angulos_regla_incompatible_es_contradiccion():
     r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=None, categoria="ANGULOS")
     assert r.contradiccion is True
+
+
+def test_mobile_colina_material_no_determinado_resuelve_directo_caso_real_472624():
+    """Bloque M2-A/B -- causa raíz real 472624: Mobile informó AZA_COLINA,
+    el OCR no logró determinar el material (`tipo_carga="NO DETERMINADO"`)
+    -- Atlas producía `CONTRADICCION_OPERACIONAL_ORIGEN[MOBILE=AZA_COLINA:
+    INCOMPATIBLE]` y dejaba el origen sin determinar. Evidencia directa
+    (Mobile) suficiente y sin contradicción real -- debe resolver y
+    terminar, nunca exigir que el material esté determinado para aceptar
+    Mobile."""
+    r = fusionar_evidencia_origen(planta_mobile=COLINA, planta_documento=None, categoria="NO DETERMINADO")
+    assert r.contradiccion is False
+    assert r.planta is COLINA
+    assert r.fuente == FUENTE_MOBILE
+    assert r.compatibilidad_mobile == SIN_REGLA
 
 
 def test_mobile_renca_angulos_es_consistente():

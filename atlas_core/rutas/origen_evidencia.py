@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from atlas_core.catalogo_plantas import Planta, normalizar_nombre_planta
+from atlas_core.clasificador_material import TipoCarga
 
 FUENTE_MOBILE = "MOBILE"
 FUENTE_DOCUMENTO = "DOCUMENTO"
@@ -82,10 +83,22 @@ def evaluar_compatibilidad_planta_categoria(planta: Planta | None, categoria: st
     (Sección "COMPATIBILIDAD HACIA ATRÁS": "no bloquear viajes válidos
     sólo porque no exista configuración"). `SIN_REGLA` cuando la planta
     no trae `categorias_permitidas` configuradas o la categoría no se
-    pudo determinar -- nunca se interpreta como incompatibilidad."""
+    pudo determinar -- nunca se interpreta como incompatibilidad.
+
+    Bloque M2-A -- causa raíz real (472624, Mobile): el string vacío no
+    era la única forma en que "no se determinó categoría" llegaba
+    aquí -- `TipoCarga.NO_DETERMINADO` ("NO DETERMINADO") es el
+    centinela que el propio clasificador de material persiste cuando NO
+    logró determinar nada, nunca una categoría real. Tratarlo como una
+    categoría literal (que ninguna planta tiene configurada) producía
+    INCOMPATIBLE por ausencia de evidencia, no por evidencia real de
+    incompatibilidad -- exactamente lo que esta función ya declaraba
+    evitar. Ausencia de evidencia != evidencia de incompatibilidad."""
     if planta is None:
         return SIN_REGLA
     categoria_normalizada = str(categoria or "").strip().upper()
+    if categoria_normalizada == TipoCarga.NO_DETERMINADO.value:
+        categoria_normalizada = ""
     permitidas = tuple(str(c).strip().upper() for c in planta.categorias_permitidas)
     if not permitidas or not categoria_normalizada:
         return SIN_REGLA

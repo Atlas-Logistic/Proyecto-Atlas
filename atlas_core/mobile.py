@@ -379,6 +379,30 @@ def procesar_envio_mobile(
             _escribir_filas(dataset, [fila])
             archivo_dataset = identificador
 
+        if carpeta_catalogos is not None:
+            # Bloque M2-D -- paridad real con Desktop: `analizar_guias_
+            # masivo.py` (lote) invoca `detectar_decision_origen_no_
+            # confirmado` para cada documento; este camino (un envío
+            # Mobile a la vez) nunca lo hacía -- una contradicción/
+            # ambigüedad real de origen producida desde Mobile (caso
+            # real 472624) podía quedar invisible en Revisión de Atlas
+            # para siempre, sin que ningún mecanismo la volviera a
+            # detectar. El propio detector ya se abstiene solo (`None`)
+            # cuando el origen quedó inequívocamente resuelto -- nunca
+            # fabrica una pregunta redundante.
+            from atlas_core.catalogo_plantas import CatalogoPlantas
+            from atlas_core.decisiones_pendientes import detectar_decision_origen_no_confirmado
+
+            try:
+                plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+            except (OSError, ValueError):
+                plantas_catalogo = []
+            decision_origen = detectar_decision_origen_no_confirmado(
+                archivo=str(datos.get("archivo") or identificador), fila=datos, plantas=plantas_catalogo,
+            )
+            if decision_origen is not None:
+                decisiones_nuevas.append(decision_origen)
+
         if dataset and dataset.is_file() and carpeta_catalogos is not None:
             # Sección 8: las decisiones que este documento haya generado
             # también deben quedar en la MISMA bandeja de Revisión de Atlas

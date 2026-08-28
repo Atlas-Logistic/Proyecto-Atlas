@@ -291,3 +291,72 @@ def test_preserva_transporte_rut_cliente_y_no_toca_otras_filas(tmp_path):
     assert objetivo["patente_tracto"] == "XY9876"
     assert objetivo["archivo"] == "mobile/envio-8/original.jpg"
     assert filas["900009"]["planta_origen_id"] == norte.planta_id  # otra fila, intacta
+
+
+# ============================================================
+# 8. Bloque M2 -- caso real 472624: fusión Mobile-SOLO marcada
+#    contradicción por un bug hoy corregido (material "NO DETERMINADO"
+#    tratado como incompatibilidad real) deja origen COMPLETAMENTE
+#    VACÍO (`origen_determinado_por == ""`, nunca "DOCUMENTO") -- se
+#    revalida igual, sin enumerar la guía a mano.
+# ============================================================
+
+
+def test_regresion_472624_mobile_solo_con_material_no_determinado_se_revalida(tmp_path):
+    catalogos = tmp_path / "catalogos"; catalogos.mkdir()
+    _crear_plantas(
+        catalogos, nombre_a="AZA COLINA", categorias_a=("BARRAS", "ROLLOS"),
+        nombre_b="AZA RENCA", categorias_b=("ANGULOS",),
+    )
+    repo = RepositorioEnviosMobile(tmp_path)
+    _crear_envio(repo, "16cda9ea-fbe9-4db1-a77a-631f39fc6cdf", planta_informada="AZA_COLINA")
+
+    fila = _fila(
+        archivo="mobile/16cda9ea-fbe9-4db1-a77a-631f39fc6cdf/original.jpg",
+        numero_guia="472624", numero_transporte="0000355433",
+        planta_origen_id="", planta_origen_nombre="", origen_determinado_por="",
+        evidencia_origen="", tipo_carga="NO DETERMINADO",
+        estado_ruta="ORIGEN_NO_DETERMINADO",
+        motivo_ruta="CONTRADICCION_OPERACIONAL_ORIGEN[MOBILE=AZA_COLINA:INCOMPATIBLE]",
+    )
+    dataset = _escribir_dataset(tmp_path, [fila])
+
+    resultado = revalidar_origen_por_evidencia_mobile_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, repositorio=repo,
+    )
+
+    assert resultado["guias_actualizadas"] == ["472624"]
+    filas = {f["numero_guia"]: f for f in csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";")}
+    objetivo = filas["472624"]
+    assert objetivo["planta_origen_nombre"] == "AZA COLINA"
+    assert objetivo["origen_determinado_por"] == "MOBILE"
+
+
+def test_mobile_solo_con_material_realmente_incompatible_no_se_fuerza(tmp_path):
+    """Control -- si el material SÍ está determinado y es realmente
+    incompatible con la planta informada, la contradicción es
+    legítima: la fila se conserva intacta, nunca se fuerza."""
+    catalogos = tmp_path / "catalogos"; catalogos.mkdir()
+    _crear_plantas(
+        catalogos, nombre_a="AZA COLINA", categorias_a=("BARRAS", "ROLLOS"),
+        nombre_b="AZA RENCA", categorias_b=("ANGULOS",),
+    )
+    repo = RepositorioEnviosMobile(tmp_path)
+    _crear_envio(repo, "envio-incompatible", planta_informada="AZA_RENCA")
+
+    fila = _fila(
+        archivo="mobile/envio-incompatible/original.jpg", numero_guia="472999",
+        numero_transporte="T472999", planta_origen_id="", planta_origen_nombre="",
+        origen_determinado_por="", tipo_carga="BARRAS",  # BARRAS es real e incompatible con RENCA
+        estado_ruta="ORIGEN_NO_DETERMINADO",
+        motivo_ruta="CONTRADICCION_OPERACIONAL_ORIGEN[MOBILE=AZA_RENCA:INCOMPATIBLE]",
+    )
+    dataset = _escribir_dataset(tmp_path, [fila])
+
+    resultado = revalidar_origen_por_evidencia_mobile_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, repositorio=repo,
+    )
+
+    assert resultado["guias_actualizadas"] == []
+    filas = {f["numero_guia"]: f for f in csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";")}
+    assert filas["472999"]["planta_origen_nombre"] == ""
