@@ -433,9 +433,14 @@ def _datos_lineales_completos(**overrides):
     datos = {
         "número de guía": "123456",
         "número de transporte": "0000123456",
-        "cliente": "A",
-        "obra destino": "B",
-        "chofer": "C",
+        # Bloque C1: placeholders con contenido real de nombre -- un
+        # valor de una sola letra ("A"/"B") ya no es un fixture neutro,
+        # es indistinguible de un fragmento truncado real (ver
+        # `atlas_core.credibilidad_campos`); ningún test de este archivo
+        # depende del valor literal.
+        "cliente": "CLIENTE DE PRUEBA SPA",
+        "obra destino": "OBRA DE PRUEBA CENTRAL",
+        "chofer": "CHOFER DE PRUEBA",
         "RUT del cliente": "11.111.111-1",
         "RUT del chofer": "11.111.111-1",
         "patente del tracto": "AB1234",

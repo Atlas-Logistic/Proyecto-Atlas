@@ -590,6 +590,51 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         aplicable_automaticamente=False,
         recopilar_evidencia=recopilar_evidencia_origen_por_conflicto_gps,
     ),
+    # ------------------------------------------------------------------
+    # Bloque C1 -- capa general de credibilidad (`atlas_core.
+    # credibilidad_campos`): un campo PRESENTE pero estructuralmente
+    # poco creíble (contaminado por otra sección, una etiqueta genérica,
+    # un fragmento truncado, un RUT crudo) escala aquí exactamente igual
+    # que cualquier otro problema documental -- misma puerta común
+    # (Bloque U1), nunca un camino aparte. Caso real motivador: 472624
+    # (material = bloque completo cliente/fecha/RUT/dirección/
+    # transportista; obra_destino/despachar_a truncados a "TRANSPORTES"/
+    # "SAN"). `aplicable_automaticamente=True` para material/cliente
+    # (mismo criterio que sus pares *_AUSENTE/*_SIN_CORROBORAR: si un
+    # documento hermano corrobora un valor limpio, se aplica solo);
+    # `False` para destino, igual que el resto de PLANTA_ORIGEN/DESTINO
+    # -- nunca se auto-aplica una dirección sin confirmación humana.
+    # ------------------------------------------------------------------
+    TipoProblemaIA(
+        codigos=frozenset({"MATERIAL_POSIBLEMENTE_CONTAMINADO"}), fuente="MOTIVO_DOCUMENTAL",
+        campo="descripcion_material", dominio="MATERIAL", herramientas=("DOCUMENTOS_RELACIONADOS",),
+        aplicable_automaticamente=True,
+        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("descripcion_material"),
+        aplicar=aplicar_valor_documental_directo("descripcion_material"),
+    ),
+    TipoProblemaIA(
+        codigos=frozenset({"OBRA_DESTINO_POSIBLEMENTE_INVALIDA"}), fuente="MOTIVO_DOCUMENTAL",
+        campo="obra_destino", dominio="OBRA_DESTINO",
+        herramientas=("DOCUMENTOS_RELACIONADOS", "VERIFICACION_EXTERNA"),
+        aplicable_automaticamente=True,
+        recopilar_evidencia=recopilar_evidencia_obra_destino("obra_destino"),
+        aplicar=aplicar_valor_documental_directo("obra_destino"),
+    ),
+    TipoProblemaIA(
+        codigos=frozenset({"CLIENTE_POSIBLEMENTE_INVALIDO"}), fuente="MOTIVO_DOCUMENTAL",
+        campo="cliente", dominio="CLIENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
+        aplicable_automaticamente=True,
+        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("cliente"),
+        aplicar=aplicar_valor_documental_directo("cliente"),
+    ),
+    TipoProblemaIA(
+        codigos=frozenset({"DESTINO_FRAGMENTO_TRUNCADO", "DESTINO_CONTAMINADO_POR_OTRA_SECCION"}),
+        fuente="MOTIVO_DOCUMENTAL",
+        campo="despachar_a_crudo", dominio="DESTINO",
+        herramientas=("DOCUMENTOS_RELACIONADOS", "VERIFICACION_EXTERNA"),
+        aplicable_automaticamente=False,
+        recopilar_evidencia=recopilar_evidencia_destino_por_obra_relacionada,
+    ),
 )
 
 # Bloque R12: varias entradas pueden compartir el mismo (fuente, código)

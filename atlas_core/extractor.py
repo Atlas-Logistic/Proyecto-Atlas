@@ -1004,6 +1004,18 @@ _ETIQUETAS_ESTRUCTURALES_DESPACHO = (
 )
 
 
+def etiquetas_estructurales_documento() -> tuple[str, ...]:
+    """Bloque C1 -- acceso público y reutilizable al mismo vocabulario
+    general (`_ETIQUETAS_ESTRUCTURALES_DESPACHO`) que ya usa
+    `_despachar_a_lineal_contaminado`/`_extraer_despachar_a_geometrico`
+    para detectar cuándo un valor extraído absorbió la etiqueta o el
+    valor de OTRA sección del documento. `atlas_core.credibilidad_
+    campos` lo reutiliza para CUALQUIER campo de texto (material, obra
+    destino, dirección) -- fuente única, nunca una segunda lista
+    duplicada de etiquetas documentales."""
+    return _ETIQUETAS_ESTRUCTURALES_DESPACHO
+
+
 _PATRON_RUT_COMPLETO = re.compile(
     r"^\s*(?:[0-9]{1,8}|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+)\s*-\s*[0-9Kk]\s*$"
 )

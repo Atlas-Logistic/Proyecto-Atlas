@@ -34,6 +34,13 @@ from atlas_core.validadores import (
     validar_rut_chileno,
 )
 from atlas_core.clasificador_material import clasificar_material
+from atlas_core.credibilidad_campos import (
+    NivelCredibilidad,
+    evaluar_credibilidad_direccion,
+    evaluar_credibilidad_entidad_nombre,
+    evaluar_credibilidad_material,
+    evaluar_credibilidad_peso,
+)
 from atlas_core.experimento_numero_guia_contextual import decidir_bloques_ocr
 from atlas_core.extractor import (
     _chofer_lineal_contaminado,
@@ -788,6 +795,31 @@ class MotivoRevisionDocumento(str, Enum):
     # está en MOTIVOS_NO_BLOQUEANTES).
     RUT_CLIENTE_CONTRADICE_CATALOGO = "RUT_CLIENTE_CONTRADICE_CATALOGO"
 
+    # Bloque C1 -- capa general de credibilidad (`atlas_core.
+    # credibilidad_campos`), entre extracción y publicación: un campo
+    # puede estar PRESENTE (nunca dispara *_AUSENTE) y aun así ser
+    # estructuralmente poco creíble -- contaminado por otra sección del
+    # documento, una etiqueta genérica en vez de una entidad real, un
+    # fragmento truncado, o un RUT crudo haciendo de razón social.
+    # BLOQUEANTES (no están en MOTIVOS_NO_BLOQUEANTES): publicar un dato
+    # así como si fuera un campo limpio confirmado es exactamente el
+    # "error con falsa seguridad" que este bloque existe para evitar.
+    MATERIAL_POSIBLEMENTE_CONTAMINADO = "MATERIAL_POSIBLEMENTE_CONTAMINADO"
+    OBRA_DESTINO_POSIBLEMENTE_INVALIDA = "OBRA_DESTINO_POSIBLEMENTE_INVALIDA"
+    CLIENTE_POSIBLEMENTE_INVALIDO = "CLIENTE_POSIBLEMENTE_INVALIDO"
+    DESTINO_FRAGMENTO_TRUNCADO = "DESTINO_FRAGMENTO_TRUNCADO"
+    DESTINO_CONTAMINADO_POR_OTRA_SECCION = "DESTINO_CONTAMINADO_POR_OTRA_SECCION"
+    # Distinto de los anteriores: el peso SÍ es legible y estructuralmente
+    # válido (ya pasó el rango de sanidad de extracción, `PESO_KG_
+    # MINIMO_PLAUSIBLE`/`PESO_KG_MAXIMO_PLAUSIBLE`) -- sólo atípico para
+    # una guía de despacho de material a granel. Nunca se reemplaza ni
+    # se inventa otro valor (nada de promedio/heurística silenciosa,
+    # ver `credibilidad_campos.evaluar_credibilidad_peso`); es
+    # puramente informativo, mismo criterio ya usado en Bloque O1 para
+    # el resto de los campos operacionales secundarios -- por eso SÍ
+    # está en MOTIVOS_NO_BLOQUEANTES, a diferencia de los 5 anteriores.
+    PESO_OPERACIONALMENTE_ATIPICO = "PESO_OPERACIONALMENTE_ATIPICO"
+
 
 MOTIVOS_NO_BLOQUEANTES = frozenset({
     MotivoRevisionDocumento.MATERIAL_AUSENTE.value,
@@ -803,6 +835,9 @@ MOTIVOS_NO_BLOQUEANTES = frozenset({
     # evidenciado). Se resuelve como Incidencia Documental.
     MotivoRevisionDocumento.RUT_CHOFER_INVALIDO.value,
     MotivoRevisionDocumento.RUT_CLIENTE_INVALIDO.value,
+    # Bloque C1 -- peso legible pero atípico: advertencia informativa,
+    # nunca bloquea (ver comentario junto a la definición del motivo).
+    MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value,
 })
 
 
@@ -1802,6 +1837,28 @@ def procesar_archivo(
     if documento_degradado:
         _motivo(MotivoRevisionDocumento.DOCUMENTO_DEGRADADO)
 
+    # Bloque C1 -- capa general de credibilidad, entre extracción y
+    # publicación (ver `atlas_core.credibilidad_campos`): un campo
+    # PRESENTE puede seguir siendo poco creíble (contaminado por otra
+    # sección, una etiqueta genérica, un fragmento truncado, un RUT
+    # crudo). Nunca reemplaza el valor documental -- sólo agrega el
+    # motivo trazable correspondiente para que quede en revisión (o,
+    # más adelante, escale a B1 vía `atlas_ia.registro_problemas`, ver
+    # bloque U1) en vez de publicarse como dato limpio.
+    if evaluar_credibilidad_material(descripcion).nivel != NivelCredibilidad.CONFIABLE:
+        _motivo(MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO)
+    if evaluar_credibilidad_entidad_nombre(datos.get("obra destino")).nivel != NivelCredibilidad.CONFIABLE:
+        _motivo(MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA)
+    if evaluar_credibilidad_entidad_nombre(datos.get("cliente")).nivel != NivelCredibilidad.CONFIABLE:
+        _motivo(MotivoRevisionDocumento.CLIENTE_POSIBLEMENTE_INVALIDO)
+    resultado_credibilidad_destino = evaluar_credibilidad_direccion(
+        (extraer_identificadores_destino(textos).despachar_a or "").strip()
+    )
+    if resultado_credibilidad_destino.motivo == "DESTINO_FRAGMENTO_TRUNCADO":
+        _motivo(MotivoRevisionDocumento.DESTINO_FRAGMENTO_TRUNCADO)
+    elif resultado_credibilidad_destino.motivo == "DESTINO_CONTAMINADO_POR_OTRA_SECCION":
+        _motivo(MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION)
+
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 
     # Bloque E2E R1: enriquecimiento logístico -- nunca participa de
@@ -2077,6 +2134,21 @@ def procesar_archivo(
         "total_documento_seg": round(fin_documento - inicio_documento, 4),
     }
 
+    # Bloque C1 -- peso: se calcula aquí (antes del `return`, no dentro
+    # del propio diccionario) para poder evaluar su credibilidad y
+    # agregar el motivo informativo correspondiente ANTES de que
+    # `motivos_revision_documento` (más abajo) se una a partir de
+    # `motivos_documento` -- nunca reemplaza `peso_kg`, sólo puede
+    # sumarle una advertencia trazable (ver `MOTIVOS_NO_BLOQUEANTES`:
+    # nunca fuerza revisión completa del documento).
+    peso_kg_final = (
+        _normalizar_peso_kg(datos.get("peso"))
+        if _normalizar_peso_kg(datos.get("peso")) != "No encontrado"
+        else extraer_peso_kg_etiquetado(textos)
+    )
+    if evaluar_credibilidad_peso(peso_kg_final).nivel != NivelCredibilidad.CONFIABLE:
+        _motivo(MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO)
+
     return {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
@@ -2106,11 +2178,7 @@ def procesar_archivo(
         # `requiere_revision`) -- "No encontrado"/"No determinada" ya es
         # el motivo trazable, sin degradar documentos que antes de este
         # bloque quedaban OK.
-        "peso_kg": (
-            _normalizar_peso_kg(datos.get("peso"))
-            if _normalizar_peso_kg(datos.get("peso")) != "No encontrado"
-            else extraer_peso_kg_etiquetado(textos)
-        ),
+        "peso_kg": peso_kg_final,
         "hora_entrada_aza": str(datos.get("hora de entrada", "No encontrado")),
         "hora_salida_aza": str(datos.get("hora de salida", "No encontrado")),
         "permanencia_minutos": _calcular_permanencia_minutos(

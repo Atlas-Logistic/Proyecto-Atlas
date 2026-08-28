@@ -681,6 +681,83 @@ def revalidar_tipo_carga_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, objec
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_credibilidad_campos_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+    """Bloque C1 -- releé cada fila del dataset y reevalúa la
+    credibilidad de material/obra_destino/cliente/despachar_a/peso YA
+    persistidos (`atlas_core.credibilidad_campos`, función pura sobre
+    el texto/número ya extraído) -- sin OCR, sin volver a extraer nada.
+    Mismo criterio general que `revalidar_tipo_carga_sin_ocr`: una fila
+    procesada ANTES de que esta capa existiera nunca pasó por estas
+    señales; resincronizar contra el conocimiento ya vigente no es
+    inventar uno nuevo.
+
+    Nunca reemplaza ningún valor documental (material/obra/cliente/
+    dirección/peso quedan byte por byte iguales) -- sólo puede AGREGAR
+    el motivo trazable correspondiente (nunca retirar uno ya presente,
+    a diferencia de las demás funciones de este módulo) cuando el valor
+    persistido resulta DUDOSO/INVÁLIDO y ese motivo todavía no está en
+    `motivos_revision_documento`. `indicador_revision`/`estado_
+    documental` se recalculan con la MISMA fórmula que usa
+    `procesamiento_masivo.py` (nunca un criterio nuevo), respetando
+    `MOTIVOS_NO_BLOQUEANTES` (p. ej. `PESO_OPERACIONALMENTE_ATIPICO` es
+    informativo, nunca fuerza revisión por sí solo)."""
+    from atlas_core.credibilidad_campos import (
+        NivelCredibilidad,
+        evaluar_credibilidad_direccion,
+        evaluar_credibilidad_entidad_nombre,
+        evaluar_credibilidad_material,
+        evaluar_credibilidad_peso,
+    )
+
+    _COMPROBACIONES: tuple[tuple[str, MotivoRevisionDocumento, object], ...] = (
+        ("descripcion_material", MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO, evaluar_credibilidad_material),
+        ("obra_destino", MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA, evaluar_credibilidad_entidad_nombre),
+        ("cliente", MotivoRevisionDocumento.CLIENTE_POSIBLEMENTE_INVALIDO, evaluar_credibilidad_entidad_nombre),
+        ("peso_kg", MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO, evaluar_credibilidad_peso),
+    )
+
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            motivos = [m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m]
+            motivos_nuevos: list[str] = []
+            for campo, motivo, evaluador in _COMPROBACIONES:
+                if motivo.value in motivos:
+                    continue
+                if evaluador(fila.get(campo, "")).nivel != NivelCredibilidad.CONFIABLE:
+                    motivos_nuevos.append(motivo.value)
+            # `despachar_a_crudo`: dos motivos posibles sobre el mismo
+            # campo (fragmento truncado / contaminado por otra sección)
+            # -- se evalúa aparte porque el resultado decide CUÁL de los
+            # dos motivos corresponde, nunca ambos a la vez.
+            if (
+                MotivoRevisionDocumento.DESTINO_FRAGMENTO_TRUNCADO.value not in motivos
+                and MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value not in motivos
+            ):
+                resultado_destino = evaluar_credibilidad_direccion(fila.get("despachar_a_crudo", ""))
+                if resultado_destino.motivo == "DESTINO_FRAGMENTO_TRUNCADO":
+                    motivos_nuevos.append(MotivoRevisionDocumento.DESTINO_FRAGMENTO_TRUNCADO.value)
+                elif resultado_destino.motivo == "DESTINO_CONTAMINADO_POR_OTRA_SECCION":
+                    motivos_nuevos.append(MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value)
+            if not motivos_nuevos:
+                continue
+            motivos = motivos + motivos_nuevos
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
+            fila["indicador_revision"] = (
+                "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            )
+            fila["estado_documental"] = (
+                "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+            )
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_telemetria_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_nombre: str = "onelogis",
