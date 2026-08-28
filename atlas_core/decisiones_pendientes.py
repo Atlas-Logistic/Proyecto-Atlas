@@ -1132,11 +1132,38 @@ def _decisiones_obra_para_cliente(
         # fallaría de nuevo y generaría una pregunta de destino
         # redundante pese a que la obra (y, en este caso real, la ruta)
         # ya están resueltas.
-        elif catalogo_obras.resolver_obra_destino_confirmada(
-            cliente_id=cliente_id, nombre_obra=obras[0].nombre_canonico
-        ) is None:
+        else:
             obra = obras[0]
             destino_texto = str(despachar_a_documental or "").strip()
+            resuelta = catalogo_obras.resolver_obra_destino_confirmada(
+                cliente_id=cliente_id, nombre_obra=obra.nombre_canonico
+            ) is not None
+            # Bloque SINCRONIZACIÓN OPERACIONAL 472593 -- mismo patrón ya
+            # corregido en Destinos Internos V1 (procesamiento_masivo.
+            # _corroborar_obra_destino_confirmada) y en la reconciliación
+            # de esta misma bandeja (`regenerar_decisiones_persistidas`,
+            # tipo DESTINO_SIN_CONFIRMAR): dos confirmaciones humanas/de
+            # evidencia DISTINTAS sobre variantes de texto OCR de la MISMA
+            # dirección real dejan a la obra con DOS relaciones
+            # CONFIRMADAS -- evidencia REDUNDANTE, nunca una contradicción
+            # -- y el resolver estricto de arriba se abstiene. Se intenta
+            # `listar_destinos_confirmados_para_obra` (sin exigir
+            # unicidad) y se suprime la pregunta sólo si la dirección
+            # documental coincide LITERALMENTE (normalizada, nunca fuzzy)
+            # con CUALQUIERA de los destinos confirmados -- nunca "el
+            # primero" ni "el más nuevo". Caso real: guía 472593.
+            if not resuelta and destino_texto:
+                texto_documental = normalizar_nombre_destino(destino_texto)
+                destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(
+                    nombre_obra=obra.nombre_canonico
+                )
+                resuelta = any(
+                    (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                    and calle in texto_documental
+                    for destino in destinos_confirmados_obra
+                )
+            if resuelta:
+                return decisiones
             # R3.4: la obra ya se conoce (identidad_resuelta); lo único
             # pendiente es confirmar la relación con ESTE destino. El
             # valor de la decisión pasa a ser el destino documental (lo
@@ -1787,9 +1814,40 @@ def regenerar_decisiones_persistidas(
             if not nombre_obra and entidad_id:
                 obra_actual = next((o for o in obras_existentes if o.obra_id == entidad_id), None)
                 nombre_obra = obra_actual.nombre_canonico if obra_actual is not None else ""
-            if nombre_obra and catalogo_obras is not None and catalogo_obras.resolver_obra_destino_confirmada_global(
-                nombre_obra=nombre_obra
-            ) is not None:
+            resuelta = bool(
+                nombre_obra and catalogo_obras is not None
+                and catalogo_obras.resolver_obra_destino_confirmada_global(nombre_obra=nombre_obra) is not None
+            )
+            # Bloque SINCRONIZACIÓN OPERACIONAL 472593 -- mismo patrón ya
+            # corregido en Destinos Internos V1 (procesamiento_masivo.
+            # _corroborar_obra_destino_confirmada) y ya usado más abajo
+            # para DESTINO_NO_RESUELTO (familia AUSIN SAN BERNARDO): dos
+            # confirmaciones humanas/de evidencia DISTINTAS sobre variantes
+            # de texto OCR de la MISMA dirección real dejan a la obra con
+            # DOS relaciones CONFIRMADAS -- evidencia REDUNDANTE, nunca una
+            # contradicción -- y el resolver estricto de arriba se
+            # abstiene. Se intenta `listar_destinos_confirmados_para_obra`
+            # (sin exigir unicidad) y se suprime la pregunta sólo si la
+            # dirección documental coincide LITERALMENTE (normalizada,
+            # nunca fuzzy) con CUALQUIERA de los destinos confirmados --
+            # nunca "el primero" ni "el más nuevo". Caso real: guía 472593
+            # (PRODALAM SA / EMPRESA CONST SIGRO / Avda Irarrázaval 5497).
+            if not resuelta and nombre_obra and catalogo_obras is not None:
+                destino_documental_decision = str(
+                    (decision.get("contexto") or {}).get("destino_documental")
+                    or decision.get("valor_documental") or ""
+                )
+                if destino_documental_decision:
+                    texto_documental = normalizar_nombre_destino(destino_documental_decision)
+                    destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(
+                        nombre_obra=nombre_obra
+                    )
+                    resuelta = any(
+                        (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                        and calle in texto_documental
+                        for destino in destinos_confirmados_obra
+                    )
+            if resuelta:
                 continue
             obra_actual = next((o for o in obras_existentes if o.obra_id == entidad_id), None)
             if obra_actual is not None:

@@ -55,6 +55,7 @@ from atlas_core.incidencias_documentales import (
     VALOR_DOCUMENTAL_CAMPO_AUSENTE,
     AlmacenIncidenciasDocumentales,
 )
+from atlas_core.mobile import RepositorioEnviosMobile
 from atlas_core.modelos import EstadoValidacion
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
@@ -65,6 +66,7 @@ from atlas_core.procesamiento_masivo import (
 )
 from atlas_core.reporte_viajes import generar_reporte_viajes
 from atlas_core.rutas.modelos import EstadoRuta
+from atlas_core.rutas.origen_evidencia import fusionar_evidencia_origen, resolver_planta_por_codigo_mobile
 from atlas_core.telemetria.enriquecimiento import enriquecer_documento_con_telemetria
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.proveedor import ProveedorTelemetriaSoloCache
@@ -873,6 +875,97 @@ def revalidar_origen_por_vecinos_temporales_gps_sin_ocr(
             _escribir_filas_completas(ruta, filas)
 
     return {"guias_actualizadas": guias_actualizadas}
+
+
+def revalidar_origen_por_evidencia_mobile_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, repositorio: RepositorioEnviosMobile,
+) -> dict[str, object]:
+    """Bloque SINCRONIZACIÓN OPERACIONAL 472593 -- reaplica la política ya
+    vigente de ORIGEN OPERACIONAL V2 (`atlas_core.rutas.origen_evidencia.
+    fusionar_evidencia_origen`, sin cambios) sobre filas cuyo origen quedó
+    determinado ÚNICAMENTE por el encabezado documental
+    (`origen_determinado_por == "DOCUMENTO"`) sin que la evidencia Mobile
+    -- ya persistida en `envio.json`, `planta_origen_informada` -- llegara
+    a fusionarse con él. Sin OCR, sin GPS nuevo, sin red: usa sólo la
+    planta que Mobile ya informó al capturar, la planta documental YA
+    resuelta (`planta_origen_id` de esta misma fila -- se busca por ID en
+    el catálogo vigente, nunca se vuelve a leer el encabezado OCR) y la
+    categoría/tipo de carga YA persistida (`tipo_carga`).
+
+    Caso real que expone el gap (472593): Mobile informó AZA_COLINA,
+    compatible con la carga documental (BARRAS); el documento resolvió
+    AZA RENCA por el encabezado societario -- pero este documento se
+    procesó antes de que `planta_origen_informada` llegara a fusionarse
+    (guía ya persistida con la fusión pendiente). Genérico por diseño
+    (igual que `origen_evidencia.py`): no conoce AZA/COLINA/RENCA/BARRAS
+    -- cualquier documento histórico con evidencia Mobile persistida cuyo
+    origen siga reflejando sólo el encabezado queda cubierto igual.
+
+    Nunca revisita GPS (`TELEMETRIA_GPS`/`ONELOGIS_GPS`, más confiable en
+    la jerarquía existente), confirmación humana
+    (`CONFIRMACION_HUMANA`) ni un origen ya fusionado con Mobile antes
+    -- sólo el caso `DOCUMENTO` puro. Ante una fusión CONTRADICTORIA
+    (evidencia real incompatible, `fusionar_evidencia_origen` así lo
+    determina) o si el resultado coincide con el origen ya persistido, la
+    fila se conserva intacta -- nunca se fuerza ni se inventa. Si cambia
+    el origen y ya había una ruta/km calculados con el origen ANTERIOR,
+    se invalidan (mismo patrón ya usado en `revalidar_telemetria_sin_ocr`)
+    -- nunca se recalculan aquí (eso exigiría ORS, fuera de alcance)."""
+    ruta = Path(ruta_dataset)
+    try:
+        plantas = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+    plantas_por_id = {p.planta_id: p for p in plantas}
+
+    # Índice archivo -> planta informada, sólo de envíos Mobile YA
+    # persistidos -- lectura read-only, nunca reprocesa el envío.
+    informada_por_archivo: dict[str, str] = {}
+    for registro in repositorio.historial():
+        informada = str(registro.get("planta_origen_informada", "")).strip()
+        envio_id = str(registro.get("envio_id", "")).strip()
+        foto = str(registro.get("foto_original", "")).strip()
+        if not informada or not envio_id or not foto:
+            continue
+        informada_por_archivo[f"mobile/{envio_id}/{foto}"] = informada
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("origen_determinado_por", "")).strip() != "DOCUMENTO":
+                continue
+            planta_informada = informada_por_archivo.get(str(fila.get("archivo", "")).strip())
+            if not planta_informada:
+                continue  # sin evidencia Mobile persistida para este documento
+            planta_mobile = resolver_planta_por_codigo_mobile(planta_informada, plantas)
+            planta_doc = plantas_por_id.get(str(fila.get("planta_origen_id", "")).strip())
+            if planta_mobile is None or planta_doc is None:
+                continue
+            fusion = fusionar_evidencia_origen(
+                planta_mobile=planta_mobile, planta_documento=planta_doc, categoria=fila.get("tipo_carga"),
+            )
+            if fusion.contradiccion or fusion.planta is None or fusion.planta.planta_id == planta_doc.planta_id:
+                continue  # sin cambio real, o evidencia incompatible -- nunca se fuerza
+
+            origen_cambio = True
+            fila["planta_origen_id"] = fusion.planta.planta_id
+            fila["planta_origen_nombre"] = fusion.planta.nombre
+            fila["origen_determinado_por"] = fusion.fuente
+            fila["evidencia_origen"] = fusion.evidencia
+            if origen_cambio and str(fila.get("distancia_km", "")).strip():
+                fila["distancia_km"] = ""
+                fila["duracion_min"] = ""
+                fila["proveedor_ruta"] = ""
+                fila["estado_ruta"] = "REQUIERE_REVISION"
+                fila["motivo_ruta"] = "ORIGEN_ACTUALIZADO_PENDIENTE_RECALCULO_RUTA"
+            else:
+                fila.update(derivar_estado_ruta_tras_cambio_origen(fila))
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
 def revalidar_destino_contra_comuna_documental_sin_ocr(
