@@ -28,6 +28,7 @@ from atlas_core.rutas.geocerca import (
     RADIO_GEOCERCA_KM_PREDETERMINADO,
     ResultadoGeocercaPlanta,
     distancia_km_haversine,
+    envolvente_convexa,
     punto_en_poligono,
     resolver_planta_por_posicion,
 )
@@ -513,7 +514,6 @@ VENTANA_PROXIMIDAD_MIN = 60.0
 # de descartar la segunda como ruido.
 MARGEN_SCORE_SUFICIENTE = 0.15
 
-
 def _proximidad_score(instante_gps: datetime | None, instante_documental: datetime | None) -> float:
     """1.0 si coinciden exactamente, decae linealmente a 0.0 a partir de
     `VENTANA_PROXIMIDAD_MIN` minutos de diferencia -- 0.0 (neutro, nunca
@@ -893,8 +893,60 @@ def resolver_planta_origen_gps(
         )
 
     ranking = sorted(evidencias.values(), key=lambda e: e.score, reverse=True)
-    lider = ranking[0]
-    margen_vs_siguiente = (lider.score - ranking[1].score) if len(ranking) > 1 else None
+
+    # Bloque FIX GPS ORIGEN: CALIDAD ABSOLUTA (simplificado) -- causa raíz
+    # real 472224: con un solo candidato de geocerca, `margen_vs_
+    # siguiente` daba `None` y el código lo confirmaba SIN comparar
+    # contra nada -- "único candidato" se trataba como sinónimo de
+    # "candidato válido". AZA RENCA quedó así confirmada usando un
+    # cluster real, pero 2h29min ANTES de que empezara siquiera la
+    # ventana documental -- ningún contacto temporal real con la carga.
+    #
+    # Regla mínima: un candidato sólo entra en juego si su evidencia
+    # TOCA la ventana documental real (`[hora_entrada, hora_salida]`) --
+    # nunca "cuán buena es su geocerca" por sí sola. Se mide por
+    # contacto de intervalos (nunca por duración/porcentaje -- un solo
+    # breadcrumb dentro de la ventana sigue siendo evidencia real,
+    # aunque matemáticamente su "duración de solape" sea 0). Con una
+    # ventana documental DEGENERADA (`hora_entrada == hora_salida`, sin
+    # rango real que tocar) esta regla no puede aplicarse -- se
+    # conserva el comportamiento normal (comparación por score/margen),
+    # nunca se descarta todo por no tener con qué medir.
+    ventana_es_real = ventana_fin > ventana_ini
+    # Margen de tolerancia en el borde de la ventana -- GPS y hora
+    # documental rara vez coinciden al minuto exacto (p. ej. el camión ya
+    # está físicamente en la planta unos minutos antes de que se registre
+    # la hora de entrada). Reutiliza `TOLERANCIA_ANCLA_MIN_PREDETERMINADA`
+    # (ya calibrada y en uso para el mismo propósito en T2) en vez de
+    # inventar un número nuevo -- 2h29min de diferencia (472224) sigue
+    # muy por encima de cualquier margen razonable de borde.
+    margen_toque = timedelta(minutes=TOLERANCIA_ANCLA_MIN_PREDETERMINADA)
+
+    def _toca_la_ventana(evidencia: EvidenciaOrigenPlanta) -> bool:
+        if not ventana_es_real:
+            return True
+        for detencion in evidencia.estadias:
+            inicio_d, fin_d = _instante(detencion.inicio), _instante(detencion.fin)
+            if (
+                inicio_d is not None and fin_d is not None
+                and inicio_d <= ventana_fin + margen_toque and fin_d >= ventana_ini - margen_toque
+            ):
+                return True
+        return False
+
+    candidatos_validos = [e for e in ranking if _toca_la_ventana(e)]
+    if not candidatos_validos:
+        return ResultadoOrigenGPS(
+            ORIGEN_GPS_NO_DETERMINADO,
+            motivo=(
+                "EVIDENCIA_GEOCERCA_SIN_SOLAPE_SUFICIENTE("
+                + ";".join(f"{e.planta_nombre}:solape={e.porcentaje_ventana}%,score={e.score}" for e in ranking)
+                + ")"
+            ).replace(" ", "_"),
+        )
+
+    lider = candidatos_validos[0]
+    margen_vs_siguiente = (lider.score - candidatos_validos[1].score) if len(candidatos_validos) > 1 else None
 
     if margen_vs_siguiente is None or margen_vs_siguiente >= MARGEN_SCORE_SUFICIENTE:
         estadia_principal = max(lider.estadias, key=lambda d: d.duracion_minutos)
@@ -941,8 +993,10 @@ def resolver_planta_origen_gps(
     # dentro de la MISMA ventana documental y sin margen suficiente para
     # distinguirlas: esto SÍ es un conflicto real (no una visita a otra
     # hora del mismo día, que ya quedó descartada como evidencia por el
-    # solape con la ventana).
-    top = ranking[:2]
+    # solape con la ventana). Se compara solo entre `candidatos_validos`
+    # (Bloque FIX GPS ORIGEN) -- un candidato que no alcanzó el piso
+    # absoluto nunca resucita como parte de un "conflicto".
+    top = candidatos_validos[:2]
     return ResultadoOrigenGPS(
         ORIGEN_GPS_CONFLICTO,
         motivo=(
@@ -951,6 +1005,62 @@ def resolver_planta_origen_gps(
             + ")"
         ).replace(" ", "_"),
     )
+
+
+# Bloque FIX GPS ORIGEN: CALIDAD ABSOLUTA + GEOCERCA COLINA -- causa raíz
+# real (472224): una geocerca POLIGONAL derivada de UN solo vehículo en UN
+# solo día no representa de forma confiable dónde estaciona/carga OTRO
+# vehículo dentro del MISMO recinto operacional (AZA COLINA: sólo 36.7% de
+# los puntos reales de BDFG50/20-08-2026 caían dentro del polígono
+# original, derivado de AL1879/11-08-2026 -- por debajo del umbral mínimo
+# de contención). La corrección NO es "dibujar otro polígono a ojo": es
+# agregar evidencia GPS real de MÚLTIPLES vehículos/fechas ya confirmados
+# de forma independiente para esa misma planta -- nunca se usa un caso
+# débil para construir la geocerca (sólo casos que `resolver_planta_
+# origen_gps` ya confirmó, con evidencia contemporánea real).
+def construir_geocerca_poligonal_multi_vehiculo(
+    *,
+    casos: Iterable[tuple[str, date, datetime | None, datetime | None]],
+    servicio: ServicioTelemetria,
+    plantas: Iterable[Planta],
+    planta_id: str,
+    radio_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
+) -> tuple[tuple[float, float], ...]:
+    """Recalcula la geocerca POLIGONAL de `planta_id` como la envolvente
+    convexa de los puntos GPS reales de los clusters que YA resolvieron a
+    esa planta, para cada `(patente, fecha, hora_entrada, hora_salida)` en
+    `casos` -- normalmente documentos YA CONFIRMADOS con evidencia GPS
+    fuerte para esa planta (ver `resolver_planta_origen_gps`), nunca
+    inventados. Genérico: no depende de qué planta ni de qué vehículo en
+    particular -- funciona igual para cualquier planta/recinto con
+    suficiente historial GPS propio.
+
+    Cuantos más `casos` independientes (vehículos/fechas distintos), más
+    robusto el recinto resultante frente a distintas zonas de
+    estacionamiento/carga dentro del mismo patio. `casos` vacío o sin
+    ningún punto real encontrado devuelve `()` -- nunca inventa vértices
+    sin evidencia; el llamador decide qué hacer (p. ej. conservar la
+    geocerca anterior)."""
+    plantas_lista = list(plantas)
+    puntos: list[PosicionTelemetria] = []
+    for patente, fecha, hora_entrada, hora_salida in casos:
+        recoleccion = recolectar_puntos_ventana_origen(
+            servicio, patente=patente, fecha=fecha,
+            hora_entrada=hora_entrada, hora_salida=hora_salida,
+        )
+        if not recoleccion.trips:
+            continue
+        detenciones = detectar_detenciones(recoleccion.trips, dict(recoleccion.breadcrumbs_por_trip))
+        for detencion in detenciones:
+            resultado_geocerca = _resolver_planta_para_detencion(
+                detencion.puntos, Coordenadas(detencion.longitud, detencion.latitud),
+                plantas_lista, radio_km=radio_km,
+            )
+            if resultado_geocerca.determinada and resultado_geocerca.planta_id == planta_id:
+                puntos.extend(detencion.puntos)
+    if not puntos:
+        return ()
+    return envolvente_convexa([(p.latitud, p.longitud) for p in puntos])
 
 
 def clasificar_concordancia_hora(

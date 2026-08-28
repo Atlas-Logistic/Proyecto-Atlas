@@ -471,7 +471,14 @@ def test_ventana_documental_degenerada_464730_no_se_auto_resuelve_a_una_planta(p
     instante, señal débil por diseño (30% del score combinado). Atlas
     debe concluir CONFLICTO (requiere humano), nunca forzar una planta
     por estar "más cerca en el tiempo" -- exactamente lo que Javier
-    confirmó que habría sido la planta incorrecta en el caso real."""
+    confirmó que habría sido la planta incorrecta en el caso real.
+
+    Bloque FIX GPS ORIGEN: CALIDAD ABSOLUTA (simplificado) -- el nuevo
+    piso de "¿la evidencia toca la ventana documental real?" (causa raíz
+    472224) NUNCA se aplica cuando la ventana en sí es degenerada (sin
+    ancho real que tocar) -- no hay con qué medir contemporaneidad, así
+    que este caso se sigue resolviendo exactamente como antes (margen de
+    score entre candidatos, nunca "ninguno toca, se descartan todos")."""
     _, servicio = _servicio(
         tmp_path,
         viajes_por_patente={

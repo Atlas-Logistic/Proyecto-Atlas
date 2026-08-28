@@ -1512,7 +1512,21 @@ def detectar_decision_origen_no_confirmado(
     candidatos: list[dict[str, object]] = []
     motivo_decision = ""
 
-    if motivo_origen_gps.startswith("CONFLICTO_REAL_EN_VENTANA"):
+    # Bloque FIX GPS ORIGEN: CALIDAD ABSOLUTA -- `resolver_planta_origen_
+    # gps` puede descartar TODOS sus candidatos por falta de solape real
+    # con la ventana documental (caso real 472224: único candidato con
+    # score=0.0/solape=0.0%; también un caso degenerado donde ambos
+    # candidatos quedan igual de descartados, ver `_MOTIVO_RUTA_BASE_
+    # SEPARADORES`/test). Nunca se sugiere una planta ya descartada por
+    # falta de evidencia real -- `candidatos` queda vacío a propósito
+    # (mismo criterio que MOTIVO_ENCABEZADO_NO_CONFIABLE arriba), pero
+    # la señal es real y sigue mereciendo una pregunta neutral, así que
+    # se bypasea el `if not candidatos: return None` genérico de las
+    # otras dos ramas GPS con este flag.
+    hubo_senal_sin_solape = motivo_origen_gps.startswith("EVIDENCIA_GEOCERCA_SIN_SOLAPE_SUFICIENTE")
+    if hubo_senal_sin_solape:
+        motivo_decision = "ORIGEN_GPS_SIN_SOLAPE_SUFICIENTE"
+    elif motivo_origen_gps.startswith("CONFLICTO_REAL_EN_VENTANA"):
         motivo_decision = "ORIGEN_GPS_CONFLICTO"
         for nombre_token, score, solape in _PATRON_CONFLICTO_ORIGEN.findall(motivo_origen_gps):
             nombre_normalizado = nombre_token.replace("_", " ").strip().upper()
@@ -1553,7 +1567,7 @@ def detectar_decision_origen_no_confirmado(
     else:
         return None  # otro motivo (SIN_HISTORICO, NINGUN_PUNTO_DENTRO_DE_GEOCERCA, etc.) -- evidencia insuficiente
 
-    if not candidatos:
+    if not candidatos and not hubo_senal_sin_solape:
         return None
 
     documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")

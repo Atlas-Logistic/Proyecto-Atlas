@@ -84,6 +84,45 @@ def punto_en_poligono(
     return dentro
 
 
+def envolvente_convexa(puntos: Sequence[tuple[float, float]]) -> tuple[tuple[float, float], ...]:
+    """Envolvente convexa (Andrew's monotone chain) de una lista de
+    `(latitud, longitud)`, tratados como plano local -- misma
+    aproximación ya usada por `punto_en_poligono` para geocercas
+    POLIGONALES (a escala de un recinto real, la distorsión de no usar
+    geodesia es despreciable). Sin dependencia GIS nueva.
+
+    Bloque FIX GPS ORIGEN: CALIDAD ABSOLUTA + GEOCERCA COLINA -- usada
+    para construir una geocerca poligonal a partir de evidencia GPS real
+    de MÚLTIPLES vehículos/fechas (ver
+    `atlas_core.telemetria.seleccion_recorrido.
+    construir_geocerca_poligonal_multi_vehiculo`), nunca de un único
+    vehículo -- una envolvente derivada de más puntos independientes
+    tolera mejor distintas zonas de estacionamiento/carga dentro del
+    mismo recinto que un polígono ajustado a una sola trayectoria.
+
+    Con 2 o menos puntos distintos, no hay envolvente real -- se
+    devuelven tal cual (nunca se inventa un polígono de la nada)."""
+    distintos = sorted(set(puntos))
+    if len(distintos) <= 2:
+        return tuple(distintos)
+
+    def _producto_cruz(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+        # (lat,lon) tratados como (y,x): el cruce usa (x,y) = (lon,lat).
+        return (a[1] - o[1]) * (b[0] - o[0]) - (a[0] - o[0]) * (b[1] - o[1])
+
+    inferior: list[tuple[float, float]] = []
+    for punto in distintos:
+        while len(inferior) >= 2 and _producto_cruz(inferior[-2], inferior[-1], punto) <= 0:
+            inferior.pop()
+        inferior.append(punto)
+    superior: list[tuple[float, float]] = []
+    for punto in reversed(distintos):
+        while len(superior) >= 2 and _producto_cruz(superior[-2], superior[-1], punto) <= 0:
+            superior.pop()
+        superior.append(punto)
+    return tuple(inferior[:-1] + superior[:-1])
+
+
 def resolver_planta_por_posicion(
     posicion: Coordenadas,
     plantas: Iterable[object],

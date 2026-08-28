@@ -49,6 +49,14 @@ class ResultadoOrquestacion:
     rondas: int = 0
     herramientas_usadas: tuple[str, ...] = ()
     detalle: str = ""
+    # Bloque SIMPLIFICAR/AVANZAR A B1 -- traza auditable de CADA ronda
+    # (hipótesis estructurada del proveedor + cuántas evidencias tenía
+    # disponibles en ese momento), no sólo la hipótesis final. Aditivo y
+    # opcional (`()` por defecto): nunca cambia el comportamiento de
+    # decisión del orquestador, sólo agrega visibilidad para auditoría.
+    # Nunca contiene razonamiento libre del proveedor -- sólo los mismos
+    # campos estructurados que ya valida `HipotesisIA`.
+    traza: tuple[dict[str, object], ...] = ()
 
     def a_dict(self) -> dict[str, object]:
         return {
@@ -57,7 +65,7 @@ class ResultadoOrquestacion:
             "hipotesis": self.hipotesis.a_dict() if self.hipotesis else None,
             "validacion": self.validacion.a_dict() if self.validacion else None,
             "rondas": self.rondas, "herramientas_usadas": list(self.herramientas_usadas),
-            "detalle": self.detalle,
+            "detalle": self.detalle, "traza": list(self.traza),
         }
 
 
@@ -84,14 +92,19 @@ class OrquestadorAtlasIA:
 
         actual = contexto
         usadas: list[str] = []
+        traza: list[dict[str, object]] = []
         for ronda in range(1, RONDAS_MAXIMAS + 1):
             try:
                 hipotesis = self._proveedor.razonar(actual)
             except ErrorProveedorModeloIA as error:
                 return ResultadoOrquestacion(
                     ERROR_PROVEEDOR, CLASIFICACION_D, actual, rondas=ronda,
-                    herramientas_usadas=tuple(usadas), detalle=str(error),
+                    herramientas_usadas=tuple(usadas), detalle=str(error), traza=tuple(traza),
                 )
+            traza.append({
+                "ronda": ronda, "evidencias_disponibles": len(actual.evidencias),
+                "hipotesis": hipotesis.a_dict(),
+            })
 
             if hipotesis.resultado == RESULTADO_HIPOTESIS_REQUIERE_HERRAMIENTA:
                 nombre = hipotesis.herramienta_faltante.strip()
@@ -101,6 +114,7 @@ class OrquestadorAtlasIA:
                         REQUIERE_HERRAMIENTA, CLASIFICACION_C, actual, hipotesis=hipotesis,
                         rondas=ronda, herramientas_usadas=tuple(usadas),
                         detalle=f"Herramienta no disponible o límite de rondas: {nombre}",
+                        traza=tuple(traza),
                     )
                 nuevas = herramienta.consultar(actual)
                 existentes = {e.identificador for e in actual.evidencias}
@@ -116,7 +130,10 @@ class OrquestadorAtlasIA:
                         REQUIERE_HERRAMIENTA, CLASIFICACION_C, actual, hipotesis=hipotesis,
                         rondas=ronda, herramientas_usadas=tuple(usadas),
                         detalle=f"La herramienta {nombre} ya se agotó sin evidencia nueva.",
+                        traza=tuple(traza),
                     )
+                traza[-1]["herramienta_consultada"] = nombre
+                traza[-1]["evidencia_nueva"] = [e.a_dict() for e in agregadas]
                 usadas.append(nombre)
                 actual = replace(actual, evidencias=(*actual.evidencias, *agregadas))
                 continue
@@ -126,18 +143,19 @@ class OrquestadorAtlasIA:
                 return ResultadoOrquestacion(
                     BLOQUEADO_POR_VALIDACION, CLASIFICACION_D, actual,
                     hipotesis=hipotesis, validacion=validacion, rondas=ronda,
-                    herramientas_usadas=tuple(usadas),
+                    herramientas_usadas=tuple(usadas), traza=tuple(traza),
                 )
             if hipotesis.resultado == RESULTADO_HIPOTESIS_ABSTENCION:
                 return ResultadoOrquestacion(
                     ABSTENCION_IA, CLASIFICACION_C, actual, hipotesis=hipotesis,
                     validacion=validacion, rondas=ronda, herramientas_usadas=tuple(usadas),
+                    traza=tuple(traza),
                 )
             if hipotesis.resultado == RESULTADO_HIPOTESIS_PROPUESTA:
                 return ResultadoOrquestacion(
                     RESUELTO_POR_IA, _clasificar_propuesta(actual, hipotesis), actual,
                     hipotesis=hipotesis, validacion=validacion, rondas=ronda,
-                    herramientas_usadas=tuple(usadas),
+                    herramientas_usadas=tuple(usadas), traza=tuple(traza),
                 )
 
         raise AssertionError(f"El orquestador excedió el máximo de {RONDAS_MAXIMAS} rondas")

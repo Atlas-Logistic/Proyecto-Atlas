@@ -55,6 +55,124 @@ def herramienta_documentos_relacionados(
 
 
 # ---------------------------------------------------------------------
+# Bloque SIMPLIFICAR/AVANZAR A B1 -- herramientas de investigación de
+# ORIGEN para B1: sólo se activan cuando la evidencia DIRECTA (GPS
+# contemporáneo a la ventana documental, Mobile inequívoco) no alcanzó
+# para resolver -- ver `atlas_core.telemetria.seleccion_recorrido.
+# resolver_planta_origen_gps`, que resuelve solo con esa evidencia
+# directa y nunca llega a B1 si ya concluyó. Caso real motivador:
+# 472647/472648 (transporte 0000355231) -- sin GPS OneLogis útil, sin
+# Mobile útil, membrete corporativo inválido como evidencia (ver Bloque
+# CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA) -- B1 debe poder
+# investigar historial y catálogo por sí mismo, nunca una receta fija.
+# ---------------------------------------------------------------------
+
+
+def herramienta_evidencia_historial_origen(
+    filas: Iterable[Mapping[str, object]],
+) -> HerramientaEvidencia:
+    """Expone, como evidencia, TODAS las guías del dataset cuyo origen ya
+    quedó determinado por evidencia INDEPENDIENTE (GPS, Mobile o
+    confirmación humana -- nunca por el membrete/`DOCUMENTO`, que ya se
+    sabe poco confiable). Nunca precalcula "el patrón" (correlatividad de
+    número de guía, coincidencia de material, de chofer, de vehículo,
+    etc.) -- eso es exactamente lo que B1 debe descubrir por su cuenta a
+    partir de los hechos crudos que aquí se entregan (guía, transporte,
+    fecha, patente, chofer, cliente, obra, tipo de carga/material), nunca
+    una conclusión ya masticada. `valor` es siempre el nombre de la
+    planta -- la única forma en que B1 puede proponerla (ver
+    `validadores.validar_hipotesis_multicampo`, exige que la propuesta
+    aparezca literalmente como `valor` de alguna evidencia)."""
+    filas_copia = tuple(dict(fila) for fila in filas)
+    ORIGENES_INDEPENDIENTES = ("TELEMETRIA_GPS", "MOBILE", "CONFIRMACION_HUMANA")
+
+    def consultar(contexto: ContextoRazonamiento) -> tuple[EvidenciaIA, ...]:
+        evidencias: list[EvidenciaIA] = []
+        for fila in filas_copia:
+            guia = str(fila.get("numero_guia", "")).strip()
+            if not guia or guia == contexto.numero_guia:
+                continue
+            if str(fila.get("origen_determinado_por", "")).strip() not in ORIGENES_INDEPENDIENTES:
+                continue
+            planta_nombre = str(fila.get("planta_origen_nombre", "")).strip()
+            if not planta_nombre:
+                continue
+            evidencias.append(EvidenciaIA(
+                identificador=f"historial_origen:{guia}",
+                campo="planta_origen", valor=planta_nombre,
+                tipo_fuente="HISTORICO", nivel="ORIGEN_CONFIRMADO_INDEPENDIENTE",
+                a_favor=(str(fila.get("origen_determinado_por", "")).strip(),),
+                independencia=1,
+                procedencia="atlas_core.atlas_ia.herramientas.evidencia_historial_origen",
+                referencias_fuente=(
+                    f"guia={guia}", f"transporte={fila.get('numero_transporte', '')}",
+                    f"fecha={fila.get('fecha', '')}", f"patente_tracto={fila.get('patente_tracto', '')}",
+                    f"chofer={fila.get('chofer', '')}", f"cliente={fila.get('cliente', '')}",
+                    f"obra_destino={fila.get('obra_destino', '')}",
+                    f"tipo_carga={fila.get('tipo_carga', '')}",
+                    f"descripcion_material={fila.get('descripcion_material', '')}",
+                ),
+            ))
+        return tuple(evidencias)
+
+    return HerramientaEvidencia(
+        nombre="EVIDENCIA_HISTORIAL_ORIGEN",
+        descripcion=(
+            "Lista otras guías del dataset con origen ya confirmado por evidencia "
+            "independiente (GPS, Mobile o confirmación humana), con sus datos "
+            "operacionales crudos (fecha, patente, chofer, cliente, material, número "
+            "de guía/transporte) -- nunca un patrón ya calculado; investigar "
+            "correlaciones (numeración, material, vehículo, chofer, etc.) es tarea "
+            "de quien razona, no de esta herramienta."
+        ),
+        consultar=consultar,
+    )
+
+
+def herramienta_evidencia_catalogo_plantas(plantas: Iterable[object]) -> HerramientaEvidencia:
+    """Expone el catálogo de plantas vivas (CONFIRMADA+ACTIVA) como
+    evidencia informativa -- incluidas las categorías de material que
+    cada una tiene permitidas, cuando el catálogo las trae. Nunca aplica
+    la regla por software (eso seguiría siendo
+    `atlas_core.rutas.origen_evidencia.evaluar_compatibilidad_planta_
+    categoria`, usada por la evidencia DIRECTA/determinista) -- aquí es
+    sólo un hecho más que B1 puede leer y sopesar junto al resto,
+    consistente con la política de sistema (categoría/catálogo no es
+    garantía absoluta para un caso puntual, punto 6)."""
+    plantas_lista = tuple(plantas)
+
+    def consultar(contexto: ContextoRazonamiento) -> tuple[EvidenciaIA, ...]:
+        evidencias: list[EvidenciaIA] = []
+        for planta in plantas_lista:
+            if getattr(planta, "estado_calidad", "") != "CONFIRMADA" or getattr(planta, "estado_vigencia", "") != "ACTIVA":
+                continue
+            categorias = tuple(getattr(planta, "categorias_permitidas", ()) or ())
+            evidencias.append(EvidenciaIA(
+                identificador=f"catalogo_planta:{getattr(planta, 'planta_id', '')}",
+                campo="planta_origen", valor=str(getattr(planta, "nombre", "")),
+                tipo_fuente="CATALOGO", nivel="CATALOGO_PLANTA_VIVA",
+                a_favor=tuple(f"categoria_permitida={c}" for c in categorias),
+                procedencia="atlas_core.atlas_ia.herramientas.evidencia_catalogo_plantas",
+                referencias_fuente=(
+                    f"comuna={getattr(planta, 'comuna', '')}",
+                    f"direccion={getattr(planta, 'direccion', '')}",
+                ),
+            ))
+        return tuple(evidencias)
+
+    return HerramientaEvidencia(
+        nombre="EVIDENCIA_CATALOGO_PLANTAS",
+        descripcion=(
+            "Lista las plantas vivas del catálogo (CONFIRMADA+ACTIVA) con sus "
+            "categorías de material permitidas, cuando el catálogo las trae -- "
+            "conocimiento operacional disponible, nunca una garantía absoluta para "
+            "este caso puntual."
+        ),
+        consultar=consultar,
+    )
+
+
+# ---------------------------------------------------------------------
 # Bloque B1 INVESTIGADOR -- verificación externa real (búsqueda web)
 # ---------------------------------------------------------------------
 

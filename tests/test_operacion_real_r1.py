@@ -166,6 +166,12 @@ def test_sin_evidencia_gps_no_asume_renca_por_defecto(plantas, tmp_path):
 
 
 def test_gps_ambiguo_entre_dos_plantas_no_confirma_ninguna(plantas, tmp_path):
+    # Bloque FIX GPS ORIGEN: CALIDAD ABSOLUTA -- ambos puntos deben caer
+    # DENTRO de la ventana de anclaje único (hora_salida ± 90 min, aquí
+    # [07:30, 10:30]) para que la ambigüedad sea real (dos candidatos
+    # genuinamente contemporáneos) -- un punto fuera de esa ventana ya no
+    # compite (causa raíz real 472224), así que RENCA se mueve de 07:05 a
+    # 07:35 (dentro) conservando exactamente el mismo propósito del test.
     _, servicio = _servicio(
         tmp_path,
         viajes_por_patente={
@@ -173,7 +179,7 @@ def test_gps_ambiguo_entre_dos_plantas_no_confirma_ninguna(plantas, tmp_path):
         },
         breadcrumbs_por_trip={
             "x": [
-                PosicionTelemetria(-33.401595, -70.685226, "2026-08-11 07:05:00"),  # RENCA
+                PosicionTelemetria(-33.401595, -70.685226, "2026-08-11 07:35:00"),  # RENCA
                 PosicionTelemetria(-33.137558, -70.665977, "2026-08-11 08:55:00"),  # COLINA
             ],
         },

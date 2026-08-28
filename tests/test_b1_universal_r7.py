@@ -351,7 +351,16 @@ def test_planta_origen_con_conflicto_gps_escala_a_b1(tmp_path):
     assert salida["conflicto.jpg"]["planta_origen_id"] == ""  # nunca se auto-aplica
 
 
-def test_planta_origen_sin_catalogo_de_plantas_no_llama_a_b1(tmp_path):
+def test_planta_origen_sin_catalogo_de_plantas_igual_llama_a_b1_por_las_herramientas_de_investigacion(tmp_path):
+    """Bloque SIMPLIFICAR/AVANZAR A B1 -- sin `carpeta_catalogos` (por lo
+    tanto sin candidatos GPS ya calculados), PLANTA_ORIGEN ya no se
+    descarta en silencio: el dominio declara herramientas de
+    investigación (`EVIDENCIA_HISTORIAL_ORIGEN`/`EVIDENCIA_CATALOGO_
+    PLANTAS`, ver `registro_problemas.py`) -- B1 puede investigar con
+    evidencia vacía en vez de rendirse sin preguntar, mismo criterio ya
+    vigente para OBRA_DESTINO/DESTINO. Con un proveedor simulado sin
+    plantilla configurada, la abstención es el resultado esperado (no
+    hay "regla" que activar aquí, sólo confirma que la llamada ocurre)."""
     ruta = tmp_path / "datos.csv"
     filas = [_fila(
         archivo="conflicto.jpg", indicador_revision="OK", estado_ruta="ORIGEN_NO_DETERMINADO",
@@ -359,9 +368,9 @@ def test_planta_origen_sin_catalogo_de_plantas_no_llama_a_b1(tmp_path):
     )]
     _escribir(ruta, filas)
     resumen = _ejecutar_ia_operacional(ruta, {"conflicto.jpg"}, OrquestadorAtlasIA(proveedor=ProveedorModeloIASimulado(respuestas_por_valor_documental={})))
-    assert resumen["llamadas"] == 0
+    assert resumen["llamadas"] == 1
     traza = json.loads(_leer(ruta)["conflicto.jpg"]["resultado_atlas_ia_json"])[0]
-    assert traza["razon_no_elegible"] == "SIN_EVIDENCIA_PARA_RAZONAR"
+    assert traza["dominio"] == "PLANTA_ORIGEN"
 
 
 # ============================================================

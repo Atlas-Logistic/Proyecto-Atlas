@@ -74,19 +74,32 @@ class TipoProblemaIA:
     aplicar: AplicadorPropuesta | None = None
 
 
-_MOTIVO_RUTA_BASE_SEPARADORES = (":", "(")
+_MOTIVO_RUTA_BASE_SEPARADORES = (":", "(", "[")
 
 
 def motivo_ruta_base(motivo_ruta: str) -> str:
-    """`motivo_ruta` persistido a veces trae detalle después de ':' o '('
-    (p. ej. `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: San != Angol`,
-    `MULTIPLES_UBICACIONES_DISPERSAS(5)`) -- el código base es lo único
-    que identifica el TIPO de problema; el detalle es evidencia, no
-    identidad. Mismo criterio ya usado en
-    `atlas_core.decisiones_pendientes.detectar_decision_destino_no_resuelto`."""
+    """`motivo_ruta` persistido a veces trae detalle después de ':', '(' o
+    '[' (p. ej. `GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: San !=
+    Angol`, `MULTIPLES_UBICACIONES_DISPERSAS(5)`,
+    `CONTRADICCION_OPERACIONAL_ORIGEN[DOCUMENTO=AZA_RENCA:INCOMPATIBLE]`)
+    -- el código base es lo único que identifica el TIPO de problema; el
+    detalle es evidencia, no identidad. Mismo criterio ya usado en
+    `atlas_core.decisiones_pendientes.detectar_decision_destino_no_resuelto`.
+
+    Bloque SIMPLIFICAR/AVANZAR A B1 -- causa raíz real (472648): cortar
+    secuencialmente en CADA separador (versión anterior) rompía un motivo
+    cuyo detalle entre corchetes contiene a su vez un ':' interno
+    (`CONTRADICCION_OPERACIONAL_ORIGEN[DOCUMENTO=AZA_RENCA:INCOMPATIBLE]`)
+    -- el corte por ':' ocurría PRIMERO y dejaba
+    `CONTRADICCION_OPERACIONAL_ORIGEN[DOCUMENTO=AZA_RENCA`, nunca el
+    código base limpio, así que este motivo real nunca podía registrarse
+    en `REGISTRO_PROBLEMAS_IA`. Ahora se corta en el separador que
+    aparece PRIMERO en el texto (el que sea), nunca en un orden fijo
+    arbitrario -- correcto para cualquier combinación futura."""
     texto = str(motivo_ruta or "").strip()
-    for separador in _MOTIVO_RUTA_BASE_SEPARADORES:
-        texto = texto.split(separador, 1)[0].strip()
+    posiciones = [texto.index(separador) for separador in _MOTIVO_RUTA_BASE_SEPARADORES if separador in texto]
+    if posiciones:
+        texto = texto[:min(posiciones)].strip()
     return texto
 
 
@@ -527,7 +540,31 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
     TipoProblemaIA(
         codigos=frozenset({"CONFLICTO_REAL_EN_VENTANA", "DETENCION_REAL_FUERA_DE_TODA_GEOCERCA"}),
         fuente="MOTIVO_ORIGEN_GPS",
-        campo="planta_origen", dominio="PLANTA_ORIGEN", herramientas=(),
+        campo="planta_origen", dominio="PLANTA_ORIGEN",
+        # Bloque SIMPLIFICAR/AVANZAR A B1 -- B1 sólo entra en juego para
+        # ORIGEN cuando la evidencia DIRECTA (GPS contemporáneo, Mobile)
+        # ya no alcanzó (ver `resolver_planta_origen_gps`, que resuelve
+        # solo con esa evidencia y nunca llega hasta aquí si concluyó).
+        # Historial y catálogo, nunca una receta fija -- B1 decide qué
+        # investigar (caso real 472647/472648).
+        herramientas=("EVIDENCIA_HISTORIAL_ORIGEN", "EVIDENCIA_CATALOGO_PLANTAS"),
+        aplicable_automaticamente=False,
+        recopilar_evidencia=recopilar_evidencia_origen_por_conflicto_gps,
+    ),
+    # Bloque SIMPLIFICAR/AVANZAR A B1 -- mismo dominio PLANTA_ORIGEN,
+    # activado por los motivos de `motivo_ruta` (no `motivo_origen_gps`)
+    # que también dejan el origen sin determinar sin evidencia directa
+    # confiable: contradicción operacional real (Mobile/Documento en
+    # conflicto, Bloque ORIGEN OPERACIONAL V2) y membrete no confiable
+    # (Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- caso
+    # real 472647/472648). Reutiliza el MISMO recolector: `detectar_
+    # decision_origen_no_confirmado` ya inspecciona `motivo_ruta`
+    # directamente, sin importar cuál columna disparó el registro.
+    TipoProblemaIA(
+        codigos=frozenset({"CONTRADICCION_OPERACIONAL_ORIGEN", "ENCABEZADO_GUIA_NO_CONFIABLE"}),
+        fuente="MOTIVO_RUTA",
+        campo="planta_origen", dominio="PLANTA_ORIGEN",
+        herramientas=("EVIDENCIA_HISTORIAL_ORIGEN", "EVIDENCIA_CATALOGO_PLANTAS"),
         aplicable_automaticamente=False,
         recopilar_evidencia=recopilar_evidencia_origen_por_conflicto_gps,
     ),
