@@ -440,6 +440,110 @@ def test_revalidar_no_modifica_catalogos(tmp_path):
     assert antes == {p.name: p.read_bytes() for p in catalogos.iterdir()}
 
 
+def test_revalidar_actualiza_estado_documental_cuando_queda_sin_motivos(tmp_path):
+    """Caso real 472593: al retirar el último motivo bloqueante,
+    `estado_documental` (columna separada, nunca tocada por esta función
+    antes de este bloque) debe reflejar el resultado -- nunca quedar
+    congelada en REQUIERE_REVISION mientras `indicador_revision` ya dice
+    OK. Se deriva con la misma fórmula ya usada en `procesamiento_masivo.py`
+    -- nunca "OK" forzado a mano."""
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
+    _confirmar_relacion_directamente(catalogos, cliente, obra)
+    dataset = actual / "analisis_completo_guias.csv"
+    filas = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))
+    filas[0]["estado_documental"] = "REQUIERE_REVISION"
+    _escribir_csv(dataset, filas)
+
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == ["464715"]
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert fila_final["indicador_revision"] == "OK"
+    assert fila_final["estado_documental"] == "OK"
+
+
+def test_revalidar_conserva_estado_documental_si_sigue_habiendo_motivo_bloqueante(tmp_path):
+    fila = _fila_csv(motivos_revision_documento="PATENTE_SIN_HOMOLOGAR | OBRA_DESTINO_SIN_CORROBORAR", estado_documental="REQUIERE_REVISION")
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path, filas_csv=[fila])
+    _confirmar_relacion_directamente(catalogos, cliente, obra)
+    dataset = actual / "analisis_completo_guias.csv"
+    revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert fila_final["indicador_revision"] == "REVISAR"
+    assert fila_final["estado_documental"] == "REQUIERE_REVISION"
+
+
+def test_revalidar_acepta_dataset_historico_sin_columna_rut_cliente(tmp_path):
+    """Bloque VALIDACIÓN E2E FOCAL 472593 -- causa raíz real: `rut_cliente`
+    se agregó a `COLUMNAS` (Bloque RUT CLIENTE V1) explícitamente como
+    backward-compatible ("un dataset existente sin esta columna sigue
+    leyéndose igual"), pero `_leer_filas` seguía exigiendo el encabezado
+    IDÉNTICO -- el dataset productivo real (nunca reescrito desde que se
+    agregó esa columna) quedaba bloqueado con "esquema incompatible" para
+    CUALQUIER revalidación sin OCR."""
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
+    _confirmar_relacion_directamente(catalogos, cliente, obra)
+    dataset = actual / "analisis_completo_guias.csv"
+    columnas_historicas = [c for c in COLUMNAS if c != "rut_cliente"]
+    fila = _fila_csv()
+    del fila["rut_cliente"]
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=columnas_historicas, delimiter=";")
+        escritor.writeheader()
+        escritor.writerow(fila)
+
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == ["464715"]
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in fila_final["motivos_revision_documento"]
+    assert fila_final["rut_cliente"] == ""  # nunca inventa un RUT -- sólo permite que el esquema avance
+
+
+def test_revalidar_resuelve_via_direccion_con_dos_relaciones_confirmadas_redundantes(tmp_path):
+    """Caso real 472593: la obra queda con DOS relaciones CONFIRMADAS hacia
+    dos `Destino` de texto ligeramente distinto para el MISMO lugar real
+    (mismo patrón AUSIN SAN BERNARDO) -- el resolver estricto se abstiene
+    ante esa redundancia; `revalidar_obra_destino_sin_ocr` debe resolver
+    igual, vía coincidencia LITERAL de la dirección documental."""
+    catalogos = _catalogos_minimos(tmp_path)
+    cliente = CatalogoClientes(catalogos / "clientes.json").crear(
+        razon_social="CONSTRUMART SA", rut="76.123.987-2", fuente="TEST", estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+    )
+    destinos_cat = CatalogoDestinos(catalogos / "destinos_maestros.json", ruta_clientes=catalogos / "clientes.json")
+    destino_a = destinos_cat.crear(
+        cliente_id=cliente.cliente_id, nombre_destino=DESTINO_TEXTO, direccion=DESTINO_TEXTO,
+        pais="CHILE", fuente="DECISION_HUMANA_TEST_1",
+    )
+    destino_b = destinos_cat.crear(
+        cliente_id=cliente.cliente_id, nombre_destino=f"{DESTINO_TEXTO} AL LADO DEL PARQUE",
+        direccion=DESTINO_TEXTO, comuna="SAN JOAQUIN", pais="CHILE", fuente="DECISION_HUMANA_TEST_2",
+    )
+    obras_cat = CatalogoObrasDestinos(
+        ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+        ruta_destinos=catalogos / "destinos_maestros.json",
+    )
+    for sufijo, destino in (("a", destino_a), ("b", destino_b)):
+        evidencia = Evidencia(
+            tipo=TipoEvidencia.GUIA.value, identificador_fuente=f"464715-{sufijo}", referencia_hash=sufijo * 64,
+            campos_observados={"obra": OBRA_TEXTO}, fecha="2026-01-01T00:00:00+00:00",
+            actor_proceso="TEST", resultado=ResultadoEvidencia.SOPORTA.value,
+        )
+        pendiente = obras_cat.registrar_observacion(
+            cliente_id=cliente.cliente_id, nombre_obra=OBRA_TEXTO, destino_id=destino.destino_id, evidencia=evidencia,
+        ).relacion
+        obras_cat.confirmar_relacion(pendiente.relacion_id, actor="test")
+
+    # El resolver estricto se abstiene: dos relaciones confirmadas -- es
+    # justo lo que el bug real reproducía.
+    assert obras_cat.resolver_obra_destino_confirmada_global(nombre_obra=OBRA_TEXTO) is None
+
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila_csv()])
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == ["464715"]
+    fila_final = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in fila_final["motivos_revision_documento"]
+
+
 def test_revalidar_y_regenerar_reporte_publica_nuevo_reporte_vigente(tmp_path):
     raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
     _confirmar_relacion_directamente(catalogos, cliente, obra)

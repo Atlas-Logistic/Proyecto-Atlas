@@ -33,6 +33,7 @@ from atlas_core.aplicacion_decisiones import (
     resolver_patentes_confirmadas_por_ledger,
 )
 from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente
+from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import (
@@ -76,6 +77,25 @@ from atlas_core.telemetria.seleccion_recorrido import (
 )
 from atlas_core.telemetria.servicio import ServicioTelemetria
 from atlas_core.validadores import rut_documentalmente_confirmado_invalido, validar_rut_chileno
+
+# Bloque VALIDACIÓN E2E FOCAL 472593 -- causa raíz real: `rut_cliente` se
+# agregó a `COLUMNAS` (Bloque RUT CLIENTE V1) explícitamente como
+# "backward-compatible, un dataset existente sin esta columna sigue
+# leyéndose igual" (ver docstring en `procesamiento_masivo.py`) -- pero
+# `_leer_filas` seguía exigiendo un encabezado IDÉNTICO byte a byte a
+# `COLUMNAS`, así que el dataset productivo real (nunca reescrito desde
+# que se agregó esa columna) quedaba bloqueado para CUALQUIER
+# revalidación sin OCR con "esquema incompatible" -- nunca se llegó a
+# probar en producción real hasta este bloque. Mismo patrón ya usado en
+# `procesamiento_masivo._validar_csv_existente`/`COLUMNAS_PRE_R4` para la
+# migración R4 anterior: se acepta también el encabezado sin
+# `rut_cliente` (la única columna agregada desde entonces); las filas
+# leídas así, al reescribirse con `_escribir_filas_completas`
+# (`DictWriter(fieldnames=COLUMNAS, ...)`, `restval=""` por defecto),
+# quedan con `rut_cliente=""` para toda fila que no la traía -- nunca se
+# INVENTA ni se migra un valor real, sólo se permite que el esquema
+# avance de forma perezosa, igual que ya hace la migración R4.
+_COLUMNAS_SIN_RUT_CLIENTE = [columna for columna in COLUMNAS if columna != "rut_cliente"]
 
 SEPARADOR_MOTIVOS = " | "
 _AUSENTES = {"", "No encontrado"}
@@ -129,7 +149,8 @@ def derivar_estado_ruta_tras_cambio_origen(fila: Mapping[str, object]) -> dict[s
 def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         lector = csv.DictReader(archivo, delimiter=";")
-        if lector.fieldnames != COLUMNAS:
+        campos = lector.fieldnames
+        if campos != COLUMNAS and campos != _COLUMNAS_SIN_RUT_CLIENTE:
             raise ValueError(
                 "El dataset tiene un esquema incompatible; se esperaba el encabezado oficial."
             )
@@ -254,11 +275,60 @@ def revalidar_obra_destino_sin_ocr(
                 except (OSError, ValueError):
                     continue
                 if resuelto is None:
-                    continue
+                    # Bloque VALIDACIÓN E2E FOCAL 472593 -- misma causa raíz
+                    # ya corregida en `procesamiento_masivo._corroborar_
+                    # obra_destino_confirmada` (Bloque DESTINOS INTERNOS
+                    # V1): una obra puede acumular más de una relación
+                    # CONFIRMADA hacia el mismo lugar real (evidencia
+                    # REDUNDANTE, nunca una contradicción -- caso real
+                    # AUSIN SAN BERNARDO/472593, dos confirmaciones humanas
+                    # independientes contra dos `Destino` de texto
+                    # ligeramente distinto). El resolver estricto de arriba
+                    # se abstiene ante esa redundancia; antes de este
+                    # bloque, esta vía de revalidación SIN OCR se quedaba
+                    # ahí -- sin el mismo fallback que ya prueba, primero,
+                    # `_corroborar_obra_destino_confirmada`. Mismo mecanismo
+                    # aquí: `listar_destinos_confirmados_para_obra` (sin
+                    # exigir unicidad) + coincidencia LITERAL (normalizada,
+                    # nunca fuzzy) de la dirección YA documental de esta
+                    # misma fila contra cualquiera de los destinos
+                    # confirmados -- nunca "el primero" ni "el más nuevo".
+                    direccion_documental = str(
+                        fila.get("despachar_a_crudo") or fila.get("direccion_entrega") or ""
+                    ).strip()
+                    resuelto_por_direccion = False
+                    if direccion_documental and direccion_documental not in _AUSENTES:
+                        texto_documental = normalizar_nombre_destino(direccion_documental)
+                        try:
+                            candidatos_confirmados = catalogo_obras.listar_destinos_confirmados_para_obra(
+                                nombre_obra=obra_documental
+                            )
+                        except (OSError, ValueError):
+                            candidatos_confirmados = []
+                        for destino in candidatos_confirmados:
+                            calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
+                            if calle and calle in texto_documental:
+                                resuelto_por_direccion = True
+                                break
+                    if not resuelto_por_direccion:
+                        continue
             motivos = [m for m in motivos if m != motivo_objetivo]
             fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
             fila["indicador_revision"] = (
                 "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            )
+            # Bloque VALIDACIÓN E2E FOCAL 472593 -- caso real: al retirar el
+            # último motivo bloqueante, `estado_documental` (columna
+            # separada, NUNCA tocada antes por esta función) quedaba
+            # congelada en su valor original ("REQUIERE_REVISION") aunque
+            # `indicador_revision` ya pasara a "OK" -- una incoherencia
+            # visible (Desktop/reportes). Se recalcula con la MISMA fórmula
+            # que ya usa `procesamiento_masivo.py` en los 3 lugares donde se
+            # fija esta columna (nunca "forzar OK": se deriva de
+            # `indicador_revision`, igual que siempre) -- nunca se inventa
+            # un criterio nuevo.
+            fila["estado_documental"] = (
+                "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
             )
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
