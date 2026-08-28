@@ -1952,6 +1952,32 @@ def regenerar_decisiones_persistidas(
                 ):
                     continue
 
+        if tipo == "CLIENTE_CANDIDATO":
+            # Bloque REVISIÓN DE ATLAS -- AUDITORÍA Y RESOLUCIÓN AUTÓNOMA V1
+            # -- causa raíz real (472593): `CLIENTE_CANDIDATO` se genera por
+            # coincidencia de NOMBRE (`motivos=("NOMBRE_SIN_RUT_CORROBORABLE",)`)
+            # exactamente cuando, al momento de esa detección, no había un
+            # RUT documental disponible/válido -- pero nunca se reconcilia
+            # después contra evidencia RUT que llegue más tarde (a
+            # diferencia de OBRA_DESCONOCIDA/DESTINO_SIN_CONFIRMAR arriba,
+            # que sí se revisan cada vez). Si la fila vigente de ESTE
+            # documento (`ruta_dataset`) ya trae hoy un `rut_cliente` válido
+            # que resuelve al MISMO cliente que esta decisión ya proponía
+            # como candidato, la pregunta quedó respondida por evidencia más
+            # fuerte (RUT, no nombre) -- se retira. Si el RUT resuelve a un
+            # cliente DISTINTO, es una contradicción real: nunca se
+            # autoaplica, la tarjeta se conserva tal cual para que un humano
+            # la resuelva.
+            if filas_por_guia is not None:
+                numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+                fila_actual = filas_por_guia.get(numero_guia_decision)
+                rut_cliente_fila = str((fila_actual or {}).get("rut_cliente", "")).strip()
+                if rut_cliente_fila and validar_rut_chileno(rut_cliente_fila).estado == EstadoValidacion.VALIDO:
+                    cliente_por_rut = _identidad_cliente_por_rut(carpeta, rut_cliente_fila)
+                    entidad_id_decision = str((decision.get("identidad_resuelta") or {}).get("entidad_id", ""))
+                    if cliente_por_rut is not None and cliente_por_rut.cliente_id == entidad_id_decision:
+                        continue
+
         if tipo == "VEHICULO_DESCONOCIDO":
             patente = normalizar_patente_vehiculo(str(decision.get("valor_documental") or ""))
             if patente in patentes_homologables:

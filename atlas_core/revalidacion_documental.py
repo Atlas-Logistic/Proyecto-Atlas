@@ -1006,6 +1006,58 @@ def revalidar_origen_por_evidencia_mobile_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_rut_cliente_desde_mobile_sin_ocr(
+    *, ruta_dataset: str | Path, repositorio: RepositorioEnviosMobile,
+) -> dict[str, object]:
+    """Bloque REVISIÓN DE ATLAS -- AUDITORÍA Y RESOLUCIÓN AUTÓNOMA V1 --
+    sincroniza `rut_cliente` (columna del dataset) desde `envio.json`
+    (`datos_ocr.rut_cliente`, YA extraído por un OCR anterior) para filas
+    Mobile cuya columna quedó vacía -- sin OCR, sin red: sólo copia un
+    valor que ya existe, persistido, en el propio registro Mobile, nunca
+    vuelve a leer la imagen ni inventa nada.
+
+    Caso real 472593: `rut_cliente` se agregó al dataset (Bloque RUT
+    CLIENTE V1) DESPUÉS de que este documento se procesara -- el valor
+    documental ("93.772.000-9") siempre existió, ya extraído, en
+    `envio.json`, pero nunca se propagó al dataset (la columna simplemente
+    no existía todavía cuando este envío se guardó). Genérico por diseño:
+    cualquier envío Mobile con este mismo patrón (columna agregada después
+    de la captura) queda cubierto igual, nunca ligado a esta guía.
+
+    Nunca sobrescribe un `rut_cliente` YA persistido, aunque parezca
+    distinto -- sólo completa un vacío con evidencia que ya existía."""
+    from atlas_core.catalogo_clientes import ErrorCatalogoClientes, normalizar_rut_cliente
+
+    ruta = Path(ruta_dataset)
+    rut_por_archivo: dict[str, str] = {}
+    for registro in repositorio.historial():
+        rut_crudo = str((registro.get("datos_ocr") or {}).get("rut_cliente", "")).strip()
+        envio_id = str(registro.get("envio_id", "")).strip()
+        foto = str(registro.get("foto_original", "")).strip()
+        if not rut_crudo or rut_crudo == "No encontrado" or not envio_id or not foto:
+            continue
+        try:
+            rut_por_archivo[f"mobile/{envio_id}/{foto}"] = normalizar_rut_cliente(rut_crudo)
+        except ErrorCatalogoClientes:
+            continue  # RUT documental inválido -- nunca se persiste basura
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("rut_cliente", "")).strip():
+                continue  # ya tiene un valor persistido -- nunca se sobrescribe
+            rut = rut_por_archivo.get(str(fila.get("archivo", "")).strip())
+            if not rut:
+                continue
+            fila["rut_cliente"] = rut
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_destino_contra_comuna_documental_sin_ocr(
     *, ruta_dataset: str | Path,
 ) -> dict[str, object]:
