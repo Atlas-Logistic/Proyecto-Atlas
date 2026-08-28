@@ -2291,13 +2291,23 @@ def _herramientas_b1_disponibles(
     puede investigar más allá de eso (mismo criterio ya usado para
     GROQ_API_KEY ausente: B1 se desactiva, nunca lanza).
 
-    Bloque M2-C -- fuente única de registro: cualquier herramienta que
+    Bloque M2-C/U1 -- fuente única de registro: cualquier herramienta que
     `atlas_ia.registro_problemas` declare como disponible para algún
     `TipoProblemaIA` debe tener aquí, en el mismo lugar, su conexión
     real -- nunca una segunda lista manual desincronizada. `filas`/
     `carpeta_catalogos` ausentes (valor por defecto `()`/`None`) sólo
-    dejan sin registrar las dos herramientas que los necesitan -- nunca
-    lanza, mismo criterio que el resto de esta función."""
+    dejan sin registrar las herramientas que los necesitan -- nunca
+    lanza, mismo criterio que el resto de esta función.
+
+    Bloque U1 -- esta función es, por diseño, el ÚNICO lugar donde el
+    nombre declarado de una herramienta (`atlas_ia.registro_problemas.
+    nombres_herramientas_declaradas()`) se traduce en un objeto
+    `HerramientaEvidencia` real. `test_u1_universalidad_b1.py` verifica
+    estructuralmente que todo nombre declarado con datos suficientes
+    (`filas` y `carpeta_catalogos` con catálogo real, credencial de
+    búsqueda presente) termina registrado aquí -- así que un dominio
+    nuevo que declare una herramienta sin conectarla aquí rompe la
+    suite, nunca queda descubierto meses después en producción."""
     import os as _os
 
     herramientas: dict[str, object] = {}
@@ -2312,10 +2322,29 @@ def _herramientas_b1_disponibles(
 
     filas_lista = list(filas)
     if filas_lista:
-        from atlas_core.atlas_ia.herramientas import herramienta_evidencia_historial_origen
+        from atlas_core.atlas_ia.herramientas import (
+            herramienta_documentos_relacionados, herramienta_evidencia_historial_origen,
+        )
 
         herramienta = herramienta_evidencia_historial_origen(filas_lista)
         herramientas[herramienta.nombre] = herramienta
+
+        # Bloque U1 -- misma fuga que M2-C, con un radio de impacto mucho
+        # mayor: `DOCUMENTOS_RELACIONADOS` está declarada como disponible
+        # en `REGISTRO_PROBLEMAS_IA` para ~9 tipos de problema (CHOFER_
+        # SIN_CORROBORAR/AUSENTE, PATENTE_SIN_HOMOLOGAR/AMBIGUA en ambos
+        # campos, CLIENTE_SIN_CORROBORAR/AUSENTE/NUEVA_ENTIDAD, FECHA_SIN_
+        # CORROBORAR, MATERIAL_AUSENTE, DESTINO) pero nunca tuvo conexión
+        # real aquí -- `herramienta_documentos_relacionados` existía en
+        # `atlas_ia.herramientas` desde antes, usada sólo en tests
+        # aislados/experimentos, jamás en el orquestador real. Si B1
+        # alguna vez pedía esta herramienta en cualquiera de esos
+        # dominios, chocaba en silencio con "herramienta no disponible" --
+        # nunca detectado porque ningún test end-to-end la ejercitaba
+        # contra el registro real. Ver `test_u1_universalidad_b1.py`, que
+        # ahora impide que esto vuelva a pasar para NINGÚN nombre nuevo.
+        herramienta_docs = herramienta_documentos_relacionados(filas_lista)
+        herramientas[herramienta_docs.nombre] = herramienta_docs
 
     if carpeta_catalogos is not None:
         try:

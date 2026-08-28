@@ -605,6 +605,27 @@ for _entrada in _ENTRADAS:
         REGISTRO_PROBLEMAS_IA[_clave] = REGISTRO_PROBLEMAS_IA.get(_clave, ()) + (_entrada,)
 
 
+def nombres_herramientas_declaradas() -> frozenset[str]:
+    """Bloque U1 -- fuente ÚNICA y canónica de "qué nombres de
+    herramienta declara el sistema, para algún dominio, como algo que
+    B1 puede llegar a pedir". Deriva de `_ENTRADAS` (nunca una lista
+    manual paralela que pueda desincronizarse): agregar un `TipoProblemaIA`
+    nuevo con una herramienta nueva la suma aquí automáticamente, sin
+    tocar esta función.
+
+    Existe para que `atlas_core.procesamiento_masivo._herramientas_b1_
+    disponibles` (la única fábrica real de herramientas, ver su
+    docstring) pueda verificarse contra ella en tests -- así, "declarada
+    pero nunca conectada" (bug real confirmado dos veces: bloque M2-C
+    con `EVIDENCIA_HISTORIAL_ORIGEN`/`EVIDENCIA_CATALOGO_PLANTAS`, bloque
+    U1 con `DOCUMENTOS_RELACIONADOS`) se vuelve una regresión de test,
+    no un descubrimiento en producción meses después."""
+    nombres: set[str] = set()
+    for entrada in _ENTRADAS:
+        nombres.update(entrada.herramientas)
+    return frozenset(nombres)
+
+
 # Motivos que son, por diseño, fallas puramente estructurales/externas --
 # nunca hay nada que razonar (documento sin identificador, degradación
 # total, proveedor de ruta caído, etc.). Explícitos, no una lista cerrada
