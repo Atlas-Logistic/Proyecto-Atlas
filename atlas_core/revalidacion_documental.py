@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,7 @@ from atlas_core.aplicacion_decisiones import (
 from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente
 from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
-from atlas_core.catalogo_plantas import CatalogoPlantas
+from atlas_core.catalogo_plantas import CatalogoPlantas, normalizar_nombre_planta
 from atlas_core.catalogo_vehiculos import (
     CatalogoVehiculosAusenteError,
     CatalogoVehiculosCorruptoError,
@@ -46,7 +47,7 @@ from atlas_core.catalogo_vehiculos import (
     normalizar_patente_vehiculo,
 )
 from atlas_core.catalogos import buscar_chofer_por_nombre_exacto, cargar_catalogo_json
-from atlas_core.extractor import _patente_valida
+from atlas_core.extractor import _patente_valida, limpiar_sufijo_rut_pegado
 from atlas_core.incidencias_documentales import (
     TIPO_RUT_DOCUMENTAL_INVALIDO,
     TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL,
@@ -62,11 +63,19 @@ from atlas_core.procesamiento_masivo import (
     MOTIVOS_NO_BLOQUEANTES,
     MotivoRevisionDocumento,
     _combinar_fecha_hora,
+    _es_fragmento_estampado_no_material,
+    _normalizar,
     _parsear_fecha_dd_mm_yyyy,
 )
 from atlas_core.reporte_viajes import generar_reporte_viajes
 from atlas_core.rutas.modelos import EstadoRuta
-from atlas_core.rutas.origen_evidencia import fusionar_evidencia_origen, resolver_planta_por_codigo_mobile
+from atlas_core.rutas.origen_evidencia import (
+    MOTIVO_CONTRADICCION_OPERACIONAL,
+    MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA,
+    fusionar_evidencia_origen,
+    resolver_planta_alternativa_por_categoria,
+    resolver_planta_por_codigo_mobile,
+)
 from atlas_core.telemetria.enriquecimiento import enriquecer_documento_con_telemetria
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.proveedor import ProveedorTelemetriaSoloCache
@@ -2327,6 +2336,179 @@ def revalidar_motivo_destino_ya_confirmado_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+def revalidar_material_estampado_persistido_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque R2.3 -- cierra la brecha entre la regla nueva de R2.2
+    (`atlas_core.procesamiento_masivo._es_fragmento_estampado_no_material`)
+    y los datos YA PERSISTIDOS: esa regla sólo se aplica dentro de
+    `extraer_descripcion_material`, en el momento de la extracción -- un
+    documento procesado ANTES de R2.2 (casos reales 464511/464489) sigue
+    mostrando el sello contaminado ("C6 10.08 12PM/BARRAS CYD") porque
+    nunca se volvió a extraer, nunca porque el fix no funcione.
+
+    Nunca vuelve a leer OCR: `descripcion_material` ya está persistido con
+    el mismo formato que produce la extracción (materiales separados por
+    " | ", ver `extraer_descripcion_material`) -- sólo se re-evalúa cada
+    segmento YA EXTRAÍDO contra la regla vigente y se retira el que
+    coincide con la firma de sello (código corto + fecha compacta + hora
+    compacta). Nunca inventa un material nuevo; si un documento queda sin
+    ningún segmento válido, el campo simplemente queda vacío (nunca se
+    rellena con nada)."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            crudo = str(fila.get("descripcion_material", "")).strip()
+            if not crudo:
+                continue
+            segmentos = [s.strip() for s in crudo.split(SEPARADOR_MOTIVOS) if s.strip()]
+            conservados = [s for s in segmentos if not _es_fragmento_estampado_no_material(_normalizar(s))]
+            if conservados == segmentos:
+                continue
+            fila["descripcion_material"] = SEPARADOR_MOTIVOS.join(conservados)
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
+def revalidar_destino_rut_pegado_persistido_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque R2.3 -- misma brecha que la función anterior, para el otro
+    hallazgo estructural de R2.2 (`atlas_core.extractor.
+    limpiar_sufijo_rut_pegado`): un documento procesado ANTES de ese fix
+    (caso real 464511: "SANTA ISABEL 585 SANTIAGO LAMPA :15454297-3")
+    sigue mostrando el RUT pegado porque la limpieza sólo corre dentro de
+    `resolver_entrega_documento`, en el momento de la extracción.
+
+    Nunca vuelve a leer OCR ni recalcula ruta/geocodificación: sólo
+    re-evalúa el texto YA PERSISTIDO de `despachar_a_crudo`/
+    `direccion_entrega` contra la regla vigente (sufijo con dígito
+    verificador de RUT válido). Si el destino cambia, NO recalcula
+    distancia/tiempo aquí -- eso es responsabilidad de la reconciliación
+    de ruta ya existente (`revalidar_ruta_sin_destino_calculado_sin_ocr`),
+    que puede correr después con el texto ya limpio."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            cambio = False
+            for campo in ("despachar_a_crudo", "direccion_entrega"):
+                original = str(fila.get(campo, "")).strip()
+                if not original:
+                    continue
+                limpio = limpiar_sufijo_rut_pegado(original).strip()
+                if limpio != original:
+                    fila[campo] = limpio
+                    cambio = True
+            if cambio:
+                actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
+_PATRON_CONTRADICCION_ORIGEN_R23 = re.compile(
+    r"(MOBILE|DOCUMENTO)=([A-Z0-9_]+):(COMPATIBLE|INCOMPATIBLE|SIN_REGLA)"
+)
+
+
+def revalidar_origen_por_eliminacion_categoria_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Bloque R2.3 (adición -- RESOLUCIÓN OPERACIONAL DE PLANTA ORIGEN):
+    intenta RESOLVER, antes de escalar a Javier, un origen que quedó
+    `CONTRADICCION_OPERACIONAL_ORIGEN[...]` porque la planta que indica
+    el encabezado documental resultó incompatible con la categoría real
+    de la carga -- ver `atlas_core.rutas.origen_evidencia.
+    resolver_planta_alternativa_por_categoria` (universal, data-driven
+    vía `categorias_permitidas`, nunca conoce ninguna empresa/material en
+    particular; la "regla AZA" es enteramente DATO de catálogo, no
+    código nuevo). Nunca vuelve a leer OCR, nunca consulta GPS/red --
+    opera sólo sobre columnas ya persistidas.
+
+    Se abstiene ante cualquier duda real: motivo_ruta no reconocido, más
+    de una planta candidata (documental o alternativa), o evidencia GPS
+    REAL Y POSITIVA que ya apunta a otra planta (`motivo_origen_gps`
+    que empieza por `CONFLICTO_REAL_EN_VENTANA`/`DETENCION_REAL_FUERA_
+    DE_TODA_GEOCERCA`) -- evidencia real nunca se sobrescribe con una
+    inferencia más débil por categoría."""
+    ruta = Path(ruta_dataset)
+    try:
+        plantas = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+    plantas_por_nombre = {p.nombre_normalizado: p for p in plantas}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("estado_ruta", "")).strip() != EstadoRuta.ORIGEN_NO_DETERMINADO.value:
+                continue
+            if str(fila.get("planta_origen_id", "")).strip():
+                continue  # ya tiene origen -- nada que resolver
+            motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
+            if not motivo_ruta.startswith(MOTIVO_CONTRADICCION_OPERACIONAL):
+                continue
+            motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
+            if motivo_origen_gps.startswith("CONFLICTO_REAL_EN_VENTANA") or \
+                    motivo_origen_gps.startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA"):
+                continue  # evidencia GPS real y positiva ya disponible -- no se pisa
+
+            plantas_documentales = [
+                plantas_por_nombre.get(normalizar_nombre_planta(token.replace("_", " ")))
+                for fuente, token, veredicto in _PATRON_CONTRADICCION_ORIGEN_R23.findall(motivo_ruta)
+                if fuente == "DOCUMENTO" and veredicto == "INCOMPATIBLE"
+            ]
+            plantas_documentales = [p for p in plantas_documentales if p is not None]
+            if len(plantas_documentales) != 1:
+                continue  # ambiguo o planta no identificable en el catálogo vigente -- se abstiene
+
+            categoria = str(fila.get("tipo_carga", "")).strip()
+            destino_texto = str(fila.get("despachar_a_crudo", "") or fila.get("direccion_entrega", "")).strip()
+            alternativa = resolver_planta_alternativa_por_categoria(
+                planta_documental=plantas_documentales[0], categoria=categoria,
+                plantas=plantas, destino_texto=destino_texto,
+            )
+            if alternativa is None:
+                continue
+
+            fila["planta_origen_id"] = alternativa.planta_id
+            fila["planta_origen_nombre"] = alternativa.nombre
+            fila["origen_determinado_por"] = MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA
+            fila["evidencia_origen"] = (
+                f"planta_documental={plantas_documentales[0].nombre};categoria={categoria or 'NO_DETERMINADO'};"
+                f"motivo_original={motivo_ruta}"
+            )
+            # Bloque R2.3 -- limpia el bloqueo de origen; `estado_ruta`/
+            # `motivo_ruta` de RUTA (distancia/tiempo) quedan para que
+            # `revalidar_ruta_sin_destino_calculado_sin_ocr` (ya existente)
+            # los recalcule después, con el origen ya resuelto -- esta
+            # función nunca llama a un proveedor de rutas/red.
+            fila["estado_ruta"] = ""
+            fila["motivo_ruta"] = ""
+            # Bloque R2.3 -- `estado_operacional` combina extracción + ruta
+            # (ver `procesamiento_masivo.procesar_archivo`) -- sin
+            # recalcularlo aquí, el viaje queda con la señal VIEJA
+            # (`REQUIERE_REVISION` por el origen que ya se resolvió) y cae
+            # a INCOMPLETO_TECNICO en vez de CONFIRMADO pese a que ya no
+            # queda ningún problema real. `estado_documental`/
+            # `indicador_revision` (extracción) no cambian -- esta función
+            # nunca toca motivos documentales.
+            fila["estado_operacional"] = (
+                "OK" if fila.get("estado_documental", "") == "OK" else "REQUIERE_REVISION"
+            )
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
 ) -> dict[str, object]:
@@ -2443,6 +2625,26 @@ def revalidar_y_regenerar_reporte(
     resultado_direccion_hermanos = revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
+    # Bloque R2.3 -- cierra la brecha entre las reglas de extracción de R2.2
+    # y los datos YA PERSISTIDOS de un documento procesado ANTES de ese
+    # bloque (casos reales 464511/464489). Corre ANTES de la reconciliación
+    # de motivo/destino de arriba a propósito: con el sufijo de RUT ya
+    # retirado, la comparación "calle confirmada dentro del texto
+    # documental" de esa función trabaja sobre el texto real, no el
+    # contaminado.
+    resultado_destino_rut_pegado = revalidar_destino_rut_pegado_persistido_sin_ocr(
+        ruta_dataset=dataset,
+    )
+    resultado_material_estampado = revalidar_material_estampado_persistido_sin_ocr(
+        ruta_dataset=dataset,
+    )
+    # Bloque R2.3 (adición) -- intenta resolver origen por eliminación de
+    # categoría ANTES de la revalidación de ruta más abajo, a propósito:
+    # con `planta_origen_id` ya resuelto, esa misma pasada puede calcular
+    # distancia/tiempo reales en vez de dejarlo para una corrida aparte.
+    resultado_origen_eliminacion = revalidar_origen_por_eliminacion_categoria_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     resultado_motivo_destino_resuelto = revalidar_motivo_destino_ya_confirmado_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
@@ -2459,6 +2661,9 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_motivo_destino_resuelto["guias_actualizadas"])
         | set(resultado_origen_vecinos["guias_actualizadas"])
         | set(resultado_ruta_convergencia_gps["guias_actualizadas"])
+        | set(resultado_destino_rut_pegado["guias_actualizadas"])
+        | set(resultado_material_estampado["guias_actualizadas"])
+        | set(resultado_origen_eliminacion["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -2477,6 +2682,9 @@ def revalidar_y_regenerar_reporte(
         "ruta_convergencia_gps_historica": resultado_ruta_convergencia_gps,
         "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
         "ruta": resultado_ruta,
+        "destino_rut_pegado": resultado_destino_rut_pegado,
+        "material_estampado": resultado_material_estampado,
+        "origen_eliminacion_categoria": resultado_origen_eliminacion,
     }
 
     # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió

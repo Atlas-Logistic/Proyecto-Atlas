@@ -243,10 +243,13 @@ def test_regresion_real_lote_post_limpieza_genera_las_decisiones_esperadas():
     por_guia_tipo = {
         (d["documento"]["numero_guia"], d["tipo"]) for d in resultado
     }
-    # Origen: sin ningún candidato ya confirmado -- pregunta real, ambas
-    # generan ORIGEN_NO_CONFIRMADO.
-    assert ("464170", "ORIGEN_NO_CONFIRMADO") in por_guia_tipo
-    assert ("464479", "ORIGEN_NO_CONFIRMADO") in por_guia_tipo
+    # Origen: Bloque R2.3 (RESOLUCIÓN OPERACIONAL DE PLANTA ORIGEN) ya
+    # resolvió ambas por eliminación de categoría (AZA RENCA no maneja
+    # ROLLOS/BARRAS, AZA COLINA sí, y el destino de ambas es un cliente
+    # externo real, no un traslado interno) -- `planta_origen_id` ya está
+    # presente, así que el detector se abstiene solo (nada que preguntar).
+    assert ("464170", "ORIGEN_NO_CONFIRMADO") not in por_guia_tipo
+    assert ("464479", "ORIGEN_NO_CONFIRMADO") not in por_guia_tipo
     # Cliente ausente: pregunta real, sin resolver.
     assert ("464265", "CLIENTE_AUSENTE") in por_guia_tipo
     # Destino contaminado, pero la obra de 464264 (SODIMAC SA CORONEL) NO
@@ -271,22 +274,30 @@ def test_regresion_real_lote_post_limpieza_genera_las_decisiones_esperadas():
 
 
 @pytest.mark.skipif(not DATOS_REALES_DISPONIBLES, reason="G:\\Mi unidad\\Atlas no disponible en esta máquina")
-def test_regresion_real_viajes_170_493_no_confirman_y_511_recuperado_si():
+def test_regresion_real_viaje_493_no_confirma_170_479_511_si_recuperados():
     """464170/464493/464511 tenían indicador_revision=OK pero
-    estado_operacional=REQUIERE_REVISION -- con el fix de gestor_viajes,
-    sus viajes ya no pueden aparecer CONFIRMADOS."""
+    estado_operacional=REQUIERE_REVISION -- con el fix de gestor_viajes
+    (R2), sus viajes no podían aparecer CONFIRMADOS en silencio. Tras
+    R2.3 (resolución de origen por eliminación de categoría + reintento
+    de ruta), 464170/464479/464511 quedaron realmente resueltos y SÍ
+    pueden confirmar -- sólo 464493 (límite real de geocodificación, no
+    una pregunta de identidad) sigue sin poder."""
     from atlas_core.gestor_viajes import agrupar_viajes, EstadoViaje
 
     with CSV_REAL.open(encoding="utf-8-sig", newline="") as archivo:
         filas = {f["archivo"]: f for f in csv.DictReader(archivo, delimiter=";")}
 
-    for archivo_nombre in ("464170.jpeg", "464493.jpeg"):
+    fila_493 = filas["464493.jpeg"]
+    assert fila_493["estado_operacional"] == "REQUIERE_REVISION"
+    viajes, _ = agrupar_viajes([fila_493])
+    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION, (
+        "464493: debía quedar REQUIERE_REVISION, no CONFIRMADO en silencio"
+    )
+
+    for archivo_nombre in ("464170.jpeg", "464479.jpeg"):
         fila = filas[archivo_nombre]
-        assert fila["estado_operacional"] == "REQUIERE_REVISION"
-        viajes, _ = agrupar_viajes([fila])
-        assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION, (
-            f"{archivo_nombre}: debía quedar REQUIERE_REVISION, no CONFIRMADO en silencio"
-        )
+        assert fila["planta_origen_nombre"], f"{archivo_nombre}: origen debía quedar resuelto"
+        assert fila["estado_operacional"] == "OK", f"{archivo_nombre}: sin origen ni otro problema real, debía confirmar"
 
     recuperada = filas["464511.jpeg"]
     assert recuperada["estado_ruta"] == "RUTA_CALCULADA"

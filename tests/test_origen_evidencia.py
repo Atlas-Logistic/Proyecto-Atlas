@@ -254,3 +254,112 @@ def test_otro_rubro_alimentos_encabezado_no_fisico_no_sobrescribe_mobile():
     assert r.contradiccion is False
     assert r.planta is PLANTA_NORTE
     assert r.fuente == FUENTE_MOBILE
+
+
+# ============================================================
+# Bloque R2.3 (adición) -- resolución de origen por eliminación de
+# categoría cuando la planta documental resulta incompatible. Universal
+# por diseño (misma filosofía del módulo): fixtures propias, nombres
+# arbitrarios -- la "regla AZA" real vive en categorias_permitidas del
+# catálogo (dato), nunca en este código.
+# ============================================================
+
+from atlas_core.rutas.origen_evidencia import resolver_planta_alternativa_por_categoria
+
+
+def _planta_con_direccion(nombre, categorias, direccion):
+    base = _planta(nombre, categorias)
+    from dataclasses import replace
+    return replace(base, direccion=direccion)
+
+
+NORTE_CON_DIRECCION = _planta_con_direccion("PLANTA NORTE AVENA", ("BARRAS", "ROLLOS"), "CALLE NORTE 100, COMUNA X")
+SUR_SOLO_ANGULOS = _planta("PLANTA SUR AVENA", ("ANGULOS",))
+
+
+def test_resuelve_por_eliminacion_cuando_hay_exactamente_una_alternativa_compatible():
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=SUR_SOLO_ANGULOS, categoria="BARRAS",
+        plantas=[NORTE_CON_DIRECCION, SUR_SOLO_ANGULOS],
+        destino_texto="CALLE DE UN CLIENTE CUALQUIERA 500",
+    )
+    assert resultado is NORTE_CON_DIRECCION
+
+
+def test_no_resuelve_si_la_planta_documental_es_compatible():
+    """Nada que resolver por este camino: la incompatibilidad es el
+    disparador, no un requisito arbitrario."""
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=NORTE_CON_DIRECCION, categoria="BARRAS",
+        plantas=[NORTE_CON_DIRECCION, SUR_SOLO_ANGULOS],
+        destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+def test_no_resuelve_si_hay_mas_de_una_alternativa_compatible():
+    otra_compatible = _planta("PLANTA ESTE AVENA", ("BARRAS",))
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=SUR_SOLO_ANGULOS, categoria="BARRAS",
+        plantas=[NORTE_CON_DIRECCION, otra_compatible, SUR_SOLO_ANGULOS],
+        destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+def test_no_resuelve_si_ninguna_alternativa_es_compatible():
+    otra_incompatible = _planta("PLANTA ESTE AVENA", ("ANGULOS",))
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=SUR_SOLO_ANGULOS, categoria="BARRAS",
+        plantas=[otra_incompatible, SUR_SOLO_ANGULOS],
+        destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+def test_no_resuelve_si_el_destino_es_la_propia_planta_alternativa_direccion():
+    """Caso real (traslado interno): BARRAS con destino la DIRECCIÓN real
+    de la planta candidata -- eso es evidencia de un movimiento interno
+    HACIA esa planta, nunca de un despacho a cliente DESDE ella."""
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=SUR_SOLO_ANGULOS, categoria="BARRAS",
+        plantas=[NORTE_CON_DIRECCION, SUR_SOLO_ANGULOS],
+        destino_texto="CALLE NORTE 100, COMUNA X",
+    )
+    assert resultado is None
+
+
+def test_no_resuelve_si_el_destino_nombra_la_propia_planta_alternativa():
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=SUR_SOLO_ANGULOS, categoria="BARRAS",
+        plantas=[NORTE_CON_DIRECCION, SUR_SOLO_ANGULOS],
+        destino_texto="PLANTA NORTE AVENA",
+    )
+    assert resultado is None
+
+
+def test_planta_alternativa_no_vigente_no_cuenta():
+    from dataclasses import replace
+    inactiva = replace(NORTE_CON_DIRECCION, estado_vigencia="INACTIVA")
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=SUR_SOLO_ANGULOS, categoria="BARRAS",
+        plantas=[inactiva, SUR_SOLO_ANGULOS],
+        destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+def test_caso_real_rollos_cliente_externo_aza_resuelve_colina():
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=RENCA, categoria="ROLLOS", plantas=[COLINA, RENCA],
+        destino_texto="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+    )
+    assert resultado is COLINA
+
+
+def test_caso_real_barras_cliente_externo_aza_resuelve_colina():
+    resultado = resolver_planta_alternativa_por_categoria(
+        planta_documental=RENCA, categoria="BARRAS", plantas=[COLINA, RENCA],
+        destino_texto="AV. ALMTE. LATORRE 843 MEJILLONES MEJILLONES",
+    )
+    assert resultado is COLINA

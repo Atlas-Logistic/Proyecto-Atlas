@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_plantas import Planta, normalizar_nombre_planta
 from atlas_core.clasificador_material import TipoCarga
 
@@ -103,6 +104,70 @@ def evaluar_compatibilidad_planta_categoria(planta: Planta | None, categoria: st
     if not permitidas or not categoria_normalizada:
         return SIN_REGLA
     return COMPATIBLE if categoria_normalizada in permitidas else INCOMPATIBLE
+
+
+# Bloque R2.3 (adición -- RESOLUCIÓN OPERACIONAL DE PLANTA ORIGEN) --
+# motivo persistido cuando la resolución automática de abajo SÍ pudo
+# concluir un origen (por eliminación, nunca adivinado): el encabezado
+# documental proponía una planta incompatible con la categoría real de
+# carga, y existe EXACTAMENTE una planta vigente alternativa compatible
+# con esa misma categoría que además no es, ella misma, el destino del
+# despacho (nunca confunde un traslado interno HACIA esa planta con un
+# despacho a cliente DESDE ella). Reconocido por
+# `decisiones_pendientes.detectar_decision_origen_no_confirmado`, que ya
+# se abstiene en cuanto `planta_origen_id` está presente -- la pregunta
+# ORIGEN_NO_CONFIRMADO desaparece sola, nunca hace falta borrarla aparte.
+MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA = "ORIGEN_RESUELTO_POR_ELIMINACION_DE_CATEGORIA"
+
+
+def resolver_planta_alternativa_por_categoria(
+    *, planta_documental: Planta, categoria: str, plantas: Iterable[Planta], destino_texto: str = "",
+) -> Planta | None:
+    """Universal por diseño (mismo criterio que el resto del módulo --
+    nunca conoce ninguna empresa/material en particular, sólo compara
+    `categorias_permitidas` -- dato de catálogo, nunca lógica de Core):
+    cuando la planta que indica el documento es INCOMPATIBLE con la
+    categoría real de la carga, busca si existe EXACTAMENTE una planta
+    alternativa vigente (CONFIRMADA+ACTIVA) cuya `categorias_permitidas`
+    SÍ incluya esa categoría -- proceso de eliminación, nunca preferencia
+    ni cercanía. Se abstiene (``None``, nunca adivina) si:
+    - la planta documental no resultó realmente INCOMPATIBLE (nada que
+      resolver por este camino);
+    - hay cero o más de una planta alternativa compatible (ambigüedad
+      real -- queda para `ORIGEN_NO_CONFIRMADO`);
+    - la única candidata compatible es, ella misma, el destino del
+      despacho (`destino_texto`) -- eso es evidencia de un TRASLADO
+      INTERNO hacia esa planta, nunca un despacho a cliente DESDE ella
+      (caso real: barras despachadas hacia la propia planta candidata no
+      prueban que la carga salió de ahí)."""
+    if evaluar_compatibilidad_planta_categoria(planta_documental, categoria) != INCOMPATIBLE:
+        return None
+    destino_normalizado = normalizar_nombre_planta(destino_texto) if destino_texto else ""
+    destino_texto_normalizado = normalizar_nombre_destino(destino_texto) if destino_texto else ""
+
+    def _es_el_propio_destino(planta: Planta) -> bool:
+        if not destino_texto:
+            return False
+        if planta.nombre_normalizado == destino_normalizado:
+            return True
+        # El documento suele imprimir la DIRECCIÓN completa, no el nombre
+        # corto de la planta -- mismo criterio ya usado en todo Atlas para
+        # "¿esta dirección confirmada coincide con el texto documental?"
+        # (ver revalidar_motivo_destino_ya_confirmado_sin_ocr): la primera
+        # porción de la dirección registrada (antes de la primera coma)
+        # aparece dentro del texto documental.
+        calle = normalizar_nombre_destino(str(planta.direccion or "").split(",", 1)[0])
+        return bool(calle) and calle in destino_texto_normalizado
+
+    candidatas = [
+        p for p in plantas
+        if p.planta_id != planta_documental.planta_id
+        and str(p.estado_calidad).upper() in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+        and str(p.estado_vigencia).upper() in {"ACTIVA", "ACTIVO"}
+        and evaluar_compatibilidad_planta_categoria(p, categoria) == COMPATIBLE
+        and not _es_el_propio_destino(p)
+    ]
+    return candidatas[0] if len(candidatas) == 1 else None
 
 
 @dataclass(frozen=True)
