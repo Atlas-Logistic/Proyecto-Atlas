@@ -491,3 +491,177 @@ def confirmar_vehiculo(
         cargar_catalogo_vehiculos(contenido)
         escribir_json_atomico(ruta, contenido)
         return vehiculo
+
+
+# ---------------------------------------------------------------------
+# Bloque V1 -- INTEGRIDAD DEL CATÁLOGO: catálogo != verdad automática.
+#
+# `confirmar_vehiculo` (arriba) es la única función que ESCRIBE un
+# vehículo -- pero nunca hubo, hasta este bloque, una función que
+# CORRIGIERA uno ya escrito cuando una auditoría posterior (p. ej.
+# `catalogo_vehiculos_catchup.generar_reporte_catchup_patentes`, u
+# otra evidencia real) demuestra que su "CONFIRMADO" no reflejaba
+# respaldo real -- típicamente un artefacto de `migrar_v0_a_v1`, que
+# promueve TODO lo que ya estaba en el catálogo legacy a CONFIRMADO
+# con sólo una evidencia `MIGRACION_LEGACY` (nunca una revisión real).
+# Ambas funciones son GENERALES (nunca hardcodean una patente
+# concreta): el llamador aporta la patente y la justificación: ninguna
+# de las dos decide POR SÍ SOLA qué patente es sospechosa.
+# ---------------------------------------------------------------------
+
+
+def fusionar_vehiculo_como_alias_ocr(
+    ruta: str | Path | None = None, *, patente_sospechosa: str, patente_canonica: str,
+    actor: str, motivo: str, fecha: datetime, referencia_hash: str = "",
+) -> Vehiculo:
+    """Pliega `patente_sospechosa` (un registro standalone del catálogo,
+    demostrado por el llamador como una confusión OCR de otro vehículo
+    ya confirmado con respaldo real) DENTRO de `patente_canonica`, como
+    alias -- nunca la borra en silencio: su propio `vehiculo_id` deja
+    de existir como entrada independiente, pero toda su evidencia
+    histórica se copia íntegra al vehículo destino (nunca se pierde
+    trazabilidad), y se agrega una evidencia nueva documentando la
+    fusión (`tipo="AUDITORIA_ALIAS_OCR"`, `resultado="SOPORTA"`,
+    `campos_observados={"alias": patente_sospechosa}`) que satisface el
+    requisito de `_validar_vehiculo` para un alias real.
+
+    Exige que `es_confusion_ocr_de_patente` sea verdadero entre ambas
+    (nunca pliega dos patentes sin relación de trazo real) y que
+    `patente_canonica` YA esté CONFIRMADO+ACTIVO (nunca crea un
+    vehículo nuevo ni pliega dentro de algo no confirmado)."""
+    if not actor.strip():
+        raise ErrorCatalogoVehiculos("actor obligatorio")
+    if not motivo.strip():
+        raise ErrorCatalogoVehiculos("motivo obligatorio")
+    if fecha.tzinfo is None:
+        raise ErrorCatalogoVehiculos("fecha debe incluir zona horaria")
+    sospechosa = _validar_patente(patente_sospechosa)
+    canonica = _validar_patente(patente_canonica)
+    if sospechosa == canonica:
+        raise ErrorCatalogoVehiculos("la patente sospechosa y la canónica no pueden ser la misma")
+    if not es_confusion_ocr_de_patente(sospechosa, canonica):
+        raise ErrorCatalogoVehiculos(
+            "la fusión sólo se permite entre patentes con una confusión OCR calibrada"
+        )
+    instante = fecha.astimezone(timezone.utc).isoformat()
+    ruta = Path(ruta) if ruta is not None else ruta_catalogo_vehiculos()
+    with bloqueo_sesion(ruta.parent, "catalogo_vehiculos"):
+        cargado = cargar_catalogo_vehiculos(ruta)
+        if cargado.formato != "V1":
+            raise ErrorCatalogoVehiculos("la fusión sólo escribe catálogos V1")
+        origen = next((v for v in cargado.vehiculos if v.patente_canonica == sospechosa), None)
+        destino = next((v for v in cargado.vehiculos if v.patente_canonica == canonica), None)
+        if origen is None:
+            raise ErrorCatalogoVehiculos("la patente sospechosa no existe en el catálogo")
+        if destino is None:
+            raise ErrorCatalogoVehiculos("la patente canónica no existe en el catálogo")
+        if destino.estado_calidad != "CONFIRMADO" or destino.estado_vigencia != "ACTIVO":
+            raise ErrorCatalogoVehiculos("sólo se puede fusionar dentro de un vehículo CONFIRMADO+ACTIVO")
+        if origen.tipo != destino.tipo:
+            raise ErrorCatalogoVehiculos("la fusión exige el mismo tipo de vehículo en ambos lados")
+        evidencia_fusion = EvidenciaVehiculo(
+            tipo="AUDITORIA_ALIAS_OCR", identificador_fuente=motivo.strip(),
+            referencia_hash=str(referencia_hash or "").strip(),
+            campos_observados={
+                "alias": sospechosa, "patente_origen_vehiculo_id": origen.vehiculo_id,
+                "patente_origen_procedencia": origen.procedencia,
+            },
+            fecha=instante, actor_proceso=actor.strip(), resultado="SOPORTA",
+        )
+        EvidenciaVehiculo.desde_dict(evidencia_fusion.a_dict())
+        vehiculo_fusionado = Vehiculo(
+            vehiculo_id=destino.vehiculo_id, patente_canonica=destino.patente_canonica,
+            tipo=destino.tipo, estado_calidad=destino.estado_calidad, estado_vigencia=destino.estado_vigencia,
+            aliases=(*destino.aliases, sospechosa),
+            # Evidencia del ORIGEN preservada íntegra dentro del destino --
+            # la fusión nunca borra trazabilidad, sólo consolida bajo la
+            # patente que sí tiene respaldo real.
+            evidencias=(*destino.evidencias, *origen.evidencias, evidencia_fusion),
+            procedencia=destino.procedencia, confirmado_por=destino.confirmado_por,
+            fecha_confirmacion=destino.fecha_confirmacion, observaciones=destino.observaciones,
+            fecha_creacion=destino.fecha_creacion, fecha_modificacion=instante,
+        )
+        _validar_vehiculo(vehiculo_fusionado)
+        contenido = {
+            "version": VERSION_FORMATO,
+            "vehiculos": [
+                *(v.a_dict() for v in cargado.vehiculos if v.patente_canonica not in (sospechosa, canonica)),
+                vehiculo_fusionado.a_dict(),
+            ],
+        }
+        cargar_catalogo_vehiculos(contenido)
+        escribir_json_atomico(ruta, contenido)
+        return vehiculo_fusionado
+
+
+def revisar_estado_calidad_vehiculo(
+    ruta: str | Path | None = None, *, patente: str, nuevo_estado_calidad: EstadoCalidadVehiculo | str,
+    actor: str, motivo: str, fecha: datetime, referencia_hash: str = "",
+) -> Vehiculo:
+    """Re-clasifica el `estado_calidad` de un vehículo YA existente a la
+    luz de evidencia nueva (p. ej. una auditoría que no encontró
+    respaldo operacional real bajo la evidencia disponible) -- nunca
+    borra el registro ni su historial: sólo cambia su nivel de
+    confianza, con una evidencia NUEVA (`tipo="AUDITORIA_REVISION_
+    INTEGRIDAD"`) que documenta el motivo, sumada a las que ya tenía
+    (nunca las reemplaza). Un vehículo así degradado deja de ser
+    `homologable()` (CONFIRMADO+ACTIVO) -- un documento futuro que lo
+    lea ya no lo trata como conocimiento confirmado, sin que la entrada
+    desaparezca ni se pierda su procedencia original."""
+    if not actor.strip():
+        raise ErrorCatalogoVehiculos("actor obligatorio")
+    if not motivo.strip():
+        raise ErrorCatalogoVehiculos("motivo obligatorio")
+    if fecha.tzinfo is None:
+        raise ErrorCatalogoVehiculos("fecha debe incluir zona horaria")
+    canonica = _validar_patente(patente)
+    try:
+        estado_nuevo = EstadoCalidadVehiculo(nuevo_estado_calidad).value
+    except ValueError as error:
+        raise ErrorCatalogoVehiculos("estado_calidad inválido") from error
+    instante = fecha.astimezone(timezone.utc).isoformat()
+    ruta = Path(ruta) if ruta is not None else ruta_catalogo_vehiculos()
+    with bloqueo_sesion(ruta.parent, "catalogo_vehiculos"):
+        cargado = cargar_catalogo_vehiculos(ruta)
+        if cargado.formato != "V1":
+            raise ErrorCatalogoVehiculos("la revisión sólo escribe catálogos V1")
+        existente = next((v for v in cargado.vehiculos if v.patente_canonica == canonica), None)
+        if existente is None:
+            raise ErrorCatalogoVehiculos("la patente no existe en el catálogo")
+        if existente.estado_calidad == estado_nuevo:
+            raise ErrorCatalogoVehiculos("el vehículo ya tiene ese estado_calidad")
+        evidencia_revision = EvidenciaVehiculo(
+            tipo="AUDITORIA_REVISION_INTEGRIDAD", identificador_fuente=motivo.strip(),
+            referencia_hash=str(referencia_hash or "").strip(),
+            campos_observados={
+                "estado_calidad_anterior": existente.estado_calidad, "estado_calidad_nuevo": estado_nuevo,
+            },
+            fecha=instante, actor_proceso=actor.strip(),
+            resultado="CONTRADICE" if estado_nuevo == "RECHAZADO" else "NEUTRAL",
+        )
+        EvidenciaVehiculo.desde_dict(evidencia_revision.a_dict())
+        # Bajar de CONFIRMADO retira también confirmado_por/fecha_confirmacion
+        # -- ya no representa una confirmación vigente (mismo criterio que
+        # `_validar_vehiculo` exige para cualquier estado != CONFIRMADO).
+        conserva_confirmacion = estado_nuevo == "CONFIRMADO"
+        vehiculo_revisado = Vehiculo(
+            vehiculo_id=existente.vehiculo_id, patente_canonica=existente.patente_canonica,
+            tipo=existente.tipo, estado_calidad=estado_nuevo, estado_vigencia=existente.estado_vigencia,
+            aliases=existente.aliases, evidencias=(*existente.evidencias, evidencia_revision),
+            procedencia=existente.procedencia,
+            confirmado_por=(existente.confirmado_por if conserva_confirmacion else ""),
+            fecha_confirmacion=(existente.fecha_confirmacion if conserva_confirmacion else ""),
+            observaciones=existente.observaciones,
+            fecha_creacion=existente.fecha_creacion, fecha_modificacion=instante,
+        )
+        _validar_vehiculo(vehiculo_revisado)
+        contenido = {
+            "version": VERSION_FORMATO,
+            "vehiculos": [
+                *(v.a_dict() for v in cargado.vehiculos if v.patente_canonica != canonica),
+                vehiculo_revisado.a_dict(),
+            ],
+        }
+        cargar_catalogo_vehiculos(contenido)
+        escribir_json_atomico(ruta, contenido)
+        return vehiculo_revisado
