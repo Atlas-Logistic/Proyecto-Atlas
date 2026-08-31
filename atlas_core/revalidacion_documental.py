@@ -2487,21 +2487,28 @@ def revalidar_origen_por_eliminacion_categoria_sin_ocr(
             )
             # Bloque R2.3 -- limpia el bloqueo de origen; `estado_ruta`/
             # `motivo_ruta` de RUTA (distancia/tiempo) quedan para que
-            # `revalidar_ruta_sin_destino_calculado_sin_ocr` (ya existente)
-            # los recalcule después, con el origen ya resuelto -- esta
-            # función nunca llama a un proveedor de rutas/red.
+            # `revalidar_ruta_sin_destino_calculado_sin_ocr` (ya existente,
+            # ejecutada después en la misma pasada por `revalidar_y_
+            # regenerar_reporte`) los recalcule con el origen ya resuelto
+            # -- esta función nunca llama a un proveedor de rutas/red.
             fila["estado_ruta"] = ""
             fila["motivo_ruta"] = ""
-            # Bloque R2.3 -- `estado_operacional` combina extracción + ruta
-            # (ver `procesamiento_masivo.procesar_archivo`) -- sin
-            # recalcularlo aquí, el viaje queda con la señal VIEJA
-            # (`REQUIERE_REVISION` por el origen que ya se resolvió) y cae
-            # a INCOMPLETO_TECNICO en vez de CONFIRMADO pese a que ya no
-            # queda ningún problema real. `estado_documental`/
-            # `indicador_revision` (extracción) no cambian -- esta función
-            # nunca toca motivos documentales.
+            # Bloque R2.4 -- CORRECCIÓN: origen resuelto NO es lo mismo que
+            # "viaje operacionalmente completo" -- si el documento tiene
+            # destino (`despachar_a_crudo`), la dependencia de ruta/km/
+            # tiempo SIGUE pendiente hasta que el revalidador de ruta la
+            # calcule de verdad (recién ÉSE, más abajo en la misma pasada,
+            # puede poner "OK" -- ver su propio código, línea ~2164). Bug
+            # real encontrado en producción: la versión anterior ponía
+            # "OK" aquí mismo, apenas se limpiaba estado_ruta, sin haber
+            # calculado ningún km/tiempo todavía -- Desktop mostraba
+            # "estado OK" + "Ruta aún no calculada" a la vez (464170). Sin
+            # destino que rutear, no hay dependencia pendiente -- ahí sí
+            # basta con la extracción documental.
             fila["estado_operacional"] = (
-                "OK" if fila.get("estado_documental", "") == "OK" else "REQUIERE_REVISION"
+                "OK"
+                if fila.get("estado_documental", "") == "OK" and not str(fila.get("despachar_a_crudo", "")).strip()
+                else "REQUIERE_REVISION"
             )
             actualizadas.append(str(fila.get("numero_guia", "")))
         if actualizadas:

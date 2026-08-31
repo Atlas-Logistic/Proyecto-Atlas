@@ -90,14 +90,46 @@ def test_resuelve_origen_por_eliminacion_y_limpia_el_bloqueo(tmp_path):
     assert "PLANTA_SUR" in fila["evidencia_origen"] or "PLANTA SUR" in fila["evidencia_origen"]
 
 
-def test_recalcula_estado_operacional_tras_resolver_origen(tmp_path):
-    """Sin esto, el viaje queda con la señal VIEJA (REQUIERE_REVISION por
-    el origen que ya se resolvió) y cae a INCOMPLETO_TECNICO en vez de
-    CONFIRMADO -- bug real encontrado al aplicar esto contra la
-    producción real (464170/464479)."""
+def test_origen_resuelto_con_destino_pendiente_sigue_requiere_revision(tmp_path):
+    """Bloque R2.4 -- CORRECCIÓN de un bug real encontrado en producción:
+    la versión anterior ponía OK aquí mismo apenas se limpiaba
+    estado_ruta, ANTES de calcular ningún km/tiempo -- Desktop mostraba
+    "estado OK" + "Ruta aún no calculada" a la vez (caso real 464170).
+    Con un destino (`despachar_a_crudo`) todavía por rutear, la
+    dependencia sigue pendiente -- sólo el revalidador de ruta (que corre
+    después, con el origen ya resuelto) puede confirmar OK de verdad."""
     carpeta = _catalogos_con_plantas(tmp_path, [PLANTA_NORTE, PLANTA_SUR])
     dataset = tmp_path / "dataset.csv"
-    _escribir_csv(dataset, [_fila(numero_guia="1", estado_documental="OK", estado_operacional="REQUIERE_REVISION")])
+    _escribir_csv(dataset, [_fila(
+        numero_guia="1", estado_documental="OK", estado_operacional="REQUIERE_REVISION",
+        despachar_a_crudo="CALLE DE UN CLIENTE 500",
+    )])
+
+    revalidar_origen_por_eliminacion_categoria_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=carpeta)
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["estado_operacional"] == "REQUIERE_REVISION", (
+        "no debe adelantarse a OK mientras la ruta siga sin calcularse"
+    )
+    assert fila["planta_origen_nombre"] == "PLANTA NORTE"  # el origen sí quedó resuelto
+
+
+def test_origen_resuelto_sin_destino_que_rutear_confirma_directo(tmp_path):
+    """Control: sin ningún destino que rutear, no hay dependencia de ruta
+    pendiente -- basta con que la extracción documental esté sana."""
+    carpeta = _catalogos_con_plantas(tmp_path, [PLANTA_NORTE, PLANTA_SUR])
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila(
+        numero_guia="1", estado_documental="OK", estado_operacional="REQUIERE_REVISION",
+        despachar_a_crudo="",
+    )])
+
+    revalidar_origen_por_eliminacion_categoria_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=carpeta)
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["estado_operacional"] == "OK"
 
     revalidar_origen_por_eliminacion_categoria_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=carpeta)
 

@@ -274,33 +274,42 @@ def test_regresion_real_lote_post_limpieza_genera_las_decisiones_esperadas():
 
 
 @pytest.mark.skipif(not DATOS_REALES_DISPONIBLES, reason="G:\\Mi unidad\\Atlas no disponible en esta máquina")
-def test_regresion_real_viaje_493_no_confirma_170_479_511_si_recuperados():
+def test_regresion_real_viaje_170_493_pendientes_tecnicos_479_511_confirmados():
     """464170/464493/464511 tenían indicador_revision=OK pero
     estado_operacional=REQUIERE_REVISION -- con el fix de gestor_viajes
-    (R2), sus viajes no podían aparecer CONFIRMADOS en silencio. Tras
-    R2.3 (resolución de origen por eliminación de categoría + reintento
-    de ruta), 464170/464479/464511 quedaron realmente resueltos y SÍ
-    pueden confirmar -- sólo 464493 (límite real de geocodificación, no
-    una pregunta de identidad) sigue sin poder."""
+    (R2), sus viajes no podían aparecer CONFIRMADOS en silencio.
+
+    Tras R2.3 (resolución de origen por eliminación de categoría) +
+    R2.4 (coherencia final de ruta -- un origen resuelto NO basta para
+    OK si la ruta/km/tiempo sigue sin calcularse): 464479/464511 sí
+    lograron ruta real y confirman. 464170 resolvió origen (AZA COLINA)
+    pero el geocodificador real rechazó la dirección
+    (GEOCODIFICACION_FUERA_DE_CHILE, MEJILLONES -- un límite técnico de
+    geocodificación, no una pregunta de identidad: la dirección YA está
+    confirmada en el catálogo para esa obra) -- igual que 464493, queda
+    pendiente técnico, nunca CONFIRMADO en silencio sin km/tiempo."""
     from atlas_core.gestor_viajes import agrupar_viajes, EstadoViaje
 
     with CSV_REAL.open(encoding="utf-8-sig", newline="") as archivo:
         filas = {f["archivo"]: f for f in csv.DictReader(archivo, delimiter=";")}
 
-    fila_493 = filas["464493.jpeg"]
-    assert fila_493["estado_operacional"] == "REQUIERE_REVISION"
-    viajes, _ = agrupar_viajes([fila_493])
-    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION, (
-        "464493: debía quedar REQUIERE_REVISION, no CONFIRMADO en silencio"
-    )
-
-    for archivo_nombre in ("464170.jpeg", "464479.jpeg"):
+    for archivo_nombre in ("464170.jpeg", "464493.jpeg"):
         fila = filas[archivo_nombre]
-        assert fila["planta_origen_nombre"], f"{archivo_nombre}: origen debía quedar resuelto"
-        assert fila["estado_operacional"] == "OK", f"{archivo_nombre}: sin origen ni otro problema real, debía confirmar"
+        assert fila["estado_operacional"] == "REQUIERE_REVISION", (
+            f"{archivo_nombre}: pendiente técnico de ruta -- nunca OK sin km/tiempo real"
+        )
+        assert not fila["distancia_km"], f"{archivo_nombre}: no debe tener distancia inventada"
+        viajes, _ = agrupar_viajes([fila])
+        assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION, (
+            f"{archivo_nombre}: debía quedar REQUIERE_REVISION a nivel de documento, no CONFIRMADO en silencio"
+        )
 
-    recuperada = filas["464511.jpeg"]
-    assert recuperada["estado_ruta"] == "RUTA_CALCULADA"
-    assert recuperada["estado_operacional"] == "OK"
-    viajes, _ = agrupar_viajes([recuperada])
-    assert viajes[0].estado == EstadoViaje.CONFIRMADO
+    assert filas["464170.jpeg"]["planta_origen_nombre"] == "AZA COLINA"  # el origen sí quedó resuelto
+
+    for archivo_nombre in ("464479.jpeg", "464511.jpeg"):
+        fila = filas[archivo_nombre]
+        assert fila["estado_ruta"] == "RUTA_CALCULADA", f"{archivo_nombre}: debía tener ruta real calculada"
+        assert fila["distancia_km"], f"{archivo_nombre}: debía tener distancia real"
+        assert fila["estado_operacional"] == "OK"
+        viajes, _ = agrupar_viajes([fila])
+        assert viajes[0].estado == EstadoViaje.CONFIRMADO
