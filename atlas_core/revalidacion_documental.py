@@ -2256,6 +2256,66 @@ def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def revalidar_motivo_destino_ya_confirmado_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Retira motivos documentales de destino que quedaron obsoletos.
+
+    Sólo actúa cuando la obra vigente tiene un destino CONFIRMADO cuya calle
+    coincide literalmente, normalizada, con el texto del propio documento.
+    No corrige OCR ni copia valores: reconcilia el estado derivado contra una
+    confirmación persistente que ya resolvió el problema.
+    """
+    ruta = Path(ruta_dataset)
+    catalogo = CatalogoObrasDestinos(
+        ruta=Path(carpeta_catalogos) / "obras_destinos.json",
+        ruta_clientes=Path(carpeta_catalogos) / "clientes.json",
+        ruta_destinos=Path(carpeta_catalogos) / "destinos_maestros.json",
+    )
+    motivos_objetivo = {
+        MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value,
+        MotivoRevisionDocumento.DESTINO_FRAGMENTO_TRUNCADO.value,
+    }
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            motivos = [m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m]
+            if not (set(motivos) & motivos_objetivo):
+                continue
+            obra = str(fila.get("obra_destino", "")).strip()
+            destino_documental = str(fila.get("despachar_a_crudo", "")).strip()
+            if not obra or not destino_documental:
+                continue
+            texto_documental = normalizar_nombre_destino(destino_documental)
+            try:
+                destinos = catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra)
+            except (OSError, ValueError):
+                continue
+            corroborado = any(
+                (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                and calle in texto_documental
+                for destino in destinos
+            )
+            if not corroborado:
+                continue
+            motivos = [m for m in motivos if m not in motivos_objetivo]
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
+            fila["indicador_revision"] = (
+                "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            )
+            fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+            fila["estado_operacional"] = (
+                "OK" if fila["estado_documental"] == "OK"
+                and str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+                else "REQUIERE_REVISION"
+            )
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
 ) -> dict[str, object]:
@@ -2372,6 +2432,9 @@ def revalidar_y_regenerar_reporte(
     resultado_direccion_hermanos = revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
+    resultado_motivo_destino_resuelto = revalidar_motivo_destino_ya_confirmado_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
@@ -2382,6 +2445,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_ruta["guias_actualizadas"])
         | set(resultado_direccion_degradada["guias_actualizadas"])
         | set(resultado_direccion_hermanos["guias_actualizadas"])
+        | set(resultado_motivo_destino_resuelto["guias_actualizadas"])
         | set(resultado_origen_vecinos["guias_actualizadas"])
         | set(resultado_ruta_convergencia_gps["guias_actualizadas"])
     )
@@ -2393,6 +2457,7 @@ def revalidar_y_regenerar_reporte(
         "cliente": resultado_cliente,
         "direccion_degradada": resultado_direccion_degradada,
         "direccion_hermanos": resultado_direccion_hermanos,
+        "motivo_destino_resuelto": resultado_motivo_destino_resuelto,
         "destino_contradicho": resultado_destino_contradicho,
         "destino_sin_numero": resultado_destino_sin_numero,
         "cliente_ausente": resultado_cliente_ausente,

@@ -330,15 +330,14 @@ def construir_ficha_vehiculo(
     Bloque CATÁLOGOS VEHÍCULOS -- SEPARAR CONFIRMADOS: `clasificacion_
     visual` (Sección 1 del bloque) usa exclusivamente evidencia real ya
     disponible en el catálogo -- nunca inventa un estado nuevo:
-    CONFIRMADO si hubo confirmación humana explícita (`confirmado_por`/
-    `procedencia`, mismo criterio ya usado por
-    `catalogo_vehiculos_catchup.clasificar_par`) O evidencia operacional
-    real (al menos una guía relacionada, ya sea propia o plegada);
+    CONFIRMADO si el catálogo persistente dice `estado_calidad=CONFIRMADO`,
+    hubo confirmación humana explícita (`confirmado_por`/`procedencia`) O
+    evidencia operacional real (al menos una guía relacionada);
     AMBIGUO si el barrido de patentes sospechosas (`patentes_ambiguas`,
     Sección 6 del bloque) todavía no encuentra corroboración suficiente
     para esta patente puntual (caso real JF9565/JF9575); OBSERVADO en
-    cualquier otro caso (migración legacy, sin evidencia operacional
-    vigente, sin ambigüedad detectada)."""
+    cualquier otro caso (calidad todavía observada/candidata, sin evidencia
+    operacional vigente ni ambigüedad detectada)."""
     patente = vehiculo.patente_canonica
     filas_vehiculo = [
         f for f in filas
@@ -353,11 +352,16 @@ def construir_ficha_vehiculo(
     primera, ultima = _primera_ultima(str(f.get("fecha", "")) for f in filas_vehiculo)
     guias_relacionadas = sorted({str(f.get("numero_guia", "")) for f in filas_vehiculo if f.get("numero_guia") not in _AUSENTES})
 
-    confirmacion_fuerte = bool(vehiculo.confirmado_por) or vehiculo.procedencia == "CONFIRMACION_HUMANA"
-    if confirmacion_fuerte:
+    # La calidad del catálogo es conocimiento persistente. La operación
+    # activa sólo aporta histórico/conteos y nunca puede degradar una
+    # entidad confirmada cuando el lote vigente está vacío.
+    confirmacion_humana = bool(vehiculo.confirmado_por) or vehiculo.procedencia == "CONFIRMACION_HUMANA"
+    if confirmacion_humana:
         clasificacion_visual = "CONFIRMADO"
     elif patente in patentes_ambiguas:
         clasificacion_visual = "AMBIGUO"
+    elif vehiculo.estado_calidad == "CONFIRMADO":
+        clasificacion_visual = "CONFIRMADO"
     elif guias_relacionadas:
         clasificacion_visual = "CONFIRMADO"
     else:

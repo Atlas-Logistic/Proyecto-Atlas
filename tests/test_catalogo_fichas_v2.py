@@ -291,10 +291,10 @@ def test_vehiculo_legacy_con_evidencia_operacional_real_es_confirmado():
     assert ficha["clasificacion_visual"] == "CONFIRMADO"
 
 
-def test_vehiculo_legacy_sin_evidencia_ni_ambiguedad_queda_observado():
+def test_vehiculo_confirmado_persistente_sin_evidencia_vigente_sigue_confirmado():
     vehiculo = _vehiculo("ZZ0000", procedencia="CATALOGO_LEGACY")
     ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=[], vehiculos_por_patente={"ZZ0000": vehiculo})
-    assert ficha["clasificacion_visual"] == "OBSERVADO"
+    assert ficha["clasificacion_visual"] == "CONFIRMADO"
 
 
 def test_vehiculo_marcado_ambiguo_por_el_barrido_nunca_aparece_como_confirmado():

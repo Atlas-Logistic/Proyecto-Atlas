@@ -150,6 +150,7 @@ def _peso_kg_numerico(valor: str) -> int | None:
 class EstadoViaje(str, Enum):
     CONFIRMADO = "CONFIRMADO"
     REQUIERE_REVISION = "REQUIERE_REVISION"
+    INCOMPLETO_TECNICO = "INCOMPLETO_TECNICO"
 
 
 class MotivoRevision(str, Enum):
@@ -797,10 +798,21 @@ def agrupar_viajes(
     *,
     normalizador_chofer: Callable[[str], str] | None = None,
     resolver_patente: Callable[[str, str, str], str] | None = None,
+    guias_revision_humana: Iterable[str] | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     generador_id: Callable[[], str] | None = None,
 ) -> tuple[list[Viaje], list[dict[str, object]]]:
-    """Agrupa por transporte y conserva toda contradicción como revisión."""
+    """Agrupa por transporte y conserva toda contradicción como revisión.
+
+    Cuando se entrega ``guias_revision_humana`` (la bandeja canónica), una
+    dependencia operacional sin resolver pero sin decisión accionable queda
+    ``INCOMPLETO_TECNICO``. Sin ese argumento se conserva la semántica binaria
+    histórica para llamadores antiguos.
+    """
+    guias_humanas = (
+        {str(g).strip() for g in guias_revision_humana if str(g).strip()}
+        if guias_revision_humana is not None else None
+    )
     grupos: dict[str, list[Mapping[str, object]]] = {}
     sin_transporte: list[dict[str, object]] = []
 
@@ -858,8 +870,21 @@ def agrupar_viajes(
         # quedar CONFIRMADO en silencio a nivel de viaje, tenga o no
         # contradicciones con otros documentos del mismo transporte. Esto es
         # independiente y se suma a los conflictos ya detectados arriba.
-        if any(_documento_marca_revision(fila) for fila in filas_grupo):
+        documentos_no_ok = [fila for fila in filas_grupo if _documento_marca_revision(fila)]
+        hay_revision_documental = bool(documentos_no_ok)
+        if hay_revision_documental:
             motivos.append(MotivoRevision.DOCUMENTO_REQUIERE_REVISION)
+        hay_conflicto = bool([m for m in motivos if m != MotivoRevision.DOCUMENTO_REQUIERE_REVISION])
+        hay_decision_humana = bool(
+            guias_humanas is not None
+            and any(str(fila.get("numero_guia", "")).strip() in guias_humanas for fila in filas_grupo)
+        )
+        if not motivos:
+            estado_viaje = EstadoViaje.CONFIRMADO
+        elif guias_humanas is None or hay_conflicto or hay_decision_humana:
+            estado_viaje = EstadoViaje.REQUIERE_REVISION
+        else:
+            estado_viaje = EstadoViaje.INCOMPLETO_TECNICO
         fecha = next((valor for valor in fechas_desktop if valor), "")
         identificador = (
             generador_id()
@@ -872,11 +897,7 @@ def agrupar_viajes(
                 numero_transporte=str(filas_grupo[0]["numero_transporte"]).strip(),
                 fecha=fecha,
                 documentos=documentos,
-                estado=(
-                    EstadoViaje.REQUIERE_REVISION
-                    if motivos
-                    else EstadoViaje.CONFIRMADO
-                ),
+                estado=estado_viaje,
                 motivos_revision=motivos,
                 fecha_creacion=ahora,
             )

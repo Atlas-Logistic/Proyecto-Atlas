@@ -395,6 +395,7 @@ def _resumen_markdown(
 ) -> str:
     confirmados = [v for v in viajes if v.estado == EstadoViaje.CONFIRMADO]
     revision = [v for v in viajes if v.estado == EstadoViaje.REQUIERE_REVISION]
+    tecnicos = [v for v in viajes if v.estado == EstadoViaje.INCOMPLETO_TECNICO]
     motivos = Counter(m.value for viaje in revision for m in viaje.motivos_revision)
     lineas = [
         "# Reporte de viajes",
@@ -407,6 +408,7 @@ def _resumen_markdown(
         f"- Viajes identificados: {len(viajes)}",
         f"- Viajes confirmados: {len(confirmados)}",
         f"- Viajes que requieren revisión: {len(revision)}",
+        f"- Viajes pendientes por causa técnica: {len(tecnicos)}",
         f"- Documentos sin transporte: {len(sin_transporte)}",
         f"- Clientes no reconocidos: {len(clientes_no_reconocidos)}",
         "",
@@ -468,9 +470,22 @@ def generar_reporte_viajes(
     )
     resolver_patente = _resolver_patente_desde_ledger(ledger_patentes) if ledger_patentes else None
     instante = reloj()
+    guias_revision_humana: set[str] = set()
+    ruta_decisiones = origen.parent / "decisiones_pendientes.json"
+    try:
+        decisiones = json.loads(ruta_decisiones.read_text(encoding="utf-8")).get("decisiones", [])
+        guias_revision_humana = {
+            str((d.get("documento") or {}).get("numero_guia", "")).strip()
+            for d in decisiones if d.get("estado") == "PENDIENTE"
+        }
+        guias_revision_humana.discard("")
+    except (OSError, ValueError, TypeError):
+        # Sin bandeja canónica no se inventa una clasificación nueva:
+        # agrupar_viajes conserva la semántica histórica binaria.
+        guias_revision_humana = None
     viajes, sin_transporte = agrupar_viajes(
         filas, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
-        reloj=lambda: instante,
+        guias_revision_humana=guias_revision_humana, reloj=lambda: instante,
     )
     no_reconocidos = _construir_clientes_no_reconocidos(filas, catalogos)
     fecha_generacion = instante.isoformat()
@@ -500,6 +515,7 @@ def generar_reporte_viajes(
 
     confirmados = [v for v in viajes if v.estado == EstadoViaje.CONFIRMADO]
     revision = [v for v in viajes if v.estado == EstadoViaje.REQUIERE_REVISION]
+    tecnicos = [v for v in viajes if v.estado == EstadoViaje.INCOMPLETO_TECNICO]
     manifest = {
         "version_reporte": "reporte-viajes-v2",
         "fecha_generacion": fecha_generacion,
@@ -517,6 +533,7 @@ def generar_reporte_viajes(
             "viajes": len(viajes),
             "viajes_confirmados": len(confirmados),
             "viajes_requieren_revision": len(revision),
+            "viajes_incompletos_tecnicos": len(tecnicos),
             "documentos_sin_transporte": len(sin_transporte),
             "clientes_no_reconocidos": len(no_reconocidos),
         },
