@@ -33,6 +33,7 @@ from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
 from atlas_core.incidencias_documentales import (
     AlmacenIncidenciasDocumentales, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE, TIPO_OBRA_DOCUMENTAL_INCONSISTENTE,
 )
+from atlas_core.procesamiento_masivo import MOTIVOS_NO_BLOQUEANTES
 from atlas_core.rutas.modelos import EstadoRuta
 
 # Bloque ORIGEN D1: fuente de origen que representa una confirmación humana
@@ -917,6 +918,24 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     razon_social_final = str(razon_social_manual or "").strip()
                     if not razon_social_final:
                         raise ErrorAplicacionDecision("Debe indicar la razón social del cliente.")
+                    # Bloque URGENTE (atomicidad) -- validaciones de sólo
+                    # LECTURA (nunca escriben nada) primero, ANTES de
+                    # tocar el catálogo -- así, si el documento de esta
+                    # decisión ya no existe en el dataset vigente, la
+                    # excepción se lanza sin haber creado ningún cliente
+                    # nuevo. No elimina por completo la ventana entre
+                    # "catálogo ya escrito" y "CSV/ledger todavía no" (la
+                    # mutación de la fila necesita el cliente ya creado),
+                    # pero sí evita la escritura de catálogo cuando la
+                    # falla es detectable de antemano -- corrección
+                    # mínima, no un framework de transacciones.
+                    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+                    filas_dataset = _leer_filas(dataset)
+                    fila_objetivo = next(
+                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                    )
+                    if fila_objetivo is None:
+                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
                     rut_valido = normalizar_rut_cliente_o_vacio(rut_manual or "")
                     catalogo_clientes = CatalogoClientes(catalogo_clientes_ruta)
                     try:
@@ -936,13 +955,6 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                             raise
                     cliente_id_nuevo = cliente_creado.cliente_id
                     resultado_extra["cliente_id"] = cliente_id_nuevo
-                    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
-                    filas_dataset = _leer_filas(dataset)
-                    fila_objetivo = next(
-                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
-                    )
-                    if fila_objetivo is None:
-                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
                     fila_objetivo["cliente"] = cliente_creado.razon_social
                     motivos_fila = {
                         m.strip() for m in str(fila_objetivo.get("motivos_revision_documento", "")).split("|") if m.strip()

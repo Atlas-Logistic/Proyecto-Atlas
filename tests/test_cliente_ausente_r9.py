@@ -214,3 +214,137 @@ def test_no_puedo_determinar_es_terminal_y_no_toca_el_dataset(tmp_path):
 
     resultado_reconciliado = reconciliar_decisiones_cliente_ausente(raiz_atlas=entorno["raiz"])
     assert resultado_reconciliado["decisiones_publicadas"] == 0
+
+
+# ============================================================
+# Bloque URGENTE -- BUG NameError 'MOTIVOS_NO_BLOQUEANTES' (caso real
+# 464265, motivos_revision_documento con MÁS de un motivo simultáneo:
+# "OBRA_DESTINO_SIN_CORROBORAR | CLIENTE_AUSENTE"). El fixture por
+# defecto de este archivo (_fila_csv, un solo motivo CLIENTE_AUSENTE)
+# nunca disparaba esto: tras .discard("CLIENTE_AUSENTE") el set queda
+# VACÍO, y `any(... for m in motivos_fila)` sobre un generador vacío
+# nunca llega a evaluar el cuerpo (nunca toca MOTIVOS_NO_BLOQUEANTES) --
+# exactamente por qué los tests existentes no detectaron el NameError.
+# Esta regresión usa DOS motivos a la vez, como el caso real, para
+# atravesar de verdad la rama que fallaba.
+# ============================================================
+
+def test_registrar_cliente_manual_con_otro_motivo_simultaneo_no_lanza_nameerror(tmp_path):
+    """Caso real 464265: CLIENTE_AUSENTE conviviendo con
+    OBRA_DESTINO_SIN_CORROBORAR -- tras resolver CLIENTE_AUSENTE, el otro
+    motivo sigue bloqueante (indicador_revision debe seguir REVISAR, no
+    OK), y la evaluación de MOTIVOS_NO_BLOQUEANTES debe ejecutarse de
+    verdad, sin NameError."""
+    fila = _fila_csv(motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR | CLIENTE_AUSENTE")
+    entorno = _entorno(tmp_path, filas_csv=[fila])
+    decision = detectar_decision_cliente_ausente(archivo="472238.jpeg", fila=fila)
+    _publicar(entorno, decision)
+
+    resultado = aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
+        accion="REGISTRAR_CLIENTE_MANUAL", razon_social_manual="SODIMAC SA",
+    )
+
+    assert resultado["ok"] is True
+    fila_final = _leer_csv(entorno["dataset"])["472238.jpeg"]
+    assert fila_final["cliente"] == "SODIMAC SA"
+    assert "CLIENTE_AUSENTE" not in fila_final["motivos_revision_documento"]
+    assert "OBRA_DESTINO_SIN_CORROBORAR" in fila_final["motivos_revision_documento"]
+    # El otro motivo sigue siendo bloqueante -- nunca queda OK en falso.
+    assert fila_final["indicador_revision"] == "REVISAR"
+    assert fila_final["estado_documental"] == "REQUIERE_REVISION"
+
+    bandeja = json.loads((entorno["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    assert bandeja["decisiones"] == []  # CLIENTE_AUSENTE se retiró tras el éxito
+
+
+def test_registrar_cliente_manual_con_motivo_no_bloqueante_restante_queda_ok(tmp_path):
+    """Control -- si lo único que queda es un motivo NO bloqueante
+    (MOTIVOS_NO_BLOQUEANTES), sí debe quedar OK -- confirma que la
+    constante recién importada se usa con la semántica correcta, no sólo
+    que no truena."""
+    fila = _fila_csv(motivos_revision_documento="MATERIAL_AUSENTE | CLIENTE_AUSENTE")
+    entorno = _entorno(tmp_path, filas_csv=[fila])
+    decision = detectar_decision_cliente_ausente(archivo="472238.jpeg", fila=fila)
+    _publicar(entorno, decision)
+
+    aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
+        accion="REGISTRAR_CLIENTE_MANUAL", razon_social_manual="SODIMAC SA",
+    )
+
+    fila_final = _leer_csv(entorno["dataset"])["472238.jpeg"]
+    assert fila_final["indicador_revision"] == "OK"
+    assert fila_final["estado_documental"] == "OK"
+
+
+def test_otras_decisiones_pendientes_quedan_intactas_al_resolver_una(tmp_path):
+    """Aplicar una decisión nunca debe tocar otra decisión pendiente no
+    relacionada (mismo principio que exige la prueba real de las 3
+    decisiones: resolver 464265 no puede afectar a 464264)."""
+    fila_238 = _fila_csv(
+        numero_guia="472238", archivo="472238.jpeg",
+        motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR | CLIENTE_AUSENTE",
+    )
+    fila_239 = _fila_csv(
+        numero_guia="472239", archivo="472239.jpeg", cliente="OTRO CLIENTE YA CONOCIDO",
+        motivos_revision_documento="",
+    )
+    entorno = _entorno(tmp_path, filas_csv=[fila_238, fila_239])
+    decision_238 = detectar_decision_cliente_ausente(archivo="472238.jpeg", fila=fila_238)
+    decision_otra = crear_decision(
+        tipo="OBRA_DESCONOCIDA", entidad="OBRA", archivo="472239.jpeg",
+        numero_guia="472239", numero_transporte="0000354443", campo="obra_destino",
+        valor_documental="OBRA X", valor_normalizado="OBRA X", identidad_resuelta=None,
+        candidatos=(), motivos=("OBRA_NO_CATALOGADA",), evidencias=({"tipo": "SIN_COINCIDENCIA"},),
+        acciones_permitidas=("REGISTRAR", "NO_REGISTRAR", "POSPONER"),
+    )
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=[decision_238, decision_otra], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+
+    aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision_238["decision_id"],
+        accion="REGISTRAR_CLIENTE_MANUAL", razon_social_manual="SODIMAC SA",
+    )
+
+    bandeja = json.loads((entorno["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    tipos_restantes = {d["tipo"] for d in bandeja["decisiones"]}
+    assert tipos_restantes == {"OBRA_DESCONOCIDA"}  # la otra decisión sigue intacta, PENDIENTE
+
+
+def test_reintento_tras_error_no_duplica_aprendizaje(tmp_path):
+    """Idempotencia razonable: si la MISMA razón social se registra dos
+    veces (p. ej. un reintento tras un fallo previo), no debe crear un
+    segundo cliente -- mismo mecanismo ya probado en
+    test_registrar_cliente_manual_reutiliza_cliente_ya_existente, ahora
+    con el motivo compuesto real."""
+    fila = _fila_csv(motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR | CLIENTE_AUSENTE")
+    entorno = _entorno(tmp_path, filas_csv=[fila])
+    decision = detectar_decision_cliente_ausente(archivo="472238.jpeg", fila=fila)
+    _publicar(entorno, decision)
+
+    aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
+        accion="REGISTRAR_CLIENTE_MANUAL", razon_social_manual="SODIMAC SA",
+    )
+    clientes_tras_primer_intento = CatalogoClientes(entorno["catalogos"] / "clientes.json").listar()
+    assert len(clientes_tras_primer_intento) == 1
+
+    # La decisión ya se retiró de la bandeja -- reaplicar el mismo
+    # decision_id (simula un reintento/doble clic tras la resolución) no
+    # debe, bajo ninguna circunstancia (ni error ni éxito silencioso),
+    # crear un segundo cliente -- el mecanismo de deduplicación por
+    # nombre normalizado ya cubre esto (ClienteDuplicadoError -> se
+    # reutiliza el existente), incluso si `aplicar_decision_obra` no
+    # rechaza explícitamente un decision_id ya resuelto.
+    try:
+        aplicar_decision_obra(
+            raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
+            accion="REGISTRAR_CLIENTE_MANUAL", razon_social_manual="SODIMAC SA",
+        )
+    except ErrorAplicacionDecision:
+        pass
+    clientes_final = CatalogoClientes(entorno["catalogos"] / "clientes.json").listar()
+    assert len(clientes_final) == 1, "un reintento nunca debe duplicar el aprendizaje ya persistido"
