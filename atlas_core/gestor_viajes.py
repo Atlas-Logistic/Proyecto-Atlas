@@ -16,6 +16,13 @@ from typing import Callable, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from atlas_core.catalogos import normalizar_rut
+from atlas_core.credibilidad_campos import (
+    NivelCredibilidad,
+    evaluar_credibilidad_direccion,
+    evaluar_credibilidad_entidad_nombre,
+    evaluar_credibilidad_material,
+    valor_publicable,
+)
 
 
 _AUSENTES = {"", "no encontrado", "revisar", "ilegible"}
@@ -320,11 +327,27 @@ class Viaje:
 
     @property
     def clientes(self) -> list[str]:
-        return _valores_unicos(d.cliente for d in self.documentos)
+        return _valores_unicos(self._campos_publicables("cliente", evaluar_credibilidad_entidad_nombre))
 
     @property
     def obras_destino(self) -> list[str]:
-        return _valores_unicos(d.obra_destino for d in self.documentos)
+        return _valores_unicos(self._campos_publicables("obra_destino", evaluar_credibilidad_entidad_nombre))
+
+    def _campos_publicables(self, campo: str, evaluador) -> list[str]:
+        """Bloque P1 -- SEPARACIÓN evidencia OCR / dato operacional
+        publicable: `cliente`/`obra_destino` son, por naturaleza, un
+        hecho COMPARTIDO por todos los documentos de un mismo viaje
+        (misma operación de transporte) -- si uno queda DUDOSO/INVÁLIDO
+        (Bloque C1), un documento HERMANO de este mismo viaje con un
+        valor CONFIABLE para el mismo campo es evidencia independiente
+        real, nunca inventada (ver `credibilidad_campos.valor_
+        publicable`). Sin recuperación posible, se publica `VALOR_NO_
+        DETERMINADO` -- nunca el texto dudoso/inválido crudo. El valor
+        documental original sigue disponible íntegro en `evidencia`
+        (ver `DocumentoViaje.evidencia`/`evidencias_documentos`)."""
+        valores = [getattr(d, campo) for d in self.documentos]
+        confiables = [v for v in valores if v and evaluador(v).nivel == NivelCredibilidad.CONFIABLE]
+        return [valor_publicable(v, evaluador, confiables) for v in valores]
 
     @property
     def origenes(self) -> list[str]:
@@ -348,7 +371,15 @@ class Viaje:
 
     @property
     def materiales(self) -> list[str]:
-        return _valores_unicos(d.descripcion_material for d in self.documentos)
+        # Bloque P1 -- a diferencia de cliente/obra_destino, el material es
+        # un hecho POR DOCUMENTO (cada guía puede transportar una carga
+        # distinta dentro del mismo viaje) -- nunca se recupera desde un
+        # documento hermano (sería atribuirle a un documento la carga de
+        # otro). Sin recuperación posible: DUDOSO/INVÁLIDO -> `VALOR_NO_
+        # DETERMINADO` directo.
+        return _valores_unicos(
+            valor_publicable(d.descripcion_material, evaluar_credibilidad_material) for d in self.documentos
+        )
 
     @property
     def tipos_carga(self) -> list[str]:
@@ -403,7 +434,23 @@ class Viaje:
 
     @property
     def despachar_a(self) -> str:
-        return self._campo_ruta_consolidado("despachar_a_crudo")
+        # Bloque P1 -- mismo criterio conservador que `_campo_ruta_
+        # consolidado` (exige coincidencia exacta entre TODOS los
+        # documentos que sí traen dato), pero un valor DUDOSO/INVÁLIDO
+        # (p. ej. un fragmento truncado, Bloque C1) se trata como
+        # "documento sin dato" para la consolidación -- nunca se publica
+        # un fragmento crudo, y nunca compite en falso contra la
+        # dirección real y limpia de un documento hermano. `despachar_a_
+        # crudo` (evidencia documental) nunca se modifica -- esto sólo
+        # filtra qué participa en la consolidación PUBLICADA; el ruteo/
+        # KM ya calculado (`direccion_entrega`/`estado_ruta`) usa la
+        # dirección resuelta en el procesamiento, no esta propiedad.
+        valores = [
+            d.despachar_a_crudo for d in self.documentos
+            if d.despachar_a_crudo and evaluar_credibilidad_direccion(d.despachar_a_crudo).nivel == NivelCredibilidad.CONFIABLE
+        ]
+        unicos = _valores_unicos(valores)
+        return unicos[0] if len(unicos) == 1 else ""
 
     @property
     def direccion_entrega(self) -> str:

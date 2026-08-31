@@ -35,6 +35,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Callable, Iterable
 
 from atlas_core.extractor import _texto_simple, etiquetas_estructurales_documento
 from atlas_core.modelos import EstadoValidacion
@@ -279,3 +280,62 @@ def evaluar_credibilidad_peso(peso_kg: object) -> ResultadoCredibilidad:
             NivelCredibilidad.DUDOSO, motivo=MOTIVO_PESO_ATIPICO, senales=(f"PESO_KG={valor:g}",),
         )
     return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
+
+
+# ---------------------------------------------------------------------
+# Bloque P1 -- SEPARACIÓN evidencia OCR / dato operacional publicable.
+#
+# C1 (bloque anterior) sólo marcaba un motivo trazable (`motivos_
+# revision_documento`) -- el valor DUDOSO/INVÁLIDO seguía siendo el
+# mismo que terminaba publicado en Viajes/reportes, exactamente el
+# "error con falsa seguridad" que P1 cierra. `valor_publicable` es el
+# ÚNICO punto que decide qué se muestra como dato operacional: nunca
+# borra el valor documental (sigue disponible íntegro donde ya vivía
+# -- `evidencia`/CSV crudo, ver `atlas_core.gestor_viajes.
+# DocumentoViaje.evidencia`), sólo decide si ESE valor puede
+# presentarse como limpio, o si corresponde reemplazarlo (en la salida
+# publicada, nunca en el dato interno) por uno recuperado de evidencia
+# independiente o por `VALOR_NO_DETERMINADO`.
+# ---------------------------------------------------------------------
+
+VALOR_NO_DETERMINADO = "NO DETERMINADO"
+
+
+def valor_publicable(
+    valor: object, evaluador: Callable[[object], ResultadoCredibilidad],
+    candidatos_recuperacion: Iterable[object] = (),
+) -> str:
+    """DETECTAR -> INVESTIGAR -> RESOLVER SI HAY EVIDENCIA -> ABSTENERSE
+    SI NO (nunca "detectar -> publicar basura + warning"):
+
+    1. Si `valor` ya es CONFIABLE (o está ausente -- la ausencia no es
+       asunto de esta función, ver `*_AUSENTE`), se publica tal cual.
+    2. Si no, se intenta recuperación determinista con evidencia
+       INDEPENDIENTE real: el primer valor de `candidatos_recuperacion`
+       (p. ej. el mismo campo en documentos hermanos del mismo viaje/
+       transporte -- nunca inventado) que resulte CONFIABLE se publica
+       en su lugar. Sólo tiene sentido para campos que son, por
+       naturaleza, un hecho compartido del viaje (cliente/obra/destino
+       documental) -- nunca para un campo por-documento como el
+       material (cada documento puede traer una carga distinta; no se
+       le pasan candidatos).
+    3. Si ninguna recuperación determinista alcanza, se publica
+       `VALOR_NO_DETERMINADO` -- nunca el valor dudoso/inválido crudo.
+       (B1, cuando corrobora con evidencia suficientemente fuerte
+       -- clasificación A, ver `atlas_ia.orquestador._clasificar_
+       propuesta` -- ya escribió el valor operacional directo en el
+       propio dataset durante el procesamiento, así que en ese caso
+       `valor` mismo ya llega CONFIABLE aquí y cae en el paso 1; esta
+       función no vuelve a invocar a B1.)"""
+    texto = str(valor or "").strip()
+    if texto in _AUSENTE or texto == "No encontrado":
+        return texto
+    if evaluador(texto).nivel == NivelCredibilidad.CONFIABLE:
+        return texto
+    for candidato in candidatos_recuperacion:
+        candidato_texto = str(candidato or "").strip()
+        if not candidato_texto or candidato_texto in _AUSENTE or candidato_texto == "No encontrado":
+            continue
+        if evaluador(candidato_texto).nivel == NivelCredibilidad.CONFIABLE:
+            return candidato_texto
+    return VALOR_NO_DETERMINADO
