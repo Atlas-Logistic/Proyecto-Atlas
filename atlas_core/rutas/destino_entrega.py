@@ -44,6 +44,7 @@ from atlas_core.catalogo_destinos import Destino
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
+    limpiar_sufijo_rut_pegado,
     _extraer_despachar_a_geometrico,
 )
 from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
@@ -1700,7 +1701,12 @@ def resolver_entrega_documento(
     (`_extraer_despachar_a_geometrico`) -- nunca por el orden de lectura."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
-    despachar_a_crudo = (identificadores.despachar_a or "").strip()
+    # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
+    # final, el RUT de OTRO campo sin su propia etiqueta (mismo
+    # intercalado de columnas de PaddleOCR que ya cubre
+    # `_despachar_a_lineal_contaminado`, pero aquí la dirección SÍ se
+    # leyó completa antes -- ver `limpiar_sufijo_rut_pegado`).
+    despachar_a_crudo = limpiar_sufijo_rut_pegado((identificadores.despachar_a or "").strip())
 
     if bloques is not None and (
         not despachar_a_crudo or _despachar_a_lineal_contaminado(despachar_a_crudo)

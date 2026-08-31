@@ -1051,6 +1051,39 @@ def _despachar_a_lineal_contaminado(valor: Any) -> bool:
     )
 
 
+_PATRON_SUFIJO_RUT_PEGADO = re.compile(
+    r"\s*:?\s*(?:[0-9]{1,8}|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+)\s*-\s*[0-9Kk]\s*$"
+)
+
+
+def limpiar_sufijo_rut_pegado(valor: Any) -> str:
+    """Complementa `_despachar_a_lineal_contaminado` (arriba): ese detector
+    exige que el valor ENTERO sea un RUT -- se abstiene cuando una
+    dirección real y legítima trae, pegado al final, el RUT de OTRO campo
+    (mismo problema de columnas de PaddleOCR intercaladas, pero la
+    dirección esta vez SÍ se leyó completa antes del RUT contaminante).
+    Caso real guía 464511: "SANTA ISABEL 585 SANTIAGO LAMPA :15454297-3"
+    -- la dirección es válida, el "  :15454297-3" final es el RUT del
+    cliente, sin su propia etiqueta "RUT" (se perdió en el intercalado),
+    así que ninguna etiqueta estructural conocida marcó el límite del
+    campo DESPACHAR A.
+
+    Sólo recorta el SUFIJO cuando tiene forma de RUT chileno válido
+    (dígito verificador correcto) pegado al final -- nunca una dirección
+    que legítimamente termine en un número (numeración de calle), porque
+    esas nunca traen guión + dígito verificador. Conserva el resto de la
+    dirección intacto; nunca inventa ni corrige el texto restante."""
+    texto = str(valor or "")
+    coincidencia = _PATRON_SUFIJO_RUT_PEGADO.search(texto)
+    if not coincidencia:
+        return texto
+    posible_rut = coincidencia.group(0).lstrip(" :").strip()
+    if validar_rut_chileno(posible_rut).estado != EstadoValidacion.VALIDO:
+        return texto
+    resto = texto[: coincidencia.start()].strip()
+    return resto if resto else texto
+
+
 def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     """Localiza el valor de DESPACHAR A por posición real en la imagen (no
     por el orden de lectura lineal de PaddleOCR, que puede intercalar

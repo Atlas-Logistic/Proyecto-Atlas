@@ -349,6 +349,24 @@ def _coincide_con_tolerancia_ocr(token: str, termino: str) -> bool:
     return all(frozenset(par) in _CONFUSIONES_OCR_MATERIAL for par in diferencias)
 
 
+def _es_fragmento_estampado_no_material(linea_normalizada: str) -> bool:
+    """Bloque R2.2 Clase C -- una línea OCR puede mencionar un término de
+    material (p. ej. "BARRAS") sólo porque un sello/anotación operacional
+    de OTRA sección del documento (código de bahía/sección + fecha
+    compacta + hora) quedó en la misma línea que la descripción real --
+    nunca porque describa un material en sí. Señal ESTRUCTURAL (forma,
+    nunca un valor literal): un código corto tipo letra+dígito(s), una
+    fecha compacta D.DD y una hora compacta HH(AM|PM) apareciendo juntos
+    en la misma línea es la firma de esta contaminación (casos reales:
+    "C6 10.08 12PM/BARRAS CYD", "C4 10.08 8AM/BARRAS CYD") -- nunca se
+    compara contra "C4"/"C6"/fechas/horas específicas, sólo contra la
+    forma. Una línea real de material nunca trae esta combinación."""
+    tiene_codigo_corto = re.search(r"\b[A-Z]\d{1,2}\b", linea_normalizada)
+    tiene_fecha_compacta = re.search(r"\b\d{1,2}\.\d{2}\b", linea_normalizada)
+    tiene_hora_compacta = re.search(r"\b\d{1,2}(?:AM|PM)\b", linea_normalizada)
+    return bool(tiene_codigo_corto and tiene_fecha_compacta and tiene_hora_compacta)
+
+
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
     """Conserva líneas OCR con evidencia explícita de material."""
     terminos = re.compile(
@@ -366,7 +384,7 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
                 _coincide_con_tolerancia_ocr(token, "HORMIGON")
                 for token in re.findall(r"[A-Z]+", normalizada)
             )
-            if tiene_evidencia:
+            if tiene_evidencia and not _es_fragmento_estampado_no_material(normalizada):
                 # Confusiones OCR acotadas al contexto inequívoco de una línea
                 # de acero: B/3/D al inicio y 8/B antes de MM.
                 limpia = re.sub(r"^[D3]\s+(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
