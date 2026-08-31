@@ -156,6 +156,7 @@ def test_multiples_ubicaciones_dispersas_se_resuelve_con_fallback_estructurado_c
     assert resultado["guias_actualizadas"] == ["472037"]
     fila = _leer(dataset)[0]
     assert fila["estado_ruta"] == "RUTA_CALCULADA"
+    assert fila["estado_operacional"] == "OK"
     # El routing real (km/tiempo) lo calcula el proveedor PRINCIPAL
     # (ORS) hacia el punto que Vía C determinó -- Nominatim es sólo
     # geocodificador de respaldo, nunca calcula rutas.

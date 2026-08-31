@@ -271,7 +271,7 @@ def test_regresion_real_lote_post_limpieza_genera_las_decisiones_esperadas():
 
 
 @pytest.mark.skipif(not DATOS_REALES_DISPONIBLES, reason="G:\\Mi unidad\\Atlas no disponible en esta máquina")
-def test_regresion_real_viajes_170_493_511_ya_no_confirman_en_silencio():
+def test_regresion_real_viajes_170_493_no_confirman_y_511_recuperado_si():
     """464170/464493/464511 tenían indicador_revision=OK pero
     estado_operacional=REQUIERE_REVISION -- con el fix de gestor_viajes,
     sus viajes ya no pueden aparecer CONFIRMADOS."""
@@ -280,10 +280,16 @@ def test_regresion_real_viajes_170_493_511_ya_no_confirman_en_silencio():
     with CSV_REAL.open(encoding="utf-8-sig", newline="") as archivo:
         filas = {f["archivo"]: f for f in csv.DictReader(archivo, delimiter=";")}
 
-    for archivo_nombre in ("464170.jpeg", "464493.jpeg", "464511.jpeg"):
+    for archivo_nombre in ("464170.jpeg", "464493.jpeg"):
         fila = filas[archivo_nombre]
         assert fila["estado_operacional"] == "REQUIERE_REVISION"
         viajes, _ = agrupar_viajes([fila])
         assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION, (
             f"{archivo_nombre}: debía quedar REQUIERE_REVISION, no CONFIRMADO en silencio"
         )
+
+    recuperada = filas["464511.jpeg"]
+    assert recuperada["estado_ruta"] == "RUTA_CALCULADA"
+    assert recuperada["estado_operacional"] == "OK"
+    viajes, _ = agrupar_viajes([recuperada])
+    assert viajes[0].estado == EstadoViaje.CONFIRMADO

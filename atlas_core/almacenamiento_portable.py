@@ -165,6 +165,7 @@ def escribir_estado_operacion(
     dataset_operacional: str | Path | None = None,
     decisiones_pendientes: str | Path | None = None,
     origen: str | None = None,
+    version_estado_derivado: int | None = None,
     raiz: Path | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> Path | None:
@@ -202,6 +203,8 @@ def escribir_estado_operacion(
         "fecha_actualizacion": reloj().astimezone(timezone.utc).isoformat(),
         "origen": origen,
     }
+    if version_estado_derivado is not None:
+        contenido["version_estado_derivado"] = version_estado_derivado
     ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
     escribir_json_atomico(ruta_manifiesto, contenido)
     return ruta_manifiesto

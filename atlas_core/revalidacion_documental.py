@@ -1875,6 +1875,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
     proveedor_rutas_fallback=None,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque H (R4.10) -- para filas con planta de origen y
     `despachar_a_crudo` YA persistidos (documento ya procesado, sin OCR
@@ -1990,6 +1991,8 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
         for fila in filas:
+            if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
+                continue
             if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
                 continue
             despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
@@ -2142,6 +2145,14 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             fila["proveedor_ruta"] = resultado.proveedor_ruta
             fila["estado_ruta"] = resultado.estado_ruta
             fila["motivo_ruta"] = ""
+            # La ruta recuperada completa la dependencia operacional. Si
+            # el documento ya estaba sano, no debe sobrevivir la bandera
+            # derivada REQUIERE_REVISION que originó el pendiente técnico.
+            if (
+                str(fila.get("indicador_revision", "")).strip() == "OK"
+                and str(fila.get("estado_documental", "")).strip() in ("", "OK")
+            ):
+                fila["estado_operacional"] = "OK"
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
