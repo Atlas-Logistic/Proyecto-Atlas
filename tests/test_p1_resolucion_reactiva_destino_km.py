@@ -37,7 +37,7 @@ def _fila_csv(**overrides):
     fila.update({
         "archivo": "900001.jpeg", "estado_procesamiento": "OK", "numero_guia": "900001",
         "numero_transporte": "0000900001", "fecha": FECHA, "chofer": "CHOFER DE PRUEBA",
-        "cliente": "CLIENTE DE PRUEBA SPA", "obra_destino": "OBRA DE PRUEBA CENTRAL",
+        "cliente": "COMERCIAL PRUEBA SPA", "obra_destino": "OBRA DE PRUEBA CENTRAL",
         "patente_tracto": "AB1234", "indicador_revision": "OK",
         "planta_origen_id": "planta-colina", "planta_origen_nombre": "AZA COLINA",
         "origen_determinado_por": "CONFIRMACION_HUMANA", "evidencia_origen": "DECISION_HUMANA:x",

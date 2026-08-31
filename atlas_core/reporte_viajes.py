@@ -81,6 +81,13 @@ COLUMNAS_VIAJES = (
     "materiales",
     "tipos_carga",
     "evidencias_documentos",
+    # Bloque P1.1 (BLOQUEANTE 1): representación PUBLICABLE por
+    # documento (cliente/obra_destino/material/destino ya filtrados por
+    # credibilidad, nunca el crudo de `evidencias_documentos`) -- ver
+    # `Viaje.documentos_operacionales`. Agregada al final del bloque
+    # existente -- backward-compatible, un reporte generado antes de
+    # este bloque simplemente no tenía esta columna.
+    "documentos_operacionales",
     "fecha_creacion",
     # Bloque RUTAS R1: enriquecimiento logístico opcional (planta origen +
     # destino canónico + ORS). Agregadas al final -- backward-compatible:
@@ -264,6 +271,9 @@ def _fila_viaje(
         "tipos_carga": " | ".join(datos["tipos_carga"]),
         "evidencias_documentos": json.dumps(
             datos["evidencias_documentos"], ensure_ascii=False, sort_keys=True
+        ),
+        "documentos_operacionales": json.dumps(
+            datos["documentos_operacionales"], ensure_ascii=False, sort_keys=True
         ),
         "fecha_creacion": datos["fecha_creacion"],
         "peso_total_viaje_kg": datos["peso_total_viaje_kg"],

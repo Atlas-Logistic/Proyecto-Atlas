@@ -438,7 +438,7 @@ def _datos_lineales_completos(**overrides):
         # es indistinguible de un fragmento truncado real (ver
         # `atlas_core.credibilidad_campos`); ningún test de este archivo
         # depende del valor literal.
-        "cliente": "CLIENTE DE PRUEBA SPA",
+        "cliente": "COMERCIAL PRUEBA SPA",
         "obra destino": "OBRA DE PRUEBA CENTRAL",
         "chofer": "CHOFER DE PRUEBA",
         "RUT del cliente": "11.111.111-1",
@@ -1194,7 +1194,7 @@ def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
         "número de guía": "463309",
         "número de transporte": "0000123456",
         "cliente": "CLIENTE ORIGINAL",
-        "obra destino": "DESTINO ORIGINAL",
+        "obra destino": "OBRA ORIGINAL PRUEBA",
         "chofer": "ENRIQUE RANOS",
         "RUT del chofer": "No encontrado",
         "patente del tracto": "ABCD12",
@@ -1212,7 +1212,7 @@ def test_fuzzy_se_aplica_al_chofer_de_ocr_directo_sin_cambiar_otros_campos(
     assert resultado["numero_guia"] == "463309"
     assert resultado["numero_transporte"] == "0000123456"
     assert resultado["cliente"] == "CLIENTE ORIGINAL"
-    assert resultado["obra_destino"] == "DESTINO ORIGINAL"
+    assert resultado["obra_destino"] == "OBRA ORIGINAL PRUEBA"
     assert resultado["patente_tracto"] == "ABCD12"
     assert resultado["patente_rampla"] == "EFGH34"
 
@@ -1224,7 +1224,7 @@ def test_fuzzy_se_aplica_al_chofer_del_fallback_geometrico_y_corrobora_sin_revis
         "número de guía": "463309",
         "número de transporte": "0000123456",
         "cliente": "CLIENTE ORIGINAL",
-        "obra destino": "DESTINO ORIGINAL",
+        "obra destino": "OBRA ORIGINAL PRUEBA",
         "chofer": "No encontrado",
     }
     bloques = [
@@ -1260,7 +1260,7 @@ def test_fuzzy_sin_coincidencia_conserva_nombre_y_revision_actual(
         "número de guía": "463309",
         "número de transporte": "0000123456",
         "cliente": "CLIENTE ORIGINAL",
-        "obra destino": "DESTINO ORIGINAL",
+        "obra destino": "OBRA ORIGINAL PRUEBA",
         "chofer": "NOMBRE ORIGINAL",
     }
     _preparar_procesamiento_fuzzy(
@@ -1285,7 +1285,7 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "número de guía": "463309",
         "número de transporte": "0000123456",
         "cliente": "CLIENTE ORIGINAL",
-        "obra destino": "DESTINO ORIGINAL",
+        "obra destino": "OBRA ORIGINAL PRUEBA",
         "chofer": "ENRIQUE RANOS",
         "RUT del chofer": "11.111.111-1",
     }

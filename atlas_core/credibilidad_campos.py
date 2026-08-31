@@ -37,7 +37,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Iterable
 
-from atlas_core.extractor import _texto_simple, etiquetas_estructurales_documento
+from atlas_core.extractor import (
+    _texto_simple, etiquetas_estructurales_documento, patente_tiene_formato_chileno_estandar,
+)
 from atlas_core.modelos import EstadoValidacion
 from atlas_core.validadores import validar_rut_chileno
 
@@ -79,6 +81,57 @@ def _etiquetas_ajenas_presentes(texto_simple: str) -> tuple[str, ...]:
         if re.search(r"(?<![A-Z0-9])" + re.escape(etiqueta) + r"(?![A-Z0-9])", texto_simple):
             encontradas.append(etiqueta)
     return tuple(encontradas)
+
+
+# ---------------------------------------------------------------------
+# Bloque P1.1 (BLOQUEANTE 3) -- marcadores ESTRUCTURALES compartidos,
+# reutilizados por material/entidad/dirección. Nunca substring ingenuo:
+# cada marcador exige que el fragmento encontrado tenga la FORMA
+# completa y válida de un dato de otra naturaleza (RUT con dígito
+# verificador correcto, fecha con formato válido, patente con formato
+# chileno real) -- nunca "contiene la palabra X". Un nombre real
+# (persona/empresa/obra/material) no contiene, por construcción, un RUT
+# con checksum válido ni una fecha con formato válido ni una patente con
+# formato real -- si lo contiene, ese fragmento pertenece a OTRA sección
+# del documento, sin importar el campo donde terminó.
+# ---------------------------------------------------------------------
+
+_PATRON_RUT_SUBCADENA = re.compile(r"\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b")
+_PATRON_TOKEN_PATENTE = re.compile(r"\b[A-Z0-9]{6}\b")
+
+
+def _contiene_rut_valido(texto: str) -> bool:
+    """Búsqueda de un RUT con formato Y dígito verificador válidos en
+    CUALQUIER posición del texto -- no exige que el valor ENTERO sea el
+    RUT (a diferencia de la validación de campo RUT dedicado)."""
+    for coincidencia in _PATRON_RUT_SUBCADENA.finditer(texto):
+        if validar_rut_chileno(coincidencia.group(0)).estado == EstadoValidacion.VALIDO:
+            return True
+    return False
+
+
+def _contiene_patente_valida(texto_simple: str) -> bool:
+    """Búsqueda de un token de 6 caracteres con formato real de patente
+    chilena en cualquier posición -- mismo criterio ya usado para
+    corroborar patentes de documentos hermanos (Bloque M3)."""
+    return any(
+        patente_tiene_formato_chileno_estandar(token)
+        for token in _PATRON_TOKEN_PATENTE.findall(texto_simple)
+    )
+
+
+def _contiene_fecha_valida(texto: str) -> bool:
+    return bool(_PATRON_FECHA_TOKEN.search(texto))
+
+
+def _letras_insuficientes(texto: str, minimo: int = 2) -> bool:
+    """Un nombre/descripción real es, por naturaleza, TEXTO -- un valor
+    con casi ninguna letra (sólo dígitos/puntuación, como mucho un
+    dígito verificador "K") nunca es una entidad ni una descripción
+    utilizable, esté o no bien formateado como RUT. Umbral de 2 letras
+    (nunca 1) para no confundir precisamente ese dígito verificador con
+    "sí es texto"."""
+    return sum(1 for caracter in texto if caracter.isalpha()) < minimo
 
 
 # ---------------------------------------------------------------------
@@ -130,6 +183,14 @@ def evaluar_credibilidad_material(valor: object) -> ResultadoCredibilidad:
         senales_fuertes.append("ETIQUETAS_DE_OTRAS_SECCIONES:" + ",".join(etiquetas))
     if tiene_rut and tiene_fecha:
         senales_fuertes.append("MEZCLA_RUT_Y_FECHA")
+    # Bloque P1.1 (BLOQUEANTE 3) -- un RUT aislado (con o sin dígito
+    # verificador válido, con o sin desalineación de OCR) nunca es una
+    # descripción de material -- una descripción real siempre trae
+    # TEXTO (medida/calidad/código), nunca sólo dígitos/puntuación.
+    # Caso real: material = "96.792.430-K" (el RUT del cliente terminó
+    # en el campo equivocado).
+    if _letras_insuficientes(texto):
+        senales_fuertes.append("SIN_LETRAS_PARECE_RUT_O_NUMERO")
     if senales_fuertes:
         return ResultadoCredibilidad(
             NivelCredibilidad.INVALIDO, motivo=MOTIVO_MATERIAL_CONTAMINADO, senales=tuple(senales_fuertes),
@@ -167,13 +228,19 @@ LONGITUD_MINIMA_ENTIDAD = 3
 MOTIVO_ENTIDAD_ETIQUETA_GENERICA = "VALOR_ES_ETIQUETA_GENERICA_NO_ENTIDAD"
 MOTIVO_ENTIDAD_FRAGMENTO_CORTO = "FRAGMENTO_DEMASIADO_CORTO"
 MOTIVO_ENTIDAD_RUT_CRUDO = "VALOR_ES_RUT_CRUDO_SIN_RAZON_SOCIAL"
+MOTIVO_ENTIDAD_CONTAMINADA = "ENTIDAD_CONTAMINADA_POR_OTRA_SECCION"
 
 
 def evaluar_credibilidad_entidad_nombre(valor: object) -> ResultadoCredibilidad:
     """Para campos que deben contener el NOMBRE de una entidad (obra
     destino, cliente) -- nunca una etiqueta documental genérica sola, un
-    fragmento demasiado corto para identificar nada, ni un RUT crudo
-    haciendo de razón social."""
+    fragmento demasiado corto para identificar nada, un RUT crudo
+    haciendo de razón social, ni un valor DOMINADO por un marcador
+    estructural de otra sección (fecha/RUT/patente con formato VÁLIDO,
+    o una etiqueta documental completa -- nunca una subcadena ingenua:
+    una razón social real como "TRANSPORTES ROJAS HNOS LTDA" nunca
+    calza como palabra completa "TRANSPORTE" ni contiene un RUT/fecha/
+    patente con formato válido, así que nunca dispara esto)."""
     texto = str(valor or "").strip()
     if _texto_simple(texto) in _AUSENTE:
         return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
@@ -198,13 +265,46 @@ def evaluar_credibilidad_entidad_nombre(valor: object) -> ResultadoCredibilidad:
     # letra (sólo dígitos/puntuación, más como mucho el dígito
     # verificador "K", típico de un RUT que el OCR desalineó con un
     # espacio de más y ya no calza con el formato estricto) nunca es un
-    # nombre de entidad utilizable, corrompido o no. Umbral de 2 letras
-    # (nunca 1) para no confundir precisamente ese dígito verificador
-    # con "sí es texto". Aplica a cualquier campo de nombre, nunca a un
-    # RUT concreto.
-    if sum(1 for caracter in texto if caracter.isalpha()) < 2:
+    # nombre de entidad utilizable, corrompido o no. Aplica a cualquier
+    # campo de nombre, nunca a un RUT concreto.
+    if _letras_insuficientes(texto):
         return ResultadoCredibilidad(
             NivelCredibilidad.DUDOSO, motivo=MOTIVO_ENTIDAD_RUT_CRUDO, senales=("SIN_LETRAS_PARECE_RUT_O_NUMERO",),
+        )
+    # Bloque P1.1 (BLOQUEANTE 3) -- casos reales reproducidos por
+    # revisión independiente: cliente = "FECHA DE EMISION 26-08-2026",
+    # obra = "PATENTE BDFG50". Ninguna razón social/obra real contiene,
+    # por construcción, una fecha con formato válido, un RUT con
+    # checksum válido, ni una patente con formato chileno real -- si
+    # los contiene, el valor pertenece a otra sección del documento.
+    # Estas 3 señales son suficientes SOLAS (formato inequívoco, nunca
+    # una coincidencia de palabra) -- ambos casos reales quedan
+    # cubiertos sin necesitar la señal de etiqueta de abajo.
+    senales_fuertes: list[str] = []
+    if _contiene_fecha_valida(texto):
+        senales_fuertes.append("FECHA_EMBEBIDA")
+    if _contiene_rut_valido(texto):
+        senales_fuertes.append("RUT_EMBEBIDO")
+    if _contiene_patente_valida(texto_simple):
+        senales_fuertes.append("PATENTE_EMBEBIDA")
+    if senales_fuertes:
+        return ResultadoCredibilidad(
+            NivelCredibilidad.INVALIDO, motivo=MOTIVO_ENTIDAD_CONTAMINADA, senales=tuple(senales_fuertes),
+        )
+    # Etiqueta estructural presente como palabra propia (nunca una
+    # subcadena ingenua, ver `_etiquetas_ajenas_presentes`) -- señal más
+    # débil que las anteriores (una única palabra SÍ podría, en teoría,
+    # formar parte de una razón social real -- "cuidar falsos
+    # positivos": nombres de fixtures reales de esta misma suite como
+    # "CLIENTE ÑUBLE" bastan para demostrarlo), así que exige >=2
+    # etiquetas DISTINTAS para considerarse dominado (mismo umbral ya
+    # usado en MATERIAL) -- una sola coincidencia nunca oculta, por sí
+    # sola, un nombre real.
+    etiquetas = _etiquetas_ajenas_presentes(texto_simple)
+    if len(etiquetas) >= 2:
+        return ResultadoCredibilidad(
+            NivelCredibilidad.INVALIDO, motivo=MOTIVO_ENTIDAD_CONTAMINADA,
+            senales=("ETIQUETAS_DE_OTRAS_SECCIONES:" + ",".join(etiquetas),),
         )
     return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
 
@@ -221,23 +321,39 @@ MOTIVO_DESTINO_CONTAMINADO = "DESTINO_CONTAMINADO_POR_OTRA_SECCION"
 
 
 def evaluar_credibilidad_direccion(valor: object) -> ResultadoCredibilidad:
+    """Una dirección de entrega real, en Chile, es calle + número --
+    prácticamente nunca un único token puramente alfabético (sin ningún
+    dígito). Bloque P1.1 (BLOQUEANTE 3) -- caso real reproducido por
+    revisión independiente: "XXXXX" (5 letras, un solo token, SIN
+    dígito) pasaba como CONFIABLE bajo el umbral de longitud anterior.
+    Nunca una lista de ciudades/calles hardcodeada -- la señal es
+    estructural (número de tokens + presencia de dígito), no un
+    diccionario de nombres válidos."""
     texto = str(valor or "").strip()
     if _texto_simple(texto) in _AUSENTE:
         return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
 
     texto_simple = _texto_simple(texto)
     tokens = texto_simple.split()
-    if len(tokens) <= 1 and len(texto_simple) < LONGITUD_MINIMA_FRAGMENTO_DIRECCION:
+    tiene_digito = any(caracter.isdigit() for caracter in texto_simple)
+    if len(tokens) <= 1 and (not tiene_digito or len(texto_simple) < LONGITUD_MINIMA_FRAGMENTO_DIRECCION):
         return ResultadoCredibilidad(
-            NivelCredibilidad.DUDOSO, motivo=MOTIVO_DESTINO_FRAGMENTO, senales=("UN_SOLO_TOKEN_CORTO",),
+            NivelCredibilidad.DUDOSO, motivo=MOTIVO_DESTINO_FRAGMENTO,
+            senales=("UN_SOLO_TOKEN_SIN_NUMERO" if not tiene_digito else "UN_SOLO_TOKEN_CORTO",),
         )
 
     etiquetas = _etiquetas_ajenas_presentes(texto_simple)
     resultado_rut = validar_rut_chileno(texto) if _PATRON_RUT_TOKEN.fullmatch(texto) else None
-    if etiquetas or (resultado_rut is not None and resultado_rut.estado == EstadoValidacion.VALIDO):
-        senales = tuple(f"ETIQUETA:{e}" for e in etiquetas) or ("FORMATO_RUT",)
+    senales_contaminacion: list[str] = []
+    if etiquetas:
+        senales_contaminacion.append("ETIQUETA_DE_OTRA_SECCION:" + ",".join(etiquetas))
+    if resultado_rut is not None and resultado_rut.estado == EstadoValidacion.VALIDO:
+        senales_contaminacion.append("FORMATO_RUT")
+    if _contiene_patente_valida(texto_simple):
+        senales_contaminacion.append("PATENTE_EMBEBIDA")
+    if senales_contaminacion:
         return ResultadoCredibilidad(
-            NivelCredibilidad.INVALIDO, motivo=MOTIVO_DESTINO_CONTAMINADO, senales=senales,
+            NivelCredibilidad.INVALIDO, motivo=MOTIVO_DESTINO_CONTAMINADO, senales=tuple(senales_contaminacion),
         )
     return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
 

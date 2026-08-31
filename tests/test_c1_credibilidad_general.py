@@ -40,7 +40,7 @@ def _datos_base(**overrides):
     datos = {
         "número de guía": "900001",
         "número de transporte": "0000900001",
-        "cliente": "CLIENTE DE PRUEBA SPA",
+        "cliente": "COMERCIAL PRUEBA SPA",
         "obra destino": "OBRA DE PRUEBA CENTRAL",
         "chofer": "CHOFER DE PRUEBA",
         "RUT del cliente": "11.111.111-1",

@@ -334,20 +334,26 @@ class Viaje:
         return _valores_unicos(self._campos_publicables("obra_destino", evaluar_credibilidad_entidad_nombre))
 
     def _campos_publicables(self, campo: str, evaluador) -> list[str]:
-        """Bloque P1 -- SEPARACIÓN evidencia OCR / dato operacional
-        publicable: `cliente`/`obra_destino` son, por naturaleza, un
-        hecho COMPARTIDO por todos los documentos de un mismo viaje
-        (misma operación de transporte) -- si uno queda DUDOSO/INVÁLIDO
-        (Bloque C1), un documento HERMANO de este mismo viaje con un
-        valor CONFIABLE para el mismo campo es evidencia independiente
-        real, nunca inventada (ver `credibilidad_campos.valor_
-        publicable`). Sin recuperación posible, se publica `VALOR_NO_
-        DETERMINADO` -- nunca el texto dudoso/inválido crudo. El valor
+        """Bloque P1/P1.1 (BLOQUEANTE 2) -- SEPARACIÓN evidencia OCR /
+        dato operacional publicable, por documento: si un valor queda
+        DUDOSO/INVÁLIDO (Bloque C1), se publica `VALOR_NO_DETERMINADO`
+        -- NUNCA el de un documento "hermano" sólo por compartir
+        `numero_transporte`. Compartir transporte demuestra relación de
+        VIAJE, nunca igualdad de cliente/obra/destino -- un mismo
+        transporte puede llevar múltiples entregas/obras/clientes
+        distintos (caso real que lo motivó: P1 recuperaba "SODIMAC SA"/
+        "SAN LUIS 1201 QUILICURA" de 472623 hacia 472624 sin ninguna
+        evidencia positiva de que ambos documentos correspondan
+        realmente a la misma entrega -- ausencia de contradicción no es
+        corroboración). La recuperación con evidencia INDEPENDIENTE
+        real (documentos relacionados con señales adicionales de
+        correspondencia, catálogo, B1) sigue existiendo -- pero vive en
+        el mecanismo general ya conectado en el PROCESAMIENTO (Bloques
+        C1/U1: `atlas_ia.registro_problemas`/`_ejecutar_ia_operacional`,
+        con su propia barrera anti-alucinación), nunca aquí. El valor
         documental original sigue disponible íntegro en `evidencia`
         (ver `DocumentoViaje.evidencia`/`evidencias_documentos`)."""
-        valores = [getattr(d, campo) for d in self.documentos]
-        confiables = [v for v in valores if v and evaluador(v).nivel == NivelCredibilidad.CONFIABLE]
-        return [valor_publicable(v, evaluador, confiables) for v in valores]
+        return [valor_publicable(getattr(d, campo), evaluador) for d in self.documentos]
 
     @property
     def origenes(self) -> list[str]:
@@ -434,22 +440,31 @@ class Viaje:
 
     @property
     def despachar_a(self) -> str:
-        # Bloque P1 -- mismo criterio conservador que `_campo_ruta_
-        # consolidado` (exige coincidencia exacta entre TODOS los
-        # documentos que sí traen dato), pero un valor DUDOSO/INVÁLIDO
-        # (p. ej. un fragmento truncado, Bloque C1) se trata como
-        # "documento sin dato" para la consolidación -- nunca se publica
-        # un fragmento crudo, y nunca compite en falso contra la
-        # dirección real y limpia de un documento hermano. `despachar_a_
-        # crudo` (evidencia documental) nunca se modifica -- esto sólo
-        # filtra qué participa en la consolidación PUBLICADA; el ruteo/
-        # KM ya calculado (`direccion_entrega`/`estado_ruta`) usa la
-        # dirección resuelta en el procesamiento, no esta propiedad.
-        valores = [
-            d.despachar_a_crudo for d in self.documentos
-            if d.despachar_a_crudo and evaluar_credibilidad_direccion(d.despachar_a_crudo).nivel == NivelCredibilidad.CONFIABLE
-        ]
-        unicos = _valores_unicos(valores)
+        # Bloque P1/P1.1 (BLOQUEANTE 2) -- mismo criterio conservador
+        # que `_campo_ruta_consolidado` (exige coincidencia exacta entre
+        # TODOS los documentos que sí traen dato: ausente nunca bloquea)
+        # PERO un valor PRESENTE y DUDOSO/INVÁLIDO (p. ej. un fragmento
+        # truncado, Bloque C1) nunca se trata como "documento sin dato":
+        # a diferencia de la ausencia real, un documento con un destino
+        # dudoso SÍ pudo haber traído una entrega DISTINTA a la de su
+        # hermano -- compartir `numero_transporte` demuestra relación de
+        # viaje, nunca igualdad de destino (caso real que lo motivó:
+        # 472624 nunca debe heredar "SAN LUIS 1201 QUILICURA" de 472623
+        # sólo porque su propio "SAN" quedó descartado). Con al menos un
+        # documento dudoso/inválido presente, el destino consolidado del
+        # viaje queda vacío -- nunca se elige el de otro documento.
+        # `despachar_a_crudo` (evidencia documental) nunca se modifica --
+        # esto sólo filtra qué participa en la consolidación PUBLICADA;
+        # el ruteo/KM ya calculado (`direccion_entrega`/`estado_ruta`)
+        # usa la dirección resuelta en el procesamiento, no esta
+        # propiedad.
+        valores_presentes = [d.despachar_a_crudo for d in self.documentos if _valor_presente(d.despachar_a_crudo)]
+        if any(
+            evaluar_credibilidad_direccion(valor).nivel != NivelCredibilidad.CONFIABLE
+            for valor in valores_presentes
+        ):
+            return ""
+        unicos = _valores_unicos(valores_presentes)
         return unicos[0] if len(unicos) == 1 else ""
 
     @property
@@ -563,6 +578,40 @@ class Viaje:
     def duracion_estadia_gps_min(self) -> str:
         return self._campo_ruta_consolidado("duracion_estadia_gps_min")
 
+    @property
+    def documentos_operacionales(self) -> list[dict[str, str]]:
+        """Bloque P1.1 (BLOQUEANTE 1) -- representación PUBLICABLE, POR
+        DOCUMENTO, de cliente/obra_destino/material/destino -- nunca la
+        lista agregada (`clientes`/`obras_destino`/`materiales`, que
+        pierde correspondencia por documento cuando hay más de uno con
+        valores distintos) ni `evidencia`/`evidencias_documentos` (OCR
+        crudo, sólo para diagnóstico/B1/trazabilidad -- Desktop
+        (`consolidacion_viaje.js`) usaba ese crudo como sustituto de un
+        valor publicable, exactamente el "error con falsa seguridad"
+        que este bloque cierra: podía volver a mostrar el bloque OCR
+        contaminado como Material, o "TRANSPORTES" como Obra, aunque
+        Motor ya hubiera publicado NO DETERMINADO).
+
+        Cada entrada se evalúa de forma INDEPENDIENTE por documento --
+        nunca recuperada de un documento hermano sólo por compartir
+        `numero_transporte` (Bloque P1.1, BLOQUEANTE 2: eso no
+        demuestra igualdad de campo). `peso_kg` se conserva tal cual
+        (la capa de credibilidad sólo lo marca sospechoso, nunca lo
+        oculta ni lo reemplaza, ver `credibilidad_campos.evaluar_
+        credibilidad_peso`)."""
+        return [
+            {
+                "archivo": d.archivo,
+                "numero_guia": d.numero_guia,
+                "cliente": valor_publicable(d.cliente, evaluar_credibilidad_entidad_nombre),
+                "obra_destino": valor_publicable(d.obra_destino, evaluar_credibilidad_entidad_nombre),
+                "descripcion_material": valor_publicable(d.descripcion_material, evaluar_credibilidad_material),
+                "despachar_a_crudo": valor_publicable(d.despachar_a_crudo, evaluar_credibilidad_direccion),
+                "peso_kg": d.peso_kg,
+            }
+            for d in self.documentos
+        ]
+
     def a_dict(self) -> dict[str, object]:
         return {
             "viaje_id": self.viaje_id,
@@ -613,6 +662,7 @@ class Viaje:
             "longitud_estadia_gps": self.longitud_estadia_gps,
             "duracion_estadia_gps_min": self.duracion_estadia_gps_min,
             "evidencias_documentos": [d.evidencia for d in self.documentos],
+            "documentos_operacionales": self.documentos_operacionales,
             "fecha_creacion": self.fecha_creacion,
         }
 

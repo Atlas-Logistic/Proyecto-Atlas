@@ -45,7 +45,7 @@ def _datos_lineales_completos(**overrides):
         # es indistinguible de un fragmento truncado real (ver
         # `atlas_core.credibilidad_campos`); ningún test de este archivo
         # depende del valor literal.
-        "cliente": "CLIENTE DE PRUEBA SPA",
+        "cliente": "COMERCIAL PRUEBA SPA",
         "obra destino": "OBRA DE PRUEBA CENTRAL",
         "chofer": "CHOFER DE PRUEBA",
         "RUT del chofer": "11.111.111-1",

@@ -73,10 +73,14 @@ def test_campo_invalido_no_se_publica_limpio():
 
 
 def test_campo_dudoso_se_rehabilita_con_candidato_confiable_real():
-    """Caso real: 472624 cliente = "96 .792.430-K" (RUT crudo
-    desalineado por OCR); el documento hermano 472623 del mismo
-    transporte trae "SODIMAC SA" -- evidencia independiente real de que
-    es el mismo cliente. Se recupera, nunca se publica el RUT crudo."""
+    """Mecanismo GENÉRICO de `valor_publicable`: si el LLAMADOR ya
+    aportó un candidato de recuperación con evidencia independiente
+    real (nunca sólo "comparte transporte" -- ver Bloque P1.1/
+    BLOQUEANTE 2, `atlas_core.gestor_viajes` ya NO pasa candidatos de
+    documentos hermanos sólo por eso), la función lo usa. Aquí el
+    candidato es un valor cualquiera ya vetted por el llamador -- la
+    prueba certifica el mecanismo de sustitución en sí, no que
+    "documento del mismo transporte" sea evidencia suficiente."""
     assert evaluar_credibilidad_entidad_nombre("96 .792.430-K").nivel != NivelCredibilidad.CONFIABLE
     publicado = valor_publicable(
         "96 .792.430-K", evaluar_credibilidad_entidad_nombre, candidatos_recuperacion=["SODIMAC SA"],
@@ -178,8 +182,13 @@ def test_viaje_472623_472624_nunca_publica_ocr_contaminado_como_dato_limpio():
     assert "96 .792.430-K" not in viaje.clientes
     assert "SAN" != viaje.despachar_a
 
-    # Rehabilitado con evidencia real (documento hermano del mismo viaje):
-    assert viaje.clientes == ["SODIMAC SA"]
+    # Bloque P1.1 (BLOQUEANTE 2) -- compartir numero_transporte NUNCA
+    # demuestra igualdad de cliente/obra/destino: 472624 NUNCA hereda el
+    # cliente/destino real de 472623 sólo por compartir viaje. Cada
+    # documento publica su PROPIO valor (o NO DETERMINADO); el de
+    # 472623 -- que sí es confiable por sí mismo -- sigue visible.
+    assert set(viaje.clientes) == {VALOR_NO_DETERMINADO, "SODIMAC SA"}
+    assert "SODIMAC SA" in viaje.clientes  # nunca se oculta un valor real y propio
     # obra_destino: ambos documentos comparten la MISMA etiqueta genérica
     # -- sin evidencia independiente real, ninguno se rehabilita.
     assert viaje.obras_destino == [VALOR_NO_DETERMINADO]
@@ -187,9 +196,11 @@ def test_viaje_472623_472624_nunca_publica_ocr_contaminado_como_dato_limpio():
     # documento) -- 472624 queda NO DETERMINADO, 472623 sigue visible.
     assert VALOR_NO_DETERMINADO in viaje.materiales
     assert "B HORMIGON 1 OMM 12M A630-42OH (N) Coladas : 2616301102,2616301202" in viaje.materiales
-    # despachar_a: el fragmento truncado se excluye de la consolidación
-    # -- gana la dirección real y completa del documento hermano.
-    assert viaje.despachar_a == "SAN LUIS 1201 QUILICURA"
+    # despachar_a: con un documento dudoso/truncado presente en el viaje,
+    # el destino CONSOLIDADO del viaje queda vacío -- NUNCA se le asigna
+    # al viaje completo la dirección de un solo documento hermano (eso
+    # sería, otra vez, atribuirle a 472624 la entrega real de 472623).
+    assert viaje.despachar_a == ""
 
     # Preservado intacto -- P1 nunca toca origen/transporte/patentes/peso.
     assert viaje.origenes == ["AZA COLINA"]
