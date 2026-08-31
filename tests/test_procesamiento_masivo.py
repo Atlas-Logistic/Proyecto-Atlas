@@ -2391,6 +2391,39 @@ def test_imprimir_metricas_documento_formato_legible(capsys):
     assert "ESTADO" not in salida  # éxito: no agrega ruido
 
 
+def test_procesar_carpeta_imprime_latencia_de_atlas_ia_por_lote(tmp_path, monkeypatch, capsys):
+    """Hallazgo del relanzamiento real del lote P2: Atlas IA/B1 no corre
+    por documento sino UNA vez para todo el lote (llamadas de red reales,
+    pueden tardar minutos) -- sin esto, esos minutos quedan invisibles
+    entre el último '[n/N] archivo' y el resumen final."""
+    _crear_archivo(tmp_path / "guias/a.jpg")
+    salida = tmp_path / "resultado.csv"
+    monkeypatch.setattr(
+        procesamiento_masivo, "_ejecutar_ia_operacional",
+        Mock(return_value={"llamadas": 2, "A": 1, "B": 1, "C": 0, "D": 0, "latencia_segundos": 5.5}),
+    )
+
+    procesar_carpeta(tmp_path / "guias", salida, procesador=lambda ruta: {"numero_guia": "1"})
+
+    salida_consola = capsys.readouterr().out
+    assert "Atlas IA (lote): 2 llamada(s)" in salida_consola
+    assert "5.5 s de latencia de red" in salida_consola
+
+
+def test_procesar_carpeta_no_imprime_atlas_ia_si_cero_llamadas(tmp_path, monkeypatch, capsys):
+    _crear_archivo(tmp_path / "guias/a.jpg")
+    salida = tmp_path / "resultado.csv"
+    monkeypatch.setattr(
+        procesamiento_masivo, "_ejecutar_ia_operacional",
+        Mock(return_value={"llamadas": 0, "A": 0, "B": 0, "C": 0, "D": 0, "latencia_segundos": 0.0}),
+    )
+
+    procesar_carpeta(tmp_path / "guias", salida, procesador=lambda ruta: {"numero_guia": "1"})
+
+    salida_consola = capsys.readouterr().out
+    assert "Atlas IA (lote)" not in salida_consola
+
+
 def test_imprimir_metricas_documento_marca_estado_error_con_detalle(capsys):
     procesamiento_masivo._imprimir_metricas_documento(
         "464170.jpeg", {"total_documento_seg": 120.0}, estado="ERROR",

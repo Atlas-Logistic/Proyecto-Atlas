@@ -2965,7 +2965,21 @@ def procesar_carpeta(
             with ruta_csv.open("r", newline="", encoding="utf-8-sig") as _archivo:
                 filas_lote = list(csv.DictReader(_archivo, delimiter=";"))
         orquestador_ia = _crear_orquestador_ia_configurado(filas=filas_lote, carpeta_catalogos=carpeta_catalogos)
+    inicio_ia_lote = time.perf_counter()
     resumen["atlas_ia"] = _ejecutar_ia_operacional(ruta_csv, archivos_procesados_ahora, orquestador_ia, carpeta_catalogos)
+    duracion_ia_lote = time.perf_counter() - inicio_ia_lote
+    # Bloque P2: a diferencia de las demás etapas, Atlas IA/B1 se ejecuta
+    # UNA vez para todo el lote (no por documento, ver más arriba) -- por
+    # eso `atlas_ia_seg` en las métricas por documento es siempre 0.0 (no
+    # es un dato faltante, es honesto: ese costo no está atribuido ahí).
+    # Su latencia real -- la que en un lote real puede tardar minutos por
+    # ser llamadas de red a un LLM -- queda invisible si no se imprime acá.
+    if resumen["atlas_ia"].get("llamadas"):
+        print(
+            f"  Atlas IA (lote): {resumen['atlas_ia']['llamadas']} llamada(s), "
+            f"{resumen['atlas_ia'].get('latencia_segundos', 0.0):.1f} s de latencia de red "
+            f"({duracion_ia_lote:.1f} s en total la etapa)"
+        )
 
     tiempo_total = time.perf_counter() - inicio
     resumen["tiempo_total_segundos"] = tiempo_total
