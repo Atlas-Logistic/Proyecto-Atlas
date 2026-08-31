@@ -9,6 +9,7 @@ import pytest
 import analizar_guias_masivo
 from atlas_core import procesamiento_masivo
 from atlas_core.ocr import BloqueOCR
+from atlas_core.ocr_provider import ProveedorOCRNoDisponible
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     descubrir_archivos,
@@ -2292,3 +2293,111 @@ def test_columnas_csv_incluyen_motivos_y_metodos_estados_s2():
     suyas después)."""
     indice = COLUMNAS.index("permanencia_minutos") + 1
     assert COLUMNAS[indice:indice + 2] == ["motivos_revision_documento", "metodos_recuperacion_documento"]
+
+
+# --- Bloque P2 -- BLOQUEO REAL DE PROCESAMIENTO DESKTOP ---
+# El OCR es una dependencia externa (proceso worker aislado); si falla o se
+# cuelga (y su propio timeout la corta -- ver test_ocr_provider.py), este
+# documento debe marcarse como error de la etapa OCR, con cuánto tardó, y
+# el lote debe seguir con el resto -- nunca quedarse detenido en uno solo.
+
+def test_procesar_archivo_ocr_fallido_incluye_etapa_y_duracion_en_el_error(tmp_path, monkeypatch):
+    ruta = tmp_path / "464170.jpeg"
+    _crear_archivo(ruta)
+
+    def _ocr_colgado_y_cortado(*a, **k):
+        raise ProveedorOCRNoDisponible(
+            "El worker de PaddleOCR no respondió en 120s al iniciar (...)"
+        )
+
+    monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", _ocr_colgado_y_cortado)
+
+    with pytest.raises(RuntimeError, match=r"^OCR: ProveedorOCRNoDisponible: .* \(tras \d") as info:
+        procesar_archivo(ruta)
+
+    assert "s)" in str(info.value)
+
+
+def test_procesar_carpeta_documento_con_ocr_colgado_no_detiene_el_lote(tmp_path, capsys):
+    """Reproduce el incidente: 464170.jpeg (primer archivo) se cuelga en OCR
+    y su propio timeout lo corta -- el lote NUNCA debe quedarse ahí, debe
+    seguir con el resto y dejar 464170 marcado como error de OCR, no
+    inventar ningún dato suyo."""
+    _crear_archivo(tmp_path / "guias/464170.jpeg")
+    _crear_archivo(tmp_path / "guias/464264.jpeg")
+    salida = tmp_path / "salida/resultado.csv"
+
+    def procesador(ruta):
+        if ruta.name == "464170.jpeg":
+            raise RuntimeError(
+                "OCR: ProveedorOCRNoDisponible: El worker de PaddleOCR no respondió "
+                "en 120s al iniciar (...) (tras 120.0s)"
+            )
+        return {
+            "numero_guia": "464264", "tipo_carga": "BARRAS", "cliente": "ACEROS SUR",
+            "metricas_procesamiento_json": json.dumps({"ocr_seg": 2.1, "total_documento_seg": 3.4}),
+        }
+
+    resumen = procesar_carpeta(tmp_path / "guias", salida, procesador=procesador, cada=1)
+
+    # El lote terminó -- no quedó "colgado" en el primer archivo.
+    assert resumen["encontrados"] == 2
+    assert resumen["procesados"] == 2
+    assert resumen["errores"] == 1
+
+    with salida.open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    fila_464170 = next(f for f in filas if f["archivo"] == "464170.jpeg")
+    fila_464264 = next(f for f in filas if f["archivo"] == "464264.jpeg")
+
+    # 464170: marcado para revisión, nunca datos inventados.
+    assert fila_464170["estado_procesamiento"] == "ERROR"
+    assert fila_464170["indicador_revision"] == "REVISAR"
+    assert "OCR:" in fila_464170["error"]
+    assert fila_464170["numero_guia"] == ""  # ningún dato inventado
+
+    # 464264: el resto del lote se procesó con normalidad.
+    assert fila_464264["estado_procesamiento"] == "OK"
+    assert fila_464264["cliente"] == "ACEROS SUR"
+
+    salida_consola = capsys.readouterr().out
+    assert "464170.jpeg" in salida_consola
+    assert "ESTADO: ERROR" in salida_consola
+    assert "OCR:" in salida_consola
+    assert "464264.jpeg" in salida_consola
+    assert "TOTAL" in salida_consola
+
+
+def test_imprimir_metricas_documento_formato_legible(capsys):
+    procesamiento_masivo._imprimir_metricas_documento(
+        "464170.jpeg",
+        {
+            "carga_preprocesamiento_seg": 0.2,
+            "ocr_seg": 28.4,
+            "extraccion_parsing_seg": 0.5,
+            "resolucion_corroboracion_seg": 0.1,
+            "atlas_ia_seg": 3.2,
+            "geocodificacion_routing_seg": 0.8,
+            "telemetria_seg": 1.4,
+            "total_documento_seg": 36.4,
+        },
+        estado="OK",
+    )
+
+    salida = capsys.readouterr().out
+    assert "464170.jpeg" in salida
+    assert "OCR" in salida and "28.4" in salida
+    assert "TOTAL" in salida and "36.4" in salida
+    assert "ESTADO" not in salida  # éxito: no agrega ruido
+
+
+def test_imprimir_metricas_documento_marca_estado_error_con_detalle(capsys):
+    procesamiento_masivo._imprimir_metricas_documento(
+        "464170.jpeg", {"total_documento_seg": 120.0}, estado="ERROR",
+        detalle_error="OCR: ProveedorOCRNoDisponible: no respondió en 120s",
+    )
+
+    salida = capsys.readouterr().out
+    assert "ESTADO: ERROR" in salida
+    assert "OCR:" in salida
+    assert "120.0" in salida

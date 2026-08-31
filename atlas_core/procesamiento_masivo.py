@@ -1041,7 +1041,20 @@ def procesar_archivo(
         return funcion_easyocr(ruta, caja, lector=lector_ocr)
 
     inicio_ocr = time.perf_counter()
-    textos = _leer_texto()
+    try:
+        textos = _leer_texto()
+    except Exception as exc:
+        # Bloque P2 -- BLOQUEO REAL DE PROCESAMIENTO DESKTOP: si el OCR (una
+        # dependencia externa: proceso worker aislado / hardware / SO) falla
+        # o se cuelga y agota su propio timeout, este documento se marca
+        # como error de la etapa OCR (con cuánto tiempo llevaba) en vez de
+        # dejar que la excepción llegue muda -- `procesar_carpeta` la
+        # captura por documento y sigue con el resto del lote, nunca
+        # inventa datos ni salta el documento en silencio.
+        duracion = time.perf_counter() - inicio_ocr
+        raise RuntimeError(
+            f"OCR: {type(exc).__name__}: {exc} (tras {duracion:.1f}s)"
+        ) from exc
     fin_ocr = time.perf_counter()
     datos = (
         extraer_datos(textos, carpeta_catalogos)
@@ -2698,6 +2711,41 @@ def escalar_resultado_ia_en_memoria(
     return salida, resumen
 
 
+# Bloque P2 -- BLOQUEO REAL DE PROCESAMIENTO DESKTOP: instrumentación simple
+# de latencia por documento (no una plataforma de monitoreo). Etiquetas
+# derivadas de las etapas ya medidas en `procesar_archivo` (`metricas`, más
+# arriba) -- nunca inventa una etapa que no se mide realmente. Se imprime
+# por consola (mismo canal por el que Desktop ya recibe el progreso "[n/N]
+# archivo" línea a línea), útil tanto para diagnóstico en vivo como para
+# quedar en el log de la corrida.
+_ETIQUETAS_METRICAS = (
+    ("carga_preprocesamiento_seg", "PREPROCESAMIENTO"),
+    ("ocr_seg", "OCR"),
+    ("extraccion_parsing_seg", "EXTRACCIÓN"),
+    ("resolucion_corroboracion_seg", "RESOLUCIÓN/CREDIBILIDAD"),
+    ("atlas_ia_seg", "ATLAS IA"),
+    ("geocodificacion_routing_seg", "RUTA/GEOCODIFICACIÓN"),
+    ("telemetria_seg", "GPS/TELEMETRÍA"),
+)
+
+
+def _imprimir_metricas_documento(
+    identificador: str, metricas: Mapping[str, float] | None, *,
+    estado: str, detalle_error: str = "",
+) -> None:
+    print(f"  {identificador}")
+    if metricas:
+        for clave, etiqueta in _ETIQUETAS_METRICAS:
+            valor = metricas.get(clave)
+            if valor is not None:
+                print(f"    {etiqueta:<24} {float(valor):6.1f} s")
+        total = metricas.get("total_documento_seg")
+        if total is not None:
+            print(f"    {'TOTAL':<24} {float(total):6.1f} s")
+    if estado != "OK":
+        print(f"    ESTADO: {estado}{(' -- ' + detalle_error) if detalle_error else ''}")
+
+
 def procesar_carpeta(
     carpeta: str | Path,
     salida: str | Path,
@@ -2847,6 +2895,7 @@ def procesar_carpeta(
                 resumen["omitidos"] += 1
                 continue
 
+            inicio_intento = time.perf_counter()
             try:
                 resultado = dict(ejecutar(ruta))
                 fila = {
@@ -2858,7 +2907,13 @@ def procesar_carpeta(
                     estado_procesamiento="OK",
                     error="",
                 )
+                _imprimir_metricas_documento(
+                    identificador,
+                    json.loads(fila.get("metricas_procesamiento_json") or "{}"),
+                    estado="OK",
+                )
             except Exception as error:  # cada documento es una unidad independiente
+                duracion_hasta_fallo = time.perf_counter() - inicio_intento
                 fila = {columna: "" for columna in COLUMNAS}
                 fila.update(
                     archivo=identificador,
@@ -2866,6 +2921,12 @@ def procesar_carpeta(
                     error=f"{type(error).__name__}: {error}",
                     tipo_carga="NO DETERMINADO",
                     indicador_revision="REVISAR",
+                )
+                _imprimir_metricas_documento(
+                    identificador,
+                    {"total_documento_seg": duracion_hasta_fallo},
+                    estado="ERROR",
+                    detalle_error=fila["error"],
                 )
                 resumen["errores"] += 1
 

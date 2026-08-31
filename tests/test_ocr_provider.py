@@ -301,4 +301,138 @@ def test_ocr_provider_no_depende_de_ocr_eval_gpu_env():
     fuente = inspect.getsource(ocr_provider)
     assert "ocr_eval_gpu_env" not in fuente
     assert "Jjjc0508" not in fuente
+
+
+# --- Bloque P2 -- BLOQUEO REAL DE PROCESAMIENTO DESKTOP ---
+# Reproduce (sin depender de PaddleOCR real ni de Windows Code Integrity)
+# el mecanismo exacto observado en el incidente en vivo: un worker cuyo
+# subproceso interno queda sin responder nunca, y confirma que ahora el
+# proveedor OCR se cae con ProveedorOCRNoDisponible en vez de bloquear el
+# hilo llamador para siempre.
+
+import subprocess as _subprocess_real
+import sys as _sys
+import time as _time
+
+
+def test_leer_linea_con_timeout_devuelve_la_linea_si_llega_a_tiempo():
+    stream = Mock()
+    stream.readline = Mock(return_value="hola\n")
+
+    assert ocr_provider._leer_linea_con_timeout(stream, 5) == "hola\n"
+
+
+def test_leer_linea_con_timeout_devuelve_none_si_el_stream_nunca_responde():
+    stream = Mock()
+    stream.readline = Mock(side_effect=lambda: _time.sleep(999))  # nunca vuelve
+
+    inicio = _time.perf_counter()
+    resultado = ocr_provider._leer_linea_con_timeout(stream, 0.2)
+    duracion = _time.perf_counter() - inicio
+
+    assert resultado is None
+    assert duracion < 2  # no esperó los 999s del stream colgado
+
+
+def test_asegurar_proceso_no_disponible_si_el_worker_nunca_manda_listo(monkeypatch):
+    """Reproduce el incidente real: el proceso worker queda vivo pero jamás
+    imprime la línea de arranque (equivalente a `PaddleOCR(...)` bloqueado
+    esperando un subproceso interno que Code Integrity nunca deja
+    continuar) -- debe fallar acotado por TIMEOUT_INICIO_SEG, no colgarse."""
+    _prohibir_bootstrap_real(monkeypatch)
+    monkeypatch.setattr(ocr_provider, "TIMEOUT_INICIO_SEG", 0.2)
+    proveedor = PaddleOCRProvider(device="cpu", ruta_python=RUTA_PYTHON_FALSA)
+    proceso = _ProcesoFalso()
+    proceso.pid = 999999  # PID inexistente a propósito
+    proceso.stdin.write = Mock(side_effect=proceso._escribir)
+    proceso.stdin.flush = Mock()
+    proceso.stdout = Mock()
+    proceso.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
+    monkeypatch.setattr(ocr_provider.Path, "exists", lambda self: True)
+    monkeypatch.setattr(ocr_provider.subprocess, "Popen", Mock(return_value=proceso))
+    matar = Mock()
+    monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", matar)
+
+    inicio = _time.perf_counter()
+    with pytest.raises(ProveedorOCRNoDisponible, match="no respondió en 0.2s al iniciar"):
+        proveedor.leer_texto("guia.jpg")
+    duracion = _time.perf_counter() - inicio
+
+    assert duracion < 3
+    matar.assert_called_once_with(proceso)
+
+
+def test_comando_no_disponible_si_el_worker_deja_de_responder_a_mitad_de_lote(monkeypatch):
+    """El worker respondió bien al iniciar, pero se cuelga procesando una
+    imagen concreta (ej. el subproceso interno de PaddlePaddle se traba
+    recién ahí) -- una imagen no debe congelar el resto del lote."""
+    _prohibir_bootstrap_real(monkeypatch)
+    proveedor, proceso = _preparar_proveedor_paddle(monkeypatch, respuestas=[])
+    proceso.pid = 999999
+    proveedor._asegurar_proceso()  # handshake de arranque, normal (proceso vivo)
+    monkeypatch.setattr(ocr_provider, "TIMEOUT_COMANDO_SEG", 0.2)
+    matar = Mock()
+    monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", matar)
+    # Recién ahora, procesando una imagen concreta, el worker se cuelga.
+    proceso.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
+
+    with pytest.raises(ProveedorOCRNoDisponible, match="no respondió en 0.2s procesando"):
+        proveedor.leer_texto("464170.jpeg")
+
+    matar.assert_called_once_with(proceso)
+    assert proveedor._proceso is None  # se puede reintentar con un proceso nuevo
+
+
+def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lote(monkeypatch):
+    """Tras el timeout de un documento, el SIGUIENTE documento debe poder
+    usar un proceso worker nuevo con normalidad -- nunca queda el
+    proveedor entero inutilizado por una sola imagen problemática."""
+    _prohibir_bootstrap_real(monkeypatch)
+    proveedor, proceso_colgado = _preparar_proveedor_paddle(monkeypatch, respuestas=[])
+    proceso_colgado.pid = 999999
+    proveedor._asegurar_proceso()  # handshake de arranque, normal
+    monkeypatch.setattr(ocr_provider, "TIMEOUT_COMANDO_SEG", 0.2)
+    monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", Mock())
+    proceso_colgado.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
+    with pytest.raises(ProveedorOCRNoDisponible):
+        proveedor.leer_texto("464170.jpeg")
+
+    # Documento siguiente: nuevo Popen, responde con normalidad.
+    respuesta = json.dumps({"ok": True, "resultado": "OK"}) + "\n"
+    proceso_nuevo = _ProcesoFalso(respuestas=[respuesta])
+    proceso_nuevo.stdin.write = Mock(side_effect=proceso_nuevo._escribir)
+    proceso_nuevo.stdin.flush = Mock()
+    proceso_nuevo.stdout = Mock()
+    proceso_nuevo.stdout.readline = Mock(side_effect=proceso_nuevo._leer_linea)
+    ocr_provider.subprocess.Popen.return_value = proceso_nuevo
+
+    resultado = proveedor.leer_texto("464264.jpeg")
+
+    assert resultado == ["OK"]
+
+
+def test_matar_arbol_proceso_termina_un_proceso_real_colgado():
+    """Sin mocks: confirma que taskkill /T /F realmente termina un proceso
+    Windows real que está en medio de un sleep -- el mecanismo que en el
+    incidente real debía liberar al worker de PaddleOCR atascado."""
+    proceso = _subprocess_real.Popen(
+        [_sys.executable, "-c", "import time; time.sleep(120)"],
+        stdout=_subprocess_real.DEVNULL, stderr=_subprocess_real.DEVNULL,
+    )
+    try:
+        assert proceso.poll() is None  # sigue vivo antes de matarlo
+
+        ocr_provider._matar_arbol_proceso(proceso)
+
+        for _ in range(50):
+            if proceso.poll() is not None:
+                break
+            _time.sleep(0.1)
+        assert proceso.poll() is not None  # terminó
+    finally:
+        if proceso.poll() is None:
+            proceso.kill()
+
+    import inspect
+    fuente = inspect.getsource(ocr_provider)
     assert r"C:\Users" not in fuente

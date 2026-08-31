@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -45,6 +47,58 @@ TIMEOUT_COMANDO_SEG = 180
 
 class ProveedorOCRNoDisponible(RuntimeError):
     """El proveedor no pudo iniciarse o dejó de responder."""
+
+
+def _leer_linea_con_timeout(stream, timeout_seg: float) -> str | None:
+    """`stream.readline()` acotado (Bloque P2 -- BLOQUEO REAL DE
+    PROCESAMIENTO DESKTOP).
+
+    Un pipe de `subprocess` en Windows no admite timeout nativo en
+    `readline()`; la lectura se delega a un hilo daemon y se espera con
+    `queue.get(timeout=...)`. Devuelve la línea leída (puede ser "" si el
+    proceso cerró el pipe -- caso YA manejado por el llamador), o `None`
+    si no llegó nada dentro del plazo: el proceso worker (o algo que él
+    haya lanzado internamente, ej. un subproceso propio de PaddlePaddle)
+    quedó sin responder -- nunca se asume la causa aquí, sólo se reporta
+    el hecho observable. El hilo lector puede seguir bloqueado tras el
+    timeout; se deja como daemon para no impedir que el proceso principal
+    continúe, y el llamador debe matar el proceso worker para liberarlo."""
+    resultado: queue.Queue = queue.Queue(maxsize=1)
+
+    def _leer() -> None:
+        try:
+            resultado.put(stream.readline())
+        except (OSError, ValueError):
+            resultado.put("")
+
+    hilo = threading.Thread(target=_leer, daemon=True)
+    hilo.start()
+    try:
+        return resultado.get(timeout=timeout_seg)
+    except queue.Empty:
+        return None
+
+
+def _matar_arbol_proceso(proceso: "subprocess.Popen") -> None:
+    """Termina el proceso worker Y sus descendientes (Bloque P2).
+
+    Un worker puede lanzar internamente subprocesos propios (comprobado en
+    vivo: PaddlePaddle aísla la detección de dispositivo/GPU en un proceso
+    hijo separado) -- `proceso.kill()` sólo mata al hijo directo y dejaría
+    huérfano cualquier nieto atascado. `taskkill /T` mata el árbol completo;
+    es una herramienta nativa de Windows (Atlas es Windows-only), sin
+    dependencia nueva."""
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(proceso.pid), "/T", "/F"],
+            capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        proceso.kill()
+    except OSError:
+        pass
 
 
 @runtime_checkable
@@ -140,7 +194,16 @@ class PaddleOCRProvider:
         )
         proceso.stdin.write(json.dumps({"device": self._device}) + "\n")
         proceso.stdin.flush()
-        linea = proceso.stdout.readline()
+        linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_INICIO_SEG)
+        if linea is None:
+            _matar_arbol_proceso(proceso)
+            raise ProveedorOCRNoDisponible(
+                f"El worker de PaddleOCR no respondió en {TIMEOUT_INICIO_SEG}s al iniciar "
+                "(el proceso quedó sin completar el arranque -- puede deberse a una "
+                "dependencia nativa bloqueada por una política del sistema operativo, "
+                "un proceso interno colgado, u otra causa; se detuvo el proceso worker "
+                "para no bloquear el lote indefinidamente)."
+            )
         if not linea:
             error = proceso.stderr.read()
             proceso.kill()
@@ -158,9 +221,18 @@ class PaddleOCRProvider:
         try:
             proceso.stdin.write(json.dumps(kwargs) + "\n")
             proceso.stdin.flush()
-            linea = proceso.stdout.readline()
+            linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_COMANDO_SEG)
         except (BrokenPipeError, OSError) as exc:
             raise ProveedorOCRNoDisponible(f"El proceso worker de PaddleOCR murió: {exc}") from exc
+        if linea is None:
+            _matar_arbol_proceso(proceso)
+            self._proceso = None
+            raise ProveedorOCRNoDisponible(
+                f"El worker de PaddleOCR no respondió en {TIMEOUT_COMANDO_SEG}s procesando "
+                f"{kwargs.get('ruta')} (se detuvo el proceso worker para no bloquear el "
+                "lote indefinidamente; se reintentará con un proceso worker nuevo en el "
+                "siguiente documento)."
+            )
         if not linea:
             error = proceso.stderr.read() if proceso.stderr else ""
             raise ProveedorOCRNoDisponible(f"El worker de PaddleOCR cerró la conexión: {error[-2000:]}")
