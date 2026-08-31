@@ -166,6 +166,7 @@ def escribir_estado_operacion(
     decisiones_pendientes: str | Path | None = None,
     origen: str | None = None,
     version_estado_derivado: int | None = None,
+    dataset_sha256: str | None = None,
     raiz: Path | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> Path | None:
@@ -205,6 +206,20 @@ def escribir_estado_operacion(
     }
     if version_estado_derivado is not None:
         contenido["version_estado_derivado"] = version_estado_derivado
+    # Bloque R2.5 -- huella del dataset operacional en el momento en que
+    # ESTE `reporte_vigente` se generó a partir de él. `atlas:cargar-
+    # automatico` (Desktop) la compara contra el hash ACTUAL del dataset
+    # en cada carga (ver `reconciliacion_estado_derivado.reconciliar_
+    # estado_derivado`) -- si difieren, el dataset cambió (p. ej. una
+    # decisión humana aplicada) DESPUÉS de que este reporte se generó, y
+    # el reporte se regenera antes de mostrarse. Sin esto, `viajes.csv`
+    # podía quedar publicando un estado operacional (destino/km/tiempo/
+    # bandeja) obsoleto indefinidamente entre corridas de procesamiento
+    # de imágenes nuevas -- la única otra vía que ya regeneraba el
+    # reporte (caso real 464264: "Revisión de Atlas" en 0 pero el reporte
+    # seguía mostrando el destino/ruta de antes de la decisión).
+    if dataset_sha256 is not None:
+        contenido["dataset_sha256"] = dataset_sha256
     ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
     escribir_json_atomico(ruta_manifiesto, contenido)
     return ruta_manifiesto

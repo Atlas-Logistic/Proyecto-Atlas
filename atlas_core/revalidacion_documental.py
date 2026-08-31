@@ -123,6 +123,39 @@ _ERRORES_CATALOGO_VEHICULOS = (
 )
 
 
+# Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN: caso real 464264 (destino
+# corregido por decisión humana de "SODIMAC SA CORONEL" -> "AV GOLFO DE
+# ARAUCO 3536"; la fila conservó 546,8 km / 10 h 22 min calculados para
+# el destino ANTERIOR incluso después de que la geocodificación del
+# destino nuevo quedara ambigua/pendiente). Regla general: si cambia una
+# dependencia BASE usada para calcular la ruta (planta de origen o
+# dirección de entrega), todo derivado calculado con el valor anterior
+# (km, tiempo, proveedor, etiqueta geocodificada, comuna/región, estado/
+# motivo de ruta, estado de entrega) deja INMEDIATAMENTE de ser
+# publicable -- nunca sobrevive un valor stale de la dependencia vieja,
+# aunque el recálculo todavía no pueda completarse. Pequeña abstracción
+# reutilizable (no un framework de transacciones): función pura que
+# devuelve sólo los campos a limpiar; quien llama decide cuándo
+# invocarla (siempre ANTES de reemplazar la dependencia base) y si
+# además dispara un recálculo inmediato (ver `aplicacion_decisiones.py`,
+# ramas `DESTINO_NO_RESUELTO`/`ORIGEN_NO_CONFIRMADO`).
+CAMPOS_DERIVADOS_RUTA: tuple[str, ...] = (
+    "distancia_km", "duracion_min", "proveedor_ruta",
+    "direccion_entrega", "localidad_entrega", "region_entrega",
+    "estado_ruta", "motivo_ruta", "estado_entrega",
+)
+
+
+def invalidar_derivados_ruta() -> dict[str, str]:
+    """Devuelve el dict `{campo: ""}` de todos los campos derivados de
+    ruta (ver `CAMPOS_DERIVADOS_RUTA`) -- se fusiona en la fila justo
+    antes de reemplazar la dependencia base (destino u origen) que los
+    produjo, para que ningún valor calculado con el valor anterior quede
+    publicado ni un instante. Nunca inventa un resultado nuevo: sólo
+    limpia: quien llama decide después si intenta recalcular."""
+    return {campo: "" for campo in CAMPOS_DERIVADOS_RUTA}
+
+
 def derivar_estado_ruta_tras_cambio_origen(fila: Mapping[str, object]) -> dict[str, str]:
     """Bloque OBSERVABILIDAD D1 -- deriva `estado_ruta`/`motivo_ruta` desde
     el estado REAL ya persistido (origen + destino), sin llamar ORS ni
@@ -321,7 +354,78 @@ def revalidar_obra_destino_sin_ocr(
                             if calle and calle in texto_documental:
                                 resuelto_por_direccion = True
                                 break
-                    if not resuelto_por_direccion:
+                    # Bloque R2.5 -- caso real 464265 ("SODIMAC SA COROBEL"
+                    # vs la obra ya CONFIRMADA "SODIMAC SA CORONEL" del
+                    # mismo cliente, `CONFLICTO_OBRA_DESTINO` a nivel de
+                    # viaje con su hermana 464264): mismo mecanismo ya
+                    # probado en `revalidar_obra_desconocida_por_variacion_
+                    # ortografica_sin_ocr` (distancia de edición == 1 en un
+                    # único token, nunca dos o más candidatos plausibles),
+                    # aplicado aquí a OBRA_DESTINO_SIN_CORROBORAR: si NI la
+                    # coincidencia global ni la dirección ya resolvieron,
+                    # pero exactamente UNA obra CONFIRMADA del MISMO cliente
+                    # coincide salvo una variación ortográfica menor, se
+                    # corrige el texto persistido al nombre canónico (nunca
+                    # dos entidades reales conviviendo como si fueran
+                    # distintas por un error de OCR) y se registra el texto
+                    # documental como alias -- la MISMA guía u otra con
+                    # idéntico texto resuelve por coincidencia EXACTA la
+                    # próxima vez.
+                    resuelto_por_variacion = False
+                    if not resuelto_por_direccion and cliente_documental not in _AUSENTES:
+                        from atlas_core.catalogo_obras_destinos import (
+                            EstadoObra, Evidencia, ResultadoEvidencia, TipoEvidencia,
+                        )
+                        from atlas_core.motor_evidencia_obras import resolver_obra_por_variacion_ortografica_menor
+
+                        try:
+                            cliente_resuelto = next(
+                                (
+                                    c for c in CatalogoClientes(carpeta / "clientes.json").listar()
+                                    if c.nombre_normalizado == normalizar_nombre_cliente(cliente_documental)
+                                ),
+                                None,
+                            )
+                        except (OSError, ValueError):
+                            cliente_resuelto = None
+                        if cliente_resuelto is not None:
+                            try:
+                                obras_confirmadas_cliente = tuple(
+                                    o for o in catalogo_obras.listar_obras()
+                                    if o.cliente_id == cliente_resuelto.cliente_id
+                                    and o.estado == EstadoObra.CONFIRMADA.value and o.estado_vigencia == "ACTIVO"
+                                )
+                            except (OSError, ValueError):
+                                obras_confirmadas_cliente = ()
+                            obra_variacion = resolver_obra_por_variacion_ortografica_menor(
+                                nombre_documental=obra_documental,
+                                obras_confirmadas_mismo_cliente=obras_confirmadas_cliente,
+                            )
+                            if obra_variacion is not None:
+                                evidencia_variacion = Evidencia(
+                                    tipo=TipoEvidencia.GUIA.value,
+                                    identificador_fuente=numero_guia or str(fila.get("archivo", "")),
+                                    referencia_hash=numero_guia,
+                                    campos_observados={
+                                        "obra_documental": obra_documental,
+                                        "obra_canonica": obra_variacion.nombre_canonico,
+                                        "numero_guia": numero_guia,
+                                    },
+                                    fecha=datetime.now(timezone.utc).isoformat(),
+                                    actor_proceso="RESOLUCION_AUTOMATICA_VARIACION_ORTOGRAFICA_MENOR",
+                                    resultado=ResultadoEvidencia.SOPORTA.value,
+                                )
+                                try:
+                                    catalogo_obras.actualizar_identidad_obra(
+                                        obra_variacion.obra_id, nombre_canonico=obra_variacion.nombre_canonico,
+                                        aliases_documentales=(obra_documental,), evidencia=evidencia_variacion,
+                                    )
+                                except (OSError, ValueError):
+                                    pass
+                                else:
+                                    fila["obra_destino"] = obra_variacion.nombre_canonico
+                                    resuelto_por_variacion = True
+                    if not resuelto_por_direccion and not resuelto_por_variacion:
                         continue
             motivos = [m for m in motivos if m != motivo_objetivo]
             fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
@@ -342,6 +446,114 @@ def revalidar_obra_destino_sin_ocr(
                 "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
             )
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def _fechas_difieren_solo_en_anio_un_digito(fecha_a: str, fecha_b: str) -> bool:
+    """True si dos fechas ``DD-MM-YYYY`` comparten EXACTAMENTE el mismo
+    día y mes, y su año difiere en un único dígito -- el único patrón de
+    error de OCR que este bloque considera lo bastante plausible como
+    para corregir automáticamente: dos documentos del MISMO transporte
+    (mismo despacho real) comparten con certeza el mismo día/mes; el año
+    es el único campo donde un solo dígito mal leído (p. ej. "4" léido
+    como "6") es una explicación creíble sin inventar nada. Una
+    diferencia en día o mes queda deliberadamente fuera -- ahí la
+    ambigüedad es real (dos fechas genuinamente distintas), no un patrón
+    de error conocido, y debe resolverla un humano."""
+    if len(fecha_a) != 10 or len(fecha_b) != 10 or fecha_a == fecha_b:
+        return False
+    if fecha_a[:6] != fecha_b[:6]:
+        return False
+    anio_a, anio_b = fecha_a[6:], fecha_b[6:]
+    return sum(1 for x, y in zip(anio_a, anio_b) if x != y) == 1
+
+
+def revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque R2.5 -- REQUIERE_REVISION ACCIONABLE: caso real 464264/
+    464265, mismo `numero_transporte` (0000351135, mismo camión/despacho
+    real) con `fecha` "05-08-2026" vs "05-08-2024" -- `CONFLICTO_FECHA` a
+    nivel de viaje (`gestor_viajes.MotivoRevision.CONFLICTO_FECHA`) sin
+    ninguna decisión pendiente ni dependencia técnica detrás: una
+    revisión huérfana. Nunca vuelve a leer el documento -- investiga
+    ÚNICAMENTE evidencia ya persistida, en dos niveles:
+
+    - Mayoría dentro del MISMO transporte (3+ documentos, uno discrepa de
+      los demás en el año): se corrige el discrepante al año mayoritario.
+    - Empate dentro del transporte (típicamente 2 documentos, 1 v/s 1):
+      se desempata por el año DOMINANTE del RESTO del lote (todo el
+      dataset, excluyendo este propio transporte) -- sólo si exactamente
+      uno de los dos años en conflicto aparece también fuera de este
+      transporte y el otro no aparece en ningún otro documento del lote.
+
+    Restringido, en ambos niveles, a pares de fecha que sólo difieren en
+    el AÑO por un único dígito (`_fechas_difieren_solo_en_anio_un_
+    digito`) -- nunca corrige una diferencia de día/mes, ni un año que
+    difiera en más de un dígito. Ante cualquier ambigüedad (3+ variantes
+    simultáneas dentro del transporte, empate sin desempate claro del
+    lote, o una diferencia que no calza el patrón), la fila se conserva
+    intacta -- el conflicto sigue vigente para una decisión humana
+    explícita (ver `decisiones_pendientes.detectar_decision_conflicto_
+    fecha_documental`)."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        grupos: dict[str, list[dict[str, str]]] = {}
+        for fila in filas:
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            if transporte:
+                grupos.setdefault(transporte, []).append(fila)
+
+        conteo_anios_lote: dict[str, int] = {}
+        for fila in filas:
+            fecha = str(fila.get("fecha", "")).strip()
+            if _parsear_fecha_dd_mm_yyyy(fecha) is not None:
+                anio = fecha[-4:]
+                conteo_anios_lote[anio] = conteo_anios_lote.get(anio, 0) + 1
+
+        guias_actualizadas: list[str] = []
+        for filas_grupo in grupos.values():
+            if len(filas_grupo) < 2:
+                continue
+            con_fecha = [
+                (fila, str(fila.get("fecha", "")).strip()) for fila in filas_grupo
+                if _parsear_fecha_dd_mm_yyyy(str(fila.get("fecha", "")).strip()) is not None
+            ]
+            distintas = sorted({fecha for _, fecha in con_fecha})
+            if len(distintas) != 2:
+                # Restringido a EXACTAMENTE 2 valores en conflicto dentro
+                # del transporte -- 3+ variantes reales simultáneas no es
+                # "un documento mal leído", es una duda más profunda que
+                # merece revisión humana directa, nunca una corrección
+                # automática.
+                continue
+            fecha_a, fecha_b = distintas
+            if not _fechas_difieren_solo_en_anio_un_digito(fecha_a, fecha_b):
+                continue
+            conteo_grupo = {fecha_a: 0, fecha_b: 0}
+            for _, fecha in con_fecha:
+                conteo_grupo[fecha] += 1
+            corroborada: str | None = None
+            if conteo_grupo[fecha_a] != conteo_grupo[fecha_b]:
+                corroborada = fecha_a if conteo_grupo[fecha_a] > conteo_grupo[fecha_b] else fecha_b
+            else:
+                anio_a, anio_b = fecha_a[-4:], fecha_b[-4:]
+                resto_a = conteo_anios_lote.get(anio_a, 0) - conteo_grupo[fecha_a]
+                resto_b = conteo_anios_lote.get(anio_b, 0) - conteo_grupo[fecha_b]
+                if resto_a > 0 and resto_b == 0:
+                    corroborada = fecha_a
+                elif resto_b > 0 and resto_a == 0:
+                    corroborada = fecha_b
+            if corroborada is None:
+                continue
+            for fila, fecha in con_fecha:
+                if fecha != corroborada:
+                    fila["fecha"] = corroborada
+                    guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
 
@@ -2077,6 +2289,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     perfil=perfil, destinos_confirmados=destinos_confirmados,
                     proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
                     contexto_evidencia_b1=contexto_evidencia_b1,
+                    contexto_obra=str(fila.get("obra_destino", "")),
                 )
             except (OSError, ValueError):
                 continue
@@ -2655,6 +2868,16 @@ def revalidar_y_regenerar_reporte(
     resultado_motivo_destino_resuelto = revalidar_motivo_destino_ya_confirmado_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
+    # Bloque R2.5 -- REQUIERE_REVISION ACCIONABLE: corre en cualquier
+    # punto de esta secuencia (no depende de ni alimenta ninguna otra
+    # revalidación de esta pasada) -- reconcilia `CONFLICTO_FECHA` a
+    # nivel de viaje cuando la evidencia de "mismo transporte + patrón de
+    # lote" ya alcanza (ver docstring), para que un viaje no quede
+    # REQUIERE_REVISION huérfano (sin decisión pendiente ni dependencia
+    # técnica) por un solo dígito de OCR.
+    resultado_fecha_transporte = revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
+        ruta_dataset=dataset,
+    )
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
@@ -2671,6 +2894,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_destino_rut_pegado["guias_actualizadas"])
         | set(resultado_material_estampado["guias_actualizadas"])
         | set(resultado_origen_eliminacion["guias_actualizadas"])
+        | set(resultado_fecha_transporte["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -2692,6 +2916,7 @@ def revalidar_y_regenerar_reporte(
         "destino_rut_pegado": resultado_destino_rut_pegado,
         "material_estampado": resultado_material_estampado,
         "origen_eliminacion_categoria": resultado_origen_eliminacion,
+        "fecha_transporte_compartido": resultado_fecha_transporte,
     }
 
     # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió

@@ -21,7 +21,7 @@ from atlas_core.almacenamiento_portable import (
 )
 from atlas_core.aplicacion_decisiones import LEDGER
 from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
-from atlas_core.reporte_viajes import generar_reporte_viajes
+from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
@@ -140,7 +140,22 @@ def reconciliar_estado_derivado(
         if registro["intentos_misma_evidencia"] < MAX_REINTENTOS_IGUALES_ARRANQUE and vencido:
             por_reintentar.append(str(registro["numero_guia"]))
     migracion = version_previa < VERSION_ESTADO_DERIVADO
-    if not migracion and not por_reintentar:
+    # Bloque R2.5 -- PROYECCIÓN CANÓNICA -> OPERACIÓN: caso real 464264
+    # (decisión humana aplicada; "Revisión de Atlas" ya reflejaba 0
+    # decisiones, pero `viajes.csv` seguía siendo el snapshot generado
+    # ANTES de la decisión -- Desktop mostraba "Destino operacional: No
+    # disponible" y el km/tiempo del destino ANTERIOR indefinidamente,
+    # porque nada volvía a llamar `generar_reporte_viajes` fuera de un
+    # drop de imágenes nuevas). El dataset puede cambiar por muchas vías
+    # que no son "migración" ni "reintento de ruta vencido" (cualquier
+    # decisión humana vía `aplicar_decision_obra`, cualquier revalidación
+    # `_sin_ocr`) -- comparar la huella del dataset contra la huella que
+    # el ÚLTIMO `reporte_vigente` publicado registró es la señal general,
+    # sin polling: se evalúa en la misma oportunidad de reconciliación
+    # natural que ya dispara cada carga de Desktop.
+    huella_dataset_actual = _sha256_archivo(dataset)
+    reporte_desactualizado = huella_dataset_actual != estado_previo.get("dataset_sha256")
+    if not migracion and not por_reintentar and not reporte_desactualizado:
         return {
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
             "version": version_previa, "pendientes_tecnicos": len(registros),
@@ -201,6 +216,12 @@ def reconciliar_estado_derivado(
                 dataset, reporte, carpeta_catalogos=catalogos,
                 ruta_ledger=actual / LEDGER, reloj=lambda: instante,
             )
+            # La huella se recalcula DESPUÉS de las revalidaciones de
+            # arriba (`limpieza`/`recuperacion` pueden haber mutado el
+            # dataset) -- es la huella del dataset que efectivamente
+            # produjo ESTE `reporte_vigente`, para que la próxima carga
+            # compare contra el estado real ya reflejado, no contra uno
+            # anterior a esta misma pasada.
             escribir_estado_operacion(
                 reporte_vigente=reporte,
                 dataset_operacional=dataset,
@@ -209,6 +230,7 @@ def reconciliar_estado_derivado(
                 reloj=lambda: instante,
                 origen="RECONCILIACION_ESTADO_DERIVADO",
                 version_estado_derivado=VERSION_ESTADO_DERIVADO,
+                dataset_sha256=_sha256_archivo(dataset),
             )
         except Exception:
             shutil.copy2(respaldo / dataset.name, dataset)
@@ -226,4 +248,5 @@ def reconciliar_estado_derivado(
         "pendientes_tecnicos": len(registros_despues),
         "totales": manifest["totales"],
         "ocr_ejecutado": False,
+        "reporte_regenerado_por_dataset_desactualizado": reporte_desactualizado,
     }

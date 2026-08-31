@@ -902,6 +902,7 @@ def resolver_destino_entrega(
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     contexto_evidencia_b1: str = "",
+    contexto_obra: str = "",
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -936,7 +937,27 @@ def resolver_destino_entrega(
     `MULTIPLES_UBICACIONES_DISPERSAS`/`COORDENADA_NO_CONFIRMADA` (ver
     `resolver_destino_con_fallback_estructurado`, "Vía C"). Nunca se
     llama si el proveedor principal ya resolvió sin ambigüedad -- "sólo
-    si A falla" (Javier)."""
+    si A falla" (Javier).
+
+    `contexto_obra` (Bloque R2.5 -- PENDIENTE TÉCNICO PROGRESIVO,
+    opcional): nombre de la obra/destino YA documental de este mismo
+    documento (p. ej. "SODIMAC SA CORONEL"). Caso real 464264: la
+    dirección confirmada por Javier ("AV GOLFO DE ARAUCO 3536") nunca
+    mencionó la comuna, y el geocodificador devolvió varios candidatos
+    homónimos dispersos -- exactamente el patrón que
+    `_candidatos_con_soporte_textual` ya sabe resolver, pero sólo puede
+    filtrar contra palabras presentes en `despachar_a_crudo`. Cuando ese
+    texto NO trae ninguna comuna inequívoca (`_comuna_documental_
+    inequivoca`) pero el nombre de la obra SÍ menciona, de forma
+    inequívoca, una comuna real del catálogo territorial cerrado (el
+    patrón operacional habitual: "CLIENTE OBRA COMUNA"), esa comuna se
+    usa como respaldo textual ADICIONAL para el mismo filtro -- nunca
+    para la consulta al geocodificador ni para el texto documental
+    persistido, sólo para decidir cuáles de los candidatos YA devueltos
+    por el proveedor tienen evidencia real. Nunca inventa una comuna: si
+    el nombre de la obra es ambiguo (dos comunas reales) o no menciona
+    ninguna, no aporta nada -- mismo comportamiento que sin este
+    parámetro."""
     texto = str(despachar_a_crudo or "").strip()
     if not texto:
         return ResultadoDestinoEntrega(
@@ -973,7 +994,19 @@ def resolver_destino_entrega(
         # "...CORONEL"). Nunca inventa evidencia: si ninguno tiene
         # respaldo, sigue con el conjunto completo (comportamiento
         # idéntico al de antes de este bloque).
-        candidatos_relevantes = _candidatos_con_soporte_textual(resultado.candidatos, texto)
+        #
+        # Bloque R2.5 -- si `despachar_a_crudo` NO trae ninguna comuna
+        # inequívoca propia, pero la obra documental de este mismo
+        # documento sí menciona una (caso real 464264: "SODIMAC SA
+        # CORONEL" con dirección confirmada sin comuna), esa comuna se
+        # suma como respaldo textual ADICIONAL para este mismo filtro --
+        # nunca reemplaza `texto`, sólo lo amplía para esta decisión.
+        texto_soporte = texto
+        if not _comuna_documental_inequivoca(texto):
+            comuna_obra = _comuna_documental_inequivoca(str(contexto_obra or ""))
+            if comuna_obra and _texto_normalizado_sin_acentos(comuna_obra) not in _texto_normalizado_sin_acentos(texto):
+                texto_soporte = f"{texto} {comuna_obra}"
+        candidatos_relevantes = _candidatos_con_soporte_textual(resultado.candidatos, texto_soporte)
         # Bloque TELEMETRÍA T1 -- evidencia GPS real (opcional), descarta
         # candidatos territorialmente incompatibles con el recorrido real.
         if punto_gps_referencia is not None:
@@ -1175,6 +1208,7 @@ def resolver_destino_entrega_validado(
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     contexto_evidencia_b1: str = "",
+    contexto_obra: str = "",
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -1205,6 +1239,7 @@ def resolver_destino_entrega_validado(
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
         contexto_evidencia_b1=contexto_evidencia_b1,
+        contexto_obra=contexto_obra,
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado
@@ -1375,6 +1410,7 @@ def calcular_ruta_con_planta_conocida(
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     contexto_evidencia_b1: str = "",
+    contexto_obra: str = "",
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -1401,6 +1437,7 @@ def calcular_ruta_con_planta_conocida(
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
         contexto_evidencia_b1=contexto_evidencia_b1,
+        contexto_obra=contexto_obra,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO

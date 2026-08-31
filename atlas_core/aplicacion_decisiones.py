@@ -665,6 +665,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     from atlas_core.revalidacion_documental import (
                         _escribir_filas_completas, _leer_filas,
                         derivar_estado_ruta_tras_cambio_origen,
+                        invalidar_derivados_ruta,
+                        revalidar_ruta_sin_destino_calculado_sin_ocr,
                     )
                     filas_dataset = _leer_filas(dataset)
                     fila_objetivo = next(
@@ -678,6 +680,25 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         "origen_determinado_por": fila_objetivo.get("origen_determinado_por", ""),
                         "evidencia_origen": fila_objetivo.get("evidencia_origen", ""),
                     }
+                    # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN (misma regla
+                    # que la rama DESTINO_NO_RESUELTO, aplicada al ORIGEN):
+                    # si la planta canónica realmente CAMBIA de valor y ya
+                    # existía una ruta calculada con la planta ANTERIOR, ese
+                    # km/tiempo/proveedor describe un origen que ya no es el
+                    # vigente y deja de ser publicable de inmediato --
+                    # `derivar_estado_ruta_tras_cambio_origen` (abajo) sólo
+                    # cubre el caso en que el origen se determina por
+                    # primera vez (nunca invalida un valor ya calculado), así
+                    # que un cambio de planta real necesita este paso
+                    # adicional, con el mismo mecanismo determinista ya
+                    # usado por la rama de destino para recalcular.
+                    planta_realmente_cambia = (
+                        str(valor_anterior["planta_origen_id"]).strip()
+                        and str(valor_anterior["planta_origen_id"]).strip() != planta_confirmada.planta_id
+                    )
+                    habia_ruta_calculada = bool(str(fila_objetivo.get("distancia_km", "")).strip())
+                    if planta_realmente_cambia and habia_ruta_calculada:
+                        fila_objetivo.update(invalidar_derivados_ruta())
                     # La evidencia GPS/documental original NUNCA se borra --
                     # queda íntegra en `motivo_origen_gps`/`evidencia_telemetria`/
                     # etc., columnas que este bloque no toca. Sólo cambian
@@ -694,6 +715,27 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # ORS/geocodificación, nunca fuerza RUTA_CALCULADA.
                     fila_objetivo.update(derivar_estado_ruta_tras_cambio_origen(fila_objetivo))
                     _escribir_filas_completas(dataset, filas_dataset)
+                    if planta_realmente_cambia and habia_ruta_calculada:
+                        # Mismo patrón que la rama de destino: con la
+                        # dependencia base ya reemplazada y los derivados ya
+                        # invalidados, se intenta recalcular de inmediato con
+                        # el mecanismo determinista ya existente -- nunca
+                        # inventa, nunca fuerza RUTA_CALCULADA; si no puede,
+                        # la fila queda genuinamente vacía (nunca con un
+                        # valor stale) hasta el próximo ciclo de
+                        # reconciliación.
+                        try:
+                            revalidar_ruta_sin_destino_calculado_sin_ocr(
+                                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                                proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
+                                guias_objetivo={numero_guia_decision},
+                            )
+                        except (OSError, ValueError):
+                            # El recálculo inmediato es una mejora aditiva --
+                            # si falla, el origen/la invalidación ya quedaron
+                            # persistidos arriba; el próximo ciclo de
+                            # reconciliación natural lo reintenta.
+                            pass
                     planta_confirmada_id = planta_confirmada.planta_id
                     planta_confirmada_nombre = planta_confirmada.nombre
                     resultado_extra["planta_id"] = planta_confirmada_id
@@ -743,6 +785,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         raise ErrorAplicacionDecision("Debe indicar la dirección de entrega.")
                     from atlas_core.revalidacion_documental import (
                         _escribir_filas_completas, _leer_filas,
+                        invalidar_derivados_ruta,
                         revalidar_ruta_sin_destino_calculado_sin_ocr,
                     )
                     filas_dataset = _leer_filas(dataset)
@@ -751,15 +794,22 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     )
                     if fila_objetivo is None:
                         raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
-                    # Se limpia el bloqueo anterior (nunca inventa un
-                    # resultado): la dirección nueva reemplaza la que
-                    # faltaba/contradecía, `revalidar_ruta_sin_destino_
-                    # calculado_sin_ocr` decide desde cero si esta sí
-                    # geocodifica de forma confiable.
+                    # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN: la dirección
+                    # nueva reemplaza la que faltaba/contradecía, así que
+                    # TODO lo que dependía de la dirección ANTERIOR (km,
+                    # tiempo, proveedor, etiqueta geocodificada, comuna/
+                    # región -- no sólo estado_ruta/motivo_ruta/estado_
+                    # entrega, como antes de este bloque) deja de ser
+                    # publicable de inmediato -- caso real 464264: sin esto,
+                    # 546,8 km / 10 h 22 min calculados para el destino
+                    # ANTERIOR sobrevivían indefinidamente si la
+                    # geocodificación del destino nuevo quedaba ambigua/
+                    # pendiente. `revalidar_ruta_sin_destino_calculado_
+                    # sin_ocr` decide desde cero, con la dependencia ya
+                    # limpia, si esta dirección sí geocodifica de forma
+                    # confiable -- nunca inventa un resultado.
+                    fila_objetivo.update(invalidar_derivados_ruta())
                     fila_objetivo["despachar_a_crudo"] = direccion_final
-                    fila_objetivo["estado_ruta"] = ""
-                    fila_objetivo["motivo_ruta"] = ""
-                    fila_objetivo["estado_entrega"] = ""
                     _escribir_filas_completas(dataset, filas_dataset)
                     resultado_revalidacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
                         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,

@@ -2009,6 +2009,7 @@ def procesar_archivo(
                                     origen_determinado_por="TELEMETRIA_GPS",
                                     evidencia_origen=resultado_entrega["evidencia_origen"],
                                     punto_gps_destino=resultado_gps.punto_gps_destino,
+                                    contexto_obra=str(datos.get("obra destino", "")),
                                 )
                                 resultado_entrega.update({
                                     "direccion_entrega": ruta_recalculada.direccion_entrega_geocodificada,
@@ -2102,6 +2103,7 @@ def procesar_archivo(
                                 origen_determinado_por=resultado_entrega.get("origen_determinado_por", ""),
                                 evidencia_origen=resultado_entrega.get("evidencia_origen", ""),
                                 punto_gps_destino=resultado_gps.punto_gps_destino,
+                                contexto_obra=str(datos.get("obra destino", "")),
                             )
                             if ruta_desambiguada.estado_ruta:
                                 resultado_entrega.update({
