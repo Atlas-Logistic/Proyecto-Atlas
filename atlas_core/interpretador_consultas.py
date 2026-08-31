@@ -319,6 +319,31 @@ _PALABRAS_PERIODO = (
     (PERIODO_HOY, ("HOY",)),
 )
 
+# Bloque R2 (adición -- FALLO DE LÓGICA/ASOCIACIÓN) -- causa raíz real:
+# "cuántos viajes con revisión tenemos" nunca poblaba `filtros["estado"]`
+# (nada en esta función lo hacía), así que la consulta caía en
+# METRICA_COUNT_VIAJES SIN NINGÚN FILTRO -- Atlas respondía con el TOTAL
+# de viajes, no con el subconjunto REQUIERE_REVISION. "estado" YA era un
+# filtro soportado por el ejecutor (`consultas_atlas._CAMPO_A_COLUMNA`/
+# `_fila_coincide`) -- sólo faltaba que el intérprete lo reconociera,
+# igual que ya reconoce período/tipo_carga/etc. Nunca confunde esto con
+# la bandeja de decisiones pendientes (`decisiones_pendientes.json`):
+# este módulo, por diseño, sólo lee `viajes.csv` (ver encabezado del
+# archivo) -- una pregunta sobre "decisiones/revisiones pendientes de
+# resolver" no menciona "viaje(s)" y ya cae, sin cambios, al `return
+# None` de más abajo (se cede a B1 o queda "no interpretable"; nunca se
+# responde con un número equivocado).
+_PALABRAS_ESTADO_VIAJE = (
+    ("REQUIERE_REVISION", (
+        "CON REVISION", "EN REVISION", "PARA REVISAR", "A REVISAR", "POR REVISAR",
+        "REQUIEREN REVISION", "REQUIERE REVISION", "QUE REQUIEREN REVISION",
+        "PENDIENTES DE REVISION", "PENDIENTE DE REVISION",
+    )),
+    ("CONFIRMADO", (
+        "CONFIRMADOS", "CONFIRMADO", "OK",
+    )),
+)
+
 _PALABRAS_AGRUPACION = (
     ("chofer", ("CHOFER", "CHOFERES")),
     ("cliente", ("CLIENTE", "CLIENTES")),
@@ -633,6 +658,11 @@ def interpretar_consulta_determinista(
     for nombre_periodo, frases in _PALABRAS_PERIODO:
         if any(frase in normalizado for frase in frases):
             filtros["periodo"] = nombre_periodo
+            break
+
+    for valor_estado, frases in _PALABRAS_ESTADO_VIAJE:
+        if any(re.search(rf"\b{re.escape(frase)}\b", normalizado) for frase in frases):
+            filtros["estado"] = valor_estado
             break
 
     agrupacion: str | None = None

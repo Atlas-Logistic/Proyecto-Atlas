@@ -17,6 +17,7 @@ from atlas_core.consultas_atlas import (
     METRICA_LISTAR_VIAJES,
     METRICA_SUM_KM,
     METRICA_SUM_PESO,
+    PERIODO_ESTA_SEMANA,
     PERIODO_ESTE_MES,
 )
 from atlas_core.interpretador_consultas import (
@@ -88,6 +89,84 @@ def test_interpreta_metrica_count_viajes_por_defecto():
 def test_interpreta_metrica_listar():
     consulta, _ = interpretar_consulta_determinista("Muéstrame los viajes de Juan Perez.", catalogos=CATALOGOS)
     assert consulta.metrica == METRICA_LISTAR_VIAJES
+
+
+# --- Bloque R2 (adición) -- "viajes con revisión" ≠ total de viajes ≠
+# decisiones pendientes (esta última bandeja no la conoce este módulo) ---
+
+def test_cuantos_viajes_con_revision_filtra_por_estado():
+    consulta, _ = interpretar_consulta_determinista("cuantos viajes con revision tenemos?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.metrica == METRICA_COUNT_VIAJES
+    assert consulta.filtros["estado"] == "REQUIERE_REVISION"
+
+
+def test_que_viajes_requieren_revision_filtra_por_estado():
+    consulta, _ = interpretar_consulta_determinista("¿Qué viajes requieren revisión?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.filtros["estado"] == "REQUIERE_REVISION"
+
+
+def test_muestrame_los_viajes_para_revisar_filtra_por_estado():
+    consulta, _ = interpretar_consulta_determinista("muéstrame los viajes para revisar", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.metrica == METRICA_LISTAR_VIAJES
+    assert consulta.filtros["estado"] == "REQUIERE_REVISION"
+
+
+def test_cuantos_viajes_tenemos_sin_filtro_de_estado():
+    """Total ≠ viajes REVISAR: sin ningún modificador de revisión, no debe
+    aparecer ningún filtro de estado."""
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos viajes tenemos?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert "estado" not in consulta.filtros
+
+
+def test_viajes_ok_filtra_por_estado_confirmado():
+    consulta, _ = interpretar_consulta_determinista("muéstrame los viajes OK", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.filtros["estado"] == "CONFIRMADO"
+
+
+def test_cuantos_viajes_estan_confirmados_filtra_por_estado_confirmado():
+    consulta, _ = interpretar_consulta_determinista("¿Cuántos viajes están confirmados?", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.filtros["estado"] == "CONFIRMADO"
+
+
+def test_revision_compuesto_con_chofer():
+    consulta, _ = interpretar_consulta_determinista("viajes con revisión de Villagra", catalogos=CATALOGOS)
+    assert consulta is not None
+    assert consulta.filtros["estado"] == "REQUIERE_REVISION"
+    assert consulta.filtros["chofer"] == "PATRICIO VILLAGRA MUÑOZ"
+
+
+def test_revision_compuesto_con_periodo():
+    consulta, _ = interpretar_consulta_determinista(
+        "cuántos viajes con revisión esta semana", catalogos=CATALOGOS,
+    )
+    assert consulta is not None
+    assert consulta.filtros["estado"] == "REQUIERE_REVISION"
+    assert consulta.filtros["periodo"] == PERIODO_ESTA_SEMANA
+
+
+def test_revision_compuesto_con_tipo_carga():
+    consulta, _ = interpretar_consulta_determinista(
+        "cuántos viajes con revisión tienen rollos", catalogos=CATALOGOS,
+    )
+    assert consulta is not None
+    assert consulta.filtros["estado"] == "REQUIERE_REVISION"
+    assert consulta.filtros["tipo_carga"] == "ROLLOS"
+
+
+def test_decisiones_pendientes_no_se_confunde_con_viajes_en_revision():
+    """Esta bandeja (`decisiones_pendientes.json`) no la conoce este
+    módulo por diseño (sólo lee viajes.csv) -- una pregunta que no
+    menciona "viaje(s)" no debe responderse con un número de VIAJES."""
+    consulta, avisos = interpretar_consulta_determinista(
+        "¿cuántas decisiones pendientes tengo?", catalogos=CATALOGOS,
+    )
+    assert consulta is None
 
 
 def test_interpreta_metrica_sum_peso_toneladas():

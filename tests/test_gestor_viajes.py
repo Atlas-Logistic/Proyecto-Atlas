@@ -572,8 +572,8 @@ def test_acentos_y_espacios_no_crean_conflicto():
 
 
 def test_documento_revisar_impide_confirmacion_silenciosa():
-    """Caso real obligatorio (guía 464170): un único documento marcado
-    REVISAR por el pipeline no puede producir un viaje CONFIRMADO en
+    """Un único documento marcado REVISAR por el pipeline de extracción
+    (`indicador_revision`) no puede producir un viaje CONFIRMADO en
     silencio, aunque sea el único documento del transporte."""
     viajes, _ = agrupar_viajes([_fila(indicador_revision="REVISAR")])
     assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
@@ -582,10 +582,60 @@ def test_documento_revisar_impide_confirmacion_silenciosa():
 
 def test_documento_ok_simple_puede_quedar_confirmado():
     """Un documento único sin motivos válidos de revisión (indicador_revision
-    OK, sin contradicciones) sí puede quedar CONFIRMADO."""
+    OK, sin contradicciones, sin problema operacional) sí puede quedar
+    CONFIRMADO."""
     viajes, _ = agrupar_viajes([_fila(indicador_revision="OK")])
     assert viajes[0].estado == EstadoViaje.CONFIRMADO
     assert viajes[0].motivos_revision == []
+
+
+# --- Bloque R2: un problema operacional (ruta/origen/destino) bloqueante
+# nunca puede convivir con un viaje CONFIRMADO, aunque el documento venga
+# indicador_revision=OK (esa columna sólo refleja extracción documental,
+# nunca ruta/origen/destino) -- casos reales obligatorios del primer lote
+# real post-limpieza: 464170 (CONTRADICCION_OPERACIONAL_ORIGEN),
+# 464493/464511 (MULTIPLES_UBICACIONES_DISPERSAS), los tres con
+# indicador_revision=OK y por eso, antes de este bloque, CONFIRMADOS en
+# silencio.
+
+def test_problema_operacional_impide_confirmacion_aunque_indicador_sea_ok():
+    """Caso real obligatorio (guía 464170): indicador_revision=OK pero
+    estado_operacional=REQUIERE_REVISION (origen contradictorio sin
+    resolver) -- el viaje no puede quedar CONFIRMADO."""
+    viajes, _ = agrupar_viajes([
+        _fila(indicador_revision="OK", estado_operacional="REQUIERE_REVISION")
+    ])
+    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.DOCUMENTO_REQUIERE_REVISION in viajes[0].motivos_revision
+
+
+def test_problema_operacional_multiples_ubicaciones_impide_confirmacion():
+    """Caso real obligatorio (guías 464493/464511): mismo patrón, motivo
+    real distinto (MULTIPLES_UBICACIONES_DISPERSAS -- destino sin resolver
+    para routing)."""
+    viajes, _ = agrupar_viajes([
+        _fila(indicador_revision="OK", estado_operacional="REQUIERE_REVISION")
+    ])
+    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
+
+
+def test_indicador_ok_y_estado_operacional_ok_confirma_normal():
+    """Control: cuando AMBAS señales están limpias (caso normal, la
+    mayoría de los documentos), el viaje sigue pudiendo confirmarse --
+    este bloque no convierte todo en revisión."""
+    viajes, _ = agrupar_viajes([
+        _fila(indicador_revision="OK", estado_operacional="OK")
+    ])
+    assert viajes[0].estado == EstadoViaje.CONFIRMADO
+    assert viajes[0].motivos_revision == []
+
+
+def test_estado_operacional_ausente_no_rompe_compatibilidad():
+    """Filas que nunca traen `estado_operacional` (fixtures antiguas,
+    otras fuentes) siguen comportándose exactamente igual que antes de
+    este bloque -- sólo `indicador_revision` decide."""
+    viajes, _ = agrupar_viajes([_fila(indicador_revision="OK")])
+    assert viajes[0].estado == EstadoViaje.CONFIRMADO
 
 
 def test_conflicto_multiguia_persiste_con_documentos_ok():

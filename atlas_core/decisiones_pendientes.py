@@ -339,6 +339,63 @@ def detectar_decision_destino_no_resuelto(
         contexto=contexto,
     )
 
+# Bloque R2 -- COHERENCIA ENTRE PROBLEMAS, ESTADO Y REVISIÓN ACCIONABLE:
+# `DESTINO_CONTAMINADO_POR_OTRA_SECCION`/`DESTINO_FRAGMENTO_TRUNCADO` viven
+# en `motivos_revision_documento` (fuente MOTIVO_DOCUMENTAL en
+# `registro_problemas.REGISTRO_PROBLEMAS_IA`, `aplicable_automaticamente=
+# False` -- Atlas IA/B1 puede investigar pero NUNCA auto-aplica un
+# destino) -- a diferencia de `detectar_decision_destino_no_resuelto`
+# (arriba), que sólo mira si la RUTA quedó bloqueada (`estado_ruta`/
+# `motivo_ruta`). Caso real 464491/464264: el routing puede calcular una
+# ruta igual (`estado_ruta=RUTA_CALCULADA`) usando el texto documental TAL
+# CUAL, sin saber que ese mismo texto ya viene marcado contaminado --
+# antes de este bloque, ese caso no generaba NINGUNA decisión (ni por acá
+# ni por el detector de ruta, que se abstiene cuando la ruta "ya
+# funcionó"). Esta función es la única que mira el motivo DOCUMENTAL de
+# contaminación directamente, sin importar si el routing "funcionó" con
+# el valor contaminado -- un destino contaminado sigue siendo una
+# pregunta real aunque el cálculo de ruta no se haya dado cuenta.
+MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL = frozenset({
+    "DESTINO_CONTAMINADO_POR_OTRA_SECCION", "DESTINO_FRAGMENTO_TRUNCADO",
+})
+
+
+def detectar_decision_destino_contaminado_documental(
+    *, archivo: str, fila: Mapping[str, str],
+) -> dict[str, object] | None:
+    """Genera `DESTINO_NO_RESUELTO` para un documento cuyo destino
+    documental sigue marcado contaminado/truncado en
+    `motivos_revision_documento`, sin importar el estado del routing --
+    complementa (nunca reemplaza) a `detectar_decision_destino_no_resuelto`."""
+    motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()}
+    motivo_presente = motivos & MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL
+    if not motivo_presente:
+        return None
+    documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
+    evidencias = [{
+        "tipo": "DESTINO_DOCUMENTAL_CONTAMINADO", "motivos": sorted(motivo_presente),
+        "despachar_a_crudo": str(fila.get("despachar_a_crudo", "")),
+        "estado_ruta": str(fila.get("estado_ruta", "")),
+    }]
+    contexto: dict[str, object] = {
+        "obra_canonica": str(fila.get("obra_destino", "")),
+        "cliente_canonico": str(fila.get("cliente", "")),
+        "planta_origen_id": str(fila.get("planta_origen_id", "")),
+    }
+    hallazgo = resumen_hallazgo_b1(fila, dominio="DESTINO", campo="despachar_a_crudo")
+    if hallazgo:
+        contexto.update(hallazgo)
+    return crear_decision(
+        tipo="DESTINO_NO_RESUELTO", entidad="DESTINO", archivo=str(archivo),
+        numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
+        campo="despachar_a_crudo", valor_documental=str(fila.get("despachar_a_crudo", "")),
+        valor_normalizado="", identidad_resuelta=None,
+        candidatos=(), motivos=sorted(motivo_presente),
+        evidencias=evidencias, acciones_permitidas=ACCIONES_DESTINO_NO_RESUELTO,
+        contexto=contexto,
+    )
+
+
 # Bloque R9 -- distinto de CLIENTE_DESCONOCIDO/CLIENTE_CANDIDATO/
 # ALIAS_CANDIDATO (los tres exigen ALGÚN texto documental de partida,
 # `cliente_documental not in _AUSENTES`): aquí el campo "cliente" está
@@ -1772,6 +1829,54 @@ def regenerar_decisiones_persistidas(
         plantas_vigentes = CatalogoPlantas(carpeta / "plantas.json").listar()
     except (OSError, ValueError):
         plantas_vigentes = []
+
+    decisiones = list(decisiones)
+    # Bloque R2 -- COHERENCIA ENTRE PROBLEMAS, ESTADO Y REVISIÓN ACCIONABLE:
+    # hasta este punto `decisiones` sólo trae lo que YA existía -- nunca se
+    # genera una decisión nueva desde cero para un documento recién
+    # procesado que nunca tuvo una. Los detectores de ORIGEN_NO_CONFIRMADO/
+    # DESTINO_NO_RESUELTO/CLIENTE_AUSENTE son correctos y ya se usan desde
+    # Mobile y la revalidación manual (`atlas_core.mobile`/
+    # `atlas_core.revalidacion_documental`) -- pero el lote real de Desktop
+    # (`analizar_guias_masivo.py` -> `procesar_carpeta` ->
+    # `detectar_decisiones_documento`) nunca los llamaba, así que un
+    # problema real (origen contradictorio, destino sin resolver/
+    # contaminado, cliente ausente) podía quedar en REQUIERE_REVISION para
+    # siempre sin ninguna ficha en Revisión de Atlas (casos reales:
+    # 464170/464479 -- origen; 464493/464511 -- destino MULTIPLES_
+    # UBICACIONES_DISPERSAS; 464491/464264 -- destino contaminado; 464265
+    # -- cliente ausente). Las candidatas se agregan AQUÍ, ANTES del bucle
+    # de reconciliación de abajo -- nunca directo a `resultado` -- para que
+    # pasen por EXACTAMENTE las mismas supresiones que ya existen (obra ya
+    # con relación confirmada, motivo obsoleto, cliente==obra, etc.); una
+    # decisión fresca que ya está resuelta por evidencia de catálogo se
+    # suprime igual que si hubiera sido persistida antes. `generar_
+    # artefacto` deduplica por `decision_id` contra el ledger -- llamar
+    # esto en cada corrida es idempotente.
+    if filas_por_guia is not None:
+        tipos_ya_presentes: dict[str, set[str]] = {}
+        for decision_existente in decisiones:
+            guia_existente = str((decision_existente.get("documento") or {}).get("numero_guia", ""))
+            tipos_ya_presentes.setdefault(guia_existente, set()).add(str(decision_existente.get("tipo", "")))
+        for numero_guia, fila_actual in filas_por_guia.items():
+            archivo_fila = str(fila_actual.get("archivo") or numero_guia)
+            tipos_de_esta_guia = tipos_ya_presentes.setdefault(numero_guia, set())
+            for nueva in (
+                detectar_decision_origen_no_confirmado(
+                    archivo=archivo_fila, fila=fila_actual, plantas=plantas_vigentes,
+                ),
+                detectar_decision_destino_no_resuelto(archivo=archivo_fila, fila=fila_actual),
+                detectar_decision_destino_contaminado_documental(archivo=archivo_fila, fila=fila_actual),
+                detectar_decision_cliente_ausente(archivo=archivo_fila, fila=fila_actual),
+            ):
+                if nueva is None:
+                    continue
+                tipo_nueva = str(nueva.get("tipo", ""))
+                if tipo_nueva in tipos_de_esta_guia:
+                    continue
+                tipos_de_esta_guia.add(tipo_nueva)
+                decisiones.append(nueva)
+
     decisiones_lista = actualizar_contrato_vehiculos_persistidos(decisiones)
     resultado: list[dict[str, object]] = []
     for original in decisiones_lista:
@@ -1910,14 +2015,25 @@ def regenerar_decisiones_persistidas(
             # vigente con causa fresca, la próxima detección publica una
             # tarjeta nueva con evidencia al día (nunca deja dos tarjetas
             # para la misma guía, una viva y una fantasma).
-            if motivo_ruta_por_guia is not None:
+            # Bloque R2 -- esta comparación sólo tiene sentido para
+            # decisiones cuya evidencia realmente viene de `motivo_ruta`
+            # (`detectar_decision_destino_no_resuelto`). Una decisión
+            # `DESTINO_NO_RESUELTO` originada en `motivos_revision_
+            # documento` (`detectar_decision_destino_contaminado_
+            # documental`, ej. DESTINO_CONTAMINADO_POR_OTRA_SECCION) casi
+            # siempre tiene `motivo_ruta` vacío o irrelevante (el routing
+            # puede haber "funcionado" con el texto contaminado) -- sin
+            # este resguardo, `motivo_actual_fila` (vacío) nunca coincide
+            # y la tarjeta se descartaría como falsamente "obsoleta" en
+            # cuanto se genera (caso real 464491/464264). Esas decisiones
+            # ya están protegidas por el chequeo genérico de arriba
+            # (`codigos_motivo_documental`/`motivos_por_guia`).
+            motivos_decision_ruta = {str(m) for m in (decision.get("motivos") or [])}
+            es_motivo_de_ruta = bool(motivos_decision_ruta) and motivos_decision_ruta <= MOTIVOS_DESTINO_NO_RESUELTO
+            if es_motivo_de_ruta and motivo_ruta_por_guia is not None:
                 numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
-                motivos_decision_ruta = {str(m) for m in (decision.get("motivos") or [])}
                 motivo_actual_fila = motivo_ruta_por_guia.get(numero_guia_decision)
-                if (
-                    motivos_decision_ruta and motivo_actual_fila is not None
-                    and motivo_actual_fila not in motivos_decision_ruta
-                ):
+                if motivo_actual_fila is not None and motivo_actual_fila not in motivos_decision_ruta:
                     continue
             # Bloque B1 EXPOSICIÓN -- refresca el hallazgo B1 de una
             # decisión YA PUBLICADA: si B1 investigó DESPUÉS de que esta

@@ -101,10 +101,27 @@ def _valores_compatibles_rut(valores: Iterable[str]) -> bool:
 
 
 def _documento_marca_revision(fila: Mapping[str, object]) -> bool:
-    """True si el documento de origen ya viene marcado REVISAR
-    (`indicador_revision`) por el pipeline de extracción/homologación —
-    independiente de si contradice o no a otros documentos del viaje."""
-    return str(fila.get("indicador_revision", "")).strip().casefold() == "revisar"
+    """True si el documento de origen ya viene marcado REVISAR -- por el
+    pipeline de extracción/homologación (`indicador_revision`) O PORQUE
+    una dependencia operacional bloqueante (ruta/origen/destino) quedó sin
+    resolver (`estado_operacional`).
+
+    Bloque R2 -- COHERENCIA ENTRE PROBLEMAS, ESTADO Y REVISIÓN ACCIONABLE:
+    antes de este bloque sólo se miraba `indicador_revision`, que sólo
+    refleja problemas de EXTRACCIÓN documental -- un problema puramente
+    operacional (ej. `CONTRADICCION_OPERACIONAL_ORIGEN`,
+    `MULTIPLES_UBICACIONES_DISPERSAS`, ambos viven en `motivo_ruta`/
+    `estado_ruta`, nunca en `motivos_revision_documento`) podía convivir
+    con `indicador_revision=OK` y el viaje quedaba CONFIRMADO en silencio
+    pese a que Atlas ya sabía que esa pieza operacional no estaba resuelta
+    (caso real: guías 464170/464493/464511). `estado_operacional` YA
+    combina ambas señales correctamente (`procesamiento_masivo.
+    procesar_archivo`/`_corroborar_documentos_relacionados`) -- este
+    detector sólo necesitaba empezar a mirarlo también. Independiente de
+    si contradice o no a otros documentos del viaje."""
+    if str(fila.get("indicador_revision", "")).strip().casefold() == "revisar":
+        return True
+    return str(fila.get("estado_operacional", "")).strip().casefold() == "requiere_revision"
 
 
 def _calcular_permanencia_minutos(hora_entrada: str, hora_salida: str) -> str:
