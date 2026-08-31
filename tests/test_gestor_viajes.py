@@ -40,6 +40,32 @@ def test_una_guia_con_transporte_conserva_ceros_y_campos():
     assert viajes[0].clientes == ["CLIENTE ÑUBLE"]
 
 
+def test_routing_multidocumento_no_mezcla_ruta_valida_con_fallo_geocodificacion():
+    filas = [
+        _fila(
+            archivo="ruta.jpg", numero_guia="464264",
+            distancia_km="546.8017", duracion_min="621.88",
+            proveedor_ruta="openrouteservice", estado_ruta="RUTA_CALCULADA",
+            motivo_ruta="",
+        ),
+        _fila(
+            archivo="fallo.jpg", numero_guia="464265",
+            distancia_km="", duracion_min="", proveedor_ruta="",
+            estado_ruta="REQUIERE_REVISION",
+            motivo_ruta="GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+        ),
+    ]
+
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    assert viaje["distancia_km"] == ""
+    assert viaje["duracion_min"] == ""
+    assert viaje["proveedor_ruta"] == ""
+    assert viaje["estado_ruta"] == "REQUIERE_REVISION"
+    assert viaje["motivo_ruta"] == "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA"
+
+
 @pytest.mark.parametrize("transporte", ["0000349935", "  0000349935  "])
 def test_transporte_numerico_conserva_ceros_y_admite_espacios_exteriores(
     transporte,

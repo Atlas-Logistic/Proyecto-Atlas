@@ -456,6 +456,49 @@ class Viaje:
         valores = _valores_unicos(getattr(d, campo) for d in self.documentos)
         return valores[0] if len(valores) == 1 else ""
 
+    def _bloque_routing_consolidado(self) -> dict[str, str]:
+        """Consolida la ruta como una unidad, nunca campo por campo.
+
+        Un documento con una ruta calculada y otro con un fallo explícito
+        no pueden aportar, respectivamente, los derivados y el diagnóstico
+        de un supuesto estado único. Ante esa contradicción se conserva el
+        único fallo coherente, pero se invalidan km/tiempo/proveedor.
+        """
+        campos = (
+            "distancia_km", "duracion_min", "proveedor_ruta",
+            "estado_ruta", "motivo_ruta",
+        )
+        bloques = [
+            {campo: str(getattr(documento, campo) or "").strip() for campo in campos}
+            for documento in self.documentos
+        ]
+        informados = [bloque for bloque in bloques if any(bloque.values())]
+        if not informados:
+            return {campo: "" for campo in campos}
+
+        firmas = {tuple(bloque[campo] for campo in campos) for bloque in informados}
+        if len(firmas) == 1:
+            return informados[0]
+
+        fallos = [
+            bloque for bloque in informados
+            if _clave_normalizada(bloque["estado_ruta"]) != "ruta_calculada"
+        ]
+        firmas_fallo = {
+            (bloque["estado_ruta"], bloque["motivo_ruta"])
+            for bloque in fallos
+        }
+        if len(firmas_fallo) == 1:
+            estado, motivo = next(iter(firmas_fallo))
+            return {
+                "distancia_km": "",
+                "duracion_min": "",
+                "proveedor_ruta": "",
+                "estado_ruta": estado,
+                "motivo_ruta": motivo,
+            }
+        return {campo: "" for campo in campos}
+
     @property
     def despachar_a(self) -> str:
         # Bloque P1/P1.1 (BLOQUEANTE 2) -- mismo criterio conservador
@@ -526,23 +569,23 @@ class Viaje:
 
     @property
     def distancia_km(self) -> str:
-        return self._campo_ruta_consolidado("distancia_km")
+        return self._bloque_routing_consolidado()["distancia_km"]
 
     @property
     def duracion_min(self) -> str:
-        return self._campo_ruta_consolidado("duracion_min")
+        return self._bloque_routing_consolidado()["duracion_min"]
 
     @property
     def proveedor_ruta(self) -> str:
-        return self._campo_ruta_consolidado("proveedor_ruta")
+        return self._bloque_routing_consolidado()["proveedor_ruta"]
 
     @property
     def estado_ruta(self) -> str:
-        return self._campo_ruta_consolidado("estado_ruta")
+        return self._bloque_routing_consolidado()["estado_ruta"]
 
     @property
     def motivo_ruta(self) -> str:
-        return self._campo_ruta_consolidado("motivo_ruta")
+        return self._bloque_routing_consolidado()["motivo_ruta"]
 
     @property
     def proveedor_telemetria(self) -> str:
