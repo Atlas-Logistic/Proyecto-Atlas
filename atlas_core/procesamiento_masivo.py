@@ -729,6 +729,7 @@ class MetodoObtencionDocumento(str, Enum):
     # destino contra los catálogos maestros -- ver criterio de
     # corroboración por campo junto a cada uso en `procesar_archivo()`.
     CATALOGO = "CATALOGO"
+    CATALOGO_RUT_CLIENTE = "CATALOGO_RUT_CLIENTE"
     CATALOGO_OBRA_DESTINO = "CATALOGO_OBRA_DESTINO"
     # Bloque INTELIGENCIA N1: limpieza estructural de un nombre de entidad
     # (sufijos societarios/prefijo suelto, ver `normalizar_nombre_societario`)
@@ -894,6 +895,41 @@ def _resolver_cliente_id_corroborado(
     ):
         return resultado.cliente.cliente_id
     return None
+
+
+def _completar_cliente_ausente_por_rut_catalogado(
+    datos: dict[str, object], carpeta_catalogos: str | Path,
+    *, campo_rut: str = "RUT del cliente",
+) -> bool:
+    """Completa sólo un cliente ausente mediante un RUT maestro inequívoco.
+
+    La identidad se decide exclusivamente en `_resolver_cliente_id_corroborado`:
+    esta función sólo materializa su razón social canónica y deja provenance.
+    Nunca crea ni modifica aliases o entradas de catálogo.
+    """
+    if str(datos.get("cliente", "")).strip() not in {"", "No encontrado"}:
+        return False
+    cliente_id = _resolver_cliente_id_corroborado(
+        carpeta_catalogos,
+        cliente_texto="",
+        rut_cliente=str(datos.get(campo_rut, "")),
+        identidad_cliente_corroborada=False,
+    )
+    if cliente_id is None:
+        return False
+    try:
+        cliente = CatalogoClientes(Path(carpeta_catalogos) / "clientes.json").obtener(cliente_id)
+    except ErrorCatalogoClientes:
+        return False
+    datos["cliente"] = cliente.razon_social
+    metodos = {
+        metodo.strip()
+        for metodo in str(datos.get("metodos_recuperacion_documento", "")).split("|")
+        if metodo.strip()
+    }
+    metodos.add(MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value)
+    datos["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
+    return True
 
 
 def _corroborar_obra_destino_confirmada(
@@ -1209,6 +1245,11 @@ def procesar_archivo(
         # La geometría puede recuperar valores después de la extracción lineal;
         # reaplicar la misma fuente al final conserva el nombre canónico.
         datos = enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
+        if _completar_cliente_ausente_por_rut_catalogado(datos, carpeta_catalogos):
+            metodos_documento.add(MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value)
+            logger.info(
+                "cliente ausente resuelto por RUT único contra cliente maestro CONFIRMADO/ACTIVO"
+            )
 
         # P2: homologación conservadora de patentes contra el catálogo canónico
         # de vehículos. Se aplica después de la recuperación geométrica (P1) para
@@ -2713,7 +2754,25 @@ def escalar_resultado_ia_en_memoria(
     """Entrada común para Mobile: reutiliza exactamente el escalamiento B1
     del lote (Bloque R7: el mismo registro universal, nunca un segundo
     camino de escalamiento para Mobile)."""
-    fila = {columna: str(datos.get(columna, "")) for columna in COLUMNAS}
+    datos_pre_b1: dict[str, object] = dict(datos)
+    cliente_resuelto_por_rut = False
+    if carpeta_catalogos is not None:
+        cliente_resuelto_por_rut = _completar_cliente_ausente_por_rut_catalogado(
+            datos_pre_b1, carpeta_catalogos, campo_rut="rut_cliente",
+        )
+    fila = {columna: str(datos_pre_b1.get(columna, "")) for columna in COLUMNAS}
+    if cliente_resuelto_por_rut:
+        motivos = {
+            motivo.strip()
+            for motivo in fila.get("motivos_revision_documento", "").split("|")
+            if motivo.strip()
+        }
+        motivos.discard(MotivoRevisionDocumento.CLIENTE_AUSENTE.value)
+        fila["motivos_revision_documento"] = " | ".join(sorted(motivos))
+        fila["indicador_revision"] = "REVISAR" if any(
+            motivo not in MOTIVOS_NO_BLOQUEANTES for motivo in motivos
+        ) else "OK"
+        fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
     fila["archivo"] = fila.get("archivo") or "__mobile_actual__"
     filas = [{columna: str(f.get(columna, "")) for columna in COLUMNAS} for f in historial]
     filas.append(fila)
