@@ -129,6 +129,37 @@ def test_indicador_revision_del_core_manda_a_revision_igual_que_desktop(tmp_path
     assert registro["archivo_dataset"] != ""
 
 
+def test_mobile_regenera_decision_humana_desde_motivo_bloqueante(tmp_path: Path) -> None:
+    """Un motivo humano Mobile no puede quedar sin tarjeta accionable."""
+    repo, envio_id = _recibir(tmp_path)
+    dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
+    _dataset_vacio(dataset)
+    catalogos = tmp_path / "catalogos"
+    catalogos.mkdir()
+    (catalogos / "clientes.json").write_text('{"version_formato": 1, "clientes": []}', encoding="utf-8")
+    (catalogos / "plantas.json").write_text('{"version_formato": 1, "plantas": []}', encoding="utf-8")
+
+    registro = procesar_envio_mobile(
+        repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos,
+        procesador=lambda ruta: {
+            "numero_guia": "472640", "numero_transporte": "0000355471",
+            "cliente": "No encontrado", "obra_destino": "OBRA EJEMPLO",
+            "motivos_revision_documento": "CLIENTE_AUSENTE",
+            "indicador_revision": "REVISAR", "estado_operacional": "REQUIERE_REVISION",
+        },
+    )
+
+    artefacto = json.loads((dataset.parent / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    decisiones_guia = [d for d in artefacto["decisiones"] if d["documento"]["numero_guia"] == "472640"]
+    assert registro["estado"] == "REQUIERE_REVISION"
+    assert [d["tipo"] for d in decisiones_guia] == ["CLIENTE_AUSENTE"]
+    from atlas_core.gestor_viajes import EstadoViaje, agrupar_viajes
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        viajes, _ = agrupar_viajes(list(csv.DictReader(archivo, delimiter=";")))
+    assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
+    assert viajes[0].estado != EstadoViaje.INCOMPLETO_TECNICO
+
+
 def test_dataset_de_esquema_reducido_nunca_recibe_una_escritura_con_esquema_completo(tmp_path: Path) -> None:
     repo, envio_id = _recibir(tmp_path)
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"

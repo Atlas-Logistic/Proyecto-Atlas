@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
-from atlas_core.decisiones_pendientes import generar_artefacto
+from atlas_core.decisiones_pendientes import generar_artefacto, regenerar_decisiones_persistidas
 from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.procesamiento_masivo import (
     COLUMNAS, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
@@ -416,9 +416,14 @@ def procesar_envio_mobile(
                 previas = list(json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", []))
             except (OSError, json.JSONDecodeError):
                 pass
+            decisiones_reconciliadas = regenerar_decisiones_persistidas(
+                decisiones=previas + decisiones_nuevas,
+                carpeta_catalogos=carpeta_catalogos,
+                ruta_dataset=dataset,
+            )
             generar_artefacto(
                 ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                decisiones=previas + decisiones_nuevas,
+                decisiones=decisiones_reconciliadas,
             )
 
         estado_final = _estado_final_mobile(datos, asociacion, captura_ilegible)
