@@ -1831,6 +1831,64 @@ def regenerar_decisiones_persistidas(
         plantas_vigentes = []
 
     decisiones = list(decisiones)
+    # Bloque R21 -- REFRESCO ESTRUCTURAL DE DECISIONES VIVAS: caso real
+    # 472640 (DSI UNDERGROUND CHILE SPA) -- una tarjeta `DESTINO_NO_
+    # RESUELTO` ya publicada por el camino DOCUMENTAL (`DESTINO_
+    # CONTAMINADO_POR_OTRA_SECCION`/`DESTINO_FRAGMENTO_TRUNCADO`, ver
+    # `detectar_decision_destino_contaminado_documental`) seguía mostrando
+    # `valor_documental="LAS VIOLETAS"` y `cliente_canonico="No
+    # encontrado"` DESPUÉS de que una reextracción corrigiera
+    # `despachar_a_crudo`/`cliente` en el dataset -- Atlas ya tenía el
+    # dato correcto persistido, pero Revisión de Atlas seguía preguntando
+    # con evidencia vieja.
+    #
+    # `valor_documental` SÍ participa del hash de `decision_id` (ver
+    # `_decision_id`) -- conservar el mismo ID mientras ese valor cambia
+    # sería una inconsistencia real (el ID dejaría de representar la
+    # evidencia que en verdad respalda la tarjeta), no una corrección. El
+    # detector documental siempre fija `campo="despachar_a_crudo"` y
+    # `valor_documental=fila["despachar_a_crudo"]` en el momento de la
+    # detección -- comparar ese valor contra el `despachar_a_crudo`
+    # VIGENTE de la fila (misma lectura `filas_por_guia` que ya usa R19,
+    # sin OCR ni red) es la comparación fresca correcta para ESTE origen.
+    #
+    # Deliberadamente restringido a `MOTIVOS_DESTINO_CONTAMINADO_
+    # DOCUMENTAL` -- NUNCA a una decisión cuyo motivo venga de
+    # `motivo_ruta` (`detectar_decision_destino_no_resuelto`): para esas,
+    # R19 (más abajo) ya compara la señal correcta (el código de
+    # `motivo_ruta`, no el texto de `valor_documental`) y es la única
+    # comparación válida ahí -- `despachar_a_crudo` puede legítimamente no
+    # reflejar por qué una decisión de ruta sigue vigente (p. ej. un test
+    # o un flujo que no repobló esa columna), así que aplicar este mismo
+    # chequeo a ese origen descartaría tarjetas vivas sin evidencia real
+    # de que quedaron obsoletas (regresión real detectada en
+    # `test_bug_perdida_decision_multiguia.py`, motivo `MULTIPLES_
+    # UBICACIONES_DISPERSAS`, fila de prueba sin `despachar_a_crudo`
+    # poblado). Si difiere, la tarjeta se descarta AQUÍ -- antes de
+    # construir `tipos_ya_presentes` más abajo -- para que, si el
+    # problema de destino sigue vigente, el bloque `candidatas_nuevas` de
+    # más abajo pueda publicar una tarjeta fresca con un `decision_id`
+    # nuevo y evidencia al día, en vez de quedar bloqueado por el "tipo ya
+    # presente" de la tarjeta vieja. Si el problema ya no aplica (motivo
+    # retirado, ruta calculada), no se genera reemplazo -- mismo
+    # comportamiento ya establecido por R19.
+    if filas_por_guia is not None:
+        decisiones = [
+            decision for decision in decisiones
+            if not (
+                str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO"
+                and str(decision.get("campo", "")) == "despachar_a_crudo"
+                and bool(decision.get("motivos"))
+                and {str(m) for m in decision.get("motivos") or []} <= MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL
+                and (
+                    fila_vigente := filas_por_guia.get(
+                        str((decision.get("documento") or {}).get("numero_guia", ""))
+                    )
+                ) is not None
+                and str(decision.get("valor_documental", ""))
+                != str(fila_vigente.get("despachar_a_crudo", ""))
+            )
+        ]
     # Bloque R2 -- COHERENCIA ENTRE PROBLEMAS, ESTADO Y REVISIÓN ACCIONABLE:
     # hasta este punto `decisiones` sólo trae lo que YA existía -- nunca se
     # genera una decisión nueva desde cero para un documento recién
@@ -2049,6 +2107,43 @@ def regenerar_decisiones_persistidas(
                     if clave.startswith("b1_"):
                         del contexto[clave]
                 if fila_actual is not None:
+                    # Bloque R21 -- mismo caso real 472640: `cliente_
+                    # canonico`/`obra_canonica` se fijaron en el contexto al
+                    # momento de la detección original (ver
+                    # `detectar_decision_destino_no_resuelto`/`_contaminado_
+                    # documental`, ambas copian `fila["cliente"]`/`fila[
+                    # "obra_destino"]` tal cual) -- si esos campos del
+                    # documento se corrigieron DESPUÉS (p. ej. una
+                    # reextracción resolvió el cliente), la tarjeta seguía
+                    # mostrando el valor viejo aunque el resto del sistema
+                    # ya tuviera el dato correcto. Ninguno de los dos
+                    # participa de `decision_id` (sólo campo/valor_
+                    # documental/evidencias lo hacen) -- refrescarlos aquí,
+                    # en el mismo lugar que ya refresca el hallazgo B1, no
+                    # cambia qué tarjeta es ésta, sólo pone al día su
+                    # presentación. El refresco por `cliente_id` de más
+                    # arriba (`cliente_vigente_contexto`) no cubre este caso
+                    # porque estas dos decisiones nunca guardaron
+                    # `cliente_id` -- sólo el texto plano.
+                    #
+                    # SÓLO se refresca una clave que la decisión YA traía
+                    # (`in contexto`) -- nunca se inyecta `obra_canonica`
+                    # de la nada en una decisión que nunca la tuvo. Una
+                    # decisión sin `obra_canonica` propio nunca pasó por
+                    # el detector real (p. ej. una construida a mano en un
+                    # test, o un artefacto de un esquema anterior a R3.1.3)
+                    # y agregar la clave aquí activaría, sin evidencia
+                    # real detrás, la supresión "obra ya tiene destino
+                    # confirmado" de más abajo -- regresión real detectada
+                    # en `test_bug_perdida_decision_multiguia.py::test_
+                    # caso_c_evidencia_real_resuelve_solo_la_decision_
+                    # correspondiente` (decisión sin `contexto` que
+                    # empezaba a suprimirse por una obra/destino que nunca
+                    # formó parte de su propia evidencia).
+                    if "cliente_canonico" in contexto:
+                        contexto["cliente_canonico"] = str(fila_actual.get("cliente", ""))
+                    if "obra_canonica" in contexto:
+                        contexto["obra_canonica"] = str(fila_actual.get("obra_destino", ""))
                     hallazgo = resumen_hallazgo_b1(
                         fila_actual, dominio="DESTINO", campo=str(decision.get("campo", "despachar_a_crudo")),
                     )

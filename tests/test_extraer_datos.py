@@ -578,6 +578,34 @@ def test_geometria_no_regresion_cliente_chofer_rut_cliente_junto_a_obra_destino(
     assert rut_cliente["valor"] == "83.585.400-0"
 
 
+def test_geometria_obra_destino_identico_al_cliente_se_resuelve_de_forma_independiente():
+    """Diagnóstico real 472640 (DSI UNDERGROUND CHILE SPA): investigación
+    contra la imagen/OCR real confirmó que el documento imprime el MISMO
+    nombre de cliente en DOS lugares físicos distintos -- junto a
+    SEÑOR(ES) (la respuesta de cliente) y, por separado, junto a OBRA
+    DESTINO (un cliente sin obra/proyecto propio: el destino ES el propio
+    cliente) -- más un tercer bloque idéntico, más arriba en la imagen,
+    que no está pegado a ninguna etiqueta (letra de cabecera/repetición
+    de imprenta). Geometría real (bounding boxes reales del OCR de
+    472640, sin reescalar): la coincidencia de texto entre cliente y
+    obra_destino NUNCA viene de que el código copie uno al otro -- cada
+    campo se resuelve por su PROPIA etiqueta y posición, ignorando el
+    bloque suelto sin etiqueta. Ver también `probar_guia7` (462793,
+    mismo cliente real) para el mismo patrón por la vía lineal."""
+    bloques = [
+        _bloque("DSI UNDERGROUND CHILE SPA", 2233, 938, 650, 62),  # suelto, sin etiqueta -- nunca debe ganar
+        _bloque("SEÑOR(ES)", 120, 991, 229, 51),
+        _bloque("DSI UNDERGROUND CHILE SPA", 790, 967, 615, 62),  # junto a SEÑOR(ES)
+        _bloque("OBRA DESTINO", 1646, 1068, 323, 46),
+        _bloque("DSI UNDERGROUND CHILE SPA", 2235, 1049, 652, 60),  # junto a OBRA DESTINO
+    ]
+
+    asociaciones = _extraer_asociaciones_geometricas(bloques)
+
+    assert asociaciones["cliente"] == "DSI UNDERGROUND CHILE SPA"
+    assert asociaciones["obra destino"] == "DSI UNDERGROUND CHILE SPA"
+
+
 def test_buscar_obra_destino_lineal_no_captura_etiqueta_vecina_comuna():
     """Reproducción real guía 464264: en el orden de lectura del OCR, la
     etiqueta "COMUNA" (columna izquierda) queda intercalada entre "OBRA
