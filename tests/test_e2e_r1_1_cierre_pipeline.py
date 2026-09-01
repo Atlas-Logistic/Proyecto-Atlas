@@ -66,6 +66,84 @@ def test_despachar_a_multilinea_misma_direccion():
     assert resultado.get("valor") == "AV DEMO 123 CORONEL CHILE"
 
 
+def test_continuacion_despachar_a_es_equivalente_a_distintas_resoluciones():
+    def escena(escala):
+        return [
+            _bloque("DESPACHAR A", 10 * escala, 100 * escala, 90 * escala, 118 * escala),
+            _bloque("LAS VIOLETAS 55", 10 * escala, 122 * escala, 150 * escala, 140 * escala),
+            _bloque("SECTOR LA ESPERANZA", 10 * escala, 143 * escala, 180 * escala, 161 * escala),
+        ]
+
+    esperado = "LAS VIOLETAS 55 SECTOR LA ESPERANZA"
+    assert _extraer_despachar_a_geometrico(escena(1))["valor"] == esperado
+    assert _extraer_despachar_a_geometrico(escena(4))["valor"] == esperado
+
+
+def test_despachar_a_une_varios_bloques_de_una_misma_linea():
+    """Caso real 472640 (Mobile alta resolución): EasyOCR segmentó una
+    sola línea impresa de la dirección en 6 cajas OCR separadas -- antes
+    de este bloque solo se tomaba la primera ("LAS VIOLETAS")."""
+    bloques = [
+        _bloque("DESPACHAR A", 10, 2800, 90, 2818),
+        _bloque("LAS VIOLETAS", 100, 2805, 220, 2823),
+        _bloque("55", 228, 2806, 250, 2822),
+        _bloque("SECTOR", 258, 2805, 310, 2823),
+        _bloque("LA ESPERANZA", 318, 2804, 400, 2824),
+        _bloque("PADRE", 408, 2806, 450, 2822),
+        _bloque("HU", 458, 2807, 480, 2823),
+    ]
+    resultado = _extraer_despachar_a_geometrico(bloques)
+    assert resultado.get("valor") == "LAS VIOLETAS 55 SECTOR LA ESPERANZA PADRE HU"
+
+
+def test_union_horizontal_despachar_a_equivalente_a_distintas_resoluciones():
+    """La unión de varios bloques de una misma línea debe dar el mismo
+    resultado sin importar la resolución de la foto -- nunca un umbral
+    absoluto calibrado a un caso concreto."""
+    def escena(escala):
+        return [
+            _bloque("DESPACHAR A", 10 * escala, 100 * escala, 90 * escala, 118 * escala),
+            _bloque("LAS VIOLETAS", 100 * escala, 105 * escala, 220 * escala, 123 * escala),
+            _bloque("55", 228 * escala, 106 * escala, 250 * escala, 122 * escala),
+            _bloque("SECTOR", 258 * escala, 105 * escala, 310 * escala, 123 * escala),
+        ]
+
+    esperado = "LAS VIOLETAS 55 SECTOR"
+    assert _extraer_despachar_a_geometrico(escena(1))["valor"] == esperado
+    assert _extraer_despachar_a_geometrico(escena(4))["valor"] == esperado
+
+
+def test_despachar_a_no_absorbe_columna_vecina_en_la_misma_fila():
+    """Un bloque de OTRA sección del documento (misma fila visual,
+    columna distinta -- caso real: RETIRA/PATENTE a la derecha de
+    DESPACHAR A) nunca se une a la dirección, aunque el hueco horizontal
+    sea moderado -- la etiqueta estructural corta la unión ahí."""
+    bloques = [
+        _bloque("DESPACHAR A", 10, 100, 90, 118),
+        _bloque("LAS VIOLETAS", 100, 105, 220, 123),
+        _bloque("55", 228, 106, 250, 122),
+        _bloque("RETIRA", 270, 105, 330, 123),
+        _bloque("LUIS REYES", 340, 105, 420, 123),
+    ]
+    resultado = _extraer_despachar_a_geometrico(bloques)
+    assert resultado.get("valor") == "LAS VIOLETAS 55"
+
+
+def test_despachar_a_horizontal_y_segunda_linea_vertical_en_orden():
+    """Continuación horizontal (primera línea, varios bloques) seguida
+    de una segunda línea vertical (también con varios bloques) -- ambas
+    se reconstruyen, en orden, como una sola dirección."""
+    bloques = [
+        _bloque("DESPACHAR A", 10, 100, 90, 118),
+        _bloque("LAS VIOLETAS", 100, 105, 220, 123),
+        _bloque("55", 228, 106, 250, 122),
+        _bloque("SECTOR", 100, 128, 160, 146),
+        _bloque("LA ESPERANZA", 168, 129, 260, 147),
+    ]
+    resultado = _extraer_despachar_a_geometrico(bloques)
+    assert resultado.get("valor") == "LAS VIOLETAS 55 SECTOR LA ESPERANZA"
+
+
 def test_despachar_a_corta_en_la_siguiente_etiqueta_estructural():
     """La cadena multilínea nunca cruza una etiqueta estructural (RUT,
     PATENTE, HORA, ...) -- se corta ahí, no sigue absorbiendo texto."""

@@ -165,11 +165,22 @@ def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:
     return not (digitos and digitos >= sum(caracter.isalpha() for caracter in texto))
 
 
+def _escala_geometrica_texto(items: List[Dict[str, Any]]) -> float:
+    """Escala relativa al alto mediano del texto OCR (18 px = fixtures base)."""
+    altos = sorted(float(item["h"]) for item in items if float(item.get("h", 0)) > 0)
+    if not altos:
+        return 1.0
+    centro = len(altos) // 2
+    mediana = altos[centro] if len(altos) % 2 else (altos[centro - 1] + altos[centro]) / 2
+    return mediana / 18.0
+
+
 def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
         return {}
+    escala = _escala_geometrica_texto(items)
 
     # "SENOR" deliberadamente NO está en esta lista: excluir por subcadena
     # rechazaría también nombres reales de obra/destino que contienen esa
@@ -195,19 +206,19 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         alto = max(etiqueta["h"], candidato["h"])
         diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
         if diferencia_y <= alto * 1.25:
-            if candidato["x1"] >= etiqueta["x2"] - 8:
+            if candidato["x1"] >= etiqueta["x2"] - 8 * escala:
                 distancia = max(0.0, candidato["x1"] - etiqueta["x2"])
-                return distancia / 350 + diferencia_y / (alto * 8)
-            if candidato["x2"] <= etiqueta["x1"] + 8:
+                return distancia / (350 * escala) + diferencia_y / (alto * 8)
+            if candidato["x2"] <= etiqueta["x1"] + 8 * escala:
                 distancia = max(0.0, etiqueta["x1"] - candidato["x2"])
-                return 0.18 + distancia / 350 + diferencia_y / (alto * 8)
+                return 0.18 + distancia / (350 * escala) + diferencia_y / (alto * 8)
         solape_x = max(0.0, min(etiqueta["x2"], candidato["x2"]) - max(etiqueta["x1"], candidato["x1"]))
-        cerca_x = abs(candidato["cx"] - etiqueta["cx"]) <= 180
+        cerca_x = abs(candidato["cx"] - etiqueta["cx"]) <= 180 * escala
         if solape_x > 0 or cerca_x:
-            if 0 < candidato["y1"] - etiqueta["y2"] <= 65:
-                return 0.28 + (candidato["y1"] - etiqueta["y2"]) / 160
-            if 0 < etiqueta["y1"] - candidato["y2"] <= 65:
-                return 0.34 + (etiqueta["y1"] - candidato["y2"]) / 160
+            if 0 < candidato["y1"] - etiqueta["y2"] <= 65 * escala:
+                return 0.28 + (candidato["y1"] - etiqueta["y2"]) / (160 * escala)
+            if 0 < etiqueta["y1"] - candidato["y2"] <= 65 * escala:
+                return 0.34 + (etiqueta["y1"] - candidato["y2"]) / (160 * escala)
         return None
 
     etiquetas_giro = [item for item in items if es_etiqueta_giro(item)]
@@ -267,7 +278,7 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                     for otra in items
                     if otra is not etiqueta and es_etiqueta(otra, campo)
                 ]
-                if otras and min(otras) + 8 < distancia_objetivo:
+                if otras and min(otras) + 8 * escala < distancia_objetivo:
                     continue
                 candidatos.append((puntuacion, item))
 
@@ -278,7 +289,7 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                         continue
                     misma_fila = abs(vecino["cy"] - item["cy"]) <= max(vecino["h"], item["h"])
                     brecha = vecino["x1"] - item["x2"]
-                    if misma_fila and 0 <= brecha <= 28:
+                    if misma_fila and 0 <= brecha <= 28 * escala:
                         decisiones.append((puntuacion - 0.03, f'{item["texto"]} {vecino["texto"]}'.upper()))
 
         if not decisiones:
@@ -371,11 +382,22 @@ def _candidatos_rut_multibloque(fila: List[Dict[str, Any]]) -> List[str]:
                 corrida.append(actual)
                 continue
             if len(corrida) > 1:
-                candidatos.append("".join(item["texto"] for item in corrida))
+                candidatos.extend(_variantes_rut_multibloque(corrida))
             corrida = [actual]
         if len(corrida) > 1:
-            candidatos.append("".join(item["texto"] for item in corrida))
+            candidatos.extend(_variantes_rut_multibloque(corrida))
     return candidatos
+
+
+def _variantes_rut_multibloque(corrida: List[Dict[str, Any]]) -> List[str]:
+    unido = "".join(item["texto"] for item in corrida)
+    variantes = [unido]
+    limpio = re.sub(r"[^0-9Kk]", "", unido).upper()
+    if re.fullmatch(r"\d{7,8}[0-9K]", limpio):
+        reconstruido = f"{limpio[:-1]}-{limpio[-1]}"
+        if validar_rut_chileno(reconstruido).estado == EstadoValidacion.VALIDO:
+            variantes.append(reconstruido)
+    return variantes
 
 
 def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
@@ -390,6 +412,7 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
         return {}
+    escala = _escala_geometrica_texto(items)
 
     etiquetas_cliente = [item for item in items if _es_etiqueta_senor(item["simple"])]
     if not etiquetas_cliente:
@@ -427,7 +450,7 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
                 item for item in items
                 if item is not etiqueta_rut and item is not etiqueta_cliente
                 and abs(item["cy"] - etiqueta_rut["cy"]) <= max(etiqueta_rut["h"], item["h"]) * 1.25
-                and item["x1"] >= etiqueta_rut["x2"] - 8
+                and item["x1"] >= etiqueta_rut["x2"] - 8 * escala
             ]
             candidatos_texto = [item["texto"] for item in fila_valor]
             candidatos_texto.extend(_candidatos_rut_multibloque(fila_valor))
@@ -435,6 +458,16 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
                 candidato = _normalizar_candidato_rut(texto)
                 resultado = validar_rut_chileno(candidato)
                 if resultado.estado == EstadoValidacion.VALIDO:
+                    # `validar_rut_chileno` ya devuelve `.valor` en formato
+                    # canónico (con puntos) sin importar si el candidato de
+                    # entrada los traía -- no hace falta (ni conviene) volver
+                    # a despuntuarlo aquí. Caso real 472593 (PRODALAM SA):
+                    # el candidato original ya traía guion propio ("93772000-9",
+                    # de un fragmento OCR "000-9") y coincidía con el mismo
+                    # patrón que un candidato RECONSTRUIDO por
+                    # `_variantes_rut_multibloque` -- despuntuarlo aquí rompía
+                    # el formato ya establecido en todo el resto del sistema
+                    # sin ninguna necesidad real.
                     candidatos_validos.add(resultado.valor)
 
     if len(candidatos_validos) == 1:
@@ -1084,18 +1117,53 @@ def limpiar_sufijo_rut_pegado(valor: Any) -> str:
     return resto if resto else texto
 
 
+def _misma_fila_geometrica(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """Centro vertical alineado, tolerancia relativa al alto de texto de
+    ambos bloques -- nunca un umbral absoluto. Mismo criterio ya usado
+    para agrupar fragmentos de una misma fila en `_candidatos_rut_
+    multibloque` (ahí con 0.5; aquí con 0.6, un poco más laxo porque el
+    texto de una dirección real puede variar levemente de alto entre
+    palabras del mismo renglón impreso, a diferencia de dígitos de un
+    mismo RUT)."""
+    return abs(a["cy"] - b["cy"]) <= max(a["h"], b["h"]) * 0.6
+
+
+def _caja_union_geometrica(bloques: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Recuadro que envuelve un grupo de bloques ya aceptados como una
+    misma línea -- se usa como ancla para decidir si una línea SIGUIENTE
+    continúa la dirección, en vez de comparar solo contra el último
+    bloque individual (que, cuando la línea tiene varias palabras, puede
+    quedar lejos del margen izquierdo real de la dirección)."""
+    x1 = min(b["x1"] for b in bloques)
+    x2 = max(b["x2"] for b in bloques)
+    y1 = min(b["y1"] for b in bloques)
+    y2 = max(b["y2"] for b in bloques)
+    return {"x1": x1, "x2": x2, "y1": y1, "y2": y2, "cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "h": y2 - y1}
+
+
 def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     """Localiza el valor de DESPACHAR A por posición real en la imagen (no
-    por el orden de lectura lineal de PaddleOCR, que puede intercalar
-    columnas -- ver `_despachar_a_lineal_contaminado`). Nunca acepta como
-    candidato un bloque que sea una etiqueta estructural conocida (PATENTE,
-    RETIRA, RUT, HORA, PESO, FECHA, ...). Soporta una dirección partida en
-    2-3 líneas verticales contiguas (misma columna, sin etiqueta estructural
-    entre medio). Se abstiene ante ausencia de candidato o ambigüedad real
-    entre dos zonas -- nunca elige por cercanía ni por orden OCR."""
+    por el orden de lectura lineal de PaddleOCR/EasyOCR, que puede
+    intercalar columnas -- ver `_despachar_a_lineal_contaminado`). Nunca
+    acepta como candidato un bloque que sea una etiqueta estructural
+    conocida (PATENTE, RETIRA, RUT, HORA, PESO, FECHA, ...).
+
+    Soporta una dirección partida en 2-3 líneas verticales contiguas
+    (misma columna, sin etiqueta estructural entre medio) -- y, DENTRO de
+    cada línea, partida además en varios bloques horizontales contiguos
+    (caso real 472640, Mobile alta resolución: "LAS VIOLETAS" + "55" +
+    "SECTOR" + "LA ESPERANZA" + "PADRE" + "HU", seis cajas OCR separadas
+    para una sola línea impresa -- antes de esto solo se tomaba la
+    primera). La unión horizontal (`_misma_fila_geometrica` + hueco
+    relativo a `escala`) nunca cruza a otra fila ni absorbe una etiqueta
+    estructural o un bloque no nominal -- se detiene ahí, nunca salta un
+    bloque para buscar uno más lejano. Se abstiene ante ausencia de
+    candidato o ambigüedad real entre dos zonas -- nunca elige por
+    cercanía ni por orden OCR."""
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
         return {}
+    escala = _escala_geometrica_texto(items)
 
     def es_etiqueta_despacho(item: Dict[str, Any]) -> bool:
         return item["simple"] == "DESPACHAR A" or item["simple"].startswith("DESPACHAR A ")
@@ -1124,16 +1192,34 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         # dígitos/puntuación (montos, folios, RUT sin etiqueta) no califica.
         return letras > 0 and digitos < letras + 4
 
+    def puede_extender_linea(item: Dict[str, Any]) -> bool:
+        """Igual que `nominal`, pero ADEMÁS admite un bloque puramente
+        numérico CORTO (1-5 dígitos, p. ej. "55" -- un número de casa
+        real) cuando continúa una línea de dirección ya iniciada por
+        texto con letras. Nunca se usa para elegir el candidato INICIAL
+        de la etiqueta (ahí `nominal` sigue exigiendo al menos una letra,
+        para no arrancar la dirección desde un monto/RUT/folio sin
+        etiqueta) -- solo para extender una línea/columna que YA
+        comenzó con texto real. Un número de casa real nunca es una
+        etiqueta estructural, y su longitud corta (<=5 dígitos) lo
+        distingue de un folio, un transporte o un cuerpo de RUT (7-8
+        dígitos) que haya perdido su propia etiqueta."""
+        if nominal(item):
+            return True
+        if es_estructural(item):
+            return False
+        return re.fullmatch(r"\d{1,5}", item["simple"]) is not None
+
     def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
         alto = max(etiqueta["h"], candidato["h"])
         diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
-        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8:
+        if diferencia_y <= alto * 1.35 and candidato["x1"] >= etiqueta["x2"] - 8 * escala:
             distancia = max(0.0, candidato["x1"] - etiqueta["x2"])
-            if distancia <= 350:
-                return distancia / 350 + diferencia_y / (alto * 8)
+            if distancia <= 350 * escala:
+                return distancia / (350 * escala) + diferencia_y / (alto * 8)
         diferencia_vertical = candidato["y1"] - etiqueta["y2"]
-        if abs(candidato["cx"] - etiqueta["cx"]) <= 200 and 0 < diferencia_vertical <= 70:
-            return 0.30 + diferencia_vertical / 160
+        if abs(candidato["cx"] - etiqueta["cx"]) <= 200 * escala and 0 < diferencia_vertical <= 70 * escala:
+            return 0.30 + diferencia_vertical / (160 * escala)
         return None
 
     etiquetas = [item for item in items if es_etiqueta_despacho(item)]
@@ -1152,36 +1238,81 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             continue
         candidatos.sort(key=lambda par: par[0])
         mejor_puntaje, mejor_item = candidatos[0]
-        cadena = [mejor_item]
-        # Continuación multilínea: bloques nominales apilados justo debajo
-        # del primer candidato, en la misma columna, sin cruzar una
-        # etiqueta estructural -- se agregan como parte de la MISMA
-        # dirección (p. ej. calle en una línea, comuna en la siguiente).
-        # Solo bloques estrictamente debajo del candidato inicial, en orden
-        # de aparición -- nunca salta líneas intermedias para "buscar" una
+
+        # Bloque MOBILE ALTA RESOLUCIÓN -- caso real 472640: unir, de
+        # izquierda a derecha y SOLO dentro de la misma fila, los bloques
+        # OCR contiguos que completan la línea del primer candidato antes
+        # de intentar continuar verticalmente. Nunca cruza una etiqueta
+        # estructural ni un bloque no nominal -- se detiene ahí, nunca
+        # salta uno para buscar otro más lejano (mismo criterio que ya
+        # regía la continuación vertical, ahora aplicado también en
+        # horizontal).
+        def _unir_linea_horizontal(inicio: Dict[str, Any]) -> List[Dict[str, Any]]:
+            fila = sorted(
+                (
+                    item for item in items
+                    if item is not etiqueta and item is not inicio
+                    and item["x1"] >= inicio["x1"]
+                    and _misma_fila_geometrica(item, inicio)
+                ),
+                key=lambda item: item["x1"],
+            )
+            linea = [inicio]
+            cursor = inicio
+            for item in fila:
+                if any(item is bloque for bloque in linea):
+                    continue
+                brecha = item["x1"] - cursor["x2"]
+                if brecha > 60 * escala:
+                    break
+                if not puede_extender_linea(item):
+                    break
+                linea.append(item)
+                cursor = item
+            return linea
+
+        primera_linea = _unir_linea_horizontal(mejor_item)
+        cadena = list(primera_linea)
+        caja_linea = _caja_union_geometrica(primera_linea)
+        lineas_usadas = 1
+        # Continuación multilínea: una nueva línea (posiblemente ella
+        # misma unida horizontalmente) apilada justo debajo de la línea
+        # YA reconstruida, en la misma columna, sin cruzar una etiqueta
+        # estructural -- se agrega como parte de la MISMA dirección
+        # (p. ej. calle en una línea, comuna en la siguiente). Se compara
+        # contra el recuadro de la línea COMPLETA (`caja_linea`), nunca
+        # solo contra su último bloque -- una línea ancha (varias palabras
+        # horizontales) puede terminar lejos del margen izquierdo real de
+        # la dirección. Nunca salta líneas intermedias para "buscar" una
         # continuación más abajo: si la línea inmediatamente siguiente no
         # encaja, la cadena se corta ahí.
-        restantes = sorted(
-            (
-                item for item in items
-                if item is not etiqueta and item is not mejor_item
-                and item["y1"] >= mejor_item["y1"]
-            ),
-            key=lambda item: (item["y1"], item["x1"]),
-        )
-        for item in restantes:
-            anterior = cadena[-1]
-            mismo_bloque_x = abs(item["cx"] - anterior["cx"]) <= 220 or (
-                item["x1"] < anterior["x2"] and item["x2"] > anterior["x1"]
+        while lineas_usadas < 3:
+            candidatas_siguiente = sorted(
+                (
+                    item for item in items
+                    if item is not etiqueta and not any(item is bloque for bloque in cadena)
+                    and item["y1"] >= caja_linea["y1"]
+                ),
+                key=lambda item: (item["y1"], item["x1"]),
             )
-            brecha_y = item["y1"] - anterior["y2"]
-            if not mismo_bloque_x or not 0 <= brecha_y <= 45:
+            inicio_siguiente = None
+            for item in candidatas_siguiente:
+                mismo_bloque_x = abs(item["cx"] - caja_linea["cx"]) <= 220 * escala or (
+                    item["x1"] < caja_linea["x2"] and item["x2"] > caja_linea["x1"]
+                )
+                brecha_y = item["y1"] - caja_linea["y2"]
+                if not mismo_bloque_x or not 0 <= brecha_y <= 45 * escala:
+                    break
+                if es_estructural(item) or not nominal(item):
+                    break
+                inicio_siguiente = item
                 break
-            if es_estructural(item) or not nominal(item):
+            if inicio_siguiente is None:
                 break
-            cadena.append(item)
-            if len(cadena) >= 3:
-                break
+            siguiente_linea = _unir_linea_horizontal(inicio_siguiente)
+            cadena.extend(siguiente_linea)
+            caja_linea = _caja_union_geometrica(siguiente_linea)
+            lineas_usadas += 1
         texto_compuesto = re.sub(
             r"\s+", " ", " ".join(bloque["texto"].strip() for bloque in cadena)
         ).strip()

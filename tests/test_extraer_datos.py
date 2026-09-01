@@ -55,6 +55,38 @@ def test_geometria_cliente_a_la_derecha_de_senores():
     assert _extraer_asociaciones_geometricas(bloques)["cliente"] == "ACEROS DEL SUR"
 
 
+def test_asociacion_cliente_es_equivalente_a_distintas_resoluciones():
+    def escena(escala):
+        return [
+            _bloque("SEÑOR(ES)", 20 * escala, 20 * escala, 80 * escala, 18 * escala),
+            _bloque("DSI UNDERGROUND CHILE SPA", 180 * escala, 20 * escala, 210 * escala, 18 * escala),
+        ]
+
+    assert _extraer_asociaciones_geometricas(escena(1))["cliente"] == "DSI UNDERGROUND CHILE SPA"
+    assert _extraer_asociaciones_geometricas(escena(4))["cliente"] == "DSI UNDERGROUND CHILE SPA"
+
+
+def test_rut_multibloque_sin_guion_se_reconstruye_solo_con_dv_valido():
+    base = [
+        _bloque("SEÑOR(ES)", 20, 100, 80),
+        _bloque("R.U.T.", 20, 121, 50),
+    ]
+    valido = base + [
+        _bloque("76", 90, 121, 20), _bloque("083", 112, 121, 28),
+        _bloque("093", 142, 121, 28), _bloque("3", 172, 121, 12),
+    ]
+    invalido = base + [
+        _bloque("76", 90, 121, 20), _bloque("083", 112, 121, 28),
+        _bloque("093", 142, 121, 28), _bloque("4", 172, 121, 12),
+    ]
+
+    # `validar_rut_chileno` siempre devuelve el formato canónico (con
+    # puntos), sin importar si el candidato de entrada los traía -- mismo
+    # formato que ya usa el resto de esta función (ver caso real 472593).
+    assert _extraer_rut_cliente_geometrico(valido) == {"valor": "76.083.093-3"}
+    assert _extraer_rut_cliente_geometrico(invalido) == {}
+
+
 def test_identidad_cliente_recortada_exige_nombre_y_rut_valido_en_borde():
     bloques = [
         _bloque("S)", 0, 100, 13, 15),

@@ -95,6 +95,26 @@ def test_reprocesar_el_mismo_envio_no_duplica_la_fila(tmp_path: Path) -> None:
     assert len(filas) == 1
 
 
+def test_mobile_usa_el_selector_normal_de_proveedor_ocr(tmp_path: Path, monkeypatch) -> None:
+    import atlas_core.mobile as mobile
+
+    repo, envio_id = _recibir(tmp_path)
+    proveedor_configurado = object()
+    observado = {}
+
+    monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda: proveedor_configurado)
+
+    def procesar(ruta, **kwargs):
+        observado.update(kwargs)
+        return {"numero_guia": "555111", "numero_transporte": "0000999888"}
+
+    monkeypatch.setattr(mobile, "procesar_archivo", procesar)
+    procesar_envio_mobile(repo, envio_id)
+
+    assert observado["proveedor"] is proveedor_configurado
+    assert "lector_ocr" not in observado
+
+
 def test_foto_ilegible_es_problema_de_captura_no_incidencia_documental(tmp_path: Path) -> None:
     repo, envio_id = _recibir(tmp_path)
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
@@ -238,7 +258,10 @@ def test_e2e_http_real_con_procesamiento_automatico_y_reintento_sin_duplicar(tmp
         # El procesamiento automático corre en segundo plano (executor de
         # 1 worker) -- se espera a que termine sin que nadie lo dispare a mano.
         registro = None
-        for _ in range(50):
+        # La selección normal puede arrancar el worker PaddleOCR por primera
+        # vez; el contrato sigue siendo asíncrono, pero ese arranque es más
+        # costoso que el fallback EasyOCR histórico de esta prueba.
+        for _ in range(300):
             registro = servidor.repositorio.cargar(envio_id)  # type: ignore[attr-defined]
             if registro["estado"] != "PROCESANDO" and registro["estado"] != "RECIBIDO":
                 break

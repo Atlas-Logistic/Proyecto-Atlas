@@ -19,6 +19,7 @@ from typing import Callable, Mapping
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.decisiones_pendientes import generar_artefacto, regenerar_decisiones_persistidas
 from atlas_core.gestor_viajes import transporte_valido
+from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.procesamiento_masivo import (
     COLUMNAS, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
 )
@@ -326,6 +327,7 @@ def procesar_envio_mobile(
             datos = dict(procesador(imagen))
         else:
             argumentos: dict[str, object] = {}
+            argumentos["proveedor"] = crear_proveedor_ocr()
             if carpeta_catalogos is not None:
                 argumentos["carpeta_catalogos"] = carpeta_catalogos
                 argumentos["recolector_decisiones"] = decisiones_nuevas.extend
