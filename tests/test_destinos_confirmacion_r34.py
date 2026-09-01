@@ -555,11 +555,50 @@ def test_revalidar_y_regenerar_reporte_publica_nuevo_reporte_vigente(tmp_path):
 
 
 def test_revalidar_y_regenerar_reporte_no_hace_nada_si_no_cambio_nada(tmp_path):
-    fila = _fila_csv(motivos_revision_documento="CLIENTE_AUSENTE")  # nada que revalidar
-    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path, filas_csv=[fila])
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
     resultado = revalidar_y_regenerar_reporte(raiz_atlas=raiz, nombre_carpeta_reporte="reporte_no_deberia_existir")
     assert resultado["reporte_regenerado"] is False
     assert not (raiz/"reportes"/"reporte_no_deberia_existir").exists()
+
+
+def test_cambio_efectivo_de_bandeja_regenera_reporte_sin_cambiar_dataset_y_es_idempotente(tmp_path):
+    fila = _fila_csv(
+        numero_transporte="0000900000", cliente="No encontrado", motivos_revision_documento="CLIENTE_AUSENTE",
+        estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION",
+    )
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path, filas_csv=[fila])
+    dataset = actual / "analisis_completo_guias.csv"
+    generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=[],
+        ruta_salida=actual / "decisiones_pendientes.json",
+    )
+    dataset_antes = dataset.read_bytes()
+
+    primera = revalidar_y_regenerar_reporte(
+        raiz_atlas=raiz, nombre_carpeta_reporte="reporte_por_cambio_bandeja",
+    )
+
+    assert dataset.read_bytes() == dataset_antes
+    assert primera["guias_actualizadas"] == []
+    assert primera["bandeja_cambio_efectivo"] is True
+    assert primera["reporte_regenerado"] is True
+    decisiones = _pendientes(actual)
+    assert [d["tipo"] for d in decisiones] == ["CLIENTE_AUSENTE"]
+    viajes = list(csv.DictReader(
+        (raiz / "reportes" / "reporte_por_cambio_bandeja" / "viajes.csv").open(encoding="utf-8-sig"),
+        delimiter=";",
+    ))
+    assert viajes[0]["estado"] == "REQUIERE_REVISION"
+    assert viajes[0]["estado"] != "INCOMPLETO_TECNICO"
+
+    segunda = revalidar_y_regenerar_reporte(
+        raiz_atlas=raiz, nombre_carpeta_reporte="reporte_segunda_pasada",
+    )
+    assert dataset.read_bytes() == dataset_antes
+    assert segunda["guias_actualizadas"] == []
+    assert segunda["bandeja_cambio_efectivo"] is False
+    assert segunda["reporte_regenerado"] is False
+    assert not (raiz / "reportes" / "reporte_segunda_pasada").exists()
 
 
 def test_confirmar_integra_revalidacion_automaticamente_y_reporte_vigente_cambia(tmp_path):

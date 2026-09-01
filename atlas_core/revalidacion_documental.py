@@ -2729,6 +2729,18 @@ def revalidar_origen_por_eliminacion_categoria_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+def _firma_efectiva_bandeja(ruta: Path) -> tuple[str, ...] | None:
+    """Firma semántica de las decisiones, sin metadatos volátiles del artefacto."""
+    try:
+        artefacto = json.loads(ruta.read_text(encoding="utf-8"))
+        decisiones = artefacto.get("decisiones", [])
+        if not isinstance(decisiones, list):
+            return None
+        return tuple(sorted(json.dumps(d, ensure_ascii=False, sort_keys=True) for d in decisiones))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
 ) -> dict[str, object]:
@@ -2744,6 +2756,8 @@ def revalidar_y_regenerar_reporte(
     actual = raiz / "operacion" / "actual"
     catalogos = raiz / "catalogos_privados"
     dataset = actual / "analisis_completo_guias.csv"
+    ruta_decisiones_inicial = actual / "decisiones_pendientes.json"
+    firma_bandeja_inicial = _firma_efectiva_bandeja(ruta_decisiones_inicial)
 
     # Bloque R13 -- caso real 472238/472239 (TORRES OCARANZA LTDA): corre
     # ANTES que `revalidar_obra_destino_sin_ocr` a propósito -- si esta
@@ -2990,7 +3004,11 @@ def revalidar_y_regenerar_reporte(
             resultado_revalidacion["bandeja_republicada"] = True
             resultado_revalidacion["decisiones_candidatas_descubiertas"] = len(candidatas_nuevas)
 
-    if not guias_actualizadas:
+    firma_bandeja_final = _firma_efectiva_bandeja(ruta_decisiones)
+    bandeja_cambio_efectivo = firma_bandeja_final != firma_bandeja_inicial
+    resultado_revalidacion["bandeja_cambio_efectivo"] = bandeja_cambio_efectivo
+
+    if not guias_actualizadas and not bandeja_cambio_efectivo:
         return {**resultado_revalidacion, "reporte_regenerado": False}
 
     from atlas_core.almacenamiento_portable import escribir_estado_operacion
