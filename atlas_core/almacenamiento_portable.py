@@ -167,6 +167,7 @@ def escribir_estado_operacion(
     origen: str | None = None,
     version_estado_derivado: int | None = None,
     dataset_sha256: str | None = None,
+    huella_filas_dataset: str | None = None,
     raiz: Path | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> Path | None:
@@ -220,6 +221,22 @@ def escribir_estado_operacion(
     # seguía mostrando el destino/ruta de antes de la decisión).
     if dataset_sha256 is not None:
         contenido["dataset_sha256"] = dataset_sha256
+    # Hallazgo Codex (diff Mobile -> reporte Desktop, 2da ronda) -- campo
+    # SEPARADO y ADITIVO, nunca reemplaza ni reinterpreta `dataset_sha256`
+    # de arriba (que sigue siendo, exactamente igual que siempre, el hash
+    # binario de los BYTES crudos del archivo -- `reconciliar_estado_
+    # derivado` y cualquier consumidor histórico lo siguen leyendo tal
+    # cual, sin ningún cambio de formato). Esta huella es una
+    # comparación SEMÁNTICA por filas (vía `_leer_filas`, que tolera una
+    # línea en blanco inerte al final igual que el resto de las
+    # revalidaciones) que sólo usa `revalidar_y_regenerar_reporte` para
+    # decidir si de verdad hace falta regenerar -- un manifiesto legacy
+    # que nunca pasó por esta función (p. ej. escrito sólo por
+    # `reconciliar_estado_derivado`) simplemente no trae esta clave, y
+    # ese caso se sigue resolviendo con el `dataset_sha256` histórico
+    # (ver `revalidacion_documental.revalidar_y_regenerar_reporte`).
+    if huella_filas_dataset is not None:
+        contenido["huella_filas_dataset"] = huella_filas_dataset
     ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
     escribir_json_atomico(ruta_manifiesto, contenido)
     return ruta_manifiesto

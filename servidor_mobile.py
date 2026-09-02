@@ -20,6 +20,7 @@ from atlas_core.mobile import (
     AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
     procesar_envio_mobile, revalidar_asociacion_mobile_sin_ocr,
 )
+from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
 
 
 MAX_PAYLOAD_BYTES = 30 * 1024 * 1024  # ver atlas_core.mobile.MAX_IMAGEN_BYTES -- mismo motivo/margen.
@@ -75,10 +76,95 @@ def _log_envio_debug(mensaje: str) -> None:
 # Doc A (que se procesó primero, sin nada todavía con qué asociarse)
 # termina asociado igual que Doc B apenas éste se persiste -- sin volver
 # a correr OCR, sin recrear ningún envío.
+#
+# Bloque MOBILE -> DESKTOP (fix real, caso real 472623/472624): causa
+# raíz confirmada -- ni `procesar_envio_mobile` ni `revalidar_asociacion_
+# mobile_sin_ocr` regeneran nunca el reporte/`estado_operacion.json` que
+# Desktop realmente lee; la fila ya queda bien escrita en el dataset,
+# pero Desktop seguía mostrando un reporte viejo hasta que algún proceso
+# EXTERNO (sin relación con Mobile) volviera a reconciliar. Se cierra
+# reusando el reconciliador general YA EXISTENTE (`revalidar_y_
+# regenerar_reporte`, el mismo que usa el resto de Atlas tras cualquier
+# mutación real de datos -- nunca un segundo reconciliador paralelo).
 def _procesar_y_revalidar(repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path, carpeta_catalogos) -> None:
     procesar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
     if dataset:
+        _revalidar_asociacion_diagnosticable(repositorio, envio_id, dataset=dataset)
+    # Hallazgo Codex #2 -- antes, un fallo de la línea de arriba (excepción
+    # no capturada) cortaba la cadena acá mismo y esta llamada nunca
+    # corría: el documento ya podía estar correctamente persistido (el
+    # paso de arriba sólo revalida, nunca reescribe la fila del dataset)
+    # y aun así quedaba invisible en Desktop porque el reporte jamás se
+    # intentaba regenerar. Ahora corre SIEMPRE, incluso si la revalidación
+    # de asociación falló -- con lo que el documento ya dejó persistido.
+    _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+
+
+def _revalidar_asociacion_diagnosticable(repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path) -> None:
+    """Envoltorio de `revalidar_asociacion_mobile_sin_ocr` que nunca deja
+    que un fallo ahí (p. ej. catálogo ilegible) se propague y corte la
+    cadena de `_procesar_y_revalidar` antes de la reconciliación del
+    reporte -- el documento de este envío ya quedó persistido por
+    `procesar_envio_mobile` (paso anterior); esta revalidación es sólo un
+    refinamiento posterior sin OCR, no una condición para que el reporte
+    se regenere. El fallo se registra diagnosticable en un campo APARTE
+    (`revalidacion_asociacion_post_ocr`) del envío que se estaba
+    procesando -- nunca en `estado`/`error` (que siguen describiendo
+    únicamente el resultado de procesar el documento), y nunca duplica ni
+    reprocesa nada."""
+    try:
         revalidar_asociacion_mobile_sin_ocr(repositorio, dataset=dataset)
+    except Exception as error:  # nunca debe impedir la reconciliación del reporte que sigue.
+        _log_envio_debug(
+            f"envio_id={envio_id!r} ERROR revalidando asociación post-OCR: {type(error).__name__}: {error}"
+        )
+        try:
+            registro = repositorio.cargar(envio_id)
+            registro["revalidacion_asociacion_post_ocr"] = {
+                "estado": "ERROR",
+                "error": f"{type(error).__name__}: {error}",
+                "intentado_en": datetime.now(timezone.utc).isoformat(),
+            }
+            repositorio.guardar(envio_id, registro)
+        except Exception:
+            pass  # el registro del intento es best-effort; nunca debe volver a cortar el flujo.
+
+
+def _regenerar_reporte_tras_envio_mobile(repositorio: RepositorioEnviosMobile, envio_id: str) -> None:
+    """Corre SIEMPRE en el mismo worker de 1 hilo en segundo plano --
+    el 202 de `do_POST` ya se respondió mucho antes de que este código
+    exista; nunca bloquea la subida esperando OCR/B1/reporte.
+    `revalidar_y_regenerar_reporte` ya es idempotente por diseño (sólo
+    reescribe el reporte si algo cambió de verdad) -- no hace falta
+    ninguna lógica nueva de idempotencia acá, sólo invocarlo.
+
+    Un fallo acá (p. ej. catálogos ilegibles, proveedor de rutas caído)
+    NUNCA debe borrar ni duplicar el envío ya procesado -- se captura y
+    se registra en un campo APARTE (`reconciliacion_reporte`), nunca en
+    `estado`/`error` (que siguen describiendo únicamente el resultado
+    de procesar el DOCUMENTO, no el de reconciliar el reporte) -- queda
+    diagnosticable en el propio envio.json sin adivinar."""
+    sello = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    intento: dict[str, object] = {"intentado_en": datetime.now(timezone.utc).isoformat()}
+    try:
+        resultado = revalidar_y_regenerar_reporte(
+            raiz_atlas=repositorio.raiz_atlas, nombre_carpeta_reporte=f"reporte_mobile_{sello}",
+        )
+        intento.update({
+            "estado": "OK",
+            "reporte_regenerado": bool(resultado.get("reporte_regenerado")),
+            "reporte_vigente": resultado.get("reporte_vigente"),
+        })
+        _log_envio_debug(
+            f"envio_id={envio_id!r} reconciliación de reporte OK -- "
+            f"reporte_regenerado={resultado.get('reporte_regenerado')!r}"
+        )
+    except Exception as error:  # nunca debe perder/duplicar el envío ya procesado.
+        intento.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
+        _log_envio_debug(f"envio_id={envio_id!r} ERROR reconciliando reporte: {type(error).__name__}: {error}")
+    registro = repositorio.cargar(envio_id)
+    registro["reconciliacion_reporte"] = intento
+    repositorio.guardar(envio_id, registro)
 
 
 def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: AutenticadorMobile, procesar: bool = True, origen_permitido: str = "*") -> ThreadingHTTPServer:

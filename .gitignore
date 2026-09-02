@@ -39,3 +39,13 @@ resultado_pruebas.txt
 # versionan, los resultados de cada corrida real no.
 experimentos_atlas_ia/resultados/*
 !experimentos_atlas_ia/resultados/.gitkeep
+
+# Hallazgo Codex #6 (diff Mobile -> reporte Desktop) -- certificados/
+# claves TLS temporales (p. ej. atlas-mobile-cert.pem/atlas-mobile-
+# key.pem, del intento directo de HTTPS ya abandonado -- ver
+# servidor_mobile.py --cert/--key y Atlas-Conductores-Mobile/src/
+# config.js, bloque MOBILE LOGIN REAL) NUNCA deben poder commitearse por
+# accidente. NUNCA commitear una clave privada.
+*.pem
+*.key
+*.crt

@@ -20,6 +20,7 @@ byte por byte igual.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -67,7 +68,7 @@ from atlas_core.procesamiento_masivo import (
     _normalizar,
     _parsear_fecha_dd_mm_yyyy,
 )
-from atlas_core.reporte_viajes import generar_reporte_viajes
+from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.rutas.origen_evidencia import (
     MOTIVO_CONTRADICCION_OPERACIONAL,
@@ -199,6 +200,44 @@ def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
                 "El dataset tiene un esquema incompatible; se esperaba el encabezado oficial."
             )
         return list(lector)
+
+
+def _huella_contenido_dataset(ruta_csv: Path) -> str | None:
+    """Huella (sha256) SEMÁNTICA de las FILAS reales del dataset -- usa el
+    mismo `_leer_filas` que ya usa cada revalidación de esta función, así
+    que tolera exactamente lo mismo que ellas (p. ej. una línea en blanco
+    al final del archivo, que `csv.DictReader` simplemente omite). A
+    diferencia de `dataset_sha256` (hash BINARIO histórico de los bytes
+    crudos del archivo -- ver Bloque R2.5 en `escribir_estado_operacion`,
+    NUNCA se toca ni se reinterpreta acá), un artefacto inerte al final
+    (sin fila real) no cuenta como cambio para ESTA huella -- sólo una
+    fila agregada, quitada o con contenido modificado lo hace. Se graba
+    en un campo APARTE (`huella_filas_dataset`), nunca en `dataset_sha256`
+    -- evita alternar dos formatos distintos bajo la misma clave.
+    ``None`` si el archivo no existe o tiene un esquema incompatible
+    (mismos casos en que el resto de esta función tampoco puede leerlo)."""
+    if not ruta_csv.is_file():
+        return None
+    try:
+        filas = _leer_filas(ruta_csv)
+    except ValueError:
+        return None
+    return hashlib.sha256(repr(filas).encode("utf-8")).hexdigest()
+
+
+def _reporte_vigente_valido(raiz: Path, estado: dict | None) -> bool:
+    """``True`` si `estado` (de `leer_estado_operacion`) describe un
+    reporte previo que de verdad existe en disco -- Hallazgo Codex #3
+    (2da ronda): un `dataset_sha256`/`huella_filas_dataset` grabado no
+    basta por sí solo si el `reporte_vigente` al que apuntan ya no está
+    (carpeta borrada/movida); en ese caso no hay nada "previo" contra qué
+    comparar, así que nunca se fuerza una regeneración sólo por eso."""
+    if not estado or not estado.get("dataset_sha256"):
+        return False
+    reporte_vigente = estado.get("reporte_vigente")
+    if not reporte_vigente:
+        return False
+    return (raiz / reporte_vigente / "viajes.csv").is_file()
 
 
 def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
@@ -2759,6 +2798,50 @@ def revalidar_y_regenerar_reporte(
     ruta_decisiones_inicial = actual / "decisiones_pendientes.json"
     firma_bandeja_inicial = _firma_efectiva_bandeja(ruta_decisiones_inicial)
 
+    # Hallazgo Codex (diff Mobile -> reporte Desktop) -- un envío Mobile
+    # nuevo que agrega una fila LIMPIA al dataset (sin motivo que ninguna
+    # revalidación de abajo necesite tocar, sin cambio de bandeja) no
+    # movía ni `guias_actualizadas` ni `bandeja_cambio_efectivo`: el
+    # reporte simplemente nunca se regeneraba y esa guía quedaba invisible
+    # en Desktop pese a estar ya persistida correctamente.
+    #
+    # Corrección Codex (2da ronda) -- `dataset_sha256` es histórico
+    # (hash BINARIO de los bytes crudos del archivo, el mismo que ya
+    # escriben/leen `estado_operacion`/`reconciliar_estado_derivado`) y
+    # NUNCA se reinterpreta acá; se sigue leyendo/escribiendo tal cual,
+    # sin alternar formatos. La comparación por FILAS reales
+    # (`_huella_contenido_dataset`, tolera una línea en blanco inerte al
+    # final -- a diferencia del hash crudo) vive en un campo APARTE
+    # (`huella_filas_dataset`, ver Bloque R2.5 en `escribir_estado_
+    # operacion`) que sólo esta función conoce -- nunca un segundo
+    # reconciliador paralelo, sólo un campo adicional del mismo
+    # manifiesto ya existente.
+    #
+    # Un manifiesto LEGACY (p. ej. escrito únicamente por `reconciliar_
+    # estado_derivado`, que nunca conoció `huella_filas_dataset`) no trae
+    # esa clave -- para ese caso se cae de vuelta al `dataset_sha256`
+    # histórico, exactamente el mismo criterio de siempre, sin forzar una
+    # regeneración falsa sólo por la migración a este código. Y si nunca
+    # hubo NINGÚN reporte previo válido en disco, tampoco hay nada contra
+    # qué comparar -- ese caso lo siguen cubriendo únicamente
+    # `guias_actualizadas`/`bandeja_cambio_efectivo`, como siempre (nunca
+    # fuerza una primera regeneración porque sí).
+    from atlas_core.almacenamiento_portable import escribir_estado_operacion, leer_estado_operacion
+
+    estado_previo = leer_estado_operacion(raiz=raiz)
+    reporte_previo_valido = _reporte_vigente_valido(raiz, estado_previo)
+    dataset_sha256_previo = estado_previo.get("dataset_sha256") if estado_previo else None
+    huella_filas_previa = estado_previo.get("huella_filas_dataset") if estado_previo else None
+    dataset_sha256_inicial = _sha256_archivo(dataset) if dataset.is_file() else None
+    huella_filas_inicial = _huella_contenido_dataset(dataset)
+
+    if not reporte_previo_valido:
+        dataset_incorporo_cambios = False
+    elif huella_filas_previa is not None:
+        dataset_incorporo_cambios = huella_filas_inicial != huella_filas_previa
+    else:
+        dataset_incorporo_cambios = dataset_sha256_inicial != dataset_sha256_previo
+
     # Bloque R13 -- caso real 472238/472239 (TORRES OCARANZA LTDA): corre
     # ANTES que `revalidar_obra_destino_sin_ocr` a propósito -- si esta
     # rellena `cliente` desde `obra_destino` en esta misma pasada, la
@@ -2913,6 +2996,7 @@ def revalidar_y_regenerar_reporte(
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
         "guias_actualizadas": guias_actualizadas,
+        "dataset_incorporo_cambios": dataset_incorporo_cambios,
         "obra_destino": resultado_obra_destino,
         "patente": resultado_patente,
         "cliente": resultado_cliente,
@@ -3008,20 +3092,31 @@ def revalidar_y_regenerar_reporte(
     bandeja_cambio_efectivo = firma_bandeja_final != firma_bandeja_inicial
     resultado_revalidacion["bandeja_cambio_efectivo"] = bandeja_cambio_efectivo
 
-    if not guias_actualizadas and not bandeja_cambio_efectivo:
+    if not guias_actualizadas and not bandeja_cambio_efectivo and not dataset_incorporo_cambios:
         return {**resultado_revalidacion, "reporte_regenerado": False}
-
-    from atlas_core.almacenamiento_portable import escribir_estado_operacion
 
     salida = raiz / "reportes" / nombre_carpeta_reporte
     kwargs = {"carpeta_catalogos": catalogos, "ruta_ledger": actual / "decisiones_aplicadas.json"}
     if reloj is not None:
         kwargs["reloj"] = reloj
     manifest = generar_reporte_viajes(dataset, salida, **kwargs)
+    # Se graban AMBAS huellas vigentes del dataset (post-revalidaciones de
+    # esta misma pasada, que pueden haberlo modificado) para que la
+    # PRÓXIMA corrida tenga un punto de comparación correcto y la
+    # detección de arriba siga siendo idempotente (una corrida sin
+    # cambios reales no vuelve a regenerar): `dataset_sha256` con el
+    # mismo hash binario histórico de siempre (compatible con
+    # `reconciliar_estado_derivado` y cualquier otro consumidor
+    # existente) y `huella_filas_dataset`, aparte, con la huella
+    # semántica por filas que usa esta función.
+    dataset_sha256_final = _sha256_archivo(dataset) if dataset.is_file() else None
+    huella_filas_final = _huella_contenido_dataset(dataset)
     escribir_estado_operacion(
         reporte_vigente=salida,
         dataset_operacional=dataset,
         decisiones_pendientes=(ruta_decisiones if ruta_decisiones.is_file() else None),
+        dataset_sha256=dataset_sha256_final,
+        huella_filas_dataset=huella_filas_final,
         raiz=raiz,
     )
     return {**resultado_revalidacion, "reporte_regenerado": True, "reporte_vigente": str(salida)}
