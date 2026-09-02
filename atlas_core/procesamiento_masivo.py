@@ -1143,92 +1143,155 @@ def procesar_archivo(
         )
     ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
     if campos_ausentes:
+        # Hallazgo REVISIÓN DE ATLAS (clase EXTRACCIÓN/CORROBORACIÓN, caso
+        # real 472624 -- RUT del cliente): antes, los ~6 intentos de
+        # recuperación geométrica de abajo (cliente/obra destino, RUT
+        # cliente, chofer, RUT chofer, transporte, patentes) compartían UN
+        # solo try/except -- cada uno ya es independiente y se abstiene
+        # solo ante ambigüedad (nunca inventa), pero una excepción en
+        # CUALQUIERA de ellos (p. ej. asociación geométrica de cliente/obra
+        # destino) abortaba el bloque completo y silenciaba TODOS los
+        # demás, incluso los que nada tenían que ver con la causa del
+        # fallo. `_extraer_rut_cliente_geometrico` ya localiza
+        # correctamente el RUT en la zona SEÑOR(ES)/R.U.T. cuando se lo
+        # invoca solo -- el síntoma real era que a veces nunca llegaba a
+        # intentarlo. Ahora cada intento tiene su propio try/except: un
+        # fallo en uno nunca vuelve a impedir que los demás, totalmente
+        # independientes, se ejecuten.
         try:
             bloques_guia = _leer_bloques()
-            asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
-            if datos.get("cliente") in {None, "", "No encontrado"}:
-                identidad_recortada = _extraer_identidad_cliente_recortada_geometrica(
-                    bloques_guia
+        except Exception as exc:
+            logger.warning("Lectura de bloques geométricos omitida: %s: %s", type(exc).__name__, exc)
+            bloques_guia = None
+
+        if bloques_guia is not None:
+            # Hallazgo Codex (2da ronda, Revisión de Atlas) -- el aislamiento
+            # anterior seguía incompleto: `_extraer_asociaciones_geometricas`
+            # y `_extraer_identidad_cliente_recortada_geometrica` compartían
+            # un mismo try/except -- si `asociaciones` ya se había obtenido
+            # con éxito pero la identidad recortada fallaba DESPUÉS, la
+            # excepción cortaba antes de llegar al `for campo in (...)` que
+            # aplica esas asociaciones ya válidas, descartándolas sin
+            # necesidad. Cada paso independiente tiene ahora su propio
+            # try/except, y la aplicación de `asociaciones` corre SIEMPRE
+            # (con `asociaciones = {}` -- abstención segura -- si ni
+            # siquiera esa primera extracción tuvo éxito), nunca condicionada
+            # a que un paso opcional posterior también haya funcionado.
+            try:
+                asociaciones = _extraer_asociaciones_geometricas(bloques_guia)
+            except Exception as exc:
+                logger.warning(
+                    "Asociación geométrica cliente/obra destino omitida: %s: %s", type(exc).__name__, exc
                 )
-                if identidad_recortada:
-                    asociaciones["cliente"] = identidad_recortada["cliente"]
-                    if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
-                        datos["RUT del cliente"] = identidad_recortada["rut"]
-                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                asociaciones = {}
+
+            if datos.get("cliente") in {None, "", "No encontrado"}:
+                try:
+                    identidad_recortada = _extraer_identidad_cliente_recortada_geometrica(
+                        bloques_guia
+                    )
+                    if identidad_recortada:
+                        asociaciones["cliente"] = identidad_recortada["cliente"]
+                        if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
+                            datos["RUT del cliente"] = identidad_recortada["rut"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                except Exception as exc:
+                    logger.warning(
+                        "Identidad de cliente recortada geométrica omitida: %s: %s", type(exc).__name__, exc
+                    )
+
             for campo in ("cliente", "obra destino"):
                 if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
                     datos[campo] = asociaciones[campo]
                     metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
                     campos_geometricos_sin_corroborar.add(campo)
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
-            if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
-                decision_rut_cliente = _extraer_rut_cliente_geometrico(bloques_guia)
-                if decision_rut_cliente.get("valor"):
-                    datos["RUT del cliente"] = decision_rut_cliente["valor"]
-                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
-                    logger.info("RUT del cliente recuperado mediante rut-cliente-geometrico-conservador-v1")
-            chofer_actual = datos.get("chofer", "No encontrado")
-            if chofer_actual in {None, "", "No encontrado"} or _chofer_lineal_contaminado(chofer_actual):
-                decision_chofer = _extraer_chofer_geometrico(bloques_guia)
-                if decision_chofer.get("valor"):
-                    datos["chofer"] = decision_chofer["valor"]
-                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
-                    chofer_geometrico = True
-                    logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
-            rut_chofer_actual = str(datos.get("RUT del chofer", "No encontrado"))
-            if rut_chofer_actual in {"", "No encontrado"}:
-                decision_rut_chofer = _extraer_rut_chofer_geometrico(bloques_guia)
-                if decision_rut_chofer.get("valor"):
-                    datos["RUT del chofer"] = decision_rut_chofer["valor"]
-                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
-                    logger.info("rut_chofer recuperado mediante rut-chofer-geometrico-conservador-v1")
-            transporte_actual = str(datos.get("número de transporte", "No encontrado"))
-            if not re.fullmatch(r"\d{10}", transporte_actual):
-                decision_transporte = _extraer_transporte_geometrico(
-                    bloques_guia, incluir_traza=True
-                )
-                if decision_transporte.get("valor"):
-                    requiere_focal = bool(decision_transporte.get("corregido")) or float(
-                        decision_transporte.get("confianza", 0.0)
-                    ) < 0.65
-                    if requiere_focal:
-                        evidencia_focal = _leer_focal(
-                            decision_transporte["caja"], ALLOWLIST_TRANSPORTE, _leer_transporte_focal
-                        )
-                        consenso = _consensuar_transporte_focal(
-                            evidencia_focal["lecturas"],
-                            str(decision_transporte.get("texto_global", "")),
-                        )
-                        if consenso.get("valor"):
-                            datos["número de transporte"] = consenso["valor"]
-                            # Corroborado por diseño: _consensuar_transporte_focal
-                            # exige >=2 lecturas focales concordantes con
-                            # confianza suficiente (ver su propio umbral) --
-                            # nunca acepta una lectura focal aislada. No
-                            # requiere un motivo de revisión adicional.
-                            metodos_documento.add(MetodoObtencionDocumento.CORREGIDO.value)
-                            metodos_documento.add(MetodoObtencionDocumento.FOCAL.value)
-                            logger.info("numero_transporte recuperado mediante consenso-focal-v1")
-                    else:
-                        datos["número de transporte"] = decision_transporte["valor"]
+
+            try:
+                if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
+                    decision_rut_cliente = _extraer_rut_cliente_geometrico(bloques_guia)
+                    if decision_rut_cliente.get("valor"):
+                        datos["RUT del cliente"] = decision_rut_cliente["valor"]
                         metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
-                        logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
-            patente_tracto_actual = str(datos.get("patente del tracto", "No encontrado"))
-            patente_carro_actual = str(datos.get("patente del carro", "No encontrado"))
-            if patente_tracto_actual == "No encontrado" or patente_carro_actual == "No encontrado":
-                decision_patentes = _extraer_patentes_geometrico(bloques_guia)
-                if patente_tracto_actual == "No encontrado" and decision_patentes.get("tracto"):
-                    datos["patente del tracto"] = decision_patentes["tracto"]
-                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
-                    patentes_geometricas_sin_homologar.add("patente del tracto")
-                    logger.info("patente_tracto recuperado mediante patentes-geometrico-conservador-v1")
-                if patente_carro_actual == "No encontrado" and decision_patentes.get("carro"):
-                    datos["patente del carro"] = decision_patentes["carro"]
-                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
-                    patentes_geometricas_sin_homologar.add("patente del carro")
-                    logger.info("patente_carro recuperado mediante patentes-geometrico-conservador-v1")
-        except Exception as exc:
-            logger.warning("Asociación geométrica omitida: %s: %s", type(exc).__name__, exc)
+                        logger.info("RUT del cliente recuperado mediante rut-cliente-geometrico-conservador-v1")
+            except Exception as exc:
+                logger.warning("RUT del cliente geométrico omitido: %s: %s", type(exc).__name__, exc)
+
+            try:
+                chofer_actual = datos.get("chofer", "No encontrado")
+                if chofer_actual in {None, "", "No encontrado"} or _chofer_lineal_contaminado(chofer_actual):
+                    decision_chofer = _extraer_chofer_geometrico(bloques_guia)
+                    if decision_chofer.get("valor"):
+                        datos["chofer"] = decision_chofer["valor"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                        chofer_geometrico = True
+                        logger.info("chofer recuperado mediante asociacion-geometrica-conservadora-v1")
+            except Exception as exc:
+                logger.warning("Chofer geométrico omitido: %s: %s", type(exc).__name__, exc)
+
+            try:
+                rut_chofer_actual = str(datos.get("RUT del chofer", "No encontrado"))
+                if rut_chofer_actual in {"", "No encontrado"}:
+                    decision_rut_chofer = _extraer_rut_chofer_geometrico(bloques_guia)
+                    if decision_rut_chofer.get("valor"):
+                        datos["RUT del chofer"] = decision_rut_chofer["valor"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                        logger.info("rut_chofer recuperado mediante rut-chofer-geometrico-conservador-v1")
+            except Exception as exc:
+                logger.warning("RUT del chofer geométrico omitido: %s: %s", type(exc).__name__, exc)
+
+            try:
+                transporte_actual = str(datos.get("número de transporte", "No encontrado"))
+                if not re.fullmatch(r"\d{10}", transporte_actual):
+                    decision_transporte = _extraer_transporte_geometrico(
+                        bloques_guia, incluir_traza=True
+                    )
+                    if decision_transporte.get("valor"):
+                        requiere_focal = bool(decision_transporte.get("corregido")) or float(
+                            decision_transporte.get("confianza", 0.0)
+                        ) < 0.65
+                        if requiere_focal:
+                            evidencia_focal = _leer_focal(
+                                decision_transporte["caja"], ALLOWLIST_TRANSPORTE, _leer_transporte_focal
+                            )
+                            consenso = _consensuar_transporte_focal(
+                                evidencia_focal["lecturas"],
+                                str(decision_transporte.get("texto_global", "")),
+                            )
+                            if consenso.get("valor"):
+                                datos["número de transporte"] = consenso["valor"]
+                                # Corroborado por diseño: _consensuar_transporte_focal
+                                # exige >=2 lecturas focales concordantes con
+                                # confianza suficiente (ver su propio umbral) --
+                                # nunca acepta una lectura focal aislada. No
+                                # requiere un motivo de revisión adicional.
+                                metodos_documento.add(MetodoObtencionDocumento.CORREGIDO.value)
+                                metodos_documento.add(MetodoObtencionDocumento.FOCAL.value)
+                                logger.info("numero_transporte recuperado mediante consenso-focal-v1")
+                        else:
+                            datos["número de transporte"] = decision_transporte["valor"]
+                            metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                            logger.info("numero_transporte recuperado mediante transporte-contextual-numerico-v1")
+            except Exception as exc:
+                logger.warning("Número de transporte geométrico omitido: %s: %s", type(exc).__name__, exc)
+
+            try:
+                patente_tracto_actual = str(datos.get("patente del tracto", "No encontrado"))
+                patente_carro_actual = str(datos.get("patente del carro", "No encontrado"))
+                if patente_tracto_actual == "No encontrado" or patente_carro_actual == "No encontrado":
+                    decision_patentes = _extraer_patentes_geometrico(bloques_guia)
+                    if patente_tracto_actual == "No encontrado" and decision_patentes.get("tracto"):
+                        datos["patente del tracto"] = decision_patentes["tracto"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                        patentes_geometricas_sin_homologar.add("patente del tracto")
+                        logger.info("patente_tracto recuperado mediante patentes-geometrico-conservador-v1")
+                    if patente_carro_actual == "No encontrado" and decision_patentes.get("carro"):
+                        datos["patente del carro"] = decision_patentes["carro"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                        patentes_geometricas_sin_homologar.add("patente del carro")
+                        logger.info("patente_carro recuperado mediante patentes-geometrico-conservador-v1")
+            except Exception as exc:
+                logger.warning("Patentes geométricas omitidas: %s: %s", type(exc).__name__, exc)
 
     # Bloque ESTADOS S2.2 -- caso real guía 383295: `enriquecer_datos_con_catalogos`
     # puede reemplazar cliente/chofer/obra_destino contra los catálogos
@@ -2773,6 +2836,27 @@ def escalar_resultado_ia_en_memoria(
             motivo not in MOTIVOS_NO_BLOQUEANTES for motivo in motivos
         ) else "OK"
         fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+    # Hallazgo REVISIÓN DE ATLAS (clase EXTRACCIÓN/CORROBORACIÓN, casos
+    # reales 472624/472623 -- decisión ORIGEN_NO_CONFIRMADO duplicada y
+    # "guía original no disponible"): `"__mobile_actual__"` es un
+    # identificador puramente INTERNO/transitorio -- sólo existe para que
+    # `_ejecutar_ia_operacional` sepa cuál fila del CSV temporal de abajo
+    # es "la actual" cuando Mobile aún no conoce el `archivo` real (a
+    # diferencia del lote, que ya trae nombres de archivo reales antes de
+    # llegar aquí). Antes, ese placeholder se filtraba tal cual en
+    # `salida` (el valor de retorno) -- de ahí terminaba en
+    # `envio.json.datos_ocr.archivo` Y en `documento.archivo` de cualquier
+    # decisión detectada con este `datos` en memoria (ver
+    # `mobile.procesar_envio_mobile`). Esa misma decisión, detectada MÁS
+    # TARDE contra la fila YA PERSISTIDA (con el `archivo` real), traía un
+    # `documento.archivo` distinto -- mismo motivo lógico, `decision_id`
+    # distinto -- duplicado en Revisión de Atlas, y la tarjeta con el
+    # placeholder nunca podía resolver "ver evidencia" (no es una ruta
+    # real). Se limpia acá, en el único lugar que conoce cuál de los dos
+    # es real: si `archivo` no venía ya poblado en la entrada, nunca debe
+    # salir poblado con el placeholder -- se restaura vacío antes de
+    # devolver, exactamente como habría quedado sin este bloque.
+    archivo_original = str(datos_pre_b1.get("archivo") or "")
     fila["archivo"] = fila.get("archivo") or "__mobile_actual__"
     filas = [{columna: str(f.get(columna, "")) for columna in COLUMNAS} for f in historial]
     filas.append(fila)
@@ -2787,6 +2871,8 @@ def escalar_resultado_ia_en_memoria(
         resumen = _ejecutar_ia_operacional(ruta, {fila["archivo"]}, orquestador, carpeta_catalogos)
         with ruta.open(newline="", encoding="utf-8-sig") as archivo:
             salida = list(csv.DictReader(archivo, delimiter=";"))[-1]
+    if not archivo_original:
+        salida["archivo"] = ""
     return salida, resumen
 
 

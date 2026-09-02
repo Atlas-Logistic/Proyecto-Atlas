@@ -76,14 +76,32 @@ def _tokens_encabezado_origen(texto: str) -> list[str]:
     tolerante a ruido OCR de "CASA MATRIZ" o de "SUCURSAL" -- lo que
     aparezca primero. Nunca infiere que "no hay nada antes" signifique
     buscar más abajo: sin texto utilizable antes de cualquiera de esos
-    dos marcadores, no hay encabezado de origen que evaluar."""
+    dos marcadores, no hay encabezado de origen que evaluar.
+
+    Hallazgo REVISIÓN DE ATLAS (caso real 472624 -- guía AZA, "CASA
+    MATRIZ PLANTA RENCA" impreso igual que en 472647/472648 arriba):
+    `"MATRIZ"` ya no se exige INMEDIATAMENTE después de `"CASA"` en el
+    texto de página completa (`textos` unido) -- se busca dentro de una
+    ventana corta de los tokens siguientes. `textos` llega en el ORDEN
+    que devuelve el proveedor OCR por bloque, no necesariamente en orden
+    de lectura visual estricto; un bloque de ruido intercalado entre
+    "CASA" y "MATRIZ" (p. ej. una leyenda/logo superpuesto en esa misma
+    zona del membrete) bastaba para que la adyacencia exacta nunca se
+    detectara -- "MATRIZ" (y todo lo que sigue, "PLANTA RENCA" incluido)
+    quedaba entonces DENTRO del encabezado evaluable en vez de excluido.
+    Ensanchar la ventana sólo puede excluir MÁS texto, nunca menos --
+    conservador por diseño: nunca se corre el riesgo de tratar el
+    membrete como evidencia real de origen por esta fragilidad."""
     tokens_completos = re.findall(r"[A-Z0-9]+", _normalizar(texto))
+    VENTANA_CASA_MATRIZ = 3
 
     def _es_inicio_casa_matriz(indice: int) -> bool:
-        return (
-            indice + 1 < len(tokens_completos)
-            and _distancia_token(tokens_completos[indice], "CASA") <= 1
-            and _distancia_token(tokens_completos[indice + 1], "MATRIZ") <= 1
+        if _distancia_token(tokens_completos[indice], "CASA") > 1:
+            return False
+        limite_ventana = min(indice + 1 + VENTANA_CASA_MATRIZ, len(tokens_completos))
+        return any(
+            _distancia_token(tokens_completos[siguiente], "MATRIZ") <= 1
+            for siguiente in range(indice + 1, limite_ventana)
         )
 
     limite = next(
