@@ -4,6 +4,16 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-09-02 — CIERRE DE JORNADA (WIP, NO APROBADO PARA PRODUCCIÓN): consistencia operacional dataset/decisiones/reporte/Mobile
+
+- **Trabajo del día:** diseño integral de consistencia operacional para todo el subsistema que escribe dataset, `decisiones_pendientes.json`, `estado_operacion.json`, reporte y `envio.json` de Mobile, implementado en dos fases (locks unificados por recurso; eliminación de rollbacks ciegos de snapshot completo; revert por campo con verificación antes de escribir; publicación de reporte/estado sólo cuando la versión del dataset no cambió mientras se generaba), más revisión del reproceso persistido idempotente de Mobile ya existente (journal, verificación por huella, reentrada sin duplicar ni repetir OCR).
+- **Suite completa verificada en cada etapa:** único patrón estable de fallos son los 6 tests preexistentes no relacionados (dependen de datos reales de Drive) más 1 flake de timing puntual confirmado en aislamiento -- ninguna regresión atribuible a lo implementado hoy.
+- **Una revisión integral final, posterior a la implementación, encontró 7 bloqueantes reales que este trabajo todavía NO resuelve** -- entre ellos: ventanas de tiempo entre verificar y publicar que no son atómicas, un par de rutas que aún pueden actuar sobre una lectura ya obsoleta antes de escribir, y un escritor del dataset que quedó fuera de la unificación de locks. Detalle exacto en `docs/HANDOFF_ATLAS.md`.
+- **Publicado como commit WIP** (`3efdc972220b7bb624efe335bdc95599c9cd6838`, rama `lector-mvp-guia-nueva`, local = remoto) para preservar el trabajo de forma recuperable desde otro equipo -- explícitamente **no es una versión aprobada para producción**. No se tocó `G:\Mi unidad\Atlas`, no se ejecutó la guía real 472624.
+- **Siguiente paso:** corrección agrupada de los 7 bloqueantes como una sola implementación, no hallazgo por hallazgo.
+
+---
+
 ## 2026-08-27 — ORIGEN OPERACIONAL V2: bug real de planta de origen corregido, reglas configurables
 
 - **Bug real corregido:** la guía Mobile 472593 publicó "AZA RENCA" (la casa matriz societaria, siempre impresa en el encabezado) en vez de "AZA COLINA" (lo que el chofer realmente informó al capturar) -- Atlas nunca cruzaba lo que Mobile informa con el documento; ahora sí, y el encabezado ya no gana automáticamente cuando contradice evidencia operacional real.

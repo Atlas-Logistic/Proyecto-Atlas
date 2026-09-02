@@ -4,6 +4,45 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-09-02 — CIERRE DE JORNADA (WIP, NO APROBADO PARA PRODUCCIÓN): consistencia operacional del subsistema dataset/decisiones/reporte/Mobile
+
+**Commit WIP publicado:** `3efdc972220b7bb624efe335bdc95599c9cd6838` (rama `lector-mvp-guia-nueva`, Motor). **local = remoto, `0/0`, working tree limpio** (verificado con `git fetch` + `git rev-list --left-right --count HEAD...origin/lector-mvp-guia-nueva`). Este commit **preserva el trabajo del día de forma recuperable desde otro equipo** -- no marca el subsistema como cerrado ni aprobado.
+
+### HECHO HOY
+
+- **Diseño integral de consistencia operacional**: inventario completo de escritores reales de dataset/`envio.json`/`decisiones_pendientes.json`/`estado_operacion.json`/catálogos de identidad, modelo de locks propuesto, modelo de CAS/versionado, plan de implementación en bloques.
+- **Reproceso persistido idempotente Mobile** (`reprocesar_envio_mobile_persistido`, `atlas_core/mobile.py`): journal separado del recurso que puede fallar, verificación por huella (nunca restaura ciego), fases explícitas (PREPARADO/PROCESADO_EN_MEMORIA/DATASET_REEMPLAZADO/DERIVADOS_REGENERADOS/COMPLETADO), COMPLETADO persistido antes de limpiar el journal, reentrada/idempotencia sin repetir OCR/B1.
+- **Fase 1 implementada**: unificación del lock físico del dataset (`revalidacion_dataset`) en todos los escritores reales identificados entonces (Mobile normal, procesamiento masivo, `_ejecutar_ia_operacional`, `reconciliar_incidencias_rut_chofer_documental`, reproceso persistido, `aplicar_decision_obra`); lock nuevo `decisiones_pendientes` para `decisiones_pendientes.json`; lock por envío (`mobile_<envio_id>`) para `procesar_envio_mobile`/`reprocesar_envio_mobile_persistido`, sostenido toda la operación (incluida OCR).
+- **Fase 2 implementada**: eliminación de rollbacks ciegos de snapshot completo del dataset (en `aplicar_decision_obra` y `reconciliar_estado_derivado`); revert de catálogos de identidad bajo el lock propio de cada uno, con verificación CAS contra un checkpoint; publicación versionada de reporte + `estado_operacion.json` (huella del dataset verificada sin cambios antes de publicar, en los 4 sitios que publican); locks nuevos agregados a `CatalogoClientes`/`CatalogoDestinos` (no tenían ninguno); corrección de `analizar_guias_masivo.py` y `generar_reporte_viajes.py` (publicaban sin el patrón protegido).
+- **Suite**: verificada en cada etapa. Único patrón estable de fallos: los 6 tests preexistentes no relacionados (consultas Atlas contra datos reales de Drive) + 1 flake de timing puntual (confirmado como flake al reproducirse limpio 3/3 en aislamiento). Ninguna regresión funcional atribuible a los cambios de hoy en las corridas de la suite completa realizadas durante la jornada.
+- **Revisión integral final ejecutada** (posterior a la implementación de Fase 2) -- encontró los bloqueantes listados abajo, que este commit **NO resuelve todavía**.
+
+### BLOQUEANTES PENDIENTES EXACTOS (encontrados por la revisión integral final, sin corregir hoy)
+
+a) Ventana check→publish entre verificar la huella del dataset y publicar reporte/`estado_operacion` -- la comprobación y la publicación no son una única operación atómica.
+
+b) Rollback de catálogos: la verificación CAS puede quedar evaluada FUERA del lock del catálogo, o contra un snapshot ya obsoleto para ese momento.
+
+c) `aplicar_decision_obra` puede publicar decisiones a partir de una lectura de la bandeja ya obsoleta.
+
+d) `reconciliar_bandeja_decisiones` tiene el mismo problema que (c).
+
+e) `_validar_csv_existente` escribe el dataset sin pasar por el lock común.
+
+f) `_ejecutar_ia_operacional` puede aplicar su delta calculado sobre una versión ya vieja de los campos, sin CAS por campo en el momento de aplicar.
+
+g) La asociación Mobile puede operar sobre una copia obsoleta del dataset; la resolución manual de asociación no vuelve a revalidar contra el estado vigente antes de aplicarse.
+
+### ESTADO
+
+- WIP publicado (commit de arriba), local = remoto, working tree limpio.
+- **NO listo para producción.**
+- Guía real `472624` -- **NO ejecutada** hoy.
+- `G:\Mi unidad\Atlas` -- **NO tocado** hoy.
+- **Siguiente paso exacto mañana**: corrección **AGRUPADA** de los 7 bloqueantes (a-g) de arriba **como una sola implementación**, no como 7 prompts/rondas separadas -- releer este bloque completo antes de empezar, no corregir hallazgo por hallazgo.
+
+---
+
 ## 2026-08-27 — ORIGEN OPERACIONAL V2: jerarquía de evidencias + reglas planta↔material configurables (caso real 472593 corregido)
 
 **Causa raíz del bug #2 del bloque anterior:** `planta_origen_informada` (lo que Mobile informa) nunca llegaba al motor de resolución de origen -- `procesar_archivo`/`resolver_entrega_documento`/`resolver_planta_origen` no tenían ningún parámetro para recibirlo. El encabezado documental (siempre la misma planta matriz societaria, "AZA RENCA", sin importar la planta física real) era la única evidencia disponible cuando GPS no alcanzaba (siempre el caso en una captura Mobile recién hecha, sin histórico de telemetría todavía) -- por eso 472593 publicó "AZA RENCA" pese a que Mobile informó "AZA COLINA".
