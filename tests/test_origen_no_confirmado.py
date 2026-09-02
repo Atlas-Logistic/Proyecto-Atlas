@@ -332,6 +332,50 @@ def test_confirmar_planta_escribe_confirmacion_humana(tmp_path):
     assert fila["motivo_origen_gps"].startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA")
 
 
+def test_confirmar_planta_revert_no_pisa_cambio_concurrente_posterior(tmp_path, monkeypatch):
+    """Bloque CONSISTENCIA OPERACIONAL, Fase 1 -- #8: si `aplicar_decision_
+    obra` falla DESPUÉS de escribir el origen (CONFIRMAR_PLANTA) y, en el
+    ínterin, otra operación real cambió esa misma fila, el revert de
+    campos propios se ABSTIENE por completo -- nunca pisa el cambio más
+    nuevo con los datos viejos (de antes de la decisión)."""
+    import atlas_core.aplicacion_decisiones as modulo
+    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+
+    entorno = _entorno(tmp_path)
+    decision = _decision_estadia(entorno)
+
+    def generar_artefacto_que_simula_carrera_y_falla(**kwargs):
+        # Simula: OTRA operación real (p. ej. una revalidación
+        # concurrente) modificó esta MISMA fila justo en este instante --
+        # DESPUÉS de que CONFIRMAR_PLANTA ya escribió el origen, pero
+        # ANTES de que esta llamada termine y falle.
+        filas = _leer_filas(entorno["dataset"])
+        for fila in filas:
+            if fila.get("numero_guia") == "464900":
+                fila["planta_origen_nombre"] = "AZA COLINA (ACTUALIZADA POR OTRO PROCESO)"
+        _escribir_filas_completas(entorno["dataset"], filas)
+        raise OSError("fallo simulado al publicar la bandeja")
+
+    monkeypatch.setattr(modulo, "generar_artefacto", generar_artefacto_que_simula_carrera_y_falla)
+
+    with pytest.raises(OSError, match="fallo simulado"):
+        aplicar_decision_obra(
+            raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"], accion="CONFIRMAR_PLANTA",
+        )
+
+    fila_final = _leer_csv(entorno["dataset"])[0]
+    # El revert de campos propios se abstuvo -- el cambio "de otro
+    # proceso" sobrevive intacto, nunca se pisó con el valor viejo
+    # (vacío, previo a la decisión).
+    assert fila_final["planta_origen_nombre"] == "AZA COLINA (ACTUALIZADA POR OTRO PROCESO)"
+    # El resto de los campos que ESTA decisión escribió, y que la otra
+    # operación NO tocó, siguen intactos (el CAS es por fila completa de
+    # los campos propios -- si CUALQUIERA no coincide, se abstiene de
+    # revertir TODOS, nunca hace un revert parcial).
+    assert fila_final["planta_origen_id"] == entorno["planta_colina"].planta_id
+    assert fila_final["origen_determinado_por"] == "CONFIRMACION_HUMANA"
+
+
 def test_confirmar_planta_falla_si_hay_mas_de_un_candidato(tmp_path):
     entorno = _entorno(tmp_path)
     decision = _decision_conflicto(entorno)

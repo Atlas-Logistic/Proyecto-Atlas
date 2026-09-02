@@ -11,9 +11,11 @@ from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_cat
 from atlas_core.telemetria.proveedores.onelogis import OnelogisProvider
 from atlas_core.telemetria.repositorio import RepositorioTelemetria
 from atlas_core.telemetria.servicio import ServicioTelemetria
+from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.decisiones_pendientes import (
     NOMBRE_ARTEFACTO,
-    generar_artefacto,
+    NOMBRE_LOCK_DECISIONES_PENDIENTES,
+    _generar_artefacto_sin_lock,
     regenerar_decisiones_persistidas,
 )
 
@@ -145,21 +147,29 @@ def main() -> None:
         # contra el ledger -- nunca resucita una ya cerrada ni duplica una
         # ya vigente.
         ruta_artefacto = Path(argumentos.salida).parent / NOMBRE_ARTEFACTO
-        decisiones_previas: list[dict[str, object]] = []
-        try:
-            decisiones_previas = json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", [])
-        except (OSError, json.JSONDecodeError):
-            pass
-        decisiones_reconciliadas = regenerar_decisiones_persistidas(
-            decisiones=[*decisiones_previas, *resumen.get("decisiones_pendientes", [])],
-            carpeta_catalogos=estado_catalogos.ruta,
-            ruta_dataset=argumentos.salida,
-        )
-        artefacto = generar_artefacto(
-            ruta_dataset=argumentos.salida,
-            carpeta_catalogos=estado_catalogos.ruta,
-            decisiones=decisiones_reconciliadas,
-        )
+        # Bloque CONSISTENCIA OPERACIONAL -- leer la bandeja FRESCA +
+        # fusionar + publicar es UNA sola sección crítica bajo el lock
+        # común de decisiones (mismo patrón que
+        # `procesar_envio_mobile`/las `reconciliar_decisiones_*`): leer
+        # antes del lock dejaría la fusión racy frente a otro publicador
+        # concurrente (Mobile, una decisión aplicada desde Desktop).
+        with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+            decisiones_previas: list[dict[str, object]] = []
+            try:
+                decisiones_previas = json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", [])
+            except (OSError, json.JSONDecodeError):
+                pass
+            decisiones_reconciliadas = regenerar_decisiones_persistidas(
+                decisiones=[*decisiones_previas, *resumen.get("decisiones_pendientes", [])],
+                carpeta_catalogos=estado_catalogos.ruta,
+                ruta_dataset=argumentos.salida,
+            )
+            artefacto = _generar_artefacto_sin_lock(
+                ruta_dataset=argumentos.salida,
+                carpeta_catalogos=estado_catalogos.ruta,
+                decisiones=decisiones_reconciliadas,
+                ruta_salida=ruta_artefacto,
+            )
         print(f"Decisiones pendientes: {len(artefacto['decisiones'])}")
     print("\nResumen final")
     print(f"Total encontrados: {resumen['encontrados']}")

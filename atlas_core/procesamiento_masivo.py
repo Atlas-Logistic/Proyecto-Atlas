@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.catalogos import (
     buscar_chofer_por_nombre_exacto,
     buscar_chofer_por_rut,
@@ -2372,9 +2373,21 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
 
 
 def _corroborar_documentos_relacionados(ruta_csv: Path, archivos_objetivo: set[str]) -> int:
-    """Propaga sólo RUT de chofer con cuatro señales fuertes coincidentes."""
+    """Propaga sólo RUT de chofer con cuatro señales fuertes coincidentes.
+
+    Bloque CONSISTENCIA OPERACIONAL -- lectura + cómputo + reemplazo
+    completo del dataset, TODO bajo el lock físico común
+    (`"revalidacion_dataset"`): es trabajo puro en memoria (sin OCR/red),
+    así que sostener el lock durante todo el cómputo es seguro y evita
+    que este reemplazo completo pise -- o sea pisado por -- cualquier
+    otro escritor real del mismo archivo."""
     if not archivos_objetivo or not ruta_csv.is_file():
         return 0
+    with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+        return _corroborar_documentos_relacionados_bajo_lock(ruta_csv, archivos_objetivo)
+
+
+def _corroborar_documentos_relacionados_bajo_lock(ruta_csv: Path, archivos_objetivo: set[str]) -> int:
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         filas = list(csv.DictReader(archivo, delimiter=";"))
     cambios = 0
@@ -2605,10 +2618,19 @@ def _ejecutar_ia_operacional(
         return resumen
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         filas = list(csv.DictReader(archivo, delimiter=";"))
-    cambio = False
+    # Bloque CONSISTENCIA OPERACIONAL -- esta función hace llamadas de RED
+    # (B1/LLM, potencialmente minutos) intercaladas por documento; NUNCA
+    # puede sostener el lock del dataset mientras tanto. En vez de un
+    # reemplazo completo ciego basado en esta foto (potencialmente ya
+    # vieja para columnas que este bloque no toca), se registra el DELTA
+    # exacto que cada fila necesita -- sólo los campos que ESTE bloque
+    # decidió cambiar -- y se aplica más abajo sobre una relectura FRESCA,
+    # bajo lock, sólo en el momento de escribir.
+    deltas: dict[str, dict[str, str]] = {}
     for fila in filas:
         if fila.get("archivo") not in archivos_objetivo:
             continue
+        fila_antes = dict(fila)
         if not _fila_requiere_atencion_operacional(fila):
             # Bloque B1 OBSERVADOR -- el Motor resolvió esta guía sin
             # ningún problema elegible: 0 llamadas LLM (nunca se invoca
@@ -2634,7 +2656,9 @@ def _ejecutar_ia_operacional(
                         "cliente": str(fila.get("cliente", "")),
                     },
                 }], ensure_ascii=False, sort_keys=True)
-                cambio = True
+                deltas[str(fila.get("archivo", ""))] = {
+                    k: v for k, v in fila.items() if fila_antes.get(k) != v
+                }
             continue
         resultados = []
         motivos = {m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()}
@@ -2800,13 +2824,31 @@ def _ejecutar_ia_operacional(
                 sum(r.get("latencia_segundos", 0) for r in resultados), 6
             )
             fila["metricas_procesamiento_json"] = json.dumps(metricas, sort_keys=True)
-            cambio = True
-    if cambio:
-        temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".ia.tmp")
-        with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
-            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
-            escritor.writeheader(); escritor.writerows(filas)
-        temporal.replace(ruta_csv)
+            deltas[str(fila.get("archivo", ""))] = {
+                k: v for k, v in fila.items() if fila_antes.get(k) != v
+            }
+    if deltas:
+        # Bloque CONSISTENCIA OPERACIONAL -- se relee el dataset FRESCO
+        # (nunca la foto de arriba, tomada antes de las llamadas de red)
+        # y se aplica SÓLO el delta que este bloque calculó para cada
+        # fila -- cualquier otro campo que haya cambiado mientras tanto
+        # (otro escritor real) se conserva intacto. Todo bajo el mismo
+        # lock físico común, sostenido sólo durante esta relectura +
+        # aplicación + escritura -- nunca durante las llamadas de red de
+        # arriba.
+        with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+            with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+                filas_frescas = list(csv.DictReader(archivo, delimiter=";"))
+            por_archivo_fresco = {f.get("archivo", ""): f for f in filas_frescas}
+            for archivo_id, delta in deltas.items():
+                fila_fresca = por_archivo_fresco.get(archivo_id)
+                if fila_fresca is not None:
+                    fila_fresca.update(delta)
+            temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".ia.tmp")
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+                escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+                escritor.writeheader(); escritor.writerows(filas_frescas)
+            temporal.replace(ruta_csv)
     return resumen
 
 
@@ -3107,10 +3149,19 @@ def procesar_carpeta(
             archivos_procesados_ahora.add(identificador)
             resumen["procesados"] += 1
             if len(pendientes) >= cada:
-                _escribir_filas(ruta_csv, pendientes)
+                # Bloque CONSISTENCIA OPERACIONAL -- mismo lock físico
+                # (`"revalidacion_dataset"`) que protege cualquier
+                # reemplazo completo del dataset (revalidaciones,
+                # reproceso, aplicación de decisión): un append sin lock
+                # puede perderse si un reemplazo completo concurrente
+                # captura su propia foto justo antes de que este append
+                # llegue a disco.
+                with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+                    _escribir_filas(ruta_csv, pendientes)
                 pendientes.clear()
     finally:
-        _escribir_filas(ruta_csv, pendientes)
+        with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+            _escribir_filas(ruta_csv, pendientes)
         pendientes.clear()
 
     corroborados = 0

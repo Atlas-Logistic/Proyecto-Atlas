@@ -14,8 +14,16 @@ from pathlib import Path
 from typing import Callable, Iterable
 from uuid import uuid4
 
+from atlas_core.almacenamiento_portable import bloqueo_sesion
 
 VERSION_FORMATO = 1
+# Bloque CONSISTENCIA OPERACIONAL -- lock físico propio de este catálogo
+# (mismo patrón ya establecido para obras_destinos/vehículos/evidencia/
+# incidencias): antes de esto, `crear`/`editar`/`agregar_alias`/
+# `desactivar` no tenían ninguna exclusión -- dos escrituras concurrentes
+# (o una escritura concurrente con el revert de `aplicar_decision_obra`)
+# podían perder una de las dos silenciosamente.
+NOMBRE_LOCK_CATALOGO_CLIENTES = "catalogo_clientes"
 
 
 class ErrorCatalogoClientes(ValueError):
@@ -245,29 +253,30 @@ class CatalogoClientes:
         estado_calidad: EstadoCalidadCliente | str = EstadoCalidadCliente.PENDIENTE,
         observacion: str = "",
     ) -> Cliente:
-        clientes = self._leer()
-        razon = _obligatorio(razon_social, "razon_social")
-        alias_limpios = tuple(_obligatorio(alias, "alias") for alias in aliases)
-        instante = self._instante_iso()
-        cliente = Cliente(
-            cliente_id=str(self._generador_id()),
-            razon_social=razon,
-            nombre_normalizado=normalizar_nombre_cliente(razon),
-            nombre_comercial=_opcional(nombre_comercial),
-            rut=normalizar_rut_cliente(rut),
-            aliases=alias_limpios,
-            estado_calidad=EstadoCalidadCliente(estado_calidad).value,
-            estado_vigencia=EstadoVigenciaCliente.ACTIVO.value,
-            fuente=_obligatorio(fuente, "fuente"),
-            observacion=_opcional(observacion),
-            fecha_creacion=instante,
-            fecha_modificacion=instante,
-        )
-        _validar_cliente(cliente)
-        self._validar_identidad(clientes, cliente)
-        clientes.append(cliente)
-        self._escribir(clientes)
-        return cliente
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_CLIENTES):
+            clientes = self._leer()
+            razon = _obligatorio(razon_social, "razon_social")
+            alias_limpios = tuple(_obligatorio(alias, "alias") for alias in aliases)
+            instante = self._instante_iso()
+            cliente = Cliente(
+                cliente_id=str(self._generador_id()),
+                razon_social=razon,
+                nombre_normalizado=normalizar_nombre_cliente(razon),
+                nombre_comercial=_opcional(nombre_comercial),
+                rut=normalizar_rut_cliente(rut),
+                aliases=alias_limpios,
+                estado_calidad=EstadoCalidadCliente(estado_calidad).value,
+                estado_vigencia=EstadoVigenciaCliente.ACTIVO.value,
+                fuente=_obligatorio(fuente, "fuente"),
+                observacion=_opcional(observacion),
+                fecha_creacion=instante,
+                fecha_modificacion=instante,
+            )
+            _validar_cliente(cliente)
+            self._validar_identidad(clientes, cliente)
+            clientes.append(cliente)
+            self._escribir(clientes)
+            return cliente
 
     def editar(
         self,
@@ -282,70 +291,73 @@ class CatalogoClientes:
         fuente: str | None = None,
         observacion: str | None = None,
     ) -> Cliente:
-        clientes = self._leer()
-        indice = self._indice(clientes, cliente_id)
-        actual = clientes[indice]
-        self._proteger(actual, modificacion_manual)
-        if limpiar_rut and rut is not None:
-            raise ErrorCatalogoClientes("no combine limpiar_rut con un RUT nuevo")
-        razon = actual.razon_social if razon_social is None else _obligatorio(razon_social, "razon_social")
-        rut_nuevo = "" if limpiar_rut else actual.rut if rut is None else normalizar_rut_cliente(rut)
-        editado = Cliente(
-            cliente_id=actual.cliente_id,
-            razon_social=razon,
-            nombre_normalizado=normalizar_nombre_cliente(razon),
-            nombre_comercial=actual.nombre_comercial if nombre_comercial is None else _opcional(nombre_comercial),
-            rut=rut_nuevo,
-            aliases=actual.aliases,
-            estado_calidad=actual.estado_calidad if estado_calidad is None else EstadoCalidadCliente(estado_calidad).value,
-            estado_vigencia=actual.estado_vigencia,
-            fuente=actual.fuente if fuente is None else _obligatorio(fuente, "fuente"),
-            observacion=actual.observacion if observacion is None else _opcional(observacion),
-            fecha_creacion=actual.fecha_creacion,
-            fecha_modificacion=self._instante_iso(),
-        )
-        _validar_cliente(editado)
-        self._validar_identidad(clientes, editado, excluir_id=actual.cliente_id)
-        clientes[indice] = editado
-        self._escribir(clientes)
-        return editado
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_CLIENTES):
+            clientes = self._leer()
+            indice = self._indice(clientes, cliente_id)
+            actual = clientes[indice]
+            self._proteger(actual, modificacion_manual)
+            if limpiar_rut and rut is not None:
+                raise ErrorCatalogoClientes("no combine limpiar_rut con un RUT nuevo")
+            razon = actual.razon_social if razon_social is None else _obligatorio(razon_social, "razon_social")
+            rut_nuevo = "" if limpiar_rut else actual.rut if rut is None else normalizar_rut_cliente(rut)
+            editado = Cliente(
+                cliente_id=actual.cliente_id,
+                razon_social=razon,
+                nombre_normalizado=normalizar_nombre_cliente(razon),
+                nombre_comercial=actual.nombre_comercial if nombre_comercial is None else _opcional(nombre_comercial),
+                rut=rut_nuevo,
+                aliases=actual.aliases,
+                estado_calidad=actual.estado_calidad if estado_calidad is None else EstadoCalidadCliente(estado_calidad).value,
+                estado_vigencia=actual.estado_vigencia,
+                fuente=actual.fuente if fuente is None else _obligatorio(fuente, "fuente"),
+                observacion=actual.observacion if observacion is None else _opcional(observacion),
+                fecha_creacion=actual.fecha_creacion,
+                fecha_modificacion=self._instante_iso(),
+            )
+            _validar_cliente(editado)
+            self._validar_identidad(clientes, editado, excluir_id=actual.cliente_id)
+            clientes[indice] = editado
+            self._escribir(clientes)
+            return editado
 
     def agregar_alias(
         self, cliente_id: str, alias: str, *, modificacion_manual: bool = False
     ) -> Cliente:
-        clientes = self._leer()
-        indice = self._indice(clientes, cliente_id)
-        actual = clientes[indice]
-        self._proteger(actual, modificacion_manual)
-        alias_limpio = _obligatorio(alias, "alias")
-        editado = replace(
-            actual,
-            aliases=(*actual.aliases, alias_limpio),
-            fecha_modificacion=self._instante_iso(),
-        )
-        _validar_cliente(editado)
-        self._validar_identidad(clientes, editado, excluir_id=actual.cliente_id, error_alias=True)
-        clientes[indice] = editado
-        self._escribir(clientes)
-        return editado
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_CLIENTES):
+            clientes = self._leer()
+            indice = self._indice(clientes, cliente_id)
+            actual = clientes[indice]
+            self._proteger(actual, modificacion_manual)
+            alias_limpio = _obligatorio(alias, "alias")
+            editado = replace(
+                actual,
+                aliases=(*actual.aliases, alias_limpio),
+                fecha_modificacion=self._instante_iso(),
+            )
+            _validar_cliente(editado)
+            self._validar_identidad(clientes, editado, excluir_id=actual.cliente_id, error_alias=True)
+            clientes[indice] = editado
+            self._escribir(clientes)
+            return editado
 
     def desactivar(
         self, cliente_id: str, *, modificacion_manual: bool = False
     ) -> Cliente:
-        clientes = self._leer()
-        indice = self._indice(clientes, cliente_id)
-        actual = clientes[indice]
-        self._proteger(actual, modificacion_manual)
-        if actual.estado_vigencia == EstadoVigenciaCliente.INACTIVO.value:
-            return actual
-        editado = replace(
-            actual,
-            estado_vigencia=EstadoVigenciaCliente.INACTIVO.value,
-            fecha_modificacion=self._instante_iso(),
-        )
-        clientes[indice] = editado
-        self._escribir(clientes)
-        return editado
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_CLIENTES):
+            clientes = self._leer()
+            indice = self._indice(clientes, cliente_id)
+            actual = clientes[indice]
+            self._proteger(actual, modificacion_manual)
+            if actual.estado_vigencia == EstadoVigenciaCliente.INACTIVO.value:
+                return actual
+            editado = replace(
+                actual,
+                estado_vigencia=EstadoVigenciaCliente.INACTIVO.value,
+                fecha_modificacion=self._instante_iso(),
+            )
+            clientes[indice] = editado
+            self._escribir(clientes)
+            return editado
 
     @staticmethod
     def _proteger(cliente: Cliente, modificacion_manual: bool) -> None:

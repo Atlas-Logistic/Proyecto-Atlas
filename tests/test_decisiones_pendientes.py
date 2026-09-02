@@ -1,8 +1,11 @@
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 
-from atlas_core.almacenamiento_portable import escribir_estado_operacion
+import pytest
+
+from atlas_core.almacenamiento_portable import SesionOcupadaError, escribir_estado_operacion
 from atlas_core.decisiones_pendientes import crear_decision, detectar_decisiones_documento, generar_artefacto, regenerar_decisiones_persistidas
 from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
 from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
@@ -540,6 +543,68 @@ def test_regenerar_conserva_obra_sin_contexto_por_falta_de_base_para_decidir(tmp
     regeneradas=regenerar_decisiones_persistidas(decisiones=[vieja],carpeta_catalogos=carpeta)
     assert len(regeneradas)==1
     assert regeneradas[0]["acciones_permitidas"]==["REGISTRAR","NO_REGISTRAR","POSPONER"]
+
+
+def test_dos_escritores_concurrentes_de_decisiones_pendientes_ninguna_decision_desaparece(tmp_path, monkeypatch):
+    """Bloque CONSISTENCIA OPERACIONAL, Fase 1 -- #9: dos publicaciones
+    concurrentes de `decisiones_pendientes.json` (leer bandeja fresca ->
+    fusionar -> publicar) nunca se pisan -- mientras una tiene el lock
+    común tomado, la otra se entera con contención explícita; reintentada
+    después (fusionando contra la bandeja ya fresca), ninguna decisión
+    desaparece."""
+    import atlas_core.decisiones_pendientes as decisiones_pendientes
+
+    carpeta = _catalogos(tmp_path)
+    dataset = tmp_path / "datos.csv"
+    dataset.write_text("19 OK;0 REVISAR\n", encoding="utf-8")
+    ruta_salida = tmp_path / "decisiones_pendientes.json"
+
+    decision_a = _decision(numero_guia="1", valor_documental="AB1234")
+    decision_b = _decision(numero_guia="2", valor_documental="CD5678", archivo="g2.png")
+
+    escribir_original = decisiones_pendientes.escribir_json_atomico
+    dentro_del_lock = threading.Event()
+    puede_continuar = threading.Event()
+
+    def escribir_con_pausa(ruta, contenido):
+        if ruta == ruta_salida:
+            dentro_del_lock.set()
+            puede_continuar.wait(timeout=5)
+        escribir_original(ruta, contenido)
+
+    monkeypatch.setattr(decisiones_pendientes, "escribir_json_atomico", escribir_con_pausa)
+
+    resultado_a: dict[str, object] = {}
+
+    def publicar_a():
+        resultado_a["valor"] = decisiones_pendientes.generar_artefacto(
+            ruta_dataset=dataset, carpeta_catalogos=carpeta, decisiones=[decision_a], ruta_salida=ruta_salida,
+        )
+
+    hilo_a = threading.Thread(target=publicar_a)
+    hilo_a.start()
+    assert dentro_del_lock.wait(timeout=5), "la publicación A nunca llegó a tomar el lock común de decisiones"
+
+    # B intenta MIENTRAS A todavía tiene el lock tomado -- debe enterarse
+    # con un error explícito, nunca perder su decisión en silencio.
+    with pytest.raises(SesionOcupadaError):
+        decisiones_pendientes.generar_artefacto(
+            ruta_dataset=dataset, carpeta_catalogos=carpeta, decisiones=[decision_b], ruta_salida=ruta_salida,
+        )
+
+    puede_continuar.set()
+    hilo_a.join(timeout=5)
+    assert len(resultado_a["valor"]["decisiones"]) == 1
+
+    # Reintento de B, ya sin contención -- fusiona contra la bandeja
+    # FRESCA (con A ya publicada), nunca la pisa.
+    previas = json.loads(ruta_salida.read_text(encoding="utf-8")).get("decisiones", [])
+    resultado_b = decisiones_pendientes.generar_artefacto(
+        ruta_dataset=dataset, carpeta_catalogos=carpeta, decisiones=[*previas, decision_b], ruta_salida=ruta_salida,
+    )
+    ids = {d["decision_id"] for d in resultado_b["decisiones"]}
+    assert decision_a["decision_id"] in ids
+    assert decision_b["decision_id"] in ids
 
 
 def test_artefacto_deduplica_y_controla_cuatro_decisiones(tmp_path):

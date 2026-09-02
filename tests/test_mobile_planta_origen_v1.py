@@ -101,9 +101,12 @@ def test_planta_informada_se_pasa_como_evidencia_pero_fila_solo_usa_datos_evalua
     `planta_origen_informada` tal cual."""
     import inspect
 
-    from atlas_core.mobile import procesar_envio_mobile
+    from atlas_core.mobile import _procesar_envio_mobile_impl
 
-    codigo = inspect.getsource(procesar_envio_mobile)
+    # Bloque CONSISTENCIA OPERACIONAL -- `procesar_envio_mobile` es ahora
+    # el wrapper protegido (lock por envío); la implementación real es
+    # `_procesar_envio_mobile_impl`.
+    codigo = inspect.getsource(_procesar_envio_mobile_impl)
     indice_llamada = codigo.index("datos = dict(procesar_archivo(imagen, **argumentos))")
     indice_fila = codigo.index('fila = {columna: str(datos.get(columna, "")) for columna in COLUMNAS}')
     # Se pasa como evidencia de ENTRADA, ANTES de invocar procesar_archivo

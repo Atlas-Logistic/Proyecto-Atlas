@@ -12,7 +12,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from atlas_core.almacenamiento_portable import escribir_json_atomico
+from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
+
+# Bloque CONSISTENCIA OPERACIONAL -- lock físico ÚNICO para
+# `decisiones_pendientes.json`, el mismo nombre en TODO el codebase (nunca
+# uno distinto por caller): la secuencia real siempre es "leer bandeja
+# FRESCA -> fusionar candidatas -> deduplicar -> publicar" -- si esa
+# secuencia completa no corre bajo el MISMO lock en cada sitio que la
+# ejecuta, dos publicaciones concurrentes pueden fusionar cada una contra
+# una foto vieja y la segunda en escribir pisa las decisiones que la
+# primera acababa de agregar (last-writer-wins silencioso).
+NOMBRE_LOCK_DECISIONES_PENDIENTES = "decisiones_pendientes"
 from atlas_core.catalogo_clientes import (
     CatalogoClientes,
     EstadoCalidadCliente,
@@ -2287,6 +2297,38 @@ def generar_artefacto(
     decisiones: Iterable[Mapping[str, object]], ruta_salida: str | Path | None = None,
     reloj=lambda: datetime.now(timezone.utc),
 ) -> dict[str, object]:
+    """Wrapper PROTEGIDO de `_generar_artefacto_sin_lock` -- para todo
+    caller que NO sostenga ya `NOMBRE_LOCK_DECISIONES_PENDIENTES`.
+
+    Bloque CONSISTENCIA OPERACIONAL: esta función sólo protege su PROPIA
+    escritura -- no basta por sí sola si el caller lee la bandeja previa
+    ANTES de adquirir el lock (la fusión en memoria seguiría siendo
+    racy). Todo caller que hace "leer bandeja fresca -> fusionar ->
+    publicar" debe envolver esa secuencia COMPLETA (lectura incluida) en
+    `with bloqueo_sesion(<carpeta>, NOMBRE_LOCK_DECISIONES_PENDIENTES):`
+    y usar `_generar_artefacto_sin_lock` (nunca este wrapper, que
+    reintentaría adquirir el mismo lock no reentrante) para la escritura
+    final dentro de esa misma sección crítica."""
+    salida = Path(ruta_salida) if ruta_salida is not None else Path(ruta_dataset).parent / NOMBRE_ARTEFACTO
+    with bloqueo_sesion(salida.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        return _generar_artefacto_sin_lock(
+            ruta_dataset=ruta_dataset, carpeta_catalogos=carpeta_catalogos,
+            decisiones=decisiones, ruta_salida=salida, reloj=reloj,
+        )
+
+
+def _generar_artefacto_sin_lock(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    decisiones: Iterable[Mapping[str, object]], ruta_salida: str | Path | None = None,
+    reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Variante `_sin_lock`: la escritura cruda del artefacto, SIN
+    adquirir ningún lock por su cuenta. Uso exclusivo de callers que YA
+    sostienen `NOMBRE_LOCK_DECISIONES_PENDIENTES` (p. ej. el propio
+    wrapper protegido de arriba, o cualquier caller que primero relee la
+    bandeja fresca bajo ese mismo lock antes de fusionar). Cualquier
+    otro caller debe usar `generar_artefacto` -- nunca esta función
+    directamente."""
     dataset = Path(ruta_dataset)
     catalogos = Path(carpeta_catalogos)
     salida = Path(ruta_salida) if ruta_salida is not None else dataset.parent / NOMBRE_ARTEFACTO

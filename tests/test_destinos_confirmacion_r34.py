@@ -232,9 +232,15 @@ def test_estado_obsoleto_por_catalogo_se_abstiene_sin_escribir(tmp_path):
     assert (catalogos/"obras_destinos.json").read_bytes() == antes_obras
 
 
-def test_fallo_posterior_revierte_destinos_obras_ledger_y_artefacto(tmp_path, monkeypatch):
+def test_fallo_posterior_revierte_destinos_obras_pero_nunca_el_artefacto(tmp_path, monkeypatch):
+    """Fase 2 -- Regla absoluta: `obras_destinos.json`/`destinos_maestros.
+    json` (escrituras DIRECTAS de esta decisión) sí se revierten, cada
+    una bajo su propio lock, verificadas contra el checkpoint.
+    `decisiones_pendientes.json` NUNCA se revierte por bytes -- ya está
+    protegido por su propio lock desde Fase 1 y nunca queda a medio
+    escribir."""
     raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
-    rutas = [catalogos/"obras_destinos.json", catalogos/"destinos_maestros.json", actual/"decisiones_pendientes.json"]
+    rutas = [catalogos/"obras_destinos.json", catalogos/"destinos_maestros.json"]
     antes = {p: p.read_bytes() for p in rutas}
     monkeypatch.setattr(modulo, "generar_artefacto", lambda **k: (_ for _ in ()).throw(OSError("fallo sintético")))
     with pytest.raises(OSError):
@@ -705,19 +711,34 @@ def test_r35_si_a_resuelve_indirectamente_b_b_desaparece(tmp_path):
     assert _pendientes(actual) == []
 
 
-def test_r35_fallo_al_publicar_bandeja_revierte_dataset_estado_reporte_y_ledger(tmp_path, monkeypatch):
+def test_r35_fallo_al_publicar_bandeja_revierte_catalogos_pero_nunca_dataset_ni_artefacto(tmp_path, monkeypatch):
+    """Fase 2 -- Regla absoluta: el dataset y `decisiones_pendientes.json`
+    NUNCA se restauran por snapshot completo -- el dataset porque sus
+    únicos cambios vienen de revalidaciones canónicas ya atómicas
+    (siempre seguras de conservar, aunque en este escenario ni siquiera
+    llega a cambiar), y el artefacto porque ya está protegido por su
+    propio lock desde Fase 1. Los catálogos de identidad SÍ se revierten,
+    cada uno bajo su propio lock, verificados contra el checkpoint."""
     raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
-    rutas = [
-        catalogos/"obras_destinos.json", catalogos/"destinos_maestros.json",
-        actual/"analisis_completo_guias.csv", actual/"decisiones_pendientes.json",
-    ]
+    rutas = [catalogos/"obras_destinos.json", catalogos/"destinos_maestros.json"]
+    dataset_antes = (actual/"analisis_completo_guias.csv").read_bytes()
     antes = {p: p.read_bytes() for p in rutas}
     monkeypatch.setattr(modulo, "generar_artefacto", lambda **k: (_ for _ in ()).throw(OSError("fallo R3.5")))
     with pytest.raises(OSError, match="fallo R3.5"):
         aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
     assert antes == {p: p.read_bytes() for p in rutas}
+    # El dataset SÍ cambió (la cascada de esta misma decisión resolvió
+    # `OBRA_DESTINO_SIN_CORROBORAR` en la fila, vía una revalidación
+    # canónica) -- y ese cambio NUNCA se revierte al snapshot original,
+    # pase lo que pase después.
+    assert (actual/"analisis_completo_guias.csv").read_bytes() != dataset_antes
     assert not (actual/"decisiones_aplicadas.json").exists()
-    assert not (actual/"estado_operacion.json").exists()
+    # `estado_operacion.json` SÍ queda publicado -- lo escribió la
+    # cascada (`revalidar_y_regenerar_reporte`) como parte de su propia
+    # regeneración exitosa del reporte, coherente con el dataset ya
+    # actualizado -- nunca se revierte esa publicación legítima sólo
+    # porque el paso posterior (`generar_artefacto`) falló.
+    assert (actual/"estado_operacion.json").exists()
     assert list((raiz/"reportes").iterdir()) == []
 
 
@@ -810,3 +831,78 @@ def test_r351_cambio_externo_en_catalogos_sigue_obsoleto(tmp_path, monkeypatch):
         aplicar_decision_obra(
             raiz_atlas=raiz, decision_id=decision_b["decision_id"], accion="CONFIRMAR",
         )
+
+
+def test_b_cascada_de_aplicar_decision_obra_vs_otro_escritor_real_nunca_pierde_ni_revierte(tmp_path, monkeypatch):
+    """Fase 2, criterio B: `aplicar_decision_obra` con mutación indirecta/
+    cascada (vía `revalidar_y_regenerar_reporte`, disparada al confirmar
+    un destino) falla porque OTRO escritor REAL (`revalidar_tipo_carga_
+    sin_ocr`, no un doble simulado) tiene el lock común del dataset
+    tomado -- el cambio de ese otro escritor nunca desaparece, y el
+    dataset nunca se revierte a un snapshot viejo."""
+    import threading
+    import atlas_core.clasificador_material as clasificador_material
+    import atlas_core.revalidacion_documental as revalidacion_documental
+    from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+    otra_fila = _fila_csv(
+        archivo="900002.jpeg", numero_guia="900002", numero_transporte="T2",
+        motivos_revision_documento="", indicador_revision="OK", estado_entrega="OK",
+        tipo_carga="", descripcion_material="ROLLOS DE ACERO",
+    )
+    # La fila de la decisión queda con un `tipo_carga` que YA coincide
+    # con lo que el clasificador (mockeado abajo) produciría -- así el
+    # otro escritor real sólo tiene algo que actualizar en la OTRA fila.
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(
+        tmp_path, filas_csv=[_fila_csv(tipo_carga="NO DETERMINADO"), otra_fila],
+    )
+    dataset = actual / "analisis_completo_guias.csv"
+
+    class _FakeTipoCarga:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    monkeypatch.setattr(
+        clasificador_material, "clasificar_material",
+        lambda d: _FakeTipoCarga("ROLLOS" if "ROLLOS" in str(d or "").upper() else "NO DETERMINADO"),
+    )
+
+    escribir_original = revalidacion_documental._escribir_filas_completas
+    dentro_del_lock = threading.Event()
+    puede_continuar = threading.Event()
+
+    def escribir_con_pausa(ruta, filas):
+        dentro_del_lock.set()
+        puede_continuar.wait(timeout=5)
+        escribir_original(ruta, filas)
+
+    monkeypatch.setattr(revalidacion_documental, "_escribir_filas_completas", escribir_con_pausa)
+
+    resultado_otro: dict[str, object] = {}
+
+    def correr_otro():
+        resultado_otro["valor"] = revalidacion_documental.revalidar_tipo_carga_sin_ocr(ruta_dataset=dataset)
+
+    hilo_otro = threading.Thread(target=correr_otro)
+    hilo_otro.start()
+    assert dentro_del_lock.wait(timeout=5), "el otro escritor real nunca llegó a tomar el lock del dataset"
+
+    # aplicar_decision_obra intenta MIENTRAS el otro escritor real
+    # todavía tiene el lock tomado -- su propia cascada
+    # (`revalidar_y_regenerar_reporte`) se entera con un error explícito.
+    with pytest.raises(SesionOcupadaError):
+        aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
+
+    puede_continuar.set()
+    hilo_otro.join(timeout=5)
+    assert resultado_otro["valor"]["guias_actualizadas"] == ["900002"]
+
+    # Reintento -- converge, y ninguna de las dos actualizaciones se
+    # perdió ni se pisó.
+    resultado_reintento = aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
+    assert resultado_reintento["ok"] is True
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas_finales = {f["numero_guia"]: f for f in csv.DictReader(archivo, delimiter=";")}
+    assert filas_finales["900002"]["tipo_carga"] == "ROLLOS"
+    assert filas_finales["464715"]["motivos_revision_documento"] == ""

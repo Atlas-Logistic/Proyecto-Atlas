@@ -162,7 +162,22 @@ def reconciliar_estado_derivado(
         }
 
     with bloqueo_sesion(actual, "reconciliacion_estado_derivado"):
+        # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- este lock ya NO
+        # protege el dataset (sus escritores reales son las
+        # revalidaciones `_sin_ocr` de abajo, cada una atómica y
+        # protegida por su PROPIO lock común, "revalidacion_dataset" --
+        # ver más abajo). Sigue existiendo para que dos reconciliaciones
+        # completas no corran en paralelo pisándose sus propios
+        # artefactos (`pendientes_tecnicos.json`, la carpeta de reporte,
+        # `estado_operacion.json`) -- una transacción de negocio, igual
+        # que el lock exterior de `aplicar_decision_obra`.
         respaldo.mkdir(parents=True, exist_ok=False)
+        # El respaldo se conserva como AUDITORÍA/histórico -- NUNCA como
+        # fuente para restaurar el dataset a ciegas (ver la Regla
+        # absoluta del bloque: nunca reponer una copia vieja del dataset
+        # si otro escritor real pudo haberlo modificado desde el
+        # snapshot). `estado_operacion.json` tampoco se restaura desde
+        # acá -- ver por qué en el `except` de más abajo.
         shutil.copy2(dataset, respaldo / dataset.name)
         if estado_ruta.is_file():
             shutil.copy2(estado_ruta, respaldo / estado_ruta.name)
@@ -176,20 +191,26 @@ def reconciliar_estado_derivado(
             "creado_en": instante.isoformat(),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+        limpieza = {"guias_actualizadas": []}
+        if migracion:
+            limpieza = revalidar_motivo_destino_ya_confirmado_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            )
+        recuperacion = {"guias_actualizadas": []}
+        if por_reintentar:
+            recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                proveedor_rutas=proveedor_rutas,
+                proveedor_rutas_fallback=proveedor_rutas_fallback,
+                guias_objetivo=set(por_reintentar),
+            )
+        # A partir de acá el dataset YA tiene los cambios de las dos
+        # revalidaciones de arriba -- cada una es atómica y ya quedó
+        # protegida por su propio lock común del dataset al escribir; NO
+        # se revierten pase lo que pase con lo que sigue (son
+        # revalidaciones canónicas, siempre seguras de conservar, igual
+        # que cualquier otra corrida de `revalidar_y_regenerar_reporte`).
         try:
-            limpieza = {"guias_actualizadas": []}
-            if migracion:
-                limpieza = revalidar_motivo_destino_ya_confirmado_sin_ocr(
-                    ruta_dataset=dataset, carpeta_catalogos=catalogos,
-                )
-            recuperacion = {"guias_actualizadas": []}
-            if por_reintentar:
-                recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
-                    ruta_dataset=dataset, carpeta_catalogos=catalogos,
-                    proveedor_rutas=proveedor_rutas,
-                    proveedor_rutas_fallback=proveedor_rutas_fallback,
-                    guias_objetivo=set(por_reintentar),
-                )
             filas_despues = {str(f.get("numero_guia", "")): f for f in _leer_filas(dataset)}
             guias_recuperadas = [
                 guia for guia in por_reintentar
@@ -212,16 +233,34 @@ def reconciliar_estado_derivado(
                 "schema_version": 1, "actualizado_en": instante.isoformat(),
                 "pendientes": registros_despues,
             })
+
+            # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
+            # VERSIONADA: se captura la huella del dataset YA
+            # RECONCILIADO (fresca, después de las revalidaciones de
+            # arriba) justo ANTES de generar el reporte, y se vuelve a
+            # comprobar justo DESPUÉS -- si algo más (una decisión
+            # humana, un reproceso, otra revalidación) cambió el dataset
+            # mientras `generar_reporte_viajes` corría, este reporte YA
+            # NO corresponde al dataset vigente: nunca se publica como
+            # `reporte_vigente` -- se descarta la carpeta recién creada
+            # (huérfana, nunca "vigente") y se retorna sin publicar. El
+            # próximo ciclo natural de reconciliación (ya se dispara en
+            # cada carga de Desktop, idempotente) converge con el
+            # dataset ya estable.
+            huella_para_publicar = _sha256_archivo(dataset)
             manifest = generar_reporte_viajes(
                 dataset, reporte, carpeta_catalogos=catalogos,
                 ruta_ledger=actual / LEDGER, reloj=lambda: instante,
             )
-            # La huella se recalcula DESPUÉS de las revalidaciones de
-            # arriba (`limpieza`/`recuperacion` pueden haber mutado el
-            # dataset) -- es la huella del dataset que efectivamente
-            # produjo ESTE `reporte_vigente`, para que la próxima carga
-            # compare contra el estado real ya reflejado, no contra uno
-            # anterior a esta misma pasada.
+            if _sha256_archivo(dataset) != huella_para_publicar:
+                shutil.rmtree(reporte, ignore_errors=True)
+                return {
+                    "reconciliado": False, "motivo": "DATASET_AVANZO_DURANTE_RECONCILIACION",
+                    "version": version_previa,
+                    "guias_actualizadas": limpieza["guias_actualizadas"],
+                    "guias_recuperadas": guias_recuperadas,
+                    "pendientes_tecnicos": len(registros_despues),
+                }
             escribir_estado_operacion(
                 reporte_vigente=reporte,
                 dataset_operacional=dataset,
@@ -230,12 +269,23 @@ def reconciliar_estado_derivado(
                 reloj=lambda: instante,
                 origen="RECONCILIACION_ESTADO_DERIVADO",
                 version_estado_derivado=VERSION_ESTADO_DERIVADO,
-                dataset_sha256=_sha256_archivo(dataset),
+                dataset_sha256=huella_para_publicar,
             )
         except Exception:
-            shutil.copy2(respaldo / dataset.name, dataset)
-            if (respaldo / estado_ruta.name).is_file():
-                shutil.copy2(respaldo / estado_ruta.name, estado_ruta)
+            # Bloque CONSISTENCIA OPERACIONAL -- el dataset NUNCA se
+            # restaura acá (Regla absoluta: sus cambios, si los hubo,
+            # vienen de revalidaciones ya atómicas y protegidas por su
+            # propio lock -- siempre seguras de conservar, nunca "un
+            # snapshot viejo" que reponer). `estado_operacion.json`
+            # tampoco necesita restaurarse: con la publicación versionada
+            # de arriba, `escribir_estado_operacion` corre COMPLETO
+            # (atómico) sólo al final, o no corre en absoluto -- un
+            # fallo acá jamás lo deja a medio escribir ni lo pisa con
+            # datos viejos. Sólo se limpia la carpeta de reporte a medio
+            # generar, si llegó a crearse -- nunca queda huérfana como
+            # "vigente".
+            if reporte.exists():
+                shutil.rmtree(reporte, ignore_errors=True)
             raise
 
     return {

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 from uuid import uuid4
 
+from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.catalogo_clientes import (
     CatalogoClientes,
     ClienteNoEncontradoError,
@@ -22,6 +23,13 @@ from atlas_core.catalogo_clientes import (
 
 
 VERSION_FORMATO = 1
+# Bloque CONSISTENCIA OPERACIONAL -- lock físico propio de este catálogo
+# (mismo patrón ya establecido para obras_destinos/vehículos/evidencia/
+# incidencias/clientes). `crear_o_reutilizar_global` NO lo adquiere
+# directamente -- delega enteramente en `editar`/`crear` (que sí lo
+# adquieren cada uno), evitando una reentrada del mismo lock no
+# reentrante.
+NOMBRE_LOCK_CATALOGO_DESTINOS = "catalogo_destinos"
 
 
 class ErrorCatalogoDestinos(ValueError):
@@ -320,36 +328,37 @@ class CatalogoDestinos:
         estado_calidad: EstadoCalidadDestino | str = EstadoCalidadDestino.PENDIENTE,
         observacion: str = "",
     ) -> Destino:
-        destinos = self._leer()
-        cliente_limpio = self._validar_cliente_activo(cliente_id) if str(cliente_id or "").strip() else ""
-        nombre = _obligatorio(nombre_destino, "nombre_destino")
-        latitud, longitud = _validar_coordenadas(latitud, longitud)
-        instante = self._instante_iso()
-        destino = Destino(
-            destino_id=str(self._generador_id()),
-            cliente_id=cliente_limpio,
-            nombre_destino=nombre,
-            nombre_normalizado=normalizar_nombre_destino(nombre),
-            codigo_destino=_opcional(codigo_destino),
-            direccion=_opcional(direccion),
-            comuna=_opcional(comuna),
-            region=_opcional(region),
-            pais=_obligatorio(pais, "pais"),
-            latitud=latitud,
-            longitud=longitud,
-            aliases=tuple(_obligatorio(alias, "alias") for alias in aliases),
-            estado_calidad=EstadoCalidadDestino(estado_calidad).value,
-            estado_vigencia=EstadoVigenciaDestino.ACTIVO.value,
-            fuente=_obligatorio(fuente, "fuente"),
-            observacion=_opcional(observacion),
-            fecha_creacion=instante,
-            fecha_modificacion=instante,
-        )
-        _validar_destino(destino)
-        self._validar_duplicado(destinos, destino)
-        destinos.append(destino)
-        self._escribir(destinos)
-        return destino
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_DESTINOS):
+            destinos = self._leer()
+            cliente_limpio = self._validar_cliente_activo(cliente_id) if str(cliente_id or "").strip() else ""
+            nombre = _obligatorio(nombre_destino, "nombre_destino")
+            latitud, longitud = _validar_coordenadas(latitud, longitud)
+            instante = self._instante_iso()
+            destino = Destino(
+                destino_id=str(self._generador_id()),
+                cliente_id=cliente_limpio,
+                nombre_destino=nombre,
+                nombre_normalizado=normalizar_nombre_destino(nombre),
+                codigo_destino=_opcional(codigo_destino),
+                direccion=_opcional(direccion),
+                comuna=_opcional(comuna),
+                region=_opcional(region),
+                pais=_obligatorio(pais, "pais"),
+                latitud=latitud,
+                longitud=longitud,
+                aliases=tuple(_obligatorio(alias, "alias") for alias in aliases),
+                estado_calidad=EstadoCalidadDestino(estado_calidad).value,
+                estado_vigencia=EstadoVigenciaDestino.ACTIVO.value,
+                fuente=_obligatorio(fuente, "fuente"),
+                observacion=_opcional(observacion),
+                fecha_creacion=instante,
+                fecha_modificacion=instante,
+            )
+            _validar_destino(destino)
+            self._validar_duplicado(destinos, destino)
+            destinos.append(destino)
+            self._escribir(destinos)
+            return destino
 
     def editar(
         self,
@@ -370,83 +379,86 @@ class CatalogoDestinos:
         fuente: str | None = None,
         observacion: str | None = None,
     ) -> Destino:
-        destinos = self._leer()
-        indice = self._indice(destinos, destino_id)
-        actual = destinos[indice]
-        self._proteger(actual, modificacion_manual)
-        cliente_nuevo = actual.cliente_id if cliente_id is None else (self._validar_cliente_activo(cliente_id) if str(cliente_id).strip() else "")
-        nombre = actual.nombre_destino if nombre_destino is None else _obligatorio(nombre_destino, "nombre_destino")
-        if limpiar_coordenadas:
-            if latitud is not None or longitud is not None:
-                raise ErrorCatalogoDestinos("no combine limpiar_coordenadas con coordenadas")
-            latitud_nueva = longitud_nueva = None
-        elif latitud is None and longitud is None:
-            latitud_nueva, longitud_nueva = actual.latitud, actual.longitud
-        else:
-            latitud_nueva, longitud_nueva = _validar_coordenadas(latitud, longitud)
-        editado = Destino(
-            destino_id=actual.destino_id,
-            cliente_id=cliente_nuevo,
-            nombre_destino=nombre,
-            nombre_normalizado=normalizar_nombre_destino(nombre),
-            codigo_destino=actual.codigo_destino if codigo_destino is None else _opcional(codigo_destino),
-            direccion=actual.direccion if direccion is None else _opcional(direccion),
-            comuna=actual.comuna if comuna is None else _opcional(comuna),
-            region=actual.region if region is None else _opcional(region),
-            pais=actual.pais if pais is None else _obligatorio(pais, "pais"),
-            latitud=latitud_nueva,
-            longitud=longitud_nueva,
-            aliases=actual.aliases,
-            estado_calidad=actual.estado_calidad if estado_calidad is None else EstadoCalidadDestino(estado_calidad).value,
-            estado_vigencia=actual.estado_vigencia,
-            fuente=actual.fuente if fuente is None else _obligatorio(fuente, "fuente"),
-            observacion=actual.observacion if observacion is None else _opcional(observacion),
-            fecha_creacion=actual.fecha_creacion,
-            fecha_modificacion=self._instante_iso(),
-        )
-        _validar_destino(editado)
-        self._validar_duplicado(destinos, editado, excluir_id=actual.destino_id)
-        destinos[indice] = editado
-        self._escribir(destinos)
-        return editado
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_DESTINOS):
+            destinos = self._leer()
+            indice = self._indice(destinos, destino_id)
+            actual = destinos[indice]
+            self._proteger(actual, modificacion_manual)
+            cliente_nuevo = actual.cliente_id if cliente_id is None else (self._validar_cliente_activo(cliente_id) if str(cliente_id).strip() else "")
+            nombre = actual.nombre_destino if nombre_destino is None else _obligatorio(nombre_destino, "nombre_destino")
+            if limpiar_coordenadas:
+                if latitud is not None or longitud is not None:
+                    raise ErrorCatalogoDestinos("no combine limpiar_coordenadas con coordenadas")
+                latitud_nueva = longitud_nueva = None
+            elif latitud is None and longitud is None:
+                latitud_nueva, longitud_nueva = actual.latitud, actual.longitud
+            else:
+                latitud_nueva, longitud_nueva = _validar_coordenadas(latitud, longitud)
+            editado = Destino(
+                destino_id=actual.destino_id,
+                cliente_id=cliente_nuevo,
+                nombre_destino=nombre,
+                nombre_normalizado=normalizar_nombre_destino(nombre),
+                codigo_destino=actual.codigo_destino if codigo_destino is None else _opcional(codigo_destino),
+                direccion=actual.direccion if direccion is None else _opcional(direccion),
+                comuna=actual.comuna if comuna is None else _opcional(comuna),
+                region=actual.region if region is None else _opcional(region),
+                pais=actual.pais if pais is None else _obligatorio(pais, "pais"),
+                latitud=latitud_nueva,
+                longitud=longitud_nueva,
+                aliases=actual.aliases,
+                estado_calidad=actual.estado_calidad if estado_calidad is None else EstadoCalidadDestino(estado_calidad).value,
+                estado_vigencia=actual.estado_vigencia,
+                fuente=actual.fuente if fuente is None else _obligatorio(fuente, "fuente"),
+                observacion=actual.observacion if observacion is None else _opcional(observacion),
+                fecha_creacion=actual.fecha_creacion,
+                fecha_modificacion=self._instante_iso(),
+            )
+            _validar_destino(editado)
+            self._validar_duplicado(destinos, editado, excluir_id=actual.destino_id)
+            destinos[indice] = editado
+            self._escribir(destinos)
+            return editado
 
     def agregar_alias(
         self, destino_id: str, alias: str, *, modificacion_manual: bool = False
     ) -> Destino:
-        destinos = self._leer()
-        indice = self._indice(destinos, destino_id)
-        actual = destinos[indice]
-        self._proteger(actual, modificacion_manual)
-        editado = replace(
-            actual,
-            aliases=(*actual.aliases, _obligatorio(alias, "alias")),
-            fecha_modificacion=self._instante_iso(),
-        )
-        _validar_destino(editado)
-        self._validar_duplicado(
-            destinos, editado, excluir_id=actual.destino_id, error_alias=True
-        )
-        destinos[indice] = editado
-        self._escribir(destinos)
-        return editado
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_DESTINOS):
+            destinos = self._leer()
+            indice = self._indice(destinos, destino_id)
+            actual = destinos[indice]
+            self._proteger(actual, modificacion_manual)
+            editado = replace(
+                actual,
+                aliases=(*actual.aliases, _obligatorio(alias, "alias")),
+                fecha_modificacion=self._instante_iso(),
+            )
+            _validar_destino(editado)
+            self._validar_duplicado(
+                destinos, editado, excluir_id=actual.destino_id, error_alias=True
+            )
+            destinos[indice] = editado
+            self._escribir(destinos)
+            return editado
 
     def desactivar(
         self, destino_id: str, *, modificacion_manual: bool = False
     ) -> Destino:
-        destinos = self._leer()
-        indice = self._indice(destinos, destino_id)
-        actual = destinos[indice]
-        self._proteger(actual, modificacion_manual)
-        if actual.estado_vigencia == EstadoVigenciaDestino.INACTIVO.value:
-            return actual
-        editado = replace(
-            actual,
-            estado_vigencia=EstadoVigenciaDestino.INACTIVO.value,
-            fecha_modificacion=self._instante_iso(),
-        )
-        destinos[indice] = editado
-        self._escribir(destinos)
-        return editado
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_DESTINOS):
+            destinos = self._leer()
+            indice = self._indice(destinos, destino_id)
+            actual = destinos[indice]
+            self._proteger(actual, modificacion_manual)
+            if actual.estado_vigencia == EstadoVigenciaDestino.INACTIVO.value:
+                return actual
+            editado = replace(
+                actual,
+                estado_vigencia=EstadoVigenciaDestino.INACTIVO.value,
+                fecha_modificacion=self._instante_iso(),
+            )
+            destinos[indice] = editado
+            self._escribir(destinos)
+            return editado
 
     def _validar_cliente_activo(self, cliente_id: str) -> str:
         buscado = _obligatorio(cliente_id, "cliente_id")

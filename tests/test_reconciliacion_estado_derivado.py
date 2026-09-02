@@ -59,9 +59,14 @@ def test_estado_pre_r2_se_reconcilia_una_vez_sin_ocr_y_con_respaldo(tmp_path, mo
     assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == 2
 
 
-def test_fallo_no_publica_version_y_restaura_dataset(tmp_path, monkeypatch):
+def test_fallo_no_publica_version_pero_nunca_revierte_cambios_del_dataset_ya_aplicados(tmp_path, monkeypatch):
+    """Fase 2 -- Regla absoluta: el dataset NUNCA se restaura por
+    snapshot completo. El cambio que dejó `revalidar_motivo_destino_ya_
+    confirmado_sin_ocr` (una revalidación canónica, ya atómica) se
+    conserva intacto aunque la generación del reporte falle después --
+    sólo la publicación de una nueva versión/estado_operación se
+    aborta."""
     dataset, _ = _entorno(tmp_path)
-    original = dataset.read_bytes()
 
     def limpiar(**kwargs):
         dataset.write_text("alterado", encoding="utf-8")
@@ -73,7 +78,7 @@ def test_fallo_no_publica_version_y_restaura_dataset(tmp_path, monkeypatch):
     import pytest
     with pytest.raises(RuntimeError, match="fallo"):
         modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
-    assert dataset.read_bytes() == original
+    assert dataset.read_text(encoding="utf-8") == "alterado"
     assert "version_estado_derivado" not in leer_estado_operacion(raiz=tmp_path)
 
 
@@ -119,3 +124,79 @@ def test_pendiente_tecnico_se_recupera_en_siguiente_oportunidad_sin_decision_hum
     assert json.loads((actual / "pendientes_tecnicos.json").read_text())["pendientes"] == []
     assert json.loads(decisiones.read_text())["decisiones"] == []
     assert repetido["reconciliado"] is False
+
+
+def test_a_reconciliacion_vs_otro_escritor_real_concurrente_no_pierde_cambio_ajeno(tmp_path, monkeypatch):
+    """Fase 2, criterio A: `reconciliar_estado_derivado` (fase de
+    migración, que llama a una revalidación REAL,
+    `revalidar_motivo_destino_ya_confirmado_sin_ocr`) contra OTRO
+    escritor REAL del dataset (`revalidar_tipo_carga_sin_ocr`, no un
+    doble simulado) -- ninguno pisa al otro; el cambio del otro escritor
+    nunca desaparece."""
+    import threading
+
+    import pytest
+
+    import atlas_core.clasificador_material as clasificador_material
+    import atlas_core.revalidacion_documental as revalidacion_documental
+    from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+    actual = tmp_path / "operacion" / "actual"
+    actual.mkdir(parents=True)
+    dataset = actual / "analisis_completo_guias.csv"
+    fila = {c: "" for c in COLUMNAS}
+    fila.update(archivo="g.jpeg", numero_guia="1", numero_transporte="T1", tipo_carga="", descripcion_material="ROLLOS DE ACERO")
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows([fila])
+
+    class _FakeTipoCarga:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    monkeypatch.setattr(
+        clasificador_material, "clasificar_material",
+        lambda d: _FakeTipoCarga("ROLLOS" if "ROLLOS" in str(d or "").upper() else "NO DETERMINADO"),
+    )
+
+    escribir_original = revalidacion_documental._escribir_filas_completas
+    dentro_del_lock = threading.Event()
+    puede_continuar = threading.Event()
+
+    def escribir_con_pausa(ruta, filas):
+        dentro_del_lock.set()
+        puede_continuar.wait(timeout=5)
+        escribir_original(ruta, filas)
+
+    monkeypatch.setattr(revalidacion_documental, "_escribir_filas_completas", escribir_con_pausa)
+
+    resultado_otro: dict[str, object] = {}
+
+    def correr_otro():
+        resultado_otro["valor"] = revalidacion_documental.revalidar_tipo_carga_sin_ocr(ruta_dataset=dataset)
+
+    hilo_otro = threading.Thread(target=correr_otro)
+    hilo_otro.start()
+    assert dentro_del_lock.wait(timeout=5), "el otro escritor real nunca llegó a tomar el lock del dataset"
+
+    # `version_previa` es 0 (ningún `estado_operacion.json` previo) --
+    # `migracion=True` dispara la revalidación REAL, que intenta MIENTRAS
+    # el otro escritor real todavía tiene el lock tomado.
+    with pytest.raises(SesionOcupadaError):
+        modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
+
+    puede_continuar.set()
+    hilo_otro.join(timeout=5)
+    assert resultado_otro["valor"]["guias_actualizadas"] == ["1"]
+
+    # Reintento -- converge, y la actualización del otro escritor sigue
+    # ahí, intacta. Reloj distinto del primer intento -- el real nunca
+    # repite timestamp entre dos llamadas, a diferencia de `RELOJ` fijo.
+    reloj_reintento = lambda: datetime(2026, 8, 31, 18, 0, 1, tzinfo=timezone.utc)
+    resultado_reintento = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=reloj_reintento)
+    assert resultado_reintento["reconciliado"] is True
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas_finales = list(csv.DictReader(archivo, delimiter=";"))
+    assert filas_finales[0]["tipo_carga"] == "ROLLOS"

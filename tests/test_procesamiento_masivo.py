@@ -2434,3 +2434,93 @@ def test_imprimir_metricas_documento_marca_estado_error_con_detalle(capsys):
     assert "ESTADO: ERROR" in salida
     assert "OCR:" in salida
     assert "120.0" in salida
+
+
+def test_ia_operacional_vs_reemplazo_completo_concurrente_ninguna_fila_desaparece(tmp_path, monkeypatch):
+    """Bloque CONSISTENCIA OPERACIONAL, Fase 1 -- #5: la escritura final de
+    `_ejecutar_ia_operacional` (delta-merge sobre una relectura fresca)
+    corre bajo el MISMO lock físico común del dataset que cualquier
+    reemplazo completo REAL (`revalidar_tipo_carga_sin_ocr`, no un doble
+    simulado) -- mientras uno lo tiene tomado, el otro se entera con un
+    error explícito; reintentado después, ninguna fila desaparece."""
+    import threading
+
+    import atlas_core.clasificador_material as clasificador_material
+    import atlas_core.revalidacion_documental as revalidacion_documental
+    from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+    dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
+    dataset.parent.mkdir(parents=True, exist_ok=True)
+
+    fila_ia = {c: "" for c in COLUMNAS}
+    # `tipo_carga` ya coincide con lo que el clasificador (mockeado abajo)
+    # produciría para una descripción vacía -- así el reemplazo completo
+    # concurrente sólo tiene algo que actualizar en la OTRA fila.
+    fila_ia.update(
+        archivo="ia.jpeg", numero_guia="900001", numero_transporte="0000900000",
+        estado_procesamiento="OK", tipo_carga="NO DETERMINADO",
+    )
+    fila_otra = {c: "" for c in COLUMNAS}
+    fila_otra.update(
+        archivo="otra.jpeg", numero_guia="100001", numero_transporte="0000100001",
+        estado_procesamiento="OK", tipo_carga="", descripcion_material="ROLLOS DE ACERO",
+    )
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows([fila_ia, fila_otra])
+
+    # Fuerza el camino OBSERVADOR (barato, determinista, sin llamadas de
+    # red) para la fila que le corresponde a este bloque de IA.
+    monkeypatch.setattr(procesamiento_masivo, "_fila_requiere_atencion_operacional", lambda fila: False)
+
+    class _FakeTipoCarga:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    monkeypatch.setattr(
+        clasificador_material, "clasificar_material",
+        lambda descripcion: _FakeTipoCarga("ROLLOS" if "ROLLOS" in str(descripcion or "").upper() else "NO DETERMINADO"),
+    )
+
+    escribir_original = revalidacion_documental._escribir_filas_completas
+    dentro_del_lock = threading.Event()
+    puede_continuar = threading.Event()
+
+    def escribir_con_pausa(ruta, filas):
+        dentro_del_lock.set()
+        puede_continuar.wait(timeout=5)
+        escribir_original(ruta, filas)
+
+    monkeypatch.setattr(revalidacion_documental, "_escribir_filas_completas", escribir_con_pausa)
+
+    resultado_revalidacion: dict[str, object] = {}
+
+    def correr_revalidacion():
+        resultado_revalidacion["valor"] = revalidacion_documental.revalidar_tipo_carga_sin_ocr(ruta_dataset=dataset)
+
+    hilo_revalidacion = threading.Thread(target=correr_revalidacion)
+    hilo_revalidacion.start()
+    assert dentro_del_lock.wait(timeout=5), "la revalidación real nunca llegó a tomar el lock del dataset"
+
+    # El bloque de IA intenta MIENTRAS la revalidación real todavía tiene
+    # el lock tomado -- debe enterarse con un error explícito, nunca
+    # escribir a ciegas.
+    with pytest.raises(SesionOcupadaError):
+        procesamiento_masivo._ejecutar_ia_operacional(dataset, {"ia.jpeg"}, None)
+
+    puede_continuar.set()
+    hilo_revalidacion.join(timeout=5)
+    assert resultado_revalidacion["valor"]["guias_actualizadas"] == ["100001"]
+
+    # Reintento, ya sin contención -- converge.
+    resumen = procesamiento_masivo._ejecutar_ia_operacional(dataset, {"ia.jpeg"}, None)
+    assert resumen["llamadas"] == 0
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas_finales = {f["archivo"]: f for f in csv.DictReader(archivo, delimiter=";")}
+    assert len(filas_finales) == 2
+    # La actualización de la revalidación real nunca se perdió.
+    assert filas_finales["otra.jpeg"]["tipo_carga"] == "ROLLOS"
+    # Y el bloque de IA, reintentado, también aplicó la suya.
+    assert filas_finales["ia.jpeg"]["resultado_atlas_ia_json"] != ""

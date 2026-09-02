@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -35,6 +36,14 @@ from atlas_core.incidencias_documentales import (
 )
 from atlas_core.procesamiento_masivo import MOTIVOS_NO_BLOQUEANTES
 from atlas_core.rutas.modelos import EstadoRuta
+
+# Bloque CONSISTENCIA OPERACIONAL -- único uso: dejar diagnóstico
+# explícito cuando el revert de campos propios del dataset (ver
+# `_revertir_dataset_por_campos`) se abstiene porque otra operación ya
+# avanzó la fila -- `aplicar_decision_obra` relanza la excepción original
+# de todos modos (esto nunca la enmascara), pero sin esto no quedaría
+# ningún rastro de que el revert del dataset específicamente se saltó.
+_LOGGER = logging.getLogger(__name__)
 
 # Bloque ORIGEN D1: fuente de origen que representa una confirmación humana
 # explícita para UN documento/viaje -- máxima precedencia posible (ver
@@ -120,6 +129,61 @@ def _restaurar(ruta: Path, contenido: bytes | None) -> None:
         os.replace(temporal, ruta)
     finally:
         if temporal is not None: temporal.unlink(missing_ok=True)
+
+
+def _calcular_revert_dataset(
+    *, numero_guia: str, snapshot_antes: dict[str, str], snapshot_despues: dict[str, str],
+) -> dict[str, object]:
+    """Bloque CONSISTENCIA OPERACIONAL -- calcula el delta EXACTO que una
+    de las 3 escrituras directas del dataset acaba de aplicar (comparando
+    la fila antes/después de mutarla), para un revert de CAMPOS PROPIOS
+    -- nunca una restauración de bytes completos del archivo -- si algo
+    falla DESPUÉS. `campos_nuevos` es lo que se acaba de escribir;
+    `campos_anteriores` es a qué revertir esos MISMOS campos si hace
+    falta. Nunca incluye columnas que esta escritura no tocó -- un revert
+    basado en esto nunca puede pisar un campo que otra operación haya
+    cambiado en el ínterin."""
+    campos_nuevos = {k: v for k, v in snapshot_despues.items() if snapshot_antes.get(k) != v}
+    return {
+        "numero_guia": numero_guia,
+        "campos_anteriores": {k: snapshot_antes.get(k, "") for k in campos_nuevos},
+        "campos_nuevos": campos_nuevos,
+    }
+
+
+def _revertir_dataset_por_campos(dataset: Path, actual: Path, revert_dataset_info: dict[str, object] | None) -> None:
+    """Bloque CONSISTENCIA OPERACIONAL -- contraparte de `_calcular_revert_
+    dataset`: relee la fila FRESCA bajo el lock común del dataset y sólo
+    revierte los campos propios si TODOS siguen siendo, exactamente, los
+    que esta operación escribió -- si otra operación ya avanzó la fila
+    (aunque sea un solo campo de los que tocamos), se abstiene por
+    completo y deja un diagnóstico explícito en el log: jamás pisa
+    trabajo ajeno más nuevo con datos viejos."""
+    if not revert_dataset_info:
+        return
+    numero_guia = str(revert_dataset_info["numero_guia"])
+    campos_nuevos = revert_dataset_info["campos_nuevos"]
+    campos_anteriores = revert_dataset_info["campos_anteriores"]
+    try:
+        with bloqueo_sesion(actual, "revalidacion_dataset"):
+            filas = _leer_filas(dataset)
+            fila = next((f for f in filas if str(f.get("numero_guia", "")) == numero_guia), None)
+            if fila is None:
+                _LOGGER.warning(
+                    "Revert de dataset abstenido para guía %r: la fila ya no existe en el dataset vigente.",
+                    numero_guia,
+                )
+                return
+            if not all(fila.get(k) == v for k, v in campos_nuevos.items()):
+                _LOGGER.warning(
+                    "Revert de dataset abstenido para guía %r: otra operación ya modificó la fila -- "
+                    "no se pisa ese cambio más nuevo con datos viejos.", numero_guia,
+                )
+                return
+            fila.update(campos_anteriores)
+            _escribir_filas_completas(dataset, filas)
+    except Exception:
+        _LOGGER.exception("Revert de dataset falló para guía %r (best-effort -- no enmascara el error original).", numero_guia)
 
 
 def _instante_iso(valor: object) -> datetime | None:
@@ -328,10 +392,43 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 catalogo_clientes_ruta, evidencia_entidades_ruta, incidencias_documentales_ruta,
             )
         }
+        # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- lock físico PROPIO de
+        # cada catálogo de identidad (mismo nombre que sus propios
+        # escritores normales -- ver `catalogo_obras_destinos.py`/
+        # `catalogo_vehiculos.py`/`evidencia_entidades.py`/
+        # `incidencias_documentales.py`/`catalogo_clientes.py`/
+        # `catalogo_destinos.py`): el revert de más abajo lo adquiere
+        # antes de restaurar, para nunca competir con una escritura
+        # normal concurrente de ese mismo catálogo.
+        NOMBRES_LOCK_CATALOGOS = {
+            catalogo_obras_ruta: "obras_destinos", catalogo_destinos_ruta: "catalogo_destinos",
+            catalogo_vehiculos_ruta: "catalogo_vehiculos", catalogo_clientes_ruta: "catalogo_clientes",
+            evidencia_entidades_ruta: "evidencia_entidades",
+            incidencias_documentales_ruta: "incidencias_documentales",
+        }
         resultado_extra: dict[str, object] = {}
         reporte_salida: Path | None = None
         reporte_salida_existia = False
         decision_siguiente: dict[str, object] | None = None
+        # Bloque CONSISTENCIA OPERACIONAL -- si alguna de las 3 ramas de
+        # escritura directa del dataset llega a escribir, deja acá el
+        # delta exacto (`_calcular_revert_dataset`) para que, si algo
+        # falla DESPUÉS, el revert del dataset sea por campos propios
+        # verificados -- nunca una restauración ciega de bytes (Regla
+        # absoluta, Fase 2: el dataset NUNCA se restaura por snapshot
+        # completo, ni siquiera cuando el cambio vino de la cascada
+        # `revalidar_y_regenerar_reporte` de esta misma llamada -- esas
+        # revalidaciones son canónicas y atómicas, siempre seguras de
+        # conservar, igual que en `reconciliar_estado_derivado`).
+        revert_dataset_info: dict[str, object] | None = None
+        # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- checkpoint de los
+        # catálogos de identidad justo DESPUÉS del ledger (más abajo):
+        # `None` mientras el fallo pueda haber ocurrido ANTES de ese
+        # punto (nada más tuvo tiempo de tocarlos todavía -- restaurar
+        # tal cual sigue siendo seguro); poblado después, para que el
+        # revert compare contra "lo que ESTA decisión ya dejó" y nunca
+        # pise un cambio de otra operación real posterior.
+        snapshot_despues_catalogos: dict[Path, bytes | None] | None = None
         try:
             if tipo == "OBRA_DESCONOCIDA":
                 obra_texto = str(decision.get("valor_documental", "")).strip()
@@ -668,53 +765,85 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         invalidar_derivados_ruta,
                         revalidar_ruta_sin_destino_calculado_sin_ocr,
                     )
-                    filas_dataset = _leer_filas(dataset)
-                    fila_objetivo = next(
-                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
-                    )
-                    if fila_objetivo is None:
-                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
-                    valor_anterior = {
-                        "planta_origen_id": fila_objetivo.get("planta_origen_id", ""),
-                        "planta_origen_nombre": fila_objetivo.get("planta_origen_nombre", ""),
-                        "origen_determinado_por": fila_objetivo.get("origen_determinado_por", ""),
-                        "evidencia_origen": fila_objetivo.get("evidencia_origen", ""),
-                    }
-                    # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN (misma regla
-                    # que la rama DESTINO_NO_RESUELTO, aplicada al ORIGEN):
-                    # si la planta canónica realmente CAMBIA de valor y ya
-                    # existía una ruta calculada con la planta ANTERIOR, ese
-                    # km/tiempo/proveedor describe un origen que ya no es el
-                    # vigente y deja de ser publicable de inmediato --
-                    # `derivar_estado_ruta_tras_cambio_origen` (abajo) sólo
-                    # cubre el caso en que el origen se determina por
-                    # primera vez (nunca invalida un valor ya calculado), así
-                    # que un cambio de planta real necesita este paso
-                    # adicional, con el mismo mecanismo determinista ya
-                    # usado por la rama de destino para recalcular.
-                    planta_realmente_cambia = (
-                        str(valor_anterior["planta_origen_id"]).strip()
-                        and str(valor_anterior["planta_origen_id"]).strip() != planta_confirmada.planta_id
-                    )
-                    habia_ruta_calculada = bool(str(fila_objetivo.get("distancia_km", "")).strip())
-                    if planta_realmente_cambia and habia_ruta_calculada:
-                        fila_objetivo.update(invalidar_derivados_ruta())
-                    # La evidencia GPS/documental original NUNCA se borra --
-                    # queda íntegra en `motivo_origen_gps`/`evidencia_telemetria`/
-                    # etc., columnas que este bloque no toca. Sólo cambian
-                    # las 4 columnas de origen canónico.
-                    fila_objetivo["planta_origen_id"] = planta_confirmada.planta_id
-                    fila_objetivo["planta_origen_nombre"] = planta_confirmada.nombre
-                    fila_objetivo["origen_determinado_por"] = FUENTE_ORIGEN_CONFIRMACION_HUMANA
-                    fila_objetivo["evidencia_origen"] = f"DECISION_HUMANA:{decision_id}"
-                    # Bloque OBSERVABILIDAD D1 -- si el destino de este
-                    # mismo documento sigue sin resolver, `estado_ruta`/
-                    # `motivo_ruta` dejan de describir el origen que
-                    # acaba de confirmarse (caso real 464717) y pasan a
-                    # expresar el bloqueo de destino vigente. Nunca llama
-                    # ORS/geocodificación, nunca fuerza RUTA_CALCULADA.
-                    fila_objetivo.update(derivar_estado_ruta_tras_cambio_origen(fila_objetivo))
-                    _escribir_filas_completas(dataset, filas_dataset)
+                    # Microcorrección (Codex, lock común del dataset) -- la
+                    # lectura + modificación + reemplazo DIRECTO del
+                    # dataset corre bajo el MISMO lock ("revalidacion_
+                    # dataset") que ya usan las 23 revalidaciones `_sin_ocr`
+                    # y el reproceso persistido Mobile -- nunca uno propio
+                    # por operación (ver `mobile.NOMBRE_LOCK_DATASET_
+                    # OPERACIONAL`). Se libera ANTES de llamar a
+                    # `revalidar_ruta_sin_destino_calculado_sin_ocr` (más
+                    # abajo), que adquiere ese MISMO lock por su cuenta --
+                    # es un lock de archivo NO reentrante: mantenerlo
+                    # tomado ahí adentro haría fallar esa llamada en seco.
+                    # El lock EXTERIOR ("aplicar_decision_obra", ver arriba)
+                    # no cambia: sigue protegiendo la transacción lógica
+                    # completa de la decisión; orden de adquisición siempre
+                    # el mismo (aplicar_decision_obra por fuera,
+                    # revalidacion_dataset por dentro, en ventanas
+                    # acotadas) -- nunca al revés en ningún caller conocido.
+                    with bloqueo_sesion(actual, "revalidacion_dataset"):
+                        filas_dataset = _leer_filas(dataset)
+                        fila_objetivo = next(
+                            (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                        )
+                        if fila_objetivo is None:
+                            raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                        # Bloque CONSISTENCIA OPERACIONAL -- snapshot COMPLETO
+                        # de la fila ANTES de mutarla: si algo falla después
+                        # de escribir, el revert (ver el `except` general más
+                        # abajo) ya no restaura los 10 archivos de `respaldos`
+                        # a ciegas para el dataset -- calcula el delta EXACTO
+                        # de columnas que ESTA rama cambió (comparando este
+                        # snapshot contra la fila ya escrita) y sólo las
+                        # revierte si, releyendo fresco, siguen siendo
+                        # exactamente lo que esta rama escribió.
+                        snapshot_fila_antes = dict(fila_objetivo)
+                        valor_anterior = {
+                            "planta_origen_id": fila_objetivo.get("planta_origen_id", ""),
+                            "planta_origen_nombre": fila_objetivo.get("planta_origen_nombre", ""),
+                            "origen_determinado_por": fila_objetivo.get("origen_determinado_por", ""),
+                            "evidencia_origen": fila_objetivo.get("evidencia_origen", ""),
+                        }
+                        # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN (misma regla
+                        # que la rama DESTINO_NO_RESUELTO, aplicada al ORIGEN):
+                        # si la planta canónica realmente CAMBIA de valor y ya
+                        # existía una ruta calculada con la planta ANTERIOR, ese
+                        # km/tiempo/proveedor describe un origen que ya no es el
+                        # vigente y deja de ser publicable de inmediato --
+                        # `derivar_estado_ruta_tras_cambio_origen` (abajo) sólo
+                        # cubre el caso en que el origen se determina por
+                        # primera vez (nunca invalida un valor ya calculado), así
+                        # que un cambio de planta real necesita este paso
+                        # adicional, con el mismo mecanismo determinista ya
+                        # usado por la rama de destino para recalcular.
+                        planta_realmente_cambia = (
+                            str(valor_anterior["planta_origen_id"]).strip()
+                            and str(valor_anterior["planta_origen_id"]).strip() != planta_confirmada.planta_id
+                        )
+                        habia_ruta_calculada = bool(str(fila_objetivo.get("distancia_km", "")).strip())
+                        if planta_realmente_cambia and habia_ruta_calculada:
+                            fila_objetivo.update(invalidar_derivados_ruta())
+                        # La evidencia GPS/documental original NUNCA se borra --
+                        # queda íntegra en `motivo_origen_gps`/`evidencia_telemetria`/
+                        # etc., columnas que este bloque no toca. Sólo cambian
+                        # las 4 columnas de origen canónico.
+                        fila_objetivo["planta_origen_id"] = planta_confirmada.planta_id
+                        fila_objetivo["planta_origen_nombre"] = planta_confirmada.nombre
+                        fila_objetivo["origen_determinado_por"] = FUENTE_ORIGEN_CONFIRMACION_HUMANA
+                        fila_objetivo["evidencia_origen"] = f"DECISION_HUMANA:{decision_id}"
+                        # Bloque OBSERVABILIDAD D1 -- si el destino de este
+                        # mismo documento sigue sin resolver, `estado_ruta`/
+                        # `motivo_ruta` dejan de describir el origen que
+                        # acaba de confirmarse (caso real 464717) y pasan a
+                        # expresar el bloqueo de destino vigente. Nunca llama
+                        # ORS/geocodificación, nunca fuerza RUTA_CALCULADA.
+                        fila_objetivo.update(derivar_estado_ruta_tras_cambio_origen(fila_objetivo))
+                        revert_dataset_info = _calcular_revert_dataset(
+                            numero_guia=numero_guia_decision,
+                            snapshot_antes=snapshot_fila_antes, snapshot_despues=fila_objetivo,
+                        )
+                        _escribir_filas_completas(dataset, filas_dataset)
                     if planta_realmente_cambia and habia_ruta_calculada:
                         # Mismo patrón que la rama de destino: con la
                         # dependencia base ya reemplazada y los derivados ya
@@ -788,29 +917,44 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         invalidar_derivados_ruta,
                         revalidar_ruta_sin_destino_calculado_sin_ocr,
                     )
-                    filas_dataset = _leer_filas(dataset)
-                    fila_objetivo = next(
-                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
-                    )
-                    if fila_objetivo is None:
-                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
-                    # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN: la dirección
-                    # nueva reemplaza la que faltaba/contradecía, así que
-                    # TODO lo que dependía de la dirección ANTERIOR (km,
-                    # tiempo, proveedor, etiqueta geocodificada, comuna/
-                    # región -- no sólo estado_ruta/motivo_ruta/estado_
-                    # entrega, como antes de este bloque) deja de ser
-                    # publicable de inmediato -- caso real 464264: sin esto,
-                    # 546,8 km / 10 h 22 min calculados para el destino
-                    # ANTERIOR sobrevivían indefinidamente si la
-                    # geocodificación del destino nuevo quedaba ambigua/
-                    # pendiente. `revalidar_ruta_sin_destino_calculado_
-                    # sin_ocr` decide desde cero, con la dependencia ya
-                    # limpia, si esta dirección sí geocodifica de forma
-                    # confiable -- nunca inventa un resultado.
-                    fila_objetivo.update(invalidar_derivados_ruta())
-                    fila_objetivo["despachar_a_crudo"] = direccion_final
-                    _escribir_filas_completas(dataset, filas_dataset)
+                    # Microcorrección (Codex, lock común del dataset) --
+                    # mismo patrón que la rama de origen más arriba: la
+                    # escritura DIRECTA corre bajo "revalidacion_dataset",
+                    # liberado ANTES de `revalidar_ruta_sin_destino_
+                    # calculado_sin_ocr` (que lo adquiere por su cuenta --
+                    # lock no reentrante).
+                    with bloqueo_sesion(actual, "revalidacion_dataset"):
+                        filas_dataset = _leer_filas(dataset)
+                        fila_objetivo = next(
+                            (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                        )
+                        if fila_objetivo is None:
+                            raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                        # Bloque CONSISTENCIA OPERACIONAL -- snapshot antes de
+                        # mutar (ver la rama de origen, arriba, para el
+                        # detalle completo del mecanismo de revert).
+                        snapshot_fila_antes = dict(fila_objetivo)
+                        # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN: la dirección
+                        # nueva reemplaza la que faltaba/contradecía, así que
+                        # TODO lo que dependía de la dirección ANTERIOR (km,
+                        # tiempo, proveedor, etiqueta geocodificada, comuna/
+                        # región -- no sólo estado_ruta/motivo_ruta/estado_
+                        # entrega, como antes de este bloque) deja de ser
+                        # publicable de inmediato -- caso real 464264: sin esto,
+                        # 546,8 km / 10 h 22 min calculados para el destino
+                        # ANTERIOR sobrevivían indefinidamente si la
+                        # geocodificación del destino nuevo quedaba ambigua/
+                        # pendiente. `revalidar_ruta_sin_destino_calculado_
+                        # sin_ocr` decide desde cero, con la dependencia ya
+                        # limpia, si esta dirección sí geocodifica de forma
+                        # confiable -- nunca inventa un resultado.
+                        fila_objetivo.update(invalidar_derivados_ruta())
+                        fila_objetivo["despachar_a_crudo"] = direccion_final
+                        revert_dataset_info = _calcular_revert_dataset(
+                            numero_guia=numero_guia_decision,
+                            snapshot_antes=snapshot_fila_antes, snapshot_despues=fila_objetivo,
+                        )
+                        _escribir_filas_completas(dataset, filas_dataset)
                     resultado_revalidacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
                         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
                         proveedor_rutas_fallback=proveedor_rutas_fallback,
@@ -980,42 +1124,57 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # falla es detectable de antemano -- corrección
                     # mínima, no un framework de transacciones.
                     from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
-                    filas_dataset = _leer_filas(dataset)
-                    fila_objetivo = next(
-                        (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
-                    )
-                    if fila_objetivo is None:
-                        raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
-                    rut_valido = normalizar_rut_cliente_o_vacio(rut_manual or "")
-                    catalogo_clientes = CatalogoClientes(catalogo_clientes_ruta)
-                    try:
-                        cliente_creado = catalogo_clientes.crear(
-                            razon_social=razon_social_final, fuente=f"DECISION_HUMANA_R9:{decision_id}",
-                            rut=rut_valido, estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+                    # Microcorrección (Codex, lock común del dataset) -- sin
+                    # ningún revalidador `_sin_ocr` anidado en esta rama, se
+                    # envuelve toda la lectura+modificación+reemplazo (la
+                    # creación del cliente, entre medio, es un recurso
+                    # distinto -- catálogo, no dataset -- y queda protegida
+                    # igual, sin riesgo de reentrada).
+                    with bloqueo_sesion(actual, "revalidacion_dataset"):
+                        filas_dataset = _leer_filas(dataset)
+                        fila_objetivo = next(
+                            (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
                         )
-                    except ClienteDuplicadoError:
-                        cliente_creado = next(
-                            (
-                                c for c in catalogo_clientes.listar()
-                                if c.nombre_normalizado == normalizar_nombre_cliente(razon_social_final)
-                            ),
-                            None,
+                        if fila_objetivo is None:
+                            raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                        # Bloque CONSISTENCIA OPERACIONAL -- snapshot antes de
+                        # mutar (ver la rama de origen, más arriba, para el
+                        # detalle completo del mecanismo de revert).
+                        snapshot_fila_antes = dict(fila_objetivo)
+                        rut_valido = normalizar_rut_cliente_o_vacio(rut_manual or "")
+                        catalogo_clientes = CatalogoClientes(catalogo_clientes_ruta)
+                        try:
+                            cliente_creado = catalogo_clientes.crear(
+                                razon_social=razon_social_final, fuente=f"DECISION_HUMANA_R9:{decision_id}",
+                                rut=rut_valido, estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+                            )
+                        except ClienteDuplicadoError:
+                            cliente_creado = next(
+                                (
+                                    c for c in catalogo_clientes.listar()
+                                    if c.nombre_normalizado == normalizar_nombre_cliente(razon_social_final)
+                                ),
+                                None,
+                            )
+                            if cliente_creado is None:
+                                raise
+                        cliente_id_nuevo = cliente_creado.cliente_id
+                        resultado_extra["cliente_id"] = cliente_id_nuevo
+                        fila_objetivo["cliente"] = cliente_creado.razon_social
+                        motivos_fila = {
+                            m.strip() for m in str(fila_objetivo.get("motivos_revision_documento", "")).split("|") if m.strip()
+                        }
+                        motivos_fila.discard("CLIENTE_AUSENTE")
+                        fila_objetivo["motivos_revision_documento"] = " | ".join(sorted(motivos_fila))
+                        fila_objetivo["indicador_revision"] = "REVISAR" if any(
+                            m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_fila
+                        ) else "OK"
+                        fila_objetivo["estado_documental"] = "REQUIERE_REVISION" if fila_objetivo["indicador_revision"] == "REVISAR" else "OK"
+                        revert_dataset_info = _calcular_revert_dataset(
+                            numero_guia=numero_guia_decision,
+                            snapshot_antes=snapshot_fila_antes, snapshot_despues=fila_objetivo,
                         )
-                        if cliente_creado is None:
-                            raise
-                    cliente_id_nuevo = cliente_creado.cliente_id
-                    resultado_extra["cliente_id"] = cliente_id_nuevo
-                    fila_objetivo["cliente"] = cliente_creado.razon_social
-                    motivos_fila = {
-                        m.strip() for m in str(fila_objetivo.get("motivos_revision_documento", "")).split("|") if m.strip()
-                    }
-                    motivos_fila.discard("CLIENTE_AUSENTE")
-                    fila_objetivo["motivos_revision_documento"] = " | ".join(sorted(motivos_fila))
-                    fila_objetivo["indicador_revision"] = "REVISAR" if any(
-                        m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_fila
-                    ) else "OK"
-                    fila_objetivo["estado_documental"] = "REQUIERE_REVISION" if fila_objetivo["indicador_revision"] == "REVISAR" else "OK"
-                    _escribir_filas_completas(dataset, filas_dataset)
+                        _escribir_filas_completas(dataset, filas_dataset)
                 # NO_PUEDO_DETERMINAR/POSPONER: no tocan el dataset.
                 aplicacion = {
                     "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
@@ -1271,17 +1430,49 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
                 reporte_salida = raiz / "reportes" / nombre_carpeta
                 reporte_salida_existia = reporte_salida.exists()
+                # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
+                # VERSIONADA: se captura la huella del dataset justo ANTES
+                # de generar el reporte y se vuelve a comprobar justo
+                # DESPUÉS -- si otra operación real cambió el dataset
+                # mientras `generar_reporte_viajes` corría, este reporte
+                # YA NO corresponde al dataset vigente: nunca se publica
+                # como `reporte_vigente`. La decisión en sí ya quedó
+                # aplicada correctamente (eso no depende de esto); el
+                # próximo ciclo natural de reconciliación converge con el
+                # dataset ya estable.
+                huella_antes_de_reporte = _sha(dataset)
                 generar_reporte_viajes(
                     dataset, reporte_salida, carpeta_catalogos=catalogos, reloj=lambda: instante,
                     ruta_ledger=ledger_ruta,
                 )
-                ruta_decisiones_operacion = actual / "decisiones_pendientes.json"
-                escribir_estado_operacion(
-                    reporte_vigente=reporte_salida, dataset_operacional=dataset,
-                    decisiones_pendientes=(ruta_decisiones_operacion if ruta_decisiones_operacion.is_file() else None),
-                    raiz=raiz,
-                )
-                resultado_extra["reporte_regenerado"] = True
+                if _sha(dataset) == huella_antes_de_reporte:
+                    ruta_decisiones_operacion = actual / "decisiones_pendientes.json"
+                    escribir_estado_operacion(
+                        reporte_vigente=reporte_salida, dataset_operacional=dataset,
+                        decisiones_pendientes=(ruta_decisiones_operacion if ruta_decisiones_operacion.is_file() else None),
+                        raiz=raiz, dataset_sha256=huella_antes_de_reporte,
+                    )
+                    resultado_extra["reporte_regenerado"] = True
+                else:
+                    if not reporte_salida_existia and reporte_salida.exists():
+                        shutil.rmtree(reporte_salida)
+                    resultado_extra["reporte_regenerado"] = False
+                    resultado_extra["reporte_no_publicado_motivo"] = "DATASET_AVANZO_DURANTE_GENERACION"
+
+            # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- checkpoint: los
+            # catálogos de identidad ya quedaron en el estado que ESTA
+            # decisión -- dispatch directo MÁS toda la cascada de arriba
+            # (R11/regeneración directa de reporte, ambas legítimas y
+            # canónicas) -- les dejó. Sólo falta la última operación que
+            # todavía puede fallar (`generar_artefacto`, justo abajo); si
+            # eso falla, el revert compara contra ESTE snapshot -- nunca
+            # contra el "antes" del inicio -- para saber si alguno de
+            # estos archivos cambió por OTRA operación real DURANTE esa
+            # última ventana, y nunca pisarla si así fue.
+            snapshot_despues_catalogos = {
+                ruta: (ruta.read_bytes() if ruta.exists() else None)
+                for ruta in NOMBRES_LOCK_CATALOGOS
+            }
 
             # Bloque REGENERACIÓN B1 -- causa raíz real de que 472037/
             # 472044 perdieran el contexto B1 enriquecido: `artefacto` es
@@ -1319,7 +1510,51 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             )
             resultado_extra["decisiones_pendientes"] = len(bandeja["decisiones"])
         except Exception:
-            for ruta, contenido in respaldos.items(): _restaurar(ruta, contenido)
+            # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- Regla absoluta:
+            # NUNCA restaurar una copia completa vieja de un archivo si,
+            # desde el snapshot, otro escritor real pudo haberlo
+            # modificado -- ni siquiera cuando ese "otro escritor" es la
+            # propia cascada de ESTA llamada (`revalidar_y_regenerar_
+            # reporte`/la publicación directa de reporte de arriba): sus
+            # escrituras son revalidaciones canónicas y atómicas, siempre
+            # seguras de conservar (misma filosofía que
+            # `reconciliar_estado_derivado`).
+            #
+            # - dataset: NUNCA se restaura por bytes. El único revert es
+            #   por campos propios verificados, para las 3 escrituras
+            #   DIRECTAS de esta función (`_revertir_dataset_por_campos`,
+            #   no-op si esta llamada no llegó a escribir directo).
+            # - `artefacto_ruta` (decisiones_pendientes.json) y
+            #   `estado_operacion_ruta`: NUNCA se restauran por bytes --
+            #   ya están protegidas por su propio mecanismo desde Fase 1/
+            #   la publicación versionada de arriba (o nunca llegaron a
+            #   publicarse, atómico).
+            # - `ledger_ruta`: único escritor real es esta misma función
+            #   (bajo su lock exterior) -- se restaura tal cual, sin lock
+            #   adicional.
+            # - catálogos de identidad (obras/destinos/vehículos/
+            #   clientes/evidencia/incidencias): SÍ son escrituras
+            #   DIRECTAS y primarias de esta operación -- se revierten,
+            #   bajo el lock PROPIO de cada catálogo, y sólo si su
+            #   contenido sigue siendo EXACTAMENTE el que esta operación
+            #   dejó justo después del ledger (`snapshot_despues_
+            #   catalogos`). Si `snapshot_despues_catalogos` sigue en
+            #   `None`, el fallo ocurrió ANTES de ese checkpoint (durante
+            #   el propio dispatch) -- nada más tuvo tiempo de tocarlos
+            #   todavía, así que restaurar tal cual sigue siendo seguro.
+            for ruta, nombre_lock in NOMBRES_LOCK_CATALOGOS.items():
+                if snapshot_despues_catalogos is not None:
+                    actual_bytes = ruta.read_bytes() if ruta.exists() else None
+                    if actual_bytes != snapshot_despues_catalogos.get(ruta):
+                        _LOGGER.warning(
+                            "Revert abstenido para %s: otra operación lo modificó "
+                            "después de esta decisión -- no se pisa ese cambio más nuevo.", ruta,
+                        )
+                        continue
+                with bloqueo_sesion(ruta.parent, nombre_lock):
+                    _restaurar(ruta, respaldos[ruta])
+            _restaurar(ledger_ruta, respaldos[ledger_ruta])
+            _revertir_dataset_por_campos(dataset, actual, revert_dataset_info)
             if reporte_salida is not None and not reporte_salida_existia and reporte_salida.exists():
                 shutil.rmtree(reporte_salida)
             raise

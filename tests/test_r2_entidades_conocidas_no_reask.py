@@ -112,5 +112,8 @@ def test_chofer_mismo_rut_variante_ocr_del_nombre_se_corrobora_no_se_repregunta(
     import inspect
 
     from atlas_core import procesamiento_masivo
-    fuente = inspect.getsource(procesamiento_masivo._corroborar_documentos_relacionados)
+    # Bloque CONSISTENCIA OPERACIONAL -- `_corroborar_documentos_
+    # relacionados` es ahora el wrapper protegido (lock del dataset); la
+    # lógica real es `_corroborar_documentos_relacionados_bajo_lock`.
+    fuente = inspect.getsource(procesamiento_masivo._corroborar_documentos_relacionados_bajo_lock)
     assert "rut_chofer" in fuente and "CHOFER_SIN_CORROBORAR" in fuente

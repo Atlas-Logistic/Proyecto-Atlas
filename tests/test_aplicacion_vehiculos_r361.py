@@ -198,11 +198,16 @@ def test_obsolescencia_y_fallo_no_dejan_estado_parcial(tmp_path, monkeypatch):
 
     raiz, catalogos, actual, decisiones = _entorno(tmp_path / "fallo", tracto="XF3629", rampla="No encontrado")
     decision = next(d for d in decisiones if d["tipo"] == "VEHICULO_DESCONOCIDO")
-    antes = {p: p.read_bytes() for p in [catalogos / "vehiculos.json", actual / "decisiones_pendientes.json"]}
+    # Fase 2 -- `vehiculos.json` (escritura DIRECTA de esta decisión) sí
+    # se revierte, bajo su propio lock, verificado contra el checkpoint.
+    # `decisiones_pendientes.json` NUNCA se revierte por bytes -- ya está
+    # protegido por su propio lock desde Fase 1.
+    ruta_vehiculos = catalogos / "vehiculos.json"
+    antes_vehiculos = ruta_vehiculos.read_bytes()
     monkeypatch.setattr(modulo, "generar_artefacto", lambda **k: (_ for _ in ()).throw(OSError("fallo")))
     with pytest.raises(OSError):
         aplicar_decision_obra(
             raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR", tipo_vehiculo="TRACTO",
         )
-    assert antes == {p: p.read_bytes() for p in antes}
+    assert ruta_vehiculos.read_bytes() == antes_vehiculos
     assert not (actual / "decisiones_aplicadas.json").exists()

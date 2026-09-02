@@ -138,8 +138,51 @@ def test_mismo_cliente_repite_obra_reutiliza_la_misma_obra(tmp_path):
     assert len(obras)==1  # no se duplica para el mismo cliente tampoco
 
 
-def test_fallo_posterior_revierte_catalogo_ledger_y_artefacto(tmp_path,monkeypatch):
-    raiz,catalogos,actual,_,decision=_entorno(tmp_path); rutas=[catalogos/"obras_destinos.json",actual/"decisiones_pendientes.json"]; antes={p:p.read_bytes() for p in rutas}
+def test_fallo_posterior_revierte_catalogo_pero_nunca_el_artefacto(tmp_path,monkeypatch):
+    """Fase 2 -- Regla absoluta: `obras_destinos.json` (escritura DIRECTA
+    de esta decisión) sí se revierte, bajo su propio lock, verificado
+    contra el checkpoint. `decisiones_pendientes.json` NUNCA se revierte
+    por bytes -- ya está protegido por su propio lock desde Fase 1 y
+    nunca queda a medio escribir (atómico); no hace falta ni es correcto
+    restaurarlo."""
+    raiz,catalogos,actual,_,decision=_entorno(tmp_path)
+    ruta_obras = catalogos/"obras_destinos.json"; antes_obras = ruta_obras.read_bytes()
     monkeypatch.setattr(modulo,"generar_artefacto",lambda **k: (_ for _ in ()).throw(OSError("fallo sintético")))
     with pytest.raises(OSError): aplicar_decision_obra(raiz_atlas=raiz,decision_id=decision["decision_id"],accion="REGISTRAR")
-    assert antes=={p:p.read_bytes() for p in rutas} and not (actual/"decisiones_aplicadas.json").exists()
+    assert ruta_obras.read_bytes()==antes_obras and not (actual/"decisiones_aplicadas.json").exists()
+
+
+def test_f_rollback_de_catalogo_concurrente_no_borra_actualizacion_ajena_posterior(tmp_path, monkeypatch):
+    """Fase 2, criterio F: si `aplicar_decision_obra` falla DESPUÉS de
+    escribir un catálogo (`obras_destinos.json`) y, en el ínterin, OTRA
+    operación real escribió ESE MISMO catálogo, el revert se abstiene --
+    nunca borra esa actualización ajena posterior."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    ruta_obras = catalogos / "obras_destinos.json"
+
+    def generar_artefacto_que_simula_otra_escritura_y_falla(**kwargs):
+        # Simula: otra operación real registra OTRA obra en el MISMO
+        # catálogo, justo en este instante (después de que esta decisión
+        # ya escribió su propia obra, antes de que el fallo se dispare).
+        CatalogoObrasDestinos(
+            ruta=ruta_obras, ruta_clientes=catalogos / "clientes.json", ruta_destinos=catalogos / "destinos_maestros.json",
+        ).registrar_observacion(
+            cliente_id=cliente.cliente_id, nombre_obra="OBRA DE OTRO PROCESO",
+            evidencia=Evidencia(
+                tipo=TipoEvidencia.GUIA.value, identificador_fuente="999", referencia_hash="c" * 64,
+                campos_observados={"obra": "OBRA DE OTRO PROCESO"}, fecha="2026-01-01T00:00:00+00:00",
+                actor_proceso="OTRO_PROCESO", resultado=ResultadoEvidencia.SOPORTA.value,
+            ),
+        )
+        raise OSError("fallo sintético")
+
+    monkeypatch.setattr(modulo, "generar_artefacto", generar_artefacto_que_simula_otra_escritura_y_falla)
+    with pytest.raises(OSError):
+        aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR")
+
+    obras = CatalogoObrasDestinos(
+        ruta=ruta_obras, ruta_clientes=catalogos / "clientes.json", ruta_destinos=catalogos / "destinos_maestros.json",
+    ).listar_obras()
+    nombres = {o.nombre_canonico for o in obras}
+    # La obra de "otro proceso" sobrevive intacta -- el revert nunca la pisó.
+    assert "OBRA DE OTRO PROCESO" in nombres

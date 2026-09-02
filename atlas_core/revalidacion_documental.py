@@ -1819,7 +1819,7 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
     recalcular la variación ortográfica. Nunca una regla global de texto
     -- el alias queda atado a ESTA obra, nunca a un patrón de caracteres."""
     from atlas_core.catalogo_obras_destinos import EstadoObra, Evidencia, ResultadoEvidencia, TipoEvidencia
-    from atlas_core.decisiones_pendientes import generar_artefacto
+    from atlas_core.decisiones_pendientes import NOMBRE_LOCK_DECISIONES_PENDIENTES, _generar_artefacto_sin_lock
     from atlas_core.motor_evidencia_obras import resolver_obra_por_variacion_ortografica_menor
 
     ruta = Path(ruta_decisiones)
@@ -1888,10 +1888,27 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
     if not decisiones_resueltas:
         return {"decisiones_resueltas": []}
 
-    generar_artefacto(
-        ruta_dataset=ruta_dataset, carpeta_catalogos=catalogos,
-        decisiones=decisiones_restantes, ruta_salida=ruta,
-    )
+    # Bloque CONSISTENCIA OPERACIONAL -- `decisiones_restantes` viene de
+    # la lectura de `bandeja` al INICIO de la función (antes de las
+    # escrituras de catálogo, que no son instantáneas) -- publicarla tal
+    # cual pisaría cualquier decisión que otro publicador haya agregado
+    # mientras tanto. En vez de eso: se relee la bandeja FRESCA bajo el
+    # lock común de decisiones y se retiran de ahí, por `decision_id`,
+    # ÚNICAMENTE las que ESTA función resolvió -- lo demás que haya
+    # cambiado concurrentemente se conserva intacto.
+    ids_resueltos = {str(d.get("decision_id")) for d in decisiones_resueltas}
+    with bloqueo_sesion(ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            bandeja_fresca = json.loads(ruta.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            bandeja_fresca = {"decisiones": []}
+        decisiones_finales = [
+            d for d in bandeja_fresca.get("decisiones", []) if str(d.get("decision_id")) not in ids_resueltos
+        ]
+        _generar_artefacto_sin_lock(
+            ruta_dataset=ruta_dataset, carpeta_catalogos=catalogos,
+            decisiones=decisiones_finales, ruta_salida=ruta,
+        )
     return {"decisiones_resueltas": decisiones_resueltas}
 
 
@@ -3033,7 +3050,8 @@ def revalidar_y_regenerar_reporte(
     # `guias_actualizadas`: el hash pudo quedar desincronizado en una
     # corrida ANTERIOR de esta misma función, no sólo en la actual.
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
     )
     ruta_decisiones = actual / NOMBRE_ARTEFACTO
     if ruta_decisiones.is_file():
@@ -3076,15 +3094,25 @@ def revalidar_y_regenerar_reporte(
                 *detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz),
                 *detectar_decisiones_cliente_ausente_sin_ocr(raiz_atlas=raiz),
             ]
-            restantes = regenerar_decisiones_persistidas(
-                decisiones=[*bandeja_previa.get("decisiones", []), *candidatas_nuevas],
-                carpeta_catalogos=catalogos, ruta_dataset=dataset,
-            )
             kwargs_artefacto = {"reloj": reloj} if reloj is not None else {}
-            generar_artefacto(
-                ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=restantes,
-                ruta_salida=ruta_decisiones, **kwargs_artefacto,
-            )
+            # Bloque CONSISTENCIA OPERACIONAL -- `bandeja_previa` (leída
+            # arriba, línea 3070, sólo como precondición de "¿hay algo que
+            # republicar?") puede haber quedado obsoleta mientras se
+            # calculaban `candidatas_nuevas` -- se relee FRESCA dentro del
+            # lock, justo antes de fusionar y publicar.
+            with bloqueo_sesion(ruta_decisiones.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+                try:
+                    bandeja_fresca = json.loads(ruta_decisiones.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    bandeja_fresca = {"decisiones": []}
+                restantes = regenerar_decisiones_persistidas(
+                    decisiones=[*bandeja_fresca.get("decisiones", []), *candidatas_nuevas],
+                    carpeta_catalogos=catalogos, ruta_dataset=dataset,
+                )
+                _generar_artefacto_sin_lock(
+                    ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=restantes,
+                    ruta_salida=ruta_decisiones, **kwargs_artefacto,
+                )
             resultado_revalidacion["bandeja_republicada"] = True
             resultado_revalidacion["decisiones_candidatas_descubiertas"] = len(candidatas_nuevas)
 
@@ -3099,7 +3127,28 @@ def revalidar_y_regenerar_reporte(
     kwargs = {"carpeta_catalogos": catalogos, "ruta_ledger": actual / "decisiones_aplicadas.json"}
     if reloj is not None:
         kwargs["reloj"] = reloj
+    # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
+    # VERSIONADA: se captura la huella del dataset justo ANTES de generar
+    # el reporte y se vuelve a comprobar justo DESPUÉS -- si otra
+    # operación real (una decisión humana, un reproceso, otra
+    # revalidación) cambió el dataset mientras `generar_reporte_viajes`
+    # corría, este reporte YA NO corresponde al dataset vigente: nunca se
+    # publica como `reporte_vigente`. Se descarta la carpeta recién
+    # creada (huérfana, nunca "vigente") y se retorna sin publicar --
+    # `reporte_regenerado=False` con el motivo explícito, nunca una
+    # mentira. El próximo ciclo natural de reconciliación (esta misma
+    # función, ya idempotente, ya se dispara en cada carga de Desktop y
+    # tras cada envío Mobile) converge con el dataset ya estable.
+    huella_para_publicar = _sha256_archivo(dataset) if dataset.is_file() else None
     manifest = generar_reporte_viajes(dataset, salida, **kwargs)
+    huella_tras_reporte = _sha256_archivo(dataset) if dataset.is_file() else None
+    if huella_tras_reporte != huella_para_publicar:
+        import shutil
+        shutil.rmtree(salida, ignore_errors=True)
+        return {
+            **resultado_revalidacion, "reporte_regenerado": False,
+            "motivo": "DATASET_AVANZO_DURANTE_GENERACION_REPORTE",
+        }
     # Se graban AMBAS huellas vigentes del dataset (post-revalidaciones de
     # esta misma pasada, que pueden haberlo modificado) para que la
     # PRÓXIMA corrida tenga un punto de comparación correcto y la
@@ -3108,14 +3157,15 @@ def revalidar_y_regenerar_reporte(
     # mismo hash binario histórico de siempre (compatible con
     # `reconciliar_estado_derivado` y cualquier otro consumidor
     # existente) y `huella_filas_dataset`, aparte, con la huella
-    # semántica por filas que usa esta función.
-    dataset_sha256_final = _sha256_archivo(dataset) if dataset.is_file() else None
+    # semántica por filas que usa esta función. Ambas se calculan sobre
+    # la MISMA lectura ya verificada arriba -- nunca una relectura
+    # adicional que podría, en teoría, ver una versión distinta.
     huella_filas_final = _huella_contenido_dataset(dataset)
     escribir_estado_operacion(
         reporte_vigente=salida,
         dataset_operacional=dataset,
         decisiones_pendientes=(ruta_decisiones if ruta_decisiones.is_file() else None),
-        dataset_sha256=dataset_sha256_final,
+        dataset_sha256=huella_para_publicar,
         huella_filas_dataset=huella_filas_final,
         raiz=raiz,
     )
@@ -3252,7 +3302,8 @@ def reconciliar_decisiones_destino_historicas(
     del sistema: `generar_artefacto` filtra contra el ledger al publicar.
     """
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
     )
 
     raiz = Path(raiz_atlas)
@@ -3261,20 +3312,24 @@ def reconciliar_decisiones_destino_historicas(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
-    try:
-        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
-        pendientes_actuales = artefacto_actual.get("decisiones", [])
-    except (OSError, json.JSONDecodeError):
-        pendientes_actuales = []
-
     candidatas = detectar_decisiones_destino_historicas_sin_ocr(raiz_atlas=raiz)
-    restantes = regenerar_decisiones_persistidas(
-        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
-    )
-    bandeja = generar_artefacto(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
-    )
+    # Bloque CONSISTENCIA OPERACIONAL -- leer `pendientes_actuales` +
+    # fusionar + publicar es UNA sola sección crítica bajo
+    # `NOMBRE_LOCK_DECISIONES_PENDIENTES`: leer antes del lock (como
+    # antes) dejaría la fusión racy frente a otro publicador concurrente.
+    with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            pendientes_actuales = artefacto_actual.get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        restantes = regenerar_decisiones_persistidas(
+            decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+        )
+        bandeja = _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
@@ -3344,7 +3399,8 @@ def reconciliar_decisiones_cliente_candidato_historico(
     `reconciliar_decisiones_origen`. No toca ningún catálogo, el CSV
     documental ni el ledger -- sólo (re)escribe la bandeja."""
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
     )
 
     raiz = Path(raiz_atlas)
@@ -3353,20 +3409,21 @@ def reconciliar_decisiones_cliente_candidato_historico(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
-    try:
-        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
-        pendientes_actuales = artefacto_actual.get("decisiones", [])
-    except (OSError, json.JSONDecodeError):
-        pendientes_actuales = []
-
     candidatas = detectar_decisiones_cliente_candidato_sin_ocr(raiz_atlas=raiz)
-    restantes = regenerar_decisiones_persistidas(
-        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
-    )
-    bandeja = generar_artefacto(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
-    )
+    # Bloque CONSISTENCIA OPERACIONAL -- ver `reconciliar_decisiones_destino_historicas`.
+    with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            pendientes_actuales = artefacto_actual.get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        restantes = regenerar_decisiones_persistidas(
+            decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+        )
+        bandeja = _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
@@ -3419,7 +3476,8 @@ def reconciliar_decisiones_origen(
     SELECCIONAR_OTRA_PLANTA/NO_PUEDO_DETERMINAR, todas terminales) nunca
     resucita mientras la evidencia (parte del `decision_id`) no cambie."""
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
     )
 
     raiz = Path(raiz_atlas)
@@ -3428,20 +3486,21 @@ def reconciliar_decisiones_origen(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
-    try:
-        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
-        pendientes_actuales = artefacto_actual.get("decisiones", [])
-    except (OSError, json.JSONDecodeError):
-        pendientes_actuales = []
-
     candidatas = detectar_decisiones_origen_sin_ocr(raiz_atlas=raiz)
-    restantes = regenerar_decisiones_persistidas(
-        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
-    )
-    bandeja = generar_artefacto(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
-    )
+    # Bloque CONSISTENCIA OPERACIONAL -- ver `reconciliar_decisiones_destino_historicas`.
+    with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            pendientes_actuales = artefacto_actual.get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        restantes = regenerar_decisiones_persistidas(
+            decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+        )
+        bandeja = _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
@@ -3480,7 +3539,8 @@ def reconciliar_decisiones_destino_no_resuelto(
     toca el CSV documental, el ledger ni ningún catálogo -- sólo
     (re)escribe la bandeja."""
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
     )
 
     raiz = Path(raiz_atlas)
@@ -3489,20 +3549,21 @@ def reconciliar_decisiones_destino_no_resuelto(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
-    try:
-        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
-        pendientes_actuales = artefacto_actual.get("decisiones", [])
-    except (OSError, json.JSONDecodeError):
-        pendientes_actuales = []
-
     candidatas = detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz)
-    restantes = regenerar_decisiones_persistidas(
-        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
-    )
-    bandeja = generar_artefacto(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
-    )
+    # Bloque CONSISTENCIA OPERACIONAL -- ver `reconciliar_decisiones_destino_historicas`.
+    with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            pendientes_actuales = artefacto_actual.get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        restantes = regenerar_decisiones_persistidas(
+            decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+        )
+        bandeja = _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
@@ -3539,7 +3600,8 @@ def reconciliar_decisiones_cliente_ausente(
     resuelto`). No toca el CSV documental, el ledger ni ningún catálogo
     -- sólo (re)escribe la bandeja."""
     from atlas_core.decisiones_pendientes import (
-        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
     )
 
     raiz = Path(raiz_atlas)
@@ -3548,20 +3610,21 @@ def reconciliar_decisiones_cliente_ausente(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
-    try:
-        artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
-        pendientes_actuales = artefacto_actual.get("decisiones", [])
-    except (OSError, json.JSONDecodeError):
-        pendientes_actuales = []
-
     candidatas = detectar_decisiones_cliente_ausente_sin_ocr(raiz_atlas=raiz)
-    restantes = regenerar_decisiones_persistidas(
-        decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
-    )
-    bandeja = generar_artefacto(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
-    )
+    # Bloque CONSISTENCIA OPERACIONAL -- ver `reconciliar_decisiones_destino_historicas`.
+    with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            artefacto_actual = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
+            pendientes_actuales = artefacto_actual.get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        restantes = regenerar_decisiones_persistidas(
+            decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+        )
+        bandeja = _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
@@ -3734,13 +3797,13 @@ def reconciliar_incidencias_rut_chofer_documental(
     candidatas = detectar_incidencias_rut_chofer_invalido_sin_ocr(raiz_atlas=raiz)
 
     registradas = []
-    corregidas = []
-    filas: list[dict[str, str]] = []
-    por_guia: dict[str, dict[str, str]] = {}
-    if candidatas:
-        filas = _leer_filas(dataset)
-        por_guia = {str(fila.get("numero_guia", "")): fila for fila in filas}
-
+    # Bloque CONSISTENCIA OPERACIONAL -- se registra cada incidencia (no
+    # toca el dataset) y se acumula, POR NÚMERO DE GUÍA, qué corrección
+    # habría que aplicar -- la aplicación real, más abajo, corre contra
+    # una relectura FRESCA del dataset bajo el lock común, nunca contra
+    # esta foto (`candidatas` puede haberse detectado sobre un dataset
+    # ya desactualizado).
+    correcciones_candidatas: dict[str, tuple[str, str]] = {}
     for candidata in candidatas:
         valor_canonico = candidata["rut_canonico"] or VALOR_CANONICO_RUT_NO_CONFIRMADO
         incidencia = almacen.registrar(
@@ -3757,13 +3820,26 @@ def reconciliar_incidencias_rut_chofer_documental(
         )
         registradas.append(incidencia.incidencia_id)
         if candidata["rut_canonico"]:
-            fila = por_guia.get(candidata["numero_guia"])
-            if fila is not None and fila.get("rut_chofer") == candidata["rut_documental"]:
-                fila["rut_chofer"] = candidata["rut_canonico"]
-                corregidas.append(candidata["numero_guia"])
+            correcciones_candidatas[str(candidata["numero_guia"])] = (
+                candidata["rut_documental"], candidata["rut_canonico"],
+            )
 
-    if corregidas:
-        _escribir_filas_completas(dataset, filas)
+    corregidas: list[str] = []
+    if correcciones_candidatas:
+        with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+            filas = _leer_filas(dataset)
+            por_guia = {str(fila.get("numero_guia", "")): fila for fila in filas}
+            for numero_guia, (rut_documental_esperado, rut_canonico) in correcciones_candidatas.items():
+                fila = por_guia.get(numero_guia)
+                # Verificación por evidencia (nunca ciega): sólo corrige
+                # si el valor documental SIGUE siendo el que se detectó --
+                # si otro proceso ya lo cambió mientras tanto, se
+                # abstiene, nunca pisa ese cambio más nuevo.
+                if fila is not None and fila.get("rut_chofer") == rut_documental_esperado:
+                    fila["rut_chofer"] = rut_canonico
+                    corregidas.append(numero_guia)
+            if corregidas:
+                _escribir_filas_completas(dataset, filas)
 
     return {
         "candidatas": len(candidatas), "incidencias_registradas": registradas,

@@ -222,7 +222,12 @@ def test_material_contaminado_b1_nunca_puede_proponer_un_valor_inventado():
 def test_mobile_y_desktop_ejecutan_la_misma_capa_de_credibilidad():
     import inspect
 
-    fuente_mobile = inspect.getsource(__import__("atlas_core.mobile", fromlist=["procesar_envio_mobile"]).procesar_envio_mobile)
+    # Bloque CONSISTENCIA OPERACIONAL -- `procesar_envio_mobile` es ahora
+    # el wrapper protegido (lock por envío); la implementación real que
+    # de verdad llama a `procesar_archivo` es `_procesar_envio_mobile_impl`.
+    fuente_mobile = inspect.getsource(
+        __import__("atlas_core.mobile", fromlist=["_procesar_envio_mobile_impl"])._procesar_envio_mobile_impl,
+    )
     fuente_lote = inspect.getsource(procesamiento_masivo.procesar_carpeta)
     assert "procesar_archivo(" in fuente_mobile
     assert "procesar_archivo(" in fuente_lote

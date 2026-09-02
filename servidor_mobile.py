@@ -14,9 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
+from atlas_core.almacenamiento_portable import bloqueo_sesion, leer_estado_operacion, resolver_raiz_atlas
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import (
+    TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
     AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
     procesar_envio_mobile, revalidar_asociacion_mobile_sin_ocr,
 )
@@ -119,13 +120,21 @@ def _revalidar_asociacion_diagnosticable(repositorio: RepositorioEnviosMobile, e
             f"envio_id={envio_id!r} ERROR revalidando asociación post-OCR: {type(error).__name__}: {error}"
         )
         try:
-            registro = repositorio.cargar(envio_id)
-            registro["revalidacion_asociacion_post_ocr"] = {
-                "estado": "ERROR",
-                "error": f"{type(error).__name__}: {error}",
-                "intentado_en": datetime.now(timezone.utc).isoformat(),
-            }
-            repositorio.guardar(envio_id, registro)
+            # Bloque CONSISTENCIA OPERACIONAL -- lock por envío: este
+            # registro diagnóstico compite por el MISMO envio.json que
+            # `procesar_envio_mobile`/un reproceso podrían estar tocando
+            # concurrentemente; nunca se escribe a ciegas encima.
+            with bloqueo_sesion(
+                repositorio.raiz, f"mobile_{envio_id}",
+                tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+            ):
+                registro = repositorio.cargar(envio_id)
+                registro["revalidacion_asociacion_post_ocr"] = {
+                    "estado": "ERROR",
+                    "error": f"{type(error).__name__}: {error}",
+                    "intentado_en": datetime.now(timezone.utc).isoformat(),
+                }
+                repositorio.guardar(envio_id, registro)
         except Exception:
             pass  # el registro del intento es best-effort; nunca debe volver a cortar el flujo.
 
@@ -162,9 +171,15 @@ def _regenerar_reporte_tras_envio_mobile(repositorio: RepositorioEnviosMobile, e
     except Exception as error:  # nunca debe perder/duplicar el envío ya procesado.
         intento.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
         _log_envio_debug(f"envio_id={envio_id!r} ERROR reconciliando reporte: {type(error).__name__}: {error}")
-    registro = repositorio.cargar(envio_id)
-    registro["reconciliacion_reporte"] = intento
-    repositorio.guardar(envio_id, registro)
+    # Bloque CONSISTENCIA OPERACIONAL -- mismo lock por envío que el
+    # resto de escritores de este envio.json.
+    with bloqueo_sesion(
+        repositorio.raiz, f"mobile_{envio_id}",
+        tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+    ):
+        registro = repositorio.cargar(envio_id)
+        registro["reconciliacion_reporte"] = intento
+        repositorio.guardar(envio_id, registro)
 
 
 def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: AutenticadorMobile, procesar: bool = True, origen_permitido: str = "*") -> ThreadingHTTPServer:
