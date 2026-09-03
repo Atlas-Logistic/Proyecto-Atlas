@@ -4,7 +4,8 @@
   "referencia": "CUT_2018_v04.xls",
   "url_fuente": "https://www.subdere.gov.cl/sites/default/files/documentos/CUT_2018_v04.xls",
   "sha256_fuente_xls": "D1B7FC3ABB93CEA3D115861579297D8BBDC9A7C762C958E646CD01B804DF1EA0",
-  "sha256_dataset": "7BF6BF3F7AFC9626754677CB4BC920BAAEE8011841739EC3EE89322B6D8AD78E",
+  "sha256_dataset": "A3BF2A401EF694337D1720BD27A4C1A00F3A455356E2987A3AC3A0BB84943FC5",
   "conteos": {"regiones": 16, "provincias": 56, "comunas": 346},
-  "validacion": "Transcripción 346/346, códigos únicos y jerarquía CUT verificados contra la fuente oficial preparada el 2026-09-01."
+  "validacion": "Transcripción 346/346, códigos únicos y jerarquía CUT verificados contra la fuente oficial preparada el 2026-09-01.",
+  "correccion_2026-09-04": "Revisión integral G1-A encontró 3 nombres de comuna mal transcritos (nombre_comuna únicamente, sin afectar código/jerarquía): 05502 CALERA->LA CALERA, 04105 PAIGUANO->PAIHUANO, 13303 TILTIL->TIL TIL. sha256_dataset recalculado tras la corrección."
 }

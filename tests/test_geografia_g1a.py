@@ -52,6 +52,33 @@ def test_exacta_segura_alias_ambigua_y_abstencion():
     assert geografia.normalizar("PARQUE", NIVEL_COMUNA).estado == EstadoNormalizacion.NO_RECONOCIDA
 
 
+def test_regresion_nombres_oficiales_de_comuna_mal_transcritos():
+    """Revisión integral G1-A (2026-09-04): el dataset SUBDERE ingerido
+    traía 3 nombres de comuna mal transcritos -- "LA CALERA" (05502)
+    aparecía como "CALERA" (quedaba NO_RECONOCIDA pese a estar bien
+    escrita), "PAIHUANO" (04105) como "PAIGUANO", y "TIL TIL" (13303)
+    como "TILTIL" (ambas degradaban de EXACTA a fuzzy y resolvían a un
+    canónico mal escrito). Fija los 3 nombres oficiales correctos contra
+    EXACTA, para que una futura re-ingesta del dataset no los rompa de
+    nuevo en silencio."""
+    geografia = cargar_geografia("CL")
+
+    la_calera = geografia.normalizar("LA CALERA", NIVEL_COMUNA)
+    assert la_calera.estado == EstadoNormalizacion.EXACTA
+    assert la_calera.unidad and la_calera.unidad.codigo == "05502"
+    assert la_calera.unidad.nombre_canonico == "La Calera"
+
+    paihuano = geografia.normalizar("PAIHUANO", NIVEL_COMUNA)
+    assert paihuano.estado == EstadoNormalizacion.EXACTA
+    assert paihuano.unidad and paihuano.unidad.codigo == "04105"
+    assert paihuano.unidad.nombre_canonico == "Paihuano"
+
+    til_til = geografia.normalizar("TIL TIL", NIVEL_COMUNA)
+    assert til_til.estado == EstadoNormalizacion.EXACTA
+    assert til_til.unidad and til_til.unidad.codigo == "13303"
+    assert til_til.unidad.nombre_canonico == "Til Til"
+
+
 def test_shim_y_normalizadores_delegados_preservan_compatibilidad():
     resultado = normalizar_comuna("CAUQUBNES")
     assert (resultado.estado, resultado.comuna, resultado.region) == (
