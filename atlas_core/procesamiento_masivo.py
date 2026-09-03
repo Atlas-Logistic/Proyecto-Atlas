@@ -49,6 +49,7 @@ from atlas_core.extractor import (
     _extraer_asociaciones_geometricas,
     _extraer_fecha_geometrico,
     _extraer_identidad_cliente_recortada_geometrica,
+    _extraer_numero_guia_geometrico,
     _extraer_patentes_geometrico,
     _extraer_rut_chofer_geometrico,
     _extraer_rut_cliente_geometrico,
@@ -1141,6 +1142,13 @@ def procesar_archivo(
             "cliente", "obra destino", "número de transporte",
             "patente del tracto", "patente del carro", "RUT del cliente",
             "RUT del chofer",
+            # Bloque FIX EXTRACCIÓN numero_guia -- caso real 472624: sin
+            # este campo en el disparador, un documento donde SÓLO falla
+            # el patrón textual de `buscar_numero_guia` (los demás campos
+            # ya vienen completos) nunca activaba la lectura de bloques
+            # geométricos (`bloques_guia`, abajo) y el fallback nuevo
+            # jamás llegaba a intentarse.
+            "número de guía",
         )
     ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
     if campos_ausentes:
@@ -1217,6 +1225,16 @@ def procesar_archivo(
                         logger.info("RUT del cliente recuperado mediante rut-cliente-geometrico-conservador-v1")
             except Exception as exc:
                 logger.warning("RUT del cliente geométrico omitido: %s: %s", type(exc).__name__, exc)
+
+            try:
+                if datos.get("número de guía") in {None, "", "No encontrado"}:
+                    decision_numero_guia = _extraer_numero_guia_geometrico(bloques_guia)
+                    if decision_numero_guia.get("valor"):
+                        datos["número de guía"] = decision_numero_guia["valor"]
+                        metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                        logger.info("número de guía recuperado mediante numero-guia-geometrico-conservador-v1")
+            except Exception as exc:
+                logger.warning("Número de guía geométrico omitido: %s: %s", type(exc).__name__, exc)
 
             try:
                 chofer_actual = datos.get("chofer", "No encontrado")

@@ -756,6 +756,93 @@ def _extraer_transporte_geometrico(
     return resultado
 
 
+# Bloque FIX EXTRACCIÓN numero_guia -- causa raíz real (472624): el patrón
+# textual contiguo de `buscar_numero_guia` (dentro de `extraer_datos`, más
+# abajo) exige "GUIA DE DESPACHO ELECTRONICA N° <número>" como una única
+# secuencia de texto -- pero PaddleOCR puede devolver "GUIA DE DESPACHO",
+# "ELECTRONICA" y "N° <número>" como bloques OCR separados, NO adyacentes
+# en el texto lineal (el encabezado real de 472624 tiene domicilio y
+# sucursales intercalados entre esos tres fragmentos, aunque visualmente
+# pertenezcan al mismo encabezado). Este fallback geométrico NUNCA
+# reemplaza el patrón textual -- sigue siendo el fast-path, sin cambios
+# (ver `buscar_numero_guia`) -- sólo se invoca cuando éste no encontró
+# nada (cableado en `atlas_core.procesamiento_masivo.procesar_archivo`,
+# junto al resto de recuperaciones geométricas de identidad).
+_PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO]\.?\s*([0-9]{5,8})$")
+_PATRON_MARCADOR_NUMERO_GUIA_SOLO = re.compile(r"^(?:N[°ºO]\.?|NRO\.?)$")
+_PATRON_CANDIDATO_NUMERICO_PURO = re.compile(r"^[0-9]{5,8}$")
+
+
+def _es_candidato_numero_guia_valido(numero: str) -> bool:
+    """Nunca confunde el candidato con un numero_transporte (siempre 10
+    dígitos con 4 ceros iniciales, formato "0000NNNNNN" -- ver
+    `buscar_numero_transporte`). Un RUT/patente/factura ya queda excluido
+    por el propio patrón de origen (sólo dígitos, sin guion ni letras)."""
+    return bool(_PATRON_CANDIDATO_NUMERICO_PURO.fullmatch(numero)) and not numero.startswith("0000")
+
+
+def _extraer_numero_guia_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+    """Fallback geométrico del número de guía (ver bloque arriba).
+
+    Exige un ancla real "GUIA DE DESPACHO" en el documento -- nunca busca
+    en cualquier documento que no sea, al menos, del tipo correcto -- y
+    sólo considera candidatos DEBAJO de esa ancla, dentro de una ventana
+    vertical y horizontal proporcional al tamaño de la propia ancla (nunca
+    un umbral fijo en píxeles: la imagen real de 472624 es de resolución
+    muy superior a los fixtures de referencia, y un umbral fijo calibrado
+    para éstos no habría capturado el caso real). Acepta dos formas del
+    marcador N°/Nº/NRO: en el MISMO bloque que el número ("N° 472624",
+    el caso real) o como bloque propio inmediatamente seguido, en la misma
+    fila, por un bloque puramente numérico. Se abstiene (devuelve {}) si
+    no hay ancla, si no aparece ningún candidato válido, o si aparece más
+    de uno distinto dentro de la ventana -- nunca inventa ni elige
+    arbitrariamente entre varios."""
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+
+    anclas = [item for item in items if "GUIA DE DESPACHO" in item["simple"]]
+    if not anclas:
+        return {}
+
+    candidatos: set[str] = set()
+    for ancla in anclas:
+        ventana_vertical = ancla["h"] * 4
+        margen_horizontal = max(ancla["x2"] - ancla["x1"], ancla["h"]) * 0.5
+        en_ventana = [
+            item for item in items
+            if item is not ancla
+            and 0 <= item["y1"] - ancla["y2"] <= ventana_vertical
+            and ancla["x1"] - margen_horizontal <= item["cx"] <= ancla["x2"] + margen_horizontal
+        ]
+
+        for item in en_ventana:
+            coincidencia = _PATRON_MARCADOR_NUMERO_GUIA.match(item["simple"])
+            if coincidencia:
+                numero = coincidencia.group(1)
+                if _es_candidato_numero_guia_valido(numero):
+                    candidatos.add(numero)
+                continue
+            if not _PATRON_MARCADOR_NUMERO_GUIA_SOLO.match(item["simple"]):
+                continue
+            vecinos = [
+                otro for otro in en_ventana
+                if otro is not item
+                and abs(otro["cy"] - item["cy"]) <= max(item["h"], otro["h"]) * 1.25
+                and 0 <= otro["x1"] - item["x2"] <= max(item["h"], otro["h"]) * 6
+            ]
+            for vecino in vecinos:
+                if (
+                    _PATRON_CANDIDATO_NUMERICO_PURO.fullmatch(vecino["simple"])
+                    and _es_candidato_numero_guia_valido(vecino["simple"])
+                ):
+                    candidatos.add(vecino["simple"])
+
+    if len(candidatos) == 1:
+        return {"valor": next(iter(candidatos))}
+    return {}
+
+
 def _extraer_fecha_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     """Localiza la zona de FECHA DE EMISIÓN mediante geometría OCR conservadora.
 
