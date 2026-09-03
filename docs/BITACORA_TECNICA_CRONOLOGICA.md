@@ -4612,3 +4612,28 @@ Revisión + diseño (sin implementar, sin copiar datasets al catálogo productiv
 **Plan aprobado (≈ M):** G1-A núcleo genérico + adaptador Chile + catálogo oficial + shim (`territorio_chile.py` → shim sobre `cargar_geografia("CL")`; delega la normalización de destino/caché; gate: suite verde + `test_territorial_t1.py` sin cambios + casos fuzzy idénticos + fixture Colombia de 2 niveles cumple el contrato). G1-B geocodificación estructurada + validación por código + `codigo_unidad` en la caché (gate: `test_rutas_nominatim.py`/`test_fallback_geografico_estructurado.py`/`test_territorial_t1.py`/`test_destino_comuna_contradiccion_r410.py`; sin regresión en `test_rutas_destino_entrega.py`). G1-C invalidación de derivados por cambio territorial + `RANGO_*_RM` → `rango_operacion` + compatibilidad hacia atrás + cierre (gate: `test_revalidar_ruta_sin_destino_r410.py`/`test_r2_4_coherencia_ruta_reactiva.py`/`test_p1_resolucion_reactiva_destino_km.py` + test nuevo de invalidación por corrección territorial).
 
 **Git:** sólo `docs/` en este commit. Ningún cambio de código, ninguna copia de dataset al catálogo productivo. `G:\Mi unidad\Atlas` no tocado.
+# 2026-09-03 — IMPLEMENTACIÓN GEOGRAFÍA G1-A
+
+Se creó `atlas_core/geografia/` con modelos neutrales, protocolo por país,
+motor parametrizado y carga por ISO. `geografia/cl.py` construye la jerarquía
+CUT región→provincia→comuna desde el catálogo SUBDERE versionado (16/56/346),
+incluye aliases y vocabulario chileno, y expone búsqueda por código, ancestros,
+parámetros y compatibilidad territorial. `territorio_chile.py` quedó como shim,
+sin catálogo ni algoritmo independientes.
+
+La fuente preparada `catalogo_comunas_chile.json` se copió byte a byte a
+`catalogos_privados/geografia_chile.json` (SHA-256
+`7BF6BF3F7AFC9626754677CB4BC920BAAEE8011841739EC3EE89322B6D8AD78E`). El
+sidecar documenta SUBDERE `CUT_2018_v04.xls`, URL oficial y SHA-256 original.
+Drive fue únicamente fuente de lectura y no recibió escrituras.
+
+Delegaciones G1-A: normalizador exacto de destinos al core común y normalizador
+de direcciones de caché al adaptador CL. No se cambiaron claves territoriales de
+caché, geocodificación estructurada, routing, invalidación ni rangos RM.
+
+Pruebas: 132 específicas/territoriales pasan; suite completa: 2579 pasan y 6
+fallan, los mismos seis preexistentes de consultas/dataset mutable. Pendientes:
+G1-B = geocoding estructurado + validación/caché por código; G1-C = invalidación
+de derivados + supuestos RM; G2 = polígonos.
+
+---

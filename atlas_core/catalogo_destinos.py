@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
-import unicodedata
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -15,6 +13,7 @@ from typing import Callable, Iterable
 from uuid import uuid4
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
+from atlas_core.geografia import texto_normalizado
 from atlas_core.catalogo_clientes import (
     CatalogoClientes,
     ClienteNoEncontradoError,
@@ -86,11 +85,7 @@ class ResultadoBusquedaDestino:
 
 def normalizar_nombre_destino(nombre: str) -> str:
     """Normaliza para comparación exacta sin modificar el texto original."""
-    texto = unicodedata.normalize("NFKD", str(nombre or "").strip())
-    texto = "".join(
-        caracter for caracter in texto if not unicodedata.combining(caracter)
-    ).upper()
-    return " ".join(re.findall(r"[A-Z0-9]+", texto))
+    return texto_normalizado(nombre)
 
 
 def _texto_direccion_normalizado(texto: str) -> str:

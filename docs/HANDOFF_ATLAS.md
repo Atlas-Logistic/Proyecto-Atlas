@@ -1680,3 +1680,32 @@ Atlas IA ya no está desacoplada del pipeline operacional: Desktop y Mobile
 convergen en el mismo escalador B1. El reset real sigue pendiente de autorización
 explícita; existe respaldo rollback y prueba aislada. Consultar
 `R4_7_B1_OPERACIONAL_Y_RESET.md` antes de autorizarlo.
+# 2026-09-03 — GEOGRAFÍA G1-A IMPLEMENTADA
+
+G1-A quedó cerrada en `lector-mvp-guia-nueva`: núcleo neutral de país en
+`atlas_core/geografia/`, contrato `GeografiaPais`, jerarquía por códigos opacos,
+motor conservador y selector por ISO; adaptador Chile con niveles región /
+provincia / comuna; y `territorio_chile.py` reducido a shim compatible.
+
+La autoridad de datos es `catalogos_privados/geografia_chile.json`, transcripción
+verificada del SUBDERE `CUT_2018_v04.xls`: 16 regiones, 56 provincias y
+exactamente 346 comunas con CUT. `geografia_chile.procedencia.json` registra URL,
+referencia, conteos y SHA-256 de fuente/dataset. La fuente preparada en Drive se
+leyó y copió sin modificarla.
+
+`catalogo_destinos.normalizar_nombre_destino` y
+`rutas/cache_geocodificacion._normalizar_direccion` delegan ahora en la autoridad
+canónica. Se preservan estados, umbrales, aliases y API histórica; un fixture de
+prueba de dos niveles (departamento/municipio) demuestra extensibilidad sin
+semántica chilena en el core.
+
+Fuera de alcance, clasificado para continuar después: **G1-B**, geocodificación
+estructurada, validación territorial por código y clave territorial de caché;
+**G1-C**, invalidación de derivados y retiro de supuestos operativos RM;
+**G2**, polígonos y validación punto-en-unidad. No se implementó ninguno aquí.
+
+Validación: 132 pruebas específicas/territoriales verdes; suite completa
+`2579 passed, 6 failed`, exactamente los seis fallos preexistentes vinculados al
+dataset mutable/consultas, sin regresiones nuevas.
+
+---

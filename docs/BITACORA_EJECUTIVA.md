@@ -3780,3 +3780,12 @@ suite (regla de la Sección 20: sólo suites de repos modificados).
 conecta desde Mobile (opt-in, mismo criterio que Desktop sin bandera
 explícita -- no bloquea ningún caso E2E); la app Mobile en sí no
 necesitó cambios (Sección 13/14 ya estaban cerradas).
+# 2026-09-03 — GEOGRAFÍA G1-A CERRADA
+
+- Núcleo geográfico multipaís, adaptador Chile y shim histórico implementados.
+- Catálogo oficial SUBDERE CUT 2018 integrado: 16 regiones, 56 provincias y 346 comunas; procedencia y hashes versionados.
+- Normalización territorial unificada; compatibilidad anterior y fixture conceptual de país con dos niveles verificados.
+- Tests: 132 específicos/territoriales verdes; suite completa 2579 passed y los mismos 6 fallos preexistentes.
+- Pendiente sólo por alcance: G1-B (geocoding/caché), G1-C (invalidación/supuestos RM), G2 (polígonos).
+
+---

@@ -22,8 +22,6 @@ dirección normalizado -- igual que ``huella_direccion`` en
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +31,7 @@ from atlas_core.almacenamiento_portable import (
     escribir_json_atomico,
     ruta_cache,
 )
+from atlas_core.geografia import cargar_geografia, texto_normalizado
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion,
     Coordenadas,
@@ -46,9 +45,8 @@ NOMBRE_ARCHIVO_PREDETERMINADO = "geocodificacion_cache.json"
 
 
 def _normalizar_direccion(direccion: str) -> str:
-    texto = unicodedata.normalize("NFKD", str(direccion).strip())
-    texto = "".join(c for c in texto if not unicodedata.combining(c)).upper()
-    return " ".join(re.findall(r"[A-Z0-9]+", texto))
+    normalizada = cargar_geografia("CL").normalizar_direccion(direccion)
+    return texto_normalizado(normalizada)
 
 
 def _clave(proveedor_nombre: str, proveedor_version: str, direccion: str) -> str:
