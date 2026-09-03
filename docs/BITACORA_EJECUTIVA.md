@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-09-03 — DISEÑO MOBILE PRODUCCIÓN M1 (recepción 24/7): APROBADO CON CAMBIOS, cierre documental
+
+- **Decisión:** el diseño de recepción Mobile 24/7 queda aprobado con cambios y documentado de forma durable en `docs/HANDOFF_ATLAS.md` para poder reconstruirlo sin el artifact externo. **No se implementó nada, no se creó infraestructura, no se tocó `G:\Mi unidad\Atlas`.**
+- **Arquitectura aprobada:** PWA (sin cambios) → intake HTTPS 24/7 en cloud (no procesa OCR/Motor) → almacenamiento durable cloud; el Motor local drena después por HTTPS y procesa localmente. Elimina de la ruta crítica el PC de Javier encendido, el dev-server 8443, el backend 8765, la IP LAN y los certificados autofirmados. Coste piloto ≈ US$6–8/mes (VPS mínimo + Caddy).
+- **5 cambios obligatorios antes de construir:** (1) desacoplar auth/repo/intake de las dependencias OCR pesadas; (2) lifecycle cloud `RECIBIDO`/`DRENADO` separado del estado operacional; (3) ACK = copia durable local, no procesamiento; (4) token de drenaje independiente + validación/rate-limit/CORS/TLS; (5) backup externo versionado con RPO ≤10 min.
+- **Orden:** M1-A intake lean + hosting → M1-B lifecycle + API de drenaje + cliente local + verificación SHA-256 + ACK tras copia durable → M1-C backup RPO ≤10 min + endurecimiento de borde + cutover a dominio productivo + operación estable de la PWA.
+- **Aclaraciones canónicas:** no se promete "exactly once" (la garantía es idempotencia / efecto único aunque haya re-descargas por fallos); el paso de la PWA dev por IP LAN al dominio productivo puede requerir un cutover/reinstalación inicial; después de eso el requisito permanente es install-once (nunca reinstalar / borrar caché / cerrar Safari / reiniciar el teléfono para recibir updates); la prueba de recuperación debe cumplir el RPO declarado, sin promesa de pérdida cero fuera de una sincronización confirmada.
+- **Separado, no bloquea M1:** hardening a–g de concurrencia del Motor; guía 472624 (diferida para el PC de casa); bloqueo de OCR PaddleOCR CPU del PC de oficina.
+
+---
+
 ## 2026-09-02 — CIERRE DE JORNADA (WIP, NO APROBADO PARA PRODUCCIÓN): consistencia operacional dataset/decisiones/reporte/Mobile
 
 - **Trabajo del día:** diseño integral de consistencia operacional para todo el subsistema que escribe dataset, `decisiones_pendientes.json`, `estado_operacion.json`, reporte y `envio.json` de Mobile, implementado en dos fases (locks unificados por recurso; eliminación de rollbacks ciegos de snapshot completo; revert por campo con verificación antes de escribir; publicación de reporte/estado sólo cuando la versión del dataset no cambió mientras se generaba), más revisión del reproceso persistido idempotente de Mobile ya existente (journal, verificación por huella, reentrada sin duplicar ni repetir OCR).
