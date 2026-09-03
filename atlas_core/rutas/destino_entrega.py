@@ -164,8 +164,19 @@ def _misma_localidad(a: CandidatoGeocodificacion, b: CandidatoGeocodificacion) -
     ya los nombró igual) -- caso real Coronel/Biobío: dos candidatos del
     mismo lugar real a ~2 km entre sí (fuera del margen de distancia de
     `_candidatos_son_el_mismo_lugar`, que asume variación de número de
-    casa, no de localidad completa). Nunca compara localidades distintas
-    por cercanía -- solo por igualdad textual exacta (sin acentos/mayúsculas)."""
+    casa, no de localidad completa).
+
+    Bloque G1-C -- identidad territorial por CÓDIGO cuando ambos
+    candidatos lo traen (ContextoGeocodificacion, ver G1-B): un alias o
+    variante de mayúsculas/tildes que resuelve a la MISMA unidad
+    administrativa oficial nunca debe leerse como "otra localidad" sólo
+    porque el texto crudo del proveedor difiere -- código idéntico basta.
+    Sólo cuando algún candidato no trae código resoluble (fuera de Chile,
+    o la geografía no pudo resolverlo EXACTA) se cae al criterio legacy:
+    igualdad textual exacta (sin acentos/mayúsculas) de localidad+región.
+    Nunca compara localidades distintas por cercanía en ningún caso."""
+    if a.codigo_unidad and b.codigo_unidad:
+        return a.codigo_pais == b.codigo_pais and a.codigo_unidad == b.codigo_unidad
     localidad_a = _texto_normalizado_sin_acentos(a.localidad)
     localidad_b = _texto_normalizado_sin_acentos(b.localidad)
     region_a = _texto_normalizado_sin_acentos(a.region)
@@ -1326,6 +1337,18 @@ class ResultadoRutaEntrega:
     direccion_entrega_geocodificada: str = ""
     localidad_entrega: str = ""
     region_entrega: str = ""
+    # Bloque G1-C -- identidad territorial por CÓDIGO (ver
+    # atlas_core.geografia.ContextoGeocodificacion), no sólo el texto de
+    # localidad/región de arriba (que conserva su semántica legacy sin
+    # cambios). Permite que `invalidar_derivados_ruta` y cualquier
+    # comparación futura usen identidad territorial real -- un alias o
+    # variante de mayúsculas/tildes que resuelve al MISMO código nunca
+    # debe leerse como un cambio; un código distinto sí. Vacíos cuando la
+    # geografía del país no pudo resolver una unidad EXACTA (mismo
+    # criterio conservador que ya usa `_contexto_geografico_desde_texto`).
+    codigo_pais: str = ""
+    codigo_unidad: str = ""
+    codigo_contexto: str = ""
     longitud_entrega: str = ""
     latitud_entrega: str = ""
     confianza_geocodificacion: str = ""
@@ -1506,6 +1529,8 @@ def calcular_ruta_con_planta_conocida(
             despachar_a_crudo=entrega.despachar_a_crudo,
             direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
             localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+            codigo_pais=entrega.codigo_pais, codigo_unidad=entrega.codigo_unidad,
+            codigo_contexto=entrega.codigo_contexto,
             longitud_entrega=str(entrega.coordenadas.longitud),
             latitud_entrega=str(entrega.coordenadas.latitud),
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -1518,6 +1543,8 @@ def calcular_ruta_con_planta_conocida(
         despachar_a_crudo=entrega.despachar_a_crudo,
         direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
         localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+        codigo_pais=entrega.codigo_pais, codigo_unidad=entrega.codigo_unidad,
+        codigo_contexto=entrega.codigo_contexto,
         longitud_entrega=str(entrega.coordenadas.longitud),
         latitud_entrega=str(entrega.coordenadas.latitud),
         confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -1621,6 +1648,8 @@ def calcular_ruta_entrega_para_viaje(
             despachar_a_crudo=entrega.despachar_a_crudo,
             direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
             localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+            codigo_pais=entrega.codigo_pais, codigo_unidad=entrega.codigo_unidad,
+            codigo_contexto=entrega.codigo_contexto,
             longitud_entrega=str(entrega.coordenadas.longitud),
             latitud_entrega=str(entrega.coordenadas.latitud),
             confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -1633,6 +1662,8 @@ def calcular_ruta_entrega_para_viaje(
         despachar_a_crudo=entrega.despachar_a_crudo,
         direccion_entrega_geocodificada=entrega.etiqueta_geocodificada,
         localidad_entrega=entrega.localidad, region_entrega=entrega.region,
+        codigo_pais=entrega.codigo_pais, codigo_unidad=entrega.codigo_unidad,
+        codigo_contexto=entrega.codigo_contexto,
         longitud_entrega=str(entrega.coordenadas.longitud),
         latitud_entrega=str(entrega.coordenadas.latitud),
         confianza_geocodificacion=str(entrega.confianza) if entrega.confianza is not None else "",
@@ -1651,6 +1682,12 @@ CAMPOS_ENTREGA_DOCUMENTO = (
     "origen_determinado_por", "evidencia_origen",
     "distancia_km", "duracion_min", "proveedor_ruta",
     "estado_ruta", "motivo_ruta",
+    # Bloque G1-C -- identidad territorial del destino por CÓDIGO opaco
+    # (ver ContextoGeocodificacion), columnas nuevas agregadas al final --
+    # backward-compatible, un dataset existente sin ellas sigue leyéndose
+    # igual (csv.DictReader por nombre de columna). localidad_entrega/
+    # region_entrega (texto legacy, arriba) NO se tocan ni se reemplazan.
+    "codigo_pais", "codigo_unidad", "codigo_contexto",
 )
 
 
@@ -1824,6 +1861,9 @@ def resolver_entrega_documento(
     resultado["direccion_entrega"] = ruta_entrega.direccion_entrega_geocodificada
     resultado["localidad_entrega"] = ruta_entrega.localidad_entrega
     resultado["region_entrega"] = ruta_entrega.region_entrega
+    resultado["codigo_pais"] = ruta_entrega.codigo_pais
+    resultado["codigo_unidad"] = ruta_entrega.codigo_unidad
+    resultado["codigo_contexto"] = ruta_entrega.codigo_contexto
     resultado["distancia_km"] = ruta_entrega.distancia_km
     resultado["duracion_min"] = ruta_entrega.duracion_min
     resultado["proveedor_ruta"] = ruta_entrega.proveedor_ruta

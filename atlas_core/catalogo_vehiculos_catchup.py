@@ -48,7 +48,7 @@ from atlas_core.catalogo_vehiculos import (
     es_confusion_ocr_de_patente,
     normalizar_patente_vehiculo,
 )
-from atlas_core.procesamiento_masivo import COLUMNAS
+from atlas_core.procesamiento_masivo import COLUMNAS, COLUMNAS_PRE_G1C
 
 _AUSENTES = {"", "No encontrado"}
 _ERRORES_CATALOGO_VEHICULOS = (OSError, ValueError)
@@ -104,7 +104,11 @@ def _leer_filas(ruta_dataset: Path) -> list[dict[str, str]]:
     try:
         with ruta_dataset.open("r", newline="", encoding="utf-8-sig") as archivo:
             lector = csv.DictReader(archivo, delimiter=";")
-            if lector.fieldnames and list(lector.fieldnames) != COLUMNAS:
+            encabezado = list(lector.fieldnames or [])
+            # COLUMNAS_PRE_G1C (Bloque G1-C): dataset real todavía sin
+            # codigo_pais/codigo_unidad/codigo_contexto -- lectura pura,
+            # sin riesgo de corromper nada; se acepta igual que COLUMNAS.
+            if encabezado and encabezado not in (COLUMNAS, COLUMNAS_PRE_G1C):
                 return []
             return list(lector)
     except (OSError, csv.Error):

@@ -61,6 +61,7 @@ from atlas_core.mobile import RepositorioEnviosMobile
 from atlas_core.modelos import EstadoValidacion
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
+    COLUMNAS_PRE_G1C,
     MOTIVOS_NO_BLOQUEANTES,
     MotivoRevisionDocumento,
     _combinar_fecha_hora,
@@ -144,6 +145,17 @@ CAMPOS_DERIVADOS_RUTA: tuple[str, ...] = (
     "distancia_km", "duracion_min", "proveedor_ruta",
     "direccion_entrega", "localidad_entrega", "region_entrega",
     "estado_ruta", "motivo_ruta", "estado_entrega",
+    # Bloque G1-C -- identidad territorial del destino por CÓDIGO opaco
+    # (ver atlas_core.geografia.ContextoGeocodificacion, G1-B). Antes de
+    # este bloque estas 3 columnas ni siquiera existían en el dataset --
+    # se calculaban en memoria (ResultadoDestinoEntrega) pero nunca
+    # llegaban a persistirse ni a esta lista, así que un cambio de
+    # dependencia base (planta u origen) invalidaba correctamente
+    # localidad_entrega/region_entrega (texto legacy) pero podía dejar
+    # codigo_unidad/codigo_contexto de una unidad territorial que ya no
+    # es la vigente. Mismo criterio que el resto de este tuple: se limpia
+    # SIEMPRE que se invalida el resto de la ruta, nunca por separado.
+    "codigo_pais", "codigo_unidad", "codigo_contexto",
 )
 
 
@@ -191,11 +203,14 @@ def derivar_estado_ruta_tras_cambio_origen(fila: Mapping[str, object]) -> dict[s
     return {"estado_ruta": "REQUIERE_REVISION", "motivo_ruta": f"DESTINO_{estado_entrega}"}
 
 
+_COLUMNAS_ACEPTADAS = (COLUMNAS, COLUMNAS_PRE_G1C, _COLUMNAS_SIN_RUT_CLIENTE)
+
+
 def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         lector = csv.DictReader(archivo, delimiter=";")
-        campos = lector.fieldnames
-        if campos != COLUMNAS and campos != _COLUMNAS_SIN_RUT_CLIENTE:
+        campos = list(lector.fieldnames or [])
+        if campos not in _COLUMNAS_ACEPTADAS:
             raise ValueError(
                 "El dataset tiene un esquema incompatible; se esperaba el encabezado oficial."
             )
@@ -1663,6 +1678,9 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
             fila["direccion_entrega"] = ""
             fila["localidad_entrega"] = ""
             fila["region_entrega"] = ""
+            fila["codigo_pais"] = ""
+            fila["codigo_unidad"] = ""
+            fila["codigo_contexto"] = ""
             fila["distancia_km"] = ""
             fila["duracion_min"] = ""
             fila["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
@@ -1724,6 +1742,9 @@ def revalidar_destino_operacional_sin_numero_de_calle_sin_ocr(
             fila["direccion_entrega"] = ""
             fila["localidad_entrega"] = ""
             fila["region_entrega"] = ""
+            fila["codigo_pais"] = ""
+            fila["codigo_unidad"] = ""
+            fila["codigo_contexto"] = ""
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
@@ -2413,11 +2434,17 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                         fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
                         fila["localidad_entrega"] = resultado.localidad_entrega
                         fila["region_entrega"] = resultado.region_entrega
+                        fila["codigo_pais"] = resultado.codigo_pais
+                        fila["codigo_unidad"] = resultado.codigo_unidad
+                        fila["codigo_contexto"] = resultado.codigo_contexto
                         guias_actualizadas.append(str(fila.get("numero_guia", "")))
                 continue
             fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
             fila["localidad_entrega"] = resultado.localidad_entrega
             fila["region_entrega"] = resultado.region_entrega
+            fila["codigo_pais"] = resultado.codigo_pais
+            fila["codigo_unidad"] = resultado.codigo_unidad
+            fila["codigo_contexto"] = resultado.codigo_contexto
             fila["distancia_km"] = resultado.distancia_km
             fila["duracion_min"] = resultado.duracion_min
             fila["proveedor_ruta"] = resultado.proveedor_ruta

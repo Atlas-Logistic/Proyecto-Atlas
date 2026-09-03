@@ -23,7 +23,7 @@ from atlas_core.decisiones_pendientes import (
 from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.procesamiento_masivo import (
-    COLUMNAS, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
+    COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
 )
 
 ESTADOS = (
@@ -411,11 +411,26 @@ def _procesar_envio_mobile_impl(
 
         filas: list[dict[str, str]] = []
         encabezado_compatible = True
+        # Bloque G1-C -- `COLUMNAS` ganó codigo_pais/codigo_unidad/
+        # codigo_contexto; el dataset real todavía no las tiene
+        # (`COLUMNAS_PRE_G1C`, sin migración masiva). `_escribir_filas`
+        # (más abajo) sólo AGREGA (modo "a", nunca reescribe el
+        # encabezado ya en disco) -- si se le dejara escribir directo
+        # sobre un archivo con el encabezado viejo, las filas nuevas
+        # quedarían con más columnas que el encabezado, corrompiendo el
+        # CSV. Se detecta ese caso concreto (nunca cualquier esquema
+        # reducido -- eso sigue siendo incompatible de verdad, ver abajo)
+        # para forzar una reescritura completa UNA sola vez, en vez de un
+        # append a ciegas.
+        requiere_migracion_g1c = False
         if dataset and dataset.is_file():
             with dataset.open(encoding="utf-8-sig", newline="") as archivo:
                 lector = csv.DictReader(archivo, delimiter=";")
                 filas = list(lector)
-                if lector.fieldnames and list(lector.fieldnames) != COLUMNAS:
+                encabezado_actual = list(lector.fieldnames or [])
+                if encabezado_actual == COLUMNAS_PRE_G1C:
+                    requiere_migracion_g1c = True
+                elif encabezado_actual and encabezado_actual != COLUMNAS:
                     # Dataset de esquema reducido (p. ej. fixtures de
                     # prueba): se sigue usando para la asociación por
                     # guía/transporte, pero nunca se le escribe una fila
@@ -452,11 +467,26 @@ def _procesar_envio_mobile_impl(
             # fila.
             with bloqueo_sesion(dataset.parent, NOMBRE_LOCK_DATASET_OPERACIONAL):
                 filas_frescas: list[dict[str, str]] = []
+                encabezado_fresco: list[str] = []
                 if dataset.is_file():
                     with dataset.open(encoding="utf-8-sig", newline="") as archivo_csv:
-                        filas_frescas = list(csv.DictReader(archivo_csv, delimiter=";"))
+                        lector_fresco = csv.DictReader(archivo_csv, delimiter=";")
+                        filas_frescas = list(lector_fresco)
+                        encabezado_fresco = list(lector_fresco.fieldnames or [])
                 if identificador not in {f.get("archivo", "") for f in filas_frescas}:
-                    _escribir_filas(dataset, [fila])
+                    if encabezado_fresco == COLUMNAS_PRE_G1C:
+                        # Bloque G1-C -- primer escritor real que toca este
+                        # dataset desde que `COLUMNAS` creció: reescritura
+                        # completa UNA vez (mismo escritor atómico que ya
+                        # usan las revalidaciones `_sin_ocr`), nunca un
+                        # append a ciegas sobre un encabezado más corto que
+                        # las filas que va a escribir. Filas viejas quedan
+                        # con codigo_pais/codigo_unidad/codigo_contexto=""
+                        # -- nunca se inventa un valor real para ellas.
+                        from atlas_core.revalidacion_documental import _escribir_filas_completas
+                        _escribir_filas_completas(dataset, filas_frescas + [fila])
+                    else:
+                        _escribir_filas(dataset, [fila])
                     archivo_dataset = identificador
 
         if carpeta_catalogos is not None:

@@ -34,7 +34,7 @@ from atlas_core.catalogo_vehiculos_catchup import (
     detectar_pares_sospechosos,
 )
 from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json
-from atlas_core.procesamiento_masivo import COLUMNAS
+from atlas_core.procesamiento_masivo import COLUMNAS, COLUMNAS_PRE_G1C
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 
 _AUSENTES = {"", "No encontrado"}
@@ -51,7 +51,11 @@ def _leer_filas_dataset(raiz_atlas: str | Path) -> list[dict[str, str]]:
     try:
         with ruta.open("r", newline="", encoding="utf-8-sig") as archivo:
             lector = csv.DictReader(archivo, delimiter=";")
-            if lector.fieldnames and list(lector.fieldnames) != COLUMNAS:
+            encabezado = list(lector.fieldnames or [])
+            # COLUMNAS_PRE_G1C (Bloque G1-C): dataset real todavía sin
+            # codigo_pais/codigo_unidad/codigo_contexto -- lectura pura,
+            # sin riesgo de corromper nada; se acepta igual que COLUMNAS.
+            if encabezado and encabezado not in (COLUMNAS, COLUMNAS_PRE_G1C):
                 return []  # esquema incompatible (p. ej. fixture reducido) -- nunca se arriesga a leer mal
             return list(lector)
     except (OSError, csv.Error):

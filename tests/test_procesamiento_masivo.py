@@ -1353,6 +1353,11 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "duracion_estadia_gps_min",
         # Bloque RUT CLIENTE V1 -- mismo criterio que rut_chofer, ver COLUMNAS.
         "rut_cliente",
+        # Bloque G1-C -- identidad territorial del destino por código
+        # opaco (ver atlas_core.geografia.ContextoGeocodificacion).
+        "codigo_pais",
+        "codigo_unidad",
+        "codigo_contexto",
     }
 
 

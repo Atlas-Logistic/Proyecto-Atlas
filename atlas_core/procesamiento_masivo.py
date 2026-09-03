@@ -307,6 +307,19 @@ _COLUMNAS_R4_NUEVAS = {
 }
 COLUMNAS_PRE_R4 = [columna for columna in COLUMNAS if columna not in _COLUMNAS_R4_NUEVAS]
 
+# Bloque G1-C: identidad territorial del destino por código opaco
+# (codigo_pais/codigo_unidad/codigo_contexto -- ver
+# atlas_core.geografia.ContextoGeocodificacion) agregada a
+# CAMPOS_ENTREGA_DOCUMENTO. El dataset real de producción (nunca migrado
+# masivamente por este bloque, ver `atlas_core.revalidacion_documental.
+# _COLUMNAS_SIN_RUT_CLIENTE` para el mismo patrón con la migración
+# anterior) sigue sin estas 3 columnas hasta que un escritor real las
+# agregue de forma perezosa -- toda validación de esquema contra
+# `COLUMNAS` debe aceptar también esta variante, igual que ya acepta
+# `COLUMNAS_PRE_R4`.
+_COLUMNAS_G1C_NUEVAS = {"codigo_pais", "codigo_unidad", "codigo_contexto"}
+COLUMNAS_PRE_G1C = [columna for columna in COLUMNAS if columna not in _COLUMNAS_G1C_NUEVAS]
+
 Procesador = Callable[[Path], Mapping[str, object]]
 
 
@@ -2138,6 +2151,9 @@ def procesar_archivo(
                                     "direccion_entrega": ruta_recalculada.direccion_entrega_geocodificada,
                                     "localidad_entrega": ruta_recalculada.localidad_entrega,
                                     "region_entrega": ruta_recalculada.region_entrega,
+                                    "codigo_pais": ruta_recalculada.codigo_pais,
+                                    "codigo_unidad": ruta_recalculada.codigo_unidad,
+                                    "codigo_contexto": ruta_recalculada.codigo_contexto,
                                     "estado_entrega": (
                                         "RESUELTO" if ruta_recalculada.direccion_entrega_geocodificada
                                         else "REVISAR"
@@ -2153,9 +2169,16 @@ def procesar_archivo(
                                 # recalcular -- igual se invalida cualquier
                                 # distancia/duración que hubiera quedado del
                                 # origen equivocado, nunca se deja una ruta
-                                # calculada desde la planta incorrecta.
+                                # calculada desde la planta incorrecta. Bloque
+                                # G1-C: la identidad territorial por código del
+                                # destino depende de la MISMA ruta calculada --
+                                # se invalida junto con distancia/duración,
+                                # nunca sobrevive sola.
                                 resultado_entrega["distancia_km"] = ""
                                 resultado_entrega["duracion_min"] = ""
+                                resultado_entrega["codigo_pais"] = ""
+                                resultado_entrega["codigo_unidad"] = ""
+                                resultado_entrega["codigo_contexto"] = ""
                                 resultado_entrega["estado_ruta"] = "ORIGEN_NO_DETERMINADO" if planta_confirmada is None else resultado_entrega.get("estado_ruta", "")
                             logger.info(
                                 "telemetria-corrige-origen-v1 planta_antes=%s planta_gps=%s",
@@ -2376,7 +2399,15 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
         filas = list(lector)
         encabezado = list(lector.fieldnames or [])
     if encabezado != COLUMNAS:
-        if encabezado != COLUMNAS_PRE_R4:
+        # Bloque G1-C: mismo patrón de migración perezosa que ya usa la
+        # rama R4 de abajo -- un dataset real todavía sin
+        # codigo_pais/codigo_unidad/codigo_contexto (columnas nuevas, ver
+        # COLUMNAS_PRE_G1C) se acepta igual y se reescribe con el
+        # encabezado completo (restval="" para las filas existentes,
+        # nunca inventa un valor real). Nunca migra masivamente datos
+        # reales por su cuenta -- sólo normaliza el ENCABEZADO la próxima
+        # vez que este mismo flujo ya iba a escribir en el archivo.
+        if encabezado not in (COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C):
             raise ValueError(
                 "El CSV existente tiene un esquema incompatible. "
                 "Se esperaba el encabezado exacto separado por ';'."

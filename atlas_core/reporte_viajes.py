@@ -37,7 +37,21 @@ from atlas_core.gestor_viajes import EstadoViaje, agrupar_viajes
 from atlas_core.procesamiento_masivo import COLUMNAS as COLUMNAS_PROCESAMIENTO
 
 
-COLUMNAS_OFICIALES = tuple(COLUMNAS_PROCESAMIENTO)
+# Bloque G1-C: codigo_pais/codigo_unidad/codigo_contexto (identidad
+# territorial del destino por código opaco, ver
+# atlas_core.geografia.ContextoGeocodificacion) son columnas NUEVAS de
+# `procesamiento_masivo.COLUMNAS` -- el dataset real de producción no las
+# tiene todavía (sin migración masiva, mismo criterio que el resto de
+# este bloque) y `COLUMNAS_OBLIGATORIAS` exige que TODA columna de
+# `COLUMNAS_OFICIALES` esté presente (`_validar_esquema`, más abajo).
+# Tratarlas como obligatorias rompería la generación de reporte contra
+# el dataset real hasta que algo más lo migre -- se excluyen de lo
+# obligatorio y se preservan como opcionales, igual que `COLUMNAS_
+# HISTORICAS` (nunca se inventa un valor si faltan).
+COLUMNAS_OPCIONALES_G1C = ("codigo_pais", "codigo_unidad", "codigo_contexto")
+COLUMNAS_OFICIALES = tuple(
+    c for c in COLUMNAS_PROCESAMIENTO if c not in COLUMNAS_OPCIONALES_G1C
+)
 COLUMNAS_HISTORICAS = (
     "numero_guia_fuente",
     "numero_guia_motivo",
