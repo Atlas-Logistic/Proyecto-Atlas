@@ -4,6 +4,85 @@ Estado de traspaso para quien retome el trabajo. Se actualiza al cierre de cada 
 
 ---
 
+## 2026-09-03 — HANDOFF OFICINA → CASA (fin de jornada)
+
+**No hay implementación M1/G1 a medias** — todo lo de hoy es diseño + documentación. Al llegar a casa: sincronizar y arrancar (~5 min, bloque `ARRANQUE EN CASA` al final de esta entrada). **NO reprocesar 472624 automáticamente.**
+
+**1. Motor (oficina), estado al cierre:**
+- Repo `Proyecto-Atlas-lector-mvp-oficina` · rama `lector-mvp-guia-nueva`
+- HEAD `7a48a5e39c9336c4077783b03f14fd8224e5f50c` (`docs: cierre documental del diseno Geografia G1`)
+- local = remoto `0  0` · working tree limpio
+- Repos hermanos en oficina, también `0  0` y limpios, ramas ya alineadas con casa: Mobile `Atlas-Conductores-Mobile` rama `fix-mobile-login-ux` HEAD `1114442`; Desktop `Atlas-Viajes-Desktop` rama `fix-desktop-data-root-drag-drop` HEAD `45f4e7c`.
+
+**2. Estado de hoy:**
+- **Mobile Producción M1 24/7**: diseñado y documentado (entrada `CIERRE DOCUMENTAL: DISEÑO MOBILE PRODUCCIÓN M1`), APROBADO CON CAMBIOS, sin implementar.
+- **Geografía G1 multipaís**: diseñada y documentada (entrada `CIERRE DOCUMENTAL: DISEÑO GEOGRAFÍA G1`), APROBADA, sin implementar.
+- **472624**: diferida para casa. No se reprocesa al llegar.
+- **PaddleOCR en el PC de oficina**: no es práctico para fotos Mobile de 12 MP a resolución nativa en CPU (startup ~8 s OK, inferencia full-res > 9 min, excede el watchdog de 180 s; i5-1135G7, sin GPU NVIDIA). Nota de contexto, no bloquea M1/G1.
+
+**3. Sincronización en casa.** Rutas y ramas de casa:
+
+| Repo | Ruta (casa) | Rama |
+|---|---|---|
+| MOTOR | `C:\Users\Jjjc0508\Desktop\Atlas\Proyecto-Atlas` | `lector-mvp-guia-nueva` |
+| DESKTOP | `C:\Users\Jjjc0508\Desktop\Atlas\Atlas-Viajes-Desktop-Restaurado` | `fix-desktop-data-root-drag-drop` |
+| MOBILE | `C:\Users\Jjjc0508\Desktop\Atlas\Atlas-Conductores-Mobile` | `fix-mobile-login-ux` |
+
+Para cada repo, en orden MOTOR → DESKTOP → MOBILE: `git fetch` → confirmar la rama → `git status` limpio → `git pull --ff-only` → `git status -sb` sin `[ahead/behind]`. Motor debe quedar en HEAD `7a48a5e`. Si `git pull --ff-only` falla por trabajo local sin commitear en casa: **parar y revisar a mano, no forzar.**
+
+**4. Entorno local de casa (NO viaja por Git) — preflight, sin instalar ni cambiar nada.** Valores de referencia observados HOY en el PC de oficina; deben existir equivalentes en casa (si falta alguno se define allí, no ahora):
+
+| Elemento | Oficina (referencia, enmascarado) | Confirmar en casa |
+|---|---|---|
+| `ATLAS_DATA_DIR` | `G:\Mi unidad\Atlas` | apunta a la copia local de Atlas en casa |
+| `GROQ_API_KEY` | SET, 56 chars (`gsk_…`) | sólo presencia + longitud, nunca el valor |
+| `ATLAS_MOBILE_TOKEN_SECRET` | SET, 44 chars | ídem |
+| `OPENROUTESERVICE_API_KEY` | SET, 120 chars (JWT) | ídem |
+| Runtime Paddle | `%LOCALAPPDATA%\Atlas\runtime\paddleocr`, `.version` = `3.7.0+3.3.1`, `python.exe` presente | `Test-Path` + `Get-Content .version` |
+| GPU NVIDIA/CUDA | **ninguna en oficina** | `nvidia-smi` — si responde, casa tiene GPU (cambia la decisión sobre PaddleOCR y 472624) |
+
+**5. 472624:** NO se reprocesa automáticamente al llegar. Primero se mide PaddleOCR en casa **read-only / no persistente** (separar import / init / inferencia a resolución nativa y a ≤2048 px; si hay GPU, medir en GPU). Sólo después de esos números se decide si se retoma la guía.
+
+**6. Próximos bloques listos (no iniciar ninguno automáticamente):**
+- **Prioridad operacional: Mobile Producción M1-A** — núcleo intake lean + hosting. Requiere decidir hosting/dominio antes de tocar código.
+- **Siguiente estructural: Geografía G1-A** — núcleo genérico `atlas_core/geografia/` + adaptador Chile + catálogo oficial + shim.
+- **Pruebas Mobile reales pendientes:** 5 guías físicas; la agrupación esperada es **desconocida para Atlas durante la prueba** (Atlas debe resolverla, no se le informa).
+
+**7. Levantar Mobile dev en casa (más tarde, NO ahora).** Desde `Atlas-Conductores-Mobile`: `npm run generar-certificado` (una vez, o si cambió la IP LAN), luego `npm run dev:demo` (HTTPS + login de prueba, imprime `https://<ip-del-PC>:8443/`). En paralelo el backend: desde `Proyecto-Atlas`, `python servidor_mobile.py --raiz-atlas "%ATLAS_DATA_DIR%"` (escucha `127.0.0.1:8765`; el dev-server 8443 hace de proxy; requiere `ATLAS_MOBILE_TOKEN_SECRET`). Sin `npm install` (el repo no tiene dependencias externas).
+
+### ARRANQUE EN CASA — 5 MIN
+
+```powershell
+# 1) MOTOR
+cd C:\Users\Jjjc0508\Desktop\Atlas\Proyecto-Atlas
+git fetch; git checkout lector-mvp-guia-nueva; git status -sb; git pull --ff-only
+git rev-list --left-right --count "HEAD...@{u}"   # esperado: 0   0
+git rev-parse HEAD                                 # esperado: 7a48a5e39c9336c4077783b03f14fd8224e5f50c
+
+# 2) DESKTOP
+cd C:\Users\Jjjc0508\Desktop\Atlas\Atlas-Viajes-Desktop-Restaurado
+git fetch; git checkout fix-desktop-data-root-drag-drop; git status -sb; git pull --ff-only
+git rev-list --left-right --count "HEAD...@{u}"   # esperado: 0   0
+
+# 3) MOBILE
+cd C:\Users\Jjjc0508\Desktop\Atlas\Atlas-Conductores-Mobile
+git fetch; git checkout fix-mobile-login-ux; git status -sb; git pull --ff-only
+git rev-list --left-right --count "HEAD...@{u}"   # esperado: 0   0
+
+# 4) PREFLIGHT ENTORNO (no instala ni cambia nada)
+foreach ($k in 'ATLAS_DATA_DIR','GROQ_API_KEY','ATLAS_MOBILE_TOKEN_SECRET','OPENROUTESERVICE_API_KEY') {
+  $v = [Environment]::GetEnvironmentVariable($k,'User'); if (-not $v) { $v = [Environment]::GetEnvironmentVariable($k,'Process') }
+  if ($k -eq 'ATLAS_DATA_DIR') { "$k = $v" } elseif ($v) { "$k: SET len=$($v.Length)" } else { "$k: MISSING" }
+}
+Test-Path "$env:LOCALAPPDATA\Atlas\runtime\paddleocr\Scripts\python.exe"
+Get-Content "$env:LOCALAPPDATA\Atlas\runtime\paddleocr\.version" -ErrorAction SilentlyContinue
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader   # si falla: sin GPU NVIDIA
+```
+
+Con los 3 repos en `0  0` y limpios y el preflight revisado: **listo para trabajar.** No arrancar M1-A, G1-A, el reproceso de 472624 ni las pruebas Mobile automáticamente — cada uno se decide explícitamente.
+
+---
+
 ## 2026-09-03 — CIERRE DOCUMENTAL: DISEÑO GEOGRAFÍA G1 (capa geográfica multipaís + catálogo oficial de comunas) — APROBADO, sin implementar
 
 **Qué es G1.** Integrar el catálogo territorial OFICIAL de Chile (SUBDERE, `CUT_2018`, 346 comunas, con códigos y provincia; investigación en `G:\Mi unidad\Atlas\investigacion\geografia_chile_g1\`, ya validada 346/346 contra la fuente) al subsistema geográfico de Atlas, sobre un NÚCLEO GENÉRICO MULTIPAÍS. **Sólo cierre documental: no se implementó G1, no se copió el dataset al catálogo productivo, no se modificó lógica, no se tocó `G:\Mi unidad\Atlas`.**
