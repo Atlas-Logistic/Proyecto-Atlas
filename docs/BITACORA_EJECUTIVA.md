@@ -4,6 +4,17 @@ Registro de alto nivel de los bloques de trabajo cerrados sobre el lector de gu�
 
 ---
 
+## 2026-09-03 — DISEÑO GEOGRAFÍA G1 (capa geográfica multipaís + catálogo oficial de comunas): APROBADO, cierre documental
+
+- **Decisión:** el diseño corregido de Geografía G1 queda aprobado y documentado de forma durable en `docs/HANDOFF_ATLAS.md` para poder empezar G1-A sin el artifact externo. **No se implementó, no se copió el dataset al catálogo productivo, no se modificó lógica, no se tocó `G:\Mi unidad\Atlas`.**
+- **Decisión arquitectónica:** la capa geográfica de Atlas es **multipaís desde el contrato**. Chile/SUBDERE es el primer adaptador/dataset, no el modelo del núcleo. Agregar otro país (p. ej. Colombia: departamento + municipio/distrito) debe requerir **adaptador + dataset**, nunca rediseñar routing ni la capa geográfica.
+- **Núcleo genérico `atlas_core/geografia/`:** `UnidadAdministrativa` (país, nivel ordinal, código oficial opaco, `codigo_padre`, nombre canónico/normalizado, aliases, geometría opcional, metadata), `ResultadoNormalizacion` genérico, protocolo `GeografiaPais`, `cargar_geografia(codigo_pais)`. Adaptadores por país; el primero es `geografia/cl.py` (región/provincia/comuna + CUT, 16/56/346). El catálogo oficial SUBDERE (346, verificado) reemplaza el snapshot no oficial actual de 345.
+- **Hallazgos que justifican G1:** territorio hardcodeado en código, fuente no oficial, 345 vs 346 comunas oficiales, sin CUT ni provincia, normalización fragmentada (3 funciones), caché de geocodificación sin territorio, supuestos RM/`"SANTIAGO"` dentro del motor.
+- **Consecuencias del diseño:** una autoridad canónica de normalización territorial desde G1 (las otras delegan); routing/geocodificación/caché/validación consumen el contrato genérico; la caché usa `codigo_unidad` genérico; `comuna`/`region`/`codigo_comuna` permanecen sólo por compatibilidad hacia atrás; un cambio territorial invalida los derivados de ruta; `RANGO_*_RM` y el literal `"SANTIAGO"` dejan de ser supuestos del motor; polígonos = G2.
+- **Plan:** G1-A núcleo genérico + adaptador Chile + catálogo oficial + shim → G1-B geocodificación estructurada + validación por código + caché → G1-C invalidación de derivados + eliminación de supuestos RM + cierre. Tamaño total ≈ M.
+
+---
+
 ## 2026-09-03 — DISEÑO MOBILE PRODUCCIÓN M1 (recepción 24/7): APROBADO CON CAMBIOS, cierre documental
 
 - **Decisión:** el diseño de recepción Mobile 24/7 queda aprobado con cambios y documentado de forma durable en `docs/HANDOFF_ATLAS.md` para poder reconstruirlo sin el artifact externo. **No se implementó nada, no se creó infraestructura, no se tocó `G:\Mi unidad\Atlas`.**

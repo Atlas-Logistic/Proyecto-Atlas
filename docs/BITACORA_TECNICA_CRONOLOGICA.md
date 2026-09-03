@@ -4577,3 +4577,38 @@ Revisión de diseño (sin implementar, sin infraestructura, sin tocar `G:\Mi uni
 **Separado, no bloquea M1:** 7 bloqueantes a–g de concurrencia del Motor (entrada 2026-09-02); guía 472624 (diferida, PC de casa); bloqueo de OCR PaddleOCR CPU del PC de oficina (worker excede watchdog de 180 s sobre imagen de 12 MP; startup ~8 s, inferencia full-res > 9 min; requiere GPU o downscale = cambio de código).
 
 **Git:** sólo `docs/` en este commit. Ningún cambio de código ni de infraestructura. `G:\Mi unidad\Atlas` no tocado.
+
+## 2026-09-03 — DISEÑO GEOGRAFÍA G1 (capa geográfica multipaís + catálogo oficial de comunas) — CIERRE DOCUMENTAL, APROBADO
+
+Revisión + diseño (sin implementar, sin copiar datasets al catálogo productivo, sin modificar lógica, sin tocar `G:\Mi unidad\Atlas`). Cruce del subsistema geográfico actual con la investigación `G:\Mi unidad\Atlas\investigacion\geografia_chile_g1\` (catálogo SUBDERE `CUT_2018`, 346 comunas, ya validado 346/346 contra la fuente).
+
+**Subsistema geográfico actual (mapa).** Comuna/territorio: `atlas_core/territorio_chile.py` — snapshot **hardcodeado**, 16 regiones / **345** comunas, adaptado de `jromerof/regiones-chile` (no oficial) con typos parchados a mano; expone `normalizar_comuna()` (exacta / fuzzy difflib ≥0.87 / ambigua / no reconocida), `region_valida()` (mapa de alias), `normalizar_direccion_con_comunas()`; sin provincia, sin códigos CUT, sin polígonos; lo importan sólo `rutas/destino_entrega.py` y `rutas/nominatim.py`. Destino: `rutas/destino_estructurado.py` + `catalogo_destinos.py` (`Destino.comuna`/`region` texto libre; `clave_fisica_destino` por nombres normalizados). Geocodificación: `rutas/openrouteservice.py` (Pelias, `boundary.country=CL`, sólo texto libre) + `rutas/nominatim.py` (respaldo, modo estructurado por parseo frágil). Caché: `rutas/cache_geocodificacion.py`, clave `(proveedor, versión, dirección)` — `version` embebe sólo `pais`. Ruteo: `OpenRouteService.calcular_ruta` (driving-hgv) vía `enriquecimiento_viaje.py` / `destino_entrega.py`. Validación territorial: `_comunas_territorialmente_compatibles` (caso especial literal `"SANTIAGO"`) + `RANGO_LATITUD_RM/LONGITUD_RM` (bounding box RM hardcodeado). Derivados de origen/destino en el dataset: `direccion/localidad/region_entrega`, `estado_entrega`, `planta_origen_*`, `distancia_km`, `duracion_min`, `estado_ruta`, `motivo_ruta` — invariante R2.5 (`CAMPOS_DERIVADOS_RUTA` + `invalidar_derivados_ruta()`) dispara con cambio de planta o dirección.
+
+**Hallazgos que justifican G1:** territorio hardcodeado en código; fuente no oficial; 345 vs 346 oficiales; sin CUT ni nivel provincia (todo indexa por nombre); normalización geográfica fragmentada (`_texto_simple_territorio`, `normalizar_nombre_destino`, `_normalizar_direccion` — sin forma canónica compartida); caché sin territorio (un cambio de catálogo no invalida entradas); supuestos RM/`"SANTIAGO"` dentro del motor.
+
+**Decisión arquitectónica: capa geográfica MULTIPAÍS.** Chile/SUBDERE = primer adaptador/dataset, no el modelo del núcleo. Agregar otro país = adaptador + dataset, nunca rediseñar routing.
+
+**Núcleo genérico `atlas_core/geografia/` (neutro de país):**
+- `UnidadAdministrativa`: `codigo_pais` · `nivel` (ordinal 1..N, nunca conteo fijo) · `codigo` (oficial estable, opaco — el motor no lo parsea) · `codigo_padre` (jerarquía) · `nombre_canonico` · `nombre_normalizado` (única forma canónica) · `aliases` · `geometria` (opcional, por `codigo`; G2) · `metadata` (extras por país).
+- `ResultadoNormalizacion` (reemplaza `ResultadoNormalizacionComuna`): `estado` (EXACTA/NORMALIZADA_SEGURA/AMBIGUA/NO_RECONOCIDA — sin cambios) · `valor_original` · `unidad` · `similitud` · `unidad_de_nivel(n)` (sube por `codigo_padre` — reemplaza el campo `region`).
+- Protocolo `GeografiaPais`: `codigo_pais` (alfa-2/alfa-3) · `niveles` · `nivel_geocodificable` · `nivel_region_geocodificacion` · `normalizar(texto, nivel=None)` · `normalizar_direccion(texto)` · `buscar_por_codigo(codigo)` · `parametros_geocodificacion(unidad)` · `compatibilidad_territorial(a, b)`.
+- `cargar_geografia(codigo_pais)` — `PAIS_OPERACION_PREDETERMINADO` elige el default.
+- Motor de normalización en el núcleo como defaults (estados + umbrales fuzzy `0.87` / `0.06` / long≥`4`); índice de unidades y lista de palabras estructurales inyectados por el adaptador.
+
+**Adaptador Chile `geografia/cl.py`:** etiquetas región/provincia/comuna; 16/56/346; `nivel_geocodificable = comuna`; CUT + `abreviatura_region`; alias de región (`"RM"`…) → `aliases` de NIVEL_1; vocabulario español de dirección; "Santiago área metropolitana" → alias, no `if`; bounding box RM → `rango_operacion` del contexto. Dataset `geografia_chile.json` en `catalogos_privados/` (patrón portable) + sidecar de procedencia; **reemplaza el snapshot no oficial de 345**.
+
+**Consecuencias:**
+- **Una autoridad canónica de normalización desde G1**: `catalogo_destinos.normalizar_nombre_destino` y `cache_geocodificacion._normalizar_direccion` **delegan** en el adaptador (no reescritura); fundir los tres cuerpos en uno solo = posterior.
+- Geocodificación estructurada: adaptadores consumen `parametros_geocodificacion(unidad)`, nunca "comuna"/"región"; texto libre de fallback.
+- Validación post-geocodificación: `compatibilidad_territorial` por `codigo` + ancestro; reemplaza `_comunas_territorialmente_compatibles` y el literal `"SANTIAGO"`.
+- Caché: `codigo_unidad` genérico en la clave + subir `version`.
+- Routing (`calcular_ruta` driving-hgv, `ServicioRutas`, `RepositorioRutas`): **sin cambios** (sólo coordenadas); `OpenRouteService(pais=…)`/`NominatimGeocoder(pais=…)` ya reciben ISO de país.
+- Compatibilidad hacia atrás: `comuna`/`region`/`codigo_comuna` permanecen (dataset y `Destino`), poblados desde `UnidadAdministrativa`; no definen el modelo interno.
+- Invalidación de derivados: cambio territorial del destino (unidad geocodificable o ancestro región) → `invalidar_derivados_ruta()` + descarte de caché stale.
+- Polígonos = G2 (test geométrico punto-en-unidad; depende de GIS + reproyección EPSG:5360→4326, fuera del entorno).
+
+**Colombia — sólo valida el contrato (sin investigar ni implementar):** departamento (NIVEL_1) + municipio/distrito (NIVEL_2, `nivel_geocodificable=2`); DIVIPOLA como `codigo`; `metadata.tipo` = MUNICIPIO/DISTRITO; Bogotá D.C. = unidad NIVEL_2 con `codigo_padre` a NIVEL_1 homónima (sin `if`); distinto número de niveles resuelto con ordinales + `nivel_geocodificable`. **Agregar otro país = adaptador + dataset; routing/núcleo/caché/validación no cambian.**
+
+**Plan aprobado (≈ M):** G1-A núcleo genérico + adaptador Chile + catálogo oficial + shim (`territorio_chile.py` → shim sobre `cargar_geografia("CL")`; delega la normalización de destino/caché; gate: suite verde + `test_territorial_t1.py` sin cambios + casos fuzzy idénticos + fixture Colombia de 2 niveles cumple el contrato). G1-B geocodificación estructurada + validación por código + `codigo_unidad` en la caché (gate: `test_rutas_nominatim.py`/`test_fallback_geografico_estructurado.py`/`test_territorial_t1.py`/`test_destino_comuna_contradiccion_r410.py`; sin regresión en `test_rutas_destino_entrega.py`). G1-C invalidación de derivados por cambio territorial + `RANGO_*_RM` → `rango_operacion` + compatibilidad hacia atrás + cierre (gate: `test_revalidar_ruta_sin_destino_r410.py`/`test_r2_4_coherencia_ruta_reactiva.py`/`test_p1_resolucion_reactiva_destino_km.py` + test nuevo de invalidación por corrección territorial).
+
+**Git:** sólo `docs/` en este commit. Ningún cambio de código, ninguna copia de dataset al catálogo productivo. `G:\Mi unidad\Atlas` no tocado.
