@@ -33,6 +33,17 @@ class UnidadAdministrativa:
 
 
 @dataclass(frozen=True)
+class ContextoGeocodificacion:
+    """Contexto territorial neutral que acompaña una consulta geográfica."""
+
+    codigo_pais: str
+    codigo_unidad: str
+    nombre_unidad: str
+    codigo_contexto: str = ""
+    nombre_contexto: str = ""
+
+
+@dataclass(frozen=True)
 class ResultadoNormalizacion:
     estado: EstadoNormalizacion
     valor_original: str

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from atlas_core.geografia import ContextoGeocodificacion
+
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion,
     Coordenadas,
@@ -19,6 +21,10 @@ class ProveedorRutas(Protocol):
     version: str
 
     def geocodificar(self, direccion: str) -> ResultadoGeocodificacion: ...
+
+    def geocodificar_estructurado(
+        self, direccion: str, contexto: ContextoGeocodificacion
+    ) -> ResultadoGeocodificacion: ...
 
     def calcular_ruta(
         self, origen: Coordenadas, destino: Coordenadas, perfil: str
@@ -48,6 +54,11 @@ class ProveedorRutasSimulado:
                 "CANDIDATO_SINTETICO",
             ),
         )
+
+    def geocodificar_estructurado(
+        self, direccion: str, contexto: ContextoGeocodificacion
+    ) -> ResultadoGeocodificacion:
+        return self.geocodificar(direccion)
 
     def calcular_ruta(
         self, origen: Coordenadas, destino: Coordenadas, perfil: str

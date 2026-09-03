@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from atlas_core.geografia import (
-    EstadoNormalizacion, GeografiaPais, MotorNormalizacion,
+    ContextoGeocodificacion, EstadoNormalizacion, GeografiaPais, MotorNormalizacion,
     UnidadAdministrativa, cargar_geografia, texto_normalizado,
 )
 from atlas_core.geografia.cl import NIVEL_COMUNA, NIVEL_PROVINCIA, NIVEL_REGION, RUTA_DATASET
@@ -106,7 +106,13 @@ class GeografiaPruebaDosNiveles:
     def normalizar(self, texto, nivel=None): return self.motor.normalizar(texto, nivel)
     def normalizar_direccion(self, texto): return self.motor.normalizar_direccion(texto, nivel=2)
     def buscar_por_codigo(self, codigo): return self.motor.por_codigo.get(codigo)
-    def parametros_geocodificacion(self, unidad): return {"codigo_pais": "XX", "unidad": unidad.nombre_canonico}
+
+    def parametros_geocodificacion(self, unidad):
+        padre = self.motor.por_codigo.get(unidad.codigo_padre) if unidad.codigo_padre else None
+        return ContextoGeocodificacion(
+            codigo_pais="XX", codigo_unidad=unidad.codigo, nombre_unidad=unidad.nombre_canonico,
+            codigo_contexto=padre.codigo if padre else "", nombre_contexto=padre.nombre_canonico if padre else "",
+        )
     def compatibilidad_territorial(self, a, b): return a.codigo == b.codigo or a.codigo_padre == b.codigo
 
 
@@ -116,3 +122,9 @@ def test_fixture_multipais_dos_niveles_cumple_core_sin_semantica_chile():
     resultado = geografia.normalizar("Municipio Uno", nivel=2)
     assert resultado.unidad and resultado.unidad_de_nivel(1).nombre_canonico == "Departamento A"
     assert "comuna" not in vars(geografia) and "región" not in vars(geografia)
+    # G1-B: parametros_geocodificacion también cumple el contrato genérico
+    # (ContextoGeocodificacion), sin tocar el core para este país ficticio.
+    contexto = geografia.parametros_geocodificacion(resultado.unidad)
+    assert contexto.codigo_pais == "XX"
+    assert contexto.nombre_unidad == "Municipio Uno"
+    assert contexto.nombre_contexto == "Departamento A"

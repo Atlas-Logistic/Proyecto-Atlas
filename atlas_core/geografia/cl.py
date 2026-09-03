@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from types import MappingProxyType
 
-from .modelos import ResultadoNormalizacion, UnidadAdministrativa
+from .modelos import ContextoGeocodificacion, ResultadoNormalizacion, UnidadAdministrativa
 from .motor import MotorNormalizacion, texto_normalizado
 
 NIVEL_REGION = 1
@@ -102,17 +102,26 @@ class GeografiaChile:
     def buscar_por_codigo(self, codigo: str) -> UnidadAdministrativa | None:
         return self.motor.por_codigo.get(str(codigo))
 
-    def parametros_geocodificacion(self, unidad: UnidadAdministrativa) -> dict[str, str]:
-        parametros = {"codigo_pais": self.codigo_pais, "unidad": unidad.nombre_canonico}
-        region = self._ancestro(unidad, NIVEL_REGION)
-        if region is not None:
-            parametros["region"] = region.nombre_canonico
-        return parametros
+    def parametros_geocodificacion(self, unidad: UnidadAdministrativa) -> ContextoGeocodificacion:
+        contexto = self._ancestro(unidad, self.nivel_region_geocodificacion)
+        return ContextoGeocodificacion(
+            codigo_pais=self.codigo_pais,
+            codigo_unidad=unidad.codigo,
+            nombre_unidad=unidad.nombre_canonico,
+            codigo_contexto=contexto.codigo if contexto else "",
+            nombre_contexto=contexto.nombre_canonico if contexto else "",
+        )
 
     def compatibilidad_territorial(self, a: UnidadAdministrativa, b: UnidadAdministrativa) -> bool:
         if a.codigo_pais != self.codigo_pais or b.codigo_pais != self.codigo_pais:
             return False
         if a.codigo == b.codigo:
+            return True
+        # En Chile "Santiago" se usa también como etiqueta del área
+        # metropolitana. Esta semántica pertenece al adaptador, no al core.
+        if ({a.nombre_normalizado, b.nombre_normalizado} & {"SANTIAGO"}
+            and self._ancestro(a, NIVEL_REGION) == self._ancestro(b, NIVEL_REGION)
+        ):
             return True
         codigos_a = self._cadena_codigos(a)
         codigos_b = self._cadena_codigos(b)

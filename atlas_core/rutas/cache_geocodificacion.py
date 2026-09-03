@@ -31,7 +31,7 @@ from atlas_core.almacenamiento_portable import (
     escribir_json_atomico,
     ruta_cache,
 )
-from atlas_core.geografia import cargar_geografia, texto_normalizado
+from atlas_core.geografia import ContextoGeocodificacion, EstadoNormalizacion, cargar_geografia, texto_normalizado
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion,
     Coordenadas,
@@ -49,8 +49,17 @@ def _normalizar_direccion(direccion: str) -> str:
     return texto_normalizado(normalizada)
 
 
-def _clave(proveedor_nombre: str, proveedor_version: str, direccion: str) -> str:
-    return "|".join((proveedor_nombre, proveedor_version, _normalizar_direccion(direccion)))
+def _clave(
+    proveedor_nombre: str, proveedor_version: str, direccion: str,
+    contexto: ContextoGeocodificacion | None = None,
+) -> str:
+    partes = [proveedor_nombre, proveedor_version, _normalizar_direccion(direccion)]
+    if contexto is not None:
+        partes.extend((
+            f"pais={contexto.codigo_pais}", f"unidad={contexto.codigo_unidad}",
+            f"contexto={contexto.codigo_contexto}",
+        ))
+    return "|".join(partes)
 
 
 class RepositorioCacheGeocodificacion:
@@ -62,12 +71,18 @@ class RepositorioCacheGeocodificacion:
         )
 
     def buscar(
-        self, proveedor_nombre: str, proveedor_version: str, direccion: str
+        self, proveedor_nombre: str, proveedor_version: str, direccion: str,
+        contexto: ContextoGeocodificacion | None = None,
     ) -> ResultadoGeocodificacion | None:
         contenido = self._leer()
-        crudo = contenido.get("consultas", {}).get(
-            _clave(proveedor_nombre, proveedor_version, direccion)
-        )
+        consultas = contenido.get("consultas", {})
+        crudo = consultas.get(_clave(proveedor_nombre, proveedor_version, direccion, contexto))
+        if crudo is None and contexto is not None:
+            historico = consultas.get(_clave(proveedor_nombre, proveedor_version, direccion))
+            if historico is not None:
+                resultado_historico = _resultado_desde_dict(historico)
+                if _compatible_con_contexto(resultado_historico, contexto):
+                    return resultado_historico
         if crudo is None:
             return None
         return _resultado_desde_dict(crudo)
@@ -78,11 +93,12 @@ class RepositorioCacheGeocodificacion:
         proveedor_version: str,
         direccion: str,
         resultado: ResultadoGeocodificacion,
+        contexto: ContextoGeocodificacion | None = None,
     ) -> None:
         with bloqueo_sesion(self.ruta.parent, "geocodificacion"):
             contenido = self._leer()
             contenido.setdefault("consultas", {})[
-                _clave(proveedor_nombre, proveedor_version, direccion)
+                _clave(proveedor_nombre, proveedor_version, direccion, contexto)
             ] = _dict_desde_resultado(resultado)
             self._escribir(contenido)
 
@@ -116,6 +132,9 @@ def _dict_desde_resultado(resultado: ResultadoGeocodificacion) -> dict:
                 "confianza": c.confianza,
                 "localidad": c.localidad,
                 "region": c.region,
+                "codigo_pais": c.codigo_pais,
+                "codigo_unidad": c.codigo_unidad,
+                "codigo_contexto": c.codigo_contexto,
             }
             for c in resultado.candidatos
         ],
@@ -131,6 +150,9 @@ def _resultado_desde_dict(crudo: dict) -> ResultadoGeocodificacion:
             c.get("confianza"),
             c.get("localidad", ""),
             c.get("region", ""),
+            c.get("codigo_pais", ""),
+            c.get("codigo_unidad", ""),
+            c.get("codigo_contexto", ""),
         )
         for c in crudo.get("candidatos", [])
     )
@@ -172,6 +194,22 @@ class ProveedorRutasConCacheGeocodificacion:
             self.repositorio.guardar(self.interno.nombre, self.interno.version, direccion, resultado)
         return resultado
 
+    def geocodificar_estructurado(
+        self, direccion: str, contexto: ContextoGeocodificacion
+    ) -> ResultadoGeocodificacion:
+        cache = self.repositorio.buscar(
+            self.interno.nombre, self.interno.version, direccion, contexto
+        )
+        if cache is not None:
+            return cache
+        metodo = getattr(self.interno, "geocodificar_estructurado", None)
+        resultado = metodo(direccion, contexto) if callable(metodo) else self.interno.geocodificar(direccion)
+        if resultado.estado in _ESTADOS_CACHEABLES:
+            self.repositorio.guardar(
+                self.interno.nombre, self.interno.version, direccion, resultado, contexto
+            )
+        return resultado
+
     def calcular_ruta(self, origen: Coordenadas, destino: Coordenadas, perfil: str):
         return self.interno.calcular_ruta(origen, destino, perfil)
 
@@ -183,3 +221,26 @@ _ESTADOS_CACHEABLES = frozenset(
         EstadoRuta.DIRECCION_NO_ENCONTRADA,
     }
 )
+
+
+def _compatible_con_contexto(
+    resultado: ResultadoGeocodificacion, contexto: ContextoGeocodificacion
+) -> bool:
+    try:
+        geografia = cargar_geografia(contexto.codigo_pais)
+    except ValueError:
+        return False
+    esperada = geografia.buscar_por_codigo(contexto.codigo_unidad)
+    if esperada is None or not resultado.candidatos:
+        return False
+    for candidato in resultado.candidatos:
+        obtenida = geografia.buscar_por_codigo(candidato.codigo_unidad) if candidato.codigo_unidad else None
+        if obtenida is None and candidato.localidad:
+            decision = geografia.normalizar(
+                candidato.localidad, nivel=geografia.nivel_geocodificable
+            )
+            if decision.estado == EstadoNormalizacion.EXACTA:
+                obtenida = decision.unidad
+        if obtenida is None or not geografia.compatibilidad_territorial(esperada, obtenida):
+            return False
+    return True

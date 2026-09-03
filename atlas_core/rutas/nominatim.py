@@ -28,6 +28,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from atlas_core.geografia import ContextoGeocodificacion, EstadoNormalizacion, cargar_geografia, texto_normalizado
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion,
     Coordenadas,
@@ -35,7 +36,6 @@ from atlas_core.rutas.modelos import (
     ResultadoGeocodificacion,
     ResultadoRuta,
 )
-from atlas_core.territorio_chile import ESTADO_COMUNA_EXACTA, normalizar_comuna
 
 # Confianza asignada a un candidato de RESPALDO -- deliberadamente fija,
 # nunca derivada de `importance` (ese campo de Nominatim mide notoriedad
@@ -68,7 +68,7 @@ def _transporte_urllib(solicitud: Request, timeout: float) -> RespuestaHTTP:
         return RespuestaHTTP(respuesta.status, respuesta.read())
 
 
-def _localidad_y_region(direccion: dict) -> tuple[str, str]:
+def _localidad_y_region(direccion: dict, geografia) -> tuple[str, str, str, str, str]:
     """Deriva localidad/región del universo territorial YA cerrado
     (`territorio_chile.normalizar_comuna`) a partir del primer campo de
     `address` de Nominatim que identifique una comuna real (`suburb` ->
@@ -82,13 +82,17 @@ def _localidad_y_region(direccion: dict) -> tuple[str, str]:
         candidato = str(direccion.get(campo, "")).strip()
         if not candidato:
             continue
-        resultado = normalizar_comuna(candidato)
-        if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna:
-            return resultado.comuna, resultado.region
-    return "", ""
+        resultado = geografia.normalizar(candidato, nivel=geografia.nivel_geocodificable) if geografia else None
+        if resultado and resultado.estado == EstadoNormalizacion.EXACTA and resultado.unidad:
+            contexto = geografia.parametros_geocodificacion(resultado.unidad)
+            return (
+                resultado.unidad.nombre_canonico, contexto.nombre_contexto,
+                contexto.codigo_pais, contexto.codigo_unidad, contexto.codigo_contexto,
+            )
+    return "", "", geografia.codigo_pais if geografia else "", "", ""
 
 
-def _calle_y_comuna(direccion: str) -> tuple[str, str] | None:
+def _calle_y_unidad(direccion: str, geografia) -> tuple[str, ContextoGeocodificacion] | None:
     """Intenta separar 'CALLE NUMERO ... COMUNA' de un texto de consulta ya
     construido -- SOLO si puede identificar, con el catálogo territorial
     cerrado (`normalizar_comuna`, EXACTA, nunca fuzzy), una comuna real en
@@ -103,11 +107,11 @@ def _calle_y_comuna(direccion: str) -> tuple[str, str] | None:
         if len(tokens) <= largo:
             continue
         candidato_comuna = " ".join(tokens[-largo:])
-        resultado = normalizar_comuna(candidato_comuna)
-        if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna:
+        resultado = geografia.normalizar(candidato_comuna, nivel=geografia.nivel_geocodificable)
+        if resultado.estado == EstadoNormalizacion.EXACTA and resultado.unidad:
             calle = " ".join(tokens[:-largo]).strip()
             if calle:
-                return calle, resultado.comuna
+                return calle, geografia.parametros_geocodificacion(resultado.unidad)
     return None
 
 
@@ -153,6 +157,10 @@ class NominatimGeocoder:
         self.timeout = timeout
         self._transporte = transporte
         self._pais = (pais or "").strip().lower() or None
+        try:
+            self._geografia = cargar_geografia(self._pais) if self._pais else cargar_geografia("CL")
+        except ValueError:
+            self._geografia = None
 
     def _solicitar(self, solicitud: Request) -> tuple[EstadoRuta | None, object | None]:
         solicitud.add_header("User-Agent", self._user_agent)
@@ -195,11 +203,14 @@ class NominatimGeocoder:
                 numero = str(direccion_item.get("house_number", "")).strip()
                 calle = str(direccion_item.get("road", "")).strip()
                 etiqueta = f"{calle} {numero}".strip() if numero else (calle or str(item.get("display_name", "")).strip())
-                localidad, region = _localidad_y_region(direccion_item)
+                localidad, region, codigo_pais, codigo_unidad, codigo_contexto = _localidad_y_region(
+                    direccion_item, self._geografia
+                )
                 confianza = CONFIANZA_CON_NUMERO_DE_CALLE if numero else CONFIANZA_SIN_NUMERO_DE_CALLE
                 candidatos_lista.append(CandidatoGeocodificacion(
                     Coordenadas(float(item["lon"]), float(item["lat"])),
                     etiqueta, confianza, localidad, region,
+                    codigo_pais, codigo_unidad, codigo_contexto,
                 ))
             return None, tuple(candidatos_lista)
         except (KeyError, TypeError, ValueError, IndexError):
@@ -223,10 +234,10 @@ class NominatimGeocoder:
         # sistema (`normalizar_comuna`, nunca fuzzy) -- si no hay comuna
         # reconocible, se usa directamente la búsqueda libre de siempre
         # (comportamiento idéntico a antes de este bloque).
-        estructurada = _calle_y_comuna(direccion)
+        estructurada = _calle_y_unidad(direccion, self._geografia) if self._geografia else None
         if estructurada is not None:
-            calle, comuna = estructurada
-            candidatos_estructurados = self._buscar_estructurada_con_reintento(calle, comuna)
+            calle, contexto = estructurada
+            candidatos_estructurados = self._buscar_estructurada_con_reintento(calle, contexto)
             if candidatos_estructurados is not None:
                 return self._resultado_desde_candidatos(candidatos_estructurados)
             # Sin resultado estructurado útil (comuna no cubierta en OSM
@@ -240,8 +251,27 @@ class NominatimGeocoder:
             return ResultadoGeocodificacion(estado, motivo=estado.value)
         return self._resultado_desde_candidatos(candidatos or ())
 
+    def geocodificar_estructurado(
+        self, direccion: str, contexto: ContextoGeocodificacion
+    ) -> ResultadoGeocodificacion:
+        if not str(direccion).strip():
+            return ResultadoGeocodificacion(EstadoRuta.DIRECCION_NO_ENCONTRADA, motivo="DIRECCION_VACIA")
+        tokens = direccion.split(",", 1)[0].split()
+        nombre_tokens = contexto.nombre_unidad.split()
+        if len(tokens) > len(nombre_tokens) and texto_normalizado(" ".join(tokens[-len(nombre_tokens):])) == texto_normalizado(contexto.nombre_unidad):
+            tokens = tokens[:-len(nombre_tokens)]
+        candidatos = self._buscar_estructurada_con_reintento(" ".join(tokens), contexto)
+        if candidatos is not None:
+            return self._resultado_desde_candidatos(candidatos)
+        estado, libres = self._consultar({
+            "q": direccion, "format": "jsonv2", "addressdetails": "1", "limit": "8",
+        })
+        if estado:
+            return ResultadoGeocodificacion(estado, motivo=estado.value)
+        return self._resultado_desde_candidatos(libres or ())
+
     def _buscar_estructurada_con_reintento(
-        self, calle: str, comuna: str,
+        self, calle: str, contexto: ContextoGeocodificacion,
     ) -> tuple[CandidatoGeocodificacion, ...] | None:
         """Bloque CIERRE LOGÍSTICA RESIDUAL -- caso real 472073 (PDTE.
         RIESCO 5903 LAS CONDES): verificado en vivo que la consulta
@@ -265,7 +295,8 @@ class NominatimGeocoder:
             if not calle_intento:
                 continue
             estado, candidatos = self._consultar({
-                "street": calle_intento, "city": comuna, "format": "jsonv2",
+                "street": calle_intento, "city": contexto.nombre_unidad,
+                "state": contexto.nombre_contexto, "format": "jsonv2",
                 "addressdetails": "1", "limit": "8",
             })
             if estado is not None or not candidatos:

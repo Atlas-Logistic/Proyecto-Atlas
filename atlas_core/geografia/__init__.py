@@ -4,7 +4,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from .contratos import GeografiaPais
-from .modelos import EstadoNormalizacion, ResultadoNormalizacion, UnidadAdministrativa
+from .modelos import ContextoGeocodificacion, EstadoNormalizacion, ResultadoNormalizacion, UnidadAdministrativa
 from .motor import MotorNormalizacion, texto_normalizado
 
 
@@ -24,7 +24,7 @@ def _cargar_geografia_canonica(codigo: str) -> GeografiaPais:
 
 
 __all__ = [
-    "EstadoNormalizacion", "GeografiaPais", "MotorNormalizacion",
+    "ContextoGeocodificacion", "EstadoNormalizacion", "GeografiaPais", "MotorNormalizacion",
     "ResultadoNormalizacion", "UnidadAdministrativa", "cargar_geografia",
     "texto_normalizado",
 ]

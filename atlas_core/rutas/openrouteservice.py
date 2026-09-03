@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from atlas_core.geografia import ContextoGeocodificacion, EstadoNormalizacion, cargar_geografia
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion,
     Coordenadas,
@@ -78,6 +79,10 @@ class OpenRouteService:
         # al comportamiento de antes de este bloque. Ver
         # `boundary.country` en `geocodificar`.
         self._pais = (pais or "").strip().upper() or None
+        try:
+            self._geografia = cargar_geografia(self._pais) if self._pais else None
+        except ValueError:
+            self._geografia = None
         # Bloque RESOLUCIÓN R19 -- causa raíz real de que el fix `pais=CL`
         # (Bloque RESOLUCIÓN R16) nunca tuviera efecto sobre una dirección
         # YA CACHEADA (caso real 472037: seguía devolviendo Córdoba,
@@ -142,7 +147,16 @@ class OpenRouteService:
             return ResultadoGeocodificacion(
                 EstadoRuta.DIRECCION_NO_ENCONTRADA, motivo="DIRECCION_VACIA"
             )
-        parametros = {"text": direccion, "size": 5}
+        return self._geocodificar_parametros(direccion, {"text": direccion, "size": 5})
+
+    def geocodificar_estructurado(
+        self, direccion: str, contexto: ContextoGeocodificacion
+    ) -> ResultadoGeocodificacion:
+        texto = ", ".join(filter(None, (direccion, contexto.nombre_unidad, contexto.nombre_contexto)))
+        parametros = {"text": texto, "size": 5, "boundary.country": contexto.codigo_pais}
+        return self._geocodificar_parametros(direccion, parametros)
+
+    def _geocodificar_parametros(self, direccion: str, parametros: dict) -> ResultadoGeocodificacion:
         if self._pais:
             # Filtro estructurado de Pelias (no un simple ", <país>" pegado
             # al texto de búsqueda) -- reduce candidatos fuera del país de
@@ -164,6 +178,7 @@ class OpenRouteService:
                     _confianza(item.get("properties", {}).get("confidence")),
                     str(item.get("properties", {}).get("locality", "")).strip(),
                     str(item.get("properties", {}).get("region", "")).strip(),
+                    *self._codigos_territoriales(item.get("properties", {})),
                 )
                 for item in features
             )
@@ -182,6 +197,16 @@ class OpenRouteService:
         return ResultadoGeocodificacion(
             EstadoRuta.REQUIERE_REVISION, candidatos, "REQUIERE_CONFIRMACION_HUMANA"
         )
+
+    def _codigos_territoriales(self, propiedades: dict) -> tuple[str, str, str]:
+        if self._geografia is None:
+            return "", "", ""
+        localidad = str(propiedades.get("locality", "")).strip()
+        decision = self._geografia.normalizar(localidad, nivel=self._geografia.nivel_geocodificable)
+        if decision.estado != EstadoNormalizacion.EXACTA or decision.unidad is None:
+            return self._geografia.codigo_pais, "", ""
+        contexto = self._geografia.parametros_geocodificacion(decision.unidad)
+        return contexto.codigo_pais, contexto.codigo_unidad, contexto.codigo_contexto
 
     def calcular_ruta(
         self, origen: Coordenadas, destino: Coordenadas, perfil: str

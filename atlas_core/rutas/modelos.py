@@ -70,6 +70,11 @@ class CandidatoGeocodificacion:
     # funcionando igual.
     localidad: str = ""
     region: str = ""
+    # Identidad administrativa G1-B. Los textos anteriores permanecen
+    # para outputs legacy; la validación interna usa estos códigos opacos.
+    codigo_pais: str = ""
+    codigo_unidad: str = ""
+    codigo_contexto: str = ""
 
 
 @dataclass(frozen=True)

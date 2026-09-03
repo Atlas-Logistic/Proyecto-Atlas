@@ -41,6 +41,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from atlas_core.catalogo_destinos import Destino
+from atlas_core.geografia import EstadoNormalizacion, cargar_geografia
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
@@ -109,6 +110,9 @@ class ResultadoDestinoEntrega:
     # candidato aceptado.
     localidad: str = ""
     region: str = ""
+    codigo_pais: str = ""
+    codigo_unidad: str = ""
+    codigo_contexto: str = ""
     # Bloque TELEMETRÍA T1 -- "TELEMETRIA_GPS" cuando un punto GPS real
     # (breadcrumb) ayudó a descartar candidatos y dejar uno solo coherente;
     # vacío en cualquier otro caso (comportamiento idéntico a antes de
@@ -135,6 +139,24 @@ def _texto_normalizado_sin_acentos(texto: str) -> str:
 
     normalizado = unicodedata.normalize("NFD", str(texto or "").upper())
     return "".join(c for c in normalizado if unicodedata.category(c) != "Mn")
+
+
+def _contexto_geografico_desde_texto(texto: str):
+    geografia = cargar_geografia("CL")
+    nombre = _comuna_documental_inequivoca(texto)
+    if not nombre:
+        return None
+    decision = geografia.normalizar(nombre, nivel=geografia.nivel_geocodificable)
+    if decision.estado != EstadoNormalizacion.EXACTA or decision.unidad is None:
+        return None
+    return geografia.parametros_geocodificacion(decision.unidad)
+
+
+def _geocodificar_con_contexto(proveedor, direccion: str, contexto):
+    metodo = getattr(proveedor, "geocodificar_estructurado", None)
+    if contexto is not None and callable(metodo):
+        return metodo(direccion, contexto)
+    return proveedor.geocodificar(direccion)
 
 
 def _misma_localidad(a: CandidatoGeocodificacion, b: CandidatoGeocodificacion) -> bool:
@@ -661,7 +683,9 @@ def resolver_destino_con_fallback_estructurado(
             identidad_confirmada=identidad_confirmada,
         )
     try:
-        resultado_fallback = proveedor_fallback.geocodificar(f"{texto}, Chile")
+        resultado_fallback = _geocodificar_con_contexto(
+            proveedor_fallback, f"{texto}, Chile", _contexto_geografico_desde_texto(texto)
+        )
     except (OSError, ValueError):
         return ResultadoDesambiguacionInequivoca(
             motivo="FALLBACK_ESTRUCTURADO_NO_DISPONIBLE", vias=(VIA_FALLBACK_ESTRUCTURADO,),
@@ -983,7 +1007,10 @@ def resolver_destino_entrega(
     consulta = (
         f"{texto_geocodificable}, {contexto_territorial}" if contexto_territorial else texto_geocodificable
     )
-    resultado = proveedor_geocodificacion.geocodificar(consulta)
+    contexto_geografico = _contexto_geografico_desde_texto(texto_geocodificable)
+    resultado = _geocodificar_con_contexto(
+        proveedor_geocodificacion, consulta, contexto_geografico
+    )
     corroborado_por_gps = False
     metodo_confirmacion_fallback = ""
 
@@ -1154,6 +1181,9 @@ def resolver_destino_entrega(
                 motivo="CONFIANZA_INSUFICIENTE",
                 localidad=candidato.localidad,
                 region=candidato.region,
+                codigo_pais=candidato.codigo_pais,
+                codigo_unidad=candidato.codigo_unidad,
+                codigo_contexto=candidato.codigo_contexto,
                 metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
             )
     return ResultadoDestinoEntrega(
@@ -1165,6 +1195,9 @@ def resolver_destino_entrega(
         motivo="",
         localidad=candidato.localidad,
         region=candidato.region,
+        codigo_pais=candidato.codigo_pais,
+        codigo_unidad=candidato.codigo_unidad,
+        codigo_contexto=candidato.codigo_contexto,
         metodo_confirmacion=metodo_confirmacion_fallback or ("TELEMETRIA_GPS" if corroborado_por_gps else ""),
     )
 
@@ -1185,16 +1218,13 @@ def _comunas_territorialmente_compatibles(comuna_documental: str, comuna_geocodi
     misma región sin que ninguna sea "Santiago") sigue siendo una
     contradicción real -- caso real 460807: "San Bernardo" vs "Angol"
     (regiones distintas, ninguna es "Santiago") sigue bloqueada."""
-    documental = normalizar_comuna(comuna_documental)
-    geocodificada = normalizar_comuna(comuna_geocodificada)
-    if (
-        documental.estado != ESTADO_COMUNA_EXACTA or geocodificada.estado != ESTADO_COMUNA_EXACTA
-        or documental.region != geocodificada.region
-    ):
-        return False
-    return "SANTIAGO" in (
-        _texto_normalizado_sin_acentos(documental.comuna or "").upper(),
-        _texto_normalizado_sin_acentos(geocodificada.comuna or "").upper(),
+    geografia = cargar_geografia("CL")
+    documental = geografia.normalizar(comuna_documental, nivel=geografia.nivel_geocodificable)
+    geocodificada = geografia.normalizar(comuna_geocodificada, nivel=geografia.nivel_geocodificable)
+    return bool(
+        documental.estado == EstadoNormalizacion.EXACTA and documental.unidad
+        and geocodificada.estado == EstadoNormalizacion.EXACTA and geocodificada.unidad
+        and geografia.compatibilidad_territorial(documental.unidad, geocodificada.unidad)
     )
 
 
