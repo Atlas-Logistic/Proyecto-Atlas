@@ -96,3 +96,98 @@ def test_motivo_destino_confirmado_se_reconcilia(tmp_path, monkeypatch):
     assert final["motivos_revision_documento"] == ""
     assert final["indicador_revision"] == "OK"
     assert final["estado_operacional"] == "OK"
+
+
+def _entorno_catalogos_reales(tmp_path, *, obras=(), relaciones=(), destinos=()):
+    """Catálogos REALES (nunca un doble simulado) -- para probar sin
+    ambigüedad que la corroboración por ruta ya calculada NO depende de
+    ningún registro en `obras_destinos.json`/`destinos_maestros.json`."""
+    import json
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "clientes.json").write_text(json.dumps({"version_formato": 1, "clientes": []}), encoding="utf-8")
+    (tmp_path / "destinos_maestros.json").write_text(json.dumps({"version_formato": 1, "destinos": list(destinos)}), encoding="utf-8")
+    (tmp_path / "obras_destinos.json").write_text(
+        json.dumps({"version_formato": 1, "obras": list(obras), "relaciones": list(relaciones)}), encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_motivo_destino_se_retira_por_ruta_ya_calculada_sin_ningun_destino_en_catalogo(tmp_path):
+    """Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640 (DSI
+    UNDERGROUND CHILE SPA): Javier confirmó "LAS VIOLETAS 55" vía
+    REGISTRAR_DIRECCION y el routing posterior fue exitoso
+    (`estado_ruta=RUTA_CALCULADA`), pero `aplicar_decision_obra` sólo
+    aprende un destino de catálogo reutilizable cuando la obra YA existía
+    como registro previo -- para una obra vista por PRIMERA vez (sin
+    ninguna obra/destino/relación en catálogo, verificado con catálogos
+    REALES y vacíos), la vía de catálogo nunca puede corroborar nada. El
+    motivo debe retirarse igual: la propia ruta ya calculada, para el
+    `despachar_a_crudo` vigente, ya es evidencia suficiente de que la
+    lectura documental no está contaminada."""
+    from atlas_core import revalidacion_documental as modulo
+
+    catalogos = _entorno_catalogos_reales(tmp_path / "catalogos")
+    fila = {c: "" for c in COLUMNAS}
+    fila.update(_fila(
+        numero_guia="472640", cliente="DSI UNDERGROUND CHILE SPA", obra_destino="DSI UNDERGROUND CHILE SPA",
+        despachar_a_crudo="LAS VIOLETAS 55", direccion_entrega="LAS VIOLETAS 55",
+        estado_ruta="RUTA_CALCULADA", distancia_km="48.5764", duracion_min="62.425",
+        motivos_revision_documento="DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+        indicador_revision="REVISAR", estado_documental="REQUIERE_REVISION",
+        estado_operacional="REQUIERE_REVISION",
+    ))
+    ruta = tmp_path / "dataset.csv"
+    with ruta.open("w", encoding="utf-8-sig", newline="") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader(); escritor.writerow(fila)
+
+    resultado = modulo.revalidar_motivo_destino_ya_confirmado_sin_ocr(
+        ruta_dataset=ruta, carpeta_catalogos=catalogos,
+    )
+    with ruta.open(encoding="utf-8-sig", newline="") as archivo:
+        final = next(csv.DictReader(archivo, delimiter=";"))
+    assert resultado["guias_actualizadas"] == ["472640"]
+    assert final["motivos_revision_documento"] == ""
+    assert final["indicador_revision"] == "OK"
+    assert final["estado_documental"] == "OK"
+    assert final["estado_operacional"] == "OK"
+    # Nunca toca lo que ya estaba resuelto -- ruta/dirección intactas.
+    assert final["estado_ruta"] == "RUTA_CALCULADA"
+    assert final["despachar_a_crudo"] == "LAS VIOLETAS 55"
+
+
+def test_motivo_destino_se_preserva_si_la_ruta_sigue_sin_calcular_y_sin_catalogo():
+    """Control (criterio explícito: preservar el motivo cuando el destino
+    REALMENTE siga sin resolver) -- misma obra nunca antes vista, mismo
+    catálogo vacío, pero `estado_ruta` NO es `RUTA_CALCULADA` (el
+    problema documental sigue sin corroborar por ninguna vía) -- el
+    motivo NUNCA se retira a ciegas."""
+    from atlas_core import revalidacion_documental as modulo
+
+    fila = {c: "" for c in COLUMNAS}
+    fila.update(_fila(
+        numero_guia="472641", obra_destino="OBRA NUEVA NUNCA VISTA",
+        despachar_a_crudo="CALLE AMBIGUA 100",
+        estado_ruta="REQUIERE_REVISION", motivo_ruta="CONFIANZA_INSUFICIENTE",
+        motivos_revision_documento="DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+        indicador_revision="REVISAR", estado_documental="REQUIERE_REVISION",
+        estado_operacional="REQUIERE_REVISION",
+    ))
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        from pathlib import Path
+        tmp_path = Path(tmp)
+        catalogos = _entorno_catalogos_reales(tmp_path / "catalogos")
+        ruta = tmp_path / "dataset.csv"
+        with ruta.open("w", encoding="utf-8-sig", newline="") as archivo:
+            escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+            escritor.writeheader(); escritor.writerow(fila)
+
+        resultado = modulo.revalidar_motivo_destino_ya_confirmado_sin_ocr(
+            ruta_dataset=ruta, carpeta_catalogos=catalogos,
+        )
+        with ruta.open(encoding="utf-8-sig", newline="") as archivo:
+            final = next(csv.DictReader(archivo, delimiter=";"))
+        assert resultado["guias_actualizadas"] == []
+        assert final["motivos_revision_documento"] == "DESTINO_CONTAMINADO_POR_OTRA_SECCION"
+        assert final["indicador_revision"] == "REVISAR"

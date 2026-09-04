@@ -2613,11 +2613,37 @@ def revalidar_motivo_destino_ya_confirmado_sin_ocr(
 ) -> dict[str, object]:
     """Retira motivos documentales de destino que quedaron obsoletos.
 
-    Sólo actúa cuando la obra vigente tiene un destino CONFIRMADO cuya calle
-    coincide literalmente, normalizada, con el texto del propio documento.
-    No corrige OCR ni copia valores: reconcilia el estado derivado contra una
-    confirmación persistente que ya resolvió el problema.
-    """
+    Corrobora por DOS vías independientes, cualquiera de las dos basta
+    (nunca se exigen ambas):
+
+    1. La obra vigente tiene un destino CONFIRMADO en catálogo cuya calle
+       coincide literalmente, normalizada, con el texto del propio
+       documento.
+    2. Bloque RECONCILIACIÓN POST-DECISIÓN -- causa raíz real del caso
+       472640: `estado_ruta` de ESTA MISMA fila ya es `RUTA_CALCULADA`
+       para el `despachar_a_crudo` VIGENTE. R2.5 (`invalidar_derivados_
+       ruta`, ver `aplicar_decision_obra`) garantiza que un `RUTA_
+       CALCULADA` nunca sobrevive a un cambio de `despachar_a_crudo` --
+       siempre se invalida ANTES de escribir el texto nuevo -- así que
+       este estado sólo puede corresponder al texto actual. Un destino
+       genuinamente "contaminado por otra sección" nunca llega a
+       geocodificar y rutear con confianza suficiente; si lo hizo, la
+       lectura documental YA NO es el problema, sin importar si la obra
+       alguna vez llegó a tener un destino CONFIRMADO reutilizable en
+       catálogo. Esta vía es indispensable para la PRIMERA guía de una
+       obra nunca antes vista: `aplicar_decision_obra` sólo aprende un
+       destino de catálogo cuando la obra YA existía como registro
+       previo (busca `obra_objetivo` entre obras existentes, nunca crea
+       una) -- para una obra nueva, ninguna guía individual queda jamás
+       corroborada por la vía 1, aunque su propia ruta esté
+       perfectamente resuelta; la decisión humana (REGISTRAR_DIRECCION)
+       igual queda representada, sólo que en la fila misma, no en el
+       catálogo.
+
+    No corrige OCR ni copia valores: reconcilia el estado derivado contra
+    evidencia YA persistida que resolvió el problema. Si el destino
+    realmente sigue sin resolver (ninguna de las dos vías corrobora), el
+    motivo se conserva intacto."""
     ruta = Path(ruta_dataset)
     catalogo = CatalogoObrasDestinos(
         ruta=Path(carpeta_catalogos) / "obras_destinos.json",
@@ -2635,20 +2661,23 @@ def revalidar_motivo_destino_ya_confirmado_sin_ocr(
             motivos = [m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m]
             if not (set(motivos) & motivos_objetivo):
                 continue
-            obra = str(fila.get("obra_destino", "")).strip()
             destino_documental = str(fila.get("despachar_a_crudo", "")).strip()
-            if not obra or not destino_documental:
+            if not destino_documental:
                 continue
-            texto_documental = normalizar_nombre_destino(destino_documental)
-            try:
-                destinos = catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra)
-            except (OSError, ValueError):
-                continue
-            corroborado = any(
-                (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                and calle in texto_documental
-                for destino in destinos
-            )
+            corroborado = str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+            if not corroborado:
+                obra = str(fila.get("obra_destino", "")).strip()
+                if obra:
+                    texto_documental = normalizar_nombre_destino(destino_documental)
+                    try:
+                        destinos = catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra)
+                    except (OSError, ValueError):
+                        destinos = []
+                    corroborado = any(
+                        (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                        and calle in texto_documental
+                        for destino in destinos
+                    )
             if not corroborado:
                 continue
             motivos = [m for m in motivos if m not in motivos_objetivo]
