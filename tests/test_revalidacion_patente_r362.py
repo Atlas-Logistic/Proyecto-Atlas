@@ -40,6 +40,12 @@ def _fila_csv(**overrides):
         "patente_tracto": "XF3629", "patente_rampla": "No encontrado",
         "descripcion_material": "MATERIAL", "tipo_carga": "OTRO",
         "indicador_revision": "REVISAR",
+        # Bloque CONVERGENCIA DE ESTADO -- coherentes con indicador_revision
+        # desde el inicio (ver `revalidar_indicadores_documentales_sin_ocr`,
+        # misma fórmula ya usada por el resto de revalidaciones de motivo);
+        # sin esto, una fila "nueva" nunca fue realista y la convergencia
+        # la marcaba como cambiada aunque ningún motivo real se retirara.
+        "estado_documental": "REQUIERE_REVISION", "estado_operacional": "REQUIERE_REVISION",
         "motivos_revision_documento": "PATENTE_SIN_HOMOLOGAR | CLIENTE_AUSENTE",
     })
     fila.update(overrides)

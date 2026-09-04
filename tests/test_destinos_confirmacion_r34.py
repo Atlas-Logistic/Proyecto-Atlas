@@ -27,6 +27,7 @@ def _fila_csv(**overrides):
         "patente_tracto": "AB1234", "patente_rampla": "No encontrado",
         "descripcion_material": "MATERIAL", "tipo_carga": "OTRO",
         "indicador_revision": "REVISAR",
+        "estado_documental": "REQUIERE_REVISION", "estado_operacional": "REQUIERE_REVISION",
         "motivos_revision_documento": "OBRA_DESTINO_SIN_CORROBORAR",
         "despachar_a_crudo": DESTINO_TEXTO, "estado_entrega": "REVISAR",
     })

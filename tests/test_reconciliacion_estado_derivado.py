@@ -45,6 +45,7 @@ def test_estado_pre_r2_se_reconcilia_una_vez_sin_ocr_y_con_respaldo(tmp_path, mo
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
@@ -79,6 +80,7 @@ def test_fallo_no_publica_version_pero_nunca_revierte_cambios_del_dataset_ya_apl
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fallo")))
 
@@ -176,6 +178,7 @@ def test_operacion_ya_reconciliada_con_ruleset_anterior_se_vuelve_a_barrer_al_su
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
@@ -200,7 +203,7 @@ def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migrac
     la decisión) nunca volvía a mirar esos motivos. Las tres deben correr
     en CUALQUIER reconciliación real, no sólo una vez por versión."""
     dataset, decisiones = _entorno(tmp_path)
-    llamadas = {"motivo_destino": 0, "material": 0, "mobile": 0}
+    llamadas = {"motivo_destino": 0, "material": 0, "mobile": 0, "indicadores": 0}
 
     def espiar(clave):
         def _fn(*a, **k):
@@ -220,12 +223,13 @@ def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migrac
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", espiar("motivo_destino"))
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", espiar("material"))
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", espiar_mobile)
+    monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", espiar("indicadores"))
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
     # Primera corrida: migración real (versión previa 0 -> vigente).
     primero = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
     assert primero["reconciliado"] is True
-    assert llamadas == {"motivo_destino": 1, "material": 1, "mobile": 1}
+    assert llamadas == {"motivo_destino": 1, "material": 1, "mobile": 1, "indicadores": 1}
 
     # El dataset avanza por una decisión humana real (simulada) -- ya NO
     # es migración (la versión ya quedó vigente arriba), sólo el dataset
@@ -234,7 +238,7 @@ def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migrac
     reloj_segundo = lambda: datetime(2026, 8, 31, 18, 0, 1, tzinfo=timezone.utc)
     segundo = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=reloj_segundo)
     assert segundo["reconciliado"] is True
-    assert llamadas == {"motivo_destino": 2, "material": 2, "mobile": 2}
+    assert llamadas == {"motivo_destino": 2, "material": 2, "mobile": 2, "indicadores": 2}
 
 
 def test_a_reconciliacion_vs_otro_escritor_real_concurrente_no_pierde_cambio_ajeno(tmp_path, monkeypatch):

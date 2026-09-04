@@ -1334,23 +1334,45 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
     desactualizada hasta que algo vuelve a evaluarla.
 
     Nunca DEGRADA un envío ya `ASOCIADO_AUTOMATICAMENTE` (conservador:
-    una asociación ya resuelta no se revisita) ni uno con
-    `problema_captura` (sin más OCR no hay nada nuevo que evaluar -- ver
-    `_captura_ilegible`). Devuelve un resumen, mismo criterio que el
-    resto de `revalidar_*_sin_ocr`."""
+    una asociación ya resuelta jamás se vuelve a INTENTAR, ver más abajo)
+    ni uno con `problema_captura` (sin más OCR no hay nada nuevo que
+    evaluar -- ver `_captura_ilegible`).
+
+    Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
+    0000355433, guías 472623/472624): `estado` puede quedar obsoleto por
+    DOS motivos INDEPENDIENTES -- la asociación en sí (cubierto arriba) O
+    una condición documental de la fila (p. ej. patente sin homologar,
+    ver `_estado_final_mobile`) que cambió DESPUÉS, sin que la asociación
+    (ya `ASOCIADO_AUTOMATICAMENTE` desde el principio, "coincidencia
+    exacta determinista") tuviera nada que reevaluar. Antes de este
+    bloque, un envío con asociación YA resuelta pero `estado` todavía
+    `REQUIERE_REVISION` por esa OTRA condición quedaba fuera del filtro
+    de entrada por completo -- nunca se le recalculaba `estado`, aunque
+    la condición real ya se hubiera resuelto. Por eso se entra al bucle
+    con CUALQUIERA de las dos señales (asociación reintentable, o estado
+    todavía en revisión) -- pero sólo se REINTENTA `asociar_documento`
+    cuando la asociación en sí lo amerita; una ya resuelta nunca se
+    revisita, sólo se usa tal cual para recalcular `estado`. Devuelve un
+    resumen, mismo criterio que el resto de `revalidar_*_sin_ocr`."""
     filas: list[dict[str, str]] = []
     if dataset and dataset.is_file():
         with dataset.open(encoding="utf-8-sig", newline="") as archivo:
             filas = list(csv.DictReader(archivo, delimiter=";"))
 
+    def _asociacion_reintentable(asociacion: Mapping[str, object]) -> bool:
+        return asociacion.get("estado") in ("SIN_ASOCIACION", "PROPUESTA_REQUIERE_REVISION")
+
     revisados = 0
     actualizados: list[str] = []
     for registro_historial in repositorio.historial():
         asociacion_previa_historial = registro_historial.get("resultado_asociacion") or {}
-        if asociacion_previa_historial.get("estado") not in ("SIN_ASOCIACION", "PROPUESTA_REQUIERE_REVISION"):
-            continue  # nada que reevaluar: sin procesar todavía, ya asociado, o en error.
+        if (
+            not _asociacion_reintentable(asociacion_previa_historial)
+            and str(registro_historial.get("estado", "")) != "REQUIERE_REVISION"
+        ):
+            continue  # asociación ya resuelta Y estado ya no en revisión -- nada que reevaluar.
         if registro_historial.get("problema_captura"):
-            continue  # sin OCR no hay evidencia nueva que pueda cambiar esto.
+            continue  # sin más OCR no hay evidencia nueva que pueda cambiar esto.
         if not (registro_historial.get("datos_ocr") or {}):
             continue
         envio_id = registro_historial["envio_id"]
@@ -1372,8 +1394,9 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 # quedado obsoleta desde que `historial()` lo snapshoteó.
                 registro = repositorio.cargar(envio_id)
                 asociacion_previa = registro.get("resultado_asociacion") or {}
-                if asociacion_previa.get("estado") not in ("SIN_ASOCIACION", "PROPUESTA_REQUIERE_REVISION"):
-                    continue  # otra operación ya lo cambió mientras tanto -- ya no aplica.
+                reintentar_asociacion = _asociacion_reintentable(asociacion_previa)
+                if not reintentar_asociacion and str(registro.get("estado", "")) != "REQUIERE_REVISION":
+                    continue  # otra operación ya lo convergió mientras tanto -- ya no aplica.
                 if registro.get("problema_captura"):
                     continue
                 datos = registro.get("datos_ocr") or {}
@@ -1391,7 +1414,13 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 # "de este documento".
                 identificador_propio = f"mobile/{envio_id}/{registro.get('foto_original', '')}"
                 filas_sin_propia = [f for f in filas if f.get("archivo") != identificador_propio]
-                asociacion_nueva = asociar_documento(datos, filas_sin_propia)
+                # Nunca DEGRADA una asociación ya resuelta -- sólo se
+                # reintenta `asociar_documento` cuando la asociación en sí
+                # sigue pendiente; si ya está resuelta, se conserva TAL
+                # CUAL (nunca se re-evalúa, nunca se inventa una nueva).
+                asociacion_nueva = (
+                    asociar_documento(datos, filas_sin_propia) if reintentar_asociacion else asociacion_previa
+                )
                 # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640:
                 # la fila propia (si `procesar_envio_mobile` ya la
                 # escribió) es la fuente FRESCA de `indicador_revision`,
@@ -1400,7 +1429,8 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 # necesitar recalcularse aunque la ASOCIACIÓN en sí no
                 # haya cambiado (p. ej. sigue SIN_ASOCIACION porque este
                 # documento nunca tendrá un segundo documento hermano con
-                # el mismo transporte -- eso es legítimo y no es lo que
+                # el mismo transporte, o ya está `ASOCIADO_AUTOMATICAMENTE`
+                # desde el principio -- ninguno de los dos es lo que
                 # cambió -- pero una decisión humana ya retiró el motivo
                 # documental que mantenía la fila en REVISAR).
                 fila_propia = next((f for f in filas if f.get("archivo") == identificador_propio), None)

@@ -300,6 +300,13 @@ def test_estado_historico_real_con_dataset_sha256_binario_no_dispara_falsa_migra
     fila_1.update(
         archivo=f"mobile/{envio_1}/original.jpg", numero_guia="472624", numero_transporte="0000355433",
         estado_procesamiento="OK", indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        # Bloque CONVERGENCIA DE ESTADO -- `estado_operacional=OK` sólo es
+        # coherente con `estado_ruta=RUTA_CALCULADA` (ver `revalidar_
+        # indicadores_documentales_sin_ocr`, misma fórmula ya usada por el
+        # resto de revalidaciones de motivo) -- sin esto, esta fila
+        # "limpia" no era realista y la nueva convergencia la marcaba como
+        # cambiada aunque ningún motivo real se hubiera retirado.
+        estado_ruta="RUTA_CALCULADA",
     )
     _escribir_filas(dataset, [fila_1])
 

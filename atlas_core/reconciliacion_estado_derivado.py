@@ -24,6 +24,7 @@ from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
+    revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
@@ -63,7 +64,17 @@ from atlas_core.revalidacion_documental import (
 # porque `version_previa` ya no era menor que 3. Subir a 4 dispara, en la
 # PRÓXIMA carga natural de Desktop (nunca un reproceso manual de ninguna
 # guía puntual), un barrido completo con TODAS las reglas vigentes.
-RULESET_VERSION = 4
+#
+# Subida de 4 a 5 -- causa raíz real (viaje 0000355433, guías 472623/
+# 472624): la migración a versión 4 ya había corrido y quedado persistida
+# ANTES de que este ticket agregara `revalidar_indicadores_documentales_
+# sin_ocr` (convergencia única de `indicador_revision`/`estado_documental`/
+# `estado_operacional`) y generalizara `revalidar_asociacion_mobile_sin_
+# ocr` para resincronizar `estado` aun con la asociación ya resuelta --
+# sin subir este número, ambas correcciones de reglas quedarían
+# INVISIBLES para cualquier operación ya migrada a 4 (exactamente este
+# caso real), tal como advierte el párrafo de arriba.
+RULESET_VERSION = 5
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -256,9 +267,6 @@ def reconciliar_estado_derivado(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
         )
         limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
-        limpieza_mobile = revalidar_asociacion_mobile_sin_ocr(
-            RepositorioEnviosMobile(raiz_atlas=raiz), dataset=dataset,
-        )
         recuperacion = {"guias_actualizadas": []}
         if por_reintentar:
             recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -267,6 +275,29 @@ def reconciliar_estado_derivado(
                 proveedor_rutas_fallback=proveedor_rutas_fallback,
                 guias_objetivo=set(por_reintentar),
             )
+        # Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
+        # 0000355433, guías 472623/472624): esta reconciliación (y también
+        # `revalidar_y_regenerar_reporte`, la otra vía por la que un motivo
+        # puede retirarse, p. ej. patente ya homologada) puede dejar
+        # `motivos_revision_documento`/`estado_ruta` ya al día pero
+        # `indicador_revision`/`estado_documental`/`estado_operacional`
+        # desincronizados -- cada revalidación de motivo (arriba, y las que
+        # corren fuera de este archivo) reimplementaba ese cálculo por su
+        # cuenta, algunas de forma incompleta. Corre AL FINAL, una sola vez,
+        # sobre el estado YA definitivo de esta pasada (después del retiro
+        # de motivos Y del reintento de ruta) -- nunca decide si un motivo
+        # sigue vigente, sólo hace que los tres campos deriven siempre de
+        # esa misma fuente ya canónica.
+        limpieza_indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset)
+        # Mobile debe leer el indicador YA convergido en esta misma
+        # pasada. Si corriera antes, una fila con motivos canónicos
+        # resueltos pero `indicador_revision` todavía obsoleto seguiría
+        # dejando el envío en REQUIERE_REVISION; como el reporte publica
+        # después la huella fresca, podría no existir una segunda pasada
+        # natural que lo corrigiera.
+        limpieza_mobile = revalidar_asociacion_mobile_sin_ocr(
+            RepositorioEnviosMobile(raiz_atlas=raiz), dataset=dataset,
+        )
         # A partir de acá el dataset YA tiene los cambios de las dos
         # revalidaciones de arriba -- cada una es atómica y ya quedó
         # protegida por su propio lock común del dataset al escribir; NO
@@ -356,7 +387,11 @@ def reconciliar_estado_derivado(
         "version": VERSION_ESTADO_DERIVADO,
         "respaldo": str(respaldo),
         "reporte_vigente": str(reporte),
-        "guias_actualizadas": sorted(set(limpieza["guias_actualizadas"]) | set(limpieza_material["guias_actualizadas"])),
+        "guias_actualizadas": sorted(
+            set(limpieza["guias_actualizadas"])
+            | set(limpieza_material["guias_actualizadas"])
+            | set(limpieza_indicadores["guias_actualizadas"])
+        ),
         "guias_recuperadas": guias_recuperadas,
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "pendientes_tecnicos": len(registros_despues),

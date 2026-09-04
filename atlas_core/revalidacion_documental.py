@@ -2608,6 +2608,72 @@ def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def _indicadores_documentales_coherentes(motivos: list[str], estado_ruta: str) -> tuple[str, str, str]:
+    """Única fuente de verdad para derivar (`indicador_revision`,
+    `estado_documental`, `estado_operacional`) a partir de lo que YA es
+    canónico en la fila (`motivos_revision_documento` YA reconciliado +
+    `estado_ruta` YA calculado) -- mismo criterio exacto que cada
+    `revalidar_*_sin_ocr` de retiro de motivo ya reimplementaba por su
+    cuenta (destino, material...), ahora en un solo lugar."""
+    indicador_revision = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+    estado_documental = "REQUIERE_REVISION" if indicador_revision == "REVISAR" else "OK"
+    estado_operacional = (
+        "OK" if estado_documental == "OK" and estado_ruta == EstadoRuta.RUTA_CALCULADA.value
+        else "REQUIERE_REVISION"
+    )
+    return indicador_revision, estado_documental, estado_operacional
+
+
+def revalidar_indicadores_documentales_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+    """Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
+    0000355433, guías 472623/472624): varios `revalidar_*_sin_ocr`
+    retiran motivos de `motivos_revision_documento` (destino contaminado,
+    material fusionado, patente sin homologar...) y CADA UNO reimplementa
+    por su cuenta el mismo cálculo de `indicador_revision`/
+    `estado_documental`/`estado_operacional` -- `revalidar_patente_sin_
+    homologar_sin_ocr` sólo actualizaba `indicador_revision` (quedó `OK`)
+    y nunca `estado_documental`/`estado_operacional` (quedaron
+    `REQUIERE_REVISION`, obsoletos): `gestor_viajes._documento_marca_
+    revision` sigue viendo `estado_operacional=REQUIERE_REVISION` y el
+    viaje queda `INCOMPLETO_TECNICO` ("pendiente completar el cálculo de
+    ruta") aunque la ruta YA esté calculada y NINGÚN motivo documental
+    real siga pendiente.
+
+    Esta función es la CONVERGENCIA final, independiente de CUÁL función
+    anterior retiró qué motivo (y de cualquier retiro futuro que se
+    agregue): releé cada fila y recalcula los TRES campos derivados
+    (`_indicadores_documentales_coherentes`) a partir de lo que YA es
+    canónico -- `motivos_revision_documento` y `estado_ruta`, ambos ya
+    reconciliados por las funciones anteriores de este mismo módulo.
+    Nunca decide POR SU CUENTA si un motivo sigue vigente (eso es
+    responsabilidad exclusiva de cada `revalidar_*_sin_ocr` específico,
+    que ya corrió antes en la misma pasada) -- sólo hace que los TRES
+    campos deriven, siempre, de la misma fuente y con el mismo criterio,
+    para que ningún retiro de motivo vuelva a dejar sólo uno o dos de los
+    tres campos al día."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            motivos = [m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m]
+            estado_ruta = str(fila.get("estado_ruta", "")).strip()
+            indicador, documental, operacional = _indicadores_documentales_coherentes(motivos, estado_ruta)
+            if (
+                str(fila.get("indicador_revision", "")).strip() == indicador
+                and str(fila.get("estado_documental", "")).strip() == documental
+                and str(fila.get("estado_operacional", "")).strip() == operacional
+            ):
+                continue
+            fila["indicador_revision"] = indicador
+            fila["estado_documental"] = documental
+            fila["estado_operacional"] = operacional
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def revalidar_motivo_destino_ya_confirmado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
 ) -> dict[str, object]:
@@ -3126,6 +3192,18 @@ def revalidar_y_regenerar_reporte(
     resultado_fecha_transporte = revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
         ruta_dataset=dataset,
     )
+    # Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
+    # 0000355433): cada revalidación de arriba retira SU PROPIO motivo de
+    # `motivos_revision_documento` (y, cada una por su cuenta, reimplementa
+    # el cálculo de `indicador_revision`/`estado_documental`/
+    # `estado_operacional` -- varias de forma incompleta, ver docstring de
+    # `revalidar_indicadores_documentales_sin_ocr`). Corre AL FINAL, una
+    # sola vez, DESPUÉS de que `motivos_revision_documento` y `estado_ruta`
+    # ya reflejan el resultado definitivo de TODAS las revalidaciones de
+    # esta misma pasada -- nunca decide si un motivo sigue vigente, sólo
+    # hace que los tres campos deriven, siempre, de esa misma fuente ya
+    # canónica.
+    resultado_indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset)
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
@@ -3143,6 +3221,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_material_estampado["guias_actualizadas"])
         | set(resultado_origen_eliminacion["guias_actualizadas"])
         | set(resultado_fecha_transporte["guias_actualizadas"])
+        | set(resultado_indicadores["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
         "filas_totales": resultado_patente["filas_totales"],
@@ -3166,6 +3245,7 @@ def revalidar_y_regenerar_reporte(
         "material_estampado": resultado_material_estampado,
         "origen_eliminacion_categoria": resultado_origen_eliminacion,
         "fecha_transporte_compartido": resultado_fecha_transporte,
+        "indicadores_documentales": resultado_indicadores,
     }
 
     # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió

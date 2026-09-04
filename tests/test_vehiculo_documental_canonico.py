@@ -312,8 +312,14 @@ def test_usar_patente_existente_aplica_sin_tocar_csv(tmp_path):
     entorno, decision = _entorno_con_decision_enriquecida(
         tmp_path,
         filas_csv=[
-            _fila_csv(numero_guia="1", patente_tracto="VP6521"),
-            _fila_csv(numero_guia="2", patente_tracto="VP8521", numero_transporte="T-2"),
+            _fila_csv(
+                numero_guia="1", patente_tracto="VP6521", indicador_revision="OK",
+                estado_documental="OK", estado_operacional="REQUIERE_REVISION",
+            ),
+            _fila_csv(
+                numero_guia="2", patente_tracto="VP8521", numero_transporte="T-2",
+                indicador_revision="OK", estado_documental="OK", estado_operacional="REQUIERE_REVISION",
+            ),
         ],
         decision_base=_decision_vehiculo(guia="1", campo="patente_tracto", valor_documental="VP6521"),
     )
