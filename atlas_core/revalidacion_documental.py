@@ -2174,6 +2174,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     proveedor_rutas=None, perfil: str = "driving-hgv",
     proveedor_rutas_fallback=None,
     guias_objetivo: set[str] | None = None,
+    comuna_manual_por_guia: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Bloque H (R4.10) -- para filas con planta de origen y
     `despachar_a_crudo` YA persistidos (documento ya procesado, sin OCR
@@ -2202,6 +2203,18 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     (por defecto) usa `OpenRouteService` + caché de geocodificación real,
     igual que el pipeline en vivo -- inyectable para tests.
 
+    `comuna_manual_por_guia` (Bloque REGISTRO_DIRECCION CONTEXTO, opcional
+    -- caso real 472640): `{numero_guia: comuna}` -- una comuna que un
+    humano acaba de escribir explícitamente (campo separado "Comuna/
+    localidad", nunca incrustada en `despachar_a_crudo`) para ESA guía
+    concreta, con prioridad sobre la resolución automática (ver
+    `resolver_comuna_territorial_conocida`). Para cualquier fila sin
+    entrada aquí (la inmensa mayoría, incluida toda revalidación masiva
+    sin decisión humana de por medio), la comuna se resuelve solo, en
+    orden: destino ya CONFIRMADO para la misma obra documental, o mención
+    inequívoca en el nombre de la obra -- nunca obliga al humano a
+    escribirla si Atlas ya la conoce por evidencia confiable.
+
     Bloque R9 -- caso real 472044: `estado_ruta` había quedado en
     `PROVEEDOR_NO_DISPONIBLE` (el proveedor externo falló durante el
     procesamiento original) y, al reintentar aquí, el proveedor SÍ
@@ -2221,7 +2234,12 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
-    from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
+    from atlas_core.rutas.destino_entrega import (
+        calcular_ruta_con_planta_conocida,
+        resolver_comuna_territorial_conocida,
+    )
+
+    comuna_manual_por_guia = comuna_manual_por_guia or {}
 
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
@@ -2358,6 +2376,21 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             contexto_evidencia_b1 = " ".join(
                 str(hallazgo_b1.get(clave, "")) for clave in ("b1_resumen_hallazgo", "b1_evidencia_resumida")
             ) if hallazgo_b1 else ""
+            obra_documental = str(fila.get("obra_destino", ""))
+            # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640: una
+            # comuna manual explícita para ESTA guía (campo separado,
+            # nunca incrustada en `despachar_a_crudo`) tiene prioridad;
+            # sin ella, se intenta resolver sola (destino CONFIRMADO
+            # previo de la misma obra, o mención inequívoca en el nombre
+            # de obra) -- nunca pide al humano algo que Atlas ya sabe.
+            comuna_conocida = str(comuna_manual_por_guia.get(str(fila.get("numero_guia", "")).strip(), "")).strip()
+            if not comuna_conocida:
+                comuna_conocida = resolver_comuna_territorial_conocida(
+                    obra_canonica=obra_documental,
+                    catalogo_obras_ruta=carpeta / "obras_destinos.json",
+                    catalogo_clientes_ruta=carpeta / "clientes.json",
+                    catalogo_destinos_ruta=carpeta / "destinos_maestros.json",
+                )
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
@@ -2366,7 +2399,8 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     perfil=perfil, destinos_confirmados=destinos_confirmados,
                     proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
                     contexto_evidencia_b1=contexto_evidencia_b1,
-                    contexto_obra=str(fila.get("obra_destino", "")),
+                    contexto_obra=obra_documental,
+                    comuna_territorial_conocida=comuna_conocida,
                 )
             except (OSError, ValueError):
                 continue
@@ -3543,6 +3577,7 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
 
     raiz = Path(raiz_atlas)
     dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    catalogos = raiz / "catalogos_privados"
     try:
         filas = _leer_filas(dataset)
     except (OSError, ValueError):
@@ -3550,7 +3585,7 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
     candidatas: list[dict[str, object]] = []
     for fila in filas:
         decision = detectar_decision_destino_no_resuelto(
-            archivo=fila.get("archivo", ""), fila=fila,
+            archivo=fila.get("archivo", ""), fila=fila, carpeta_catalogos=catalogos,
         )
         if decision is not None:
             candidatas.append(decision)

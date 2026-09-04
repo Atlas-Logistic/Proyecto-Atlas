@@ -17,6 +17,7 @@ from atlas_core.rutas.destino_entrega import (
     _comuna_documental_inequivoca,
     _comunas_explicitas,
     calcular_ruta_entrega_para_viaje,
+    resolver_comuna_territorial_conocida,
     resolver_destino_entrega,
 )
 from atlas_core.rutas.modelos import (
@@ -83,6 +84,158 @@ def test_candidato_unico_con_confianza_insuficiente_revisa():
     resultado = resolver_destino_entrega("CALLE AMBIGUA 100", proveedor)
     assert resultado.estado == ESTADO_REVISAR
     assert resultado.motivo == "CONFIANZA_INSUFICIENTE"
+
+
+# --- Bloque REGISTRO_DIRECCION CONTEXTO (caso real 472640) ---
+
+
+def test_comuna_territorial_conocida_eleva_un_candidato_de_baja_confianza():
+    """Sin comuna, el mismo candidato real (472640: "LAS VIOLETAS 55")
+    queda con confianza insuficiente -- exactamente el bug real. Con una
+    comuna YA confiable de otra fuente (nunca del propio texto, que sigue
+    sin mencionarla), la consulta se amplía y el mismo proveedor la
+    resuelve."""
+    direccion = "LAS VIOLETAS 55"
+    proveedor = ProveedorRutasSimulado(geocodificaciones={
+        f"{direccion} Padre Hurtado, Chile": ResultadoGeocodificacion(
+            EstadoRuta.REQUIERE_REVISION,
+            (CandidatoGeocodificacion(
+                Coordenadas(-70.76, -33.58), direccion + ", Padre Hurtado, RM, Chile", 0.9,
+                "Padre Hurtado", "Metropolitana",
+            ),),
+            "",
+        ),
+    })
+    sin_comuna = resolver_destino_entrega(direccion, proveedor)
+    assert sin_comuna.estado == ESTADO_REVISAR
+    assert sin_comuna.motivo == "CONFIANZA_INSUFICIENTE"
+
+    con_comuna = resolver_destino_entrega(
+        direccion, proveedor, comuna_territorial_conocida="Padre Hurtado",
+    )
+    assert con_comuna.estado == ESTADO_RESUELTO
+    assert con_comuna.localidad == "Padre Hurtado"
+    # El texto documental persistido (`despachar_a_crudo`) sigue siendo
+    # EXACTAMENTE lo que el humano escribió -- la comuna sólo amplió la
+    # consulta al geocodificador, nunca se incrusta en el resultado.
+    assert con_comuna.despachar_a_crudo == direccion
+
+
+def test_comuna_territorial_conocida_nunca_contradice_comuna_documental_propia():
+    """Si `despachar_a_crudo` YA menciona una comuna propia inequívoca,
+    `comuna_territorial_conocida` nunca la sobrescribe ni se agrega --
+    sólo completa evidencia AUSENTE, jamás contradice evidencia ya
+    presente en el documento."""
+    direccion = "AV SIEMPREVIVA 123 QUILICURA"
+    consulta_original = f"{direccion}, Chile"
+    proveedor = ProveedorRutasSimulado(geocodificaciones={
+        consulta_original: ResultadoGeocodificacion(
+            EstadoRuta.REQUIERE_REVISION,
+            (CandidatoGeocodificacion(
+                Coordenadas(-70.73, -33.36), direccion + ", Quilicura, RM, Chile", 0.9,
+                "Quilicura", "Metropolitana",
+            ),),
+            "",
+        ),
+    })
+    resultado = resolver_destino_entrega(
+        direccion, proveedor, comuna_territorial_conocida="Padre Hurtado",
+    )
+    assert resultado.estado == ESTADO_RESUELTO
+    assert resultado.localidad == "Quilicura"
+    assert proveedor.llamadas_geocodificacion == 1
+
+
+def test_resolver_comuna_territorial_conocida_usa_destino_confirmado_de_la_obra(tmp_path):
+    """Escribe los 3 catálogos directamente en su forma persistida (mismo
+    esquema que `Destino`/`Obra`/`RelacionObraDestino.a_dict()`) -- evita
+    acoplar esta prueba a la API interna de escritura de cada catálogo,
+    que ya tiene su propia cobertura dedicada. Cubre lo mismo que el
+    escenario real (ver `test_registro_direccion_contexto_territorial.
+    test_comuna_de_destino_confirmado_previo_se_reutiliza_sin_preguntar`,
+    a través del flujo real de `aplicar_decision_obra`), aislado a sólo
+    `resolver_comuna_territorial_conocida`."""
+    import json as json_mod
+
+    fecha = "2026-01-01T00:00:00+00:00"
+    (tmp_path / "clientes.json").write_text(
+        json_mod.dumps({"version_formato": 1, "clientes": []}), encoding="utf-8",
+    )
+    (tmp_path / "destinos_maestros.json").write_text(json_mod.dumps({
+        "version_formato": 1,
+        "destinos": [{
+            "destino_id": "destino-1", "cliente_id": "", "nombre_destino": "CAMINO LA ESTRELLA 100",
+            "nombre_normalizado": "CAMINO LA ESTRELLA 100", "codigo_destino": "",
+            "direccion": "CAMINO LA ESTRELLA 100", "comuna": "Padre Hurtado", "region": "Metropolitana",
+            "pais": "CHILE", "latitud": -33.58, "longitud": -70.76, "aliases": [],
+            "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "fuente": "TEST",
+            "observacion": "", "fecha_creacion": fecha, "fecha_modificacion": fecha,
+        }],
+    }), encoding="utf-8")
+    (tmp_path / "obras_destinos.json").write_text(json_mod.dumps({
+        "version_formato": 1,
+        "obras": [{
+            "obra_id": "obra-1", "cliente_id": "", "nombre_canonico": "DSI UNDERGROUND CHILE SPA",
+            "nombre_normalizado": "DSI UNDERGROUND CHILE SPA", "aliases_documentales": [],
+            "estado": "CONFIRMADA", "estado_vigencia": "ACTIVO",
+            "evidencias": [{
+                "tipo": "CONFIRMACION_HUMANA", "identificador_fuente": "472037", "referencia_hash": "x",
+                "campos_observados": {}, "fecha": fecha, "actor_proceso": "TEST", "resultado": "SOPORTA",
+            }],
+            "fecha_creacion": fecha, "fecha_modificacion": fecha,
+        }],
+        "relaciones": [{
+            "relacion_id": "relacion-1", "obra_id": "obra-1", "destino_id": "destino-1",
+            "estado": "CONFIRMADA",
+            "evidencias": [{
+                "tipo": "CONFIRMACION_HUMANA", "identificador_fuente": "472037", "referencia_hash": "x",
+                "campos_observados": {}, "fecha": fecha, "actor_proceso": "TEST", "resultado": "SOPORTA",
+            }],
+            "fuente_confirmacion": "TEST",
+            "confirmado_por": "TEST", "fecha_confirmacion": fecha, "observaciones": "",
+            "fecha_creacion": fecha, "fecha_modificacion": fecha,
+        }],
+    }), encoding="utf-8")
+
+    comuna = resolver_comuna_territorial_conocida(
+        obra_canonica="DSI UNDERGROUND CHILE SPA",
+        catalogo_obras_ruta=tmp_path / "obras_destinos.json",
+        catalogo_clientes_ruta=tmp_path / "clientes.json",
+        catalogo_destinos_ruta=tmp_path / "destinos_maestros.json",
+    )
+    assert comuna == "Padre Hurtado"
+
+
+def test_resolver_comuna_territorial_conocida_usa_nombre_de_obra_sin_destino_previo(tmp_path):
+    for nombre, contenido in {
+        "clientes.json": {"version_formato": 1, "clientes": []},
+        "obras_destinos.json": {"version_formato": 1, "obras": [], "relaciones": []},
+        "destinos_maestros.json": {"version_formato": 1, "destinos": []},
+    }.items():
+        (tmp_path / nombre).write_text(__import__("json").dumps(contenido), encoding="utf-8")
+    comuna = resolver_comuna_territorial_conocida(
+        obra_canonica="CONSTRUCTORA EJEMPLO PADRE HURTADO",
+        catalogo_obras_ruta=tmp_path / "obras_destinos.json",
+        catalogo_clientes_ruta=tmp_path / "clientes.json",
+        catalogo_destinos_ruta=tmp_path / "destinos_maestros.json",
+    )
+    assert comuna == "Padre Hurtado"
+
+
+def test_resolver_comuna_territorial_conocida_vacia_sin_ninguna_fuente_confiable(tmp_path):
+    for nombre, contenido in {
+        "clientes.json": {"version_formato": 1, "clientes": []},
+        "obras_destinos.json": {"version_formato": 1, "obras": [], "relaciones": []},
+        "destinos_maestros.json": {"version_formato": 1, "destinos": []},
+    }.items():
+        (tmp_path / nombre).write_text(__import__("json").dumps(contenido), encoding="utf-8")
+    comuna = resolver_comuna_territorial_conocida(
+        obra_canonica="DSI UNDERGROUND CHILE SPA",
+        catalogo_obras_ruta=tmp_path / "obras_destinos.json",
+        catalogo_clientes_ruta=tmp_path / "clientes.json",
+        catalogo_destinos_ruta=tmp_path / "destinos_maestros.json",
+    )
+    assert comuna == ""
 
 
 def test_multiples_candidatos_nunca_elige_el_mas_cercano_a_aza():

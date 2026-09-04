@@ -283,8 +283,36 @@ def resumen_observacion_operacional(fila: Mapping[str, str]) -> dict[str, object
     }
 
 
+def _comuna_sugerida_para_contexto(
+    *, obra_canonica: str, carpeta_catalogos: str | Path | None,
+) -> str:
+    """Bloque REGISTRO_DIRECCION CONTEXTO (caso real 472640) -- lectura
+    READ-ONLY de catálogos, sólo para adjuntar al `contexto` de la
+    decisión (nunca para decidir nada por su cuenta) una comuna YA
+    confiable si existe, mediante `resolver_comuna_territorial_conocida`
+    (destino CONFIRMADO previo de la misma obra, o mención inequívoca en
+    el nombre de obra). `carpeta_catalogos=None` (compatibilidad con
+    llamadores que todavía no la entregan) -- se abstiene sin romper
+    nada. Nunca lanza: un catálogo ilegible/ausente sólo significa "sin
+    sugerencia todavía", igual que sin este bloque."""
+    if not carpeta_catalogos:
+        return ""
+    from atlas_core.rutas.destino_entrega import resolver_comuna_territorial_conocida
+
+    carpeta = Path(carpeta_catalogos)
+    try:
+        return resolver_comuna_territorial_conocida(
+            obra_canonica=obra_canonica,
+            catalogo_obras_ruta=carpeta / "obras_destinos.json",
+            catalogo_clientes_ruta=carpeta / "clientes.json",
+            catalogo_destinos_ruta=carpeta / "destinos_maestros.json",
+        )
+    except (OSError, ValueError):
+        return ""
+
+
 def detectar_decision_destino_no_resuelto(
-    *, archivo: str, fila: Mapping[str, str],
+    *, archivo: str, fila: Mapping[str, str], carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, object] | None:
     """Bloque R6 A/B/E: genera una pregunta `DESTINO_NO_RESUELTO` para UN
     documento YA PROCESADO cuyo origen ya está resuelto (`planta_origen_id`
@@ -324,8 +352,9 @@ def detectar_decision_destino_no_resuelto(
         "despachar_a_crudo": str(fila.get("despachar_a_crudo", "")),
         "planta_origen_nombre": str(fila.get("planta_origen_nombre", "")),
     }]
+    obra_canonica = str(fila.get("obra_destino", ""))
     contexto = {
-        "obra_canonica": str(fila.get("obra_destino", "")),
+        "obra_canonica": obra_canonica,
         "cliente_canonico": str(fila.get("cliente", "")),
         "planta_origen_id": str(fila.get("planta_origen_id", "")),
     }
@@ -339,6 +368,17 @@ def detectar_decision_destino_no_resuelto(
     hallazgo = resumen_hallazgo_b1(fila, dominio="DESTINO", campo="despachar_a_crudo")
     if hallazgo:
         contexto.update(hallazgo)
+    # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640: si Atlas ya
+    # conoce una comuna confiable para esta obra (destino CONFIRMADO
+    # previo, o mención inequívoca en el nombre de obra), se adjunta aquí
+    # para que Desktop la prellene/oculte el campo "Comuna/localidad" en
+    # vez de pedírsela al humano de nuevo -- nunca se adjunta si no hay
+    # nada confiable (`comuna_sugerida` ausente del contexto).
+    comuna_sugerida = _comuna_sugerida_para_contexto(
+        obra_canonica=obra_canonica, carpeta_catalogos=carpeta_catalogos,
+    )
+    if comuna_sugerida:
+        contexto["comuna_sugerida"] = comuna_sugerida
     return crear_decision(
         tipo="DESTINO_NO_RESUELTO", entidad="DESTINO", archivo=str(archivo),
         numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
@@ -371,7 +411,7 @@ MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL = frozenset({
 
 
 def detectar_decision_destino_contaminado_documental(
-    *, archivo: str, fila: Mapping[str, str],
+    *, archivo: str, fila: Mapping[str, str], carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, object] | None:
     """Genera `DESTINO_NO_RESUELTO` para un documento cuyo destino
     documental sigue marcado contaminado/truncado en
@@ -387,14 +427,22 @@ def detectar_decision_destino_contaminado_documental(
         "despachar_a_crudo": str(fila.get("despachar_a_crudo", "")),
         "estado_ruta": str(fila.get("estado_ruta", "")),
     }]
+    obra_canonica = str(fila.get("obra_destino", ""))
     contexto: dict[str, object] = {
-        "obra_canonica": str(fila.get("obra_destino", "")),
+        "obra_canonica": obra_canonica,
         "cliente_canonico": str(fila.get("cliente", "")),
         "planta_origen_id": str(fila.get("planta_origen_id", "")),
     }
     hallazgo = resumen_hallazgo_b1(fila, dominio="DESTINO", campo="despachar_a_crudo")
     if hallazgo:
         contexto.update(hallazgo)
+    # Bloque REGISTRO_DIRECCION CONTEXTO -- ver
+    # `detectar_decision_destino_no_resuelto`, mismo mecanismo.
+    comuna_sugerida = _comuna_sugerida_para_contexto(
+        obra_canonica=obra_canonica, carpeta_catalogos=carpeta_catalogos,
+    )
+    if comuna_sugerida:
+        contexto["comuna_sugerida"] = comuna_sugerida
     return crear_decision(
         tipo="DESTINO_NO_RESUELTO", entidad="DESTINO", archivo=str(archivo),
         numero_guia=str(documento[0]), numero_transporte=str(documento[1]),
@@ -1933,8 +1981,12 @@ def regenerar_decisiones_persistidas(
                 detectar_decision_origen_no_confirmado(
                     archivo=archivo_fila, fila=fila_actual, plantas=plantas_vigentes,
                 ),
-                detectar_decision_destino_no_resuelto(archivo=archivo_fila, fila=fila_actual),
-                detectar_decision_destino_contaminado_documental(archivo=archivo_fila, fila=fila_actual),
+                detectar_decision_destino_no_resuelto(
+                    archivo=archivo_fila, fila=fila_actual, carpeta_catalogos=carpeta_catalogos,
+                ),
+                detectar_decision_destino_contaminado_documental(
+                    archivo=archivo_fila, fila=fila_actual, carpeta_catalogos=carpeta_catalogos,
+                ),
                 detectar_decision_cliente_ausente(archivo=archivo_fila, fila=fila_actual),
             ):
                 if nueva is None:

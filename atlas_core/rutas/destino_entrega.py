@@ -38,6 +38,7 @@ import re
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable
 
 from atlas_core.catalogo_destinos import Destino
@@ -150,6 +151,59 @@ def _contexto_geografico_desde_texto(texto: str):
     if decision.estado != EstadoNormalizacion.EXACTA or decision.unidad is None:
         return None
     return geografia.parametros_geocodificacion(decision.unidad)
+
+
+def resolver_comuna_territorial_conocida(
+    *, obra_canonica: str,
+    catalogo_obras_ruta: str | Path, catalogo_clientes_ruta: str | Path,
+    catalogo_destinos_ruta: str | Path,
+) -> str:
+    """Bloque REGISTRO_DIRECCION CONTEXTO -- causa raíz real del caso
+    472640 (LAS VIOLETAS 55, DSI UNDERGROUND CHILE SPA): cuando un humano
+    corrige `despachar_a_crudo` (calle+número, Bloque R6 A/B/E) escribiendo
+    SÓLO la calle -- exactamente lo que se le pide, ver
+    `aplicar_decision_obra` -- ninguna comuna viaja con esa corrección. Sin
+    comuna, un candidato de geocodificación real pero ambiguo a nivel país
+    queda con confianza insuficiente (`CONFIANZA_INSUFICIENTE`) y la ruta
+    nunca se calcula, aunque Atlas pueda ya conocer la comuna por otra vía
+    confiable -- nunca debe obligarse al humano a re-escribirla dentro del
+    campo Dirección (eso mezclaría calle+comuna en un solo texto libre,
+    justo lo que el Bloque E1 evita para no confundir "calle" con
+    "sector/comuna").
+
+    Devuelve una comuna sólo si proviene de evidencia YA confiable, en
+    orden de prioridad (la primera que responda gana, nunca se combinan):
+
+    1. Un destino ya CONFIRMADO (evidencia humana o externa previa, nunca
+       un candidato nuevo) para la MISMA obra documental, vía
+       `CatalogoObrasDestinos.resolver_obra_destino_confirmada_global`
+       (R3.4 -- identidad global, no depende de qué cliente trae ESTE
+       documento). Nunca dos destinos CONFIRMADOS en conflicto: esa
+       función ya se abstiene ante ambigüedad.
+    2. Una comuna real mencionada de forma INEQUÍVOCA en el propio nombre
+       de la obra documental (mismo criterio ya usado como respaldo
+       textual de candidatos, Bloque R2.5, caso real 464264 "SODIMAC SA
+       CORONEL").
+
+    Nunca lee `COMUNA`/`DIRECCION`/`COD DESTINATARIO` del formulario (ver
+    docstring del módulo: esos campos NO son confiables como destino real
+    de entrega) ni inventa nada -- devuelve "" cuando ninguna fuente
+    resuelve algo inequívoco, dejando la decisión en manos del humano."""
+    obra = str(obra_canonica or "").strip()
+    if not obra:
+        return ""
+    try:
+        from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+
+        resolucion = CatalogoObrasDestinos(
+            catalogo_obras_ruta, ruta_clientes=catalogo_clientes_ruta,
+            ruta_destinos=catalogo_destinos_ruta,
+        ).resolver_obra_destino_confirmada_global(nombre_obra=obra)
+    except (OSError, ValueError):
+        resolucion = None
+    if resolucion is not None and resolucion.destino.comuna.strip():
+        return resolucion.destino.comuna.strip()
+    return _comuna_documental_inequivoca(obra)
 
 
 def _geocodificar_con_contexto(proveedor, direccion: str, contexto):
@@ -938,6 +992,7 @@ def resolver_destino_entrega(
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     contexto_evidencia_b1: str = "",
     contexto_obra: str = "",
+    comuna_territorial_conocida: str = "",
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -992,7 +1047,21 @@ def resolver_destino_entrega(
     por el proveedor tienen evidencia real. Nunca inventa una comuna: si
     el nombre de la obra es ambiguo (dos comunas reales) o no menciona
     ninguna, no aporta nada -- mismo comportamiento que sin este
-    parámetro."""
+    parámetro.
+
+    `comuna_territorial_conocida` (Bloque REGISTRO_DIRECCION CONTEXTO,
+    opcional -- ver `resolver_comuna_territorial_conocida`, caso real
+    472640): a diferencia de `contexto_obra` (sólo filtra candidatos ya
+    devueltos), esta comuna SÍ se agrega a la consulta enviada al
+    geocodificador y al `ContextoGeocodificacion` estructurado -- porque
+    viene de evidencia ya confiable (destino CONFIRMADO previo para la
+    misma obra, o mención inequívoca en el nombre de obra), nunca del
+    texto libre que un humano acaba de escribir. Sólo actúa cuando
+    `despachar_a_crudo` NO trae ya su propia comuna inequívoca -- nunca
+    reemplaza ni contradice evidencia documental existente, sólo la
+    completa cuando falta. Resuelve exactamente el caso real 472640
+    (LAS VIOLETAS 55): sin esto, un único candidato de baja confianza
+    quedaba en `CONFIANZA_INSUFICIENTE` para siempre."""
     texto = str(despachar_a_crudo or "").strip()
     if not texto:
         return ResultadoDestinoEntrega(
@@ -1015,6 +1084,20 @@ def resolver_destino_entrega(
     # para la consulta un token "SANTIAGO" redundante cuando el texto ya
     # trae otra comuna real distinta.
     texto_geocodificable = _texto_geocodificable_sin_etiqueta_ciudad_santiago(texto_geocodificable)
+    # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640: si el texto
+    # documental no trae ninguna comuna propia inequívoca, pero SÍ existe
+    # una comuna ya confiable de otra fuente (ver `comuna_territorial_
+    # conocida`/`resolver_comuna_territorial_conocida`), se agrega aquí --
+    # tanto a la consulta como al `ContextoGeocodificacion` estructurado
+    # de abajo, que la detecta con el MISMO mecanismo ya existente
+    # (`_comuna_documental_inequivoca` sobre el texto ya ampliado, nunca
+    # un camino paralelo). Si el texto YA trae su propia comuna, nunca se
+    # toca -- esto sólo completa evidencia ausente, nunca contradice la
+    # documental.
+    if comuna_territorial_conocida and not _comuna_documental_inequivoca(texto_geocodificable):
+        comuna_normalizada = _texto_normalizado_sin_acentos(comuna_territorial_conocida)
+        if comuna_normalizada and comuna_normalizada not in _texto_normalizado_sin_acentos(texto_geocodificable):
+            texto_geocodificable = f"{texto_geocodificable} {comuna_territorial_conocida}".strip()
     consulta = (
         f"{texto_geocodificable}, {contexto_territorial}" if contexto_territorial else texto_geocodificable
     )
@@ -1044,6 +1127,15 @@ def resolver_destino_entrega(
             comuna_obra = _comuna_documental_inequivoca(str(contexto_obra or ""))
             if comuna_obra and _texto_normalizado_sin_acentos(comuna_obra) not in _texto_normalizado_sin_acentos(texto):
                 texto_soporte = f"{texto} {comuna_obra}"
+            # Bloque REGISTRO_DIRECCION CONTEXTO -- mismo respaldo, pero
+            # con una comuna ya confiable de OTRA fuente (destino
+            # CONFIRMADO previo para la misma obra, ver
+            # `comuna_territorial_conocida`), no sólo la que menciona el
+            # propio nombre de obra.
+            if comuna_territorial_conocida:
+                comuna_normalizada = _texto_normalizado_sin_acentos(comuna_territorial_conocida)
+                if comuna_normalizada and comuna_normalizada not in _texto_normalizado_sin_acentos(texto_soporte):
+                    texto_soporte = f"{texto_soporte} {comuna_territorial_conocida}"
         candidatos_relevantes = _candidatos_con_soporte_textual(resultado.candidatos, texto_soporte)
         # Bloque TELEMETRÍA T1 -- evidencia GPS real (opcional), descarta
         # candidatos territorialmente incompatibles con el recorrido real.
@@ -1250,6 +1342,7 @@ def resolver_destino_entrega_validado(
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     contexto_evidencia_b1: str = "",
     contexto_obra: str = "",
+    comuna_territorial_conocida: str = "",
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -1281,6 +1374,7 @@ def resolver_destino_entrega_validado(
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
         contexto_evidencia_b1=contexto_evidencia_b1,
         contexto_obra=contexto_obra,
+        comuna_territorial_conocida=comuna_territorial_conocida,
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado
@@ -1464,6 +1558,7 @@ def calcular_ruta_con_planta_conocida(
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     contexto_evidencia_b1: str = "",
     contexto_obra: str = "",
+    comuna_territorial_conocida: str = "",
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -1491,6 +1586,7 @@ def calcular_ruta_con_planta_conocida(
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
         contexto_evidencia_b1=contexto_evidencia_b1,
         contexto_obra=contexto_obra,
+        comuna_territorial_conocida=comuna_territorial_conocida,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO

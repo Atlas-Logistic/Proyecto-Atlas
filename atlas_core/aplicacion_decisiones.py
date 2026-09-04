@@ -269,7 +269,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -912,6 +912,19 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     direccion_final = str(direccion_manual or "").strip()
                     if not direccion_final:
                         raise ErrorAplicacionDecision("Debe indicar la dirección de entrega.")
+                    # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640
+                    # (LAS VIOLETAS 55, DSI UNDERGROUND CHILE SPA): la
+                    # comuna/localidad NUNCA se escribe dentro de este mismo
+                    # campo (mezclaría calle con sector/comuna, ver
+                    # `resolver_destino_entrega`) -- viaja aparte, opcional,
+                    # sólo cuando Atlas no pudo resolverla sola (Desktop
+                    # sólo pide el campo si `decision.contexto.comuna_
+                    # sugerida` viene vacía, ver `detectar_decision_destino_
+                    # no_resuelto`). Si el humano la escribe, tiene prioridad
+                    # sobre la resolución automática, pero nunca la
+                    # reemplaza si viene vacía -- `revalidar_ruta_sin_
+                    # destino_calculado_sin_ocr` resuelve sola en ese caso.
+                    comuna_final = str(comuna_manual or "").strip()
                     from atlas_core.revalidacion_documental import (
                         _escribir_filas_completas, _leer_filas,
                         invalidar_derivados_ruta,
@@ -958,6 +971,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     resultado_revalidacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
                         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
                         proveedor_rutas_fallback=proveedor_rutas_fallback,
+                        comuna_manual_por_guia=(
+                            {numero_guia_decision: comuna_final} if comuna_final else None
+                        ),
                     )
                     # Bloque LOGÍSTICA L1 -- `guias_actualizadas` ya NO es un
                     # proxy fiable de "ruta resuelta": desde este bloque
@@ -1559,6 +1575,29 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 shutil.rmtree(reporte_salida)
             raise
 
+        # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640: el
+        # mensaje genérico ("revise el detalle del motivo") no le decía a
+        # Javier QUÉ faltaba. Estos motivos concretos se corrigen
+        # agregando comuna/localidad (campo separado, ver Desktop) --
+        # nunca reescribiendo la dirección; el resto de motivos (comuna
+        # documental contradicha, fuera de Chile, sin acceso vial) son
+        # evidencia real/inmutable y no se resuelven agregando comuna, así
+        # que conservan el mensaje genérico.
+        MOTIVOS_RUTA_CORREGIBLES_CON_COMUNA = {
+            "CONFIANZA_INSUFICIENTE", "GEOCODIFICACION_DEMASIADO_GENERICA",
+            "MULTIPLES_UBICACIONES_DISPERSAS", "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+        }
+        motivo_tras_intento_base = str(
+            resultado_extra.get("motivo_ruta_tras_intento", "") or ""
+        ).split(":", 1)[0].split("(", 1)[0].strip()
+        mensaje_direccion_sin_ruta = (
+            "Dirección registrada. Atlas no pudo ubicarla con confianza suficiente "
+            "sin conocer la comuna/localidad -- indíquela en el campo separado "
+            "\"Comuna/localidad\" y vuelva a confirmar; el resto de la dirección "
+            "no hace falta reescribirlo."
+            if motivo_tras_intento_base in MOTIVOS_RUTA_CORREGIBLES_CON_COMUNA
+            else "Dirección registrada, pero sigue sin poder calcularse una ruta confiable con ella -- revise el detalle del motivo."
+        )
         mensajes = {
             ("OBRA_DESCONOCIDA", "REGISTRAR"): "Obra registrada. Atlas podrá reconocerla en documentos futuros.",
             ("OBRA_DESCONOCIDA", "NO_REGISTRAR"): "Decisión guardada. Atlas no registrará esta observación como obra.",
@@ -1580,7 +1619,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("DESTINO_NO_RESUELTO", "REGISTRAR_DIRECCION"): (
                 "Dirección registrada. Ruta calculada y km/tiempo actualizados; Atlas reconocerá esta obra en documentos futuros."
                 if resultado_extra.get("ruta_resuelta")
-                else "Dirección registrada, pero sigue sin poder calcularse una ruta confiable con ella -- revise el detalle del motivo."
+                else mensaje_direccion_sin_ruta
             ),
             ("DESTINO_NO_RESUELTO", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este destino mientras la evidencia no cambie.",
             ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"): "Cliente registrado. Atlas reconocerá esta razón social en documentos futuros.",
