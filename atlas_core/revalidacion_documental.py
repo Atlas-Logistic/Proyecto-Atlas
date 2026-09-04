@@ -48,6 +48,7 @@ from atlas_core.catalogo_vehiculos import (
     normalizar_patente_vehiculo,
 )
 from atlas_core.catalogos import buscar_chofer_por_nombre_exacto, cargar_catalogo_json
+from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_material
 from atlas_core.extractor import _patente_valida, limpiar_sufijo_rut_pegado
 from atlas_core.incidencias_documentales import (
     TIPO_RUT_DOCUMENTAL_INVALIDO,
@@ -65,6 +66,7 @@ from atlas_core.procesamiento_masivo import (
     MOTIVOS_NO_BLOQUEANTES,
     MotivoRevisionDocumento,
     _combinar_fecha_hora,
+    _dividir_items_material_fusionados,
     _es_fragmento_estampado_no_material,
     _normalizar,
     _parsear_fecha_dd_mm_yyyy,
@@ -2684,21 +2686,63 @@ def revalidar_material_estampado_persistido_sin_ocr(
     coincide con la firma de sello (código corto + fecha compacta + hora
     compacta). Nunca inventa un material nuevo; si un documento queda sin
     ningún segmento válido, el campo simplemente queda vacío (nunca se
-    rellena con nada)."""
+    rellena con nada).
+
+    Bloque PROPAGACIÓN MATERIAL M1 (extensión) -- misma brecha, para el
+    hallazgo estructural de `_dividir_items_material_fusionados`: un
+    documento procesado ANTES de ese bloque puede tener persistido un
+    ÚNICO segmento que en realidad fusiona varios ítems reales (caso real
+    472640, DSI UNDERGROUND CHILE SPA) -- se re-divide con la MISMA regla
+    vigente, ANTES de filtrar sellos. Si el resultado deja de disparar
+    `MATERIAL_POSIBLEMENTE_CONTAMINADO` (`evaluar_credibilidad_material`),
+    ese motivo se retira de `motivos_revision_documento` y se recalculan
+    `indicador_revision`/`estado_documental`/`estado_operacional` -- MISMO
+    criterio exacto que ya usa `revalidar_motivo_destino_ya_confirmado_
+    sin_ocr` para el motivo de destino contaminado (nunca dos criterios
+    distintos para el mismo tipo de reconciliación). Cualquier OTRO motivo
+    ya presente (material ausente, obra/cliente sin corroborar, etc.) se
+    conserva intacto -- esta función sólo decide sobre el motivo de
+    material, nunca sobre los demás."""
     ruta = Path(ruta_dataset)
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
         actualizadas: list[str] = []
         for fila in filas:
+            cambio = False
             crudo = str(fila.get("descripcion_material", "")).strip()
-            if not crudo:
-                continue
-            segmentos = [s.strip() for s in crudo.split(SEPARADOR_MOTIVOS) if s.strip()]
-            conservados = [s for s in segmentos if not _es_fragmento_estampado_no_material(_normalizar(s))]
-            if conservados == segmentos:
-                continue
-            fila["descripcion_material"] = SEPARADOR_MOTIVOS.join(conservados)
-            actualizadas.append(str(fila.get("numero_guia", "")))
+            if crudo:
+                segmentos = [s.strip() for s in crudo.split(SEPARADOR_MOTIVOS) if s.strip()]
+                divididos = [
+                    item
+                    for segmento in segmentos
+                    for item in _dividir_items_material_fusionados(segmento)
+                ]
+                conservados = [s for s in divididos if not _es_fragmento_estampado_no_material(_normalizar(s))]
+                nuevo_valor = SEPARADOR_MOTIVOS.join(dict.fromkeys(conservados))
+                if nuevo_valor != crudo:
+                    fila["descripcion_material"] = nuevo_valor
+                    cambio = True
+            motivos_previos = [
+                m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m
+            ]
+            motivo_material = MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value
+            if motivo_material in motivos_previos:
+                valor_actual = str(fila.get("descripcion_material", "")).strip()
+                if evaluar_credibilidad_material(valor_actual).nivel == NivelCredibilidad.CONFIABLE:
+                    motivos_nuevos = [m for m in motivos_previos if m != motivo_material]
+                    fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_nuevos)
+                    fila["indicador_revision"] = (
+                        "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_nuevos) else "OK"
+                    )
+                    fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+                    fila["estado_operacional"] = (
+                        "OK" if fila["estado_documental"] == "OK"
+                        and str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+                        else "REQUIERE_REVISION"
+                    )
+                    cambio = True
+            if cambio:
+                actualizadas.append(str(fila.get("numero_guia", "")))
         if actualizadas:
             _escribir_filas_completas(ruta, filas)
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}

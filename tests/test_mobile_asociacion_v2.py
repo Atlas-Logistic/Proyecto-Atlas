@@ -299,6 +299,82 @@ def test_revalidar_nunca_degrada_un_envio_ya_asociado(tmp_path: Path) -> None:
     assert repo.cargar(envio_id)["resultado_asociacion"]["estado"] == "ASOCIADO_AUTOMATICAMENTE"
 
 
+# ============================================================
+# Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: `estado` debe
+# recalcularse contra la fila FRESCA del propio documento en el dataset
+# (no sólo contra la foto fija de `datos_ocr`), aunque la ASOCIACIÓN en
+# sí no cambie -- "primer/único documento conocido de este transporte" es
+# legítimo y permanece SIN_ASOCIACION para siempre (nunca se inventa un
+# segundo documento que no existe); lo que sí debe dejar de estar
+# obsoleto es `estado`, cuando el motivo que lo mantenía en
+# REQUIERE_REVISION ya fue retirado en la fila del dataset.
+# ============================================================
+
+def test_estado_se_recalcula_contra_la_fila_fresca_aunque_la_asociacion_no_cambie(tmp_path: Path) -> None:
+    dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
+    _dataset_vacio(dataset)
+    repo, envio_id = _recibir(tmp_path)
+    registro = procesar_envio_mobile(
+        repo, envio_id, dataset=dataset,
+        procesador=lambda r: {
+            "numero_guia": "472640", "numero_transporte": "0000355509",
+            "indicador_revision": "REVISAR",
+        },
+    )
+    # Único documento conocido de este transporte -- SIN_ASOCIACION
+    # legítimo (Sección 13.2), y REQUIERE_REVISION porque el propio
+    # documento vino marcado REVISAR.
+    assert registro["resultado_asociacion"]["estado"] == "SIN_ASOCIACION"
+    assert registro["estado"] == "REQUIERE_REVISION"
+
+    # Simula lo que una reconciliación real (`revalidar_motivo_destino_ya_
+    # confirmado_sin_ocr`/`revalidar_material_estampado_persistido_sin_
+    # ocr`) ya deja en el dataset -- nunca vuelve a leer OCR, sólo edita
+    # la fila YA persistida de este mismo documento.
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    for fila in filas:
+        if fila.get("numero_guia") == "472640":
+            fila["indicador_revision"] = "OK"
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    resumen = revalidar_asociacion_mobile_sin_ocr(repo, dataset=dataset)
+    assert envio_id in resumen["actualizados"]
+    registro_revisado = repo.cargar(envio_id)
+    # La asociación NUNCA se inventa -- sigue siendo el único documento
+    # conocido de este transporte, exactamente igual que antes.
+    assert registro_revisado["resultado_asociacion"]["estado"] == "SIN_ASOCIACION"
+    assert registro_revisado["resultado_asociacion"]["numero_transporte"] == ""
+    # Pero el estado del ENVÍO ya no está obsoleto -- el motivo real que
+    # lo mantenía en revisión ya fue retirado en el dataset.
+    assert registro_revisado["estado"] == "ASOCIADO"
+
+
+def test_estado_se_conserva_si_la_fila_fresca_sigue_marcando_revisar(tmp_path: Path) -> None:
+    """Control -- si la fila del dataset SIGUE en REVISAR (un motivo real
+    y distinto, p. ej. material contaminado, todavía sin resolver),
+    `estado` no cambia -- nunca se oculta un pendiente real de otro
+    motivo."""
+    dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
+    _dataset_vacio(dataset)
+    repo, envio_id = _recibir(tmp_path)
+    registro = procesar_envio_mobile(
+        repo, envio_id, dataset=dataset,
+        procesador=lambda r: {
+            "numero_guia": "472641", "numero_transporte": "0000355510",
+            "indicador_revision": "REVISAR",
+        },
+    )
+    assert registro["estado"] == "REQUIERE_REVISION"
+
+    resumen = revalidar_asociacion_mobile_sin_ocr(repo, dataset=dataset)
+    assert envio_id not in resumen["actualizados"]
+    assert repo.cargar(envio_id)["estado"] == "REQUIERE_REVISION"
+
+
 def test_revalidar_no_toca_envios_con_captura_ilegible(tmp_path: Path) -> None:
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
     _dataset_vacio(dataset)

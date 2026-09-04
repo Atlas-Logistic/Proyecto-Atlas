@@ -44,6 +44,8 @@ def test_estado_pre_r2_se_reconcilia_una_vez_sin_ocr_y_con_respaldo(tmp_path, mo
         return {"totales": {"viajes": 1, "viajes_incompletos_tecnicos": 1}}
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
+    monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
     primero = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
@@ -52,11 +54,14 @@ def test_estado_pre_r2_se_reconcilia_una_vez_sin_ocr_y_con_respaldo(tmp_path, mo
     assert primero["reconciliado"] is True
     assert primero["ocr_ejecutado"] is False
     assert primero["guias_actualizadas"] == ["1"]
-    assert segundo == {"reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE", "version": 2, "pendientes_tecnicos": 0}
+    assert segundo == {
+        "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
+        "version": modulo.VERSION_ESTADO_DERIVADO, "pendientes_tecnicos": 0,
+    }
     assert llamadas == {"limpieza": 1, "reporte": 1}
     assert decisiones.read_bytes() == bytes_decisiones
     assert (next((tmp_path / "respaldos").iterdir()) / dataset.name).is_file()
-    assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == 2
+    assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == modulo.VERSION_ESTADO_DERIVADO
 
 
 def test_fallo_no_publica_version_pero_nunca_revierte_cambios_del_dataset_ya_aplicados(tmp_path, monkeypatch):
@@ -73,6 +78,8 @@ def test_fallo_no_publica_version_pero_nunca_revierte_cambios_del_dataset_ya_apl
         return {"guias_actualizadas": ["1"]}
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
+    monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fallo")))
 
     import pytest
@@ -124,6 +131,54 @@ def test_pendiente_tecnico_se_recupera_en_siguiente_oportunidad_sin_decision_hum
     assert json.loads((actual / "pendientes_tecnicos.json").read_text())["pendientes"] == []
     assert json.loads(decisiones.read_text())["decisiones"] == []
     assert repetido["reconciliado"] is False
+
+
+def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migracion(tmp_path, monkeypatch):
+    """Bloque RECONCILIACIÓN POST-DECISIÓN -- causa raíz real del caso
+    472640: antes, `revalidar_motivo_destino_ya_confirmado_sin_ocr` (y,
+    con este bloque, también la de material y la de asociación Mobile)
+    sólo corrían durante una migración de versión (`if migracion:`) --
+    Javier confirmó una dirección real, Atlas recalculó km/tiempo
+    correctamente, pero el viaje seguía "Pendiente técnico" porque la
+    reconciliación NORMAL (versión ya vigente, sólo el dataset avanzó por
+    la decisión) nunca volvía a mirar esos motivos. Las tres deben correr
+    en CUALQUIER reconciliación real, no sólo una vez por versión."""
+    dataset, decisiones = _entorno(tmp_path)
+    llamadas = {"motivo_destino": 0, "material": 0, "mobile": 0}
+
+    def espiar(clave):
+        def _fn(*a, **k):
+            llamadas[clave] += 1
+            return {"guias_actualizadas": []}
+        return _fn
+
+    def espiar_mobile(*a, **k):
+        llamadas["mobile"] += 1
+        return {"revisados": 0, "actualizados": []}
+
+    def reportar(_dataset, salida, **kwargs):
+        salida.mkdir(parents=True)
+        (salida / "viajes.csv").write_text("estado\nCONFIRMADO\n", encoding="utf-8")
+        return {"totales": {"viajes": 1, "viajes_confirmados": 1}}
+
+    monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", espiar("motivo_destino"))
+    monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", espiar("material"))
+    monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", espiar_mobile)
+    monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
+
+    # Primera corrida: migración real (versión previa 0 -> vigente).
+    primero = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
+    assert primero["reconciliado"] is True
+    assert llamadas == {"motivo_destino": 1, "material": 1, "mobile": 1}
+
+    # El dataset avanza por una decisión humana real (simulada) -- ya NO
+    # es migración (la versión ya quedó vigente arriba), sólo el dataset
+    # cambió.
+    dataset.write_text(dataset.read_text(encoding="utf-8") + "2;OK\n", encoding="utf-8")
+    reloj_segundo = lambda: datetime(2026, 8, 31, 18, 0, 1, tzinfo=timezone.utc)
+    segundo = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=reloj_segundo)
+    assert segundo["reconciliado"] is True
+    assert llamadas == {"motivo_destino": 2, "material": 2, "mobile": 2}
 
 
 def test_a_reconciliacion_vs_otro_escritor_real_concurrente_no_pierde_cambio_ajeno(tmp_path, monkeypatch):

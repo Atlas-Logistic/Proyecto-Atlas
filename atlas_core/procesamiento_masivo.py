@@ -382,12 +382,93 @@ def _es_fragmento_estampado_no_material(linea_normalizada: str) -> bool:
     return bool(tiene_codigo_corto and tiene_fecha_compacta and tiene_hora_compacta)
 
 
+_TERMINOS_MATERIAL = (
+    r"HORMIGON|BARRAS?|ROLLOS?|ALAMBRON|BOBINAS?|"
+    r"ANGULOS?|REDONDOS?|CUADRADOS?|PLANAS?|PERFILES?|VIGAS?|MALLAS?"
+)
+
+# Bloque PROPAGACIÓN MATERIAL M1 -- caso real 472640: cuando el documento
+# no trae saltos de línea limpios entre filas de la tabla DESCRIPCIÓN
+# (imagen inclinada/de baja calidad), el OCR devuelve VARIOS ítems reales
+# de material fusionados en una sola línea de texto (p. ej. "B HORMIGON
+# 32MM ... Coladas: ... B HORMIGON 22MM ... Coladas: ..."). El bucle de
+# abajo split-ea por SALTO DE LÍNEA solamente, así que ese bloque
+# fusionado se trataba como un ÚNICO ítem -- su longitud total (ambos
+# ítems reales juntos) disparaba el umbral de contaminación de
+# `evaluar_credibilidad_material` (`LONGITUD_EXCESIVA`) aunque cada ítem
+# individual fuera perfectamente razonable, y Desktop terminaba mostrando
+# "NO DETERMINADO" para un material que SÍ se había leído.
+#
+# El límite entre ítems NO puede detectarse por "aparece otro término de
+# material" -- un ítem real legítimo puede mencionar dos términos juntos
+# (p. ej. "ROLLOS ALAMBRON 6MM", un solo producto) y partirlo ahí
+# fragmentaría un ítem real. "COLADAS" (las coladas/lotes de fabricación
+# de acero) SÍ es un marcador de cierre de ítem confiable en este tipo de
+# guía -- aparece UNA vez por cada fila real de la tabla, nunca dentro de
+# la descripción del producto mismo -- así que el fin de cada bloque
+# "Coladas: <números>" es el límite real entre un ítem y el siguiente.
+# Mismo criterio que ya protege la unión con "|" (`evaluar_credibilidad_
+# material`: "la longitud se evalúa por ítem, nunca sobre el texto ya
+# unido completo"), sólo que aplicado también DENTRO de una línea OCR
+# fusionada, no sólo entre líneas ya separadas.
+_PATRON_FIN_ITEM_MATERIAL = re.compile(r"COLADAS?\s*:?\s*[\d,\s]*\d", re.IGNORECASE)
+_PATRON_TERMINOS_MATERIAL = re.compile(rf"\b(?:{_TERMINOS_MATERIAL})\b")
+
+
+def _tiene_evidencia_material(texto: str) -> bool:
+    """Mismo criterio de evidencia que ya usa `extraer_descripcion_material`
+    para aceptar una LÍNEA completa (término reconocido, o tolerancia OCR
+    sobre "HORMIGON") -- reutilizado aquí para decidir si un fragmento
+    suelto (el remanente tras el último "Coladas:", ver
+    `_dividir_items_material_fusionados`) es en verdad un ítem de
+    material o sólo texto ajeno (pie de página, observación, comentario)."""
+    normalizado = _normalizar(texto)
+    return bool(_PATRON_TERMINOS_MATERIAL.search(normalizado)) or any(
+        _coincide_con_tolerancia_ocr(token, "HORMIGON")
+        for token in re.findall(r"[A-Z]+", normalizado)
+    )
+
+
+def _dividir_items_material_fusionados(limpia: str) -> list[str]:
+    """Si `limpia` contiene 2+ cierres "Coladas: ..." (ver
+    `_PATRON_FIN_ITEM_MATERIAL`), la parte justo después de cada uno --
+    cualquier texto ANTES del primer ítem (p. ej. la etiqueta de columna
+    "DESCRIPCION" que el OCR fusionó junto con la primera fila) queda
+    dentro del primer segmento, nunca se descarta ni se trata como ítem
+    aparte. Con 0 o 1 cierre reconocible (el caso normal: una línea OCR
+    ya es un único ítem, con o sin su propio "Coladas"), devuelve la
+    línea intacta, sin dividir -- nunca fragmenta un ítem real que
+    mencione dos términos de material sin ningún "Coladas" de por medio.
+
+    El REMANENTE después del ÚLTIMO "Coladas:" es distinto de los demás
+    segmentos: a diferencia de éstos (siempre cerrados por su propio
+    "Coladas:", ya validados como línea completa por el llamador antes de
+    llegar aquí), el remanente nunca tiene ese cierre -- puede ser una
+    fila de material real cuyo propio "Coladas:" el OCR simplemente no
+    alcanzó a leer, pero TAMBIÉN puede ser pie de página/observación/
+    comentario que el OCR fusionó en la misma línea (caso real: "...
+    Coladas: 2 OBSERVACIONES GENERALES" -- "OBSERVACIONES GENERALES" NO
+    es material). Sólo se conserva como ítem si trae su PROPIA evidencia
+    explícita de material (`_tiene_evidencia_material`, mismo criterio
+    que ya exige cualquier línea de material) -- sin ella, se descarta
+    por completo (nunca se adjunta al segmento anterior, nunca se inventa
+    evidencia que no está)."""
+    fines = [m.end() for m in _PATRON_FIN_ITEM_MATERIAL.finditer(limpia)]
+    if len(fines) < 2:
+        return [limpia]
+    segmentos = []
+    inicio = 0
+    for fin in fines:
+        segmentos.append(limpia[inicio:fin].strip())
+        inicio = fin
+    resto = limpia[inicio:].strip()
+    if resto and _tiene_evidencia_material(resto):
+        segmentos.append(resto)
+    return [s for s in segmentos if s]
+
+
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
     """Conserva líneas OCR con evidencia explícita de material."""
-    terminos = re.compile(
-        r"\b(HORMIGON|BARRAS?|ROLLOS?|ALAMBRON|BOBINAS?|"
-        r"ANGULOS?|REDONDOS?|CUADRADOS?|PLANAS?|PERFILES?|VIGAS?|MALLAS?)\b"
-    )
     encontradas: list[str] = []
     for bloque in textos:
         for linea in str(bloque).splitlines():
@@ -395,16 +476,12 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             if not limpia:
                 continue
             normalizada = _normalizar(limpia)
-            tiene_evidencia = terminos.search(normalizada) or any(
-                _coincide_con_tolerancia_ocr(token, "HORMIGON")
-                for token in re.findall(r"[A-Z]+", normalizada)
-            )
-            if tiene_evidencia and not _es_fragmento_estampado_no_material(normalizada):
+            if _tiene_evidencia_material(limpia) and not _es_fragmento_estampado_no_material(normalizada):
                 # Confusiones OCR acotadas al contexto inequívoco de una línea
                 # de acero: B/3/D al inicio y 8/B antes de MM.
                 limpia = re.sub(r"^[D3]\s+(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
                 limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
-                encontradas.append(limpia)
+                encontradas.extend(_dividir_items_material_fusionados(limpia))
     return " | ".join(dict.fromkeys(encontradas))
 
 

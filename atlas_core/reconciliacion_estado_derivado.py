@@ -21,14 +21,23 @@ from atlas_core.almacenamiento_portable import (
 )
 from atlas_core.aplicacion_decisiones import LEDGER
 from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
+from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
+    revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
 )
 
 
-VERSION_ESTADO_DERIVADO = 2
+# Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: subida de 2 a 3
+# para disparar, en la PRÓXIMA carga natural de Desktop (nunca un reproceso
+# manual de ninguna guía puntual), la migración de una sola vez que barre
+# TODA la operación vigente contra las reglas ya corregidas de esta versión
+# (retiro de motivo de destino ya confirmado + material fusionado/estampado
+# + asociación Mobile ya determinada) -- exactamente el mismo mecanismo que
+# ya usa este archivo, nunca uno paralelo. Ver `reconciliar_estado_derivado`.
+VERSION_ESTADO_DERIVADO = 3
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
 MAX_REINTENTOS_IGUALES_ARRANQUE = 3
@@ -191,11 +200,30 @@ def reconciliar_estado_derivado(
             "creado_en": instante.isoformat(),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-        limpieza = {"guias_actualizadas": []}
-        if migracion:
-            limpieza = revalidar_motivo_destino_ya_confirmado_sin_ocr(
-                ruta_dataset=dataset, carpeta_catalogos=catalogos,
-            )
+        # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: estas
+        # tres revalidaciones NUNCA leen OCR ni recalculan ruta -- sólo
+        # reconcilian flags/estados derivados YA obsoletos contra reglas
+        # ya vigentes (motivo documental de destino ya confirmado por una
+        # decisión humana o por catálogo; material que en verdad fusiona
+        # varios ítems reales o trae un sello pegado; asociación/estado de
+        # un envío Mobile cuyo propio documento ya tiene fila fresca en el
+        # dataset). Antes corrían SÓLO durante una migración de versión
+        # (`if migracion:`) -- la primera vez que Javier confirmó una
+        # dirección real (472640) y Atlas recalculó km/tiempo
+        # correctamente, el viaje seguía mostrando "Pendiente técnico" y
+        # el envío Mobile seguía "sin asociación" pidiendo "Confirmar
+        # viaje", porque nada volvía a mirar estos tres flags en la MISMA
+        # reconciliación que ya corre automáticamente en cada carga de
+        # Desktop. Corren siempre que se entra a este bloque (migración,
+        # reintento de ruta vencido, o simplemente el dataset avanzó por
+        # cualquier decisión humana) -- nunca sólo una vez por versión.
+        limpieza = revalidar_motivo_destino_ya_confirmado_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        )
+        limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
+        limpieza_mobile = revalidar_asociacion_mobile_sin_ocr(
+            RepositorioEnviosMobile(raiz_atlas=raiz), dataset=dataset,
+        )
         recuperacion = {"guias_actualizadas": []}
         if por_reintentar:
             recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -293,8 +321,9 @@ def reconciliar_estado_derivado(
         "version": VERSION_ESTADO_DERIVADO,
         "respaldo": str(respaldo),
         "reporte_vigente": str(reporte),
-        "guias_actualizadas": limpieza["guias_actualizadas"],
+        "guias_actualizadas": sorted(set(limpieza["guias_actualizadas"]) | set(limpieza_material["guias_actualizadas"])),
         "guias_recuperadas": guias_recuperadas,
+        "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "pendientes_tecnicos": len(registros_despues),
         "totales": manifest["totales"],
         "ocr_ejecutado": False,

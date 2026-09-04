@@ -307,17 +307,36 @@ def _captura_ilegible(datos: Mapping[str, object]) -> bool:
     return guia in ("", "No encontrado") and transporte in ("", "No encontrado")
 
 
-def _estado_final_mobile(datos: Mapping[str, object], asociacion: Mapping[str, object], captura_ilegible: bool) -> str:
+def _estado_final_mobile(
+    datos: Mapping[str, object], asociacion: Mapping[str, object], captura_ilegible: bool,
+    *, indicador_revision_actual: str | None = None,
+) -> str:
     """Deriva el `estado` final del envío a partir de la asociación y de
     las mismas señales documentales que ya respeta Desktop. Extraída de
     `procesar_envio_mobile` (Asociación Mobile V2) para que
     `revalidar_asociacion_mobile_sin_ocr` pueda recalcular el estado tras
-    una reevaluación sin duplicar esta decisión en dos lugares."""
+    una reevaluación sin duplicar esta decisión en dos lugares.
+
+    `indicador_revision_actual` (Bloque RECONCILIACIÓN POST-DECISIÓN,
+    opcional -- caso real 472640): `datos.get("indicador_revision")` es
+    una FOTO fija tomada cuando este envío se procesó por primera vez --
+    nunca se actualiza sola. Si el documento de este envío YA tiene su
+    propia fila en el dataset vigente (`procesar_envio_mobile` ya la
+    escribió), su `indicador_revision` ahí es la fuente FRESCA -- puede
+    haber bajado a "OK" desde entonces (p. ej. una decisión humana
+    retiró el motivo que lo mantenía en REVISAR). Cuando se entrega, éste
+    reemplaza a la foto fija; sin él (compatibilidad con el llamador
+    original en `procesar_envio_mobile`, donde la fila TODAVÍA no
+    existe), el comportamiento es idéntico al de siempre."""
     if captura_ilegible:
         return "REQUIERE_REVISION"
     if asociacion["estado"] == "PROPUESTA_REQUIERE_REVISION":
         return "REQUIERE_REVISION"
-    if str(datos.get("indicador_revision", "")).strip().casefold() == "revisar":
+    indicador = (
+        indicador_revision_actual if indicador_revision_actual is not None
+        else datos.get("indicador_revision", "")
+    )
+    if str(indicador).strip().casefold() == "revisar":
         # Sección 7/11: el propio Core ya marcó esta guía para revisión
         # (regla existente, p. ej. chofer sin corroborar o dato
         # documental incoherente) -- Mobile no inventa una regla
@@ -1373,9 +1392,24 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 identificador_propio = f"mobile/{envio_id}/{registro.get('foto_original', '')}"
                 filas_sin_propia = [f for f in filas if f.get("archivo") != identificador_propio]
                 asociacion_nueva = asociar_documento(datos, filas_sin_propia)
-                if asociacion_nueva == asociacion_previa:
+                # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640:
+                # la fila propia (si `procesar_envio_mobile` ya la
+                # escribió) es la fuente FRESCA de `indicador_revision`,
+                # a diferencia de la foto fija en `datos_ocr` -- ver
+                # docstring de `_estado_final_mobile`. `estado` puede
+                # necesitar recalcularse aunque la ASOCIACIÓN en sí no
+                # haya cambiado (p. ej. sigue SIN_ASOCIACION porque este
+                # documento nunca tendrá un segundo documento hermano con
+                # el mismo transporte -- eso es legítimo y no es lo que
+                # cambió -- pero una decisión humana ya retiró el motivo
+                # documental que mantenía la fila en REVISAR).
+                fila_propia = next((f for f in filas if f.get("archivo") == identificador_propio), None)
+                indicador_actual = fila_propia.get("indicador_revision") if fila_propia else None
+                estado_nuevo = _estado_final_mobile(
+                    datos, asociacion_nueva, False, indicador_revision_actual=indicador_actual,
+                )
+                if asociacion_nueva == asociacion_previa and estado_nuevo == registro.get("estado"):
                     continue
-                estado_nuevo = _estado_final_mobile(datos, asociacion_nueva, False)
                 registro["resultado_asociacion"] = asociacion_nueva
                 registro["estado"] = estado_nuevo
                 repositorio.guardar(envio_id, registro)
