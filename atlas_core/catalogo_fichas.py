@@ -127,6 +127,24 @@ def _patente_canonica_o_plegada(patente_observada: str, rol: str, vehiculos_por_
     return next(iter(candidatos)) if len(candidatos) == 1 else patente_observada
 
 
+# Bloque RELACIONES OPERACIONALES V1 -- umbral genérico, el mismo para
+# cualquier tipo de relación (chofer↔vehículo, tracto↔rampla): una
+# relación con 3 o más apariciones documentales independientes es
+# evidencia operacional consistente ("FUERTE"); con 1 o 2, es real pero
+# todavía puntual ("AISLADA") -- nunca se trata como confirmación de
+# asignación permanente (ver `buscar_relaciones_*`, más abajo, para el
+# uso que le da B1). El corte en 3 replica el criterio ya usado por la
+# investigación externa de referencia (Copilot, `atlas_relaciones_
+# operacionales_investigacion/`) -- se adopta el UMBRAL, nunca sus CSV:
+# cada número de este módulo se recalcula siempre desde
+# `analisis_completo_guias.csv`, la única fuente canónica."""
+UMBRAL_RELACION_FUERTE = 3
+
+
+def _nivel_evidencia(apariciones: int) -> str:
+    return "FUERTE" if apariciones >= UMBRAL_RELACION_FUERTE else "AISLADA"
+
+
 def _vehiculos_asociados(filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object]) -> list[dict[str, object]]:
     """Sección 4 -- nunca "una patente fija": todas las asociadas,
     tracto y rampla, con apariciones/primera/última -- nunca borra
@@ -143,7 +161,7 @@ def _vehiculos_asociados(filas: list[dict[str, str]], vehiculos_por_patente: Map
             patente = _patente_canonica_o_plegada(normalizar_patente_vehiculo(valor), rol, vehiculos_por_patente)
             registro = por_patente.setdefault(patente, {
                 "patente": patente, "roles_documentales": set(), "apariciones": 0,
-                "fechas": [], "transportes": set(),
+                "fechas": [], "transportes": set(), "guias": set(),
             })
             registro["roles_documentales"].add(rol)
             registro["apariciones"] += 1
@@ -151,6 +169,9 @@ def _vehiculos_asociados(filas: list[dict[str, str]], vehiculos_por_patente: Map
             transporte = str(fila.get("numero_transporte", "")).strip()
             if transporte and transporte not in _AUSENTES:
                 registro["transportes"].add(transporte)
+            guia = str(fila.get("numero_guia", "")).strip()
+            if guia and guia not in _AUSENTES:
+                registro["guias"].add(guia)
 
     salida = []
     for patente, registro in por_patente.items():
@@ -163,10 +184,85 @@ def _vehiculos_asociados(filas: list[dict[str, str]], vehiculos_por_patente: Map
             "transportes_distintos": len(registro["transportes"]),
             "primera_aparicion": primera,
             "ultima_aparicion": ultima,
+            "guias_soporte": sorted(registro["guias"]),
+            "nivel_evidencia": _nivel_evidencia(registro["apariciones"]),
             "tipo_catalogo": vehiculo_catalogo.tipo if vehiculo_catalogo else None,
             "estado_catalogo": vehiculo_catalogo.estado_calidad if vehiculo_catalogo else "SIN_CATALOGAR",
         })
     salida.sort(key=lambda v: (-v["apariciones"], v["patente"]))
+    return salida
+
+
+def _choferes_asociados(filas: list[dict[str, str]]) -> list[dict[str, object]]:
+    """Lado simétrico de `_vehiculos_asociados`, visto desde un
+    vehículo: uno o varios choferes, cada uno con apariciones/primera/
+    última/guías soporte -- nunca "un chofer fijo" (Sección VEHÍCULO del
+    bloque RELACIONES OPERACIONALES). `filas` ya viene filtrada a las
+    guías de un vehículo puntual (ver `construir_ficha_vehiculo`)."""
+    por_chofer: dict[str, dict[str, object]] = {}
+    for fila in filas:
+        nombre = str(fila.get("chofer", "")).strip()
+        if not nombre or nombre in _AUSENTES:
+            continue
+        registro = por_chofer.setdefault(nombre, {"nombre": nombre, "apariciones": 0, "fechas": [], "guias": set()})
+        registro["apariciones"] += 1
+        registro["fechas"].append(str(fila.get("fecha", "")))
+        guia = str(fila.get("numero_guia", "")).strip()
+        if guia and guia not in _AUSENTES:
+            registro["guias"].add(guia)
+
+    salida = []
+    for nombre, registro in por_chofer.items():
+        primera, ultima = _primera_ultima(registro["fechas"])
+        salida.append({
+            "nombre": nombre, "apariciones": registro["apariciones"],
+            "primera_aparicion": primera, "ultima_aparicion": ultima,
+            "guias_soporte": sorted(registro["guias"]),
+            "nivel_evidencia": _nivel_evidencia(registro["apariciones"]),
+        })
+    salida.sort(key=lambda c: (-c["apariciones"], c["nombre"]))
+    return salida
+
+
+def _combinaciones_tracto_rampla(
+    filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Bloque RELACIONES OPERACIONALES -- TRACTO↔RAMPLA: la combinación
+    real que un mismo documento trae junta (mismo `patente_tracto` +
+    `patente_rampla` en la MISMA fila/guía) es evidencia operacional
+    -- puede servir para corroborar una lectura OCR débil de una de las
+    dos patentes contra la otra, ya conocida (nunca al revés: esto
+    sólo agrega evidencia ponderable, nunca sustituye/corrige un dato
+    documental por su cuenta). Sólo cuenta filas con AMBAS patentes
+    presentes; cada una se resuelve primero a su canónica confirmada si
+    es una confusión OCR ya calibrada (mismo criterio que el resto del
+    módulo, nunca uno nuevo)."""
+    por_par: dict[tuple[str, str], dict[str, object]] = {}
+    for fila in filas:
+        tracto_doc = str(fila.get("patente_tracto", "")).strip()
+        rampla_doc = str(fila.get("patente_rampla", "")).strip()
+        if not tracto_doc or tracto_doc in _AUSENTES or not rampla_doc or rampla_doc in _AUSENTES:
+            continue
+        tracto = _patente_canonica_o_plegada(normalizar_patente_vehiculo(tracto_doc), "TRACTO", vehiculos_por_patente)
+        rampla = _patente_canonica_o_plegada(normalizar_patente_vehiculo(rampla_doc), "CARRO", vehiculos_por_patente)
+        clave = (tracto, rampla)
+        registro = por_par.setdefault(clave, {"tracto": tracto, "rampla": rampla, "apariciones": 0, "fechas": [], "guias": set()})
+        registro["apariciones"] += 1
+        registro["fechas"].append(str(fila.get("fecha", "")))
+        guia = str(fila.get("numero_guia", "")).strip()
+        if guia and guia not in _AUSENTES:
+            registro["guias"].add(guia)
+
+    salida = []
+    for (tracto, rampla), registro in por_par.items():
+        primera, ultima = _primera_ultima(registro["fechas"])
+        salida.append({
+            "tracto": tracto, "rampla": rampla, "apariciones": registro["apariciones"],
+            "primera_aparicion": primera, "ultima_aparicion": ultima,
+            "guias_soporte": sorted(registro["guias"]),
+            "nivel_evidencia": _nivel_evidencia(registro["apariciones"]),
+        })
+    salida.sort(key=lambda c: (-c["apariciones"], c["tracto"], c["rampla"]))
     return salida
 
 
@@ -272,6 +368,7 @@ def construir_ficha_chofer(*, identificador: str, registro_catalogo: Mapping[str
         "observacion_catalogo": str(registro_catalogo.get("observacion", "")).strip(),
         "rut": rut,
         "vehiculos": _vehiculos_asociados(filas_chofer, vehiculos_por_patente),
+        "combinaciones_tracto_rampla": _combinaciones_tracto_rampla(filas_chofer, vehiculos_por_patente),
         "historico": _historico_entidad(filas_chofer, campo_contraparte="cliente"),
         "guias_relacionadas": sorted({str(f.get("numero_guia", "")) for f in filas_chofer if f.get("numero_guia") not in _AUSENTES}),
     }
@@ -348,11 +445,15 @@ def construir_ficha_vehiculo(
         if _patente_canonica_o_plegada(normalizar_patente_vehiculo(str(f.get("patente_tracto", ""))), "TRACTO", vehiculos_por_patente) == patente
         or _patente_canonica_o_plegada(normalizar_patente_vehiculo(str(f.get("patente_rampla", ""))), "CARRO", vehiculos_por_patente) == patente
     ]
-    choferes: dict[str, int] = {}
-    for f in filas_vehiculo:
-        nombre = str(f.get("chofer", "")).strip()
-        if nombre and nombre not in _AUSENTES:
-            choferes[nombre] = choferes.get(nombre, 0) + 1
+    choferes_asociados = _choferes_asociados(filas_vehiculo)
+    # Bloque RELACIONES OPERACIONALES -- TRACTO↔RAMPLA: combinaciones
+    # observadas de TODO el histórico (nunca sólo las filas de este
+    # vehículo, que ya son sólo un lado del par) que involucran esta
+    # patente, en cualquiera de los dos roles (tracto o rampla).
+    combinaciones_tracto_rampla = [
+        c for c in _combinaciones_tracto_rampla(filas, vehiculos_por_patente)
+        if patente in (c["tracto"], c["rampla"])
+    ]
     primera, ultima = _primera_ultima(str(f.get("fecha", "")) for f in filas_vehiculo)
     guias_relacionadas = sorted({str(f.get("numero_guia", "")) for f in filas_vehiculo if f.get("numero_guia") not in _AUSENTES})
 
@@ -382,7 +483,8 @@ def construir_ficha_vehiculo(
         "clasificacion_visual": clasificacion_visual,
         "aliases": list(vehiculo.aliases),
         "confirmado_por": vehiculo.confirmado_por,
-        "choferes_asociados": _top(choferes, n=10),
+        "choferes_asociados": choferes_asociados,
+        "combinaciones_tracto_rampla": combinaciones_tracto_rampla,
         "primera_aparicion": primera,
         "ultima_aparicion": ultima,
         "guias_relacionadas": guias_relacionadas,
@@ -459,3 +561,91 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
         "choferes": fichas_choferes, "clientes": fichas_clientes,
         "obras": fichas_obras, "vehiculos": fichas_vehiculos,
     }
+
+
+# ============================================================
+# Bloque RELACIONES OPERACIONALES -- consulta puntual para B1
+# ============================================================
+#
+# `construir_snapshot_fichas` sirve a Desktop (un snapshot completo, una
+# vez por apertura de Catálogos). B1 necesita lo opuesto: UNA ficha
+# puntual, por nombre de chofer reconocido o por patente, con la MISMA
+# evidencia (nunca un criterio ni un cálculo paralelo -- reutiliza
+# `construir_snapshot_fichas` y sólo filtra el resultado).
+#
+# Ejemplo de uso pensado (ver ticket): nombre de chofer reconocido -> RUT
+# -> vehículos históricos -> combinaciones tracto/rampla -> frecuencia/
+# recencia -> contraste contra una lectura OCR dudosa. El contraste en
+# sí (decidir si una patente OCR corresponde a una ya asociada) es
+# responsabilidad de quien llama (B1, o `evaluar_evidencia_patente` en
+# `decisiones_pendientes.py`) -- esta función sólo entrega la evidencia
+# ya agregada, nunca decide ni corrige nada por su cuenta.
+
+
+def buscar_relaciones_chofer(
+    *, raiz_atlas: str | Path, nombre: str = "", rut: str = "",
+) -> dict[str, object] | None:
+    """Busca la ficha de UN chofer por nombre reconocido (canónico o
+    alias, normalizado igual que el resto del módulo) o por RUT
+    (cualquier formato válido). `None` si ninguno calza -- nunca inventa
+    ni aproxima por similitud de texto.
+
+    Devuelve la misma ficha completa que ya consume Desktop: `rut`,
+    `vehiculos` (histórico chofer→patente, con `apariciones`/
+    `primera_aparicion`/`ultima_aparicion`/`guias_soporte`/
+    `nivel_evidencia`), `combinaciones_tracto_rampla` (histórico de
+    pares tracto+rampla que este chofer condujo juntos) e `historico`.
+
+    Nunca confirma nada por su cuenta: quien consuma el resultado
+    (B1 incluido) trata `nivel_evidencia`/`apariciones` como evidencia
+    ponderable, nunca como una corrección ya aplicada."""
+    nombre_normalizado = _normalizar_nombre_entidad(nombre) if nombre else ""
+    rut_normalizado = _rut_valido_o_none(rut) if rut else None
+    if not nombre_normalizado and not rut_normalizado:
+        return None
+    snapshot = construir_snapshot_fichas(raiz_atlas=raiz_atlas)
+    for ficha in snapshot["choferes"]:
+        if rut_normalizado and ficha["rut"].get("valor") == rut_normalizado:
+            return ficha
+        if nombre_normalizado:
+            nombres_ficha = {_normalizar_nombre_entidad(n) for n in [ficha["nombre_canonico"], *ficha["aliases"]]}
+            if nombre_normalizado in nombres_ficha:
+                return ficha
+    return None
+
+
+def buscar_relaciones_vehiculo(*, raiz_atlas: str | Path, patente: str) -> dict[str, object] | None:
+    """Busca la ficha de UN vehículo por patente (cualquier variante ya
+    resuelta a su canónica confirmada -- ver `_patente_canonica_o_
+    plegada`; una patente que sólo existe como confusión OCR de otra ya
+    catalogada devuelve la ficha de la canónica). `None` si no hay
+    ningún vehículo catalogado que calce.
+
+    Devuelve la misma ficha completa que ya consume Desktop:
+    `choferes_asociados` (histórico vehículo→chofer, con `apariciones`/
+    `primera_aparicion`/`ultima_aparicion`/`guias_soporte`/
+    `nivel_evidencia`) y `combinaciones_tracto_rampla`.
+
+    Si `patente` no calza exacto con ninguna canónica pero es una
+    confusión OCR calibrada e inequívoca de una que sí lo es (misma
+    regla ya usada por `resolver_patente`/`catalogo_vehiculos.py` --
+    nunca un criterio nuevo), devuelve la ficha de esa canónica. Esto es
+    precisamente el caso de uso de B1 (Sección B1 del ticket): contrastar
+    una lectura documental dudosa contra la evidencia ya conocida."""
+    patente_normalizada = normalizar_patente_vehiculo(patente)
+    if not patente_normalizada:
+        return None
+    snapshot = construir_snapshot_fichas(raiz_atlas=raiz_atlas)
+    for ficha in snapshot["vehiculos"]:
+        if ficha["patente"] == patente_normalizada:
+            return ficha
+    from atlas_core.catalogo_vehiculos import resolver_patente
+    try:
+        resultado = resolver_patente(Path(raiz_atlas) / "catalogos_privados" / "vehiculos.json", patente_normalizada)
+    except _ERRORES_CATALOGO_VEHICULOS:
+        return None  # mismo criterio que `_cargar_vehiculos_por_patente` -- nunca revienta por un catálogo corrupto/ausente
+    if resultado.estado in ("COINCIDENCIA_EXACTA", "ALIAS", "CORRECCION_OCR_SEGURA") and resultado.valor_resultado != patente_normalizada:
+        for ficha in snapshot["vehiculos"]:
+            if ficha["patente"] == resultado.valor_resultado:
+                return ficha
+    return None

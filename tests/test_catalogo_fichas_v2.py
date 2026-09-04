@@ -467,5 +467,210 @@ def test_ficha_vehiculo_incluye_tipo_choferes_asociados_y_apariciones():
     ]
     ficha = construir_ficha_vehiculo(vehiculo=vehiculo, filas=filas, vehiculos_por_patente={"BPHR67": vehiculo})
     assert ficha["tipo_vehiculo"] == "TRACTO"
-    assert ficha["choferes_asociados"] == [{"nombre": "CRISTOPHER RETAMAL", "apariciones": 2}]
+    # Bloque RELACIONES OPERACIONALES: además de nombre/apariciones, cada
+    # relación vehículo->chofer trae primera/última aparición, guías
+    # soporte y nivel de evidencia (mismo criterio que el lado chofer-
+    # >vehículo, ver `_vehiculos_asociados`) -- 2 apariciones es "AISLADA"
+    # (< UMBRAL_RELACION_FUERTE).
+    assert ficha["choferes_asociados"] == [{
+        "nombre": "CRISTOPHER RETAMAL", "apariciones": 2,
+        "primera_aparicion": "2026-08-18", "ultima_aparicion": "2026-08-18",
+        "guias_soporte": ["1", "2"], "nivel_evidencia": "AISLADA",
+    }]
     assert ficha["guias_relacionadas"] == ["1", "2"]
+
+
+# ============================================================
+# Bloque RELACIONES OPERACIONALES -- tracto-rampla, choferes
+# multiples/vehiculos multiples, nivel de evidencia, consulta
+# puntual para B1.
+# ============================================================
+
+
+def test_combinacion_tracto_rampla_aparece_en_ambas_fichas_del_par():
+    tracto = _vehiculo("AB1111", tipo="TRACTO")
+    rampla = _vehiculo("CD2222", tipo="CARRO")
+    vehiculos_por_patente = {"AB1111": tracto, "CD2222": rampla}
+    filas = [
+        _fila(numero_guia="1", patente_tracto="AB1111", patente_rampla="CD2222"),
+        _fila(numero_guia="2", patente_tracto="AB1111", patente_rampla="CD2222"),
+        _fila(numero_guia="3", patente_tracto="AB1111", patente_rampla="CD2222"),
+    ]
+    ficha_tracto = construir_ficha_vehiculo(vehiculo=tracto, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
+    ficha_rampla = construir_ficha_vehiculo(vehiculo=rampla, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
+    esperado = [{
+        "tracto": "AB1111", "rampla": "CD2222", "apariciones": 3,
+        "primera_aparicion": "2026-08-18", "ultima_aparicion": "2026-08-18",
+        "guias_soporte": ["1", "2", "3"], "nivel_evidencia": "FUERTE",
+    }]
+    assert ficha_tracto["combinaciones_tracto_rampla"] == esperado
+    assert ficha_rampla["combinaciones_tracto_rampla"] == esperado
+
+
+def test_combinacion_tracto_rampla_aislada_bajo_el_umbral():
+    tracto = _vehiculo("AB1111", tipo="TRACTO")
+    filas = [_fila(numero_guia="1", patente_tracto="AB1111", patente_rampla="CD2222")]
+    ficha = construir_ficha_vehiculo(vehiculo=tracto, filas=filas, vehiculos_por_patente={"AB1111": tracto})
+    assert ficha["combinaciones_tracto_rampla"][0]["nivel_evidencia"] == "AISLADA"
+
+
+def test_sin_rampla_documental_no_genera_combinacion():
+    tracto = _vehiculo("AB1111", tipo="TRACTO")
+    filas = [_fila(numero_guia="1", patente_tracto="AB1111", patente_rampla="No encontrado")]
+    ficha = construir_ficha_vehiculo(vehiculo=tracto, filas=filas, vehiculos_por_patente={"AB1111": tracto})
+    assert ficha["combinaciones_tracto_rampla"] == []
+
+
+def test_chofer_con_combinaciones_tracto_rampla_propias():
+    filas = [
+        _fila(numero_guia="1", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla="CD2222"),
+        _fila(numero_guia="2", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla="CD2222"),
+        _fila(numero_guia="3", chofer="OTRO", patente_tracto="EF3333", patente_rampla="GH4444"),
+    ]
+    ficha = construir_ficha_chofer(
+        identificador="PENDIENTE1", registro_catalogo={"nombre": "ANA PEREZ", "activo": True, "aliases": []},
+        filas=filas, vehiculos_por_patente={},
+    )
+    assert ficha["combinaciones_tracto_rampla"] == [{
+        "tracto": "AB1111", "rampla": "CD2222", "apariciones": 2,
+        "primera_aparicion": "2026-08-18", "ultima_aparicion": "2026-08-18",
+        "guias_soporte": ["1", "2"], "nivel_evidencia": "AISLADA",
+    }]
+
+
+def test_vehiculo_con_mas_de_un_chofer_conserva_ambos_nunca_elige_uno():
+    tracto = _vehiculo("AB1111", tipo="TRACTO")
+    filas = [
+        _fila(numero_guia="1", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla=""),
+        _fila(numero_guia="2", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla=""),
+        _fila(numero_guia="3", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla=""),
+        _fila(numero_guia="4", chofer="LUIS SOTO", patente_tracto="AB1111", patente_rampla="", fecha="20-08-2026"),
+    ]
+    ficha = construir_ficha_vehiculo(vehiculo=tracto, filas=filas, vehiculos_por_patente={"AB1111": tracto})
+    nombres = {c["nombre"] for c in ficha["choferes_asociados"]}
+    assert nombres == {"ANA PEREZ", "LUIS SOTO"}
+    # El mas frecuente (evidencia FUERTE) va primero, pero ninguno se descarta.
+    assert ficha["choferes_asociados"][0]["nombre"] == "ANA PEREZ"
+    assert ficha["choferes_asociados"][0]["nivel_evidencia"] == "FUERTE"
+    assert ficha["choferes_asociados"][1]["nivel_evidencia"] == "AISLADA"
+
+
+def test_chofer_con_mas_de_un_vehiculo_conserva_ambos_periodos():
+    """Caso esperado del ticket: un chofer maneja un camion en guias
+    antiguas y despues pasa a otro -- Atlas conserva ambos periodos y
+    distingue cual es mas reciente/frecuente, nunca convierte la
+    relacion antigua en la unica vigente."""
+    filas = [
+        _fila(numero_guia="1", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla="", fecha="01-06-2026"),
+        _fila(numero_guia="2", chofer="ANA PEREZ", patente_tracto="AB1111", patente_rampla="", fecha="02-06-2026"),
+        _fila(numero_guia="3", chofer="ANA PEREZ", patente_tracto="XY9999", patente_rampla="", fecha="20-08-2026"),
+    ]
+    ficha = construir_ficha_chofer(
+        identificador="PENDIENTE1", registro_catalogo={"nombre": "ANA PEREZ", "activo": True, "aliases": []},
+        filas=filas, vehiculos_por_patente={},
+    )
+    patentes = {v["patente"]: v for v in ficha["vehiculos"]}
+    assert set(patentes) == {"AB1111", "XY9999"}
+    assert patentes["AB1111"]["nivel_evidencia"] == "AISLADA"
+    assert patentes["AB1111"]["ultima_aparicion"] == "2026-06-02"
+    assert patentes["XY9999"]["ultima_aparicion"] == "2026-08-20"
+
+
+def _raiz_relaciones(tmp_path, *, filas, choferes_json, vehiculos_json):
+    import csv
+    import json as json_mod
+
+    raiz = tmp_path
+    (raiz / "operacion" / "actual").mkdir(parents=True)
+    (raiz / "catalogos_privados").mkdir(parents=True)
+    with (raiz / "operacion" / "actual" / "analisis_completo_guias.csv").open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+    (raiz / "catalogos_privados" / "choferes.json").write_text(json_mod.dumps(choferes_json), encoding="utf-8")
+    (raiz / "catalogos_privados" / "vehiculos.json").write_text(
+        json_mod.dumps({"version": 1, "vehiculos": vehiculos_json}), encoding="utf-8",
+    )
+    return raiz
+
+
+def _vehiculo_dict(patente, tipo="TRACTO"):
+    # Mismo formato de migracion legacy que el catalogo real (ver
+    # `_vehiculo_legacy` mas arriba en este archivo) -- CONFIRMADO sin
+    # confirmacion humana puntual requiere evidencia MIGRACION_LEGACY,
+    # nunca queda "CONFIRMADO" sin evidencia real que lo respalde.
+    return {
+        "vehiculo_id": f"v-{patente}", "patente_canonica": patente, "tipo": tipo,
+        "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "aliases": [],
+        "evidencias": [{
+            "tipo": "MIGRACION_LEGACY", "identificador_fuente": "vehiculos.json",
+            "referencia_hash": "x", "campos_observados": {"patente": patente, "tipo": tipo},
+            "fecha": FECHA, "actor_proceso": "PROCESO_MIGRACION", "resultado": "SOPORTA",
+        }],
+        "procedencia": "CATALOGO_LEGACY", "confirmado_por": "", "fecha_confirmacion": "",
+        "observaciones": "", "fecha_creacion": FECHA, "fecha_modificacion": FECHA,
+    }
+
+
+def test_buscar_relaciones_chofer_por_nombre_y_por_rut(tmp_path):
+    from atlas_core.catalogo_fichas import buscar_relaciones_chofer
+
+    raiz = _raiz_relaciones(
+        tmp_path,
+        filas=[
+            _fila(numero_guia="1", chofer="ANA PEREZ", rut_chofer="26.646.499-1", patente_tracto="AB1111", patente_rampla="CD2222"),
+            _fila(numero_guia="2", chofer="ANA PEREZ", rut_chofer="26.646.499-1", patente_tracto="AB1111", patente_rampla="CD2222"),
+        ],
+        choferes_json={"266464991": {"nombre": "ANA PEREZ", "activo": True}},
+        vehiculos_json=[_vehiculo_dict("AB1111", "TRACTO"), _vehiculo_dict("CD2222", "CARRO")],
+    )
+    por_nombre = buscar_relaciones_chofer(raiz_atlas=raiz, nombre="ana perez")
+    assert por_nombre is not None
+    assert por_nombre["nombre_canonico"] == "ANA PEREZ"
+    assert por_nombre["rut"]["valor"] == "26.646.499-1"
+    assert {v["patente"] for v in por_nombre["vehiculos"]} == {"AB1111", "CD2222"}
+    assert por_nombre["combinaciones_tracto_rampla"][0]["nivel_evidencia"] == "AISLADA"
+
+    por_rut = buscar_relaciones_chofer(raiz_atlas=raiz, rut="26.646.499-1")
+    assert por_rut["nombre_canonico"] == "ANA PEREZ"
+
+    assert buscar_relaciones_chofer(raiz_atlas=raiz, nombre="NADIE CONOCIDO") is None
+
+
+def test_buscar_relaciones_vehiculo_exacta_y_por_confusion_ocr(tmp_path):
+    from atlas_core.catalogo_fichas import buscar_relaciones_vehiculo
+
+    raiz = _raiz_relaciones(
+        tmp_path,
+        filas=[_fila(numero_guia="1", chofer="ANA PEREZ", patente_tracto="BPHR67", patente_rampla="")],
+        choferes_json={},
+        vehiculos_json=[_vehiculo_dict("BPHR67", "TRACTO")],
+    )
+    exacta = buscar_relaciones_vehiculo(raiz_atlas=raiz, patente="BPHR67")
+    assert exacta is not None and exacta["patente"] == "BPHR67"
+
+    # "BPHF67" es una confusion OCR calibrada (F/R) de "BPHR67" -- una
+    # lectura documental dudosa debe poder contrastarse contra la
+    # evidencia ya conocida (Seccion B1 del ticket), nunca quedar en
+    # None solo porque el texto no calza byte a byte.
+    por_confusion = buscar_relaciones_vehiculo(raiz_atlas=raiz, patente="BPHF67")
+    assert por_confusion is not None and por_confusion["patente"] == "BPHR67"
+
+    assert buscar_relaciones_vehiculo(raiz_atlas=raiz, patente="ZZ9999") is None
+
+
+def test_entidad_sin_historico_no_genera_relaciones_ni_combinaciones(tmp_path):
+    """Una entidad catalogada pero sin ninguna guia real asociada debe
+    devolver listas vacias -- nunca ruido, nunca una relacion
+    inventada (validacion 9 del ticket)."""
+    from atlas_core.catalogo_fichas import buscar_relaciones_chofer
+
+    raiz = _raiz_relaciones(
+        tmp_path, filas=[],
+        choferes_json={"PENDIENTE00000001": {"nombre": "CHOFER SIN GUIAS", "activo": True}},
+        vehiculos_json=[],
+    )
+    ficha = buscar_relaciones_chofer(raiz_atlas=raiz, nombre="CHOFER SIN GUIAS")
+    assert ficha["vehiculos"] == []
+    assert ficha["combinaciones_tracto_rampla"] == []
+    assert ficha["guias_relacionadas"] == []
