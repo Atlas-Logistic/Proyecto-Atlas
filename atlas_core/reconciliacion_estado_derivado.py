@@ -30,14 +30,41 @@ from atlas_core.revalidacion_documental import (
 )
 
 
-# Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: subida de 2 a 3
-# para disparar, en la PRÓXIMA carga natural de Desktop (nunca un reproceso
-# manual de ninguna guía puntual), la migración de una sola vez que barre
-# TODA la operación vigente contra las reglas ya corregidas de esta versión
-# (retiro de motivo de destino ya confirmado + material fusionado/estampado
-# + asociación Mobile ya determinada) -- exactamente el mismo mecanismo que
-# ya usa este archivo, nunca uno paralelo. Ver `reconciliar_estado_derivado`.
-VERSION_ESTADO_DERIVADO = 3
+# Bloque RECONCILIACIÓN POST-DECISIÓN -- causa raíz real (caso 472640,
+# confirmada dos veces): la migración de versión es la ÚNICA señal que hace
+# que `reconciliar_estado_derivado` vuelva a barrer una operación que YA
+# alcanzó la versión vigente (ver `migracion = version_previa <
+# RULESET_VERSION`, más abajo) -- un cambio de REGLAS dentro de una misma
+# corrida (p. ej. corregir la corroboración que usa `revalidar_motivo_
+# destino_ya_confirmado_sin_ocr`, commit efb2067) sin subir este número
+# queda INVISIBLE para cualquier operación que ya migró: `migracion` da
+# `False`, y si el dataset no cambió por ningún otro motivo (ninguna
+# decisión nueva, ningún reintento de ruta vencido), la reconciliación
+# entera se aborta temprano (`VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE`) sin
+# ejecutar NINGÚN revalidador -- el fix de reglas nunca llega a correr
+# contra datos reales hasta que algo más (una decisión humana nueva)
+# vuelva a mover el dataset. Éste es el nombre EXPLÍCITO del número que
+# hay que subir cada vez que cambian las reglas de cualquier `revalidar_*_
+# sin_ocr` invocado desde `reconciliar_estado_derivado` -- no sólo cuando
+# cambia el ESQUEMA de los artefactos derivados (`pendientes_tecnicos.json`,
+# etc., el motivo original de esta migración). `VERSION_ESTADO_DERIVADO`
+# (persistido en `estado_operacion.json`, nombre de campo ya fijado, nunca
+# se renombra) sigue siendo exactamente este mismo número -- RULESET_
+# VERSION es sólo el nombre que dice qué dispara la migración: CUALQUIER
+# cambio de reglas de reconciliación, no sólo un cambio de esquema.
+#
+# Subida de 3 a 4 -- causa raíz real: la migración a versión 3 ya había
+# corrido (y quedado persistida en `estado_operacion.json`) usando la
+# corroboración VIEJA de `revalidar_motivo_destino_ya_confirmado_sin_ocr`
+# (sólo destino CONFIRMADO en catálogo) ANTES de que el commit efb2067
+# agregara la corroboración por `estado_ruta` ya `RUTA_CALCULADA` -- para
+# una obra sin ningún destino en catálogo (472640, DSI UNDERGROUND CHILE
+# SPA), la reconciliación NUNCA volvió a intentarlo con la regla nueva,
+# porque `version_previa` ya no era menor que 3. Subir a 4 dispara, en la
+# PRÓXIMA carga natural de Desktop (nunca un reproceso manual de ninguna
+# guía puntual), un barrido completo con TODAS las reglas vigentes.
+RULESET_VERSION = 4
+VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
 MAX_REINTENTOS_IGUALES_ARRANQUE = 3
@@ -117,7 +144,15 @@ def reconciliar_estado_derivado(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     proveedor_rutas=None, proveedor_rutas_fallback=None,
 ) -> dict[str, object]:
-    """Actualiza una operación antigua una sola vez por versión lógica."""
+    """Actualiza una operación antigua una sola vez por RULESET_VERSION.
+
+    `migracion` (más abajo) sólo se dispara si `version_previa <
+    RULESET_VERSION` -- CUALQUIER cambio a las reglas de alguno de los
+    `revalidar_*_sin_ocr` invocados aquí (no sólo un cambio de esquema de
+    los artefactos derivados) exige subir `RULESET_VERSION`; de lo
+    contrario, una operación que ya alcanzó la versión vigente nunca
+    vuelve a ejecutar la regla corregida hasta que algo MÁS mueva el
+    dataset (ver docstring de `RULESET_VERSION`, caso real 472640)."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -148,7 +183,7 @@ def reconciliar_estado_derivado(
                 pass
         if registro["intentos_misma_evidencia"] < MAX_REINTENTOS_IGUALES_ARRANQUE and vencido:
             por_reintentar.append(str(registro["numero_guia"]))
-    migracion = version_previa < VERSION_ESTADO_DERIVADO
+    migracion = version_previa < RULESET_VERSION
     # Bloque R2.5 -- PROYECCIÓN CANÓNICA -> OPERACIÓN: caso real 464264
     # (decisión humana aplicada; "Revisión de Atlas" ya reflejaba 0
     # decisiones, pero `viajes.csv` seguía siendo el snapshot generado

@@ -133,6 +133,62 @@ def test_pendiente_tecnico_se_recupera_en_siguiente_oportunidad_sin_decision_hum
     assert repetido["reconciliado"] is False
 
 
+def test_operacion_ya_reconciliada_con_ruleset_anterior_se_vuelve_a_barrer_al_subir_ruleset_version(tmp_path, monkeypatch):
+    """Bloque RECONCILIACIÓN POST-DECISIÓN -- causa raíz real (caso
+    472640, confirmada dos veces): la reconciliación v3 ya había corrido
+    y quedado persistida (`version_estado_derivado=3` en `estado_
+    operacion.json`) usando la corroboración VIEJA de `revalidar_motivo_
+    destino_ya_confirmado_sin_ocr` -- el commit efb2067 corrigió esa
+    regla (agregó corroboración por `estado_ruta` ya `RUTA_CALCULADA`),
+    pero SIN subir `RULESET_VERSION`, `migracion` daba `False` para
+    cualquier operación que ya hubiera llegado a v3: la regla corregida
+    NUNCA volvía a ejecutarse contra el dataset real hasta que algo MÁS
+    (una decisión humana nueva) moviera el dataset. Esta prueba simula
+    exactamente esa operación -- ya reconciliada con el ruleset anterior
+    (`RULESET_VERSION - 1`), dataset sin cambios desde entonces (mismo
+    hash) -- y prueba que subir `RULESET_VERSION` (nunca modificar datos
+    a mano, nunca reprocesar OCR) es lo que dispara la nueva
+    reconciliación con las reglas vigentes."""
+    dataset, decisiones = _entorno(tmp_path)
+    # Simula que esta operación YA fue reconciliada con el ruleset
+    # ANTERIOR (un ciclo previo real, antes del cambio de reglas) --
+    # nunca se toca el dataset, sólo el manifiesto de versión.
+    from atlas_core.almacenamiento_portable import escribir_estado_operacion
+    reporte_previo = tmp_path / "reportes" / "previo_ruleset_anterior"
+    reporte_previo.mkdir(parents=True)
+    escribir_estado_operacion(
+        reporte_vigente=reporte_previo, dataset_operacional=dataset,
+        decisiones_pendientes=decisiones, raiz=tmp_path, reloj=RELOJ,
+        version_estado_derivado=modulo.RULESET_VERSION - 1,
+    )
+    assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == modulo.RULESET_VERSION - 1
+
+    llamadas = {"motivo_destino": 0}
+
+    def limpiar(**kwargs):
+        llamadas["motivo_destino"] += 1
+        return {"guias_actualizadas": []}
+
+    def reportar(_dataset, salida, **kwargs):
+        salida.mkdir(parents=True)
+        (salida / "viajes.csv").write_text("estado\nCONFIRMADO\n", encoding="utf-8")
+        return {"totales": {"viajes": 1, "viajes_confirmados": 1}}
+
+    monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
+    monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
+    monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
+
+    resultado = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
+
+    # El ruleset nuevo SÍ disparó una reconciliación real -- nunca se
+    # quedó "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE" sólo porque el
+    # dataset no había cambiado por ningún otro motivo.
+    assert resultado["reconciliado"] is True
+    assert llamadas["motivo_destino"] == 1
+    assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == modulo.RULESET_VERSION
+
+
 def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migracion(tmp_path, monkeypatch):
     """Bloque RECONCILIACIÓN POST-DECISIÓN -- causa raíz real del caso
     472640: antes, `revalidar_motivo_destino_ya_confirmado_sin_ocr` (y,
