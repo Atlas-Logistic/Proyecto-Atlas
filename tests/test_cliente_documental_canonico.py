@@ -234,7 +234,19 @@ def test_alias_candidato_variante_empresas_json_no_soportada_aun(tmp_path):
 # ============================================================
 
 
-def test_dos_confirmaciones_independientes_elevan_decision_futura_a_resuelto_automaticamente(tmp_path):
+def test_alias_persistido_con_rut_exacto_desaparece_sin_aplicacion(tmp_path):
+    entorno = _entorno(tmp_path, filas_csv=[_fila_csv(numero_guia="1")], clientes=[_cliente_ebema_dict()])
+    decision = _decision_alias_candidato(guia="1", transporte="T-1", valor_documental="PPP CONSTRUCCIONES")
+    generar_artefacto(
+        ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
+        decisiones=[decision], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
+    )
+    resultado = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
+    assert all(d["decision_id"] != decision["decision_id"] for d in resultado["bandeja"]["decisiones"])
+    assert resultado["decisiones_aplicadas_automaticamente"] == []
+    assert AlmacenEvidenciaEntidades(entorno["catalogos"] / "evidencia_entidades.json").listar() == []
+    assert CatalogoClientes(entorno["catalogos"] / "clientes.json").listar()[0].aliases == ()
+    return
     """CASO C del bloque anterior, ahora de punta a punta con acciones
     reales: dos CONFIRMAR_ALIAS en transportes distintos elevan la
     relación RUT->EBEMA a conocimiento fuerte; una tercera aparición

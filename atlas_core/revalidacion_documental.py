@@ -4117,6 +4117,35 @@ def reconciliar_incidencias_rut_chofer_documental(
 MAX_ITERACIONES_AUTO_RESOLUCION = 10
 
 
+def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]]:
+    """Lee hechos ya publicados sólo como evidencia y deduplica copias."""
+    unicas: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
+    for ruta in sorted((raiz / "reportes").glob("*/viajes.csv")):
+        try:
+            with ruta.open("r", newline="", encoding="utf-8-sig") as archivo:
+                for viaje in csv.DictReader(archivo, delimiter=";"):
+                    try:
+                        documentos = json.loads(str(viaje.get("evidencias_documentos", "") or "[]"))
+                    except (json.JSONDecodeError, TypeError):
+                        documentos = []
+                    for doc in documentos if isinstance(documentos, list) else []:
+                        if not isinstance(doc, dict):
+                            continue
+                        fila = {k: str(doc.get(k, "")) for k in (
+                            "numero_guia", "numero_transporte", "rut_chofer",
+                            "patente_tracto", "patente_rampla",
+                        )}
+                        clave = tuple(fila[k] for k in (
+                            "numero_guia", "numero_transporte", "rut_chofer",
+                            "patente_tracto", "patente_rampla",
+                        ))
+                        if clave[0] and clave[2]:
+                            unicas[clave] = fila
+        except (OSError, UnicodeDecodeError):
+            continue
+    return list(unicas.values())
+
+
 def reconciliar_bandeja_decisiones(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
 ) -> dict[str, object]:
@@ -4194,6 +4223,7 @@ def reconciliar_bandeja_decisiones(
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
+    relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
 
     def _regenerar_enriquecer_publicar(pendientes: list[dict[str, object]]) -> dict[str, object]:
         vigentes_locales = regenerar_decisiones_persistidas(
@@ -4204,7 +4234,10 @@ def reconciliar_bandeja_decisiones(
             vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
         except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
             vehiculos = ()
-        enriquecidas_locales = enriquecer_decisiones_vehiculo(decisiones=vigentes_locales, filas=filas, vehiculos=vehiculos)
+        enriquecidas_locales = enriquecer_decisiones_vehiculo(
+            decisiones=vigentes_locales, filas=filas, vehiculos=vehiculos,
+            relaciones_historicas=relaciones_historicas,
+        )
 
         try:
             clientes_confirmados = [

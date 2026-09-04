@@ -378,10 +378,7 @@ def test_cliente_corroborado_via_rut_propone_alias_sin_escribir_catalogo(tmp_pat
     assert resultado["cliente"] == "EBEMA SA"
     assert "FUZZY" not in resultado["metodos_recuperacion_documento"]  # corroboró por RUT, no por fuzzy
     assert ruta_empresas.read_bytes() == antes
-    aliases = [decision for decision in decisiones if decision["tipo"] == "ALIAS_CANDIDATO"]
-    assert len(aliases) == 1
-    assert aliases[0]["valor_documental"] == "EDMA SA"
-    assert aliases[0]["identidad_resuelta"]["valor_canonico"] == "EBEMA SA"
+    assert all(decision["tipo"] != "ALIAS_CANDIDATO" for decision in decisiones)
 
 
 # --- 15: obra destino corroborada (mecanismo existente, código destinatario) ---

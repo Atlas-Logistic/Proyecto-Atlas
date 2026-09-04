@@ -29,6 +29,8 @@ from atlas_core.decisiones_pendientes import (
     RESULTADO_ABSTENCION,
     RESULTADO_RESUELTO_AUTOMATICAMENTE,
     RESULTADO_SUGERENCIA_HUMANA,
+    crear_decision,
+    enriquecer_decisiones_vehiculo,
     evaluar_evidencia_patente,
 )
 from atlas_core.procesamiento_masivo import COLUMNAS
@@ -61,6 +63,32 @@ def _catalogo(tmp_path):
     ruta = tmp_path / "vehiculos.json"
     ruta.write_text(json.dumps({"version": 1, "vehiculos": []}), encoding="utf-8")
     return ruta
+
+
+def test_relacion_historica_aislada_frena_registrar_sin_autocorregir(tmp_path):
+    ruta = _catalogo(tmp_path)
+    _confirmar(ruta, "TZWR86", TipoVehiculo.TRACTO)
+    _confirmar(ruta, "JH5478", TipoVehiculo.CARRO)
+    decision = crear_decision(
+        tipo="VEHICULO_DESCONOCIDO", entidad="VEHICULO", archivo="464367.jpeg",
+        numero_guia="464367", numero_transporte="T-NUEVO", campo="patente_tracto",
+        valor_documental="T2MN86", valor_normalizado="T2MN86", identidad_resuelta=None,
+        candidatos=(), motivos=("SIN_VEHICULO_CONFIRMADO_COMPATIBLE",),
+        evidencias=(), acciones_permitidas=("REGISTRAR", "NO_REGISTRAR", "POSPONER"),
+        tipo_vehiculo_propuesto="TRACTO",
+    )
+    salida = enriquecer_decisiones_vehiculo(
+        decisiones=[decision], filas=[_fila(numero_guia="464367", numero_transporte="T-NUEVO", rut_chofer="15.925.888-2")],
+        vehiculos=cargar_catalogo_vehiculos(ruta).homologables(),
+        relaciones_historicas=[{
+            "numero_guia": "463630", "numero_transporte": "T-ANTERIOR", "rut_chofer": "15925888-2",
+            "patente_tracto": "TZWR86", "patente_rampla": "JH5478",
+        }],
+    )[0]
+    assert salida["evaluacion_evidencia"]["resultado"] == RESULTADO_SUGERENCIA_HUMANA
+    assert [c["patente"] for c in salida["candidatos"]] == ["TZWR86"]
+    assert "REGISTRAR" not in salida["acciones_permitidas"]
+    assert "USAR_PATENTE_EXISTENTE" in salida["acciones_permitidas"]
 
 
 # ============================================================

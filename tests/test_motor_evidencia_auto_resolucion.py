@@ -97,7 +97,7 @@ def _decision_alias_candidato(*, guia, transporte, valor_documental):
     )
 
 
-def test_sugerencia_humana_nunca_se_aplica_sola_sigue_generando_tarjeta(tmp_path):
+def test_rut_exacto_retira_alias_sin_aplicarlo_aunque_haya_evidencia_debil(tmp_path):
     """Una única confirmación previa (no dos) da SUGERENCIA_HUMANA, no
     RESUELTO_AUTOMATICAMENTE -- debe permanecer pendiente."""
     entorno = _entorno(tmp_path, filas_csv=[_fila_csv(numero_guia="1")], clientes=[_cliente_ebema_dict()])
@@ -112,12 +112,12 @@ def test_sugerencia_humana_nunca_se_aplica_sola_sigue_generando_tarjeta(tmp_path
     resultado = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
     assert resultado["decisiones_aplicadas_automaticamente"] == []
     ids_pendientes = [d["decision_id"] for d in resultado["bandeja"]["decisiones"]]
-    assert decision["decision_id"] in ids_pendientes
+    assert decision["decision_id"] not in ids_pendientes
     clientes = CatalogoClientes(entorno["catalogos"] / "clientes.json").listar()
     assert clientes[0].aliases == ()  # nada se vinculó -- sigue pendiente de un humano
 
 
-def test_reconciliar_dos_veces_tras_auto_resolucion_es_idempotente(tmp_path):
+def test_reconciliar_dos_veces_tras_supresion_por_rut_es_idempotente(tmp_path):
     """Regenerar la bandeja una segunda vez, después de que la
     auto-resolución ya cerró la decisión, no debe fallar ni duplicar
     nada -- la decisión ya cerrada nunca resucita (mismo filtro terminal
@@ -137,18 +137,16 @@ def test_reconciliar_dos_veces_tras_auto_resolucion_es_idempotente(tmp_path):
         decisiones=[decision], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
     )
     primera = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
-    assert len(primera["decisiones_aplicadas_automaticamente"]) == 1
+    assert primera["decisiones_aplicadas_automaticamente"] == []
 
     segunda = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
     assert segunda["decisiones_aplicadas_automaticamente"] == []
     assert all(d["decision_id"] != decision["decision_id"] for d in segunda["bandeja"]["decisiones"])
 
-    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
-    aplicaciones_de_esta_decision = [a for a in ledger["aplicaciones"] if a["decision_id"] == decision["decision_id"]]
-    assert len(aplicaciones_de_esta_decision) == 1  # nunca se duplica
+    assert CatalogoClientes(entorno["catalogos"] / "clientes.json").listar()[0].aliases == ()
 
 
-def test_dos_alias_candidato_se_desbloquean_en_cadena_en_una_sola_reconciliacion(tmp_path):
+def test_evidencia_previa_no_convierte_alias_por_rut_en_aplicacion(tmp_path):
     """Punto fijo: aplicar la primera decisión (que aporta la 2ª
     confirmación independiente) puede desbloquear una SEGUNDA decisión
     de otro documento en la MISMA corrida de `reconciliar_bandeja_decisiones`,
@@ -179,5 +177,5 @@ def test_dos_alias_candidato_se_desbloquean_en_cadena_en_una_sola_reconciliacion
         decisiones=[decision_3], ruta_salida=entorno["actual"] / "decisiones_pendientes.json",
     )
     resultado = reconciliar_bandeja_decisiones(raiz_atlas=entorno["raiz"])
-    assert len(resultado["decisiones_aplicadas_automaticamente"]) == 1
-    assert resultado["decisiones_aplicadas_automaticamente"][0]["decision_id"] == decision_3["decision_id"]
+    assert resultado["decisiones_aplicadas_automaticamente"] == []
+    assert all(d["decision_id"] != decision_3["decision_id"] for d in resultado["bandeja"]["decisiones"])

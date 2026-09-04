@@ -89,22 +89,19 @@ def test_cliente_desconocido_con_rut_valido_preserva_texto_evidencia_y_catalogos
     assert antes=={p.name:p.read_bytes() for p in carpeta.iterdir()}
 
 
-def test_alias_cliente_maestro_por_rut_es_read_only(tmp_path):
+def test_rut_exacto_cliente_maestro_no_genera_pregunta_y_es_read_only(tmp_path):
     carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta); antes=(carpeta/"clientes.json").read_bytes()
     ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(),carpeta_catalogos=carpeta,cliente_documental_original="NOMBRE DOCUMENTAL SPA")
-    d=next(x for x in ds if x["tipo"]=="ALIAS_CANDIDATO")
-    assert d["identidad_resuelta"]["entidad_id"]==cliente.cliente_id and d["valor_documental"]=="NOMBRE DOCUMENTAL SPA"
-    assert d["acciones_permitidas"]==["CONFIRMAR_ALIAS","RECHAZAR","POSPONER"]
+    assert all(x["tipo"]!="ALIAS_CANDIDATO" for x in ds)
     assert (carpeta/"clientes.json").read_bytes()==antes
 
 
-def test_alias_empresa_legacy_por_rut_no_registra_alias(tmp_path, monkeypatch):
+def test_rut_exacto_empresa_legacy_no_genera_pregunta_ni_alias(tmp_path, monkeypatch):
     carpeta=_catalogos(tmp_path); (carpeta/"empresas.json").write_text(json.dumps({"50.234.350-5":{"nombre":"EMPRESA CANONICA SA"}}),encoding="utf-8"); antes=(carpeta/"empresas.json").read_bytes()
     import atlas_core.catalogos as catalogos
     monkeypatch.setattr(catalogos,"registrar_alias_seguro",lambda *a,**k: (_ for _ in ()).throw(AssertionError("no debe ejecutarse")))
     ds=detectar_decisiones_documento(archivo="100.png",datos=_datos_cliente(),carpeta_catalogos=carpeta,cliente_documental_original="NOMBRE DOCUMENTAL SPA")
-    d=next(x for x in ds if x["tipo"]=="ALIAS_CANDIDATO")
-    assert d["identidad_resuelta"]["valor_canonico"]=="EMPRESA CANONICA SA"
+    assert all(x["tipo"]!="ALIAS_CANDIDATO" for x in ds)
     assert (carpeta/"empresas.json").read_bytes()==antes
 
 

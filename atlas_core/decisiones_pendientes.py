@@ -965,6 +965,7 @@ def sugerir_vehiculos_por_chofer(
 def enriquecer_decisiones_vehiculo(
     *, decisiones: Iterable[Mapping[str, object]],
     filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
+    relaciones_historicas: Iterable[Mapping[str, object]] = (),
 ) -> list[dict[str, object]]:
     """Bloque VEHÍCULO D1/E1 -- añade `candidatos`/acciones adicionales a
     decisiones `VEHICULO_DESCONOCIDO` YA generadas (nunca las crea desde
@@ -991,6 +992,11 @@ def enriquecer_decisiones_vehiculo(
     resultado."""
     filas = list(filas)
     vehiculos = list(vehiculos)
+    relaciones_historicas = list(relaciones_historicas)
+    vehiculos_por_patente = {
+        v.patente_canonica: v for v in vehiculos
+        if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
+    }
     filas_por_guia: dict[str, dict[str, object]] = {}
     for fila in filas:
         guia = str(fila.get("numero_guia", ""))
@@ -1013,6 +1019,56 @@ def enriquecer_decisiones_vehiculo(
                     numero_transporte_actual=transporte, filas=filas, vehiculos=vehiculos,
                 )
                 sugeridos = evaluacion["candidatos"]
+                tipo = decision.get("tipo_vehiculo_propuesto")
+                campo_hist = "patente_tracto" if tipo == "TRACTO" else "patente_rampla" if tipo == "CARRO" else ""
+                valor_norm = normalizar_patente_vehiculo(str(decision.get("valor_documental", "")))
+                rel_por_patente: dict[str, set[tuple[str, str]]] = {}
+                for rel in relaciones_historicas:
+                    if normalizar_rut(str(rel.get("rut_chofer", ""))) != normalizar_rut(rut) or not campo_hist:
+                        continue
+                    patente = normalizar_patente_vehiculo(str(rel.get(campo_hist, "")))
+                    vehiculo = vehiculos_por_patente.get(patente)
+                    if vehiculo is None or vehiculo.tipo != tipo or patente == valor_norm:
+                        continue
+                    tracto = normalizar_patente_vehiculo(str(rel.get("patente_tracto", "")))
+                    rampla = normalizar_patente_vehiculo(str(rel.get("patente_rampla", "")))
+                    if not tracto or not rampla:
+                        continue
+                    otro = vehiculos_por_patente.get(rampla if tipo == "TRACTO" else tracto)
+                    if otro is None or otro.tipo != ("CARRO" if tipo == "TRACTO" else "TRACTO"):
+                        continue
+                    rel_por_patente.setdefault(patente, set()).add((
+                        str(rel.get("numero_transporte", "")), str(rel.get("numero_guia", "")),
+                    ))
+                existentes = {str(c.get("patente", "")) for c in sugeridos}
+                for patente, referencias in sorted(rel_por_patente.items()):
+                    if patente in existentes:
+                        continue
+                    vehiculo = vehiculos_por_patente[patente]
+                    refs = [
+                        {"numero_transporte": t, "numero_guia": g, "relacion_evento": "HISTORICO_RELACIONAL"}
+                        for t, g in sorted(referencias)
+                    ]
+                    sugeridos.append({
+                        "patente": patente, "vehiculo_id": vehiculo.vehiculo_id,
+                        "tipo_vehiculo": vehiculo.tipo, "nivel": NIVEL_DOCUMENTAL_DEBIL,
+                        "evidencias": ("RUT_CHOFER_COINCIDE", "TIPO_COMPATIBLE", "PAREJA_TRACTO_RAMPLA_HISTORICA"),
+                        "conflictos": ("OCR_ACTUAL_DIFIERE", "RELACION_HISTORICA_NO_CONFIRMA_LECTURA"),
+                        "guias": sorted({g for _, g in referencias if g}),
+                        "transportes_independientes": len({t for t, _ in referencias if t}),
+                        "referencias_fuente": refs,
+                        "razon_legible": (
+                            f'Atlas conoce "{patente}" en un par tracto/rampla histórico del mismo chofer, '
+                            f'pero el OCR actual leyó "{decision.get("valor_documental", "")}". '
+                            "La relación frena registrar una entidad nueva, pero no autoriza autocorregir."
+                        ),
+                        "evidencia_resumen": "Relación histórica aislada del mismo chofer; requiere confirmación humana.",
+                    })
+                if rel_por_patente:
+                    evaluacion = {
+                        "resultado": RESULTADO_SUGERENCIA_HUMANA,
+                        "explicacion": "La relación histórica contradice una lectura OCR dudosa; Atlas no registra ni autocorrige sin confirmación.",
+                    }
                 decision["candidatos"] = sugeridos
                 decision["evaluacion_evidencia"] = {
                     "resultado": evaluacion["resultado"], "explicacion": evaluacion["explicacion"],
@@ -1022,6 +1078,8 @@ def enriquecer_decisiones_vehiculo(
                 # unas candidatas que desaparecieron también retiren las
                 # acciones que ya no corresponden).
                 base = [a for a in (decision.get("acciones_permitidas") or ACCIONES_ENTIDAD_DESCONOCIDA) if a not in ACCIONES_PATENTE_SUGERIDA]
+                if rel_por_patente:
+                    base = [a for a in base if a != "REGISTRAR"]
                 if sugeridos:
                     nuevas = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in base]
                     if "POSPONER" in base:
@@ -1412,50 +1470,15 @@ def detectar_decisiones_documento(
             "valor_canonico": cliente.razon_social,
             "rut": cliente.rut,
         }
-        claves_confirmadas = {
-            normalizar_nombre_cliente(cliente.razon_social),
-            *(normalizar_nombre_cliente(alias) for alias in cliente.aliases),
-        }
-        if (
-            cliente_documental not in _AUSENTES
-            and normalizar_nombre_cliente(cliente_documental) not in claves_confirmadas
-        ):
-            decisiones.append(crear_decision(
-                tipo="ALIAS_CANDIDATO", entidad="CLIENTE", campo="cliente",
-                valor_documental=cliente_documental,
-                valor_normalizado=normalizar_nombre_cliente(cliente_documental),
-                identidad_resuelta=identidad_cliente,
-                candidatos=(identidad_cliente,), motivos=("RUT_EXACTO_ALIAS_NO_CONFIRMADO",),
-                evidencias=({"tipo": "RUT_EXACTO", "campo": "rut_cliente", "valor": rut_cliente},),
-                acciones_permitidas=("CONFIRMAR_ALIAS", "RECHAZAR", "POSPONER"),
-                **comunes,
-            ))
+        # Un RUT exacto ya conocido determina la identidad canónica. Una
+        # variante documental del nombre no constituye ambigüedad humana.
     elif rut_valido and cliente_documental not in _AUSENTES:
         empresas = cargar_catalogo_json(carpeta / "empresas.json")
         empresa = buscar_empresa_por_rut(empresas, rut_cliente)
         if empresa is not None:
-            canonico = str(empresa.get("nombre", "")).strip()
-            alias_confirmados = [str(x) for x in empresa.get("aliases", [])]
-            claves = {normalizar_nombre_cliente(canonico), *(
-                normalizar_nombre_cliente(alias) for alias in alias_confirmados
-            )}
-            if normalizar_nombre_cliente(cliente_documental) not in claves:
-                identidad = {
-                    "entidad_id": normalizar_rut_cliente(rut_cliente),
-                    "valor_canonico": canonico,
-                    "rut": normalizar_rut_cliente(rut_cliente),
-                    "catalogo": "empresas.json",
-                }
-                decisiones.append(crear_decision(
-                    tipo="ALIAS_CANDIDATO", entidad="CLIENTE", campo="cliente",
-                    valor_documental=cliente_documental,
-                    valor_normalizado=normalizar_nombre_cliente(cliente_documental),
-                    identidad_resuelta=identidad, candidatos=(identidad,),
-                    motivos=("RUT_EXACTO_ALIAS_NO_CONFIRMADO",),
-                    evidencias=({"tipo": "RUT_EXACTO", "campo": "rut_cliente", "valor": rut_cliente},),
-                    acciones_permitidas=("CONFIRMAR_ALIAS", "RECHAZAR", "POSPONER"),
-                    **comunes,
-                ))
+            # Misma regla para el catálogo legado: el nombre OCR distinto
+            # no vuelve ambigua una identidad determinada por RUT exacto.
+            pass
         else:
             # R3.2: cliente realmente nuevo (RUT válido, no existe en ningún
             # catálogo maestro) -- Registrar/No registrar, nada más.
@@ -2011,6 +2034,12 @@ def regenerar_decisiones_persistidas(
                 if motivos_fila is not None and not (motivos_decision & motivos_fila):
                     continue  # el motivo que originó esta decisión ya no está en el dataset
         tipo = decision.get("tipo")
+        if tipo == "ALIAS_CANDIDATO" and "RUT_EXACTO_ALIAS_NO_CONFIRMADO" in (decision.get("motivos") or ()):
+            rut_exacto = rut_documental_de_decision_cliente(decision)
+            cliente_exacto = _identidad_cliente_por_rut(carpeta, rut_exacto) if rut_exacto else None
+            identidad_id = str((decision.get("identidad_resuelta") or {}).get("entidad_id", ""))
+            if cliente_exacto is not None and cliente_exacto.cliente_id == identidad_id:
+                continue
         contexto = dict(decision.get("contexto") or {})
         cliente_id_contexto = str(contexto.get("cliente_id") or "")
         cliente_vigente_contexto = clientes_por_id.get(cliente_id_contexto)
