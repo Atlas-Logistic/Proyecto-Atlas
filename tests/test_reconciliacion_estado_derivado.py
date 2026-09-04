@@ -45,8 +45,11 @@ def test_estado_pre_r2_se_reconcilia_una_vez_sin_ocr_y_con_respaldo(tmp_path, mo
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_origen_encabezado_no_confiable_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "reconciliar_incidencias_rut_chofer_documental", lambda **k: {"candidatas": 0, "incidencias_registradas": [], "rut_corregido_en_dataset": []})
     monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
+    monkeypatch.setattr(modulo, "reconciliar_bandeja_decisiones", lambda **k: {"decisiones_aplicadas_automaticamente": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
     primero = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
@@ -80,8 +83,11 @@ def test_fallo_no_publica_version_pero_nunca_revierte_cambios_del_dataset_ya_apl
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_origen_encabezado_no_confiable_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "reconciliar_incidencias_rut_chofer_documental", lambda **k: {"candidatas": 0, "incidencias_registradas": [], "rut_corregido_en_dataset": []})
     monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
+    monkeypatch.setattr(modulo, "reconciliar_bandeja_decisiones", lambda **k: {"decisiones_aplicadas_automaticamente": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fallo")))
 
     import pytest
@@ -178,8 +184,11 @@ def test_operacion_ya_reconciliada_con_ruleset_anterior_se_vuelve_a_barrer_al_su
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", limpiar)
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_origen_encabezado_no_confiable_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "reconciliar_incidencias_rut_chofer_documental", lambda **k: {"candidatas": 0, "incidencias_registradas": [], "rut_corregido_en_dataset": []})
     monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
+    monkeypatch.setattr(modulo, "reconciliar_bandeja_decisiones", lambda **k: {"decisiones_aplicadas_automaticamente": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
     resultado = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
@@ -222,8 +231,11 @@ def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migrac
 
     monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", espiar("motivo_destino"))
     monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", espiar("material"))
+    monkeypatch.setattr(modulo, "revalidar_origen_encabezado_no_confiable_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "reconciliar_incidencias_rut_chofer_documental", lambda **k: {"candidatas": 0, "incidencias_registradas": [], "rut_corregido_en_dataset": []})
     monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", espiar_mobile)
     monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", espiar("indicadores"))
+    monkeypatch.setattr(modulo, "reconciliar_bandeja_decisiones", lambda **k: {"decisiones_aplicadas_automaticamente": []})
     monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
 
     # Primera corrida: migración real (versión previa 0 -> vigente).

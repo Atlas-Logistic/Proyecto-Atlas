@@ -78,6 +78,17 @@ VALOR_CANONICO_CAMPO_REQUERIDO = "número de transporte requerido, no impreso en
 # se usa el sentinela de abajo -- nunca se inventa un valor.
 TIPO_RUT_DOCUMENTAL_INVALIDO = "RUT_DOCUMENTAL_INVALIDO"
 VALOR_CANONICO_RUT_NO_CONFIRMADO = "RUT canónico no confirmado -- requiere revisión humana"
+# Bloque FIX RUT AUSENTE -- distinto del bloque de arriba: acá la guía
+# nunca imprimió (o el motor nunca leyó) ningún RUT de chofer -- no hay un
+# valor documental inválido que contrastar, sólo una ausencia (mismo
+# patrón que TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL, arriba: se usa el
+# sentinela `VALOR_DOCUMENTAL_CAMPO_AUSENTE` en vez de fingir un RUT
+# documental que nunca existió). El chofer identificado por nombre SÍ
+# puede tener, en catálogo o en el histórico del propio dataset, un RUT
+# canónico confiable -- ver `atlas_core.revalidacion_documental.
+# _rut_canonico_para_chofer`, misma recuperación que ya usaba el bloque de
+# RUT inválido, ahora también disponible para RUT ausente.
+TIPO_RUT_DOCUMENTAL_AUSENTE = "RUT_CHOFER_AUSENTE_DOCUMENTAL"
 
 # Lo que NUNCA es una incidencia documental -- código explícito para que
 # el resto del código (y los tests) puedan afirmarlo positivamente, en

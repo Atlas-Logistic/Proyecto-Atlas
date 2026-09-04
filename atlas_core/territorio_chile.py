@@ -1,6 +1,7 @@
 """Shim histórico de territorio chileno sobre la autoridad geográfica G1-A."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from atlas_core.geografia import EstadoNormalizacion, MotorNormalizacion, UnidadAdministrativa, cargar_geografia
@@ -74,9 +75,40 @@ def normalizar_comuna(texto: str) -> ResultadoNormalizacionComuna:
     )
 
 
+# Bloque REGIONES V1 -- caso real 464170 (Mejillones/Antofagasta): el
+# catálogo territorial (G1-A) guarda cada región por su nombre BARE
+# ("Antofagasta", nunca "Región de Antofagasta"), pero un proveedor de
+# geocodificación real devolvió literalmente "De Antofagasta" -- un
+# nombre administrativo chileno real ("Región de Antofagasta") con la
+# palabra "Región" recortada, dejando sólo la preposición pegada al
+# nombre. `region_valida` exigía coincidencia EXACTA (nunca difusa, a
+# propósito -- nada de fuzzy matching para regiones, para no aceptar por
+# error una región extranjera homónima) y esa variante nunca calzaba,
+# así que una entrega interregional real quedaba marcada
+# `GEOCODIFICACION_FUERA_DE_CHILE` -- un falso positivo de normalización
+# de nombre, no una entrega fuera del país. Se intenta primero el texto
+# tal cual (ninguna región chilena real empieza con esta preposición); si
+# no calza EXACTO, se reintenta UNA sola vez quitando SÓLO una preposición
+# regional inicial ("de"/"del"/"de la"/"de los") -- nunca ninguna otra
+# transformación, y el resultado final sigue exigiendo coincidencia
+# EXACTA contra el catálogo cerrado, igual que antes. Genérico por diseño:
+# no hardcodea "Antofagasta" ni ninguna región en particular.
+_PREPOSICION_REGIONAL_INICIAL = re.compile(
+    r"^\s*(?:del|de\s+la|de\s+los|de)\s+", re.IGNORECASE,
+)
+
+
 def region_valida(texto: str) -> str | None:
     decision = _GEOGRAFIA.normalizar(texto, nivel=1)
-    return decision.unidad.nombre_canonico if decision.estado == EstadoNormalizacion.EXACTA and decision.unidad else None
+    if decision.estado == EstadoNormalizacion.EXACTA and decision.unidad:
+        return decision.unidad.nombre_canonico
+    sin_preposicion = _PREPOSICION_REGIONAL_INICIAL.sub("", str(texto or ""), count=1)
+    if sin_preposicion == texto:
+        return None
+    decision_sin_preposicion = _GEOGRAFIA.normalizar(sin_preposicion, nivel=1)
+    if decision_sin_preposicion.estado == EstadoNormalizacion.EXACTA and decision_sin_preposicion.unidad:
+        return decision_sin_preposicion.unidad.nombre_canonico
+    return None
 
 
 def normalizar_direccion_con_comunas(texto: str) -> str:

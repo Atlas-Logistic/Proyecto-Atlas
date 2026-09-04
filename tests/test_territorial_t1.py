@@ -112,7 +112,12 @@ def test_san_bernardo_vs_angol_sigue_siendo_contradiccion_real(tmp_path):
     Araucanía), ninguna es "Santiago": nunca se debilita esta protección."""
     assert _comunas_territorialmente_compatibles("San Bernardo", "Angol") is False
     planta = _planta(tmp_path)
-    consulta = "INTERIOR NUEVA 1148 SAN BERNARDO SAN BERNARDO, Chile"
+    # Bloque RESOLUCIÓN R18: "SAN BERNARDO" repetida de forma literal e
+    # inmediata al final se colapsa ANTES de consultar al geocodificador
+    # (`_sin_duplicacion_inmediata_de_cola`) -- la contradicción real que
+    # este test verifica (San Bernardo documental vs Angol geocodificado)
+    # es independiente de esa limpieza de formato.
+    consulta = "INTERIOR NUEVA 1148 SAN BERNARDO, Chile"
     proveedor = ProveedorRutasSimulado(
         geocodificaciones={
             consulta: ResultadoGeocodificacion(

@@ -954,6 +954,37 @@ def resolver_direccion_canonica_mas_limpia(*, texto_objetivo: str, candidatos: I
 
 _PATRON_TOKEN_SANTIAGO = re.compile(r"(?i)\bSANTIAGO\b")
 
+# Bloque RESOLUCIÓN R18 -- casos reales 464395 ("CARMEN MENA 529 SAN
+# MIGUEL SAN MIGUEL") y 464170 ("AV. ALMTE. LATORRE 843 MEJILLONES
+# MEJILLONES"): el propio `despachar_a_crudo` trae la comuna/localidad
+# repetida de forma literal e inmediata al final del texto -- no un
+# campo `COMUNA` externo inyectado (esa fuente sigue sin usarse nunca,
+# ver docstring del módulo), sino el mismo texto documental duplicándose
+# a sí mismo. Un proveedor de geocodificación real no resuelve
+# "SAN MIGUEL SAN MIGUEL" como dirección válida y devuelve 0
+# candidatos -- basura de formato, no evidencia insuficiente. Máximo 5
+# palabras de ventana (la comuna real más larga del catálogo territorial
+# cerrado, "San Pedro de la Paz"/"San Juan de la Costa", tiene 5 --
+# ninguna comuna/localidad chilena real excede eso, ver
+# `atlas_core.geografia`); case/acento-insensible para detectar el
+# duplicado, pero la porción que se conserva es siempre el texto
+# ORIGINAL tal cual apareció primero -- nunca se inventa ni se
+# selecciona texto que no estaba ya ahí. Genérico por diseño: no conoce
+# ningún nombre de comuna en particular, sólo compara la cola del texto
+# contra el tramo inmediatamente anterior.
+_VENTANA_MAXIMA_DUPLICACION_INMEDIATA = 5
+
+
+def _sin_duplicacion_inmediata_de_cola(texto: str) -> str:
+    palabras = texto.split()
+    limite = min(_VENTANA_MAXIMA_DUPLICACION_INMEDIATA, len(palabras) // 2)
+    for tamano in range(limite, 0, -1):
+        cola = palabras[-tamano:]
+        tramo_previo = palabras[-2 * tamano:-tamano]
+        if tramo_previo and [p.upper() for p in tramo_previo] == [p.upper() for p in cola]:
+            return " ".join(palabras[:-tamano])
+    return texto
+
 
 def _texto_geocodificable_sin_etiqueta_ciudad_santiago(texto: str) -> str:
     """Bloque RESOLUCIÓN R17 -- casos reales 472018 (CAMINO LOS PINOS 3396
@@ -1084,6 +1115,10 @@ def resolver_destino_entrega(
     # para la consulta un token "SANTIAGO" redundante cuando el texto ya
     # trae otra comuna real distinta.
     texto_geocodificable = _texto_geocodificable_sin_etiqueta_ciudad_santiago(texto_geocodificable)
+    # Bloque RESOLUCIÓN R18 -- ver docstring de la función: colapsa una
+    # comuna/localidad que el propio texto repite de forma literal e
+    # inmediata al final (nunca toca `despachar_a_crudo` almacenado).
+    texto_geocodificable = _sin_duplicacion_inmediata_de_cola(texto_geocodificable)
     # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640: si el texto
     # documental no trae ninguna comuna propia inequívoca, pero SÍ existe
     # una comuna ya confiable de otra fuente (ver `comuna_territorial_

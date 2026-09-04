@@ -423,7 +423,12 @@ def test_caso_real_464170_apunta_a_mejillones_no_a_galvarino(planta_renca):
     Galvarino 8501 no debe usarse como destino de esta ruta."""
     plantas, _ = planta_renca
     despachar_a_real = "AV. ALMTE. LATORRE 843 MEJILLONES MEJILLONES"
-    consulta = f"{despachar_a_real}, Chile"
+    # Bloque RESOLUCIÓN R18: "MEJILLONES" repetida de forma literal e
+    # inmediata al final se colapsa ANTES de consultar al geocodificador
+    # (`_sin_duplicacion_inmediata_de_cola`) -- `despachar_a_crudo`
+    # persistido sigue siendo el texto real con la duplicación, sólo la
+    # consulta cambia.
+    consulta = "AV. ALMTE. LATORRE 843 MEJILLONES, Chile"
     proveedor = ProveedorRutasSimulado(
         geocodificaciones={
             consulta: ResultadoGeocodificacion(

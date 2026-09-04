@@ -24,9 +24,12 @@ from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
+    reconciliar_bandeja_decisiones,
+    reconciliar_incidencias_rut_chofer_documental,
     revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
+    revalidar_origen_encabezado_no_confiable_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
 )
 
@@ -74,7 +77,19 @@ from atlas_core.revalidacion_documental import (
 # sin subir este número, ambas correcciones de reglas quedarían
 # INVISIBLES para cualquier operación ya migrada a 4 (exactamente este
 # caso real), tal como advierte el párrafo de arriba.
-RULESET_VERSION = 5
+#
+# Subida de 5 a 6 -- bloque previo al lote 2: se conectan aquí
+# `revalidar_origen_encabezado_no_confiable_sin_ocr` (caso real 464367,
+# AZA RENCA aceptado desde "CASA MATRIZ PLANTA RENCA") y
+# `reconciliar_bandeja_decisiones` (Motor de Evidencia -- homologación de
+# patente por similitud/historial, alias por RUT exacto, obra por
+# evidencia externa) al flujo automático -- antes, ambas sólo corrían
+# detrás de un camino de excepción manual (`aplicar_decision_pendiente.py`,
+# sólo tras `DecisionObsoletaError`) o de sus propios tests. Una operación
+# que ya migró a la versión 5 nunca volvería a barrerse con estas dos
+# reglas nuevas sin subir este número, igual que advierte el párrafo de
+# arriba.
+RULESET_VERSION = 6
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -267,6 +282,23 @@ def reconciliar_estado_derivado(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
         )
         limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
+        # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa
+        # raíz real (464367): un origen que quedó determinado ÚNICAMENTE
+        # por `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
+        # societaria, nunca la planta real de despacho) nunca se
+        # revertía sola -- esta función existía y estaba probada, pero
+        # ningún flujo automático la invocaba. Corre ANTES del reintento
+        # de ruta y de la convergencia de indicadores de abajo, para que
+        # un origen recién invalidado (vuelve a `ORIGEN_NO_DETERMINADO`)
+        # se refleje de inmediato en `estado_operacional`, nunca con un
+        # ciclo de rezago.
+        limpieza_origen = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+        # Bloque FIX RUT AUSENTE -- caso real 464367 (CARLOS ÑANCUCHEO):
+        # un chofer identificado por nombre pero sin RUT documental
+        # (ausente o inválido) puede tener RUT canónico confiable en
+        # catálogo o en el histórico del propio dataset -- función ya
+        # existente y probada, sin flujo automático que la invocara.
+        limpieza_rut_chofer = reconciliar_incidencias_rut_chofer_documental(raiz_atlas=raiz, reloj=lambda: instante)
         recuperacion = {"guias_actualizadas": []}
         if por_reintentar:
             recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -298,7 +330,23 @@ def reconciliar_estado_derivado(
         limpieza_mobile = revalidar_asociacion_mobile_sin_ocr(
             RepositorioEnviosMobile(raiz_atlas=raiz), dataset=dataset,
         )
-        # A partir de acá el dataset YA tiene los cambios de las dos
+        # Bloque MOTOR DE EVIDENCIA -- causa raíz real (T2MN86/J35478,
+        # 464529 alias TORRES OCARANEA): `reconciliar_bandeja_decisiones`
+        # (catálogo + similitud OCR calibrada + historial RUT/transporte
+        # para patentes; RUT exacto para alias; evidencia externa
+        # oficial/corporativa para obras) existía completo y probado,
+        # pero sólo se invocaba detrás de un camino de excepción manual
+        # (`aplicar_decision_pendiente.py`, sólo tras
+        # `DecisionObsoletaError`). Corre AL FINAL de esta pasada, sobre
+        # el dataset YA reconciliado arriba (motivos/ruta/origen/mobile),
+        # para que la evidencia que usa (p. ej. `estado_ruta` ya
+        # `RUTA_CALCULADA`) sea la vigente. Nunca inventa ni relaja sus
+        # propios umbrales -- reutiliza exactamente el mismo mecanismo ya
+        # probado (Fases 1-4), incluida su auto-resolución acotada
+        # (`MAX_ITERACIONES_AUTO_RESOLUCION`) para los tipos de decisión
+        # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
+        evidencia_decisiones = reconciliar_bandeja_decisiones(raiz_atlas=raiz, reloj=lambda: instante)
+        # A partir de acá el dataset YA tiene los cambios de las
         # revalidaciones de arriba -- cada una es atómica y ya quedó
         # protegida por su propio lock común del dataset al escribir; NO
         # se revierten pase lo que pase con lo que sigue (son
@@ -390,10 +438,13 @@ def reconciliar_estado_derivado(
         "guias_actualizadas": sorted(
             set(limpieza["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])
+            | set(limpieza_origen["guias_actualizadas"])
+            | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
             | set(limpieza_indicadores["guias_actualizadas"])
         ),
         "guias_recuperadas": guias_recuperadas,
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
+        "decisiones_aplicadas_automaticamente": evidencia_decisiones["decisiones_aplicadas_automaticamente"],
         "pendientes_tecnicos": len(registros_despues),
         "totales": manifest["totales"],
         "ocr_ejecutado": False,

@@ -51,6 +51,7 @@ from atlas_core.catalogos import buscar_chofer_por_nombre_exacto, cargar_catalog
 from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_material
 from atlas_core.extractor import _patente_valida, limpiar_sufijo_rut_pegado
 from atlas_core.incidencias_documentales import (
+    TIPO_RUT_DOCUMENTAL_AUSENTE,
     TIPO_RUT_DOCUMENTAL_INVALIDO,
     TIPO_TRANSPORTE_AUSENTE_DOCUMENTAL,
     VALOR_CANONICO_CAMPO_REQUERIDO,
@@ -3192,6 +3193,23 @@ def revalidar_y_regenerar_reporte(
     resultado_fecha_transporte = revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
         ruta_dataset=dataset,
     )
+    # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa raíz
+    # real (464367): un origen determinado ÚNICAMENTE por
+    # `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
+    # societaria) nunca se revertía sola en esta pasada tampoco -- misma
+    # función ya usada en `reconciliar_estado_derivado`, ahora también
+    # aquí para que cualquier consumidor de esta orquestación (no sólo la
+    # carga automática de Desktop) converja igual.
+    resultado_origen_encabezado = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+    # Bloque FIX RUT AUSENTE/INVÁLIDO -- deliberadamente NO conectado
+    # aquí: esta orquestación corre transitivamente dentro de
+    # `aplicar_decision_obra` (toda aplicación de CUALQUIER decisión la
+    # dispara), así que conectarla acá le da un alcance mucho mayor al
+    # "bloque mínimo" pedido -- cada aplicación de decisión, de cualquier
+    # tipo, en cualquier operación, quedaría revisando RUT de chofer de
+    # TODAS las filas. Vive sólo en `reconciliar_estado_derivado` (la
+    # carga automática de Desktop), que es donde el caso real (464367)
+    # necesita que corra.
     # Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
     # 0000355433): cada revalidación de arriba retira SU PROPIO motivo de
     # `motivos_revision_documento` (y, cada una por su cuenta, reimplementa
@@ -3221,6 +3239,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_material_estampado["guias_actualizadas"])
         | set(resultado_origen_eliminacion["guias_actualizadas"])
         | set(resultado_fecha_transporte["guias_actualizadas"])
+        | set(resultado_origen_encabezado["guias_actualizadas"])
         | set(resultado_indicadores["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
@@ -3245,6 +3264,7 @@ def revalidar_y_regenerar_reporte(
         "material_estampado": resultado_material_estampado,
         "origen_eliminacion_categoria": resultado_origen_eliminacion,
         "fecha_transporte_compartido": resultado_fecha_transporte,
+        "origen_encabezado_no_confiable": resultado_origen_encabezado,
         "indicadores_documentales": resultado_indicadores,
     }
 
@@ -3949,10 +3969,22 @@ def detectar_incidencias_rut_chofer_invalido_sin_ocr(
     guía de WLADIMIR AGUILAR con "55.555.555-5", dígito verificador
     correcto pero cuerpo implausible).
 
+    Bloque FIX RUT AUSENTE -- caso real 464367 (CARLOS ÑANCUCHEO): un RUT
+    genuinamente AUSENTE (nunca leído, nunca impreso -- `rut_chofer` en
+    `_AUSENTES`) es un dominio distinto de un RUT INVÁLIDO (impreso pero
+    mal formado), pero la recuperación es la MISMA evidencia ya existente
+    (`_rut_canonico_para_chofer`: catálogo por nombre exacto, o histórico
+    consistente del propio dataset) -- antes de este bloque el guard sólo
+    entraba con `rut_chofer` no vacío, así que un chofer ya conocido en
+    catálogo con RUT ausente en ESTE documento nunca se beneficiaba de la
+    misma recuperación que ya funcionaba para el caso inválido. Cada
+    candidata trae ahora `tipo_incidencia` explícito -- nunca se etiqueta
+    una ausencia real como si fuera un valor documental inválido.
+
     Devuelve un candidato por cada fila con chofer identificado por
-    nombre pero `rut_chofer` inválido, junto con el RUT canónico
-    encontrado (catálogo o histórico del propio dataset), si lo hay --
-    `rut_canonico` viene vacío cuando no hay ninguno confiable."""
+    nombre pero `rut_chofer` ausente o inválido, junto con el RUT
+    canónico encontrado (catálogo o histórico del propio dataset), si lo
+    hay -- `rut_canonico` viene vacío cuando no hay ninguno confiable."""
     raiz = Path(raiz_atlas)
     dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
     catalogo_ruta = raiz / "catalogos_privados" / "choferes.json"
@@ -3966,12 +3998,16 @@ def detectar_incidencias_rut_chofer_invalido_sin_ocr(
     for fila in filas:
         nombre_chofer = str(fila.get("chofer", "")).strip()
         rut_chofer = str(fila.get("rut_chofer", "")).strip()
-        if not nombre_chofer or nombre_chofer == "No encontrado" or not rut_chofer:
+        if not nombre_chofer or nombre_chofer == "No encontrado":
             continue
-        # Sección 2 del bloque: sólo se trata como error documental
-        # confirmado (nunca duda de OCR) -- mismo criterio que el
-        # tiempo real en `procesamiento_masivo`.
-        if not rut_documentalmente_confirmado_invalido(rut_chofer):
+        if rut_chofer in _AUSENTES:
+            tipo_incidencia = TIPO_RUT_DOCUMENTAL_AUSENTE
+        elif rut_documentalmente_confirmado_invalido(rut_chofer):
+            # Sección 2 del bloque: sólo se trata como error documental
+            # confirmado (nunca duda de OCR) -- mismo criterio que el
+            # tiempo real en `procesamiento_masivo`.
+            tipo_incidencia = TIPO_RUT_DOCUMENTAL_INVALIDO
+        else:
             continue
         canonico = _rut_canonico_para_chofer(
             nombre_chofer=nombre_chofer, filas=filas,
@@ -3985,6 +4021,7 @@ def detectar_incidencias_rut_chofer_invalido_sin_ocr(
             "chofer": nombre_chofer,
             "rut_documental": rut_chofer,
             "rut_canonico": canonico or "",
+            "tipo_incidencia": tipo_incidencia,
         })
     return candidatas
 
@@ -3995,11 +4032,12 @@ def reconciliar_incidencias_rut_chofer_documental(
     """Bloque FIX RUT DOCUMENTAL -- registra, en el almacén ya existente
     de Incidencias Documentales (`atlas_core.incidencias_documentales`),
     una incidencia por cada documento detectado por
-    `detectar_incidencias_rut_chofer_invalido_sin_ocr`. Idempotente
+    `detectar_incidencias_rut_chofer_invalido_sin_ocr` (RUT inválido O
+    ausente -- ver bloque FIX RUT AUSENTE en esa función). Idempotente
     (`AlmacenIncidenciasDocumentales.registrar` no duplica por
     `incidencia_id`). Cuando hay un RUT canónico confiable (catálogo o
     histórico consistente), además CORRIGE ese `rut_chofer` en el
-    dataset -- el valor documental inválido queda conservado como
+    dataset -- el valor documental inválido/ausente queda conservado como
     evidencia sólo en la incidencia, nunca en el dato operacional (ver
     Sección 3 del bloque: nunca se contamina catálogo/dataset con el
     valor inválido). Cuando no hay RUT canónico confiable, el dataset se
@@ -4021,17 +4059,28 @@ def reconciliar_incidencias_rut_chofer_documental(
     correcciones_candidatas: dict[str, tuple[str, str]] = {}
     for candidata in candidatas:
         valor_canonico = candidata["rut_canonico"] or VALOR_CANONICO_RUT_NO_CONFIRMADO
+        tipo_incidencia = candidata.get("tipo_incidencia") or TIPO_RUT_DOCUMENTAL_INVALIDO
+        # `registrar()` exige un `valor_documental` no vacío -- una
+        # ausencia real ("" o "No encontrado") usa el mismo sentinela ya
+        # usado para transporte ausente, nunca el string vacío tal cual.
+        valor_documental = (
+            VALOR_DOCUMENTAL_CAMPO_AUSENTE if tipo_incidencia == TIPO_RUT_DOCUMENTAL_AUSENTE
+            else candidata["rut_documental"]
+        )
         incidencia = almacen.registrar(
             contexto=candidata["cliente"], numero_guia=candidata["numero_guia"],
             numero_transporte=candidata["numero_transporte"], campo="RUT del chofer",
-            valor_documental=candidata["rut_documental"], valor_canonico=valor_canonico,
-            tipo_incidencia=TIPO_RUT_DOCUMENTAL_INVALIDO,
+            valor_documental=valor_documental, valor_canonico=valor_canonico,
+            tipo_incidencia=tipo_incidencia,
             evidencia=(
                 f"CHOFER_IDENTIFICADO_POR_NOMBRE:{candidata['chofer']}",
                 "RUT_CANONICO_CORROBORADO_CATALOGO_O_HISTORICO" if candidata["rut_canonico"]
                 else "SIN_CANDIDATO_CANONICO_CONFIABLE",
             ),
-            fecha=reloj(), fuente_resolucion="DETECCION_AUTOMATICA_RUT_INVALIDO",
+            fecha=reloj(), fuente_resolucion=(
+                "DETECCION_AUTOMATICA_RUT_AUSENTE" if tipo_incidencia == TIPO_RUT_DOCUMENTAL_AUSENTE
+                else "DETECCION_AUTOMATICA_RUT_INVALIDO"
+            ),
         )
         registradas.append(incidencia.incidencia_id)
         if candidata["rut_canonico"]:
