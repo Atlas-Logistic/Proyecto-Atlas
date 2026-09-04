@@ -30,6 +30,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
     revalidar_origen_encabezado_no_confiable_sin_ocr,
+    revalidar_origen_por_categoria_sin_candidato_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
 )
 
@@ -89,7 +90,14 @@ from atlas_core.revalidacion_documental import (
 # que ya migró a la versión 5 nunca volvería a barrerse con estas dos
 # reglas nuevas sin subir este número, igual que advierte el párrafo de
 # arriba.
-RULESET_VERSION = 6
+#
+# Subida de 6 a 7 -- ORIGEN: CONVERGER EVIDENCIA ANTES DE PREGUNTAR
+# (lote 2, casos reales 464730/464631/464529): conecta aquí
+# `revalidar_origen_por_categoria_sin_candidato_sin_ocr` -- ninguna
+# pregunta ORIGEN_NO_CONFIRMADO real desaparece hasta que la próxima
+# reconciliación natural corra con la regla nueva; sin subir este
+# número, una operación ya en versión 6 nunca la vería.
+RULESET_VERSION = 7
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -129,12 +137,27 @@ def _cargar_seguimiento(ruta: Path) -> dict[str, dict[str, object]]:
 
 
 def _pendientes_ruta(dataset: Path, decisiones: Path) -> list[dict[str, str]]:
+    # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
+    # `estado_ruta==""` con `planta_origen_id` YA presente es exactamente
+    # el estado que dejan los revalidadores de origen por categoría
+    # (éste y su hermano R2.3, `revalidar_origen_por_eliminacion_
+    # categoria_sin_ocr`) -- origen resuelto, ruta todavía sin calcular.
+    # Excluirlo aquí (como antes) dejaba estas filas fuera de la única
+    # cola de reintento que corre en la carga automática de Desktop
+    # (`reconciliar_estado_derivado`, la otra vía --
+    # `revalidar_y_regenerar_reporte` -- sólo corre dentro de una
+    # aplicación de decisión o de un envío Mobile, nunca sólo al abrir
+    # Desktop): origen resuelto, pero sin ninguna vía automática que
+    # calculara nunca su ruta. Una fila persistida SIEMPRE llega a este
+    # dataset con un `estado_ruta` real (nunca "" de fábrica) -- "" sólo
+    # existe porque un revalidador lo dejó así a propósito, esperando
+    # este mismo reintento.
     humanas = _guias_humanas(decisiones)
     return [
         f for f in _leer_filas(dataset)
         if str(f.get("numero_guia", "")).strip() not in humanas
         and str(f.get("indicador_revision", "")).strip() == "OK"
-        and str(f.get("estado_ruta", "")).strip() not in ("", "RUTA_CALCULADA")
+        and str(f.get("estado_ruta", "")).strip() != "RUTA_CALCULADA"
         and str(f.get("planta_origen_id", "")).strip()
         and str(f.get("despachar_a_crudo", "")).strip()
     ]
@@ -293,6 +316,17 @@ def reconciliar_estado_derivado(
         # se refleje de inmediato en `estado_operacional`, nunca con un
         # ciclo de rezago.
         limpieza_origen = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+        # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR
+        # -- causa raíz sistémica real (lote 2: 464730, 464631, 464529):
+        # antes de dejar un origen sin determinar (o de dejarlo así
+        # después de revertir un encabezado no confiable, arriba mismo),
+        # cruza categoría real de la carga + naturaleza del destino
+        # (externo vs. la propia planta) contra el catálogo -- corre
+        # ANTES del reintento de ruta para que la misma pasada calcule
+        # km/tiempo con el origen ya resuelto.
+        limpieza_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        )
         # Bloque FIX RUT AUSENTE -- caso real 464367 (CARLOS ÑANCUCHEO):
         # un chofer identificado por nombre pero sin RUT documental
         # (ausente o inválido) puede tener RUT canónico confiable en
@@ -439,6 +473,7 @@ def reconciliar_estado_derivado(
             set(limpieza["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])
             | set(limpieza_origen["guias_actualizadas"])
+            | set(limpieza_origen_categoria["guias_actualizadas"])
             | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
             | set(limpieza_indicadores["guias_actualizadas"])
         ),

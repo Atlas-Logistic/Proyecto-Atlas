@@ -290,6 +290,85 @@ def test_sin_evidencia_gps_ni_documental_origen_no_determinado(entorno, tmp_path
     assert proveedor_rutas.llamadas_ruta == 0
 
 
+# ============================================================
+# Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR: sin
+# GPS y sin ningún origen informado (ni Mobile ni documento), antes de
+# rendirse se intenta resolver por categoría/destino solo -- casos
+# reales del lote 2 (464730/464631/464529).
+# ============================================================
+
+@pytest.fixture
+def entorno_categorias(tmp_path):
+    ruta_plantas = tmp_path / "plantas.json"
+    plantas_repo = CatalogoPlantas(ruta_plantas)
+    planta_renca = plantas_repo.crear(
+        nombre="AZA RENCA", pais="CHILE", fuente="PRUEBA",
+        direccion="LA UNION 3070", comuna="RENCA", region="RM",
+        latitud=COORD_AZA_RENCA.latitud, longitud=COORD_AZA_RENCA.longitud,
+        estado_calidad=EstadoCalidad.CONFIRMADA, categorias_permitidas=("ANGULOS",),
+    )
+    planta_colina = plantas_repo.crear(
+        nombre="AZA COLINA", pais="CHILE", fuente="PRUEBA",
+        direccion="AV. PDTE. EDUARDO FREI MONTALVA 18500", comuna="COLINA", region="RM",
+        latitud=COORD_AZA_COLINA.latitud, longitud=COORD_AZA_COLINA.longitud,
+        estado_calidad=EstadoCalidad.CONFIRMADA, categorias_permitidas=("BARRAS", "ROLLOS"),
+    )
+    return {"plantas": plantas_repo.listar(), "renca": planta_renca, "colina": planta_colina}
+
+
+def test_sin_gps_sin_mobile_sin_documento_resuelve_por_categoria_solo(entorno_categorias):
+    """Caso real 464730/464631/464529: ningún origen informado -- ni
+    Mobile ni encabezado -- pero la categoría real sólo la despacha una
+    planta vigente del catálogo, y el destino no es esa misma planta."""
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
+        patente=None, instante_salida=None, proveedor_posicion=None,
+        plantas=entorno_categorias["plantas"],
+        textos_documento=["GUIA SIN NINGUNA MENCION DE PLANTA"],
+        categoria_documento="BARRAS", destino_texto="CALLE DE UN CLIENTE CUALQUIERA 500",
+    )
+    assert planta.planta_id == entorno_categorias["colina"].planta_id
+    assert determinado_por == "CATEGORIA_DESTINO_EXTERNO"
+    assert motivo == ""
+
+
+def test_categoria_sin_regla_sigue_sin_determinar(entorno_categorias):
+    """Sin categoría (o SIN_REGLA) nunca inventa -- 464367/464265, donde
+    el material quedó NO_DETERMINADO."""
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
+        patente=None, instante_salida=None, proveedor_posicion=None,
+        plantas=entorno_categorias["plantas"],
+        textos_documento=["GUIA SIN NINGUNA MENCION DE PLANTA"],
+        categoria_documento="NO DETERMINADO", destino_texto="CUALQUIER DESTINO",
+    )
+    assert planta is None
+    assert determinado_por == ""
+
+
+def test_gps_sigue_siendo_superior_a_la_categoria(entorno_categorias):
+    """GPS real (posición dentro de la geocerca) sigue ganando siempre,
+    incluso si la categoría por sí sola apuntaría a otra planta."""
+    proveedor_gps = _proveedor_gps("ABCD12", COORD_AZA_RENCA)  # GPS real: RENCA
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
+        patente="ABCD12", instante_salida=INSTANTE_SALIDA, proveedor_posicion=proveedor_gps,
+        plantas=entorno_categorias["plantas"],
+        textos_documento=["GUIA SIN NINGUNA MENCION DE PLANTA"],
+        categoria_documento="BARRAS", destino_texto="CUALQUIER DESTINO",
+    )
+    assert planta.planta_id == entorno_categorias["renca"].planta_id  # gana el GPS, aunque RENCA no maneje BARRAS
+    assert determinado_por == "ONELOGIS_GPS"
+
+
+def test_traslado_interno_no_resuelve_por_categoria(entorno_categorias):
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
+        patente=None, instante_salida=None, proveedor_posicion=None,
+        plantas=entorno_categorias["plantas"],
+        textos_documento=["GUIA SIN NINGUNA MENCION DE PLANTA"],
+        categoria_documento="BARRAS",
+        destino_texto="AV. PDTE. EDUARDO FREI MONTALVA 18500",  # la propia dirección de AZA COLINA
+    )
+    assert planta is None
+
+
 def test_planta_determinada_sin_coordenadas_en_catalogo_no_lanza(tmp_path):
     """Caso real (AZA COLINA sin lat/lon cargados en plantas.json antes de
     este bloque): la planta se determina (documento) pero su registro de

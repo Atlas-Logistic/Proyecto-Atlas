@@ -1729,6 +1729,7 @@ def calcular_ruta_entrega_para_viaje(
         proveedor_posicion=proveedor_posicion, plantas=plantas,
         textos_documento=textos_documento, radio_km=radio_geocerca_km,
         codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
+        destino_texto=despachar_a_crudo,
     )
     if planta is None:
         return ResultadoRutaEntrega(
@@ -1965,6 +1966,7 @@ def resolver_entrega_documento(
         patente=None, instante_salida=None, proveedor_posicion=None,
         plantas=plantas, textos_documento=textos,
         codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
+        destino_texto=despachar_a_crudo,
     )
     if planta is None:
         resultado["estado_ruta"] = EstadoRuta.ORIGEN_NO_DETERMINADO.value

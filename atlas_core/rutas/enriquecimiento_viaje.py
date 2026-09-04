@@ -26,7 +26,12 @@ from atlas_core.rutas.geocerca import (
 )
 from atlas_core.rutas.modelos import Coordenadas, EstadoRuta
 from atlas_core.rutas.origen_documental import resolver_origen_documental
-from atlas_core.rutas.origen_evidencia import fusionar_evidencia_origen, resolver_planta_por_codigo_mobile
+from atlas_core.rutas.origen_evidencia import (
+    FUENTE_CATEGORIA_DESTINO_EXTERNO,
+    fusionar_evidencia_origen,
+    resolver_planta_por_codigo_mobile,
+    resolver_planta_unica_por_categoria,
+)
 from atlas_core.rutas.posicion_vehiculo import (
     EstadoPosicionVehiculo,
     ProveedorPosicionVehiculo,
@@ -169,10 +174,12 @@ def resolver_planta_origen(
     radio_km: float = RADIO_GEOCERCA_KM_PREDETERMINADO,
     codigo_planta_mobile: str | None = None,
     categoria_documento: str | None = None,
+    destino_texto: str = "",
 ) -> tuple[Planta | None, str, str, str]:
     """Jerarquía conservadora (Bloque PLANTA-P1), extendida en el Bloque
     ORIGEN OPERACIONAL V2 (`codigo_planta_mobile`/`categoria_documento`,
-    ambos opcionales -- sin ellos, comportamiento IDÉNTICO a antes):
+    ambos opcionales -- sin ellos, comportamiento IDÉNTICO a antes) y en
+    el Bloque ORIGEN V3 (`destino_texto`, opcional):
 
     1. GPS histórico/geocerca, si hay evidencia (patente + instante +
        proveedor + posición dentro de ventana y geocerca válida). Sigue
@@ -188,7 +195,21 @@ def resolver_planta_origen(
        la categoría real transportada; el caso real que lo motiva es la
        guía 472593, encabezado societario "AZA RENCA" sustituyendo un
        "AZA COLINA" informado por Mobile y compatible con la carga).
-    3. Sin evidencia suficiente, o evidencia contradictoria que ninguna
+    3. Bloque ORIGEN V3 -- causa raíz real (464730/464631/464529, lote
+       2): si NI Mobile NI el documento informaron ningún origen (nada
+       que fusionar en el paso 2), antes de rendirse se intenta
+       `atlas_core.rutas.origen_evidencia.resolver_planta_unica_por_
+       categoria` -- si la categoría real de la carga sólo la despacha
+       UNA planta vigente del catálogo (dato, `categorias_permitidas`,
+       nunca lógica nueva) y el destino no es, él mismo, esa planta
+       (evitando confundir un traslado interno con un despacho real),
+       resuelve por esa única evidencia. GPS sigue siendo superior:
+       corre siempre en el paso 1, y quien orquesta este resultado
+       (`atlas_core.procesamiento_masivo`) puede además CONFIRMAR o
+       reemplazar esta resolución con telemetría real que llegue
+       después, en un segundo tramo -- ver ahí el criterio exacto de
+       cuándo un conflicto de telemetría sí debe descartarla.
+    4. Sin evidencia suficiente, o evidencia contradictoria que ninguna
        regla puede desempatar: `None` (`ORIGEN_NO_DETERMINADO`, o
        `CONTRADICCION_OPERACIONAL_ORIGEN` cuando hay evidencia real en
        conflicto) -- nunca se elige a ciegas, nunca se inventa origen.
@@ -209,6 +230,14 @@ def resolver_planta_origen(
     planta_mobile = resolver_planta_por_codigo_mobile(codigo_planta_mobile, plantas)
 
     if planta_mobile is None and planta_doc is None:
+        planta_categoria = resolver_planta_unica_por_categoria(
+            categoria=categoria_documento or "", plantas=plantas, destino_texto=destino_texto,
+        )
+        if planta_categoria is not None:
+            return (
+                planta_categoria, "", FUENTE_CATEGORIA_DESTINO_EXTERNO,
+                f"CATEGORIA={categoria_documento or ''};UNICA_PLANTA_COMPATIBLE",
+            )
         return None, motivo_gps, "", ""
 
     fusion = fusionar_evidencia_origen(
@@ -294,6 +323,7 @@ def calcular_ruta_para_viaje(
         patente=patente, instante_salida=instante_salida,
         proveedor_posicion=proveedor_posicion, plantas=plantas,
         textos_documento=textos_documento, radio_km=radio_geocerca_km,
+        destino_texto=str(destino.direccion or destino.nombre_destino or ""),
     )
     if planta is None:
         return ResultadoEnriquecimientoRuta(

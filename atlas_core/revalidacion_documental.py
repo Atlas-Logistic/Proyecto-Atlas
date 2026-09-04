@@ -75,11 +75,14 @@ from atlas_core.procesamiento_masivo import (
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.rutas.origen_evidencia import (
+    FUENTE_CATEGORIA_DESTINO_EXTERNO,
     MOTIVO_CONTRADICCION_OPERACIONAL,
     MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA,
+    conflicto_gps_tiene_evidencia_real,
     fusionar_evidencia_origen,
     resolver_planta_alternativa_por_categoria,
     resolver_planta_por_codigo_mobile,
+    resolver_planta_unica_por_categoria,
 )
 from atlas_core.telemetria.enriquecimiento import enriquecer_documento_con_telemetria
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
@@ -2986,6 +2989,86 @@ def revalidar_origen_por_eliminacion_categoria_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+def revalidar_origen_por_categoria_sin_candidato_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
+    causa raíz sistémica real (lote 2 -- 464730, 464631, 464529). A
+    diferencia de `revalidar_origen_por_eliminacion_categoria_sin_ocr`
+    (exige un motivo `CONTRADICCION_OPERACIONAL_ORIGEN[...]`, es decir,
+    que YA exista una planta documental identificada e incompatible),
+    estos tres casos reales nunca tuvieron ningún origen informado por
+    Mobile ni por el encabezado -- el pipeline se rendía de inmediato
+    con `SIN_EVIDENCIA_GPS` (un motivo genérico que ni siquiera refleja
+    que la telemetría corrió después y encontró 0% de solape/conflicto)
+    sin cruzar nunca la categoría real de la carga contra el catálogo,
+    aunque esa evidencia por sí sola ya alcanzaba (dato YA declarado en
+    `categorias_permitidas`: AZA COLINA despacha BARRAS/ROLLOS, AZA
+    RENCA no). Reutiliza `resolver_planta_unica_por_categoria` -- misma
+    función, mismo criterio, que el motor de ingesta ya usa para
+    documentos NUEVOS (Bloque ORIGEN V3 en `enriquecimiento_viaje.
+    resolver_planta_origen`); esta es la vía RETROACTIVA para la
+    bandeja ya persistida, sin OCR, sin red, sin GPS nuevo.
+
+    Se abstiene ante cualquier duda real: `planta_origen_id` ya
+    presente (nada que resolver), categoría no determinada o más de una
+    planta compatible (ambigüedad real -- SIN_REGLA nunca cuenta), la
+    única candidata es ella misma el destino del despacho (traslado
+    interno), o evidencia GPS REAL y positiva ya disponible
+    (`_conflicto_gps_es_evidencia_real`, o `motivo_origen_gps` que
+    empieza por `DETENCION_REAL_FUERA_DE_TODA_GEOCERCA`) -- evidencia
+    física real nunca se pisa con una inferencia más débil por
+    categoría."""
+    ruta = Path(ruta_dataset)
+    try:
+        plantas = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("estado_ruta", "")).strip() != EstadoRuta.ORIGEN_NO_DETERMINADO.value:
+                continue
+            if str(fila.get("planta_origen_id", "")).strip():
+                continue  # ya tiene origen -- nada que resolver
+            motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
+            if motivo_origen_gps.startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA"):
+                continue  # evidencia GPS real y positiva ya disponible -- no se pisa
+            if conflicto_gps_tiene_evidencia_real(motivo_origen_gps):
+                continue
+
+            categoria = str(fila.get("tipo_carga", "")).strip()
+            destino_texto = str(fila.get("despachar_a_crudo", "") or fila.get("direccion_entrega", "")).strip()
+            planta_resuelta = resolver_planta_unica_por_categoria(
+                categoria=categoria, plantas=plantas, destino_texto=destino_texto,
+            )
+            if planta_resuelta is None:
+                continue
+
+            fila["planta_origen_id"] = planta_resuelta.planta_id
+            fila["planta_origen_nombre"] = planta_resuelta.nombre
+            fila["origen_determinado_por"] = FUENTE_CATEGORIA_DESTINO_EXTERNO
+            fila["evidencia_origen"] = f"CATEGORIA={categoria or 'NO_DETERMINADO'};UNICA_PLANTA_COMPATIBLE"
+            # Mismo criterio que `revalidar_origen_por_eliminacion_categoria_
+            # sin_ocr` (Bloque R2.3/R2.4): limpia el bloqueo de origen, deja
+            # `estado_ruta`/`motivo_ruta` de RUTA para que `revalidar_ruta_
+            # sin_destino_calculado_sin_ocr` (misma pasada) calcule km/tiempo
+            # de verdad -- origen resuelto no es "viaje completo" por sí solo.
+            fila["estado_ruta"] = ""
+            fila["motivo_ruta"] = ""
+            fila["estado_operacional"] = (
+                "OK"
+                if fila.get("estado_documental", "") == "OK" and not destino_texto
+                else "REQUIERE_REVISION"
+            )
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def _firma_efectiva_bandeja(ruta: Path) -> tuple[str, ...] | None:
     """Firma semántica de las decisiones, sin metadatos volátiles del artefacto."""
     try:
@@ -3201,6 +3284,16 @@ def revalidar_y_regenerar_reporte(
     # aquí para que cualquier consumidor de esta orquestación (no sólo la
     # carga automática de Desktop) converja igual.
     resultado_origen_encabezado = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+    # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
+    # corre DESPUÉS de revertir un encabezado no confiable (arriba), a
+    # propósito -- una fila recién revertida (planta_origen_id vacío,
+    # ORIGEN_NO_DETERMINADO) merece la misma oportunidad de resolverse
+    # por categoría/destino en la MISMA pasada, nunca esperar a una
+    # corrida aparte. Antes de la revalidación de ruta más abajo, igual
+    # que su función hermana de eliminación por categoría.
+    resultado_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     # Bloque FIX RUT AUSENTE/INVÁLIDO -- deliberadamente NO conectado
     # aquí: esta orquestación corre transitivamente dentro de
     # `aplicar_decision_obra` (toda aplicación de CUALQUIER decisión la
@@ -3240,6 +3333,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_origen_eliminacion["guias_actualizadas"])
         | set(resultado_fecha_transporte["guias_actualizadas"])
         | set(resultado_origen_encabezado["guias_actualizadas"])
+        | set(resultado_origen_categoria["guias_actualizadas"])
         | set(resultado_indicadores["guias_actualizadas"])
     )
     resultado_revalidacion: dict[str, object] = {
@@ -3265,6 +3359,7 @@ def revalidar_y_regenerar_reporte(
         "origen_eliminacion_categoria": resultado_origen_eliminacion,
         "fecha_transporte_compartido": resultado_fecha_transporte,
         "origen_encabezado_no_confiable": resultado_origen_encabezado,
+        "origen_categoria_sin_candidato": resultado_origen_categoria,
         "indicadores_documentales": resultado_indicadores,
     }
 

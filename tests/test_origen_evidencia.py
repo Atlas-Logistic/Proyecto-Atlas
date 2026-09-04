@@ -363,3 +363,108 @@ def test_caso_real_barras_cliente_externo_aza_resuelve_colina():
         destino_texto="AV. ALMTE. LATORRE 843 MEJILLONES MEJILLONES",
     )
     assert resultado is COLINA
+
+
+# ============================================================
+# Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
+# `resolver_planta_unica_por_categoria` -- a diferencia de la función de
+# arriba, NUNCA exige una planta documental que "eliminar"; resuelve por
+# categoría sola cuando exactamente una planta vigente la despacha.
+# Casos reales del lote 2: 464730/464631/464529.
+# ============================================================
+
+from atlas_core.rutas.origen_evidencia import (
+    conflicto_gps_tiene_evidencia_real,
+    resolver_planta_unica_por_categoria,
+)
+
+
+def test_resuelve_sin_ningun_candidato_previo_cuando_hay_una_sola_planta_compatible():
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="BARRAS", plantas=[COLINA, RENCA],
+        destino_texto="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+    )
+    assert resultado is COLINA
+
+
+def test_caso_real_464730_barras_conflicto_gps_en_cero_resuelve_colina():
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="BARRAS", plantas=[COLINA, RENCA],
+        destino_texto="CAMINO A MELIPILLA 10B00 SANTIAGO MAIPU",
+    )
+    assert resultado is COLINA
+
+
+def test_caso_real_464631_rollos_resuelve_colina():
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="ROLLOS", plantas=[COLINA, RENCA], destino_texto="SANTA ISABEL 585 SANTIAGO LAMPA",
+    )
+    assert resultado is COLINA
+
+
+def test_caso_real_464529_rollos_resuelve_colina():
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="ROLLOS", plantas=[COLINA, RENCA], destino_texto="VISTA CLARA 2351 CERRILLOS",
+    )
+    assert resultado is COLINA
+
+
+def test_categoria_sin_regla_nunca_cuenta_como_evidencia():
+    """SIN_REGLA (categoría no determinada, o ninguna planta con
+    `categorias_permitidas` configuradas) nunca decide -- nunca se
+    inventa origen cuando en verdad no hay evidencia real (464367/464265:
+    material NO_DETERMINADO)."""
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="NO DETERMINADO", plantas=[COLINA, RENCA], destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+def test_dos_plantas_compatibles_es_ambiguedad_real_nunca_elige():
+    otra_compatible = _planta("PLANTA ESTE", ("BARRAS",))
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="BARRAS", plantas=[COLINA, otra_compatible, RENCA], destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+def test_traslado_interno_hacia_la_unica_planta_no_resuelve():
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="ROLLOS", plantas=[COLINA, RENCA], destino_texto="AZA COLINA",
+    )
+    assert resultado is None
+
+
+def test_ninguna_planta_compatible_no_resuelve():
+    resultado = resolver_planta_unica_por_categoria(
+        categoria="ANGULOS", plantas=[COLINA], destino_texto="CUALQUIER DESTINO",
+    )
+    assert resultado is None
+
+
+# --- `conflicto_gps_tiene_evidencia_real` -- distingue un conflicto GPS
+# con evidencia física real de uno donde todo el "solape" mide 0%. ---
+
+
+def test_conflicto_real_con_todo_solape_en_cero_no_es_evidencia_real():
+    """Caso real 464730 -- ningún candidato tocó realmente la ventana de
+    forma medible; el empate en cero no es evidencia real."""
+    assert conflicto_gps_tiene_evidencia_real(
+        "CONFLICTO_REAL_EN_VENTANA(AZA_COLINA:score=0.0026,solape=0.0%;AZA_RENCA:score=0.0,solape=0.0%)"
+    ) is False
+
+
+def test_conflicto_real_con_algun_solape_positivo_es_evidencia_real():
+    assert conflicto_gps_tiene_evidencia_real(
+        "CONFLICTO_REAL_EN_VENTANA(AZA_COLINA:score=0.8,solape=45.2%;AZA_RENCA:score=0.1,solape=0.0%)"
+    ) is True
+
+
+def test_motivo_que_no_es_conflicto_nunca_cuenta_como_evidencia_real():
+    assert conflicto_gps_tiene_evidencia_real("EVIDENCIA_GEOCERCA_SIN_SOLAPE_SUFICIENTE(X:solape=0.0%,score=0.0)") is False
+    assert conflicto_gps_tiene_evidencia_real("SIN_EVIDENCIA_GPS") is False
+    assert conflicto_gps_tiene_evidencia_real("") is False
+
+
+def test_conflicto_real_sin_solape_parseable_se_trata_como_evidencia_real_por_cautela():
+    assert conflicto_gps_tiene_evidencia_real("CONFLICTO_REAL_EN_VENTANA(FORMATO_INESPERADO)") is True

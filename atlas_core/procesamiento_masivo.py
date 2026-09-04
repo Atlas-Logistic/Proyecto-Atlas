@@ -92,6 +92,10 @@ from atlas_core.rutas.destino_entrega import (
 )
 from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
 from atlas_core.rutas.modelos import EstadoRuta
+from atlas_core.rutas.origen_evidencia import (
+    FUENTE_CATEGORIA_DESTINO_EXTERNO,
+    conflicto_gps_tiene_evidencia_real,
+)
 from atlas_core.telemetria.modelos import EstadoSeleccionRecorrido
 from atlas_core.telemetria.seleccion_recorrido import (
     ORIGEN_GPS_CONFIRMADO,
@@ -2291,7 +2295,27 @@ def procesar_archivo(
                         # previo no cambia (no hay señal GPS real que lo
                         # reemplace).
                         planta_origen_id_previo = resultado_entrega.get("planta_origen_id", "")
-                        if planta_origen_id_previo:
+                        # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES
+                        # DE PREGUNTAR: causa raíz real (464730, lote 2) --
+                        # un origen ya resuelto por categoría/destino
+                        # (`resolver_planta_unica_por_categoria`, Fase 3 de
+                        # `resolver_planta_origen`) es evidencia operacional
+                        # determinante, no el mismo encabezado societario
+                        # débil que este bloque fue diseñado para descartar.
+                        # Sólo se descarta igual si la telemetría trae
+                        # evidencia GPS REAL positiva apuntando a otra parte
+                        # (`CONFLICTO_REAL_EN_VENTANA` con algún solape > 0%
+                        # -- nunca el caso 464730, donde ambas plantas
+                        # midieron 0.0% de solape, un empate en cero que no
+                        # es evidencia real de nada).
+                        origen_es_por_categoria = (
+                            resultado_entrega.get("origen_determinado_por") == FUENTE_CATEGORIA_DESTINO_EXTERNO
+                        )
+                        gps_tiene_evidencia_real = conflicto_gps_tiene_evidencia_real(
+                            resultado_telemetria.get("motivo_origen_gps", "")
+                        )
+                        preservar_origen_por_categoria = origen_es_por_categoria and not gps_tiene_evidencia_real
+                        if planta_origen_id_previo and not preservar_origen_por_categoria:
                             resultado_entrega["planta_origen_id"] = ""
                             resultado_entrega["planta_origen_nombre"] = ""
                             resultado_entrega["origen_determinado_por"] = ""

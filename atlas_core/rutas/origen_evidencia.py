@@ -25,6 +25,7 @@ strings de categoría genéricos."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -34,6 +35,42 @@ from atlas_core.clasificador_material import TipoCarga
 
 FUENTE_MOBILE = "MOBILE"
 FUENTE_DOCUMENTO = "DOCUMENTO"
+# Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR: fuente
+# que no depende de ningún origen informado (Mobile o encabezado) -- ver
+# `resolver_planta_unica_por_categoria`, más abajo.
+FUENTE_CATEGORIA_DESTINO_EXTERNO = "CATEGORIA_DESTINO_EXTERNO"
+
+_PATRON_SOLAPE_CONFLICTO = re.compile(r"solape=(\d+(?:\.\d+)?)%")
+
+
+def conflicto_gps_tiene_evidencia_real(motivo_origen_gps: str) -> bool:
+    """Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
+    distingue un `CONFLICTO_REAL_EN_VENTANA` (ver
+    `atlas_core.telemetria.seleccion_recorrido`) con evidencia física
+    genuina (al menos una planta candidata con solape > 0% dentro de la
+    ventana documental -- una detención real, así sea breve) de uno
+    donde TODAS las plantas candidatas miden 0.0% de solape -- caso real
+    464730 (AZA_COLINA:score=0.0026,solape=0.0%;AZA_RENCA:score=0.0,
+    solape=0.0%): ningún candidato tocó realmente la ventana de forma
+    medible, la etiqueta "conflicto" sólo refleja que ambos, por igual
+    de débiles, superaron el piso mínimo de `_toca_la_ventana` (un solo
+    breadcrumb alcanza). Ese empate en cero NO es evidencia real
+    apuntando a otra planta -- nunca debe bloquear una conclusión ya
+    respaldada por categoría/destino (ver `resolver_planta_unica_por_
+    categoria`, más abajo, y sus llamadores). Cualquier solape > 0% en
+    CUALQUIER candidato sigue siendo evidencia real que nunca se pisa
+    (mismo principio que `DETENCION_REAL_FUERA_DE_TODA_GEOCERCA`, que
+    cada llamador sigue tratando como bloqueante por separado). Si el
+    texto no es reconocible como `CONFLICTO_REAL_EN_VENTANA` o no se
+    puede parsear ningún `solape=`, se trata como evidencia real por
+    cautela -- nunca se decide sobre un formato que no se entiende."""
+    texto = str(motivo_origen_gps or "")
+    if not texto.startswith("CONFLICTO_REAL_EN_VENTANA"):
+        return False
+    solapes = [float(v) for v in _PATRON_SOLAPE_CONFLICTO.findall(texto)]
+    if not solapes:
+        return True  # formato inesperado -- nunca se asume "sin evidencia" a ciegas
+    return any(s > 0.0 for s in solapes)
 
 COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
@@ -120,6 +157,35 @@ def evaluar_compatibilidad_planta_categoria(planta: Planta | None, categoria: st
 MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA = "ORIGEN_RESUELTO_POR_ELIMINACION_DE_CATEGORIA"
 
 
+def _planta_vigente(planta: Planta) -> bool:
+    return (
+        str(planta.estado_calidad).upper() in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+        and str(planta.estado_vigencia).upper() in {"ACTIVA", "ACTIVO"}
+    )
+
+
+def _es_el_propio_destino(planta: Planta, destino_texto: str) -> bool:
+    """Compartida por `resolver_planta_alternativa_por_categoria` y
+    `resolver_planta_unica_por_categoria`: `destino_texto` (típicamente
+    `despachar_a_crudo`) menciona, él mismo, a esta planta -- evidencia
+    de un TRASLADO INTERNO hacia ella, nunca un despacho a cliente DESDE
+    ella (caso real: barras despachadas hacia la propia planta candidata
+    no prueban que la carga salió de ahí)."""
+    if not destino_texto:
+        return False
+    if planta.nombre_normalizado == normalizar_nombre_planta(destino_texto):
+        return True
+    # El documento suele imprimir la DIRECCIÓN completa, no el nombre
+    # corto de la planta -- mismo criterio ya usado en todo Atlas para
+    # "¿esta dirección confirmada coincide con el texto documental?"
+    # (ver revalidar_motivo_destino_ya_confirmado_sin_ocr): la primera
+    # porción de la dirección registrada (antes de la primera coma)
+    # aparece dentro del texto documental.
+    destino_texto_normalizado = normalizar_nombre_destino(destino_texto)
+    calle = normalizar_nombre_destino(str(planta.direccion or "").split(",", 1)[0])
+    return bool(calle) and calle in destino_texto_normalizado
+
+
 def resolver_planta_alternativa_por_categoria(
     *, planta_documental: Planta, categoria: str, plantas: Iterable[Planta], destino_texto: str = "",
 ) -> Planta | None:
@@ -142,30 +208,48 @@ def resolver_planta_alternativa_por_categoria(
       prueban que la carga salió de ahí)."""
     if evaluar_compatibilidad_planta_categoria(planta_documental, categoria) != INCOMPATIBLE:
         return None
-    destino_normalizado = normalizar_nombre_planta(destino_texto) if destino_texto else ""
-    destino_texto_normalizado = normalizar_nombre_destino(destino_texto) if destino_texto else ""
-
-    def _es_el_propio_destino(planta: Planta) -> bool:
-        if not destino_texto:
-            return False
-        if planta.nombre_normalizado == destino_normalizado:
-            return True
-        # El documento suele imprimir la DIRECCIÓN completa, no el nombre
-        # corto de la planta -- mismo criterio ya usado en todo Atlas para
-        # "¿esta dirección confirmada coincide con el texto documental?"
-        # (ver revalidar_motivo_destino_ya_confirmado_sin_ocr): la primera
-        # porción de la dirección registrada (antes de la primera coma)
-        # aparece dentro del texto documental.
-        calle = normalizar_nombre_destino(str(planta.direccion or "").split(",", 1)[0])
-        return bool(calle) and calle in destino_texto_normalizado
-
     candidatas = [
         p for p in plantas
         if p.planta_id != planta_documental.planta_id
-        and str(p.estado_calidad).upper() in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
-        and str(p.estado_vigencia).upper() in {"ACTIVA", "ACTIVO"}
+        and _planta_vigente(p)
         and evaluar_compatibilidad_planta_categoria(p, categoria) == COMPATIBLE
-        and not _es_el_propio_destino(p)
+        and not _es_el_propio_destino(p, destino_texto)
+    ]
+    return candidatas[0] if len(candidatas) == 1 else None
+
+
+# Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR: causa
+# raíz sistémica real (464730, 464631, 464529 -- lote 2). A diferencia de
+# `resolver_planta_alternativa_por_categoria` (exige una planta
+# DOCUMENTAL ya identificada e INCOMPATIBLE que "eliminar"), estos tres
+# casos reales nunca tuvieron ningún origen informado por Mobile NI por
+# el encabezado documental -- `resolver_planta_origen` se rendía de
+# inmediato ("SIN_EVIDENCIA_GPS", un motivo genérico que ni siquiera
+# refleja que GPS corrió después y encontró 0% de solape/conflicto) sin
+# nunca cruzar la categoría real de la carga contra el catálogo, aunque
+# esa evidencia por sí sola ya bastaba (B HORMIGON/barras y ALAMBRON/
+# rollos hacia un cliente externo sólo los despacha AZA COLINA -- dato
+# YA declarado en `categorias_permitidas`, nunca lógica nueva por
+# empresa). Misma regla de "traslado interno" que la función hermana --
+# nunca decide con SIN_REGLA (categoría no determinada o planta sin
+# `categorias_permitidas` configuradas nunca cuenta como evidencia).
+def resolver_planta_unica_por_categoria(
+    *, categoria: str, plantas: Iterable[Planta], destino_texto: str = "",
+) -> Planta | None:
+    """Cuando NINGÚN origen fue informado (ni Mobile ni documento):
+    resuelve por categoría SOLA si, y sólo si, existe EXACTAMENTE una
+    planta vigente (CONFIRMADA+ACTIVA) cuyo `categorias_permitidas`
+    declare explícitamente esa categoría -- nunca cuando ninguna o más
+    de una calzan (`evaluar_compatibilidad_planta_categoria` ya
+    distingue SIN_REGLA de COMPATIBLE: SIN_REGLA nunca cuenta acá).
+    Misma abstención por traslado interno que `resolver_planta_
+    alternativa_por_categoria` (`destino_texto` == la propia planta
+    candidata)."""
+    candidatas = [
+        p for p in plantas
+        if _planta_vigente(p)
+        and evaluar_compatibilidad_planta_categoria(p, categoria) == COMPATIBLE
+        and not _es_el_propio_destino(p, destino_texto)
     ]
     return candidatas[0] if len(candidatas) == 1 else None
 
