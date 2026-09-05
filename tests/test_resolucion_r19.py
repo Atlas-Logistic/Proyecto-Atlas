@@ -112,14 +112,34 @@ def test_registrar_direccion_con_evidencia_externa_queda_trazable(tmp_path):
     ledger = _json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
     assert ledger["aplicaciones"][-1]["actor"] == "ATLAS_EVIDENCIA_EXTERNA_R19"
     pendientes = _json.loads((actual / "decisiones_pendientes.json").read_text(encoding="utf-8"))
-    assert pendientes["decisiones"] == []
+    # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- el proveedor real
+    # puede devolver, para esta dirección concreta, un candidato en una
+    # comuna distinta a la documental (evidencia real y fresca, nunca el
+    # motivo VIEJO `MULTIPLES_UBICACIONES_DISPERSAS` con el que arrancó
+    # esta prueba) -- nunca debe sobrevivir una tarjeta FANTASMA con el
+    # motivo obsoleto, ni tampoco debe desaparecer en silencio un
+    # problema real todavía sin resolver (regresión real: antes de este
+    # bloque, la tarjeta vieja bloqueaba -- vía `tipos_ya_presentes` --
+    # que el barrido generara la fresca, dejando la guía sin NINGUNA
+    # tarjeta pese a tener un motivo técnico real vigente).
+    motivos_presentes = [tuple(d.get("motivos") or ()) for d in pendientes["decisiones"]]
+    assert ("MULTIPLES_UBICACIONES_DISPERSAS",) not in motivos_presentes
+    assert len(pendientes["decisiones"]) <= 1
 
 
 def test_decision_destino_con_motivo_obsoleto_se_descarta(tmp_path):
     """Caso real 472037: una decisión `DESTINO_NO_RESUELTO` publicada con
     el motivo VIEJO ("GEOCODIFICACION_FUERA_DE_CHILE", evidencia
     obsoleta) debe descartarse cuando la fila ya se refrescó a un motivo
-    distinto -- nunca queda una tarjeta fantasma junto a la fresca."""
+    distinto -- nunca queda una tarjeta fantasma junto a la fresca.
+
+    Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- la fila de esta
+    prueba tiene, además, un motivo NUEVO real y vigente
+    (`MULTIPLES_UBICACIONES_DISPERSAS`) -- el barrido debe reemplazar la
+    tarjeta vieja por una fresca con el motivo correcto, nunca dejar la
+    guía sin ninguna tarjeta (regresión real: `tipos_ya_presentes` se
+    construía ANTES de descartar la vieja, bloqueando la generación de
+    la fresca -- la guía quedaba sin ninguna, un problema real oculto)."""
     from atlas_core.decisiones_pendientes import crear_decision, regenerar_decisiones_persistidas
 
     carpeta, planta = _catalogos(tmp_path)
@@ -138,7 +158,9 @@ def test_decision_destino_con_motivo_obsoleto_se_descarta(tmp_path):
     restantes = regenerar_decisiones_persistidas(
         decisiones=[decision_obsoleta], carpeta_catalogos=carpeta, ruta_dataset=dataset,
     )
-    assert restantes == []
+    assert len(restantes) == 1
+    assert restantes[0]["motivos"] == ["MULTIPLES_UBICACIONES_DISPERSAS"]
+    assert restantes[0]["decision_id"] != decision_obsoleta["decision_id"]
 
 
 def test_geocodificacion_fuera_de_chile_se_reintenta_y_refresca(tmp_path):

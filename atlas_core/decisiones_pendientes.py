@@ -171,6 +171,19 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
     # INCOMPLETO_TECNICO para siempre -- exactamente el hueco que este
     # bloque cierra.
     "DESTINO_REVISAR",
+    # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- caso real 464265:
+    # `revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr` deja
+    # este motivo cuando la obra documental YA tiene un destino
+    # CONFIRMADO en catálogo, pero su calle NO corrobora (ni siquiera
+    # normalizada) el texto de ESTA guía -- una contradicción real
+    # (posible cambio de destino, incidencia documental, u OCR
+    # suficientemente distinto de la dirección hermana ya confirmada,
+    # p. ej. 464264 para la misma obra) que nunca debe ocultarse ni
+    # reintentarse en silencio para siempre. Callejón sin salida
+    # automático -- inmediato, igual que los demás motivos de este
+    # conjunto: la evidencia ya es definitiva, sólo un humano puede decir
+    # cuál de las dos direcciones es la correcta.
+    "DESTINO_CONTRADICE_CATALOGO_CONFIRMADO",
 })
 
 # Bloque CONVERGENCIA POST LOTE 2 -- a diferencia del conjunto de arriba
@@ -2108,6 +2121,41 @@ def regenerar_decisiones_persistidas(
                 ) is not None
                 and str(decision.get("valor_documental", ""))
                 != str(fila_vigente.get("despachar_a_crudo", ""))
+            )
+        ]
+    # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- caso real 464265:
+    # mismo tipo de bug que el bloque de arriba (R19/contaminación
+    # documental), pero para el origen de motivo `motivo_ruta` en vez de
+    # `motivos_revision_documento`. Antes, este mismo descarte por motivo
+    # obsoleto sólo vivía MÁS ABAJO, dentro del bucle principal de
+    # reconciliación (`if es_motivo_de_ruta and motivo_ruta_por_guia...`)
+    # -- DESPUÉS de que `tipos_ya_presentes` (justo abajo) ya se hubiera
+    # construido a partir de la lista VIEJA de decisiones (todavía con la
+    # tarjeta obsoleta adentro). Efecto real: cuando `motivo_ruta` de una
+    # fila cambia de un motivo reconocido a OTRO motivo reconocido en la
+    # MISMA pasada (aquí, `revalidar_ruta_con_destino_confirmado_en_
+    # catalogo_sin_ocr` reescribe `GEOCODIFICACION_DIRECCION_NO_ENCONTRADA`
+    # -> `DESTINO_CONTRADICE_CATALOGO_CONFIRMADO`), el bloque `candidatas_
+    # nuevas` de abajo veía "DESTINO_NO_RESUELTO ya presente para esta
+    # guía" (por la tarjeta VIEJA, todavía sin descartar) y se abstenía de
+    # generar la fresca; la tarjeta vieja recién se descartaba MÁS TARDE,
+    # en el bucle principal -- la guía quedaba sin ninguna tarjeta. Se
+    # descarta AQUÍ, antes de construir `tipos_ya_presentes`, exactamente
+    # igual que ya hace el bloque de arriba para el motivo documental.
+    if filas_por_guia is not None and motivo_ruta_por_guia is not None:
+        motivos_ruta_reconocidos = MOTIVOS_DESTINO_NO_RESUELTO | MOTIVOS_DESTINO_TECNICO_AGOTABLE
+        decisiones = [
+            decision for decision in decisiones
+            if not (
+                str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO"
+                and bool(decision.get("motivos"))
+                and {str(m) for m in decision.get("motivos") or []} <= motivos_ruta_reconocidos
+                and (
+                    motivo_actual := motivo_ruta_por_guia.get(
+                        str((decision.get("documento") or {}).get("numero_guia", ""))
+                    )
+                ) is not None
+                and motivo_actual not in {str(m) for m in decision.get("motivos") or []}
             )
         ]
     # Bloque R2 -- COHERENCIA ENTRE PROBLEMAS, ESTADO Y REVISIÓN ACCIONABLE:

@@ -2175,6 +2175,47 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     return {"guias_actualizadas": guias_actualizadas, "destinos_aprendidos": destinos_aprendidos}
 
 
+def _proveedor_rutas_ors_predeterminado():
+    """Bloque RESOLUCIÓN R16 -- proveedor principal por defecto para
+    cualquier revalidación `_sin_ocr` que calcule ruta/geocodifique: ORS
+    con caché de geocodificación real y filtro de país ya restringido a
+    Chile (sin esto, la búsqueda queda sin restricción territorial,
+    dejando competir candidatos de cualquier país contra los chilenos --
+    causa raíz real del caso 472037, VICUÑA MACKENNA resuelto en Córdoba,
+    Argentina). Extraído para que ningún llamador reconstruya este mismo
+    proveedor por su cuenta."""
+    from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
+    from atlas_core.rutas.cache_geocodificacion import (
+        ProveedorRutasConCacheGeocodificacion,
+        RepositorioCacheGeocodificacion,
+    )
+    from atlas_core.rutas.openrouteservice import OpenRouteService
+
+    return ProveedorRutasConCacheGeocodificacion(
+        OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+    )
+
+
+def _proveedor_rutas_fallback_predeterminado():
+    """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- geocodificador de
+    RESPALDO estructurado (Nominatim/OSM, sin credencial, misma caché de
+    geocodificación -- nunca paga dos veces la misma consulta), sólo
+    consultado por `resolver_destino_entrega` cuando el principal (ORS)
+    deja una ambigüedad sin resolver ("sólo si A falla", Bloque J).
+    Extraído para que ningún llamador reconstruya este mismo proveedor
+    por su cuenta."""
+    from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
+    from atlas_core.rutas.cache_geocodificacion import (
+        ProveedorRutasConCacheGeocodificacion,
+        RepositorioCacheGeocodificacion,
+    )
+    from atlas_core.rutas.nominatim import NominatimGeocoder
+
+    return ProveedorRutasConCacheGeocodificacion(
+        NominatimGeocoder(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+    )
+
+
 def revalidar_ruta_sin_destino_calculado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -2239,7 +2280,6 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     aquí -- es estable por diseño, no ruido técnico."""
     from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
     from atlas_core.catalogo_plantas import CatalogoPlantas
-    from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
     from atlas_core.rutas.destino_entrega import (
         calcular_ruta_con_planta_conocida,
         resolver_comuna_territorial_conocida,
@@ -2250,45 +2290,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
-        from atlas_core.rutas.cache_geocodificacion import (
-            ProveedorRutasConCacheGeocodificacion,
-            RepositorioCacheGeocodificacion,
-        )
-        from atlas_core.rutas.openrouteservice import OpenRouteService
-
-        # Bloque RESOLUCIÓN R16 -- causa raíz real del caso 472037 (VICUÑA
-        # MACKENNA resuelto en Córdoba, Argentina): esta reconciliación
-        # retroactiva construía el proveedor SIN el filtro de país que ya
-        # usa el procesamiento en vivo (`procesamiento_masivo.py`, mismo
-        # `OpenRouteService(pais=pais_operacion)`) -- la búsqueda quedaba
-        # sin restricción territorial alguna, dejando competir candidatos
-        # de cualquier país contra los chilenos. `GEOCODIFICACION_FUERA_
-        # DE_CHILE` (Bloque TERRITORIAL T1) sigue como red de seguridad
-        # para cualquier proveedor que no respete el filtro, pero la
-        # consulta ahora ya llega restringida a Chile por diseño, igual
-        # que el resto del sistema -- un solo criterio, sin ruta paralela.
-        proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
-            OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
-        )
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado()
     if proveedor_rutas_fallback is None:
-        # Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- geocodificador de
-        # RESPALDO estructurado (Nominatim/OSM, sin credencial, con la
-        # MISMA caché de geocodificación -- nunca paga dos veces la misma
-        # consulta), consultado por `resolver_destino_entrega` SÓLO
-        # cuando el principal (ORS) deja una ambigüedad sin resolver y
-        # ni el catálogo confirmado ni GPS pueden desambiguar ("sólo si A
-        # falla", Bloque J). Reutiliza `ProveedorRutasConCacheGeocodificacion`
-        # -- la clave de caché ya incluye `proveedor_nombre`, así que
-        # comparte archivo con ORS sin colisionar.
-        from atlas_core.rutas.cache_geocodificacion import (
-            ProveedorRutasConCacheGeocodificacion as _ProveedorConCache,
-            RepositorioCacheGeocodificacion as _RepositorioCache,
-        )
-        from atlas_core.rutas.nominatim import NominatimGeocoder
-
-        proveedor_rutas_fallback = _ProveedorConCache(
-            NominatimGeocoder(pais=PAIS_OPERACION_PREDETERMINADO), _RepositorioCache(),
-        )
+        proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado()
     try:
         destinos_confirmados = [
             d for d in CatalogoDestinos(
@@ -2515,6 +2519,206 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             _escribir_filas_completas(ruta, filas)
 
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    proveedor_rutas=None, perfil: str = "driving-hgv",
+    proveedor_rutas_fallback=None,
+    guias_objetivo: set[str] | None = None,
+) -> dict[str, object]:
+    """Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- causa raíz real
+    (464588): `destinos_confirmados` (parámetro ya existente en
+    `resolver_destino_entrega`) sólo se usa para CORROBORAR un candidato
+    que el proveedor de geocodificación YA devolvió -- nunca como fuente
+    autoritativa que reemplace la geocodificación cuando el proveedor
+    directamente falla (0 candidatos, o ninguno cae cerca del punto ya
+    confirmado). Un destino con coordenadas ya CONFIRMADAS por Javier
+    (`CatalogoObrasDestinos.listar_destinos_confirmados_para_obra`) es
+    evidencia MÁS fuerte que cualquier geocodificación fresca -- "¿es
+    correcta esta dirección?" ya tiene respuesta humana (mismo principio
+    que Bloque R13/R18 en `decisiones_pendientes.py`, que sólo retira la
+    PREGUNTA; esta función completa la mitad que faltaba, la RUTA).
+
+    Regla (idéntica a la pedida: "obra/destino inequívocamente
+    identificado + dirección canónica confirmada en catálogo + sin
+    evidencia nueva contradictoria"):
+    1. La obra documental de la fila resuelve, en catálogo, a un destino
+       CONFIRMADO cuya calle aparece literalmente (normalizada, nunca
+       fuzzy) en el propio `despachar_a_crudo` -- exactamente el mismo
+       chequeo ya usado por R13/R18 para suprimir la pregunta. Si NINGÚN
+       destino confirmado de esa obra corrobora el texto documental
+       (existiendo al menos uno), es una posible CONTRADICCIÓN real (la
+       guía podría estar despachando a un destino distinto del ya
+       confirmado) -- nunca se oculta: se marca con un motivo técnico
+       propio, para investigar/clasificar, en vez de aplicar cualquier
+       cosa a ciegas. Si corroboran DOS O MÁS (ambigüedad real), se
+       abstiene igual -- nunca "el primero".
+    2. Con exactamente un destino confirmado corroborado: si ya tiene
+       coordenadas propias (confirmación humana previa con lat/lon reales
+       -- caso 464588), se calcula la ruta DIRECTO desde esas coordenadas,
+       sin volver a geocodificar nada. Si el destino confirmado NO tiene
+       coordenadas propias (su "confirmación" nunca llegó a geocodificar
+       -- casos reales 464395/464740, donde la dirección canónica es
+       idéntica al texto que ya fallaba), se reintenta geocodificar esa
+       MISMA dirección canónica -- nunca inventa coordenadas: si el
+       proveedor real sigue sin poder ubicarla, la fila queda intacta
+       (sigue técnica, con su motivo real ya correcto).
+
+    `despachar_a_crudo` NUNCA se sobrescribe aquí -- es la verdad
+    documental; sólo se completan las columnas derivadas de ruta
+    (idéntico conjunto que ya escribe `revalidar_ruta_sin_destino_
+    calculado_sin_ocr`). No corrige OCR, no inventa nada: sólo usa
+    evidencia YA confirmada por un humano o YA persistida en catálogo."""
+    from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
+    from atlas_core.rutas.geocerca import coordenada_ruteo_planta
+    from atlas_core.rutas.modelos import Coordenadas
+
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    if proveedor_rutas is None:
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado()
+    if proveedor_rutas_fallback is None:
+        proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado()
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": [], "guias_contradiccion": []}
+    try:
+        plantas_por_id = {p.planta_id: p for p in CatalogoPlantas(carpeta / "plantas.json").listar()}
+    except (OSError, ValueError):
+        plantas_por_id = {}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        guias_contradiccion: list[str] = []
+        for fila in filas:
+            numero_guia = str(fila.get("numero_guia", "")).strip()
+            if guias_objetivo is not None and numero_guia not in guias_objetivo:
+                continue
+            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+            planta_id = str(fila.get("planta_origen_id", "")).strip()
+            obra_documental = str(fila.get("obra_destino", "")).strip()
+            if not despachar_a or not planta_id or not obra_documental:
+                continue
+            planta = plantas_por_id.get(planta_id)
+            if planta is None:
+                continue
+            try:
+                destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(
+                    nombre_obra=obra_documental,
+                )
+            except (OSError, ValueError):
+                continue
+            if not destinos_confirmados_obra:
+                continue
+            texto_documental = normalizar_nombre_destino(despachar_a)
+            candidatos_coincidentes = [
+                destino for destino in destinos_confirmados_obra
+                if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and calle in texto_documental
+            ]
+            if len(candidatos_coincidentes) != 1:
+                if not candidatos_coincidentes:
+                    # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS --
+                    # la obra SÍ tiene destino(s) confirmado(s), pero
+                    # ninguno corrobora el texto de ESTA guía: posible
+                    # cambio de destino real o incidencia documental --
+                    # nunca se oculta la contradicción ni se ignora.
+                    motivo_nuevo = "DESTINO_CONTRADICE_CATALOGO_CONFIRMADO"
+                    if str(fila.get("motivo_ruta", "")).strip() != motivo_nuevo:
+                        fila["estado_ruta"] = "REQUIERE_REVISION"
+                        fila["motivo_ruta"] = motivo_nuevo
+                        guias_contradiccion.append(numero_guia)
+                        guias_actualizadas.append(numero_guia)
+                # Dos o más coincidencias: ambigüedad real, se abstiene
+                # (nunca "el primero" ni "el más nuevo").
+                continue
+            destino = candidatos_coincidentes[0]
+            coordenada_origen = coordenada_ruteo_planta(planta)
+            if coordenada_origen is None:
+                continue
+            if destino.latitud is not None and destino.longitud is not None:
+                # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- caso
+                # real 464588: coordenadas YA confirmadas por Javier en
+                # catálogo -- nunca se vuelve a geocodificar (el texto
+                # documental puede traer ruido OCR que el proveedor
+                # externo no logra resolver; la coordenada humana ya
+                # confirmada es evidencia más fuerte).
+                try:
+                    ruta_calculada = proveedor_rutas.calcular_ruta(
+                        coordenada_origen, Coordenadas(destino.longitud, destino.latitud), perfil,
+                    )
+                except (OSError, ValueError):
+                    continue
+                if ruta_calculada.estado != EstadoRuta.RUTA_CALCULADA:
+                    continue
+                fila["direccion_entrega"] = destino.direccion
+                fila["localidad_entrega"] = destino.comuna
+                fila["region_entrega"] = destino.region
+                fila["codigo_pais"] = ""
+                fila["codigo_unidad"] = ""
+                fila["codigo_contexto"] = ""
+                fila["distancia_km"] = str(ruta_calculada.distancia_km)
+                fila["duracion_min"] = str(ruta_calculada.duracion_estimada_min)
+                fila["proveedor_ruta"] = proveedor_rutas.nombre
+                fila["estado_ruta"] = ruta_calculada.estado.value
+                fila["motivo_ruta"] = ""
+            else:
+                # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- casos
+                # reales 464395/464740: el destino confirmado nunca llegó
+                # a geocodificar (sin lat/lon propias) -- se reintenta con
+                # la dirección CANÓNICA del catálogo (misma maquinaria de
+                # siempre, reutilizada tal cual vía `calcular_ruta_con_
+                # planta_conocida`), nunca el texto documental crudo. Si
+                # el proveedor real sigue sin poder ubicarla (aquí, la
+                # canónica es idéntica al texto que ya fallaba), la fila
+                # queda intacta -- nunca se inventa una coordenada.
+                resultado = calcular_ruta_con_planta_conocida(
+                    planta=planta, despachar_a_crudo=destino.direccion, proveedor_rutas=proveedor_rutas,
+                    origen_determinado_por=str(fila.get("origen_determinado_por", "")),
+                    evidencia_origen=str(fila.get("evidencia_origen", "")),
+                    perfil=perfil, destinos_confirmados=destinos_confirmados_obra,
+                    proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
+                )
+                if resultado.estado_ruta != EstadoRuta.RUTA_CALCULADA.value:
+                    continue
+                fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
+                fila["localidad_entrega"] = resultado.localidad_entrega
+                fila["region_entrega"] = resultado.region_entrega
+                fila["codigo_pais"] = resultado.codigo_pais
+                fila["codigo_unidad"] = resultado.codigo_unidad
+                fila["codigo_contexto"] = resultado.codigo_contexto
+                fila["distancia_km"] = resultado.distancia_km
+                fila["duracion_min"] = resultado.duracion_min
+                fila["proveedor_ruta"] = resultado.proveedor_ruta
+                fila["estado_ruta"] = resultado.estado_ruta
+                fila["motivo_ruta"] = ""
+            # Misma sincronización ya usada por revalidar_ruta_sin_
+            # destino_calculado_sin_ocr: la ruta recuperada completa la
+            # dependencia operacional -- si el documento ya estaba sano,
+            # no debe sobrevivir la bandera REQUIERE_REVISION derivada
+            # que originó el pendiente técnico.
+            if (
+                str(fila.get("indicador_revision", "")).strip() == "OK"
+                and str(fila.get("estado_documental", "")).strip() in ("", "OK")
+            ):
+                fila["estado_operacional"] = "OK"
+            guias_actualizadas.append(numero_guia)
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {
+        "filas_totales": len(filas), "guias_actualizadas": guias_actualizadas,
+        "guias_contradiccion": guias_contradiccion,
+    }
 
 
 def revalidar_direccion_entrega_degradada_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
@@ -4543,6 +4747,27 @@ def forzar_decision_correccion_destino(*, raiz_atlas: str | Path, numero_guia: s
             d for d in resultado["bandeja"]["decisiones"]
             if str(d.get("decision_id", "")) == decision["decision_id"]
         ),
-        decision,
+        None,
     )
+    if decision_publicada is None:
+        # Bloque CORRECCIÓN HUMANA DE DESTINO -- caso real detectado en
+        # vivo (464367, demostración visual): la reconciliación canónica
+        # de arriba puede suprimir la tarjeta recién publicada si, en el
+        # mismo instante, ya existe una relación obra<->destino CONFIRMADA
+        # cuya calle corrobora literalmente ESTE MISMO texto (R13/R18 --
+        # p. ej. Javier ya corrigió y confirmó esta obra segundos antes, y
+        # nadie volvió a cambiar el texto documental desde entonces). Sin
+        # este chequeo, se devolvía `ok: True` con una decisión FANTASMA
+        # (nunca realmente publicada) -- Desktop la mostraba como
+        # aplicable, pero `aplicar_decision_obra` la rechazaba después
+        # como "ya no está pendiente", una falla confusa y tardía. Ahora
+        # se informa aquí mismo, de inmediato y con una razón real.
+        return {
+            "ok": False,
+            "error": (
+                "El destino de esta obra ya quedó confirmado con el texto actual -- "
+                "no hay ninguna pregunta pendiente que corregir. Si el destino real es "
+                "otro, edite primero la dirección documental."
+            ),
+        }
     return {"ok": True, "decision": decision_publicada}

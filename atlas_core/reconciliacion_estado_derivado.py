@@ -31,6 +31,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
     revalidar_origen_encabezado_no_confiable_sin_ocr,
     revalidar_origen_por_categoria_sin_candidato_sin_ocr,
+    revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
 )
 
@@ -111,7 +112,19 @@ from atlas_core.revalidacion_documental import (
 # accionable). Una operación que ya migró a 7 nunca volvería a barrerse
 # con esta regla nueva sin subir este número, igual que advierte el
 # párrafo de arriba.
-RULESET_VERSION = 8
+#
+# Subida de 8 a 9 -- CIERRE REAL DE CONVERGENCIA DE DESTINOS (casos
+# reales 464588/464395/464740): conecta aquí `revalidar_ruta_con_destino_
+# confirmado_en_catalogo_sin_ocr` -- una dirección ya CONFIRMADA por
+# Javier en catálogo (con o sin coordenadas propias) es evidencia más
+# fuerte que cualquier reintento de geocodificación fresca, y antes no
+# se usaba como fuente autoritativa (sólo como corroboración de un
+# candidato que el proveedor ya hubiera devuelto). Corre SIEMPRE que se
+# entra a este bloque, nunca gated por el cooldown de reintento técnico
+# (evidencia humana distinta, no la misma evidencia técnica reintentada).
+# Una operación que ya migró a 8 nunca volvería a barrerse con esta regla
+# nueva sin subir este número.
+RULESET_VERSION = 9
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -347,6 +360,23 @@ def reconciliar_estado_derivado(
         # catálogo o en el histórico del propio dataset -- función ya
         # existente y probada, sin flujo automático que la invocara.
         limpieza_rut_chofer = reconciliar_incidencias_rut_chofer_documental(raiz_atlas=raiz, reloj=lambda: instante)
+        # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- causa raíz
+        # real (464588/464395/464740): una dirección ya CONFIRMADA por
+        # Javier en catálogo (con o sin coordenadas propias) es evidencia
+        # MÁS fuerte que cualquier reintento de geocodificación fresca --
+        # corre SIEMPRE que se entra a este bloque (mismo criterio que
+        # las revalidaciones de arriba), nunca gated por el cooldown de
+        # `por_reintentar`/`MAX_REINTENTOS_IGUALES_ARRANQUE` (ese cooldown
+        # gobierna reintentos de la MISMA evidencia técnica -- esta es
+        # evidencia DISTINTA, ya humana, que debe converger en cuanto
+        # exista, sin esperar 24h). Corre ANTES del reintento de ruta de
+        # abajo para que una fila que converge aquí nunca vuelva a
+        # gastar un intento técnico en el proveedor externo en la misma
+        # pasada.
+        limpieza_destino_catalogo = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
+        )
         recuperacion = {"guias_actualizadas": []}
         if por_reintentar:
             recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -490,8 +520,10 @@ def reconciliar_estado_derivado(
             | set(limpieza_origen_categoria["guias_actualizadas"])
             | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
             | set(limpieza_indicadores["guias_actualizadas"])
+            | set(limpieza_destino_catalogo["guias_actualizadas"])
         ),
         "guias_recuperadas": guias_recuperadas,
+        "guias_contradiccion_destino_catalogo": limpieza_destino_catalogo["guias_contradiccion"],
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "decisiones_aplicadas_automaticamente": evidencia_decisiones["decisiones_aplicadas_automaticamente"],
         "pendientes_tecnicos": len(registros_despues),
