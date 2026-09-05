@@ -97,7 +97,21 @@ from atlas_core.revalidacion_documental import (
 # pregunta ORIGEN_NO_CONFIRMADO real desaparece hasta que la próxima
 # reconciliación natural corra con la regla nueva; sin subir este
 # número, una operación ya en versión 6 nunca la vería.
-RULESET_VERSION = 7
+#
+# Subida de 7 a 8 -- CONVERGENCIA DE PENDIENTES TÉCNICOS POST LOTE 2
+# (casos reales 464395/464367/464265/464588): `detectar_decision_destino_
+# no_resuelto` (atlas_core.decisiones_pendientes) amplía su cobertura de
+# motivos (`GEOCODIFICACION_DIRECCION_NO_ENCONTRADA`, `DESTINO_REVISAR`
+# inmediatos; `COORDENADA_NO_CONFIRMADA` gated por
+# `intentos_misma_evidencia >= UMBRAL_INTENTOS_TECNICOS_AGOTADOS`, la
+# misma cuenta que este archivo ya escribe en `pendientes_tecnicos.json`)
+# -- así el `escalamiento` que se declara aquí al agotar
+# `MAX_REINTENTOS_IGUALES_ARRANQUE` deja de ser observabilidad huérfana y
+# pasa a tener un consumidor real (una tarjeta `DESTINO_NO_RESUELTO`
+# accionable). Una operación que ya migró a 7 nunca volvería a barrerse
+# con esta regla nueva sin subir este número, igual que advierte el
+# párrafo de arriba.
+RULESET_VERSION = 8
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)

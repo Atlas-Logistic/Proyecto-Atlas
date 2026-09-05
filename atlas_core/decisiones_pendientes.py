@@ -151,7 +151,56 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
     # ya aplicado a la elegibilidad de B1 (Bloque R16,
     # atlas_ia.registro_problemas).
     "GEOCODIFICACION_FUERA_DE_CHILE",
+    # Bloque CONVERGENCIA POST LOTE 2 -- caso real 464395: el proveedor de
+    # geocodificación no encuentra NINGÚN candidato para la dirección
+    # documental, incluso ya limpia (verificado en vivo contra el
+    # proveedor) -- no es una falla técnica transitoria, es evidencia de
+    # que el texto de destino no alcanza para ubicar el punto: el mismo
+    # tipo de problema de DESTINO que los demás motivos de este conjunto,
+    # nunca "cero intentos automáticos razonables por explotar".
+    "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+    # Bloque CONVERGENCIA POST LOTE 2 -- casos reales 464265/464367:
+    # `derivar_estado_ruta_tras_cambio_origen` (revalidacion_documental.py)
+    # deja este motivo genérico cuando el origen se resuelve DESPUÉS y la
+    # ruta queda pendiente con `estado_entrega` real pero sin detalle
+    # técnico reconstruible (deliberado: "nunca inventa el detalle exacto
+    # del problema de destino, eso está fuera de su alcance" -- ver esa
+    # función). Sin esta entrada, un destino ya rechazado por Javier
+    # (464367) o pendiente de la misma clase (464265) quedaba sin ninguna
+    # tarjeta accionable en Revisión de Atlas, atrapado como
+    # INCOMPLETO_TECNICO para siempre -- exactamente el hueco que este
+    # bloque cierra.
+    "DESTINO_REVISAR",
 })
+
+# Bloque CONVERGENCIA POST LOTE 2 -- a diferencia del conjunto de arriba
+# (motivos que son, con la evidencia ya persistida, un callejón sin salida
+# automático), estos motivos representan un candidato AMBIGUO pero no
+# necesariamente agotado: una geocodificación pudo devolver una coordenada
+# de baja confianza que un reintento posterior (con evidencia distinta --
+# p. ej. un fix de deduplicación de comuna ya en producción) puede resolver
+# solo, sin preguntarle nada a Javier. Caso real 464588
+# (`COORDENADA_NO_CONFIRMADA(5)`): el fix de deduplicación de comuna ya
+# corregía este caso, pero de haberse tratado como "inmediato" habría
+# generado una pregunta humana innecesaria antes de darle a Atlas la
+# oportunidad de su propio reintento automático -- justo lo que el punto 3
+# de este bloque (REINTENTOS Y ESCALAMIENTO) pide evitar ("evitar preguntas
+# humanas mientras aún exista evidencia automática razonable por
+# explotar"). Sólo produce una decisión cuando `intentos_misma_evidencia`
+# (ver `detectar_decision_destino_no_resuelto`) ya alcanzó
+# `UMBRAL_INTENTOS_TECNICOS_AGOTADOS` -- es decir, cuando el propio
+# `escalamiento` de `reconciliacion_estado_derivado.py` ya declaró la
+# evidencia agotada.
+MOTIVOS_DESTINO_TECNICO_AGOTABLE = frozenset({
+    "COORDENADA_NO_CONFIRMADA",
+})
+
+# Mismo valor que `reconciliacion_estado_derivado.MAX_REINTENTOS_IGUALES_
+# ARRANQUE` -- deliberadamente una constante local propia (no un import)
+# para evitar un ciclo: `reconciliacion_estado_derivado.py` ya importa
+# `NOMBRE_ARTEFACTO` DESDE este módulo. Si ese valor cambia allá, este debe
+# actualizarse igual -- están documentados cruzados a propósito.
+UMBRAL_INTENTOS_TECNICOS_AGOTADOS = 3
 
 
 def _evidencia_externa_resumida(evidencias: list) -> tuple[str, tuple[str, ...]]:
@@ -313,6 +362,7 @@ def _comuna_sugerida_para_contexto(
 
 def detectar_decision_destino_no_resuelto(
     *, archivo: str, fila: Mapping[str, str], carpeta_catalogos: str | Path | None = None,
+    intentos_misma_evidencia: int = 0, forzar: bool = False,
 ) -> dict[str, object] | None:
     """Bloque R6 A/B/E: genera una pregunta `DESTINO_NO_RESUELTO` para UN
     documento YA PROCESADO cuyo origen ya está resuelto (`planta_origen_id`
@@ -329,29 +379,100 @@ def detectar_decision_destino_no_resuelto(
     - el motivo de ruta no es uno de los reconocidos como "problema de
       destino" (p. ej. `ORIGEN_NO_DETERMINADO`, o cualquier motivo técnico
       transitorio como proveedor caído/sin credencial -- eso no es una
-      pregunta para un humano, es un problema de infraestructura)."""
+      pregunta para un humano, es un problema de infraestructura);
+    - el motivo SÍ es reconocido pero pertenece a
+      `MOTIVOS_DESTINO_TECNICO_AGOTABLE` (candidato ambiguo, no un
+      callejón sin salida) y `intentos_misma_evidencia` todavía no alcanza
+      `UMBRAL_INTENTOS_TECNICOS_AGOTADOS` -- Atlas aún tiene un reintento
+      automático razonable por explotar (caso real 464588) y preguntarle a
+      Javier antes de agotarlo sería exactamente la pregunta humana
+      prematura que el punto 3 de "convergencia post lote 2" pide evitar.
+
+    `intentos_misma_evidencia` (Bloque CONVERGENCIA POST LOTE 2, opcional y
+    aditivo -- por defecto 0, compatible con todos los llamadores
+    existentes que no lo conocían) es la misma cuenta que ya mantiene
+    `reconciliacion_estado_derivado._registro_pendiente` en
+    `pendientes_tecnicos.json`: cuántas veces se reintentó la MISMA
+    evidencia sin que cambiara el resultado. No decide nada por sí sola
+    para los motivos de `MOTIVOS_DESTINO_NO_RESUELTO` (esos siempre fueron,
+    y siguen siendo, callejones sin salida inmediatos) -- sólo gobierna los
+    de `MOTIVOS_DESTINO_TECNICO_AGOTABLE`.
+
+    `forzar` (Bloque CORRECCIÓN HUMANA DE DESTINO, opcional -- por defecto
+    False, compatible con todo llamador automático existente): un humano
+    (Javier, desde la sección Logística del viaje en Desktop, "Corregir
+    destino") puede descubrir un destino operacional erróneo aunque Atlas
+    nunca haya detectado ningún problema técnico -- ni `estado_ruta`
+    bloqueado, ni un `motivo_ruta` reconocido (el caso típico: la ruta ya
+    quedó `RUTA_CALCULADA` con una dirección que, en la práctica, resultó
+    incorrecta). `forzar=True` omite las dos abstenciones basadas en
+    evidencia automática (estado de ruta, motivo reconocido) -- la única
+    que se conserva es la de origen sin resolver, porque preguntar por un
+    destino antes de tener planta de origen sigue sin aportar nada, con o
+    sin evidencia técnica de por medio. El resto del contrato (misma
+    forma de decisión, mismas acciones permitidas, misma aplicación vía
+    `aplicar_decision_obra`/REGISTRAR_DIRECCION) es idéntico -- nunca un
+    camino de aplicación nuevo, sólo un origen distinto para la pregunta."""
     if not str(fila.get("planta_origen_id", "")).strip():
         return None
     motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
     motivo_base = motivo_ruta.split(":", 1)[0].split("(", 1)[0].strip()
     estado_ruta = str(fila.get("estado_ruta", "")).strip()
-    # Bloque R9 -- los 4 motivos originales (rechazo de destino/
-    # geocodificación) siempre normalizan `estado_ruta` a
-    # "REQUIERE_REVISION" (ver `resolver_destino_entrega`/`_validado`).
-    # Un rechazo a nivel de ROUTING (p. ej. `SIN_ACCESO_VIAL`, caso real
-    # 472044) en cambio deja `estado_ruta` igual a su propio motivo crudo
-    # -- se acepta también esa forma, nunca una lista fija de estados
-    # nueva por cada motivo.
-    if estado_ruta not in ("REQUIERE_REVISION", motivo_base):
-        return None
-    if motivo_base not in MOTIVOS_DESTINO_NO_RESUELTO:
-        return None
+    # Bloque CORRECCIÓN HUMANA DE DESTINO -- caso real detectado en vivo
+    # (464367, demostración visual de "Corregir destino"): si la fila YA
+    # tiene un motivo técnico real y reconocido, forzar la pregunta debe
+    # producir el MISMO `decision_id` que la detección automática --
+    # nunca una tarjeta duplicada para el mismo problema. `es_correccion_
+    # manual` (y el marcador `origen_pregunta` de la evidencia, más abajo)
+    # se reserva EXCLUSIVAMENTE para cuando no hay ningún motivo técnico
+    # que citar (el caso genuino de "Atlas nunca detectó nada, Javier lo
+    # reportó solo").
+    es_correccion_manual = forzar and not motivo_base
+    if forzar:
+        # Bloque CORRECCIÓN HUMANA DE DESTINO -- sin motivo técnico real
+        # que citar (p. ej. ruta ya calculada), se documenta el origen
+        # humano de la pregunta en vez de dejar `motivos` vacío.
+        motivo_base = motivo_base or "CORRECCION_MANUAL_LOGISTICA"
+    else:
+        # Bloque R9 -- los 4 motivos originales (rechazo de destino/
+        # geocodificación) siempre normalizan `estado_ruta` a
+        # "REQUIERE_REVISION" (ver `resolver_destino_entrega`/`_validado`).
+        # Un rechazo a nivel de ROUTING (p. ej. `SIN_ACCESO_VIAL`, caso real
+        # 472044) en cambio deja `estado_ruta` igual a su propio motivo crudo
+        # -- se acepta también esa forma, nunca una lista fija de estados
+        # nueva por cada motivo.
+        if estado_ruta not in ("REQUIERE_REVISION", motivo_base):
+            return None
+        if motivo_base in MOTIVOS_DESTINO_NO_RESUELTO:
+            pass
+        elif motivo_base in MOTIVOS_DESTINO_TECNICO_AGOTABLE:
+            if int(intentos_misma_evidencia) < UMBRAL_INTENTOS_TECNICOS_AGOTADOS:
+                return None
+        else:
+            return None
     documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
     evidencias = [{
         "tipo": "RUTA_BLOQUEADA", "motivo_ruta": motivo_ruta,
         "despachar_a_crudo": str(fila.get("despachar_a_crudo", "")),
         "planta_origen_nombre": str(fila.get("planta_origen_nombre", "")),
     }]
+    if motivo_base in MOTIVOS_DESTINO_TECNICO_AGOTABLE:
+        # Bloque REINTENTOS Y ESCALAMIENTO -- conserva el diagnóstico
+        # técnico (cuántos intentos automáticos con la misma evidencia se
+        # agotaron) en la propia tarjeta, nunca lo descarta al convertirla
+        # en acción humana.
+        evidencias[0]["intentos_misma_evidencia"] = int(intentos_misma_evidencia)
+    if es_correccion_manual:
+        # Bloque CORRECCIÓN HUMANA DE DESTINO -- deja explícito, en la
+        # propia evidencia de la tarjeta, que esta pregunta nació de una
+        # corrección manual (Logística) y no de un problema técnico
+        # detectado por Atlas -- nunca se disfraza de hallazgo automático.
+        # Sólo se agrega cuando NO había motivo técnico real (ver
+        # `es_correccion_manual` más arriba): si ya existía uno, esta
+        # tarjeta debe ser IDÉNTICA (mismo `decision_id`) a la que el
+        # detector automático ya publicó o publicaría -- nunca una
+        # segunda pregunta para el mismo problema.
+        evidencias[0]["origen_pregunta"] = "CORRECCION_MANUAL_LOGISTICA"
     obra_canonica = str(fila.get("obra_destino", ""))
     contexto = {
         "obra_canonica": obra_canonica,
@@ -1855,6 +1976,16 @@ def regenerar_decisiones_persistidas(
     # sólo por eso (el hallazgo no participa del hash) y la próxima
     # detección quedaría descartada como duplicado por `generar_artefacto`.
     filas_por_guia: dict[str, dict[str, str]] | None = None
+    # Bloque CONVERGENCIA POST LOTE 2 -- cuenta de reintentos con la misma
+    # evidencia por guía, leída del artefacto hermano
+    # `pendientes_tecnicos.json` (mismo directorio que `ruta_dataset`,
+    # nunca uno distinto) para que `detectar_decision_destino_no_resuelto`
+    # pueda distinguir "callejón sin salida inmediato" de "candidato
+    # ambiguo con reintentos automáticos todavía por explotar" (ver
+    # `MOTIVOS_DESTINO_TECNICO_AGOTABLE`). Puramente aditivo: si el
+    # artefacto no existe o no puede leerse, cada guía cuenta como 0
+    # intentos -- exactamente el comportamiento de antes de este bloque.
+    intentos_por_guia: dict[str, int] = {}
     if ruta_dataset is not None:
         import csv as _csv
 
@@ -1879,6 +2010,15 @@ def regenerar_decisiones_persistidas(
             motivos_por_guia = None
             motivo_ruta_por_guia = None
             filas_por_guia = None
+        try:
+            _ruta_pendientes_tecnicos = Path(ruta_dataset).parent / "pendientes_tecnicos.json"
+            _contenido_pendientes = json.loads(_ruta_pendientes_tecnicos.read_text(encoding="utf-8"))
+            for _registro in _contenido_pendientes.get("pendientes", []) or []:
+                _guia_pendiente = str(_registro.get("numero_guia", "")).strip()
+                if _guia_pendiente:
+                    intentos_por_guia[_guia_pendiente] = int(_registro.get("intentos_misma_evidencia", 0) or 0)
+        except (OSError, ValueError, UnicodeDecodeError, AttributeError):
+            intentos_por_guia = {}
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -2006,6 +2146,7 @@ def regenerar_decisiones_persistidas(
                 ),
                 detectar_decision_destino_no_resuelto(
                     archivo=archivo_fila, fila=fila_actual, carpeta_catalogos=carpeta_catalogos,
+                    intentos_misma_evidencia=intentos_por_guia.get(numero_guia, 0),
                 ),
                 detectar_decision_destino_contaminado_documental(
                     archivo=archivo_fila, fila=fila_actual, carpeta_catalogos=carpeta_catalogos,
@@ -2178,7 +2319,16 @@ def regenerar_decisiones_persistidas(
             # ya están protegidas por el chequeo genérico de arriba
             # (`codigos_motivo_documental`/`motivos_por_guia`).
             motivos_decision_ruta = {str(m) for m in (decision.get("motivos") or [])}
-            es_motivo_de_ruta = bool(motivos_decision_ruta) and motivos_decision_ruta <= MOTIVOS_DESTINO_NO_RESUELTO
+            # Bloque CONVERGENCIA POST LOTE 2 -- incluye también los
+            # motivos "agotables" (`MOTIVOS_DESTINO_TECNICO_AGOTABLE`,
+            # p. ej. `COORDENADA_NO_CONFIRMADA`): una tarjeta publicada tras
+            # agotar los reintentos automáticos es igual de descartable si
+            # el motivo de la fila cambia por cualquier vía (p. ej. una
+            # decisión humana aplicada a otra evidencia del mismo
+            # documento) -- misma lógica de R19, ningún motivo nuevo.
+            es_motivo_de_ruta = bool(motivos_decision_ruta) and motivos_decision_ruta <= (
+                MOTIVOS_DESTINO_NO_RESUELTO | MOTIVOS_DESTINO_TECNICO_AGOTABLE
+            )
             if es_motivo_de_ruta and motivo_ruta_por_guia is not None:
                 numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
                 motivo_actual_fila = motivo_ruta_por_guia.get(numero_guia_decision)

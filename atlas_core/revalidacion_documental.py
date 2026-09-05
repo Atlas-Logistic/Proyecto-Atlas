@@ -2366,8 +2366,20 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             # extensión, esa fila quedaba con una causa obsoleta/engañosa
             # para siempre (la reconciliación automática nunca la
             # reintentaba).
+            # Bloque CONVERGENCIA POST LOTE 2 -- casos reales 464265/
+            # 464367: `DESTINO_REVISAR` (`derivar_estado_ruta_tras_cambio_
+            # origen`) es, por diseño de esa misma función, un rótulo
+            # genérico sin diagnóstico técnico reconstruible -- "Atlas no
+            # sabe todavía por qué", exactamente el mismo caso que
+            # `motivo_previo_sin_causa` ya trata como reevaluable, nunca
+            # una causa estable basada en evidencia real. Sin esto, un
+            # origen que se resuelve DESPUÉS del intento inicial de ruta
+            # dejaba esta etiqueta genérica congelada para siempre, aunque
+            # el reintento aquí mismo sí calculara el motivo técnico real
+            # (p. ej. `GEOCODIFICACION_DIRECCION_NO_ENCONTRADA`).
             motivo_previo_reevaluable = motivo_ruta_base(motivo_previo_crudo) in (
                 "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL", "GEOCODIFICACION_FUERA_DE_CHILE",
+                "DESTINO_REVISAR",
             )
             # Bloque VALIDACIÓN TERRITORIAL T2 -- caso real 472037: B1 ya
             # investigó y dejó evidencia PERSISTIDA (`resultado_atlas_ia_
@@ -4451,3 +4463,86 @@ def reconciliar_bandeja_decisiones(
         "decisiones_aplicadas_automaticamente": aplicadas_automaticamente,
         "bandeja": bandeja,
     }
+
+
+def forzar_decision_correccion_destino(*, raiz_atlas: str | Path, numero_guia: str) -> dict[str, object]:
+    """Bloque CORRECCIÓN HUMANA DE DESTINO -- publica (o reutiliza, si ya
+    existe una idéntica) una decisión `DESTINO_NO_RESUELTO` para UN
+    documento concreto, a pedido explícito de un humano: la acción
+    "Corregir destino" de la sección Logística del viaje en Desktop, para
+    un destino que Javier descubre erróneo FUERA de Revisión de Atlas
+    (típicamente una guía cuya ruta ya quedó `RUTA_CALCULADA` -- ningún
+    problema técnico que Atlas pudiera haber detectado solo).
+
+    Reutiliza `detectar_decision_destino_no_resuelto(forzar=True)` para
+    construir la decisión (misma forma, mismas acciones permitidas que
+    cualquier `DESTINO_NO_RESUELTO` automática) y `reconciliar_bandeja_
+    decisiones` (mismo mecanismo canónico de enriquecimiento/publicación
+    que usa cualquier otra decisión, incluida la protección de
+    `NOMBRE_LOCK_DECISIONES_PENDIENTES` contra una fusión concurrente) para
+    publicarla -- ningún camino de aplicación nuevo: una vez publicada, la
+    corrección real (invalidar derivados, geocodificar, calcular ruta,
+    aprender la relación) la sigue haciendo `aplicar_decision_obra` con
+    `REGISTRAR_DIRECCION`, exactamente como cualquier `DESTINO_NO_RESUELTO`
+    detectada automáticamente. Idempotente: si Javier abre "Corregir
+    destino" dos veces sin que el documento cambie, `decision_id` es el
+    mismo -- nunca se duplica la tarjeta."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, detectar_decision_destino_no_resuelto,
+    )
+
+    raiz = Path(raiz_atlas)
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    catalogos = raiz / "catalogos_privados"
+    guia = str(numero_guia or "").strip()
+    if not guia:
+        return {"ok": False, "error": "Debe indicar el número de guía a corregir."}
+    if not dataset.is_file():
+        return {"ok": False, "error": "No hay un dataset operacional vigente."}
+    fila = next(
+        (f for f in _leer_filas(dataset) if str(f.get("numero_guia", "")).strip() == guia), None,
+    )
+    if fila is None:
+        return {"ok": False, "error": "No se encontró ese documento en el dataset vigente."}
+    decision = detectar_decision_destino_no_resuelto(
+        archivo=str(fila.get("archivo") or guia), fila=fila, carpeta_catalogos=catalogos, forzar=True,
+    )
+    if decision is None:
+        # Único caso real de abstención con `forzar=True`: sin origen
+        # confirmado todavía -- preguntar por destino antes no aporta
+        # nada (ver docstring de `detectar_decision_destino_no_resuelto`).
+        return {
+            "ok": False,
+            "error": "Este documento todavía no tiene un origen confirmado. Resuelva primero el origen en Revisión de Atlas.",
+        }
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+    with bloqueo_sesion(actual, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            pendientes_actuales = json.loads(artefacto_ruta.read_text(encoding="utf-8")).get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        ya_publicada = any(
+            str(d.get("decision_id", "")) == decision["decision_id"] for d in pendientes_actuales
+        )
+        if not ya_publicada:
+            _generar_artefacto_sin_lock(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                decisiones=[*pendientes_actuales, decision], ruta_salida=artefacto_ruta,
+            )
+    # Bloque CONSISTENCIA OPERACIONAL -- la misma reconciliación canónica
+    # que corre tras cualquier otra publicación de decisión: enriquece
+    # (vehículo/cliente/obra), reconcilia contra el dataset/ledger vigente
+    # (nunca resucita algo ya terminal) y republica -- fuera del lock de
+    # arriba, igual que hace `aplicar_decision_pendiente.py` tras una
+    # `DecisionObsoletaError`.
+    resultado = reconciliar_bandeja_decisiones(raiz_atlas=raiz)
+    decision_publicada = next(
+        (
+            d for d in resultado["bandeja"]["decisiones"]
+            if str(d.get("decision_id", "")) == decision["decision_id"]
+        ),
+        decision,
+    )
+    return {"ok": True, "decision": decision_publicada}
