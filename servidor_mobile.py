@@ -27,6 +27,31 @@ from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
 MAX_PAYLOAD_BYTES = 30 * 1024 * 1024  # ver atlas_core.mobile.MAX_IMAGEN_BYTES -- mismo motivo/margen.
 
 
+def _descartar_cuerpo(handler: BaseHTTPRequestHandler) -> None:
+    """Consume y descarta el body de la solicitud sin parsearlo.
+
+    Bloque MOBILE COLA V2 -- cuando la autenticación falla ANTES de leer el
+    multipart (401 `token_invalido`), responder sin drenar el body deja al
+    cliente/proxy escribiendo una foto de varios MB contra un socket que el
+    servidor ya no lee -> `stdlib http.server` cierra la conexión y el
+    cliente ve un `ECONNRESET` en vez del 401 (evidencia real: primer
+    Viaje A, el proxy dev-server ni siquiera podía leer el 401). Drenar el
+    body deja la conexión en un estado consumible y el 401 llega limpio.
+    No cambia el contrato ni la autenticación: sólo vacía bytes que igual
+    se iban a ignorar. Tolera un Content-Length ausente/no numérico."""
+    try:
+        restante = int(handler.headers.get("Content-Length", "0") or "0")
+    except (TypeError, ValueError):
+        return
+    if restante <= 0 or restante > MAX_PAYLOAD_BYTES:
+        return
+    while restante > 0:
+        trozo = handler.rfile.read(min(restante, 65536))
+        if not trozo:
+            break
+        restante -= len(trozo)
+
+
 def _multipart(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], bytes, str]:
     largo = int(handler.headers.get("Content-Length", "0"))
     if largo <= 0 or largo > MAX_PAYLOAD_BYTES:
@@ -231,6 +256,11 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
             cabecera = self.headers.get("Authorization", "")
             identidad = autenticador.autenticar(cabecera[7:] if cabecera.startswith("Bearer ") else "")
             if not identidad:
+                # Bloque MOBILE COLA V2 -- drenar el body ANTES de responder
+                # el 401: si no, el cliente sigue subiendo la foto contra un
+                # socket que ya no se lee y ve un ECONNRESET en vez del 401
+                # (ver _descartar_cuerpo).
+                _descartar_cuerpo(self)
                 self._json(401, {"error": "token_invalido"}); return
             try:
                 campos, imagen, mime = _multipart(self)
