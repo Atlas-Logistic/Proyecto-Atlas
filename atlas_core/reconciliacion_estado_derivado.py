@@ -27,12 +27,14 @@ from atlas_core.revalidacion_documental import (
     SEPARADOR_MOTIVOS,
     _indicadores_documentales_coherentes,
     reconciliar_bandeja_decisiones,
+    reconciliar_decisiones_destino_no_resuelto,
     reconciliar_incidencias_rut_chofer_documental,
     revalidar_destino_contra_comuna_documental_sin_ocr,
     revalidar_destinos_confirmados_sin_coordenadas_sin_ocr,
     revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
+    revalidar_obra_destino_sin_ocr,
     revalidar_origen_encabezado_no_confiable_sin_ocr,
     revalidar_origen_por_categoria_sin_candidato_sin_ocr,
     revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
@@ -181,7 +183,32 @@ from atlas_core.revalidacion_documental import (
 # este número, una operación ya migrada a 12 seguiría publicando una ruta
 # a la ciudad equivocada, o un INCOMPLETO_TECNICO transitorio, hasta que
 # algo más regenerara el reporte.
-RULESET_VERSION = 13
+#
+# Subida de 13 a 14 -- CIERRE OPERACIONAL DE PENDIENTE_TECNICO (casos
+# reales 0000353055/464715 y 0000353062/464717): (1) `reconciliar_
+# decisiones_destino_no_resuelto` se conecta a esta batería -- un motivo
+# de destino que ya es callejón sin salida (`MOTIVOS_DESTINO_NO_RESUELTO`:
+# MULTIPLES_UBICACIONES_DISPERSAS, etc.) genera su tarjeta `DESTINO_NO_
+# RESUELTO` accionable de inmediato en la carga/drop, sin esperar 3
+# reintentos y sin quedar como INCOMPLETO_TECNICO "que se reintenta
+# solo"; (2) `revalidar_obra_destino_sin_ocr` se conecta aquí (antes
+# sólo tras decisión / envío Mobile) para retirar `OBRA_DESTINO_SIN_
+# CORROBORAR` cuando la obra ES la propia sede del cliente (obra ==
+# cliente, sin obra homónima real de otro cliente). Sin subir este
+# número, 464715 seguiría sin tarjeta y 464717 seguiría bloqueado hasta
+# que algo más regenerara el reporte.
+#
+# Subida de 14 a 15 -- mismo bloque, segunda corrección: `reconciliar_
+# decisiones_destino_no_resuelto` ahora pasa `ruta_dataset` a
+# `regenerar_decisiones_persistidas` para que la supresión "la obra ya
+# tiene un destino confirmado que coincide con el texto" NO silencie una
+# tarjeta cuando el `motivo_ruta` VIGENTE de la fila sigue siendo un
+# callejón sin salida de destino (caso real 464715: Javier confirmó "AV.
+# VICUÑA MACKENNA 3451 ..." el 17-08, pero ese texto sigue geocodificando
+# a múltiples ubicaciones dispersas -- la pregunta sigue viva). Sin subir
+# el número, las tarjetas de 464715/464740/464784/464395 seguirían
+# suprimidas en una operación ya migrada a 14.
+RULESET_VERSION = 15
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -466,6 +493,18 @@ def reconciliar_estado_derivado(
         # columnas ya escritas.
         limpieza_geo_contradiccion = revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
         limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
+        # Bloque ENTREGA A SEDE DEL PROPIO CLIENTE -- caso real 0000353062/
+        # 464717 (cliente == obra_destino == "AMERICAN SCREW CHILE SPA",
+        # ruta 35 km calculada): `revalidar_obra_destino_sin_ocr` ya retira
+        # `OBRA_DESTINO_SIN_CORROBORAR` cuando `obra_destino` normaliza
+        # EXACTO al `cliente` de la misma fila ("el mismo hecho dos veces")
+        # o cuando el catálogo lo resuelve -- pero SÓLO se invocaba desde
+        # `revalidar_y_regenerar_reporte` (decisión / envío Mobile). Aquí
+        # se conecta también a la reconciliación de la carga de Desktop /
+        # ingreso de un lote. Sin OCR, sin red.
+        limpieza_obra_destino = revalidar_obra_destino_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / LEDGER,
+        )
         # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa
         # raíz real (464367): un origen que quedó determinado ÚNICAMENTE
         # por `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
@@ -575,6 +614,23 @@ def reconciliar_estado_derivado(
         # (`MAX_ITERACIONES_AUTO_RESOLUCION`) para los tipos de decisión
         # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
         evidencia_decisiones = reconciliar_bandeja_decisiones(raiz_atlas=raiz, reloj=lambda: instante)
+        # Bloque PENDIENTES TÉCNICOS ACCIONABLES -- caso real 0000353055/
+        # 464715 (MULTIPLES_UBICACIONES_DISPERSAS): los motivos de destino
+        # que YA son un callejón sin salida con la evidencia actual
+        # (`MOTIVOS_DESTINO_NO_RESUELTO`: dispersas, contradice comuna,
+        # número incompatible, fuera de Chile, sin dato, genérica, sin
+        # acceso vial, contradice catálogo confirmado, DESTINO_REVISAR)
+        # generan su tarjeta `DESTINO_NO_RESUELTO` INMEDIATAMENTE, sin
+        # esperar 3 reintentos. `reconciliar_decisiones_destino_no_resuelto`
+        # ya existía y es idempotente (`regenerar_decisiones_persistidas`
+        # + `_generar_artefacto_sin_lock` deduplican por `decision_id`
+        # determinista y nunca resucitan una decisión ya cerrada en el
+        # ledger), pero SÓLO se invocaba desde `revalidar_y_regenerar_
+        # reporte` (decisión / envío Mobile). Corre AL FINAL, sobre el
+        # dataset YA reconciliado, ANTES de generar el reporte -- así el
+        # viaje aparece REQUIERE_REVISION con tarjeta, nunca
+        # INCOMPLETO_TECNICO "que se reintenta solo".
+        deteccion_destino = reconciliar_decisiones_destino_no_resuelto(raiz_atlas=raiz, reloj=lambda: instante)
         # A partir de acá el dataset YA tiene los cambios de las
         # revalidaciones de arriba -- cada una es atómica y ya quedó
         # protegida por su propio lock común del dataset al escribir; NO
@@ -673,10 +729,12 @@ def reconciliar_estado_derivado(
             | set(limpieza_indicadores["guias_actualizadas"])
             | set(limpieza_destino_catalogo["guias_actualizadas"])
             | set(limpieza_geo_contradiccion["guias_actualizadas"])
+            | set(limpieza_obra_destino["guias_actualizadas"])
         ),
         "guias_recuperadas": guias_recuperadas,
         "guias_contradiccion_destino_catalogo": limpieza_destino_catalogo["guias_contradiccion"],
         "destinos_coordenadas_completadas": limpieza_destino_coords["destinos_actualizados"],
+        "decisiones_destino_no_resuelto_publicadas": deteccion_destino["decisiones_publicadas"],
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "decisiones_aplicadas_automaticamente": evidencia_decisiones["decisiones_aplicadas_automaticamente"],
         "pendientes_tecnicos": len(registros_despues),

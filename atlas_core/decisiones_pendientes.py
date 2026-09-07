@@ -2484,6 +2484,23 @@ def regenerar_decisiones_persistidas(
             # para_obra` (sin exigir unicidad) y se suprime si CUALQUIERA
             # de los destinos confirmados coincide literalmente -- nunca
             # sólo "el primero" ni "el más nuevo".
+            #
+            # Bloque CIERRE OPERACIONAL DE PENDIENTE_TECNICO -- caso real
+            # 464715 (obra "CONSTRUCTORA INMOBILIARIA E", destino "AV.
+            # VICUÑA MACKENNA 3451 ..." con relación pero degradado): la
+            # relación destino existe, su texto coincide LITERALMENTE con
+            # el de esta decisión... pero el `Destino` quedó degradado --
+            # `estado_calidad=PENDIENTE`, sin lat/lon -- y la ruta sigue en
+            # un callejón sin salida (`MULTIPLES_UBICACIONES_DISPERSAS`).
+            # Una relación así NO es una respuesta a "¿cuál es la dirección
+            # real?": nunca se resolvió a un punto usable ni la confirmó un
+            # humano vía REGISTRAR_DIRECCION. Suprimir la tarjeta por "la
+            # obra ya tiene destino confirmado" dejaría el viaje
+            # INCOMPLETO_TECNICO en silencio. Sólo se suprime cuando el
+            # destino que coincide es utilizable: `estado_calidad`
+            # CONFIRMADO (lo que deja `aplicar_decision_obra` al registrar
+            # una dirección humana -- el caso que R13/R18/B1 cubren) o con
+            # coordenadas reales.
             obra_canonica_destino = str((decision.get("contexto") or {}).get("obra_canonica", ""))
             if obra_canonica_destino and catalogo_obras is not None:
                 texto_documental = normalizar_nombre_destino(str(decision.get("valor_documental", "")))
@@ -2493,6 +2510,10 @@ def regenerar_decisiones_persistidas(
                 if any(
                     (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
                     and calle in texto_documental
+                    and (
+                        str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
+                        or (destino.latitud is not None and destino.longitud is not None)
+                    )
                     for destino in destinos_confirmados_obra
                 ):
                     continue

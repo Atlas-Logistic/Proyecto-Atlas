@@ -370,6 +370,32 @@ def revalidar_obra_destino_sin_ocr(
                 cliente_documental not in _AUSENTES
                 and normalizar_nombre_obra(obra_documental) == normalizar_nombre_obra(cliente_documental)
             )
+            # Bloque ENTREGA A SEDE DEL PROPIO CLIENTE -- "no aplicar si
+            # existe una obra distinta real": si el catálogo tiene una obra
+            # ACTIVA con ese mismo nombre normalizado que pertenece a OTRO
+            # cliente (cliente_id que no resuelve al cliente documental de
+            # esta fila), no es "el mismo hecho dos veces" -- hay una
+            # entidad obra real homónima y la corroboración sigue teniendo
+            # sentido. Se abstiene (deja el motivo).
+            if mismo_hecho_que_cliente:
+                try:
+                    _clave_obra_fila = normalizar_nombre_obra(obra_documental)
+                    _cliente_fila = next(
+                        (c for c in CatalogoClientes(carpeta / "clientes.json").listar()
+                         if c.nombre_normalizado == normalizar_nombre_cliente(cliente_documental)),
+                        None,
+                    )
+                    _cliente_id_fila = _cliente_fila.cliente_id if _cliente_fila is not None else ""
+                    _obra_homonima_de_otro_cliente = any(
+                        normalizar_nombre_obra(o.nombre_canonico) == _clave_obra_fila
+                        and o.estado_vigencia == "ACTIVO"
+                        and str(o.cliente_id) not in ("", _cliente_id_fila)
+                        for o in catalogo_obras.listar_obras()
+                    )
+                    if _obra_homonima_de_otro_cliente:
+                        mismo_hecho_que_cliente = False
+                except (OSError, ValueError):
+                    pass
             ya_revisado_por_humano = numero_guia in guias_resueltas_ledger
             if not mismo_hecho_que_cliente and not ya_revisado_por_humano:
                 try:
@@ -4140,6 +4166,14 @@ def reconciliar_decisiones_destino_no_resuelto(
             pendientes_actuales = []
         restantes = regenerar_decisiones_persistidas(
             decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+            # Bloque CIERRE OPERACIONAL DE PENDIENTE_TECNICO -- pasar el
+            # dataset activa el filtro R19 (descarta tarjetas cuyo
+            # `motivo_ruta` vigente ya no coincide -- limpieza de tarjetas
+            # obsoletas) y le da a la supresión "la obra ya tiene destino
+            # confirmado" el `motivo_ruta` VIGENTE para no silenciar un
+            # callejón sin salida real (caso 464715: destino confirmado por
+            # un humano que aun así NO produce ruta).
+            ruta_dataset=dataset,
         )
         bandeja = _generar_artefacto_sin_lock(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
