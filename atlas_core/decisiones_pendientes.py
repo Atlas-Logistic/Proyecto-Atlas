@@ -2005,6 +2005,7 @@ def regenerar_decisiones_persistidas(
     # artefacto no existe o no puede leerse, cada guía cuenta como 0
     # intentos -- exactamente el comportamiento de antes de este bloque.
     intentos_por_guia: dict[str, int] = {}
+    guias_registro_direccion: dict[str, set[str]] = {}
     if ruta_dataset is not None:
         import csv as _csv
 
@@ -2038,6 +2039,25 @@ def regenerar_decisiones_persistidas(
                     intentos_por_guia[_guia_pendiente] = int(_registro.get("intentos_misma_evidencia", 0) or 0)
         except (OSError, ValueError, UnicodeDecodeError, AttributeError):
             intentos_por_guia = {}
+        # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- `{numero_guia: {direcciones
+        # normalizadas que un humano registró vía REGISTRAR_DIRECCION para
+        # ESA guía}}`. Distingue "el humano ya respondió ESTA pregunta y aun
+        # así no rutea" (464784: mantener la tarjeta accionable) de "una guía
+        # HERMANA de la misma obra respondió" (472238: R13 la suprime, la
+        # falla de ruteo se ve aparte). Read-only del ledger ya existente.
+        try:
+            _ledger_dir = json.loads(
+                (Path(ruta_dataset).parent / "decisiones_aplicadas.json").read_text(encoding="utf-8")
+            )
+            for _ap in _ledger_dir.get("aplicaciones", []) or []:
+                if _ap.get("accion") != "REGISTRAR_DIRECCION":
+                    continue
+                _g = str((_ap.get("documento") or {}).get("numero_guia", "")).strip()
+                _dir = normalizar_nombre_destino(str(_ap.get("direccion_manual") or ""))
+                if _g and _dir:
+                    guias_registro_direccion.setdefault(_g, set()).add(_dir)
+        except (OSError, ValueError, AttributeError):
+            guias_registro_direccion = {}
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -2388,6 +2408,52 @@ def regenerar_decisiones_persistidas(
                 motivo_actual_fila = motivo_ruta_por_guia.get(numero_guia_decision)
                 if motivo_actual_fila is not None and motivo_actual_fila not in motivos_decision_ruta:
                     continue
+            # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464717
+            # (obra AMERICAN SCREW CHILE SPA): una tarjeta
+            # DESTINO_NO_RESUELTO nacida de "Corregir destino"
+            # (`detectar_decision_destino_no_resuelto(forzar=True)` sin
+            # ningún motivo técnico que citar -> `motivos =
+            # ["CORRECCION_MANUAL_LOGISTICA"]`) NO entra en la comprobación
+            # de obsolescencia R19 de arriba (`es_motivo_de_ruta` es False:
+            # ese marcador no vive en `MOTIVOS_DESTINO_NO_RESUELTO`) ni en
+            # el chequeo genérico de motivos documentales -- así que cuando
+            # el problema real que la originó se resuelve DESPUÉS por vía
+            # automática (aquí: `OBRA_DESTINO_SIN_CORROBORAR` retirado
+            # porque la entrega es a la sede del propio cliente, ruta 35,3
+            # km / 49 min, `estado_operacional` OK), la tarjeta quedaba
+            # viva para siempre sin ninguna vía que la cerrara.
+            #
+            # No se puede distinguir por estado "recién forzada" de "vieja
+            # y olvidada" (ambas pueden tener ruta calculada -- "Corregir
+            # destino" existe justamente para el caso ruta-OK-pero-destino-
+            # equivocado). Por eso el cierre exige una corroboración
+            # POSITIVA e inequívoca de que el destino vigente ya no es el
+            # que Javier venía a corregir: la fila está enteramente limpia
+            # (`indicador_revision`/`estado_operacional` OK, ruta
+            # calculada) Y la entrega es a la SEDE DEL PROPIO CLIENTE
+            # (`obra_destino` normaliza EXACTO a `cliente`, ambos no
+            # vacíos -- la misma regla R4.8 que ya retira
+            # `OBRA_DESTINO_SIN_CORROBORAR`). Una tarjeta cuya fila sólo
+            # tiene un geocode sin corroborar se CONSERVA -- nunca se
+            # oculta una pregunta que podría seguir siendo real. El ledger
+            # de auditoría queda intacto (esto sólo saca la pregunta viva
+            # de la bandeja).
+            if (
+                filas_por_guia is not None
+                and motivos_decision_ruta == {"CORRECCION_MANUAL_LOGISTICA"}
+            ):
+                numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+                fila_correccion_manual = filas_por_guia.get(numero_guia_decision) or {}
+                cliente_fila = normalizar_nombre_destino(str(fila_correccion_manual.get("cliente", "")))
+                obra_fila = normalizar_nombre_destino(str(fila_correccion_manual.get("obra_destino", "")))
+                fila_enteramente_limpia = (
+                    str(fila_correccion_manual.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+                    and str(fila_correccion_manual.get("indicador_revision", "")).strip() == "OK"
+                    and str(fila_correccion_manual.get("estado_operacional", "")).strip() == "OK"
+                )
+                entrega_a_sede_propia = bool(cliente_fila) and cliente_fila == obra_fila
+                if fila_enteramente_limpia and entrega_a_sede_propia:
+                    continue
             # Bloque B1 EXPOSICIÓN -- refresca el hallazgo B1 de una
             # decisión YA PUBLICADA: si B1 investigó DESPUÉS de que esta
             # tarjeta se publicó (`resultado_atlas_ia_json` cambió), el
@@ -2507,12 +2573,63 @@ def regenerar_decisiones_persistidas(
                 destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(
                     nombre_obra=obra_canonica_destino
                 )
+                # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464784
+                # (URUGUAY 15, obra CONSTRUCTORA ALTIUS SPA):
+                # `aplicar_decision_obra`/REGISTRAR_DIRECCION deja el
+                # `Destino` en `estado_calidad=CONFIRMADO` AUNQUE la
+                # geocodificación de esa misma dirección siga sin dar un
+                # punto usable ("URUGUAY 15" -> "Uruguay 1545",
+                # `GEOCODIFICACION_NUMERO_INCOMPATIBLE`). Un Destino
+                # CONFIRMADO SIN coordenadas propias cuya fila vigente
+                # sigue en un callejón de DESTINO (`motivo_ruta` en
+                # `MOTIVOS_DESTINO_NO_RESUELTO` y sin ruta calculada) NO
+                # responde "¿dónde queda?" -- suprimir la tarjeta aquí
+                # dejaría el viaje como pendiente técnico invisible (nunca
+                # se autorresuelve: el proveedor seguirá devolviendo 1545).
+                # Sólo cuenta como utilizable un Destino con coordenadas
+                # reales, o una fila que YA tiene `estado_ruta=
+                # RUTA_CALCULADA` (ahí la pregunta está de verdad cerrada).
+                # Sin `ruta_dataset` (`filas_por_guia is None`) se conserva
+                # el criterio previo (CONFIRMADO o coordenadas), compatible
+                # con todos los llamadores que no lo pasan.
+                #
+                # El "callejón sin coordenadas" sólo mantiene VIVA la
+                # tarjeta cuando el humano respondió ESTA MISMA pregunta
+                # (esta guía tiene un REGISTRAR_DIRECCION en el ledger con
+                # esta misma dirección) y aun así no rutea -- ahí Javier
+                # necesita volver a decidir (otra dirección, o
+                # NO_PUEDO_DETERMINAR). Si la relación confirmada vino de
+                # una guía HERMANA de la obra (caso 472238/R13), la
+                # pregunta "¿es correcta esta dirección?" YA tiene
+                # respuesta humana y la tarjeta se suprime igual -- la
+                # falla de ruteo se ve aparte vía `estado_ruta`.
+                numero_guia_destino = str((decision.get("documento") or {}).get("numero_guia", ""))
+                fila_destino = (
+                    filas_por_guia.get(numero_guia_destino) if filas_por_guia is not None else None
+                )
+                ruta_ya_calculada = (
+                    fila_destino is not None
+                    and str(fila_destino.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+                )
+                fila_en_callejon_destino = (
+                    not ruta_ya_calculada
+                    and motivo_ruta_por_guia is not None
+                    and motivo_ruta_por_guia.get(numero_guia_destino) in MOTIVOS_DESTINO_NO_RESUELTO
+                )
+                humano_respondio_esta_guia = texto_documental in guias_registro_direccion.get(
+                    numero_guia_destino, set()
+                )
+                callejon_tras_respuesta_propia = fila_en_callejon_destino and humano_respondio_esta_guia
                 if any(
                     (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
                     and calle in texto_documental
                     and (
-                        str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
-                        or (destino.latitud is not None and destino.longitud is not None)
+                        (destino.latitud is not None and destino.longitud is not None)
+                        or ruta_ya_calculada
+                        or (
+                            str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
+                            and not callejon_tras_respuesta_propia
+                        )
                     )
                     for destino in destinos_confirmados_obra
                 ):

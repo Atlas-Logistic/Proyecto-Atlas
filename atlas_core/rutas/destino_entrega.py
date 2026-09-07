@@ -1378,6 +1378,7 @@ def resolver_destino_entrega_validado(
     contexto_evidencia_b1: str = "",
     contexto_obra: str = "",
     comuna_territorial_conocida: str = "",
+    comuna_confirmada_humano: str = "",
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -1429,6 +1430,36 @@ def resolver_destino_entrega_validado(
             motivo=(
                 "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
                 f"{comuna_documental} != {resultado.localidad}"
+            ),
+            localidad="", region="",
+            metodo_confirmacion=resultado.metodo_confirmacion,
+        )
+    # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464784 (URUGUAY
+    # 15 / LA CISTERNA): una comuna que un HUMANO acaba de confirmar
+    # EXPLÍCITAMENTE (`comuna_confirmada_humano`, el campo "Comuna/
+    # localidad" que escribió en REGISTRAR_DIRECCION -- NUNCA la comuna
+    # auto-resuelta desde el nombre de la obra) es evidencia igual de
+    # fuerte que una comuna inequívoca del propio texto documental. Si el
+    # geocodificador devuelve una localidad que la CONTRADICE (el proveedor
+    # insiste en Temuco), se rechaza -- la confirmación humana NUNCA
+    # autoriza aceptar cualquier coordenada. Mismo criterio territorial
+    # (catálogo cerrado, sin fuzzy) que la comuna documental de arriba.
+    comuna_humana = _comuna_documental_inequivoca(comuna_confirmada_humano or "")
+    if (
+        comuna_humana and resultado.localidad
+        and _texto_normalizado_sin_acentos(comuna_humana)
+        != _texto_normalizado_sin_acentos(resultado.localidad)
+        and not _comunas_territorialmente_compatibles(comuna_humana, resultado.localidad)
+    ):
+        return ResultadoDestinoEntrega(
+            despachar_a_crudo=resultado.despachar_a_crudo,
+            coordenadas=resultado.coordenadas,
+            etiqueta_geocodificada="",
+            confianza=resultado.confianza,
+            estado=ESTADO_REVISAR,
+            motivo=(
+                "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
+                f"{comuna_humana} != {resultado.localidad}"
             ),
             localidad="", region="",
             metodo_confirmacion=resultado.metodo_confirmacion,
@@ -1612,6 +1643,7 @@ def calcular_ruta_con_planta_conocida(
     contexto_evidencia_b1: str = "",
     contexto_obra: str = "",
     comuna_territorial_conocida: str = "",
+    comuna_confirmada_humano: str = "",
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -1640,6 +1672,7 @@ def calcular_ruta_con_planta_conocida(
         contexto_evidencia_b1=contexto_evidencia_b1,
         contexto_obra=contexto_obra,
         comuna_territorial_conocida=comuna_territorial_conocida,
+        comuna_confirmada_humano=comuna_confirmada_humano,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO

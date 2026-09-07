@@ -2457,7 +2457,10 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             # sin ella, se intenta resolver sola (destino CONFIRMADO
             # previo de la misma obra, o mención inequívoca en el nombre
             # de obra) -- nunca pide al humano algo que Atlas ya sabe.
-            comuna_conocida = str(comuna_manual_por_guia.get(str(fila.get("numero_guia", "")).strip(), "")).strip()
+            comuna_confirmada_humano = str(
+                comuna_manual_por_guia.get(str(fila.get("numero_guia", "")).strip(), "")
+            ).strip()
+            comuna_conocida = comuna_confirmada_humano
             if not comuna_conocida:
                 comuna_conocida = resolver_comuna_territorial_conocida(
                     obra_canonica=obra_documental,
@@ -2475,6 +2478,11 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     contexto_evidencia_b1=contexto_evidencia_b1,
                     contexto_obra=obra_documental,
                     comuna_territorial_conocida=comuna_conocida,
+                    # Sólo la comuna que un HUMANO escribió explícitamente
+                    # es un gate DURO contra un candidato que la contradiga
+                    # (ver `resolver_destino_entrega_validado`); la comuna
+                    # auto-resuelta del nombre de obra sólo sesga la query.
+                    comuna_confirmada_humano=comuna_confirmada_humano,
                 )
             except (OSError, ValueError):
                 continue

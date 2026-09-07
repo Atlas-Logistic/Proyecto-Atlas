@@ -345,6 +345,58 @@ def _estado_derivado_incoherente(dataset: Path) -> bool:
     return False
 
 
+def _falta_tarjeta_destino_accionable(dataset: Path, decisiones: Path) -> bool:
+    """``True`` si alguna fila ya es un callejón de DESTINO reconocido
+    (`motivo_ruta` base en `MOTIVOS_DESTINO_NO_RESUELTO`: número
+    incompatible, contradice comuna, múltiples ubicaciones, etc.) -- origen
+    resuelto, ruta sin calcular -- pero NO tiene todavía una decisión
+    `DESTINO_NO_RESUELTO` pendiente que la vuelva accionable en Revisión de
+    Atlas.
+
+    Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464784 (URUGUAY 15):
+    Javier registró la dirección, el reintento inmediato la reconcilió a un
+    motivo real y estable (`GEOCODIFICACION_NUMERO_INCOMPATIBLE`), pero la
+    tarjeta quedó suprimida por "la obra ya tiene destino CONFIRMADO" --
+    dejando la fila como pendiente técnico invisible que NUNCA se
+    autorresuelve (el proveedor seguirá devolviendo 1545). `reconciliar_
+    estado_derivado` abortaba antes de llegar a `reconciliar_decisiones_
+    destino_no_resuelto` porque `migracion`/`por_reintentar`/`reporte_
+    desactualizado`/`estado_derivado_incoherente` daban todos `False`.
+    Este disparador -- misma clase que `estado_derivado_incoherente` --
+    hace entrar al bloque para que esa tarjeta se publique.
+    `_pendientes_ruta` ya excluye guías humanas, filas con ruta calculada
+    y filas sin planta/despachar_a, así que sólo se mira lo que de verdad
+    quedó atrapado. Idempotente: una vez publicada la tarjeta,
+    `_guias_humanas` la incluye y este disparador deja de verla. Una guía
+    cuya tarjeta de destino ya fue resuelta de forma TERMINAL por un
+    humano (`NO_PUEDO_DETERMINAR`/`NO_CONFIRMAR` en el ledger --
+    `reconciliar_decisiones_destino_no_resuelto` nunca la republicaría) se
+    excluye también: reintentar la reconciliación en cada carga sin poder
+    publicar nada sería un bucle inútil."""
+    from atlas_core.decisiones_pendientes import MOTIVOS_DESTINO_NO_RESUELTO
+
+    guias_destino_terminadas: set[str] = set()
+    try:
+        _ledger = json.loads((dataset.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+        for _ap in _ledger.get("aplicaciones", []) or []:
+            if _ap.get("tipo") == "DESTINO_NO_RESUELTO" and _ap.get("accion") in {
+                "NO_PUEDO_DETERMINAR", "NO_CONFIRMAR",
+            }:
+                _g = str((_ap.get("documento") or {}).get("numero_guia", "")).strip()
+                if _g:
+                    guias_destino_terminadas.add(_g)
+    except (OSError, ValueError):
+        pass
+
+    for fila in _pendientes_ruta(dataset, decisiones):
+        if str(fila.get("numero_guia", "")).strip() in guias_destino_terminadas:
+            continue
+        motivo_base = str(fila.get("motivo_ruta", "")).split(":", 1)[0].split("(", 1)[0].strip()
+        if motivo_base in MOTIVOS_DESTINO_NO_RESUELTO:
+            return True
+    return False
+
+
 def reconciliar_estado_derivado(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     proveedor_rutas=None, proveedor_rutas_fallback=None,
@@ -423,9 +475,16 @@ def reconciliar_estado_derivado(
     # reporte; el viaje deja de ser `INCOMPLETO_TECNICO`. Idempotente: una
     # vez convergida, la siguiente corrida ya no lo detecta.
     estado_derivado_incoherente = _estado_derivado_incoherente(dataset)
+    # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464784: una fila
+    # que ya es un callejón de DESTINO reconocido pero sin tarjeta
+    # accionable todavía (quedó como pendiente técnico invisible) también
+    # debe hacer entrar al bloque -- `reconciliar_decisiones_destino_no_
+    # resuelto` (AL FINAL) publica su tarjeta. Misma clase de disparador
+    # que `estado_derivado_incoherente`; idempotente.
+    falta_tarjeta_destino = _falta_tarjeta_destino_accionable(dataset, decisiones)
     if (
         not migracion and not por_reintentar and not reporte_desactualizado
-        and not estado_derivado_incoherente
+        and not estado_derivado_incoherente and not falta_tarjeta_destino
     ):
         return {
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
