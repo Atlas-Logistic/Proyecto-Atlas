@@ -147,6 +147,80 @@ def _peso_kg_numerico(valor: str) -> int | None:
     return int(texto) if texto.isdigit() else None
 
 
+def _hora_a_minutos(valor: object) -> int | None:
+    """Minutos desde medianoche para una hora ``"H:MM"``/``"HH:MM"`` real,
+    o ``None`` si no lo es (los centinelas "No encontrado"/"Revisar"/… caen
+    por `_valor_presente`)."""
+    texto = str(valor or "").strip()
+    if not _valor_presente(texto):
+        return None
+    coincidencia = re.fullmatch(r"(\d{1,2}):(\d{2})", texto)
+    if not coincidencia:
+        return None
+    hora, minuto = int(coincidencia.group(1)), int(coincidencia.group(2))
+    if hora > 23 or minuto > 59:
+        return None
+    return hora * 60 + minuto
+
+
+def _ventana_planta_comun(documentos: Iterable["DocumentoViaje"]) -> tuple[str, str] | None:
+    """Bloque VENTANA DE PLANTA COMÚN -- causa raíz real (transporte
+    0000356848, guías 473210/473209, ambas AZA COLINA; Javier verificó que
+    en LAS DOS fotos la hora de entrada y de salida son exactamente
+    iguales): una guía se leyó completa (12:38 -> 13:40) y la otra sólo
+    capturó un único timbre ("13:40") que el OCR ubicó en
+    `hora_entrada_aza` en vez de `hora_salida_aza`. `_valores_compatibles`
+    veía "12:38" != "13:40" y levantaba un `CONFLICTO_HORA_ENTRADA` falso.
+
+    Un `numero_transporte` es UN viaje físico; para las guías que
+    comparten transporte Y planta, la visita a planta es UN solo evento
+    con exactamente dos timbres reales (entrada, salida). Si existe una
+    guía con la ventana COMPLETA y ORDENADA ``[E, S]`` (E < S, ambas horas
+    reales) y TODA hora de entrada/salida presente en las demás guías de
+    esa misma planta coincide EXACTAMENTE con ``E`` o con ``S``, entonces
+    no hay un tercer horario en juego: el "conflicto" es sólo un timbre
+    parcial o mal asignado del mismo evento. Devuelve ``(E, S)`` -- la
+    ventana ya LEÍDA de una guía real, nunca inventada ni interpolada ni
+    copiada campo a campo al documento.
+
+    Devuelve ``None`` (y el criterio estricto `_valores_compatibles` sigue
+    mandando, generando la revisión) si: las guías con hora no comparten
+    una única `planta_origen_id` presente (plantas distintas pueden tener
+    ventanas distintas); no hay ninguna ventana completa que ancle; o
+    alguna hora presente cae fuera de ``{E, S}`` -- una discrepancia real
+    siempre conserva la revisión."""
+    con_hora = [
+        d for d in documentos
+        if _hora_a_minutos(d.hora_entrada_aza) is not None
+        or _hora_a_minutos(d.hora_salida_aza) is not None
+    ]
+    if len(con_hora) < 2:
+        return None
+    if any(not _valor_presente(d.planta_origen_id) for d in con_hora):
+        return None
+    if len({_clave_normalizada(d.planta_origen_id) for d in con_hora}) != 1:
+        return None
+    for ancla in con_hora:
+        entrada_min = _hora_a_minutos(ancla.hora_entrada_aza)
+        salida_min = _hora_a_minutos(ancla.hora_salida_aza)
+        if entrada_min is None or salida_min is None or entrada_min >= salida_min:
+            continue
+        extremos = {entrada_min, salida_min}
+        if all(
+            (
+                (minutos := _hora_a_minutos(d.hora_entrada_aza)) is None
+                or minutos in extremos
+            )
+            and (
+                (minutos := _hora_a_minutos(d.hora_salida_aza)) is None
+                or minutos in extremos
+            )
+            for d in con_hora
+        ):
+            return ancla.hora_entrada_aza.strip(), ancla.hora_salida_aza.strip()
+    return None
+
+
 class EstadoViaje(str, Enum):
     CONFIRMADO = "CONFIRMADO"
     REQUIERE_REVISION = "REQUIERE_REVISION"
@@ -428,12 +502,23 @@ class Viaje:
     def hora_entrada_aza(self) -> str:
         """Consolidada solo si todas las horas de entrada válidas
         presentes coinciden (documentos sin dato no impiden consolidar) —
-        nunca se elige una arbitrariamente ante conflicto."""
+        nunca se elige una arbitrariamente ante conflicto. Bloque VENTANA
+        DE PLANTA COMÚN: si varias guías del mismo transporte+planta
+        describen la misma visita a planta con timbres parciales/mal
+        asignados pero compatibles con una única ventana `[E, S]` ya
+        leída completa por una de ellas, se publica esa ventana (ver
+        `_ventana_planta_comun`)."""
+        ventana = _ventana_planta_comun(self.documentos)
+        if ventana is not None:
+            return ventana[0]
         valores = _valores_unicos(d.hora_entrada_aza for d in self.documentos)
         return valores[0] if len(valores) == 1 else ""
 
     @property
     def hora_salida_aza(self) -> str:
+        ventana = _ventana_planta_comun(self.documentos)
+        if ventana is not None:
+            return ventana[1]
         valores = _valores_unicos(d.hora_salida_aza for d in self.documentos)
         return valores[0] if len(valores) == 1 else ""
 
@@ -955,6 +1040,15 @@ def agrupar_viajes(
         # detectándose -- eso vive en `motivo_ruta`/las decisiones
         # `DESTINO_NO_RESUELTO`, un mecanismo totalmente distinto, nunca
         # tocado aquí.
+        # Bloque VENTANA DE PLANTA COMÚN -- caso real 0000356848: una hora
+        # de entrada/salida sólo es CONFLICTO si no puede explicarse como
+        # timbre parcial o mal asignado de una única visita a planta ya
+        # leída completa por una guía hermana del mismo transporte+planta
+        # (ver `_ventana_planta_comun`). Nunca inventa ni copia horas.
+        ventana_planta_comun = _ventana_planta_comun(documentos) is not None
+        _horas_compatibles = (
+            lambda valores, _ok=ventana_planta_comun: _ok or _valores_compatibles(valores)
+        )
         campos_conflicto = (
             (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop], _valores_compatibles),
             (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos], _valores_compatibles),
@@ -962,8 +1056,8 @@ def agrupar_viajes(
             (MotivoRevision.CONFLICTO_ORIGEN, [], lambda _valores, _c=hay_conflicto_origen: not _c),
             (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos], _valores_compatibles),
-            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos], _valores_compatibles),
-            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos], _valores_compatibles),
+            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos], _horas_compatibles),
+            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos], _horas_compatibles),
         )
         motivos = [
             motivo for motivo, valores, comparador in campos_conflicto

@@ -150,7 +150,21 @@ from atlas_core.revalidacion_documental import (
 # CLASIFICACIÓN del reporte (`viajes.csv`) -- sin subir este número, una
 # operación que ya migró a 10 seguiría marcando REQUIERE_REVISION en
 # silencio para un viaje ya sano.
-RULESET_VERSION = 11
+#
+# Subida de 11 a 12 -- VENTANA DE PLANTA COMÚN (caso real 0000356848,
+# guías 473210/473209, ambas AZA COLINA; Javier verificó que las dos
+# fotos muestran la misma hora de entrada y de salida): `gestor_viajes.
+# agrupar_viajes` ya no genera `CONFLICTO_HORA_ENTRADA`/
+# `CONFLICTO_HORA_SALIDA` cuando una hora sólo difiere porque una guía
+# hermana del mismo transporte+planta la leyó como timbre parcial o mal
+# asignado de la MISMA ventana `[E, S]` ya leída completa por otra guía
+# (`_ventana_planta_comun` -- nunca inventa ni copia horas; una
+# discrepancia real, o plantas distintas, conserva la revisión). Igual
+# que las dos subidas anteriores, es una corrección de CLASIFICACIÓN del
+# reporte (`viajes.csv`) -- sin subir este número, una operación que ya
+# migró a 11 seguiría marcando REQUIERE_REVISION por un conflicto de hora
+# falso hasta que algún otro motivo regenerara el reporte.
+RULESET_VERSION = 12
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)

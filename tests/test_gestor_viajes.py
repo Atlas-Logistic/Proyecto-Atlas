@@ -959,6 +959,66 @@ def test_horas_faltantes_en_algunos_documentos_consolidan_con_los_validos():
     assert MotivoRevision.CONFLICTO_HORA_ENTRADA not in viaje.motivos_revision
 
 
+def test_ventana_planta_comun_absorbe_timbre_parcial_mal_asignado():
+    # Caso real (transporte 0000356848, 473210/473209, ambas AZA COLINA):
+    # una guía se leyó completa 12:38 -> 13:40; la otra sólo capturó un
+    # timbre ("13:40") que el OCR puso en hora_entrada en vez de salida.
+    # Javier verificó que en LAS DOS fotos la ventana es la misma -> no es
+    # conflicto: se publica la ventana ya leída completa, sin inventar.
+    filas = [
+        _fila(archivo="473210.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="12:38", hora_salida_aza="13:40"),
+        _fila(archivo="473209.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="13:40", hora_salida_aza="No encontrado"),
+    ]
+    viaje = agrupar_viajes(filas)[0][0]
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA not in viaje.motivos_revision
+    assert MotivoRevision.CONFLICTO_HORA_SALIDA not in viaje.motivos_revision
+    assert viaje.hora_entrada_aza == "12:38"
+    assert viaje.hora_salida_aza == "13:40"
+    assert viaje.permanencia_minutos == "62"
+
+
+def test_ventana_planta_comun_conserva_conflicto_si_hay_tercer_horario_real():
+    # Una discrepancia REAL (un horario que no es ninguno de los dos
+    # extremos de la ventana completa) siempre conserva la revisión.
+    filas = [
+        _fila(archivo="a.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="12:38", hora_salida_aza="13:40"),
+        _fila(archivo="b.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="15:00", hora_salida_aza="No encontrado"),
+    ]
+    viaje = agrupar_viajes(filas)[0][0]
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA in viaje.motivos_revision
+    assert viaje.hora_entrada_aza == ""
+
+
+def test_ventana_planta_comun_no_aplica_entre_plantas_distintas():
+    # Plantas distintas pueden tener ventanas distintas -- no se absorbe.
+    filas = [
+        _fila(archivo="a.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="12:38", hora_salida_aza="13:40"),
+        _fila(archivo="b.jpg", numero_transporte="0000356848", planta_origen_id="p-renca",
+              hora_entrada_aza="13:40", hora_salida_aza="No encontrado"),
+    ]
+    viaje = agrupar_viajes(filas)[0][0]
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA in viaje.motivos_revision
+
+
+def test_ventana_planta_comun_no_aplica_sin_ventana_completa_de_ancla():
+    # Sin ninguna guía que aporte la ventana COMPLETA y ordenada, dos
+    # entradas distintas siguen siendo conflicto (no hay con qué probar
+    # que son los dos extremos del mismo evento).
+    filas = [
+        _fila(archivo="a.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="12:38", hora_salida_aza="No encontrado"),
+        _fila(archivo="b.jpg", numero_transporte="0000356848", planta_origen_id="p-colina",
+              hora_entrada_aza="13:40", hora_salida_aza="No encontrado"),
+    ]
+    viaje = agrupar_viajes(filas)[0][0]
+    assert MotivoRevision.CONFLICTO_HORA_ENTRADA in viaje.motivos_revision
+
+
 def test_peso_multiguia_suma_cuando_todos_los_documentos_tienen_dato():
     # Caso real (transporte 0000297304): 6.971 + 3.100 + 4.256 = 14.327
     # kg -- cada documento trae el peso PARCIAL de su propia línea de
