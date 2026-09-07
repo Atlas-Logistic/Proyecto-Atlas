@@ -24,6 +24,8 @@ from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
+    SEPARADOR_MOTIVOS,
+    _indicadores_documentales_coherentes,
     reconciliar_bandeja_decisiones,
     reconciliar_incidencias_rut_chofer_documental,
     revalidar_indicadores_documentales_sin_ocr,
@@ -240,6 +242,51 @@ def _registro_pendiente(fila: dict[str, str], previo: dict[str, object] | None) 
     }
 
 
+_ESTADOS_REVISION = {"REVISAR", "REQUIERE_REVISION"}
+
+
+def _estado_derivado_incoherente(dataset: Path) -> bool:
+    """``True`` si alguna fila del dataset arrastra un estado de revisión
+    TÉCNICO que ya no corresponde: `indicador_revision`/`estado_documental`/
+    `estado_operacional` persistidos siguen pidiendo revisión, pero la
+    coherencia canónica (`motivos_revision_documento` YA reconciliado +
+    `estado_ruta` YA calculado -- misma fuente y mismo criterio que
+    `revalidar_indicadores_documentales_sin_ocr`) da `OK` para ese mismo
+    campo.
+
+    Es exactamente el estado que deja "el pendiente técnico se fijó cuando
+    todavía faltaba routing y la ruta se resolvió en una reconciliación
+    posterior, sin que nadie volviera a derivar el estado del
+    documento/viaje" (caso real 0000356332). Esta señal existe para que
+    esa fila NO quede stale hasta que algún OTRO motivo (una decisión
+    humana, un envío Mobile, una migración de `RULESET_VERSION`) vuelva a
+    mover el dataset -- igual que `reporte_desactualizado`, pero para la
+    incoherencia INTERNA de una fila, no para el reporte publicado.
+
+    Sólo mira en la dirección de CONVERGER (revisión stale -> OK): nunca
+    marca incoherente una fila que pide MENOS revisión que la canónica
+    (esa dirección la resuelve, bidireccional,
+    `revalidar_indicadores_documentales_sin_ocr` cuando ya se entra al
+    bloque por cualquier otra vía) -- así un motivo humano/documental real
+    (p. ej. `OBRA_DESTINO_SIN_CORROBORAR`, caso 0000356848) mantiene su
+    fila en revisión y jamás dispara esto. No lee OCR ni recalcula rutas:
+    sólo relee el dataset ya persistido."""
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return False
+    for fila in filas:
+        motivos = [m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m]
+        estado_ruta = str(fila.get("estado_ruta", "")).strip()
+        coherentes = _indicadores_documentales_coherentes(motivos, estado_ruta)
+        for campo, coherente in zip(
+            ("indicador_revision", "estado_documental", "estado_operacional"), coherentes,
+        ):
+            if str(fila.get(campo, "")).strip() in _ESTADOS_REVISION and coherente == "OK":
+                return True
+    return False
+
+
 def reconciliar_estado_derivado(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     proveedor_rutas=None, proveedor_rutas_fallback=None,
@@ -299,7 +346,29 @@ def reconciliar_estado_derivado(
     # natural que ya dispara cada carga de Desktop.
     huella_dataset_actual = _sha256_archivo(dataset)
     reporte_desactualizado = huella_dataset_actual != estado_previo.get("dataset_sha256")
-    if not migracion and not por_reintentar and not reporte_desactualizado:
+    # Bloque CONVERGENCIA DE ESTADO TÉCNICO STALE -- causa raíz real (viaje
+    # 0000356332, guías 477145/477146): un pendiente técnico
+    # (`estado_documental`/`estado_operacional` = `REQUIERE_REVISION`) se
+    # fijó cuando todavía faltaba routing; una reconciliación posterior
+    # resolvió origen+ruta (`estado_ruta` = `RUTA_CALCULADA`, sin motivo
+    # documental real), pero el estado derivado del documento/viaje quedó
+    # sin recalcular y ninguna vía automática lo tocaba: `migracion` da
+    # `False` (versión ya vigente), `por_reintentar` está vacío (la ruta
+    # YA está calculada, `_pendientes_ruta` la excluye) y
+    # `reporte_desactualizado` da `False` (el dataset no volvió a cambiar
+    # tras la última publicación). La fila quedaba stale hasta que algún
+    # OTRO motivo moviera el dataset. `_estado_derivado_incoherente` es la
+    # misma clase de disparador que `reporte_desactualizado`, pero para la
+    # incoherencia INTERNA de una fila -- al entrar al bloque,
+    # `revalidar_indicadores_documentales_sin_ocr` (más abajo, AL FINAL)
+    # converge los tres campos desde lo canónico y se republica el
+    # reporte; el viaje deja de ser `INCOMPLETO_TECNICO`. Idempotente: una
+    # vez convergida, la siguiente corrida ya no lo detecta.
+    estado_derivado_incoherente = _estado_derivado_incoherente(dataset)
+    if (
+        not migracion and not por_reintentar and not reporte_desactualizado
+        and not estado_derivado_incoherente
+    ):
         return {
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
             "version": version_previa, "pendientes_tecnicos": len(registros),
@@ -554,4 +623,5 @@ def reconciliar_estado_derivado(
         "totales": manifest["totales"],
         "ocr_ejecutado": False,
         "reporte_regenerado_por_dataset_desactualizado": reporte_desactualizado,
+        "reporte_regenerado_por_estado_derivado_incoherente": estado_derivado_incoherente,
     }
