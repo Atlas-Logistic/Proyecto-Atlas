@@ -2168,24 +2168,44 @@ def extraer_datos(
             # caso real guía 387789) nunca se cuenta como corrupción: no
             # tiene ninguna forma de horario, es simplemente otro dato
             # numérico del documento.
+            #
+            # Bloque O1.3 -- LAYOUT AZA CON TIMBRES DESORDENADOS (caso real
+            # 473209: "...AV PDTE ... 12:38:00 HORA ENTRADA COMUNA RENCA
+            # :13:40:40 HORA SALIDA CIUDAD..."): el valor de una etiqueta
+            # horaria puede aparecer ANTES o DESPUÉS del texto de la
+            # etiqueta según cómo el OCR ordene los recuadros -- aquí AMBOS
+            # timbres PRECEDEN a su etiqueta. Se recogen los tokens con
+            # forma de hora a AMBOS lados de la etiqueta y se elige el más
+            # cercano por distancia de caracteres (la adyacencia
+            # etiqueta<->valor es la señal real del layout). Nunca se
+            # inventa ni se copia desde otra guía: sólo se asigna lo que
+            # ESTE documento ya mostró.
             posicion = zona_encabezado.find(etiqueta)
             if posicion == -1:
                 return None, False
-            segmento = zona_encabezado[posicion + len(etiqueta) : posicion + len(etiqueta) + ventana]
+            fin_etiqueta = posicion + len(etiqueta)
+            seg_antes = zona_encabezado[max(0, posicion - ventana) : posicion]
+            seg_despues = zona_encabezado[fin_etiqueta : fin_etiqueta + ventana]
             hubo_corrupto = False
-            for tramo in re.finditer(r"[\d:]+", segmento):
-                # Un ":" inicial suelto es el separador etiqueta/valor
-                # habitual (p. ej. "HORA ENTRADA\n:09:40:00") -- no forma
-                # parte de un dígito corrupto, se descarta sin más.
-                token = tramo.group(0).lstrip(":")
-                if not token:
-                    continue
-                coincidencia = _PATRON_HORA_TOKEN_COMPLETO.match(token)
-                if not coincidencia:
-                    if ":" in token:
-                        hubo_corrupto = True
-                    continue
-                candidato = f"{int(coincidencia.group(1)):02d}:{coincidencia.group(2)}"
+            candidatos: list[tuple[int, str]] = []  # (distancia_a_la_etiqueta, "HH:MM")
+            for segmento, hacia_atras in ((seg_antes, True), (seg_despues, False)):
+                for tramo in re.finditer(r"[\d:]+", segmento):
+                    # Un ":" suelto en un extremo es el separador
+                    # etiqueta/valor habitual ("HORA ENTRADA\n:09:40:00" /
+                    # "RENCA :13:40:40") -- nunca parte de un dígito
+                    # corrupto, se descarta sin más.
+                    token = tramo.group(0).strip(":")
+                    if not token:
+                        continue
+                    coincidencia = _PATRON_HORA_TOKEN_COMPLETO.match(token)
+                    if not coincidencia:
+                        if ":" in token:
+                            hubo_corrupto = True
+                        continue
+                    distancia = (len(segmento) - tramo.end()) if hacia_atras else tramo.start()
+                    candidatos.append((distancia, f"{int(coincidencia.group(1)):02d}:{coincidencia.group(2)}"))
+            candidatos.sort(key=lambda par: par[0])
+            for _distancia, candidato in candidatos:
                 if excluir is None or candidato != excluir:
                     return candidato, hubo_corrupto
             return None, hubo_corrupto
@@ -2207,6 +2227,21 @@ def extraer_datos(
             if coincidencia_tabla:
                 entrada = entrada or normalizar_hora(coincidencia_tabla.group(1))
                 salida = salida or normalizar_hora(coincidencia_tabla.group(2))
+
+        # Bloque O1.3 -- un camión ENTRA a planta antes de SALIR: si se
+        # leyeron dos timbres válidos y distintos pero quedaron asignados
+        # al revés (etiqueta y valor cruzados por el layout), se ordenan
+        # cronológicamente con los propios valores del documento -- nunca
+        # se fabrica ni se toma una hora de otra guía. `entrada == salida`
+        # (caso legítimo ya confirmado) no se toca.
+        if entrada and salida:
+            coincidencia_e = _PATRON_HORA_TOKEN_COMPLETO.match(entrada)
+            coincidencia_s = _PATRON_HORA_TOKEN_COMPLETO.match(salida)
+            if coincidencia_e and coincidencia_s:
+                minutos_e = int(coincidencia_e.group(1)) * 60 + int(coincidencia_e.group(2))
+                minutos_s = int(coincidencia_s.group(1)) * 60 + int(coincidencia_s.group(2))
+                if minutos_e > minutos_s:
+                    entrada, salida = salida, entrada
 
         return entrada, salida
 

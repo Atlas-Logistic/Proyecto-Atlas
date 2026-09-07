@@ -145,6 +145,48 @@ def test_no_regresion_salida_valida_historica():
     assert datos["hora de salida"] == "09:03"
 
 
+# --- Bloque O1.3: layout AZA con los dos timbres ANTES de su etiqueta ---
+
+def test_valores_horarios_preceden_a_su_etiqueta_caso_real_473209():
+    # Caso real 473209 (verificado por Javier: entrada 12:38 / salida
+    # 13:40, misma ventana que 473210). El OCR de ESTA guía puso ambos
+    # valores JUSTO ANTES de su etiqueta ("...12:38:00 HORA ENTRADA ...
+    # :13:40:40 HORA SALIDA ..."); antes de O1.3 el extractor sólo miraba
+    # hacia adelante y devolvía entrada=13:40 / salida=No encontrado.
+    textos = ENCABEZADO + [
+        "DIRECCION", "AV PDTE EDUARDO FREI 3092", "12:38:00", "HORA ENTRADA",
+        "COMUNA", "RENCA", ":13:40:40", "HORA SALIDA", "CIUDAD", "SANTIAGO",
+        "Nro. TRANSPORTE", ":0000356848", "CANTIDAD",
+    ]
+    datos = extraer_datos(textos)
+    assert datos["hora de entrada"] == "12:38"
+    assert datos["hora de salida"] == "13:40"
+
+
+def test_timbres_cruzados_se_ordenan_cronologicamente_sin_copiar():
+    # Si entrada/salida quedan asignadas al revés (etiqueta y valor
+    # cruzados por el layout), se ordenan con los propios valores del
+    # documento -- un camión entra antes de salir. Nunca se fabrica una
+    # hora ni se toma de otra guía.
+    textos = ENCABEZADO + [
+        "HORA ENTRADA", ":13:40:00", "COMUNA", ": RENCA",
+        "HORA SALIDA", ":12:38:00", "CANTIDAD",
+    ]
+    datos = extraer_datos(textos)
+    assert datos["hora de entrada"] == "12:38"
+    assert datos["hora de salida"] == "13:40"
+
+
+def test_o1_3_no_altera_el_par_ya_correcto():
+    textos = ENCABEZADO + [
+        "HORA ENTRADA", ":08:00:00", "COMUNA", ": RENCA",
+        "HORA SALIDA", ":09:30:00", "CANTIDAD",
+    ]
+    datos = extraer_datos(textos)
+    assert datos["hora de entrada"] == "08:00"
+    assert datos["hora de salida"] == "09:30"
+
+
 # --- 9: PESO KG directo (adyacente, sin línea intermedia) ---
 
 def test_peso_kg_directo_sin_linea_intermedia():
