@@ -137,7 +137,18 @@ from atlas_core.revalidacion_documental import (
 # la próxima vez que el reporte se regenera; sin subir este número, una
 # operación que ya migró a 9 seguiría publicando la ficha incoherente
 # hasta que algún OTRO motivo disparara una regeneración.
-RULESET_VERSION = 10
+#
+# Subida de 10 a 11 -- VIAJES MULTIGUÍA/MULTICLIENTE/MULTIOBRA (caso real
+# 0000352376, 464698/464699/464700): `gestor_viajes.agrupar_viajes` ya no
+# genera `CONFLICTO_CLIENTE`/`CONFLICTO_OBRA_DESTINO` por mera diversidad
+# de cliente/obra_destino entre documentos del mismo transporte -- un
+# mismo viaje físico puede llevar legítimamente varias entregas a
+# clientes/obras distintos (ver docstring de `Viaje.clientes`, ya lo
+# reconocía). Igual que la subida anterior, es una corrección de
+# CLASIFICACIÓN del reporte (`viajes.csv`) -- sin subir este número, una
+# operación que ya migró a 10 seguiría marcando REQUIERE_REVISION en
+# silencio para un viaje ya sano.
+RULESET_VERSION = 11
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)

@@ -125,15 +125,26 @@ def test_columnas_repetidas_se_rechazan(tmp_path):
 
 
 def test_conflictos_y_evidencias_aparecen_en_viajes_csv(tmp_path):
+    # Bloque VIAJES MULTIGUÍA/MULTICLIENTE/MULTIOBRA -- caso real
+    # 0000352376: cliente/obra_destino distintos entre documentos del
+    # mismo transporte ya NO son conflicto (diversidad legítima, un
+    # mismo viaje físico puede llevar varias entregas) -- el conflicto
+    # de este fixture se dispara con un campo que sí describe el
+    # vehículo/viaje físico (chofer), para seguir probando que un
+    # conflicto real SÍ se propaga a `viajes.csv` con sus evidencias.
     filas = [
-        _fila(archivo="a.jpg", cliente="UNO", obra_destino="NORTE"),
-        _fila(archivo="b.jpg", numero_guia="000102", cliente="DOS", obra_destino="SUR"),
+        _fila(archivo="a.jpg", cliente="UNO", obra_destino="NORTE", chofer="CHOFER UNO"),
+        _fila(archivo="b.jpg", numero_guia="000102", cliente="DOS", obra_destino="SUR", chofer="CHOFER DOS"),
     ]
     _, salida, manifest = _generar(tmp_path, filas)
     viaje = _leer_csv(salida / "viajes.csv")[0]
     assert manifest["totales"]["viajes_requieren_revision"] == 1
-    assert "CONFLICTO_CLIENTE" in viaje["motivos_revision"]
-    assert "CONFLICTO_OBRA_DESTINO" in viaje["motivos_revision"]
+    assert "CONFLICTO_CHOFER" in viaje["motivos_revision"]
+    # Diversidad legítima de cliente/obra -- nunca conflicto por sí sola.
+    assert "CONFLICTO_CLIENTE" not in viaje["motivos_revision"]
+    assert "CONFLICTO_OBRA_DESTINO" not in viaje["motivos_revision"]
+    assert viaje["clientes"] == "DOS | UNO"
+    assert viaje["obras_destino"] == "NORTE | SUR"
     evidencias = json.loads(viaje["evidencias_documentos"])
     assert [e["numero_guia"] for e in evidencias] == ["000101", "000102"]
 

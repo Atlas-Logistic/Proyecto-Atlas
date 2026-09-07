@@ -916,12 +916,35 @@ def agrupar_viajes(
         # discrepante que ya perdió frente a un GPS confirmado no cuenta
         # como conflicto (jerarquía, no empate).
         _, _, _, _, hay_conflicto_origen = _resolver_origen_viaje(documentos)
+        # Bloque VIAJES MULTIGUÍA/MULTICLIENTE/MULTIOBRA -- causa raíz real
+        # (transporte 0000352376, guías 464698/464699/464700, auditoría
+        # previa): esta tupla comparaba `cliente`/`obra_destino` con el
+        # MISMO criterio de unanimidad (`_valores_compatibles`) que los
+        # campos que sí describen el VEHÍCULO/VIAJE FÍSICO (chofer, RUT,
+        # patente, fecha, hora) -- un solo camión, un solo chofer, una
+        # sola fecha, pero un mismo transporte puede legítimamente llevar
+        # varias entregas a clientes/obras distintos (ya lo reconoce
+        # `Viaje.clientes`/`obras_destino`, Bloque P1/P1.1, caso real
+        # 472623/472624: "un mismo transporte puede llevar múltiples
+        # entregas/obras/clientes distintos" -- esta detección nunca se
+        # actualizó para coincidir con esa misma premisa). Diversidad de
+        # cliente/obra NUNCA es, por sí sola, evidencia de que dos
+        # documentos contradigan el mismo hecho -- `destino/dirección`
+        # (`_campo_destino_consolidado`) y `material`
+        # (`Viaje.materiales`) ya tratan esa misma diversidad como
+        # legítima, publicando listas en vez de exigir unanimidad; sólo
+        # cliente/obra_destino seguían tratándose como si el viaje fuera
+        # de un único cliente/obra. Una contradicción real dentro del
+        # MISMO hecho operacional (p. ej. 464265/`DESTINO_CONTRADICE_
+        # CATALOGO_CONFIRMADO`, un documento cuyo propio destino
+        # contradice el catálogo ya confirmado para su obra) sigue
+        # detectándose -- eso vive en `motivo_ruta`/las decisiones
+        # `DESTINO_NO_RESUELTO`, un mecanismo totalmente distinto, nunca
+        # tocado aquí.
         campos_conflicto = (
             (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop], _valores_compatibles),
             (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_RUT_CHOFER, [d.rut_chofer for d in documentos], _valores_compatibles_rut),
-            (MotivoRevision.CONFLICTO_CLIENTE, [d.cliente for d in documentos], _valores_compatibles),
-            (MotivoRevision.CONFLICTO_OBRA_DESTINO, [d.obra_destino for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_ORIGEN, [], lambda _valores, _c=hay_conflicto_origen: not _c),
             (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos], _valores_compatibles),

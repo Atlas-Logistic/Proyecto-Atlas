@@ -262,10 +262,11 @@ def test_chofer_canonico_fuzzy_se_conserva():
 @pytest.mark.parametrize(
     ("campo", "valor", "motivo"),
     [
+        # Campos que describen el VEHÍCULO/VIAJE FÍSICO -- un solo camión,
+        # un solo chofer, una sola fecha -- diversidad real aquí SÍ es
+        # contradicción.
         ("chofer", "OTRO CHOFER", MotivoRevision.CONFLICTO_CHOFER),
         ("rut_chofer", "9.999.999-9", MotivoRevision.CONFLICTO_RUT_CHOFER),
-        ("cliente", "OTRO CLIENTE", MotivoRevision.CONFLICTO_CLIENTE),
-        ("obra_destino", "OTRA OBRA", MotivoRevision.CONFLICTO_OBRA_DESTINO),
         ("patente_tracto", "ZZZZ99", MotivoRevision.CONFLICTO_PATENTE_TRACTO),
         ("patente_rampla", "YYYY88", MotivoRevision.CONFLICTO_PATENTE_RAMPLA),
         ("fecha", "2026-07-29", MotivoRevision.CONFLICTO_FECHA),
@@ -282,6 +283,84 @@ def test_contradicciones_activan_revision_y_preservan_evidencia(
     assert viaje.estado == EstadoViaje.REQUIERE_REVISION
     assert motivo in viaje.motivos_revision
     assert viaje.documentos[0].evidencia[campo] != viaje.documentos[1].evidencia[campo]
+
+
+# ============================================================
+# Bloque VIAJES MULTIGUÍA/MULTICLIENTE/MULTIOBRA -- caso real 0000352376
+# (464698/464699/464700): diversidad de cliente/obra_destino entre
+# documentos del mismo transporte es legítima (varias entregas en un
+# mismo viaje físico) -- nunca, por sí sola, evidencia de contradicción.
+# ============================================================
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor"),
+    [
+        ("cliente", "OTRO CLIENTE"),
+        ("obra_destino", "OTRA OBRA"),
+    ],
+)
+def test_diversidad_de_cliente_u_obra_entre_documentos_no_genera_conflicto(campo, valor):
+    """Un mismo transporte puede llevar entregas a clientes/obras
+    distintos -- diversidad legítima, nunca CONFLICTO_CLIENTE/
+    CONFLICTO_OBRA_DESTINO por sí sola. Los datos por documento se
+    preservan intactos (ver `documentos_operacionales`/`clientes`/
+    `obras_destino`, que siguen publicando ambos valores como lista)."""
+    filas = [_fila(archivo="a.jpg"), _fila(archivo="b.jpg", **{campo: valor})]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.CONFIRMADO
+    assert MotivoRevision.CONFLICTO_CLIENTE not in viaje.motivos_revision
+    assert MotivoRevision.CONFLICTO_OBRA_DESTINO not in viaje.motivos_revision
+    # El dato por documento sigue disponible tal cual -- nunca se pierde,
+    # nunca se mezcla entre documentos.
+    assert viaje.documentos[0].evidencia[campo] != viaje.documentos[1].evidencia[campo]
+
+
+def test_caso_real_0000352376_cliente_y_obra_distintos_confirma_solo():
+    """Reproduce el caso real completo: 2 clientes/2 obras/2 destinos
+    legítimos en el mismo transporte -- confirma solo, sin pedirle nada
+    a Javier, conservando los 3 documentos y ambos pares cliente/obra."""
+    filas = [
+        _fila(
+            archivo="464698.jpeg", numero_guia="464698",
+            cliente="EBEMA SA", obra_destino="SOC CONSTRUCTORA OCL LIMITADA",
+        ),
+        _fila(
+            archivo="464699.jpeg", numero_guia="464699",
+            cliente="EBEMA SA", obra_destino="SOC CONSTRUCTORA OCL LIMITADA",
+        ),
+        _fila(
+            archivo="464700.jpeg", numero_guia="464700",
+            cliente="PRODALAM SA", obra_destino="EBCO SA",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    assert len(viajes) == 1
+    viaje = viajes[0]
+
+    assert viaje.estado == EstadoViaje.CONFIRMADO
+    assert viaje.motivos_revision == []
+    assert len(viaje.documentos) == 3
+    assert viaje.numeros_guia == ["464698", "464699", "464700"]
+    assert set(viaje.clientes) == {"EBEMA SA", "PRODALAM SA"}
+    assert set(viaje.obras_destino) == {"SOC CONSTRUCTORA OCL LIMITADA", "EBCO SA"}
+
+
+def test_diversidad_de_cliente_no_oculta_una_contradiccion_real_de_vehiculo():
+    """Diversidad legítima de cliente/obra y una contradicción real de
+    patente (mismo transporte, dos patentes de tracto distintas) deben
+    convivir -- la primera nunca enmascara ni suprime la segunda."""
+    filas = [
+        _fila(archivo="a.jpg", cliente="CLIENTE A", obra_destino="OBRA A"),
+        _fila(archivo="b.jpg", cliente="CLIENTE B", obra_destino="OBRA B", patente_tracto="ZZZZ99"),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0]
+    assert viaje.estado == EstadoViaje.REQUIERE_REVISION
+    assert MotivoRevision.CONFLICTO_PATENTE_TRACTO in viaje.motivos_revision
+    assert MotivoRevision.CONFLICTO_CLIENTE not in viaje.motivos_revision
+    assert MotivoRevision.CONFLICTO_OBRA_DESTINO not in viaje.motivos_revision
 
 
 @pytest.mark.parametrize(
@@ -422,6 +501,12 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
         # Ninguna fila de este escenario trae indicador_revision=REVISAR;
         # ese motivo es independiente de los conflictos entre documentos.
         MotivoRevision.DOCUMENTO_REQUIERE_REVISION,
+        # Bloque VIAJES MULTIGUÍA/MULTICLIENTE/MULTIOBRA -- cliente/obra
+        # también divergen en este escenario (a propósito, junto con los
+        # campos que sí describen el vehículo/viaje físico), pero ya no
+        # generan conflicto por sí solos -- diversidad legítima.
+        MotivoRevision.CONFLICTO_CLIENTE,
+        MotivoRevision.CONFLICTO_OBRA_DESTINO,
     }
     assert len(viaje.a_dict()["evidencias_documentos"]) == 2
 
