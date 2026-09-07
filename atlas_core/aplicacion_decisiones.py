@@ -569,7 +569,19 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 identidad_obra = decision.get("identidad_resuelta") or {}
                 obra_id = str(identidad_obra.get("entidad_id", ""))
                 obra_canonica = str(contexto.get("obra_canonica") or identidad_obra.get("valor_canonico") or "")
-                destino_texto = str(contexto.get("destino_documental") or decision.get("valor_documental", "")).strip()
+                destino_leido = str(contexto.get("destino_documental") or decision.get("valor_documental", "")).strip()
+                # Bloque CONFIRMACIÓN/CORRECCIÓN DE DESTINO -- caso real
+                # 0000356848 ("ING. EDUARDO DOMINGUEZ 920 MAIPU MAIPU"):
+                # al confirmar, Javier puede corregir el texto leído (aquí
+                # quitar la comuna repetida dentro de la calle) antes de
+                # aplicar. El valor CORREGIDO -- nunca el crudo -- es el
+                # que se aprende como dirección canónica; la comuna/región
+                # viajan aparte (`comuna_manual`, nunca incrustada en la
+                # calle), igual que en REGISTRAR_DIRECCION.
+                correccion_destino = str(direccion_manual or "").strip()
+                comuna_correccion = str(comuna_manual or "").strip()
+                destino_texto = correccion_destino or destino_leido
+                destino_corregido = bool(correccion_destino) and correccion_destino != destino_leido
                 if not obra_id or not obra_canonica or not destino_texto or not cliente_id:
                     raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para confirmar el destino.")
                 if accion == "CONFIRMAR":
@@ -577,6 +589,31 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # dirección normalizada => mismo destino_id).
                     numero_guia = str(decision.get("documento", {}).get("numero_guia") or "")
                     fuente = f"DECISION_HUMANA_R3_4:{decision_id}"
+                    # Bloque CONFIRMACIÓN/CORRECCIÓN DE DESTINO -- si el
+                    # texto leído se corrigió, el dato SUCIO no debe
+                    # sobrevivir en la fila: se reemplaza `despachar_a_
+                    # crudo`/`direccion_entrega` por el corregido y se
+                    # invalidan los derivados de ruta (km/tiempo/comuna/
+                    # región dependían de la dirección anterior). El
+                    # recálculo lo hace `revalidar_y_regenerar_reporte` al
+                    # final de `aplicar_decision_obra` (esta combinación
+                    # tipo/acción ya cae en esa rama) -- nunca se inventa
+                    # km/tiempo; si no geocodifica, la próxima
+                    # reconciliación natural lo reintenta y el aprendizaje
+                    # canónico de abajo no se pierde (mismo criterio R13).
+                    if destino_corregido:
+                        from atlas_core.revalidacion_documental import (
+                            _escribir_filas_completas, _leer_filas, invalidar_derivados_ruta,
+                        )
+                        with bloqueo_sesion(actual, "revalidacion_dataset"):
+                            filas_dataset = _leer_filas(dataset)
+                            fila_objetivo = next(
+                                (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia), None,
+                            )
+                            if fila_objetivo is not None:
+                                fila_objetivo.update(invalidar_derivados_ruta())
+                                fila_objetivo["despachar_a_crudo"] = destino_texto
+                                _escribir_filas_completas(dataset, filas_dataset)
                     # Bloque RESOLUCIÓN R16 -- una confirmación humana
                     # explícita ("CONFIRMAR") es exactamente la evidencia
                     # que `estado_calidad=CONFIRMADO` representa; antes de
@@ -587,6 +624,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # sin ningún destino real que pudiera usar.
                     destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
                         nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
+                        comuna=comuna_correccion,
                         estado_calidad=EstadoCalidadDestino.CONFIRMADO,
                     )
                     # B/C. Reutilizar la obra global existente (por nombre

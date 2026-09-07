@@ -42,7 +42,7 @@ def _escribir_csv(ruta, filas):
         escritor.writerows(filas)
 
 
-def _entorno(tmp_path, *, filas_csv=None):
+def _entorno(tmp_path, *, filas_csv=None, destino_texto=DESTINO_TEXTO):
     raiz = tmp_path / "Atlas"
     catalogos = raiz / "catalogos_privados"; actual = raiz / "operacion" / "actual"
     (raiz / "reportes").mkdir(parents=True); catalogos.mkdir(parents=True); actual.mkdir(parents=True)
@@ -64,19 +64,22 @@ def _entorno(tmp_path, *, filas_csv=None):
     obra = obras.registrar_observacion(cliente_id=cliente.cliente_id, nombre_obra=OBRA_TEXTO, evidencia=evidencia_obra).obra
 
     dataset = actual / "analisis_completo_guias.csv"
-    _escribir_csv(dataset, filas_csv if filas_csv is not None else [_fila_csv()])
+    _escribir_csv(
+        dataset,
+        filas_csv if filas_csv is not None else [_fila_csv(despachar_a_crudo=destino_texto)],
+    )
 
     decision = crear_decision(
         tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO", archivo="464715.jpeg",
         numero_guia="464715", numero_transporte="T1", campo="destino_entrega",
-        valor_documental=DESTINO_TEXTO, valor_normalizado=DESTINO_TEXTO,
+        valor_documental=destino_texto, valor_normalizado=destino_texto,
         identidad_resuelta={"entidad_id": obra.obra_id, "valor_canonico": OBRA_TEXTO},
         candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",),
         evidencias=({"tipo": "OBRA_IDENTIFICADA", "entidad_id": obra.obra_id},),
         acciones_permitidas=("CONFIRMAR", "NO_CONFIRMAR", "POSPONER"),
         contexto={
             "cliente_id": cliente.cliente_id, "cliente_canonico": "CONSTRUMART SA",
-            "obra_id": obra.obra_id, "obra_canonica": OBRA_TEXTO, "destino_documental": DESTINO_TEXTO,
+            "obra_id": obra.obra_id, "obra_canonica": OBRA_TEXTO, "destino_documental": destino_texto,
         },
     )
     generar_artefacto(ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual/"decisiones_pendientes.json")
@@ -179,6 +182,55 @@ def test_repetir_confirmar_no_duplica(tmp_path):
     assert segunda["idempotente"] is True
     destinos = CatalogoDestinos(catalogos/"destinos_maestros.json", ruta_clientes=catalogos/"clientes.json").listar()
     assert len(destinos) == 1
+
+
+# --- CONFIRMAR con corrección de la dirección leída ---
+
+DESTINO_SUCIO = "ING. EDUARDO DOMINGUEZ 920 MAIPU MAIPU"
+DESTINO_LIMPIO = "ING. EDUARDO DOMINGUEZ 920"
+
+
+def test_confirmar_con_direccion_corregida_aprende_el_valor_limpio(tmp_path):
+    # Caso real 0000356848: Javier confirma el destino pero corrige el
+    # texto leído (quita la comuna repetida dentro de la calle). El valor
+    # CORREGIDO -- nunca el sucio -- es el que se aprende como canónico y
+    # el que queda en la fila.
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path, destino_texto=DESTINO_SUCIO)
+    resultado = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR",
+        direccion_manual=DESTINO_LIMPIO, comuna_manual="Maipú",
+    )
+    assert resultado["ok"]
+
+    destinos = CatalogoDestinos(catalogos/"destinos_maestros.json", ruta_clientes=catalogos/"clientes.json").listar()
+    assert len(destinos) == 1
+    assert destinos[0].direccion == DESTINO_LIMPIO
+    assert "MAIPU MAIPU" not in destinos[0].direccion
+
+    with (actual / "analisis_completo_guias.csv").open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["despachar_a_crudo"] == DESTINO_LIMPIO  # el texto sucio no sobrevive
+
+    obras_cat = CatalogoObrasDestinos(ruta=catalogos/"obras_destinos.json", ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogos/"destinos_maestros.json")
+    relaciones = obras_cat.listar_relaciones()
+    assert len(relaciones) == 1 and relaciones[0].estado == "CONFIRMADA"
+    assert _pendientes(actual) == []
+
+
+def test_confirmar_sin_correccion_conserva_el_texto_leido(tmp_path):
+    # Sin corrección (o corrección idéntica): comportamiento intacto --
+    # se aprende el texto leído y la fila no se reescribe.
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path, destino_texto=DESTINO_SUCIO)
+    resultado = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR",
+        direccion_manual=DESTINO_SUCIO,
+    )
+    assert resultado["ok"]
+    destinos = CatalogoDestinos(catalogos/"destinos_maestros.json", ruta_clientes=catalogos/"clientes.json").listar()
+    assert len(destinos) == 1 and destinos[0].direccion == DESTINO_SUCIO
+    with (actual / "analisis_completo_guias.csv").open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["despachar_a_crudo"] == DESTINO_SUCIO
 
 
 # --- NO CONFIRMAR ---
