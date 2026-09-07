@@ -669,6 +669,19 @@ class Viaje:
         return self._campo_ruta_consolidado("duracion_estadia_gps_min")
 
     @property
+    def entregas(self) -> list[dict[str, object]]:
+        """Bloque VIAJE MULTIENTREGA V1 -- derivación (no persistente) de las
+        1..N entregas/paradas ya inferibles desde los documentos del viaje.
+        Compartir `numero_transporte` nunca basta para agrupar dos
+        documentos en la misma entrega (caso real 0000352376: 464698/464699
+        a una comuna, 464700 a otra). Con un único destino inferible, la
+        lista tiene un solo elemento -- Desktop mantiene entonces la ficha
+        de Logística compacta de siempre. Ver `atlas_core.entregas`."""
+        from atlas_core.entregas import derivar_entregas
+
+        return derivar_entregas(self.documentos)
+
+    @property
     def documentos_operacionales(self) -> list[dict[str, str]]:
         """Bloque P1.1 (BLOQUEANTE 1) -- representación PUBLICABLE, POR
         DOCUMENTO, de cliente/obra_destino/material/destino -- nunca la
@@ -753,6 +766,7 @@ class Viaje:
             "duracion_estadia_gps_min": self.duracion_estadia_gps_min,
             "evidencias_documentos": [d.evidencia for d in self.documentos],
             "documentos_operacionales": self.documentos_operacionales,
+            "entregas": self.entregas,
             "fecha_creacion": self.fecha_creacion,
         }
 

@@ -102,6 +102,13 @@ COLUMNAS_VIAJES = (
     # existente -- backward-compatible, un reporte generado antes de
     # este bloque simplemente no tenía esta columna.
     "documentos_operacionales",
+    # Bloque VIAJE MULTIENTREGA V1: derivación (no persistente) de las
+    # 1..N entregas/paradas ya inferibles desde los documentos del viaje
+    # -- ver `Viaje.entregas`/`atlas_core.entregas`. Agregada al final del
+    # bloque existente -- backward-compatible: un reporte generado antes de
+    # este bloque simplemente no tenía esta columna, y Desktop la deriva
+    # entonces desde `evidencias_documentos`/`documentos_operacionales`.
+    "entregas",
     "fecha_creacion",
     # Bloque RUTAS R1: enriquecimiento logístico opcional (planta origen +
     # destino canónico + ORS). Agregadas al final -- backward-compatible:
@@ -288,6 +295,9 @@ def _fila_viaje(
         ),
         "documentos_operacionales": json.dumps(
             datos["documentos_operacionales"], ensure_ascii=False, sort_keys=True
+        ),
+        "entregas": json.dumps(
+            datos["entregas"], ensure_ascii=False, sort_keys=True
         ),
         "fecha_creacion": datos["fecha_creacion"],
         "peso_total_viaje_kg": datos["peso_total_viaje_kg"],
