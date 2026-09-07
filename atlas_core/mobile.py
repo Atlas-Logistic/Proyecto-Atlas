@@ -14,7 +14,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from atlas_core.almacenamiento_portable import SesionOcupadaError, bloqueo_sesion, escribir_json_atomico
 from atlas_core.decisiones_pendientes import (
@@ -223,7 +223,10 @@ class RepositorioEnviosMobile:
         return sorted(salida, key=lambda r: r.get("recibido_en", ""))
 
 
-def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) -> dict[str, object]:
+def asociar_documento(
+    datos: Mapping[str, object], filas: list[dict[str, str]],
+    *, candidatos_lote: Sequence[str] = (),
+) -> dict[str, object]:
     """Distingue tres conceptos que ANTES de Asociación Mobile V2 se
     confundían bajo un solo resultado/etiqueta (caso real 472593, guía y
     transporte OCR limpios que terminaban en SIN_ASOCIACION):
@@ -245,6 +248,17 @@ def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) 
     aparece un segundo documento con el mismo transporte (Multiguía,
     Sección 4) vía `revalidar_asociacion_mobile_sin_ocr` (Sección 7),
     nunca reescribiendo esta función para adivinar antes de tiempo.
+
+    `candidatos_lote` (Bloque RESPALDO POR LOTE, prueba real "5 guías / 2
+    viajes"): transportes YA resueltos (`ASOCIADO_AUTOMATICAMENTE`) de
+    OTROS documentos de la MISMA tanda Mobile (`lote_id`) -- calculados
+    por el llamador (`_procesar_envio_mobile_impl`/`revalidar_asociacion_
+    mobile_sin_ocr`), nunca por esta función (que sigue sin tocar disco).
+    `numero_transporte` sigue siendo la única identidad canónica del
+    viaje -- `lote_id` NUNCA la reemplaza, sólo aporta un respaldo
+    determinista para el caso en que ESTE documento no tenga ninguna
+    evidencia propia utilizable (ver más abajo). Ausente/vacío ->
+    comportamiento histórico intacto, idéntico a antes de este bloque.
     """
     guia = str(datos.get("numero_guia", "")).strip()
     transporte = str(datos.get("numero_transporte", "")).strip()
@@ -283,6 +297,48 @@ def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) 
     # COINCIDENCIA, Sección 2) -- nunca se inventa un estado nuevo
     # (Sección 2: "no crear estados nuevos si los actuales ya
     # representan correctamente estas situaciones").
+    # Bloque RESPALDO POR LOTE -- sólo entra aquí un documento SIN
+    # evidencia propia utilizable (transporte vacío/"No encontrado"/
+    # formato inválido, `not transporte_valido(transporte)`). Uno con
+    # transporte válido, aunque no matchee todavía (bucket "primer
+    # documento de un transporte nuevo", legítimo por Sección 13.2),
+    # NUNCA llega a este bloque -- evidencia documental propia, aunque
+    # sea sólo suya, siempre pesa más que una inferencia de lote y jamás
+    # se pisa silenciosamente (ticket "no sobrescribir evidencia fuerte
+    # contradictoria"). `candidatos_lote` ya viene filtrado por el
+    # llamador a sólo transportes de OTROS documentos de la MISMA tanda
+    # (`lote_id`) que ya resolvieron `ASOCIADO_AUTOMATICAMENTE` -- mismo
+    # criterio "coincidencia exacta determinista" que el resto de esta
+    # función, nunca una heurística nueva ni un `numero_transporte`
+    # inventado.
+    if not transporte_valido(transporte) and candidatos_lote:
+        candidatos_lote_unicos = sorted(set(candidatos_lote))
+        if len(candidatos_lote_unicos) == 1:
+            return {
+                "estado": "ASOCIADO_AUTOMATICAMENTE", "numero_transporte": candidatos_lote_unicos[0],
+                "numero_guia": guia, "candidatos": candidatos_lote_unicos,
+                "motivo": "Respaldo por lote Mobile: otro documento de la misma tanda ya resolvió este transporte.",
+                "documento_ya_existe": documento_ya_existe,
+            }
+        if len(candidatos_lote_unicos) > 1:
+            # Más de un transporte resuelto dentro de la misma tanda:
+            # inconsistencia real (p. ej. dos viajes distintos mezclados
+            # en una tanda por error humano) -- nunca se elige uno al
+            # azar, mismo criterio que el `len(transportes) > 1` de
+            # arriba (reutiliza el mismo estado, Sección 2: "no crear
+            # estados nuevos si los actuales ya representan
+            # correctamente estas situaciones").
+            return {
+                "estado": "PROPUESTA_REQUIERE_REVISION", "numero_transporte": "", "numero_guia": guia,
+                "candidatos": candidatos_lote_unicos,
+                "motivo": "La misma tanda Mobile ya resolvió más de un transporte distinto -- ambigüedad real, no se elige ninguno.",
+                "documento_ya_existe": documento_ya_existe,
+            }
+        # 0 candidatos resueltos todavía en la tanda: sigue sin evidencia
+        # -- cae al SIN_ASOCIACION de siempre, se reintentará solo cuando
+        # algún documento hermano resuelva (revalidar_asociacion_mobile_
+        # sin_ocr, disparada automáticamente tras cada envío nuevo).
+
     if transporte_valido(transporte):
         motivo = "Transporte leído, pero todavía sin ninguna otra coincidencia en la operación vigente."
     elif transporte:
@@ -293,6 +349,88 @@ def asociar_documento(datos: Mapping[str, object], filas: list[dict[str, str]]) 
         "estado": "SIN_ASOCIACION", "numero_transporte": "", "numero_guia": guia, "candidatos": [],
         "motivo": motivo, "documento_ya_existe": documento_ya_existe,
     }
+
+
+def _transportes_resueltos_del_lote(
+    historial: list[dict[str, object]], lote_id: str, *, excluir_envio_id: str,
+) -> list[str]:
+    """Bloque RESPALDO POR LOTE -- transportes YA resueltos
+    (`ASOCIADO_AUTOMATICAMENTE`) de otros envíos de la MISMA tanda
+    (`lote_id`), para que `asociar_documento` los use como respaldo
+    determinista. Puramente de lectura sobre un `historial()` ya
+    obtenido por el llamador (nunca vuelve a tocar disco por su cuenta) --
+    lo mismo que ya resolvió otro documento de la tanda (por el mecanismo
+    normal O por este mismo respaldo, ver más abajo) cuenta igual, lo que
+    permite que la convergencia sea transitiva sin importar el orden de
+    llegada. `lote_id` vacío nunca debería llegar aquí (el llamador ya
+    filtra) -- por las dudas, devuelve vacío en vez de agrupar por
+    "todos los envíos sin lote".
+    """
+    if not lote_id:
+        return []
+    transportes: set[str] = set()
+    for registro in historial:
+        if registro.get("envio_id") == excluir_envio_id:
+            continue
+        if str(registro.get("lote_id", "")) != lote_id:
+            continue
+        asociacion = registro.get("resultado_asociacion") or {}
+        if asociacion.get("estado") != "ASOCIADO_AUTOMATICAMENTE":
+            continue
+        transporte_resuelto = str(asociacion.get("numero_transporte", "")).strip()
+        if transporte_resuelto:
+            transportes.add(transporte_resuelto)
+    return sorted(transportes)
+
+
+def _corregir_transporte_por_respaldo_lote_en_dataset(
+    dataset: Path, *, identificador_documento: str, numero_transporte: str,
+) -> bool:
+    """Bloque RESPALDO POR LOTE -- cuando `revalidar_asociacion_mobile_
+    sin_ocr` converge un documento vía respaldo de lote DESPUÉS de que su
+    fila ya se persistió (la primera vez que se procesó, sin nada
+    todavía con qué asociarse -- el mismo caso de siempre, Sección 4),
+    esa fila ya en disco sigue mostrando el `numero_transporte` crudo que
+    leyó el OCR (vacío/"No encontrado") y NUNCA se actualiza sola:
+    `agrupar_viajes` (Desktop) lee `numero_transporte` de la fila, nunca
+    de `resultado_asociacion` (que vive sólo en `envio.json`). Sin esta
+    corrección, la convergencia quedaría invisible para Desktop pese a
+    estar resuelta en Mobile.
+
+    Corrige ÚNICAMENTE ese campo, de ESA fila (por `archivo`, mismo
+    identificador que usa el resto de este módulo) -- nunca reinterpreta
+    ni toca ningún otro dato documental. Reutiliza el mismo lock
+    (`NOMBRE_LOCK_DATASET_OPERACIONAL`) y el mismo escritor atómico
+    (`_escribir_filas_completas`, ya usado más arriba para la migración
+    G1-C) que el resto de las escrituras al dataset operacional -- nunca
+    un segundo mecanismo paralelo. Conservador con esquemas no
+    estándar (fixtures de prueba con columnas reducidas, dataset
+    ausente, fila no encontrada, o encabezado `COLUMNAS_PRE_G1C` sin
+    migrar): en cualquiera de esos casos no hace nada y devuelve
+    ``False`` -- exactamente la misma cautela que ya aplica la escritura
+    original de esta misma fila (`encabezado_compatible`)."""
+    if not dataset.is_file():
+        return False
+    with bloqueo_sesion(dataset.parent, NOMBRE_LOCK_DATASET_OPERACIONAL):
+        with dataset.open(encoding="utf-8-sig", newline="") as archivo_csv:
+            lector = csv.DictReader(archivo_csv, delimiter=";")
+            filas_frescas = list(lector)
+            encabezado_fresco = list(lector.fieldnames or [])
+        if encabezado_fresco != COLUMNAS:
+            return False  # esquema reducido/en migración -- no se toca.
+        cambiado = False
+        for fila in filas_frescas:
+            if fila.get("archivo") != identificador_documento:
+                continue
+            if fila.get("numero_transporte") != numero_transporte:
+                fila["numero_transporte"] = numero_transporte
+                cambiado = True
+            break
+        if not cambiado:
+            return False
+        from atlas_core.revalidacion_documental import _escribir_filas_completas
+        _escribir_filas_completas(dataset, filas_frescas)
+        return True
 
 
 def _captura_ilegible(datos: Mapping[str, object]) -> bool:
@@ -459,7 +597,16 @@ def _procesar_envio_mobile_impl(
         datos, resumen_ia = escalar_resultado_ia_en_memoria(
             datos, filas, orquestador_ia=orquestador_ia, carpeta_catalogos=carpeta_catalogos,
         )
-        asociacion = asociar_documento(datos, filas)
+        # Bloque RESPALDO POR LOTE -- sólo se molesta en escanear
+        # `historial()` cuando este envío realmente trae `lote_id`
+        # (Mobile V1 histórico, sin tanda, nunca paga este costo -- ver
+        # `_transportes_resueltos_del_lote`).
+        lote_id = str(registro.get("lote_id", "")).strip()
+        candidatos_lote: list[str] = (
+            _transportes_resueltos_del_lote(repositorio.historial(), lote_id, excluir_envio_id=envio_id)
+            if lote_id else []
+        )
+        asociacion = asociar_documento(datos, filas, candidatos_lote=candidatos_lote)
         captura_ilegible = _captura_ilegible(datos)
 
         archivo_dataset = ""
@@ -476,6 +623,18 @@ def _procesar_envio_mobile_impl(
                 estado_procesamiento=str(datos.get("estado_procesamiento") or "OK"),
                 error="",
             )
+            # Bloque RESPALDO POR LOTE -- si `asociacion` resolvió el
+            # transporte por respaldo de lote (no por lo que ESTE
+            # documento leyó por su cuenta), la fila que se persiste debe
+            # reflejarlo -- si no, Desktop (`agrupar_viajes`, que lee
+            # `numero_transporte` de esta MISMA fila, nunca de
+            # `resultado_asociacion`) nunca agruparía este documento bajo
+            # su viaje real. Sólo pisa el campo cuando la asociación es
+            # `ASOCIADO_AUTOMATICAMENTE` -- nunca en SIN_ASOCIACION/
+            # PROPUESTA_REQUIERE_REVISION, donde no hay ningún valor
+            # determinista que escribir.
+            if asociacion.get("estado") == "ASOCIADO_AUTOMATICAMENTE":
+                fila["numero_transporte"] = str(asociacion.get("numero_transporte", ""))
             # Bloque CONSISTENCIA OPERACIONAL -- el chequeo de duplicado
             # (`filas`, leído ANTES del OCR, arriba) puede haber quedado
             # obsoleto mientras corría el OCR: se revalida por segunda vez
@@ -1418,9 +1577,21 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 # reintenta `asociar_documento` cuando la asociación en sí
                 # sigue pendiente; si ya está resuelta, se conserva TAL
                 # CUAL (nunca se re-evalúa, nunca se inventa una nueva).
-                asociacion_nueva = (
-                    asociar_documento(datos, filas_sin_propia) if reintentar_asociacion else asociacion_previa
-                )
+                if reintentar_asociacion:
+                    # Bloque RESPALDO POR LOTE -- `historial()` se
+                    # relee FRESCO acá (nunca el snapshot con el que
+                    # empezó este barrido) para que un hermano de la
+                    # MISMA tanda que ya convergió más temprano en este
+                    # mismo barrido cuente igual -- la convergencia es
+                    # transitiva e independiente del orden de llegada.
+                    lote_id = str(registro.get("lote_id", "")).strip()
+                    candidatos_lote: list[str] = (
+                        _transportes_resueltos_del_lote(repositorio.historial(), lote_id, excluir_envio_id=envio_id)
+                        if lote_id else []
+                    )
+                    asociacion_nueva = asociar_documento(datos, filas_sin_propia, candidatos_lote=candidatos_lote)
+                else:
+                    asociacion_nueva = asociacion_previa
                 # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640:
                 # la fila propia (si `procesar_envio_mobile` ya la
                 # escribió) es la fuente FRESCA de `indicador_revision`,
@@ -1444,6 +1615,19 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 registro["estado"] = estado_nuevo
                 repositorio.guardar(envio_id, registro)
                 actualizados.append(envio_id)
+                # Bloque RESPALDO POR LOTE -- si la convergencia de este
+                # pase resolvió un transporte que ESTE documento no leyó
+                # por su cuenta (respaldo de lote), la fila ya persistida
+                # en el dataset todavía muestra el valor crudo original --
+                # Desktop/`agrupar_viajes` leen de ahí, nunca de
+                # `resultado_asociacion`. Se intenta también en el caso
+                # normal (mismo valor ya escrito, ver docstring) -- no-op
+                # seguro, nunca un segundo camino de decisión.
+                if asociacion_nueva.get("estado") == "ASOCIADO_AUTOMATICAMENTE":
+                    _corregir_transporte_por_respaldo_lote_en_dataset(
+                        dataset, identificador_documento=identificador_propio,
+                        numero_transporte=str(asociacion_nueva.get("numero_transporte", "")),
+                    )
         except SesionOcupadaError:
             continue
 
