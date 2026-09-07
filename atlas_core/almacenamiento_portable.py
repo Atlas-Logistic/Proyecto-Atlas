@@ -183,6 +183,25 @@ def escribir_estado_operacion(
     ruta_reporte_relativa = _ruta_relativa_segura(raiz_efectiva, reporte_vigente)
     if ruta_reporte_relativa is None:
         return None
+    # Bloque PUBLICACIÓN / RECONCILIACIÓN DEL DROP -- causa raíz real
+    # (lote de 10 guías): `contenido` se arma de cero en cada llamada, así
+    # que un publicador que NO conoce `version_estado_derivado` (p. ej.
+    # `generar_reporte_viajes.py`, el 1er reporte del ingreso Desktop, o
+    # `revalidar_y_regenerar_reporte`) BORRABA el campo -- y la siguiente
+    # `reconciliar_estado_derivado` leía `version_estado_derivado=0`,
+    # tratando un dataset ya vigente como una migración completa v0->N
+    # sobre TODAS las filas históricas. Cuando el llamador no pasa
+    # `version_estado_derivado` se ARRASTRA el del manifiesto actual --
+    # `reconciliar_estado_derivado` (el único dueño real del campo)
+    # siempre lo pasa explícito, así que sigue mandando cuando de verdad
+    # migra. `huella_filas_dataset` NO se arrastra: su ausencia ya tiene
+    # un fallback definido (`dataset_sha256` histórico, ver
+    # `revalidar_y_regenerar_reporte`) y arrastrar un valor viejo tras un
+    # cambio real de dataset sería peor que omitirlo.
+    if version_estado_derivado is None:
+        _previo = leer_estado_operacion(raiz=raiz_efectiva) or {}
+        if isinstance(_previo.get("version_estado_derivado"), int):
+            version_estado_derivado = _previo["version_estado_derivado"]
     ruta_dataset_relativa = None
     if dataset_operacional is not None:
         ruta_dataset_relativa = _ruta_relativa_segura(raiz_efectiva, dataset_operacional)

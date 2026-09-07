@@ -1433,6 +1433,24 @@ def resolver_destino_entrega_validado(
             localidad="", region="",
             metodo_confirmacion=resultado.metodo_confirmacion,
         )
+    # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- señal secundaria: número
+    # de casa incompatible por orden de magnitud (ver
+    # `_numero_direccion_incompatible`). No aceptar un match espurio sólo
+    # porque el proveedor devolvió coordenadas.
+    if _numero_direccion_incompatible(despachar_a_crudo or "", resultado.etiqueta_geocodificada or ""):
+        return ResultadoDestinoEntrega(
+            despachar_a_crudo=resultado.despachar_a_crudo,
+            coordenadas=resultado.coordenadas,
+            etiqueta_geocodificada="",
+            confianza=resultado.confianza,
+            estado=ESTADO_REVISAR,
+            motivo=(
+                "GEOCODIFICACION_NUMERO_INCOMPATIBLE: "
+                f"{_numero_calle(despachar_a_crudo or '')} != {_numero_calle(resultado.etiqueta_geocodificada or '')}"
+            ),
+            localidad="", region="",
+            metodo_confirmacion=resultado.metodo_confirmacion,
+        )
     return resultado
 
 
@@ -1895,9 +1913,80 @@ def _comuna_documental_inequivoca(texto: str) -> str:
     catálogo territorial (dos comunas reales que comparten nombre con una
     calle). Con una sola comuna mencionada (caso real 460807: "SAN
     BERNARDO" repetido, ninguna otra comuna en el texto), la evidencia sí
-    es inequívoca y puede contradecir con seguridad."""
+    es inequívoca y puede contradecir con seguridad.
+
+    Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- caso real 0000353303/
+    464784 ("URUGUAY 15 ... LA CISTERNA"): el texto de destino trae a
+    menudo la comuna específica de entrega PRECEDIDA por "Santiago" usado
+    como etiqueta de CIUDAD / ÁREA METROPOLITANA (no la comuna homónima).
+    `_comunas_explicitas` devuelve `("La Cisterna", "Santiago")` y, antes
+    de este bloque, dos menciones bastaban para abstenerse -- así una
+    geocodificación en Temuco (Araucanía) se aceptaba en silencio. Cuando
+    hay EXACTAMENTE dos comunas y una es "Santiago" territorialmente
+    compatible con la otra (misma región -- reutiliza
+    `_comunas_territorialmente_compatibles`, el mismo criterio ya usado
+    para no marcar falso conflicto contra la localidad geocodificada), la
+    comuna específica ES la inequívoca. Nunca colapsa dos comunas
+    específicas reales en conflicto (regiones distintas, o ninguna es
+    "Santiago") -- ese caso (472002 GALVARINO/QUILICURA) sigue devolviendo
+    "" igual que antes."""
     comunas = _comunas_explicitas(texto)
-    return comunas[0] if len(comunas) == 1 else ""
+    if len(comunas) == 1:
+        return comunas[0]
+    if len(comunas) == 2:
+        es_santiago = [_texto_normalizado_sin_acentos(c).strip().upper() == "SANTIAGO" for c in comunas]
+        if es_santiago.count(True) == 1:
+            especifica = comunas[es_santiago.index(False)]
+            if _comunas_territorialmente_compatibles("Santiago", especifica):
+                return especifica
+    return ""
+
+
+def texto_destino_degradado(texto: str) -> bool:
+    """Bloque DESTINOS CONFIRMADOS COMPLETOS -- caso real 0000353055/
+    464715 ("AV. VICUNA MACKENNA 3451 SAN JOAQUIN SAN JOA"): un texto de
+    destino que el OCR truncó a mitad de palabra NUNCA debe promoverse
+    automáticamente a dirección canónica CONFIRMADA. Señal determinista y
+    conservadora: la frase final (últimos 1..3 tokens) es un prefijo
+    ESTRICTO -- >= 3 caracteres, distinta -- de la frase inmediatamente
+    anterior de la misma longitud. Ese es exactamente el patrón de una
+    comuna repetida y cortada ("SAN JOAQUIN" -> "SAN JOA"). No marca
+    degradado un texto limpio, ni una comuna repetida COMPLETA ("LAS
+    CONDES LAS CONDES" / "SAN MIGUEL SAN MIGUEL"), ni abreviaturas."""
+    tokens = [t.upper() for t in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", str(texto or ""))]
+    for k in range(1, 4):
+        if len(tokens) < 2 * k:
+            break
+        final = " ".join(tokens[-k:])
+        anterior = " ".join(tokens[-2 * k:-k])
+        if len(final) >= 3 and final != anterior and anterior.startswith(final):
+            return True
+    return False
+
+
+def _numero_calle(texto: str) -> str:
+    """Primer número de casa reconocible en una dirección (el que va justo
+    después del nombre de calle, antes de la comuna). Cadena vacía si no
+    hay ninguno."""
+    coincidencia = re.search(r"\b(\d{1,6})\b", str(texto or ""))
+    return coincidencia.group(1) if coincidencia else ""
+
+
+def _numero_direccion_incompatible(despachar_a_crudo: str, etiqueta_geocodificada: str) -> bool:
+    """Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- caso real 464784
+    ("URUGUAY 15" documental -> "1545 Uruguay, Temuco" geocodificado): un
+    match de Nominatim no es confiable sólo porque devolvió coordenadas si
+    el número de casa que trae difiere en ORDEN DE MAGNITUD del documental
+    (15 vs 1545 -- dos dígitos de más). No se rechaza por un dígito de
+    diferencia (OCR frecuente) ni cuando falta el número de un lado
+    (ausencia != contradicción); sólo cuando ambos números existen y su
+    largo difiere en >= 2 dígitos. Señal secundaria -- la comuna/región
+    contradicha sigue siendo la barrera principal."""
+    doc = _numero_calle(despachar_a_crudo)
+    geo = _numero_calle(etiqueta_geocodificada)
+    if not doc or not geo or doc == geo:
+        return False
+    return abs(len(doc) - len(geo)) >= 2
 
 
 def resolver_entrega_documento(

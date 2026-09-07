@@ -589,6 +589,34 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # dirección normalizada => mismo destino_id).
                     numero_guia = str(decision.get("documento", {}).get("numero_guia") or "")
                     fuente = f"DECISION_HUMANA_R3_4:{decision_id}"
+                    # Bloque DESTINOS CONFIRMADOS COMPLETOS -- si la fila de
+                    # ESTA guía YA tiene ruta calculada, sus lat/lon/comuna/
+                    # región validadas se persisten junto con la
+                    # confirmación: un destino CONFIRMADO nunca debe quedar
+                    # con `lat/lon` None cuando las coordenadas ya se
+                    # obtuvieron y validaron (caso 464781). Sin corrección
+                    # (`destino_corregido` False) y con ruta ya calculada,
+                    # es exactamente el mismo punto que la confirmación
+                    # avala -- nunca se inventa nada.
+                    lat_fila = lon_fila = None
+                    comuna_fila = region_fila = ""
+                    if not destino_corregido:
+                        try:
+                            from atlas_core.revalidacion_documental import _leer_filas as _leer_filas_dest
+                            _fila_dest = next(
+                                (f for f in _leer_filas_dest(dataset)
+                                 if str(f.get("numero_guia", "")) == numero_guia), None,
+                            )
+                        except (OSError, ValueError):
+                            _fila_dest = None
+                        if _fila_dest is not None and str(_fila_dest.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                            try:
+                                lat_fila = float(_fila_dest.get("latitud_entrega") or "")
+                                lon_fila = float(_fila_dest.get("longitud_entrega") or "")
+                            except (TypeError, ValueError):
+                                lat_fila = lon_fila = None
+                            comuna_fila = str(_fila_dest.get("localidad_entrega") or "").strip()
+                            region_fila = str(_fila_dest.get("region_entrega") or "").strip()
                     # Bloque CONFIRMACIÓN/CORRECCIÓN DE DESTINO -- si el
                     # texto leído se corrigió, el dato SUCIO no debe
                     # sobrevivir en la fila: se reemplaza `despachar_a_
@@ -624,7 +652,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # sin ningún destino real que pudiera usar.
                     destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
                         nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
-                        comuna=comuna_correccion,
+                        comuna=comuna_correccion or comuna_fila,
+                        region=region_fila,
+                        latitud=lat_fila, longitud=lon_fila,
                         estado_calidad=EstadoCalidadDestino.CONFIRMADO,
                     )
                     # B/C. Reutilizar la obra global existente (por nombre

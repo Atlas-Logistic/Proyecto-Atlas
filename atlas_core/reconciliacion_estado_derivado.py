@@ -28,6 +28,8 @@ from atlas_core.revalidacion_documental import (
     _indicadores_documentales_coherentes,
     reconciliar_bandeja_decisiones,
     reconciliar_incidencias_rut_chofer_documental,
+    revalidar_destino_contra_comuna_documental_sin_ocr,
+    revalidar_destinos_confirmados_sin_coordenadas_sin_ocr,
     revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
@@ -164,7 +166,22 @@ from atlas_core.revalidacion_documental import (
 # reporte (`viajes.csv`) -- sin subir este número, una operación que ya
 # migró a 11 seguiría marcando REQUIERE_REVISION por un conflicto de hora
 # falso hasta que algún otro motivo regenerara el reporte.
-RULESET_VERSION = 12
+#
+# Subida de 12 a 13 -- VALIDACIÓN GEOGRÁFICA + DESTINOS CONFIRMADOS
+# COMPLETOS (lote real de 10 guías): (1) `_comuna_documental_inequivoca`
+# ahora colapsa "Santiago" usado como etiqueta de área junto a la comuna
+# específica -- una geocodificación en otra región (caso 464784: LA
+# CISTERNA -> Temuco) ya NO se acepta en silencio (nuevo motivo
+# `GEOCODIFICACION_NUMERO_INCOMPATIBLE` para el número de casa espurio);
+# (2) `revalidar_destinos_confirmados_sin_coordenadas_sin_ocr` se conecta
+# aquí (antes sólo corría tras una decisión / envío Mobile) para que un
+# destino CONFIRMADO sin coordenadas (caso 464781) se complete en la
+# misma reconciliación del ingreso, y nunca completa un destino con texto
+# degradado por OCR (`texto_destino_degradado`, caso 464715). Sin subir
+# este número, una operación ya migrada a 12 seguiría publicando una ruta
+# a la ciudad equivocada, o un INCOMPLETO_TECNICO transitorio, hasta que
+# algo más regenerara el reporte.
+RULESET_VERSION = 13
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -438,6 +455,16 @@ def reconciliar_estado_derivado(
         limpieza = revalidar_motivo_destino_ya_confirmado_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
         )
+        # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- caso real 464784: un
+        # destino ya persistido cuya localidad geocodificada contradice la
+        # comuna documental inequívoca (LA CISTERNA vs Temuco), o cuyo
+        # número de casa es incompatible por orden de magnitud, se retira
+        # (nunca se deja un viaje CONFIRMADO con km/tiempo a la ciudad
+        # equivocada). `revalidar_y_regenerar_reporte` ya lo hacía; aquí
+        # se conecta también a la reconciliación de la carga de Desktop
+        # (única vía del ingreso de un lote). Sin OCR, sin red -- sólo
+        # columnas ya escritas.
+        limpieza_geo_contradiccion = revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
         limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
         # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa
         # raíz real (464367): un origen que quedó determinado ÚNICAMENTE
@@ -467,6 +494,23 @@ def reconciliar_estado_derivado(
         # catálogo o en el histórico del propio dataset -- función ya
         # existente y probada, sin flujo automático que la invocara.
         limpieza_rut_chofer = reconciliar_incidencias_rut_chofer_documental(raiz_atlas=raiz, reloj=lambda: instante)
+        # Bloque DESTINOS CONFIRMADOS COMPLETOS -- causa raíz real
+        # (0000353312/464781): un destino CONFIRMADO en catálogo cuya
+        # confirmación nunca llegó a geocodificar queda con `lat/lon`
+        # None, así que cada guía a esa obra re-geocodifica en la carga de
+        # Desktop y su 1er reporte la muestra INCOMPLETO_TECNICO hasta que
+        # `revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr` (más
+        # abajo) la resuelve. Esta función ya existía y estaba probada,
+        # pero SÓLO se invocaba desde `revalidar_y_regenerar_reporte`
+        # (aplicación de decisión / envío Mobile), nunca desde la
+        # reconciliación de la carga de Desktop -- que es exactamente
+        # donde el ingreso de un lote la necesita. Corre ANTES del bloque
+        # de catálogo de abajo, para que ese ya use las coordenadas recién
+        # completadas. Nunca completa un destino con texto degradado por
+        # OCR (`texto_destino_degradado`, caso 464715).
+        limpieza_destino_coords = revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
+            carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+        )
         # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- causa raíz
         # real (464588/464395/464740): una dirección ya CONFIRMADA por
         # Javier en catálogo (con o sin coordenadas propias) es evidencia
@@ -628,9 +672,11 @@ def reconciliar_estado_derivado(
             | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
             | set(limpieza_indicadores["guias_actualizadas"])
             | set(limpieza_destino_catalogo["guias_actualizadas"])
+            | set(limpieza_geo_contradiccion["guias_actualizadas"])
         ),
         "guias_recuperadas": guias_recuperadas,
         "guias_contradiccion_destino_catalogo": limpieza_destino_catalogo["guias_contradiccion"],
+        "destinos_coordenadas_completadas": limpieza_destino_coords["destinos_actualizados"],
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "decisiones_aplicadas_automaticamente": evidencia_decisiones["decisiones_aplicadas_automaticamente"],
         "pendientes_tecnicos": len(registros_despues),

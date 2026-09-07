@@ -1644,7 +1644,8 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
     calculado hacia un destino ya demostrado incorrecto. Se abstiene fila
     por fila si no hay evidencia demostrable (nunca inventa una)."""
     from atlas_core.rutas.destino_entrega import (
-        _comuna_documental_inequivoca, _comunas_territorialmente_compatibles, _texto_normalizado_sin_acentos,
+        _comuna_documental_inequivoca, _comunas_territorialmente_compatibles,
+        _numero_calle, _numero_direccion_incompatible, _texto_normalizado_sin_acentos,
     )
 
     ruta = Path(ruta_dataset)
@@ -1673,6 +1674,15 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
                         "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
                         f"{comuna_documental} != {localidad}"
                     )
+            # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- número de casa
+            # incompatible por orden de magnitud (caso real 464784: doc
+            # "15", geocodificado "1545"). Mismo criterio que en vivo
+            # (`resolver_destino_entrega_validado`).
+            if not motivo_rechazo and despachar_a and _numero_direccion_incompatible(despachar_a, direccion):
+                motivo_rechazo = (
+                    "GEOCODIFICACION_NUMERO_INCOMPATIBLE: "
+                    f"{_numero_calle(despachar_a)} != {_numero_calle(direccion)}"
+                )
             if (
                 not motivo_rechazo and not localidad and not region
                 and estado_ruta_actual != EstadoRuta.RUTA_CALCULADA.value
@@ -1781,7 +1791,9 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
     destino queda exactamente como estaba -- nunca inventa un punto,
     nunca sobreescribe una coordenada ya presente."""
     from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
-    from atlas_core.rutas.destino_entrega import ESTADO_RESUELTO, resolver_destino_entrega_validado
+    from atlas_core.rutas.destino_entrega import (
+        ESTADO_RESUELTO, resolver_destino_entrega_validado, texto_destino_degradado,
+    )
 
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
@@ -1811,6 +1823,14 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
         texto = destino.direccion.strip()
         if not texto:
             continue
+        # Bloque DESTINOS CONFIRMADOS COMPLETOS -- un destino cuyo texto
+        # canónico quedó truncado por OCR ("SAN JOAQUIN" -> "SAN JOA",
+        # caso 464715) NUNCA se completa a ciegas: geocodificar ese texto
+        # sólo fijaría un punto dudoso sobre una fila ya CONFIRMADA. Se
+        # deja intacto -- la corrección honesta pasa por el humano
+        # (tarjeta DESTINO_NO_RESUELTO / "Corregir destino").
+        if texto_destino_degradado(texto):
+            continue
         if destino.comuna and destino.comuna.upper() not in texto.upper():
             texto = f"{texto}, {destino.comuna}"
         try:
@@ -1818,9 +1838,15 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
         except (OSError, ValueError):
             continue
         if resultado.estado == ESTADO_RESUELTO and resultado.coordenadas is not None:
+            # Bloque DESTINOS CONFIRMADOS COMPLETOS -- se completa TODO lo
+            # que el punto validado aporta y el destino aún no tiene:
+            # coordenadas + comuna + región (nunca se pisa un valor ya
+            # presente -- `editar` con `None` conserva el actual).
             catalogo.editar(
                 destino.destino_id, modificacion_manual=True,
                 latitud=resultado.coordenadas.latitud, longitud=resultado.coordenadas.longitud,
+                comuna=(resultado.localidad or None) if not destino.comuna else None,
+                region=(resultado.region or None) if not destino.region else None,
             )
             destinos_actualizados.append(destino.destino_id)
     return {"destinos_actualizados": destinos_actualizados}
@@ -2572,7 +2598,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     evidencia YA confirmada por un humano o YA persistida en catálogo."""
     from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
     from atlas_core.catalogo_plantas import CatalogoPlantas
-    from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
+    from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida, texto_destino_degradado
     from atlas_core.rutas.geocerca import coordenada_ruteo_planta
     from atlas_core.rutas.modelos import Coordenadas
 
@@ -2618,6 +2644,15 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                 )
             except (OSError, ValueError):
                 continue
+            # Bloque DESTINOS CONFIRMADOS COMPLETOS -- un destino cuyo
+            # texto canónico quedó truncado por OCR (caso 464715) no es
+            # una dirección canónica utilizable: no se rutea contra él ni
+            # se lo trata como evidencia -- la fila sigue su curso técnico
+            # normal (tarjeta DESTINO_NO_RESUELTO), nunca se re-geocodifica
+            # basura en cada pasada.
+            destinos_confirmados_obra = [
+                d for d in destinos_confirmados_obra if not texto_destino_degradado(d.direccion or "")
+            ]
             if not destinos_confirmados_obra:
                 continue
             texto_documental = normalizar_nombre_destino(despachar_a)

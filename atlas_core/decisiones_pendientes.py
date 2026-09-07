@@ -135,6 +135,12 @@ ACCIONES_DESTINO_NO_RESUELTO = ("REGISTRAR_DIRECCION", "NO_PUEDO_DETERMINAR", "P
 MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
     "DESTINO_SIN_DATO",
     "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL",
+    # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- caso real 464784: el
+    # número de casa geocodificado difiere en orden de magnitud del
+    # documental (15 vs 1545) -- evidencia de match espurio, un callejón
+    # sin salida automático igual que la contradicción de comuna: sólo un
+    # humano puede decir cuál es la dirección real.
+    "GEOCODIFICACION_NUMERO_INCOMPATIBLE",
     "GEOCODIFICACION_DEMASIADO_GENERICA",
     "MULTIPLES_UBICACIONES_DISPERSAS",
     # Bloque R9 -- caso real 472044: el punto geocodificado no tiene
