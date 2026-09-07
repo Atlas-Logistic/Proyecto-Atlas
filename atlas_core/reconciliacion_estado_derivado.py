@@ -124,7 +124,20 @@ from atlas_core.revalidacion_documental import (
 # (evidencia humana distinta, no la misma evidencia técnica reintentada).
 # Una operación que ya migró a 8 nunca volvería a barrerse con esta regla
 # nueva sin subir este número.
-RULESET_VERSION = 9
+#
+# Subida de 9 a 10 -- COHERENCIA DE DESTINO CONSOLIDADO (caso real
+# 0000351135, 464264+464265): `Viaje.direccion_entrega`/`localidad_
+# entrega`/`region_entrega`/`estado_entrega` (atlas_core.gestor_viajes)
+# ahora se abstienen (nunca muestran un destino consolidado como
+# resuelto) cuando `_bloque_routing_consolidado` -- el mismo que ya
+# gobierna `distancia_km`/`estado_ruta` -- indica que el viaje sigue
+# bloqueado. Es una corrección de PRESENTACIÓN del reporte (`viajes.csv`,
+# generado por `generar_reporte_viajes`/`gestor_viajes.agrupar_viajes`),
+# no una regla de detección/decisión -- pero igual sólo se ve reflejada
+# la próxima vez que el reporte se regenera; sin subir este número, una
+# operación que ya migró a 9 seguiría publicando la ficha incoherente
+# hasta que algún OTRO motivo disparara una regeneración.
+RULESET_VERSION = 10
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)

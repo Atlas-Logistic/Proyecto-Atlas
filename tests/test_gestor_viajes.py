@@ -66,6 +66,153 @@ def test_routing_multidocumento_no_mezcla_ruta_valida_con_fallo_geocodificacion(
     assert viaje["motivo_ruta"] == "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA"
 
 
+# ============================================================
+# Bloque COHERENCIA DE DESTINO CONSOLIDADO -- caso real 0000351135
+# (464264 resuelto + 464265 bloqueado por DESTINO_CONTRADICE_CATALOGO_
+# CONFIRMADO): la ficha mostraba "AV GOLFO DE ARAUCO 3536" como destino
+# ya resuelto del viaje, mientras estado_ruta seguía REQUIERE_REVISION --
+# dos presentaciones incoherentes del mismo viaje.
+# ============================================================
+
+
+def _fila_con_destino(**cambios):
+    base = {
+        "direccion_entrega": "", "localidad_entrega": "", "region_entrega": "",
+        "estado_entrega": "", "distancia_km": "", "duracion_min": "",
+        "proveedor_ruta": "", "estado_ruta": "", "motivo_ruta": "",
+    }
+    base.update(cambios)
+    return _fila(**base)
+
+
+def _filas_464264_464265():
+    """Reproduce el caso real exacto: 464264 con destino/ruta ya resuelta,
+    464265 con la MISMA obra pero bloqueada por una contradicción real de
+    catálogo -- nunca "sin dato", un conflicto real."""
+    return [
+        _fila_con_destino(
+            archivo="464264.jpg", numero_guia="464264", obra_destino="SODIMAC SA CORONEL",
+            despachar_a_crudo="AV GOLFO DE ARAUCO 3536",
+            direccion_entrega="AV GOLFO DE ARAUCO 3536", localidad_entrega="Coronel", region_entrega="Biobío",
+            estado_entrega="RESUELTO",
+            distancia_km="546.8017", duracion_min="621.88", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="464265.jpg", numero_guia="464265", obra_destino="SODIMAC SA CORONEL",
+            despachar_a_crudo="AV GOLPO DE ARAUCO 353E CONONEL CORONEL",
+            # direccion_entrega/localidad_entrega/etc. quedan vacías -- el
+            # destino de ESTE documento nunca llegó a resolverse (no es
+            # "sin dato": el motivo real vive en motivo_ruta).
+            estado_ruta="REQUIERE_REVISION", motivo_ruta="DESTINO_CONTRADICE_CATALOGO_CONFIRMADO",
+        ),
+    ]
+
+
+def test_destino_consolidado_no_se_muestra_resuelto_si_la_ruta_del_viaje_sigue_bloqueada():
+    """PRUEBA 1 -- caso real 0000351135: un documento resuelto (464264) +
+    otro bloqueado por conflicto real (464265) -- el destino consolidado
+    del VIAJE nunca debe presentarse como resuelto mientras la ruta del
+    viaje siga bloqueada, aunque uno de los dos documentos sí tenga
+    dirección propia."""
+    viajes, _ = agrupar_viajes(_filas_464264_464265())
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == "REQUIERE_REVISION"
+    assert viaje["motivo_ruta"] == "DESTINO_CONTRADICE_CATALOGO_CONFIRMADO"
+    # Antes de este bloque, esto devolvía "AV GOLFO DE ARAUCO 3536" --
+    # exactamente el bug real detectado.
+    assert viaje["direccion_entrega"] == ""
+    assert viaje["localidad_entrega"] == ""
+    assert viaje["region_entrega"] == ""
+    assert viaje["estado_entrega"] == ""
+
+
+def test_destino_consolidado_se_muestra_normal_cuando_el_viaje_es_realmente_coherente():
+    """PRUEBA 2 -- multiguía realmente coherente (misma dirección, ambos
+    documentos con ruta calculada): el destino consolidado SÍ debe
+    mostrarse -- este bloque no debe volverse más conservador de lo
+    necesario."""
+    filas = [
+        _fila_con_destino(
+            archivo="a.jpg", numero_guia="464264", obra_destino="SODIMAC SA CORONEL",
+            despachar_a_crudo="AV GOLFO DE ARAUCO 3536",
+            direccion_entrega="AV GOLFO DE ARAUCO 3536", localidad_entrega="Coronel", region_entrega="Biobío",
+            estado_entrega="RESUELTO",
+            distancia_km="546.8017", duracion_min="621.88", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="b.jpg", numero_guia="464266", obra_destino="SODIMAC SA CORONEL",
+            despachar_a_crudo="AV GOLFO DE ARAUCO 3536",
+            direccion_entrega="AV GOLFO DE ARAUCO 3536", localidad_entrega="Coronel", region_entrega="Biobío",
+            estado_entrega="RESUELTO",
+            distancia_km="546.8017", duracion_min="621.88", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
+    assert viaje["direccion_entrega"] == "AV GOLFO DE ARAUCO 3536"
+    assert viaje["localidad_entrega"] == "Coronel"
+    assert viaje["region_entrega"] == "Biobío"
+    assert viaje["estado_entrega"] == "RESUELTO"
+
+
+def test_un_solo_documento_con_ruta_calculada_sigue_mostrando_su_destino_normalmente():
+    """El caso más común (un único documento, ya resuelto) nunca debe
+    verse afectado -- mismo valor que ya devolvía la consolidación
+    anterior."""
+    viajes, _ = agrupar_viajes([
+        _fila_con_destino(
+            archivo="464367.jpg", numero_guia="464367",
+            despachar_a_crudo="TACNA 144", direccion_entrega="TACNA 144",
+            localidad_entrega="Yungay", region_entrega="Ñuble", estado_entrega="RESUELTO",
+            distancia_km="513.8199", duracion_min="586.795", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+    ])
+    viaje = viajes[0].a_dict()
+    assert viaje["direccion_entrega"] == "TACNA 144"
+    assert viaje["localidad_entrega"] == "Yungay"
+
+
+def test_destino_y_routing_comparten_el_mismo_criterio_de_consolidacion():
+    """PRUEBA 3 -- ruta/km/tiempo y destino visible deben compartir
+    exactamente el mismo criterio: si uno queda bloqueado, el otro
+    también -- nunca una ficha con un destino "listo" y una ruta
+    "pendiente" al mismo tiempo, ni viceversa."""
+    viajes, _ = agrupar_viajes(_filas_464264_464265())
+    viaje = viajes[0].a_dict()
+
+    ruta_resuelta = viaje["estado_ruta"] == "RUTA_CALCULADA"
+    destino_resuelto = bool(viaje["direccion_entrega"])
+    assert ruta_resuelta is False
+    assert destino_resuelto is False
+    assert ruta_resuelta == destino_resuelto
+
+
+def test_destino_consolidado_no_altera_los_documentos_individuales():
+    """PRUEBA 4 -- la consolidación del VIAJE nunca reescribe los datos
+    POR DOCUMENTO: 464264 conserva su propia dirección/ruta resuelta tal
+    cual, y 464265 conserva su propio motivo de conflicto -- esto sólo
+    decide qué se presenta a nivel de viaje."""
+    viajes, _ = agrupar_viajes(_filas_464264_464265())
+    documentos = {d.numero_guia: d for d in viajes[0].documentos}
+
+    doc_464264 = documentos["464264"]
+    assert doc_464264.direccion_entrega == "AV GOLFO DE ARAUCO 3536"
+    assert doc_464264.estado_ruta == "RUTA_CALCULADA"
+    assert doc_464264.distancia_km == "546.8017"
+
+    doc_464265 = documentos["464265"]
+    assert doc_464265.despachar_a_crudo == "AV GOLPO DE ARAUCO 353E CONONEL CORONEL"
+    assert doc_464265.estado_ruta == "REQUIERE_REVISION"
+    assert doc_464265.motivo_ruta == "DESTINO_CONTRADICE_CATALOGO_CONFIRMADO"
+
+
 @pytest.mark.parametrize("transporte", ["0000349935", "  0000349935  "])
 def test_transporte_numerico_conserva_ceros_y_admite_espacios_exteriores(
     transporte,

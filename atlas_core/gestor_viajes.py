@@ -456,6 +456,35 @@ class Viaje:
         valores = _valores_unicos(getattr(d, campo) for d in self.documentos)
         return valores[0] if len(valores) == 1 else ""
 
+    def _campo_destino_consolidado(self, campo: str) -> str:
+        """Bloque COHERENCIA DE DESTINO CONSOLIDADO -- caso real 0000351135
+        (464264 con destino ya resuelto + 464265 bloqueado por
+        `DESTINO_CONTRADICE_CATALOGO_CONFIRMADO`): `_campo_ruta_consolidado`
+        exige coincidencia sólo entre los documentos que SÍ informan un
+        valor, tratando cualquier campo vacío como "sin dato" -- pero un
+        documento cuyo destino sigue bloqueado por un conflicto REAL (no
+        simplemente ausente) deja `direccion_entrega` vacío por esa razón
+        distinta, y antes de este bloque eso nunca lo distinguía de "no
+        informa nada". Resultado real: la ficha mostraba "AV GOLFO DE
+        ARAUCO 3536" como si el destino del VIAJE ya estuviera resuelto,
+        mientras `estado_ruta` seguía `REQUIERE_REVISION` -- dos
+        presentaciones del mismo viaje, incoherentes entre sí.
+
+        La presentación del destino consolidado (`direccion_entrega`/
+        `localidad_entrega`/`region_entrega`/`estado_entrega`) sólo tiene
+        sentido cuando el bloque de ROUTING del viaje -- el mismo `_bloque_
+        routing_consolidado` que ya gobierna `distancia_km`/`estado_ruta`,
+        nunca una regla paralela -- también quedó consolidado a `RUTA_
+        CALCULADA`. Si el viaje tiene un único documento (o varios,
+        legítimamente coherentes) que sí calculó ruta, esto es un no-op:
+        exactamente el mismo valor que ya devolvía `_campo_ruta_
+        consolidado`. Ningún dato por documento se toca -- `despachar_a_
+        crudo`/las decisiones humanas existentes siguen intactas; esto
+        sólo decide qué se PRESENTA como destino consolidado del viaje."""
+        if _clave_normalizada(self._bloque_routing_consolidado()["estado_ruta"]) != "ruta_calculada":
+            return ""
+        return self._campo_ruta_consolidado(campo)
+
     def _bloque_routing_consolidado(self) -> dict[str, str]:
         """Consolida la ruta como una unidad, nunca campo por campo.
 
@@ -530,19 +559,19 @@ class Viaje:
 
     @property
     def direccion_entrega(self) -> str:
-        return self._campo_ruta_consolidado("direccion_entrega")
+        return self._campo_destino_consolidado("direccion_entrega")
 
     @property
     def localidad_entrega(self) -> str:
-        return self._campo_ruta_consolidado("localidad_entrega")
+        return self._campo_destino_consolidado("localidad_entrega")
 
     @property
     def region_entrega(self) -> str:
-        return self._campo_ruta_consolidado("region_entrega")
+        return self._campo_destino_consolidado("region_entrega")
 
     @property
     def estado_entrega(self) -> str:
-        return self._campo_ruta_consolidado("estado_entrega")
+        return self._campo_destino_consolidado("estado_entrega")
 
     @property
     def planta_origen_id(self) -> str:
