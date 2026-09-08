@@ -49,6 +49,27 @@ def test_registrar_crea_obra_auditada_desaparece_y_se_reconoce_sin_ocr(tmp_path)
     assert not any(d["tipo"]=="OBRA_DESCONOCIDA" for d in nuevas)
 
 
+def test_registrar_obra_corregida_conserva_ocr_como_alias_sin_duplicar_entidad(tmp_path):
+    raiz,catalogos,_,cliente,decision=_entorno(tmp_path)
+    resultado=aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    catalogo=CatalogoObrasDestinos(
+        ruta=catalogos/"obras_destinos.json", ruta_clientes=catalogos/"clientes.json",
+        ruta_destinos=catalogos/"destinos_maestros.json",
+    )
+    obras=catalogo.listar_obras()
+    assert resultado["ok"] and len(obras) == 1
+    assert obras[0].nombre_canonico == "OBRA CANONICA LIMITADA"
+    assert obras[0].aliases_documentales == ("OBRA NUEVA",)
+    nuevas=detectar_decisiones_documento(
+        archivo="alias.png", datos={"número de guía":"101", "cliente":cliente.razon_social,
+        "RUT del cliente":"50.234.350-5", "obra destino":"OBRA NUEVA"}, carpeta_catalogos=catalogos,
+    )
+    assert not any(d["tipo"] == "OBRA_DESCONOCIDA" for d in nuevas)
+
+
 def test_registrar_es_idempotente(tmp_path):
     raiz,catalogos,_,_,decision=_entorno(tmp_path)
     aplicar_decision_obra(raiz_atlas=raiz,decision_id=decision["decision_id"],accion="REGISTRAR")

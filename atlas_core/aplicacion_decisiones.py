@@ -269,7 +269,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -460,9 +460,15 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                             ),
                             None,
                         )
-                    nombre_obra_registro = obra_texto
+                    # La corrección humana identifica una obra concreta; no
+                    # fusiona por similitud. El OCR original queda como alias
+                    # documental y en la evidencia de esta guía.
+                    nombre_obra_confirmada = str(nombre_obra_manual or "").strip()
+                    nombre_obra_registro = nombre_obra_confirmada or obra_texto
                     alias_documental_registro = ""
-                    if candidato_obra_resuelta is not None:
+                    if nombre_obra_confirmada and nombre_obra_confirmada != obra_texto:
+                        alias_documental_registro = obra_texto
+                    if candidato_obra_resuelta is not None and not nombre_obra_confirmada:
                         canonico_evidencia = str(candidato_obra_resuelta.get("valor_canonico") or "").strip()
                         if canonico_evidencia and canonico_evidencia != obra_texto:
                             nombre_obra_registro = canonico_evidencia
@@ -484,6 +490,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         referencia_hash=decision_id,
                         campos_observados={
                             "obra": nombre_obra_registro, "decision_id": decision_id,
+                            "obra_documental": obra_texto,
                             "cliente_id_observado": cliente_id,
                             "cliente_canonico_observado": str(contexto.get("cliente_canonico", "")),
                             "numero_guia": numero_guia,
