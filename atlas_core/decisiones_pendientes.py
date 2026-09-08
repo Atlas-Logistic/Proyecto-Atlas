@@ -2091,6 +2091,51 @@ def regenerar_decisiones_persistidas(
         plantas_vigentes = []
 
     decisiones = list(decisiones)
+    # Una misma pregunta de destino puede llegar por el detector documental
+    # y por el de ruta. Si conservan guía/campo/valor documental idénticos,
+    # son una sola duda humana: se fusionan los motivos/evidencias, no se
+    # publican dos tarjetas equivalentes.
+    decisiones_sin_duplicados: list[dict[str, object]] = []
+    indice_destino: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    for decision_original in decisiones:
+        clave = (
+            str(decision_original.get("tipo", "")),
+            str((decision_original.get("documento") or {}).get("numero_guia", "")),
+            str(decision_original.get("campo", "")),
+            str(decision_original.get("valor_documental", "")),
+        )
+        if clave[0] != "DESTINO_NO_RESUELTO" or clave not in indice_destino:
+            copia = dict(decision_original)
+            decisiones_sin_duplicados.append(copia)
+            if clave[0] == "DESTINO_NO_RESUELTO":
+                indice_destino[clave] = copia
+            continue
+        vigente = indice_destino[clave]
+        vigente["motivos"] = list(dict.fromkeys([
+            *(vigente.get("motivos") or []), *(decision_original.get("motivos") or []),
+        ]))
+        vigente["evidencias"] = list(dict.fromkeys([
+            *(json.dumps(e, sort_keys=True, ensure_ascii=False) for e in (vigente.get("evidencias") or [])),
+            *(json.dumps(e, sort_keys=True, ensure_ascii=False) for e in (decision_original.get("evidencias") or [])),
+        ]))
+        vigente["evidencias"] = [json.loads(e) for e in vigente["evidencias"]]
+    decisiones = decisiones_sin_duplicados
+    # Si la fila vigente ya tiene dirección canónica, ruta válida y estado
+    # operacional limpio, la tarjeta vieja es sólo evidencia OCR histórica:
+    # no queda trabajo humano pendiente. Una contradicción real activa no
+    # pasa este criterio porque conserva REQUIERE_REVISION.
+    if filas_por_guia is not None:
+        decisiones = [
+            decision for decision in decisiones
+            if not (
+                str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO"
+                and (fila := filas_por_guia.get(str((decision.get("documento") or {}).get("numero_guia", "")))) is not None
+                and str(fila.get("direccion_entrega", "")).strip()
+                and str(fila.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+                and str(fila.get("indicador_revision", "")).strip() == "OK"
+                and str(fila.get("estado_operacional", "")).strip() == "OK"
+            )
+        ]
     # Bloque R21 -- REFRESCO ESTRUCTURAL DE DECISIONES VIVAS: caso real
     # 472640 (DSI UNDERGROUND CHILE SPA) -- una tarjeta `DESTINO_NO_
     # RESUELTO` ya publicada por el camino DOCUMENTAL (`DESTINO_

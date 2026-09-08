@@ -379,6 +379,44 @@ def test_correccion_manual_logistica_se_cierra_cuando_la_entrega_es_a_sede_propi
     assert restantes == []  # la tarjeta obsoleta se retira
 
 
+def test_destino_resuelto_con_ruta_retira_tarjeta_contaminada_y_conserva_ocr_en_la_entrada(tmp_path):
+    ocr = "14293816-2 FECHA LLEGADA 17-08-2026"
+    fila = _fila(
+        archivo="464836.jpeg", numero_guia="464836", numero_transporte="0000353361",
+        cliente="AMERICAN SCREW CHILE SPA", obra_destino="AMERICAN SCREW CHILE SPA",
+        despachar_a_crudo=ocr, direccion_entrega="CAMINO A MELIPILLA 10800",
+        indicador_revision="OK", estado_operacional="OK", estado_ruta="RUTA_CALCULADA",
+        distancia_km="35.3246", duracion_min="49.43", motivos_revision_documento="",
+    )
+    entorno = _entorno(tmp_path, [fila])
+    tarjeta = _tarjeta_correccion_manual("464836", cliente="AMERICAN SCREW CHILE SPA", obra="AMERICAN SCREW CHILE SPA")
+    tarjeta["valor_documental"] = ocr
+    tarjeta["motivos"] = ["DESTINO_CONTAMINADO_POR_OTRA_SECCION"]
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[tarjeta], carpeta_catalogos=entorno["catalogos"], ruta_dataset=entorno["dataset"],
+    )
+    assert restantes == []
+    assert tarjeta["valor_documental"] == ocr
+
+
+def test_dos_tarjetas_destino_equivalentes_se_fusionan_y_conflicto_activo_permanece(tmp_path):
+    fila = _fila(
+        archivo="464836.jpeg", numero_guia="464836", numero_transporte="0000353361",
+        despachar_a_crudo="OCR CONTAMINADO", indicador_revision="REVISAR",
+        estado_operacional="REQUIERE_REVISION", estado_ruta="REQUIERE_REVISION",
+        motivo_ruta="GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+    )
+    entorno = _entorno(tmp_path, [fila])
+    primera = _tarjeta_correccion_manual("464836", cliente="CLIENTE", obra="OBRA")
+    primera.update({"valor_documental": "OCR CONTAMINADO", "motivos": ["DESTINO_CONTAMINADO_POR_OTRA_SECCION"]})
+    segunda = dict(primera); segunda["decision_id"] = "otra"; segunda["motivos"] = ["GEOCODIFICACION_DIRECCION_NO_ENCONTRADA"]
+    restantes = regenerar_decisiones_persistidas(
+        decisiones=[primera, segunda], carpeta_catalogos=entorno["catalogos"], ruta_dataset=entorno["dataset"],
+    )
+    assert len(restantes) == 1
+    assert set(restantes[0]["motivos"]) == {"DESTINO_CONTAMINADO_POR_OTRA_SECCION", "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA"}
+
+
 # 6. NO se cierra una decisión cuyo problema siga vigente
 
 def test_correccion_manual_logistica_no_se_cierra_si_la_ruta_sigue_sin_calcularse(tmp_path):
