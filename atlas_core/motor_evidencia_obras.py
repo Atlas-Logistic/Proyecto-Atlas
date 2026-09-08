@@ -313,3 +313,25 @@ def resolver_obra_por_variacion_ortografica_menor(
     if len(candidatos) != 1:
         return None
     return candidatos[0]
+
+
+def resolver_obra_por_prefijo_documental_confirmado(
+    *, nombre_documental: str, obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
+) -> Obra | None:
+    """Resuelve un recorte OCR sólo cuando éste es un prefijo inequívoco.
+
+    No es fuzzy matching: exige al menos tres palabras, veinte caracteres y
+    que el texto documental completo sea prefijo del nombre canónico o de un
+    alias ya confirmado. El llamador debe además corroborar el destino
+    confirmado del mismo documento; este helper sólo decide la identidad de
+    obra y se abstiene ante más de un candidato.
+    """
+    documental = normalizar_nombre_obra(nombre_documental)
+    if len(documental) < 20 or len(documental.split()) < 3:
+        return None
+    candidatos = []
+    for obra in obras_confirmadas_mismo_cliente:
+        claves = (obra.nombre_canonico, *obra.aliases_documentales)
+        if any(normalizar_nombre_obra(clave).startswith(documental) for clave in claves):
+            candidatos.append(obra)
+    return candidatos[0] if len(candidatos) == 1 else None

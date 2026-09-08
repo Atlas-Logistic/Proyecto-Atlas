@@ -1903,7 +1903,10 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
     -- el alias queda atado a ESTA obra, nunca a un patrón de caracteres."""
     from atlas_core.catalogo_obras_destinos import EstadoObra, Evidencia, ResultadoEvidencia, TipoEvidencia
     from atlas_core.decisiones_pendientes import NOMBRE_LOCK_DECISIONES_PENDIENTES, _generar_artefacto_sin_lock
-    from atlas_core.motor_evidencia_obras import resolver_obra_por_variacion_ortografica_menor
+    from atlas_core.motor_evidencia_obras import (
+        resolver_obra_por_prefijo_documental_confirmado,
+        resolver_obra_por_variacion_ortografica_menor,
+    )
 
     ruta = Path(ruta_decisiones)
     catalogos = Path(carpeta_catalogos)
@@ -1939,6 +1942,21 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
         obra = resolver_obra_por_variacion_ortografica_menor(
             nombre_documental=documental, obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
         )
+        por_prefijo = False
+        if obra is None:
+            candidata = resolver_obra_por_prefijo_documental_confirmado(
+                nombre_documental=documental, obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+            )
+            destino_documental = normalizar_nombre_destino(str(contexto.get("destino_documental", "")))
+            if candidata is not None and any(
+                (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                and calle in destino_documental
+                for destino in catalogo_obras.listar_destinos_confirmados_para_obra(
+                    nombre_obra=candidata.nombre_canonico
+                )
+            ):
+                obra = candidata
+                por_prefijo = True
         if obra is None:
             decisiones_restantes.append(decision)
             continue
@@ -1952,13 +1970,18 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
                 "numero_guia": numero_guia, "decision_id": str(decision.get("decision_id", "")),
             },
             fecha=datetime.now(timezone.utc).isoformat(),
-            actor_proceso="RESOLUCION_AUTOMATICA_VARIACION_ORTOGRAFICA_MENOR",
+            actor_proceso=(
+                "RESOLUCION_AUTOMATICA_PREFIJO_DESTINO_CONFIRMADO"
+                if por_prefijo else "RESOLUCION_AUTOMATICA_VARIACION_ORTOGRAFICA_MENOR"
+            ),
             resultado=ResultadoEvidencia.SOPORTA.value,
         )
         try:
             catalogo_obras.actualizar_identidad_obra(
                 obra.obra_id, nombre_canonico=obra.nombre_canonico,
-                aliases_documentales=(documental,), evidencia=evidencia,
+                # Un texto truncado sirve de evidencia de este documento,
+                # pero nunca se aprende como alias exacto reutilizable.
+                aliases_documentales=() if por_prefijo else (documental,), evidencia=evidencia,
             )
         except (OSError, ValueError):
             decisiones_restantes.append(decision)

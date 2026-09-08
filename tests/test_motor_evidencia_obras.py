@@ -11,6 +11,7 @@ from atlas_core.motor_evidencia_obras import (
     coincide_salvo_sufijo_societario,
     coincide_salvo_variacion_ortografica_menor,
     evaluar_evidencia_obra,
+    resolver_obra_por_prefijo_documental_confirmado,
     resolver_obra_por_variacion_ortografica_menor,
 )
 from tests.fixtures_verificacion_externa import EVIDENCIA_SIGRO_CORPORATIVA, EVIDENCIA_SIGRO_DIRECTORIO
@@ -250,4 +251,29 @@ def test_sin_candidatos_no_autorresuelve():
     assert resolver_obra_por_variacion_ortografica_menor(
         nombre_documental="SALOMON SACK SA SAN BERNGARDO",
         obras_confirmadas_mismo_cliente=(),
+    ) is None
+
+
+def test_prefijo_documental_largo_con_unico_candidato_resuelve_identidad():
+    obra = Obra(
+        obra_id="obra-bravo", cliente_id="cliente-prodalam",
+        nombre_canonico="EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA",
+        nombre_normalizado="EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA",
+        aliases_documentales=("EMPRESA CONSTRUCTORA BRAVO E",), estado="CONFIRMADA",
+        estado_vigencia="ACTIVO", evidencias=(),
+        fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00",
+    )
+    assert resolver_obra_por_prefijo_documental_confirmado(
+        nombre_documental="EMPRESA CONSTRUCTORA BRA", obras_confirmadas_mismo_cliente=(obra,),
+    ) is obra
+
+
+def test_prefijo_documental_ambiguo_o_demasiado_corto_se_abstiene():
+    obra_a = _obra_salomon_sack()
+    obra_b = Obra(**{**obra_a.__dict__, "obra_id": "otra", "nombre_canonico": "SALOMON SACK SA SAN BERNARDINO"})
+    assert resolver_obra_por_prefijo_documental_confirmado(
+        nombre_documental="SALOMON SACK SA SAN BERN", obras_confirmadas_mismo_cliente=(obra_a, obra_b),
+    ) is None
+    assert resolver_obra_por_prefijo_documental_confirmado(
+        nombre_documental="BRA", obras_confirmadas_mismo_cliente=(obra_a,),
     ) is None

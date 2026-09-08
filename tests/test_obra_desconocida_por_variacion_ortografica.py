@@ -56,12 +56,12 @@ def _escribir_obra_confirmada(carpeta, *, cliente_id, nombre_canonico, obra_id="
     return catalogo
 
 
-def _decision_obra_desconocida(*, decision_id, numero_guia, valor_documental, cliente_id):
+def _decision_obra_desconocida(*, decision_id, numero_guia, valor_documental, cliente_id, destino_documental=""):
     return {
         "decision_id": decision_id, "estado": "PENDIENTE", "tipo": "OBRA_DESCONOCIDA",
         "entidad": "OBRA", "documento": {"archivo": f"{numero_guia}.jpeg", "numero_guia": numero_guia},
         "campo": "obra_destino", "valor_documental": valor_documental, "valor_normalizado": valor_documental,
-        "identidad_resuelta": None, "contexto": {"cliente_id": cliente_id, "cliente_canonico": "SALOMON SACK SA"},
+        "identidad_resuelta": None, "contexto": {"cliente_id": cliente_id, "cliente_canonico": "SALOMON SACK SA", "destino_documental": destino_documental},
         "candidatos": [], "motivos": ["OBRA_NO_EXISTE_PARA_CLIENTE"],
         "evidencias": [{"tipo": "CLIENTE_RESUELTO", "entidad_id": cliente_id}],
         "acciones_permitidas": ["REGISTRAR", "NO_REGISTRAR", "POSPONER"],
@@ -182,3 +182,39 @@ def test_sin_decisiones_pendientes_no_falla(tmp_path):
         ruta_dataset=_dataset_vacio(tmp_path),
     )
     assert resultado["decisiones_resueltas"] == []
+
+
+def test_prefijo_ocr_con_destino_humano_confirmado_retira_sin_aprender_alias(tmp_path):
+    carpeta = _carpeta_catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="PRODALAM SA")
+    catalogo = _escribir_obra_confirmada(
+        carpeta, cliente_id=cliente.cliente_id,
+        nombre_canonico="EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA", obra_id="obra-bravo",
+    )
+    destinos = json.loads((carpeta / "destinos_maestros.json").read_text(encoding="utf-8"))
+    destinos["destinos"].append({
+        "destino_id": "destino-bravo", "cliente_id": "", "nombre_destino": "SAN DAMIAN 0100",
+        "nombre_normalizado": "SAN DAMIAN 0100", "codigo_destino": "", "direccion": "SAN DAMIAN 0100",
+        "comuna": "VITACURA", "region": "", "pais": "CHILE", "latitud": None, "longitud": None,
+        "aliases": [], "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "fuente": "TEST",
+        "observacion": "", "fecha_creacion": "2026-01-01T00:00:00+00:00", "fecha_modificacion": "2026-01-01T00:00:00+00:00",
+    })
+    (carpeta / "destinos_maestros.json").write_text(json.dumps(destinos), encoding="utf-8")
+    obras = json.loads((carpeta / "obras_destinos.json").read_text(encoding="utf-8"))
+    obras["relaciones"].append({
+        "relacion_id": "rel-bravo", "obra_id": "obra-bravo", "destino_id": "destino-bravo", "estado": "CONFIRMADA",
+        "evidencias": [{"tipo": "CONFIRMACION_HUMANA", "identificador_fuente": "test", "referencia_hash": "", "campos_observados": {"decision": "CONFIRMADA"}, "fecha": "2026-01-01T00:00:00+00:00", "actor_proceso": "test", "resultado": "SOPORTA"}],
+        "fuente_confirmacion": "CONFIRMACION_HUMANA", "confirmado_por": "test", "fecha_confirmacion": "2026-01-01T00:00:00+00:00", "observaciones": "", "fecha_creacion": "2026-01-01T00:00:00+00:00", "fecha_modificacion": "2026-01-01T00:00:00+00:00",
+    })
+    (carpeta / "obras_destinos.json").write_text(json.dumps(obras), encoding="utf-8")
+    ruta_decisiones = _escribir_decisiones(tmp_path, [_decision_obra_desconocida(
+        decision_id="dec-bravo", numero_guia="1", valor_documental="EMPRESA CONSTRUCTORA BRA",
+        cliente_id=cliente.cliente_id, destino_documental="SAN DAMIAN 0100 VITACURA",
+    )])
+    resultado = revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
+        ruta_decisiones=ruta_decisiones, carpeta_catalogos=carpeta, ruta_dataset=_dataset_vacio(tmp_path),
+    )
+    assert len(resultado["decisiones_resueltas"]) == 1
+    assert json.loads(ruta_decisiones.read_text(encoding="utf-8"))["decisiones"] == []
+    obra = next(o for o in catalogo.listar_obras() if o.obra_id == "obra-bravo")
+    assert "EMPRESA CONSTRUCTORA BRA" not in obra.aliases_documentales

@@ -52,7 +52,10 @@ from atlas_core.catalogos import (
 )
 from atlas_core.evidencia_entidades import ConfirmacionIdentidad
 from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
-from atlas_core.motor_evidencia_obras import evaluar_evidencia_obra, resolver_obra_por_variacion_ortografica_menor
+from atlas_core.motor_evidencia_obras import (
+    evaluar_evidencia_obra, resolver_obra_por_prefijo_documental_confirmado,
+    resolver_obra_por_variacion_ortografica_menor,
+)
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
 from atlas_core.rutas.origen_evidencia import (
@@ -1405,6 +1408,26 @@ def _decisiones_obra_para_cliente(
             )
             if obra_por_variacion is not None:
                 obras = [obra_por_variacion]
+            # Un recorte OCR no es por sí solo una identidad. Sólo se
+            # reutiliza una obra confirmada si el texto completo es su
+            # prefijo inequívoco Y el destino humano ya confirmado de esa
+            # obra aparece literalmente en este mismo documento.
+            if not obras:
+                obra_por_prefijo = resolver_obra_por_prefijo_documental_confirmado(
+                    nombre_documental=obra_texto,
+                    obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+                )
+                if obra_por_prefijo is not None:
+                    destino_documental = normalizar_nombre_destino(str(despachar_a_documental or ""))
+                    destinos = catalogo_obras.listar_destinos_confirmados_para_obra(
+                        nombre_obra=obra_por_prefijo.nombre_canonico
+                    )
+                    if any(
+                        (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                        and calle in destino_documental
+                        for destino in destinos
+                    ):
+                        obras = [obra_por_prefijo]
         if not obras and clave in claves_cliente:
             pass
         elif not obras:
