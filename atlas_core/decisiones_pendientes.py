@@ -2827,6 +2827,14 @@ def _generar_artefacto_sin_lock(
                 # sobre evidencia ya vista.
                 "CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA", "NO_PUEDO_DETERMINAR",
                 "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
+                # Una dirección y comuna que el humano acaba de registrar
+                # responden definitivamente ESTA pregunta documental. Si el
+                # geocoder o routing no logra ubicarla, ese fallo permanece
+                # explícito en la fila (estado/motivo_ruta), pero no se debe
+                # reabrir la misma tarjeta para pedir exactamente el mismo
+                # dato. Una evidencia posterior distinta produce otro
+                # decision_id y sigue siendo revisable.
+                "REGISTRAR_DIRECCION",
             }
         }
     except (OSError, json.JSONDecodeError, AttributeError):

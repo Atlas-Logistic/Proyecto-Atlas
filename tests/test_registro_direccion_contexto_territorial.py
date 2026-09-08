@@ -464,10 +464,13 @@ def test_r2_5_invalida_derivados_viejos_antes_de_reintentar_con_comuna_auto_resu
     # fallar; se recalcula desde cero y el resultado fresco (aquí,
     # también sin ruta) es el único que queda persistido.
     for campo in (
-        "direccion_entrega", "localidad_entrega", "region_entrega",
+        "localidad_entrega", "region_entrega",
         "codigo_pais", "codigo_unidad", "codigo_contexto",
         "distancia_km", "duracion_min",
     ):
         assert fila_final[campo] == "", campo
+    # La dirección explícitamente confirmada por el humano no es un
+    # derivado geográfico: permanece aunque el proveedor no la ubique.
+    assert fila_final["direccion_entrega"] == direccion
     assert fila_final["proveedor_ruta"] != "viejo"
     assert fila_final["despachar_a_crudo"] == direccion

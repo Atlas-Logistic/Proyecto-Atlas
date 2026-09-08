@@ -1050,6 +1050,29 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                             {numero_guia_decision: comuna_final} if comuna_final else None
                         ),
                     )
+                    # La confirmación humana responde cuál es la dirección,
+                    # incluso cuando el proveedor no puede convertirla en
+                    # coordenadas. La revalidación limpia sus derivados ante
+                    # un fallo técnico; por ello se restaura explícitamente
+                    # el valor canónico humano (y su comuna separada) sin
+                    # fabricar latitud, longitud, km ni tiempo.
+                    with bloqueo_sesion(actual, "revalidacion_dataset"):
+                        filas_confirmacion_humana = _leer_filas(dataset)
+                        fila_confirmacion_humana = next(
+                            (
+                                f for f in filas_confirmacion_humana
+                                if str(f.get("numero_guia", "")) == numero_guia_decision
+                            ),
+                            None,
+                        )
+                        if fila_confirmacion_humana is None:
+                            raise ErrorAplicacionDecision(
+                                "No se encontró el documento tras revalidar su dirección confirmada."
+                            )
+                        fila_confirmacion_humana["direccion_entrega"] = direccion_final
+                        if comuna_final:
+                            fila_confirmacion_humana["localidad_entrega"] = comuna_final
+                        _escribir_filas_completas(dataset, filas_confirmacion_humana)
                     # Bloque LOGÍSTICA L1 -- `guias_actualizadas` ya NO es un
                     # proxy fiable de "ruta resuelta": desde este bloque
                     # también incluye filas cuyo intento falló pero cuyo
@@ -1182,6 +1205,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "direccion_manual": str(direccion_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
+                    "comuna_manual": str(comuna_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
                     "ruta_resuelta": ruta_resuelta, "destino_id": destino_id_nuevo, "relacion_id": relacion_id_nueva,
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }

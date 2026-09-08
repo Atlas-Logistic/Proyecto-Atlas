@@ -2,12 +2,10 @@
 de Atlas antes de operación real:
 
 CASO 1 (464784 / URUGUAY 15): tras REGISTRAR_DIRECCION, el reintento
-inmediato reconcilia la dirección humana a un motivo real y estable
-(`GEOCODIFICACION_NUMERO_INCOMPATIBLE`), pero la tarjeta quedaba
-suprimida por "la obra ya tiene destino CONFIRMADO" -- dejando el viaje
-como pendiente técnico INVISIBLE que nunca se autorresuelve. Ahora la
-tarjeta se conserva accionable (con el motivo nuevo) y el viaje sale de
-`pendientes_tecnicos.json`.
+inmediato puede conservar un motivo geográfico real y estable
+(`GEOCODIFICACION_NUMERO_INCOMPATIBLE`). La respuesta humana es terminal
+para esa misma pregunta: la tarjeta no reaparece; el fallo técnico queda
+explícito en la fila, sin inventar ruta.
 
 CASO 2 (464717 / AMERICAN SCREW CHILE SPA): una tarjeta
 `DESTINO_NO_RESUELTO` nacida de "Corregir destino"
@@ -255,12 +253,11 @@ def test_comuna_humana_rechaza_candidato_contradictorio_pero_persiste_la_direcci
     assert fila["despachar_a_crudo"] == "URUGUAY 15"
 
 
-# 8. INCOMPLETO_TECNICO convertido en revisión humana no aparece
-#    simultáneamente como deuda técnica engañosa
-#    + la tarjeta accionable se CONSERVA aunque exista un Destino CONFIRMADO
-#      sin coordenadas (el humano ya respondió ESTA guía y aún no rutea).
+# 8. La confirmación humana de dirección es terminal para esa pregunta,
+#    aun si geocodificación/routing siguen bloqueados. El estado técnico
+#    permanece en la fila, sin ruta inventada ni nueva tarjeta humana.
 
-def test_tras_registrar_direccion_sin_ruta_la_tarjeta_se_conserva_y_sale_de_pendientes_tecnicos(tmp_path):
+def test_tras_registrar_direccion_sin_ruta_no_reabre_la_misma_tarjeta_y_conserva_fallo_tecnico(tmp_path):
     fila_comuna_ok_numero_no = _fila(
         motivo_ruta="GEOCODIFICACION_NUMERO_INCOMPATIBLE: 15 != 1545",
     )
@@ -281,22 +278,26 @@ def test_tras_registrar_direccion_sin_ruta_la_tarjeta_se_conserva_y_sale_de_pend
     dataset = entorno["dataset"]
     decisiones = entorno["actual"] / "decisiones_pendientes.json"
 
-    # La tarjeta accionable se conserva (motivo real nuevo), NO se suprime
-    # por "la obra ya tiene destino confirmado".
+    # La pregunta ya fue respondida por Javier: aunque el proveedor no
+    # encuentre un punto utilizable, no vuelve a pedir la misma dirección.
     fresca = detectar_decision_destino_no_resuelto(
         archivo="464784.jpeg", fila=_leer_csv(dataset)[0], carpeta_catalogos=entorno["catalogos"],
     )
     assert fresca is not None
-    restantes = regenerar_decisiones_persistidas(
-        decisiones=[fresca], carpeta_catalogos=entorno["catalogos"], ruta_dataset=dataset,
-    )
-    guias = [(d["tipo"], d["documento"]["numero_guia"]) for d in restantes]
-    assert ("DESTINO_NO_RESUELTO", "464784") in guias
+    fila_tras = _leer_csv(dataset)[0]
+    assert fila_tras["estado_ruta"] != "RUTA_CALCULADA"
+    assert fila_tras["motivo_ruta"].startswith("GEOCODIFICACION_NUMERO_INCOMPATIBLE")
+    assert fila_tras["distancia_km"] == "" and fila_tras["duracion_min"] == ""
+    assert fila_tras["direccion_entrega"] == "URUGUAY 15"
+    assert fila_tras["localidad_entrega"] == "LA CISTERNA"
 
     _publicar(entorno, fresca)
-    # 8 -- con la tarjeta publicada, la guía NO figura como pendiente técnico.
-    pendientes = [f["numero_guia"] for f in _pendientes_ruta(dataset, decisiones)]
-    assert "464784" not in pendientes
+    assert _bandeja(entorno) == []
+
+    correccion_posterior = dict(fresca)
+    correccion_posterior["decision_id"] = "correccion-posterior-464784"
+    _publicar(entorno, correccion_posterior)
+    assert [d["decision_id"] for d in _bandeja(entorno)] == ["correccion-posterior-464784"]
 
 
 def test_tarjeta_de_guia_hermana_se_suprime_aunque_su_fila_siga_en_callejon(tmp_path):
