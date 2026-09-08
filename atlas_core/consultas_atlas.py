@@ -17,6 +17,7 @@ devuelve un `ResultadoConsultaAtlas`."""
 from __future__ import annotations
 
 import csv
+import re
 import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -44,6 +45,9 @@ METRICA_COUNT_INCIDENCIAS = "COUNT_INCIDENCIAS"
 # futuro -- el ejecutor nunca valida `tipo_evento` contra una lista
 # cerrada, ver `eventos_operacionales.py`).
 METRICA_COUNT_EVENTOS = "COUNT_EVENTOS"
+METRICA_COUNT_DISTINCT_VIAJE = "COUNT_DISTINCT_VIAJE"
+METRICA_LIST_DISTINCT_CHOFER = "LIST_DISTINCT_CHOFER"
+METRICA_LIST_VIAJES = "LIST_VIAJES"
 # Bloque UNIVERSAL V1 (Bloque 8 del ticket) -- RELACIÓN genérica sobre
 # el dominio VIAJES: "qué patentes ha usado Retamal", "con qué chofer
 # está vinculada JF4288", "qué cliente aparece en el viaje X" son todas
@@ -66,6 +70,7 @@ METRICAS_SOPORTADAS = frozenset({
     METRICA_SUM_KM, METRICA_SUM_TIEMPO, METRICA_LISTAR_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_EVENTOS, METRICA_LIST_RELACION, METRICA_COUNT_DISTINCT_RELACION,
+    METRICA_COUNT_DISTINCT_VIAJE, METRICA_LIST_DISTINCT_CHOFER, METRICA_LIST_VIAJES,
 })
 _UNIDADES_POR_METRICA = {
     METRICA_COUNT_VIAJES: "viajes", METRICA_COUNT_GUIAS: "guías",
@@ -76,6 +81,7 @@ _UNIDADES_POR_METRICA = {
     METRICA_LISTAR_VIAJES: "viajes", METRICA_COUNT_DISTINCT_CHOFER: "choferes",
     METRICA_COUNT_INCIDENCIAS: "incidencias", METRICA_COUNT_EVENTOS: "eventos",
     METRICA_LIST_RELACION: "valores", METRICA_COUNT_DISTINCT_RELACION: "valores",
+    METRICA_COUNT_DISTINCT_VIAJE: "viajes", METRICA_LIST_DISTINCT_CHOFER: "choferes", METRICA_LIST_VIAJES: "viajes",
 }
 
 # --- Bloque B1 V2 (Bloque 3 del ticket): DOMINIO -- una ConsultaAtlas ya
@@ -100,7 +106,7 @@ DOMINIOS_SOPORTADOS = frozenset({DOMINIO_VIAJES, DOMINIO_INCIDENCIAS_DOCUMENTALE
 _METRICAS_POR_DOMINIO = {
     DOMINIO_VIAJES: METRICAS_SOPORTADAS - {METRICA_COUNT_INCIDENCIAS, METRICA_COUNT_EVENTOS},
     DOMINIO_INCIDENCIAS_DOCUMENTALES: frozenset({METRICA_COUNT_INCIDENCIAS}),
-    DOMINIO_EVENTOS: frozenset({METRICA_COUNT_EVENTOS}),
+    DOMINIO_EVENTOS: frozenset({METRICA_COUNT_EVENTOS, METRICA_COUNT_DISTINCT_VIAJE, METRICA_COUNT_DISTINCT_CHOFER, METRICA_LIST_DISTINCT_CHOFER, METRICA_LIST_VIAJES}),
 }
 
 # --- Bloque 2: filtros V1 -- sólo campos que `viajes.csv` realmente
@@ -576,9 +582,22 @@ def ejecutar_consulta_eventos(
     validar_consulta(consulta)
     if consulta.dominio != DOMINIO_EVENTOS:
         raise ErrorConsultaAtlas(f"ejecutar_consulta_eventos sólo resuelve el dominio {DOMINIO_EVENTOS!r}.")
-    if consulta.metrica != METRICA_COUNT_EVENTOS:
+    if consulta.metrica not in _METRICAS_POR_DOMINIO[DOMINIO_EVENTOS]:
         raise ErrorConsultaAtlas(f"Métrica no soportada para EVENTOS: {consulta.metrica!r}")
     rango_fecha = _rango_fecha_de_consulta(consulta)
+
+    def _valor_evento(evento: Mapping[str, object], campo: str) -> str:
+        directo = str(evento.get(campo, "")).strip()
+        if directo:
+            return directo
+        snapshot = evento.get("snapshot")
+        if not isinstance(snapshot, Mapping):
+            return ""
+        if campo == "chofer":
+            return str(snapshot.get("chofer", "")).strip()
+        if campo == "chofer_id":
+            return str(snapshot.get("rut_chofer", "")).strip()
+        return ""
 
     def _coincide(evento: Mapping[str, object]) -> bool:
         if rango_fecha is not None:
@@ -604,18 +623,52 @@ def ejecutar_consulta_eventos(
             valor = consulta.filtros.get(campo)
             if valor is None:
                 continue
-            if normalizar_texto_atlas(str(evento.get(campo, ""))) != normalizar_texto_atlas(valor):
+            if normalizar_texto_atlas(_valor_evento(evento, campo)) != normalizar_texto_atlas(valor):
                 return False
         return True
 
-    coincidencias = [e for e in eventos if _coincide(e)]
-    unidades = _UNIDADES_POR_METRICA[METRICA_COUNT_EVENTOS]
+    coincidencias = [
+        e for e in eventos
+        if str(e.get("estado", "ACTIVO")).strip().upper() == "ACTIVO" and _coincide(e)
+    ]
+    unidades = _UNIDADES_POR_METRICA[consulta.metrica]
+
+    def _distintos(*campos: str) -> tuple[str, ...]:
+        valores = set()
+        for evento in coincidencias:
+            valor = next((_valor_evento(evento, campo) for campo in campos if _valor_evento(evento, campo)), "")
+            if valor:
+                valores.add(valor)
+        return tuple(sorted(valores))
+
+    def _choferes_distintos() -> tuple[str, ...]:
+        por_id: dict[str, str] = {}
+        for evento in coincidencias:
+            nombre = _valor_evento(evento, "chofer")
+            identificador = _valor_evento(evento, "chofer_id")
+            clave = re.sub(r"[^A-Z0-9]", "", normalizar_texto_atlas(identificador or nombre))
+            if clave and nombre:
+                por_id.setdefault(clave, nombre)
+        return tuple(sorted(por_id.values()))
 
     if consulta.agrupacion is None:
+        if consulta.metrica == METRICA_COUNT_EVENTOS:
+            resultado: object = len(coincidencias)
+        elif consulta.metrica == METRICA_COUNT_DISTINCT_VIAJE:
+            resultado = len(_distintos("viaje_id", "numero_transporte"))
+        elif consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER:
+            resultado = len(_choferes_distintos())
+        elif consulta.metrica == METRICA_LIST_DISTINCT_CHOFER:
+            resultado = _choferes_distintos()
+        else:  # LIST_VIAJES
+            resultado = _distintos("viaje_id", "numero_transporte")
         return ResultadoConsultaAtlas(
-            consulta_interpretada=consulta, resultado=len(coincidencias), unidades=unidades,
+            consulta_interpretada=consulta, resultado=resultado, unidades=unidades,
             total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),
         )
+
+    if consulta.metrica != METRICA_COUNT_EVENTOS:
+        raise ErrorConsultaAtlas("Agrupación no soportada para esta métrica de eventos.")
 
     acumulado: dict[str, int] = {}
     por_grupo: dict[str, list[Mapping[str, object]]] = {}

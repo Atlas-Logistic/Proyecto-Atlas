@@ -25,6 +25,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_VIAJES,
     ConsultaAtlas,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_DISTINCT_VIAJE,
     METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
@@ -32,6 +33,8 @@ from atlas_core.consultas_atlas import (
     METRICA_COUNT_VIAJES,
     METRICA_LIST_RELACION,
     METRICA_LISTAR_VIAJES,
+    METRICA_LIST_DISTINCT_CHOFER,
+    METRICA_LIST_VIAJES,
     METRICA_SUM_KM,
     METRICA_SUM_PESO,
     METRICA_SUM_TIEMPO,
@@ -560,8 +563,18 @@ def interpretar_consulta_determinista(
                 return None, (f"AMBIGUO:{campo}:" + " | ".join(resolucion.candidatos),)
             filtros_evento[campo] = resolucion.valor
             palabras_reclamadas_evento |= resolucion.palabras_coincidentes
+        if re.search(r"\bCUANT[OA]S?\s+CHOFER(?:ES)?\b", normalizado):
+            metrica_evento = METRICA_COUNT_DISTINCT_CHOFER
+        elif re.search(r"\b(?:QUE|QUIEN(?:ES)?)\s+CHOFER(?:ES)?\b", normalizado):
+            metrica_evento = METRICA_LIST_DISTINCT_CHOFER
+        elif re.search(r"\bCUANT[OA]S?\s+VIAJES?\b", normalizado):
+            metrica_evento = METRICA_COUNT_DISTINCT_VIAJE
+        elif re.search(r"\b(?:QUE|CUALES?)\s+VIAJES?\b", normalizado):
+            metrica_evento = METRICA_LIST_VIAJES
+        else:
+            metrica_evento = METRICA_COUNT_EVENTOS
         return ConsultaAtlas(
-            metrica=METRICA_COUNT_EVENTOS, dominio=DOMINIO_EVENTOS, filtros=filtros_evento,
+            metrica=metrica_evento, dominio=DOMINIO_EVENTOS, filtros=filtros_evento,
             agrupacion=agrupacion_evento, limite=limite_evento,
         ), tuple(avisos)
 

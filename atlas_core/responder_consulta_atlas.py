@@ -19,6 +19,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER,
+    METRICA_COUNT_DISTINCT_VIAJE,
     METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
@@ -26,6 +27,8 @@ from atlas_core.consultas_atlas import (
     METRICA_COUNT_VIAJES,
     METRICA_LIST_RELACION,
     METRICA_LISTAR_VIAJES,
+    METRICA_LIST_DISTINCT_CHOFER,
+    METRICA_LIST_VIAJES,
     METRICA_SUM_KM,
     METRICA_SUM_PESO,
     METRICA_SUM_TIEMPO,
@@ -38,7 +41,6 @@ from atlas_core.consultas_atlas import (
     ejecutar_consulta_incidencias_documentales,
     validar_consulta,
 )
-from atlas_core.eventos_operacionales import construir_eventos_operacionales
 from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales
 from atlas_core.interpretador_consultas import (
     CatalogosConsulta,
@@ -46,7 +48,7 @@ from atlas_core.interpretador_consultas import (
     interpretar_consulta_determinista,
     validar_compatibilidad_semantica,
 )
-from atlas_core.mobile import RepositorioEnviosMobile
+from atlas_core.registro_eventos_operacionales import leer_eventos_operacionales
 from atlas_core.proveedor_interpretacion_consultas import ProveedorInterpretacionConsulta
 
 # Bloque B1 V2 (Bloque 16 del ticket) -- observabilidad SÓLO en logs
@@ -191,8 +193,18 @@ def _formatear_respuesta_eventos(resultado: ResultadoConsultaAtlas) -> str:
         verbo = "tuvo" if len(nombres) == 1 else "tuvieron"
         return f"{', '.join(nombres)} {verbo} {etiqueta_plural}."
 
+    if consulta.metrica == METRICA_LIST_DISTINCT_CHOFER:
+        nombres = resultado.resultado
+        return "No encontré choferes con ese evento." if not nombres else f"Choferes: {', '.join(nombres)}."
+    if consulta.metrica == METRICA_LIST_VIAJES:
+        viajes = resultado.resultado
+        return "No encontré viajes con ese evento." if not viajes else f"Viajes: {', '.join(viajes)}."
     n = resultado.resultado
     etiqueta = _etiqueta_evento(tipo_evento, n)
+    if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER:
+        return f"{n} chofer{'es' if n != 1 else ''} tienen {etiqueta}."
+    if consulta.metrica == METRICA_COUNT_DISTINCT_VIAJE:
+        return f"{n} viaje{'s' if n != 1 else ''} tienen {etiqueta}."
     if sujeto:
         return f"{sujeto} tuvo {n} {etiqueta}."
     return f"Se registraron {n} {etiqueta}."
@@ -321,8 +333,14 @@ def _cargar_eventos(raiz_atlas: str | Path | None, viajes: list[dict[str, str]])
     registrado" (mismo criterio ya establecido para incidencias)."""
     if raiz_atlas is None:
         return []
-    envios = RepositorioEnviosMobile(Path(raiz_atlas)).historial()
-    return construir_eventos_operacionales(envios, viajes)
+    salida = []
+    for bruto in leer_eventos_operacionales(raiz=raiz_atlas).get("eventos", []):
+        evento = dict(bruto)
+        snapshot = evento.get("snapshot") if isinstance(evento.get("snapshot"), dict) else {}
+        evento.setdefault("chofer", str(snapshot.get("chofer", "")).strip())
+        evento.setdefault("chofer_id", str(snapshot.get("rut_chofer", "")).strip())
+        salida.append(evento)
+    return salida
 
 
 def responder_consulta_atlas(

@@ -471,3 +471,26 @@ def test_count_eventos_acepta_tipo_evento_de_otro_rubro_sin_lista_cerrada():
         eventos,
     )
     assert r.resultado == 1
+
+
+def test_metricas_eventos_activos_distinguen_eventos_viajes_y_choferes():
+    eventos = [
+        _evento(evento_id="e1", viaje_id="v1", chofer_id="11-1", chofer="JUAN", estado="ACTIVO"),
+        _evento(evento_id="e2", viaje_id="v1", chofer_id="11-1", chofer="JUAN", estado="ACTIVO"),
+        _evento(evento_id="e3", viaje_id="v2", chofer_id="22-2", chofer="PEDRO", estado="ACTIVO"),
+        _evento(evento_id="e4", viaje_id="v3", chofer_id="33-3", chofer="ANULADO", estado="ANULADO"),
+        _evento(evento_id="e5", viaje_id="v4", chofer_id="44-4", chofer="DEV", tipo_evento="DEVOLUCION_TOTAL", estado="ACTIVO"),
+        _evento(evento_id="e6", viaje_id="v5", chofer_id="55-5", chofer="PARCIAL", tipo_evento="DEVOLUCION_PARCIAL", estado="ACTIVO"),
+        _evento(evento_id="e7", viaje_id="v6", chofer_id="66-6", chofer="DOBLE", tipo_evento="DOBLE_VUELTA", estado="ACTIVO"),
+    ]
+    filtro = {"tipo_evento": "TIENE_ESTADIA"}
+    def ejecutar(metrica):
+        return ejecutar_consulta_eventos(ConsultaAtlas(metrica=metrica, dominio=DOMINIO_EVENTOS, filtros=filtro), eventos).resultado
+    assert ejecutar("COUNT_EVENTOS") == 3
+    assert ejecutar("COUNT_DISTINCT_VIAJE") == 2
+    assert ejecutar("COUNT_DISTINCT_CHOFER") == 2
+    assert ejecutar("LIST_DISTINCT_CHOFER") == ("JUAN", "PEDRO")
+    assert ejecutar("LIST_VIAJES") == ("v1", "v2")
+    for tipo, esperado in {"DEVOLUCION_TOTAL": 1, "DEVOLUCION_PARCIAL": 1, "DOBLE_VUELTA": 1}.items():
+        r = ejecutar_consulta_eventos(ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": tipo}), eventos)
+        assert r.resultado == esperado

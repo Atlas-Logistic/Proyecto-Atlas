@@ -18,6 +18,7 @@ from atlas_core.responder_consulta_atlas import (
     ESTADO_SIN_RESULTADOS,
     responder_consulta_atlas,
 )
+from atlas_core.registro_eventos_operacionales import registrar_evento
 
 COLUMNAS = (
     "viaje_id", "numero_transporte", "fecha", "estado", "numeros_guia", "clientes",
@@ -301,24 +302,37 @@ def test_cuantas_estadias_tuvo_retamal_de_extremo_a_extremo(tmp_path):
         _fila(numero_transporte="T2", choferes="CRISTOPHER RETAMAL"),
         _fila(numero_transporte="T3", choferes="PEDRO GOMEZ"),
     ])
-    _escribir_envio(tmp_path, "e1", {
-        "envio_id": "e1", "tipo_novedad": "TIENE_ESTADIA",
-        "resultado_asociacion": {"numero_transporte": "T1"}, "recibido_en": "2026-08-20T10:00:00+00:00",
-    })
-    _escribir_envio(tmp_path, "e2", {
-        "envio_id": "e2", "tipo_novedad": "TIENE_ESTADIA",
-        "resultado_asociacion": {"numero_transporte": "T2"}, "recibido_en": "2026-08-21T10:00:00+00:00",
-    })
-    _escribir_envio(tmp_path, "e3", {
-        "envio_id": "e3", "tipo_novedad": "DOBLE_VUELTA",
-        "resultado_asociacion": {"numero_transporte": "T3"}, "recibido_en": "2026-08-21T10:00:00+00:00",
-    })
+    for transporte, tipo, viaje, chofer, rut in (
+        ("T1", "TIENE_ESTADIA", "v1", "CRISTOPHER RETAMAL", "11-1"),
+        ("T2", "TIENE_ESTADIA", "v2", "CRISTOPHER RETAMAL", "11-1"),
+        ("T3", "DOBLE_VUELTA", "v3", "PEDRO GOMEZ", "22-2"),
+    ):
+        registrar_evento(
+            raiz=tmp_path, tipo_evento=tipo, numero_transporte=transporte, origen="TEST",
+            enriquecimiento={"viaje_id": viaje, "vinculo_completo": True,
+                            "snapshot": {"chofer": chofer, "rut_chofer": rut}},
+        )
     r = responder_consulta_atlas(
         "¿Cuántas estadías tuvo Retamal?", ruta_viajes=ruta_viajes, raiz_atlas=tmp_path,
     )
     assert r.estado == ESTADO_OK
     assert r.resultado.resultado == 2
     assert "CRISTOPHER RETAMAL tuvo 2 estadías" in r.texto_respuesta
+
+
+def test_cuantos_choferes_tienen_estadia_usa_registro_canonico(tmp_path):
+    ruta_viajes = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta_viajes, [_fila(numero_transporte="T1"), _fila(numero_transporte="T2")])
+    for transporte in ("T1", "T2"):
+        registrar_evento(
+            raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=transporte, origen="TEST",
+            enriquecimiento={"viaje_id": transporte, "vinculo_completo": True,
+                            "snapshot": {"chofer": "JUAN PEREZ", "rut_chofer": "11-1"}},
+        )
+    r = responder_consulta_atlas("¿Cuántos choferes tienen estadía?", ruta_viajes=ruta_viajes, raiz_atlas=tmp_path)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.consulta_interpretada.metrica == "COUNT_DISTINCT_CHOFER"
+    assert r.resultado.resultado == 1
 
 
 def test_eventos_sin_raiz_atlas_nunca_afirma_cero_con_confianza(tmp_path):
