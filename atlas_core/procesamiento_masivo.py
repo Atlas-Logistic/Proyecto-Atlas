@@ -1094,6 +1094,50 @@ def _corroborar_obra_destino_confirmada(
         return None
 
 
+def _obra_confirmada_en_catalogo(
+    carpeta_catalogos: str | Path, *, obra_documental: str,
+) -> bool:
+    """Reconoce la identidad de una obra sin afirmar una dirección nueva.
+
+    Una obra confirmada con al menos una relación vigente conocida demuestra
+    que su nombre no es una entidad desconocida. No implica que el destino
+    documental actual coincida con ninguno de sus destinos históricos.
+    """
+    obra = str(obra_documental or "").strip()
+    if obra in {"", "No encontrado"}:
+        return False
+    carpeta = Path(carpeta_catalogos)
+    try:
+        catalogo = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json",
+            ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        return bool(catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra))
+    except (OSError, ValueError, ErrorCatalogoObrasDestinos):
+        return False
+
+
+def _revalidar_contaminacion_destino_final(
+    motivos: list[str], resultado_entrega: Mapping[str, object],
+) -> None:
+    """Retira in-place sólo una contaminación ya ausente tras corroborar."""
+    motivo = MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
+    if motivo not in motivos:
+        return
+    destino = str(resultado_entrega.get("despachar_a_crudo", "")).strip()
+    direccion = str(resultado_entrega.get("direccion_entrega", "")).strip()
+    ambos_confiables = all(
+        evaluar_credibilidad_direccion(valor).nivel == NivelCredibilidad.CONFIABLE
+        for valor in (destino, direccion)
+    )
+    convergen = bool(destino and direccion) and (
+        normalizar_nombre_destino(destino) == normalizar_nombre_destino(direccion)
+    )
+    if ambos_confiables and convergen:
+        motivos.remove(motivo)
+
+
 def _corroborar_destino_historico_repetido(
     carpeta_catalogos: str | Path, *, cliente_id: str, textos: Iterable[str],
 ) -> dict[str, object] | None:
@@ -1966,7 +2010,10 @@ def procesar_archivo(
                 obra_destino_corroborada = _corroborar_destino_historico_repetido(
                     carpeta_catalogos, cliente_id=cliente_id_historico, textos=textos,
                 )
-        if obra_destino_corroborada is not None:
+        obra_identidad_confirmada = _obra_confirmada_en_catalogo(
+            carpeta_catalogos, obra_documental=obra_final,
+        )
+        if obra_destino_corroborada is not None or obra_identidad_confirmada:
             campos_geometricos_sin_corroborar.discard("obra destino")
             metodos_documento.add(
                 MetodoObtencionDocumento.CATALOGO_OBRA_DESTINO.value
@@ -2375,6 +2422,15 @@ def procesar_archivo(
             logger.warning("Enriquecimiento con telemetría omitido: %s: %s", type(exc).__name__, exc)
     fin_telemetria = time.perf_counter()
 
+    # R1: los motivos de credibilidad se detectan sobre la lectura temprana,
+    # pero logística puede haber producido después un destino corroborado.
+    # Retiramos únicamente la contaminación que ya no se reproduce en el
+    # valor final y cuya dirección confirmada converge exactamente; cualquier
+    # discrepancia o contaminación residual conserva la revisión.
+    _revalidar_contaminacion_destino_final(motivos_documento, resultado_entrega)
+
+    requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
+
     if recolector_decisiones is not None and carpeta_catalogos is not None:
         try:
             recolector_decisiones(detectar_decisiones_documento(
@@ -2605,6 +2661,118 @@ def _corroborar_documentos_relacionados_bajo_lock(ruta_csv: Path, archivos_objet
             escritor.writeheader(); escritor.writerows(filas)
         temporal.replace(ruta_csv)
     return cambios
+
+
+def _resolver_destinos_contaminados_por_historial(
+    ruta_csv: Path, archivos_objetivo: set[str], *, minimo_guias: int = 2,
+) -> int:
+    """Aplica un destino sólo si historial independiente converge sin conflicto."""
+    if not archivos_objetivo or not ruta_csv.is_file():
+        return 0
+    motivo = MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
+    with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+            filas = list(csv.DictReader(archivo, delimiter=";"))
+        cambios = 0
+        for fila in filas:
+            if fila.get("archivo") not in archivos_objetivo:
+                continue
+            motivos = [m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()]
+            obra = _normalizar(fila.get("obra_destino", ""))
+            cambio_fila = False
+            motivo_obra = MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR.value
+            if motivo_obra in motivos and obra:
+                guias_misma_obra = {
+                    str(otra.get("numero_guia", "")).strip()
+                    for otra in filas
+                    if otra.get("archivo") != fila.get("archivo")
+                    and _normalizar(otra.get("obra_destino", "")) == obra
+                    and str(otra.get("numero_guia", "")).strip()
+                }
+                if len(guias_misma_obra) >= minimo_guias:
+                    motivos.remove(motivo_obra)
+                    cambio_fila = True
+
+            if motivo not in motivos:
+                if cambio_fila:
+                    fila["motivos_revision_documento"] = " | ".join(motivos)
+                    fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+                    fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+                    fila["estado_operacional"] = "REQUIERE_REVISION" if (
+                        fila["estado_documental"] == "REQUIERE_REVISION"
+                        or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+                    ) else "OK"
+                    cambios += 1
+                continue
+            candidatos: dict[str, list[dict[str, str]]] = {}
+            for otra in filas:
+                if otra.get("archivo") == fila.get("archivo") or _normalizar(otra.get("obra_destino", "")) != obra:
+                    continue
+                if otra.get("estado_ruta") != EstadoRuta.RUTA_CALCULADA.value:
+                    continue
+                direccion = str(otra.get("direccion_entrega", "")).strip()
+                if not direccion or evaluar_credibilidad_direccion(direccion).nivel != NivelCredibilidad.CONFIABLE:
+                    continue
+                candidatos.setdefault(normalizar_nombre_destino(direccion), []).append(otra)
+            grupos_suficientes = [grupo for grupo in candidatos.values() if len({f.get("numero_guia") for f in grupo}) >= minimo_guias]
+            if len(grupos_suficientes) != 1:
+                if cambio_fila:
+                    fila["motivos_revision_documento"] = " | ".join(motivos)
+                    fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+                    fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+                    fila["estado_operacional"] = "REQUIERE_REVISION" if (
+                        fila["estado_documental"] == "REQUIERE_REVISION"
+                        or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+                    ) else "OK"
+                    cambios += 1
+                continue
+            direccion = str(grupos_suficientes[0][0]["direccion_entrega"]).strip()
+            fila["despachar_a_crudo"] = direccion
+            fila["direccion_entrega"] = direccion
+            # Si las mismas guías independientes convergen además en una
+            # ruta ya calculada desde el mismo origen, reutilizar ese hecho
+            # operacional evita volver a geocodificar una dirección que el
+            # historial ya confirmó. Cualquier divergencia se abstiene.
+            origen_actual = str(fila.get("planta_origen_id", "")).strip()
+            rutas = {
+                tuple(str(h.get(campo, "")) for campo in (
+                    "planta_origen_id", "localidad_entrega", "region_entrega",
+                    "distancia_km", "duracion_min", "proveedor_ruta",
+                    "codigo_pais", "codigo_unidad", "codigo_contexto",
+                ))
+                for h in grupos_suficientes[0]
+                if h.get("estado_ruta") == EstadoRuta.RUTA_CALCULADA.value
+                and str(h.get("planta_origen_id", "")).strip() == origen_actual
+            }
+            if origen_actual and len(rutas) == 1:
+                ruta = next(iter(rutas))
+                for campo, valor in zip((
+                    "planta_origen_id", "localidad_entrega", "region_entrega",
+                    "distancia_km", "duracion_min", "proveedor_ruta",
+                    "codigo_pais", "codigo_unidad", "codigo_contexto",
+                ), ruta):
+                    fila[campo] = valor
+                fila["estado_entrega"] = "RESUELTO"
+                fila["estado_ruta"] = EstadoRuta.RUTA_CALCULADA.value
+                fila["motivo_ruta"] = ""
+            motivos.remove(motivo)
+            cambio_fila = True
+            fila["motivos_revision_documento"] = " | ".join(motivos)
+            fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+            fila["estado_operacional"] = "REQUIERE_REVISION" if (
+                fila["estado_documental"] == "REQUIERE_REVISION"
+                or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+            ) else "OK"
+            if cambio_fila:
+                cambios += 1
+        if cambios:
+            temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".historial.tmp")
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+                escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+                escritor.writeheader(); escritor.writerows(filas)
+            temporal.replace(ruta_csv)
+        return cambios
 
 
 def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
@@ -3321,6 +3489,9 @@ def procesar_carpeta(
         if not nuevos:
             break
     resumen["documentos_relacionados_corroborados"] = corroborados
+    resumen["destinos_historial_resueltos"] = _resolver_destinos_contaminados_por_historial(
+        ruta_csv, archivos_procesados_ahora,
+    )
     if orquestador_ia is None:
         # Bloque M2-C -- `ruta_csv` ya tiene TODO el lote volcado a disco
         # en este punto (ver el `finally` arriba); se relee fresco para

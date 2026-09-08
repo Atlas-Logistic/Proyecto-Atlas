@@ -331,6 +331,42 @@ def test_sin_gps_sin_mobile_sin_documento_resuelve_por_categoria_solo(entorno_ca
     assert motivo == ""
 
 
+@pytest.mark.parametrize("categoria", ["BARRAS", "ROLLOS"])
+def test_membrete_renca_incompatible_resuelve_alternativa_unica_colina(
+    entorno_categorias, categoria,
+):
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
+        patente=None, instante_salida=None, proveedor_posicion=None,
+        plantas=entorno_categorias["plantas"],
+        # Simula el candidato documental incompatible que atravesó el filtro.
+        textos_documento=["AZA RENCA"],
+        categoria_documento=categoria,
+        destino_texto="CALLE DE CLIENTE 500",
+    )
+    assert planta.planta_id == entorno_categorias["colina"].planta_id
+    assert motivo == ""
+    assert determinado_por == "CATEGORIA_DESTINO_EXTERNO"
+    assert evidencia == f"CATEGORIA={categoria};ALTERNATIVA_UNICA_COMPATIBLE"
+
+
+def test_membrete_incompatible_con_dos_alternativas_no_inventa(entorno_categorias):
+    from dataclasses import replace
+
+    segunda = replace(
+        entorno_categorias["colina"], planta_id="segunda-compatible",
+        nombre="PLANTA TERCERA", nombre_normalizado="PLANTA TERCERA",
+    )
+    planta, motivo, determinado_por, evidencia = resolver_planta_origen(
+        patente=None, instante_salida=None, proveedor_posicion=None,
+        plantas=[*entorno_categorias["plantas"], segunda],
+        textos_documento=["AZA RENCA"],
+        categoria_documento="BARRAS", destino_texto="CLIENTE EXTERNO 500",
+    )
+    assert planta is None
+    assert motivo == "CONTRADICCION_OPERACIONAL_ORIGEN[DOCUMENTO=AZA_RENCA:INCOMPATIBLE]"
+    assert determinado_por == ""
+
+
 def test_categoria_sin_regla_sigue_sin_determinar(entorno_categorias):
     """Sin categoría (o SIN_REGLA) nunca inventa -- 464367/464265, donde
     el material quedó NO_DETERMINADO."""

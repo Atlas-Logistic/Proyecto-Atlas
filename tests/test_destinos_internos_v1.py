@@ -21,6 +21,7 @@ confirmado (antes: `None`) -- cero llamadas a Groq, cero llamadas a
 Internet."""
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,7 +48,9 @@ from atlas_core.atlas_ia.registro_problemas import (
     recopilar_evidencia_obra_destino,
 )
 from atlas_core.procesamiento_masivo import (
+    COLUMNAS,
     _corroborar_obra_destino_confirmada,
+    _resolver_destinos_contaminados_por_historial,
     escalar_resultado_ia_en_memoria,
     procesar_archivo,
 )
@@ -184,6 +187,81 @@ def _procesar_con_mocks(tmp_path, carpeta, monkeypatch, *, cliente_texto, rut_cl
     monkeypatch.setattr(procesamiento_masivo, "leer_bloques_imagen", Mock(return_value=[]))
     monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=base))
     return procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta, proveedor_rutas=object())
+
+
+def test_obra_confirmada_con_direccion_nueva_reconoce_identidad_sin_confirmar_destino(
+    tmp_path, monkeypatch,
+):
+    carpeta, clientes, cliente, reloj, ids = _crear_cliente(tmp_path)
+    destino_historico = _crear_destino(
+        carpeta, clientes, cliente, reloj, ids,
+        nombre="OBRA CONOCIDA", direccion="URUGUAY 15 SANTIAGO",
+    )
+    catalogo = _obras_destinos(carpeta, clientes)
+    observacion = catalogo.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra="CONSTRUCTORA CONOCIDA SPA",
+        destino_id=destino_historico.destino_id, evidencia=_evidencia("guia-historica"),
+    )
+    catalogo.confirmar_relacion(observacion.relacion.relacion_id, actor="HUMANO")
+
+    salida = _procesar_con_mocks(
+        tmp_path, carpeta, monkeypatch, cliente_texto=cliente.razon_social,
+        rut_cliente="50.234.350-5", obra="CONSTRUCTORA CONOCIDA SPA",
+        direccion="AV PROVIDENCIA 1550 PROVIDENCIA",
+    )
+
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in salida["motivos_revision_documento"]
+    # Reconocer la identidad nunca sustituye la dirección nueva por la histórica.
+    assert "URUGUAY 15" not in salida["despachar_a_crudo"]
+
+
+def test_destino_contaminado_se_resuelve_solo_con_historial_repetido_sin_conflicto(tmp_path):
+    ruta = tmp_path / "guias.csv"
+    def fila(archivo, guia, direccion, *, motivo="", estado_ruta="RUTA_CALCULADA"):
+        datos = {columna: "" for columna in COLUMNAS}
+        datos.update(
+            archivo=archivo, numero_guia=guia, obra_destino="OBRA CONOCIDA",
+            despachar_a_crudo=direccion, direccion_entrega=direccion,
+            estado_ruta=estado_ruta, motivos_revision_documento=motivo,
+            planta_origen_id="planta-1", distancia_km="35.5", duracion_min="50",
+            proveedor_ruta="proveedor-test",
+            indicador_revision="REVISAR" if motivo else "OK",
+            estado_documental="REQUIERE_REVISION" if motivo else "OK",
+        )
+        return datos
+    filas = [
+        fila("actual.jpeg", "3", "RUT CHOFER 11.111.111-1", motivo="OBRA_DESTINO_SIN_CORROBORAR | DESTINO_CONTAMINADO_POR_OTRA_SECCION", estado_ruta="DESTINO_NO_VALIDO"),
+        fila("historia-1.jpeg", "1", "CAMINO CENTRAL 10800 SANTIAGO"),
+        fila("historia-2.jpeg", "2", "CAMINO CENTRAL 10800 SANTIAGO"),
+    ]
+    with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader(); escritor.writerows(filas)
+
+    assert _resolver_destinos_contaminados_por_historial(ruta, {"actual.jpeg"}) == 1
+    with ruta.open(newline="", encoding="utf-8-sig") as archivo:
+        actual = list(csv.DictReader(archivo, delimiter=";"))[0]
+    assert actual["despachar_a_crudo"] == "CAMINO CENTRAL 10800 SANTIAGO"
+    assert actual["motivos_revision_documento"] == ""
+    assert actual["estado_ruta"] == "RUTA_CALCULADA"
+    assert actual["distancia_km"] == "35.5"
+
+
+def test_destino_contaminado_no_se_resuelve_con_historial_divergente(tmp_path):
+    ruta = tmp_path / "guias.csv"
+    filas = []
+    for archivo, guia, direccion, motivo, estado in (
+        ("actual.jpeg", "3", "RUT CHOFER 11.111.111-1", "DESTINO_CONTAMINADO_POR_OTRA_SECCION", "DESTINO_NO_VALIDO"),
+        ("historia-1.jpeg", "1", "CAMINO CENTRAL 10800 SANTIAGO", "", "RUTA_CALCULADA"),
+        ("historia-2.jpeg", "2", "OTRA CALLE 200 SANTIAGO", "", "RUTA_CALCULADA"),
+    ):
+        datos = {columna: "" for columna in COLUMNAS}
+        datos.update(archivo=archivo, numero_guia=guia, obra_destino="OBRA CONOCIDA", despachar_a_crudo=direccion, direccion_entrega=direccion, motivos_revision_documento=motivo, estado_ruta=estado)
+        filas.append(datos)
+    with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader(); escritor.writerows(filas)
+    assert _resolver_destinos_contaminados_por_historial(ruta, {"actual.jpeg"}) == 0
 
 
 # ============================================================

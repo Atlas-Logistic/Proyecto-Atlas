@@ -28,6 +28,7 @@ from atlas_core.rutas.modelos import Coordenadas, EstadoRuta
 from atlas_core.rutas.origen_documental import resolver_origen_documental
 from atlas_core.rutas.origen_evidencia import (
     FUENTE_CATEGORIA_DESTINO_EXTERNO,
+    resolver_planta_alternativa_por_categoria,
     fusionar_evidencia_origen,
     resolver_planta_por_codigo_mobile,
     resolver_planta_unica_por_categoria,
@@ -228,6 +229,25 @@ def resolver_planta_origen(
 
     planta_doc = resolver_origen_documental(textos_documento, plantas) if textos_documento is not None else None
     planta_mobile = resolver_planta_por_codigo_mobile(codigo_planta_mobile, plantas)
+
+    # R1: una planta leída del documento pero incompatible con la carga no
+    # debe impedir el mismo fallback determinístico que ya usamos cuando el
+    # documento no aporta origen. Esto cubre, entre otros, membretes
+    # societarios que mencionan una planta sin identificar el despacho real.
+    # La función se abstiene salvo que exista exactamente una alternativa
+    # vigente compatible y que ésta no sea el propio destino.
+    if planta_mobile is None and planta_doc is not None:
+        planta_alternativa = resolver_planta_alternativa_por_categoria(
+            planta_documental=planta_doc,
+            categoria=categoria_documento or "",
+            plantas=plantas,
+            destino_texto=destino_texto,
+        )
+        if planta_alternativa is not None:
+            return (
+                planta_alternativa, "", FUENTE_CATEGORIA_DESTINO_EXTERNO,
+                f"CATEGORIA={categoria_documento or ''};ALTERNATIVA_UNICA_COMPATIBLE",
+            )
 
     if planta_mobile is None and planta_doc is None:
         planta_categoria = resolver_planta_unica_por_categoria(

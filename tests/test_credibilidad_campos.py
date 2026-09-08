@@ -175,6 +175,29 @@ def test_direccion_ausente_es_confiable_no_es_asunto_de_esta_capa():
     assert evaluar_credibilidad_direccion("No encontrado").nivel == NivelCredibilidad.CONFIABLE
 
 
+def test_revalidacion_post_corroboracion_retira_contaminacion_si_converge():
+    from atlas_core.procesamiento_masivo import _revalidar_contaminacion_destino_final
+
+    motivos = ["DESTINO_CONTAMINADO_POR_OTRA_SECCION"]
+    _revalidar_contaminacion_destino_final(motivos, {
+        "despachar_a_crudo": "MARURI 1942 RENCA",
+        "direccion_entrega": "MARURI 1942 RENCA",
+    })
+    assert motivos == []
+
+
+def test_revalidacion_post_corroboracion_conserva_contaminacion_real():
+    from atlas_core.procesamiento_masivo import _revalidar_contaminacion_destino_final
+
+    for entrega in (
+        {"despachar_a_crudo": "RUT CHOFER 14293816-2", "direccion_entrega": ""},
+        {"despachar_a_crudo": "MARURI 1942 RENCA", "direccion_entrega": "OTRA CALLE 100 RENCA"},
+    ):
+        motivos = ["DESTINO_CONTAMINADO_POR_OTRA_SECCION"]
+        _revalidar_contaminacion_destino_final(motivos, entrega)
+        assert motivos == ["DESTINO_CONTAMINADO_POR_OTRA_SECCION"]
+
+
 # ============================================================
 # PESO -- nunca se reemplaza, sólo se marca.
 # ============================================================
