@@ -264,6 +264,195 @@ def test_destino_contaminado_no_se_resuelve_con_historial_divergente(tmp_path):
     assert _resolver_destinos_contaminados_por_historial(ruta, {"actual.jpeg"}) == 0
 
 
+def test_historial_no_sobrescribe_destino_ya_confirmado_por_humano(tmp_path):
+    ruta = tmp_path / "guias.csv"
+    def fila(archivo, guia, direccion, *, motivo=""):
+        datos = {columna: "" for columna in COLUMNAS}
+        datos.update(
+            archivo=archivo, numero_guia=guia, obra_destino="OBRA CONOCIDA",
+            despachar_a_crudo=direccion, direccion_entrega=direccion,
+            estado_ruta="RUTA_CALCULADA", motivos_revision_documento=motivo,
+            planta_origen_id="planta-1", distancia_km="35.5", duracion_min="50",
+        )
+        return datos
+    filas = [
+        fila("humana.jpeg", "3", "DIRECCION HUMANA 99"),
+        fila("historia-1.jpeg", "1", "CAMINO CENTRAL 10800 SANTIAGO"),
+        fila("historia-2.jpeg", "2", "CAMINO CENTRAL 10800 SANTIAGO"),
+    ]
+    with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader(); escritor.writerows(filas)
+
+    assert _resolver_destinos_contaminados_por_historial(ruta, {"humana.jpeg"}) == 0
+    with ruta.open(newline="", encoding="utf-8-sig") as archivo:
+        humana = list(csv.DictReader(archivo, delimiter=";"))[0]
+    assert humana["direccion_entrega"] == "DIRECCION HUMANA 99"
+
+
+# ============================================================
+# 1.b  RECUPERACIÓN POR HISTORIAL también para filas HISTÓRICAS,
+#      durante la reconciliación (no sólo al terminar un lote nuevo).
+#      Caso real 464836 / viaje 0000353361.
+# ============================================================
+
+
+def _fila_reconc(**over):
+    fila = {c: "" for c in COLUMNAS}
+    fila.update(
+        estado_procesamiento="OK", fecha="17-08-2026", chofer="JOSE LAZCANO",
+        planta_origen_id="planta-colina", planta_origen_nombre="AZA COLINA",
+        origen_determinado_por="CATEGORIA", evidencia_origen="CATEGORIA=BARRAS",
+    )
+    fila.update(over)
+    return fila
+
+
+def test_reconciliacion_recupera_destino_contaminado_de_fila_historica(tmp_path):
+    """El arreglo general: `_resolver_destinos_contaminados_por_historial`
+    -- que ya reconstruía un destino contaminado a partir de guías
+    hermanas independientes convergentes -- ahora corre TAMBIÉN durante
+    `reconciliar_estado_derivado`, no sólo con `archivos_procesados_ahora`
+    al terminar un lote. Un caso resoluble se reconcilia; uno ambiguo
+    sigue pendiente; ninguna decisión se crea."""
+    from atlas_core.almacenamiento_portable import escribir_estado_operacion
+    from atlas_core.reconciliacion_estado_derivado import (
+        RULESET_VERSION, reconciliar_estado_derivado,
+    )
+    from atlas_core.reporte_viajes import _sha256_archivo
+
+    raiz = tmp_path / "Atlas"
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    catalogos.mkdir(parents=True)
+    actual.mkdir(parents=True)
+    for nombre, contenido in {
+        "clientes.json": {"version_formato": 1, "clientes": []},
+        "empresas.json": {}, "vehiculos.json": {"version": 1, "vehiculos": []},
+        "obras_destinos.json": {"version_formato": 1, "obras": [], "relaciones": []},
+        "destinos_maestros.json": {"version_formato": 1, "destinos": []},
+    }.items():
+        (catalogos / nombre).write_text(json.dumps(contenido), encoding="utf-8")
+
+    ruta_maipu = "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"
+    filas = [
+        # --- caso resoluble (464836 real): destino contaminado, sin ruta,
+        #     obra == cliente == AMERICAN SCREW, NO en ningún set "nuevo" ---
+        _fila_reconc(
+            archivo="464836.jpeg", numero_guia="464836", numero_transporte="0000353361",
+            cliente="AMERICAN SCREW CHILE SPA", obra_destino="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo="14293816-2 FECHA LLEGADA 17-08-2026",
+            estado_ruta="REQUIERE_REVISION", motivo_ruta="GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+            motivos_revision_documento="DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+            indicador_revision="REVISAR", estado_documental="REQUIERE_REVISION",
+            estado_operacional="REQUIERE_REVISION",
+        ),
+        # dos guías hermanas independientes, misma obra, misma ruta ya calculada
+        _fila_reconc(
+            archivo="464479.jpeg", numero_guia="464479", numero_transporte="0000352394",
+            cliente="AMERICAN SCREW CHILE SPA", obra_destino="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo=ruta_maipu, direccion_entrega=ruta_maipu,
+            localidad_entrega="Maipú", region_entrega="Metropolitana",
+            estado_ruta="RUTA_CALCULADA", estado_entrega="RESUELTO",
+            distancia_km="35.3246", duracion_min="49.43", proveedor_ruta="openrouteservice",
+            indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        ),
+        _fila_reconc(
+            archivo="464730.jpeg", numero_guia="464730", numero_transporte="0000353118",
+            cliente="AMERICAN SCREW CHILE SPA", obra_destino="AMERICAN SCREW CHILE SPA",
+            despachar_a_crudo=ruta_maipu, direccion_entrega=ruta_maipu,
+            localidad_entrega="Maipú", region_entrega="Metropolitana",
+            estado_ruta="RUTA_CALCULADA", estado_entrega="RESUELTO",
+            distancia_km="35.3246", duracion_min="49.43", proveedor_ruta="openrouteservice",
+            indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        ),
+        # --- caso AMBIGUO: destino contaminado + dos destinos hermanos
+        #     divergentes, cada uno con 2 guías -> se abstiene, sigue pendiente
+        _fila_reconc(
+            archivo="900001.jpeg", numero_guia="900001", numero_transporte="0000399001",
+            cliente="OBRA AMBIGUA SPA", obra_destino="OBRA AMBIGUA SPA",
+            despachar_a_crudo="11.111.111-1 FECHA 17-08-2026",
+            estado_ruta="REQUIERE_REVISION", motivo_ruta="GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+            motivos_revision_documento="DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+            indicador_revision="REVISAR", estado_documental="REQUIERE_REVISION",
+            estado_operacional="REQUIERE_REVISION",
+        ),
+        _fila_reconc(
+            archivo="900010.jpeg", numero_guia="900010", numero_transporte="0000399010",
+            cliente="OBRA AMBIGUA SPA", obra_destino="OBRA AMBIGUA SPA",
+            despachar_a_crudo="CAMINO CENTRAL 10800 SANTIAGO", direccion_entrega="CAMINO CENTRAL 10800 SANTIAGO",
+            estado_ruta="RUTA_CALCULADA", estado_entrega="RESUELTO", distancia_km="10", duracion_min="12",
+            indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        ),
+        _fila_reconc(
+            archivo="900011.jpeg", numero_guia="900011", numero_transporte="0000399011",
+            cliente="OBRA AMBIGUA SPA", obra_destino="OBRA AMBIGUA SPA",
+            despachar_a_crudo="CAMINO CENTRAL 10800 SANTIAGO", direccion_entrega="CAMINO CENTRAL 10800 SANTIAGO",
+            estado_ruta="RUTA_CALCULADA", estado_entrega="RESUELTO", distancia_km="10", duracion_min="12",
+            indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        ),
+        _fila_reconc(
+            archivo="900020.jpeg", numero_guia="900020", numero_transporte="0000399020",
+            cliente="OBRA AMBIGUA SPA", obra_destino="OBRA AMBIGUA SPA",
+            despachar_a_crudo="OTRA CALLE 200 SANTIAGO", direccion_entrega="OTRA CALLE 200 SANTIAGO",
+            estado_ruta="RUTA_CALCULADA", estado_entrega="RESUELTO", distancia_km="20", duracion_min="25",
+            indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        ),
+        _fila_reconc(
+            archivo="900021.jpeg", numero_guia="900021", numero_transporte="0000399021",
+            cliente="OBRA AMBIGUA SPA", obra_destino="OBRA AMBIGUA SPA",
+            despachar_a_crudo="OTRA CALLE 200 SANTIAGO", direccion_entrega="OTRA CALLE 200 SANTIAGO",
+            estado_ruta="RUTA_CALCULADA", estado_entrega="RESUELTO", distancia_km="20", duracion_min="25",
+            indicador_revision="OK", estado_documental="OK", estado_operacional="OK",
+        ),
+    ]
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader(); escritor.writerows(filas)
+    (actual / "decisiones_pendientes.json").write_text(
+        json.dumps({"schema_version": 1, "decisiones": []}), encoding="utf-8"
+    )
+    reporte_previo = raiz / "reportes" / "previo"
+    reporte_previo.mkdir(parents=True)
+    # Publicado UNA versión atrás -> `migracion` dispara la batería (la
+    # misma señal que usa cualquier cambio de reglas de reconciliación).
+    escribir_estado_operacion(
+        reporte_vigente=reporte_previo, dataset_operacional=dataset,
+        decisiones_pendientes=actual / "decisiones_pendientes.json", raiz=raiz,
+        version_estado_derivado=RULESET_VERSION - 1, dataset_sha256=_sha256_archivo(dataset),
+    )
+
+    resultado = reconciliar_estado_derivado(raiz_atlas=raiz)
+
+    assert resultado["reconciliado"] is True
+    assert resultado["destinos_historial_recuperados"] == 1
+
+    with dataset.open(newline="", encoding="utf-8-sig") as archivo:
+        por_guia = {f["numero_guia"]: f for f in csv.DictReader(archivo, delimiter=";")}
+
+    recuperada = por_guia["464836"]
+    assert recuperada["despachar_a_crudo"] == ruta_maipu
+    assert recuperada["direccion_entrega"] == ruta_maipu
+    assert recuperada["estado_ruta"] == "RUTA_CALCULADA"
+    assert recuperada["motivo_ruta"] == ""
+    assert recuperada["distancia_km"] == "35.3246"
+    assert recuperada["planta_origen_nombre"] == "AZA COLINA"
+    assert recuperada["motivos_revision_documento"] == ""
+    assert recuperada["estado_operacional"] == "OK"
+
+    # caso ambiguo: intacto, sigue pendiente
+    ambigua = por_guia["900001"]
+    assert "DESTINO_CONTAMINADO_POR_OTRA_SECCION" in ambigua["motivos_revision_documento"]
+    assert ambigua["direccion_entrega"] == ""
+    assert ambigua["estado_ruta"] != "RUTA_CALCULADA"
+
+    # no se creó ninguna decisión humana
+    bandeja = json.loads((actual / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    guias_decision = {(d.get("documento") or {}).get("numero_guia") for d in bandeja["decisiones"]}
+    assert "464836" not in guias_decision
+
+
 # ============================================================
 # 2. alias confirmado + misma dirección -> resolución automática
 # ============================================================

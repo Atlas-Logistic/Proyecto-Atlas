@@ -208,7 +208,24 @@ from atlas_core.revalidacion_documental import (
 # a múltiples ubicaciones dispersas -- la pregunta sigue viva). Sin subir
 # el número, las tarjetas de 464715/464740/464784/464395 seguirían
 # suprimidas en una operación ya migrada a 14.
-RULESET_VERSION = 15
+#
+# Subida de 15 a 16 -- RECUPERACIÓN DETERMINÍSTICA DE DESTINO POR HISTORIAL
+# TAMBIÉN PARA FILAS HISTÓRICAS (caso real 464836 / viaje 0000353361, obra
+# == cliente == "AMERICAN SCREW CHILE SPA"): `_resolver_destinos_
+# contaminados_por_historial` (procesamiento_masivo) ya reconstruía un
+# destino contaminado ("14293816-2 FECHA LLEGADA 17-08-2026") a partir de
+# guías hermanas independientes que convergen sin conflicto en un mismo
+# destino confiable y una misma ruta ya calculada -- pero SÓLO se invocaba
+# al terminar un lote nuevo, con `archivos_procesados_ahora`. Una fila ya
+# existente que quedó contaminada antes de que su propio historial
+# convergiera nunca volvía a entrar a ese paso. Ahora se conecta a esta
+# batería: selecciona las filas con `DESTINO_CONTAMINADO_POR_OTRA_SECCION`
+# vigente y aplica EXACTAMENTE sus gates normales (>=2 guías
+# independientes, un único destino confiable, una única ruta para el mismo
+# origen; cualquier divergencia se abstiene). No crea decisiones, no lee
+# OCR, no relaja ningún gate. Sin subir este número, 464836 seguiría con
+# su tarjeta `DESTINO_NO_RESUELTO` hasta que un lote nuevo lo incluyera.
+RULESET_VERSION = 16
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -521,6 +538,33 @@ def reconciliar_estado_derivado(
             "creado_en": instante.isoformat(),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+        # Un documento ya existente puede haber quedado contaminado antes
+        # de que el historial independiente convergiera. La recuperación
+        # determinística ya usada al terminar un lote nuevo debe correr
+        # también durante la reconciliación: selecciona sólo filas con el
+        # motivo documental vigente y aplica exactamente sus gates normales
+        # (dos guías independientes, un único destino confiable y una única
+        # ruta para el mismo origen). No crea decisiones ni usa OCR.
+        from atlas_core.procesamiento_masivo import (
+            MotivoRevisionDocumento,
+            _resolver_destinos_contaminados_por_historial,
+        )
+        with dataset.open("r", newline="", encoding="utf-8-sig") as archivo_dataset:
+            archivos_destino_contaminado = {
+                str(fila.get("archivo", "")).strip()
+                for fila in csv.DictReader(archivo_dataset, delimiter=";")
+                if str(fila.get("archivo", "")).strip()
+                and MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
+                in {
+                    motivo.strip()
+                    for motivo in str(fila.get("motivos_revision_documento", "")).split("|")
+                    if motivo.strip()
+                }
+            }
+        recuperacion_historial_destino = _resolver_destinos_contaminados_por_historial(
+            dataset, archivos_destino_contaminado,
+        )
+
         # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: estas
         # tres revalidaciones NUNCA leen OCR ni recalculan ruta -- sólo
         # reconcilian flags/estados derivados YA obsoletos contra reglas
@@ -790,6 +834,7 @@ def reconciliar_estado_derivado(
             | set(limpieza_geo_contradiccion["guias_actualizadas"])
             | set(limpieza_obra_destino["guias_actualizadas"])
         ),
+        "destinos_historial_recuperados": recuperacion_historial_destino,
         "guias_recuperadas": guias_recuperadas,
         "guias_contradiccion_destino_catalogo": limpieza_destino_catalogo["guias_contradiccion"],
         "destinos_coordenadas_completadas": limpieza_destino_coords["destinos_actualizados"],
