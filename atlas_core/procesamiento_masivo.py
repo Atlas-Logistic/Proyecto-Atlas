@@ -22,6 +22,7 @@ from atlas_core.catalogos import (
     buscar_chofer_por_rut,
     buscar_empresa_por_rut,
     cargar_catalogo_json,
+    corroborar_chofer_por_nombre_y_rut_documental,
     enriquecer_datos_con_catalogos,
     normalizar_rut,
     resolver_nombre_chofer_difuso,
@@ -1721,18 +1722,24 @@ def procesar_archivo(
                 catalogo_choferes, nombre_chofer
             )
             if coincidencia_exacta is not None:
-                rut_catalogo, registro_chofer = coincidencia_exacta
+                _identificador, registro_chofer = coincidencia_exacta
                 datos["chofer"] = str(
                     registro_chofer.get("nombre", nombre_chofer)
                 ).strip()
-                rut_limpio = normalizar_rut(rut_catalogo)
-                rut_con_guion = (
-                    f"{rut_limpio[:-1]}-{rut_limpio[-1]}"
-                    if len(rut_limpio) >= 2 else rut_limpio
+                # Bloque FIX RUT DOCUMENTAL / ID PLACEHOLDER -- caso real
+                # WLADIMIR AGUILAR (ID interno `PENDIENTE00000006`, sin RUT
+                # canónico): un ID placeholder NO debe impedir corroborar
+                # una entidad activa única y conocida. Si la entidad tiene
+                # RUT canónico se usa ése (y un RUT documental VÁLIDO
+                # DISTINTO lo bloquea por contradicción, nunca se acepta en
+                # silencio); si no lo tiene, el RUT documental
+                # estructuralmente válido corrobora la identidad. Nunca
+                # crea un segundo chofer ni desambigua por fuzzy.
+                corroboracion_catalogo = corroborar_chofer_por_nombre_y_rut_documental(
+                    catalogo_choferes, nombre_chofer, rut_chofer
                 )
-                rut_validado = validar_rut_chileno(rut_con_guion)
-                if rut_validado.estado == EstadoValidacion.VALIDO:
-                    datos["RUT del chofer"] = rut_validado.valor
+                if corroboracion_catalogo is not None:
+                    datos["chofer"], datos["RUT del chofer"] = corroboracion_catalogo
                     metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
                     chofer_corroborado = True
             decision_fuzzy = resolver_nombre_chofer_difuso(

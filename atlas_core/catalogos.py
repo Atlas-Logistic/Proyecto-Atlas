@@ -116,6 +116,73 @@ def buscar_chofer_por_nombre_exacto(
     return coincidencias[0] if len(coincidencias) == 1 else None
 
 
+def rut_canonico_de_registro_chofer(
+    identificador: str, registro: Mapping[str, Any] | None
+) -> str | None:
+    """RUT canónico REAL de un registro de chofer, SEPARADO del ID interno.
+
+    El catálogo histórico usó el RUT como clave, pero un chofer agregado
+    sin RUT confirmado lleva un identificador placeholder
+    (``PENDIENTE00000006``) -- ese ID NUNCA es un RUT. Devuelve, en orden:
+    el campo ``rut`` explícito del registro si trae uno estructuralmente
+    válido; si no, el propio identificador cuando ES un RUT válido;
+    ``None`` cuando no hay ninguno (entidad activa sin RUT canónico
+    todavía)."""
+    from atlas_core.modelos import EstadoValidacion
+    from atlas_core.validadores import validar_rut_chileno
+
+    for candidato in (
+        str((registro or {}).get("rut", "")).strip(),
+        str(identificador or "").strip(),
+    ):
+        limpio = normalizar_rut(candidato)
+        if len(limpio) >= 2:
+            validado = validar_rut_chileno(f"{limpio[:-1]}-{limpio[-1]}")
+            if validado.estado == EstadoValidacion.VALIDO:
+                return validado.valor
+    return None
+
+
+def corroborar_chofer_por_nombre_y_rut_documental(
+    catalogo: FuenteCatalogo, nombre_chofer: str, rut_documental: str
+) -> tuple[str, str] | None:
+    """Corrobora la identidad de un chofer cuando su nombre coincide EXACTO
+    con un único chofer ACTIVO del catálogo. Devuelve
+    ``(nombre_canonico, rut_a_persistir)`` o ``None``.
+
+    - Entidad CON RUT canónico (campo ``rut`` o ID que ES un RUT):
+      corrobora con ESE RUT si el documental es ausente/inválido o
+      coincide con él; si el documental es un RUT VÁLIDO DISTINTO ->
+      ``None`` (contradicción, nunca se acepta en silencio).
+    - Entidad SIN RUT canónico (ID placeholder ``PENDIENTE...``): un ID
+      interno placeholder NO impide corroborar una entidad activa conocida
+      -- corrobora con el RUT DOCUMENTAL si éste es estructuralmente
+      válido; si no, ``None``.
+
+    Nunca desambigua por fuzzy ni acepta un match de nombre no único
+    (``buscar_chofer_por_nombre_exacto`` ya devuelve ``None`` ante dos
+    entidades competitivas)."""
+    from atlas_core.modelos import EstadoValidacion
+    from atlas_core.validadores import validar_rut_chileno
+
+    coincidencia = buscar_chofer_por_nombre_exacto(catalogo, nombre_chofer)
+    if coincidencia is None:
+        return None
+    identificador, registro = coincidencia
+    nombre_canonico = str(registro.get("nombre", nombre_chofer)).strip() or nombre_chofer
+    rut_canonico = rut_canonico_de_registro_chofer(identificador, registro)
+    rut_doc_validado = validar_rut_chileno(str(rut_documental or "").strip())
+    rut_doc_valido = rut_doc_validado.estado == EstadoValidacion.VALIDO
+
+    if rut_canonico is not None:
+        if rut_doc_valido and normalizar_rut(rut_doc_validado.valor) != normalizar_rut(rut_canonico):
+            return None
+        return nombre_canonico, rut_canonico
+    if rut_doc_valido:
+        return nombre_canonico, rut_doc_validado.valor
+    return None
+
+
 def buscar_vehiculo_por_patente(
     catalogo: FuenteCatalogo, patente: str
 ) -> dict[str, Any] | None:

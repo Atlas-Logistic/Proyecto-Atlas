@@ -47,7 +47,11 @@ from atlas_core.catalogo_vehiculos import (
     cargar_catalogo_vehiculos,
     normalizar_patente_vehiculo,
 )
-from atlas_core.catalogos import buscar_chofer_por_nombre_exacto, cargar_catalogo_json
+from atlas_core.catalogos import (
+    buscar_chofer_por_nombre_exacto,
+    cargar_catalogo_json,
+    corroborar_chofer_por_nombre_y_rut_documental,
+)
 from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_material
 from atlas_core.extractor import _patente_valida, limpiar_sufijo_rut_pegado
 from atlas_core.incidencias_documentales import (
@@ -4497,6 +4501,82 @@ def reconciliar_incidencias_rut_chofer_documental(
         "candidatas": len(candidatas), "incidencias_registradas": registradas,
         "rut_corregido_en_dataset": corregidas,
     }
+
+
+def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> dict[str, object]:
+    """Bloque FIX RUT DOCUMENTAL / ID PLACEHOLDER -- caso real WLADIMIR
+    AGUILAR (viaje 0000354443): relee cada fila del dataset y reevalúa
+    ÚNICAMENTE el motivo ``CHOFER_SIN_CORROBORAR`` contra el catálogo de
+    choferes vigente -- sin OCR, sin red, sin tocar el catálogo.
+
+    Retira el motivo de una fila SÓLO cuando
+    ``corroborar_chofer_por_nombre_y_rut_documental`` (misma lógica que ya
+    usa el pipeline al procesar un documento nuevo) confirma la identidad:
+    el ``chofer`` ya persistido coincide EXACTO con un único chofer activo
+    del catálogo y, o bien la entidad tiene un RUT canónico consistente
+    con el documental, o bien -- si su ID interno es un placeholder
+    (``PENDIENTE...``) y no tiene RUT canónico -- el ``rut_chofer``
+    documental es estructuralmente válido. Un RUT documental válido
+    DISTINTO del canónico bloquea (contradicción). Se abstiene fila por
+    fila ante cualquier duda; nunca crea un segundo chofer ni desambigua
+    por fuzzy.
+
+    El ``rut_chofer`` de la fila se sincroniza al valor corroborado (el
+    canónico de la entidad, o el documental ya validado) -- nunca un valor
+    inválido/ausente."""
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    catalogo_choferes = cargar_catalogo_json(raiz / "catalogos_privados" / "choferes.json")
+    motivo_objetivo = MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR.value
+
+    with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(dataset)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            motivos = [
+                m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m
+            ]
+            if motivo_objetivo not in motivos:
+                continue
+            nombre_chofer = str(fila.get("chofer", "")).strip()
+            if not nombre_chofer or nombre_chofer == "No encontrado":
+                continue
+            corroboracion = corroborar_chofer_por_nombre_y_rut_documental(
+                catalogo_choferes, nombre_chofer, str(fila.get("rut_chofer", "")).strip()
+            )
+            if corroboracion is None:
+                continue
+            nombre_canonico, rut_corroborado = corroboracion
+            fila["chofer"] = nombre_canonico
+            fila["rut_chofer"] = rut_corroborado
+            motivos = [m for m in motivos if m != motivo_objetivo]
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
+            fila["indicador_revision"] = (
+                "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+            )
+            fila["estado_documental"] = (
+                "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+            )
+            fila["estado_operacional"] = (
+                "REQUIERE_REVISION"
+                if fila["estado_documental"] == "REQUIERE_REVISION"
+                or str(fila.get("estado_ruta", "")).strip()
+                in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+                else "OK"
+            )
+            metodos = {m.strip() for m in str(fila.get("metodos_recuperacion_documento", "")).split("|") if m.strip()}
+            metodos.add("CATALOGO")
+            fila["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
+            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(dataset, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
 # MOTOR DE EVIDENCIA FASE 4 -- tope del punto fijo de auto-resolución en

@@ -29,6 +29,7 @@ from atlas_core.revalidacion_documental import (
     reconciliar_bandeja_decisiones,
     reconciliar_decisiones_destino_no_resuelto,
     reconciliar_incidencias_rut_chofer_documental,
+    revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr,
     revalidar_destino_contra_comuna_documental_sin_ocr,
     revalidar_destinos_confirmados_sin_coordenadas_sin_ocr,
     revalidar_indicadores_documentales_sin_ocr,
@@ -225,7 +226,16 @@ from atlas_core.revalidacion_documental import (
 # origen; cualquier divergencia se abstiene). No crea decisiones, no lee
 # OCR, no relaja ningún gate. Sin subir este número, 464836 seguiría con
 # su tarjeta `DESTINO_NO_RESUELTO` hasta que un lote nuevo lo incluyera.
-RULESET_VERSION = 16
+#
+# Subida de 16 a 17 -- CHOFER_SIN_CORROBORAR con ID interno placeholder
+# (caso real WLADIMIR AGUILAR, viaje 0000354443, ID `PENDIENTE00000006`):
+# se conecta `revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr` a esta
+# batería -- retira `CHOFER_SIN_CORROBORAR` de una fila cuya identidad ya
+# es inequívoca (nombre exacto = único chofer activo del catálogo) y cuyo
+# RUT documental es estructuralmente válido y no contradice ningún RUT
+# canónico. Sin subir este número, esas filas quedarían bloqueadas hasta
+# que un lote nuevo volviera a procesar el documento.
+RULESET_VERSION = 17
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -636,6 +646,15 @@ def reconciliar_estado_derivado(
         # catálogo o en el histórico del propio dataset -- función ya
         # existente y probada, sin flujo automático que la invocara.
         limpieza_rut_chofer = reconciliar_incidencias_rut_chofer_documental(raiz_atlas=raiz, reloj=lambda: instante)
+        # Bloque FIX RUT DOCUMENTAL / ID PLACEHOLDER -- caso real WLADIMIR
+        # AGUILAR (viaje 0000354443, ID interno `PENDIENTE00000006`): una
+        # fila con `CHOFER_SIN_CORROBORAR` cuya identidad YA es inequívoca
+        # (nombre exacto, único chofer activo del catálogo) + RUT
+        # documental estructuralmente válido nunca se corroboraba porque
+        # la corroboración por catálogo derivaba el RUT del ID interno --
+        # y un ID placeholder no es un RUT. Sin OCR, sin red; misma lógica
+        # que ya usa el pipeline al procesar un documento nuevo.
+        limpieza_chofer_corroborado = revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(raiz_atlas=raiz)
         # Bloque DESTINOS CONFIRMADOS COMPLETOS -- causa raíz real
         # (0000353312/464781): un destino CONFIRMADO en catálogo cuya
         # confirmación nunca llegó a geocodificar queda con `lat/lon`
@@ -829,6 +848,7 @@ def reconciliar_estado_derivado(
             | set(limpieza_origen["guias_actualizadas"])
             | set(limpieza_origen_categoria["guias_actualizadas"])
             | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
+            | set(limpieza_chofer_corroborado["guias_actualizadas"])
             | set(limpieza_indicadores["guias_actualizadas"])
             | set(limpieza_destino_catalogo["guias_actualizadas"])
             | set(limpieza_geo_contradiccion["guias_actualizadas"])
