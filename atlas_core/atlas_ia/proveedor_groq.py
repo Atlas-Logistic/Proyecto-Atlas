@@ -7,7 +7,7 @@ import os
 import re
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -32,6 +32,10 @@ class CredencialGroqAusente(ErrorProveedorModeloIA):
 
 class ProveedorGroqNoDisponible(ErrorProveedorModeloIA):
     """Groq no responde o devuelve una respuesta inválida."""
+
+
+class PresupuestoGroqExcedido(ProveedorGroqNoDisponible):
+    """La solicitud no cabe en el presupuesto conocido de Groq."""
 
 
 class CostoGroqNoCero(ErrorProveedorModeloIA):
@@ -70,6 +74,10 @@ def _transporte_urllib(solicitud: Request, timeout: float) -> RespuestaHTTP:
 
 _URL_COMPLETIONS = "https://api.groq.com/openai/v1/chat/completions"
 _MODELO = "openai/gpt-oss-120b"
+_MAX_TOKENS_SOLICITUD = 8_000
+_MAX_TOKENS_COMPLETADO = 1_800
+_MAX_TOKENS_ENTRADA = _MAX_TOKENS_SOLICITUD - _MAX_TOKENS_COMPLETADO
+_MAX_ESPERA_REINTENTO_429_SEGUNDOS = 15.0
 _ESQUEMA_HIPOTESIS = {
     "type": "object",
     "properties": {
@@ -111,6 +119,83 @@ def _mensaje_usuario(contexto: ContextoRazonamiento) -> str:
         "herramientas_disponibles": list(contexto.herramientas_disponibles),
         "restricciones_dominio": list(contexto.restricciones_dominio),
     }, ensure_ascii=False, indent=2)
+
+
+def _estimar_tokens_conservador(texto: str | bytes) -> int:
+    """Cota conservadora y determinista para no exceder el TPM conocido."""
+    datos = texto.encode("utf-8") if isinstance(texto, str) else texto
+    return (len(datos) + 1) // 2
+
+
+def _cuerpo_solicitud(modelo: str, contexto: ContextoRazonamiento) -> bytes:
+    return json.dumps({
+        "model": modelo,
+        "messages": [
+            {"role": "system", "content": POLITICA_PROMPT_SISTEMA},
+            {"role": "user", "content": _mensaje_usuario(contexto)},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "hipotesis_atlas", "strict": True, "schema": _ESQUEMA_HIPOTESIS},
+        },
+        "include_reasoning": False,
+        "reasoning_effort": "medium",
+        "temperature": 0,
+        "max_completion_tokens": _MAX_TOKENS_COMPLETADO,
+    }, ensure_ascii=False).encode("utf-8")
+
+
+def _es_evidencia_critica(evidencia: object) -> bool:
+    return bool(
+        getattr(evidencia, "en_contra", ())
+        or getattr(evidencia, "es_decision_humana", False)
+    )
+
+
+def _prioridad_evidencia(evidencia: object) -> tuple[int, int, int, str]:
+    """Prioriza señal operacional; las contradicciones se reservan aparte."""
+    niveles = {
+        "CONFIRMACION_HUMANA": 0,
+        "CANONICO_CONFIRMADO": 1,
+        "ORIGEN_CONFIRMADO_INDEPENDIENTE": 2,
+        "DOCUMENTAL_INDEPENDIENTE": 3,
+        "CATALOGO_CONFIRMADO": 4,
+        "EXTERNO_OFICIAL": 5,
+        "GPS_CANDIDATO": 6,
+    }
+    fuentes = {"DECISION_HUMANA": 0, "CATALOGO": 1, "HISTORICO": 2, "EXTERNO": 3, "DOCUMENTAL": 4}
+    return (
+        niveles.get(str(getattr(evidencia, "nivel", "")), 99),
+        fuentes.get(str(getattr(evidencia, "tipo_fuente", "")), 99),
+        -int(getattr(evidencia, "independencia", 0)),
+        str(getattr(evidencia, "identificador", "")),
+    )
+
+
+def _preparar_cuerpo_acotado(modelo: str, contexto: ContextoRazonamiento) -> bytes:
+    """Selecciona evidencia antes de red; nunca oculta contradicciones explícitas."""
+    base = replace(contexto, evidencias=())
+    if _estimar_tokens_conservador(_cuerpo_solicitud(modelo, base)) > _MAX_TOKENS_ENTRADA:
+        raise PresupuestoGroqExcedido(
+            f"Solicitud B1 excede el presupuesto conocido de {_MAX_TOKENS_SOLICITUD} tokens; no se envió a Groq."
+        )
+
+    criticas = [e for e in contexto.evidencias if _es_evidencia_critica(e)]
+    restantes = [e for e in contexto.evidencias if not _es_evidencia_critica(e)]
+    seleccionadas = []
+    for evidencia in sorted(criticas, key=_prioridad_evidencia) + sorted(restantes, key=_prioridad_evidencia):
+        candidata = replace(contexto, evidencias=tuple((*seleccionadas, evidencia)))
+        if _estimar_tokens_conservador(_cuerpo_solicitud(modelo, candidata)) <= _MAX_TOKENS_ENTRADA:
+            seleccionadas.append(evidencia)
+            continue
+        if _es_evidencia_critica(evidencia):
+            raise PresupuestoGroqExcedido(
+                f"Solicitud B1 excede el presupuesto conocido de {_MAX_TOKENS_SOLICITUD} tokens; no se envió a Groq."
+            )
+    return _cuerpo_solicitud(
+        modelo,
+        replace(contexto, evidencias=tuple(sorted(seleccionadas, key=_prioridad_evidencia))),
+    )
 
 
 def _detalle_error_seguro(error: HTTPError) -> str:
@@ -197,30 +282,26 @@ class ProveedorModeloIAGroq:
         modelo: str = _MODELO,
         timeout: float = 180.0,
         transporte: TransporteHTTP = _transporte_urllib,
+        reloj_monotono: Callable[[], float] = time.monotonic,
+        dormir: Callable[[float], None] = time.sleep,
     ) -> None:
         self._api_key = resolver_groq_api_key(api_key)
         self._modelo = modelo
         self._timeout = timeout
         self._transporte = transporte
+        self._reloj_monotono = reloj_monotono
+        self._dormir = dormir
+        self._bloqueado_hasta = 0.0
 
     def razonar(self, contexto: ContextoRazonamiento) -> HipotesisIA:
         if not self._api_key:
             raise CredencialGroqAusente("No hay GROQ_API_KEY configurada en este entorno.")
-        cuerpo = json.dumps({
-            "model": self._modelo,
-            "messages": [
-                {"role": "system", "content": POLITICA_PROMPT_SISTEMA},
-                {"role": "user", "content": _mensaje_usuario(contexto)},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "hipotesis_atlas", "strict": True, "schema": _ESQUEMA_HIPOTESIS},
-            },
-            "include_reasoning": False,
-            "reasoning_effort": "medium",
-            "temperature": 0,
-            "max_completion_tokens": 1800,
-        }, ensure_ascii=False).encode("utf-8")
+        ahora = self._reloj_monotono()
+        if ahora < self._bloqueado_hasta:
+            raise ProveedorGroqNoDisponible(
+                "Groq sigue limitado por rate limit conocido; no se envió una nueva solicitud."
+            )
+        cuerpo = _preparar_cuerpo_acotado(self._modelo, contexto)
         solicitud = Request(_URL_COMPLETIONS, data=cuerpo, method="POST")
         solicitud.add_header("authorization", f"Bearer {self._api_key}")
         solicitud.add_header("content-type", "application/json")
@@ -228,16 +309,20 @@ class ProveedorModeloIAGroq:
 
         inicio = time.perf_counter()
         respuesta = None
-        for intento in range(3):
+        for intento in range(2):
             try:
                 respuesta = self._transporte(solicitud, self._timeout)
                 break
             except HTTPError as error:
                 detalle = _detalle_error_seguro(error)
                 espera = re.search(r"retry_after_seconds=(\d+(?:\.\d+)?)", detalle)
-                if error.code == 429 and intento < 2 and espera:
-                    time.sleep(min(float(espera.group(1)) + 1, 60.0))
-                    continue
+                if error.code == 429 and espera:
+                    espera_segundos = float(espera.group(1))
+                    self._bloqueado_hasta = self._reloj_monotono() + espera_segundos
+                    if intento == 0 and 0 < espera_segundos <= _MAX_ESPERA_REINTENTO_429_SEGUNDOS:
+                        self._dormir(espera_segundos)
+                        self._bloqueado_hasta = 0.0
+                        continue
                 raise ProveedorGroqNoDisponible(
                     f"Groq devolvió HTTP {error.code}" + (f": {detalle}" if detalle else ".")
                 ) from error

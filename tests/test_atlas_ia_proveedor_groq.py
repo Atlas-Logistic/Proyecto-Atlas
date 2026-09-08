@@ -11,9 +11,11 @@ from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
 from atlas_core.atlas_ia.proveedor_groq import (
     CostoGroqNoCero,
     CredencialGroqAusente,
+    PresupuestoGroqExcedido,
     ProveedorGroqNoDisponible,
     ProveedorModeloIAGroq,
     RespuestaHTTP,
+    _estimar_tokens_conservador,
 )
 
 CLAVE_PRUEBA = "gsk_CLAVE_FALSA"
@@ -116,7 +118,7 @@ def test_http_error_sanea_body_y_credencial():
     assert CLAVE_PRUEBA not in mensaje and "privado" not in mensaje
 
 
-def test_rate_limit_reintenta_respetando_espera(monkeypatch):
+def test_rate_limit_reintenta_una_vez_respetando_espera():
     llamadas = []
     esperas = []
 
@@ -132,10 +134,84 @@ def test_rate_limit_reintenta_respetando_espera(monkeypatch):
             raise HTTPError("url", 429, "rate", {}, BytesIO(cuerpo))
         return RespuestaHTTP(200, json.dumps(_respuesta()).encode())
 
-    monkeypatch.setattr("atlas_core.atlas_ia.proveedor_groq.time.sleep", esperas.append)
-    hipotesis = ProveedorModeloIAGroq(api_key=CLAVE_PRUEBA, transporte=transportar).razonar(_contexto())
+    hipotesis = ProveedorModeloIAGroq(
+        api_key=CLAVE_PRUEBA, transporte=transportar, dormir=esperas.append,
+    ).razonar(_contexto())
     assert hipotesis.resultado == "PROPUESTA"
-    assert len(llamadas) == 2 and esperas == [3.0]
+    assert len(llamadas) == 2 and esperas == [2.0]
+
+
+def test_payload_sobredimensionado_se_compacta_antes_del_request():
+    capturas = []
+    evidencias = tuple(
+        EvidenciaIA(
+            identificador=f"baja-{indice}", campo="patente_tracto", valor="x" * 320,
+            tipo_fuente="HISTORICO", nivel="GPS_CANDIDATO", independencia=0,
+        )
+        for indice in range(80)
+    )
+    contexto = _contexto().__class__(**{**_contexto().__dict__, "evidencias": evidencias})
+    ProveedorModeloIAGroq(api_key=CLAVE_PRUEBA, transporte=_transporte(_respuesta(), capturas)).razonar(contexto)
+    cuerpo = capturas[0][0].data
+    enviado = json.loads(cuerpo)["messages"][1]["content"]
+    assert _estimar_tokens_conservador(cuerpo) <= 6_200
+    assert len(json.loads(enviado)["evidencia_disponible"]) < len(evidencias)
+
+
+def test_compactacion_conserva_evidencia_prioritaria_y_contradiccion():
+    alta = EvidenciaIA(
+        identificador="catalogo-confirmado", campo="destino", valor="MARURI 1942 RENCA",
+        tipo_fuente="CATALOGO", nivel="CATALOGO_CONFIRMADO", independencia=2,
+    )
+    contradiccion = EvidenciaIA(
+        identificador="ocr-difiere", campo="destino", valor="MARURI 1942 RENCA",
+        tipo_fuente="DOCUMENTAL", nivel="GPS_CANDIDATO", en_contra=("OCR: MARURI 1942 QUILICURA",),
+    )
+    relleno = tuple(
+        EvidenciaIA(
+            identificador=f"baja-{indice}", campo="destino", valor="z" * 320,
+            tipo_fuente="HISTORICO", nivel="GPS_CANDIDATO",
+        ) for indice in range(80)
+    )
+    contexto = _contexto().__class__(**{**_contexto().__dict__, "evidencias": (alta, contradiccion, *relleno)})
+    capturas = []
+    ProveedorModeloIAGroq(api_key=CLAVE_PRUEBA, transporte=_transporte(_respuesta(), capturas)).razonar(contexto)
+    evidencias_enviadas = json.loads(json.loads(capturas[0][0].data)["messages"][1]["content"])["evidencia_disponible"]
+    assert {"catalogo-confirmado", "ocr-difiere"} <= {e["identificador"] for e in evidencias_enviadas}
+    assert evidencias_enviadas[0]["identificador"] == "catalogo-confirmado"
+    ocr = next(e for e in evidencias_enviadas if e["identificador"] == "ocr-difiere")
+    assert ocr["en_contra"] == ["OCR: MARURI 1942 QUILICURA"]
+
+
+def test_payload_imposible_no_se_envia():
+    llamadas = []
+    critica_gigante = EvidenciaIA(
+        identificador="contradiccion-gigante", campo="destino", valor="A",
+        tipo_fuente="DOCUMENTAL", nivel="DOCUMENTAL_INDEPENDIENTE", en_contra=("x" * 30_000,),
+    )
+    contexto = _contexto().__class__(**{**_contexto().__dict__, "evidencias": (critica_gigante,)})
+    with pytest.raises(PresupuestoGroqExcedido, match="no se envió"):
+        ProveedorModeloIAGroq(api_key=CLAVE_PRUEBA, transporte=lambda *_: llamadas.append(True)).razonar(contexto)
+    assert llamadas == []
+
+
+def test_429_largo_no_reintenta_ni_espera_y_activa_cooldown():
+    llamadas = []
+    esperas = []
+
+    def transportar(*_):
+        llamadas.append(True)
+        cuerpo = json.dumps({"error": {"message": "Please try again in 60s."}}).encode()
+        raise HTTPError("url", 429, "rate", {}, BytesIO(cuerpo))
+
+    proveedor = ProveedorModeloIAGroq(
+        api_key=CLAVE_PRUEBA, transporte=transportar, dormir=esperas.append, reloj_monotono=lambda: 100.0,
+    )
+    with pytest.raises(ProveedorGroqNoDisponible):
+        proveedor.razonar(_contexto())
+    with pytest.raises(ProveedorGroqNoDisponible, match="no se envió"):
+        proveedor.razonar(_contexto())
+    assert len(llamadas) == 1 and esperas == []
 
 
 @pytest.mark.parametrize("error", [socket.timeout(), URLError("sin red")])
