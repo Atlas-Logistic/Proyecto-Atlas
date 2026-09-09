@@ -36,6 +36,8 @@ from atlas_core.atlas_ia.contratos import EvidenciaIA
 from atlas_core.atlas_ia.convergencia import (
     CONTRADICCION_FUERTE,
     MANTENER_REVISION,
+    METODO_ABSTENCION_AMBIGUA,
+    METODO_CONTEXTO_DETERMINISTA,
     RESOLVER_SILENCIOSO,
     CandidatoConvergencia,
     ResultadoConvergencia,
@@ -436,35 +438,83 @@ def _distancia_token_unico(a: str, b: str) -> int | None:
     return _distancia_edicion(*difs[0])
 
 
+# Distancia OCR máxima tolerada para plegar al canónico según la fuerza
+# del candidato ganador -- una confirmación humana (o decisión humana
+# previa) tolera hasta 2 posiciones; una corroboración sólo documental,
+# 1. Una variación más grande que eso ("radicalmente distinta") nunca se
+# fuerza, aunque el Motor la haya listado.
+_DISTANCIA_MAXIMA_ANCLA_HUMANA = 2
+_DISTANCIA_MAXIMA_DOCUMENTAL = 1
+
+
+def _cargar_decisiones_aplicadas(carpeta_catalogos: Path) -> list[Mapping[str, object]]:
+    """Ledger de decisiones aplicadas (`operacion/actual/decisiones_
+    aplicadas.json`), hermano de `catalogos_privados`. Ausente/corrupto ->
+    `[]`, igual que el resto de los lectores `sin_ocr`."""
+    import json
+
+    ruta = carpeta_catalogos.parent / "operacion" / "actual" / "decisiones_aplicadas.json"
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    aplicaciones = datos.get("aplicaciones") if isinstance(datos, Mapping) else datos
+    return [a for a in (aplicaciones or []) if isinstance(a, Mapping)]
+
+
 def convergencia_vehiculo(
     *, campo: str, valor_documental: str, rut_chofer: str, numero_transporte: str,
     filas: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path | None,
 ) -> ResultadoConvergencia:
-    """¿Una confirmación humana / historial fuerte del chofer permite
-    resolver esta patente al canónico sin pasar por revisión? Nunca
-    inventa: sólo evalúa los candidatos que `evaluar_evidencia_patente`
-    ya reunió, más una comprobación de contradicción (el propio valor OCR
-    es una patente canónica real y distinta -> no es un error OCR)."""
+    """¿El conocimiento interno canónico de Atlas permite plegar esta
+    patente al canónico sin pasar por revisión?
+
+    NO re-litiga la jerarquía de evidencia: delega en el Motor
+    (`evaluar_evidencia_patente`, que ya ordena CONFIRMACION_HUMANA >
+    DOCUMENTAL_INDEPENDIENTE > DOCUMENTAL_DEBIL, exige un único candidato
+    en el nivel más alto y trata una decisión humana previa del mismo
+    RUT/campo -- ledger -- igual que una confirmación humana). Sobre esa
+    resolución añade sólo los guardarraíles que el Motor no aplica:
+
+      1. distancia OCR dentro de lo que tolera la fuerza del ganador
+         (algo radicalmente distinto nunca se fuerza);
+      2. el valor OCR no es ya una patente canónica real y distinta
+         (`CONTRADICCION_FUERTE`);
+      3. si el Motor NO resolvió inequívocamente -> `MANTENER_REVISION`
+         (dos candidatos plausibles, o evidencia insuficiente).
+
+    Siempre deja traza de observabilidad del desempate (`desempate`):
+    candidatos considerados, evidencias/fuentes independientes por
+    candidato, contradicciones, método y valores OCR/canónico -- también
+    cuando se abstiene."""
     valor = str(valor_documental or "").strip()
+    vacio = ResultadoConvergencia(decision=MANTENER_REVISION, valor_ocr_original=valor, metodo="CONVERGENCIA_VEHICULO")
     if not carpeta_catalogos or valor in _AUSENTES or not str(rut_chofer or "").strip():
-        return ResultadoConvergencia(decision=MANTENER_REVISION, valor_ocr_original=valor, metodo="CONVERGENCIA_VEHICULO")
+        return vacio
     carpeta = Path(carpeta_catalogos)
     try:
         from atlas_core.catalogo_vehiculos import (
             cargar_catalogo_vehiculos, normalizar_patente_vehiculo, resolver_patente,
         )
-        from atlas_core.decisiones_pendientes import evaluar_evidencia_patente
+        from atlas_core.decisiones_pendientes import (
+            NIVEL_CONFIRMACION_HUMANA as _NIVEL_HUMANA,
+            RESULTADO_RESUELTO_AUTOMATICAMENTE as _RESUELTO,
+            evaluar_evidencia_patente,
+        )
 
         vehiculos = list(cargar_catalogo_vehiculos(carpeta / "vehiculos.json").homologables())
     except (OSError, ValueError):
-        return ResultadoConvergencia(decision=MANTENER_REVISION, valor_ocr_original=valor, metodo="CONVERGENCIA_VEHICULO")
+        return vacio
 
     contradicciones: list[str] = []
-    exacto = resolver_patente(carpeta / "vehiculos.json", valor)
-    if exacto.estado == "COINCIDENCIA_EXACTA":
-        contradicciones.append(
-            f'"{valor}" ya es una patente canónica real -- no es una lectura OCR a corregir'
-        )
+    try:
+        exacto = resolver_patente(carpeta / "vehiculos.json", valor)
+        if exacto.estado == "COINCIDENCIA_EXACTA":
+            contradicciones.append(
+                f'"{valor}" ya es una patente canónica real -- no es una lectura OCR a corregir'
+            )
+    except (OSError, ValueError):
+        pass
 
     try:
         resultado = evaluar_evidencia_patente(
@@ -472,32 +522,98 @@ def convergencia_vehiculo(
             tipo_esperado=_tipo_esperado_por_campo(campo),
             numero_transporte_actual=str(numero_transporte or ""),
             filas=list(filas), vehiculos=vehiculos,
+            decisiones_aplicadas=_cargar_decisiones_aplicadas(carpeta),
         )
     except (OSError, ValueError):
-        return ResultadoConvergencia(decision=MANTENER_REVISION, valor_ocr_original=valor, metodo="CONVERGENCIA_VEHICULO")
+        return vacio
 
     valor_norm = normalizar_patente_vehiculo(valor)
-    candidatos: list[CandidatoConvergencia] = []
-    for c in resultado.get("candidatos") or ():
+    candidatos_motor = list(resultado.get("candidatos") or ())
+
+    def _fuentes_independientes(c: Mapping[str, object]) -> int:
         codigos = tuple(c.get("evidencias") or ())
+        ancla_humana = any(
+            k in codigos for k in ("CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER", "DECISION_HUMANA_PREVIA_MISMO_RUT")
+        )
+        return int(c.get("transportes_independientes", 0) or 0) + (1 if ancla_humana else 0)
+
+    desempate_candidatos = [
+        {
+            "patente": str(c.get("patente", "")),
+            "nivel": str(c.get("nivel", "")),
+            "evidencias": list(c.get("evidencias") or ()),
+            "conflictos": list(c.get("conflictos") or ()),
+            "transportes_independientes": int(c.get("transportes_independientes", 0) or 0),
+            "fuentes_independientes": _fuentes_independientes(c),
+            "distancia_ocr": _distancia_edicion(
+                valor_norm, normalizar_patente_vehiculo(str(c.get("patente", "")))
+            ),
+        }
+        for c in candidatos_motor
+    ]
+
+    ganador = candidatos_motor[0] if candidatos_motor else None
+    distancia = desempate_candidatos[0]["distancia_ocr"] if desempate_candidatos else None
+    techo = (
+        _DISTANCIA_MAXIMA_ANCLA_HUMANA
+        if ganador and str(ganador.get("nivel", "")) == _NIVEL_HUMANA
+        else _DISTANCIA_MAXIMA_DOCUMENTAL
+    )
+    resuelve = (
+        resultado.get("resultado") == _RESUELTO
+        and ganador is not None
+        and not contradicciones
+        and distancia is not None
+        and 0 < distancia <= techo
+    )
+
+    def _desempate(metodo: str, resolucion: str, confianza: str, canonico: str) -> dict:
+        return {
+            "valor_ocr": valor,
+            "valor_canonico_aplicado": canonico,
+            "metodo": metodo,
+            "resolucion": resolucion,
+            "confianza": confianza,
+            "resultado_motor": str(resultado.get("resultado", "")),
+            "candidatos": desempate_candidatos,
+            "contradicciones": list(contradicciones),
+        }
+
+    if contradicciones:
+        return ResultadoConvergencia(
+            decision=CONTRADICCION_FUERTE, valor_ocr_original=valor, metodo="CONVERGENCIA_VEHICULO",
+            contradiccion="; ".join(contradicciones),
+            desempate=_desempate(METODO_ABSTENCION_AMBIGUA, "ABSTENCION", "", ""),
+        )
+
+    if resuelve:
+        codigos = tuple(ganador.get("evidencias") or ())
+        # Traduce los códigos del Motor a las SEÑAL_* abstractas ya
+        # publicadas en el contrato de `ResultadoConvergencia.evidencias`
+        # (los códigos crudos quedan en `desempate`).
         señales: set[str] = {SEÑAL_CATALOGO_CANONICO}
-        if "CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER" in codigos:
+        if "CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER" in codigos or "DECISION_HUMANA_PREVIA_MISMO_RUT" in codigos:
             señales.add(SEÑAL_CONFIRMACION_HUMANA)
             señales.add(SEÑAL_RELACION_CHOFER_VEHICULO)
         if "RUT_CHOFER_COINCIDE" in codigos:
             señales.add(SEÑAL_RUT_COINCIDE)
-        if int(c.get("transportes_independientes", 0) or 0) >= 2:
+        if int(ganador.get("transportes_independientes", 0) or 0) >= 2:
             señales.add(SEÑAL_HISTORIAL_CONSISTENTE)
         if "SIMILITUD_OCR_CALIBRADA" in codigos:
             señales.add(SEÑAL_ALIAS_CONOCIDO)
-        candidatos.append(CandidatoConvergencia(
-            valor_canonico=str(c.get("patente", "")),
-            distancia_ocr=_distancia_edicion(valor_norm, normalizar_patente_vehiculo(str(c.get("patente", "")))),
-            señales=frozenset(señales),
-        ))
-    return evaluar_convergencia(
-        dominio="VEHICULO", valor_ocr=valor, candidatos=tuple(candidatos),
-        metodo="CONVERGENCIA_VEHICULO", contradicciones_fuertes=tuple(contradicciones),
+        confianza = "ALTA" if SEÑAL_CONFIRMACION_HUMANA in señales else "MEDIA"
+        canonico = str(ganador.get("patente", ""))
+        return ResultadoConvergencia(
+            decision=RESOLVER_SILENCIOSO, valor_canonico=canonico, valor_ocr_original=valor,
+            metodo="CONVERGENCIA_VEHICULO", evidencias=tuple(sorted(señales)), confianza=confianza,
+            desempate=_desempate(METODO_CONTEXTO_DETERMINISTA, "RESUELTA", confianza, canonico),
+        )
+
+    competidores = tuple(str(c.get("patente", "")) for c in candidatos_motor)
+    return ResultadoConvergencia(
+        decision=MANTENER_REVISION, valor_ocr_original=valor, metodo="CONVERGENCIA_VEHICULO",
+        competidores=competidores,
+        desempate=_desempate(METODO_ABSTENCION_AMBIGUA, "ABSTENCION", "", ""),
     )
 
 

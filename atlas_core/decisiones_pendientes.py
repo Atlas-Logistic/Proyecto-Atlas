@@ -982,11 +982,57 @@ def _vehiculos_confirmados_para_rut(
     return resultado
 
 
+# Acciones del ledger que CIERRAN una VEHICULO_DESCONOCIDO fijando una
+# patente canónica -- una decisión humana explícita sobre qué vehículo
+# corresponde a este documento (nunca un registro nuevo, nunca un
+# rechazo).
+_ACCIONES_LEDGER_PATENTE_ELEGIDA = frozenset({"USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE"})
+
+
+def _patentes_por_decision_humana_de_rut(
+    *, campo: str, rut_normalizado: str, decisiones_aplicadas: Iterable[Mapping[str, object]],
+) -> set[str]:
+    """Patentes canónicas que un humano YA eligió, en el ledger de
+    decisiones aplicadas, para una `VEHICULO_DESCONOCIDO` del MISMO
+    RUT de chofer y el MISMO campo (`patente_rampla`/`patente_tracto`).
+
+    Es una decisión humana previa sobre "qué vehículo es de este
+    chofer/RUT" -- pesa igual que una confirmación humana asociada al RUT
+    en el catálogo (`_vehiculos_confirmados_para_rut`), y nunca se infiere:
+    sólo cuenta lo que un operador dejó registrado como
+    `USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`, con `rut_chofer`
+    explícito en la aplicación. Una entrada del ledger que no conserva el
+    RUT (aplicaciones anteriores a este bloque) simplemente no cuenta --
+    nunca se adivina a partir del documento."""
+    resultado: set[str] = set()
+    if not rut_normalizado or campo not in ("patente_rampla", "patente_tracto"):
+        return resultado
+    tipo_campo = "CARRO" if campo == "patente_rampla" else "TRACTO"
+    for ap in decisiones_aplicadas or ():
+        if not isinstance(ap, Mapping):
+            continue
+        if str(ap.get("tipo", "")) != "VEHICULO_DESCONOCIDO":
+            continue
+        if str(ap.get("accion", "")) not in _ACCIONES_LEDGER_PATENTE_ELEGIDA:
+            continue
+        if str(ap.get("campo", "")) != campo:
+            continue
+        if normalizar_rut(str(ap.get("rut_chofer", "") or "")) != rut_normalizado:
+            continue
+        if str(ap.get("tipo_vehiculo", "")).strip() not in ("", tipo_campo):
+            continue
+        canonica = normalizar_patente_vehiculo(str(ap.get("patente_canonica", "") or ""))
+        if canonica:
+            resultado.add(canonica)
+    return resultado
+
+
 def _razon_legible_candidato(*, patente: str, evidencias: tuple[str, ...], conflictos: tuple[str, ...], valor_documental: str) -> str:
     frases_evidencia = {
         "RUT_CHOFER_COINCIDE": "corresponde al mismo chofer/RUT",
         "TIPO_COMPATIBLE": "es un tipo de vehículo compatible",
         "CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER": "fue confirmada directamente por un humano para este chofer",
+        "DECISION_HUMANA_PREVIA_MISMO_RUT": "un operador ya la eligió antes para otra guía de este mismo chofer",
         "SIMILITUD_OCR_CALIBRADA": f"difiere de \"{valor_documental}\" en un solo carácter, dentro de las confusiones OCR ya conocidas",
     }
     frases_conflicto = {
@@ -1012,6 +1058,7 @@ def _razon_legible_candidato(*, patente: str, evidencias: tuple[str, ...], confl
 def evaluar_evidencia_patente(
     *, campo: str, valor_documental: str, rut_chofer: str, tipo_esperado: str | None,
     numero_transporte_actual: str, filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
+    decisiones_aplicadas: Iterable[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Bloque VEHÍCULO E1 -- combina, de forma determinista y auditable,
     todas las señales ya disponibles en el sistema para explicar (nunca
@@ -1020,8 +1067,11 @@ def evaluar_evidencia_patente(
 
     - `RESUELTO_AUTOMATICAMENTE`: existe una única candidata con
       evidencia de más alto nivel (`CONFIRMACION_HUMANA` -- un humano ya
-      confirmó explícitamente esa patente PARA este mismo chofer/RUT) y
-      ninguna otra candidata compite en ese mismo nivel. Esta
+      confirmó explícitamente esa patente PARA este mismo chofer/RUT en
+      el catálogo, O ya la eligió antes en el ledger para una
+      `VEHICULO_DESCONOCIDO` del mismo RUT y campo -- ver
+      `decisiones_aplicadas`) y ninguna otra candidata compite en ese
+      mismo nivel. Esta
       clasificación es puramente informativa/explicativa -- NUNCA aplica
       nada por sí sola; la escritura sigue exigiendo la acción humana ya
       existente (`USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`).
@@ -1065,6 +1115,15 @@ def evaluar_evidencia_patente(
     confirmadas_para_rut = _vehiculos_confirmados_para_rut(
         rut_normalizado=rut_normalizado, tipo_esperado=tipo_esperado, vehiculos=vehiculos,
     )
+    # Bloque VEHÍCULO E3 -- desempate contextual: una decisión humana
+    # previa del MISMO RUT y campo, ya registrada en el ledger
+    # (`USAR_PATENTE_EXISTENTE`/`SELECCIONAR_OTRA_PATENTE`), es una
+    # afirmación humana explícita sobre qué vehículo es de este chofer.
+    # Pesa igual que `_vehiculos_confirmados_para_rut` -- nunca se infiere
+    # del documento, sólo cuenta lo que un operador dejó escrito.
+    decididas_por_humano = _patentes_por_decision_humana_de_rut(
+        campo=campo, rut_normalizado=rut_normalizado, decisiones_aplicadas=decisiones_aplicadas,
+    )
     homologables_por_patente = {
         v.patente_canonica: v for v in vehiculos
         if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
@@ -1091,7 +1150,9 @@ def evaluar_evidencia_patente(
         if tipo_esperado else set()
     )
 
-    patentes_candidatas = (set(transportes_por_patente) | confirmadas_para_rut | patentes_ocr_similares) - {valor_norm}
+    patentes_candidatas = (
+        set(transportes_por_patente) | confirmadas_para_rut | decididas_por_humano | patentes_ocr_similares
+    ) - {valor_norm}
     candidatos: list[dict[str, object]] = []
     for patente in sorted(patentes_candidatas):
         vehiculo = homologables_por_patente.get(patente)
@@ -1117,7 +1178,10 @@ def evaluar_evidencia_patente(
             for guia in sorted(guias_transporte)
         ]
 
-        tiene_historial_rut = bool(transportes) or patente in confirmadas_para_rut
+        es_decision_humana_previa = patente in decididas_por_humano
+        tiene_historial_rut = (
+            bool(transportes) or patente in confirmadas_para_rut or es_decision_humana_previa
+        )
         evidencias: list[str] = (["RUT_CHOFER_COINCIDE"] if tiene_historial_rut else []) + ["TIPO_COMPATIBLE"]
         conflictos: list[str] = ["OCR_ACTUAL_DIFIERE"]
         if not tiene_historial_rut:
@@ -1131,10 +1195,13 @@ def evaluar_evidencia_patente(
         es_confirmacion_directa = patente in confirmadas_para_rut
         if es_confirmacion_directa:
             evidencias.append("CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER")
+        if es_decision_humana_previa:
+            evidencias.append("DECISION_HUMANA_PREVIA_MISMO_RUT")
         if _diferencia_ocr_segura(valor_norm, patente):
             evidencias.append("SIMILITUD_OCR_CALIBRADA")
 
-        if es_confirmacion_directa:
+        es_ancla_humana = es_confirmacion_directa or es_decision_humana_previa
+        if es_ancla_humana:
             nivel = NIVEL_CONFIRMACION_HUMANA
         elif n_independientes >= 1:
             nivel = NIVEL_DOCUMENTAL_INDEPENDIENTE
@@ -1229,6 +1296,7 @@ def enriquecer_decisiones_vehiculo(
     *, decisiones: Iterable[Mapping[str, object]],
     filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
     relaciones_historicas: Iterable[Mapping[str, object]] = (),
+    decisiones_aplicadas: Iterable[Mapping[str, object]] = (),
 ) -> list[dict[str, object]]:
     """Bloque VEHÍCULO D1/E1 -- añade `candidatos`/acciones adicionales a
     decisiones `VEHICULO_DESCONOCIDO` YA generadas (nunca las crea desde
@@ -1256,6 +1324,7 @@ def enriquecer_decisiones_vehiculo(
     filas = list(filas)
     vehiculos = list(vehiculos)
     relaciones_historicas = list(relaciones_historicas)
+    decisiones_aplicadas = list(decisiones_aplicadas)
     vehiculos_por_patente = {
         v.patente_canonica: v for v in vehiculos
         if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
@@ -1280,8 +1349,10 @@ def enriquecer_decisiones_vehiculo(
                     campo=str(decision.get("campo", "")), valor_documental=str(decision.get("valor_documental", "")),
                     rut_chofer=rut, tipo_esperado=decision.get("tipo_vehiculo_propuesto"),
                     numero_transporte_actual=transporte, filas=filas, vehiculos=vehiculos,
+                    decisiones_aplicadas=decisiones_aplicadas,
                 )
                 sugeridos = evaluacion["candidatos"]
+                motor_resolvio = evaluacion.get("resultado") == RESULTADO_RESUELTO_AUTOMATICAMENTE
                 tipo = decision.get("tipo_vehiculo_propuesto")
                 campo_hist = "patente_tracto" if tipo == "TRACTO" else "patente_rampla" if tipo == "CARRO" else ""
                 valor_norm = normalizar_patente_vehiculo(str(decision.get("valor_documental", "")))
@@ -1304,6 +1375,7 @@ def enriquecer_decisiones_vehiculo(
                         str(rel.get("numero_transporte", "")), str(rel.get("numero_guia", "")),
                     ))
                 existentes = {str(c.get("patente", "")) for c in sugeridos}
+                rel_competidoras_nuevas = [p for p in rel_por_patente if p not in existentes]
                 for patente, referencias in sorted(rel_por_patente.items()):
                     if patente in existentes:
                         continue
@@ -1327,7 +1399,22 @@ def enriquecer_decisiones_vehiculo(
                         ),
                         "evidencia_resumen": "Relación histórica aislada del mismo chofer; requiere confirmación humana.",
                     })
-                if rel_por_patente:
+                # Bloque VEHÍCULO E3 -- la relación tracto/rampla histórica
+                # sólo BAJA a `SUGERENCIA_HUMANA` cuando de verdad
+                # introduce una competencia que el Motor no vio: aporta un
+                # candidato nuevo (`rel_competidoras_nuevas`), o el Motor
+                # tampoco resolvió inequívocamente por su cuenta. Si el
+                # Motor ya tiene un único candidato dominante (p. ej. una
+                # confirmación humana asociada al RUT) y la relación
+                # histórica sólo repite a un competidor de menor nivel que
+                # el Motor ya conoce y descartó, la relación NO revierte
+                # esa resolución -- antes cualquier par histórico del
+                # chofer congelaba el caso, sin mirar la jerarquía de
+                # evidencia (caso real 472477, Carlos Simón).
+                override_por_relacion = bool(
+                    rel_por_patente and (rel_competidoras_nuevas or not motor_resolvio)
+                )
+                if override_por_relacion:
                     evaluacion = {
                         "resultado": RESULTADO_SUGERENCIA_HUMANA,
                         "explicacion": "La relación histórica contradice una lectura OCR dudosa; Atlas no registra ni autocorrige sin confirmación.",
@@ -1341,7 +1428,7 @@ def enriquecer_decisiones_vehiculo(
                 # unas candidatas que desaparecieron también retiren las
                 # acciones que ya no corresponden).
                 base = [a for a in (decision.get("acciones_permitidas") or ACCIONES_ENTIDAD_DESCONOCIDA) if a not in ACCIONES_PATENTE_SUGERIDA]
-                if rel_por_patente:
+                if override_por_relacion:
                     base = [a for a in base if a != "REGISTRAR"]
                 if sugeridos:
                     nuevas = [a for a in ACCIONES_PATENTE_SUGERIDA if a not in base]

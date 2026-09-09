@@ -42,6 +42,13 @@ RESOLVER_SILENCIOSO = "RESOLVER_SILENCIOSO"
 MANTENER_REVISION = "MANTENER_REVISION"
 CONTRADICCION_FUERTE = "CONTRADICCION_FUERTE"
 
+# Métodos de desempate -- traza de observabilidad de cómo se llegó a una
+# resolución/abstención de VEHÍCULO (nunca cambian la decisión, sólo la
+# explican). Vocabulario cerrado.
+METODO_CONTEXTO_DETERMINISTA = "CONTEXTO_DETERMINISTA"
+METODO_B1_EVIDENCIA_INTERNA = "B1_EVIDENCIA_INTERNA"
+METODO_ABSTENCION_AMBIGUA = "ABSTENCION_AMBIGUA"
+
 # Señales de evidencia INDEPENDIENTE que suman fuerza a un candidato.
 # Cada una debe venir de una fuente distinta -- nunca dos lecturas del
 # mismo documento, nunca dos guías del mismo transporte (esa
@@ -121,14 +128,22 @@ class ResultadoConvergencia:
     confianza: str = ""  # "ALTA" | "MEDIA" | ""
     competidores: tuple[str, ...] = ()
     contradiccion: str = ""
+    # Traza de observabilidad del desempate (candidatos considerados,
+    # evidencias/fuentes independientes por candidato, contradicciones,
+    # método, valor OCR original y valor canónico aplicado). Vacío cuando
+    # no se intentó ningún desempate. Nunca influye en `decision`.
+    desempate: dict = field(default_factory=dict)
 
     def a_dict(self) -> dict[str, object]:
-        return {
+        salida = {
             "decision": self.decision, "valor_canonico": self.valor_canonico,
             "valor_ocr_original": self.valor_ocr_original, "metodo": self.metodo,
             "evidencias": list(self.evidencias), "confianza": self.confianza,
             "competidores": list(self.competidores), "contradiccion": self.contradiccion,
         }
+        if self.desempate:
+            salida["desempate"] = self.desempate
+        return salida
 
 
 def evaluar_convergencia(

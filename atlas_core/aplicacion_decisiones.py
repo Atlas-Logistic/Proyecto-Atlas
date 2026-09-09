@@ -783,13 +783,37 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         )
                     vehiculo_id = vehiculo.vehiculo_id
                     resultado_extra.update({"vehiculo_id": vehiculo_id, "tipo_vehiculo": tipo_final})
+                # Bloque VEHÍCULO E3 -- el RUT del chofer del documento se
+                # persiste en el ledger para que una decisión humana
+                # aplicada aquí pueda reconocerse después como evidencia
+                # de "qué vehículo es de este chofer" en otra guía del
+                # mismo RUT (`_patentes_por_decision_humana_de_rut`).
+                rut_chofer_ledger = ""
+                try:
+                    from atlas_core.revalidacion_documental import _leer_filas as _leer_filas_veh
+
+                    _numero_guia_veh = str((decision.get("documento") or {}).get("numero_guia", ""))
+                    _fila_veh = next(
+                        (f for f in _leer_filas_veh(dataset) if str(f.get("numero_guia", "")) == _numero_guia_veh),
+                        None,
+                    )
+                    if _fila_veh is not None:
+                        rut_chofer_ledger = str(_fila_veh.get("rut_chofer", "") or "")
+                except (OSError, ValueError, ImportError):
+                    rut_chofer_ledger = ""
                 aplicacion = {
                     "decision_id": decision_id, "tipo": tipo, "accion": accion,
-                    "actor": "JAVIER_MBT", "fecha": reloj().astimezone(timezone.utc).isoformat(),
+                    # El histórico de este bloque siempre registró `JAVIER_MBT`
+                    # para las confirmaciones humanas de vehículo; se conserva
+                    # ese contrato, pero una auto-aplicación de Atlas
+                    # (`ATLAS_AUTOMATICO`) queda distinguible en el ledger.
+                    "actor": "ATLAS_AUTOMATICO" if actor == "ATLAS_AUTOMATICO" else "JAVIER_MBT",
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(),
                     "documento": decision.get("documento"), "campo": decision.get("campo"),
                     "valor_documental": patente, "vehiculo_id": vehiculo_id,
                     "patente_canonica": patente_canonica_elegida,
                     "tipo_vehiculo": tipo_final, "motivo_rechazo": motivo_rechazo_final,
+                    "rut_chofer": rut_chofer_ledger,
                     "candidatos_previos": decision.get("candidatos") or None,
                     "dataset_sha256": artefacto.get("dataset_sha256"),
                     "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),

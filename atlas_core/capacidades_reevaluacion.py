@@ -86,8 +86,14 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         motivos_documentales=frozenset({"CHOFER_SIN_CORROBORAR", "CHOFER_AUSENTE", "RUT_CHOFER_INVALIDO"}),
     ),
     DOMINIO_VEHICULO: Capacidad(
-        dominio=DOMINIO_VEHICULO, version=2,
-        descripcion="Relaciones chofer↔vehículo, homologación de patente, convergencia.",
+        dominio=DOMINIO_VEHICULO, version=3,
+        descripcion=(
+            "Relaciones chofer↔vehículo, homologación de patente, convergencia. "
+            "v3: desempate contextual -- jerarquía de evidencia (confirmación "
+            "humana / decisión humana previa del mismo RUT > transporte "
+            "independiente > similitud OCR); un competidor un tier por debajo "
+            "deja de bloquear; `convergencia_vehiculo` delega en el Motor."
+        ),
         tipos_decision=frozenset({"VEHICULO_DESCONOCIDO"}),
         motivos_documentales=frozenset({"PATENTE_SIN_HOMOLOGAR", "PATENTE_AMBIGUA"}),
     ),

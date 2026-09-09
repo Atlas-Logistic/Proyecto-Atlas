@@ -1060,7 +1060,7 @@ def _convergencia_documental(
     Devuelve un delta puro (nunca escribe): `datos` corregido, motivos a
     quitar/agregar, métodos a agregar y el registro de auditoría."""
     delta: dict[str, object] = {
-        "datos": dict(datos), "resoluciones": [], "contradicciones": [],
+        "datos": dict(datos), "resoluciones": [], "contradicciones": [], "desempates": [],
         "motivos_quitar": set(), "motivos_agregar": set(), "metodos_agregar": set(),
     }
     if carpeta_catalogos is None:
@@ -1085,11 +1085,14 @@ def _convergencia_documental(
     # chofer (`_transportes_por_patente_de_chofer`). `procesar_archivo` es
     # por-documento y NO tiene ese contexto -- ahí la patente la resuelve
     # la segunda pasada universal (`_segunda_pasada_universal`), que sí
-    # trae el lote entero. Sin `filas` no se hace convergencia de patente:
-    # nunca se resuelve a un canónico que podría tener un competidor
-    # invisible desde este documento (caso real 472477: JD8659 confirmada
-    # por Javier PERO JE8659 también aparece en un transporte independiente
-    # real del mismo chofer -> dos candidatos plausibles -> revisión).
+    # trae el lote entero. `convergencia_vehiculo` delega la jerarquía de
+    # evidencia en `evaluar_evidencia_patente` (CONFIRMACION_HUMANA /
+    # decisión humana previa del mismo RUT > DOCUMENTAL_INDEPENDIENTE > ...)
+    # y sólo pliega cuando hay un ÚNICO candidato en el nivel más alto,
+    # dentro de la distancia OCR tolerada -- caso real 472477 (Carlos
+    # Simón): JD8659 con confirmación humana asociada al RUT gana a JE8659
+    # (un transporte independiente, un tier por debajo) -> resuelve. Dos
+    # candidatos EMPATADOS en el nivel más alto -> se conserva la revisión.
     for clave_datos, campo_convergencia, motivos_campo in (
         ("patente del tracto", "patente_tracto",
          (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
@@ -1115,9 +1118,17 @@ def _convergencia_documental(
                 "campo": campo_convergencia, "valor_ocr": r.valor_ocr_original,
                 "valor_canonico": r.valor_canonico, "metodo": r.metodo,
                 "evidencias": list(r.evidencias), "confianza": r.confianza,
+                "desempate": r.desempate,
             })
         elif r.decision == CONTRADICCION_FUERTE:
             delta["contradicciones"].append({"campo": campo_convergencia, "detalle": r.contradiccion})
+            if r.desempate:
+                delta.setdefault("desempates", []).append(r.desempate)
+        elif r.desempate.get("candidatos"):
+            # Abstención con competidores reales -- se deja traza del
+            # desempate intentado (candidatos, evidencias, método
+            # ABSTENCION_AMBIGUA) aunque no se resuelva nada.
+            delta.setdefault("desempates", []).append(r.desempate)
 
     nombre_cliente = str(nuevos.get("cliente", "")).strip()
     if nombre_cliente not in {"", "No encontrado"}:
@@ -2484,6 +2495,7 @@ def procesar_archivo(
     # CLIENTE_CANDIDATO/OBRA_DESCONOCIDA/VEHICULO_DESCONOCIDO nace por una
     # imperfección OCR sobre conocimiento fuerte.
     resoluciones_convergentes: list[dict[str, object]] = []
+    desempates_vehiculo: list[dict[str, object]] = []
     if carpeta_catalogos is not None:
         try:
             _delta_conv = _convergencia_documental(
@@ -2505,6 +2517,7 @@ def procesar_archivo(
                     motivos_documento.append(_m)
             metodos_documento.update(_delta_conv["metodos_agregar"])
             resoluciones_convergentes = list(_delta_conv["resoluciones"])
+            desempates_vehiculo = list(_delta_conv.get("desempates") or [])
 
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 
@@ -2866,6 +2879,13 @@ def procesar_archivo(
         # + confianza -- el OCR nunca se pierde aunque el canónico se haya
         # aplicado solo.
         metricas["resoluciones_convergentes"] = resoluciones_convergentes
+    if desempates_vehiculo:
+        # Observabilidad del desempate de VEHÍCULO (Bloque E3): candidatos
+        # considerados, evidencias/fuentes independientes por candidato,
+        # contradicciones, método (CONTEXTO_DETERMINISTA / ABSTENCION_
+        # AMBIGUA), valor OCR original y valor canónico aplicado -- también
+        # cuando Atlas se abstuvo.
+        metricas["desempates_vehiculo"] = desempates_vehiculo
 
     # Bloque C1 -- peso: se calcula aquí (antes del `return`, no dentro
     # del propio diccionario) para poder evaluar su credibilidad y
@@ -3751,15 +3771,30 @@ def _segunda_pasada_universal(
             deltas[archivo] = {**deltas.get(archivo, {}), **cambios}
             guias_tocadas.add(str(fila.get("numero_guia", "")))
             m["resueltas_determinista"] = int(m["resueltas_determinista"]) + 1
-            m["resoluciones_deterministas"].append({
+            reg = {
                 "archivo": archivo, "campo": campo, "valor_ocr": conv.valor_ocr_original,
                 "valor_canonico": conv.valor_canonico, "confianza": conv.confianza,
                 "evidencias": list(conv.evidencias),
-            })
+            }
+            if getattr(conv, "desempate", None):
+                reg["desempate"] = conv.desempate
+            m["resoluciones_deterministas"].append(reg)
             continue
         if conv is not None and conv.decision == CONTRADICCION_FUERTE:
             m["a_humano"] = int(m["a_humano"]) + 1
+            if getattr(conv, "desempate", None):
+                m.setdefault("desempates_vehiculo", []).append(conv.desempate)
             continue
+        if (
+            conv is not None
+            and campo in ("patente_tracto", "patente_rampla")
+            and getattr(conv, "desempate", None)
+            and conv.desempate.get("candidatos")
+        ):
+            # Abstención con competidores reales -- traza del desempate
+            # intentado (método ABSTENCION_AMBIGUA), aunque el caso siga
+            # a B1 / a Javier.
+            m.setdefault("desempates_vehiculo", []).append(conv.desempate)
 
         # 3) B1 -- sólo con evidencia INTERNA suficiente (nunca una
         #    tormenta de llamadas: sin proveedor o sin evidencia -> humano).

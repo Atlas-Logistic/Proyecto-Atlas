@@ -4725,6 +4725,13 @@ def reconciliar_bandeja_decisiones(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
     relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
+    try:
+        _ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+        decisiones_aplicadas_ledger = [
+            a for a in (_ledger.get("aplicaciones") or []) if isinstance(a, dict)
+        ]
+    except (OSError, json.JSONDecodeError, AttributeError):
+        decisiones_aplicadas_ledger = []
 
     def _regenerar_enriquecer_publicar(pendientes: list[dict[str, object]]) -> dict[str, object]:
         vigentes_locales = regenerar_decisiones_persistidas(
@@ -4738,6 +4745,7 @@ def reconciliar_bandeja_decisiones(
         enriquecidas_locales = enriquecer_decisiones_vehiculo(
             decisiones=vigentes_locales, filas=filas, vehiculos=vehiculos,
             relaciones_historicas=relaciones_historicas,
+            decisiones_aplicadas=decisiones_aplicadas_ledger,
         )
 
         try:
@@ -4827,36 +4835,58 @@ def reconciliar_bandeja_decisiones(
         "OBRA_DESCONOCIDA": "REGISTRAR",
     }
 
+    # Bloque VEHÍCULO E3 -- `evaluar_evidencia_patente` puede alcanzar
+    # RESUELTO_AUTOMATICAMENTE con un ÚNICO candidato en el NIVEL MÁS ALTO
+    # pero conservando en `candidatos` competidores de nivel inferior
+    # (caso real 472477: JD8659 con confirmación humana asociada al RUT +
+    # JE8659 con un transporte independiente real -- un tier por debajo).
+    # `USAR_PATENTE_EXISTENTE` exige EXACTAMENTE un candidato; con más de
+    # uno, la vía canónica es `SELECCIONAR_OTRA_PATENTE` indicando la
+    # ganadora. Dos o más candidatos EMPATADOS en el nivel más alto ->
+    # NO hay ganadora única -> la tarjeta se conserva para Javier
+    # ("dos plausibles -> preguntar").
+    _ORDEN_NIVEL = {"CONFIRMACION_HUMANA": 0, "DOCUMENTAL_INDEPENDIENTE": 1, "DOCUMENTAL_DEBIL": 2}
+
+    def _ganadora_unica_patente(decision: dict) -> str | None:
+        cands = decision.get("candidatos") or []
+        if not cands:
+            return None
+        if len(cands) == 1:
+            return None  # ya lo cubre USAR_PATENTE_EXISTENTE
+        rangos = [(_ORDEN_NIVEL.get(str(c.get("nivel", "")), 9), c) for c in cands]
+        mejor = min(r for r, _ in rangos)
+        top = [c for r, c in rangos if r == mejor]
+        return str(top[0].get("patente") or "") if len(top) == 1 else None
+
     aplicadas_automaticamente: list[dict[str, object]] = []
     for _ in range(MAX_ITERACIONES_AUTO_RESOLUCION):
         candidatas = [
             d for d in bandeja["decisiones"]
             if d.get("tipo") in _ACCION_AUTO_POR_TIPO
             and (d.get("evaluacion_evidencia") or {}).get("resultado") == "RESUELTO_AUTOMATICAMENTE"
-            # `USAR_PATENTE_EXISTENTE` exige EXACTAMENTE un candidato (ver
-            # `aplicar_decision_obra`). `evaluar_evidencia_patente` puede
-            # alcanzar RESUELTO_AUTOMATICAMENTE con un único candidato en el
-            # NIVEL MÁS ALTO pero conservando en `candidatos` los de nivel
-            # inferior (caso real 472477: JD8659 confirmada por Javier +
-            # JE8659 con un transporte independiente real del mismo chofer).
-            # Sin este filtro, la auto-aplicación lanzaba `ErrorAplicacion
-            # Decision` y abortaba TODA la reconciliación -- y con ella
-            # cualquier RULESET nuevo. Con dos candidatos plausibles la
-            # tarjeta se conserva para que Javier elija (SELECCIONAR_OTRA_
-            # PATENTE), exactamente el criterio "dos plausibles -> preguntar".
-            and (d.get("tipo") != "VEHICULO_DESCONOCIDO" or len(d.get("candidatos") or []) == 1)
+            and (
+                d.get("tipo") != "VEHICULO_DESCONOCIDO"
+                or len(d.get("candidatos") or []) == 1
+                or _ganadora_unica_patente(d) is not None
+            )
         ]
         if not candidatas:
             break
         for decision in candidatas:
+            accion_auto = _ACCION_AUTO_POR_TIPO[decision["tipo"]]
+            patente_elegida = None
+            if decision["tipo"] == "VEHICULO_DESCONOCIDO" and len(decision.get("candidatos") or []) > 1:
+                patente_elegida = _ganadora_unica_patente(decision)
+                accion_auto = "SELECCIONAR_OTRA_PATENTE"
             resultado_aplicacion = aplicar_decision_obra(
                 raiz_atlas=raiz, decision_id=decision["decision_id"],
-                accion=_ACCION_AUTO_POR_TIPO[decision["tipo"]],
+                accion=accion_auto, patente_elegida=patente_elegida,
                 actor="ATLAS_AUTOMATICO", reloj=reloj,
             )
             aplicadas_automaticamente.append({
                 "decision_id": decision["decision_id"], "documento": decision.get("documento"),
-                "valor_documental": decision.get("valor_documental"), "resultado": resultado_aplicacion,
+                "valor_documental": decision.get("valor_documental"),
+                "patente_canonica": patente_elegida, "resultado": resultado_aplicacion,
             })
         pendientes_tras_aplicar = json.loads(artefacto_ruta.read_text(encoding="utf-8")).get("decisiones", [])
         resultado_pasada = _regenerar_enriquecer_publicar(pendientes_tras_aplicar)
