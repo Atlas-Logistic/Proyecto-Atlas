@@ -148,13 +148,16 @@ _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO = (
 )
 
 
-# Bloque AUTORIDAD OPERACIONAL -- morfología de dirección de calle (caso
-# real 472414 SALOMON SACK: la asociación geométrica dejó que el valor de
-# DIRECCION -- "AV PRESID EDO FREI MONTALVA 9770" -- contaminara OBRA
-# DESTINO, cuyo valor real era "TRANSPORTES Y EXCAVACIONES L"). No es una
-# lista de calles ni fuzzy: un valor que EMPIEZA con un tipo de vía y trae
-# un número de dirección, y NO trae ningún token de entidad/empresa, es
-# una dirección -- nunca el NOMBRE de una obra.
+# Bloque AUTORIDAD OPERACIONAL -- clasificación REUSABLE de un candidato a
+# OBRA DESTINO (caso real 472414 SALOMON SACK: el OCR intercaló las tres
+# columnas del membrete y la extracción tomó como obra, en distintas
+# corridas, "AV PRESID EDO FREI MONTALVA 9770" -- una DIRECCION -- o "ORDEN
+# DE COMPRA" / "GIRO ..." -- etiquetas administrativas). No es una
+# blacklist de un valor puntual ni fuzzy: un valor de OBRA DESTINO es
+# ADMINISTRATIVO (dominado por etiquetas estructurales del formulario),
+# DIRECCION (morfología de calle) o NUMERO (sólo dígitos/puntuación) --
+# ninguno de esos puede ser el NOMBRE de una obra. Cualquier otra cosa es
+# NOMINAL.
 _TOKENS_VIA_DIRECCION = frozenset({
     "AV", "AVDA", "AVENIDA", "CALLE", "PASAJE", "PJE", "PSJE", "CAMINO", "RUTA",
 })
@@ -165,17 +168,56 @@ _TOKENS_ENTIDAD_NO_DIRECCION = frozenset({
     "EXCAVACIONES", "INGENIERIA", "MINERA", "AGRICOLA", "MAESTRANZA",
     "DISTRIBUIDORA", "IMPORTADORA", "EXPORTADORA", "PROYECTOS",
 })
+# Etiquetas ESTRUCTURALES del formulario de guía (nunca parte del nombre
+# de una obra real). Deliberadamente NO incluye EMPRESA/CONSTRUCTORA/
+# TRANSPORTE(S)/OBRA/CONST -- ésas SÍ aparecen en nombres reales de obra
+# ("EMPRESA CONST SIGRO", "CONST CERRO APOQUINDO CUATRO", ...).
+_TOKENS_ADMINISTRATIVOS = frozenset({
+    "RUT", "TELEFONO", "FONO", "CODIGO", "COD", "HORA", "DIRECCION",
+    "COMUNA", "CIUDAD", "GIRO", "DESTINATARIO", "SOLICITANTE", "FECHA",
+    "EMISION", "ENTRADA", "SALIDA", "LLEGADA", "DESPACHAR", "PESO",
+    "BRUTO", "TARA", "TOTAL", "VALOR", "NETO", "IVA", "ORDEN", "COMPRA",
+    "MENOR", "VTA", "MAI", "INDICADOR", "TRASLADO", "RETIRA", "MOTIVO",
+    "FOLIO", "DOCUMENTO", "PRECIO", "UNIDAD", "CANTIDAD", "DESCRIPCION",
+    "POSTAL", "SAP", "PATENTE", "CHOFER", "NRO", "CLIENTE", "SENOR",
+    "SEÑOR", "NOMBRE", "TIMBRE", "ELECTRONICO", "EXENTO",
+})
+
+
+def _tokens_valor(texto: str) -> list[str]:
+    return [t.strip(".") for t in re.findall(r"[A-ZÑÁÉÍÓÚ0-9\.]+", str(texto or "").upper()) if t.strip(".")]
 
 
 def _parece_direccion_calle(texto: str) -> bool:
-    tokens = re.findall(r"[A-ZÑÁÉÍÓÚ0-9\.]+", str(texto or "").upper())
+    tokens = _tokens_valor(texto)
     if len(tokens) < 2:
         return False
-    if any(t.strip(".") in _TOKENS_ENTIDAD_NO_DIRECCION for t in tokens):
+    if any(t in _TOKENS_ENTIDAD_NO_DIRECCION for t in tokens):
         return False
-    empieza_con_via = tokens[0].strip(".") in _TOKENS_VIA_DIRECCION
+    empieza_con_via = tokens[0] in _TOKENS_VIA_DIRECCION
     tiene_numero_calle = any(re.fullmatch(r"\d{2,5}[A-Z]?", t) for t in tokens[1:])
     return empieza_con_via and tiene_numero_calle
+
+
+def clasificar_valor_obra_destino(texto: str) -> str:
+    """"ADMINISTRATIVO" | "DIRECCION" | "NUMERO" | "NOMINAL" -- decide si un
+    texto capturado para OBRA DESTINO puede ser el nombre de una obra. Sólo
+    "NOMINAL" es aceptable como valor; el resto se descarta y se deja que
+    otra vía (geometría) lo complete. Reusable por el regex lineal y por la
+    asociación geométrica -- nunca una lista por guía."""
+    tokens = _tokens_valor(texto)
+    if not tokens:
+        return "NUMERO"
+    if all(re.fullmatch(r"\d[\d.]*", t) for t in tokens):
+        return "NUMERO"
+    if _parece_direccion_calle(texto):
+        return "DIRECCION"
+    admin = sum(1 for t in tokens if t in _TOKENS_ADMINISTRATIVOS)
+    if tokens[0] in _TOKENS_ADMINISTRATIVOS or admin * 2 >= len(tokens):
+        return "ADMINISTRATIVO"
+    if tokens[0] in _TOKENS_VIA_DIRECCION:
+        return "DIRECCION"
+    return "NOMINAL"
 
 
 def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:
@@ -193,6 +235,42 @@ def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:
         return False
     digitos = sum(caracter.isdigit() for caracter in texto)
     return not (digitos and digitos >= sum(caracter.isalpha() for caracter in texto))
+
+
+# Bloque AUTORIDAD OPERACIONAL / EXTRACCIÓN OBRA DESTINO -- política nominal
+# ESPECÍFICA de obra destino. `_es_candidato_nominal_geometrico` compara
+# las etiquetas estructurales por SUBCADENA ("TRANSPORTE" in "TRANSPORTES
+# Y EXCAVACIONES L" -> True), lo que rechaza un nombre de obra real cuyo
+# primer token es "TRANSPORTES" (caso 472414, PaddleOCR lee la obra
+# limpia y alineada con la etiqueta, pero la política general la
+# descartaba). Aquí la exclusión estructural de una etiqueta de UNA
+# palabra es por TOKEN, no por subcadena; el resto de los guardarraíles
+# (longitud, SEÑOR/RUT, dígitos) y la clasificación reusable
+# `clasificar_valor_obra_destino` (ADMINISTRATIVO/DIRECCION/NUMERO ->
+# rechazado) se conservan. Nunca se relaja para cliente/chofer.
+_ETIQUETAS_ESTRUCTURALES_1_PALABRA = frozenset(
+    p for p in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO if " " not in p
+)
+_ETIQUETAS_ESTRUCTURALES_MULTI = tuple(
+    p for p in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO if " " in p
+)
+
+
+def _es_candidato_obra_destino_geometrico(item: Dict[str, Any]) -> bool:
+    texto = item["simple"]
+    if not 2 <= len(texto) <= 60 or not re.search(r"[A-Z]", texto):
+        return False
+    if _es_etiqueta_senor(texto) or _es_etiqueta_rut(texto):
+        return False
+    if clasificar_valor_obra_destino(item["texto"]) != "NOMINAL":
+        return False
+    tokens = set(_tokens_valor(texto))
+    if tokens & _ETIQUETAS_ESTRUCTURALES_1_PALABRA:
+        return False
+    if any(p in texto for p in _ETIQUETAS_ESTRUCTURALES_MULTI):
+        return False
+    digitos = sum(c.isdigit() for c in texto)
+    return not (digitos and digitos >= sum(c.isalpha() for c in texto))
 
 
 def _escala_geometrica_texto(items: List[Dict[str, Any]]) -> float:
@@ -300,11 +378,17 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         for etiqueta in (item for item in items if es_etiqueta(item, campo)):
             candidatos = []
             for item in items:
-                if item is etiqueta or not nominal(item):
+                if item is etiqueta:
                     continue
                 if campo == "obra destino":
-                    # Nunca un valor con morfología de dirección de calle.
-                    if _parece_direccion_calle(item["texto"]):
+                    # Política nominal ESPECÍFICA de obra destino: acepta un
+                    # nombre real que empieza por "TRANSPORTES..." (caso
+                    # 472414) -- que la política general rechazaba por
+                    # subcadena -- y rechaza DIRECCION / etiqueta
+                    # administrativa ("ORDEN DE COMPRA", "GIRO ...") /
+                    # número (misma clasificación reusable que el regex
+                    # lineal).
+                    if not _es_candidato_obra_destino_geometrico(item):
                         continue
                     # Nunca un valor más cercano a una etiqueta DIRECCION.
                     if etiquetas_direccion:
@@ -315,6 +399,8 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                         )
                         if d_dir + 8 * escala < d_obra:
                             continue
+                elif not nominal(item):
+                    continue
                 # GIRO es un dato comercial distinto: su valor no puede ser
                 # ni cliente ni obra destino.
                 if id(item) in valores_giro:
@@ -2017,14 +2103,17 @@ def extraer_datos(
             # lista nueva ni fuzzy. Al descartarla, la función cae a "sin
             # match" y `_extraer_asociaciones_geometricas` (que sí ubica el
             # valor real por geometría) queda libre de completarlo después.
-            if obra and obra in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO:
-                obra = None
-            # Bloque AUTORIDAD OPERACIONAL -- si el orden de lectura OCR
-            # intercaló el valor de DIRECCION entre las etiquetas OBRA
-            # DESTINO/COD DESTINATARIO, la captura tiene morfología de
-            # dirección de calle -- nunca es el nombre de la obra (caso
-            # 472414). Se descarta y se deja que la geometría lo complete.
-            if obra and _parece_direccion_calle(obra):
+            # Bloque AUTORIDAD OPERACIONAL / EXTRACCIÓN OBRA DESTINO -- caso
+            # real 472414: con las tres columnas del membrete intercaladas
+            # por el OCR, este regex lineal captura entre "OBRA DESTINO" y
+            # "COD DESTINATARIO" texto que NO es el nombre de la obra: una
+            # DIRECCION ("AV PRESID EDO FREI MONTALVA 9770"), una etiqueta
+            # administrativa ("ORDEN DE COMPRA", "GIRO ..."), o un número.
+            # Se descarta cualquier captura que no clasifique como NOMINAL
+            # (clasificación reusable, nunca una lista por guía) y se deja
+            # que `_extraer_asociaciones_geometricas` -- que sí ubica el
+            # valor real por alineación con la etiqueta -- lo complete.
+            if obra and clasificar_valor_obra_destino(obra) != "NOMINAL":
                 obra = None
             if obra and "HORA ENTRADA" not in obra:
                 return obra
