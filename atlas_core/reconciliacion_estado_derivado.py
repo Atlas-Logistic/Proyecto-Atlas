@@ -20,7 +20,14 @@ from atlas_core.almacenamiento_portable import (
     leer_estado_operacion,
 )
 from atlas_core.aplicacion_decisiones import LEDGER
-from atlas_core.decisiones_pendientes import NOMBRE_ARTEFACTO
+from atlas_core.decisiones_pendientes import (
+    MOTIVOS_DESTINO_NO_RESUELTO,
+    NOMBRE_ARTEFACTO,
+    _guias_con_direccion_confirmada_por_humano,
+    _guias_destino_terminado_por_humano,
+    _motivo_ruta_base,
+    clasificar_fallo_tecnico,
+)
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
@@ -235,11 +242,42 @@ from atlas_core.revalidacion_documental import (
 # RUT documental es estructuralmente válido y no contradice ningún RUT
 # canónico. Sin subir este número, esas filas quedarían bloqueadas hasta
 # que un lote nuevo volviera a procesar el documento.
-RULESET_VERSION = 17
+#
+# Subida de 17 a 18 -- GEOGRAFÍA 2B / CICLO DE VIDA DE INCOMPLETO_TECNICO:
+# cada pendiente técnico de `pendientes_tecnicos.json` recibe una
+# `clase_fallo` (TRANSITORIO / AGOTABLE / DETERMINISTA, ver
+# `atlas_core.decisiones_pendientes.clasificar_fallo_tecnico`) y un
+# `estado_espera` explícito (ESPERANDO_COOLDOWN / ESPERANDO_PROVEEDOR /
+# ESPERANDO_EVIDENCIA_NUEVA / ESPERANDO_ACCION_HUMANA / AGOTADO) con
+# `causa_siguiente_accion` y una `proxima_oportunidad` en fecha ISO real
+# (ya no el literal fijo). Los reintentos dejan de ser "3 iguales cada
+# 24 h para todo": un DETERMINISTA no se reintenta sólo por paso del
+# tiempo; un TRANSITORIO usa cooldown corto; `CONFIANZA_INSUFICIENTE`
+# deja de quedar huérfano (converge a tarjeta o a evidencia nueva); una
+# dirección ya confirmada por un humano nunca vuelve a preguntarse. Sin
+# subir este número, los pendientes históricos nunca se reclasificarían
+# bajo esta política.
+RULESET_VERSION = 18
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
 MAX_REINTENTOS_IGUALES_ARRANQUE = 3
+
+# Bloque GEOGRAFÍA 2B -- cooldown y tope por clase de fallo. Sin daemon:
+# el reintento sólo se evalúa dentro de una reconciliación natural
+# (Desktop/CLI/operación), pero con un ciclo de vida finito y
+# convergente.
+COOLDOWN_REINTENTO_TRANSITORIO = timedelta(hours=6)
+MAX_REINTENTOS_POR_CLASE = {
+    "TRANSITORIO": 5,
+    "AGOTABLE": MAX_REINTENTOS_IGUALES_ARRANQUE,
+    "DETERMINISTA": 0,
+}
+ESTADO_ESPERA_COOLDOWN = "ESPERANDO_COOLDOWN"
+ESTADO_ESPERA_PROVEEDOR = "ESPERANDO_PROVEEDOR"
+ESTADO_ESPERA_EVIDENCIA = "ESPERANDO_EVIDENCIA_NUEVA"
+ESTADO_ESPERA_ACCION_HUMANA = "ESPERANDO_ACCION_HUMANA"
+ESTADO_ESPERA_AGOTADO = "AGOTADO"
 
 
 def _leer_filas(ruta: Path) -> list[dict[str, str]]:
@@ -322,9 +360,98 @@ def _registro_pendiente(fila: dict[str, str], previo: dict[str, object] | None) 
         "ultimo_intento": (mismo or {}).get("ultimo_intento"),
         "ultimo_resultado": (mismo or {}).get("ultimo_resultado"),
         "historial_resultados": list((mismo or {}).get("historial_resultados", [])),
-        "proxima_oportunidad": "ARRANQUE_TRAS_24H_O_CAMBIO_DE_EVIDENCIA",
+        # Bloque GEOGRAFÍA 2B -- clase de fallo (TRANSITORIO / AGOTABLE /
+        # DETERMINISTA). `estado_espera` / `causa_siguiente_accion` /
+        # `proxima_oportunidad` (fecha ISO real o null) se completan en
+        # `_ciclo_vida_pendiente`, tras el reintento de esta pasada.
+        "clase_fallo": clasificar_fallo_tecnico(str(fila.get("motivo_ruta", "")).strip()),
+        "proxima_oportunidad": None,
+        # Compatibilidad: `escalamiento` se conserva para llamadores/tests
+        # previos a 2B; `estado_espera` es la señal canónica desde 2B.
         "escalamiento": "PROXIMA_CORRIDA_GUIAS_REVALIDACION_GLOBAL_B1" if int((mismo or {}).get("intentos_misma_evidencia", 0)) >= MAX_REINTENTOS_IGUALES_ARRANQUE else "REINTENTO_DEPENDENCIA",
     }
+
+
+def _ciclo_vida_pendiente(
+    registro: dict[str, object], *, instante: datetime,
+    direccion_confirmada_por_humano: bool, destino_terminado_por_humano: bool,
+) -> dict[str, object]:
+    """Bloque GEOGRAFÍA 2B -- estado de ciclo de vida explícito de un
+    pendiente técnico, calculado tras el reintento de esta pasada. Nunca
+    deja un caso en limbo: siempre queda en RESUELTO (fuera de esta lista),
+    ESPERANDO_ACCION_HUMANA (con tarjeta real en la bandeja),
+    ESPERANDO_COOLDOWN / ESPERANDO_PROVEEDOR / ESPERANDO_EVIDENCIA_NUEVA /
+    AGOTADO (condición explícita no humana)."""
+    motivo = str(registro.get("motivo_actual", ""))
+    clase = clasificar_fallo_tecnico(motivo)
+    base = _motivo_ruta_base(motivo)
+    intentos = int(registro.get("intentos_misma_evidencia", 0) or 0)
+    maximo = MAX_REINTENTOS_POR_CLASE.get(clase, 0)
+    cooldown = (
+        COOLDOWN_REINTENTO_TRANSITORIO if clase == "TRANSITORIO" else INTERVALO_REINTENTO
+    )
+
+    def _resultado(estado: str, causa: str, proxima: str | None) -> dict[str, object]:
+        return {
+            "clase_fallo": clase,
+            "estado_espera": estado,
+            "causa_siguiente_accion": causa,
+            "proxima_oportunidad": proxima,
+        }
+
+    if destino_terminado_por_humano:
+        return _resultado(
+            ESTADO_ESPERA_AGOTADO, "HUMANO_DECLARO_NO_PUEDE_DETERMINAR", None
+        )
+    if direccion_confirmada_por_humano:
+        # La identidad del destino ya está resuelta por un humano; el
+        # geocodificador aún no la ubica -- nunca se vuelve a preguntar.
+        return _resultado(
+            ESTADO_ESPERA_EVIDENCIA,
+            "DIRECCION_CONFIRMADA_POR_HUMANO__GEOCODER_NO_RESUELVE",
+            None,
+        )
+    if clase == "DETERMINISTA":
+        if base in MOTIVOS_DESTINO_NO_RESUELTO:
+            # `reconciliar_decisiones_destino_no_resuelto` publica la
+            # tarjeta accionable en esta misma reconciliación.
+            return _resultado(
+                ESTADO_ESPERA_ACCION_HUMANA, "CORREGIR_O_CONFIRMAR_DIRECCION", None
+            )
+        return _resultado(
+            ESTADO_ESPERA_EVIDENCIA, "MOTIVO_DETERMINISTA_SIN_ACCION_HUMANA_UTIL", None
+        )
+    if intentos < maximo:
+        proxima = None
+        ultimo = registro.get("ultimo_intento")
+        if ultimo:
+            try:
+                proxima = (datetime.fromisoformat(str(ultimo)) + cooldown).isoformat()
+            except ValueError:
+                proxima = None
+        causa = (
+            "PROVEEDOR_EXTERNO_TEMPORALMENTE_INDISPONIBLE"
+            if clase == "TRANSITORIO"
+            else "REINTENTO_AUTOMATICO_PENDIENTE"
+        )
+        return _resultado(ESTADO_ESPERA_COOLDOWN, causa, proxima)
+    # Agotó el máximo de su clase.
+    if clase == "TRANSITORIO":
+        return _resultado(
+            ESTADO_ESPERA_PROVEEDOR,
+            "PROVEEDOR_EXTERNO_NO_DISPONIBLE_TRAS_MAX_INTENTOS",
+            None,
+        )
+    # AGOTABLE agotado: la tarjeta accionable ya se publica (intentos >=
+    # UMBRAL) en la misma reconciliación; si por alguna supresión no
+    # existiera, el humano igual es quien puede resolverlo.
+    if base in MOTIVOS_DESTINO_NO_RESUELTO or clase == "AGOTABLE":
+        return _resultado(
+            ESTADO_ESPERA_ACCION_HUMANA, "CORREGIR_O_CONFIRMAR_DIRECCION", None
+        )
+    return _resultado(
+        ESTADO_ESPERA_EVIDENCIA, "SIN_ACCION_AUTOMATICA_NI_HUMANA_DISPONIBLE", None
+    )
 
 
 _ESTADOS_REVISION = {"REVISAR", "REQUIERE_REVISION"}
@@ -399,27 +526,48 @@ def _falta_tarjeta_destino_accionable(dataset: Path, decisiones: Path) -> bool:
     humano (`NO_PUEDO_DETERMINAR`/`NO_CONFIRMAR` en el ledger --
     `reconciliar_decisiones_destino_no_resuelto` nunca la republicaría) se
     excluye también: reintentar la reconciliación en cada carga sin poder
-    publicar nada sería un bucle inútil."""
-    from atlas_core.decisiones_pendientes import MOTIVOS_DESTINO_NO_RESUELTO
+    publicar nada sería un bucle inútil.
 
-    guias_destino_terminadas: set[str] = set()
+    Bloque GEOGRAFÍA 2B -- también entra al bloque una fila cuyo motivo es
+    AGOTABLE (`CONFIANZA_INSUFICIENTE`, `COORDENADA_NO_CONFIRMADA`) y que
+    YA agotó sus reintentos (`intentos_misma_evidencia >=
+    UMBRAL_INTENTOS_TECNICOS_AGOTADOS` en `pendientes_tecnicos.json`) sin
+    tarjeta: converge a `DESTINO_NO_RESUELTO` accionable en la misma
+    pasada. Una guía cuya dirección un humano ya confirmó nunca cuenta
+    (jamás se le publica tarjeta -- queda `ESPERANDO_EVIDENCIA_NUEVA`)."""
+    from atlas_core.decisiones_pendientes import (
+        MOTIVOS_DESTINO_NO_RESUELTO,
+        MOTIVOS_DESTINO_TECNICO_AGOTABLE,
+        UMBRAL_INTENTOS_TECNICOS_AGOTADOS,
+    )
+
+    guias_destino_terminadas = set(_guias_destino_terminado_por_humano(
+        dataset.parent / "decisiones_aplicadas.json"
+    ))
+    guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
+        dataset.parent / "decisiones_aplicadas.json"
+    )
+    intentos_por_guia: dict[str, int] = {}
     try:
-        _ledger = json.loads((dataset.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
-        for _ap in _ledger.get("aplicaciones", []) or []:
-            if _ap.get("tipo") == "DESTINO_NO_RESUELTO" and _ap.get("accion") in {
-                "NO_PUEDO_DETERMINAR", "NO_CONFIRMAR",
-            }:
-                _g = str((_ap.get("documento") or {}).get("numero_guia", "")).strip()
-                if _g:
-                    guias_destino_terminadas.add(_g)
-    except (OSError, ValueError):
+        _pend = json.loads((dataset.parent / NOMBRE_PENDIENTES_TECNICOS).read_text(encoding="utf-8"))
+        for _r in _pend.get("pendientes", []) or []:
+            _g = str(_r.get("numero_guia", "")).strip()
+            if _g:
+                intentos_por_guia[_g] = int(_r.get("intentos_misma_evidencia", 0) or 0)
+    except (OSError, ValueError, AttributeError):
         pass
 
     for fila in _pendientes_ruta(dataset, decisiones):
-        if str(fila.get("numero_guia", "")).strip() in guias_destino_terminadas:
+        guia = str(fila.get("numero_guia", "")).strip()
+        if guia in guias_destino_terminadas or guia in guias_direccion_confirmada:
             continue
-        motivo_base = str(fila.get("motivo_ruta", "")).split(":", 1)[0].split("(", 1)[0].strip()
+        motivo_base = _motivo_ruta_base(str(fila.get("motivo_ruta", "")))
         if motivo_base in MOTIVOS_DESTINO_NO_RESUELTO:
+            return True
+        if (
+            motivo_base in MOTIVOS_DESTINO_TECNICO_AGOTABLE
+            and intentos_por_guia.get(guia, 0) >= UMBRAL_INTENTOS_TECNICOS_AGOTADOS
+        ):
             return True
     return False
 
@@ -456,18 +604,49 @@ def reconciliar_estado_derivado(
     seguimiento_previo = _cargar_seguimiento(ruta_pendientes)
     pendientes_antes = _pendientes_ruta(dataset, decisiones)
     registros = [_registro_pendiente(f, seguimiento_previo.get(str(f.get("numero_guia", "")))) for f in pendientes_antes]
+    # Bloque GEOGRAFÍA 2B -- guías cuya dirección un humano YA confirmó
+    # (REGISTRAR_DIRECCION aplicado) y guías cuya decisión de destino un
+    # humano ya cerró de forma terminal (NO_PUEDO_DETERMINAR/NO_CONFIRMAR).
+    guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
+        actual / "decisiones_aplicadas.json"
+    )
+    guias_destino_terminado = _guias_destino_terminado_por_humano(
+        actual / "decisiones_aplicadas.json"
+    )
+    migracion = version_previa < RULESET_VERSION
     por_reintentar = []
     for registro in registros:
+        if str(registro["numero_guia"]) in guias_direccion_confirmada:
+            # Dirección ya confirmada por un humano: su reintento útil es
+            # `revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr`
+            # (corre siempre, evidencia humana), nunca repetir la misma
+            # consulta técnica ni volver a preguntar.
+            continue
+        clase = clasificar_fallo_tecnico(str(registro.get("motivo_actual", "")))
+        intentos = int(registro["intentos_misma_evidencia"])
+        if clase == "DETERMINISTA":
+            # Nunca se reintenta sólo por paso del tiempo -- repetir la
+            # MISMA consulta con la MISMA evidencia no cambiaría nada (no
+            # se gastan 3 intentos idénticos). SÍ se reintenta ante
+            # evidencia NUEVA (`intentos == 0`: primer intento, o huella
+            # distinta que `_registro_pendiente` reinició) o ante un
+            # cambio de reglas (`migracion`, una vez por `RULESET_VERSION`).
+            if migracion or intentos == 0:
+                por_reintentar.append(str(registro["numero_guia"]))
+            continue
+        maximo = MAX_REINTENTOS_POR_CLASE.get(clase, 0)
+        cooldown = (
+            COOLDOWN_REINTENTO_TRANSITORIO if clase == "TRANSITORIO" else INTERVALO_REINTENTO
+        )
         ultimo = registro.get("ultimo_intento")
         vencido = True
         if ultimo:
             try:
-                vencido = instante - datetime.fromisoformat(str(ultimo)) >= INTERVALO_REINTENTO
+                vencido = instante - datetime.fromisoformat(str(ultimo)) >= cooldown
             except ValueError:
                 pass
-        if registro["intentos_misma_evidencia"] < MAX_REINTENTOS_IGUALES_ARRANQUE and vencido:
+        if intentos < maximo and vencido:
             por_reintentar.append(str(registro["numero_guia"]))
-    migracion = version_previa < RULESET_VERSION
     # Bloque R2.5 -- PROYECCIÓN CANÓNICA -> OPERACIÓN: caso real 464264
     # (decisión humana aplicada; "Revisión de Atlas" ya reflejaba 0
     # decisiones, pero `viajes.csv` seguía siendo el snapshot generado
@@ -766,6 +945,15 @@ def reconciliar_estado_derivado(
                 if str(filas_despues.get(guia, {}).get("estado_ruta", "")) == "RUTA_CALCULADA"
             ]
             pendientes_despues = _pendientes_ruta(dataset, decisiones)
+            # 2B -- el ledger pudo avanzar durante esta reconciliación
+            # (una decisión aplicada arriba): se re-lee para el estado de
+            # ciclo de vida.
+            guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
+                actual / "decisiones_aplicadas.json"
+            )
+            guias_destino_terminado = _guias_destino_terminado_por_humano(
+                actual / "decisiones_aplicadas.json"
+            )
             registros_despues = []
             for fila in pendientes_despues:
                 guia = str(fila.get("numero_guia", ""))
@@ -777,6 +965,16 @@ def reconciliar_estado_derivado(
                     historial = list(registro["historial_resultados"])[-9:]
                     historial.append({"fecha": instante.isoformat(), "resultado": registro["ultimo_resultado"]})
                     registro["historial_resultados"] = historial
+                # Bloque GEOGRAFÍA 2B -- estado de ciclo de vida explícito y
+                # convergente: `clase_fallo` + `estado_espera` +
+                # `causa_siguiente_accion` + `proxima_oportunidad` (ISO real
+                # o null). Ningún pendiente queda "guardado y quizá algún
+                # día se arregle".
+                registro.update(_ciclo_vida_pendiente(
+                    registro, instante=instante,
+                    direccion_confirmada_por_humano=guia in guias_direccion_confirmada,
+                    destino_terminado_por_humano=guia in guias_destino_terminado,
+                ))
                 registros_despues.append(registro)
             escribir_json_atomico(ruta_pendientes, {
                 "schema_version": 1, "actualizado_en": instante.isoformat(),

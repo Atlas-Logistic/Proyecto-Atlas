@@ -301,10 +301,13 @@ def test_tras_registrar_direccion_sin_ruta_no_reabre_la_misma_tarjeta_y_conserva
 
 
 def test_tarjeta_de_guia_hermana_se_suprime_aunque_su_fila_siga_en_callejon(tmp_path):
-    """Contraste con el test anterior: si el Destino CONFIRMADO vino de una
-    guía HERMANA de la obra (no de ESTA), la pregunta "¿es correcta esta
-    dirección?" ya tiene respuesta humana -- la tarjeta de la hermana se
-    suprime igual (R13); su fallo de ruteo se ve aparte."""
+    """Bloque GEOGRAFÍA 2B -- una dirección que un humano YA confirmó
+    (REGISTRAR_DIRECCION aplicado) nunca vuelve a preguntarse, aunque el
+    geocodificador siga sin ubicarla: la tarjeta se suprime tanto para la
+    guía que el humano respondió (464784) como para una guía hermana
+    (999999). El fallo de ruteo deja de ser una "tarjeta falsa" y pasa a
+    verse como pendiente técnico explícito (`estado_espera=
+    ESPERANDO_EVIDENCIA_NUEVA` en `pendientes_tecnicos.json`)."""
     fila_a = _fila(archivo="464784.jpeg", numero_guia="464784", despachar_a_crudo="URUGUAY 15",
                    motivo_ruta="GEOCODIFICACION_NUMERO_INCOMPATIBLE: 15 != 1545")
     fila_b = _fila(archivo="999999.jpeg", numero_guia="999999", numero_transporte="0000353999",
@@ -333,7 +336,7 @@ def test_tarjeta_de_guia_hermana_se_suprime_aunque_su_fila_siga_en_callejon(tmp_
         decisiones=frescas, carpeta_catalogos=entorno["catalogos"], ruta_dataset=dataset,
     )
     guias = {d["documento"]["numero_guia"] for d in restantes}
-    assert "464784" in guias        # el humano respondió ESTA -> se conserva
+    assert "464784" not in guias    # 2B: el humano ya confirmó -> no se re-pregunta
     assert "999999" not in guias    # guía hermana -> R13 la suprime
 
 
@@ -564,7 +567,9 @@ def test_regenerar_decisiones_persistidas_es_idempotente(tmp_path):
     ids_1 = sorted(d["decision_id"] for d in primera)
     assert ids_1 == sorted(d["decision_id"] for d in segunda)
     assert ids_1 == sorted(d["decision_id"] for d in tercera)
-    # 464784 accionable presente; la CORRECCION_MANUAL obsoleta retirada.
+    # 2B: 464784 ya fue confirmada por un humano -> su tarjeta NO se
+    # re-publica (queda ESPERANDO_EVIDENCIA_NUEVA); la CORRECCION_MANUAL
+    # obsoleta también se retira. La reconciliación repetida es idempotente.
     guias = {d["documento"]["numero_guia"] for d in primera}
-    assert "464784" in guias
+    assert "464784" not in guias
     assert "cm-464717" not in {d["decision_id"] for d in primera}

@@ -4153,19 +4153,29 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
     candidata por cada documento con origen ya resuelto pero cuya ruta
     quedó bloqueada por un problema de destino reconocido -- ver
     `atlas_core.decisiones_pendientes.detectar_decision_destino_no_resuelto`."""
-    from atlas_core.decisiones_pendientes import detectar_decision_destino_no_resuelto
+    from atlas_core.decisiones_pendientes import (
+        _guias_con_direccion_confirmada_por_humano,
+        detectar_decision_destino_no_resuelto,
+    )
 
     raiz = Path(raiz_atlas)
-    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
     catalogos = raiz / "catalogos_privados"
     try:
         filas = _leer_filas(dataset)
     except (OSError, ValueError):
         return []
+    # Bloque GEOGRAFÍA 2B -- nunca re-generar la pregunta de destino para
+    # una guía cuya dirección un humano YA registró/corrigió.
+    guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
+        actual / "decisiones_aplicadas.json"
+    )
     candidatas: list[dict[str, object]] = []
     for fila in filas:
         decision = detectar_decision_destino_no_resuelto(
             archivo=fila.get("archivo", ""), fila=fila, carpeta_catalogos=catalogos,
+            guias_direccion_confirmada=guias_direccion_confirmada,
         )
         if decision is not None:
             candidatas.append(decision)

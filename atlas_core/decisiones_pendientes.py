@@ -215,7 +215,76 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
 # evidencia agotada.
 MOTIVOS_DESTINO_TECNICO_AGOTABLE = frozenset({
     "COORDENADA_NO_CONFIRMADA",
+    # Bloque GEOGRAFÍA 2B -- causa raíz real (472044/PUERTA DEL SOL 83): un
+    # único candidato del proveedor con confianza insuficiente podía
+    # reintentarse 3 veces, no generar NUNCA una tarjeta y quedar
+    # `INCOMPLETO_TECNICO` para siempre (no estaba en NINGÚN conjunto). Con
+    # Geografía 2A el primer pase ya agota principal + fallback gratuito +
+    # destinos confirmados antes de dejar este motivo -- si aun así queda,
+    # un reintento posterior todavía puede mejorar (el fallback pudo fallar
+    # transitoriamente), pero NO para siempre: tras
+    # `UMBRAL_INTENTOS_TECNICOS_AGOTADOS` converge a una tarjeta accionable
+    # (`REGISTRAR_DIRECCION`) -- salvo que la dirección YA fuera confirmada
+    # por un humano, en cuyo caso nunca se re-pregunta (ver
+    # `guias_direccion_confirmada` en `detectar_decision_destino_no_resuelto`).
+    "CONFIANZA_INSUFICIENTE",
 })
+
+# Bloque GEOGRAFÍA 2B -- CLASIFICACIÓN EXPLÍCITA DE FALLOS TÉCNICOS.
+# Motivos de `motivo_ruta` cuyo fallo es puramente temporal (proveedor
+# externo caído, sin conexión, cuota, respuesta corrupta): repetir la
+# MISMA consulta en una reconciliación futura sí puede resolverlos, así
+# que se reintentan automáticamente con un cooldown corto y un máximo
+# finito -- nunca un loop. `resolver_destino_entrega` antepone
+# "GEOCODIFICACION_" al estado crudo del proveedor, así que se aceptan
+# ambas formas.
+CLASE_FALLO_TRANSITORIO = "TRANSITORIO"
+CLASE_FALLO_DETERMINISTA = "DETERMINISTA"
+CLASE_FALLO_AGOTABLE = "AGOTABLE"
+
+_MOTIVOS_FALLO_TRANSITORIO = frozenset({
+    "SIN_CREDENCIAL", "SIN_CONEXION", "PROVEEDOR_NO_DISPONIBLE",
+    "LIMITE_CUOTA", "RESPUESTA_INVALIDA",
+    "GEOCODIFICACION_SIN_CREDENCIAL", "GEOCODIFICACION_SIN_CONEXION",
+    "GEOCODIFICACION_PROVEEDOR_NO_DISPONIBLE", "GEOCODIFICACION_LIMITE_CUOTA",
+    "GEOCODIFICACION_RESPUESTA_INVALIDA",
+})
+
+
+def _motivo_ruta_base(motivo_ruta: str) -> str:
+    """Código base de `motivo_ruta` (sin el detalle tras ':', '(' o '[')
+    -- mismo criterio que `detectar_decision_destino_no_resuelto` ya usa
+    inline y que `atlas_core.atlas_ia.registro_problemas.motivo_ruta_base`.
+    Local para no crear un import cruzado nuevo."""
+    texto = str(motivo_ruta or "").strip()
+    posiciones = [texto.index(s) for s in (":", "(", "[") if s in texto]
+    return texto[:min(posiciones)].strip() if posiciones else texto
+
+
+def clasificar_fallo_tecnico(motivo_ruta: str) -> str:
+    """Bloque GEOGRAFÍA 2B -- clasifica un `motivo_ruta` de fallo
+    geográfico/routing en exactamente una categoría de ciclo de vida:
+
+    - `TRANSITORIO`: proveedor externo temporalmente indisponible -- se
+      reintenta con cooldown corto y máximo finito.
+    - `AGOTABLE`: candidato de baja confianza que un reintento posterior
+      podría mejorar, pero no indefinidamente -- máximo pequeño y luego
+      converge (tarjeta accionable o `ESPERANDO_EVIDENCIA_NUEVA`).
+    - `DETERMINISTA`: repetir la MISMA consulta no cambiará nada
+      (contradicción de comuna, número incompatible, fuera de Chile,
+      múltiples ubicaciones dispersas, dirección no encontrada tras agotar
+      el fallback) -- no se reintenta sólo por paso del tiempo; sólo un
+      cambio de evidencia (huella) o de reglas (`RULESET_VERSION`) lo
+      reactiva. Si hay una corrección humana posible, se publica tarjeta.
+
+    Un motivo no reconocido se trata como `DETERMINISTA` (nunca se
+    reintenta a ciegas por tiempo)."""
+    base = _motivo_ruta_base(motivo_ruta)
+    if base in _MOTIVOS_FALLO_TRANSITORIO:
+        return CLASE_FALLO_TRANSITORIO
+    if base in MOTIVOS_DESTINO_TECNICO_AGOTABLE:
+        return CLASE_FALLO_AGOTABLE
+    return CLASE_FALLO_DETERMINISTA
 
 # Mismo valor que `reconciliacion_estado_derivado.MAX_REINTENTOS_IGUALES_
 # ARRANQUE` -- deliberadamente una constante local propia (no un import)
@@ -382,9 +451,53 @@ def _comuna_sugerida_para_contexto(
         return ""
 
 
+def _guias_con_direccion_confirmada_por_humano(ruta_ledger: str | Path) -> frozenset[str]:
+    """Bloque GEOGRAFÍA 2B -- guías cuya dirección de entrega YA fue
+    registrada/corregida por un humano (decisión `DESTINO_NO_RESUELTO` +
+    acción `REGISTRAR_DIRECCION` aplicada en el ledger). Para esas la
+    IDENTIDAD del destino está resuelta: nunca se vuelve a preguntar; si
+    el geocodificador aún no la ubica, el caso queda técnico
+    `ESPERANDO_EVIDENCIA_NUEVA`, nunca una tarjeta repetida (spec 2/7)."""
+    try:
+        contenido = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    guias: set[str] = set()
+    for aplicacion in contenido.get("aplicaciones", []) or []:
+        if (
+            aplicacion.get("tipo") == "DESTINO_NO_RESUELTO"
+            and aplicacion.get("accion") == "REGISTRAR_DIRECCION"
+        ):
+            guia = str((aplicacion.get("documento") or {}).get("numero_guia", "")).strip()
+            if guia:
+                guias.add(guia)
+    return frozenset(guias)
+
+
+def _guias_destino_terminado_por_humano(ruta_ledger: str | Path) -> frozenset[str]:
+    """Bloque GEOGRAFÍA 2B -- guías cuya decisión `DESTINO_NO_RESUELTO` un
+    humano cerró de forma TERMINAL (`NO_PUEDO_DETERMINAR` / `NO_CONFIRMAR`):
+    no hay más acción humana ni automática -- el pendiente técnico queda
+    `AGOTADO`, nunca se vuelve a preguntar ni a reintentar en silencio."""
+    try:
+        contenido = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    guias: set[str] = set()
+    for aplicacion in contenido.get("aplicaciones", []) or []:
+        if aplicacion.get("tipo") == "DESTINO_NO_RESUELTO" and aplicacion.get("accion") in {
+            "NO_PUEDO_DETERMINAR", "NO_CONFIRMAR",
+        }:
+            guia = str((aplicacion.get("documento") or {}).get("numero_guia", "")).strip()
+            if guia:
+                guias.add(guia)
+    return frozenset(guias)
+
+
 def detectar_decision_destino_no_resuelto(
     *, archivo: str, fila: Mapping[str, str], carpeta_catalogos: str | Path | None = None,
     intentos_misma_evidencia: int = 0, forzar: bool = False,
+    guias_direccion_confirmada: frozenset[str] = frozenset(),
 ) -> dict[str, object] | None:
     """Bloque R6 A/B/E: genera una pregunta `DESTINO_NO_RESUELTO` para UN
     documento YA PROCESADO cuyo origen ya está resuelto (`planta_origen_id`
@@ -436,6 +549,13 @@ def detectar_decision_destino_no_resuelto(
     `aplicar_decision_obra`/REGISTRAR_DIRECCION) es idéntico -- nunca un
     camino de aplicación nuevo, sólo un origen distinto para la pregunta."""
     if not str(fila.get("planta_origen_id", "")).strip():
+        return None
+    # Bloque GEOGRAFÍA 2B -- si un humano YA registró/corrigió la dirección
+    # de esta guía, la identidad del destino está resuelta: no se vuelve a
+    # preguntar lo mismo aunque el geocodificador siga sin ubicarla (spec
+    # 2/7). `forzar=True` (un humano re-corrigiendo desde "Corregir
+    # destino") sigue pasando -- es una acción humana nueva y deliberada.
+    if not forzar and str(fila.get("numero_guia", "")).strip() in guias_direccion_confirmada:
         return None
     motivo_ruta = str(fila.get("motivo_ruta", "")).strip()
     motivo_base = motivo_ruta.split(":", 1)[0].split("(", 1)[0].strip()
@@ -2028,7 +2148,10 @@ def regenerar_decisiones_persistidas(
     # artefacto no existe o no puede leerse, cada guía cuenta como 0
     # intentos -- exactamente el comportamiento de antes de este bloque.
     intentos_por_guia: dict[str, int] = {}
-    guias_registro_direccion: dict[str, set[str]] = {}
+    # Bloque GEOGRAFÍA 2B -- guías cuya dirección de entrega YA fue
+    # registrada/corregida por un humano (REGISTRAR_DIRECCION aplicado):
+    # su identidad de destino está resuelta, nunca se re-pregunta.
+    guias_direccion_confirmada: frozenset[str] = frozenset()
     if ruta_dataset is not None:
         import csv as _csv
 
@@ -2062,25 +2185,18 @@ def regenerar_decisiones_persistidas(
                     intentos_por_guia[_guia_pendiente] = int(_registro.get("intentos_misma_evidencia", 0) or 0)
         except (OSError, ValueError, UnicodeDecodeError, AttributeError):
             intentos_por_guia = {}
-        # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- `{numero_guia: {direcciones
-        # normalizadas que un humano registró vía REGISTRAR_DIRECCION para
-        # ESA guía}}`. Distingue "el humano ya respondió ESTA pregunta y aun
-        # así no rutea" (464784: mantener la tarjeta accionable) de "una guía
-        # HERMANA de la misma obra respondió" (472238: R13 la suprime, la
-        # falla de ruteo se ve aparte). Read-only del ledger ya existente.
+        # Bloque GEOGRAFÍA 2B -- guías con un `DESTINO_NO_RESUELTO` +
+        # `REGISTRAR_DIRECCION` YA aplicado en el ledger: el humano ya
+        # respondió "¿cuál es la dirección?" para ESA guía. Nunca se
+        # re-pregunta (spec 2/7); si el geocodificador aún no la ubica, el
+        # caso queda técnico `ESPERANDO_EVIDENCIA_NUEVA` (ver
+        # `pendientes_tecnicos.json`). Read-only del ledger ya existente.
         try:
-            _ledger_dir = json.loads(
-                (Path(ruta_dataset).parent / "decisiones_aplicadas.json").read_text(encoding="utf-8")
+            guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
+                Path(ruta_dataset).parent / "decisiones_aplicadas.json"
             )
-            for _ap in _ledger_dir.get("aplicaciones", []) or []:
-                if _ap.get("accion") != "REGISTRAR_DIRECCION":
-                    continue
-                _g = str((_ap.get("documento") or {}).get("numero_guia", "")).strip()
-                _dir = normalizar_nombre_destino(str(_ap.get("direccion_manual") or ""))
-                if _g and _dir:
-                    guias_registro_direccion.setdefault(_g, set()).add(_dir)
         except (OSError, ValueError, AttributeError):
-            guias_registro_direccion = {}
+            guias_direccion_confirmada = frozenset()
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -2289,6 +2405,7 @@ def regenerar_decisiones_persistidas(
                 detectar_decision_destino_no_resuelto(
                     archivo=archivo_fila, fila=fila_actual, carpeta_catalogos=carpeta_catalogos,
                     intentos_misma_evidencia=intentos_por_guia.get(numero_guia, 0),
+                    guias_direccion_confirmada=guias_direccion_confirmada,
                 ),
                 detectar_decision_destino_contaminado_documental(
                     archivo=archivo_fila, fila=fila_actual, carpeta_catalogos=carpeta_catalogos,
@@ -2661,16 +2778,18 @@ def regenerar_decisiones_persistidas(
                 # el criterio previo (CONFIRMADO o coordenadas), compatible
                 # con todos los llamadores que no lo pasan.
                 #
-                # El "callejón sin coordenadas" sólo mantiene VIVA la
-                # tarjeta cuando el humano respondió ESTA MISMA pregunta
-                # (esta guía tiene un REGISTRAR_DIRECCION en el ledger con
-                # esta misma dirección) y aun así no rutea -- ahí Javier
-                # necesita volver a decidir (otra dirección, o
-                # NO_PUEDO_DETERMINAR). Si la relación confirmada vino de
-                # una guía HERMANA de la obra (caso 472238/R13), la
-                # pregunta "¿es correcta esta dirección?" YA tiene
-                # respuesta humana y la tarjeta se suprime igual -- la
-                # falla de ruteo se ve aparte vía `estado_ruta`.
+                # Bloque GEOGRAFÍA 2B -- cambio de política deliberado sobre
+                # el "Cierre Quirúrgico": antes, si el humano respondía ESTA
+                # guía (REGISTRAR_DIRECCION en el ledger) y la ruta seguía
+                # sin calcularse, la tarjeta se MANTENÍA viva "para que no
+                # quedara pendiente técnico invisible" (464784/URUGUAY 15).
+                # Ya no es invisible: `pendientes_tecnicos.json` ahora lleva
+                # `estado_espera=ESPERANDO_EVIDENCIA_NUEVA` + causa
+                # explícita. Volver a preguntar una dirección que el humano
+                # ya confirmó (y que el geocodificador aún no ubica) es
+                # exactamente la "tarjeta falsa" que 2B prohíbe -- se
+                # suprime igual que cuando la relación vino de una guía
+                # hermana. El ruteo fallido se ve aparte vía `estado_ruta`.
                 numero_guia_destino = str((decision.get("documento") or {}).get("numero_guia", ""))
                 fila_destino = (
                     filas_por_guia.get(numero_guia_destino) if filas_por_guia is not None else None
@@ -2679,25 +2798,13 @@ def regenerar_decisiones_persistidas(
                     fila_destino is not None
                     and str(fila_destino.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
                 )
-                fila_en_callejon_destino = (
-                    not ruta_ya_calculada
-                    and motivo_ruta_por_guia is not None
-                    and motivo_ruta_por_guia.get(numero_guia_destino) in MOTIVOS_DESTINO_NO_RESUELTO
-                )
-                humano_respondio_esta_guia = texto_documental in guias_registro_direccion.get(
-                    numero_guia_destino, set()
-                )
-                callejon_tras_respuesta_propia = fila_en_callejon_destino and humano_respondio_esta_guia
                 if any(
                     (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
                     and calle in texto_documental
                     and (
                         (destino.latitud is not None and destino.longitud is not None)
                         or ruta_ya_calculada
-                        or (
-                            str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
-                            and not callejon_tras_respuesta_propia
-                        )
+                        or str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
                     )
                     for destino in destinos_confirmados_obra
                 ):
