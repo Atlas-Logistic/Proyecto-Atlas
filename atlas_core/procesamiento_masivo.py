@@ -833,6 +833,15 @@ class MetodoObtencionDocumento(str, Enum):
     # -- nunca decide identidad, solo corrige una corrupción OCR segura del
     # propio texto documental.
     NORMALIZADO = "NORMALIZADO"
+    # Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA: el conocimiento
+    # acumulado de Atlas (confirmación humana + catálogo canónico + RUT +
+    # relaciones + ausencia de competidor) convergió de forma única en un
+    # canónico dentro de una variación OCR pequeña -- se resolvió
+    # silenciosamente, conservando el valor OCR original y la evidencia
+    # (`metricas_procesamiento_json["resoluciones_convergentes"]`).
+    CONVERGENCIA_VEHICULO = "CONVERGENCIA_VEHICULO"
+    CONVERGENCIA_CLIENTE = "CONVERGENCIA_CLIENTE"
+    CONVERGENCIA_OBRA = "CONVERGENCIA_OBRA"
 
 
 class MotivoRevisionDocumento(str, Enum):
@@ -1027,6 +1036,132 @@ def _completar_cliente_ausente_por_rut_catalogado(
     metodos.add(MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value)
     datos["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
     return True
+
+
+def _convergencia_documental(
+    carpeta_catalogos: str | Path | None,
+    datos: Mapping[str, object],
+    *,
+    despachar_a_documental: str = "",
+) -> dict[str, object]:
+    """Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA (Bloque A, criterio
+    general): un error pequeño de OCR NO puede convertir conocimiento
+    fuertemente establecido en desconocido. Si el conocimiento acumulado
+    de Atlas (confirmación humana, catálogo canónico, RUT, relaciones
+    chofer↔vehículo / cliente↔obra / obra↔destino, ausencia de
+    competidor) converge de forma ÚNICA en un canónico dentro de una
+    variación pequeña, se resuelve SILENCIOSAMENTE al canónico -- se
+    conserva el valor OCR y la evidencia para auditoría, y NO se genera
+    revisión. Dos candidatos plausibles -> nunca; una contradicción
+    documental real (RUT válido de otra empresa, patente canónica real
+    distinta) -> nunca se oculta, se marca.
+
+    Devuelve un delta puro (nunca escribe): `datos` corregido, motivos a
+    quitar/agregar, métodos a agregar y el registro de auditoría."""
+    delta: dict[str, object] = {
+        "datos": dict(datos), "resoluciones": [], "contradicciones": [],
+        "motivos_quitar": set(), "motivos_agregar": set(), "metodos_agregar": set(),
+    }
+    if carpeta_catalogos is None:
+        return delta
+    try:
+        from atlas_core.atlas_ia.convergencia import (
+            CONTRADICCION_FUERTE, RESOLVER_SILENCIOSO,
+        )
+        from atlas_core.atlas_ia.evidencia_dominios import (
+            convergencia_cliente, convergencia_obra, convergencia_vehiculo,
+        )
+    except ImportError:
+        return delta
+
+    nuevos = delta["datos"]
+    rut_chofer = str(nuevos.get("RUT del chofer", ""))
+    numero_transporte = str(nuevos.get("número de transporte", ""))
+
+    for clave_datos, campo_convergencia, motivos_campo in (
+        ("patente del tracto", "patente_tracto",
+         (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
+        ("patente del carro", "patente_rampla",
+         (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
+    ):
+        valor = str(nuevos.get(clave_datos, "")).strip()
+        if valor in {"", "No encontrado"} or not rut_chofer.strip():
+            continue
+        try:
+            r = convergencia_vehiculo(
+                campo=campo_convergencia, valor_documental=valor, rut_chofer=rut_chofer,
+                numero_transporte=numero_transporte, filas=(), carpeta_catalogos=carpeta_catalogos,
+            )
+        except Exception:  # nunca tumba el procesamiento por convergencia
+            continue
+        if r.decision == RESOLVER_SILENCIOSO:
+            nuevos[clave_datos] = r.valor_canonico
+            delta["metodos_agregar"].add(MetodoObtencionDocumento.CONVERGENCIA_VEHICULO.value)
+            for m in motivos_campo:
+                delta["motivos_quitar"].add(m.value)
+            delta["resoluciones"].append({
+                "campo": campo_convergencia, "valor_ocr": r.valor_ocr_original,
+                "valor_canonico": r.valor_canonico, "metodo": r.metodo,
+                "evidencias": list(r.evidencias), "confianza": r.confianza,
+            })
+        elif r.decision == CONTRADICCION_FUERTE:
+            delta["contradicciones"].append({"campo": campo_convergencia, "detalle": r.contradiccion})
+
+    nombre_cliente = str(nuevos.get("cliente", "")).strip()
+    if nombre_cliente not in {"", "No encontrado"}:
+        try:
+            r = convergencia_cliente(
+                nombre_documental=nombre_cliente,
+                rut_documental=str(nuevos.get("RUT del cliente", "")),
+                carpeta_catalogos=carpeta_catalogos,
+            )
+        except Exception:
+            r = None
+        if r is not None and r.decision == RESOLVER_SILENCIOSO:
+            nuevos["cliente"] = r.valor_canonico
+            delta["metodos_agregar"].add(MetodoObtencionDocumento.CONVERGENCIA_CLIENTE.value)
+            for m in (
+                MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR,
+                MotivoRevisionDocumento.CLIENTE_AUSENTE,
+                MotivoRevisionDocumento.CLIENTE_POSIBLEMENTE_INVALIDO,
+                MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA,
+            ):
+                delta["motivos_quitar"].add(m.value)
+            delta["resoluciones"].append({
+                "campo": "cliente", "valor_ocr": r.valor_ocr_original,
+                "valor_canonico": r.valor_canonico, "metodo": r.metodo,
+                "evidencias": list(r.evidencias), "confianza": r.confianza,
+            })
+        elif r is not None and r.decision == CONTRADICCION_FUERTE:
+            delta["motivos_agregar"].add(MotivoRevisionDocumento.RUT_CLIENTE_CONTRADICE_CATALOGO.value)
+            delta["contradicciones"].append({"campo": "cliente", "detalle": r.contradiccion})
+
+    nombre_obra = str(nuevos.get("obra destino", "")).strip()
+    if nombre_obra not in {"", "No encontrado"}:
+        try:
+            r = convergencia_obra(
+                nombre_documental=nombre_obra, cliente_documental=nombre_cliente,
+                rut_cliente_documental=str(nuevos.get("RUT del cliente", "")),
+                despachar_a_documental=despachar_a_documental,
+                carpeta_catalogos=carpeta_catalogos,
+            )
+        except Exception:
+            r = None
+        if r is not None and r.decision == RESOLVER_SILENCIOSO:
+            nuevos["obra destino"] = r.valor_canonico
+            delta["metodos_agregar"].add(MetodoObtencionDocumento.CONVERGENCIA_OBRA.value)
+            for m in (
+                MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR,
+                MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA,
+            ):
+                delta["motivos_quitar"].add(m.value)
+            delta["resoluciones"].append({
+                "campo": "obra_destino", "valor_ocr": r.valor_ocr_original,
+                "valor_canonico": r.valor_canonico, "metodo": r.metodo,
+                "evidencias": list(r.evidencias), "confianza": r.confianza,
+            })
+
+    return delta
 
 
 def _corroborar_obra_destino_confirmada(
@@ -2161,6 +2296,38 @@ def procesar_archivo(
     elif resultado_credibilidad_destino.motivo == "DESTINO_CONTAMINADO_POR_OTRA_SECCION":
         _motivo(MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION)
 
+    # Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA (Bloque A) -- último paso
+    # DETERMINISTA antes de calcular `requiere_revision` y antes de la
+    # ruta/telemetría y de detectar decisiones pendientes: si el
+    # conocimiento acumulado de Atlas absorbe una pequeña variación OCR y
+    # converge de forma única en un canónico, se resuelve SILENCIOSAMENTE
+    # (valor OCR y evidencia conservados para auditoría) -- así el motivo
+    # nunca se publica, la ruta usa el valor correcto y ninguna decisión
+    # CLIENTE_CANDIDATO/OBRA_DESCONOCIDA/VEHICULO_DESCONOCIDO nace por una
+    # imperfección OCR sobre conocimiento fuerte.
+    resoluciones_convergentes: list[dict[str, object]] = []
+    if carpeta_catalogos is not None:
+        try:
+            _delta_conv = _convergencia_documental(
+                carpeta_catalogos, datos,
+                despachar_a_documental=(extraer_identificadores_destino(textos).despachar_a or "").strip(),
+            )
+        except Exception as _exc_conv:  # nunca tumba el documento
+            logger.warning("Convergencia documental omitida: %s: %s", type(_exc_conv).__name__, _exc_conv)
+            _delta_conv = None
+        if _delta_conv:
+            for _clave, _valor in _delta_conv["datos"].items():
+                if datos.get(_clave) != _valor:
+                    datos[_clave] = _valor
+            for _m in _delta_conv["motivos_quitar"]:
+                if _m in motivos_documento:
+                    motivos_documento.remove(_m)
+            for _m in _delta_conv["motivos_agregar"]:
+                if _m not in motivos_documento:
+                    motivos_documento.append(_m)
+            metodos_documento.update(_delta_conv["metodos_agregar"])
+            resoluciones_convergentes = list(_delta_conv["resoluciones"])
+
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 
     # Bloque E2E R1: enriquecimiento logístico -- nunca participa de
@@ -2515,6 +2682,12 @@ def procesar_archivo(
         "telemetria_seg": round(fin_telemetria - inicio_telemetria, 4),
         "total_documento_seg": round(fin_documento - inicio_documento, 4),
     }
+    if resoluciones_convergentes:
+        # Auditoría de la resolución silenciosa por convergencia (Bloque
+        # A): valor OCR original + canónico aplicado + método + evidencias
+        # + confianza -- el OCR nunca se pierde aunque el canónico se haya
+        # aplicado solo.
+        metricas["resoluciones_convergentes"] = resoluciones_convergentes
 
     # Bloque C1 -- peso: se calcula aquí (antes del `return`, no dentro
     # del propio diccionario) para poder evaluar su credibilidad y
@@ -3216,6 +3389,453 @@ def _ejecutar_ia_operacional(
     return resumen
 
 
+# ---------------------------------------------------------------------
+# Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL (Bloque C)
+# ---------------------------------------------------------------------
+
+# tipo de decisión pendiente -> campo del `ContextoRazonamiento`/columna
+# CSV que representa. `VEHICULO_DESCONOCIDO` trae su propio `campo`
+# (patente_tracto/patente_rampla) -- se toma de la decisión.
+_DOMINIO_SEGUNDA_PASADA: dict[str, str] = {
+    "CLIENTE_CANDIDATO": "cliente",
+    "CLIENTE_DESCONOCIDO": "cliente",
+    "OBRA_DESCONOCIDA": "obra_destino",
+    "VEHICULO_DESCONOCIDO": "",  # desde decision["campo"]
+}
+
+
+def _rut_cliente_canonico(carpeta_catalogos: str | Path | None, razon_social: str) -> str:
+    """RUT del cliente CONFIRMADO/ACTIVO cuya razón social/alias coincide
+    (normalizado) con `razon_social` -- sólo si es único. `""` en cualquier
+    otro caso."""
+    if not carpeta_catalogos or not razon_social.strip():
+        return ""
+    try:
+        from atlas_core.catalogo_clientes import (
+            CatalogoClientes, EstadoCalidadCliente, EstadoVigenciaCliente,
+            normalizar_nombre_cliente,
+        )
+
+        clave = normalizar_nombre_cliente(razon_social)
+        coincidencias = [
+            c for c in CatalogoClientes(Path(carpeta_catalogos) / "clientes.json").listar()
+            if c.estado_calidad == EstadoCalidadCliente.CONFIRMADO.value
+            and c.estado_vigencia == EstadoVigenciaCliente.ACTIVO.value
+            and c.rut
+            and clave in {normalizar_nombre_cliente(c.razon_social),
+                          *(normalizar_nombre_cliente(a) for a in c.aliases)}
+        ]
+        return coincidencias[0].rut if len(coincidencias) == 1 else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _datos_sinteticos_desde_fila(fila: Mapping[str, str]) -> dict[str, str]:
+    """Reconstruye el `datos` de claves-OCR mínimo que
+    `detectar_decisiones_documento` necesita, a partir de una fila del
+    dataset ya persistida -- mismo patrón que
+    `revalidacion_documental.detectar_decisiones_cliente_candidato_sin_ocr`."""
+    return {
+        "número de guía": str(fila.get("numero_guia", "")),
+        "número de transporte": str(fila.get("numero_transporte", "")),
+        "cliente": str(fila.get("cliente", "")),
+        "RUT del cliente": str(fila.get("rut_cliente", "")),
+        "obra destino": str(fila.get("obra_destino", "")),
+        "patente del tracto": str(fila.get("patente_tracto", "")),
+        "patente del carro": str(fila.get("patente_rampla", "")),
+        "RUT del chofer": str(fila.get("rut_chofer", "")),
+    }
+
+
+def _campos_ya_evaluados_por_b1(fila: Mapping[str, str]) -> set[str]:
+    """Campos para los que la pasada B1 sobre motivos YA hizo una llamada
+    real en esta corrida (leído de la traza que persiste
+    `_ejecutar_ia_operacional`) -- la segunda pasada no vuelve a
+    consultarlos por una decisión equivalente (Bloque E: deduplicar
+    tareas equivalentes entre pasadas, nunca una tormenta de llamadas)."""
+    try:
+        trazas = json.loads(str(fila.get("resultado_atlas_ia_json", "")) or "[]")
+    except (TypeError, ValueError):
+        return set()
+    return {
+        str(t.get("campo", "")) for t in trazas
+        if isinstance(t, dict) and t.get("llamada_realizada")
+    }
+
+
+def _segunda_pasada_universal(
+    ruta_csv: Path, archivos_objetivo: set[str],
+    decisiones_pendientes: list[dict[str, object]],
+    orquestador: object, carpeta_catalogos: str | Path | None,
+) -> dict[str, object]:
+    """NINGUNA decisión llega a Javier sin que Atlas primero (1) agote la
+    resolución determinista con TODO el conocimiento (convergencia,
+    Bloque A) y (2) B1 tenga una oportunidad REAL con evidencia interna
+    suficiente. Recorre TODA decisión pendiente que podría todavía
+    resolverse (CLIENTE/OBRA/VEHICULO), la deduplica, resuelve primero lo
+    determinista, envía a B1 sólo lo que sobreviva, valida, aplica por el
+    mismo mecanismo canónico (corrige la fila + `detectar_decisiones_
+    documento` regenera la bandeja) y sólo entonces conserva la decisión
+    humana realmente necesaria. Nunca modifica el CSV a mano ni crea un
+    segundo sistema de decisiones.
+
+    `decisiones_pendientes` se muta IN PLACE (las resueltas se retiran,
+    las de guías tocadas se regeneran). Devuelve métricas por lote."""
+    m: dict[str, object] = {
+        "decisiones_detectadas": 0, "resueltas_determinista": 0,
+        "entregadas_b1": 0, "b1_respondio": 0, "b1_resolvio": 0,
+        "b1_abstuvo": 0, "b1_bloqueado": 0, "b1_bloqueado_motivos": [],
+        "b1_error_413": 0, "b1_error_429_cooldown": 0, "a_humano": 0,
+        "dedup_con_pasada_motivos": 0,
+        "resoluciones_deterministas": [], "resoluciones_b1": [],
+    }
+    if not decisiones_pendientes or not ruta_csv.is_file() or carpeta_catalogos is None:
+        return m
+    from atlas_core.atlas_ia.contratos import ContextoRazonamiento
+    from atlas_core.atlas_ia.convergencia import CONTRADICCION_FUERTE, RESOLVER_SILENCIOSO
+    from atlas_core.atlas_ia.evidencia_dominios import (
+        convergencia_cliente, convergencia_obra, convergencia_vehiculo,
+        evidencia_cliente_interna, evidencia_obra_interna, evidencia_vehiculo_interna,
+    )
+    from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+
+    with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    fila_por_archivo = {str(f.get("archivo", "")): f for f in filas}
+    fila_por_guia = {str(f.get("numero_guia", "")): f for f in filas}
+
+    # 1) dedup: una tarea por (archivo, campo, valor_documental) -- varias
+    #    decisiones equivalentes (p. ej. la misma guía re-detectada) no
+    #    disparan varias llamadas a B1 (Bloque E).
+    tareas: dict[tuple[str, str, str], dict[str, object]] = {}
+    for dec in decisiones_pendientes:
+        tipo = str(dec.get("tipo", ""))
+        if tipo not in _DOMINIO_SEGUNDA_PASADA:
+            continue
+        doc = dec.get("documento") or {}
+        archivo = str(doc.get("archivo", ""))
+        if archivo not in archivos_objetivo:
+            continue
+        campo = _DOMINIO_SEGUNDA_PASADA[tipo] or str(dec.get("campo", ""))
+        if not campo:
+            continue
+        clave = (archivo, campo, str(dec.get("valor_documental", "")))
+        tareas.setdefault(clave, {"tipo": tipo, "decision": dec, "campo": campo, "archivo": archivo})
+
+    guias_tocadas: set[str] = set()
+    deltas: dict[str, dict[str, str]] = {}
+
+    for (archivo, campo, valor_doc), tarea in tareas.items():
+        fila = fila_por_archivo.get(archivo)
+        if fila is None:
+            continue
+        m["decisiones_detectadas"] = int(m["decisiones_detectadas"]) + 1
+        rut_cliente = str(fila.get("rut_cliente", ""))
+        cliente_txt = str(fila.get("cliente", ""))
+        despachar_a = str(fila.get("despachar_a_crudo") or fila.get("direccion_entrega") or "")
+
+        # 2) DETERMINISTA primero -- convergencia (Bloque A).
+        conv = None
+        try:
+            if campo == "cliente":
+                conv = convergencia_cliente(
+                    nombre_documental=cliente_txt, rut_documental=rut_cliente,
+                    carpeta_catalogos=carpeta_catalogos,
+                )
+            elif campo == "obra_destino":
+                conv = convergencia_obra(
+                    nombre_documental=str(fila.get("obra_destino", "")),
+                    cliente_documental=cliente_txt, rut_cliente_documental=rut_cliente,
+                    despachar_a_documental=despachar_a, carpeta_catalogos=carpeta_catalogos,
+                )
+            elif campo in ("patente_tracto", "patente_rampla"):
+                conv = convergencia_vehiculo(
+                    campo=campo, valor_documental=str(fila.get(campo, "")),
+                    rut_chofer=str(fila.get("rut_chofer", "")),
+                    numero_transporte=str(fila.get("numero_transporte", "")),
+                    filas=filas, carpeta_catalogos=carpeta_catalogos,
+                )
+        except Exception as exc:  # nunca tumba el lote
+            logger.warning("Segunda pasada -- convergencia %s omitida: %s", campo, exc)
+
+        if conv is not None and conv.decision == RESOLVER_SILENCIOSO:
+            fila[campo] = conv.valor_canonico
+            cambios = {campo: conv.valor_canonico}
+            # Cliente: materializa además el RUT canónico -- la identidad
+            # quedó determinada, así que la regeneración
+            # (`detectar_decisiones_documento`) ya no vuelve a preguntar
+            # (CLIENTE_CANDIDATO nace justo por "nombre sin RUT").
+            if campo == "cliente" and str(fila.get("rut_cliente", "")).strip() in ("", "No encontrado"):
+                rut_canon = _rut_cliente_canonico(carpeta_catalogos, conv.valor_canonico)
+                if rut_canon:
+                    fila["rut_cliente"] = rut_canon
+                    cambios["rut_cliente"] = rut_canon
+            deltas[archivo] = {**deltas.get(archivo, {}), **cambios}
+            guias_tocadas.add(str(fila.get("numero_guia", "")))
+            m["resueltas_determinista"] = int(m["resueltas_determinista"]) + 1
+            m["resoluciones_deterministas"].append({
+                "archivo": archivo, "campo": campo, "valor_ocr": conv.valor_ocr_original,
+                "valor_canonico": conv.valor_canonico, "confianza": conv.confianza,
+                "evidencias": list(conv.evidencias),
+            })
+            continue
+        if conv is not None and conv.decision == CONTRADICCION_FUERTE:
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+
+        # 3) B1 -- sólo con evidencia INTERNA suficiente (nunca una
+        #    tormenta de llamadas: sin proveedor o sin evidencia -> humano).
+        if orquestador is None:
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+        # Bloque E -- si la pasada B1 sobre motivos YA consultó este campo
+        # en esta corrida, no se vuelve a llamar por una decisión
+        # equivalente: se toma su resultado como final (quedó para Javier
+        # si no se aplicó ahí).
+        if campo in _campos_ya_evaluados_por_b1(fila):
+            m["dedup_con_pasada_motivos"] = int(m.get("dedup_con_pasada_motivos", 0)) + 1
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+        try:
+            if campo == "cliente":
+                evidencias = evidencia_cliente_interna(
+                    nombre_documental=cliente_txt, rut_documental=rut_cliente,
+                    numero_guia=str(fila.get("numero_guia", "")),
+                    numero_transporte=str(fila.get("numero_transporte", "")),
+                    carpeta_catalogos=carpeta_catalogos,
+                )
+            elif campo == "obra_destino":
+                evidencias = evidencia_obra_interna(
+                    nombre_documental=str(fila.get("obra_destino", "")),
+                    cliente_documental=cliente_txt, rut_cliente_documental=rut_cliente,
+                    despachar_a_documental=despachar_a, carpeta_catalogos=carpeta_catalogos,
+                )
+            else:
+                evidencias = evidencia_vehiculo_interna(
+                    campo=campo, valor_documental=str(fila.get(campo, "")),
+                    rut_chofer=str(fila.get("rut_chofer", "")),
+                    numero_transporte=str(fila.get("numero_transporte", "")),
+                    filas=filas, carpeta_catalogos=carpeta_catalogos,
+                )
+        except Exception as exc:
+            logger.warning("Segunda pasada -- evidencia %s omitida: %s", campo, exc)
+            evidencias = ()
+        if not evidencias:
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+
+        contexto = ContextoRazonamiento(
+            campo=campo, valor_documental=str(fila.get(campo, "")),
+            rut_chofer=str(fila.get("rut_chofer", "")),
+            numero_guia=str(fila.get("numero_guia", "")),
+            numero_transporte=str(fila.get("numero_transporte", "")),
+            evidencias=tuple(evidencias), resultado_motor="REQUIERE_REVISION",
+            explicacion_motor=str(tarea["tipo"]),
+            identidad_documento=archivo,
+            identidad_operacional={
+                "obra_destino": str(fila.get("obra_destino", "")),
+                "cliente": cliente_txt, "direccion_entrega": despachar_a,
+            },
+            restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "MAXIMO_RONDAS_B1"),
+        )
+        m["entregadas_b1"] = int(m["entregadas_b1"]) + 1
+        try:
+            resultado = orquestador.resolver(contexto)
+        except Exception as exc:
+            texto = str(exc).lower()
+            if "413" in texto or "request entity too large" in texto or "payload" in texto:
+                m["b1_error_413"] = int(m["b1_error_413"]) + 1
+            elif "429" in texto or "rate limit" in texto or "cooldown" in texto:
+                m["b1_error_429_cooldown"] = int(m["b1_error_429_cooldown"]) + 1
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+
+        estado = str(getattr(resultado, "estado", ""))
+        clase = str(getattr(resultado, "clasificacion", ""))[:1]
+        hipotesis = getattr(resultado, "hipotesis", None)
+        if estado in ("ERROR_PROVEEDOR",):
+            detalle = str(getattr(resultado, "detalle", "")).lower()
+            if "429" in detalle or "rate limit" in detalle:
+                m["b1_error_429_cooldown"] = int(m["b1_error_429_cooldown"]) + 1
+            elif "413" in detalle:
+                m["b1_error_413"] = int(m["b1_error_413"]) + 1
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+        if estado == "BLOQUEADO_POR_VALIDACION":
+            m["b1_bloqueado"] = int(m["b1_bloqueado"]) + 1
+            val = getattr(resultado, "validacion", None)
+            if val is not None:
+                m["b1_bloqueado_motivos"].append(str(getattr(val, "motivo_rechazo", "")))
+            m["a_humano"] = int(m["a_humano"]) + 1
+            continue
+        m["b1_respondio"] = int(m["b1_respondio"]) + 1
+        aplicable = (
+            clase == "A" and hipotesis is not None
+            and getattr(hipotesis, "resultado", "") == "PROPUESTA"
+            and getattr(hipotesis, "valor_propuesto", "")
+        )
+        if aplicable:
+            fila[campo] = hipotesis.valor_propuesto
+            deltas.setdefault(archivo, {})[campo] = hipotesis.valor_propuesto
+            if campo == "cliente" and str(fila.get("rut_cliente", "")).strip() in ("", "No encontrado"):
+                rut_canon = _rut_cliente_canonico(carpeta_catalogos, hipotesis.valor_propuesto)
+                if rut_canon:
+                    fila["rut_cliente"] = rut_canon
+                    deltas[archivo]["rut_cliente"] = rut_canon
+            guias_tocadas.add(str(fila.get("numero_guia", "")))
+            m["b1_resolvio"] = int(m["b1_resolvio"]) + 1
+            m["resoluciones_b1"].append({
+                "archivo": archivo, "campo": campo,
+                "valor_ocr": str(contexto.valor_documental),
+                "valor_canonico": hipotesis.valor_propuesto,
+                "clasificacion": clase,
+            })
+        else:
+            m["b1_abstuvo"] = int(m["b1_abstuvo"]) + 1
+            m["a_humano"] = int(m["a_humano"]) + 1
+
+    # 4) REGENERAR la bandeja para las guías tocadas -- mismo mecanismo
+    #    canónico (`detectar_decisiones_documento`), nunca se edita la
+    #    lista a mano.
+    if guias_tocadas:
+        carpeta = Path(carpeta_catalogos)
+        conservadas = [
+            d for d in decisiones_pendientes
+            if str((d.get("documento") or {}).get("numero_guia", "")) not in guias_tocadas
+        ]
+        regeneradas: list[dict[str, object]] = []
+        for guia in guias_tocadas:
+            fila = fila_por_guia.get(guia)
+            if fila is None:
+                continue
+            try:
+                regeneradas.extend(detectar_decisiones_documento(
+                    archivo=str(fila.get("archivo", "")),
+                    datos=_datos_sinteticos_desde_fila(fila),
+                    carpeta_catalogos=carpeta,
+                ))
+            except (OSError, ValueError) as exc:
+                logger.warning("Segunda pasada -- regeneración guía %s omitida: %s", guia, exc)
+        decisiones_pendientes[:] = [*conservadas, *regeneradas]
+
+    # 5) persistir las correcciones de fila -- relectura FRESCA bajo lock,
+    #    sólo el delta calculado aquí (mismo patrón que _ejecutar_ia_operacional).
+    if deltas:
+        with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+            with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+                frescas = list(csv.DictReader(archivo, delimiter=";"))
+            por_archivo = {f.get("archivo", ""): f for f in frescas}
+            for archivo_id, delta in deltas.items():
+                objetivo = por_archivo.get(archivo_id)
+                if objetivo is not None:
+                    objetivo.update(delta)
+            temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".sp.tmp")
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+                escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+                escritor.writeheader(); escritor.writerows(frescas)
+            temporal.replace(ruta_csv)
+
+    return m
+
+
+def consolidar_observabilidad_b1(
+    *, ruta_csv: Path, archivos_objetivo: set[str],
+    decisiones_pendientes: list[Mapping[str, object]],
+    resumen_motivos: Mapping[str, object] | None,
+    resumen_segunda_pasada: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """OBSERVABILIDAD OBLIGATORIA -- un único registro por lote,
+    auditable sin arqueología manual, que combina la pasada B1 sobre
+    motivos (`resultado_atlas_ia_json` de cada fila) con la segunda
+    pasada universal sobre decisiones. Nunca infiere: cuenta lo que
+    quedó trazado."""
+    motivos = dict(resumen_motivos or {})
+    sp = dict(resumen_segunda_pasada or {})
+    r: dict[str, object] = {
+        "problemas_detectados": 0,
+        "resueltos_determinista_antes_de_b1": int(sp.get("resueltas_determinista", 0)),
+        "entregados_a_b1": int(sp.get("entregadas_b1", 0)),
+        "b1_respondio": int(sp.get("b1_respondio", 0)) + int(sp.get("b1_abstuvo", 0)),
+        "b1_resolvio_aplico": int(sp.get("b1_resolvio", 0)),
+        "b1_se_abstuvo": int(sp.get("b1_abstuvo", 0)),
+        "b1_bloqueado_validacion": int(sp.get("b1_bloqueado", 0)),
+        "b1_bloqueado_motivos": list(sp.get("b1_bloqueado_motivos", []) or []),
+        "b1_error_413": int(sp.get("b1_error_413", 0)),
+        "b1_error_429_cooldown": int(sp.get("b1_error_429_cooldown", 0)),
+        "dedup_tareas_equivalentes": int(sp.get("dedup_con_pasada_motivos", 0)),
+        "decisiones_a_humano": int(sp.get("a_humano", 0)),
+    }
+    if ruta_csv.is_file():
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+            filas = list(csv.DictReader(archivo, delimiter=";"))
+        for fila in filas:
+            if fila.get("archivo") not in archivos_objetivo:
+                continue
+            try:
+                trazas = json.loads(str(fila.get("resultado_atlas_ia_json", "")) or "[]")
+            except (TypeError, ValueError):
+                trazas = []
+            for t in trazas if isinstance(trazas, list) else []:
+                if not isinstance(t, dict):
+                    continue
+                if t.get("elegible_ia"):
+                    r["problemas_detectados"] = int(r["problemas_detectados"]) + 1
+                if t.get("razon_no_elegible") in {"SIN_EVIDENCIA_PARA_RAZONAR", "SIN_PROVEEDOR_IA_CONFIGURADO"}:
+                    pass  # ni resuelto ni entregado -- ya cae en "a humano" por el motivo
+                if t.get("llamada_realizada"):
+                    r["entregados_a_b1"] = int(r["entregados_a_b1"]) + 1
+                estado = str(t.get("estado", ""))
+                if estado in ("RESUELTO_POR_IA", "ABSTENCION_IA"):
+                    r["b1_respondio"] = int(r["b1_respondio"]) + 1
+                if t.get("aplicado_operacionalmente"):
+                    r["b1_resolvio_aplico"] = int(r["b1_resolvio_aplico"]) + 1
+                if estado == "ABSTENCION_IA":
+                    r["b1_se_abstuvo"] = int(r["b1_se_abstuvo"]) + 1
+                if estado == "BLOQUEADO_POR_VALIDACION":
+                    r["b1_bloqueado_validacion"] = int(r["b1_bloqueado_validacion"]) + 1
+                    motivo = str((t.get("validacion") or {}).get("motivo_rechazo", ""))
+                    if motivo:
+                        r["b1_bloqueado_motivos"].append(motivo)
+                if estado == "ERROR_PROVEEDOR":
+                    detalle = str(t.get("detalle", "")).lower()
+                    if "413" in detalle:
+                        r["b1_error_413"] = int(r["b1_error_413"]) + 1
+                    elif "429" in detalle or "rate limit" in detalle:
+                        r["b1_error_429_cooldown"] = int(r["b1_error_429_cooldown"]) + 1
+            # convergencia determinista (Bloque A) registrada en métricas
+            try:
+                met = json.loads(str(fila.get("metricas_procesamiento_json", "")) or "{}")
+            except (TypeError, ValueError):
+                met = {}
+            r["resueltos_determinista_antes_de_b1"] = int(r["resueltos_determinista_antes_de_b1"]) + len(
+                met.get("resoluciones_convergentes", []) or []
+            )
+    r["problemas_detectados"] = int(r["problemas_detectados"]) + int(sp.get("decisiones_detectadas", 0))
+    # decisiones que finalmente siguen pendientes tras ambas pasadas
+    r["decisiones_pendientes_finales"] = len([
+        d for d in decisiones_pendientes
+        if str((d.get("documento") or {}).get("archivo", "")) in archivos_objetivo
+    ])
+    r["b1_bloqueado_motivos"] = sorted(set(r["b1_bloqueado_motivos"]))
+    r["latencia_b1_segundos"] = float(motivos.get("latencia_segundos", 0.0))
+    return r
+
+
+def _persistir_observabilidad_b1(ruta_csv: Path, registro: Mapping[str, object]) -> None:
+    """Anexa una línea JSON por lote a `b1_observabilidad.jsonl` junto al
+    dataset -- registro estructurado, no un dashboard, auditable directo."""
+    try:
+        import datetime as _dt
+
+        linea = {"fecha": _dt.datetime.now(_dt.timezone.utc).isoformat(), **dict(registro)}
+        destino = ruta_csv.parent / "b1_observabilidad.jsonl"
+        with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+            with destino.open("a", encoding="utf-8") as archivo:
+                archivo.write(json.dumps(linea, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as exc:
+        logger.warning("No se pudo anexar b1_observabilidad.jsonl: %s", exc)
+
+
 def escalar_resultado_ia_en_memoria(
     datos: Mapping[str, object], historial: Iterable[Mapping[str, object]],
     *, orquestador_ia: object = None, carpeta_catalogos: str | Path | None = None,
@@ -3563,6 +4183,34 @@ def procesar_carpeta(
             f"{resumen['atlas_ia'].get('latencia_segundos', 0.0):.1f} s de latencia de red "
             f"({duracion_ia_lote:.1f} s en total la etapa)"
         )
+
+    # Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL (Bloque C) --
+    # TODA decisión pendiente (CLIENTE/OBRA/VEHICULO) pasa antes de Javier
+    # por: resolución determinista (convergencia) -> B1 con evidencia
+    # interna -> validación -> aplicación canónica -> regeneración de la
+    # bandeja. Muta `decisiones_pendientes` in place.
+    resumen["segunda_pasada_b1"] = _segunda_pasada_universal(
+        ruta_csv, archivos_procesados_ahora, decisiones_pendientes,
+        orquestador_ia, carpeta_catalogos,
+    )
+    _sp = resumen["segunda_pasada_b1"]
+    if _sp.get("decisiones_detectadas"):
+        print(
+            f"  Segunda pasada B1: {_sp['decisiones_detectadas']} decisión(es) -- "
+            f"{_sp['resueltas_determinista']} determinista, {_sp['b1_resolvio']} por B1, "
+            f"{_sp['a_humano']} a Javier"
+        )
+
+    # OBSERVABILIDAD OBLIGATORIA -- un único registro por lote (motivos +
+    # segunda pasada) anexado a `b1_observabilidad.jsonl` y expuesto en el
+    # resumen.
+    resumen["b1_lote"] = consolidar_observabilidad_b1(
+        ruta_csv=ruta_csv, archivos_objetivo=archivos_procesados_ahora,
+        decisiones_pendientes=decisiones_pendientes,
+        resumen_motivos=resumen.get("atlas_ia"),
+        resumen_segunda_pasada=resumen.get("segunda_pasada_b1"),
+    )
+    _persistir_observabilidad_b1(ruta_csv, resumen["b1_lote"])
 
     tiempo_total = time.perf_counter() - inicio
     resumen["tiempo_total_segundos"] = tiempo_total

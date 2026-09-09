@@ -26,8 +26,54 @@ from atlas_core.atlas_ia.contratos import (
     ResultadoValidacionHipotesis,
 )
 from atlas_core.extractor import _patente_valida
-from atlas_core.catalogo_clientes import normalizar_rut_cliente
+from atlas_core.catalogo_clientes import normalizar_nombre_cliente, normalizar_rut_cliente
+from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
+from atlas_core.catalogo_vehiculos import normalizar_patente_vehiculo
 from atlas_core.validadores import EstadoValidacion, validar_fecha
+
+
+def _clave_comparacion_valor(campo: str, valor: str) -> str:
+    """Clave canónica por dominio para comparar un valor propuesto contra
+    los valores de la evidencia -- Bloque AUTORIDAD OPERACIONAL / Bloque D.
+
+    La barrera anti-alucinación se conserva intacta (una propuesta que no
+    aparezca en la evidencia recuperada se sigue rechazando), pero la
+    comparación deja de ser `str ==` cruda: usa la MISMA normalización que
+    el resto del Motor para ese dominio, de modo que una conclusión
+    correcta no se bloquee sólo porque el texto exacto ("JD-8659", "Casa
+    Helsinski") difiere en formato del valor canónico que trae la
+    evidencia interna ("JD8659", "CASA HELSINSKI"). Nunca amplía el
+    conjunto de valores respaldados -- sólo reconoce el mismo valor
+    escrito de otra forma."""
+    texto = str(valor or "").strip()
+    dominio = campo.lower()
+    if dominio in ("patente_tracto", "patente_rampla"):
+        # Sólo tolerancia de formato para comparar (guiones/puntos/espacios):
+        # "JD-8659" y "JD8659" son el mismo valor. `normalizar_patente_
+        # vehiculo` es identidad de almacenamiento (no quita guiones), por
+        # eso aquí se hace la limpieza mínima adicional.
+        base = normalizar_patente_vehiculo(texto)
+        return "".join(c for c in base if c.isalnum())
+    if dominio in ("rut_chofer", "rut_cliente"):
+        try:
+            return normalizar_rut_cliente(texto)
+        except ValueError:
+            return texto.replace(".", "").replace("-", "").upper()
+    if dominio == "cliente":
+        return normalizar_nombre_cliente(texto)
+    if dominio == "obra_destino":
+        return normalizar_nombre_obra(texto)
+    return " ".join(texto.upper().split())
+
+
+def _valor_respaldado_por_evidencia(hipotesis: HipotesisIA, contexto: ContextoRazonamiento) -> bool:
+    objetivo = _clave_comparacion_valor(contexto.campo, hipotesis.valor_propuesto)
+    if not objetivo:
+        return hipotesis.valor_propuesto in contexto.valores_evidencia()
+    return any(
+        _clave_comparacion_valor(contexto.campo, candidato) == objetivo
+        for candidato in contexto.valores_evidencia()
+    )
 
 
 def validar_hipotesis_multicampo(
@@ -41,13 +87,17 @@ def validar_hipotesis_multicampo(
         )
     if hipotesis.resultado != RESULTADO_HIPOTESIS_PROPUESTA:
         return ResultadoValidacionHipotesis(aceptada=True)
-    if hipotesis.valor_propuesto not in contexto.valores_evidencia():
+    if not _valor_respaldado_por_evidencia(hipotesis, contexto):
         return ResultadoValidacionHipotesis(
             aceptada=False, motivo_rechazo=MOTIVO_VALOR_NO_RESPALDADO,
             detalle=f'"{hipotesis.valor_propuesto}" no aparece en la evidencia del caso.',
         )
+    _clave_propuesta = _clave_comparacion_valor(contexto.campo, hipotesis.valor_propuesto)
     for evidencia in contexto.evidencias:
-        if evidencia.es_decision_humana and evidencia.valor != hipotesis.valor_propuesto:
+        if (
+            evidencia.es_decision_humana
+            and _clave_comparacion_valor(contexto.campo, evidencia.valor) != _clave_propuesta
+        ):
             return ResultadoValidacionHipotesis(
                 aceptada=False, motivo_rechazo=MOTIVO_CONTRADICE_EVIDENCIA_SUPERIOR,
                 detalle=f'La propuesta contradice la decisión humana "{evidencia.valor}".',
@@ -106,8 +156,10 @@ def validar_hipotesis_vehiculo(
         )
 
     # V2 -- el valor propuesto debe existir en la evidencia recuperada
-    # para este caso exacto; nunca inventado por el proveedor.
-    if hipotesis.valor_propuesto not in contexto.valores_evidencia():
+    # para este caso exacto; nunca inventado por el proveedor. La
+    # comparación normaliza la patente en ambos lados (Bloque D): "JD-8659"
+    # y "JD8659" son el mismo valor -- nunca amplía el conjunto respaldado.
+    if not _valor_respaldado_por_evidencia(hipotesis, contexto):
         return ResultadoValidacionHipotesis(
             aceptada=False, motivo_rechazo=MOTIVO_VALOR_NO_RESPALDADO,
             detalle=(
@@ -119,8 +171,9 @@ def validar_hipotesis_vehiculo(
 
     # V3 -- ninguna decisión humana previa, ya presente en la evidencia,
     # puede quedar contradicha por la propuesta.
+    _clave = _clave_comparacion_valor(contexto.campo, hipotesis.valor_propuesto)
     for evidencia in contexto.evidencias:
-        if evidencia.es_decision_humana and evidencia.valor != hipotesis.valor_propuesto:
+        if evidencia.es_decision_humana and _clave_comparacion_valor(contexto.campo, evidencia.valor) != _clave:
             return ResultadoValidacionHipotesis(
                 aceptada=False, motivo_rechazo=MOTIVO_CONTRADICE_EVIDENCIA_SUPERIOR,
                 detalle=(

@@ -259,21 +259,107 @@ def recopilar_evidencia_catalogo_obras_destinos(campo: str) -> RecolectorEvidenc
 
 
 def recopilar_evidencia_obra_destino(campo: str) -> RecolectorEvidencia:
-    """Bloque DESTINOS INTERNOS V1 -- combina, en el orden de prioridad
-    del bloque (interno antes que nada), la evidencia de catálogo
-    (`recopilar_evidencia_catalogo_obras_destinos`) con la de documentos
-    relacionados del mismo lote (`recopilar_evidencia_documentos_
-    relacionados`, ya existente, sin cambios) -- nunca reemplaza a
-    ninguna, las junta para que B1 vea todo lo interno disponible antes
-    de pedir Internet."""
+    """Bloque DESTINOS INTERNOS V1 + AUTORIDAD OPERACIONAL -- combina, en
+    el orden de prioridad del bloque (interno antes que nada):
+    - `recopilar_evidencia_catalogo_obras_destinos` (relación obra↔destino
+      confirmada, coincidencia EXACTA de nombre);
+    - `evidencia_obra_interna` (Bloque AUTORIDAD): la obra conocida que
+      corresponde a una VARIANTE OCR del nombre, corroborada por contexto
+      (cliente por RUT canónico + destino confirmado que calza con la
+      dirección de entrega documental) -- lo que faltaba para el caso
+      "INMOB CASA HELSINSKI SPA" (evidencias internas vacías);
+    - `recopilar_evidencia_documentos_relacionados` (documentos hermanos
+      del mismo lote, ya existente, sin cambios).
+    Nunca reemplaza a ninguna, las junta para que B1 vea todo lo interno
+    disponible antes de pedir Internet."""
     recolector_catalogo = recopilar_evidencia_catalogo_obras_destinos(campo)
     recolector_historial = recopilar_evidencia_documentos_relacionados(campo)
 
     def recolectar(
         fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
     ) -> tuple[EvidenciaIA, ...]:
+        internas: tuple[EvidenciaIA, ...] = ()
+        if campo == "obra_destino":
+            from atlas_core.atlas_ia.evidencia_dominios import evidencia_obra_interna
+
+            internas = evidencia_obra_interna(
+                nombre_documental=str(fila.get("obra_destino", "")),
+                cliente_documental=str(fila.get("cliente", "")),
+                rut_cliente_documental=str(fila.get("rut_cliente", "")),
+                despachar_a_documental=str(
+                    fila.get("despachar_a_crudo") or fila.get("direccion_entrega") or ""
+                ),
+                carpeta_catalogos=carpeta_catalogos,
+            )
         return (
             *recolector_catalogo(fila, filas, carpeta_catalogos=carpeta_catalogos),
+            *internas,
+            *recolector_historial(fila, filas, carpeta_catalogos=carpeta_catalogos),
+        )
+
+    return recolectar
+
+
+def recopilar_evidencia_cliente(campo: str) -> RecolectorEvidencia:
+    """Bloque AUTORIDAD OPERACIONAL -- evidencia interna de identidad de
+    cliente (RUT canónico, coincidencia difusa/alias contra clientes
+    CONFIRMADO/ACTIVO, confirmaciones humanas de identidad acumuladas)
+    ANTES que nada, más los documentos hermanos del mismo lote. Causa raíz
+    corregida: los cuatro tipos CLIENTE_* sólo miraban documentos del
+    mismo lote -- B1 recibía `evidencias: []` aunque el cliente estuviera
+    canónico y confirmado en `clientes.json` (caso PRODALAM SA con RUT no
+    extraído)."""
+    recolector_historial = recopilar_evidencia_documentos_relacionados(campo)
+
+    def recolectar(
+        fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
+    ) -> tuple[EvidenciaIA, ...]:
+        from atlas_core.atlas_ia.evidencia_dominios import evidencia_cliente_interna
+
+        internas = evidencia_cliente_interna(
+            nombre_documental=str(fila.get("cliente", "")),
+            rut_documental=str(fila.get("rut_cliente", "")),
+            numero_guia=str(fila.get("numero_guia", "")),
+            numero_transporte=str(fila.get("numero_transporte", "")),
+            carpeta_catalogos=carpeta_catalogos,
+        )
+        return (
+            *internas,
+            *recolector_historial(fila, filas, carpeta_catalogos=carpeta_catalogos),
+        )
+
+    return recolectar
+
+
+def recopilar_evidencia_vehiculo(campo: str) -> RecolectorEvidencia:
+    """Bloque AUTORIDAD OPERACIONAL -- evidencia interna de vehículo
+    (`evaluar_evidencia_patente`: patentes CONFIRMADAS asociadas por un
+    humano a este RUT, variantes históricas en transportes independientes,
+    confusiones OCR calibradas del catálogo) ANTES que nada, más los
+    documentos hermanos del mismo lote. Causa raíz corregida: PATENTE_* /
+    CHOFER_* sólo miraban documentos del mismo lote -- B1 recibía
+    `evidencias: []` aunque hubiera una confirmación humana previa
+    vinculando la rampla a ese chofer/RUT (caso JD8629 -> JD8659, Carlos
+    Simón). La diferencia 2↔5 NO se agrega a la tabla de confusiones OCR
+    globales: lo que hace resoluble el caso es esa confirmación humana
+    como evidencia contextual."""
+    recolector_historial = recopilar_evidencia_documentos_relacionados(campo)
+
+    def recolectar(
+        fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
+    ) -> tuple[EvidenciaIA, ...]:
+        internas: tuple[EvidenciaIA, ...] = ()
+        if campo in ("patente_tracto", "patente_rampla"):
+            from atlas_core.atlas_ia.evidencia_dominios import evidencia_vehiculo_interna
+
+            internas = evidencia_vehiculo_interna(
+                campo=campo, valor_documental=str(fila.get(campo, "")),
+                rut_chofer=str(fila.get("rut_chofer", "")),
+                numero_transporte=str(fila.get("numero_transporte", "")),
+                filas=filas, carpeta_catalogos=carpeta_catalogos,
+            )
+        return (
+            *internas,
             *recolector_historial(fila, filas, carpeta_catalogos=carpeta_catalogos),
         )
 
@@ -432,7 +518,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({"PATENTE_SIN_HOMOLOGAR"}), fuente="MOTIVO_DOCUMENTAL",
         campo="patente_tracto", dominio="PATENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=True,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("patente_tracto"),
+        recopilar_evidencia=recopilar_evidencia_vehiculo("patente_tracto"),
         aplicar=aplicar_valor_documental_directo("patente_tracto"),
     ),
     # Bloque R12 -- caso real 472247 (Rodrigo Nahuelñir, JE4288): el mismo
@@ -447,7 +533,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({"PATENTE_SIN_HOMOLOGAR"}), fuente="MOTIVO_DOCUMENTAL",
         campo="patente_rampla", dominio="PATENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=True,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("patente_rampla"),
+        recopilar_evidencia=recopilar_evidencia_vehiculo("patente_rampla"),
         aplicar=aplicar_valor_documental_directo("patente_rampla"),
     ),
     # Bloque R12 -- ambigüedad real de patente (>1 candidato igual de
@@ -460,19 +546,19 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({"PATENTE_AMBIGUA"}), fuente="MOTIVO_DOCUMENTAL",
         campo="patente_tracto", dominio="PATENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=False,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("patente_tracto"),
+        recopilar_evidencia=recopilar_evidencia_vehiculo("patente_tracto"),
     ),
     TipoProblemaIA(
         codigos=frozenset({"PATENTE_AMBIGUA"}), fuente="MOTIVO_DOCUMENTAL",
         campo="patente_rampla", dominio="PATENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=False,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("patente_rampla"),
+        recopilar_evidencia=recopilar_evidencia_vehiculo("patente_rampla"),
     ),
     TipoProblemaIA(
         codigos=frozenset({"CLIENTE_SIN_CORROBORAR"}), fuente="MOTIVO_DOCUMENTAL",
         campo="cliente", dominio="CLIENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=True,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("cliente"),
+        recopilar_evidencia=recopilar_evidencia_cliente("cliente"),
         aplicar=aplicar_valor_documental_directo("cliente"),
     ),
     # Bloque R12 -- caso real 472238/472239 (CLIENTE_AUSENTE, Bloque R9):
@@ -486,7 +572,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({"CLIENTE_AUSENTE"}), fuente="MOTIVO_DOCUMENTAL",
         campo="cliente", dominio="CLIENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=True,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("cliente"),
+        recopilar_evidencia=recopilar_evidencia_cliente("cliente"),
         aplicar=aplicar_valor_documental_directo("cliente"),
     ),
     # Bloque R12 -- CHOFER_AUSENTE (nombre de chofer ausente; distinto de
@@ -526,7 +612,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({"CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA"}), fuente="MOTIVO_DOCUMENTAL",
         campo="cliente", dominio="CLIENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=False,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("cliente"),
+        recopilar_evidencia=recopilar_evidencia_cliente("cliente"),
     ),
     # Bloque R7 -- dominio nuevo: DESTINO (motivos ya definidos en Bloque
     # R6, `decisiones_pendientes.MOTIVOS_DESTINO_NO_RESUELTO`). Nunca se
@@ -624,7 +710,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({"CLIENTE_POSIBLEMENTE_INVALIDO"}), fuente="MOTIVO_DOCUMENTAL",
         campo="cliente", dominio="CLIENTE", herramientas=("DOCUMENTOS_RELACIONADOS",),
         aplicable_automaticamente=True,
-        recopilar_evidencia=recopilar_evidencia_documentos_relacionados("cliente"),
+        recopilar_evidencia=recopilar_evidencia_cliente("cliente"),
         aplicar=aplicar_valor_documental_directo("cliente"),
     ),
     TipoProblemaIA(

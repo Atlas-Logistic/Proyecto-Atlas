@@ -257,7 +257,25 @@ from atlas_core.revalidacion_documental import (
 # dirección ya confirmada por un humano nunca vuelve a preguntarse. Sin
 # subir este número, los pendientes históricos nunca se reclasificarían
 # bajo esta política.
-RULESET_VERSION = 18
+#
+# Subida de 18 a 19 -- BLOQUE AUTORIDAD OPERACIONAL / CONVERGENCIA +
+# SEGUNDA PASADA UNIVERSAL: la resolución determinista de identidad
+# (cliente/obra/vehículo) cambió de reglas. Un error pequeño de OCR ya no
+# convierte conocimiento fuertemente establecido en desconocido: si la
+# evidencia acumulada (confirmación humana, catálogo canónico, RUT,
+# relaciones chofer↔vehículo / cliente↔obra / obra↔destino, ausencia de
+# competidor) converge de forma ÚNICA en un canónico dentro de una
+# variación pequeña, se resuelve SILENCIOSAMENTE (ver
+# `atlas_core.atlas_ia.convergencia` y `procesamiento_masivo._convergencia_
+# documental`); y TODA decisión pendiente CLIENTE_CANDIDATO/OBRA_
+# DESCONOCIDA/VEHICULO_DESCONOCIDO pasa por una segunda pasada
+# (determinista -> B1 con evidencia interna -> validación -> aplicación
+# canónica -> regeneración de la bandeja) antes de llegar a Javier (ver
+# `procesamiento_masivo._segunda_pasada_universal`). Sin subir este
+# número, una operación ya migrada a 18 nunca volvería a barrer sus
+# decisiones/pendientes con estas reglas hasta que un lote nuevo la
+# tocara -- exactamente lo que este párrafo advierte.
+RULESET_VERSION = 19
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)

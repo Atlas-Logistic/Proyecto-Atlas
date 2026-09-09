@@ -148,6 +148,36 @@ _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO = (
 )
 
 
+# Bloque AUTORIDAD OPERACIONAL -- morfología de dirección de calle (caso
+# real 472414 SALOMON SACK: la asociación geométrica dejó que el valor de
+# DIRECCION -- "AV PRESID EDO FREI MONTALVA 9770" -- contaminara OBRA
+# DESTINO, cuyo valor real era "TRANSPORTES Y EXCAVACIONES L"). No es una
+# lista de calles ni fuzzy: un valor que EMPIEZA con un tipo de vía y trae
+# un número de dirección, y NO trae ningún token de entidad/empresa, es
+# una dirección -- nunca el NOMBRE de una obra.
+_TOKENS_VIA_DIRECCION = frozenset({
+    "AV", "AVDA", "AVENIDA", "CALLE", "PASAJE", "PJE", "PSJE", "CAMINO", "RUTA",
+})
+_TOKENS_ENTIDAD_NO_DIRECCION = frozenset({
+    "SPA", "SA", "LTDA", "LIMITADA", "EIRL", "SOCIEDAD", "ANONIMA",
+    "CONSTRUCTORA", "INMOBILIARIA", "INMOB", "EMPRESA", "COMERCIAL",
+    "INDUSTRIA", "INDUSTRIAS", "SERVICIOS", "TRANSPORTES", "TRANSPORTE",
+    "EXCAVACIONES", "INGENIERIA", "MINERA", "AGRICOLA", "MAESTRANZA",
+    "DISTRIBUIDORA", "IMPORTADORA", "EXPORTADORA", "PROYECTOS",
+})
+
+
+def _parece_direccion_calle(texto: str) -> bool:
+    tokens = re.findall(r"[A-ZÑÁÉÍÓÚ0-9\.]+", str(texto or "").upper())
+    if len(tokens) < 2:
+        return False
+    if any(t.strip(".") in _TOKENS_ENTIDAD_NO_DIRECCION for t in tokens):
+        return False
+    empieza_con_via = tokens[0].strip(".") in _TOKENS_VIA_DIRECCION
+    tiene_numero_calle = any(re.fullmatch(r"\d{2,5}[A-Z]?", t) for t in tokens[1:])
+    return empieza_con_via and tiene_numero_calle
+
+
 def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:
     """Política nominal única para asociaciones geométricas de identidad."""
     texto = item["simple"]
@@ -256,6 +286,15 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         if candidato is not None
     }
 
+    # Bloque AUTORIDAD OPERACIONAL -- etiquetas DIRECCION presentes (caso
+    # 472414): un candidato a OBRA DESTINO que está geométricamente MÁS
+    # CERCA de una etiqueta DIRECCION que de la de OBRA DESTINO pertenece a
+    # la dirección, nunca a la obra -- estructura/etiqueta, no morfología.
+    etiquetas_direccion = [
+        item for item in items
+        if item["simple"] == "DIRECCION" or item["simple"].startswith("DIRECCION ")
+    ]
+
     def seleccionar(campo: str) -> Optional[str]:
         decisiones = []
         for etiqueta in (item for item in items if es_etiqueta(item, campo)):
@@ -263,6 +302,19 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
             for item in items:
                 if item is etiqueta or not nominal(item):
                     continue
+                if campo == "obra destino":
+                    # Nunca un valor con morfología de dirección de calle.
+                    if _parece_direccion_calle(item["texto"]):
+                        continue
+                    # Nunca un valor más cercano a una etiqueta DIRECCION.
+                    if etiquetas_direccion:
+                        d_obra = abs(item["cx"] - etiqueta["cx"]) + abs(item["cy"] - etiqueta["cy"])
+                        d_dir = min(
+                            abs(item["cx"] - e["cx"]) + abs(item["cy"] - e["cy"])
+                            for e in etiquetas_direccion
+                        )
+                        if d_dir + 8 * escala < d_obra:
+                            continue
                 # GIRO es un dato comercial distinto: su valor no puede ser
                 # ni cliente ni obra destino.
                 if id(item) in valores_giro:
@@ -1967,6 +2019,13 @@ def extraer_datos(
             # valor real por geometría) queda libre de completarlo después.
             if obra and obra in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO:
                 obra = None
+            # Bloque AUTORIDAD OPERACIONAL -- si el orden de lectura OCR
+            # intercaló el valor de DIRECCION entre las etiquetas OBRA
+            # DESTINO/COD DESTINATARIO, la captura tiene morfología de
+            # dirección de calle -- nunca es el nombre de la obra (caso
+            # 472414). Se descarta y se deja que la geometría lo complete.
+            if obra and _parece_direccion_calle(obra):
+                obra = None
             if obra and "HORA ENTRADA" not in obra:
                 return obra
 
@@ -2027,6 +2086,26 @@ def extraer_datos(
             # relación posicional con ACMA -- pueden aparecer en fechas,
             # precios, teléfonos, etc. por pura coincidencia). Sin el
             # patrón contextual de arriba, se abstiene.
+
+        # Bloque AUTORIDAD OPERACIONAL -- recuperación GENERAL del RUT del
+        # cliente en su zona documental (SEÑOR(ES) / R.U.T.), sin depender
+        # de un patrón por empresa ni de que "GIRO" quede pegado (caso
+        # real 472477/PRODALAM: el RUT estaba impreso y legible, pero la
+        # extracción lo dejó "No encontrado" porque el patrón exigía
+        # "... GIRO" a continuación). Se toma el PRIMER RUT con forma
+        # chilena que aparece tras una etiqueta SEÑOR(ES)/R.U.T. y ANTES
+        # de la siguiente sección (GIRO/DIRECCION/DESPACHAR/OBRA/COMUNA),
+        # y sólo se acepta si valida dígito verificador -- nunca un número
+        # suelto de otra parte del documento.
+        zona = re.search(
+            r"SE[NÑ]OR(?:\(?ES\)?)?(.*?)(?:\bGIRO\b|\bDIRECCION\b|\bDESPACHAR\b|\bOBRA\s+DESTINO\b|\bCOMUNA\b|$)",
+            texto_busqueda, re.DOTALL,
+        )
+        segmento = zona.group(1) if zona else texto_busqueda
+        for cand in re.findall(r"\b(\d{1,2}[.\s]?\d{3}[.\s]?\d{3}\s?-?\s?[0-9Kk])\b", segmento):
+            limpio = limpiar_rut(cand)
+            if "-" in limpio and validar_rut_chileno(limpio).estado == EstadoValidacion.VALIDO:
+                return limpio, None
 
         return None, None
 
