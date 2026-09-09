@@ -1250,10 +1250,33 @@ def resolver_destino_entrega(
         # DIRECCION_NO_ENCONTRADA, LIMITE_CUOTA, PROVEEDOR_NO_DISPONIBLE,
         # RESPUESTA_INVALIDA, ...) es un fallo de geocodificación, no una
         # decisión de destino -- se preserva el texto crudo y se explica.
-        return ResultadoDestinoEntrega(
-            despachar_a_crudo=texto, estado=ESTADO_REVISAR,
-            motivo=f"GEOCODIFICACION_{resultado.estado.value}",
-        )
+        #
+        # Bloque GEOGRAFÍA 2A -- "0 candidatos" (DIRECCION_NO_ENCONTRADA) del
+        # proveedor PRINCIPAL ya no es un callejón sin salida: se agota
+        # primero el geocodificador de RESPALDO gratuito ("sólo si A falla"
+        # cubre CUALQUIER forma de que A falle, no sólo la ambigüedad de
+        # varios candidatos -- mismo principio que el camino de confianza
+        # insuficiente de un único candidato). El candidato del respaldo, si
+        # corrobora (número único + catálogo confirmado / evidencia B1 /
+        # comuna del propio texto -- ver `resolver_destino_con_fallback_
+        # estructurado`), sigue pasando por los MISMOS gates de abajo
+        # (territorio / número / confianza) -- nunca un camino paralelo.
+        # Sin respaldo, o sin corroboración, se conserva EXACTAMENTE la
+        # abstención anterior (mismo motivo técnico específico).
+        if proveedor_geocodificacion_fallback is not None and (
+            fallback_sin_candidatos := resolver_destino_con_fallback_estructurado(
+                texto, proveedor_fallback=proveedor_geocodificacion_fallback,
+                destinos_confirmados=destinos_confirmados,
+                contexto_evidencia_b1=contexto_evidencia_b1,
+            )
+        ).resuelto and fallback_sin_candidatos.candidato is not None:
+            candidato = fallback_sin_candidatos.candidato
+            metodo_confirmacion_fallback = "FALLBACK_ESTRUCTURADO_CORROBORADO"
+        else:
+            return ResultadoDestinoEntrega(
+                despachar_a_crudo=texto, estado=ESTADO_REVISAR,
+                motivo=f"GEOCODIFICACION_{resultado.estado.value}",
+            )
     else:
         # Un único candidato (REQUIERE_REVISION): sigue exigiendo
         # confianza suficiente antes de darlo por resuelto -- ver abajo.
@@ -1752,6 +1775,7 @@ def calcular_ruta_entrega_para_viaje(
     punto_gps_destino: Coordenadas | None = None,
     radio_gps_destino_km: float = 50.0,
     destinos_confirmados: Iterable[Destino] = (),
+    proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     codigo_planta_mobile: str | None = None,
     categoria_documento: str | None = None,
 ) -> ResultadoRutaEntrega:
@@ -1767,7 +1791,15 @@ def calcular_ruta_entrega_para_viaje(
     nunca golpea un proveedor de telemetría directamente, ver límites
     multiempresa). Si se entrega, ayuda a descartar candidatos de
     geocodificación territorialmente incompatibles ante ambigüedad (ver
-    `resolver_destino_entrega`)."""
+    `resolver_destino_entrega`).
+
+    `proveedor_geocodificacion_fallback` (Bloque GEOGRAFÍA 2A, opcional):
+    geocodificador de RESPALDO gratuito (Nominatim/OSM, sin credencial) --
+    se consulta SÓLO cuando el principal deja la dirección sin resolver
+    (0 candidatos, confianza insuficiente, o ambigüedad que ninguna otra
+    vía desambiguó), y su candidato pasa por los MISMOS gates territoriales
+    /de número/de confianza (ver `resolver_destino_entrega`). Sin él,
+    comportamiento idéntico a antes de este bloque."""
     # Import perezoso: evita un ciclo de import a nivel de módulo con
     # enriquecimiento_viaje (que a su vez importa este módulo de forma
     # perezosa dentro de `calcular_ruta_para_viaje` -- ver Bloque D2).
@@ -1797,6 +1829,7 @@ def calcular_ruta_entrega_para_viaje(
         despachar_a_crudo, proveedor_rutas,
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
         destinos_confirmados=destinos_confirmados,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F: coordenadas/confianza SÍ se conservan (evidencia
@@ -1824,6 +1857,7 @@ def calcular_ruta_entrega_para_viaje(
         ruta=ruta, entrega=entrega, coordenada_origen=coordenada_origen,
         proveedor_rutas=proveedor_rutas, perfil=perfil,
         despachar_a_crudo=despachar_a_crudo, destinos_confirmados=destinos_confirmados,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
     )
     if ruta.estado != EstadoRuta.RUTA_CALCULADA:
         return ResultadoRutaEntrega(
@@ -2019,6 +2053,17 @@ def _numero_direccion_incompatible(despachar_a_crudo: str, etiqueta_geocodificad
     geo = _numero_calle(etiqueta_geocodificada)
     if not doc or not geo or doc == geo:
         return False
+    # Bloque GEOGRAFÍA 2A -- equivalencia numérica segura: dos tokens
+    # PURAMENTE numéricos que sólo difieren en ceros a la izquierda
+    # ("0100" == "100", "0015" == "15") son el MISMO número de casa, nunca
+    # una contradicción -- el criterio de orden de magnitud de abajo, que
+    # compara LARGO de string, los marcaba incompatibles por error. Sólo
+    # se colapsa cuando ambos tokens son dígitos puros: nunca "0114B" /
+    # "O1148" / "10B00" (equivalencias alfanuméricas -- fuera de este
+    # bloque). "15" vs "1545" siguen siendo distintos (valor distinto) y
+    # el criterio de abajo los mantiene incompatibles.
+    if doc.isdigit() and geo.isdigit() and int(doc) == int(geo):
+        return False
     return abs(len(doc) - len(geo)) >= 2
 
 
@@ -2031,6 +2076,8 @@ def resolver_entrega_documento(
     bloques: Iterable[Any] | None = None,
     codigo_planta_mobile: str | None = None,
     categoria_documento: str | None = None,
+    destinos_confirmados: Iterable[Destino] = (),
+    proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
 ) -> dict[str, str]:
     """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
     persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
@@ -2056,7 +2103,15 @@ def resolver_entrega_documento(
     texto lineal, por "PATENTE : BDFG50"). Si el valor lineal está vacío o
     contaminado (ver `_despachar_a_lineal_contaminado`) y se entregan
     `bloques`, se reintenta por posición real en la imagen
-    (`_extraer_despachar_a_geometrico`) -- nunca por el orden de lectura."""
+    (`_extraer_despachar_a_geometrico`) -- nunca por el orden de lectura.
+
+    `destinos_confirmados` / `proveedor_geocodificacion_fallback` (Bloque
+    GEOGRAFÍA 2A, opcionales): conocimiento CONFIRMADO ya persistido y el
+    geocodificador de RESPALDO gratuito -- exactamente los mismos que la
+    revalidación posterior ya usa, ahora también en el PRIMER pase para no
+    dejar como REVISAR una entrega que Atlas ya podía resolver sin costo.
+    Ambos entran por el camino seguro existente (mismos gates); sin ellos,
+    comportamiento idéntico a antes de este bloque."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
     # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
@@ -2112,6 +2167,8 @@ def resolver_entrega_documento(
         proveedor_posicion=None, proveedor_rutas=proveedor_rutas,
         textos_documento=textos, perfil=perfil,
         codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
+        destinos_confirmados=destinos_confirmados,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
     )
     resultado["direccion_entrega"] = ruta_entrega.direccion_entrega_geocodificada
     resultado["localidad_entrega"] = ruta_entrega.localidad_entrega

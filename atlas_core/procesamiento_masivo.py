@@ -2174,13 +2174,14 @@ def procesar_archivo(
     resultado_entrega = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}
     if carpeta_catalogos is not None:
         try:
+            from atlas_core.rutas.cache_geocodificacion import (
+                ProveedorRutasConCacheGeocodificacion,
+                RepositorioCacheGeocodificacion,
+            )
+
             proveedor_rutas_efectivo = proveedor_rutas
             if proveedor_rutas_efectivo is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
-                from atlas_core.rutas.cache_geocodificacion import (
-                    ProveedorRutasConCacheGeocodificacion,
-                    RepositorioCacheGeocodificacion,
-                )
 
                 # INFRAESTRUCTURA S2.1: caché portable (Drive) de
                 # geocodificación -- una dirección ya geocodificada en
@@ -2192,11 +2193,49 @@ def procesar_archivo(
             plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
             if bloques_guia is None:
                 bloques_guia = _leer_bloques()
+            # Bloque GEOGRAFÍA 2A -- el PRIMER pase usa las mismas dos
+            # capacidades gratuitas que la revalidación posterior ya
+            # aprovecha, para no dejar como REVISAR una entrega que Atlas
+            # ya puede resolver sin costo: (1) el geocodificador de
+            # RESPALDO (Nominatim/OSM, sin credencial, misma caché portable
+            # -- nunca paga dos veces la misma consulta), consultado SÓLO
+            # si el principal deja la dirección sin resolver; (2) los
+            # destinos ya CONFIRMADOS del catálogo, que corroboran
+            # IDENTIDAD y -- sólo si traen coordenadas válidas y
+            # territorialmente compatibles -- resuelven el punto por el
+            # camino seguro existente. Todo candidato sigue pasando por los
+            # mismos gates (Chile/región, comuna documental/humana, número,
+            # confianza) -- nunca se acepta algo sólo porque el respaldo lo
+            # encontró.
+            from atlas_core.rutas.nominatim import NominatimGeocoder
+
+            proveedor_geocodificacion_fallback = ProveedorRutasConCacheGeocodificacion(
+                NominatimGeocoder(pais=pais_operacion),
+                RepositorioCacheGeocodificacion(),
+            )
+            try:
+                from atlas_core.catalogo_destinos import (
+                    CatalogoDestinos,
+                    EstadoCalidadDestino,
+                )
+
+                destinos_confirmados_primer_pase = [
+                    d
+                    for d in CatalogoDestinos(
+                        Path(carpeta_catalogos) / "destinos_maestros.json",
+                        ruta_clientes=Path(carpeta_catalogos) / "clientes.json",
+                    ).listar()
+                    if d.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
+                ]
+            except (OSError, ValueError):
+                destinos_confirmados_primer_pase = []
             resultado_entrega = resolver_entrega_documento(
                 textos, plantas_catalogo, proveedor_rutas_efectivo,
                 bloques=bloques_guia,
                 codigo_planta_mobile=planta_origen_informada,
                 categoria_documento=tipo_carga_preliminar,
+                destinos_confirmados=destinos_confirmados_primer_pase,
+                proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",
