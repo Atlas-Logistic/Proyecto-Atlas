@@ -10,6 +10,7 @@ import csv
 import hashlib
 import json
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -286,7 +287,18 @@ from atlas_core.revalidacion_documental import (
 # `reconciliar_estado_derivado` -- así una operación ya migrada obtiene la
 # convergencia en su próxima reconciliación natural, y cualquier RULESET
 # futuro que cambie conocimiento derivado se beneficia igual.
-RULESET_VERSION = 20
+#
+# Subida de 20 a 21 -- REEVALUACIÓN RETROACTIVA UNIVERSAL: se agrega
+# `versiones_capacidades` a `estado_operacion.json` y un trigger nuevo --
+# cuando se sube la `version` de un dominio en `atlas_core.capacidades_
+# reevaluacion.REGISTRO_CAPACIDADES`, la próxima reconciliación natural
+# entra a la batería (que ya reúne todos los revalidadores) para
+# reevaluar los pendientes de ESE dominio, y deja traza de qué
+# dominio-versión retiró qué. Subir a 21 fuerza el primer barrido + el
+# primer estampado de `versiones_capacidades` sobre operaciones ya
+# migradas; a partir de ahí el mecanismo es incremental (cada dominio se
+# reevalúa sólo cuando SU versión avanza) e idempotente.
+RULESET_VERSION = 21
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -643,6 +655,27 @@ def reconciliar_estado_derivado(
         actual / "decisiones_aplicadas.json"
     )
     migracion = version_previa < RULESET_VERSION
+
+    # Bloque REEVALUACIÓN RETROACTIVA UNIVERSAL -- una mejora declarada en
+    # `capacidades_reevaluacion.REGISTRO_CAPACIDADES` (subir la `version`
+    # de un dominio) debe poder propagarse automáticamente a los viajes
+    # que sigan pendientes de ese dominio, sin esperar un lote nuevo ni un
+    # reproceso manual. Se compara contra `versiones_capacidades`
+    # persistido; si alguna avanzó, se ENTRA a la batería de abajo (que ya
+    # reúne todos los revalidadores). Una migración de `RULESET_VERSION`
+    # cuenta como "todas pudieron avanzar" (se re-estampa igual).
+    from atlas_core.capacidades_reevaluacion import (
+        capacidades_avanzadas as _capacidades_avanzadas,
+        resumen_reevaluacion as _resumen_reevaluacion,
+        versiones_actuales as _versiones_cap_actuales,
+    )
+    _versiones_cap_previas = estado_previo.get("versiones_capacidades") or {}
+    capacidades_a_reevaluar = _capacidades_avanzadas(_versiones_cap_previas)
+    if migracion:
+        _act = _versiones_cap_actuales()
+        capacidades_a_reevaluar = {
+            d: (int(_versiones_cap_previas.get(d, 0) or 0), _act[d]) for d in _act
+        }
     por_reintentar = []
     for registro in registros:
         if str(registro["numero_guia"]) in guias_direccion_confirmada:
@@ -720,11 +753,25 @@ def reconciliar_estado_derivado(
     if (
         not migracion and not por_reintentar and not reporte_desactualizado
         and not estado_derivado_incoherente and not falta_tarjeta_destino
+        and not capacidades_a_reevaluar
     ):
         return {
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
             "version": version_previa, "pendientes_tecnicos": len(registros),
         }
+
+    # Snapshot ANTES (para la traza de reevaluación retroactiva) -- la
+    # bandeja de decisiones y los pendientes técnicos tal cual están antes
+    # de que la batería de abajo los regenere.
+    _t_reeval_inicio = time.perf_counter()
+    try:
+        _decisiones_antes = json.loads(decisiones.read_text(encoding="utf-8")).get("decisiones", []) if decisiones.is_file() else []
+    except (OSError, ValueError):
+        _decisiones_antes = []
+    try:
+        _tecnicos_antes = json.loads(ruta_pendientes.read_text(encoding="utf-8")).get("pendientes", []) if ruta_pendientes.is_file() else []
+    except (OSError, ValueError):
+        _tecnicos_antes = []
 
     with bloqueo_sesion(actual, "reconciliacion_estado_derivado"):
         # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- este lock ya NO
@@ -990,6 +1037,28 @@ def reconciliar_estado_derivado(
         # viaje aparece REQUIERE_REVISION con tarjeta, nunca
         # INCOMPLETO_TECNICO "que se reintenta solo".
         deteccion_destino = reconciliar_decisiones_destino_no_resuelto(raiz_atlas=raiz, reloj=lambda: instante)
+
+        # Bloque REEVALUACIÓN RETROACTIVA UNIVERSAL -- traza: qué
+        # dominio-versión retiró qué pendiente. La batería de arriba YA
+        # regeneró bandeja y pendientes técnicos por el mecanismo
+        # canónico; aquí sólo se comparan los snapshots ANTES/DESPUÉS y se
+        # atribuye cada retiro al/los dominio(s) que lo gobiernan y
+        # avanzaron. Si una capacidad no aportó evidencia, su pendiente
+        # sigue en pie (`decisiones_retiradas`=0) -- nunca se inventa.
+        try:
+            _decisiones_despues = json.loads(decisiones.read_text(encoding="utf-8")).get("decisiones", []) if decisiones.is_file() else []
+        except (OSError, ValueError):
+            _decisiones_despues = list(_decisiones_antes)
+        try:
+            _tecnicos_despues = json.loads(ruta_pendientes.read_text(encoding="utf-8")).get("pendientes", []) if ruta_pendientes.is_file() else []
+        except (OSError, ValueError):
+            _tecnicos_despues = list(_tecnicos_antes)
+        reevaluacion_retroactiva = _resumen_reevaluacion(
+            avanzadas=capacidades_a_reevaluar,
+            decisiones_antes=_decisiones_antes, decisiones_despues=_decisiones_despues,
+            tecnicos_antes=_tecnicos_antes, tecnicos_despues=_tecnicos_despues,
+            duracion_ms=round((time.perf_counter() - _t_reeval_inicio) * 1000),
+        )
         # A partir de acá el dataset YA tiene los cambios de las
         # revalidaciones de arriba -- cada una es atómica y ya quedó
         # protegida por su propio lock común del dataset al escribir; NO
@@ -1074,6 +1143,12 @@ def reconciliar_estado_derivado(
                 reloj=lambda: instante,
                 origen="RECONCILIACION_ESTADO_DERIVADO",
                 version_estado_derivado=VERSION_ESTADO_DERIVADO,
+                # Bloque REEVALUACIÓN RETROACTIVA UNIVERSAL -- se estampan
+                # las versiones de capacidad vigentes: la próxima
+                # reconciliación no reevalúa un dominio que no avanzó
+                # (idempotencia), y una futura mejora (subir una versión)
+                # se detecta contra esta foto.
+                versiones_capacidades=_versiones_cap_actuales(),
                 dataset_sha256=huella_para_publicar,
             )
         except Exception:
@@ -1123,6 +1198,7 @@ def reconciliar_estado_derivado(
             "contradicciones": convergencia_identidad["contradicciones"],
         },
         "segunda_pasada_universal_sin_ocr": segunda_pasada_historica,
+        "reevaluacion_retroactiva": reevaluacion_retroactiva,
         "pendientes_tecnicos": len(registros_despues),
         "totales": manifest["totales"],
         "ocr_ejecutado": False,

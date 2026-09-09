@@ -166,6 +166,7 @@ def escribir_estado_operacion(
     decisiones_pendientes: str | Path | None = None,
     origen: str | None = None,
     version_estado_derivado: int | None = None,
+    versiones_capacidades: dict[str, int] | None = None,
     dataset_sha256: str | None = None,
     huella_filas_dataset: str | None = None,
     raiz: Path | None = None,
@@ -202,6 +203,17 @@ def escribir_estado_operacion(
         _previo = leer_estado_operacion(raiz=raiz_efectiva) or {}
         if isinstance(_previo.get("version_estado_derivado"), int):
             version_estado_derivado = _previo["version_estado_derivado"]
+    # `versiones_capacidades` (Bloque REEVALUACIÓN RETROACTIVA UNIVERSAL):
+    # mismo criterio de arrastre que `version_estado_derivado` -- un
+    # publicador que no lo conoce (1er reporte del ingreso, revalidar_y_
+    # regenerar_reporte) NUNCA debe borrarlo; su dueño real es
+    # `reconciliar_estado_derivado`, que siempre lo pasa explícito cuando
+    # de verdad estampa.
+    if versiones_capacidades is None:
+        _previo_cap = leer_estado_operacion(raiz=raiz_efectiva) or {}
+        _vc = _previo_cap.get("versiones_capacidades")
+        if isinstance(_vc, dict):
+            versiones_capacidades = {str(k): int(v) for k, v in _vc.items() if isinstance(v, int)}
     ruta_dataset_relativa = None
     if dataset_operacional is not None:
         ruta_dataset_relativa = _ruta_relativa_segura(raiz_efectiva, dataset_operacional)
@@ -226,6 +238,8 @@ def escribir_estado_operacion(
     }
     if version_estado_derivado is not None:
         contenido["version_estado_derivado"] = version_estado_derivado
+    if versiones_capacidades is not None:
+        contenido["versiones_capacidades"] = dict(versiones_capacidades)
     # Bloque R2.5 -- huella del dataset operacional en el momento en que
     # ESTE `reporte_vigente` se generó a partir de él. `atlas:cargar-
     # automatico` (Desktop) la compara contra el hash ACTUAL del dataset
