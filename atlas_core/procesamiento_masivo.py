@@ -1043,6 +1043,7 @@ def _convergencia_documental(
     datos: Mapping[str, object],
     *,
     despachar_a_documental: str = "",
+    filas: "Iterable[Mapping[str, object]]" = (),
 ) -> dict[str, object]:
     """Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA (Bloque A, criterio
     general): un error pequeño de OCR NO puede convertir conocimiento
@@ -1077,7 +1078,18 @@ def _convergencia_documental(
     nuevos = delta["datos"]
     rut_chofer = str(nuevos.get("RUT del chofer", ""))
     numero_transporte = str(nuevos.get("número de transporte", ""))
+    filas_lista = list(filas)
 
+    # VEHÍCULO -- SÓLO cuando el llamador entrega el dataset completo
+    # (`filas`): la unicidad del candidato depende de las OTRAS guías del
+    # chofer (`_transportes_por_patente_de_chofer`). `procesar_archivo` es
+    # por-documento y NO tiene ese contexto -- ahí la patente la resuelve
+    # la segunda pasada universal (`_segunda_pasada_universal`), que sí
+    # trae el lote entero. Sin `filas` no se hace convergencia de patente:
+    # nunca se resuelve a un canónico que podría tener un competidor
+    # invisible desde este documento (caso real 472477: JD8659 confirmada
+    # por Javier PERO JE8659 también aparece en un transporte independiente
+    # real del mismo chofer -> dos candidatos plausibles -> revisión).
     for clave_datos, campo_convergencia, motivos_campo in (
         ("patente del tracto", "patente_tracto",
          (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
@@ -1085,12 +1097,12 @@ def _convergencia_documental(
          (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
     ):
         valor = str(nuevos.get(clave_datos, "")).strip()
-        if valor in {"", "No encontrado"} or not rut_chofer.strip():
+        if not filas_lista or valor in {"", "No encontrado"} or not rut_chofer.strip():
             continue
         try:
             r = convergencia_vehiculo(
                 campo=campo_convergencia, valor_documental=valor, rut_chofer=rut_chofer,
-                numero_transporte=numero_transporte, filas=(), carpeta_catalogos=carpeta_catalogos,
+                numero_transporte=numero_transporte, filas=filas_lista, carpeta_catalogos=carpeta_catalogos,
             )
         except Exception:  # nunca tumba el procesamiento por convergencia
             continue
@@ -1119,6 +1131,15 @@ def _convergencia_documental(
             r = None
         if r is not None and r.decision == RESOLVER_SILENCIOSO:
             nuevos["cliente"] = r.valor_canonico
+            # Materializa el RUT canónico si el documento no traía uno
+            # válido -- la identidad quedó determinada; así la regeneración
+            # de la bandeja ya no vuelve a preguntar (CLIENTE_CANDIDATO
+            # nace justo por "nombre sin RUT"). Mismo criterio que
+            # `_completar_cliente_ausente_por_rut_catalogado`.
+            if str(nuevos.get("RUT del cliente", "")).strip() in ("", "No encontrado"):
+                rut_canon = _rut_cliente_canonico(carpeta_catalogos, r.valor_canonico)
+                if rut_canon:
+                    nuevos["RUT del cliente"] = rut_canon
             delta["metodos_agregar"].add(MetodoObtencionDocumento.CONVERGENCIA_CLIENTE.value)
             for m in (
                 MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR,
@@ -1162,6 +1183,163 @@ def _convergencia_documental(
             })
 
     return delta
+
+
+def _fila_csv_a_datos_convergencia(fila: Mapping[str, str]) -> dict[str, str]:
+    """Traduce una fila del dataset persistido a las claves-OCR mínimas que
+    `_convergencia_documental` lee -- nunca vuelve a leer OCR ni catálogos,
+    sólo columnas ya escritas."""
+    return {
+        "número de guía": str(fila.get("numero_guia", "")),
+        "número de transporte": str(fila.get("numero_transporte", "")),
+        "cliente": str(fila.get("cliente", "")),
+        "RUT del cliente": str(fila.get("rut_cliente", "")),
+        "obra destino": str(fila.get("obra_destino", "")),
+        "patente del tracto": str(fila.get("patente_tracto", "")),
+        "patente del carro": str(fila.get("patente_rampla", "")),
+        "RUT del chofer": str(fila.get("rut_chofer", "")),
+        "metodos_recuperacion_documento": str(fila.get("metodos_recuperacion_documento", "")),
+    }
+
+
+def revalidar_convergencia_identidad_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA -- SIN OCR, SIN RED.
+
+    Aplica el MISMO criterio de convergencia determinista que
+    `_convergencia_documental` corre al final de `procesar_archivo`, pero
+    sobre filas YA PERSISTIDAS -- para que una operación histórica (que ya
+    migró a una `RULESET_VERSION` anterior a que este criterio existiera)
+    pueda beneficiarse en la próxima reconciliación natural, sin reprocesar
+    imágenes. Nunca pierde el valor OCR (queda en
+    `metricas_procesamiento_json["resoluciones_convergentes"]`), nunca
+    inventa (dos candidatos plausibles / variación grande -> no toca la
+    fila), nunca oculta una contradicción documental real. Idempotente: una
+    vez convergida, la siguiente corrida no encuentra nada que cambiar.
+
+    Escritura atómica bajo el lock común del dataset (`revalidacion_dataset`),
+    igual que el resto de los `revalidar_*_sin_ocr`."""
+    ruta = Path(ruta_dataset)
+    resumen: dict[str, object] = {"filas_convergidas": 0, "resoluciones": [], "contradicciones": []}
+    if not ruta.is_file():
+        return resumen
+    with ruta.open("r", newline="", encoding="utf-8-sig") as archivo:
+        lector = csv.DictReader(archivo, delimiter=";")
+        campos = list(lector.fieldnames or [])
+        # Sólo el esquema oficial (o sus variantes previas conocidas) --
+        # un dataset con encabezado incompatible no es de esta función.
+        if campos not in (COLUMNAS, COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C):
+            return resumen
+        filas = list(lector)
+
+    deltas: dict[str, dict[str, str]] = {}
+    for fila in filas:
+        if str(fila.get("estado_procesamiento", "")).strip() not in ("", "OK"):
+            continue
+        # Sólo filas que YA están en revisión: una fila `OK` no le está
+        # preguntando nada a Javier -- reescribir su identidad a la forma
+        # canónica (un alias ya reconocido, un sufijo societario) sería un
+        # cambio de datos histórico sin ninguna decisión que resolver, y
+        # fuera del alcance ("regenerar/retirar ÚNICAMENTE las decisiones
+        # que ahora puedan resolverse"). Las decisiones sobre filas `OK`
+        # (p. ej. una `OBRA_DESCONOCIDA` tardía) las cubre
+        # `reconciliar_segunda_pasada_universal_sin_ocr`.
+        if str(fila.get("indicador_revision", "")).strip().upper() != "REVISAR":
+            continue
+        datos = _fila_csv_a_datos_convergencia(fila)
+        despachar_a = str(fila.get("despachar_a_crudo") or fila.get("direccion_entrega") or "")
+        try:
+            delta = _convergencia_documental(carpeta_catalogos, datos, despachar_a_documental=despachar_a)
+        except Exception as exc:  # nunca tumba la reconciliación
+            logger.warning("Convergencia sin_ocr omitida para %s: %s", fila.get("numero_guia"), exc)
+            continue
+        # Sólo se actúa cuando hay ALGO REAL que corregir en esta fila: un
+        # valor de identidad distinto del canónico, un motivo documental
+        # vigente que la convergencia retira, o una contradicción nueva.
+        # Re-afirmar una fila ya limpia (cliente ya canónico, sin motivo,
+        # sin decisión) no aporta nada y sólo genera churn.
+        motivos_vigentes = {
+            m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()
+        }
+        valor_cambia = any(
+            str(delta["datos"].get(k, "")) and str(delta["datos"].get(k, "")) != str(fila.get(col, ""))
+            for k, col in (
+                ("cliente", "cliente"), ("obra destino", "obra_destino"),
+                ("patente del tracto", "patente_tracto"), ("patente del carro", "patente_rampla"),
+            )
+        )
+        # `delta["contradicciones"]` de patente ("ya es una patente
+        # canónica real") NO son accionables -- son el guardarraíl diciendo
+        # "no toques este valor". La contradicción accionable (RUT válido
+        # de otra empresa) ya viaja en `motivos_agregar`.
+        if not (
+            valor_cambia
+            or (delta["motivos_quitar"] & motivos_vigentes)
+            or delta["motivos_agregar"]
+        ):
+            continue
+        fila_antes = dict(fila)
+        for clave_ocr, columna in (
+            ("cliente", "cliente"), ("obra destino", "obra_destino"),
+            ("patente del tracto", "patente_tracto"), ("patente del carro", "patente_rampla"),
+        ):
+            nuevo = str(delta["datos"].get(clave_ocr, ""))
+            if nuevo and nuevo != str(fila.get(columna, "")):
+                fila[columna] = nuevo
+        # RUT del cliente materializado por la convergencia (identidad
+        # determinada) -- sólo si el dataset no traía uno válido.
+        rut_conv = str(delta["datos"].get("RUT del cliente", "")).strip()
+        if rut_conv and str(fila.get("rut_cliente", "")).strip() in ("", "No encontrado"):
+            fila["rut_cliente"] = rut_conv
+        if delta["motivos_quitar"] or delta["motivos_agregar"]:
+            motivos = [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()]
+            motivos = [m for m in motivos if m not in delta["motivos_quitar"]]
+            for m in delta["motivos_agregar"]:
+                if m not in motivos:
+                    motivos.append(m)
+            fila["motivos_revision_documento"] = " | ".join(motivos)
+            fila["indicador_revision"] = "REVISAR" if any(
+                m not in MOTIVOS_NO_BLOQUEANTES for m in motivos
+            ) else "OK"
+            fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+        if delta["metodos_agregar"]:
+            metodos = {m.strip() for m in str(fila.get("metodos_recuperacion_documento", "")).split("|") if m.strip()}
+            metodos.update(delta["metodos_agregar"])
+            fila["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
+        if delta["resoluciones"]:
+            try:
+                met = json.loads(str(fila.get("metricas_procesamiento_json", "")) or "{}")
+            except (TypeError, ValueError):
+                met = {}
+            met.setdefault("resoluciones_convergentes", [])
+            existentes = {(r.get("campo"), r.get("valor_ocr")) for r in met["resoluciones_convergentes"]}
+            for r in delta["resoluciones"]:
+                if (r.get("campo"), r.get("valor_ocr")) not in existentes:
+                    met["resoluciones_convergentes"].append(r)
+            fila["metricas_procesamiento_json"] = json.dumps(met, ensure_ascii=False, sort_keys=True)
+        cambios = {k: v for k, v in fila.items() if fila_antes.get(k) != v}
+        if cambios:
+            deltas[str(fila.get("archivo", ""))] = cambios
+            resumen["filas_convergidas"] = int(resumen["filas_convergidas"]) + 1
+            resumen["resoluciones"].extend(delta["resoluciones"])
+            resumen["contradicciones"].extend(delta["contradicciones"])
+
+    if deltas:
+        with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+            with ruta.open("r", newline="", encoding="utf-8-sig") as archivo:
+                frescas = list(csv.DictReader(archivo, delimiter=";"))
+            por_archivo = {f.get("archivo", ""): f for f in frescas}
+            for archivo_id, cambios in deltas.items():
+                objetivo = por_archivo.get(archivo_id)
+                if objetivo is not None:
+                    objetivo.update(cambios)
+            temporal = ruta.with_suffix(ruta.suffix + ".conv.tmp")
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+                escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+                escritor.writeheader(); escritor.writerows(frescas)
+            temporal.replace(ruta)
+    return resumen
 
 
 def _corroborar_obra_destino_confirmada(

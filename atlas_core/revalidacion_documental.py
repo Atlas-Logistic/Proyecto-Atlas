@@ -4833,6 +4833,18 @@ def reconciliar_bandeja_decisiones(
             d for d in bandeja["decisiones"]
             if d.get("tipo") in _ACCION_AUTO_POR_TIPO
             and (d.get("evaluacion_evidencia") or {}).get("resultado") == "RESUELTO_AUTOMATICAMENTE"
+            # `USAR_PATENTE_EXISTENTE` exige EXACTAMENTE un candidato (ver
+            # `aplicar_decision_obra`). `evaluar_evidencia_patente` puede
+            # alcanzar RESUELTO_AUTOMATICAMENTE con un único candidato en el
+            # NIVEL MÁS ALTO pero conservando en `candidatos` los de nivel
+            # inferior (caso real 472477: JD8659 confirmada por Javier +
+            # JE8659 con un transporte independiente real del mismo chofer).
+            # Sin este filtro, la auto-aplicación lanzaba `ErrorAplicacion
+            # Decision` y abortaba TODA la reconciliación -- y con ella
+            # cualquier RULESET nuevo. Con dos candidatos plausibles la
+            # tarjeta se conserva para que Javier elija (SELECCIONAR_OTRA_
+            # PATENTE), exactamente el criterio "dos plausibles -> preguntar".
+            and (d.get("tipo") != "VEHICULO_DESCONOCIDO" or len(d.get("candidatos") or []) == 1)
         ]
         if not candidatas:
             break
@@ -4856,6 +4868,69 @@ def reconciliar_bandeja_decisiones(
         "decisiones_publicadas": len(bandeja["decisiones"]),
         "decisiones_aplicadas_automaticamente": aplicadas_automaticamente,
         "bandeja": bandeja,
+    }
+
+
+def reconciliar_segunda_pasada_universal_sin_ocr(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL -- SIN OCR,
+    SIN RED. Da a una operación HISTÓRICA (que ya migró a una
+    `RULESET_VERSION` anterior a que existiera este criterio) la misma
+    oportunidad que un lote nuevo: TODA decisión pendiente CLIENTE_
+    CANDIDATO/CLIENTE_DESCONOCIDO/OBRA_DESCONOCIDA/VEHICULO_DESCONOCIDO
+    pasa por convergencia determinista (`atlas_core.atlas_ia.convergencia`)
+    antes de quedar para Javier. `orquestador=None` -> nunca B1 aquí
+    (B1 es una llamada de red; la reconciliación histórica se mantiene
+    determinista). Al resolver: corrige la fila (valor OCR + evidencia
+    conservados en `metricas_procesamiento_json`), regenera la bandeja por
+    el mecanismo canónico (`regenerar_decisiones_persistidas` +
+    `generar_artefacto`, que filtra contra el ledger -- ninguna decisión
+    ya cerrada por un humano resucita, ninguna se duplica) y publica con
+    hashes frescos. Dos candidatos plausibles / variación grande / sin
+    OCR -> la decisión se conserva intacta. Idempotente."""
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
+    )
+    from atlas_core.procesamiento_masivo import _segunda_pasada_universal
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+    if not dataset.is_file():
+        return {"aplicado": False, "motivo": "SIN_DATASET"}
+    try:
+        pendientes = json.loads(artefacto_ruta.read_text(encoding="utf-8")).get("decisiones", [])
+    except (OSError, json.JSONDecodeError):
+        pendientes = []
+    if not pendientes:
+        return {"aplicado": False, "motivo": "SIN_DECISIONES", "metricas": {}}
+
+    try:
+        archivos = {
+            str(f.get("archivo", "")).strip()
+            for f in _leer_filas(dataset)
+            if str(f.get("archivo", "")).strip()
+        }
+        metricas = _segunda_pasada_universal(dataset, archivos, pendientes, None, catalogos)
+        vigentes = regenerar_decisiones_persistidas(
+            decisiones=pendientes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+        )
+        bandeja = generar_artefacto(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=vigentes, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
+    except (OSError, ValueError) as exc:
+        # Esquema incompatible / catálogo ausente -- nunca tumba la
+        # reconciliación (mismo criterio que el resto de la batería).
+        return {"aplicado": False, "motivo": f"OMITIDO:{type(exc).__name__}", "metricas": {}}
+    return {
+        "aplicado": bool(metricas.get("resueltas_determinista")),
+        "metricas": {k: v for k, v in metricas.items() if not isinstance(v, list)},
+        "resoluciones_deterministas": metricas.get("resoluciones_deterministas", []),
+        "decisiones_publicadas": len(bandeja["decisiones"]),
     }
 
 

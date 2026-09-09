@@ -292,18 +292,28 @@ def test_E_ocr_original_queda_en_auditoria_de_metricas(tmp_path):
         "número de guía": "472477", "número de transporte": "0000354870",
         "patente del carro": "JD8629", "RUT del chofer": "15489424-1",
     }
-    delta = _convergencia_documental(carpeta, datos, despachar_a_documental="")
+    # Convergencia de patente SÓLO cuando el llamador entrega el dataset
+    # (`filas`): la unicidad depende de las OTRAS guías del chofer. Sin
+    # `filas` no se toca la patente (caso real 472477: JE8659 es un
+    # competidor real invisible desde un solo documento).
+    assert _convergencia_documental(carpeta, datos, despachar_a_documental="")["resoluciones"] == []
+
+    fila = {"numero_guia": "472477", "numero_transporte": "0000354870",
+            "patente_rampla": "JD8629", "rut_chofer": "15489424-1", "estado_procesamiento": "OK"}
+    delta = _convergencia_documental(carpeta, datos, despachar_a_documental="", filas=[fila])
     assert delta["datos"]["patente del carro"] == "JD8659"
-    assert delta["resoluciones"] == [{
-        "campo": "patente_rampla", "valor_ocr": "JD8629", "valor_canonico": "JD8659",
-        "metodo": "CONVERGENCIA_VEHICULO",
-        "evidencias": list(delta["resoluciones"][0]["evidencias"]), "confianza": "ALTA",
-    }]
+    assert delta["resoluciones"][0]["valor_ocr"] == "JD8629"  # OCR original trazable
+    assert delta["resoluciones"][0]["valor_canonico"] == "JD8659"
+    assert delta["resoluciones"][0]["confianza"] == "ALTA"
     assert "CONVERGENCIA_VEHICULO" in delta["metodos_agregar"]
     assert "PATENTE_SIN_HOMOLOGAR" in delta["motivos_quitar"]
 
 
-def test_E_pipeline_completo_resuelve_silencioso_y_audita(tmp_path, monkeypatch):
+def test_E_procesar_archivo_no_toca_la_patente_sin_contexto_de_lote(tmp_path, monkeypatch):
+    """`procesar_archivo` es por-documento: no puede verificar unicidad de
+    la patente contra las otras guías del chofer, así que NUNCA la resuelve
+    sola -- eso queda para la segunda pasada universal del lote. El OCR se
+    conserva intacto y el motivo/decisión se emite normalmente."""
     carpeta = _carpeta(tmp_path)
     _confirmar_vehiculo(carpeta, "JD8659", TipoVehiculo.CARRO, rut_chofer_asociado="15489424-1")
     base = {
@@ -318,13 +328,11 @@ def test_E_pipeline_completo_resuelve_silencioso_y_audita(tmp_path, monkeypatch)
     monkeypatch.setattr(procesamiento_masivo, "extraer_datos", Mock(return_value=dict(base)))
     salida = procesar_archivo(tmp_path / "g.jpg", carpeta_catalogos=carpeta, proveedor_rutas=object())
 
-    assert salida["patente_rampla"] == "JD8659"  # canónico aplicado
-    assert "PATENTE_SIN_HOMOLOGAR" not in salida["motivos_revision_documento"]
+    assert salida["patente_rampla"] == "JD8629"  # OCR intacto
     metricas = json.loads(salida["metricas_procesamiento_json"])
-    audit = metricas["resoluciones_convergentes"]
-    assert audit[0]["valor_ocr"] == "JD8629"  # OCR original trazable
-    assert audit[0]["valor_canonico"] == "JD8659"
-    assert "CONVERGENCIA_VEHICULO" in salida["metodos_recuperacion_documento"]
+    assert "resoluciones_convergentes" not in metricas or all(
+        r["campo"] != "patente_rampla" for r in metricas["resoluciones_convergentes"]
+    )
 
 
 # ==========================================================================

@@ -35,6 +35,7 @@ from atlas_core.revalidacion_documental import (
     _indicadores_documentales_coherentes,
     reconciliar_bandeja_decisiones,
     reconciliar_decisiones_destino_no_resuelto,
+    reconciliar_segunda_pasada_universal_sin_ocr,
     reconciliar_incidencias_rut_chofer_documental,
     revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr,
     revalidar_destino_contra_comuna_documental_sin_ocr,
@@ -271,11 +272,21 @@ from atlas_core.revalidacion_documental import (
 # DESCONOCIDA/VEHICULO_DESCONOCIDO pasa por una segunda pasada
 # (determinista -> B1 con evidencia interna -> validación -> aplicación
 # canónica -> regeneración de la bandeja) antes de llegar a Javier (ver
-# `procesamiento_masivo._segunda_pasada_universal`). Sin subir este
-# número, una operación ya migrada a 18 nunca volvería a barrer sus
-# decisiones/pendientes con estas reglas hasta que un lote nuevo la
-# tocara -- exactamente lo que este párrafo advierte.
-RULESET_VERSION = 19
+# `procesamiento_masivo._segunda_pasada_universal`).
+#
+# Subida de 19 a 20 -- causa raíz real: la 19 sólo cableó esas reglas en
+# `procesar_carpeta` (ingesta de un lote nuevo). Una operación histórica
+# que abre Desktop ejecuta `reconciliar_estado_derivado`, que NO invocaba
+# ni `_convergencia_documental` ni `_segunda_pasada_universal` -- migrar a
+# 19 marcaba "ya barrido a v19" sin haber aplicado ninguna de las reglas
+# nuevas (caso real: 472477 PRODALAM seguía como CLIENTE_CANDIDATO tras
+# abrir Desktop post-commit). La 20 conecta `revalidar_convergencia_
+# identidad_sin_ocr` y `reconciliar_segunda_pasada_universal_sin_ocr`
+# (SIN OCR, SIN red, `orquestador=None`) a la batería de
+# `reconciliar_estado_derivado` -- así una operación ya migrada obtiene la
+# convergencia en su próxima reconciliación natural, y cualquier RULESET
+# futuro que cambie conocimiento derivado se beneficia igual.
+RULESET_VERSION = 20
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -755,6 +766,7 @@ def reconciliar_estado_derivado(
         from atlas_core.procesamiento_masivo import (
             MotivoRevisionDocumento,
             _resolver_destinos_contaminados_por_historial,
+            revalidar_convergencia_identidad_sin_ocr,
         )
         with dataset.open("r", newline="", encoding="utf-8-sig") as archivo_dataset:
             archivos_destino_contaminado = {
@@ -770,6 +782,21 @@ def reconciliar_estado_derivado(
             }
         recuperacion_historial_destino = _resolver_destinos_contaminados_por_historial(
             dataset, archivos_destino_contaminado,
+        )
+
+        # Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA -- SIN OCR: aplica el
+        # mismo criterio determinista que `procesar_archivo` ya corre al
+        # final de cada documento (un error pequeño de OCR no convierte
+        # conocimiento fuertemente establecido en desconocido) a filas YA
+        # PERSISTIDAS, para que una operación histórica se beneficie en la
+        # próxima reconciliación natural sin reprocesar imágenes. Corre
+        # temprano -- las revalidaciones de abajo y `reconciliar_bandeja_
+        # decisiones` deben ver la identidad ya convergida. Nunca inventa
+        # (dos candidatos plausibles / variación grande -> no toca la
+        # fila), nunca oculta una contradicción documental real, nunca
+        # pierde el valor OCR.
+        convergencia_identidad = revalidar_convergencia_identidad_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
         )
 
         # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: estas
@@ -933,6 +960,19 @@ def reconciliar_estado_derivado(
         # (`MAX_ITERACIONES_AUTO_RESOLUCION`) para los tipos de decisión
         # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
         evidencia_decisiones = reconciliar_bandeja_decisiones(raiz_atlas=raiz, reloj=lambda: instante)
+        # Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL -- SIN
+        # OCR, SIN RED: TODA decisión pendiente CLIENTE_CANDIDATO/CLIENTE_
+        # DESCONOCIDO/OBRA_DESCONOCIDA/VEHICULO_DESCONOCIDO pasa por
+        # convergencia determinista antes de quedar para Javier -- misma
+        # oportunidad que un lote nuevo, ahora también para una operación
+        # histórica. Corre DESPUÉS de `reconciliar_bandeja_decisiones`
+        # (sobre la bandeja ya regenerada/enriquecida) y republica por el
+        # mecanismo canónico (filtra contra el ledger: ninguna decisión
+        # humana se pierde ni se duplica). `orquestador=None` -> nunca B1
+        # aquí (la reconciliación histórica se mantiene determinista).
+        segunda_pasada_historica = reconciliar_segunda_pasada_universal_sin_ocr(
+            raiz_atlas=raiz, reloj=lambda: instante,
+        )
         # Bloque PENDIENTES TÉCNICOS ACCIONABLES -- caso real 0000353055/
         # 464715 (MULTIPLES_UBICACIONES_DISPERSAS): los motivos de destino
         # que YA son un callejón sin salida con la evidencia actual
@@ -1077,6 +1117,12 @@ def reconciliar_estado_derivado(
         "decisiones_destino_no_resuelto_publicadas": deteccion_destino["decisiones_publicadas"],
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "decisiones_aplicadas_automaticamente": evidencia_decisiones["decisiones_aplicadas_automaticamente"],
+        "convergencia_identidad_sin_ocr": {
+            "filas_convergidas": convergencia_identidad["filas_convergidas"],
+            "resoluciones": convergencia_identidad["resoluciones"],
+            "contradicciones": convergencia_identidad["contradicciones"],
+        },
+        "segunda_pasada_universal_sin_ocr": segunda_pasada_historica,
         "pendientes_tecnicos": len(registros_despues),
         "totales": manifest["totales"],
         "ocr_ejecutado": False,
