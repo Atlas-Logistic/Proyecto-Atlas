@@ -4623,6 +4623,17 @@ def procesar_carpeta(
             f"{_sp['a_humano']} a Javier"
         )
 
+    # Codex 472623/472624 -- un destino que B1 acaba de RECHAZAR por
+    # evidencia (`VALOR_NO_RESPALDADO_POR_EVIDENCIA` / `BLOQUEADO_POR_
+    # VALIDACION`) no puede seguir como RUTA_CALCULADA. Import perezoso:
+    # `revalidacion_documental` importa este módulo.
+    from atlas_core.revalidacion_documental import (
+        revalidar_destino_rechazado_por_evidencia_b1_sin_ocr,
+    )
+    resumen["destinos_rechazados_por_evidencia_b1"] = (
+        revalidar_destino_rechazado_por_evidencia_b1_sin_ocr(ruta_dataset=ruta_csv)
+    )["guias_actualizadas"]
+
     # OBSERVABILIDAD OBLIGATORIA -- un único registro por lote (motivos +
     # segunda pasada) anexado a `b1_observabilidad.jsonl` y expuesto en el
     # resumen.

@@ -1639,6 +1639,168 @@ def revalidar_origen_encabezado_no_confiable_sin_ocr(*, ruta_dataset: str | Path
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+_MOTIVO_RUTA_DESTINO_RECHAZADO_B1 = "DESTINO_RECHAZADO_POR_EVIDENCIA_B1"
+_MOTIVO_DESTINO_CONTAMINADO = MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
+_RECHAZOS_EVIDENCIA_B1 = frozenset({"VALOR_NO_RESPALDADO_POR_EVIDENCIA"})
+
+
+def _trazas_atlas_ia(fila: Mapping[str, str]) -> list:
+    try:
+        datos = json.loads(str(fila.get("resultado_atlas_ia_json", "")) or "[]")
+    except (ValueError, TypeError):
+        return []
+    return datos if isinstance(datos, list) else []
+
+
+def _traza_es_de_destino(traza: object) -> bool:
+    return isinstance(traza, dict) and (
+        str(traza.get("dominio", "")).upper() == "DESTINO"
+        or str(traza.get("campo", "")) == "despachar_a_crudo"
+    )
+
+
+def _valor_destino_rechazado_por_b1(traza: object) -> str:
+    """Valor de destino que B1 / la validación de evidencia RECHAZÓ
+    EXPLÍCITAMENTE en esta traza -- cadena vacía si no es un rechazo.
+    Rechazo = `aplicado_operacionalmente` falso Y (`BLOQUEADO_POR_
+    VALIDACION` con `VALOR_NO_RESPALDADO_POR_EVIDENCIA`, o
+    `validacion.aceptada == false`, o `hipotesis.evidencia_en_contra`)."""
+    if not _traza_es_de_destino(traza) or traza.get("aplicado_operacionalmente"):
+        return ""
+    validacion = traza.get("validacion") or {}
+    hipotesis = traza.get("hipotesis") or {}
+    contradiccion = bool(hipotesis.get("evidencia_en_contra"))
+    bloqueada = str(traza.get("estado", "")) == "BLOQUEADO_POR_VALIDACION"
+    rechazada_validacion = validacion.get("aceptada") is False
+    if not (contradiccion or bloqueada or rechazada_validacion):
+        return ""
+    motivo = str(validacion.get("motivo_rechazo", ""))
+    if bloqueada and motivo and motivo not in _RECHAZOS_EVIDENCIA_B1 and not contradiccion:
+        return ""
+    contexto = traza.get("contexto_final") or {}
+    identidad = contexto.get("identidad_operacional") or {}
+    return str(
+        hipotesis.get("valor_propuesto")
+        or hipotesis.get("valor_observado")
+        or contexto.get("valor_documental")
+        or identidad.get("direccion_entrega")
+        or ""
+    ).strip()
+
+
+def _destino_aceptado_por_b1(fila: Mapping[str, str]) -> bool:
+    for traza in _trazas_atlas_ia(fila):
+        if not _traza_es_de_destino(traza):
+            continue
+        validacion = traza.get("validacion") or {}
+        if traza.get("aplicado_operacionalmente") or validacion.get("aceptada") is True:
+            return True
+    return False
+
+
+def revalidar_destino_rechazado_por_evidencia_b1_sin_ocr(
+    *, ruta_dataset: str | Path, ruta_ledger: str | Path | None = None,
+) -> dict[str, object]:
+    """Codex 472623/472624 -- una dirección que la evidencia documental /
+    B1 RECHAZÓ explícitamente (`VALOR_NO_RESPALDADO_POR_EVIDENCIA` /
+    `BLOQUEADO_POR_VALIDACION` / `evidencia_en_contra`, con
+    `aplicado_operacionalmente=false`) NUNCA puede quedar como destino
+    operacional confirmado, `RUTA_CALCULADA` ni fuente histórica
+    confiable. Sin OCR, sin red -- sólo `resultado_atlas_ia_json` ya
+    persistido.
+
+    - invalida `direccion_entrega` / ruta / km / tiempo derivados de ese
+      valor y vacía `despachar_a_crudo` (el valor rechazado NO es
+      evidencia documental confiable; el texto crudo sobrevive en la
+      traza B1 y en los respaldos para auditar -- criterio 5);
+    - re-marca `DESTINO_CONTAMINADO_POR_OTRA_SECCION`: la fila queda
+      EXPLÍCITAMENTE sin resolver (criterio 7), nunca "SAN LUIS" por
+      comodidad;
+    - alcance por TRANSPORTE (criterio 4): si B1 rechazó ese valor para
+      UNA guía, otra guía del MISMO transporte con ese mismo valor
+      operacional tampoco lo conserva -- dos guías del mismo transporte
+      no se validan mutuamente;
+    - se abstiene si hay evidencia SUPERIOR para esa guía: un
+      `REGISTRAR_DIRECCION` humano, un destino de catálogo confirmado
+      (`CATALOGO_OBRA_DESTINO`), o una traza de destino B1 ACEPTADA.
+
+    Idempotente: una fila ya invalidada (sin destino/despachar + motivo
+    contaminado) no se vuelve a tocar."""
+    from atlas_core.decisiones_pendientes import _guias_con_direccion_confirmada_por_humano
+
+    ruta = Path(ruta_dataset)
+    ledger = Path(ruta_ledger) if ruta_ledger is not None else ruta.parent / "decisiones_aplicadas.json"
+    try:
+        guias_registro_direccion = _guias_con_direccion_confirmada_por_humano(ledger)
+    except (OSError, ValueError, AttributeError):
+        guias_registro_direccion = frozenset()
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+        rechazados_por_transporte: dict[str, set[str]] = {}
+        for fila in filas:
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            if not transporte:
+                continue
+            for traza in _trazas_atlas_ia(fila):
+                valor = _valor_destino_rechazado_por_b1(traza)
+                if valor:
+                    rechazados_por_transporte.setdefault(transporte, set()).add(
+                        normalizar_nombre_destino(valor)
+                    )
+        if not rechazados_por_transporte:
+            return {"filas_totales": len(filas), "guias_actualizadas": []}
+
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            rechazados = rechazados_por_transporte.get(transporte, set())
+            if not rechazados:
+                continue
+            direccion = str(fila.get("direccion_entrega", "")).strip()
+            despachar = str(fila.get("despachar_a_crudo", "")).strip()
+            valor_operacional = direccion or despachar
+            if not valor_operacional:
+                continue
+            if normalizar_nombre_destino(valor_operacional) not in rechazados:
+                continue
+            guia = str(fila.get("numero_guia", "")).strip()
+            # Evidencia SUPERIOR -> se conserva tal cual.
+            if guia in guias_registro_direccion:
+                continue
+            if "CATALOGO_OBRA_DESTINO" in str(fila.get("metodos_recuperacion_documento", "")):
+                continue
+            if _destino_aceptado_por_b1(fila):
+                continue
+            motivos = [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()]
+
+            for campo in (
+                "despachar_a_crudo", "direccion_entrega", "localidad_entrega", "region_entrega",
+                "codigo_pais", "codigo_unidad", "codigo_contexto",
+                "distancia_km", "duracion_min", "proveedor_ruta",
+            ):
+                fila[campo] = ""
+            fila["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
+            fila["motivo_ruta"] = _MOTIVO_RUTA_DESTINO_RECHAZADO_B1
+            fila["estado_entrega"] = "NO_INTENTADO"
+            if _MOTIVO_DESTINO_CONTAMINADO not in motivos:
+                motivos.append(_MOTIVO_DESTINO_CONTAMINADO)
+            fila["motivos_revision_documento"] = " | ".join(motivos)
+            fila["indicador_revision"] = "REVISAR" if any(
+                m not in MOTIVOS_NO_BLOQUEANTES for m in motivos
+            ) else "OK"
+            fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+            fila["estado_operacional"] = "REQUIERE_REVISION"
+            guias_actualizadas.append(guia)
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_destino_contra_comuna_documental_sin_ocr(
     *, ruta_dataset: str | Path,
 ) -> dict[str, object]:
