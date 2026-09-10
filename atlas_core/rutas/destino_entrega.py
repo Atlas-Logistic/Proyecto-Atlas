@@ -1642,6 +1642,28 @@ def resolver_destino_entrega_validado(
             localidad="", region="",
             metodo_confirmacion=resultado.metodo_confirmacion,
         )
+    # Bloque COHERENCIA DESTINO -- casos reales 464170 / 464653 / 464746:
+    # un candidato que contradice materialmente la calle o el número de la
+    # dirección documental clara, o que la degrada a sólo comuna/ciudad,
+    # NUNCA se acepta como destino final sólo porque el proveedor devolvió
+    # coordenadas. Complementa las señales de arriba (comuna, número por
+    # orden de magnitud) -- ver `motivo_incoherencia_destino_documental`.
+    motivo_incoherencia = motivo_incoherencia_destino_documental(
+        despachar_a_crudo=despachar_a_crudo or "",
+        etiqueta_geocodificada=resultado.etiqueta_geocodificada or "",
+        localidad=resultado.localidad or "", region=resultado.region or "",
+    )
+    if motivo_incoherencia:
+        return ResultadoDestinoEntrega(
+            despachar_a_crudo=resultado.despachar_a_crudo,
+            coordenadas=resultado.coordenadas,
+            etiqueta_geocodificada="",
+            confianza=resultado.confianza,
+            estado=ESTADO_REVISAR,
+            motivo=motivo_incoherencia,
+            localidad="", region="",
+            metodo_confirmacion=resultado.metodo_confirmacion,
+        )
     return resultado
 
 
@@ -2204,6 +2226,152 @@ def _numero_direccion_incompatible(despachar_a_crudo: str, etiqueta_geocodificad
     if doc.isdigit() and geo.isdigit() and int(doc) == int(geo):
         return False
     return abs(len(doc) - len(geo)) >= 2
+
+
+# ---------------------------------------------------------------------------
+# COHERENCIA DIRECCIÓN DOCUMENTAL <-> GEOCODIFICACIÓN
+# ---------------------------------------------------------------------------
+# Bloque COHERENCIA DESTINO -- casos reales 464170 ("ALMTE. LATORRE 843
+# MEJILLONES" -> "898 Avenida Almirante Latorre"), 464653 ("PDTE. BRESCO
+# 6903 LAS CONDES" -> "Avenida Las Condes 6903") y 464746 ("CAM. EL
+# NOVICIADO LAMPA" -> "Lampa, RM, Chile"): un candidato geocodificado no
+# es válido -- no puede producir RUTA_CALCULADA -- si CONTRADICE
+# materialmente la calle o el número de una dirección documental clara, o
+# si DEGRADA una dirección específica a sólo comuna/ciudad/región. Nunca
+# se compara por string literal: se expanden abreviaturas y se tolera
+# ruido OCR a nivel de token.
+
+_ABREVIATURAS_VIA_DOCUMENTAL = {
+    "PDTE": "PRESIDENTE", "PTE": "PRESIDENTE", "PRES": "PRESIDENTE",
+    "ALMTE": "ALMIRANTE", "GRAL": "GENERAL", "CNEL": "CORONEL",
+    "DR": "DOCTOR", "DRA": "DOCTORA", "PROF": "PROFESOR", "MONS": "MONSENOR",
+    "AV": "AVENIDA", "AVDA": "AVENIDA", "AVE": "AVENIDA",
+    "CAM": "CAMINO", "CMNO": "CAMINO", "PJE": "PASAJE", "PSJE": "PASAJE",
+    "STA": "SANTA", "STO": "SANTO", "STGO": "SANTIAGO", "DIAG": "DIAGONAL",
+}
+_PREFIJOS_VIA_ESTRUCTURALES = frozenset({
+    "AVENIDA", "CALLE", "CAMINO", "PASAJE", "RUTA", "DIAGONAL", "COSTANERA",
+    "ALAMEDA", "AUTOPISTA", "CARRETERA", "SUBIDA", "BAJADA", "CALLEJON",
+    "LOTE", "PARCELA", "SITIO", "MANZANA", "BLOCK", "DEPTO", "PISO",
+    "LOCAL", "BODEGA", "GALPON", "OFICINA", "KM", "KMS",
+})
+_STOPWORDS_CALLE = frozenset({"DE", "DEL", "LA", "LAS", "LOS", "EL", "Y", "E", "A", "AL"})
+_TOKENS_NIVEL_CIUDAD = frozenset({"SANTIAGO", "CHILE", "METROPOLITANA", "REGION", "REG"})
+
+
+def _nucleo_calle(texto: str, *comunas_a_excluir: str) -> set[str]:
+    """Tokens significativos del NOMBRE de la calle en `texto` -- lo que va
+    ANTES del primer número de casa, sin prefijos de vía, sin stopwords,
+    sin nombres de comuna/ciudad ni tokens de <3 caracteres, con las
+    abreviaturas expandidas. Vacío si no hay una calle clara (p. ej.
+    "Lampa, RM, Chile" tras excluir la comuna)."""
+    excluir: set[str] = set()
+    for comuna in comunas_a_excluir:
+        excluir |= {
+            t for t in re.findall(r"[A-Z0-9]+", _texto_normalizado_sin_acentos(comuna or "").upper())
+        }
+    coincidencia = re.search(r"\b\d{1,6}\b", texto or "")
+    cabeza = (texto or "")[: coincidencia.start()] if coincidencia else (texto or "")
+    nucleo: set[str] = set()
+    for token in re.findall(r"[A-Z0-9]+", _texto_normalizado_sin_acentos(cabeza).upper()):
+        if token.isdigit():
+            continue
+        token = _ABREVIATURAS_VIA_DOCUMENTAL.get(token, token)
+        if (
+            len(token) < 3
+            or token in _PREFIJOS_VIA_ESTRUCTURALES
+            or token in _STOPWORDS_CALLE
+            or token in _TOKENS_NIVEL_CIUDAD
+            or token in excluir
+        ):
+            continue
+        nucleo.add(token)
+    return nucleo
+
+
+def _distancia_edicion(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    fila = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        anterior, fila[0] = fila[0], i
+        for j, cb in enumerate(b, 1):
+            anterior, fila[j] = fila[j], min(fila[j] + 1, fila[j - 1] + 1, anterior + (ca != cb))
+    return fila[-1]
+
+
+def _tokens_calle_compatibles(a: str, b: str) -> bool:
+    """``True`` si dos tokens de calle son "el mismo" salvo ruido OCR --
+    iguales, uno prefijo del otro (>=4 chars), o distancia de edición
+    pequeña relativa al largo ("MELIFILLA" ~ "MELIPILLA")."""
+    if a == b:
+        return True
+    corto = min(len(a), len(b))
+    if corto >= 4 and (a.startswith(b) or b.startswith(a)):
+        return True
+    if corto < 4:
+        return False
+    return _distancia_edicion(a, b) <= max(1, corto // 4)
+
+
+def _numero_casa_incoherente(numero_documental: str, numero_geocodificado: str) -> bool:
+    """``True`` si ambos números existen y son MATERIALMENTE distintos --
+    no se rechaza por un solo dígito cambiado (OCR frecuente) ni por ceros
+    a la izquierda; sí por otro largo o por >=2 dígitos distintos
+    ("843" != "898", "15" != "1545")."""
+    doc = str(numero_documental or "").strip()
+    geo = str(numero_geocodificado or "").strip()
+    if not doc or not geo or doc == geo:
+        return False
+    if doc.isdigit() and geo.isdigit() and int(doc) == int(geo):
+        return False
+    if len(doc) != len(geo):
+        return True
+    return sum(1 for x, y in zip(doc, geo) if x != y) >= 2
+
+
+MOTIVO_CALLE_DOCUMENTAL_DISTINTA = "GEOCODIFICACION_CALLE_DOCUMENTAL_DISTINTA"
+MOTIVO_DESTINO_DEGRADADO_A_COMUNA = "GEOCODIFICACION_DEMASIADO_GENERICA"
+
+
+def motivo_incoherencia_destino_documental(
+    *, despachar_a_crudo: str, etiqueta_geocodificada: str,
+    localidad: str = "", region: str = "",
+) -> str:
+    """Motivo de rechazo si la geocodificación NO es coherente con una
+    dirección documental clara -- cadena vacía si es coherente (o si el
+    documento no trae calle ni número con qué contrastar).
+
+    - número documental claro != número geocodificado -> NUMERO_INCOMPATIBLE
+      (criterio 2);
+    - calle documental clara vs calle geocodificada sin ningún token
+      compatible -> CALLE_DOCUMENTAL_DISTINTA (criterio 3);
+    - calle documental clara pero la geocodificación no trae calle propia
+      (sólo comuna/ciudad/región) -> DEMASIADO_GENERICA (criterio 4).
+
+    Nunca compara strings literales (abreviaturas + tolerancia OCR,
+    criterio 5). Nunca toca `despachar_a_crudo` (criterio 7)."""
+    documental = str(despachar_a_crudo or "").strip()
+    etiqueta = str(etiqueta_geocodificada or "").strip()
+    if not documental:
+        return ""
+    comuna_doc = _comuna_documental_inequivoca(documental)
+    num_doc = _numero_calle(documental)
+    num_geo = _numero_calle(etiqueta)
+    if _numero_casa_incoherente(num_doc, num_geo):
+        return f"GEOCODIFICACION_NUMERO_INCOMPATIBLE: {num_doc} != {num_geo}"
+    nucleo_doc = _nucleo_calle(documental, comuna_doc, localidad)
+    if not nucleo_doc:
+        return ""  # el documento no fija una calle clara: nada que exigir aquí
+    nucleo_geo = _nucleo_calle(etiqueta, comuna_doc, localidad)
+    if not nucleo_geo:
+        return MOTIVO_DESTINO_DEGRADADO_A_COMUNA
+    if not any(_tokens_calle_compatibles(a, b) for a in nucleo_doc for b in nucleo_geo):
+        return (
+            f"{MOTIVO_CALLE_DOCUMENTAL_DISTINTA}: "
+            f"{'/'.join(sorted(nucleo_doc))} != {'/'.join(sorted(nucleo_geo))}"
+        )
+    return ""
 
 
 def resolver_entrega_documento(

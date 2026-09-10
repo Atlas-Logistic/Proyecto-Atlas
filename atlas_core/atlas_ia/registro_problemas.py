@@ -622,6 +622,9 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         codigos=frozenset({
             "DESTINO_SIN_DATO", "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL",
             "GEOCODIFICACION_DEMASIADO_GENERICA", "MULTIPLES_UBICACIONES_DISPERSAS",
+            # Bloque COHERENCIA DESTINO -- caso real 464653: calle
+            # geocodificada sin ningún token en común con la documental.
+            "GEOCODIFICACION_CALLE_DOCUMENTAL_DISTINTA",
             # Bloque R9 -- caso real 472044.
             "SIN_ACCESO_VIAL",
             # Bloque RESOLUCIÓN R16 -- caso real 472037: un candidato fuera

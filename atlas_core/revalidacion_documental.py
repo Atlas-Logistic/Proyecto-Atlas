@@ -1837,7 +1837,7 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
     por fila si no hay evidencia demostrable (nunca inventa una)."""
     from atlas_core.rutas.destino_entrega import (
         _comuna_documental_inequivoca, _comunas_territorialmente_compatibles,
-        _numero_calle, _numero_direccion_incompatible, _texto_normalizado_sin_acentos,
+        _texto_normalizado_sin_acentos, motivo_incoherencia_destino_documental,
     )
 
     ruta = Path(ruta_dataset)
@@ -1866,14 +1866,16 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
                         "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
                         f"{comuna_documental} != {localidad}"
                     )
-            # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- número de casa
-            # incompatible por orden de magnitud (caso real 464784: doc
-            # "15", geocodificado "1545"). Mismo criterio que en vivo
-            # (`resolver_destino_entrega_validado`).
-            if not motivo_rechazo and despachar_a and _numero_direccion_incompatible(despachar_a, direccion):
-                motivo_rechazo = (
-                    "GEOCODIFICACION_NUMERO_INCOMPATIBLE: "
-                    f"{_numero_calle(despachar_a)} != {_numero_calle(direccion)}"
+            # Bloque COHERENCIA DESTINO -- casos reales 464170 / 464653 /
+            # 464746: número documental != número geocodificado (más allá
+            # de un dígito OCR), calle documental materialmente distinta, o
+            # dirección específica degradada a sólo comuna/ciudad. Mismo
+            # criterio EXACTO que en vivo (`resolver_destino_entrega_
+            # validado`), nunca una regla nueva ni comparación literal.
+            if not motivo_rechazo and despachar_a:
+                motivo_rechazo = motivo_incoherencia_destino_documental(
+                    despachar_a_crudo=despachar_a, etiqueta_geocodificada=direccion,
+                    localidad=localidad, region=region,
                 )
             if (
                 not motivo_rechazo and not localidad and not region
@@ -1891,6 +1893,11 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
             fila["codigo_contexto"] = ""
             fila["distancia_km"] = ""
             fila["duracion_min"] = ""
+            # Derivados de una ruta ya demostrada incorrecta: nunca deben
+            # sobrevivir junto a un destino invalidado (mismo criterio que
+            # el resto de la limpieza retroactiva -- 472477 / 472623).
+            fila["proveedor_ruta"] = ""
+            fila["estado_entrega"] = "NO_INTENTADO"
             fila["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
             fila["motivo_ruta"] = motivo_rechazo
             guias_actualizadas.append(str(fila.get("numero_guia", "")))

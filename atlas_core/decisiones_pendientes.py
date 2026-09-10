@@ -145,6 +145,13 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
     # humano puede decir cuál es la dirección real.
     "GEOCODIFICACION_NUMERO_INCOMPATIBLE",
     "GEOCODIFICACION_DEMASIADO_GENERICA",
+    # Bloque COHERENCIA DESTINO -- casos reales 464653 ("PDTE. BRESCO 6903
+    # LAS CONDES" geocodificado a "Avenida Las Condes 6903"): la calle
+    # geocodificada no comparte ningún token con la calle documental
+    # clara, ni siquiera tolerando abreviaturas/ruido OCR -- match
+    # espurio, callejón sin salida automático igual que la contradicción
+    # de comuna: sólo un humano puede decir cuál es la calle real.
+    "GEOCODIFICACION_CALLE_DOCUMENTAL_DISTINTA",
     "MULTIPLES_UBICACIONES_DISPERSAS",
     # Bloque R9 -- caso real 472044: el punto geocodificado no tiene
     # acceso vial cercano (evidencia real de imprecisión del destino,
