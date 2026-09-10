@@ -63,15 +63,29 @@ def test_calle_materialmente_distinta_es_incoherente():
     assert m.startswith("GEOCODIFICACION_CALLE_DOCUMENTAL_DISTINTA")
 
 
-def test_abreviaturas_y_ruido_ocr_no_disparan_falso_positivo():
+def test_abreviaturas_y_ruido_ocr_solo_para_el_nombre_de_la_calle():
     # abreviatura ALMTE -> ALMIRANTE, mismo número -> coherente
     assert _m("AV. ALMTE. LATORRE 843 MEJILLONES", "Avenida Almirante Latorre 843, Mejillones") == ""
-    # ruido OCR en la calle ("MELIFILLA" ~ "MELIPILLA") y en el número
-    # ("1OBOD") -- el geocodificador recuperó la calle real: coherente
+    # ruido OCR en el NOMBRE de la calle ("MELIFILLA" ~ "MELIPILLA") -- el
+    # geocodificador recuperó la calle real; el número documental no es
+    # claro ("1OBOD"), así que no hay nada que contrastar ahí: coherente
     assert _m("CAMINO A MELIFILLA 1OBOD SANTIAGO MAIPU",
               "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "Maipu") == ""
-    # un solo dígito cambiado en el número es OCR frecuente, no contradicción
-    assert _m("APOQUINDO 843 LAS CONDES", "Apoquindo 848, Las Condes", "Las Condes") == ""
+
+
+def test_un_solo_digito_distinto_en_el_numero_es_incompatible_sin_evidencia_ocr():
+    # 843 vs 848: un dígito distinto NO se tolera por parecido/distancia
+    # de edición -- sólo con confusión OCR documentada para ese carácter
+    # (tabla vacía por diseño).
+    assert _m("APOQUINDO 843 LAS CONDES", "Apoquindo 848, Las Condes", "Las Condes") == \
+        "GEOCODIFICACION_NUMERO_INCOMPATIBLE: 843 != 848"
+    assert _m("URUGUAY 15 LA CISTERNA", "Uruguay 16, La Cisterna", "La Cisterna") == \
+        "GEOCODIFICACION_NUMERO_INCOMPATIBLE: 15 != 16"
+
+
+def test_numero_coincide_exacto_o_solo_ceros_a_la_izquierda():
+    assert _m("SAN DAMIAN 0100 VITACURA", "San Damian 100, Vitacura", "Vitacura") == ""
+    assert _m("SAN DAMIAN 100 VITACURA", "San Damian 0100, Vitacura", "Vitacura") == ""
 
 
 def test_direccion_coherente_no_marca_nada():

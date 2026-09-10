@@ -1867,11 +1867,13 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
                         f"{comuna_documental} != {localidad}"
                     )
             # Bloque COHERENCIA DESTINO -- casos reales 464170 / 464653 /
-            # 464746: número documental != número geocodificado (más allá
-            # de un dígito OCR), calle documental materialmente distinta, o
-            # dirección específica degradada a sólo comuna/ciudad. Mismo
-            # criterio EXACTO que en vivo (`resolver_destino_entrega_
-            # validado`), nunca una regla nueva ni comparación literal.
+            # 464746: número documental != número geocodificado (coincidencia
+            # EXACTA salvo ceros a la izquierda; un dígito distinto sólo si
+            # hay confusión OCR documentada para ese carácter), calle
+            # documental materialmente distinta, o dirección específica
+            # degradada a sólo comuna/ciudad. Mismo criterio EXACTO que en
+            # vivo (`resolver_destino_entrega_validado`), nunca una regla
+            # nueva ni comparación literal.
             if not motivo_rechazo and despachar_a:
                 motivo_rechazo = motivo_incoherencia_destino_documental(
                     despachar_a_crudo=despachar_a, etiqueta_geocodificada=direccion,

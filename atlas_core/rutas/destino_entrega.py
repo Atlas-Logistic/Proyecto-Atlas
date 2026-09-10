@@ -2314,11 +2314,24 @@ def _tokens_calle_compatibles(a: str, b: str) -> bool:
     return _distancia_edicion(a, b) <= max(1, corto // 4)
 
 
+# Confusiones OCR DOCUMENTADAS entre dígitos de un número de casa. Igual
+# criterio que `catalogo_vehiculos._CONFUSIONES_OCR`: cada par entra SÓLO
+# con un caso real persistido detrás -- nunca una tabla ampliada por
+# parecido de trazo o por distancia de edición. Vacía por diseño: sin
+# evidencia específica, un número de casa geocodificado que no coincide
+# EXACTAMENTE con el documental (salvo ceros a la izquierda) es una
+# contradicción -- "843" != "848".
+_CONFUSIONES_OCR_NUMERO_CASA: tuple[frozenset[str], ...] = ()
+
+
 def _numero_casa_incoherente(numero_documental: str, numero_geocodificado: str) -> bool:
-    """``True`` si ambos números existen y son MATERIALMENTE distintos --
-    no se rechaza por un solo dígito cambiado (OCR frecuente) ni por ceros
-    a la izquierda; sí por otro largo o por >=2 dígitos distintos
-    ("843" != "898", "15" != "1545")."""
+    """``True`` si ambos números de casa existen y NO son el MISMO: el
+    geocodificado debe coincidir EXACTAMENTE con el documental, admitiendo
+    sólo ceros a la izquierda equivalentes ("0100" == "100"). Un único
+    dígito distinto se tolera SÓLO si ese par está en
+    `_CONFUSIONES_OCR_NUMERO_CASA` (evidencia OCR documentada para ese
+    carácter) -- nunca por parecido/distancia de edición general
+    ("843" != "848", "15" != "1545")."""
     doc = str(numero_documental or "").strip()
     geo = str(numero_geocodificado or "").strip()
     if not doc or not geo or doc == geo:
@@ -2327,7 +2340,10 @@ def _numero_casa_incoherente(numero_documental: str, numero_geocodificado: str) 
         return False
     if len(doc) != len(geo):
         return True
-    return sum(1 for x, y in zip(doc, geo) if x != y) >= 2
+    diferencias = [(x, y) for x, y in zip(doc, geo) if x != y]
+    if len(diferencias) == 1 and frozenset(diferencias[0]) in _CONFUSIONES_OCR_NUMERO_CASA:
+        return False
+    return True
 
 
 MOTIVO_CALLE_DOCUMENTAL_DISTINTA = "GEOCODIFICACION_CALLE_DOCUMENTAL_DISTINTA"
@@ -2342,15 +2358,18 @@ def motivo_incoherencia_destino_documental(
     dirección documental clara -- cadena vacía si es coherente (o si el
     documento no trae calle ni número con qué contrastar).
 
-    - número documental claro != número geocodificado -> NUMERO_INCOMPATIBLE
-      (criterio 2);
+    - número documental claro que NO coincide EXACTAMENTE con el
+      geocodificado (salvo ceros a la izquierda; un dígito distinto sólo
+      se tolera con confusión OCR documentada para ese carácter, ver
+      `_numero_casa_incoherente`) -> NUMERO_INCOMPATIBLE (criterio 2);
     - calle documental clara vs calle geocodificada sin ningún token
       compatible -> CALLE_DOCUMENTAL_DISTINTA (criterio 3);
     - calle documental clara pero la geocodificación no trae calle propia
       (sólo comuna/ciudad/región) -> DEMASIADO_GENERICA (criterio 4).
 
-    Nunca compara strings literales (abreviaturas + tolerancia OCR,
-    criterio 5). Nunca toca `despachar_a_crudo` (criterio 7)."""
+    El NOMBRE de la calle sí admite abreviaturas y ruido OCR (criterio 5);
+    el número de casa NO. Nunca compara strings literales. Nunca toca
+    `despachar_a_crudo` (criterio 7)."""
     documental = str(despachar_a_crudo or "").strip()
     etiqueta = str(etiqueta_geocodificada or "").strip()
     if not documental:
