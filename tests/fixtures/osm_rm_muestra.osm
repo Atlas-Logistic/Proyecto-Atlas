@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GEOGRAFIA 2C.2 : fixture SINTETICO de OSM XML para el importador offline.
+  NO es un extracto real de OpenStreetMap. Coordenadas y numeros inventados
+  a mano para ejercitar cada rama del pipeline: RM / no_RM / comuna no
+  resoluble / sin numero / numero con letra / rango / Null Island / way sin
+  geometria / duplicado exacto / colision de clave / addr_municipality.
+-->
+<osm version="0.6" generator="atlas-fixture-2c2">
+  <node id="1" lat="-33.4280000" lon="-70.6100000">
+    <tag k="addr:street" v="Avenida Providencia"/>
+    <tag k="addr:housenumber" v="1234"/>
+    <tag k="addr:city" v="Providencia"/>
+  </node>
+  <node id="2" lat="-33.4281000" lon="-70.6112000">
+    <tag k="addr:street" v="Avenida Providencia"/>
+    <tag k="addr:housenumber" v="1250"/>
+    <tag k="addr:city" v="Providencia"/>
+  </node>
+  <node id="3" lat="-33.4280000" lon="-70.6100000">
+    <tag k="addr:street" v="Avenida Providencia"/>
+    <tag k="addr:housenumber" v="1234"/>
+    <tag k="addr:city" v="Providencia"/>
+  </node>
+  <node id="4" lat="-33.4270000" lon="-70.6100000">
+    <tag k="addr:street" v="Avenida Providencia"/>
+    <tag k="addr:housenumber" v="1234"/>
+    <tag k="addr:city" v="Providencia"/>
+  </node>
+  <node id="5" lat="-33.5100000" lon="-70.7600000">
+    <tag k="addr:street" v="Calle Nueva"/>
+    <tag k="addr:city" v="Maipú"/>
+  </node>
+  <node id="6" lat="-33.4500000" lon="-70.6600000">
+    <tag k="addr:housenumber" v="999"/>
+    <tag k="amenity" v="pharmacy"/>
+  </node>
+  <node id="7" lat="-33.0400000" lon="-71.6200000">
+    <tag k="addr:street" v="Avenida Pedro Montt"/>
+    <tag k="addr:housenumber" v="2200"/>
+    <tag k="addr:city" v="Valparaíso"/>
+  </node>
+  <node id="8" lat="-33.4100000" lon="-70.5700000">
+    <tag k="addr:street" v="Los Militares"/>
+    <tag k="addr:housenumber" v="4500"/>
+    <tag k="addr:city" v="Comuna Que No Existe"/>
+  </node>
+  <node id="9" lat="-33.3900000" lon="-70.5200000">
+    <tag k="addr:street" v="Camino El Alba"/>
+    <tag k="addr:housenumber" v="S/N"/>
+    <tag k="addr:city" v="Las Condes"/>
+  </node>
+  <node id="10" lat="-33.4560000" lon="-70.6000000">
+    <tag k="addr:street" v="Pasaje Uno"/>
+    <tag k="addr:housenumber" v="0123"/>
+    <tag k="addr:city" v="Ñuñoa"/>
+  </node>
+  <node id="11" lat="-33.4440000" lon="-70.5350000">
+    <tag k="addr:street" v="Calle Dos"/>
+    <tag k="addr:housenumber" v="12B"/>
+    <tag k="addr:city" v="La Reina"/>
+  </node>
+  <node id="12" lat="-33.4900000" lon="-70.6500000">
+    <tag k="addr:street" v="Gran Avenida"/>
+    <tag k="addr:housenumber" v="100-104"/>
+    <tag k="addr:city" v="San Miguel"/>
+  </node>
+  <node id="13" lat="-33.4300000" lon="-70.6200000">
+    <tag k="addr:street" v="Marchant Pereira"/>
+    <tag k="addr:housenumber" v="220"/>
+    <tag k="addr:municipality" v="Providencia"/>
+  </node>
+  <node id="14" lat="-33.4450000" lon="-70.6400000">
+    <tag k="amenity" v="cafe"/>
+    <tag k="name" v="Café sin dirección"/>
+  </node>
+  <node id="15" lat="0.0" lon="0.0">
+    <tag k="addr:street" v="Camino Rinconada"/>
+    <tag k="addr:housenumber" v="88"/>
+    <tag k="addr:city" v="Maipú"/>
+  </node>
+  <node id="16" lat="-33.5120000" lon="-70.7580000">
+    <tag k="addr:street" v="Calle Nueva"/>
+    <tag k="addr:housenumber" v="742"/>
+    <tag k="addr:city" v="Maipú"/>
+  </node>
+  <way id="100">
+    <nd ref="900"/>
+    <nd ref="901"/>
+    <nd ref="902"/>
+    <nd ref="900"/>
+    <tag k="building" v="commercial"/>
+    <tag k="addr:street" v="El Bosque Norte"/>
+    <tag k="addr:housenumber" v="500"/>
+    <tag k="addr:city" v="Las Condes"/>
+  </way>
+</osm>

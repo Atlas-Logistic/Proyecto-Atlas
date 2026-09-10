@@ -1,0 +1,12 @@
+# Dependencia AISLADA del importador offline OSM/PBF -> base local Atlas
+# (atlas_core/geografia/importador_osm.py, GEOGRAFÍA 2C.2).
+#
+# NO es dependencia del Motor en runtime: en operación Atlas sólo consume
+# el SQLite ya generado (atlas_core/geografia/base_local.py). Instala esto
+# únicamente en la máquina donde se corre el importador contra un .pbf.
+#
+#   pip install -r requirements-importador-osm.txt
+#
+# Los formatos .osm / .xml se leen sin esta dependencia (xml.etree stdlib);
+# osmium sólo hace falta para .osm.pbf / .pbf / .osm.bz2.
+osmium>=3.6,<5
