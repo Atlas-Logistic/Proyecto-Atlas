@@ -18,24 +18,33 @@ CONFIRMADO o la comuna que el propio documento nombra:
     ``disponible()`` devuelve ``False`` y toda consulta responde
     ``NO_ENCONTRADO`` con motivo explícito -- nunca un ``crash``.
 
-Distingue cuatro desenlaces de consulta -- ``EXACTA`` / ``NORMALIZADA`` /
-``MULTIPLE`` / ``NO_ENCONTRADO`` (``EstadoConsultaLocal``).
+Distingue el desenlace de matcheo del string -- ``EXACTA`` /
+``NORMALIZADA`` / ``MULTIPLE`` / ``NO_ENCONTRADO`` (``EstadoConsultaLocal``)
+-- y, encima, el desenlace de ALTO NIVEL para el flujo
+(``EvidenciaGeoLocal.resultado``): ``DIRECCION_EXACTA`` (calle + número
+confirmados, con coordenada real), ``CALLE_CONOCIDA_NUMERO_NO_EN_BASE``
+(la calle existe en la comuna pero ese número no -- NUNCA aporta
+coordenada), ``CALLE_NO_ENCONTRADA`` y ``MULTIPLE``.
 
-Preparado para OSM sin rediseñar el Motor: el esquema SQLite ya trae
-``lon``/``lat`` opcionales y ``fuente`` por fila; un importador
-OSM/PBF -> filas posterior sólo llama a ``importar_filas`` -- el contrato
-público (``BaseGeograficaLocal``) y ``consultar`` no cambian.
+Preparado para OSM y para el maestro territorial INE sin rediseñar el
+Motor: el esquema SQLite trae ``lon``/``lat`` opcionales, ``fuente`` y
+(GEOGRAFÍA 2C.3) ``ref_externa`` (gid INE / id OSM, trazabilidad) y
+``alias`` (alias INE -- se almacena, NUNCA participa en la resolución)
+por fila; cualquier importador offline sólo llama a ``importar_filas``,
+que consume el iterable en CHUNKS (millones de filas sin cargar todo en
+RAM). El contrato público (``BaseGeograficaLocal``) y ``consultar`` no
+cambian.
 
-Lo que ESTE bloque NO hace todavía (siguiente bloque 2C): descargar el
-PBF, derivar el índice, poblar coordenadas reales, y cablear la base en
-el primer pase productivo / la revalidación masiva.
+Lo que ESTE bloque NO hace todavía: interpolar numeración, calcular
+centroides, y cablear la base en el primer pase productivo / la
+revalidación masiva.
 """
 from __future__ import annotations
 
 import math
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, Mapping, Protocol, runtime_checkable
@@ -44,7 +53,11 @@ from .modelos import EstadoNormalizacion
 from .motor import texto_normalizado
 
 NOMBRE_ARCHIVO_PREDETERMINADO = "base_local_rm.sqlite"
-VERSION_ESQUEMA = 1
+# v2 (GEOGRAFÍA 2C.3): + columnas ``ref_externa`` / ``alias``.
+VERSION_ESQUEMA = 2
+# Tamaño de lote para la escritura en streaming -- millones de filas
+# (maestro INE) sin materializar toda la lista en memoria.
+TAMANO_CHUNK_IMPORT = 50_000
 
 # Palabras estructurales de dirección que NO discriminan una calle (una
 # consulta "CALLE LOS OLMOS" y un registro "LOS OLMOS" son la misma
@@ -102,9 +115,13 @@ class DireccionLocal:
     numero: str = ""            # "" -> la base sólo conoce la calle
     numero_coincide: bool = False   # respecto del número consultado
     # (lon, lat) SÓLO si la fila trae coordenadas reales; None mientras
-    # no exista un import OSM/PBF -- nunca un centroide sintético.
+    # no exista un import OSM/INE -- nunca un centroide sintético.
     coordenadas: tuple[float, float] | None = None
     fuente: str = ""
+    # GEOGRAFÍA 2C.3 -- trazabilidad. ``ref_externa``: gid INE / id OSM.
+    # ``alias``: alias INE (se conserva, NUNCA se usa para resolver).
+    ref_externa: str = ""
+    alias: str = ""
 
     def a_dict(self) -> dict[str, object]:
         return {
@@ -117,6 +134,8 @@ class DireccionLocal:
             "longitud": self.coordenadas[0] if self.coordenadas else None,
             "latitud": self.coordenadas[1] if self.coordenadas else None,
             "fuente": self.fuente,
+            "ref_externa": self.ref_externa,
+            "alias": self.alias,
         }
 
 
@@ -151,14 +170,37 @@ class EvidenciaGeoLocal:
             and self.candidatos[0].numero_coincide
         )
 
+    @property
+    def calle_conocida(self) -> bool:
+        """La calle existe en la comuna (aunque el número no esté). NUNCA
+        implica dirección resuelta ni coordenada utilizable."""
+        return self.encontrada
+
+    @property
+    def resultado(self) -> str:
+        """Desenlace de alto nivel, vocabulario cerrado (GEOGRAFÍA 2C.3):
+        ``DIRECCION_EXACTA`` / ``CALLE_CONOCIDA_NUMERO_NO_EN_BASE`` /
+        ``CALLE_NO_ENCONTRADA`` / ``MULTIPLE`` / ``SIN_DATO``."""
+        if self.numero_confirmado:
+            return "DIRECCION_EXACTA"
+        if self.estado == EstadoConsultaLocal.MULTIPLE:
+            return "MULTIPLE"
+        if self.encontrada:
+            return "CALLE_CONOCIDA_NUMERO_NO_EN_BASE"
+        if self.motivo == "CALLE_NO_ENCONTRADA_EN_COMUNA":
+            return "CALLE_NO_ENCONTRADA"
+        return "SIN_DATO"
+
     def a_dict(self) -> dict[str, object]:
         return {
             "estado": self.estado.value,
+            "resultado": self.resultado,
             "consulta": dict(self.consulta),
             "disponible": self.disponible,
             "motivo": self.motivo,
             "codigo_comuna": self.codigo_comuna,
             "encontrada": self.encontrada,
+            "calle_conocida": self.calle_conocida,
             "numero_confirmado": self.numero_confirmado,
             "candidatos": [c.a_dict() for c in self.candidatos],
         }
@@ -236,10 +278,17 @@ class BaseGeograficaLocalSQLite:
         " lon               REAL,"
         " lat               REAL,"
         " fuente            TEXT NOT NULL DEFAULT '',"
+        " ref_externa       TEXT NOT NULL DEFAULT '',"
+        " alias             TEXT NOT NULL DEFAULT '',"
         " PRIMARY KEY (codigo_comuna, calle_normalizada, numero));",
+        # Índice de "calle conocida en la comuna" (prefijo comuna+calle).
+        # La consulta por comuna+calle+número usa directamente la PK.
         "CREATE INDEX IF NOT EXISTS ix_direcciones_comuna_calle"
         " ON direcciones (codigo_comuna, calle_normalizada);",
     )
+    # Columnas agregadas después de v1 -- se añaden por ALTER a una base
+    # antigua abierta sin ``--reemplazar`` (nunca se pierde lo ya escrito).
+    _COLUMNAS_V2 = ("ref_externa", "alias")
 
     def __init__(self, ruta: str | Path | None = None) -> None:
         if ruta is not None:
@@ -249,18 +298,27 @@ class BaseGeograficaLocalSQLite:
 
             self.ruta = ruta_datos_privados("geografia") / NOMBRE_ARCHIVO_PREDETERMINADO
         self._conn_lectura: sqlite3.Connection | None = None
+        # Expresiones SELECT para las columnas v2, tolerando una base v1
+        # (``''`` literal en su lugar). Se resuelve en la 1ª lectura.
+        self._select_v2: str | None = None
 
     # ---- disponibilidad -------------------------------------------------
 
     def disponible(self) -> bool:
+        return self.contar() > 0
+
+    def contar(self) -> int:
+        """Número de filas en ``direcciones`` (0 si la base no existe o no
+        es legible). Nunca lanza."""
         if not self.ruta.exists():
-            return False
+            return 0
         try:
-            conn = self._conexion_lectura()
-            fila = conn.execute("SELECT COUNT(*) FROM direcciones").fetchone()
+            fila = self._conexion_lectura().execute(
+                "SELECT COUNT(*) FROM direcciones"
+            ).fetchone()
         except sqlite3.Error:
-            return False
-        return bool(fila and fila[0] > 0)
+            return 0
+        return int(fila[0]) if fila else 0
 
     # ---- consulta -----------------------------------------------------
 
@@ -343,17 +401,23 @@ class BaseGeograficaLocalSQLite:
                 motivo="NUMERO_EN_MULTIPLES_REGISTROS", codigo_comuna=codigo_comuna,
             )
 
-        # Cero coincidencias de número. Nunca se devuelve un número
-        # distinto como coincidencia.
-        solo_calle = tuple(c for c in candidatos if not c.numero)
-        if solo_calle:
-            return EvidenciaGeoLocal(
-                estado_calle, consulta, solo_calle,
-                motivo="CALLE_CONOCIDA_NUMERO_NO_EN_BASE", codigo_comuna=codigo_comuna,
+        # Cero coincidencias de número: la CALLE existe en la comuna pero
+        # ese número no está en la base. NUNCA se devuelve un número
+        # distinto como coincidencia, NUNCA se marca la dirección como
+        # resuelta y NUNCA se expone la coordenada de OTRO número como si
+        # fuera la del consultado -- los candidatos van SIN coordenada
+        # (evidencia de "calle conocida", no un punto). Se prefieren los
+        # registros de sólo-calle (``numero == ""``); si no hay, se
+        # listan los numerados sólo como contexto (número visible, sin
+        # ``numero_coincide`` y sin coordenada).
+        contexto_calle = tuple(
+            replace(c, coordenadas=None) for c in (
+                tuple(c for c in candidatos if not c.numero) or candidatos
             )
+        )
         return EvidenciaGeoLocal(
-            EstadoConsultaLocal.NO_ENCONTRADO, consulta, candidatos,
-            motivo="NUMERO_NO_PRESENTE_EN_CALLE", codigo_comuna=codigo_comuna,
+            estado_calle, consulta, contexto_calle,
+            motivo="CALLE_CONOCIDA_NUMERO_NO_EN_BASE", codigo_comuna=codigo_comuna,
         )
 
     # ---- import (único camino de escritura) --------------------------
@@ -364,63 +428,103 @@ class BaseGeograficaLocalSQLite:
         *,
         fuente: str = "",
         reemplazar: bool = False,
+        meta: Mapping[str, object] | None = None,
+        chunk: int = TAMANO_CHUNK_IMPORT,
     ) -> int:
-        """Puebla la base. Cada fila requiere ``comuna`` (nombre o código
-        CUT) y ``calle``; acepta ``numero`` (str, se preservan ceros
-        iniciales), ``lon``/``lat`` (sólo se guardan si ambos son finitos)
-        y ``fuente``. Una comuna no resoluble aborta con ``ValueError`` --
-        una semilla / un volcado OSM debe venir limpio. Devuelve el número
-        de filas escritas.
+        """Puebla la base consumiendo ``filas`` en STREAMING (lotes de
+        ``chunk``: millones de filas sin materializar todo en RAM).
 
-        ``reemplazar=True`` vacía ``direcciones`` antes de insertar
-        (reconstrucción completa desde un PBF nuevo)."""
+        Cada fila requiere ``comuna`` (nombre o código CUT) y ``calle``;
+        acepta ``numero`` (str, se preservan ceros iniciales),
+        ``lon``/``lat`` (sólo se guardan si ambos son finitos), ``fuente``,
+        ``ref_externa`` (gid INE / id OSM) y ``alias``. Una comuna no
+        resoluble o una calle no normalizable abortan con ``ValueError``
+        -- el importador debe entregar filas ya limpias. Devuelve el
+        número de filas escritas (``INSERT OR REPLACE``; una colisión de
+        PK cuenta igual).
+
+        ``reemplazar=True`` vacía ``direcciones`` antes de insertar.
+        ``meta`` persiste pares clave/valor de procedencia en la tabla
+        ``meta`` (p. ej. corte del dataset, paquete, sha256)."""
         from atlas_core.geografia import cargar_geografia
 
         geografia = cargar_geografia("CL")
-        preparadas: list[tuple] = []
-        for cruda in filas:
+        cache_comuna: dict[str, tuple[str, str]] = {}
+
+        def _preparar(cruda: Mapping[str, object]) -> tuple:
             comuna_valor = str(cruda.get("comuna", "")).strip()
             calle_valor = str(cruda.get("calle", "")).strip()
             if not calle_valor:
                 raise ValueError("cada fila requiere 'calle'")
-            resuelta = self._resolver_comuna(comuna_valor, geografia=geografia)
+            resuelta = cache_comuna.get(comuna_valor)
             if resuelta is None:
-                raise ValueError(f"comuna no resoluble en fila: {comuna_valor!r}")
+                resuelta = self._resolver_comuna(comuna_valor, geografia=geografia)
+                if resuelta is None:
+                    raise ValueError(f"comuna no resoluble en fila: {comuna_valor!r}")
+                cache_comuna[comuna_valor] = resuelta
             codigo_comuna, comuna_canonica = resuelta
-            numero_valor = str(cruda.get("numero", "")).strip()
             calle_norm = _norma_texto(calle_valor)
             if not calle_norm:
                 raise ValueError(f"'calle' no normalizable: {calle_valor!r}")
             coords = _coordenadas_de_fila(cruda.get("lon"), cruda.get("lat"))
-            preparadas.append((
-                codigo_comuna, calle_norm, numero_valor, calle_valor, comuna_canonica,
+            return (
+                codigo_comuna, calle_norm, str(cruda.get("numero", "")).strip(),
+                calle_valor, comuna_canonica,
                 coords[0] if coords else None, coords[1] if coords else None,
                 str(cruda.get("fuente", "") or fuente).strip(),
-            ))
+                str(cruda.get("ref_externa", "")).strip(),
+                str(cruda.get("alias", "")).strip(),
+            )
 
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.ruta))
+        insert = (
+            "INSERT OR REPLACE INTO direcciones"
+            " (codigo_comuna, calle_normalizada, numero, calle_canonica,"
+            "  comuna_canonica, lon, lat, fuente, ref_externa, alias)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        total = 0
         try:
+            # Base regenerable: se prioriza velocidad de carga; si se
+            # interrumpe, se vuelve a correr con --reemplazar.
+            conn.execute("PRAGMA journal_mode = MEMORY")
+            conn.execute("PRAGMA synchronous = OFF")
             for sentencia in self._DDL:
                 conn.execute(sentencia)
+            columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(direcciones)")}
+            for columna in self._COLUMNAS_V2:
+                if columna not in columnas:
+                    conn.execute(
+                        f"ALTER TABLE direcciones ADD COLUMN {columna} TEXT NOT NULL DEFAULT ''"
+                    )
             if reemplazar:
                 conn.execute("DELETE FROM direcciones")
-            conn.executemany(
-                "INSERT OR REPLACE INTO direcciones"
-                " (codigo_comuna, calle_normalizada, numero, calle_canonica,"
-                "  comuna_canonica, lon, lat, fuente)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                preparadas,
-            )
+            lote: list[tuple] = []
+            for cruda in filas:
+                lote.append(_preparar(cruda))
+                if len(lote) >= chunk:
+                    conn.executemany(insert, lote)
+                    conn.commit()
+                    total += len(lote)
+                    lote.clear()
+            if lote:
+                conn.executemany(insert, lote)
+                total += len(lote)
             conn.execute(
                 "INSERT OR REPLACE INTO meta (clave, valor) VALUES ('version_esquema', ?)",
                 (str(VERSION_ESQUEMA),),
             )
+            for clave, valor in dict(meta or {}).items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (clave, valor) VALUES (?, ?)",
+                    (str(clave), str(valor)),
+                )
             conn.commit()
         finally:
             conn.close()
         self._cerrar_lectura()
-        return len(preparadas)
+        return total
 
     def cerrar(self) -> None:
         self._cerrar_lectura()
@@ -440,11 +544,26 @@ class BaseGeograficaLocalSQLite:
             except sqlite3.Error:
                 pass
             self._conn_lectura = None
+        self._select_v2 = None
+
+    def _expr_columnas_v2(self, conn: sqlite3.Connection) -> str:
+        """Devuelve ``ref_externa, alias`` si la tabla los tiene, o
+        ``'' AS ref_externa, '' AS alias`` en una base v1 -- así una base
+        anterior a GEOGRAFÍA 2C.3 sigue siendo consultable sin re-importar."""
+        if self._select_v2 is None:
+            try:
+                columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(direcciones)")}
+            except sqlite3.Error:
+                columnas = set()
+            self._select_v2 = ", ".join(
+                col if col in columnas else f"'' AS {col}" for col in self._COLUMNAS_V2
+            )
+        return self._select_v2
 
     def _filas_por_calle(self, conn: sqlite3.Connection, codigo_comuna: str, calle_norm: str) -> list[tuple]:
         return conn.execute(
             "SELECT codigo_comuna, calle_normalizada, numero, calle_canonica,"
-            " comuna_canonica, lon, lat, fuente"
+            f" comuna_canonica, lon, lat, fuente, {self._expr_columnas_v2(conn)}"
             " FROM direcciones WHERE codigo_comuna = ? AND calle_normalizada = ?"
             " ORDER BY numero",
             (codigo_comuna, calle_norm),
@@ -459,7 +578,7 @@ class BaseGeograficaLocalSQLite:
 
     @staticmethod
     def _fila_a_direccion(fila: tuple, numero_consultado: str) -> DireccionLocal:
-        cc, calle_norm, numero, calle_can, comuna_can, lon, lat, fuente = fila
+        cc, calle_norm, numero, calle_can, comuna_can, lon, lat, fuente, ref_externa, alias = fila
         return DireccionLocal(
             codigo_comuna=str(cc),
             comuna_canonica=str(comuna_can or ""),
@@ -470,6 +589,8 @@ class BaseGeograficaLocalSQLite:
             and numero_equivalente_seguro(str(numero or ""), numero_consultado),
             coordenadas=_coordenadas_de_fila(lon, lat),
             fuente=str(fuente or ""),
+            ref_externa=str(ref_externa or ""),
+            alias=str(alias or ""),
         )
 
     @staticmethod

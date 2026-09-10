@@ -193,9 +193,11 @@ def test_numero_distinto_nunca_es_coincidencia(tmp_path):
     ev = _base(tmp_path, _FILAS_RM).consultar(
         comuna="Providencia", calle="Pedro de Valdivia", numero="150"
     )
-    assert ev.estado == EstadoConsultaLocal.NO_ENCONTRADO
-    assert ev.motivo == "NUMERO_NO_PRESENTE_EN_CALLE"
-    assert ev.encontrada is False
+    # GEOGRAFÍA 2C.3: la calle SÍ existe en la comuna -> CALLE_CONOCIDA,
+    # nunca DIRECCION_EXACTA. El número distinto jamás se acepta.
+    assert ev.resultado == "CALLE_CONOCIDA_NUMERO_NO_EN_BASE"
+    assert ev.motivo == "CALLE_CONOCIDA_NUMERO_NO_EN_BASE"
+    assert ev.calle_conocida is True
     assert ev.numero_confirmado is False
     # se devuelven los registros de la calle como EVIDENCIA (no como match)
     assert {c.numero for c in ev.candidatos} == {"100", "200"}
@@ -296,4 +298,4 @@ def test_flujo_helper_numero_distinto_no_confirma(tmp_path):
     b = _base(tmp_path, _FILAS_RM)
     ev = evidencia_local_para_direccion(b, "PEDRO DE VALDIVIA 999 PROVIDENCIA")
     assert ev.numero_confirmado is False
-    assert ev.estado == EstadoConsultaLocal.NO_ENCONTRADO
+    assert ev.resultado == "CALLE_CONOCIDA_NUMERO_NO_EN_BASE"

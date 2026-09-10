@@ -217,10 +217,11 @@ def test_importar_a_sqlite_genera_base_consultable_y_procedencia(tmp_path):
     assert {c.numero for c in ev_multi.candidatos} == {"", "742"}
     # "0123" en base: la regla segura de 2C.1 acepta "123" == "0123"
     assert base.consultar(comuna="Ñuñoa", calle="Pasaje Uno", numero="123").numero_confirmado is True
-    # "12B" NUNCA se convierte en "128"
-    assert base.consultar(
-        comuna="La Reina", calle="Calle Dos", numero="128"
-    ).estado == EstadoConsultaLocal.NO_ENCONTRADO
+    # "12B" NUNCA se convierte en "128": la calle se reconoce pero ese
+    # número no está (CALLE_CONOCIDA, nunca DIRECCION_EXACTA).
+    ev_12b = base.consultar(comuna="La Reina", calle="Calle Dos", numero="128")
+    assert ev_12b.resultado == "CALLE_CONOCIDA_NUMERO_NO_EN_BASE"
+    assert ev_12b.numero_confirmado is False
     # way sin geometría: dirección conocida, sin coordenada inventada
     ev_way = base.consultar(comuna="Las Condes", calle="El Bosque Norte", numero="500")
     assert ev_way.estado == EstadoConsultaLocal.EXACTA
@@ -273,11 +274,24 @@ def test_iter_elementos_xml_lee_nodos_y_ways_del_fixture():
 def test_pbf_sin_osmium_error_explicito_y_aislado(tmp_path):
     falso = tmp_path / "region.osm.pbf"
     falso.write_bytes(b"no importa el contenido")
-    with pytest.raises(DependenciaImportadorFaltante) as exc:
-        construir_filas_desde_osm(falso)
-    mensaje = str(exc.value)
-    assert "requirements-importador-osm.txt" in mensaje
-    assert "NO es dependencia del Motor" in mensaje
+    try:
+        import osmium  # noqa: F401
+        osmium_presente = True
+    except ImportError:
+        osmium_presente = False
+
+    if osmium_presente:
+        # osmium instalado: el .pbf falso falla al PARSEARSE, no por
+        # dependencia -- el aislamiento (no lo importa el runtime) lo
+        # cubre `test_importador_no_es_importado_por_el_runtime`.
+        with pytest.raises(Exception):
+            construir_filas_desde_osm(falso)
+    else:
+        with pytest.raises(DependenciaImportadorFaltante) as exc:
+            construir_filas_desde_osm(falso)
+        mensaje = str(exc.value)
+        assert "requirements-importador-osm.txt" in mensaje
+        assert "NO es dependencia del Motor" in mensaje
 
 
 def test_importador_no_es_importado_por_el_runtime():
