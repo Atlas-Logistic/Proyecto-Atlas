@@ -26,6 +26,7 @@ from atlas_core.rutas.destino_entrega import (
     VIA_BASE_LOCAL,
     resolver_destino_con_fallback_estructurado,
     resolver_destino_entrega,
+    resolver_destino_entrega_validado,
 )
 from atlas_core.rutas.modelos import (
     CandidatoGeocodificacion,
@@ -125,19 +126,45 @@ def test_base_local_no_corrobora_si_el_numero_difiere(tmp_path):
     assert "FALLBACK_SIN_CORROBORACION_TERRITORIAL" in r.motivo
 
 
-def test_base_local_no_corrobora_candidato_en_otra_comuna(tmp_path):
-    """La base conoce la calle+número en Maipú; el candidato del respaldo
-    dice Providencia -> la base consultada CON la comuna del candidato no
-    la encuentra -> no corrobora."""
+def test_base_local_no_corrobora_candidato_en_otra_comuna_pero_ine_resuelve_sola(tmp_path):
+    """GEOGRAFÍA 3 -- el candidato del respaldo dice Providencia y no
+    corrobora contra la base consultada CON esa comuna; pero la base
+    territorial INE conoce esa calle+número como ÚNICA en toda la RM
+    (Maipú) -> resuelve por sí misma con su coordenada real, ignorando la
+    comuna equivocada del respaldo. Nunca inventa: si estuviera en dos
+    comunas, abstención (ver test siguiente)."""
     candidatos = (_candidato(-33.43, -70.61, "Vicuña Mackenna 655", localidad="Providencia"),)
     base = _base(tmp_path, [
-        {"comuna": "Maipú", "calle": "Vicuña Mackenna", "numero": "655", "fuente": "SEMILLA"},
+        {"comuna": "Maipú", "calle": "Vicuña Mackenna", "numero": "655",
+         "ref_externa": "gid=1", "lon": -70.75, "lat": -33.52},
+    ])
+    r = resolver_destino_con_fallback_estructurado(
+        "VICUÑA MACKENNA 655", proveedor_fallback=_fallback(candidatos),
+        base_geografica_local=base,
+    )
+    assert r.resuelto is True
+    assert r.motivo == "DIRECCION_EXACTA_BASE_LOCAL_INE"
+    assert r.candidato.localidad == "Maipú"
+    assert (r.candidato.coordenadas.longitud, r.candidato.coordenadas.latitud) == (-70.75, -33.52)
+
+
+def test_base_local_se_abstiene_si_la_calle_numero_esta_en_dos_comunas(tmp_path):
+    """GEOGRAFÍA 3 -- misma calle+número en DOS comunas -> INE devuelve
+    MULTIPLE -> nunca elige; el respaldo tampoco corrobora -> abstención
+    intacta."""
+    candidatos = (_candidato(-33.43, -70.61, "Vicuña Mackenna 655", localidad="Providencia"),)
+    base = _base(tmp_path, [
+        {"comuna": "Maipú", "calle": "Vicuña Mackenna", "numero": "655",
+         "ref_externa": "gid=1", "lon": -70.75, "lat": -33.52},
+        {"comuna": "La Florida", "calle": "Vicuña Mackenna", "numero": "655",
+         "ref_externa": "gid=2", "lon": -70.58, "lat": -33.53},
     ])
     r = resolver_destino_con_fallback_estructurado(
         "VICUÑA MACKENNA 655", proveedor_fallback=_fallback(candidatos),
         base_geografica_local=base,
     )
     assert r.resuelto is False
+    assert "FALLBACK_SIN_CORROBORACION_TERRITORIAL" in r.motivo
 
 
 def test_base_local_calle_conocida_sin_el_numero_no_corrobora_si_hay_numero_en_doc(tmp_path):
@@ -199,6 +226,68 @@ def test_resolver_destino_entrega_sin_base_local_default_none_no_cambia_nada(tmp
     r = resolver_destino_entrega(
         "VICUÑA MACKENNA 655", principal,
         proveedor_geocodificacion_fallback=fallback,
+    )
+    assert r.estado == "REVISAR"
+
+
+# ============================================================
+# 3bis. GEOGRAFÍA 3 -- INE rescata un destino que el geocodificador dejó
+#       INCOHERENTE con la dirección documental (número / calle / comuna)
+# ============================================================
+
+
+def _principal_confiado(consulta, candidato):
+    return ProveedorRutasSimulado(geocodificaciones={
+        consulta: ResultadoGeocodificacion(
+            EstadoRuta.REQUIERE_REVISION, (candidato,), "OK",
+        ),
+    })
+
+
+def test_ine_rescata_destino_con_numero_incompatible_del_geocodificador(tmp_path):
+    """El proveedor resuelve, confiado, "VICUÑA MACKENNA 1545" para un
+    documento que dice 655 -> la guarda de número lo rechaza; la base INE
+    tiene el 655 real -> se acepta ESE, no un pendiente técnico."""
+    consulta = "VICUÑA MACKENNA 655, Chile"
+    malo = _candidato(-33.49, -70.62, "Vicuña Mackenna 1545, Maipú", localidad="Maipú")
+    base = _base(tmp_path, [
+        {"comuna": "Maipú", "calle": "Vicuña Mackenna", "numero": "655",
+         "ref_externa": "gid=1", "lon": -70.75, "lat": -33.52},
+    ])
+    r = resolver_destino_entrega_validado(
+        "VICUÑA MACKENNA 655", _principal_confiado(consulta, malo),
+        base_geografica_local=base,
+    )
+    assert r.estado == "RESUELTO"
+    assert r.coordenadas == Coordenadas(-70.75, -33.52)   # coordenada REAL de INE
+    assert r.localidad == "Maipú"
+    assert r.metodo_confirmacion == "BASE_LOCAL_INE"
+
+
+def test_sin_ine_el_numero_incompatible_sigue_siendo_rechazo(tmp_path):
+    consulta = "VICUÑA MACKENNA 655, Chile"
+    malo = _candidato(-33.49, -70.62, "Vicuña Mackenna 1545, Maipú", localidad="Maipú")
+    r = resolver_destino_entrega_validado(
+        "VICUÑA MACKENNA 655", _principal_confiado(consulta, malo),
+        base_geografica_local=None,
+    )
+    assert r.estado == "REVISAR"
+    assert r.motivo.startswith("GEOCODIFICACION_NUMERO_INCOMPATIBLE")
+
+
+def test_ine_no_rescata_si_tambien_contradice_la_comuna_documental(tmp_path):
+    """La base INE resolvería la calle+número en Maipú, pero el documento
+    dice CERRILLOS de forma inequívoca -> el candidato INE pasa por las
+    MISMAS guardas y también se rechaza: gana el rechazo original."""
+    consulta = "VICUÑA MACKENNA 655 CERRILLOS, Chile"
+    malo = _candidato(-33.49, -70.62, "Vicuña Mackenna 1545, Maipú", localidad="Maipú")
+    base = _base(tmp_path, [
+        {"comuna": "Maipú", "calle": "Vicuña Mackenna", "numero": "655",
+         "ref_externa": "gid=1", "lon": -70.75, "lat": -33.52},
+    ])
+    r = resolver_destino_entrega_validado(
+        "VICUÑA MACKENNA 655 CERRILLOS", _principal_confiado(consulta, malo),
+        base_geografica_local=base,
     )
     assert r.estado == "REVISAR"
 

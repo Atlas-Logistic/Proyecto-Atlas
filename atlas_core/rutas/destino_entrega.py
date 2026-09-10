@@ -930,6 +930,19 @@ def resolver_destino_con_fallback_estructurado(
         and not corroborado_por_texto_documental
         and not corroborado_por_base_local
     ):
+        # GEOGRAFÍA 3 -- ni el catálogo confirmado, ni B1, ni el texto
+        # documental, ni la base consultada CON la comuna del candidato
+        # del respaldo (que puede venir con una comuna equivocada)
+        # corroboran. Antes de abstenerse, la base territorial INE puede
+        # resolver la dirección POR SÍ MISMA como DIRECCION_EXACTA -- calle
+        # + número confirmados en el maestro, un único punto real en una
+        # única comuna de toda la RM: su coordenada REAL entra como
+        # candidato y pasa por los mismos gates de `resolver_destino_
+        # entrega`. Nunca inventa: MULTIPLE / número ausente / calle no
+        # encontrada -> se conserva EXACTAMENTE la abstención de antes.
+        rescate_ine = _resuelto_por_base_local_ine()
+        if rescate_ine is not None:
+            return rescate_ine
         return ResultadoDesambiguacionInequivoca(
             motivo=f"FALLBACK_SIN_CORROBORACION_TERRITORIAL: {candidato.etiqueta}",
             candidato=candidato, vias=(VIA_FALLBACK_ESTRUCTURADO,),
@@ -1524,6 +1537,52 @@ def _comunas_territorialmente_compatibles(comuna_documental: str, comuna_geocodi
     )
 
 
+def _motivo_incoherencia_destino_validado(
+    *,
+    despachar_a_crudo: str,
+    localidad: str,
+    region: str,
+    etiqueta_geocodificada: str,
+    comuna_confirmada_humano: str = "",
+) -> str:
+    """Motivo por el que un destino RESUELTO por el geocodificador debe
+    RECHAZARSE por incoherencia con la evidencia documental -- ``""`` si es
+    coherente. Reúne, en orden y sin cambiar ninguna, las señales ya
+    calibradas: comuna documental inequívoca / comuna que un humano
+    confirmó explícitamente (Bloque CIERRE QUIRÚRGICO, 464784) / número de
+    casa por orden de magnitud (`_numero_direccion_incompatible`) /
+    calle-número-degradación materialmente distintos
+    (`motivo_incoherencia_destino_documental`, 464170/464653/464746).
+
+    Extraído para poder aplicar EXACTAMENTE las mismas guardas al
+    candidato de la base territorial INE (GEOGRAFÍA 3) antes de aceptarlo
+    como rescate -- nunca un camino más laxo."""
+    comuna_documental = _comuna_documental_inequivoca(despachar_a_crudo or "")
+    if (
+        comuna_documental and localidad
+        and _texto_normalizado_sin_acentos(comuna_documental) != _texto_normalizado_sin_acentos(localidad)
+        and not _comunas_territorialmente_compatibles(comuna_documental, localidad)
+    ):
+        return f"GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: {comuna_documental} != {localidad}"
+    comuna_humana = _comuna_documental_inequivoca(comuna_confirmada_humano or "")
+    if (
+        comuna_humana and localidad
+        and _texto_normalizado_sin_acentos(comuna_humana) != _texto_normalizado_sin_acentos(localidad)
+        and not _comunas_territorialmente_compatibles(comuna_humana, localidad)
+    ):
+        return f"GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: {comuna_humana} != {localidad}"
+    if _numero_direccion_incompatible(despachar_a_crudo or "", etiqueta_geocodificada or ""):
+        return (
+            "GEOCODIFICACION_NUMERO_INCOMPATIBLE: "
+            f"{_numero_calle(despachar_a_crudo or '')} != {_numero_calle(etiqueta_geocodificada or '')}"
+        )
+    return motivo_incoherencia_destino_documental(
+        despachar_a_crudo=despachar_a_crudo or "",
+        etiqueta_geocodificada=etiqueta_geocodificada or "",
+        localidad=localidad or "", region=region or "",
+    )
+
+
 def resolver_destino_entrega_validado(
     despachar_a_crudo: str | None,
     proveedor_geocodificacion: ProveedorRutas,
@@ -1574,97 +1633,70 @@ def resolver_destino_entrega_validado(
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado
-    comuna_documental = _comuna_documental_inequivoca(despachar_a_crudo or "")
-    if (
-        comuna_documental and resultado.localidad
-        and _texto_normalizado_sin_acentos(comuna_documental)
-        != _texto_normalizado_sin_acentos(resultado.localidad)
-        and not _comunas_territorialmente_compatibles(comuna_documental, resultado.localidad)
-    ):
-        return ResultadoDestinoEntrega(
-            despachar_a_crudo=resultado.despachar_a_crudo,
-            coordenadas=resultado.coordenadas,
-            etiqueta_geocodificada="",
-            confianza=resultado.confianza,
-            estado=ESTADO_REVISAR,
-            motivo=(
-                "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
-                f"{comuna_documental} != {resultado.localidad}"
-            ),
-            localidad="", region="",
-            metodo_confirmacion=resultado.metodo_confirmacion,
-        )
-    # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464784 (URUGUAY
-    # 15 / LA CISTERNA): una comuna que un HUMANO acaba de confirmar
-    # EXPLÍCITAMENTE (`comuna_confirmada_humano`, el campo "Comuna/
-    # localidad" que escribió en REGISTRAR_DIRECCION -- NUNCA la comuna
-    # auto-resuelta desde el nombre de la obra) es evidencia igual de
-    # fuerte que una comuna inequívoca del propio texto documental. Si el
-    # geocodificador devuelve una localidad que la CONTRADICE (el proveedor
-    # insiste en Temuco), se rechaza -- la confirmación humana NUNCA
-    # autoriza aceptar cualquier coordenada. Mismo criterio territorial
-    # (catálogo cerrado, sin fuzzy) que la comuna documental de arriba.
-    comuna_humana = _comuna_documental_inequivoca(comuna_confirmada_humano or "")
-    if (
-        comuna_humana and resultado.localidad
-        and _texto_normalizado_sin_acentos(comuna_humana)
-        != _texto_normalizado_sin_acentos(resultado.localidad)
-        and not _comunas_territorialmente_compatibles(comuna_humana, resultado.localidad)
-    ):
-        return ResultadoDestinoEntrega(
-            despachar_a_crudo=resultado.despachar_a_crudo,
-            coordenadas=resultado.coordenadas,
-            etiqueta_geocodificada="",
-            confianza=resultado.confianza,
-            estado=ESTADO_REVISAR,
-            motivo=(
-                "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL: "
-                f"{comuna_humana} != {resultado.localidad}"
-            ),
-            localidad="", region="",
-            metodo_confirmacion=resultado.metodo_confirmacion,
-        )
-    # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- señal secundaria: número
-    # de casa incompatible por orden de magnitud (ver
-    # `_numero_direccion_incompatible`). No aceptar un match espurio sólo
-    # porque el proveedor devolvió coordenadas.
-    if _numero_direccion_incompatible(despachar_a_crudo or "", resultado.etiqueta_geocodificada or ""):
-        return ResultadoDestinoEntrega(
-            despachar_a_crudo=resultado.despachar_a_crudo,
-            coordenadas=resultado.coordenadas,
-            etiqueta_geocodificada="",
-            confianza=resultado.confianza,
-            estado=ESTADO_REVISAR,
-            motivo=(
-                "GEOCODIFICACION_NUMERO_INCOMPATIBLE: "
-                f"{_numero_calle(despachar_a_crudo or '')} != {_numero_calle(resultado.etiqueta_geocodificada or '')}"
-            ),
-            localidad="", region="",
-            metodo_confirmacion=resultado.metodo_confirmacion,
-        )
-    # Bloque COHERENCIA DESTINO -- casos reales 464170 / 464653 / 464746:
-    # un candidato que contradice materialmente la calle o el número de la
-    # dirección documental clara, o que la degrada a sólo comuna/ciudad,
-    # NUNCA se acepta como destino final sólo porque el proveedor devolvió
-    # coordenadas. Complementa las señales de arriba (comuna, número por
-    # orden de magnitud) -- ver `motivo_incoherencia_destino_documental`.
-    motivo_incoherencia = motivo_incoherencia_destino_documental(
+    # Señales de INCOHERENCIA con la dirección documental (comuna
+    # inequívoca / comuna confirmada por un humano -- 464784 / número de
+    # casa por orden de magnitud / calle materialmente distinta o
+    # degradación a comuna -- 464170/464653/464746). Ver
+    # `_motivo_incoherencia_destino_validado` -- un solo lugar, sin
+    # arquitectura paralela.
+    motivo_incoherencia = _motivo_incoherencia_destino_validado(
         despachar_a_crudo=despachar_a_crudo or "",
-        etiqueta_geocodificada=resultado.etiqueta_geocodificada or "",
         localidad=resultado.localidad or "", region=resultado.region or "",
+        etiqueta_geocodificada=resultado.etiqueta_geocodificada or "",
+        comuna_confirmada_humano=comuna_confirmada_humano,
     )
-    if motivo_incoherencia:
+    if not motivo_incoherencia:
+        return resultado
+    # GEOGRAFÍA 3 -- el candidato del geocodificador es incoherente con la
+    # dirección documental; ANTES de rechazar, se prueba el candidato de
+    # la base territorial INE v3 (calle + número confirmados en el maestro,
+    # un solo punto real, comuna canónica). Pasa por EXACTAMENTE las
+    # mismas guardas de coherencia (si también fuera incoherente -- p. ej.
+    # una comuna que el propio documento contradice -- se descarta y gana
+    # el rechazo original) y por la validación de región chilena. Sólo
+    # actúa donde el flujo YA iba a abstenerse: nunca perturba un destino
+    # aceptado.
+    ine = _candidato_geocodificacion_desde_base_local(
+        base_geografica_local, despachar_a_crudo or "",
+        comuna_territorial_conocida=(
+            comuna_territorial_conocida
+            or _comuna_documental_inequivoca(comuna_confirmada_humano or "")
+        ),
+    )
+    if (
+        ine is not None and ine.coordenadas is not None
+        and (not ine.region or region_valida(ine.region))
+        and not _motivo_incoherencia_destino_validado(
+            despachar_a_crudo=despachar_a_crudo or "",
+            localidad=ine.localidad or "", region=ine.region or "",
+            etiqueta_geocodificada=ine.etiqueta or "",
+            comuna_confirmada_humano=comuna_confirmada_humano,
+        )
+    ):
         return ResultadoDestinoEntrega(
             despachar_a_crudo=resultado.despachar_a_crudo,
-            coordenadas=resultado.coordenadas,
-            etiqueta_geocodificada="",
-            confianza=resultado.confianza,
-            estado=ESTADO_REVISAR,
-            motivo=motivo_incoherencia,
-            localidad="", region="",
-            metodo_confirmacion=resultado.metodo_confirmacion,
+            coordenadas=ine.coordenadas,
+            etiqueta_geocodificada=_etiqueta_geocodificada_o_texto_documental(
+                etiqueta=ine.etiqueta, texto_documental=despachar_a_crudo or "",
+            ),
+            confianza=ine.confianza,
+            estado=ESTADO_RESUELTO,
+            motivo="",
+            localidad=ine.localidad, region=ine.region,
+            codigo_pais=ine.codigo_pais, codigo_unidad=ine.codigo_unidad,
+            codigo_contexto=ine.codigo_contexto,
+            metodo_confirmacion="BASE_LOCAL_INE",
         )
-    return resultado
+    return ResultadoDestinoEntrega(
+        despachar_a_crudo=resultado.despachar_a_crudo,
+        coordenadas=resultado.coordenadas,
+        etiqueta_geocodificada="",
+        confianza=resultado.confianza,
+        estado=ESTADO_REVISAR,
+        motivo=motivo_incoherencia,
+        localidad="", region="",
+        metodo_confirmacion=resultado.metodo_confirmacion,
+    )
 
 
 CAMPOS_RESULTADO_RUTA_ENTREGA = (
@@ -1939,6 +1971,7 @@ def calcular_ruta_entrega_para_viaje(
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     codigo_planta_mobile: str | None = None,
     categoria_documento: str | None = None,
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
 ) -> ResultadoRutaEntrega:
     """Orquesta PLANTA ORIGEN -> DESPACHAR A (Bloque E1). Nunca usa
     `DIRECCION`/`COMUNA`/`COD DESTINATARIO` del cliente como destino de
@@ -1991,6 +2024,7 @@ def calcular_ruta_entrega_para_viaje(
         punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+        base_geografica_local=base_geografica_local,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F: coordenadas/confianza SÍ se conservan (evidencia
@@ -2404,6 +2438,7 @@ def resolver_entrega_documento(
     categoria_documento: str | None = None,
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
 ) -> dict[str, str]:
     """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
     persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
@@ -2437,7 +2472,18 @@ def resolver_entrega_documento(
     revalidación posterior ya usa, ahora también en el PRIMER pase para no
     dejar como REVISAR una entrega que Atlas ya podía resolver sin costo.
     Ambos entran por el camino seguro existente (mismos gates); sin ellos,
-    comportamiento idéntico a antes de este bloque."""
+    comportamiento idéntico a antes de este bloque.
+
+    `base_geografica_local` (GEOGRAFÍA 3, opcional): la base territorial
+    INE v3 -- ya provisionada y validada por `cargar_base_geografica_
+    local_ine`. Se cablea también al PRIMER pase (no sólo a la
+    revalidación retroactiva): una guía nueva cuya dirección resuelve como
+    DIRECCION_EXACTA en el maestro territorial obtiene la coordenada real
+    de una vez, en vez de nacer como pendiente técnico para recién después
+    aprovechar INE. Mantiene TODAS las guardas: EXACT -> puede resolver;
+    MULTIPLE / número ausente / calle no encontrada -> se abstiene y sigue
+    con los demás fallbacks; nunca inventa; nunca altera la dirección
+    documental. Sin base (o `None`), comportamiento idéntico."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
     # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
@@ -2495,6 +2541,7 @@ def resolver_entrega_documento(
         codigo_planta_mobile=codigo_planta_mobile, categoria_documento=categoria_documento,
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+        base_geografica_local=base_geografica_local,
     )
     resultado["direccion_entrega"] = ruta_entrega.direccion_entrega_geocodificada
     resultado["localidad_entrega"] = ruta_entrega.localidad_entrega

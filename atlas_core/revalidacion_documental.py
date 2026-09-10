@@ -2838,6 +2838,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     evidencia YA confirmada por un humano o YA persistida en catálogo."""
     from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
     from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.geografia.base_local import cargar_base_geografica_local_ine
     from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida, texto_destino_degradado
     from atlas_core.rutas.geocerca import coordenada_ruteo_planta
     from atlas_core.rutas.modelos import Coordenadas
@@ -2848,6 +2849,12 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
         proveedor_rutas = _proveedor_rutas_ors_predeterminado()
     if proveedor_rutas_fallback is None:
         proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado()
+    # GEOGRAFÍA 3 -- misma base territorial INE v3 que usa el reintento de
+    # ruta sin destino calculado: la dirección canónica del catálogo
+    # confirmado (casos 464395/464740) puede resolver como DIRECCION_
+    # EXACTA en el maestro aunque el geocodificador externo siga sin
+    # ubicarla. `None` si no está provisionada -> comportamiento idéntico.
+    base_geografica_local_ine = cargar_base_geografica_local_ine(raiz=carpeta.parent)
     try:
         catalogo_obras = CatalogoObrasDestinos(
             ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
@@ -2962,6 +2969,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                     evidencia_origen=str(fila.get("evidencia_origen", "")),
                     perfil=perfil, destinos_confirmados=destinos_confirmados_obra,
                     proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
+                    base_geografica_local=base_geografica_local_ine,
                 )
                 if resultado.estado_ruta != EstadoRuta.RUTA_CALCULADA.value:
                     continue

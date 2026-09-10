@@ -224,9 +224,13 @@ def test_base_ine_no_rescata_una_calle_conocida_sin_ese_numero(base_ine_v3):
 
 
 def test_comuna_conocida_permite_resolver_cuando_el_texto_no_la_trae(base_ine_v3):
-    # "CARMEN MENA 529" a secas (sin comuna en el texto) NO resuelve...
-    assert _candidato_geocodificacion_desde_base_local(base_ine_v3, "CARMEN MENA 529") is None
-    # ...pero con la comuna que Atlas ya conoce por evidencia confiable, sí
+    # GEOGRAFÍA 3 -- "CARMEN MENA 529" a secas (sin comuna) YA resuelve:
+    # esa calle+número es ÚNICA en toda la RM (San Miguel) -> región-wide.
+    c0 = _candidato_geocodificacion_desde_base_local(base_ine_v3, "CARMEN MENA 529")
+    assert c0 is not None
+    assert (c0.coordenadas.longitud, c0.coordenadas.latitud) == (-70.63886, -33.508934)
+    assert c0.localidad == "San Miguel"
+    # con la comuna que Atlas ya conoce por evidencia confiable, también
     c = _candidato_geocodificacion_desde_base_local(
         base_ine_v3, "CARMEN MENA 529", comuna_territorial_conocida="San Miguel",
     )
@@ -236,6 +240,42 @@ def test_comuna_conocida_permite_resolver_cuando_el_texto_no_la_trae(base_ine_v3
     assert _candidato_geocodificacion_desde_base_local(
         base_ine_v3, "CARMEN MENA 529", comuna_territorial_conocida="Vitacura",
     ) is None
+
+
+def test_region_wide_se_abstiene_si_la_calle_numero_esta_en_dos_comunas(tmp_path):
+    # misma calle+número en DOS comunas -> MULTIPLE -> nunca elige un punto
+    ruta = tmp_path / "base_local_rm_ine.sqlite"
+    base = BaseGeograficaLocalSQLite(ruta)
+    base.importar_filas(
+        [
+            {"comuna": "Maipú", "calle": "LOS AROMOS", "numero": "100",
+             "ref_externa": "gid=1", "lon": -70.75, "lat": -33.51},
+            {"comuna": "Puente Alto", "calle": "LOS AROMOS", "numero": "100",
+             "ref_externa": "gid=2", "lon": -70.58, "lat": -33.61},
+        ],
+        reemplazar=True,
+    )
+    ev = base.consultar_sin_comuna(calle="LOS AROMOS", numero="100")
+    assert ev.estado.value == "MULTIPLE"
+    assert ev.resultado == "MULTIPLE"
+    assert _candidato_geocodificacion_desde_base_local(base, "LOS AROMOS 100") is None
+    # el mismo número EN una sola comuna sí resuelve
+    ev2 = base.consultar_sin_comuna(calle="LOS AROMOS", numero="101")
+    # (101 no está) -> abstención por número, nunca devuelve el 100
+    assert ev2.resultado in ("CALLE_CONOCIDA_NUMERO_NO_EN_BASE", "CALLE_NO_ENCONTRADA")
+
+
+def test_region_wide_sin_numero_se_abstiene(base_ine_v3):
+    ev = base_ine_v3.consultar_sin_comuna(calle="CARMEN MENA", numero="")
+    assert ev.estado.value == "NO_ENCONTRADO"
+    assert ev.motivo == "NUMERO_NO_INFORMADO_CONSULTA_SIN_COMUNA"
+    assert _candidato_geocodificacion_desde_base_local(base_ine_v3, "CARMEN MENA") is None
+
+
+def test_region_wide_calle_inexistente_no_asume_homonima(base_ine_v3):
+    ev = base_ine_v3.consultar_sin_comuna(calle="AVENIDA QUE NO EXISTE", numero="42")
+    assert ev.resultado == "CALLE_NO_ENCONTRADA"
+    assert all(c.coordenadas is None for c in ev.candidatos)
 
 
 def test_resolver_con_fallback_propaga_la_comuna_conocida_a_la_base(base_ine_v3):
@@ -254,3 +294,17 @@ def test_calcular_ruta_con_planta_conocida_acepta_base_geografica_local():
     from atlas_core.rutas.destino_entrega import calcular_ruta_con_planta_conocida
 
     assert "base_geografica_local" in inspect.signature(calcular_ruta_con_planta_conocida).parameters
+
+
+def test_primer_pase_cablea_base_geografica_local_de_punta_a_punta():
+    """GEOGRAFÍA 3 -- el primer pase (procesamiento inicial) debe poder
+    recibir la base INE y propagarla hasta `resolver_destino_entrega`."""
+    import inspect
+
+    from atlas_core.rutas.destino_entrega import (
+        calcular_ruta_entrega_para_viaje,
+        resolver_entrega_documento,
+    )
+
+    for fn in (resolver_entrega_documento, calcular_ruta_entrega_para_viaje):
+        assert "base_geografica_local" in inspect.signature(fn).parameters, fn.__name__

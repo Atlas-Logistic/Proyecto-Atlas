@@ -686,6 +686,7 @@ def reconciliar_estado_derivado(
     # cuenta como "todas pudieron avanzar" (se re-estampa igual).
     from atlas_core.capacidades_reevaluacion import (
         capacidades_avanzadas as _capacidades_avanzadas,
+        dominios_de_motivo_tecnico as _dominios_de_motivo_tecnico,
         resumen_reevaluacion as _resumen_reevaluacion,
         versiones_actuales as _versiones_cap_actuales,
     )
@@ -696,6 +697,7 @@ def reconciliar_estado_derivado(
         capacidades_a_reevaluar = {
             d: (int(_versiones_cap_previas.get(d, 0) or 0), _act[d]) for d in _act
         }
+    _dominios_avanzados = set(capacidades_a_reevaluar)
     por_reintentar = []
     for registro in registros:
         if str(registro["numero_guia"]) in guias_direccion_confirmada:
@@ -704,16 +706,28 @@ def reconciliar_estado_derivado(
             # (corre siempre, evidencia humana), nunca repetir la misma
             # consulta técnica ni volver a preguntar.
             continue
-        clase = clasificar_fallo_tecnico(str(registro.get("motivo_actual", "")))
+        motivo_registro = str(registro.get("motivo_actual", ""))
+        clase = clasificar_fallo_tecnico(motivo_registro)
         intentos = int(registro["intentos_misma_evidencia"])
+        # La CAPACIDAD de un dominio que gobierna este motivo avanzó
+        # (p. ej. GEOGRAFIA 2->3: maestro territorial INE v3 activo) --
+        # evidencia NUEVA para el pendiente, exactamente como una
+        # `migracion` de `RULESET_VERSION` pero acotada a ese dominio: se
+        # reintenta UNA vez, sin esperar cooldown. Idempotente -- una vez
+        # re-estampada `versiones_capacidades`, `capacidades_a_reevaluar`
+        # queda vacío y este reintento no se vuelve a forzar.
+        capacidad_del_dominio_avanzo = bool(
+            _dominios_avanzados & _dominios_de_motivo_tecnico(motivo_registro)
+        )
         if clase == "DETERMINISTA":
             # Nunca se reintenta sólo por paso del tiempo -- repetir la
             # MISMA consulta con la MISMA evidencia no cambiaría nada (no
             # se gastan 3 intentos idénticos). SÍ se reintenta ante
             # evidencia NUEVA (`intentos == 0`: primer intento, o huella
-            # distinta que `_registro_pendiente` reinició) o ante un
-            # cambio de reglas (`migracion`, una vez por `RULESET_VERSION`).
-            if migracion or intentos == 0:
+            # distinta que `_registro_pendiente` reinició), ante un
+            # cambio de reglas (`migracion`, una vez por `RULESET_VERSION`)
+            # o ante el avance de capacidad de un dominio que lo gobierna.
+            if migracion or intentos == 0 or capacidad_del_dominio_avanzo:
                 por_reintentar.append(str(registro["numero_guia"]))
             continue
         maximo = MAX_REINTENTOS_POR_CLASE.get(clase, 0)
@@ -727,7 +741,7 @@ def reconciliar_estado_derivado(
                 vencido = instante - datetime.fromisoformat(str(ultimo)) >= cooldown
             except ValueError:
                 pass
-        if intentos < maximo and vencido:
+        if (intentos < maximo and vencido) or capacidad_del_dominio_avanzo:
             por_reintentar.append(str(registro["numero_guia"]))
     # Bloque R2.5 -- PROYECCIÓN CANÓNICA -> OPERACIÓN: caso real 464264
     # (decisión humana aplicada; "Revisión de Atlas" ya reflejaba 0

@@ -1491,6 +1491,39 @@ def _corroborar_destino_historico_repetido(
     }
 
 
+# GEOGRAFÍA 3 -- la base territorial INE v3 se carga UNA vez por proceso:
+# la validación de `cargar_base_geografica_local_ine` (`disponible()` ->
+# `COUNT(*)` sobre ~1.5M filas) no debe repetirse por documento. Se
+# invalida sola si el archivo cambia de fecha/tamaño (re-provisión).
+_BASE_INE_MEMO: dict[str, object] = {}
+
+
+def _base_geografica_ine_memoizada():
+    """Devuelve la base INE v3 lista para el primer pase, o ``None`` si no
+    está provisionada / no es v3 / está vacía (mismo guardián que la
+    revalidación retroactiva). Nunca lanza."""
+    try:
+        from atlas_core.geografia.base_local import (
+            cargar_base_geografica_local_ine,
+            ruta_base_ine_predeterminada,
+        )
+
+        ruta = ruta_base_ine_predeterminada()
+        firma = (
+            (str(ruta), ruta.stat().st_mtime, ruta.stat().st_size)
+            if ruta.exists() else (str(ruta), 0, 0)
+        )
+    except (OSError, ImportError):
+        return _BASE_INE_MEMO.get("base")
+    if _BASE_INE_MEMO.get("firma") != firma:
+        _BASE_INE_MEMO["firma"] = firma
+        try:
+            _BASE_INE_MEMO["base"] = cargar_base_geografica_local_ine()
+        except Exception:  # nunca tumba el procesamiento
+            _BASE_INE_MEMO["base"] = None
+    return _BASE_INE_MEMO.get("base")
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -2594,6 +2627,10 @@ def procesar_archivo(
                 categoria_documento=tipo_carga_preliminar,
                 destinos_confirmados=destinos_confirmados_primer_pase,
                 proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+                # GEOGRAFÍA 3 -- INE v3 también en el primer pase: una guía
+                # nueva no cae en pendiente técnico para recién después
+                # usar el maestro territorial (mismas guardas de seguridad).
+                base_geografica_local=_base_geografica_ine_memoizada(),
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",

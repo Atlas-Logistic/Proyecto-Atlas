@@ -56,6 +56,17 @@ flujo (ver ``rutas.destino_entrega``); ``MULTIPLE`` conserva la
 ambigüedad y ``CALLE_CONOCIDA``/``CALLE_NO_ENCONTRADA`` nunca inventan
 coordenada ni convierten ausencia de fuente en inexistencia.
 
+GEOGRAFÍA 3 -- ``consultar_sin_comuna`` resuelve REGIÓN-WIDE cuando el
+documento no fija comuna y ninguna evidencia confiable la aporta (el
+patrón real de una guía nueva: "CARMEN MENA 529" a secas). Busca la
+calle en TODA la base y sólo devuelve ``DIRECCION_EXACTA`` -- coordenada
+utilizable -- si el número consultado cae, bajo la regla segura de
+ceros, en EXACTAMENTE una comuna y un único punto espacial. Con la calle
+en >=2 comunas, o el número en >=2 puntos, devuelve ``MULTIPLE`` (nunca
+elige); sin número se abstiene. El índice ``ix_direcciones_calle_numero``
+(en ``_DDL``; se crea best-effort al cargar una base ya provisionada)
+hace de esa consulta un acceso por índice y no un full scan.
+
 Lo que ESTE bloque NO hace todavía: interpolar numeración ni calcular
 centroides.
 """
@@ -210,7 +221,7 @@ class EvidenciaGeoLocal:
             return "MULTIPLE"
         if self.encontrada:
             return "CALLE_CONOCIDA_NUMERO_NO_EN_BASE"
-        if self.motivo == "CALLE_NO_ENCONTRADA_EN_COMUNA":
+        if self.motivo in ("CALLE_NO_ENCONTRADA_EN_COMUNA", "CALLE_NO_ENCONTRADA_EN_REGION"):
             return "CALLE_NO_ENCONTRADA"
         return "SIN_DATO"
 
@@ -344,6 +355,11 @@ class BaseGeograficaLocalSQLite:
         # La consulta por comuna+calle+número usa directamente la PK.
         "CREATE INDEX IF NOT EXISTS ix_direcciones_comuna_calle"
         " ON direcciones (codigo_comuna, calle_normalizada);",
+        # GEOGRAFÍA 3 -- índice para la resolución REGIÓN-WIDE (sin comuna):
+        # ``consultar_sin_comuna`` filtra por ``calle_normalizada`` sobre
+        # TODA la base; sin este índice sería un full scan de ~1.5M filas.
+        "CREATE INDEX IF NOT EXISTS ix_direcciones_calle_numero"
+        " ON direcciones (calle_normalizada, numero);",
     )
     # Columnas agregadas después de v1 -- se añaden por ALTER a una base
     # antigua abierta sin ``--reemplazar`` (nunca se pierde lo ya escrito).
@@ -363,6 +379,11 @@ class BaseGeograficaLocalSQLite:
         # Expresiones SELECT para las columnas v2, tolerando una base v1
         # (``''`` literal en su lugar). Se resuelve en la 1ª lectura.
         self._select_v2: str | None = None
+        # GEOGRAFÍA 3 -- ``contar()`` recorre ~1.5M filas (``COUNT(*)`` sin
+        # WHERE): cachear el resultado por instancia evita pagarlo en CADA
+        # ``consultar``/``consultar_sin_comuna``. Se invalida en
+        # ``_cerrar_lectura`` (que ``importar_filas`` llama al terminar).
+        self._conteo_cache: int | None = None
 
     # ---- disponibilidad -------------------------------------------------
 
@@ -372,6 +393,8 @@ class BaseGeograficaLocalSQLite:
     def contar(self) -> int:
         """Número de filas en ``direcciones`` (0 si la base no existe o no
         es legible). Nunca lanza."""
+        if self._conteo_cache is not None:
+            return self._conteo_cache
         if not self.ruta.exists():
             return 0
         try:
@@ -380,7 +403,8 @@ class BaseGeograficaLocalSQLite:
             ).fetchone()
         except sqlite3.Error:
             return 0
-        return int(fila[0]) if fila else 0
+        self._conteo_cache = int(fila[0]) if fila else 0
+        return self._conteo_cache
 
     def esquema_v3_compatible(self) -> bool:
         """``True`` sólo si la tabla ``direcciones`` tiene la PK v3
@@ -506,6 +530,104 @@ class BaseGeograficaLocalSQLite:
         return EvidenciaGeoLocal(
             estado_calle, consulta, contexto_calle,
             motivo="CALLE_CONOCIDA_NUMERO_NO_EN_BASE", codigo_comuna=codigo_comuna,
+        )
+
+    def consultar_sin_comuna(self, *, calle: str, numero: str = "") -> EvidenciaGeoLocal:
+        """GEOGRAFÍA 3 -- resolución REGIÓN-WIDE: el documento NO fija
+        comuna y ninguna evidencia confiable la aporta (patrón real de una
+        guía nueva). Busca ``calle`` en TODA la base y sólo devuelve
+        ``DIRECCION_EXACTA`` -- coordenada utilizable -- si el ``numero``
+        consultado resuelve, bajo la regla segura de ceros a la izquierda,
+        a UNA sola comuna y UN solo punto espacial (``_celda_espacial``).
+
+        Se ABSTIENE -- nunca inventa, nunca elige -- cuando:
+          * no hay ``numero`` (una calle homónima repartida en varias
+            comunas jamás se colapsa a un punto sin número);
+          * la calle no existe en ninguna comuna (``CALLE_NO_ENCONTRADA``);
+          * el número aparece en >=2 comunas o en >=2 puntos distintos de
+            una misma comuna (``MULTIPLE``);
+          * la calle existe pero ese número no (``CALLE_CONOCIDA_NUMERO_
+            NO_EN_BASE`` -- sin coordenada).
+
+        Nunca degrada la dirección a comuna, nunca acepta un número
+        distinto, nunca convierte ausencia de fuente en inexistencia."""
+        calle = str(calle or "").strip()
+        numero = str(numero or "").strip()
+        consulta = {"comuna": "", "calle": calle, "numero": numero}
+
+        if not self.disponible():
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.NO_ENCONTRADO, consulta,
+                disponible=False, motivo="BASE_LOCAL_NO_PROVISIONADA",
+            )
+        if not calle:
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.NO_ENCONTRADO, consulta, motivo="CALLE_NO_INFORMADA",
+            )
+        if not numero:
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.NO_ENCONTRADO, consulta,
+                motivo="NUMERO_NO_INFORMADO_CONSULTA_SIN_COMUNA",
+            )
+
+        try:
+            conn = self._conexion_lectura()
+        except sqlite3.Error:
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.NO_ENCONTRADO, consulta,
+                disponible=False, motivo="BASE_LOCAL_NO_LEGIBLE",
+            )
+
+        calle_norm = _norma_texto(calle)
+        filas = self._filas_por_calle_region(conn, calle_norm)
+        if not filas:
+            calle_alt = _sin_prefijo_estructural(calle_norm)
+            if calle_alt != calle_norm:
+                filas = self._filas_por_calle_region(conn, calle_alt)
+        if not filas:
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.NO_ENCONTRADO, consulta,
+                motivo="CALLE_NO_ENCONTRADA_EN_REGION",
+            )
+
+        candidatos = tuple(self._fila_a_direccion(f, numero) for f in filas)
+        coincidentes = tuple(c for c in candidatos if c.numero_coincide)
+        if not coincidentes:
+            # La calle existe en la región, pero ese número no -> NUNCA
+            # aporta coordenada (evidencia de "calle conocida", no un punto).
+            contexto_calle = tuple(
+                replace(c, coordenadas=None) for c in (
+                    tuple(c for c in candidatos if not c.numero) or candidatos
+                )
+            )
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.NORMALIZADA, consulta, contexto_calle,
+                motivo="CALLE_CONOCIDA_NUMERO_NO_EN_BASE",
+            )
+
+        comunas = {c.codigo_comuna for c in coincidentes}
+        if len(comunas) > 1:
+            representantes: list[DireccionLocal] = []
+            for cc in sorted(comunas):
+                grupo = tuple(c for c in coincidentes if c.codigo_comuna == cc)
+                representantes.extend(self._colapsar_observaciones(grupo))
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.MULTIPLE, consulta, tuple(representantes),
+                motivo="NUMERO_EN_MULTIPLES_COMUNAS",
+            )
+
+        codigo_comuna = next(iter(comunas))
+        colapsados = self._colapsar_observaciones(coincidentes)
+        con_punto = tuple(c for c in colapsados if c.coordenadas is not None)
+        if len(con_punto) > 1:
+            return EvidenciaGeoLocal(
+                EstadoConsultaLocal.MULTIPLE, consulta, con_punto,
+                motivo="NUMERO_EN_MULTIPLES_PUNTOS", codigo_comuna=codigo_comuna,
+            )
+        unico = con_punto[0] if con_punto else colapsados[0]
+        return EvidenciaGeoLocal(
+            EstadoConsultaLocal.NORMALIZADA, consulta, (unico,),
+            motivo="DIRECCION_CON_NUMERO_CONFIRMADO_REGION", codigo_comuna=codigo_comuna,
         )
 
     # ---- import (único camino de escritura) --------------------------
@@ -659,6 +781,7 @@ class BaseGeograficaLocalSQLite:
                 pass
             self._conn_lectura = None
         self._select_v2 = None
+        self._conteo_cache = None
 
     def _expr_columnas_v2(self, conn: sqlite3.Connection) -> str:
         """Devuelve ``ref_externa, alias`` si la tabla los tiene, o
@@ -684,6 +807,18 @@ class BaseGeograficaLocalSQLite:
             # inserción / del CSV importado.
             " ORDER BY numero, ref_externa, lon, lat",
             (codigo_comuna, calle_norm),
+        ).fetchall()
+
+    def _filas_por_calle_region(self, conn: sqlite3.Connection, calle_norm: str) -> list[tuple]:
+        """GEOGRAFÍA 3 -- todas las filas de ``calle_norm`` en CUALQUIER
+        comuna (usa ``ix_direcciones_calle_numero``). Orden total y estable
+        -- el desenlace no depende del orden de inserción / del CSV."""
+        return conn.execute(
+            "SELECT codigo_comuna, calle_normalizada, numero, calle_canonica,"
+            f" comuna_canonica, lon, lat, fuente, {self._expr_columnas_v2(conn)}"
+            " FROM direcciones WHERE calle_normalizada = ?"
+            " ORDER BY codigo_comuna, numero, ref_externa, lon, lat",
+            (calle_norm,),
         ).fetchall()
 
     @staticmethod
@@ -826,6 +961,16 @@ def evidencia_local_para_direccion(
         calle = _PATRON_NUMERO.sub(" ", calle, count=1)
     calle = " ".join(calle.split())
 
+    # GEOGRAFÍA 3 -- sin comuna (ni en el texto ni aportada por evidencia
+    # confiable) pero con número: se intenta la resolución REGIÓN-WIDE
+    # (`consultar_sin_comuna`), que sólo resuelve una dirección ÚNICA en
+    # toda la RM y se abstiene ante cualquier ambigüedad. Un backend que
+    # no la implemente (doble de test antiguo) cae al camino de siempre.
+    if not comuna_final and numero:
+        consultar_region = getattr(base, "consultar_sin_comuna", None)
+        if callable(consultar_region):
+            return consultar_region(calle=calle, numero=numero)
+
     return base.consultar(comuna=comuna_final, calle=calle, numero=numero)
 
 
@@ -862,7 +1007,13 @@ def cargar_base_geografica_local_ine(
         nueva, aunque esté en la ruta canónica);
       * la base está vacía o es ilegible (``disponible()`` es ``False``).
 
-    Nunca lanza. Nunca crea el archivo (la consulta abre en modo ``ro``)."""
+    Nunca lanza. Nunca crea el archivo (la consulta abre en modo ``ro``).
+
+    GEOGRAFÍA 3 -- sobre una base YA provisionada (las nuevas ya lo traen
+    por ``_DDL``) se crea, best-effort, el índice
+    ``ix_direcciones_calle_numero`` que la resolución región-wide
+    necesita; si el archivo es de sólo lectura o el índice ya existe, no
+    pasa nada (nunca bloquea el cableado)."""
     destino = Path(ruta) if ruta is not None else ruta_base_ine_predeterminada(raiz=raiz)
     try:
         if not destino.is_file():
@@ -872,6 +1023,27 @@ def cargar_base_geografica_local_ine(
             return None
         if not base.disponible():
             return None
+        _asegurar_indice_calle_numero(destino)
         return base
     except (OSError, sqlite3.Error, ValueError):
         return None
+
+
+def _asegurar_indice_calle_numero(destino: Path) -> None:
+    """Crea ``ix_direcciones_calle_numero`` en una base INE ya provisionada
+    (GEOGRAFÍA 3 -- resolución región-wide sin comuna). Best-effort: una
+    base de sólo lectura, o un índice ya existente, no son error. Se hace
+    en una conexión propia de corta vida -- ``CREATE INDEX IF NOT EXISTS``
+    es un no-op barato cuando el índice ya está."""
+    try:
+        conn = sqlite3.connect(str(destino))
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_direcciones_calle_numero"
+                " ON direcciones (calle_normalizada, numero)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
