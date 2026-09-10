@@ -832,8 +832,13 @@ def reconciliar_estado_derivado(
         from atlas_core.procesamiento_masivo import (
             MotivoRevisionDocumento,
             _resolver_destinos_contaminados_por_historial,
+            _revertir_promociones_historial_contaminado,
             revalidar_convergencia_identidad_sin_ocr,
         )
+        # Codex 472477 -- deshace primero cualquier `despachar_a_crudo`
+        # inyectado por la regla vieja (obra placeholder / distinto
+        # cliente / un solo transporte), antes de re-evaluar convergencias.
+        reversion_historial_destino = _revertir_promociones_historial_contaminado(dataset)
         with dataset.open("r", newline="", encoding="utf-8-sig") as archivo_dataset:
             archivos_destino_contaminado = {
                 str(fila.get("archivo", "")).strip()
@@ -1205,6 +1210,7 @@ def reconciliar_estado_derivado(
             | set(limpieza_obra_destino["guias_actualizadas"])
         ),
         "destinos_historial_recuperados": recuperacion_historial_destino,
+        "destinos_historial_revertidos": reversion_historial_destino,
         "guias_recuperadas": guias_recuperadas,
         "guias_contradiccion_destino_catalogo": limpieza_destino_catalogo["guias_contradiccion"],
         "destinos_coordenadas_completadas": limpieza_destino_coords["destinos_actualizados"],

@@ -3080,13 +3080,100 @@ def _corroborar_documentos_relacionados_bajo_lock(ruta_csv: Path, archivos_objet
     return cambios
 
 
+# Valores de `obra_destino` que NO identifican una obra real -- nunca
+# habilitan una promoción histórica de destino (Codex 472477: la obra
+# "No encontrado" se usaba como clave de agrupación válida).
+_PLACEHOLDERS_OBRA_DESTINO = frozenset({
+    "", "NO ENCONTRADO", "SIN OBRA", "SIN INFORMACION", "SIN INFORMACIÓN",
+    "NO INFORMADO", "NO APLICA", "N/A", "NA", "S/I", "SI", "-", "--",
+    "SIN DATO", "SIN DATOS", "NO DETERMINADO", "DESCONOCIDO",
+})
+
+_PATRON_NUMERO_DIRECCION = re.compile(r"\d{2,6}")
+
+
+def _es_placeholder_obra_destino(obra_normalizada: str) -> bool:
+    valor = str(obra_normalizada or "").strip()
+    if valor in _PLACEHOLDERS_OBRA_DESTINO:
+        return True
+    return not any(caracter.isalpha() for caracter in valor)
+
+
+def _transporte_util_para_evidencia(valor: object) -> str:
+    texto = str(valor or "").strip()
+    return "" if _normalizar(texto) in {"", "NO ENCONTRADO", "SIN TRANSPORTE"} else texto
+
+
+def _tokens_calle_documental(texto: str) -> set[str]:
+    coincidencia = _PATRON_NUMERO_DIRECCION.search(texto or "")
+    cabeza = (texto or "")[: coincidencia.start()] if coincidencia else (texto or "")
+    return {t for t in _normalizar(cabeza).split() if len(t) >= 3 and t.isalpha()}
+
+
+def _propuesta_historica_contradice_documental(documental: str, propuesta: str) -> bool:
+    """Codex criterio 5: la propuesta histórica se descarta si contradice
+    MATERIALMENTE la calle, el número o la comuna/ciudad de un destino
+    documental CLARO. Un `despachar_a_crudo` que no es una dirección
+    creíble (RUT/fecha/fragmento) no aporta contradicción -- ahí mandan
+    los gates de obra/cliente/transporte."""
+    doc = str(documental or "").strip()
+    prop = str(propuesta or "").strip()
+    if not doc or not prop or _normalizar(doc) == _normalizar(prop):
+        return False
+    if evaluar_credibilidad_direccion(doc).nivel != NivelCredibilidad.CONFIABLE:
+        return False
+    nums_doc = set(_PATRON_NUMERO_DIRECCION.findall(doc))
+    nums_prop = set(_PATRON_NUMERO_DIRECCION.findall(prop))
+    if nums_doc and nums_prop and nums_doc.isdisjoint(nums_prop):
+        return True
+    calle_doc, calle_prop = _tokens_calle_documental(doc), _tokens_calle_documental(prop)
+    if calle_doc and calle_prop and calle_doc.isdisjoint(calle_prop):
+        return True
+    try:
+        from atlas_core.rutas.destino_entrega import (
+            _comuna_documental_inequivoca,
+            _comunas_territorialmente_compatibles,
+        )
+        comuna_doc = _comuna_documental_inequivoca(doc)
+        comuna_prop = _comuna_documental_inequivoca(prop)
+        if (
+            comuna_doc and comuna_prop
+            and _normalizar(comuna_doc) != _normalizar(comuna_prop)
+            and not _comunas_territorialmente_compatibles(comuna_doc, comuna_prop)
+        ):
+            return True
+    except (ImportError, ValueError):
+        pass
+    return False
+
+
+def _reflejar_estados_fila(fila: dict[str, str], motivos: list[str]) -> None:
+    fila["motivos_revision_documento"] = " | ".join(motivos)
+    fila["indicador_revision"] = "REVISAR" if any(
+        m not in MOTIVOS_NO_BLOQUEANTES for m in motivos
+    ) else "OK"
+    fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+    fila["estado_operacional"] = "REQUIERE_REVISION" if (
+        fila["estado_documental"] == "REQUIERE_REVISION"
+        or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+    ) else "OK"
+
+
 def _resolver_destinos_contaminados_por_historial(
-    ruta_csv: Path, archivos_objetivo: set[str], *, minimo_guias: int = 2,
+    ruta_csv: Path, archivos_objetivo: set[str], *, minimo_transportes: int = 2,
 ) -> int:
-    """Aplica un destino sólo si historial independiente converge sin conflicto."""
+    """Promueve un destino operacional SÓLO cuando historial de otros
+    TRANSPORTES converge sin conflicto, con obra canónica real y el mismo
+    cliente. Nunca sobrescribe `despachar_a_crudo` (evidencia documental).
+
+    Codex 472477 -- la versión anterior: (1) usaba `obra_destino="No
+    encontrado"` como clave válida; (2) no exigía mismo cliente; (3)
+    contaba dos guías del MISMO transporte como dos pruebas; (4)
+    sobrescribía `despachar_a_crudo`. Los cuatro puntos quedan cerrados."""
     if not archivos_objetivo or not ruta_csv.is_file():
         return 0
     motivo = MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
+    motivo_obra = MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR.value
     with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
         with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
             filas = list(csv.DictReader(archivo, delimiter=";"))
@@ -3096,95 +3183,216 @@ def _resolver_destinos_contaminados_por_historial(
                 continue
             motivos = [m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()]
             obra = _normalizar(fila.get("obra_destino", ""))
+            cliente_fila = _normalizar(fila.get("cliente", ""))
+            transporte_fila = _transporte_util_para_evidencia(fila.get("numero_transporte"))
             cambio_fila = False
-            motivo_obra = MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR.value
-            if motivo_obra in motivos and obra:
-                guias_misma_obra = {
-                    str(otra.get("numero_guia", "")).strip()
-                    for otra in filas
+
+            # Codex criterio 2/3: un placeholder de obra (o una obra vacía)
+            # NUNCA habilita una promoción histórica.
+            if _es_placeholder_obra_destino(obra):
+                continue
+
+            def _hermanas(pred_extra) -> list[dict[str, str]]:
+                return [
+                    otra for otra in filas
                     if otra.get("archivo") != fila.get("archivo")
                     and _normalizar(otra.get("obra_destino", "")) == obra
-                    and str(otra.get("numero_guia", "")).strip()
+                    # Codex criterio 3: misma identidad de cliente.
+                    and _normalizar(otra.get("cliente", "")) == cliente_fila
+                    and pred_extra(otra)
+                ]
+
+            def _transportes_independientes(candidatas) -> set[str]:
+                # Codex criterio 4: evidencia independiente = transportes
+                # DISTINTOS; dos guías del mismo transporte no son dos
+                # pruebas, y el propio transporte de la fila no cuenta.
+                return {
+                    _transporte_util_para_evidencia(c.get("numero_transporte"))
+                    for c in candidatas
+                    if _transporte_util_para_evidencia(c.get("numero_transporte"))
+                    and _transporte_util_para_evidencia(c.get("numero_transporte")) != transporte_fila
                 }
-                if len(guias_misma_obra) >= minimo_guias:
+
+            if motivo_obra in motivos:
+                hermanas = _hermanas(lambda o: bool(str(o.get("numero_guia", "")).strip()))
+                if len(_transportes_independientes(hermanas)) >= minimo_transportes:
                     motivos.remove(motivo_obra)
                     cambio_fila = True
 
-            if motivo not in motivos:
-                if cambio_fila:
-                    fila["motivos_revision_documento"] = " | ".join(motivos)
-                    fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
-                    fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
-                    fila["estado_operacional"] = "REQUIERE_REVISION" if (
-                        fila["estado_documental"] == "REQUIERE_REVISION"
-                        or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
-                    ) else "OK"
-                    cambios += 1
-                continue
-            candidatos: dict[str, list[dict[str, str]]] = {}
-            for otra in filas:
-                if otra.get("archivo") == fila.get("archivo") or _normalizar(otra.get("obra_destino", "")) != obra:
-                    continue
-                if otra.get("estado_ruta") != EstadoRuta.RUTA_CALCULADA.value:
-                    continue
-                direccion = str(otra.get("direccion_entrega", "")).strip()
-                if not direccion or evaluar_credibilidad_direccion(direccion).nivel != NivelCredibilidad.CONFIABLE:
-                    continue
-                candidatos.setdefault(normalizar_nombre_destino(direccion), []).append(otra)
-            grupos_suficientes = [grupo for grupo in candidatos.values() if len({f.get("numero_guia") for f in grupo}) >= minimo_guias]
-            if len(grupos_suficientes) != 1:
-                if cambio_fila:
-                    fila["motivos_revision_documento"] = " | ".join(motivos)
-                    fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
-                    fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
-                    fila["estado_operacional"] = "REQUIERE_REVISION" if (
-                        fila["estado_documental"] == "REQUIERE_REVISION"
-                        or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
-                    ) else "OK"
-                    cambios += 1
-                continue
-            direccion = str(grupos_suficientes[0][0]["direccion_entrega"]).strip()
-            fila["despachar_a_crudo"] = direccion
-            fila["direccion_entrega"] = direccion
-            # Si las mismas guías independientes convergen además en una
-            # ruta ya calculada desde el mismo origen, reutilizar ese hecho
-            # operacional evita volver a geocodificar una dirección que el
-            # historial ya confirmó. Cualquier divergencia se abstiene.
-            origen_actual = str(fila.get("planta_origen_id", "")).strip()
-            rutas = {
-                tuple(str(h.get(campo, "")) for campo in (
-                    "planta_origen_id", "localidad_entrega", "region_entrega",
-                    "distancia_km", "duracion_min", "proveedor_ruta",
-                    "codigo_pais", "codigo_unidad", "codigo_contexto",
-                ))
-                for h in grupos_suficientes[0]
-                if h.get("estado_ruta") == EstadoRuta.RUTA_CALCULADA.value
-                and str(h.get("planta_origen_id", "")).strip() == origen_actual
-            }
-            if origen_actual and len(rutas) == 1:
-                ruta = next(iter(rutas))
-                for campo, valor in zip((
-                    "planta_origen_id", "localidad_entrega", "region_entrega",
-                    "distancia_km", "duracion_min", "proveedor_ruta",
-                    "codigo_pais", "codigo_unidad", "codigo_contexto",
-                ), ruta):
-                    fila[campo] = valor
-                fila["estado_entrega"] = "RESUELTO"
-                fila["estado_ruta"] = EstadoRuta.RUTA_CALCULADA.value
-                fila["motivo_ruta"] = ""
-            motivos.remove(motivo)
-            cambio_fila = True
-            fila["motivos_revision_documento"] = " | ".join(motivos)
-            fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
-            fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
-            fila["estado_operacional"] = "REQUIERE_REVISION" if (
-                fila["estado_documental"] == "REQUIERE_REVISION"
-                or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
-            ) else "OK"
+            if motivo in motivos:
+                candidatos: dict[str, list[dict[str, str]]] = {}
+                for otra in _hermanas(
+                    lambda o: o.get("estado_ruta") == EstadoRuta.RUTA_CALCULADA.value
+                    and str(o.get("direccion_entrega", "")).strip()
+                    and evaluar_credibilidad_direccion(
+                        str(o.get("direccion_entrega", "")).strip()
+                    ).nivel == NivelCredibilidad.CONFIABLE
+                ):
+                    direccion_otra = str(otra.get("direccion_entrega", "")).strip()
+                    candidatos.setdefault(normalizar_nombre_destino(direccion_otra), []).append(otra)
+                grupos_suficientes = [
+                    grupo for grupo in candidatos.values()
+                    if len(_transportes_independientes(grupo)) >= minimo_transportes
+                ]
+                if len(grupos_suficientes) == 1:
+                    direccion = str(grupos_suficientes[0][0]["direccion_entrega"]).strip()
+                    if _propuesta_historica_contradice_documental(
+                        fila.get("despachar_a_crudo", ""), direccion
+                    ):
+                        pass  # Codex criterio 5: contradicción material -> abstenerse
+                    else:
+                        # Codex criterio 1/6: la propuesta histórica SÓLO
+                        # afecta el campo operacional; `despachar_a_crudo`
+                        # (documental) NUNCA recibe ese valor. Si su
+                        # contenido actual no es una dirección creíble --
+                        # es el fragmento contaminado que originó el
+                        # motivo -- se vacía (nunca se sustituye por la
+                        # histórica) para no falsear las validaciones de
+                        # coherencia aguas abajo (número/comuna).
+                        fila["direccion_entrega"] = direccion
+                        if evaluar_credibilidad_direccion(
+                            str(fila.get("despachar_a_crudo", "")).strip()
+                        ).nivel != NivelCredibilidad.CONFIABLE:
+                            fila["despachar_a_crudo"] = ""
+                        origen_actual = str(fila.get("planta_origen_id", "")).strip()
+                        rutas = {
+                            tuple(str(h.get(campo, "")) for campo in (
+                                "planta_origen_id", "localidad_entrega", "region_entrega",
+                                "distancia_km", "duracion_min", "proveedor_ruta",
+                                "codigo_pais", "codigo_unidad", "codigo_contexto",
+                            ))
+                            for h in grupos_suficientes[0]
+                            if h.get("estado_ruta") == EstadoRuta.RUTA_CALCULADA.value
+                            and str(h.get("planta_origen_id", "")).strip() == origen_actual
+                        }
+                        if origen_actual and len(rutas) == 1:
+                            ruta = next(iter(rutas))
+                            for campo, valor in zip((
+                                "planta_origen_id", "localidad_entrega", "region_entrega",
+                                "distancia_km", "duracion_min", "proveedor_ruta",
+                                "codigo_pais", "codigo_unidad", "codigo_contexto",
+                            ), ruta):
+                                fila[campo] = valor
+                            fila["estado_entrega"] = "RESUELTO"
+                            fila["estado_ruta"] = EstadoRuta.RUTA_CALCULADA.value
+                            fila["motivo_ruta"] = ""
+                        motivos.remove(motivo)
+                        cambio_fila = True
+
             if cambio_fila:
+                _reflejar_estados_fila(fila, motivos)
                 cambios += 1
         if cambios:
             temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".historial.tmp")
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
+                escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+                escritor.writeheader(); escritor.writerows(filas)
+            temporal.replace(ruta_csv)
+        return cambios
+
+
+def _revertir_promociones_historial_contaminado(ruta_csv: Path) -> int:
+    """Codex criterio 8 -- deshace las promociones históricas de destino
+    que la versión anterior de `_resolver_destinos_contaminados_por_
+    historial` aplicó bajo reglas ahora inválidas (obra placeholder,
+    distinto cliente, o un único transporte de origen). Sin OCR, sin red,
+    idempotente.
+
+    Caso testigo 472477: `despachar_a_crudo` = "SAN LUIS 1201 QUILICURA"
+    fue INYECTADO desde 472623/472624 (mismo transporte 0000355433,
+    cliente SODIMAC != PRODALAM, obra "No encontrado"). Reversión: el
+    documental queda vacío (el valor real -- "PASAJE ISRAEL 1303 CHILLAN
+    CHILLAN" -- sólo se recupera con OCR, fuera de este bloque) y se
+    re-marca DESTINO_CONTAMINADO_POR_OTRA_SECCION para que la próxima
+    re-extracción/revisión reestablezca la dirección real."""
+    if not ruta_csv.is_file():
+        return 0
+    motivo = MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
+    with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+            filas = list(csv.DictReader(archivo, delimiter=";"))
+        cambios = 0
+        for fila in filas:
+            despachar = str(fila.get("despachar_a_crudo", "")).strip()
+            if not despachar:
+                continue
+            motivos = [m.strip() for m in fila.get("motivos_revision_documento", "").split("|") if m.strip()]
+            if motivo in motivos:
+                continue  # aún marcado como contaminado -> lo maneja el resolver
+            # Guardas de ámbito -- la fila TIENE que verse como una
+            # promoción que nunca aterrizó en un viaje operativo: sin
+            # `direccion_entrega`, sin ruta calculada y todavía en
+            # revisión. Una convergencia legítima ya tiene su
+            # `direccion_entrega`/ruta y no pasa por aquí.
+            if str(fila.get("direccion_entrega", "")).strip():
+                continue
+            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            if str(fila.get("estado_operacional", "")).strip() != "REQUIERE_REVISION":
+                continue
+            obra = _normalizar(fila.get("obra_destino", ""))
+            cliente_fila = _normalizar(fila.get("cliente", ""))
+            transporte_fila = _transporte_util_para_evidencia(fila.get("numero_transporte"))
+            despachar_norm = normalizar_nombre_destino(despachar)
+
+            # ¿Existe un grupo de "fuentes" que -- bajo las reglas VIEJAS
+            # (>=2 numero_guia distintos, misma obra normalizada) -- pudo
+            # haber inyectado exactamente este `despachar_a_crudo`?
+            fuentes = [
+                otra for otra in filas
+                if otra.get("archivo") != fila.get("archivo")
+                and _normalizar(otra.get("obra_destino", "")) == obra
+                and otra.get("estado_ruta") == EstadoRuta.RUTA_CALCULADA.value
+                and str(otra.get("direccion_entrega", "")).strip()
+                and normalizar_nombre_destino(str(otra.get("direccion_entrega", "")).strip()) == despachar_norm
+                and evaluar_credibilidad_direccion(
+                    str(otra.get("direccion_entrega", "")).strip()
+                ).nivel == NivelCredibilidad.CONFIABLE
+            ]
+            if len({str(f.get("numero_guia", "")).strip() for f in fuentes if str(f.get("numero_guia", "")).strip()}) < 2:
+                continue
+
+            # Ninguna fuente comparte el transporte de ESTA fila: la
+            # dirección vino ENTERAMENTE de otros transportes (si una
+            # hermana del mismo transporte la trajera, sería evidencia
+            # propia, no contaminación).
+            if any(
+                _transporte_util_para_evidencia(f.get("numero_transporte")) == transporte_fila
+                and transporte_fila
+                for f in fuentes
+            ):
+                continue
+
+            transportes_fuente = {
+                _transporte_util_para_evidencia(f.get("numero_transporte"))
+                for f in fuentes
+                if _transporte_util_para_evidencia(f.get("numero_transporte"))
+            }
+            clientes_fuente = {_normalizar(f.get("cliente", "")) for f in fuentes}
+            # Las reglas NUEVAS habrían rechazado esas fuentes:
+            invalida_ahora = (
+                _es_placeholder_obra_destino(obra)
+                or any(c != cliente_fila for c in clientes_fuente)
+                or len(transportes_fuente) < 2
+            )
+            if not invalida_ahora:
+                continue
+
+            fila["despachar_a_crudo"] = ""
+            if motivo not in motivos:
+                motivos.append(motivo)
+            for campo in (
+                "direccion_entrega", "localidad_entrega", "region_entrega",
+                "codigo_pais", "codigo_unidad", "codigo_contexto",
+                "distancia_km", "duracion_min", "proveedor_ruta", "motivo_ruta",
+            ):
+                fila[campo] = ""
+            fila["estado_entrega"] = "NO_INTENTADO"
+            fila["estado_ruta"] = EstadoRuta.REQUIERE_REVISION.value
+            _reflejar_estados_fila(fila, motivos)
+            cambios += 1
+        if cambios:
+            temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".revierte_historial.tmp")
             with temporal.open("w", newline="", encoding="utf-8-sig") as archivo:
                 escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
                 escritor.writeheader(); escritor.writerows(filas)
@@ -4368,6 +4576,7 @@ def procesar_carpeta(
         if not nuevos:
             break
     resumen["documentos_relacionados_corroborados"] = corroborados
+    resumen["destinos_historial_revertidos"] = _revertir_promociones_historial_contaminado(ruta_csv)
     resumen["destinos_historial_resueltos"] = _resolver_destinos_contaminados_por_historial(
         ruta_csv, archivos_procesados_ahora,
     )

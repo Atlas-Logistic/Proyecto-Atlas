@@ -217,10 +217,11 @@ def test_obra_confirmada_con_direccion_nueva_reconoce_identidad_sin_confirmar_de
 
 def test_destino_contaminado_se_resuelve_solo_con_historial_repetido_sin_conflicto(tmp_path):
     ruta = tmp_path / "guias.csv"
-    def fila(archivo, guia, direccion, *, motivo="", estado_ruta="RUTA_CALCULADA"):
+    def fila(archivo, guia, direccion, *, transporte="", motivo="", estado_ruta="RUTA_CALCULADA"):
         datos = {columna: "" for columna in COLUMNAS}
         datos.update(
-            archivo=archivo, numero_guia=guia, obra_destino="OBRA CONOCIDA",
+            archivo=archivo, numero_guia=guia, numero_transporte=transporte,
+            cliente="CLIENTE UNICO SA", obra_destino="OBRA CONOCIDA",
             despachar_a_crudo=direccion, direccion_entrega=direccion,
             estado_ruta=estado_ruta, motivos_revision_documento=motivo,
             planta_origen_id="planta-1", distancia_km="35.5", duracion_min="50",
@@ -230,9 +231,14 @@ def test_destino_contaminado_se_resuelve_solo_con_historial_repetido_sin_conflic
         )
         return datos
     filas = [
-        fila("actual.jpeg", "3", "RUT CHOFER 11.111.111-1", motivo="OBRA_DESTINO_SIN_CORROBORAR | DESTINO_CONTAMINADO_POR_OTRA_SECCION", estado_ruta="DESTINO_NO_VALIDO"),
-        fila("historia-1.jpeg", "1", "CAMINO CENTRAL 10800 SANTIAGO"),
-        fila("historia-2.jpeg", "2", "CAMINO CENTRAL 10800 SANTIAGO"),
+        # el documental es un fragmento contaminado (RUT/fecha), no una
+        # dirección creíble -> no aporta contradicción; mandan los gates.
+        fila("actual.jpeg", "3", "RUT CHOFER 11.111.111-1", transporte="0000000003",
+             motivo="OBRA_DESTINO_SIN_CORROBORAR | DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+             estado_ruta="DESTINO_NO_VALIDO"),
+        # dos TRANSPORTES distintos (Codex criterio 4), mismo cliente y obra
+        fila("historia-1.jpeg", "1", "CAMINO CENTRAL 10800 SANTIAGO", transporte="0000000001"),
+        fila("historia-2.jpeg", "2", "CAMINO CENTRAL 10800 SANTIAGO", transporte="0000000002"),
     ]
     with ruta.open("w", newline="", encoding="utf-8-sig") as archivo:
         escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
@@ -241,7 +247,12 @@ def test_destino_contaminado_se_resuelve_solo_con_historial_repetido_sin_conflic
     assert _resolver_destinos_contaminados_por_historial(ruta, {"actual.jpeg"}) == 1
     with ruta.open(newline="", encoding="utf-8-sig") as archivo:
         actual = list(csv.DictReader(archivo, delimiter=";"))[0]
-    assert actual["despachar_a_crudo"] == "CAMINO CENTRAL 10800 SANTIAGO"
+    # Codex criterio 1/6: el documental NUNCA recibe la propuesta
+    # histórica; el fragmento contaminado ("RUT CHOFER ...") se vacía,
+    # nunca se sustituye por la dirección histórica.
+    assert actual["despachar_a_crudo"] == ""
+    # sólo el campo operacional recibe la dirección histórica convergente.
+    assert actual["direccion_entrega"] == "CAMINO CENTRAL 10800 SANTIAGO"
     assert actual["motivos_revision_documento"] == ""
     assert actual["estado_ruta"] == "RUTA_CALCULADA"
     assert actual["distancia_km"] == "35.5"
@@ -432,7 +443,10 @@ def test_reconciliacion_recupera_destino_contaminado_de_fila_historica(tmp_path)
         por_guia = {f["numero_guia"]: f for f in csv.DictReader(archivo, delimiter=";")}
 
     recuperada = por_guia["464836"]
-    assert recuperada["despachar_a_crudo"] == ruta_maipu
+    # Codex criterio 1/6: la propuesta histórica NUNCA entra en
+    # `despachar_a_crudo`; el fragmento contaminado ("14293816-2 FECHA
+    # ...") se vacía. Sólo el campo operacional recibe la ruta convergente.
+    assert recuperada["despachar_a_crudo"] == ""
     assert recuperada["direccion_entrega"] == ruta_maipu
     assert recuperada["estado_ruta"] == "RUTA_CALCULADA"
     assert recuperada["motivo_ruta"] == ""
