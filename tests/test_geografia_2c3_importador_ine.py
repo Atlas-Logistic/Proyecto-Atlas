@@ -53,26 +53,38 @@ def test_dry_run_conteos_exactos():
         "via_vacia_descartadas": 1,
         "aceptadas": 17,
         "filas_enviadas": 0,
-        "colisiones_pk": 0,
+        "direcciones_con_multiples_observaciones": 0,
+        "direcciones_multipunto": 0,
         "filas_en_tabla": 0,
     }
 
 
-def test_import_conteos_y_colision_pk(tmp_path):
+def test_import_preserva_multiplicidad_sin_ultima_fila(tmp_path):
     _base_obj, sqlite_path = _base(tmp_path)
     meta = json.loads((tmp_path / "base_local_rm_ine.sqlite.procedencia.json").read_text("utf-8"))
     c = meta["conteos"]
     assert c["aceptadas"] == 17
     assert c["filas_enviadas"] == 17
-    assert c["colisiones_pk"] == 1          # gid 1 y gid 20 -> misma (comuna,calle,numero)
-    assert c["filas_en_tabla"] == 16
-    assert BaseGeograficaLocalSQLite(sqlite_path).contar() == 16
+    # gid 1 y gid 20 son la MISMA dirección (CARMEN MENA 529 SAN MIGUEL):
+    # ya NO se colapsan a "la última fila" -- ambas filas quedan en la base.
+    assert c["direcciones_con_multiples_observaciones"] == 1
+    # ...y como sus coordenadas caen en la misma celda espacial (~1 m de
+    # diferencia), NO es multipunto: la consulta sigue siendo EXACTA.
+    assert c["direcciones_multipunto"] == 0
+    assert c["filas_en_tabla"] == 17
+    assert BaseGeograficaLocalSQLite(sqlite_path).contar() == 17
+    # las DOS observaciones son auditables por gid
+    gids = sqlite3.connect(f"file:{sqlite_path.as_posix()}?mode=ro", uri=True).execute(
+        "SELECT ref_externa FROM direcciones"
+        " WHERE calle_normalizada='CARMEN MENA' AND numero='529' ORDER BY ref_externa"
+    ).fetchall()
+    assert [g[0] for g in gids] == ["gid=1", "gid=20"]
 
 
 def test_chunk_pequeno_no_pierde_filas(tmp_path):
     sqlite_path = tmp_path / "b.sqlite"
     importar_a_sqlite(FIXTURE, sqlite_path, reemplazar=True, chunk=1)
-    assert BaseGeograficaLocalSQLite(sqlite_path).contar() == 16
+    assert BaseGeograficaLocalSQLite(sqlite_path).contar() == 17
 
 
 # ============================================================
@@ -196,7 +208,7 @@ def test_importa_desde_zip(tmp_path):
         zf.write(FIXTURE, arcname="a4a_cl_geoaddress_test.csv")
     sqlite_path = tmp_path / "b.sqlite"
     conteos = importar_a_sqlite(zip_path, sqlite_path, reemplazar=True)
-    assert conteos["filas_en_tabla"] == 16
+    assert conteos["filas_en_tabla"] == 17
     meta = json.loads((tmp_path / "b.sqlite.procedencia.json").read_text("utf-8"))
     assert meta["dataset"]["csv_interno"] == "a4a_cl_geoaddress_test.csv"
     assert len(meta["dataset"]["sha256"]) == 64
@@ -215,7 +227,7 @@ def test_cli_import_json(tmp_path, capsys):
     destino = tmp_path / "salida.sqlite"
     assert main(["--csv", str(FIXTURE), "--salida", str(destino), "--reemplazar", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["conteos"]["filas_en_tabla"] == 16
+    assert payload["conteos"]["filas_en_tabla"] == 17
     assert destino.exists()
     assert (tmp_path / "salida.sqlite.procedencia.json").exists()
 
@@ -258,3 +270,202 @@ def test_cabecera_inesperada_falla_claro(tmp_path):
         list(iter_filas_rm(malo, geografia=__import__(
             "atlas_core.geografia", fromlist=["cargar_geografia"]
         ).cargar_geografia("CL")))
+
+
+# ============================================================
+# 7. GEOGRAFÍA 2C.4 -- multiplicidad de coordenadas por dirección
+# ============================================================
+
+_CABECERA_INE = "gid,via,hnum,alias,error,region,clase_urbana,nombre_comuna,longitude,latitude\n"
+
+
+def _fila_ine(gid, via, hnum, comuna, lon, lat, alias=""):
+    return (
+        f"{gid},{via},{hnum},{alias},,METROPOLITANA DE SANTIAGO,CALLE,"
+        f"{comuna},{lon},{lat}\n"
+    )
+
+
+def _csv_ine(tmp_path, filas, nombre="mini_ine.csv"):
+    ruta = tmp_path / nombre
+    ruta.write_text(_CABECERA_INE + "".join(filas), encoding="utf-8")
+    return ruta
+
+
+def test_2c4_duplicado_mismo_punto_no_crea_ambiguedad(tmp_path):
+    """Duplicado exacto / coordenadas dentro de la misma celda espacial =>
+    NO se inventa una ambigüedad: la consulta sigue siendo
+    DIRECCION_EXACTA con UN candidato, pero las N observaciones quedan en
+    la base para auditar."""
+    ruta = _csv_ine(tmp_path, [
+        _fila_ine(101, "LOS AROMOS", "500", "MAIPU", -70.75000, -33.50000),
+        _fila_ine(102, "LOS AROMOS", "500", "MAIPU", -70.750004, -33.499997),  # ~0.5 m
+        _fila_ine(103, "LOS AROMOS", "500", "MAIPU", -70.75000, -33.50000),    # idéntica a gid 101
+    ])
+    sqlite_path = tmp_path / "b.sqlite"
+    conteos = importar_a_sqlite(ruta, sqlite_path, reemplazar=True, chunk=2)
+
+    assert conteos["aceptadas"] == 3
+    assert conteos["filas_en_tabla"] == 3                       # nada se pisa
+    assert conteos["direcciones_con_multiples_observaciones"] == 1
+    assert conteos["direcciones_multipunto"] == 0               # una sola celda
+
+    base = BaseGeograficaLocalSQLite(sqlite_path)
+    ev = base.consultar(comuna="Maipú", calle="LOS AROMOS", numero="500")
+    assert ev.resultado == "DIRECCION_EXACTA"
+    assert len(ev.candidatos) == 1
+    assert ev.candidatos[0].coordenadas is not None
+    assert ev.candidatos[0].ref_externa == "gid=101"            # representante determinista
+
+    gids = sqlite3.connect(f"file:{sqlite_path.as_posix()}?mode=ro", uri=True).execute(
+        "SELECT ref_externa FROM direcciones WHERE calle_normalizada='LOS AROMOS' ORDER BY ref_externa"
+    ).fetchall()
+    assert [g[0] for g in gids] == ["gid=101", "gid=102", "gid=103"]
+
+
+def test_2c4_misma_direccion_coordenadas_distintas_devuelve_multiple(tmp_path):
+    """Misma ``(comuna, calle, numero)`` con coordenadas materialmente
+    distintas => MULTIPLE con un candidato por punto; jamás "la última
+    fila", y cada candidato conserva su gid y su coordenada."""
+    ruta = _csv_ine(tmp_path, [
+        _fila_ine(201, "EL BOSQUE", "1234", "LAS CONDES", -70.60000, -33.40000),
+        _fila_ine(202, "EL BOSQUE", "1234", "LAS CONDES", -70.61500, -33.41500),  # ~2 km
+    ])
+    sqlite_path = tmp_path / "b.sqlite"
+    conteos = importar_a_sqlite(ruta, sqlite_path, reemplazar=True)
+
+    assert conteos["filas_en_tabla"] == 2
+    assert conteos["direcciones_con_multiples_observaciones"] == 1
+    assert conteos["direcciones_multipunto"] == 1
+
+    base = BaseGeograficaLocalSQLite(sqlite_path)
+    ev = base.consultar(comuna="Las Condes", calle="EL BOSQUE", numero="1234")
+    assert ev.estado.value == "MULTIPLE"
+    assert ev.resultado == "MULTIPLE"
+    assert ev.numero_confirmado is False
+    assert {c.ref_externa for c in ev.candidatos} == {"gid=201", "gid=202"}
+    assert {c.coordenadas for c in ev.candidatos} == {(-70.6, -33.4), (-70.615, -33.415)}
+
+
+def test_2c4_resultado_no_depende_del_orden_del_csv(tmp_path):
+    """El desenlace y los candidatos NO dependen del orden de las filas en
+    el CSV -- ni el colapso del punto repetido ni la elección del
+    representante."""
+    f1 = _fila_ine(301, "LAS ROSAS", "10", "LAS CONDES", -70.70000, -33.40000)
+    f2 = _fila_ine(302, "LAS ROSAS", "10", "LAS CONDES", -70.72000, -33.42000)     # otro punto
+    f3 = _fila_ine(303, "LAS ROSAS", "10", "LAS CONDES", -70.700004, -33.399997)   # = gid 301
+
+    def _desenlace(orden, nombre):
+        ruta = _csv_ine(tmp_path, orden, nombre)
+        sqlite_path = tmp_path / f"{nombre}.sqlite"
+        conteos = importar_a_sqlite(ruta, sqlite_path, reemplazar=True, chunk=2)
+        ev = BaseGeograficaLocalSQLite(sqlite_path).consultar(
+            comuna="Las Condes", calle="LAS ROSAS", numero="10"
+        )
+        return (
+            ev.estado.value,
+            tuple(sorted(c.ref_externa for c in ev.candidatos)),
+            tuple(sorted(c.coordenadas for c in ev.candidatos)),
+            conteos["direcciones_multipunto"],
+            conteos["filas_en_tabla"],
+        )
+
+    a = _desenlace([f1, f2, f3], "orden_a")
+    b = _desenlace([f3, f2, f1], "orden_b")
+    c = _desenlace([f2, f3, f1], "orden_c")
+    assert a == b == c
+    estado, refs, _coords, multipunto, en_tabla = a
+    assert estado == "MULTIPLE"
+    assert en_tabla == 3
+    assert multipunto == 1
+    # el representante del punto colapsado es SIEMPRE gid=301 (menor
+    # ref_externa), nunca la fila que quedó última en el CSV
+    assert refs == ("gid=301", "gid=302")
+
+
+def test_2c4_importacion_grande_es_por_lotes_y_memoria_acotada(tmp_path):
+    """Una importación grande sigue siendo streaming: el pico de memoria
+    asignada NO escala con el nº de filas (un chunk << total)."""
+    import tracemalloc
+
+    from atlas_core.geografia import cargar_geografia
+
+    cargar_geografia("CL")  # catálogo ya en RAM antes de medir (lru_cache)
+
+    n = 60_000
+    ruta = tmp_path / "grande.csv"
+    with ruta.open("w", encoding="utf-8") as fh:
+        fh.write(_CABECERA_INE)
+        for i in range(n):
+            g = i // 4  # 4 observaciones por dirección, todas al mismo punto
+            lon = -70.60 - g * 1e-5
+            lat = -33.40 - g * 1e-5
+            fh.write(_fila_ine(i, f"CALLE {g}", "100", "MAIPU", f"{lon:.6f}", f"{lat:.6f}"))
+
+    sqlite_path = tmp_path / "g.sqlite"
+    tracemalloc.start()
+    conteos = importar_a_sqlite(ruta, sqlite_path, reemplazar=True, chunk=1_000)
+    _actual, pico = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert conteos["aceptadas"] == n
+    assert conteos["filas_en_tabla"] == n                       # nada se pisa
+    assert conteos["direcciones_con_multiples_observaciones"] == n // 4
+    assert conteos["direcciones_multipunto"] == 0
+    # un impl. no-streaming (list() de las 60 000 filas) superaría de
+    # lejos esta cota; el pipeline por lotes se queda muy por debajo.
+    assert pico < 16 * 1024 * 1024
+
+
+def test_2c4_reimportar_mismo_gid_es_idempotente(tmp_path):
+    """Re-importar el MISMO gid pisa su propia fila (INSERT OR REPLACE por
+    PK que incluye ref_externa); no multiplica observaciones."""
+    ruta = _csv_ine(tmp_path, [
+        _fila_ine(401, "LOS CEREZOS", "20", "MAIPU", -70.71000, -33.41000),
+        _fila_ine(402, "LOS CEREZOS", "20", "MAIPU", -70.71000, -33.41000),
+    ])
+    sqlite_path = tmp_path / "b.sqlite"
+    importar_a_sqlite(ruta, sqlite_path, reemplazar=True)
+    importar_a_sqlite(ruta, sqlite_path, reemplazar=True)
+    base = BaseGeograficaLocalSQLite(sqlite_path)
+    assert base.contar() == 2
+    filas = sqlite3.connect(f"file:{sqlite_path.as_posix()}?mode=ro", uri=True).execute(
+        "SELECT ref_externa FROM direcciones ORDER BY ref_externa"
+    ).fetchall()
+    assert [f[0] for f in filas] == ["gid=401", "gid=402"]
+
+
+def test_2c4_base_esquema_previo_exige_reemplazar(tmp_path):
+    """Una base con la PK antigua (sin ref_externa) no se puede completar
+    sin reconstruir: importar sin ``reemplazar`` aborta con un mensaje
+    accionable en vez de seguir perdiendo multiplicidad."""
+    sqlite_path = tmp_path / "vieja.sqlite"
+    con = sqlite3.connect(str(sqlite_path))
+    con.execute(
+        "CREATE TABLE direcciones ("
+        " codigo_comuna TEXT NOT NULL, calle_normalizada TEXT NOT NULL,"
+        " numero TEXT NOT NULL DEFAULT '', calle_canonica TEXT NOT NULL,"
+        " comuna_canonica TEXT NOT NULL DEFAULT '', lon REAL, lat REAL,"
+        " fuente TEXT NOT NULL DEFAULT '', ref_externa TEXT NOT NULL DEFAULT '',"
+        " alias TEXT NOT NULL DEFAULT '',"
+        " PRIMARY KEY (codigo_comuna, calle_normalizada, numero));"
+    )
+    con.commit()
+    con.close()
+
+    base = BaseGeograficaLocalSQLite(sqlite_path)
+    with pytest.raises(ValueError, match="reemplazar=True"):
+        base.importar_filas(
+            [{"comuna": "Maipú", "calle": "X", "numero": "1", "ref_externa": "gid=9"}]
+        )
+    # con reemplazar reconstruye a v3 y ya preserva la multiplicidad
+    base.importar_filas(
+        [
+            {"comuna": "Maipú", "calle": "X", "numero": "1", "ref_externa": "gid=9",
+             "lon": -70.7, "lat": -33.5},
+            {"comuna": "Maipú", "calle": "X", "numero": "1", "ref_externa": "gid=10",
+             "lon": -70.8, "lat": -33.6},
+        ],
+        reemplazar=True,
+    )
+    assert base.contar() == 2

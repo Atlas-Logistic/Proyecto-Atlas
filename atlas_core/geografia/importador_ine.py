@@ -27,6 +27,18 @@ Reglas de seguridad:
     descartada (contada), nunca corregida;
   * ``gid`` se conserva en ``ref_externa`` (trazabilidad); ``alias`` se
     conserva pero NUNCA participa en la resolución.
+
+GEOGRAFÍA 2C.4 -- multiplicidad de coordenadas por dirección: NO se
+deduplica en la importación. Cada fila INE aceptada se ENVÍA tal cual;
+como la PK de ``direcciones`` ahora incluye ``ref_externa`` (= ``gid``),
+dos observaciones de la misma ``(comuna, calle, numero)`` con gid
+distinto CONVIVEN en la base (auditables por gid). El colapso de
+observaciones que representan el mismo punto y el desenlace ``MULTIPLE``
+para coordenadas materialmente distintas ocurren en la CONSULTA
+(``base_local.consultar``), con un criterio espacial explícito y
+determinista (rejilla de ~1e-4°). El importador sólo AUDITA el resultado
+(``direcciones_con_multiples_observaciones`` / ``direcciones_multipunto``).
+INE sigue SIN conectarse al runtime productivo.
 """
 from __future__ import annotations
 
@@ -35,6 +47,7 @@ import csv
 import hashlib
 import io
 import json
+import sqlite3
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -66,7 +79,14 @@ CLAVES_CONTEO = (
     "filas_csv_leidas", "malformadas", "fuera_de_rm_descartadas",
     "comuna_no_resuelta_descartadas", "coordenada_invalida_descartadas",
     "via_vacia_descartadas", "aceptadas", "filas_enviadas",
-    "colisiones_pk", "filas_en_tabla",
+    # GEOGRAFÍA 2C.4 -- ya NO existe "colisiones_pk" (ninguna observación
+    # se pisa por PK): en su lugar se AUDITA la multiplicidad resultante.
+    #   direcciones_con_multiples_observaciones: (comuna, calle, numero)
+    #       con >= 2 filas conservadas;
+    #   direcciones_multipunto: de esas, las que tienen >= 2 celdas
+    #       espaciales distintas -> la consulta devolverá MULTIPLE.
+    "direcciones_con_multiples_observaciones", "direcciones_multipunto",
+    "filas_en_tabla",
 )
 
 
@@ -281,6 +301,68 @@ def escribir_procedencia(
 
 
 # ---------------------------------------------------------------------------
+# Auditoría de multiplicidad
+# ---------------------------------------------------------------------------
+
+
+def _escanear_multiplicidad(ruta_sqlite: str | Path) -> dict[str, int]:
+    """Recorre ``direcciones`` en STREAMING (ordenada por la clave natural
+    ``comuna, calle, numero``) y cuenta, con memoria acotada (sólo el
+    grupo en curso):
+
+      * ``con_multiples_observaciones``: direcciones ``(comuna, calle,
+        numero)`` con >= 2 filas conservadas (antes se perdían por PK);
+      * ``multipunto``: de esas, las que tienen >= 2 celdas espaciales
+        distintas segun ``base_local._celda_espacial`` -- coordenadas
+        materialmente diferentes que la consulta devolverá como
+        ``MULTIPLE``.
+
+    Usa EXACTAMENTE el mismo criterio espacial que ``consultar`` (una
+    sola definición de "mismo punto")."""
+    from atlas_core.geografia.base_local import _celda_espacial
+
+    ruta = Path(ruta_sqlite)
+    if not ruta.exists():
+        return {"con_multiples_observaciones": 0, "multipunto": 0}
+
+    con = sqlite3.connect(f"file:{ruta.as_posix()}?mode=ro", uri=True)
+    con_multiples = multipunto = 0
+    clave_actual: tuple | None = None
+    n_filas = 0
+    celdas: set[tuple[int, int]] = set()
+
+    def _cerrar_grupo() -> None:
+        nonlocal con_multiples, multipunto
+        if n_filas >= 2:
+            con_multiples += 1
+            if len(celdas) >= 2:
+                multipunto += 1
+
+    try:
+        cursor = con.execute(
+            "SELECT codigo_comuna, calle_normalizada, numero, lon, lat"
+            " FROM direcciones ORDER BY codigo_comuna, calle_normalizada, numero"
+        )
+        for cc, calle, numero, lon, lat in cursor:
+            clave = (cc, calle, numero)
+            if clave != clave_actual:
+                if clave_actual is not None:
+                    _cerrar_grupo()
+                clave_actual = clave
+                n_filas = 0
+                celdas = set()
+            n_filas += 1
+            celda = _celda_espacial((lon, lat) if lon is not None and lat is not None else None)
+            if celda is not None:
+                celdas.add(celda)
+        if clave_actual is not None:
+            _cerrar_grupo()
+    finally:
+        con.close()
+    return {"con_multiples_observaciones": con_multiples, "multipunto": multipunto}
+
+
+# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -339,9 +421,12 @@ def importar_a_sqlite(
     en_tabla = base.contar()
     conteos["filas_enviadas"] = enviadas
     conteos["filas_en_tabla"] = en_tabla
-    # Sólo es una lectura fiel de "colisiones" cuando se partió de tabla
-    # vacía (--reemplazar); si no, en_tabla incluye lo preexistente.
-    conteos["colisiones_pk"] = max(0, enviadas - en_tabla) if reemplazar else 0
+    # Auditoría de multiplicidad (GEOGRAFÍA 2C.4): recorre la tabla en
+    # streaming y cuenta las direcciones con varias observaciones y las
+    # que además son multipunto -- sin colapsar nada, sin "última fila".
+    mult = _escanear_multiplicidad(ruta_sqlite)
+    conteos["direcciones_con_multiples_observaciones"] = mult["con_multiples_observaciones"]
+    conteos["direcciones_multipunto"] = mult["multipunto"]
 
     if escribir_meta:
         escribir_procedencia(

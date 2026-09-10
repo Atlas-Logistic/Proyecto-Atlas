@@ -35,6 +35,17 @@ que consume el iterable en CHUNKS (millones de filas sin cargar todo en
 RAM). El contrato público (``BaseGeograficaLocal``) y ``consultar`` no
 cambian.
 
+GEOGRAFÍA 2C.4 -- la PERSISTENCIA preserva la MULTIPLICIDAD de
+coordenadas por dirección: la PK incluye ``ref_externa`` (v3), de modo
+que dos observaciones de la MISMA ``(comuna, calle, numero)`` con gid
+distinto conviven en la tabla (auditables) en vez de que "la última
+fila" pise a las demás por ``INSERT OR REPLACE``. En la CONSULTA, varias
+observaciones que representan el MISMO punto -- duplicado exacto o
+coordenadas dentro de la misma celda de ``_celda_espacial`` (rejilla
+determinista de ~1e-4°) -- se colapsan a un candidato; si las
+coordenadas son materialmente distintas, la consulta devuelve
+``MULTIPLE`` con un candidato por punto, nunca uno elegido por orden.
+
 Lo que ESTE bloque NO hace todavía: interpolar numeración, calcular
 centroides, y cablear la base en el primer pase productivo / la
 revalidación masiva.
@@ -54,7 +65,10 @@ from .motor import texto_normalizado
 
 NOMBRE_ARCHIVO_PREDETERMINADO = "base_local_rm.sqlite"
 # v2 (GEOGRAFÍA 2C.3): + columnas ``ref_externa`` / ``alias``.
-VERSION_ESQUEMA = 2
+# v3 (GEOGRAFÍA 2C.4): ``ref_externa`` entra en la PK -> varias
+#     observaciones de la misma ``(comuna, calle, numero)`` conviven en
+#     la tabla en vez de colapsar a una por ``INSERT OR REPLACE``.
+VERSION_ESQUEMA = 3
 # Tamaño de lote para la escritura en streaming -- millones de filas
 # (maestro INE) sin materializar toda la lista en memoria.
 TAMANO_CHUNK_IMPORT = 50_000
@@ -252,6 +266,39 @@ def _coordenadas_de_fila(lon: object, lat: object) -> tuple[float, float] | None
     return (lon_f, lat_f)
 
 
+# GEOGRAFÍA 2C.4 -- criterio ESPACIAL explícito y determinista para
+# decidir si dos observaciones de la misma dirección son "el mismo
+# punto": se redondea cada coordenada a una rejilla de 1e-4 grados
+# (~9 m en longitud y ~11 m en latitud a la latitud de la RM) y dos
+# observaciones son el MISMO punto si, y sólo si, caen en la MISMA celda.
+#
+# Se eligió una rejilla (cuantización) y NO un umbral de distancia por
+# pares porque la rejilla es transitiva y no depende del orden de
+# llegada: "A ~ B" y "B ~ C" nunca dejan "A !~ C". Coordenada ausente
+# NUNCA equivale a otra (ausencia != igualdad): una fila sin coordenada
+# no aporta punto y jamás fabrica una coincidencia.
+_GRILLA_ESPACIAL = 10_000  # 1 / 1e-4 grados
+
+
+def _celda_espacial(coordenadas: tuple[float, float] | None) -> tuple[int, int] | None:
+    """Celda de la rejilla determinista a la que pertenece ``coordenadas``
+    (``None`` si no hay coordenada). Dos coordenadas con la misma celda se
+    consideran EL MISMO punto."""
+    if coordenadas is None:
+        return None
+    lon, lat = coordenadas
+    return (round(lon * _GRILLA_ESPACIAL), round(lat * _GRILLA_ESPACIAL))
+
+
+def _orden_representante(candidato: "DireccionLocal") -> tuple:
+    """Clave TOTALMENTE determinista para elegir el representante de un
+    conjunto de observaciones del mismo punto -- por ``ref_externa`` (gid
+    INE / id OSM), luego número y calle canónica, luego la coordenada.
+    NUNCA "la última fila"."""
+    coord = candidato.coordenadas or (math.inf, math.inf)
+    return (candidato.ref_externa, candidato.numero, candidato.calle_canonica, coord[0], coord[1])
+
+
 class BaseGeograficaLocalSQLite:
     """Backend SQLite -- persistente, portable y testeable.
 
@@ -280,7 +327,10 @@ class BaseGeograficaLocalSQLite:
         " fuente            TEXT NOT NULL DEFAULT '',"
         " ref_externa       TEXT NOT NULL DEFAULT '',"
         " alias             TEXT NOT NULL DEFAULT '',"
-        " PRIMARY KEY (codigo_comuna, calle_normalizada, numero));",
+        # ``ref_externa`` en la PK (v3): preserva varias observaciones de
+        # la misma ``(comuna, calle, numero)`` con gid distinto. Filas sin
+        # ``ref_externa`` (semilla / OSM) siguen colapsando como antes.
+        " PRIMARY KEY (codigo_comuna, calle_normalizada, numero, ref_externa));",
         # Índice de "calle conocida en la comuna" (prefijo comuna+calle).
         # La consulta por comuna+calle+número usa directamente la PK.
         "CREATE INDEX IF NOT EXISTS ix_direcciones_comuna_calle"
@@ -288,6 +338,9 @@ class BaseGeograficaLocalSQLite:
     )
     # Columnas agregadas después de v1 -- se añaden por ALTER a una base
     # antigua abierta sin ``--reemplazar`` (nunca se pierde lo ya escrito).
+    # NOTA v3: cambiar la PK exige reconstruir la tabla, así que una base
+    # de esquema pre-v3 sólo se acepta con ``reemplazar=True`` (ver
+    # ``importar_filas``); esas bases son regenerables y offline.
     _COLUMNAS_V2 = ("ref_externa", "alias")
 
     def __init__(self, ruta: str | Path | None = None) -> None:
@@ -371,6 +424,11 @@ class BaseGeograficaLocalSQLite:
             )
 
         candidatos = tuple(self._fila_a_direccion(f, numero) for f in filas)
+        # GEOGRAFÍA 2C.4 -- varias observaciones (gid) de la MISMA
+        # dirección que representan el MISMO punto se colapsan a un
+        # candidato; las que están en celdas espaciales distintas se
+        # conservan (aguas abajo -> MULTIPLE). Nunca se elige por orden.
+        candidatos = self._colapsar_observaciones(candidatos)
         estado_calle = (
             EstadoConsultaLocal.NORMALIZADA
             if normalizada or not self._alguna_calle_verbatim(calle, filas)
@@ -440,8 +498,14 @@ class BaseGeograficaLocalSQLite:
         ``ref_externa`` (gid INE / id OSM) y ``alias``. Una comuna no
         resoluble o una calle no normalizable abortan con ``ValueError``
         -- el importador debe entregar filas ya limpias. Devuelve el
-        número de filas escritas (``INSERT OR REPLACE``; una colisión de
-        PK cuenta igual).
+        número de filas ENVIADAS a la base (``INSERT OR REPLACE``; ahora
+        la PK incluye ``ref_externa``, así que sólo re-importar el MISMO
+        gid pisa una fila -- dos gid distintos de la misma dirección
+        conviven y ``contar()`` los cuenta a ambos).
+
+        Una base de esquema pre-v3 (PK sin ``ref_externa``) sólo se acepta
+        con ``reemplazar=True`` -- cambiar la PK exige reconstruir la
+        tabla y esas bases son regenerables offline.
 
         ``reemplazar=True`` vacía ``direcciones`` antes de insertar.
         ``meta`` persiste pares clave/valor de procedencia en la tabla
@@ -490,6 +554,26 @@ class BaseGeograficaLocalSQLite:
             # interrumpe, se vuelve a correr con --reemplazar.
             conn.execute("PRAGMA journal_mode = MEMORY")
             conn.execute("PRAGMA synchronous = OFF")
+            # Migración de esquema pre-v3: la PK antigua NO incluía
+            # ``ref_externa`` y colapsaba varias observaciones de la misma
+            # ``(comuna, calle, numero)`` a una sola fila (perdía la
+            # multiplicidad de coordenadas). Cambiar la PK exige rehacer
+            # la tabla -> sólo se hace con ``reemplazar`` (bases
+            # regenerables); si no, se aborta con un mensaje accionable.
+            tabla_previa = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='direcciones'"
+            ).fetchone()
+            if tabla_previa is not None:
+                pk_previa = [f[1] for f in conn.execute("PRAGMA table_info(direcciones)") if f[5]]
+                if "ref_externa" not in pk_previa:
+                    if reemplazar:
+                        conn.execute("DROP TABLE direcciones")
+                    else:
+                        raise ValueError(
+                            "base local de esquema anterior a v3 (PK sin "
+                            "ref_externa): reimporte con reemplazar=True para "
+                            "preservar la multiplicidad de coordenadas por dirección"
+                        )
             for sentencia in self._DDL:
                 conn.execute(sentencia)
             columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(direcciones)")}
@@ -565,9 +649,47 @@ class BaseGeograficaLocalSQLite:
             "SELECT codigo_comuna, calle_normalizada, numero, calle_canonica,"
             f" comuna_canonica, lon, lat, fuente, {self._expr_columnas_v2(conn)}"
             " FROM direcciones WHERE codigo_comuna = ? AND calle_normalizada = ?"
-            " ORDER BY numero",
+            # Orden TOTAL y estable -- ahora puede haber varias filas por
+            # ``numero`` (v3): el desenlace no debe depender del orden de
+            # inserción / del CSV importado.
+            " ORDER BY numero, ref_externa, lon, lat",
             (codigo_comuna, calle_norm),
         ).fetchall()
+
+    @staticmethod
+    def _colapsar_observaciones(candidatos: tuple[DireccionLocal, ...]) -> tuple[DireccionLocal, ...]:
+        """Colapsa observaciones REDUNDANTES de una misma dirección (mismo
+        ``numero`` almacenado) que representan EL MISMO punto -- duplicado
+        exacto o coordenadas en la misma celda de ``_celda_espacial`` -- a
+        UN candidato determinista. Observaciones en celdas distintas se
+        conservan (una por celda): esa es la ambigüedad REAL que aguas
+        abajo produce ``MULTIPLE``. Las filas sin coordenada quedan
+        subsumidas cuando la dirección ya tiene al menos un punto (no
+        crean una ambigüedad falsa); si NINGUNA observación trae punto, la
+        dirección es una sola (sólo-calle/número) y se deja un
+        representante. El representante nunca es "la última fila": es el
+        menor por ``_orden_representante``."""
+        if len(candidatos) <= 1:
+            return candidatos
+        por_numero: dict[str, list[DireccionLocal]] = {}
+        for c in candidatos:
+            por_numero.setdefault(c.numero, []).append(c)
+        salida: list[DireccionLocal] = []
+        for grupo in por_numero.values():
+            por_celda: dict[tuple[int, int], list[DireccionLocal]] = {}
+            sin_coord: list[DireccionLocal] = []
+            for c in grupo:
+                celda = _celda_espacial(c.coordenadas)
+                if celda is None:
+                    sin_coord.append(c)
+                else:
+                    por_celda.setdefault(celda, []).append(c)
+            if por_celda:
+                for obs in por_celda.values():
+                    salida.append(min(obs, key=_orden_representante))
+            else:
+                salida.append(min(sin_coord, key=_orden_representante))
+        return tuple(salida)
 
     @staticmethod
     def _alguna_calle_verbatim(calle_consultada: str, filas: list[tuple]) -> bool:
