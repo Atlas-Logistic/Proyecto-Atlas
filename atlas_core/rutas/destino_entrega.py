@@ -43,6 +43,10 @@ from typing import Any, Iterable
 
 from atlas_core.catalogo_destinos import Destino
 from atlas_core.geografia import EstadoNormalizacion, cargar_geografia
+from atlas_core.geografia.base_local import (
+    BaseGeograficaLocal,
+    evidencia_local_para_direccion,
+)
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
@@ -373,6 +377,9 @@ def _candidato_respaldado_por_destino_confirmado(
 
 VIA_CATALOGO_CONFIRMADO = "CATALOGO_CONFIRMADO"
 VIA_GPS_DESCARTA_RIVALES = "GPS_DESCARTA_RIVALES"
+# Bloque GEOGRAFÍA 2C -- la base geográfica local de Atlas corroboró la
+# calle (+ número, si el documento lo trae) del candidato en su comuna.
+VIA_BASE_LOCAL = "BASE_GEOGRAFICA_LOCAL"
 
 
 @dataclass(frozen=True)
@@ -696,6 +703,7 @@ def resolver_destino_con_fallback_estructurado(
     proveedor_fallback: ProveedorRutas,
     destinos_confirmados: Iterable[Destino] = (),
     contexto_evidencia_b1: str = "",
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
 ) -> ResultadoDesambiguacionInequivoca:
     """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C": cuando el
     proveedor PRINCIPAL deja una ambigüedad sin resolver y ni Vía A
@@ -808,10 +816,47 @@ def resolver_destino_con_fallback_estructurado(
         destino_corroborante is None and not corroborado_por_evidencia_b1 and candidato.localidad
         and _comuna_candidato_en_texto(texto, candidato.localidad)
     )
-    if destino_corroborante is None and not corroborado_por_evidencia_b1 and not corroborado_por_texto_documental:
+    # Bloque GEOGRAFÍA 2C -- la base geográfica local de Atlas como fuente
+    # de evidencia ADICIONAL (nunca autoridad): si ni el catálogo
+    # confirmado, ni B1, ni el propio texto documental corroboran la
+    # comuna del candidato del respaldo, se consulta la base local. Sólo
+    # corrobora cuando reconoce la calle del documento EN la comuna del
+    # candidato Y -- si el documento trae número -- confirma ese mismo
+    # número bajo la regla segura de ceros a la izquierda (nunca acepta un
+    # número distinto). Con la base no provisionada (sin PBF todavía) esto
+    # es un no-op estricto: `disponible()` es False y devuelve
+    # NO_ENCONTRADO. Nunca aporta coordenadas -- sólo confirma que el
+    # lugar es real, igual que "la comuna aparece en el texto".
+    corroborado_por_base_local = False
+    if (
+        base_geografica_local is not None
+        and destino_corroborante is None
+        and not corroborado_por_evidencia_b1
+        and not corroborado_por_texto_documental
+        and candidato.localidad
+    ):
+        evidencia_local = evidencia_local_para_direccion(
+            base_geografica_local, texto, comuna=candidato.localidad
+        )
+        corroborado_por_base_local = evidencia_local.encontrada and (
+            evidencia_local.numero_confirmado or not _numeros_de_calle(texto)
+        )
+    if (
+        destino_corroborante is None
+        and not corroborado_por_evidencia_b1
+        and not corroborado_por_texto_documental
+        and not corroborado_por_base_local
+    ):
         return ResultadoDesambiguacionInequivoca(
             motivo=f"FALLBACK_SIN_CORROBORACION_TERRITORIAL: {candidato.etiqueta}",
             candidato=candidato, vias=(VIA_FALLBACK_ESTRUCTURADO,),
+            identidad_confirmada=identidad_confirmada,
+        )
+    if corroborado_por_base_local:
+        return ResultadoDesambiguacionInequivoca(
+            resuelto=True, candidato=candidato,
+            motivo="FALLBACK_ESTRUCTURADO_CORROBORADO_POR_BASE_LOCAL",
+            vias=(VIA_FALLBACK_ESTRUCTURADO, VIA_BASE_LOCAL),
             identidad_confirmada=identidad_confirmada,
         )
     return ResultadoDesambiguacionInequivoca(
@@ -1024,6 +1069,7 @@ def resolver_destino_entrega(
     contexto_evidencia_b1: str = "",
     contexto_obra: str = "",
     comuna_territorial_conocida: str = "",
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
 ) -> ResultadoDestinoEntrega:
     """Geocodifica `DESPACHAR A` -- nunca `DIRECCION`/`COMUNA` del cliente.
 
@@ -1212,6 +1258,7 @@ def resolver_destino_entrega(
                     texto, proveedor_fallback=proveedor_geocodificacion_fallback,
                     destinos_confirmados=destinos_confirmados,
                     contexto_evidencia_b1=contexto_evidencia_b1,
+                    base_geografica_local=base_geografica_local,
                 )
             ).resuelto and fallback.candidato is not None:
                 # Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C",
@@ -1268,6 +1315,7 @@ def resolver_destino_entrega(
                 texto, proveedor_fallback=proveedor_geocodificacion_fallback,
                 destinos_confirmados=destinos_confirmados,
                 contexto_evidencia_b1=contexto_evidencia_b1,
+                base_geografica_local=base_geografica_local,
             )
         ).resuelto and fallback_sin_candidatos.candidato is not None:
             candidato = fallback_sin_candidatos.candidato
@@ -1325,6 +1373,7 @@ def resolver_destino_entrega(
                 texto, proveedor_fallback=proveedor_geocodificacion_fallback,
                 destinos_confirmados=destinos_confirmados,
                 contexto_evidencia_b1=contexto_evidencia_b1,
+                base_geografica_local=base_geografica_local,
             )
         ).resuelto and fallback_unico.candidato is not None:
             candidato = fallback_unico.candidato
@@ -1402,6 +1451,7 @@ def resolver_destino_entrega_validado(
     contexto_obra: str = "",
     comuna_territorial_conocida: str = "",
     comuna_confirmada_humano: str = "",
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
 ) -> ResultadoDestinoEntrega:
     """Bloque F (destinos degradados/absurdos) -- igual que
     `resolver_destino_entrega`, con una validación adicional: un resultado
@@ -1434,6 +1484,7 @@ def resolver_destino_entrega_validado(
         contexto_evidencia_b1=contexto_evidencia_b1,
         contexto_obra=contexto_obra,
         comuna_territorial_conocida=comuna_territorial_conocida,
+        base_geografica_local=base_geografica_local,
     )
     if resultado.estado != ESTADO_RESUELTO:
         return resultado

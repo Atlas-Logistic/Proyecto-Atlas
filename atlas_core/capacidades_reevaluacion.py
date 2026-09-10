@@ -110,8 +110,17 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         motivos_documentales=frozenset({"DESTINO_FRAGMENTO_TRUNCADO", "DESTINO_CONTAMINADO_POR_OTRA_SECCION"}),
     ),
     DOMINIO_GEOGRAFIA: Capacidad(
-        dominio=DOMINIO_GEOGRAFIA, version=1,
-        descripcion="Geocodificación, resolución de calles/comunas, bases locales.",
+        dominio=DOMINIO_GEOGRAFIA, version=2,
+        descripcion=(
+            "Geocodificación, resolución de calles/comunas, bases locales. "
+            "v2: base geográfica local propia (GEOGRAFÍA 2C -- backend SQLite "
+            "persistente, contrato `BaseGeograficaLocal`, evidencia "
+            "estructurada EXACTA/NORMALIZADA/MULTIPLE/NO_ENCONTRADO) que "
+            "participa como fuente de evidencia ADICIONAL en la Vía C del "
+            "flujo de destino antes de declarar un fallo agotado -- nunca "
+            "inventa coordenadas, nunca acepta un número distinto, preserva "
+            "ceros iniciales."
+        ),
         tipos_decision=frozenset({"DESTINO_NO_RESUELTO"}),
         motivos_tecnicos=frozenset({
             "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA", "COORDENADA_NO_CONFIRMADA",
