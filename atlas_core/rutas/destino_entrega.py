@@ -697,6 +697,69 @@ def _texto_menciona_comuna_como_palabra_completa(texto: str, comuna: str) -> boo
     return comuna_normalizada in " ".join(_PATRON_PALABRA.findall(_texto_normalizado_sin_acentos(texto).upper()))
 
 
+def _candidato_geocodificacion_desde_base_local(
+    base_geografica_local: "BaseGeograficaLocal | None", despachar_a_crudo: str,
+    *, comuna_territorial_conocida: str = "",
+) -> CandidatoGeocodificacion | None:
+    """GEOGRAFÍA 2C.5 -- si la base territorial local (INE v3) resuelve el
+    texto documental a UNA única dirección real con coordenada -- estado
+    de alto nivel ``DIRECCION_EXACTA``: calle + número confirmados bajo la
+    regla segura de ceros, un solo candidato, coordenada real de la
+    fuente -- se sintetiza un ``CandidatoGeocodificacion`` con esa
+    coordenada real y la comuna/región canónicas.
+
+    Devuelve ``None`` -- nunca inventa ni fuerza un resultado -- cuando:
+      * no hay base, o no está provisionada / es incompatible / está
+        vacía (``cargar_base_geografica_local_ine`` ya devolvió ``None``);
+      * la base devuelve ``MULTIPLE`` (ambigüedad real: se conserva, no se
+        elige un candidato arbitrario);
+      * ``CALLE_CONOCIDA_NUMERO_NO_EN_BASE`` / ``CALLE_NO_ENCONTRADA``
+        (ausencia en ESTA fuente != dirección inexistente: nunca aporta
+        coordenada, nunca asume una calle homónima -- p. ej. NUNCA
+        "INTERIOR NUEVA 01148" == "SANTA MARGARITA 01148").
+
+    El candidato sintetizado pasa después por EXACTAMENTE los mismos
+    gates territoriales / de confianza que cualquier candidato del
+    geocodificador -- nunca un camino paralelo con reglas propias."""
+    if base_geografica_local is None:
+        return None
+    # La comuna que Atlas ya conoce por evidencia confiable (destino
+    # CONFIRMADO de la misma obra, o mención inequívoca en el nombre de
+    # obra -- ver `resolver_comuna_territorial_conocida`) se pasa como
+    # pista cuando el propio texto documental no la trae: sin ella un
+    # "CARMEN MENA 529" a secas no resuelve en la base. Nunca RECHAZA
+    # nada -- sólo permite ubicar la calle en la comuna correcta.
+    evidencia = evidencia_local_para_direccion(
+        base_geografica_local, despachar_a_crudo,
+        comuna=str(comuna_territorial_conocida or ""),
+    )
+    if evidencia.resultado != "DIRECCION_EXACTA" or len(evidencia.candidatos) != 1:
+        return None
+    fila = evidencia.candidatos[0]
+    if fila.coordenadas is None or not fila.numero_coincide:
+        return None
+    try:
+        coordenadas = Coordenadas(longitud=float(fila.coordenadas[0]), latitud=float(fila.coordenadas[1]))
+    except (TypeError, ValueError):
+        return None
+    geografia = cargar_geografia("CL")
+    unidad = geografia.buscar_por_codigo(str(fila.codigo_comuna))
+    contexto = geografia.parametros_geocodificacion(unidad) if unidad is not None else None
+    numero = (" " + fila.numero).rstrip()
+    return CandidatoGeocodificacion(
+        coordenadas=coordenadas,
+        etiqueta=f"{fila.calle_canonica}{numero}, {fila.comuna_canonica} [INE]".strip(),
+        # Coincidencia EXACTA de calle + número en el maestro territorial:
+        # la evidencia más fuerte que produce la base local.
+        confianza=1.0,
+        localidad=fila.comuna_canonica,
+        region=contexto.nombre_contexto if contexto is not None else "",
+        codigo_pais=contexto.codigo_pais if contexto is not None else "CL",
+        codigo_unidad=str(fila.codigo_comuna),
+        codigo_contexto=contexto.codigo_contexto if contexto is not None else "",
+    )
+
+
 def resolver_destino_con_fallback_estructurado(
     despachar_a_crudo: str,
     *,
@@ -704,6 +767,7 @@ def resolver_destino_con_fallback_estructurado(
     destinos_confirmados: Iterable[Destino] = (),
     contexto_evidencia_b1: str = "",
     base_geografica_local: "BaseGeograficaLocal | None" = None,
+    comuna_territorial_conocida: str = "",
 ) -> ResultadoDesambiguacionInequivoca:
     """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C": cuando el
     proveedor PRINCIPAL deja una ambigüedad sin resolver y ni Vía A
@@ -755,18 +819,37 @@ def resolver_destino_con_fallback_estructurado(
             motivo="SIN_NUMERO_DE_CALLE_EN_TEXTO_DOCUMENTAL",
             identidad_confirmada=identidad_confirmada,
         )
+    def _resuelto_por_base_local_ine() -> "ResultadoDesambiguacionInequivoca | None":
+        # GEOGRAFÍA 2C.5 -- cuando el geocodificador de respaldo tampoco
+        # deja un candidato usable, la base territorial local (INE v3, si
+        # está provisionada) puede aportar la coordenada REAL de una
+        # dirección que resuelve como DIRECCION_EXACTA. Es evidencia, no
+        # autoridad: sólo actúa donde el flujo YA se abstenía, y el
+        # candidato pasa por los mismos gates de abajo.
+        ine = _candidato_geocodificacion_desde_base_local(
+            base_geografica_local, texto,
+            comuna_territorial_conocida=comuna_territorial_conocida,
+        )
+        if ine is None:
+            return None
+        return ResultadoDesambiguacionInequivoca(
+            resuelto=True, candidato=ine,
+            motivo="DIRECCION_EXACTA_BASE_LOCAL_INE",
+            vias=(VIA_BASE_LOCAL,), identidad_confirmada=identidad_confirmada,
+        )
+
     try:
         resultado_fallback = _geocodificar_con_contexto(
             proveedor_fallback, f"{texto}, Chile", _contexto_geografico_desde_texto(texto)
         )
     except (OSError, ValueError):
-        return ResultadoDesambiguacionInequivoca(
+        return _resuelto_por_base_local_ine() or ResultadoDesambiguacionInequivoca(
             motivo="FALLBACK_ESTRUCTURADO_NO_DISPONIBLE", vias=(VIA_FALLBACK_ESTRUCTURADO,),
             identidad_confirmada=identidad_confirmada,
         )
     candidato = _candidato_unico_con_numero_de_calle(texto, resultado_fallback.candidatos or ())
     if candidato is None:
-        return ResultadoDesambiguacionInequivoca(
+        return _resuelto_por_base_local_ine() or ResultadoDesambiguacionInequivoca(
             motivo="FALLBACK_SIN_CANDIDATO_UNICO", vias=(VIA_FALLBACK_ESTRUCTURADO,),
             identidad_confirmada=identidad_confirmada,
         )
@@ -1259,6 +1342,7 @@ def resolver_destino_entrega(
                     destinos_confirmados=destinos_confirmados,
                     contexto_evidencia_b1=contexto_evidencia_b1,
                     base_geografica_local=base_geografica_local,
+                    comuna_territorial_conocida=comuna_territorial_conocida,
                 )
             ).resuelto and fallback.candidato is not None:
                 # Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- "Vía C",
@@ -1316,6 +1400,7 @@ def resolver_destino_entrega(
                 destinos_confirmados=destinos_confirmados,
                 contexto_evidencia_b1=contexto_evidencia_b1,
                 base_geografica_local=base_geografica_local,
+                comuna_territorial_conocida=comuna_territorial_conocida,
             )
         ).resuelto and fallback_sin_candidatos.candidato is not None:
             candidato = fallback_sin_candidatos.candidato
@@ -1374,6 +1459,7 @@ def resolver_destino_entrega(
                 destinos_confirmados=destinos_confirmados,
                 contexto_evidencia_b1=contexto_evidencia_b1,
                 base_geografica_local=base_geografica_local,
+                comuna_territorial_conocida=comuna_territorial_conocida,
             )
         ).resuelto and fallback_unico.candidato is not None:
             candidato = fallback_unico.candidato
@@ -1718,6 +1804,7 @@ def calcular_ruta_con_planta_conocida(
     contexto_obra: str = "",
     comuna_territorial_conocida: str = "",
     comuna_confirmada_humano: str = "",
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -1747,6 +1834,7 @@ def calcular_ruta_con_planta_conocida(
         contexto_obra=contexto_obra,
         comuna_territorial_conocida=comuna_territorial_conocida,
         comuna_confirmada_humano=comuna_confirmada_humano,
+        base_geografica_local=base_geografica_local,
     )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO

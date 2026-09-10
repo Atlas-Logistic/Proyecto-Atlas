@@ -46,9 +46,18 @@ determinista de ~1e-4°) -- se colapsan a un candidato; si las
 coordenadas son materialmente distintas, la consulta devuelve
 ``MULTIPLE`` con un candidato por punto, nunca uno elegido por orden.
 
-Lo que ESTE bloque NO hace todavía: interpolar numeración, calcular
-centroides, y cablear la base en el primer pase productivo / la
-revalidación masiva.
+GEOGRAFÍA 2C.5 -- ``cargar_base_geografica_local_ine()`` cablea la base
+INE v3 al runtime de resolución de destino: sólo se usa si está
+provisionada en la ruta canónica Y es esquema v3 (``esquema_v3_
+compatible()``) Y tiene filas; en cualquier otro caso devuelve ``None`` y
+Atlas sigue con su fallback actual, sin bloquear nada. Un
+``DIRECCION_EXACTA`` con coordenada real puede aportar esa coordenada al
+flujo (ver ``rutas.destino_entrega``); ``MULTIPLE`` conserva la
+ambigüedad y ``CALLE_CONOCIDA``/``CALLE_NO_ENCONTRADA`` nunca inventan
+coordenada ni convierten ausencia de fuente en inexistencia.
+
+Lo que ESTE bloque NO hace todavía: interpolar numeración ni calcular
+centroides.
 """
 from __future__ import annotations
 
@@ -372,6 +381,27 @@ class BaseGeograficaLocalSQLite:
         except sqlite3.Error:
             return 0
         return int(fila[0]) if fila else 0
+
+    def esquema_v3_compatible(self) -> bool:
+        """``True`` sólo si la tabla ``direcciones`` tiene la PK v3
+        (GEOGRAFÍA 2C.4: incluye ``ref_externa``, que preserva la
+        multiplicidad de coordenadas por dirección). Una base v1/v2
+        antigua -- o cualquier archivo ilegible -- da ``False``. Nunca
+        lanza: es el guardián que impide cablear una base vieja al runtime
+        como si fuera la nueva."""
+        if not self.ruta.exists():
+            return False
+        try:
+            conn = self._conexion_lectura()
+            existe = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='direcciones'"
+            ).fetchone()
+            if existe is None:
+                return False
+            pk_cols = [f[1] for f in conn.execute("PRAGMA table_info(direcciones)") if f[5]]
+        except sqlite3.Error:
+            return False
+        return "ref_externa" in pk_cols
 
     # ---- consulta -----------------------------------------------------
 
@@ -797,3 +827,51 @@ def evidencia_local_para_direccion(
     calle = " ".join(calle.split())
 
     return base.consultar(comuna=comuna_final, calle=calle, numero=numero)
+
+
+# ---------------------------------------------------------------------------
+# GEOGRAFÍA 2C.5 -- cableado seguro de la base territorial INE al runtime
+# ---------------------------------------------------------------------------
+
+# Nombre canónico del SQLite que genera ``importador_ine`` (2C.3/2C.4).
+# Distinto de ``NOMBRE_ARCHIVO_PREDETERMINADO`` (base OSM): el runtime
+# consume la base INE por su nombre propio y NUNCA confunde una con otra.
+NOMBRE_ARCHIVO_INE = "base_local_rm_ine.sqlite"
+
+
+def ruta_base_ine_predeterminada(*, raiz: "str | Path | None" = None) -> Path:
+    """Ruta persistente/canónica de la base INE: ``<datos_privados>/
+    geografia/base_local_rm_ine.sqlite``. Sólo calcula la ruta -- no crea
+    nada, no comprueba existencia."""
+    from atlas_core.almacenamiento_portable import ruta_datos_privados
+
+    return ruta_datos_privados("geografia", raiz=Path(raiz) if raiz is not None else None) / NOMBRE_ARCHIVO_INE
+
+
+def cargar_base_geografica_local_ine(
+    *, ruta: "str | Path | None" = None, raiz: "str | Path | None" = None,
+) -> "BaseGeograficaLocal | None":
+    """Devuelve la base geográfica local INE lista para consultar por el
+    runtime, o ``None`` si NO se puede usar de forma segura.
+
+    Devuelve ``None`` -- y el runtime sigue con sus mecanismos/fallback
+    actuales, sin bloquear nada -- cuando:
+      * el archivo no existe todavía (base aún no provisionada);
+      * el esquema NO es v3 (una base v1/v2 vieja: ``esquema_v3_
+        compatible()`` es ``False`` -- nunca se cablea como si fuera la
+        nueva, aunque esté en la ruta canónica);
+      * la base está vacía o es ilegible (``disponible()`` es ``False``).
+
+    Nunca lanza. Nunca crea el archivo (la consulta abre en modo ``ro``)."""
+    destino = Path(ruta) if ruta is not None else ruta_base_ine_predeterminada(raiz=raiz)
+    try:
+        if not destino.is_file():
+            return None
+        base = BaseGeograficaLocalSQLite(destino)
+        if not base.esquema_v3_compatible():
+            return None
+        if not base.disponible():
+            return None
+        return base
+    except (OSError, sqlite3.Error, ValueError):
+        return None

@@ -2386,6 +2386,13 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     except (OSError, ValueError):
         plantas_por_id = {}
 
+    # GEOGRAFÍA 2C.5 -- base territorial local INE (v3) como evidencia
+    # geográfica adicional. `None` si no está provisionada / es esquema
+    # incompatible / está vacía: la revalidación sigue idéntica a antes,
+    # nunca bloquea. Se resuelve UNA vez por corrida (no por fila).
+    from atlas_core.geografia.base_local import cargar_base_geografica_local_ine
+    base_geografica_local_ine = cargar_base_geografica_local_ine(raiz=carpeta.parent)
+
     from atlas_core.atlas_ia.registro_problemas import (
         MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
         motivo_ruta_base,
@@ -2510,6 +2517,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     # (ver `resolver_destino_entrega_validado`); la comuna
                     # auto-resuelta del nombre de obra sólo sesga la query.
                     comuna_confirmada_humano=comuna_confirmada_humano,
+                    base_geografica_local=base_geografica_local_ine,
                 )
             except (OSError, ValueError):
                 continue
