@@ -298,7 +298,26 @@ from atlas_core.revalidacion_documental import (
 # primer estampado de `versiones_capacidades` sobre operaciones ya
 # migradas; a partir de ahí el mecanismo es incremental (cada dominio se
 # reevalúa sólo cuando SU versión avanza) e idempotente.
-RULESET_VERSION = 21
+#
+# Subida de 21 a 22 -- REVISIONES ESTANCADAS por drift de OCR entre
+# pasadas: `regenerar_decisiones_persistidas` sólo empataba una tarjeta
+# regenerada contra su resolución previa por clave EXACTA (`decision_id`,
+# que depende de `valor_documental`, o coincidencia LITERAL de calle).
+# Cuando una reextracción posterior varía el texto documental
+# ("COMERCIAL A Y B" -> "CONERCIAL A Y B"; el destino real -> "Jefe de
+# Adquisiciones ..."), la MISMA pregunta reaparece con otro `decision_id`
+# y ninguna de esas claves la reconoce -- la tarjeta sobrevive para
+# siempre aunque un humano ya la respondió para esa guía. La 22 agrega
+# dos supresiones tolerantes al drift, keyed por `(numero_guia, entidad)`:
+# `CLIENTE_CANDIDATO` cuando el ledger tiene un `CONFIRMAR` humano de esa
+# guía a la MISMA identidad (y el `cliente` vigente de la fila no
+# contradice); `DESTINO_SIN_CONFIRMAR` cuando la obra ya tiene una
+# relación obra<->destino CONFIRMADA (nivel CONFIRMACION_HUMANA) cuya
+# evidencia cita esa guía y la fila vigente está operacionalmente limpia.
+# Casos reales: 472037 (CONERCIAL/COMERCIAL A Y B LTDA), 472008 (AUSIN
+# SAN BERNARDO), 472227 (EMPRESA CONST SIGRO). Subir a 22 fuerza el
+# barrido sobre operaciones ya migradas; idempotente.
+RULESET_VERSION = 22
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)

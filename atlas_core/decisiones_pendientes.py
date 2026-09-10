@@ -494,6 +494,79 @@ def _guias_destino_terminado_por_humano(ruta_ledger: str | Path) -> frozenset[st
     return frozenset(guias)
 
 
+def _clientes_confirmados_por_humano_por_guia(ruta_ledger: str | Path) -> dict[str, set[str]]:
+    """Bloque REVISIONES ESTANCADAS -- ``{numero_guia: {cliente_id, ...}}``
+    de las guías donde un humano ya FIJÓ la identidad del cliente en el
+    ledger: ``CLIENTE_CANDIDATO``/``CONFIRMAR`` o ``CLIENTE_AUSENTE``/
+    ``REGISTRAR_CLIENTE_MANUAL``. Caso real 472037: el humano confirmó el
+    cliente con ``valor_documental="COMERCIAL A Y B LTDA"``; una
+    reextracción posterior leyó ``"CONERCIAL A Y B LTDA"`` (una letra) y
+    ``detectar_decisiones_documento`` regeneró un ``CLIENTE_CANDIDATO`` con
+    otro ``decision_id`` -- el ledger (que sólo empata por ``decision_id``
+    exacto) no lo suprimía. La identidad resuelta es la MISMA: no hay
+    pregunta nueva que hacerle a un humano."""
+    try:
+        contenido = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    por_guia: dict[str, set[str]] = {}
+    aceptables = {
+        ("CLIENTE_CANDIDATO", "CONFIRMAR"),
+        ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"),
+        ("CLIENTE_DESCONOCIDO", "REGISTRAR"),
+    }
+    for aplicacion in contenido.get("aplicaciones", []) or []:
+        if (str(aplicacion.get("tipo", "")), str(aplicacion.get("accion", ""))) not in aceptables:
+            continue
+        guia = str((aplicacion.get("documento") or {}).get("numero_guia", "")).strip()
+        cliente_id = str(aplicacion.get("cliente_id", "")).strip()
+        if guia and cliente_id:
+            por_guia.setdefault(guia, set()).add(cliente_id)
+    return por_guia
+
+
+def _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras) -> dict[str, set[str]]:
+    """Bloque REVISIONES ESTANCADAS -- ``{numero_guia: {obra_id, ...}}`` de
+    las relaciones obra<->destino que YA están ``CONFIRMADA`` a nivel
+    ``CONFIRMACION_HUMANA`` y cuya evidencia cita esa guía concreta. Casos
+    reales 472008 / 472227: el humano (o una corroboración de evidencia
+    externa registrada al nivel ``CONFIRMACION_HUMANA``) ya confirmó la
+    relación PARA ESA GUÍA, pero una reextracción posterior dejó el
+    ``destino_documental`` de la tarjeta ``DESTINO_SIN_CONFIRMAR`` como un
+    texto OCR distinto ("Jefe de Adquisiciones ...", "INTERIOR NUEVA
+    0114B" vs "O1148"), así que la supresión por coincidencia LITERAL de
+    calle ya existente no la reconocía. La pregunta está respondida."""
+    por_guia: dict[str, set[str]] = {}
+    if catalogo_obras is None:
+        return por_guia
+    try:
+        relaciones = catalogo_obras.listar_relaciones()
+    except (OSError, ValueError, AttributeError):
+        return por_guia
+    for relacion in relaciones:
+        if str(getattr(relacion, "estado", "")) != "CONFIRMADA":
+            continue
+        evidencias = list(getattr(relacion, "evidencias", ()) or ())
+        nivel_humano = str(getattr(relacion, "fuente_confirmacion", "")) == "CONFIRMACION_HUMANA" or any(
+            str(getattr(e, "tipo", "")) == "CONFIRMACION_HUMANA" for e in evidencias
+        )
+        if not nivel_humano:
+            continue
+        obra_id = str(getattr(relacion, "obra_id", "")).strip()
+        if not obra_id:
+            continue
+        for evidencia in evidencias:
+            campos = getattr(evidencia, "campos_observados", {}) or {}
+            guia = str(campos.get("numero_guia", "")).strip()
+            if not guia:
+                fuente = str(getattr(evidencia, "identificador_fuente", "")).strip()
+                fuente = fuente.split(":", 1)[1] if fuente.startswith("guia:") else fuente
+                guia = fuente if fuente.isdigit() else ""
+            if guia:
+                por_guia.setdefault(guia, set()).add(obra_id)
+    return por_guia
+
+
 def detectar_decision_destino_no_resuelto(
     *, archivo: str, fila: Mapping[str, str], carpeta_catalogos: str | Path | None = None,
     intentos_misma_evidencia: int = 0, forzar: bool = False,
@@ -2239,6 +2312,9 @@ def regenerar_decisiones_persistidas(
     # registrada/corregida por un humano (REGISTRAR_DIRECCION aplicado):
     # su identidad de destino está resuelta, nunca se re-pregunta.
     guias_direccion_confirmada: frozenset[str] = frozenset()
+    # Bloque REVISIONES ESTANCADAS -- ledger de identidad ya fijada por un
+    # humano, tolerante al drift de OCR entre pasadas (ver helpers).
+    clientes_confirmados_por_guia: dict[str, set[str]] = {}
     if ruta_dataset is not None:
         import csv as _csv
 
@@ -2284,6 +2360,12 @@ def regenerar_decisiones_persistidas(
             )
         except (OSError, ValueError, AttributeError):
             guias_direccion_confirmada = frozenset()
+        try:
+            clientes_confirmados_por_guia = _clientes_confirmados_por_humano_por_guia(
+                Path(ruta_dataset).parent / "decisiones_aplicadas.json"
+            )
+        except (OSError, ValueError, AttributeError):
+            clientes_confirmados_por_guia = {}
     try:
         clientes_por_id = {c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()}
     except (OSError, ValueError):
@@ -2300,6 +2382,14 @@ def regenerar_decisiones_persistidas(
     except (OSError, ValueError):
         catalogo_obras = None
         obras_existentes = []
+    # Bloque REVISIONES ESTANCADAS -- relación obra<->destino ya CONFIRMADA
+    # (nivel CONFIRMACION_HUMANA) cuya evidencia cita una guía concreta;
+    # para esa guía la pregunta DESTINO_SIN_CONFIRMAR ya está respondida
+    # aunque el `destino_documental` de la tarjeta haya derivado por OCR.
+    obras_relacion_confirmada_por_guia: dict[str, set[str]] = (
+        _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras)
+        if ruta_dataset is not None else {}
+    )
     try:
         patentes_homologables = {
             v.patente_canonica
@@ -2627,6 +2717,30 @@ def regenerar_decisiones_persistidas(
                         and calle in texto_documental
                         for destino in destinos_confirmados_obra
                     )
+            # Bloque REVISIONES ESTANCADAS -- casos reales 472008 / 472227:
+            # para ESTA guía ya existe una relación obra<->destino
+            # CONFIRMADA a nivel CONFIRMACION_HUMANA cuya evidencia la cita
+            # explícitamente, pero el `destino_documental` de la tarjeta
+            # quedó como un texto OCR distinto tras una reextracción
+            # ("Jefe de Adquisiciones ...", "0114B" vs "O1148"), así que
+            # la coincidencia LITERAL de calle de arriba no lo veía. Sólo
+            # se suprime si la fila vigente de esa guía está
+            # operacionalmente limpia (ruta calculada, sin revisión,
+            # estado OK) -- una contradicción real conserva
+            # REQUIERE_REVISION y no pasa este filtro.
+            if not resuelta and entidad_id and filas_por_guia is not None:
+                numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
+                obras_confirmadas_guia = obras_relacion_confirmada_por_guia.get(
+                    numero_guia_decision, set()
+                )
+                fila_guia = filas_por_guia.get(numero_guia_decision) or {}
+                fila_limpia = (
+                    str(fila_guia.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+                    and str(fila_guia.get("indicador_revision", "")).strip() == "OK"
+                    and str(fila_guia.get("estado_operacional", "")).strip() == "OK"
+                )
+                if str(entidad_id) in obras_confirmadas_guia and fila_limpia:
+                    resuelta = True
             if resuelta:
                 continue
             obra_actual = next((o for o in obras_existentes if o.obra_id == entidad_id), None)
@@ -2946,10 +3060,34 @@ def regenerar_decisiones_persistidas(
                 numero_guia_decision = str((decision.get("documento") or {}).get("numero_guia", ""))
                 fila_actual = filas_por_guia.get(numero_guia_decision)
                 rut_cliente_fila = str((fila_actual or {}).get("rut_cliente", "")).strip()
+                entidad_id_decision = str((decision.get("identidad_resuelta") or {}).get("entidad_id", ""))
                 if rut_cliente_fila and validar_rut_chileno(rut_cliente_fila).estado == EstadoValidacion.VALIDO:
                     cliente_por_rut = _identidad_cliente_por_rut(carpeta, rut_cliente_fila)
-                    entidad_id_decision = str((decision.get("identidad_resuelta") or {}).get("entidad_id", ""))
                     if cliente_por_rut is not None and cliente_por_rut.cliente_id == entidad_id_decision:
+                        continue
+                # Bloque REVISIONES ESTANCADAS -- caso real 472037: un
+                # humano YA confirmó el cliente de ESTA guía en el ledger
+                # (CLIENTE_CANDIDATO/CONFIRMAR) a la MISMA identidad que
+                # esta decisión propone. Una reextracción posterior varió
+                # el `valor_documental` ("COMERCIAL" -> "CONERCIAL", una
+                # letra) y `detectar_decisiones_documento` regeneró la
+                # tarjeta con otro `decision_id`, que el ledger (empata por
+                # `decision_id` exacto) no suprimía. La identidad no
+                # cambió: no hay pregunta nueva. Se exige además que el
+                # `cliente` vigente de la fila NO contradiga esa identidad
+                # (mismo nombre canónico/alias) -- si la reextracción
+                # aterrizó en OTRO cliente, es contradicción real y la
+                # tarjeta se conserva.
+                if entidad_id_decision in clientes_confirmados_por_guia.get(numero_guia_decision, set()):
+                    cliente_catalogo = clientes_por_id.get(entidad_id_decision)
+                    cliente_fila = normalizar_nombre_cliente(str((fila_actual or {}).get("cliente", "")))
+                    nombres_identidad = set()
+                    if cliente_catalogo is not None:
+                        nombres_identidad.add(normalizar_nombre_cliente(cliente_catalogo.razon_social))
+                        nombres_identidad.update(
+                            normalizar_nombre_cliente(a) for a in cliente_catalogo.aliases
+                        )
+                    if not cliente_fila or cliente_fila in nombres_identidad:
                         continue
 
         if tipo == "VEHICULO_DESCONOCIDO":
