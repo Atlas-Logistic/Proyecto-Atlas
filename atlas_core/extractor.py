@@ -1390,8 +1390,31 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         return {}
     escala = _escala_geometrica_texto(items)
 
+    def _ancla_despacho(item: Dict[str, Any]) -> tuple[bool, bool]:
+        """Devuelve (es_ancla, truncada_en_borde).
+
+        ``ESPACHAR A`` es la unica variante truncada aceptada: falta
+        exactamente la D inicial, la caja toca el margen izquierdo y la
+        zona conserva otra etiqueta propia del bloque de entrega. No se usa
+        distancia de edicion ni se aceptan sufijos ambiguos (``AR A``/``A``).
+        """
+        simple = item["simple"]
+        if simple == "DESPACHAR A" or simple.startswith("DESPACHAR A "):
+            return True, False
+        if not (simple == "ESPACHAR A" or simple.startswith("ESPACHAR A ")):
+            return False, False
+        cerca_borde = item["x1"] <= 25 * escala
+        apoyos = ("RUT CHOFER", "PATENTE", "RETIRA", "FECHA SALIDA", "LLEGADA")
+        zona_esperada = any(
+            otro is not item
+            and any(otro["simple"] == apoyo or otro["simple"].startswith(apoyo + " ") for apoyo in apoyos)
+            and abs(otro["cy"] - item["cy"]) <= 220 * escala
+            for otro in items
+        )
+        return bool(cerca_borde and zona_esperada), bool(cerca_borde and zona_esperada)
+
     def es_etiqueta_despacho(item: Dict[str, Any]) -> bool:
-        return item["simple"] == "DESPACHAR A" or item["simple"].startswith("DESPACHAR A ")
+        return _ancla_despacho(item)[0]
 
     def es_estructural(item: Dict[str, Any]) -> bool:
         return any(
@@ -1463,6 +1486,15 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             continue
         candidatos.sort(key=lambda par: par[0])
         mejor_puntaje, mejor_item = candidatos[0]
+        ancla_truncada = _ancla_despacho(etiqueta)[1]
+        if ancla_truncada and any(
+            abs(puntaje - mejor_puntaje) <= 0.06
+            and item["simple"] != mejor_item["simple"]
+            for puntaje, item in candidatos[1:]
+        ):
+            # Para una etiqueta incompleta la geometria debe decidir por si
+            # sola: dos valores equivalentes son ambiguedad real.
+            continue
 
         # Bloque MOBILE ALTA RESOLUCIÓN -- caso real 472640: unir, de
         # izquierda a derecha y SOLO dentro de la misma fila, los bloques
@@ -1541,6 +1573,13 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         texto_compuesto = re.sub(
             r"\s+", " ", " ".join(bloque["texto"].strip() for bloque in cadena)
         ).strip()
+        if ancla_truncada and not (
+            re.search(r"[A-Z]", _texto_simple(texto_compuesto))
+            and re.search(r"\d{1,5}", texto_compuesto)
+        ):
+            # La tolerancia de borde exige morfologia de direccion
+            # (texto nominal + numero); una persona/empresa suelta no basta.
+            continue
         decisiones.append((mejor_puntaje, texto_compuesto))
 
     if not decisiones:
@@ -1553,7 +1592,45 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     }
     if rivales:
         return {}
-    return {"valor": mejor}
+    truncada = any(_ancla_despacho(item)[1] for item in etiquetas)
+    return {
+        "valor": mejor,
+        **({"senal_calidad_captura": "CAPTURA_RECORTADA_POSIBLE"} if truncada else {}),
+    }
+
+
+def detectar_captura_recortada_posible(bloques: List[Any]) -> bool:
+    """Detecta evidencia fuerte de anclas estructurales cortadas al borde.
+
+    Es una senal de calidad, no una fuente de datos. Se limita a variantes
+    inequivocas confirmadas del formulario AZA; no hace fuzzy matching y no
+    considera fragmentos ambiguos. Puede activarse aunque el valor asociado
+    no sea recuperable, permitiendo distinguir captura degradada de campo
+    genuinamente ausente.
+    """
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return False
+    escala = _escala_geometrica_texto(items)
+    truncadas_seguras = {"ESPACHAR A", "ESO KG"}
+    fragmentos_solo_calidad = {
+        "AR A", "UT CHOFER", "ECHA SALIDA", "LIDA", "IRECCION", "OMUNA", "IUDAD",
+    }
+    fragmentos_borde: list[Dict[str, Any]] = []
+    for item in items:
+        simple = item["simple"].strip(" .:")
+        if simple in truncadas_seguras and item["x1"] <= 25 * escala:
+            return True
+        if simple in fragmentos_solo_calidad and item["x1"] <= 25 * escala:
+            fragmentos_borde.append(item)
+    # Un fragmento corto nunca habilita extraccion. Dos etiquetas distintas,
+    # alineadas sobre el mismo borde y dentro de una banda del formulario,
+    # si son evidencia fuerte del encuadre recortado.
+    return any(
+        a["simple"] != b["simple"] and abs(a["cy"] - b["cy"]) <= 260 * escala
+        for indice, a in enumerate(fragmentos_borde)
+        for b in fragmentos_borde[indice + 1:]
+    )
 
 
 _ETIQUETAS_PATENTE_TRACTO = ("PATENTE", "TRACTO")

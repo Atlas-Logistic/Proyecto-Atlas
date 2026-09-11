@@ -1320,6 +1320,7 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
             "metricas_procesamiento_json",
             "resultado_atlas_ia_json",
             "evidencia_documentos_relacionados",
+            "senal_calidad_captura",
         "peso_kg",
         "hora_entrada_aza",
         "hora_salida_aza",

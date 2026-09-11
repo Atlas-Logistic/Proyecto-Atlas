@@ -57,6 +57,7 @@ from atlas_core.extractor import (
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
     _patente_valida,
+    detectar_captura_recortada_posible,
     extraer_datos,
 )
 from atlas_core.ocr import (
@@ -276,6 +277,9 @@ COLUMNAS = [
     "metricas_procesamiento_json",
     "resultado_atlas_ia_json",
     "evidencia_documentos_relacionados",
+    # Calidad de captura, separada de motivos documentales y de decisiones
+    # humanas. No bloquea ni cambia el dato recuperado.
+    "senal_calidad_captura",
     # Bloque E2E R1: enriquecimiento logístico por documento (planta origen
     # documental + DESPACHAR A + geocodificación + ORS driving-hgv).
     # Agregadas al final -- backward-compatible; sin catálogo de plantas ni
@@ -324,6 +328,9 @@ COLUMNAS_PRE_R4 = [columna for columna in COLUMNAS if columna not in _COLUMNAS_R
 # `COLUMNAS_PRE_R4`.
 _COLUMNAS_G1C_NUEVAS = {"codigo_pais", "codigo_unidad", "codigo_contexto"}
 COLUMNAS_PRE_G1C = [columna for columna in COLUMNAS if columna not in _COLUMNAS_G1C_NUEVAS]
+
+# Compatibilidad con datasets creados antes de registrar calidad de encuadre.
+COLUMNAS_PRE_CAPTURA = [columna for columna in COLUMNAS if columna != "senal_calidad_captura"]
 
 Procesador = Callable[[Path], Mapping[str, object]]
 
@@ -1240,7 +1247,7 @@ def revalidar_convergencia_identidad_sin_ocr(
         campos = list(lector.fieldnames or [])
         # Sólo el esquema oficial (o sus variantes previas conocidas) --
         # un dataset con encabezado incompatible no es de esta función.
-        if campos not in (COLUMNAS, COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C):
+        if campos not in (COLUMNAS, COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA):
             return resumen
         filas = list(lector)
 
@@ -2641,6 +2648,18 @@ def procesar_archivo(
         except Exception as exc:
             logger.warning("Enriquecimiento logístico omitido: %s: %s", type(exc).__name__, exc)
     fin_rutas = time.perf_counter()
+    try:
+        captura_recortada_posible = (
+            bloques_guia is not None
+            and detectar_captura_recortada_posible(list(bloques_guia))
+        )
+    except TypeError:
+        # Un proveedor que no entregue una secuencia valida no puede aportar
+        # evidencia de borde; la senal se abstiene y nunca rompe el documento.
+        captura_recortada_posible = False
+    senal_calidad_captura = (
+        "CAPTURA_RECORTADA_POSIBLE" if captura_recortada_posible else ""
+    )
 
     # Bloque TELEMETRÍA T2 / corregido en OPERACIÓN REAL R1 -- causa raíz
     # encontrada: el encabezado de una guía AZA siempre imprime la misma
@@ -2963,6 +2982,7 @@ def procesar_archivo(
         "metricas_procesamiento_json": json.dumps(metricas, ensure_ascii=False, sort_keys=True),
         "resultado_atlas_ia_json": "",
         "evidencia_documentos_relacionados": "",
+        "senal_calidad_captura": senal_calidad_captura,
         # Bloque O1: peso y horarios operacionales. La ausencia de estos
         # datos NUNCA por sí sola invalida el documento (no participan en
         # `requiere_revision`) -- "No encontrado"/"No determinada" ya es
@@ -3018,7 +3038,7 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
         # nunca inventa un valor real). Nunca migra masivamente datos
         # reales por su cuenta -- sólo normaliza el ENCABEZADO la próxima
         # vez que este mismo flujo ya iba a escribir en el archivo.
-        if encabezado not in (COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C):
+        if encabezado not in (COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA):
             raise ValueError(
                 "El CSV existente tiene un esquema incompatible. "
                 "Se esperaba el encabezado exacto separado por ';'."

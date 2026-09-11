@@ -69,6 +69,7 @@ from atlas_core.clasificador_material import clasificar_material
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     COLUMNAS_PRE_G1C,
+    COLUMNAS_PRE_CAPTURA,
     MOTIVOS_NO_BLOQUEANTES,
     MotivoRevisionDocumento,
     _combinar_fecha_hora,
@@ -215,7 +216,9 @@ def derivar_estado_ruta_tras_cambio_origen(fila: Mapping[str, object]) -> dict[s
     return {"estado_ruta": "REQUIERE_REVISION", "motivo_ruta": f"DESTINO_{estado_entrega}"}
 
 
-_COLUMNAS_ACEPTADAS = (COLUMNAS, COLUMNAS_PRE_G1C, _COLUMNAS_SIN_RUT_CLIENTE)
+_COLUMNAS_ACEPTADAS = (
+    COLUMNAS, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA, _COLUMNAS_SIN_RUT_CLIENTE,
+)
 
 
 def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
