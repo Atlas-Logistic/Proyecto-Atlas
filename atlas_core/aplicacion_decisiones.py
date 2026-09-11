@@ -1007,10 +1007,25 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 ruta_resuelta = False
                 relacion_id_nueva = None
                 destino_id_nuevo = None
+                obra_id_nuevo = None
                 if accion == "REGISTRAR_DIRECCION":
                     direccion_final = str(direccion_manual or "").strip()
                     if not direccion_final:
                         raise ErrorAplicacionDecision("Debe indicar la dirección de entrega.")
+                    # Bloque OBRA AUSENTE (Codex 472477) -- `nombre_obra_
+                    # manual` sólo tiene sentido cuando ESTA decisión marcó
+                    # `contexto.obra_ausente` (el propio campo de obra
+                    # nunca se extrajo -- ver `_obra_esta_ausente`). Un
+                    # texto de obra documental REAL, por raro que sea,
+                    # sigue su propio camino (`OBRA_DESCONOCIDA`) -- nunca
+                    # se relaja ni se corrige "de paso" aquí.
+                    obra_ausente_decision = bool((decision.get("contexto") or {}).get("obra_ausente"))
+                    nombre_obra_final = str(nombre_obra_manual or "").strip()
+                    if nombre_obra_final and not obra_ausente_decision:
+                        raise ErrorAplicacionDecision(
+                            "nombre_obra_manual sólo aplica cuando la obra está ausente en esta decisión "
+                            "-- un texto de obra documental existente se corrige vía OBRA_DESCONOCIDA."
+                        )
                     # Bloque REGISTRO_DIRECCION CONTEXTO -- caso real 472640
                     # (LAS VIOLETAS 55, DSI UNDERGROUND CHILE SPA): la
                     # comuna/localidad NUNCA se escribe dentro de este mismo
@@ -1214,6 +1229,89 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                                     )
                                 relacion_id_nueva = relacion.relacion_id
                             destino_id_nuevo = destino_creado.destino_id
+                        elif (
+                            fila_confirmada is not None and cliente_objetivo is not None
+                            and obra_ausente_decision and nombre_obra_final
+                        ):
+                            # Bloque OBRA AUSENTE (Codex 472477) -- misma
+                            # obra_objetivo=None de arriba, pero por la
+                            # razón OPUESTA: no es que el nombre no calce
+                            # con catálogo, es que nunca hubo nombre
+                            # (`obra_canonica` placeholder). Una sola
+                            # interacción humana resuelve AMBOS
+                            # aprendizajes: registra/canoniza la obra con
+                            # el MISMO mecanismo seguro de OBRA_DESCONOCIDA/
+                            # REGISTRAR (`registrar_observacion` busca/crea
+                            # GLOBALMENTE por nombre -- reutiliza si ya
+                            # existe, nunca duplica) y la asocia al destino
+                            # de esta misma dirección en un solo paso.
+                            # Nunca alía "No encontrado" (placeholder, no
+                            # texto documental real) a la obra nueva.
+                            latitud_confirmada = longitud_confirmada = None
+                            if str(fila_confirmada.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                                try:
+                                    latitud_confirmada = float(fila_confirmada.get("latitud_entrega") or "")
+                                    longitud_confirmada = float(fila_confirmada.get("longitud_entrega") or "")
+                                except (TypeError, ValueError):
+                                    latitud_confirmada = longitud_confirmada = None
+                            destino_creado = CatalogoDestinos(
+                                catalogo_destinos_ruta, ruta_clientes=catalogo_clientes_ruta,
+                            ).crear_o_reutilizar_global(
+                                nombre_destino=fila_confirmada.get("direccion_entrega") or direccion_final,
+                                direccion=fila_confirmada.get("direccion_entrega") or direccion_final,
+                                comuna=fila_confirmada.get("localidad_entrega", ""),
+                                region=fila_confirmada.get("region_entrega", ""),
+                                latitud=latitud_confirmada, longitud=longitud_confirmada,
+                                fuente=f"DECISION_HUMANA_R6:{decision_id}",
+                                estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+                            )
+                            evidencia_obra_ausente = Evidencia(
+                                tipo=TipoEvidencia.GUIA.value,
+                                identificador_fuente=numero_guia_decision, referencia_hash=decision_id,
+                                campos_observados={
+                                    "obra": nombre_obra_final, "obra_documental": obra_canonica,
+                                    "destino": direccion_final, "decision_id": decision_id,
+                                    "cliente_id_observado": cliente_objetivo.cliente_id,
+                                    "cliente_canonico_observado": cliente_canonico_decision,
+                                    "numero_guia": numero_guia_decision,
+                                },
+                                fecha=reloj().astimezone(timezone.utc).isoformat(),
+                                actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
+                            )
+                            resultado_obs = catalogo_obras.registrar_observacion(
+                                cliente_id=cliente_objetivo.cliente_id, nombre_obra=nombre_obra_final,
+                                destino_id=destino_creado.destino_id, evidencia=evidencia_obra_ausente,
+                            )
+                            if resultado_obs.relacion is not None:
+                                relacion = resultado_obs.relacion
+                                if relacion.estado == "PENDIENTE":
+                                    relacion = catalogo_obras.confirmar_relacion(
+                                        relacion.relacion_id, actor=actor, identificador_fuente=decision_id,
+                                    )
+                                relacion_id_nueva = relacion.relacion_id
+                            destino_id_nuevo = destino_creado.destino_id
+                            obra_id_nuevo = resultado_obs.obra.obra_id
+                            # Bloque OBRA AUSENTE -- la fila documental
+                            # nunca traía ningún texto de obra ("No
+                            # encontrado", nunca un dato real): rellenar
+                            # `obra_destino` con el nombre que el propio
+                            # humano acaba de escribir no sobrescribe
+                            # ninguna evidencia OCR (no existía) -- mismo
+                            # patrón ya usado por `revalidar_obra_destino_
+                            # sin_ocr` al reemplazar el texto documental por
+                            # el nombre canónico resuelto.
+                            with bloqueo_sesion(actual, "revalidacion_dataset"):
+                                filas_obra_ausente = _leer_filas(dataset)
+                                fila_obra_ausente = next(
+                                    (
+                                        f for f in filas_obra_ausente
+                                        if str(f.get("numero_guia", "")) == numero_guia_decision
+                                    ),
+                                    None,
+                                )
+                                if fila_obra_ausente is not None:
+                                    fila_obra_ausente["obra_destino"] = nombre_obra_final
+                                    _escribir_filas_completas(dataset, filas_obra_ausente)
                     except (OSError, ValueError, ErrorCatalogoObrasDestinos, ClienteDuplicadoError, DestinoDuplicadoError):
                         # El aprendizaje reutilizable es una mejora
                         # aditiva -- si falla, la ruta de ESTE
@@ -1222,6 +1320,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         pass
                     resultado_extra["destino_id"] = destino_id_nuevo
                     resultado_extra["relacion_id"] = relacion_id_nueva
+                    resultado_extra["obra_id"] = obra_id_nuevo
                 # NO_PUEDO_DETERMINAR/POSPONER: no tocan el dataset -- el
                 # ledger basta para que no vuelva a preguntarse lo mismo
                 # mientras la evidencia no cambie.
@@ -1230,7 +1329,14 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "direccion_manual": str(direccion_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
                     "comuna_manual": str(comuna_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
-                    "ruta_resuelta": ruta_resuelta, "destino_id": destino_id_nuevo, "relacion_id": relacion_id_nueva,
+                    # Bloque OBRA AUSENTE (Codex 472477) -- sólo distinto de
+                    # `None` cuando esta misma aplicación registró la obra
+                    # (nunca para una guía cuya obra ya venía resuelta).
+                    "nombre_obra_manual": (
+                        str(nombre_obra_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None
+                    ) or None,
+                    "ruta_resuelta": ruta_resuelta, "destino_id": destino_id_nuevo,
+                    "relacion_id": relacion_id_nueva, "obra_id": obra_id_nuevo,
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
             elif tipo == "CLIENTE_AUSENTE":

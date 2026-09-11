@@ -75,6 +75,16 @@ TIPOS_SOPORTADOS = frozenset({
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
 
+
+def _obra_esta_ausente(obra_canonica: str) -> bool:
+    """Bloque OBRA AUSENTE (Codex 472477) -- mismo criterio EXACTO que ya
+    usa `_decisiones_obra_para_cliente` para abstenerse de publicar
+    `OBRA_DESCONOCIDA` (`obra_texto in _AUSENTES`): un campo `obra_destino`
+    genuinamente vacío/placeholder (nunca extraído), nunca un texto real
+    -- por raro que sea -- que sólo no calce con catálogo (ese caso sigue
+    siendo, correctamente, terreno de `OBRA_DESCONOCIDA`)."""
+    return str(obra_canonica or "").strip() in _AUSENTES
+
 # R3.2/R3.2.1: pregunta operacional única para una entidad realmente
 # desconocida -- registrarla, no registrarla o decidir después. Se usa tal
 # cual para OBRA_DESCONOCIDA, VEHICULO_DESCONOCIDO y CLIENTE_DESCONOCIDO.
@@ -796,6 +806,15 @@ def detectar_decision_destino_no_resuelto(
         "cliente_canonico": str(fila.get("cliente", "")),
         "planta_origen_id": str(fila.get("planta_origen_id", "")),
     }
+    # Bloque OBRA AUSENTE (Codex 472477) -- cuando el propio campo de obra
+    # nunca se extrajo (placeholder, nunca un texto real desconocido),
+    # Desktop debe pedir el nombre de la obra en la MISMA tarjeta -- una
+    # sola interacción humana cierra ambos aprendizajes (ver
+    # `aplicar_decision_obra`/REGISTRAR_DIRECCION, `nombre_obra_manual`).
+    # Ausente del contexto (comportamiento previo intacto) cuando la obra
+    # sí trae un texto documental, por raro que sea.
+    if _obra_esta_ausente(obra_canonica):
+        contexto["obra_ausente"] = True
     # Bloque B1 EXPOSICIÓN -- si B1 (Bloque B1 INVESTIGADOR) ya investigó
     # este mismo problema y dejó una explicación/evidencia útil en
     # `resultado_atlas_ia_json` (misma fuente de verdad, nunca una
@@ -871,6 +890,12 @@ def detectar_decision_destino_contaminado_documental(
         "cliente_canonico": str(fila.get("cliente", "")),
         "planta_origen_id": str(fila.get("planta_origen_id", "")),
     }
+    # Bloque OBRA AUSENTE (Codex 472477) -- ver
+    # `detectar_decision_destino_no_resuelto`, mismo mecanismo: este
+    # detector es precisamente el que publica la tarjeta de 472477 (motivo
+    # documental, no de ruta), así que necesita la misma señal.
+    if _obra_esta_ausente(obra_canonica):
+        contexto["obra_ausente"] = True
     hallazgo = resumen_hallazgo_b1(fila, dominio="DESTINO", campo="despachar_a_crudo")
     if hallazgo:
         contexto.update(hallazgo)
@@ -3020,6 +3045,19 @@ def regenerar_decisiones_persistidas(
                         contexto["cliente_canonico"] = str(fila_actual.get("cliente", ""))
                     if "obra_canonica" in contexto:
                         contexto["obra_canonica"] = str(fila_actual.get("obra_destino", ""))
+                    # Bloque OBRA AUSENTE (Codex 472477) -- a diferencia de
+                    # `obra_canonica`/`cliente_canonico` (arriba), esta
+                    # bandera es pura metadata para Desktop: NINGUNA
+                    # supresión de este bloque la consulta, así que
+                    # inyectarla/retirarla contra el estado VIGENTE de la
+                    # fila es seguro incluso en una decisión publicada
+                    # antes de que este bloque existiera -- nunca activa
+                    # la supresión "obra ya tiene destino confirmado" de
+                    # más abajo (ésa sigue mirando sólo `obra_canonica`).
+                    if _obra_esta_ausente(str(fila_actual.get("obra_destino", ""))):
+                        contexto["obra_ausente"] = True
+                    else:
+                        contexto.pop("obra_ausente", None)
                     hallazgo = resumen_hallazgo_b1(
                         fila_actual, dominio="DESTINO", campo=str(decision.get("campo", "despachar_a_crudo")),
                     )
