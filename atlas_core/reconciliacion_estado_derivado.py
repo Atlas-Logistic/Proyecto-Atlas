@@ -51,6 +51,8 @@ from atlas_core.revalidacion_documental import (
     revalidar_obra_destino_sin_ocr,
     revalidar_origen_encabezado_no_confiable_sin_ocr,
     revalidar_origen_por_categoria_sin_candidato_sin_ocr,
+    revalidar_origen_por_documento_hermano_de_transporte_sin_ocr,
+    revalidar_origen_por_historial_de_cliente_sin_ocr,
     revalidar_origen_vecinos_gps_contra_evidencia_propia_real_sin_ocr,
     revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
     revalidar_ruta_por_historial_de_obra_sin_ocr,
@@ -998,6 +1000,23 @@ def reconciliar_estado_derivado(
         limpieza_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
         )
+        # Bloque CAPABILITY SUITE DE ORIGEN -- corre DESPUÉS de la regla
+        # por categoría, a propósito: así un hermano de transporte que
+        # la categoría acaba de resolver ya está disponible para
+        # propagarse, en la MISMA pasada, a cualquier otro documento del
+        # mismo transporte sin categoría propia.
+        limpieza_origen_hermano_transporte = revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(
+            ruta_dataset=dataset,
+        )
+        # Bloque CAPABILITY SUITE DE ORIGEN (caso real 472477) -- última
+        # vía automática antes de que el origen quede genuinamente sin
+        # resolver: convergencia ABSOLUTA en TODO el historial confiable
+        # de este mismo cliente (sin ventana temporal) -- corre DESPUÉS
+        # de la regla por categoría, misma razón que en
+        # `revalidar_y_regenerar_reporte`.
+        limpieza_origen_historial_cliente = revalidar_origen_por_historial_de_cliente_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        )
         # Bloque FIX RUT AUSENTE -- caso real 464367 (CARLOS ÑANCUCHEO):
         # un chofer identificado por nombre pero sin RUT documental
         # (ausente o inválido) puede tener RUT canónico confiable en
@@ -1287,8 +1306,10 @@ def reconciliar_estado_derivado(
             set(limpieza["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])
             | set(limpieza_origen["guias_actualizadas"])
+            | set(limpieza_origen_hermano_transporte["guias_actualizadas"])
             | set(limpieza_origen_vecinos_contra_evidencia_propia["guias_actualizadas"])
             | set(limpieza_origen_categoria["guias_actualizadas"])
+            | set(limpieza_origen_historial_cliente["guias_actualizadas"])
             | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
             | set(limpieza_chofer_corroborado["guias_actualizadas"])
             | set(limpieza_indicadores["guias_actualizadas"])

@@ -85,6 +85,7 @@ from atlas_core.rutas.origen_evidencia import (
     FUENTE_CATEGORIA_DESTINO_EXTERNO,
     MOTIVO_CONTRADICCION_OPERACIONAL,
     MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA,
+    _es_el_propio_destino,
     conflicto_gps_tiene_evidencia_real,
     fusionar_evidencia_origen,
     plantas_mencionadas_en_conflicto_gps,
@@ -4027,6 +4028,92 @@ def revalidar_destino_rut_pegado_persistido_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+FUENTE_DOCUMENTO_HERMANO_MISMO_TRANSPORTE = "DOCUMENTO_HERMANO_MISMO_TRANSPORTE"
+
+
+def revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque CAPABILITY SUITE DE ORIGEN -- causa raíz sistémica: dos
+    documentos que comparten `numero_transporte` describen, físicamente,
+    el MISMO viaje de UN solo camión -- no una inferencia estadística
+    (como el patrón de vecinos temporales, que agrupa por vehículo+
+    ventana de días) ni una convergencia de negocio (como el historial
+    de cliente), sino identidad directa del hecho físico: si un
+    documento hermano YA tiene `planta_origen_id` resuelto (por
+    cualquier vía, incluida una decisión humana), el resto de los
+    documentos del MISMO transporte comparten ese mismo origen sin
+    ambigüedad -- caso real 0000354651 (472276/472277).
+
+    Corre ANTES que la regla documental por categoría y el resto de la
+    familia de revalidadores de origen, a propósito: es la evidencia
+    MÁS fuerte disponible (nunca una inferencia, es el mismo evento
+    físico), así que ninguna regla más débil debe competir con ella.
+
+    Se abstiene ante cualquier duda real: sin `numero_transporte`
+    (nunca agrupa filas sin identidad de transporte), sin ningún
+    hermano con origen ya resuelto, hermanos en desacuerdo entre sí
+    (nunca debería ocurrir para el MISMO transporte, pero si ocurre es
+    una contradicción real -- se abstiene, nunca se promedia ni se
+    elige arbitrariamente), evidencia GPS real y propia de ESTE
+    documento (conflicto real o detención real -- una contradicción
+    real entre el propio documento y su hermano es, en sí misma, motivo
+    para preguntar a un humano, no para que uno pise al otro en
+    silencio), o la única candidata es ella misma el destino del
+    despacho (traslado interno)."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+
+        candidatos_por_transporte: dict[str, set[tuple[str, str]]] = {}
+        for fila in filas:
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            planta_id = str(fila.get("planta_origen_id", "")).strip()
+            if not transporte or not planta_id:
+                continue
+            candidatos_por_transporte.setdefault(transporte, set()).add(
+                (planta_id, str(fila.get("planta_origen_nombre", "")))
+            )
+
+        actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("planta_origen_id", "")).strip():
+                continue  # ya tiene origen -- nunca se reinvestiga
+            motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
+            if (
+                motivo_origen_gps.startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA")
+                or conflicto_gps_tiene_evidencia_real(motivo_origen_gps)
+            ):
+                continue  # evidencia GPS real y propia de este documento -- nunca se pisa
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            if not transporte:
+                continue
+            candidatos = candidatos_por_transporte.get(transporte, set())
+            if len(candidatos) != 1:
+                continue  # sin hermano resuelto, o hermanos en desacuerdo -- se abstiene
+            planta_id, planta_nombre = next(iter(candidatos))
+            destino_texto = str(fila.get("despachar_a_crudo", "") or fila.get("direccion_entrega", "")).strip()
+            if destino_texto and normalizar_nombre_planta(destino_texto) == normalizar_nombre_planta(planta_nombre):
+                continue  # traslado interno hacia la propia candidata -- no prueba que salió de ahí
+
+            fila["planta_origen_id"] = planta_id
+            fila["planta_origen_nombre"] = planta_nombre
+            fila["origen_determinado_por"] = FUENTE_DOCUMENTO_HERMANO_MISMO_TRANSPORTE
+            fila["evidencia_origen"] = f"MISMO_TRANSPORTE={transporte}"
+            fila["estado_ruta"] = ""
+            fila["motivo_ruta"] = ""
+            fila["estado_operacional"] = (
+                "OK" if fila.get("estado_documental", "") == "OK" and not destino_texto else "REQUIERE_REVISION"
+            )
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 _PATRON_CONTRADICCION_ORIGEN_R23 = re.compile(
     r"(MOBILE|DOCUMENTO)=([A-Z0-9_]+):(COMPATIBLE|INCOMPATIBLE|SIN_REGLA)"
 )
@@ -4240,6 +4327,122 @@ def revalidar_origen_por_categoria_sin_candidato_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+# Bloque CAPABILITY SUITE DE ORIGEN (caso real 472477) -- fuentes de
+# origen ya persistidas cuya confiabilidad justifica usarlas como
+# historial (nunca una inferencia de una inferencia): telemetría GPS
+# directa y las dos reglas documentales por categoría, ya deterministas
+# por diseño. Deliberadamente NUNCA incluye `PATRON_VEHICULO_GPS_
+# VECINOS` (ver `revalidar_origen_por_vecinos_temporales_gps_sin_ocr`)
+# ni esta misma fuente (`HISTORIAL_CLIENTE`, más abajo) -- evitar que
+# una inferencia ya débil se use, a su vez, como evidencia para otra
+# fila, componiendo incertidumbre en vez de reducirla.
+FUENTE_HISTORIAL_CLIENTE = "HISTORIAL_CLIENTE"
+_FUENTES_ORIGEN_CONFIABLES_PARA_HISTORIAL = frozenset({
+    "TELEMETRIA_GPS", FUENTE_CATEGORIA_DESTINO_EXTERNO, MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA,
+})
+_MINIMO_OBSERVACIONES_HISTORIAL_CLIENTE = 2
+
+
+def revalidar_origen_por_historial_de_cliente_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+) -> dict[str, object]:
+    """Bloque CAPABILITY SUITE DE ORIGEN -- causa raíz real 472477: un
+    cliente puede tener, en el propio dataset ya persistido, una
+    convergencia de origen tan absoluta como la de un vehículo (ver
+    `revalidar_origen_por_vecinos_temporales_gps_sin_ocr`), sólo que sin
+    ventana temporal -- una relación comercial cliente<->planta es
+    estable a lo largo de meses, no de días. Caso real: PRODALAM SA
+    tiene, en TODA su historia en el dataset, cero guías despachadas
+    desde una planta distinta a AZA COLINA (14 observaciones GPS/
+    categoría-confirmadas, ninguna en desacuerdo) -- exactamente la
+    misma convergencia ABSOLUTA que ya exige el patrón de vecinos, sólo
+    que agrupada por identidad de cliente en vez de por vehículo+fecha.
+    Nunca "el cliente normalmente recibe de X" con un umbral de
+    frecuencia: exige TODAS las observaciones confiables de ese cliente
+    de acuerdo (cero en desacuerdo) y al menos
+    `_MINIMO_OBSERVACIONES_HISTORIAL_CLIENTE` para no generalizar de un
+    solo dato.
+
+    Corre DESPUÉS de la regla documental por categoría y del patrón de
+    vecinos temporales (ambas evidencia más directa: catálogo
+    declarado, o el mismo vehículo físico) -- es la última vía
+    automática antes de escalar a `ORIGEN_NO_CONFIRMADO`. Sólo usa
+    observaciones de fuentes YA confiables (`_FUENTES_ORIGEN_
+    CONFIABLES_PARA_HISTORIAL`) -- nunca compone esta misma inferencia,
+    ni el patrón de vecinos, como evidencia de sí misma.
+
+    Se abstiene ante cualquier duda real: sin cliente documental, sin
+    historial suficiente, historial en desacuerdo (más de una planta),
+    evidencia GPS real y propia de ESTE documento ya disponible (mismo
+    criterio que el resto de la familia de revalidadores de origen), o
+    la única planta candidata es ella misma el destino del despacho
+    (traslado interno)."""
+    ruta = Path(ruta_dataset)
+    try:
+        plantas_por_id = {p.planta_id: p for p in CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()}
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+
+        plantas_por_cliente: dict[str, list[str]] = {}
+        for fila in filas:
+            if str(fila.get("origen_determinado_por", "")).strip() not in _FUENTES_ORIGEN_CONFIABLES_PARA_HISTORIAL:
+                continue
+            cliente = normalizar_nombre_cliente(str(fila.get("cliente", "")).strip())
+            planta_id = str(fila.get("planta_origen_id", "")).strip()
+            if not cliente or not planta_id:
+                continue
+            plantas_por_cliente.setdefault(cliente, []).append(planta_id)
+
+        actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("planta_origen_id", "")).strip():
+                continue  # ya tiene origen -- nunca se reinvestiga
+            motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
+            if (
+                motivo_origen_gps.startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA")
+                or conflicto_gps_tiene_evidencia_real(motivo_origen_gps)
+            ):
+                continue  # evidencia GPS real y propia de este documento -- nunca se pisa
+            cliente = normalizar_nombre_cliente(str(fila.get("cliente", "")).strip())
+            if not cliente:
+                continue
+            observaciones = plantas_por_cliente.get(cliente, [])
+            if len(observaciones) < _MINIMO_OBSERVACIONES_HISTORIAL_CLIENTE:
+                continue
+            plantas_distintas = set(observaciones)
+            if len(plantas_distintas) != 1:
+                continue  # historial en desacuerdo -- ambigüedad real, se abstiene
+            planta_id = next(iter(plantas_distintas))
+            planta = plantas_por_id.get(planta_id)
+            if planta is None:
+                continue
+            destino_texto = str(fila.get("despachar_a_crudo", "") or fila.get("direccion_entrega", "")).strip()
+            if _es_el_propio_destino(planta, destino_texto):
+                continue  # traslado interno hacia la propia candidata -- no prueba que salió de ahí
+
+            fila["planta_origen_id"] = planta.planta_id
+            fila["planta_origen_nombre"] = planta.nombre
+            fila["origen_determinado_por"] = FUENTE_HISTORIAL_CLIENTE
+            fila["evidencia_origen"] = (
+                f"CLIENTE={cliente};OBSERVACIONES_CONFIABLES={len(observaciones)};UNANIMES"
+            )
+            fila["estado_ruta"] = ""
+            fila["motivo_ruta"] = ""
+            fila["estado_operacional"] = (
+                "OK" if fila.get("estado_documental", "") == "OK" and not destino_texto else "REQUIERE_REVISION"
+            )
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def _firma_efectiva_bandeja(ruta: Path) -> tuple[str, ...] | None:
     """Firma semántica de las decisiones, sin metadatos volátiles del artefacto."""
     try:
@@ -4444,6 +4647,18 @@ def revalidar_y_regenerar_reporte(
     resultado_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
+    # Bloque CAPABILITY SUITE DE ORIGEN -- corre DESPUÉS de la regla
+    # documental por categoría, a propósito: así un hermano de
+    # transporte que la categoría acaba de resolver ya está disponible
+    # para propagarse, en la MISMA pasada, a cualquier otro documento
+    # del mismo transporte sin categoría propia (caso real 0000354651,
+    # 472276/472277). Sigue siendo evidencia MÁS fuerte que categoría en
+    # términos absolutos (es el mismo evento físico, no una regla
+    # inferida) -- el orden aquí es sólo para maximizar cuántas filas
+    # convergen en una sola pasada, nunca una jerarquía de fuerza.
+    resultado_origen_hermano_transporte = revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(
+        ruta_dataset=dataset,
+    )
     # Bloque CIERRE DE ORQUESTACIÓN (caso real 472037) -- corre ANTES que
     # el patrón de vecinos, a propósito: limpia cualquier origen ya
     # persistido que el patrón de vecinos haya fijado por encima de
@@ -4463,6 +4678,16 @@ def revalidar_y_regenerar_reporte(
     # regla documental por categoría (arriba), a propósito -- ver Bloque
     # CIERRE PRECEDENCIA ORIGEN.
     resultado_origen_vecinos = revalidar_origen_por_vecinos_temporales_gps_sin_ocr(ruta_dataset=dataset)
+    # Bloque CAPABILITY SUITE DE ORIGEN (caso real 472477) -- última vía
+    # automática antes de escalar a `ORIGEN_NO_CONFIRMADO`: convergencia
+    # ABSOLUTA de origen en TODO el historial confiable de este mismo
+    # cliente (sin ventana temporal, a diferencia del patrón de
+    # vecinos) -- corre DESPUÉS de esa función, a propósito, porque es
+    # una evidencia de negocio (relación comercial), no física
+    # (vehículo/GPS).
+    resultado_origen_historial_cliente = revalidar_origen_por_historial_de_cliente_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     # Bloque FINAL CORE V1 -- caso real 460807/472008 (AUSIN SAN
     # BERNARDO): corre ANTES también -- resuelve un punto operacional
     # por convergencia GPS histórica cuando la dirección postal no es
@@ -4583,8 +4808,10 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_direccion_degradada["guias_actualizadas"])
         | set(resultado_direccion_hermanos["guias_actualizadas"])
         | set(resultado_motivo_destino_resuelto["guias_actualizadas"])
+        | set(resultado_origen_hermano_transporte["guias_actualizadas"])
         | set(resultado_origen_vecinos_contra_evidencia_propia["guias_actualizadas"])
         | set(resultado_origen_vecinos["guias_actualizadas"])
+        | set(resultado_origen_historial_cliente["guias_actualizadas"])
         | set(resultado_ruta_convergencia_gps["guias_actualizadas"])
         | set(resultado_destino_rut_pegado["guias_actualizadas"])
         | set(resultado_material_estampado["guias_actualizadas"])
@@ -4609,7 +4836,9 @@ def revalidar_y_regenerar_reporte(
         "cliente_ausente": resultado_cliente_ausente,
         "destino_confirmado_ledger": resultado_destino_confirmado_ledger,
         "origen_vecinos_gps_contra_evidencia_propia": resultado_origen_vecinos_contra_evidencia_propia,
+        "origen_hermano_transporte": resultado_origen_hermano_transporte,
         "origen_vecinos_temporales_gps": resultado_origen_vecinos,
+        "origen_historial_cliente": resultado_origen_historial_cliente,
         "ruta_convergencia_gps_historica": resultado_ruta_convergencia_gps,
         "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
         "ruta": resultado_ruta,
