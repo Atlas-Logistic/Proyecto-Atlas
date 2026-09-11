@@ -1403,10 +1403,16 @@ def revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
         ProveedorTelemetriaSoloCache(nombre=proveedor_nombre),
         RepositorioTelemetria(carpeta / "telemetria_cache.json"),
     )
-    plantas_catalogo = CatalogoPlantas(carpeta / "plantas.json").listar()
+    try:
+        plantas_catalogo = CatalogoPlantas(carpeta / "plantas.json").listar()
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
-        filas = _leer_filas(ruta)
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
         guias_actualizadas: list[str] = []
         for fila in filas:
             if str(fila.get("origen_determinado_por", "")).strip() != "TELEMETRIA_GPS":
@@ -1523,7 +1529,10 @@ def revalidar_origen_por_vecinos_temporales_gps_sin_ocr(
 
     ruta = Path(ruta_dataset)
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
-        filas = _leer_filas(ruta)
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"guias_actualizadas": []}
         gps_confirmados_por_patente: dict[str, list[tuple]] = {}
         for fila in filas:
             if str(fila.get("origen_determinado_por", "")).strip() != "TELEMETRIA_GPS":
@@ -4147,7 +4156,10 @@ def revalidar_origen_por_eliminacion_categoria_sin_ocr(
     plantas_por_nombre = {p.nombre_normalizado: p for p in plantas}
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
-        filas = _leer_filas(ruta)
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
         actualizadas: list[str] = []
         for fila in filas:
             if str(fila.get("estado_ruta", "")).strip() != EstadoRuta.ORIGEN_NO_DETERMINADO.value:
@@ -4612,6 +4624,19 @@ def revalidar_y_regenerar_reporte(
     # recién revertido merece la misma oportunidad de resolverse por
     # categoría/eliminación/vecinos en ESTA misma pasada.
     resultado_origen_encabezado = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+    # Bloque CIERRE ORIGEN GPS -- causa raíz real (472224): hermana de la
+    # limpieza de arriba, misma filosofía -- un origen confirmado por
+    # `resolver_planta_origen_gps` ANTES del fix que exige contacto
+    # temporal real (nunca "único candidato" tratado como sinónimo de
+    # "válido") queda con la firma exacta de ese bug para siempre si
+    # nadie lo reintenta. Corre justo después de la limpieza de
+    # encabezado, mismo motivo: una fila recién corregida merece la
+    # misma oportunidad de resolverse (o de quedar honestamente sin
+    # origen) en ESTA misma pasada, antes de la familia de reglas por
+    # categoría/hermano/vecinos/historial de abajo.
+    resultado_origen_gps_candidato_unico = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     # Bloque R2.3 (adición) -- intenta resolver origen por eliminación de
     # categoría ANTES de la revalidación de ruta más abajo, a propósito:
     # con `planta_origen_id` ya resuelto, esa misma pasada puede calcular
@@ -4808,6 +4833,7 @@ def revalidar_y_regenerar_reporte(
         | set(resultado_direccion_degradada["guias_actualizadas"])
         | set(resultado_direccion_hermanos["guias_actualizadas"])
         | set(resultado_motivo_destino_resuelto["guias_actualizadas"])
+        | set(resultado_origen_gps_candidato_unico["guias_actualizadas"])
         | set(resultado_origen_hermano_transporte["guias_actualizadas"])
         | set(resultado_origen_vecinos_contra_evidencia_propia["guias_actualizadas"])
         | set(resultado_origen_vecinos["guias_actualizadas"])
@@ -4836,6 +4862,7 @@ def revalidar_y_regenerar_reporte(
         "cliente_ausente": resultado_cliente_ausente,
         "destino_confirmado_ledger": resultado_destino_confirmado_ledger,
         "origen_vecinos_gps_contra_evidencia_propia": resultado_origen_vecinos_contra_evidencia_propia,
+        "origen_gps_candidato_unico": resultado_origen_gps_candidato_unico,
         "origen_hermano_transporte": resultado_origen_hermano_transporte,
         "origen_vecinos_temporales_gps": resultado_origen_vecinos,
         "origen_historial_cliente": resultado_origen_historial_cliente,
