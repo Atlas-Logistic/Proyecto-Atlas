@@ -72,6 +72,30 @@ def conflicto_gps_tiene_evidencia_real(motivo_origen_gps: str) -> bool:
         return True  # formato inesperado -- nunca se asume "sin evidencia" a ciegas
     return any(s > 0.0 for s in solapes)
 
+
+_PATRON_PLANTA_CONFLICTO = re.compile(r"([A-Za-z0-9_]+):score=")
+
+
+def plantas_mencionadas_en_conflicto_gps(motivo_origen_gps: str) -> frozenset[str]:
+    """Bloque CIERRE PRECEDENCIA ORIGEN (caso real 472037) -- nombres
+    normalizados (`_` -> espacio, mayúsculas) de las plantas que la
+    propia telemetría ya consideró candidatas dentro de un
+    `CONFLICTO_REAL_EN_VENTANA` -- frozenset vacío si el texto no es ese
+    formato. Usado para distinguir "GPS real mencionó ESTA planta entre
+    sus candidatos, aunque no pudo decidir cuál" (una regla determinística
+    que la elige no la contradice, la corrobora) de "la categoría apunta
+    a una planta que el GPS ni siquiera consideró" (ahí sí hay una
+    contradicción real entre dos fuentes de evidencia, y ninguna debe
+    pisar a la otra en silencio)."""
+    texto = str(motivo_origen_gps or "")
+    if not texto.startswith("CONFLICTO_REAL_EN_VENTANA"):
+        return frozenset()
+    return frozenset(
+        token.replace("_", " ").strip().upper()
+        for token in _PATRON_PLANTA_CONFLICTO.findall(texto)
+    )
+
+
 COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
 SIN_REGLA = "SIN_REGLA"

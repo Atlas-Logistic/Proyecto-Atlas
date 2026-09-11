@@ -87,6 +87,7 @@ from atlas_core.rutas.origen_evidencia import (
     MOTIVO_RESUELTO_POR_ELIMINACION_CATEGORIA,
     conflicto_gps_tiene_evidencia_real,
     fusionar_evidencia_origen,
+    plantas_mencionadas_en_conflicto_gps,
     resolver_planta_alternativa_por_categoria,
     resolver_planta_por_codigo_mobile,
     resolver_planta_unica_por_categoria,
@@ -4170,7 +4171,23 @@ def revalidar_origen_por_categoria_sin_candidato_sin_ocr(
     determinar" para esta misma resolución por categoría; ambos casos
     comparten exactamente la misma pregunta (¿qué planta compatible
     tiene esta categoría de carga?) y las mismas guardas de abstención
-    de arriba siguen aplicando sin cambios."""
+    de arriba siguen aplicando sin cambios.
+
+    Bloque CIERRE PRECEDENCIA ORIGEN (caso real 472037) -- un
+    `CONFLICTO_REAL_EN_VENTANA` NUNCA es, por definición, un origen ya
+    confirmado: es la propia telemetría diciendo que no pudo decidir
+    entre dos o más candidatos. "GPS es una fuente de evidencia, no un
+    bloqueo terminal" -- si la categoría resuelve de forma única a UNA
+    de esas mismas plantas que el GPS ya venía considerando (472037:
+    AZA COLINA, con 22.4% de solape -- el candidato con MÁS evidencia de
+    los dos, aunque no lo bastante para que la telemetría se decidiera
+    sola), la regla documental CORROBORA la ambigüedad de GPS -- nunca
+    la contradice -- así que se acepta. Sólo se sigue abstiene cuando la
+    categoría apunta a una planta que el GPS ni siquiera mencionó como
+    candidata (una contradicción real entre dos fuentes de evidencia
+    independientes, ninguna de las dos gana en silencio) o cuando la
+    evidencia GPS es más fuerte que un conflicto de ventana
+    (`DETENCION_REAL_FUERA_DE_TODA_GEOCERCA`, arriba, sin cambios)."""
     ruta = Path(ruta_dataset)
     try:
         plantas = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
@@ -4188,8 +4205,6 @@ def revalidar_origen_por_categoria_sin_candidato_sin_ocr(
             motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
             if motivo_origen_gps.startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA"):
                 continue  # evidencia GPS real y positiva ya disponible -- no se pisa
-            if conflicto_gps_tiene_evidencia_real(motivo_origen_gps):
-                continue
 
             categoria = str(fila.get("tipo_carga", "")).strip()
             destino_texto = str(fila.get("despachar_a_crudo", "") or fila.get("direccion_entrega", "")).strip()
@@ -4198,6 +4213,10 @@ def revalidar_origen_por_categoria_sin_candidato_sin_ocr(
             )
             if planta_resuelta is None:
                 continue
+            if conflicto_gps_tiene_evidencia_real(motivo_origen_gps):
+                candidatos_gps = plantas_mencionadas_en_conflicto_gps(motivo_origen_gps)
+                if planta_resuelta.nombre.strip().upper() not in candidatos_gps:
+                    continue  # la categoría contradice a TODOS los candidatos que el GPS sí consideró -- no se pisa
 
             fila["planta_origen_id"] = planta_resuelta.planta_id
             fila["planta_origen_nombre"] = planta_resuelta.nombre
@@ -4378,6 +4397,53 @@ def revalidar_y_regenerar_reporte(
     resultado_destino_confirmado_ledger = revalidar_destino_confirmado_desde_ledger_sin_ocr(
         carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+    # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa raíz
+    # real (464367): un origen determinado ÚNICAMENTE por
+    # `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
+    # societaria) nunca se revertía sola en esta pasada tampoco -- misma
+    # función ya usada en `reconciliar_estado_derivado`, ahora también
+    # aquí para que cualquier consumidor de esta orquestación (no sólo la
+    # carga automática de Desktop) converja igual. Corre ANTES de todo lo
+    # demás de este bloque de origen, a propósito -- mismo orden ya usado
+    # en `reconciliar_estado_derivado` (ver esa función): un origen
+    # recién revertido merece la misma oportunidad de resolverse por
+    # categoría/eliminación/vecinos en ESTA misma pasada.
+    resultado_origen_encabezado = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+    # Bloque R2.3 (adición) -- intenta resolver origen por eliminación de
+    # categoría ANTES de la revalidación de ruta más abajo, a propósito:
+    # con `planta_origen_id` ya resuelto, esa misma pasada puede calcular
+    # distancia/tiempo reales en vez de dejarlo para una corrida aparte.
+    # Bloque CIERRE DE ORQUESTACIÓN -- corrige una discrepancia real entre
+    # el comentario original de este bloque (que siempre dijo "ANTES de
+    # la revalidación de ruta") y el orden en que el código realmente
+    # corría (después) -- nunca ejercitada hasta que `aplicar_decision_
+    # obra` empezó a invocar esta función completa tras `REGISTRAR_
+    # DIRECCION` (caso real 472477): un origen recién resuelto aquí
+    # llegaba demasiado tarde para que la ruta, más abajo EN LA MISMA
+    # pasada, pudiera aprovecharlo.
+    resultado_origen_eliminacion = revalidar_origen_por_eliminacion_categoria_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
+    # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
+    # corre DESPUÉS de revertir un encabezado no confiable (arriba), a
+    # propósito -- una fila recién revertida (planta_origen_id vacío,
+    # ORIGEN_NO_DETERMINADO) merece la misma oportunidad de resolverse
+    # por categoría/destino en la MISMA pasada, nunca esperar a una
+    # corrida aparte.
+    #
+    # Bloque CIERRE PRECEDENCIA ORIGEN (caso real 472037) -- corre ANTES
+    # que el patrón de vecinos temporales (más abajo), a propósito: una
+    # regla documental determinística (categoría de carga -> ÚNICA planta
+    # compatible, declarada en el catálogo) es evidencia más fuerte que
+    # un patrón inferido de OTROS viajes del mismo vehículo -- si ambas
+    # pudieran resolver esta misma fila, la regla documental nunca debe
+    # perder sólo por el orden en que casualmente corrieron. Con la
+    # categoría ya resuelta aquí, el patrón de vecinos (que exige
+    # `planta_origen_id` vacío) se abstiene solo, igual que ante un
+    # origen ya confirmado por cualquier otra vía.
+    resultado_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    )
     # Bloque CIERRE DE ORQUESTACIÓN (caso real 472037) -- corre ANTES que
     # el patrón de vecinos, a propósito: limpia cualquier origen ya
     # persistido que el patrón de vecinos haya fijado por encima de
@@ -4393,7 +4459,9 @@ def revalidar_y_regenerar_reporte(
     # revalidación de ruta a propósito -- resuelve la PLANTA (vecinos
     # temporales GPS del mismo vehículo) para que la revalidación de
     # ruta, más abajo, ya tenga `planta_origen_id` con qué intentar
-    # geocodificación/routing en esta MISMA pasada.
+    # geocodificación/routing en esta MISMA pasada. Corre DESPUÉS de la
+    # regla documental por categoría (arriba), a propósito -- ver Bloque
+    # CIERRE PRECEDENCIA ORIGEN.
     resultado_origen_vecinos = revalidar_origen_por_vecinos_temporales_gps_sin_ocr(ruta_dataset=dataset)
     # Bloque FINAL CORE V1 -- caso real 460807/472008 (AUSIN SAN
     # BERNARDO): corre ANTES también -- resuelve un punto operacional
@@ -4418,43 +4486,6 @@ def revalidar_y_regenerar_reporte(
     # hermana que comparta esa dirección -- ver docstring de la función.
     resultado_destinos_confirmados = revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
         carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
-    )
-    # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa raíz
-    # real (464367): un origen determinado ÚNICAMENTE por
-    # `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
-    # societaria) nunca se revertía sola en esta pasada tampoco -- misma
-    # función ya usada en `reconciliar_estado_derivado`, ahora también
-    # aquí para que cualquier consumidor de esta orquestación (no sólo la
-    # carga automática de Desktop) converja igual. Corre ANTES de la
-    # revalidación de ruta, a propósito -- mismo orden ya usado en
-    # `reconciliar_estado_derivado` (ver esa función): un origen recién
-    # revertido merece la misma oportunidad de resolverse por
-    # categoría/eliminación en ESTA misma pasada.
-    resultado_origen_encabezado = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
-    # Bloque R2.3 (adición) -- intenta resolver origen por eliminación de
-    # categoría ANTES de la revalidación de ruta más abajo, a propósito:
-    # con `planta_origen_id` ya resuelto, esa misma pasada puede calcular
-    # distancia/tiempo reales en vez de dejarlo para una corrida aparte.
-    # Bloque CIERRE DE ORQUESTACIÓN -- corrige una discrepancia real entre
-    # el comentario original de este bloque (que siempre dijo "ANTES de
-    # la revalidación de ruta") y el orden en que el código realmente
-    # corría (después) -- nunca ejercitada hasta que `aplicar_decision_
-    # obra` empezó a invocar esta función completa tras `REGISTRAR_
-    # DIRECCION` (caso real 472477): un origen recién resuelto aquí
-    # llegaba demasiado tarde para que la ruta, más abajo EN LA MISMA
-    # pasada, pudiera aprovecharlo.
-    resultado_origen_eliminacion = revalidar_origen_por_eliminacion_categoria_sin_ocr(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-    )
-    # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR:
-    # corre DESPUÉS de revertir un encabezado no confiable (arriba), a
-    # propósito -- una fila recién revertida (planta_origen_id vacío,
-    # ORIGEN_NO_DETERMINADO) merece la misma oportunidad de resolverse
-    # por categoría/destino en la MISMA pasada, nunca esperar a una
-    # corrida aparte. Antes de la revalidación de ruta más abajo, igual
-    # que su función hermana de eliminación por categoría.
-    resultado_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
     )
     # Bloque LOGÍSTICA L1 -- caso real (11 viajes sin km/tiempo pese a
     # tener origen+destino documental ya persistidos): a diferencia de

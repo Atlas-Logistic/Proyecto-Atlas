@@ -134,11 +134,38 @@ def test_traslado_interno_hacia_la_unica_candidata_no_resuelve(tmp_path):
     assert resultado["guias_actualizadas"] == []
 
 
-def test_conflicto_gps_con_solape_real_no_se_pisa(tmp_path):
-    """Evidencia GPS real y positiva (solape > 0% en algún candidato)
-    sigue siendo superior a la inferencia por categoría -- nunca se
-    fuerza por encima."""
+def test_conflicto_gps_con_solape_real_pero_categoria_corrobora_un_candidato_resuelve(tmp_path):
+    """Bloque CIERRE PRECEDENCIA ORIGEN (caso real 472037) -- un
+    `CONFLICTO_REAL_EN_VENTANA` NUNCA es, por definición, un origen ya
+    confirmado -- es la propia telemetría diciendo que no pudo decidir
+    entre sus candidatos. Si la categoría resuelve de forma única a UNA
+    de esas MISMAS plantas que el GPS ya venía considerando (aquí,
+    PLANTA NORTE, la de mayor solape de las dos), la regla documental
+    CORROBORA la ambigüedad de GPS -- nunca la contradice -- así que se
+    acepta: "GPS es una fuente de evidencia, no un bloqueo terminal"."""
     carpeta = _catalogos_con_plantas(tmp_path, [PLANTA_NORTE, PLANTA_SUR])
+    dataset = tmp_path / "dataset.csv"
+    _escribir_csv(dataset, [_fila(
+        numero_guia="1",
+        motivo_origen_gps="CONFLICTO_REAL_EN_VENTANA(PLANTA_NORTE:score=0.8,solape=45.2%;PLANTA_SUR:score=0.1,solape=0.0%)",
+    )])
+
+    resultado = revalidar_origen_por_categoria_sin_candidato_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=carpeta)
+
+    assert resultado["guias_actualizadas"] == ["1"]
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["planta_origen_nombre"] == "PLANTA NORTE"
+
+
+def test_conflicto_gps_con_solape_real_pero_categoria_contradice_a_ambos_no_se_pisa(tmp_path):
+    """Regresión negativa del test anterior -- si la categoría resuelve a
+    una planta que el GPS real NI SIQUIERA consideró como candidata
+    (aquí, PLANTA_TERCERA -- ninguno de los dos nombres del conflicto),
+    eso sí es una contradicción real entre dos fuentes de evidencia
+    independientes -- ninguna gana en silencio, se abstiene."""
+    planta_tercera = _planta_json(nombre="PLANTA TERCERA", categorias=("BARRAS", "ROLLOS"))
+    carpeta = _catalogos_con_plantas(tmp_path, [planta_tercera, PLANTA_SUR])
     dataset = tmp_path / "dataset.csv"
     _escribir_csv(dataset, [_fila(
         numero_guia="1",
