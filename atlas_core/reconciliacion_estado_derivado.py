@@ -51,6 +51,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_obra_destino_sin_ocr,
     revalidar_origen_encabezado_no_confiable_sin_ocr,
     revalidar_origen_por_categoria_sin_candidato_sin_ocr,
+    revalidar_origen_vecinos_gps_contra_evidencia_propia_real_sin_ocr,
     revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
     revalidar_ruta_por_historial_de_obra_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
@@ -971,6 +972,21 @@ def reconciliar_estado_derivado(
         # se refleje de inmediato en `estado_operacional`, nunca con un
         # ciclo de rezago.
         limpieza_origen = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+        # Bloque CIERRE DE ORQUESTACIÓN -- causa raíz real (472037):
+        # hermana de la limpieza de arriba, mismo criterio -- un origen
+        # que quedó determinado ÚNICAMENTE por `PATRON_VEHICULO_GPS_
+        # VECINOS` (evidencia de OTROS viajes del mismo vehículo) nunca
+        # debió pisar un conflicto GPS REAL y propio de ESTE documento
+        # (dos plantas con solape > 0%, o una detención real). Corre
+        # justo después, mismo motivo: antes del reintento de ruta y de
+        # la convergencia de indicadores, para que el origen recién
+        # revertido se refleje de inmediato -- también para que la carga
+        # automática de Desktop (no sólo la aplicación de una decisión)
+        # deje de esconder la tarjeta `ORIGEN_NO_CONFIRMADO` que este
+        # conflicto real amerita.
+        limpieza_origen_vecinos_contra_evidencia_propia = revalidar_origen_vecinos_gps_contra_evidencia_propia_real_sin_ocr(
+            ruta_dataset=dataset,
+        )
         # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR
         # -- causa raíz sistémica real (lote 2: 464730, 464631, 464529):
         # antes de dejar un origen sin determinar (o de dejarlo así
@@ -1271,6 +1287,7 @@ def reconciliar_estado_derivado(
             set(limpieza["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])
             | set(limpieza_origen["guias_actualizadas"])
+            | set(limpieza_origen_vecinos_contra_evidencia_propia["guias_actualizadas"])
             | set(limpieza_origen_categoria["guias_actualizadas"])
             | set(limpieza_rut_chofer["rut_corregido_en_dataset"])
             | set(limpieza_chofer_corroborado["guias_actualizadas"])

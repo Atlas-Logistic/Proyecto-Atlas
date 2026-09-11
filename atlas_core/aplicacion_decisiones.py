@@ -1833,6 +1833,57 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     resultado_extra["reporte_regenerado"] = False
                     resultado_extra["reporte_no_publicado_motivo"] = "DATASET_AVANZO_DURANTE_GENERACION"
 
+            # Bloque CIERRE DE ORQUESTACIÓN (caso real 472477) --
+            # convergencia final tras CUALQUIER decisión aplicada
+            # (general, nunca restringida a un tipo/guía en particular):
+            # si el documento de ESTA decisión sigue con `MATERIAL_
+            # AUSENTE`, se intenta el reproceso focal YA existente
+            # (`reprocesar_material_focal_desde_imagen_original` --
+            # guiado por guía, abstiene sola si la imagen no existe o el
+            # material sigue siendo irrecuperable, nunca inventa nada).
+            # Si de verdad recupera material (categoría antes
+            # desconocida), se corre la batería completa UNA vez más --
+            # una categoría nueva es exactamente lo que puede faltarle a
+            # la resolución de origen por categoría para dejar de
+            # abstenerse, lo que a su vez puede desbloquear la ruta.
+            # Nunca un OCR masivo: sólo esta imagen, sólo si el motivo
+            # sigue vigente en el dataset ya escrito arriba.
+            numero_guia_para_material = str((decision.get("documento") or {}).get("numero_guia") or "")
+            if numero_guia_para_material and accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET:
+                from atlas_core.procesamiento_masivo import MotivoRevisionDocumento
+                from atlas_core.revalidacion_documental import SEPARADOR_MOTIVOS, _leer_filas as _leer_filas_material
+                try:
+                    filas_para_material = _leer_filas_material(dataset)
+                except (OSError, ValueError):
+                    filas_para_material = []
+                fila_para_material = next(
+                    (
+                        f for f in filas_para_material
+                        if str(f.get("numero_guia", "")).strip() == numero_guia_para_material
+                    ),
+                    None,
+                )
+                motivo_material_ausente = MotivoRevisionDocumento.MATERIAL_AUSENTE.value
+                if fila_para_material is not None and motivo_material_ausente in [
+                    m.strip() for m in str(fila_para_material.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS)
+                    if m.strip()
+                ]:
+                    from atlas_core.revalidacion_documental import reprocesar_material_focal_desde_imagen_original
+                    resultado_material_focal = reprocesar_material_focal_desde_imagen_original(
+                        raiz_atlas=raiz, numero_guia=numero_guia_para_material,
+                    )
+                    resultado_extra["material_focal"] = resultado_material_focal
+                    if resultado_material_focal.get("aplicado"):
+                        from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte as _revalidar_convergencia
+                        instante_convergencia = reloj()
+                        nombre_carpeta_convergencia = (
+                            f"reporte_convergencia_material_{instante_convergencia.strftime('%Y%m%d_%H%M%S_%f')}"
+                        )
+                        resultado_extra["revalidacion_tras_material"] = _revalidar_convergencia(
+                            raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta_convergencia, reloj=reloj,
+                            proveedor_rutas=proveedor_rutas,
+                        )
+
             # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- checkpoint: los
             # catálogos de identidad ya quedaron en el estado que ESTA
             # decisión -- dispatch directo MÁS toda la cascada de arriba
