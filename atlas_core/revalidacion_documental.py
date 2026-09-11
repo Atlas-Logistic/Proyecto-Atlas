@@ -2899,6 +2899,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     proveedor_rutas_fallback=None,
     guias_objetivo: set[str] | None = None,
     comuna_manual_por_guia: dict[str, str] | None = None,
+    guias_excluir_reintento: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque H (R4.10) -- para filas con planta de origen y
     `despachar_a_crudo` YA persistidos (documento ya procesado, sin OCR
@@ -2954,7 +2955,26 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     una ruta, sólo se corrige la etiqueta para que diga la verdad
     vigente. Un motivo de rechazo YA basado en evidencia real (comuna
     contradicha, genérico, disperso) nunca se reintenta ni se reescribe
-    aquí -- es estable por diseño, no ruido técnico."""
+    aquí -- es estable por diseño, no ruido técnico.
+
+    `guias_excluir_reintento` (Bloque CIERRE DE ORQUESTACIÓN, opcional --
+    caso real Uruguay 15/Puerta del Sol 83): guías que YA tuvieron un
+    intento genuino de esta misma revalidación -- con la misma planta,
+    el mismo `despachar_a_crudo` y el mismo proveedor -- unos instantes
+    antes, dentro de la MISMA transacción (`aplicar_decision_obra`
+    escribió la dirección y llamó esta función directamente ANTES de
+    que `revalidar_y_regenerar_reporte` la vuelva a invocar sobre todo
+    el dataset). Reintentar de inmediato, sin evidencia nueva, no es
+    idempotente: `comuna_territorial_conocida` puede cambiar entre
+    ambos intentos (esta misma decisión pudo confirmar un destino de
+    catálogo para la obra, lo que sesga la consulta de geocodificación
+    de forma distinta la segunda vez) y silenciosamente reemplazar un
+    rechazo ya definitivo (`direccion_entrega=""`, Bloque F) por un
+    resultado distinto. Nunca se excluye una guía que NO tuvo ese
+    primer intento real (p. ej. porque `planta_origen_id` seguía vacío
+    en ese momento) -- ésas sí deben tener su primera oportunidad real
+    aquí, típicamente porque el origen se acaba de resolver en la misma
+    pasada."""
     from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.destino_entrega import (
@@ -2963,6 +2983,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     )
 
     comuna_manual_por_guia = comuna_manual_por_guia or {}
+    guias_excluir_reintento = guias_excluir_reintento or set()
 
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
@@ -3002,6 +3023,8 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         guias_actualizadas: list[str] = []
         for fila in filas:
             if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
+                continue
+            if str(fila.get("numero_guia", "")).strip() in guias_excluir_reintento:
                 continue
             if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
                 continue
@@ -4111,6 +4134,8 @@ def _firma_efectiva_bandeja(ruta: Path) -> tuple[str, ...] | None:
 
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
+    comuna_manual_por_guia: dict[str, str] | None = None,
+    guias_excluir_reintento_ruta: set[str] | None = None,
 ) -> dict[str, object]:
     """Orquesta la revalidación del dataset (R3.4 obra/destino + R3.6.2
     patente de vehículo, cada una restringida a su propio motivo) y, sólo
@@ -4119,7 +4144,31 @@ def revalidar_y_regenerar_reporte(
     resuelto -- sin OCR, usando exclusivamente el dataset ya persistido y
     los catálogos vigentes. Publica el nuevo `reporte_vigente` en
     `estado_operacion.json` mediante la misma infraestructura oficial que
-    usa el CLI de reportes."""
+    usa el CLI de reportes.
+
+    `comuna_manual_por_guia` (Bloque CIERRE DE ORQUESTACIÓN, caso real
+    Uruguay 15/`test_comuna_humana_rechaza_candidato_contradictorio_pero_
+    persiste_la_direccion`): reenviado tal cual a `revalidar_ruta_sin_
+    destino_calculado_sin_ocr` -- sin este parámetro, una segunda pasada
+    de esta misma función (p. ej. la que ahora corre justo después de
+    aplicar `REGISTRAR_DIRECCION`, ver `aplicar_decision_obra`) reintenta
+    geocodificar esa guía SIN saber que un humano ya rechazó
+    explícitamente un candidato por contradecir la comuna que escribió --
+    y podía aceptar ese mismo candidato contradictorio en esta segunda
+    pasada, revirtiendo en silencio un rechazo humano ya vigente. Nunca
+    se infiere de otra fuente (ledger, catálogo): sólo la aplicación de
+    decisión que ACABA de escribir esa comuna conoce este valor en el
+    momento de esta llamada -- cualquier otro caller sigue con `None`
+    (comportamiento idéntico al de siempre).
+
+    `guias_excluir_reintento_ruta` (mismo bloque, caso real Puerta del
+    Sol 83): reenviado tal cual a `revalidar_ruta_sin_destino_calculado_
+    sin_ocr` -- guías que ya tuvieron, segundos antes y en la MISMA
+    transacción, un intento real de esta misma revalidación (mismo
+    origen, mismo `despachar_a_crudo`, mismo proveedor). Ver el
+    docstring de esa función para el detalle completo; de nuevo, `None`
+    para cualquier caller que no sea `aplicar_decision_obra` reprocesando
+    su propia decisión recién aplicada."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     catalogos = raiz / "catalogos_privados"
@@ -4269,6 +4318,8 @@ def revalidar_y_regenerar_reporte(
     # aparte -- "Atlas debe automáticamente".
     resultado_ruta = revalidar_ruta_sin_destino_calculado_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+        comuna_manual_por_guia=comuna_manual_por_guia,
+        guias_excluir_reintento=guias_excluir_reintento_ruta,
     )
     # Bloque LOGÍSTICA L1 -- caso real 472044/472227/472247: filas YA con
     # `RUTA_CALCULADA` nunca pasan por la revalidación anterior (no lo

@@ -174,10 +174,30 @@ def test_e2e_decision_cliente_ausente_desaparece_de_la_bandeja_tras_reconciliar(
 # --- 3. Destino/relación reutilizable independiente de la geocodificación ---
 
 def _proveedor_direccion_ambigua(direccion):
+    # Bloque CIERRE DE ORQUESTACIÓN -- desde que `revalidar_y_regenerar_
+    # reporte` corre completo tras REGISTRAR_DIRECCION, esta MISMA
+    # instancia de proveedor también puede ser consultada por
+    # `revalidar_destinos_confirmados_sin_coordenadas_sin_ocr` (destino ya
+    # CONFIRMADO en catálogo pero aún sin coordenadas -- exactamente el
+    # caso que este test provoca a propósito) vía `.geocodificar()`/
+    # `.geocodificar_estructurado()`, nunca sólo `.calcular_ruta()`. El
+    # doble ahora implementa el protocolo `ProveedorRutas` completo --
+    # "no logra geocodificarla" en TODOS los métodos, no sólo el que el
+    # flujo anterior alcanzaba.
+    from atlas_core.rutas.modelos import EstadoRuta, ResultadoGeocodificacion, ResultadoRuta
+
     class _ProveedorAmbiguo:
+        nombre = "ambiguo_test"
+        version = "1"
+
+        def geocodificar(self, direccion_consultada):
+            return ResultadoGeocodificacion(EstadoRuta.DIRECCION_NO_ENCONTRADA, (), "SIN_CANDIDATO_TEST")
+
+        def geocodificar_estructurado(self, direccion_consultada, contexto):
+            return self.geocodificar(direccion_consultada)
+
         def calcular_ruta(self, *args, **kwargs):
-            from atlas_core.rutas.modelos import EstadoRuta, ResultadoRuta
-            return ResultadoRuta(estado=EstadoRuta.DIRECCION_AMBIGUA, distancia_km=None, duracion_minutos=None, proveedor="test")
+            return ResultadoRuta(EstadoRuta.DIRECCION_NO_ENCONTRADA)
     return _ProveedorAmbiguo()
 
 

@@ -164,6 +164,17 @@ def _revertir_dataset_por_campos(dataset: Path, actual: Path, revert_dataset_inf
     numero_guia = str(revert_dataset_info["numero_guia"])
     campos_nuevos = revert_dataset_info["campos_nuevos"]
     campos_anteriores = revert_dataset_info["campos_anteriores"]
+    # `_leer_filas`/`_escribir_filas_completas` se importan localmente en
+    # cada rama de `aplicar_decision_obra` (evita el ciclo de import a
+    # nivel de módulo con `revalidacion_documental`) -- esta función,
+    # definida fuera de esas ramas, nunca las tenía en su propio scope.
+    # Hallazgo Codex (cierre de orquestación 472477): al dejar que
+    # `revalidar_y_regenerar_reporte` corra para REGISTRAR_DIRECCION, una
+    # excepción real dentro de esa batería (p. ej. un proveedor de rutas
+    # que falla al geocodificar la guía hermana de otra decisión) ya podía
+    # llegar hasta acá -- y el `NameError` resultante enmascaraba el error
+    # original en vez de intentar el revert.
+    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
     try:
         with bloqueo_sesion(actual, "revalidacion_dataset"):
             filas = _leer_filas(dataset)
@@ -1625,15 +1636,40 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # cierre una decisión (nunca POSPONER/NO_PUEDO_DETERMINAR, que
             # no escriben nada) dispara `revalidar_y_regenerar_reporte`
             # -- sin OCR, sin red, idempotente (sólo regenera si algo
-            # cambió) -- salvo los 3 tipos que ya regeneran directo más
+            # cambió) -- salvo los 2 tipos que ya regeneran directo más
             # abajo porque SABEN que el dataset cambió (evitar el trabajo
             # redundante, no por riesgo). Cubre obra/cliente/destino/
             # vehículo/alias hoy y cualquier tipo de decisión nuevo mañana,
             # sin volver a tocar esta lista.
+            #
+            # Bloque CIERRE DE ORQUESTACIÓN (caso real 472477) -- hasta
+            # aquí, `("DESTINO_NO_RESUELTO", "REGISTRAR_DIRECCION")` vivía
+            # en `TIPOS_CON_REGENERACION_DIRECTA` igual que los otros dos:
+            # el dataset SÍ acababa de cambiar (dirección/comuna/obra ya
+            # escritas arriba), así que evitar la batería completa parecía
+            # sólo una optimización ("no por riesgo", como dice el
+            # comentario original). Pero esa evidencia nueva (destino
+            # recién resuelto) es exactamente la que puede desbloquear, en
+            # la MISMA pasada, revalidadores que `generar_reporte_viajes`
+            # nunca ejecuta: resolución de origen por categoría/vecinos
+            # GPS, cálculo de ruta ahora que el origen puede resolverse,
+            # convergencia de indicadores y, sobre todo, el redescubrimiento
+            # de decisiones nuevas (`detectar_decisiones_origen_sin_ocr`/
+            # `_destino_no_resuelto_sin_ocr`/`_cliente_ausente_sin_ocr`,
+            # dentro de `revalidar_y_regenerar_reporte`) para CUALQUIER
+            # guía del dataset a la que esta evidencia nueva le abra o le
+            # cierre una pregunta -- nunca sólo la guía de esta decisión.
+            # Se saca de la whitelist de regeneración directa: ahora cae
+            # en la rama de arriba, igual que obra/cliente/vehículo. Se
+            # reutiliza `revalidar_y_regenerar_reporte` tal cual (mismo
+            # mecanismo, sin duplicar lógica); es idempotente por diseño
+            # (sólo regenera/republica si algo cambió de verdad) y cada
+            # revalidador que corre adentro sigue restringido a su propio
+            # motivo -- nunca toca una fila que no calce su patrón, así
+            # que viajes ajenos a esta evidencia quedan intactos.
             ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET = ("POSPONER", "NO_PUEDO_DETERMINAR")
             TIPOS_CON_REGENERACION_DIRECTA = {
                 ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"), ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"),
-                ("DESTINO_NO_RESUELTO", "REGISTRAR_DIRECCION"),
                 ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"),
             }
             if (
@@ -1645,19 +1681,112 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
                 reporte_salida = raiz / "reportes" / nombre_carpeta
                 reporte_salida_existia = reporte_salida.exists()
+                # Bloque CIERRE DE ORQUESTACIÓN -- si ESTA decisión acaba
+                # de escribir una comuna humana (REGISTRAR_DIRECCION), esa
+                # misma comuna se reenvía a esta pasada: sin esto, la
+                # revalidación de ruta que corre adentro reintentaría
+                # geocodificar la MISMA guía sin saber que un candidato ya
+                # fue rechazado explícitamente por contradecirla -- ver
+                # docstring de `revalidar_y_regenerar_reporte`. Ningún otro
+                # tipo/acción tiene una comuna humana que reenviar aquí.
+                comuna_manual_por_guia_decision = (
+                    {numero_guia_decision: comuna_final}
+                    if tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION" and comuna_final
+                    else None
+                )
+                # Bloque CIERRE DE ORQUESTACIÓN -- caso real "Puerta del Sol
+                # 83"/Uruguay 15: si ESTA guía YA tenía `planta_origen_id`
+                # antes de esta decisión, el intento inline de arriba (unas
+                # líneas más arriba en este mismo bloque) ya fue un intento
+                # REAL de ruta con ese mismo origen -- reintentarlo de
+                # inmediato aquí, sin evidencia nueva, no es idempotente
+                # (ver docstring de `revalidar_ruta_sin_destino_calculado_
+                # sin_ocr`: el destino recién CONFIRMADO en catálogo por
+                # esta misma decisión puede sesgar la comuna auto-resuelta
+                # de forma distinta la segunda vez, reemplazando en
+                # silencio un rechazo ya definitivo). Si en cambio la
+                # planta seguía VACÍA (caso real 472477: el destino nunca
+                # se pudo intentar rutear porque el origen aún no se
+                # resolvía), no hay ningún intento previo que proteger --
+                # esta guía sí debe tener su primera oportunidad real aquí,
+                # justo si la resolución de origen de esta misma pasada
+                # acaba de completarla.
+                guias_excluir_reintento_ruta_decision = (
+                    {numero_guia_decision}
+                    if (
+                        tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION"
+                        and str(snapshot_fila_antes.get("planta_origen_id", "")).strip()
+                    )
+                    else None
+                )
                 resultado_extra["revalidacion"] = revalidar_y_regenerar_reporte(
                     raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
+                    proveedor_rutas=proveedor_rutas,
+                    comuna_manual_por_guia=comuna_manual_por_guia_decision,
+                    guias_excluir_reintento_ruta=guias_excluir_reintento_ruta_decision,
                 )
+                # Bloque CIERRE DE ORQUESTACIÓN -- red de seguridad general:
+                # `guias_excluir_reintento_ruta_decision` sólo protege contra
+                # un SEGUNDO intento del propio `revalidar_ruta_sin_destino_
+                # calculado_sin_ocr`, pero otros revalidadores de la misma
+                # batería que también leen `direccion_entrega`/`localidad_
+                # entrega`/`estado_ruta` YA persistidos (p. ej. `revalidar_
+                # destino_contra_comuna_documental_sin_ocr`, limpieza
+                # retroactiva de destinos degradados/absurdos, Bloque F)
+                # pueden alcanzar, para la MISMA guía, un veredicto distinto
+                # al que el intento inline de arriba ya dejó como resultado
+                # definitivo -- caso real "LAS VIOLETAS 55": el intento
+                # inline deja `CONFIANZA_INSUFICIENTE`, pero sin localidad
+                # ni región (nunca hubo candidato suficiente), esa misma
+                # combinación es EXACTAMENTE lo que Bloque F reconoce como
+                # `GEOCODIFICACION_DEMASIADO_GENERICA` -- dos clasificadores
+                # legítimos, cada uno correcto para su propio propósito
+                # (en vivo vs. limpieza retroactiva de datos viejos), en
+                # desacuerdo sobre el MISMO resultado fresco. Cuando ya
+                # hubo un intento real (mismo criterio que arriba: `planta_
+                # origen_id` ya existía antes de esta decisión), el
+                # resultado de ESE intento -- no una reinterpretación
+                # posterior en la misma respiración -- es la resolución
+                # automática ya agotada para esta guía; se restaura tal
+                # cual, salvo que la batería haya llegado a completar
+                # `RUTA_CALCULADA` (una mejora real, nunca revertida).
+                # Nunca toca otros campos (origen, material, motivos
+                # documentales) -- sólo los campos derivados de ruta/
+                # destino de ESTA guía.
+                if guias_excluir_reintento_ruta_decision:
+                    from atlas_core.revalidacion_documental import (
+                        CAMPOS_DERIVADOS_RUTA,
+                        SEPARADOR_MOTIVOS,
+                        _escribir_filas_completas as _escribir_filas_post_bateria,
+                        _indicadores_documentales_coherentes,
+                        _leer_filas as _leer_filas_post_bateria,
+                    )
+                    with bloqueo_sesion(actual, "revalidacion_dataset"):
+                        filas_post_bateria = _leer_filas_post_bateria(dataset)
+                        fila_post_bateria = next(
+                            (f for f in filas_post_bateria if str(f.get("numero_guia", "")) == numero_guia_decision),
+                            None,
+                        )
+                        if (
+                            fila_post_bateria is not None
+                            and str(fila_post_bateria.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value
+                            and fila_tras_intento is not None
+                        ):
+                            for campo in CAMPOS_DERIVADOS_RUTA:
+                                fila_post_bateria[campo] = fila_tras_intento.get(campo, "")
+                            motivos_post_bateria = [
+                                m for m in str(fila_post_bateria.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS)
+                                if m
+                            ]
+                            indicador_r, documental_r, operacional_r = _indicadores_documentales_coherentes(
+                                motivos_post_bateria, str(fila_post_bateria.get("estado_ruta", "")).strip(),
+                            )
+                            fila_post_bateria["indicador_revision"] = indicador_r
+                            fila_post_bateria["estado_documental"] = documental_r
+                            fila_post_bateria["estado_operacional"] = operacional_r
+                            _escribir_filas_post_bateria(dataset, filas_post_bateria)
             elif (
                 (tipo == "ORIGEN_NO_CONFIRMADO" and accion in ("CONFIRMAR_PLANTA", "SELECCIONAR_OTRA_PLANTA"))
-                # Bloque R6 A/B/E -- mismo caso: REGISTRAR_DIRECCION ya
-                # escribió el dataset arriba (`despachar_a_crudo` y, si
-                # `revalidar_ruta_sin_destino_calculado_sin_ocr` tuvo
-                # éxito, también estado_ruta/distancia/duración) -- se
-                # regenera el reporte tanto si la ruta quedó calculada
-                # como si sigue bloqueada (con un motivo ya reevaluado,
-                # nunca uno obsoleto).
-                or (tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION")
                 # Bloque R9 -- mismo caso: REGISTRAR_CLIENTE_MANUAL ya
                 # escribió el dataset arriba (cliente + motivos_revision_
                 # documento/indicador_revision).
