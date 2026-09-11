@@ -2015,7 +2015,7 @@ def test_procesar_carpeta_crea_proveedor_una_vez_y_lo_reutiliza(tmp_path, monkey
     proveedores_recibidos = []
     monkeypatch.setattr(procesamiento_masivo, "crear_proveedor_ocr", crear_proveedor)
 
-    def procesar(ruta, proveedor=None):
+    def procesar(ruta, proveedor=None, **_kwargs):
         proveedores_recibidos.append(proveedor)
         return {"tipo_carga": "NO DETERMINADO"}
 
@@ -2038,7 +2038,10 @@ def test_lector_inyectado_no_crea_proveedor(tmp_path, monkeypatch):
     procesar_carpeta(carpeta, tmp_path / "resultado.csv", lector_ocr=lector)
 
     crear_proveedor.assert_not_called()
-    procesar.assert_called_once_with(next(carpeta.iterdir()), lector_ocr=lector)
+    procesar.assert_called_once_with(
+        next(carpeta.iterdir()),
+        lector_ocr=lector,
+    )
 
 
 def test_proveedor_inyectado_se_reutiliza_sin_crear_otro(tmp_path, monkeypatch):
@@ -2050,7 +2053,7 @@ def test_proveedor_inyectado_se_reutiliza_sin_crear_otro(tmp_path, monkeypatch):
     proveedores_recibidos = []
     monkeypatch.setattr(procesamiento_masivo, "crear_proveedor_ocr", crear_proveedor)
 
-    def procesar(ruta, proveedor=None):
+    def procesar(ruta, proveedor=None, **_kwargs):
         proveedores_recibidos.append(proveedor)
         return {"tipo_carga": "NO DETERMINADO"}
 
@@ -2102,7 +2105,10 @@ def test_procesar_carpeta_sin_rango_mantiene_llamada_compatible(
 
     procesar_carpeta(carpeta, tmp_path / "salida.csv", lector_ocr=lector)
 
-    procesar.assert_called_once_with(next(carpeta.iterdir()), lector_ocr=lector)
+    procesar.assert_called_once_with(
+        next(carpeta.iterdir()),
+        lector_ocr=lector,
+    )
 
 
 @pytest.mark.parametrize(

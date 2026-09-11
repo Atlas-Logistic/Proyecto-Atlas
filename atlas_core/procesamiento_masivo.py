@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -70,6 +71,12 @@ from atlas_core.ocr import (
     leer_texto_imagen,
 )
 from atlas_core.ocr_provider import crear_proveedor_ocr
+from atlas_core.trazabilidad_ocr import (
+    ESTADO_BLOQUES_DISPONIBLES,
+    ESTADO_BLOQUES_NO_DISPONIBLES,
+    ESTADO_BLOQUES_NO_SOLICITADOS,
+    persistir_traza_ocr,
+)
 from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
 from atlas_core.catalogo_clientes import (
@@ -112,6 +119,13 @@ from atlas_core.telemetria.enriquecimiento import (
 
 
 logger = logging.getLogger(__name__)
+
+# Contexto efímero del lote: permite que `procesar_carpeta` entregue la
+# ubicación de evidencia a su implementación real sin cambiar el contrato de
+# llamadas de `procesar_archivo` que consumidores y adaptadores ya observan.
+_CONTEXTO_TRAZA_OCR: ContextVar[tuple[Path, str] | None] = ContextVar(
+    "contexto_traza_ocr", default=None
+)
 
 
 EXTENSIONES_PERMITIDAS = frozenset(
@@ -1543,6 +1557,8 @@ def procesar_archivo(
     recolector_decisiones: Callable[[list[dict[str, object]]], None] | None = None,
     servicio_telemetria: object = None,
     planta_origen_informada: str | None = None,
+    directorio_trazas_ocr: str | Path | None = None,
+    referencia_imagen_traza: str | None = None,
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
 
@@ -1580,7 +1596,12 @@ def procesar_archivo(
     configurada (ver `atlas_core.rutas.origen_evidencia`) en vez de dejar
     que el encabezado societario lo sustituya sin más. Sin este valor
     (Desktop/procesamiento por lote, sin Mobile), comportamiento IDÉNTICO
-    a antes de este bloque."""
+    a antes de este bloque.
+
+    `directorio_trazas_ocr` (opt-in desde `procesar_carpeta`) persiste una
+    evidencia JSON lateral usando sólo el OCR que este documento ya leyó.
+    La escritura es best-effort: su falla se registra y nunca altera los
+    campos extraídos ni interrumpe el procesamiento."""
 
     inicio_documento = time.perf_counter()
 
@@ -1639,6 +1660,22 @@ def procesar_archivo(
     chofer_geometrico = False
     patentes_geometricas_sin_homologar: set[str] = set()
     bloques_guia = None
+    estado_bloques_ocr = ESTADO_BLOQUES_NO_SOLICITADOS
+
+    def _leer_bloques_con_estado() -> list | None:
+        """Reutiliza la lectura existente y deja su disponibilidad auditable."""
+        nonlocal estado_bloques_ocr
+        try:
+            bloques = _leer_bloques()
+        except Exception:
+            estado_bloques_ocr = ESTADO_BLOQUES_NO_DISPONIBLES
+            raise
+        if bloques is None:
+            estado_bloques_ocr = ESTADO_BLOQUES_NO_DISPONIBLES
+            return None
+        estado_bloques_ocr = ESTADO_BLOQUES_DISPONIBLES
+        return bloques
+
     campos_ausentes = any(
         datos.get(campo) in {None, "", "No encontrado"}
         for campo in (
@@ -1671,7 +1708,7 @@ def procesar_archivo(
         # fallo en uno nunca vuelve a impedir que los demás, totalmente
         # independientes, se ejecuten.
         try:
-            bloques_guia = _leer_bloques()
+            bloques_guia = _leer_bloques_con_estado()
         except Exception as exc:
             logger.warning("Lectura de bloques geométricos omitida: %s: %s", type(exc).__name__, exc)
             bloques_guia = None
@@ -2174,7 +2211,7 @@ def procesar_archivo(
     if numero_guia_actual in {"", "No encontrado"}:
         try:
             if bloques_guia is None:
-                bloques_guia = _leer_bloques()
+                bloques_guia = _leer_bloques_con_estado()
             decision_guia = decidir_bloques_ocr(bloques_guia, numero_guia_actual)
             candidato_guia = str(decision_guia["valor"])
             if decision_guia["emitida"] and re.fullmatch(r"\d{5,8}", candidato_guia):
@@ -2194,7 +2231,7 @@ def procesar_archivo(
     if fecha_actual == "No encontrado":
         try:
             if bloques_guia is None:
-                bloques_guia = _leer_bloques()
+                bloques_guia = _leer_bloques_con_estado()
             decision_fecha = _extraer_fecha_geometrico(bloques_guia)
             if decision_fecha.get("caja"):
                 evidencia_focal = _leer_focal(decision_fecha["caja"], ALLOWLIST_FECHA, _leer_fecha_focal)
@@ -2590,7 +2627,7 @@ def procesar_archivo(
                 )
             plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
             if bloques_guia is None:
-                bloques_guia = _leer_bloques()
+                bloques_guia = _leer_bloques_con_estado()
             # Bloque GEOGRAFÍA 2A -- el PRIMER pase usa las mismas dos
             # capacidades gratuitas que la revalidación posterior ya
             # aprovecha, para no dejar como REVISAR una entrega que Atlas
@@ -2958,7 +2995,7 @@ def procesar_archivo(
     if evaluar_credibilidad_peso(peso_kg_final).nivel != NivelCredibilidad.CONFIABLE:
         _motivo(MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO)
 
-    return {
+    resultado = {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
         "numero_transporte": str(datos.get("número de transporte", "No encontrado")),
         "fecha": fecha_actual,
@@ -3005,6 +3042,41 @@ def procesar_archivo(
         # -- no se duplica esa información acá.
         "rut_cliente": str(datos.get("RUT del cliente", "No encontrado")),
     }
+    contexto_traza = _CONTEXTO_TRAZA_OCR.get()
+    directorio_traza_efectivo = (
+        directorio_trazas_ocr
+        if directorio_trazas_ocr is not None
+        else (contexto_traza[0] if contexto_traza is not None else None)
+    )
+    referencia_traza_efectiva = (
+        referencia_imagen_traza
+        if referencia_imagen_traza is not None
+        else (contexto_traza[1] if contexto_traza is not None else Path(ruta).name)
+    )
+    if directorio_traza_efectivo is not None:
+        try:
+            persistir_traza_ocr(
+                directorio=directorio_traza_efectivo,
+                referencia_imagen=referencia_traza_efectiva,
+                textos=textos,
+                bloques=bloques_guia,
+                estado_bloques=estado_bloques_ocr,
+                proveedor=proveedor,
+                identificadores={
+                    "numero_guia": resultado["numero_guia"],
+                    "numero_transporte": resultado["numero_transporte"],
+                },
+            )
+        except Exception as exc:
+            # La evidencia es diagnóstica, no una dependencia de extracción:
+            # un medio sin permisos o lleno no puede impedir el documento.
+            logger.warning(
+                "Traza OCR no persistida para %s: %s: %s",
+                referencia_traza_efectiva,
+                type(exc).__name__,
+                exc,
+            )
+    return resultado
 
 
 def _archivos_ya_procesados(ruta_csv: Path) -> set[str]:
@@ -4415,6 +4487,24 @@ def _imprimir_metricas_documento(
         print(f"    ESTADO: {estado}{(' -- ' + detalle_error) if detalle_error else ''}")
 
 
+def _directorio_trazas_ocr_para_salida(ruta_csv: Path) -> Path:
+    """Ubica trazas persistentes fuera del snapshot ``operacion/actual``.
+
+    En la operación canónica, ``actual`` es el estado vigente y puede
+    resetearse; las trazas son evidencia histórica y por eso son hermanas de
+    ``evidencia_resuelta`` bajo ``operacion/trazas_ocr``. Para una salida
+    local/de prueba que no sigue esa estructura, se mantiene el sidecar junto
+    a la salida indicada por el llamador.
+    """
+    carpeta_salida = ruta_csv.parent
+    if (
+        carpeta_salida.name.casefold() == "actual"
+        and carpeta_salida.parent.name.casefold() == "operacion"
+    ):
+        return carpeta_salida.parent / "trazas_ocr"
+    return carpeta_salida / "trazas_ocr"
+
+
 def procesar_carpeta(
     carpeta: str | Path,
     salida: str | Path,
@@ -4493,7 +4583,9 @@ def procesar_carpeta(
     proveedor_compartido = proveedor
     proveedor_rutas_compartido = proveedor_rutas
 
-    def ejecutar(ruta: Path) -> Mapping[str, object]:
+    directorio_trazas_ocr = _directorio_trazas_ocr_para_salida(ruta_csv)
+
+    def ejecutar(ruta: Path, identificador: str) -> Mapping[str, object]:
         nonlocal lector_compartido, proveedor_compartido, proveedor_rutas_compartido
         if procesador is not None:
             return procesador(ruta)
@@ -4565,8 +4657,12 @@ def procesar_carpeta(
                 continue
 
             inicio_intento = time.perf_counter()
+            token_traza = (
+                _CONTEXTO_TRAZA_OCR.set((directorio_trazas_ocr, identificador))
+                if procesador is None else None
+            )
             try:
-                resultado = dict(ejecutar(ruta))
+                resultado = dict(ejecutar(ruta, identificador))
                 fila = {
                     columna: str(resultado.get(columna, ""))
                     for columna in COLUMNAS
@@ -4598,6 +4694,9 @@ def procesar_carpeta(
                     detalle_error=fila["error"],
                 )
                 resumen["errores"] += 1
+            finally:
+                if token_traza is not None:
+                    _CONTEXTO_TRAZA_OCR.reset(token_traza)
 
             contador_tipo = {
                 "BARRAS": "barras",
