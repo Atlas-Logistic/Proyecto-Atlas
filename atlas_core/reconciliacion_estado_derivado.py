@@ -28,6 +28,7 @@ from atlas_core.decisiones_pendientes import (
     _guias_destino_terminado_por_humano,
     _motivo_ruta_base,
     clasificar_fallo_tecnico,
+    guias_destino_conocido_ruta_pendiente,
 )
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
@@ -40,6 +41,7 @@ from atlas_core.revalidacion_documental import (
     reconciliar_incidencias_rut_chofer_documental,
     revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr,
     revalidar_destino_contra_comuna_documental_sin_ocr,
+    revalidar_destino_propio_respaldado_por_b1_sin_ocr,
     revalidar_destino_rechazado_por_evidencia_b1_sin_ocr,
     revalidar_destinos_confirmados_sin_coordenadas_sin_ocr,
     revalidar_indicadores_documentales_sin_ocr,
@@ -49,6 +51,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_origen_encabezado_no_confiable_sin_ocr,
     revalidar_origen_por_categoria_sin_candidato_sin_ocr,
     revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
+    revalidar_ruta_por_historial_de_obra_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
 )
 
@@ -877,6 +880,16 @@ def reconciliar_estado_derivado(
         recuperacion_historial_destino = _resolver_destinos_contaminados_por_historial(
             dataset, archivos_destino_contaminado,
         )
+        # Codex 472623/472624 -- brecha INVERSA a la de arriba: un destino
+        # que B1 propuso con evidencia EXCLUSIVAMENTE propia del documento
+        # (nunca de otra guía/catálogo) y sin contradicción, bloqueado sólo
+        # por un empaquetado de evidencia vacío -- nunca una evidencia
+        # genuinamente insuficiente. Corre DESPUÉS de las dos funciones de
+        # arriba (que ya retiraron cualquier valor genuinamente contaminado
+        # o rechazado) para que sólo quede evidencia propia y limpia.
+        recuperacion_destino_propio = revalidar_destino_propio_respaldado_por_b1_sin_ocr(
+            ruta_dataset=dataset,
+        )
 
         # Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA -- SIN OCR: aplica el
         # mismo criterio determinista que `procesar_archivo` ya corre al
@@ -973,6 +986,16 @@ def reconciliar_estado_derivado(
         # y un ID placeholder no es un RUT. Sin OCR, sin red; misma lógica
         # que ya usa el pipeline al procesar un documento nuevo.
         limpieza_chofer_corroborado = revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(raiz_atlas=raiz)
+        # Codex 464784 (URUGUAY 15) -- reutiliza una ruta YA CALCULADA de
+        # un documento hermano de la MISMA obra+planta con la MISMA
+        # calle+número y comuna explícita sin contradicción, sin volver a
+        # geocodificar ni tocar la red. Corre ANTES de los bloques de
+        # geocodificación de abajo para que una guía resuelta aquí nunca
+        # gaste un intento técnico en el proveedor externo en esta misma
+        # pasada.
+        recuperacion_ruta_historial_obra = revalidar_ruta_por_historial_de_obra_sin_ocr(
+            ruta_dataset=dataset,
+        )
         # Bloque DESTINOS CONFIRMADOS COMPLETOS -- causa raíz real
         # (0000353312/464781): un destino CONFIRMADO en catálogo cuya
         # confirmación nunca llegó a geocodificar queda con `lat/lon`
@@ -1122,9 +1145,22 @@ def reconciliar_estado_derivado(
             # 2B -- el ledger pudo avanzar durante esta reconciliación
             # (una decisión aplicada arriba): se re-lee para el estado de
             # ciclo de vida.
-            guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
+            guias_direccion_confirmada = set(_guias_con_direccion_confirmada_por_humano(
                 actual / "decisiones_aplicadas.json"
-            )
+            ))
+            # Bloque SEPARAR CONOCIMIENTO DE DESTINO DE RESOLUCIÓN TÉCNICA
+            # DE RUTA -- caso real 464746: una guía con `GEOCODIFICACION_
+            # DEMASIADO_GENERICA` cuya obra<->destino ya está CONFIRMADA a
+            # nivel humano nunca debe reportar `ESPERANDO_ACCION_HUMANA`
+            # en `pendientes_tecnicos.json` -- ninguna tarjeta existe para
+            # que un humano actúe (`regenerar_decisiones_persistidas` ya
+            # la suprime); el ciclo de vida debe reflejar el mismo hecho.
+            try:
+                guias_direccion_confirmada |= guias_destino_conocido_ruta_pendiente(
+                    carpeta_catalogos=catalogos, ruta_dataset=dataset,
+                )
+            except (OSError, ValueError, AttributeError):
+                pass
             guias_destino_terminado = _guias_destino_terminado_por_humano(
                 actual / "decisiones_aplicadas.json"
             )

@@ -574,6 +574,101 @@ def _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras) -> dict[s
     return por_guia
 
 
+# Bloque SEPARAR CONOCIMIENTO DE DESTINO DE RESOLUCIÓN TÉCNICA DE RUTA --
+# caso real 464746 (CAM. EL NOVICIADO LAMPA LAMPA): `GEOCODIFICACION_
+# DEMASIADO_GENERICA` es un problema puro de PRECISIÓN de ruteo (la
+# dirección documental nunca trajo número de calle -- un camino rural sin
+# numeración -- nunca algo que un humano pueda "corregir"), a diferencia
+# de los demás motivos de `MOTIVOS_DESTINO_NO_RESUELTO`, que sí pueden
+# esconder una identidad todavía en duda. Deliberadamente restringido a
+# ESTE único motivo -- nunca se extiende a `GEOCODIFICACION_NUMERO_
+# INCOMPATIBLE`/`DESTINO_CONTRADICE_CATALOGO_CONFIRMADO`/etc., donde la
+# MISMA clase de confirmación previa (`DESTINO_SIN_CONFIRMAR`/`CONFIRMAR`)
+# puede seguir siendo justo la evidencia que expone una contradicción
+# real (caso 464170: mismo tipo de confirmación previa, motivo distinto
+# -- sigue siendo HUMANO_LEGITIMO, esta función nunca lo toca).
+_MOTIVO_DESTINO_DEMASIADO_GENERICO = "GEOCODIFICACION_DEMASIADO_GENERICA"
+
+
+def guias_destino_conocido_ruta_pendiente(
+    *, carpeta_catalogos: str | Path, ruta_dataset: str | Path,
+) -> frozenset[str]:
+    """Guías cuyo `motivo_ruta` vigente es `GEOCODIFICACION_DEMASIADO_
+    GENERICA` y cuya relación obra<->destino YA está CONFIRMADA a nivel
+    CONFIRMACION_HUMANA citando esa misma guía (`_obras_con_relacion_
+    confirmada_por_humano_por_guia`), con el destino confirmado
+    coincidiendo LITERALMENTE (normalizado, nunca fuzzy) con el propio
+    `despachar_a_crudo` de la fila -- la identidad de destino ya está
+    respondida, sólo falta la PRECISIÓN de ruteo (nunca inventada aquí).
+
+    Usada para dos efectos, deliberadamente el MISMO conjunto de guías en
+    ambos: (1) `regenerar_decisiones_persistidas` deja de republicar una
+    tarjeta `DESTINO_NO_RESUELTO` ya respondida; (2) el ciclo de vida del
+    pendiente técnico de ruta (`reconciliacion_estado_derivado`) refleja
+    `ESPERANDO_EVIDENCIA_NUEVA` en vez de `ESPERANDO_ACCION_HUMANA` --
+    nunca debe quedar un pendiente técnico anunciando una acción humana
+    para la que ninguna tarjeta existe.
+
+    Ausente/corrupto cualquier archivo -> conjunto vacío, igual que el
+    resto de los lectores `sin_ocr`."""
+    import csv as _csv
+
+    try:
+        filas_por_guia: dict[str, dict[str, str]] = {}
+        with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo:
+            for _fila in _csv.DictReader(_archivo, delimiter=";"):
+                guia = str(_fila.get("numero_guia", "")).strip()
+                if guia:
+                    filas_por_guia[guia] = dict(_fila)
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+
+    from atlas_core.atlas_ia.registro_problemas import motivo_ruta_base
+
+    candidatas = {
+        guia for guia, fila in filas_por_guia.items()
+        if motivo_ruta_base(str(fila.get("motivo_ruta", ""))) == _MOTIVO_DESTINO_DEMASIADO_GENERICO
+    }
+    if not candidatas:
+        return frozenset()
+
+    carpeta = Path(carpeta_catalogos)
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        obras = catalogo_obras.listar_obras()
+    except (OSError, ValueError):
+        return frozenset()
+    obras_relacion_confirmada_por_guia = _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras)
+
+    resultado: set[str] = set()
+    for guia in candidatas:
+        obras_confirmadas = obras_relacion_confirmada_por_guia.get(guia)
+        if not obras_confirmadas:
+            continue
+        fila = filas_por_guia[guia]
+        despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+        obra_nombre = str(fila.get("obra_destino", "")).strip()
+        if not despachar_a or not obra_nombre:
+            continue
+        obra = next(
+            (o for o in obras if normalizar_nombre_obra(o.nombre_canonico) == normalizar_nombre_obra(obra_nombre)),
+            None,
+        )
+        if obra is None or obra.obra_id not in obras_confirmadas:
+            continue
+        try:
+            destinos = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra.nombre_canonico)
+        except (OSError, ValueError):
+            destinos = []
+        texto_documental = normalizar_nombre_destino(despachar_a)
+        if any(normalizar_nombre_destino(d.direccion) == texto_documental for d in destinos):
+            resultado.add(guia)
+    return frozenset(resultado)
+
+
 def detectar_decision_destino_no_resuelto(
     *, archivo: str, fila: Mapping[str, str], carpeta_catalogos: str | Path | None = None,
     intentos_misma_evidencia: int = 0, forzar: bool = False,
@@ -2397,6 +2492,15 @@ def regenerar_decisiones_persistidas(
         _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras)
         if ruta_dataset is not None else {}
     )
+    # Bloque SEPARAR CONOCIMIENTO DE DESTINO DE RESOLUCIÓN TÉCNICA DE RUTA
+    # -- caso real 464746: ver `guias_destino_conocido_ruta_pendiente`.
+    try:
+        guias_destino_generico_confirmado = (
+            guias_destino_conocido_ruta_pendiente(carpeta_catalogos=carpeta, ruta_dataset=ruta_dataset)
+            if ruta_dataset is not None else frozenset()
+        )
+    except (OSError, ValueError, AttributeError):
+        guias_destino_generico_confirmado = frozenset()
     try:
         patentes_homologables = {
             v.patente_canonica
@@ -2801,6 +2905,24 @@ def regenerar_decisiones_persistidas(
                 motivo_actual_fila = motivo_ruta_por_guia.get(numero_guia_decision)
                 if motivo_actual_fila is not None and motivo_actual_fila not in motivos_decision_ruta:
                     continue
+            # Bloque SEPARAR CONOCIMIENTO DE DESTINO DE RESOLUCIÓN TÉCNICA
+            # DE RUTA -- caso real 464746 (CAM. EL NOVICIADO LAMPA LAMPA):
+            # `GEOCODIFICACION_DEMASIADO_GENERICA` es un problema puro de
+            # PRECISIÓN de ruteo (la dirección nunca trajo número de
+            # calle -- nada que corregir) cuando la relación obra<->
+            # destino de ESTA guía ya está CONFIRMADA a nivel
+            # CONFIRMACION_HUMANA y coincide literalmente con el propio
+            # `despachar_a_crudo`. La identidad ya está respondida: nunca
+            # se vuelve a preguntar "¿cuál es el destino?" sólo porque el
+            # geocodificador no puede ubicar un número que el documento
+            # nunca trajo -- el problema de ruta sigue vivo en el
+            # dataset (`motivo_ruta`/`estado_ruta` intactos), sólo se
+            # retira la pregunta humana duplicada.
+            if (
+                motivos_decision_ruta == {_MOTIVO_DESTINO_DEMASIADO_GENERICO}
+                and str((decision.get("documento") or {}).get("numero_guia", "")) in guias_destino_generico_confirmado
+            ):
+                continue
             # Bloque CIERRE QUIRÚRGICO DE REVISIONES -- caso real 464717
             # (obra AMERICAN SCREW CHILE SPA): una tarjeta
             # DESTINO_NO_RESUELTO nacida de "Corregir destino"

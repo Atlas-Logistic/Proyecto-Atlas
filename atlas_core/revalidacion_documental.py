@@ -1801,6 +1801,175 @@ def revalidar_destino_rechazado_por_evidencia_b1_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+# Bloque BRECHA DE CITACIÓN B1 -- evidencia que B1 usó para proponer un
+# destino y que la fila trae, palabra por palabra, en SUS PROPIOS campos
+# (nunca de otro documento ni de un catálogo/historial): el propio OCR de
+# ESTE documento (`valor_documental_observado`) y el contexto operacional
+# de ESTE MISMO documento (`identidad_operacional.direccion_entrega`).
+# `_valor_destino_rechazado_por_b1` exige exactamente uno de estos dos
+# códigos como origen del `hipotesis_id` -- un tercer código (histórico,
+# de otro documento, de catálogo) NUNCA entra en este conjunto: eso sigue
+# siendo, correctamente, terreno de `revalidar_destino_rechazado_por_
+# evidencia_b1_sin_ocr`.
+_EVIDENCIA_USADA_PROPIA_DOCUMENTO = frozenset({
+    "valor_documental_observado", "identidad_operacional.direccion_entrega",
+})
+_CONFIANZA_MINIMA_AUTOCITACION = 0.9
+
+
+def _destino_propio_respaldado_sin_citar(traza: object) -> str:
+    """Valor de destino que B1 propuso con evidencia EXCLUSIVAMENTE
+    propia del documento (nunca de otra guía/catálogo/historial) pero que
+    la barrera anti-alucinación rechazó por `VALOR_NO_RESPALDADO_POR_
+    EVIDENCIA` -- cadena vacía si no aplica. Distinto de un rechazo
+    genuino (`_valor_destino_rechazado_por_b1`): aquí `contexto_final.
+    evidencias` llegó vacío por una brecha de EMPAQUETADO (el mismo tipo
+    de causa raíz que documenta `atlas_ia.evidencia_dominios`), no porque
+    la evidencia citada por B1 sea insuficiente o contradictoria."""
+    if not _traza_es_de_destino(traza) or traza.get("aplicado_operacionalmente"):
+        return ""
+    if str(traza.get("estado", "")) != "BLOQUEADO_POR_VALIDACION":
+        return ""
+    validacion = traza.get("validacion") or {}
+    if str(validacion.get("motivo_rechazo", "")) not in _RECHAZOS_EVIDENCIA_B1:
+        return ""
+    hipotesis = traza.get("hipotesis") or {}
+    if hipotesis.get("evidencia_en_contra"):
+        return ""  # una contradicción real nunca es una brecha de citación
+    evidencia_usada = {str(e) for e in (hipotesis.get("evidencia_usada") or ())}
+    if not evidencia_usada or not evidencia_usada <= _EVIDENCIA_USADA_PROPIA_DOCUMENTO:
+        return ""  # cita algo fuera de este documento -- terreno del rechazo genuino
+    metadata = hipotesis.get("metadata") or {}
+    try:
+        confianza = float(metadata.get("confianza_declarada", 0) or 0)
+    except (TypeError, ValueError):
+        confianza = 0.0
+    if confianza < _CONFIANZA_MINIMA_AUTOCITACION:
+        return ""
+    contexto_final = traza.get("contexto_final") or {}
+    identidad = contexto_final.get("identidad_operacional") or {}
+    valores = {
+        str(hipotesis.get("valor_propuesto", "")).strip(),
+        str(hipotesis.get("valor_observado", "")).strip(),
+        str(contexto_final.get("valor_documental", "")).strip(),
+        str(identidad.get("direccion_entrega", "")).strip(),
+    }
+    if len(valores) != 1 or not next(iter(valores)):
+        return ""  # las cuatro fuentes propias deben coincidir EXACTO, sin divergencia
+    return next(iter(valores))
+
+
+def revalidar_destino_propio_respaldado_por_b1_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Codex 472623/472624 -- CIERRA LA BRECHA DE CITACIÓN inversa a
+    `revalidar_destino_rechazado_por_evidencia_b1_sin_ocr`: un destino que
+    B1 propuso con confianza alta (>=0.9), citando ÚNICAMENTE evidencia
+    del PROPIO documento (`valor_documental_observado` == `identidad_
+    operacional.direccion_entrega` == `valor_propuesto` == `valor_
+    observado`, las cuatro idénticas) y SIN ninguna contradicción
+    (`evidencia_en_contra` vacío), quedó bloqueado por `VALOR_NO_
+    RESPALDADO_POR_EVIDENCIA` sólo porque `contexto_final.evidencias`
+    llegó vacío -- una brecha de EMPAQUETADO de evidencia (mismo tipo de
+    causa raíz que corrige `atlas_ia.evidencia_dominios` para CLIENTE/
+    OBRA/VEHÍCULO), nunca una evidencia genuinamente insuficiente.
+
+    Nunca relaja `VALOR_NO_RESPALDADO_POR_EVIDENCIA`: si B1 citó CUALQUIER
+    evidencia fuera de este documento (otra guía, un catálogo, un
+    historial) o dejó una contradicción, esta función no toca la fila --
+    ese sigue siendo terreno exclusivo de la función hermana. Restaura
+    `despachar_a_crudo` al MISMO texto que la propia traza B1 ya
+    demuestra que el OCR de este documento observó (nunca un valor
+    nuevo/adivinado) y retira `DESTINO_CONTAMINADO_POR_OTRA_SECCION` de
+    `motivos_revision_documento` -- ese motivo describía la sospecha
+    inicial que llevó a invocar a B1, no un hecho confirmado; con
+    evidencia propia y sin contradicción, la sospecha queda descartada
+    para ESTE documento. `estado_ruta`/`motivo_ruta`/`direccion_entrega`
+    se limpian a un estado "pendiente de recalcular" (nunca se calcula
+    aquí una ruta -- sin red): la próxima geocodificación real de la
+    operación normal recalcula con el destino ya restaurado.
+
+    Alcance por TRANSPORTE (mismo criterio, invertido, que la función
+    hermana): una guía SIN traza propia de destino (p. ej. 472624) pero
+    que comparte `numero_transporte` con una guía que SÍ quedó respaldada
+    en esta misma pasada, y cuyo `despachar_a_crudo` sigue vacío con el
+    mismo motivo de contaminación, es la MISMA parada de entrega -- se le
+    aplica el mismo texto ya restaurado, sin crear una segunda evidencia
+    histórica independiente (ningún catálogo se toca aquí).
+
+    Idempotente: una fila cuyo `despachar_a_crudo` ya trae texto, o cuyo
+    motivo ya no incluye la contaminación, se conserva intacta."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+
+        def _aplicar(fila: dict[str, str], valor: str) -> None:
+            fila["despachar_a_crudo"] = valor
+            motivos = [
+                m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|")
+                if m.strip() and m.strip() != _MOTIVO_DESTINO_CONTAMINADO
+            ]
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos)
+            for campo in (
+                "direccion_entrega", "localidad_entrega", "region_entrega",
+                "codigo_pais", "codigo_unidad", "codigo_contexto",
+                "distancia_km", "duracion_min", "proveedor_ruta",
+            ):
+                fila[campo] = ""
+            fila["estado_ruta"] = ""
+            fila["motivo_ruta"] = ""
+            fila["estado_entrega"] = "NO_INTENTADO"
+
+        def _motivos_fila(fila: Mapping[str, str]) -> set[str]:
+            return {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()}
+
+        guias_actualizadas: list[str] = []
+        valores_respaldados_por_transporte: dict[str, str] = {}
+        for fila in filas:
+            if _MOTIVO_DESTINO_CONTAMINADO not in _motivos_fila(fila):
+                continue
+            if str(fila.get("despachar_a_crudo", "")).strip():
+                continue  # ya tiene texto -- nunca se sobrescribe
+            valor = ""
+            for traza in _trazas_atlas_ia(fila):
+                valor = _destino_propio_respaldado_sin_citar(traza)
+                if valor:
+                    break
+            if not valor:
+                continue
+            _aplicar(fila, valor)
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            if transporte:
+                valores_respaldados_por_transporte[transporte] = valor
+            guias_actualizadas.append(str(fila.get("numero_guia", "")).strip())
+
+        # Documento hermano del mismo transporte/parada -- nunca una
+        # segunda evidencia histórica independiente, sólo la misma fila de
+        # entrega ya respaldada arriba.
+        for fila in filas:
+            guia = str(fila.get("numero_guia", "")).strip()
+            if guia in guias_actualizadas:
+                continue
+            if _MOTIVO_DESTINO_CONTAMINADO not in _motivos_fila(fila):
+                continue
+            if str(fila.get("despachar_a_crudo", "")).strip():
+                continue
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            valor = valores_respaldados_por_transporte.get(transporte) if transporte else None
+            if not valor:
+                continue
+            _aplicar(fila, valor)
+            guias_actualizadas.append(guia)
+
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
 def revalidar_destino_contra_comuna_documental_sin_ocr(
     *, ruta_dataset: str | Path,
 ) -> dict[str, object]:
@@ -2251,6 +2420,139 @@ def revalidar_destino_confirmado_desde_ledger_sin_ocr(
         )
         destinos_corregidos.append(destino.destino_id)
     return {"destinos_corregidos": destinos_corregidos}
+
+
+def _calle_numero_normalizado(texto: str) -> str | None:
+    """Prefijo "calle + número" normalizado de un texto de destino libre
+    (calle, posiblemente varias palabras, seguida del primer número que
+    aparece) -- `None` si no trae ningún número. Usado para comparar
+    calle+número SIN exigir que el resto del texto (comuna/ciudad) sea
+    idéntico -- eso es exactamente lo que un documento hermano con comuna
+    explícita agrega."""
+    match = re.search(r"\d+", texto)
+    if not match:
+        return None
+    return normalizar_nombre_destino(texto[: match.end()])
+
+
+def revalidar_ruta_por_historial_de_obra_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Codex 464784 (URUGUAY 15, EASY RETAIL SA / CONSTRUCTORA ALTIUS SPA)
+    -- la dirección de esta guía ya fue `REGISTRAR_DIRECCION` por un
+    humano ("URUGUAY 15", sin comuna): la IDENTIDAD del destino nunca
+    estuvo en duda. El geocodificador la deja en `GEOCODIFICACION_
+    NUMERO_INCOMPATIBLE` para siempre porque, sin comuna, el número "15"
+    cae ambiguo entre dos comunas reales de la RM (La Cisterna / Puente
+    Alto). La MISMA obra (mismo `obra_destino` + `planta_origen_id`) ya
+    tiene OTRA guía -- 464491, "URUGUAY 15 SANTIAGO LA CISTERNA" -- con
+    la MISMA calle+número, una comuna EXPLÍCITA y una ruta YA CALCULADA
+    por el proveedor real en una corrida anterior: misma calle+número +
+    comuna explícita sin contradicción entre hermanos de la misma obra es
+    evidencia suficiente para REUTILIZAR esa ruta ya persistida, sin
+    volver a geocodificar ni tocar la red -- nunca inventa una
+    coordenada ni un km/tiempo nuevo, sólo copia el resultado que un
+    proveedor real ya calculó para la misma obra+planta+calle+número.
+
+    Nunca sobrescribe `despachar_a_crudo` (columna documental intacta --
+    sigue siendo el texto humano); sólo completa las columnas derivadas
+    de ruta con el resultado ya persistido del documento hermano.
+
+    Se abstiene si:
+    - la guía no fue confirmada por un humano vía `REGISTRAR_DIRECCION`
+      (evita reabrir una identidad de destino que sigue en duda -- éste
+      no es el mecanismo para eso, ver `detectar_decision_destino_no_
+      resuelto`);
+    - ya tiene `RUTA_CALCULADA` (nada que reutilizar);
+    - no hay ningún hermano `RUTA_CALCULADA` de la MISMA obra+planta con
+      la MISMA calle+número;
+    - hay dos o más hermanos con la MISMA calle+número pero comunas
+      DISTINTAS (ambigüedad real entre hermanos -- nunca "el primero").
+
+    Idempotente: vuelve a correr sobre el dataset ya actualizado sin
+    cambiar nada más."""
+    from atlas_core.decisiones_pendientes import _guias_con_direccion_confirmada_por_humano
+
+    ruta = Path(ruta_dataset)
+    ledger = ruta.parent / "decisiones_aplicadas.json"
+    try:
+        guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(ledger)
+    except (OSError, ValueError, AttributeError):
+        guias_direccion_confirmada = frozenset()
+    if not guias_direccion_confirmada:
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+
+        # Hermanos candidatos: RUTA_CALCULADA, con comuna explícita ya
+        # geocodificada, agrupados por (obra, planta de origen).
+        hermanos_por_obra_planta: dict[tuple[str, str], list[dict[str, str]]] = {}
+        for hermano in filas:
+            if str(hermano.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            if not str(hermano.get("localidad_entrega", "")).strip():
+                continue
+            clave = (
+                normalizar_nombre_obra(str(hermano.get("obra_destino", ""))),
+                str(hermano.get("planta_origen_id", "")).strip(),
+            )
+            if not clave[0] or not clave[1]:
+                continue
+            hermanos_por_obra_planta.setdefault(clave, []).append(hermano)
+
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            guia = str(fila.get("numero_guia", "")).strip()
+            if guia not in guias_direccion_confirmada:
+                continue
+            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+            calle_numero_objetivo = _calle_numero_normalizado(despachar_a) if despachar_a else None
+            if not calle_numero_objetivo:
+                continue
+            clave = (
+                normalizar_nombre_obra(str(fila.get("obra_destino", ""))),
+                str(fila.get("planta_origen_id", "")).strip(),
+            )
+            if not clave[0] or not clave[1]:
+                continue
+            candidatos = [
+                hermano for hermano in hermanos_por_obra_planta.get(clave, ())
+                if _calle_numero_normalizado(str(hermano.get("despachar_a_crudo", ""))) == calle_numero_objetivo
+            ]
+            if not candidatos:
+                continue
+            comunas = {str(h.get("localidad_entrega", "")).strip() for h in candidatos}
+            if len(comunas) != 1:
+                continue  # ambigüedad real entre hermanos -- nunca "el primero"
+            hermano = candidatos[0]
+            fila["direccion_entrega"] = str(hermano.get("direccion_entrega", ""))
+            fila["localidad_entrega"] = str(hermano.get("localidad_entrega", ""))
+            fila["region_entrega"] = str(hermano.get("region_entrega", ""))
+            fila["codigo_pais"] = str(hermano.get("codigo_pais", ""))
+            fila["codigo_unidad"] = str(hermano.get("codigo_unidad", ""))
+            fila["codigo_contexto"] = str(hermano.get("codigo_contexto", ""))
+            fila["distancia_km"] = str(hermano.get("distancia_km", ""))
+            fila["duracion_min"] = str(hermano.get("duracion_min", ""))
+            fila["proveedor_ruta"] = str(hermano.get("proveedor_ruta", ""))
+            fila["estado_ruta"] = EstadoRuta.RUTA_CALCULADA.value
+            fila["motivo_ruta"] = ""
+            fila["estado_entrega"] = "NO_INTENTADO"
+            if (
+                str(fila.get("indicador_revision", "")).strip() == "OK"
+                and str(fila.get("estado_documental", "")).strip() in ("", "OK")
+            ):
+                fila["estado_operacional"] = "OK"
+            guias_actualizadas.append(guia)
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
 def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
@@ -3665,6 +3967,13 @@ def revalidar_y_regenerar_reporte(
     resultado_cliente = revalidar_cliente_sin_corroborar_sin_ocr(
         ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+    # Codex 472623/472624 -- destino con evidencia B1 EXCLUSIVAMENTE
+    # propia del documento, bloqueado sólo por un empaquetado de
+    # evidencia vacío (nunca una evidencia genuinamente insuficiente).
+    # Sin OCR, sin red.
+    resultado_destino_propio = revalidar_destino_propio_respaldado_por_b1_sin_ocr(
+        ruta_dataset=dataset,
+    )
     # Bloque F (R4.10): limpieza retroactiva de destinos degradados/
     # absurdos que quedaron persistidos antes del fix de
     # `resolver_destino_entrega_validado` -- sin OCR, sin red.
@@ -3706,6 +4015,13 @@ def revalidar_y_regenerar_reporte(
     # abajo, que sí necesita un candidato geocodificado).
     resultado_ruta_convergencia_gps = revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+    )
+    # Codex 464784 (URUGUAY 15) -- reutiliza una ruta YA CALCULADA de un
+    # documento hermano de la MISMA obra+planta con la MISMA calle+número
+    # y comuna explícita sin contradicción. Sin OCR, sin red -- corre
+    # ANTES de los bloques de geocodificación de abajo.
+    resultado_ruta_historial_obra = revalidar_ruta_por_historial_de_obra_sin_ocr(
+        ruta_dataset=dataset,
     )
     # Bloque RESOLUCIÓN R18 -- corre ANTES que la revalidación de ruta a
     # propósito: un destino recién geocodificado aquí (confirmado por
