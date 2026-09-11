@@ -25,7 +25,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -65,6 +65,7 @@ from atlas_core.incidencias_documentales import (
 )
 from atlas_core.mobile import RepositorioEnviosMobile
 from atlas_core.modelos import EstadoValidacion
+from atlas_core.clasificador_material import clasificar_material
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
     COLUMNAS_PRE_G1C,
@@ -75,6 +76,7 @@ from atlas_core.procesamiento_masivo import (
     _es_fragmento_estampado_no_material,
     _normalizar,
     _parsear_fecha_dd_mm_yyyy,
+    extraer_descripcion_material,
 )
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.rutas.modelos import EstadoRuta
@@ -643,6 +645,126 @@ def revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
             for fila, fecha in con_fecha:
                 if fecha != corroborada:
                     fila["fecha"] = corroborada
+                    guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def _fecha_desde_timestamp_gps(texto: object) -> date | None:
+    """Extrae sólo la FECHA (AAAA-MM-DD) de un timestamp de telemetría YA
+    persistido (`hora_entrada_gps`/`hora_salida_gps`, formato "AAAA-MM-DD
+    HH:MM:SS") -- nunca reinterpreta la hora, sólo el día real que el GPS
+    confirmó, para compararlo contra la fecha documental (DD-MM-AAAA)."""
+    coincidencia = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(texto or "").strip())
+    if not coincidencia:
+        return None
+    anio, mes, dia = (int(x) for x in coincidencia.groups())
+    try:
+        return date(anio, mes, dia)
+    except ValueError:
+        return None
+
+
+def revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque FECHA POR TELEMETRÍA -- caso real 0000354651 (472276/472277,
+    PRODALAM SA/CRISTOPHER RETAMAL): dos documentos del MISMO transporte
+    con `fecha` documental distinta en el DÍA ("21-08-2026" vs
+    "23-08-2026") -- fuera del alcance de `revalidar_fecha_documental_
+    por_transporte_compartido_sin_ocr` (hermana de esta función, que sólo
+    corrige un dígito del AÑO, nunca del día/mes: una diferencia de día
+    puede ser, en principio, una fecha real distinta, así que esa función
+    exige el patrón MÁS estrecho posible -- mayoría/desempate por
+    conteo). Aquí la evidencia es de otra clase, más fuerte que contar
+    OCR: telemetría GPS propia, ya persistida, del propio vehículo.
+
+    Sólo corrige cuando, dentro del MISMO `numero_transporte`:
+    - hay EXACTAMENTE 2 fechas documentales distintas;
+    - TODO el grupo comparte el mismo `patente_tracto` normalizado
+      (coherencia fuerte de vehículo -- "mismo transporte" solo no
+      basta para asumir "mismo camión, mismo día real");
+    - UNA de las dos fechas está respaldada por al menos un documento con
+      GPS PROPIO confirmado (`origen_gps == ORIGEN_GPS_CONFIRMADO`) cuyo
+      propio `hora_entrada_gps`/`hora_salida_gps` cae en esa MISMA fecha
+      (autoconsistente: el documento no se contradice a sí mismo);
+    - la OTRA fecha no tiene, en NINGÚN documento del grupo, esa misma
+      clase de respaldo propio.
+
+    Se abstiene (conserva ambas fechas intactas) ante cualquier otro
+    escenario -- en particular:
+    - 3 o más fechas distintas en el transporte (duda más profunda,
+      nunca "la mayoría");
+    - patentes distintas dentro del grupo (sin coherencia de vehículo,
+      "mismo transporte" no es evidencia suficiente);
+    - AMBAS fechas respaldadas por GPS propio (contradicción real entre
+      dos evidencias fuertes -- un empate genuino, nunca "la primera");
+    - NINGUNA fecha respaldada por GPS propio (nada que copiar sin
+      inventar).
+
+    Nunca toca `motivo_ruta`/`estado_ruta`/derivados de ruta -- sólo el
+    campo `fecha`, para que `CONFLICTO_FECHA`
+    (`gestor_viajes.MotivoRevision`) deje de ver una discrepancia que la
+    propia telemetría ya resolvió. Sin OCR, sin red -- sólo columnas ya
+    persistidas."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
+        grupos: dict[str, list[dict[str, str]]] = {}
+        for fila in filas:
+            transporte = str(fila.get("numero_transporte", "")).strip()
+            if transporte:
+                grupos.setdefault(transporte, []).append(fila)
+
+        def _gps_propio_confirmado(fila: Mapping[str, str]) -> bool:
+            if str(fila.get("origen_gps", "")).strip() != ORIGEN_GPS_CONFIRMADO:
+                return False
+            fecha_doc = _parsear_fecha_dd_mm_yyyy(str(fila.get("fecha", "")).strip())
+            if fecha_doc is None:
+                return False
+            return any(
+                _fecha_desde_timestamp_gps(fila.get(campo)) == fecha_doc
+                for campo in ("hora_entrada_gps", "hora_salida_gps")
+            )
+
+        guias_actualizadas: list[str] = []
+        for filas_grupo in grupos.values():
+            if len(filas_grupo) < 2:
+                continue
+            con_fecha = [
+                (fila, str(fila.get("fecha", "")).strip()) for fila in filas_grupo
+                if _parsear_fecha_dd_mm_yyyy(str(fila.get("fecha", "")).strip()) is not None
+            ]
+            distintas = sorted({fecha for _, fecha in con_fecha})
+            if len(distintas) != 2:
+                continue
+
+            patentes_validas = {
+                str(fila.get("patente_tracto", "")).strip().upper() for fila, _ in con_fecha
+                if _patente_valida(str(fila.get("patente_tracto", "")).strip().upper())
+            }
+            if len(patentes_validas) != 1:
+                continue
+
+            respaldo_por_fecha: dict[str, bool] = {fecha: False for fecha in distintas}
+            for fila, fecha in con_fecha:
+                if _gps_propio_confirmado(fila):
+                    respaldo_por_fecha[fecha] = True
+            fechas_respaldadas = [fecha for fecha, respaldada in respaldo_por_fecha.items() if respaldada]
+            if len(fechas_respaldadas) != 1:
+                # 0 (nada que copiar) o 2 (contradicción real entre dos
+                # evidencias propias fuertes) -- ambos casos se abstienen.
+                continue
+            fecha_corroborada = fechas_respaldadas[0]
+
+            for fila, fecha in con_fecha:
+                if fecha != fecha_corroborada:
+                    fila["fecha"] = fecha_corroborada
                     guias_actualizadas.append(str(fila.get("numero_guia", "")))
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
@@ -3648,6 +3770,108 @@ def revalidar_material_estampado_persistido_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+def reprocesar_material_focal_desde_imagen_original(
+    *, raiz_atlas: str | Path, numero_guia: str, lector_ocr: object = None,
+) -> dict[str, object]:
+    """Bloque REPROCESO FOCAL DE MATERIAL -- caso real 0000354651/472277
+    (PRODALAM SA): a diferencia de TODAS las demás funciones de este
+    módulo, ÉSTA SÍ ejecuta OCR nuevo -- deliberadamente, y sólo cuando
+    se invoca de forma explícita para UNA guía concreta (nunca en un
+    lote/batch automático, nunca dentro de `reconciliar_estado_derivado`/
+    `revalidar_y_regenerar_reporte`; el llamador -- CLI o Desktop -- es
+    quien decide reprocesar). El OCR (`atlas_core.ocr.leer_texto_imagen`,
+    EasyOCR local) no toca red -- el modelo ya está descargado la primera
+    vez que se usó.
+
+    Único alcance: releer la imagen original YA conservada
+    (`atlas_core.evidencia_documental.resolver_ruta_evidencia`, el mismo
+    mecanismo que ya usa Desktop para "Ver guía original") de un
+    documento con `MATERIAL_AUSENTE` y `descripcion_material` vacío, para
+    reintentar `extraer_descripcion_material` -- nunca para re-derivar
+    fecha/chofer/cliente/destino/ruta/ningún otro campo de la fila,
+    aunque el OCR complete vuelva a leer toda la imagen.
+
+    Se abstiene (`{"aplicado": False, "motivo": ...}`, nunca lanza) si:
+    - la guía no existe en el dataset (`GUIA_NO_ENCONTRADA`);
+    - `descripcion_material` YA tiene texto -- nunca sobrescribe una
+      evidencia documental ya capturada (`MATERIAL_YA_PRESENTE`);
+    - `MATERIAL_AUSENTE` no está entre los motivos vigentes de esa fila
+      -- nada que reprocesar (`SIN_MOTIVO_MATERIAL_AUSENTE`);
+    - la imagen original no se encuentra o ya fue purgada
+      (`IMAGEN_NO_ENCONTRADA`/`IMAGEN_PURGADA`);
+    - el OCR en sí falla (`ERROR_OCR`, con el detalle -- documento
+      corrupto/ilegible, nunca deja el dataset a medio escribir).
+
+    Si el OCR reprocesado SIGUE sin encontrar ninguna línea con
+    evidencia de material (`MATERIAL_NO_RECUPERABLE_TRAS_REPROCESO`): se
+    conserva `MATERIAL_AUSENTE` intacto -- `motivo_ruta`/`estado_ruta`/
+    todo lo demás de la fila, sin tocar. Nunca inventa un material, y
+    nunca genera una decisión humana nueva (`MATERIAL_AUSENTE` no tiene
+    tipo de decisión asociado -- ver Desktop `_TIPOS_DECISION_POR_
+    MOTIVO_DOCUMENTAL` -- sigue siendo, correctamente, sólo una
+    observación documental no bloqueante)."""
+    from atlas_core.evidencia_documental import resolver_ruta_evidencia
+    from atlas_core.ocr import leer_texto_imagen
+
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    guia_objetivo = str(numero_guia).strip()
+    with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(dataset)
+        except (OSError, ValueError):
+            return {"aplicado": False, "motivo": "DATASET_NO_DISPONIBLE"}
+        fila = next(
+            (f for f in filas if str(f.get("numero_guia", "")).strip() == guia_objetivo), None,
+        )
+        if fila is None:
+            return {"aplicado": False, "motivo": "GUIA_NO_ENCONTRADA", "numero_guia": guia_objetivo}
+        if str(fila.get("descripcion_material", "")).strip():
+            return {"aplicado": False, "motivo": "MATERIAL_YA_PRESENTE", "numero_guia": guia_objetivo}
+        motivo_material = MotivoRevisionDocumento.MATERIAL_AUSENTE.value
+        motivos_actuales = [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()]
+        if motivo_material not in motivos_actuales:
+            return {"aplicado": False, "motivo": "SIN_MOTIVO_MATERIAL_AUSENTE", "numero_guia": guia_objetivo}
+
+        archivo = str(fila.get("archivo", "")).strip()
+        evidencia = resolver_ruta_evidencia(raiz, archivo)
+        if evidencia.ruta is None:
+            return {
+                "aplicado": False, "motivo": f"IMAGEN_{evidencia.ubicacion}",
+                "numero_guia": guia_objetivo, "archivo": archivo,
+            }
+        try:
+            textos = leer_texto_imagen(evidencia.ruta, lector=lector_ocr)
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            return {
+                "aplicado": False, "motivo": "ERROR_OCR", "numero_guia": guia_objetivo,
+                "detalle": f"{type(exc).__name__}: {exc}",
+            }
+        material_recuperado = extraer_descripcion_material(textos)
+        if not material_recuperado:
+            return {
+                "aplicado": False, "motivo": "MATERIAL_NO_RECUPERABLE_TRAS_REPROCESO",
+                "numero_guia": guia_objetivo,
+            }
+
+        fila["descripcion_material"] = material_recuperado
+        fila["tipo_carga"] = clasificar_material(material_recuperado).value
+        motivos_restantes = [m for m in motivos_actuales if m != motivo_material]
+        fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
+        indicador, documental, operacional = _indicadores_documentales_coherentes(
+            motivos_restantes, str(fila.get("estado_ruta", "")).strip(),
+        )
+        fila["indicador_revision"] = indicador
+        fila["estado_documental"] = documental
+        fila["estado_operacional"] = operacional
+        _escribir_filas_completas(dataset, filas)
+
+    return {
+        "aplicado": True, "numero_guia": guia_objetivo,
+        "descripcion_material": material_recuperado, "tipo_carga": fila["tipo_carga"],
+    }
+
+
 def revalidar_destino_rut_pegado_persistido_sin_ocr(
     *, ruta_dataset: str | Path,
 ) -> dict[str, object]:
@@ -4089,6 +4313,14 @@ def revalidar_y_regenerar_reporte(
     # REQUIERE_REVISION huérfano (sin decisión pendiente ni dependencia
     # técnica) por un solo dígito de OCR.
     resultado_fecha_transporte = revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
+        ruta_dataset=dataset,
+    )
+    # Bloque FECHA POR TELEMETRÍA -- caso real 0000354651 (472276/472277):
+    # hermana de la anterior para el patrón que ESA función deliberadamente
+    # no cubre (un dígito del DÍA, no del año) -- aquí la evidencia es
+    # telemetría GPS propia ya persistida, más fuerte que un conteo de
+    # OCR. Corre justo después, mismo criterio de ubicación.
+    resultado_fecha_telemetria = revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr(
         ruta_dataset=dataset,
     )
     # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa raíz

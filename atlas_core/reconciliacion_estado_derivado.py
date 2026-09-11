@@ -44,6 +44,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_destino_propio_respaldado_por_b1_sin_ocr,
     revalidar_destino_rechazado_por_evidencia_b1_sin_ocr,
     revalidar_destinos_confirmados_sin_coordenadas_sin_ocr,
+    revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr,
     revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
@@ -937,6 +938,16 @@ def reconciliar_estado_derivado(
         # columnas ya escritas.
         limpieza_geo_contradiccion = revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
         limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
+        # Bloque FECHA POR TELEMETRÍA -- caso real 0000354651 (472276/
+        # 472277): igual que las dos limpiezas de arriba, existía y estaba
+        # probada pero sólo se invocaba desde `revalidar_y_regenerar_
+        # reporte` (aplicación de decisión / envío Mobile) -- se conecta
+        # también aquí para que `CONFLICTO_FECHA` deje de verse en la
+        # PRIMERA carga automática de Desktop, sin esperar una decisión
+        # humana no relacionada. Sin OCR, sin red.
+        limpieza_fecha_telemetria = revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr(
+            ruta_dataset=dataset,
+        )
         # Bloque ENTREGA A SEDE DEL PROPIO CLIENTE -- caso real 0000353062/
         # 464717 (cliente == obra_destino == "AMERICAN SCREW CHILE SPA",
         # ruta 35 km calculada): `revalidar_obra_destino_sin_ocr` ya retira
