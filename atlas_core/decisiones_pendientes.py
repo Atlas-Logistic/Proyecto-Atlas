@@ -2156,8 +2156,24 @@ def detectar_decision_origen_no_confirmado(
        ofrece como candidata cualquier planta CONFIRMADA+ACTIVA dentro de
        `RADIO_CANDIDATO_ORIGEN_SUGERIDO_KM`. Casos reales: 464717, 464892
        (ambos AZA COLINA, con evidencia real aunque por debajo del umbral
-       de resolución automática)."""
-    if str(fila.get("estado_ruta", "")).strip() != "ORIGEN_NO_DETERMINADO":
+       de resolución automática).
+
+    Bloque CIERRE DE ESTADOS NO TERMINALES (caso real 472477) -- opera
+    también sobre `estado_ruta` VACÍO, no sólo `ORIGEN_NO_DETERMINADO`:
+    un documento cuyo destino se resolvió recién (p. ej. vía
+    `REGISTRAR_DIRECCION`) nunca llegó a intentar ruta mientras el
+    destino faltaba, así que `estado_ruta` sigue en blanco -- "nunca se
+    intentó" no es menos elegible que "se intentó y no se pudo
+    determinar" para esta misma pregunta; ambos casos comparten
+    exactamente la misma evidencia de origen (`motivo_origen_gps`) y las
+    mismas guardas de abstención de arriba. Sin esto, un conflicto GPS
+    real entre dos plantas conocidas (472477: AZA_COLINA/AZA_RENCA, con
+    evidencia agotada por completo -- sin convergencia de vecinos, sin
+    categoría determinable, material irrecuperable) quedaba invisible
+    para siempre: `REQUIERE_REPROCESAMIENTO` sin ninguna acción técnica
+    pendiente real es, en los hechos, una ambigüedad humana disfrazada
+    de pendiente técnico."""
+    if str(fila.get("estado_ruta", "")).strip() not in ("", "ORIGEN_NO_DETERMINADO"):
         return None
     if str(fila.get("planta_origen_id", "")).strip():
         return None  # ya tiene origen -- nada que preguntar
