@@ -30,7 +30,7 @@ from atlas_core.catalogo_clientes import (
     normalizar_nombre_cliente,
     normalizar_rut_cliente,
 )
-from atlas_core.catalogo_destinos import normalizar_nombre_destino
+from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos,
     EstadoObra,
@@ -1831,7 +1831,7 @@ def _decisiones_obra_para_cliente(
                     )
                     if any(
                         (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                        and calle in destino_documental
+                        and direccion_confirmada_coincide(calle, destino_documental)
                         for destino in destinos
                     ):
                         obras = [obra_por_prefijo]
@@ -1905,7 +1905,7 @@ def _decisiones_obra_para_cliente(
                 )
                 resuelta = any(
                     (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                    and calle in texto_documental
+                    and direccion_confirmada_coincide(calle, texto_documental)
                     for destino in destinos_confirmados_obra
                 )
             if resuelta:
@@ -2866,7 +2866,7 @@ def regenerar_decisiones_persistidas(
                     )
                     resuelta = any(
                         (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                        and calle in texto_documental
+                        and direccion_confirmada_coincide(calle, texto_documental)
                         for destino in destinos_confirmados_obra
                     )
             # Bloque REVISIONES ESTANCADAS -- casos reales 472008 / 472227:
@@ -3184,7 +3184,7 @@ def regenerar_decisiones_persistidas(
                 )
                 if any(
                     (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                    and calle in texto_documental
+                    and direccion_confirmada_coincide(calle, texto_documental)
                     and (
                         (destino.latitud is not None and destino.longitud is not None)
                         or ruta_ya_calculada

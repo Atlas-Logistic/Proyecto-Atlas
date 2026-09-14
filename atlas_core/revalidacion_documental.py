@@ -35,7 +35,7 @@ from atlas_core.aplicacion_decisiones import (
     resolver_patentes_confirmadas_por_ledger,
 )
 from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente
-from atlas_core.catalogo_destinos import normalizar_nombre_destino
+from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_plantas import CatalogoPlantas, normalizar_nombre_planta
 from atlas_core.catalogo_vehiculos import (
@@ -448,7 +448,7 @@ def revalidar_obra_destino_sin_ocr(
                             candidatos_confirmados = []
                         for destino in candidatos_confirmados:
                             calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
-                            if calle and calle in texto_documental:
+                            if calle and direccion_confirmada_coincide(calle, texto_documental):
                                 resuelto_por_direccion = True
                                 break
                     # Bloque R2.5 -- caso real 464265 ("SODIMAC SA COROBEL"
@@ -2516,7 +2516,7 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
             destino_documental = normalizar_nombre_destino(str(contexto.get("destino_documental", "")))
             if candidata is not None and any(
                 (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                and calle in destino_documental
+                and direccion_confirmada_coincide(calle, destino_documental)
                 for destino in catalogo_obras.listar_destinos_confirmados_para_obra(
                     nombre_obra=candidata.nombre_canonico
                 )
@@ -3456,7 +3456,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             texto_documental = normalizar_nombre_destino(despachar_a)
             candidatos_coincidentes = [
                 destino for destino in destinos_confirmados_obra
-                if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and calle in texto_documental
+                if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and direccion_confirmada_coincide(calle, texto_documental)
             ]
             if len(candidatos_coincidentes) != 1:
                 if not candidatos_coincidentes:
@@ -3795,7 +3795,7 @@ def revalidar_motivo_destino_ya_confirmado_sin_ocr(
                         destinos = []
                     corroborado = any(
                         (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                        and calle in texto_documental
+                        and direccion_confirmada_coincide(calle, texto_documental)
                         for destino in destinos
                     )
             if not corroborado:

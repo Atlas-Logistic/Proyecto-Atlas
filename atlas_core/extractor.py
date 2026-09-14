@@ -1279,7 +1279,7 @@ _PATRON_RUT_COMPLETO = re.compile(
 )
 
 
-def _despachar_a_lineal_contaminado(valor: Any) -> bool:
+def _despachar_a_lineal_contaminado(valor: Any, *, valor_chofer_resuelto: str = "") -> bool:
     """Detecta cuando la extracción lineal de DESPACHAR A (regex sobre texto
     ya unido en una sola línea) absorbió por error la etiqueta/valor de OTRO
     campo estructural -- caso real guía 463594: el orden de lectura de
@@ -1292,7 +1292,23 @@ def _despachar_a_lineal_contaminado(valor: Any) -> bool:
     contaminante no siempre es una PALABRA -- a veces es el VALOR de otro
     campo (un RUT, p.ej. "14293816-2") que quedó pegado a "DESPACHAR A" en
     el texto lineal. Un valor que es integramente un RUT con formato y
-    dígito verificador válidos nunca es una dirección."""
+    dígito verificador válidos nunca es una dirección.
+
+    Caso real guía 472523 (Bloque CONTAMINACIÓN ENTRE CAMPOS): el mismo
+    intercalado de columnas puede pegar a DESPACHAR A ni una etiqueta ni
+    un RUT, sino el VALOR NOMINAL de OTRO campo -- aquí, "PATRICK ORTIZ",
+    el nombre del chofer impreso bajo RETIRA (geométricamente su propia
+    fila, lejos de DESPACHAR A -- ver `_extraer_despachar_a_geometrico`),
+    que el texto lineal dejó pegado justo después de la etiqueta
+    "DESPACHAR A" por puro orden de lectura de OCR. Ninguna de las dos
+    reglas de arriba lo detecta: no es una etiqueta conocida ni un RUT.
+    `valor_chofer_resuelto` (opcional -- el chofer YA resuelto de este
+    mismo documento, por su propia vía) cierra ese hueco: un destino que
+    coincide EXACTO (normalizado) con el chofer nunca es una dirección
+    real, sin importar cuán plausible parezca el texto por sí solo --
+    nunca se adivina por "parece un nombre", sólo por colisión real con
+    el valor de otro campo, igual que la regla de RUT de arriba. Ausente
+    (`""`), comportamiento idéntico a antes de este bloque."""
     texto_crudo = str(valor or "").strip()
     if not texto_crudo:
         return False
@@ -1303,6 +1319,9 @@ def _despachar_a_lineal_contaminado(valor: Any) -> bool:
     texto = _texto_simple(texto_crudo)
     if not texto:
         return False
+    chofer_simple = _texto_simple(str(valor_chofer_resuelto or ""))
+    if chofer_simple and texto == chofer_simple:
+        return True
     return any(
         texto == etiqueta or texto.startswith(etiqueta + " ")
         for etiqueta in _ETIQUETAS_ESTRUCTURALES_DESPACHO

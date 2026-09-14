@@ -87,7 +87,7 @@ from atlas_core.catalogo_clientes import (
     EstadoVigenciaCliente,
     normalizar_rut_cliente,
 )
-from atlas_core.catalogo_destinos import normalizar_nombre_destino
+from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos,
     ErrorCatalogoObrasDestinos,
@@ -1433,7 +1433,7 @@ def _corroborar_obra_destino_confirmada(
         destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra)
         for destino in destinos_confirmados_obra:
             calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
-            if calle and calle in texto_documental:
+            if calle and direccion_confirmada_coincide(calle, texto_documental):
                 return destino
         return None
     except (OSError, ValueError, ErrorCatalogoObrasDestinos):
@@ -2675,6 +2675,13 @@ def procesar_archivo(
                 # nueva no cae en pendiente técnico para recién después
                 # usar el maestro territorial (mismas guardas de seguridad).
                 base_geografica_local=_base_geografica_ine_memoizada(),
+                # Bloque CONTAMINACIÓN ENTRE CAMPOS (caso real 472523): el
+                # chofer ya quedó resuelto arriba (lineal o geométrico) --
+                # se pasa para que un DESPACHAR A lineal que en realidad
+                # es el nombre del chofer (columnas intercaladas de OCR)
+                # se detecte como contaminado en vez de aceptarse tal
+                # cual (ver `_despachar_a_lineal_contaminado`).
+                chofer_resuelto=str(datos.get("chofer") or ""),
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",

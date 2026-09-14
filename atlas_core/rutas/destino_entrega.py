@@ -2439,6 +2439,7 @@ def resolver_entrega_documento(
     destinos_confirmados: Iterable[Destino] = (),
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     base_geografica_local: "BaseGeograficaLocal | None" = None,
+    chofer_resuelto: str = "",
 ) -> dict[str, str]:
     """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
     persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
@@ -2483,7 +2484,15 @@ def resolver_entrega_documento(
     aprovechar INE. Mantiene TODAS las guardas: EXACT -> puede resolver;
     MULTIPLE / número ausente / calle no encontrada -> se abstiene y sigue
     con los demás fallbacks; nunca inventa; nunca altera la dirección
-    documental. Sin base (o `None`), comportamiento idéntico."""
+    documental. Sin base (o `None`), comportamiento idéntico.
+
+    `chofer_resuelto` (Bloque CONTAMINACIÓN ENTRE CAMPOS, opcional -- caso
+    real 472523): el chofer YA resuelto de este mismo documento, por su
+    propia vía (zona RETIRA). Un DESPACHAR A lineal que coincide EXACTO
+    con ese valor nunca es una dirección real -- se trata como
+    contaminado (ver `_despachar_a_lineal_contaminado`) igual que una
+    etiqueta/RUT ajenos, disparando el mismo reintento geométrico.
+    Ausente (`""`), comportamiento idéntico a antes de este bloque."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
     # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
@@ -2494,14 +2503,17 @@ def resolver_entrega_documento(
     despachar_a_crudo = limpiar_sufijo_rut_pegado((identificadores.despachar_a or "").strip())
 
     if bloques is not None and (
-        not despachar_a_crudo or _despachar_a_lineal_contaminado(despachar_a_crudo)
+        not despachar_a_crudo
+        or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
     ):
         try:
             decision_geometrica = _extraer_despachar_a_geometrico(list(bloques))
         except Exception:
             decision_geometrica = {}
         candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
-        if candidato_geometrico and not _despachar_a_lineal_contaminado(candidato_geometrico):
+        if candidato_geometrico and not _despachar_a_lineal_contaminado(
+            candidato_geometrico, valor_chofer_resuelto=chofer_resuelto
+        ):
             despachar_a_crudo = candidato_geometrico
 
     resultado = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}

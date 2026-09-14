@@ -92,6 +92,70 @@ def _texto_direccion_normalizado(texto: str) -> str:
     return normalizar_nombre_destino(texto)
 
 
+# Bloque REUTILIZACIÓN DE DESTINO CONFIRMADO CON TOLERANCIA OCR -- caso
+# real 472444 (obra "EMPRESA CONST SIGRO", cliente PRODALAM SA): la
+# dirección "AVDA IRARRAZAVAL 5497 SANTIAGO NUNOA" ya está CONFIRMADA
+# dos veces por Javier (guías 464550, 472227 -- ver `obras_destinos.
+# json`), pero la guía 472444 la imprime con un único carácter OCR mal
+# leído ("IRABRAZAVAL", R/B visualmente parecidas en el documento
+# escaneado). Antes de este bloque, todos los sitios que reutilizan un
+# destino ya confirmado (`decisiones_pendientes.py`,
+# `procesamiento_masivo.py`, `revalidacion_documental.py`) exigían que
+# la calle confirmada apareciera LITERALMENTE dentro del texto
+# documental -- un solo carácter distinto bastaba para que Atlas tratara
+# una dirección ya conocida como si fuera nueva y generara una revisión
+# humana redundante para corregir un typo de OCR, exactamente lo que la
+# Sección "normalización contextual antes de preguntar" pide evitar.
+#
+# La tolerancia sigue siendo deliberadamente estrecha -- nunca "fuzzy
+# matching" general (ver comentarios "nunca fuzzy" repetidos en los
+# sitios de llamada): sólo sustitución de caracteres en la MISMA
+# posición/longitud (nunca inserción ni eliminación, que reordenarían la
+# comparación y arriesgarían confundir dos calles reales distintas), y
+# sólo quedó habilitada a partir de una longitud mínima -- un fragmento
+# corto (p. ej. un número de calle o una palabra corta ambigua) exige
+# coincidencia exacta como siempre.
+_LONGITUD_MINIMA_TOLERANCIA_OCR_DIRECCION = 10
+
+
+def _limite_tolerancia_ocr_direccion(longitud: int) -> int:
+    """Cantidad máxima de caracteres que pueden diferir por error OCR al
+    comparar una calle ya confirmada contra el texto documental de una
+    guía nueva -- ver bloque arriba. Escala con la longitud del
+    fragmento (una sustitución cada ~25 caracteres, tope 2) porque a
+    mayor longitud una coincidencia accidental con una calle real
+    distinta es cada vez menos probable; por debajo del mínimo, cero
+    tolerancia (coincidencia exacta, comportamiento previo intacto)."""
+    if longitud < _LONGITUD_MINIMA_TOLERANCIA_OCR_DIRECCION:
+        return 0
+    return 1 if longitud <= 25 else 2
+
+
+def direccion_confirmada_coincide(calle_confirmada: str, texto_documental: str) -> bool:
+    """True si `calle_confirmada` (la calle de un destino YA CONFIRMADO
+    para esta obra, normalizada con `normalizar_nombre_destino`) aparece
+    dentro de `texto_documental` (idem) -- literalmente, como siempre, o
+    con hasta `_limite_tolerancia_ocr_direccion` caracteres sustituidos
+    por un error OCR (ver bloque arriba). Reemplaza el `calle in texto`
+    literal en todos los sitios que reutilizan un destino confirmado;
+    mismo comportamiento previo cuando no hay coincidencia con
+    tolerancia (devuelve `False` igual que el `in` original)."""
+    if not calle_confirmada:
+        return False
+    if calle_confirmada in texto_documental:
+        return True
+    longitud = len(calle_confirmada)
+    limite = _limite_tolerancia_ocr_direccion(longitud)
+    if limite <= 0:
+        return False
+    for inicio in range(0, len(texto_documental) - longitud + 1):
+        ventana = texto_documental[inicio:inicio + longitud]
+        distancia = sum(1 for a, b in zip(ventana, calle_confirmada) if a != b)
+        if distancia <= limite:
+            return True
+    return False
+
+
 def clave_fisica_destino(direccion: str, comuna: str = "", region: str = "") -> tuple[str, str, str]:
     """Clave global exacta y conservadora; nunca fuzzy."""
     direccion_n = _texto_direccion_normalizado(direccion)
