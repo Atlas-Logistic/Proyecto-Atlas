@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from atlas_core.catalogos import enriquecer_datos_con_catalogos
 from atlas_core.modelos import EstadoValidacion
+from atlas_core.normalizacion_semantica import _distancia_edicion_acotada
 from atlas_core.validadores import validar_rut_chileno
 
 
@@ -284,7 +285,22 @@ def _escala_geometrica_texto(items: List[Dict[str, Any]]) -> float:
 
 
 def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
-    """Asocia cliente y destino con etiquetas mediante geometría OCR conservadora."""
+    """Asocia cliente y destino con etiquetas mediante geometría OCR
+    conservadora.
+
+    Bloque CONTAMINACIÓN GIRO/SEÑOR (caso real 472437) -- la exclusión de
+    valores que "pertenecen" a GIRO es COMPARATIVA, no una identidad
+    absoluta: un bloque sólo se descarta de cliente/obra_destino si GIRO
+    lo reclama con una puntuación igual o mejor que la del campo que se
+    está resolviendo (nunca al revés -- 464170 sigue protegido). Además,
+    un bloque "CLIENTE" precedido de "CODIGO"/"COD" en la misma fila
+    (etiqueta compuesta "Código Cliente", un número de cuenta interno) se
+    excluye de ser la etiqueta SEÑOR(ES)/nombre real. Bloque UNIÓN
+    MULTIBLOQUE (caso real 472437, "CONSTRUCTORA IGNACIO HURTADO" en tres
+    cajas OCR separadas) -- el valor de cliente/obra_destino se extiende
+    hacia la derecha, dentro de la misma fila geométrica, uniendo TODOS
+    los bloques contiguos válidos (no sólo un par), mismo algoritmo ya
+    usado en `_extraer_despachar_a_geometrico`."""
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
         return {}
@@ -296,9 +312,30 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     # se descarta como candidato aparte, en `nominal()`, comparando el bloque
     # completo contra `_es_etiqueta_senor` (mismo criterio conservador que
     # usa `es_etiqueta` para reconocer la etiqueta de cliente).
+    def _es_etiqueta_codigo_cliente(item: Dict[str, Any]) -> bool:
+        """True si este bloque "CLIENTE" en realidad pertenece a la
+        etiqueta compuesta "CÓDIGO CLIENTE" -- un número de cuenta interno
+        de la cabecera del formulario (caso real 472437: "Código" +
+        "Cliente" son dos cajas OCR contiguas de una misma etiqueta
+        administrativa, con su propio valor numérico "0001006226", nada
+        que ver con el campo SEÑOR(ES)/nombre real). Sólo se activa
+        cuando "CODIGO"/"COD" está INMEDIATAMENTE a la izquierda, en la
+        misma fila -- nunca por sola coincidencia de la palabra "CLIENTE"
+        en cualquier otra parte del documento."""
+        return any(
+            otro is not item
+            and otro["simple"] in {"CODIGO", "COD"}
+            and _misma_fila_geometrica(otro, item)
+            and otro["x1"] <= item["x1"]
+            and item["x1"] - otro["x2"] <= 40 * escala
+            for otro in items
+        )
+
     def es_etiqueta(item: Dict[str, Any], campo: str) -> bool:
         texto = item["simple"]
         if campo == "cliente":
+            if texto == "CLIENTE" and _es_etiqueta_codigo_cliente(item):
+                return False
             return _es_etiqueta_senor(texto) or texto == "CLIENTE"
         return "OBRA DESTINO" in texto or texto == "DESTINO"
 
@@ -331,37 +368,38 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
 
     etiquetas_giro = [item for item in items if es_etiqueta_giro(item)]
 
-    def _mejor_candidato(etiqueta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """El candidato nominal con mejor (menor) puntaje para esta etiqueta,
-        usando la misma función de puntuación que `seleccionar`. Se usa para
-        identificar qué bloque "pertenece" a GIRO, no para resolver un campo."""
-        mejores = [
-            (puntuar(etiqueta, item), item)
-            for item in items
-            if item is not etiqueta and nominal(item)
+    def _puntaje_giro(item: Dict[str, Any]) -> Optional[float]:
+        """Mejor (menor) puntaje de `item` contra cualquier etiqueta GIRO
+        del documento, usando la misma función de puntuación que
+        `seleccionar`. `None` si ningún GIRO lo reclama."""
+        puntajes = [
+            puntuar(etiqueta_giro, item)
+            for etiqueta_giro in etiquetas_giro
             # Las filas estructurales avanzan de arriba hacia abajo. Un valor
             # cuyo centro está materialmente por encima de GIRO pertenece a
             # una fila documental anterior (p. ej. SEÑOR(ES) o R.U.T.), aunque
             # por cajas OCR solapadas resulte aritméticamente más cercano.
-            and item["cy"]
-            >= etiqueta["cy"] - max(etiqueta["h"], item["h"]) * 0.25
+            if item["cy"] >= etiqueta_giro["cy"] - max(etiqueta_giro["h"], item["h"]) * 0.25
         ]
-        mejores = [(puntuacion, item) for puntuacion, item in mejores if puntuacion is not None and puntuacion <= 1.25]
-        if not mejores:
-            return None
-        return min(mejores, key=lambda par: par[0])[1]
+        puntajes = [p for p in puntajes if p is not None and p <= 1.25]
+        return min(puntajes) if puntajes else None
 
-    # GIRO es un campo distinto y nunca es elegible como obra/destino. En vez
-    # de comparar distancias (frágil cuando GIRO y OBRA DESTINO son columnas
-    # vecinas casi equidistantes, caso real guía 464170), se identifica por
-    # identidad el bloque que sería el propio valor de GIRO y se excluye de
-    # ser candidato de cualquier otro campo — garantiza que GIRO nunca gane,
-    # sin depender de umbrales de proximidad.
-    valores_giro = {
-        id(candidato)
-        for etiqueta_giro in etiquetas_giro
-        for candidato in (_mejor_candidato(etiqueta_giro),)
-        if candidato is not None
+    # GIRO es un campo distinto y nunca es elegible como obra/destino.
+    # `puntaje_giro_por_id` guarda, para cada bloque nominal del documento,
+    # qué tan bien "encajaría" como valor de GIRO -- se usa de forma
+    # COMPARATIVA en `seleccionar` (ver Bloque CONTAMINACIÓN GIRO/SEÑOR más
+    # abajo), nunca como blacklist absoluta: la identidad-sin-comparar
+    # (versión anterior) protegía 464170 pero, ante un documento donde GIRO
+    # no tiene ningún candidato mejor que el valor real de otro campo
+    # (caso real 472437: el texto de GIRO nunca puntúa contra ninguna
+    # etiqueta, y "AGF ACEROS DE CHILE SPA" -- la respuesta real de
+    # SEÑOR(ES) -- terminaba "ganando por descarte" como si fuera de GIRO),
+    # excluía por error el valor real de un campo distinto.
+    puntaje_giro_por_id = {
+        id(item): puntaje
+        for item in items
+        for puntaje in (_puntaje_giro(item),)
+        if puntaje is not None
     }
 
     # Bloque AUTORIDAD OPERACIONAL -- etiquetas DIRECCION presentes (caso
@@ -401,12 +439,21 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                             continue
                 elif not nominal(item):
                     continue
-                # GIRO es un dato comercial distinto: su valor no puede ser
-                # ni cliente ni obra destino.
-                if id(item) in valores_giro:
-                    continue
                 puntuacion = puntuar(etiqueta, item)
                 if puntuacion is None or puntuacion > 1.25:
+                    continue
+                # Bloque CONTAMINACIÓN GIRO/SEÑOR (caso real 472437) -- GIRO
+                # es un dato comercial distinto: su valor no puede ser ni
+                # cliente ni obra destino, SALVO que el propio campo que se
+                # está resolviendo reclame el mismo bloque con una
+                # puntuación ESTRICTAMENTE mejor (más cercana) que la que
+                # GIRO obtendría para él. Comparativo, no identidad: nunca
+                # se relaja al revés -- si GIRO empata o gana, la exclusión
+                # se mantiene (caso real 464170, GIRO y OBRA DESTINO en
+                # columnas casi equidistantes, sigue protegido con este
+                # mismo criterio).
+                puntaje_giro = puntaje_giro_por_id.get(id(item))
+                if puntaje_giro is not None and puntaje_giro <= puntuacion:
                     continue
                 # No atraviesa otra etiqueta: el candidato debe pertenecer a la
                 # zona de esta etiqueta y no estar más cerca de otra.
@@ -420,15 +467,65 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                     continue
                 candidatos.append((puntuacion, item))
 
-            for puntuacion, item in candidatos:
-                decisiones.append((puntuacion, item["texto"].upper()))
-                for _, vecino in candidatos:
-                    if vecino is item:
+            # Bloque UNIÓN MULTIBLOQUE CLIENTE/OBRA (caso real 472437,
+            # "CONSTRUCTORA" + "IGNACIO" + "HURTADO": tres cajas OCR
+            # separadas para un solo nombre) -- generaliza a N bloques la
+            # unión de a pares que existía antes (que sólo producía
+            # "CONSTRUCTORA IGNACIO", truncando el último token). Reutiliza
+            # el mismo algoritmo ya validado en
+            # `_extraer_despachar_a_geometrico._unir_linea_horizontal`:
+            # extiende el candidato hacia la derecha, dentro de la MISMA
+            # fila geométrica, mientras cada bloque siguiente sea contiguo
+            # (hueco acotado) y siga siendo un candidato válido para este
+            # campo -- nunca cruza a otra fila, nunca absorbe una etiqueta
+            # estructural ni un bloque ya excluido (GIRO comparativo
+            # incluido), nunca salta un bloque para buscar uno más lejano.
+            def _valido_continuacion(candidato: Dict[str, Any]) -> bool:
+                if campo == "obra destino":
+                    if not _es_candidato_obra_destino_geometrico(candidato):
+                        return False
+                elif not nominal(candidato):
+                    return False
+                puntaje_giro = puntaje_giro_por_id.get(id(candidato))
+                if puntaje_giro is not None and puntaje_giro <= 0.5:
+                    # Sin una etiqueta propia contra la que comparar (es una
+                    # continuación, no el candidato inicial), sólo se
+                    # rechaza si GIRO lo reclama con una afinidad real --
+                    # nunca marginal -- para no romper una frase genuina.
+                    return False
+                return True
+
+            def _unir_fila_valor(inicio: Dict[str, Any]) -> List[Dict[str, Any]]:
+                fila = sorted(
+                    (
+                        item for item in items
+                        if item is not inicio
+                        and item["x1"] >= inicio["x1"]
+                        and _misma_fila_geometrica(item, inicio)
+                    ),
+                    key=lambda item: item["x1"],
+                )
+                cadena = [inicio]
+                cursor = inicio
+                for item in fila:
+                    if any(item is bloque for bloque in cadena):
                         continue
-                    misma_fila = abs(vecino["cy"] - item["cy"]) <= max(vecino["h"], item["h"])
-                    brecha = vecino["x1"] - item["x2"]
-                    if misma_fila and 0 <= brecha <= 28 * escala:
-                        decisiones.append((puntuacion - 0.03, f'{item["texto"]} {vecino["texto"]}'.upper()))
+                    brecha = item["x1"] - cursor["x2"]
+                    if brecha > 28 * escala:
+                        break
+                    if not _valido_continuacion(item):
+                        break
+                    cadena.append(item)
+                    cursor = item
+                return cadena
+
+            for puntuacion, item in candidatos:
+                cadena = _unir_fila_valor(item)
+                if len(cadena) > 1:
+                    texto_cadena = " ".join(bloque["texto"] for bloque in cadena)
+                    decisiones.append((puntuacion - 0.03, re.sub(r"\s+", " ", texto_cadena).upper()))
+                else:
+                    decisiones.append((puntuacion, item["texto"].upper()))
 
         if not decisiones:
             return None
@@ -906,9 +1003,40 @@ def _extraer_transporte_geometrico(
 # (ver `buscar_numero_guia`) -- sólo se invoca cuando éste no encontró
 # nada (cableado en `atlas_core.procesamiento_masivo.procesar_archivo`,
 # junto al resto de recuperaciones geométricas de identidad).
-_PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO]\.?\s*([0-9]{5,8})$")
-_PATRON_MARCADOR_NUMERO_GUIA_SOLO = re.compile(r"^(?:N[°ºO]\.?|NRO\.?)$")
+# "?" se suma a la clase de marcador -- confusión OCR real y confirmada
+# (caso 464453: "N? 464453") del signo "°" mal leído; nunca abre nada
+# más que esta posición puntual del marcador "N".
+_PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO?]\.?\s*([0-9]{5,8})$")
+_PATRON_MARCADOR_NUMERO_GUIA_SOLO = re.compile(r"^(?:N[°ºO?]\.?|NRO\.?)$")
 _PATRON_CANDIDATO_NUMERICO_PURO = re.compile(r"^[0-9]{5,8}$")
+
+# Bloque GUIA_AUSENTE RECUPERABLE (caso real 464453) -- el ancla exigía
+# la frase COMPLETA "GUIA DE DESPACHO" como substring exacto; una guía
+# real (imagen sin ningún recorte ni daño) puede leerse "GUIA DE DESPAC"
+# -- el OCR simplemente no captura las últimas dos letras de una palabra
+# fija y conocida, nunca un fragmento ambiguo. Se tolera un PREFIJO
+# COMÚN de longitud mínima (nunca la frase completa reemplazada por un
+# fragmento corto que pudiera calzar con cualquier otra cosa) -- misma
+# filosofía que la tolerancia ya existente para "ESPACHAR A" (824fe31),
+# aplicada aquí a esta ancla fija específica, nunca un literal por guía.
+_ANCLA_GUIA_DESPACHO = "GUIA DE DESPACHO"
+_LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO = 12  # > 2/3 de los 16 caracteres del ancla completa
+
+
+def _es_ancla_guia_despacho(texto_simple: str) -> bool:
+    """True si `texto_simple` contiene el ancla completa "GUIA DE
+    DESPACHO", o comparte con ella un prefijo común de al menos
+    `_LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO` caracteres (tolera un
+    sufijo final truncado por el OCR -- nunca sustituciones en medio,
+    nunca un prefijo corto y ambiguo)."""
+    if _ANCLA_GUIA_DESPACHO in texto_simple:
+        return True
+    longitud_prefijo_comun = 0
+    for a, b in zip(texto_simple, _ANCLA_GUIA_DESPACHO):
+        if a != b:
+            break
+        longitud_prefijo_comun += 1
+    return longitud_prefijo_comun >= _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO
 
 
 def _es_candidato_numero_guia_valido(numero: str) -> bool:
@@ -928,18 +1056,24 @@ def _extraer_numero_guia_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     vertical y horizontal proporcional al tamaño de la propia ancla (nunca
     un umbral fijo en píxeles: la imagen real de 472624 es de resolución
     muy superior a los fixtures de referencia, y un umbral fijo calibrado
-    para éstos no habría capturado el caso real). Acepta dos formas del
-    marcador N°/Nº/NRO: en el MISMO bloque que el número ("N° 472624",
-    el caso real) o como bloque propio inmediatamente seguido, en la misma
-    fila, por un bloque puramente numérico. Se abstiene (devuelve {}) si
-    no hay ancla, si no aparece ningún candidato válido, o si aparece más
-    de uno distinto dentro de la ventana -- nunca inventa ni elige
-    arbitrariamente entre varios."""
+    para éstos no habría capturado el caso real). El ancla misma tolera
+    un recorte del OCR en su extremo final (bloque GUIA_AUSENTE RECUPERABLE,
+    caso real 464453: el documento completo, sin ningún daño ni recorte,
+    se leyó "GUIA DE DESPAC" -- ver `_es_ancla_guia_despacho`) -- nunca
+    tolera un fragmento corto y ambiguo, sólo un prefijo largo de un ancla
+    fija y conocida. Acepta dos formas del marcador N°/Nº/NRO (también "N?",
+    confusión real de OCR con "N°" -- caso 464453): en el MISMO bloque que
+    el número ("N° 472624", el caso real) o como bloque propio inmediatamente
+    seguido, en la misma fila, por un bloque puramente numérico. Se abstiene
+    (devuelve {}) si no hay ancla, si no aparece ningún candidato válido, o
+    si aparece más de uno distinto dentro de la ventana -- nunca inventa ni
+    elige arbitrariamente entre varios. Nunca usa el nombre de archivo como
+    fuente: sólo el contenido geométrico/textual real del documento."""
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
         return {}
 
-    anclas = [item for item in items if "GUIA DE DESPACHO" in item["simple"]]
+    anclas = [item for item in items if _es_ancla_guia_despacho(item["simple"])]
     if not anclas:
         return {}
 
@@ -1252,6 +1386,9 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     return {"valor": re.sub(r"\s+", " ", mejor).strip()}
 
 
+_FRASE_DESPACHAR_A = "DESPACHAR A"
+
+
 _ETIQUETAS_ESTRUCTURALES_DESPACHO = (
     "PATENTE", "CARRO", "RETIRA", "RUT CHOFER", "RUT", "TRANSPORTE",
     "HORA ENTRADA", "HORA SALIDA", "HORA", "PESO", "FECHA LLEGADA",
@@ -1385,6 +1522,87 @@ def _caja_union_geometrica(bloques: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"x1": x1, "x2": x2, "y1": y1, "y2": y2, "cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2, "h": y2 - y1}
 
 
+def _token_coincide_tolerante(token: str, objetivo: str) -> bool:
+    """Compara dos tokens ya normalizados con la misma tolerancia acotada
+    a corrupción OCR que usa el resto de Atlas (`_distancia_edicion_
+    acotada`, ya validada para nombres societarios) -- nunca una
+    coincidencia exacta obligatoria, porque el mismo texto impreso puede
+    leerse distinto en dos zonas separadas del documento (caso real
+    472211: "LANPA" junto al ancla recortada vs "LAMPA" en la zona
+    duplicada), pero tampoco cualquier parecido: palabras cortas (<=4)
+    sólo toleran sustitución en la MISMA longitud, palabras más largas
+    toleran 1-2 ediciones según su largo."""
+    if token == objetivo:
+        return True
+    limite = 1 if len(objetivo) <= 6 else 2
+    if len(objetivo) <= 4:
+        if len(token) != len(objetivo):
+            return False
+        limite = 1
+    return _distancia_edicion_acotada(token, objetivo, limite) <= limite
+
+
+def _existe_valor_duplicado_en_documento(
+    texto_candidato: str,
+    bloques_candidato: List[Dict[str, Any]],
+    items: List[Dict[str, Any]],
+    escala: float,
+) -> bool:
+    """Bloque CAPTURA RECORTADA SEVERA (caso real 472211: ancla "AR A",
+    falta "DESPACH" completo) -- corrobora que el valor candidato también
+    aparece, de forma INDEPENDIENTE, en OTRA zona del mismo documento
+    (típicamente el bloque de datos del destinatario -- DIRECCION/COMUNA
+    -- impreso una segunda vez más arriba del formulario). Es la
+    seguridad adicional que permite aceptar una ancla mucho más corta que
+    la tolerancia histórica ("ESPACHAR A", sólo falta la "D") sin relajar
+    el umbral globalmente -- nunca acepta un ancla corta sin esta
+    corroboración documental real. Agrupa bloques ajenos por fila
+    geométrica (y una posible fila siguiente contigua, mismo criterio que
+    la continuación multilínea de la dirección principal) y exige que
+    TODOS los tokens del candidato encuentren, en esa fila, un token
+    equivalente (tolerante a OCR vía `_token_coincide_tolerante`) -- no
+    hace falta coincidencia exacta de texto, pero sí de cada palabra."""
+    ids_candidato = {id(b) for b in bloques_candidato}
+    tokens_candidato = _tokens_valor(texto_candidato)
+    if not tokens_candidato:
+        return False
+    restantes = [item for item in items if id(item) not in ids_candidato]
+    visitados: set[int] = set()
+    for inicio in restantes:
+        if id(inicio) in visitados:
+            continue
+        fila = sorted(
+            (o for o in restantes if _misma_fila_geometrica(o, inicio)),
+            key=lambda o: o["x1"],
+        )
+        cadena = [fila[0]]
+        cursor = fila[0]
+        for siguiente in fila[1:]:
+            if siguiente["x1"] - cursor["x2"] > 40 * escala:
+                break
+            cadena.append(siguiente)
+            cursor = siguiente
+        for bloque in cadena:
+            visitados.add(id(bloque))
+        caja = _caja_union_geometrica(cadena)
+        texto_fila = " ".join(b["texto"] for b in cadena)
+        fila_siguiente = [
+            o for o in restantes
+            if id(o) not in visitados
+            and 0 <= o["y1"] - caja["y2"] <= 40 * escala
+            and abs(o["cx"] - caja["cx"]) <= 220 * escala
+        ]
+        if fila_siguiente:
+            texto_fila += " " + " ".join(o["texto"] for o in sorted(fila_siguiente, key=lambda o: o["x1"]))
+        tokens_fila = _tokens_valor(texto_fila)
+        if all(
+            any(_token_coincide_tolerante(token, objetivo) for objetivo in tokens_fila)
+            for token in tokens_candidato
+        ):
+            return True
+    return False
+
+
 def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     """Localiza el valor de DESPACHAR A por posición real en la imagen (no
     por el orden de lectura lineal de PaddleOCR/EasyOCR, que puede
@@ -1403,25 +1621,61 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     estructural o un bloque no nominal -- se detiene ahí, nunca salta un
     bloque para buscar uno más lejano. Se abstiene ante ausencia de
     candidato o ambigüedad real entre dos zonas -- nunca elige por
-    cercanía ni por orden OCR."""
+    cercanía ni por orden OCR.
+
+    Bloque CAPTURA RECORTADA SEVERA (caso real 472211: ancla "AR A", falta
+    "DESPACH" completo) -- además de la tolerancia "normal" a un recorte
+    de sólo la "D" inicial ("ESPACHAR A"), reconoce sufijos reales de
+    "DESPACHAR A" todavía más cortos bajo la misma exigencia geométrica
+    (toca el margen izquierdo + zona de entrega confirmada). Un ancla así
+    de corta NUNCA se acepta sola: exige además que el valor candidato
+    tenga un DUPLICADO independiente en otra parte del mismo documento
+    (`_existe_valor_duplicado_en_documento`, tolerante a variación de OCR
+    entre ambas apariciones) -- la corroboración documental es lo que
+    permite aceptar el recorte, nunca un umbral de longitud relajado."""
     items = _normalizar_bloques_geometricos(bloques)
     if not items:
         return {}
     escala = _escala_geometrica_texto(items)
 
-    def _ancla_despacho(item: Dict[str, Any]) -> tuple[bool, bool]:
-        """Devuelve (es_ancla, truncada_en_borde).
+    def _ancla_despacho(item: Dict[str, Any]) -> tuple[bool, bool, bool]:
+        """Devuelve (es_ancla, truncada_en_borde, requiere_corroboracion_duplicado).
 
-        ``ESPACHAR A`` es la unica variante truncada aceptada: falta
-        exactamente la D inicial, la caja toca el margen izquierdo y la
-        zona conserva otra etiqueta propia del bloque de entrega. No se usa
-        distancia de edicion ni se aceptan sufijos ambiguos (``AR A``/``A``).
-        """
+        ``ESPACHAR A`` es la variante truncada "normal": falta exactamente
+        la D inicial, la caja toca el margen izquierdo y la zona conserva
+        otra etiqueta propia del bloque de entrega -- misma tolerancia de
+        siempre, sin distancia de edición ni sufijos ambiguos.
+
+        Bloque CAPTURA RECORTADA SEVERA (caso real 472211: "AR A", falta
+        "DESPACH" completo) -- un recorte de foto MÁS severo puede comerse
+        más letras todavía. Se reconoce cualquier SUFIJO real de "DESPACHAR
+        A" de 3 a 9 caracteres (nunca un fragmento inventado ni un ancla
+        corta suelta sin relación con la frase completa) bajo las MISMAS
+        dos condiciones geométricas de siempre (toca el margen izquierdo +
+        zona de entrega confirmada por una etiqueta vecina) -- pero,
+        además, marca `requiere_corroboracion_duplicado=True`: el llamador
+        sólo puede aceptar el valor si también encuentra ese mismo valor
+        de forma independiente en otra parte del documento
+        (`_existe_valor_duplicado_en_documento`). Esa corroboración
+        adicional es lo que evita "aceptar anclas arbitrariamente cortas
+        globalmente" -- entre más corto el sufijo, más se apoya la
+        decisión en evidencia documental real, nunca en el propio umbral
+        de longitud."""
         simple = item["simple"]
         if simple == "DESPACHAR A" or simple.startswith("DESPACHAR A "):
-            return True, False
-        if not (simple == "ESPACHAR A" or simple.startswith("ESPACHAR A ")):
-            return False, False
+            return True, False, False
+        if simple == "ESPACHAR A" or simple.startswith("ESPACHAR A "):
+            severo = False
+        elif any(
+            simple == _FRASE_DESPACHAR_A[-longitud:] or simple.startswith(_FRASE_DESPACHAR_A[-longitud:] + " ")
+            # 3..9 caracteres: entre "AR A" (falta "DESPACH", caso real
+            # 472211) y justo antes de "ESPACHAR A" (longitud 10, ya
+            # cubierta arriba como la tolerancia "normal").
+            for longitud in range(3, len(_FRASE_DESPACHAR_A) - 1)
+        ):
+            severo = True
+        else:
+            return False, False, False
         cerca_borde = item["x1"] <= 25 * escala
         apoyos = ("RUT CHOFER", "PATENTE", "RETIRA", "FECHA SALIDA", "LLEGADA")
         zona_esperada = any(
@@ -1430,7 +1684,8 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             and abs(otro["cy"] - item["cy"]) <= 220 * escala
             for otro in items
         )
-        return bool(cerca_borde and zona_esperada), bool(cerca_borde and zona_esperada)
+        ok = bool(cerca_borde and zona_esperada)
+        return ok, ok, ok and severo
 
     def es_etiqueta_despacho(item: Dict[str, Any]) -> bool:
         return _ancla_despacho(item)[0]
@@ -1505,8 +1760,19 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             continue
         candidatos.sort(key=lambda par: par[0])
         mejor_puntaje, mejor_item = candidatos[0]
-        ancla_truncada = _ancla_despacho(etiqueta)[1]
-        if ancla_truncada and any(
+        _, ancla_truncada, requiere_corroboracion = _ancla_despacho(etiqueta)
+        # Bloque CAPTURA RECORTADA SEVERA (caso real 472211) -- con un
+        # ancla tan corta como "AR A", CUALQUIER fragmento de ruido OCR
+        # cercano al margen (p. ej. "ER", resto de otra palabra cortada)
+        # queda, por pura casualidad de distancia, a un puntaje casi
+        # idéntico del candidato real -- exigir aquí la misma "geometría
+        # decide sola" de la tolerancia normal abstendría el caso real
+        # siempre. Cuando la ancla exige corroboración por duplicado, esa
+        # corroboración (más abajo) YA es la salvaguarda -- un fragmento
+        # de ruido no tiene, plausiblemente, un duplicado documental
+        # propio en otra parte del documento, así que no hace falta
+        # además exigir separación de puntaje entre candidatos.
+        if ancla_truncada and not requiere_corroboracion and any(
             abs(puntaje - mejor_puntaje) <= 0.06
             and item["simple"] != mejor_item["simple"]
             for puntaje, item in candidatos[1:]
@@ -1598,6 +1864,16 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         ):
             # La tolerancia de borde exige morfologia de direccion
             # (texto nominal + numero); una persona/empresa suelta no basta.
+            continue
+        if requiere_corroboracion and not _existe_valor_duplicado_en_documento(
+            texto_compuesto, cadena, items, escala
+        ):
+            # Bloque CAPTURA RECORTADA SEVERA (caso real 472211) -- un
+            # ancla tan corta como "AR A" NUNCA se acepta sola: sólo
+            # cuando el mismo valor también aparece, independientemente,
+            # en otra zona del documento (la corroboración documental que
+            # el bloque de arriba exige). Sin ese duplicado, se abstiene
+            # -- nunca inventa ni relaja el umbral de longitud del ancla.
             continue
         decisiones.append((mejor_puntaje, texto_compuesto))
 

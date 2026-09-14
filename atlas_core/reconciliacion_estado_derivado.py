@@ -27,6 +27,7 @@ from atlas_core.decisiones_pendientes import (
     _guias_con_direccion_confirmada_por_humano,
     _guias_destino_terminado_por_humano,
     _motivo_ruta_base,
+    _obra_esta_ausente,
     clasificar_fallo_tecnico,
     guias_destino_conocido_ruta_pendiente,
 )
@@ -57,6 +58,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_origen_por_historial_de_cliente_sin_ocr,
     revalidar_origen_por_vecinos_temporales_gps_sin_ocr,
     revalidar_origen_vecinos_gps_contra_evidencia_propia_real_sin_ocr,
+    revalidar_destino_vacio_confirmado_por_documento_sin_ocr,
     revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
     revalidar_ruta_por_historial_de_obra_sin_ocr,
     revalidar_ruta_sin_destino_calculado_sin_ocr,
@@ -328,7 +330,30 @@ from atlas_core.revalidacion_documental import (
 # Casos reales: 472037 (CONERCIAL/COMERCIAL A Y B LTDA), 472008 (AUSIN
 # SAN BERNARDO), 472227 (EMPRESA CONST SIGRO). Subir a 22 fuerza el
 # barrido sobre operaciones ya migradas; idempotente.
-RULESET_VERSION = 22
+#
+# Subida de 22 a 23 -- CIERRE GENERAL DE LOS 9 INCOMPLETO_TECNICO
+# (segunda pasada, Codex): tres reglas usadas por esta misma batería
+# cambiaron de comportamiento, ninguna nueva en el sentido de "regla que
+# antes no corría" -- ya corrían, pero con un defecto real:
+# 1. `_huella_ruta` incluía `resultado_atlas_ia_json` (traza diagnóstica,
+#    nunca evidencia de ruteo) en el hash de "misma evidencia" --
+#    `intentos_misma_evidencia` se reseteaba en cada pasada aunque nada
+#    relevante hubiera cambiado, dejando `COORDENADA_NO_CONFIRMADA` sin
+#    converger nunca a una tarjeta (472477/472541).
+# 2. `_ciclo_vida_pendiente` (rama DETERMINISTA) ahora reconoce que un
+#    `motivo`/`estado_ruta` vacíos no significan "nada que preguntar"
+#    cuando la obra está ausente y ya hay dirección documental que
+#    preguntar junto (`OBRA_AUSENTE_BLOQUEA_RUTEO`, 472623/472624) --
+#    antes caía siempre a `MOTIVO_DETERMINISTA_SIN_ACCION_HUMANA_UTIL`.
+# 3. `revalidar_destino_vacio_confirmado_por_documento_sin_ocr` (nueva,
+#    llamada desde esta batería) reaplica automáticamente un destino ya
+#    CONFIRMADO por un humano en el ledger cuando una dependencia previa
+#    (origen) que bloqueaba su aplicación histórica ya se resolvió y la
+#    fila sigue con `despachar_a_crudo` vacío (472037).
+# Una operación ya migrada a 22 nunca reevaluaría estas tres reglas por sí
+# sola -- subir a 23 fuerza el primer barrido sobre operaciones ya
+# migradas; a partir de ahí, idempotente.
+RULESET_VERSION = 23
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -368,9 +393,22 @@ def _guias_humanas(decisiones: Path) -> set[str]:
 
 
 def _huella_ruta(fila: dict[str, str]) -> str:
+    # Bloque BUG intentos_misma_evidencia (Codex 472477/472541) -- causa
+    # raíz real: `resultado_atlas_ia_json` NO es evidencia de ruteo -- es
+    # la traza diagnóstica de B1 (texto/metadata que puede refrescarse
+    # entre pasadas sin que ningún campo de ruteo real haya cambiado).
+    # Incluirla en la huella hacía que CUALQUIER cambio de esa traza
+    # (aunque `planta_origen_id`/`despachar_a_crudo`/`motivo_ruta`, etc.
+    # quedaran idénticos) se leyera como "evidencia nueva": `_registro_
+    # pendiente` descartaba `intentos_misma_evidencia`/`ultimo_intento`
+    # en cada pasada y el reintento nunca acumulaba -- quedaba
+    # perpetuamente en `intentos=0` sin importar cuántas reconciliaciones
+    # reales corrieran. La huella ahora depende EXCLUSIVAMENTE de los
+    # campos que de verdad determinan si el ruteo puede converger
+    # distinto -- ningún campo de diagnóstico/observabilidad.
     campos = (
         "planta_origen_id", "despachar_a_crudo", "cliente", "obra_destino",
-        "destino_id", "motivo_ruta", "resultado_atlas_ia_json",
+        "destino_id", "motivo_ruta",
     )
     return hashlib.sha256("\0".join(str(fila.get(c, "")) for c in campos).encode("utf-8")).hexdigest()
 
@@ -489,6 +527,21 @@ def _ciclo_vida_pendiente(
             return _resultado(
                 ESTADO_ESPERA_ACCION_HUMANA, "CORREGIR_O_CONFIRMAR_DIRECCION", None
             )
+        # Bloque BLOQUEO PREVIO AL RUTEO (Codex 472623/472624) -- un
+        # `motivo` vacío no siempre significa "nada útil que hacer": el
+        # ruteo puede no haberse intentado nunca porque la obra nunca se
+        # extrajo del documento -- misma condición exacta que
+        # `detectar_decision_destino_no_resuelto` ya reconoce (motivo
+        # sintético `OBRA_AUSENTE_BLOQUEA_RUTEO`) para publicar la
+        # tarjeta correspondiente. Este bloque sólo alinea la EXPLICACIÓN
+        # del pendiente técnico con esa misma realidad -- nunca decide
+        # nada por sí solo.
+        if not motivo:
+            datos = registro.get("datos_disponibles") or {}
+            if _obra_esta_ausente(str(datos.get("obra", ""))) and str(datos.get("destino_documental", "")).strip():
+                return _resultado(
+                    ESTADO_ESPERA_ACCION_HUMANA, "OBRA_AUSENTE_BLOQUEA_RUTEO", None
+                )
         return _resultado(
             ESTADO_ESPERA_EVIDENCIA, "MOTIVO_DETERMINISTA_SIN_ACCION_HUMANA_UTIL", None
         )
@@ -1101,6 +1154,18 @@ def reconciliar_estado_derivado(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
             proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
         )
+        # Bloque DESTINO HUMANO YA CONFIRMADO (Codex 472037) -- corre
+        # ANTES del reintento de ruta de abajo, a propósito: llena
+        # `despachar_a_crudo` desde una confirmación humana YA registrada
+        # en el ledger que nunca pudo aplicarse porque el origen seguía
+        # bloqueado en ese momento -- así el reintento de ruta, en la
+        # MISMA pasada, ya tiene con qué intentar geocodificar. Ver
+        # docstring de la función para el criterio completo (identidad
+        # exacta guía+transporte, nunca sobrescribe un `despachar_a_crudo`
+        # ya existente).
+        destino_vacio_confirmado = revalidar_destino_vacio_confirmado_por_documento_sin_ocr(
+            ruta_dataset=dataset, ruta_ledger=actual / LEDGER,
+        )
         recuperacion = {"guias_actualizadas": []}
         if por_reintentar:
             recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -1344,7 +1409,9 @@ def reconciliar_estado_derivado(
             | set(limpieza_destino_catalogo["guias_actualizadas"])
             | set(limpieza_geo_contradiccion["guias_actualizadas"])
             | set(limpieza_obra_destino["guias_actualizadas"])
+            | set(destino_vacio_confirmado["guias_actualizadas"])
         ),
+        "destino_vacio_confirmado_desde_ledger": destino_vacio_confirmado["guias_actualizadas"],
         "destinos_historial_recuperados": recuperacion_historial_destino,
         "destinos_historial_revertidos": reversion_historial_destino,
         "destinos_rechazados_por_evidencia_b1": rechazo_evidencia_destino["guias_actualizadas"],

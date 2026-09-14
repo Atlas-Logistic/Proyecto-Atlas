@@ -2648,6 +2648,107 @@ def revalidar_destino_confirmado_desde_ledger_sin_ocr(
     return {"destinos_corregidos": destinos_corregidos}
 
 
+def revalidar_destino_vacio_confirmado_por_documento_sin_ocr(
+    *, ruta_dataset: str | Path, ruta_ledger: str | Path,
+) -> dict[str, object]:
+    """Bloque DESTINO HUMANO YA CONFIRMADO (Codex 472037) -- causa raíz
+    real: un humano confirmó `REGISTRAR_DIRECCION` (`direccion_manual`, a
+    veces `nombre_obra_manual`) para un documento cuyo `despachar_a_crudo`
+    NUNCA llegó a extraerse del OCR (vacío -- no un texto OCR parecido
+    que corregir, el campo simplemente no existía). En el momento de esa
+    confirmación la planta de origen todavía no estaba resuelta
+    (bloqueada por otra dependencia, p. ej. un conflicto GPS que otra
+    capacidad corrigió después), así que la confirmación nunca pudo
+    aplicarse a la fila. Cuando esa dependencia se resuelve más tarde, la
+    fila sigue con `despachar_a_crudo` vacío -- ninguna revalidación
+    existente vuelve a mirar una confirmación humana YA registrada; sin
+    este bloque, el humano tendría que repetir exactamente lo que ya dijo.
+
+    Reaplica esa confirmación usando la identidad EXACTA del documento
+    (`numero_guia` + `numero_transporte`, la misma pareja que identifica
+    la decisión en el ledger) -- nunca por texto/similitud, para no
+    aplicar una confirmación a un documento equivocado. Sólo llena el
+    campo; NO calcula ruta aquí -- `revalidar_ruta_sin_destino_calculado_
+    sin_ocr` (que ya corre después en la misma reconciliación) hace eso:
+    su propio docstring ya documenta 472037 explícitamente para el caso
+    "`motivo_ruta` en blanco, sin causa estable, se reintenta con el
+    despachar_a_crudo fresco" -- este bloque resuelve la capa anterior
+    (el campo seguía vacío, así que ese reintento nunca llegaba a correr).
+
+    Se abstiene (no toca la fila) cuando:
+    - `despachar_a_crudo` YA tiene texto (aunque sea genérico/incorrecto
+      -- eso es terreno de otras revalidaciones; nunca sobrescribe lo que
+      el documento ya trae);
+    - no hay planta de origen todavía (la dependencia sigue bloqueada,
+      nada que reaplicar todavía);
+    - la fila ya tiene `estado_ruta == RUTA_CALCULADA` (nada pendiente);
+    - no existe ninguna aplicación `REGISTRAR_DIRECCION` en el ledger
+      para ESA MISMA pareja (numero_guia, numero_transporte)."""
+    ruta = Path(ruta_dataset)
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    # La aplicación MÁS RECIENTE por (guía, transporte) -- el ledger es
+    # cronológico (se recorre en orden), así que la última vista para una
+    # misma clave es la vigente: una corrección posterior del mismo
+    # humano reemplaza a la anterior, nunca se mezclan.
+    confirmaciones: dict[tuple[str, str], dict[str, object]] = {}
+    for aplicacion in ledger.get("aplicaciones", []) or []:
+        if aplicacion.get("tipo") != "DESTINO_NO_RESUELTO" or aplicacion.get("accion") != "REGISTRAR_DIRECCION":
+            continue
+        direccion_manual = str(aplicacion.get("direccion_manual") or "").strip()
+        if not direccion_manual:
+            continue
+        documento = aplicacion.get("documento") or {}
+        guia = str(documento.get("numero_guia", "")).strip()
+        transporte = str(documento.get("numero_transporte", "")).strip()
+        if not guia or not transporte:
+            continue
+        confirmaciones[(guia, transporte)] = aplicacion
+
+    if not confirmaciones:
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    from atlas_core.decisiones_pendientes import _obra_esta_ausente
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            if str(fila.get("despachar_a_crudo", "")).strip():
+                continue
+            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+                continue
+            planta_id = str(fila.get("planta_origen_id", "")).strip()
+            if not planta_id:
+                continue
+            clave = (
+                str(fila.get("numero_guia", "")).strip(),
+                str(fila.get("numero_transporte", "")).strip(),
+            )
+            aplicacion = confirmaciones.get(clave)
+            if aplicacion is None:
+                continue
+            fila["despachar_a_crudo"] = str(aplicacion.get("direccion_manual") or "").strip()
+            comuna_manual = str(aplicacion.get("comuna_manual") or "").strip()
+            if comuna_manual and not str(fila.get("localidad_entrega", "")).strip():
+                fila["localidad_entrega"] = comuna_manual
+            nombre_obra_manual = str(aplicacion.get("nombre_obra_manual") or "").strip()
+            if nombre_obra_manual and _obra_esta_ausente(str(fila.get("obra_destino", ""))):
+                fila["obra_destino"] = nombre_obra_manual
+            # `motivo_ruta` queda vacío a propósito -- ver docstring:
+            # `revalidar_ruta_sin_destino_calculado_sin_ocr` ya trata un
+            # motivo en blanco como "sin causa estable" y reintenta con
+            # el `despachar_a_crudo` fresco; nunca se inventa un motivo
+            # aquí.
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def _calle_numero_normalizado(texto: str) -> str | None:
     """Prefijo "calle + número" normalizado de un texto de destino libre
     (calle, posiblemente varias palabras, seguida del primer número que
@@ -4737,6 +4838,19 @@ def revalidar_y_regenerar_reporte(
     resultado_destinos_confirmados = revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
         carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
     )
+    # Bloque DESTINO HUMANO YA CONFIRMADO (Codex 472037) -- corre justo
+    # ANTES de la revalidación de ruta, a propósito: un `despachar_a_
+    # crudo` recién llenado aquí desde una confirmación humana YA
+    # registrada en el ledger (que nunca pudo aplicarse porque el origen
+    # seguía bloqueado en ese momento) es exactamente el dato fresco que
+    # la revalidación de ruta, justo abajo EN LA MISMA pasada, necesita
+    # para intentar geocodificar/rutear -- mismo criterio que ya rige
+    # todo este bloque (una capacidad recién resuelta merece la misma
+    # oportunidad de propagarse en la pasada actual, nunca esperar a una
+    # corrida aparte).
+    resultado_destino_vacio_confirmado = revalidar_destino_vacio_confirmado_por_documento_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json",
+    )
     # Bloque LOGÍSTICA L1 -- caso real (11 viajes sin km/tiempo pese a
     # tener origen+destino documental ya persistidos): a diferencia de
     # las revalidaciones anteriores, ÉSTA sí puede tocar red (geocodificación/
@@ -4868,6 +4982,7 @@ def revalidar_y_regenerar_reporte(
         "origen_historial_cliente": resultado_origen_historial_cliente,
         "ruta_convergencia_gps_historica": resultado_ruta_convergencia_gps,
         "destinos_confirmados_geocodificados": resultado_destinos_confirmados,
+        "destino_vacio_confirmado": resultado_destino_vacio_confirmado,
         "ruta": resultado_ruta,
         "destino_rut_pegado": resultado_destino_rut_pegado,
         "material_estampado": resultado_material_estampado,

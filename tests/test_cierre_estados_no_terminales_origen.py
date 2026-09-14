@@ -171,8 +171,16 @@ def _entorno_472477(tmp_path):
             origen_determinado_por="", motivo_origen_gps=_MOTIVO_EMPATE_SIN_EVIDENCIA,
             origen_gps="ORIGEN_GPS_CONFLICTO",
             estado_ruta="", motivo_ruta="",
+            # Bloque BLOQUEO PREVIO AL RUTEO (Codex 472623/472624): la obra
+            # se deja explícitamente CONOCIDA -- este módulo prueba
+            # exclusivamente el ciclo de vida de la decisión de ORIGEN (ver
+            # docstring del archivo, "destino confirmado" ya agotado por
+            # diseño); una obra_destino ausente aquí sería un vacío
+            # accidental del fixture, no evidencia real de que la obra
+            # falte, y generaría de forma legítima una SEGUNDA pregunta
+            # (DESTINO_NO_RESUELTO) ajena a lo que este archivo valida.
             despachar_a_crudo="PASAJE ISRAEL 1303", direccion_entrega="PASAJE ISRAEL 1303",
-            localidad_entrega="CHILLAN",
+            localidad_entrega="CHILLAN", obra_destino="OBRA CHILLAN CONOCIDA",
             tipo_carga="NO DETERMINADO", descripcion_material="",
         ),
     ])

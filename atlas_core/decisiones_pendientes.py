@@ -231,6 +231,22 @@ MOTIVOS_DESTINO_NO_RESUELTO = frozenset({
 # `escalamiento` de `reconciliacion_estado_derivado.py` ya declaró la
 # evidencia agotada.
 MOTIVOS_DESTINO_TECNICO_AGOTABLE = frozenset({
+    # Bloque CIERRE 472477/472541 -- se mantiene AGOTABLE a propósito,
+    # nunca DETERMINISTA: "repetir la MISMA consulta" no es sólo repetir
+    # la llamada HTTP con el mismo texto -- cada reintento vuelve a
+    # correr el pipeline COMPLETO de resolución (deduplicación de
+    # comuna, base territorial INE, destinos ya confirmados, etc.), así
+    # que un fix de código o un dato geográfico nuevo desplegado entre
+    # reintentos SÍ puede cambiar el resultado sin que la evidencia
+    # externa documental haya cambiado un ápice (`RULESET_VERSION`
+    # fuerza esto también, de inmediato, ante cualquier cambio de
+    # reglas -- el cooldown de abajo sólo cubre la ventana entre
+    # versiones). El bug real que hacía perder los reintentos ya
+    # acumulados no era la clase AGOTABLE en sí -- era que la huella de
+    # "misma evidencia" (`reconciliacion_estado_derivado._huella_ruta`)
+    # incluía `resultado_atlas_ia_json` (diagnóstico, no evidencia de
+    # ruteo), reseteando `intentos_misma_evidencia` en cada pasada
+    # aunque nada relevante hubiera cambiado -- corregido ahí, no aquí.
     "COORDENADA_NO_CONFIRMADA",
     # Bloque GEOGRAFÍA 2B -- causa raíz real (472044/PUERTA DEL SOL 83): un
     # único candidato del proveedor con confianza insuficiente podía
@@ -708,6 +724,17 @@ def detectar_decision_destino_no_resuelto(
       Javier antes de agotarlo sería exactamente la pregunta humana
       prematura que el punto 3 de "convergencia post lote 2" pide evitar.
 
+    Bloque BLOQUEO PREVIO AL RUTEO (Codex 472623/472624): cuando
+    `motivo_ruta`/`estado_ruta` están AMBOS vacíos (el ruteo nunca se
+    intentó, típicamente porque la obra nunca se extrajo del documento),
+    esto NO se trata automáticamente como "sin acción humana útil" -- si
+    la obra está ausente (`_obra_esta_ausente`) y ya hay una dirección
+    documental (`despachar_a_crudo`) que preguntar junto, se genera la
+    misma tarjeta que si hubiera un motivo de ruta reconocido (motivo
+    sintético `OBRA_AUSENTE_BLOQUEA_RUTEO`). Nunca reabre algo que el
+    ledger/catálogo ya resolvió -- eso lo sigue cubriendo
+    `guias_direccion_confirmada` arriba, antes de llegar aquí.
+
     `intentos_misma_evidencia` (Bloque CONVERGENCIA POST LOTE 2, opcional y
     aditivo -- por defecto 0, compatible con todos los llamadores
     existentes que no lo conocían) es la misma cuenta que ya mantiene
@@ -775,6 +802,27 @@ def detectar_decision_destino_no_resuelto(
         elif motivo_base in MOTIVOS_DESTINO_TECNICO_AGOTABLE:
             if int(intentos_misma_evidencia) < UMBRAL_INTENTOS_TECNICOS_AGOTADOS:
                 return None
+        elif not motivo_base and not estado_ruta:
+            # Bloque BLOQUEO PREVIO AL RUTEO (Codex 472623/472624) -- un
+            # `motivo_ruta`/`estado_ruta` vacíos NO significan "nada que
+            # preguntar": el ruteo puede no haberse intentado NUNCA porque
+            # algo lo bloqueó ANTES de llegar a geocodificar -- el caso
+            # real es la obra nunca extraída del documento
+            # (`_obra_esta_ausente`), exactamente la misma condición que
+            # ya sabe preguntar `OBRA_AUSENTE` más abajo, pero hasta ahora
+            # sólo se evaluaba cuando SÍ existía un motivo de ruta
+            # reconocido que citar. Sólo se activa con una acción humana
+            # útil real y NUEVA -- obra ausente Y una dirección documental
+            # ya extraída para preguntar junto en la misma tarjeta --
+            # nunca para volver a pedir algo que el ledger/catálogo ya
+            # resolvió (esa abstención (`guias_direccion_confirmada`) ya
+            # corrió arriba, antes de este bloque).
+            if not (
+                _obra_esta_ausente(str(fila.get("obra_destino", "")))
+                and str(fila.get("despachar_a_crudo", "")).strip()
+            ):
+                return None
+            motivo_base = "OBRA_AUSENTE_BLOQUEA_RUTEO"
         else:
             return None
     documento = fila.get("numero_guia", ""), fila.get("numero_transporte", "")
