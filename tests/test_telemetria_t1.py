@@ -329,6 +329,146 @@ def test_cache_persiste_entre_instancias_del_repositorio(tmp_path):
     assert len(resultado.viajes) == 1
 
 
+# ============================================================
+# Bloque OPTIMIZACIÓN SEGURA DE LATENCIA EN TELEMETRÍA -- caché en
+# memoria por instancia de `RepositorioTelemetria` (causa raíz medida:
+# 741 relecturas del mismo `telemetria_cache.json` de 6,4 MB en una sola
+# aplicación de decisión, ~39s de ~64s totales). Contrato: primera
+# lectura toca disco, lecturas posteriores de la MISMA instancia
+# reutilizan la caché en memoria, escrituras la mantienen sincronizada,
+# una instancia NUEVA vuelve a leer -- nunca caché global/singleton.
+# ============================================================
+
+
+def _contar_lecturas_de_disco(repositorio, monkeypatch):
+    """Espía `_leer_desde_disco` (el único punto que realmente toca
+    disco) sin cambiar su comportamiento -- devuelve una lista que
+    crece en cada llamada real."""
+    llamadas = []
+    original = repositorio._leer_desde_disco
+    def espia():
+        llamadas.append(1)
+        return original()
+    monkeypatch.setattr(repositorio, "_leer_desde_disco", espia)
+    return llamadas
+
+
+def test_primera_lectura_toca_disco(tmp_path, monkeypatch):
+    ruta = tmp_path / "cache.json"
+    ruta.write_text('{"version_formato": 1, "viajes": {}, "breadcrumbs": {}}', encoding="utf-8")
+    repo = RepositorioTelemetria(ruta)
+    llamadas = _contar_lecturas_de_disco(repo, monkeypatch)
+    repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27))
+    assert len(llamadas) == 1
+
+
+def test_segunda_lectura_misma_instancia_no_vuelve_a_leer(tmp_path, monkeypatch):
+    ruta = tmp_path / "cache.json"
+    ruta.write_text('{"version_formato": 1, "viajes": {}, "breadcrumbs": {}}', encoding="utf-8")
+    repo = RepositorioTelemetria(ruta)
+    llamadas = _contar_lecturas_de_disco(repo, monkeypatch)
+    for _ in range(5):
+        repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27))
+        repo.buscar_breadcrumbs("onelogis", "1")
+    assert len(llamadas) == 1, "10 lecturas sobre la misma instancia -- disco tocado una sola vez"
+
+
+def test_escritura_actualiza_cache_sin_releer_disco(tmp_path, monkeypatch):
+    ruta = tmp_path / "cache.json"
+    repo = RepositorioTelemetria(ruta)
+    llamadas = _contar_lecturas_de_disco(repo, monkeypatch)
+    viajes = (ViajeTelemetria("1", "TZWR86", "2026-07-27T10:00:00", "2026-07-27T10:05:00"),)
+    repo.guardar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27), viajes)
+    assert len(llamadas) == 1, "guardar_viajes lee (crea la base vacía) una vez antes de escribir"
+    resultado = repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27))
+    assert resultado == list(viajes)
+    assert len(llamadas) == 1, "la lectura posterior ve el dato recien escrito sin volver a tocar disco"
+
+
+def test_guardar_viajes_visible_de_inmediato_en_la_misma_instancia(tmp_path):
+    repo = RepositorioTelemetria(tmp_path / "cache.json")
+    viajes = (ViajeTelemetria("1", "TZWR86", "2026-07-27T10:00:00", "2026-07-27T10:05:00"),)
+    repo.guardar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27), viajes)
+    assert repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27)) == list(viajes)
+
+
+def test_guardar_breadcrumbs_visible_de_inmediato_en_la_misma_instancia(tmp_path):
+    repo = RepositorioTelemetria(tmp_path / "cache.json")
+    puntos = (PosicionTelemetria(-33.4, -70.6, "2026-07-27T10:00:00"),)
+    repo.guardar_breadcrumbs("onelogis", "1", puntos)
+    assert repo.buscar_breadcrumbs("onelogis", "1") == list(puntos)
+
+
+def test_nueva_instancia_vuelve_a_leer_desde_disco(tmp_path, monkeypatch):
+    ruta = tmp_path / "cache.json"
+    repo_1 = RepositorioTelemetria(ruta)
+    viajes = (ViajeTelemetria("1", "TZWR86", "2026-07-27T10:00:00", "2026-07-27T10:05:00"),)
+    repo_1.guardar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27), viajes)
+
+    repo_2 = RepositorioTelemetria(ruta)
+    llamadas_2 = _contar_lecturas_de_disco(repo_2, monkeypatch)
+    assert len(llamadas_2) == 0, "una instancia recien creada no ha tocado disco todavia"
+    resultado = repo_2.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27))
+    assert len(llamadas_2) == 1, "instancia NUEVA -- primera lectura de ESTA instancia toca disco"
+    assert resultado == list(viajes)
+
+
+def test_archivo_ausente_se_cachea_como_base_vacia_sin_cambiar_semantica(tmp_path, monkeypatch):
+    ruta = tmp_path / "no-existe.json"
+    repo = RepositorioTelemetria(ruta)
+    llamadas = _contar_lecturas_de_disco(repo, monkeypatch)
+    assert repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27)) is None
+    assert repo.buscar_breadcrumbs("onelogis", "1") is None
+    assert len(llamadas) == 1, "ausencia de archivo tambien se resuelve una sola vez por instancia"
+
+
+def test_archivo_corrupto_se_cachea_como_base_vacia_sin_cambiar_semantica(tmp_path, monkeypatch):
+    ruta = tmp_path / "cache.json"
+    ruta.write_text("{esto no es json valido", encoding="utf-8")
+    repo = RepositorioTelemetria(ruta)
+    llamadas = _contar_lecturas_de_disco(repo, monkeypatch)
+    assert repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27)) is None
+    assert len(llamadas) == 1
+    # Segunda consulta -- misma instancia, sigue sin reventar ni releer.
+    assert repo.buscar_breadcrumbs("onelogis", "1") is None
+    assert len(llamadas) == 1
+
+
+def test_archivo_json_valido_pero_no_es_objeto_se_trata_como_vacio(tmp_path):
+    ruta = tmp_path / "cache.json"
+    ruta.write_text("[1, 2, 3]", encoding="utf-8")
+    repo = RepositorioTelemetria(ruta)
+    assert repo.buscar_viajes("onelogis", "TZWR86", date(2026, 7, 27), date(2026, 7, 27)) is None
+
+
+def test_resultados_funcionales_identicos_con_o_sin_cache_multiples_claves(tmp_path):
+    """Control de equivalencia funcional -- varias patentes/trips
+    distintos en la misma instancia, mezclando lecturas y escrituras en
+    cualquier orden, deben verse exactamente igual que con el
+    comportamiento anterior (siempre re-leyendo): ninguna clave se
+    pierde, ninguna se mezcla con otra."""
+    repo = RepositorioTelemetria(tmp_path / "cache.json")
+    v1 = (ViajeTelemetria("1", "AA1111", "2026-07-27T10:00:00", "2026-07-27T10:05:00"),)
+    v2 = (ViajeTelemetria("2", "BB2222", "2026-07-28T11:00:00", "2026-07-28T11:05:00"),)
+    b1 = (PosicionTelemetria(-33.4, -70.6, "2026-07-27T10:00:00"),)
+
+    repo.guardar_viajes("onelogis", "AA1111", date(2026, 7, 27), date(2026, 7, 27), v1)
+    assert repo.buscar_viajes("onelogis", "BB2222", date(2026, 7, 28), date(2026, 7, 28)) is None
+    repo.guardar_viajes("onelogis", "BB2222", date(2026, 7, 28), date(2026, 7, 28), v2)
+    repo.guardar_breadcrumbs("onelogis", "1", b1)
+
+    assert repo.buscar_viajes("onelogis", "AA1111", date(2026, 7, 27), date(2026, 7, 27)) == list(v1)
+    assert repo.buscar_viajes("onelogis", "BB2222", date(2026, 7, 28), date(2026, 7, 28)) == list(v2)
+    assert repo.buscar_breadcrumbs("onelogis", "1") == list(b1)
+    assert repo.buscar_breadcrumbs("onelogis", "2") is None
+
+    # Releído desde una instancia nueva (disco real) -- mismo resultado.
+    repo_2 = RepositorioTelemetria(repo.ruta)
+    assert repo_2.buscar_viajes("onelogis", "AA1111", date(2026, 7, 27), date(2026, 7, 27)) == list(v1)
+    assert repo_2.buscar_viajes("onelogis", "BB2222", date(2026, 7, 28), date(2026, 7, 28)) == list(v2)
+    assert repo_2.buscar_breadcrumbs("onelogis", "1") == list(b1)
+
+
 # --- 14: no filtración de credencial ---
 
 

@@ -31,8 +31,29 @@ def _clave_breadcrumbs(proveedor: str, trip_id: str) -> str:
 
 
 class RepositorioTelemetria:
+    """Bloque OPTIMIZACIÓN SEGURA DE LATENCIA EN TELEMETRÍA -- causa raíz
+    medida (2026-09-14): `_leer()` releía y reparseaba `telemetria_cache.
+    json` completo (~6,4 MB) en CADA llamada -- una sola aplicación de
+    decisión disparaba 741 relecturas del mismo archivo dentro de
+    `revalidar_ruta_por_convergencia_gps_historica_sin_ocr` (~39s de los
+    ~64s totales). El contenido nunca cambia entre dos llamadas de la
+    MISMA instancia salvo que ESA MISMA instancia lo escriba -- por eso
+    basta con una caché EN MEMORIA por instancia (`self._cache`), nunca
+    global/singleton (cada revalidador sigue construyendo su propia
+    instancia, con su propio alcance -- nunca una vida artificialmente
+    extendida ni compartida entre revalidadores distintos). Primera
+    lectura toca disco; lecturas posteriores de la misma instancia
+    reutilizan `self._cache`; `guardar_viajes`/`guardar_breadcrumbs`
+    actualizan `self._cache` en el mismo momento en que escriben a disco
+    -- nunca queda desincronizado dentro de la vida de la instancia.
+    Cambios externos al archivo hechos por OTRA instancia/proceso
+    durante la vida de ÉSTA no se ven -- exactamente el mismo supuesto
+    ya vigente para cualquier revalidador de una sola pasada (construye
+    su propia instancia, la usa, la descarta)."""
+
     def __init__(self, ruta: str | Path = "catalogos/telemetria_cache.json") -> None:
         self.ruta = Path(ruta)
+        self._cache: dict | None = None
 
     def buscar_viajes(
         self, proveedor: str, patente: str, desde: date, hasta: date
@@ -72,6 +93,22 @@ class RepositorioTelemetria:
         self._escribir(contenido)
 
     def _leer(self) -> dict:
+        """Contenido vigente para ESTA instancia -- disco sólo en la
+        PRIMERA llamada (`self._cache is None`); de ahí en más, la copia
+        en memoria (ver docstring de la clase). Devuelve el mismo objeto
+        `dict` en cada llamada (nunca una copia) a propósito:
+        `guardar_viajes`/`guardar_breadcrumbs` mutan ese mismo objeto
+        antes de persistirlo, así que la caché queda al día sin ningún
+        paso adicional."""
+        if self._cache is None:
+            self._cache = self._leer_desde_disco()
+        return self._cache
+
+    def _leer_desde_disco(self) -> dict:
+        """Lectura real de disco -- nunca se llama más de una vez por
+        instancia (ver `_leer`). Separada de `_leer` para que un test
+        pueda espiar/contar exactamente cuántas veces se tocó el disco,
+        sin depender de mockear `Path.read_text` directamente."""
         if not self.ruta.exists():
             return {"version_formato": VERSION_FORMATO, "viajes": {}, "breadcrumbs": {}}
         try:
@@ -104,3 +141,9 @@ class RepositorioTelemetria:
             if temporal is not None:
                 temporal.unlink(missing_ok=True)
             raise
+        # La escritura tuvo éxito -- `contenido` (ya mutado por
+        # `guardar_viajes`/`guardar_breadcrumbs`) pasa a ser la caché
+        # vigente de esta instancia, para que una lectura inmediatamente
+        # posterior (misma instancia) vea el dato recién escrito sin
+        # volver a tocar disco.
+        self._cache = contenido
