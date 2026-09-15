@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from atlas_core.registro_eventos_operacionales import registrar_evento
+
 RAIZ_PROYECTO = Path(__file__).resolve().parent.parent
 COLUMNAS = (
     "viaje_id", "numero_transporte", "fecha", "estado", "numeros_guia", "clientes",
@@ -40,9 +42,12 @@ def _fila(**overrides):
     return base
 
 
-def _ejecutar_cli(pregunta, ruta_viajes):
+def _ejecutar_cli(pregunta, ruta_viajes, raiz_atlas=None):
+    argumentos = [sys.executable, str(RAIZ_PROYECTO / "consultar_atlas.py"), pregunta, "--viajes", str(ruta_viajes)]
+    if raiz_atlas is not None:
+        argumentos.extend(["--raiz-atlas", str(raiz_atlas)])
     resultado = subprocess.run(
-        [sys.executable, str(RAIZ_PROYECTO / "consultar_atlas.py"), pregunta, "--viajes", str(ruta_viajes)],
+        argumentos,
         cwd=str(RAIZ_PROYECTO), capture_output=True, text=True, timeout=30,
     )
     return resultado
@@ -76,3 +81,22 @@ def test_cli_nunca_deja_el_proceso_sin_salida_json_ante_error(tmp_path):
     datos = json.loads(resultado.stdout.strip())
     assert datos["estado"] == "ERROR"
     assert datos["resultado"] is None
+
+
+def test_cli_lista_viajes_de_incidencias_operacionales_sin_convertir_strings_a_dict(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(viaje_id="v1", numero_transporte="T1", fecha="12-09-2026", numeros_guia="473001"),
+        _fila(viaje_id="v2", numero_transporte="T2", fecha="11-09-2026", numeros_guia="473002"),
+    ])
+    for transporte in ("T1", "T2"):
+        registrar_evento(raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=transporte, origen="TEST")
+    resultado = _ejecutar_cli("que viajes tuvieron incidencia en los ultimos 30 dias", ruta, raiz_atlas=tmp_path)
+    assert resultado.returncode == 0
+    datos = json.loads(resultado.stdout.strip())
+    cuerpo = datos["resultado"]
+    assert cuerpo["consulta_interpretada"]["dominio"] == "EVENTOS"
+    assert cuerpo["consulta_interpretada"]["filtros"]["dias"] == "30"
+    assert cuerpo["resultado"] == ["v1", "v2"]
+    assert {e["numero_transporte"] for e in cuerpo["viajes_soporte"]} == {"T1", "T2"}
+    assert all(e["tipo_evento"] == "TIENE_ESTADIA" for e in cuerpo["viajes_soporte"])

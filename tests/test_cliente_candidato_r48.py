@@ -6,7 +6,7 @@ este bloque)."""
 import csv
 import json
 
-from atlas_core.aplicacion_decisiones import aplicar_decision_obra
+from atlas_core.aplicacion_decisiones import ErrorAplicacionDecision, aplicar_decision_obra
 from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
 from atlas_core.decisiones_pendientes import detectar_decisiones_documento, generar_artefacto
 from atlas_core.procesamiento_masivo import COLUMNAS
@@ -153,6 +153,95 @@ def test_confirmar_cliente_candidato_no_escribe_catalogo_y_encadena_obra(tmp_pat
     aplicacion = ledger["aplicaciones"][0]
     assert aplicacion["tipo"] == "CLIENTE_CANDIDATO" and aplicacion["accion"] == "CONFIRMAR"
     assert aplicacion["valor_canonico"] == "COMERCIAL A Y B LTDA"
+
+
+# ============================================================
+# Bloque CORRECCIÓN HUMANA TRANSVERSAL -- CLIENTE_CANDIDATO tenía el mismo
+# defecto estructural que DESTINO_NO_RESUELTO con propuesta B1: sólo se
+# podía Confirmar/No confirmar el candidato sugerido, sin forma de indicar
+# cuál es el cliente correcto si el candidato estaba mal. `cliente_
+# correccion_manual` (opcional) busca ese nombre entre los clientes YA
+# existentes (`CatalogoClientes.buscar`, nunca difuso/ambiguo) y lo usa en
+# vez del candidato -- nunca crea un cliente nuevo aquí.
+# ============================================================
+
+
+def test_confirmar_con_correccion_usa_el_cliente_escrito_en_vez_del_candidato(tmp_path):
+    raiz, catalogos, actual, candidato_sugerido, decision = _entorno(tmp_path)
+    cliente_correcto = _cliente_confirmado(catalogos, nombre="PRODALAM SA", rut="93.772.000-9")
+    # Registrar un cliente nuevo cambia `catalogos_sha256` -- se republica
+    # la MISMA decisión (idéntico contenido/decision_id) para que su
+    # artefacto quede otra vez sincronizado con el catálogo vigente, igual
+    # que haría una reconciliación real entre el registro del cliente y la
+    # aplicación de esta corrección.
+    generar_artefacto(ruta_dataset=actual / "analisis_completo_guias.csv", carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json")
+
+    resultado = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR",
+        cliente_correccion_manual="PRODALAM SA",
+    )
+    assert resultado["ok"] is True
+    # La corrección -- nunca el candidato original -- es la identidad que
+    # queda confirmada.
+    assert resultado["cliente_id"] == cliente_correcto.cliente_id
+    assert resultado["cliente_id"] != candidato_sugerido.cliente_id
+
+    ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    aplicacion = ledger["aplicaciones"][0]
+    assert aplicacion["cliente_id"] == cliente_correcto.cliente_id
+    assert aplicacion["valor_canonico"] == "PRODALAM SA"
+    # Trazabilidad: qué candidato proponía Atlas antes de la corrección.
+    assert aplicacion["cliente_id_candidato_anterior"] == candidato_sugerido.cliente_id
+    assert aplicacion["cliente_correccion_manual"] == "PRODALAM SA"
+
+    # La obra encadenada se pregunta para el cliente CORREGIDO, no para el
+    # candidato original.
+    pendientes = _pendientes(actual)
+    obra_pendiente = next(d for d in pendientes if d["tipo"] == "OBRA_DESCONOCIDA")
+    assert obra_pendiente["contexto"]["cliente_id"] == cliente_correcto.cliente_id
+    assert obra_pendiente["contexto"]["cliente_canonico"] == "PRODALAM SA"
+
+
+def test_confirmar_con_correccion_inexistente_se_abstiene_sin_tocar_nada(tmp_path):
+    raiz, catalogos, actual, candidato_sugerido, decision = _entorno(tmp_path)
+    antes_ledger = (actual / "decisiones_aplicadas.json").read_bytes() if (actual / "decisiones_aplicadas.json").exists() else b""
+    antes_pendientes = (actual / "decisiones_pendientes.json").read_bytes()
+
+    try:
+        aplicar_decision_obra(
+            raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR",
+            cliente_correccion_manual="EMPRESA QUE NO EXISTE EN NINGUN CATALOGO SPA",
+        )
+        assert False, "debía lanzar"
+    except ErrorAplicacionDecision as error:
+        assert "no se encontró" in str(error).lower()
+
+    # Nunca aplica a ciegas -- ni ledger ni bandeja cambiaron.
+    ledger_despues = (actual / "decisiones_aplicadas.json").read_bytes() if (actual / "decisiones_aplicadas.json").exists() else b""
+    assert ledger_despues == antes_ledger
+    assert (actual / "decisiones_pendientes.json").read_bytes() == antes_pendientes
+
+
+# Nota: una búsqueda AMBIGUA (dos clientes cuyo nombre/alias normalizado
+# colisiona) no se prueba aparte -- `CatalogoClientes.crear` ya lo impide
+# estructuralmente (`_validar_identidad`, `ClienteDuplicadoError`), así que
+# nunca puede ocurrir con un catálogo válido; el código de aplicación trata
+# AMBIGUA y SIN_COINCIDENCIA de forma idéntica (mismo `!= COINCIDENCIA`),
+# y esa rama ya queda cubierta por el caso "inexistente" de arriba.
+
+
+def test_confirmar_sin_correccion_sigue_usando_el_candidato_sugerido_no_regresion(tmp_path):
+    raiz, catalogos, actual, candidato_sugerido, decision = _entorno(tmp_path)
+    resultado = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR",
+        cliente_correccion_manual=None,
+    )
+    assert resultado["ok"] is True
+    assert resultado["cliente_id"] == candidato_sugerido.cliente_id
+    ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    aplicacion = ledger["aplicaciones"][0]
+    assert aplicacion["cliente_correccion_manual"] is None
+    assert aplicacion["cliente_id_candidato_anterior"] == candidato_sugerido.cliente_id
 
 
 def test_flujo_completo_472037_termina_sin_estado_intermedio_no_accionable(tmp_path):

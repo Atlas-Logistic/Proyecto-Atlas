@@ -169,6 +169,7 @@ def escribir_estado_operacion(
     versiones_capacidades: dict[str, int] | None = None,
     dataset_sha256: str | None = None,
     huella_filas_dataset: str | None = None,
+    firma_bateria_compartida: str | None = None,
     raiz: Path | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> Path | None:
@@ -270,6 +271,20 @@ def escribir_estado_operacion(
     # (ver `revalidacion_documental.revalidar_y_regenerar_reporte`).
     if huella_filas_dataset is not None:
         contenido["huella_filas_dataset"] = huella_filas_dataset
+    # Bloque P1 ELIMINAR DOBLE RECONCILIACIÓN -- a diferencia de
+    # `version_estado_derivado`/`versiones_capacidades` de arriba, este
+    # campo NUNCA se arrastra desde el manifiesto previo cuando el
+    # llamador no lo pasa: sólo `revalidar_y_regenerar_reporte` (Fase 1)
+    # lo escribe, justo después de correr su batería compartida contra el
+    # dataset ya final. Cualquier otra escritura (incluida la que hace
+    # `reconciliar_estado_derivado`/Fase 2 al terminar, o cualquier otro
+    # publicador que no conozca este campo) simplemente lo omite -- así
+    # la oportunidad de omitir la batería compartida existe sólo para la
+    # Fase 2 que corre INMEDIATAMENTE después de esa Fase 1, nunca
+    # sobrevive a una reconciliación posterior. Ver
+    # `atlas_core.frescura_reconciliacion` para el contrato completo.
+    if firma_bateria_compartida is not None:
+        contenido["firma_bateria_compartida"] = firma_bateria_compartida
     ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
     escribir_json_atomico(ruta_manifiesto, contenido)
     return ruta_manifiesto

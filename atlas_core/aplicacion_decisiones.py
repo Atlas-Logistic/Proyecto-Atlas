@@ -13,7 +13,7 @@ from pathlib import Path
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogo_clientes import (
     CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
-    EstadoCalidadCliente, normalizar_nombre_cliente, normalizar_rut_cliente,
+    EstadoBusquedaCliente, EstadoCalidadCliente, normalizar_nombre_cliente, normalizar_rut_cliente,
 )
 from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError, EstadoCalidadDestino
 from atlas_core.catalogo_obras_destinos import (
@@ -32,8 +32,12 @@ from atlas_core.decisiones_pendientes import (
 )
 from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
 from atlas_core.incidencias_documentales import (
-    AlmacenIncidenciasDocumentales, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE, TIPO_OBRA_DOCUMENTAL_INCONSISTENTE,
+    AlmacenIncidenciasDocumentales, EstadoIncidencia,
+    TIPO_CAMPO_DOCUMENTAL_INCORRECTO, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
+    TIPO_OBRA_DOCUMENTAL_INCONSISTENTE, TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
 )
+from atlas_core.catalogos import buscar_chofer_por_rut, cargar_catalogo_json, normalizar_rut, registrar_alias_seguro
+from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 from atlas_core.procesamiento_masivo import MOTIVOS_NO_BLOQUEANTES
 from atlas_core.rutas.modelos import EstadoRuta
 
@@ -76,6 +80,97 @@ ACCIONES = frozenset({
 })
 LEDGER = "decisiones_aplicadas.json"
 
+
+def _confirma_discrepancia_documental(aplicacion: dict[str, object]) -> bool:
+    """Reconoce la confirmación explícita, incluso en ledger previo al fix."""
+    if aplicacion.get("discrepancia_documental_confirmada"):
+        return True
+    # Compatibilidad acotada: estas dos acciones humanas ya tenían la misma
+    # semántica explícita antes de que el ledger guardara la marca. No se
+    # generaliza desde OCR, catálogo ni historial.
+    return bool(
+        str(aplicacion.get("actor", "")) != "ATLAS_AUTOMATICO"
+        and (
+            (
+                aplicacion.get("tipo") == "VEHICULO_DESCONOCIDO"
+                and aplicacion.get("accion") in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
+            )
+            or (
+                aplicacion.get("tipo") == "CLIENTE_CANDIDATO"
+                and aplicacion.get("accion") == "CONFIRMAR"
+            )
+        )
+    )
+
+
+def _emitir_incidencia_documental_confirmada(
+    *, aplicacion: dict[str, object], ruta_incidencias: Path, reloj,
+) -> object | None:
+    """Emite sólo discrepancias documentales explícitamente confirmadas.
+
+    La marca no se deriva de OCR, similitud, catálogo ni historial: debe ser
+    puesta por la rama que recibió la confirmación humana. Así una corrección
+    de lectura/foto nunca se convierte accidentalmente en Incidencia.
+    """
+    if not _confirma_discrepancia_documental(aplicacion):
+        return None
+    if str(aplicacion.get("actor", "")) == "ATLAS_AUTOMATICO":
+        return None
+    documental = str(aplicacion.get("valor_documental") or "").strip()
+    canonico = str(aplicacion.get("valor_canonico") or aplicacion.get("patente_canonica") or "").strip()
+    campo = str(aplicacion.get("campo") or "").strip()
+    documento = aplicacion.get("documento") or {}
+    if not documental or not canonico or not campo or documental == canonico:
+        return None
+    tipo = {
+        "patente_tracto": TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
+        "patente_rampla": TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
+        "cliente": TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
+        "obra_destino": TIPO_OBRA_DOCUMENTAL_INCONSISTENTE,
+    }.get(campo, TIPO_CAMPO_DOCUMENTAL_INCORRECTO)
+    try:
+        return AlmacenIncidenciasDocumentales(ruta_incidencias).registrar(
+            contexto=str(aplicacion.get("contexto_incidencia") or canonico),
+            numero_guia=str(documento.get("numero_guia") or ""),
+            numero_transporte=str(documento.get("numero_transporte") or ""),
+            campo=campo, valor_documental=documental, valor_canonico=canonico,
+            tipo_incidencia=tipo,
+            evidencia=(
+                "DISCREPANCIA_DOCUMENTAL_CONFIRMADA_POR_HUMANO",
+                f"DECISION:{aplicacion.get('decision_id', '')}",
+                f"ACCION:{aplicacion.get('accion', '')}",
+            ),
+            fecha=reloj(), estado=EstadoIncidencia.CONFIRMADA,
+            fuente_resolucion="DECISION_HUMANA_DISCREPANCIA_DOCUMENTAL",
+            actor=str(aplicacion.get("actor") or ""), decision_id=str(aplicacion.get("decision_id") or ""),
+        )
+    except (OSError, ValueError):
+        # La decisión operacional ya fue validada; una falla de su proyección
+        # documental no puede revertir ni bloquear el valor canónico.
+        _LOGGER.exception("No se pudo emitir Incidencia Documental confirmada")
+        return None
+
+
+def reconciliar_incidencias_documentales_confirmadas_desde_ledger(
+    *, ruta_ledger: str | Path, ruta_incidencias: str | Path, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, int]:
+    """Proyecta decisiones humanas históricas sin tocar dataset ni OCR."""
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"decisiones_compatibles": 0, "incidencias_reconciliadas": 0}
+    compatibles = 0
+    reconciliadas = 0
+    for aplicacion in ledger.get("aplicaciones", []):
+        if not _confirma_discrepancia_documental(aplicacion):
+            continue
+        compatibles += 1
+        if _emitir_incidencia_documental_confirmada(
+            aplicacion=aplicacion, ruta_incidencias=Path(ruta_incidencias), reloj=reloj,
+        ) is not None:
+            reconciliadas += 1
+    return {"decisiones_compatibles": compatibles, "incidencias_reconciliadas": reconciliadas}
+
 # R3.4: qué acciones son válidas para cada tipo de decisión -- una acción de
 # un tipo nunca se aplica a una decisión de otro tipo, aunque comparta el
 # mismo código POSPONER.
@@ -86,6 +181,8 @@ ACCIONES_POR_TIPO = {
         "REGISTRAR", "NO_REGISTRAR", "POSPONER",
         "USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE",
     }),
+    "CHOFER_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
+    "CHOFER_CANDIDATO": frozenset({"CONFIRMAR", "NO_CONFIRMAR", "POSPONER"}),
     "CLIENTE_DESCONOCIDO": frozenset({"REGISTRAR", "NO_REGISTRAR", "POSPONER"}),
     "CLIENTE_CANDIDATO": frozenset({"CONFIRMAR", "NO_CONFIRMAR", "POSPONER"}),
     "ALIAS_CANDIDATO": frozenset({"CONFIRMAR_ALIAS", "RECHAZAR", "POSPONER"}),
@@ -280,7 +377,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -289,6 +386,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
     catalogo_vehiculos_ruta = catalogos / "vehiculos.json"
     catalogo_plantas_ruta = catalogos / "plantas.json"
     catalogo_clientes_ruta = catalogos / "clientes.json"
+    catalogo_choferes_ruta = catalogos / "choferes.json"
     evidencia_entidades_ruta = catalogos / "evidencia_entidades.json"
     incidencias_documentales_ruta = catalogos / "incidencias_documentales.json"
     estado_operacion_ruta = actual / "estado_operacion.json"
@@ -300,7 +398,13 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
         except (OSError, json.JSONDecodeError) as error: raise ErrorAplicacionDecision("El historial de decisiones no se puede leer.") from error
         previas = [x for x in ledger.get("aplicaciones", []) if x.get("decision_id") == decision_id]
         if previas:
-            return {"ok": True, "idempotente": True, "accion": previas[-1]["accion"], "mensaje": "Esta decisión ya fue aplicada."}
+            incidencia_confirmada = _emitir_incidencia_documental_confirmada(
+                aplicacion=previas[-1], ruta_incidencias=incidencias_documentales_ruta, reloj=reloj,
+            )
+            resultado = {"ok": True, "idempotente": True, "accion": previas[-1]["accion"], "mensaje": "Esta decisión ya fue aplicada."}
+            if incidencia_confirmada is not None:
+                resultado["incidencia_documental_id"] = incidencia_confirmada.incidencia_id
+            return resultado
         try: artefacto = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error: raise ErrorAplicacionDecision("No se pudo leer la bandeja vigente.") from error
         coincidencias = [d for d in artefacto.get("decisiones", []) if d.get("decision_id") == decision_id]
@@ -368,7 +472,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 )
                 raise DecisionObsoletaError(mensaje)
             artefacto = artefacto_fresco
-        for clave, nombre in {"clientes":"clientes.json","vehiculos":"vehiculos.json","obras_destinos":"obras_destinos.json","destinos_maestros":"destinos_maestros.json"}.items():
+        for clave, nombre in {"clientes":"clientes.json","choferes":"choferes.json","vehiculos":"vehiculos.json","obras_destinos":"obras_destinos.json","destinos_maestros":"destinos_maestros.json"}.items():
             esperado = artefacto.get("catalogos_sha256", {}).get(clave)
             ruta = catalogos / nombre
             actual_hash = _sha(ruta) if ruta.is_file() else None
@@ -400,7 +504,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             for ruta in (
                 catalogo_obras_ruta, catalogo_destinos_ruta, ledger_ruta,
                 catalogo_vehiculos_ruta, artefacto_ruta, dataset, estado_operacion_ruta,
-                catalogo_clientes_ruta, evidencia_entidades_ruta, incidencias_documentales_ruta,
+                catalogo_clientes_ruta, catalogo_choferes_ruta, evidencia_entidades_ruta, incidencias_documentales_ruta,
             )
         }
         # Bloque CONSISTENCIA OPERACIONAL, Fase 2 -- lock físico PROPIO de
@@ -414,6 +518,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
         NOMBRES_LOCK_CATALOGOS = {
             catalogo_obras_ruta: "obras_destinos", catalogo_destinos_ruta: "catalogo_destinos",
             catalogo_vehiculos_ruta: "catalogo_vehiculos", catalogo_clientes_ruta: "catalogo_clientes",
+            catalogo_choferes_ruta: "catalogo_choferes",
             evidencia_entidades_ruta: "evidencia_entidades",
             incidencias_documentales_ruta: "incidencias_documentales",
         }
@@ -823,6 +928,16 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "documento": decision.get("documento"), "campo": decision.get("campo"),
                     "valor_documental": patente, "vehiculo_id": vehiculo_id,
                     "patente_canonica": patente_canonica_elegida,
+                    # Esta marca expresa una confirmación HUMANA de que el
+                    # valor impreso/documental y el vehículo operacional son
+                    # distintos. No se marca en auto-resolución: OCR !=
+                    # canónico por sí solo jamás genera una incidencia.
+                    "discrepancia_documental_confirmada": bool(
+                        actor != "ATLAS_AUTOMATICO"
+                        and accion in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
+                        and patente_canonica_elegida
+                        and patente != patente_canonica_elegida
+                    ),
                     "tipo_vehiculo": tipo_final, "motivo_rechazo": motivo_rechazo_final,
                     "rut_chofer": rut_chofer_ledger,
                     "candidatos_previos": decision.get("candidatos") or None,
@@ -1340,6 +1455,20 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "direccion_manual": str(direccion_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
                     "comuna_manual": str(comuna_manual or "").strip() if accion == "REGISTRAR_DIRECCION" else None,
+                    # Bloque CORRECCIÓN HUMANA TRANSVERSAL -- trazabilidad de
+                    # lo que Atlas tenía ANTES de esta aplicación: el texto
+                    # documental (`valor_documental`, normalmente vacío para
+                    # este tipo) y, cuando la decisión traía una propuesta
+                    # B1 confirmable (`contexto.b1_propuesta`), esa propuesta
+                    # -- para poder distinguir siempre "Javier confirmó tal
+                    # cual" de "Javier corrigió, esto es lo que Atlas había
+                    # propuesto" sin depender de que el humano recuerde
+                    # escribirlo en ningún otro lado. `None` cuando no había
+                    # nada que preceder (dirección nunca antes propuesta).
+                    "valor_documental_anterior": str(decision.get("valor_documental") or "").strip() or None,
+                    "b1_propuesta_anterior": (
+                        str((decision.get("contexto") or {}).get("b1_propuesta") or "").strip() or None
+                    ),
                     # Bloque OBRA AUSENTE (Codex 472477) -- sólo distinto de
                     # `None` cuando esta misma aplicación registró la obra
                     # (nunca para una guía cuya obra ya venía resuelta).
@@ -1439,6 +1568,68 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     "cliente_id": cliente_id_nuevo,
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+            elif tipo in {"CHOFER_DESCONOCIDO", "CHOFER_CANDIDATO"}:
+                # Resolver humano de identidad de chofer. El catálogo simple
+                # es la fuente que ya consume el revalidador automático; esta
+                # rama sólo agrega evidencia humana explícita, jamás elige un
+                # candidato por similitud ni modifica el texto documental.
+                nombre_documental = str(decision.get("valor_documental", "")).strip()
+                evidencia_rut = next(
+                    (str(e.get("valor", "")).strip() for e in decision.get("evidencias", [])
+                     if isinstance(e, dict) and e.get("tipo") == "RUT_DOCUMENTAL"),
+                    "",
+                )
+                rut_documental = evidencia_rut or str(rut_manual or "").strip()
+                validacion = validar_rut_chileno(rut_documental)
+                if not nombre_documental:
+                    raise ErrorAplicacionDecision("La decisión no contiene nombre documental de chofer.")
+                chofer_confirmado = None
+                if tipo == "CHOFER_DESCONOCIDO" and accion == "REGISTRAR":
+                    if validacion.estado != EstadoValidacion.VALIDO:
+                        raise ErrorAplicacionDecision("Registrar un chofer nuevo exige un RUT documental válido.")
+                    catalogo_choferes = cargar_catalogo_json(catalogo_choferes_ruta)
+                    clave = normalizar_rut(validacion.valor)
+                    existente = buscar_chofer_por_rut(catalogo_choferes, validacion.valor)
+                    if existente is not None:
+                        nombre_existente = str(existente.get("nombre", "")).strip()
+                        if nombre_existente != nombre_documental:
+                            raise ErrorAplicacionDecision("El RUT ya pertenece a otro chofer del catálogo.")
+                    else:
+                        catalogo_choferes[clave] = {
+                            "nombre": nombre_documental, "rut": validacion.valor,
+                            "aliases": [], "activo": True,
+                            "fuente": f"DECISION_HUMANA:{decision_id}",
+                        }
+                        escribir_json_atomico(catalogo_choferes_ruta, catalogo_choferes)
+                    chofer_confirmado = {"rut": validacion.valor, "nombre": nombre_documental}
+                elif tipo == "CHOFER_CANDIDATO" and accion == "CONFIRMAR":
+                    seleccionado = str(rut_chofer_elegido or "").strip()
+                    candidatos = decision.get("candidatos") or []
+                    if not seleccionado and len(candidatos) == 1:
+                        seleccionado = str(candidatos[0].get("rut", "")).strip()
+                    if not seleccionado:
+                        raise ErrorAplicacionDecision("Indique el RUT del chofer candidato confirmado.")
+                    catalogo_choferes = cargar_catalogo_json(catalogo_choferes_ruta)
+                    elegido = buscar_chofer_por_rut(catalogo_choferes, seleccionado)
+                    if elegido is None or elegido.get("activo", True) is not True:
+                        raise ErrorAplicacionDecision("El chofer candidato indicado no existe o no está activo.")
+                    chofer_confirmado = {"rut": seleccionado, "nombre": str(elegido.get("nombre", "")).strip()}
+                    if chofer_confirmado["nombre"] and chofer_confirmado["nombre"] != nombre_documental:
+                        for clave, registro in catalogo_choferes.items():
+                            if registro is elegido:
+                                registrar_alias_seguro(catalogo_choferes_ruta, str(clave), nombre_documental)
+                                break
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
+                    "campo": "chofer", "valor_documental": nombre_documental,
+                    "rut_documental": rut_documental,
+                    "chofer_confirmado": chofer_confirmado,
+                    "candidatos_previos": decision.get("candidatos") or [],
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
+                if chofer_confirmado:
+                    resultado_extra["chofer"] = chofer_confirmado
             elif tipo == "CLIENTE_DESCONOCIDO":
                 # MOTOR DE EVIDENCIA FASE 3 -- primera aplicación real para
                 # este tipo (antes sólo UX preparatoria). Mismo patrón que
@@ -1489,21 +1680,55 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 # mismo patrón ya usado por R3.4.2 para OBRA_DESCONOCIDA).
                 identidad_candidata = decision.get("identidad_resuelta") or {}
                 cliente_id_candidato = str(identidad_candidata.get("entidad_id", ""))
+                valor_canonico_candidato = str(identidad_candidata.get("valor_canonico", ""))
                 valor_documental_cliente = str(decision.get("valor_documental", "")).strip()
-                if accion == "CONFIRMAR" and not cliente_id_candidato:
+                # Bloque CORRECCIÓN HUMANA TRANSVERSAL -- CLIENTE_CANDIDATO
+                # tenía el mismo defecto estructural que DESTINO_NO_RESUELTO
+                # con propuesta B1: "puedo confirmar/rechazar, pero no
+                # indicar el valor correcto". Si Javier escribe el nombre de
+                # OTRO cliente (uno que ya existe en el catálogo -- nunca se
+                # crea uno nuevo aquí, para eso ya existe CLIENTE_AUSENTE/
+                # CLIENTE_DESCONOCIDO), se busca por nombre/alias exacto
+                # (`CatalogoClientes.buscar`, el mismo mecanismo ya usado en
+                # convergencia) y esa identidad reemplaza al candidato
+                # sugerido -- nunca una coincidencia ambigua ni inventada.
+                cliente_id_final = cliente_id_candidato
+                valor_canonico_final = valor_canonico_candidato
+                correccion_cliente = str(cliente_correccion_manual or "").strip()
+                if accion == "CONFIRMAR" and correccion_cliente:
+                    busqueda_correccion = CatalogoClientes(catalogo_clientes_ruta).buscar(correccion_cliente)
+                    if busqueda_correccion.estado != EstadoBusquedaCliente.COINCIDENCIA:
+                        raise ErrorAplicacionDecision(
+                            "No se encontró un único cliente existente que coincida con el nombre escrito "
+                            "-- verifique la razón social, o regístrelo primero como cliente nuevo si de "
+                            "verdad no existe todavía."
+                        )
+                    cliente_id_final = busqueda_correccion.cliente.cliente_id
+                    valor_canonico_final = busqueda_correccion.cliente.razon_social
+                if accion == "CONFIRMAR" and not cliente_id_final:
                     raise ErrorAplicacionDecision("La decisión no contiene una identidad de cliente candidata.")
                 aplicacion = {
                     "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "campo": decision.get("campo"), "valor_documental": valor_documental_cliente,
-                    "cliente_id": cliente_id_candidato if accion == "CONFIRMAR" else None,
-                    "valor_canonico": str(identidad_candidata.get("valor_canonico", "")) if accion == "CONFIRMAR" else None,
+                    "cliente_id": cliente_id_final if accion == "CONFIRMAR" else None,
+                    "valor_canonico": valor_canonico_final if accion == "CONFIRMAR" else None,
+                    "discrepancia_documental_confirmada": bool(
+                        actor != "ATLAS_AUTOMATICO" and accion == "CONFIRMAR"
+                        and valor_documental_cliente and valor_canonico_final
+                        and valor_documental_cliente != valor_canonico_final
+                    ),
+                    "contexto_incidencia": valor_canonico_final if accion == "CONFIRMAR" else None,
                     "motivo_rechazo": (str(motivo_rechazo).strip() if motivo_rechazo and accion == "NO_CONFIRMAR" else None),
+                    # Trazabilidad: qué candidato proponía Atlas ANTES de
+                    # esta aplicación, y qué escribió Javier si corrigió.
+                    "cliente_id_candidato_anterior": cliente_id_candidato or None,
+                    "cliente_correccion_manual": correccion_cliente or None,
                     "candidatos_previos": decision.get("candidatos"),
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
                 if accion == "CONFIRMAR":
-                    resultado_extra["cliente_id"] = cliente_id_candidato
+                    resultado_extra["cliente_id"] = cliente_id_final
                     # R4.8 -- encadena, sin OCR, la pregunta de obra/destino
                     # que `detectar_decisiones_documento` no pudo generar en
                     # su momento por falta de identidad de cliente confirmada
@@ -1518,7 +1743,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     if numero_guia_doc:
                         from atlas_core.revalidacion_documental import _leer_filas
                         try:
-                            candidato_confirmado = CatalogoClientes(catalogo_clientes_ruta).obtener(cliente_id_candidato)
+                            candidato_confirmado = CatalogoClientes(catalogo_clientes_ruta).obtener(cliente_id_final)
                         except ClienteNoEncontradoError:
                             candidato_confirmado = None
                         fila_guia = next(
@@ -1607,6 +1832,22 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
 
             ledger.setdefault("aplicaciones", []).append(aplicacion)
             escribir_json_atomico(ledger_ruta, ledger)
+            # El revalidador general es deliberadamente conservador y sólo
+            # consume catálogo. Después de registrar/confirmar un chofer,
+            # ejecutarlo aquí elimina de inmediato el motivo técnico de la
+            # guía y evita una tarjeta/estado operacional obsoleto hasta el
+            # próximo ciclo masivo.
+            if tipo in {"CHOFER_DESCONOCIDO", "CHOFER_CANDIDATO"} and aplicacion.get("chofer_confirmado"):
+                from atlas_core.revalidacion_documental import revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr
+                resultado_extra["revalidacion_chofer"] = revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
+                    raiz_atlas=raiz,
+                )
+            incidencia_confirmada = _emitir_incidencia_documental_confirmada(
+                aplicacion=aplicacion, ruta_incidencias=incidencias_documentales_ruta,
+                reloj=reloj,
+            )
+            if incidencia_confirmada is not None:
+                resultado_extra["incidencia_documental_id"] = incidencia_confirmada.incidencia_id
 
             # R3.5/R3.6.2: cualquier revalidación que cambie el dataset debe
             # ocurrir ANTES de publicar la nueva bandeja. Así el artefacto

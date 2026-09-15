@@ -19,8 +19,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from atlas_core.aplicacion_decisiones import aplicar_decision_obra
+from atlas_core.aplicacion_decisiones import (
+    aplicar_decision_obra, reconciliar_incidencias_documentales_confirmadas_desde_ledger,
+)
 from atlas_core.catalogo_vehiculos import TipoVehiculo, confirmar_vehiculo
+from atlas_core.incidencias_documentales import (
+    AlmacenIncidenciasDocumentales, EstadoIncidencia,
+    TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
+)
 from atlas_core.decisiones_pendientes import detectar_decisiones_documento, generar_artefacto
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import (
@@ -412,6 +418,33 @@ def test_usar_patente_existente_dispara_revalidacion_via_ledger(tmp_path):
     assert fila_final["motivos_revision_documento"] == "CLIENTE_AUSENTE"
     # El valor documental original nunca se toca.
     assert fila_final["patente_tracto"] == "VP6521"
+    incidencias = AlmacenIncidenciasDocumentales(
+        catalogos / "incidencias_documentales.json"
+    ).listar()
+    assert len(incidencias) == 1
+    incidencia = incidencias[0]
+    assert (incidencia.campo, incidencia.valor_documental, incidencia.valor_canonico) == (
+        "patente_tracto", "VP6521", "VP8521",
+    )
+    assert incidencia.tipo_incidencia == TIPO_PATENTE_DOCUMENTAL_INCORRECTA
+    assert incidencia.estado == EstadoIncidencia.CONFIRMADA.value
+    assert "DISCREPANCIA_DOCUMENTAL_CONFIRMADA_POR_HUMANO" in incidencia.evidencia
+    # Ledger anterior al fix: al reintentar una decisión ya cerrada, el
+    # catch-up emite sin reabrir ni alterar la guía operacional.
+    ruta_ledger = actual / "decisiones_aplicadas.json"
+    ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
+    ledger["aplicaciones"][-1].pop("discrepancia_documental_confirmada")
+    ruta_ledger.write_text(json.dumps(ledger), encoding="utf-8")
+    (catalogos / "incidencias_documentales.json").unlink()
+    resultado_catchup = reconciliar_incidencias_documentales_confirmadas_desde_ledger(
+        ruta_ledger=ruta_ledger, ruta_incidencias=catalogos / "incidencias_documentales.json", reloj=lambda: FECHA,
+    )
+    assert resultado_catchup == {"decisiones_compatibles": 1, "incidencias_reconciliadas": 1}
+    # Un reintento de la decisión cerrada tampoco emite duplicado.
+    assert aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_final["decision_id"], accion="USAR_PATENTE_EXISTENTE",
+    )["idempotente"] is True
+    assert len(AlmacenIncidenciasDocumentales(catalogos / "incidencias_documentales.json").listar()) == 1
 
 
 def test_no_registrar_sigue_sin_disparar_revalidacion_ni_falsamente_resolver_patente(tmp_path):

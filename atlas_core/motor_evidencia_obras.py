@@ -335,3 +335,44 @@ def resolver_obra_por_prefijo_documental_confirmado(
         if any(normalizar_nombre_obra(clave).startswith(documental) for clave in claves):
             candidatos.append(obra)
     return candidatos[0] if len(candidatos) == 1 else None
+
+
+# Bloque RUIDO OCR INICIAL (caso real 472516) -- un artefacto de OCR real
+# (checkbox/viñeta/numeración de renglón mal leída) puede anteponer un
+# token corto puramente numérico al nombre real de la obra -- "1
+# CONSTRUCTORA LO BLANCO SPA" en vez de "CONSTRUCTORA LO BLANCO SPA".
+# Deliberadamente estrecho: sólo 1-2 dígitos, sólo al INICIO, sólo
+# aceptado si el texto que queda coincide EXACTO (normalizado) con una
+# obra ya CONFIRMADA de ese mismo cliente -- nunca fuzzy, nunca combina
+# con la variación ortográfica de arriba (ver docstring).
+_PATRON_RUIDO_NUMERICO_INICIAL = re.compile(r"^\s*[0-9]{1,2}\s+")
+
+
+def resolver_obra_por_ruido_ocr_inicial(
+    *, nombre_documental: str, obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
+) -> Obra | None:
+    """Resuelve un token numérico corto (1-2 dígitos) pegado al INICIO del
+    nombre documental cuando, al quitarlo, el texto restante coincide
+    EXACTO (normalizado) con una obra ya CONFIRMADA del mismo cliente.
+
+    No es fuzzy matching sobre el resto del nombre -- eso sigue siendo
+    terreno exclusivo de `resolver_obra_por_variacion_ortografica_menor`
+    (y ambas pueden combinarse: el llamador puede intentar esta función
+    primero y, si no resuelve, pasar el texto ya sin el prefijo numérico
+    a la variación ortográfica). Se abstiene si el texto no trae ningún
+    prefijo numérico que quitar, o ante más de un candidato."""
+    documental = str(nombre_documental or "").strip()
+    if not documental:
+        return None
+    sin_ruido = _PATRON_RUIDO_NUMERICO_INICIAL.sub("", documental, count=1)
+    if sin_ruido == documental or not sin_ruido.strip():
+        return None
+    clave_sin_ruido = normalizar_nombre_obra(sin_ruido)
+    if not clave_sin_ruido:
+        return None
+    candidatos = [
+        obra for obra in obras_confirmadas_mismo_cliente
+        if clave_sin_ruido == normalizar_nombre_obra(obra.nombre_canonico)
+        or any(clave_sin_ruido == normalizar_nombre_obra(alias) for alias in obra.aliases_documentales)
+    ]
+    return candidatos[0] if len(candidatos) == 1 else None

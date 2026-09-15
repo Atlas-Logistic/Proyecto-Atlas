@@ -147,7 +147,7 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         }),
     ),
     DOMINIO_MATERIAL: Capacidad(
-        dominio=DOMINIO_MATERIAL, version=1,
+        dominio=DOMINIO_MATERIAL, version=2,
         descripcion="Descripción/peso de material.",
         motivos_documentales=frozenset({"MATERIAL_AUSENTE", "MATERIAL_POSIBLEMENTE_CONTAMINADO"}),
     ),
@@ -161,7 +161,7 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         descripcion="Cálculo de ruta/km/tiempo (ORS).",
     ),
     DOMINIO_EXTRACCION: Capacidad(
-        dominio=DOMINIO_EXTRACCION, version=2,
+        dominio=DOMINIO_EXTRACCION, version=3,
         descripcion="Extracción OCR/estructural (obra destino, RUT cliente, contaminación de campos).",
     ),
     DOMINIO_B1: Capacidad(

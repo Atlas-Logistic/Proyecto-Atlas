@@ -12,12 +12,17 @@ import time
 import tempfile
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
-from atlas_core.almacenamiento_portable import bloqueo_sesion
+from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
+from atlas_core.deduplicacion_ingesta import (
+    ClasificacionDuplicado,
+    clasificar_reingesta_documental,
+    sha256_binario,
+)
 from atlas_core.catalogos import (
     buscar_chofer_por_nombre_exacto,
     buscar_chofer_por_rut,
@@ -61,16 +66,60 @@ from atlas_core.extractor import (
     detectar_captura_recortada_posible,
     extraer_datos,
 )
-from atlas_core.ocr import (
-    ALLOWLIST_FECHA,
-    ALLOWLIST_TRANSPORTE,
-    _leer_fecha_focal,
-    _leer_transporte_focal,
-    crear_lector_ocr,
-    leer_bloques_imagen,
-    leer_texto_imagen,
-)
-from atlas_core.ocr_provider import crear_proveedor_ocr
+
+# Bloque P2 SPAWN/IPC -- `atlas_core.ocr` (vía `easyocr` -> `torch` ->
+# `torchvision`) y `atlas_core.ocr_provider` cuestan, medido, ~6.3 s SOLO
+# en importar -- antes de ejecutar una sola línea. Los consumidores "sin
+# OCR" de este módulo (`reconciliar_estado_derivado.py`, `aplicar_
+# decision_pendiente.py`, cualquier revalidador `_sin_ocr`) NUNCA llaman
+# `procesar_archivo`/`procesar_carpeta` (los dos ÚNICOS lugares de este
+# archivo que de verdad leen imagen), así que pagaban ese costo en CADA
+# subproceso de Desktop sin usarlo jamás.
+#
+# Envoltorios diferidos en vez de un `import` dentro de la función: la
+# suite existente parchea estos nombres como atributos DE ESTE MÓDULO
+# (`monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", ...)`)
+# -- un `from atlas_core.ocr import X` local dentro de `procesar_archivo`
+# crearía una variable LOCAL que ignora ese parche por completo (build
+# roto: 160 tests). Cada envoltorio seguirá siendo el atributo del módulo
+# que un test puede reemplazar; sin parche, importa `atlas_core.ocr`
+# recién en la primera llamada real (costo pagado una sola vez por
+# proceso, cacheado por `sys.modules` -- nunca en un proceso que jamás
+# procesa una imagen).
+def leer_texto_imagen(*args, **kwargs):
+    from atlas_core.ocr import leer_texto_imagen as _f
+    return _f(*args, **kwargs)
+
+
+def leer_bloques_imagen(*args, **kwargs):
+    from atlas_core.ocr import leer_bloques_imagen as _f
+    return _f(*args, **kwargs)
+
+
+def _leer_fecha_focal(*args, **kwargs):
+    from atlas_core.ocr import _leer_fecha_focal as _f
+    return _f(*args, **kwargs)
+
+
+def _leer_transporte_focal(*args, **kwargs):
+    from atlas_core.ocr import _leer_transporte_focal as _f
+    return _f(*args, **kwargs)
+
+
+def crear_proveedor_ocr(*args, **kwargs):
+    from atlas_core.ocr_provider import crear_proveedor_ocr as _f
+    return _f(*args, **kwargs)
+
+
+# `ALLOWLIST_FECHA`/`ALLOWLIST_TRANSPORTE` son literales de texto sin
+# ninguna dependencia real de `easyocr`/`torch` -- sólo viven en
+# `atlas_core.ocr` por cercanía temática. Ningún test parchea estos dos
+# como atributos de `procesamiento_masivo` (a diferencia de las funciones
+# de arriba), así que replicar el valor aquí es más simple y no reintroduce
+# el import pesado -- `atlas_core.ocr` sigue siendo la fuente canónica;
+# si su valor cambiara alguna vez, `tests/test_ocr.py` lo detecta.
+ALLOWLIST_FECHA = "0123456789-/ "
+ALLOWLIST_TRANSPORTE = "0123456789OoDdQqIl| .-"
 from atlas_core.trazabilidad_ocr import (
     ESTADO_BLOQUES_DISPONIBLES,
     ESTADO_BLOQUES_NO_DISPONIBLES,
@@ -1602,7 +1651,12 @@ def procesar_archivo(
     evidencia JSON lateral usando sólo el OCR que este documento ya leyó.
     La escritura es best-effort: su falla se registra y nunca altera los
     campos extraídos ni interrumpe el procesamiento."""
-
+    # `leer_texto_imagen`/`leer_bloques_imagen`/`_leer_fecha_focal`/
+    # `_leer_transporte_focal`/`ALLOWLIST_*` se resuelven como nombres de
+    # MÓDULO (definidos arriba, envoltorios con import diferido de
+    # `atlas_core.ocr`) -- nunca un import local aquí, que crearía una
+    # variable de función y rompería los tests que los parchean vía
+    # `monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", ...)`.
     inicio_documento = time.perf_counter()
 
     def _leer_texto() -> list[str]:
@@ -3097,6 +3151,39 @@ def _archivos_ya_procesados(ruta_csv: Path) -> set[str]:
         }
 
 
+def _identidades_documentales_existentes(ruta_csv: Path) -> set[tuple[str, str]]:
+    """Índice de sólo lectura para el gate Desktop de reingesta confirmada."""
+    if not ruta_csv.is_file() or ruta_csv.stat().st_size == 0:
+        return set()
+    with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+        return {
+            (str(fila.get("numero_guia", "")), str(fila.get("numero_transporte", "")))
+            for fila in csv.DictReader(archivo, delimiter=";")
+        }
+
+
+def _persistir_manifiesto_seleccion_desktop(
+    *, raiz: Path, archivos: list[Path], ruta_csv: Path,
+) -> Path:
+    """Audita qué archivos seleccionó Desktop sin copiar ni mover imágenes."""
+    instante = datetime.now(timezone.utc).isoformat()
+    seleccion = []
+    for ruta in archivos:
+        seleccion.append({
+            "nombre_archivo": ruta.name,
+            "ruta_origen": str(ruta),
+            "ingresado_en_utc": instante,
+            "sha256": sha256_binario(ruta.read_bytes()),
+        })
+    ruta_manifiesto = ruta_csv.parent / "manifiestos_ingesta" / f"{raiz.name}.json"
+    escribir_json_atomico(ruta_manifiesto, {
+        "schema_version": 1,
+        "lote": raiz.name,
+        "seleccion": seleccion,
+    })
+    return ruta_manifiesto
+
+
 def _validar_csv_existente(ruta_csv: Path) -> bool:
     """Valida el encabezado y devuelve si el CSV contiene filas de datos."""
     if not ruta_csv.exists() or ruta_csv.stat().st_size == 0:
@@ -4569,7 +4656,11 @@ def procesar_carpeta(
             "Use una ruta de salida nueva o inexistente."
         )
     archivos = descubrir_archivos(raiz)
+    ruta_manifiesto_ingesta = _persistir_manifiesto_seleccion_desktop(
+        raiz=raiz, archivos=archivos, ruta_csv=ruta_csv,
+    )
     procesados = set() if reprocesar else _archivos_ya_procesados(ruta_csv)
+    identidades_existentes = _identidades_documentales_existentes(ruta_csv)
     archivos_procesados_ahora: set[str] = set()
     pendientes: list[dict[str, str]] = []
     decisiones_pendientes: list[dict[str, object]] = []
@@ -4584,6 +4675,8 @@ def procesar_carpeta(
         "no_determinados": 0,
         "tiempo_total_segundos": 0.0,
         "promedio_segundos_archivo": 0.0,
+        "reingestas_omitidas": 0,
+        "manifiesto_ingesta": str(ruta_manifiesto_ingesta),
         "decisiones_pendientes": decisiones_pendientes,
     }
     lector_compartido = lector_ocr
@@ -4592,7 +4685,9 @@ def procesar_carpeta(
 
     directorio_trazas_ocr = _directorio_trazas_ocr_para_salida(ruta_csv)
 
-    def ejecutar(ruta: Path, identificador: str) -> Mapping[str, object]:
+    def ejecutar(
+        ruta: Path, identificador: str, recolector_documento: Callable[[list[dict[str, object]]], None],
+    ) -> Mapping[str, object]:
         nonlocal lector_compartido, proveedor_compartido, proveedor_rutas_compartido
         if procesador is not None:
             return procesador(ruta)
@@ -4600,7 +4695,7 @@ def procesar_carpeta(
         argumentos_archivo: dict[str, object] = {}
         if carpeta_catalogos is not None:
             argumentos_archivo["carpeta_catalogos"] = carpeta_catalogos
-            argumentos_archivo["recolector_decisiones"] = decisiones_pendientes.extend
+            argumentos_archivo["recolector_decisiones"] = recolector_documento
             if proveedor_rutas_compartido is None:
                 from atlas_core.rutas.openrouteservice import OpenRouteService
                 from atlas_core.rutas.cache_geocodificacion import (
@@ -4640,6 +4735,8 @@ def procesar_carpeta(
             )
 
         if proveedor_compartido is None:
+            # `crear_proveedor_ocr` es el nombre de módulo (envoltorio con
+            # import diferido, ver arriba) -- nunca un import local aquí.
             proveedor_compartido = crear_proveedor_ocr()
             logger.info(
                 "procesar_carpeta: proveedor OCR creado una sola vez para todo el lote (%s)",
@@ -4664,12 +4761,13 @@ def procesar_carpeta(
                 continue
 
             inicio_intento = time.perf_counter()
+            decisiones_documento: list[dict[str, object]] = []
             token_traza = (
                 _CONTEXTO_TRAZA_OCR.set((directorio_trazas_ocr, identificador))
                 if procesador is None else None
             )
             try:
-                resultado = dict(ejecutar(ruta, identificador))
+                resultado = dict(ejecutar(ruta, identificador, decisiones_documento.extend))
                 fila = {
                     columna: str(resultado.get(columna, ""))
                     for columna in COLUMNAS
@@ -4684,6 +4782,19 @@ def procesar_carpeta(
                     json.loads(fila.get("metricas_procesamiento_json") or "{}"),
                     estado="OK",
                 )
+                clasificacion_reingesta = clasificar_reingesta_documental(
+                    numero_guia=fila.get("numero_guia", ""),
+                    numero_transporte=fila.get("numero_transporte", ""),
+                    identidades_existentes=identidades_existentes,
+                )
+                if clasificacion_reingesta is ClasificacionDuplicado.DUPLICADO_CONFIRMADO:
+                    resumen["reingestas_omitidas"] += 1
+                    print(
+                        "    REINGESTA OMITIDA: la combinación "
+                        f"guía={fila['numero_guia']} + transporte={fila['numero_transporte']} ya existe."
+                    )
+                    continue
+                decisiones_pendientes.extend(decisiones_documento)
             except Exception as error:  # cada documento es una unidad independiente
                 duracion_hasta_fallo = time.perf_counter() - inicio_intento
                 fila = {columna: "" for columna in COLUMNAS}
@@ -4791,10 +4902,25 @@ def procesar_carpeta(
     # VALIDACION`) no puede seguir como RUTA_CALCULADA. Import perezoso:
     # `revalidacion_documental` importa este módulo.
     from atlas_core.revalidacion_documental import (
+        revalidar_destino_contaminado_rut_etiqueta_sin_ocr,
         revalidar_destino_rechazado_por_evidencia_b1_sin_ocr,
     )
     resumen["destinos_rechazados_por_evidencia_b1"] = (
         revalidar_destino_rechazado_por_evidencia_b1_sin_ocr(ruta_dataset=ruta_csv)
+    )["guias_actualizadas"]
+
+    # Bloque CONTAMINACIÓN RUT+ETIQUETA (caso real 460486) -- un
+    # `despachar_a_crudo` que ES el RUT del chofer seguido de una etiqueta
+    # administrativa truncada (FECHA/HORA/...) nunca es una dirección real
+    # ni puede sobrevivir como propuesta B1 válida; ver `revalidar_destino_
+    # contaminado_rut_etiqueta_sin_ocr` (misma detección ya usada en
+    # ingesta por `_despachar_a_lineal_contaminado`, nunca una regla
+    # nueva). Corre sobre TODO el dataset en cada lote, igual que la
+    # revalidación hermana de arriba, para que una fila ya persistida con
+    # este patrón (de antes de que existiera esta detección) también
+    # converja sin necesidad de reprocesar el documento.
+    resumen["destinos_contaminados_rut_etiqueta"] = (
+        revalidar_destino_contaminado_rut_etiqueta_sin_ocr(ruta_dataset=ruta_csv)
     )["guias_actualizadas"]
 
     # OBSERVABILIDAD OBLIGATORIA -- un único registro por lote (motivos +

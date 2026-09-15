@@ -11,9 +11,11 @@ import pytest
 
 from atlas_core.incidencias_documentales import (
     MOTIVO_CALIDAD_DOCUMENTAL_O_IMAGEN, MOTIVO_PROBLEMA_LECTURA, MOTIVOS_NUNCA_INCIDENCIA,
-    TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE, TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
+    TIPO_CAMPO_DOCUMENTAL_INCORRECTO, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
+    TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
     AlmacenIncidenciasDocumentales, EstadoIncidencia, ErrorIncidenciasDocumentales,
 )
+from atlas_core.aplicacion_decisiones import _emitir_incidencia_documental_confirmada
 
 FECHA = datetime(2026, 8, 19, tzinfo=timezone.utc)
 
@@ -119,3 +121,33 @@ def test_caso_d_foto_borrosa_no_debe_registrarse_como_incidencia(tmp_path):
             valor_documental="EBEMA 5A", valor_canonico="EBEMA SA",
             tipo_incidencia=MOTIVO_CALIDAD_DOCUMENTAL_O_IMAGEN, evidencia=(), fecha=FECHA,
         )
+
+
+def test_emisor_confirmado_es_general_y_exige_marca_humana(tmp_path):
+    """No basta una diferencia automática: la rama humana debe marcarla."""
+    ruta = tmp_path / "incidencias_documentales.json"
+    base = {
+        "decision_id": "d-1", "accion": "CONFIRMAR", "campo": "direccion_entrega",
+        "valor_documental": "CAMINO VIEJO 12", "valor_canonico": "RUTA 5 SUR KM 12",
+        "documento": {"numero_guia": "472958", "numero_transporte": "14"},
+        "discrepancia_documental_confirmada": True,
+    }
+    automatica = _emitir_incidencia_documental_confirmada(
+        aplicacion={**base, "actor": "ATLAS_AUTOMATICO"}, ruta_incidencias=ruta, reloj=lambda: FECHA,
+    )
+    assert automatica is None
+    assert _almacen(tmp_path).listar() == []
+
+    incidencia = _emitir_incidencia_documental_confirmada(
+        aplicacion={**base, "actor": "JAVIER_MBT"}, ruta_incidencias=ruta, reloj=lambda: FECHA,
+    )
+    assert incidencia is not None
+    assert incidencia.tipo_incidencia == TIPO_CAMPO_DOCUMENTAL_INCORRECTO
+    assert incidencia.estado == EstadoIncidencia.CONFIRMADA.value
+    assert incidencia.valor_documental == "CAMINO VIEJO 12"
+    assert incidencia.valor_canonico == "RUTA 5 SUR KM 12"
+    # Misma decisión y misma discrepancia: el modelo existente deduplica.
+    _emitir_incidencia_documental_confirmada(
+        aplicacion={**base, "actor": "JAVIER_MBT"}, ruta_incidencias=ruta, reloj=lambda: FECHA,
+    )
+    assert len(_almacen(tmp_path).listar()) == 1

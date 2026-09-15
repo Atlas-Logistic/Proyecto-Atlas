@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 
 from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES, DOMINIO_VIAJES, METRICA_LIST_RELACION
 from atlas_core.responder_consulta_atlas import RespuestaConsultaAtlas, responder_consulta_atlas
@@ -43,6 +44,16 @@ _COLUMNAS_SOPORTE_DESKTOP = (
 
 def _viaje_recortado(viaje: dict) -> dict:
     return {columna: viaje.get(columna, "") for columna in _COLUMNAS_SOPORTE_DESKTOP}
+
+
+def _serializar_resultado_iterable(valores, recorte):
+    """Conserva escalares de listas de resultado y recorta sólo filas.
+
+    ``LIST_VIAJES`` del dominio EVENTOS devuelve identificadores de viaje
+    (strings), mientras otros listados devuelven mappings. El contrato CLI
+    no puede suponer que todo iterable sea convertible con ``dict()``.
+    """
+    return [recorte(dict(valor)) if isinstance(valor, Mapping) else valor for valor in valores]
 
 
 def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
@@ -78,11 +89,11 @@ def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
             # `_viaje_recortado` las vaciaba en silencio (todas las
             # columnas quedaban "") porque ninguna coincide con
             # "grupo"/"valor". Se pasan tal cual, ya son pequeñas.
-            resultado_serializado = [dict(f) for f in resultado_bruto]
+            resultado_serializado = _serializar_resultado_iterable(resultado_bruto, lambda f: f)
         elif isinstance(resultado_bruto, tuple):
             # LISTAR_VIAJES (o el listado de soporte de otro dominio): la
             # propia lista de filas es el "resultado".
-            resultado_serializado = [recorte(dict(v)) for v in resultado_bruto]
+            resultado_serializado = _serializar_resultado_iterable(resultado_bruto, recorte)
         else:
             resultado_serializado = resultado_bruto
         salida["resultado"] = {
@@ -93,7 +104,7 @@ def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
             "resultado": resultado_serializado,
             "unidades": r.unidades,
             "total_coincidencias": r.total_coincidencias,
-            "viajes_soporte": [recorte(dict(v)) for v in r.viajes_soporte],
+            "viajes_soporte": _serializar_resultado_iterable(r.viajes_soporte, recorte),
             "advertencias": list(r.advertencias),
         }
     return salida

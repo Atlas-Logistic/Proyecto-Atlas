@@ -21,6 +21,7 @@ from atlas_core.almacenamiento_portable import (
     leer_estado_operacion,
 )
 from atlas_core.aplicacion_decisiones import LEDGER
+from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.decisiones_pendientes import (
     MOTIVOS_DESTINO_NO_RESUELTO,
     NOMBRE_ARTEFACTO,
@@ -48,6 +49,9 @@ from atlas_core.revalidacion_documental import (
     revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr,
     revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
+    revalidar_tipo_carga_sin_ocr,
+    recuperar_material_ausente_focal_controlado,
+    recuperar_pendientes_desde_replay_traza_ocr_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
     revalidar_obra_destino_sin_ocr,
     revalidar_origen_encabezado_no_confiable_sin_ocr,
@@ -353,7 +357,7 @@ from atlas_core.revalidacion_documental import (
 # Una operación ya migrada a 22 nunca reevaluaría estas tres reglas por sí
 # sola -- subir a 23 fuerza el primer barrido sobre operaciones ya
 # migradas; a partir de ahí, idempotente.
-RULESET_VERSION = 23
+RULESET_VERSION = 24
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -857,10 +861,30 @@ def reconciliar_estado_derivado(
             "version": version_previa, "pendientes_tecnicos": len(registros),
         }
 
+    # Bloque MÉTRICAS DE DURACIÓN POR ETAPA -- caso real: "Actualizando
+    # operación" tardaba ~70s en Desktop sin que ningún log dijera dónde.
+    # `_marca_etapa` es sólo instrumentación (perf_counter, nunca decide
+    # nada ni cambia ningún resultado) -- agrupa la batería de abajo en
+    # tramos legibles para que una futura regresión de rendimiento sea
+    # visible en `tiempos_ms` del resultado, en vez de "algo se puso
+    # lento" sin más detalle. `reevaluacion_retroactiva.duracion_ms` antes
+    # medía por error TODA la batería (incluidas `reconciliar_segunda_
+    # pasada_universal_sin_ocr` y `reconciliar_decisiones_destino_no_
+    # resuelto`) en vez de sólo la comparación antes/después que le da
+    # nombre -- ver `_t_reeval_comparacion_inicio` más abajo, junto a esa
+    # comparación real.
+    _t_bateria_inicio = time.perf_counter()
+    _t_ultima_marca = [_t_bateria_inicio]
+    _tiempos_ms: dict[str, float] = {}
+
+    def _marca_etapa(nombre: str) -> None:
+        ahora = time.perf_counter()
+        _tiempos_ms[nombre] = round((ahora - _t_ultima_marca[0]) * 1000, 1)
+        _t_ultima_marca[0] = ahora
+
     # Snapshot ANTES (para la traza de reevaluación retroactiva) -- la
     # bandeja de decisiones y los pendientes técnicos tal cual están antes
     # de que la batería de abajo los regenere.
-    _t_reeval_inicio = time.perf_counter()
     try:
         _decisiones_antes = json.loads(decisiones.read_text(encoding="utf-8")).get("decisiones", []) if decisiones.is_file() else []
     except (OSError, ValueError):
@@ -899,6 +923,61 @@ def reconciliar_estado_derivado(
             "version_destino": VERSION_ESTADO_DERIVADO,
             "creado_en": instante.isoformat(),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        # Bloque P1 ELIMINAR DOBLE RECONCILIACIÓN -- si `revalidar_y_
+        # regenerar_reporte` (Fase 1, disparada por `aplicar_decision_
+        # obra`) YA corrió, hace un instante, las 18 funciones de
+        # `FUNCIONES_BATERIA_COMPARTIDA` contra este MISMO dataset +
+        # catálogos + ledger + versión de reglas/capacidades -- byte a
+        # byte, no por timestamp --, repetirlas aquí es trabajo idéntico
+        # tirado a la basura (caso real medido: ~26 s en Fase 1 y otra vez
+        # ~27 s en Fase 2 sobre el mismo estado, segundos después). El
+        # resto de la batería (recuperación P0, replay OCR, convergencia
+        # de identidad, corroboración de chofer por RUT, mobile,
+        # `revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr` --
+        # sin equivalente en Fase 1 -- y las 3 pasadas exclusivas de Fase
+        # 2) corre SIEMPRE, sin excepción -- ver `atlas_core.frescura_
+        # reconciliacion` para el contrato completo y la auditoría
+        # función por función.
+        #
+        # PELIGRO DE ORDEN (por qué esto NO es una firma calculada una
+        # sola vez): varias funciones NO compartidas (`rechazo_evidencia_
+        # destino`, `reversion_historial_destino`, `recuperacion_
+        # historial_destino`, recuperación P0, convergencia de identidad,
+        # RUT de chofer, y el reintento de ruta acotado a `por_
+        # reintentar`) corren ANTES o ENTREMEDIO de las 18 llamadas
+        # compartidas y SÍ pueden mutar el dataset en esta misma pasada.
+        # Si cualquiera de ellas cambia algo, el estado deja de coincidir
+        # con lo que Fase 1 firmó -- `_bateria_compartida_sigue_fresca()`
+        # relee dataset+catálogos+ledger y RECALCULA la firma cada vez
+        # que se llama (nunca una firma congelada al principio), así que
+        # una mutación intermedia la invalida automáticamente para TODAS
+        # las llamadas compartidas que todavía no corrieron, sin importar
+        # cuántas funciones no compartidas se hayan intercalado antes.
+        from atlas_core.frescura_reconciliacion import calcular_firma_bateria_compartida
+
+        _firma_publicada_bateria_compartida = estado_previo.get("firma_bateria_compartida")
+
+        def _bateria_compartida_sigue_fresca() -> bool:
+            if not _firma_publicada_bateria_compartida:
+                return False
+            try:
+                firma_actual = calcular_firma_bateria_compartida(
+                    dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / LEDGER,
+                    ruleset_version=RULESET_VERSION, versiones_capacidades=_versiones_cap_actuales(),
+                )
+            except OSError:
+                return False
+            return firma_actual == _firma_publicada_bateria_compartida
+
+        def _sin_cambio_guias() -> dict[str, object]:
+            # Forma de retorno verificada por AST contra las 17 de las 18
+            # funciones compartidas que devuelven {filas_totales,
+            # guias_actualizadas} -- ver `frescura_reconciliacion.py`.
+            # `filas_totales` no se lee en ningún punto de esta función
+            # (sólo `guias_actualizadas`); se deja en 0 para que sea
+            # obvio en un log que la llamada real fue omitida.
+            return {"filas_totales": 0, "guias_actualizadas": []}
 
         # Un documento ya existente puede haber quedado contaminado antes
         # de que el historial independiente convergiera. La recuperación
@@ -947,9 +1026,11 @@ def reconciliar_estado_derivado(
         # genuinamente insuficiente. Corre DESPUÉS de las dos funciones de
         # arriba (que ya retiraron cualquier valor genuinamente contaminado
         # o rechazado) para que sólo quede evidencia propia y limpia.
-        recuperacion_destino_propio = revalidar_destino_propio_respaldado_por_b1_sin_ocr(
-            ruta_dataset=dataset,
+        recuperacion_destino_propio = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_destino_propio_respaldado_por_b1_sin_ocr(ruta_dataset=dataset)
         )
+        _marca_etapa("recuperacion_historial_destino")
 
         # Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA -- SIN OCR: aplica el
         # mismo criterio determinista que `procesar_archivo` ya corre al
@@ -962,9 +1043,40 @@ def reconciliar_estado_derivado(
         # (dos candidatos plausibles / variación grande -> no toca la
         # fila), nunca oculta una contradicción documental real, nunca
         # pierde el valor OCR.
+        # P0 CONVERGENCIA HISTÓRICA -- el sidecar OCR ya persistido puede
+        # recuperar sólo ausencias geométricas seguras (guía/cliente/obra/
+        # DESPACHAR A). Nunca OCR nuevo, nunca pisa decisión humana ni un
+        # valor existente; deja su propia traza por fila y luego esta misma
+        # batería normal decide catálogo, convergencia y pendientes.
+        recuperacion_replay = recuperar_pendientes_desde_replay_traza_ocr_sin_ocr(
+            raiz_atlas=raiz,
+        )
+        # MATERIAL no participa del replay. El único OCR posterior real es
+        # focal y se limita a dos MATERIAL_AUSENTE con imagen preservada por
+        # ciclo; su intento queda marcado para que abrir Desktop de nuevo no
+        # transforme la reconciliación en OCR masivo.
+        recuperacion_material_focal = recuperar_material_ausente_focal_controlado(
+            raiz_atlas=raiz,
+        )
+        # Un clasificador mejorado debe alcanzar también filas históricas.
+        # Es una función pura de descripcion_material y sólo cambia cuando
+        # el resultado vigente difiere: idempotente y sin degradar texto.
+        try:
+            sincronizacion_tipo_carga = revalidar_tipo_carga_sin_ocr(ruta_dataset=dataset)
+        except (OSError, ValueError):
+            # Igual que el resto de la batería: un artefacto legacy de
+            # esquema incompleto no puede impedir la reconciliación ni los
+            # demás recuperadores. El revalidador conserva su contrato
+            # estricto para sus llamadores directos.
+            sincronizacion_tipo_carga = {"filas_totales": 0, "guias_actualizadas": []}
+        por_reintentar.extend(recuperacion_replay.get("guias_actualizadas", []))
+        por_reintentar.extend(recuperacion_material_focal.get("recuperados", []))
+        por_reintentar = list(dict.fromkeys(por_reintentar))
+
         convergencia_identidad = revalidar_convergencia_identidad_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
         )
+        _marca_etapa("recuperacion_p0_y_convergencia_identidad")
 
         # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: estas
         # tres revalidaciones NUNCA leen OCR ni recalculan ruta -- sólo
@@ -983,8 +1095,11 @@ def reconciliar_estado_derivado(
         # Desktop. Corren siempre que se entra a este bloque (migración,
         # reintento de ruta vencido, o simplemente el dataset avanzó por
         # cualquier decisión humana) -- nunca sólo una vez por versión.
-        limpieza = revalidar_motivo_destino_ya_confirmado_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        limpieza = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_motivo_destino_ya_confirmado_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            )
         )
         # Bloque VALIDACIÓN GEOGRÁFICA OBLIGATORIA -- caso real 464784: un
         # destino ya persistido cuya localidad geocodificada contradice la
@@ -995,8 +1110,14 @@ def reconciliar_estado_derivado(
         # se conecta también a la reconciliación de la carga de Desktop
         # (única vía del ingreso de un lote). Sin OCR, sin red -- sólo
         # columnas ya escritas.
-        limpieza_geo_contradiccion = revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
-        limpieza_material = revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
+        limpieza_geo_contradiccion = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
+        )
+        limpieza_material = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_material_estampado_persistido_sin_ocr(ruta_dataset=dataset)
+        )
         # Bloque FECHA POR TELEMETRÍA -- caso real 0000354651 (472276/
         # 472277): igual que las dos limpiezas de arriba, existía y estaba
         # probada pero sólo se invocaba desde `revalidar_y_regenerar_
@@ -1004,8 +1125,9 @@ def reconciliar_estado_derivado(
         # también aquí para que `CONFLICTO_FECHA` deje de verse en la
         # PRIMERA carga automática de Desktop, sin esperar una decisión
         # humana no relacionada. Sin OCR, sin red.
-        limpieza_fecha_telemetria = revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr(
-            ruta_dataset=dataset,
+        limpieza_fecha_telemetria = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr(ruta_dataset=dataset)
         )
         # Bloque ENTREGA A SEDE DEL PROPIO CLIENTE -- caso real 0000353062/
         # 464717 (cliente == obra_destino == "AMERICAN SCREW CHILE SPA",
@@ -1016,9 +1138,13 @@ def reconciliar_estado_derivado(
         # `revalidar_y_regenerar_reporte` (decisión / envío Mobile). Aquí
         # se conecta también a la reconciliación de la carga de Desktop /
         # ingreso de un lote. Sin OCR, sin red.
-        limpieza_obra_destino = revalidar_obra_destino_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / LEDGER,
+        limpieza_obra_destino = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_obra_destino_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / LEDGER,
+            )
         )
+        _marca_etapa("limpieza_motivos_destino_obra_material_fecha")
         # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa
         # raíz real (464367): un origen que quedó determinado ÚNICAMENTE
         # por `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
@@ -1029,7 +1155,10 @@ def reconciliar_estado_derivado(
         # un origen recién invalidado (vuelve a `ORIGEN_NO_DETERMINADO`)
         # se refleje de inmediato en `estado_operacional`, nunca con un
         # ciclo de rezago.
-        limpieza_origen = revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+        limpieza_origen = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_encabezado_no_confiable_sin_ocr(ruta_dataset=dataset)
+        )
         # Bloque CIERRE ORIGEN GPS -- causa raíz real (472224): hermana de
         # la limpieza de arriba, misma filosofía -- un origen confirmado
         # por `resolver_planta_origen_gps` ANTES del fix que exige
@@ -1039,15 +1168,21 @@ def reconciliar_estado_derivado(
         # regenerar_reporte` -- mismo orden, misma razón: un viaje no
         # debe obtener distinto origen únicamente por la puerta de
         # entrada (decisión vs. carga automática de Desktop).
-        limpieza_origen_gps_candidato_unico = revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        limpieza_origen_gps_candidato_unico = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_gps_candidato_unico_sin_contacto_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            )
         )
         # Bloque R2.3 (adición) -- intenta resolver origen por eliminación
         # de categoría (planta documental YA identificada e incompatible)
         # -- misma función que ya usa `revalidar_y_regenerar_reporte`,
         # alineada aquí por el mismo principio de arriba.
-        limpieza_origen_eliminacion_categoria = revalidar_origen_por_eliminacion_categoria_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        limpieza_origen_eliminacion_categoria = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_por_eliminacion_categoria_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            )
         )
         # Bloque ORIGEN V3 -- CONVERGENCIA DE EVIDENCIA ANTES DE PREGUNTAR
         # -- causa raíz sistémica real (lote 2: 464730, 464631, 464529):
@@ -1057,16 +1192,20 @@ def reconciliar_estado_derivado(
         # (externo vs. la propia planta) contra el catálogo -- corre
         # ANTES del reintento de ruta para que la misma pasada calcule
         # km/tiempo con el origen ya resuelto.
-        limpieza_origen_categoria = revalidar_origen_por_categoria_sin_candidato_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        limpieza_origen_categoria = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_por_categoria_sin_candidato_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            )
         )
         # Bloque CAPABILITY SUITE DE ORIGEN -- corre DESPUÉS de la regla
         # por categoría, a propósito: así un hermano de transporte que
         # la categoría acaba de resolver ya está disponible para
         # propagarse, en la MISMA pasada, a cualquier otro documento del
         # mismo transporte sin categoría propia.
-        limpieza_origen_hermano_transporte = revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(
-            ruta_dataset=dataset,
+        limpieza_origen_hermano_transporte = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(ruta_dataset=dataset)
         )
         # Bloque CIERRE DE ORQUESTACIÓN -- causa raíz real (472037):
         # un origen que quedó determinado ÚNICAMENTE por `PATRON_
@@ -1077,23 +1216,30 @@ def reconciliar_estado_derivado(
         # es la única función que puede producir esa firma) para que una
         # fila ya corregida por vías más fuertes (arriba) nunca vuelva a
         # quedar mal etiquetada por ese patrón en la MISMA pasada.
-        limpieza_origen_vecinos_contra_evidencia_propia = revalidar_origen_vecinos_gps_contra_evidencia_propia_real_sin_ocr(
-            ruta_dataset=dataset,
+        limpieza_origen_vecinos_contra_evidencia_propia = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_vecinos_gps_contra_evidencia_propia_real_sin_ocr(ruta_dataset=dataset)
         )
         # Bloque FINAL CORE V1 -- caso real 464981: vecinos temporales GPS
         # del mismo vehículo (ventana de días) -- misma función que ya usa
         # `revalidar_y_regenerar_reporte`, alineada aquí por el mismo
         # principio: un viaje no debe obtener distinto origen únicamente
         # por la puerta de entrada.
-        limpieza_origen_vecinos = revalidar_origen_por_vecinos_temporales_gps_sin_ocr(ruta_dataset=dataset)
+        limpieza_origen_vecinos = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_por_vecinos_temporales_gps_sin_ocr(ruta_dataset=dataset)
+        )
         # Bloque CAPABILITY SUITE DE ORIGEN (caso real 472477) -- última
         # vía automática antes de que el origen quede genuinamente sin
         # resolver: convergencia ABSOLUTA en TODO el historial confiable
         # de este mismo cliente (sin ventana temporal) -- corre DESPUÉS
         # de la regla por categoría, misma razón que en
         # `revalidar_y_regenerar_reporte`.
-        limpieza_origen_historial_cliente = revalidar_origen_por_historial_de_cliente_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        limpieza_origen_historial_cliente = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_origen_por_historial_de_cliente_sin_ocr(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            )
         )
         # Bloque FIX RUT AUSENTE -- caso real 464367 (CARLOS ÑANCUCHEO):
         # un chofer identificado por nombre pero sin RUT documental
@@ -1110,6 +1256,7 @@ def reconciliar_estado_derivado(
         # y un ID placeholder no es un RUT. Sin OCR, sin red; misma lógica
         # que ya usa el pipeline al procesar un documento nuevo.
         limpieza_chofer_corroborado = revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(raiz_atlas=raiz)
+        _marca_etapa("origen_y_chofer")
         # Codex 464784 (URUGUAY 15) -- reutiliza una ruta YA CALCULADA de
         # un documento hermano de la MISMA obra+planta con la MISMA
         # calle+número y comuna explícita sin contradicción, sin volver a
@@ -1117,8 +1264,9 @@ def reconciliar_estado_derivado(
         # geocodificación de abajo para que una guía resuelta aquí nunca
         # gaste un intento técnico en el proveedor externo en esta misma
         # pasada.
-        recuperacion_ruta_historial_obra = revalidar_ruta_por_historial_de_obra_sin_ocr(
-            ruta_dataset=dataset,
+        recuperacion_ruta_historial_obra = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_ruta_por_historial_de_obra_sin_ocr(ruta_dataset=dataset)
         )
         # Bloque DESTINOS CONFIRMADOS COMPLETOS -- causa raíz real
         # (0000353312/464781): un destino CONFIRMADO en catálogo cuya
@@ -1134,8 +1282,11 @@ def reconciliar_estado_derivado(
         # de catálogo de abajo, para que ese ya use las coordenadas recién
         # completadas. Nunca completa un destino con texto degradado por
         # OCR (`texto_destino_degradado`, caso 464715).
-        limpieza_destino_coords = revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
-            carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+        limpieza_destino_coords = (
+            {"destinos_actualizados": []} if _bateria_compartida_sigue_fresca()
+            else revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
+                carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+            )
         )
         # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- causa raíz
         # real (464588/464395/464740): una dirección ya CONFIRMADA por
@@ -1150,9 +1301,31 @@ def reconciliar_estado_derivado(
         # abajo para que una fila que converge aquí nunca vuelva a
         # gastar un intento técnico en el proveedor externo en la misma
         # pasada.
+        # Bloque P2 RUTEO -- cola focal en vez de barrer todo el dataset:
+        # `revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr` ya
+        # soporta `guias_objetivo` (el mismo contrato que ya usa el
+        # reintento de ruta más abajo), pero nunca se lo pasaban -- barría
+        # las 183 filas reales en cada pasada, incluidas las ~170+ que YA
+        # tienen `estado_ruta == RUTA_CALCULADA` y que la función misma
+        # descarta en su primera línea (`if estado_ruta == RUTA_CALCULADA:
+        # continue`). Acotar aquí replica EXACTAMENTE ese mismo filtro --
+        # ninguna fila que la función habría procesado deja de procesarse;
+        # sólo se evita la iteración + búsqueda de catálogo de las que de
+        # todos modos iba a descartar en la primera línea. Medido: el
+        # revalidador más costoso de la batería (~6-7 s), dominado por
+        # geocodificación real para las pocas filas que sí califican.
+        try:
+            guias_ruta_pendiente = {
+                str(f.get("numero_guia", "")).strip()
+                for f in _leer_filas(dataset)
+                if str(f.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value
+            }
+        except (OSError, ValueError):
+            guias_ruta_pendiente = None  # ante cualquier duda, sin acotar -- barrido completo de siempre
         limpieza_destino_catalogo = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
             proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
+            guias_objetivo=guias_ruta_pendiente,
         )
         # Bloque DESTINO HUMANO YA CONFIRMADO (Codex 472037) -- corre
         # ANTES del reintento de ruta de abajo, a propósito: llena
@@ -1163,9 +1336,13 @@ def reconciliar_estado_derivado(
         # docstring de la función para el criterio completo (identidad
         # exacta guía+transporte, nunca sobrescribe un `despachar_a_crudo`
         # ya existente).
-        destino_vacio_confirmado = revalidar_destino_vacio_confirmado_por_documento_sin_ocr(
-            ruta_dataset=dataset, ruta_ledger=actual / LEDGER,
+        destino_vacio_confirmado = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_destino_vacio_confirmado_por_documento_sin_ocr(
+                ruta_dataset=dataset, ruta_ledger=actual / LEDGER,
+            )
         )
+        _marca_etapa("destino_ruta_y_geocoding")
         recuperacion = {"guias_actualizadas": []}
         if por_reintentar:
             recuperacion = revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -1174,6 +1351,7 @@ def reconciliar_estado_derivado(
                 proveedor_rutas_fallback=proveedor_rutas_fallback,
                 guias_objetivo=set(por_reintentar),
             )
+        _marca_etapa("reintento_ruta_acotado_a_por_reintentar")
         # Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
         # 0000355433, guías 472623/472624): esta reconciliación (y también
         # `revalidar_y_regenerar_reporte`, la otra vía por la que un motivo
@@ -1187,7 +1365,10 @@ def reconciliar_estado_derivado(
         # de motivos Y del reintento de ruta) -- nunca decide si un motivo
         # sigue vigente, sólo hace que los tres campos deriven siempre de
         # esa misma fuente ya canónica.
-        limpieza_indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset)
+        limpieza_indicadores = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset)
+        )
         # Mobile debe leer el indicador YA convergido en esta misma
         # pasada. Si corriera antes, una fila con motivos canónicos
         # resueltos pero `indicador_revision` todavía obsoleto seguiría
@@ -1197,6 +1378,7 @@ def reconciliar_estado_derivado(
         limpieza_mobile = revalidar_asociacion_mobile_sin_ocr(
             RepositorioEnviosMobile(raiz_atlas=raiz), dataset=dataset,
         )
+        _marca_etapa("indicadores_y_mobile")
         # Bloque MOTOR DE EVIDENCIA -- causa raíz real (T2MN86/J35478,
         # 464529 alias TORRES OCARANEA): `reconciliar_bandeja_decisiones`
         # (catálogo + similitud OCR calibrada + historial RUT/transporte
@@ -1213,6 +1395,7 @@ def reconciliar_estado_derivado(
         # (`MAX_ITERACIONES_AUTO_RESOLUCION`) para los tipos de decisión
         # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
         evidencia_decisiones = reconciliar_bandeja_decisiones(raiz_atlas=raiz, reloj=lambda: instante)
+        _marca_etapa("bandeja_decisiones_evidencia")
         # Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL -- SIN
         # OCR, SIN RED: TODA decisión pendiente CLIENTE_CANDIDATO/CLIENTE_
         # DESCONOCIDO/OBRA_DESCONOCIDA/VEHICULO_DESCONOCIDO pasa por
@@ -1226,6 +1409,7 @@ def reconciliar_estado_derivado(
         segunda_pasada_historica = reconciliar_segunda_pasada_universal_sin_ocr(
             raiz_atlas=raiz, reloj=lambda: instante,
         )
+        _marca_etapa("segunda_pasada_universal_sin_ocr")
         # Bloque PENDIENTES TÉCNICOS ACCIONABLES -- caso real 0000353055/
         # 464715 (MULTIPLES_UBICACIONES_DISPERSAS): los motivos de destino
         # que YA son un callejón sin salida con la evidencia actual
@@ -1243,6 +1427,8 @@ def reconciliar_estado_derivado(
         # viaje aparece REQUIERE_REVISION con tarjeta, nunca
         # INCOMPLETO_TECNICO "que se reintenta solo".
         deteccion_destino = reconciliar_decisiones_destino_no_resuelto(raiz_atlas=raiz, reloj=lambda: instante)
+        _marca_etapa("destino_no_resuelto")
+        _t_bateria_fin = time.perf_counter()
 
         # Bloque REEVALUACIÓN RETROACTIVA UNIVERSAL -- traza: qué
         # dominio-versión retiró qué pendiente. La batería de arriba YA
@@ -1251,6 +1437,11 @@ def reconciliar_estado_derivado(
         # atribuye cada retiro al/los dominio(s) que lo gobiernan y
         # avanzaron. Si una capacidad no aportó evidencia, su pendiente
         # sigue en pie (`decisiones_retiradas`=0) -- nunca se inventa.
+        # `duracion_ms` mide SÓLO esta comparación (antes medía por error
+        # toda la batería de arriba, ver bloque MÉTRICAS DE DURACIÓN POR
+        # ETAPA al inicio de la función -- `tiempos_ms`/`duracion_bateria_
+        # completa_ms` en el resultado es donde vive ese costo real).
+        _t_reeval_comparacion_inicio = time.perf_counter()
         try:
             _decisiones_despues = json.loads(decisiones.read_text(encoding="utf-8")).get("decisiones", []) if decisiones.is_file() else []
         except (OSError, ValueError):
@@ -1263,7 +1454,7 @@ def reconciliar_estado_derivado(
             avanzadas=capacidades_a_reevaluar,
             decisiones_antes=_decisiones_antes, decisiones_despues=_decisiones_despues,
             tecnicos_antes=_tecnicos_antes, tecnicos_despues=_tecnicos_despues,
-            duracion_ms=round((time.perf_counter() - _t_reeval_inicio) * 1000),
+            duracion_ms=round((time.perf_counter() - _t_reeval_comparacion_inicio) * 1000),
         )
         # A partir de acá el dataset YA tiene los cambios de las
         # revalidaciones de arriba -- cada una es atómica y ya quedó
@@ -1345,6 +1536,9 @@ def reconciliar_estado_derivado(
                 dataset, reporte, carpeta_catalogos=catalogos,
                 ruta_ledger=actual / LEDGER, reloj=lambda: instante,
             )
+            _tiempos_ms["post_proceso_pendientes_y_generar_reporte"] = round(
+                (time.perf_counter() - _t_bateria_fin) * 1000, 1
+            )
             if _sha256_archivo(dataset) != huella_para_publicar:
                 shutil.rmtree(reporte, ignore_errors=True)
                 return {
@@ -1410,6 +1604,9 @@ def reconciliar_estado_derivado(
             | set(limpieza_geo_contradiccion["guias_actualizadas"])
             | set(limpieza_obra_destino["guias_actualizadas"])
             | set(destino_vacio_confirmado["guias_actualizadas"])
+            | set(recuperacion_replay["guias_actualizadas"])
+            | set(recuperacion_material_focal["recuperados"])
+            | set(sincronizacion_tipo_carga["guias_actualizadas"])
         ),
         "destino_vacio_confirmado_desde_ledger": destino_vacio_confirmado["guias_actualizadas"],
         "destinos_historial_recuperados": recuperacion_historial_destino,
@@ -1426,6 +1623,11 @@ def reconciliar_estado_derivado(
             "resoluciones": convergencia_identidad["resoluciones"],
             "contradicciones": convergencia_identidad["contradicciones"],
         },
+        "recuperacion_p0": {
+            "replay": recuperacion_replay,
+            "material_focal": recuperacion_material_focal,
+            "tipo_carga": sincronizacion_tipo_carga,
+        },
         "segunda_pasada_universal_sin_ocr": segunda_pasada_historica,
         "reevaluacion_retroactiva": reevaluacion_retroactiva,
         "pendientes_tecnicos": len(registros_despues),
@@ -1433,4 +1635,12 @@ def reconciliar_estado_derivado(
         "ocr_ejecutado": False,
         "reporte_regenerado_por_dataset_desactualizado": reporte_desactualizado,
         "reporte_regenerado_por_estado_derivado_incoherente": estado_derivado_incoherente,
+        # Bloque MÉTRICAS DE DURACIÓN POR ETAPA -- ver comentario al inicio
+        # de la función. `tiempos_ms` es aditivo (cada etapa mide sólo lo
+        # transcurrido desde la marca anterior); `duracion_bateria_
+        # completa_ms` es el total de arriba, útil para comparar contra
+        # `reevaluacion_retroactiva.duracion_ms` (que ahora sólo mide su
+        # propia comparación, no toda la batería).
+        "tiempos_ms": _tiempos_ms,
+        "duracion_bateria_completa_ms": round((time.perf_counter() - _t_bateria_inicio) * 1000, 1),
     }

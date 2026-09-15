@@ -46,14 +46,18 @@ from atlas_core.catalogo_vehiculos import (
 )
 from atlas_core.catalogos import (
     buscar_empresa_por_rut,
+    buscar_chofer_por_rut,
+    corroborar_chofer_por_nombre_y_rut_documental,
     cargar_catalogo_json,
     normalizar_rut,
+    resolver_nombre_chofer_difuso,
     resolver_nombre_cliente_difuso,
 )
 from atlas_core.evidencia_entidades import ConfirmacionIdentidad
 from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import (
-    evaluar_evidencia_obra, resolver_obra_por_prefijo_documental_confirmado,
+    _PATRON_RUIDO_NUMERICO_INICIAL, evaluar_evidencia_obra,
+    resolver_obra_por_prefijo_documental_confirmado, resolver_obra_por_ruido_ocr_inicial,
     resolver_obra_por_variacion_ortografica_menor,
 )
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
@@ -69,7 +73,7 @@ from atlas_core.verificacion_externa import EvidenciaExterna
 SCHEMA_VERSION = 1
 NOMBRE_ARTEFACTO = "decisiones_pendientes.json"
 TIPOS_SOPORTADOS = frozenset({
-    "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
+    "VEHICULO_DESCONOCIDO", "CHOFER_DESCONOCIDO", "CHOFER_CANDIDATO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
     "OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR", "ALIAS_CANDIDATO",
     "ORIGEN_NO_CONFIRMADO", "DESTINO_NO_RESUELTO", "CLIENTE_AUSENTE",
 })
@@ -90,7 +94,7 @@ def _obra_esta_ausente(obra_canonica: str) -> bool:
 # cual para OBRA_DESCONOCIDA, VEHICULO_DESCONOCIDO y CLIENTE_DESCONOCIDO.
 ACCIONES_ENTIDAD_DESCONOCIDA = ("REGISTRAR", "NO_REGISTRAR", "POSPONER")
 TIPOS_ENTIDAD_DESCONOCIDA = frozenset({
-    "OBRA_DESCONOCIDA", "VEHICULO_DESCONOCIDO", "CLIENTE_DESCONOCIDO",
+    "OBRA_DESCONOCIDA", "VEHICULO_DESCONOCIDO", "CHOFER_DESCONOCIDO", "CLIENTE_DESCONOCIDO",
 })
 # R3.4: para DESTINO_SIN_CONFIRMAR la entidad (obra) ya se conoce; lo único
 # pendiente es confirmar la relación obra<->destino -- pregunta distinta a
@@ -821,6 +825,21 @@ def detectar_decision_destino_no_resuelto(
                 _obra_esta_ausente(str(fila.get("obra_destino", "")))
                 and str(fila.get("despachar_a_crudo", "")).strip()
             ):
+                return None
+            # Bloque CIERRE B1 EVIDENCIA DESTINO (Codex 472623/472624) --
+            # si B1 YA aceptó el valor de `despachar_a_crudo` con
+            # evidencia real (mismo criterio exacto que usa
+            # `revalidar_destino_rechazado_por_evidencia_b1_sin_ocr` para
+            # abstenerse de invalidar la ruta -- nunca uno nuevo),
+            # preguntar por la obra no aporta nada: el ruteo puede
+            # avanzar solo, sin esa pregunta, en la próxima
+            # reconciliación natural. Sin este chequeo, una tarjeta ya
+            # retirada por `regenerar_decisiones_persistidas` (mismo
+            # criterio) se regeneraría de inmediato en la MISMA pasada,
+            # con el mismo `decision_id` -- bloqueo circular real.
+            from atlas_core.revalidacion_documental import _destino_aceptado_por_b1
+
+            if _destino_aceptado_por_b1(fila):
                 return None
             motivo_base = "OBRA_AUSENTE_BLOQUEA_RUTEO"
         else:
@@ -1863,6 +1882,31 @@ def _decisiones_obra_para_cliente(
             )
             if obra_por_variacion is not None:
                 obras = [obra_por_variacion]
+            # Bloque RUIDO OCR INICIAL (caso real 472516) -- un token
+            # numérico corto (checkbox/viñeta OCR) antepuesto al nombre
+            # real de la obra ("1 CONSTRUCTORA LO BLANCO SPA"). Se
+            # intenta primero coincidencia EXACTA tras quitarlo; si el
+            # texto restante sigue sin calzar exacto (p. ej. combina
+            # ADEMÁS una variación ortográfica menor), se reintenta la
+            # variación ortográfica ya existente sobre el texto YA sin
+            # el prefijo -- nunca al revés (el prefijo numérico nunca es
+            # parte de una "variación ortográfica").
+            if not obras:
+                obra_por_ruido = resolver_obra_por_ruido_ocr_inicial(
+                    nombre_documental=obra_texto,
+                    obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+                )
+                if obra_por_ruido is not None:
+                    obras = [obra_por_ruido]
+                else:
+                    sin_ruido = _PATRON_RUIDO_NUMERICO_INICIAL.sub("", obra_texto, count=1)
+                    if sin_ruido != obra_texto and sin_ruido.strip():
+                        obra_por_variacion_sin_ruido = resolver_obra_por_variacion_ortografica_menor(
+                            nombre_documental=sin_ruido,
+                            obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+                        )
+                        if obra_por_variacion_sin_ruido is not None:
+                            obras = [obra_por_variacion_sin_ruido]
             # Un recorte OCR no es por sí solo una identidad. Sólo se
             # reutiliza una obra confirmada si el texto completo es su
             # prefijo inequívoco Y el destino humano ya confirmado de esa
@@ -2002,6 +2046,69 @@ def detectar_decisiones_documento(
     transporte = str(datos.get("número de transporte", ""))
     comunes = {"archivo": archivo, "numero_guia": guia, "numero_transporte": transporte}
     decisiones: list[dict[str, object]] = []
+    # Un chofer que no pudo corroborarse automáticamente debe terminar en
+    # una vía humana accionable, nunca sólo en el motivo técnico terminal.
+    # Primero se vuelve a aplicar el mismo catálogo/RUT/alias que el flujo
+    # automático: si aquello basta, no se publica tarjeta. Sólo se pregunta
+    # al humano por una entidad nueva o por candidatos realmente competitivos.
+    nombre_chofer = str(datos.get("chofer", "")).strip()
+    rut_chofer = str(datos.get("RUT del chofer", "")).strip()
+    if nombre_chofer not in _AUSENTES:
+        try:
+            choferes = cargar_catalogo_json(carpeta / "choferes.json")
+            corroborado = corroborar_chofer_por_nombre_y_rut_documental(
+                choferes, nombre_chofer, rut_chofer,
+            )
+            por_rut = buscar_chofer_por_rut(choferes, rut_chofer)
+            difuso = resolver_nombre_chofer_difuso(choferes, nombre_chofer)
+            if not corroborado and not por_rut:
+                if difuso.estado == "AMBIGUO":
+                    candidatos = [
+                        {"nombre": str(r.get("nombre", "")).strip(), "rut": str(r.get("rut", "")).strip()}
+                        for r in choferes.values()
+                        if isinstance(r, dict) and r.get("activo", True) is True
+                        and str(r.get("nombre", "")).strip()
+                    ]
+                    decisiones.append(crear_decision(
+                        tipo="CHOFER_CANDIDATO", entidad="CHOFER", campo="chofer",
+                        valor_documental=nombre_chofer, valor_normalizado=nombre_chofer,
+                        identidad_resuelta=None, candidatos=candidatos,
+                        motivos=("CHOFER_SIN_CORROBORAR_CANDIDATOS_AMBIGUOS",),
+                        evidencias=({"tipo": "RUT_DOCUMENTAL", "valor": rut_chofer},),
+                        acciones_permitidas=("CONFIRMAR", "NO_CONFIRMAR", "POSPONER"), **comunes,
+                    ))
+                elif difuso.estado in _ESTADOS_NOMBRE_SEGUROS:
+                    # Si el nombre se parece de forma segura pero el RUT lo
+                    # contradice, no se autocorrige: el humano debe confirmar
+                    # (o rechazar) esa identidad explícitamente.
+                    candidato = next(
+                        (r for r in choferes.values() if isinstance(r, dict)
+                         and str(r.get("nombre", "")).strip() == difuso.valor_resultado),
+                        {},
+                    )
+                    decisiones.append(crear_decision(
+                        tipo="CHOFER_CANDIDATO", entidad="CHOFER", campo="chofer",
+                        valor_documental=nombre_chofer, valor_normalizado=nombre_chofer,
+                        identidad_resuelta=None,
+                        candidatos=[{"nombre": difuso.valor_resultado, "rut": str(candidato.get("rut", "")).strip()}],
+                        motivos=("CHOFER_SIN_CORROBORAR_REQUIERE_CONFIRMACION",),
+                        evidencias=({"tipo": "RUT_DOCUMENTAL", "valor": rut_chofer},),
+                        acciones_permitidas=("CONFIRMAR", "NO_CONFIRMAR", "POSPONER"), **comunes,
+                    ))
+                else:
+                    decisiones.append(crear_decision(
+                        tipo="CHOFER_DESCONOCIDO", entidad="CHOFER", campo="chofer",
+                        valor_documental=nombre_chofer, valor_normalizado=nombre_chofer,
+                        identidad_resuelta=None, candidatos=(),
+                        motivos=("CHOFER_SIN_CORROBORAR_SIN_ESTRATEGIA_AUTOMATICA",),
+                        evidencias=({"tipo": "RUT_DOCUMENTAL", "valor": rut_chofer},),
+                        acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA, **comunes,
+                    ))
+        except (OSError, ValueError):
+            # Catálogo no disponible: no inventar identidad ni una tarjeta
+            # basada en candidatos incompletos; la próxima reconciliación la
+            # reintentará con la fuente normal disponible.
+            pass
     rampla_documental_valida = _patente_documental_valida(datos.get("patente del carro", ""))
     # R4: mismo catálogo que ya carga `resolver_patente` más abajo, leído
     # una sola vez aquí -- sólo para poder mirar el TIPO de una identidad ya
@@ -2710,6 +2817,46 @@ def regenerar_decisiones_persistidas(
                 != str(fila_vigente.get("despachar_a_crudo", ""))
             )
         ]
+    # Bloque CIERRE B1 EVIDENCIA DESTINO (Codex 472623/472624) -- una
+    # decisión DESTINO_NO_RESUELTO con el motivo sintético
+    # `OBRA_AUSENTE_BLOQUEA_RUTEO` (Bloque BLOQUEO PREVIO AL RUTEO) nunca
+    # corresponde a un `motivo_ruta` real -- ni el bloque de arriba
+    # (R19/documental) ni el de abajo (motivo de ruta) pueden reconocerla
+    # como obsoleta, porque ninguno de los dos existe para ESTE motivo:
+    # `motivo_ruta` de la fila se queda vacío para siempre en este caso
+    # (el ruteo nunca llegó a intentarse), así que nada en el dataset
+    # marca nunca la tarjeta como resuelta -- y mientras la tarjeta siga
+    # viva, `_pendientes_ruta` (Bloque R2.5/reconciliación) la excluye de
+    # todo reintento automático de ruteo, así que la evidencia que la
+    # volvería obsoleta (una ruta calculada) nunca llega a producirse:
+    # bloqueo circular real, no hipotético (472623/472624).
+    #
+    # La condición real de obsolescencia de ESTA tarjeta es otra: si B1
+    # YA aceptó el valor de `despachar_a_crudo` con evidencia real
+    # (`_destino_aceptado_por_b1`, el mismo criterio que ya usa
+    # `revalidar_destino_rechazado_por_evidencia_b1_sin_ocr` para
+    # abstenerse de invalidar la ruta -- nunca un criterio nuevo),
+    # preguntar por la obra ya no aporta nada: el ruteo puede avanzar
+    # solo, sin esa pregunta, en la próxima reconciliación natural.
+    # Nunca descarta una `OBRA_AUSENTE_BLOQUEA_RUTEO` genuina (sin
+    # evidencia B1 aceptada todavía) -- ésa sigue siendo, correctamente,
+    # una pregunta real para Javier.
+    if filas_por_guia is not None:
+        from atlas_core.revalidacion_documental import _destino_aceptado_por_b1
+
+        decisiones = [
+            decision for decision in decisiones
+            if not (
+                str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO"
+                and "OBRA_AUSENTE_BLOQUEA_RUTEO" in {str(m) for m in decision.get("motivos") or []}
+                and (
+                    fila_vigente := filas_por_guia.get(
+                        str((decision.get("documento") or {}).get("numero_guia", ""))
+                    )
+                ) is not None
+                and _destino_aceptado_por_b1(fila_vigente)
+            )
+        ]
     # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- caso real 464265:
     # mismo tipo de bug que el bloque de arriba (R19/contaminación
     # documental), pero para el origen de motivo `motivo_ruta` en vez de
@@ -3388,7 +3535,7 @@ def _generar_artefacto_sin_lock(
     salida = Path(ruta_salida) if ruta_salida is not None else dataset.parent / NOMBRE_ARTEFACTO
     hashes = {}
     for clave, nombre in {
-        "clientes": "clientes.json", "vehiculos": "vehiculos.json",
+        "clientes": "clientes.json", "choferes": "choferes.json", "vehiculos": "vehiculos.json",
         "obras_destinos": "obras_destinos.json",
         "destinos_maestros": "destinos_maestros.json",
     }.items():

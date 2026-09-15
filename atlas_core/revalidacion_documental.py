@@ -25,6 +25,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -50,10 +51,17 @@ from atlas_core.catalogo_vehiculos import (
 from atlas_core.catalogos import (
     buscar_chofer_por_nombre_exacto,
     cargar_catalogo_json,
+    buscar_chofer_por_rut,
     corroborar_chofer_por_nombre_y_rut_documental,
+    resolver_nombre_chofer_difuso,
 )
-from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_material
-from atlas_core.extractor import _patente_valida, limpiar_sufijo_rut_pegado
+from atlas_core.credibilidad_campos import (
+    NivelCredibilidad, evaluar_credibilidad_direccion,
+    evaluar_credibilidad_entidad_nombre, evaluar_credibilidad_material,
+)
+from atlas_core.extractor import (
+    _es_rut_seguido_de_etiqueta_administrativa, _patente_valida, limpiar_sufijo_rut_pegado,
+)
 from atlas_core.incidencias_documentales import (
     TIPO_RUT_DOCUMENTAL_AUSENTE,
     TIPO_RUT_DOCUMENTAL_INVALIDO,
@@ -105,6 +113,8 @@ from atlas_core.telemetria.seleccion_recorrido import (
 )
 from atlas_core.telemetria.servicio import ServicioTelemetria
 from atlas_core.validadores import rut_documentalmente_confirmado_invalido, validar_rut_chileno
+from atlas_core.replay_traza_ocr import reproducir_extraccion_geometrica_desde_traza
+from atlas_core.trazabilidad_ocr import ruta_traza_ocr
 
 # Bloque VALIDACIÓN E2E FOCAL 472593 -- causa raíz real: `rut_cliente` se
 # agregó a `COLUMNAS` (Bloque RUT CLIENTE V1) explícitamente como
@@ -138,6 +148,13 @@ _ERRORES_CATALOGO_VEHICULOS = (
     OSError,
     ValueError,
 )
+
+# Recuperaciones P0: versiones locales y deliberadamente pequeñas.  Se
+# persisten dentro de la métrica ya propia de cada fila; no se introduce otro
+# registro ni se convierte cada reconciliación en un reproceso masivo.
+_VERSION_REPLAY_P0 = 1
+_VERSION_MATERIAL_FOCAL_P0 = 1
+_LIMITE_MATERIAL_FOCAL_POR_CICLO = 2
 
 
 # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN: caso real 464264 (destino
@@ -1117,6 +1134,208 @@ def revalidar_tipo_carga_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, objec
             _escribir_filas_completas(ruta, filas)
 
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def _metricas_recuperacion_p0(fila: Mapping[str, object]) -> dict[str, object]:
+    """Lee sólo el pequeño espacio de trazabilidad P0 de una fila."""
+    try:
+        metricas = json.loads(str(fila.get("metricas_procesamiento_json", "") or "{}"))
+    except (TypeError, ValueError):
+        metricas = {}
+    valor = metricas.get("recuperacion_p0") if isinstance(metricas, dict) else None
+    return dict(valor) if isinstance(valor, dict) else {}
+
+
+def _anotar_recuperacion_p0(fila: dict[str, str], clave: str, valor: Mapping[str, object]) -> None:
+    try:
+        metricas = json.loads(str(fila.get("metricas_procesamiento_json", "") or "{}"))
+    except (TypeError, ValueError):
+        metricas = {}
+    if not isinstance(metricas, dict):
+        metricas = {}
+    recuperacion = metricas.get("recuperacion_p0")
+    if not isinstance(recuperacion, dict):
+        recuperacion = {}
+    recuperacion[clave] = dict(valor)
+    metricas["recuperacion_p0"] = recuperacion
+    fila["metricas_procesamiento_json"] = json.dumps(metricas, ensure_ascii=False, sort_keys=True)
+
+
+def _hay_decision_humana_para_campo(
+    aplicaciones: list[Mapping[str, object]], *, fila: Mapping[str, str], campo: str,
+) -> bool:
+    """Una decisión humana del mismo documento siempre gana al replay.
+
+    Se compara primero por archivo (estable aun si falta número de guía) y,
+    como defensa para ledgers antiguos, también por guía. No se infiere una
+    decisión por similitud de texto.
+    """
+    archivo = str(fila.get("archivo", "")).strip()
+    guia = str(fila.get("numero_guia", "")).strip()
+    for aplicacion in aplicaciones:
+        documento = aplicacion.get("documento")
+        if not isinstance(documento, Mapping):
+            continue
+        mismo_documento = (
+            bool(archivo) and str(documento.get("archivo", "")).strip() == archivo
+        ) or (
+            bool(guia) and str(documento.get("numero_guia", "")).strip() == guia
+        )
+        if mismo_documento and str(aplicacion.get("campo", "")).strip() == campo:
+            return True
+    return False
+
+
+def recuperar_pendientes_desde_replay_traza_ocr_sin_ocr(
+    *, raiz_atlas: str | Path, limite_por_ciclo: int = 20,
+) -> dict[str, object]:
+    """Aplica replay geométrico sólo a ausencias compatibles y trazadas.
+
+    El replay no relee imagen ni OCR y sólo conoce los cuatro campos que hoy
+    expone. Cada candidato atraviesa el validador estructural ya usado por el
+    flujo documental; una decisión humana del ledger o un valor existente
+    bloquean la escritura. Un replay ejecutado (inclusive si se abstuvo) se
+    registra en la métrica de la fila para no repetirlo sin evidencia nueva.
+    """
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    ledger = raiz / "operacion" / "actual" / "decisiones_aplicadas.json"
+    directorios = (raiz / "operacion" / "trazas_ocr", dataset.parent / "trazas_ocr")
+    if not dataset.is_file() or limite_por_ciclo <= 0:
+        return {"revisadas": 0, "guias_actualizadas": [], "abstenciones": 0, "sin_traza": 0}
+    try:
+        aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
+        aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)]
+    except (OSError, ValueError, AttributeError):
+        aplicaciones = []
+
+    mapeo = {
+        "numero_guia": ("numero_guia", None),
+        "cliente": ("cliente", evaluar_credibilidad_entidad_nombre),
+        "obra destino": ("obra_destino", evaluar_credibilidad_entidad_nombre),
+        "despachar_a_crudo": ("despachar_a_crudo", evaluar_credibilidad_direccion),
+    }
+    with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(dataset)
+        except (OSError, ValueError):
+            return {"revisadas": 0, "guias_actualizadas": [], "abstenciones": 0, "sin_traza": 0}
+        actualizadas: list[str] = []
+        revisadas = abstenciones = sin_traza = 0
+        for fila in filas:
+            if revisadas >= limite_por_ciclo:
+                break
+            pendientes = [
+                (origen, destino, validador) for origen, (destino, validador) in mapeo.items()
+                if str(fila.get(destino, "")).strip() in _AUSENTES
+                and not _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=destino)
+            ]
+            if not pendientes:
+                continue
+            previa = _metricas_recuperacion_p0(fila).get("replay")
+            if isinstance(previa, Mapping) and previa.get("version") == _VERSION_REPLAY_P0:
+                continue
+            archivo = str(fila.get("archivo", "")).strip()
+            ruta = next((ruta_traza_ocr(d, archivo) for d in directorios if ruta_traza_ocr(d, archivo).is_file()), None)
+            if ruta is None:
+                sin_traza += 1
+                continue  # una traza puede llegar después; no se consume el intento
+            revisadas += 1
+            try:
+                traza = json.loads(ruta.read_text(encoding="utf-8"))
+                replay = reproducir_extraccion_geometrica_desde_traza(
+                    traza, referencia_esperada=archivo,
+                ).get("extraccion", {})
+            except (OSError, ValueError, TypeError) as exc:
+                _anotar_recuperacion_p0(fila, "replay", {
+                    "version": _VERSION_REPLAY_P0, "resultado": "ERROR_TRAZA",
+                    "detalle": type(exc).__name__, "campos": [],
+                })
+                abstenciones += 1
+                continue
+            aplicados: list[str] = []
+            for origen, destino, validador in pendientes:
+                candidato = str(replay.get(origen, "")).strip()
+                if not candidato or candidato in _AUSENTES:
+                    continue
+                if destino == "numero_guia" and not re.fullmatch(r"\d{5,9}", candidato):
+                    continue
+                if validador is not None and validador(candidato).nivel != NivelCredibilidad.CONFIABLE:
+                    continue
+                # Defensa final: no sobrescribir si otro paso de esta misma
+                # reconciliación hubiera llenado la fila antes del write.
+                if str(fila.get(destino, "")).strip() not in _AUSENTES:
+                    continue
+                fila[destino] = candidato
+                aplicados.append(destino)
+            _anotar_recuperacion_p0(fila, "replay", {
+                "version": _VERSION_REPLAY_P0,
+                "resultado": "APLICADO" if aplicados else "ABSTENCION",
+                "campos": aplicados, "traza": ruta.name,
+            })
+            if aplicados:
+                actualizadas.append(str(fila.get("numero_guia", "")) or archivo)
+            else:
+                abstenciones += 1
+        if actualizadas or revisadas:
+            _escribir_filas_completas(dataset, filas)
+    return {
+        "revisadas": revisadas, "guias_actualizadas": actualizadas,
+        "abstenciones": abstenciones, "sin_traza": sin_traza,
+    }
+
+
+def recuperar_material_ausente_focal_controlado(
+    *, raiz_atlas: str | Path, limite_por_ciclo: int = _LIMITE_MATERIAL_FOCAL_POR_CICLO,
+) -> dict[str, object]:
+    """Consume, con presupuesto fijo, OCR focal sólo de MATERIAL_AUSENTE.
+
+    La función de reproceso existente conserva la autoridad de escritura. Esta
+    envoltura sólo selecciona candidatos con evidencia preservada y registra
+    el intento equivalente, de modo que un ciclo siguiente no reabra OCR.
+    """
+    from atlas_core.evidencia_documental import resolver_ruta_evidencia
+
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    if not dataset.is_file() or limite_por_ciclo <= 0:
+        return {"intentados": 0, "recuperados": [], "omitidos": 0}
+    with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(dataset)
+        except (OSError, ValueError):
+            return {"intentados": 0, "recuperados": [], "omitidos": 0}
+        candidatas = []
+        for fila in filas:
+            motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()}
+            ya = _metricas_recuperacion_p0(fila).get("material_focal")
+            if (
+                str(fila.get("descripcion_material", "")).strip() in _AUSENTES
+                and MotivoRevisionDocumento.MATERIAL_AUSENTE.value in motivos
+                and not (isinstance(ya, Mapping) and ya.get("version") == _VERSION_MATERIAL_FOCAL_P0)
+                and resolver_ruta_evidencia(raiz, str(fila.get("archivo", ""))).ruta is not None
+            ):
+                candidatas.append(str(fila.get("numero_guia", "")).strip())
+            if len(candidatas) >= limite_por_ciclo:
+                break
+    recuperados: list[str] = []
+    for guia in candidatas:
+        resultado = reprocesar_material_focal_desde_imagen_original(raiz_atlas=raiz, numero_guia=guia)
+        with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+            filas = _leer_filas(dataset)
+            fila = next((f for f in filas if str(f.get("numero_guia", "")).strip() == guia), None)
+            if fila is not None:
+                _anotar_recuperacion_p0(fila, "material_focal", {
+                    "version": _VERSION_MATERIAL_FOCAL_P0,
+                    "resultado": "RECUPERADO" if resultado.get("aplicado") else str(resultado.get("motivo", "ABSTENCION")),
+                })
+                _escribir_filas_completas(dataset, filas)
+        if resultado.get("aplicado"):
+            recuperados.append(guia)
+    # Aunque la función focal ya clasifica el material recuperado, este pase
+    # cubre filas históricas que se resincronicen en el mismo ciclo.
+    tipo = revalidar_tipo_carga_sin_ocr(ruta_dataset=dataset)
+    return {"intentados": len(candidatas), "recuperados": recuperados, "omitidos": 0, "tipo_carga": tipo}
 
 
 def revalidar_credibilidad_campos_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
@@ -2749,6 +2968,47 @@ def revalidar_destino_vacio_confirmado_por_documento_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+def revalidar_destino_contaminado_rut_etiqueta_sin_ocr(
+    *, ruta_dataset: str | Path,
+) -> dict[str, object]:
+    """Bloque CONTAMINACIÓN RUT+ETIQUETA (caso real 460486: `despachar_a_
+    crudo` = "10833150-K FECHA" -- el mismo RUT del chofer de esta guía,
+    seguido de la etiqueta "FECHA" truncada de "FECHA SALIDA") --
+    `despachar_a_crudo` ya persistido puede haber quedado contaminado por
+    el mismo intercalado de columnas que ya protege `_despachar_a_
+    lineal_contaminado` en ingesta (nunca vuelve a correr solo sobre una
+    fila ya persistida). Reutiliza EXACTAMENTE la misma detección
+    (`_es_rut_seguido_de_etiqueta_administrativa`, extractor.py) -- nunca
+    una regla nueva ni una lista de guías.
+
+    NUNCA es evidencia real de destino: un RUT+etiqueta administrativa no
+    es una dirección truncada, es el campo de OTRA sección arrastrado por
+    el orden de lectura de OCR. Limpia `despachar_a_crudo` y los campos
+    de ruta derivados de ese valor contaminado (quedan "pendiente de
+    recalcular" -- nunca se inventa una dirección ni se calcula ruta
+    aquí, sin red). Nunca toca `obra_destino`/`cliente`/otros campos de
+    identidad -- ese es terreno de otras revalidaciones, sin relación con
+    este patrón. Idempotente: una fila ya limpia (`despachar_a_crudo`
+    vacío) no vuelve a tocarse."""
+    ruta = Path(ruta_dataset)
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        actualizadas: list[str] = []
+        for fila in filas:
+            valor = str(fila.get("despachar_a_crudo", "")).strip()
+            if not valor or not _es_rut_seguido_de_etiqueta_administrativa(valor):
+                continue
+            fila["despachar_a_crudo"] = ""
+            fila["direccion_entrega"] = ""
+            fila["estado_ruta"] = ""
+            fila["motivo_ruta"] = ""
+            fila["estado_entrega"] = "NO_INTENTADO"
+            actualizadas.append(str(fila.get("numero_guia", "")))
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
+
+
 def _calle_numero_normalizado(texto: str) -> str | None:
     """Prefijo "calle + número" normalizado de un texto de destino libre
     (calle, posiblemente varias palabras, seguida del primer número que
@@ -4054,7 +4314,11 @@ def reprocesar_material_focal_desde_imagen_original(
         )
         if fila is None:
             return {"aplicado": False, "motivo": "GUIA_NO_ENCONTRADA", "numero_guia": guia_objetivo}
-        if str(fila.get("descripcion_material", "")).strip():
+        # El CSV histórico usa ambos sentinelas de ausencia. ``No
+        # encontrado`` no es evidencia material y debe poder entrar al mismo
+        # reproceso focal que una celda vacía; un texto real sigue siendo
+        # intocable.
+        if str(fila.get("descripcion_material", "")).strip() not in _AUSENTES:
             return {"aplicado": False, "motivo": "MATERIAL_YA_PRESENTE", "numero_guia": guia_objetivo}
         motivo_material = MotivoRevisionDocumento.MATERIAL_AUSENTE.value
         motivos_actuales = [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()]
@@ -4605,12 +4869,30 @@ def revalidar_y_regenerar_reporte(
     docstring de esa función para el detalle completo; de nuevo, `None`
     para cualquier caller que no sea `aplicar_decision_obra` reprocesando
     su propia decisión recién aplicada."""
+    # Bloque MÉTRICAS DE DURACIÓN -- caso real: "Aplicar decisión" tardaba
+    # ~40s en Desktop antes de que la tarjeta cambiara, sin ningún log que
+    # dijera dónde. Instrumentación pura (`time.perf_counter`, nunca
+    # decide nada); ver `atlas_core.reconciliacion_estado_derivado` para
+    # el desglose fino equivalente del otro tramo ("Actualizando
+    # operación").
+    _t_inicio_fase1 = time.perf_counter()
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     catalogos = raiz / "catalogos_privados"
     dataset = actual / "analisis_completo_guias.csv"
     ruta_decisiones_inicial = actual / "decisiones_pendientes.json"
     firma_bandeja_inicial = _firma_efectiva_bandeja(ruta_decisiones_inicial)
+    # Una decisión humana histórica ya contiene la evidencia documental y
+    # canónica necesaria. Proyéctala en Incidencias sin OCR, sin tocar la
+    # fila operacional y con el deduplicador ya existente del almacén.
+    from atlas_core.aplicacion_decisiones import (
+        reconciliar_incidencias_documentales_confirmadas_desde_ledger,
+    )
+    resultado_incidencias_confirmadas = reconciliar_incidencias_documentales_confirmadas_desde_ledger(
+        ruta_ledger=actual / "decisiones_aplicadas.json",
+        ruta_incidencias=catalogos / "incidencias_documentales.json",
+        reloj=reloj or (lambda: datetime.now(timezone.utc)),
+    )
 
     # Hallazgo Codex (diff Mobile -> reporte Desktop) -- un envío Mobile
     # nuevo que agrega una fila LIMPIA al dataset (sin motivo que ninguna
@@ -4991,6 +5273,7 @@ def revalidar_y_regenerar_reporte(
         "origen_encabezado_no_confiable": resultado_origen_encabezado,
         "origen_categoria_sin_candidato": resultado_origen_categoria,
         "indicadores_documentales": resultado_indicadores,
+        "incidencias_documentales_confirmadas": resultado_incidencias_confirmadas,
     }
 
     # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque cambió
@@ -5049,6 +5332,7 @@ def revalidar_y_regenerar_reporte(
             # por evidencia) -- nunca produce una tarjeta repetida ni
             # resucita una ya cerrada en el ledger.
             candidatas_nuevas = [
+                *detectar_decisiones_chofer_sin_corroborar_sin_ocr(raiz_atlas=raiz),
                 *detectar_decisiones_origen_sin_ocr(raiz_atlas=raiz),
                 *detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz),
                 *detectar_decisiones_cliente_ausente_sin_ocr(raiz_atlas=raiz),
@@ -5078,6 +5362,8 @@ def revalidar_y_regenerar_reporte(
     firma_bandeja_final = _firma_efectiva_bandeja(ruta_decisiones)
     bandeja_cambio_efectivo = firma_bandeja_final != firma_bandeja_inicial
     resultado_revalidacion["bandeja_cambio_efectivo"] = bandeja_cambio_efectivo
+    _tiempos_ms_fase1 = {"bateria_revalidadores_ms": round((time.perf_counter() - _t_inicio_fase1) * 1000, 1)}
+    resultado_revalidacion["tiempos_ms"] = _tiempos_ms_fase1
 
     if not guias_actualizadas and not bandeja_cambio_efectivo and not dataset_incorporo_cambios:
         return {**resultado_revalidacion, "reporte_regenerado": False}
@@ -5099,7 +5385,10 @@ def revalidar_y_regenerar_reporte(
     # función, ya idempotente, ya se dispara en cada carga de Desktop y
     # tras cada envío Mobile) converge con el dataset ya estable.
     huella_para_publicar = _sha256_archivo(dataset) if dataset.is_file() else None
+    _t_inicio_reporte = time.perf_counter()
     manifest = generar_reporte_viajes(dataset, salida, **kwargs)
+    _tiempos_ms_fase1["generar_reporte_ms"] = round((time.perf_counter() - _t_inicio_reporte) * 1000, 1)
+    _tiempos_ms_fase1["total_ms"] = round((time.perf_counter() - _t_inicio_fase1) * 1000, 1)
     huella_tras_reporte = _sha256_archivo(dataset) if dataset.is_file() else None
     if huella_tras_reporte != huella_para_publicar:
         import shutil
@@ -5120,12 +5409,31 @@ def revalidar_y_regenerar_reporte(
     # la MISMA lectura ya verificada arriba -- nunca una relectura
     # adicional que podría, en teoría, ver una versión distinta.
     huella_filas_final = _huella_contenido_dataset(dataset)
+    # Bloque P1 ELIMINAR DOBLE RECONCILIACIÓN -- las 18 funciones de
+    # `FUNCIONES_BATERIA_COMPARTIDA` (subconjunto auditado, función por
+    # función, que también corre dentro de `reconciliar_estado_derivado`
+    # con los MISMOS argumentos) ya corrieron arriba, sobre el dataset que
+    # `huella_para_publicar` describe. Se estampa la firma AQUÍ (dataset
+    # ya final, misma lectura verificada que se acaba de usar para
+    # publicar) para que Fase 2, si corre inmediatamente después sin que
+    # nada más haya tocado dataset/catálogos/ledger/reglas, pueda
+    # abstenerse de repetirlas. Import diferido -- evita el ciclo con
+    # `reconciliacion_estado_derivado` (que sí importa de este módulo al
+    # cargar).
+    from atlas_core.capacidades_reevaluacion import versiones_actuales as _versiones_cap_actuales_p1
+    from atlas_core.frescura_reconciliacion import calcular_firma_bateria_compartida
+    from atlas_core.reconciliacion_estado_derivado import RULESET_VERSION as _RULESET_VERSION_P1
+    firma_bateria_compartida = calcular_firma_bateria_compartida(
+        dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
+        ruleset_version=_RULESET_VERSION_P1, versiones_capacidades=_versiones_cap_actuales_p1(),
+    )
     escribir_estado_operacion(
         reporte_vigente=salida,
         dataset_operacional=dataset,
         decisiones_pendientes=(ruta_decisiones if ruta_decisiones.is_file() else None),
         dataset_sha256=huella_para_publicar,
         huella_filas_dataset=huella_filas_final,
+        firma_bateria_compartida=firma_bateria_compartida,
         raiz=raiz,
     )
     return {**resultado_revalidacion, "reporte_regenerado": True, "reporte_vigente": str(salida)}
@@ -5247,6 +5555,44 @@ def detectar_decisiones_destino_historicas_sin_ocr(
         if decision is not None:
             candidatas.append(decision)
     return candidatas
+
+
+def detectar_decisiones_chofer_sin_corroborar_sin_ocr(
+    *, raiz_atlas: str | Path,
+) -> list[dict[str, object]]:
+    """Reconstruye la salida humana para choferes históricos terminales.
+
+    No lee imágenes ni altera filas: usa nombre/RUT ya preservados y el
+    detector canónico. Es la regla de escape: si no queda una estrategia
+    automática que pueda retirar ``CHOFER_SIN_CORROBORAR``, publica una
+    tarjeta ``CHOFER_DESCONOCIDO`` o ``CHOFER_CANDIDATO``.
+    """
+    from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+    raiz = Path(raiz_atlas)
+    try:
+        filas = _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")
+    except (OSError, ValueError):
+        return []
+    resultado: list[dict[str, object]] = []
+    motivo = MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR.value
+    for fila in filas:
+        motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()}
+        if motivo not in motivos:
+            continue
+        datos = {
+            "número de guía": fila.get("numero_guia", ""),
+            "número de transporte": fila.get("numero_transporte", ""),
+            "chofer": fila.get("chofer", ""), "RUT del chofer": fila.get("rut_chofer", ""),
+        }
+        try:
+            decisiones = detectar_decisiones_documento(
+                archivo=str(fila.get("archivo", "")), datos=datos,
+                carpeta_catalogos=raiz / "catalogos_privados",
+            )
+        except (OSError, ValueError):
+            continue
+        resultado.extend(d for d in decisiones if d.get("tipo") in {"CHOFER_DESCONOCIDO", "CHOFER_CANDIDATO"})
+    return resultado
 
 
 def reconciliar_decisiones_destino_historicas(
@@ -5900,6 +6246,26 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
             corroboracion = corroborar_chofer_por_nombre_y_rut_documental(
                 catalogo_choferes, nombre_chofer, str(fila.get("rut_chofer", "")).strip()
             )
+            por_rut = buscar_chofer_por_rut(catalogo_choferes, str(fila.get("rut_chofer", "")).strip())
+            if corroboracion is None and isinstance(por_rut, dict) and por_rut.get("activo", True) is True:
+                # RUT válido ya conocido es un ancla más fuerte que una
+                # variante de nombre; preservamos su nombre canónico.
+                nombre_por_rut = str(por_rut.get("nombre", "")).strip()
+                if nombre_por_rut:
+                    corroboracion = corroborar_chofer_por_nombre_y_rut_documental(
+                        catalogo_choferes, nombre_por_rut, str(fila.get("rut_chofer", "")).strip(),
+                    )
+            # Alias confirmado o una variación única, por encima del umbral
+            # existente, es la misma evidencia fuerte que ya usa ingesta.
+            # Se revalida luego con el RUT canónico: una contradicción de RUT
+            # sigue absteniéndose, nunca se "arregla" sólo por parecido.
+            if corroboracion is None:
+                difuso = resolver_nombre_chofer_difuso(catalogo_choferes, nombre_chofer)
+                if difuso.estado in {"ALIAS", "COINCIDENCIA_SEGURA"}:
+                    corroboracion = corroborar_chofer_por_nombre_y_rut_documental(
+                        catalogo_choferes, difuso.valor_resultado,
+                        str(fila.get("rut_chofer", "")).strip(),
+                    )
             if corroboracion is None:
                 continue
             nombre_canonico, rut_corroborado = corroboracion

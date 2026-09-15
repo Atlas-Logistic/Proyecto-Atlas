@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from datetime import datetime, timezone
 
 from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES, ConsultaAtlas
 from atlas_core.proveedor_interpretacion_consultas import (
@@ -216,9 +217,9 @@ def test_b1_tampoco_puede_producir_consulta_semanticamente_incompatible(tmp_path
 def test_cuantos_choferes_trabajaron_cuenta_personas_no_viajes(tmp_path):
     ruta = tmp_path / "viajes.csv"
     _escribir_viajes(ruta, [
-        _fila(numero_transporte="T1", choferes="JUAN PEREZ"),
-        _fila(numero_transporte="T2", choferes="JUAN PEREZ"),
-        _fila(numero_transporte="T3", choferes="PEDRO GOMEZ"),
+        _fila(numero_transporte="T1", choferes="JUAN PEREZ", fecha="12-09-2026"),
+        _fila(numero_transporte="T2", choferes="JUAN PEREZ", fecha="12-09-2026"),
+        _fila(numero_transporte="T3", choferes="PEDRO GOMEZ", fecha="12-09-2026"),
     ])
     r = responder_consulta_atlas("¿Cuántos choferes trabajaron este mes?", ruta_viajes=ruta)
     assert r.estado == ESTADO_OK
@@ -411,3 +412,98 @@ def test_cuantas_barras_de_extremo_a_extremo_explica_la_limitacion(tmp_path):
     assert r.texto_respuesta.startswith("No tengo registrada la cantidad de barras por unidad.")
     assert "1 tonelada" in r.texto_respuesta or "1000 kg" in r.texto_respuesta
     assert r.resultado.consulta_interpretada.filtros.get("tipo_carga") == "BARRAS"
+
+
+def test_pendientes_tecnicos_usan_estado_de_viaje_no_incidencias(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(numero_transporte="T1", estado="INCOMPLETO_TECNICO"),
+        _fila(numero_transporte="T2", estado="INCOMPLETO_TECNICO"),
+        _fila(numero_transporte="T3", estado="REQUIERE_REVISION"),
+    ])
+    for pregunta in (
+        "cuantos pendientes tecnicos hay?",
+        "cuántos viajes están pendientes técnicamente?",
+        "viajes incompletos técnicos",
+    ):
+        respuesta = responder_consulta_atlas(pregunta, ruta_viajes=ruta)
+        assert respuesta.estado == ESTADO_OK
+        assert respuesta.resultado.consulta_interpretada.dominio == "VIAJES"
+        assert respuesta.resultado.consulta_interpretada.filtros == {"estado": "INCOMPLETO_TECNICO"}
+        assert respuesta.resultado.resultado == 2
+        assert all(v["estado"] == "INCOMPLETO_TECNICO" for v in respuesta.resultado.viajes_soporte)
+
+
+def test_patentes_sin_chofer_usa_asociaciones_y_soporte_coherente(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(numero_transporte="T1", patentes_tracto="AA1111", choferes=""),
+        _fila(numero_transporte="T2", patentes_tracto="BB2222", choferes="JUAN PEREZ"),
+        _fila(numero_transporte="T3", patentes_tracto="AA1111", choferes="NO ENCONTRADO"),
+    ])
+    for pregunta in (
+        "cuantas patentes no estan asociadas a un chofer?",
+        "vehículos sin chofer",
+    ):
+        respuesta = responder_consulta_atlas(pregunta, ruta_viajes=ruta)
+        assert respuesta.estado == ESTADO_OK
+        assert respuesta.resultado.consulta_interpretada.dominio == "ASOCIACIONES_PATENTE_CHOFER"
+        assert respuesta.resultado.resultado == 1
+        assert respuesta.resultado.viajes_soporte == ({
+            "patente": "AA1111", "estado_asociacion_chofer": "SIN_CHOFER",
+            "choferes_asociados": "", "transportes_soporte": "T1 | T3", "guias_soporte": "1",
+        },)
+
+
+def test_ranking_eventos_respeta_agregacion_periodo_y_soporte(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(numero_transporte=f"T{i}", choferes=chofer)
+        for i, chofer in enumerate((
+            "CRISTOPHER RETAMAL", "CRISTOPHER RETAMAL", "CRISTOPHER RETAMAL", "CRISTOPHER RETAMAL",
+            "LEANDRO TOLEDO", "LEANDRO TOLEDO", "LEANDRO TOLEDO",
+            "PATRICIO VILLAGRA MUÑOZ", "PATRICIO VILLAGRA MUÑOZ",
+        ), start=1)
+    ])
+    reloj = lambda: datetime(2026, 9, 15, tzinfo=timezone.utc)
+    for i, chofer in enumerate((
+        "CRISTOPHER RETAMAL", "CRISTOPHER RETAMAL", "CRISTOPHER RETAMAL", "CRISTOPHER RETAMAL",
+        "LEANDRO TOLEDO", "LEANDRO TOLEDO", "LEANDRO TOLEDO",
+        "PATRICIO VILLAGRA MUÑOZ", "PATRICIO VILLAGRA MUÑOZ",
+    ), start=1):
+        registrar_evento(
+            raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=f"T{i}", origen="TEST", reloj=reloj,
+            enriquecimiento={"viaje_id": f"v{i}", "vinculo_completo": True,
+                            "snapshot": {"chofer": chofer, "rut_chofer": f"{i}-1"}},
+        )
+    respuesta = responder_consulta_atlas(
+        "Chofer que más reportó estadías en los últimos 30 días", ruta_viajes=ruta, raiz_atlas=tmp_path,
+    )
+    assert respuesta.estado == ESTADO_OK
+    consulta = respuesta.resultado.consulta_interpretada
+    assert (consulta.agrupacion, consulta.limite, consulta.orden) == ("chofer", 1, "DESC")
+    assert consulta.filtros["periodo"] == "ULTIMOS_N_DIAS" and consulta.filtros["dias"] == "30"
+    assert respuesta.resultado.resultado == ({"grupo": "CRISTOPHER RETAMAL", "valor": 4},)
+    assert "CRISTOPHER RETAMAL tuvo más estadías (4)" in respuesta.texto_respuesta
+    assert {e["chofer"] for e in respuesta.resultado.viajes_soporte} == {"CRISTOPHER RETAMAL"}
+    assert len(respuesta.resultado.viajes_soporte) == 4
+
+
+def test_variantes_ranking_eventos_y_rango_explicito(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [_fila(numero_transporte="T1", choferes="JUAN PEREZ", fecha="10-09-2026"), _fila(numero_transporte="T2", choferes="PEDRO GOMEZ", fecha="01-08-2026")])
+    for transporte, chofer, fecha in (("T1", "JUAN PEREZ", datetime(2026, 9, 10, tzinfo=timezone.utc)), ("T2", "PEDRO GOMEZ", datetime(2026, 8, 1, tzinfo=timezone.utc))):
+        registrar_evento(raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=transporte, origen="TEST", reloj=lambda fecha=fecha: fecha,
+                         enriquecimiento={"viaje_id": transporte, "vinculo_completo": True, "snapshot": {"chofer": chofer, "rut_chofer": transporte}})
+    top = responder_consulta_atlas("top 3 choferes con estadías", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert top.resultado.consulta_interpretada.limite == 3
+    por_chofer = responder_consulta_atlas("cuántas estadías por chofer", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert por_chofer.resultado.consulta_interpretada.agrupacion == "chofer"
+    rango = responder_consulta_atlas("quién tuvo más estadías entre 01-09-2026 y 15-09-2026", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert rango.resultado.resultado == ({"grupo": "JUAN PEREZ", "valor": 1},)
+    assert {e["chofer"] for e in rango.resultado.viajes_soporte} == {"JUAN PEREZ"}
+    for dias in (7, 30, 90):
+        ventana = responder_consulta_atlas(f"quién tuvo más estadías en los últimos {dias} días", ruta_viajes=ruta, raiz_atlas=tmp_path)
+        assert ventana.resultado.consulta_interpretada.filtros["dias"] == str(dias)
+    mes = responder_consulta_atlas("chofer con mayor cantidad de estadías este mes", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert mes.resultado.consulta_interpretada.filtros["periodo"] == "ESTE_MES"

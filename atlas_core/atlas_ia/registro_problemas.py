@@ -366,35 +366,94 @@ def recopilar_evidencia_vehiculo(campo: str) -> RecolectorEvidencia:
     return recolectar
 
 
-def recopilar_evidencia_destino_por_obra_relacionada(
+# Bloque AUTORIDAD OPERACIONAL / DESTINO SIN OBRA (Codex 472623/472624) --
+# métodos de extracción ya considerados confiables para otros dominios
+# (ver `atlas_core.procesamiento_masivo.MetodoObtencionDocumento`): un
+# valor de `despachar_a_crudo` obtenido por uno de éstos vino de leer
+# geometría/posición real del documento, nunca de una heurística lineal
+# frágil -- es evidencia DOCUMENTAL legítima del propio caso, con o sin
+# obra resuelta.
+_METODOS_EXTRACCION_DESTINO_CONFIABLES = frozenset({"GEOMETRICO", "CONTEXTUAL"})
+
+
+def recopilar_evidencia_destino(
     fila: Mapping[str, object], filas: "list[Mapping[str, object]]", *, carpeta_catalogos=None,
 ) -> tuple[EvidenciaIA, ...]:
-    """Bloque R7 -- dominio DESTINO: otro documento de la MISMA obra
-    destino que ya tiene una entrega resuelta (`estado_ruta ==
-    RUTA_CALCULADA`, `direccion_entrega` no vacía) aporta esa dirección
-    como evidencia HISTORICA. Sin ningún sibling resuelto, no hay
-    evidencia -- B1 no tiene nada real con qué razonar y debe abstenerse
-    (nunca se fabrica una dirección)."""
+    """Bloque R7 + Codex 472623/472624 -- dominio DESTINO, tres fuentes de
+    evidencia, ninguna inventada -- todas ya calculadas por el Motor
+    determinista, nunca por número de guía ni por el texto de una
+    dirección en particular:
+
+    1. Obra relacionada (comportamiento original, sin cambio): otro
+       documento de la MISMA obra destino que ya tiene una entrega
+       resuelta (`estado_ruta == RUTA_CALCULADA`) aporta esa dirección.
+    2. Extracción documental confiable de ESTA fila: causa raíz real de
+       472623/472624 -- la ÚNICA vía de evidencia para DESTINO exigía una
+       obra ya resuelta; sin ella, `evidencias` quedaba `[]` aunque el
+       propio Motor YA hubiera leído `despachar_a_crudo` directamente del
+       documento por un método confiable (GEOMETRICO/CONTEXTUAL, nunca la
+       heurística lineal frágil) y B1 -- viendo la MISMA imagen -- llegara
+       a la misma conclusión con alta confianza. Ese valor ya extraído ES
+       evidencia real (`DOCUMENTAL`); nunca se auto-aplica solo, pero deja
+       de bloquearse por "sin evidencia" cuando la evidencia ya existe.
+    3. Guía hermana del MISMO `numero_transporte`: dos documentos
+       independientes de un mismo envío que imprimen exactamente el mismo
+       `despachar_a_crudo` (normalizado) se corroboran entre sí -- nunca
+       cruza a otro transporte, una misma dirección en transportes
+       distintos es coincidencia, no corroboración."""
     obra = _normalizar_texto(fila.get("obra_destino"))
-    if not obra:
-        return ()
+    valor_propio = str(fila.get("despachar_a_crudo", "")).strip()
     evidencias: list[EvidenciaIA] = []
-    for otra in filas:
-        if otra is fila:
-            continue
-        if _normalizar_texto(otra.get("obra_destino")) != obra:
-            continue
-        if str(otra.get("estado_ruta", "")).strip() != "RUTA_CALCULADA":
-            continue
-        direccion = str(otra.get("direccion_entrega", "")).strip()
-        if not direccion:
-            continue
-        evidencias.append(EvidenciaIA(
-            identificador=f"documento:{otra.get('archivo')}:destino", campo="despachar_a_crudo",
-            valor=direccion, tipo_fuente="HISTORICO", nivel="OBRA_RELACIONADA",
-            independencia=1, procedencia="atlas_ia.registro_problemas.destino_por_obra",
-            referencias_fuente=(str(otra.get("archivo", "")),),
-        ))
+
+    if obra:
+        for otra in filas:
+            if otra is fila:
+                continue
+            if _normalizar_texto(otra.get("obra_destino")) != obra:
+                continue
+            if str(otra.get("estado_ruta", "")).strip() != "RUTA_CALCULADA":
+                continue
+            direccion = str(otra.get("direccion_entrega", "")).strip()
+            if not direccion:
+                continue
+            evidencias.append(EvidenciaIA(
+                identificador=f"documento:{otra.get('archivo')}:destino", campo="despachar_a_crudo",
+                valor=direccion, tipo_fuente="HISTORICO", nivel="OBRA_RELACIONADA",
+                independencia=1, procedencia="atlas_ia.registro_problemas.destino_por_obra",
+                referencias_fuente=(str(otra.get("archivo", "")),),
+            ))
+
+    if valor_propio:
+        metodos = {
+            m.strip().upper()
+            for m in str(fila.get("metodos_recuperacion_documento", "")).split("|")
+        }
+        if metodos & _METODOS_EXTRACCION_DESTINO_CONFIABLES:
+            evidencias.append(EvidenciaIA(
+                identificador=f"documento:{fila.get('archivo')}:destino_propio", campo="despachar_a_crudo",
+                valor=valor_propio, tipo_fuente="DOCUMENTAL", nivel="EXTRACCION_CONFIABLE",
+                independencia=1, procedencia="atlas_ia.registro_problemas.destino_extraccion_confiable",
+                referencias_fuente=(str(fila.get("archivo", "")),),
+            ))
+
+        transporte = str(fila.get("numero_transporte", "")).strip()
+        objetivo = _normalizar_texto(valor_propio)
+        if transporte:
+            for otra in filas:
+                if otra is fila:
+                    continue
+                if str(otra.get("numero_transporte", "")).strip() != transporte:
+                    continue
+                valor_hermano = str(otra.get("despachar_a_crudo", "")).strip()
+                if not valor_hermano or _normalizar_texto(valor_hermano) != objetivo:
+                    continue
+                evidencias.append(EvidenciaIA(
+                    identificador=f"documento:{otra.get('archivo')}:destino_hermano", campo="despachar_a_crudo",
+                    valor=valor_hermano, tipo_fuente="HISTORICO", nivel="TRANSPORTE_RELACIONADO",
+                    independencia=1, procedencia="atlas_ia.registro_problemas.destino_por_transporte",
+                    referencias_fuente=(str(otra.get("archivo", "")),),
+                ))
+
     return tuple(evidencias)
 
 
@@ -641,7 +700,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         # nunca un dispatcher nuevo. Casos reales 472008/472037/472044.
         herramientas=("DOCUMENTOS_RELACIONADOS", "VERIFICACION_EXTERNA"),
         aplicable_automaticamente=False,
-        recopilar_evidencia=recopilar_evidencia_destino_por_obra_relacionada,
+        recopilar_evidencia=recopilar_evidencia_destino,
     ),
     # Bloque R7 -- dominio nuevo: PLANTA ORIGEN (Bloque R5, `motivo_origen_
     # gps` con conflicto real entre plantas, o detención real sin planta
@@ -722,7 +781,7 @@ _ENTRADAS: tuple[TipoProblemaIA, ...] = (
         campo="despachar_a_crudo", dominio="DESTINO",
         herramientas=("DOCUMENTOS_RELACIONADOS", "VERIFICACION_EXTERNA"),
         aplicable_automaticamente=False,
-        recopilar_evidencia=recopilar_evidencia_destino_por_obra_relacionada,
+        recopilar_evidencia=recopilar_evidencia_destino,
     ),
 )
 

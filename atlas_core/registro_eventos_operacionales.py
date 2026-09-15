@@ -64,6 +64,15 @@ CONTEXTO_EMPRESARIAL_SIN_ASIGNAR = "__SIN_ASIGNAR__"
 
 ESTADO_ACTIVO = "ACTIVO"
 ESTADO_ANULADO = "ANULADO"
+# Estado de gestión es independiente del hecho: sólo se asigna si ese tipo
+# requiere cobro/seguimiento. Ausente significa "no aplica", no pendiente.
+GESTION_REPORTADA = "REPORTADA"
+GESTION_ENVIADA = "ENVIADA"
+GESTION_PENDIENTE_RESPUESTA = "PENDIENTE_RESPUESTA"
+GESTION_APROBADA = "APROBADA"
+GESTION_RECHAZADA = "RECHAZADA"
+ESTADOS_GESTION_SOPORTADOS = frozenset({GESTION_REPORTADA, GESTION_ENVIADA, GESTION_PENDIENTE_RESPUESTA, GESTION_APROBADA, GESTION_RECHAZADA})
+REVISION_SIN_INCIDENCIA = "SIN_INCIDENCIA"
 
 # Los 4 tipos iniciales. Son MARCA_VIAJE: como máximo UN hecho activo del
 # mismo tipo por viaje dentro del mismo contexto empresarial. La lista NO
@@ -102,6 +111,7 @@ def _documento_vacio() -> dict:
         "revision": 0,
         "actualizado_en": None,
         "eventos": [],
+        "revisiones_incidencias": [],
     }
 
 
@@ -129,6 +139,7 @@ def leer_eventos_operacionales(*, raiz: str | Path | None = None) -> dict:
         return _documento_vacio()
     if not _documento_valido(contenido):
         return _documento_vacio()
+    contenido.setdefault("revisiones_incidencias", [])  # compatibilidad schema V1 previo
     return contenido
 
 
@@ -151,6 +162,7 @@ def _cargar_para_escritura(ruta: Path) -> dict:
         raise EventosOperacionalesCorruptosError(
             f"{ruta} no tiene la forma esperada (schema_version/eventos)."
         )
+    contenido.setdefault("revisiones_incidencias", [])  # compatibilidad schema V1 previo
     return contenido
 
 
@@ -195,6 +207,8 @@ def _fecha_operacional_iso(valor: object) -> str:
     m = _PATRON_FECHA_ISO.match(texto)
     if m:
         return texto
+    if len(texto) >= 10 and _PATRON_FECHA_ISO.match(texto[:10]):
+        return texto[:10]
     m = _PATRON_FECHA_DMY.match(texto)
     if m:
         dia, mes, anio = m.groups()
@@ -316,6 +330,11 @@ def registrar_evento(
     origen: str,
     referencia: str = "",
     enriquecimiento: Mapping[str, object] | None = None,
+    estado_gestion: str | None = None,
+    fecha_evento: str = "",
+    evidencia: tuple[str, ...] = (),
+    monto_solicitado: float | None = None,
+    monto_aprobado: float | None = None,
     reloj: Callable[[], datetime] = _RELOJ_UTC,
 ) -> dict:
     """Registra (o reactiva, o deja igual) un hecho MARCA_VIAJE.
@@ -341,6 +360,8 @@ def registrar_evento(
         raise ValueError("tipo_evento es obligatorio.")
     if not numero_transporte:
         raise ValueError("numero_transporte es obligatorio (clave de idempotencia MARCA_VIAJE).")
+    if estado_gestion is not None and estado_gestion not in ESTADOS_GESTION_SOPORTADOS:
+        raise ValueError("Estado de gestión operacional no soportado.")
 
     ruta = ruta_eventos_operacionales(raiz=raiz)
     clave = clave_idempotencia(
@@ -373,6 +394,11 @@ def registrar_evento(
                 "snapshot": {},
                 "nota": str(nota or ""),
                 "estado": ESTADO_ACTIVO,
+                "estado_gestion": estado_gestion,
+                "fecha_evento": _fecha_operacional_iso(fecha_evento),
+                "evidencia": list(evidencia),
+                "monto_solicitado": monto_solicitado,
+                "monto_aprobado": monto_aprobado,
                 "vinculo_completo": False,
                 "motivo_vinculo_incompleto": "SIN_ENRIQUECIMIENTO",
                 "procedencias": [procedencia],
@@ -430,6 +456,14 @@ def registrar_evento(
                 {"accion": "NOTA_ACTUALIZADA", "en": ahora, "origen": procedencia["origen"]}
             )
             cambio = True
+
+        # Sólo completa/actualiza gestión cuando el caller lo pidió; nunca
+        # fuerza estados de cobro a tipos que no los usan.
+        for campo, valor in (("estado_gestion", estado_gestion), ("monto_solicitado", monto_solicitado), ("monto_aprobado", monto_aprobado)):
+            if valor is not None and existente.get(campo) != valor:
+                existente[campo] = valor
+                existente["historial"].append({"accion": "GESTION_ACTUALIZADA", "en": ahora, "origen": procedencia["origen"], "detalle": {campo: valor}})
+                cambio = True
 
         procedencias = existente.setdefault("procedencias", [])
         if not any(_mismo_par_procedencia(procedencia, p) for p in procedencias):
@@ -564,4 +598,71 @@ def listar_eventos_por_transporte(
         if not incluir_anulados and evento.get("estado") == ESTADO_ANULADO:
             continue
         salida.append(json.loads(json.dumps(evento)))
+    return salida
+
+
+def marcar_viaje_revisado_sin_incidencia(
+    *, raiz: str | Path, numero_transporte: str, numeros_guia: tuple[str, ...] = (),
+    actor: str, observacion: str = "", reloj: Callable[[], datetime] = _RELOJ_UTC,
+) -> dict:
+    """Declara revisión negativa explícita; ausencia de evento nunca se interpreta como revisión."""
+    numero_transporte = str(numero_transporte or "").strip()
+    if not numero_transporte:
+        raise ValueError("numero_transporte es obligatorio.")
+    ruta = ruta_eventos_operacionales(raiz=raiz)
+    with bloqueo_sesion(ruta.parent, NOMBRE_LOCK):
+        documento = _cargar_para_escritura(ruta)
+        ahora = reloj().astimezone(timezone.utc).isoformat()
+        existente = next((r for r in documento["revisiones_incidencias"] if r.get("numero_transporte") == numero_transporte), None)
+        if existente is not None:
+            return {"ok": True, "idempotente": True, "revision": json.loads(json.dumps(existente))}
+        revision = {
+            "numero_transporte": numero_transporte, "numeros_guia": list(numeros_guia),
+            "estado_revision": REVISION_SIN_INCIDENCIA, "actor": str(actor or ""),
+            "observacion": str(observacion or ""), "revisado_en": ahora,
+            "historial": [{"accion": "REVISADO_SIN_INCIDENCIA", "en": ahora, "actor": str(actor or "")}],
+        }
+        documento["revisiones_incidencias"].append(revision)
+        _publicar(ruta, documento, ahora)
+        return {"ok": True, "idempotente": False, "revision": json.loads(json.dumps(revision))}
+
+
+def consultar_incidencias_operacionales(
+    *, raiz: str | Path, tipo: str | None = None, estado_gestion: str | None = None,
+    chofer: str | None = None, cliente: str | None = None, guia: str | None = None,
+    numero_transporte: str | None = None, fecha_desde: str | None = None, fecha_hasta: str | None = None,
+) -> dict:
+    """Contrato read-only para Dashboard/B1: hechos, pendientes y revisiones negativas."""
+    documento = leer_eventos_operacionales(raiz=raiz)
+    eventos = [e for e in documento["eventos"] if e.get("estado") == ESTADO_ACTIVO]
+    if tipo:
+        eventos = [e for e in eventos if e.get("tipo_evento") == tipo]
+    if estado_gestion:
+        eventos = [e for e in eventos if e.get("estado_gestion") == estado_gestion]
+    def coincide(e: Mapping[str, object]) -> bool:
+        snapshot = e.get("snapshot") if isinstance(e.get("snapshot"), Mapping) else {}
+        if chofer and str(snapshot.get("chofer", "")).strip() != chofer: return False
+        if cliente and str(snapshot.get("cliente", "")).strip() != cliente: return False
+        if guia and guia not in e.get("numeros_guia", []): return False
+        if numero_transporte and str(e.get("numero_transporte", "")) != numero_transporte: return False
+        fecha = _fecha_operacional_iso(e.get("fecha_evento") or e.get("fecha_operacional") or e.get("creado_en"))
+        return (not fecha_desde or fecha >= fecha_desde) and (not fecha_hasta or fecha <= fecha_hasta)
+    eventos = [e for e in eventos if coincide(e)]
+    return {
+        "incidencias": json.loads(json.dumps(eventos)),
+        "revisiones_sin_incidencia": json.loads(json.dumps(documento.get("revisiones_incidencias", []))),
+        "pendientes_gestion": [e for e in eventos if e.get("estado_gestion") in (GESTION_REPORTADA, GESTION_ENVIADA, GESTION_PENDIENTE_RESPUESTA)],
+    }
+
+
+def estado_revision_viajes(*, raiz: str | Path, viajes: list[Mapping[str, object]]) -> list[dict]:
+    """Clasifica viajes para histórico: NO_REVISADO, SIN_INCIDENCIA o INCIDENCIA_REGISTRADA."""
+    documento = leer_eventos_operacionales(raiz=raiz)
+    con_incidencia = {str(e.get("numero_transporte", "")) for e in documento["eventos"] if e.get("estado") == ESTADO_ACTIVO}
+    sin_incidencia = {str(r.get("numero_transporte", "")) for r in documento.get("revisiones_incidencias", [])}
+    salida = []
+    for viaje in viajes:
+        transporte = str(viaje.get("numero_transporte", "")).strip()
+        estado = "INCIDENCIA_REGISTRADA" if transporte in con_incidencia else (REVISION_SIN_INCIDENCIA if transporte in sin_incidencia else "NO_REVISADO")
+        salida.append({"numero_transporte": transporte, "estado_revision_incidencias": estado})
     return salida

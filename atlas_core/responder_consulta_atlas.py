@@ -16,6 +16,7 @@ from pathlib import Path
 
 from atlas_core.consultas_atlas import (
     DOMINIO_EVENTOS,
+    DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER,
@@ -24,6 +25,7 @@ from atlas_core.consultas_atlas import (
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_INCIDENCIAS,
+    METRICA_COUNT_PATENTES_SIN_CHOFER,
     METRICA_COUNT_VIAJES,
     METRICA_LIST_RELACION,
     METRICA_LISTAR_VIAJES,
@@ -36,10 +38,13 @@ from atlas_core.consultas_atlas import (
     ErrorConsultaAtlas,
     ResultadoConsultaAtlas,
     cargar_viajes,
+    enriquecer_eventos_operacionales,
     ejecutar_consulta_atlas,
+    ejecutar_consulta_asociaciones_patente_chofer,
     ejecutar_consulta_eventos,
     ejecutar_consulta_incidencias_documentales,
     validar_consulta,
+    validar_consistencia_respuesta,
 )
 from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales
 from atlas_core.interpretador_consultas import (
@@ -128,6 +133,8 @@ _NOMBRE_RELACION_LEGIBLE = {
 
 
 def _etiqueta_evento(tipo_evento: str | None, n: int) -> str:
+    if not tipo_evento:
+        return "incidencia operacional" if n == 1 else "incidencias operacionales"
     par = _NOMBRE_EVENTO_LEGIBLE.get(tipo_evento or "")
     if par is not None:
         return par[0] if n == 1 else par[1]
@@ -188,10 +195,11 @@ def _formatear_respuesta_eventos(resultado: ResultadoConsultaAtlas) -> str:
             return f"No encontré {etiqueta_plural} para agrupar por {_NOMBRE_AGRUPACION_LEGIBLE.get(consulta.agrupacion, consulta.agrupacion)}."
         if consulta.limite == 1:
             top = filas[0]
-            return f"{top['grupo']} tuvo más {etiqueta_plural} ({_formatear_numero(top['valor'])})."
-        nombres = tuple(f["grupo"] for f in filas)
-        verbo = "tuvo" if len(nombres) == 1 else "tuvieron"
-        return f"{', '.join(nombres)} {verbo} {etiqueta_plural}."
+            comparativo = "menos" if consulta.orden == "ASC" else "más"
+            return f"{top['grupo']} tuvo {comparativo} {etiqueta_plural} ({_formatear_numero(top['valor'])})."
+        ranking = ", ".join(f"{f['grupo']} ({_formatear_numero(f['valor'])})" for f in filas)
+        etiqueta_agrupacion = _NOMBRE_AGRUPACION_LEGIBLE.get(consulta.agrupacion, consulta.agrupacion)
+        return f"{etiqueta_plural.capitalize()} por {etiqueta_agrupacion}: {ranking}."
 
     if consulta.metrica == METRICA_LIST_DISTINCT_CHOFER:
         nombres = resultado.resultado
@@ -251,6 +259,12 @@ def _formatear_respuesta(resultado: ResultadoConsultaAtlas) -> str:
         return _formatear_respuesta_incidencias(resultado)
     if consulta.dominio == DOMINIO_EVENTOS:
         return _formatear_respuesta_eventos(resultado)
+    if consulta.dominio == DOMINIO_ASOCIACIONES_PATENTE_CHOFER:
+        n = resultado.resultado
+        return (
+            f"{n} patente{'s' if n != 1 else ''} sin asociación de chofer."
+            if n else "No encontré patentes sin asociación de chofer."
+        )
     if consulta.metrica == METRICA_LIST_RELACION:
         return _formatear_respuesta_relacion(resultado)
     if consulta.metrica == METRICA_COUNT_DISTINCT_RELACION:
@@ -482,10 +496,17 @@ def responder_consulta_atlas(
                     "raíz de datos en este entorno. Esto no significa que no existan."
                 ),
             )
-        eventos = _cargar_eventos(raiz_atlas, viajes)
+        eventos = enriquecer_eventos_operacionales(_cargar_eventos(raiz_atlas, viajes), viajes)
         resultado = ejecutar_consulta_eventos(consulta, eventos)
+    elif consulta.dominio == DOMINIO_ASOCIACIONES_PATENTE_CHOFER:
+        resultado = ejecutar_consulta_asociaciones_patente_chofer(consulta, viajes)
     else:
         resultado = ejecutar_consulta_atlas(consulta, viajes)
+    try:
+        validar_consistencia_respuesta(resultado)
+    except ErrorConsultaAtlas as error:
+        _registro.error("Respuesta descartada por inconsistencia semántica: %s", error)
+        return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
     texto = _formatear_respuesta(resultado)
     # Bloque UNIVERSAL V1.1 (Bloque 3 del ticket) -- "unidad solicitada ≠
     # unidad disponible -> explicar la limitación": la consulta SÍ se

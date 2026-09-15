@@ -65,12 +65,14 @@ METRICA_LIST_RELACION = "LIST_RELACION"
 # camino queda intacto, ya probado en producción) -- cubre las demás
 # dimensiones para las que hoy no existe ningún conteo dedicado.
 METRICA_COUNT_DISTINCT_RELACION = "COUNT_DISTINCT_RELACION"
+METRICA_COUNT_PATENTES_SIN_CHOFER = "COUNT_PATENTES_SIN_CHOFER"
 METRICAS_SOPORTADAS = frozenset({
     METRICA_COUNT_VIAJES, METRICA_COUNT_GUIAS, METRICA_SUM_PESO,
     METRICA_SUM_KM, METRICA_SUM_TIEMPO, METRICA_LISTAR_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_EVENTOS, METRICA_LIST_RELACION, METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_DISTINCT_VIAJE, METRICA_LIST_DISTINCT_CHOFER, METRICA_LIST_VIAJES,
+    METRICA_COUNT_PATENTES_SIN_CHOFER,
 })
 _UNIDADES_POR_METRICA = {
     METRICA_COUNT_VIAJES: "viajes", METRICA_COUNT_GUIAS: "guías",
@@ -82,6 +84,7 @@ _UNIDADES_POR_METRICA = {
     METRICA_COUNT_INCIDENCIAS: "incidencias", METRICA_COUNT_EVENTOS: "eventos",
     METRICA_LIST_RELACION: "valores", METRICA_COUNT_DISTINCT_RELACION: "valores",
     METRICA_COUNT_DISTINCT_VIAJE: "viajes", METRICA_LIST_DISTINCT_CHOFER: "choferes", METRICA_LIST_VIAJES: "viajes",
+    METRICA_COUNT_PATENTES_SIN_CHOFER: "patentes sin asociación de chofer",
 }
 
 # --- Bloque B1 V2 (Bloque 3 del ticket): DOMINIO -- una ConsultaAtlas ya
@@ -102,11 +105,23 @@ DOMINIO_INCIDENCIAS_DOCUMENTALES = "INCIDENCIAS_DOCUMENTALES"
 # por completo (Mobile, ver `eventos_operacionales.py`), igual que
 # INCIDENCIAS_DOCUMENTALES ya lo es.
 DOMINIO_EVENTOS = "EVENTOS"
-DOMINIOS_SOPORTADOS = frozenset({DOMINIO_VIAJES, DOMINIO_INCIDENCIAS_DOCUMENTALES, DOMINIO_EVENTOS})
+DOMINIO_ASOCIACIONES_PATENTE_CHOFER = "ASOCIACIONES_PATENTE_CHOFER"
+DOMINIOS_SOPORTADOS = frozenset({
+    DOMINIO_VIAJES, DOMINIO_INCIDENCIAS_DOCUMENTALES, DOMINIO_EVENTOS,
+    DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
+})
 _METRICAS_POR_DOMINIO = {
     DOMINIO_VIAJES: METRICAS_SOPORTADAS - {METRICA_COUNT_INCIDENCIAS, METRICA_COUNT_EVENTOS},
     DOMINIO_INCIDENCIAS_DOCUMENTALES: frozenset({METRICA_COUNT_INCIDENCIAS}),
     DOMINIO_EVENTOS: frozenset({METRICA_COUNT_EVENTOS, METRICA_COUNT_DISTINCT_VIAJE, METRICA_COUNT_DISTINCT_CHOFER, METRICA_LIST_DISTINCT_CHOFER, METRICA_LIST_VIAJES}),
+    DOMINIO_ASOCIACIONES_PATENTE_CHOFER: frozenset({METRICA_COUNT_PATENTES_SIN_CHOFER}),
+}
+# Registro semántico único: cada métrica declara la fuente que sustenta su
+# cifra y soporte. Evita que el router pueda presentar viajes como evidencia
+# de incidencias o de una asociación patente↔chofer.
+CAPACIDADES_SEMANTICAS = {
+    dominio: {"metricas": metricas, "soporte": dominio}
+    for dominio, metricas in _METRICAS_POR_DOMINIO.items()
 }
 
 # --- Bloque 2: filtros V1 -- sólo campos que `viajes.csv` realmente
@@ -228,6 +243,9 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
     si la armó B1."""
     if consulta.dominio not in DOMINIOS_SOPORTADOS:
         raise ErrorConsultaAtlas(f"Dominio no soportado: {consulta.dominio!r}")
+    capacidad = CAPACIDADES_SEMANTICAS.get(consulta.dominio)
+    if capacidad is None or consulta.metrica not in capacidad["metricas"]:
+        raise ErrorConsultaAtlas("La métrica no tiene una capacidad semántica para ese dominio.")
     if consulta.metrica not in METRICAS_SOPORTADAS:
         raise ErrorConsultaAtlas(f"Métrica no soportada: {consulta.metrica!r}")
     if consulta.metrica not in _METRICAS_POR_DOMINIO[consulta.dominio]:
@@ -261,6 +279,15 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
         valor = consulta.filtros.get(clave)
         if valor is not None and _parsear_fecha_iso(valor) is None:
             raise ErrorConsultaAtlas(f"{clave} inválida: {valor!r}")
+
+
+def validar_consistencia_respuesta(resultado: ResultadoConsultaAtlas) -> None:
+    """Última barrera: intención ejecutada, métrica y soporte son un dominio."""
+    consulta = resultado.consulta_interpretada
+    validar_consulta(consulta)
+    capacidad = CAPACIDADES_SEMANTICAS[consulta.dominio]
+    if capacidad["soporte"] != consulta.dominio:
+        raise ErrorConsultaAtlas("El soporte no corresponde al dominio de la métrica.")
 
 
 def resolver_periodo(nombre: str, *, hoy: date, dias: int | None = None) -> tuple[date, date]:
@@ -550,22 +577,106 @@ def ejecutar_consulta_atlas(
     )
 
 
+def ejecutar_consulta_asociaciones_patente_chofer(
+    consulta: ConsultaAtlas, viajes: Sequence[Mapping[str, str]],
+) -> ResultadoConsultaAtlas:
+    """Deriva asociaciones desde viajes reales; nunca usa filas genéricas como soporte."""
+    validar_consulta(consulta)
+    if consulta.dominio != DOMINIO_ASOCIACIONES_PATENTE_CHOFER:
+        raise ErrorConsultaAtlas("El ejecutor no corresponde al dominio de asociaciones patente-chofer.")
+    asociaciones: dict[str, dict[str, set[str]]] = {}
+    for viaje in viajes:
+        choferes = {
+            chofer for chofer in _valores_multivalor(viaje, "choferes")
+            if normalizar_texto_atlas(chofer) not in _CHOFERES_AUSENTES
+        }
+        for patente in (*_valores_multivalor(viaje, "patentes_tracto"), *_valores_multivalor(viaje, "patentes_rampla")):
+            registro = asociaciones.setdefault(patente, {"choferes": set(), "transportes": set(), "guias": set()})
+            registro["choferes"].update(choferes)
+            valor_transporte = str(viaje.get("numero_transporte", "")).strip()
+            if valor_transporte:
+                registro["transportes"].add(valor_transporte)
+            registro["guias"].update(_valores_multivalor(viaje, "numeros_guia"))
+    soporte = tuple(
+        {
+            "patente": patente,
+            "estado_asociacion_chofer": "SIN_CHOFER",
+            "choferes_asociados": "",
+            "transportes_soporte": " | ".join(sorted(registro["transportes"])),
+            "guias_soporte": " | ".join(sorted(registro["guias"])),
+        }
+        for patente, registro in sorted(asociaciones.items())
+        if not registro["choferes"]
+    )
+    return ResultadoConsultaAtlas(
+        consulta_interpretada=consulta, resultado=len(soporte),
+        unidades=_UNIDADES_POR_METRICA[consulta.metrica],
+        total_coincidencias=len(soporte), viajes_soporte=soporte,
+    )
+
+
 def _parsear_fecha_evento(evento: Mapping[str, object]) -> date | None:
-    """Bloque 12 -- misma semántica calendario que viajes: prefiere la
-    `fecha` del viaje asociado (DD-MM-YYYY); si el evento no llegó a
-    asociarse a ningún viaje, usa la fecha de recepción real
-    (`recibido_en`, ISO) -- nunca deja un evento real sin fecha
-    consultable sólo porque no se pudo enlazar a un viaje."""
-    fecha_viaje = _parsear_fecha_dataset(str(evento.get("fecha", "")))
-    if fecha_viaje is not None:
-        return fecha_viaje
-    recibido = str(evento.get("recibido_en", "")).strip()
-    if not recibido:
-        return None
-    try:
-        return datetime.fromisoformat(recibido.replace("Z", "+00:00")).date()
-    except ValueError:
-        return None
+    """Fecha del HECHO operacional, nunca fecha de alta/gestión.
+
+    Orden explícito: fecha declarada del evento, fecha operacional obtenida
+    del viaje y, para eventos históricos, su campo legacy ``fecha``. Un
+    ``creado_en`` sólo dice cuándo Atlas lo registró y no puede meter un
+    viaje antiguo dentro de "últimos N días".
+    """
+    for campo in ("fecha_evento", "fecha_operacional", "fecha"):
+        valor = str(evento.get(campo, "")).strip()
+        fecha = _parsear_fecha_dataset(valor)
+        if fecha is not None:
+            return fecha
+        try:
+            return datetime.fromisoformat(valor.replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+    return None
+
+
+_DIMENSIONES_EVENTO_DESDE_VIAJE = {
+    "chofer": "choferes", "cliente": "clientes", "obra": "obras_destino",
+    "destino": "direccion_entrega", "comuna": "localidad_entrega",
+    "patente_tracto": "patentes_tracto", "patente_rampla": "patentes_rampla",
+    "origen": "planta_origen", "material": "materiales", "tipo_carga": "tipos_carga",
+}
+
+
+def enriquecer_eventos_operacionales(
+    eventos: Sequence[Mapping[str, object]], viajes: Sequence[Mapping[str, str]],
+) -> list[dict[str, object]]:
+    """Proyección read-only evento → viaje → dimensiones consultables.
+
+    No persiste ni migra el evento: el transporte sólo se une si identifica
+    exactamente un viaje. Así también los JSON históricos V1 son
+    consultables y un transporte inexistente/ambiguo queda absteniéndose.
+    """
+    def sin_valor(valor: object) -> bool:
+        return valor is None or (isinstance(valor, (list, tuple, set, dict)) and not valor) or not str(valor).strip()
+
+    por_transporte: dict[str, Mapping[str, str] | None] = {}
+    for viaje in viajes:
+        transporte = str(viaje.get("numero_transporte", "")).strip()
+        if not transporte:
+            continue
+        por_transporte[transporte] = viaje if transporte not in por_transporte else None
+    salida: list[dict[str, object]] = []
+    for original in eventos:
+        evento = dict(original)
+        viaje = por_transporte.get(str(evento.get("numero_transporte", "")).strip())
+        if viaje is not None:
+            for destino, origen in (
+                ("viaje_id", "viaje_id"), ("numeros_guia", "numeros_guia"),
+                ("fecha_operacional", "fecha"),
+            ):
+                if sin_valor(evento.get(destino)):
+                    evento[destino] = str(viaje.get(origen, "")).strip()
+            for destino, origen in _DIMENSIONES_EVENTO_DESDE_VIAJE.items():
+                if sin_valor(evento.get(destino)):
+                    evento[destino] = str(viaje.get(origen, "")).strip()
+        salida.append(evento)
+    return salida
 
 
 def ejecutar_consulta_eventos(
@@ -625,6 +736,15 @@ def ejecutar_consulta_eventos(
                 continue
             if normalizar_texto_atlas(_valor_evento(evento, campo)) != normalizar_texto_atlas(valor):
                 return False
+        guia = consulta.filtros.get("numero_guia")
+        if guia is not None:
+            guias = evento.get("numeros_guia", evento.get("numero_guia", ""))
+            if isinstance(guias, (list, tuple, set)):
+                valores_guia = {str(g).strip() for g in guias}
+            else:
+                valores_guia = {g.strip() for g in str(guias).split("|") if g.strip()}
+            if str(guia).strip() not in valores_guia:
+                return False
         return True
 
     coincidencias = [
@@ -673,7 +793,7 @@ def ejecutar_consulta_eventos(
     acumulado: dict[str, int] = {}
     por_grupo: dict[str, list[Mapping[str, object]]] = {}
     for evento in coincidencias:
-        clave = str(evento.get(consulta.agrupacion, "")).strip()
+        clave = _valor_evento(evento, consulta.agrupacion)
         if not clave:
             continue  # Bloque 11 -- nunca agrupar bajo una clave vacía/sin resolver
         acumulado[clave] = acumulado.get(clave, 0) + 1
@@ -716,6 +836,9 @@ def ejecutar_consulta_incidencias_documentales(
             f"{DOMINIO_INCIDENCIAS_DOCUMENTALES!r}."
         )
     registros = list(incidencias)
+    guia = consulta.filtros.get("numero_guia")
+    if guia is not None:
+        registros = [r for r in registros if str(r.get("numero_guia", "")).strip() == str(guia).strip()]
     unidades = _UNIDADES_POR_METRICA[consulta.metrica]
     transportes = {
         str(r.get("numero_transporte", "")).strip()

@@ -230,6 +230,23 @@ def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:
         return False
     if texto in {"GIRO", "IRO"}:
         return False
+    # La misma clasificación estructural que protege OBRA DESTINO también
+    # protege CLIENTE: una etiqueta administrativa es texto nominal desde el
+    # punto de vista tipográfico, pero nunca representa una entidad. Esto
+    # evita que ORDEN DE COMPRA/INDICADOR TRASLADO ganen por pura cercanía.
+    if clasificar_valor_obra_destino(item["texto"]) != "NOMINAL":
+        return False
+    # EMPRESA TRANSPORTE(S) es una etiqueta compuesta del formulario, no el
+    # comienzo de una razón social cuando aparece sola. Se limita a la frase
+    # completa para no excluir nombres reales con una razón social posterior.
+    tokens = tuple(_tokens_valor(texto))
+    if tokens in {
+        ("EMPRESA", "TRANSPORTE"),
+        ("EMPRESA", "TRANSPORTES"),
+        ("EMPRESA", "DE", "TRANSPORTE"),
+        ("EMPRESA", "DE", "TRANSPORTES"),
+    }:
+        return False
     if any(palabra in texto for palabra in _EXCLUSIONES_CANDIDATO_NOMINAL_GEOMETRICO):
         return False
     if re.fullmatch(r"[\d\W_]+", texto) or re.search(r"\b\d{1,2}[:;]\d{2}\b", texto):
@@ -368,6 +385,12 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
 
     etiquetas_giro = [item for item in items if es_etiqueta_giro(item)]
 
+    # Las cajas de PaddleOCR pueden desplazar unos pocos píxeles la línea de
+    # GIRO respecto de SEÑOR(ES). Este margen es menor al umbral global de
+    # ambigüedad (0.06): sólo evita que una ventaja mínima de GIRO invalide
+    # un valor que la etiqueta explícita SEÑOR(ES) también reclama.
+    MARGEN_DOMINIO_GIRO_VS_SENOR = 0.04
+
     def _puntaje_giro(item: Dict[str, Any]) -> Optional[float]:
         """Mejor (menor) puntaje de `item` contra cualquier etiqueta GIRO
         del documento, usando la misma función de puntuación que
@@ -453,8 +476,14 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
                 # columnas casi equidistantes, sigue protegido con este
                 # mismo criterio).
                 puntaje_giro = puntaje_giro_por_id.get(id(item))
-                if puntaje_giro is not None and puntaje_giro <= puntuacion:
-                    continue
+                if puntaje_giro is not None:
+                    es_cliente_senor = campo == "cliente" and _es_etiqueta_senor(etiqueta["simple"])
+                    umbral_dominio_giro = (
+                        puntuacion - MARGEN_DOMINIO_GIRO_VS_SENOR
+                        if es_cliente_senor else puntuacion
+                    )
+                    if puntaje_giro <= umbral_dominio_giro:
+                        continue
                 # No atraviesa otra etiqueta: el candidato debe pertenecer a la
                 # zona de esta etiqueta y no estar más cerca de otra.
                 distancia_objetivo = abs(item["cx"] - etiqueta["cx"]) + abs(item["cy"] - etiqueta["cy"])
@@ -1415,6 +1444,37 @@ _PATRON_RUT_COMPLETO = re.compile(
     r"^\s*(?:[0-9]{1,8}|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+)\s*-\s*[0-9Kk]\s*$"
 )
 
+_PATRON_RUT_SEGUIDO_DE_TEXTO = re.compile(
+    r"^\s*((?:[0-9]{1,8}|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+)\s*-\s*[0-9Kk])\s+(.+)$"
+)
+
+
+def _es_rut_seguido_de_etiqueta_administrativa(texto_crudo: str) -> bool:
+    """Bloque CONTAMINACIÓN RUT+ETIQUETA (caso real 460486: "10833150-K
+    FECHA", el mismo RUT ya resuelto como `rut_chofer` de esta guía,
+    seguido de la etiqueta "FECHA" truncada de "FECHA SALIDA") --
+    generaliza la regla de arriba (un valor que ES íntegramente un RUT)
+    al caso donde el RUT queda seguido de una o más etiquetas
+    administrativas del formulario y NADA MÁS -- mismo intercalado de
+    columnas que ya cubren las reglas vecinas de esta función, nunca una
+    dirección real truncada. Exige que el RUT tenga dígito verificador
+    válido Y que absolutamente TODO el texto restante sea, token a
+    token, una etiqueta administrativa conocida (`_TOKENS_
+    ADMINISTRATIVOS`, la misma lista que ya protege CLIENTE/OBRA/
+    COMUNA) -- si sobra cualquier otra palabra o número (un nombre de
+    calle, una numeración), no es este patrón: podría ser una dirección
+    real con un RUT pegado por delante, y esta función se abstiene."""
+    coincidencia = _PATRON_RUT_SEGUIDO_DE_TEXTO.match(texto_crudo)
+    if not coincidencia:
+        return False
+    rut_candidato, resto = coincidencia.group(1), coincidencia.group(2)
+    if validar_rut_chileno(rut_candidato).estado != EstadoValidacion.VALIDO:
+        return False
+    tokens_resto = _tokens_valor(resto)
+    if not tokens_resto:
+        return False
+    return all(token in _TOKENS_ADMINISTRATIVOS for token in tokens_resto)
+
 
 def _despachar_a_lineal_contaminado(valor: Any, *, valor_chofer_resuelto: str = "") -> bool:
     """Detecta cuando la extracción lineal de DESPACHAR A (regex sobre texto
@@ -1453,6 +1513,8 @@ def _despachar_a_lineal_contaminado(valor: Any, *, valor_chofer_resuelto: str = 
         resultado_rut = validar_rut_chileno(texto_crudo)
         if resultado_rut.estado == EstadoValidacion.VALIDO:
             return True
+    if _es_rut_seguido_de_etiqueta_administrativa(texto_crudo):
+        return True
     texto = _texto_simple(texto_crudo)
     if not texto:
         return False
@@ -2558,11 +2620,28 @@ def extraer_datos(
         # de la siguiente sección (GIRO/DIRECCION/DESPACHAR/OBRA/COMUNA),
         # y sólo se acepta si valida dígito verificador -- nunca un número
         # suelto de otra parte del documento.
+        #
+        # Bloque IDENTIDAD I2 (caso real 460486) -- cuando la etiqueta
+        # SEÑOR(ES) no puede anclarse (p. ej. la foto recorta también la
+        # "SE" inicial, dejando solo "...ÑOR(ES)"), este bloque ANTES
+        # degradaba a escanear el DOCUMENTO COMPLETO por el primer RUT con
+        # forma válida -- exactamente lo que el comentario de arriba decía
+        # que nunca hacía. Eso capturaba el RUT del EMISOR/membrete (que
+        # siempre aparece antes en el orden de lectura del OCR) como si
+        # fuera el del cliente, contaminando la identidad documental con
+        # una sección ajena. Sin ancla SEÑOR(ES) confiable, no hay zona
+        # segura que buscar: se abstiene (los fallbacks geométricos --
+        # `_extraer_rut_cliente_geometrico` / `_extraer_identidad_
+        # cliente_recortada_geometrica`, ambos tolerantes a este mismo
+        # recorte -- siguen disponibles para recuperar el RUT correcto sin
+        # arriesgar tomar uno de otra sección).
         zona = re.search(
             r"SE[NÑ]OR(?:\(?ES\)?)?(.*?)(?:\bGIRO\b|\bDIRECCION\b|\bDESPACHAR\b|\bOBRA\s+DESTINO\b|\bCOMUNA\b|$)",
             texto_busqueda, re.DOTALL,
         )
-        segmento = zona.group(1) if zona else texto_busqueda
+        if zona is None:
+            return None, None
+        segmento = zona.group(1)
         for cand in re.findall(r"\b(\d{1,2}[.\s]?\d{3}[.\s]?\d{3}\s?-?\s?[0-9Kk])\b", segmento):
             limpio = limpiar_rut(cand)
             if "-" in limpio and validar_rut_chileno(limpio).estado == EstadoValidacion.VALIDO:

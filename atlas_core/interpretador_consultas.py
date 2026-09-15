@@ -21,6 +21,7 @@ from typing import Iterable, Mapping
 from atlas_core.consultas_atlas import (
     AGRUPACIONES_SOPORTADAS,
     DOMINIO_EVENTOS,
+    DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
     ConsultaAtlas,
@@ -30,6 +31,7 @@ from atlas_core.consultas_atlas import (
     METRICA_COUNT_EVENTOS,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_INCIDENCIAS,
+    METRICA_COUNT_PATENTES_SIN_CHOFER,
     METRICA_COUNT_VIAJES,
     METRICA_LIST_RELACION,
     METRICA_LISTAR_VIAJES,
@@ -44,6 +46,7 @@ from atlas_core.consultas_atlas import (
     PERIODO_HOY,
     PERIODO_MES_PASADO,
     PERIODO_SEMANA_PASADA,
+    PERIODO_ULTIMOS_N_DIAS,
     RELACIONES_SOPORTADAS,
     normalizar_texto_atlas,
 )
@@ -265,7 +268,27 @@ _PALABRAS_METRICA = (
 # cosa: el resto de esta función está pensada para `viajes.csv`, y una
 # pregunta sobre incidencias nunca debería pasar por la resolución de
 # entidades de chofer/cliente/obra de ese dominio.
-_PALABRAS_INCIDENCIA = ("INCIDENCIA", "INCIDENCIAS", "ERROR DOCUMENTAL", "ERRORES DOCUMENTALES")
+# ``incidencia`` a secas dejó de ser sinónimo de error documental: Atlas
+# también registra incidencias operacionales. Sólo estas expresiones llevan
+# inequívocamente al repositorio documental; el término genérico se resuelve
+# como seguimiento operacional (o por sus tipos explícitos) más abajo.
+_PALABRAS_INCIDENCIA_DOCUMENTAL = (
+    "INCIDENCIA DOCUMENTAL", "INCIDENCIAS DOCUMENTALES", "ERROR DOCUMENTAL", "ERRORES DOCUMENTALES",
+    "PROBLEMA DE LA GUIA", "PROBLEMA DEL DOCUMENTO", "PROBLEMAS DE LA GUIA", "PROBLEMAS DEL DOCUMENTO",
+)
+_PALABRAS_INCIDENCIA_GENERICA = ("INCIDENCIA", "INCIDENCIAS", "OBSERVACION OPERACIONAL", "OBSERVACIONES OPERACIONALES", "INCIDENCIA OPERACIONAL", "INCIDENCIAS OPERACIONALES")
+
+# Intenciones de estado: se declaran por dominio y estado real, no como
+# frases completas. "pendiente técnico" nunca es una incidencia documental.
+_PALABRAS_PENDIENTE_TECNICO = (
+    "PENDIENTE TECNICO", "PENDIENTES TECNICOS", "INCOMPLETO TECNICO",
+    "INCOMPLETOS TECNICOS", "TECNICAMENTE PENDIENTE", "TECNICAMENTE PENDIENTES",
+    "PENDIENTE TECNICAMENTE", "PENDIENTES TECNICAMENTE",
+)
+_PATRON_ASOCIACION_SIN_CHOFER = re.compile(
+    r"\b(?:PATENTES?|VEHICULOS?)\b.*\b(?:SIN|NO)\b.*\b(?:ASOCIAD|VINCULAD|CHOFER|CONDUCTOR)"
+    r"|\b(?:SIN|NO)\b.*\bCHOFER(?:ES)?\b.*\b(?:PATENTES?|VEHICULOS?)\b"
+)
 
 # Bloque B1 V2 (Bloque 4.C del ticket) -- "choferes"/"conductores" en
 # PLURAL, sin ir precedido de "por"/"cada" (esa es la agrupación V1 ya
@@ -321,6 +344,25 @@ _PALABRAS_PERIODO = (
     (PERIODO_AYER, ("AYER",)),
     (PERIODO_HOY, ("HOY",)),
 )
+_PATRON_ULTIMOS_DIAS = re.compile(r"\bULTIM[OA]S?\s+(\d+)\s+DIAS?\b")
+_PATRON_RANGO_FECHAS = re.compile(
+    r"\b(?:ENTRE|DESDE)\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})\s+(?:Y|HASTA)\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b"
+)
+
+
+def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
+    """Extrae una ventana real antes de contar o agrupar cualquier dominio."""
+    ultimos = _PATRON_ULTIMOS_DIAS.search(texto_normalizado)
+    if ultimos:
+        return {"periodo": PERIODO_ULTIMOS_N_DIAS, "dias": ultimos.group(1)}
+    rango = _PATRON_RANGO_FECHAS.search(texto_normalizado)
+    if rango:
+        d1, m1, a1, d2, m2, a2 = rango.groups()
+        return {"fecha_desde": f"{a1}-{int(m1):02d}-{int(d1):02d}", "fecha_hasta": f"{a2}-{int(m2):02d}-{int(d2):02d}"}
+    for nombre_periodo, frases in _PALABRAS_PERIODO:
+        if any(frase in texto_normalizado for frase in frases):
+            return {"periodo": nombre_periodo}
+    return {}
 
 # Bloque R2 (adición -- FALLO DE LÓGICA/ASOCIACIÓN) -- causa raíz real:
 # "cuántos viajes con revisión tenemos" nunca poblaba `filtros["estado"]`
@@ -487,14 +529,32 @@ def interpretar_consulta_determinista(
     normalizado = normalizar_texto_atlas(texto)
     avisos: list[str] = []
 
+    # Antes de la métrica genérica de patentes/vehículos: aquí la dimensión
+    # es la asociación, no el inventario de vehículos ni los viajes.
+    if _PATRON_ASOCIACION_SIN_CHOFER.search(normalizado):
+        return ConsultaAtlas(
+            metrica=METRICA_COUNT_PATENTES_SIN_CHOFER,
+            dominio=DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
+        ), tuple(avisos)
+
+    if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_PENDIENTE_TECNICO):
+        return ConsultaAtlas(
+            metrica=METRICA_COUNT_VIAJES, dominio=DOMINIO_VIAJES,
+            filtros={"estado": "INCOMPLETO_TECNICO"},
+        ), tuple(avisos)
+
     # Bloque B1 V2 (Bloque 4.A/9 del ticket) -- dominio
     # INCIDENCIAS_DOCUMENTALES, resuelto ANTES que nada: es una fuente
     # de datos distinta a `viajes.csv`, así que el resto de esta función
     # (resolución de entidades chofer/cliente/obra, agrupación, etc, todo
     # pensado para el reporte de viajes) no aplica en absoluto.
-    if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_INCIDENCIA):
+    if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_INCIDENCIA_DOCUMENTAL):
+        filtro_documental: dict[str, str] = {}
+        guia_documental = re.search(r"\bGUIA\s+(\d{5,})\b", normalizado)
+        if guia_documental:
+            filtro_documental["numero_guia"] = guia_documental.group(1)
         return ConsultaAtlas(
-            metrica=METRICA_COUNT_INCIDENCIAS, dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES, filtros={},
+            metrica=METRICA_COUNT_INCIDENCIAS, dominio=DOMINIO_INCIDENCIAS_DOCUMENTALES, filtros=filtro_documental,
         ), tuple(avisos)
 
     # Bloque UNIVERSAL V1 (Bloque 8/18 del ticket) -- preguntas
@@ -517,25 +577,41 @@ def interpretar_consulta_determinista(
         if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in palabras):
             tipo_evento_detectado = tipo
             break
-    if tipo_evento_detectado is not None:
-        filtros_evento: dict[str, str] = {"tipo_evento": tipo_evento_detectado}
-        for nombre_periodo, frases in _PALABRAS_PERIODO:
-            if any(frase in normalizado for frase in frases):
-                filtros_evento["periodo"] = nombre_periodo
-                break
+    incidencia_operacional_generica = any(
+        re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_INCIDENCIA_GENERICA
+    )
+    if tipo_evento_detectado is not None or incidencia_operacional_generica:
+        filtros_evento: dict[str, str] = _filtros_periodo(normalizado)
+        if tipo_evento_detectado is not None:
+            filtros_evento["tipo_evento"] = tipo_evento_detectado
+        guia_evento = re.search(r"\bGUIA\s+(\d{5,})\b", normalizado)
+        if guia_evento:
+            filtros_evento["numero_guia"] = guia_evento.group(1)
         agrupacion_evento: str | None = None
         limite_evento: int | None = None
+        orden_evento = "DESC"
+        top_n = re.search(r"\bTOP\s+(\d+)\b", normalizado)
+        es_maximo = bool(re.search(r"\b(?:MAS|MAYOR|MAXIM[OA])\b", normalizado))
+        es_minimo = bool(re.search(r"\b(?:MENOS|MENOR|MINIM[OA])\b", normalizado))
         for campo_agrupacion, palabras_campo in _PALABRAS_EVENTO_AGRUPACION:
             patrones_agrup = [rf"\bPOR {pal}\b" for pal in palabras_campo] + [rf"\bCADA {pal}\b" for pal in palabras_campo]
-            patrones_top = [rf"\bQUE {pal}\b" for pal in palabras_campo]
-            if any(re.search(p, normalizado) for p in patrones_agrup):
+            patrones_entidad = [rf"\b{pal}\b" for pal in palabras_campo]
+            patrones_listado = [rf"\b(?:QUE|CUALES?)\s+{pal}\b" for pal in palabras_campo]
+            if any(re.search(p, normalizado) for p in (*patrones_agrup, *patrones_listado)):
                 agrupacion_evento = campo_agrupacion
                 break
-            if any(re.search(p, normalizado) for p in patrones_top):
+            if (top_n or es_maximo or es_minimo) and any(re.search(p, normalizado) for p in patrones_entidad):
                 agrupacion_evento = campo_agrupacion
-                if _PATRON_TOP.search(normalizado):
-                    limite_evento = 1
                 break
+        if agrupacion_evento is None and (es_maximo or es_minimo) and re.search(r"\b(?:QUIEN|QUIENES)\b", normalizado):
+            agrupacion_evento = "chofer"
+        if agrupacion_evento is not None:
+            if top_n:
+                limite_evento = int(top_n.group(1))
+            elif es_maximo or es_minimo:
+                limite_evento = 1
+            if es_minimo:
+                orden_evento = "ASC"
         # Bloque 6/12 -- misma lógica que el flujo de viajes: resuelve
         # las 3 familias primero, sin comprometer nada, y sólo acepta de
         # más fuerte a más débil (evita el mismo cruce real "Salomon
@@ -575,7 +651,7 @@ def interpretar_consulta_determinista(
             metrica_evento = METRICA_COUNT_EVENTOS
         return ConsultaAtlas(
             metrica=metrica_evento, dominio=DOMINIO_EVENTOS, filtros=filtros_evento,
-            agrupacion=agrupacion_evento, limite=limite_evento,
+            agrupacion=agrupacion_evento, limite=limite_evento, orden=orden_evento,
         ), tuple(avisos)
 
     # Bloque UNIVERSAL V1.1 (Bloque 2 del ticket) -- "cuántas patentes/
@@ -792,8 +868,21 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
         and consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER
     ):
         return "la pregunta pide cantidad de patentes/vehículos, pero la consulta cuenta choferes"
-    if _menciona(_PALABRAS_INCIDENCIA) and consulta.dominio != DOMINIO_INCIDENCIAS_DOCUMENTALES:
+    if _menciona(_PALABRAS_INCIDENCIA_DOCUMENTAL) and consulta.dominio != DOMINIO_INCIDENCIAS_DOCUMENTALES:
         return "la pregunta pide incidencias documentales, pero la consulta consulta viajes"
+    if _menciona(_PALABRAS_INCIDENCIA_GENERICA) and not _menciona(_PALABRAS_INCIDENCIA_DOCUMENTAL) and consulta.dominio != DOMINIO_EVENTOS:
+        return "la pregunta pide incidencias operacionales, pero la consulta no usa eventos operacionales"
+    if _menciona(_PALABRAS_PENDIENTE_TECNICO) and not (
+        consulta.dominio == DOMINIO_VIAJES
+        and consulta.metrica == METRICA_COUNT_VIAJES
+        and consulta.filtros.get("estado") == "INCOMPLETO_TECNICO"
+    ):
+        return "la pregunta pide pendientes técnicos, pero la consulta no usa el estado técnico real de viajes"
+    if _PATRON_ASOCIACION_SIN_CHOFER.search(normalizado) and not (
+        consulta.dominio == DOMINIO_ASOCIACIONES_PATENTE_CHOFER
+        and consulta.metrica == METRICA_COUNT_PATENTES_SIN_CHOFER
+    ):
+        return "la pregunta pide asociaciones patente-chofer ausentes, pero la consulta usa otra métrica o soporte"
     if (
         _menciona(_PALABRAS_CHOFER_PLURAL)
         and not _PATRON_AGRUPACION_CHOFER.search(normalizado)

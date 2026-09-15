@@ -21,10 +21,22 @@ from atlas_core.decisiones_pendientes import (
     NOMBRE_LOCK_DECISIONES_PENDIENTES, _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
 )
 from atlas_core.gestor_viajes import transporte_valido
-from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.procesamiento_masivo import (
     COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
 )
+
+
+# Bloque P2 SPAWN/IPC -- ver comentario equivalente en
+# `procesamiento_masivo.py`: envoltorio con import diferido de
+# `atlas_core.ocr_provider` (evita pagar ~4-6 s de `easyocr`/`torch` en
+# CADA subproceso, incluidos los "sin OCR"), definido como nombre DE ESTE
+# MÓDULO -- nunca un import local dentro de las funciones que lo usan --
+# para seguir siendo patcheable por
+# `monkeypatch.setattr(mobile, "crear_proveedor_ocr", ...)`, como ya hace
+# la suite existente.
+def crear_proveedor_ocr(*args, **kwargs):
+    from atlas_core.ocr_provider import crear_proveedor_ocr as _f
+    return _f(*args, **kwargs)
 
 ESTADOS = (
     "RECIBIDO", "PROCESANDO", "ASOCIADO", "REQUIERE_REVISION", "ERROR",
@@ -548,6 +560,8 @@ def _procesar_envio_mobile_impl(
         if procesador is not None:
             datos = dict(procesador(imagen))
         else:
+            # `crear_proveedor_ocr` es el nombre de módulo (envoltorio con
+            # import diferido, ver arriba) -- nunca un import local aquí.
             argumentos: dict[str, object] = {}
             argumentos["proveedor"] = crear_proveedor_ocr()
             if carpeta_catalogos is not None:

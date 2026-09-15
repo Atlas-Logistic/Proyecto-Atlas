@@ -55,6 +55,10 @@ TIPO_OBRA_DOCUMENTAL_INCONSISTENTE = "OBRA_DOCUMENTAL_INCONSISTENTE"
 TIPO_COMUNA_DOCUMENTAL_INCORRECTA = "COMUNA_DOCUMENTAL_INCORRECTA"
 TIPO_TRANSPORTISTA_DOCUMENTAL_INCORRECTO = "TRANSPORTISTA_DOCUMENTAL_INCORRECTO"
 TIPO_HORA_DOCUMENTAL_INCONSISTENTE = "HORA_DOCUMENTAL_INCONSISTENTE"
+# Una confirmación humana puede cubrir campos nuevos antes de que merezcan
+# una taxonomía propia. El campo estructurado conserva la especificidad; este
+# tipo evita inventar reglas distintas para cada futuro dominio.
+TIPO_CAMPO_DOCUMENTAL_INCORRECTO = "CAMPO_DOCUMENTAL_INCORRECTO"
 # Bloque R5 I -- omisión, no contradicción: la guía nunca imprimió el
 # número de transporte (la etiqueta "NRO...TRANSPORTE" no aparece en el
 # texto OCR, y el documento no está degradado en general -- ver
