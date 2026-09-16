@@ -51,7 +51,16 @@ _PALABRAS_GESTION = (
         "PENDIENTE DE RESPUESTA", "PENDIENTES DE RESPUESTA",
         "SIGUE PENDIENTE", "SIGUEN PENDIENTES",
     )),
-    ("APROBADA", ("FUE APROBADA", "FUERON APROBADAS", "APROBADA", "APROBADAS", "APROBARON", "APROBO")),
+    # "CONFIRMADA"/"CONFIRMADAS" -- caso real: "tienen estadía confirmada"
+    # (Desktop) generaba REGISTRAR_INCIDENCIA sin ESTADO GESTIÓN porque
+    # "confirmada" no era sinónimo de ningún estado. Semánticamente
+    # equivalente a "aprobada" en este dominio (una gestión SE confirma
+    # cuando se aprueba) -- mismo estado GESTION_APROBADA, nunca un estado
+    # nuevo.
+    ("APROBADA", (
+        "FUE APROBADA", "FUERON APROBADAS", "APROBADA", "APROBADAS", "APROBARON", "APROBO",
+        "FUE CONFIRMADA", "FUERON CONFIRMADAS", "CONFIRMADA", "CONFIRMADAS", "CONFIRMARON", "CONFIRMO",
+    )),
     ("RECHAZADA", ("FUE RECHAZADA", "FUERON RECHAZADAS", "RECHAZADA", "RECHAZADAS", "RECHAZARON", "RECHAZO")),
     ("ENVIADA", ("FUE ENVIADA", "FUERON ENVIADAS", "ENVIADA", "ENVIADAS", "ENVIARON", "ENVIO")),
     ("REPORTADA", ("FUE REPORTADA", "FUERON REPORTADAS", "REPORTADA", "REPORTADAS", "REPORTARON", "REPORTO")),

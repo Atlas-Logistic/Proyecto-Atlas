@@ -103,6 +103,70 @@ def test_interpreta_pendiente_sin_tipo_explicito():
     ]
 
 
+# ============================================================
+# 1b. Composición en UNA instrucción -- caso real Desktop: "tienen
+#    estadía confirmada" generaba REGISTRAR_INCIDENCIA sin ESTADO
+#    GESTIÓN porque "confirmada" no era sinónimo de ningún estado.
+#    "confirmada"/"confirmadas" ahora es sinónimo de APROBADA (mismo
+#    mecanismo genérico tipo+gestión ya usado por
+#    `test_interpreta_actualizacion_gestion_lista_compartida`, nunca un
+#    parche exclusivo de estadía).
+# ============================================================
+
+
+def test_composicion_estadia_confirmada_las_5_guias_reales_del_reporte():
+    """Caso real reportado: 5 guías, "tienen estadía confirmada" ->
+    TIENE_ESTADIA + APROBADA para cada una, en una sola instrucción."""
+    texto = "Las guías 473056, 473220, 473081, 473280 y 473221 tienen estadía confirmada"
+    acciones = interpretar_instruccion_incidencias(texto)
+    assert acciones == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": guia, "estado_gestion": "APROBADA", "tipo": "TIENE_ESTADIA"}
+        for guia in ("473056", "473220", "473081", "473280", "473221")
+    ]
+
+
+def test_composicion_generaliza_a_devolucion_y_doble_vuelta_confirmada():
+    """No es un parche exclusivo de estadía -- "confirmada" compone
+    igual con cualquier tipo ya soportado."""
+    assert interpretar_instruccion_incidencias("473015 tuvo devolución total confirmada.") == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473015", "estado_gestion": "APROBADA", "tipo": "DEVOLUCION_TOTAL"},
+    ]
+    assert interpretar_instruccion_incidencias("473020 doble vuelta confirmada.") == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473020", "estado_gestion": "APROBADA", "tipo": "DOBLE_VUELTA"},
+    ]
+    assert interpretar_instruccion_incidencias("Fueron confirmadas las devoluciones parciales de 473001 y 473004.") == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473001", "estado_gestion": "APROBADA", "tipo": "DEVOLUCION_PARCIAL"},
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473004", "estado_gestion": "APROBADA", "tipo": "DEVOLUCION_PARCIAL"},
+    ]
+
+
+def test_composicion_no_rompe_las_frases_de_gestion_ya_soportadas():
+    """Regresión explícita: "aprobada"/"rechazada"/"pendiente de
+    respuesta" (vocabulario ya soportado antes de este bloque) siguen
+    funcionando igual, incluso mezcladas con "confirmada" en la misma
+    instrucción."""
+    # "Y" separa dos hechos INDEPENDIENTES aquí (ya hay una palabra clave
+    # -- "confirmada" -- entre la guía 473001 y la "Y"): la segunda
+    # sub-cláusula nunca hereda el tipo de la primera, mismo criterio que
+    # ya prueba `_sub_clausulas` para el resto del vocabulario -- por eso
+    # 473004 queda sin "tipo" (candidata a backfill, igual que "473020
+    # sigue pendiente de respuesta").
+    acciones = interpretar_instruccion_incidencias(
+        "473001 tiene estadía confirmada y 473004 fue rechazada."
+    )
+    assert acciones == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473001", "estado_gestion": "APROBADA", "tipo": "TIENE_ESTADIA"},
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473004", "estado_gestion": "RECHAZADA"},
+    ]
+    assert interpretar_instruccion_incidencias("Las estadías de 473001 y 473004 fueron aprobadas.") == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473001", "estado_gestion": "APROBADA", "tipo": "TIENE_ESTADIA"},
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473004", "estado_gestion": "APROBADA", "tipo": "TIENE_ESTADIA"},
+    ]
+    assert interpretar_instruccion_incidencias("473020 sigue pendiente de respuesta.") == [
+        {"accion": "ACTUALIZAR_GESTION", "guia": "473020", "estado_gestion": "PENDIENTE_RESPUESTA"},
+    ]
+
+
 def test_fragmento_sin_tipo_ni_gestion_queda_marcado_no_reconocido():
     """Nunca se descarta en silencio -- una guía mencionada sin ninguna
     palabra clave reconocida queda con `accion=""`, visible después en el
@@ -267,6 +331,58 @@ def test_rechazo_de_estadia_actualiza_gestion_sin_duplicar_el_hecho(tmp_path):
     documento = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
     assert len(documento["eventos"]) == 1  # nunca duplicó el hecho MARCA_VIAJE
     assert documento["eventos"][0]["estado_gestion"] == "RECHAZADA"
+
+
+# ============================================================
+# 5b. Composición en el preview real de Desktop (propuesta.acciones,
+#    zipped por índice con propuesta.preview.acciones -- exactamente lo
+#    que `atlas_viajes.html`/`renderPropuestaIncidencias` lee para pintar
+#    las columnas "Tipo"/"Estado gestión") -- ANTES de cualquier
+#    confirmación/escritura.
+# ============================================================
+
+
+def test_preview_estadia_confirmada_muestra_tipo_y_gestion_compuestos_antes_de_confirmar(tmp_path):
+    """Criterio de aceptación: la frase compuesta debe mostrar, en el
+    preview (antes de escribir nada), TIENE_ESTADIA + APROBADA para
+    cada guía -- lo mismo que Desktop pinta en "Tipo"/"Estado gestión"."""
+    raiz, ruta_viajes = _entorno(tmp_path, FILAS_BASE)
+    texto = "Las guías 473001, 473004, 473010, 473015 y 473020 tienen estadía confirmada."
+    propuesta = proponer_lote_incidencias(texto=texto, raiz=raiz, ruta_viajes=ruta_viajes)
+
+    assert propuesta["interpretado"] is True
+    assert propuesta["preview"]["aplicable"] is True
+    for accion, item in zip(propuesta["acciones"], propuesta["preview"]["acciones"]):
+        assert accion["tipo"] == "TIENE_ESTADIA"
+        assert accion["estado_gestion"] == "APROBADA"
+        assert item["estado"] == "RESUELTA"  # lo que Desktop usa para la fila "ok"
+    assert not _ruta_eventos(raiz).exists(), "el preview nunca debe escribir eventos_operacionales"
+
+
+def test_confirmar_estadia_confirmada_aplica_tipo_y_gestion_en_una_sola_escritura_e_idempotente(tmp_path):
+    """Aplicar la instrucción compuesta crea el hecho MARCA_VIAJE Y deja
+    estado_gestion=APROBADA en la MISMA escritura (nunca dos pasos) --
+    y repetir la misma instrucción nunca duplica ni reescribe de más
+    (revalidación/idempotencia intactas)."""
+    raiz, ruta_viajes = _entorno(tmp_path, FILAS_BASE)
+    texto = "Las guías 473001, 473004 y 473010 tienen estadía confirmada."
+    p1 = proponer_lote_incidencias(texto=texto, raiz=raiz, ruta_viajes=ruta_viajes)
+    r1 = confirmar_lote_incidencias(raiz=raiz, ruta_viajes=ruta_viajes, acciones=p1["acciones"], actor="JAVIER", confirmado=True)
+    assert r1["resumen"] == {"aplicados": 3, "ya_registrados": 0, "no_aplicados": 0, "errores": []}
+
+    documento = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
+    assert len(documento["eventos"]) == 3
+    for evento in documento["eventos"]:
+        assert evento["tipo_evento"] == "TIENE_ESTADIA"
+        assert evento["estado_gestion"] == "APROBADA"
+        assert evento["creado_en"] == evento["actualizado_en"]  # una sola escritura, no dos pasos
+
+    # Reintento con la MISMA instrucción -- idempotente, nunca duplica.
+    p2 = proponer_lote_incidencias(texto=texto, raiz=raiz, ruta_viajes=ruta_viajes)
+    r2 = confirmar_lote_incidencias(raiz=raiz, ruta_viajes=ruta_viajes, acciones=p2["acciones"], actor="JAVIER", confirmado=True)
+    assert r2["resumen"] == {"aplicados": 0, "ya_registrados": 3, "no_aplicados": 0, "errores": []}
+    documento_final = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
+    assert len(documento_final["eventos"]) == 3  # nunca duplicó
 
 
 # ============================================================
