@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from atlas_core.aplicacion_decisiones import aplicar_decision_obra
 from atlas_core.decisiones_pendientes import detectar_decisiones_documento, generar_artefacto
@@ -88,3 +91,25 @@ def test_confirmar_candidato_aprende_alias_y_cierra_motivo(tmp_path):
     aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR", rut_chofer_elegido=RUT)
     assert "CHOFER_SIN_CORROBORAR" not in _fila(raiz)["motivos_revision_documento"]
     assert "CARLO SIMON" in json.loads((catalogos / "choferes.json").read_text(encoding="utf-8"))["144183495"]["aliases"]
+
+
+def test_cli_confirma_chofer_candidato_con_el_rut_elegido_por_javier(tmp_path):
+    catalogo = {
+        "144183495": {"nombre": "CARLO SIMON A", "rut": RUT, "activo": True},
+        "10833150K": {"nombre": "CARLO SIMON B", "rut": "10.833.150-K", "activo": True},
+    }
+    raiz = _raiz(tmp_path, chofer="CARLO SIMON", rut="", catalogo=catalogo)
+    decision = detectar_decisiones_chofer_sin_corroborar_sin_ocr(raiz_atlas=raiz)[0]
+    actual = raiz / "operacion" / "actual"
+    generar_artefacto(
+        ruta_dataset=actual / "analisis_completo_guias.csv", carpeta_catalogos=raiz / "catalogos_privados",
+        decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json",
+    )
+    script = Path(__file__).resolve().parents[1] / "aplicar_decision_pendiente.py"
+    proceso = subprocess.run(
+        [sys.executable, str(script), "--raiz-atlas", str(raiz), "--decision-id", decision["decision_id"],
+         "--accion", "CONFIRMAR", "--rut-chofer-elegido", RUT],
+        cwd=script.parent, capture_output=True, check=True,
+    )
+    assert json.loads(proceso.stdout.decode("ascii"))["ok"] is True
+    assert "CHOFER_SIN_CORROBORAR" not in _fila(raiz)["motivos_revision_documento"]
