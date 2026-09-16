@@ -98,14 +98,28 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         motivos_documentales=frozenset({"PATENTE_SIN_HOMOLOGAR", "PATENTE_AMBIGUA"}),
     ),
     DOMINIO_OBRA: Capacidad(
-        dominio=DOMINIO_OBRA, version=2,
-        descripcion="Extracción/catálogo/relaciones de obra destino y convergencia.",
+        dominio=DOMINIO_OBRA, version=3,
+        descripcion=(
+            "Extracción/catálogo/relaciones de obra destino y convergencia. "
+            "v3: REVISIONES ESTANCADAS (473309) -- OBRA_DESCONOCIDA también se "
+            "suprime cuando el texto documental es una lectura OCR levemente "
+            "degradada del propio CLIENTE ya resuelto por RUT (distancia de "
+            "edición <=2 sobre el nombre completo, nunca fuzzy general -- ver "
+            "coincide_con_cliente_por_variacion_ortografica_menor)."
+        ),
         tipos_decision=frozenset({"OBRA_DESCONOCIDA"}),
         motivos_documentales=frozenset({"OBRA_DESTINO_SIN_CORROBORAR", "OBRA_DESTINO_POSIBLEMENTE_INVALIDA"}),
     ),
     DOMINIO_DESTINO: Capacidad(
-        dominio=DOMINIO_DESTINO, version=1,
-        descripcion="Relación obra↔destino confirmada y recuperación de destino.",
+        dominio=DOMINIO_DESTINO, version=2,
+        descripcion=(
+            "Relación obra↔destino confirmada y recuperación de destino. "
+            "v2: REVISIONES ESTANCADAS (473149) -- una relación obra↔destino "
+            "CONFIRMADA a nivel humano se reutiliza para CUALQUIER guía con la "
+            "misma obra y el mismo despachar_a_crudo literal, no sólo la guía "
+            "que originó la confirmación (ver "
+            "_obras_con_relacion_confirmada_por_humano)."
+        ),
         tipos_decision=frozenset({"DESTINO_SIN_CONFIRMAR", "DESTINO_NO_RESUELTO"}),
         motivos_documentales=frozenset({"DESTINO_FRAGMENTO_TRUNCADO", "DESTINO_CONTAMINADO_POR_OTRA_SECCION"}),
     ),

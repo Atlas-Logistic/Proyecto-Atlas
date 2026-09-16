@@ -216,6 +216,94 @@ def test_operacion_ya_reconciliada_con_ruleset_anterior_se_vuelve_a_barrer_al_su
     assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == modulo.RULESET_VERSION
 
 
+def test_operacion_ya_reconciliada_con_capacidades_obra_destino_viejas_se_vuelve_a_barrer(tmp_path, monkeypatch):
+    """Bloque REVISIONES ESTANCADAS POST-INTEGRACIÓN -- causa raíz real
+    (validación de Javier tras integrar 473309/473149): el fix de
+    `regenerar_decisiones_persistidas` (cliente≈obra por OCR + reutilización
+    de obra<->destino confirmada entre guías distintas) quedó correcto en
+    código, pero `reconciliar_estado_derivado` -- el camino REAL que corre
+    Desktop al abrir (`atlas:cargar-automatico`) -- tiene un short-circuit
+    temprano (`VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE`) que se salta TODA
+    la batería (incluidas `reconciliar_bandeja_decisiones` y
+    `reconciliar_decisiones_destino_no_resuelto`, donde vive el fix) cuando
+    ni `migracion` ni `por_reintentar` ni `reporte_desactualizado` ni
+    `estado_derivado_incoherente` ni `falta_tarjeta_destino` ni
+    `capacidades_a_reevaluar` señalan nada por hacer. Como el fix es un
+    cambio de REGLA sin bump de versión, una operación ya reconciliada
+    (mismo `RULESET_VERSION`, dataset sin cambios) nunca lo alcanzaba.
+
+    Esta prueba simula exactamente esa operación real -- ya al día en
+    `RULESET_VERSION` y con el dataset sin cambios (mismo hash), pero con
+    `versiones_capacidades` estampadas en el valor ANTERIOR de OBRA/DESTINO
+    (antes del fix) -- y prueba que el bump de esas dos capacidades
+    (`atlas_core.capacidades_reevaluacion.REGISTRO_CAPACIDADES`) es lo que
+    dispara una reconciliación real (nunca `migracion` ni ningún otro
+    disparador), llegando efectivamente a las dos funciones donde vive el
+    fix."""
+    from atlas_core.almacenamiento_portable import escribir_estado_operacion
+    from atlas_core.capacidades_reevaluacion import DOMINIO_DESTINO, DOMINIO_OBRA, versiones_actuales
+
+    dataset, decisiones = _entorno(tmp_path)
+    huella_dataset = modulo._sha256_archivo(dataset)
+    # Valores REALES persistidos en G: antes de este fix (verificados en
+    # el `estado_operacion.json` real de Javier) -- fijos a propósito,
+    # nunca derivados del registro vigente: si algún día se revierte el
+    # bump de OBRA/DESTINO en `REGISTRO_CAPACIDADES`, esta prueba debe
+    # volver a fallar (persistido == vigente -> ningún avance -> el
+    # short-circuit vuelve a saltarse la batería).
+    versiones_previas = versiones_actuales()
+    versiones_previas[DOMINIO_OBRA] = 2
+    versiones_previas[DOMINIO_DESTINO] = 1
+    reporte_previo = tmp_path / "reportes" / "previo_capacidad_vieja"
+    reporte_previo.mkdir(parents=True)
+    escribir_estado_operacion(
+        reporte_vigente=reporte_previo, dataset_operacional=dataset,
+        decisiones_pendientes=decisiones, raiz=tmp_path, reloj=RELOJ,
+        version_estado_derivado=modulo.RULESET_VERSION, dataset_sha256=huella_dataset,
+        versiones_capacidades=versiones_previas,
+    )
+    assert leer_estado_operacion(raiz=tmp_path)["version_estado_derivado"] == modulo.RULESET_VERSION
+
+    llamadas = {"bandeja_decisiones": 0, "destino_no_resuelto": 0}
+
+    def espiar_bandeja(**kwargs):
+        llamadas["bandeja_decisiones"] += 1
+        return {"decisiones_aplicadas_automaticamente": []}
+
+    def espiar_destino(**kwargs):
+        llamadas["destino_no_resuelto"] += 1
+        return {"decisiones_candidatas": 0, "decisiones_publicadas": 0, "bandeja": {"decisiones": []}}
+
+    def reportar(_dataset, salida, **kwargs):
+        salida.mkdir(parents=True)
+        (salida / "viajes.csv").write_text("estado\nCONFIRMADO\n", encoding="utf-8")
+        return {"totales": {"viajes": 1, "viajes_confirmados": 1}}
+
+    monkeypatch.setattr(modulo, "revalidar_motivo_destino_ya_confirmado_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_material_estampado_persistido_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_destino_contra_comuna_documental_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_obra_destino_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "reconciliar_decisiones_destino_no_resuelto", espiar_destino)
+    monkeypatch.setattr(modulo, "revalidar_origen_encabezado_no_confiable_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_origen_por_categoria_sin_candidato_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr", lambda **k: {"guias_actualizadas": [], "guias_contradiccion": []})
+    monkeypatch.setattr(modulo, "reconciliar_incidencias_rut_chofer_documental", lambda **k: {"candidatas": 0, "incidencias_registradas": [], "rut_corregido_en_dataset": []})
+    monkeypatch.setattr(modulo, "revalidar_indicadores_documentales_sin_ocr", lambda **k: {"guias_actualizadas": []})
+    monkeypatch.setattr(modulo, "revalidar_asociacion_mobile_sin_ocr", lambda *a, **k: {"revisados": 0, "actualizados": []})
+    monkeypatch.setattr(modulo, "reconciliar_bandeja_decisiones", espiar_bandeja)
+    monkeypatch.setattr(modulo, "generar_reporte_viajes", reportar)
+
+    resultado = modulo.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
+
+    # Nunca "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE" -- el bump de
+    # capacidad, por sí solo (sin migración, sin dataset nuevo, sin
+    # pendiente técnico por reintentar), es lo que dispara la batería real.
+    assert resultado["reconciliado"] is True
+    assert llamadas == {"bandeja_decisiones": 1, "destino_no_resuelto": 1}
+    assert leer_estado_operacion(raiz=tmp_path)["versiones_capacidades"][DOMINIO_OBRA] == versiones_actuales()[DOMINIO_OBRA]
+    assert leer_estado_operacion(raiz=tmp_path)["versiones_capacidades"][DOMINIO_DESTINO] == versiones_actuales()[DOMINIO_DESTINO]
+
+
 def test_las_tres_revalidaciones_corren_en_toda_reconciliacion_no_solo_en_migracion(tmp_path, monkeypatch):
     """Bloque RECONCILIACIÓN POST-DECISIÓN -- causa raíz real del caso
     472640: antes, `revalidar_motivo_destino_ya_confirmado_sin_ocr` (y,
