@@ -315,6 +315,46 @@ def resolver_obra_por_variacion_ortografica_menor(
     return candidatos[0]
 
 
+# Bloque REVISIONES ESTANCADAS (caso real 473309) -- "AGP ACEROS DE
+# CHILS SPA" (OCR) vs el propio CLIENTE ya resuelto "AGF ACEROS DE CHILE
+# SPA" (evidencia independiente: RUT_COINCIDE + CATALOGO_CANONICO). A
+# diferencia de `coincide_salvo_variacion_ortografica_menor` (calibrada
+# para distinguir DOS OBRAS reales potencialmente distintas -- de ahí
+# exigir un único token con distancia de edición == 1, abstenerse ante
+# dos o más tokens distintos), acá el candidato de comparación es una
+# identidad YA resuelta por evidencia mucho más fuerte que el propio
+# texto (el RUT documental del cliente coincidió contra catálogo) -- no
+# hay "dos entidades reales similares" entre las que elegir, sólo la
+# pregunta de si el texto de `obra_destino` es simplemente ese mismo
+# cliente, mal leído por OCR. Por eso tolera más de un token afectado,
+# pero exige que la distancia de edición TOTAL sobre el nombre completo
+# sea mínima (<=2, "errores OCR pequeños") y que el nombre sea lo
+# bastante largo para que esa tolerancia no sea, por sí sola, ambigua.
+_LONGITUD_MINIMA_CLIENTE_OBRA_OCR = 15
+_DISTANCIA_MAXIMA_CLIENTE_OBRA_OCR = 2
+
+
+def coincide_con_cliente_por_variacion_ortografica_menor(nombre_obra_documental: str, nombre_cliente: str) -> bool:
+    """True si el texto documental de `obra_destino` es, con evidencia
+    suficiente, una lectura OCR levemente degradada del nombre del propio
+    CLIENTE ya resuelto (nunca de una obra) -- mismo número de tokens que
+    `nombre_cliente`, ambos con al menos `_LONGITUD_MINIMA_CLIENTE_OBRA_OCR`
+    caracteres normalizados, y distancia de edición total sobre el nombre
+    completo <= `_DISTANCIA_MAXIMA_CLIENTE_OBRA_OCR`. El llamador es
+    responsable de que `nombre_cliente` sea una identidad ya confirmada
+    (nunca un texto documental sin resolver) -- esta función sólo compara
+    texto, nunca decide identidad de cliente por sí sola."""
+    documental = normalizar_nombre_obra(nombre_obra_documental)
+    cliente = normalizar_nombre_obra(nombre_cliente)
+    if not documental or not cliente or documental == cliente:
+        return documental == cliente and bool(documental)
+    if min(len(documental), len(cliente)) < _LONGITUD_MINIMA_CLIENTE_OBRA_OCR:
+        return False
+    if len(documental.split()) != len(cliente.split()):
+        return False
+    return _distancia_edicion(documental, cliente) <= _DISTANCIA_MAXIMA_CLIENTE_OBRA_OCR
+
+
 def resolver_obra_por_prefijo_documental_confirmado(
     *, nombre_documental: str, obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
 ) -> Obra | None:

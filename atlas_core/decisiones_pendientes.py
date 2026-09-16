@@ -56,7 +56,7 @@ from atlas_core.catalogos import (
 from atlas_core.evidencia_entidades import ConfirmacionIdentidad
 from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import (
-    _PATRON_RUIDO_NUMERICO_INICIAL, evaluar_evidencia_obra,
+    _PATRON_RUIDO_NUMERICO_INICIAL, coincide_con_cliente_por_variacion_ortografica_menor, evaluar_evidencia_obra,
     resolver_obra_por_prefijo_documental_confirmado, resolver_obra_por_ruido_ocr_inicial,
     resolver_obra_por_variacion_ortografica_menor,
 )
@@ -604,6 +604,45 @@ def _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras) -> dict[s
     return por_guia
 
 
+def _obras_con_relacion_confirmada_por_humano(catalogo_obras) -> set[str]:
+    """``{obra_id, ...}`` de las relaciones obra<->destino que YA están
+    ``CONFIRMADA`` a nivel ``CONFIRMACION_HUMANA`` -- mismo filtro EXACTO
+    que ``_obras_con_relacion_confirmada_por_humano_por_guia``, pero sin
+    indexar por la guía que citó la confirmación (caso real 473149:
+    "EMPRESA CONSTRUCTORA MENA Y" -> "CAM. EL NOVICIADO LAMPA LAMPA" ya
+    fue confirmada por Javier para la guía 464746; la guía 473149, con el
+    mismo `obra_destino` y el mismo `despachar_a_crudo` LITERAL, es una
+    guía DISTINTA que nunca citó esa confirmación -- pero la relación
+    obra<->destino es una identidad GLOBAL, no un hecho ligado a una
+    guía particular, así que el aprendizaje debe poder reutilizarse.
+    Usada únicamente por `guias_destino_conocido_ruta_pendiente`, que ya
+    exige además coincidencia LITERAL del texto documental contra un
+    destino confirmado de esa misma obra -- la variante `_por_guia` de
+    arriba se conserva intacta para su otro uso (reconocer que ESTA
+    MISMA guía ya fue respondida pese a que su propio texto OCR haya
+    derivado, ver docstring de esa función)."""
+    obras_confirmadas: set[str] = set()
+    if catalogo_obras is None:
+        return obras_confirmadas
+    try:
+        relaciones = catalogo_obras.listar_relaciones()
+    except (OSError, ValueError, AttributeError):
+        return obras_confirmadas
+    for relacion in relaciones:
+        if str(getattr(relacion, "estado", "")) != "CONFIRMADA":
+            continue
+        evidencias = list(getattr(relacion, "evidencias", ()) or ())
+        nivel_humano = str(getattr(relacion, "fuente_confirmacion", "")) == "CONFIRMACION_HUMANA" or any(
+            str(getattr(e, "tipo", "")) == "CONFIRMACION_HUMANA" for e in evidencias
+        )
+        if not nivel_humano:
+            continue
+        obra_id = str(getattr(relacion, "obra_id", "")).strip()
+        if obra_id:
+            obras_confirmadas.add(obra_id)
+    return obras_confirmadas
+
+
 # Bloque SEPARAR CONOCIMIENTO DE DESTINO DE RESOLUCIÓN TÉCNICA DE RUTA --
 # caso real 464746 (CAM. EL NOVICIADO LAMPA LAMPA): `GEOCODIFICACION_
 # DEMASIADO_GENERICA` es un problema puro de PRECISIÓN de ruteo (la
@@ -624,12 +663,19 @@ def guias_destino_conocido_ruta_pendiente(
     *, carpeta_catalogos: str | Path, ruta_dataset: str | Path,
 ) -> frozenset[str]:
     """Guías cuyo `motivo_ruta` vigente es `GEOCODIFICACION_DEMASIADO_
-    GENERICA` y cuya relación obra<->destino YA está CONFIRMADA a nivel
-    CONFIRMACION_HUMANA citando esa misma guía (`_obras_con_relacion_
-    confirmada_por_humano_por_guia`), con el destino confirmado
-    coincidiendo LITERALMENTE (normalizado, nunca fuzzy) con el propio
-    `despachar_a_crudo` de la fila -- la identidad de destino ya está
-    respondida, sólo falta la PRECISIÓN de ruteo (nunca inventada aquí).
+    GENERICA` y cuya obra (`obra_destino` de la fila) YA tiene, para
+    CUALQUIER guía (caso real 473149: la confirmación humana original fue
+    para la guía 464746; esta función reconoce que también aplica a
+    guías posteriores con la misma obra), una relación obra<->destino
+    CONFIRMADA a nivel CONFIRMACION_HUMANA (`_obras_con_relacion_
+    confirmada_por_humano`) cuyo destino confirmado coincide LITERALMENTE
+    (normalizado, nunca fuzzy) con el propio `despachar_a_crudo` de la
+    fila -- la identidad de destino ya está respondida, sólo falta la
+    PRECISIÓN de ruteo (nunca inventada aquí). La relación obra<->destino
+    es una identidad GLOBAL (no atada a la guía que la originó); distinto
+    de `DESTINO_SIN_CONFIRMAR` más abajo, que sí necesita saber qué guía
+    CITÓ la confirmación (reconocer que ESA MISMA guía ya fue respondida
+    pese a que su propio texto OCR haya derivado).
 
     Usada para dos efectos, deliberadamente el MISMO conjunto de guías en
     ambos: (1) `regenerar_decisiones_persistidas` deja de republicar una
@@ -671,13 +717,22 @@ def guias_destino_conocido_ruta_pendiente(
         obras = catalogo_obras.listar_obras()
     except (OSError, ValueError):
         return frozenset()
-    obras_relacion_confirmada_por_guia = _obras_con_relacion_confirmada_por_humano_por_guia(catalogo_obras)
+    # Bloque REVISIONES ESTANCADAS (caso real 473149) -- a diferencia de
+    # `DESTINO_SIN_CONFIRMAR` más abajo (que sí necesita saber qué guía
+    # CITÓ la confirmación, para reconocer que ESA MISMA guía ya fue
+    # respondida pese a que su propio texto OCR haya derivado), acá la
+    # pregunta es otra: ¿esta obra ya tiene una relación CONFIRMADA cuyo
+    # destino coincide LITERALMENTE con lo que ESTA guía trae? Esa
+    # relación es una identidad GLOBAL de la obra, no un hecho atado a la
+    # guía que la originó -- por eso se usa la variante sin indexar por
+    # guía (`_obras_con_relacion_confirmada_por_humano`), y no la que
+    # exige que la guía candidata sea, además, la que citó la evidencia.
+    obras_confirmadas_humano = _obras_con_relacion_confirmada_por_humano(catalogo_obras)
+    if not obras_confirmadas_humano:
+        return frozenset()
 
     resultado: set[str] = set()
     for guia in candidatas:
-        obras_confirmadas = obras_relacion_confirmada_por_guia.get(guia)
-        if not obras_confirmadas:
-            continue
         fila = filas_por_guia[guia]
         despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
         obra_nombre = str(fila.get("obra_destino", "")).strip()
@@ -687,7 +742,7 @@ def guias_destino_conocido_ruta_pendiente(
             (o for o in obras if normalizar_nombre_obra(o.nombre_canonico) == normalizar_nombre_obra(obra_nombre)),
             None,
         )
-        if obra is None or obra.obra_id not in obras_confirmadas:
+        if obra is None or obra.obra_id not in obras_confirmadas_humano:
             continue
         try:
             destinos = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra.nombre_canonico)
@@ -2983,7 +3038,19 @@ def regenerar_decisiones_persistidas(
                         normalizar_nombre_obra(alias) for alias in cliente_vigente.aliases
                     )
                 obra_texto = str(decision.get("valor_documental", ""))
-                if normalizar_nombre_obra(obra_texto) in claves_cliente:
+                # Bloque REVISIONES ESTANCADAS (caso real 473309) -- además
+                # de la coincidencia EXACTA de arriba, un texto documental
+                # que es una lectura OCR levemente degradada del propio
+                # cliente (evidencia independiente: RUT documental ya
+                # coincidió contra catálogo) tampoco es una obra nueva --
+                # ver `coincide_con_cliente_por_variacion_ortografica_menor`
+                # (deliberadamente distinta de la comparación obra-vs-obra:
+                # acá no hay dos entidades reales entre las que elegir,
+                # sólo el propio cliente ya resuelto).
+                if normalizar_nombre_obra(obra_texto) in claves_cliente or any(
+                    coincide_con_cliente_por_variacion_ortografica_menor(obra_texto, clave)
+                    for clave in claves_cliente
+                ):
                     continue  # cliente==obra: no hay obra nueva que preguntar
                 # R3.3.1: obra = identidad GLOBAL -- ya no se filtra por
                 # cliente_id. Si la obra ya existe para CUALQUIER cliente

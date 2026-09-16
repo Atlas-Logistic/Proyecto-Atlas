@@ -15,7 +15,16 @@ dataset (nunca se inventa una coordenada).
 Regresión explícita: 464170 (misma clase de confirmación previa vía
 `DESTINO_SIN_CONFIRMAR`/`CONFIRMAR`, pero motivo `GEOCODIFICACION_
 NUMERO_INCOMPATIBLE`) NUNCA debe suprimirse por este mecanismo -- ese
-motivo sí puede esconder una contradicción real."""
+motivo sí puede esconder una contradicción real.
+
+Caso real 473149 (bloque REVISIONES ESTANCADAS): la MISMA obra/destino
+de 464746, confirmados el 2026-08-18, vuelven a aparecer en una guía
+POSTERIOR y DISTINTA (473149, 2026-09-02) con el mismo `obra_destino` y
+el mismo `despachar_a_crudo` LITERAL -- la relación obra<->destino es
+una identidad GLOBAL, no un hecho atado a la guía 464746 que la
+originó, así que también debe suprimirse para cualquier guía futura que
+traiga la misma evidencia (`test_se_retira_para_una_guia_distinta_
+con_misma_obra_y_destino` más abajo)."""
 from __future__ import annotations
 
 import csv
@@ -158,8 +167,32 @@ def test_no_se_retira_si_el_texto_documental_no_coincide_literal(tmp_path):
     assert [d["decision_id"] for d in salida] == [decision["decision_id"]]
 
 
-def test_no_se_retira_si_la_relacion_confirmada_no_cita_esta_guia(tmp_path):
-    catalogos, dataset, decision = _setup(tmp_path, citar_guia=False)
+def test_se_retira_para_una_guia_distinta_con_misma_obra_y_destino(tmp_path):
+    """Caso real 473149: la relación obra<->destino se confirmó citando
+    la guía 464746, pero una guía POSTERIOR y distinta (473149), con el
+    mismo `obra_destino` y el mismo `despachar_a_crudo` LITERAL, también
+    debe reutilizar esa confirmación -- es la misma identidad GLOBAL de
+    la obra, nunca un hecho atado a la guía que la originó."""
+    catalogos, dataset, decision = _setup(tmp_path, citar_guia=False, guia="473149")
+    salida = regenerar_decisiones_persistidas(
+        decisiones=[decision], carpeta_catalogos=catalogos, ruta_dataset=dataset,
+    )
+    assert salida == []
+
+
+def test_no_se_retira_si_ninguna_obra_tiene_relacion_confirmada_por_humano(tmp_path):
+    """Regresión -- sin ninguna relación CONFIRMADA a nivel humano (para
+    NINGUNA guía), la tarjeta nunca se suprime por este mecanismo."""
+    catalogos = tmp_path / "catalogos"; catalogos.mkdir(); _catalogos_base(catalogos)
+    actual = tmp_path / "actual"; actual.mkdir()
+    CatalogoClientes(catalogos / "clientes.json").crear(
+        razon_social="EASY RETAIL SA", rut="76123456-0", fuente="TEST",
+        estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+    )
+    fila = _fila(numero_guia="473149")
+    dataset = _dataset(actual, [fila])
+    decision = detectar_decision_destino_no_resuelto(archivo=fila["archivo"], fila=fila, carpeta_catalogos=catalogos)
+    assert decision is not None
     salida = regenerar_decisiones_persistidas(
         decisiones=[decision], carpeta_catalogos=catalogos, ruta_dataset=dataset,
     )
