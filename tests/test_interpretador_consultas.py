@@ -7,6 +7,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_EVENTOS,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
+    ESTADO_GESTION_EN_ESPERA,
     ConsultaAtlas,
     METRICA_COUNT_DISTINCT_CHOFER,
     METRICA_COUNT_DISTINCT_RELACION,
@@ -604,3 +605,103 @@ def test_semantica_no_rechaza_peso_cuando_la_pregunta_ya_pide_peso():
     consulta = ConsultaAtlas(metrica=METRICA_SUM_PESO)
     motivo = validar_compatibilidad_semantica("¿Cuántas toneladas de barras se movieron?", consulta)
     assert motivo is None
+
+
+# --- Bloque ANALYTICS V1 (ticket real: "el motor reconoce palabras
+# sueltas pero falla al componer entidad + métrica + filtro +
+# agrupación + ranking") -- los 4 casos reales de aceptación + variantes
+# semánticas razonables. Ninguna regla aquí es "if pregunta == X" --
+# reutilizan las MISMAS primitivas genéricas (`_detectar_ranking`,
+# `_resolver_filtros_entidad`, vocabulario por palabras) que ya usa el
+# resto de este intérprete. ---
+
+def test_caso1_estadias_aprobadas_y_en_espera_agrupa_por_estado_gestion():
+    c, avisos = interpretar_consulta_determinista(
+        "¿Cuántas estadías hay aprobadas y cuántas en espera?", catalogos=CATALOGOS_UNIVERSAL,
+    )
+    assert c.dominio == DOMINIO_EVENTOS
+    assert c.filtros == {"tipo_evento": "TIENE_ESTADIA"}
+    assert c.agrupacion == "estado_gestion"
+    assert avisos == ()
+
+
+def test_caso1_variante_una_sola_estadias_aprobadas_filtra_un_solo_estado():
+    c, _ = interpretar_consulta_determinista("¿Cuántas estadías están aprobadas?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.dominio == DOMINIO_EVENTOS
+    assert c.filtros == {"tipo_evento": "TIENE_ESTADIA", "estado_gestion": "APROBADA"}
+    assert c.agrupacion is None
+
+
+def test_caso1_variante_en_espera_mapea_a_la_macro_explicita():
+    for pregunta in ("¿Cuántas estadías están en espera?", "¿Cuántas estadías están pendientes?", "¿Cuántas estadías están pendientes de respuesta?"):
+        c, _ = interpretar_consulta_determinista(pregunta, catalogos=CATALOGOS_UNIVERSAL)
+        assert c.filtros == {"tipo_evento": "TIENE_ESTADIA", "estado_gestion": ESTADO_GESTION_EN_ESPERA}, pregunta
+
+
+def test_caso1_no_confunde_pendiente_tecnico_de_viajes_con_estado_de_gestion():
+    """Regresión real encontrada al implementar el Bloque ANALYTICS V1:
+    "PENDIENTE(S)" también es vocabulario de estado de gestión, pero
+    "pendiente técnico"/"incompleto técnico" son un concepto DISTINTO
+    del dataset VIAJES -- nunca debe activar el dominio EVENTOS."""
+    for pregunta in ("cuantos pendientes tecnicos hay?", "¿cuántos viajes están pendientes técnicamente?"):
+        c, _ = interpretar_consulta_determinista(pregunta, catalogos=CATALOGOS_UNIVERSAL)
+        assert c.dominio == DOMINIO_VIAJES, pregunta
+        assert c.filtros.get("estado") == "INCOMPLETO_TECNICO", pregunta
+        motivo = validar_compatibilidad_semantica(pregunta, c)
+        assert motivo is None, pregunta
+
+
+def test_caso2_que_chofer_ha_movido_mas_toneladas():
+    c, avisos = interpretar_consulta_determinista("¿Qué chofer ha movido más toneladas?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.dominio == DOMINIO_VIAJES
+    assert c.metrica == METRICA_SUM_PESO
+    assert c.agrupacion == "chofer"
+    assert c.limite == 1
+    assert c.orden == "DESC"
+    assert avisos == ()
+
+
+def test_caso2_variante_top_n_y_menor():
+    c, _ = interpretar_consulta_determinista("top 3 choferes con más toneladas movidas", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.metrica == METRICA_SUM_PESO and c.agrupacion == "chofer" and c.limite == 3 and c.orden == "DESC"
+    c2, _ = interpretar_consulta_determinista("¿qué chofer movió menos peso?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c2.metrica == METRICA_SUM_PESO and c2.agrupacion == "chofer" and c2.limite == 1 and c2.orden == "ASC"
+
+
+def test_caso3_que_empresa_ha_movido_mas_toneladas_usa_dimension_cliente():
+    c, avisos = interpretar_consulta_determinista("¿Qué empresa ha movido más toneladas?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.dominio == DOMINIO_VIAJES
+    assert c.metrica == METRICA_SUM_PESO
+    assert c.agrupacion == "cliente"
+    assert c.limite == 1
+    assert avisos == ()
+
+
+def test_caso3_variante_cliente_en_vez_de_empresa():
+    c, _ = interpretar_consulta_determinista("¿Qué cliente movió más toneladas?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.metrica == METRICA_SUM_PESO and c.agrupacion == "cliente" and c.limite == 1
+
+
+def test_caso4_a_cuantas_empresas_ha_entregado_nahuelnir():
+    c, avisos = interpretar_consulta_determinista("¿A cuántas empresas ha entregado Nahuelñir?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.dominio == DOMINIO_VIAJES
+    assert c.metrica == METRICA_COUNT_DISTINCT_RELACION
+    assert c.relacion == "cliente"
+    assert c.filtros == {"chofer": "RODRIGO NAHUELÑIR"}
+    assert avisos == ()
+
+
+def test_caso4_variante_cuantos_clientes():
+    c, _ = interpretar_consulta_determinista("¿A cuántos clientes ha entregado Nahuelñir?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.relacion == "cliente"
+    assert c.filtros == {"chofer": "RODRIGO NAHUELÑIR"}
+
+
+def test_caso4_sin_chofer_resuelto_no_agrega_filtro_espurio():
+    """Sin ningún nombre reconocible en el texto, la consulta sigue
+    siendo válida (cuenta clientes distintos de TODA la operación) --
+    nunca inventa un filtro ni bloquea la consulta por eso."""
+    c, avisos = interpretar_consulta_determinista("¿A cuántas empresas se ha entregado?", catalogos=CATALOGOS_UNIVERSAL)
+    assert c.relacion == "cliente"
+    assert c.filtros == {}
+    assert avisos == ()

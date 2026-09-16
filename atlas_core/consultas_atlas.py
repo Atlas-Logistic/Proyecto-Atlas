@@ -24,7 +24,32 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from atlas_core.registro_eventos_operacionales import (
+    GESTION_ENVIADA,
+    GESTION_PENDIENTE_RESPUESTA,
+    GESTION_REPORTADA,
+    ESTADOS_GESTION_SOPORTADOS,
+)
+
 SEPARADOR_MULTIVALOR = " | "
+
+# --- Bloque ANALYTICS V1 -- estado de gestión de eventos (Bloque 1 del
+# ticket real: "aprobadas" vs "en espera"). Reutiliza EXACTAMENTE las
+# constantes canónicas de `registro_eventos_operacionales.py` -- nunca
+# una copia paralela. "EN_ESPERA" es un valor SIMBÓLICO (nunca un estado
+# real que un evento pueda tener) que agrupa los estados operacionales
+# ya definidos como "a la espera de una respuesta" en ese mismo módulo
+# (`estado_revision_viajes`, `pendientes_gestion`) -- la única fuente de
+# verdad de qué significa "en espera", nunca inventada aquí de nuevo.
+# "Sin estado_gestion" (evento cuyo tipo no requiere gestión) NUNCA
+# coincide con esta ni con ninguna otra macro -- ausente significa "no
+# aplica", no "pendiente" (ver docstring de `registro_eventos_
+# operacionales.ESTADOS_GESTION_SOPORTADOS`).
+ESTADO_GESTION_EN_ESPERA = "EN_ESPERA"
+ESTADOS_GESTION_EQUIVALENTES = {
+    ESTADO_GESTION_EN_ESPERA: (GESTION_REPORTADA, GESTION_ENVIADA, GESTION_PENDIENTE_RESPUESTA),
+}
+ESTADOS_GESTION_FILTRABLES = ESTADOS_GESTION_SOPORTADOS | {ESTADO_GESTION_EN_ESPERA}
 
 # --- Bloque 3: métricas V1 -- exactamente las que el dataset real puede
 # calcular sin inventar ningún dato. ---
@@ -154,13 +179,26 @@ _FILTROS_SUBCADENA = frozenset({"material", "destino"})
 # para que `validar_consulta` lo acepte con el mismo mecanismo único.
 FILTROS_SOPORTADOS = frozenset(_CAMPO_A_COLUMNA) | frozenset({
     "periodo", "fecha_desde", "fecha_hasta", "patente", "tipo_evento", "dias",
+    # Bloque ANALYTICS V1 -- sólo válido en el dominio EVENTOS (ver
+    # `validar_consulta`); un evento cuyo tipo no requiere gestión
+    # simplemente no aparece en un filtro por estado real (nunca
+    # "ausente" == "en espera").
+    "estado_gestion",
 })
 
 # --- Bloque 4: agrupaciones V1. ---
 AGRUPACIONES_SOPORTADAS = frozenset({
     "chofer", "cliente", "obra", "destino", "comuna", "material",
     "tipo_carga", "dia", "semana", "mes",
+    # Bloque ANALYTICS V1 -- sólo válido en el dominio EVENTOS.
+    "estado_gestion",
 })
+# Agrupaciones/filtros cuyo significado está atado a UN dominio -- nunca
+# a viajes.csv (que no tiene columna estado_gestion) ni a ningún dominio
+# futuro que reutilice el mismo nombre de campo por casualidad.
+_CAMPOS_EXCLUSIVOS_POR_DOMINIO = {
+    "estado_gestion": DOMINIO_EVENTOS,
+}
 
 # --- Bloque UNIVERSAL V1 (Bloque 8 del ticket): RELACIÓN -- proyecta
 # los valores DISTINTOS de un campo relacionado sobre los viajes que
@@ -264,8 +302,19 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
     for campo in consulta.filtros:
         if campo not in FILTROS_SOPORTADOS:
             raise ErrorConsultaAtlas(f"Filtro no soportado: {campo!r}")
+        dominio_exclusivo = _CAMPOS_EXCLUSIVOS_POR_DOMINIO.get(campo)
+        if dominio_exclusivo is not None and consulta.dominio != dominio_exclusivo:
+            raise ErrorConsultaAtlas(f"El filtro {campo!r} sólo es válido para el dominio {dominio_exclusivo!r}.")
     if consulta.agrupacion is not None and consulta.agrupacion not in AGRUPACIONES_SOPORTADAS:
         raise ErrorConsultaAtlas(f"Agrupación no soportada: {consulta.agrupacion!r}")
+    dominio_exclusivo_agrupacion = _CAMPOS_EXCLUSIVOS_POR_DOMINIO.get(consulta.agrupacion or "")
+    if dominio_exclusivo_agrupacion is not None and consulta.dominio != dominio_exclusivo_agrupacion:
+        raise ErrorConsultaAtlas(
+            f"La agrupación {consulta.agrupacion!r} sólo es válida para el dominio {dominio_exclusivo_agrupacion!r}."
+        )
+    estado_gestion_filtro = consulta.filtros.get("estado_gestion")
+    if estado_gestion_filtro is not None and estado_gestion_filtro not in ESTADOS_GESTION_FILTRABLES:
+        raise ErrorConsultaAtlas(f"Estado de gestión no soportado: {estado_gestion_filtro!r}")
     periodo = consulta.filtros.get("periodo")
     if periodo is not None and periodo not in PERIODOS_SOPORTADOS:
         raise ErrorConsultaAtlas(f"Período no soportado: {periodo!r}")
@@ -698,7 +747,14 @@ def ejecutar_consulta_eventos(
     rango_fecha = _rango_fecha_de_consulta(consulta)
 
     def _valor_evento(evento: Mapping[str, object], campo: str) -> str:
-        directo = str(evento.get(campo, "")).strip()
+        # Bloque ANALYTICS V1 -- `evento.get(campo)` puede devolver el
+        # `None` real de JSON (p. ej. `estado_gestion` de un tipo que no
+        # requiere gestión, ver `registrar_evento`) -- `str(None)` daría
+        # la cadena NO VACÍA "None", que este filtro/agrupación
+        # confundiría con un valor real. "Ausente" siempre es "", nunca
+        # el texto "None".
+        crudo = evento.get(campo)
+        directo = str(crudo).strip() if crudo is not None else ""
         if directo:
             return directo
         snapshot = evento.get("snapshot")
@@ -735,6 +791,24 @@ def ejecutar_consulta_eventos(
             if valor is None:
                 continue
             if normalizar_texto_atlas(_valor_evento(evento, campo)) != normalizar_texto_atlas(valor):
+                return False
+        # Bloque ANALYTICS V1 -- filtro genérico y reutilizable por
+        # `estado_gestion` (y cualquier otro campo real futuro del
+        # evento que no requiera resolución especial): "EN_ESPERA" es la
+        # ÚNICA macro soportada -- se expande a los estados reales
+        # equivalentes ya definidos en `ESTADOS_GESTION_EQUIVALENTES`
+        # (reutiliza la misma agrupación canónica de `registro_eventos_
+        # operacionales`, nunca una lista paralela); un valor real
+        # (APROBADA/RECHAZADA/...) exige igualdad exacta. Un evento sin
+        # `estado_gestion` (tipo que no requiere gestión) nunca coincide
+        # con ningún valor ni macro -- "ausente" no es "en espera".
+        estado_gestion_filtro = consulta.filtros.get("estado_gestion")
+        if estado_gestion_filtro is not None:
+            estado_gestion_evento = _valor_evento(evento, "estado_gestion")
+            if not estado_gestion_evento:
+                return False
+            equivalentes = ESTADOS_GESTION_EQUIVALENTES.get(estado_gestion_filtro, (estado_gestion_filtro,))
+            if estado_gestion_evento not in equivalentes:
                 return False
         guia = consulta.filtros.get("numero_guia")
         if guia is not None:

@@ -108,7 +108,35 @@ _NOMBRE_AGRUPACION_LEGIBLE = {
     "chofer": "chofer", "cliente": "cliente", "obra": "obra", "destino": "destino",
     "comuna": "comuna", "material": "material", "tipo_carga": "tipo de carga",
     "dia": "día", "semana": "semana", "mes": "mes",
+    # Bloque ANALYTICS V1 (caso real "¿Cuántas estadías hay aprobadas y
+    # cuántas en espera?").
+    "estado_gestion": "estado de gestión",
 }
+# Bloque ANALYTICS V1 -- término legible por estado real de gestión
+# (nunca el enum técnico en mayúsculas en la respuesta al usuario).
+# REPORTADA/ENVIADA/PENDIENTE_RESPUESTA se presentan juntas como "en
+# espera" -- son estados operacionales EQUIVALENTES a ojos de Javier
+# (misma agrupación canónica que ya usa el filtro `EN_ESPERA`, ver
+# `consultas_atlas.ESTADOS_GESTION_EQUIVALENTES`); el dato agrupado que
+# de verdad se calculó sigue siendo el real y granular (nunca se suma
+# en el ejecutor) -- este mapeo es SÓLO de presentación.
+_ESTADO_GESTION_LEGIBLE = {
+    "APROBADA": "aprobada", "RECHAZADA": "rechazada",
+    "REPORTADA": "en espera", "ENVIADA": "en espera", "PENDIENTE_RESPUESTA": "en espera",
+}
+
+
+def _etiqueta_estado_gestion(valor: str) -> str:
+    return _ESTADO_GESTION_LEGIBLE.get(valor, valor.replace("_", " ").lower())
+
+
+def _calificador_estado_gestion(valor: str, n: int) -> str:
+    """Concuerda en número SÓLO los adjetivos reales -- "en espera" es
+    una frase invariable ("2 estadías en espera", nunca "en esperas")."""
+    etiqueta = _etiqueta_estado_gestion(valor)
+    if etiqueta == "en espera":
+        return etiqueta
+    return etiqueta if n == 1 else f"{etiqueta}s"
 # Bloque UNIVERSAL V1 (Bloque 9/16 del ticket) -- nombre humano de cada
 # tipo de evento (singular, plural). Un `tipo_evento` desconocido por
 # esta tabla (rubro futuro, Bloque 20/21: anti-hardcode) usa un
@@ -193,6 +221,19 @@ def _formatear_respuesta_eventos(resultado: ResultadoConsultaAtlas) -> str:
         etiqueta_plural = _etiqueta_evento(tipo_evento, 2)
         if not filas:
             return f"No encontré {etiqueta_plural} para agrupar por {_NOMBRE_AGRUPACION_LEGIBLE.get(consulta.agrupacion, consulta.agrupacion)}."
+        if consulta.agrupacion == "estado_gestion":
+            # Bloque ANALYTICS V1 -- presentación legible + colapso de
+            # los 3 estados reales "en espera" en una sola línea sumada
+            # (el dato granular real sigue disponible en `resultado.
+            # resultado`/`viajes_soporte`, esto es sólo texto). Nunca
+            # reordena por magnitud -- mismo orden que ya trae el
+            # ejecutor (determinístico, primer-visto).
+            colapsado: dict[str, float] = {}
+            for f in filas:
+                etiqueta = _etiqueta_estado_gestion(str(f["grupo"]))
+                colapsado[etiqueta] = colapsado.get(etiqueta, 0) + f["valor"]
+            resumen = ", ".join(f"{etiqueta} ({_formatear_numero(valor)})" for etiqueta, valor in colapsado.items())
+            return f"{etiqueta_plural.capitalize()} por estado de gestión: {resumen}."
         if consulta.limite == 1:
             top = filas[0]
             comparativo = "menos" if consulta.orden == "ASC" else "más"
@@ -209,13 +250,19 @@ def _formatear_respuesta_eventos(resultado: ResultadoConsultaAtlas) -> str:
         return "No encontré viajes con ese evento." if not viajes else f"Viajes: {', '.join(viajes)}."
     n = resultado.resultado
     etiqueta = _etiqueta_evento(tipo_evento, n)
+    # Bloque ANALYTICS V1 -- "cuántas estadías están aprobadas": el
+    # filtro por un único estado de gestión debe quedar explícito en el
+    # texto (nunca un "Se registraron N estadías" ambiguo que oculte
+    # cuál subconjunto se contó).
+    estado_gestion_filtro = consulta.filtros.get("estado_gestion")
+    calificador_estado = f" {_calificador_estado_gestion(estado_gestion_filtro, n)}" if estado_gestion_filtro else ""
     if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER:
         return f"{n} chofer{'es' if n != 1 else ''} tienen {etiqueta}."
     if consulta.metrica == METRICA_COUNT_DISTINCT_VIAJE:
         return f"{n} viaje{'s' if n != 1 else ''} tienen {etiqueta}."
     if sujeto:
-        return f"{sujeto} tuvo {n} {etiqueta}."
-    return f"Se registraron {n} {etiqueta}."
+        return f"{sujeto} tuvo {n} {etiqueta}{calificador_estado}."
+    return f"Se registraron {n} {etiqueta}{calificador_estado}."
 
 
 def _formatear_respuesta_relacion(resultado: ResultadoConsultaAtlas) -> str:

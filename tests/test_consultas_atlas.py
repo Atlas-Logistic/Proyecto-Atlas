@@ -12,6 +12,9 @@ from atlas_core.consultas_atlas import (
     DOMINIO_EVENTOS,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
+    ESTADO_GESTION_EN_ESPERA,
+    METRICA_COUNT_DISTINCT_RELACION,
+    METRICA_SUM_PESO,
     PERIODO_ULTIMOS_N_DIAS,
     ConsultaAtlas,
     ErrorConsultaAtlas,
@@ -494,3 +497,100 @@ def test_metricas_eventos_activos_distinguen_eventos_viajes_y_choferes():
     for tipo, esperado in {"DEVOLUCION_TOTAL": 1, "DEVOLUCION_PARCIAL": 1, "DOBLE_VUELTA": 1}.items():
         r = ejecutar_consulta_eventos(ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": tipo}), eventos)
         assert r.resultado == esperado
+
+
+# --- Bloque ANALYTICS V1 (ticket real: "el motor reconoce palabras
+# sueltas pero falla al componer entidad + métrica + filtro +
+# agrupación + ranking") -- primitivas reutilizables del EJECUTOR:
+# estado de gestión (filtro real + macro EN_ESPERA + agrupación),
+# ranking por peso en VIAJES (ya soportado por el group-by genérico,
+# aquí sólo se fija el contrato explícito) y COUNT_DISTINCT_RELACION
+# combinado con un filtro de entidad (chofer). ---
+
+def test_caso1_estado_gestion_filtra_por_estado_real():
+    eventos = [
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="APROBADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="APROBADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="RECHAZADA"),
+    ]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": "TIENE_ESTADIA", "estado_gestion": "APROBADA"}),
+        eventos,
+    )
+    assert r.resultado == 2
+
+
+def test_caso1_estado_gestion_en_espera_agrupa_reportada_enviada_pendiente_respuesta():
+    """"Sin estado NO equivale a pendiente": un evento sin `estado_
+    gestion` (tipo que no requiere gestión) NUNCA cuenta como "en
+    espera", aunque el filtro EN_ESPERA esté activo."""
+    eventos = [
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="REPORTADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="ENVIADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="PENDIENTE_RESPUESTA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="APROBADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion=None),
+    ]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(
+            metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS,
+            filtros={"tipo_evento": "TIENE_ESTADIA", "estado_gestion": ESTADO_GESTION_EN_ESPERA},
+        ),
+        eventos,
+    )
+    assert r.resultado == 3
+
+
+def test_caso1_agrupado_por_estado_gestion_desglosa_los_estados_reales():
+    eventos = [
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="APROBADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="APROBADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="REPORTADA"),
+        _evento(tipo_evento="TIENE_ESTADIA", estado_gestion="RECHAZADA"),
+    ]
+    r = ejecutar_consulta_eventos(
+        ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_EVENTOS, filtros={"tipo_evento": "TIENE_ESTADIA"}, agrupacion="estado_gestion"),
+        eventos,
+    )
+    grupos = {f["grupo"]: f["valor"] for f in r.resultado}
+    assert grupos == {"APROBADA": 2, "REPORTADA": 1, "RECHAZADA": 1}
+
+
+def test_estado_gestion_solo_valido_en_dominio_eventos():
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_VIAJES", dominio=DOMINIO_VIAJES, filtros={"estado_gestion": "APROBADA"}))
+    with pytest.raises(ErrorConsultaAtlas):
+        validar_consulta(ConsultaAtlas(metrica="COUNT_EVENTOS", dominio=DOMINIO_VIAJES, agrupacion="estado_gestion"))
+
+
+def test_caso2_chofer_con_mas_peso_reutiliza_group_by_generico():
+    viajes = [
+        _viaje(choferes="JUAN PEREZ", peso_total_viaje_kg="1000"),
+        _viaje(choferes="JUAN PEREZ", peso_total_viaje_kg="2000"),
+        _viaje(choferes="PEDRO GOMEZ", peso_total_viaje_kg="5000"),
+    ]
+    r = ejecutar_consulta_atlas(ConsultaAtlas(metrica=METRICA_SUM_PESO, agrupacion="chofer", orden="DESC", limite=1), viajes)
+    assert r.resultado == ({"grupo": "PEDRO GOMEZ", "valor": 5000.0},)
+
+
+def test_caso3_cliente_con_mas_peso_reutiliza_group_by_generico():
+    viajes = [
+        _viaje(clientes="CLIENTE A", peso_total_viaje_kg="1000"),
+        _viaje(clientes="CLIENTE B", peso_total_viaje_kg="500"),
+        _viaje(clientes="CLIENTE A", peso_total_viaje_kg="3000"),
+    ]
+    r = ejecutar_consulta_atlas(ConsultaAtlas(metrica=METRICA_SUM_PESO, agrupacion="cliente", orden="DESC", limite=1), viajes)
+    assert r.resultado == ({"grupo": "CLIENTE A", "valor": 4000.0},)
+
+
+def test_caso4_count_distinct_relacion_combinado_con_filtro_de_chofer():
+    viajes = [
+        _viaje(choferes="RODRIGO NAHUELÑIR", clientes="CLIENTE A"),
+        _viaje(choferes="RODRIGO NAHUELÑIR", clientes="CLIENTE B"),
+        _viaje(choferes="OTRO CHOFER", clientes="CLIENTE C"),
+    ]
+    r = ejecutar_consulta_atlas(
+        ConsultaAtlas(metrica=METRICA_COUNT_DISTINCT_RELACION, relacion="cliente", filtros={"chofer": "RODRIGO NAHUELÑIR"}),
+        viajes,
+    )
+    assert r.resultado == 2

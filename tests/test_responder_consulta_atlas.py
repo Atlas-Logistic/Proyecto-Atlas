@@ -507,3 +507,61 @@ def test_variantes_ranking_eventos_y_rango_explicito(tmp_path):
         assert ventana.resultado.consulta_interpretada.filtros["dias"] == str(dias)
     mes = responder_consulta_atlas("chofer con mayor cantidad de estadías este mes", ruta_viajes=ruta, raiz_atlas=tmp_path)
     assert mes.resultado.consulta_interpretada.filtros["periodo"] == "ESTE_MES"
+
+
+# --- Bloque ANALYTICS V1 -- los 4 casos reales de aceptación, de
+# extremo a extremo (pregunta -> texto de respuesta), con datos
+# sintéticos propios (nunca el dataset real). ---
+
+def test_caso1_estadias_aprobadas_y_en_espera_extremo_a_extremo(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [_fila(numero_transporte=f"T{i}") for i in range(1, 6)])
+    estados = ["APROBADA", "APROBADA", "REPORTADA", "ENVIADA", "RECHAZADA"]
+    for i, estado in enumerate(estados, start=1):
+        registrar_evento(
+            raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=f"T{i}", origen="TEST",
+            estado_gestion=estado,
+            enriquecimiento={"viaje_id": f"T{i}", "vinculo_completo": True, "snapshot": {"chofer": "JUAN PEREZ", "rut_chofer": "1"}},
+        )
+    r = responder_consulta_atlas("¿Cuántas estadías hay aprobadas y cuántas en espera?", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert r.estado == ESTADO_OK
+    assert "aprobada (2)" in r.texto_respuesta
+    assert "en espera (2)" in r.texto_respuesta
+    assert "rechazada (1)" in r.texto_respuesta
+
+    solo_aprobadas = responder_consulta_atlas("¿Cuántas estadías están aprobadas?", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert solo_aprobadas.estado == ESTADO_OK
+    assert "2 estadías aprobadas" in solo_aprobadas.texto_respuesta
+
+    solo_espera = responder_consulta_atlas("¿Cuántas estadías están en espera?", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert solo_espera.estado == ESTADO_OK
+    assert "2 estadías en espera" in solo_espera.texto_respuesta
+
+
+def test_caso2_y_caso3_ranking_por_toneladas_extremo_a_extremo(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(numero_transporte="T1", choferes="JUAN PEREZ", clientes="CLIENTE A", peso_total_viaje_kg="1000"),
+        _fila(numero_transporte="T2", choferes="PEDRO GOMEZ", clientes="CLIENTE B", peso_total_viaje_kg="5000"),
+        _fila(numero_transporte="T3", choferes="PEDRO GOMEZ", clientes="CLIENTE B", peso_total_viaje_kg="500"),
+    ])
+    chofer = responder_consulta_atlas("¿Qué chofer ha movido más toneladas?", ruta_viajes=ruta)
+    assert chofer.estado == ESTADO_OK
+    assert chofer.resultado.resultado == ({"grupo": "PEDRO GOMEZ", "valor": 5500.0},)
+
+    empresa = responder_consulta_atlas("¿Qué empresa ha movido más toneladas?", ruta_viajes=ruta)
+    assert empresa.estado == ESTADO_OK
+    assert empresa.resultado.resultado == ({"grupo": "CLIENTE B", "valor": 5500.0},)
+
+
+def test_caso4_a_cuantas_empresas_ha_entregado_nahuelnir_extremo_a_extremo(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [
+        _fila(numero_transporte="T1", choferes="RODRIGO NAHUELÑIR", clientes="CLIENTE A"),
+        _fila(numero_transporte="T2", choferes="RODRIGO NAHUELÑIR", clientes="CLIENTE B"),
+        _fila(numero_transporte="T3", choferes="OTRO CHOFER", clientes="CLIENTE C"),
+    ])
+    r = responder_consulta_atlas("¿A cuántas empresas ha entregado Nahuelñir?", ruta_viajes=ruta)
+    assert r.estado == ESTADO_OK
+    assert r.resultado.resultado == 2
+    assert "2 clientes" in r.texto_respuesta

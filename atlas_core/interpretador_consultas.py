@@ -24,6 +24,7 @@ from atlas_core.consultas_atlas import (
     DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
     DOMINIO_INCIDENCIAS_DOCUMENTALES,
     DOMINIO_VIAJES,
+    ESTADO_GESTION_EN_ESPERA,
     ConsultaAtlas,
     METRICA_COUNT_DISTINCT_CHOFER,
     METRICA_COUNT_DISTINCT_VIAJE,
@@ -50,6 +51,7 @@ from atlas_core.consultas_atlas import (
     RELACIONES_SOPORTADAS,
     normalizar_texto_atlas,
 )
+from atlas_core.registro_eventos_operacionales import GESTION_APROBADA, GESTION_RECHAZADA
 from atlas_core.extractor import _patente_valida
 
 RESUELTA = "RESUELTA"
@@ -247,7 +249,12 @@ _PALABRAS_UNIDADES_FISICAS = (
 # para no arriesgar ninguna regresión ya probada.
 _SUSTANTIVO_CUANTOS_A_RELACION = {
     "PATENTE": "vehiculo", "PATENTES": "vehiculo", "VEHICULO": "vehiculo", "VEHICULOS": "vehiculo",
-    "CLIENTE": "cliente", "CLIENTES": "cliente",
+    # Bloque ANALYTICS V1 -- "empresa"/"empresas" es el mismo lenguaje
+    # coloquial de negocio para la dimensión "cliente" ya soportada
+    # (misma columna real `clientes`, nunca una dimensión nueva) --
+    # caso real "¿Qué empresa ha movido más toneladas?"/"¿A cuántas
+    # empresas ha entregado X?".
+    "CLIENTE": "cliente", "CLIENTES": "cliente", "EMPRESA": "cliente", "EMPRESAS": "cliente",
     "OBRA": "obra", "OBRAS": "obra",
     "DESTINO": "destino", "DESTINOS": "destino",
     "COMUNA": "comuna", "COMUNAS": "comuna",
@@ -318,10 +325,95 @@ _PALABRAS_EVENTO = (
 )
 _PALABRAS_EVENTO_AGRUPACION = (
     ("chofer", ("CHOFER", "CHOFERES")),
-    ("cliente", ("CLIENTE", "CLIENTES")),
+    ("cliente", ("CLIENTE", "CLIENTES", "EMPRESA", "EMPRESAS")),
     ("obra", ("OBRA", "OBRAS")),
 )
+
+# Bloque ANALYTICS V1 (caso real "¿Cuántas estadías hay aprobadas y
+# cuántas en espera?") -- vocabulario de ESTADO DE GESTIÓN, mismo
+# criterio que `_PALABRAS_EVENTO`: cada entrada declara el valor
+# canónico real (o la macro simbólica `ESTADO_GESTION_EN_ESPERA`, nunca
+# un estado real por sí misma) + las frases que lo expresan. "en espera"
+# reutiliza EXACTAMENTE la misma agrupación ya canónica en
+# `registro_eventos_operacionales` (ver `ESTADOS_GESTION_EQUIVALENTES`
+# en `consultas_atlas.py`) -- nunca una lista nueva inventada aquí.
+# "PENDIENTE"/"PENDIENTES" a secas SÓLO significa esto dentro del bloque
+# EVENTOS (la frase completa "PENDIENTE TECNICO" ya se resolvió antes y
+# retorna temprano, ver más arriba en `interpretar_consulta_
+# determinista" -- nunca hay colisión real).
+_PALABRAS_ESTADO_GESTION = (
+    (GESTION_APROBADA, ("APROBADA", "APROBADAS", "APROBADO", "APROBADOS")),
+    (GESTION_RECHAZADA, ("RECHAZADA", "RECHAZADAS", "RECHAZADO", "RECHAZADOS")),
+    (ESTADO_GESTION_EN_ESPERA, (
+        "EN ESPERA", "PENDIENTE", "PENDIENTES", "PENDIENTE DE RESPUESTA",
+        "PENDIENTES DE RESPUESTA", "POR RESPONDER", "SIN RESPUESTA",
+        "ESPERANDO RESPUESTA", "EN TRAMITE", "PENDIENTE DE APROBACION",
+        "PENDIENTES DE APROBACION", "POR APROBAR", "SIN APROBAR",
+    )),
+)
 _PATRON_TOP = re.compile(r"\bMAS\b|\bMAYOR\b")
+_PATRON_TOP_N = re.compile(r"\bTOP\s+(\d+)\b")
+_PATRON_MINIMO = re.compile(r"\b(?:MENOS|MENOR|MINIM[OA])\b")
+_PATRON_MAXIMO = re.compile(r"\b(?:MAS|MAYOR|MAXIM[OA])\b")
+
+
+def _resolver_filtros_entidad(
+    texto: str, familias: tuple[tuple[str, tuple[str, ...], bool], ...],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Bloque ANALYTICS V1 -- primitiva REUTILIZABLE de resolución de
+    entidades multi-familia (chofer/cliente/obra/tipo_carga/comuna/...):
+    resuelve TODAS las familias ACTIVAS contra su propio catálogo antes
+    de comprometer ningún filtro, y sólo acepta de más fuerte a más
+    débil (más palabras coincidentes primero, Bloque 6/12) -- una
+    coincidencia cuyas palabras ya quedaron enteramente explicadas por
+    una coincidencia RESUELTA más fuerte de otra familia se descarta en
+    silencio (nunca un filtro extra espurio). `familias` es
+    `(campo, valores_conocidos, activa)`; `activa=False` excluye esa
+    familia por completo (p. ej. la dimensión que la propia pregunta ya
+    está CONTANDO, nunca tiene sentido resolverla también como filtro).
+    Devuelve `(filtros, avisos)` -- un aviso `AMBIGUO:campo:candidatos`
+    por cada familia que sigue sin explicación; el llamador decide si
+    eso aborta la consulta (mismo criterio en todos los flujos: nunca se
+    ejecuta una consulta con una ambigüedad real sin resolver)."""
+    candidatos: dict[str, ResolucionEntidad] = {}
+    for campo, valores, activa in familias:
+        if not activa or not valores:
+            continue
+        resolucion = resolver_entidad_por_palabras(texto, valores)
+        if resolucion.estado in (RESUELTA, AMBIGUA):
+            candidatos[campo] = resolucion
+    filtros: dict[str, str] = {}
+    avisos: list[str] = []
+    palabras_reclamadas: set[str] = set()
+    for campo, resolucion in sorted(candidatos.items(), key=lambda item: -len(item[1].palabras_coincidentes)):
+        if resolucion.palabras_coincidentes and resolucion.palabras_coincidentes <= palabras_reclamadas:
+            continue
+        if resolucion.estado == AMBIGUA:
+            avisos.append(f"AMBIGUO:{campo}:" + " | ".join(resolucion.candidatos))
+            continue
+        filtros[campo] = resolucion.valor
+        palabras_reclamadas |= resolucion.palabras_coincidentes
+    return filtros, tuple(avisos)
+
+
+def _detectar_ranking(texto_normalizado: str) -> tuple[int | None, str]:
+    """Bloque ANALYTICS V1 -- primitiva REUTILIZABLE de ranking/orden:
+    "TOP N" explícito, o "más/mayor/máximo" (limite=1, DESC) / "menos/
+    menor/mínimo" (limite=1, ASC). Antes vivía sólo dentro del bloque
+    EVENTOS (Bloque 9/19 del ticket); se extrae aquí para que CUALQUIER
+    dominio (VIAJES incluido -- casos reales "qué chofer/empresa ha
+    movido más toneladas") pueda componer la misma detección sin
+    duplicar la regex. Devuelve `(None, "DESC")` si el texto no trae
+    ninguna señal de ranking -- el llamador decide entonces si mantiene
+    el comportamiento sin agrupar/ordenar de siempre."""
+    top_n = _PATRON_TOP_N.search(texto_normalizado)
+    if top_n:
+        return int(top_n.group(1)), "DESC"
+    if _PATRON_MINIMO.search(texto_normalizado):
+        return 1, "ASC"
+    if _PATRON_MAXIMO.search(texto_normalizado):
+        return 1, "DESC"
+    return None, "DESC"
 
 # Bloque UNIVERSAL V1 (Bloque 8/18 del ticket) -- vocabulario de
 # preguntas RELACIONALES: "en qué VIAJES/GUÍAS aparece", "con qué
@@ -332,7 +424,7 @@ _PATRON_HA_USADO = re.compile(r"\bHAN? (USADO|UTILIZADO)\b|\bUSO\b|\bUTILIZO\b")
 _PATRON_PATENTE_KW = re.compile(r"\bPATENTES?\b|\bVEHICULOS?\b")
 _PATRON_GUIA_KW = re.compile(r"\bGUIAS?\b")
 _PATRON_CHOFER_KW = re.compile(r"\bCHOFER(ES)?\b|\bCONDUCTOR(ES)?\b")
-_PATRON_CLIENTE_KW = re.compile(r"\bCLIENTES?\b")
+_PATRON_CLIENTE_KW = re.compile(r"\bCLIENTES?\b|\bEMPRESAS?\b")
 _PATRON_VIAJE_KW = re.compile(r"\bVIAJES?\b")
 _PATRON_NUMERO_TRANSPORTE = re.compile(r"\b(\d{6,})\b")
 
@@ -391,7 +483,7 @@ _PALABRAS_ESTADO_VIAJE = (
 
 _PALABRAS_AGRUPACION = (
     ("chofer", ("CHOFER", "CHOFERES")),
-    ("cliente", ("CLIENTE", "CLIENTES")),
+    ("cliente", ("CLIENTE", "CLIENTES", "EMPRESA", "EMPRESAS")),
     ("obra", ("OBRA", "OBRAS")),
     ("destino", ("DESTINO", "DESTINOS")),
     ("comuna", ("COMUNA", "COMUNAS")),
@@ -421,6 +513,12 @@ _PALABRAS_ESTRUCTURA_PREGUNTA = frozenset({
     "VINCULADOS", "APARECE", "APARECEN", "USADO", "UTILIZADO", "USO", "UTILIZO", "HAN", "HA",
     "ESTADIA", "ESTADIAS", "DEVOLUCION", "DEVOLUCIONES", "TOTAL", "TOTALES", "PARCIAL",
     "PARCIALES", "VUELTA", "VUELTAS", "DOBLE", "DOBLES", "MAS", "MAYOR", "AUTORIZACION", "ESPERA",
+    # Bloque ANALYTICS V1 -- sinónimo de "cliente" + vocabulario de
+    # estado de gestión (nunca nombres propios reales).
+    "EMPRESA", "EMPRESAS", "APROBADA", "APROBADAS", "APROBADO", "APROBADOS",
+    "RECHAZADA", "RECHAZADAS", "RECHAZADO", "RECHAZADOS", "PENDIENTE", "PENDIENTES",
+    "RESPUESTA", "TRAMITE", "MENOS", "MENOR", "MINIMO", "MINIMA", "TOP", "MOVIDO", "MOVIO",
+    "ENTREGADO", "ENTREGO", "ENTREGA",
 })
 _PATRON_PALABRA_CAPITALIZADA = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+")
 
@@ -588,11 +686,10 @@ def interpretar_consulta_determinista(
         if guia_evento:
             filtros_evento["numero_guia"] = guia_evento.group(1)
         agrupacion_evento: str | None = None
-        limite_evento: int | None = None
-        orden_evento = "DESC"
-        top_n = re.search(r"\bTOP\s+(\d+)\b", normalizado)
-        es_maximo = bool(re.search(r"\b(?:MAS|MAYOR|MAXIM[OA])\b", normalizado))
-        es_minimo = bool(re.search(r"\b(?:MENOS|MENOR|MINIM[OA])\b", normalizado))
+        limite_evento, orden_evento = _detectar_ranking(normalizado)
+        es_maximo = limite_evento is not None and orden_evento == "DESC"
+        es_minimo = limite_evento is not None and orden_evento == "ASC"
+        top_n_o_ranking = limite_evento is not None
         for campo_agrupacion, palabras_campo in _PALABRAS_EVENTO_AGRUPACION:
             patrones_agrup = [rf"\bPOR {pal}\b" for pal in palabras_campo] + [rf"\bCADA {pal}\b" for pal in palabras_campo]
             patrones_entidad = [rf"\b{pal}\b" for pal in palabras_campo]
@@ -600,18 +697,28 @@ def interpretar_consulta_determinista(
             if any(re.search(p, normalizado) for p in (*patrones_agrup, *patrones_listado)):
                 agrupacion_evento = campo_agrupacion
                 break
-            if (top_n or es_maximo or es_minimo) and any(re.search(p, normalizado) for p in patrones_entidad):
+            if top_n_o_ranking and any(re.search(p, normalizado) for p in patrones_entidad):
                 agrupacion_evento = campo_agrupacion
                 break
         if agrupacion_evento is None and (es_maximo or es_minimo) and re.search(r"\b(?:QUIEN|QUIENES)\b", normalizado):
             agrupacion_evento = "chofer"
-        if agrupacion_evento is not None:
-            if top_n:
-                limite_evento = int(top_n.group(1))
-            elif es_maximo or es_minimo:
-                limite_evento = 1
-            if es_minimo:
-                orden_evento = "ASC"
+        # Bloque ANALYTICS V1 (caso real "¿Cuántas estadías hay
+        # aprobadas y cuántas en espera?") -- estado de gestión: si el
+        # texto nombra MÁS DE UN estado (real o la macro EN_ESPERA)
+        # distinto, la pregunta es un desglose ("aprobadas Y en
+        # espera") -- se agrupa por estado de gestión en vez de filtrar
+        # a uno solo, para responder ambos números de una sola consulta
+        # reutilizable (nunca partiendo la pregunta en dos). Si nombra
+        # exactamente UNO, se filtra a ese estado -- comportamiento
+        # idéntico al resto de los filtros de este intérprete.
+        estados_gestion_mencionados = tuple(
+            valor for valor, frases in _PALABRAS_ESTADO_GESTION
+            if any(re.search(rf"\b{re.escape(f)}\b", normalizado) for f in frases)
+        )
+        if len(estados_gestion_mencionados) > 1 and agrupacion_evento is None:
+            agrupacion_evento = "estado_gestion"
+        elif len(estados_gestion_mencionados) == 1:
+            filtros_evento["estado_gestion"] = estados_gestion_mencionados[0]
         # Bloque 6/12 -- misma lógica que el flujo de viajes: resuelve
         # las 3 familias primero, sin comprometer nada, y sólo acepta de
         # más fuerte a más débil (evita el mismo cruce real "Salomon
@@ -674,6 +781,25 @@ def interpretar_consulta_determinista(
                 if any(frase in normalizado for frase in frases):
                     filtros_relacion["periodo"] = nombre_periodo
                     break
+            # Bloque ANALYTICS V1 (caso real "¿A cuántas empresas/
+            # clientes ha entregado Nahuelñir?") -- la dimensión que la
+            # pregunta CUENTA (aquí "cliente") nunca se resuelve también
+            # como filtro (no tiene sentido "cuántos clientes, filtrado
+            # por cliente X"); el resto de las familias (chofer/obra/
+            # tipo_carga/comuna) SÍ pueden acotar la cuenta -- "a cuántas
+            # empresas ha entregado Nahuelñir" filtra por el chofer
+            # resuelto, igual que cualquier otro filtro de este
+            # intérprete (misma primitiva, ningún caso especial nuevo).
+            filtros_entidad, avisos_entidad = _resolver_filtros_entidad(texto, (
+                ("chofer", catalogos.choferes, relacion_contada != "chofer"),
+                ("cliente", catalogos.clientes, relacion_contada != "cliente"),
+                ("obra", catalogos.obras, relacion_contada != "obra"),
+                ("tipo_carga", catalogos.tipos_carga, relacion_contada != "tipo_carga"),
+                ("comuna", catalogos.comunas, relacion_contada != "comuna"),
+            ))
+            if avisos_entidad:
+                return None, tuple(avisos_entidad)
+            filtros_relacion.update(filtros_entidad)
             return ConsultaAtlas(
                 metrica=METRICA_COUNT_DISTINCT_RELACION, relacion=relacion_contada, filtros=filtros_relacion,
             ), tuple(avisos)
@@ -714,9 +840,20 @@ def interpretar_consulta_determinista(
     # conductores [trabajaron/hicieron viajes/cargaron]..." pregunta por
     # CANTIDAD DE PERSONAS, nunca por cantidad de viajes/filas. Se separa
     # de "por chofer"/"cada chofer" (agrupación V1 ya existente).
+    #
+    # Bloque ANALYTICS V1 (caso real "top 3 choferes con más toneladas
+    # movidas") -- también se separa de un RANKING con métrica propia
+    # ("choferes" plural + señal de ranking + peso/km/tiempo explícitos):
+    # ahí "choferes" es la dimensión a AGRUPAR/ordenar, nunca la cantidad
+    # de personas -- se cede al flujo genérico de más abajo (Bloque
+    # ranking-agrupación reutilizable), que ya sabe resolver esta forma.
+    _es_ranking_con_metrica_propia = _detectar_ranking(normalizado)[0] is not None and any(
+        re.search(rf"\b{re.escape(p)}\b", normalizado) for p in (*_PALABRAS_PESO, *_PALABRAS_KM, *_PALABRAS_TIEMPO)
+    )
     if (
         any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_CHOFER_PLURAL)
         and not _PATRON_AGRUPACION_CHOFER.search(normalizado)
+        and not _es_ranking_con_metrica_propia
     ):
         filtros_chofer: dict[str, str] = {}
         for nombre_periodo, frases in _PALABRAS_PERIODO:
@@ -761,6 +898,29 @@ def interpretar_consulta_determinista(
         if any(re.search(p, normalizado) for p in (*patrones, *patrones_por)):
             agrupacion = campo_agrupacion
             break
+
+    # Bloque ANALYTICS V1 (casos reales "¿Qué chofer ha movido más
+    # toneladas?"/"¿Qué empresa ha movido más toneladas?") -- misma
+    # primitiva de ranking ya usada en el bloque EVENTOS (Bloque 9/19):
+    # cuando el texto trae una señal de ranking (TOP N/más/mayor/menos/
+    # menor) Y nombra una dimensión ("qué CHOFER"/"qué EMPRESA") sin que
+    # esa dimensión ya haya resuelto una entidad AMBIGUA/RESUELTA por
+    # nombre propio (eso sigue significando "de este chofer/cliente
+    # puntual", nunca un ranking), la pregunta es "agrupar por esa
+    # dimensión y quedarse con el extremo" -- nunca "más toneladas" a
+    # secas (que ya se responde sin agrupar, comportamiento intacto).
+    limite: int | None = None
+    orden = "DESC"
+    if agrupacion is None:
+        limite_ranking, orden_ranking = _detectar_ranking(normalizado)
+        if limite_ranking is not None:
+            for campo_agrupacion, palabras in _PALABRAS_AGRUPACION:
+                if campo_agrupacion in ("dia", "semana", "mes"):
+                    continue  # el ranking temporal no aplica aquí -- sin caso real que lo pida
+                if any(re.search(rf"\b{p}\b", normalizado) for p in palabras):
+                    agrupacion = campo_agrupacion
+                    limite, orden = limite_ranking, orden_ranking
+                    break
 
     # Bloque 6/12 -- las 5 familias de entidad se resuelven cada una
     # contra SU PROPIO catálogo (nunca se mezclan), pero un mismo
@@ -823,7 +983,7 @@ def interpretar_consulta_determinista(
     if sin_explicar:
         return None, (*avisos, "SIN_COINCIDENCIA:" + ", ".join(sin_explicar))
 
-    return ConsultaAtlas(metrica=metrica, filtros=filtros, agrupacion=agrupacion), tuple(avisos)
+    return ConsultaAtlas(metrica=metrica, filtros=filtros, agrupacion=agrupacion, limite=limite, orden=orden), tuple(avisos)
 
 
 def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> str | None:
@@ -897,4 +1057,21 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
         and consulta.dominio != DOMINIO_EVENTOS
     ):
         return "la pregunta pide un evento operacional (estadía/devolución/doble vuelta), pero la consulta no usa ese dominio"
+    # Bloque ANALYTICS V1 -- "aprobadas"/"en espera"/"rechazadas" piden
+    # estado de gestión: la consulta debe filtrar o agrupar por
+    # `estado_gestion` en el dominio EVENTOS, nunca ignorarlo en
+    # silencio (mismo criterio que el resto de esta red de seguridad).
+    if (
+        any(_menciona(frases) for _, frases in _PALABRAS_ESTADO_GESTION)
+        # "pendiente técnico" (dataset VIAJES, `estado_ruta`/`estado_
+        # operacional`) es un concepto TOTALMENTE distinto que ya
+        # resuelve su propio bloque más arriba -- nunca lo reclama este
+        # chequeo sólo porque comparte la palabra "PENDIENTE".
+        and not _menciona(_PALABRAS_PENDIENTE_TECNICO)
+        and not (
+            consulta.dominio == DOMINIO_EVENTOS
+            and ("estado_gestion" in consulta.filtros or consulta.agrupacion == "estado_gestion")
+        )
+    ):
+        return "la pregunta pide un estado de gestión (aprobada/rechazada/en espera), pero la consulta no lo usa"
     return None
