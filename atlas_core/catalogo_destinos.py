@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -151,6 +152,29 @@ def direccion_confirmada_coincide(calle_confirmada: str, texto_documental: str) 
     for inicio in range(0, len(texto_documental) - longitud + 1):
         ventana = texto_documental[inicio:inicio + longitud]
         distancia = sum(1 for a, b in zip(ventana, calle_confirmada) if a != b)
+        if distancia <= limite:
+            return True
+
+    # OCR puede partir una palabra de calle en dos sin alterar su contenido
+    # (p. ej. una separación espuria). Para no convertir esto en fuzzy
+    # matching abierto, esta segunda vía exige que la calle tenga un número
+    # explícito y que todos sus números aparezcan como tokens exactos en el
+    # documento. Sólo entonces compara la forma sin espacios con la misma
+    # tolerancia acotada de arriba.
+    numeros = re.findall(r"\d+", calle_confirmada)
+    if not numeros or not all(
+        re.search(rf"(?<!\d){re.escape(numero)}(?!\d)", texto_documental)
+        for numero in numeros
+    ):
+        return False
+    calle_compacta = "".join(calle_confirmada.split())
+    texto_compacto = "".join(texto_documental.split())
+    if calle_compacta in texto_compacto:
+        return True
+    longitud_compacta = len(calle_compacta)
+    for inicio in range(0, len(texto_compacto) - longitud_compacta + 1):
+        ventana = texto_compacto[inicio:inicio + longitud_compacta]
+        distancia = sum(1 for a, b in zip(ventana, calle_compacta) if a != b)
         if distancia <= limite:
             return True
     return False
@@ -478,6 +502,51 @@ class CatalogoDestinos:
             destinos[indice] = editado
             self._escribir(destinos)
             return editado
+
+    def confirmar_coordenada_canonica(
+        self, destino_id: str, *, latitud: float, longitud: float,
+        actor: str, referencia: str,
+    ) -> Destino:
+        """Persiste una coordenada sólo por acto explícito y auditable.
+        La autoridad queda en los campos ya canónicos del Destino: fuente,
+        observación y fecha de modificación; no se crea otro catálogo."""
+        actual = self.obtener(destino_id)
+        actor = _obligatorio(actor, "actor")
+        referencia = _obligatorio(referencia, "referencia")
+        nota = (
+            "COORDENADA_CANONICA_CONFIRMADA "
+            f"actor={actor}; referencia={referencia}; fuente_previa={actual.fuente}"
+        )
+        return self.editar(
+            destino_id, modificacion_manual=True, latitud=latitud, longitud=longitud,
+            fuente="COORDENADA_CANONICA_CONFIRMADA", observacion=nota,
+        )
+
+    def promover_coordenada_canonica_evidencia_fuerte(
+        self, destino_id: str, *, latitud: float, longitud: float,
+        proveedor: str, referencia: str,
+    ) -> Destino:
+        """Persiste sólo una promoción automática previamente evaluada.
+
+        No confirma identidad: exige que el destino ya fuera CONFIRMADO y
+        deja una procedencia distinta de la confirmación humana para que la
+        auditoría pueda distinguir ambos actos.
+        """
+        actual = self.obtener(destino_id)
+        if actual.estado_calidad != EstadoCalidadDestino.CONFIRMADO.value:
+            raise ErrorCatalogoDestinos("un destino no confirmado no puede promover coordenada automática")
+        if actual.latitud is not None or actual.longitud is not None:
+            raise ErrorCatalogoDestinos("un destino con coordenada existente no puede sobrescribirse automáticamente")
+        proveedor = _obligatorio(proveedor, "proveedor")
+        referencia = _obligatorio(referencia, "referencia")
+        nota = (
+            "COORDENADA_CANONICA_EVIDENCIA_FUERTE "
+            f"proveedor={proveedor}; referencia={referencia}; fuente_previa={actual.fuente}"
+        )
+        return self.editar(
+            destino_id, modificacion_manual=True, latitud=latitud, longitud=longitud,
+            fuente="COORDENADA_CANONICA_EVIDENCIA_FUERTE", observacion=nota,
+        )
 
     def agregar_alias(
         self, destino_id: str, alias: str, *, modificacion_manual: bool = False

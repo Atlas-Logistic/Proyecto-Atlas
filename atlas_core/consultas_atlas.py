@@ -184,6 +184,11 @@ FILTROS_SOPORTADOS = frozenset(_CAMPO_A_COLUMNA) | frozenset({
     # simplemente no aparece en un filtro por estado real (nunca
     # "ausente" == "en espera").
     "estado_gestion",
+    # Bloque P0 CASO B ("ingresadas hoy") -- espacio de nombres SEPARADO
+    # de periodo/fecha_desde/fecha_hasta/dias: filtra por
+    # `fecha_ingesta` (timestamp real de ingesta a Atlas), nunca por la
+    # fecha documental. Ver `_rango_fecha_ingesta_de_consulta`.
+    "periodo_ingesta", "fecha_ingesta_desde", "fecha_ingesta_hasta", "dias_ingesta",
 })
 
 # --- Bloque 4: agrupaciones V1. ---
@@ -322,9 +327,18 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
         dias = consulta.filtros.get("dias")
         if dias is None or not str(dias).strip().isdigit() or int(dias) <= 0:
             raise ErrorConsultaAtlas(f"'dias' inválido para ULTIMOS_N_DIAS: {dias!r}")
+    # Bloque P0 CASO B -- mismas reglas que `periodo`/`dias`, en el
+    # espacio de nombres de ingesta.
+    periodo_ingesta = consulta.filtros.get("periodo_ingesta")
+    if periodo_ingesta is not None and periodo_ingesta not in PERIODOS_SOPORTADOS:
+        raise ErrorConsultaAtlas(f"Período de ingesta no soportado: {periodo_ingesta!r}")
+    if periodo_ingesta == PERIODO_ULTIMOS_N_DIAS:
+        dias_ingesta = consulta.filtros.get("dias_ingesta")
+        if dias_ingesta is None or not str(dias_ingesta).strip().isdigit() or int(dias_ingesta) <= 0:
+            raise ErrorConsultaAtlas(f"'dias_ingesta' inválido para ULTIMOS_N_DIAS: {dias_ingesta!r}")
     if consulta.orden not in ("ASC", "DESC"):
         raise ErrorConsultaAtlas(f"Orden no soportado: {consulta.orden!r}")
-    for clave in ("fecha_desde", "fecha_hasta"):
+    for clave in ("fecha_desde", "fecha_hasta", "fecha_ingesta_desde", "fecha_ingesta_hasta"):
         valor = consulta.filtros.get(clave)
         if valor is not None and _parsear_fecha_iso(valor) is None:
             raise ErrorConsultaAtlas(f"{clave} inválida: {valor!r}")
@@ -432,15 +446,59 @@ def _rango_fecha_de_consulta(consulta: ConsultaAtlas) -> tuple[date, date] | Non
     return fecha_desde, fecha_hasta
 
 
+def _rango_fecha_ingesta_de_consulta(consulta: ConsultaAtlas) -> tuple[date, date] | None:
+    """Bloque P0 CASO B -- misma forma que `_rango_fecha_de_consulta`,
+    pero para el espacio de nombres de ingesta (`periodo_ingesta`/
+    `fecha_ingesta_desde`/`fecha_ingesta_hasta`/`dias_ingesta`).
+    Intencionalmente una función separada -- nunca comparte rango con
+    la fecha documental."""
+    periodo = consulta.filtros.get("periodo_ingesta")
+    if periodo is not None:
+        dias = consulta.filtros.get("dias_ingesta")
+        return resolver_periodo(periodo, hoy=date.today(), dias=int(dias) if dias is not None else None)
+    desde = consulta.filtros.get("fecha_ingesta_desde")
+    hasta = consulta.filtros.get("fecha_ingesta_hasta")
+    if desde is None and hasta is None:
+        return None
+    fecha_desde = _parsear_fecha_iso(desde) if desde is not None else date.min
+    fecha_hasta = _parsear_fecha_iso(hasta) if hasta is not None else date.max
+    return fecha_desde, fecha_hasta
+
+
+def _parsear_fecha_ingesta_dataset(texto: str) -> date | None:
+    """`viajes.csv.fecha_ingesta` es UTC ISO-8601 (`datetime.isoformat()`
+    de `procesar_archivo`) -- nunca DD-MM-YYYY como la fecha documental.
+    Vacío o sin timestamp real -> `None` (nunca se inventa)."""
+    crudo = str(texto or "").strip()
+    if not crudo:
+        return None
+    try:
+        return datetime.fromisoformat(crudo).date()
+    except ValueError:
+        return None
+
+
 def _fila_coincide(
     viaje: Mapping[str, str], consulta: ConsultaAtlas, rango_fecha: tuple[date, date] | None,
+    rango_fecha_ingesta: tuple[date, date] | None = None,
 ) -> bool:
     if rango_fecha is not None:
         fecha = _parsear_fecha_dataset(viaje.get("fecha", ""))
         if fecha is None or not (rango_fecha[0] <= fecha <= rango_fecha[1]):
             return False
+    if rango_fecha_ingesta is not None:
+        # Bloque P0 CASO B -- filtra por `fecha_ingesta` (timestamp REAL
+        # de ingesta a Atlas), NUNCA por `fecha` (documental). Un viaje
+        # sin `fecha_ingesta` real (histórico, de antes de este bloque)
+        # nunca "cae" en un período de ingesta preguntado -- ausencia de
+        # dato nunca se disfraza de coincidencia.
+        fecha_ingesta = _parsear_fecha_ingesta_dataset(viaje.get("fecha_ingesta", ""))
+        if fecha_ingesta is None or not (rango_fecha_ingesta[0] <= fecha_ingesta <= rango_fecha_ingesta[1]):
+            return False
     for campo, valor in consulta.filtros.items():
         if campo in ("periodo", "fecha_desde", "fecha_hasta", "dias"):
+            continue
+        if campo in ("periodo_ingesta", "fecha_ingesta_desde", "fecha_ingesta_hasta", "dias_ingesta"):
             continue
         if campo == "tipo_evento":
             continue  # Bloque UNIVERSAL V1 -- sólo aplica al dominio EVENTOS
@@ -525,7 +583,8 @@ def ejecutar_consulta_atlas(
             f"-- {consulta.dominio!r} no corresponde a viajes.csv."
         )
     rango_fecha = _rango_fecha_de_consulta(consulta)
-    coincidencias = [v for v in viajes if _fila_coincide(v, consulta, rango_fecha)]
+    rango_fecha_ingesta = _rango_fecha_ingesta_de_consulta(consulta)
+    coincidencias = [v for v in viajes if _fila_coincide(v, consulta, rango_fecha, rango_fecha_ingesta)]
     unidades = _UNIDADES_POR_METRICA[consulta.metrica]
 
     if consulta.metrica == METRICA_COUNT_DISTINCT_CHOFER:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from atlas_core.decisiones_pendientes import (
     clasificar_fallo_tecnico,
     guias_destino_conocido_ruta_pendiente,
 )
+from atlas_core.frescura_reconciliacion import _sha256_archivo_o_ausente
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
@@ -362,6 +364,23 @@ VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
 MAX_REINTENTOS_IGUALES_ARRANQUE = 3
+
+# Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA -- caso
+# real medido (guía 474197): dos reconciliaciones GLOBALES completas
+# corrieron 75s aparte para la misma ingesta, con conteos de salida
+# IDÉNTICOS (234/202/1/31) -- prueba de que la segunda no tenía nada
+# nuevo que hacer. La causa raíz (Desktop llamando `reconciliar_estado_
+# derivado.py` sin alcance justo después de que la ingesta ya reconcilió
+# focal) se corrige en su origen (ver `Atlas-Viajes-Desktop-Restaurado`).
+# Esta ventana es la protección de respaldo, general para cualquier
+# llamador: si YA hay una reconciliación GLOBAL completa muy reciente
+# cuyos insumos (dataset + pendientes técnicos + decisiones aplicadas +
+# versión de reglas/capacidades) son BYTE IDÉNTICOS a los actuales, la
+# repetición no puede producir un resultado distinto -- se omite la
+# batería pesada. Nunca compara alcances distintos (ver `_alcance_run`
+# más abajo): una corrida FOCAL nunca puede "cubrir" el barrido GLOBAL
+# que una corrida GLOBAL posterior necesita hacer de verdad.
+VENTANA_IDEMPOTENCIA_RECONCILIACION_COMPLETA = timedelta(seconds=300)
 
 # Bloque GEOGRAFÍA 2B -- cooldown y tope por clase de fallo. Sin daemon:
 # el reintento sólo se evalúa dentro de una reconciliación natural
@@ -700,9 +719,108 @@ def _falta_tarjeta_destino_accionable(dataset: Path, decisiones: Path) -> bool:
     return False
 
 
+def _reconciliacion_global_reciente_identica(
+    *, raiz: Path, instante, huella_idempotencia_actual: dict[str, object],
+) -> str | None:
+    """Bloque P0 INGESTA FOCAL -- ver comentario junto a
+    `VENTANA_IDEMPOTENCIA_RECONCILIACION_COMPLETA`. Busca el respaldo de
+    reconciliación GLOBAL más reciente (mismo `VERSION_ESTADO_DERIVADO`)
+    dentro de la ventana y compara su huella BYTE A BYTE contra la
+    actual -- cualquier ausencia, error de lectura o discrepancia hace
+    que devuelva `None` (comportamiento de siempre: correr la batería).
+    Nunca compara contra una corrida FOCAL (ver `alcance` en el
+    manifiesto) -- sólo GLOBAL-contra-GLOBAL, el único par donde "mismos
+    insumos" garantiza "mismo resultado" sin ambigüedad de alcance."""
+    carpeta_respaldos = raiz / "respaldos"
+    try:
+        candidatos = sorted(
+            (
+                p for p in carpeta_respaldos.iterdir()
+                if p.is_dir()
+                and p.name.startswith(f"reconciliacion_estado_derivado_v{VERSION_ESTADO_DERIVADO}_")
+            ),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    if not candidatos:
+        return None
+    mas_reciente = candidatos[0]
+    try:
+        manifest = json.loads((mas_reciente / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if manifest.get("alcance") != "GLOBAL":
+        return None
+    huella_previa = manifest.get("huella_idempotencia")
+    if not isinstance(huella_previa, dict):
+        return None
+    try:
+        completada_en = datetime.fromisoformat(str(manifest.get("creado_en")))
+    except ValueError:
+        return None
+    if instante - completada_en > VENTANA_IDEMPOTENCIA_RECONCILIACION_COMPLETA:
+        return None
+    if huella_previa == huella_idempotencia_actual:
+        return mas_reciente.name
+    return None
+
+
+def _ruta_log_diagnostico_reconciliacion() -> Path:
+    """Bloque P0 OBSERVABILIDAD RECONCILIACIÓN FOCAL -- ubicación LOCAL,
+    fuera de CUALQUIER `raiz_atlas`/G:\\ (nunca dato operacional, nunca
+    escribe en la operación real) -- mismo criterio ya establecido en
+    `atlas_core.paddle_runtime.ruta_runtime_paddle`: override explícito
+    primero (útil para pruebas), si no `%LOCALAPPDATA%\\Atlas\\
+    diagnostico\\` (o `~/AppData/Local` si la variable no existe, p. ej.
+    fuera de Windows)."""
+    override = os.environ.get("ATLAS_DIAGNOSTICO_DIR")
+    if override:
+        base = Path(override)
+    else:
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = (Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local") / "Atlas" / "diagnostico"
+    return base / "reconciliacion_tiempos.jsonl"
+
+
+def _registrar_diagnostico_reconciliacion(
+    *, raiz: Path, guias_objetivo: set[str] | None, instante, resultado: dict[str, object],
+) -> None:
+    """Bloque P0 OBSERVABILIDAD RECONCILIACIÓN FOCAL -- caso real medido
+    (guía 474196): la reconciliación focal tomó ~60s sin que ningún log
+    dijera en qué sub-etapa. `tiempos_ms`/`duracion_bateria_completa_ms`
+    YA los calcula la función (bloque `_marca_etapa` de arriba) -- esto
+    sólo los APPENDEA a un archivo local, nunca mide nada nuevo y nunca
+    cambia `resultado`. Estrictamente best-effort: cualquier fallo
+    (permisos, disco lleno, ruta inválida) se descarta en silencio --
+    el diagnóstico jamás puede impedir ni alterar una reconciliación
+    real."""
+    try:
+        ruta = _ruta_log_diagnostico_reconciliacion()
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        linea = {
+            "registrado_en_utc": instante.isoformat(),
+            "raiz_atlas": str(raiz),
+            "alcance": "GLOBAL" if guias_objetivo is None else "FOCAL",
+            "guias_objetivo": sorted(guias_objetivo) if guias_objetivo is not None else None,
+            "reconciliado": resultado.get("reconciliado"),
+            "motivo": resultado.get("motivo"),
+            "version": resultado.get("version"),
+            "tiempos_ms": resultado.get("tiempos_ms"),
+            "duracion_bateria_completa_ms": resultado.get("duracion_bateria_completa_ms"),
+        }
+        with ruta.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(linea, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def reconciliar_estado_derivado(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     proveedor_rutas=None, proveedor_rutas_fallback=None,
+    guias_excluir_reintento_ruta: set[str] | None = None,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Actualiza una operación antigua una sola vez por RULESET_VERSION.
 
@@ -712,7 +830,36 @@ def reconciliar_estado_derivado(
     los artefactos derivados) exige subir `RULESET_VERSION`; de lo
     contrario, una operación que ya alcanzó la versión vigente nunca
     vuelve a ejecutar la regla corregida hasta que algo MÁS mueva el
-    dataset (ver docstring de `RULESET_VERSION`, caso real 472640)."""
+    dataset (ver docstring de `RULESET_VERSION`, caso real 472640).
+
+    `guias_excluir_reintento_ruta` (Bloque P0 EVITAR SEGUNDO INTENTO,
+    aditivo -- `None` conserva el comportamiento de siempre): guías que
+    YA tuvieron un intento real de ruta/geocodificación DENTRO de la
+    MISMA operación que llama a esta función (p. ej.
+    `aplicar_decisiones_multiples`, que corre esta reconciliación justo
+    después de su propia batería diferida) -- se reenvía tal cual a los
+    dos revalidadores de ruta de abajo para que ninguno de los dos pague
+    una consulta externa redundante por la MISMA guía en la MISMA
+    pasada. Nunca un cooldown persistente: vive sólo en esta llamada.
+
+    `guias_objetivo` (Bloque P0 RECONCILIACIÓN FOCAL -- ingesta rápida,
+    aditivo, `None` conserva EXACTAMENTE el comportamiento de siempre:
+    mantenimiento/reconciliación GLOBAL, recorre y reintenta todo el
+    backlog elegible): cuando se entrega, esta reconciliación se vuelve
+    FOCAL -- procesa la(s) guía(s) del conjunto (típicamente una guía
+    recién ingestada más cualquier otra causalmente afectada por la
+    misma operación, ver `atlas_core.procesamiento_masivo.procesar_
+    carpeta`) y dejar intacto el resto del backlog pendiente de ruta,
+    identidad y segunda pasada -- nunca lo toca, nunca lo excluye
+    permanentemente: sigue esperando el próximo ciclo de mantenimiento
+    (`guias_objetivo=None`), que conserva capacidad plena de recorrerlo.
+    Una guía fuera del scope SÍ se reevalúa igual si la razón es GLOBAL
+    de verdad (migración de `RULESET_VERSION`, avance de capacidad de
+    dominio) -- el scope nunca oculta ni retrasa esas dos, sólo apaga el
+    reintento de backlog por cooldown ordinario. La publicación de
+    reporte/estado al final de la función corre igual, focal o global --
+    la guía procesada queda visible sin depender de una reconciliación
+    global posterior."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -786,6 +933,23 @@ def reconciliar_estado_derivado(
         capacidad_del_dominio_avanzo = bool(
             _dominios_avanzados & _dominios_de_motivo_tecnico(motivo_registro)
         )
+        # Bloque P0 RECONCILIACIÓN FOCAL -- `guias_objetivo=None` (default,
+        # mantenimiento/global) hace que `en_scope` sea SIEMPRE True, así
+        # que las dos condiciones de abajo quedan matemáticamente
+        # idénticas a como estaban antes de este bloque -- ningún caller
+        # existente puede notar la diferencia. Cuando SÍ se entrega
+        # `guias_objetivo` (reconciliación focal, p. ej. tras ingestar una
+        # guía nueva), una guía FUERA del scope sólo entra a `por_
+        # reintentar` por una razón GLOBAL de verdad (`migracion` de
+        # `RULESET_VERSION`, o avance de `capacidad_del_dominio_avanzo` --
+        # ambas versionadas, deliberadas, poco frecuentes) -- nunca sólo
+        # porque su cooldown de reintento venció o porque es su primer
+        # intento; eso es exactamente el barrido de backlog no
+        # relacionado que esta reconciliación focal no debe hacer. Una
+        # guía SIN evidencia nueva y sin causa global simplemente espera
+        # al próximo ciclo de mantenimiento/reconciliación global
+        # (`guias_objetivo=None`), que sigue disponible sin cambios.
+        en_scope = guias_objetivo is None or str(registro["numero_guia"]) in guias_objetivo
         if clase == "DETERMINISTA":
             # Nunca se reintenta sólo por paso del tiempo -- repetir la
             # MISMA consulta con la MISMA evidencia no cambiaría nada (no
@@ -794,7 +958,7 @@ def reconciliar_estado_derivado(
             # distinta que `_registro_pendiente` reinició), ante un
             # cambio de reglas (`migracion`, una vez por `RULESET_VERSION`)
             # o ante el avance de capacidad de un dominio que lo gobierna.
-            if migracion or intentos == 0 or capacidad_del_dominio_avanzo:
+            if migracion or capacidad_del_dominio_avanzo or (intentos == 0 and en_scope):
                 por_reintentar.append(str(registro["numero_guia"]))
             continue
         maximo = MAX_REINTENTOS_POR_CLASE.get(clase, 0)
@@ -808,7 +972,7 @@ def reconciliar_estado_derivado(
                 vencido = instante - datetime.fromisoformat(str(ultimo)) >= cooldown
             except ValueError:
                 pass
-        if (intentos < maximo and vencido) or capacidad_del_dominio_avanzo:
+        if capacidad_del_dominio_avanzo or ((intentos < maximo and vencido) and en_scope):
             por_reintentar.append(str(registro["numero_guia"]))
     # Bloque R2.5 -- PROYECCIÓN CANÓNICA -> OPERACIÓN: caso real 464264
     # (decisión humana aplicada; "Revisión de Atlas" ya reflejaba 0
@@ -825,6 +989,27 @@ def reconciliar_estado_derivado(
     # natural que ya dispara cada carga de Desktop.
     huella_dataset_actual = _sha256_archivo(dataset)
     reporte_desactualizado = huella_dataset_actual != estado_previo.get("dataset_sha256")
+    # Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA (ver
+    # `VENTANA_IDEMPOTENCIA_RECONCILIACION_COMPLETA` arriba). Huella de
+    # TODO lo que puede hacer variar el resultado de una corrida GLOBAL:
+    # dataset + pendientes técnicos (gobierna `por_reintentar`) +
+    # decisiones aplicadas (gobierna `guias_direccion_confirmada`/
+    # `guias_destino_terminado`) + versión de reglas/capacidades. Sólo se
+    # usa para la comparación de idempotencia de abajo -- nunca sustituye
+    # `reporte_desactualizado` (que sigue siendo la señal real de "hay
+    # que republicar").
+    huella_idempotencia_actual = {
+        "dataset_sha256": huella_dataset_actual,
+        "pendientes_tecnicos_sha256": _sha256_archivo_o_ausente(ruta_pendientes),
+        "decisiones_aplicadas_sha256": _sha256_archivo_o_ausente(actual / "decisiones_aplicadas.json"),
+        "version_estado_derivado": version_previa,
+        "versiones_capacidades": dict(sorted((estado_previo.get("versiones_capacidades") or {}).items())),
+    }
+    reconciliacion_global_redundante = None
+    if guias_objetivo is None:
+        reconciliacion_global_redundante = _reconciliacion_global_reciente_identica(
+            raiz=raiz, instante=instante, huella_idempotencia_actual=huella_idempotencia_actual,
+        )
     # Bloque CONVERGENCIA DE ESTADO TÉCNICO STALE -- causa raíz real (viaje
     # 0000356332, guías 477145/477146): un pendiente técnico
     # (`estado_documental`/`estado_operacional` = `REQUIERE_REVISION`) se
@@ -860,6 +1045,21 @@ def reconciliar_estado_derivado(
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
             "version": version_previa, "pendientes_tecnicos": len(registros),
         }
+    if reconciliacion_global_redundante is not None:
+        # Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA: a
+        # diferencia del corte de arriba, éste SÍ puede haber entrado con
+        # `por_reintentar` no vacío (backlog con cooldown vencido) -- pero
+        # una reconciliación GLOBAL igual de reciente, con la MISMA huella
+        # byte a byte, ya demostró que ese backlog no tenía nada resoluble
+        # (mismo dataset, mismos pendientes técnicos, mismas decisiones
+        # aplicadas -- el resultado no puede ser distinto). El reporte
+        # vigente que esa corrida dejó publicado sigue siendo válido; no
+        # se toca nada más.
+        return {
+            "reconciliado": False, "motivo": "IDEMPOTENTE_RECONCILIACION_GLOBAL_RECIENTE_SIN_CAMBIOS",
+            "version": version_previa, "pendientes_tecnicos": len(registros),
+            "respaldo_referencia": reconciliacion_global_redundante,
+        }
 
     # Bloque MÉTRICAS DE DURACIÓN POR ETAPA -- caso real: "Actualizando
     # operación" tardaba ~70s en Desktop sin que ningún log dijera dónde.
@@ -876,6 +1076,15 @@ def reconciliar_estado_derivado(
     _t_bateria_inicio = time.perf_counter()
     _t_ultima_marca = [_t_bateria_inicio]
     _tiempos_ms: dict[str, float] = {}
+    # Bloque P0 MEMOIZACIÓN -- caché COMPARTIDA por huella de insumos,
+    # vive sólo durante ESTA llamada (nunca persiste, nunca se comparte
+    # entre invocaciones): `reconciliar_decisiones_destino_no_resuelto`/
+    # `reconciliar_bandeja_decisiones`/`reconciliar_segunda_pasada_
+    # universal_sin_ocr` llaman cada una, por su cuenta, a `regenerar_
+    # decisiones_persistidas` sobre la MISMA lista de decisiones y los
+    # MISMOS catálogos/dataset si nada las cambió entre medio -- ver
+    # docstring de esa función.
+    _cache_regenerar_decisiones: dict[tuple[object, ...], list[dict[str, object]]] = {}
 
     def _marca_etapa(nombre: str) -> None:
         ahora = time.perf_counter()
@@ -922,6 +1131,12 @@ def reconciliar_estado_derivado(
             "version_origen": version_previa,
             "version_destino": VERSION_ESTADO_DERIVADO,
             "creado_en": instante.isoformat(),
+            # Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA:
+            # huella de los insumos AL INICIO de esta corrida (antes de que
+            # la batería de abajo mueva nada) + si fue focal o global --
+            # ver `_reconciliacion_global_reciente_identica`.
+            "alcance": "GLOBAL" if guias_objetivo is None else "FOCAL",
+            "huella_idempotencia": huella_idempotencia_actual,
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         # Bloque P1 ELIMINAR DOBLE RECONCILIACIÓN -- si `revalidar_y_
@@ -1074,7 +1289,7 @@ def reconciliar_estado_derivado(
         por_reintentar = list(dict.fromkeys(por_reintentar))
 
         convergencia_identidad = revalidar_convergencia_identidad_sin_ocr(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_objetivo,
         )
         _marca_etapa("recuperacion_p0_y_convergencia_identidad")
 
@@ -1322,10 +1537,21 @@ def reconciliar_estado_derivado(
             }
         except (OSError, ValueError):
             guias_ruta_pendiente = None  # ante cualquier duda, sin acotar -- barrido completo de siempre
+        # Bloque P0 RECONCILIACIÓN FOCAL -- distinto del "P2 RUTEO" de
+        # arriba (ese es un atajo de rendimiento puro, nunca deja de
+        # procesar una fila elegible). Esto SÍ acota el universo cuando
+        # `guias_objetivo` viene dado (focal): intersección, nunca
+        # reemplazo -- una guía fuera del scope y ya con
+        # `estado_ruta == RUTA_CALCULADA` seguía sin calificar de todos
+        # modos, así que la intersección nunca oculta nada que el P2 de
+        # arriba no hubiera descartado igual.
+        if guias_objetivo is not None:
+            guias_ruta_pendiente = (guias_ruta_pendiente or set()) & guias_objetivo
         limpieza_destino_catalogo = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
             proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
             guias_objetivo=guias_ruta_pendiente,
+            guias_excluir_reintento=guias_excluir_reintento_ruta,
         )
         # Bloque DESTINO HUMANO YA CONFIRMADO (Codex 472037) -- corre
         # ANTES del reintento de ruta de abajo, a propósito: llena
@@ -1350,6 +1576,7 @@ def reconciliar_estado_derivado(
                 proveedor_rutas=proveedor_rutas,
                 proveedor_rutas_fallback=proveedor_rutas_fallback,
                 guias_objetivo=set(por_reintentar),
+                guias_excluir_reintento=guias_excluir_reintento_ruta,
             )
         _marca_etapa("reintento_ruta_acotado_a_por_reintentar")
         # Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
@@ -1394,7 +1621,9 @@ def reconciliar_estado_derivado(
         # probado (Fases 1-4), incluida su auto-resolución acotada
         # (`MAX_ITERACIONES_AUTO_RESOLUCION`) para los tipos de decisión
         # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
-        evidencia_decisiones = reconciliar_bandeja_decisiones(raiz_atlas=raiz, reloj=lambda: instante)
+        evidencia_decisiones = reconciliar_bandeja_decisiones(
+            raiz_atlas=raiz, reloj=lambda: instante, cache_memoizacion=_cache_regenerar_decisiones,
+        )
         _marca_etapa("bandeja_decisiones_evidencia")
         # Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL -- SIN
         # OCR, SIN RED: TODA decisión pendiente CLIENTE_CANDIDATO/CLIENTE_
@@ -1406,8 +1635,20 @@ def reconciliar_estado_derivado(
         # mecanismo canónico (filtra contra el ledger: ninguna decisión
         # humana se pierde ni se duplica). `orquestador=None` -> nunca B1
         # aquí (la reconciliación histórica se mantiene determinista).
+        archivos_objetivo_focal = None
+        if guias_objetivo is not None:
+            try:
+                archivos_objetivo_focal = {
+                    str(f.get("archivo", "")).strip()
+                    for f in _leer_filas(dataset)
+                    if str(f.get("numero_guia", "")).strip() in guias_objetivo
+                    and str(f.get("archivo", "")).strip()
+                }
+            except (OSError, ValueError):
+                archivos_objetivo_focal = None  # ante cualquier duda, sin acotar
         segunda_pasada_historica = reconciliar_segunda_pasada_universal_sin_ocr(
             raiz_atlas=raiz, reloj=lambda: instante,
+            archivos_objetivo=archivos_objetivo_focal, cache_memoizacion=_cache_regenerar_decisiones,
         )
         _marca_etapa("segunda_pasada_universal_sin_ocr")
         # Bloque PENDIENTES TÉCNICOS ACCIONABLES -- caso real 0000353055/
@@ -1426,7 +1667,9 @@ def reconciliar_estado_derivado(
         # dataset YA reconciliado, ANTES de generar el reporte -- así el
         # viaje aparece REQUIERE_REVISION con tarjeta, nunca
         # INCOMPLETO_TECNICO "que se reintenta solo".
-        deteccion_destino = reconciliar_decisiones_destino_no_resuelto(raiz_atlas=raiz, reloj=lambda: instante)
+        deteccion_destino = reconciliar_decisiones_destino_no_resuelto(
+            raiz_atlas=raiz, reloj=lambda: instante, cache_memoizacion=_cache_regenerar_decisiones,
+        )
         _marca_etapa("destino_no_resuelto")
         _t_bateria_fin = time.perf_counter()
 
@@ -1581,7 +1824,7 @@ def reconciliar_estado_derivado(
                 shutil.rmtree(reporte, ignore_errors=True)
             raise
 
-    return {
+    resultado_final = {
         "reconciliado": True,
         "version": VERSION_ESTADO_DERIVADO,
         "respaldo": str(respaldo),
@@ -1644,3 +1887,7 @@ def reconciliar_estado_derivado(
         "tiempos_ms": _tiempos_ms,
         "duracion_bateria_completa_ms": round((time.perf_counter() - _t_bateria_inicio) * 1000, 1),
     }
+    _registrar_diagnostico_reconciliacion(
+        raiz=raiz, guias_objetivo=guias_objetivo, instante=instante, resultado=resultado_final,
+    )
+    return resultado_final

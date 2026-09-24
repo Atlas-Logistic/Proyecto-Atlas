@@ -2285,6 +2285,97 @@ def _extraer_rut_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     return {"valor": mejor[3]}
 
 
+# Bloque O2 -- defensa evidencial contra un dígito espurio al inicio de
+# PESO KG. Caso real que motivó este bloque (viaje 0000359510, chofer
+# SALOMÓN PIZARRO): EasyOCR leyó "19.307.00" (confianza 0.8249) donde el
+# documento dice "9.307,00", y "18.937,00" (confianza 0.9008) donde dice
+# "8.937,00" -- ambos exactamente +10.000 kg, mientras el resto de cada
+# documento ronda confianza 0.93-0.9999. En ambos casos el mismo dígito
+# correcto aparece, SIN el "1" espurio y con confianza 0.999+, en otro
+# bloque OCR independiente del mismo documento (columna de peso por ítem
+# junto a la descripción de material, antes de la sección de totales).
+UMBRAL_CONFIANZA_PESO_SOSPECHOSA = 0.92
+UMBRAL_CONFIANZA_COROBORACION_PESO = 0.99
+
+
+def _solo_digitos(texto: str) -> str:
+    return re.sub(r"\D", "", str(texto or ""))
+
+
+def _peso_tiene_forma_sospechosa(peso_kg_final: str) -> bool:
+    """Chequeo puramente de texto (sin bloques OCR): ¿vale la pena pagar el
+    costo de leer los bloques geométricos del documento para reexaminar
+    este peso? El llamador (`procesamiento_masivo.procesar_archivo`) sólo
+    debe cargar `bloques_guia` cuando esto es True -- la mayoría de los
+    documentos NUNCA necesitan esa lectura (ver Bloque P2 SPAWN/IPC:
+    cuesta ~6.3s de import la primera vez), y varios tests existentes
+    verifican explícitamente que `leer_bloques_imagen` no se llame sin
+    necesidad real."""
+    return bool(
+        peso_kg_final and peso_kg_final.isdigit()
+        and peso_kg_final.startswith("1") and len(peso_kg_final) >= 4
+    )
+
+
+def _reexaminar_peso_por_baja_confianza(
+    peso_kg_final: str, bloques: Optional[List[Any]]
+) -> tuple[str, Optional[str]]:
+    """Reexamina (nunca adivina) un `peso_kg_final` ya normalizado (dígitos
+    enteros, p. ej. "19307") contra la evidencia geométrica del documento.
+
+    Sólo corrige cuando las TRES condiciones se cumplen a la vez:
+    1) el valor tiene la forma "1" + un peso más corto (>=4 dígitos);
+    2) el bloque OCR que produjo ESE valor tiene confianza baja
+       (< `UMBRAL_CONFIANZA_PESO_SOSPECHOSA`) -- un valor idéntico pero
+       leído con confianza alta nunca se toca, sin importar que también
+       empiece con "1" (hay pesos reales de 5 dígitos que sí empiezan con
+       1, ver caso histórico "14.270,000" en `buscar_peso`);
+    3) el valor recortado (sin el "1") aparece, con confianza alta
+       (>= `UMBRAL_CONFIANZA_COROBORACION_PESO`), en OTRO bloque
+       independiente del documento que no mencione TARA ni BRUTO (para no
+       reintroducir la confusión tara/peso-bruto que este extractor ya
+       evita en `buscar_peso`).
+
+    Sin las tres condiciones, devuelve el valor sin tocar -- la defensa de
+    plausibilidad del viaje completo (`credibilidad_campos.evaluar_
+    credibilidad_peso_total_viaje`) es la que se hace cargo entonces,
+    señalando el caso para revisión en vez de dejarlo pasar en silencio.
+
+    Devuelve (valor_final, motivo_si_se_corrigio_o_None). El valor
+    original leído por OCR nunca se pierde: sigue íntegro en la traza OCR
+    (`operacion/trazas_ocr/`) y el motivo devuelto dice explícitamente cuál
+    fue el valor descartado, para que la corrección sea auditable.
+    """
+    if not bloques or not _peso_tiene_forma_sospechosa(peso_kg_final):
+        return peso_kg_final, None
+    valor_recortado = peso_kg_final[1:]
+    if not valor_recortado or valor_recortado[0] == "0":
+        return peso_kg_final, None
+
+    bloque_origen = next(
+        (b for b in bloques if _solo_digitos(getattr(b, "texto", "")).startswith(peso_kg_final)),
+        None,
+    )
+    if bloque_origen is None or bloque_origen.confianza >= UMBRAL_CONFIANZA_PESO_SOSPECHOSA:
+        return peso_kg_final, None
+
+    for bloque in bloques:
+        if bloque is bloque_origen or bloque.confianza < UMBRAL_CONFIANZA_COROBORACION_PESO:
+            continue
+        texto_simple = _normalizar_acentos(str(getattr(bloque, "texto", "")).upper())
+        if "TARA" in texto_simple or "BRUTO" in texto_simple:
+            continue
+        if _solo_digitos(bloque.texto).startswith(valor_recortado):
+            motivo = (
+                f"PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR:{peso_kg_final}->{valor_recortado}"
+                f";confianza_lectura_original={bloque_origen.confianza:.4f}"
+                f";confianza_corroboracion={bloque.confianza:.4f}"
+            )
+            return valor_recortado, motivo
+
+    return peso_kg_final, None
+
+
 def extraer_datos(
     textos: List[str], carpeta_catalogos: str | Path = "catalogos"
 ) -> Dict[str, str]:
@@ -2298,6 +2389,8 @@ def extraer_datos(
         "número de transporte": "No encontrado",
         "cliente": "No encontrado",
         "obra destino": "No encontrado",
+        "código cliente": "No encontrado",
+        "cod destinatario": "No encontrado",
         "RUT del cliente": "No encontrado",
         "chofer": "No encontrado",
         "RUT del chofer": "No encontrado",
@@ -2566,6 +2659,71 @@ def extraer_datos(
         if "AMERICAN SCREW" in texto_busqueda:
             return "AMERICAN SCREW CHILE SPA"
 
+        return None
+
+    def _normalizar_codigo_administrativo(valor: str) -> str:
+        """Un código administrativo (Código Cliente / COD DESTINATARIO)
+        se conserva TAL CUAL -- ceros a la izquierda incluidos ("0001006226")
+        y letras cuando el código es alfanumérico (caso real ACEROS COX:
+        "CL12"). Nunca se interpreta como número; sólo se recorta espacio
+        en blanco sobrante que el OCR puede insertar entre dígitos."""
+        return re.sub(r"\s+", "", valor).upper()
+
+    def buscar_codigo_cliente() -> Optional[str]:
+        """Bloque P0 CÓDIGO CLIENTE/DESTINATARIO -- ancla "CÓDIGO CLIENTE"
+        (caso real AGF: "Código Cliente 0001006226"), nunca confundido con
+        la etiqueta SEÑOR(ES)/nombre real: `_es_etiqueta_codigo_cliente`
+        (en `_extraer_asociaciones_geometricas`) ya excluye ese bloque
+        "CLIENTE" precedido de "CODIGO"/"COD" de ser candidato a nombre de
+        cliente -- esta función captura, aparte, el VALOR administrativo
+        que esa etiqueta compuesta acompaña. Puramente evidencia
+        complementaria (ver `codigo_cliente_destinatario.py`): nunca
+        reemplaza al cliente ya resuelto por SEÑOR(ES)/RUT.
+
+        Bloque CIERRE P0 -- caso real 473316 (AGF): el texto lineal trae
+        "CODIGO CLIENTE : 0001006226" -- un separador ":" entre la
+        etiqueta y el valor, que `\\s+` solo nunca cruza. `\\s*:?\\s*`
+        tolera el separador opcional sin ampliar qué cuenta como valor.
+        Longitud mínima subida de 2 a 4 -- evidencia real (mismo
+        documento): el layout de dos columnas del membrete puede
+        intercalar un fragmento corto ajeno (p. ej. "13" de una hora)
+        justo después de una etiqueta; ningún código real de la muestra
+        (AGF/PRODALAM/EASY/TORRES/ACEROS COX) tiene menos de 4
+        caracteres -- sigue sin inventar geometría, sólo reduce falsos
+        positivos del regex lineal."""
+        coincidencia = re.search(r"C[OÓ]DIGO\s+CLIENTE\s*:?\s*([A-Z0-9]{4,15})", texto_busqueda)
+        if coincidencia:
+            return _normalizar_codigo_administrativo(coincidencia.group(1))
+        return None
+
+    def buscar_cod_destinatario() -> Optional[str]:
+        """Bloque P0 CÓDIGO CLIENTE/DESTINATARIO -- "COD DESTINATARIO" es
+        una ficha operacional AZA/SAP (casos reales AGF/PRODALAM/EASY: el
+        mismo Código Cliente puede traer varios COD DESTINATARIO
+        distintos, uno por obra) -- NUNCA se asume que equivale al cliente,
+        a un receptor jurídico ni a una dirección física; sólo se persiste
+        el valor documental tal cual, para que
+        `codigo_cliente_destinatario.py` lo use como evidencia
+        complementaria de OBRA_DESTINO. Independiente de
+        `buscar_obra_destino()` (que ya usa "COD DESTINATARIO" como
+        frontera de layout, no como fuente de este valor): el nombre de la
+        obra puede resolverse por geometría aunque este regex lineal no
+        encuentre el código, y viceversa.
+
+        Mismo cierre de CODIGO CLIENTE arriba: separador ":" tolerado,
+        longitud mínima 4 -- caso real 473316: el layout de dos columnas
+        intercala "COD DESTINATARIO" con el valor de OTRA etiqueta
+        (":13:31:00", una hora, de la fila de "INDICADOR TRASLADO") en
+        vez del código real; con longitud mínima 4 ese fragmento corto
+        ("13") ya no se captura por error -- la función simplemente se
+        abstiene (`None`) en vez de persistir una evidencia
+        estructuralmente inválida. No se resuelve aquí la geometría
+        completa del membrete (eso ya lo hace, para `obra_destino`,
+        `_extraer_asociaciones_geometricas` -- fuera de alcance de este
+        bloque, que es deliberadamente lineal)."""
+        coincidencia = re.search(r"COD\s+DESTINATARIO\s*:?\s*([A-Z0-9]{4,15})", texto_busqueda)
+        if coincidencia:
+            return _normalizar_codigo_administrativo(coincidencia.group(1))
         return None
 
     def buscar_rut_cliente(cliente: str) -> tuple[Optional[str], Optional[str]]:
@@ -2930,6 +3088,14 @@ def extraer_datos(
     obra_destino = buscar_obra_destino()
     if obra_destino:
         datos["obra destino"] = obra_destino
+
+    codigo_cliente = buscar_codigo_cliente()
+    if codigo_cliente:
+        datos["código cliente"] = codigo_cliente
+
+    cod_destinatario = buscar_cod_destinatario()
+    if cod_destinatario:
+        datos["cod destinatario"] = cod_destinatario
 
     rut_cliente, rut_cliente_documental_invalido = buscar_rut_cliente(datos["cliente"])
     if rut_cliente:

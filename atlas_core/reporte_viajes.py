@@ -165,6 +165,13 @@ COLUMNAS_VIAJES = (
     "latitud_estadia_gps",
     "longitud_estadia_gps",
     "duracion_estadia_gps_min",
+    # Bloque P0 CASO B ("ingresadas hoy"): timestamp real de ingesta a
+    # Atlas (UTC ISO-8601, la más temprana entre los documentos del
+    # viaje) -- ver `Viaje.fecha_ingesta`/`DocumentoViaje.fecha_ingesta_
+    # utc`. Nunca `fecha` (documental). Agregada al final --
+    # backward-compatible: un reporte generado antes de este bloque
+    # simplemente no tenía esta columna.
+    "fecha_ingesta",
 )
 
 
@@ -322,6 +329,7 @@ def _fila_viaje(
         "latitud_estadia_gps": datos["latitud_estadia_gps"],
         "longitud_estadia_gps": datos["longitud_estadia_gps"],
         "duracion_estadia_gps_min": datos["duracion_estadia_gps_min"],
+        "fecha_ingesta": datos["fecha_ingesta"],
         **campos_ruta,
     }
 
@@ -410,6 +418,58 @@ def _resolver_patente_desde_ledger(
     return resolver
 
 
+def _resolver_patente_contextual(
+    *, filas: list[Mapping[str, object]], carpeta_catalogos: Path,
+    ledger_patentes: Mapping[tuple[str, str, str], str],
+) -> Callable[[str, str, str], str]:
+    """Resuelve el valor operacional, preservando siempre la evidencia OCR.
+
+    El ledger tiene prioridad. Sin decisión por documento, una asociación
+    humana única del chofer absorbe una lectura OCR incierta; dos candidatos
+    plausibles se conservan sin resolver.
+    """
+    from atlas_core.atlas_ia.convergencia import RESOLVER_SILENCIOSO
+    from atlas_core.atlas_ia.evidencia_dominios import convergencia_vehiculo
+
+    por_clave: dict[tuple[str, str, str], Mapping[str, object]] = {}
+    for fila in filas:
+        guia = str(fila.get("numero_guia", "")).strip()
+        for campo in ("patente_tracto", "patente_rampla"):
+            valor = str(fila.get(campo, "")).strip()
+            por_clave.setdefault((guia, campo, valor), fila)
+    cache: dict[tuple[str, str, str], str] = {}
+
+    def resolver(numero_guia: str, campo: str, valor_documental: str) -> str:
+        clave = (numero_guia, campo, valor_documental)
+        if clave in cache:
+            return cache[clave]
+        if canonica_ledger := ledger_patentes.get(clave):
+            cache[clave] = canonica_ledger
+            return canonica_ledger
+        fila = por_clave.get(clave)
+        if fila is None:
+            cache[clave] = valor_documental
+            return valor_documental
+        try:
+            resultado = convergencia_vehiculo(
+                campo=campo, valor_documental=valor_documental,
+                rut_chofer=str(fila.get("rut_chofer", "")),
+                numero_transporte=str(fila.get("numero_transporte", "")),
+                filas=filas, carpeta_catalogos=carpeta_catalogos,
+            )
+        except (OSError, ValueError):
+            resultado = None
+        valor = (
+            resultado.valor_canonico
+            if resultado is not None and resultado.decision == RESOLVER_SILENCIOSO
+            else valor_documental
+        )
+        cache[clave] = valor
+        return valor
+
+    return resolver
+
+
 def _resumen_markdown(
     viajes,
     sin_transporte,
@@ -492,7 +552,9 @@ def generar_reporte_viajes(
     ledger_patentes = (
         resolver_patentes_confirmadas_por_ledger(ruta_ledger) if ruta_ledger is not None else {}
     )
-    resolver_patente = _resolver_patente_desde_ledger(ledger_patentes) if ledger_patentes else None
+    resolver_patente = _resolver_patente_contextual(
+        filas=filas, carpeta_catalogos=catalogos, ledger_patentes=ledger_patentes,
+    )
     instante = reloj()
     guias_revision_humana: set[str] = set()
     ruta_decisiones = origen.parent / "decisiones_pendientes.json"

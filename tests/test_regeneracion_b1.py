@@ -387,6 +387,38 @@ def test_regenerar_suprime_destino_sin_confirmar_por_redundancia_equivalente(tmp
     assert restantes == []
 
 
+def test_regenerar_retira_tarjeta_legacy_sin_destino_documental(tmp_path):
+    """Una tarjeta antigua cuyo contexto confirma que no había dirección
+    documental no puede conservarse usando el nombre de obra como sustituto."""
+    catalogos = tmp_path / "catalogos"; catalogos.mkdir()
+    _catalogos_base(catalogos)
+    cliente = CatalogoClientes(catalogos / "clientes.json").crear(
+        razon_social="CLIENTE GENERICO SA", rut="76.111.111-6", fuente="TEST",
+        estado_calidad=EstadoCalidadCliente.CONFIRMADO,
+    )
+    obra = CatalogoObrasDestinos(
+        ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+        ruta_destinos=catalogos / "destinos_maestros.json",
+    ).registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra="OBRA GENERICA",
+        evidencia=Evidencia(
+            tipo=TipoEvidencia.GUIA.value, identificador_fuente="1", referencia_hash="a" * 64,
+            campos_observados={"obra": "OBRA GENERICA"}, fecha="2026-01-01T00:00:00+00:00",
+            actor_proceso="TEST", resultado=ResultadoEvidencia.SOPORTA.value,
+        ),
+    ).obra
+    decision = crear_decision(
+        tipo="DESTINO_SIN_CONFIRMAR", entidad="RELACION_OBRA_DESTINO", archivo="1.jpeg",
+        numero_guia="1", numero_transporte="T1", campo="destino_entrega",
+        valor_documental="OBRA GENERICA", valor_normalizado="OBRA GENERICA",
+        identidad_resuelta={"entidad_id": obra.obra_id, "valor_canonico": "OBRA GENERICA"},
+        candidatos=(), motivos=("OBRA_SIN_RELACION_CONFIRMADA_UNICA",), evidencias=(),
+        acciones_permitidas=("CONFIRMAR", "NO_CONFIRMAR", "POSPONER"),
+        contexto={"obra_id": obra.obra_id, "obra_canonica": "OBRA GENERICA", "destino_documental": ""},
+    )
+    assert regenerar_decisiones_persistidas(decisiones=[decision], carpeta_catalogos=catalogos) == []
+
+
 # --- Invariante 4: regenerar dos veces sin cambios produce el mismo
 # conjunto semántico, sin duplicados ni pérdida de contexto. ---
 

@@ -193,9 +193,39 @@ def test_destino_confirmado_con_coordenadas_calcula_ruta_directo_sin_geocodifica
     )
     assert sembrado["ok"] is True and sembrado["ruta_resuelta"] is True
 
+    # `aplicar_decision_obra` no persiste `latitud_entrega`/`longitud_
+    # entrega` en el dataset (columna que ningún revalidador de ruta
+    # escribe hoy), así que la confirmación de catálogo nace sin
+    # coordenadas propias aunque la ruta ya se haya calculado. Este caso
+    # (464588) es exactamente "Javier YA confirmó coordenadas reales
+    # antes" -- se simula el estado real seedando el destino recién
+    # creado con coordenadas, vía la misma API pública de edición que
+    # usaría cualquier flujo de confirmación con coordenadas.
+    from atlas_core.catalogo_destinos import CatalogoDestinos
+    from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+
+    catalogo_obras = CatalogoObrasDestinos(
+        ruta=entorno["catalogos"] / "obras_destinos.json", ruta_clientes=entorno["catalogos"] / "clientes.json",
+        ruta_destinos=entorno["catalogos"] / "destinos_maestros.json",
+    )
+    destinos_obra = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra="OBRA TEST")
+    assert len(destinos_obra) == 1
+    CatalogoDestinos(entorno["catalogos"] / "destinos_maestros.json", ruta_clientes=entorno["catalogos"] / "clientes.json").editar(
+        destinos_obra[0].destino_id, latitud=-70.634933, longitud=-33.436723, modificacion_manual=True,
+    )
+
+    # Bloque P0 AISLAMIENTO DE CACHÉ -- `proveedor_rutas_fallback` debe
+    # inyectarse explícito, igual que `proveedor_rutas`: sin esto, la
+    # función construye por defecto un `NominatimGeocoder` REAL (ver
+    # `_proveedor_rutas_fallback_predeterminado`), volviendo esta prueba
+    # no determinista (mismo criterio ya documentado en
+    # `test_destino_no_resuelto_r6.py::_proveedor_confianza_insuficiente`).
+    # Ambos proveedores son señuelos que NUNCA deberían consultarse --
+    # con coordenadas ya confirmadas, la función calcula la ruta directo.
     resultado = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
         ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
         proveedor_rutas=_proveedor_direccion_valida("NUNCA_DEBERIA_CONSULTARSE"),
+        proveedor_rutas_fallback=_proveedor_direccion_valida("NUNCA_DEBERIA_CONSULTARSE"),
     )
     assert "2" in resultado["guias_actualizadas"]
     assert resultado["guias_contradiccion"] == []
@@ -232,9 +262,13 @@ def test_no_geocodifica_de_nuevo_cuando_ya_tiene_coordenadas_confirmadas(tmp_pat
     proveedor_sin_geocodificaciones = ProveedorRutasSimulado(
         geocodificaciones={}, resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 25.4, 38.2, "SINTETICO"),
     )
+    # Bloque P0 AISLAMIENTO DE CACHÉ -- mismo criterio que el test
+    # anterior: `proveedor_rutas_fallback` explícito, nunca el
+    # `NominatimGeocoder` real predeterminado.
     resultado = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
         ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["catalogos"],
         proveedor_rutas=proveedor_sin_geocodificaciones,
+        proveedor_rutas_fallback=_proveedor_direccion_valida(direccion),
     )
     assert "2" in resultado["guias_actualizadas"]
     filas = {f["numero_guia"]: f for f in _leer_csv(entorno["dataset"])}

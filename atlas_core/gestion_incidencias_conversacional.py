@@ -60,13 +60,42 @@ def _backfill_tipo_pendiente(*, raiz: str | Path, ruta_viajes: str | Path, accio
     EXACTAMENTE una incidencia ACTIVA ya registrada para ese viaje --
     nunca se adivina entre varias. Si no hay ninguna, o hay más de una, se
     deja el `tipo` vacío: `previsualizar_lote` ya lo marca `TIPO_REQUERIDO`
-    de forma visible, nunca se aplica a ciegas."""
+    de forma visible, nunca se aplica a ciegas.
+
+    Bloque P0 CASO A -- caso real: "473001 tiene estadía. 473001 fue
+    aprobada." (dos oraciones, misma guía) llega aquí como DOS acciones
+    en el MISMO lote -- REGISTRAR_INCIDENCIA(TIENE_ESTADIA) seguida de
+    ACTUALIZAR_GESTION sin tipo. Antes, el backfill sólo consultaba el
+    ledger YA ESCRITO (`consultar_incidencias_operacionales`), que
+    todavía no conoce la primera acción del MISMO lote (se aplican en
+    orden, una a la vez, más adelante) -- la segunda quedaba
+    `TIPO_REQUERIDO` aunque el tipo fuera obvio, y `registrar_evento`
+    nunca llegaba a escribir el estado de gestión: el evento persistía
+    con `estado_gestion=None`, un estado no-terminal que vuelve a
+    calificar como "aplicable" en cualquier consulta posterior. Ahora se
+    mira PRIMERO si el MISMO lote ya trae un `REGISTRAR_INCIDENCIA` para
+    la misma guía con un tipo -- sólo si es único (nunca adivina entre
+    dos tipos distintos del mismo lote) se usa esa evidencia, sin
+    esperar a que el ledger la refleje. Si el lote no la trae, se cae al
+    mismo camino de siempre (ledger persistido)."""
     salida: list[dict] = []
     guias = [str(a.get("guia", "")).strip() for a in acciones]
     resueltas = resolver_guias(ruta_viajes=ruta_viajes, guias=guias)
+    tipos_por_guia_en_lote: dict[str, set[str]] = {}
+    for a in acciones:
+        if str(a.get("accion", "")) == "REGISTRAR_INCIDENCIA":
+            tipo_lote = str(a.get("tipo", "")).strip()
+            if tipo_lote:
+                tipos_por_guia_en_lote.setdefault(str(a.get("guia", "")).strip(), set()).add(tipo_lote)
     for accion in acciones:
         accion = dict(accion)
         necesita_tipo = accion.get("accion") == "ACTUALIZAR_GESTION" and not str(accion.get("tipo", "")).strip()
+        if necesita_tipo:
+            tipos_lote = tipos_por_guia_en_lote.get(str(accion.get("guia", "")).strip(), set())
+            if len(tipos_lote) == 1:
+                accion["tipo"] = next(iter(tipos_lote))
+                accion["tipo_inferido_de_incidencia_existente"] = True
+                necesita_tipo = False
         if necesita_tipo:
             info = resueltas.get(str(accion.get("guia", "")).strip())
             if info and info.get("estado") == "RESUELTA":
@@ -94,7 +123,7 @@ def proponer_lote_incidencias(*, texto: str, raiz: str | Path, ruta_viajes: str 
             "mensaje": "No reconocí ninguna instrucción de incidencias en ese texto -- no se propuso ningún cambio.",
         }
     acciones = _backfill_tipo_pendiente(raiz=raiz, ruta_viajes=ruta_viajes, acciones=acciones)
-    preview = previsualizar_lote(ruta_viajes=ruta_viajes, acciones=acciones)
+    preview = previsualizar_lote(ruta_viajes=ruta_viajes, acciones=acciones, raiz=raiz)
     # Distingue, aparte del rechazo de `previsualizar_lote`, el fragmento
     # que esta capa ni siquiera pudo interpretar (`accion==""`) del que sí
     # se interpretó pero el allowlist/resolución de guía rechaza -- ambos
@@ -107,9 +136,9 @@ def proponer_lote_incidencias(*, texto: str, raiz: str | Path, ruta_viajes: str 
         "preview": preview,
         "fragmentos_no_reconocidos": no_reconocidas,
         "mensaje": (
-            f"Propuesta de {len(acciones)} acción(es) -- revise el detalle antes de confirmar."
+            f"{preview['resumen']['aplicables']} aplicable(s), {preview['resumen']['ya_registradas']} ya registrada(s) y {preview['resumen']['no_resueltas']} no resuelta(s) -- revise el detalle antes de confirmar."
             if preview["aplicable"]
-            else "Algunas acciones del lote no se pudieron resolver -- revise el detalle antes de confirmar."
+            else "No hay acciones aplicables; las no resueltas quedan sólo como información."
         ),
     }
 
@@ -152,6 +181,7 @@ def confirmar_lote_incidencias(
             "aplicados": aplicados,
             "ya_registrados": ya_registrados,
             "no_aplicados": len(errores),
+            "no_resueltas": len(errores),
             "errores": errores,
         },
     }

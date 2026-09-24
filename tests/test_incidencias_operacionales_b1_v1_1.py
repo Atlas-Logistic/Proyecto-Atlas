@@ -207,12 +207,12 @@ def test_guia_inexistente_preview_marca_no_encontrada_sin_escribir(tmp_path):
     assert propuesta["preview"]["aplicable"] is False
     assert propuesta["preview"]["acciones"][0]["estado"] == "NO_ENCONTRADA"
     assert not _ruta_eventos(raiz).exists()
-    # Ni siquiera confirmando se puede aplicar un preview no aplicable en
-    # su totalidad -- pero cada acción se evalúa por su cuenta; una guía
-    # NO_ENCONTRADA nunca produce un evento (ver aplicar_lote).
+    # Sin acción aplicable no hay escritura ni confirmación útil.
     resultado = confirmar_lote_incidencias(
         raiz=raiz, ruta_viajes=ruta_viajes, acciones=propuesta["acciones"], actor="TEST", confirmado=True,
     )
+    assert resultado["aplicado"] is False
+    assert resultado["motivo"] == "SIN_ACCIONES_APLICABLES"
     assert resultado["resultados"][0]["ok"] is False
     assert resultado["resultados"][0]["estado"] == "NO_ENCONTRADA"
     assert not _ruta_eventos(raiz).exists()
@@ -226,7 +226,41 @@ def test_lote_parcialmente_invalido_muestra_cada_parte_explicitamente(tmp_path):
     acciones_preview = propuesta["preview"]["acciones"]
     assert acciones_preview[0]["guia"] == "473001" and acciones_preview[0]["estado"] == "RESUELTA"
     assert acciones_preview[1]["guia"] == "999999" and acciones_preview[1]["estado"] == "NO_ENCONTRADA"
-    assert propuesta["preview"]["aplicable"] is False
+    assert propuesta["preview"]["aplicable"] is True
+    resultado = confirmar_lote_incidencias(
+        raiz=raiz, ruta_viajes=ruta_viajes, acciones=propuesta["acciones"], actor="TEST", confirmado=True,
+    )
+    assert resultado["resumen"] == {
+        "aplicados": 1, "ya_registrados": 0, "no_aplicados": 1,
+        "no_resueltas": 1, "errores": [{"guia": "999999", "estado": "NO_ENCONTRADA"}],
+    }
+
+
+def test_lote_mezcla_valida_ya_registrada_e_inexistente_sin_bloquear(tmp_path):
+    raiz, ruta_viajes = _entorno(tmp_path, FILAS_BASE)
+    previa = proponer_lote_incidencias(
+        texto="La guía 473001 tiene estadía.", raiz=raiz, ruta_viajes=ruta_viajes,
+    )
+    confirmar_lote_incidencias(
+        raiz=raiz, ruta_viajes=ruta_viajes, acciones=previa["acciones"], actor="TEST", confirmado=True,
+    )
+    propuesta = proponer_lote_incidencias(
+        texto="Las guías 473001, 473004 y 999999 tienen estadía.", raiz=raiz, ruta_viajes=ruta_viajes,
+    )
+    assert [x["estado"] for x in propuesta["preview"]["acciones"]] == [
+        "YA_REGISTRADA", "RESUELTA", "NO_ENCONTRADA",
+    ]
+    assert propuesta["preview"]["aplicable"] is True
+
+    resultado = confirmar_lote_incidencias(
+        raiz=raiz, ruta_viajes=ruta_viajes, acciones=propuesta["acciones"], actor="TEST", confirmado=True,
+    )
+
+    assert resultado["resumen"] == {
+        "aplicados": 1, "ya_registrados": 1, "no_aplicados": 1,
+        "no_resueltas": 1, "errores": [{"guia": "999999", "estado": "NO_ENCONTRADA"}],
+    }
+    assert len(json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))["eventos"]) == 2
 
 
 def test_sin_confirmacion_no_escribe(tmp_path):
@@ -249,7 +283,7 @@ def test_confirmacion_aplica_y_lote_multiple_se_registra(tmp_path):
         raiz=raiz, ruta_viajes=ruta_viajes, acciones=propuesta["acciones"], actor="JAVIER", confirmado=True,
     )
     assert resultado["aplicado"] is True
-    assert resultado["resumen"] == {"aplicados": 3, "ya_registrados": 0, "no_aplicados": 0, "errores": []}
+    assert resultado["resumen"] == {"aplicados": 3, "ya_registrados": 0, "no_aplicados": 0, "no_resueltas": 0, "errores": []}
     documento = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
     assert len(documento["eventos"]) == 3
     assert {e["tipo_evento"] for e in documento["eventos"]} == {"TIENE_ESTADIA"}
@@ -266,7 +300,9 @@ def test_reintento_es_idempotente_no_duplica(tmp_path):
     # confirmado otra vez -- nunca debe duplicar eventos.
     p2 = proponer_lote_incidencias(texto=texto, raiz=raiz, ruta_viajes=ruta_viajes)
     r2 = confirmar_lote_incidencias(raiz=raiz, ruta_viajes=ruta_viajes, acciones=p2["acciones"], actor="JAVIER", confirmado=True)
-    assert r2["resumen"] == {"aplicados": 0, "ya_registrados": 3, "no_aplicados": 0, "errores": []}
+    assert r2["aplicado"] is False
+    assert r2["motivo"] == "SIN_ACCIONES_APLICABLES"
+    assert r2["resumen"] == {"aplicables": 0, "ya_registradas": 3, "no_resueltas": 0}
     documento = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
     assert len(documento["eventos"]) == 3  # nunca duplicó
 
@@ -368,7 +404,7 @@ def test_confirmar_estadia_confirmada_aplica_tipo_y_gestion_en_una_sola_escritur
     texto = "Las guías 473001, 473004 y 473010 tienen estadía confirmada."
     p1 = proponer_lote_incidencias(texto=texto, raiz=raiz, ruta_viajes=ruta_viajes)
     r1 = confirmar_lote_incidencias(raiz=raiz, ruta_viajes=ruta_viajes, acciones=p1["acciones"], actor="JAVIER", confirmado=True)
-    assert r1["resumen"] == {"aplicados": 3, "ya_registrados": 0, "no_aplicados": 0, "errores": []}
+    assert r1["resumen"] == {"aplicados": 3, "ya_registrados": 0, "no_aplicados": 0, "no_resueltas": 0, "errores": []}
 
     documento = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
     assert len(documento["eventos"]) == 3
@@ -380,7 +416,8 @@ def test_confirmar_estadia_confirmada_aplica_tipo_y_gestion_en_una_sola_escritur
     # Reintento con la MISMA instrucción -- idempotente, nunca duplica.
     p2 = proponer_lote_incidencias(texto=texto, raiz=raiz, ruta_viajes=ruta_viajes)
     r2 = confirmar_lote_incidencias(raiz=raiz, ruta_viajes=ruta_viajes, acciones=p2["acciones"], actor="JAVIER", confirmado=True)
-    assert r2["resumen"] == {"aplicados": 0, "ya_registrados": 3, "no_aplicados": 0, "errores": []}
+    assert r2["aplicado"] is False
+    assert r2["resumen"] == {"aplicables": 0, "ya_registradas": 3, "no_resueltas": 0}
     documento_final = json.loads(_ruta_eventos(raiz).read_text(encoding="utf-8"))
     assert len(documento_final["eventos"]) == 3  # nunca duplicó
 
@@ -406,6 +443,7 @@ def test_accion_fuera_de_allowlist_nunca_se_aplica(tmp_path):
     resultado_preview = previsualizar_lote(ruta_viajes=ruta_viajes, acciones=acciones)
     assert resultado_preview["acciones"][0]["estado"] == "ACCION_NO_PERMITIDA"
     resultado = confirmar_lote_incidencias(raiz=raiz, ruta_viajes=ruta_viajes, acciones=acciones, actor="JAVIER", confirmado=True)
+    assert resultado["aplicado"] is False
     assert resultado["resultados"][0]["ok"] is False
     assert not _ruta_eventos(raiz).exists()
 

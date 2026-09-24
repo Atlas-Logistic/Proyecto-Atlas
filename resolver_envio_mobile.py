@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, leer_estado_operacion, resolver_raiz_atlas
-from atlas_core.mobile import TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS, RepositorioEnviosMobile
+from atlas_core.mobile import (
+    TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS, RepositorioEnviosMobile, registrar_eventos_canonicos_mobile,
+    reintentar_evidencias_firmadas_pendientes,
+)
 
 
 def resolver(raiz: Path, envio_id: str, numero_transporte: str) -> dict:
@@ -39,6 +42,14 @@ def resolver(raiz: Path, envio_id: str, numero_transporte: str) -> dict:
         }
         registro["asociado_manualmente_en"] = datetime.now(timezone.utc).isoformat()
         repo.guardar(envio_id, registro)
+    # Bloque MOBILE CONTRATO V2 -- ya asociada a un viaje: sus incidencias
+    # pasan al registro canónico y se reintentan las guías firmadas que
+    # esperaban esta guía. Best-effort: nunca revierte la confirmación.
+    try:
+        registrar_eventos_canonicos_mobile(repo)
+        reintentar_evidencias_firmadas_pendientes(repo, dataset=dataset)
+    except Exception:
+        pass
     return {"ok": True, "envio_id": envio_id, "numero_transporte": numero_transporte}
 
 

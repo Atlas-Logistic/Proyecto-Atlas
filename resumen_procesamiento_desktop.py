@@ -7,6 +7,8 @@ import csv
 import json
 from pathlib import Path
 
+from atlas_core.ingesta_pdf import directorio_evidencia_pdf_para_dataset, leer_evidencias_adicionales
+
 
 def _leer_csv(
     ruta: Path,
@@ -83,52 +85,78 @@ def comando_resumen(argumentos: argparse.Namespace) -> None:
         fila["archivo"] for fila in sin_transporte if fila.get("archivo", "").strip()
     }
 
-    resultados = []
-    nombres = list(dict.fromkeys(argumentos.archivo))
-    for nombre in nombres:
-        fila = por_archivo.get(nombre)
-        if fila is None:
-            resultados.append({"archivo": nombre, "encontrado": False})
-            continue
-        transporte = fila.get("numero_transporte", "").strip()
-        viaje_encontrado = next(
+    # Un PDF genera filas por página (`<pdf>::pagina=NNNN`); una página de
+    # una guía+transporte ya existente no crea fila, pero puede quedar como
+    # evidencia adicional del documento existente (ver `atlas_core.
+    # ingesta_pdf.registrar_evidencia_adicional`).
+    evidencias_adicionales = leer_evidencias_adicionales(
+        directorio_evidencia_pdf_para_dataset(argumentos.csv_masivo)
+    )
+
+    def viaje_de(archivo: str) -> dict[str, str] | None:
+        return next(
             (
                 viaje
                 for viaje in viajes
-                if nombre
+                if archivo
                 in [d.strip() for d in viaje.get("documentos", "").split("|")]
             ),
             None,
         )
+
+    def resultado_fila(archivo: str, fila: dict[str, str]) -> dict[str, object]:
+        transporte = fila.get("numero_transporte", "").strip()
+        viaje_encontrado = viaje_de(archivo)
         if not transporte or (
-            nombre in archivos_sin_transporte and viaje_encontrado is None
+            archivo in archivos_sin_transporte and viaje_encontrado is None
         ):
-            resultados.append(
-                {
-                    "archivo": nombre,
-                    "encontrado": True,
-                    "sin_transporte": True,
-                    "numero_transporte": transporte,
-                }
-            )
-            continue
-        resultados.append(
-            {
-                "archivo": nombre,
+            return {
+                "archivo": archivo,
                 "encontrado": True,
-                "sin_transporte": False,
+                "sin_transporte": True,
                 "numero_transporte": transporte,
-                "es_nuevo": transporte not in antes,
-                "estado": (
-                    viaje_encontrado.get("estado") if viaje_encontrado else None
-                ),
-                "numeros_guia": (
-                    viaje_encontrado.get("numeros_guia")
-                    if viaje_encontrado
-                    else None
-                ),
             }
+        return {
+            "archivo": archivo,
+            "encontrado": True,
+            "sin_transporte": False,
+            "numero_transporte": transporte,
+            "es_nuevo": transporte not in antes,
+            "estado": viaje_encontrado.get("estado") if viaje_encontrado else None,
+            "numeros_guia": (
+                viaje_encontrado.get("numeros_guia") if viaje_encontrado else None
+            ),
+        }
+
+    resultados = []
+    nombres = list(dict.fromkeys(argumentos.archivo))
+    for nombre in nombres:
+        archivos = sorted(
+            archivo
+            for archivo in por_archivo
+            if archivo == nombre or archivo.startswith(nombre + "::pagina=")
         )
+        if archivos:
+            resultados.extend(resultado_fila(a, por_archivo[a]) for a in archivos)
+            continue
+        asociadas = [
+            e for e in evidencias_adicionales
+            if e.get("evidencia", {}).get("referencia_original") == nombre
+        ]
+        if asociadas:
+            for asociacion in asociadas:
+                documento = asociacion.get("documento", {})
+                resultado = resultado_fila(
+                    str(documento.get("archivo", "")),
+                    {"numero_transporte": str(documento.get("numero_transporte", ""))},
+                )
+                resultado.update(
+                    archivo=str(asociacion.get("evidencia", {}).get("archivo", nombre)),
+                    evidencia_adicional_de=str(documento.get("archivo", "")),
+                )
+                resultados.append(resultado)
+            continue
+        resultados.append({"archivo": nombre, "encontrado": False})
     print(json.dumps(resultados, ensure_ascii=False))
 
 

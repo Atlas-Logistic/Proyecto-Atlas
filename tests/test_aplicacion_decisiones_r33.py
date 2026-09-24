@@ -207,3 +207,269 @@ def test_f_rollback_de_catalogo_concurrente_no_borra_actualizacion_ajena_posteri
     nombres = {o.nombre_canonico for o in obras}
     # La obra de "otro proceso" sobrevive intacta -- el revert nunca la pisó.
     assert "OBRA DE OTRO PROCESO" in nombres
+
+
+# ============================================================
+# Bloque HOMOLOGACIÓN OBRA -> OPERACIÓN -- caso real 0000359449/474381:
+# Javier confirmó "LINSAS MONTAJES Y SERVICIOS" (OCR) == "LINEAS MONTAJES
+# Y SERVICIOS HENAO SPA" (canónico); el catálogo quedaba correcto
+# (nombre_canonico + alias_documental), pero la ficha del viaje seguía
+# mostrando el texto documental porque nada reescribía `obra_destino` en
+# el dataset -- ni al aplicar la decisión, ni al revalidar después. Estas
+# pruebas usan la misma fixture `_entorno` (OCR "OBRA NUEVA" -> canónico
+# "OBRA CANONICA LIMITADA") -- nunca los números reales del caso, nunca
+# hardcodeados -- para que el mismo criterio valga para cualquier
+# decisión de obra equivalente.
+# ============================================================
+
+def test_registrar_con_correccion_actualiza_la_fila_del_documento_al_canonico(tmp_path):
+    """Items 1/2/4 del bloque: OCR trae una obra incorrecta, el humano
+    confirma la obra canónica real, y la FICHA (el campo `obra_destino`
+    del dataset que lee `gestor_viajes`/`entregas`/reportes) debe mostrar
+    el canónico de inmediato -- sin esperar ninguna revalidación
+    posterior, sin depender de que la fila tuviera un motivo bloqueante."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    resultado = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    assert resultado["ok"]
+
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["obra_destino"] == "OBRA CANONICA LIMITADA"
+
+
+def test_registrar_con_correccion_conserva_el_valor_documental_para_trazabilidad(tmp_path):
+    """Item 3: el OCR original NUNCA se pierde -- sigue disponible como
+    alias en el catálogo (ya cubierto por
+    test_registrar_obra_corregida_conserva_ocr_como_alias_sin_duplicar_
+    entidad) y, aparte, como `valor_documental` auditable en el ledger de
+    decisiones aplicadas -- la trazabilidad documental es independiente
+    de qué se reescribe como operacional."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    assert ledger["aplicaciones"][0]["valor_documental"] == "OBRA NUEVA"
+
+
+def test_viaje_y_entrega_muestran_la_obra_canonica_tras_aplicar_la_decision(tmp_path):
+    """Items 4/5: la ficha del VIAJE y de la ENTREGA (las superficies
+    operacionales reales que arma `gestor_viajes.agrupar_viajes`/
+    `Viaje.entregas`) deben mostrar la obra canónica, nunca el texto
+    documental -- integración end-to-end, no sólo la fila cruda."""
+    from atlas_core.gestor_viajes import agrupar_viajes
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    # `_entorno` usa "T1" como transporte (válido para el contrato de
+    # decisiones, que nunca exige transporte numérico) -- `agrupar_viajes`
+    # sí lo exige (`transporte_valido`); se sustituye por uno numérico
+    # sintético sólo para poder ejercer la agrupación real, sin tocar
+    # ningún otro campo ya persistido por la decisión.
+    fila["numero_transporte"] = "0000900001"
+
+    viajes, pendientes = agrupar_viajes([fila])
+    assert not pendientes
+    assert len(viajes) == 1
+    viaje = viajes[0]
+    assert viaje.obras_destino == ["OBRA CANONICA LIMITADA"]
+    assert len(viaje.entregas) == 1
+    assert viaje.entregas[0]["obras_destino"] == ["OBRA CANONICA LIMITADA"]
+
+
+def test_revalidar_de_nuevo_no_revierte_al_valor_documental(tmp_path):
+    """Item 6: un "reload"/nueva revalidación posterior (Javier refresca
+    Desktop, o corre la reconciliación de nuevo) nunca debe reintroducir
+    el texto OCR ya corregido -- ni dejarlo como estaba, ni volver a
+    escribirlo por error."""
+    from atlas_core.revalidacion_documental import revalidar_obra_destino_sin_ocr
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    dataset = actual / "analisis_completo_guias.csv"
+
+    revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["obra_destino"] == "OBRA CANONICA LIMITADA"
+
+
+def test_siguiente_aparicion_con_el_mismo_ocr_no_vuelve_a_preguntar(tmp_path):
+    """Item 7: una vez homologado (alias único y fuerte -- una confirmación
+    humana explícita), un documento FUTURO con el mismo texto OCR no debe
+    generar una nueva tarjeta OBRA_DESCONOCIDA -- el aprendizaje ya
+    existente (`detectar_decisiones_documento`, reconocimiento por alias)
+    ya cubre esto; esta prueba sólo lo verifica explícitamente para el
+    mismo escenario del bug real, con una guía y archivo distintos."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+
+    nuevas = detectar_decisiones_documento(
+        archivo="otra_guia_futura.png",
+        datos={
+            "número de guía": "555", "cliente": cliente.razon_social,
+            "RUT del cliente": "50.234.350-5", "obra destino": "OBRA NUEVA",
+        },
+        carpeta_catalogos=catalogos,
+    )
+    assert not any(d["tipo"] == "OBRA_DESCONOCIDA" for d in nuevas)
+
+
+def test_variante_realmente_desconocida_no_se_auto_homologa(tmp_path):
+    """Item 8: un texto documental que NO coincide con ninguna obra/alias
+    conocido es ambigüedad real -- `revalidar_obra_destino_sin_ocr` debe
+    abstenerse (nunca inventar una homologación): ni reescribe
+    `obra_destino`, ni retira el motivo bloqueante."""
+    from atlas_core.revalidacion_documental import revalidar_obra_destino_sin_ocr
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    # Ninguna decisión se aplica -- el catálogo de obras queda vacío
+    # (ninguna obra CONFIRMADA con la que "OBRA COMPLETAMENTE DESCONOCIDA"
+    # pudiera coincidir, ni por nombre ni por alias).
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    filas[0]["obra_destino"] = "OBRA COMPLETAMENTE DESCONOCIDA"
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=filas[0].keys(), delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    resultado = revalidar_obra_destino_sin_ocr(ruta_dataset=dataset, carpeta_catalogos=catalogos)
+    assert resultado["guias_actualizadas"] == []
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["obra_destino"] == "OBRA COMPLETAMENTE DESCONOCIDA"
+    assert "OBRA_DESTINO_SIN_CORROBORAR" in fila["motivos_revision_documento"]
+
+
+def test_catchup_revalida_fila_stale_de_una_decision_ya_aplicada_antes_del_fix(tmp_path):
+    """Caso real 0000359449/474381: decisiones aplicadas ANTES de este fix
+    (o antes de que este mecanismo existiera) dejaron el catálogo
+    correcto, pero la fila del dataset con el texto documental para
+    siempre -- ninguna revalidación normal la toca porque no tiene ningún
+    motivo bloqueante. `revalidar_obra_destino_por_decision_aplicada_sin_
+    ocr` es el mecanismo de catch-up genérico (nunca hardcodeado a
+    ninguna guía/transporte -- recorre TODO el ledger) para corregir
+    retroactivamente esas filas."""
+    from atlas_core.revalidacion_documental import revalidar_obra_destino_por_decision_aplicada_sin_ocr
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    dataset = actual / "analisis_completo_guias.csv"
+
+    # Simula el estado "pre-fix" real encontrado en G:\: la fila quedó con
+    # el texto documental y SIN motivo bloqueante, aunque el catálogo/
+    # ledger ya reflejen la corrección humana.
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    filas[0]["obra_destino"] = "OBRA NUEVA"
+    filas[0]["motivos_revision_documento"] = ""
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=filas[0].keys(), delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    resultado = revalidar_obra_destino_por_decision_aplicada_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json", carpeta_catalogos=catalogos,
+    )
+    assert resultado["guias_actualizadas"] == ["100"]
+
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["obra_destino"] == "OBRA CANONICA LIMITADA"
+
+
+def test_catchup_nunca_pisa_una_fila_que_ya_cambio_por_otra_via(tmp_path):
+    """Seguridad del catch-up: si la fila ya no muestra el texto
+    documental exacto que originó la decisión (otra corrección real
+    posterior), nunca se pisa -- ni con el canónico ni con ningún otro
+    valor."""
+    from atlas_core.revalidacion_documental import revalidar_obra_destino_por_decision_aplicada_sin_ocr
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    filas[0]["obra_destino"] = "OTRO VALOR CUALQUIERA YA CORREGIDO"
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=filas[0].keys(), delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    resultado = revalidar_obra_destino_por_decision_aplicada_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json", carpeta_catalogos=catalogos,
+    )
+    assert resultado["guias_actualizadas"] == []
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["obra_destino"] == "OTRO VALOR CUALQUIERA YA CORREGIDO"
+
+
+def test_catchup_numeros_transporte_acota_el_alcance(tmp_path):
+    """El filtro `numeros_transporte` (mismo criterio de alcance que
+    `revalidar_documentos_por_transporte`) deja fuera cualquier fila de un
+    transporte no incluido, aunque el ledger sí tenga una decisión
+    terminal aplicable -- permite revalidar UN transporte real sin tocar
+    el resto del catch-up general."""
+    from atlas_core.revalidacion_documental import revalidar_obra_destino_por_decision_aplicada_sin_ocr
+
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+        nombre_obra_manual="OBRA CANONICA LIMITADA",
+    )
+    dataset = actual / "analisis_completo_guias.csv"
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    filas[0]["obra_destino"] = "OBRA NUEVA"
+    filas[0]["motivos_revision_documento"] = ""
+    with dataset.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=filas[0].keys(), delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    # "T1" es el transporte real de la fixture -- pedir uno DISTINTO
+    # deja la fila fuera de alcance, aunque el ledger sí resolviera.
+    resultado_fuera_de_alcance = revalidar_obra_destino_por_decision_aplicada_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json", carpeta_catalogos=catalogos,
+        numeros_transporte={"OTRO_TRANSPORTE_CUALQUIERA"},
+    )
+    assert resultado_fuera_de_alcance["guias_actualizadas"] == []
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(csv.DictReader(archivo, delimiter=";"))
+    assert fila["obra_destino"] == "OBRA NUEVA"  # sin tocar
+
+    resultado_en_alcance = revalidar_obra_destino_por_decision_aplicada_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=actual / "decisiones_aplicadas.json", carpeta_catalogos=catalogos,
+        numeros_transporte={"T1"},
+    )
+    assert resultado_en_alcance["guias_actualizadas"] == ["100"]

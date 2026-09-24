@@ -74,6 +74,16 @@ GESTION_RECHAZADA = "RECHAZADA"
 ESTADOS_GESTION_SOPORTADOS = frozenset({GESTION_REPORTADA, GESTION_ENVIADA, GESTION_PENDIENTE_RESPUESTA, GESTION_APROBADA, GESTION_RECHAZADA})
 REVISION_SIN_INCIDENCIA = "SIN_INCIDENCIA"
 
+# Ciclo de vida de estadía.  El hecho persistido sigue siendo el mismo
+# ``TIENE_ESTADIA``; este campo describe su estado vigente.  Así una
+# aprobación no crea una segunda incidencia activa ni pierde la auditoría.
+ESTADO_INCIDENCIA_ESPERA_ESTADIA = "ESPERA_ESTADIA"
+ESTADO_INCIDENCIA_ESTADIA_APROBADA = "ESTADIA_APROBADA"
+ESTADOS_INCIDENCIA_ESTADIA = frozenset({
+    ESTADO_INCIDENCIA_ESPERA_ESTADIA,
+    ESTADO_INCIDENCIA_ESTADIA_APROBADA,
+})
+
 # Los 4 tipos iniciales. Son MARCA_VIAJE: como máximo UN hecho activo del
 # mismo tipo por viaje dentro del mismo contexto empresarial. La lista NO
 # es cerrada -- un `tipo_evento` desconocido se acepta igual y se trata
@@ -320,6 +330,34 @@ def _aplicar_enriquecimiento(evento: dict, enriquecimiento: Mapping[str, object]
     )
 
 
+def estado_estadia_vigente(evento: Mapping[str, object]) -> str | None:
+    """Devuelve el ciclo vigente sólo cuando está explícito o es legible.
+
+    Los eventos históricos no se reescriben. Se reconoce compatibilidad
+    únicamente para el texto operacional exacto ya usado por Desktop; un
+    ``TIENE_ESTADIA`` sin esa señal queda indeterminado, nunca aprobado por
+    una firma, recepción o cierre de viaje.
+    """
+    if str(evento.get("tipo_evento", "")).strip() != "TIENE_ESTADIA":
+        return None
+    estado = str(evento.get("estado_incidencia", "")).strip()
+    if estado in ESTADOS_INCIDENCIA_ESTADIA:
+        return estado
+    nota = " ".join(str(evento.get("nota", "")).upper().split())
+    if "ESPERA" in nota and "AUTORIZ" in nota and "ESTAD" in nota:
+        return ESTADO_INCIDENCIA_ESPERA_ESTADIA
+    if (
+        "ESTE VIAJE TIENE ESTADIA" in nota
+        and "GUIA FIRMADA AL CORREO" in nota
+    ):
+        return ESTADO_INCIDENCIA_ESTADIA_APROBADA
+    # Los eventos ya marcados explícitamente como APROBADA son también
+    # inequívocos, aun si su nota libre fue luego eliminada.
+    if str(evento.get("estado_gestion", "")).strip() == GESTION_APROBADA:
+        return ESTADO_INCIDENCIA_ESTADIA_APROBADA
+    return None
+
+
 def registrar_evento(
     *,
     raiz: str | Path | None = None,
@@ -335,6 +373,7 @@ def registrar_evento(
     evidencia: tuple[str, ...] = (),
     monto_solicitado: float | None = None,
     monto_aprobado: float | None = None,
+    estado_incidencia: str | None = None,
     reloj: Callable[[], datetime] = _RELOJ_UTC,
 ) -> dict:
     """Registra (o reactiva, o deja igual) un hecho MARCA_VIAJE.
@@ -362,6 +401,17 @@ def registrar_evento(
         raise ValueError("numero_transporte es obligatorio (clave de idempotencia MARCA_VIAJE).")
     if estado_gestion is not None and estado_gestion not in ESTADOS_GESTION_SOPORTADOS:
         raise ValueError("Estado de gestión operacional no soportado.")
+    if estado_incidencia is not None:
+        if tipo_evento != "TIENE_ESTADIA" or estado_incidencia not in ESTADOS_INCIDENCIA_ESTADIA:
+            raise ValueError("Estado de incidencia de estadía no soportado.")
+        esperado = (
+            GESTION_PENDIENTE_RESPUESTA
+            if estado_incidencia == ESTADO_INCIDENCIA_ESPERA_ESTADIA
+            else GESTION_APROBADA
+        )
+        if estado_gestion is not None and estado_gestion != esperado:
+            raise ValueError("El estado de gestión no corresponde al ciclo de estadía.")
+        estado_gestion = esperado
 
     ruta = ruta_eventos_operacionales(raiz=raiz)
     clave = clave_idempotencia(
@@ -395,6 +445,7 @@ def registrar_evento(
                 "nota": str(nota or ""),
                 "estado": ESTADO_ACTIVO,
                 "estado_gestion": estado_gestion,
+                "estado_incidencia": estado_incidencia,
                 "fecha_evento": _fecha_operacional_iso(fecha_evento),
                 "evidencia": list(evidencia),
                 "monto_solicitado": monto_solicitado,
@@ -457,6 +508,17 @@ def registrar_evento(
             )
             cambio = True
 
+        if estado_incidencia is not None and existente.get("estado_incidencia") != estado_incidencia:
+            anterior = estado_estadia_vigente(existente)
+            existente["estado_incidencia"] = estado_incidencia
+            existente["historial"].append({
+                "accion": "ESTADO_ESTADIA_ACTUALIZADO",
+                "en": ahora,
+                "origen": procedencia["origen"],
+                "detalle": {"anterior": anterior, "nuevo": estado_incidencia},
+            })
+            cambio = True
+
         # Sólo completa/actualiza gestión cuando el caller lo pidió; nunca
         # fuerza estados de cobro a tipos que no los usan.
         for campo, valor in (("estado_gestion", estado_gestion), ("monto_solicitado", monto_solicitado), ("monto_aprobado", monto_aprobado)):
@@ -496,6 +558,38 @@ def registrar_evento(
             "cambio": cambio,
             "evento": json.loads(json.dumps(existente)),
         }
+
+
+def registrar_estado_estadia(
+    *,
+    raiz: str | Path | None = None,
+    numero_transporte: str,
+    estado_incidencia: str,
+    nota: str = "",
+    contexto_empresarial: str = CONTEXTO_EMPRESARIAL_SIN_ASIGNAR,
+    origen: str,
+    referencia: str = "",
+    enriquecimiento: Mapping[str, object] | None = None,
+    reloj: Callable[[], datetime] = _RELOJ_UTC,
+) -> dict:
+    """Registra el estado vigente de la única incidencia de estadía.
+
+    Acepta aprobación directa: si no hubo espera, crea el mismo hecho
+    ``TIENE_ESTADIA`` ya en ``ESTADIA_APROBADA``. Repetir cualquiera de los
+    dos estados es un no-op idempotente.
+    """
+    return registrar_evento(
+        raiz=raiz,
+        tipo_evento="TIENE_ESTADIA",
+        numero_transporte=numero_transporte,
+        nota=nota,
+        contexto_empresarial=contexto_empresarial,
+        origen=origen,
+        referencia=referencia,
+        enriquecimiento=enriquecimiento,
+        estado_incidencia=estado_incidencia,
+        reloj=reloj,
+    )
 
 
 def anular_evento(

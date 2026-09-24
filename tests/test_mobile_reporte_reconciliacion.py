@@ -5,7 +5,7 @@ lee -- la fila del documento ya quedaba bien escrita en el dataset,
 pero Desktop seguía mostrando un reporte viejo hasta que algún proceso
 externo, sin relación con la subida Mobile, volviera a reconciliar.
 
-`servidor_mobile._procesar_y_revalidar` ahora cierra ese hueco llamando
+`atlas_core.mobile.procesar_y_revalidar_envio_mobile` ahora cierra ese hueco llamando
 al reconciliador general ya existente (`revalidar_y_regenerar_reporte`)
 al terminar cada envío -- nunca un segundo reconciliador paralelo,
 nunca bloquea el 202 (corre en el mismo worker de 1 hilo en segundo
@@ -19,11 +19,10 @@ from pathlib import Path
 
 from atlas_core.almacenamiento_portable import escribir_estado_operacion, leer_estado_operacion
 from atlas_core.decisiones_pendientes import generar_artefacto
-from atlas_core.mobile import RepositorioEnviosMobile
+from atlas_core.mobile import RepositorioEnviosMobile, _regenerar_reporte_tras_envio_mobile
 from atlas_core.procesamiento_masivo import COLUMNAS, _escribir_filas
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
-from servidor_mobile import _procesar_y_revalidar, _regenerar_reporte_tras_envio_mobile
 
 
 def _dataset_vacio(ruta: Path) -> None:
@@ -125,14 +124,15 @@ def test_regenerar_reporte_tras_envio_mobile_actualiza_estado_operacion_y_viajes
 
 
 def test_procesar_y_revalidar_real_encadena_ocr_asociacion_y_reconciliacion(tmp_path: Path, monkeypatch) -> None:
-    """Ejercita `_procesar_y_revalidar` de verdad (el punto de entrada
-    real que usa `do_POST` en segundo plano) -- sólo se reemplaza el
-    paso de OCR (mismo patrón ya usado en
+    """Ejercita `procesar_y_revalidar_envio_mobile` de verdad (el punto de
+    entrada real que usa `do_POST` en segundo plano, y que reutiliza el
+    consumidor PULL del Bloque MOBILE SINCRONIZACIÓN PULL V1) -- sólo se
+    reemplaza el paso de OCR (mismo patrón ya usado en
     test_mobile_guias_v1.py::test_mobile_usa_el_selector_normal_de_
     proveedor_ocr) para no depender de una imagen real; el resto de la
     cadena (asociación + reconciliación de reporte) es el código real,
     sin mocks."""
-    import servidor_mobile as sm
+    import atlas_core.mobile as mobile_mod
 
     catalogos = _catalogos_minimos(tmp_path / "catalogos_privados")
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
@@ -151,9 +151,9 @@ def test_procesar_y_revalidar_real_encadena_ocr_asociacion_y_reconciliacion(tmp_
         repositorio.guardar(envio_id_arg, registro)
         return registro
 
-    monkeypatch.setattr(sm, "procesar_envio_mobile", procesar_envio_mobile_falso)
+    monkeypatch.setattr(mobile_mod, "procesar_envio_mobile", procesar_envio_mobile_falso)
 
-    sm._procesar_y_revalidar(repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos)
+    mobile_mod.procesar_y_revalidar_envio_mobile(repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos)
 
     registro = repo.cargar(envio_id)
     assert registro["archivo_dataset"] != "", "la fila del documento debe seguir escribiéndose (paso ya existente, sin cambios)"
@@ -359,14 +359,14 @@ def test_estado_historico_real_con_dataset_sha256_binario_no_dispara_falsa_migra
 def test_fallo_revalidando_asociacion_no_impide_la_reconciliacion_del_reporte(tmp_path: Path, monkeypatch) -> None:
     """Hallazgo Codex #2: antes de este fix, si `revalidar_asociacion_
     mobile_sin_ocr` lanzaba una excepción, el código secuencial de
-    `_procesar_y_revalidar` se cortaba ahí mismo y `_regenerar_reporte_
-    tras_envio_mobile` (el paso siguiente) nunca llegaba a correr -- el
-    documento ya podía estar correctamente persistido (ese paso sólo
-    revalida, nunca reescribe la fila) y aun así quedaba invisible en
-    Desktop. Ahora la reconciliación del reporte corre siempre, y el
-    fallo queda diagnosticable en un campo aparte sin tocar estado/error
-    del envío ni duplicar nada."""
-    import servidor_mobile as sm
+    `procesar_y_revalidar_envio_mobile` se cortaba ahí mismo y
+    `_regenerar_reporte_tras_envio_mobile` (el paso siguiente) nunca
+    llegaba a correr -- el documento ya podía estar correctamente
+    persistido (ese paso sólo revalida, nunca reescribe la fila) y aun
+    así quedaba invisible en Desktop. Ahora la reconciliación del reporte
+    corre siempre, y el fallo queda diagnosticable en un campo aparte sin
+    tocar estado/error del envío ni duplicar nada."""
+    import atlas_core.mobile as mobile_mod
 
     catalogos = _catalogos_minimos(tmp_path / "catalogos_privados")
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
@@ -384,10 +384,10 @@ def test_fallo_revalidando_asociacion_no_impide_la_reconciliacion_del_reporte(tm
     def revalidar_asociacion_rota(repositorio, *, dataset):
         raise RuntimeError("catálogo ilegible (simulado)")
 
-    monkeypatch.setattr(sm, "procesar_envio_mobile", procesar_envio_mobile_falso)
-    monkeypatch.setattr(sm, "revalidar_asociacion_mobile_sin_ocr", revalidar_asociacion_rota)
+    monkeypatch.setattr(mobile_mod, "procesar_envio_mobile", procesar_envio_mobile_falso)
+    monkeypatch.setattr(mobile_mod, "revalidar_asociacion_mobile_sin_ocr", revalidar_asociacion_rota)
 
-    sm._procesar_y_revalidar(repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos)
+    mobile_mod.procesar_y_revalidar_envio_mobile(repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos)
 
     registro = repo.cargar(envio_id)
     # El fallo de la revalidación de asociación queda diagnosticable aparte...
@@ -405,7 +405,8 @@ def test_fallo_revalidando_asociacion_no_impide_la_reconciliacion_del_reporte(tm
 # ---- 5. un fallo reconciliando nunca borra/duplica el envío, y queda diagnosticable ----
 
 def test_fallo_reconciliando_queda_diagnosticable_y_nunca_toca_el_envio_ya_procesado(tmp_path: Path, monkeypatch) -> None:
-    import servidor_mobile as sm
+    import atlas_core.mobile as mobile_mod
+    import atlas_core.revalidacion_documental as revalidacion_mod
 
     catalogos = _catalogos_minimos(tmp_path / "catalogos_privados")
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
@@ -420,9 +421,14 @@ def test_fallo_reconciliando_queda_diagnosticable_y_nunca_toca_el_envio_ya_proce
     def reconciliador_roto(*, raiz_atlas, nombre_carpeta_reporte, **kwargs):
         raise RuntimeError("catálogo corrupto (simulado)")
 
-    monkeypatch.setattr(sm, "revalidar_y_regenerar_reporte", reconciliador_roto)
+    # `_regenerar_reporte_tras_envio_mobile` importa `revalidar_y_
+    # regenerar_reporte` de forma diferida (evita un ciclo real de
+    # imports, ver comentario en atlas_core/mobile.py) -- el parche debe
+    # ir sobre el módulo ORIGEN (`atlas_core.revalidacion_documental`),
+    # que es de donde ese import diferido lo relee en cada llamada.
+    monkeypatch.setattr(revalidacion_mod, "revalidar_y_regenerar_reporte", reconciliador_roto)
 
-    sm._regenerar_reporte_tras_envio_mobile(repo, envio_id)
+    mobile_mod._regenerar_reporte_tras_envio_mobile(repo, envio_id)
 
     registro_despues = repo.cargar(envio_id)
     assert registro_despues["reconciliacion_reporte"]["estado"] == "ERROR"

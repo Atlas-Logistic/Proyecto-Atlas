@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,11 +46,32 @@ ESTADOS = (
     # los datos nuevos de un reproceso, pero decisiones/bandeja todavía
     # no -- nunca "ERROR" (el documento en sí está bien).
     "DATOS_REPROCESADOS_DERIVADOS_PENDIENTES",
+    # Bloque MOBILE CONTRATO V2 -- sólo envíos con rol EVIDENCIA_FIRMADA
+    # (nunca pasan por OCR): esperando documento inequívoco / asociada.
+    "PENDIENTE_ASOCIACION", "EVIDENCIA_ASOCIADA",
 )
 TIPOS_NOVEDAD = (
     "", "ESPERA_AUTORIZACION_ESTADIA", "TIENE_ESTADIA", "DEVOLUCION_TOTAL",
     "DEVOLUCION_PARCIAL", "DOBLE_VUELTA",
 )
+# Bloque MOBILE CONTRATO V2 --
+# - `tipos_novedad`: lista de los MISMOS códigos de `TIPOS_NOVEDAD` (nunca
+#   códigos nuevos); `tipo_novedad` sigue existiendo (compatibilidad v1) y
+#   vale el primero de la lista.
+# - `rol_documento`: GUIA (por defecto, igual que v1) o EVIDENCIA_FIRMADA
+#   (foto de la guía firmada: evidencia adicional, nunca OCR/dataset).
+# - `evidencia_de_envio_id`: en una EVIDENCIA_FIRMADA, el `envio_id` de la
+#   guía de ESE mismo flujo a la que corresponde (relación explícita).
+ROL_GUIA = "GUIA"
+ROL_EVIDENCIA_FIRMADA = "EVIDENCIA_FIRMADA"
+ROLES_DOCUMENTO = (ROL_GUIA, ROL_EVIDENCIA_FIRMADA)
+ESTADO_PENDIENTE_ASOCIACION = "PENDIENTE_ASOCIACION"
+ESTADO_EVIDENCIA_ASOCIADA = "EVIDENCIA_ASOCIADA"
+# Incompatibilidad operacional REAL ya definida en Atlas (no preferencia de
+# UI): el registro canónico tiene UN solo hecho TIENE_ESTADIA por viaje con
+# UN estado vigente -- "espera autorización" y "tiene estadía" son dos
+# estados del mismo hecho, nunca dos incidencias simultáneas.
+_TIPOS_NOVEDAD_EXCLUYENTES = (frozenset({"ESPERA_AUTORIZACION_ESTADIA", "TIENE_ESTADIA"}),)
 # Bloque MOBILE V1 -- selector de planta de origen (COLINA/RENCA) en la
 # app del chofer (ver Atlas-Conductores-Mobile/src/sync-core.js,
 # PLANTAS_ORIGEN_VALIDAS -- mismos dos códigos, nunca texto libre).
@@ -74,10 +96,79 @@ MIME_PERMITIDOS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".we
 # redimensiona antes de subir (ver Atlas-Conductores-Mobile/src/camera.js).
 MAX_IMAGEN_BYTES = 28 * 1024 * 1024
 _ID_SEGURO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
+# Bloque MOBILE OBSERVACIÓN DEL CHOFER V1 -- texto libre OPCIONAL que el
+# chofer escribe para el ENVÍO completo (la tanda "Enviar N guías"; cada
+# documento de la tanda lleva la MISMA observación junto a su `lote_id`).
+# Se conserva tal cual lo escribió -- nunca se interpreta ni se convierte
+# en una decisión operacional aquí. Mismo límite que
+# Atlas-Conductores-Mobile/src/sync-core.js (MAX_OBSERVACION_CARACTERES),
+# contado en caracteres Unicode (code points) tras normalizar.
+MAX_OBSERVACION_CARACTERES = 500
+# Caracteres de control prohibidos: todo C0 salvo tabulación y salto de
+# línea (el textarea puede traer "\n"; "\r" se normaliza antes), más DEL.
+_CONTROL_OBSERVACION = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 class ErrorEnvioMobile(ValueError):
     pass
+
+
+def normalizar_observacion_mobile(valor: object) -> str:
+    """Normaliza y valida la observación del chofer. `None`/ausente -> "".
+
+    Sólo transformaciones que no cambian lo escrito: NFC (tildes/ñ
+    compuestas o descompuestas cuentan igual), CRLF/CR -> LF (multipart
+    serializa los saltos de un textarea como CRLF) y recorte de espacios
+    en los extremos. Nunca recorta silenciosamente sobre el límite: lo
+    rechaza, para que el chofer no pierda texto sin saberlo."""
+    if valor is None:
+        return ""
+    if not isinstance(valor, str):
+        raise ErrorEnvioMobile("observacion inválida")
+    texto = unicodedata.normalize("NFC", valor).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if _CONTROL_OBSERVACION.search(texto):
+        raise ErrorEnvioMobile("observacion contiene caracteres no permitidos")
+    if len(texto) > MAX_OBSERVACION_CARACTERES:
+        raise ErrorEnvioMobile(f"observacion supera {MAX_OBSERVACION_CARACTERES} caracteres")
+    return texto
+
+
+def normalizar_tipos_novedad(tipos: object, tipo_legado: object) -> tuple[list[str], str]:
+    """Bloque MOBILE CONTRATO V2 -- (`tipos_novedad`, `tipo_novedad`)
+    normalizados. Acepta la lista v2 (lista o JSON) y/o el campo v1:
+    - sólo v1 -> `[tipo_novedad]` (o `[]` si vacío);
+    - v2 -> cada código debe existir en `TIPOS_NOVEDAD`, sin repetidos, y
+      `tipo_novedad` (si viene) debe estar en la lista;
+    - "espera autorización" + "tiene estadía" juntos se rechazan."""
+    legado = str(tipo_legado or "").strip()
+    if legado not in TIPOS_NOVEDAD:
+        raise ErrorEnvioMobile("tipo_novedad inválido")
+    if tipos is None or (isinstance(tipos, str) and not tipos.strip()):
+        lista: object = []
+    elif isinstance(tipos, str):
+        try:
+            lista = json.loads(tipos)
+        except ValueError as error:
+            raise ErrorEnvioMobile("tipos_novedad inválido") from error
+    else:
+        lista = tipos
+    if not isinstance(lista, (list, tuple)) or len(lista) > len(TIPOS_NOVEDAD):
+        raise ErrorEnvioMobile("tipos_novedad inválido")
+    salida: list[str] = []
+    for tipo in lista:
+        codigo = tipo.strip() if isinstance(tipo, str) else ""
+        if not codigo or codigo not in TIPOS_NOVEDAD:
+            raise ErrorEnvioMobile("tipos_novedad inválido")
+        if codigo not in salida:
+            salida.append(codigo)
+    if not salida and legado:
+        salida = [legado]
+    if legado and legado not in salida:
+        raise ErrorEnvioMobile("tipo_novedad no coincide con tipos_novedad")
+    for grupo in _TIPOS_NOVEDAD_EXCLUYENTES:
+        if len(grupo & set(salida)) > 1:
+            raise ErrorEnvioMobile("tipos_novedad incompatibles: " + " y ".join(sorted(grupo)))
+    return salida, (legado or (salida[0] if salida else ""))
 
 
 def hash_password(password: str, *, salt: bytes | None = None) -> str:
@@ -131,6 +222,30 @@ class AutenticadorMobile:
             return None
 
 
+# Bloque MOBILE SINCRONIZACIÓN PULL V1 -- credencial DISTINTA de la del
+# chofer (`AutenticadorMobile`): quien llama a `/api/mobile/sync/*` es el
+# propio Atlas local (PC de Javier) tirando de la recepción central, nunca
+# un celular -- separar el secreto es mínimo privilegio real (un token de
+# chofer filtrado nunca debe poder listar/descargar TODOS los envíos de
+# TODOS los choferes; un token de sincronización filtrado nunca debe poder
+# hacerse pasar por un chofer para subir envíos falsos). A diferencia de
+# `AutenticadorMobile.login` (sesión de un humano, con expiración corta),
+# este es un secreto compartido de máquina a máquina configurado una vez
+# por Javier en ambos lados (`ATLAS_MOBILE_SYNC_TOKEN`) -- sin estado, sin
+# expiración, comparado con `hmac.compare_digest` (tiempo constante, nunca
+# `==`) para no filtrar el secreto por temporización.
+class AutenticadorSincronizacionMobile:
+    def __init__(self, secreto: str) -> None:
+        if len(secreto) < 24:
+            raise ValueError("El secreto de sincronización Mobile debe tener al menos 24 caracteres.")
+        self.secreto = secreto
+
+    def autenticar(self, token: str) -> bool:
+        if not token:
+            return False
+        return hmac.compare_digest(token.encode(), self.secreto.encode())
+
+
 @dataclass
 class RepositorioEnviosMobile:
     raiz_atlas: Path
@@ -146,9 +261,19 @@ class RepositorioEnviosMobile:
             raise ErrorEnvioMobile("tipo de imagen no permitido")
         if not imagen or len(imagen) > MAX_IMAGEN_BYTES:
             raise ErrorEnvioMobile("imagen vacía o demasiado grande")
-        tipo = str(metadata.get("tipo_novedad", ""))
-        if tipo not in TIPOS_NOVEDAD:
-            raise ErrorEnvioMobile("tipo_novedad inválido")
+        # Bloque MOBILE CONTRATO V2 (compatible con v1: sin los campos
+        # nuevos, `tipos_novedad = [tipo_novedad]` y `rol_documento = GUIA`).
+        tipos, tipo = normalizar_tipos_novedad(metadata.get("tipos_novedad"), metadata.get("tipo_novedad", ""))
+        rol = str(metadata.get("rol_documento") or ROL_GUIA).strip()
+        if rol not in ROLES_DOCUMENTO:
+            raise ErrorEnvioMobile("rol_documento inválido")
+        evidencia_de = str(metadata.get("evidencia_de_envio_id") or "").strip()
+        if evidencia_de and (rol != ROL_EVIDENCIA_FIRMADA or not _ID_SEGURO.fullmatch(evidencia_de) or evidencia_de == envio_id):
+            raise ErrorEnvioMobile("evidencia_de_envio_id inválido")
+        metadata = {
+            **dict(metadata), "tipo_novedad": tipo, "tipos_novedad": tipos,
+            "rol_documento": rol, "evidencia_de_envio_id": evidencia_de,
+        }
         # Bloque MOBILE V1 -- a diferencia de tipo_novedad (donde "" es
         # una respuesta válida, "ninguna aplica"), la planta de origen es
         # obligatoria: la propia app ya bloquea el envío sin ella (ver
@@ -157,6 +282,9 @@ class RepositorioEnviosMobile:
         planta = str(metadata.get("planta_origen_informada", ""))
         if planta not in PLANTAS_ORIGEN_MOBILE:
             raise ErrorEnvioMobile("planta_origen_informada inválida")
+        # Bloque MOBILE OBSERVACIÓN DEL CHOFER V1 -- opcional; un cliente
+        # anterior que no manda el campo queda con "" (igual que `lote_id`).
+        metadata = {**dict(metadata), "observacion": normalizar_observacion_mobile(metadata.get("observacion"))}
         directorio = self.raiz / envio_id
         registro_path = directorio / "envio.json"
         # Bloque CONSISTENCIA OPERACIONAL -- fast path SIN lock: un
@@ -233,6 +361,62 @@ class RepositorioEnviosMobile:
             except (OSError, json.JSONDecodeError):
                 continue
         return sorted(salida, key=lambda r: r.get("recibido_en", ""))
+
+    # Bloque MOBILE SINCRONIZACIÓN PULL V1 -- lado RECEPTOR CENTRAL: qué
+    # envíos todavía no confirmó ningún consumidor (Sección "IDEMPOTENCIA"
+    # del bloque: la marca vive en un campo APARTE, `sincronizacion`,
+    # nunca en `estado` -- `estado` sigue describiendo únicamente el
+    # resultado de PROCESAR el documento -- RECIBIDO/PROCESANDO/ASOCIADO/
+    # REQUIERE_REVISION/ERROR -- nunca si ya viajó a un PC local. "Recibido
+    # por Atlas" para el chofer (el 202 de `POST /envios`) ya significa
+    # "el receptor lo guardó bien"; esto es una dimensión ortogonal y
+    # posterior, invisible para el chofer).
+    def listar_pendientes_sincronizacion(self) -> list[dict]:
+        salida = []
+        if not self.raiz.is_dir():
+            return salida
+        for ruta in self.raiz.glob("*/envio.json"):
+            try:
+                registro = json.loads(ruta.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if registro.get("sincronizacion", {}).get("estado") == "SINCRONIZADO_LOCAL":
+                continue
+            salida.append(registro)
+        return sorted(salida, key=lambda r: r.get("recibido_en", ""))
+
+    def ruta_imagen(self, envio_id: str) -> Path:
+        """Resuelve la ruta de la foto original de un envío para servirla
+        por `/api/mobile/sync/envios/<id>/imagen`. Revalida `envio_id` con
+        el mismo patrón que `recibir()` -- nunca confía en que el llamador
+        (el propio servidor HTTP) ya lo haya hecho, misma defensa en
+        profundidad contra path traversal que el resto del módulo."""
+        if not _ID_SEGURO.fullmatch(envio_id):
+            raise ErrorEnvioMobile("envio_id inválido")
+        registro = self.cargar(envio_id)
+        return self.raiz / envio_id / str(registro["foto_original"])
+
+    def marcar_sincronizado(self, envio_id: str, *, consumidor: str) -> dict:
+        """Bloque MOBILE SINCRONIZACIÓN PULL V1 -- idempotente a propósito:
+        confirmar un envío ya confirmado sólo actualiza el timestamp, nunca
+        falla ni duplica nada -- un consumidor que reintenta la
+        confirmación (timeout de red, reinicio a mitad) siempre puede
+        volver a llamar esto sin efecto secundario distinto. Bajo el MISMO
+        lock por envío (`mobile_<id>`) que ya usan `procesar_envio_mobile`/
+        las escrituras diagnósticas de `servidor_mobile.py` -- nunca una
+        exclusión paralela distinta para este campo."""
+        with bloqueo_sesion(
+            self.raiz, f"mobile_{envio_id}",
+            tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+        ):
+            registro = self.cargar(envio_id)
+            registro["sincronizacion"] = {
+                "estado": "SINCRONIZADO_LOCAL",
+                "sincronizado_en": datetime.now(timezone.utc).isoformat(),
+                "consumidor": consumidor,
+            }
+            self.guardar(envio_id, registro)
+            return registro
 
 
 def asociar_documento(
@@ -551,6 +735,16 @@ def _procesar_envio_mobile_impl(
     arriba (`procesar_envio_mobile`), que ya sostiene el lock por envío;
     nunca directamente (evita readquirir un lock no reentrante)."""
     registro = repositorio.cargar(envio_id)
+    if es_evidencia_firmada(registro):
+        # Bloque MOBILE CONTRATO V2 -- una guía firmada es EVIDENCIA, nunca
+        # un documento nuevo: sin OCR, sin dataset, sin viaje, sin routing.
+        # Queda PENDIENTE_ASOCIACION hasta que `asociar_evidencia_firmada_
+        # mobile` encuentre UN documento inequívoco.
+        if registro.get("estado") != ESTADO_EVIDENCIA_ASOCIADA:
+            registro["estado"] = ESTADO_PENDIENTE_ASOCIACION
+            registro.setdefault("evidencia_firmada", {"estado": ESTADO_PENDIENTE_ASOCIACION, "motivo": "AUN_NO_EVALUADA"})
+            repositorio.guardar(envio_id, registro)
+        return registro
     registro["estado"] = "PROCESANDO"
     repositorio.guardar(envio_id, registro)
     try:
@@ -1091,6 +1285,10 @@ def _reprocesar_envio_mobile_persistido_impl(
     Nunca conoce ninguna guía/cliente/envío concreto -- opera sobre
     CUALQUIER `envio_id` ya persistido que se le pida."""
     registro = repositorio.cargar(envio_id)
+    if es_evidencia_firmada(registro):
+        # Bloque MOBILE CONTRATO V2 -- una evidencia firmada nunca se
+        # reprocesa como guía (no tiene fila propia en el dataset).
+        raise ErrorEnvioMobile("una EVIDENCIA_FIRMADA no se reprocesa con OCR")
     identificador = f"mobile/{envio_id}/{registro['foto_original']}"
 
     # `bloqueo_sesion`/`escribir_json_atomico` ya se importan a nivel de
@@ -1646,3 +1844,403 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
             continue
 
     return {"revisados": revisados, "actualizados": actualizados}
+
+
+# Bloque MOBILE SINCRONIZACIÓN PULL V1 -- movidas tal cual desde
+# `servidor_mobile.py` (antes `_procesar_y_revalidar`/`_revalidar_
+# asociacion_diagnosticable`/`_regenerar_reporte_tras_envio_mobile`,
+# privadas de ese archivo) para que el consumidor PULL local
+# (`atlas_core.mobile_sync_cliente`) reutilice EXACTAMENTE la misma
+# orquestación que ya usa el servidor LAN tras `POST /api/mobile/envios`
+# -- nunca una segunda implementación paralela de "qué pasa después de
+# recibir un envío". `servidor_mobile.py` ahora sólo importa y llama a
+# `procesar_y_revalidar_envio_mobile`; ningún comportamiento cambia para
+# el modo LAN existente.
+def _revalidar_asociacion_diagnosticable(repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path) -> None:
+    """Envoltorio de `revalidar_asociacion_mobile_sin_ocr` que nunca deja
+    que un fallo ahí (p. ej. catálogo ilegible) se propague y corte la
+    cadena de `procesar_y_revalidar_envio_mobile` antes de la
+    reconciliación del reporte -- el documento de este envío ya quedó
+    persistido por `procesar_envio_mobile` (paso anterior); esta
+    revalidación es sólo un refinamiento posterior sin OCR, no una
+    condición para que el reporte se regenere. El fallo se registra
+    diagnosticable en un campo APARTE (`revalidacion_asociacion_post_ocr`)
+    del envío que se estaba procesando -- nunca en `estado`/`error` (que
+    siguen describiendo únicamente el resultado de procesar el documento),
+    y nunca duplica ni reprocesa nada."""
+    try:
+        revalidar_asociacion_mobile_sin_ocr(repositorio, dataset=dataset)
+    except Exception as error:  # nunca debe impedir la reconciliación del reporte que sigue.
+        try:
+            with bloqueo_sesion(
+                repositorio.raiz, f"mobile_{envio_id}",
+                tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+            ):
+                registro = repositorio.cargar(envio_id)
+                registro["revalidacion_asociacion_post_ocr"] = {
+                    "estado": "ERROR",
+                    "error": f"{type(error).__name__}: {error}",
+                    "intentado_en": datetime.now(timezone.utc).isoformat(),
+                }
+                repositorio.guardar(envio_id, registro)
+        except Exception:
+            pass  # el registro del intento es best-effort; nunca debe volver a cortar el flujo.
+
+
+def _regenerar_reporte_tras_envio_mobile(repositorio: "RepositorioEnviosMobile", envio_id: str) -> None:
+    """Corre SIEMPRE (en un worker en segundo plano en modo LAN; de forma
+    síncrona en el consumidor PULL) -- nunca bloquea la subida/descarga
+    esperando OCR/B1/reporte más de lo que ya toma. `revalidar_y_
+    regenerar_reporte` ya es idempotente por diseño (sólo reescribe el
+    reporte si algo cambió de verdad) -- no hace falta ninguna lógica
+    nueva de idempotencia acá, sólo invocarlo.
+
+    Un fallo acá (p. ej. catálogos ilegibles, proveedor de rutas caído)
+    NUNCA debe borrar ni duplicar el envío ya procesado -- se captura y
+    se registra en un campo APARTE (`reconciliacion_reporte`), nunca en
+    `estado`/`error` (que siguen describiendo únicamente el resultado
+    de procesar el DOCUMENTO, no el de reconciliar el reporte) -- queda
+    diagnosticable en el propio envio.json sin adivinar."""
+    # Import diferido -- evita el ciclo real `mobile.py` -> `revalidacion_
+    # documental.py` -> `mobile.py` (ese módulo importa `RepositorioEnvios
+    # Mobile` de acá). Mismo criterio que `crear_proveedor_ocr` arriba.
+    from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
+
+    sello = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    intento: dict[str, object] = {"intentado_en": datetime.now(timezone.utc).isoformat()}
+    try:
+        resultado = revalidar_y_regenerar_reporte(
+            raiz_atlas=repositorio.raiz_atlas, nombre_carpeta_reporte=f"reporte_mobile_{sello}",
+        )
+        intento.update({
+            "estado": "OK",
+            "reporte_regenerado": bool(resultado.get("reporte_regenerado")),
+            "reporte_vigente": resultado.get("reporte_vigente"),
+        })
+    except Exception as error:  # nunca debe perder/duplicar el envío ya procesado.
+        intento.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
+    with bloqueo_sesion(
+        repositorio.raiz, f"mobile_{envio_id}",
+        tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+    ):
+        registro = repositorio.cargar(envio_id)
+        registro["reconciliacion_reporte"] = intento
+        repositorio.guardar(envio_id, registro)
+
+
+# ===================================================================
+# Bloque MOBILE CONTRATO V2 -- incidencias múltiples + evidencia firmada
+# ===================================================================
+
+def es_evidencia_firmada(registro: Mapping[str, object]) -> bool:
+    return str(registro.get("rol_documento") or ROL_GUIA) == ROL_EVIDENCIA_FIRMADA
+
+
+def tipos_novedad_de(registro: Mapping[str, object]) -> list[str]:
+    """Incidencias de un envío v2 (`tipos_novedad`) o v1 (`tipo_novedad`)."""
+    tipos = registro.get("tipos_novedad")
+    if isinstance(tipos, list):
+        return [str(t) for t in tipos if str(t).strip()]
+    legado = str(registro.get("tipo_novedad") or "").strip()
+    return [legado] if legado else []
+
+
+def _filas_dataset(dataset: Path) -> list[dict[str, str]]:
+    if not dataset or not Path(dataset).is_file():
+        return []
+    with Path(dataset).open("r", encoding="utf-8-sig", newline="") as archivo:
+        return list(csv.DictReader(archivo, delimiter=";"))
+
+
+def _documento_de_fila(fila: Mapping[str, str]) -> dict[str, str]:
+    return {
+        "archivo": str(fila.get("archivo", "")).strip(),
+        "numero_guia": str(fila.get("numero_guia", "")).strip(),
+        "numero_transporte": str(fila.get("numero_transporte", "")).strip(),
+    }
+
+
+def _guia_de_referencia(
+    repositorio: "RepositorioEnviosMobile", evidencia: Mapping[str, object],
+) -> tuple[dict | None, str]:
+    """La guía (envío GUIA) a la que corresponde la evidencia: la indicada
+    explícitamente (`evidencia_de_envio_id`) o, si no se indicó, la ÚNICA
+    guía de su misma tanda. Nunca elige entre varias."""
+    objetivo = str(evidencia.get("evidencia_de_envio_id") or "").strip()
+    if not objetivo:
+        lote = str(evidencia.get("lote_id") or "").strip()
+        if not lote:
+            return None, "SIN_GUIA_DE_REFERENCIA"
+        guias = [
+            r for r in repositorio.historial()
+            if str(r.get("lote_id") or "") == lote and not es_evidencia_firmada(r)
+        ]
+        if len(guias) != 1:
+            return None, "TANDA_CON_VARIAS_GUIAS" if guias else "GUIA_DE_REFERENCIA_NO_RECIBIDA"
+        return guias[0], ""
+    try:
+        guia = repositorio.cargar(objetivo)
+    except (OSError, ValueError):
+        return None, "GUIA_DE_REFERENCIA_NO_RECIBIDA"
+    if es_evidencia_firmada(guia):
+        return None, "REFERENCIA_NO_ES_GUIA"
+    return guia, ""
+
+
+def _documento_para_evidencia(
+    guia: Mapping[str, object], filas: list[dict[str, str]],
+) -> tuple[dict[str, str] | None, str]:
+    """Documento del dataset al que pertenece la guía de referencia -- su
+    propia fila si existe; si no (p. ej. reingesta omitida), la ÚNICA fila
+    con su misma guía+transporte. Nunca adivina entre varias."""
+    if str(guia.get("estado") or "") in ("RECIBIDO", "PROCESANDO"):
+        return None, "GUIA_DE_REFERENCIA_SIN_PROCESAR"
+    propio = f"mobile/{guia.get('envio_id')}/{guia.get('foto_original')}"
+    propias = [f for f in filas if str(f.get("archivo", "")).strip() == propio]
+    if len(propias) == 1:
+        return _documento_de_fila(propias[0]), ""
+    asociacion = guia.get("resultado_asociacion") or {}
+    ocr = guia.get("datos_ocr") or {}
+    numero_guia = str((asociacion.get("numero_guia") if isinstance(asociacion, Mapping) else "") or (ocr.get("numero_guia") if isinstance(ocr, Mapping) else "") or "").strip()
+    transporte = str((asociacion.get("numero_transporte") if isinstance(asociacion, Mapping) else "") or "").strip()
+    if not numero_guia or not transporte or numero_guia == "No encontrado":
+        return None, "DOCUMENTO_NO_IDENTIFICADO"
+    candidatas = [
+        f for f in filas
+        if str(f.get("numero_guia", "")).strip() == numero_guia and str(f.get("numero_transporte", "")).strip() == transporte
+    ]
+    if len(candidatas) != 1:
+        return None, "DOCUMENTO_AMBIGUO" if candidatas else "DOCUMENTO_NO_ENCONTRADO"
+    return _documento_de_fila(candidatas[0]), ""
+
+
+def _registrar_evidencia(
+    repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path,
+    documento: dict[str, str], motivo: str, asociado_por: str = "",
+) -> dict:
+    from atlas_core.ingesta_pdf import (
+        construir_asociacion_evidencia_mobile, directorio_evidencia_pdf_para_dataset, registrar_evidencia_adicional,
+    )
+
+    registro = repositorio.cargar(envio_id)
+    asociacion = construir_asociacion_evidencia_mobile(
+        documento=documento, envio=registro, motivo=motivo, asociado_por=asociado_por,
+    )
+    nueva = registrar_evidencia_adicional(directorio_evidencia_pdf_para_dataset(dataset), asociacion)
+    registro["estado"] = ESTADO_EVIDENCIA_ASOCIADA
+    registro["evidencia_firmada"] = {
+        "estado": ESTADO_EVIDENCIA_ASOCIADA, "documento": documento["archivo"],
+        "numero_guia": documento["numero_guia"], "numero_transporte": documento["numero_transporte"],
+        "motivo": motivo, "asociado_en": datetime.now(timezone.utc).isoformat(),
+        **({"asociado_por": asociado_por} if asociado_por else {}),
+    }
+    repositorio.guardar(envio_id, registro)
+    return {"envio_id": envio_id, "estado": ESTADO_EVIDENCIA_ASOCIADA, "documento": documento["archivo"], "nueva": nueva}
+
+
+def asociar_evidencia_firmada_mobile(
+    repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path,
+) -> dict:
+    """Asociación AUTOMÁTICA de una EVIDENCIA_FIRMADA: sólo si la guía de
+    referencia resuelve a exactamente un documento del dataset. Si no, queda
+    PENDIENTE_ASOCIACION con su motivo -- nunca se asocia por suposición.
+    Idempotente (el registro de evidencias deduplica por documento+SHA)."""
+    with bloqueo_sesion(
+        repositorio.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+    ):
+        registro = repositorio.cargar(envio_id)
+        if not es_evidencia_firmada(registro):
+            return {"envio_id": envio_id, "estado": registro.get("estado"), "motivo": "NO_ES_EVIDENCIA"}
+        if registro.get("estado") == ESTADO_EVIDENCIA_ASOCIADA:
+            return {"envio_id": envio_id, "estado": ESTADO_EVIDENCIA_ASOCIADA, "documento": (registro.get("evidencia_firmada") or {}).get("documento"), "nueva": False}
+        guia, motivo = _guia_de_referencia(repositorio, registro)
+        documento = None
+        if guia is not None:
+            documento, motivo = _documento_para_evidencia(guia, _filas_dataset(dataset))
+        if documento is None:
+            registro["estado"] = ESTADO_PENDIENTE_ASOCIACION
+            registro["evidencia_firmada"] = {
+                "estado": ESTADO_PENDIENTE_ASOCIACION, "motivo": motivo,
+                "evaluado_en": datetime.now(timezone.utc).isoformat(),
+            }
+            repositorio.guardar(envio_id, registro)
+            return {"envio_id": envio_id, "estado": ESTADO_PENDIENTE_ASOCIACION, "motivo": motivo}
+        from atlas_core.ingesta_pdf import MOTIVO_EVIDENCIA_FIRMADA_MOBILE
+
+        return _registrar_evidencia(repositorio, envio_id, dataset=dataset, documento=documento, motivo=MOTIVO_EVIDENCIA_FIRMADA_MOBILE)
+
+
+def asociar_evidencia_firmada_mobile_manual(
+    repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, numero_guia: str, actor: str,
+) -> dict:
+    """Asociación EXPLÍCITA decidida por una persona en Desktop: la guía
+    indicada debe corresponder a exactamente UN documento del dataset."""
+    from atlas_core.ingesta_pdf import MOTIVO_EVIDENCIA_FIRMADA_MOBILE_MANUAL
+
+    guia = str(numero_guia or "").strip()
+    if not guia:
+        raise ErrorEnvioMobile("número de guía requerido")
+    with bloqueo_sesion(
+        repositorio.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+    ):
+        registro = repositorio.cargar(envio_id)
+        if not es_evidencia_firmada(registro):
+            raise ErrorEnvioMobile("el envío no es una EVIDENCIA_FIRMADA")
+        if registro.get("estado") == ESTADO_EVIDENCIA_ASOCIADA:
+            raise ErrorEnvioMobile("la evidencia ya está asociada")
+        candidatas = [f for f in _filas_dataset(dataset) if str(f.get("numero_guia", "")).strip() == guia]
+        if len(candidatas) != 1:
+            raise ErrorEnvioMobile(
+                f"la guía {guia} corresponde a {len(candidatas)} documentos: no se asocia (debe ser exactamente uno)"
+            )
+        return _registrar_evidencia(
+            repositorio, envio_id, dataset=dataset, documento=_documento_de_fila(candidatas[0]),
+            motivo=MOTIVO_EVIDENCIA_FIRMADA_MOBILE_MANUAL, asociado_por=str(actor or "DESKTOP"),
+        )
+
+
+def reintentar_evidencias_firmadas_pendientes(
+    repositorio: "RepositorioEnviosMobile", *, dataset: Path,
+) -> list[dict]:
+    """Reintenta TODAS las evidencias aún pendientes (p. ej. la guía de su
+    tanda terminó de procesarse después). Idempotente."""
+    salida = []
+    for registro in repositorio.historial():
+        if es_evidencia_firmada(registro) and registro.get("estado") != ESTADO_EVIDENCIA_ASOCIADA:
+            try:
+                salida.append(asociar_evidencia_firmada_mobile(repositorio, str(registro["envio_id"]), dataset=dataset))
+            except (SesionOcupadaError, OSError, ValueError, KeyError) as error:
+                salida.append({"envio_id": registro.get("envio_id"), "error": f"{type(error).__name__}: {error}"})
+    return salida
+
+
+# Incidencia Mobile -> (tipo canónico, estado de estadía). Mismos códigos
+# de siempre; la espera y la aprobación son estados del MISMO hecho
+# TIENE_ESTADIA (ver `registro_eventos_operacionales`).
+_EVENTO_CANONICO_MOBILE = {
+    "ESPERA_AUTORIZACION_ESTADIA": ("TIENE_ESTADIA", "ESPERA_ESTADIA"),
+    "TIENE_ESTADIA": ("TIENE_ESTADIA", "ESTADIA_APROBADA"),
+    "DEVOLUCION_PARCIAL": ("DEVOLUCION_PARCIAL", None),
+    "DEVOLUCION_TOTAL": ("DEVOLUCION_TOTAL", None),
+    "DOBLE_VUELTA": ("DOBLE_VUELTA", None),
+}
+
+
+def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -> list[dict]:
+    """Lleva las incidencias de los envíos GUIA ya ASOCIADOS a un viaje al
+    registro canónico `eventos_operacionales.json`, con la MISMA semántica e
+    idempotencia que Desktop (un hecho por tipo y viaje). Cada envío recuerda
+    qué incidencias ya llevó (`eventos_canonicos`), así Mobile nunca:
+    - reactiva un hecho que una persona anuló en Desktop;
+    - retrocede una estadía ya APROBADA a "espera";
+    - pisa la nota escrita en Desktop."""
+    from atlas_core import registro_eventos_operacionales as reo
+
+    raiz = repositorio.raiz_atlas
+    salida: list[dict] = []
+    for registro in repositorio.historial():
+        envio_id = str(registro.get("envio_id") or "")
+        asociacion = registro.get("resultado_asociacion") or {}
+        transporte = str(asociacion.get("numero_transporte") or "").strip() if isinstance(asociacion, Mapping) else ""
+        if es_evidencia_firmada(registro) or registro.get("estado") != "ASOCIADO" or not transporte:
+            continue
+        ya = registro.get("eventos_canonicos") or {}
+        pendientes = [t for t in tipos_novedad_de(registro) if t in _EVENTO_CANONICO_MOBILE and t not in ya]
+        if not pendientes:
+            continue
+        existentes = {e.get("clave_idempotencia"): e for e in reo.leer_eventos_operacionales(raiz=raiz).get("eventos", [])}
+        try:
+            enriquecimiento = reo.resolver_enriquecimiento_transporte(raiz=raiz, numero_transporte=transporte)
+        except Exception:  # sin reporte vigente: vínculo incompleto explícito, nunca inventado
+            enriquecimiento = None
+        origen = f"MOBILE:{registro.get('usuario') or registro.get('chofer_id') or 'chofer'}"
+        marcas: dict[str, dict] = {}
+        for tipo_mobile in pendientes:
+            tipo_evento, estado_estadia = _EVENTO_CANONICO_MOBILE[tipo_mobile]
+            clave = reo.clave_idempotencia(
+                contexto_empresarial=reo.CONTEXTO_EMPRESARIAL_SIN_ASIGNAR, tipo_evento=tipo_evento, numero_transporte=transporte,
+            )
+            existente = existentes.get(clave)
+            ahora = datetime.now(timezone.utc).isoformat()
+            if existente is not None and existente.get("estado") == reo.ESTADO_ANULADO:
+                marcas[tipo_mobile] = {"resultado": "OMITIDO_ANULADO_EN_DESKTOP", "evento_id": existente.get("evento_id"), "en": ahora}
+                continue
+            if (
+                estado_estadia == reo.ESTADO_INCIDENCIA_ESPERA_ESTADIA and existente is not None
+                and reo.estado_estadia_vigente(existente) == reo.ESTADO_INCIDENCIA_ESTADIA_APROBADA
+            ):
+                marcas[tipo_mobile] = {"resultado": "OMITIDO_ESTADIA_YA_APROBADA", "evento_id": existente.get("evento_id"), "en": ahora}
+                continue
+            comun = dict(
+                raiz=raiz, numero_transporte=transporte, origen=origen,
+                referencia=f"ENVIO_MOBILE:{envio_id}", enriquecimiento=enriquecimiento,
+            )
+            if estado_estadia:
+                resultado = reo.registrar_estado_estadia(estado_incidencia=estado_estadia, **comun)
+            else:
+                resultado = reo.registrar_evento(tipo_evento=tipo_evento, **comun)
+            evento = resultado.get("evento") or {}
+            existentes[clave] = evento
+            marcas[tipo_mobile] = {
+                "resultado": "CREADO" if resultado.get("creado") else "EXISTENTE",
+                "tipo_evento": tipo_evento, "estado_incidencia": estado_estadia,
+                "evento_id": evento.get("evento_id"), "en": ahora,
+            }
+        with bloqueo_sesion(
+            repositorio.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+        ):
+            actual = repositorio.cargar(envio_id)
+            actual["eventos_canonicos"] = {**(actual.get("eventos_canonicos") or {}), **marcas}
+            repositorio.guardar(envio_id, actual)
+        salida.append({"envio_id": envio_id, "numero_transporte": transporte, "eventos": marcas})
+    return salida
+
+
+def _sincronizar_contrato_v2(repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path | None) -> None:
+    """Tras procesar CUALQUIER envío: eventos canónicos pendientes y
+    evidencias firmadas pendientes. Best-effort: un fallo aquí nunca pierde
+    ni duplica el envío -- queda anotado en el propio envío."""
+    intento: dict[str, object] = {"intentado_en": datetime.now(timezone.utc).isoformat()}
+    try:
+        intento["eventos"] = registrar_eventos_canonicos_mobile(repositorio)
+    except Exception as error:
+        intento["error_eventos"] = f"{type(error).__name__}: {error}"
+    if dataset:
+        try:
+            intento["evidencias"] = reintentar_evidencias_firmadas_pendientes(repositorio, dataset=dataset)
+        except Exception as error:
+            intento["error_evidencias"] = f"{type(error).__name__}: {error}"
+    if "error_eventos" not in intento and "error_evidencias" not in intento:
+        return  # nada que anotar: sin escrituras ni locks extra
+    try:
+        with bloqueo_sesion(
+            repositorio.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+        ):
+            registro = repositorio.cargar(envio_id)
+            registro["sincronizacion_contrato_v2"] = {
+                k: v for k, v in intento.items() if k in ("intentado_en", "error_eventos", "error_evidencias")
+            }
+            repositorio.guardar(envio_id, registro)
+    except (SesionOcupadaError, OSError, ValueError):
+        pass
+
+
+def procesar_y_revalidar_envio_mobile(
+    repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, carpeta_catalogos,
+) -> None:
+    """Punto de entrada único para "qué pasa después de recibir un envío
+    Mobile", sea que haya llegado por `POST /api/mobile/envios` (LAN,
+    `servidor_mobile.py`) o por el consumidor PULL local (`atlas_core.
+    mobile_sync_cliente`, Bloque MOBILE SINCRONIZACIÓN PULL V1). Procesa
+    (OCR/B1/asociación) y, en el MISMO hilo llamante, reintenta la
+    asociación de cualquier otro envío que hubiera quedado SIN_ASOCIACION/
+    PROPUESTA_REQUIERE_REVISION, y siempre reconcilia el reporte/`estado_
+    operacion.json` al final -- incluso si el paso de revalidación de
+    asociación falló (ver `_revalidar_asociacion_diagnosticable`)."""
+    procesar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+    if dataset:
+        _revalidar_asociacion_diagnosticable(repositorio, envio_id, dataset=dataset)
+    _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+    # Bloque MOBILE CONTRATO V2 -- DESPUÉS del reporte: los eventos
+    # canónicos se enriquecen con el `viajes.csv` vigente.
+    _sincronizar_contrato_v2(repositorio, envio_id, dataset=dataset)

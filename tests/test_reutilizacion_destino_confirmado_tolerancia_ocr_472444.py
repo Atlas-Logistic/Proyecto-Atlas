@@ -110,6 +110,15 @@ def test_un_solo_caracter_distinto_en_direccion_larga_se_tolera():
     assert direccion_confirmada_coincide(confirmada, documental_con_ocr) is True
 
 
+def test_separacion_ocr_espuria_con_numero_ancla_se_tolera():
+    """La tolerancia conserva el ancla numérica y sólo absorbe una
+    separación espuria de OCR; no habilita una búsqueda difusa general."""
+    assert direccion_confirmada_coincide(
+        "AVENIDA CENTRAL 151",
+        "AVENIDA CENT RAL 151 SANTIAGO",
+    ) is True
+
+
 def test_fragmento_corto_exige_coincidencia_exacta_sin_tolerancia():
     """Por debajo del umbral mínimo (10 caracteres) -- p. ej. un número
     de calle o una palabra corta ambigua -- nunca hay tolerancia: un
@@ -195,6 +204,20 @@ def test_direccion_corta_con_error_ocr_de_una_letra_sigue_generando_tarjeta(tmp_
         comunes={"archivo": "3.jpeg", "numero_guia": "3", "numero_transporte": "T3"},
     )
     assert len(decisiones) == 1
+
+
+def test_obra_confirmada_sin_destino_documental_no_genera_revision(tmp_path):
+    """Sin dirección documental no hay relación obra↔destino que decidir."""
+    catalogos, cliente = _preparar_obra_con_dos_confirmaciones(
+        tmp_path, cliente_razon_social="CLIENTE GENERICO SA", rut="76.111.111-6",
+        obra="OBRA GENERICA", destino_a="CALLE UNO 100 SANTIAGO", destino_b="CALLE DOS 200 SANTIAGO",
+    )
+    decisiones = _decisiones_obra_para_cliente(
+        carpeta=catalogos, cliente_id=cliente.cliente_id, cliente_razon_social=cliente.razon_social,
+        cliente_aliases=(), obra_texto="OBRA GENERICA", despachar_a_documental="",
+        comunes={"archivo": "4.jpeg", "numero_guia": "4", "numero_transporte": "T4"},
+    )
+    assert decisiones == []
 
 
 # ============================================================

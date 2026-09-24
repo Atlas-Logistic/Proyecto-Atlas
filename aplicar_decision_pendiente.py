@@ -1,6 +1,7 @@
 """CLI estrecho usado por Atlas Desktop para aplicar decisiones R3.3/R3.4."""
 import argparse
 import json
+from atlas_core.almacenamiento_portable import SesionOcupadaError
 from atlas_core.aplicacion_decisiones import DecisionObsoletaError, ErrorAplicacionDecision, aplicar_decision_obra
 
 def main():
@@ -51,6 +52,21 @@ def main():
             resultado={"ok":False,"error":str(error)}
     except ErrorAplicacionDecision as error:
         resultado={"ok":False,"error":str(error)}
+    except SesionOcupadaError:
+        # Bloque P0 RECUPERACIÓN TRANSACCIONAL -- caso real 0000359449:
+        # sin este `except`, este error (RuntimeError, no ErrorAplicacionDecision)
+        # escapaba sin capturar -- Python imprimía un traceback completo por
+        # stderr y este CLI salía con código de error, sin ninguna línea de
+        # JSON por stdout. Desktop esperaba poder parsear JSON y en cambio
+        # recibía eso -- un mensaje técnico ilegible para Javier en vez de
+        # un aviso operacional. Nunca oculta errores inesperados: sólo este
+        # caso conocido y ya diagnosticado (otra operación sosteniendo el
+        # mismo lock) se convierte en un mensaje comprensible.
+        resultado={
+            "ok": False,
+            "error": "Otra operación de Atlas está escribiendo esta misma decisión en este momento. "
+                     "Vuelve a intentar en unos segundos.",
+        }
     # Salida ASCII JSON: evita que la consola Windows recodifique los
     # mensajes UTF-8 antes de que Desktop haga JSON.parse. Los escapes JSON
     # se reconstruyen como Unicode correcto en la UI.

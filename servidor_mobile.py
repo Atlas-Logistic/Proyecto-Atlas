@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import ssl
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -14,14 +15,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from atlas_core.almacenamiento_portable import bloqueo_sesion, leer_estado_operacion, resolver_raiz_atlas
+from atlas_core.catalogos import cargar_catalogo_json
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import (
-    TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
-    AutenticadorMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
-    procesar_envio_mobile, revalidar_asociacion_mobile_sin_ocr,
+    AutenticadorMobile, AutenticadorSincronizacionMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
+    procesar_y_revalidar_envio_mobile,
 )
-from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
+from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
 
 
 MAX_PAYLOAD_BYTES = 30 * 1024 * 1024  # ver atlas_core.mobile.MAX_IMAGEN_BYTES -- mismo motivo/margen.
@@ -80,7 +80,13 @@ def _multipart(handler: BaseHTTPRequestHandler) -> tuple[dict[str, str], bytes, 
         if nombre == "imagen":
             imagen, mime = contenido, parte.get_content_type()
         elif nombre:
-            campos[nombre] = contenido.decode("utf-8")
+            # Bloque MOBILE OBSERVACIÓN DEL CHOFER V1 -- con texto libre
+            # (`observacion`) un byte no UTF-8 es posible; responde 400 en
+            # vez de dejar escapar la excepción y cortar la conexión.
+            try:
+                campos[nombre] = contenido.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ErrorEnvioMobile(f"campo {nombre} no es UTF-8 válido") from error
     return campos, imagen, mime
 
 
@@ -93,121 +99,44 @@ def _log_envio_debug(mensaje: str) -> None:
     print(f"[{ahora}] [mobile-envio-debug] {mensaje}")
 
 
-# Bloque ASOCIACIÓN MOBILE V2 (Sección 4 -- Multiguía; Sección 7 --
-# reevaluación): procesa el envío nuevo y, en el MISMO worker (el
-# ejecutor sigue siendo de 1 hilo -- nunca se agrega concurrencia/cola
-# nueva), reintenta la asociación de cualquier otro envío que hubiera
-# quedado SIN_ASOCIACION/PROPUESTA_REQUIERE_REVISION. Es el mecanismo
-# real por el que, en una tanda con Doc A y Doc B del mismo transporte,
-# Doc A (que se procesó primero, sin nada todavía con qué asociarse)
-# termina asociado igual que Doc B apenas éste se persiste -- sin volver
-# a correr OCR, sin recrear ningún envío.
+# Bloque MOBILE SINCRONIZACIÓN PULL V1 -- la orquestación "qué pasa
+# después de recibir un envío" (procesar + revalidar asociación +
+# reconciliar reporte, caso real 472623/472624) se movió a
+# `atlas_core.mobile.procesar_y_revalidar_envio_mobile` para que el
+# consumidor PULL local la reutilice tal cual -- nunca una segunda
+# implementación paralela. Este archivo sólo la invoca.
 #
-# Bloque MOBILE -> DESKTOP (fix real, caso real 472623/472624): causa
-# raíz confirmada -- ni `procesar_envio_mobile` ni `revalidar_asociacion_
-# mobile_sin_ocr` regeneran nunca el reporte/`estado_operacion.json` que
-# Desktop realmente lee; la fila ya queda bien escrita en el dataset,
-# pero Desktop seguía mostrando un reporte viejo hasta que algún proceso
-# EXTERNO (sin relación con Mobile) volviera a reconciliar. Se cierra
-# reusando el reconciliador general YA EXISTENTE (`revalidar_y_
-# regenerar_reporte`, el mismo que usa el resto de Atlas tras cualquier
-# mutación real de datos -- nunca un segundo reconciliador paralelo).
-def _procesar_y_revalidar(repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path, carpeta_catalogos) -> None:
-    procesar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
-    if dataset:
-        _revalidar_asociacion_diagnosticable(repositorio, envio_id, dataset=dataset)
-    # Hallazgo Codex #2 -- antes, un fallo de la línea de arriba (excepción
-    # no capturada) cortaba la cadena acá mismo y esta llamada nunca
-    # corría: el documento ya podía estar correctamente persistido (el
-    # paso de arriba sólo revalida, nunca reescribe la fila del dataset)
-    # y aun así quedaba invisible en Desktop porque el reporte jamás se
-    # intentaba regenerar. Ahora corre SIEMPRE, incluso si la revalidación
-    # de asociación falló -- con lo que el documento ya dejó persistido.
-    _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+# Rutas nuevas, SOLO activas si el llamador de `crear_servidor` pasa
+# `autenticador_sync` (en `main()`, sólo si `ATLAS_MOBILE_SYNC_TOKEN` está
+# configurado) -- sin eso, se comportan exactamente como cualquier ruta no
+# reconocida (404), igual que antes de este bloque: el modo LAN existente
+# (login/envíos de chofer) no cambia en nada si nadie configura el
+# secreto de sincronización. El PC de Atlas (nunca el receptor) es quien
+# iniciacada solicitud -- estas rutas son sólo lectura + una confirmación
+# idempotente, nunca ejecutan nada que el cliente mande (nunca hay un
+# "comando remoto" -- ver Sección DISEÑO del bloque).
+_RUTA_SYNC_PENDIENTES = "/api/mobile/sync/pendientes"
+_RUTA_SYNC_IMAGEN = re.compile(r"^/api/mobile/sync/envios/([A-Za-z0-9][A-Za-z0-9._-]{7,127})/imagen$")
+_RUTA_SYNC_CONFIRMAR = re.compile(r"^/api/mobile/sync/envios/([A-Za-z0-9][A-Za-z0-9._-]{7,127})/confirmar$")
 
 
-def _revalidar_asociacion_diagnosticable(repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path) -> None:
-    """Envoltorio de `revalidar_asociacion_mobile_sin_ocr` que nunca deja
-    que un fallo ahí (p. ej. catálogo ilegible) se propague y corte la
-    cadena de `_procesar_y_revalidar` antes de la reconciliación del
-    reporte -- el documento de este envío ya quedó persistido por
-    `procesar_envio_mobile` (paso anterior); esta revalidación es sólo un
-    refinamiento posterior sin OCR, no una condición para que el reporte
-    se regenere. El fallo se registra diagnosticable en un campo APARTE
-    (`revalidacion_asociacion_post_ocr`) del envío que se estaba
-    procesando -- nunca en `estado`/`error` (que siguen describiendo
-    únicamente el resultado de procesar el documento), y nunca duplica ni
-    reprocesa nada."""
-    try:
-        revalidar_asociacion_mobile_sin_ocr(repositorio, dataset=dataset)
-    except Exception as error:  # nunca debe impedir la reconciliación del reporte que sigue.
-        _log_envio_debug(
-            f"envio_id={envio_id!r} ERROR revalidando asociación post-OCR: {type(error).__name__}: {error}"
-        )
-        try:
-            # Bloque CONSISTENCIA OPERACIONAL -- lock por envío: este
-            # registro diagnóstico compite por el MISMO envio.json que
-            # `procesar_envio_mobile`/un reproceso podrían estar tocando
-            # concurrentemente; nunca se escribe a ciegas encima.
-            with bloqueo_sesion(
-                repositorio.raiz, f"mobile_{envio_id}",
-                tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
-            ):
-                registro = repositorio.cargar(envio_id)
-                registro["revalidacion_asociacion_post_ocr"] = {
-                    "estado": "ERROR",
-                    "error": f"{type(error).__name__}: {error}",
-                    "intentado_en": datetime.now(timezone.utc).isoformat(),
-                }
-                repositorio.guardar(envio_id, registro)
-        except Exception:
-            pass  # el registro del intento es best-effort; nunca debe volver a cortar el flujo.
+def _nombre_canonico_chofer(carpeta_catalogos: object, chofer_id: str) -> str:
+    """Nombre del chofer en `choferes.json` (clave = `chofer_id`), o "" si
+    no hay catálogo o el chofer no está (p. ej. cuentas de prueba). Se lee
+    en cada login para que un chofer recién catalogado aparezca sin
+    reiniciar el servidor; nunca lanza."""
+    if not carpeta_catalogos:
+        return ""
+    registro = cargar_catalogo_json(Path(carpeta_catalogos) / "choferes.json").get(str(chofer_id))
+    nombre = registro.get("nombre") if isinstance(registro, dict) else None
+    return nombre.strip() if isinstance(nombre, str) else ""
 
 
-def _regenerar_reporte_tras_envio_mobile(repositorio: RepositorioEnviosMobile, envio_id: str) -> None:
-    """Corre SIEMPRE en el mismo worker de 1 hilo en segundo plano --
-    el 202 de `do_POST` ya se respondió mucho antes de que este código
-    exista; nunca bloquea la subida esperando OCR/B1/reporte.
-    `revalidar_y_regenerar_reporte` ya es idempotente por diseño (sólo
-    reescribe el reporte si algo cambió de verdad) -- no hace falta
-    ninguna lógica nueva de idempotencia acá, sólo invocarlo.
-
-    Un fallo acá (p. ej. catálogos ilegibles, proveedor de rutas caído)
-    NUNCA debe borrar ni duplicar el envío ya procesado -- se captura y
-    se registra en un campo APARTE (`reconciliacion_reporte`), nunca en
-    `estado`/`error` (que siguen describiendo únicamente el resultado
-    de procesar el DOCUMENTO, no el de reconciliar el reporte) -- queda
-    diagnosticable en el propio envio.json sin adivinar."""
-    sello = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    intento: dict[str, object] = {"intentado_en": datetime.now(timezone.utc).isoformat()}
-    try:
-        resultado = revalidar_y_regenerar_reporte(
-            raiz_atlas=repositorio.raiz_atlas, nombre_carpeta_reporte=f"reporte_mobile_{sello}",
-        )
-        intento.update({
-            "estado": "OK",
-            "reporte_regenerado": bool(resultado.get("reporte_regenerado")),
-            "reporte_vigente": resultado.get("reporte_vigente"),
-        })
-        _log_envio_debug(
-            f"envio_id={envio_id!r} reconciliación de reporte OK -- "
-            f"reporte_regenerado={resultado.get('reporte_regenerado')!r}"
-        )
-    except Exception as error:  # nunca debe perder/duplicar el envío ya procesado.
-        intento.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
-        _log_envio_debug(f"envio_id={envio_id!r} ERROR reconciliando reporte: {type(error).__name__}: {error}")
-    # Bloque CONSISTENCIA OPERACIONAL -- mismo lock por envío que el
-    # resto de escritores de este envio.json.
-    with bloqueo_sesion(
-        repositorio.raiz, f"mobile_{envio_id}",
-        tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
-    ):
-        registro = repositorio.cargar(envio_id)
-        registro["reconciliacion_reporte"] = intento
-        repositorio.guardar(envio_id, registro)
-
-
-def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: AutenticadorMobile, procesar: bool = True, origen_permitido: str = "*") -> ThreadingHTTPServer:
+def crear_servidor(
+    host: str, puerto: int, *, raiz: Path, autenticador: AutenticadorMobile,
+    autenticador_sync: AutenticadorSincronizacionMobile | None = None,
+    procesar: bool = True, origen_permitido: str = "*",
+) -> ThreadingHTTPServer:
     repositorio = RepositorioEnviosMobile(raiz)
     ejecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atlas-mobile")
     estado = leer_estado_operacion(raiz=raiz) or {}
@@ -237,11 +166,74 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", origen_permitido)
             self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.end_headers()
+
+        # Bloque MOBILE SINCRONIZACIÓN PULL V1 -- credencial DISTINTA de
+        # la del chofer (`AutenticadorMobile.autenticar`, arriba); ver
+        # `AutenticadorSincronizacionMobile` en atlas_core/mobile.py.
+        def _autorizado_sync(self) -> bool:
+            if autenticador_sync is None:
+                return False
+            cabecera = self.headers.get("Authorization", "")
+            token = cabecera[7:] if cabecera.startswith("Bearer ") else ""
+            return autenticador_sync.autenticar(token)
+
+        def do_GET(self) -> None:
+            ruta = urlparse(self.path).path
+
+            if ruta == _RUTA_SYNC_PENDIENTES:
+                if not self._autorizado_sync():
+                    self._json(401, {"error": "token_sync_invalido"}); return
+                self._json(200, {"envios": repositorio.listar_pendientes_sincronizacion()})
+                return
+
+            coincidencia = _RUTA_SYNC_IMAGEN.fullmatch(ruta)
+            if coincidencia:
+                if not self._autorizado_sync():
+                    self._json(401, {"error": "token_sync_invalido"}); return
+                envio_id = coincidencia.group(1)
+                try:
+                    registro = repositorio.cargar(envio_id)
+                    contenido = repositorio.ruta_imagen(envio_id).read_bytes()
+                except (ErrorEnvioMobile, OSError, json.JSONDecodeError):
+                    self._json(404, {"error": "envio_no_encontrado"}); return
+                self.send_response(200)
+                self.send_header("Content-Type", str(registro.get("imagen_mime", "application/octet-stream")))
+                self.send_header("Content-Length", str(len(contenido)))
+                self.send_header("Access-Control-Allow-Origin", origen_permitido)
+                self.end_headers()
+                self.wfile.write(contenido)
+                return
+
+            self._json(404, {"error": "ruta_no_encontrada"})
 
         def do_POST(self) -> None:
             ruta = urlparse(self.path).path
+
+            coincidencia = _RUTA_SYNC_CONFIRMAR.fullmatch(ruta)
+            if coincidencia:
+                if not self._autorizado_sync():
+                    _descartar_cuerpo(self)
+                    self._json(401, {"error": "token_sync_invalido"}); return
+                envio_id = coincidencia.group(1)
+                try:
+                    largo = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    largo = 0
+                cuerpo_bruto = self.rfile.read(largo) if 0 < largo <= MAX_PAYLOAD_BYTES else b""
+                try:
+                    datos = json.loads(cuerpo_bruto) if cuerpo_bruto else {}
+                except json.JSONDecodeError:
+                    datos = {}
+                consumidor = str(datos.get("consumidor", "")).strip() or self.address_string()
+                try:
+                    registro = repositorio.marcar_sincronizado(envio_id, consumidor=consumidor)
+                except (ErrorEnvioMobile, OSError, json.JSONDecodeError):
+                    self._json(404, {"error": "envio_no_encontrado"}); return
+                self._json(200, {"resultado": "OK", "envio_id": envio_id, "sincronizacion": registro["sincronizacion"]})
+                return
+
             if ruta == "/api/mobile/login":
                 try:
                     largo = int(self.headers.get("Content-Length", "0"))
@@ -249,6 +241,10 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                     sesion = autenticador.login(str(datos.get("usuario", "")), str(datos.get("password", "")))
                 except (ValueError, json.JSONDecodeError):
                     sesion = None
+                if sesion:
+                    # Nombre canónico del chofer para el saludo de la app
+                    # (sólo presentación; la autenticación no cambia).
+                    sesion = {**sesion, "nombre_chofer": _nombre_canonico_chofer(carpeta_catalogos, sesion["chofer_id"])}
                 self._json(200 if sesion else 401, sesion or {"error": "credenciales_invalidas"})
                 return
             if ruta != "/api/mobile/envios":
@@ -292,11 +288,22 @@ def crear_servidor(host: str, puerto: int, *, raiz: Path, autenticador: Autentic
                         # `repositorio.recibir` ya tolera cualquier
                         # metadata ausente/nueva sin cambios.
                         "lote_id": campos.get("lote_id", ""),
+                        # Bloque MOBILE OBSERVACIÓN DEL CHOFER V1 -- texto
+                        # libre opcional del ENVÍO (misma en cada foto de
+                        # la tanda). Ausente en clientes anteriores ->
+                        # `recibir` lo guarda como "". Validado/normalizado
+                        # en `atlas_core.mobile.normalizar_observacion_mobile`.
+                        "observacion": campos.get("observacion"),
+                        # Bloque MOBILE CONTRATO V2 -- opcionales; un cliente v1
+                        # no los manda y `recibir` los completa compatibles.
+                        "tipos_novedad": campos.get("tipos_novedad"),
+                        "rol_documento": campos.get("rol_documento"),
+                        "evidencia_de_envio_id": campos.get("evidencia_de_envio_id"),
                     },
                 )
                 if nuevo and procesar:
                     ejecutor.submit(
-                        _procesar_y_revalidar, repositorio, registro["envio_id"],
+                        procesar_y_revalidar_envio_mobile, repositorio, registro["envio_id"],
                         dataset=dataset, carpeta_catalogos=carpeta_catalogos,
                     )
                 _log_envio_debug(f"envio_id={registro['envio_id']!r} ACEPTADO (nuevo={nuevo}, estado={registro['estado']!r})")
@@ -327,8 +334,16 @@ def main() -> None:
     usuarios_path = args.usuarios or (raiz / "catalogos_privados" / "usuarios_mobile.json")
     usuarios = json.loads(usuarios_path.read_text(encoding="utf-8"))["usuarios"]
     secreto = os.environ.get("ATLAS_MOBILE_TOKEN_SECRET", "")
+    # Bloque MOBILE SINCRONIZACIÓN PULL V1 -- secreto SEPARADO del de
+    # login de chofer (ver AutenticadorSincronizacionMobile). Sin
+    # configurar (piloto LAN actual, sin receptor central todavía), las
+    # rutas /api/mobile/sync/* quedan simplemente inexistentes (404) --
+    # cero cambio de comportamiento para el modo LAN existente.
+    secreto_sync = os.environ.get("ATLAS_MOBILE_SYNC_TOKEN", "")
+    autenticador_sync = AutenticadorSincronizacionMobile(secreto_sync) if secreto_sync else None
     servidor = crear_servidor(
         args.host, args.puerto, raiz=raiz, autenticador=AutenticadorMobile(usuarios, secreto),
+        autenticador_sync=autenticador_sync,
         origen_permitido=os.environ.get("ATLAS_MOBILE_ALLOWED_ORIGIN", "*"),
     )
     esquema = "http"

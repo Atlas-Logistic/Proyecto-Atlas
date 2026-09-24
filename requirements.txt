@@ -2,4 +2,5 @@
 easyocr
 numpy
 Pillow
+pypdfium2>=5.13,<6
 pytest

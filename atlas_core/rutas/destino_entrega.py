@@ -39,9 +39,14 @@ import re
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
-from atlas_core.catalogo_destinos import Destino
+from atlas_core.catalogo_destinos import (
+    Destino,
+    EstadoCalidadDestino,
+    EstadoVigenciaDestino,
+    normalizar_nombre_destino,
+)
 from atlas_core.geografia import EstadoNormalizacion, cargar_geografia
 from atlas_core.geografia.base_local import (
     BaseGeograficaLocal,
@@ -91,6 +96,9 @@ MARGEN_MISMO_LUGAR_KM = 1.0
 ESTADO_RESUELTO = "RESUELTO"
 ESTADO_REVISAR = "REVISAR"
 ESTADO_SIN_DATO = "SIN_DATO"
+
+FUENTE_COORDENADA_CANONICA_CONFIRMADA = "COORDENADA_CANONICA_CONFIRMADA"
+FUENTE_COORDENADA_CANONICA_EVIDENCIA_FUERTE = "COORDENADA_CANONICA_EVIDENCIA_FUERTE"
 
 
 @dataclass(frozen=True)
@@ -1954,6 +1962,78 @@ def calcular_ruta_con_planta_conocida(
     )
 
 
+@dataclass(frozen=True)
+class PlanImpactoCoordenadaCanonica:
+    """Alcance demostrable de una coordenada canónica sobre un lote."""
+
+    destino_id: str
+    guias: tuple[str, ...]
+
+
+def _destino_con_coordenada_canonica_para(
+    despachar_a_crudo: str, destinos: Iterable[Destino],
+) -> Destino | None:
+    """Devuelve una única autoridad canónica exacta, o se abstiene."""
+    clave_documental = normalizar_nombre_destino(despachar_a_crudo)
+    candidatos = []
+    for destino in destinos:
+        if (
+            destino.estado_calidad != EstadoCalidadDestino.CONFIRMADO.value
+            or destino.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value
+            or destino.fuente not in (
+                FUENTE_COORDENADA_CANONICA_CONFIRMADA,
+                FUENTE_COORDENADA_CANONICA_EVIDENCIA_FUERTE,
+            )
+            or destino.latitud is None
+            or destino.longitud is None
+            or normalizar_nombre_destino(destino.direccion) != clave_documental
+        ):
+            continue
+        # Defensa para objetos creados fuera del lector estricto del catálogo.
+        try:
+            latitud, longitud = float(destino.latitud), float(destino.longitud)
+        except (TypeError, ValueError):
+            continue
+        if -90 <= latitud <= 90 and -180 <= longitud <= 180:
+            candidatos.append(destino)
+    return candidatos[0] if len(candidatos) == 1 else None
+
+
+def plan_impacto_coordenada_canonica(
+    *, destino: Destino, filas: Iterable[dict[str, Any]],
+) -> PlanImpactoCoordenadaCanonica:
+    """Identifica el subconjunto que se puede revalidar sin reconciliar todo."""
+    guias: list[str] = []
+    clave = normalizar_nombre_destino(destino.direccion)
+    for fila in filas:
+        texto = str(fila.get("despachar_a_crudo", ""))
+        if normalizar_nombre_destino(texto) != clave:
+            continue
+        guia = str(fila.get("numero_guia") or fila.get("guia") or "").strip()
+        if guia:
+            guias.append(guia)
+    return PlanImpactoCoordenadaCanonica(
+        destino_id=destino.destino_id,
+        guias=tuple(dict.fromkeys(guias)),
+    )
+
+
+def revalidar_coordenada_canonica_focal(
+    *, destino: Destino, filas: Iterable[dict[str, Any]],
+    revalidador: Callable[[dict[str, Any]], Any],
+) -> tuple[PlanImpactoCoordenadaCanonica, tuple[Any, ...]]:
+    """Ejecuta sólo las filas del PlanImpacto; el llamador controla escritura."""
+    filas = tuple(filas)
+    plan = plan_impacto_coordenada_canonica(destino=destino, filas=filas)
+    afectadas = set(plan.guias)
+    resultados = tuple(
+        revalidador(fila)
+        for fila in filas
+        if str(fila.get("numero_guia") or fila.get("guia") or "").strip() in afectadas
+    )
+    return plan, resultados
+
+
 def calcular_ruta_entrega_para_viaje(
     *,
     despachar_a_crudo: str,
@@ -2000,6 +2080,7 @@ def calcular_ruta_entrega_para_viaje(
     from atlas_core.rutas.enriquecimiento_viaje import resolver_planta_origen
 
     plantas = list(plantas)
+    destinos_confirmados = tuple(destinos_confirmados)
 
     planta, motivo_origen, determinado_por, evidencia_origen = resolver_planta_origen(
         patente=patente, instante_salida=instante_salida,
@@ -2019,13 +2100,24 @@ def calcular_ruta_entrega_para_viaje(
             motivo_ruta="PLANTA_SIN_COORDENADAS_EN_CATALOGO",
         )
 
-    entrega = resolver_destino_entrega_validado(
-        despachar_a_crudo, proveedor_rutas,
-        punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
-        destinos_confirmados=destinos_confirmados,
-        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
-        base_geografica_local=base_geografica_local,
-    )
+    # La coordenada canónica confirmada tiene autoridad sólo para el mismo
+    # DESPACHAR A exacto; antecede al geocoder y nunca eleva destinos pendientes.
+    d = _destino_con_coordenada_canonica_para(despachar_a_crudo, destinos_confirmados)
+    if d is not None:
+        entrega = ResultadoDestinoEntrega(
+            despachar_a_crudo=despachar_a_crudo,
+            coordenadas=Coordenadas(longitud=float(d.longitud), latitud=float(d.latitud)),
+            etiqueta_geocodificada=d.direccion, confianza=1.0, estado=ESTADO_RESUELTO,
+            localidad=d.comuna, region=d.region, metodo_confirmacion="COORDENADA_CANONICA_CATALOGO",
+        )
+    else:
+        entrega = resolver_destino_entrega_validado(
+            despachar_a_crudo, proveedor_rutas,
+            punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
+            destinos_confirmados=destinos_confirmados,
+            proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+            base_geografica_local=base_geografica_local,
+        )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F: coordenadas/confianza SÍ se conservan (evidencia
         # técnica de auditoría, Fase J -- `motivo_ruta` ya explica por qué

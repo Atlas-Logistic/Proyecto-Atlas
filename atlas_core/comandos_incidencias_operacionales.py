@@ -11,7 +11,9 @@ from typing import Mapping, Sequence
 
 from atlas_core.consultas_atlas import cargar_viajes
 from atlas_core.registro_eventos_operacionales import (
-    ESTADOS_GESTION_SOPORTADOS, marcar_viaje_revisado_sin_incidencia, registrar_evento,
+    CONTEXTO_EMPRESARIAL_SIN_ASIGNAR, ESTADOS_GESTION_SOPORTADOS,
+    clave_idempotencia, leer_eventos_operacionales,
+    marcar_viaje_revisado_sin_incidencia, registrar_evento,
 )
 
 ACCIONES_SOPORTADAS = frozenset({"REGISTRAR_INCIDENCIA", "REVISAR_SIN_INCIDENCIA", "ACTUALIZAR_GESTION"})
@@ -39,8 +41,37 @@ def resolver_guias(*, ruta_viajes: str | Path, guias: Sequence[str]) -> dict[str
     return salida
 
 
-def previsualizar_lote(*, ruta_viajes: str | Path, acciones: Sequence[Mapping[str, object]]) -> dict:
-    """Valida allowlist y guía→viaje, sin escribir."""
+def _estado_idempotencia(*, raiz: str | Path | None, accion: Mapping[str, object], item: Mapping[str, object]) -> str:
+    """Clasifica sólo contra hechos ya persistidos; nunca escribe en preview."""
+    if raiz is None or item.get("estado") != "RESUELTA":
+        return str(item.get("estado", ""))
+    viaje = item.get("viaje") or {}
+    clase = str(accion.get("accion", ""))
+    eventos = leer_eventos_operacionales(raiz=raiz)
+    transporte = str(viaje.get("numero_transporte", ""))
+    if clase == "REVISAR_SIN_INCIDENCIA":
+        return (
+            "YA_REGISTRADA"
+            if any(str(r.get("numero_transporte", "")) == transporte for r in eventos.get("revisiones_incidencias", []))
+            else "RESUELTA"
+        )
+    tipo = str(accion.get("tipo", "")).strip()
+    if not tipo:
+        return "RESUELTA"
+    clave = clave_idempotencia(
+        contexto_empresarial=CONTEXTO_EMPRESARIAL_SIN_ASIGNAR,
+        tipo_evento=tipo, numero_transporte=transporte,
+    )
+    existente = next((e for e in eventos.get("eventos", []) if e.get("clave_idempotencia") == clave and e.get("estado") == "ACTIVO"), None)
+    if existente is None:
+        return "RESUELTA"
+    if clase == "ACTUALIZAR_GESTION" and existente.get("estado_gestion") != accion.get("estado_gestion"):
+        return "RESUELTA"
+    return "YA_REGISTRADA"
+
+
+def previsualizar_lote(*, ruta_viajes: str | Path, acciones: Sequence[Mapping[str, object]], raiz: str | Path | None = None) -> dict:
+    """Valida cada acción independientemente y clasifica su idempotencia, sin escribir."""
     guias = [str(a.get("guia", "")).strip() for a in acciones]
     resueltas = resolver_guias(ruta_viajes=ruta_viajes, guias=guias)
     detalle = []
@@ -54,17 +85,39 @@ def previsualizar_lote(*, ruta_viajes: str | Path, acciones: Sequence[Mapping[st
             item["estado"] = "TIPO_REQUERIDO"
         if clase == "ACTUALIZAR_GESTION" and str(accion.get("estado_gestion", "")) not in ESTADOS_GESTION_SOPORTADOS:
             item["estado"] = "GESTION_NO_PERMITIDA"
+        item["estado"] = _estado_idempotencia(raiz=raiz, accion=accion, item=item)
         detalle.append(item)
-    return {"requiere_confirmacion": True, "acciones": detalle, "aplicable": all(x["estado"] == "RESUELTA" for x in detalle)}
+    aplicables = [x for x in detalle if x["estado"] == "RESUELTA"]
+    ya_registradas = [x for x in detalle if x["estado"] == "YA_REGISTRADA"]
+    no_resueltas = [x for x in detalle if x["estado"] not in {"RESUELTA", "YA_REGISTRADA"}]
+    return {
+        "requiere_confirmacion": bool(aplicables), "acciones": detalle,
+        "aplicable": bool(aplicables),
+        "resumen": {
+            "aplicables": len(aplicables), "ya_registradas": len(ya_registradas),
+            "no_resueltas": len(no_resueltas),
+        },
+    }
 
 
 def aplicar_lote(*, raiz: str | Path, ruta_viajes: str | Path, acciones: Sequence[Mapping[str, object]], actor: str, confirmado: bool) -> dict:
     """Aplica sólo un preview válido y confirmado; resultado individual por guía."""
-    preview = previsualizar_lote(ruta_viajes=ruta_viajes, acciones=acciones)
+    preview = previsualizar_lote(ruta_viajes=ruta_viajes, acciones=acciones, raiz=raiz)
     if not confirmado:
         return {**preview, "aplicado": False, "motivo": "CONFIRMACION_HUMANA_REQUERIDA"}
+    if not preview["aplicable"]:
+        return {
+            **preview, "aplicado": False, "motivo": "SIN_ACCIONES_APLICABLES",
+            "resultados": [
+                {"guia": item["guia"], "ok": False, "estado": item["estado"]}
+                for item in preview["acciones"]
+            ],
+        }
     resultados = []
     for accion, item in zip(acciones, preview["acciones"]):
+        if item["estado"] == "YA_REGISTRADA":
+            resultados.append({"guia": item["guia"], "ok": True, "ya_registrada": True, "resultado": {}})
+            continue
         if item["estado"] != "RESUELTA":
             resultados.append({"guia": item["guia"], "ok": False, "estado": item["estado"]}); continue
         viaje = item["viaje"]

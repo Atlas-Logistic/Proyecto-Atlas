@@ -270,6 +270,24 @@ _PALABRAS_METRICA = (
     (METRICA_LISTAR_VIAJES, ("MUESTRAME", "MUESTRA", "LISTA", "LISTAME", "LISTAR", "DETALLE")),
 )
 
+# Bloque P0 CASO B -- seguimiento "muéstramelos": un texto que consiste
+# ÚNICAMENTE en estas palabras (verbo de listar + pronombres/relleno) no
+# aporta NINGÚN filtro propio -- se interpreta como "lista lo mismo que
+# acabas de contarme", conservando EXACTAMENTE estado/período/dominio de
+# `contexto_previo`. Cualquier palabra fuera de esta lista (un número, un
+# nombre, otra palabra clave) hace que el texto se interprete como una
+# consulta nueva, de cero -- nunca se adivina una mezcla.
+_PALABRAS_SEGUIMIENTO_LISTAR = frozenset({
+    "MUESTRAME", "MUESTRA", "MUESTRAMELOS", "MUESTRAMELAS", "MUESTRALOS", "MUESTRALAS",
+    "LISTA", "LISTAME", "LISTALOS", "LISTALAS", "LISTAR", "DETALLE", "VER", "DAME",
+    "POR", "FAVOR", "PORFAVOR", "ME", "LOS", "LAS", "ESOS", "ESAS", "ESO", "ESA",
+})
+
+
+def _es_seguimiento_listar_bare(normalizado: str) -> bool:
+    tokens = [t for t in re.split(r"[^A-Z]+", normalizado) if t]
+    return bool(tokens) and all(t in _PALABRAS_SEGUIMIENTO_LISTAR for t in tokens)
+
 # Bloque B1 V2 (Bloque 4.A del ticket) -- dominio INCIDENCIAS_DOCUMENTALES,
 # nunca el dominio VIAJES por defecto. Se revisa ANTES que cualquier otra
 # cosa: el resto de esta función está pensada para `viajes.csv`, y una
@@ -349,6 +367,7 @@ _PALABRAS_ESTADO_GESTION = (
         "PENDIENTES DE RESPUESTA", "POR RESPONDER", "SIN RESPUESTA",
         "ESPERANDO RESPUESTA", "EN TRAMITE", "PENDIENTE DE APROBACION",
         "PENDIENTES DE APROBACION", "POR APROBAR", "SIN APROBAR",
+        "ESPERA AUTORIZACION", "ESPERANDO AUTORIZACION",
     )),
 )
 _PATRON_TOP = re.compile(r"\bMAS\b|\bMAYOR\b")
@@ -454,6 +473,51 @@ def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
     for nombre_periodo, frases in _PALABRAS_PERIODO:
         if any(frase in texto_normalizado for frase in frases):
             return {"periodo": nombre_periodo}
+    return {}
+
+
+# Bloque P0 CASO B -- "ingresada(s)/ingresado(s)/subida(s)/cargada(s)/
+# procesada(s) hoy/ayer/..." se refiere al INGRESO REAL a Atlas
+# (`fecha_ingesta_utc`/`Viaje.fecha_ingesta`), NUNCA a la fecha
+# documental (`fecha`, la que ya resuelve `_filtros_periodo`). Vocabulario
+# separado a propósito -- nunca se mezcla con `_PALABRAS_PERIODO` mismo,
+# para que un "hoy" suelto sin ninguna de estas palabras siga significando
+# fecha documental (comportamiento histórico intacto).
+_PALABRAS_INGESTA_KW = (
+    "INGRESADA", "INGRESADAS", "INGRESADO", "INGRESADOS",
+    "SUBIDA", "SUBIDAS", "SUBIDO", "SUBIDOS",
+    "CARGADA", "CARGADAS", "CARGADO", "CARGADOS",
+    "PROCESADA", "PROCESADAS", "PROCESADO", "PROCESADOS",
+)
+_PATRON_INGESTA_KW = re.compile(r"\b(?:" + "|".join(_PALABRAS_INGESTA_KW) + r")\b")
+
+
+def _menciona_ingesta(texto_normalizado: str) -> bool:
+    return bool(_PATRON_INGESTA_KW.search(texto_normalizado))
+
+
+def _filtros_periodo_ingesta(texto_normalizado: str) -> dict[str, str]:
+    """Igual forma que `_filtros_periodo`, pero SÓLO se activa si el
+    texto menciona explícitamente el ingreso a Atlas (ver
+    `_menciona_ingesta`) -- nunca para una mención de fecha corriente.
+    Claves en un espacio de nombres separado (`periodo_ingesta`/
+    `fecha_ingesta_desde`/`fecha_ingesta_hasta`/`dias_ingesta`) para que
+    jamás se confundan con el filtro de fecha documental."""
+    if not _menciona_ingesta(texto_normalizado):
+        return {}
+    ultimos = _PATRON_ULTIMOS_DIAS.search(texto_normalizado)
+    if ultimos:
+        return {"periodo_ingesta": PERIODO_ULTIMOS_N_DIAS, "dias_ingesta": ultimos.group(1)}
+    rango = _PATRON_RANGO_FECHAS.search(texto_normalizado)
+    if rango:
+        d1, m1, a1, d2, m2, a2 = rango.groups()
+        return {
+            "fecha_ingesta_desde": f"{a1}-{int(m1):02d}-{int(d1):02d}",
+            "fecha_ingesta_hasta": f"{a2}-{int(m2):02d}-{int(d2):02d}",
+        }
+    for nombre_periodo, frases in _PALABRAS_PERIODO:
+        if any(frase in texto_normalizado for frase in frases):
+            return {"periodo_ingesta": nombre_periodo}
     return {}
 
 # Bloque R2 (adición -- FALLO DE LÓGICA/ASOCIACIÓN) -- causa raíz real:
@@ -617,15 +681,29 @@ def _intentar_consulta_relacional(
 
 
 def interpretar_consulta_determinista(
-    texto: str, *, catalogos: CatalogosConsulta,
+    texto: str, *, catalogos: CatalogosConsulta, contexto_previo: ConsultaAtlas | None = None,
 ) -> tuple[ConsultaAtlas | None, tuple[str, ...]]:
     """Bloque 10/21 -- camino rápido sin B1. Devuelve `(None, avisos)`
     si no logra reconocer ninguna métrica (el llamador debe entonces
     intentar B1); devuelve `(consulta, avisos)` cuando sí puede.
     `avisos` señala ambigüedades encontradas (Bloque 14) -- nunca elige
-    arbitrariamente entre dos entidades reales."""
+    arbitrariamente entre dos entidades reales.
+
+    `contexto_previo` (Bloque P0 CASO B, opcional -- `None` conserva el
+    comportamiento de siempre): la `ConsultaAtlas` YA interpretada del
+    turno anterior. Un texto de seguimiento "bare" (ver
+    `_es_seguimiento_listar_bare` -- sólo "muéstramelos"/"lístalos"/
+    variantes, sin ningún contenido propio) reutiliza su `filtros`/
+    `dominio` EXACTOS, sólo cambia la métrica a listar -- nunca combina
+    ni reinterpreta un texto con contenido real."""
     normalizado = normalizar_texto_atlas(texto)
     avisos: list[str] = []
+
+    if contexto_previo is not None and _es_seguimiento_listar_bare(normalizado):
+        return ConsultaAtlas(
+            metrica=METRICA_LISTAR_VIAJES, filtros=dict(contexto_previo.filtros),
+            dominio=contexto_previo.dominio,
+        ), tuple(avisos)
 
     # Antes de la métrica genérica de patentes/vehículos: aquí la dimensión
     # es la asociación, no el inventario de vehículos ni los viajes.
@@ -636,9 +714,26 @@ def interpretar_consulta_determinista(
         ), tuple(avisos)
 
     if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in _PALABRAS_PENDIENTE_TECNICO):
+        # Bloque P0 CASO B -- causa raíz real: este `return` temprano
+        # nunca llamaba a `_filtros_periodo`/`_filtros_periodo_ingesta`,
+        # así que "...guías ingresadas hoy" perdía la restricción de
+        # período por completo -- "32 viajes INCOMPLETO_TECNICO" contaba
+        # TODOS, sin importar cuándo se ingresaron. Ahora compone: si el
+        # texto menciona el INGRESO a Atlas (INGRESADA/SUBIDA/CARGADA/
+        # PROCESADA + hoy/ayer/fecha/rango), filtra por
+        # `fecha_ingesta_utc` real (nunca la fecha documental); si no,
+        # conserva el comportamiento histórico de siempre (B6) -- incluida
+        # la posibilidad, ya soportada en otras ramas, de un período
+        # documental corriente si el texto lo menciona.
+        filtros_pendiente_tecnico: dict[str, str] = {"estado": "INCOMPLETO_TECNICO"}
+        filtros_ingesta = _filtros_periodo_ingesta(normalizado)
+        if filtros_ingesta:
+            filtros_pendiente_tecnico.update(filtros_ingesta)
+        else:
+            filtros_pendiente_tecnico.update(_filtros_periodo(normalizado))
         return ConsultaAtlas(
             metrica=METRICA_COUNT_VIAJES, dominio=DOMINIO_VIAJES,
-            filtros={"estado": "INCOMPLETO_TECNICO"},
+            filtros=filtros_pendiente_tecnico,
         ), tuple(avisos)
 
     # Bloque B1 V2 (Bloque 4.A/9 del ticket) -- dominio

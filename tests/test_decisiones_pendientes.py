@@ -519,6 +519,62 @@ def test_regenerar_conserva_patente_desconocida_y_normaliza_acciones(tmp_path):
     assert d["decision_id"]==vieja["decision_id"]
 
 
+def test_regenerar_memoizacion_misma_firma_una_sola_evaluacion(tmp_path):
+    """Bloque P0 MEMOIZACIÓN -- item E: dos llamadas con la MISMA
+    `decisiones`/catálogos/dataset y un `cache_memoizacion` compartido
+    devuelven el MISMO objeto lista (identidad, no sólo igualdad) -- la
+    segunda nunca reconstruye el resultado desde cero."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="CONSTRUMART SA")
+    vieja = _decision_obra_r31(carpeta, cliente, "CONSTRUCTORA INMOBILIARIA E", numero_guia="464715")
+    cache: dict = {}
+    primera = regenerar_decisiones_persistidas(decisiones=[vieja], carpeta_catalogos=carpeta, cache_memoizacion=cache)
+    assert len(cache) == 1
+    segunda = regenerar_decisiones_persistidas(decisiones=[vieja], carpeta_catalogos=carpeta, cache_memoizacion=cache)
+    assert segunda is primera  # cache hit: mismo objeto, no una reconstrucción equivalente
+    assert len(cache) == 1  # nunca creció -- la segunda llamada no agregó una entrada nueva
+
+
+def test_regenerar_memoizacion_input_invalidado_recalcula(tmp_path):
+    """Bloque P0 MEMOIZACIÓN -- item E: si el catálogo cambia de verdad
+    entre dos llamadas (aquí, el cliente pasa a existir con el mismo
+    nombre que la obra -- condición real de descarte R3.1), la segunda
+    llamada con el MISMO `cache_memoizacion` SÍ recalcula y refleja el
+    catálogo nuevo -- nunca sirve un resultado obsoleto."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="CONSTRUMART SA")
+    vieja = _decision_obra_r31(carpeta, cliente, "CONSTRUCTORA INMOBILIARIA E", numero_guia="464715")
+    cache: dict = {}
+    primera = regenerar_decisiones_persistidas(decisiones=[vieja], carpeta_catalogos=carpeta, cache_memoizacion=cache)
+    assert len(primera) == 1  # obra realmente desconocida -- se conserva
+
+    # Invalidación real: el MISMO cliente (mismo cliente_id que ya
+    # referencia `vieja.contexto.cliente_id`) se renombra para llamarse
+    # IGUAL que la obra -- R3.1 debe descartar la decisión (cliente==obra)
+    # al refrescar el contexto canónico desde catálogo.
+    from atlas_core.catalogo_clientes import CatalogoClientes
+    CatalogoClientes(carpeta / "clientes.json").editar(
+        cliente.cliente_id, razon_social="CONSTRUCTORA INMOBILIARIA E", modificacion_manual=True,
+    )
+    segunda = regenerar_decisiones_persistidas(decisiones=[vieja], carpeta_catalogos=carpeta, cache_memoizacion=cache)
+    assert segunda is not primera
+    assert segunda == []  # reflejó el catálogo nuevo -- nunca sirvió el resultado viejo
+    assert len(cache) == 2  # dos huellas distintas, dos entradas
+
+
+def test_regenerar_sin_cache_memoizacion_comportamiento_identico_de_siempre(tmp_path):
+    """`cache_memoizacion=None` (default) -- ningún caller existente
+    (todos los de este archivo, `aplicar_decision_obra`, etc.) puede
+    notar la diferencia: se recalcula siempre, como antes de este bloque."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="CONSTRUMART SA")
+    vieja = _decision_obra_r31(carpeta, cliente, "CONSTRUCTORA INMOBILIARIA E", numero_guia="464715")
+    primera = regenerar_decisiones_persistidas(decisiones=[vieja], carpeta_catalogos=carpeta)
+    segunda = regenerar_decisiones_persistidas(decisiones=[vieja], carpeta_catalogos=carpeta)
+    assert segunda is not primera
+    assert segunda == primera
+
+
 def test_regenerar_no_modifica_catalogos(tmp_path):
     carpeta=_catalogos(tmp_path); cliente=_cliente_confirmado(carpeta,nombre="CONSTRUMART SA")
     vieja=_decision_obra_r31(carpeta,cliente,"CONSTRUCTORA INMOBILIARIA E")

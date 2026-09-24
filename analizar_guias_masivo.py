@@ -1,6 +1,7 @@
 """CLI para procesar masivamente guías de despacho."""
 
 import argparse
+import csv
 import json
 import re
 from datetime import date
@@ -78,6 +79,19 @@ def crear_parser() -> argparse.ArgumentParser:
             "intenta siempre -- sin credencial configurada, cada consulta "
             "se abstiene sola (SIN_CREDENCIAL) y el procesamiento continúa "
             "igual que antes."
+        ),
+    )
+    parser.add_argument(
+        "--reconciliar-focal",
+        action="store_true",
+        help=(
+            "Bloque P0 INGESTA FOCAL: al terminar, calcula el PlanImpacto de "
+            "este lote (guías nuevas + cualquier guía que comparta número de "
+            "transporte con ellas) y reconcilia SOLO ese alcance -- publica "
+            "reportes/actual y estado_operacion.json (lo que Desktop lee) sin "
+            "recorrer ni reintentar el backlog de rutas/identidad/segunda "
+            "pasada ajeno a este lote. Sin esta bandera, comportamiento "
+            "idéntico a siempre: sólo CSV + bandeja, ninguna reconciliación."
         ),
     )
     return parser
@@ -171,6 +185,59 @@ def main() -> None:
                 ruta_salida=ruta_artefacto,
             )
         print(f"Decisiones pendientes: {len(artefacto['decisiones'])}")
+
+        if argumentos.reconciliar_focal:
+            # Bloque P0 INGESTA FOCAL -- corre DESPUÉS de publicar la
+            # bandeja de arriba, a propósito: recién ahí
+            # `decisiones_pendientes.json` en disco ya incluye las
+            # decisiones nuevas de este lote (OBRA_DESCONOCIDA/etc,
+            # detectadas SOLO durante `procesar_archivo` -- la
+            # reconciliación no las vuelve a descubrir por su cuenta;
+            # DESTINO_NO_RESUELTO sí se re-detecta sola, pero se deja
+            # todo al mismo mecanismo para no bifurcar el camino).
+            #
+            # PlanImpacto = guías genuinamente nuevas de este lote +
+            # cualquier guía que comparta `numero_transporte` con ellas
+            # (mismo viaje -- el criterio de "afectada causalmente" que
+            # ya usa el resto del sistema, p. ej. `revalidar_origen_por_
+            # documento_hermano_de_transporte_sin_ocr`). Nunca el
+            # backlog de rutas/identidad/segunda pasada ajeno -- ese
+            # sigue disponible vía `reconciliar_estado_derivado.py`
+            # (mantenimiento/reconciliación global explícita).
+            from atlas_core.reconciliacion_estado_derivado import reconciliar_estado_derivado
+
+            with open(argumentos.salida, encoding="utf-8-sig", newline="") as _fh:
+                _filas_lote = list(csv.DictReader(_fh, delimiter=";"))
+            archivos_nuevos = set(resumen.get("archivos_procesados_ahora", []))
+            guias_nuevas = {
+                str(f.get("numero_guia", "")).strip()
+                for f in _filas_lote
+                if str(f.get("archivo", "")).strip() in archivos_nuevos
+                and str(f.get("numero_guia", "")).strip()
+            }
+            transportes_afectados = {
+                str(f.get("numero_transporte", "")).strip()
+                for f in _filas_lote
+                if str(f.get("numero_guia", "")).strip() in guias_nuevas
+                and str(f.get("numero_transporte", "")).strip()
+            }
+            guias_afectadas = set(guias_nuevas) | {
+                str(f.get("numero_guia", "")).strip()
+                for f in _filas_lote
+                if str(f.get("numero_transporte", "")).strip() in transportes_afectados
+                and str(f.get("numero_guia", "")).strip()
+            }
+            if guias_afectadas:
+                raiz_reconciliacion = Path(estado_catalogos.ruta).parent
+                resultado_reconciliacion = reconciliar_estado_derivado(
+                    raiz_atlas=raiz_reconciliacion, guias_objetivo=guias_afectadas,
+                )
+                print(
+                    f"Reconciliación focal: {len(guias_afectadas)} guía(s) en alcance "
+                    f"({len(guias_nuevas)} nueva(s) + {len(guias_afectadas) - len(guias_nuevas)} "
+                    f"afectada(s) por transporte compartido) -- "
+                    f"reconciliado={resultado_reconciliacion.get('reconciliado')}"
+                )
     print("\nResumen final")
     print(f"Total encontrados: {resumen['encontrados']}")
     print(f"Procesados: {resumen['procesados']}")

@@ -201,7 +201,7 @@ def test_cliente_candidato_se_conserva_si_la_fila_resuelve_a_otro_cliente(tmp_pa
     assert [d["decision_id"] for d in salida] == [decision["decision_id"]]
 
 
-def test_cliente_candidato_se_conserva_sin_confirmacion_humana_en_ledger(tmp_path):
+def test_cliente_candidato_exacto_vigente_se_retira_sin_confirmacion_humana(tmp_path):
     catalogos = tmp_path / "catalogos"; catalogos.mkdir(); _catalogos_base(catalogos)
     actual = tmp_path / "actual"; actual.mkdir()
     cliente = CatalogoClientes(catalogos / "clientes.json").crear(
@@ -217,7 +217,10 @@ def test_cliente_candidato_se_conserva_sin_confirmacion_humana_en_ledger(tmp_pat
     salida = regenerar_decisiones_persistidas(
         decisiones=[decision], carpeta_catalogos=catalogos, ruta_dataset=dataset,
     )
-    assert [d["decision_id"] for d in salida] == [decision["decision_id"]]
+    # La identidad actual ya es exacta, única, activa y confirmada; no se
+    # mantiene una revisión humana evitable sólo porque el artefacto viejo
+    # nació desde una variante OCR. No se usa fuzzy ni se escribe catálogo.
+    assert salida == []
 
 
 # --------------------------------------------------------------------------

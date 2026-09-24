@@ -28,7 +28,7 @@ def test_preview_confirma_y_aplica_lote_idempotente_con_trazabilidad(tmp_path):
         {"accion": "REGISTRAR_INCIDENCIA", "guia": "999999", "tipo": "DEVOLUCION_PARCIAL"},
     )
     preview = previsualizar_lote(ruta_viajes=ruta, acciones=acciones)
-    assert preview["requiere_confirmacion"] and not preview["aplicable"]
+    assert preview["requiere_confirmacion"] and preview["aplicable"]
     assert [a["estado"] for a in preview["acciones"]] == ["RESUELTA", "RESUELTA", "NO_ENCONTRADA"]
     assert aplicar_lote(raiz=tmp_path, ruta_viajes=ruta, acciones=acciones[:2], actor="JAVIER", confirmado=False)["aplicado"] is False
     aplicado = aplicar_lote(raiz=tmp_path, ruta_viajes=ruta, acciones=acciones, actor="JAVIER", confirmado=True)
@@ -38,7 +38,8 @@ def test_preview_confirma_y_aplica_lote_idempotente_con_trazabilidad(tmp_path):
     assert eventos[0]["estado_gestion"] == GESTION_REPORTADA and eventos[0]["evidencia"] == ["GUIA_FIRMADA"]
     repetir = aplicar_lote(raiz=tmp_path, ruta_viajes=ruta, acciones=acciones[:2], actor="JAVIER", confirmado=True)
     assert len(leer_eventos_operacionales(raiz=tmp_path)["eventos"]) == 2
-    assert repetir["resultados"][0]["resultado"]["creado"] is False
+    assert repetir["aplicado"] is False
+    assert [r["estado"] for r in repetir["resultados"]] == ["YA_REGISTRADA", "YA_REGISTRADA"]
 
 
 def test_gestion_y_revision_negativa_comparten_fuente_consultable(tmp_path):

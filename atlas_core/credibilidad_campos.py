@@ -399,6 +399,46 @@ def evaluar_credibilidad_peso(peso_kg: object) -> ResultadoCredibilidad:
 
 
 # ---------------------------------------------------------------------
+# PESO TOTAL DEL VIAJE (Bloque O3) -- distinto del check por documento de
+# arriba: aquél mira UN documento en aislado (150-45.000 kg, un tracto+
+# rampla+carga individual puede pesar eso en bruto); éste mira la SUMA de
+# carga de TODOS los documentos de un mismo viaje/transporte, que nunca
+# debería superar la capacidad de carga real de un camión. Javier confirmó
+# el rango operacional máximo real: 27-30 t. Se usa el techo de ese rango
+# (30 t) para no generar falsos positivos sobre cargas legítimas cercanas
+# al máximo -- nunca corrige el peso, sólo señala la contradicción para
+# revisión humana (ver `gestor_viajes.MotivoRevision.PESO_TOTAL_VIAJE_
+# IMPLAUSIBLE`, que sí bloquea a nivel de viaje).
+UMBRAL_MAXIMO_PESO_TOTAL_VIAJE_KG = 30000.0
+
+MOTIVO_PESO_TOTAL_VIAJE_IMPLAUSIBLE = "PESO_TOTAL_VIAJE_IMPLAUSIBLE"
+
+
+def evaluar_credibilidad_peso_total_viaje(peso_total_kg: object) -> ResultadoCredibilidad:
+    """Peso total del VIAJE (suma de todos los documentos), no de un
+    documento individual -- ver `evaluar_credibilidad_peso` para ese caso.
+    Vacío (viaje sin `peso_total_viaje_kg` calculable: algún documento sin
+    peso válido) es CONFIABLE -- ausencia de evidencia no es evidencia de
+    contradicción."""
+    texto = str(peso_total_kg if peso_total_kg is not None else "").strip()
+    if not texto:
+        return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
+    try:
+        valor = float(texto)
+    except (TypeError, ValueError):
+        return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
+    if valor <= 0:
+        return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
+    if valor > UMBRAL_MAXIMO_PESO_TOTAL_VIAJE_KG:
+        return ResultadoCredibilidad(
+            NivelCredibilidad.DUDOSO,
+            motivo=MOTIVO_PESO_TOTAL_VIAJE_IMPLAUSIBLE,
+            senales=(f"PESO_TOTAL_VIAJE_KG={valor:g}",),
+        )
+    return ResultadoCredibilidad(NivelCredibilidad.CONFIABLE)
+
+
+# ---------------------------------------------------------------------
 # Bloque P1 -- SEPARACIÓN evidencia OCR / dato operacional publicable.
 #
 # C1 (bloque anterior) sólo marcaba un motivo trazable (`motivos_

@@ -60,20 +60,39 @@ def construir_eventos_operacionales(
 
     eventos: list[dict[str, str]] = []
     for envio in envios:
-        tipo = str(envio.get("tipo_novedad", "")).strip()
-        if not tipo:
+        # Bloque MOBILE CONTRATO V2 -- una guía firmada (EVIDENCIA_FIRMADA)
+        # es evidencia, nunca un evento; un envío puede traer VARIAS
+        # incidencias (`tipos_novedad`) -- cada una con identidad propia.
+        if str(envio.get("rol_documento") or "GUIA") == "EVIDENCIA_FIRMADA":
             continue
+        tipos = envio.get("tipos_novedad")
+        if isinstance(tipos, list):
+            tipos = [str(t).strip() for t in tipos if str(t).strip()]
+        else:
+            legado = str(envio.get("tipo_novedad", "")).strip()
+            tipos = [legado] if legado else []
         numero_transporte = _numero_transporte_de(envio)
         viaje = indice_viajes.get(numero_transporte)
-        eventos.append({
-            "evento_id": str(envio.get("envio_id", "")),
-            "tipo_evento": tipo,
-            "numero_transporte": numero_transporte,
-            "numero_guia": _numero_guia_de(envio),
-            "chofer": str(viaje.get("choferes", "")).strip() if viaje else "",
-            "cliente": str(viaje.get("clientes", "")).strip() if viaje else "",
-            "obra": str(viaje.get("obras_destino", "")).strip() if viaje else "",
-            "fecha": str(viaje.get("fecha", "")).strip() if viaje else "",
-            "recibido_en": str(envio.get("recibido_en", "")).strip(),
-        })
+        for tipo in tipos:
+            eventos.append(_evento_de_envio(envio, tipo, varios=len(tipos) > 1, numero_transporte=numero_transporte, viaje=viaje))
     return eventos
+
+
+def _evento_de_envio(
+    envio: Mapping[str, object], tipo: str, *, varios: bool,
+    numero_transporte: str, viaje: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Un envío con una sola incidencia conserva `evento_id = envio_id`
+    (igual que v1); con varias, cada una es `<envio_id>:<tipo>`."""
+    envio_id = str(envio.get("envio_id", ""))
+    return {
+        "evento_id": f"{envio_id}:{tipo}" if varios else envio_id,
+        "tipo_evento": tipo,
+        "numero_transporte": numero_transporte,
+        "numero_guia": _numero_guia_de(envio),
+        "chofer": str(viaje.get("choferes", "")).strip() if viaje else "",
+        "cliente": str(viaje.get("clientes", "")).strip() if viaje else "",
+        "obra": str(viaje.get("obras_destino", "")).strip() if viaje else "",
+        "fecha": str(viaje.get("fecha", "")).strip() if viaje else "",
+        "recibido_en": str(envio.get("recibido_en", "")).strip(),
+    }

@@ -49,6 +49,15 @@ _TERMINOS_ANGULOS = (
     "ANGULOS",
 )
 
+# Algunas guías AZA omiten el prefijo ``B`` de "B HORMIGON", pero
+# conservan la especificación de acero A630. En este dominio, HORMIGON +
+# A630 es evidencia documental de barra; un producto enrollado declara
+# explícitamente ROLLO/ALAMBRON/BOBINA y conserva esa categoría. El patrón
+# se evalúa sólo cuando la descripción no declara una de esas formas.
+_PATRON_BARRA_HORMIGON_A630 = re.compile(
+    r"\bHORMIGON\b.*\bA\s*630\b"
+)
+
 
 def normalizar_texto(valor: object) -> str:
     """
@@ -92,6 +101,11 @@ def clasificar_material(descripcion: object) -> TipoCarga:
         termino in texto
         for termino in _TERMINOS_ROLLOS
     )
+
+    # No convertir un "ROLLO HORMIGON ... A630" en MIXTO: la declaración
+    # explícita de rollo es más específica que esta forma abreviada.
+    if not contiene_rollos and _PATRON_BARRA_HORMIGON_A630.search(texto):
+        contiene_barras = True
 
     contiene_angulos = any(
         termino in texto

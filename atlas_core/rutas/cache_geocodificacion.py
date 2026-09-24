@@ -63,12 +63,27 @@ def _clave(
 
 
 class RepositorioCacheGeocodificacion:
-    """JSON con escritura atómica; ubicación predeterminada portable (Drive)."""
+    """JSON con escritura atómica; ubicación predeterminada portable (Drive).
 
-    def __init__(self, ruta: str | Path | None = None) -> None:
-        self.ruta = Path(ruta) if ruta is not None else (
-            ruta_cache("geocodificacion") / NOMBRE_ARCHIVO_PREDETERMINADO
-        )
+    Bloque P0 AISLAMIENTO DE CACHÉ -- causa raíz real: `ruta_cache(...)`
+    sin `raiz` explícita llama a `resolver_raiz_atlas()`, que AUTODETECTA
+    el Drive real de este equipo (`G:\\Mi unidad\\Atlas`) -- una corrida
+    contra una copia scratch de `raiz_atlas` (perfilado, repro, test)
+    podía terminar leyendo/escribiendo el caché de G:\\ real sin que nada
+    en la firma lo advirtiera. `raiz_atlas` (nuevo, opcional, sólo
+    keyword) resuelve la ubicación BAJO esa raíz explícita -- nunca cae a
+    autodetección mientras se entregue. Se ignora si `ruta` ya viene
+    explícita (compatibilidad total con callers existentes -- tests que
+    inyectan su propio archivo). Sólo si NINGUNO de los dos se entrega se
+    preserva el comportamiento productivo de siempre (autodetección)."""
+
+    def __init__(self, ruta: str | Path | None = None, *, raiz_atlas: str | Path | None = None) -> None:
+        if ruta is not None:
+            self.ruta = Path(ruta)
+        elif raiz_atlas is not None:
+            self.ruta = ruta_cache("geocodificacion", raiz=Path(raiz_atlas)) / NOMBRE_ARCHIVO_PREDETERMINADO
+        else:
+            self.ruta = ruta_cache("geocodificacion") / NOMBRE_ARCHIVO_PREDETERMINADO
 
     def buscar(
         self, proveedor_nombre: str, proveedor_version: str, direccion: str,

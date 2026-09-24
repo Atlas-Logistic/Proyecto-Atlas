@@ -493,6 +493,84 @@ def confirmar_vehiculo(
         return vehiculo
 
 
+def asociar_chofer_a_vehiculo_confirmado(
+    ruta: str | Path, *, patente: str, actor: str, fuente_decision: str,
+    fecha: datetime, rut_chofer_asociado: str, observaciones: str = "",
+) -> Vehiculo:
+    """Bloque ASIGNACIONES CANÓNICAS CHOFER->VEHÍCULO -- cierra un hueco
+    real de `confirmar_vehiculo`: esa función es la ÚNICA que escribe un
+    vehículo, pero rechaza con `VehiculoDuplicadoError` cualquier
+    vehículo YA `CONFIRMADO` con una confirmación humana real (nunca
+    permite sobrescribir una decisión humana ya registrada) -- caso real
+    TG8925/JF9575: ambos ya fueron confirmados por Javier en un lote
+    anterior (`CONFIRMACION_HUMANA_VEHICULOS_R2_2026-08-13`), SIN el
+    vínculo estructurado a un chofer/RUT concreto, y ese vínculo debe
+    poder agregarse después sin re-confirmar el vehículo desde cero.
+
+    Nunca reemplaza ni retira evidencias existentes -- APPEND-ONLY,
+    misma filosofía que el resto del catálogo (evidencia acumulada,
+    nunca sobrescrita): agrega una evidencia `CONFIRMACION_HUMANA` nueva
+    con `rut_chofer_asociado`, conservando `vehiculo_id`/`aliases`/
+    `procedencia`/`fecha_creacion` y todas las evidencias previas tal
+    cual. Nunca crea un vehículo nuevo ni un duplicado -- exige que la
+    patente YA exista, CONFIRMADA y ACTIVA; cualquier otro estado se
+    rechaza explícitamente (nunca reactiva ni corrige de paso)."""
+    if not actor.strip():
+        raise ErrorCatalogoVehiculos("actor obligatorio")
+    if not fuente_decision.strip():
+        raise ErrorCatalogoVehiculos("fuente_decision obligatoria")
+    if fecha.tzinfo is None:
+        raise ErrorCatalogoVehiculos("fecha debe incluir zona horaria")
+    if not rut_chofer_asociado.strip():
+        raise ErrorCatalogoVehiculos("rut_chofer_asociado obligatorio")
+    canonica = _validar_patente(patente)
+    instante = fecha.astimezone(timezone.utc).isoformat()
+    ruta = Path(ruta) if ruta is not None else ruta_catalogo_vehiculos()
+    with bloqueo_sesion(ruta.parent, "catalogo_vehiculos"):
+        cargado = cargar_catalogo_vehiculos(ruta)
+        if cargado.formato != "V1":
+            raise ErrorCatalogoVehiculos("esta operación sólo escribe catálogos V1")
+        existente = next((v for v in cargado.vehiculos if v.patente_canonica == canonica), None)
+        if existente is None:
+            raise ErrorCatalogoVehiculos(
+                "no existe un vehículo confirmado con esa patente -- usar confirmar_vehiculo primero"
+            )
+        if existente.estado_calidad != "CONFIRMADO" or existente.estado_vigencia != "ACTIVO":
+            raise ErrorCatalogoVehiculos("sólo un vehículo CONFIRMADO y ACTIVO puede recibir esta asociación")
+        evidencia = EvidenciaVehiculo(
+            tipo="CONFIRMACION_HUMANA",
+            identificador_fuente=fuente_decision.strip(),
+            referencia_hash="",
+            campos_observados={
+                "patente": canonica, "tipo": existente.tipo,
+                "observacion": observaciones.strip(),
+                "rut_chofer_asociado": rut_chofer_asociado.strip(),
+            },
+            fecha=instante, actor_proceso=actor.strip(), resultado="SOPORTA",
+        )
+        EvidenciaVehiculo.desde_dict(evidencia.a_dict())
+        vehiculo = Vehiculo(
+            vehiculo_id=existente.vehiculo_id, patente_canonica=canonica, tipo=existente.tipo,
+            estado_calidad=existente.estado_calidad, estado_vigencia=existente.estado_vigencia,
+            aliases=existente.aliases, evidencias=(*existente.evidencias, evidencia),
+            procedencia=existente.procedencia, confirmado_por=existente.confirmado_por,
+            fecha_confirmacion=existente.fecha_confirmacion,
+            observaciones=existente.observaciones,
+            fecha_creacion=existente.fecha_creacion, fecha_modificacion=instante,
+        )
+        _validar_vehiculo(vehiculo)
+        contenido = {
+            "version": VERSION_FORMATO,
+            "vehiculos": [
+                *(v.a_dict() for v in cargado.vehiculos if v.patente_canonica != canonica),
+                vehiculo.a_dict(),
+            ],
+        }
+        cargar_catalogo_vehiculos(contenido)
+        escribir_json_atomico(ruta, contenido)
+        return vehiculo
+
+
 # ---------------------------------------------------------------------
 # Bloque V1 -- INTEGRIDAD DEL CATÁLOGO: catálogo != verdad automática.
 #

@@ -149,14 +149,40 @@ def _sub_clausulas(clausula: str) -> list[str]:
     return [t.strip() for t in trozos if t.strip()]
 
 
-def _procesar_subclausula(sub: str) -> list[dict]:
+def _procesar_subclausula(sub: str, *, guias_heredadas: tuple[str, ...] = ()) -> list[dict]:
+    """Bloque P0 CASO A -- caso real: "473001 tiene estadía Y fue
+    aprobada." `_sub_clausulas` corta en el "Y" (hay una palabra clave de
+    tipo entre la guía y el "Y"), dejando "fue aprobada" sin ningún
+    número de guía propio. Antes, sin guía -> `[]` -- el hecho
+    desaparecía en silencio (ni acción ni error visible), el evento
+    quedaba persistido más tarde con `estado_gestion=None` (ver Bug 2) y
+    la tarjeta nunca llegaba a un estado terminal -- reaparecía como
+    "Lista para aplicar" indefinidamente.
+
+    `guias_heredadas` (la(s) guía(s) de la sub-cláusula ANTERIOR dentro
+    de la MISMA oración -- ver `interpretar_instruccion_incidencias`):
+    si esta sub-cláusula no menciona ninguna guía propia, hereda esas --
+    "fue aprobada" sin sujeto propio se refiere a la guía que la
+    sub-cláusula anterior ya estableció, nunca a una guía distinta ni a
+    todas las guías vistas en la instrucción completa. Si tampoco hay
+    guías heredadas (primera sub-cláusula sin guía), sigue sin generar
+    nada -- comportamiento idéntico al de siempre."""
     guias = [m.group(1) for m in _PATRON_GUIA.finditer(sub)]
+    hereda_guia = False
     if not guias:
-        return []
+        if not guias_heredadas:
+            return []
+        guias = list(guias_heredadas)
+        hereda_guia = True
     keywords = _encontrar_keywords(sub)
     tipo = next((k.valor for k in keywords if k.categoria == "tipo"), "")
     gestion = next((k.valor for k in keywords if k.categoria == "gestion"), "")
     sin_incidencia = any(k.categoria == "sin_incidencia" for k in keywords)
+    if hereda_guia and not (tipo or gestion or sin_incidencia):
+        # Fragmento heredado sin ninguna palabra clave reconocible
+        # (p. ej. un resto de conjunción) -- no genera una acción vacía
+        # repetida por cada guía heredada.
+        return []
     acciones: list[dict] = []
     for guia in guias:
         if sin_incidencia:
@@ -187,6 +213,14 @@ def interpretar_instruccion_incidencias(texto: str) -> list[dict]:
     normalizado = normalizar_texto_atlas(texto)
     acciones: list[dict] = []
     for clausula in _dividir_clausulas(normalizado):
+        # La herencia de guía (ver `_procesar_subclausula`) nunca cruza
+        # una frontera de oración (".", ";") -- una oración nueva
+        # reestablece su propio sujeto; sólo se acota a las
+        # sub-cláusulas de la MISMA oración, unidas por "Y".
+        guias_previas: tuple[str, ...] = ()
         for sub in _sub_clausulas(clausula):
-            acciones.extend(_procesar_subclausula(sub))
+            guias_en_sub = tuple(m.group(1) for m in _PATRON_GUIA.finditer(sub))
+            acciones.extend(_procesar_subclausula(sub, guias_heredadas=guias_previas))
+            if guias_en_sub:
+                guias_previas = guias_en_sub
     return acciones

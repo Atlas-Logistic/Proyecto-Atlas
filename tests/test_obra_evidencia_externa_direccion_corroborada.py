@@ -352,7 +352,16 @@ def test_e2e_472339_obra_se_auto_resuelve_promueve_al_catalogo_y_el_motivo_se_li
     with entorno["dataset"].open(encoding="utf-8-sig", newline="") as archivo:
         fila = next(csv.DictReader(archivo, delimiter=";"))
     assert MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR.value not in fila["motivos_revision_documento"]
-    assert fila["obra_destino"] == "INMOB PROYECTO CEN SPA"  # el valor documental nunca se reescribe
+    # Bloque HOMOLOGACIÓN OBRA -> OPERACIÓN (caso real 0000359449/474381):
+    # antes de ese fix, el texto documental crudo sobrevivía para siempre
+    # en `obra_destino` aunque la obra ya quedara CONFIRMADA con nombre
+    # canónico distinto -- la ficha operacional (Viaje/Entrega/B1) mostraba
+    # el error OCR indefinidamente. Ahora, una resolución global única y
+    # CONFIRMADA corrige el texto persistido al canónico -- el OCR original
+    # sigue disponible para auditoría en `aliases_documentales` del
+    # catálogo (verificado arriba) y en la Incidencia Documental (abajo),
+    # nunca se pierde -- sólo deja de ser lo que se PRESENTA como OBRA.
+    assert fila["obra_destino"] == "PROYECTO CIEN"
 
     # Incidencia Documental: el error OCR queda como evidencia auditable
     # (Dato emitido vs Dato usado por Atlas), nunca oculto.

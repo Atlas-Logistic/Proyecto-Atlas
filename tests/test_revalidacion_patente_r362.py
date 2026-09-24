@@ -89,10 +89,10 @@ def _leer_filas(dataset):
     return {f["numero_guia"]: f for f in csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";")}
 
 
-def _confirmar(catalogos, *, patente, tipo, referencia="TEST"):
+def _confirmar(catalogos, *, patente, tipo, referencia="TEST", rut_chofer_asociado=""):
     confirmar_vehiculo(
         catalogos / "vehiculos.json", patente=patente, tipo=tipo, actor="TEST",
-        fuente_decision=referencia, fecha=FECHA,
+        fuente_decision=referencia, fecha=FECHA, rut_chofer_asociado=rut_chofer_asociado,
     )
 
 
@@ -131,6 +131,29 @@ def test_vehiculo_resuelto_retira_el_motivo(tmp_path):
     assert fila_final["indicador_revision"] == "OK"
     assert fila_final["patente_tracto"] == "KN5439"  # dato documental intacto
     assert fila_final["patente_rampla"] == "JF6468"
+
+
+def test_asociacion_humana_unica_resuelve_ocr_sin_reescribir_el_dato_documental(tmp_path):
+    fila = _fila_csv(
+        numero_guia="1", numero_transporte="T-1", rut_chofer="14.293.816-2",
+        patente_tracto="DD2494", patente_rampla="JBH529",
+        motivos_revision_documento="PATENTE_SIN_HOMOLOGAR",
+    )
+    _, catalogos, _, dataset = _entorno(tmp_path, filas_csv=[fila])
+    _confirmar(catalogos, patente="DD2494", tipo=TipoVehiculo.TRACTO)
+    _confirmar(
+        catalogos, patente="JB8529", tipo=TipoVehiculo.CARRO,
+        rut_chofer_asociado="14.293.816-2",
+    )
+    catalogo_antes = (catalogos / "vehiculos.json").read_bytes()
+
+    resultado = revalidar_patente_sin_homologar_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo={"1"},
+    )
+
+    assert resultado["guias_actualizadas"] == ["1"]
+    assert _leer_filas(dataset)["1"]["patente_rampla"] == "JBH529"
+    assert (catalogos / "vehiculos.json").read_bytes() == catalogo_antes
 
 
 # --- 2. Vehículo parcialmente resuelto (sólo una de las dos patentes) ---

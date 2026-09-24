@@ -36,12 +36,25 @@ from pathlib import Path
 from typing import Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico, ruta_operacion
+from atlas_core.ingesta_pdf import (
+    MIME_PDF, PAGINA_OK, PNG_CORRUPTO, TEXTO_CORRUPTO, detectar_mime_documento, leer_manifiestos_pdf,
+    rasterizar_pdf, separar_identificador_pagina_pdf, verificar_pagina_derivada,
+)
 
 UBICACION_ACTIVA_DESKTOP = "ACTIVA_DESKTOP"
 UBICACION_ACTIVA_MOBILE = "ACTIVA_MOBILE"
 UBICACION_EVIDENCIA_RESUELTA = "EVIDENCIA_RESUELTA"
 UBICACION_PURGADA = "PURGADA"
 UBICACION_NO_ENCONTRADA = "NO_ENCONTRADA"
+# Página de un PDF de entrada: la evidencia es su PNG técnico derivado
+# (``operacion/evidencia_pdf/``), verificado contra el manifiesto del PDF.
+UBICACION_DERIVADA_PDF = "DERIVADA_PDF"
+# El derivado existe pero no coincide con su hash/formato registrado -- se
+# abstiene, nunca lo usa ni lo reescribe.
+UBICACION_EVIDENCIA_PDF_CORRUPTA = "EVIDENCIA_PDF_CORRUPTA"
+# Sin el original y con varios manifiestos del mismo nombre (contenidos
+# distintos): no hay forma determinista de elegir -- se abstiene.
+UBICACION_EVIDENCIA_PDF_AMBIGUA = "EVIDENCIA_PDF_AMBIGUA"
 
 NOMBRE_METADATA = "metadata.json"
 
@@ -55,6 +68,12 @@ class RutaEvidencia:
     archivo: str
     ruta: Path | None
     ubicacion: str
+    # Sólo para páginas PDF (UBICACION_DERIVADA_PDF): número de página y,
+    # si esa página se procesó con texto embebido, su sidecar -- lo que
+    # `ingesta_pdf.proveedor_para_documento` necesita para releerla igual
+    # que en la ingesta. None para imágenes y páginas OCR.
+    pagina_pdf: int | None = None
+    ruta_texto_pdf: Path | None = None
 
 
 def _prefijo_mobile(archivo: str) -> tuple[str, str] | None:
@@ -82,6 +101,9 @@ def resolver_ruta_evidencia(raiz_atlas: str | Path, archivo: str) -> RutaEvidenc
     archivo = str(archivo or "").strip()
     if not archivo:
         return RutaEvidencia(archivo, None, UBICACION_NO_ENCONTRADA)
+    referencia_pdf, pagina_pdf = separar_identificador_pagina_pdf(archivo)
+    if pagina_pdf is not None:
+        return _resolver_pagina_pdf(raiz, archivo, referencia_pdf, pagina_pdf)
 
     mobile = _prefijo_mobile(archivo)
     if mobile is not None:
@@ -129,6 +151,84 @@ def resolver_ruta_evidencia(raiz_atlas: str | Path, archivo: str) -> RutaEvidenc
     return RutaEvidencia(archivo, None, UBICACION_NO_ENCONTRADA)
 
 
+def _directorio_evidencia_pdf(raiz: Path) -> Path:
+    """Mismo destino que usa la ingesta en operación real
+    (`procesamiento_masivo._directorio_artefactos_pdf_para_salida`)."""
+    return raiz / "operacion" / "evidencia_pdf"
+
+
+def _resolver_pagina_pdf(raiz: Path, archivo: str, referencia: str, pagina: int) -> RutaEvidencia:
+    """Página `pagina` del PDF `referencia` -> su PNG técnico (y sidecar de
+    texto si lo usó la ingesta), verificados contra el manifiesto.
+
+    El original se localiza con el MISMO resolvedor (entradas activas /
+    evidencia resuelta) y se identifica por su SHA-256, así que siempre se
+    elige el manifiesto de ESE contenido. Si falta un derivado y el original
+    está, se regenera con la misma rasterización determinista (nunca toca el
+    original). Un derivado corrupto nunca se reutiliza ni se sobrescribe:
+    abstención auditable."""
+    directorio = _directorio_evidencia_pdf(raiz)
+    original = resolver_ruta_evidencia(raiz, referencia).ruta
+    if original is not None and detectar_mime_documento(original) != MIME_PDF:
+        original = None
+
+    def candidatos() -> list[dict]:
+        manifiestos = leer_manifiestos_pdf(directorio, referencia)
+        if original is None:
+            return manifiestos
+        sha = _sha256_archivo(original)
+        return [m for m in manifiestos if m.get("original_pdf", {}).get("sha256") == sha]
+
+    encontrados = candidatos()
+    if original is None and len({m.get("original_pdf", {}).get("sha256") for m in encontrados}) > 1:
+        return RutaEvidencia(archivo, None, UBICACION_EVIDENCIA_PDF_AMBIGUA, pagina_pdf=pagina)
+    png = texto = None
+    motivo = UBICACION_NO_ENCONTRADA
+    if encontrados:
+        png, texto, motivo = verificar_pagina_derivada(directorio, encontrados[0], pagina)
+    if motivo in (PNG_CORRUPTO, TEXTO_CORRUPTO):
+        return RutaEvidencia(archivo, None, UBICACION_EVIDENCIA_PDF_CORRUPTA, pagina_pdf=pagina)
+    if motivo != PAGINA_OK and original is not None:
+        rasterizar_pdf(original, directorio, referencia_original=referencia)
+        encontrados = candidatos()
+        if encontrados:
+            png, texto, motivo = verificar_pagina_derivada(directorio, encontrados[0], pagina)
+    if motivo in (PNG_CORRUPTO, TEXTO_CORRUPTO):
+        return RutaEvidencia(archivo, None, UBICACION_EVIDENCIA_PDF_CORRUPTA, pagina_pdf=pagina)
+    if motivo != PAGINA_OK or png is None:
+        return RutaEvidencia(archivo, None, UBICACION_NO_ENCONTRADA, pagina_pdf=pagina)
+    return RutaEvidencia(archivo, png, UBICACION_DERIVADA_PDF, pagina_pdf=pagina, ruta_texto_pdf=texto)
+
+
+def paginas_pdf_procesables(raiz_atlas: str | Path, referencia: str) -> list[int] | None:
+    """Páginas procesables del PDF `referencia` según su manifiesto (lo
+    genera con la rasterización determinista si todavía no existe). None
+    si `referencia` no resuelve a un PDF real (por firma) -- p. ej. una
+    imagen, o un original ya purgado."""
+    raiz = Path(raiz_atlas)
+    original = resolver_ruta_evidencia(raiz, referencia).ruta
+    if original is None or detectar_mime_documento(original) != MIME_PDF:
+        return None
+    directorio = _directorio_evidencia_pdf(raiz)
+    sha = _sha256_archivo(original)
+    manifiestos = [
+        m for m in leer_manifiestos_pdf(directorio, referencia)
+        if m.get("original_pdf", {}).get("sha256") == sha
+    ]
+    if not manifiestos:
+        rasterizar_pdf(original, directorio, referencia_original=referencia)
+        manifiestos = [
+            m for m in leer_manifiestos_pdf(directorio, referencia)
+            if m.get("original_pdf", {}).get("sha256") == sha
+        ]
+    if not manifiestos:
+        return []
+    return sorted(
+        int(p["pagina"]) for p in manifiestos[0].get("paginas", [])
+        if isinstance(p, Mapping) and isinstance(p.get("pagina"), int)
+    )
+
+
 def documentos_con_revision_pendiente(decisiones_pendientes: Mapping[str, object]) -> frozenset[str]:
     """`archivo` de cada documento con al menos una decisión con
     ``estado == "PENDIENTE"`` -- la única fuente de verdad de qué
@@ -147,6 +247,10 @@ def documentos_con_revision_pendiente(decisiones_pendientes: Mapping[str, object
         archivo = documento.get("archivo") if isinstance(documento, Mapping) else None
         if archivo:
             archivos.add(str(archivo))
+            # Una página PDF pendiente (`<pdf>::pagina=NNNN`) también
+            # mantiene pendiente su PDF original: la evidencia física en
+            # entradas/evidencia resuelta es el PDF, no la página.
+            archivos.add(separar_identificador_pagina_pdf(str(archivo))[0])
     return frozenset(archivos)
 
 

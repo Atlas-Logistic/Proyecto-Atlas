@@ -23,6 +23,7 @@ from atlas_core.registro_eventos_operacionales import (
     anular_evento,
     listar_eventos_por_transporte,
     registrar_evento,
+    registrar_estado_estadia,
     resolver_enriquecimiento_transporte,
 )
 
@@ -55,6 +56,24 @@ def _anular(args) -> dict:
         referencia=args.referencia or "",
         motivo=args.motivo or "",
     )
+
+
+def _actualizar_estadia(args) -> dict:
+    enriquecimiento = resolver_enriquecimiento_transporte(
+        raiz=args.raiz_atlas, numero_transporte=args.numero_transporte
+    )
+    resultado = registrar_estado_estadia(
+        raiz=args.raiz_atlas,
+        numero_transporte=args.numero_transporte,
+        estado_incidencia=args.estado_incidencia,
+        nota=args.nota or "",
+        contexto_empresarial=args.contexto_empresarial,
+        origen=args.origen,
+        referencia=args.referencia or "",
+        enriquecimiento=enriquecimiento,
+    )
+    resultado["enriquecimiento"] = enriquecimiento
+    return resultado
 
 
 def _listar(args) -> dict:
@@ -95,6 +114,17 @@ def main() -> None:
     p_anu = sub.add_parser("anular")
     comunes(p_anu, con_motivo=True)
 
+    p_est = sub.add_parser("actualizar-estadia")
+    p_est.add_argument("--raiz-atlas", dest="raiz_atlas", required=True)
+    p_est.add_argument("--numero-transporte", dest="numero_transporte", required=True)
+    p_est.add_argument("--estado-incidencia", dest="estado_incidencia", required=True,
+                       choices=("ESPERA_ESTADIA", "ESTADIA_APROBADA"))
+    p_est.add_argument("--contexto-empresarial", dest="contexto_empresarial",
+                       default=CONTEXTO_EMPRESARIAL_SIN_ASIGNAR)
+    p_est.add_argument("--origen", dest="origen", default="DESKTOP_OBSERVACIONES")
+    p_est.add_argument("--referencia", dest="referencia", default="")
+    p_est.add_argument("--nota", dest="nota", default="")
+
     p_lis = sub.add_parser("listar")
     p_lis.add_argument("--raiz-atlas", dest="raiz_atlas", required=True)
     p_lis.add_argument("--numero-transporte", dest="numero_transporte", required=True)
@@ -112,6 +142,8 @@ def main() -> None:
             resultado = _registrar(args)
         elif args.accion == "anular":
             resultado = _anular(args)
+        elif args.accion == "actualizar-estadia":
+            resultado = _actualizar_estadia(args)
         else:
             resultado = _listar(args)
     except Exception as error:  # noqa: BLE001 -- el ACK a Desktop nunca debe ser un stacktrace

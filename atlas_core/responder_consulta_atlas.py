@@ -408,6 +408,7 @@ def responder_consulta_atlas(
     pregunta: str, *, ruta_viajes: str | Path, ruta_incidencias: str | Path | None = None,
     raiz_atlas: str | Path | None = None,
     proveedor_interpretacion: ProveedorInterpretacionConsulta | None = None,
+    consulta_anterior: ConsultaAtlas | None = None,
 ) -> RespuestaConsultaAtlas:
     """Punto de entrada único de Consultas Atlas V1. Read-only (Bloque
     18): nunca escribe nada, sólo lee `viajes.csv`, (dominio
@@ -420,11 +421,21 @@ def responder_consulta_atlas(
         falta) -> [validador semántico] -> validador estructural ->
         ejecutor determinístico -> presentación.
     Toda cifra sigue saliendo siempre del ejecutor -- B1 nunca produce
-    una respuesta numérica final, sólo una `ConsultaAtlas`."""
+    una respuesta numérica final, sólo una `ConsultaAtlas`.
+
+    `consulta_anterior` (Bloque P0 CASO B, opcional -- `None` conserva
+    el comportamiento de siempre, stateless): la `ConsultaAtlas` de la
+    respuesta anterior (`respuesta.resultado.consulta_interpretada`) --
+    el llamador (Desktop/CLI) es quien conserva ese único valor entre
+    turnos, nunca este módulo. Un "muéstramelos" sin ningún contenido
+    propio reutiliza su `filtros`/`dominio` EXACTOS (ver
+    `interpretador_consultas._es_seguimiento_listar_bare`)."""
     viajes = cargar_viajes(ruta_viajes)
     catalogos = construir_catalogos_consulta(viajes)
 
-    consulta, avisos = interpretar_consulta_determinista(pregunta, catalogos=catalogos)
+    consulta, avisos = interpretar_consulta_determinista(
+        pregunta, catalogos=catalogos, contexto_previo=consulta_anterior,
+    )
 
     ambiguos = [a for a in avisos if a.startswith("AMBIGUO:")]
     if ambiguos:

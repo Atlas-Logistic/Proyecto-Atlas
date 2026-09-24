@@ -136,6 +136,103 @@ def test_ruta_predeterminada_deriva_de_la_raiz_portable(tmp_path, monkeypatch):
     assert repositorio.ruta == tmp_path / "Atlas" / "cache" / "geocodificacion" / "geocodificacion_cache.json"
 
 
+def test_raiz_atlas_explicita_ubica_el_cache_bajo_esa_raiz(tmp_path):
+    """Bloque P0 AISLAMIENTO DE CACHÉ -- requisito (a): `raiz_atlas`
+    explícita resuelve el archivo de caché DENTRO de esa raíz (mismo
+    layout `cache/geocodificacion/...` que ya usa la raíz portable)."""
+    scratch = tmp_path / "Atlas_scratch"
+    repositorio = RepositorioCacheGeocodificacion(raiz_atlas=scratch)
+    assert repositorio.ruta == scratch / "cache" / "geocodificacion" / "geocodificacion_cache.json"
+
+
+def test_raiz_atlas_explicita_nunca_resuelve_hacia_g_aunque_g_exista(tmp_path, monkeypatch):
+    """Bloque P0 AISLAMIENTO DE CACHÉ -- requisito (b): aunque la
+    autodetección de Drive encontraría un G:\\ real (simulado aquí con un
+    directorio que SÍ existe y SÍ parece una raíz de Drive válida),
+    entregar `raiz_atlas` explícita hace que jamás se consulte esa
+    autodetección -- ni siquiera se importa/llama."""
+    g_simulado = tmp_path / "G_simulado" / "Mi unidad" / "Atlas"
+    g_simulado.mkdir(parents=True)
+    (g_simulado / "cache" / "geocodificacion").mkdir(parents=True)
+
+    def _autodetectar_no_debe_llamarse():
+        raise AssertionError("autodetectar_raiz_drive no debe consultarse cuando raiz_atlas es explícita")
+
+    monkeypatch.setattr(
+        "atlas_core.almacenamiento_portable.autodetectar_raiz_drive", _autodetectar_no_debe_llamarse,
+    )
+    scratch = tmp_path / "scratch_explicito"
+    repositorio = RepositorioCacheGeocodificacion(raiz_atlas=scratch)
+    assert repositorio.ruta == scratch / "cache" / "geocodificacion" / "geocodificacion_cache.json"
+    assert g_simulado not in repositorio.ruta.parents
+    # Ejercitar lectura/escritura real -- nunca toca `g_simulado`.
+    interno = ProveedorRutasSimulado(geocodificaciones={"DIRECCION X": _resultado_ok()})
+    ProveedorRutasConCacheGeocodificacion(interno, repositorio).geocodificar("DIRECCION X")
+    assert not (g_simulado / "cache" / "geocodificacion" / "geocodificacion_cache.json").exists()
+    assert (scratch / "cache" / "geocodificacion" / "geocodificacion_cache.json").exists()
+
+
+def test_sin_raiz_ni_ruta_explicita_conserva_autodeteccion_productiva(tmp_path, monkeypatch):
+    """Bloque P0 AISLAMIENTO DE CACHÉ -- requisito (c): la autodetección
+    SÓLO puede existir cuando el caller no entrega ni `ruta` ni
+    `raiz_atlas` -- comportamiento productivo idéntico al de siempre
+    (mismo mecanismo que ya cubre `test_ruta_predeterminada_deriva_de_
+    la_raiz_portable` vía variable de entorno; aquí se ejercita la otra
+    vía de resolución productiva, la autodetección de Drive, para
+    confirmar que sigue intacta)."""
+    g_simulado = tmp_path / "G_simulado" / "Mi unidad" / "Atlas"
+    g_simulado.mkdir(parents=True)
+    monkeypatch.setattr(
+        "atlas_core.almacenamiento_portable.autodetectar_raiz_drive", lambda: g_simulado,
+    )
+    monkeypatch.delenv("ATLAS_DATA_DIR", raising=False)
+    repositorio = RepositorioCacheGeocodificacion()
+    assert repositorio.ruta == g_simulado / "cache" / "geocodificacion" / "geocodificacion_cache.json"
+
+
+def test_raiz_atlas_se_ignora_si_ruta_ya_viene_explicita(tmp_path):
+    """`ruta` explícita (el caso ya usado por todos los tests de este
+    archivo/por los tests que inyectan su propio archivo) sigue ganando
+    sobre `raiz_atlas` -- compatibilidad total, nunca un comportamiento
+    sorpresa para un caller que ya construye su propia ruta."""
+    ruta_directa = tmp_path / "mi_cache_propio.json"
+    otra_raiz = tmp_path / "raiz_que_debe_ignorarse"
+    repositorio = RepositorioCacheGeocodificacion(ruta_directa, raiz_atlas=otra_raiz)
+    assert repositorio.ruta == ruta_directa
+
+
+def test_lectura_escritura_respeta_la_raiz_resuelta_por_raiz_atlas(tmp_path):
+    """Bloque P0 AISLAMIENTO DE CACHÉ -- requisito (d): dos instancias
+    construidas con la MISMA `raiz_atlas` comparten caché (una escribe,
+    otra lee del disco); una tercera instancia con una `raiz_atlas`
+    DISTINTA no ve nada -- el aislamiento por raíz es real, no sólo en
+    el atributo `.ruta` calculado."""
+    raiz_a = tmp_path / "Atlas_A"
+    raiz_b = tmp_path / "Atlas_B"
+
+    interno_1 = ProveedorRutasSimulado(geocodificaciones={"DIRECCION AISLADA": _resultado_ok()})
+    ProveedorRutasConCacheGeocodificacion(
+        interno_1, RepositorioCacheGeocodificacion(raiz_atlas=raiz_a),
+    ).geocodificar("DIRECCION AISLADA")
+
+    # Misma raíz A -- cache hit, nunca vuelve a llamar al proveedor interno.
+    interno_2 = ProveedorRutasSimulado()
+    resultado_misma_raiz = ProveedorRutasConCacheGeocodificacion(
+        interno_2, RepositorioCacheGeocodificacion(raiz_atlas=raiz_a),
+    ).geocodificar("DIRECCION AISLADA")
+    assert interno_2.llamadas_geocodificacion == 0
+    assert resultado_misma_raiz.estado == EstadoRuta.REQUIERE_REVISION
+
+    # Raíz B distinta -- nunca ve lo que escribió la raíz A.
+    interno_3 = ProveedorRutasSimulado(geocodificaciones={"DIRECCION AISLADA": _resultado_ok()})
+    ProveedorRutasConCacheGeocodificacion(
+        interno_3, RepositorioCacheGeocodificacion(raiz_atlas=raiz_b),
+    ).geocodificar("DIRECCION AISLADA")
+    assert interno_3.llamadas_geocodificacion == 1  # miss real -- raíz distinta, sin cache compartido
+    assert (raiz_a / "cache" / "geocodificacion" / "geocodificacion_cache.json").exists()
+    assert (raiz_b / "cache" / "geocodificacion" / "geocodificacion_cache.json").exists()
+
+
 def test_cache_persiste_en_disco_entre_instancias_distintas(tmp_path):
     ruta = tmp_path / "geocodificacion_cache.json"
     interno_1 = ProveedorRutasSimulado()
