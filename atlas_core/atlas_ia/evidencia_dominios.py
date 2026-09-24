@@ -465,6 +465,7 @@ def _cargar_decisiones_aplicadas(carpeta_catalogos: Path) -> list[Mapping[str, o
 def convergencia_vehiculo(
     *, campo: str, valor_documental: str, rut_chofer: str, numero_transporte: str,
     filas: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path | None,
+    evidencia_visual_clara_distinta: bool = False,
 ) -> ResultadoConvergencia:
     """¿El conocimiento interno canónico de Atlas permite plegar esta
     patente al canónico sin pasar por revisión?
@@ -494,7 +495,7 @@ def convergencia_vehiculo(
     carpeta = Path(carpeta_catalogos)
     try:
         from atlas_core.catalogo_vehiculos import (
-            cargar_catalogo_vehiculos, normalizar_patente_vehiculo, resolver_patente,
+            cargar_catalogo_vehiculos, normalizar_patente_vehiculo,
         )
         from atlas_core.decisiones_pendientes import (
             NIVEL_CONFIRMACION_HUMANA as _NIVEL_HUMANA,
@@ -506,15 +507,14 @@ def convergencia_vehiculo(
     except (OSError, ValueError):
         return vacio
 
-    contradicciones: list[str] = []
-    try:
-        exacto = resolver_patente(carpeta / "vehiculos.json", valor)
-        if exacto.estado == "COINCIDENCIA_EXACTA":
-            contradicciones.append(
-                f'"{valor}" ya es una patente canónica real -- no es una lectura OCR a corregir'
-            )
-    except (OSError, ValueError):
-        pass
+    # Una cadena OCR, aunque coincida con la patente canónica de otro
+    # vehículo, no demuestra que el conjunto del chofer cambió. Sólo una
+    # verificación visual explícita hecha aguas arriba puede contradecir
+    # una asociación humana única; jamás se deduce de distancia textual.
+    contradicciones: list[str] = (
+        ["EVIDENCIA_DOCUMENTAL_VISUAL_CLARA_DE_PATENTE_DISTINTA"]
+        if evidencia_visual_clara_distinta else []
+    )
 
     try:
         resultado = evaluar_evidencia_patente(
@@ -559,12 +559,42 @@ def convergencia_vehiculo(
         if ganador and str(ganador.get("nivel", "")) == _NIVEL_HUMANA
         else _DISTANCIA_MAXIMA_DOCUMENTAL
     )
+    ancla_humana = bool(ganador) and str(ganador.get("nivel", "")) == _NIVEL_HUMANA
+
+    # Bloque P0 CONVERGENCIA VEHÍCULO -- a diferencia de una coincidencia
+    # APROXIMADA (que el comentario de arriba correctamente nunca usa como
+    # prueba, porque el ruido de OCR puede acercar por azar a la patente de
+    # cualquier otro vehículo), aquí el valor documental coincide EXACTO
+    # (distancia 0) con la patente canónica de un vehículo CONFIRMADO/ACTIVO
+    # distinto del ganador -- no es una inferencia por proximidad de texto,
+    # es una identidad real y distinta ya escrita tal cual en el documento.
+    # Plegar hacia el ganador (p. ej. por relación chofer<->vehículo)
+    # escondería que el documento nombra a OTRO vehículo real y confirmado
+    # -- eso es CONTRADICCION_FUERTE, nunca una corrección silenciosa.
+    canonico_ganador = normalizar_patente_vehiculo(str(ganador.get("patente", ""))) if ganador else ""
+    if any(
+        normalizar_patente_vehiculo(v.patente_canonica) == valor_norm
+        and valor_norm != canonico_ganador
+        for v in vehiculos
+    ):
+        contradicciones.append("PATENTE_DOCUMENTAL_ES_CANONICA_CONFIRMADA_DE_OTRO_VEHICULO")
+
     resuelve = (
         resultado.get("resultado") == _RESUELTO
         and ganador is not None
         and not contradicciones
         and distancia is not None
-        and 0 < distancia <= techo
+        and 0 < distancia
+        # Bloque P0 CONVERGENCIA VEHÍCULO -- una asociación humana única
+        # tolera MÁS distancia OCR (`techo` ya sube a
+        # `_DISTANCIA_MAXIMA_ANCLA_HUMANA` arriba), pero nunca la vuelve
+        # ILIMITADA: "GFZW99" documentado para un chofer cuyo único
+        # vehículo confirmado es "JD8659" es radicalmente distinto (a
+        # kilómetros de cualquier techo calibrado) y jamás puede plegarse
+        # en silencio sólo porque la relación chofer<->vehículo es fuerte
+        # -- eso exige MANTENER_REVISION, igual que cualquier otra
+        # variación que exceda el techo de su propia fuerza.
+        and distancia <= techo
     )
 
     def _desempate(metodo: str, resolucion: str, confianza: str, canonico: str) -> dict:

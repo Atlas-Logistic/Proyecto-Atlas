@@ -12,6 +12,7 @@ from atlas_core.reporte_viajes import (
     COLUMNAS_VIAJES,
     generar_reporte_viajes,
 )
+from atlas_core.catalogo_vehiculos import TipoVehiculo, confirmar_vehiculo
 from resumen_procesamiento_desktop import comando_resumen, comando_snapshot
 
 
@@ -481,6 +482,51 @@ def test_ledger_resuelve_caso_real_0000351135(tmp_path):
     assert viaje["patentes_tracto"] == "VP8521"
     assert "CONFLICTO_PATENTE_RAMPLA" not in viaje["motivos_revision"]
     assert "CONFLICTO_PATENTE_TRACTO" not in viaje["motivos_revision"]
+
+
+def test_reporte_no_pliega_patente_radicalmente_distinta_aunque_la_asociacion_sea_unica(tmp_path):
+    # Bloque P0 CONVERGENCIA VEHÍCULO -- este test antes exigía que
+    # "ZZ0000" (documento 1) se plegara en silencio a "JB8529" sólo porque
+    # la asociación humana RUT<->vehículo es única (sin competidores).
+    # Ese es exactamente el bloqueo P0 corregido: distancia 6 entre
+    # "ZZ0000" y "JB8529" está muy por encima del techo calibrado incluso
+    # con ancla humana (`_DISTANCIA_MAXIMA_ANCLA_HUMANA = 2`) -- una
+    # asociación única absorbe OCR incierto (typo de 1-2 posiciones),
+    # nunca vuelve la distancia ilimitada. El documento 2 SÍ trae el valor
+    # exacto ("JB8529") y no necesita converger; el conflicto real entre
+    # ambos documentos del mismo viaje debe quedar visible, nunca oculto
+    # tras una fusión silenciosa.
+    filas = [
+        _fila(
+            numero_guia="1", numero_transporte="00002001", rut_chofer="14.293.816-2",
+            patente_tracto="DD2494", patente_rampla="ZZ0000",
+        ),
+        _fila(
+            archivo="b.jpg", numero_guia="2", numero_transporte="00002001", rut_chofer="14.293.816-2",
+            patente_tracto="DD2494", patente_rampla="JB8529",
+        ),
+    ]
+    origen = tmp_path / "entrada.csv"
+    _escribir_csv(origen, filas)
+    catalogos = tmp_path / "catalogos"
+    catalogos.mkdir()
+    (catalogos / "vehiculos.json").write_text(
+        json.dumps({"version": 1, "vehiculos": []}), encoding="utf-8",
+    )
+    confirmar_vehiculo(
+        catalogos / "vehiculos.json", patente="JB8529", tipo=TipoVehiculo.CARRO,
+        actor="TEST", fuente_decision="TEST", fecha=RELOJ(), rut_chofer_asociado="14.293.816-2",
+    )
+    antes = origen.read_bytes()
+
+    generar_reporte_viajes(origen, tmp_path / "reporte", carpeta_catalogos=catalogos, reloj=RELOJ)
+
+    viaje = _leer_csv(tmp_path / "reporte" / "viajes.csv")[0]
+    # Ninguna corrección silenciosa: ambos valores documentales sobreviven,
+    # el conflicto real queda explícito para revisión humana.
+    assert viaje["patentes_rampla"] == "JB8529 | ZZ0000"
+    assert "CONFLICTO_PATENTE_RAMPLA" in viaje["motivos_revision"]
+    assert origen.read_bytes() == antes
 
 
 def test_sin_ruta_ledger_conserva_comportamiento_actual_t5(tmp_path):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 from contextvars import ContextVar
 import json
 import logging
@@ -22,6 +23,12 @@ from atlas_core.deduplicacion_ingesta import (
     ClasificacionDuplicado,
     clasificar_reingesta_documental,
     sha256_binario,
+)
+from atlas_core.ingesta_pdf import (
+    MIME_PDF, PaginaPdfRasterizada, detectar_mime_documento, directorio_evidencia_pdf_para_dataset,
+    PAGINA_OK, construir_asociacion_evidencia_adicional, evidencia_adicional_ya_registrada,
+    identificador_pagina_pdf, leer_manifiestos_pdf, proveedor_para_documento, rasterizar_pdf,
+    registrar_evidencia_adicional, separar_identificador_pagina_pdf, verificar_pagina_derivada,
 )
 from atlas_core.catalogos import (
     buscar_chofer_por_nombre_exacto,
@@ -63,6 +70,8 @@ from atlas_core.extractor import (
     _extraer_transporte_geometrico,
     _extraer_chofer_geometrico,
     _patente_valida,
+    _peso_tiene_forma_sospechosa,
+    _reexaminar_peso_por_baja_confianza,
     detectar_captura_recortada_posible,
     extraer_datos,
 )
@@ -178,7 +187,7 @@ _CONTEXTO_TRAZA_OCR: ContextVar[tuple[Path, str] | None] = ContextVar(
 
 
 EXTENSIONES_PERMITIDAS = frozenset(
-    {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+    {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".pdf"}
 )
 RUTA_CATALOGO_CHOFERES = Path("catalogos/choferes.json")
 
@@ -191,6 +200,25 @@ RUTA_CATALOGO_CHOFERES = Path("catalogos/choferes.json")
 # `pais_operacion` distinto, o inyectar su propio `proveedor_rutas` y no
 # usar este valor en absoluto (ver límites multiempresa, Bloque N).
 PAIS_OPERACION_PREDETERMINADO = "CL"
+
+# Bloque P0 ESTADO_OPERACIONAL -- criterio único (mismo ya usado por
+# `_fila_requiere_atencion_operacional`, Bloque R7) para decidir si una
+# ruta sigue pendiente de resolución: cualquier `estado_ruta` que no sea
+# ni "sin dato" (ruta no aplicable/no intentada) ni el único estado de
+# éxito (`RUTA_CALCULADA`) bloquea. Antes, `estado_operacional` se
+# calculaba en 3 sitios distintos comparando contra una lista fija de
+# sólo 3 valores conocidos (`REQUIERE_REVISION`/`ORIGEN_NO_DETERMINADO`/
+# `DESTINO_NO_VALIDO`) -- cualquier otro estado real de fallo devuelto
+# por el proveedor de rutas (`SIN_CREDENCIAL`, `SIN_CONEXION`,
+# `DIRECCION_NO_ENCONTRADA`, `RESULTADO_AMBIGUO`, `PROVEEDOR_NO_
+# DISPONIBLE`, `LIMITE_CUOTA`, `RESPUESTA_INVALIDA`, `SIN_ACCESO_VIAL` --
+# ver `atlas_core.rutas.modelos.EstadoRuta`) se colaba sin marcarse,
+# dejando `estado_operacional == "OK"` en un viaje sin ruta real
+# calculada. P0: nunca enumerar fallos conocidos, sólo reconocer el
+# único éxito.
+def _ruta_pendiente_de_resolucion(estado_ruta: object) -> bool:
+    valor = str(estado_ruta or "").strip()
+    return valor not in ("", EstadoRuta.RUTA_CALCULADA.value)
 
 # Guarda de plausibilidad temporal: cuando el llamador no entrega
 # fecha_desde/fecha_hasta explícitos, igual se descartan años que ningún
@@ -371,7 +399,30 @@ COLUMNAS = [
     # backward-compatible, un dataset existente sin esta columna sigue
     # leyéndose igual (csv.DictReader por nombre de columna).
     "rut_cliente",
+    # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: dos identidades documentales
+    # DISTINTAS, nunca fusionadas -- `codigo_cliente` (cuenta interna del
+    # comprador, ancla "Código Cliente") es evidencia complementaria para
+    # CLIENTE_COMPRADOR; `cod_destinatario` (ficha operacional AZA/SAP,
+    # ancla "COD DESTINATARIO") es 1:N respecto del comprador y NUNCA
+    # equivale a cliente, receptor jurídico ni dirección física -- se
+    # persiste tal cual para servir de evidencia complementaria de OBRA
+    # DESTINO, nunca de DESPACHAR_A. Agregadas al final -- backward-
+    # compatible, ver `_COLUMNAS_SIN_CODIGO_CLIENTE_DESTINATARIO` en
+    # revalidacion_documental.py.
+    "codigo_cliente",
+    "cod_destinatario",
+    # Bloque P0 CASO B ("ingresadas hoy") -- timestamp REAL de ingesta a
+    # Atlas (UTC ISO-8601), estampado UNA vez, por documento, en el
+    # momento exacto en que `procesar_archivo` lo procesa -- nunca la
+    # fecha documental (`fecha`, arriba), nunca recalculado por ningún
+    # `revalidar_*_sin_ocr` (ninguno lo conoce; una reescritura completa
+    # de fila simplemente preserva lo que ya traía el dict). Agregada al
+    # final -- backward-compatible, ver `COLUMNAS_PRE_INGESTA`.
+    "fecha_ingesta_utc",
 ]
+
+_COLUMNAS_INGESTA_NUEVAS = {"fecha_ingesta_utc"}
+COLUMNAS_PRE_INGESTA = [columna for columna in COLUMNAS if columna not in _COLUMNAS_INGESTA_NUEVAS]
 
 _COLUMNAS_R4_NUEVAS = {
     "estado_documental", "estado_operacional", "metricas_procesamiento_json",
@@ -414,6 +465,66 @@ def descubrir_archivos(carpeta: str | Path) -> list[Path]:
         ),
         key=lambda ruta: ruta.relative_to(raiz).as_posix().casefold(),
     )
+
+
+def _directorio_artefactos_pdf_para_salida(ruta_csv: Path) -> Path:
+    """Evidencia PDF fuera del snapshot ``actual`` cuando es operación real."""
+    return directorio_evidencia_pdf_para_dataset(ruta_csv)
+
+
+class ErrorEntradaDocumento(ValueError):
+    """Entrada que no puede llegar al pipeline (PDF cifrado/corrupto/vacío,
+    `.pdf` que no es PDF, página no renderizable). Se registra como fila
+    ERROR con su identificador -- nunca desaparece del lote en silencio."""
+
+
+def _preparar_entradas_ocr(
+    *, raiz: Path, archivos: list[Path], ruta_csv: Path,
+    paginas_pdf: dict[str, PaginaPdfRasterizada] | None = None,
+    errores_entrada: dict[str, str] | None = None,
+) -> list[tuple[Path, str]]:
+    """Expande PDFs a páginas PNG sin cambiar el camino de las imágenes.
+
+    El identificador que se persiste en ``archivo`` mantiene el PDF y su
+    página (`original.pdf::pagina=0001`); el manifiesto determinista enlaza
+    ese identificador con el PNG, ambos hashes y el original preservado.
+
+    PDF se reconoce por FIRMA (un PDF real con extensión `.jpg` también se
+    expande), y un `.pdf` cuyo contenido no es PDF se rechaza. Imágenes: el
+    camino no cambia. `paginas_pdf` (identificador -> página) y
+    `errores_entrada` (identificador -> motivo) los completa esta función
+    para que `procesar_carpeta` sepa qué páginas traen texto embebido y qué
+    entradas deben quedar como fila ERROR.
+    """
+    entradas: list[tuple[Path, str]] = []
+    destino_pdf = _directorio_artefactos_pdf_para_salida(ruta_csv)
+    for ruta in archivos:
+        referencia = ruta.relative_to(raiz).as_posix()
+        if ruta.suffix.lower() != ".pdf" and detectar_mime_documento(ruta) != MIME_PDF:
+            entradas.append((ruta, referencia))
+            continue
+        resultado = rasterizar_pdf(
+            ruta, destino_pdf, referencia_original=referencia,
+        )
+        for pagina in resultado.paginas:
+            identificador = identificador_pagina_pdf(referencia, pagina.pagina)
+            entradas.append((pagina.ruta_imagen, identificador))
+            if paginas_pdf is not None:
+                paginas_pdf[identificador] = pagina
+        for error in resultado.errores:
+            logger.warning(
+                "PDF %s, página %s: %s: %s (manifiesto %s)",
+                referencia, error.pagina, error.tipo, error.mensaje,
+                resultado.ruta_manifiesto,
+            )
+            identificador = (
+                referencia if error.pagina is None
+                else identificador_pagina_pdf(referencia, error.pagina)
+            )
+            if errores_entrada is not None:
+                errores_entrada[identificador] = f"{error.tipo}: {error.mensaje}"
+                entradas.append((ruta, identificador))
+    return entradas
 
 
 def _normalizar(texto: object) -> str:
@@ -1014,6 +1125,14 @@ class MotivoRevisionDocumento(str, Enum):
     # el resto de los campos operacionales secundarios -- por eso SÍ
     # está en MOTIVOS_NO_BLOQUEANTES, a diferencia de los 5 anteriores.
     PESO_OPERACIONALMENTE_ATIPICO = "PESO_OPERACIONALMENTE_ATIPICO"
+    # Bloque O2 -- `peso_kg` fue corregido por
+    # `extractor._reexaminar_peso_por_baja_confianza` tras encontrar
+    # corroboración geométrica independiente de alta confianza para un
+    # valor cuya lectura original tenía confianza baja (ver ese docstring
+    # para las tres condiciones exigidas). Puramente informativo/auditable
+    # -- el valor OCR original descartado queda en el propio motivo y en
+    # la traza OCR; nunca bloquea revisión completa del documento.
+    PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR = "PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR"
 
 
 MOTIVOS_NO_BLOQUEANTES = frozenset({
@@ -1033,6 +1152,10 @@ MOTIVOS_NO_BLOQUEANTES = frozenset({
     # Bloque C1 -- peso legible pero atípico: advertencia informativa,
     # nunca bloquea (ver comentario junto a la definición del motivo).
     MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value,
+    # Bloque O2 -- corrección ya resuelta por corroboración geométrica de
+    # alta confianza: informativa/auditable, nunca bloquea (ver comentario
+    # junto a la definición del motivo).
+    MotivoRevisionDocumento.PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR.value,
 })
 
 
@@ -1108,6 +1231,75 @@ def _completar_cliente_ausente_por_rut_catalogado(
     return True
 
 
+# Bloque P0 CONVERGENCIA SILENCIOSA -- ESTADO DERIVADO HUÉRFANO -- caso
+# real 474252 (Cristopher Retamal, BPHR67): cuando una convergencia
+# silenciosa corrige un valor documental, el motivo de revisión que ese
+# valor había disparado debe limpiarse igual de determinista -- de lo
+# contrario el viaje queda con un motivo huérfano (p. ej.
+# PATENTE_SIN_HOMOLOGAR) aunque el valor operacional ya sea el canónico.
+# Estas tablas son la ÚNICA fuente de qué motivo corresponde a cada
+# campo -- tanto `_convergencia_documental` (abajo) como
+# `_segunda_pasada_universal` (que resuelve con contexto de lote
+# completo, fuera del alcance por-documento de `_convergencia_
+# documental`) las reutilizan; nunca se duplican.
+MOTIVOS_PATENTE_POR_CONVERGENCIA: tuple[MotivoRevisionDocumento, ...] = (
+    MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA,
+)
+MOTIVOS_CLIENTE_POR_CONVERGENCIA: tuple[MotivoRevisionDocumento, ...] = (
+    MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR,
+    MotivoRevisionDocumento.CLIENTE_AUSENTE,
+    MotivoRevisionDocumento.CLIENTE_POSIBLEMENTE_INVALIDO,
+    MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA,
+)
+MOTIVOS_OBRA_DESTINO_POR_CONVERGENCIA: tuple[MotivoRevisionDocumento, ...] = (
+    MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR,
+    MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA,
+)
+# Clave = nombre de columna del dataset persistido (el mismo `campo` que
+# ya usa `_segunda_pasada_universal`) -- nunca la clave de OCR crudo.
+MOTIVOS_POR_CAMPO_CONVERGENCIA: dict[str, tuple[MotivoRevisionDocumento, ...]] = {
+    "patente_tracto": MOTIVOS_PATENTE_POR_CONVERGENCIA,
+    "patente_rampla": MOTIVOS_PATENTE_POR_CONVERGENCIA,
+    "cliente": MOTIVOS_CLIENTE_POR_CONVERGENCIA,
+    "obra_destino": MOTIVOS_OBRA_DESTINO_POR_CONVERGENCIA,
+}
+
+
+def _limpiar_motivos_por_convergencia_silenciosa(fila: dict[str, object], campo: str) -> dict[str, object]:
+    """Bloque P0 CONVERGENCIA SILENCIOSA -- ESTADO DERIVADO HUÉRFANO.
+    Dado que un `campo` ya se resolvió `RESOLVER_SILENCIOSO` (valor
+    operacional ya corregido por el llamador), retira ÚNICAMENTE los
+    motivos de `MOTIVOS_POR_CAMPO_CONVERGENCIA[campo]` que sigan
+    presentes en `motivos_revision_documento` -- cualquier motivo
+    independiente (de otro campo, o técnico/operacional) se conserva tal
+    cual. Recalcula `indicador_revision`/`estado_documental` con el mismo
+    criterio de siempre (`MOTIVOS_NO_BLOQUEANTES`) y `estado_operacional`
+    con el mismo criterio de `procesar_archivo` (también depende de
+    `estado_ruta`, nunca sólo de lo documental). No escribe nada por sí
+    sola -- devuelve sólo las claves que cambiaron, para que el llamador
+    las fusione con su propio delta (mismo patrón que ya usa el resto de
+    `_segunda_pasada_universal`). Nunca toca valores OCR/crudos ni
+    `resultado_atlas_ia_json` (la auditoría de la propuesta original)."""
+    motivos_del_campo = MOTIVOS_POR_CAMPO_CONVERGENCIA.get(campo)
+    if not motivos_del_campo:
+        return {}
+    valores_quitar = {m.value for m in motivos_del_campo}
+    motivos_antes = [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()]
+    if not any(m in valores_quitar for m in motivos_antes):
+        return {}
+    motivos_despues = [m for m in motivos_antes if m not in valores_quitar]
+    cambios: dict[str, object] = {"motivos_revision_documento": " | ".join(motivos_despues)}
+    indicador_nuevo = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_despues) else "OK"
+    cambios["indicador_revision"] = indicador_nuevo
+    cambios["estado_documental"] = "REQUIERE_REVISION" if indicador_nuevo == "REVISAR" else "OK"
+    cambios["estado_operacional"] = (
+        "REQUIERE_REVISION"
+        if indicador_nuevo == "REVISAR" or _ruta_pendiente_de_resolucion(fila.get("estado_ruta"))
+        else "OK"
+    )
+    return cambios
+
+
 def _convergencia_documental(
     carpeta_catalogos: str | Path | None,
     datos: Mapping[str, object],
@@ -1164,10 +1356,8 @@ def _convergencia_documental(
     # (un transporte independiente, un tier por debajo) -> resuelve. Dos
     # candidatos EMPATADOS en el nivel más alto -> se conserva la revisión.
     for clave_datos, campo_convergencia, motivos_campo in (
-        ("patente del tracto", "patente_tracto",
-         (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
-        ("patente del carro", "patente_rampla",
-         (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR, MotivoRevisionDocumento.PATENTE_AMBIGUA)),
+        ("patente del tracto", "patente_tracto", MOTIVOS_PATENTE_POR_CONVERGENCIA),
+        ("patente del carro", "patente_rampla", MOTIVOS_PATENTE_POR_CONVERGENCIA),
     ):
         valor = str(nuevos.get(clave_datos, "")).strip()
         if not filas_lista or valor in {"", "No encontrado"} or not rut_chofer.strip():
@@ -1222,12 +1412,7 @@ def _convergencia_documental(
                 if rut_canon:
                     nuevos["RUT del cliente"] = rut_canon
             delta["metodos_agregar"].add(MetodoObtencionDocumento.CONVERGENCIA_CLIENTE.value)
-            for m in (
-                MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR,
-                MotivoRevisionDocumento.CLIENTE_AUSENTE,
-                MotivoRevisionDocumento.CLIENTE_POSIBLEMENTE_INVALIDO,
-                MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA,
-            ):
+            for m in MOTIVOS_CLIENTE_POR_CONVERGENCIA:
                 delta["motivos_quitar"].add(m.value)
             delta["resoluciones"].append({
                 "campo": "cliente", "valor_ocr": r.valor_ocr_original,
@@ -1252,10 +1437,7 @@ def _convergencia_documental(
         if r is not None and r.decision == RESOLVER_SILENCIOSO:
             nuevos["obra destino"] = r.valor_canonico
             delta["metodos_agregar"].add(MetodoObtencionDocumento.CONVERGENCIA_OBRA.value)
-            for m in (
-                MotivoRevisionDocumento.OBRA_DESTINO_SIN_CORROBORAR,
-                MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA,
-            ):
+            for m in MOTIVOS_OBRA_DESTINO_POR_CONVERGENCIA:
                 delta["motivos_quitar"].add(m.value)
             delta["resoluciones"].append({
                 "campo": "obra_destino", "valor_ocr": r.valor_ocr_original,
@@ -1285,8 +1467,15 @@ def _fila_csv_a_datos_convergencia(fila: Mapping[str, str]) -> dict[str, str]:
 
 def revalidar_convergencia_identidad_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque AUTORIDAD OPERACIONAL / CONVERGENCIA -- SIN OCR, SIN RED.
+
+    `guias_objetivo` (Bloque P0 RECONCILIACIÓN FOCAL, opcional -- `None`
+    conserva el barrido de SIEMPRE sobre todas las filas en revisión):
+    cuando se entrega, sólo se evalúan las guías del conjunto -- el resto
+    de filas en revisión queda intacta para el próximo mantenimiento/
+    reconciliación global (que sigue disponible sin este argumento).
 
     Aplica el MISMO criterio de convergencia determinista que
     `_convergencia_documental` corre al final de `procesar_archivo`, pero
@@ -1310,12 +1499,14 @@ def revalidar_convergencia_identidad_sin_ocr(
         campos = list(lector.fieldnames or [])
         # Sólo el esquema oficial (o sus variantes previas conocidas) --
         # un dataset con encabezado incompatible no es de esta función.
-        if campos not in (COLUMNAS, COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA):
+        if campos not in (COLUMNAS, COLUMNAS_PRE_INGESTA, COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA):
             return resumen
         filas = list(lector)
 
     deltas: dict[str, dict[str, str]] = {}
     for fila in filas:
+        if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
+            continue
         if str(fila.get("estado_procesamiento", "")).strip() not in ("", "OK"):
             continue
         # Sólo filas que YA están en revisión: una fila `OK` no le está
@@ -1608,8 +1799,19 @@ def procesar_archivo(
     planta_origen_informada: str | None = None,
     directorio_trazas_ocr: str | Path | None = None,
     referencia_imagen_traza: str | None = None,
+    reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> dict[str, str]:
     """Procesa una guía reutilizando el OCR y extractor actuales.
+
+    `reloj` (Bloque P0 CASO B -- "ingresadas hoy", opcional, inyectable
+    en pruebas -- por defecto `datetime.now(timezone.utc)`, comportamiento
+    real de siempre): instante REAL en que ESTE documento se procesa,
+    persistido en `fecha_ingesta_utc` -- nunca la fecha documental
+    (`fecha`, un campo OCR distinto). Se estampa UNA sola vez, aquí, por
+    documento -- ningún `revalidar_*_sin_ocr` posterior lo conoce ni lo
+    recalcula, así que sobrevive intacto a cualquier revalidación
+    (reescriben la fila completa a partir del dict ya existente, nunca
+    limpian una clave que no reconocen).
 
     `servicio_telemetria` (Bloque TELEMETRÍA T2, opcional --
     `atlas_core.telemetria.servicio.ServicioTelemetria`): sin esto (por
@@ -2675,9 +2877,13 @@ def procesar_archivo(
                 # INFRAESTRUCTURA S2.1: caché portable (Drive) de
                 # geocodificación -- una dirección ya geocodificada en
                 # casa/oficina no vuelve a pagar otra llamada a Pelias.
+                # Bloque P0 AISLAMIENTO DE CACHÉ -- `raiz_atlas` derivada
+                # de `carpeta_catalogos.parent` (mismo contrato que el
+                # resto del sistema) para que una corrida contra una
+                # `carpeta_catalogos` scratch nunca autodetecte G:\ real.
                 proveedor_rutas_efectivo = ProveedorRutasConCacheGeocodificacion(
                     OpenRouteService(pais=pais_operacion),
-                    RepositorioCacheGeocodificacion(),
+                    RepositorioCacheGeocodificacion(raiz_atlas=Path(carpeta_catalogos).parent),
                 )
             plantas_catalogo = CatalogoPlantas(Path(carpeta_catalogos) / "plantas.json").listar()
             if bloques_guia is None:
@@ -2700,7 +2906,7 @@ def procesar_archivo(
 
             proveedor_geocodificacion_fallback = ProveedorRutasConCacheGeocodificacion(
                 NominatimGeocoder(pais=pais_operacion),
-                RepositorioCacheGeocodificacion(),
+                RepositorioCacheGeocodificacion(raiz_atlas=Path(carpeta_catalogos).parent),
             )
             try:
                 from atlas_core.catalogo_destinos import (
@@ -3011,9 +3217,7 @@ def procesar_archivo(
     estado_documental = "REQUIERE_REVISION" if requiere_revision else "OK"
     estado_operacional = (
         "REQUIERE_REVISION"
-        if requiere_revision or str(resultado_entrega.get("estado_ruta", "")) in {
-            "REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"
-        }
+        if requiere_revision or _ruta_pendiente_de_resolucion(resultado_entrega.get("estado_ruta", ""))
         else "OK"
     )
     fin_documento = time.perf_counter()
@@ -3053,6 +3257,25 @@ def procesar_archivo(
         if _normalizar_peso_kg(datos.get("peso")) != "No encontrado"
         else extraer_peso_kg_etiquetado(textos)
     )
+    # Bloque O2 -- reexamina (nunca adivina) contra evidencia geométrica
+    # independiente antes de aceptar un peso cuya lectura fue de baja
+    # confianza; ver docstring de `_reexaminar_peso_por_baja_confianza`.
+    # `_peso_tiene_forma_sospechosa` es un chequeo de texto puro (sin
+    # bloques) para decidir SI VALE LA PENA cargar `bloques_guia` -- la
+    # gran mayoría de los documentos no tiene esta forma y nunca debe
+    # pagar el costo de esa lectura (ver comentario "Bloque P2 SPAWN/IPC"
+    # arriba; varios tests verifican explícitamente que no se llame sin
+    # necesidad real).
+    motivo_correccion_peso = None
+    if _peso_tiene_forma_sospechosa(peso_kg_final):
+        if bloques_guia is None:
+            bloques_guia = _leer_bloques_con_estado()
+        peso_kg_final, motivo_correccion_peso = _reexaminar_peso_por_baja_confianza(
+            peso_kg_final, bloques_guia
+        )
+    if motivo_correccion_peso:
+        metodos_documento.add(motivo_correccion_peso)
+        _motivo(MotivoRevisionDocumento.PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR)
     if evaluar_credibilidad_peso(peso_kg_final).nivel != NivelCredibilidad.CONFIABLE:
         _motivo(MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO)
 
@@ -3102,6 +3325,12 @@ def procesar_archivo(
         # el método de recuperación en `metodos_recuperacion_documento`
         # -- no se duplica esa información acá.
         "rut_cliente": str(datos.get("RUT del cliente", "No encontrado")),
+        "codigo_cliente": str(datos.get("código cliente", "No encontrado")),
+        "cod_destinatario": str(datos.get("cod destinatario", "No encontrado")),
+        # Bloque P0 CASO B -- timestamp real de ingesta (ver docstring de
+        # `reloj` arriba). ISO-8601 UTC, para que ordenar/comparar por
+        # texto ya sea correcto sin parsear.
+        "fecha_ingesta_utc": reloj().astimezone(timezone.utc).isoformat(),
     }
     contexto_traza = _CONTEXTO_TRAZA_OCR.get()
     directorio_traza_efectivo = (
@@ -3162,6 +3391,144 @@ def _identidades_documentales_existentes(ruta_csv: Path) -> set[tuple[str, str]]
         }
 
 
+def _archivos_por_identidad_documental(ruta_csv: Path) -> dict[tuple[str, str], list[str]]:
+    """(guía, transporte) -> `archivo` de las filas YA persistidas con esa
+    identidad. Sólo lectura; base para asociar evidencia adicional."""
+    salida: dict[tuple[str, str], list[str]] = {}
+    if not ruta_csv.is_file() or ruta_csv.stat().st_size == 0:
+        return salida
+    with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+        for fila in csv.DictReader(archivo, delimiter=";"):
+            identidad = (str(fila.get("numero_guia", "")).strip(), str(fila.get("numero_transporte", "")).strip())
+            if all(identidad) and str(fila.get("archivo", "")).strip():
+                salida.setdefault(identidad, []).append(str(fila["archivo"]).strip())
+    return salida
+
+
+def _asociar_pagina_pdf_como_evidencia_adicional(
+    *, identificador: str, pagina: PaginaPdfRasterizada | None, fila: Mapping[str, object],
+    archivos_por_identidad: Mapping[tuple[str, str], list[str]], raiz: Path, ruta_csv: Path,
+    resumen: dict[str, object], aplicar: bool = True,
+) -> dict[str, object] | None:
+    """Una página PDF omitida por reingesta (misma guía+transporte ya
+    existente) queda como evidencia ADICIONAL del documento existente -- sólo
+    si ese documento es inequívoco (exactamente una fila con esa identidad).
+    Nunca crea fila/viaje ni toca la fila existente. Imágenes: sin cambios.
+    `aplicar=False` (asociación retroactiva en simulación) calcula el MISMO
+    registro sin escribirlo. Devuelve lo registrado (o simulado)."""
+    if pagina is None:
+        return None
+    identidad = (str(fila.get("numero_guia", "")).strip(), str(fila.get("numero_transporte", "")).strip())
+    existentes = archivos_por_identidad.get(identidad, [])
+    if len(existentes) != 1:
+        resumen["evidencias_adicionales_ambiguas"].append(identificador)
+        print(f"    EVIDENCIA ADICIONAL NO ASOCIADA (ambigua: {len(existentes)} documentos con esa guía+transporte).")
+        return None
+    referencia, _ = separar_identificador_pagina_pdf(identificador)
+    directorio = directorio_evidencia_pdf_para_dataset(ruta_csv)
+    asociacion = construir_asociacion_evidencia_adicional(
+        documento={"archivo": existentes[0], "numero_guia": identidad[0], "numero_transporte": identidad[1]},
+        identificador=identificador, ruta_original=raiz / referencia, pagina=pagina.pagina,
+        imagen_tecnica=pagina.ruta_imagen.name, sha256_imagen=pagina.sha256_imagen,
+        metodo=pagina.metodo, lote=raiz.name,
+    )
+    nueva = (
+        registrar_evidencia_adicional(directorio, asociacion) if aplicar
+        else not evidencia_adicional_ya_registrada(directorio, asociacion)
+    )
+    registro = {
+        "archivo": identificador, "documento": existentes[0], "numero_guia": identidad[0],
+        "numero_transporte": identidad[1], "nueva": nueva, "asociacion": asociacion,
+    }
+    resumen["evidencias_adicionales"].append(registro)
+    if not nueva:
+        estado = "YA ASOCIADA"
+    else:
+        estado = "ASOCIADA" if aplicar else "SE ASOCIARIA (simulacion)"
+    print(f"    EVIDENCIA ADICIONAL {estado} al documento existente {existentes[0]!r}.")
+    return registro
+
+
+def asociar_evidencias_pdf_de_lote(
+    *, raiz_atlas: str | Path, lote: str, aplicar: bool = False,
+) -> dict[str, object]:
+    """Asociación RETROACTIVA de evidencia adicional para un lote Desktop ya
+    ingresado (p. ej. antes de existir `evidencias_adicionales.json`), SIN
+    OCR ni reingesta: por cada página PDF del lote sin fila propia, toma la
+    identidad que el OCR ya extrajo en su momento (traza OCR de esa página:
+    los mismos `numero_guia`/`numero_transporte` finales que usó la
+    compuerta de reingesta) y aplica EXACTAMENTE las mismas validaciones y
+    el mismo registro que una reingesta actual. `aplicar=False` (por
+    defecto): simulación, no escribe nada. Nunca toca el dataset."""
+    from atlas_core.trazabilidad_ocr import ruta_traza_ocr
+
+    raiz = Path(raiz_atlas)
+    carpeta_lote = raiz / "operacion" / "entradas" / lote
+    ruta_csv = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    if not carpeta_lote.is_dir():
+        raise FileNotFoundError(f"No existe el lote {lote!r}: {carpeta_lote}")
+    directorio_pdf = directorio_evidencia_pdf_para_dataset(ruta_csv)
+    directorio_trazas = _directorio_trazas_ocr_para_salida(ruta_csv)
+    ya_procesados = _archivos_ya_procesados(ruta_csv)
+    identidades_existentes = _identidades_documentales_existentes(ruta_csv)
+    archivos_por_identidad = _archivos_por_identidad_documental(ruta_csv)
+    resumen: dict[str, object] = {
+        "lote": lote, "aplicar": aplicar, "evidencias_adicionales": [],
+        "evidencias_adicionales_ambiguas": [], "omitidas": [],
+    }
+
+    def omitir(identificador: str, motivo: str) -> None:
+        resumen["omitidas"].append({"archivo": identificador, "motivo": motivo})
+
+    for ruta in sorted(p for p in carpeta_lote.iterdir() if p.is_file()):
+        if detectar_mime_documento(ruta) != MIME_PDF:
+            continue
+        referencia = ruta.relative_to(carpeta_lote).as_posix()
+        sha = hashlib.sha256(ruta.read_bytes()).hexdigest()
+        manifiestos = [
+            m for m in leer_manifiestos_pdf(directorio_pdf, referencia)
+            if m.get("original_pdf", {}).get("sha256") == sha
+        ]
+        if len(manifiestos) != 1:
+            omitir(referencia, "SIN_MANIFIESTO_UNICO")
+            continue
+        for entrada in manifiestos[0].get("paginas", []):
+            numero = int(entrada.get("pagina"))
+            identificador = identificador_pagina_pdf(referencia, numero)
+            if identificador in ya_procesados:
+                omitir(identificador, "DOCUMENTO_CON_FILA_PROPIA")
+                continue
+            png, _, motivo_pagina = verificar_pagina_derivada(directorio_pdf, manifiestos[0], numero)
+            if motivo_pagina != PAGINA_OK or png is None:
+                omitir(identificador, f"DERIVADO_{motivo_pagina}")
+                continue
+            try:
+                traza = json.loads(ruta_traza_ocr(directorio_trazas, identificador).read_text(encoding="utf-8"))
+                identidad = traza.get("identificadores_extraidos") or {}
+            except (OSError, ValueError):
+                identidad = {}
+            fila = {
+                "numero_guia": str(identidad.get("numero_guia", "")),
+                "numero_transporte": str(identidad.get("numero_transporte", "")),
+            }
+            if clasificar_reingesta_documental(
+                numero_guia=fila["numero_guia"], numero_transporte=fila["numero_transporte"],
+                identidades_existentes=identidades_existentes,
+            ) is not ClasificacionDuplicado.DUPLICADO_CONFIRMADO:
+                omitir(identificador, "SIN_IDENTIDAD_DE_REINGESTA_VALIDA")
+                continue
+            pagina = PaginaPdfRasterizada(
+                numero, png, str(entrada.get("sha256_imagen", "")),
+                metodo=str(entrada.get("metodo", "OCR")),
+            )
+            _asociar_pagina_pdf_como_evidencia_adicional(
+                identificador=identificador, pagina=pagina, fila=fila,
+                archivos_por_identidad=archivos_por_identidad, raiz=carpeta_lote, ruta_csv=ruta_csv,
+                resumen=resumen, aplicar=aplicar,
+            )
+    return resumen
+
+
 def _persistir_manifiesto_seleccion_desktop(
     *, raiz: Path, archivos: list[Path], ruta_csv: Path,
 ) -> Path:
@@ -3204,7 +3571,7 @@ def _validar_csv_existente(ruta_csv: Path) -> bool:
         # nunca inventa un valor real). Nunca migra masivamente datos
         # reales por su cuenta -- sólo normaliza el ENCABEZADO la próxima
         # vez que este mismo flujo ya iba a escribir en el archivo.
-        if encabezado not in (COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA):
+        if encabezado not in (COLUMNAS_PRE_INGESTA, COLUMNAS_PRE_R4, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA):
             raise ValueError(
                 "El CSV existente tiene un esquema incompatible. "
                 "Se esperaba el encabezado exacto separado por ';'."
@@ -3278,9 +3645,7 @@ def _corroborar_documentos_relacionados_bajo_lock(ruta_csv: Path, archivos_objet
             m not in MOTIVOS_NO_BLOQUEANTES for m in fila["motivos_revision_documento"].split(" | ") if m
         ) else "OK"
         fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
-        ruta_requiere_revision = fila.get("estado_ruta") in {
-            "REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"
-        }
+        ruta_requiere_revision = _ruta_pendiente_de_resolucion(fila.get("estado_ruta"))
         fila["estado_operacional"] = (
             "REQUIERE_REVISION"
             if fila["estado_documental"] == "REQUIERE_REVISION" or ruta_requiere_revision
@@ -3378,7 +3743,7 @@ def _reflejar_estados_fila(fila: dict[str, str], motivos: list[str]) -> None:
     fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
     fila["estado_operacional"] = "REQUIERE_REVISION" if (
         fila["estado_documental"] == "REQUIERE_REVISION"
-        or fila.get("estado_ruta") in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+        or _ruta_pendiente_de_resolucion(fila.get("estado_ruta"))
     ) else "OK"
 
 
@@ -4199,6 +4564,18 @@ def _segunda_pasada_universal(
                 if rut_canon:
                     fila["rut_cliente"] = rut_canon
                     cambios["rut_cliente"] = rut_canon
+            # Bloque P0 CONVERGENCIA SILENCIOSA -- ESTADO DERIVADO HUÉRFANO
+            # (caso real 474252): el valor ya quedó canónico arriba -- el
+            # motivo que ese valor documental había disparado (y el
+            # indicador/estado que dependen de él) deben converger igual
+            # de determinista, o el viaje queda REQUIERE_REVISION con una
+            # tarjeta que ya no tiene nada que mostrar. Sólo quita el/los
+            # motivo(s) asociados a ESTE campo -- cualquier motivo
+            # independiente (de otro campo, o técnico/operacional real)
+            # se conserva intacto.
+            for _clave, _valor in _limpiar_motivos_por_convergencia_silenciosa(fila, campo).items():
+                fila[_clave] = _valor
+                cambios[_clave] = _valor
             deltas[archivo] = {**deltas.get(archivo, {}), **cambios}
             guias_tocadas.add(str(fila.get("numero_guia", "")))
             m["resueltas_determinista"] = int(m["resueltas_determinista"]) + 1
@@ -4624,6 +5001,19 @@ def procesar_carpeta(
     `servicio_telemetria`, el lote se procesa exactamente igual que antes
     de este bloque.
 
+    Bloque P0 INGESTA FOCAL -- esta función NUNCA publica `reportes/
+    actual`/`estado_operacion.json` por sí sola (sólo el CSV y, vía
+    `resumen["decisiones_pendientes"]`, las decisiones detectadas EN
+    ESTE lote -- el caller, p. ej. `analizar_guias_masivo.py`, es quien
+    funde eso con la bandeja ya persistida y publica). La reconciliación
+    focal de cierre (PlanImpacto -> `reconciliar_estado_derivado(guias_
+    objetivo=...)`) vive en ese caller, DESPUÉS de publicar la bandeja
+    -- nunca aquí, porque aquí `decisiones_pendientes.json` en disco
+    todavía no incluye las decisiones nuevas de este lote (ver
+    `resumen["archivos_procesados_ahora"]`, expuesto para que el caller
+    pueda construir el PlanImpacto sin volver a descubrir qué se acaba
+    de procesar).
+
     Sin `procesador` ni `lector_ocr` explícitos, se construye **un solo**
     `ProveedorOCR` (vía `crear_proveedor_ocr()` — PaddleOCR si está
     disponible, si no EasyOCR) para todo el lote, y se reutiliza para cada
@@ -4659,13 +5049,20 @@ def procesar_carpeta(
     ruta_manifiesto_ingesta = _persistir_manifiesto_seleccion_desktop(
         raiz=raiz, archivos=archivos, ruta_csv=ruta_csv,
     )
+    paginas_pdf: dict[str, PaginaPdfRasterizada] = {}
+    errores_entrada: dict[str, str] = {}
+    entradas_ocr = _preparar_entradas_ocr(
+        raiz=raiz, archivos=archivos, ruta_csv=ruta_csv,
+        paginas_pdf=paginas_pdf, errores_entrada=errores_entrada,
+    )
     procesados = set() if reprocesar else _archivos_ya_procesados(ruta_csv)
     identidades_existentes = _identidades_documentales_existentes(ruta_csv)
+    archivos_por_identidad = _archivos_por_identidad_documental(ruta_csv)
     archivos_procesados_ahora: set[str] = set()
     pendientes: list[dict[str, str]] = []
     decisiones_pendientes: list[dict[str, object]] = []
     resumen: dict[str, object] = {
-        "encontrados": len(archivos),
+        "encontrados": len(entradas_ocr),
         "procesados": 0,
         "omitidos": 0,
         "errores": 0,
@@ -4676,6 +5073,8 @@ def procesar_carpeta(
         "tiempo_total_segundos": 0.0,
         "promedio_segundos_archivo": 0.0,
         "reingestas_omitidas": 0,
+        "evidencias_adicionales": [],
+        "evidencias_adicionales_ambiguas": [],
         "manifiesto_ingesta": str(ruta_manifiesto_ingesta),
         "decisiones_pendientes": decisiones_pendientes,
     }
@@ -4689,6 +5088,8 @@ def procesar_carpeta(
         ruta: Path, identificador: str, recolector_documento: Callable[[list[dict[str, object]]], None],
     ) -> Mapping[str, object]:
         nonlocal lector_compartido, proveedor_compartido, proveedor_rutas_compartido
+        if identificador in errores_entrada:
+            raise ErrorEntradaDocumento(errores_entrada[identificador])
         if procesador is not None:
             return procesador(ruta)
 
@@ -4705,10 +5106,12 @@ def procesar_carpeta(
 
                 # INFRAESTRUCTURA S2.1: mismo motivo que en
                 # `procesar_archivo` -- caché portable de geocodificación
-                # compartida por todo el lote.
+                # compartida por todo el lote. Bloque P0 AISLAMIENTO DE
+                # CACHÉ -- misma `raiz_atlas` derivada que en
+                # `procesar_archivo`.
                 proveedor_rutas_compartido = ProveedorRutasConCacheGeocodificacion(
                     OpenRouteService(pais=pais_operacion),
-                    RepositorioCacheGeocodificacion(),
+                    RepositorioCacheGeocodificacion(raiz_atlas=Path(carpeta_catalogos).parent),
                 )
                 logger.info(
                     "procesar_carpeta: proveedor de rutas creado una sola vez para todo el lote (%s)",
@@ -4721,6 +5124,25 @@ def procesar_carpeta(
                 # requiere credencial/configuración explícita del
                 # llamador (Fase J, opt-in).
                 argumentos_archivo["servicio_telemetria"] = servicio_telemetria
+
+        pagina_pdf = paginas_pdf.get(identificador)
+        if pagina_pdf is not None and pagina_pdf.ruta_texto is not None:
+            # Página PDF con texto embebido utilizable: MISMO
+            # `procesar_archivo`, sólo cambia la fuente de líneas/bloques
+            # (sidecar) -- las lecturas focales siguen yendo al OCR real.
+            if lector_ocr is None and proveedor_compartido is None:
+                proveedor_compartido = crear_proveedor_ocr()
+            proveedor_documento, lector_documento = proveedor_para_documento(
+                ruta_texto_pdf=pagina_pdf.ruta_texto,
+                proveedor=proveedor_compartido if lector_ocr is None else None,
+                lector_ocr=lector_compartido,
+            )
+            if fecha_desde is not None or fecha_hasta is not None:
+                argumentos_archivo.update(fecha_desde=fecha_desde, fecha_hasta=fecha_hasta)
+            return procesar_archivo(
+                ruta, proveedor=proveedor_documento, lector_ocr=lector_documento,
+                **argumentos_archivo,
+            )
 
         if lector_ocr is not None:
             # Compatibilidad: EasyOCR explícito, sin pasar por el proveedor.
@@ -4753,9 +5175,8 @@ def procesar_carpeta(
         )
 
     try:
-        for indice, ruta in enumerate(archivos, start=1):
-            identificador = ruta.relative_to(raiz).as_posix()
-            print(f"[{indice}/{len(archivos)}] {identificador}")
+        for indice, (ruta, identificador) in enumerate(entradas_ocr, start=1):
+            print(f"[{indice}/{len(entradas_ocr)}] {identificador}")
             if identificador in procesados:
                 resumen["omitidos"] += 1
                 continue
@@ -4792,6 +5213,10 @@ def procesar_carpeta(
                     print(
                         "    REINGESTA OMITIDA: la combinación "
                         f"guía={fila['numero_guia']} + transporte={fila['numero_transporte']} ya existe."
+                    )
+                    _asociar_pagina_pdf_como_evidencia_adicional(
+                        identificador=identificador, pagina=paginas_pdf.get(identificador), fila=fila,
+                        archivos_por_identidad=archivos_por_identidad, raiz=raiz, ruta_csv=ruta_csv, resumen=resumen,
                     )
                     continue
                 decisiones_pendientes.extend(decisiones_documento)
@@ -4939,4 +5364,10 @@ def procesar_carpeta(
     resumen["promedio_segundos_archivo"] = (
         tiempo_total / resumen["procesados"] if resumen["procesados"] else 0.0
     )
+    # Bloque P0 INGESTA FOCAL -- expone los archivos genuinamente nuevos
+    # de ESTE lote para que el caller pueda construir el PlanImpacto de
+    # una reconciliación focal (guías nuevas + afectadas causalmente,
+    # p. ej. mismo `numero_transporte`) sin tener que re-descubrir qué se
+    # acaba de procesar comparando snapshots del CSV.
+    resumen["archivos_procesados_ahora"] = sorted(archivos_procesados_ahora)
     return resumen

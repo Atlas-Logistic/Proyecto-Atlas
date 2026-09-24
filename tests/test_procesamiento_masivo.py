@@ -1359,6 +1359,11 @@ def test_fuzzy_no_modifica_rut_y_respeta_match_exacto_existente(
         "codigo_pais",
         "codigo_unidad",
         "codigo_contexto",
+        # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO -- ver COLUMNAS.
+        "codigo_cliente",
+        "cod_destinatario",
+        # Bloque P0 CASO B ("ingresadas hoy") -- ver COLUMNAS.
+        "fecha_ingesta_utc",
     }
 
 
@@ -1483,7 +1488,13 @@ def test_acepta_encabezado_exacto_para_reanudar(tmp_path):
 @pytest.mark.parametrize(
     "encabezado",
     [
-        COLUMNAS[:-1],
+        # Bloque P0 CASO B: `COLUMNAS[:-1]` (sin la última, `fecha_
+        # ingesta_utc`) ahora es `COLUMNAS_PRE_INGESTA` -- una variante
+        # ACEPTADA a propósito (migración perezosa, mismo criterio que
+        # COLUMNAS_PRE_R4/G1C/CAPTURA). Se prueba con las dos últimas
+        # ausentes -- eso sigue sin corresponder a ninguna variante
+        # conocida.
+        COLUMNAS[:-2],
         COLUMNAS + ["columna_extra"],
         [*COLUMNAS[:-1], COLUMNAS[-2]],
     ],
@@ -2536,3 +2547,54 @@ def test_ia_operacional_vs_reemplazo_completo_concurrente_ninguna_fila_desaparec
     assert filas_finales["otra.jpeg"]["tipo_carga"] == "ROLLOS"
     # Y el bloque de IA, reintentado, también aplicó la suya.
     assert filas_finales["ia.jpeg"]["resultado_atlas_ia_json"] != ""
+
+
+# ============================================================
+# P0 FALSO OK DE RUTA -- `estado_operacional` nunca puede quedar "OK" con
+# una ruta sin calcular, sin importar el motivo exacto del fallo.
+# ============================================================
+
+
+def test_ruta_pendiente_de_resolucion_reconoce_cualquier_fallo_no_solo_los_tres_listados():
+    # Antes del fix, `estado_operacional` sólo bloqueaba ante 3 valores
+    # fijos de `estado_ruta` (REQUIERE_REVISION/ORIGEN_NO_DETERMINADO/
+    # DESTINO_NO_VALIDO) -- cualquier OTRO estado real de fallo devuelto
+    # por el proveedor de rutas (`atlas_core.rutas.modelos.EstadoRuta`)
+    # se colaba como si la ruta hubiese tenido éxito. El criterio correcto
+    # (ya usado por `_fila_requiere_atencion_operacional`, Bloque R7) es
+    # reconocer el ÚNICO estado de éxito, nunca enumerar los fallos.
+    from atlas_core.rutas.modelos import EstadoRuta
+
+    fallos_antes_invisibles = (
+        EstadoRuta.SIN_CREDENCIAL, EstadoRuta.SIN_CONEXION,
+        EstadoRuta.DIRECCION_NO_ENCONTRADA, EstadoRuta.RESULTADO_AMBIGUO,
+        EstadoRuta.PROVEEDOR_NO_DISPONIBLE, EstadoRuta.LIMITE_CUOTA,
+        EstadoRuta.RESPUESTA_INVALIDA, EstadoRuta.SIN_ACCESO_VIAL,
+    )
+    for estado in fallos_antes_invisibles:
+        assert procesamiento_masivo._ruta_pendiente_de_resolucion(estado.value) is True, estado
+
+    # Sin dato (ruta no aplicable/no intentada) nunca bloquea por sí solo.
+    assert procesamiento_masivo._ruta_pendiente_de_resolucion("") is False
+    # El único éxito real tampoco bloquea.
+    assert procesamiento_masivo._ruta_pendiente_de_resolucion(EstadoRuta.RUTA_CALCULADA.value) is False
+
+
+def test_convergencia_silenciosa_no_declara_ok_operacional_con_ruta_sin_credencial():
+    # Caso real de la clase de bug: un documento cuya patente convergió
+    # SILENCIOSAMENTE (indicador_revision vuelve a OK, ver `_limpiar_
+    # motivos_por_convergencia_silenciosa`) pero cuyo `estado_ruta` quedó
+    # en `SIN_CREDENCIAL` (proveedor de rutas sin credencial configurada,
+    # NUNCA uno de los 3 valores que la versión anterior reconocía) --
+    # `estado_operacional` debe seguir `REQUIERE_REVISION`: la ruta real
+    # nunca se calculó, sin importar que la parte documental ya converja.
+    fila = {
+        "motivos_revision_documento": "PATENTE_SIN_HOMOLOGAR",
+        "estado_ruta": "SIN_CREDENCIAL",
+    }
+    cambios = procesamiento_masivo._limpiar_motivos_por_convergencia_silenciosa(
+        fila, "patente_tracto",
+    )
+    assert cambios["indicador_revision"] == "OK"
+    assert cambios["estado_documental"] == "OK"
+    assert cambios["estado_operacional"] == "REQUIERE_REVISION"
