@@ -28,7 +28,7 @@ import tempfile
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Collection, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.aplicacion_decisiones import (
@@ -76,6 +76,7 @@ from atlas_core.modelos import EstadoValidacion
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
+    COLUMNAS_PRE_INGESTA,
     COLUMNAS_PRE_G1C,
     COLUMNAS_PRE_CAPTURA,
     MOTIVOS_NO_BLOQUEANTES,
@@ -134,6 +135,14 @@ from atlas_core.trazabilidad_ocr import ruta_traza_ocr
 # INVENTA ni se migra un valor real, sólo se permite que el esquema
 # avance de forma perezosa, igual que ya hace la migración R4.
 _COLUMNAS_SIN_RUT_CLIENTE = [columna for columna in COLUMNAS if columna != "rut_cliente"]
+# Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: mismo patrón que
+# `_COLUMNAS_SIN_RUT_CLIENTE` para la migración -- un dataset real
+# (G:\) escrito antes de este bloque no trae `codigo_cliente`/
+# `cod_destinatario` todavía; `_leer_filas` sigue aceptando ese
+# encabezado hasta la próxima reescritura completa.
+_COLUMNAS_SIN_CODIGO_CLIENTE_DESTINATARIO = [
+    columna for columna in COLUMNAS if columna not in {"codigo_cliente", "cod_destinatario"}
+]
 
 SEPARADOR_MOTIVOS = " | "
 _AUSENTES = {"", "No encontrado"}
@@ -236,7 +245,8 @@ def derivar_estado_ruta_tras_cambio_origen(fila: Mapping[str, object]) -> dict[s
 
 
 _COLUMNAS_ACEPTADAS = (
-    COLUMNAS, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA, _COLUMNAS_SIN_RUT_CLIENTE,
+    COLUMNAS, COLUMNAS_PRE_INGESTA, COLUMNAS_PRE_G1C, COLUMNAS_PRE_CAPTURA, _COLUMNAS_SIN_RUT_CLIENTE,
+    _COLUMNAS_SIN_CODIGO_CLIENTE_DESTINATARIO,
 )
 
 
@@ -432,6 +442,20 @@ def revalidar_obra_destino_sin_ocr(
                     )
                 except (OSError, ValueError):
                     continue
+                if resuelto is not None:
+                    # Bloque HOMOLOGACIÓN OBRA -> OPERACIÓN -- mismo
+                    # criterio que ya aplica el sub-camino "resuelto_por_
+                    # variacion" más abajo (única rama que, antes de este
+                    # fix, sí reescribía `obra_destino`): una resolución
+                    # global ÚNICA y CONFIRMADA (ver guardas de
+                    # `resolver_obra_destino_confirmada_global`, nunca
+                    # ambigua) es evidencia tan fuerte como una variación
+                    # ortográfica menor -- el texto documental de ESTA fila
+                    # se corrige al nombre canónico, nunca se deja el
+                    # crudo conviviendo con un motivo ya retirado.
+                    nombre_canonico_resuelto = resuelto.obra.nombre_canonico
+                    if nombre_canonico_resuelto and nombre_canonico_resuelto != obra_documental:
+                        fila["obra_destino"] = nombre_canonico_resuelto
                 if resuelto is None:
                     # Bloque VALIDACIÓN E2E FOCAL 472593 -- misma causa raíz
                     # ya corregida en `procesamiento_masivo._corroborar_
@@ -560,6 +584,98 @@ def revalidar_obra_destino_sin_ocr(
                 "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
             )
             guias_actualizadas.append(str(fila.get("numero_guia", "")))
+        if guias_actualizadas:
+            _escribir_filas_completas(ruta, filas)
+
+    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+
+
+def revalidar_obra_destino_por_decision_aplicada_sin_ocr(
+    *, ruta_dataset: str | Path, ruta_ledger: str | Path, carpeta_catalogos: str | Path,
+    numeros_transporte: Collection[str] | None = None,
+) -> dict[str, object]:
+    """Bloque HOMOLOGACIÓN OBRA -> OPERACIÓN -- catch-up genérico, nunca
+    hardcodeado a ningún transporte/guía, para decisiones OBRA_DESCONOCIDA/
+    REGISTRAR ya aplicadas ANTES de que `aplicar_decision_obra` escribiera
+    de inmediato el nombre canónico en la fila del documento (ver ese
+    bloque). El ledger ya demuestra, para cada `numero_guia` exacto, que
+    un humano confirmó un nombre canónico distinto del texto documental --
+    pero la fila puede haber quedado con el texto documental para siempre
+    porque, en su momento, nada la reescribía.
+
+    A diferencia de `revalidar_obra_destino_sin_ocr`, NO exige que la fila
+    tenga ningún motivo bloqueante presente -- la evidencia aquí es el
+    ledger mismo (una decisión humana ya terminal), no el estado de
+    revisión de la fila (caso real: la fila puede llevar tiempo mostrando
+    `indicador_revision=OK` con el motivo ya retirado por otra vía,
+    mientras el texto seguía siendo el documental).
+
+    Sólo escribe cuando la fila sigue mostrando EXACTAMENTE el mismo texto
+    documental que originó esa decisión (nunca pisa un cambio real
+    posterior de otra fuente, ni una fila que nunca tuvo esa obra) y el
+    nombre canónico vigente de esa obra en el catálogo difiere -- mismo
+    criterio de seguridad que el write-back inmediato de
+    `aplicar_decision_obra`. No ejecuta OCR ni toca ningún otro campo.
+
+    `numeros_transporte` (opcional, mismo criterio de alcance que
+    `atlas_core.reprocesamiento_reparador.revalidar_documentos_por_
+    transporte`): acota el catch-up a sólo esos transportes -- para una
+    reconciliación general (sin acotar) se omite, que es el uso normal
+    dentro de la batería de `revalidar_y_regenerar_reporte`."""
+    ruta = Path(ruta_dataset)
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    # Última aplicación terminal de OBRA_DESCONOCIDA/REGISTRAR por guía --
+    # nunca la primera si hubiera más de una para la misma guía (no
+    # debería ocurrir, pero se prefiere la más reciente si ocurriera).
+    canonicos_por_guia: dict[str, tuple[str, str]] = {}
+    for aplicacion in ledger.get("aplicaciones", []):
+        if aplicacion.get("tipo") != "OBRA_DESCONOCIDA" or aplicacion.get("accion") != "REGISTRAR":
+            continue
+        obra_id = str(aplicacion.get("obra_id") or "")
+        numero_guia = str((aplicacion.get("documento") or {}).get("numero_guia") or "")
+        valor_documental = str(aplicacion.get("valor_documental") or "").strip()
+        if not obra_id or not numero_guia or not valor_documental:
+            continue
+        canonicos_por_guia[numero_guia] = (valor_documental, obra_id)
+
+    if not canonicos_por_guia:
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=Path(carpeta_catalogos) / "obras_destinos.json",
+            ruta_clientes=Path(carpeta_catalogos) / "clientes.json",
+            ruta_destinos=Path(carpeta_catalogos) / "destinos_maestros.json",
+        )
+        obras_por_id = {obra.obra_id: obra for obra in catalogo_obras.listar_obras()}
+    except (OSError, ValueError):
+        return {"filas_totales": 0, "guias_actualizadas": []}
+
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta)
+        guias_actualizadas: list[str] = []
+        for fila in filas:
+            if numeros_transporte is not None and str(fila.get("numero_transporte", "")) not in numeros_transporte:
+                continue
+            numero_guia = str(fila.get("numero_guia", ""))
+            datos_ledger = canonicos_por_guia.get(numero_guia)
+            if datos_ledger is None:
+                continue
+            valor_documental, obra_id = datos_ledger
+            if str(fila.get("obra_destino", "")).strip() != valor_documental:
+                continue  # ya cambió por otra vía -- nunca se pisa.
+            obra = obras_por_id.get(obra_id)
+            if obra is None:
+                continue
+            nombre_canonico = str(obra.nombre_canonico or "").strip()
+            if not nombre_canonico or nombre_canonico == valor_documental:
+                continue
+            fila["obra_destino"] = nombre_canonico
+            guias_actualizadas.append(numero_guia)
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
 
@@ -993,6 +1109,7 @@ def _vehiculo_homologado(
 
 def revalidar_patente_sin_homologar_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, ruta_ledger: str | Path | None = None,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """R3.6.2: relee cada fila del dataset y reevalúa ÚNICAMENTE el motivo
     ``PATENTE_SIN_HOMOLOGAR`` contra el estado VIGENTE del catálogo de
@@ -1045,7 +1162,45 @@ def revalidar_patente_sin_homologar_sin_ocr(
             return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
         vehiculos_homologables = catalogo.homologables()
 
+        def resolver_contextual(
+            *, fila: Mapping[str, str], campo: str, valor_documental: str,
+        ) -> Vehiculo | None:
+            resuelto = _vehiculo_homologado(
+                vehiculos_homologables, normalizar_patente_vehiculo(valor_documental),
+            )
+            if resuelto is not None:
+                return resuelto
+            canonica_ledger = confirmaciones_ledger.get((
+                str(fila.get("numero_guia", "")), campo, valor_documental,
+            ))
+            if canonica_ledger:
+                resuelto = _vehiculo_homologado(
+                    vehiculos_homologables, normalizar_patente_vehiculo(canonica_ledger),
+                )
+                if resuelto is not None:
+                    return resuelto
+            try:
+                from atlas_core.atlas_ia.convergencia import RESOLVER_SILENCIOSO
+                from atlas_core.atlas_ia.evidencia_dominios import convergencia_vehiculo
+
+                convergencia = convergencia_vehiculo(
+                    campo=campo, valor_documental=valor_documental,
+                    rut_chofer=str(fila.get("rut_chofer", "")),
+                    numero_transporte=str(fila.get("numero_transporte", "")),
+                    filas=filas, carpeta_catalogos=carpeta,
+                )
+            except (OSError, ValueError):
+                return None
+            if convergencia.decision != RESOLVER_SILENCIOSO:
+                return None
+            return _vehiculo_homologado(
+                vehiculos_homologables,
+                normalizar_patente_vehiculo(convergencia.valor_canonico),
+            )
+
         for fila in filas:
+            if guias_objetivo is not None and str(fila.get("numero_guia", "")) not in guias_objetivo:
+                continue
             motivos = [m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m]
             if motivo_objetivo not in motivos:
                 continue
@@ -1059,24 +1214,16 @@ def revalidar_patente_sin_homologar_sin_ocr(
             numero_guia = str(fila.get("numero_guia", ""))
 
             if rampla_presente:
-                rampla_resuelta = _vehiculo_homologado(
-                    vehiculos_homologables, normalizar_patente_vehiculo(rampla_doc)
+                rampla_resuelta = resolver_contextual(
+                    fila=fila, campo="patente_rampla", valor_documental=rampla_doc,
                 )
-                if rampla_resuelta is None:
-                    canonica = confirmaciones_ledger.get((numero_guia, "patente_rampla", rampla_doc))
-                    if canonica:
-                        rampla_resuelta = _vehiculo_homologado(vehiculos_homologables, normalizar_patente_vehiculo(canonica))
                 if rampla_resuelta is None or rampla_resuelta.tipo != _TIPO_CARRO:
                     continue  # rampla sin resolver o tipo incompatible -> conservar
 
             if tracto_presente:
-                tracto_resuelto = _vehiculo_homologado(
-                    vehiculos_homologables, normalizar_patente_vehiculo(tracto_doc)
+                tracto_resuelto = resolver_contextual(
+                    fila=fila, campo="patente_tracto", valor_documental=tracto_doc,
                 )
-                if tracto_resuelto is None:
-                    canonica = confirmaciones_ledger.get((numero_guia, "patente_tracto", tracto_doc))
-                    if canonica:
-                        tracto_resuelto = _vehiculo_homologado(vehiculos_homologables, normalizar_patente_vehiculo(canonica))
                 if tracto_resuelto is None:
                     continue  # tracto sin resolver -> conservar
                 tipos_compatibles = (
@@ -2612,16 +2759,14 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
 
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
-        from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
-        from atlas_core.rutas.cache_geocodificacion import (
-            ProveedorRutasConCacheGeocodificacion,
-            RepositorioCacheGeocodificacion,
-        )
-        from atlas_core.rutas.openrouteservice import OpenRouteService
-
-        proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
-            OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
-        )
+        # Bloque P0 AISLAMIENTO DE CACHÉ -- reutiliza el mismo constructor
+        # predeterminado que el resto de revalidadores (nunca duplica la
+        # construcción del proveedor por su cuenta), con `raiz_atlas`
+        # derivada de `carpeta_catalogos.parent` -- mismo contrato que ya
+        # usa `cargar_base_geografica_local_ine` -- para que el caché de
+        # geocodificación nunca autodetecte G:\ real cuando esta función
+        # recibió una raíz scratch explícita.
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=carpeta.parent)
     catalogo = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
     destinos_actualizados: list[str] = []
     try:
@@ -3183,14 +3328,9 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
-        from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
-        from atlas_core.rutas.cache_geocodificacion import (
-            ProveedorRutasConCacheGeocodificacion, RepositorioCacheGeocodificacion,
-        )
-        from atlas_core.rutas.openrouteservice import OpenRouteService
-        proveedor_rutas = ProveedorRutasConCacheGeocodificacion(
-            OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
-        )
+        # Bloque P0 AISLAMIENTO DE CACHÉ -- ver docstring de
+        # `_proveedor_rutas_ors_predeterminado`.
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=carpeta.parent)
     servicio = servicio_telemetria or ServicioTelemetria(
         ProveedorTelemetriaSoloCache(nombre=proveedor_nombre),
         RepositorioTelemetria(carpeta / "telemetria_cache.json"),
@@ -3314,7 +3454,7 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     return {"guias_actualizadas": guias_actualizadas, "destinos_aprendidos": destinos_aprendidos}
 
 
-def _proveedor_rutas_ors_predeterminado():
+def _proveedor_rutas_ors_predeterminado(*, raiz_atlas: str | Path | None = None):
     """Bloque RESOLUCIÓN R16 -- proveedor principal por defecto para
     cualquier revalidación `_sin_ocr` que calcule ruta/geocodifique: ORS
     con caché de geocodificación real y filtro de país ya restringido a
@@ -3322,7 +3462,16 @@ def _proveedor_rutas_ors_predeterminado():
     dejando competir candidatos de cualquier país contra los chilenos --
     causa raíz real del caso 472037, VICUÑA MACKENNA resuelto en Córdoba,
     Argentina). Extraído para que ningún llamador reconstruya este mismo
-    proveedor por su cuenta."""
+    proveedor por su cuenta.
+
+    Bloque P0 AISLAMIENTO DE CACHÉ -- `raiz_atlas` (opcional) se reenvía
+    tal cual a `RepositorioCacheGeocodificacion`: si el caller la conoce
+    (todo revalidador `_sin_ocr` recibe `carpeta_catalogos`, y
+    `carpeta_catalogos.parent` ES esa raíz por el mismo contrato que ya
+    usa `cargar_base_geografica_local_ine`), el caché queda bajo ESA
+    raíz -- nunca autodetecta G:\\ real mientras se entregue. `None`
+    (ningún caller la pasa hoy salvo los ya migrados) conserva el
+    comportamiento productivo de siempre."""
     from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
     from atlas_core.rutas.cache_geocodificacion import (
         ProveedorRutasConCacheGeocodificacion,
@@ -3331,18 +3480,22 @@ def _proveedor_rutas_ors_predeterminado():
     from atlas_core.rutas.openrouteservice import OpenRouteService
 
     return ProveedorRutasConCacheGeocodificacion(
-        OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+        OpenRouteService(pais=PAIS_OPERACION_PREDETERMINADO),
+        RepositorioCacheGeocodificacion(raiz_atlas=raiz_atlas),
     )
 
 
-def _proveedor_rutas_fallback_predeterminado():
+def _proveedor_rutas_fallback_predeterminado(*, raiz_atlas: str | Path | None = None):
     """Bloque B1 OBSERVADOR + FALLBACK GEOGRÁFICO -- geocodificador de
     RESPALDO estructurado (Nominatim/OSM, sin credencial, misma caché de
     geocodificación -- nunca paga dos veces la misma consulta), sólo
     consultado por `resolver_destino_entrega` cuando el principal (ORS)
     deja una ambigüedad sin resolver ("sólo si A falla", Bloque J).
     Extraído para que ningún llamador reconstruya este mismo proveedor
-    por su cuenta."""
+    por su cuenta.
+
+    `raiz_atlas` (Bloque P0 AISLAMIENTO DE CACHÉ): mismo criterio que
+    `_proveedor_rutas_ors_predeterminado` -- ver ese docstring."""
     from atlas_core.procesamiento_masivo import PAIS_OPERACION_PREDETERMINADO
     from atlas_core.rutas.cache_geocodificacion import (
         ProveedorRutasConCacheGeocodificacion,
@@ -3351,7 +3504,8 @@ def _proveedor_rutas_fallback_predeterminado():
     from atlas_core.rutas.nominatim import NominatimGeocoder
 
     return ProveedorRutasConCacheGeocodificacion(
-        NominatimGeocoder(pais=PAIS_OPERACION_PREDETERMINADO), RepositorioCacheGeocodificacion(),
+        NominatimGeocoder(pais=PAIS_OPERACION_PREDETERMINADO),
+        RepositorioCacheGeocodificacion(raiz_atlas=raiz_atlas),
     )
 
 
@@ -3450,9 +3604,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
-        proveedor_rutas = _proveedor_rutas_ors_predeterminado()
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=carpeta.parent)
     if proveedor_rutas_fallback is None:
-        proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado()
+        proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado(raiz_atlas=carpeta.parent)
     try:
         destinos_confirmados = [
             d for d in CatalogoDestinos(
@@ -3483,6 +3637,19 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
+        # Bloque P0 EVITAR SEGUNDO INTENTO -- caso real 473545: a
+        # diferencia de `guias_actualizadas` (sólo guías cuyo resultado
+        # PERSISTIDO cambió), esta lista registra CUALQUIER guía para la
+        # que se llegó a invocar realmente `calcular_ruta_con_planta_
+        # conocida` (consulta externa real, incluso si terminó en
+        # RESULTADO_AMBIGUO/fallo/excepción -- la llamada externa YA se
+        # pagó) -- nunca las que se saltaron por los guards de arriba
+        # (`guias_excluir_reintento`, sin planta/despachar_a, etc.). El
+        # caller (`aplicar_decision_obra`, intento inline) la usa para
+        # que el mismo lote sepa qué guía NO debe volver a intentarse en
+        # la batería diferida -- ver `TIPOS_ELEGIBLES_DIFERIR_
+        # REVALIDACION_GLOBAL` en `aplicacion_decisiones.py`.
+        guias_intentadas: list[str] = []
         for fila in filas:
             if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
                 continue
@@ -3585,6 +3752,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     catalogo_clientes_ruta=carpeta / "clientes.json",
                     catalogo_destinos_ruta=carpeta / "destinos_maestros.json",
                 )
+            guias_intentadas.append(str(fila.get("numero_guia", "")))
             try:
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=despachar_a, proveedor_rutas=proveedor_rutas,
@@ -3696,7 +3864,10 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         if guias_actualizadas:
             _escribir_filas_completas(ruta, filas)
 
-    return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
+    return {
+        "filas_totales": len(filas), "guias_actualizadas": guias_actualizadas,
+        "guias_intentadas": guias_intentadas,
+    }
 
 
 def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
@@ -3704,6 +3875,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     proveedor_rutas=None, perfil: str = "driving-hgv",
     proveedor_rutas_fallback=None,
     guias_objetivo: set[str] | None = None,
+    guias_excluir_reintento: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- causa raíz real
     (464588): `destinos_confirmados` (parámetro ya existente en
@@ -3758,9 +3930,9 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
-        proveedor_rutas = _proveedor_rutas_ors_predeterminado()
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=carpeta.parent)
     if proveedor_rutas_fallback is None:
-        proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado()
+        proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado(raiz_atlas=carpeta.parent)
     # GEOGRAFÍA 3 -- misma base territorial INE v3 que usa el reintento de
     # ruta sin destino calculado: la dirección canónica del catálogo
     # confirmado (casos 464395/464740) puede resolver como DIRECCION_
@@ -3779,6 +3951,8 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     except (OSError, ValueError):
         plantas_por_id = {}
 
+    guias_excluir_reintento = guias_excluir_reintento or set()
+
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
@@ -3786,6 +3960,17 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
         for fila in filas:
             numero_guia = str(fila.get("numero_guia", "")).strip()
             if guias_objetivo is not None and numero_guia not in guias_objetivo:
+                continue
+            # Bloque P0 EVITAR SEGUNDO INTENTO -- caso real 473545: esta
+            # función es OTRA vía independiente (destino ya CONFIRMADO en
+            # catálogo para la misma obra) que puede volver a invocar
+            # `calcular_ruta_con_planta_conocida` para una guía que YA
+            # tuvo su intento real en esta misma operación (ver
+            # `guias_intentadas` en `revalidar_ruta_sin_destino_calculado_
+            # sin_ocr` y `aplicar_decision_obra`) -- mismo set, misma
+            # semántica de exclusión (nunca permanente, sólo para ESTA
+            # llamada).
+            if numero_guia in guias_excluir_reintento:
                 continue
             if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
                 continue
@@ -4333,8 +4518,15 @@ def reprocesar_material_focal_desde_imagen_original(
                 "numero_guia": guia_objetivo, "archivo": archivo,
             }
         try:
-            textos = leer_texto_imagen(evidencia.ruta, lector=lector_ocr)
-        except (OSError, ValueError, FileNotFoundError) as exc:
+            if evidencia.ruta_texto_pdf is not None:
+                # Página PDF procesada con texto embebido: se relee la MISMA
+                # fuente que usó la ingesta (sidecar), nunca OCR distinto.
+                from atlas_core.ingesta_pdf import ProveedorPaginaPdf
+
+                textos = ProveedorPaginaPdf(None, evidencia.ruta_texto_pdf).leer_texto(evidencia.ruta)
+            else:
+                textos = leer_texto_imagen(evidencia.ruta, lector=lector_ocr)
+        except (OSError, ValueError, FileNotFoundError, KeyError) as exc:
             return {
                 "aplicado": False, "motivo": "ERROR_OCR", "numero_guia": guia_objetivo,
                 "detalle": f"{type(exc).__name__}: {exc}",
@@ -4834,6 +5026,7 @@ def _firma_efectiva_bandeja(ruta: Path) -> tuple[str, ...] | None:
 
 def revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
+    proveedor_rutas_fallback=None,
     comuna_manual_por_guia: dict[str, str] | None = None,
     guias_excluir_reintento_ruta: set[str] | None = None,
 ) -> dict[str, object]:
@@ -4868,7 +5061,15 @@ def revalidar_y_regenerar_reporte(
     origen, mismo `despachar_a_crudo`, mismo proveedor). Ver el
     docstring de esa función para el detalle completo; de nuevo, `None`
     para cualquier caller que no sea `aplicar_decision_obra` reprocesando
-    su propia decisión recién aplicada."""
+    su propia decisión recién aplicada.
+
+    `proveedor_rutas_fallback` (Bloque P0 AISLAMIENTO DE CACHÉ/EVITAR
+    SEGUNDO INTENTO, aditivo): reenviado tal cual a `revalidar_ruta_sin_
+    destino_calculado_sin_ocr` -- antes esta función nunca lo exponía y
+    cada caller quedaba atado al respaldo (Nominatim) predeterminado.
+    `None` conserva ese mismo comportamiento; inyectarlo permite pruebas
+    deterministas y a `aplicar_decisiones_multiples` propagar el mismo
+    proveedor de respaldo que ya usó el intento inline."""
     # Bloque MÉTRICAS DE DURACIÓN -- caso real: "Aplicar decisión" tardaba
     # ~40s en Desktop antes de que la tarjeta cambiara, sin ningún log que
     # dijera dónde. Instrumentación pura (`time.perf_counter`, nunca
@@ -5145,6 +5346,7 @@ def revalidar_y_regenerar_reporte(
     # aparte -- "Atlas debe automáticamente".
     resultado_ruta = revalidar_ruta_sin_destino_calculado_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
+        proveedor_rutas_fallback=proveedor_rutas_fallback,
         comuna_manual_por_guia=comuna_manual_por_guia,
         guias_excluir_reintento=guias_excluir_reintento_ruta,
     )
@@ -5848,12 +6050,16 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
 
 def reconciliar_decisiones_destino_no_resuelto(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+    cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     """Bloque R6 A/B/E -- publica en `decisiones_pendientes.json` la unión
     de la bandeja pendiente vigente con las decisiones `DESTINO_NO_RESUELTO`
     recién detectadas (mismo patrón que `reconciliar_decisiones_origen`). No
     toca el CSV documental, el ledger ni ningún catálogo -- sólo
-    (re)escribe la bandeja."""
+    (re)escribe la bandeja.
+
+    `cache_memoizacion` (Bloque P0 MEMOIZACIÓN, opcional -- ver docstring
+    de `regenerar_decisiones_persistidas`): se reenvía tal cual."""
     from atlas_core.decisiones_pendientes import (
         NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
         _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
@@ -5883,6 +6089,7 @@ def reconciliar_decisiones_destino_no_resuelto(
             # callejón sin salida real (caso 464715: destino confirmado por
             # un humano que aun así NO produce ruta).
             ruta_dataset=dataset,
+            cache_memoizacion=cache_memoizacion,
         )
         bandeja = _generar_artefacto_sin_lock(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
@@ -6282,8 +6489,7 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
             fila["estado_operacional"] = (
                 "REQUIERE_REVISION"
                 if fila["estado_documental"] == "REQUIERE_REVISION"
-                or str(fila.get("estado_ruta", "")).strip()
-                in {"REQUIERE_REVISION", "ORIGEN_NO_DETERMINADO", "DESTINO_NO_VALIDO"}
+                or str(fila.get("estado_ruta", "")).strip() != "RUTA_CALCULADA"
                 else "OK"
             )
             metodos = {m.strip() for m in str(fila.get("metodos_recuperacion_documento", "")).split("|") if m.strip()}
@@ -6302,37 +6508,167 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
 MAX_ITERACIONES_AUTO_RESOLUCION = 10
 
 
-def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]]:
-    """Lee hechos ya publicados sólo como evidencia y deduplica copias."""
-    unicas: dict[tuple[str, str, str, str, str], dict[str, object]] = {}
+_CAMPOS_RELACION_HISTORICA = (
+    "numero_guia", "numero_transporte", "rut_chofer", "patente_tracto", "patente_rampla",
+)
+
+
+def _relaciones_de_un_reporte(ruta_viajes_csv: Path) -> list[dict[str, object]]:
+    """Extrae, de UN `viajes.csv` ya publicado, las relaciones documentales
+    de evidencia histórica -- unidad de trabajo reutilizada tanto por el
+    fallback sin cache como por el cache incremental de abajo. Nunca lanza
+    -- una carpeta ilegible simplemente no aporta nada."""
+    encontradas: dict[tuple[str, ...], dict[str, object]] = {}
+    try:
+        with ruta_viajes_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
+            for viaje in csv.DictReader(archivo, delimiter=";"):
+                try:
+                    documentos = json.loads(str(viaje.get("evidencias_documentos", "") or "[]"))
+                except (json.JSONDecodeError, TypeError):
+                    documentos = []
+                for doc in documentos if isinstance(documentos, list) else []:
+                    if not isinstance(doc, dict):
+                        continue
+                    fila = {k: str(doc.get(k, "")) for k in _CAMPOS_RELACION_HISTORICA}
+                    clave = tuple(fila[k] for k in _CAMPOS_RELACION_HISTORICA)
+                    if clave[0] and clave[2]:
+                        encontradas[clave] = fila
+    except (OSError, UnicodeDecodeError):
+        return []
+    return list(encontradas.values())
+
+
+def _leer_relaciones_historicas_reportadas_sin_cache(raiz: Path) -> list[dict[str, object]]:
+    """Escaneo COMPLETO, SIN cache -- el comportamiento original, byte a
+    byte. Usado como fallback seguro cuando el cache incremental está
+    ausente/corrupto/inutilizable (nunca puede dar un resultado peor que
+    éste, sólo más lento)."""
+    unicas: dict[tuple[str, ...], dict[str, object]] = {}
     for ruta in sorted((raiz / "reportes").glob("*/viajes.csv")):
-        try:
-            with ruta.open("r", newline="", encoding="utf-8-sig") as archivo:
-                for viaje in csv.DictReader(archivo, delimiter=";"):
-                    try:
-                        documentos = json.loads(str(viaje.get("evidencias_documentos", "") or "[]"))
-                    except (json.JSONDecodeError, TypeError):
-                        documentos = []
-                    for doc in documentos if isinstance(documentos, list) else []:
-                        if not isinstance(doc, dict):
-                            continue
-                        fila = {k: str(doc.get(k, "")) for k in (
-                            "numero_guia", "numero_transporte", "rut_chofer",
-                            "patente_tracto", "patente_rampla",
-                        )}
-                        clave = tuple(fila[k] for k in (
-                            "numero_guia", "numero_transporte", "rut_chofer",
-                            "patente_tracto", "patente_rampla",
-                        ))
-                        if clave[0] and clave[2]:
-                            unicas[clave] = fila
-        except (OSError, UnicodeDecodeError):
-            continue
+        for fila in _relaciones_de_un_reporte(ruta):
+            clave = tuple(str(fila.get(k, "")) for k in _CAMPOS_RELACION_HISTORICA)
+            unicas[clave] = fila
     return list(unicas.values())
+
+
+def _ruta_cache_relaciones_historicas(raiz: Path) -> Path:
+    """Bloque P0 CACHE INCREMENTAL -- ubicación LOCAL, fuera de
+    `raiz_atlas`/G:\\ (G sigue siendo fuente de verdad, nunca cache de
+    rendimiento) -- mismo criterio ya establecido en
+    `atlas_core.paddle_runtime.ruta_runtime_paddle` / el diagnóstico de
+    reconciliación (`ATLAS_DIAGNOSTICO_DIR`): override explícito primero
+    (pruebas), si no `%LOCALAPPDATA%\\Atlas\\cache\\`. Namespaced por la
+    raíz operacional (huella de la ruta absoluta) -- dos raíces distintas
+    (G real vs. una raíz scratch de prueba) nunca comparten ni
+    colisionan cache."""
+    override = os.environ.get("ATLAS_CACHE_DIR")
+    if override:
+        base = Path(override)
+    else:
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = (Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local") / "Atlas" / "cache"
+    huella_raiz = hashlib.sha256(str(Path(raiz).resolve()).encode("utf-8")).hexdigest()[:16]
+    return base / "relaciones_historicas_reportadas" / f"{huella_raiz}.json"
+
+
+def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]]:
+    """Bloque P0 ELIMINAR ESCANEO HISTÓRICO REPETITIVO -- causa raíz
+    medida (reconciliación real, guías 474211/474252): recorría CADA
+    `viajes.csv` bajo `reportes/` (518 archivos, 396 MB medidos) en CADA
+    llamada -- ~30s, incluso con la bandeja vacía (resultado sin usar).
+    `reportes/<carpeta>/viajes.csv` es INMUTABLE una vez creado
+    (`generar_reporte_viajes.py` nunca sobrescribe un directorio
+    existente -- garantía YA vigente en el código, no nueva) -- una vez
+    parseada una carpeta, su resultado no puede cambiar; sólo hace falta
+    reparsear las que son nuevas.
+
+    Cache LOCAL (nunca en G -- ver `_ruta_cache_relaciones_historicas`):
+    guarda el conjunto YA fusionado/deduplicado de relaciones + qué
+    carpetas (con su huella `mtime_ns`+`size`, barata de obtener vía
+    `stat()`, sin abrir el archivo) ya se incorporaron -- evita que 518
+    copias equivalentes de la misma evidencia se guarden por separado
+    (bloque 4: un solo almacén fusionado, no uno por carpeta).
+
+    En cada llamada: 1) lista qué carpetas existen HOY (sólo `glob`+
+    `stat`, sin leer contenido); 2) si el cache es un SUBCONJUNTO de eso
+    (ninguna carpeta que conocía desapareció) Y las huellas de las que sí
+    conoce siguen calzando -> lo reutiliza y sólo parsea las carpetas
+    NUEVAS, fusionándolas; 3) si no (carpeta desaparecida, huella
+    distinta, cache ausente/corrupto) -> reconstruye completo desde
+    disco, igual que `_leer_relaciones_historicas_reportadas_sin_cache`.
+    G sigue siendo la fuente de verdad: el cache nunca sirve evidencia
+    que el disco ya no respalda, y un fallo de lectura/escritura del
+    cache se degrada en silencio al escaneo completo -- el resultado
+    jamás depende de que el cache exista o esté íntegro, sólo la
+    velocidad."""
+    raiz = Path(raiz)
+    try:
+        rutas_actuales = sorted((raiz / "reportes").glob("*/viajes.csv"))
+    except OSError:
+        return _leer_relaciones_historicas_reportadas_sin_cache(raiz)
+
+    huellas_actuales: dict[str, list[int]] = {}
+    for ruta in rutas_actuales:
+        try:
+            info = ruta.stat()
+        except OSError:
+            continue
+        huellas_actuales[ruta.parent.name] = [info.st_mtime_ns, info.st_size]
+
+    ruta_cache = _ruta_cache_relaciones_historicas(raiz)
+    cache_valido = False
+    carpetas_cache: dict[str, list[int]] = {}
+    relaciones_por_clave: dict[tuple[str, ...], dict[str, object]] = {}
+    try:
+        contenido = json.loads(ruta_cache.read_text(encoding="utf-8"))
+        crudo_carpetas = contenido.get("carpetas")
+        crudo_relaciones = contenido.get("relaciones")
+        if isinstance(crudo_carpetas, dict) and isinstance(crudo_relaciones, list):
+            carpetas_cache = {str(k): list(v) for k, v in crudo_carpetas.items()}
+            # El cache es confiable sólo si TODA carpeta que recuerda sigue
+            # existiendo HOY con la MISMA huella -- cualquier discrepancia
+            # (desaparecida, tamaño/mtime distinto) invalida por completo
+            # en vez de intentar restar evidencia a ciegas.
+            cache_valido = all(
+                nombre in huellas_actuales and huellas_actuales[nombre] == huella
+                for nombre, huella in carpetas_cache.items()
+            )
+            if cache_valido:
+                for fila in crudo_relaciones:
+                    if isinstance(fila, dict):
+                        clave = tuple(str(fila.get(k, "")) for k in _CAMPOS_RELACION_HISTORICA)
+                        relaciones_por_clave[clave] = fila
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        cache_valido = False
+
+    if not cache_valido:
+        carpetas_cache = {}
+        relaciones_por_clave = {}
+
+    carpetas_nuevas = [
+        nombre for nombre in sorted(huellas_actuales) if nombre not in carpetas_cache
+    ]
+    for nombre in carpetas_nuevas:
+        for fila in _relaciones_de_un_reporte(raiz / "reportes" / nombre / "viajes.csv"):
+            clave = tuple(str(fila.get(k, "")) for k in _CAMPOS_RELACION_HISTORICA)
+            relaciones_por_clave[clave] = fila
+
+    if carpetas_nuevas or not cache_valido:
+        try:
+            ruta_cache.parent.mkdir(parents=True, exist_ok=True)
+            ruta_cache.write_text(json.dumps({
+                "carpetas": huellas_actuales,
+                "relaciones": list(relaciones_por_clave.values()),
+            }, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass  # el cache es sólo aceleración -- un fallo de escritura nunca rompe el resultado
+
+    return list(relaciones_por_clave.values())
 
 
 def reconciliar_bandeja_decisiones(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+    cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     """Bloque RECONCILIACIÓN D1 -- re-publica la bandeja de decisiones
     pendientes vigente con un `dataset_sha256`/`catalogos_sha256` frescos,
@@ -6392,10 +6728,21 @@ def reconciliar_bandeja_decisiones(
     No modifica ningún catálogo ni el CSV documental por sí sola (el paso
     4 SÍ escribe catálogos/ledger -- exactamente lo mismo que ya hace
     `aplicar_decision_obra` para una confirmación humana, con el mismo
-    respaldo/rollback transaccional)."""
+    respaldo/rollback transaccional).
+
+    `cache_memoizacion` (Bloque P0 MEMOIZACIÓN, opcional -- ver docstring
+    de `regenerar_decisiones_persistidas`): se reenvía tal cual a cada
+    invocación interna de `regenerar_decisiones_persistidas` (incluidas
+    las del punto fijo acotado -- una iteración cuyos insumos SÍ cambiaron
+    respecto de la anterior nunca usa la caché, sólo las repeticiones con
+    huella idéntica)."""
     from atlas_core.aplicacion_decisiones import aplicar_decision_obra
     from atlas_core.catalogo_clientes import CatalogoClientes
     from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+    from atlas_core.codigo_cliente_destinatario import (
+        CatalogoCodigosCliente, enriquecer_decisiones_cliente_por_codigo,
+        enriquecer_decisiones_obra_por_destinatario,
+    )
     from atlas_core.decisiones_pendientes import (
         NOMBRE_ARTEFACTO, enriquecer_decisiones_cliente, enriquecer_decisiones_obra,
         enriquecer_decisiones_vehiculo, generar_artefacto, regenerar_decisiones_persistidas,
@@ -6408,7 +6755,16 @@ def reconciliar_bandeja_decisiones(
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
-    relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
+    # Bloque P0 SHORT-CIRCUIT -- `relaciones_historicas` (ver más abajo,
+    # después de conocer `pendientes_actuales`) sólo se calcula si de
+    # verdad hay una decisión que la use (`VEHICULO_DESCONOCIDO`, la
+    # única consumida por `enriquecer_decisiones_vehiculo`). Una bandeja
+    # vacía o sin decisiones de vehículo cuesta prácticamente cero en
+    # esta parte -- referenciada por `_regenerar_enriquecer_publicar` vía
+    # closure (Python resuelve la variable libre al momento de la
+    # llamada, no de la definición, así que asignarla más abajo, antes
+    # de invocar el closure, es seguro).
+    relaciones_historicas: list[dict[str, object]] = []
     try:
         _ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
         decisiones_aplicadas_ledger = [
@@ -6420,6 +6776,7 @@ def reconciliar_bandeja_decisiones(
     def _regenerar_enriquecer_publicar(pendientes: list[dict[str, object]]) -> dict[str, object]:
         vigentes_locales = regenerar_decisiones_persistidas(
             decisiones=pendientes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+            cache_memoizacion=cache_memoizacion,
         )
         filas = _leer_filas(dataset)
         try:
@@ -6454,6 +6811,15 @@ def reconciliar_bandeja_decisiones(
             decisiones=enriquecidas_locales, clientes=clientes_confirmados, confirmaciones=confirmaciones,
             evidencia_externa_por_clave=evidencia_externa_clientes,
         )
+        # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: evidencia COMPLEMENTARIA
+        # en un campo aparte (`evaluacion_evidencia_codigo`) -- nunca
+        # reemplaza ni sube el nivel de `evaluacion_evidencia` de arriba
+        # (RUT/nombre), ver contrato P0 punto B.
+        enriquecidas_locales = enriquecer_decisiones_cliente_por_codigo(
+            decisiones=enriquecidas_locales, filas=filas,
+            clientes=clientes_confirmados,
+            catalogo_codigos=CatalogoCodigosCliente(catalogos / "codigos_cliente.json"),
+        )
         try:
             obras_vigentes = CatalogoObrasDestinos(
                 ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
@@ -6463,6 +6829,14 @@ def reconciliar_bandeja_decisiones(
             obras_vigentes = ()
         enriquecidas_locales = enriquecer_decisiones_obra(
             decisiones=enriquecidas_locales, obras=obras_vigentes, evidencia_externa_por_clave=evidencia_externa_clientes,
+        )
+        # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: evidencia complementaria
+        # de OBRA_DESCONOCIDA por relación observada cliente+COD
+        # DESTINATARIO -> obra histórica; contexto informativo para
+        # DESTINO_NO_RESUELTO -- nunca toca despachar_a_crudo/dirección
+        # (contrato P0 puntos C/E).
+        enriquecidas_locales = enriquecer_decisiones_obra_por_destinatario(
+            decisiones=enriquecidas_locales, filas=filas,
         )
 
         bandeja_local = generar_artefacto(
@@ -6487,6 +6861,15 @@ def reconciliar_bandeja_decisiones(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
         decisiones_pendientes=pendientes_actuales, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+
+    # Bloque P0 SHORT-CIRCUIT -- ver comentario junto a la declaración de
+    # `relaciones_historicas` más arriba. `pendientes_actuales` ya es el
+    # conjunto COMPLETO de instancias de decisión para esta corrida (las
+    # pasadas siguientes sólo filtran/enriquecen/auto-aplican miembros de
+    # este mismo conjunto -- nunca fabrican un tipo nuevo de la nada), así
+    # que basta evaluar esto UNA vez, antes de la primera pasada.
+    if any(str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales):
+        relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
 
     resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)
     vigentes = resultado_primero["vigentes"]
@@ -6587,6 +6970,8 @@ def reconciliar_bandeja_decisiones(
 
 def reconciliar_segunda_pasada_universal_sin_ocr(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+    archivos_objetivo: set[str] | None = None,
+    cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     """Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL -- SIN OCR,
     SIN RED. Da a una operación HISTÓRICA (que ya migró a una
@@ -6602,7 +6987,21 @@ def reconciliar_segunda_pasada_universal_sin_ocr(
     `generar_artefacto`, que filtra contra el ledger -- ninguna decisión
     ya cerrada por un humano resucita, ninguna se duplica) y publica con
     hashes frescos. Dos candidatos plausibles / variación grande / sin
-    OCR -> la decisión se conserva intacta. Idempotente."""
+    OCR -> la decisión se conserva intacta. Idempotente.
+
+    `archivos_objetivo` (Bloque P0 RECONCILIACIÓN FOCAL, opcional --
+    `None` conserva el barrido de SIEMPRE, TODOS los archivos del
+    dataset): cuando se entrega, sólo las decisiones pendientes de esos
+    archivos entran a la segunda pasada -- el resto de la bandeja se
+    conserva intacta (nunca se descarta, nunca se toca; `_segunda_pasada_
+    universal` ya filtra internamente por archivo, esto sólo acota qué
+    universo de archivos se le declara "en juego" para ESTA llamada).
+    Pensado para una reconciliación disparada por una ingesta puntual
+    (guía(s) nueva(s) + afectadas causales) -- el mantenimiento/
+    reconciliación global sigue disponible sin pasar este argumento.
+
+    `cache_memoizacion` (Bloque P0 MEMOIZACIÓN): ver docstring de
+    `regenerar_decisiones_persistidas`."""
     from atlas_core.decisiones_pendientes import (
         NOMBRE_ARTEFACTO, generar_artefacto, regenerar_decisiones_persistidas,
     )
@@ -6623,14 +7022,18 @@ def reconciliar_segunda_pasada_universal_sin_ocr(
         return {"aplicado": False, "motivo": "SIN_DECISIONES", "metricas": {}}
 
     try:
-        archivos = {
-            str(f.get("archivo", "")).strip()
-            for f in _leer_filas(dataset)
-            if str(f.get("archivo", "")).strip()
-        }
+        if archivos_objetivo is not None:
+            archivos = set(archivos_objetivo)
+        else:
+            archivos = {
+                str(f.get("archivo", "")).strip()
+                for f in _leer_filas(dataset)
+                if str(f.get("archivo", "")).strip()
+            }
         metricas = _segunda_pasada_universal(dataset, archivos, pendientes, None, catalogos)
         vigentes = regenerar_decisiones_persistidas(
             decisiones=pendientes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+            cache_memoizacion=cache_memoizacion,
         )
         bandeja = generar_artefacto(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,

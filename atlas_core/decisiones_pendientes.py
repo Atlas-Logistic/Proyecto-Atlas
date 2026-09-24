@@ -53,6 +53,12 @@ from atlas_core.catalogos import (
     resolver_nombre_chofer_difuso,
     resolver_nombre_cliente_difuso,
 )
+from atlas_core.convergencia_identidad_conocida import (
+    RESULTADO_RESUELTO as _IDENTIDAD_RESUELTA,
+    resolver_identidad_nominal_fuerte_chofer,
+    resolver_identidad_nominal_fuerte_cliente,
+    resolver_patente_operacional_canonica_por_chofer,
+)
 from atlas_core.evidencia_entidades import ConfirmacionIdentidad
 from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import (
@@ -2028,6 +2034,13 @@ def _decisiones_obra_para_cliente(
         else:
             obra = obras[0]
             destino_texto = str(despachar_a_documental or "").strip()
+            # Una relación obra↔destino sólo se puede preguntar si el
+            # documento realmente aporta un destino. Reutilizar el nombre
+            # de la obra como valor de una tarjeta sin dirección crea una
+            # revisión imposible de responder y no representa evidencia
+            # nueva para el catálogo.
+            if destino_texto in _AUSENTES:
+                destino_texto = obra_texto
             resuelta = catalogo_obras.resolver_obra_destino_confirmada(
                 cliente_id=cliente_id, nombre_obra=obra.nombre_canonico
             ) is not None
@@ -2116,7 +2129,7 @@ def detectar_decisiones_documento(
             )
             por_rut = buscar_chofer_por_rut(choferes, rut_chofer)
             difuso = resolver_nombre_chofer_difuso(choferes, nombre_chofer)
-            if not corroborado and not por_rut:
+            if choferes and not corroborado and not por_rut:
                 if difuso.estado == "AMBIGUO":
                     candidatos = [
                         {"nombre": str(r.get("nombre", "")).strip(), "rut": str(r.get("rut", "")).strip()}
@@ -2583,13 +2596,58 @@ def decision_destino_para_obra_registrada(
     )
 
 
+def _firma_regenerar_decisiones_persistidas(
+    *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
+    ids_resueltos: Iterable[str], ruta_dataset: str | Path | None,
+) -> tuple[object, ...]:
+    """Bloque P0 MEMOIZACIÓN -- huella de los ÚNICOS insumos de los que
+    depende el resultado de `regenerar_decisiones_persistidas` (identidad
+    de las decisiones de entrada, contenido real de los catálogos
+    consultados, contenido real del dataset si se entregó, e
+    `ids_resueltos`). Dos llamadas con la MISMA huella producen,
+    determinísticamente, el MISMO resultado -- la función es de lectura
+    pura (nunca escribe nada) sobre esos mismos insumos."""
+    ids_decisiones = tuple(sorted(str(d.get("decision_id", "")) for d in decisiones))
+    carpeta = Path(carpeta_catalogos)
+    nombres_catalogo = ("clientes.json", "choferes.json", "vehiculos.json", "obras_destinos.json", "destinos_maestros.json")
+    hashes_catalogos = tuple(
+        _sha256(carpeta / nombre) if (carpeta / nombre).is_file() else None
+        for nombre in nombres_catalogo
+    )
+    hash_dataset = None
+    if ruta_dataset is not None:
+        ruta_dataset_path = Path(ruta_dataset)
+        if ruta_dataset_path.is_file():
+            hash_dataset = _sha256(ruta_dataset_path)
+    return (ids_decisiones, hashes_catalogos, hash_dataset, tuple(sorted(str(i) for i in ids_resueltos)))
+
+
 def regenerar_decisiones_persistidas(
     *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
     ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
+    cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
 ) -> list[dict[str, object]]:
     """R3.2.1: reclasifica decisiones YA PERSISTIDAS (p. ej. las de un
     artefacto `decisiones_pendientes.json` generado antes de R3.2) sin volver
     a leer datos documentales ni ejecutar OCR.
+
+    `cache_memoizacion` (Bloque P0 MEMOIZACIÓN, opcional y aditivo --
+    `None` conserva el comportamiento de siempre, recalcular SIEMPRE):
+    caso real medido -- dentro de UNA sola `reconciliar_estado_derivado`,
+    `reconciliar_decisiones_destino_no_resuelto`/`reconciliar_bandeja_
+    decisiones`/`reconciliar_segunda_pasada_universal_sin_ocr` llaman
+    cada una, por su cuenta, a esta función sobre la MISMA lista de
+    decisiones y los MISMOS catálogos/dataset (nadie los cambió entre
+    medio) -- 3 reclasificaciones idénticas pagadas como si fueran 3
+    resultados distintos (~26s medidos para 8 decisiones). Si el caller
+    entrega un `dict` compartido (vacío al empezar la operación), esta
+    función lo usa como caché por huella de insumos (`_firma_regenerar_
+    decisiones_persistidas`) -- misma huella, mismo resultado, sin
+    recalcular; huella distinta (cambió qué decisiones se pasan, o
+    cambió de verdad algún catálogo/dataset consultado) SIEMPRE
+    recalcula. Nunca se persiste a disco ni sobrevive más allá del
+    `dict` que el caller decida conservar -- vive y muere con la
+    operación que lo creó.
 
     Fuente de verdad: el propio contenido de cada decisión (`valor_documental`,
     `contexto`, `evidencias`) más una lectura read-only de catálogos para
@@ -2627,6 +2685,18 @@ def regenerar_decisiones_persistidas(
     indefinidamente. Genérico por construcción -- cualquier tipo de
     decisión futuro cuyo motivo coincida con la columna documental queda
     cubierto automáticamente, sin agregar un caso por tipo."""
+    # Bloque P0 MEMOIZACIÓN -- `decisiones` se materializa una sola vez
+    # (puede ser un generador; si lo fuera, iterarlo dos veces -- para la
+    # huella y para el cuerpo real -- lo dejaría vacío la segunda vez).
+    decisiones = list(decisiones)
+    firma_memoizacion = None
+    if cache_memoizacion is not None:
+        firma_memoizacion = _firma_regenerar_decisiones_persistidas(
+            decisiones=decisiones, carpeta_catalogos=carpeta_catalogos,
+            ids_resueltos=ids_resueltos, ruta_dataset=ruta_dataset,
+        )
+        if firma_memoizacion in cache_memoizacion:
+            return cache_memoizacion[firma_memoizacion]
     carpeta = Path(carpeta_catalogos)
     motivos_por_guia: dict[str, set[str]] | None = None
     codigos_motivo_documental: frozenset[str] = frozenset()
@@ -2651,6 +2721,15 @@ def regenerar_decisiones_persistidas(
     # sólo por eso (el hallazgo no participa del hash) y la próxima
     # detección quedaría descartada como duplicado por `generar_artefacto`.
     filas_por_guia: dict[str, dict[str, str]] | None = None
+    # Bloque REFRESCO ESTRUCTURAL GENERAL (caso real 473325/473326, lote
+    # REPROCESAMIENTO_REPARADOR) -- misma necesidad que ya resolvió R21
+    # para DESTINO_NO_RESUELTO/despachar_a_crudo, generalizada a
+    # cualquier tipo/campo. A diferencia de `filas_por_guia`, se indexa
+    # por `archivo` (identidad estable del documento) -- `numero_guia`
+    # puede ser justamente uno de los campos que la reparación corrige
+    # (473326 pasó de "No encontrado" a "473326"), así que indexar por
+    # guía perdería o cruzaría la fila correcta para ese caso exacto.
+    filas_por_archivo: dict[str, dict[str, str]] | None = None
     # Bloque CONVERGENCIA POST LOTE 2 -- cuenta de reintentos con la misma
     # evidencia por guía, leída del artefacto hermano
     # `pendientes_tecnicos.json` (mismo directorio que `ruta_dataset`,
@@ -2677,10 +2756,29 @@ def regenerar_decisiones_persistidas(
         motivos_por_guia = {}
         motivo_ruta_por_guia = {}
         filas_por_guia = {}
+        filas_por_archivo = {}
+        _archivos_ambiguos: set[str] = set()
         try:
-            with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo:
-                for _fila in _csv.DictReader(_archivo, delimiter=";"):
+            with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo_csv:
+                for _fila in _csv.DictReader(_archivo_csv, delimiter=";"):
                     _guia = str(_fila.get("numero_guia", "")).strip()
+                    _nombre_archivo = str(_fila.get("archivo", "")).strip()
+                    # `archivo` DEBE ser único por documento en datos reales
+                    # (es la identidad que usa todo el resto de Atlas, ver
+                    # `resolver_ruta_evidencia`), pero algunas fixtures de
+                    # test históricas repiten "1.jpeg" para dos guías
+                    # distintas (nunca importó antes -- nada indexaba por
+                    # archivo). Ante una colisión real, nunca se adivina cuál
+                    # fila es la correcta: se excluye esa clave por completo
+                    # (mismo criterio conservador de "ante la duda, no
+                    # tocar" que el resto de este bloque) en vez de dejar
+                    # que la última fila leída pise silenciosamente a la
+                    # primera.
+                    if _nombre_archivo:
+                        if _nombre_archivo in filas_por_archivo:
+                            _archivos_ambiguos.add(_nombre_archivo)
+                        else:
+                            filas_por_archivo[_nombre_archivo] = dict(_fila)
                     if not _guia:
                         continue
                     motivos_por_guia[_guia] = {
@@ -2688,10 +2786,13 @@ def regenerar_decisiones_persistidas(
                     }
                     motivo_ruta_por_guia[_guia] = _motivo_ruta_base(str(_fila.get("motivo_ruta", "")))
                     filas_por_guia[_guia] = dict(_fila)
+            for _nombre_archivo in _archivos_ambiguos:
+                filas_por_archivo.pop(_nombre_archivo, None)
         except (OSError, UnicodeDecodeError):
             motivos_por_guia = None
             motivo_ruta_por_guia = None
             filas_por_guia = None
+            filas_por_archivo = None
         try:
             _ruta_pendientes_tecnicos = Path(ruta_dataset).parent / "pendientes_tecnicos.json"
             _contenido_pendientes = json.loads(_ruta_pendientes_tecnicos.read_text(encoding="utf-8"))
@@ -2872,6 +2973,160 @@ def regenerar_decisiones_persistidas(
                 != str(fila_vigente.get("despachar_a_crudo", ""))
             )
         ]
+    # Bloque REFRESCO ESTRUCTURAL VEHICULO/CHOFER DESCONOCIDO -- caso real
+    # 473325 (VEHICULO_DESCONOCIDO sobre patente_tracto="2PAR67", reparado
+    # a "BPHR67") y 473326 (CHOFER_DESCONOCIDO sobre chofer="CRISIOPHER
+    # RSTAVAR BPHR NETOS", reparado a "CRISTOPHER RETAMAL") -- ninguno de
+    # los bloques de arriba los cubre: su `motivos` es una razón INTERNA
+    # propia de la decisión (p. ej. "SIN_VEHICULO_CONFIRMADO_COMPATIBLE"),
+    # nunca un código de `MotivoRevisionDocumento` (R13 nunca aplica), y
+    # R19/R21 están deliberadamente acotados a DESTINO_NO_RESUELTO/
+    # despachar_a_crudo. Mismo principio de R21 (una decisión es una
+    # pregunta sobre `valor_documental` de `campo` EN EL MOMENTO en que se
+    # detectó -- si el valor VIGENTE ya no coincide, la evidencia que la
+    # sustentaba desapareció y la tarjeta queda obsoleta; una fresca, con
+    # `decision_id` nuevo y evidencia al día, se publica más abajo si el
+    # campo lo sigue necesitando), pero DELIBERADAMENTE ACOTADO a
+    # VEHICULO_DESCONOCIDO/CHOFER_DESCONOCIDO -- nunca un chequeo
+    # type-agnostic: la primera versión de este bloque, sin acotar por
+    # tipo, comparaba `valor_documental` contra el campo vigente para
+    # CUALQUIER decisión y rompió en la práctica `CLIENTE_CANDIDATO` (su
+    # semántica es justamente tolerar drift de OCR frente al valor
+    # confirmado -- `test_revisiones_estancadas_ocr_drift.py`) y
+    # `OBRA_DESCONOCIDA`/multi-guía en fixtures sintéticas cuya fila no
+    # necesariamente refleja el `valor_documental` de una decisión
+    # inyectada sin evidencia nueva (`test_bug_perdida_decision_
+    # multiguia.py`). VEHICULO_DESCONOCIDO/CHOFER_DESCONOCIDO no tienen
+    # esa tolerancia por diseño: representan "no hay NINGÚN candidato de
+    # catálogo compatible con este valor documental" -- si el valor
+    # documental cambió, la pregunta original ya no tiene sentido tal
+    # cual, sin ambigüedad de drift que preservar.
+    #
+    # Se indexa por `archivo` (`filas_por_archivo`), nunca por
+    # `numero_guia` (`filas_por_guia`): 473326 es justo un caso donde
+    # `numero_guia` mismo fue uno de los campos reparados ("No
+    # encontrado" -> "473326") -- indexar por guía habría perdido o
+    # cruzado la fila con la de otro documento que todavía tuviera
+    # "No encontrado".
+    _TIPOS_REFRESCO_VEHICULO_CHOFER = frozenset({"VEHICULO_DESCONOCIDO", "CHOFER_DESCONOCIDO"})
+    if filas_por_archivo is not None:
+        decisiones = [
+            decision for decision in decisiones
+            if not (
+                str(decision.get("tipo", "")) in _TIPOS_REFRESCO_VEHICULO_CHOFER
+                and bool(str(decision.get("campo", "")))
+                and (
+                    fila_vigente := filas_por_archivo.get(
+                        str((decision.get("documento") or {}).get("archivo", ""))
+                    )
+                ) is not None
+                and str(decision.get("campo", "")) in fila_vigente
+                and str(decision.get("valor_documental", "")).strip()
+                != str(fila_vigente.get(str(decision.get("campo", "")), "")).strip()
+            )
+        ]
+    # Bloque CONVERGENCIA DE IDENTIDADES CONOCIDAS -- casos reales 473546
+    # (CHOFER_CANDIDATO sobre "SALOMÓN PIZARRO", único chofer activo de
+    # ese nombre en catálogo, con RUT documental estructuralmente válido
+    # pero DISTINTO del canónico -- OCR degradado, nunca una contradicción
+    # real de identidad cuando el nombre por sí solo ya es inequívoco) y
+    # 473442 (CLIENTE_DESCONOCIDO sobre "TORRES OCARANZA LTDA", cliente
+    # ya confirmado/activo). Atlas no debe mantener una tarjeta pidiendo
+    # confirmar que una entidad es ella misma -- ver
+    # `convergencia_identidad_conocida.py` para la regla completa
+    # (asimetría deliberada: CHOFER tolera RUT documental problemático de
+    # cualquier tipo si el nombre es único+activo; CLIENTE exige RUT sin
+    # contradicción real). Nunca aprende/corrige RUT, nunca crea
+    # entidades/aliases -- sólo retira la pregunta cuando ya no tiene
+    # sentido. El ledger sigue ganando siempre: una decisión ya aplicada
+    # ni siquiera llega hasta aquí como `decisiones_pendientes` vigente.
+    if filas_por_archivo is not None:
+        _hay_chofer_candidato = any(d.get("tipo") == "CHOFER_CANDIDATO" for d in decisiones)
+        # Una tarjeta CLIENTE_CANDIDATO tampoco debe sobrevivir si la fila
+        # vigente ya identifica EXACTAMENTE, de manera única, a un cliente
+        # confirmado/activo. Es la misma certeza nominal que evita crear la
+        # tarjeta en ingesta; nunca abarca fuzzy y el resolver se abstiene
+        # ante un RUT documental válido contradictorio.
+        _hay_cliente_desconocido = any(
+            d.get("tipo") in {"CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO"}
+            for d in decisiones
+        )
+        # Bloque P0 FINAL -- ASIGNACIÓN OPERACIONAL CHOFER->VEHÍCULO (casos
+        # reales 473442/473546): mismo principio de convergencia, para
+        # VEHICULO_DESCONOCIDO/patente_tracto -- ver `resolver_patente_
+        # operacional_canonica_por_chofer` en `convergencia_identidad_
+        # conocida.py`. Nunca usa historial (deliberado, a pedido
+        # explícito): sólo catálogo ya confirmado.
+        _hay_vehiculo_desconocido = any(
+            d.get("tipo") == "VEHICULO_DESCONOCIDO"
+            and str(d.get("campo", "")) in {"patente_tracto", "patente_rampla"}
+            for d in decisiones
+        )
+        _choferes_convergencia = (
+            cargar_catalogo_json(carpeta / "choferes.json") if (_hay_chofer_candidato or _hay_vehiculo_desconocido) else {}
+        )
+        if _hay_cliente_desconocido:
+            try:
+                _clientes_convergencia = [
+                    c for c in CatalogoClientes(carpeta / "clientes.json").listar()
+                    if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+                ]
+            except (OSError, ValueError):
+                _clientes_convergencia = []
+        else:
+            _clientes_convergencia = []
+        if _hay_vehiculo_desconocido:
+            try:
+                _vehiculos_convergencia = [
+                    v for v in cargar_catalogo_vehiculos(carpeta / "vehiculos.json").homologables()
+                ]
+            except (OSError, ValueError):
+                _vehiculos_convergencia = []
+        else:
+            _vehiculos_convergencia = []
+
+        def _identidad_converge(decision: Mapping[str, object]) -> bool:
+            tipo_decision = str(decision.get("tipo", ""))
+            if tipo_decision not in (
+                "CHOFER_CANDIDATO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
+                "VEHICULO_DESCONOCIDO",
+            ):
+                return False
+            fila_vigente = filas_por_archivo.get(str((decision.get("documento") or {}).get("archivo", "")))
+            if fila_vigente is None:
+                return False
+            if tipo_decision == "CHOFER_CANDIDATO":
+                resultado = resolver_identidad_nominal_fuerte_chofer(
+                    nombre_documental=str(fila_vigente.get("chofer", "")),
+                    rut_documental=str(fila_vigente.get("rut_chofer", "")),
+                    choferes=_choferes_convergencia,
+                )
+                return resultado.resultado == _IDENTIDAD_RESUELTA
+            if tipo_decision in {"CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO"}:
+                resultado = resolver_identidad_nominal_fuerte_cliente(
+                    nombre_documental=str(fila_vigente.get("cliente", "")),
+                    rut_documental=str(fila_vigente.get("rut_cliente", "")),
+                    clientes=_clientes_convergencia,
+                )
+                return resultado.resultado == _IDENTIDAD_RESUELTA
+            tipo_esperado = {
+                "patente_tracto": "TRACTO",
+                "patente_rampla": "CARRO",
+            }.get(str(decision.get("campo", "")))
+            if tipo_esperado is None:
+                return False
+            resultado_patente = resolver_patente_operacional_canonica_por_chofer(
+                nombre_documental=str(fila_vigente.get("chofer", "")),
+                rut_documental=str(fila_vigente.get("rut_chofer", "")),
+                choferes=_choferes_convergencia, vehiculos=_vehiculos_convergencia,
+                tipo_esperado=tipo_esperado,
+            )
+            return (
+                resultado_patente.resultado == _IDENTIDAD_RESUELTA
+                and resultado_patente.patente is not None
+            )
+
+        decisiones = [decision for decision in decisiones if not _identidad_converge(decision)]
     # Bloque CIERRE B1 EVIDENCIA DESTINO (Codex 472623/472624) -- una
     # decisión DESTINO_NO_RESUELTO con el motivo sintético
     # `OBRA_AUSENTE_BLOQUEA_RUTEO` (Bloque BLOQUEO PREVIO AL RUTEO) nunca
@@ -2947,6 +3202,66 @@ def regenerar_decisiones_persistidas(
                 and motivo_actual not in {str(m) for m in decision.get("motivos") or []}
             )
         ]
+    # Bloque CIERRE DUPLICADO DESTINO_NO_RESUELTO -- caso real 473444:
+    # dos tarjetas `DESTINO_NO_RESUELTO` simultáneas para el MISMO
+    # archivo, con el MISMO motivo ("GEOCODIFICACION_DIRECCION_NO_
+    # ENCONTRADA" -- la geocodificación TODAVÍA falla incluso con el
+    # texto corregido, así que R19 arriba, que sólo compara el CÓDIGO de
+    # `motivo_ruta`, nunca ve un cambio) pero `valor_documental` distinto
+    # ("VaRGAS BUSTOS 899 SAn MIGUEL..." vs "VARGAS BUSTOS 899 SAN
+    # MIGUEL..."). R21 (más arriba) sólo cubre el conjunto de motivos de
+    # "destino contaminado documental" -- un origen distinto.
+    #
+    # Deliberadamente ACOTADO a colisiones reales (2+ decisiones para el
+    # MISMO archivo+campo), nunca una comparación type-wide contra
+    # "cualquier" `DESTINO_NO_RESUELTO` -- una primera versión de este
+    # bloque, sin acotar a duplicados, comparaba `valor_documental`
+    # contra el `despachar_a_crudo` vigente para TODA decisión de este
+    # tipo y rompió `test_bug_perdida_decision_multiguia.py`/
+    # `test_cierre_quirurgico_revisiones.py`/`test_vehiculo_documental_
+    # canonico.py`: sus fixtures inyectan una única `DESTINO_NO_RESUELTO`
+    # sin poblar `despachar_a_crudo` en la fila (nunca importó antes --
+    # nada comparaba ese campo type-wide). Acotar a duplicados reales
+    # hace que esas fixtures (una sola decisión, nada que desambiguar)
+    # nunca entren a este bloque -- mismo criterio que ya aprendió el
+    # bloque VEHICULO/CHOFER de arriba con la colisión de `archivo`.
+    #
+    # De cada grupo duplicado, se retira la(s) que YA NO coincide(n) con
+    # el `despachar_a_crudo` vigente del archivo -- la que sí coincide
+    # sobrevive sola (nunca se genera una fresca redundante encima); si
+    # NINGUNA coincide (el valor cambió una tercera vez), se retiran
+    # todas y una fresca correcta se genera más abajo si el destino
+    # TODAVÍA necesita resolución. `filas_por_archivo` ya excluye por
+    # construcción cualquier `archivo` ambiguo/duplicado en el propio
+    # dataset (ver bloque de lectura del CSV, más arriba) -- ese caso
+    # nunca entra aquí tampoco. Se ejecuta ANTES de "tipos_ya_presentes"
+    # (justo abajo) -- mismo motivo exacto que ya documentó el bloque de
+    # arriba para `motivo_ruta`.
+    if filas_por_archivo is not None:
+        _grupos_destino: dict[tuple[str, str], list[dict[str, object]]] = {}
+        for decision in decisiones:
+            if str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO" and str(decision.get("campo", "")) == "despachar_a_crudo":
+                _clave_grupo = (
+                    str((decision.get("documento") or {}).get("archivo", "")),
+                    str(decision.get("campo", "")),
+                )
+                _grupos_destino.setdefault(_clave_grupo, []).append(decision)
+        _ids_destino_obsoletos: set[str] = set()
+        for (_archivo_grupo, _campo_grupo), _grupo in _grupos_destino.items():
+            if len(_grupo) < 2 or not _archivo_grupo:
+                continue  # nada que desambiguar -- nunca toca una decisión única
+            _fila_vigente_grupo = filas_por_archivo.get(_archivo_grupo)
+            if _fila_vigente_grupo is None:
+                continue
+            _valor_vigente_grupo = str(_fila_vigente_grupo.get(_campo_grupo, "")).strip()
+            for _decision_grupo in _grupo:
+                if str(_decision_grupo.get("valor_documental", "")).strip() != _valor_vigente_grupo:
+                    _ids_destino_obsoletos.add(str(_decision_grupo.get("decision_id", "")))
+        if _ids_destino_obsoletos:
+            decisiones = [
+                decision for decision in decisiones
+                if str(decision.get("decision_id", "")) not in _ids_destino_obsoletos
+            ]
     # Bloque R2 -- COHERENCIA ENTRE PROBLEMAS, ESTADO Y REVISIÓN ACCIONABLE:
     # hasta este punto `decisiones` sólo trae lo que YA existía -- nunca se
     # genera una decisión nueva desde cero para un documento recién
@@ -3098,6 +3413,17 @@ def regenerar_decisiones_persistidas(
             if not nombre_obra and entidad_id:
                 obra_actual = next((o for o in obras_existentes if o.obra_id == entidad_id), None)
                 nombre_obra = obra_actual.nombre_canonico if obra_actual is not None else ""
+            contexto_destino = decision.get("contexto") or {}
+            # Las tarjetas persistidas por la versión anterior usaban el
+            # nombre de la obra como `valor_documental` incluso cuando el
+            # documento no traía destino. Si el contexto explícito confirma
+            # esa ausencia, no existe una relación que preguntar: se retira
+            # al reconciliar en vez de conservar una revisión espuria.
+            if (
+                "destino_documental" in contexto_destino
+                and str(contexto_destino.get("destino_documental") or "").strip() in _AUSENTES
+            ):
+                continue
             resuelta = bool(
                 nombre_obra and catalogo_obras is not None
                 and catalogo_obras.resolver_obra_destino_confirmada_global(nombre_obra=nombre_obra) is not None
@@ -3557,6 +3883,8 @@ def regenerar_decisiones_persistidas(
             decision["acciones_permitidas"] = list(ACCIONES_DESTINO_SIN_CONFIRMAR)
 
         resultado.append(decision)
+    if cache_memoizacion is not None:
+        cache_memoizacion[firma_memoizacion] = resultado
     return resultado
 
 

@@ -80,6 +80,32 @@ ACCIONES = frozenset({
 })
 LEDGER = "decisiones_aplicadas.json"
 
+_TIPOS_IDENTIDAD_CLIENTE = frozenset({
+    "CLIENTE_AUSENTE", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO", "ALIAS_CANDIDATO",
+})
+
+
+def _codigo_cliente_vigente(dataset: Path, archivo: str) -> str:
+    """Bloque P0 CÓDIGO CLIENTE -- `codigo_cliente` de la fila VIGENTE de
+    `archivo` en el dataset (nunca `cod_destinatario`: columna y semántica
+    distintas, ver `codigo_cliente_destinatario.py`). Import diferido de
+    `_leer_filas` -- `revalidacion_documental` ya importa este módulo a
+    nivel de módulo, así que el import inverso a nivel de módulo crearía
+    un ciclo (mismo patrón ya usado en este archivo para
+    `revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr`)."""
+    if not archivo:
+        return ""
+    from atlas_core.revalidacion_documental import _leer_filas
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return ""
+    for fila in filas:
+        if str(fila.get("archivo", "")).strip() == archivo:
+            valor = str(fila.get("codigo_cliente", "")).strip()
+            return valor if valor not in {"", "No encontrado", "REVISAR", "Ilegible"} else ""
+    return ""
+
 
 def _confirma_discrepancia_documental(aplicacion: dict[str, object]) -> bool:
     """Reconoce la confirmación explícita, incluso en ledger previo al fix."""
@@ -171,6 +197,21 @@ def reconciliar_incidencias_documentales_confirmadas_desde_ledger(
             reconciliadas += 1
     return {"decisiones_compatibles": compatibles, "incidencias_reconciliadas": reconciliadas}
 
+# Bloque P0 RECUPERACIÓN TRANSACCIONAL -- caso real 0000359449: el lock
+# `aplicar_decision_obra` usaba el default de `bloqueo_sesion` (6 horas),
+# pensado para operaciones legítimamente largas -- pero una aplicación de
+# decisión real completa en segundos (incluida su propia `revalidar_y_
+# regenerar_reporte` interna, ~40-60s según el perfilado de `aplicacion_
+# multiple.py`). Un proceso que muere a mitad (cierre forzado de Desktop,
+# corte de energía, OOM) deja el lock huérfano hasta que alguien lo
+# investigue y lo borre a mano -- 6 horas es una espera injustificable para
+# un flujo que un humano está mirando en pantalla en ese mismo momento.
+# 10 minutos da margen generoso sobre la duración real observada sin
+# obligar a intervención manual: un lock genuinamente huérfano se
+# autorepara solo, y uno activo de verdad (una revalidación agregada larga
+# de un lote grande) sigue muy por debajo del umbral.
+TIEMPO_EXPIRACION_LOCK_APLICAR_DECISION_SEGUNDOS = 600
+
 # R3.4: qué acciones son válidas para cada tipo de decisión -- una acción de
 # un tipo nunca se aplica a una decisión de otro tipo, aunque comparta el
 # mismo código POSPONER.
@@ -196,6 +237,14 @@ ACCIONES_POR_TIPO = {
         "REGISTRAR_CLIENTE_MANUAL", "NO_PUEDO_DETERMINAR", "POSPONER",
     }),
 }
+
+# Bloque P0 REVISIÓN V2 -- PLANIMPACTO AGRUPADO: tipos auditados para los
+# que un caller de lote puede pedir `diferir_revalidacion_global=True` (ver
+# ese kwarg en `aplicar_decision_obra`). Deliberadamente acotado -- ampliar
+# esta lista exige releer y auditar la rama correspondiente del tipo nuevo
+# (qué escribe directo vs qué depende de `revalidar_y_regenerar_reporte`)
+# antes de agregarla, nunca "por si acaso".
+TIPOS_ELEGIBLES_DIFERIR_REVALIDACION_GLOBAL = frozenset({"OBRA_DESCONOCIDA", "DESTINO_NO_RESUELTO"})
 
 class ErrorAplicacionDecision(ValueError): pass
 class DecisionObsoletaError(ErrorAplicacionDecision): pass
@@ -377,7 +426,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc)) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc), diferir_revalidacion_global: bool = False) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -392,7 +441,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
     estado_operacion_ruta = actual / "estado_operacion.json"
     accion = str(accion).upper(); decision_id = str(decision_id).strip()
     if accion not in ACCIONES or not decision_id: raise ErrorAplicacionDecision("Solicitud de decisión inválida.")
-    with bloqueo_sesion(actual, "aplicar_decision_obra"):
+    with bloqueo_sesion(
+        actual, "aplicar_decision_obra",
+        tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_APLICAR_DECISION_SEGUNDOS,
+    ):
         try: ledger = json.loads(ledger_ruta.read_text(encoding="utf-8"))
         except FileNotFoundError: ledger = {"schema_version": 1, "aplicaciones": []}
         except (OSError, json.JSONDecodeError) as error: raise ErrorAplicacionDecision("El historial de decisiones no se puede leer.") from error
@@ -600,6 +652,40 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # cliente) la reutiliza en vez de duplicarla.
                     numero_guia = str(decision.get("documento", {}).get("numero_guia") or "")
                     numero_transporte_obra = str(decision.get("documento", {}).get("numero_transporte") or "")
+                    # Bloque HOMOLOGACIÓN OBRA -> OPERACIÓN (caso real
+                    # 0000359449/474381): `registrar_observacion` (abajo)
+                    # deja el nombre canónico + alias documental
+                    # persistidos en el CATÁLOGO -- pero la ficha
+                    # operacional (Viaje/Entrega/B1) lee directamente
+                    # `obra_destino` del documento ya persistido en el
+                    # dataset; nunca resuelve contra catálogo en tiempo de
+                    # lectura. Sin este write-back, el texto documental
+                    # crudo ("LINSAS MONTAJES Y SERVICIOS") seguía
+                    # mostrándose como OBRA indefinidamente, incluso
+                    # después de revalidar -- la corrección humana quedaba
+                    # invisible en toda superficie operacional. Mismo
+                    # patrón ya usado por `DESTINO_SIN_CONFIRMAR` más abajo
+                    # (`despachar_a_crudo`): escritura directa de la fila
+                    # que ORIGINÓ la decisión, bajo el mismo lock
+                    # (`revalidacion_dataset`), nunca un segundo mecanismo
+                    # paralelo. Sólo escribe si el canónico difiere de
+                    # verdad del texto documental, y sólo si la fila sigue
+                    # mostrando exactamente el texto que originó la
+                    # decisión (nunca pisa un cambio real posterior de
+                    # otra fuente) -- nunca toca otras filas/guías.
+                    if nombre_obra_registro and nombre_obra_registro != obra_texto and numero_guia:
+                        from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+                        with bloqueo_sesion(actual, "revalidacion_dataset"):
+                            filas_dataset_obra = _leer_filas(dataset)
+                            fila_objetivo_obra = next(
+                                (f for f in filas_dataset_obra if str(f.get("numero_guia", "")) == numero_guia), None,
+                            )
+                            if (
+                                fila_objetivo_obra is not None
+                                and str(fila_objetivo_obra.get("obra_destino", "")).strip() == obra_texto
+                            ):
+                                fila_objetivo_obra["obra_destino"] = nombre_obra_registro
+                                _escribir_filas_completas(dataset, filas_dataset_obra)
                     evidencia = Evidencia(
                         tipo=TipoEvidencia.GUIA.value,
                         identificador_fuente=str(decision.get("documento", {}).get("numero_guia") or decision.get("documento", {}).get("archivo")),
@@ -1157,10 +1243,13 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # comuna/localidad NUNCA se escribe dentro de este mismo
                     # campo (mezclaría calle con sector/comuna, ver
                     # `resolver_destino_entrega`) -- viaja aparte, opcional,
-                    # sólo cuando Atlas no pudo resolverla sola (Desktop
-                    # sólo pide el campo si `decision.contexto.comuna_
-                    # sugerida` viene vacía, ver `detectar_decision_destino_
-                    # no_resuelto`). Si el humano la escribe, tiene prioridad
+                    # sólo cuando Atlas no pudo resolverla sola. Bloque
+                    # COMUNA/LOCALIDAD EDITABLE (caso real 473545): Desktop
+                    # pide el campo SIEMPRE -- precargado con `decision.
+                    # contexto.comuna_sugerida` cuando existe, editable, para
+                    # que una sugerencia incorrecta de Atlas nunca quede
+                    # inmutable frente a evidencia documental contraria. Si
+                    # el humano la escribe, tiene prioridad
                     # sobre la resolución automática, pero nunca la
                     # reemplaza si viene vacía -- `revalidar_ruta_sin_
                     # destino_calculado_sin_ocr` resuelve sola en ese caso.
@@ -1214,6 +1303,38 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         comuna_manual_por_guia=(
                             {numero_guia_decision: comuna_final} if comuna_final else None
                         ),
+                        # Bloque P0 EVITAR SEGUNDO INTENTO -- caso real
+                        # 473545/473880: sin esto, este intento INLINE
+                        # barre el dataset COMPLETO (todas las filas sin
+                        # `RUTA_CALCULADA`) -- en un lote de varias
+                        # decisiones, el inline de la SEGUNDA decisión
+                        # volvía a intentar la guía que el inline de la
+                        # PRIMERA ya había resuelto/intentado segundos
+                        # antes, sin que ningún `guias_excluir_reintento`
+                        # lo supiera (esa exclusión sólo protege a la
+                        # batería DIFERIDA, no a otros intentos inline del
+                        # mismo lote). El propósito documentado de este
+                        # intento es dar feedback inmediato sobre ESTA
+                        # decisión (`resultado["ruta_resuelta"]`) -- nunca
+                        # barrer otras guías (eso es trabajo exclusivo de
+                        # la batería diferida/`revalidar_y_regenerar_
+                        # reporte`, que sí sigue sin acotar).
+                        guias_objetivo={numero_guia_decision},
+                    )
+                    # Bloque P0 EVITAR SEGUNDO INTENTO -- caso real 473545:
+                    # este intento INLINE (arriba) es una consulta externa
+                    # real siempre que la fila tenía `planta_origen_id`
+                    # (de lo contrario `revalidar_ruta_sin_destino_
+                    # calculado_sin_ocr` la salta sola -- ver sus guards --
+                    # y esta guía SÍ debe tener su primera oportunidad real
+                    # más abajo, en la batería). Se lee `guias_intentadas`
+                    # (no `guias_actualizadas`: un RESULTADO_AMBIGUO/fallo
+                    # también pagó la consulta externa, aunque no cambie
+                    # nada persistido) en vez de inferirlo indirectamente
+                    # de `planta_origen_id` -- explícito, no depende de
+                    # reconstruir la lógica interna de esa función.
+                    guia_con_intento_ruta_en_esta_operacion = numero_guia_decision in (
+                        resultado_revalidacion.get("guias_intentadas") or []
                     )
                     # La confirmación humana responde cuál es la dirección,
                     # incluso cuando el proveedor no puede convertirla en
@@ -1234,9 +1355,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                             raise ErrorAplicacionDecision(
                                 "No se encontró el documento tras revalidar su dirección confirmada."
                             )
-                        fila_confirmacion_humana["direccion_entrega"] = direccion_final
+                        fila_confirmacion_humana["direccion_entrega"] = direccion_final if ruta_resuelta else ""
                         if comuna_final:
-                            fila_confirmacion_humana["localidad_entrega"] = comuna_final
+                            fila_confirmacion_humana["localidad_entrega"] = comuna_final if ruta_resuelta else ""
                         _escribir_filas_completas(dataset, filas_confirmacion_humana)
                     # Bloque LOGÍSTICA L1 -- `guias_actualizadas` ya NO es un
                     # proxy fiable de "ruta resuelta": desde este bloque
@@ -1832,6 +1953,39 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
 
             ledger.setdefault("aplicaciones", []).append(aplicacion)
             escribir_json_atomico(ledger_ruta, ledger)
+            # Bloque P0 CÓDIGO CLIENTE -- punto ÚNICO y común de TODA
+            # confirmación humana de identidad de CLIENTE: las cuatro
+            # ramas (CLIENTE_AUSENTE/CLIENTE_DESCONOCIDO/CLIENTE_CANDIDATO/
+            # ALIAS_CANDIDATO) ya convergieron aquí, en el `aplicacion`
+            # recién escrito en el ledger -- nunca se duplica esta lógica
+            # dentro de cada rama. Sólo aprende si (a) esta aplicación
+            # SÍ fijó un `cliente_id` (nunca con NO_REGISTRAR/RECHAZAR/
+            # POSPONER, que dejan `cliente_id=None` en `aplicacion`) y
+            # (b) el documento vigente trae `codigo_cliente` documental
+            # válido -- nunca aprende de una guía sin código. El ledger
+            # ya escrito arriba sigue siendo la autoridad y la
+            # trazabilidad real: esto sólo persiste una PROYECCIÓN
+            # derivada de ese mismo hecho ya auditado, nunca al revés.
+            # Nunca falla la aplicación ya confirmada por un problema
+            # de este paso puramente complementario.
+            if tipo in _TIPOS_IDENTIDAD_CLIENTE:
+                cliente_id_confirmado = aplicacion.get("cliente_id")
+                if cliente_id_confirmado:
+                    codigo_cliente_vigente = _codigo_cliente_vigente(
+                        dataset, str((decision.get("documento") or {}).get("archivo", "")),
+                    )
+                    if codigo_cliente_vigente:
+                        from atlas_core.codigo_cliente_destinatario import CatalogoCodigosCliente
+                        try:
+                            CatalogoCodigosCliente(catalogos / "codigos_cliente.json").confirmar(
+                                codigo=codigo_cliente_vigente, cliente_id=str(cliente_id_confirmado),
+                                actor=actor, fuente=f"{tipo}:{accion}", reloj=reloj,
+                            )
+                        except Exception as error:
+                            _LOGGER.warning(
+                                "No se pudo registrar codigo_cliente->cliente_id (%s): %s: %s",
+                                decision_id, type(error).__name__, error,
+                            )
             # El revalidador general es deliberadamente conservador y sólo
             # consume catálogo. Después de registrar/confirmar un chofer,
             # ejecutarlo aquí elimina de inmediato el motivo técnico de la
@@ -1913,10 +2067,66 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"), ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"),
                 ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"),
             }
-            if (
+            requiere_revalidacion_global = (
                 accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
                 and (tipo, accion) not in TIPOS_CON_REGENERACION_DIRECTA
-            ):
+            )
+            # Bloque P0 REVISIÓN V2 -- PLANIMPACTO AGRUPADO: un caller de
+            # LOTE (`aplicar_decisiones_multiples`) puede pedir que ESTA
+            # decisión NO dispare su propia pasada completa de
+            # `revalidar_y_regenerar_reporte` (~40-60s contra el dataset
+            # real, perfilado real del bloque -- ver
+            # `atlas_core.aplicacion_multiple`) cuando el caller sabe que va
+            # a agregar los mismos insumos (comuna humana / guía a excluir
+            # de reintento) de VARIAS decisiones del mismo lote y correr la
+            # batería UNA sola vez al final -- nunca N veces por N
+            # decisiones. Alcance deliberadamente acotado a los 2 tipos ya
+            # auditados para este bloque (`TIPOS_ELEGIBLES_DIFERIR_
+            # REVALIDACION_GLOBAL`, ver constante al inicio del módulo):
+            # fuera de esos tipos, o si nadie pide diferir
+            # (`diferir_revalidacion_global=False`, default), el
+            # comportamiento es IDÉNTICO a siempre -- ningún caller
+            # existente (Desktop aplicando una tarjeta, cualquier test)
+            # puede notar la diferencia. Nunca se salta la escritura
+            # canónica (catálogo/dataset directo de la rama del tipo, más
+            # arriba) ni el cierre de ledger/bandeja de más abajo -- sólo
+            # se difiere la batería de revalidadores globales, que el
+            # caller queda obligado a correr (agregada) antes de considerar
+            # el lote cerrado.
+            diferir_esta_revalidacion = (
+                diferir_revalidacion_global
+                and requiere_revalidacion_global
+                and tipo in TIPOS_ELEGIBLES_DIFERIR_REVALIDACION_GLOBAL
+            )
+            if diferir_esta_revalidacion:
+                # `numero_guia_decision` sólo existe en el scope de las
+                # ramas ORIGEN_NO_CONFIRMADO/DESTINO_NO_RESUELTO/
+                # CLIENTE_AUSENTE -- OBRA_DESCONOCIDA (el otro tipo
+                # elegible) usa su propia variable local `numero_guia`. Se
+                # relee directo desde `decision` (disponible en cualquier
+                # rama) para no depender de cuál branch la definió.
+                numero_guia_para_plan_impacto = str((decision.get("documento") or {}).get("numero_guia") or "")
+                resultado_extra["plan_impacto_diferido"] = {
+                    "numero_guia": numero_guia_para_plan_impacto,
+                    "comuna_manual": (
+                        comuna_final
+                        if tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION" and comuna_final
+                        else None
+                    ),
+                    # Bloque P0 EVITAR SEGUNDO INTENTO -- reemplaza la
+                    # condición anterior (inferir del `planta_origen_id`
+                    # ANTES de la decisión) por la señal EXPLÍCITA de si
+                    # el intento inline de arriba de verdad pagó una
+                    # consulta externa para esta guía -- misma intención,
+                    # menos frágil (no depende de reconstruir cuándo
+                    # `revalidar_ruta_sin_destino_calculado_sin_ocr` se
+                    # abstiene internamente).
+                    "excluir_reintento_ruta": bool(
+                        tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION"
+                        and guia_con_intento_ruta_en_esta_operacion
+                    ),
+                }
+            elif requiere_revalidacion_global:
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
@@ -1952,11 +2162,16 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 # esta guía sí debe tener su primera oportunidad real aquí,
                 # justo si la resolución de origen de esta misma pasada
                 # acaba de completarla.
+                # Bloque P0 EVITAR SEGUNDO INTENTO -- misma señal explícita
+                # que el camino diferido (ver `plan_impacto_diferido`
+                # arriba): `guia_con_intento_ruta_en_esta_operacion` viene
+                # de `guias_intentadas` (consulta externa REALMENTE hecha),
+                # no de inferir `planta_origen_id` antes/después.
                 guias_excluir_reintento_ruta_decision = (
                     {numero_guia_decision}
                     if (
                         tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION"
-                        and str(snapshot_fila_antes.get("planta_origen_id", "")).strip()
+                        and guia_con_intento_ruta_en_esta_operacion
                     )
                     else None
                 )
