@@ -1560,6 +1560,46 @@ def limpiar_sufijo_rut_pegado(valor: Any) -> str:
     return resto if resto else texto
 
 
+def limpiar_sufijo_chofer_pegado(valor: Any, valor_chofer_resuelto: Any) -> str:
+    """Bloque CONTAMINACIÓN ENTRE CAMPOS (sufijo) -- hermana de
+    `limpiar_sufijo_rut_pegado` (arriba) para el VALOR NOMINAL de RETIRA.
+    `_despachar_a_lineal_contaminado` (caso real 472523) sólo reconoce un
+    DESPACHAR A que ES íntegramente el chofer; se abstiene cuando la
+    dirección real SÍ se leyó completa y el nombre del chofer quedó pegado
+    AL FINAL por el orden de lectura de PaddleOCR (foto levemente girada:
+    "RETIRA" se lee antes que "DESPACHAR A" y su valor cae justo después
+    de la dirección). Caso real transporte 0000360025: una de tres guías
+    del mismo viaje leyó "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU JOSE
+    LAZCANO" y el viaje se partió en dos entregas falsas.
+
+    Sólo recorta cuando TODO se cumple: el chofer ya resuelto de este
+    mismo documento tiene 2+ palabras (nunca un token suelto que podría
+    ser parte legítima de una calle o comuna), esas palabras son
+    exactamente las ÚLTIMAS del valor (tolerante a OCR vía
+    `_token_coincide_tolerante`, nunca una coincidencia parcial ni en
+    medio del texto -- "PASAJE JUAN PEREZ 123" queda intacto), y lo que
+    queda sigue siendo una dirección con numeración (al menos un dígito
+    y una letra). Ante cualquier duda devuelve el valor intacto; nunca
+    inventa ni corrige el texto restante."""
+    texto = str(valor or "")
+    tokens_chofer = _tokens_valor(_texto_simple(str(valor_chofer_resuelto or "")))
+    if len(tokens_chofer) < 2 or not all(t.isalpha() for t in tokens_chofer):
+        return texto
+    palabras = texto.split()
+    if len(palabras) <= len(tokens_chofer):
+        return texto
+    cola = palabras[-len(tokens_chofer):]
+    if not all(
+        _token_coincide_tolerante(_texto_simple(palabra), objetivo)
+        for palabra, objetivo in zip(cola, tokens_chofer)
+    ):
+        return texto
+    resto = " ".join(palabras[: -len(tokens_chofer)]).rstrip(" :;,-")
+    if not (re.search(r"\d", resto) and re.search(r"[A-Za-z]", resto)):
+        return texto
+    return resto
+
+
 def _misma_fila_geometrica(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
     """Centro vertical alineado, tolerancia relativa al alto de texto de
     ambos bloques -- nunca un umbral absoluto. Mismo criterio ya usado

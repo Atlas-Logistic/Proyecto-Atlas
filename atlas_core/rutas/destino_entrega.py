@@ -55,6 +55,7 @@ from atlas_core.geografia.base_local import (
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
+    limpiar_sufijo_chofer_pegado,
     limpiar_sufijo_rut_pegado,
     _extraer_despachar_a_geometrico,
 )
@@ -2593,6 +2594,13 @@ def resolver_entrega_documento(
     # `_despachar_a_lineal_contaminado`, pero aquí la dirección SÍ se
     # leyó completa antes -- ver `limpiar_sufijo_rut_pegado`).
     despachar_a_crudo = limpiar_sufijo_rut_pegado((identificadores.despachar_a or "").strip())
+    # Mismo intercalado, pero con el VALOR de RETIRA (el chofer ya
+    # resuelto) pegado al final -- ver `limpiar_sufijo_chofer_pegado`.
+    # El RUT del chofer puede quedar antes o después de su nombre: se
+    # repite la limpieza de RUT sobre el resultado.
+    despachar_a_crudo = limpiar_sufijo_rut_pegado(
+        limpiar_sufijo_chofer_pegado(despachar_a_crudo, chofer_resuelto)
+    ).strip()
 
     if bloques is not None and (
         not despachar_a_crudo

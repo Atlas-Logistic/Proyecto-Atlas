@@ -60,7 +60,8 @@ from atlas_core.credibilidad_campos import (
     evaluar_credibilidad_entidad_nombre, evaluar_credibilidad_material,
 )
 from atlas_core.extractor import (
-    _es_rut_seguido_de_etiqueta_administrativa, _patente_valida, limpiar_sufijo_rut_pegado,
+    _es_rut_seguido_de_etiqueta_administrativa, _patente_valida, limpiar_sufijo_chofer_pegado,
+    limpiar_sufijo_rut_pegado,
 )
 from atlas_core.incidencias_documentales import (
     TIPO_RUT_DOCUMENTAL_AUSENTE,
@@ -4572,18 +4573,29 @@ def revalidar_destino_rut_pegado_persistido_sin_ocr(
     verificador de RUT válido). Si el destino cambia, NO recalcula
     distancia/tiempo aquí -- eso es responsabilidad de la reconciliación
     de ruta ya existente (`revalidar_ruta_sin_destino_calculado_sin_ocr`),
-    que puede correr después con el texto ya limpio."""
+    que puede correr después con el texto ya limpio.
+
+    Aplica también `limpiar_sufijo_chofer_pegado` con el `chofer` de la
+    MISMA fila (caso real transporte 0000360025: el nombre del chofer
+    impreso bajo RETIRA quedó pegado al final de DESPACHAR A y partió el
+    viaje en dos entregas falsas) -- mismas garantías: nunca relee OCR."""
     ruta = Path(ruta_dataset)
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
-        filas = _leer_filas(ruta)
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"filas_totales": 0, "guias_actualizadas": []}
         actualizadas: list[str] = []
         for fila in filas:
             cambio = False
+            chofer = str(fila.get("chofer", "")).strip()
             for campo in ("despachar_a_crudo", "direccion_entrega"):
                 original = str(fila.get(campo, "")).strip()
                 if not original:
                     continue
-                limpio = limpiar_sufijo_rut_pegado(original).strip()
+                limpio = limpiar_sufijo_rut_pegado(
+                    limpiar_sufijo_chofer_pegado(limpiar_sufijo_rut_pegado(original), chofer)
+                ).strip()
                 if limpio != original:
                     fila[campo] = limpio
                     cambio = True

@@ -46,6 +46,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr,
     revalidar_destino_contra_comuna_documental_sin_ocr,
     revalidar_destino_propio_respaldado_por_b1_sin_ocr,
+    revalidar_destino_rut_pegado_persistido_sin_ocr,
     revalidar_destino_rechazado_por_evidencia_b1_sin_ocr,
     revalidar_destinos_confirmados_sin_coordenadas_sin_ocr,
     revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr,
@@ -359,7 +360,16 @@ from atlas_core.revalidacion_documental import (
 # Una operación ya migrada a 22 nunca reevaluaría estas tres reglas por sí
 # sola -- subir a 23 fuerza el primer barrido sobre operaciones ya
 # migradas; a partir de ahí, idempotente.
-RULESET_VERSION = 24
+#
+# Subida de 24 a 25 -- CONTAMINACIÓN DE DESTINO POR SUFIJO DE CHOFER:
+# `revalidar_destino_rut_pegado_persistido_sin_ocr` se conecta a esta
+# batería (antes sólo corría en `revalidar_y_regenerar_reporte`) y
+# ahora también retira el nombre del chofer (valor de RETIRA) pegado al
+# final de `despachar_a_crudo`/`direccion_entrega` (`atlas_core.
+# extractor.limpiar_sufijo_chofer_pegado`) -- caso real transporte
+# 0000360025, un viaje partido en dos entregas falsas. Subir a 25 fuerza
+# el primer barrido sobre operaciones ya migradas; idempotente.
+RULESET_VERSION = 25
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(hours=24)
@@ -1310,6 +1320,17 @@ def reconciliar_estado_derivado(
         # Desktop. Corren siempre que se entra a este bloque (migración,
         # reintento de ruta vencido, o simplemente el dataset avanzó por
         # cualquier decisión humana) -- nunca sólo una vez por versión.
+        #
+        # Limpieza de sufijo contaminante (RUT / nombre del chofer pegado
+        # al final de DESPACHAR A -- casos reales 464511 y transporte
+        # 0000360025): existía sólo en `revalidar_y_regenerar_reporte`; se
+        # conecta aquí igual que material/geo/fecha, y ANTES de la
+        # reconciliación de motivo/destino (mismo orden que allá) para que
+        # ésta y la derivación de entregas trabajen sobre el texto limpio.
+        limpieza_sufijo_destino = (
+            _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
+            else revalidar_destino_rut_pegado_persistido_sin_ocr(ruta_dataset=dataset)
+        )
         limpieza = (
             _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
             else revalidar_motivo_destino_ya_confirmado_sin_ocr(
@@ -1831,6 +1852,7 @@ def reconciliar_estado_derivado(
         "reporte_vigente": str(reporte),
         "guias_actualizadas": sorted(
             set(limpieza["guias_actualizadas"])
+            | set(limpieza_sufijo_destino["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])
             | set(limpieza_origen["guias_actualizadas"])
             | set(limpieza_origen_gps_candidato_unico["guias_actualizadas"])
