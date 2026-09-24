@@ -2,6 +2,11 @@
 
 El Motor conserva la copia local con `RepositorioEnviosMobile.recibir()` y
 sólo entonces confirma Cloud. Un lease vencido deja el envío reintentable.
+
+Mobile 24/7 -- con `procesar=True`, tras el PULL procesa (OCR/B1/reporte)
+todo envío local todavía `RECIBIDO` con el MISMO punto de entrada que el
+flujo LAN (`procesar_y_revalidar_envio_mobile`), bajo el mismo lock por
+envío: idempotente aunque el PC se apague a mitad o corran dos PCs.
 """
 from __future__ import annotations
 
@@ -10,9 +15,13 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
-from atlas_core.mobile import MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile
+from atlas_core.mobile import (
+    MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_y_revalidar_envio_mobile,
+)
+from atlas_core.almacenamiento_portable import SesionOcupadaError
 
 
 class ErrorSincronizacionCloudMobile(RuntimeError):
@@ -60,7 +69,8 @@ def _descargar(url: str, *, esperado_bytes: int, timeout: float) -> bytes:
 
 def sincronizar_envios_cloud(
     *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
-    timeout: float = 30.0,
+    timeout: float = 30.0, procesar: bool = False, dataset: Path | None = None,
+    carpeta_catalogos: str | Path | None = None,
 ) -> dict[str, Any]:
     """Ejecuta listado, lease, descarga, verificación, persistencia y confirmación.
 
@@ -103,4 +113,30 @@ def sincronizar_envios_cloud(
             resumen["confirmados"].append(envio_id)
         except (ErrorSincronizacionCloudMobile, ErrorEnvioMobile, KeyError, TypeError, ValueError) as error:
             resumen["fallidos"][envio_id] = str(error)
+    if procesar:
+        resumen.update(procesar_envios_recibidos(repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos))
     return resumen
+
+
+def procesar_envios_recibidos(
+    repositorio: RepositorioEnviosMobile, *, dataset: Path | None, carpeta_catalogos: str | Path | None,
+) -> dict[str, Any]:
+    """Misma pasada que el cliente LAN (`mobile_sync_cliente`): todo envío
+    local en RECIBIDO -- de esta corrida o de una anterior interrumpida --
+    pasa por `procesar_y_revalidar_envio_mobile`. Un envío ya procesado no
+    está en RECIBIDO y nunca se reprocesa; uno tomado por otro consumidor
+    (lock `mobile_<id>`) se omite en esta pasada. Un fallo aislado nunca
+    corta el resto (la recepción ya quedó a salvo)."""
+    resultado: dict[str, Any] = {"procesados": [], "omitidos_por_bloqueo": [], "errores_procesamiento": {}}
+    for registro in repositorio.historial():
+        if registro.get("estado") != "RECIBIDO":
+            continue
+        envio_id = str(registro.get("envio_id", ""))
+        try:
+            procesar_y_revalidar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+            resultado["procesados"].append(envio_id)
+        except SesionOcupadaError:
+            resultado["omitidos_por_bloqueo"].append(envio_id)
+        except Exception as error:  # nunca corta el resto del procesamiento
+            resultado["errores_procesamiento"][envio_id] = f"{type(error).__name__}: {error}"
+    return resultado
