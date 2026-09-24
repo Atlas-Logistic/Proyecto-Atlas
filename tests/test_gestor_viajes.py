@@ -507,6 +507,10 @@ def test_conflictos_multiples_se_declaran_juntos_sin_perder_evidencia():
         # generan conflicto por sí solos -- diversidad legítima.
         MotivoRevision.CONFLICTO_CLIENTE,
         MotivoRevision.CONFLICTO_OBRA_DESTINO,
+        # Bloque O3 -- ningún documento de este escenario trae peso_kg
+        # implausible (no es lo que este test ejercita); independiente de
+        # los conflictos de identidad/horas que sí se declaran aquí.
+        MotivoRevision.PESO_TOTAL_VIAJE_IMPLAUSIBLE,
     }
     assert len(viaje.a_dict()["evidencias_documentos"]) == 2
 
@@ -1202,3 +1206,258 @@ def test_resolver_patente_no_afecta_otros_campos_de_consolidacion_t7():
     assert viaje.choferes == ["JOSÉ PÉREZ"]
     assert viaje.obras_destino == ["OBRA ÁGUILA"]
     assert viaje.materiales == ["BARRAS"]
+
+
+# ============================================================
+# Bloque VIAJE MULTIENTREGA V1.1 -- caso real 0000359510 (SALOMÓN
+# PIZARRO, guías 474285/474286/474287, destino "SANTA ISABEL 585
+# SANTIAGO LAMPA"): las 3 guías calcularon ruta EXITOSAMENTE
+# (RUTA_CALCULADA), pero un typo de OCR en 474285 ("SANTA ISADEL")
+# produjo una geocodificación independiente y numéricamente distinta a
+# la de 474286/474287 -- antes de este bloque, ni `_bloque_routing_
+# consolidado` ni `_campo_ruta_consolidado` sabían resolver "todos
+# tuvieron éxito, pero no coinciden", y el viaje mostraba ruta/destino
+# vacíos pese a que 2 de 3 documentos SÍ comparten exactamente el mismo
+# resultado real.
+# ============================================================
+
+
+def _filas_0000359510():
+    return [
+        _fila_con_destino(
+            archivo="474285.jpg", numero_guia="474285", numero_transporte="0000359510",
+            despachar_a_crudo="SANTA ISADEL 585 SANTIAGO LAMPA",
+            direccion_entrega="SANTA ISADEL 585 SANTIAGO LAMPA", localidad_entrega="Lampa", region_entrega="Metropolitana",
+            estado_entrega="RESUELTO",
+            distancia_km="6.6102", duracion_min="11.05", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="474286.jpg", numero_guia="474286", numero_transporte="0000359510",
+            despachar_a_crudo="SANTA ISABEL 585 SANTIAGO LAMPA",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA", localidad_entrega="Lampa", region_entrega="Metropolitana",
+            estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="474287.jpg", numero_guia="474287", numero_transporte="0000359510",
+            despachar_a_crudo="SANTA ISABEL 585 SANTIAGO LAMPA",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA", localidad_entrega="Lampa", region_entrega="Metropolitana",
+            estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+    ]
+
+
+def test_ruta_de_la_mayoria_se_reutiliza_a_nivel_de_viaje_pese_a_typo_ocr_en_un_documento():
+    """Caso real 0000359510: 2 de 3 documentos comparten exactamente la
+    misma ruta calculada; el tercero difiere sólo por un typo de OCR en
+    su propia dirección. El VIAJE debe mostrar la ruta compartida por la
+    mayoría estricta -- nunca vacía, nunca promediada."""
+    viajes, _ = agrupar_viajes(_filas_0000359510())
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
+    assert viaje["motivo_ruta"] == ""
+    assert viaje["distancia_km"] == "6.5048"
+    assert viaje["duracion_min"] == "10.846666666666666"
+    assert viaje["proveedor_ruta"] == "openrouteservice"
+
+
+def test_direccion_entrega_de_la_mayoria_se_presenta_pese_a_typo_ocr():
+    """El mismo caso real: `direccion_entrega` consolidada del viaje debe
+    ser la de la mayoría ("SANTA ISABEL...") -- nunca la del documento
+    minoritario con el typo, ni una mezcla de ambas."""
+    viajes, _ = agrupar_viajes(_filas_0000359510())
+    viaje = viajes[0].a_dict()
+
+    assert viaje["direccion_entrega"] == "SANTA ISABEL 585 SANTIAGO LAMPA"
+    assert viaje["localidad_entrega"] == "Lampa"
+    assert viaje["region_entrega"] == "Metropolitana"
+    assert viaje["estado_entrega"] == "RESUELTO"
+
+
+def test_ruta_a_nivel_de_viaje_se_abstiene_ante_empate_estricto_nunca_promedia():
+    """Ante un empate real (1 vs 1), el viaje debe abstenerse exactamente
+    igual que antes de este bloque -- la mayoría estricta nunca se
+    relaja a "más votada de cualquier forma"."""
+    filas = [
+        _fila_con_destino(
+            archivo="a.jpg", numero_guia="474285", numero_transporte="0000359999",
+            direccion_entrega="SANTA ISADEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Lampa", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.6102", duracion_min="11.05", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="b.jpg", numero_guia="474286", numero_transporte="0000359999",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Lampa", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == ""
+    assert viaje["distancia_km"] == ""
+    assert viaje["duracion_min"] == ""
+    assert viaje["proveedor_ruta"] == ""
+    assert viaje["direccion_entrega"] == ""
+    assert viaje["localidad_entrega"] == ""
+
+
+def test_ruta_de_la_mayoria_no_aplica_a_nivel_de_viaje_si_algun_documento_fallo():
+    """La reutilización por mayoría sólo aplica cuando TODOS los
+    documentos informados tuvieron éxito (RUTA_CALCULADA) -- si alguno
+    falló explícitamente, sigue vigente la regla previa: se conserva el
+    único fallo coherente, nunca se "vota" con un éxito."""
+    filas = [
+        _fila_con_destino(
+            archivo="a.jpg", numero_guia="474285", numero_transporte="0000359998",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Lampa", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="b.jpg", numero_guia="474286", numero_transporte="0000359998",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Lampa", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="c.jpg", numero_guia="474287", numero_transporte="0000359998",
+            estado_ruta="REQUIERE_REVISION", motivo_ruta="GEOCODIFICACION_DIRECCION_NO_ENCONTRADA",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == "REQUIERE_REVISION"
+    assert viaje["motivo_ruta"] == "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA"
+    assert viaje["distancia_km"] == ""
+    assert viaje["direccion_entrega"] == ""
+
+
+def test_mayoria_de_direccion_entrega_no_se_extiende_a_localidad_region_estado():
+    """La excepción de mayoría está acotada explícitamente a
+    `direccion_entrega` en `_campo_ruta_consolidado`. Si `localidad_
+    entrega` difiere entre documentos (incluso 2 contra 1), ese campo
+    debe seguir exigiendo unanimidad estricta -- nunca "votarse" como el
+    texto de la dirección, porque describe si CADA documento quedó
+    resuelto, no un typo de OCR."""
+    filas = [
+        _fila_con_destino(
+            archivo="a.jpg", numero_guia="474285", numero_transporte="0000359997",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Lampa", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="b.jpg", numero_guia="474286", numero_transporte="0000359997",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Lampa", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+        _fila_con_destino(
+            archivo="c.jpg", numero_guia="474287", numero_transporte="0000359997",
+            direccion_entrega="SANTA ISABEL 585 SANTIAGO LAMPA",
+            localidad_entrega="Quilicura", region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.846666666666666", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        ),
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    # La ruta sí consolida (las 3 firmas de routing son idénticas --
+    # `distancia_km`/`duracion_min`/`proveedor_ruta`/`estado_ruta` no
+    # incluyen `localidad_entrega`), pero `localidad_entrega` no
+    # unánime debe quedar vacía en vez de "votarse" 2 contra 1.
+    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
+    assert viaje["direccion_entrega"] == "SANTA ISABEL 585 SANTIAGO LAMPA"
+    assert viaje["localidad_entrega"] == ""
+
+
+def test_documentos_individuales_conservan_su_propio_typo_ocr_tras_consolidar_por_mayoria():
+    """La consolidación del VIAJE por mayoría nunca reescribe los datos
+    POR DOCUMENTO: 474285 conserva su propia dirección con el typo de
+    OCR y su propia ruta calculada (distinta), aunque el viaje presente
+    la de la mayoría."""
+    viajes, _ = agrupar_viajes(_filas_0000359510())
+    documentos = {d.numero_guia: d for d in viajes[0].documentos}
+
+    doc_474285 = documentos["474285"]
+    assert doc_474285.direccion_entrega == "SANTA ISADEL 585 SANTIAGO LAMPA"
+    assert doc_474285.distancia_km == "6.6102"
+    assert doc_474285.estado_ruta == "RUTA_CALCULADA"
+
+    doc_474286 = documentos["474286"]
+    assert doc_474286.direccion_entrega == "SANTA ISABEL 585 SANTIAGO LAMPA"
+    assert doc_474286.distancia_km == "6.5048"
+
+
+# ============================================================
+# P0 D2 -- INVARIANTE: un candidato de destino rechazado, de baja
+# confianza o contradictorio nunca puede reaparecer como destino
+# operacional del VIAJE por mayoría entre documentos.
+# ============================================================
+
+
+def test_direccion_entrega_del_viaje_nunca_es_un_valor_contaminado_aunque_gane_por_mayoria():
+    # Los 3 documentos comparten exactamente el mismo bloque de ruta (la
+    # firma que usa `_bloque_routing_consolidado` no incluye
+    # `direccion_entrega`), así que el viaje consolida a RUTA_CALCULADA
+    # sin importar el texto de la dirección. 2 de los 3 traen un
+    # `direccion_entrega` contaminado por una etiqueta de otra sección
+    # ("PATENTE BDFG50" -- INVÁLIDO según `credibilidad_campos.
+    # evaluar_credibilidad_direccion`); el tercero trae la dirección real.
+    # Antes del fix, la mayoría (2 contra 1) imponía el valor contaminado
+    # como `direccion_entrega` del viaje.
+    filas = [
+        _fila_con_destino(
+            archivo=f"{n}.jpg", numero_guia=n, numero_transporte="0000359996",
+            direccion_entrega=direccion, localidad_entrega="Quilicura",
+            region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.85", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        )
+        for n, direccion in (
+            ("1", "PATENTE BDFG50"),
+            ("2", "PATENTE BDFG50"),
+            ("3", "SAN LUIS 1201 QUILICURA"),
+        )
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
+    assert viaje["direccion_entrega"] == "SAN LUIS 1201 QUILICURA"
+
+
+def test_direccion_entrega_del_viaje_sin_ningun_valor_confiable_queda_vacia():
+    # Si TODOS los `direccion_entrega` informados son dudosos/inválidos,
+    # nunca se elige el "menos malo" por mayoría -- el campo queda vacío,
+    # igual que ante cualquier otro conflicto real sin resolver.
+    filas = [
+        _fila_con_destino(
+            archivo=f"{n}.jpg", numero_guia=n, numero_transporte="0000359995",
+            direccion_entrega="PATENTE BDFG50", localidad_entrega="Quilicura",
+            region_entrega="Metropolitana", estado_entrega="RESUELTO",
+            distancia_km="6.5048", duracion_min="10.85", proveedor_ruta="openrouteservice",
+            estado_ruta="RUTA_CALCULADA", motivo_ruta="",
+        )
+        for n in ("1", "2")
+    ]
+    viajes, _ = agrupar_viajes(filas)
+    viaje = viajes[0].a_dict()
+
+    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
+    assert viaje["direccion_entrega"] == ""

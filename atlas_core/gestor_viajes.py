@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -21,6 +22,7 @@ from atlas_core.credibilidad_campos import (
     evaluar_credibilidad_direccion,
     evaluar_credibilidad_entidad_nombre,
     evaluar_credibilidad_material,
+    evaluar_credibilidad_peso_total_viaje,
     valor_publicable,
 )
 
@@ -244,6 +246,21 @@ class MotivoRevision(str, Enum):
     # se elige una arbitrariamente.
     CONFLICTO_HORA_ENTRADA = "CONFLICTO_HORA_ENTRADA"
     CONFLICTO_HORA_SALIDA = "CONFLICTO_HORA_SALIDA"
+    # Bloque O3 -- defensa de plausibilidad del PESO TOTAL DEL VIAJE
+    # (`peso_total_viaje_kg`, suma de todos los documentos), distinta de
+    # `PESO_OPERACIONALMENTE_ATIPICO` (por documento, informativa, rango
+    # 150-45.000 kg). Un camión real (tracto+rampla) no debería terminar
+    # cargado con 45-48 toneladas de carga -- rango operacional máximo
+    # aproximado confirmado por Javier: 27-30 t. Nunca corrige el peso
+    # automáticamente (ver `credibilidad_campos.evaluar_credibilidad_
+    # peso_total_viaje`): sólo señala para revisión humana cuando la suma
+    # sigue siendo implausible después de que `extractor._reexaminar_
+    # peso_por_baja_confianza` ya tuvo su oportunidad de resolverla con
+    # evidencia geométrica (Bloque O2). SÍ bloquea (fuerza
+    # REQUIERE_REVISION) -- a diferencia del motivo por documento, aquí la
+    # contradicción persiste sin explicación, exactamente el caso en que
+    # Atlas debe abstenerse de publicar el viaje como confirmado.
+    PESO_TOTAL_VIAJE_IMPLAUSIBLE = "PESO_TOTAL_VIAJE_IMPLAUSIBLE"
 
 
 @dataclass(frozen=True)
@@ -298,6 +315,10 @@ class DocumentoViaje:
     latitud_estadia_gps: str
     longitud_estadia_gps: str
     duracion_estadia_gps_min: str
+    # Bloque P0 CASO B ("ingresadas hoy"): timestamp real de ingesta a
+    # Atlas (UTC ISO-8601), tal cual lo escribió `procesar_archivo` --
+    # nunca `fecha` (documental).
+    fecha_ingesta_utc: str
     evidencia: dict[str, str]
 
 
@@ -499,6 +520,18 @@ class Viaje:
         return str(sum(pesos))
 
     @property
+    def fecha_ingesta(self) -> str:
+        """Bloque P0 CASO B ("ingresadas hoy") -- la MÁS TEMPRANA
+        `fecha_ingesta_utc` entre los documentos del viaje (cuándo Atlas
+        vio por primera vez alguna parte de este viaje). A diferencia de
+        `peso_total_viaje_kg`, un documento sin este dato (viaje
+        histórico, de antes de este bloque) nunca invalida el resto --
+        simplemente no participa; si NINGÚN documento lo trae, queda
+        vacío (nunca se falsifica con `fecha`, el campo documental)."""
+        valores = sorted(d.fecha_ingesta_utc for d in self.documentos if d.fecha_ingesta_utc.strip())
+        return valores[0] if valores else ""
+
+    @property
     def hora_entrada_aza(self) -> str:
         """Consolidada solo si todas las horas de entrada válidas
         presentes coinciden (documentos sin dato no impiden consolidar) —
@@ -537,7 +570,44 @@ class Viaje:
         por documento, no por viaje) solo se consolida al nivel de viaje si
         todos los documentos que lo informan coinciden. Documentos sin dato
         no impiden consolidar; ante conflicto real, nunca se elige uno
-        arbitrariamente -- se deja vacío."""
+        arbitrariamente -- se deja vacío.
+
+        Bloque VIAJE MULTIENTREGA V1.1 -- excepción acotada SÓLO a
+        `direccion_entrega` (caso real 0000359510): un typo de OCR en un
+        documento ("SANTA ISADEL" vs "SANTA ISABEL" en sus hermanos) hace
+        que la unanimidad exigida arriba nunca se cumpla, aunque sea
+        evidente cuál dirección es la real. Con MAYORÍA ESTRICTA (más
+        documentos comparten un mismo valor exacto que cualquier otro), se
+        presenta ese valor -- nunca uno inventado ni promediado. Nunca se
+        aplica a `localidad_entrega`/`region_entrega`/`estado_entrega`:
+        esos reflejan si CADA documento quedó resuelto, no texto OCR de una
+        dirección, y una mayoría ahí podría esconder un documento
+        genuinamente sin resolver.
+
+        P0 D2 -- INVARIANTE: un candidato de destino rechazado, de baja
+        confianza o contradictorio nunca puede reaparecer como destino
+        operacional por mayoría entre documentos. Se vota únicamente entre
+        los valores CONFIABLES (mismo criterio ya usado por `despachar_a`
+        más abajo) -- un `direccion_entrega` DUDOSO/INVÁLIDO (fragmento
+        truncado o contaminado por otra sección, ver `credibilidad_
+        campos.evaluar_credibilidad_direccion`) nunca entra a la cuenta,
+        gane o no la mayoría de votos crudos."""
+        if campo == "direccion_entrega":
+            valores_presentes = [
+                str(getattr(d, campo) or "").strip() for d in self.documentos
+                if _valor_presente(getattr(d, campo, ""))
+            ]
+            valores_confiables = [
+                v for v in valores_presentes
+                if evaluar_credibilidad_direccion(v).nivel == NivelCredibilidad.CONFIABLE
+            ]
+            if not valores_confiables:
+                return ""
+            conteo = Counter(_clave_normalizada(v) for v in valores_confiables)
+            clave_mayoritaria, votos = conteo.most_common(1)[0]
+            if votos > len(valores_confiables) - votos:
+                return next(v for v in valores_confiables if _clave_normalizada(v) == clave_mayoritaria)
+            return ""
         valores = _valores_unicos(getattr(d, campo) for d in self.documentos)
         return valores[0] if len(valores) == 1 else ""
 
@@ -611,6 +681,22 @@ class Viaje:
                 "estado_ruta": estado,
                 "motivo_ruta": motivo,
             }
+        # Bloque VIAJE MULTIENTREGA V1.1 -- mismo criterio que
+        # `entregas._routing_consolidado` (nunca una regla paralela
+        # distinta, ver docstring de esa función para el caso real que lo
+        # motivó, transporte 0000359510): varios documentos calcularon
+        # EXITOSAMENTE una ruta pero con resultados numéricos distintos,
+        # típicamente porque un typo de OCR en la dirección de uno de
+        # ellos generó una geocodificación independiente y ligeramente
+        # distinta del MISMO destino real. Nunca se promedia/inventa un
+        # punto intermedio: si una ruta YA calculada es compartida por la
+        # MAYORÍA ESTRICTA de los documentos exitosos, se reutiliza esa.
+        # Ante empate real, Atlas se abstiene igual que siempre.
+        if not fallos:
+            conteo = Counter(tuple(bloque[campo] for campo in campos) for bloque in informados)
+            firma_mayoritaria, votos = conteo.most_common(1)[0]
+            if votos > len(informados) - votos:
+                return dict(zip(campos, firma_mayoritaria))
         return {campo: "" for campo in campos}
 
     @property
@@ -853,6 +939,7 @@ class Viaje:
             "documentos_operacionales": self.documentos_operacionales,
             "entregas": self.entregas,
             "fecha_creacion": self.fecha_creacion,
+            "fecha_ingesta": self.fecha_ingesta,
         }
 
 
@@ -947,6 +1034,7 @@ def _documento_desde_fila(
         latitud_estadia_gps=str(fila.get("latitud_estadia_gps", "")).strip(),
         longitud_estadia_gps=str(fila.get("longitud_estadia_gps", "")).strip(),
         duracion_estadia_gps_min=str(fila.get("duracion_estadia_gps_min", "")).strip(),
+        fecha_ingesta_utc=str(fila.get("fecha_ingesta_utc", "")).strip(),
         evidencia=evidencia,
     )
 
@@ -1068,6 +1156,17 @@ def agrupar_viajes(
             for original, normalizada in zip(fechas_originales, fechas_desktop)
         ):
             motivos.append(MotivoRevision.FECHA_NO_COMPATIBLE_DESKTOP)
+        # Bloque O3 -- peso total del viaje físicamente implausible (>30t,
+        # ver `credibilidad_campos.evaluar_credibilidad_peso_total_viaje`).
+        # Mismo criterio que `Viaje.peso_total_viaje_kg`: sólo se evalúa
+        # cuando TODOS los documentos tienen un peso numérico válido -- una
+        # suma parcial (algún documento sin peso) nunca es evidencia de
+        # nada. Nunca corrige el peso, sólo señala para revisión humana.
+        pesos_documentos = [_peso_kg_numerico(d.peso_kg) for d in documentos]
+        if pesos_documentos and all(peso is not None for peso in pesos_documentos):
+            peso_total_viaje = str(sum(pesos_documentos))
+            if evaluar_credibilidad_peso_total_viaje(peso_total_viaje).nivel != NivelCredibilidad.CONFIABLE:
+                motivos.append(MotivoRevision.PESO_TOTAL_VIAJE_IMPLAUSIBLE)
         # Un documento marcado REVISAR por el pipeline (campos ausentes,
         # recuperación geométrica, chofer no homologado, etc.) nunca puede
         # quedar CONFIRMADO en silencio a nivel de viaje, tenga o no

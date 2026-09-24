@@ -28,12 +28,16 @@ determinista: N puede ser 1, 2, 5 o cualquier cantidad.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING, Sequence
 
 from atlas_core.credibilidad_campos import (
+    NivelCredibilidad,
+    evaluar_credibilidad_direccion,
     evaluar_credibilidad_entidad_nombre,
     valor_publicable,
 )
+from atlas_core.catalogo_destinos import _limite_tolerancia_ocr_direccion
 
 if TYPE_CHECKING:  # pragma: no cover - sólo para anotaciones
     from atlas_core.gestor_viajes import DocumentoViaje
@@ -113,16 +117,53 @@ def _niveles_destino(documento: "DocumentoViaje") -> list[tuple[str, str]]:
     return niveles
 
 
+# Bloque VIAJE MULTIENTREGA V1.1 -- caso real 0000359510 (chofer SALOMÓN
+# PIZARRO, guías 474285/474286/474287): las tres imprimen el mismo destino
+# operacional ("SANTA ISABEL 585 SANTIAGO LAMPA"), pero el OCR de 474285
+# leyó "SANTA ISADEL..." (B/D confundidas, visualmente parecidas). Antes
+# de este bloque, la comparación de nivel "direccion_entrega"/"despachar_a"
+# exigía igualdad EXACTA tras `_clave()` (sólo case/espacios/acentos) --
+# ese único carácter bastaba para que Atlas tratara dos documentos del
+# MISMO destino como si fueran destinos distintos y dividiera el viaje en
+# entregas que no corresponden (DIRECTO -> REPARTO falso).
+#
+# Reutiliza EXACTAMENTE la misma tolerancia ya usada y aprobada para
+# reconocer un destino ya confirmado pese a un typo de OCR
+# (`catalogo_destinos.direccion_confirmada_coincide`): sólo sustitución de
+# caracteres en la MISMA posición/longitud (nunca inserción ni
+# eliminación), escalada por longitud (1 cada ~25 caracteres, tope 2).
+# Aplicada aquí de forma SIMÉTRICA entre dos documentos hermanos del mismo
+# viaje (en vez de "documento nuevo" contra "calle ya confirmada" del
+# catálogo) -- mismo criterio, nunca fuzzy matching abierto: con longitudes
+# distintas no hay tolerancia (podría ser una calle realmente distinta,
+# más corta o más larga -- no un typo de un solo carácter), y el código
+# territorial opaco (nivel "territorial") nunca lleva tolerancia, porque
+# no es texto OCR de una dirección sino un identificador exacto.
+def _claves_equivalentes_por_tolerancia_ocr(clave_a: str, clave_b: str) -> bool:
+    if clave_a == clave_b:
+        return True
+    if len(clave_a) != len(clave_b):
+        return False
+    limite = _limite_tolerancia_ocr_direccion(len(clave_a))
+    if limite <= 0:
+        return False
+    distancia = sum(1 for x, y in zip(clave_a, clave_b) if x != y)
+    return distancia <= limite
+
+
 def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     """True sólo si ambos documentos comparten al menos un nivel de señal
-    de destino poblado y coinciden en el más fuerte de esos niveles
-    compartidos. Sin ningún nivel compartido -> NO compatible (nunca se
-    agrupa "por descarte")."""
+    de destino poblado y coinciden (con tolerancia a un typo de OCR de un
+    solo carácter, sólo para direccion_entrega/despachar_a -- ver bloque
+    arriba) en el más fuerte de esos niveles compartidos. Sin ningún nivel
+    compartido -> NO compatible (nunca se agrupa "por descarte")."""
     niveles_a = dict(_niveles_destino(a))
     niveles_b = dict(_niveles_destino(b))
     for nombre in ("territorial", "direccion_entrega", "despachar_a"):
         if nombre in niveles_a and nombre in niveles_b:
-            return niveles_a[nombre] == niveles_b[nombre]
+            if nombre == "territorial":
+                return niveles_a[nombre] == niveles_b[nombre]
+            return _claves_equivalentes_por_tolerancia_ocr(niveles_a[nombre], niveles_b[nombre])
     return False
 
 
@@ -192,7 +233,71 @@ def _routing_consolidado(documentos) -> dict[str, str]:
             "distancia_km": "", "duracion_min": "", "proveedor_ruta": "",
             "estado_ruta": estado, "motivo_ruta": motivo,
         }
+    # Bloque VIAJE MULTIENTREGA V1.1 -- caso real 0000359510: varios
+    # documentos calcularon EXITOSAMENTE una ruta (todos RUTA_CALCULADA),
+    # pero con resultados numéricos distintos -- porque se calcularon
+    # ANTES de reconocerse como la misma entrega (un typo de OCR en la
+    # dirección de uno de ellos -- ya tolerado en la identidad de la
+    # entrega, ver `_claves_equivalentes_por_tolerancia_ocr` -- generó una
+    # geocodificación independiente y ligeramente distinta del MISMO
+    # destino real). Nunca se promedia ni se inventa un punto intermedio
+    # (NO centroide, NUNCA): si una ruta YA calculada es compartida por la
+    # MAYORÍA ESTRICTA de los documentos exitosos de la entrega, se
+    # reutiliza esa -- es la que más evidencia independiente ya confirma,
+    # nunca una ruta nueva. Ante empate real (ninguna mayoría estricta),
+    # Atlas se abstiene igual que siempre: ambigüedad geográfica genuina,
+    # nunca se adivina cuál de las rutas ya calculadas es la correcta.
+    if not fallos:
+        conteo = Counter(tuple(b[campo] for campo in campos) for b in informados)
+        firma_mayoritaria, votos = conteo.most_common(1)[0]
+        otros_votos = len(informados) - votos
+        if votos > otros_votos:
+            return dict(zip(campos, firma_mayoritaria))
     return {campo: "" for campo in campos}
+
+
+# Bloque VIAJE MULTIENTREGA V1.1 -- caso real 0000359510: `_primer_presente`
+# toma literalmente el primer documento de la entrega en el orden en que
+# llegó -- que resultó ser justo el que trae el typo de OCR ("SANTA
+# ISADEL..."), mostrando como destino operacional de la PARADA un valor
+# minoritario mientras el resto de la consolidación (ruta/`direccion_
+# entrega` a nivel de viaje, ver `_routing_consolidado` arriba y
+# `Viaje._campo_ruta_consolidado`) ya presenta la dirección real compartida
+# por la mayoría. Mismo criterio en los tres lugares, nunca una regla
+# paralela distinta: con MAYORÍA ESTRICTA se presenta ese valor exacto
+# (nunca uno inventado ni promediado); sin mayoría estricta (empate o un
+# único documento), se conserva el comportamiento previo -- el primer valor
+# presente -- para no dejar de mostrar un destino que sí existe.
+#
+# P0 D2 -- INVARIANTE: un candidato de destino rechazado, de baja
+# confianza o contradictorio nunca puede reaparecer como destino
+# operacional por consolidación/mayoría entre documentos. La versión
+# original de este bloque votaba sobre el texto crudo de TODOS los
+# `direccion_entrega` presentes sin filtrar por credibilidad -- dos
+# documentos agrupados en la misma entrega por evidencia territorial
+# fuerte (código opaco, `_destino_compatible`) pueden traer un
+# `direccion_entrega` DUDOSO/INVÁLIDO (fragmento truncado o contaminado
+# por otra sección, ver `credibilidad_campos.evaluar_credibilidad_
+# direccion`) que nunca debería ganar sólo por aparecer más veces. Se
+# vota únicamente entre los valores CONFIABLES (mismo criterio ya usado
+# por `Viaje.despachar_a`); un valor rechazado/dudoso jamás entra a la
+# cuenta, gane o no la mayoría.
+def _destino_operacional_consolidado(documentos) -> str:
+    valores_presentes = [
+        str(v).strip() for v in (getattr(d, "direccion_entrega", "") for d in documentos)
+        if _presente(v)
+    ]
+    valores_confiables = [
+        v for v in valores_presentes
+        if evaluar_credibilidad_direccion(v).nivel == NivelCredibilidad.CONFIABLE
+    ]
+    if valores_confiables:
+        conteo = Counter(_clave(v) for v in valores_confiables)
+        clave_mayoritaria, votos = conteo.most_common(1)[0]
+        if votos > len(valores_confiables) - votos:
+            return next(v for v in valores_confiables if _clave(v) == clave_mayoritaria)
+        return valores_confiables[0]
+    return _primer_presente([getattr(d, "despachar_a_crudo", "") for d in documentos])
 
 
 def _entrega_a_dict(documentos) -> dict[str, object]:
@@ -203,10 +308,7 @@ def _entrega_a_dict(documentos) -> dict[str, object]:
         ),
         "clientes": _lista_publicable(documentos, "cliente"),
         "obras_destino": _lista_publicable(documentos, "obra_destino"),
-        "destino_operacional": _primer_presente(
-            [getattr(d, "direccion_entrega", "") for d in documentos]
-        )
-        or _primer_presente([getattr(d, "despachar_a_crudo", "") for d in documentos]),
+        "destino_operacional": _destino_operacional_consolidado(documentos),
         "localidad_entrega": _consolidar_unico(
             [getattr(d, "localidad_entrega", "") for d in documentos]
         ),

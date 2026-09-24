@@ -161,6 +161,200 @@ def test_destinos_distintos_no_se_fusionan_ni_con_mismo_cliente_y_transporte():
     assert len(entregas) == 2
 
 
+# ---------------------------------------------------------------------------
+# 6b. Bloque VIAJE MULTIENTREGA V1.1 -- un typo de OCR de un solo carácter
+# en la dirección no debe dividir una entrega real (caso real 0000359510)
+# ---------------------------------------------------------------------------
+def test_typo_ocr_de_un_caracter_en_direccion_no_divide_la_entrega():
+    # Caso real 0000359510 (chofer SALOMÓN PIZARRO): 474285 imprime "SANTA
+    # ISADEL 585 SANTIAGO LAMPA" (OCR confundió B/D, visualmente
+    # parecidas); 474286 y 474287 imprimen correctamente "SANTA ISABEL 585
+    # SANTIAGO LAMPA". Las tres son el mismo destino operacional -- antes
+    # de este bloque, ese único carácter dividía el viaje en 2 entregas
+    # (DIRECTO real presentado como REPARTO falso).
+    _, entregas = _entregas_de([
+        _parada("474285", "SANTA ISADEL 585 SANTIAGO LAMPA", "Lampa"),
+        _parada("474286", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa"),
+        _parada("474287", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa"),
+    ])
+    assert len(entregas) == 1
+    assert entregas[0]["numeros_guia"] == ["474285", "474286", "474287"]
+
+
+def test_dos_typos_ocr_en_direccion_larga_siguen_tolerados():
+    # Misma tolerancia ya usada y aprobada para reutilizar un destino
+    # confirmado (`catalogo_destinos._limite_tolerancia_ocr_direccion`):
+    # direcciones de más de 25 caracteres toleran hasta 2 sustituciones.
+    _, entregas = _entregas_de([
+        _parada("1", "AVENIDA LAS INDUSTRIAS 4850", "Renca"),
+        _parada("2", "AVENIDA LAS IN0USTRIA5 4850", "Renca"),
+    ])
+    assert len(entregas) == 1
+
+
+def test_direcciones_con_mas_diferencias_que_un_typo_no_se_fusionan():
+    # Salvaguarda del bloque anterior: no se convierte en fuzzy matching
+    # abierto -- una dirección genuinamente distinta (o con más de 1-2
+    # caracteres distintos) sigue separando la entrega.
+    _, entregas = _entregas_de([
+        _parada("1", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa"),
+        _parada("2", "SANTA MONICA 585 SANTIAGO LAMPA", "Lampa"),
+    ])
+    assert len(entregas) == 2
+
+
+def test_direcciones_de_distinta_longitud_no_reciben_tolerancia():
+    # Longitudes distintas podrían ser una calle real más corta/larga, no
+    # un typo de un solo carácter en la misma posición -- sin tolerancia.
+    _, entregas = _entregas_de([
+        _parada("1", "SANTA ISABEL 585", "Lampa"),
+        _parada("2", "SANTA ISABEL 5850", "Lampa"),
+    ])
+    assert len(entregas) == 2
+
+
+# ---------------------------------------------------------------------------
+# 6c. Bloque VIAJE MULTIENTREGA V1.1 -- ruta consolidada de una entrega
+# fusionada por tolerancia OCR: varios documentos calcularon RUTA EXITOSA
+# antes de reconocerse como la misma entrega, con resultados numéricos
+# distintos -- reutilizar la ruta de la mayoría (nunca promediar/inventar)
+# ---------------------------------------------------------------------------
+def _parada_con_ruta(numero_guia, direccion, localidad, **cambios_ruta):
+    """Como `_parada`, pero permite sobreescribir cualquier campo de ruta
+    (incluidos los que `_parada` ya fija por defecto) sin chocar por
+    keyword duplicado."""
+    fila = _parada(numero_guia, direccion, localidad)
+    fila.update(cambios_ruta)
+    return fila
+
+
+def test_ruta_de_la_mayoria_se_reutiliza_cuando_hay_typo_ocr_en_un_documento():
+    # Caso real 0000359510: 474285 calculó ruta a "SANTA ISADEL" (typo),
+    # 474286/474287 calcularon la MISMA ruta real a "SANTA ISABEL". Los
+    # tres ya se fusionan en una entrega (tolerancia OCR); la ruta debe
+    # ser la de la mayoría (474286/474287), nunca un promedio ni vacío.
+    _, entregas = _entregas_de([
+        _parada_con_ruta("474285", "SANTA ISADEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="8.5231", duracion_min="14.44"),
+        _parada_con_ruta("474286", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="6.5048", duracion_min="10.85"),
+        _parada_con_ruta("474287", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="6.5048", duracion_min="10.85"),
+    ])
+    assert len(entregas) == 1
+    assert entregas[0]["numeros_guia"] == ["474285", "474286", "474287"]
+    assert entregas[0]["distancia_km"] == "6.5048"
+    assert entregas[0]["duracion_min"] == "10.85"
+    assert entregas[0]["estado_ruta"] == "RUTA_CALCULADA"
+    # El destino operacional PUBLICADO de la parada también debe ser el de
+    # la mayoría -- nunca "el primer documento que llegó" (474285, el del
+    # typo). Antes de este bloque `destino_operacional` usaba
+    # `_primer_presente`, ciego a cuál dirección es la real.
+    assert entregas[0]["destino_operacional"] == "SANTA ISABEL 585 SANTIAGO LAMPA"
+
+
+def test_destino_operacional_de_la_mayoria_no_depende_del_orden_de_los_documentos():
+    # Mismo caso real, pero con el documento del typo llegando AL FINAL en
+    # vez de primero -- `_primer_presente` habría acertado por casualidad
+    # en ese orden; la mayoría debe dar el mismo resultado sin importar el
+    # orden de llegada de los documentos.
+    _, entregas = _entregas_de([
+        _parada_con_ruta("474286", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="6.5048", duracion_min="10.85"),
+        _parada_con_ruta("474287", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="6.5048", duracion_min="10.85"),
+        _parada_con_ruta("474285", "SANTA ISADEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="8.5231", duracion_min="14.44"),
+    ])
+    assert len(entregas) == 1
+    assert entregas[0]["destino_operacional"] == "SANTA ISABEL 585 SANTIAGO LAMPA"
+
+
+def test_destino_operacional_sin_mayoria_estricta_usa_el_primer_documento_como_antes():
+    # Empate real (1 contra 1): sin mayoría estricta, se conserva el
+    # comportamiento previo a este bloque (primer valor presente) -- nunca
+    # deja de mostrar un destino que sí existe sólo por el empate.
+    _, entregas = _entregas_de([
+        _parada_con_ruta("1", "SANTA ISADEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="8.5231", duracion_min="14.44"),
+        _parada_con_ruta("2", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="6.5048", duracion_min="10.85"),
+    ])
+    assert len(entregas) == 1
+    assert entregas[0]["destino_operacional"] == "SANTA ISADEL 585 SANTIAGO LAMPA"
+
+
+def test_ruta_sin_mayoria_estricta_se_abstiene_nunca_promedia():
+    # 2 documentos, 2 rutas exitosas distintas -- empate real, ninguna
+    # mayoría. Atlas se abstiene (NUNCA centroide/promedio).
+    _, entregas = _entregas_de([
+        _parada_con_ruta("1", "SANTA ISADEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="8.5231", duracion_min="14.44"),
+        _parada_con_ruta("2", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="6.5048", duracion_min="10.85"),
+    ])
+    assert len(entregas) == 1  # misma entrega (tolerancia OCR), pero...
+    assert entregas[0]["distancia_km"] == ""  # ...sin mayoría, se abstiene
+    assert entregas[0]["duracion_min"] == ""
+    assert entregas[0]["estado_ruta"] == ""
+
+
+def test_ruta_de_la_mayoria_no_aplica_si_alguna_ruta_fallo():
+    # Mezcla de éxito + fallo real -- no es el caso que cubre este bloque
+    # (todas exitosas pero distintas); debe seguir abstiniéndose como
+    # antes, nunca "ganarle" al fallo con una mayoría de éxitos.
+    _, entregas = _entregas_de([
+        _parada_con_ruta("1", "SANTA ISADEL 585 SANTIAGO LAMPA", "Lampa", distancia_km="8.5231", duracion_min="14.44"),
+        _parada_con_ruta(
+            "2", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa",
+            distancia_km="", duracion_min="", proveedor_ruta="",
+            estado_ruta="SIN_CANDIDATO", motivo_ruta="GEOCODIFICACION_AMBIGUA",
+        ),
+        _parada_con_ruta(
+            "3", "SANTA ISABEL 585 SANTIAGO LAMPA", "Lampa",
+            distancia_km="", duracion_min="", proveedor_ruta="",
+            estado_ruta="SIN_CANDIDATO", motivo_ruta="GEOCODIFICACION_AMBIGUA",
+        ),
+    ])
+    assert len(entregas) == 1
+    # 2 fallos iguales + 1 éxito: sigue la regla YA existente de "un solo
+    # modo de fallo coherente" -- conserva el diagnóstico, nunca la ruta.
+    assert entregas[0]["distancia_km"] == ""
+    assert entregas[0]["estado_ruta"] == "SIN_CANDIDATO"
+
+
+# ---------------------------------------------------------------------------
+# 6d. P0 D2 -- un candidato de destino rechazado/de baja confianza nunca
+# puede ganar la mayoría e imponerse como destino operacional.
+# ---------------------------------------------------------------------------
+def test_destino_operacional_nunca_es_un_valor_contaminado_aunque_gane_por_mayoria():
+    # 3 documentos comparten el mismo código territorial opaco (evidencia
+    # operacional POSITIVA que ya agrupa la entrega independientemente de
+    # `direccion_entrega`, ver `_destino_compatible`). 2 de las 3 traen un
+    # `direccion_entrega` contaminado por una etiqueta de otra sección
+    # ("PATENTE BDFG50" -- INVÁLIDO según
+    # `credibilidad_campos.evaluar_credibilidad_direccion`); la tercera sí
+    # trae la dirección real. Antes del fix, la mayoría (2 contra 1)
+    # imponía el valor contaminado como destino operacional -- exactamente
+    # el candidato rechazado/de baja confianza reapareciendo por
+    # consolidación que el invariante P0 D2 prohíbe.
+    codigo = dict(codigo_pais="CL", codigo_unidad="RENCA", codigo_contexto="0001")
+    _, entregas = _entregas_de([
+        _parada("1", "PATENTE BDFG50", "Quilicura", **codigo),
+        _parada("2", "PATENTE BDFG50", "Quilicura", **codigo),
+        _parada("3", "SAN LUIS 1201 QUILICURA", "Quilicura", **codigo),
+    ])
+    assert len(entregas) == 1
+    assert entregas[0]["destino_operacional"] == "SAN LUIS 1201 QUILICURA"
+
+
+def test_destino_operacional_sin_ningun_valor_confiable_no_inventa_uno():
+    # Si TODOS los `direccion_entrega` de la entrega son dudosos/inválidos,
+    # nunca se elige el "menos malo" por mayoría -- se cae al mismo
+    # respaldo documental ya usado cuando no hay `direccion_entrega` en
+    # absoluto (`despachar_a_crudo`).
+    codigo = dict(codigo_pais="CL", codigo_unidad="RENCA", codigo_contexto="0002")
+    _, entregas = _entregas_de([
+        _parada_con_ruta("1", "PATENTE BDFG50", "Quilicura", despachar_a_crudo="", **codigo),
+        _parada_con_ruta(
+            "2", "PATENTE BDFG50", "Quilicura",
+            despachar_a_crudo="SAN LUIS 1201 QUILICURA", **codigo,
+        ),
+    ])
+    assert len(entregas) == 1
+    assert entregas[0]["destino_operacional"] == "SAN LUIS 1201 QUILICURA"
+
+
 def test_no_agrupa_solo_por_numero_de_transporte_sin_senal_de_destino():
     # Dos documentos del mismo transporte, ninguno con dirección/despachar
     # ni código territorial -> ambigüedad real: una entrega por documento.
