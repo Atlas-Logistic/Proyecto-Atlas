@@ -859,10 +859,35 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # dejando la Vía A de desambiguación
                     # (`resolver_destino_ambiguo_con_evidencia_inequivoca`)
                     # sin ningún destino real que pudiera usar.
+                    # Una comuna declarada mal escrita (variante OCR/tipeo)
+                    # no se aprende si la evidencia documental de ESTA guía
+                    # trae la comuna válida; ante ambigüedad se conserva tal
+                    # cual (nunca se inventa).
+                    comuna_destino = comuna_correccion or comuna_fila
+                    region_destino = region_fila
+                    if comuna_destino:
+                        from atlas_core.revalidacion_documental import _leer_filas as _leer_filas_evid
+                        from atlas_core.rutas.destino_entrega import (
+                            comuna_territorial_desde_evidencia, textos_documentales_destino,
+                        )
+                        from atlas_core.territorio_chile import normalizar_comuna
+                        try:
+                            _fila_evid = next(
+                                (f for f in _leer_filas_evid(dataset)
+                                 if str(f.get("numero_guia", "")) == numero_guia), None,
+                            )
+                        except (OSError, ValueError):
+                            _fila_evid = None
+                        comuna_valida = comuna_territorial_desde_evidencia(
+                            comuna_destino, textos_documentales_destino(_fila_evid or {}),
+                        )
+                        if comuna_valida and comuna_valida != comuna_destino:
+                            comuna_destino = comuna_valida
+                            region_destino = region_destino or str(normalizar_comuna(comuna_valida).region or "")
                     destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
                         nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
-                        comuna=comuna_correccion or comuna_fila,
-                        region=region_fila,
+                        comuna=comuna_destino,
+                        region=region_destino,
                         latitud=lat_fila, longitud=lon_fila,
                         estado_calidad=EstadoCalidadDestino.CONFIRMADO,
                     )

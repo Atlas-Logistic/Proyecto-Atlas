@@ -157,6 +157,12 @@ class Operacion:
         (self.actual / "pendientes_tecnicos.json").write_text(
             json.dumps({"schema_version": 1, "pendientes": registros}), encoding="utf-8")
 
+    def decisiones(self) -> list[dict]:
+        ruta = self.actual / "decisiones_pendientes.json"
+        if not ruta.is_file():
+            return []
+        return json.loads(ruta.read_text(encoding="utf-8")).get("decisiones", [])
+
     def pendientes(self) -> dict[str, dict]:
         datos = json.loads((self.actual / "pendientes_tecnicos.json").read_text(encoding="utf-8"))
         return {p["numero_guia"]: p for p in datos["pendientes"]}
@@ -222,7 +228,10 @@ def test_1b_agotable_tiene_limite_finito(op, espia):
                minutos=24 * 60, intentos=3)
     assert op.mantener()["elegibles"] == []
     assert espia == []
-    assert op.pendientes()["474597"]["estado_espera"] == "ESPERANDO_ACCION_HUMANA"
+    # Agotado: la acción humana queda visible como tarjeta, no en la cola.
+    assert "474597" not in op.pendientes()
+    assert [d["tipo"] for d in op.decisiones() if d["documento"]["numero_guia"] == "474597"] == [
+        "DESTINO_NO_RESUELTO"]
 
 
 # ---------------------------------------------- 2. TRANSITORIO ya no 6 h

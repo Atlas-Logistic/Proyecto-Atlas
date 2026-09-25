@@ -15,11 +15,12 @@ from atlas_core.decisiones_pendientes import (
     _guias_con_direccion_confirmada_por_humano,
     _guias_destino_terminado_por_humano,
     clasificar_fallo_tecnico,
+    guias_destino_conocido_ruta_pendiente,
 )
 from atlas_core.politica_pendientes_tecnicos import conocimiento_para_guia, elegibilidad
 from atlas_core.reconciliacion_estado_derivado import (
     LEDGER, NOMBRE_ARTEFACTO, NOMBRE_PENDIENTES_TECNICOS, RULESET_VERSION,
-    _cargar_seguimiento, _ciclo_vida_pendiente, _leer_filas, _pendientes_ruta,
+    _asegurar_via_humana, _cargar_seguimiento, _ciclo_vida_pendiente, _leer_filas, _pendientes_ruta,
     _registro_pendiente,
 )
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
@@ -142,7 +143,16 @@ def mantener_pendientes_tecnicos(
 
             filas_pendientes = {str(f.get("numero_guia", "")).strip(): f for f in
                                 _pendientes_ruta(dataset, actual / NOMBRE_ARTEFACTO)}
-            humanas = _guias_con_direccion_confirmada_por_humano(actual / "decisiones_aplicadas.json")
+            # Mismo conjunto que `reconciliar_estado_derivado` para el ciclo
+            # de vida: identidad respondida por REGISTRAR_DIRECCION o por
+            # una relación obra<->destino humana que ya coincide.
+            humanas = set(_guias_con_direccion_confirmada_por_humano(actual / "decisiones_aplicadas.json"))
+            try:
+                humanas |= guias_destino_conocido_ruta_pendiente(
+                    carpeta_catalogos=raiz / "catalogos_privados", ruta_dataset=dataset,
+                )
+            except (OSError, ValueError, AttributeError):
+                pass
             terminadas = _guias_destino_terminado_por_humano(actual / "decisiones_aplicadas.json")
             registros: list[dict] = []
             for guia, fila in filas_pendientes.items():
@@ -169,15 +179,24 @@ def mantener_pendientes_tecnicos(
                     destino_terminado_por_humano=guia in terminadas,
                 ))
                 registros.append(registro)
-            if not ids and len(registros) == len(previos) and all(
+            def _persistir(regs: list[dict]) -> None:
+                escribir_json_atomico(actual / NOMBRE_PENDIENTES_TECNICOS, {
+                    "schema_version": 1, "actualizado_en": instante.isoformat(), "pendientes": regs,
+                })
+
+            # Ninguna acción humana anunciada sin tarjeta visible -- también
+            # sin elegibles, para que un limbo previo converja.
+            registros = _asegurar_via_humana(
+                raiz=raiz, registros=registros, previos=previos, instante=instante, persistir=_persistir,
+            )
+            sin_cambios = len(registros) == len(previos) and all(
                 previos.get(r["numero_guia"]) == r for r in registros
-            ):
-                return {"ejecutado": False, "motivo": "SIN_ELEGIBLES", "elegibles": []}
-            escribir_json_atomico(actual / NOMBRE_PENDIENTES_TECNICOS, {
-                "schema_version": 1, "actualizado_en": instante.isoformat(), "pendientes": registros,
-            })
+            )
+            if not sin_cambios:
+                _persistir(registros)
             if not ids:
-                return {"ejecutado": False, "motivo": "HUELLAS_ACTUALIZADAS", "elegibles": []}
+                motivo = "SIN_ELEGIBLES" if sin_cambios else "HUELLAS_ACTUALIZADAS"
+                return {"ejecutado": False, "motivo": motivo, "elegibles": []}
 
             # Publica únicamente tarjetas de las guías intentadas. Las
             # decisiones ajenas conservan su contenido anterior. Siempre

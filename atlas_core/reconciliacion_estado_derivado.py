@@ -482,6 +482,56 @@ def _pendientes_ruta(dataset: Path, decisiones: Path) -> list[dict[str, str]]:
     ]
 
 
+CAUSA_SIN_PREGUNTA_HUMANA_PUBLICABLE = "ACCION_HUMANA_SIN_PREGUNTA_PUBLICABLE"
+
+
+def _asegurar_via_humana(
+    *, raiz: Path, registros: list[dict[str, object]],
+    previos: dict[str, dict[str, object]], instante: datetime,
+    persistir,
+) -> list[dict[str, object]]:
+    """Invariante: ningún pendiente técnico queda `ESPERANDO_ACCION_HUMANA`
+    sin una tarjeta visible. Toda decisión PENDIENTE de la guía la saca de
+    esta cola (`_pendientes_ruta`), así que un registro en ese estado aquí
+    es, por definición, una acción humana sin vía. Se publica su tarjeta
+    (focal, sólo esas guías; `persistir` deja antes escrito
+    `pendientes_tecnicos.json` con los intentos vigentes, que la detección
+    lee); las que la obtienen salen de la cola y las
+    que no admiten pregunta publicable quedan `ESPERANDO_EVIDENCIA_NUEVA`
+    con causa explícita. Sin cambio de evidencia, contador ni conocimiento
+    desde la pasada anterior, no se vuelve a consultar (idempotente)."""
+    limbo = {str(r["numero_guia"]) for r in registros if r.get("estado_espera") == ESTADO_ESPERA_ACCION_HUMANA}
+    if not limbo:
+        return registros
+    ya_evaluadas = {
+        g for g in limbo
+        for r in registros if str(r["numero_guia"]) == g
+        if (previo := previos.get(g) or {}).get("causa_siguiente_accion") == CAUSA_SIN_PREGUNTA_HUMANA_PUBLICABLE
+        and all(previo.get(k) == r.get(k) for k in ("huella_datos", "intentos_misma_evidencia", "huella_conocimiento"))
+    }
+    actual = raiz / "operacion" / "actual"
+    con_tarjeta: set[str] = set()
+    if limbo - ya_evaluadas:
+        persistir(registros)
+        reconciliar_decisiones_destino_no_resuelto(
+            raiz_atlas=raiz, reloj=lambda: instante, guias_objetivo=limbo - ya_evaluadas,
+        )
+        con_tarjeta = _guias_humanas(actual / NOMBRE_ARTEFACTO) & limbo
+    resultado = []
+    for registro in registros:
+        guia = str(registro["numero_guia"])
+        if guia in con_tarjeta:
+            continue
+        if guia in limbo:
+            registro = {
+                **registro, "estado_espera": ESTADO_ESPERA_EVIDENCIA,
+                "causa_siguiente_accion": CAUSA_SIN_PREGUNTA_HUMANA_PUBLICABLE,
+                "proxima_oportunidad": None,
+            }
+        resultado.append(registro)
+    return resultado
+
+
 def _registro_pendiente(fila: dict[str, str], previo: dict[str, object] | None) -> dict[str, object]:
     huella = _huella_ruta(fila)
     mismo = previo if previo and previo.get("huella_datos") == huella else None
@@ -1784,10 +1834,17 @@ def reconciliar_estado_derivado(
                     versiones_capacidades=_versiones_cap_actuales(),
                 )
                 registros_despues.append(registro)
-            escribir_json_atomico(ruta_pendientes, {
-                "schema_version": 1, "actualizado_en": instante.isoformat(),
-                "pendientes": registros_despues,
-            })
+            def _persistir_pendientes(registros: list[dict[str, object]]) -> None:
+                escribir_json_atomico(ruta_pendientes, {
+                    "schema_version": 1, "actualizado_en": instante.isoformat(),
+                    "pendientes": registros,
+                })
+
+            registros_despues = _asegurar_via_humana(
+                raiz=raiz, registros=registros_despues, previos=seguimiento_previo,
+                instante=instante, persistir=_persistir_pendientes,
+            )
+            _persistir_pendientes(registros_despues)
 
             # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
             # VERSIONADA: se captura la huella del dataset YA

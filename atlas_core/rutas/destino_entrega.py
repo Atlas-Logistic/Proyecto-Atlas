@@ -34,12 +34,13 @@ Chile) determine la localidad.
 
 from __future__ import annotations
 
+import json
 import re
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from atlas_core.catalogo_destinos import (
     Destino,
@@ -70,6 +71,7 @@ from atlas_core.rutas.posicion_vehiculo import ProveedorPosicionVehiculo
 from atlas_core.rutas.proveedor import ProveedorRutas
 from atlas_core.territorio_chile import (
     ESTADO_COMUNA_EXACTA,
+    ESTADO_COMUNA_NORMALIZADA_SEGURA,
     normalizar_comuna,
     normalizar_direccion_con_comunas,
     region_valida,
@@ -166,10 +168,60 @@ def _contexto_geografico_desde_texto(texto: str):
     return geografia.parametros_geocodificacion(decision.unidad)
 
 
+def textos_documentales_destino(fila: Mapping[str, Any]) -> tuple[str, ...]:
+    """Textos de destino que el propio documento aportó: DESPACHAR A,
+    dirección de entrega y la identidad operacional que B1 dejó PERSISTIDA
+    (nunca una llamada nueva). Esta última conserva el texto original aunque
+    un revalidador haya vaciado después `direccion_entrega`."""
+    textos = [str(fila.get("despachar_a_crudo") or ""), str(fila.get("direccion_entrega") or "")]
+    try:
+        resultados_b1 = json.loads(str(fila.get("resultado_atlas_ia_json") or "") or "[]")
+    except ValueError:
+        resultados_b1 = []
+    for resultado in resultados_b1 if isinstance(resultados_b1, list) else []:
+        contexto = resultado.get("contexto_final") if isinstance(resultado, dict) else None
+        identidad = contexto.get("identidad_operacional") if isinstance(contexto, dict) else None
+        if isinstance(identidad, dict):
+            textos.extend(str(identidad.get(clave) or "") for clave in ("despachar_a_crudo", "direccion_entrega"))
+    vistos: list[str] = []
+    for texto in (t.strip() for t in textos):
+        if texto and texto not in vistos:
+            vistos.append(texto)
+    return tuple(vistos)
+
+
+def comuna_territorial_desde_evidencia(
+    comuna_declarada: str, textos_evidencia: Iterable[str] = (),
+) -> str:
+    """Comuna utilizable como contexto territorial, o "" (abstención).
+
+    Una comuna declarada (humano o catálogo) que ya es válida se respeta tal
+    cual. Si no lo es, nunca degrada a una comuna válida que la evidencia
+    documental menciona de forma inequívoca: una variante OCR que el motor
+    territorial normaliza con seguridad a ESA misma comuna, o una declarada
+    irreconocible, ceden ante ella. Si la variante apunta a otra comuna que
+    la documental, o la documental es ambigua entre textos, se abstiene.
+    Nunca inventa: sin comuna válida disponible devuelve ""."""
+    declarada = str(comuna_declarada or "").strip()
+    documentales = {c for c in (_comuna_documental_inequivoca(t) for t in textos_evidencia) if c}
+    documental = next(iter(documentales)) if len(documentales) == 1 else ""
+    if not declarada:
+        return documental
+    normalizada = normalizar_comuna(declarada)
+    if normalizada.estado == ESTADO_COMUNA_EXACTA and normalizada.comuna:
+        return declarada
+    if normalizada.estado == ESTADO_COMUNA_NORMALIZADA_SEGURA and normalizada.comuna:
+        if len(documentales) > 1 or (documental and documental != normalizada.comuna):
+            return ""
+        return normalizada.comuna
+    return documental
+
+
 def resolver_comuna_territorial_conocida(
     *, obra_canonica: str,
     catalogo_obras_ruta: str | Path, catalogo_clientes_ruta: str | Path,
     catalogo_destinos_ruta: str | Path,
+    textos_evidencia: Iterable[str] = (),
 ) -> str:
     """Bloque REGISTRO_DIRECCION CONTEXTO -- causa raíz real del caso
     472640 (LAS VIOLETAS 55, DSI UNDERGROUND CHILE SPA): cuando un humano
@@ -214,9 +266,14 @@ def resolver_comuna_territorial_conocida(
         ).resolver_obra_destino_confirmada_global(nombre_obra=obra)
     except (OSError, ValueError):
         resolucion = None
+    evidencia = tuple(textos_evidencia)
     if resolucion is not None and resolucion.destino.comuna.strip():
-        return resolucion.destino.comuna.strip()
-    return _comuna_documental_inequivoca(obra)
+        # Una comuna de catálogo mal escrita (variante OCR/tipeo) nunca
+        # reemplaza a la comuna válida que el documento sí trae.
+        comuna = comuna_territorial_desde_evidencia(resolucion.destino.comuna, evidencia)
+        if comuna:
+            return comuna
+    return comuna_territorial_desde_evidencia("", evidencia) or _comuna_documental_inequivoca(obra)
 
 
 def _geocodificar_con_contexto(proveedor, direccion: str, contexto):

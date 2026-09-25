@@ -345,14 +345,19 @@ def test_registro_viejo_de_pendientes_tecnicos_se_migra_sin_perder_historial(tmp
 
     recon.reconciliar_estado_derivado(raiz_atlas=tmp_path, reloj=RELOJ)
     pend = json.loads((actual / recon.NOMBRE_PENDIENTES_TECNICOS).read_text())["pendientes"]
+    if not pend:
+        # El intento de esta pasada agotó el AGOTABLE (2 -> 3): la acción
+        # humana queda visible como tarjeta y la guía sale de la cola --
+        # nunca ESPERANDO_ACCION_HUMANA sin tarjeta.
+        decisiones = json.loads((actual / recon.NOMBRE_ARTEFACTO).read_text())["decisiones"]
+        assert [d["tipo"] for d in decisiones if d["documento"]["numero_guia"] == "99"] == ["DESTINO_NO_RESUELTO"]
+        return
     assert len(pend) == 1
     reg = pend[0]
     assert reg["historial_resultados"][0] == historial[0]  # historial no se pierde
     assert reg["intentos_misma_evidencia"] >= 2  # nunca se resetea a ciegas
     assert reg["clase_fallo"] == "AGOTABLE"
-    assert reg["estado_espera"] in {
-        "ESPERANDO_COOLDOWN", "ESPERANDO_ACCION_HUMANA", "ESPERANDO_EVIDENCIA_NUEVA",
-    }
+    assert reg["estado_espera"] in {"ESPERANDO_COOLDOWN", "ESPERANDO_EVIDENCIA_NUEVA"}
     assert "causa_siguiente_accion" in reg
 
 

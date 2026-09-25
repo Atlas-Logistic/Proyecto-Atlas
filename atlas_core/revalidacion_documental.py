@@ -3596,7 +3596,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.destino_entrega import (
         calcular_ruta_con_planta_conocida,
+        comuna_territorial_desde_evidencia,
         resolver_comuna_territorial_conocida,
+        textos_documentales_destino,
     )
 
     comuna_manual_por_guia = comuna_manual_por_guia or {}
@@ -3742,9 +3744,16 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             # sin ella, se intenta resolver sola (destino CONFIRMADO
             # previo de la misma obra, o mención inequívoca en el nombre
             # de obra) -- nunca pide al humano algo que Atlas ya sabe.
+            textos_destino = textos_documentales_destino(fila)
             comuna_confirmada_humano = str(
                 comuna_manual_por_guia.get(str(fila.get("numero_guia", "")).strip(), "")
             ).strip()
+            # Una variante mal escrita de la comuna humana nunca desplaza a
+            # la comuna válida que el propio documento trae.
+            comuna_confirmada_humano = (
+                comuna_territorial_desde_evidencia(comuna_confirmada_humano, textos_destino)
+                or comuna_confirmada_humano
+            )
             comuna_conocida = comuna_confirmada_humano
             if not comuna_conocida:
                 comuna_conocida = resolver_comuna_territorial_conocida(
@@ -3752,6 +3761,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     catalogo_obras_ruta=carpeta / "obras_destinos.json",
                     catalogo_clientes_ruta=carpeta / "clientes.json",
                     catalogo_destinos_ruta=carpeta / "destinos_maestros.json",
+                    textos_evidencia=textos_destino,
                 )
             guias_intentadas.append(str(fila.get("numero_guia", "")))
             try:
@@ -6055,12 +6065,23 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
     guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(
         actual / "decisiones_aplicadas.json"
     )
+    # Un AGOTABLE sólo publica tarjeta tras agotar sus reintentos: el
+    # contador persistido es parte de la evidencia de la detección.
+    try:
+        intentos_por_guia = {
+            str(r.get("numero_guia", "")).strip(): int(r.get("intentos_misma_evidencia", 0) or 0)
+            for r in json.loads((actual / "pendientes_tecnicos.json").read_text(encoding="utf-8")).get("pendientes", [])
+            if isinstance(r, dict)
+        }
+    except (OSError, ValueError, AttributeError, TypeError):
+        intentos_por_guia = {}
     candidatas: list[dict[str, object]] = []
     for fila in filas:
         if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
             continue
         decision = detectar_decision_destino_no_resuelto(
             archivo=fila.get("archivo", ""), fila=fila, carpeta_catalogos=catalogos,
+            intentos_misma_evidencia=intentos_por_guia.get(str(fila.get("numero_guia", "")).strip(), 0),
             guias_direccion_confirmada=guias_direccion_confirmada,
         )
         if decision is not None:

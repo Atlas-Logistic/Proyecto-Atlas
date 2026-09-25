@@ -468,6 +468,7 @@ def resumen_observacion_operacional(fila: Mapping[str, str]) -> dict[str, object
 
 def _comuna_sugerida_para_contexto(
     *, obra_canonica: str, carpeta_catalogos: str | Path | None,
+    fila: Mapping[str, str] | None = None,
 ) -> str:
     """Bloque REGISTRO_DIRECCION CONTEXTO (caso real 472640) -- lectura
     READ-ONLY de catálogos, sólo para adjuntar al `contexto` de la
@@ -480,7 +481,9 @@ def _comuna_sugerida_para_contexto(
     sugerencia todavía", igual que sin este bloque."""
     if not carpeta_catalogos:
         return ""
-    from atlas_core.rutas.destino_entrega import resolver_comuna_territorial_conocida
+    from atlas_core.rutas.destino_entrega import (
+        resolver_comuna_territorial_conocida, textos_documentales_destino,
+    )
 
     carpeta = Path(carpeta_catalogos)
     try:
@@ -489,6 +492,7 @@ def _comuna_sugerida_para_contexto(
             catalogo_obras_ruta=carpeta / "obras_destinos.json",
             catalogo_clientes_ruta=carpeta / "clientes.json",
             catalogo_destinos_ruta=carpeta / "destinos_maestros.json",
+            textos_evidencia=textos_documentales_destino(fila or {}),
         )
     except (OSError, ValueError):
         return ""
@@ -960,7 +964,7 @@ def detectar_decision_destino_no_resuelto(
     # vez de pedírsela al humano de nuevo -- nunca se adjunta si no hay
     # nada confiable (`comuna_sugerida` ausente del contexto).
     comuna_sugerida = _comuna_sugerida_para_contexto(
-        obra_canonica=obra_canonica, carpeta_catalogos=carpeta_catalogos,
+        obra_canonica=obra_canonica, carpeta_catalogos=carpeta_catalogos, fila=fila,
     )
     if comuna_sugerida:
         contexto["comuna_sugerida"] = comuna_sugerida
@@ -1030,7 +1034,7 @@ def detectar_decision_destino_contaminado_documental(
     # Bloque REGISTRO_DIRECCION CONTEXTO -- ver
     # `detectar_decision_destino_no_resuelto`, mismo mecanismo.
     comuna_sugerida = _comuna_sugerida_para_contexto(
-        obra_canonica=obra_canonica, carpeta_catalogos=carpeta_catalogos,
+        obra_canonica=obra_canonica, carpeta_catalogos=carpeta_catalogos, fila=fila,
     )
     if comuna_sugerida:
         contexto["comuna_sugerida"] = comuna_sugerida
@@ -3770,15 +3774,37 @@ def regenerar_decisiones_persistidas(
                     fila_destino is not None
                     and str(fila_destino.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
                 )
-                if any(
-                    (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+                coincidentes = [
+                    destino for destino in destinos_confirmados_obra
+                    if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
                     and direccion_confirmada_coincide(calle, texto_documental)
-                    and (
-                        (destino.latitud is not None and destino.longitud is not None)
-                        or ruta_ya_calculada
-                        or str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
-                    )
-                    for destino in destinos_confirmados_obra
+                ]
+                # Tarjeta de un AGOTABLE que ya agotó sus reintentos: el
+                # humano confirmó la IDENTIDAD del destino, pero ese destino
+                # nunca tuvo ubicación ruteable (sin coordenadas, ruta sin
+                # calcular) y nadie registró aún una dirección ubicable para
+                # ESTA guía. La pregunta que queda es otra -- dónde queda --
+                # y suprimirla dejaría el pendiente anunciando una acción
+                # humana sin ninguna tarjeta.
+                falta_ubicacion_de_identidad_confirmada = (
+                    bool(motivos_decision_ruta)
+                    and motivos_decision_ruta <= MOTIVOS_DESTINO_TECNICO_AGOTABLE
+                    and bool(coincidentes)
+                    and not ruta_ya_calculada
+                    and numero_guia_destino not in guias_direccion_confirmada
+                    and all(d.latitud is None or d.longitud is None for d in coincidentes)
+                )
+                if falta_ubicacion_de_identidad_confirmada:
+                    decision["contexto"] = {
+                        **(decision.get("contexto") or {}),
+                        "identidad_destino_confirmada": True,
+                        "falta": "UBICACION_RUTEABLE",
+                    }
+                elif any(
+                    (destino.latitud is not None and destino.longitud is not None)
+                    or ruta_ya_calculada
+                    or str(getattr(destino, "estado_calidad", "")) == "CONFIRMADO"
+                    for destino in coincidentes
                 ):
                     continue
 
