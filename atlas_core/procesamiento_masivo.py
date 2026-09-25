@@ -12,6 +12,7 @@ import re
 import time
 import tempfile
 import unicodedata
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -43,6 +44,7 @@ from atlas_core.catalogos import (
     resolver_patente_canonica,
 )
 from atlas_core.normalizacion_semantica import normalizar_nombre_societario
+from atlas_core.orientacion_documental import normalizar_orientacion
 from atlas_core.validadores import (
     EstadoValidacion,
     rut_documentalmente_confirmado_invalido,
@@ -1861,22 +1863,42 @@ def procesar_archivo(
     # `monkeypatch.setattr(procesamiento_masivo, "leer_texto_imagen", ...)`.
     inicio_documento = time.perf_counter()
 
+    def _leer_bloques_de(ruta_imagen) -> list:
+        if proveedor is not None:
+            return proveedor.leer_bloques(ruta_imagen)
+        return leer_bloques_imagen(ruta_imagen, lector=lector_ocr)
+
+    inicio_ocr = time.perf_counter()
+    # Bloque ORIENTACIÓN DOCUMENTAL (caso real 480603/480604): TODA lectura
+    # OCR de este documento (texto, bloques y focal) usa la MISMA imagen
+    # -- la original o su copia girada -- para que la geometría etiqueta->
+    # valor sea coherente. `ruta` sigue siendo la identidad/evidencia.
+    orientacion = None
+    try:
+        orientacion = normalizar_orientacion(Path(ruta), _leer_bloques_de)
+        weakref.finalize(orientacion, orientacion.limpiar)
+    except Exception as exc:
+        logger.warning("Normalización de orientación omitida: %s: %s", type(exc).__name__, exc)
+    ruta_ocr = orientacion.ruta_ocr if orientacion is not None else ruta
+    bloques_ya_leidos = orientacion.bloques if orientacion is not None else None
+
     def _leer_texto() -> list[str]:
         if proveedor is not None:
-            return proveedor.leer_texto(ruta)
-        return leer_texto_imagen(ruta, lector=lector_ocr)
+            return proveedor.leer_texto(ruta_ocr)
+        return leer_texto_imagen(ruta_ocr, lector=lector_ocr)
 
     def _leer_bloques() -> list:
-        if proveedor is not None:
-            return proveedor.leer_bloques(ruta)
-        return leer_bloques_imagen(ruta, lector=lector_ocr)
+        nonlocal bloques_ya_leidos
+        if bloques_ya_leidos is not None:
+            bloques, bloques_ya_leidos = bloques_ya_leidos, None
+            return bloques
+        return _leer_bloques_de(ruta_ocr)
 
     def _leer_focal(caja, allowlist: str, funcion_easyocr) -> dict:
         if proveedor is not None:
-            return proveedor.leer_focal(ruta, caja, allowlist=allowlist)
-        return funcion_easyocr(ruta, caja, lector=lector_ocr)
+            return proveedor.leer_focal(ruta_ocr, caja, allowlist=allowlist)
+        return funcion_easyocr(ruta_ocr, caja, lector=lector_ocr)
 
-    inicio_ocr = time.perf_counter()
     try:
         textos = _leer_texto()
     except Exception as exc:
@@ -3231,6 +3253,8 @@ def procesar_archivo(
         "telemetria_seg": round(fin_telemetria - inicio_telemetria, 4),
         "total_documento_seg": round(fin_documento - inicio_documento, 4),
     }
+    if orientacion is not None and orientacion.diagnostico:
+        metricas["orientacion_documental"] = orientacion.diagnostico
     if resoluciones_convergentes:
         # Auditoría de la resolución silenciosa por convergencia (Bloque
         # A): valor OCR original + canónico aplicado + método + evidencias
