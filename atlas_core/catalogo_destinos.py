@@ -132,52 +132,118 @@ def _limite_tolerancia_ocr_direccion(longitud: int) -> int:
     return 1 if longitud <= 25 else 2
 
 
-def direccion_confirmada_coincide(calle_confirmada: str, texto_documental: str) -> bool:
-    """True si `calle_confirmada` (la calle de un destino YA CONFIRMADO
-    para esta obra, normalizada con `normalizar_nombre_destino`) aparece
-    dentro de `texto_documental` (idem) -- literalmente, como siempre, o
-    con hasta `_limite_tolerancia_ocr_direccion` caracteres sustituidos
-    por un error OCR (ver bloque arriba). Reemplaza el `calle in texto`
-    literal en todos los sitios que reutilizan un destino confirmado;
-    mismo comportamiento previo cuando no hay coincidencia con
-    tolerancia (devuelve `False` igual que el `in` original)."""
-    if not calle_confirmada:
-        return False
-    if calle_confirmada in texto_documental:
-        return True
-    longitud = len(calle_confirmada)
-    limite = _limite_tolerancia_ocr_direccion(longitud)
-    if limite <= 0:
-        return False
-    for inicio in range(0, len(texto_documental) - longitud + 1):
-        ventana = texto_documental[inicio:inicio + longitud]
-        distancia = sum(1 for a, b in zip(ventana, calle_confirmada) if a != b)
-        if distancia <= limite:
-            return True
+_TOKENS_ESTRUCTURALES_DIRECCION = frozenset({
+    "CALLE", "AVENIDA", "AV", "AVDA", "CAMINO", "PASAJE", "RUTA", "LOTE", "SITIO", "PARCELA", "KM",
+})
 
-    # OCR puede partir una palabra de calle en dos sin alterar su contenido
-    # (p. ej. una separación espuria). Para no convertir esto en fuzzy
-    # matching abierto, esta segunda vía exige que la calle tenga un número
-    # explícito y que todos sus números aparezcan como tokens exactos en el
-    # documento. Sólo entonces compara la forma sin espacios con la misma
-    # tolerancia acotada de arriba.
-    numeros = re.findall(r"\d+", calle_confirmada)
-    if not numeros or not all(
-        re.search(rf"(?<!\d){re.escape(numero)}(?!\d)", texto_documental)
-        for numero in numeros
-    ):
+
+def _tokens_direccion(texto: str) -> list[str]:
+    return re.findall(r"[A-Z]+|\d+", texto)
+
+
+def _distancia_edicion_acotada(a: str, b: str, limite: int) -> int:
+    """Distancia de edici?n de un token, cortada al l?mite pedido.
+
+    Se usa s?lo sobre UN token largo dentro de una direcci?n ya anclada;
+    no es una b?squeda aproximada entre direcciones.
+    """
+    if abs(len(a) - len(b)) > limite:
+        return limite + 1
+    anterior = list(range(len(b) + 1))
+    for i, caracter_a in enumerate(a, 1):
+        actual = [i]
+        for j, caracter_b in enumerate(b, 1):
+            actual.append(min(anterior[j] + 1, actual[j - 1] + 1, anterior[j - 1] + (caracter_a != caracter_b)))
+        if min(actual) > limite:
+            return limite + 1
+        anterior = actual
+    return anterior[-1]
+
+
+def _token_ocr_limitado(coincidente: str, documental: str) -> bool:
+    """Admite UN token no estructural truncado o con error OCR peque?o.
+
+    La variante documental debe conservar al menos seis caracteres y puede
+    omitir hasta cuatro del final. Sobre ese prefijo la edici?n queda
+    acotada a dos operaciones, suficiente para un truncamiento con lectura
+    desplazada, sin habilitar semejanza libre.
+    """
+    if len(coincidente) < 6 or len(documental) < 6:
         return False
-    calle_compacta = "".join(calle_confirmada.split())
-    texto_compacto = "".join(texto_documental.split())
-    if calle_compacta in texto_compacto:
+    if len(documental) > len(coincidente) or len(coincidente) - len(documental) > 4:
+        return False
+    return _distancia_edicion_acotada(coincidente[:len(documental)], documental, 2) <= 2
+
+
+def _anclas_fuertes_conservadas(calle: str, texto: str, comuna_confirmada: str) -> bool:
+    tokens_calle = _tokens_direccion(calle)
+    tokens_texto = _tokens_direccion(texto)
+    # N?meros (incluidos lote/sitio) son anclas inviolables: nunca se tolera
+    # una sustituci?n de d?gito ni se acepta que falte uno del maestro.
+    numeros_calle = [t for t in tokens_calle if t.isdigit()]
+    numeros_texto = [t for t in tokens_texto if t.isdigit()]
+    if numeros_calle and any(n not in numeros_texto for n in numeros_calle):
+        return False
+    # Palabras que describen la estructura f?sica tampoco pueden ser OCR
+    # tolerante: CALLE/LOTE/PARCELA son evidencia, no decoraci?n nominal.
+    estructurales = set(tokens_calle) & _TOKENS_ESTRUCTURALES_DIRECCION
+    if not estructurales.issubset(set(tokens_texto)):
+        return False
+    comuna = normalizar_nombre_destino(comuna_confirmada)
+    return not comuna or comuna in texto
+
+
+def direccion_confirmada_coincide(
+    calle_confirmada: str, texto_documental: str, *, comuna_confirmada: str = "",
+) -> bool:
+    """Corroboraci?n estructurada, conservadora y sin fuzzy matching libre.
+
+    Conserva todas las anclas num?ricas y estructurales. Fuera de ellas admite
+    s?lo un token largo, no estructural, con un typo OCR de un car?cter o un
+    truncamiento/prefijo corto. La comuna se exige cuando el llamador aporta
+    una comuna confirmada. La selecci?n entre varios destinos sigue siendo
+    responsabilidad del llamador: m?s de una coincidencia debe abstenerse.
+    """
+    calle = normalizar_nombre_destino(calle_confirmada)
+    texto = normalizar_nombre_destino(texto_documental)
+    if not calle or not texto:
+        return False
+    if calle in texto:
         return True
-    longitud_compacta = len(calle_compacta)
-    for inicio in range(0, len(texto_compacto) - longitud_compacta + 1):
-        ventana = texto_compacto[inicio:inicio + longitud_compacta]
-        distancia = sum(1 for a, b in zip(ventana, calle_compacta) if a != b)
-        if distancia <= limite:
-            return True
-    return False
+    if not _anclas_fuertes_conservadas(calle, texto, comuna_confirmada):
+        return False
+
+    tokens_calle = _tokens_direccion(calle)
+    tokens_texto = _tokens_direccion(texto)
+    if not tokens_calle:
+        return False
+    # La ?nica tolerancia se aplica dentro de una secuencia completa de la
+    # direcci?n maestra. Todo token salvo uno debe ser exacto; los n?meros y
+    # las palabras estructurales ya fueron fijados arriba y nunca pasan aqu?.
+    for inicio in range(len(tokens_texto) - len(tokens_calle) + 1):
+        tolerados = 0
+        anclas_exactas = 0
+        for maestro, documental in zip(tokens_calle, tokens_texto[inicio:inicio + len(tokens_calle)]):
+            if maestro == documental:
+                if maestro.isdigit() or maestro in _TOKENS_ESTRUCTURALES_DIRECCION:
+                    anclas_exactas += 1
+                continue
+            if maestro.isdigit() or maestro in _TOKENS_ESTRUCTURALES_DIRECCION:
+                break
+            if tolerados or not _token_ocr_limitado(maestro, documental):
+                break
+            tolerados += 1
+        else:
+            # La v?a tolerante s?lo existe sobre una direcci?n ya anclada,
+            # nunca sobre coincidencia nominal de obra/cliente.
+            if anclas_exactas >= 2 and tolerados == 1:
+                return True
+
+    # Separaci?n espuria OCR: conserva la conducta previa s?lo con n?meros
+    # exactos y las dem?s anclas ya comprobadas; no introduce aproximaci?n.
+    calle_compacta = "".join(calle.split())
+    texto_compacto = "".join(texto.split())
+    return bool(calle_compacta and calle_compacta in texto_compacto)
 
 
 def clave_fisica_destino(direccion: str, comuna: str = "", region: str = "") -> tuple[str, str, str]:

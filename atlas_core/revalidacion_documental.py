@@ -4014,7 +4014,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             texto_documental = normalizar_nombre_destino(despachar_a)
             candidatos_coincidentes = [
                 destino for destino in destinos_confirmados_obra
-                if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and direccion_confirmada_coincide(calle, texto_documental)
+                if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna)
             ]
             if len(candidatos_coincidentes) != 1:
                 if not candidatos_coincidentes:
