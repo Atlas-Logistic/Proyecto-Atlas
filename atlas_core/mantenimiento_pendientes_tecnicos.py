@@ -84,6 +84,59 @@ def _plan(
     return elegibles, huellas, causas
 
 
+def _tarjetas_pendientes(actual: Path) -> dict[str, dict[str, str]]:
+    """decision_id -> {numero_guia, tipo} de la bandeja PENDIENTE vigente."""
+    try:
+        contenido = json.loads((actual / NOMBRE_ARTEFACTO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {
+        str(d["decision_id"]): {
+            "numero_guia": str((d.get("documento") or {}).get("numero_guia", "")),
+            "tipo": str(d.get("tipo", "")),
+        }
+        for d in contenido.get("decisiones", [])
+        if isinstance(d, dict) and d.get("estado") == "PENDIENTE" and d.get("decision_id")
+    }
+
+
+def _observabilidad(
+    *, ids: set[str], via_humana: dict, tarjetas_antes: dict, tarjetas_despues: dict,
+) -> dict[str, object]:
+    """Qué hizo la pasada ADEMÁS de intentar las elegibles: la reparación
+    de limbos (`_asegurar_via_humana`) corre sobre TODA la cola, también
+    fuera de elegibles, y la bandeja puede ganar o perder tarjetas."""
+    detectados = list(via_humana.get("limbos_detectados", []))
+    con_tarjeta = set(via_humana.get("limbos_con_tarjeta", []))
+
+    def _origen(guia: str) -> str:
+        if guia in con_tarjeta:
+            return "REPARACION_LIMBO"
+        return "ELEGIBLE" if guia in ids else "OTRA"
+
+    publicadas = [
+        {"decision_id": i, **t, "origen": _origen(t["numero_guia"])}
+        for i, t in sorted(tarjetas_despues.items(), key=lambda par: (par[1]["numero_guia"], par[0]))
+        if i not in tarjetas_antes
+    ]
+    retiradas = [
+        {"decision_id": i, **t}
+        for i, t in sorted(tarjetas_antes.items(), key=lambda par: (par[1]["numero_guia"], par[0]))
+        if i not in tarjetas_despues
+    ]
+    return {
+        "limbos": {
+            "detectados": detectados,
+            "fuera_de_elegibles": [g for g in detectados if g not in ids],
+            "reparados_con_tarjeta": sorted(con_tarjeta),
+            "sin_pregunta_publicable": list(via_humana.get("limbos_sin_pregunta_publicable", [])),
+            "ya_evaluados_sin_cambio": list(via_humana.get("limbos_ya_evaluados", [])),
+        },
+        "tarjetas_publicadas": publicadas,
+        "tarjetas_retiradas": retiradas,
+    }
+
+
 def mantener_pendientes_tecnicos(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     proveedor_rutas=None, proveedor_rutas_fallback=None, solo_plan: bool = False,
@@ -115,6 +168,14 @@ def mantener_pendientes_tecnicos(
             )
             previos = _cargar_seguimiento(actual / NOMBRE_PENDIENTES_TECNICOS)
             ids = {e["numero_guia"] for e in elegibles}
+            tarjetas_antes = _tarjetas_pendientes(actual)
+            via_humana: dict[str, object] = {}
+
+            def _informe() -> dict[str, object]:
+                return _observabilidad(
+                    ids=ids, via_humana=via_humana, tarjetas_antes=tarjetas_antes,
+                    tarjetas_despues=_tarjetas_pendientes(actual),
+                )
             huella_dataset_inicial = _sha256_archivo(dataset)
             if ids:
                 # Conocimiento humano/local antes de cualquier geocodificador.
@@ -188,6 +249,7 @@ def mantener_pendientes_tecnicos(
             # sin elegibles, para que un limbo previo converja.
             registros = _asegurar_via_humana(
                 raiz=raiz, registros=registros, previos=previos, instante=instante, persistir=_persistir,
+                informe=via_humana,
             )
             sin_cambios = len(registros) == len(previos) and all(
                 previos.get(r["numero_guia"]) == r for r in registros
@@ -196,7 +258,8 @@ def mantener_pendientes_tecnicos(
                 _persistir(registros)
             if not ids:
                 motivo = "SIN_ELEGIBLES" if sin_cambios else "HUELLAS_ACTUALIZADAS"
-                return {"ejecutado": False, "motivo": motivo, "elegibles": []}
+                return {"ejecutado": False, "motivo": motivo, "elegibles": [], "resueltas": [],
+                        "pendientes": [], "reporte_regenerado": False, **_informe()}
 
             # Publica únicamente tarjetas de las guías intentadas. Las
             # decisiones ajenas conservan su contenido anterior. Siempre
@@ -209,7 +272,7 @@ def mantener_pendientes_tecnicos(
                 # Ninguna fila cambió: el reporte vigente sigue siendo fiel.
                 return {"ejecutado": True, "elegibles": elegibles, "resueltas": [],
                         "pendientes": sorted(ids & set(filas_pendientes)),
-                        "reporte_regenerado": False}
+                        "reporte_regenerado": False, **_informe()}
 
             reporte = raiz / "reportes" / f"mantenimiento_tecnico_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
             huella_dataset = _sha256_archivo(dataset)
@@ -220,7 +283,8 @@ def mantener_pendientes_tecnicos(
                 )
                 if _sha256_archivo(dataset) != huella_dataset:
                     shutil.rmtree(reporte, ignore_errors=True)
-                    return {"ejecutado": False, "motivo": "DATASET_AVANZO_DURANTE_REPORTE", "elegibles": elegibles}
+                    return {"ejecutado": False, "motivo": "DATASET_AVANZO_DURANTE_REPORTE", "elegibles": elegibles,
+                            "reporte_regenerado": False, **_informe()}
                 escribir_estado_operacion(
                     reporte_vigente=reporte, dataset_operacional=dataset,
                     decisiones_pendientes=(actual / NOMBRE_ARTEFACTO if (actual / NOMBRE_ARTEFACTO).is_file() else None),
@@ -233,6 +297,6 @@ def mantener_pendientes_tecnicos(
             return {"ejecutado": True, "elegibles": elegibles,
                     "resueltas": sorted(ids - set(filas_pendientes)),
                     "pendientes": sorted(ids & set(filas_pendientes)),
-                    "reporte_regenerado": True}
+                    "reporte_regenerado": True, **_informe()}
     except SesionOcupadaError:
         return {"ejecutado": False, "motivo": "OTRA_SESION_ACTIVA", "elegibles": []}

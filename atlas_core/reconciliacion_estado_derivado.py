@@ -488,7 +488,7 @@ CAUSA_SIN_PREGUNTA_HUMANA_PUBLICABLE = "ACCION_HUMANA_SIN_PREGUNTA_PUBLICABLE"
 def _asegurar_via_humana(
     *, raiz: Path, registros: list[dict[str, object]],
     previos: dict[str, dict[str, object]], instante: datetime,
-    persistir,
+    persistir, informe: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     """Invariante: ningún pendiente técnico queda `ESPERANDO_ACCION_HUMANA`
     sin una tarjeta visible. Toda decisión PENDIENTE de la guía la saca de
@@ -499,8 +499,17 @@ def _asegurar_via_humana(
     lee); las que la obtienen salen de la cola y las
     que no admiten pregunta publicable quedan `ESPERANDO_EVIDENCIA_NUEVA`
     con causa explícita. Sin cambio de evidencia, contador ni conocimiento
-    desde la pasada anterior, no se vuelve a consultar (idempotente)."""
+    desde la pasada anterior, no se vuelve a consultar (idempotente).
+
+    `informe` (opcional, sólo observabilidad -- nunca cambia qué se hace):
+    si se entrega, se completa con `limbos_detectados`, `limbos_ya_
+    evaluados` (sin cambio desde la pasada anterior: no se consultan),
+    `limbos_con_tarjeta` (repararon con tarjeta publicada) y `limbos_sin_
+    pregunta_publicable` (pasan a ESPERANDO_EVIDENCIA_NUEVA con causa)."""
     limbo = {str(r["numero_guia"]) for r in registros if r.get("estado_espera") == ESTADO_ESPERA_ACCION_HUMANA}
+    if informe is not None:
+        informe.update(limbos_detectados=sorted(limbo), limbos_ya_evaluados=[],
+                       limbos_con_tarjeta=[], limbos_sin_pregunta_publicable=[])
     if not limbo:
         return registros
     ya_evaluadas = {
@@ -529,6 +538,12 @@ def _asegurar_via_humana(
                 "proxima_oportunidad": None,
             }
         resultado.append(registro)
+    if informe is not None:
+        informe.update(
+            limbos_ya_evaluados=sorted(ya_evaluadas),
+            limbos_con_tarjeta=sorted(con_tarjeta),
+            limbos_sin_pregunta_publicable=sorted(limbo - ya_evaluadas - con_tarjeta),
+        )
     return resultado
 
 
