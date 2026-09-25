@@ -2126,6 +2126,55 @@ _EVENTO_CANONICO_MOBILE = {
 }
 
 
+VIA_VIAJE_CREADO_CON_ESTA_GUIA = "VIAJE_CREADO_CON_ESTA_GUIA"
+
+
+def _viajes_del_reporte_vigente(raiz: Path) -> list[dict]:
+    """Filas de `viajes.csv` del reporte vigente (la MISMA fuente que usa
+    `resolver_enriquecimiento_transporte` y Desktop). Sin reporte o
+    ilegible -> `[]`: nunca se inventa un viaje."""
+    from atlas_core.almacenamiento_portable import leer_estado_operacion
+    from atlas_core.consultas_atlas import cargar_viajes
+
+    estado = leer_estado_operacion(raiz=Path(raiz))
+    reporte_rel = str((estado or {}).get("reporte_vigente", "")).strip()
+    if not reporte_rel:
+        return []
+    ruta_viajes = Path(raiz) / reporte_rel / "viajes.csv"
+    try:
+        return cargar_viajes(ruta_viajes) if ruta_viajes.is_file() else []
+    except OSError:
+        return []
+
+
+def _transporte_de_viaje_creado_con_esta_guia(viajes: list[dict], envio_id: str) -> str:
+    """Caso real 474562 -> 0000360111 (y 474548 -> 0000360098): el primer
+    documento de un transporte nuevo queda `SIN_ASOCIACION` con
+    `numero_transporte` vacío PARA SIEMPRE (la revalidación excluye su
+    propia fila -- regla anti-autoasociación, intacta). El viaje igual
+    existe: lo creó este mismo envío. Se usa la MISMA prueba que Desktop
+    ("Viaje creado con esta guía", `estados_mobile.indexarViajesReporte`):
+    el propio documento `mobile/<envio_id>/...` figura en
+    `evidencias_documentos` de un viaje del reporte vigente. Sólo si hay
+    EXACTAMENTE un viaje así; 0 o >1 -> "" (no se proyecta, se reintenta
+    en la próxima pasada)."""
+    prefijo = f"mobile/{envio_id}/"
+    transportes = []
+    for viaje in viajes:
+        transporte = str(viaje.get("numero_transporte") or "").strip()
+        if not transporte:
+            continue
+        try:
+            evidencias = json.loads(viaje.get("evidencias_documentos") or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(evidencias, list):
+            continue
+        if any(isinstance(d, Mapping) and str(d.get("archivo") or "").startswith(prefijo) for d in evidencias):
+            transportes.append(transporte)
+    return transportes[0] if len(transportes) == 1 else ""
+
+
 def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -> list[dict]:
     """Lleva las incidencias de los envíos GUIA ya ASOCIADOS a un viaje al
     registro canónico `eventos_operacionales.json`, con la MISMA semántica e
@@ -2138,15 +2187,26 @@ def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -
 
     raiz = repositorio.raiz_atlas
     salida: list[dict] = []
+    viajes_reporte: list[dict] | None = None  # se lee una vez, sólo si hace falta
     for registro in repositorio.historial():
         envio_id = str(registro.get("envio_id") or "")
         asociacion = registro.get("resultado_asociacion") or {}
-        transporte = str(asociacion.get("numero_transporte") or "").strip() if isinstance(asociacion, Mapping) else ""
-        if es_evidencia_firmada(registro) or registro.get("estado") != "ASOCIADO" or not transporte:
+        if not isinstance(asociacion, Mapping):
+            asociacion = {}
+        transporte = str(asociacion.get("numero_transporte") or "").strip()
+        if es_evidencia_firmada(registro) or registro.get("estado") != "ASOCIADO":
             continue
         ya = registro.get("eventos_canonicos") or {}
         pendientes = [t for t in tipos_novedad_de(registro) if t in _EVENTO_CANONICO_MOBILE and t not in ya]
         if not pendientes:
+            continue
+        via = None
+        if not transporte and asociacion.get("estado") == "SIN_ASOCIACION":
+            if viajes_reporte is None:
+                viajes_reporte = _viajes_del_reporte_vigente(raiz)
+            transporte = _transporte_de_viaje_creado_con_esta_guia(viajes_reporte, envio_id)
+            via = VIA_VIAJE_CREADO_CON_ESTA_GUIA if transporte else None
+        if not transporte:
             continue
         existentes = {e.get("clave_idempotencia"): e for e in reo.leer_eventos_operacionales(raiz=raiz).get("eventos", [])}
         try:
@@ -2186,6 +2246,9 @@ def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -
                 "tipo_evento": tipo_evento, "estado_incidencia": estado_estadia,
                 "evento_id": evento.get("evento_id"), "en": ahora,
             }
+        if via:
+            for marca in marcas.values():
+                marca["via"] = via
         with bloqueo_sesion(
             repositorio.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
         ):

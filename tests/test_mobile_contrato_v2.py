@@ -268,6 +268,126 @@ def test_evidencia_y_envio_sin_asociar_no_generan_eventos(operacion) -> None:
     assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
 
 
+# ---- viaje creado por la misma guía (caso real 474562 -> 0000360111)
+
+def _publicar_reporte(raiz, viajes):
+    """Reporte vigente mínimo: `viajes` = [(numero_transporte, [envio_id, ...])]."""
+    from atlas_core.almacenamiento_portable import escribir_estado_operacion
+
+    carpeta = raiz / "reportes" / ("r-" + uuid.uuid4().hex)
+    carpeta.mkdir(parents=True)
+    with (carpeta / "viajes.csv").open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=["viaje_id", "numero_transporte", "evidencias_documentos"], delimiter=";")
+        escritor.writeheader()
+        for transporte, envios in viajes:
+            escritor.writerow({
+                "viaje_id": str(uuid.uuid4()), "numero_transporte": transporte,
+                "evidencias_documentos": json.dumps([{"archivo": f"mobile/{e}/original.jpg"} for e in envios]),
+            })
+    escribir_estado_operacion(reporte_vigente=carpeta, raiz=raiz)
+
+
+def _guia_que_crea_viaje(repo, dataset, guia, transporte, tipos='["ESPERA_AUTORIZACION_ESTADIA"]'):
+    envio = _recibir(repo, tipos_novedad=tipos)
+    _procesar_guia(repo, envio, dataset, guia, transporte)
+    registro = repo.cargar(envio)
+    assert registro["estado"] == "ASOCIADO"
+    assert registro["resultado_asociacion"]["estado"] == "SIN_ASOCIACION"
+    assert registro["resultado_asociacion"]["numero_transporte"] == ""
+    return envio
+
+
+def test_viaje_creado_por_la_misma_guia_proyecta_espera_estadia(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_que_crea_viaje(repo, dataset, "474562", "0000360111")
+    _publicar_reporte(repo.raiz_atlas, [("0000360111", [envio])])
+
+    registrar_eventos_canonicos_mobile(repo)
+    registrar_eventos_canonicos_mobile(repo)  # idempotente
+
+    eventos = reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"]
+    assert len(eventos) == 1
+    estadia = eventos[0]
+    assert (estadia["tipo_evento"], estadia["numero_transporte"]) == ("TIENE_ESTADIA", "0000360111")
+    assert estadia["estado"] == "ACTIVO" and estadia["estado_incidencia"] == "ESPERA_ESTADIA"
+    registro = repo.cargar(envio)
+    marca = registro["eventos_canonicos"]["ESPERA_AUTORIZACION_ESTADIA"]
+    assert marca["resultado"] == "CREADO" and marca["via"] == "VIAJE_CREADO_CON_ESTA_GUIA"
+    # la asociación NUNCA se reescribe (regla anti-autoasociación intacta)
+    assert registro["resultado_asociacion"]["estado"] == "SIN_ASOCIACION"
+    assert registro["resultado_asociacion"]["numero_transporte"] == ""
+
+
+def test_viaje_creado_sin_coincidencia_en_reporte_no_proyecta_y_se_reintenta(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_que_crea_viaje(repo, dataset, "474548", "0000360098")
+    _publicar_reporte(repo.raiz_atlas, [("0000360098", ["otro-envio"])])  # 0 coincidencias
+
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+    assert repo.cargar(envio).get("eventos_canonicos") is None  # sin marca: queda reintentable
+
+    _publicar_reporte(repo.raiz_atlas, [("0000360098", [envio])])  # el reporte ya lo incluye
+    registrar_eventos_canonicos_mobile(repo)
+    eventos = reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"]
+    assert [(e["numero_transporte"], e["estado_incidencia"]) for e in eventos] == [("0000360098", "ESPERA_ESTADIA")]
+
+
+def test_viaje_creado_con_dos_coincidencias_no_proyecta(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_que_crea_viaje(repo, dataset, "474570", "0000360120")
+    _publicar_reporte(repo.raiz_atlas, [("0000360120", [envio]), ("0000360121", [envio])])
+
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+    assert repo.cargar(envio).get("eventos_canonicos") is None
+
+
+def test_viaje_creado_pero_envio_en_revision_no_proyecta(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_que_crea_viaje(repo, dataset, "474571", "0000360122")
+    registro = repo.cargar(envio)
+    registro["estado"] = "REQUIERE_REVISION"
+    repo.guardar(envio, registro)
+    _publicar_reporte(repo.raiz_atlas, [("0000360122", [envio])])
+
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+
+
+def test_viaje_creado_espera_y_luego_tiene_estadia_pasa_a_aprobada(operacion) -> None:
+    repo, dataset = operacion
+    espera = _guia_que_crea_viaje(repo, dataset, "474572", "0000360123")
+    _publicar_reporte(repo.raiz_atlas, [("0000360123", [espera])])
+    registrar_eventos_canonicos_mobile(repo)
+    inicial = reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"]
+    assert [e["estado_incidencia"] for e in inicial] == ["ESPERA_ESTADIA"]
+
+    aprobada = _recibir(repo, tipos_novedad='["TIENE_ESTADIA"]')  # misma guía, más tarde
+    _procesar_guia(repo, aprobada, dataset, "474572", "0000360123")
+    registrar_eventos_canonicos_mobile(repo)
+
+    eventos = reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"]
+    assert len(eventos) == 1
+    assert eventos[0]["estado_incidencia"] == "ESTADIA_APROBADA" and eventos[0]["estado_gestion"] == "APROBADA"
+    assert "via" not in repo.cargar(aprobada)["eventos_canonicos"]["TIENE_ESTADIA"]  # viaje ya existente: vía normal
+
+
+def test_viaje_ya_existente_conserva_via_normal_sin_reporte(operacion) -> None:
+    repo, dataset = operacion
+    _asegurar_transportes(dataset, "0000360030")
+    envio = _recibir(repo, tipos_novedad='["ESPERA_AUTORIZACION_ESTADIA"]')
+    _procesar_guia(repo, envio, dataset, "474541", "0000360030")
+    assert repo.cargar(envio)["resultado_asociacion"]["numero_transporte"] == "0000360030"
+
+    registrar_eventos_canonicos_mobile(repo)  # sin reporte vigente: igual que antes
+
+    estadia = _eventos(repo.raiz_atlas)[("TIENE_ESTADIA", "0000360030")]
+    assert estadia["estado_incidencia"] == "ESPERA_ESTADIA"
+    marca = repo.cargar(envio)["eventos_canonicos"]["ESPERA_AUTORIZACION_ESTADIA"]
+    assert marca["resultado"] == "CREADO" and "via" not in marca
+
+
 def test_adaptador_de_consultas_da_identidad_propia_a_cada_incidencia() -> None:
     envios = [
         {"envio_id": "v1", "tipo_novedad": "DOBLE_VUELTA"},
