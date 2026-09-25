@@ -34,6 +34,7 @@ from atlas_core.decisiones_pendientes import (
     guias_destino_conocido_ruta_pendiente,
 )
 from atlas_core.frescura_reconciliacion import _sha256_archivo_o_ausente
+from atlas_core.politica_pendientes_tecnicos import conocimiento_para_guia
 from atlas_core.mobile import RepositorioEnviosMobile, revalidar_asociacion_mobile_sin_ocr
 from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
@@ -372,7 +373,7 @@ from atlas_core.revalidacion_documental import (
 RULESET_VERSION = 25
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
-INTERVALO_REINTENTO = timedelta(hours=24)
+INTERVALO_REINTENTO = timedelta(minutes=30)
 MAX_REINTENTOS_IGUALES_ARRANQUE = 3
 
 # Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA -- caso
@@ -396,7 +397,7 @@ VENTANA_IDEMPOTENCIA_RECONCILIACION_COMPLETA = timedelta(seconds=300)
 # el reintento sólo se evalúa dentro de una reconciliación natural
 # (Desktop/CLI/operación), pero con un ciclo de vida finito y
 # convergente.
-COOLDOWN_REINTENTO_TRANSITORIO = timedelta(hours=6)
+COOLDOWN_REINTENTO_TRANSITORIO = timedelta(minutes=30)
 MAX_REINTENTOS_POR_CLASE = {
     "TRANSITORIO": 5,
     "AGOTABLE": MAX_REINTENTOS_IGUALES_ARRANQUE,
@@ -1776,6 +1777,12 @@ def reconciliar_estado_derivado(
                     direccion_confirmada_por_humano=guia in guias_direccion_confirmada,
                     destino_terminado_por_humano=guia in guias_destino_terminado,
                 ))
+                registro["huella_conocimiento"] = conocimiento_para_guia(
+                    fila, catalogos=catalogos,
+                    decisiones_aplicadas=actual / "decisiones_aplicadas.json",
+                    version_reglas=RULESET_VERSION,
+                    versiones_capacidades=_versiones_cap_actuales(),
+                )
                 registros_despues.append(registro)
             escribir_json_atomico(ruta_pendientes, {
                 "schema_version": 1, "actualizado_en": instante.isoformat(),

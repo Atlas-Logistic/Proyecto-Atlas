@@ -3877,6 +3877,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     proveedor_rutas_fallback=None,
     guias_objetivo: set[str] | None = None,
     guias_excluir_reintento: set[str] | None = None,
+    solo_con_coordenadas: bool = False,
 ) -> dict[str, object]:
     """Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- causa raíz real
     (464588): `destinos_confirmados` (parámetro ya existente en
@@ -4022,6 +4023,11 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                 # (nunca "el primero" ni "el más nuevo").
                 continue
             destino = candidatos_coincidentes[0]
+            # Pasada sólo con conocimiento interno (mantenimiento de
+            # pendientes técnicos): un destino confirmado sin coordenada
+            # exigiría geocodificar -- se abstiene, nunca contradice.
+            if solo_con_coordenadas and (destino.latitud is None or destino.longitud is None):
+                continue
             coordenada_origen = coordenada_ruteo_planta(planta)
             if coordenada_origen is None:
                 continue
@@ -6024,7 +6030,7 @@ def reconciliar_decisiones_origen(
 
 
 def detectar_decisiones_destino_no_resuelto_sin_ocr(
-    *, raiz_atlas: str | Path,
+    *, raiz_atlas: str | Path, guias_objetivo: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Bloque R6 A/B/E -- READ-ONLY, nunca escribe nada. Recorre el
     dataset vigente y devuelve una decisión `DESTINO_NO_RESUELTO`
@@ -6051,6 +6057,8 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
     )
     candidatas: list[dict[str, object]] = []
     for fila in filas:
+        if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
+            continue
         decision = detectar_decision_destino_no_resuelto(
             archivo=fila.get("archivo", ""), fila=fila, carpeta_catalogos=catalogos,
             guias_direccion_confirmada=guias_direccion_confirmada,
@@ -6063,6 +6071,7 @@ def detectar_decisiones_destino_no_resuelto_sin_ocr(
 def reconciliar_decisiones_destino_no_resuelto(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque R6 A/B/E -- publica en `decisiones_pendientes.json` la unión
     de la bandeja pendiente vigente con las decisiones `DESTINO_NO_RESUELTO`
@@ -6083,7 +6092,9 @@ def reconciliar_decisiones_destino_no_resuelto(
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
 
-    candidatas = detectar_decisiones_destino_no_resuelto_sin_ocr(raiz_atlas=raiz)
+    candidatas = detectar_decisiones_destino_no_resuelto_sin_ocr(
+        raiz_atlas=raiz, guias_objetivo=guias_objetivo,
+    )
     # Bloque CONSISTENCIA OPERACIONAL -- ver `reconciliar_decisiones_destino_historicas`.
     with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
         try:
@@ -6091,8 +6102,16 @@ def reconciliar_decisiones_destino_no_resuelto(
             pendientes_actuales = artefacto_actual.get("decisiones", [])
         except (OSError, json.JSONDecodeError):
             pendientes_actuales = []
-        restantes = regenerar_decisiones_persistidas(
-            decisiones=[*pendientes_actuales, *candidatas], carpeta_catalogos=catalogos,
+        if guias_objetivo is None:
+            no_objetivo = []
+            del_objetivo = pendientes_actuales
+        else:
+            no_objetivo = [d for d in pendientes_actuales
+                           if str((d.get("documento") or {}).get("numero_guia", "")).strip() not in guias_objetivo]
+            del_objetivo = [d for d in pendientes_actuales
+                            if str((d.get("documento") or {}).get("numero_guia", "")).strip() in guias_objetivo]
+        regeneradas = regenerar_decisiones_persistidas(
+            decisiones=[*del_objetivo, *candidatas], carpeta_catalogos=catalogos,
             # Bloque CIERRE OPERACIONAL DE PENDIENTE_TECNICO -- pasar el
             # dataset activa el filtro R19 (descarta tarjetas cuyo
             # `motivo_ruta` vigente ya no coincide -- limpieza de tarjetas
@@ -6103,6 +6122,7 @@ def reconciliar_decisiones_destino_no_resuelto(
             ruta_dataset=dataset,
             cache_memoizacion=cache_memoizacion,
         )
+        restantes = [*no_objetivo, *regeneradas]
         bandeja = _generar_artefacto_sin_lock(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
             decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,

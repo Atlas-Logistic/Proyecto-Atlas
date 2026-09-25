@@ -1888,17 +1888,30 @@ def calcular_ruta_con_planta_conocida(
             origen_determinado_por=origen_determinado_por, evidencia_origen=evidencia_origen,
         )
 
-    entrega = resolver_destino_entrega_validado(
-        despachar_a_crudo, proveedor_rutas,
-        punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
-        destinos_confirmados=destinos_confirmados,
-        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
-        contexto_evidencia_b1=contexto_evidencia_b1,
-        contexto_obra=contexto_obra,
-        comuna_territorial_conocida=comuna_territorial_conocida,
-        comuna_confirmada_humano=comuna_confirmada_humano,
-        base_geografica_local=base_geografica_local,
-    )
+    # Misma autoridad canónica que `calcular_ruta_entrega_para_viaje`: un
+    # reintento con planta conocida no vuelve a geocodificar un DESPACHAR A
+    # cuya coordenada ya está confirmada en catálogo (dirección o alias).
+    canonico = _destino_con_coordenada_canonica_para(despachar_a_crudo, destinos_confirmados)
+    if canonico is not None:
+        entrega = ResultadoDestinoEntrega(
+            despachar_a_crudo=despachar_a_crudo,
+            coordenadas=Coordenadas(longitud=float(canonico.longitud), latitud=float(canonico.latitud)),
+            etiqueta_geocodificada=canonico.direccion, confianza=1.0,
+            estado=ESTADO_RESUELTO, localidad=canonico.comuna, region=canonico.region,
+            metodo_confirmacion="COORDENADA_CANONICA_CATALOGO",
+        )
+    else:
+        entrega = resolver_destino_entrega_validado(
+            despachar_a_crudo, proveedor_rutas,
+            punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
+            destinos_confirmados=destinos_confirmados,
+            proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+            contexto_evidencia_b1=contexto_evidencia_b1,
+            contexto_obra=contexto_obra,
+            comuna_territorial_conocida=comuna_territorial_conocida,
+            comuna_confirmada_humano=comuna_confirmada_humano,
+            base_geografica_local=base_geografica_local,
+        )
     if entrega.estado != ESTADO_RESUELTO:
         # Bloque F (destinos degradados/absurdos): un destino RECHAZADO
         # (confianza insuficiente, ambiguo, etc.) nunca debe exponerse como

@@ -441,7 +441,9 @@ class CatalogoDestinos:
             self._validar_duplicado(destinos, destino)
             destinos.append(destino)
             self._escribir(destinos)
-            return destino
+        from atlas_core.revalidacion_reactiva_tecnica import revalidar_tras_cambio_catalogo
+        revalidar_tras_cambio_catalogo(self.ruta, destino=destino)
+        return destino
 
     def editar(
         self,
@@ -501,7 +503,9 @@ class CatalogoDestinos:
             self._validar_duplicado(destinos, editado, excluir_id=actual.destino_id)
             destinos[indice] = editado
             self._escribir(destinos)
-            return editado
+        from atlas_core.revalidacion_reactiva_tecnica import revalidar_tras_cambio_catalogo
+        revalidar_tras_cambio_catalogo(self.ruta, destino=editado)
+        return editado
 
     def confirmar_coordenada_canonica(
         self, destino_id: str, *, latitud: float, longitud: float,
@@ -567,7 +571,9 @@ class CatalogoDestinos:
             )
             destinos[indice] = editado
             self._escribir(destinos)
-            return editado
+        from atlas_core.revalidacion_reactiva_tecnica import revalidar_tras_cambio_catalogo
+        revalidar_tras_cambio_catalogo(self.ruta, destino=editado)
+        return editado
 
     def desactivar(
         self, destino_id: str, *, modificacion_manual: bool = False

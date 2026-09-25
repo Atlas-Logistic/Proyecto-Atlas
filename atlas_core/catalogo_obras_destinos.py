@@ -624,7 +624,9 @@ class CatalogoObrasDestinos:
             relaciones[relaciones.index(relacion)] = nueva
             self._validar_catalogo(obras, relaciones)
             self._escribir(obras, relaciones)
-            return nueva
+        from atlas_core.revalidacion_reactiva_tecnica import revalidar_tras_cambio_catalogo
+        revalidar_tras_cambio_catalogo(self.ruta, obra_id=nueva.obra_id)
+        return nueva
 
     def rechazar_relacion(self, relacion_id: str, *, actor: str, observaciones: str = "") -> RelacionObraDestino:
         return self._decidir_no_confirmada(
