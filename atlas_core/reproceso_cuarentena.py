@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.evidencia_documental import resolver_ruta_evidencia
 from atlas_core.procesamiento_masivo import COLUMNAS, procesar_archivo
+from atlas_core.ocr_provider import crear_proveedor_ocr
 from atlas_core.rutas.modelos import EstadoRuta, ResultadoGeocodificacion, ResultadoRuta
 from atlas_core.validadores import validar_rut_chileno
 from atlas_core.modelos import EstadoValidacion
@@ -117,7 +118,13 @@ def generar_candidato(*,raiz_atlas,workspace,documentos:Iterable[DocumentoSelecc
         if _sha(e.ruta)!=s.sha256:raise ValueError(f"SHA_INCORRECTO:{s.archivo}")
     ws.mkdir(parents=True)
     hashes=_catalogos(raiz/"catalogos_privados",ws/"catalogos");docs=[]
-    for s in seleccion:
+    # Mismo proveedor compartido que usa el reparador canónico.  El
+    # fallback de procesar_archivo es EasyOCR legacy; no es equivalente a
+    # la ingesta actual y por eso nunca se usa aquí por omisión.
+    proveedor_propio=proveedor_ocr is None
+    proveedor_efectivo=proveedor_ocr or crear_proveedor_ocr()
+    try:
+     for s in seleccion:
         actual=por.get(s.archivo)
         if actual is None:raise ValueError(f"FILA_NO_ENCONTRADA:{s.archivo}")
         if transporte_esperado and actual.get("numero_transporte","").strip()!=transporte_esperado:raise ValueError(f"TRANSPORTE_ACTUAL_INESPERADO:{s.archivo}")
@@ -125,8 +132,10 @@ def generar_candidato(*,raiz_atlas,workspace,documentos:Iterable[DocumentoSelecc
         if e.ruta is None:raise ValueError(f"ORIGINAL_NO_ENCONTRADO:{s.archivo}")
         if _sha(e.ruta)!=s.sha256:raise ValueError(f"SHA_INCORRECTO:{s.archivo}")
         copia=ws/"originales"/Path(s.archivo).name;copia.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(e.ruta,copia)
-        sin_red=ProveedorRutasSinRed();extraido=procesar_archivo(copia,proveedor=proveedor_ocr,carpeta_catalogos=ws/"catalogos",proveedor_rutas=sin_red,proveedor_geocodificacion_fallback=sin_red,directorio_trazas_ocr=ws/"trazas_ocr",directorio_orientacion=ws/"orientacion",referencia_imagen_traza=s.archivo)
+        sin_red=ProveedorRutasSinRed();extraido=procesar_archivo(copia,proveedor=proveedor_efectivo,carpeta_catalogos=ws/"catalogos",proveedor_rutas=sin_red,proveedor_geocodificacion_fallback=sin_red,directorio_trazas_ocr=ws/"trazas_ocr",directorio_orientacion=ws/"orientacion",referencia_imagen_traza=s.archivo)
         candidata=_candidata(actual,extraido);docs.append({"archivo":s.archivo,"sha256_esperado":s.sha256,"sha256_observado":_sha(e.ruta),"fila_actual":actual,"fila_candidata":candidata,"diff":{k:{"antes":actual.get(k,""),"despues":candidata.get(k,"")} for k in COLUMNAS if actual.get(k,"")!=candidata.get(k,"")},"advertencias":[],"llamadas_red_bloqueadas":sin_red.llamadas})
+    finally:
+     if proveedor_propio and hasattr(proveedor_efectivo,"cerrar"): proveedor_efectivo.cerrar()
     errores=_validar(docs,transporte_esperado,cardinalidad_esperada)
     m={"schema_version":1,"estado":"APTO_PARA_PROMOCION" if not errores else "NO_APTO_PARA_PROMOCION","creado_en":datetime.now(timezone.utc).isoformat(),"commit_motor":_commit(),"transporte_esperado":transporte_esperado or "","cardinalidad_esperada":cardinalidad_esperada,"catalogos_sha256":hashes,"documentos":docs,"validaciones":errores,"aislamiento":{"red":"BLOQUEADA","b1":"NO_EJECUTADO","dataset":"NO_MODIFICADO","catalogos_productivos":"SOLO_LECTURA","caches_productivas":"NO_MODIFICADAS"}}
     escribir_json_atomico(ws/NOMBRE_MANIFIESTO,m);return m
