@@ -1796,11 +1796,13 @@ def procesar_archivo(
     proveedor: object = None,
     carpeta_catalogos: str | Path | None = None,
     proveedor_rutas: object = None,
+    proveedor_geocodificacion_fallback: object = None,
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
     recolector_decisiones: Callable[[list[dict[str, object]]], None] | None = None,
     servicio_telemetria: object = None,
     planta_origen_informada: str | None = None,
     directorio_trazas_ocr: str | Path | None = None,
+    directorio_orientacion: str | Path | None = None,
     referencia_imagen_traza: str | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> dict[str, str]:
@@ -1886,8 +1888,10 @@ def procesar_archivo(
             orientacion = normalizar_orientacion(
                 Path(ruta), _leer_bloques_de,
                 directorio_persistencia=(
-                    directorio_orientacion_para_raiz(Path(carpeta_catalogos).parent)
-                    if carpeta_catalogos is not None else None
+                    Path(directorio_orientacion)
+                    if directorio_orientacion is not None
+                    else (directorio_orientacion_para_raiz(Path(carpeta_catalogos).parent)
+                          if carpeta_catalogos is not None else None)
                 ),
                 referencia=referencia_imagen_traza or (contexto_traza[1] if contexto_traza else None),
             )
@@ -2941,9 +2945,12 @@ def procesar_archivo(
             # encontró.
             from atlas_core.rutas.nominatim import NominatimGeocoder
 
-            proveedor_geocodificacion_fallback = ProveedorRutasConCacheGeocodificacion(
-                NominatimGeocoder(pais=pais_operacion),
-                RepositorioCacheGeocodificacion(raiz_atlas=Path(carpeta_catalogos).parent),
+            proveedor_geocodificacion_fallback = (
+                proveedor_geocodificacion_fallback
+                or ProveedorRutasConCacheGeocodificacion(
+                    NominatimGeocoder(pais=pais_operacion),
+                    RepositorioCacheGeocodificacion(raiz_atlas=Path(carpeta_catalogos).parent),
+                )
             )
             try:
                 from atlas_core.catalogo_destinos import (
