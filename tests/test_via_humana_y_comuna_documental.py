@@ -45,6 +45,12 @@ def _sin_limbo(op: Operacion) -> None:
             assert guia in con_tarjeta, guia
 
 
+def _fila_destino_desconocido(guia: str, planta_id: str, **extra) -> dict:
+    """Obra/destino que ningún humano confirmó: la pregunta humana sigue."""
+    return _fila(guia, AGOTABLE, planta_id, obra_destino="OBRA SIN DESTINO CONOCIDO",
+                 despachar_a_crudo="PASAJE SIN UBICAR 12", **extra)
+
+
 @pytest.fixture
 def op(tmp_path):
     return Operacion(tmp_path)
@@ -53,17 +59,25 @@ def op(tmp_path):
 # ------------------------------------- 1. AGOTABLE agotado => tarjeta visible
 
 
-def test_1_agotable_agotado_con_identidad_confirmada_publica_tarjeta(op):
+def test_1_agotable_agotado_con_identidad_confirmada_queda_en_espera_tecnica(op):
+    """Política ESPERA TÉCNICA (reemplaza a la tarjeta UBICACION_RUTEABLE
+    de c969d6a): identidad confirmada por un humano, sólo falta ubicarla ->
+    sin tarjeta, esperando evidencia nueva con causa explícita."""
     op.confirmar_destino_de_obra(con_coordenadas=False)
     op.sembrar([_fila("480001", AGOTABLE, op.planta_id)], intentos=2)
     op.mantener()  # 3er intento: agota
-    tarjetas = _tarjetas(op, "480001")
-    assert [t["tipo"] for t in tarjetas] == ["DESTINO_NO_RESUELTO"]
-    assert "REGISTRAR_DIRECCION" in tarjetas[0]["acciones_permitidas"]
-    assert tarjetas[0]["motivos"] == ["COORDENADA_NO_CONFIRMADA"]
-    # La pregunta no es la identidad (ya confirmada) sino su ubicación.
-    assert tarjetas[0]["contexto"]["identidad_destino_confirmada"] is True
-    assert tarjetas[0]["contexto"]["falta"] == "UBICACION_RUTEABLE"
+    assert _tarjetas(op, "480001") == []
+    registro = op.pendientes()["480001"]
+    assert registro["estado_espera"] == "ESPERANDO_EVIDENCIA_NUEVA"
+    assert registro["causa_siguiente_accion"] == "DIRECCION_CONFIRMADA_POR_HUMANO__GEOCODER_NO_RESUELVE"
+
+
+def test_1c_agotable_agotado_con_destino_desconocido_publica_tarjeta(op):
+    op.sembrar([_fila_destino_desconocido("480001", op.planta_id)], intentos=2)
+    op.mantener()
+    (tarjeta,) = _tarjetas(op, "480001")
+    assert tarjeta["tipo"] == "DESTINO_NO_RESUELTO"
+    assert "REGISTRAR_DIRECCION" in tarjeta["acciones_permitidas"]
     assert "480001" not in op.pendientes()
 
 
@@ -104,8 +118,7 @@ def test_2b_sin_pregunta_publicable_queda_evidencia_nueva_con_causa(op):
 
 
 def test_2c_helper_de_reconciliacion_publica_o_degrada(op):
-    op.confirmar_destino_de_obra(con_coordenadas=False)
-    op.sembrar([_fila("480001", AGOTABLE, op.planta_id)], intentos=3)
+    op.sembrar([_fila_destino_desconocido("480001", op.planta_id)], intentos=3)
     registros = list(op.pendientes().values())
     for r in registros:
         r["estado_espera"] = "ESPERANDO_ACCION_HUMANA"
@@ -125,7 +138,7 @@ def test_2c_helper_de_reconciliacion_publica_o_degrada(op):
 def test_3_ejecuciones_repetidas_no_duplican_tarjeta_ni_reescriben(op, monkeypatch):
     op.confirmar_destino_de_obra(con_coordenadas=False)
     op.sembrar([
-        _fila("480001", AGOTABLE, op.planta_id),
+        _fila_destino_desconocido("480001", op.planta_id),
         _fila("480003", "GEOCODIFICACION_NUMERO_INCOMPATIBLE: 38 != 3800", op.planta_id),
     ], intentos=3)
     op.mantener()
@@ -172,12 +185,13 @@ def test_4b_identidad_confirmada_con_ubicacion_no_pregunta(op):
     assert _tarjetas(op, "480001") == []
 
 
-def test_4c_identidad_confirmada_sin_ubicacion_si_pregunta_otra_cosa(op):
+def test_4c_identidad_confirmada_sin_ubicacion_no_vuelve_a_preguntar(op):
     op.confirmar_destino_de_obra(con_coordenadas=False)
     op.sembrar([_fila("480001", AGOTABLE, op.planta_id)], intentos=3)
     op.mantener()
-    (tarjeta,) = _tarjetas(op, "480001")
-    assert tarjeta["contexto"]["falta"] == "UBICACION_RUTEABLE"
+    assert _tarjetas(op, "480001") == []
+    assert op.pendientes()["480001"]["causa_siguiente_accion"] == (
+        "DIRECCION_CONFIRMADA_POR_HUMANO__GEOCODER_NO_RESUELVE")
 
 
 # --------------------------- 5. variante OCR inválida + comuna válida
@@ -203,7 +217,7 @@ def test_5b_textos_documentales_incluyen_traza_b1_persistida():
     assert textos_documentales_destino({"resultado_atlas_ia_json": "no-json"}) == ()
 
 
-def test_5c_tarjeta_sugiere_la_comuna_valida_aunque_el_catalogo_tenga_la_variante(op):
+def test_5c_destino_confirmado_con_variante_de_comuna_espera_sin_tocar_el_catalogo(op):
     destino_id = op.confirmar_destino_de_obra(con_coordenadas=False)
     catalogo = op.catalogos / "destinos_maestros.json"
     contenido = json.loads(catalogo.read_text(encoding="utf-8"))
@@ -214,8 +228,9 @@ def test_5c_tarjeta_sugiere_la_comuna_valida_aunque_el_catalogo_tenga_la_variant
     op.sembrar([_fila("480001", AGOTABLE, op.planta_id,
                       resultado_atlas_ia_json=_b1_con_direccion(f"{DIRECCION} PUDAHEL PUDAHUEL"))], intentos=3)
     op.mantener()
-    (tarjeta,) = _tarjetas(op, "480001")
-    assert tarjeta["contexto"]["comuna_sugerida"] == "Pudahuel"
+    # Política ESPERA TÉCNICA: identidad confirmada -> sin tarjeta (la
+    # comuna válida sigue usándose en el reintento, ver test_5d).
+    assert _tarjetas(op, "480001") == []
     # No se inventan coordenadas ni se reescribe el catálogo.
     destino = op.destinos.obtener(destino_id)
     assert destino.latitud is None and destino.longitud is None and destino.comuna == "PUDAHEL"

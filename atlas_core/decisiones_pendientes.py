@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
+from atlas_core.investigacion_documental import (
+    archivos_en_investigacion, excluir_decisiones_en_investigacion, raiz_desde_actual,
+)
 
 # Bloque CONSISTENCIA OPERACIONAL -- lock físico ÚNICO para
 # `decisiones_pendientes.json`, el mismo nombre en TODO el codebase (nunca
@@ -761,6 +764,87 @@ def guias_destino_conocido_ruta_pendiente(
         texto_documental = normalizar_nombre_destino(despachar_a)
         if any(normalizar_nombre_destino(d.direccion) == texto_documental for d in destinos):
             resultado.add(guia)
+    return frozenset(resultado)
+
+
+CAUSA_ESPERA_DESTINO_CONFIRMADO = "DIRECCION_CONFIRMADA_POR_HUMANO__GEOCODER_NO_RESUELVE"
+
+
+def guias_destino_confirmado_sin_ubicacion_ruteable(
+    *, carpeta_catalogos: str | Path, ruta_dataset: str | Path,
+) -> frozenset[str]:
+    """Política ESPERA TÉCNICA (casos reales 472541/472647): guías cuyo
+    destino ya tiene IDENTIDAD confirmada a nivel humano y a las que sólo
+    les falta una ubicación ruteable. Todas estas condiciones a la vez:
+
+    - `motivo_ruta` vigente es un motivo AGOTABLE de destino (candidato
+      ambiguo/no confirmado, nunca un callejón documental) y la ruta no
+      está calculada;
+    - la obra de la fila tiene una relación obra<->destino CONFIRMADA a
+      nivel `CONFIRMACION_HUMANA` (mismo filtro que `guias_destino_
+      conocido_ruta_pendiente`);
+    - exactamente UN destino confirmado de esa obra coincide con el
+      `despachar_a_crudo` de la fila (sin ambigüedad sobre QUÉ destino es);
+    - ese destino no tiene coordenadas (si las tuviera, el reintento
+      interno ya calcula la ruta).
+
+    No mira intentos: quien la usa decide cuándo aplica (el ciclo de vida
+    sólo tras agotar los intentos AGOTABLES; la regeneración sólo sobre la
+    tarjeta que se publica tras agotarlos). Para estas guías no se vuelve
+    a pedir la dirección: el pendiente técnico queda ESPERANDO_EVIDENCIA_
+    NUEVA con `CAUSA_ESPERA_DESTINO_CONFIRMADO` y se reactiva por cambio de
+    huella (catálogo/coordenadas, evidencia de la guía, reglas). Nunca
+    escribe nada ni registra respuestas humanas."""
+    import csv as _csv
+
+    from atlas_core.atlas_ia.registro_problemas import motivo_ruta_base
+
+    try:
+        with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as _archivo:
+            filas = [dict(f) for f in _csv.DictReader(_archivo, delimiter=";")]
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    candidatas = [
+        f for f in filas
+        if str(f.get("numero_guia", "")).strip()
+        and motivo_ruta_base(str(f.get("motivo_ruta", ""))) in MOTIVOS_DESTINO_TECNICO_AGOTABLE
+        and str(f.get("estado_ruta", "")).strip() != "RUTA_CALCULADA"
+        and str(f.get("despachar_a_crudo", "")).strip()
+        and str(f.get("obra_destino", "")).strip()
+    ]
+    if not candidatas:
+        return frozenset()
+    carpeta = Path(carpeta_catalogos)
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        obras = catalogo_obras.listar_obras()
+    except (OSError, ValueError):
+        return frozenset()
+    obras_humanas = _obras_con_relacion_confirmada_por_humano(catalogo_obras)
+    if not obras_humanas:
+        return frozenset()
+    resultado: set[str] = set()
+    for fila in candidatas:
+        clave = normalizar_nombre_obra(str(fila["obra_destino"]))
+        if not any(o.obra_id in obras_humanas and clave in catalogo_obras._claves_obra(o) for o in obras):
+            continue
+        try:
+            destinos = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=str(fila["obra_destino"]))
+        except (OSError, ValueError):
+            continue
+        texto = normalizar_nombre_destino(str(fila["despachar_a_crudo"]))
+        coincidentes = [
+            d for d in destinos
+            if (calle := normalizar_nombre_destino(d.direccion.split(",", 1)[0]))
+            and direccion_confirmada_coincide(calle, texto)
+        ]
+        if len({d.destino_id for d in coincidentes}) != 1:
+            continue
+        if all(d.latitud is None or d.longitud is None for d in coincidentes):
+            resultado.add(str(fila["numero_guia"]).strip())
     return frozenset(resultado)
 
 
@@ -2631,6 +2715,27 @@ def regenerar_decisiones_persistidas(
     ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
     cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
 ) -> list[dict[str, object]]:
+    """Ver `_regenerar_decisiones_persistidas`. Cuarentena EN_INVESTIGACION
+    (`atlas_core.investigacion_documental`): las decisiones de un documento
+    en cuarentena activa nunca entran ni salen de la regeneración -- ni las
+    persistidas ni las que los detectores internos vuelvan a producir."""
+    archivos = (
+        archivos_en_investigacion(raiz_desde_actual(Path(ruta_dataset).parent))
+        if ruta_dataset is not None else frozenset()
+    )
+    resultado = _regenerar_decisiones_persistidas(
+        decisiones=excluir_decisiones_en_investigacion(decisiones, archivos),
+        carpeta_catalogos=carpeta_catalogos, ids_resueltos=ids_resueltos,
+        ruta_dataset=ruta_dataset, cache_memoizacion=cache_memoizacion,
+    )
+    return excluir_decisiones_en_investigacion(resultado, archivos) if archivos else resultado
+
+
+def _regenerar_decisiones_persistidas(
+    *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
+    ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
+    cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
+) -> list[dict[str, object]]:
     """R3.2.1: reclasifica decisiones YA PERSISTIDAS (p. ej. las de un
     artefacto `decisiones_pendientes.json` generado antes de R3.2) sin volver
     a leer datos documentales ni ejecutar OCR.
@@ -2702,6 +2807,21 @@ def regenerar_decisiones_persistidas(
         if firma_memoizacion in cache_memoizacion:
             return cache_memoizacion[firma_memoizacion]
     carpeta = Path(carpeta_catalogos)
+    # Política ESPERA TÉCNICA: calculado una sola vez y sólo si hace falta.
+    _memo_espera_tecnica: list[frozenset[str]] = []
+
+    def _guias_espera_tecnica() -> frozenset[str]:
+        if ruta_dataset is None:
+            return frozenset()
+        if not _memo_espera_tecnica:
+            try:
+                _memo_espera_tecnica.append(guias_destino_confirmado_sin_ubicacion_ruteable(
+                    carpeta_catalogos=carpeta, ruta_dataset=ruta_dataset,
+                ))
+            except (OSError, ValueError, AttributeError):
+                _memo_espera_tecnica.append(frozenset())
+        return _memo_espera_tecnica[0]
+
     motivos_por_guia: dict[str, set[str]] | None = None
     codigos_motivo_documental: frozenset[str] = frozenset()
     # Bloque RESOLUCIÓN R19 -- caso real 472037: cuando una revalidación
@@ -3794,6 +3914,13 @@ def regenerar_decisiones_persistidas(
                     and numero_guia_destino not in guias_direccion_confirmada
                     and all(d.latitud is None or d.longitud is None for d in coincidentes)
                 )
+                if falta_ubicacion_de_identidad_confirmada and numero_guia_destino in _guias_espera_tecnica():
+                    # Política ESPERA TÉCNICA: identidad confirmada por un
+                    # humano, sin ambigüedad, sólo falta ubicarla -- no se
+                    # vuelve a pedir la dirección; el pendiente técnico
+                    # queda esperando evidencia nueva (ver
+                    # `guias_destino_confirmado_sin_ubicacion_ruteable`).
+                    continue
                 if falta_ubicacion_de_identidad_confirmada:
                     decision["contexto"] = {
                         **(decision.get("contexto") or {}),
@@ -3995,7 +4122,11 @@ def _generar_artefacto_sin_lock(
         pass
     decisiones_unicas: list[dict[str, object]] = []
     ids_vistos: set[str] = set()
-    for decision_original in decisiones:
+    # Cuarentena EN_INVESTIGACION: único escritor de la bandeja -- ningún
+    # camino (detección, regeneración, mantenimiento, Mobile) puede
+    # publicar una decisión de un documento en cuarentena activa.
+    en_investigacion = archivos_en_investigacion(raiz_desde_actual(salida.parent))
+    for decision_original in excluir_decisiones_en_investigacion(decisiones, en_investigacion):
         decision = dict(decision_original)
         decision_id = str(decision.get("decision_id", ""))
         if decision_id in ids_terminales:

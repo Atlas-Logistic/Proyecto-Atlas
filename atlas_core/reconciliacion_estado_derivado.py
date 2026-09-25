@@ -31,6 +31,7 @@ from atlas_core.decisiones_pendientes import (
     _motivo_ruta_base,
     _obra_esta_ausente,
     clasificar_fallo_tecnico,
+    guias_destino_confirmado_sin_ubicacion_ruteable,
     guias_destino_conocido_ruta_pendiente,
 )
 from atlas_core.frescura_reconciliacion import _sha256_archivo_o_ausente
@@ -583,6 +584,7 @@ def _registro_pendiente(fila: dict[str, str], previo: dict[str, object] | None) 
 def _ciclo_vida_pendiente(
     registro: dict[str, object], *, instante: datetime,
     direccion_confirmada_por_humano: bool, destino_terminado_por_humano: bool,
+    destino_confirmado_sin_ubicacion: bool = False,
 ) -> dict[str, object]:
     """Bloque GEOGRAFÍA 2B -- estado de ciclo de vida explícito de un
     pendiente técnico, calculado tras el reintento de esta pasada. Nunca
@@ -663,6 +665,17 @@ def _ciclo_vida_pendiente(
         return _resultado(
             ESTADO_ESPERA_PROVEEDOR,
             "PROVEEDOR_EXTERNO_NO_DISPONIBLE_TRAS_MAX_INTENTOS",
+            None,
+        )
+    # Política ESPERA TÉCNICA: AGOTABLE agotado cuyo destino ya tiene
+    # identidad confirmada por un humano (sin ambigüedad) y sólo le falta
+    # una ubicación ruteable -- no se vuelve a pedir la dirección; espera
+    # evidencia nueva (cambio de huella: catálogo/coordenadas, evidencia de
+    # la guía, reglas o capacidad), igual que un destino ya respondido.
+    if destino_confirmado_sin_ubicacion and clase == "AGOTABLE":
+        return _resultado(
+            ESTADO_ESPERA_EVIDENCIA,
+            "DIRECCION_CONFIRMADA_POR_HUMANO__GEOCODER_NO_RESUELVE",
             None,
         )
     # AGOTABLE agotado: la tarjeta accionable ya se publica (intentos >=
@@ -1821,6 +1834,12 @@ def reconciliar_estado_derivado(
             guias_destino_terminado = _guias_destino_terminado_por_humano(
                 actual / "decisiones_aplicadas.json"
             )
+            try:
+                guias_espera_tecnica = guias_destino_confirmado_sin_ubicacion_ruteable(
+                    carpeta_catalogos=catalogos, ruta_dataset=dataset,
+                )
+            except (OSError, ValueError, AttributeError):
+                guias_espera_tecnica = frozenset()
             registros_despues = []
             for fila in pendientes_despues:
                 guia = str(fila.get("numero_guia", ""))
@@ -1841,6 +1860,7 @@ def reconciliar_estado_derivado(
                     registro, instante=instante,
                     direccion_confirmada_por_humano=guia in guias_direccion_confirmada,
                     destino_terminado_por_humano=guia in guias_destino_terminado,
+                    destino_confirmado_sin_ubicacion=guia in guias_espera_tecnica,
                 ))
                 registro["huella_conocimiento"] = conocimiento_para_guia(
                     fila, catalogos=catalogos,

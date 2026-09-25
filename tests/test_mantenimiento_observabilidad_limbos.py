@@ -27,7 +27,10 @@ def _sembrar_escenario(op: Operacion, *, con_elegible: bool = True) -> None:
     ajenos: un AGOTABLE ya agotado (con pregunta publicable) y un
     DETERMINISTA cuya pregunta la política suprime."""
     op.confirmar_destino_de_obra(con_coordenadas=False)
-    filas = [_fila(LIMBO_CON_TARJETA, AGOTABLE, op.planta_id), _fila(LIMBO_SIN_PREGUNTA, DETERMINISTA, op.planta_id)]
+    # El limbo con pregunta publicable tiene un destino que nadie confirmó.
+    filas = [_fila(LIMBO_CON_TARJETA, AGOTABLE, op.planta_id, obra_destino="OBRA SIN DESTINO CONOCIDO",
+                   despachar_a_crudo="PASAJE SIN UBICAR 12"),
+             _fila(LIMBO_SIN_PREGUNTA, DETERMINISTA, op.planta_id)]
     if con_elegible:
         filas.insert(0, _fila(ELEGIBLE, AGOTABLE, op.planta_id))
     op.sembrar(filas)
@@ -135,8 +138,8 @@ def test_resultado_es_json_serializable_para_el_log(op):
 def test_asegurar_via_humana_sin_informe_conserva_contrato(op):
     """El parámetro `informe` es opcional: el llamador de siempre
     (reconciliación) no cambia."""
-    op.confirmar_destino_de_obra(con_coordenadas=False)
-    op.sembrar([_fila(LIMBO_CON_TARJETA, AGOTABLE, op.planta_id)], intentos=3)
+    op.sembrar([_fila(LIMBO_CON_TARJETA, AGOTABLE, op.planta_id, obra_destino="OBRA SIN DESTINO CONOCIDO",
+                      despachar_a_crudo="PASAJE SIN UBICAR 12")], intentos=3)
     registros = list(op.pendientes().values())
     for r in registros:
         r["estado_espera"] = "ESPERANDO_ACCION_HUMANA"

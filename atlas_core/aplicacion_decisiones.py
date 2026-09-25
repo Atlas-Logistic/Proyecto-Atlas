@@ -10,6 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from atlas_core.investigacion_documental import decision_en_investigacion
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogo_clientes import (
     CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
@@ -457,6 +458,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             if incidencia_confirmada is not None:
                 resultado["incidencia_documental_id"] = incidencia_confirmada.incidencia_id
             return resultado
+        # Cuarentena EN_INVESTIGACION: una decisión retenida nunca se aplica
+        # (ni aprendizaje ni respuesta humana) mientras siga activa.
+        if decision_en_investigacion(raiz, decision_id) is not None:
+            raise ErrorAplicacionDecision("El documento de esta decisión está en investigación; no se puede aplicar.")
         try: artefacto = json.loads(artefacto_ruta.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error: raise ErrorAplicacionDecision("No se pudo leer la bandeja vigente.") from error
         coincidencias = [d for d in artefacto.get("decisiones", []) if d.get("decision_id") == decision_id]

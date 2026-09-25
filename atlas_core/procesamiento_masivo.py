@@ -44,6 +44,7 @@ from atlas_core.catalogos import (
     resolver_patente_canonica,
 )
 from atlas_core.normalizacion_semantica import normalizar_nombre_societario
+from atlas_core.investigacion_documental import archivos_en_investigacion, raiz_desde_actual
 from atlas_core.orientacion_documental import directorio_orientacion_para_raiz, normalizar_orientacion
 from atlas_core.validadores import (
     EstadoValidacion,
@@ -4108,6 +4109,11 @@ def _herramientas_b1_disponibles(
         herramientas["VERIFICACION_EXTERNA"] = herramienta_verificacion_externa(buscador)
 
     filas_lista = list(filas)
+    # Cuarentena EN_INVESTIGACION: su evidencia no sirve de historial a B1.
+    if carpeta_catalogos is not None:
+        en_investigacion = archivos_en_investigacion(Path(carpeta_catalogos).parent)
+        if en_investigacion:
+            filas_lista = [f for f in filas_lista if str(f.get("archivo", "")) not in en_investigacion]
     if filas_lista:
         from atlas_core.atlas_ia.herramientas import (
             herramienta_documentos_relacionados, herramienta_evidencia_historial_origen,
@@ -4196,8 +4202,14 @@ def _ejecutar_ia_operacional(
     # decidió cambiar -- y se aplica más abajo sobre una relectura FRESCA,
     # bajo lock, sólo en el momento de escribir.
     deltas: dict[str, dict[str, str]] = {}
+    # Cuarentena EN_INVESTIGACION: B1 nunca investiga ni aprende de un
+    # documento cuya evidencia está bajo investigación.
+    en_investigacion = archivos_en_investigacion(
+        raiz_desde_actual(ruta_csv.parent)
+        or (Path(carpeta_catalogos).parent if carpeta_catalogos is not None else None)
+    )
     for fila in filas:
-        if fila.get("archivo") not in archivos_objetivo:
+        if fila.get("archivo") not in archivos_objetivo or fila.get("archivo") in en_investigacion:
             continue
         fila_antes = dict(fila)
         if not _fila_requiere_atencion_operacional(fila):

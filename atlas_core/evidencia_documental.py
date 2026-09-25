@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico, ruta_operacion
+from atlas_core.investigacion_documental import archivos_en_investigacion
 from atlas_core.ingesta_pdf import (
     MIME_PDF, PAGINA_OK, PNG_CORRUPTO, TEXTO_CORRUPTO, detectar_mime_documento, leer_manifiestos_pdf,
     rasterizar_pdf, separar_identificador_pagina_pdf, verificar_pagina_derivada,
@@ -289,7 +290,9 @@ def mover_evidencia_resuelta_sin_revision_pendiente(
     necesidad real. Queda fuera de alcance de este bloque a propósito
     -- ver informe."""
     raiz = Path(raiz_atlas)
-    pendientes = documentos_con_revision_pendiente(decisiones_pendientes)
+    # Un documento EN_INVESTIGACION conserva su evidencia activa aunque no
+    # tenga decisiones pendientes (están retenidas por la cuarentena).
+    pendientes = documentos_con_revision_pendiente(decisiones_pendientes) | archivos_en_investigacion(raiz)
     carpeta_entradas = raiz / "operacion" / "entradas"
     carpeta_resuelta = ruta_operacion("evidencia_resuelta", raiz=raiz)
     movidos: list[str] = []
@@ -341,7 +344,7 @@ def purgar_evidencia_resuelta_vencida(
     pendiente` como salvaguarda activa -- nunca purga un `archivo` que,
     por cualquier motivo, haya vuelto a tener una decisión PENDIENTE."""
     raiz = Path(raiz_atlas)
-    pendientes = documentos_con_revision_pendiente(decisiones_pendientes)
+    pendientes = documentos_con_revision_pendiente(decisiones_pendientes) | archivos_en_investigacion(raiz)
     carpeta_resuelta = ruta_operacion("evidencia_resuelta", raiz=raiz)
     purgados: list[str] = []
     if not carpeta_resuelta.is_dir():

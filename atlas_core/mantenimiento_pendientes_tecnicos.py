@@ -15,6 +15,7 @@ from atlas_core.decisiones_pendientes import (
     _guias_con_direccion_confirmada_por_humano,
     _guias_destino_terminado_por_humano,
     clasificar_fallo_tecnico,
+    guias_destino_confirmado_sin_ubicacion_ruteable,
     guias_destino_conocido_ruta_pendiente,
 )
 from atlas_core.politica_pendientes_tecnicos import conocimiento_para_guia, elegibilidad
@@ -239,6 +240,12 @@ def mantener_pendientes_tecnicos(
             except (OSError, ValueError, AttributeError):
                 pass
             terminadas = _guias_destino_terminado_por_humano(actual / "decisiones_aplicadas.json")
+            try:
+                espera_tecnica = guias_destino_confirmado_sin_ubicacion_ruteable(
+                    carpeta_catalogos=raiz / "catalogos_privados", ruta_dataset=dataset,
+                )
+            except (OSError, ValueError, AttributeError):
+                espera_tecnica = frozenset()
             registros: list[dict] = []
             for guia, fila in filas_pendientes.items():
                 previo = previos.get(guia)
@@ -262,6 +269,7 @@ def mantener_pendientes_tecnicos(
                     registro, instante=instante,
                     direccion_confirmada_por_humano=guia in humanas,
                     destino_terminado_por_humano=guia in terminadas,
+                    destino_confirmado_sin_ubicacion=guia in espera_tecnica,
                 ))
                 registros.append(registro)
             def _persistir(regs: list[dict]) -> None:
