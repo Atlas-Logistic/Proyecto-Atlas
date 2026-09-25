@@ -26,7 +26,7 @@ from atlas_core.deduplicacion_ingesta import (
     sha256_binario,
 )
 from atlas_core.ingesta_pdf import (
-    MIME_PDF, PaginaPdfRasterizada, detectar_mime_documento, directorio_evidencia_pdf_para_dataset,
+    MIME_PDF, PaginaPdfRasterizada, ProveedorPaginaPdf, detectar_mime_documento, directorio_evidencia_pdf_para_dataset,
     PAGINA_OK, construir_asociacion_evidencia_adicional, evidencia_adicional_ya_registrada,
     identificador_pagina_pdf, leer_manifiestos_pdf, proveedor_para_documento, rasterizar_pdf,
     registrar_evidencia_adicional, separar_identificador_pagina_pdf, verificar_pagina_derivada,
@@ -44,7 +44,7 @@ from atlas_core.catalogos import (
     resolver_patente_canonica,
 )
 from atlas_core.normalizacion_semantica import normalizar_nombre_societario
-from atlas_core.orientacion_documental import normalizar_orientacion
+from atlas_core.orientacion_documental import directorio_orientacion_para_raiz, normalizar_orientacion
 from atlas_core.validadores import (
     EstadoValidacion,
     rut_documentalmente_confirmado_invalido,
@@ -1872,11 +1872,25 @@ def procesar_archivo(
     # Bloque ORIENTACIÓN DOCUMENTAL (caso real 480603/480604): TODA lectura
     # OCR de este documento (texto, bloques y focal) usa la MISMA imagen
     # -- la original o su copia girada -- para que la geometría etiqueta->
-    # valor sea coherente. `ruta` sigue siendo la identidad/evidencia.
+    # valor sea coherente. `ruta` sigue siendo la identidad/evidencia
+    # (el original nunca se toca). Con catálogos (operación real: Desktop,
+    # Mobile, reparadores) la versión girada y su registro auditable quedan
+    # persistidos en `<raiz_atlas>/operacion/evidencia_orientada` -- misma
+    # raíz derivada que la caché de geocodificación. Una página PDF con
+    # texto embebido no se evalúa: sus líneas no salen de los píxeles.
     orientacion = None
     try:
-        orientacion = normalizar_orientacion(Path(ruta), _leer_bloques_de)
-        weakref.finalize(orientacion, orientacion.limpiar)
+        if not isinstance(proveedor, ProveedorPaginaPdf):
+            contexto_traza = _CONTEXTO_TRAZA_OCR.get()
+            orientacion = normalizar_orientacion(
+                Path(ruta), _leer_bloques_de,
+                directorio_persistencia=(
+                    directorio_orientacion_para_raiz(Path(carpeta_catalogos).parent)
+                    if carpeta_catalogos is not None else None
+                ),
+                referencia=referencia_imagen_traza or (contexto_traza[1] if contexto_traza else None),
+            )
+            weakref.finalize(orientacion, orientacion.limpiar)
     except Exception as exc:
         logger.warning("Normalización de orientación omitida: %s: %s", type(exc).__name__, exc)
     ruta_ocr = orientacion.ruta_ocr if orientacion is not None else ruta
