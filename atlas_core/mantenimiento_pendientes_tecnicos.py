@@ -100,6 +100,22 @@ def _tarjetas_pendientes(actual: Path) -> dict[str, dict[str, str]]:
     }
 
 
+def _salidas_de_cola(dataset: Path, guias: set[str]) -> list[dict[str, str]]:
+    """Estado ACTUAL en el dataset de cada guía que salió de la cola."""
+    if not guias:
+        return []
+    filas = {str(f.get("numero_guia", "")).strip(): f for f in _leer_filas(dataset)}
+    return [
+        {
+            "numero_guia": guia,
+            "estado_ruta_actual": str(filas.get(guia, {}).get("estado_ruta", "")),
+            "motivo_ruta_actual": str(filas.get(guia, {}).get("motivo_ruta", "")),
+            "estado_operacional_actual": str(filas.get(guia, {}).get("estado_operacional", "")),
+        }
+        for guia in sorted(guias)
+    ]
+
+
 def _observabilidad(
     *, ids: set[str], via_humana: dict, tarjetas_antes: dict, tarjetas_despues: dict,
 ) -> dict[str, object]:
@@ -170,12 +186,13 @@ def mantener_pendientes_tecnicos(
             ids = {e["numero_guia"] for e in elegibles}
             tarjetas_antes = _tarjetas_pendientes(actual)
             via_humana: dict[str, object] = {}
+            salidas_de_cola: list[dict[str, str]] = []
 
             def _informe() -> dict[str, object]:
-                return _observabilidad(
+                return {"salidas_de_cola": salidas_de_cola, **_observabilidad(
                     ids=ids, via_humana=via_humana, tarjetas_antes=tarjetas_antes,
                     tarjetas_despues=_tarjetas_pendientes(actual),
-                )
+                )}
             huella_dataset_inicial = _sha256_archivo(dataset)
             if ids:
                 # Conocimiento humano/local antes de cualquier geocodificador.
@@ -204,6 +221,13 @@ def mantener_pendientes_tecnicos(
 
             filas_pendientes = {str(f.get("numero_guia", "")).strip(): f for f in
                                 _pendientes_ruta(dataset, actual / NOMBRE_ARTEFACTO)}
+            # Sólo observabilidad: guías que estaban en la cola al empezar y
+            # ya no pertenecen a la reconstruida SIN haber sido intentadas en
+            # esta pasada (ésas van en `resueltas`) -- p. ej. otro flujo les
+            # calculó la ruta entre dos pasadas. No altera la cola.
+            salidas_de_cola.extend(_salidas_de_cola(
+                dataset, set(previos) - set(filas_pendientes) - ids,
+            ))
             # Mismo conjunto que `reconciliar_estado_derivado` para el ciclo
             # de vida: identidad respondida por REGISTRAR_DIRECCION o por
             # una relación obra<->destino humana que ya coincide.

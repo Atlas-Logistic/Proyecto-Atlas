@@ -146,3 +146,69 @@ def test_asegurar_via_humana_sin_informe_conserva_contrato(op):
         persistir=op.escribir_pendientes, informe=informe,
     ) == []
     assert informe["limbos_con_tarjeta"] == [LIMBO_CON_TARJETA]
+
+
+# ------------------------------------------------ salidas de la cola
+
+def _resolver_fuera_del_mantenimiento(op: Operacion, guia: str) -> None:
+    """Otro flujo (p. ej. Mobile) calcula la ruta entre dos pasadas."""
+    import csv
+    from test_ciclo_pendientes_tecnicos_simulado import _escribir_csv
+    with op.dataset.open(encoding="utf-8-sig", newline="") as f:
+        filas = list(csv.DictReader(f, delimiter=";"))
+    for fila in filas:
+        if fila["numero_guia"] == guia:
+            fila.update(estado_ruta="RUTA_CALCULADA", motivo_ruta="", estado_operacional="OK", distancia_km="522.3")
+    _escribir_csv(op.dataset, filas)
+
+
+def test_guia_resuelta_por_otro_flujo_aparece_en_salidas_de_cola(op):
+    """Caso real 474597: estaba en la cola (cooldown vigente, no elegible) y
+    otro flujo la dejó RUTA_CALCULADA; la pasada no tiene elegibles."""
+    op.sembrar([_fila("474597", AGOTABLE, op.planta_id), _fila(LIMBO_SIN_PREGUNTA, DETERMINISTA, op.planta_id)],
+               minutos=5)
+    _resolver_fuera_del_mantenimiento(op, "474597")
+    resultado = op.mantener()
+
+    assert resultado["elegibles"] == [] and resultado["motivo"] == "HUELLAS_ACTUALIZADAS"
+    assert resultado["salidas_de_cola"] == [{
+        "numero_guia": "474597", "estado_ruta_actual": "RUTA_CALCULADA",
+        "motivo_ruta_actual": "", "estado_operacional_actual": "OK",
+    }]
+    assert resultado["resueltas"] == [], "no se mezcla con lo resuelto por intentos de esta pasada"
+    assert "474597" not in op.pendientes()
+    # El resto del informe sigue presente.
+    for clave in ("limbos", "tarjetas_publicadas", "tarjetas_retiradas", "pendientes", "reporte_regenerado"):
+        assert clave in resultado
+
+
+def test_salida_de_cola_no_se_reporta_de_nuevo_en_la_pasada_siguiente(op):
+    op.sembrar([_fila("474597", AGOTABLE, op.planta_id), _fila(LIMBO_SIN_PREGUNTA, DETERMINISTA, op.planta_id)],
+               minutos=5)
+    _resolver_fuera_del_mantenimiento(op, "474597")
+    op.mantener()
+    segunda = op.mantener()
+    assert segunda["salidas_de_cola"] == []
+    assert segunda["motivo"] == "SIN_ELEGIBLES"
+
+
+def test_resuelta_por_el_intento_de_la_pasada_va_en_resueltas_no_en_salidas(op):
+    op.confirmar_destino_de_obra(con_coordenadas=True)
+    op.sembrar([_fila("480001", AGOTABLE, op.planta_id)], intentos=2)
+    resultado = op.mantener()
+    assert resultado["resueltas"] == ["480001"]
+    assert resultado["salidas_de_cola"] == []
+
+
+def test_elegible_y_salida_ajena_en_la_misma_pasada(op):
+    """Una elegible que sigue pendiente + una guía ajena que salió."""
+    op.sembrar([_fila(ELEGIBLE, AGOTABLE, op.planta_id), _fila("474597", AGOTABLE, op.planta_id)])
+    registros = op.pendientes()
+    registros["474597"]["ultimo_intento"] = (AHORA).isoformat()  # cooldown vigente: no elegible
+    op.escribir_pendientes(list(registros.values()))
+    _resolver_fuera_del_mantenimiento(op, "474597")
+    resultado = op.mantener()
+    assert [e["numero_guia"] for e in resultado["elegibles"]] == [ELEGIBLE]
+    assert resultado["pendientes"] == [ELEGIBLE] and resultado["resueltas"] == []
+    assert [s["numero_guia"] for s in resultado["salidas_de_cola"]] == ["474597"]
+    assert op.pendientes()[ELEGIBLE]["intentos_misma_evidencia"] == 2, "intentos intactos"
