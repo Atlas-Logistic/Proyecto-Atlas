@@ -1974,8 +1974,10 @@ class PlanImpactoCoordenadaCanonica:
 def _destino_con_coordenada_canonica_para(
     despachar_a_crudo: str, destinos: Iterable[Destino],
 ) -> Destino | None:
-    """Devuelve una única autoridad canónica exacta, o se abstiene."""
+    """Devuelve una única autoridad canónica por dirección o alias exacto."""
     clave_documental = normalizar_nombre_destino(despachar_a_crudo)
+    if not clave_documental:
+        return None
     candidatos = []
     for destino in destinos:
         if (
@@ -1987,8 +1989,14 @@ def _destino_con_coordenada_canonica_para(
             )
             or destino.latitud is None
             or destino.longitud is None
-            or normalizar_nombre_destino(destino.direccion) != clave_documental
         ):
+            continue
+        claves_destino = {
+            normalizar_nombre_destino(texto)
+            for texto in (destino.direccion, *destino.aliases)
+            if texto
+        }
+        if clave_documental not in claves_destino:
             continue
         # Defensa para objetos creados fuera del lector estricto del catálogo.
         try:

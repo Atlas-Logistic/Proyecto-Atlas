@@ -1,5 +1,6 @@
 """P0 Geografia: coordenada canónica confirmada, sin acceso a G."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from atlas_core.catalogo_destinos import (
@@ -13,6 +14,7 @@ from atlas_core.catalogo_clientes import CatalogoClientes
 from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.rutas.destino_entrega import (
     FUENTE_COORDENADA_CANONICA_CONFIRMADA,
+    _destino_con_coordenada_canonica_para,
     calcular_ruta_entrega_para_viaje,
     plan_impacto_coordenada_canonica,
     revalidar_coordenada_canonica_focal,
@@ -27,14 +29,15 @@ TEXTO_RENCA = "GUIA DESPACHO PLANTA ORIGEN RENCA ACEROS AZA S A"
 
 
 def _destino(*, direccion=NOVICIADO, estado="CONFIRMADO", latitud=-33.25,
-              longitud=-70.88, fuente=FUENTE_COORDENADA_CANONICA_CONFIRMADA):
+              longitud=-70.88, fuente=FUENTE_COORDENADA_CANONICA_CONFIRMADA,
+              aliases=(), comuna="LAMPA"):
     ahora = datetime(2026, 9, 17, tzinfo=timezone.utc).isoformat()
     return Destino(
         destino_id="destino-noviciado", cliente_id="cliente-mena",
         nombre_destino="OBRA NOVICIADO",
         nombre_normalizado=normalizar_nombre_destino("OBRA NOVICIADO"),
-        codigo_destino="", direccion=direccion, comuna="LAMPA", region="RM",
-        pais="CHILE", latitud=latitud, longitud=longitud, aliases=(),
+        codigo_destino="", direccion=direccion, comuna=comuna, region="RM",
+        pais="CHILE", latitud=latitud, longitud=longitud, aliases=aliases,
         estado_calidad=estado, estado_vigencia=EstadoVigenciaDestino.ACTIVO.value,
         fuente=fuente, observacion="COORDENADA_CANONICA_CONFIRMADA actor=prueba",
         fecha_creacion=ahora, fecha_modificacion=ahora,
@@ -73,6 +76,58 @@ def test_noviciado_canonico_reutiliza_una_coordenada_en_cuatro_guias(tmp_path):
     assert {r.metodo_confirmacion_destino for r in resultados} == {"COORDENADA_CANONICA_CATALOGO"}
     assert proveedor.llamadas_geocodificacion == 0
     assert proveedor.llamadas_ruta == 4
+
+
+def _destino_uruguay():
+    return _destino(
+        direccion="URUGUAY 15", aliases=("URUGUAY 15 SANTIAGO LA CISTERNA",),
+        latitud=-33.529673, longitud=-70.660891, comuna="LA CISTERNA",
+    )
+
+
+def test_acceso_rapido_resuelve_direccion_canonica(tmp_path):
+    destino = _destino_uruguay()
+    proveedor = ProveedorRutasSimulado()
+    resultado = _ruta(tmp_path, proveedor, destino, "uruguay 15")
+
+    assert resultado.estado_ruta == EstadoRuta.RUTA_CALCULADA.value
+    assert (resultado.latitud_entrega, resultado.longitud_entrega) == (
+        "-33.529673", "-70.660891",
+    )
+    assert resultado.localidad_entrega == "LA CISTERNA"
+    assert resultado.metodo_confirmacion_destino == "COORDENADA_CANONICA_CATALOGO"
+    assert proveedor.llamadas_geocodificacion == 0
+
+
+def test_acceso_rapido_resuelve_alias_explicito_al_mismo_destino(tmp_path):
+    destino = _destino_uruguay()
+    assert _destino_con_coordenada_canonica_para("URUGUAY 15", [destino]) is destino
+    assert _destino_con_coordenada_canonica_para(
+        "Uruguay 15 Santiago La Cisterna", [destino],
+    ) is destino
+    proveedor = ProveedorRutasSimulado()
+    resultado = _ruta(tmp_path, proveedor, destino, "Uruguay 15 Santiago La Cisterna")
+    assert resultado.estado_ruta == EstadoRuta.RUTA_CALCULADA.value
+    assert (resultado.latitud_entrega, resultado.longitud_entrega) == (
+        "-33.529673", "-70.660891",
+    )
+    assert resultado.localidad_entrega == "LA CISTERNA"
+    assert resultado.metodo_confirmacion_destino == "COORDENADA_CANONICA_CATALOGO"
+    assert proveedor.llamadas_geocodificacion == 0
+
+
+def test_acceso_rapido_no_acepta_texto_parecido_no_registrado():
+    destino = _destino_uruguay()
+    assert _destino_con_coordenada_canonica_para("URUGUAY 15 LA CISTERNA", [destino]) is None
+    assert _destino_con_coordenada_canonica_para("URUGUAY 105", [destino]) is None
+
+
+def test_acceso_rapido_se_abstiene_ante_alias_ambiguo():
+    destino = _destino_uruguay()
+    otro = replace(destino, destino_id="otro-destino", direccion="OTRA CALLE 1")
+    assert _destino_con_coordenada_canonica_para(
+        "URUGUAY 15 SANTIAGO LA CISTERNA", [destino, otro],
+    ) is None
 
 
 def test_plan_impacto_y_revalidacion_solo_tocan_guias_exactas():
