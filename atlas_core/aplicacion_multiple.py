@@ -52,12 +52,15 @@ enviar (lote vacío) nunca escribe nada."""
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+_LOGGER = logging.getLogger(__name__)
 from atlas_core.aplicacion_decisiones import (
     TIPOS_ELEGIBLES_DIFERIR_REVALIDACION_GLOBAL,
     DecisionObsoletaError,
@@ -188,6 +191,7 @@ def aplicar_decisiones_multiples(
     resultados: list[ResultadoItemMultiple] = []
     algo_aplicado = False
     planes_diferidos: list[dict[str, object]] = []
+    detenido_por = ""
     for solicitud in solicitudes:
         decision_id = str(solicitud.get("decision_id", "")).strip()
         decision_inicial = vigentes_iniciales.get(decision_id)
@@ -196,6 +200,14 @@ def aplicar_decisiones_multiples(
         numero_guia = str(documento.get("numero_guia", ""))
         tipo = str((decision_inicial or {}).get("tipo", ""))
         accion = str(solicitud.get("accion", ""))
+        if detenido_por:
+            resultados.append(ResultadoItemMultiple(
+                decision_id=decision_id, archivo=archivo, numero_guia=numero_guia,
+                tipo=tipo, accion=accion, aplicada=False,
+                motivo=f"No procesada: el lote se detuvo tras un error inesperado en {detenido_por}. "
+                       "Sigue pendiente; puede reintentarse.",
+            ))
+            continue
         if decision_inicial is None:
             resultados.append(ResultadoItemMultiple(
                 decision_id=decision_id, archivo=archivo, numero_guia=numero_guia,
@@ -246,6 +258,23 @@ def aplicar_decisiones_multiples(
                 tipo=tipo, accion=accion, aplicada=False,
                 motivo="Otra operación de Atlas está escribiendo esta misma decisión en este momento. "
                        "Vuelve a intentar esta tarjeta en unos segundos.",
+            ))
+        except Exception as error:  # noqa: BLE001 -- caso real 474823
+            # Un error INESPERADO (no de dominio) dentro de
+            # `aplicar_decision_obra`: esa función ya revirtió su propia
+            # decisión (catálogos + ledger; el dataset nunca se reemplaza a
+            # medias). Antes escapaba del lote: abortaba sin informar qué se
+            # aplicó, sin intentar el resto y SIN el cierre agregado de lo ya
+            # aplicado. Ahora queda explícito por ítem, el lote se DETIENE
+            # (no se sigue escribiendo ante una falla desconocida) y el
+            # cierre corre igual para lo que sí se aplicó.
+            _LOGGER.exception("Error inesperado aplicando la decisión %s del lote", decision_id)
+            detenido_por = f"la guía {numero_guia or decision_id}"
+            resultados.append(ResultadoItemMultiple(
+                decision_id=decision_id, archivo=archivo, numero_guia=numero_guia,
+                tipo=tipo, accion=accion, aplicada=False,
+                motivo=f"Error inesperado ({type(error).__name__}): {error}. "
+                       "Esta decisión se revirtió y sigue pendiente.",
             ))
 
     plan_impacto_ejecutado = False

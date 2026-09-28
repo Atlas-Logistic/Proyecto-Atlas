@@ -11,12 +11,37 @@ from atlas_core.almacenamiento_portable import SesionOcupadaError
 from atlas_core.aplicacion_multiple import aplicar_decisiones_multiples
 
 
+def leer_solicitudes(entrada=None) -> list:
+    """Lee el lote como UTF-8 ESTRICTO desde los bytes de stdin.
+
+    Caso real 474823: `sys.stdin.read()` en Windows decodifica una tubería
+    con la página de códigos local (cp1252 + surrogateescape). Desktop
+    (Node) escribe UTF-8, así que "COMPAÑÍA" llegaba como
+    "COMPAÃ\\u2018Ã\\udc8d" -- mojibake silencioso para Ñ y un surrogate
+    para Í que rompió la escritura del dataset. Se leen los bytes y se
+    decodifican como UTF-8 (tolerando BOM); un texto no UTF-8 se rechaza
+    explícitamente en vez de aceptarse corrupto."""
+    entrada = sys.stdin if entrada is None else entrada
+    buffer = getattr(entrada, "buffer", None)
+    texto = buffer.read().decode("utf-8-sig") if buffer is not None else entrada.read()
+    return json.loads(texto or "[]")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--raiz-atlas", required=True)
     parser.add_argument("--actor", default="JAVIER_DESKTOP")
     args = parser.parse_args()
-    solicitudes = json.loads(sys.stdin.read() or "[]")
+    try:
+        solicitudes = leer_solicitudes()
+    except ValueError as error:  # UnicodeDecodeError / JSON inválido: nada se aplica
+        print(json.dumps({
+            "resultados": [], "total_solicitadas": 0, "total_aplicadas": 0,
+            "reconciliacion_ejecutada": False,
+            "reconciliacion_motivo": f"El lote recibido no es JSON UTF-8 válido; no se aplicó nada ({type(error).__name__}).",
+            "plan_impacto_ejecutado": False, "plan_impacto_guias": 0, "plan_impacto_duracion_ms": 0.0,
+        }, ensure_ascii=True))
+        return
     try:
         resultado = aplicar_decisiones_multiples(
             raiz_atlas=args.raiz_atlas, solicitudes=solicitudes, actor=args.actor,

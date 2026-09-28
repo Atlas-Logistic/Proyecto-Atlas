@@ -301,6 +301,11 @@ def _reporte_vigente_valido(raiz: Path, estado: dict | None) -> bool:
 
 
 def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
+    # Caso real 474823: un surrogate suelto en cualquier valor abortaba la
+    # escritura UTF-8 a mitad de archivo. Se sanea sólo lo inválido (con
+    # trazabilidad en el log); el texto Unicode válido queda intacto.
+    from atlas_core.texto_unicode import sanear_filas_csv
+    sanear_filas_csv(filas)
     temporal: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -314,7 +319,9 @@ def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> No
             archivo.flush()
             os.fsync(archivo.fileno())
         os.replace(temporal, ruta_csv)
-    except OSError:
+    except BaseException:
+        # Cualquier fallo (no sólo OSError) debe retirar el temporal parcial:
+        # en 474823 un UnicodeEncodeError dejó un .tmp truncado en actual/.
         if temporal is not None:
             temporal.unlink(missing_ok=True)
         raise

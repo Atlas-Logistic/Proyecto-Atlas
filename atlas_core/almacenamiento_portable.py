@@ -326,12 +326,21 @@ def escribir_json_atomico(ruta: str | Path, contenido: object) -> None:
             prefix=f".{ruta.name}.", suffix=".tmp", delete=False,
         ) as archivo:
             temporal = Path(archivo.name)
-            json.dump(contenido, archivo, ensure_ascii=False, indent=2)
+            try:
+                json.dump(contenido, archivo, ensure_ascii=False, indent=2)
+            except UnicodeEncodeError:
+                # Caso real 474823: un surrogate suelto abortaba la escritura
+                # UTF-8. Se reescribe el temporal saneando sólo lo inválido
+                # (U+FFFD, con trazabilidad en el log).
+                from atlas_core.texto_unicode import sanear_texto
+                archivo.seek(0)
+                archivo.truncate()
+                archivo.write(sanear_texto(json.dumps(contenido, ensure_ascii=False, indent=2), ubicacion=ruta.name))
             archivo.write("\n")
             archivo.flush()
             os.fsync(archivo.fileno())
         os.replace(temporal, ruta)
-    except OSError:
+    except BaseException:
         if temporal is not None:
             temporal.unlink(missing_ok=True)
         raise
