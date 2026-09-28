@@ -234,13 +234,13 @@ def _construir_consultas_investigacion(contexto: ContextoRazonamiento) -> tuple[
         if obra and obra.upper() not in _AUSENTE:
             consultas.append(f"{valor}, empresa/obra {obra}, Chile -- ¿es una dirección real y en qué comuna?")
         if cliente and cliente.upper() not in _AUSENTE and cliente != obra:
-            consultas.append(f"{valor}, cliente {cliente}, Región Metropolitana, Chile -- ¿es una dirección real y en qué comuna?")
+            consultas.append(f"{valor}, cliente {cliente}, Chile -- ¿es una dirección real y en qué comuna?")
         if not consultas:
             # Sin obra/cliente utilizable -- único caso donde se investiga
             # la dirección sola, con contexto territorial explícito
             # (nunca sin país/región, ver Bloque TERRITORIAL T1/
             # RESOLUCIÓN R16).
-            consultas.append(f"{valor}, Santiago, Región Metropolitana, Chile -- ¿es una dirección real y en qué comuna?")
+            consultas.append(f"{valor}, Chile -- ¿es una dirección real y en qué comuna?")
     else:
         # `valor` es un NOMBRE (empresa/obra/destino) -- la pregunta es
         # sobre la RELACIÓN con la dirección de entrega ya conocida,
