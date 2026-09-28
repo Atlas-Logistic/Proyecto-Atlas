@@ -384,8 +384,7 @@ def recopilar_evidencia_destino(
     determinista, nunca por número de guía ni por el texto de una
     dirección en particular:
 
-    1. Obra relacionada (comportamiento original, sin cambio): otro
-       documento de la MISMA obra destino que ya tiene una entrega
+    1. Obra relacionada: otro documento de la MISMA obra y cliente que ya tiene una entrega
        resuelta (`estado_ruta == RUTA_CALCULADA`) aporta esa dirección.
     2. Extracción documental confiable de ESTA fila: causa raíz real de
        472623/472624 -- la ÚNICA vía de evidencia para DESTINO exigía una
@@ -402,6 +401,7 @@ def recopilar_evidencia_destino(
        cruza a otro transporte, una misma dirección en transportes
        distintos es coincidencia, no corroboración."""
     obra = _normalizar_texto(fila.get("obra_destino"))
+    cliente = _normalizar_texto(fila.get("cliente"))
     valor_propio = str(fila.get("despachar_a_crudo", "")).strip()
     evidencias: list[EvidenciaIA] = []
 
@@ -410,6 +410,8 @@ def recopilar_evidencia_destino(
             if otra is fila:
                 continue
             if _normalizar_texto(otra.get("obra_destino")) != obra:
+                continue
+            if _normalizar_texto(otra.get("cliente")) != cliente:
                 continue
             if str(otra.get("estado_ruta", "")).strip() != "RUTA_CALCULADA":
                 continue

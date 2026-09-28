@@ -1713,13 +1713,20 @@ def _obra_confirmada_en_catalogo(
 
 
 def _revalidar_contaminacion_destino_final(
-    motivos: list[str], resultado_entrega: Mapping[str, object],
+    motivos: list[str], resultado_entrega: Mapping[str, object], *, destino_lineal: str = "",
 ) -> None:
-    """Retira in-place sólo una contaminación ya ausente tras corroborar."""
+    """Retira contaminación resuelta por geometría o destino geocodificado convergente."""
     motivo = MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION.value
     if motivo not in motivos:
         return
     destino = str(resultado_entrega.get("despachar_a_crudo", "")).strip()
+    if (
+        destino and destino_lineal and destino != destino_lineal
+        and evaluar_credibilidad_direccion(destino_lineal).nivel == NivelCredibilidad.INVALIDO
+        and evaluar_credibilidad_direccion(destino).nivel == NivelCredibilidad.CONFIABLE
+    ):
+        motivos.remove(motivo)
+        return
     direccion = str(resultado_entrega.get("direccion_entrega", "")).strip()
     ambos_confiables = all(
         evaluar_credibilidad_direccion(valor).nivel == NivelCredibilidad.CONFIABLE
@@ -2893,9 +2900,8 @@ def procesar_archivo(
         _motivo(MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA)
     if evaluar_credibilidad_entidad_nombre(datos.get("cliente")).nivel != NivelCredibilidad.CONFIABLE:
         _motivo(MotivoRevisionDocumento.CLIENTE_POSIBLEMENTE_INVALIDO)
-    resultado_credibilidad_destino = evaluar_credibilidad_direccion(
-        (extraer_identificadores_destino(textos).despachar_a or "").strip()
-    )
+    destino_lineal = (extraer_identificadores_destino(textos).despachar_a or "").strip()
+    resultado_credibilidad_destino = evaluar_credibilidad_direccion(destino_lineal)
     if resultado_credibilidad_destino.motivo == "DESTINO_FRAGMENTO_TRUNCADO":
         _motivo(MotivoRevisionDocumento.DESTINO_FRAGMENTO_TRUNCADO)
     elif resultado_credibilidad_destino.motivo == "DESTINO_CONTAMINADO_POR_OTRA_SECCION":
@@ -3274,10 +3280,11 @@ def procesar_archivo(
 
     # R1: los motivos de credibilidad se detectan sobre la lectura temprana,
     # pero logística puede haber producido después un destino corroborado.
-    # Retiramos únicamente la contaminación que ya no se reproduce en el
-    # valor final y cuya dirección confirmada converge exactamente; cualquier
-    # discrepancia o contaminación residual conserva la revisión.
-    _revalidar_contaminacion_destino_final(motivos_documento, resultado_entrega)
+    # La lectura geométrica puede sustituir un lineal contaminado aunque
+    # aún no exista punto geocodificado; la ruta pendiente se evalúa aparte.
+    _revalidar_contaminacion_destino_final(
+        motivos_documento, resultado_entrega, destino_lineal=destino_lineal,
+    )
 
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 

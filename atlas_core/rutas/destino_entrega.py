@@ -54,6 +54,7 @@ from atlas_core.geografia.base_local import (
     evidencia_local_para_direccion,
 )
 from atlas_core.catalogo_plantas import Planta
+from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_direccion
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
     limpiar_sufijo_chofer_pegado,
@@ -2683,6 +2684,7 @@ def resolver_entrega_documento(
     if bloques is not None and (
         not despachar_a_crudo
         or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
+        or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
     ):
         try:
             decision_geometrica = _extraer_despachar_a_geometrico(list(bloques))

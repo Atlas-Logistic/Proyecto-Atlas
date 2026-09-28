@@ -3060,8 +3060,9 @@ def _regenerar_decisiones_persistidas(
     # VIGENTE de la fila (misma lectura `filas_por_guia` que ya usa R19,
     # sin OCR ni red) es la comparación fresca correcta para ESTE origen.
     #
-    # Deliberadamente restringido a `MOTIVOS_DESTINO_CONTAMINADO_
-    # DOCUMENTAL` -- NUNCA a una decisión cuyo motivo venga de
+    # Requiere un motivo en `MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL`,
+    # incluso si la tarjeta fusionó además un motivo de ruta. NUNCA a una
+    # decisión cuyo motivo venga sólo de
     # `motivo_ruta` (`detectar_decision_destino_no_resuelto`): para esas,
     # R19 (más abajo) ya compara la señal correcta (el código de
     # `motivo_ruta`, no el texto de `valor_documental`) y es la única
@@ -3087,7 +3088,7 @@ def _regenerar_decisiones_persistidas(
                 str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO"
                 and str(decision.get("campo", "")) == "despachar_a_crudo"
                 and bool(decision.get("motivos"))
-                and {str(m) for m in decision.get("motivos") or []} <= MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL
+                and {str(m) for m in decision.get("motivos") or []} & MOTIVOS_DESTINO_CONTAMINADO_DOCUMENTAL
                 and (
                     fila_vigente := filas_por_guia.get(
                         str((decision.get("documento") or {}).get("numero_guia", ""))
