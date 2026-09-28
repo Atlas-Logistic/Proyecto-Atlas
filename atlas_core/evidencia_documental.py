@@ -88,7 +88,82 @@ def _prefijo_mobile(archivo: str) -> tuple[str, str] | None:
     return None
 
 
-def resolver_ruta_evidencia(raiz_atlas: str | Path, archivo: str) -> RutaEvidencia:
+# Bloque RELECTURA CON EVIDENCIA MEJOR (caso real 474699) -- Desktop
+# guarda cada arrastre en su propio lote (``operacion/entradas/<marca>/``),
+# así que una foto nueva de una guía ya ingresada convive con la original
+# bajo el MISMO `archivo`. Este registro dice cuál de ellas es la evidencia
+# VIGENTE de cada documento (la que la reextracción promovió) y conserva
+# el historial de todas las relecturas, promovidas o rechazadas. Sin
+# entrada en el registro, la resolución es la de siempre (primer lote).
+NOMBRE_REGISTRO_RELECTURAS = "relecturas_documentales.json"
+RELECTURA_PROMOVIDA = "PROMOVIDA"
+RELECTURA_RECHAZADA = "RECHAZADA"
+
+
+def ruta_registro_relecturas(raiz_atlas: str | Path) -> Path:
+    return Path(raiz_atlas) / "operacion" / NOMBRE_REGISTRO_RELECTURAS
+
+
+def leer_registro_relecturas(raiz_atlas: str | Path) -> dict:
+    try:
+        contenido = json.loads(ruta_registro_relecturas(raiz_atlas).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        contenido = {}
+    documentos = contenido.get("documentos") if isinstance(contenido, dict) else None
+    return {"schema_version": 1, "documentos": documentos if isinstance(documentos, dict) else {}}
+
+
+def registrar_relectura(
+    raiz_atlas: str | Path, *, archivo: str, lote: str, sha256: str, resultado: str,
+    motivo: str = "", anterior: Mapping[str, str] | None = None,
+    detalle: Mapping[str, object] | None = None,
+    reloj=lambda: datetime.now(timezone.utc),
+) -> dict:
+    """Anexa una relectura al historial de `archivo`. Sólo `resultado ==
+    RELECTURA_PROMOVIDA` cambia la evidencia vigente; nunca borra nada."""
+    raiz = Path(raiz_atlas)
+    instante = reloj().astimezone(timezone.utc).isoformat()
+    with bloqueo_sesion(raiz / "operacion", "relecturas_documentales"):
+        registro = leer_registro_relecturas(raiz)
+        documento = registro["documentos"].setdefault(archivo, {"vigente": None, "historial": []})
+        entrada = {
+            "lote": lote, "sha256": sha256, "resultado": resultado, "motivo": motivo,
+            "anterior": dict(anterior or {}), "registrado_en_utc": instante, **dict(detalle or {}),
+        }
+        documento.setdefault("historial", []).append(entrada)
+        if resultado == RELECTURA_PROMOVIDA:
+            documento["vigente"] = {"lote": lote, "sha256": sha256, "desde_utc": instante}
+        escribir_json_atomico(ruta_registro_relecturas(raiz), registro)
+    return entrada
+
+
+def relectura_ya_registrada(raiz_atlas: str | Path, archivo: str, sha256: str) -> bool:
+    """El mismo contenido ya fue evaluado como relectura de `archivo`
+    (promovido o rechazado): volver a arrastrarlo no reprocesa nada."""
+    documento = leer_registro_relecturas(raiz_atlas)["documentos"].get(archivo) or {}
+    return any(str(h.get("sha256", "")) == sha256 for h in documento.get("historial") or [])
+
+
+def _evidencia_vigente_registrada(raiz: Path, archivo: str) -> Path | None:
+    documento = leer_registro_relecturas(raiz)["documentos"].get(archivo) or {}
+    vigente = documento.get("vigente") or {}
+    lote, sha = str(vigente.get("lote", "")), str(vigente.get("sha256", ""))
+    if not lote or not sha:
+        return None
+    carpeta_lote = raiz / "operacion" / "entradas" / lote
+    candidato = carpeta_lote / archivo
+    try:
+        candidato.resolve().relative_to(carpeta_lote.resolve())
+    except ValueError:
+        return None
+    if candidato.is_file() and _sha256_archivo(candidato) == sha:
+        return candidato
+    return None
+
+
+def resolver_ruta_evidencia(
+    raiz_atlas: str | Path, archivo: str, *, excluir_lote: str | Path | None = None,
+) -> RutaEvidencia:
     """Único punto de resolución GUÍA -> imagen original. Busca, en
     orden, en las mismas ubicaciones donde Desktop/Mobile YA dejan la
     evidencia (nunca un índice/base de datos nueva): Mobile
@@ -97,7 +172,12 @@ def resolver_ruta_evidencia(raiz_atlas: str | Path, archivo: str) -> RutaEvidenc
     cualquier lote -- el llamador no necesita saber en cuál quedó) y,
     por último, el depósito de evidencia YA resuelta (Fase B/C de este
     bloque) -- si el binario de ahí ya fue purgado, se distingue
-    explícitamente (`PURGADA`) de "nunca existió" (`NO_ENCONTRADA`)."""
+    explícitamente (`PURGADA`) de "nunca existió" (`NO_ENCONTRADA`).
+
+    Si una relectura promovió otra foto del mismo `archivo`, la evidencia
+    activa de Desktop es ésa (`relecturas_documentales.json`).
+    `excluir_lote`: carpeta de lote que no se considera (la ingesta que
+    está evaluando una foto nueva no debe encontrarse a sí misma)."""
     raiz = Path(raiz_atlas)
     archivo = str(archivo or "").strip()
     if not archivo:
@@ -114,10 +194,17 @@ def resolver_ruta_evidencia(raiz_atlas: str | Path, archivo: str) -> RutaEvidenc
             return RutaEvidencia(archivo, ruta, UBICACION_ACTIVA_MOBILE)
         return RutaEvidencia(archivo, None, UBICACION_NO_ENCONTRADA)
 
+    lote_excluido = Path(excluir_lote).resolve() if excluir_lote is not None else None
+    vigente = _evidencia_vigente_registrada(raiz, archivo)
+    if vigente is not None and vigente.parent.resolve() != lote_excluido:
+        return RutaEvidencia(archivo, vigente, UBICACION_ACTIVA_DESKTOP)
+
     carpeta_entradas = raiz / "operacion" / "entradas"
     if carpeta_entradas.is_dir():
         for lote in sorted(carpeta_entradas.iterdir()):
             if not lote.is_dir():
+                continue
+            if lote_excluido is not None and lote.resolve() == lote_excluido:
                 continue
             candidato = lote / archivo
             # Nunca sale de la carpeta del lote (`archivo` viene de un
@@ -293,6 +380,10 @@ def mover_evidencia_resuelta_sin_revision_pendiente(
     # Un documento EN_INVESTIGACION conserva su evidencia activa aunque no
     # tenga decisiones pendientes (están retenidas por la cuarentena).
     pendientes = documentos_con_revision_pendiente(decisiones_pendientes) | archivos_en_investigacion(raiz)
+    # Un documento con relecturas tiene varias fotos bajo el mismo
+    # `archivo` (una por lote): el depósito resuelto guarda una sola por
+    # `archivo`, así que se conservan todas activas.
+    pendientes |= set(leer_registro_relecturas(raiz)["documentos"])
     carpeta_entradas = raiz / "operacion" / "entradas"
     carpeta_resuelta = ruta_operacion("evidencia_resuelta", raiz=raiz)
     movidos: list[str] = []

@@ -45,6 +45,10 @@ from atlas_core.catalogos import (
 )
 from atlas_core.normalizacion_semantica import normalizar_nombre_societario
 from atlas_core.investigacion_documental import archivos_en_investigacion, raiz_desde_actual
+from atlas_core.evidencia_documental import (
+    RELECTURA_PROMOVIDA, RELECTURA_RECHAZADA, registrar_relectura, relectura_ya_registrada,
+    resolver_ruta_evidencia,
+)
 from atlas_core.orientacion_documental import directorio_orientacion_para_raiz, normalizar_orientacion
 from atlas_core.validadores import (
     EstadoValidacion,
@@ -3489,6 +3493,138 @@ def _archivos_por_identidad_documental(ruta_csv: Path) -> dict[tuple[str, str], 
     return salida
 
 
+# Bloque RELECTURA CON EVIDENCIA MEJOR (caso real 474699) -- Desktop copia
+# cada arrastre a su propio lote, pero la ingesta omitía cualquier archivo
+# cuyo nombre ya tuviera fila, sin mirar su contenido: una foto mejor de una
+# guía ya ingresada quedaba guardada y jamás se leía. Una foto con el mismo
+# `archivo` y OTRO contenido es una relectura: se extrae con el pipeline de
+# siempre y sólo reemplaza la extracción vigente si identifica el mismo
+# documento y no pierde información (ver `_evaluar_relectura`).
+_CAMPOS_INFORMACION_RELECTURA = (
+    "numero_guia", "numero_transporte", "fecha", "chofer", "rut_chofer", "cliente", "rut_cliente",
+    "obra_destino", "despachar_a_crudo", "patente_tracto", "patente_rampla", "descripcion_material", "peso_kg",
+)
+_AUSENTES_RELECTURA = {"", "No encontrado", "REVISAR", "Ilegible"}
+
+
+def _raiz_atlas_para_relectura(raiz_lote: Path, ruta_csv: Path) -> Path | None:
+    """Sólo en la operación real (lote bajo ``<raiz>/operacion/entradas`` y
+    dataset en ``<raiz>/operacion/actual``) una relectura puede volverse la
+    evidencia vigente; en cualquier otra salida se conserva la omisión."""
+    raiz_atlas = raiz_desde_actual(ruta_csv.parent)
+    if raiz_atlas is None or raiz_lote.parent.resolve() != (raiz_atlas / "operacion" / "entradas").resolve():
+        return None
+    return raiz_atlas
+
+
+def _motivos(fila: Mapping[str, object]) -> set[str]:
+    return {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()}
+
+
+def _evaluar_relectura(
+    fila_vigente: Mapping[str, str], fila_nueva: Mapping[str, str], *, identidades_existentes: set[tuple[str, str]],
+) -> str:
+    """Motivo de rechazo de la extracción nueva frente a la vigente, o ""
+    si puede reemplazarla. Nunca compara textos de forma aproximada."""
+    if fila_nueva.get("estado_procesamiento") != "OK":
+        return "EXTRACCION_FALLIDA"
+    identidad_vigente = (str(fila_vigente.get("numero_guia", "")).strip(), str(fila_vigente.get("numero_transporte", "")).strip())
+    identidad_nueva = (str(fila_nueva.get("numero_guia", "")).strip(), str(fila_nueva.get("numero_transporte", "")).strip())
+    if any(v in _AUSENTES_RELECTURA for v in identidad_nueva):
+        return "NO_IDENTIFICABLE"
+    vigente_completa = all(v not in _AUSENTES_RELECTURA for v in identidad_vigente)
+    if vigente_completa and identidad_nueva != identidad_vigente:
+        return "IDENTIDAD_DISTINTA"
+    if not vigente_completa and identidad_nueva in identidades_existentes:
+        return "IDENTIDAD_DE_OTRO_DOCUMENTO"
+    if (
+        MotivoRevisionDocumento.DOCUMENTO_DEGRADADO.value in _motivos(fila_nueva)
+        and MotivoRevisionDocumento.DOCUMENTO_DEGRADADO.value not in _motivos(fila_vigente)
+    ):
+        return "EVIDENCIA_PEOR:DOCUMENTO_DEGRADADO"
+    perdidos = [
+        campo for campo in _CAMPOS_INFORMACION_RELECTURA
+        if str(fila_vigente.get(campo, "")).strip() not in _AUSENTES_RELECTURA
+        and str(fila_nueva.get(campo, "")).strip() in _AUSENTES_RELECTURA
+    ]
+    if perdidos:
+        return "EVIDENCIA_PEOR:CAMPOS_PERDIDOS=" + ",".join(perdidos)
+    return ""
+
+
+def _promover_relectura(
+    ruta_csv: Path, *, archivo: str, fila_nueva: Mapping[str, str],
+) -> dict[str, list[str]]:
+    """Reemplaza EN SU LUGAR la fila de `archivo` por la extracción nueva
+    (nunca agrega una fila). Un campo con decisión humana en el ledger
+    conserva su valor vigente; `fecha_ingesta_utc` sigue siendo la del
+    documento. Devuelve {campo: [antes, después]} de lo que cambió."""
+    from atlas_core.revalidacion_documental import (
+        _escribir_filas_completas, _hay_decision_humana_para_campo, _leer_filas,
+    )
+
+    try:
+        aplicaciones = json.loads((ruta_csv.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+        aplicaciones = [a for a in aplicaciones.get("aplicaciones", []) if isinstance(a, Mapping)]
+    except (OSError, ValueError, AttributeError):
+        aplicaciones = []
+    with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+        filas = _leer_filas(ruta_csv)
+        indices = [i for i, f in enumerate(filas) if str(f.get("archivo", "")) == archivo]
+        if len(indices) != 1:
+            raise ValueError(f"Relectura de {archivo!r}: se esperaba una fila, hay {len(indices)}")
+        vigente = filas[indices[0]]
+        reemplazo = {columna: str(fila_nueva.get(columna, "")) for columna in COLUMNAS}
+        reemplazo["archivo"] = archivo
+        reemplazo["fecha_ingesta_utc"] = str(vigente.get("fecha_ingesta_utc", "")) or reemplazo["fecha_ingesta_utc"]
+        for columna in COLUMNAS:
+            if _hay_decision_humana_para_campo(aplicaciones, fila=vigente, campo=columna):
+                reemplazo[columna] = str(vigente.get(columna, ""))
+        cambios = {
+            campo: [str(vigente.get(campo, "")), reemplazo[campo]]
+            for campo in _CAMPOS_INFORMACION_RELECTURA
+            if str(vigente.get(campo, "")) != reemplazo[campo]
+        }
+        filas[indices[0]] = reemplazo
+        _escribir_filas_completas(ruta_csv, filas)
+    return cambios
+
+
+def _instalar_traza_relectura(
+    directorio_trazas: Path, directorio_relectura: Path, identificador: str, *, sha_anterior: str,
+) -> None:
+    """La traza OCR se indexa por `archivo`: al promoverse una relectura,
+    la de la evidencia anterior se conserva como copia y la nueva pasa a
+    ser la del documento."""
+    from atlas_core.trazabilidad_ocr import ruta_traza_ocr
+
+    traza = ruta_traza_ocr(directorio_trazas, identificador)
+    nueva = ruta_traza_ocr(directorio_relectura, identificador)
+    if traza.is_file():
+        copia = traza.with_name(f"{traza.stem}--anterior-{(sha_anterior or 'desconocido')[:16]}{traza.suffix}")
+        if not copia.exists():
+            copia.write_bytes(traza.read_bytes())
+    if nueva.is_file():
+        traza.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(nueva, traza)
+        for carpeta in (nueva.parent, nueva.parent.parent):
+            try:
+                carpeta.rmdir()  # sólo si quedó vacía
+            except OSError:
+                break
+
+
+def descartar_decisiones_de_relecturas_promovidas(
+    decisiones: Iterable[Mapping[str, object]], relecturas: Iterable[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    """Relectura promovida: las preguntas vigentes de ese documento se
+    hicieron sobre la extracción reemplazada. Las que la nueva extracción
+    siga necesitando las trae su propio lote (o las re-detecta la
+    reconciliación); las ya respondidas viven en el ledger."""
+    archivos = {str(r.get("archivo", "")) for r in relecturas if r.get("resultado") == RELECTURA_PROMOVIDA}
+    return [d for d in decisiones if str((d.get("documento") or {}).get("archivo", "")) not in archivos]
+
+
 def _asociar_pagina_pdf_como_evidencia_adicional(
     *, identificador: str, pagina: PaginaPdfRasterizada | None, fila: Mapping[str, object],
     archivos_por_identidad: Mapping[tuple[str, str], list[str]], raiz: Path, ruta_csv: Path,
@@ -5172,7 +5308,56 @@ def procesar_carpeta(
         "evidencias_adicionales_ambiguas": [],
         "manifiesto_ingesta": str(ruta_manifiesto_ingesta),
         "decisiones_pendientes": decisiones_pendientes,
+        "relecturas": [],
     }
+    raiz_atlas_relectura = None if reprocesar else _raiz_atlas_para_relectura(raiz, ruta_csv)
+    filas_vigentes_por_archivo: dict[str, dict[str, str]] = {}
+    en_investigacion_relectura: frozenset[str] = frozenset()
+    if raiz_atlas_relectura is not None and ruta_csv.is_file():
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as _archivo_vigente:
+            filas_vigentes_por_archivo = {
+                str(f.get("archivo", "")): f for f in csv.DictReader(_archivo_vigente, delimiter=";")
+            }
+        en_investigacion_relectura = frozenset(archivos_en_investigacion(raiz_atlas_relectura))
+
+    def detectar_relectura(ruta: Path, identificador: str) -> dict[str, object] | None:
+        """Foto con el `archivo` de un documento ya ingresado y OTRO
+        contenido -> candidata a relectura. Mismo contenido que la vigente,
+        o ya evaluado antes -> None (se omite como siempre)."""
+        if (
+            raiz_atlas_relectura is None or identificador in paginas_pdf
+            or separar_identificador_pagina_pdf(identificador)[1] is not None
+            or identificador not in filas_vigentes_por_archivo
+        ):
+            return None
+        sha_nuevo = sha256_binario(ruta.read_bytes())
+        anterior = resolver_ruta_evidencia(raiz_atlas_relectura, identificador, excluir_lote=raiz)
+        sha_anterior = sha256_binario(anterior.ruta.read_bytes()) if anterior.ruta is not None else ""
+        if sha_nuevo == sha_anterior or relectura_ya_registrada(raiz_atlas_relectura, identificador, sha_nuevo):
+            return None
+        lote_anterior = anterior.ruta.parent.name if anterior.ruta is not None else ""
+        return {"sha256": sha_nuevo, "anterior": {"lote": lote_anterior, "sha256": sha_anterior}}
+
+    def cerrar_relectura(
+        identificador: str, relectura: Mapping[str, object], *, motivo: str,
+        fila_nueva: Mapping[str, str], cambios: Mapping[str, list[str]] | None = None,
+    ) -> None:
+        resultado = RELECTURA_RECHAZADA if motivo else RELECTURA_PROMOVIDA
+        detalle = {
+            "numero_guia": str(fila_nueva.get("numero_guia", "")),
+            "numero_transporte": str(fila_nueva.get("numero_transporte", "")),
+            "cambios": dict(cambios or {}),
+        }
+        registrar_relectura(
+            raiz_atlas_relectura, archivo=identificador, lote=raiz.name, sha256=str(relectura["sha256"]),
+            resultado=resultado, motivo=motivo, anterior=relectura["anterior"], detalle=detalle,
+        )
+        resumen["relecturas"].append({"archivo": identificador, "resultado": resultado, "motivo": motivo, **detalle})
+        if motivo:
+            print(f"    RELECTURA RECHAZADA ({motivo}): se conserva la extracción vigente.")
+        else:
+            print(f"    RELECTURA PROMOVIDA: {len(detalle['cambios'])} campo(s) actualizados desde la nueva evidencia.")
+
     lector_compartido = lector_ocr
     proveedor_compartido = proveedor
     proveedor_rutas_compartido = proveedor_rutas
@@ -5272,14 +5457,31 @@ def procesar_carpeta(
     try:
         for indice, (ruta, identificador) in enumerate(entradas_ocr, start=1):
             print(f"[{indice}/{len(entradas_ocr)}] {identificador}")
+            relectura: dict[str, object] | None = None
             if identificador in procesados:
-                resumen["omitidos"] += 1
-                continue
+                relectura = detectar_relectura(ruta, identificador)
+                if relectura is None:
+                    resumen["omitidos"] += 1
+                    continue
+                if identificador in en_investigacion_relectura:
+                    cerrar_relectura(
+                        identificador, relectura, motivo="DOCUMENTO_EN_INVESTIGACION",
+                        fila_nueva=filas_vigentes_por_archivo[identificador],
+                    )
+                    resumen["omitidos"] += 1
+                    continue
 
             inicio_intento = time.perf_counter()
             decisiones_documento: list[dict[str, object]] = []
+            # La traza OCR de una relectura se escribe aparte hasta saber
+            # si se promueve: la del documento sigue describiendo la
+            # evidencia vigente.
+            directorio_traza_documento = (
+                directorio_trazas_ocr / "_relecturas" / raiz.name if relectura is not None
+                else directorio_trazas_ocr
+            )
             token_traza = (
-                _CONTEXTO_TRAZA_OCR.set((directorio_trazas_ocr, identificador))
+                _CONTEXTO_TRAZA_OCR.set((directorio_traza_documento, identificador))
                 if procesador is None else None
             )
             try:
@@ -5298,6 +5500,31 @@ def procesar_carpeta(
                     json.loads(fila.get("metricas_procesamiento_json") or "{}"),
                     estado="OK",
                 )
+                if relectura is not None:
+                    motivo_rechazo = _evaluar_relectura(
+                        filas_vigentes_por_archivo[identificador], fila,
+                        identidades_existentes=identidades_existentes,
+                    )
+                    cambios_relectura: dict[str, list[str]] = {}
+                    if not motivo_rechazo:
+                        cambios_relectura = _promover_relectura(ruta_csv, archivo=identificador, fila_nueva=fila)
+                        _instalar_traza_relectura(
+                            directorio_trazas_ocr, directorio_traza_documento, identificador,
+                            sha_anterior=str(relectura["anterior"]["sha256"]),
+                        )
+                    cerrar_relectura(
+                        identificador, relectura, motivo=motivo_rechazo, fila_nueva=fila, cambios=cambios_relectura,
+                    )
+                    if motivo_rechazo:
+                        resumen["omitidos"] += 1
+                        continue
+                    decisiones_pendientes.extend(decisiones_documento)
+                    archivos_procesados_ahora.add(identificador)
+                    resumen["procesados"] += 1
+                    resumen[{
+                        "BARRAS": "barras", "ROLLOS": "rollos", "MIXTO": "mixtos",
+                    }.get(fila["tipo_carga"], "no_determinados")] += 1
+                    continue
                 clasificacion_reingesta = clasificar_reingesta_documental(
                     numero_guia=fila.get("numero_guia", ""),
                     numero_transporte=fila.get("numero_transporte", ""),
@@ -5316,6 +5543,15 @@ def procesar_carpeta(
                     continue
                 decisiones_pendientes.extend(decisiones_documento)
             except Exception as error:  # cada documento es una unidad independiente
+                if relectura is not None:
+                    # Una relectura que falla nunca agrega una fila de error
+                    # junto a la del documento: queda registrada y se omite.
+                    cerrar_relectura(
+                        identificador, relectura, motivo=f"EXTRACCION_FALLIDA:{type(error).__name__}",
+                        fila_nueva=filas_vigentes_por_archivo[identificador],
+                    )
+                    resumen["omitidos"] += 1
+                    continue
                 duracion_hasta_fallo = time.perf_counter() - inicio_intento
                 fila = {columna: "" for columna in COLUMNAS}
                 fila.update(

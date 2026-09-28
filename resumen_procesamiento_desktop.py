@@ -7,7 +7,9 @@ import csv
 import json
 from pathlib import Path
 
+from atlas_core.evidencia_documental import leer_registro_relecturas
 from atlas_core.ingesta_pdf import directorio_evidencia_pdf_para_dataset, leer_evidencias_adicionales
+from atlas_core.investigacion_documental import raiz_desde_actual
 
 
 def _leer_csv(
@@ -93,6 +95,23 @@ def comando_resumen(argumentos: argparse.Namespace) -> None:
         directorio_evidencia_pdf_para_dataset(argumentos.csv_masivo)
     )
 
+    # Relectura (foto nueva de un documento ya ingresado, ver
+    # `procesamiento_masivo.detectar_relectura`): el lote de este arrastre
+    # es la carpeta del snapshot.
+    raiz_atlas = raiz_desde_actual(Path(argumentos.csv_masivo).parent)
+    relecturas = leer_registro_relecturas(raiz_atlas)["documentos"] if raiz_atlas is not None else {}
+    lote = snapshot.parent.name
+
+    def relectura_de(archivo: str) -> dict[str, object] | None:
+        historial = (relecturas.get(archivo) or {}).get("historial") or []
+        entrada = next((h for h in reversed(historial) if h.get("lote") == lote), None)
+        if entrada is None:
+            return None
+        return {
+            "resultado": entrada.get("resultado"), "motivo": entrada.get("motivo", ""),
+            "campos_cambiados": sorted((entrada.get("cambios") or {}).keys()),
+        }
+
     def viaje_de(archivo: str) -> dict[str, str] | None:
         return next(
             (
@@ -137,7 +156,12 @@ def comando_resumen(argumentos: argparse.Namespace) -> None:
             if archivo == nombre or archivo.startswith(nombre + "::pagina=")
         )
         if archivos:
-            resultados.extend(resultado_fila(a, por_archivo[a]) for a in archivos)
+            for a in archivos:
+                resultado = resultado_fila(a, por_archivo[a])
+                relectura = relectura_de(a)
+                if relectura is not None:
+                    resultado["relectura"] = relectura
+                resultados.append(resultado)
             continue
         asociadas = [
             e for e in evidencias_adicionales

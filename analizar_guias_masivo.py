@@ -7,7 +7,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-from atlas_core.procesamiento_masivo import procesar_carpeta
+from atlas_core.procesamiento_masivo import descartar_decisiones_de_relecturas_promovidas, procesar_carpeta
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.telemetria.proveedores.onelogis import OnelogisProvider
 from atlas_core.telemetria.repositorio import RepositorioTelemetria
@@ -173,6 +173,9 @@ def main() -> None:
                 decisiones_previas = json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", [])
             except (OSError, json.JSONDecodeError):
                 pass
+            decisiones_previas = descartar_decisiones_de_relecturas_promovidas(
+                decisiones_previas, resumen.get("relecturas", []),
+            )
             decisiones_reconciliadas = regenerar_decisiones_persistidas(
                 decisiones=[*decisiones_previas, *resumen.get("decisiones_pendientes", [])],
                 carpeta_catalogos=estado_catalogos.ruta,
