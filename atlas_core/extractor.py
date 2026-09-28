@@ -585,6 +585,70 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
     return resultado
 
 
+# Etiquetas de fila del encabezado de la guía (columnas izquierda y derecha)
+# cuyo valor se imprime a su DERECHA, en la misma fila. SEÑOR(ES) y R.U.T.
+# se reconocen aparte con sus comparadores de bloque completo.
+_ETIQUETAS_FILA_ENCABEZADO = frozenset({
+    "GIRO", "IRO", "DIRECCION", "COMUNA", "CIUDAD", "INDICADOR TRASLADO",
+    "EMPRESA TRANSPORTE", "FECHA DE EMISION", "ORDEN DE COMPRA", "SOLICITANTE",
+    "TELEFONO", "COD DESTINATARIO", "HORA ENTRADA", "HORA SALIDA",
+    "NRO. TRANSPORTE", "NRO TRANSPORTE",
+})
+
+
+def _nombre_etiqueta_fila(item: Dict[str, Any]) -> Optional[str]:
+    texto = item["simple"]
+    if "OBRA DESTINO" in texto:
+        return "OBRA DESTINO"
+    if _es_etiqueta_senor(texto):
+        return "SENOR(ES)"
+    if _es_etiqueta_rut(texto):
+        return "R.U.T."
+    return texto if texto in _ETIQUETAS_FILA_ENCABEZADO else None
+
+
+def etiqueta_propietaria_valor_encabezado(bloques: List[Any], valor: str) -> Optional[str]:
+    """Etiqueta del encabezado a la que pertenece geométricamente el bloque
+    OCR cuyo texto completo es `valor`, o None si no se puede afirmar.
+
+    Caso real 474708: con la foto inclinada, el orden de lectura del OCR
+    dejó el valor de COMUNA ("QUELICURA", columna izquierda) entre las
+    etiquetas "OBRA DESTINO" y "COD DESTINATARIO" de la columna derecha, y
+    el regex lineal lo tomó como obra. En el formulario cada valor está a la
+    DERECHA de su etiqueta y en su misma fila: la dueña es la etiqueta que
+    lo precede con menor desalineación vertical y menor separación. Se
+    abstiene (None) si ningún bloque calza con el valor completo (p. ej. un
+    valor unido de varias cajas), si algún bloque que calza no tiene
+    etiqueta a su izquierda, o si distintos bloques apuntan a etiquetas
+    distintas. Nunca fuzzy ni por catálogo."""
+    objetivo = _texto_simple(valor)
+    if not objetivo:
+        return None
+    items = _normalizar_bloques_geometricos(bloques)
+    escala = _escala_geometrica_texto(items)
+    etiquetas = [(item, nombre) for item in items for nombre in (_nombre_etiqueta_fila(item),) if nombre]
+    propietarias = set()
+    for item in items:
+        if item["simple"] != objetivo:
+            continue
+        mejor: Optional[tuple[float, str]] = None
+        for etiqueta, nombre in etiquetas:
+            if etiqueta is item:
+                continue
+            alto = max(etiqueta["h"], item["h"])
+            diferencia_y = abs(item["cy"] - etiqueta["cy"])
+            if diferencia_y > alto * 1.25 or etiqueta["x2"] > item["x1"] + 8 * escala:
+                continue
+            separacion = max(0.0, item["x1"] - etiqueta["x2"])
+            puntaje = separacion / (350 * escala) + diferencia_y / alto
+            if mejor is None or puntaje < mejor[0]:
+                mejor = (puntaje, nombre)
+        if mejor is None:
+            return None
+        propietarias.add(mejor[1])
+    return propietarias.pop() if len(propietarias) == 1 else None
+
+
 def _normalizar_candidato_rut(texto: str) -> str:
     """Limpieza compartida de un candidato de RUT antes de validar
     dígito verificador -- extraída para reutilizarla también sobre

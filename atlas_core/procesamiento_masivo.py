@@ -76,6 +76,7 @@ from atlas_core.extractor import (
     _peso_tiene_forma_sospechosa,
     _reexaminar_peso_por_baja_confianza,
     detectar_captura_recortada_posible,
+    etiqueta_propietaria_valor_encabezado,
     extraer_datos,
 )
 
@@ -2148,6 +2149,43 @@ def procesar_archivo(
                         logger.info("patente_carro recuperado mediante patentes-geometrico-conservador-v1")
             except Exception as exc:
                 logger.warning("Patentes geométricas omitidas: %s: %s", type(exc).__name__, exc)
+
+    # Caso real 474708 -- el regex lineal "OBRA DESTINO (.+?) COD
+    # DESTINATARIO" depende del orden de lectura del OCR: con la foto
+    # inclinada, el valor de COMUNA quedó entre ambas etiquetas y se aceptó
+    # como obra. Con bloques OCR disponibles SIN una lectura adicional (ya
+    # leídos o entregados por la orientación), el bloque capturado se
+    # atribuye a la etiqueta que lo precede en su fila; si no es OBRA
+    # DESTINO, la captura lineal se descarta y sólo la reemplaza la
+    # asociación geométrica de OBRA DESTINO cuando existe y no es ambigua.
+    # Sin ella, la obra queda "No encontrado" (nunca la comuna).
+    obra_lineal = str(datos.get("obra destino", "No encontrado")).strip()
+    if (
+        obra_lineal not in {"", "No encontrado"}
+        and "obra destino" not in campos_geometricos_sin_corroborar
+        and (bloques_guia is not None or bloques_ya_leidos is not None)
+    ):
+        try:
+            if bloques_guia is None:
+                bloques_guia = _leer_bloques_con_estado()
+            propietaria = (
+                etiqueta_propietaria_valor_encabezado(bloques_guia, obra_lineal)
+                if bloques_guia is not None else None
+            )
+            if propietaria and propietaria != "OBRA DESTINO":
+                obra_geometrica = _extraer_asociaciones_geometricas(bloques_guia).get("obra destino")
+                if obra_geometrica and obra_geometrica != obra_lineal:
+                    datos["obra destino"] = obra_geometrica
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    campos_geometricos_sin_corroborar.add("obra destino")
+                else:
+                    datos["obra destino"] = "No encontrado"
+                logger.info(
+                    "obra destino lineal descartada: el bloque pertenece a %s (geometría: %s)",
+                    propietaria, obra_geometrica or "sin valor",
+                )
+        except Exception as exc:
+            logger.warning("Validación geométrica de obra destino omitida: %s: %s", type(exc).__name__, exc)
 
     # Bloque ESTADOS S2.2 -- caso real guía 383295: `enriquecer_datos_con_catalogos`
     # puede reemplazar cliente/chofer/obra_destino contra los catálogos
