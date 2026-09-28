@@ -23,7 +23,10 @@ def main(argv=None) -> int:
     operador = OperadorB1(resolver_raiz_atlas(args.raiz_atlas), usuario=args.usuario)
     respuesta = operador.atender(args.conversacion, args.texto)
     print(json.dumps(respuesta, ensure_ascii=True, default=str))
-    return 1 if respuesta.get("estado") in {"RECHAZADA", "FALLIDA"} else 0
+    # Siempre 0 si hubo respuesta: el `estado` (RECHAZADA/FALLIDA incluidos)
+    # ES el resultado del turno; Desktop descarta la salida de un proceso
+    # que termina con código distinto de 0.
+    return 0
 
 
 if __name__ == "__main__":
