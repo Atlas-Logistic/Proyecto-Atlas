@@ -195,24 +195,39 @@ def _reparar_campos_documento(
     return cambios
 
 
-def _aplicar_cambios_a_fila(fila: dict[str, str], cambios: list[CambioCampo]) -> None:
+def _aplicar_cambios_a_fila(
+    fila: dict[str, str], cambios: list[CambioCampo], *, motivos_reextraccion: str = "",
+) -> None:
     """Escribe `cambios` en `fila` (en memoria) y recalcula los 3
     indicadores documentales coherentes -- mismo criterio para cualquier
-    llamador, nunca duplicado."""
+    llamador, nunca duplicado.
+
+    Los motivos de degradación de un campo reemplazado describían el valor
+    ANTERIOR. El valor nuevo trae su propia evaluación, hecha por las
+    reglas de siempre en la reextracción (`motivos_reextraccion`, la
+    columna `motivos_revision_documento` que devolvió `procesar_archivo`):
+    si ésta sigue marcando el campo (caso real 474708: la obra corregida
+    sigue OBRA_DESTINO_SIN_CORROBORAR), el motivo se conserva; sólo se
+    retira cuando el valor nuevo ya no lo tiene."""
     if not cambios:
         return
     motivos_actuales = {
         m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()
     }
+    motivos_valor_nuevo = {
+        m.strip() for m in str(motivos_reextraccion or "").split(SEPARADOR_MOTIVOS) if m.strip()
+    }
     campos_cambiados = {c.campo for c in cambios}
     for cambio in cambios:
         fila[cambio.campo] = cambio.valor_nuevo
-    motivos_resueltos = {
+    motivos_campos_cambiados = {
         m for campo, (motivos_degradacion, _) in CAMPOS_REPARABLES.items()
         for m in motivos_degradacion
         if campo in campos_cambiados
     }
-    motivos_restantes = [m for m in sorted(motivos_actuales) if m not in motivos_resueltos]
+    motivos_restantes = sorted(
+        (motivos_actuales - motivos_campos_cambiados) | (motivos_valor_nuevo & motivos_campos_cambiados)
+    )
     fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
     indicador, documental, operacional = _indicadores_documentales_coherentes(
         motivos_restantes, str(fila.get("estado_ruta", "")).strip(),
@@ -476,7 +491,9 @@ def reprocesar_lote_reparador(
                 fila, extraido, aplicaciones, documento_degradado=documento_degradado,
             )
             guia_antes = str(fila.get("numero_guia", ""))
-            _aplicar_cambios_a_fila(fila, cambios)
+            _aplicar_cambios_a_fila(
+                fila, cambios, motivos_reextraccion=str(extraido.get("motivos_revision_documento", "")),
+            )
             documentos.append(DocumentoReparado(
                 archivo=archivo_id, numero_guia_antes=guia_antes,
                 numero_guia_despues=str(fila.get("numero_guia", "")),
@@ -804,7 +821,9 @@ def revalidar_documentos_por_transporte(
                 fila, extraido, aplicaciones, documento_degradado=documento_degradado,
             )
             guia_antes = str(fila.get("numero_guia", ""))
-            _aplicar_cambios_a_fila(fila, cambios)
+            _aplicar_cambios_a_fila(
+                fila, cambios, motivos_reextraccion=str(extraido.get("motivos_revision_documento", "")),
+            )
             documentos.append(DocumentoReparado(
                 archivo=archivo_id, numero_guia_antes=guia_antes,
                 numero_guia_despues=str(fila.get("numero_guia", "")),

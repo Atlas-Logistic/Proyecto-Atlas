@@ -3149,6 +3149,75 @@ def _regenerar_decisiones_persistidas(
                 != str(fila_vigente.get(str(decision.get("campo", "")), "")).strip()
             )
         ]
+    # Bloque DECISIÓN SUPERADA POR EL VALOR VIGENTE (caso real 474708) --
+    # una OBRA_DESCONOCIDA pregunta por la obra `valor_documental` que el
+    # documento traía al detectarse. Si después el valor vigente de la fila
+    # cambió a OTRA obra real (reextracción, corrección humana, B1, catálogo
+    # o cualquier revalidación que escriba el dataset), esa pregunta quedó
+    # superada: se retira y, con el cliente YA resuelto que la propia
+    # decisión conserva (`contexto.cliente_id`, nunca re-resuelto desde el
+    # texto OCR), el detector canónico `_decisiones_obra_para_cliente`
+    # decide qué pregunta corresponde al valor NUEVO -- ninguna si ya es una
+    # obra conocida, OBRA_DESCONOCIDA si sigue desconocida. Sólo con el
+    # motivo OBRA_DESTINO_SIN_CORROBORAR vigente se genera algo nuevo.
+    # Conservador: vigente ausente ("No encontrado", vacío) -> no se toca
+    # (fixtures multi-guía sin obra en la fila); cliente no confirmado/
+    # activo, o guía con obra ya decidida por un humano en el ledger ->
+    # no se reemplaza la tarjeta.
+    if filas_por_archivo is not None and any(
+        d.get("tipo") == "OBRA_DESCONOCIDA" and d.get("campo") == "obra_destino" for d in decisiones
+    ):
+        from atlas_core.revalidacion_documental import resolver_obras_resueltas_por_ledger
+
+        guias_obra_resuelta_ledger = resolver_obras_resueltas_por_ledger(
+            Path(ruta_dataset).parent / "decisiones_aplicadas.json"
+        )
+        try:
+            clientes_por_id = {
+                c.cliente_id: c for c in CatalogoClientes(carpeta / "clientes.json").listar()
+                if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+            }
+        except (OSError, ValueError):
+            clientes_por_id = {}
+        conservadas: list[Mapping[str, object]] = []
+        reemplazos: list[dict[str, object]] = []
+        for decision in decisiones:
+            documento = decision.get("documento") or {}
+            fila_vigente = filas_por_archivo.get(str(documento.get("archivo", "")))
+            valor_vigente = str((fila_vigente or {}).get("obra_destino", "")).strip()
+            cliente = clientes_por_id.get(str((decision.get("contexto") or {}).get("cliente_id", "")))
+            superada = (
+                decision.get("tipo") == "OBRA_DESCONOCIDA"
+                and decision.get("campo") == "obra_destino"
+                and fila_vigente is not None
+                and valor_vigente not in _AUSENTES
+                and normalizar_nombre_obra(valor_vigente)
+                != normalizar_nombre_obra(str(decision.get("valor_documental", "")))
+                and cliente is not None
+                and str(documento.get("numero_guia", "")) not in guias_obra_resuelta_ledger
+            )
+            if not superada:
+                conservadas.append(decision)
+                continue
+            motivos_vigentes = {
+                m.strip() for m in str(fila_vigente.get("motivos_revision_documento", "")).split("|") if m.strip()
+            }
+            if "OBRA_DESTINO_SIN_CORROBORAR" in motivos_vigentes:
+                reemplazos.extend(_decisiones_obra_para_cliente(
+                    carpeta=carpeta, cliente_id=cliente.cliente_id, cliente_razon_social=cliente.razon_social,
+                    cliente_aliases=cliente.aliases, obra_texto=valor_vigente,
+                    despachar_a_documental=str(fila_vigente.get("despachar_a_crudo", "")).strip(),
+                    comunes={
+                        "archivo": str(documento.get("archivo", "")),
+                        "numero_guia": str(documento.get("numero_guia", "")),
+                        "numero_transporte": str(documento.get("numero_transporte", "")),
+                    },
+                ))
+        ids_conservados = {str(d.get("decision_id", "")) for d in conservadas}
+        decisiones = conservadas + [
+            nueva for nueva in {str(n["decision_id"]): n for n in reemplazos}.values()
+            if str(nueva["decision_id"]) not in ids_conservados
+        ]
     # Bloque CONVERGENCIA DE IDENTIDADES CONOCIDAS -- casos reales 473546
     # (CHOFER_CANDIDATO sobre "SALOMÓN PIZARRO", único chofer activo de
     # ese nombre en catálogo, con RUT documental estructuralmente válido
