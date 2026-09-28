@@ -609,6 +609,31 @@ def registrar_alias_seguro(
     return True
 
 
+def cambiar_estado_chofer(
+    ruta_catalogo: str | Path, identificador: str, activo: bool
+) -> dict[str, Any]:
+    """Único escritor de la vigencia (`activo`) de un chofer. Nunca borra
+    el registro ni toca nombre/RUT/aliases: inactivar sólo lo excluye de
+    los resolutores de identidad (todos filtran `activo is True`).
+    Idempotente: si ya tiene ese estado no reescribe el archivo."""
+    from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
+
+    if not isinstance(activo, bool):
+        raise ValueError("activo debe ser booleano")
+    ruta = Path(ruta_catalogo)
+    with bloqueo_sesion(ruta.parent, "choferes"):
+        with ruta.open("r", encoding="utf-8") as archivo:
+            catalogo = json.load(archivo)
+        registro = catalogo.get(identificador) if isinstance(catalogo, dict) else None
+        if not isinstance(registro, dict):
+            raise ValueError(f"chofer inexistente: {identificador}")
+        if registro.get("activo", True) is activo:
+            return dict(registro)
+        catalogo[identificador] = {**registro, "activo": activo}
+        escribir_json_atomico(ruta, catalogo)
+        return dict(catalogo[identificador])
+
+
 def _texto_sin_acentos(texto: str) -> str:
     texto_normalizado = unicodedata.normalize("NFD", texto)
     return "".join(

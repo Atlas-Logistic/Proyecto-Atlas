@@ -620,11 +620,19 @@ _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
 
 def reparar_documento_focal_con_valores_conocidos(
     *, raiz_atlas: str | Path, archivo: str, valores: Mapping[str, str], dry_run: bool = True,
+    reconciliar: bool = True, tipos_ledger_superables: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     """Persiste, para UN documento puntual ya identificado por
     `archivo`, valores YA conocidos de una reextracción real (nunca
     vueltos a inferir aquí -- el llamador los aporta ya verificados).
-    `dry_run=True` (default): calcula y reporta, no escribe nada."""
+    `dry_run=True` (default): calcula y reporta, no escribe nada.
+
+    `reconciliar=False` (capa de acciones operacionales): el llamador
+    asume la reconciliación FOCAL de lo afectado en vez de la global
+    `revalidar_y_regenerar_reporte`. `tipos_ledger_superables`: tipos de
+    aplicación del ledger que NO bloquean el campo -- sólo para que una
+    corrección explícita del operador pueda reemplazar a otra corrección
+    explícita del operador; una decisión de Revisión sigue ganando."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -633,7 +641,8 @@ def reparar_documento_focal_con_valores_conocidos(
 
     try:
         aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
-        aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)]
+        aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)
+                        and str(a.get("tipo", "")) not in tipos_ledger_superables]
     except (OSError, ValueError):
         aplicaciones = []
 
@@ -684,7 +693,7 @@ def reparar_documento_focal_con_valores_conocidos(
                 _escribir_filas_completas(dataset, filas)
 
     reconciliacion: dict[str, object] | None = None
-    if not dry_run and cambios:
+    if not dry_run and cambios and reconciliar:
         reconciliacion = revalidar_y_regenerar_reporte(
             raiz_atlas=raiz,
             nombre_carpeta_reporte=f"reporte_reparador_focal_{archivo_id.replace('/', '_')}_{int(time.time())}",
