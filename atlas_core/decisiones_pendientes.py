@@ -2128,7 +2128,7 @@ def _decisiones_obra_para_cliente(
             # revisión imposible de responder y no representa evidencia
             # nueva para el catálogo.
             if destino_texto in _AUSENTES:
-                destino_texto = obra_texto
+                return decisiones
             resuelta = catalogo_obras.resolver_obra_destino_confirmada(
                 cliente_id=cliente_id, nombre_obra=obra.nombre_canonico
             ) is not None

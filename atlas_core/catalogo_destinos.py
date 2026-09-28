@@ -217,6 +217,18 @@ def direccion_confirmada_coincide(
     tokens_texto = _tokens_direccion(texto)
     if not tokens_calle:
         return False
+    # La tolerancia nunca puede elegir entre numeraciones distintas ni
+    # descansar en el nombre de la obra. Exigimos la misma secuencia de
+    # números en todo el texto documental y una vía física identificable.
+    numeros_calle = [token for token in tokens_calle if token.isdigit()]
+    numeros_texto = [token for token in tokens_texto if token.isdigit()]
+    if not numeros_calle or numeros_calle != numeros_texto:
+        return False
+    vias = {"CALLE", "AVENIDA", "AV", "AVDA", "CAMINO", "PASAJE", "RUTA"}
+    if not (set(tokens_calle) & vias):
+        return False
+    if any(token in vias and token not in tokens_calle for token in tokens_texto):
+        return False
     # La ?nica tolerancia se aplica dentro de una secuencia completa de la
     # direcci?n maestra. Todo token salvo uno debe ser exacto; los n?meros y
     # las palabras estructurales ya fueron fijados arriba y nunca pasan aqu?.
@@ -236,7 +248,19 @@ def direccion_confirmada_coincide(
         else:
             # La v?a tolerante s?lo existe sobre una direcci?n ya anclada,
             # nunca sobre coincidencia nominal de obra/cliente.
-            if anclas_exactas >= 2 and tolerados == 1:
+            # Un prefijo recortado exige además lote/sitio/parcela y comuna
+            # explícita. La sustitución de longitud igual conserva el umbral
+            # anterior (vía + número), para no alterar OCR ya corroborado.
+            truncado = any(
+                a != b and len(b) < len(a)
+                for a, b in zip(tokens_calle, tokens_texto[inicio:inicio + len(tokens_calle)])
+            )
+            anclas_truncamiento = (
+                bool(comuna_confirmada)
+                and bool(set(tokens_calle) & {"LOTE", "SITIO", "PARCELA"})
+                and anclas_exactas >= 3
+            )
+            if tolerados == 1 and anclas_exactas >= 2 and (not truncado or anclas_truncamiento):
                 return True
 
     # Separaci?n espuria OCR: conserva la conducta previa s?lo con n?meros

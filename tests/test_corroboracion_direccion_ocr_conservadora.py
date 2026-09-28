@@ -27,6 +27,21 @@ def test_numero_distinto_se_rechaza():
         "CALLE ALFA LOTE 18 PARQUE TECNIC COMUNA ALFA",
         comuna_confirmada="COMUNA ALFA",
     )
+    # La misma regla cubre una letra intercalada en el maestro: no depende
+    # de un alias del token documental.
+    assert direccion_confirmada_coincide(
+        "CALLE D LOTE 27 Y 28 PARQUE INDRUSTRIAL",
+        "CALLE D LOTE 27 Y 28 PARQUE INDRUST CORONEL",
+        comuna_confirmada="CORONEL",
+    )
+
+
+def test_numero_adicional_contradictorio_se_rechaza():
+    assert not direccion_confirmada_coincide(
+        "CALLE D LOTE 27 Y 28 PARQUE INDUSTRIAL",
+        "CALLE D LOTE 27 Y 28 PARQUE INDRUST 29 CORONEL",
+        comuna_confirmada="CORONEL",
+    )
 
 
 def test_lote_distinto_se_rechaza():
@@ -59,6 +74,26 @@ def test_misma_obra_no_convierte_direccion_contradictoria_en_coincidencia():
         "CALLE EPSILON LOTE 9 PARQUE INDUSTRIAL",
         "RUTA ZETA LOTE 9 PARQUE INDRUST COMUNA EPSILON",
         comuna_confirmada="COMUNA EPSILON",
+    )
+
+
+def test_prefijo_sin_lote_o_comuna_no_basta():
+    assert not direccion_confirmada_coincide(
+        "CALLE D 27 PARQUE INDUSTRIAL",
+        "CALLE D 27 PARQUE INDRUST CORONEL",
+        comuna_confirmada="CORONEL",
+    )
+    assert not direccion_confirmada_coincide(
+        "CALLE D LOTE 27 PARQUE INDUSTRIAL",
+        "CALLE D LOTE 27 PARQUE INDRUST CORONEL",
+    )
+
+
+def test_otra_via_documental_impide_tolerancia():
+    assert not direccion_confirmada_coincide(
+        "CALLE D LOTE 27 Y 28 PARQUE INDUSTRIAL",
+        "CALLE D LOTE 27 Y 28 PARQUE INDRUST RUTA ZETA CORONEL",
+        comuna_confirmada="CORONEL",
     )
 
 
