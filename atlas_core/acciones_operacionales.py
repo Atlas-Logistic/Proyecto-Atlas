@@ -401,7 +401,10 @@ def _plan_chofer_vehiculo(ctx: _Contexto, p: dict) -> Plan:
     tipo = {"TRACTO": "TRACTO", "CARRO": "RAMPLA"}.get(vehiculo.tipo)
     if tipo is None:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"tipo de vehículo {vehiculo.tipo} no asociable")
-    ruts_asociados = sorted({str(e.campos_observados.get("rut_chofer_asociado", "")) for e in vehiculo.evidencias} - {""})
+    # Normalizado: asociaciones previas pudieron guardar el RUT con formato
+    # ("18091588-5"); compararlas crudas duplicaría la misma relación.
+    ruts_asociados = sorted({normalizar_rut(str(e.campos_observados.get("rut_chofer_asociado", "")))
+                             for e in vehiculo.evidencias} - {""})
     impacto = _plan_impacto_focal(raiz=ctx.raiz, rut_chofer=rut_normalizado, tipo_humano=tipo,
                                   patente=patente, aplicar=False)
     return Plan(

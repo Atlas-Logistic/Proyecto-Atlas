@@ -449,3 +449,15 @@ def test_cli_catalogo_previsualizar_ejecutar(entorno, capsys):
                  "--confirmado-por", "JAVIER"]) == 0
     assert json.loads(capsys.readouterr().out)["estado"] == "APLICADA"
     assert main(["--raiz-atlas", str(entorno["raiz"]), "previsualizar", "--accion", "SHELL", "--actor", "JAVIER"]) == 1
+
+
+def test_asociacion_previa_con_rut_formateado_es_sin_cambios(entorno):
+    # Caso real (copia de G:): TG8925 tenía el RUT asociado como "18091588-5";
+    # la comparación cruda proponía duplicar la misma relación.
+    from atlas_core.catalogo_vehiculos import asociar_chofer_a_vehiculo_confirmado
+    asociar_chofer_a_vehiculo_confirmado(
+        entorno["cat"] / "vehiculos.json", patente="KN5439", actor="TEST", fuente_decision="TEST",
+        fecha=datetime(2026, 9, 1, tzinfo=timezone.utc), rut_chofer_asociado="12.345.678-5")
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    p = capa.previsualizar("CHOFER_ASIGNAR_VEHICULO", {"chofer": RUT_ACTIVO, "patente": "KN5439"}, actor="JAVIER")
+    assert p["estado"] == "SIN_CAMBIOS", p
