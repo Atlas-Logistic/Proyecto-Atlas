@@ -1175,6 +1175,13 @@ def agrupar_viajes(
 
             entrada_ok = _horas_por_transporte("hora_entrada_aza")
             salida_ok = _horas_por_transporte("hora_salida_aza")
+            # Mismo criterio para el ORIGEN: cada transporte es su propia
+            # carga en su propia planta (viaje multiplanta confirmado por un
+            # humano). Sólo es conflicto una contradicción DENTRO de un
+            # mismo transporte; el viaje no publica una planta única.
+            hay_conflicto_origen = any(
+                _resolver_origen_viaje(docs)[4] for docs in por_transporte.values()
+            )
             _horas_entrada = lambda _valores, _ok=entrada_ok: _ok  # noqa: E731
             _horas_salida = lambda _valores, _ok=salida_ok: _ok  # noqa: E731
         else:

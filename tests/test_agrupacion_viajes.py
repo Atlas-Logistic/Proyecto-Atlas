@@ -208,3 +208,94 @@ def test_capa_catalogo_expone_la_accion_como_reversible():
     accion = {a["accion"]: a for a in catalogo_acciones()}["VIAJE_AGRUPAR_GUIAS"]
     assert accion["riesgo"] == "OPERACIONAL_REVERSIBLE" and accion["parametros"]["guias"]["obligatorio"]
     assert isinstance(CapaAccionesOperacionales, type)
+
+
+# ------------------------------------------------------------ multiplanta / multidestino
+# Forma del caso real (sin sus números): 2 transportes AZA cargados en 2
+# plantas distintas, 4 guías, 3 entregas (dos guías comparten una).
+TA, TB = "0000800122", "0000800179"
+
+
+def _multiplanta():
+    def f(guia, transporte, planta_id, planta, horas, peso, destino, localidad, unidad, km):
+        return _fila(guia, transporte, planta_origen_id=planta_id, planta_origen_nombre=planta,
+                     origen_determinado_por="CATEGORIA_DESTINO_EXTERNO", hora_entrada_aza=horas[0],
+                     hora_salida_aza=horas[1], peso_kg=peso, despachar_a_crudo=destino, direccion_entrega=destino,
+                     localidad_entrega=localidad, codigo_unidad=unidad, distancia_km=km, fecha="24-09-2026",
+                     chofer="CHOFER MULTI", rut_chofer="16.789.012-1", patente_tracto="AB1234", patente_rampla="CD5678")
+    return [
+        f("700597", TA, "p-norte", "PLANTA NORTE", ("14:02", "14:49"), "11973", "LAS HORTENSIAS 3800", "Talcahuano", "08110", "522.3"),
+        f("700598", TA, "p-norte", "PLANTA NORTE", ("14:02", "14:49"), "3008", "AV CUATRO NORTE 1565", "Concepcion", "08101", "518.1"),
+        f("700603", TB, "p-sur", "PLANTA SUR", ("16:47", "16:47"), "1002", "CALLE D LOTE 27 CORONEL", "Coronel", "08102", "535.9"),
+        f("700604", TB, "p-sur", "PLANTA SUR", ("16:47", "16:47"), "11938", "CALLE D LOTE 27 CORONEL", "Coronel", "08102", "535.9"),
+    ]
+
+
+def test_multiplanta_un_viaje_con_3_entregas_pesos_propios_y_sin_conflicto_de_origen_falso():
+    sueltos, _ = agrupar_viajes(_multiplanta(), guias_revision_humana=())
+    assert len(sueltos) == 2 and all(v.estado == EstadoViaje.CONFIRMADO for v in sueltos)
+    viajes, _ = agrupar_viajes(_multiplanta(), guias_revision_humana=(), agrupaciones_transporte={TA: TA, TB: TA})
+    assert len(viajes) == 1
+    viaje = viajes[0]
+    assert viaje.transportes_aza == [TA, TB] and viaje.numeros_guia == ["700597", "700598", "700603", "700604"]
+    # dos plantas = dos cargas, no una contradicción del viaje
+    assert MotivoRevision.CONFLICTO_ORIGEN not in viaje.motivos_revision
+    assert viaje.estado == EstadoViaje.CONFIRMADO, viaje.motivos_revision
+    assert viaje.planta_origen_nombre == ""  # nunca se elige una planta única
+    # cada guía conserva SU transporte, planta y peso documental
+    propios = {d.numero_guia: (d.evidencia["numero_transporte"], d.planta_origen_nombre, d.peso_kg) for d in viaje.documentos}
+    assert propios == {"700597": (TA, "PLANTA NORTE", "11973"), "700598": (TA, "PLANTA NORTE", "3008"),
+                       "700603": (TB, "PLANTA SUR", "1002"), "700604": (TB, "PLANTA SUR", "11938")}
+    assert viaje.peso_total_viaje_kg == "27921"
+    # 3 entregas, dos guías compartiendo la misma, cada una con SU ruta
+    entregas = {tuple(e["numeros_guia"]): e for e in viaje.entregas}
+    assert set(entregas) == {("700597",), ("700598",), ("700603", "700604")}
+    assert entregas[("700597",)]["distancia_km"] == "522.3"
+    assert entregas[("700598",)]["distancia_km"] == "518.1"
+    assert entregas[("700603", "700604")]["distancia_km"] == "535.9"  # nunca la del transporte principal
+    assert viaje.distancia_km == ""  # sin ruta única inventada a nivel de viaje
+
+
+def test_multiplanta_sigue_detectando_plantas_contradictorias_dentro_de_un_mismo_transporte():
+    filas = _multiplanta()
+    filas[1].update(planta_origen_id="p-sur", planta_origen_nombre="PLANTA SUR")
+    viajes, _ = agrupar_viajes(filas, guias_revision_humana=(), agrupaciones_transporte={TA: TA, TB: TA})
+    assert MotivoRevision.CONFLICTO_ORIGEN in viajes[0].motivos_revision
+
+
+@pytest.fixture
+def raiz_multiplanta(raiz):
+    with (raiz / "operacion" / "actual" / "analisis_completo_guias.csv").open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(_multiplanta())
+    return raiz
+
+
+def test_b1_preview_multiplanta_explicito_aplicacion_e_idempotencia(raiz_multiplanta):
+    raiz = raiz_multiplanta
+    actual = raiz / "operacion" / "actual"
+    b1 = OperadorB1(raiz)
+    r = b1.atender("c", "Las guías 700597, 700598, 700603 y 700604 pertenecen al mismo viaje")
+    assert r["estado"] == "PREVIEW_PENDIENTE", r
+    mensaje = r["mensaje"]
+    assert f"transporte {TA} en PLANTA NORTE (14:02-14:49): guía 700597 11.973 kg, guía 700598 3.008 kg" in mensaje
+    assert f"transporte {TB} en PLANTA SUR (16:47-16:47): guía 700603 1.002 kg, guía 700604 11.938 kg" in mensaje
+    assert "3 ENTREGA(S)" in mensaje
+    assert "guía 700597 -> LAS HORTENSIAS 3800 (Talcahuano), 522 km" in mensaje
+    assert "guía 700598 -> AV CUATRO NORTE 1565 (Concepcion), 518 km" in mensaje
+    assert "guía 700603, 700604 -> CALLE D LOTE 27 CORONEL (Coronel), 536 km" in mensaje
+    assert "Peso total 27.921 kg" in mensaje and "Estado resultante: CONFIRMADO" in mensaje
+    entregas = r["preview"]["valor_propuesto"]["viaje_unico"]["entregas"]
+    assert [e["guias"] for e in entregas] == [["700597"], ["700598"], ["700603", "700604"]]
+    assert not (actual / "agrupaciones_viaje.json").exists()
+
+    assert b1.atender("c", "sí")["estado"] == "EJECUTADA"
+    viajes = [v for v in _viajes_del_ultimo_reporte(raiz) if TA in v["transportes_aza"]]
+    assert len(viajes) == 1 and viajes[0]["estado"] == "CONFIRMADO"
+    publicadas = json.loads(viajes[0]["entregas"])
+    assert sorted(tuple(e["numeros_guia"]) for e in publicadas) == [("700597",), ("700598",), ("700603", "700604")]
+
+    r = b1.atender("c", "Las guías 700604, 700597, 700598 y 700603 pertenecen al mismo viaje")
+    assert r["estado"] == "SIN_CAMBIOS" and "ya pertenecen al mismo viaje" in r["mensaje"]
+    assert len(json.loads((actual / "agrupaciones_viaje.json").read_text(encoding="utf-8"))["agrupaciones"]) == 1

@@ -334,6 +334,18 @@ def resolver_decision_destino(decisiones: list[Mapping[str, object]], guia: str)
 # --------------------------------------------------------------- formato
 
 
+def _peso_legible(valor: object) -> str:
+    texto = str(valor or "").strip()
+    return f"{int(texto):,} kg".replace(",", ".") if texto.isdigit() else "peso no disponible"
+
+
+def _km_legible(valor: object) -> str:
+    try:
+        return f"{float(str(valor)):.0f} km"
+    except ValueError:
+        return "ruta no disponible"
+
+
 def _describir_preview(preview: Mapping[str, object]) -> str:
     accion, entidad = preview.get("accion"), preview.get("entidad") or {}
     actual, propuesto = preview.get("valor_actual"), preview.get("valor_propuesto") or {}
@@ -358,6 +370,24 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
         texto = (f"Agrupar en UN solo viaje Atlas: {partes_viajes}. Viaje resultante con transporte principal "
                  f"{unico.get('numero_transporte_principal')} y transportes AZA "
                  f"{' + '.join(unico.get('transportes_aza') or [])}; cada guía conserva su número de transporte.")
+        cargas = unico.get("cargas") or []
+        entregas = unico.get("entregas") or []
+        if cargas:
+            texto += " CARGAS: " + "; ".join(
+                f"transporte {c['numero_transporte']} en {' / '.join(c['plantas']) or 'planta no disponible'}"
+                f"{' (' + ', '.join(c['horas_planta']) + ')' if c['horas_planta'] else ''}: "
+                + ", ".join(f"guía {g['numero_guia']} {_peso_legible(g['peso_kg'])}" for g in c["guias"])
+                for c in cargas) + "."
+        if entregas:
+            texto += f" {len(entregas)} ENTREGA(S): " + "; ".join(
+                f"{i}) guía {', '.join(e['guias'])} -> {e['destino'] or 'destino no disponible'}"
+                f"{' (' + e['localidad'] + ')' if e['localidad'] else ''}"
+                f"{', ' + _km_legible(e['distancia_km']) if e['distancia_km'] else ''}"
+                for i, e in enumerate(entregas, 1)) + "."
+        if unico.get("estado_resultante"):
+            motivos = unico.get("motivos_revision") or []
+            texto += (f" Peso total {_peso_legible(unico.get('peso_total_kg'))}. Estado resultante: "
+                      f"{unico['estado_resultante']}{' (' + ', '.join(motivos) + ')' if motivos else ''}.")
     elif accion == "DOCUMENTO_CORREGIR_CAMPO":
         texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
                  f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")

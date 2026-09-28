@@ -859,6 +859,9 @@ def _plan_viaje_agrupar(ctx: _Contexto, p: dict) -> Plan:
     transportes = evaluacion.transportes
     todas_las_guias = sorted({d["numero_guia"] for docs in evaluacion.documentos.values() for d in docs})
     relevantes = [a for a in agrupaciones if set(a.get("transportes") or []) & set(transportes)]
+    pendientes = {str((d.get("documento") or {}).get("numero_guia", "")).strip() for d in ctx.decisiones()
+                  if d.get("estado", "PENDIENTE") == "PENDIENTE"}
+    resultado = _simular_viaje_agrupado(filas, transportes, pendientes) if not evaluacion.ya_agrupadas else {}
     return Plan(
         entidad={"tipo": "VIAJE_FISICO", "id": identificador_agrupacion(transportes), "transportes": transportes,
                  "guias": evaluacion.guias},
@@ -867,7 +870,8 @@ def _plan_viaje_agrupar(ctx: _Contexto, p: dict) -> Plan:
                                                           f"{d['hora_salida_aza']}".strip() for d in docs})}
                                  for t, docs in evaluacion.documentos.items()]},
         valor_propuesto={"viaje_unico": {"numero_transporte_principal": evaluacion.principal,
-                                         "transportes_aza": transportes, "guias": todas_las_guias}},
+                                         "transportes_aza": transportes, "guias": todas_las_guias,
+                                         **resultado}},
         estado_base={"filas": [f for f in filas if str(f.get("numero_transporte", "")).strip() in set(transportes)],
                      "agrupaciones": relevantes},
         sin_cambios=evaluacion.ya_agrupadas,
@@ -875,13 +879,41 @@ def _plan_viaje_agrupar(ctx: _Contexto, p: dict) -> Plan:
         consecuencias=[
             f"{len(transportes)} transportes AZA pasan a ser UN viaje Atlas (principal {evaluacion.principal}); "
             "cada guía conserva su número de transporte y sus datos documentales.",
-            "Ruta, peso y entregas se consolidan sobre el viaje único; cada transporte conserva su propia "
-            "ventana horaria en planta.",
+            "Cada guía conserva su transporte, planta, material y peso; cada entrega conserva su destino y su "
+            "propia ruta (nunca la del transporte principal). Ver cargas y entregas resultantes.",
         ],
         revalidaciones=["REGENERAR_REPORTE_VIAJES", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIAS"],
         archivos=("agrupaciones_viaje", "bandeja"),
         datos={"transportes": transportes, "guias": todas_las_guias},
     )
+
+
+def _simular_viaje_agrupado(filas: list[dict[str, str]], transportes: list[str], pendientes: set[str]) -> dict:
+    """Resultado EXACTO que publicará el reporte tras agrupar: el mismo
+    `agrupar_viajes` sobre las filas involucradas, en memoria (no escribe)."""
+    from atlas_core.gestor_viajes import agrupar_viajes
+    involucradas = [f for f in filas if str(f.get("numero_transporte", "")).strip() in set(transportes)]
+    viajes, _ = agrupar_viajes(involucradas, guias_revision_humana=pendientes - {""},
+                               agrupaciones_transporte={t: transportes[0] for t in transportes})
+    if len(viajes) != 1:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la simulación no produjo un único viaje")
+    viaje = viajes[0]
+    cargas = []
+    for transporte in transportes:
+        docs = [d for d in viaje.documentos if d.evidencia.get("numero_transporte", "").strip() == transporte]
+        cargas.append({
+            "numero_transporte": transporte,
+            "plantas": sorted({d.planta_origen_nombre for d in docs if d.planta_origen_nombre}),
+            "horas_planta": sorted({f"{d.hora_entrada_aza}-{d.hora_salida_aza}" for d in docs
+                                    if d.hora_entrada_aza or d.hora_salida_aza}),
+            "guias": [{"numero_guia": d.numero_guia, "peso_kg": d.peso_kg,
+                       "material": d.descripcion_material} for d in docs],
+        })
+    entregas = [{"guias": list(e.get("numeros_guia") or []), "destino": e.get("destino_operacional", ""),
+                 "localidad": e.get("localidad_entrega", ""), "distancia_km": e.get("distancia_km", ""),
+                 "estado_ruta": e.get("estado_ruta", "")} for e in viaje.entregas]
+    return {"cargas": cargas, "entregas": entregas, "peso_total_kg": viaje.peso_total_viaje_kg,
+            "estado_resultante": viaje.estado.value, "motivos_revision": [m.value for m in viaje.motivos_revision]}
 
 
 def _aplicar_viaje_agrupar(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
