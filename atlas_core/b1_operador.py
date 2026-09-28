@@ -134,6 +134,16 @@ _DESTINO_GUIA = [
                r"(?:DESTINO|DIRECCION(?:\s+DE\s+ENTREGA)?)\s+(?:DE\s+LA\s+|DE\s+|A\s+LA\s+)?" + _GUIA
                + r"\s*(?:A|POR|COMO|EN|:)\s*(?P<dir>.+)$"),
 ]
+# MISMO VIAJE FÍSICO: afirmación humana explícita de que 2+ guías son un
+# solo viaje ("las guías A y B pertenecen al mismo viaje", "son del mismo
+# viaje", "junta las guías A y B en un solo viaje"). Nunca una pregunta ni
+# una negación.
+_MISMO_VIAJE = re.compile(
+    r"\bGUIAS\b.*\b(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|JUNTA|JUNTAR|AGRUPA|AGRUPAR|UNE|UNIR)\b"
+    r".*\b(?:(?:AL|DEL|EL|EN\s+EL|A\s+UN|EN\s+UN|UN)\s+(?:MISMO|SOLO|UNICO)\s+(?:VIAJE|REPARTO))\b"
+    r"|\b(?:JUNTA|JUNTAR|AGRUPA|AGRUPAR|UNE|UNIR)\s+LAS\s+GUIAS\b.*\b(?:VIAJE|REPARTO)\b")
+_NEGACION_MISMO_VIAJE = re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|ES)\b")
+_NUMERO_GUIA = re.compile(r"\b\d{5,9}\b")
 _COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
 
@@ -159,6 +169,11 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     m = _TRANSPORTE.search(plano)
     if m:
         return Intencion("TRANSPORTE_REVALIDAR", {"numero_transporte": m.group("n")})
+    es_pregunta = str(texto or "").strip().endswith("?") or str(texto or "").strip().startswith("¿")
+    if not es_pregunta and _MISMO_VIAJE.search(plano) and not _NEGACION_MISMO_VIAJE.search(plano):
+        guias = list(dict.fromkeys(_NUMERO_GUIA.findall(plano)))
+        if len(guias) >= 2:
+            return Intencion("VIAJE_AGRUPAR_GUIAS", {"guias": guias})
     for patron in _DESTINO_GUIA:
         m = patron.match(plano)
         if m:
@@ -335,6 +350,14 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
                  f"{documento.get('numero_transporte')}): leído {(actual or {}).get('valor_documental')!r} -> "
                  f"{propuesto.get('direccion_manual')!r}{comuna}. Se geocodifica, se recalcula la ruta del viaje "
                  "y se cierra la revisión de destino.")
+    elif accion == "VIAJE_AGRUPAR_GUIAS":
+        unico = propuesto.get("viaje_unico") or {}
+        partes_viajes = "; ".join(
+            f"transporte {v.get('numero_transporte')} (guía {', '.join(v.get('guias') or [])})"
+            for v in (actual or {}).get("viajes") or [])
+        texto = (f"Agrupar en UN solo viaje Atlas: {partes_viajes}. Viaje resultante con transporte principal "
+                 f"{unico.get('numero_transporte_principal')} y transportes AZA "
+                 f"{' + '.join(unico.get('transportes_aza') or [])}; cada guía conserva su número de transporte.")
     elif accion == "DOCUMENTO_CORREGIR_CAMPO":
         texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
                  f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")
@@ -510,8 +533,13 @@ class OperadorB1:
                 f"{preview['valor_propuesto']['tipo']} en el catálogo. Revisa la patente.")}
         publico = {k: v for k, v in preview.items() if k != "token"}
         if preview.get("estado") == "SIN_CAMBIOS":
-            return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico,
-                    "mensaje": "Eso ya está así; no hay nada que confirmar."}
+            mensaje = "Eso ya está así; no hay nada que confirmar."
+            if intencion.accion == "VIAJE_AGRUPAR_GUIAS":
+                unico = (preview.get("valor_propuesto") or {}).get("viaje_unico") or {}
+                mensaje = (f"Las guías {', '.join((preview.get('entidad') or {}).get('guias') or [])} ya pertenecen "
+                           f"al mismo viaje (transporte principal {unico.get('numero_transporte_principal')}); "
+                           "no hay nada que confirmar.")
+            return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico, "mensaje": mensaje}
         if preview.get("riesgo") == SENSIBLE:
             return {"estado": "REQUIERE_AUTORIZACION_SENSIBLE", "accion": intencion.accion, "preview": publico,
                     "mensaje": ("Esta operación es SENSIBLE (" + _describir_preview(preview) + ") y requiere "

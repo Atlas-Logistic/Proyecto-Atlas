@@ -433,6 +433,10 @@ class Viaje:
     estado: EstadoViaje = EstadoViaje.CONFIRMADO
     motivos_revision: list[MotivoRevision] = field(default_factory=list)
     fecha_creacion: str = ""
+    # Viaje físico multitransporte confirmado por un humano
+    # (`atlas_core.agrupacion_viajes`): TODOS los transportes AZA del viaje.
+    # Vacío = viaje de un solo transporte (`numero_transporte`).
+    transportes_aza: list[str] = field(default_factory=list)
 
     @property
     def numeros_guia(self) -> list[str]:
@@ -890,6 +894,7 @@ class Viaje:
         return {
             "viaje_id": self.viaje_id,
             "numero_transporte": self.numero_transporte,
+            "transportes_aza": list(self.transportes_aza) or [self.numero_transporte],
             "fecha": self.fecha,
             "estado": self.estado.value,
             "motivos_revision": [m.value for m in self.motivos_revision],
@@ -1060,8 +1065,15 @@ def agrupar_viajes(
     guias_revision_humana: Iterable[str] | None = None,
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     generador_id: Callable[[], str] | None = None,
+    agrupaciones_transporte: Mapping[str, str] | None = None,
 ) -> tuple[list[Viaje], list[dict[str, object]]]:
     """Agrupa por transporte y conserva toda contradicción como revisión.
+
+    ``agrupaciones_transporte`` ({transporte: transporte principal}, ver
+    `atlas_core.agrupacion_viajes`): transportes AZA que un humano confirmó
+    como UN mismo viaje físico se agrupan bajo el principal (mismo
+    `viaje_id`/`numero_transporte` que tendría éste solo; todos en
+    `transportes_aza`). Sin agrupaciones, comportamiento histórico idéntico.
 
     Cuando se entrega ``guias_revision_humana`` (la bandeja canónica), una
     dependencia operacional sin resolver pero sin decisión accionable queda
@@ -1074,13 +1086,17 @@ def agrupar_viajes(
     )
     grupos: dict[str, list[Mapping[str, object]]] = {}
     sin_transporte: list[dict[str, object]] = []
+    grupo_de_transporte = {
+        _clave_normalizada(t): _clave_normalizada(p) for t, p in (agrupaciones_transporte or {}).items()
+    }
 
     for fila in _deduplicar_filas(filas):
         transporte = str(fila.get("numero_transporte", "")).strip()
         if not transporte_valido(transporte):
             sin_transporte.append(dict(fila))
             continue
-        grupos.setdefault(_clave_normalizada(transporte), []).append(fila)
+        clave = _clave_normalizada(transporte)
+        grupos.setdefault(grupo_de_transporte.get(clave, clave), []).append(fila)
 
     viajes: list[Viaje] = []
     ahora = reloj().isoformat()
@@ -1137,6 +1153,32 @@ def agrupar_viajes(
         _horas_compatibles = (
             lambda valores, _ok=ventana_planta_comun: _ok or _valores_compatibles(valores)
         )
+        transportes_grupo = sorted({str(f["numero_transporte"]).strip() for f in filas_grupo})
+        multitransporte = len({_clave_normalizada(t) for t in transportes_grupo}) > 1
+        if multitransporte:
+            # Viaje físico multitransporte (agrupación humana): cada
+            # transporte AZA es SU PROPIA visita a planta, con su propia
+            # ventana de horas -- sólo es conflicto una discrepancia DENTRO
+            # de un mismo transporte. Chofer/fecha/vehículo siguen
+            # exigiendo unanimidad en todo el viaje.
+            por_transporte: dict[str, list[DocumentoViaje]] = {}
+            for fila, documento in zip(filas_grupo, documentos):
+                por_transporte.setdefault(
+                    _clave_normalizada(fila["numero_transporte"]), []).append(documento)
+
+            def _horas_por_transporte(campo: str) -> bool:
+                return all(
+                    _ventana_planta_comun(docs) is not None
+                    or _valores_compatibles([getattr(d, campo) for d in docs])
+                    for docs in por_transporte.values()
+                )
+
+            entrada_ok = _horas_por_transporte("hora_entrada_aza")
+            salida_ok = _horas_por_transporte("hora_salida_aza")
+            _horas_entrada = lambda _valores, _ok=entrada_ok: _ok  # noqa: E731
+            _horas_salida = lambda _valores, _ok=salida_ok: _ok  # noqa: E731
+        else:
+            _horas_entrada = _horas_salida = _horas_compatibles
         campos_conflicto = (
             (MotivoRevision.CONFLICTO_FECHA, [valor or "" for valor in fechas_desktop], _valores_compatibles),
             (MotivoRevision.CONFLICTO_CHOFER, [d.chofer for d in documentos], _valores_compatibles),
@@ -1144,8 +1186,8 @@ def agrupar_viajes(
             (MotivoRevision.CONFLICTO_ORIGEN, [], lambda _valores, _c=hay_conflicto_origen: not _c),
             (MotivoRevision.CONFLICTO_PATENTE_TRACTO, [d.patente_tracto for d in documentos], _valores_compatibles),
             (MotivoRevision.CONFLICTO_PATENTE_RAMPLA, [d.patente_rampla for d in documentos], _valores_compatibles),
-            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos], _horas_compatibles),
-            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos], _horas_compatibles),
+            (MotivoRevision.CONFLICTO_HORA_ENTRADA, [d.hora_entrada_aza for d in documentos], _horas_entrada),
+            (MotivoRevision.CONFLICTO_HORA_SALIDA, [d.hora_salida_aza for d in documentos], _horas_salida),
         )
         motivos = [
             motivo for motivo, valores, comparador in campos_conflicto
@@ -1196,12 +1238,14 @@ def agrupar_viajes(
         viajes.append(
             Viaje(
                 viaje_id=identificador,
-                numero_transporte=str(filas_grupo[0]["numero_transporte"]).strip(),
+                numero_transporte=(transportes_grupo[0] if multitransporte
+                                   else str(filas_grupo[0]["numero_transporte"]).strip()),
                 fecha=fecha,
                 documentos=documentos,
                 estado=estado_viaje,
                 motivos_revision=motivos,
                 fecha_creacion=ahora,
+                transportes_aza=transportes_grupo if multitransporte else [],
             )
         )
     return viajes, sin_transporte

@@ -172,6 +172,11 @@ COLUMNAS_VIAJES = (
     # backward-compatible: un reporte generado antes de este bloque
     # simplemente no tenía esta columna.
     "fecha_ingesta",
+    # Viaje físico multitransporte (agrupación confirmada por un humano,
+    # `atlas_core.agrupacion_viajes`): TODOS los transportes AZA del viaje,
+    # separados por " | ". Un viaje normal lista sólo su `numero_transporte`.
+    # Agregada al final -- backward-compatible.
+    "transportes_aza",
 )
 
 
@@ -330,6 +335,7 @@ def _fila_viaje(
         "longitud_estadia_gps": datos["longitud_estadia_gps"],
         "duracion_estadia_gps_min": datos["duracion_estadia_gps_min"],
         "fecha_ingesta": datos["fecha_ingesta"],
+        "transportes_aza": " | ".join(datos["transportes_aza"]),
         **campos_ruta,
     }
 
@@ -569,9 +575,13 @@ def generar_reporte_viajes(
         # Sin bandeja canónica no se inventa una clasificación nueva:
         # agrupar_viajes conserva la semántica histórica binaria.
         guias_revision_humana = None
+    # Agrupaciones de viaje físico confirmadas por humano (misma carpeta que
+    # el dataset y la bandeja); sin registro, agrupamiento histórico.
+    from atlas_core.agrupacion_viajes import agrupaciones_activas, mapa_transporte_a_grupo
     viajes, sin_transporte = agrupar_viajes(
         filas, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
         guias_revision_humana=guias_revision_humana, reloj=lambda: instante,
+        agrupaciones_transporte=mapa_transporte_a_grupo(agrupaciones_activas(origen.parent)),
     )
     no_reconocidos = _construir_clientes_no_reconocidos(filas, catalogos)
     fecha_generacion = instante.isoformat()

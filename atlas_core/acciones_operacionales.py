@@ -193,6 +193,7 @@ class _Contexto:
         self.proveedor_rutas = proveedor_rutas
         self.proveedor_rutas_fallback = proveedor_rutas_fallback
         self.token = ""
+        self.confirmado_por = ""
         # Únicos archivos que esta capa puede respaldar/restaurar -- rutas
         # fijas de la raíz, nunca derivadas de parámetros.
         self.archivos = {
@@ -204,6 +205,7 @@ class _Contexto:
             "dataset": self.actual / "analisis_completo_guias.csv",
             "bandeja": self.actual / "decisiones_pendientes.json",
             "ledger_decisiones": self.actual / "decisiones_aplicadas.json",
+            "agrupaciones_viaje": self.actual / "agrupaciones_viaje.json",
         }
 
     def filas(self) -> list[dict[str, str]]:
@@ -840,6 +842,60 @@ def _aplicar_decision(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
     return {"despues": {"estado": "APLICADA", "accion": p["accion_decision"]}, "servicio": resultado}
 
 
+# =============================================================== VIAJE FÍSICO
+
+
+def _plan_viaje_agrupar(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.agrupacion_viajes import agrupaciones_activas, evaluar_agrupacion, identificador_agrupacion
+    guias = [str(g) for g in p["guias"]]
+    if not 2 <= len(set(guias)) <= 10 or any(not re.fullmatch(r"\d{3,12}", g) for g in guias):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "guias: entre 2 y 10 números de guía distintos")
+    filas = ctx.filas()
+    agrupaciones = agrupaciones_activas(ctx.actual)
+    eventos = _leer_json(ctx.actual / "eventos_operacionales.json", {}).get("eventos") or []
+    evaluacion = evaluar_agrupacion(guias=guias, filas=filas, agrupaciones=agrupaciones, eventos=eventos)
+    if evaluacion.motivo_rechazo:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", evaluacion.motivo_rechazo)
+    transportes = evaluacion.transportes
+    todas_las_guias = sorted({d["numero_guia"] for docs in evaluacion.documentos.values() for d in docs})
+    relevantes = [a for a in agrupaciones if set(a.get("transportes") or []) & set(transportes)]
+    return Plan(
+        entidad={"tipo": "VIAJE_FISICO", "id": identificador_agrupacion(transportes), "transportes": transportes,
+                 "guias": evaluacion.guias},
+        valor_actual={"viajes": [{"numero_transporte": t, "guias": [d["numero_guia"] for d in docs],
+                                  "planta_horas": sorted({f"{d['planta_origen_nombre']} {d['hora_entrada_aza']}-"
+                                                          f"{d['hora_salida_aza']}".strip() for d in docs})}
+                                 for t, docs in evaluacion.documentos.items()]},
+        valor_propuesto={"viaje_unico": {"numero_transporte_principal": evaluacion.principal,
+                                         "transportes_aza": transportes, "guias": todas_las_guias}},
+        estado_base={"filas": [f for f in filas if str(f.get("numero_transporte", "")).strip() in set(transportes)],
+                     "agrupaciones": relevantes},
+        sin_cambios=evaluacion.ya_agrupadas,
+        afectados=_afectados_por_guias(ctx, set(todas_las_guias)),
+        consecuencias=[
+            f"{len(transportes)} transportes AZA pasan a ser UN viaje Atlas (principal {evaluacion.principal}); "
+            "cada guía conserva su número de transporte y sus datos documentales.",
+            "Ruta, peso y entregas se consolidan sobre el viaje único; cada transporte conserva su propia "
+            "ventana horaria en planta.",
+        ],
+        revalidaciones=["REGENERAR_REPORTE_VIAJES", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIAS"],
+        archivos=("agrupaciones_viaje", "bandeja"),
+        datos={"transportes": transportes, "guias": todas_las_guias},
+    )
+
+
+def _aplicar_viaje_agrupar(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.agrupacion_viajes import registrar_agrupacion
+    agrupacion, _creada = registrar_agrupacion(
+        ctx.actual, transportes=plan.datos["transportes"], guias=plan.datos["guias"], actor=actor,
+        confirmado_por=ctx.confirmado_por or actor, fuente=f"ACCION_OPERACIONAL:{ctx.token}", referencia=str(p.get("referencia", "")),
+        reloj=ctx.reloj,
+    )
+    return {"despues": {"agrupacion_id": agrupacion["agrupacion_id"], "transportes_aza": agrupacion["transportes"],
+                        "numero_transporte_principal": agrupacion["transporte_principal"]},
+            "reconciliar": True, "guias_revalidar": list(plan.datos["guias"]), "regenerar_reporte": True}
+
+
 # =============================================================== TRANSPORTE (sensible)
 
 
@@ -917,6 +973,10 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"decision_id": _P("id", True), "accion_decision": _P("enum", True, opciones=_ACCIONES_DECISION),
                       **{k: _P("texto", max_largo=200) for k in _EXTRAS_DECISION}},
                      _plan_decision, _aplicar_decision),
+    DefinicionAccion("VIAJE_AGRUPAR_GUIAS", OPERACIONAL_REVERSIBLE,
+                     "Declara que 2+ guías (y sus transportes AZA completos) son un mismo viaje físico.",
+                     {"guias": _P("lista_texto", True, max_largo=12), "referencia": _REF},
+                     _plan_viaje_agrupar, _aplicar_viaje_agrupar),
     DefinicionAccion("TRANSPORTE_REVALIDAR", SENSIBLE, "Re-extrae con OCR los documentos de un transporte.",
                      {"numero_transporte": _P("transporte", True), "referencia": _REF},
                      _plan_transporte, _aplicar_transporte),
@@ -1123,6 +1183,7 @@ class CapaAccionesOperacionales:
                     "auditoria_previa": anterior.get("auditoria_id") if anterior else None}
 
         self._ctx.token = token
+        self._ctx.confirmado_por = confirmado
         respaldo = self._respaldar(plan.archivos, token)
         instante = self._reloj().astimezone(timezone.utc).isoformat()
         try:
