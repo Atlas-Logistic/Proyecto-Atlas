@@ -103,7 +103,7 @@ _TRANSPORTE = re.compile(r"\b(?:REVALIDA|REPROCESA|RELEE|REEXTRAE|VUELVE A LEER)
 _DESTRUCTIVA = re.compile(r"^(?:BORRA|BORRAR|ELIMINA|ELIMINAR|SUPRIME|SUPRIMIR|DESTRUYE)\w*\b(?P<resto>.*)$")
 _CAMPOS_DOC = {
     "OBRA": "obra_destino", "CLIENTE": "cliente", "RUT DEL CLIENTE": "rut_cliente", "RUT CLIENTE": "rut_cliente",
-    "DIRECCION": "despachar_a_crudo", "DESTINO": "despachar_a_crudo", "TRACTO": "patente_tracto",
+    "TRACTO": "patente_tracto",
     "PATENTE": "patente_tracto", "PATENTE DEL TRACTO": "patente_tracto", "RAMPLA": "patente_rampla",
     "PATENTE DE LA RAMPLA": "patente_rampla", "CODIGO CLIENTE": "codigo_cliente",
     "CODIGO DE CLIENTE": "codigo_cliente", "COD DESTINATARIO": "cod_destinatario",
@@ -120,6 +120,21 @@ _LECTURA_CHOFERES = re.compile(r"\b(?:CHOFERES|CONDUCTORES)\b.*\b(?:IN)?ACTIV[OA
 _VERBO_LECTURA = re.compile(r"^(?:QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
 _LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
 _NO_ES_DECISION = re.compile(r"\b(?:ESTADIAS?|INCIDENCIAS?|DEVOLUCION(?:ES)?|VUELTAS?)\b")
+# DESTINO de una guía (mismo camino que Revisión: DESTINO_NO_RESUELTO /
+# REGISTRAR_DIRECCION). Frases: "el destino de la guía N es X", "la guía N va
+# a X", "corrige/cambia/asigna el destino de la guía N a X". Comuna opcional
+# sólo si viene explícita ("..., comuna X").
+_GUIA = r"GUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})"
+_DESTINO_GUIA = [
+    re.compile(r"^(?:EL\s+|LA\s+)?(?:DESTINO|DIRECCION(?:\s+DE\s+ENTREGA)?)\s+(?:DE\s+LA\s+|DE\s+)?" + _GUIA
+               + r"\s*(?:ES|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A|:)\s*(?P<dir>.+)$"),
+    re.compile(r"^(?:LA\s+)?" + _GUIA + r"\s+(?:VA|IBA|FUE|SE\s+ENTREGA|SE\s+ENTREGO|SE\s+DESPACHA|SE\s+DESPACHO)\s+"
+               r"(?:A|EN|HACIA)\s+(?P<dir>.+)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|ASIGNA|ASIGNAR|REGISTRA|REGISTRAR|PON|PONER)\s+(?:EL\s+|LA\s+)?"
+               r"(?:DESTINO|DIRECCION(?:\s+DE\s+ENTREGA)?)\s+(?:DE\s+LA\s+|DE\s+|A\s+LA\s+)?" + _GUIA
+               + r"\s*(?:A|POR|COMO|EN|:)\s*(?P<dir>.+)$"),
+]
+_COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
 
 
@@ -144,6 +159,17 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     m = _TRANSPORTE.search(plano)
     if m:
         return Intencion("TRANSPORTE_REVALIDAR", {"numero_transporte": m.group("n")})
+    for patron in _DESTINO_GUIA:
+        m = patron.match(plano)
+        if m:
+            direccion = original[m.start("dir"):m.end("dir")].strip(" ,")
+            parametros = {"accion_decision": "REGISTRAR_DIRECCION"}
+            comuna = _COMUNA_EXPLICITA.match(_plano(direccion))
+            if comuna:
+                parametros["comuna_manual"] = direccion[comuna.start("comuna"):comuna.end("comuna")].strip()
+                direccion = direccion[:comuna.end("dir")].strip(" ,")
+            parametros["direccion_manual"] = direccion
+            return Intencion("DECISION_APLICAR", parametros, {"guia_destino": m.group("guia")})
     m = _DOCUMENTO.match(plano)
     if m:
         return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
@@ -183,7 +209,8 @@ class ErrorContratoInterpretacion(ValueError):
     pass
 
 
-_MENCIONES_PERMITIDAS = {"chofer"}
+# mención -> parámetro de la acción que resuelve (nunca se pasa cruda).
+_MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id"}
 _SOSPECHOSO = re.compile(
     r"(^[A-Za-z]:[\\/])|(\.\.[\\/])|(^[\\/])|(\\\\)|[;|&`$<>{}]|"
     r"\b(?:rm|del|rmdir|powershell|cmd|bash|sh|python|py|pip|import|exec|eval|subprocess|os\.system|"
@@ -212,10 +239,10 @@ def validar_intencion(intencion: Intencion) -> Intencion:
     fuera = sorted(set(intencion.parametros) - set(esquema))
     if fuera:
         raise ErrorContratoInterpretacion(f"parámetros fuera del esquema: {', '.join(fuera)}")
-    if set(intencion.menciones) - _MENCIONES_PERMITIDAS:
+    if set(intencion.menciones) - set(_MENCIONES_PERMITIDAS):
         raise ErrorContratoInterpretacion("mención no permitida")
     for mencion in intencion.menciones:
-        if mencion not in esquema:
+        if _MENCIONES_PERMITIDAS[mencion] not in esquema:
             raise ErrorContratoInterpretacion(f"la acción no admite la mención {mencion}")
     for nombre, valor in {**intencion.parametros, **intencion.menciones}.items():
         _guardia_valor(nombre, valor)
@@ -269,6 +296,26 @@ def resolver_chofer(choferes: Mapping[str, dict], mencion: str, *, incluir_inact
     return {"estado": "AMBIGUO" if len(candidatos) > 1 else "DESCONOCIDO", "candidatos": candidatos}
 
 
+def resolver_decision_destino(decisiones: list[Mapping[str, object]], guia: str) -> tuple[str, str]:
+    """(decision_id, "") si la guía tiene EXACTAMENTE una revisión de destino
+    pendiente que admite REGISTRAR_DIRECCION (misma tarjeta que Revisión);
+    si no, ("", mensaje de aclaración). Nunca crea ni adivina una decisión."""
+    candidatas = [
+        d for d in decisiones
+        if str((d.get("documento") or {}).get("numero_guia", "")).strip() == guia
+        and d.get("tipo") == "DESTINO_NO_RESUELTO" and d.get("estado", "PENDIENTE") == "PENDIENTE"
+        and "REGISTRAR_DIRECCION" in (d.get("acciones_permitidas") or [])
+    ]
+    if len(candidatas) == 1:
+        return str(candidatas[0]["decision_id"]), ""
+    if len(candidatas) > 1:
+        archivos = ", ".join(str((d.get("documento") or {}).get("archivo", "")) for d in candidatas)
+        return "", (f"La guía {guia} tiene más de una revisión de destino pendiente ({archivos}); "
+                    "resuélvela desde Revisión de Atlas.")
+    return "", (f"La guía {guia} no tiene una revisión de destino pendiente en la bandeja. Si el destino "
+                "de un viaje ya calculado está mal, usa «Corregir destino» en la Logística del viaje.")
+
+
 # --------------------------------------------------------------- formato
 
 
@@ -281,6 +328,13 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
     elif accion == "CHOFER_CAMBIAR_ESTADO":
         estado = "ACTIVO" if propuesto.get("activo") else "INACTIVO"
         texto = f"Dejar al chofer {entidad.get('nombre')} ({entidad.get('id')}) como {estado}."
+    elif accion == "DECISION_APLICAR" and propuesto.get("accion") == "REGISTRAR_DIRECCION":
+        documento = entidad.get("documento") or {}
+        comuna = f", comuna {propuesto['comuna_manual']}" if propuesto.get("comuna_manual") else ""
+        texto = (f"Registrar el destino de la guía {documento.get('numero_guia')} (transporte "
+                 f"{documento.get('numero_transporte')}): leído {(actual or {}).get('valor_documental')!r} -> "
+                 f"{propuesto.get('direccion_manual')!r}{comuna}. Se geocodifica, se recalcula la ruta del viaje "
+                 "y se cierra la revisión de destino.")
     elif accion == "DOCUMENTO_CORREGIR_CAMPO":
         texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
                  f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")
@@ -430,6 +484,13 @@ class OperadorB1:
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
                         "mensaje": mensaje}
             parametros["chofer"] = resolucion["chofer"]
+        if "guia_destino" in intencion.menciones:
+            guia = intencion.menciones["guia_destino"]
+            decision_id, aclaracion = resolver_decision_destino(self.capa._ctx.decisiones(), guia)
+            if aclaracion:
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [],
+                        "mensaje": aclaracion}
+            parametros["decision_id"] = decision_id
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
 
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
