@@ -82,3 +82,20 @@ escribir; pedir de nuevo una acción ya aplicada devuelve `SIN_CAMBIOS`.
 Una corrección documental queda protegida en `decisiones_aplicadas.json` con tipo
 `CORRECCION_DOCUMENTAL_OPERADOR`: el replay OCR/reparador la respeta, y sólo otra
 corrección del operador puede reemplazarla (una decisión de Revisión siempre gana).
+
+## B1 operador (lenguaje natural)
+
+Módulo: `atlas_core/b1_operador.py` · CLI: `b1_operador_cli.py --conversacion ID --texto "..."`.
+
+- Intérprete determinista de alta certeza (reutiliza `operaciones_conversacionales._interpretar`
+  para "X usa PATENTE") + proveedor de modelo opcional. Toda intención, venga de donde venga,
+  se valida contra `catalogo_acciones()` (acción del catálogo, parámetros del esquema, sólo
+  mención `chofer`, sin rutas/comandos/código) antes de llegar a la capa.
+- Menciones de chofer se resuelven con `resolver_identidad_nominal_fuerte_chofer` o RUT;
+  ambigua/desconocida → `ACLARACION_REQUERIDA` con candidatos, nunca se adivina.
+- Estado por conversación en `operacion/actual/b1_operador_conversaciones.json`: un único
+  preview pendiente; una instrucción operacional nueva lo reemplaza; "sí/confirma/aplica/dale/ok"
+  ejecuta sólo ese token (`confirmado_por` = usuario humano); sin pendiente no hace nada;
+  obsoleto/expirado → `PREVIEW_RENOVADO` sin ejecutar.
+- LECTURA responde directo. SENSIBLE → `REQUIERE_AUTORIZACION_SENSIBLE`, nunca queda pendiente.
+  DESTRUCTIVA → rechazada.

@@ -1,0 +1,490 @@
+"""B1 OPERADOR -- conecta órdenes en lenguaje natural con la capa canónica
+de acciones operacionales (`atlas_core.acciones_operacionales`).
+
+    texto -> intención (determinista o modelo) -> validación contra
+    `catalogo_acciones()` -> resolución de entidades (sin adivinar) ->
+    `previsualizar(origen="B1")` -> preview pendiente de ESTA conversación
+    -> "sí" -> `ejecutar(token pendiente, confirmado_por=<humano>)`.
+
+Reglas:
+- LECTURA se responde directo, sin confirmación y sin tocar el pendiente.
+- OPERACIONAL_REVERSIBLE: preview + una confirmación humana.
+- SENSIBLE: se informa que requiere autorización sensible; nunca queda
+  pendiente, así que ningún "sí" puede ejecutarla por esta vía.
+- DESTRUCTIVA: la capa la rechaza.
+- Una confirmación sólo ejecuta el token pendiente de su conversación; sin
+  pendiente no se ejecuta nada; expirado u obsoleto -> se muestra el preview
+  nuevo, nunca se ejecuta en silencio.
+- Una instrucción operacional nueva reemplaza al pendiente anterior.
+- Una mención de chofer ambigua o desconocida -> se pregunta, no se adivina.
+- Lo que proponga un modelo es DATO: sólo {accion, parametros, menciones},
+  acción del catálogo, parámetros del esquema, sin rutas/comandos/código.
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Mapping, Protocol
+
+from atlas_core.acciones_operacionales import (
+    ACCIONES, DESTRUCTIVA, LECTURA, ORIGEN_B1, SENSIBLE, CapaAccionesOperacionales, _esquema,
+)
+from atlas_core.almacenamiento_portable import SesionOcupadaError, bloqueo_sesion, escribir_json_atomico
+
+NOMBRE_ESTADO = "b1_operador_conversaciones.json"
+ACTOR_B1 = "B1"
+_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+
+# --------------------------------------------------------------- texto
+
+
+def _plano(texto: str) -> str:
+    """Mayúsculas sin tildes, MISMO largo que `texto.upper()` (carácter a
+    carácter), para capturar valores del original con los mismos índices."""
+    salida = []
+    for caracter in str(texto or "").upper():
+        base = unicodedata.normalize("NFKD", caracter)
+        salida.append(base[0] if base and not unicodedata.combining(base[0]) else caracter)
+    return "".join(salida)
+
+
+def _limpio(texto: str) -> tuple[str, str]:
+    original = " ".join(str(texto or "").split()).strip(" .!?¿¡").upper()
+    return original, _plano(original)
+
+
+_CONFIRMAR_FUERTES = {"SI", "CONFIRMA", "CONFIRMO", "CONFIRMADO", "APLICA", "APLICALO", "APLICAR", "DALE",
+                      "OK", "OKAY", "HAZLO", "ADELANTE", "PROCEDE", "EJECUTA", "EJECUTALO", "ACUERDO"}
+_CONFIRMAR_RELLENO = {"DE", "YA", "POR", "FAVOR", "PORFA", "NOMAS"}
+_CANCELAR = {"NO", "CANCELA", "CANCELAR", "CANCELALO", "ANULA", "ANULALO", "OLVIDALO", "DEJALO", "MEJOR", "NADA"}
+
+
+def _palabras(plano: str) -> list[str]:
+    return re.findall(r"[A-Z0-9]+", plano)
+
+
+def es_confirmacion(texto: str) -> bool:
+    palabras = _palabras(_limpio(texto)[1])
+    return (bool(palabras) and len(palabras) <= 5 and any(p in _CONFIRMAR_FUERTES for p in palabras)
+            and all(p in _CONFIRMAR_FUERTES | _CONFIRMAR_RELLENO for p in palabras)
+            and palabras[0] != "NO")
+
+
+def es_cancelacion(texto: str) -> bool:
+    palabras = _palabras(_limpio(texto)[1])
+    return bool(palabras) and len(palabras) <= 4 and palabras[0] in _CANCELAR and all(p in _CANCELAR for p in palabras)
+
+
+# --------------------------------------------------------------- intención
+
+
+@dataclass
+class Intencion:
+    accion: str
+    parametros: dict[str, object] = field(default_factory=dict)
+    menciones: dict[str, str] = field(default_factory=dict)
+    tipo_vehiculo_declarado: str = ""
+    fuente: str = "DETERMINISTA"
+
+
+_ESTADO_A = re.compile(
+    r"^(?:PON|PONER|PONGA|DEJA|DEJAR|DEJE|MARCA|MARCAR|MARQUE)\s+(?:COMO\s+)?(IN)?ACTIV[OA]\s+"
+    r"(?:A\s+|AL\s+)?(?:CHOFER\s+|CONDUCTOR\s+)?(?P<chofer>.+)$")
+_ESTADO_B = re.compile(
+    r"^(?:PON|PONER|DEJA|DEJAR|MARCA|MARCAR)\s+(?:A\s+|AL\s+)?(?:CHOFER\s+|CONDUCTOR\s+)?(?P<chofer>.+?)\s+"
+    r"(?:COMO\s+)?(IN)?ACTIV[OA]$")
+_ESTADO_C = re.compile(
+    r"^(DESACTIVA|INACTIVA|ACTIVA|REACTIVA)(?:R)?\s+(?:A\s+|AL\s+)?(?:CHOFER\s+|CONDUCTOR\s+)?(?P<chofer>.+)$")
+_TRANSPORTE = re.compile(r"\b(?:REVALIDA|REPROCESA|RELEE|REEXTRAE|VUELVE A LEER)\w*\s+(?:EL\s+)?(?:TRANSPORTE|VIAJE)\s+"
+                         r"(?:N[°O]?\s*)?(?P<n>\d{4,15})\b")
+_DESTRUCTIVA = re.compile(r"^(?:BORRA|BORRAR|ELIMINA|ELIMINAR|SUPRIME|SUPRIMIR|DESTRUYE)\w*\b(?P<resto>.*)$")
+_CAMPOS_DOC = {
+    "OBRA": "obra_destino", "CLIENTE": "cliente", "RUT DEL CLIENTE": "rut_cliente", "RUT CLIENTE": "rut_cliente",
+    "DIRECCION": "despachar_a_crudo", "DESTINO": "despachar_a_crudo", "TRACTO": "patente_tracto",
+    "PATENTE": "patente_tracto", "PATENTE DEL TRACTO": "patente_tracto", "RAMPLA": "patente_rampla",
+    "PATENTE DE LA RAMPLA": "patente_rampla", "CODIGO CLIENTE": "codigo_cliente",
+    "CODIGO DE CLIENTE": "codigo_cliente", "COD DESTINATARIO": "cod_destinatario",
+}
+_DOCUMENTO = re.compile(
+    r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR)\s+(?:EL|LA)\s+(?P<campo>"
+    + "|".join(sorted(_CAMPOS_DOC, key=len, reverse=True))
+    + r")\s+DE\s+LA\s+GUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\s+(?:A|POR|AL VALOR)\s+(?P<valor>.+)$")
+_LECTURA_CHOFERES = re.compile(r"\bCHOFERES\b|\bCONDUCTORES\b")
+_VERBO_LECTURA = re.compile(r"^(?:QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
+_LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS|PENDIENTES)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
+_LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|MUESTRA|MUESTRAME|LISTA|LISTAR|QUE|CUALES)\s+(?:LA\s+|LAS\s+)?OBRAS?\b\s*(?P<nombre>.*)$")
+
+
+def interpretar_determinista(texto: str) -> Intencion | None:
+    """Sólo patrones de alta certeza; ante la duda devuelve None."""
+    from atlas_core.operaciones_conversacionales import _interpretar
+    original, plano = _limpio(texto)
+    if not plano:
+        return None
+    m = _DESTRUCTIVA.match(plano)
+    if m:
+        resto = m.group("resto")
+        accion = ("EVIDENCIA_ELIMINAR" if re.search(r"EVIDENCIA|FOTO|IMAGEN|DOCUMENTO", resto)
+                  else "HISTORIAL_ELIMINAR" if re.search(r"HISTORIAL|AUDITORIA|REGISTRO", resto) else "ENTIDAD_ELIMINAR")
+        return Intencion(accion)
+    for patron in (_ESTADO_A, _ESTADO_B, _ESTADO_C):
+        m = patron.match(plano)
+        if m:
+            activo = m.group(1) in {"ACTIVA", "REACTIVA"} if patron is _ESTADO_C else m.group(1) is None
+            return Intencion("CHOFER_CAMBIAR_ESTADO", {"activo": activo},
+                             {"chofer": original[m.start("chofer"):m.end("chofer")]})
+    m = _TRANSPORTE.search(plano)
+    if m:
+        return Intencion("TRANSPORTE_REVALIDAR", {"numero_transporte": m.group("n")})
+    m = _DOCUMENTO.match(plano)
+    if m:
+        return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+            "numero_guia": m.group("guia"), "campo": _CAMPOS_DOC[m.group("campo")],
+            "valor": original[m.start("valor"):m.end("valor")].strip()})
+    m = _LECTURA_OBRAS.match(plano)
+    if m:
+        nombre = original[m.start("nombre"):m.end("nombre")].strip()
+        return Intencion("OBRA_CONSULTAR", {"nombre": nombre} if nombre else {})
+    if _VERBO_LECTURA.match(plano) or str(texto or "").strip().endswith("?"):
+        if _LECTURA_CHOFERES.search(plano):
+            estado = "INACTIVO" if re.search(r"\bINACTIV", plano) else "ACTIVO" if re.search(r"\bACTIV", plano) else "TODOS"
+            return Intencion("CHOFER_CONSULTAR", {"estado": estado})
+        m = _LECTURA_DECISIONES.search(plano)
+        if m:
+            return Intencion("DECISION_CONSULTAR", {"numero_guia": m.group("guia")} if m.group("guia") else {})
+        return None
+    asociacion = _interpretar(texto)
+    if asociacion:
+        tipo, chofer, patente = asociacion
+        return Intencion("CHOFER_ASIGNAR_VEHICULO", {"patente": patente}, {"chofer": chofer},
+                         tipo_vehiculo_declarado=tipo)
+    return None
+
+
+# --------------------------------------------------------------- modelo (opcional)
+
+
+class ProveedorInterpretacionAcciones(Protocol):
+    """Traduce texto a {accion, parametros, menciones}. Recibe el contrato
+    público para elegir; su salida SIEMPRE se valida después."""
+
+    def interpretar(self, texto: str, contrato: list[dict]) -> Mapping[str, object] | None: ...
+
+
+class ErrorContratoInterpretacion(ValueError):
+    pass
+
+
+_MENCIONES_PERMITIDAS = {"chofer"}
+_SOSPECHOSO = re.compile(
+    r"(^[A-Za-z]:[\\/])|(\.\.[\\/])|(^[\\/])|(\\\\)|[;|&`$<>{}]|"
+    r"\b(?:rm|del|rmdir|powershell|cmd|bash|sh|python|py|pip|import|exec|eval|subprocess|os\.system|"
+    r"open|drop|select|insert|update|delete|curl|wget)\b\s*[\-(/\\*.]|\w+\.\w+\s*\(|\.(?:py|ps1|bat|exe|sh|json|csv)\b",
+    re.I,
+)
+
+
+def _guardia_valor(nombre: str, valor: object) -> None:
+    valores = valor if isinstance(valor, list) else [valor]
+    for v in valores:
+        if isinstance(v, bool) or isinstance(v, (int, float)):
+            continue
+        if not isinstance(v, str):
+            raise ErrorContratoInterpretacion(f"{nombre}: tipo de valor no permitido")
+        if _SOSPECHOSO.search(v):
+            raise ErrorContratoInterpretacion(f"{nombre}: el valor parece una ruta, comando o código")
+
+
+def validar_intencion(intencion: Intencion) -> Intencion:
+    """Contrato común (determinista o modelo) ANTES de llegar al ejecutor."""
+    definicion = ACCIONES.get(intencion.accion)
+    if definicion is None:
+        raise ErrorContratoInterpretacion("acción fuera del catálogo canónico")
+    esquema = _esquema(definicion)
+    fuera = sorted(set(intencion.parametros) - set(esquema))
+    if fuera:
+        raise ErrorContratoInterpretacion(f"parámetros fuera del esquema: {', '.join(fuera)}")
+    if set(intencion.menciones) - _MENCIONES_PERMITIDAS:
+        raise ErrorContratoInterpretacion("mención no permitida")
+    for mencion in intencion.menciones:
+        if mencion not in esquema:
+            raise ErrorContratoInterpretacion(f"la acción no admite la mención {mencion}")
+    for nombre, valor in {**intencion.parametros, **intencion.menciones}.items():
+        _guardia_valor(nombre, valor)
+    return intencion
+
+
+def intencion_desde_modelo(propuesta: object) -> Intencion:
+    if not isinstance(propuesta, Mapping):
+        raise ErrorContratoInterpretacion("la propuesta del modelo no es un objeto")
+    if set(propuesta) - {"accion", "parametros", "menciones"}:
+        raise ErrorContratoInterpretacion("la propuesta del modelo trae claves fuera del contrato")
+    accion = propuesta.get("accion")
+    parametros = propuesta.get("parametros") or {}
+    menciones = propuesta.get("menciones") or {}
+    if not isinstance(accion, str) or not isinstance(parametros, Mapping) or not isinstance(menciones, Mapping):
+        raise ErrorContratoInterpretacion("propuesta del modelo con tipos inválidos")
+    if not all(isinstance(v, str) for v in menciones.values()):
+        raise ErrorContratoInterpretacion("menciones deben ser texto")
+    return validar_intencion(Intencion(accion.strip().upper(), dict(parametros), dict(menciones), fuente="MODELO"))
+
+
+# --------------------------------------------------------------- resolución de entidades
+
+
+def _candidatos_chofer(choferes: Mapping[str, dict], mencion: str) -> list[dict]:
+    from atlas_core.catalogos import rut_canonico_de_registro_chofer
+    from atlas_core.convergencia_identidad_conocida import _candidatos_contextuales_chofer
+    return [{"chofer": clave, "nombre": str(r.get("nombre", "")), "rut": rut_canonico_de_registro_chofer(clave, r) or "",
+             "activo": r.get("activo", True) is True}
+            for clave, r in _candidatos_contextuales_chofer(choferes, mencion)]
+
+
+def resolver_chofer(choferes: Mapping[str, dict], mencion: str, *, incluir_inactivos: bool) -> dict:
+    """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'chofer', 'nombre', 'candidatos'}"""
+    from atlas_core.catalogos import normalizar_rut
+    from atlas_core.convergencia_identidad_conocida import resolver_identidad_nominal_fuerte_chofer
+    from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
+    vista = {k: ({**r, "activo": True} if incluir_inactivos else r) for k, r in choferes.items() if isinstance(r, dict)}
+    if validar_rut_chileno(mencion).estado == EstadoValidacion.VALIDO:
+        buscado = normalizar_rut(mencion)
+        claves = [k for k, r in vista.items() if r.get("activo", True) is True
+                  and buscado in {normalizar_rut(k), normalizar_rut(str(r.get("rut", "")))}]
+        if len(claves) == 1:
+            return {"estado": "RESUELTO", "chofer": claves[0], "nombre": str(vista[claves[0]].get("nombre", ""))}
+    identidad = resolver_identidad_nominal_fuerte_chofer(nombre_documental=mencion, rut_documental="", choferes=vista)
+    if identidad.resultado == "RESUELTO" and identidad.identificador:
+        return {"estado": "RESUELTO", "chofer": identidad.identificador, "nombre": identidad.nombre_canonico or ""}
+    candidatos = _candidatos_chofer(vista, mencion)
+    for c in candidatos:
+        c["activo"] = choferes.get(c["chofer"], {}).get("activo", True) is True
+    return {"estado": "AMBIGUO" if len(candidatos) > 1 else "DESCONOCIDO", "candidatos": candidatos}
+
+
+# --------------------------------------------------------------- formato
+
+
+def _describir_preview(preview: Mapping[str, object]) -> str:
+    accion, entidad = preview.get("accion"), preview.get("entidad") or {}
+    actual, propuesto = preview.get("valor_actual"), preview.get("valor_propuesto") or {}
+    if accion == "CHOFER_ASIGNAR_VEHICULO":
+        texto = (f"Asociar {propuesto.get('tipo')} {propuesto.get('patente')} al chofer "
+                 f"{entidad.get('chofer')} (RUT {propuesto.get('rut_chofer')}).")
+    elif accion == "CHOFER_CAMBIAR_ESTADO":
+        estado = "ACTIVO" if propuesto.get("activo") else "INACTIVO"
+        texto = f"Dejar al chofer {entidad.get('nombre')} ({entidad.get('id')}) como {estado}."
+    elif accion == "DOCUMENTO_CORREGIR_CAMPO":
+        texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
+                 f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")
+    else:
+        texto = f"{accion}: {entidad} -> {propuesto}."
+    afectados = preview.get("afectados") or {}
+    partes = [texto]
+    if isinstance(afectados, Mapping):
+        if "total_guias" in afectados:
+            partes.append(f"Afecta {afectados['total_guias']} guía(s) y {afectados.get('total_decisiones', 0)} "
+                          "decisión(es) pendiente(s).")
+        if afectados.get("decisiones_obsoletas"):
+            partes.append(f"Retirará {len(afectados['decisiones_obsoletas'])} decisión(es) obsoleta(s).")
+    partes.extend(str(c) for c in preview.get("consecuencias") or [])
+    return " ".join(partes)
+
+
+def _describir_lectura(accion: str, resultado: Mapping[str, object]) -> str:
+    if accion == "CHOFER_CONSULTAR":
+        choferes = resultado.get("choferes") or []
+        if not choferes:
+            return "No hay choferes con ese estado."
+        return f"{len(choferes)} chofer(es): " + "; ".join(
+            f"{c['nombre']} ({c['rut'] or c['chofer_id']}, {'activo' if c['activo'] else 'inactivo'})" for c in choferes)
+    if accion == "DECISION_CONSULTAR":
+        decisiones = resultado.get("decisiones") or []
+        return (f"{resultado.get('total', 0)} decisión(es) pendiente(s): "
+                + "; ".join(f"{d['tipo']} guía {(d.get('documento') or {}).get('numero_guia')}" for d in decisiones)
+                if decisiones else "No hay decisiones pendientes.")
+    if accion == "OBRA_CONSULTAR":
+        obras = resultado.get("obras") or []
+        return (f"{resultado.get('total', 0)} obra(s): " + "; ".join(f"{o['nombre']} ({o['estado']})" for o in obras)
+                if obras else "No encontré obras con ese nombre.")
+    return str(resultado)
+
+
+def _describir_resultado(resultado: Mapping[str, object]) -> str:
+    partes = [f"Aplicado: {resultado.get('accion')}. Antes: {resultado.get('antes')}. Después: {resultado.get('despues')}."]
+    reconciliacion = resultado.get("reconciliacion") or {}
+    if reconciliacion:
+        partes.append("Bandeja reconciliada." if reconciliacion.get("ejecutado")
+                      else f"Bandeja no reconciliada ({reconciliacion.get('motivo')}).")
+    if resultado.get("decisiones_retiradas"):
+        partes.append(f"Decisiones retiradas: {len(resultado['decisiones_retiradas'])}.")
+    revalidacion = resultado.get("revalidacion") or {}
+    if revalidacion.get("focal"):
+        partes.append("Revalidación focal ejecutada.")
+    if (revalidacion.get("reporte") or {}).get("regenerado"):
+        partes.append("Reporte de viajes regenerado.")
+    return " ".join(partes)
+
+
+# --------------------------------------------------------------- operador
+
+
+class OperadorB1:
+    """Estado conversacional del preview pendiente + puente a la capa."""
+
+    def __init__(self, raiz_atlas: str | Path, *, usuario: str = "JAVIER",
+                 proveedor: ProveedorInterpretacionAcciones | None = None,
+                 capa: CapaAccionesOperacionales | None = None, reloj=lambda: datetime.now(timezone.utc)):
+        if not _ID.fullmatch(str(usuario or "")):
+            raise ValueError("usuario inválido")
+        self.raiz = Path(raiz_atlas)
+        self.usuario = usuario
+        self.proveedor = proveedor
+        self.reloj = reloj
+        self.capa = capa or CapaAccionesOperacionales(self.raiz, reloj=reloj)
+        self._actual = self.raiz / "operacion" / "actual"
+        self._ruta = self._actual / NOMBRE_ESTADO
+
+    # ------------------------------------------------------------ estado
+
+    def _leer(self) -> dict:
+        import json
+        try:
+            datos = json.loads(self._ruta.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"schema_version": 1, "conversaciones": {}}
+        if datos.get("schema_version") != 1:
+            raise ValueError("estado conversacional con versión desconocida")
+        return datos
+
+    def pendiente(self, conversacion_id: str) -> dict | None:
+        return (self._leer().get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
+
+    def _fijar_pendiente(self, estado: dict, conversacion_id: str, pendiente: dict | None) -> None:
+        conversaciones = estado.setdefault("conversaciones", {})
+        if pendiente is None:
+            conversaciones.pop(conversacion_id, None)
+        else:
+            conversaciones[conversacion_id] = {"pendiente": pendiente}
+        escribir_json_atomico(self._ruta, estado)
+
+    # ------------------------------------------------------------ entrada
+
+    def atender(self, conversacion_id: str, texto: str) -> dict:
+        if not _ID.fullmatch(str(conversacion_id or "")):
+            return {"estado": "RECHAZADA", "mensaje": "conversación inválida"}
+        try:
+            with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
+                estado = self._leer()
+                if es_confirmacion(texto):
+                    return self._confirmar(estado, conversacion_id)
+                if es_cancelacion(texto):
+                    tenia = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
+                    self._fijar_pendiente(estado, conversacion_id, None)
+                    return {"estado": "CANCELADA" if tenia else "SIN_PREVIEW_PENDIENTE",
+                            "mensaje": "Operación pendiente descartada." if tenia else "No había nada pendiente."}
+                return self._instruccion(estado, conversacion_id, texto)
+        except SesionOcupadaError:
+            return {"estado": "RECHAZADA", "mensaje": "Otra operación de esta conversación está en curso."}
+
+    def _interpretar(self, texto: str) -> Intencion | None:
+        intencion = interpretar_determinista(texto)
+        if intencion is not None:
+            return validar_intencion(intencion)
+        if self.proveedor is None:
+            return None
+        from atlas_core.acciones_operacionales import catalogo_acciones
+        propuesta = self.proveedor.interpretar(str(texto), catalogo_acciones())
+        return None if propuesta is None else intencion_desde_modelo(propuesta)
+
+    def _instruccion(self, estado: dict, conversacion_id: str, texto: str) -> dict:
+        try:
+            intencion = self._interpretar(texto)
+        except ErrorContratoInterpretacion as error:
+            return {"estado": "RECHAZADA", "codigo": "CONTRATO_INTERPRETACION", "mensaje": str(error)}
+        if intencion is None:
+            return {"estado": "NO_INTERPRETADA", "mensaje": (
+                "No reconocí una instrucción operacional. Puedo: asociar vehículo a chofer, activar/inactivar un "
+                "chofer, corregir un campo de una guía, o consultar choferes, obras y decisiones.")}
+        definicion = ACCIONES[intencion.accion]
+        if definicion.riesgo != LECTURA:
+            # Toda instrucción operacional nueva invalida el pendiente anterior.
+            self._fijar_pendiente(estado, conversacion_id, None)
+        parametros = dict(intencion.parametros)
+        if "chofer" in intencion.menciones:
+            resolucion = resolver_chofer(self.capa._ctx.choferes(), intencion.menciones["chofer"],
+                                         incluir_inactivos=intencion.accion == "CHOFER_CAMBIAR_ESTADO")
+            if resolucion["estado"] != "RESUELTO":
+                candidatos = resolucion.get("candidatos") or []
+                mensaje = ("¿A cuál chofer te refieres? " + "; ".join(f"{c['nombre']} (RUT {c['rut'] or c['chofer']})"
+                                                                      for c in candidatos)
+                           + ". Repite la orden con el nombre completo o el RUT."
+                           if candidatos else f"No encontré un chofer que coincida con «{intencion.menciones['chofer']}».")
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
+                        "mensaje": mensaje}
+            parametros["chofer"] = resolucion["chofer"]
+        return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
+
+    def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
+                       texto: str) -> dict:
+        preview = self.capa.previsualizar(intencion.accion, parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
+                                          referencia=str(texto)[:500])
+        if preview.get("estado") == "RECHAZADA":
+            return {"estado": "RECHAZADA", "accion": intencion.accion, "codigo": preview.get("codigo"),
+                    "mensaje": preview.get("mensaje")}
+        if preview.get("estado") == "RESULTADO":
+            return {"estado": "RESULTADO_LECTURA", "accion": intencion.accion, "resultado": preview["resultado"],
+                    "mensaje": _describir_lectura(intencion.accion, preview["resultado"])}
+        if (intencion.tipo_vehiculo_declarado
+                and (preview.get("valor_propuesto") or {}).get("tipo") not in (None, intencion.tipo_vehiculo_declarado)):
+            return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "mensaje": (
+                f"Dijiste {intencion.tipo_vehiculo_declarado}, pero {parametros.get('patente')} es "
+                f"{preview['valor_propuesto']['tipo']} en el catálogo. Revisa la patente.")}
+        publico = {k: v for k, v in preview.items() if k != "token"}
+        if preview.get("estado") == "SIN_CAMBIOS":
+            return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico,
+                    "mensaje": "Eso ya está así; no hay nada que confirmar."}
+        if preview.get("riesgo") == SENSIBLE:
+            return {"estado": "REQUIERE_AUTORIZACION_SENSIBLE", "accion": intencion.accion, "preview": publico,
+                    "mensaje": ("Esta operación es SENSIBLE (" + _describir_preview(preview) + ") y requiere "
+                                "autorización sensible explícita de un humano; B1 no la ejecuta como operación normal.")}
+        self._fijar_pendiente(estado, conversacion_id, {
+            "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
+            "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat()})
+        return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion, "preview": publico,
+                "mensaje": _describir_preview(preview) + " ¿Confirmas? (sí / no)"}
+
+    def _confirmar(self, estado: dict, conversacion_id: str) -> dict:
+        pendiente = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
+        if not pendiente:
+            return {"estado": "SIN_PREVIEW_PENDIENTE", "mensaje": "No hay ninguna operación pendiente de confirmar."}
+        resultado = self.capa.ejecutar(pendiente["token"], actor=ACTOR_B1, origen=ORIGEN_B1,
+                                       confirmado_por=self.usuario, accion_esperada=pendiente["accion"])
+        estado_capa = resultado.get("estado")
+        if estado_capa == "APLICADA":
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                    "mensaje": _describir_resultado(resultado)}
+        if estado_capa == "PREVIEW_OBSOLETO" or resultado.get("codigo") in {"PREVIEW_EXPIRADO", "TOKEN_DESCONOCIDO"}:
+            nuevo = resultado.get("preview_nuevo") or self.capa.previsualizar(
+                pendiente["accion"], pendiente["parametros"], actor=ACTOR_B1, origen=ORIGEN_B1,
+                referencia=pendiente.get("referencia", ""))
+            motivo = "cambió la información" if estado_capa == "PREVIEW_OBSOLETO" else "la propuesta expiró"
+            if nuevo.get("estado") != "PREVIEW":
+                self._fijar_pendiente(estado, conversacion_id, None)
+                return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                        "mensaje": f"No ejecuté nada: {motivo} y ya no hay cambio que confirmar "
+                                   f"({nuevo.get('estado')}: {nuevo.get('mensaje', 'sin cambios')})."}
+            self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
+                                                           "creado_en": self.reloj().isoformat()})
+            return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                    "preview": {k: v for k, v in nuevo.items() if k != "token"},
+                    "mensaje": f"No ejecuté nada: {motivo}. Propuesta vigente: {_describir_preview(nuevo)} "
+                               "¿Confirmas? (sí / no)"}
+        self._fijar_pendiente(estado, conversacion_id, None)
+        if estado_capa == "SIN_CAMBIOS":
+            return {"estado": "SIN_CAMBIOS", "accion": pendiente["accion"], "mensaje": "Ya estaba aplicado."}
+        return {"estado": "RECHAZADA" if estado_capa == "RECHAZADA" else "FALLIDA", "accion": pendiente["accion"],
+                "codigo": resultado.get("codigo"), "mensaje": resultado.get("mensaje")}
