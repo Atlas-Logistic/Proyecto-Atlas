@@ -277,3 +277,21 @@ def test_interprete_determinista_y_cli(raiz, capsys):
     assert json.loads(capsys.readouterr().out)["estado"] == "PREVIEW_PENDIENTE"
     assert main(["--raiz-atlas", str(raiz), "--conversacion", "cli", "--texto", "sí"]) == 0
     assert json.loads(capsys.readouterr().out)["estado"] == "EJECUTADA"
+
+
+@pytest.mark.parametrize("texto", [
+    "¿Qué choferes trabajaron este mes?", "Cuántos choferes hubo hoy", "¿Qué estadías pendientes hay?",
+    "Muéstrame las incidencias pendientes", "Qué obras tuvieron más viajes", "cuales guias estan pendientes de revision",
+    "¿Qué revisiones de estadías hay?", "¿En qué guías aparece JF4288?",
+])
+def test_preguntas_de_consultas_no_las_toma_b1(texto):
+    # Integración Desktop: B1 va primero en el panel Consultas; una pregunta
+    # sobre la operación debe seguir llegando a Consultas/Incidencias.
+    assert interpretar_determinista(texto) is None
+
+
+def test_lecturas_de_catalogo_siguen_en_b1():
+    assert interpretar_determinista("¿Qué choferes están inactivos?").parametros == {"estado": "INACTIVO"}
+    assert interpretar_determinista("Muéstrame los choferes activos").parametros == {"estado": "ACTIVO"}
+    assert interpretar_determinista("¿Qué decisiones hay de la guía 500001?").accion == "DECISION_CONSULTAR"
+    assert interpretar_determinista("busca la obra Edificio Norte").parametros == {"nombre": "EDIFICIO NORTE"}

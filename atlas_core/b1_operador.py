@@ -112,10 +112,15 @@ _DOCUMENTO = re.compile(
     r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR)\s+(?:EL|LA)\s+(?P<campo>"
     + "|".join(sorted(_CAMPOS_DOC, key=len, reverse=True))
     + r")\s+DE\s+LA\s+GUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\s+(?:A|POR|AL VALOR)\s+(?P<valor>.+)$")
-_LECTURA_CHOFERES = re.compile(r"\bCHOFERES\b|\bCONDUCTORES\b")
+# Lecturas de CATÁLOGO acotadas: las preguntas sobre la operación ("qué
+# choferes trabajaron", "estadías pendientes", "qué obras tuvieron más
+# viajes") pertenecen a Consultas/Incidencias, nunca a B1 operador.
+_LECTURA_CHOFERES = re.compile(r"\b(?:CHOFERES|CONDUCTORES)\b.*\b(?:IN)?ACTIV[OA]S?\b"
+                               r"|\b(?:IN)?ACTIV[OA]S?\b.*\b(?:CHOFERES|CONDUCTORES)\b")
 _VERBO_LECTURA = re.compile(r"^(?:QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
-_LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS|PENDIENTES)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
-_LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|MUESTRA|MUESTRAME|LISTA|LISTAR|QUE|CUALES)\s+(?:LA\s+|LAS\s+)?OBRAS?\b\s*(?P<nombre>.*)$")
+_LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
+_NO_ES_DECISION = re.compile(r"\b(?:ESTADIAS?|INCIDENCIAS?|DEVOLUCION(?:ES)?|VUELTAS?)\b")
+_LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
 
 
 def interpretar_determinista(texto: str) -> Intencion | None:
@@ -150,10 +155,10 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         return Intencion("OBRA_CONSULTAR", {"nombre": nombre} if nombre else {})
     if _VERBO_LECTURA.match(plano) or str(texto or "").strip().endswith("?"):
         if _LECTURA_CHOFERES.search(plano):
-            estado = "INACTIVO" if re.search(r"\bINACTIV", plano) else "ACTIVO" if re.search(r"\bACTIV", plano) else "TODOS"
+            estado = "INACTIVO" if re.search(r"\bINACTIV", plano) else "ACTIVO"
             return Intencion("CHOFER_CONSULTAR", {"estado": estado})
         m = _LECTURA_DECISIONES.search(plano)
-        if m:
+        if m and not _NO_ES_DECISION.search(plano):
             return Intencion("DECISION_CONSULTAR", {"numero_guia": m.group("guia")} if m.group("guia") else {})
         return None
     asociacion = _interpretar(texto)
