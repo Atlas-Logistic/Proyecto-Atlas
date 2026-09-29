@@ -1008,6 +1008,9 @@ def _consensuar_transporte_focal(
     }
 
 
+_PATRON_TRANSPORTE_SOLO_NUMERICO = re.compile(r":?\s*[0-9OoDdQqIl|][0-9OoDdQqIl| .-]*")
+
+
 def _extraer_transporte_geometrico(
     bloques: List[Any], incluir_traza: bool = False
 ) -> Dict[str, Any]:
@@ -1030,6 +1033,14 @@ def _extraer_transporte_geometrico(
             )
         )
 
+    def misma_fila_a_la_derecha(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> bool:
+        alto = max(etiqueta["h"], candidato["h"])
+        return (
+            abs(candidato["cy"] - etiqueta["cy"]) <= alto * 1.35
+            and candidato["x1"] >= etiqueta["x2"] - 8
+            and candidato["x1"] - etiqueta["x2"] <= 360
+        )
+
     def puntuar(etiqueta: Dict[str, Any], candidato: Dict[str, Any]) -> Optional[float]:
         alto = max(etiqueta["h"], candidato["h"])
         diferencia_y = abs(candidato["cy"] - etiqueta["cy"])
@@ -1039,7 +1050,10 @@ def _extraer_transporte_geometrico(
                 return brecha / 360 + diferencia_y / (alto * 8)
         diferencia_vertical = candidato["y1"] - etiqueta["y2"]
         alineado = abs(candidato["cx"] - etiqueta["cx"]) <= 190
-        if alineado and 0 < diferencia_vertical <= 70:
+        # Caso real 480715: bajo la etiqueta, "Coledant 2617521105" (una
+        # colada de la tabla de ítems) ganaba al valor real. En vertical sólo
+        # vale un bloque numérico propio, nunca uno con palabras delante.
+        if alineado and 0 < diferencia_vertical <= 70 and _PATRON_TRANSPORTE_SOLO_NUMERICO.fullmatch(candidato["texto"]):
             return 0.30 + diferencia_vertical / 175
         return None
 
@@ -1051,6 +1065,15 @@ def _extraer_transporte_geometrico(
             if candidato is etiqueta:
                 continue
             convertido = _normalizar_transporte_aza(candidato["texto"])
+            if convertido is None and misma_fila_a_la_derecha(etiqueta, candidato):
+                # Caso real 480715: el ":" tras la etiqueta se lee pegado como
+                # dígito ("10000361121"). Sólo en la misma fila, sólo 11
+                # caracteres y sólo ese primer carácter se descarta.
+                compacto = re.sub(r"[ .-]", "", candidato["texto"])
+                if len(compacto) == 11 and compacto[0] in "1Il|:":
+                    sin_separador = _normalizar_transporte_aza(compacto[1:])
+                    if sin_separador is not None:
+                        convertido = (sin_separador[0], True)
             if convertido is None:
                 continue
             puntuacion = puntuar(etiqueta, candidato)

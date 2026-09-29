@@ -795,6 +795,47 @@ def test_transporte_no_recibe_nombre_de_archivo():
     assert _extraer_transporte_geometrico([]) == {}
 
 
+# Caso real 480715: cajas OCR reales de la traza (foto inclinada ~4°). El ":"
+# tras la etiqueta se leyó pegado ("10000361121", 11 caracteres) y debajo
+# quedaba "Coledant 2617521105" (una colada), que antes ganaba.
+_BLOQUES_480715 = [
+    BloqueOCR("HORA ENTRADA", ((416, 362), (476, 367), (475, 377), (415, 372)), 0.99),
+    BloqueOCR(": 11:21:00", ((507, 369), (552, 371), (552, 382), (506, 380)), 0.99),
+    BloqueOCR("EMPRESA TRANSPORTE", ((136, 369), (231, 377), (230, 388), (135, 380)), 0.99),
+    BloqueOCR("HORA SALIDA", ((415, 371), (468, 375), (467, 386), (414, 382)), 0.99),
+    BloqueOCR(": 13:30:17", ((507, 378), (553, 381), (552, 391), (506, 388)), 0.99),
+    BloqueOCR("I TRANSPORTES MBT SPA", ((255, 380), (351, 387), (350, 397), (254, 390)), 0.95),
+    BloqueOCR("Nro. TRANSPORTE", ((415, 381), (484, 386), (483, 397), (414, 392)), 0.99),
+    BloqueOCR("10000361121", ((505, 387), (561, 390), (560, 401), (504, 398)), 0.98),
+    BloqueOCR("Coledant 2617521105", ((272, 420), (359, 427), (358, 438), (271, 431)), 0.9),
+    BloqueOCR("Coladas: 2617841504", ((271, 439), (360, 446), (359, 457), (270, 450)), 0.95),
+]
+
+
+def test_transporte_480715_descarta_separador_leido_como_digito_y_nunca_toma_la_colada():
+    resultado = _extraer_transporte_geometrico(_BLOQUES_480715)
+    assert resultado == {"valor": "0000361121", "corregido": True}
+    assert resultado["valor"] != "2617521105"
+
+
+def test_transporte_vertical_rechaza_bloque_con_palabras_delante():
+    bloques = [_bloque("NRO TRANSPORTE", 20, 20, 120), _bloque("Coladas 2617521105", 40, 50, 150)]
+    assert _extraer_transporte_geometrico(bloques) == {}
+    # Un bloque vertical sólo numérico (con ":" opcional) sigue aceptándose.
+    solo_numero = [_bloque("NRO TRANSPORTE", 20, 20, 120), _bloque(": 0000348808", 40, 50, 110)]
+    assert _extraer_transporte_geometrico(solo_numero)["valor"] == "0000348808"
+
+
+@pytest.mark.parametrize("ocr", ["20000361121", "00000361121", "X0000361121", "1000036112X"])
+def test_transporte_once_caracteres_sin_separador_inicial_no_se_acepta(ocr):
+    assert _transporte(ocr) == {}
+
+
+def test_transporte_once_caracteres_fuera_de_la_misma_fila_no_se_acepta():
+    bloques = [_bloque("NRO TRANSPORTE", 20, 20, 120), _bloque("10000361121", 40, 50, 110)]
+    assert _extraer_transporte_geometrico(bloques) == {}
+
+
 def test_fecha_geometrica_candidato_a_la_derecha_de_la_etiqueta():
     bloques = [
         _bloque("FECHA DE EMISION", 20, 20, 150),
