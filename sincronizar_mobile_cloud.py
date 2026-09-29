@@ -23,10 +23,31 @@ import socket
 
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
+from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile
 
 URL_CLOUD_POR_DEFECTO = "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
+
+
+def ejecutar_pull_con_escritor(
+    *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
+    timeout: float, procesar: bool, dataset, carpeta_catalogos, fabrica_escritor=LeaseEscritorOperativo,
+) -> dict:
+    """Ejecuta una pasada sólo bajo escritor global vigente.
+
+    Si Cloud no está disponible o otro PC posee el lease, no llama al PULL:
+    así no existe un fallback local que pueda escribir G: sin arbitraje.
+    """
+    with fabrica_escritor(base_url=base_url, token_motor=token_motor, timeout=timeout) as escritor:
+        if not escritor.adquirir():
+            return {"escritor_operativo": "NO_ADQUIRIDO", "encontrados": 0, "confirmados": []}
+        return sincronizar_envios_cloud(
+            base_url=base_url, token_motor=token_motor, consumidor=consumidor,
+            repositorio=repositorio, timeout=timeout, procesar=procesar,
+            dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            puede_continuar=lambda: escritor.vigente,
+        )
 
 
 def main() -> None:
@@ -50,7 +71,7 @@ def main() -> None:
     except ErrorFuenteCatalogos:
         carpeta_catalogos = None
 
-    resultado = sincronizar_envios_cloud(
+    resultado = ejecutar_pull_con_escritor(
         base_url=args.base_url, token_motor=args.token, consumidor=args.consumidor,
         repositorio=RepositorioEnviosMobile(raiz), timeout=args.timeout,
         procesar=not args.sin_procesar, dataset=dataset, carpeta_catalogos=carpeta_catalogos,

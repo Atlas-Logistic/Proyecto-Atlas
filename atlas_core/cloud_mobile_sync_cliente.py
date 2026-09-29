@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from atlas_core.mobile import (
     MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_y_revalidar_envio_mobile,
@@ -128,6 +128,7 @@ def sincronizar_envios_cloud(
     *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
     timeout: float = 30.0, procesar: bool = False, dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None, lease_heartbeat_segundos: float = 60.0,
+    puede_continuar: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Ejecuta listado, lease, descarga, verificación, persistencia y confirmación.
 
@@ -139,10 +140,17 @@ def sincronizar_envios_cloud(
         "encontrados": 0, "leaseados": [], "persistidos": [], "confirmados": [],
         "fallidos": {}, "procesados": [], "omitidos_por_bloqueo": [],
         "errores_procesamiento": {},
+        "detenido_por_escritor": False,
     }
+    if not _puede_continuar(puede_continuar):
+        resumen["detenido_por_escritor"] = True
+        return resumen
     pendientes = _json(base_url, "/api/motor/envios/pendientes", token_motor, timeout=timeout).get("envios", [])
     resumen["encontrados"] = len(pendientes)
     for pendiente in pendientes:
+        if not _puede_continuar(puede_continuar):
+            resumen["detenido_por_escritor"] = True
+            break
         envio_id = str(pendiente.get("envio_id", ""))
         if not envio_id:
             continue
@@ -168,6 +176,9 @@ def sincronizar_envios_cloud(
                 raise ErrorSincronizacionCloudMobile("tamaño descargado no coincide")
             if hashlib.sha256(imagen).hexdigest() != sha:
                 raise ErrorSincronizacionCloudMobile("SHA-256 descargado no coincide")
+            if not _puede_continuar(puede_continuar):
+                resumen["detenido_por_escritor"] = True
+                continue
             metadata = {
                 "empresa_id": lease["empresa_id"], "documento_id": lease["documento_id"], "chofer_id": lease["chofer_id"],
                 "observacion": lease.get("observacion", ""), "capturado_en": lease.get("capturado_en", ""),
@@ -183,6 +194,9 @@ def sincronizar_envios_cloud(
             _marcar_aterrizado_cloud(repositorio, envio_id, lease)
             if not procesar:
                 continue
+            if not _puede_continuar(puede_continuar):
+                resumen["detenido_por_escritor"] = True
+                continue
             checkpoint = (repositorio.cargar(envio_id).get("cloud_procesamiento") or {}).get("estado")
             resultado = (
                 {"completado": True, "ya_reconciliado": True}
@@ -193,6 +207,9 @@ def sincronizar_envios_cloud(
             )
             _sumar_resultado_procesamiento(resumen, envio_id, resultado)
             if not resultado.get("completado"):
+                continue
+            if not _puede_continuar(puede_continuar):
+                resumen["detenido_por_escritor"] = True
                 continue
             _marcar_reconciliado_cloud(repositorio, envio_id)
             if not lease_activo.vigente or not lease_activo.renovar():
@@ -205,9 +222,15 @@ def sincronizar_envios_cloud(
         finally:
             if lease_activo is not None:
                 lease_activo.cerrar()
-    if procesar:
+    if procesar and _puede_continuar(puede_continuar):
         _sumar_recuperacion_local(resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+    elif procesar:
+        resumen["detenido_por_escritor"] = True
     return resumen
+
+
+def _puede_continuar(guardia: Callable[[], bool] | None) -> bool:
+    return guardia is None or bool(guardia())
 
 
 def procesar_envios_recibidos(

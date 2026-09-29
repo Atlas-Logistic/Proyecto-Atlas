@@ -97,6 +97,39 @@ class CloudMobileSyncTests(unittest.TestCase):
         self.assertEqual(confirmaciones, [])
         self.assertIn("envio-1", resultado["fallidos"])
 
+    def test_escritor_no_vigente_no_reclama_ni_escribe(self):
+        with patch("atlas_core.cloud_mobile_sync_cliente._json", side_effect=AssertionError("no debe consultar ni reclamar Cloud")):
+            resultado = sincronizar_envios_cloud(
+                base_url="https://cloud.test", token_motor="t", consumidor="motor", repositorio=Repo(),
+                procesar=True, puede_continuar=lambda: False,
+            )
+        self.assertTrue(resultado["detenido_por_escritor"])
+        self.assertEqual(resultado["leaseados"], [])
+        self.assertEqual(resultado["persistidos"], [])
+
+    def test_perdida_de_escritor_durante_procesamiento_no_confirma(self):
+        activo = {"valor": True}
+        confirmaciones = []
+        def falso_json(_base, ruta, _token, **_kwargs):
+            if ruta.endswith("pendientes"): return {"envios": [{"envio_id": "envio-1"}]}
+            if ruta.endswith("/lease"): return lease()
+            if ruta.endswith("/renovar"): return {"estado": "EN_LEASE"}
+            if ruta.endswith("/confirmar"):
+                confirmaciones.append(ruta); return {"estado": "COMPLETADO"}
+            raise AssertionError(ruta)
+        def procesamiento(*_args, **_kwargs):
+            activo["valor"] = False
+            return {"completado": True}
+        with patch("atlas_core.cloud_mobile_sync_cliente._json", side_effect=falso_json), \
+             patch("atlas_core.cloud_mobile_sync_cliente._descargar", return_value=BYTES), \
+             patch("atlas_core.cloud_mobile_sync_cliente._procesar_envio_cloud", side_effect=procesamiento):
+            resultado = sincronizar_envios_cloud(
+                base_url="https://cloud.test", token_motor="t", consumidor="motor", repositorio=Repo(),
+                procesar=True, puede_continuar=lambda: activo["valor"],
+            )
+        self.assertEqual(confirmaciones, [])
+        self.assertTrue(resultado["detenido_por_escritor"])
+
     def test_renueva_lease_durante_procesamiento_largo(self):
         renovaciones = []
         def falso_json(_base, ruta, _token, **_kwargs):
