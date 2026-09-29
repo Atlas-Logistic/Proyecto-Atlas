@@ -175,6 +175,42 @@ def _token_ocr_limitado(coincidente: str, documental: str) -> bool:
     return _distancia_edicion_acotada(coincidente[:len(documental)], documental, 2) <= 2
 
 
+# Caso real 480676 (AUSIN SAN BERNARDO): la numeración "01148" quedó
+# confirmada como "O1148" (letra O inicial leída por OCR en 460807), y el
+# tokenizador parte "O1148" en O + 1148 -- las anclas numéricas nunca
+# coincidían con "01148". Sólo un token completo "O<dígitos>" se lee como
+# "0<dígitos>"; nunca otra letra, nunca una O suelta ni dentro de palabra.
+_NUMERACION_CON_O_INICIAL = re.compile(r"\bO(\d+)\b")
+
+
+def _numeracion_o_como_cero(texto: str) -> str:
+    return _NUMERACION_CON_O_INICIAL.sub(lambda coincidencia: "0" + coincidencia.group(1), texto)
+
+
+def _coincide_con_numeracion_o_cero(calle: str, texto: str) -> bool:
+    """Misma dirección salvo la O inicial de una numeración leída como 0.
+
+    Exige la calle confirmada COMPLETA, token por token y contigua, dentro
+    del texto documental tras la sustitución (nunca subcadena: "01148" no
+    coincide con "011489"), con al menos un número y un nombre de vía: no
+    hay otra tolerancia encima.
+    """
+    calle_variante = _numeracion_o_como_cero(calle)
+    texto_variante = _numeracion_o_como_cero(texto)
+    if calle_variante == calle and texto_variante == texto:
+        return False
+    tokens = _tokens_direccion(calle_variante)
+    if not any(token.isdigit() for token in tokens):
+        return False
+    if not any(len(token) >= 3 and token not in _TOKENS_ESTRUCTURALES_DIRECCION for token in tokens if token.isalpha()):
+        return False
+    tokens_texto = _tokens_direccion(texto_variante)
+    return any(
+        tokens_texto[inicio:inicio + len(tokens)] == tokens
+        for inicio in range(len(tokens_texto) - len(tokens) + 1)
+    )
+
+
 def _anclas_fuertes_conservadas(calle: str, texto: str, comuna_confirmada: str) -> bool:
     tokens_calle = _tokens_direccion(calle)
     tokens_texto = _tokens_direccion(texto)
@@ -209,6 +245,8 @@ def direccion_confirmada_coincide(
     if not calle or not texto:
         return False
     if calle in texto:
+        return True
+    if _coincide_con_numeracion_o_cero(calle, texto):
         return True
     if not _anclas_fuertes_conservadas(calle, texto, comuna_confirmada):
         return False
