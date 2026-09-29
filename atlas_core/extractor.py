@@ -1596,6 +1596,10 @@ def _despachar_a_lineal_contaminado(valor: Any, *, valor_chofer_resuelto: str = 
     texto_crudo = str(valor or "").strip()
     if not texto_crudo:
         return False
+    # Caso real 480715: el intercalado pegó a DESPACHAR A el valor de PESO KG.
+    # ("3.812,00"). Un valor sin ninguna letra nunca es una dirección.
+    if not any(caracter.isalpha() for caracter in texto_crudo):
+        return True
     if _PATRON_RUT_COMPLETO.match(texto_crudo):
         resultado_rut = validar_rut_chileno(texto_crudo)
         if resultado_rut.estado == EstadoValidacion.VALIDO:

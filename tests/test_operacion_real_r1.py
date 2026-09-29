@@ -349,9 +349,10 @@ def test_despachar_a_lineal_contaminado_rechaza_rut_valido():
     assert _despachar_a_lineal_contaminado("14293816-2") is True
     assert _despachar_a_lineal_contaminado("10833150-K") is True
     # RUT con dígito verificador incorrecto: no matchea como RUT válido,
-    # pero tampoco es una dirección -- se deja para otras validaciones,
-    # este chequeo específico no debe reportarlo como "contaminado por RUT".
-    assert _despachar_a_lineal_contaminado("14293816-9") is False
+    # pero tampoco es una dirección -- sin ninguna letra, se marca
+    # contaminado igual (caso real 480715: un valor sin letras nunca es
+    # una dirección).
+    assert _despachar_a_lineal_contaminado("14293816-9") is True
     # Una dirección real, aunque tenga números y guiones, nunca se confunde.
     assert _despachar_a_lineal_contaminado("SANTA ISABEL 585 SANTIAGO LAMPA") is False
     assert _despachar_a_lineal_contaminado("CAMINO LOS PINOS 3396 SAN BERNARDO") is False
