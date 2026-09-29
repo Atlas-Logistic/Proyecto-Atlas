@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,62 @@ from atlas_core.almacenamiento_portable import SesionOcupadaError
 
 class ErrorSincronizacionCloudMobile(RuntimeError):
     pass
+
+
+class LeaseMotor:
+    """Renueva el lease mientras una fase local potencialmente larga corre.
+
+    El lease sigue siendo por envío. Esta clase no coordina PCs: sólo evita
+    confirmar un token que Cloud ya declaró vencido.
+    """
+
+    def __init__(self, *, base_url: str, token_motor: str, envio_id: str,
+                 lease_token: str, timeout: float, intervalo_segundos: float) -> None:
+        self.base_url = base_url
+        self.token_motor = token_motor
+        self.envio_id = envio_id
+        self.lease_token = lease_token
+        self.timeout = timeout
+        self.intervalo_segundos = intervalo_segundos
+        self._detener = threading.Event()
+        self._perdido = threading.Event()
+        self._hilo: threading.Thread | None = None
+
+    @property
+    def vigente(self) -> bool:
+        return not self._perdido.is_set()
+
+    def renovar(self) -> bool:
+        if self._perdido.is_set():
+            return False
+        try:
+            _json(
+                self.base_url,
+                f"/api/motor/envios/{urllib.parse.quote(self.envio_id, safe='')}/lease/renovar",
+                self.token_motor,
+                method="POST", body={"lease_token": self.lease_token}, timeout=self.timeout,
+            )
+            return True
+        except ErrorSincronizacionCloudMobile:
+            self._perdido.set()
+            return False
+
+    def iniciar(self) -> None:
+        if self.intervalo_segundos <= 0:
+            return
+
+        def latir() -> None:
+            while not self._detener.wait(self.intervalo_segundos):
+                if not self.renovar():
+                    return
+
+        self._hilo = threading.Thread(target=latir, name=f"atlas-lease-{self.envio_id}", daemon=True)
+        self._hilo.start()
+
+    def cerrar(self) -> None:
+        self._detener.set()
+        if self._hilo is not None:
+            self._hilo.join(timeout=self.timeout + 1)
 
 
 def _url(base_url: str, ruta: str) -> str:
@@ -70,23 +127,37 @@ def _descargar(url: str, *, esperado_bytes: int, timeout: float) -> bytes:
 def sincronizar_envios_cloud(
     *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
     timeout: float = 30.0, procesar: bool = False, dataset: Path | None = None,
-    carpeta_catalogos: str | Path | None = None,
+    carpeta_catalogos: str | Path | None = None, lease_heartbeat_segundos: float = 60.0,
 ) -> dict[str, Any]:
     """Ejecuta listado, lease, descarga, verificación, persistencia y confirmación.
 
-    Nunca confirma Cloud cuando la descarga, hash/tamaño o persistencia local
-    falla. No procesa OCR ni toca el receptor/PWA LAN.
+    Nunca confirma Cloud hasta que el documento y la reconciliación requerida
+    terminaron. No procesa OCR ni toca el receptor/PWA LAN fuera de la
+    orquestación Mobile ya existente.
     """
-    resumen: dict[str, Any] = {"encontrados": 0, "leaseados": [], "persistidos": [], "confirmados": [], "fallidos": {}}
+    resumen: dict[str, Any] = {
+        "encontrados": 0, "leaseados": [], "persistidos": [], "confirmados": [],
+        "fallidos": {}, "procesados": [], "omitidos_por_bloqueo": [],
+        "errores_procesamiento": {},
+    }
     pendientes = _json(base_url, "/api/motor/envios/pendientes", token_motor, timeout=timeout).get("envios", [])
     resumen["encontrados"] = len(pendientes)
     for pendiente in pendientes:
         envio_id = str(pendiente.get("envio_id", ""))
         if not envio_id:
             continue
+        lease_activo: LeaseMotor | None = None
         try:
             lease = _json(base_url, f"/api/motor/envios/{urllib.parse.quote(envio_id, safe='')}/lease", token_motor, method="POST", body={"consumidor": consumidor}, timeout=timeout)
             resumen["leaseados"].append(envio_id)
+            lease_token = str(lease.get("lease_token", ""))
+            if not lease_token:
+                raise ErrorSincronizacionCloudMobile("lease Cloud sin token")
+            lease_activo = LeaseMotor(
+                base_url=base_url, token_motor=token_motor, envio_id=envio_id,
+                lease_token=lease_token, timeout=timeout, intervalo_segundos=lease_heartbeat_segundos,
+            )
+            lease_activo.iniciar()
             mime = str(lease.get("imagen_mime", ""))
             esperado = int(lease.get("imagen_bytes", -1))
             sha = str(lease.get("imagen_sha256", ""))
@@ -109,12 +180,33 @@ def sincronizar_envios_cloud(
             }
             repositorio.recibir(envio_id=envio_id, imagen=imagen, mime=mime, metadata=metadata)
             resumen["persistidos"].append(envio_id)
-            _json(base_url, f"/api/motor/envios/{urllib.parse.quote(envio_id, safe='')}/confirmar", token_motor, method="POST", body={"lease_token": lease["lease_token"]}, timeout=timeout)
+            _marcar_aterrizado_cloud(repositorio, envio_id, lease)
+            if not procesar:
+                continue
+            checkpoint = (repositorio.cargar(envio_id).get("cloud_procesamiento") or {}).get("estado")
+            resultado = (
+                {"completado": True, "ya_reconciliado": True}
+                if checkpoint == "RECONCILIADO"
+                else _procesar_envio_cloud(
+                    repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                )
+            )
+            _sumar_resultado_procesamiento(resumen, envio_id, resultado)
+            if not resultado.get("completado"):
+                continue
+            _marcar_reconciliado_cloud(repositorio, envio_id)
+            if not lease_activo.vigente or not lease_activo.renovar():
+                resumen["fallidos"][envio_id] = "lease Cloud perdido antes de confirmar"
+                continue
+            _json(base_url, f"/api/motor/envios/{urllib.parse.quote(envio_id, safe='')}/confirmar", token_motor, method="POST", body={"lease_token": lease_token}, timeout=timeout)
             resumen["confirmados"].append(envio_id)
         except (ErrorSincronizacionCloudMobile, ErrorEnvioMobile, KeyError, TypeError, ValueError) as error:
             resumen["fallidos"][envio_id] = str(error)
+        finally:
+            if lease_activo is not None:
+                lease_activo.cerrar()
     if procesar:
-        resumen.update(procesar_envios_recibidos(repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos))
+        _sumar_recuperacion_local(resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
     return resumen
 
 
@@ -129,14 +221,82 @@ def procesar_envios_recibidos(
     corta el resto (la recepción ya quedó a salvo)."""
     resultado: dict[str, Any] = {"procesados": [], "omitidos_por_bloqueo": [], "errores_procesamiento": {}}
     for registro in repositorio.historial():
-        if registro.get("estado") != "RECIBIDO":
+        if registro.get("estado") not in ("RECIBIDO", "PROCESANDO"):
             continue
         envio_id = str(registro.get("envio_id", ""))
         try:
-            procesar_y_revalidar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
-            resultado["procesados"].append(envio_id)
+            salida = _procesar_envio_cloud(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+            if salida.get("completado"):
+                resultado["procesados"].append(envio_id)
+            elif salida.get("error"):
+                resultado["errores_procesamiento"][envio_id] = str(salida["error"])
         except SesionOcupadaError:
             resultado["omitidos_por_bloqueo"].append(envio_id)
         except Exception as error:  # nunca corta el resto del procesamiento
             resultado["errores_procesamiento"][envio_id] = f"{type(error).__name__}: {error}"
     return resultado
+
+
+def _marcar_aterrizado_cloud(repositorio: RepositorioEnviosMobile, envio_id: str, lease: dict) -> None:
+    registro = repositorio.cargar(envio_id)
+    checkpoint = dict(registro.get("cloud_procesamiento") or {})
+    checkpoint.update({
+        "estado": checkpoint.get("estado") or "ATERRIZADO",
+        "documento_id": lease.get("documento_id", ""),
+        "imagen_sha256": lease.get("imagen_sha256", ""),
+    })
+    registro["cloud_procesamiento"] = checkpoint
+    repositorio.guardar(envio_id, registro)
+
+
+def _marcar_reconciliado_cloud(repositorio: RepositorioEnviosMobile, envio_id: str) -> None:
+    registro = repositorio.cargar(envio_id)
+    checkpoint = dict(registro.get("cloud_procesamiento") or {})
+    checkpoint["estado"] = "RECONCILIADO"
+    registro["cloud_procesamiento"] = checkpoint
+    repositorio.guardar(envio_id, registro)
+
+
+def _procesar_envio_cloud(
+    repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path | None,
+    carpeta_catalogos: str | Path | None,
+) -> dict[str, object]:
+    registro = repositorio.cargar(envio_id)
+    if registro.get("estado") == "ERROR":
+        return {"completado": False, "error": "ERROR funcional persistido"}
+    try:
+        salida = procesar_y_revalidar_envio_mobile(
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+        )
+    except SesionOcupadaError:
+        return {"completado": False, "bloqueado": True}
+    except Exception as error:
+        return {"completado": False, "error": f"{type(error).__name__}: {error}"}
+    if not salida.get("procesamiento_ok"):
+        return {"completado": False, "error": "procesamiento operacional no terminado"}
+    if not salida.get("reconciliacion_ok"):
+        return {"completado": False, "error": "reconciliación operacional no terminada"}
+    return {"completado": True}
+
+
+def _sumar_resultado_procesamiento(resumen: dict[str, Any], envio_id: str, resultado: dict[str, object]) -> None:
+    if resultado.get("completado") and not resultado.get("ya_reconciliado"):
+        resumen["procesados"].append(envio_id)
+    elif resultado.get("bloqueado"):
+        resumen["omitidos_por_bloqueo"].append(envio_id)
+    elif resultado.get("error"):
+        resumen["errores_procesamiento"][envio_id] = str(resultado["error"])
+
+
+def _sumar_recuperacion_local(
+    resumen: dict[str, Any], repositorio: RepositorioEnviosMobile, *, dataset: Path | None,
+    carpeta_catalogos: str | Path | None,
+) -> None:
+    recuperacion = procesar_envios_recibidos(
+        repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+    )
+    for clave in ("procesados", "omitidos_por_bloqueo"):
+        for envio_id in recuperacion[clave]:
+            if envio_id not in resumen[clave]:
+                resumen[clave].append(envio_id)
+    resumen["errores_procesamiento"].update(recuperacion["errores_procesamiento"])

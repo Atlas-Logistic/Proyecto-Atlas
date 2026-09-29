@@ -1887,7 +1887,7 @@ def _revalidar_asociacion_diagnosticable(repositorio: "RepositorioEnviosMobile",
             pass  # el registro del intento es best-effort; nunca debe volver a cortar el flujo.
 
 
-def _regenerar_reporte_tras_envio_mobile(repositorio: "RepositorioEnviosMobile", envio_id: str) -> None:
+def _regenerar_reporte_tras_envio_mobile(repositorio: "RepositorioEnviosMobile", envio_id: str) -> bool:
     """Corre SIEMPRE (en un worker en segundo plano en modo LAN; de forma
     síncrona en el consumidor PULL) -- nunca bloquea la subida/descarga
     esperando OCR/B1/reporte más de lo que ya toma. `revalidar_y_
@@ -1917,8 +1917,10 @@ def _regenerar_reporte_tras_envio_mobile(repositorio: "RepositorioEnviosMobile",
             "reporte_regenerado": bool(resultado.get("reporte_regenerado")),
             "reporte_vigente": resultado.get("reporte_vigente"),
         })
+        exito = True
     except Exception as error:  # nunca debe perder/duplicar el envío ya procesado.
         intento.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
+        exito = False
     with bloqueo_sesion(
         repositorio.raiz, f"mobile_{envio_id}",
         tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
@@ -1926,6 +1928,7 @@ def _regenerar_reporte_tras_envio_mobile(repositorio: "RepositorioEnviosMobile",
         registro = repositorio.cargar(envio_id)
         registro["reconciliacion_reporte"] = intento
         repositorio.guardar(envio_id, registro)
+    return exito
 
 
 # ===================================================================
@@ -2290,7 +2293,7 @@ def _sincronizar_contrato_v2(repositorio: "RepositorioEnviosMobile", envio_id: s
 
 def procesar_y_revalidar_envio_mobile(
     repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, carpeta_catalogos,
-) -> None:
+) -> dict[str, bool]:
     """Punto de entrada único para "qué pasa después de recibir un envío
     Mobile", sea que haya llegado por `POST /api/mobile/envios` (LAN,
     `servidor_mobile.py`) o por el consumidor PULL local (`atlas_core.
@@ -2300,10 +2303,24 @@ def procesar_y_revalidar_envio_mobile(
     PROPUESTA_REQUIERE_REVISION, y siempre reconcilia el reporte/`estado_
     operacion.json` al final -- incluso si el paso de revalidación de
     asociación falló (ver `_revalidar_asociacion_diagnosticable`)."""
-    procesar_envio_mobile(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+    # Un envío que sobrevivió una caída puede haber quedado en PROCESANDO
+    # después de escribir el dataset, o haber terminado el documento antes
+    # de caer durante la reconciliación. Reanudar sólo procesa de nuevo los
+    # dos estados incompletos; la inserción documental ya protege el mismo
+    # identificador mobile/<envio_id>/<archivo> bajo su lock común.
+    registro = repositorio.cargar(envio_id)
+    if registro.get("estado") in ("RECIBIDO", "PROCESANDO"):
+        registro = procesar_envio_mobile(
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+        )
+    if registro.get("estado") == "ERROR":
+        # ERROR es un resultado funcional persistido, no una interrupción:
+        # nunca se reintenta como si fuera RECIBIDO/PROCESANDO.
+        return {"procesamiento_ok": False, "reconciliacion_ok": False}
     if dataset:
         _revalidar_asociacion_diagnosticable(repositorio, envio_id, dataset=dataset)
-    _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+    reconciliacion_ok = _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
     # Bloque MOBILE CONTRATO V2 -- DESPUÉS del reporte: los eventos
     # canónicos se enriquecen con el `viajes.csv` vigente.
     _sincronizar_contrato_v2(repositorio, envio_id, dataset=dataset)
+    return {"procesamiento_ok": True, "reconciliacion_ok": reconciliacion_ok}
