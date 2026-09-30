@@ -2719,6 +2719,32 @@ def _firma_regenerar_decisiones_persistidas(
     return (ids_decisiones, hashes_catalogos, hash_dataset, tuple(sorted(str(i) for i in ids_resueltos)))
 
 
+_PATRON_ARCHIVO_MOBILE = re.compile(r"^mobile/[^/]+/([^/]+)$")
+
+
+def _fila_mobile_unica_para_decision(
+    documento: Mapping[str, object], filas_mobile_por_nombre: Mapping[str, list[dict[str, str]]],
+) -> dict[str, str] | None:
+    """Caso real 475036 -- una decisión detectada sobre un envío Mobile puede
+    persistir sólo el nombre corto de la foto (``"original.jpg"``) mientras
+    la fila documental usa la identidad completa ``mobile/<envio_id>/
+    original.jpg``. El nombre corto se repite entre envíos, así que nunca
+    basta por sí solo: la fila debe coincidir además en ``numero_guia``
+    (y en ``numero_transporte`` cuando la decisión lo trae) y ser ÚNICA.
+    Ante cero o varias coincidencias se abstiene (``None``)."""
+    archivo = str(documento.get("archivo", "")).strip()
+    guia = str(documento.get("numero_guia", "")).strip()
+    if not archivo or "/" in archivo or "\\" in archivo or guia in _AUSENTES:
+        return None
+    transporte = str(documento.get("numero_transporte", "")).strip()
+    coincidentes = [
+        fila for fila in filas_mobile_por_nombre.get(archivo, ())
+        if str(fila.get("numero_guia", "")).strip() == guia
+        and (transporte in _AUSENTES or str(fila.get("numero_transporte", "")).strip() == transporte)
+    ]
+    return coincidentes[0] if len(coincidentes) == 1 else None
+
+
 def regenerar_decisiones_persistidas(
     *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
     ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
@@ -2863,6 +2889,9 @@ def _regenerar_decisiones_persistidas(
     # (473326 pasó de "No encontrado" a "473326"), así que indexar por
     # guía perdería o cruzaría la fila correcta para ese caso exacto.
     filas_por_archivo: dict[str, dict[str, str]] | None = None
+    # Filas Mobile indexadas por nombre corto de foto (ver
+    # `_fila_mobile_unica_para_decision`); nunca se usan sin desambiguar.
+    filas_mobile_por_nombre: dict[str, list[dict[str, str]]] = {}
     # Bloque CONVERGENCIA POST LOTE 2 -- cuenta de reintentos con la misma
     # evidencia por guía, leída del artefacto hermano
     # `pendientes_tecnicos.json` (mismo directorio que `ruta_dataset`,
@@ -2912,6 +2941,9 @@ def _regenerar_decisiones_persistidas(
                             _archivos_ambiguos.add(_nombre_archivo)
                         else:
                             filas_por_archivo[_nombre_archivo] = dict(_fila)
+                        _coincidencia_mobile = _PATRON_ARCHIVO_MOBILE.match(_nombre_archivo)
+                        if _coincidencia_mobile:
+                            filas_mobile_por_nombre.setdefault(_coincidencia_mobile.group(1), []).append(dict(_fila))
                     if not _guia:
                         continue
                     motivos_por_guia[_guia] = {
@@ -3296,6 +3328,10 @@ def _regenerar_decisiones_persistidas(
             ):
                 return False
             fila_vigente = filas_por_archivo.get(str((decision.get("documento") or {}).get("archivo", "")))
+            if fila_vigente is None and tipo_decision in {"CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO"}:
+                fila_vigente = _fila_mobile_unica_para_decision(
+                    decision.get("documento") or {}, filas_mobile_por_nombre,
+                )
             if fila_vigente is None:
                 return False
             if tipo_decision == "CHOFER_CANDIDATO":

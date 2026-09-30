@@ -191,7 +191,14 @@ def resolver_identidad_nominal_fuerte_cliente(
     if rut_documental not in _AUSENTES:
         validado = validar_rut_chileno(rut_documental)
         if validado.estado == EstadoValidacion.VALIDO:
-            rut_normalizado = normalizar_rut_cliente(str(validado.valor))
+            # `validar_rut_chileno` acepta cuerpos cortos cuyo DV cuadra por
+            # azar (OCR truncado "772.000-9"); si el catálogo no puede
+            # normalizarlo, es evidencia RUT no utilizable -- se sigue con
+            # el nombre, nunca se aborta la reevaluación.
+            try:
+                rut_normalizado = normalizar_rut_cliente(str(validado.valor))
+            except ValueError:
+                rut_normalizado = ""
 
     if rut_normalizado:
         cliente_por_rut = next((c for c in clientes_vigentes if c.rut and c.rut == rut_normalizado), None)

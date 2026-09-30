@@ -298,3 +298,118 @@ def test_convergencia_nunca_toca_vehiculo_desconocido(tmp_path):
         decisiones=[decision_vehiculo], carpeta_catalogos=carpeta, ruta_dataset=dataset,
     )
     assert len(restantes) == 1  # sobrevive -- este bloque no toca VEHICULO_DESCONOCIDO
+
+
+# ============ DECISIONES CLIENTE MOBILE + RUT OCR TRUNCADO (475036) ============
+
+RUT_PRODALAM_CANONICO = "93772000-9"
+
+
+def _decision_cliente_mobile(*, archivo, numero_guia, numero_transporte, valor_documental, rut_documental):
+    return crear_decision(
+        tipo="CLIENTE_DESCONOCIDO", entidad="CLIENTE", archivo=archivo, numero_guia=numero_guia,
+        numero_transporte=numero_transporte, campo="cliente", valor_documental=valor_documental,
+        valor_normalizado=normalizar_nombre_cliente(valor_documental), identidad_resuelta=None, candidatos=[],
+        motivos=("RUT_VALIDO_NO_EXISTE_EN_CATALOGO_MAESTRO",),
+        evidencias=({"tipo": "RUT_VALIDO", "campo": "rut_cliente", "valor": rut_documental},),
+        acciones_permitidas=("REGISTRAR", "NO_REGISTRAR", "POSPONER"),
+    )
+
+
+def _catalogo_prodalam(tmp_path):
+    carpeta = _catalogos_vacios(tmp_path)
+    _escribir_clientes(carpeta, [_cliente("cliente-prodalam", "PRODALAM SA", rut=RUT_PRODALAM_CANONICO)])
+    return carpeta
+
+
+def test_rut_truncado_no_lanza_y_resuelve_por_nombre_exacto():
+    prodalam = _cliente("cliente-prodalam", "PRODALAM SA", rut=RUT_PRODALAM_CANONICO)
+    resultado = resolver_identidad_nominal_fuerte_cliente(
+        nombre_documental="PRODALAM SA", rut_documental="772.000-9", clientes=[prodalam],
+    )
+    assert resultado.resultado == RESULTADO_RESUELTO
+    assert resultado.cliente_id == "cliente-prodalam"
+    assert resultado.via == "NOMBRE"
+
+
+def test_rut_valido_conserva_comportamiento_por_rut_y_contradiccion():
+    prodalam = _cliente("cliente-prodalam", "PRODALAM SA", rut=RUT_PRODALAM_CANONICO)
+    por_rut = resolver_identidad_nominal_fuerte_cliente(
+        nombre_documental="OTRO TEXTO OCR", rut_documental="93.772.000-9", clientes=[prodalam],
+    )
+    assert (por_rut.resultado, por_rut.via) == (RESULTADO_RESUELTO, "RUT")
+    contradictorio = resolver_identidad_nominal_fuerte_cliente(
+        nombre_documental="PRODALAM SA", rut_documental="50.234.350-5", clientes=[prodalam],
+    )
+    assert contradictorio.resultado == RESULTADO_ABSTENCION
+
+
+def test_decision_mobile_archivo_corto_se_vincula_a_su_fila_unica(tmp_path):
+    carpeta = _catalogo_prodalam(tmp_path)
+    dataset = tmp_path / "analisis_completo_guias.csv"
+    _escribir_csv(dataset, [
+        _fila(archivo="mobile/envio-a/original.jpg", numero_guia="475036", numero_transporte="0000361173",
+              cliente="PRODALAM SA", rut_cliente="93.772.000-9"),
+        # Otro envío con el mismo nombre corto de foto, distinta guía.
+        _fila(archivo="mobile/envio-b/original.jpg", numero_guia="999999", numero_transporte="0000000001",
+              cliente="PRODALAM SA", rut_cliente="50.234.350-5"),
+    ])
+    decision = _decision_cliente_mobile(
+        archivo="original.jpg", numero_guia="475036", numero_transporte="0000361173",
+        valor_documental="PRODALAM SA", rut_documental="93.772.000-9",
+    )
+    assert regenerar_decisiones_persistidas(decisiones=[decision], carpeta_catalogos=carpeta, ruta_dataset=dataset) == []
+
+
+def test_decision_mobile_archivo_corto_ambiguo_no_se_vincula(tmp_path):
+    carpeta = _catalogo_prodalam(tmp_path)
+    dataset = tmp_path / "analisis_completo_guias.csv"
+    # Dos envíos de la MISMA guía/transporte con igual nombre corto: no hay
+    # identidad inequívoca, la tarjeta debe sobrevivir.
+    _escribir_csv(dataset, [
+        _fila(archivo="mobile/envio-a/original.jpg", numero_guia="475036", numero_transporte="0000361173",
+              cliente="PRODALAM SA", rut_cliente="93.772.000-9"),
+        _fila(archivo="mobile/envio-b/original.jpg", numero_guia="475036", numero_transporte="0000361173",
+              cliente="PRODALAM SA", rut_cliente="93.772.000-9"),
+    ])
+    decision = _decision_cliente_mobile(
+        archivo="original.jpg", numero_guia="475036", numero_transporte="0000361173",
+        valor_documental="PRODALAM SA", rut_documental="93.772.000-9",
+    )
+    restantes = regenerar_decisiones_persistidas(decisiones=[decision], carpeta_catalogos=carpeta, ruta_dataset=dataset)
+    assert [d["decision_id"] for d in restantes] == [decision["decision_id"]]
+
+
+def test_decision_mobile_archivo_corto_sin_guia_coincidente_no_se_vincula(tmp_path):
+    carpeta = _catalogo_prodalam(tmp_path)
+    dataset = tmp_path / "analisis_completo_guias.csv"
+    _escribir_csv(dataset, [
+        _fila(archivo="mobile/envio-a/original.jpg", numero_guia="111111", numero_transporte="0000361173",
+              cliente="PRODALAM SA", rut_cliente="93.772.000-9"),
+    ])
+    decision = _decision_cliente_mobile(
+        archivo="original.jpg", numero_guia="475036", numero_transporte="0000361173",
+        valor_documental="PRODALAM SA", rut_documental="93.772.000-9",
+    )
+    restantes = regenerar_decisiones_persistidas(decisiones=[decision], carpeta_catalogos=carpeta, ruta_dataset=dataset)
+    assert len(restantes) == 1
+
+
+def test_caso_475036_mobile_y_rut_truncado_retira_cliente_desconocido_obsoleto(tmp_path):
+    carpeta = _catalogo_prodalam(tmp_path)
+    catalogo_antes = (carpeta / "clientes.json").read_bytes()
+    dataset = tmp_path / "analisis_completo_guias.csv"
+    _escribir_csv(dataset, [
+        _fila(archivo="mobile/c82667df/original.jpg", numero_guia="475036", numero_transporte="0000361173",
+              cliente="PRODALAM SA", rut_cliente="772.000-9"),
+        _fila(archivo="mobile/otro-envio/original.jpg", numero_guia="480000", numero_transporte="0000360000",
+              cliente="OTRO CLIENTE SA", rut_cliente="No encontrado"),
+    ])
+    decision = _decision_cliente_mobile(
+        archivo="original.jpg", numero_guia="475036", numero_transporte="0000361173",
+        valor_documental="PRODALAM SA", rut_documental="772.000-9",
+    )
+    restantes = regenerar_decisiones_persistidas(decisiones=[decision], carpeta_catalogos=carpeta, ruta_dataset=dataset)
+    assert restantes == []
+    # Nunca crea ni modifica clientes.
+    assert (carpeta / "clientes.json").read_bytes() == catalogo_antes
