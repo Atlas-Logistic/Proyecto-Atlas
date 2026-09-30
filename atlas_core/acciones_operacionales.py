@@ -598,6 +598,78 @@ def _aplicar_destino_registrar(ctx: _Contexto, p: dict, plan: Plan, actor: str) 
             "revalidacion_focal": reactiva, "reconciliar": True}
 
 
+# Chile continental + insular cercano: una coordenada fuera (p. ej. signos
+# invertidos) nunca es un punto de entrega de esta operación.
+_LATITUD_CHILE, _LONGITUD_CHILE = (-56.0, -17.0), (-76.0, -66.0)
+
+
+def _plan_destino_coordenada(ctx: _Contexto, p: dict) -> Plan:
+    """Coordenada canónica confirmada por humano para un destino EXISTENTE.
+    Deja el destino CONFIRMADO con fuente COORDENADA_CANONICA_CONFIRMADA:
+    desde ahí `_destino_con_coordenada_canonica_para` la reutiliza para todo
+    DESPACHAR A que coincida exactamente con su dirección o alias."""
+    from atlas_core.catalogo_destinos import ErrorCatalogoDestinos
+    from atlas_core.rutas.destino_entrega import (
+        FUENTE_COORDENADA_CANONICA_CONFIRMADA, plan_impacto_coordenada_canonica,
+    )
+    latitud, longitud = float(p["latitud"]), float(p["longitud"])
+    if not (_LATITUD_CHILE[0] <= latitud <= _LATITUD_CHILE[1] and _LONGITUD_CHILE[0] <= longitud <= _LONGITUD_CHILE[1]):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "la coordenada no está en Chile (revise signos y orden)")
+    try:
+        destino = ctx.catalogo_destinos().obtener(str(p["destino_id"]))
+    except ErrorCatalogoDestinos as error:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "destino inexistente") from error
+    if destino.estado_vigencia != "ACTIVO":
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el destino no está activo")
+    if not str(destino.direccion or "").strip():
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el destino no tiene dirección con qué coincidir")
+    guias = list(plan_impacto_coordenada_canonica(destino=destino, filas=ctx.filas()).guias)
+    sin_cambios = (destino.estado_calidad == "CONFIRMADO" and destino.fuente == FUENTE_COORDENADA_CANONICA_CONFIRMADA
+                   and destino.latitud == latitud and destino.longitud == longitud)
+    consecuencias = [
+        f"Toda guía cuyo DESPACHAR A sea exactamente {destino.direccion!r} (o un alias del destino) "
+        "se ruteará a este punto, sin geocodificar.",
+        f"Se recalcula ahora la ruta de {len(guias)} guía(s)" + (f": {', '.join(guias)}." if guias else "."),
+    ]
+    if destino.latitud is not None and not sin_cambios:
+        consecuencias.insert(0, f"Reemplaza la coordenada actual ({destino.latitud}, {destino.longitud}).")
+    if destino.estado_calidad != "CONFIRMADO":
+        consecuencias.append(f"El destino pasa de {destino.estado_calidad} a CONFIRMADO.")
+    return Plan(
+        entidad={"tipo": "DESTINO", "id": destino.destino_id, "direccion": destino.direccion},
+        valor_actual={"latitud": destino.latitud, "longitud": destino.longitud,
+                      "estado_calidad": destino.estado_calidad, "fuente": destino.fuente},
+        valor_propuesto={"latitud": latitud, "longitud": longitud, "estado_calidad": "CONFIRMADO",
+                         "fuente": FUENTE_COORDENADA_CANONICA_CONFIRMADA},
+        estado_base={"destino": destino.a_dict(), "guias": guias}, sin_cambios=sin_cambios,
+        afectados=_afectados_por_guias(ctx, set(guias)), consecuencias=consecuencias,
+        revalidaciones=["MANTENIMIENTO_FOCAL_GUIAS", "RECONCILIAR_BANDEJA", "REGENERAR_REPORTE_VIAJES"],
+        archivos=("destinos_maestros", "bandeja"), datos={"guias": guias},
+    )
+
+
+def _aplicar_destino_coordenada(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.catalogo_destinos import EstadoCalidadDestino
+    catalogo = ctx.catalogo_destinos()
+    destino_id = str(p["destino_id"])
+    # Con el lock de decisión tomado, la revalidación reactiva del catálogo
+    # se aparta (DECISION_EN_CURSO): la revalidación focal la hace esta
+    # acción UNA vez, con el destino ya completo (CONFIRMADO + coordenada).
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        if plan.valor_actual["estado_calidad"] != EstadoCalidadDestino.CONFIRMADO.value:
+            catalogo.editar(destino_id, estado_calidad=EstadoCalidadDestino.CONFIRMADO.value,
+                            modificacion_manual=True)
+        destino = catalogo.confirmar_coordenada_canonica(
+            destino_id, latitud=float(p["latitud"]), longitud=float(p["longitud"]),
+            actor=f"{actor}/{ctx.confirmado_por}",
+            referencia=f"ACCION_OPERACIONAL:{ctx.token}" + (f" {p['referencia']}" if p.get("referencia") else ""),
+        )
+    return {"despues": {"latitud": destino.latitud, "longitud": destino.longitud,
+                        "estado_calidad": destino.estado_calidad, "fuente": destino.fuente},
+            "reconciliar": True, "guias_revalidar": list(plan.datos["guias"]), "regenerar_reporte": True,
+            "servicio": "CatalogoDestinos.confirmar_coordenada_canonica"}
+
+
 def _plan_obra_destino(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
     obra = _obra(ctx, str(p["obra_id"]))
@@ -1121,6 +1193,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "region": _P("texto", max_largo=80), "nombre_destino": _P("texto"),
                       "latitud": _P("numero"), "longitud": _P("numero"), "referencia": _REF},
                      _plan_destino_registrar, _aplicar_destino_registrar),
+    DefinicionAccion("DESTINO_CONFIRMAR_COORDENADA", OPERACIONAL_REVERSIBLE,
+                     "Confirma (humano) la coordenada canónica de un destino EXISTENTE y lo deja CONFIRMADO.",
+                     {"destino_id": _P("id", True), "latitud": _P("numero", True), "longitud": _P("numero", True),
+                      "referencia": _REF},
+                     _plan_destino_coordenada, _aplicar_destino_coordenada),
     DefinicionAccion("OBRA_VINCULAR_DESTINO", OPERACIONAL_REVERSIBLE, "Confirma la relación obra↔destino.",
                      {"obra_id": _P("id", True), "destino_id": _P("id", True), "cliente_id": _P("id"),
                       "observaciones": _P("texto"), "referencia": _REF},

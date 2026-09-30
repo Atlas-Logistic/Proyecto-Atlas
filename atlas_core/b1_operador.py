@@ -153,7 +153,23 @@ _OBRA_GUIA = [
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|ASIGNA|ASIGNAR)\s+(?:LA\s+)?OBRA\s+(?:DE\s+LA\s+|DE\s+|A\s+LA\s+)?"
                + _GUIA + r"\s*(?:A|POR|COMO|:)\s*(?:LA\s+OBRA\s+)?(?P<obra>.+)$"),
 ]
-_NEGACION_MISMO_VIAJE =re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|ES)\b")
+# COORDENADA de un destino existente, dada por un humano: "la coordenada del
+# destino X es LAT, LON", "el destino X está en LAT, LON", "confirma la
+# coordenada LAT, LON para el destino X", "confirma la coordenada del destino
+# X: LAT, LON". Decimales con punto; el signo lo valida la capa (Chile).
+_COORD = r"(?P<lat>-?\s?\d{1,2}\.\d+)\s*[,;/]?\s*(?P<lon>-?\s?\d{1,3}\.\d+)"
+_VERBO_COORD = r"(?:CONFIRMA|CONFIRMAR|ASIGNA|ASIGNAR|REGISTRA|REGISTRAR|FIJA|FIJAR|PON|PONER)"
+_COORDENADA_DESTINO = [
+    re.compile(r"^(?:LA\s+|LAS\s+)?(?:COORDENADAS?|UBICACION)\s+(?:DEL\s+DESTINO\s+|DE\s+)(?P<destino>.+?)\s*"
+               r"(?:\s(?:ES|SON)|:)\s*(?:LA\s+)?" + _COORD + r"$"),
+    re.compile(r"^(?:EL\s+)?DESTINO\s+(?P<destino>.+?)\s+(?:ESTA|QUEDA|SE\s+UBICA)\s+EN\s+"
+               r"(?:LAS?\s+COORDENADAS?\s+)?" + _COORD + r"$"),
+    re.compile(r"^" + _VERBO_COORD + r"\s+(?:LA\s+|LAS\s+)?COORDENADAS?\s+" + _COORD
+               + r"\s+(?:PARA|AL|DEL|EN)\s+(?:EL\s+)?DESTINO\s+(?P<destino>.+)$"),
+    re.compile(r"^" + _VERBO_COORD + r"\s+(?:LA\s+|LAS\s+)?COORDENADAS?\s+(?:DEL\s+DESTINO\s+|DE\s+)"
+               r"(?P<destino>.+?)(?:\s+(?:EN|A|COMO)|\s*:)\s*" + _COORD + r"$"),
+]
+_NEGACION_MISMO_VIAJE = re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|ES)\b")
 _NUMERO_GUIA = re.compile(r"\b\d{5,9}\b")
 _COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
@@ -186,6 +202,13 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         if len(guias) >= 2:
             return Intencion("VIAJE_AGRUPAR_GUIAS", {"guias": guias})
     if not es_pregunta:
+        for patron in _COORDENADA_DESTINO:
+            m = patron.match(plano)
+            if m:
+                return Intencion("DESTINO_CONFIRMAR_COORDENADA",
+                                 {"latitud": float(m.group("lat").replace(" ", "")),
+                                  "longitud": float(m.group("lon").replace(" ", ""))},
+                                 {"destino": original[m.start("destino"):m.end("destino")].strip(" ,:")})
         for patron in _OBRA_GUIA:
             m = patron.match(plano)
             if m:
@@ -242,7 +265,8 @@ class ErrorContratoInterpretacion(ValueError):
 
 
 # mención -> parámetro de la acción que resuelve (nunca se pasa cruda).
-_MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id", "obra": "obra_id"}
+_MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id", "obra": "obra_id",
+                         "destino": "destino_id"}
 _SOSPECHOSO = re.compile(
     r"(^[A-Za-z]:[\\/])|(\.\.[\\/])|(^[\\/])|(\\\\)|[;|&`$<>{}]|"
     r"\b(?:rm|del|rmdir|powershell|cmd|bash|sh|python|py|pip|import|exec|eval|subprocess|os\.system|"
@@ -365,6 +389,23 @@ def resolver_obra(obras: list, mencion: str) -> dict:
             "candidatos": [{"obra_id": o.obra_id, "nombre": o.nombre_canonico} for o in parecidas[:10]]}
 
 
+def resolver_destino(destinos: list, mencion: str) -> dict:
+    """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'destino_id', 'direccion', 'candidatos'}.
+    Sólo coincidencia exacta normalizada con dirección, nombre o alias de un
+    destino ACTIVO existente; nunca crea destinos ni elige entre varios."""
+    from atlas_core.catalogo_destinos import normalizar_nombre_destino
+    clave = normalizar_nombre_destino(mencion)
+    activos = [d for d in destinos if d.estado_vigencia == "ACTIVO"]
+    exactos = [d for d in activos if clave and clave in {
+        normalizar_nombre_destino(t) for t in (d.direccion, d.nombre_destino, *d.aliases) if t}]
+    if len(exactos) == 1:
+        return {"estado": "RESUELTO", "destino_id": exactos[0].destino_id, "direccion": exactos[0].direccion}
+    parecidos = exactos or [d for d in activos if clave and clave in normalizar_nombre_destino(d.direccion or "")]
+    return {"estado": "AMBIGUO" if len(exactos) > 1 else "DESCONOCIDO",
+            "candidatos": [{"destino_id": d.destino_id, "direccion": d.direccion or d.nombre_destino,
+                            "comuna": d.comuna} for d in parecidos[:10]]}
+
+
 # --------------------------------------------------------------- formato
 
 
@@ -422,6 +463,11 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
             motivos = unico.get("motivos_revision") or []
             texto += (f" Peso total {_peso_legible(unico.get('peso_total_kg'))}. Estado resultante: "
                       f"{unico['estado_resultante']}{' (' + ', '.join(motivos) + ')' if motivos else ''}.")
+    elif accion == "DESTINO_CONFIRMAR_COORDENADA":
+        texto = (f"Confirmar la coordenada del destino {entidad.get('direccion')!r}: "
+                 f"{propuesto.get('latitud')}, {propuesto.get('longitud')}.")
+        # sólo destino, coordenada y consecuencias operacionales
+        return " ".join([texto, *(str(c) for c in preview.get("consecuencias") or [])])
     elif accion == "DOCUMENTO_ASIGNAR_OBRA":
         texto = (f"Asignar la obra de la guía {entidad.get('numero_guia')} (transporte "
                  f"{entidad.get('numero_transporte')}): actual {(actual or {}).get('obra_destino')!r} -> "
@@ -596,6 +642,21 @@ class OperadorB1:
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
                         "mensaje": mensaje}
             parametros["obra_id"] = resolucion["obra_id"]
+        if "destino" in intencion.menciones:
+            mencion = intencion.menciones["destino"]
+            resolucion = resolver_destino(self.capa._ctx.catalogo_destinos().listar(), mencion)
+            if resolucion["estado"] != "RESUELTO":
+                candidatos = resolucion["candidatos"]
+                listado = "; ".join(f"{c['direccion']}{' (' + c['comuna'] + ')' if c['comuna'] else ''}"
+                                    for c in candidatos)
+                mensaje = (f"«{mencion}» coincide con más de un destino: {listado}. Indica cuál."
+                           if resolucion["estado"] == "AMBIGUO" else
+                           f"No encontré un destino existente «{mencion}»"
+                           + (f". ¿Te refieres a alguno de estos? {listado}" if candidatos else "")
+                           + ". No creo destinos desde aquí; repite la orden con la dirección exacta.")
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
+                        "mensaje": mensaje}
+            parametros["destino_id"] = resolucion["destino_id"]
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
 
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
