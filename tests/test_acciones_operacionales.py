@@ -647,6 +647,29 @@ def test_corregir_transporte_agrupacion_activa_bloquea(entorno):
     assert _sha(entorno["dataset"]) == huella
 
 
+def test_corregir_transporte_eventos_activos_del_transporte_nuevo_bloquean(entorno):
+    _entorno_transporte(entorno)
+    (entorno["actual"] / "eventos_operacionales.json").write_text(json.dumps({"eventos": [
+        {"numero_transporte": T_NUEVO, "tipo_evento": "TIENE_ESTADIA", "estado": "ACTIVO"}]}), encoding="utf-8")
+    huella = _sha(entorno["dataset"])
+    r = _preview_transporte(CapaAccionesOperacionales(entorno["raiz"]))
+    assert r["codigo"] == "PRECONDICION_FALLIDA" and T_NUEVO in r["mensaje"] and "evento" in r["mensaje"], r
+    assert _sha(entorno["dataset"]) == huella
+
+
+def test_corregir_transporte_agrupacion_activa_del_transporte_nuevo_bloquea(entorno):
+    from atlas_core.agrupacion_viajes import SCHEMA_VERSION as SCHEMA_AGRUPACION
+    _entorno_transporte(entorno)
+    (entorno["actual"] / "agrupaciones_viaje.json").write_text(json.dumps({
+        "schema_version": SCHEMA_AGRUPACION,
+        "agrupaciones": [{"agrupacion_id": "g2", "estado": "ACTIVA", "transportes": [T_NUEVO, "0000900009"]}],
+    }), encoding="utf-8")
+    huella = _sha(entorno["dataset"])
+    r = _preview_transporte(CapaAccionesOperacionales(entorno["raiz"]))
+    assert r["codigo"] == "PRECONDICION_FALLIDA" and T_NUEVO in r["mensaje"] and "agrupación" in r["mensaje"], r
+    assert _sha(entorno["dataset"]) == huella
+
+
 @pytest.mark.parametrize("valor", ["000090002", "00009000021", "00009A0002", "0000 900002"])
 def test_corregir_transporte_exige_exactamente_diez_digitos(entorno, valor):
     _entorno_transporte(entorno)

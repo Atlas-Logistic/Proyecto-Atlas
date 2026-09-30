@@ -700,21 +700,24 @@ def _precondiciones_cambio_transporte(ctx: _Contexto, fila: Mapping[str, str], n
     viajes involucrados, que el preview muestra."""
     from atlas_core.agrupacion_viajes import agrupaciones_activas
     anterior = _transporte(fila)
-    if anterior:
+    # Misma protección para ambos extremos: sacar la guía de un viaje con
+    # eventos/agrupación o meterla en uno los alteraría en silencio.
+    for transporte in (t for t in (anterior, nuevo) if t):
         eventos = [e for e in _leer_json(ctx.actual / "eventos_operacionales.json", {}).get("eventos") or []
                    if isinstance(e, dict) and e.get("estado", "ACTIVO") == "ACTIVO"
-                   and str(e.get("numero_transporte", "")).strip() == anterior]
+                   and str(e.get("numero_transporte", "")).strip() == transporte]
         if eventos:
             raise ErrorAccionOperacional(
                 "PRECONDICION_FALLIDA",
-                f"el transporte {anterior} tiene {len(eventos)} evento(s) operacional(es) activo(s); resuélvalos primero",
+                f"el transporte {transporte} tiene {len(eventos)} evento(s) operacional(es) activo(s); "
+                "resuélvalos primero",
             )
         agrupaciones = [a for a in agrupaciones_activas(ctx.actual)
-                        if anterior in {str(t).strip() for t in a.get("transportes") or []}]
+                        if transporte in {str(t).strip() for t in a.get("transportes") or []}]
         if agrupaciones:
             raise ErrorAccionOperacional(
                 "PRECONDICION_FALLIDA",
-                f"el transporte {anterior} participa en una agrupación de viaje activa "
+                f"el transporte {transporte} participa en una agrupación de viaje activa "
                 f"({agrupaciones[0].get('agrupacion_id', '')}); desagrúpelo primero",
             )
     filas = ctx.filas()
