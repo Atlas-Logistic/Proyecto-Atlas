@@ -579,6 +579,10 @@ CAMPOS_FOCALES_CONOCIDOS: dict[str, object] = {
     "despachar_a_crudo": lambda v: v not in _AUSENTES,
     "patente_tracto": lambda v: v not in _AUSENTES and _patente_valida(v),
     "patente_rampla": lambda v: v not in _AUSENTES and _patente_valida(v),
+    # Caso 480715: número AZA completo, nunca un fragmento OCR -- más
+    # estricto que `CAMPOS_REPARABLES` (\d{6,}) porque aquí no hay
+    # reextracción que lo respalde, sólo el valor aportado por el operador.
+    "numero_transporte": lambda v: bool(re.fullmatch(r"[0-9]{10}", v)),
 }
 
 # Motivos que cada campo puede retirar al promoverse -- mismo criterio
@@ -615,7 +619,22 @@ _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
         MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR.value,
         MotivoRevisionDocumento.PATENTE_AMBIGUA.value,
     ),
+    "numero_transporte": (_MOTIVO_TRANSPORTE, _MOTIVO_TRANSPORTE_SIN_ETIQUETA),
 }
+
+
+def duplicados_guia_transporte(
+    filas: list[dict[str, str]], *, archivo: str, numero_guia: str, numero_transporte: str,
+) -> list[str]:
+    """Archivos de OTRAS filas con la misma identidad guía+transporte --
+    la misma identidad que `reprocesar_lote_reparador` nunca duplica."""
+    guia, transporte = str(numero_guia).strip(), str(numero_transporte).strip()
+    return sorted(
+        str(f.get("archivo", "")) for f in filas
+        if str(f.get("archivo", "")) != archivo
+        and str(f.get("numero_guia", "")).strip() == guia
+        and str(f.get("numero_transporte", "")).strip() == transporte
+    )
 
 
 def reparar_documento_focal_con_valores_conocidos(
@@ -659,6 +678,7 @@ def reparar_documento_focal_con_valores_conocidos(
         cambios: list[CambioCampo] = []
         campos_ignorados: list[str] = []
         campos_bloqueados_ledger: list[str] = []
+        duplicados: list[str] = []
         for campo, valor_nuevo_crudo in valores.items():
             if campo not in CAMPOS_FOCALES_CONOCIDOS:
                 campos_ignorados.append(campo)  # nunca toca un campo no autorizado
@@ -671,8 +691,17 @@ def reparar_documento_focal_con_valores_conocidos(
             valor_actual = str(fila.get(campo, "")).strip()
             if not valor_nuevo or valor_nuevo == valor_actual or not es_valido(valor_nuevo):
                 continue
+            if campo == "numero_transporte":
+                duplicados = duplicados_guia_transporte(
+                    filas, archivo=archivo_id, numero_guia=str(fila.get("numero_guia", "")),
+                    numero_transporte=valor_nuevo,
+                )
+                if duplicados:
+                    continue  # nunca crea un duplicado guía+transporte
             cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), campo, valor_actual, valor_nuevo))
 
+        if duplicados:
+            cambios = []  # bloqueo total: ni siquiera los demás campos del mismo pedido
         if cambios:
             for cambio in cambios:
                 fila[cambio.campo] = cambio.valor_nuevo
@@ -705,6 +734,7 @@ def reparar_documento_focal_con_valores_conocidos(
         "campos_solicitados": list(valores.keys()),
         "campos_ignorados_no_autorizados": campos_ignorados,
         "campos_bloqueados_por_ledger": campos_bloqueados_ledger,
+        "duplicados_guia_transporte": duplicados,
         "cambios": [
             {"campo": c.campo, "antes": c.valor_anterior, "despues": c.valor_nuevo} for c in cambios
         ],

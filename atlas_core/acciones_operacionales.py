@@ -677,10 +677,51 @@ def _fila_documento(ctx: _Contexto, guia: str, archivo: str) -> dict[str, str]:
     return filas[0]
 
 
-def _decision_obsoleta_por_campo(decision: Mapping[str, object], archivo: str, campo: str, valor: str) -> bool:
-    return (str((decision.get("documento") or {}).get("archivo", "")) == archivo
-            and str(decision.get("campo", "")) == campo
-            and str(decision.get("valor_documental", "")).strip() != valor)
+def _decision_obsoleta_por_campo(decision: Mapping[str, object], archivo: str, campo: str, valor: str,
+                                 transporte_anterior: str = "") -> bool:
+    documento = decision.get("documento") or {}
+    if str(documento.get("archivo", "")) != archivo:
+        return False
+    if str(decision.get("campo", "")) == campo and str(decision.get("valor_documental", "")).strip() != valor:
+        return True
+    # Corrección de transporte: una tarjeta del mismo archivo que sigue
+    # identificando el documento por el transporte anterior depende de él
+    # (la independencia de evidencia se cuenta por transporte).
+    return bool(transporte_anterior) and str(documento.get("numero_transporte", "")).strip() == transporte_anterior
+
+
+def _transporte(fila: Mapping[str, str]) -> str:
+    return str(fila.get("numero_transporte", "")).strip()
+
+
+def _precondiciones_cambio_transporte(ctx: _Contexto, fila: Mapping[str, str], nuevo: str) -> dict[str, object]:
+    """Bloqueos de `numero_transporte` que el reparador no puede ver
+    (eventos y agrupaciones viven fuera del dataset) y las filas de los dos
+    viajes involucrados, que el preview muestra."""
+    from atlas_core.agrupacion_viajes import agrupaciones_activas
+    anterior = _transporte(fila)
+    if anterior:
+        eventos = [e for e in _leer_json(ctx.actual / "eventos_operacionales.json", {}).get("eventos") or []
+                   if isinstance(e, dict) and e.get("estado", "ACTIVO") == "ACTIVO"
+                   and str(e.get("numero_transporte", "")).strip() == anterior]
+        if eventos:
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"el transporte {anterior} tiene {len(eventos)} evento(s) operacional(es) activo(s); resuélvalos primero",
+            )
+        agrupaciones = [a for a in agrupaciones_activas(ctx.actual)
+                        if anterior in {str(t).strip() for t in a.get("transportes") or []}]
+        if agrupaciones:
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"el transporte {anterior} participa en una agrupación de viaje activa "
+                f"({agrupaciones[0].get('agrupacion_id', '')}); desagrúpelo primero",
+            )
+    filas = ctx.filas()
+    archivo = str(fila.get("archivo", ""))
+    origen = [f for f in filas if anterior and _transporte(f) == anterior and str(f.get("archivo", "")) != archivo]
+    destino = [f for f in filas if _transporte(f) == nuevo and str(f.get("archivo", "")) != archivo]
+    return {"origen": origen, "destino": destino}
 
 
 def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
@@ -706,9 +747,17 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
                 "CAMPO_FIJADO_POR_DECISION_HUMANA",
                 "una decisión de Revisión ya fijó este campo; corríjalo desde esa decisión",
             )
+        if simulacion.get("duplicados_guia_transporte"):
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"ya existe la guía {fila.get('numero_guia', '')} con transporte {valor} "
+                f"({', '.join(simulacion['duplicados_guia_transporte'])})",
+            )
         if not simulacion["cambios"]:
             raise ErrorAccionOperacional("PARAMETRO_INVALIDO", f"valor no válido para {campo}")
         sin_cambios = False
+    if campo == "numero_transporte":
+        return _plan_documento_transporte(ctx, p, fila, sin_cambios=sin_cambios)
     obsoletas = [d for d in ctx.decisiones() if _decision_obsoleta_por_campo(d, archivo, campo, valor)]
     return Plan(
         entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": fila.get("numero_guia", ""),
@@ -725,6 +774,50 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
         archivos=("dataset", "bandeja", "ledger_decisiones"),
         datos={"archivo": archivo, "guia": str(fila.get("numero_guia", "")),
                "transporte": str(fila.get("numero_transporte", ""))},
+    )
+
+
+def _plan_documento_transporte(ctx: _Contexto, p: dict, fila: dict[str, str], *, sin_cambios: bool) -> Plan:
+    archivo, guia = str(fila.get("archivo", "")), str(fila.get("numero_guia", ""))
+    anterior, nuevo = _transporte(fila), str(p["valor"])
+    viajes = ({"origen": [], "destino": []} if sin_cambios
+              else _precondiciones_cambio_transporte(ctx, fila, nuevo))
+    guias_origen = sorted({str(f.get("numero_guia", "")) for f in viajes["origen"]} - {""})
+    guias_destino = sorted({str(f.get("numero_guia", "")) for f in viajes["destino"]} - {""})
+    obsoletas = [] if sin_cambios else [
+        d for d in ctx.decisiones()
+        if _decision_obsoleta_por_campo(d, archivo, "numero_transporte", nuevo, anterior)
+    ]
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia, "numero_transporte": anterior,
+                 "campo": "numero_transporte"},
+        valor_actual={"numero_transporte": anterior}, valor_propuesto={"numero_transporte": nuevo},
+        # Filas de ambos viajes: si otra guía entra o sale de cualquiera de
+        # los dos entre el preview y la confirmación, el preview queda obsoleto.
+        estado_base={"fila": fila, "viaje_origen": viajes["origen"], "viaje_destino": viajes["destino"]},
+        sin_cambios=sin_cambios,
+        afectados={
+            "guias": [guia], "archivo": archivo, "numero_transporte": anterior,
+            "transporte_anterior": anterior, "transporte_nuevo": nuevo,
+            "viaje_origen": {"numero_transporte": anterior, "guias_restantes": guias_origen},
+            "viaje_destino": {"numero_transporte": nuevo, "guias_existentes": guias_destino,
+                              "guias_resultantes": sorted({*guias_destino, guia})},
+            "guias_revalidar": sorted({guia, *guias_destino}),
+            "decisiones_obsoletas": [{"decision_id": d.get("decision_id"), "tipo": d.get("tipo"),
+                                      "valor_documental": d.get("valor_documental")} for d in obsoletas],
+        },
+        consecuencias=[
+            f"La guía {guia} ({archivo}) pasa del transporte {anterior or '(vacío)'} al {nuevo}; "
+            "ningún otro campo del documento cambia.",
+            (f"El viaje {anterior} queda con {len(guias_origen)} guía(s)" if anterior else "Sin viaje de origen")
+            + f"; el viaje {nuevo} queda con {len(guias_destino) + 1} guía(s).",
+            "El valor queda protegido en el ledger: un reproceso/OCR no lo revierte.",
+            "Se retiran las tarjetas del documento que dependen del transporte anterior y se recalcula la bandeja.",
+        ],
+        revalidaciones=["RETIRO_DECISIONES_OBSOLETAS", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIAS",
+                        "REGENERAR_REPORTE_VIAJES"],
+        archivos=("dataset", "bandeja", "ledger_decisiones"),
+        datos={"archivo": archivo, "guia": guia, "transporte": anterior, "guias_destino": guias_destino},
     )
 
 
@@ -749,11 +842,16 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
             "referencia": str(p.get("referencia", "")),
         })
         escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    if campo == "numero_transporte":
+        return {"despues": {campo: valor}, "reconciliar": True,
+                "retirar_obsoletas": (archivo, campo, valor, str(plan.datos["transporte"])),
+                "guias_revalidar": [plan.datos["guia"], *plan.datos["guias_destino"]], "regenerar_reporte": True}
     return {"despues": {campo: valor}, "reconciliar": True, "retirar_obsoletas": (archivo, campo, valor),
             "guias_revalidar": [plan.datos["guia"]], "regenerar_reporte": True}
 
 
-def _retirar_obsoletas_por_campo(ctx: _Contexto, archivo: str, campo: str, valor: str) -> list[str]:
+def _retirar_obsoletas_por_campo(ctx: _Contexto, archivo: str, campo: str, valor: str,
+                                 transporte_anterior: str = "") -> list[str]:
     """Red de seguridad DESPUÉS de la reconciliación canónica (que ya retira
     y recalcula los tipos que conoce): ninguna tarjeta puede seguir
     preguntando por el valor anterior de un campo que el operador corrigió.
@@ -767,7 +865,8 @@ def _retirar_obsoletas_por_campo(ctx: _Contexto, archivo: str, campo: str, valor
         clave = "decisiones" if isinstance(contenido.get("decisiones"), list) else "decisions"
         vigentes = []
         for decision in contenido.get(clave) or []:
-            if isinstance(decision, dict) and _decision_obsoleta_por_campo(decision, archivo, campo, valor):
+            if isinstance(decision, dict) and _decision_obsoleta_por_campo(
+                    decision, archivo, campo, valor, transporte_anterior):
                 retiradas.append(str(decision.get("decision_id", "")))
             else:
                 vigentes.append(decision)

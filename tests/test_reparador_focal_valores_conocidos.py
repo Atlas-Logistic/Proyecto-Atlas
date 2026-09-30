@@ -84,17 +84,36 @@ def test_dry_run_no_escribe_nada(tmp_path):
 
 def test_ignora_campos_no_autorizados(tmp_path):
     raiz = _raiz(tmp_path)
-    _escribir_dataset(raiz, [_fila_base(chofer="ORIGINAL", numero_transporte="0000000001")])
+    _escribir_dataset(raiz, [_fila_base(chofer="ORIGINAL", peso_kg="28000")])
     _escribir_ledger(raiz, [])
     resultado = m.reparar_documento_focal_con_valores_conocidos(
         raiz_atlas=raiz, archivo="473442.jpeg", dry_run=False,
-        valores={"chofer": "OTRO CHOFER", "numero_transporte": "0000999999"},
+        valores={"chofer": "OTRO CHOFER", "peso_kg": "99999"},
     )
-    assert resultado["campos_ignorados_no_autorizados"] == ["chofer", "numero_transporte"]
+    assert resultado["campos_ignorados_no_autorizados"] == ["chofer", "peso_kg"]
     assert resultado["campos_cambiados_total"] == 0
     filas_tras = _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")
     assert filas_tras[0]["chofer"] == "ORIGINAL"
-    assert filas_tras[0]["numero_transporte"] == "0000000001"
+    assert filas_tras[0]["peso_kg"] == "28000"
+
+
+def test_numero_transporte_exige_diez_digitos_y_retira_su_motivo(tmp_path):
+    raiz = _raiz(tmp_path)
+    _escribir_dataset(raiz, [_fila_base(
+        numero_transporte="", motivos_revision_documento="TRANSPORTE_AUSENTE | MATERIAL_AUSENTE")])
+    _escribir_ledger(raiz, [])
+    for invalido in ("123456789", "12345678901", "12345A7890"):
+        r = m.reparar_documento_focal_con_valores_conocidos(
+            raiz_atlas=raiz, archivo="473442.jpeg", dry_run=False, reconciliar=False,
+            valores={"numero_transporte": invalido})
+        assert r["campos_cambiados_total"] == 0, invalido
+    r = m.reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=raiz, archivo="473442.jpeg", dry_run=False, reconciliar=False,
+        valores={"numero_transporte": "0000480715"})
+    assert r["cambios"] == [{"campo": "numero_transporte", "antes": "", "despues": "0000480715"}]
+    fila = _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")[0]
+    assert fila["numero_transporte"] == "0000480715"
+    assert fila["motivos_revision_documento"] == "MATERIAL_AUSENTE"
 
 
 def test_patente_tracto_y_rampla_estan_autorizados_y_estructuralmente_validados(tmp_path):

@@ -461,3 +461,206 @@ def test_asociacion_previa_con_rut_formateado_es_sin_cambios(entorno):
     capa = CapaAccionesOperacionales(entorno["raiz"])
     p = capa.previsualizar("CHOFER_ASIGNAR_VEHICULO", {"chofer": RUT_ACTIVO, "patente": "KN5439"}, actor="JAVIER")
     assert p["estado"] == "SIN_CAMBIOS", p
+
+
+# ------------------------------------------------------------ numero_transporte (caso 480715)
+
+T_ANTERIOR, T_NUEVO = "0000900001", "0000900002"
+# Únicas columnas que una corrección de transporte puede tocar.
+_DERIVADAS_TRANSPORTE = {"numero_transporte", "motivos_revision_documento", "indicador_revision",
+                         "estado_documental", "estado_operacional"}
+
+
+def _filas_dataset(entorno) -> dict[str, dict[str, str]]:
+    with entorno["dataset"].open(encoding="utf-8-sig", newline="") as archivo:
+        return {f["archivo"]: f for f in csv.DictReader(archivo, delimiter=";")}
+
+
+def _escribir_dataset(entorno, filas) -> None:
+    with entorno["dataset"].open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+
+def _entorno_transporte(entorno, *extra):
+    """500001 y 500002 en el viaje anterior; 500003 ya en el viaje destino.
+    500001 trae poblados los campos no relacionados para verificar que
+    ninguno cambia."""
+    completa = _fila(
+        "500001", fecha="2026-09-20", patente_rampla="JK1234", peso_kg="28000",
+        descripcion_material="ARIDO", hora_entrada_aza="08:00", hora_salida_aza="08:40", planta_origen_id="P1",
+        planta_origen_nombre="PLANTA UNO", origen_gps="GPS", planta_gps_nombre="PLANTA UNO",
+        hora_entrada_gps="07:58", distancia_gps_km="31.2", evidencia_telemetria='{"x":1}', distancia_km="30.5",
+        duracion_min="45", motivo_ruta="OK", metricas_procesamiento_json='{"ms":10}', rut_cliente="76.111.111-6",
+        direccion_entrega="CALLE DOS 200", localidad_entrega="SANTIAGO",
+        motivos_revision_documento="TRANSPORTE_AUSENTE_SIN_ETIQUETA | OBRA_DESTINO_SIN_CORROBORAR",
+    )
+    _escribir_dataset(entorno, [completa, _fila("500002", obra_destino="OBRA OTRA"),
+                                _fila("500003", numero_transporte=T_NUEVO), *extra])
+    otra = crear_decision(
+        tipo="OBRA_DESCONOCIDA", entidad="OBRA", archivo="500002.jpeg", numero_guia="500002",
+        numero_transporte=T_ANTERIOR, campo="obra_destino", valor_documental="OBRA OTRA",
+        valor_normalizado="OBRA OTRA", identidad_resuelta=None, candidatos=(),
+        motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
+        evidencias=({"tipo": "CLIENTE_RESUELTO", "entidad_id": entorno["cliente"].cliente_id},),
+        acciones_permitidas=("REGISTRAR", "NO_REGISTRAR", "POSPONER"),
+        contexto={"cliente_id": entorno["cliente"].cliente_id, "cliente_canonico": entorno["cliente"].razon_social,
+                  "destino_documental": ""},
+    )
+    generar_artefacto(ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["cat"],
+                      decisiones=[entorno["decision"], otra])
+    return otra
+
+
+def _preview_transporte(capa, valor=T_NUEVO, **extra):
+    return capa.previsualizar("DOCUMENTO_CORREGIR_CAMPO",
+                              {"numero_guia": "500001", "campo": "numero_transporte", "valor": valor, **extra},
+                              actor="JAVIER")
+
+
+def _sin_mantenimiento_real(monkeypatch, forzadas: list | None = None):
+    import atlas_core.mantenimiento_pendientes_tecnicos as mantenimiento
+
+    def registrar(**kw):
+        if forzadas is not None:
+            forzadas.append(set(kw["guias_forzadas"]))
+        return {"ejecutado": True}
+    monkeypatch.setattr(mantenimiento, "mantener_pendientes_tecnicos", registrar)
+
+
+def test_corregir_transporte_aplica_preserva_y_retira_tarjeta_dependiente(entorno, monkeypatch):
+    otra = _entorno_transporte(entorno)
+    antes = _filas_dataset(entorno)
+    forzadas: list[set[str]] = []
+    _sin_mantenimiento_real(monkeypatch, forzadas)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    vieja = entorno["decision"]["decision_id"]
+
+    p = _preview_transporte(capa)
+    assert p["estado"] == "PREVIEW", p
+    assert p["valor_actual"] == {"numero_transporte": T_ANTERIOR}
+    assert p["valor_propuesto"] == {"numero_transporte": T_NUEVO}
+    af = p["afectados"]
+    assert (af["transporte_anterior"], af["transporte_nuevo"]) == (T_ANTERIOR, T_NUEVO)
+    assert af["guias"] == ["500001"] and af["archivo"] == "500001.jpeg"
+    assert af["viaje_origen"] == {"numero_transporte": T_ANTERIOR, "guias_restantes": ["500002"]}
+    assert af["viaje_destino"] == {"numero_transporte": T_NUEVO, "guias_existentes": ["500003"],
+                                   "guias_resultantes": ["500001", "500003"]}
+    assert af["guias_revalidar"] == ["500001", "500003"]
+    assert [d["decision_id"] for d in af["decisiones_obsoletas"]] == [vieja]
+
+    r = capa.ejecutar(p["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert r["estado"] == "APLICADA", r
+    despues = _filas_dataset(entorno)
+    assert despues["500001.jpeg"]["numero_transporte"] == T_NUEVO
+    # sólo el transporte y sus indicadores derivados; el motivo de otro campo se conserva
+    assert despues["500001.jpeg"]["motivos_revision_documento"] == "OBRA_DESTINO_SIN_CORROBORAR"
+    for columna in set(COLUMNAS) - _DERIVADAS_TRANSPORTE:
+        assert despues["500001.jpeg"][columna] == antes["500001.jpeg"][columna], columna
+    assert despues["500002.jpeg"] == antes["500002.jpeg"] and despues["500003.jpeg"] == antes["500003.jpeg"]
+
+    # revalidación focal: guía corregida + guías del viaje destino
+    assert forzadas == [{"500001", "500003"}]
+    # la tarjeta del archivo ligada al transporte anterior se retira; la de otro archivo, no
+    bandeja = _bandeja(entorno)["decisiones"]
+    ids = {d["decision_id"] for d in bandeja}
+    assert vieja not in ids and otra["decision_id"] in ids
+    assert r["retiradas_por_red_de_seguridad"] == [vieja]
+    assert all(d["documento"]["numero_transporte"] != T_ANTERIOR
+               for d in bandeja if d["documento"]["archivo"] == "500001.jpeg")
+
+    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    [entrada] = [a for a in ledger["aplicaciones"] if a["tipo"] == TIPO_LEDGER_CORRECCION]
+    assert entrada["campo"] == "numero_transporte"
+    assert (entrada["valor_documental"], entrada["valor_corregido"]) == (T_ANTERIOR, T_NUEVO)
+    assert entrada["documento"] == {"archivo": "500001.jpeg", "numero_guia": "500001",
+                                    "numero_transporte": T_ANTERIOR}
+    auditoria = capa.auditoria()[-1]
+    assert auditoria["antes"] == {"numero_transporte": T_ANTERIOR}
+    assert auditoria["despues"] == {"numero_transporte": T_NUEVO}
+
+
+def test_corregir_transporte_replay_e_idempotencia_del_ledger(entorno, monkeypatch):
+    from atlas_core.reprocesamiento_reparador import _reparar_campos_documento
+    _entorno_transporte(entorno)
+    _sin_mantenimiento_real(monkeypatch)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    p = _preview_transporte(capa)
+    primera = capa.ejecutar(p["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert primera["estado"] == "APLICADA", primera
+    huella = _sha(entorno["dataset"])
+    repetida = capa.ejecutar(p["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert repetida["idempotente"] is True and repetida["auditoria_id"] == primera["auditoria_id"]
+    assert _preview_transporte(capa)["estado"] == "SIN_CAMBIOS"
+    assert _sha(entorno["dataset"]) == huella
+    aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(
+        encoding="utf-8"))["aplicaciones"]
+    assert len([a for a in aplicaciones if a["tipo"] == TIPO_LEDGER_CORRECCION]) == 1
+    # replay de reproceso/OCR: aun con el documento degradado y el OCR
+    # leyendo el transporte anterior, el ledger gana
+    fila = _filas_dataset(entorno)["500001.jpeg"]
+    cambios = _reparar_campos_documento(fila, {"numero_transporte": T_ANTERIOR}, aplicaciones,
+                                        documento_degradado=True)
+    assert [c for c in cambios if c.campo == "numero_transporte"] == []
+
+
+def test_corregir_transporte_duplicado_guia_transporte_bloquea(entorno):
+    from atlas_core.reprocesamiento_reparador import reparar_documento_focal_con_valores_conocidos
+    _entorno_transporte(entorno, _fila("500001", archivo="500001_b.jpeg", numero_transporte=T_NUEVO))
+    huella = _sha(entorno["dataset"])
+    r = _preview_transporte(CapaAccionesOperacionales(entorno["raiz"]), archivo="500001.jpeg")
+    assert r["codigo"] == "PRECONDICION_FALLIDA" and "500001_b.jpeg" in r["mensaje"], r
+    directo = reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=entorno["raiz"], archivo="500001.jpeg", valores={"numero_transporte": T_NUEVO}, dry_run=False,
+        reconciliar=False,
+    )
+    assert directo["cambios"] == [] and directo["duplicados_guia_transporte"] == ["500001_b.jpeg"]
+    assert _sha(entorno["dataset"]) == huella
+
+
+def test_corregir_transporte_eventos_activos_bloquean(entorno):
+    _entorno_transporte(entorno)
+    ruta = entorno["actual"] / "eventos_operacionales.json"
+    ruta.write_text(json.dumps({"eventos": [
+        {"numero_transporte": T_ANTERIOR, "tipo_evento": "TIENE_ESTADIA", "estado": "ANULADO"}]}), encoding="utf-8")
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    assert _preview_transporte(capa)["estado"] == "PREVIEW"  # un evento anulado no bloquea
+    ruta.write_text(json.dumps({"eventos": [
+        {"numero_transporte": T_ANTERIOR, "tipo_evento": "TIENE_ESTADIA", "estado": "ACTIVO"}]}), encoding="utf-8")
+    huella = _sha(entorno["dataset"])
+    r = _preview_transporte(capa)
+    assert r["codigo"] == "PRECONDICION_FALLIDA" and "evento" in r["mensaje"], r
+    assert _sha(entorno["dataset"]) == huella
+
+
+def test_corregir_transporte_agrupacion_activa_bloquea(entorno):
+    from atlas_core.agrupacion_viajes import SCHEMA_VERSION as SCHEMA_AGRUPACION
+    _entorno_transporte(entorno)
+    (entorno["actual"] / "agrupaciones_viaje.json").write_text(json.dumps({
+        "schema_version": SCHEMA_AGRUPACION,
+        "agrupaciones": [{"agrupacion_id": "g1", "estado": "ACTIVA", "transportes": [T_ANTERIOR, "0000900009"]}],
+    }), encoding="utf-8")
+    huella = _sha(entorno["dataset"])
+    r = _preview_transporte(CapaAccionesOperacionales(entorno["raiz"]))
+    assert r["codigo"] == "PRECONDICION_FALLIDA" and "agrupación" in r["mensaje"], r
+    assert _sha(entorno["dataset"]) == huella
+
+
+@pytest.mark.parametrize("valor", ["000090002", "00009000021", "00009A0002", "0000 900002"])
+def test_corregir_transporte_exige_exactamente_diez_digitos(entorno, valor):
+    _entorno_transporte(entorno)
+    r = _preview_transporte(CapaAccionesOperacionales(entorno["raiz"]), valor=valor)
+    assert r["codigo"] == "PARAMETRO_INVALIDO", r
+
+
+def test_corregir_transporte_preview_obsoleto_si_cambia_el_viaje_destino(entorno):
+    _entorno_transporte(entorno)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    p = _preview_transporte(capa)
+    filas = list(_filas_dataset(entorno).values())
+    _escribir_dataset(entorno, [*filas, _fila("500004", numero_transporte=T_NUEVO)])  # otra guía entra al destino
+    r = capa.ejecutar(p["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert r["estado"] == "PREVIEW_OBSOLETO", r
+    assert _filas_dataset(entorno)["500001.jpeg"]["numero_transporte"] == T_ANTERIOR
+    assert r["preview_nuevo"]["afectados"]["viaje_destino"]["guias_existentes"] == ["500003", "500004"]
