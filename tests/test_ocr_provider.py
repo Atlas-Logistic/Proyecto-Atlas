@@ -393,9 +393,11 @@ def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lot
     proveedor._asegurar_proceso()  # handshake de arranque, normal
     monkeypatch.setattr(ocr_provider, "TIMEOUT_COMANDO_SEG", 0.2)
     monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", Mock())
+    easyocr = Mock()
+    easyocr.leer_texto.return_value = ["fallback"]
+    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", Mock(return_value=easyocr))
     proceso_colgado.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
-    with pytest.raises(ProveedorOCRNoDisponible):
-        proveedor.leer_texto("464170.jpeg")
+    assert proveedor.leer_texto("464170.jpeg") == ["fallback"]
 
     # Documento siguiente: nuevo Popen, responde con normalidad.
     respuesta = json.dumps({"ok": True, "resultado": "OK"}) + "\n"
@@ -408,7 +410,8 @@ def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lot
 
     resultado = proveedor.leer_texto("464264.jpeg")
 
-    assert resultado == ["OK"]
+    assert resultado == ["fallback"]
+    assert ocr_provider.subprocess.Popen.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -455,6 +458,31 @@ def test_paddleocr_timeout_con_error_easyocr_conserva_el_error_sin_reintentar_pa
 
     assert paddle.call_count == 1
     easyocr.leer_texto.assert_called_once_with("guia.jpg")
+
+
+def test_paddleocr_degradado_usa_easyocr_en_operaciones_posteriores_sin_reintentar_paddle(monkeypatch, caplog):
+    proveedor = PaddleOCRProvider(device="cpu")
+    asegurar = Mock()
+    monkeypatch.setattr(proveedor, "_asegurar_proceso", asegurar)
+    paddle = Mock(side_effect=ProveedorOCRNoDisponible("worker agotó timeout"))
+    monkeypatch.setattr(proveedor, "_comando", paddle)
+    easyocr = Mock()
+    easyocr.leer_texto.return_value = ["TEXTO"]
+    easyocr.leer_bloques.return_value = []
+    easyocr.leer_focal.return_value = {"lecturas": []}
+    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", Mock(return_value=easyocr))
+
+    with caplog.at_level("WARNING"):
+        assert proveedor.leer_texto("guia.jpg") == ["TEXTO"]
+        assert proveedor.leer_bloques("guia.jpg") == []
+        assert proveedor.leer_focal("guia.jpg", (1, 2, 3, 4), ALLOWLIST_FECHA) == {"lecturas": []}
+
+    assert paddle.call_count == 1
+    assert asegurar.call_count == 1
+    easyocr.leer_texto.assert_called_once_with("guia.jpg")
+    easyocr.leer_bloques.assert_called_once_with("guia.jpg")
+    easyocr.leer_focal.assert_called_once_with("guia.jpg", (1, 2, 3, 4), ALLOWLIST_FECHA)
+    assert caplog.text.count("PaddleOCR degradado; usando EasyOCR directamente") == 2
 
 
 def test_matar_arbol_proceso_termina_un_proceso_real_colgado():

@@ -171,6 +171,7 @@ class PaddleOCRProvider:
         self._ruta_python_forzada = ruta_python
         self._proceso: subprocess.Popen | None = None
         self._fallback_easyocr: EasyOCRProvider | None = None
+        self._degradado_a_easyocr = False
 
     @property
     def device(self) -> str:
@@ -254,12 +255,18 @@ class PaddleOCRProvider:
         EasyOCR falla, su excepción se propaga sin volver a Paddle ni crear
         un ciclo entre proveedores.
         """
+        if self._degradado_a_easyocr:
+            mensaje = f"PaddleOCR degradado; usando EasyOCR directamente para {operacion} de {ruta}"
+            logger.warning(mensaje)
+            print(f"[Atlas OCR] {mensaje}")
+            return leer_easyocr()
         try:
             return leer_paddle()
         except ProveedorOCRNoDisponible as exc:
+            self._degradado_a_easyocr = True
             mensaje = (
-                f"PaddleOCR no disponible durante {operacion} de {ruta}; "
-                f"reintentando una vez con EasyOCR: {exc}"
+                f"PaddleOCR no disponible durante {operacion} de {ruta}; degradado a EasyOCR "
+                f"para esta instancia y reintentando una vez con EasyOCR: {exc}"
             )
             logger.warning(mensaje)
             print(f"[Atlas OCR] {mensaje}")
@@ -273,7 +280,8 @@ class PaddleOCRProvider:
                 raise exc from error_easyocr
 
     def leer_texto(self, ruta_imagen: str | Path) -> list[str]:
-        self._asegurar_proceso()
+        if not self._degradado_a_easyocr:
+            self._asegurar_proceso()
         return self._con_fallback_easyocr(
             "texto", ruta_imagen,
             lambda: (
@@ -284,7 +292,8 @@ class PaddleOCRProvider:
         )
 
     def leer_bloques(self, ruta_imagen: str | Path) -> list[BloqueOCR]:
-        self._asegurar_proceso()
+        if not self._degradado_a_easyocr:
+            self._asegurar_proceso()
 
         def convertir(crudos) -> list[BloqueOCR]:
             bloques = []
@@ -310,7 +319,8 @@ class PaddleOCRProvider:
         # equivalente en su API publica; el recorte/margen/variantes son
         # idénticos a EasyOCRProvider, la limitación de caracteres queda del
         # lado de extraer_fecha/consenso, que ya validan el formato resultante.
-        self._asegurar_proceso()
+        if not self._degradado_a_easyocr:
+            self._asegurar_proceso()
         return self._con_fallback_easyocr(
             "lectura focal", ruta_imagen,
             lambda: self._comando(op="focal", ruta=str(ruta_imagen), caja=list(caja)),
