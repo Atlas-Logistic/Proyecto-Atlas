@@ -715,6 +715,73 @@ def procesar_envio_mobile(
         )
 
 
+def recuperar_envio_mobile_error_pre_persistencia(
+    repositorio: RepositorioEnviosMobile, envio_id: str, *,
+    dataset: Path, carpeta_catalogos: str | Path | None = None,
+    orquestador_ia: object = None, puede_escribir: Callable[[], bool] | None = None,
+) -> dict:
+    """Recupera explícitamente un ERROR Mobile que nunca alcanzó el dataset.
+
+    No es un barrido ni un cambio de semántica para ``ERROR``: sólo admite
+    el envío indicado, con su imagen y metadatos íntegros, y únicamente si
+    su identificador aún no existe en el dataset. Reutiliza la misma
+    implementación interna del procesamiento normal bajo el lock del envío.
+    """
+    if puede_escribir is None or not puede_escribir():
+        raise ErrorEnvioMobile("La recuperación requiere un lease global de escritor vigente")
+    with bloqueo_sesion(
+        repositorio.raiz, f"mobile_{envio_id}",
+        tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+    ):
+        if not puede_escribir():
+            raise ErrorEnvioMobile("El lease global de escritor ya no está vigente")
+        registro = repositorio.cargar(envio_id)
+        if registro.get("estado") != "ERROR":
+            raise ErrorEnvioMobile("La recuperación sólo admite un envío en estado ERROR")
+        if registro.get("envio_id") != envio_id:
+            raise ErrorEnvioMobile("envio_id inconsistente en el registro Mobile")
+        if registro.get("foto_original") != "original.jpg":
+            raise ErrorEnvioMobile("La recuperación requiere la foto original Mobile esperada")
+        if str(registro.get("imagen_mime") or "") not in MIME_PERMITIDOS:
+            raise ErrorEnvioMobile("Metadato imagen_mime inválido para recuperación")
+        esperado = str(registro.get("imagen_sha256") or "")
+        if len(esperado) != 64:
+            raise ErrorEnvioMobile("Metadato imagen_sha256 inválido para recuperación")
+        for campo in ("empresa_id", "documento_id", "chofer_id", "capturado_en"):
+            if not str(registro.get(campo) or "").strip():
+                raise ErrorEnvioMobile(f"Metadato {campo} ausente para recuperación")
+        imagen = repositorio.raiz / envio_id / "original.jpg"
+        if not imagen.is_file():
+            raise ErrorEnvioMobile("No existe original.jpg para recuperación")
+        actual = hashlib.sha256(imagen.read_bytes()).hexdigest()
+        if not hmac.compare_digest(actual, esperado):
+            raise ErrorEnvioMobile("SHA-256 de original.jpg no coincide con el registro")
+        if not dataset.is_file():
+            raise ErrorEnvioMobile("No existe el dataset operacional para recuperación")
+        identificador = f"mobile/{envio_id}/original.jpg"
+        with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+            if any(fila.get("archivo") == identificador for fila in csv.DictReader(archivo, delimiter=";")):
+                raise ErrorEnvioMobile("El envío ya tiene una fila documental; usar reproceso persistido")
+
+        registro["recuperacion_error_pre_persistencia"] = {
+            "estado": "INICIADA", "iniciada_en": datetime.now(timezone.utc).isoformat(),
+            "error_anterior": str(registro.get("error") or ""),
+        }
+        repositorio.guardar(envio_id, registro)
+        resultado = _procesar_envio_mobile_impl(
+            repositorio, envio_id, dataset=dataset,
+            carpeta_catalogos=carpeta_catalogos, orquestador_ia=orquestador_ia,
+        )
+        recuperacion = dict(resultado.get("recuperacion_error_pre_persistencia") or {})
+        recuperacion.update({
+            "estado": "COMPLETADA" if resultado.get("estado") != "ERROR" else "FALLIDA",
+            "finalizada_en": datetime.now(timezone.utc).isoformat(),
+        })
+        resultado["recuperacion_error_pre_persistencia"] = recuperacion
+        repositorio.guardar(envio_id, resultado)
+        return resultado
+
+
 def _procesar_envio_mobile_impl(
     repositorio: RepositorioEnviosMobile, envio_id: str, *,
     procesador: Callable[[Path], Mapping[str, object]] | None = None,
