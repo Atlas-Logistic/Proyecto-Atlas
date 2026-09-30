@@ -269,8 +269,10 @@ def test_texto_con_comando_no_se_interpreta_ni_ejecuta(raiz):
 
 def test_interprete_determinista_y_cli(raiz, capsys):
     assert interpretar_determinista("Pon inactivo a Juan Pérez").menciones == {"chofer": "JUAN PÉREZ"}
-    assert interpretar_determinista("corrige la obra de la guía 500001 a OBRA DOS").parametros == {
-        "numero_guia": "500001", "campo": "obra_destino", "valor": "OBRA DOS"}
+    assert interpretar_determinista("corrige el cliente de la guía 500001 a CLIENTE DOS").parametros == {
+        "numero_guia": "500001", "campo": "cliente", "valor": "CLIENTE DOS"}
+    # la obra se resuelve contra el catálogo (nunca texto libre)
+    assert interpretar_determinista("corrige la obra de la guía 500001 a OBRA DOS").accion == "DOCUMENTO_ASIGNAR_OBRA"
     assert interpretar_determinista("hola") is None
     from b1_operador_cli import main
     assert main(["--raiz-atlas", str(raiz), "--conversacion", "cli", "--texto", "Pizarro usa JF9575"]) == 0

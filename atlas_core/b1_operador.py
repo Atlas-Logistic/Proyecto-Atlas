@@ -142,7 +142,18 @@ _MISMO_VIAJE = re.compile(
     r"\bGUIAS\b.*\b(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|JUNTA|JUNTAR|AGRUPA|AGRUPAR|UNE|UNIR)\b"
     r".*\b(?:(?:AL|DEL|EL|EN\s+EL|A\s+UN|EN\s+UN|UN)\s+(?:MISMO|SOLO|UNICO)\s+(?:VIAJE|REPARTO))\b"
     r"|\b(?:JUNTA|JUNTAR|AGRUPA|AGRUPAR|UNE|UNIR)\s+LAS\s+GUIAS\b.*\b(?:VIAJE|REPARTO)\b")
-_NEGACION_MISMO_VIAJE = re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|ES)\b")
+# OBRA de una guía: "la obra de la guía N es X", "la guía N pertenece a la
+# obra X", "cambia/corrige/asigna la obra de la guía N a X". Va antes que
+# DOCUMENTO_CORREGIR_CAMPO y que la asociación chofer↔vehículo (que leía
+# "OBRA DE LA GUÍA N" como nombre de chofer).
+_OBRA_GUIA = [
+    re.compile(r"^(?:LA\s+)?OBRA\s+(?:DE\s+LA\s+|DE\s+)?" + _GUIA
+               + r"\s*(?:ES|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A|:)\s*(?:LA\s+OBRA\s+)?(?P<obra>.+)$"),
+    re.compile(r"^(?:LA\s+)?" + _GUIA + r"\s+(?:PERTENECE\s+A|CORRESPONDE\s+A|ES\s+DE)\s+LA\s+OBRA\s*:?\s*(?P<obra>.+)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|ASIGNA|ASIGNAR)\s+(?:LA\s+)?OBRA\s+(?:DE\s+LA\s+|DE\s+|A\s+LA\s+)?"
+               + _GUIA + r"\s*(?:A|POR|COMO|:)\s*(?:LA\s+OBRA\s+)?(?P<obra>.+)$"),
+]
+_NEGACION_MISMO_VIAJE =re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|ES)\b")
 _NUMERO_GUIA = re.compile(r"\b\d{5,9}\b")
 _COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
@@ -174,6 +185,12 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         guias = list(dict.fromkeys(_NUMERO_GUIA.findall(plano)))
         if len(guias) >= 2:
             return Intencion("VIAJE_AGRUPAR_GUIAS", {"guias": guias})
+    if not es_pregunta:
+        for patron in _OBRA_GUIA:
+            m = patron.match(plano)
+            if m:
+                return Intencion("DOCUMENTO_ASIGNAR_OBRA", {"numero_guia": m.group("guia")},
+                                 {"obra": original[m.start("obra"):m.end("obra")].strip(" ,:")})
     for patron in _DESTINO_GUIA:
         m = patron.match(plano)
         if m:
@@ -225,7 +242,7 @@ class ErrorContratoInterpretacion(ValueError):
 
 
 # mención -> parámetro de la acción que resuelve (nunca se pasa cruda).
-_MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id"}
+_MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id", "obra": "obra_id"}
 _SOSPECHOSO = re.compile(
     r"(^[A-Za-z]:[\\/])|(\.\.[\\/])|(^[\\/])|(\\\\)|[;|&`$<>{}]|"
     r"\b(?:rm|del|rmdir|powershell|cmd|bash|sh|python|py|pip|import|exec|eval|subprocess|os\.system|"
@@ -331,6 +348,23 @@ def resolver_decision_destino(decisiones: list[Mapping[str, object]], guia: str)
                 "de un viaje ya calculado está mal, usa «Corregir destino» en la Logística del viaje.")
 
 
+def resolver_obra(obras: list, mencion: str) -> dict:
+    """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'obra_id', 'nombre', 'candidatos'}.
+    Sólo coincidencia exacta normalizada con el nombre canónico o un alias de
+    una obra vigente; nunca crea obra ni adivina entre varias."""
+    from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
+    clave = normalizar_nombre_obra(mencion)
+    vigentes = [o for o in obras if o.estado_vigencia == "ACTIVO" and o.estado not in {"RECHAZADA", "INACTIVA"}]
+    exactas = [o for o in vigentes
+               if clave and clave in {normalizar_nombre_obra(x) for x in (o.nombre_canonico, *o.aliases_documentales)}]
+    if len(exactas) == 1:
+        return {"estado": "RESUELTO", "obra_id": exactas[0].obra_id, "nombre": exactas[0].nombre_canonico}
+    parecidas = exactas or [o for o in vigentes if clave and (clave in normalizar_nombre_obra(o.nombre_canonico)
+                                                              or normalizar_nombre_obra(o.nombre_canonico) in clave)]
+    return {"estado": "AMBIGUO" if len(exactas) > 1 else "DESCONOCIDO",
+            "candidatos": [{"obra_id": o.obra_id, "nombre": o.nombre_canonico} for o in parecidas[:10]]}
+
+
 # --------------------------------------------------------------- formato
 
 
@@ -388,6 +422,10 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
             motivos = unico.get("motivos_revision") or []
             texto += (f" Peso total {_peso_legible(unico.get('peso_total_kg'))}. Estado resultante: "
                       f"{unico['estado_resultante']}{' (' + ', '.join(motivos) + ')' if motivos else ''}.")
+    elif accion == "DOCUMENTO_ASIGNAR_OBRA":
+        texto = (f"Asignar la obra de la guía {entidad.get('numero_guia')} (transporte "
+                 f"{entidad.get('numero_transporte')}): actual {(actual or {}).get('obra_destino')!r} -> "
+                 f"{propuesto.get('obra_destino')!r} (obra existente, obra_id {propuesto.get('obra_id')}).")
     elif accion == "DOCUMENTO_CORREGIR_CAMPO":
         texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
                  f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")
@@ -519,7 +557,7 @@ class OperadorB1:
         if intencion is None:
             return {"estado": "NO_INTERPRETADA", "mensaje": (
                 "No reconocí una instrucción operacional. Puedo: asociar vehículo a chofer, activar/inactivar un "
-                "chofer, corregir un campo de una guía, o consultar choferes, obras y decisiones.")}
+                "chofer, corregir un campo o la obra de una guía, o consultar choferes, obras y decisiones.")}
         definicion = ACCIONES[intencion.accion]
         if definicion.riesgo != LECTURA:
             # Toda instrucción operacional nueva invalida el pendiente anterior.
@@ -544,6 +582,20 @@ class OperadorB1:
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [],
                         "mensaje": aclaracion}
             parametros["decision_id"] = decision_id
+        if "obra" in intencion.menciones:
+            mencion = intencion.menciones["obra"]
+            resolucion = resolver_obra(self.capa._ctx.catalogo_obras().listar_obras(), mencion)
+            if resolucion["estado"] != "RESUELTO":
+                candidatos = resolucion["candidatos"]
+                listado = "; ".join(f"{c['nombre']} (obra_id {c['obra_id']})" for c in candidatos)
+                mensaje = (f"«{mencion}» coincide con más de una obra: {listado}. Indica cuál."
+                           if resolucion["estado"] == "AMBIGUO" else
+                           f"No encontré una obra existente llamada «{mencion}»"
+                           + (f". ¿Te refieres a alguna de estas? {listado}" if candidatos else "")
+                           + ". No creo obras nuevas desde aquí; repite la orden con el nombre exacto.")
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
+                        "mensaje": mensaje}
+            parametros["obra_id"] = resolucion["obra_id"]
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
 
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,

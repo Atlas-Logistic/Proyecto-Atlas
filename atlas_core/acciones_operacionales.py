@@ -879,6 +879,34 @@ def _retirar_obsoletas_por_campo(ctx: _Contexto, archivo: str, campo: str, valor
     return retiradas
 
 
+def _plan_documento_obra(ctx: _Contexto, p: dict) -> Plan:
+    """Obra de una guía = una obra YA EXISTENTE del catálogo (por obra_id).
+    Se escribe su nombre canónico por la misma vía que DOCUMENTO_CORREGIR_CAMPO;
+    el catálogo no se toca (ni obra nueva ni alias desde el texto anterior)."""
+    obra = _obra(ctx, str(p["obra_id"]))
+    if obra.estado_vigencia != "ACTIVO" or obra.estado in {"RECHAZADA", "INACTIVA"}:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la obra está rechazada o inactiva")
+    base = _plan_documento_campo(ctx, {"numero_guia": p["numero_guia"], "campo": "obra_destino",
+                                       "valor": obra.nombre_canonico, "archivo": p.get("archivo", "")})
+    base.entidad["obra_id"] = obra.obra_id
+    base.valor_propuesto = {"obra_destino": obra.nombre_canonico, "obra_id": obra.obra_id}
+    base.estado_base = {"documento": base.estado_base, "obra": obra.a_dict()}
+    base.consecuencias = [
+        f"Reutiliza la obra existente {obra.nombre_canonico!r} (obra_id {obra.obra_id}); "
+        "no crea obra nueva ni registra el valor anterior como alias.",
+        *base.consecuencias,
+        "Revalidación focal sólo de esta guía y su viaje.",
+    ]
+    return base
+
+
+def _aplicar_documento_obra(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    salida = _aplicar_documento_campo(ctx, {"campo": "obra_destino", "valor": plan.valor_propuesto["obra_destino"],
+                                            "referencia": p.get("referencia", "")}, plan, actor)
+    salida["despues"] = dict(plan.valor_propuesto)
+    return salida
+
+
 # =============================================================== DECISIONES
 
 
@@ -1103,6 +1131,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "valor": _P("texto", True, max_largo=200), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_campo, _aplicar_documento_campo),
+    DefinicionAccion("DOCUMENTO_ASIGNAR_OBRA", OPERACIONAL_REVERSIBLE,
+                     "Asigna a una guía una obra EXISTENTE del catálogo (sin crear obra ni alias).",
+                     {"numero_guia": _P("guia", True), "obra_id": _P("id", True),
+                      "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
+                     _plan_documento_obra, _aplicar_documento_obra),
     DefinicionAccion("DECISION_APLICAR", OPERACIONAL_REVERSIBLE, "Aplica una decisión pendiente de Revisión.",
                      {"decision_id": _P("id", True), "accion_decision": _P("enum", True, opciones=_ACCIONES_DECISION),
                       **{k: _P("texto", max_largo=200) for k in _EXTRAS_DECISION}},

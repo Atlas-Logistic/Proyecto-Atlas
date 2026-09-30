@@ -58,7 +58,7 @@ def test_comuna_explicita_viaja_separada():
 
 def test_no_captura_otras_intenciones():
     assert interpretar_determinista("¿Cuál es el destino de la guía 472037?") is None
-    assert interpretar_determinista("corrige la obra de la guía 472037 a OBRA DOS").accion == "DOCUMENTO_CORREGIR_CAMPO"
+    assert interpretar_determinista("corrige la obra de la guía 472037 a OBRA DOS").accion == "DOCUMENTO_ASIGNAR_OBRA"
 
 
 def test_destino_por_lenguaje_natural_preview_confirmacion_y_aplicacion(tmp_path):
