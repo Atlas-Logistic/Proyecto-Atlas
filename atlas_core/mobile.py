@@ -779,7 +779,17 @@ def recuperar_envio_mobile_error_pre_persistencia(
         })
         resultado["recuperacion_error_pre_persistencia"] = recuperacion
         repositorio.guardar(envio_id, resultado)
-        return resultado
+    # Caso real 65aefff1 (474982, ESPERA_AUTORIZACION_ESTADIA): el cierre
+    # normal (revalidación, reporte, eventos canónicos) debe correr igual
+    # que en una ingesta. Fuera del lock `mobile_{envio_id}` (no
+    # reentrante); con el envío ya fuera de RECIBIDO/PROCESANDO,
+    # `procesar_y_revalidar_envio_mobile` nunca vuelve a correr OCR.
+    if resultado.get("estado") != "ERROR" and puede_escribir():
+        procesar_y_revalidar_envio_mobile(
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+        )
+        resultado = repositorio.cargar(envio_id)
+    return resultado
 
 
 def _procesar_envio_mobile_impl(

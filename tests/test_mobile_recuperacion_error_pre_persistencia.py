@@ -114,3 +114,78 @@ def test_cli_no_recupera_si_no_adquiere_el_lease_global(tmp_path):
 
     assert resultado == {"escritor_operativo": "NO_ADQUIRIDO", "envio_id": envio_id}
     assert repo.cargar(envio_id)["estado"] == "ERROR"
+
+
+# --- Caso real 65aefff1 / 474982: cierre postprocesamiento tras recuperar ---
+
+def _envio_error_con_novedad(tmp_path: Path) -> tuple[RepositorioEnviosMobile, str, Path]:
+    repo, envio_id, dataset = _envio_error(tmp_path)
+    registro = repo.cargar(envio_id)
+    registro.update({"tipo_novedad": "ESPERA_AUTORIZACION_ESTADIA", "tipos_novedad": ["ESPERA_AUTORIZACION_ESTADIA"]})
+    repo.guardar(envio_id, registro)
+    return repo, envio_id, dataset
+
+
+def _preparar_cierre(monkeypatch, envio_id: str, llamadas_ocr: list[int]) -> None:
+    def _procesar(*_args, **_kwargs):
+        llamadas_ocr.append(1)
+        return {"numero_guia": "474982", "numero_transporte": "0000361269", "cliente": "CONSTRUMART SA"}
+
+    monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda: object())
+    monkeypatch.setattr(mobile, "procesar_archivo", _procesar)
+    # Sin reconciliación real del reporte: el viaje ya existe, creado por esta guía.
+    monkeypatch.setattr(mobile, "_regenerar_reporte_tras_envio_mobile", lambda *_a, **_k: True)
+    monkeypatch.setattr(mobile, "_viajes_del_reporte_vigente", lambda _raiz: [{
+        "numero_transporte": "0000361269",
+        "evidencias_documentos": json.dumps([{"archivo": f"mobile/{envio_id}/original.jpg"}]),
+    }])
+
+
+def _eventos(tmp_path: Path) -> list[dict]:
+    ruta = tmp_path / "operacion/actual/eventos_operacionales.json"
+    return json.loads(ruta.read_text(encoding="utf-8")).get("eventos", []) if ruta.is_file() else []
+
+
+def test_recuperacion_exitosa_proyecta_espera_autorizacion_estadia_una_vez_sin_reprocesar(tmp_path, monkeypatch):
+    repo, envio_id, dataset = _envio_error_con_novedad(tmp_path)
+    llamadas_ocr: list[int] = []
+    _preparar_cierre(monkeypatch, envio_id, llamadas_ocr)
+
+    resultado = recuperar_envio_mobile_error_pre_persistencia(
+        repo, envio_id, dataset=dataset, puede_escribir=lambda: True,
+    )
+
+    assert llamadas_ocr == [1]  # el cierre nunca vuelve a correr OCR/documento
+    assert resultado["recuperacion_error_pre_persistencia"]["estado"] == "COMPLETADA"
+    assert resultado["tipos_novedad"] == ["ESPERA_AUTORIZACION_ESTADIA"]
+    marca = resultado["eventos_canonicos"]["ESPERA_AUTORIZACION_ESTADIA"]
+    assert marca["resultado"] == "CREADO" and marca["estado_incidencia"] == "ESPERA_ESTADIA"
+    eventos = [e for e in _eventos(tmp_path) if e.get("numero_transporte") == "0000361269"]
+    assert len(eventos) == 1 and eventos[0]["tipo_evento"] == "TIENE_ESTADIA"
+    with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+        assert len(list(csv.DictReader(archivo, delimiter=";"))) == 1
+
+    # Un segundo cierre (p. ej. otra ingesta Mobile) no duplica el evento.
+    mobile.registrar_eventos_canonicos_mobile(repo)
+    assert len([e for e in _eventos(tmp_path) if e.get("numero_transporte") == "0000361269"]) == 1
+
+
+def test_recuperacion_que_termina_en_error_no_ejecuta_cierre(tmp_path, monkeypatch):
+    repo, envio_id, dataset = _envio_error_con_novedad(tmp_path)
+    monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda: object())
+
+    def _falla(*_args, **_kwargs):
+        raise RuntimeError("OCR: timeout otra vez")
+
+    monkeypatch.setattr(mobile, "procesar_archivo", _falla)
+    cierres: list[str] = []
+    monkeypatch.setattr(mobile, "procesar_y_revalidar_envio_mobile", lambda *_a, **_k: cierres.append("x"))
+
+    resultado = recuperar_envio_mobile_error_pre_persistencia(
+        repo, envio_id, dataset=dataset, puede_escribir=lambda: True,
+    )
+
+    assert resultado["estado"] == "ERROR"
+    assert resultado["recuperacion_error_pre_persistencia"]["estado"] == "FALLIDA"
+    assert cierres == []
+    assert _eventos(tmp_path) == []
