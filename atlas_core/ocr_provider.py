@@ -170,6 +170,7 @@ class PaddleOCRProvider:
         self._device = device or ("gpu" if _gpu_nvidia_disponible() else "cpu")
         self._ruta_python_forzada = ruta_python
         self._proceso: subprocess.Popen | None = None
+        self._fallback_easyocr: EasyOCRProvider | None = None
 
     @property
     def device(self) -> str:
@@ -241,21 +242,66 @@ class PaddleOCRProvider:
             raise RuntimeError(f"Error de PaddleOCR procesando {kwargs.get('ruta')}: {respuesta.get('error')}")
         return respuesta["resultado"]
 
+    def _easyocr(self) -> EasyOCRProvider:
+        if self._fallback_easyocr is None:
+            self._fallback_easyocr = EasyOCRProvider()
+        return self._fallback_easyocr
+
+    def _con_fallback_easyocr(self, operacion: str, ruta: str | Path, leer_paddle, leer_easyocr):
+        """Reintenta una operación fallida de Paddle una sola vez con EasyOCR.
+
+        El fallback sólo captura la señal operacional del worker Paddle. Si
+        EasyOCR falla, su excepción se propaga sin volver a Paddle ni crear
+        un ciclo entre proveedores.
+        """
+        try:
+            return leer_paddle()
+        except ProveedorOCRNoDisponible as exc:
+            mensaje = (
+                f"PaddleOCR no disponible durante {operacion} de {ruta}; "
+                f"reintentando una vez con EasyOCR: {exc}"
+            )
+            logger.warning(mensaje)
+            print(f"[Atlas OCR] {mensaje}")
+            try:
+                return leer_easyocr()
+            except Exception as error_easyocr:
+                logger.warning(
+                    "EasyOCR also failed during %s of %s; preserving PaddleOCR error: %s",
+                    operacion, ruta, error_easyocr,
+                )
+                raise exc from error_easyocr
+
     def leer_texto(self, ruta_imagen: str | Path) -> list[str]:
-        resultado = self._comando(op="texto", ruta=str(ruta_imagen))
-        return str(resultado).split("\n") if resultado else []
+        self._asegurar_proceso()
+        return self._con_fallback_easyocr(
+            "texto", ruta_imagen,
+            lambda: (
+                str(resultado).split("\n")
+                if (resultado := self._comando(op="texto", ruta=str(ruta_imagen))) else []
+            ),
+            lambda: self._easyocr().leer_texto(ruta_imagen),
+        )
 
     def leer_bloques(self, ruta_imagen: str | Path) -> list[BloqueOCR]:
-        crudos = self._comando(op="bloques", ruta=str(ruta_imagen))
-        bloques = []
-        for b in crudos:
-            bbox = b.get("bbox")
-            if not bbox or len(bbox) != 4:
-                continue
-            puntos = tuple((float(p[0]), float(p[1])) for p in bbox)
-            conf = b.get("confianza")
-            bloques.append(BloqueOCR(texto=str(b.get("texto", "")), bounding_box=puntos, confianza=float(conf) if conf is not None else 0.0))
-        return bloques
+        self._asegurar_proceso()
+
+        def convertir(crudos) -> list[BloqueOCR]:
+            bloques = []
+            for b in crudos:
+                bbox = b.get("bbox")
+                if not bbox or len(bbox) != 4:
+                    continue
+                puntos = tuple((float(p[0]), float(p[1])) for p in bbox)
+                conf = b.get("confianza")
+                bloques.append(BloqueOCR(texto=str(b.get("texto", "")), bounding_box=puntos, confianza=float(conf) if conf is not None else 0.0))
+            return bloques
+
+        return self._con_fallback_easyocr(
+            "bloques", ruta_imagen,
+            lambda: convertir(self._comando(op="bloques", ruta=str(ruta_imagen))),
+            lambda: self._easyocr().leer_bloques(ruta_imagen),
+        )
 
     def leer_focal(
         self, ruta_imagen: str | Path, caja: tuple[float, float, float, float], allowlist: str
@@ -264,8 +310,12 @@ class PaddleOCRProvider:
         # equivalente en su API publica; el recorte/margen/variantes son
         # idénticos a EasyOCRProvider, la limitación de caracteres queda del
         # lado de extraer_fecha/consenso, que ya validan el formato resultante.
-        del allowlist
-        return self._comando(op="focal", ruta=str(ruta_imagen), caja=list(caja))
+        self._asegurar_proceso()
+        return self._con_fallback_easyocr(
+            "lectura focal", ruta_imagen,
+            lambda: self._comando(op="focal", ruta=str(ruta_imagen), caja=list(caja)),
+            lambda: self._easyocr().leer_focal(ruta_imagen, caja, allowlist),
+        )
 
     def cerrar(self) -> None:
         if self._proceso is not None and self._proceso.poll() is None:

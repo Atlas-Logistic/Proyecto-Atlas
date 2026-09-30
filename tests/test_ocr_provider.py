@@ -411,6 +411,52 @@ def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lot
     assert resultado == ["OK"]
 
 
+@pytest.mark.parametrize(
+    ("operacion", "argumentos", "resultado_easyocr", "metodo_easyocr"),
+    [
+        ("texto", ("guia.jpg",), ["TEXTO"], "leer_texto"),
+        ("bloques", ("guia.jpg",), [], "leer_bloques"),
+        ("focal", ("guia.jpg", (1, 2, 3, 4), ALLOWLIST_FECHA), {"lecturas": []}, "leer_focal"),
+    ],
+)
+def test_paddleocr_timeout_reintenta_una_vez_la_misma_operacion_con_easyocr(
+    monkeypatch, caplog, operacion, argumentos, resultado_easyocr, metodo_easyocr,
+):
+    proveedor = PaddleOCRProvider(device="cpu")
+    monkeypatch.setattr(proveedor, "_asegurar_proceso", Mock())
+    paddle = Mock(side_effect=ProveedorOCRNoDisponible("worker agotó timeout"))
+    monkeypatch.setattr(proveedor, "_comando", paddle)
+    easyocr = Mock()
+    getattr(easyocr, metodo_easyocr).return_value = resultado_easyocr
+    fabrica_easyocr = Mock(return_value=easyocr)
+    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", fabrica_easyocr)
+
+    with caplog.at_level("WARNING"):
+        resultado = getattr(proveedor, f"leer_{operacion}")(*argumentos)
+
+    assert resultado == resultado_easyocr
+    assert paddle.call_count == 1
+    fabrica_easyocr.assert_called_once_with()
+    getattr(easyocr, metodo_easyocr).assert_called_once_with(*argumentos)
+    assert "reintentando una vez con EasyOCR" in caplog.text
+
+
+def test_paddleocr_timeout_con_error_easyocr_conserva_el_error_sin_reintentar_paddle(monkeypatch):
+    proveedor = PaddleOCRProvider(device="cpu")
+    monkeypatch.setattr(proveedor, "_asegurar_proceso", Mock())
+    paddle = Mock(side_effect=ProveedorOCRNoDisponible("worker agotó timeout"))
+    monkeypatch.setattr(proveedor, "_comando", paddle)
+    easyocr = Mock()
+    easyocr.leer_texto.side_effect = RuntimeError("EasyOCR falló")
+    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", Mock(return_value=easyocr))
+
+    with pytest.raises(ProveedorOCRNoDisponible, match="worker agotó timeout"):
+        proveedor.leer_texto("guia.jpg")
+
+    assert paddle.call_count == 1
+    easyocr.leer_texto.assert_called_once_with("guia.jpg")
+
+
 def test_matar_arbol_proceso_termina_un_proceso_real_colgado():
     """Sin mocks: confirma que taskkill /T /F realmente termina un proceso
     Windows real que está en medio de un sleep -- el mecanismo que en el
