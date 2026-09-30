@@ -180,11 +180,15 @@ def _token_ocr_limitado(coincidente: str, documental: str) -> bool:
 # tokenizador parte "O1148" en O + 1148 -- las anclas numéricas nunca
 # coincidían con "01148". Sólo un token completo "O<dígitos>" se lee como
 # "0<dígitos>"; nunca otra letra, nunca una O suelta ni dentro de palabra.
-_NUMERACION_CON_O_INICIAL = re.compile(r"\bO(\d+)\b")
+# Caso real 475036/475040 (PRODALAM SA TALCAHUANO): destino confirmado
+# "AMERICO VESPUCIO 73O" (O final) vs documental "730" -- la O puede ir en
+# cualquier posición de un token completo formado sólo por dígitos y O,
+# siempre que tenga al menos un dígito.
+_NUMERACION_CON_O_INICIAL = re.compile(r"\b(?=[\dO]*\d)[\dO]*O[\dO]*\b")
 
 
 def _numeracion_o_como_cero(texto: str) -> str:
-    return _NUMERACION_CON_O_INICIAL.sub(lambda coincidencia: "0" + coincidencia.group(1), texto)
+    return _NUMERACION_CON_O_INICIAL.sub(lambda coincidencia: coincidencia.group(0).replace("O", "0"), texto)
 
 
 def _coincide_con_numeracion_o_cero(calle: str, texto: str) -> bool:

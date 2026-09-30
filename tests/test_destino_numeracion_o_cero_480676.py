@@ -152,3 +152,35 @@ def test_tarjeta_persistida_de_480676_se_retira_al_regenerar(tmp_path):
                     contexto=dict(decision["contexto"], destino_documental="INTERIOR NUEVA 01149 SAN BERNARDO SAN BERNAR"))
     conservadas = regenerar_decisiones_persistidas(decisiones=[distinta], carpeta_catalogos=catalogos)
     assert [d["tipo"] for d in conservadas] == ["DESTINO_SIN_CONFIRMAR"]
+
+
+# --- 6. Caso real 475036/475040: O final de numeración ("73O" <-> "730") ---
+
+CONFIRMADO_475040 = "AMERICO VESPUCIO 73O"
+DOCUMENTAL_475036 = "AMERICO VESPUCIO 730 TALCAHUANO TALCAHUANO"
+
+
+def test_o_final_de_numeracion_coincide_con_cero_bajo_calle_completa():
+    assert direccion_confirmada_coincide(CONFIRMADO_475040, DOCUMENTAL_475036, comuna_confirmada="TALCAHUANO")
+    # Simétrico: maestro con cero, documento con O final.
+    assert direccion_confirmada_coincide("AMERICO VESPUCIO 730", "AMERICO VESPUCIO 73O TALCAHUANO")
+    # O intermedia también.
+    assert direccion_confirmada_coincide("AMERICO VESPUCIO 7O5", "AMERICO VESPUCIO 705 TALCAHUANO")
+
+
+def test_73o_no_coincide_con_otros_numeros_ni_otra_calle():
+    for documental in (
+        "AMERICO VESPUCIO 73 TALCAHUANO",        # sin el cero
+        "AMERICO VESPUCIO 731 TALCAHUANO",
+        "AMERICO VESPUCIO 7300 TALCAHUANO",
+        "AMERICO VESPUCIO 703 TALCAHUANO",
+        "AMERICO VESPUCI 730 TALCAHUANO",        # calle incompleta/distinta
+        "VESPUCIO 730 TALCAHUANO",
+    ):
+        assert not direccion_confirmada_coincide(CONFIRMADO_475040, documental), documental
+
+
+def test_o_final_suelta_o_en_palabra_no_se_convierte():
+    assert not direccion_confirmada_coincide("PASAJE LOS ALAMOS 73 O", "PASAJE LOS ALAMOS 730")
+    assert not direccion_confirmada_coincide("CALLE 2DO 73", "CALLE 2D0 73")
+    assert not direccion_confirmada_coincide("73O", "730 TALCAHUANO")  # sin nombre de vía
