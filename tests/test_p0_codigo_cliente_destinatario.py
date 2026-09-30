@@ -286,3 +286,51 @@ def test_catalogo_codigos_cliente_confirmar_y_buscar_roundtrip(tmp_path):
     assert catalogo.buscar("0001006226") == "cliente-agf"
     # Tolerante a espacios/mayúsculas del OCR, mismo criterio de normalización.
     assert catalogo.buscar(" 0001006226 ") == "cliente-agf"
+
+
+# --- Regresión 475036: RUT documental OCR truncado no aborta ---
+
+def test_rut_documental_truncado_no_aborta_y_se_trata_como_ausente(tmp_path):
+    prodalam = _cliente("cliente-prodalam", "PRODALAM SA", rut="93772000-9")
+    identidad = resolver_identidad_cliente_reforzada(
+        rut_documental="772.000-9", nombre_documental="PRODALAM SA",
+        codigo_cliente="No encontrado", clientes=[prodalam],
+        catalogo_codigos=CatalogoCodigosCliente(tmp_path / "codigos_cliente.json"),
+    )
+    assert identidad.resultado == RESULTADO_SIN_EVIDENCIA
+
+
+def test_rut_documental_truncado_con_codigo_conocido_sigue_por_codigo():
+    prodalam = _cliente("cliente-prodalam", "PRODALAM SA", rut="93772000-9")
+    catalogo_codigos = _catalogo_codigos_con(tmp_codigo="0001003518", cliente_id="cliente-prodalam")
+    identidad = resolver_identidad_cliente_reforzada(
+        rut_documental="772.000-9", nombre_documental="PRODALAM SA",
+        codigo_cliente="0001003518", clientes=[prodalam], catalogo_codigos=catalogo_codigos,
+    )
+    assert identidad.resultado == RESULTADO_SUGERENCIA_HUMANA
+    assert identidad.via == "CODIGO_CLIENTE"
+
+
+def test_enriquecer_decision_con_rut_truncado_no_lanza(tmp_path):
+    prodalam = _cliente("cliente-prodalam", "PRODALAM SA", rut="93772000-9")
+    decision = {
+        "tipo": "CLIENTE_DESCONOCIDO", "entidad": "CLIENTE", "valor_documental": "PRODALAM SA",
+        "documento": {"archivo": "original.jpg", "numero_guia": "475036"},
+        "evidencias": [{"tipo": "RUT_VALIDO", "campo": "rut_cliente", "valor": "772.000-9"}],
+    }
+    salida = enriquecer_decisiones_cliente_por_codigo(
+        decisiones=[decision], filas=[], clientes=[prodalam],
+        catalogo_codigos=CatalogoCodigosCliente(tmp_path / "codigos_cliente.json"),
+    )
+    assert salida[0]["evaluacion_evidencia_codigo"]["resultado"] == RESULTADO_SIN_EVIDENCIA
+
+
+def test_rut_documental_valido_prodalam_mantiene_prioridad_por_rut(tmp_path):
+    prodalam = _cliente("cliente-prodalam", "PRODALAM SA", rut="93772000-9")
+    identidad = resolver_identidad_cliente_reforzada(
+        rut_documental="93.772.000-9", nombre_documental="PRODALAM SA",
+        codigo_cliente="No encontrado", clientes=[prodalam],
+        catalogo_codigos=CatalogoCodigosCliente(tmp_path / "codigos_cliente.json"),
+    )
+    assert identidad.resultado == RESULTADO_SUGERENCIA_HUMANA
+    assert identidad.via == "RUT" and identidad.cliente_id == "cliente-prodalam"

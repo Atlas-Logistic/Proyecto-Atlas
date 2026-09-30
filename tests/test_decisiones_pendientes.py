@@ -668,3 +668,21 @@ def test_artefacto_deduplica_y_controla_cuatro_decisiones(tmp_path):
     assert artefacto["schema_version"]==1 and len(artefacto["decisiones"])==4
     assert [x["tipo"] for x in artefacto["decisiones"]].count("ALIAS_CANDIDATO")==3
     assert [x["tipo"] for x in artefacto["decisiones"]].count("DESTINO_SIN_CONFIRMAR")==1
+
+
+def test_rut_truncado_ocr_prodalam_no_genera_cliente_desconocido(tmp_path):
+    # Caso real 475036: OCR "93 . 772.000-9" extraído como "772.000-9" --
+    # DV cuadra por azar, pero no es un RUT corroborable del catálogo.
+    carpeta=_catalogos(tmp_path)
+    prodalam=_cliente_confirmado(carpeta, nombre="PRODALAM SA", rut="93772000-9")
+    ds=detectar_decisiones_documento(archivo="475036.jpeg",datos=_datos_cliente(nombre="PRODALAM SA", rut="772.000-9"),carpeta_catalogos=carpeta)
+    assert not [x for x in ds if x["tipo"]=="CLIENTE_DESCONOCIDO"]
+    candidatas=[x for x in ds if x["tipo"]=="CLIENTE_CANDIDATO"]
+    assert [c["identidad_resuelta"]["entidad_id"] for c in candidatas]==[prodalam.cliente_id]
+
+
+def test_rut_valido_completo_prodalam_se_resuelve_por_rut_sin_decision_cliente(tmp_path):
+    carpeta=_catalogos(tmp_path)
+    _cliente_confirmado(carpeta, nombre="PRODALAM SA", rut="93772000-9")
+    ds=detectar_decisiones_documento(archivo="475036.jpeg",datos=_datos_cliente(nombre="PRODALAM SA", rut="93.772.000-9"),carpeta_catalogos=carpeta)
+    assert not [x for x in ds if x["entidad"]=="CLIENTE"]

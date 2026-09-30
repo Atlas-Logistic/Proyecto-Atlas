@@ -2344,6 +2344,15 @@ def detectar_decisiones_documento(
     rut_cliente = str(datos.get("RUT del cliente", "")).strip()
     cliente = _identidad_cliente_por_rut(carpeta, rut_cliente)
     rut_valido = validar_rut_chileno(rut_cliente).estado == EstadoValidacion.VALIDO
+    if rut_valido:
+        # `validar_rut_chileno` acepta cuerpos cortos cuyo DV cuadra por
+        # azar (OCR truncado "772.000-9" de 93.772.000-9); si el catálogo
+        # no puede normalizarlo, no es un RUT corroborable -- sigue por la
+        # vía sin RUT (nombre contra catálogo), nunca CLIENTE_DESCONOCIDO.
+        try:
+            normalizar_rut_cliente(rut_cliente)
+        except ValueError:
+            rut_valido = False
     identidad_cliente = None
     if cliente is not None:
         identidad_cliente = {

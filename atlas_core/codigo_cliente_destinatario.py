@@ -192,7 +192,13 @@ def resolver_identidad_cliente_reforzada(
        evidencia: el resto del pipeline sigue exactamente igual que hoy.
     """
     clientes = list(clientes)
-    rut_normalizado = normalizar_rut_cliente(rut_documental) if rut_documental not in _AUSENTES else ""
+    try:
+        rut_normalizado = normalizar_rut_cliente(rut_documental) if rut_documental not in _AUSENTES else ""
+    except ValueError:
+        # RUT documental/OCR no normalizable (p. ej. truncado "772.000-9"):
+        # equivale a RUT ausente -- este enriquecimiento es informativo y
+        # nunca debe abortar la reconciliación de toda la bandeja.
+        rut_normalizado = ""
     cliente_por_rut = _cliente_por_rut(clientes, rut_normalizado) if rut_normalizado else None
     if cliente_por_rut is not None:
         return IdentidadClienteReforzada(
