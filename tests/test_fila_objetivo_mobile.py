@@ -144,3 +144,24 @@ def test_accion_controlada_audita_la_misma_guia_que_modifica(entorno):  # noqa: 
     correccion = [a for a in ledger if a["tipo"] == TIPO_LEDGER_CORRECCION][-1]
     assert correccion["documento"]["archivo"] == MOBILE_A and correccion["documento"]["numero_guia"] == "500001"
     assert correccion["valor_documental"] == antes["500001"]["obra_destino"]  # antes de A, no de B
+
+
+def test_preview_simula_sobre_la_fila_de_la_guia_y_no_otra(entorno, monkeypatch):  # noqa: F811
+    """El dry-run del preview (bloqueos de ledger, duplicados) también evalúa la
+    fila de la guía objetivo, nunca la primera Mobile."""
+    from atlas_core import reprocesamiento_reparador as reparador
+    _mobile(entorno)
+    vistas = []
+    original = reparador._resolver_fila_por_archivo
+
+    def espia(filas, archivo, *, numero_guia=""):
+        fila, motivo = original(filas, archivo, numero_guia=numero_guia)
+        vistas.append((archivo, numero_guia, (fila or {}).get("numero_guia")))
+        return fila, motivo
+
+    monkeypatch.setattr(reparador, "_resolver_fila_por_archivo", espia)
+    preview = CapaAccionesOperacionales(entorno["raiz"]).previsualizar(
+        "DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": "500001", "campo": "obra_destino", "valor": "OBRA NUEVA"},
+        actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW", preview
+    assert vistas == [(MOBILE_A, "500001", "500001")]

@@ -813,10 +813,15 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     else:
         # El propio reparador focal valida el valor y el guardián del ledger
         # (dry-run: nunca escribe).
-        simulacion = reparar_documento_focal_con_valores_conocidos(
-            raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=True,
-            reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
-        )
+        try:
+            simulacion = reparar_documento_focal_con_valores_conocidos(
+                raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=True,
+                reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
+                numero_guia=str(fila.get("numero_guia", "")),
+            )
+        except ValueError as error:
+            # La fila del documento no es única o no es de la guía: nunca se elige otra.
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", str(error)) from error
         if simulacion["campos_bloqueados_por_ledger"]:
             raise ErrorAccionOperacional(
                 "CAMPO_FIJADO_POR_DECISION_HUMANA",
