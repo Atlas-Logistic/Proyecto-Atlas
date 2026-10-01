@@ -3295,6 +3295,15 @@ def revalidar_ruta_por_historial_de_obra_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
 
 
+def _direcciones_documentales_compatibles(a: object, b: object) -> bool:
+    """Misma dirección documental (variantes OCR/comuna repetida/O<->0), nunca
+    por similitud libre: `direccion_confirmada_coincide` en ambos sentidos."""
+    texto_a, texto_b = str(a or "").split(",", 1)[0].strip(), str(b or "").split(",", 1)[0].strip()
+    if not texto_a or not texto_b:
+        return False
+    return direccion_confirmada_coincide(texto_a, texto_b) or direccion_confirmada_coincide(texto_b, texto_a)
+
+
 def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -3350,17 +3359,31 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
-        filas_por_obra: dict[str, list[dict[str, str]]] = {}
+        # Convergencia por OBRA + DIRECCIÓN documental compatible: una obra
+        # puede tener varios destinos reales (caso Los Trapenses vs San
+        # Damián, misma obra) -- el GPS de las entregas a una dirección
+        # nunca ubica, rutea ni rellena otra dirección de la misma obra.
+        filas_por_obra: dict[tuple[str, int], list[dict[str, str]]] = {}
+        direcciones_por_obra: dict[str, list[str]] = {}
         for fila in filas:
             obra = normalizar_nombre_obra(str(fila.get("obra_destino", "")))
-            if obra:
-                filas_por_obra.setdefault(obra, []).append(fila)
+            direccion = str(fila.get("despachar_a_crudo", "")).strip()
+            if not obra or not direccion:
+                continue  # sin dirección no hay a qué atribuir un punto
+            grupos = direcciones_por_obra.setdefault(obra, [])
+            indice = next((i for i, representante in enumerate(grupos)
+                           if _direcciones_documentales_compatibles(representante, direccion)), None)
+            if indice is None:
+                grupos.append(direccion)
+                indice = len(grupos) - 1
+            filas_por_obra.setdefault((obra, indice), []).append(fila)
 
         guias_actualizadas: list[str] = []
         destinos_aprendidos: list[str] = []
-        for obra_clave, filas_obra in filas_por_obra.items():
+        for (obra_clave, indice_direccion), filas_obra in filas_por_obra.items():
+            direccion_grupo = direcciones_por_obra[obra_clave][indice_direccion]
             if len(filas_obra) < 2:
-                continue  # nunca converge con una sola fila de esa obra
+                continue  # nunca converge con una sola fila de esa obra/dirección
             puntos: list[tuple[dict[str, str], object]] = []
             for fila in filas_obra:
                 patente = str(fila.get("patente_tracto", "")).strip().upper()
@@ -3447,6 +3470,8 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
                         if (
                             destino.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
                             and destino.latitud is None and destino.longitud is None
+                            # Sólo el destino de ESTA dirección; nunca otro de la misma obra.
+                            and _direcciones_documentales_compatibles(destino.direccion, direccion_grupo)
                         ):
                             catalogo_destinos.editar(
                                 destino_id, modificacion_manual=True,

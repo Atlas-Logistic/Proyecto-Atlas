@@ -325,7 +325,23 @@ def _candidatos_son_el_mismo_lugar(candidatos: tuple[CandidatoGeocodificacion, .
         for c in candidatos[1:]
     ):
         return True
-    return all(_misma_localidad(base, c) for c in candidatos[1:])
+    # Más allá de MARGEN_MISMO_LUGAR_KM, compartir localidad+región sólo
+    # prueba "mismo lugar" si es el MISMO rasgo nombrado con coordenadas
+    # imprecisas (caso Coronel: dos "Coronel, BI"). Lugares DISTINTOS de una
+    # misma comuna (Núcleo/Mall/Rotonda/Pasaje Los Trapenses, todos en Lo
+    # Barnechea, dispersos hasta ~3 km) no colapsan: elegir uno sería
+    # adivinar -- se abstiene y la ruta queda pendiente.
+    etiqueta_base = _etiqueta_rasgo(base)
+    return all(_misma_localidad(base, c) and _etiqueta_rasgo(c) == etiqueta_base for c in candidatos[1:])
+
+
+def _etiqueta_rasgo(candidato: CandidatoGeocodificacion) -> str:
+    """Nombre del rasgo geocodificado, normalizado (sin acentos/puntuación) y
+    sin numeración: dos números de la MISMA vía ("Avenida Providencia" /
+    "1964 Avenida Providencia") son el mismo rasgo; dos POI con nombres
+    distintos ("Rotonda"/"Núcleo Los Trapenses") no."""
+    tokens = re.findall(r"[A-Z0-9]+", _texto_normalizado_sin_acentos(str(candidato.etiqueta or "")).upper())
+    return " ".join(t for t in tokens if not any(c.isdigit() for c in t))
 
 
 def _candidatos_con_soporte_textual(

@@ -1397,6 +1397,17 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # un fallo técnico; por ello se restaura explícitamente
                     # el valor canónico humano (y su comuna separada) sin
                     # fabricar latitud, longitud, km ni tiempo.
+                    # `ruta_resuelta` real ANTES de escribir los campos que
+                    # dependen de él (antes se leía el False inicial y se
+                    # vaciaban dirección/comuna confirmadas).
+                    filas_antes_confirmacion = _leer_filas(dataset)
+                    fila_antes_confirmacion = next(
+                        (f for f in filas_antes_confirmacion if _es_fila_de_documento(f, documento_decision)), None,
+                    )
+                    ruta_resuelta = (
+                        fila_antes_confirmacion is not None
+                        and str(fila_antes_confirmacion.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+                    )
                     with bloqueo_sesion(actual, "revalidacion_dataset"):
                         filas_confirmacion_humana = _leer_filas(dataset)
                         fila_confirmacion_humana = next(
@@ -1412,7 +1423,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                             )
                         fila_confirmacion_humana["direccion_entrega"] = direccion_final if ruta_resuelta else ""
                         if comuna_final:
-                            fila_confirmacion_humana["localidad_entrega"] = comuna_final if ruta_resuelta else ""
+                            # La comuna confirmada por el humano es identidad del
+                            # destino, no un derivado de la ruta: se conserva
+                            # aunque la ruta quede pendiente.
+                            fila_confirmacion_humana["localidad_entrega"] = comuna_final
                         _escribir_filas_completas(dataset, filas_confirmacion_humana)
                     # Bloque LOGÍSTICA L1 -- `guias_actualizadas` ya NO es un
                     # proxy fiable de "ruta resuelta": desde este bloque

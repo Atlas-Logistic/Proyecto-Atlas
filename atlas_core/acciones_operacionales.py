@@ -670,6 +670,94 @@ def _aplicar_destino_coordenada(ctx: _Contexto, p: dict, plan: Plan, actor: str)
             "servicio": "CatalogoDestinos.confirmar_coordenada_canonica"}
 
 
+MOTIVO_COORDENADA_NO_CONFIRMADA = "COORDENADA_NO_CONFIRMADA"
+
+
+def _filas_de_guias_para_destino(ctx: _Contexto, destino, guias: list[str]) -> list[dict[str, str]]:
+    """Exactamente una fila por guía, y su DESPACHAR A debe ser la dirección
+    del destino; si no, ninguna (nunca se elige entre varias filas)."""
+    from atlas_core.revalidacion_documental import _direcciones_documentales_compatibles
+    filas = ctx.filas()
+    elegidas = []
+    for guia in guias:
+        candidatas = [f for f in filas if str(f.get("numero_guia", "")) == guia
+                      and _direcciones_documentales_compatibles(destino.direccion, f.get("despachar_a_crudo", ""))]
+        if len(candidatas) != 1:
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"la guía {guia} no tiene exactamente un documento con la dirección {destino.direccion!r}")
+        elegidas.append(candidatas[0])
+    return elegidas
+
+
+def _plan_destino_retirar_coordenada(ctx: _Contexto, p: dict) -> Plan:
+    """Retira una coordenada NO verificada de un destino CONFIRMADO (identidad
+    humana intacta) y deja pendiente la ruta de sus guías: nunca asigna otra
+    coordenada ni recalcula a un punto aproximado."""
+    from atlas_core.catalogo_destinos import ErrorCatalogoDestinos
+    try:
+        destino = ctx.catalogo_destinos().obtener(str(p["destino_id"]))
+    except ErrorCatalogoDestinos as error:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "destino inexistente") from error
+    if destino.estado_vigencia != "ACTIVO" or destino.estado_calidad != "CONFIRMADO":
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el destino no está CONFIRMADO y activo")
+    guias = [str(g) for g in p["guias"]]
+    filas = _filas_de_guias_para_destino(ctx, destino, guias)
+    comuna = str(p.get("comuna") or "").strip().upper()
+    sin_cambios = (destino.latitud is None and destino.longitud is None
+                   and (not comuna or destino.comuna == comuna)
+                   and all(f.get("estado_ruta") != "RUTA_CALCULADA" for f in filas))
+    return Plan(
+        entidad={"tipo": "DESTINO", "id": destino.destino_id, "direccion": destino.direccion, "guias": guias},
+        valor_actual={"latitud": destino.latitud, "longitud": destino.longitud, "comuna": destino.comuna,
+                      "rutas": {f["numero_guia"]: [f.get("estado_ruta"), f.get("distancia_km")] for f in filas}},
+        valor_propuesto={"latitud": None, "longitud": None, "comuna": comuna or destino.comuna,
+                         "rutas": {f["numero_guia"]: ["REQUIERE_REVISION", MOTIVO_COORDENADA_NO_CONFIRMADA]
+                                   for f in filas}},
+        estado_base={"destino": destino.a_dict(), "filas": filas}, sin_cambios=sin_cambios,
+        afectados=_afectados_por_guias(ctx, set(guias)),
+        consecuencias=[
+            "Se retira la coordenada no verificada del destino; su identidad (dirección confirmada) no cambia.",
+            "No se asigna ninguna coordenada nueva: la ruta de las guías queda pendiente hasta una ubicación válida.",
+            "No se reabre la revisión de destino: la dirección ya está confirmada.",
+        ],
+        revalidaciones=["MANTENIMIENTO_FOCAL_GUIAS", "RECONCILIAR_BANDEJA", "REGENERAR_REPORTE_VIAJES"],
+        archivos=("destinos_maestros", "dataset", "bandeja"),
+        datos={"guias": guias, "archivos": [f["archivo"] for f in filas], "comuna": comuna},
+    )
+
+
+def _aplicar_destino_retirar_coordenada(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.revalidacion_documental import invalidar_derivados_ruta
+    destino_id = str(p["destino_id"])
+    nota = (f"COORDENADA_RETIRADA_NO_VERIFICADA ({plan.valor_actual['latitud']}, {plan.valor_actual['longitud']}) "
+            f"ACCION_OPERACIONAL:{ctx.token} {actor}/{ctx.confirmado_por}"
+            + (f" {p['referencia']}" if p.get("referencia") else ""))[:500]
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        catalogo = ctx.catalogo_destinos()
+        previa = str(catalogo.obtener(destino_id).observacion or "").strip()
+        destino = catalogo.editar(
+            destino_id, modificacion_manual=True, limpiar_coordenadas=True,
+            comuna=plan.datos["comuna"] or None, observacion=(f"{previa} | {nota}" if previa else nota),
+        )
+        with bloqueo_sesion(ctx.actual, "revalidacion_dataset"):
+            from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+            filas = _leer_filas(ctx.archivos["dataset"])
+            archivos = set(plan.datos["archivos"])
+            for fila in filas:
+                if fila.get("archivo") in archivos:
+                    fila.update(invalidar_derivados_ruta())
+                    fila["estado_ruta"] = "REQUIERE_REVISION"
+                    fila["motivo_ruta"] = MOTIVO_COORDENADA_NO_CONFIRMADA
+                    fila["direccion_entrega"] = ""
+                    fila["localidad_entrega"] = destino.comuna
+            _escribir_filas_completas(ctx.archivos["dataset"], filas)
+    return {"despues": {"latitud": destino.latitud, "longitud": destino.longitud, "comuna": destino.comuna,
+                        "guias_pendientes": list(plan.datos["guias"])},
+            "reconciliar": True, "guias_revalidar": list(plan.datos["guias"]), "regenerar_reporte": True,
+            "servicio": "CatalogoDestinos.editar(limpiar_coordenadas=True)"}
+
+
 def _plan_obra_destino(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
     obra = _obra(ctx, str(p["obra_id"]))
@@ -1208,6 +1296,12 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"destino_id": _P("id", True), "latitud": _P("numero", True), "longitud": _P("numero", True),
                       "referencia": _REF},
                      _plan_destino_coordenada, _aplicar_destino_coordenada),
+    DefinicionAccion("DESTINO_RETIRAR_COORDENADA_NO_VERIFICADA", OPERACIONAL_REVERSIBLE,
+                     "Retira una coordenada no verificada de un destino CONFIRMADO y deja pendiente la ruta "
+                     "de sus guías (nunca asigna otra coordenada).",
+                     {"destino_id": _P("id", True), "guias": _P("lista_texto", True, max_largo=12),
+                      "comuna": _P("texto", max_largo=80), "referencia": _REF},
+                     _plan_destino_retirar_coordenada, _aplicar_destino_retirar_coordenada),
     DefinicionAccion("OBRA_VINCULAR_DESTINO", OPERACIONAL_REVERSIBLE, "Confirma la relación obra↔destino.",
                      {"obra_id": _P("id", True), "destino_id": _P("id", True), "cliente_id": _P("id"),
                       "observaciones": _P("texto"), "referencia": _REF},
