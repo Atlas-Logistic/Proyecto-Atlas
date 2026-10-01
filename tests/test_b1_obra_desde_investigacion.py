@@ -123,7 +123,7 @@ def test_identidad_societaria_igual_que_desktop():
 
 def test_intencion_reutilizacion_va_antes_que_investigar():
     assert interpretar_determinista(CORRIGE).accion == ACCION_OBRA_DESDE_INVESTIGACION
-    assert interpretar_determinista(CORRIGE).parametros == {"numero_guia": "500001"}
+    assert interpretar_determinista(CORRIGE).parametros == {"numero_guia": "500001", "campo": "obra_destino"}
     assert interpretar_determinista("Aplica la propuesta anterior a la obra de la guía 500001").accion \
         == ACCION_OBRA_DESDE_INVESTIGACION
     assert interpretar_determinista(INVESTIGA).accion == ACCION_INVESTIGAR_REVISION
@@ -137,7 +137,7 @@ def test_intencion_reutilizacion_va_antes_que_investigar():
 def test_investigacion_luego_correccion_produce_preview_limpio_sin_aplicar(entorno, b1):
     r = b1.atender("chat", INVESTIGA)
     assert r["estado"] == "RESULTADO_INVESTIGACION" and b1.pendiente("chat") is None
-    previa = b1.investigacion_previa("chat")
+    previa = b1.investigacion_previa("chat")["obra"]
     assert previa["estado"] == "PROPUESTA" and previa["propuesta_publicada"] == PUBLICADO
     antes = _huellas(entorno)
 
@@ -234,14 +234,14 @@ def test_investigacion_sin_propuesta_rechazo_seguro(entorno, b1):
     b1.respuesta_investigacion["valor"] = _resultado(_expediente("", nivel="INSUFICIENTE", accion="ABSTENERSE",
                                                                  estado_externo="ABSTENCION"))
     b1.atender("chat", INVESTIGA)
-    assert b1.investigacion_previa("chat")["estado"] == "SIN_PROPUESTA"
+    assert b1.investigacion_previa("chat")["obra"]["estado"] == "SIN_PROPUESTA"
     assert "evidencia suficiente" in _rechaza_sin_escribir(entorno, b1, "chat")["mensaje"]
 
 
 def test_investigacion_fallida_rechazo_seguro(entorno, b1):
     b1.respuesta_investigacion["valor"] = OSError("sin acceso al documento")
     assert b1.atender("chat", INVESTIGA)["estado"] == "INVESTIGACION_NO_DISPONIBLE"
-    assert b1.investigacion_previa("chat")["estado"] == "FALLIDA"
+    assert b1.investigacion_previa("chat")["obra"]["estado"] == "FALLIDA"
     assert "no se completó" in _rechaza_sin_escribir(entorno, b1, "chat")["mensaje"]
 
 
@@ -250,7 +250,7 @@ def test_busqueda_externa_caida_cuenta_como_fallida(entorno, b1):
                                                                  estado_externo="BUSQUEDA_NO_DISPONIBLE"),
                                                      busqueda="FALLIDA")
     b1.atender("chat", INVESTIGA)
-    assert b1.investigacion_previa("chat")["estado"] == "FALLIDA"
+    assert b1.investigacion_previa("chat")["obra"]["estado"] == "FALLIDA"
     _rechaza_sin_escribir(entorno, b1, "chat")
 
 
@@ -264,14 +264,14 @@ def test_fallida_posterior_anula_propuesta_exitosa_anterior(entorno, b1):
 def test_propuesta_ambigua_rechazo_seguro(entorno, b1):
     b1.respuesta_investigacion["valor"] = _resultado(_expediente(PUBLICADO), _expediente("OTRA OBRA DISTINTA SPA"))
     b1.atender("chat", INVESTIGA)
-    assert b1.investigacion_previa("chat")["estado"] == "AMBIGUA"
-    assert "más de un nombre" in _rechaza_sin_escribir(entorno, b1, "chat")["mensaje"]
+    assert b1.investigacion_previa("chat")["obra"]["estado"] == "AMBIGUA"
+    assert "más de un valor" in _rechaza_sin_escribir(entorno, b1, "chat")["mensaje"]
 
 
 def test_mismo_nombre_con_otra_forma_societaria_escrita_no_es_ambiguo(entorno, b1):
     b1.respuesta_investigacion["valor"] = _resultado(_expediente(PUBLICADO), _expediente("Obra Vieja Completa Ltda."))
     b1.atender("chat", INVESTIGA)
-    assert b1.investigacion_previa("chat")["estado"] == "PROPUESTA"
+    assert b1.investigacion_previa("chat")["obra"]["estado"] == "PROPUESTA"
     assert b1.atender("chat", CORRIGE)["estado"] == "PREVIEW_PENDIENTE"
 
 
