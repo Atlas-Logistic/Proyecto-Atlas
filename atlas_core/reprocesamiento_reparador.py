@@ -175,7 +175,10 @@ def _reparar_campos_documento(
     }
     cambios: list[CambioCampo] = []
     for campo, (motivos_degradacion, es_valido) in CAMPOS_REPARABLES.items():
-        if not documento_degradado and not (motivos_actuales & set(motivos_degradacion)):
+        # Un campo hoy AUSENTE no es un dato limpio: la reextracción real
+        # puede completarlo (nunca sobrescribe un valor presente sin motivo).
+        ausente = str(fila.get(campo, "")).strip() in _AUSENTES
+        if not documento_degradado and not ausente and not (motivos_actuales & set(motivos_degradacion)):
             continue  # campo hoy limpio y documento no degradado -- nunca se toca
         if _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=campo):
             continue  # el ledger siempre gana

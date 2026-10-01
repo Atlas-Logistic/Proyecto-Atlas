@@ -56,3 +56,18 @@ def test_recorte_mas_severo_sigue_exigiendo_duplicado_documental():
 def test_texto_no_relacionado_no_activa_la_regla():
     for texto in ("SPACHARA", "SPA CHAR A", "DESPACHO", "CHARLA A", "SPACHAR"):
         assert _extraer_despachar_a_geometrico(_documento(texto)) == {}, texto
+
+
+# ------------------------------------------------------------ reproceso focal de un campo ausente
+
+def test_reextraccion_completa_un_campo_ausente_y_nunca_pisa_uno_presente_sin_motivo():
+    from atlas_core.reprocesamiento_reparador import _reparar_campos_documento
+    base = {"archivo": "1.jpeg", "numero_guia": "1", "motivos_revision_documento": ""}
+    extraido = {"despachar_a_crudo": VALOR}
+    cambios = _reparar_campos_documento({**base, "despachar_a_crudo": ""}, extraido, [], documento_degradado=False)
+    assert [(c.campo, c.valor_anterior, c.valor_nuevo) for c in cambios] == [("despachar_a_crudo", "", VALOR)]
+    presente = {**base, "despachar_a_crudo": "OTRA CALLE 9"}
+    assert _reparar_campos_documento(presente, extraido, [], documento_degradado=False) == []
+    # el ledger sigue ganando aunque el campo esté ausente
+    ledger = [{"documento": {"archivo": "1.jpeg", "numero_guia": "1"}, "campo": "despachar_a_crudo"}]
+    assert _reparar_campos_documento({**base, "despachar_a_crudo": ""}, extraido, ledger, documento_degradado=False) == []
