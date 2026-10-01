@@ -902,9 +902,14 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
     resultado = reparar_documento_focal_con_valores_conocidos(
         raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=False,
         reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
+        numero_guia=str(plan.datos["guia"]),
     )
     if not resultado["cambios"]:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el reparador no aplicó el cambio")
+    if (str(resultado.get("archivo")) != archivo
+            or str(resultado.get("numero_guia")) != str(plan.datos["guia"])):
+        # Defensa: el documento modificado debe ser exactamente el del plan.
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el documento modificado no es el del preview")
     antes = str(resultado["cambios"][0]["antes"])
     with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
         ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})

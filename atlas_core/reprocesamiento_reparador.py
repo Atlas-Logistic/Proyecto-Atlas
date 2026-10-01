@@ -298,17 +298,61 @@ def _cargar_manifiesto(raiz: Path, *, nombre_lote: str | None) -> tuple[str, lis
     return str(mejor_contenido.get("lote", mejor_ruta.stem)), seleccion
 
 
-def _fila_por_archivo(filas: list[dict[str, str]], nombre_archivo: str) -> dict[str, str] | None:
-    """`archivo` en el dataset es el identificador relativo (p. ej.
-    ``<marca>/<archivo>``) que ya usa `resolver_ruta_evidencia` -- se
-    compara por el NOMBRE del archivo (última componente), que es lo
-    único estable entre el manifiesto (nombre de origen del usuario) y
-    el dataset (identificador de Atlas), nunca por ruta completa."""
-    objetivo = Path(nombre_archivo).name
-    for fila in filas:
-        if Path(str(fila.get("archivo", ""))).name == objetivo:
-            return fila
-    return None
+FILA_NO_ENCONTRADA = "FILA_NO_ENCONTRADA"
+FILA_AMBIGUA = "FILA_AMBIGUA"
+FILA_CONTRADICE_GUIA = "FILA_CONTRADICE_GUIA"
+
+
+def _ruta_normalizada(valor: object) -> str:
+    return str(valor or "").strip().replace("\\", "/").strip("/")
+
+
+def _es_documento_mobile(archivo: object) -> bool:
+    return _ruta_normalizada(archivo).lower().startswith("mobile/")
+
+
+def _resolver_fila_por_archivo(
+    filas: list[dict[str, str]], archivo: str, *, numero_guia: str = "",
+) -> tuple[dict[str, str] | None, str]:
+    """Fila EXACTA del documento `archivo`, o (None, motivo) si no hay una única.
+
+    1. Ruta relativa completa (identificador de Atlas, p. ej.
+       ``mobile/<uuid>/original.jpg`` o ``<marca>/<archivo>``).
+    2. Sólo si el llamador dio un nombre SIN carpeta (nombre de origen del
+       manifiesto de lote): nombre de archivo, siempre que identifique una
+       única fila y nunca una fila Mobile -- todas las capturas Mobile se
+       llaman ``original.jpg`` (caso real: una corrección de una guía Mobile
+       caía en la primera fila Mobile del dataset).
+    3. Si el llamador conoce la guía objetivo y la fila no es de esa guía:
+       abstención. Nunca se elige "la primera" de varias.
+    """
+    objetivo = _ruta_normalizada(archivo)
+    if not objetivo:
+        return None, FILA_NO_ENCONTRADA
+    candidatas = [f for f in filas if _ruta_normalizada(f.get("archivo")) == objetivo]
+    if not candidatas and "/" not in objetivo:
+        candidatas = [f for f in filas
+                      if Path(_ruta_normalizada(f.get("archivo"))).name == objetivo
+                      and not _es_documento_mobile(f.get("archivo"))]
+        if any(_es_documento_mobile(f.get("archivo")) and Path(_ruta_normalizada(f.get("archivo"))).name == objetivo
+               for f in filas):
+            return None, FILA_AMBIGUA
+    if not candidatas:
+        return None, FILA_NO_ENCONTRADA
+    if len(candidatas) > 1:
+        return None, FILA_AMBIGUA
+    fila = candidatas[0]
+    guia = str(numero_guia or "").strip()
+    if guia and str(fila.get("numero_guia", "")).strip() != guia:
+        return None, FILA_CONTRADICE_GUIA
+    return fila, ""
+
+
+def _fila_por_archivo(
+    filas: list[dict[str, str]], nombre_archivo: str, *, numero_guia: str = "",
+) -> dict[str, str] | None:
+    """Compatibilidad: la fila única de `_resolver_fila_por_archivo` o None."""
+    return _resolver_fila_por_archivo(filas, nombre_archivo, numero_guia=numero_guia)[0]
 
 
 def _expandir_paginas_pdf(
@@ -414,7 +458,14 @@ def reprocesar_lote_reparador(
                     fila_nueva=False, cambios=(), motivo_no_reparado="PDF_SIN_PAGINAS_PROCESABLES",
                 ))
                 continue
-            fila = _fila_por_archivo(filas, nombre_archivo)
+            fila, motivo_fila = _resolver_fila_por_archivo(filas, nombre_archivo)
+            if motivo_fila in {FILA_AMBIGUA, FILA_CONTRADICE_GUIA}:
+                # Varias filas posibles: nunca se elige una ni se crea otra.
+                documentos.append(DocumentoReparado(
+                    archivo=nombre_archivo, numero_guia_antes="", numero_guia_despues="",
+                    fila_nueva=False, cambios=(), motivo_no_reparado=motivo_fila,
+                ))
+                continue
             archivo_id = str(fila.get("archivo", nombre_archivo)) if fila is not None else nombre_archivo
 
             evidencia = resolver_ruta_evidencia(raiz, archivo_id)
@@ -640,6 +691,7 @@ def duplicados_guia_transporte(
 def reparar_documento_focal_con_valores_conocidos(
     *, raiz_atlas: str | Path, archivo: str, valores: Mapping[str, str], dry_run: bool = True,
     reconciliar: bool = True, tipos_ledger_superables: frozenset[str] = frozenset(),
+    numero_guia: str = "",
 ) -> dict[str, object]:
     """Persiste, para UN documento puntual ya identificado por
     `archivo`, valores YA conocidos de una reextracción real (nunca
@@ -651,7 +703,11 @@ def reparar_documento_focal_con_valores_conocidos(
     `revalidar_y_regenerar_reporte`. `tipos_ledger_superables`: tipos de
     aplicación del ledger que NO bloquean el campo -- sólo para que una
     corrección explícita del operador pueda reemplazar a otra corrección
-    explícita del operador; una decisión de Revisión sigue ganando."""
+    explícita del operador; una decisión de Revisión sigue ganando.
+
+    `archivo` debe identificar UNA fila (ruta completa; ver
+    `_resolver_fila_por_archivo`); con `numero_guia` la fila además debe
+    ser de esa guía. Si no, ValueError y nada se escribe."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -667,9 +723,10 @@ def reparar_documento_focal_con_valores_conocidos(
 
     with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
         filas = _leer_filas(dataset)
-        fila = _fila_por_archivo(filas, archivo)
+        fila, motivo_fila = _resolver_fila_por_archivo(filas, archivo, numero_guia=numero_guia)
         if fila is None:
-            raise ValueError(f"No existe una fila persistida para archivo={archivo!r}")
+            raise ValueError(f"{motivo_fila}: no hay una única fila persistida para archivo={archivo!r}"
+                             + (f" y guía {numero_guia}" if numero_guia else ""))
         archivo_id = str(fila.get("archivo", archivo))
 
         motivos_actuales = {
@@ -730,6 +787,7 @@ def reparar_documento_focal_con_valores_conocidos(
 
     return {
         "archivo": archivo_id,
+        "numero_guia": str(fila.get("numero_guia", "")),
         "dry_run": dry_run,
         "campos_solicitados": list(valores.keys()),
         "campos_ignorados_no_autorizados": campos_ignorados,
