@@ -6439,7 +6439,9 @@ def reconciliar_incidencias_rut_chofer_documental(
                 "DETECCION_AUTOMATICA_RUT_AUSENTE" if tipo_incidencia == TIPO_RUT_DOCUMENTAL_AUSENTE
                 else "DETECCION_AUTOMATICA_RUT_INVALIDO"
             ),
-            clasificacion="DOCUMENTAL_CONFIRMADA",
+            # La validación estructural no comprueba la región visual: queda
+            # como hallazgo interno hasta confirmación humana explícita.
+            clasificacion="NO_VERIFICABLE", vigente_documental=False,
         )
         registradas.append(incidencia.incidencia_id)
         if candidata["rut_canonico"]:

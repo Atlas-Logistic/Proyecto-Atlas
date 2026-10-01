@@ -186,6 +186,17 @@ def test_error_ocr_obra_o_patente_sin_confirmacion_explicita_no_es_emision(tmp_p
     assert evaluar_incidencia(incidencia).clasificacion is ClasificacionDocumental.NO_VERIFICABLE
 
 
+def test_rut_invalido_automatico_sin_revision_visual_tampoco_es_incidencia_visible(tmp_path):
+    incidencia = _almacen(tmp_path).registrar(
+        contexto="X", numero_guia="1", numero_transporte="T", campo="RUT del chofer",
+        valor_documental="55.555.555-5", valor_canonico="12.345.678-5",
+        tipo_incidencia="RUT_DOCUMENTAL_INVALIDO", evidencia=("OCR",), fecha=FECHA,
+    )
+    evaluacion = evaluar_incidencia(incidencia)
+    assert evaluacion.clasificacion is ClasificacionDocumental.NO_VERIFICABLE
+    assert evaluacion.vigente_documental is False
+
+
 def test_decision_operacional_no_equivale_a_confirmacion_documental():
     assert not _confirma_discrepancia_documental({
         "tipo": "VEHICULO_DESCONOCIDO", "accion": "USAR_PATENTE_EXISTENTE", "actor": "JAVIER_MBT",

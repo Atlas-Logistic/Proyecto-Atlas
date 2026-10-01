@@ -47,12 +47,13 @@ def evaluar_incidencia(incidencia: IncidenciaDocumental, fila: Mapping[str, obje
                                         "AUSENCIA_OBSOLETA_EXTRACCION_VIGENTE_CON_RUT")
         return EvaluacionIncidencia(ClasificacionDocumental.NO_VERIFICABLE, False,
                                     "AUSENCIA_EN_EXTRACCION_NO_PRUEBA_AUSENCIA_DOCUMENTAL")
-    # Sólo el RUT implausible es una regla estructural existente que conserva
-    # el valor observado; cualquier otra diferencia histórica queda pendiente
-    # hasta que una persona la confirme explícitamente sobre el documento.
+    # Ni siquiera un RUT estructuralmente inválido prueba, por sí solo, que
+    # ese texto estaba impreso en la región correcta (podría venir de OCR o
+    # de un campo vecino). Toda evidencia automática queda fuera de la vista
+    # documental hasta una confirmación humana explícita sobre la guía.
     if incidencia.tipo_incidencia == TIPO_RUT_DOCUMENTAL_INVALIDO:
-        return EvaluacionIncidencia(ClasificacionDocumental.DOCUMENTAL_CONFIRMADA, True,
-                                    "RUT_DOCUMENTAL_ESTRUCTURALMENTE_INVALIDO")
+        return EvaluacionIncidencia(ClasificacionDocumental.NO_VERIFICABLE, False,
+                                    "RUT_INVALIDO_SIN_CONFIRMACION_VISUAL_HUMANA")
     return EvaluacionIncidencia(ClasificacionDocumental.NO_VERIFICABLE, False,
                                 "EVIDENCIA_HISTORICA_SIN_CONFIRMACION_DOCUMENTAL_EXPLICITA")
 
