@@ -124,6 +124,31 @@ def test_busqueda_adaptativa_trazable_y_acotada():
     assert r.traza[1]["incertidumbre"].startswith("CORROBORAR:")
 
 
+def test_busqueda_corrobora_nombre_aunque_no_haya_direccion_publicada():
+    primero, segundo = "https://minvu.gob.cl/ficha", "https://diariooficial.cl/aviso"
+    bruto = {"razon_social": "EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA",
+             "rut": "84.102.200-9", "url": primero}
+    llamadas = []
+
+    class Buscador:
+        def buscar(self, consulta):
+            llamadas.append(consulta)
+            url = primero if len(llamadas) == 1 else segundo
+            candidato = {**bruto, "url": url}
+            return SimpleNamespace(consulta=consulta, fecha="2026-01-01",
+                respuesta_texto=json.dumps({"candidatos": [candidato]}),
+                citas=(SimpleNamespace(url=url),))
+
+    resultado = buscar_adaptativamente(buscador=Buscador(), entidad="EMPRESA CONSTRUCTORA BRAVO E",
+        direccion="", localidad="", leer_fuente=lambda _: "EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA 84.102.200-9")
+    from atlas_core.atlas_ia.candidatos_externos import evaluar_nombre_obra
+    evaluacion = evaluar_nombre_obra(candidatos=resultado.candidatos,
+                                     obra_documental="EMPRESA CONSTRUCTORA BRAVO E")
+    assert len(llamadas) == 2
+    assert resultado.traza[1]["incertidumbre"].startswith("CORROBORAR_NOMBRE:")
+    assert evaluacion["estado"] == "PROPUESTA_RESOLUBLE"
+
+
 def test_numero_ocr_ambiguo_no_equivale_a_numero_limpio():
     assert comparar_numero("J61", "361") == "COMPATIBLE"
     assert comparar_numero("461", "361") == "CONTRADICE"

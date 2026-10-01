@@ -179,6 +179,11 @@ class CandidatoExterno:
         return {**self.__dict__, "anclajes_verificados": list(self.anclajes_verificados)}
 
 
+def _nombre_publicado(candidato: CandidatoExterno) -> str:
+    """Nombre usable para una obra: el nombre comercial o la razón social publicada."""
+    return str(candidato.nombre or candidato.razon_social or "").strip()
+
+
 def _parsear_candidatos(texto: str) -> list[dict]:
     limpio = texto.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
@@ -196,7 +201,8 @@ def _verificar(candidato: CandidatoExterno, texto: str) -> CandidatoExterno:
     via = _tokens_via(candidato.direccion)
     comuna = normalizar(candidato.comuna)
     numero = normalizar(candidato.numero)
-    nombre = normalizar(candidato.nombre)
+    nombre_publicado = _nombre_publicado(candidato)
+    nombre = normalizar(nombre_publicado)
     rut = normalizar(candidato.rut).replace(" ", "")
     # Se exige coocurrencia local de dirección, número y comuna. Una
     # página con varias sucursales no puede mezclar valores de filas lejanas.
@@ -237,7 +243,7 @@ def _verificar(candidato: CandidatoExterno, texto: str) -> CandidatoExterno:
     if rut and "ENTIDAD" in anclajes and rut in fuente.replace(" ", ""):
         anclajes.append("RUT")
     fecha_verificada = candidato.fecha if candidato.fecha and candidato.fecha in texto else ""
-    return replace(candidato, verificacion="VERIFICADA", fragmento_fuente=fragmento,
+    return replace(candidato, nombre=nombre_publicado, verificacion="VERIFICADA", fragmento_fuente=fragmento,
                    fecha=fecha_verificada,
                    anclajes_verificados=tuple(dict.fromkeys(anclajes)))
 
@@ -386,23 +392,23 @@ def evaluar_nombre_obra(*, candidatos: list[CandidatoExterno], obra_documental: 
     muestren ese mismo nombre completo; no se exige que la fuente pruebe
     propiedad, mandato, contrato ni vínculo jurídico con el cliente.
     """
+    documental = normalizar(obra_documental)
+
     def compatible(nombre: str) -> bool:
-        # Para expandir un texto truncado basta que todos sus tokens
-        # distintivos aparezcan literalmente en el nombre completo. La
-        # coincidencia aislada nunca resuelve: el llamador exige abajo dos
-        # fuentes independientes para el MISMO nombre completo.
-        ignorar = {"SA", "SPA", "LTDA", "LIMITADA", "EMPRESA", "CONSTRUCTORA", "E"}
-        base = [t for t in normalizar(obra_documental).split() if t not in ignorar and len(t) >= 4]
-        completo = set(normalizar(nombre).split())
-        return bool(base) and all(t in completo for t in base)
+        # Una ampliación debe conservar literalmente el prefijo documental;
+        # no basta compartir una palabra distintiva. Así no se inventan
+        # términos ni se confunden dos razones sociales parecidas.
+        base, completo = documental.split(), normalizar(nombre).split()
+        return len(base) >= 2 and len(completo) > len(base) and completo[:len(base)] == base
 
     grupos: dict[str, list[CandidatoExterno]] = {}
     for candidato in candidatos:
         if candidato.verificacion != "VERIFICADA" or "NOMBRE_COMPLETO" not in candidato.anclajes_verificados:
             continue
-        if not compatible(candidato.nombre):
+        nombre = _nombre_publicado(candidato)
+        if not compatible(nombre):
             continue
-        clave = normalizar(candidato.nombre)
+        clave = normalizar(nombre)
         if clave:
             grupos.setdefault(clave, []).append(candidato)
 
@@ -410,12 +416,23 @@ def evaluar_nombre_obra(*, candidatos: list[CandidatoExterno], obra_documental: 
     for grupo in grupos.values():
         dominios = sorted({_dominio(c.url) for c in grupo if _dominio(c.url)})
         evaluados.append({
-            "nombre_candidato": max((c.nombre for c in grupo), key=lambda n: len(normalizar(n))),
+            "nombre_candidato": max((_nombre_publicado(c) for c in grupo), key=lambda n: len(normalizar(n))),
             "fuentes_independientes": dominios,
             "fuentes": [c.a_dict() for c in grupo],
             "resoluble": len(dominios) >= 2,
         })
+    if not evaluados and any(normalizar(_nombre_publicado(c)) == documental for c in candidatos
+           if c.verificacion == "VERIFICADA"):
+        return {"estado": "SIN_CAMBIOS", "propuesta": None,
+                "razon": "El nombre documental ya está completo en la evidencia pública",
+                "candidatos_evaluados": evaluados}
     plausibles = [e for e in evaluados if e["resoluble"]]
+    # Una fuente publicada que muestra otra ampliación compatible ya es una
+    # contradicción nominal relevante: no se escoge entre dos razones sociales.
+    if len(evaluados) > 1:
+        return {"estado": "ABSTENCION", "propuesta": None,
+                "razon": "Fuentes públicas presentan nombres completos contradictorios",
+                "candidatos_evaluados": evaluados}
     if len(plausibles) == 1:
         return {"estado": "PROPUESTA_RESOLUBLE", "propuesta": plausibles[0],
                 "razon": "Dos fuentes independientes publican el mismo nombre operacional completo",
@@ -470,6 +487,21 @@ def buscar_adaptativamente(*, buscador, entidad: str, direccion: str, localidad:
         resultado.traza.append({"incertidumbre": objetivo, "consulta": consulta,
                                 "candidatos": [c.a_dict() for c in nuevos], "error": error})
         if objetivo == "IDENTIDAD_Y_DIRECCION":
+            # La corroboración de nombre no depende de que una razón social
+            # tenga publicada la dirección de la entrega. Se consulta una
+            # fuente de otro dominio para validar la expansión nominal.
+            corroborar_nombre = None
+            nombres_vistos: set[str] = set()
+            for candidato in nuevos:
+                nombre = _nombre_publicado(candidato)
+                clave_nombre = normalizar(nombre)
+                if not clave_nombre or clave_nombre in nombres_vistos:
+                    continue
+                nombres_vistos.add(clave_nombre)
+                corroborar_nombre = (f"CORROBORAR_NOMBRE:{clave_nombre}",
+                    _consulta("corroboración independiente del nombre operacional completo", nombre,
+                              "", "", urlsplit(candidato.url).hostname or ""))
+                break
             # El segundo paso depende de direcciones realmente encontradas.
             # Se investiga tanto la coincidente como la rival, hasta el tope.
             vistos: set[tuple[str, str]] = set()
@@ -484,4 +516,6 @@ def buscar_adaptativamente(*, buscador, entidad: str, direccion: str, localidad:
                               destino, candidato.comuna or localidad, urlsplit(candidato.url).hostname or "")))
                 if len(pendientes) >= max_consultas - 1:
                     break
+            if corroborar_nombre is not None:
+                pendientes.append(corroborar_nombre)
     return resultado

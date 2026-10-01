@@ -38,6 +38,21 @@ def test_nombre_truncado_propone_nombre_operacional_completo_sin_prueba_juridica
     assert resultado["propuesta"]["nombre_candidato"] == "EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA"
 
 
+def test_obra_truncada_con_dos_fuentes_publicas_convergentes_propone_nombre_completo():
+    # Una fuente puede entregar la razón social, no un nombre comercial.
+    fuentes = [
+        CandidatoExterno(razon_social="EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA",
+            rut="84.102.200-9", url="https://minvu.gob.cl/registro", verificacion="VERIFICADA",
+            anclajes_verificados=("ENTIDAD", "NOMBRE_COMPLETO", "RUT")),
+        CandidatoExterno(razon_social="EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA",
+            rut="84.102.200-9", url="https://diariooficial.cl/publicacion", verificacion="VERIFICADA",
+            anclajes_verificados=("ENTIDAD", "NOMBRE_COMPLETO", "RUT")),
+    ]
+    resultado = evaluar_nombre_obra(candidatos=fuentes, obra_documental="EMPRESA CONSTRUCTORA BRAVO E")
+    assert resultado["estado"] == "PROPUESTA_RESOLUBLE"
+    assert resultado["propuesta"]["nombre_candidato"] == "EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA"
+
+
 def test_direccion_incompleta_propone_numero_solo_cuando_dos_fuentes_lo_publican():
     resultado = _eval_direccion(_direccion("https://uno.cl/a"), _direccion("https://dos.cl/b"))
     assert resultado["estado"] == "PROPUESTA_RESOLUBLE"
@@ -69,6 +84,23 @@ def test_dos_nombres_o_dos_direcciones_plausibles_piden_aclaracion():
         _direccion("https://tres.cl/b", numero="75"), _direccion("https://cuatro.cl/b", numero="75"),
     )
     assert obras["estado"] == destinos["estado"] == "ABSTENCION"
+
+
+def test_fuentes_con_nombres_completos_contradictorios_abstienen():
+    resultado = evaluar_nombre_obra(candidatos=[
+        _obra("https://uno.cl/a", "EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA"),
+        _obra("https://dos.cl/a", "EMPRESA CONSTRUCTORA BRAVO E SPA"),
+    ], obra_documental="EMPRESA CONSTRUCTORA BRAVO E")
+    assert resultado["estado"] == "ABSTENCION"
+    assert "contradictorios" in resultado["razon"]
+
+
+def test_nombre_documental_ya_completo_no_propone_cambio():
+    completo = "EMPRESA CONSTRUCTORA BRAVO E IZQUIERDO LIMITADA"
+    resultado = evaluar_nombre_obra(candidatos=[_obra("https://uno.cl/a", completo), _obra("https://dos.cl/a", completo)],
+                                    obra_documental=completo)
+    assert resultado["estado"] == "SIN_CAMBIOS"
+    assert resultado["propuesta"] is None
 
 
 def test_preview_humano_es_minimo_y_exige_confirmacion_por_via_controlada():
