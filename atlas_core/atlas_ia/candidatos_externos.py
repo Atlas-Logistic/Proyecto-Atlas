@@ -184,6 +184,21 @@ def _nombre_publicado(candidato: CandidatoExterno) -> str:
     return str(candidato.nombre or candidato.razon_social or "").strip()
 
 
+def clave_nombre_societario(nombre: str) -> str:
+    """Clave de COMPARACIÓN: LTDA final == LIMITADA. No altera el texto publicado
+    ni toca palabras no societarias o en otra posición."""
+    tokens = normalizar(nombre).split()
+    if tokens and tokens[-1] == "LTDA":
+        tokens[-1] = "LIMITADA"
+    return " ".join(tokens)
+
+
+def _forma_preferida(nombres: list[str]) -> str:
+    """Prefiere la forma societaria completa (LIMITADA) y luego la más larga."""
+    elegido = max(nombres, key=lambda n: (normalizar(n).endswith(" LIMITADA"), len(normalizar(n))))
+    return " ".join(elegido.upper().split())
+
+
 def _parsear_candidatos(texto: str) -> list[dict]:
     limpio = texto.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
@@ -408,7 +423,7 @@ def evaluar_nombre_obra(*, candidatos: list[CandidatoExterno], obra_documental: 
         nombre = _nombre_publicado(candidato)
         if not compatible(nombre):
             continue
-        clave = normalizar(nombre)
+        clave = clave_nombre_societario(nombre)
         if clave:
             grupos.setdefault(clave, []).append(candidato)
 
@@ -416,7 +431,7 @@ def evaluar_nombre_obra(*, candidatos: list[CandidatoExterno], obra_documental: 
     for grupo in grupos.values():
         dominios = sorted({_dominio(c.url) for c in grupo if _dominio(c.url)})
         evaluados.append({
-            "nombre_candidato": max((_nombre_publicado(c) for c in grupo), key=lambda n: len(normalizar(n))),
+            "nombre_candidato": _forma_preferida([_nombre_publicado(c) for c in grupo]),
             "fuentes_independientes": dominios,
             "fuentes": [c.a_dict() for c in grupo],
             "resoluble": len(dominios) >= 2,
@@ -469,6 +484,10 @@ def buscar_adaptativamente(*, buscador, entidad: str, direccion: str, localidad:
                            leer_fuente: Callable[[str], str] = obtener_texto_fuente,
                            max_consultas: int = 3) -> ResultadoBusquedaAdaptativa:
     """Descubre y contrasta candidatos, con consulta siguiente ligada a hallazgos."""
+    if getattr(buscador, "nombre", "") == "tavily":
+        from atlas_core.atlas_ia.buscador_tavily import buscar_adaptativamente_tavily
+        return buscar_adaptativamente_tavily(buscador=buscador, entidad=entidad,
+                                             direccion=direccion, localidad=localidad)
     resultado = ResultadoBusquedaAdaptativa()
     pendientes = [("IDENTIDAD_Y_DIRECCION", _consulta("identidad y dirección", entidad, direccion, localidad))]
     hechas: set[str] = set()

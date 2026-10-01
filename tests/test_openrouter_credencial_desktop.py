@@ -68,6 +68,7 @@ def test_ruta_desktop_cli_instancia_buscador_y_ejecuta_busqueda_adaptativa(tmp_p
     _raiz(tmp_path)
     monkeypatch.setenv(VARIABLE_ENTORNO, str(tmp_path))  # caché de búsqueda dentro de tmp
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)  # como el hijo de Electron
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)  # este test cubre la ruta OpenRouter
     _registro_usuario(monkeypatch, {"OPENROUTER_API_KEY": "or-hkcu"})
     monkeypatch.setattr(investigacion_revision, "_lectura_original",
         lambda *args, **kwargs: {"ruta": "original.jpg", "sha256": "abc", "lineas": ["DESPACHAR A", "CALLE REAL 1"],

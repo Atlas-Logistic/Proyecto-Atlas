@@ -223,6 +223,11 @@ class BuscadorWebConCache:
         self._interno = interno
         self._repositorio = repositorio
 
+    @property
+    def nombre(self) -> str:
+        # El proveedor interno decide cómo se interpretan sus respuestas.
+        return str(getattr(self._interno, "nombre", ""))
+
     def buscar(self, consulta: str) -> RespuestaBusquedaWeb:
         cache = self._repositorio.buscar(consulta)
         if cache is not None:

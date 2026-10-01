@@ -165,6 +165,31 @@ def preview_operacional(expediente: dict) -> dict | None:
     }
 
 
+def _buscador_externo_configurado():
+    """Tavily si hay TAVILY_API_KEY; si no, OpenRouter/Sonar; si no, None."""
+    from atlas_core.atlas_ia.buscador_web import BuscadorWebConCache, RepositorioCacheBusquedaWeb
+    from atlas_core.atlas_ia.credenciales import resolver_openrouter_api_key, resolver_tavily_api_key
+    if resolver_tavily_api_key():
+        from atlas_core.atlas_ia.buscador_tavily import BuscadorWebTavily, repositorio_cache_tavily
+        return BuscadorWebConCache(BuscadorWebTavily(), repositorio_cache_tavily())
+    if resolver_openrouter_api_key():
+        from atlas_core.atlas_ia.buscador_web import BuscadorWebOpenRouter
+        return BuscadorWebConCache(BuscadorWebOpenRouter(), RepositorioCacheBusquedaWeb())
+    return None
+
+
+def _estado_busqueda_externa(buscador, investigacion) -> dict:
+    """Separa "no se pudo buscar" de "se buscó y no hubo evidencia suficiente"."""
+    if buscador is None:
+        return {"estado": "NO_DISPONIBLE", "proveedor": None,
+                "motivo": "Sin credencial de búsqueda externa (TAVILY_API_KEY u OPENROUTER_API_KEY)."}
+    proveedor = str(getattr(buscador, "nombre", "") or "") or None
+    errores = [t["error"] for t in investigacion.traza if t.get("error")]
+    if investigacion.traza and len(errores) == len(investigacion.traza):
+        return {"estado": "FALLIDA", "proveedor": proveedor, "motivo": errores[0]}
+    return {"estado": "EJECUTADA", "proveedor": proveedor, "motivo": ""}
+
+
 def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = None,
                         orquestador=None, proveedor_ocr=None,
                         investigar_externo: bool = True, buscador_externo=None,
@@ -198,18 +223,14 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
     investigacion_adaptativa = None
     evaluacion_externa = None
     evaluacion_nombre_obra = None
+    busqueda_externa = {"estado": "NO_SOLICITADA", "proveedor": None, "motivo": ""}
     if investigar_externo:
         from atlas_core.atlas_ia.candidatos_externos import (
             buscar_adaptativamente, evaluar_candidatos, evaluar_nombre_obra, localidad_documental,
             obtener_texto_fuente,
         )
         if buscador_externo is None:
-            from atlas_core.atlas_ia.credenciales import resolver_openrouter_api_key
-            if resolver_openrouter_api_key():
-                from atlas_core.atlas_ia.buscador_web import (
-                    BuscadorWebConCache, BuscadorWebOpenRouter, RepositorioCacheBusquedaWeb,
-                )
-                buscador_externo = BuscadorWebConCache(BuscadorWebOpenRouter(), RepositorioCacheBusquedaWeb())
+            buscador_externo = _buscador_externo_configurado()
         if buscador_externo is not None:
             direccion_base = str(lectura.get("destino_geometrico") or fila.get("despachar_a_crudo") or "")
             localidad = localidad_documental(direccion_base)
@@ -229,6 +250,14 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
                 candidatos=investigacion_adaptativa.candidatos,
                 obra_documental=str(fila.get("obra_destino") or ""),
             )
+        busqueda_externa = _estado_busqueda_externa(buscador_externo, investigacion_adaptativa)
+        if busqueda_externa["estado"] != "EJECUTADA":
+            # Sin búsqueda no hay evaluación: nunca "evidencia insuficiente".
+            no_disponible = {"estado": "BUSQUEDA_NO_DISPONIBLE", "propuesta": None,
+                             "razon": f"Búsqueda externa no disponible: {busqueda_externa['motivo']}",
+                             "candidatos_evaluados": [], "numero_documental": ""}
+            evaluacion_externa = dict(no_disponible)
+            evaluacion_nombre_obra = dict(no_disponible)
     casos = []
     problemas = detectar_problemas_elegibles(fila)
     # Una consulta explícita puede investigar obra o destino aunque la guía
@@ -346,4 +375,5 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
                 k: v for k, v in lectura.items() if k != "lineas"},
             "expedientes": casos,
             "BUSQUEDA_ADAPTATIVA": investigacion_adaptativa.traza if investigacion_adaptativa else [],
+            "BUSQUEDA_EXTERNA": busqueda_externa,
             "escrituras_productivas": 0}
