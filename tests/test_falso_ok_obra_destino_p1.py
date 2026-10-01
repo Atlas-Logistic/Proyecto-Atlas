@@ -276,6 +276,43 @@ def test_destino_historico_repetido_no_tumba_el_documento(tmp_path):
     assert "CATALOGO_OBRA_DESTINO" in resultado["metodos_recuperacion_documento"]
 
 
+def test_destino_confirmado_por_direccion_no_tumba_el_documento(tmp_path):
+    """Caso real envío Mobile 88ba6625: con dos relaciones confirmadas la
+    corroboración cae al destino que coincide con la dirección leída (un
+    `Destino`, sin obra canónica); el documento no debe terminar en ERROR."""
+    carpeta, cliente = _catalogos_con_cliente(
+        tmp_path, nombre_cliente="CONSTRUMART SA", rut_cliente="50.234.350-5",
+    )
+    destinos = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
+    catalogo = CatalogoObrasDestinos(
+        carpeta / "obras_destinos.json",
+        ruta_clientes=carpeta / "clientes.json",
+        ruta_destinos=carpeta / "destinos_maestros.json",
+    )
+    for direccion in ("LOS ALERCES 1148", "AVENIDA CENTRAL 500"):
+        destino = destinos.crear(
+            cliente_id=cliente.cliente_id, nombre_destino=f"DESTINO {direccion}",
+            direccion=direccion, pais="CHILE", fuente="PRUEBA",
+        )
+        relacion = catalogo.registrar_observacion(
+            cliente_id=cliente.cliente_id, nombre_obra="OBRA LOS ALERCES",
+            destino_id=destino.destino_id, evidencia=_evidencia(direccion),
+        ).relacion
+        catalogo.confirmar_relacion(relacion.relacion_id, actor="JAVIER_MBT")
+
+    resultado, _ = _procesar(
+        tmp_path, carpeta,
+        _datos(
+            cliente="CONSTRUMART SA", **{"RUT del cliente": "50.234.350-5"},
+            **{"obra destino": "OBRA LOS ALERCES"},
+        ),
+        texto_lineal="FECHA DE EMISION 01-01-2026 DESPACHAR A: LOS ALERCES 1148 SAN BERNARDO",
+    )
+
+    assert resultado["obra_destino"] == "OBRA LOS ALERCES"
+    assert "CATALOGO_OBRA_DESTINO" in resultado["metodos_recuperacion_documento"]
+
+
 # --- obra nueva (genérica, distinta del cliente): REVISAR + motivo +
 #     decisión OBRA_DESCONOCIDA coherentes entre sí ---
 
