@@ -53,3 +53,37 @@ def test_investigacion_es_informativa_y_no_crea_preview(tmp_path, monkeypatch):
 
 def test_pregunta_normal_por_obra_sigue_siendo_informativa_y_no_accion():
     assert interpretar_determinista("¿Cuál es la obra de la guía 474993?") is None
+
+
+def _expediente_sin_busqueda():
+    return {"BUSQUEDA_EXTERNA": {"estado": "FALLIDA", "proveedor": "tavily",
+                                 "motivo": "BuscadorWebNoDisponible: Tavily devolvió HTTP 500."},
+            "expedientes": [{
+                "CAMPO": "obra_destino", "HECHOS_DOCUMENTALES": {"valor_extraido": "OBRA PARCIAL"}, "PROPUESTA": "",
+                "EVALUACION_CANDIDATOS_EXTERNOS": {
+                    "estado": "BUSQUEDA_NO_DISPONIBLE",
+                    "razon": "Búsqueda externa no disponible: BuscadorWebNoDisponible: Tavily devolvió HTTP 500."},
+                "PREVIEW_OPERACIONAL": None}]}
+
+
+def test_busqueda_no_disponible_se_informa_en_lenguaje_operacional(tmp_path, monkeypatch):
+    (tmp_path / "operacion" / "actual").mkdir(parents=True)
+    monkeypatch.setattr(investigacion_revision, "investigar_revision", lambda *a, **k: _expediente_sin_busqueda())
+    respuesta = OperadorB1(tmp_path).atender("chat-1", "Investiga la obra de la guía 474993")
+    assert respuesta["estado"] == "RESULTADO_INVESTIGACION"
+    assert respuesta["busqueda_externa"] == "NO_DISPONIBLE"
+    assert "búsqueda externa no está disponible" in respuesta["mensaje"]
+    texto = str(respuesta)
+    assert "BuscadorWebNoDisponible" not in texto and "HTTP 500" not in texto
+    assert "evidencia suficiente" not in respuesta["propuestas"]["obra"]["evidencia_relevante"]
+
+
+def test_investigacion_con_busqueda_ejecutada_marca_disponible(tmp_path, monkeypatch):
+    (tmp_path / "operacion" / "actual").mkdir(parents=True)
+    monkeypatch.setattr(investigacion_revision, "investigar_revision", lambda *a, **k: {
+        "BUSQUEDA_EXTERNA": {"estado": "EJECUTADA", "proveedor": "tavily", "motivo": ""},
+        "expedientes": [{"CAMPO": "obra_destino", "PROPUESTA": "OBRA COMPLETA LIMITADA",
+                         "HECHOS_DOCUMENTALES": {"valor_extraido": "OBRA"}}]})
+    respuesta = OperadorB1(tmp_path).atender("chat-1", "Investiga la obra de la guía 474993")
+    assert respuesta["busqueda_externa"] == "DISPONIBLE"
+    assert respuesta["propuestas"]["obra"]["valor_propuesto"] == "OBRA COMPLETA LIMITADA"

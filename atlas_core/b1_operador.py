@@ -706,6 +706,10 @@ class OperadorB1:
             return {"estado": "INVESTIGACION_NO_DISPONIBLE", "accion": ACCION_INVESTIGAR_REVISION,
                     "mensaje": f"No pude investigar la guía {numero_guia}: {error}"}
         etiquetas = {"obra_destino": "obra", "despachar_a_crudo": "dirección de destino"}
+        # "No se pudo buscar" no es "no hay evidencia": se informa aparte y en
+        # lenguaje operacional (el detalle técnico queda sólo en el expediente).
+        sin_busqueda = (resultado.get("BUSQUEDA_EXTERNA") or {}).get("estado") in {"FALLIDA", "NO_DISPONIBLE"}
+        busqueda_externa = "NO_DISPONIBLE" if sin_busqueda else "DISPONIBLE"
         propuestas: dict[str, dict[str, str]] = {}
         for expediente in resultado.get("expedientes") or []:
             campo = str(expediente.get("CAMPO") or "")
@@ -716,6 +720,8 @@ class OperadorB1:
             propuesta = str(preview.get("valor_propuesto") or expediente.get("PROPUESTA") or "").strip()
             evidencia = str(preview.get("evidencia_relevante") or evaluacion.get("razon")
                             or expediente.get("RAZON_ABSTENCION") or "Evidencia insuficiente para proponer.")
+            if sin_busqueda and not propuesta:
+                evidencia = "No se pudieron consultar fuentes públicas: la búsqueda externa no está disponible."
             propuestas[etiquetas[campo]] = {
                 "valor_actual": str(preview.get("valor_actual") or
                                      (expediente.get("HECHOS_DOCUMENTALES") or {}).get("valor_extraido") or ""),
@@ -725,16 +731,21 @@ class OperadorB1:
                     ("No se aplicará ningún cambio sin confirmación humana." if propuesta else
                      "Atlas se abstiene: no hay evidencia suficiente para cambiar el dato.")),
             }
+        if sin_busqueda and not any(p["valor_propuesto"] != "Sin propuesta suficiente" for p in propuestas.values()):
+            return {"estado": "RESULTADO_INVESTIGACION", "accion": ACCION_INVESTIGAR_REVISION,
+                    "propuestas": propuestas, "busqueda_externa": busqueda_externa, "mensaje": (
+                        f"Investigación de guía {numero_guia}, sin cambios: no pude consultar fuentes públicas "
+                        "porque la búsqueda externa no está disponible en este momento. Intenta de nuevo más tarde.")}
         if not propuestas:
             return {"estado": "RESULTADO_INVESTIGACION", "accion": ACCION_INVESTIGAR_REVISION,
-                    "propuestas": {}, "mensaje": (
+                    "propuestas": {}, "busqueda_externa": busqueda_externa, "mensaje": (
                         f"Investigación de guía {numero_guia}, sin cambios: no encontré evidencia reutilizable "
                         "para los datos solicitados.")}
         resumen = "; ".join(
             f"{etiqueta}: actual {dato['valor_actual']!r}; propuesta {dato['valor_propuesto']!r}."
             for etiqueta, dato in propuestas.items())
         return {"estado": "RESULTADO_INVESTIGACION", "accion": ACCION_INVESTIGAR_REVISION,
-                "propuestas": propuestas,
+                "propuestas": propuestas, "busqueda_externa": busqueda_externa,
                 "mensaje": f"Investigación de guía {numero_guia}, sin cambios: {resumen}"}
 
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
