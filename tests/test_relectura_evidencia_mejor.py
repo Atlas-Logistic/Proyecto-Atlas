@@ -37,6 +37,8 @@ EXTRACCIONES = {
         "numero_guia": GUIA, "numero_transporte": TRANSPORTE, "fecha": "No encontrado",
         "chofer": "LUIS VARAS", "cliente": "SALOMON SACK SA", "obra_destino": "SALOMON SACK SA",
         "despachar_a_crudo": "CAMINO LOS PINOS", "tipo_carga": "BARRAS", "peso_kg": "26733",
+        # Una captura peor trae más dudas que la vigente, no menos.
+        "motivos_revision_documento": "CLIENTE_SIN_CORROBORAR | OBRA_DESTINO_SIN_CORROBORAR | FECHA_SIN_CORROBORAR",
     },
     b"foto-degradada-global": {
         "numero_guia": GUIA, "numero_transporte": TRANSPORTE, "fecha": "26-09-2026",

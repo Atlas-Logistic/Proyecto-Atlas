@@ -137,11 +137,18 @@ def registrar_relectura(
     return entrada
 
 
-def relectura_ya_registrada(raiz_atlas: str | Path, archivo: str, sha256: str) -> bool:
+def relectura_ya_registrada(raiz_atlas: str | Path, archivo: str, sha256: str, *, version_reglas: int = 0) -> bool:
     """El mismo contenido ya fue evaluado como relectura de `archivo`
-    (promovido o rechazado): volver a arrastrarlo no reprocesa nada."""
+    (promovido o rechazado): volver a arrastrarlo no reprocesa nada. Una
+    relectura RECHAZADA con reglas anteriores a `version_reglas` sí se
+    reevalúa (las reglas cambiaron; el contenido puede promoverse ahora)."""
     documento = leer_registro_relecturas(raiz_atlas)["documentos"].get(archivo) or {}
-    return any(str(h.get("sha256", "")) == sha256 for h in documento.get("historial") or [])
+    return any(
+        str(h.get("sha256", "")) == sha256 and (
+            h.get("resultado") == RELECTURA_PROMOVIDA or int(h.get("reglas") or 1) >= version_reglas
+        )
+        for h in documento.get("historial") or []
+    )
 
 
 def _evidencia_vigente_registrada(raiz: Path, archivo: str) -> Path | None:

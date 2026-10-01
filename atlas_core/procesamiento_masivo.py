@@ -3675,6 +3675,80 @@ _CAMPOS_INFORMACION_RELECTURA = (
     "obra_destino", "despachar_a_crudo", "patente_tracto", "patente_rampla", "descripcion_material", "peso_kg",
 )
 _AUSENTES_RELECTURA = {"", "No encontrado", "REVISAR", "Ilegible"}
+# Versión de las reglas de relectura: un rechazo registrado con reglas
+# anteriores se reevalúa si el mismo contenido vuelve a ingresar.
+RELECTURA_REGLAS_VERSION = 2
+# Campos ESTRUCTURADOS que una relectura mejor puede no haber leído y que se
+# conservan de la evidencia anterior sólo si allí eran válidos y sin motivo
+# de revisión propio (nunca texto libre: un nombre/dirección ilegible de una
+# foto peor no se arrastra a la extracción buena).
+_CAMPOS_CONSERVABLES_RELECTURA: dict[str, tuple[object, tuple[str, ...]]] = {
+    "fecha": (lambda v: bool(re.fullmatch(r"\d{2}-\d{2}-\d{4}", v)), ("FECHA_SIN_CORROBORAR",)),
+    "rut_chofer": (lambda v: validar_rut_chileno(v).estado == EstadoValidacion.VALIDO, ("RUT_CHOFER_INVALIDO",)),
+    "rut_cliente": (lambda v: validar_rut_chileno(v).estado == EstadoValidacion.VALIDO,
+                    ("RUT_CLIENTE_INVALIDO", "RUT_CLIENTE_CONTRADICE_CATALOGO")),
+    "codigo_cliente": (lambda v: v not in _AUSENTES_RELECTURA, ()),
+    "patente_tracto": (lambda v: bool(re.fullmatch(r"[A-Z]{2,4}\d{2,4}", v)), ("PATENTE_SIN_HOMOLOGAR", "PATENTE_AMBIGUA")),
+    "patente_rampla": (lambda v: bool(re.fullmatch(r"[A-Z]{2,4}\d{2,4}", v)), ("PATENTE_SIN_HOMOLOGAR", "PATENTE_AMBIGUA")),
+    "peso_kg": (lambda v: bool(re.fullmatch(r"\d{2,6}", v)),
+                ("PESO_OPERACIONALMENTE_ATIPICO", "PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR")),
+}
+# Dígitos que el OCR confunde entre sí (forma similar). Sólo con ellos un
+# número de transporte distinto puede ser el MISMO documento mal leído.
+_DIGITOS_CONFUNDIBLES_OCR = {frozenset(par) for par in ("38", "68", "36", "08", "06", "17", "56", "59", "89", "13")}
+CONFIANZA_MINIMA_TRANSPORTE_RELECTURA = 0.98
+MARGEN_CONFIANZA_TRANSPORTE_RELECTURA = 0.05
+
+
+def _transportes_confundibles(a: str, b: str) -> bool:
+    if len(a) != len(b) or not (a.isdigit() and b.isdigit()) or a == b:
+        return False
+    diferencias = [(x, y) for x, y in zip(a, b) if x != y]
+    return len(diferencias) <= 2 and all(frozenset(par) in _DIGITOS_CONFUNDIBLES_OCR for par in diferencias)
+
+
+def _confianza_ocr_de_valor(ruta_traza: Path, valor: str) -> float | None:
+    """Mayor confianza OCR con que la traza leyó literalmente `valor`."""
+    try:
+        traza = json.loads(Path(ruta_traza).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ocr = traza.get("ocr") or {}
+    confianzas = [
+        float(item.get("confianza") or 0)
+        for clave in ("lineas", "bloques") for item in (ocr.get(clave) or [])
+        if isinstance(item, Mapping) and re.sub(r"[^0-9A-Z]", "", str(item.get("texto", "")).upper()) == valor
+    ]
+    return max(confianzas) if confianzas else None
+
+
+# Motivos (por prefijo) con que la extracción vigente ya declaraba en duda un
+# campo de texto: perderlo en una relectura mejor no degrada nada.
+_PREFIJOS_DUDA_POR_CAMPO = {
+    "numero_transporte": ("TRANSPORTE_",), "fecha": ("FECHA_",), "chofer": ("CHOFER_",),
+    "rut_chofer": ("RUT_CHOFER_", "CHOFER_"), "cliente": ("CLIENTE_",), "rut_cliente": ("RUT_CLIENTE_", "CLIENTE_"),
+    "obra_destino": ("OBRA_DESTINO_",), "despachar_a_crudo": ("DESTINO_", "OBRA_DESTINO_"),
+    "patente_tracto": ("PATENTE_",), "patente_rampla": ("PATENTE_",), "descripcion_material": ("MATERIAL_",),
+    "peso_kg": ("PESO_",),
+}
+
+
+def _campo_en_duda(fila: Mapping[str, str], campo: str) -> bool:
+    prefijos = _PREFIJOS_DUDA_POR_CAMPO.get(campo, ())
+    return any(m.startswith(prefijos) for m in _motivos(fila)) if prefijos else False
+
+
+def _campo_conservable(fila: Mapping[str, str], campo: str) -> bool:
+    regla = _CAMPOS_CONSERVABLES_RELECTURA.get(campo)
+    valor = str(fila.get(campo, "")).strip()
+    return bool(regla) and valor not in _AUSENTES_RELECTURA and regla[0](valor) and not _motivos(fila) & set(regla[1])
+
+
+def _relectura_mejor(fila_vigente: Mapping[str, str], fila_nueva: Mapping[str, str]) -> bool:
+    """La extracción nueva no agrega dudas y resuelve al menos una: sus
+    motivos de revisión son un subconjunto ESTRICTO de los vigentes."""
+    nuevos, vigentes = _motivos(fila_nueva), _motivos(fila_vigente)
+    return MotivoRevisionDocumento.DOCUMENTO_DEGRADADO.value not in nuevos and nuevos < vigentes
 
 
 def _raiz_atlas_para_relectura(raiz_lote: Path, ruta_csv: Path) -> Path | None:
@@ -3693,9 +3767,16 @@ def _motivos(fila: Mapping[str, object]) -> set[str]:
 
 def _evaluar_relectura(
     fila_vigente: Mapping[str, str], fila_nueva: Mapping[str, str], *, identidades_existentes: set[tuple[str, str]],
+    confianzas_transporte: tuple[float | None, float | None] = (None, None),
 ) -> str:
     """Motivo de rechazo de la extracción nueva frente a la vigente, o ""
-    si puede reemplazarla. Nunca compara textos de forma aproximada."""
+    si puede reemplazarla. Nunca compara textos de forma aproximada.
+
+    Mismo `archivo` y misma guía con un número de transporte distinto sólo
+    es el MISMO documento si ambos números difieren en dígitos que el OCR
+    confunde y la captura nueva lo lee con confianza alta y claramente
+    mayor (`confianzas_transporte` = (vigente, nueva), de sus trazas OCR);
+    si no, conflicto real: se conserva la vigente (y su Revisión)."""
     if fila_nueva.get("estado_procesamiento") != "OK":
         return "EXTRACCION_FALLIDA"
     identidad_vigente = (str(fila_vigente.get("numero_guia", "")).strip(), str(fila_vigente.get("numero_transporte", "")).strip())
@@ -3704,7 +3785,17 @@ def _evaluar_relectura(
         return "NO_IDENTIFICABLE"
     vigente_completa = all(v not in _AUSENTES_RELECTURA for v in identidad_vigente)
     if vigente_completa and identidad_nueva != identidad_vigente:
-        return "IDENTIDAD_DISTINTA"
+        confianza_vigente, confianza_nueva = confianzas_transporte
+        transporte_releido = (
+            identidad_nueva[0] == identidad_vigente[0]
+            and _transportes_confundibles(identidad_vigente[1], identidad_nueva[1])
+            and identidad_nueva not in identidades_existentes
+            and confianza_nueva is not None and confianza_nueva >= CONFIANZA_MINIMA_TRANSPORTE_RELECTURA
+            and (confianza_vigente is None
+                 or confianza_nueva - confianza_vigente >= MARGEN_CONFIANZA_TRANSPORTE_RELECTURA)
+        )
+        if not transporte_releido:
+            return "IDENTIDAD_DISTINTA"
     if not vigente_completa and identidad_nueva in identidades_existentes:
         return "IDENTIDAD_DE_OTRO_DOCUMENTO"
     if (
@@ -3718,12 +3809,42 @@ def _evaluar_relectura(
         and str(fila_nueva.get(campo, "")).strip() in _AUSENTES_RELECTURA
     ]
     if perdidos:
-        return "EVIDENCIA_PEOR:CAMPOS_PERDIDOS=" + ",".join(perdidos)
+        # Sólo una relectura MEJOR puede no haber leído algo, y únicamente si
+        # cada dato no leído se conserva de la evidencia anterior
+        # (estructurado válido) o allí ya estaba en duda (motivo de revisión
+        # propio). Un dato bueno nunca se pierde por una lectura nueva.
+        no_cubiertos = [
+            campo for campo in perdidos
+            if not _campo_conservable(fila_vigente, campo) and not _campo_en_duda(fila_vigente, campo)
+        ]
+        if not _relectura_mejor(fila_vigente, fila_nueva) or no_cubiertos:
+            return "EVIDENCIA_PEOR:CAMPOS_PERDIDOS=" + ",".join(no_cubiertos or perdidos)
     return ""
+
+
+def _conservar_de_evidencia_anterior(
+    fila_vigente: Mapping[str, str], reemplazo: dict[str, str],
+) -> dict[str, str]:
+    """Campos estructurados que la relectura no leyó pero la evidencia
+    anterior sí, válidos y sin motivo de revisión propio: se conservan (una
+    lectura que no ve un dato no lo borra). Devuelve {campo: valor}."""
+    motivos_vigentes = _motivos(fila_vigente)
+    conservados: dict[str, str] = {}
+    for campo, (es_valido, motivos_campo) in _CAMPOS_CONSERVABLES_RELECTURA.items():
+        anterior = str(fila_vigente.get(campo, "")).strip()
+        if (
+            str(reemplazo.get(campo, "")).strip() in _AUSENTES_RELECTURA
+            and anterior not in _AUSENTES_RELECTURA and es_valido(anterior)
+            and not motivos_vigentes & set(motivos_campo)
+        ):
+            reemplazo[campo] = anterior
+            conservados[campo] = anterior
+    return conservados
 
 
 def _promover_relectura(
     ruta_csv: Path, *, archivo: str, fila_nueva: Mapping[str, str],
+    conservados: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
     """Reemplaza EN SU LUGAR la fila de `archivo` por la extracción nueva
     (nunca agrega una fila). Un campo con decisión humana en el ledger
@@ -3750,6 +3871,9 @@ def _promover_relectura(
         for columna in COLUMNAS:
             if _hay_decision_humana_para_campo(aplicaciones, fila=vigente, campo=columna):
                 reemplazo[columna] = str(vigente.get(columna, ""))
+        conservados_ahora = _conservar_de_evidencia_anterior(vigente, reemplazo)
+        if conservados is not None:
+            conservados.update(conservados_ahora)
         cambios = {
             campo: [str(vigente.get(campo, "")), reemplazo[campo]]
             for campo in _CAMPOS_INFORMACION_RELECTURA
@@ -5503,7 +5627,9 @@ def procesar_carpeta(
         sha_nuevo = sha256_binario(ruta.read_bytes())
         anterior = resolver_ruta_evidencia(raiz_atlas_relectura, identificador, excluir_lote=raiz)
         sha_anterior = sha256_binario(anterior.ruta.read_bytes()) if anterior.ruta is not None else ""
-        if sha_nuevo == sha_anterior or relectura_ya_registrada(raiz_atlas_relectura, identificador, sha_nuevo):
+        if sha_nuevo == sha_anterior or relectura_ya_registrada(
+            raiz_atlas_relectura, identificador, sha_nuevo, version_reglas=RELECTURA_REGLAS_VERSION,
+        ):
             return None
         lote_anterior = anterior.ruta.parent.name if anterior.ruta is not None else ""
         return {"sha256": sha_nuevo, "anterior": {"lote": lote_anterior, "sha256": sha_anterior}}
@@ -5511,12 +5637,18 @@ def procesar_carpeta(
     def cerrar_relectura(
         identificador: str, relectura: Mapping[str, object], *, motivo: str,
         fila_nueva: Mapping[str, str], cambios: Mapping[str, list[str]] | None = None,
+        conservados: Mapping[str, str] | None = None,
+        confianzas_transporte: tuple[float | None, float | None] = (None, None),
     ) -> None:
         resultado = RELECTURA_RECHAZADA if motivo else RELECTURA_PROMOVIDA
         detalle = {
             "numero_guia": str(fila_nueva.get("numero_guia", "")),
             "numero_transporte": str(fila_nueva.get("numero_transporte", "")),
             "cambios": dict(cambios or {}),
+            # Trazabilidad por campo: qué evidencia resolvió cada dato.
+            "conservados_de_evidencia_anterior": dict(conservados or {}),
+            "confianza_transporte": {"anterior": confianzas_transporte[0], "nueva": confianzas_transporte[1]},
+            "reglas": RELECTURA_REGLAS_VERSION,
         }
         registrar_relectura(
             raiz_atlas_relectura, archivo=identificador, lote=raiz.name, sha256=str(relectura["sha256"]),
@@ -5671,19 +5803,32 @@ def procesar_carpeta(
                     estado="OK",
                 )
                 if relectura is not None:
+                    from atlas_core.trazabilidad_ocr import ruta_traza_ocr
+                    vigente_relectura = filas_vigentes_por_archivo[identificador]
+                    confianzas_transporte = (
+                        _confianza_ocr_de_valor(ruta_traza_ocr(directorio_trazas_ocr, identificador),
+                                                str(vigente_relectura.get("numero_transporte", "")).strip()),
+                        _confianza_ocr_de_valor(ruta_traza_ocr(directorio_traza_documento, identificador),
+                                                str(fila.get("numero_transporte", "")).strip()),
+                    )
                     motivo_rechazo = _evaluar_relectura(
-                        filas_vigentes_por_archivo[identificador], fila,
+                        vigente_relectura, fila,
                         identidades_existentes=identidades_existentes,
+                        confianzas_transporte=confianzas_transporte,
                     )
                     cambios_relectura: dict[str, list[str]] = {}
+                    conservados_relectura: dict[str, str] = {}
                     if not motivo_rechazo:
-                        cambios_relectura = _promover_relectura(ruta_csv, archivo=identificador, fila_nueva=fila)
+                        cambios_relectura = _promover_relectura(
+                            ruta_csv, archivo=identificador, fila_nueva=fila, conservados=conservados_relectura,
+                        )
                         _instalar_traza_relectura(
                             directorio_trazas_ocr, directorio_traza_documento, identificador,
                             sha_anterior=str(relectura["anterior"]["sha256"]),
                         )
                     cerrar_relectura(
                         identificador, relectura, motivo=motivo_rechazo, fila_nueva=fila, cambios=cambios_relectura,
+                        conservados=conservados_relectura, confianzas_transporte=confianzas_transporte,
                     )
                     if motivo_rechazo:
                         resumen["omitidos"] += 1
