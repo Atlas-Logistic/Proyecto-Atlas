@@ -215,6 +215,67 @@ def test_obra_conocida_confirmada_sigue_ok_sin_decisiones_redundantes(tmp_path):
     assert decisiones_obra == []
 
 
+def test_obra_confirmada_con_nombre_incompleto_no_cierra_revision(tmp_path):
+    """Una observación histórica truncada no es identidad canónica válida."""
+    carpeta, cliente = _catalogos_con_cliente(
+        tmp_path, nombre_cliente="CONSTRUMART SA", rut_cliente="50.234.350-5",
+    )
+    _confirmar_obra(carpeta, cliente, nombre_obra="CONSTRUCTORA INMOBILIARIA E")
+
+    resultado, _ = _procesar(tmp_path, carpeta, _datos(
+        cliente="CONSTRUMART SA", **{"RUT del cliente": "50.234.350-5"},
+        **{"obra destino": "CONSTRUCTORA INMOBILIARIA E"},
+    ))
+
+    assert resultado["obra_destino"] == "CONSTRUCTORA INMOBILIARIA E"
+    assert resultado["indicador_revision"] == "REVISAR"
+    assert "OBRA_DESTINO_SIN_CORROBORAR" in resultado["motivos_revision_documento"]
+    assert "CATALOGO_OBRA_DESTINO" not in resultado["metodos_recuperacion_documento"]
+
+
+def test_prefijo_incompleto_unico_muestra_canonico_confirmado(tmp_path):
+    carpeta, cliente = _catalogos_con_cliente(
+        tmp_path, nombre_cliente="CONSTRUMART SA", rut_cliente="50.234.350-5",
+    )
+    _confirmar_obra(
+        carpeta, cliente, nombre_obra="CONSTRUCTORA INMOBILIARIA EL ROBLE SPA",
+    )
+
+    resultado, _ = _procesar(tmp_path, carpeta, _datos(
+        cliente="CONSTRUMART SA", **{"RUT del cliente": "50.234.350-5"},
+        **{"obra destino": "CONSTRUCTORA INMOBILIARIA E"},
+    ))
+
+    assert resultado["obra_destino"] == "CONSTRUCTORA INMOBILIARIA EL ROBLE SPA"
+    assert resultado["indicador_revision"] == "OK"
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in resultado["motivos_revision_documento"]
+
+
+def test_destino_historico_repetido_no_tumba_el_documento(tmp_path):
+    """Caso real 475141: la corroboración por destino histórico repetido
+    devuelve un registro sin obra canónica; el documento debe procesarse
+    conservando su obra leída, nunca terminar en ERROR."""
+    carpeta, cliente = _catalogos_con_cliente(
+        tmp_path, nombre_cliente="CONSTRUMART SA", rut_cliente="50.234.350-5",
+    )
+    CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json").crear(
+        cliente_id=cliente.cliente_id, nombre_destino="BODEGA LOS ALAMOS",
+        direccion="CALLE 1", pais="CHILE", fuente="PRUEBA", observacion="3 VIAJES",
+    )
+
+    resultado, _ = _procesar(
+        tmp_path, carpeta,
+        _datos(
+            cliente="CONSTRUMART SA", **{"RUT del cliente": "50.234.350-5"},
+            **{"obra destino": "BODEGA LOS ALAMOS"},
+        ),
+        texto_lineal="FECHA DE EMISION 01-01-2026 BODEGA LOS ALAMOS",
+    )
+
+    assert resultado["obra_destino"] == "BODEGA LOS ALAMOS"
+    assert "CATALOGO_OBRA_DESTINO" in resultado["metodos_recuperacion_documento"]
+
+
 # --- obra nueva (genérica, distinta del cliente): REVISAR + motivo +
 #     decisión OBRA_DESCONOCIDA coherentes entre sí ---
 

@@ -81,6 +81,20 @@ def _sin_sufijo_societario(tokens: tuple[str, ...]) -> tuple[str, ...]:
     return tokens
 
 
+def nombre_obra_documental_parece_incompleto(nombre: str) -> bool:
+    """Detecta un recorte textual inequívoco, sin adivinar una identidad.
+
+    Una última palabra alfabética de una sola letra, tras un nombre de obra
+    sustantivo, suele ser el borde de un campo impreso/extraído (por ejemplo,
+    ``CONSTRUCTORA INMOBILIARIA E``). No intenta completar ese texto: sólo
+    impide que una entidad de catálogo con el mismo fragmento lo convierta en
+    una identidad resuelta. Un prefijo así puede resolverse más adelante sólo
+    contra una obra canónica completa y única.
+    """
+    tokens = tuple(normalizar_nombre_obra(nombre).split())
+    return len(tokens) >= 3 and len(tokens[-1]) == 1 and tokens[-1].isalpha()
+
+
 def coincide_salvo_sufijo_societario(nombre_a: str, nombre_b: str) -> bool:
     """True si dos nombres, ya normalizados por `normalizar_nombre_obra`,
     son IDÉNTICOS una vez que se retira -- como mucho -- un sufijo

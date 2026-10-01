@@ -160,6 +160,10 @@ from atlas_core.catalogo_obras_destinos import (
     ErrorCatalogoObrasDestinos,
     ResolucionObraDestino,
 )
+from atlas_core.motor_evidencia_obras import (
+    nombre_obra_documental_parece_incompleto,
+    resolver_obra_por_prefijo_documental_confirmado,
+)
 from atlas_core.decisiones_pendientes import detectar_decisiones_documento
 from atlas_core.rutas.destino_entrega import (
     CAMPOS_ENTREGA_DOCUMENTO,
@@ -1798,9 +1802,31 @@ def _corroborar_obra_destino_confirmada(
             ruta_clientes=carpeta / "clientes.json",
             ruta_destinos=carpeta / "destinos_maestros.json",
         )
+        # Un fragmento terminal ("... E") no se puede confirmar sólo porque
+        # una observación histórica acabó registrada con el mismo fragmento.
+        # Antes de consultar relaciones se busca, únicamente para ese caso,
+        # un canónico completo y único del mismo cliente. Nunca se inventa el
+        # resto del nombre ni se usa una coincidencia fuzzy.
+        obra_a_corroborar = obra
+        if nombre_obra_documental_parece_incompleto(obra):
+            candidatas = tuple(
+                candidata for candidata in catalogo_obras.listar_obras()
+                if candidata.cliente_id == cliente_id
+                and candidata.estado == "CONFIRMADA"
+                and candidata.estado_vigencia == "ACTIVO"
+                and not nombre_obra_documental_parece_incompleto(candidata.nombre_canonico)
+            )
+            candidata = resolver_obra_por_prefijo_documental_confirmado(
+                nombre_documental=obra,
+                obras_confirmadas_mismo_cliente=candidatas,
+            )
+            if candidata is None:
+                return None
+            obra_a_corroborar = candidata.nombre_canonico
+
         resolucion = catalogo_obras.resolver_obra_destino_confirmada(
             cliente_id=cliente_id,
-            nombre_obra=obra,
+            nombre_obra=obra_a_corroborar,
         )
         if resolucion is not None:
             return resolucion
@@ -1808,7 +1834,9 @@ def _corroborar_obra_destino_confirmada(
         if direccion in {"", "No encontrado"}:
             return None
         texto_documental = normalizar_nombre_destino(direccion)
-        destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra)
+        destinos_confirmados_obra = catalogo_obras.listar_destinos_confirmados_para_obra(
+            nombre_obra=obra_a_corroborar,
+        )
         for destino in destinos_confirmados_obra:
             calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
             if calle and direccion_confirmada_coincide(calle, texto_documental):
@@ -1820,6 +1848,7 @@ def _corroborar_obra_destino_confirmada(
 
 def _obra_confirmada_en_catalogo(
     carpeta_catalogos: str | Path, *, obra_documental: str,
+    cliente_texto: str = "", rut_cliente: str = "", identidad_cliente_corroborada: bool = False,
 ) -> bool:
     """Reconoce la identidad de una obra sin afirmar una dirección nueva.
 
@@ -1837,6 +1866,29 @@ def _obra_confirmada_en_catalogo(
             ruta_clientes=carpeta / "clientes.json",
             ruta_destinos=carpeta / "destinos_maestros.json",
         )
+        if nombre_obra_documental_parece_incompleto(obra):
+            cliente_id = _resolver_cliente_id_corroborado(
+                carpeta,
+                cliente_texto=cliente_texto,
+                rut_cliente=rut_cliente,
+                identidad_cliente_corroborada=identidad_cliente_corroborada,
+            )
+            if cliente_id is None:
+                return False
+            candidatas = tuple(
+                candidata for candidata in catalogo.listar_obras()
+                if candidata.cliente_id == cliente_id
+                and candidata.estado == "CONFIRMADA"
+                and candidata.estado_vigencia == "ACTIVO"
+                and not nombre_obra_documental_parece_incompleto(candidata.nombre_canonico)
+            )
+            candidata = resolver_obra_por_prefijo_documental_confirmado(
+                nombre_documental=obra,
+                obras_confirmadas_mismo_cliente=candidatas,
+            )
+            if candidata is None:
+                return False
+            obra = candidata.nombre_canonico
         return bool(catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra))
     except (OSError, ValueError, ErrorCatalogoObrasDestinos):
         return False
@@ -2923,8 +2975,20 @@ def procesar_archivo(
                 obra_destino_corroborada = _corroborar_destino_historico_repetido(
                     carpeta_catalogos, cliente_id=cliente_id_historico, textos=textos,
                 )
+        if isinstance(obra_destino_corroborada, ResolucionObraDestino):
+            # Se mantiene `obra_documental` como evidencia del texto leído;
+            # la salida operacional sólo expone el canónico cuando el prefijo
+            # se resolvió de manera única y confirmada. Un destino confirmado
+            # o histórico repetido (caso real 475141) corrobora sin traer una
+            # obra canónica: la obra leída se conserva.
+            datos["obra destino"] = obra_destino_corroborada.obra.nombre_canonico
+            obra_final = str(datos["obra destino"])
         obra_identidad_confirmada = _obra_confirmada_en_catalogo(
-            carpeta_catalogos, obra_documental=obra_final,
+            carpeta_catalogos,
+            obra_documental=obra_documental,
+            cliente_texto=str(datos.get("cliente", "")),
+            rut_cliente=str(datos.get("RUT del cliente", "")),
+            identidad_cliente_corroborada=cliente_corroborado_n1,
         )
         if obra_destino_corroborada is not None or obra_identidad_confirmada:
             campos_geometricos_sin_corroborar.discard("obra destino")
