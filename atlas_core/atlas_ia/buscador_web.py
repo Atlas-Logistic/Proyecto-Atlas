@@ -17,7 +17,6 @@ consulta nunca se paga dos veces."""
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
 import time
@@ -30,6 +29,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico, ruta_cache
+from atlas_core.atlas_ia.credenciales import resolver_openrouter_api_key
 
 
 class ErrorBuscadorWeb(Exception):
@@ -123,7 +123,7 @@ class BuscadorWebOpenRouter:
         self, *, api_key: str | None = None, modelo: str = _MODELO_BUSQUEDA,
         timeout: float = 30.0, transporte: TransporteHTTP = _transporte_urllib,
     ) -> None:
-        self._api_key = (api_key if api_key is not None else os.getenv("OPENROUTER_API_KEY", "")).strip()
+        self._api_key = resolver_openrouter_api_key(api_key)
         self._modelo = modelo
         self._timeout = timeout
         self._transporte = transporte

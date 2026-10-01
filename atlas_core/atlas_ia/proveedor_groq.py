@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
 import time
@@ -22,6 +21,7 @@ from atlas_core.atlas_ia.contratos import (
     RESULTADOS_HIPOTESIS,
     calcular_hipotesis_id,
 )
+from atlas_core.atlas_ia.credenciales import resolver_credencial
 from atlas_core.atlas_ia.politica_prompt import POLITICA_PROMPT_SISTEMA, POLITICA_PROMPT_VERSION
 from atlas_core.atlas_ia.proveedor_anthropic import ErrorProveedorModeloIA
 
@@ -53,18 +53,7 @@ TransporteHTTP = Callable[[Request, float], RespuestaHTTP]
 
 def resolver_groq_api_key(api_key: str | None = None) -> str:
     """Resuelve la credencial del proceso o del perfil Windows, sin persistirla."""
-    if api_key is not None:
-        return api_key.strip()
-    valor = os.getenv("GROQ_API_KEY", "").strip()
-    if valor or os.name != "nt":
-        return valor
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as clave:
-            valor, _ = winreg.QueryValueEx(clave, "GROQ_API_KEY")
-        return str(valor or "").strip()
-    except (FileNotFoundError, OSError):
-        return ""
+    return resolver_credencial("GROQ_API_KEY", api_key)
 
 
 def _transporte_urllib(solicitud: Request, timeout: float) -> RespuestaHTTP:

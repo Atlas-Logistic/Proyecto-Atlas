@@ -204,8 +204,8 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
             obtener_texto_fuente,
         )
         if buscador_externo is None:
-            import os
-            if os.getenv("OPENROUTER_API_KEY", "").strip():
+            from atlas_core.atlas_ia.credenciales import resolver_openrouter_api_key
+            if resolver_openrouter_api_key():
                 from atlas_core.atlas_ia.buscador_web import (
                     BuscadorWebConCache, BuscadorWebOpenRouter, RepositorioCacheBusquedaWeb,
                 )

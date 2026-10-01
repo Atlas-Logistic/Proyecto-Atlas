@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import time
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ from atlas_core.atlas_ia.contratos import (
     RESULTADOS_HIPOTESIS,
     calcular_hipotesis_id,
 )
+from atlas_core.atlas_ia.credenciales import resolver_openrouter_api_key
 from atlas_core.atlas_ia.politica_prompt import POLITICA_PROMPT_SISTEMA, POLITICA_PROMPT_VERSION
 from atlas_core.atlas_ia.proveedor_anthropic import ErrorProveedorModeloIA
 
@@ -179,9 +179,7 @@ class ProveedorModeloIAOpenRouter:
         timeout: float = 180.0,
         transporte: TransporteHTTP = _transporte_urllib,
     ) -> None:
-        self._api_key = (
-            api_key if api_key is not None else os.getenv("OPENROUTER_API_KEY", "")
-        ).strip()
+        self._api_key = resolver_openrouter_api_key(api_key)
         self._modelo = modelo
         self._timeout = timeout
         self._transporte = transporte

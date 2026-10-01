@@ -60,7 +60,7 @@ def test_sin_credencial_no_hace_llamada(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     llamadas = []
     with pytest.raises(CredencialOpenRouterAusente):
-        ProveedorModeloIAOpenRouter(transporte=lambda *_: llamadas.append(True)).razonar(_contexto())
+        ProveedorModeloIAOpenRouter(api_key="", transporte=lambda *_: llamadas.append(True)).razonar(_contexto())
     assert llamadas == []
 
 

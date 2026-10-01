@@ -4284,10 +4284,10 @@ def _herramientas_b1_disponibles(
     búsqueda presente) termina registrado aquí -- así que un dominio
     nuevo que declare una herramienta sin conectarla aquí rompe la
     suite, nunca queda descubierto meses después en producción."""
-    import os as _os
+    from atlas_core.atlas_ia.credenciales import resolver_openrouter_api_key
 
     herramientas: dict[str, object] = {}
-    if _os.getenv("OPENROUTER_API_KEY", "").strip():
+    if resolver_openrouter_api_key():
         from atlas_core.atlas_ia.buscador_web import (
             BuscadorWebConCache, BuscadorWebOpenRouter, RepositorioCacheBusquedaWeb,
         )
