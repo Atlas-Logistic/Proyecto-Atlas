@@ -10,12 +10,14 @@ from datetime import datetime, timezone
 import pytest
 
 from atlas_core.incidencias_documentales import (
+    ClasificacionDocumental,
     MOTIVO_CALIDAD_DOCUMENTAL_O_IMAGEN, MOTIVO_PROBLEMA_LECTURA, MOTIVOS_NUNCA_INCIDENCIA,
     TIPO_CAMPO_DOCUMENTAL_INCORRECTO, TIPO_IDENTIDAD_CLIENTE_INCONSISTENTE,
     TIPO_PATENTE_DOCUMENTAL_INCORRECTA,
     AlmacenIncidenciasDocumentales, EstadoIncidencia, ErrorIncidenciasDocumentales,
 )
-from atlas_core.aplicacion_decisiones import _emitir_incidencia_documental_confirmada
+from atlas_core.clasificacion_documental import evaluar_incidencia
+from atlas_core.aplicacion_decisiones import _confirma_discrepancia_documental, _emitir_incidencia_documental_confirmada
 
 FECHA = datetime(2026, 8, 19, tzinfo=timezone.utc)
 
@@ -151,3 +153,51 @@ def test_emisor_confirmado_es_general_y_exige_marca_humana(tmp_path):
         aplicacion={**base, "actor": "JAVIER_MBT"}, ruta_incidencias=ruta, reloj=lambda: FECHA,
     )
     assert len(_almacen(tmp_path).listar()) == 1
+
+
+def test_ausencia_ocr_con_rut_vigente_es_hallazgo_atlas_no_incidencia_vigente(tmp_path):
+    incidencia = _almacen(tmp_path).registrar(
+        contexto="X", numero_guia="1", numero_transporte="T", campo="RUT del chofer",
+        valor_documental="(campo ausente en el documento)", valor_canonico="12.345.678-5",
+        tipo_incidencia="RUT_CHOFER_AUSENTE_DOCUMENTAL", evidencia=(), fecha=FECHA,
+    )
+    evaluacion = evaluar_incidencia(incidencia, {"rut_chofer": "12.345.678-5"})
+    assert evaluacion.clasificacion is ClasificacionDocumental.ATLAS_EXTRACCION_ERRONEA
+    assert evaluacion.vigente_documental is False
+
+
+def test_ausencia_sin_evidencia_visual_no_acusa_documento(tmp_path):
+    incidencia = _almacen(tmp_path).registrar(
+        contexto="X", numero_guia="1", numero_transporte="T", campo="RUT del chofer",
+        valor_documental="(campo ausente en el documento)", valor_canonico="12.345.678-5",
+        tipo_incidencia="RUT_CHOFER_AUSENTE_DOCUMENTAL", evidencia=(), fecha=FECHA,
+    )
+    evaluacion = evaluar_incidencia(incidencia, {"rut_chofer": "No encontrado"})
+    assert evaluacion.clasificacion is ClasificacionDocumental.NO_VERIFICABLE
+    assert evaluacion.vigente_documental is False
+
+
+def test_error_ocr_obra_o_patente_sin_confirmacion_explicita_no_es_emision(tmp_path):
+    incidencia = _almacen(tmp_path).registrar(
+        contexto="X", numero_guia="1", numero_transporte="T", campo="obra_destino",
+        valor_documental="RELSINSKI", valor_canonico="HELSINSKI",
+        tipo_incidencia="OBRA_DOCUMENTAL_INCONSISTENTE", evidencia=("OCR",), fecha=FECHA,
+    )
+    assert evaluar_incidencia(incidencia).clasificacion is ClasificacionDocumental.NO_VERIFICABLE
+
+
+def test_decision_operacional_no_equivale_a_confirmacion_documental():
+    assert not _confirma_discrepancia_documental({
+        "tipo": "VEHICULO_DESCONOCIDO", "accion": "USAR_PATENTE_EXISTENTE", "actor": "JAVIER_MBT",
+    })
+    assert _confirma_discrepancia_documental({"discrepancia_documental_confirmada": True})
+
+
+def test_475096_negativa_las_ausencias_y_contaminacion_no_crean_emision_confirmada(tmp_path):
+    for campo, observado in (("chofer", "No encontrado"), ("material", ""), ("despachar_a_crudo", "PUT CHOFER RUT")):
+        incidencia = _almacen(tmp_path).registrar(
+            contexto="X", numero_guia="475096", numero_transporte="T", campo=campo,
+            valor_documental=observado or "(no encontrado)", valor_canonico="valor operacional",
+            tipo_incidencia="CAMPO_DOCUMENTAL_INCORRECTO", evidencia=(), fecha=FECHA,
+        )
+        assert evaluar_incidencia(incidencia).clasificacion is ClasificacionDocumental.NO_VERIFICABLE

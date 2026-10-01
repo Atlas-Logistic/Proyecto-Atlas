@@ -6357,7 +6357,9 @@ def detectar_incidencias_rut_chofer_invalido_sin_ocr(
         if not nombre_chofer or nombre_chofer == "No encontrado":
             continue
         if rut_chofer in _AUSENTES:
-            tipo_incidencia = TIPO_RUT_DOCUMENTAL_AUSENTE
+            # Ausencia de extracción no prueba una omisión en la guía. El
+            # hallazgo queda en Revisión de Atlas, no en Incidencias.
+            continue
         elif rut_documentalmente_confirmado_invalido(rut_chofer):
             # Sección 2 del bloque: sólo se trata como error documental
             # confirmado (nunca duda de OCR) -- mismo criterio que el
@@ -6437,6 +6439,7 @@ def reconciliar_incidencias_rut_chofer_documental(
                 "DETECCION_AUTOMATICA_RUT_AUSENTE" if tipo_incidencia == TIPO_RUT_DOCUMENTAL_AUSENTE
                 else "DETECCION_AUTOMATICA_RUT_INVALIDO"
             ),
+            clasificacion="DOCUMENTAL_CONFIRMADA",
         )
         registradas.append(incidencia.incidencia_id)
         if candidata["rut_canonico"]:

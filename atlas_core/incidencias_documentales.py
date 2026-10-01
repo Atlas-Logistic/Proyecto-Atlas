@@ -34,6 +34,14 @@ from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_ato
 VERSION_FORMATO = 1
 
 
+class ClasificacionDocumental(str, Enum):
+    """Resultado de atribución; sólo CONFIRMADA acusa al documento."""
+    ATLAS_LECTURA_INCIERTA = "ATLAS_LECTURA_INCIERTA"
+    ATLAS_EXTRACCION_ERRONEA = "ATLAS_EXTRACCION_ERRONEA"
+    NO_VERIFICABLE = "NO_VERIFICABLE"
+    DOCUMENTAL_CONFIRMADA = "DOCUMENTAL_CONFIRMADA"
+
+
 class ErrorIncidenciasDocumentales(ValueError):
     """Error base de este almacén."""
 
@@ -118,21 +126,34 @@ class IncidenciaDocumental:
     fuente_resolucion: str
     actor: str  # "" si la detección fue automática, sin intervención humana puntual
     decision_id: str  # "" si no hay una decisión de bandeja asociada
+    # Campos aditivos: los JSON v1 históricos no los traen. Se conservan
+    # legibles y se evalúan conservadoramente al presentarlos.
+    clasificacion: str = ClasificacionDocumental.NO_VERIFICABLE.value
+    vigente_documental: str = "SI"
+    procedencia: tuple[str, ...] = ()
 
     def a_dict(self) -> dict[str, object]:
         datos = asdict(self)
         datos["evidencia"] = list(self.evidencia)
+        datos["procedencia"] = list(self.procedencia)
         return datos
 
     @classmethod
     def desde_dict(cls, datos: dict[str, object]) -> "IncidenciaDocumental":
         campos = set(cls.__dataclass_fields__)
-        faltantes = campos - set(datos)
+        obligatorios = campos - {"clasificacion", "vigente_documental", "procedencia"}
+        faltantes = obligatorios - set(datos)
         if faltantes:
             raise ErrorIncidenciasDocumentales(f"incidencia incompleta, faltan: {sorted(faltantes)}")
         valores = dict(datos)
         valores["evidencia"] = tuple(valores.get("evidencia") or ())
-        return cls(**{campo: valores[campo] if campo == "evidencia" else str(valores[campo]) for campo in campos})
+        valores["procedencia"] = tuple(valores.get("procedencia") or ())
+        valores.setdefault("clasificacion", ClasificacionDocumental.NO_VERIFICABLE.value)
+        valores.setdefault("vigente_documental", "SI")
+        return cls(**{
+            campo: valores[campo] if campo in {"evidencia", "procedencia"} else str(valores[campo])
+            for campo in campos
+        })
 
 
 def _id_incidencia(*, numero_guia: str, campo: str, valor_documental: str, valor_canonico: str) -> str:
@@ -158,6 +179,8 @@ class AlmacenIncidenciasDocumentales:
         valor_documental: str, valor_canonico: str, tipo_incidencia: str,
         evidencia: Iterable[str], fecha: datetime, estado: EstadoIncidencia | str = EstadoIncidencia.DETECTADA,
         fuente_resolucion: str = "", actor: str = "", decision_id: str = "",
+        clasificacion: ClasificacionDocumental | str = ClasificacionDocumental.NO_VERIFICABLE,
+        vigente_documental: bool = True, procedencia: Iterable[str] = (),
     ) -> IncidenciaDocumental:
         if tipo_incidencia.strip() in MOTIVOS_NUNCA_INCIDENCIA:
             raise ErrorIncidenciasDocumentales(
@@ -174,6 +197,7 @@ class AlmacenIncidenciasDocumentales:
             )
         if fecha.tzinfo is None:
             raise ErrorIncidenciasDocumentales("fecha debe incluir zona horaria")
+        clasificacion_normalizada = ClasificacionDocumental(clasificacion).value
         incidencia = IncidenciaDocumental(
             incidencia_id=_id_incidencia(
                 numero_guia=numero_guia, campo=campo,
@@ -185,6 +209,9 @@ class AlmacenIncidenciasDocumentales:
             fecha_deteccion=fecha.astimezone(timezone.utc).isoformat(),
             estado=EstadoIncidencia(estado).value, fuente_resolucion=fuente_resolucion.strip(),
             actor=actor.strip(), decision_id=decision_id.strip(),
+            clasificacion=clasificacion_normalizada,
+            vigente_documental="SI" if vigente_documental else "NO",
+            procedencia=tuple(str(x) for x in procedencia),
         )
         with bloqueo_sesion(self.ruta.parent, "incidencias_documentales"):
             incidencias = self._leer()
