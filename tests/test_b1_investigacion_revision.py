@@ -78,10 +78,18 @@ def test_investigacion_idempotente_sin_escrituras_productivas(tmp_path, monkeypa
             return SimpleNamespace(contexto_final=contexto, hipotesis=None, estado="ABSTENCION_IA",
                 validacion=None, a_dict=lambda: {"estado": "ABSTENCION_IA"})
 
+    class Buscador:
+        def buscar(self, consulta):
+            return SimpleNamespace(consulta=consulta, fecha="2026-01-01",
+                respuesta_texto='{"candidatos":[]}', citas=())
+
     antes = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (dataset, catalogo, ledger)}
-    primero = investigar_revision("1", raiz_atlas=tmp_path, orquestador=B1(), investigar_externo=False)
-    segundo = investigar_revision("1", raiz_atlas=tmp_path, orquestador=B1(), investigar_externo=False)
+    primero = investigar_revision("1", raiz_atlas=tmp_path, orquestador=B1(),
+        buscador_externo=Buscador(), leer_fuente=lambda _: "")
+    segundo = investigar_revision("1", raiz_atlas=tmp_path, orquestador=B1(),
+        buscador_externo=Buscador(), leer_fuente=lambda _: "")
     assert primero == segundo
     assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in antes} == antes
     assert primero["escrituras_productivas"] == 0
+    assert primero["BUSQUEDA_ADAPTATIVA"][0]["incertidumbre"] == "IDENTIDAD_Y_DIRECCION"
     assert primero["expedientes"][0]["HECHOS_DOCUMENTALES"]["destino_original"] == "CALLE REAL 1"

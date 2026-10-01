@@ -31,3 +31,34 @@ La investigación externa existente usa OpenRouter Sonar cuando hay
 abstención. Las respuestas de búsqueda son evidencia de exploración con
 URLs; una respuesta resumida del proveedor no confirma por sí sola la
 identidad de una obra ni el número exacto de una dirección.
+
+## Investigación adaptativa
+
+`atlas_core.atlas_ia.candidatos_externos` usa el buscador y la caché web
+existentes. La primera consulta pide candidatos estructurados a partir de
+obra, dirección OCR y comuna documental. Las siguientes consultas se forman
+con los candidatos encontrados para corroborar cada dirección, hasta tres
+consultas por expediente. Cada consulta conserva la incertidumbre que buscó
+resolver, el resultado y el error si lo hubo.
+
+Un candidato contiene los campos originales devueltos por la búsqueda y se
+vincula sólo a URLs citadas. Atlas abre la página pública y exige que calle,
+número y comuna aparezcan juntos en el texto fuente. Conserva el fragmento
+original del buscador y el fragmento verificado de la página. Si la página
+no puede leerse o no contiene los anclajes, queda `NO_VERIFICABLE`.
+
+La comparación usa los estados `COINCIDE`, `COMPATIBLE`, `CONTRADICE`,
+`NO_APORTA` y `NO_VERIFICABLE`. Para `PROPUESTA_RESOLUBLE` exige dos dominios
+independientes verificados que relacionen la misma entidad con la dirección;
+calle, número OCR y comuna deben ser compatibles con el original. Un RUT
+verificado contradictorio, número limpio contradictorio o comuna distinta
+bloquean. La tolerancia OCR de un número alfanumérico sólo produce
+`COMPATIBLE`, nunca identidad confirmada por sí sola. Si dos direcciones
+cubren todos los anclajes, se abstiene. El historial observado no vence al
+original. La propuesta sigue siendo de sólo lectura y requiere confirmación
+humana antes de cualquier cambio productivo.
+
+Si OpenRouter falla, esta ruta puede mostrar búsquedas anteriores de la
+caché como evidencia externa de contexto, sin convertirlas en candidatos
+verificados. El material no dispara búsqueda web: usa el original, OCR y
+evidencia documental/Atlas existentes.

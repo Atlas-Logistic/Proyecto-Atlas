@@ -94,6 +94,23 @@ def _seccion(evidencias: list[dict], tipos: tuple[str, ...]) -> list[dict]:
     return [e for e in evidencias if e["tipo_fuente"] in tipos]
 
 
+def _evidencia_web_cacheada(contexto: ContextoRazonamiento) -> tuple[EvidenciaIA, ...]:
+    """Sólo reutiliza búsquedas reales previas si la consulta nueva falló."""
+    from atlas_core.atlas_ia.buscador_web import RepositorioCacheBusquedaWeb
+    from atlas_core.atlas_ia.herramientas import herramienta_verificacion_externa
+
+    repositorio = RepositorioCacheBusquedaWeb()
+
+    class SoloCache:
+        def buscar(self, consulta):
+            resultado = repositorio.buscar(consulta)
+            if resultado is None:
+                raise LookupError("Consulta no cacheada")
+            return resultado
+
+    return herramienta_verificacion_externa(SoloCache()).consultar(contexto)
+
+
 def _evaluar_propuesta(resultado, documental: str, historicos: list[dict],
                       observado: str = "", motivo: str = "") -> dict:
     """Compuerta de expediente: B1 validado nunca vence el original."""
@@ -125,9 +142,29 @@ def _evaluar_propuesta(resultado, documental: str, historicos: list[dict],
             "inferencia": hipotesis.a_dict() if hipotesis else None}
 
 
+def preview_operacional(expediente: dict) -> dict | None:
+    """Vista humana mínima de una propuesta B1, sin auditoría interna."""
+    propuesta = str(expediente.get("PROPUESTA") or "").strip()
+    if not propuesta:
+        return None
+    campo = str(expediente.get("CAMPO") or "")
+    actual = str((expediente.get("HECHOS_DOCUMENTALES") or {}).get("valor_extraido") or "")
+    efecto = ("La guía quedará asociada al nombre operacional propuesto tras su confirmación."
+              if campo == "obra_destino" else
+              "La guía podrá usar esta dirección operacional para su resolución de entrega tras su confirmación.")
+    evaluacion = expediente.get("EVALUACION_CANDIDATOS_EXTERNOS") or {}
+    return {
+        "valor_actual": actual,
+        "valor_propuesto": propuesta,
+        "evidencia_relevante": str(evaluacion.get("razon") or "Evidencia documental y pública convergente."),
+        "consecuencia_operacional": efecto,
+    }
+
+
 def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = None,
                         orquestador=None, proveedor_ocr=None,
-                        investigar_externo: bool = True) -> dict:
+                        investigar_externo: bool = True, buscador_externo=None,
+                        leer_fuente=None) -> dict:
     """Devuelve un expediente reproducible, sin escritura productiva.
 
     El proveedor OCR y el orquestador son inyectables para pruebas. Si B1
@@ -143,12 +180,48 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
         raise ValueError(f"La guía {numero_guia} tiene {len(candidatas)} filas vigentes")
     fila = candidatas[0]
     lectura = _lectura_original(raiz, fila, proveedor_ocr)
+    from atlas_core.procesamiento_masivo import extraer_descripcion_material
+    material_original = extraer_descripcion_material(lectura["lineas"])
     catalogos = raiz / "catalogos_privados"
     # Se reutiliza el constructor productivo de herramientas, pero sólo sus
     # objetos consultables. No se invoca el pipeline que aplica decisiones.
     if orquestador is None:
         from atlas_core.procesamiento_masivo import _crear_orquestador_ia_configurado
         orquestador = _crear_orquestador_ia_configurado(filas=filas, carpeta_catalogos=catalogos)
+    investigacion_adaptativa = None
+    evaluacion_externa = None
+    evaluacion_nombre_obra = None
+    if investigar_externo:
+        from atlas_core.atlas_ia.candidatos_externos import (
+            buscar_adaptativamente, evaluar_candidatos, evaluar_nombre_obra, localidad_documental,
+            obtener_texto_fuente,
+        )
+        if buscador_externo is None:
+            import os
+            if os.getenv("OPENROUTER_API_KEY", "").strip():
+                from atlas_core.atlas_ia.buscador_web import (
+                    BuscadorWebConCache, BuscadorWebOpenRouter, RepositorioCacheBusquedaWeb,
+                )
+                buscador_externo = BuscadorWebConCache(BuscadorWebOpenRouter(), RepositorioCacheBusquedaWeb())
+        if buscador_externo is not None:
+            direccion_base = str(lectura.get("destino_geometrico") or fila.get("despachar_a_crudo") or "")
+            localidad = localidad_documental(direccion_base)
+            investigacion_adaptativa = buscar_adaptativamente(
+                buscador=buscador_externo,
+                entidad=str(fila.get("obra_destino") or fila.get("cliente") or ""),
+                direccion=direccion_base, localidad=localidad,
+                leer_fuente=leer_fuente or obtener_texto_fuente,
+            )
+            evaluacion_externa = evaluar_candidatos(
+                candidatos=investigacion_adaptativa.candidatos,
+                obra=str(fila.get("obra_destino") or ""), cliente=str(fila.get("cliente") or ""),
+                rut_cliente=str(fila.get("rut_cliente") or ""),
+                direccion_documental=direccion_base, localidad=localidad,
+            )
+            evaluacion_nombre_obra = evaluar_nombre_obra(
+                candidatos=investigacion_adaptativa.candidatos,
+                obra_documental=str(fila.get("obra_destino") or ""),
+            )
     casos = []
     for tipo, motivo in detectar_problemas_elegibles(fila):
         if tipo.dominio not in {"OBRA_DESTINO", "DESTINO", "MATERIAL"}:
@@ -177,17 +250,24 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
             herramientas_disponibles=tipo.herramientas,
             restricciones_dominio=("NO_INVENTAR_DATOS", "NO_ESCRIBIR_CATALOGOS", "CONTRASTE_ORIGINAL"),
         )
-        # En investigación explícita se consulta la misma herramienta web
-        # existente antes de B1: así un fallo/cuota del razonador no oculta
-        # fuentes externas disponibles. Sólo escribe la caché de búsqueda.
-        if investigar_externo and orquestador is not None and tipo.dominio in {"OBRA_DESTINO", "DESTINO"}:
+        # Candidatos verificados llegan al mismo ContextoRazonamiento B1:
+        # B1 puede contrastarlos, y el expediente conserva la evaluación
+        # estructural aun si el proveedor B1 agota su cuota.
+        if investigacion_adaptativa and tipo.dominio in {"OBRA_DESTINO", "DESTINO"}:
             from dataclasses import replace
-            from atlas_core.procesamiento_masivo import _herramientas_b1_disponibles
-            herramienta = _herramientas_b1_disponibles(filas=filas, carpeta_catalogos=catalogos).get("VERIFICACION_EXTERNA")
-            if herramienta is not None:
-                consulta = replace(contexto, valor_documental=documental) if documental else contexto
-                externas = herramienta.consultar(consulta)
-                contexto = replace(contexto, evidencias=(*contexto.evidencias, *externas))
+            externas = tuple(EvidenciaIA(
+                identificador="externo:" + hashlib.sha256((c.url + c.direccion + c.numero).encode()).hexdigest()[:16],
+                campo=tipo.campo,
+                valor=(f"{c.direccion} {c.numero}, {c.comuna}" if tipo.dominio == "DESTINO" else c.nombre),
+                tipo_fuente="EXTERNO", nivel="FUENTE_WEB_VERIFICADA",
+                independencia=1, procedencia="atlas_ia.candidatos_externos",
+                referencias_fuente=(c.url, c.fragmento_fuente, f"consultado_en={c.consultado_en}"),
+            ) for c in investigacion_adaptativa.candidatos if c.verificacion == "VERIFICADA" and
+                (c.direccion if tipo.dominio == "DESTINO" else c.nombre))
+            if not externas and any(t["error"] for t in investigacion_adaptativa.traza):
+                consulta_cache = replace(contexto, valor_documental=documental) if documental else contexto
+                externas = _evidencia_web_cacheada(consulta_cache)
+            contexto = replace(contexto, evidencias=(*contexto.evidencias, *externas))
         resultado = orquestador.resolver(contexto) if orquestador else None
         final = resultado.contexto_final if resultado else contexto
         hechos = [e.a_dict() for e in final.evidencias]
@@ -197,26 +277,54 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
         observados = [e for e in historicos if e not in confirmados]
         evaluacion = _evaluar_propuesta(resultado, documental, historicos,
                                         str(fila.get(tipo.campo, "")), motivo)
+        propuesta_evidencia = ""
+        evaluacion_dominio = (evaluacion_nombre_obra if tipo.dominio == "OBRA_DESTINO"
+                              else evaluacion_externa)
+        if evaluacion_dominio and evaluacion_dominio["estado"] == "PROPUESTA_RESOLUBLE":
+            ganador = evaluacion_dominio["propuesta"]
+            if tipo.dominio == "DESTINO":
+                propuesta_evidencia = ganador["direccion"]
+            elif tipo.dominio == "OBRA_DESTINO" and ganador["nombre_candidato"]:
+                propuesta_evidencia = ganador["nombre_candidato"]
+        propuesta_final = propuesta_evidencia or (evaluacion["propuesta"] if tipo.dominio != "DESTINO" else "")
+        nivel_final = "PROPUESTA_RESOLUBLE" if propuesta_evidencia else evaluacion["nivel"]
+        razones = [] if propuesta_evidencia else [evaluacion["razon"]]
+        if not propuesta_evidencia and tipo.dominio in {"OBRA_DESTINO", "DESTINO"}:
+            if evaluacion_dominio:
+                razones.append(evaluacion_dominio["razon"])
+            if investigacion_adaptativa and any(t["error"] for t in investigacion_adaptativa.traza):
+                razones.append("Una búsqueda externa falló; ver BUSQUEDA_ADAPTATIVA")
+            if tipo.dominio == "DESTINO" and evaluacion_externa and not evaluacion_externa["numero_documental"]:
+                razones.append("El original no aporta número; sólo se propone si fuentes independientes lo publican literalmente")
+        if not propuesta_evidencia and tipo.dominio == "MATERIAL" and not material_original:
+            razones.append("La extracción de material del OCR original/alternativo no recuperó una descripción exacta")
         casos.append({
             "CAMPO": tipo.campo, "MOTIVO": motivo,
             "HECHOS_DOCUMENTALES": {"valor_extraido": str(fila.get(tipo.campo, "")),
-                                     "destino_original": documental, "ocr_lineas": lectura["lineas"]},
+                                     "destino_original": documental,
+                                     "material_original_extraido": material_original if tipo.dominio == "MATERIAL" else "",
+                                     "ocr_lineas": lectura["lineas"]},
             "HECHOS_ATLAS": _seccion(hechos, ("CATALOGO",)),
             "HISTORIAL_CONFIRMADO": confirmados,
             "HISTORIAL_OBSERVADO": observados,
             "EVIDENCIA_EXTERNA": _seccion(hechos, ("EXTERNO",)),
             "CONTRADICCIONES": evaluacion["contradicciones"],
             "INFERENCIAS": [evaluacion["inferencia"]] if evaluacion["inferencia"] else [],
-            "PROPUESTA": evaluacion["propuesta"],
-            "NIVEL_EVIDENCIA": evaluacion["nivel"],
-            "ACCION_RECOMENDADA": "REVISAR_ORIGINAL_Y_CONFIRMAR" if evaluacion["bloqueada"] else (
-                "PROPONER_A_HUMANO" if evaluacion["propuesta"] else "ABSTENERSE"),
+            "PROPUESTA": propuesta_final,
+            "NIVEL_EVIDENCIA": nivel_final,
+            "ACCION_RECOMENDADA": "PROPONER_A_HUMANO" if propuesta_evidencia else (
+                "REVISAR_ORIGINAL_Y_CONFIRMAR" if evaluacion["bloqueada"] else
+                "PROPONER_A_HUMANO" if propuesta_final else "ABSTENERSE"),
             "REQUIERE_CONFIRMACION_HUMANA": True,
-            "RAZON_ABSTENCION": evaluacion["razon"],
+            "RAZON_ABSTENCION": "; ".join(r for r in razones if r),
+            "EVALUACION_CANDIDATOS_EXTERNOS": evaluacion_dominio if tipo.dominio in {"OBRA_DESTINO", "DESTINO"} else None,
             "RESULTADO_B1": resultado.a_dict() if resultado else None,
         })
+        casos[-1]["PREVIEW_OPERACIONAL"] = preview_operacional(casos[-1])
     return {"schema_version": 1, "numero_guia": str(numero_guia),
             "numero_transporte": str(fila.get("numero_transporte", "")),
             "archivo": str(fila.get("archivo", "")), "documento_original": {
                 k: v for k, v in lectura.items() if k != "lineas"},
-            "expedientes": casos, "escrituras_productivas": 0}
+            "expedientes": casos,
+            "BUSQUEDA_ADAPTATIVA": investigacion_adaptativa.traza if investigacion_adaptativa else [],
+            "escrituras_productivas": 0}
