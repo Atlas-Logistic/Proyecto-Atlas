@@ -19,13 +19,17 @@ Reglas:
 - Una mención de chofer ambigua o desconocida -> se pregunta, no se adivina.
 - Lo que proponga un modelo es DATO: sólo {accion, parametros, menciones},
   acción del catálogo, parámetros del esquema, sin rutas/comandos/código.
+- Una investigación deja en ESTA conversación su resultado estructurado (no
+  su texto); "corrige la obra con lo que acabas de identificar" sólo lo
+  reutiliza si es de la misma guía, exitoso, no ambiguo y reciente, y lo
+  convierte en un preview de DOCUMENTO_ASIGNAR_OBRA (obra existente).
 """
 from __future__ import annotations
 
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -33,6 +37,7 @@ from atlas_core.acciones_operacionales import (
     ACCIONES, DESTRUCTIVA, LECTURA, ORIGEN_B1, SENSIBLE, CapaAccionesOperacionales, _esquema,
 )
 from atlas_core.almacenamiento_portable import SesionOcupadaError, bloqueo_sesion, escribir_json_atomico
+from atlas_core.identidad_canonica import misma_identidad, nombre_visible
 
 NOMBRE_ESTADO = "b1_operador_conversaciones.json"
 ACTOR_B1 = "B1"
@@ -176,6 +181,29 @@ _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s
 ACCION_INVESTIGAR_REVISION = "INVESTIGAR_REVISION"
 _GUIA_INVESTIGACION = re.compile(r"\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\b")
 _VERBO_INVESTIGAR = re.compile(r"\b(?:INVESTIGA(?:R)?|BUSCA(?:R)?|AVERIGUA(?:R)?)\b")
+# Corregir la obra con el resultado de la investigación inmediatamente
+# anterior: "corrige el nombre de la obra de la guía N usando el nombre
+# completo que acabas de identificar", "aplica la propuesta anterior a la
+# obra de la guía N". Va antes que la investigación (que leía "NOMBRE
+# COMPLETO ... OBRA" como una investigación nueva).
+ACCION_OBRA_DESDE_INVESTIGACION = "OBRA_DESDE_INVESTIGACION_PREVIA"
+_VERBO_CORREGIR_OBRA = re.compile(
+    r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|ACTUALIZA|ACTUALIZAR|ASIGNA|ASIGNAR|APLICA|APLICAR|"
+    r"REEMPLAZA|REEMPLAZAR|USA|USAR)\b.*\bOBRA\b")
+_REFERENCIA_INVESTIGACION = re.compile(
+    r"\b(?:ACABAS?\s+DE\s+(?:IDENTIFICAR|ENCONTRAR|INVESTIGAR|PROPONER|OBTENER|DETERMINAR)"
+    r"|(?:QUE|LO\s+QUE)\s+(?:IDENTIFICASTE|ENCONTRASTE|PROPUSISTE|INVESTIGASTE|DETERMINASTE)"
+    r"|PROPUESTA\s+(?:ANTERIOR|DE\s+LA\s+INVESTIGACION|QUE\s+(?:ME\s+)?DISTE))\b")
+# Una investigación sólo es "inmediatamente anterior" mientras es reciente.
+VIGENCIA_INVESTIGACION = timedelta(minutes=30)
+_NIVELES_PROPUESTA_REUTILIZABLE = {"PROPUESTA_RESOLUBLE", "DOCUMENTAL_CONVERGENTE"}
+
+
+def _intencion_obra_desde_investigacion(plano: str) -> Intencion | None:
+    if not (_VERBO_CORREGIR_OBRA.match(plano) and _REFERENCIA_INVESTIGACION.search(plano)):
+        return None
+    guia = _GUIA_INVESTIGACION.search(plano)
+    return Intencion(ACCION_OBRA_DESDE_INVESTIGACION, {"numero_guia": guia.group("guia") if guia else ""})
 
 
 def _intencion_investigar_revision(plano: str) -> Intencion | None:
@@ -220,6 +248,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     m = _TRANSPORTE.search(plano)
     if m:
         return Intencion("TRANSPORTE_REVALIDAR", {"numero_transporte": m.group("n")})
+    reutilizacion = _intencion_obra_desde_investigacion(plano)
+    if reutilizacion is not None:
+        return reutilizacion
     investigacion = _intencion_investigar_revision(plano)
     if investigacion is not None:
         return investigacion
@@ -551,6 +582,95 @@ def _describir_resultado(resultado: Mapping[str, object]) -> str:
     return " ".join(partes)
 
 
+# --------------------------------------------------------------- investigación previa
+
+
+def registro_investigacion_obra(numero_guia: str, campos: tuple, resultado: Mapping | None,
+                                creado_en: str) -> dict:
+    """Resultado ESTRUCTURADO de una investigación (de sus expedientes, nunca
+    del texto mostrado) para que la conversación pueda reutilizarlo.
+    estado: PROPUESTA | SIN_PROPUESTA | AMBIGUA | FALLIDA | NO_SOLICITADA."""
+    registro = {"numero_guia": str(numero_guia), "campo": "obra_destino", "creado_en": creado_en,
+                "estado": "FALLIDA", "valor_documental": "", "propuesta_publicada": "",
+                "nivel_evidencia": "", "evidencia_relevante": "", "fuentes": []}
+    if "obra_destino" not in tuple(campos or ()):
+        return {**registro, "estado": "NO_SOLICITADA"}
+    if resultado is None:
+        return registro
+    registro["numero_transporte"] = str(resultado.get("numero_transporte") or "")
+    expedientes = [e for e in resultado.get("expedientes") or []
+                   if isinstance(e, Mapping) and e.get("CAMPO") == "obra_destino"]
+    for expediente in expedientes:
+        valor = str((expediente.get("HECHOS_DOCUMENTALES") or {}).get("valor_extraido") or "")
+        if valor and not registro["valor_documental"]:
+            registro["valor_documental"] = valor
+    propuestas = [e for e in expedientes
+                  if str(e.get("PROPUESTA") or "").strip()
+                  and e.get("ACCION_RECOMENDADA") == "PROPONER_A_HUMANO"
+                  and e.get("NIVEL_EVIDENCIA") in _NIVELES_PROPUESTA_REUTILIZABLE
+                  and (e.get("EVALUACION_CANDIDATOS_EXTERNOS") or {}).get("estado") in (None, "PROPUESTA_RESOLUBLE")]
+    if not propuestas:
+        sin_busqueda = (resultado.get("BUSQUEDA_EXTERNA") or {}).get("estado") in {"FALLIDA", "NO_DISPONIBLE"}
+        return {**registro, "estado": "FALLIDA" if sin_busqueda or not expedientes else "SIN_PROPUESTA"}
+    distintas: list[str] = []
+    for expediente in propuestas:
+        nombre = str(expediente["PROPUESTA"]).strip()
+        if not any(misma_identidad(nombre, previa) for previa in distintas):
+            distintas.append(nombre)
+    if len(distintas) != 1:
+        return {**registro, "estado": "AMBIGUA"}
+    elegido = propuestas[0]
+    evaluacion = elegido.get("EVALUACION_CANDIDATOS_EXTERNOS") or {}
+    fuentes: list[str] = []
+    for evidencia in elegido.get("EVIDENCIA_EXTERNA") or []:
+        referencias = (evidencia.get("referencias_fuente") or []) if isinstance(evidencia, Mapping) else []
+        for referencia in referencias:
+            if str(referencia).startswith("http") and referencia not in fuentes:
+                fuentes.append(str(referencia))
+    return {**registro, "estado": "PROPUESTA", "propuesta_publicada": distintas[0],
+            "nivel_evidencia": str(elegido.get("NIVEL_EVIDENCIA") or ""),
+            "evidencia_relevante": str((elegido.get("PREVIEW_OPERACIONAL") or {}).get("evidencia_relevante")
+                                       or evaluacion.get("razon") or "")[:300],
+            "fuentes": fuentes[:5]}
+
+
+def _obra_por_identidad(obras: list, nombre: str) -> list:
+    """Obras vigentes cuyo nombre canónico (o, si ninguna, un alias) es la
+    misma identidad que `nombre`. Nunca fuzzy."""
+    vigentes = [o for o in obras if o.estado_vigencia == "ACTIVO" and o.estado not in {"RECHAZADA", "INACTIVA"}]
+    por_nombre = [o for o in vigentes if misma_identidad(o.nombre_canonico, nombre)]
+    return por_nombre or [o for o in vigentes if any(misma_identidad(a, nombre) for a in o.aliases_documentales)]
+
+
+_MOTIVO_NO_REUTILIZABLE = {
+    "FALLIDA": "la investigación anterior no se completó, así que no hay propuesta que aplicar",
+    "SIN_PROPUESTA": "la investigación anterior no encontró evidencia suficiente para proponer un nombre",
+    "AMBIGUA": "la investigación anterior encontró más de un nombre posible y no elijo entre ellos",
+    "NO_SOLICITADA": "la investigación anterior no fue sobre la obra",
+}
+
+
+def _mensaje_preview_obra(presentacion: Mapping[str, str]) -> str:
+    return (f"Guía: {presentacion['numero_guia']}\nObra actual: {presentacion['antes'] or 'sin obra'}\n"
+            f"Obra propuesta: {presentacion['despues']}\n"
+            "Se usa la obra ya registrada en Atlas; el texto leído en la guía se conserva como respaldo. "
+            "¿Confirmas? (sí / no)")
+
+
+def _preview_publico_obra(presentacion: Mapping[str, str], preview: Mapping[str, object]) -> dict:
+    """Preview visible sin IDs, tokens, códigos ni nombres de acciones."""
+    obsoletas = (preview.get("afectados") or {}).get("decisiones_obsoletas") or []
+    return {
+        "entidad": {"numero_guia": presentacion["numero_guia"]},
+        "valor_actual": {"obra_destino": presentacion["antes"]},
+        "valor_propuesto": {"obra_destino": presentacion["despues"]},
+        "afectados": {"total_guias": 1, "total_decisiones": len(obsoletas)},
+        "consecuencias": ["Se usa la obra ya registrada en Atlas; no se crea una obra nueva.",
+                          "El texto leído en la guía se conserva como respaldo.",
+                          "Atlas revisará la guía y su viaje."],
+    }
+
+
 # --------------------------------------------------------------- operador
 
 
@@ -585,13 +705,29 @@ class OperadorB1:
     def pendiente(self, conversacion_id: str) -> dict | None:
         return (self._leer().get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
 
-    def _fijar_pendiente(self, estado: dict, conversacion_id: str, pendiente: dict | None) -> None:
+    def _fijar(self, estado: dict, conversacion_id: str, clave: str, valor: dict | None) -> None:
+        """Fija/borra una sola clave de la conversación sin tocar las demás."""
         conversaciones = estado.setdefault("conversaciones", {})
-        if pendiente is None:
-            conversaciones.pop(conversacion_id, None)
+        conversacion = dict(conversaciones.get(conversacion_id) or {})
+        if valor is None:
+            conversacion.pop(clave, None)
         else:
-            conversaciones[conversacion_id] = {"pendiente": pendiente}
+            conversacion[clave] = valor
+        if conversacion:
+            conversaciones[conversacion_id] = conversacion
+        else:
+            conversaciones.pop(conversacion_id, None)
         escribir_json_atomico(self._ruta, estado)
+
+    def _fijar_pendiente(self, estado: dict, conversacion_id: str, pendiente: dict | None) -> None:
+        self._fijar(estado, conversacion_id, "pendiente", pendiente)
+
+    def _olvidar_investigacion(self, estado: dict, conversacion_id: str) -> None:
+        if "investigacion" in (estado.get("conversaciones", {}).get(conversacion_id) or {}):
+            self._fijar(estado, conversacion_id, "investigacion", None)
+
+    def investigacion_previa(self, conversacion_id: str) -> dict | None:
+        return (self._leer().get("conversaciones", {}).get(conversacion_id) or {}).get("investigacion")
 
     # ------------------------------------------------------------ entrada
 
@@ -602,8 +738,10 @@ class OperadorB1:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
                 if es_confirmacion(texto):
+                    self._olvidar_investigacion(estado, conversacion_id)
                     return self._confirmar(estado, conversacion_id)
                 if es_cancelacion(texto):
+                    self._olvidar_investigacion(estado, conversacion_id)
                     tenia = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
                     self._fijar_pendiente(estado, conversacion_id, None)
                     return {"estado": "CANCELADA" if tenia else "SIN_PREVIEW_PENDIENTE",
@@ -615,7 +753,7 @@ class OperadorB1:
     def _interpretar(self, texto: str) -> Intencion | None:
         intencion = interpretar_determinista(texto)
         if intencion is not None:
-            if intencion.accion == ACCION_INVESTIGAR_REVISION:
+            if intencion.accion in {ACCION_INVESTIGAR_REVISION, ACCION_OBRA_DESDE_INVESTIGACION}:
                 return intencion
             return validar_intencion(intencion)
         if self.proveedor is None:
@@ -628,13 +766,20 @@ class OperadorB1:
         try:
             intencion = self._interpretar(texto)
         except ErrorContratoInterpretacion as error:
+            self._olvidar_investigacion(estado, conversacion_id)
             return {"estado": "RECHAZADA", "codigo": "CONTRATO_INTERPRETACION", "mensaje": str(error)}
+        if intencion is None or intencion.accion not in {ACCION_INVESTIGAR_REVISION, ACCION_OBRA_DESDE_INVESTIGACION}:
+            # Sólo la investigación INMEDIATAMENTE anterior es reutilizable:
+            # cualquier otra instrucción la deja sin efecto.
+            self._olvidar_investigacion(estado, conversacion_id)
         if intencion is None:
             return {"estado": "NO_INTERPRETADA", "mensaje": (
                 "No reconocí una instrucción operacional. Puedo: asociar vehículo a chofer, activar/inactivar un "
                 "chofer, corregir un campo o la obra de una guía, o consultar choferes, obras y decisiones.")}
         if intencion.accion == ACCION_INVESTIGAR_REVISION:
-            return self._investigar_revision(intencion)
+            return self._investigar_revision(intencion, estado, conversacion_id)
+        if intencion.accion == ACCION_OBRA_DESDE_INVESTIGACION:
+            return self._obra_desde_investigacion(estado, conversacion_id, intencion, texto)
         definicion = ACCIONES[intencion.accion]
         if definicion.riesgo != LECTURA:
             # Toda instrucción operacional nueva invalida el pendiente anterior.
@@ -690,21 +835,31 @@ class OperadorB1:
             parametros["destino_id"] = resolucion["destino_id"]
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
 
-    def _investigar_revision(self, intencion: Intencion) -> dict:
-        """Investiga en modo lectura: no crea preview ni altera el pendiente."""
+    def _investigar_revision(self, intencion: Intencion, estado: dict | None = None,
+                             conversacion_id: str = "") -> dict:
+        """Investiga en modo lectura: no crea preview ni altera el pendiente.
+        Deja en la conversación sólo su resultado estructurado (reutilizable)."""
         numero_guia = str(intencion.parametros.get("numero_guia") or "")
         campos = tuple(intencion.parametros.get("campos") or ())
         if not numero_guia:
             return {"estado": "ACLARACION_REQUERIDA", "accion": ACCION_INVESTIGAR_REVISION,
                     "mensaje": "Indica el número de guía que quieres investigar."}
+
+        def registrar(resultado: Mapping | None) -> None:
+            if estado is not None and conversacion_id:
+                self._fijar(estado, conversacion_id, "investigacion", registro_investigacion_obra(
+                    numero_guia, campos, resultado, self.reloj().isoformat()))
+
         from atlas_core.atlas_ia.investigacion_revision import investigar_revision
         try:
             resultado = investigar_revision(numero_guia, raiz_atlas=self.raiz,
                                              campos_solicitados=campos,
                                              permitir_ocr_nuevo=False)
         except (OSError, ValueError) as error:
+            registrar(None)
             return {"estado": "INVESTIGACION_NO_DISPONIBLE", "accion": ACCION_INVESTIGAR_REVISION,
                     "mensaje": f"No pude investigar la guía {numero_guia}: {error}"}
+        registrar(resultado)
         etiquetas = {"obra_destino": "obra", "despachar_a_crudo": "dirección de destino"}
         # "No se pudo buscar" no es "no hay evidencia": se informa aparte y en
         # lenguaje operacional (el detalle técnico queda sólo en el expediente).
@@ -748,6 +903,66 @@ class OperadorB1:
                 "propuestas": propuestas, "busqueda_externa": busqueda_externa,
                 "mensaje": f"Investigación de guía {numero_guia}, sin cambios: {resumen}"}
 
+    def _obra_desde_investigacion(self, estado: dict, conversacion_id: str, intencion: Intencion,
+                                  texto: str) -> dict:
+        """Convierte la propuesta ESTRUCTURADA de la investigación anterior de
+        esta conversación en un preview de DOCUMENTO_ASIGNAR_OBRA. Nunca relee
+        texto libre, nunca crea obras y nunca aplica sin confirmación."""
+        self._fijar_pendiente(estado, conversacion_id, None)
+
+        def rechazo(motivo: str) -> dict:
+            return {"estado": "RECHAZADA", "accion": ACCION_OBRA_DESDE_INVESTIGACION, "mensaje": motivo}
+
+        previa = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("investigacion")
+        try:
+            vigente = bool(previa) and (
+                self.reloj() - datetime.fromisoformat(previa["creado_en"]) <= VIGENCIA_INVESTIGACION)
+        except (KeyError, TypeError, ValueError):
+            vigente = False
+        if not vigente:
+            return rechazo("No tengo una investigación reciente de obra en esta conversación para reutilizar. "
+                           "Pide primero: «Investiga la obra de la guía N».")
+        guia = str(intencion.parametros.get("numero_guia") or "") or previa["numero_guia"]
+        if guia != previa["numero_guia"]:
+            return rechazo(f"La investigación anterior fue de la guía {previa['numero_guia']}, no de la guía {guia}; "
+                           "no reutilizo una propuesta de otra guía.")
+        if previa.get("estado") != "PROPUESTA":
+            motivo = _MOTIVO_NO_REUTILIZABLE.get(previa.get("estado"), _MOTIVO_NO_REUTILIZABLE["FALLIDA"])
+            return rechazo(f"No hice cambios en la guía {guia}: {motivo}.")
+        propuesta = previa["propuesta_publicada"]
+        coincidencias = _obra_por_identidad(self.capa._ctx.catalogo_obras().listar_obras(), propuesta)
+        if not coincidencias:
+            return rechazo(f"No hice cambios en la guía {guia}: la obra propuesta «{nombre_visible(propuesta)}» "
+                           "no está registrada en Atlas y no creo obras desde aquí.")
+        if len(coincidencias) > 1:
+            return rechazo(f"No hice cambios en la guía {guia}: «{nombre_visible(propuesta)}» coincide con más de "
+                           "una obra registrada y no elijo entre ellas.")
+        obra = coincidencias[0]
+        referencia = (f"{str(texto)[:120]} | Investigación B1 previa, guía {guia}: documental "
+                      f"{previa.get('valor_documental')!r}; propuesta publicada {propuesta!r}; nivel "
+                      f"{previa.get('nivel_evidencia')}; evidencia: {previa.get('evidencia_relevante')}; fuentes: "
+                      f"{', '.join(previa.get('fuentes') or []) or 'sin URL'}")[:500]
+        # La evidencia viaja también como parámetro: queda en el ledger junto al documental.
+        parametros = {"numero_guia": guia, "obra_id": obra.obra_id, "referencia": referencia}
+        preview = self.capa.previsualizar("DOCUMENTO_ASIGNAR_OBRA", parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
+                                          referencia=referencia)
+        if preview.get("estado") == "SIN_CAMBIOS":
+            return {"estado": "SIN_CAMBIOS", "accion": ACCION_OBRA_DESDE_INVESTIGACION,
+                    "mensaje": f"La guía {guia} ya tiene la obra {nombre_visible(obra.nombre_canonico)}; "
+                               "no hay nada que confirmar."}
+        if preview.get("estado") != "PREVIEW" or preview.get("riesgo") == SENSIBLE:
+            return rechazo(f"No hice cambios en la guía {guia}: la corrección no se puede preparar ahora"
+                           + (f" ({preview['mensaje']})." if preview.get("mensaje") else "."))
+        presentacion = {"numero_guia": guia,
+                        "antes": str((preview.get("valor_actual") or {}).get("obra_destino") or ""),
+                        "despues": nombre_visible(obra.nombre_canonico)}
+        self._fijar_pendiente(estado, conversacion_id, {
+            "token": preview["token"], "accion": "DOCUMENTO_ASIGNAR_OBRA", "parametros": parametros,
+            "referencia": referencia, "creado_en": self.reloj().isoformat(), "presentacion": presentacion})
+        return {"estado": "PREVIEW_PENDIENTE", "accion": "DOCUMENTO_ASIGNAR_OBRA",
+                "preview": _preview_publico_obra(presentacion, preview),
+                "mensaje": _mensaje_preview_obra(presentacion)}
+
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
                        texto: str) -> dict:
         preview = self.capa.previsualizar(intencion.accion, parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
@@ -789,8 +1004,15 @@ class OperadorB1:
         resultado = self.capa.ejecutar(pendiente["token"], actor=ACTOR_B1, origen=ORIGEN_B1,
                                        confirmado_por=self.usuario, accion_esperada=pendiente["accion"])
         estado_capa = resultado.get("estado")
+        presentacion = pendiente.get("presentacion")
         if estado_capa == "APLICADA":
             self._fijar_pendiente(estado, conversacion_id, None)
+            if presentacion:
+                visible = {**resultado, "antes": {"obra_destino": presentacion["antes"]},
+                           "despues": {"obra_destino": presentacion["despues"]}}
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": visible,
+                        "mensaje": f"Aplicado: la guía {presentacion['numero_guia']} queda con la obra "
+                                   f"{presentacion['despues']}."}
             return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
                     "mensaje": _describir_resultado(resultado)}
         if estado_capa == "PREVIEW_OBSOLETO" or resultado.get("codigo") in {"PREVIEW_EXPIRADO", "TOKEN_DESCONOCIDO"}:
@@ -803,6 +1025,15 @@ class OperadorB1:
                 return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
                         "mensaje": f"No ejecuté nada: {motivo} y ya no hay cambio que confirmar "
                                    f"({nuevo.get('estado')}: {nuevo.get('mensaje', 'sin cambios')})."}
+            if presentacion:
+                presentacion = {**presentacion,
+                                "antes": str((nuevo.get("valor_actual") or {}).get("obra_destino") or "")}
+                self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
+                                                               "creado_en": self.reloj().isoformat(),
+                                                               "presentacion": presentacion})
+                return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                        "preview": _preview_publico_obra(presentacion, nuevo),
+                        "mensaje": f"No ejecuté nada: {motivo}. " + _mensaje_preview_obra(presentacion)}
             self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
                                                            "creado_en": self.reloj().isoformat()})
             return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
