@@ -849,6 +849,172 @@ def _extraer_identidad_cliente_recortada_geometrica(
     return {"cliente": nombre, "rut": rut}
 
 
+def _es_fragmento_etiqueta_senor(texto_simple: str) -> bool:
+    """Etiqueta SEÑOR(ES) completa o truncada por el borde de la foto.
+
+    Acepta un sufijo de ``SENOR(ES)``/``SENORES`` que conserve ``OR``; el
+    primer carácter visible del fragmento puede venir mal leído porque es
+    justamente el que queda cortado (caso real 475042: ``VOR(ES)``). El
+    resto del bloque debe coincidir completo, nunca por subcadena.
+    """
+    if _es_etiqueta_senor(texto_simple):
+        return True
+    if "OR" not in texto_simple:
+        return False
+    for etiqueta in ("SENOR(ES)", "SENORES"):
+        for inicio in range(1, len(etiqueta) - 1):
+            sufijo = etiqueta[inicio:]
+            if "OR" not in sufijo:
+                continue
+            if texto_simple == sufijo:
+                return True
+            if (
+                len(sufijo) >= 5 and len(texto_simple) == len(sufijo)
+                and texto_simple[1:] == sufijo[1:]
+            ):
+                return True
+    return False
+
+
+def _es_fragmento_etiqueta_codigo_cliente(texto_simple: str) -> bool:
+    """``CÓDIGO CLIENTE`` completo o con ``CÓDIGO`` truncado/mal leído por
+    el borde (caso real 475042: ``DLGO CLIENTE``)."""
+    coincidencia = re.fullmatch(r"([A-Z]{1,6})\.? ?CLIENTE", texto_simple)
+    if not coincidencia:
+        return False
+    prefijo = coincidencia.group(1)
+    return prefijo in {"COD", "CODIGO"} or (len(prefijo) >= 2 and prefijo.endswith("GO"))
+
+
+def _corrida_contigua_desde(
+    fila: List[Dict[str, Any]], inicio: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Bloques contiguos hacia la derecha desde `inicio`, dentro de la misma
+    fila; un huelgo mayor (otra columna del formulario) corta la corrida."""
+    corrida = [inicio]
+    for item in sorted(fila, key=lambda candidato: candidato["x1"]):
+        if item["x1"] <= corrida[-1]["x1"]:
+            continue
+        if item["x1"] - corrida[-1]["x2"] > max(item["h"], corrida[-1]["h"]) * 1.25:
+            break
+        corrida.append(item)
+    return corrida
+
+
+def _extraer_identidad_cliente_cabecera_truncada(bloques: List[Any]) -> Dict[str, Any]:
+    """Lee nombre, RUT y código del cliente en la cabecera SEÑOR(ES) aunque
+    las etiquetas de la columna izquierda estén truncadas o mal leídas.
+
+    Caso real 475042: la foto corta el margen izquierdo (``VOR(ES)``,
+    ``DLGO CLIENTE``, etiqueta R.U.T. ilegible), el nombre queda lejos de
+    la etiqueta y el RUT llega partido en dos cajas. La estructura del
+    formulario se conserva: la etiqueta SEÑOR(ES) es el primer bloque de
+    su fila, el nombre es la primera corrida de valores a su derecha, el
+    RUT es la corrida alineada con esa columna en la fila siguiente y el
+    código cliente está en la fila de cabecera superior.
+
+    Sólo entrega evidencia documental; nunca decide identidad (eso exige
+    catálogo, ver `procesamiento_masivo._completar_cliente_ausente_por_
+    cabecera_documental`). Un RUT sólo se entrega si su dígito verificador
+    es válido y es el único candidato; ante varias cabeceras con
+    resultados distintos se abstiene por completo.
+    """
+    items = _normalizar_bloques_geometricos(bloques)
+    if not items:
+        return {}
+    escala = _escala_geometrica_texto(items)
+
+    def primero_de_su_fila(item: Dict[str, Any]) -> bool:
+        return not any(
+            otro is not item and _misma_fila_geometrica(otro, item) and otro["cx"] < item["x1"]
+            for otro in items
+        )
+
+    resultados: set[tuple[str, str, str, bool]] = set()
+    anclas = [
+        item for item in items
+        if _es_fragmento_etiqueta_senor(item["simple"]) and primero_de_su_fila(item)
+    ]
+    for ancla in anclas:
+        alto = ancla["h"]
+        fila_nombre = [
+            item for item in items
+            if item is not ancla and _misma_fila_geometrica(item, ancla)
+            and item["x1"] >= ancla["x2"] - 8 * escala
+        ]
+        nombre = ""
+        columna_x = None
+        if fila_nombre:
+            primero = min(fila_nombre, key=lambda item: item["x1"])
+            if (
+                primero["x1"] - ancla["x2"] <= 260 * escala
+                and _es_candidato_nominal_geometrico(primero)
+            ):
+                corrida = _corrida_contigua_desde(fila_nombre, primero)
+                nombre = re.sub(r"\s+", " ", " ".join(item["texto"] for item in corrida)).strip().upper()
+                columna_x = primero["x1"]
+
+        # Fila inmediatamente inferior (R.U.T.), alineada con la columna de
+        # valores cuando se conoce; si no hubo nombre, el primer valor a la
+        # derecha de la etiqueta.
+        fila_inferior = [
+            item for item in items
+            if alto * 0.5 < item["cy"] - ancla["cy"] <= alto * 2.2
+            and item["x1"] >= ancla["x2"] - 8 * escala
+        ]
+        rut_validos: set[str] = set()
+        if fila_inferior:
+            if columna_x is not None:
+                alineados = [
+                    item for item in fila_inferior if abs(item["x1"] - columna_x) <= 25 * escala
+                ]
+            else:
+                cercano = min(fila_inferior, key=lambda item: item["x1"])
+                alineados = [cercano] if cercano["x1"] - ancla["x2"] <= 260 * escala else []
+            for inicio in alineados:
+                misma_fila = [item for item in fila_inferior if _misma_fila_geometrica(item, inicio)]
+                corrida = _corrida_contigua_desde(misma_fila, inicio)
+                textos = [item["texto"] for item in corrida]
+                for fin in range(2, len(corrida) + 1):
+                    textos.extend(_variantes_rut_multibloque(corrida[:fin]))
+                for texto in textos:
+                    validacion = validar_rut_chileno(_normalizar_candidato_rut(texto))
+                    if validacion.estado == EstadoValidacion.VALIDO:
+                        rut_validos.add(validacion.valor)
+        rut = next(iter(rut_validos)) if len(rut_validos) == 1 else ""
+
+        # Código cliente: etiqueta en la columna izquierda, por encima de
+        # SEÑOR(ES), con un único valor numérico a su derecha.
+        codigos: set[str] = set()
+        for etiqueta in items:
+            if not (
+                _es_fragmento_etiqueta_codigo_cliente(etiqueta["simple"])
+                and etiqueta["cy"] < ancla["cy"]
+                and ancla["cy"] - etiqueta["cy"] <= alto * 5
+                and etiqueta["x1"] <= ancla["x2"]
+            ):
+                continue
+            valores = [
+                item for item in items
+                if item is not etiqueta and _misma_fila_geometrica(item, etiqueta)
+                and item["x1"] >= etiqueta["x2"] - 8 * escala
+                and item["x1"] - etiqueta["x2"] <= 260 * escala
+            ]
+            if valores:
+                valor = min(valores, key=lambda item: item["x1"])["texto"]
+                limpio = re.sub(r"[\s:]", "", valor)
+                if re.fullmatch(r"\d{6,12}", limpio):
+                    codigos.add(limpio)
+        codigo = next(iter(codigos)) if len(codigos) == 1 else ""
+
+        if nombre or rut or codigo:
+            resultados.add((nombre, rut, codigo, len(rut_validos) > 1))
+    if len(resultados) != 1:
+        return {}
+    nombre, rut, codigo, rut_ambiguo = next(iter(resultados))
+    return {"cliente": nombre, "rut": rut, "codigo_cliente": codigo, "rut_ambiguo": rut_ambiguo}
+
+
 def _normalizar_transporte_aza(texto: str) -> Optional[tuple[str, bool]]:
     """Aplica exclusivamente el contrato numérico contextual autorizado."""
     sustituciones = {

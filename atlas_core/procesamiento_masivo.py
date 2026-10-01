@@ -69,6 +69,7 @@ from atlas_core.extractor import (
     _consensuar_transporte_focal,
     _extraer_asociaciones_geometricas,
     _extraer_fecha_geometrico,
+    _extraer_identidad_cliente_cabecera_truncada,
     _extraer_identidad_cliente_recortada_geometrica,
     _extraer_numero_guia_geometrico,
     _extraer_patentes_geometrico,
@@ -1016,6 +1017,9 @@ class MetodoObtencionDocumento(str, Enum):
     # corroboración por campo junto a cada uso en `procesar_archivo()`.
     CATALOGO = "CATALOGO"
     CATALOGO_RUT_CLIENTE = "CATALOGO_RUT_CLIENTE"
+    # Caso real 475042: código cliente con asociación humana confirmada +
+    # nombre documental exacto (ver `_completar_cliente_ausente_por_cabecera_documental`).
+    CATALOGO_CODIGO_CLIENTE = "CATALOGO_CODIGO_CLIENTE"
     CATALOGO_OBRA_DESTINO = "CATALOGO_OBRA_DESTINO"
     # Bloque INTELIGENCIA N1: limpieza estructural de un nombre de entidad
     # (sufijos societarios/prefijo suelto, ver `normalizar_nombre_societario`)
@@ -1237,6 +1241,132 @@ def _completar_cliente_ausente_por_rut_catalogado(
     metodos.add(MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value)
     datos["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
     return True
+
+
+_AUSENTES_CLIENTE_DOCUMENTAL = {"", "No encontrado", "REVISAR", "Ilegible"}
+
+
+def _completar_cliente_ausente_por_cabecera_documental(
+    datos: dict[str, object], identidad: dict[str, object] | None,
+    carpeta_catalogos: str | Path,
+) -> dict[str, object] | None:
+    """Caso real 475042: resuelve un cliente ausente con la evidencia de la
+    cabecera SEÑOR(ES) de ESTA guía (`_extraer_identidad_cliente_cabecera_
+    truncada`), sólo contra clientes CONFIRMADO/ACTIVO del catálogo.
+
+    - RUT documental válido que resuelve un único cliente: suficiente.
+    - Código cliente con asociación confirmada por un humano: sólo si el
+      nombre documental resuelve EXACTAMENTE al mismo cliente (el código
+      es evidencia complementaria, ver `codigo_cliente_destinatario`).
+    - El nombre documental por sí solo nunca decide; sólo corrobora.
+    - Contradicción (RUT/código de la extracción primaria distinto, piezas
+      que resuelven clientes distintos, nombre legible sin ningún token en
+      común con el cliente resuelto) o ambigüedad: abstención, el
+      documento conserva CLIENTE_AUSENTE.
+
+    Nunca consulta otras guías ni crea/modifica entradas de catálogo.
+    Devuelve la evidencia auditable aplicada, o `None` si se abstuvo.
+    """
+    if not identidad or str(datos.get("cliente", "")).strip() not in _AUSENTES_CLIENTE_DOCUMENTAL:
+        return None
+    from atlas_core.catalogo_clientes import normalizar_nombre_cliente
+    from atlas_core.codigo_cliente_destinatario import CatalogoCodigosCliente
+
+    def _rut(valor: object) -> str:
+        texto = str(valor or "").strip()
+        if texto in _AUSENTES_CLIENTE_DOCUMENTAL:
+            return ""
+        try:
+            return normalizar_rut_cliente(texto)
+        except ErrorCatalogoClientes:
+            return ""
+
+    def _codigo(valor: object) -> str:
+        texto = str(valor or "").strip()
+        return "" if texto in _AUSENTES_CLIENTE_DOCUMENTAL else re.sub(r"\s+", "", texto).upper()
+
+    if identidad.get("rut_ambiguo"):
+        return None
+    rut_documental = _rut(identidad.get("rut"))
+    codigo_documental = _codigo(identidad.get("codigo_cliente"))
+    nombre_documental = str(identidad.get("cliente") or "").strip()
+    rut_primario = _rut(datos.get("RUT del cliente"))
+    codigo_primario = _codigo(datos.get("código cliente"))
+    if rut_documental and rut_primario and rut_documental != rut_primario:
+        return None
+    if codigo_documental and codigo_primario and codigo_documental != codigo_primario:
+        return None
+    rut_efectivo = rut_documental or rut_primario
+    codigo_efectivo = codigo_documental or codigo_primario
+
+    try:
+        clientes = [
+            cliente for cliente in CatalogoClientes(Path(carpeta_catalogos) / "clientes.json").listar()
+            if cliente.estado_vigencia == EstadoVigenciaCliente.ACTIVO.value
+            and cliente.estado_calidad == EstadoCalidadCliente.CONFIRMADO.value
+        ]
+    except ErrorCatalogoClientes:
+        return None
+    por_id = {cliente.cliente_id: cliente for cliente in clientes}
+
+    def _claves(cliente) -> set[str]:
+        return {
+            normalizar_nombre_cliente(valor)
+            for valor in (cliente.razon_social, cliente.nombre_comercial, *cliente.aliases)
+            if valor
+        } - {""}
+
+    ids_rut = {c.cliente_id for c in clientes if rut_efectivo and c.rut == rut_efectivo}
+    clave_nombre = normalizar_nombre_cliente(nombre_documental) if nombre_documental else ""
+    ids_nombre = {c.cliente_id for c in clientes if clave_nombre and clave_nombre in _claves(c)}
+    id_codigo = None
+    if codigo_efectivo:
+        try:
+            id_codigo = CatalogoCodigosCliente(Path(carpeta_catalogos) / "codigos_cliente.json").buscar(
+                codigo_efectivo
+            )
+        except Exception:
+            id_codigo = None
+        if id_codigo not in por_id:
+            id_codigo = None
+    if len(ids_rut) > 1 or len(ids_nombre) > 1:
+        return None
+
+    resueltos = set(ids_rut) | set(ids_nombre) | ({id_codigo} if id_codigo else set())
+    if len(resueltos) != 1:
+        return None
+    cliente_id = next(iter(resueltos))
+    via_rut = bool(ids_rut)
+    via_codigo = bool(id_codigo) and bool(ids_nombre)
+    if not (via_rut or via_codigo):
+        return None
+    cliente = por_id[cliente_id]
+    if nombre_documental and not ids_nombre:
+        tokens_doc = {t for t in clave_nombre.split() if len(t) >= 3}
+        tokens_cliente = {t for clave in _claves(cliente) for t in clave.split() if len(t) >= 3}
+        if tokens_doc and not tokens_doc & tokens_cliente:
+            return None
+
+    datos["cliente"] = cliente.razon_social
+    if not rut_primario and rut_documental:
+        datos["RUT del cliente"] = str(identidad.get("rut"))
+    if not codigo_primario and codigo_documental:
+        datos["código cliente"] = codigo_documental
+    corroboraciones = [
+        via for via, presente in (
+            ("RUT", via_rut), ("CODIGO_CLIENTE", bool(id_codigo)), ("NOMBRE_EXACTO", bool(ids_nombre)),
+        ) if presente
+    ]
+    return {
+        "metodo": "CABECERA_CLIENTE_DOCUMENTAL",
+        "cliente_id": cliente_id,
+        "razon_social": cliente.razon_social,
+        "via": "RUT" if via_rut else "CODIGO_CLIENTE",
+        "corroboraciones": corroboraciones,
+        "nombre_documental": nombre_documental,
+        "rut_documental": str(identidad.get("rut") or ""),
+        "codigo_cliente_documental": codigo_documental,
+    }
 
 
 # Bloque P0 CONVERGENCIA SILENCIOSA -- ESTADO DERIVADO HUÉRFANO -- caso
@@ -1968,6 +2098,8 @@ def procesar_archivo(
     obra_destino_corroborada = None
     chofer_geometrico = False
     patentes_geometricas_sin_homologar: set[str] = set()
+    identidad_cliente_cabecera: dict[str, object] | None = None
+    recuperacion_cliente_documental: dict[str, object] | None = None
     bloques_guia = None
     estado_bloques_ocr = ESTADO_BLOQUES_NO_SOLICITADOS
 
@@ -2064,6 +2196,18 @@ def procesar_archivo(
                     metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
                     campos_geometricos_sin_corroborar.add(campo)
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
+
+            if datos.get("cliente") in {None, "", "No encontrado"}:
+                # Caso real 475042: etiquetas SEÑOR(ES)/R.U.T./CÓDIGO CLIENTE
+                # truncadas por el borde de la foto. Sólo se recoge la
+                # evidencia; la identidad se decide contra el catálogo más
+                # abajo (`_completar_cliente_ausente_por_cabecera_documental`).
+                try:
+                    identidad_cliente_cabecera = _extraer_identidad_cliente_cabecera_truncada(bloques_guia) or None
+                except Exception as exc:
+                    logger.warning(
+                        "Cabecera documental de cliente omitida: %s: %s", type(exc).__name__, exc
+                    )
 
             try:
                 if datos.get("RUT del cliente") in {None, "", "No encontrado"}:
@@ -2213,7 +2357,22 @@ def procesar_archivo(
         # La geometría puede recuperar valores después de la extracción lineal;
         # reaplicar la misma fuente al final conserva el nombre canónico.
         datos = enriquecer_datos_con_catalogos(datos, textos, carpeta_catalogos)
-        if _completar_cliente_ausente_por_rut_catalogado(datos, carpeta_catalogos):
+        recuperacion_cliente_documental = _completar_cliente_ausente_por_cabecera_documental(
+            datos, identidad_cliente_cabecera, carpeta_catalogos
+        )
+        if recuperacion_cliente_documental is not None:
+            metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+            metodos_documento.add(
+                MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value
+                if recuperacion_cliente_documental["via"] == "RUT"
+                else MetodoObtencionDocumento.CATALOGO_CODIGO_CLIENTE.value
+            )
+            logger.info(
+                "cliente ausente resuelto por cabecera documental via=%s corroboraciones=%s",
+                recuperacion_cliente_documental["via"],
+                recuperacion_cliente_documental["corroboraciones"],
+            )
+        elif _completar_cliente_ausente_por_rut_catalogado(datos, carpeta_catalogos):
             metodos_documento.add(MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value)
             logger.info(
                 "cliente ausente resuelto por RUT único contra cliente maestro CONFIRMADO/ACTIVO"
@@ -3339,6 +3498,10 @@ def procesar_archivo(
         # AMBIGUA), valor OCR original y valor canónico aplicado -- también
         # cuando Atlas se abstuvo.
         metricas["desempates_vehiculo"] = desempates_vehiculo
+    if recuperacion_cliente_documental is not None:
+        # Auditoría de la recuperación del cliente por cabecera documental:
+        # nombre/RUT/código leídos + cliente maestro + vía y corroboraciones.
+        metricas["recuperacion_cliente_documental"] = recuperacion_cliente_documental
 
     # Bloque C1 -- peso: se calcula aquí (antes del `return`, no dentro
     # del propio diccionario) para poder evaluar su credibilidad y
