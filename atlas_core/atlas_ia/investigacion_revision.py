@@ -14,7 +14,7 @@ import unicodedata
 from pathlib import Path
 
 from atlas_core.atlas_ia.contratos import ContextoRazonamiento, EvidenciaIA
-from atlas_core.atlas_ia.registro_problemas import detectar_problemas_elegibles
+from atlas_core.atlas_ia.registro_problemas import REGISTRO_PROBLEMAS_IA, detectar_problemas_elegibles
 from atlas_core.almacenamiento_portable import resolver_raiz_atlas
 
 
@@ -41,7 +41,7 @@ def _documento_original(raiz: Path, archivo: str) -> Path | None:
     return ruta if ruta is not None and ruta.is_file() else None
 
 
-def _lectura_original(raiz: Path, fila: dict, proveedor_ocr=None) -> dict:
+def _lectura_original(raiz: Path, fila: dict, proveedor_ocr=None, *, permitir_ocr_nuevo: bool = True) -> dict:
     archivo = str(fila.get("archivo", ""))
     ruta = _documento_original(raiz, archivo)
     if ruta is None:
@@ -59,7 +59,7 @@ def _lectura_original(raiz: Path, fila: dict, proveedor_ocr=None) -> dict:
             bloques = list(ocr.get("bloques") or [])
             fuente = str(candidata)
             break
-    if not bloques:
+    if not bloques and permitir_ocr_nuevo:
         try:
             if proveedor_ocr is None:
                 from atlas_core.ocr_provider import crear_proveedor_ocr
@@ -70,9 +70,13 @@ def _lectura_original(raiz: Path, fila: dict, proveedor_ocr=None) -> dict:
         except Exception as error:
             return {"ruta": str(ruta), "sha256": sha, "lineas": lineas,
                     "destino_geometrico": "", "fuente": fuente, "error": f"OCR_NO_DISPONIBLE:{type(error).__name__}"}
+    if not bloques:
+        return {"ruta": str(ruta), "sha256": sha, "lineas": lineas,
+                "destino_geometrico": "", "fuente": fuente,
+                "error": "OCR_NO_REEJECUTADO"}
     from atlas_core.extractor import _extraer_despachar_a_geometrico
     destino = str(_extraer_despachar_a_geometrico(bloques).get("valor", ""))
-    if not destino and fuente != "OCR_NUEVO":
+    if not destino and fuente != "OCR_NUEVO" and permitir_ocr_nuevo:
         # La traza puede conservar una lectura anterior degradada. Una
         # nueva lectura del mismo original es consultiva; no altera OCR.
         try:
@@ -164,7 +168,8 @@ def preview_operacional(expediente: dict) -> dict | None:
 def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = None,
                         orquestador=None, proveedor_ocr=None,
                         investigar_externo: bool = True, buscador_externo=None,
-                        leer_fuente=None) -> dict:
+                        leer_fuente=None, campos_solicitados: tuple[str, ...] | None = None,
+                        permitir_ocr_nuevo: bool = True) -> dict:
     """Devuelve un expediente reproducible, sin escritura productiva.
 
     El proveedor OCR y el orquestador son inyectables para pruebas. Si B1
@@ -179,7 +184,9 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
     if len(candidatas) != 1:
         raise ValueError(f"La guía {numero_guia} tiene {len(candidatas)} filas vigentes")
     fila = candidatas[0]
-    lectura = _lectura_original(raiz, fila, proveedor_ocr)
+    # Conserva la firma histórica para inyectores de pruebas ya existentes.
+    lectura = (_lectura_original(raiz, fila, proveedor_ocr, permitir_ocr_nuevo=False)
+               if not permitir_ocr_nuevo else _lectura_original(raiz, fila, proveedor_ocr))
     from atlas_core.procesamiento_masivo import extraer_descripcion_material
     material_original = extraer_descripcion_material(lectura["lineas"])
     catalogos = raiz / "catalogos_privados"
@@ -223,7 +230,19 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
                 obra_documental=str(fila.get("obra_destino") or ""),
             )
     casos = []
-    for tipo, motivo in detectar_problemas_elegibles(fila):
+    problemas = detectar_problemas_elegibles(fila)
+    # Una consulta explícita puede investigar obra o destino aunque la guía
+    # no tenga precisamente ese motivo abierto. Reutiliza los mismos tipos
+    # registrados y sus recolectores; no crea una ruta ni una regla nueva.
+    for campo in campos_solicitados or ():
+        if any(tipo.campo == campo for tipo, _ in problemas):
+            continue
+        tipo = next((entrada for entradas in REGISTRO_PROBLEMAS_IA.values()
+                     for entrada in entradas
+                     if entrada.campo == campo and entrada.dominio in {"OBRA_DESTINO", "DESTINO"}), None)
+        if tipo is not None:
+            problemas.append((tipo, "INVESTIGACION_SOLICITADA"))
+    for tipo, motivo in problemas:
         if tipo.dominio not in {"OBRA_DESTINO", "DESTINO", "MATERIAL"}:
             continue
         evidencias = list(tipo.recopilar_evidencia(fila, filas, carpeta_catalogos=catalogos))

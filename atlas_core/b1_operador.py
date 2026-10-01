@@ -173,6 +173,30 @@ _NEGACION_MISMO_VIAJE = re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|I
 _NUMERO_GUIA = re.compile(r"\b\d{5,9}\b")
 _COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
+ACCION_INVESTIGAR_REVISION = "INVESTIGAR_REVISION"
+_GUIA_INVESTIGACION = re.compile(r"\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\b")
+_VERBO_INVESTIGAR = re.compile(r"\b(?:INVESTIGA(?:R)?|BUSCA(?:R)?|AVERIGUA(?:R)?)\b")
+
+
+def _intencion_investigar_revision(plano: str) -> Intencion | None:
+    """Reconoce investigación consultiva; nunca es una acción del catálogo."""
+    pide_nombre = bool(re.search(r"\bNOMBRE\s+COMPLETO\b.*\bOBRA\b|\bOBRA\b.*\bNOMBRE\s+COMPLETO\b", plano))
+    pide_direccion = bool(re.search(r"\bDIRECCION\s+COMPLETA\b|\bDESTINO\b", plano))
+    guia = _GUIA_INVESTIGACION.search(plano)
+    investigacion = bool(_VERBO_INVESTIGAR.search(plano)) or pide_nombre or pide_direccion
+    # "busca la obra X" sigue siendo la consulta de catálogo ya existente.
+    if not investigacion or (not guia and not re.search(r"\bESTA\s+(?:OBRA|DIRECCION)\b", plano)):
+        return None
+    if pide_nombre and pide_direccion:
+        campos = ("obra_destino", "despachar_a_crudo")
+    elif pide_nombre or (re.search(r"\bOBRA\b", plano) and not pide_direccion):
+        campos = ("obra_destino",)
+    elif pide_direccion and not re.search(r"\bOBRA\b", plano):
+        campos = ("despachar_a_crudo",)
+    else:
+        campos = ("obra_destino", "despachar_a_crudo")
+    return Intencion(ACCION_INVESTIGAR_REVISION,
+                     {"numero_guia": guia.group("guia") if guia else "", "campos": campos})
 
 
 def interpretar_determinista(texto: str) -> Intencion | None:
@@ -196,6 +220,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     m = _TRANSPORTE.search(plano)
     if m:
         return Intencion("TRANSPORTE_REVALIDAR", {"numero_transporte": m.group("n")})
+    investigacion = _intencion_investigar_revision(plano)
+    if investigacion is not None:
+        return investigacion
     es_pregunta = str(texto or "").strip().endswith("?") or str(texto or "").strip().startswith("¿")
     if not es_pregunta and _MISMO_VIAJE.search(plano) and not _NEGACION_MISMO_VIAJE.search(plano):
         guias = list(dict.fromkeys(_NUMERO_GUIA.findall(plano)))
@@ -588,6 +615,8 @@ class OperadorB1:
     def _interpretar(self, texto: str) -> Intencion | None:
         intencion = interpretar_determinista(texto)
         if intencion is not None:
+            if intencion.accion == ACCION_INVESTIGAR_REVISION:
+                return intencion
             return validar_intencion(intencion)
         if self.proveedor is None:
             return None
@@ -604,6 +633,8 @@ class OperadorB1:
             return {"estado": "NO_INTERPRETADA", "mensaje": (
                 "No reconocí una instrucción operacional. Puedo: asociar vehículo a chofer, activar/inactivar un "
                 "chofer, corregir un campo o la obra de una guía, o consultar choferes, obras y decisiones.")}
+        if intencion.accion == ACCION_INVESTIGAR_REVISION:
+            return self._investigar_revision(intencion)
         definicion = ACCIONES[intencion.accion]
         if definicion.riesgo != LECTURA:
             # Toda instrucción operacional nueva invalida el pendiente anterior.
@@ -658,6 +689,53 @@ class OperadorB1:
                         "mensaje": mensaje}
             parametros["destino_id"] = resolucion["destino_id"]
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
+
+    def _investigar_revision(self, intencion: Intencion) -> dict:
+        """Investiga en modo lectura: no crea preview ni altera el pendiente."""
+        numero_guia = str(intencion.parametros.get("numero_guia") or "")
+        campos = tuple(intencion.parametros.get("campos") or ())
+        if not numero_guia:
+            return {"estado": "ACLARACION_REQUERIDA", "accion": ACCION_INVESTIGAR_REVISION,
+                    "mensaje": "Indica el número de guía que quieres investigar."}
+        from atlas_core.atlas_ia.investigacion_revision import investigar_revision
+        try:
+            resultado = investigar_revision(numero_guia, raiz_atlas=self.raiz,
+                                             campos_solicitados=campos,
+                                             permitir_ocr_nuevo=False)
+        except (OSError, ValueError) as error:
+            return {"estado": "INVESTIGACION_NO_DISPONIBLE", "accion": ACCION_INVESTIGAR_REVISION,
+                    "mensaje": f"No pude investigar la guía {numero_guia}: {error}"}
+        etiquetas = {"obra_destino": "obra", "despachar_a_crudo": "dirección de destino"}
+        propuestas: dict[str, dict[str, str]] = {}
+        for expediente in resultado.get("expedientes") or []:
+            campo = str(expediente.get("CAMPO") or "")
+            if campo not in campos or campo in propuestas:
+                continue
+            preview = expediente.get("PREVIEW_OPERACIONAL") or {}
+            evaluacion = expediente.get("EVALUACION_CANDIDATOS_EXTERNOS") or {}
+            propuesta = str(preview.get("valor_propuesto") or expediente.get("PROPUESTA") or "").strip()
+            evidencia = str(preview.get("evidencia_relevante") or evaluacion.get("razon")
+                            or expediente.get("RAZON_ABSTENCION") or "Evidencia insuficiente para proponer.")
+            propuestas[etiquetas[campo]] = {
+                "valor_actual": str(preview.get("valor_actual") or
+                                     (expediente.get("HECHOS_DOCUMENTALES") or {}).get("valor_extraido") or ""),
+                "valor_propuesto": propuesta or "Sin propuesta suficiente",
+                "evidencia_relevante": evidencia,
+                "consecuencia_operacional": str(preview.get("consecuencia_operacional") or
+                    ("No se aplicará ningún cambio sin confirmación humana." if propuesta else
+                     "Atlas se abstiene: no hay evidencia suficiente para cambiar el dato.")),
+            }
+        if not propuestas:
+            return {"estado": "RESULTADO_INVESTIGACION", "accion": ACCION_INVESTIGAR_REVISION,
+                    "propuestas": {}, "mensaje": (
+                        f"Investigación de guía {numero_guia}, sin cambios: no encontré evidencia reutilizable "
+                        "para los datos solicitados.")}
+        resumen = "; ".join(
+            f"{etiqueta}: actual {dato['valor_actual']!r}; propuesta {dato['valor_propuesto']!r}."
+            for etiqueta, dato in propuestas.items())
+        return {"estado": "RESULTADO_INVESTIGACION", "accion": ACCION_INVESTIGAR_REVISION,
+                "propuestas": propuestas,
+                "mensaje": f"Investigación de guía {numero_guia}, sin cambios: {resumen}"}
 
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
                        texto: str) -> dict:
