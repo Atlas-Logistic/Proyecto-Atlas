@@ -247,6 +247,26 @@ ACCIONES_POR_TIPO = {
 # antes de agregarla, nunca "por si acaso".
 TIPOS_ELEGIBLES_DIFERIR_REVALIDACION_GLOBAL = frozenset({"OBRA_DESCONOCIDA", "DESTINO_NO_RESUELTO"})
 
+
+def _es_fila_de_documento(fila: Mapping[str, object], documento: Mapping[str, object]) -> bool:
+    """Fila del documento de una decisión: misma guía y, si la decisión trae
+    archivo, misma ruta relativa completa (una guía puede tener varias filas;
+    todas las capturas Mobile se llaman original.jpg)."""
+    archivo = str(documento.get("archivo") or "").replace("\\", "/").strip("/")
+    return (str(fila.get("numero_guia", "")) == str(documento.get("numero_guia") or "")
+            and (not archivo or str(fila.get("archivo", "")).replace("\\", "/").strip("/") == archivo))
+
+
+def _filas_de_documento(filas: list[dict[str, str]], documento: Mapping[str, object]) -> list[dict[str, str]]:
+    """Filas del documento: guía + ruta completa; si la decisión no trae un
+    archivo que exista, sólo la guía y únicamente cuando es UNA fila. Nunca
+    se elige la primera de varias (el llamador se abstiene si no hay una)."""
+    exactas = [f for f in filas if _es_fila_de_documento(f, documento)]
+    if exactas:
+        return exactas
+    por_guia = [f for f in filas if str(f.get("numero_guia", "")) == str(documento.get("numero_guia") or "")]
+    return por_guia
+
 class ErrorAplicacionDecision(ValueError): pass
 class DecisionObsoletaError(ErrorAplicacionDecision): pass
 
@@ -1297,11 +1317,16 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # lock no reentrante).
                     with bloqueo_sesion(actual, "revalidacion_dataset"):
                         filas_dataset = _leer_filas(dataset)
-                        fila_objetivo = next(
-                            (f for f in filas_dataset if str(f.get("numero_guia", "")) == numero_guia_decision), None,
-                        )
-                        if fila_objetivo is None:
-                            raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                        coincidentes = _filas_de_documento(filas_dataset, documento_decision)
+                        if len(coincidentes) != 1:
+                            # Identidad de fila (fix 38ac3dc): nunca "la primera" de varias.
+                            raise ErrorAplicacionDecision(
+                                "No se encontró el documento de esta decisión en el dataset vigente."
+                                if not coincidentes else
+                                "La decisión coincide con más de un documento del dataset; no se aplica.")
+                        fila_objetivo = coincidentes[0]
+                        # Las lecturas posteriores siguen EXACTAMENTE esta fila.
+                        documento_decision = {**documento_decision, "archivo": str(fila_objetivo.get("archivo", ""))}
                         # Bloque CONSISTENCIA OPERACIONAL -- snapshot antes de
                         # mutar (ver la rama de origen, arriba, para el
                         # detalle completo del mecanismo de revert).
@@ -1377,7 +1402,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         fila_confirmacion_humana = next(
                             (
                                 f for f in filas_confirmacion_humana
-                                if str(f.get("numero_guia", "")) == numero_guia_decision
+                                if _es_fila_de_documento(f, documento_decision)
                             ),
                             None,
                         )
@@ -1398,7 +1423,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # estado real de la fila tras el intento.
                     filas_tras_intento = _leer_filas(dataset)
                     fila_tras_intento = next(
-                        (f for f in filas_tras_intento if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                        (f for f in filas_tras_intento if _es_fila_de_documento(f, documento_decision)), None,
                     )
                     ruta_resuelta = (
                         fila_tras_intento is not None
@@ -1433,7 +1458,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     try:
                         filas_confirmadas = _leer_filas(dataset)
                         fila_confirmada = next(
-                            (f for f in filas_confirmadas if str(f.get("numero_guia", "")) == numero_guia_decision), None,
+                            (f for f in filas_confirmadas if _es_fila_de_documento(f, documento_decision)), None,
                         )
                         cliente_objetivo = next(
                             (
@@ -1582,7 +1607,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                                 fila_obra_ausente = next(
                                     (
                                         f for f in filas_obra_ausente
-                                        if str(f.get("numero_guia", "")) == numero_guia_decision
+                                        if _es_fila_de_documento(f, documento_decision)
                                     ),
                                     None,
                                 )

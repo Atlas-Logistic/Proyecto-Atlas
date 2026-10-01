@@ -215,6 +215,26 @@ def _intencion_desde_investigacion(plano: str) -> Intencion | None:
                      {"numero_guia": guia.group("guia") if guia else "", "campo": campo})
 
 
+# Resolver el destino con una CONFIRMACIÓN HUMANA previa de otra guía del mismo
+# contexto: "resuelve el destino de la guía N con el destino ya confirmado".
+# Nunca búsqueda externa; ver `atlas_core.destino_confirmacion_previa`.
+ACCION_DESTINO_CONFIRMADO_PREVIO = "DESTINO_DESDE_CONFIRMACION_PREVIA"
+_VERBO_DESTINO_PREVIO = re.compile(
+    r"^(?:RESUELVE|RESOLVER|CORRIGE|CORREGIR|ASIGNA|ASIGNAR|USA|USAR|APLICA|APLICAR|COMPLETA|COMPLETAR|"
+    r"REGISTRA|REGISTRAR|PROPON|PROPONE|PROPONER)\b")
+_REFERENCIA_CONFIRMACION_PREVIA = re.compile(
+    r"\b(?:YA\s+)?CONFIRMAD[OA]S?\b|\bCONFIRMACION\s+(?:HUMANA|PREVIA|ANTERIOR)\b|\bEVIDENCIA\s+INTERNA\b")
+
+
+def _intencion_destino_confirmado_previo(plano: str) -> Intencion | None:
+    guia = _GUIA_INVESTIGACION.search(plano)
+    if not (guia and _VERBO_DESTINO_PREVIO.match(plano) and _MENCION_DESTINO.search(plano)
+            and not _MENCION_OBRA.search(plano.replace("MISMA OBRA", ""))
+            and _REFERENCIA_CONFIRMACION_PREVIA.search(plano)):
+        return None
+    return Intencion(ACCION_DESTINO_CONFIRMADO_PREVIO, {"numero_guia": guia.group("guia")})
+
+
 def _intencion_investigar_revision(plano: str) -> Intencion | None:
     """Reconoce investigación consultiva; nunca es una acción del catálogo.
     Sólo un verbo de investigación o un pedido explícito de "nombre/dirección
@@ -264,6 +284,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     reutilizacion = _intencion_desde_investigacion(plano)
     if reutilizacion is not None:
         return reutilizacion
+    confirmado_previo = _intencion_destino_confirmado_previo(plano)
+    if confirmado_previo is not None:
+        return confirmado_previo
     investigacion = _intencion_investigar_revision(plano)
     if investigacion is not None:
         return investigacion
@@ -731,6 +754,13 @@ def _obra_por_identidad(obras: list, nombre: str) -> list:
     return por_nombre or [o for o in vigentes if any(misma_identidad(a, nombre) for a in o.aliases_documentales)]
 
 
+_MOTIVO_SIN_CONFIRMACION_PREVIA = {
+    "SIN_CONFIRMACION_COMPATIBLE": ("no encontré un destino confirmado por una persona para otra guía del mismo "
+                                    "cliente y la misma obra cuyo destino en la guía diga lo mismo"),
+    "CONFIRMACIONES_INCOMPATIBLES": "hay más de un destino confirmado posible y no elijo entre ellos",
+    "IDENTIDAD_OBJETIVO_INSUFICIENTE": "no pude identificar sin ambigüedad el documento de esa guía",
+}
+
 _MOTIVO_NO_REUTILIZABLE = {
     "FALLIDA": "la investigación anterior no se completó, así que no hay propuesta que aplicar",
     "SIN_PROPUESTA": "la investigación anterior no encontró evidencia suficiente para proponer un valor",
@@ -887,7 +917,8 @@ class OperadorB1:
     def _interpretar(self, texto: str) -> Intencion | None:
         intencion = interpretar_determinista(texto)
         if intencion is not None:
-            if intencion.accion in {ACCION_INVESTIGAR_REVISION, ACCION_DESDE_INVESTIGACION}:
+            if intencion.accion in {ACCION_INVESTIGAR_REVISION, ACCION_DESDE_INVESTIGACION,
+                                    ACCION_DESTINO_CONFIRMADO_PREVIO}:
                 return intencion
             return validar_intencion(intencion)
         if self.proveedor is None:
@@ -914,6 +945,8 @@ class OperadorB1:
             return self._investigar_revision(intencion, estado, conversacion_id)
         if intencion.accion == ACCION_DESDE_INVESTIGACION:
             return self._desde_investigacion(estado, conversacion_id, intencion, texto)
+        if intencion.accion == ACCION_DESTINO_CONFIRMADO_PREVIO:
+            return self._destino_confirmado_previo(estado, conversacion_id, intencion, texto)
         definicion = ACCIONES[intencion.accion]
         if definicion.riesgo != LECTURA:
             # Toda instrucción operacional nueva invalida el pendiente anterior.
@@ -1088,22 +1121,87 @@ class OperadorB1:
                       f"{previa.get('valor_documental')!r}; propuesta {previa['propuesta_publicada']!r}; nivel "
                       f"{previa.get('nivel_evidencia')}; evidencia: {previa.get('evidencia_relevante')}; fuentes: "
                       f"{', '.join(previa.get('fuentes') or []) or 'sin URL'}")[:500]
+        return self._preview_destino(
+            estado, conversacion_id, guia, decision_id, rechazo, referencia=referencia,
+            direccion=f"{previa['calle']} {previa['numero']}".upper(), comuna=previa["comuna"].upper(),
+            antes=str(previa.get("valor_documental") or ""), evidencia=_evidencia_visible(previa),
+            accion_origen=ACCION_DESDE_INVESTIGACION)
+
+    def _destino_confirmado_previo(self, estado: dict, conversacion_id: str, intencion: Intencion,
+                                   texto: str) -> dict:
+        """Propone el destino de la guía con la dirección que un HUMANO ya
+        confirmó para otra guía del mismo cliente, obra y destino documental
+        (`destino_confirmacion_previa`). Sin búsqueda externa; nunca inventa
+        número; aplica sólo tras preview + confirmación."""
+        import csv
+        import json
+        from atlas_core.destino_confirmacion_previa import proponer_destino_por_confirmacion_humana
+        from atlas_core.geografia.cl import RUTA_DATASET
+        self._fijar_pendiente(estado, conversacion_id, None)
+        guia = str(intencion.parametros.get("numero_guia") or "")
+
+        def rechazo(motivo: str) -> dict:
+            return {"estado": "RECHAZADA", "accion": ACCION_DESTINO_CONFIRMADO_PREVIO, "mensaje": motivo}
+
+        decisiones = self.capa._ctx.decisiones()
+        decision_id, aclaracion = resolver_decision_destino(decisiones, guia)
+        if aclaracion:
+            return rechazo(f"No hice cambios: {aclaracion}")
+        decision = next(d for d in decisiones if str(d.get("decision_id")) == decision_id)
+        archivos = self.capa._ctx.archivos
+        with archivos["dataset"].open(encoding="utf-8-sig", newline="") as flujo:
+            filas = list(csv.DictReader(flujo, delimiter=";"))
+        try:
+            aplicaciones = json.loads(archivos["ledger_decisiones"].read_text(encoding="utf-8")).get("aplicaciones", [])
+        except (OSError, ValueError):
+            aplicaciones = []
+        try:
+            comunas = [str(c["nombre_comuna"]) for c in json.loads(RUTA_DATASET.read_text(encoding="utf-8"))]
+        except (OSError, ValueError, KeyError):
+            comunas = []
+        resultado = proponer_destino_por_confirmacion_humana(
+            decision=decision, filas=filas, aplicaciones=aplicaciones,
+            obras=self.capa._ctx.catalogo_obras().listar_obras(), comunas=comunas)
+        if resultado["estado"] != "PROPUESTA":
+            return rechazo(f"No hice cambios en la guía {guia}: "
+                           + _MOTIVO_SIN_CONFIRMACION_PREVIA.get(resultado["motivo"],
+                                                                 _MOTIVO_SIN_CONFIRMACION_PREVIA["SIN_CONFIRMACION_COMPATIBLE"])
+                           + ".")
+        evidencia = resultado["evidencias"][-1]
+        documental = str(decision.get("valor_documental") or "")
+        referencia = (f"DESTINO_DESDE_CONFIRMACION_HUMANA_PREVIA: guia {evidencia['numero_guia']} "
+                      f"({evidencia['archivo']}) confirmada por {evidencia['actor']} el {evidencia['fecha']}; "
+                      f"documental previo {evidencia['valor_documental_anterior']!r} -> "
+                      f"{evidencia['direccion_manual']!r}, {evidencia['comuna_manual']}; documental objetivo "
+                      f"{documental!r}; sin numero de calle inventado | {str(texto)[:100]}")[:500]
+        fecha = evidencia["fecha"][:10]
+        fecha_visible = "-".join(reversed(fecha.split("-"))) if fecha else "una fecha anterior"
+        evidencia_visible = (f"Destino confirmado en Revisión el {fecha_visible} para la guía "
+                             f"{evidencia['numero_guia']}, del mismo cliente y la misma obra, cuya guía decía el "
+                             "mismo destino." + ("" if resultado["numero"] else
+                                                 " Sin número de calle: ninguna evidencia lo trae."))
+        return self._preview_destino(
+            estado, conversacion_id, guia, decision_id, rechazo, referencia=referencia,
+            direccion=resultado["direccion"], comuna=resultado["comuna"], antes=documental,
+            evidencia=evidencia_visible, accion_origen=ACCION_DESTINO_CONFIRMADO_PREVIO)
+
+    def _preview_destino(self, estado: dict, conversacion_id: str, guia: str, decision_id: str, rechazo, *,
+                         referencia: str, direccion: str, comuna: str, antes: str, evidencia: str,
+                         accion_origen: str) -> dict:
+        """Preview de REGISTRAR_DIRECCION (DECISION_APLICAR) con presentación limpia."""
         parametros = {"decision_id": decision_id, "accion_decision": "REGISTRAR_DIRECCION",
-                      "direccion_manual": f"{previa['calle']} {previa['numero']}".upper(),
-                      "comuna_manual": previa["comuna"].upper()}
+                      "direccion_manual": direccion, "comuna_manual": comuna}
         preview = self.capa.previsualizar("DECISION_APLICAR", parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
                                           referencia=referencia)
         if preview.get("estado") == "SIN_CAMBIOS":
-            return {"estado": "SIN_CAMBIOS", "accion": ACCION_DESDE_INVESTIGACION,
+            return {"estado": "SIN_CAMBIOS", "accion": accion_origen,
                     "mensaje": f"La guía {guia} ya tiene ese destino; no hay nada que confirmar."}
         if preview.get("estado") != "PREVIEW" or preview.get("riesgo") == SENSIBLE:
             return rechazo(f"No hice cambios en la guía {guia}: la corrección no se puede preparar ahora"
                            + (f" ({preview['mensaje']})." if preview.get("mensaje") else "."))
         presentacion = {"campo": "despachar_a_crudo", "numero_guia": guia,
-                        "antes": str(previa.get("valor_documental") or
-                                     (preview.get("valor_actual") or {}).get("valor_documental") or ""),
-                        "despues": f"{parametros['direccion_manual']}, {parametros['comuna_manual']}",
-                        "evidencia": _evidencia_visible(previa)}
+                        "antes": antes or str((preview.get("valor_actual") or {}).get("valor_documental") or ""),
+                        "despues": f"{direccion}, {comuna}", "evidencia": evidencia}
         self._fijar_pendiente(estado, conversacion_id, {
             "token": preview["token"], "accion": "DECISION_APLICAR", "parametros": parametros,
             "referencia": referencia, "creado_en": self.reloj().isoformat(), "presentacion": presentacion})
