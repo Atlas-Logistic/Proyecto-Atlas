@@ -1669,6 +1669,9 @@ def _extraer_chofer_geometrico(bloques: List[Any]) -> Dict[str, Any]:
 
 
 _FRASE_DESPACHAR_A = "DESPACHAR A"
+# Sufijo más corto de la etiqueta aceptado como recorte "normal" (sin
+# corroboración por duplicado): "SPACHAR A" -- pierde sólo "DE".
+_LONGITUD_MINIMA_ANCLA_DESPACHO_NORMAL = len(_FRASE_DESPACHAR_A) - 2
 
 
 _ETIQUETAS_ESTRUCTURALES_DESPACHO = (
@@ -2023,14 +2026,23 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         simple = item["simple"]
         if simple == "DESPACHAR A" or simple.startswith("DESPACHAR A "):
             return True, False, False
-        if simple == "ESPACHAR A" or simple.startswith("ESPACHAR A "):
+
+        def es_sufijo(longitud: int) -> bool:
+            sufijo = _FRASE_DESPACHAR_A[-longitud:]
+            return simple == sufijo or simple.startswith(sufijo + " ")
+
+        # Tolerancia "normal": se pierden a lo sumo las DOS primeras letras
+        # ("ESPACHAR A", "SPACHAR A" -- caso real 475096) y la palabra
+        # distintiva "SPACHAR" sigue completa. Sólo la etiqueta se tolera,
+        # nunca el valor; mismas exigencias geométricas de abajo.
+        if any(es_sufijo(longitud) for longitud in range(_LONGITUD_MINIMA_ANCLA_DESPACHO_NORMAL, len(_FRASE_DESPACHAR_A))):
             severo = False
         elif any(
-            simple == _FRASE_DESPACHAR_A[-longitud:] or simple.startswith(_FRASE_DESPACHAR_A[-longitud:] + " ")
-            # 3..9 caracteres: entre "AR A" (falta "DESPACH", caso real
-            # 472211) y justo antes de "ESPACHAR A" (longitud 10, ya
-            # cubierta arriba como la tolerancia "normal").
-            for longitud in range(3, len(_FRASE_DESPACHAR_A) - 1)
+            es_sufijo(longitud)
+            # 3..8 caracteres: entre "AR A" (falta "DESPACH", caso real
+            # 472211) y justo antes de "SPACHAR A": recorte severo, exige
+            # además un duplicado documental del valor.
+            for longitud in range(3, _LONGITUD_MINIMA_ANCLA_DESPACHO_NORMAL)
         ):
             severo = True
         else:
