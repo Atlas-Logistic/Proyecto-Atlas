@@ -203,6 +203,55 @@ def _coincide_con_numeracion_o_cero(calle: str, texto: str) -> bool:
     texto_variante = _numeracion_o_como_cero(texto)
     if calle_variante == calle and texto_variante == texto:
         return False
+    return _calle_completa_contigua_en_texto(calle_variante, texto_variante)
+
+
+# Caso real 475176 (EBEMA SA, destino confirmado "GALVARINO 8501"): el OCR
+# leyó el 8 inicial de la numeración como B ("GALVARINO B501 QUILICURA").
+# Misma regla estricta que la O, más acotada: sólo una B INICIAL de un token
+# completo "B<3+ dígitos>" se lee como 8. Nunca una B suelta, intermedia o
+# final ("12B", "1234 B" son numeraciones reales con letra), nunca otra
+# letra, y la comuna confirmada -- si el llamador la aporta -- debe estar en
+# el texto documental.
+_NUMERACION_CON_B_INICIAL = re.compile(r"\bB(?=\d{3,}\b)")
+
+
+def _numeracion_b_como_ocho(texto: str) -> str:
+    return _NUMERACION_CON_B_INICIAL.sub("8", texto)
+
+
+def _coincide_con_numeracion_b_ocho(calle: str, texto: str, comuna_confirmada: str = "") -> bool:
+    calle_variante = _numeracion_b_como_ocho(calle)
+    texto_variante = _numeracion_b_como_ocho(texto)
+    if calle_variante == calle and texto_variante == texto:
+        return False
+    comuna = normalizar_nombre_destino(comuna_confirmada)
+    if comuna and comuna not in texto:
+        return False
+    return _calle_completa_contigua_en_texto(calle_variante, texto_variante)
+
+
+def _coincide_con_numeracion_ocr(calle: str, texto: str, comuna_confirmada: str = "") -> bool:
+    return _coincide_con_numeracion_o_cero(calle, texto) or _coincide_con_numeracion_b_ocho(
+        calle, texto, comuna_confirmada,
+    )
+
+
+def coincide_solo_por_numeracion_ocr(
+    calle_confirmada: str, texto_documental: str, *, comuna_confirmada: str = "",
+) -> bool:
+    """True si el texto documental corresponde a la calle confirmada SÓLO
+    gracias a la tolerancia de numeración OCR (O->0, B->8): la calle
+    confirmada no aparece literal en el texto. Señala que cualquier
+    geocodificación hecha con ese texto partió de un número corrupto."""
+    calle = normalizar_nombre_destino(calle_confirmada)
+    texto = normalizar_nombre_destino(texto_documental)
+    if not calle or not texto or calle in texto:
+        return False
+    return _coincide_con_numeracion_ocr(calle, texto, comuna_confirmada)
+
+
+def _calle_completa_contigua_en_texto(calle_variante: str, texto_variante: str) -> bool:
     tokens = _tokens_direccion(calle_variante)
     if not any(token.isdigit() for token in tokens):
         return False
@@ -250,7 +299,7 @@ def direccion_confirmada_coincide(
         return False
     if calle in texto:
         return True
-    if _coincide_con_numeracion_o_cero(calle, texto):
+    if _coincide_con_numeracion_ocr(calle, texto, comuna_confirmada):
         return True
     if not _anclas_fuertes_conservadas(calle, texto, comuna_confirmada):
         return False

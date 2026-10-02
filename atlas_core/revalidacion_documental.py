@@ -37,7 +37,11 @@ from atlas_core.aplicacion_decisiones import (
     resolver_patentes_confirmadas_por_ledger,
 )
 from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente
-from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
+from atlas_core.catalogo_destinos import (
+    coincide_solo_por_numeracion_ocr,
+    direccion_confirmada_coincide,
+    normalizar_nombre_destino,
+)
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_plantas import CatalogoPlantas, normalizar_nombre_planta
 from atlas_core.catalogo_vehiculos import (
@@ -4101,8 +4105,12 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             # llamada).
             if numero_guia in guias_excluir_reintento:
                 continue
-            if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
-                continue
+            # Caso real 475176: una ruta YA calculada sólo se reconsidera
+            # cuando su texto documental corresponde al destino confirmado
+            # únicamente por la tolerancia de numeración OCR (ver abajo) --
+            # esa ruta partió de un número corrupto ("B501"), no de la
+            # entidad conocida.
+            ruta_ya_calculada = str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
             despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
             planta_id = str(fila.get("planta_origen_id", "")).strip()
             obra_documental = str(fila.get("obra_destino", "")).strip()
@@ -4133,6 +4141,15 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                 destino for destino in destinos_confirmados_obra
                 if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna)
             ]
+            if ruta_ya_calculada and not (
+                len(candidatos_coincidentes) == 1
+                and coincide_solo_por_numeracion_ocr(
+                    candidatos_coincidentes[0].direccion.split(",", 1)[0], texto_documental,
+                    comuna_confirmada=candidatos_coincidentes[0].comuna,
+                )
+                and str(fila.get("direccion_entrega", "")).strip() != candidatos_coincidentes[0].direccion
+            ):
+                continue
             if len(candidatos_coincidentes) != 1:
                 if not candidatos_coincidentes:
                     # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS --
