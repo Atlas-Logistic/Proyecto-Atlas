@@ -38,9 +38,11 @@ from atlas_core.aplicacion_decisiones import (
 )
 from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente
 from atlas_core.catalogo_destinos import (
+    coincide_solo_por_numeracion_b_ocho,
     coincide_solo_por_numeracion_ocr,
     direccion_confirmada_coincide,
     normalizar_nombre_destino,
+    tiene_numeracion_b_inicial,
 )
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos, normalizar_nombre_obra
 from atlas_core.catalogo_plantas import CatalogoPlantas, normalizar_nombre_planta
@@ -4002,6 +4004,107 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     }
 
 
+def _guias_con_decision_humana_de_destino(ruta_ledger: Path) -> set[str] | None:
+    """Guías cuyo destino ya decidió una persona (ledger): `DESTINO_*` o
+    corrección documental del operador. `None` si el ledger existe pero no
+    se puede leer -- quien llama se abstiene, nunca asume que no hay
+    decisión humana."""
+    if not ruta_ledger.is_file():
+        return set()
+    try:
+        aplicaciones = json.loads(ruta_ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
+    except (OSError, ValueError, AttributeError):
+        return None
+    return {
+        str((aplicacion.get("documento") or {}).get("numero_guia", "")).strip()
+        for aplicacion in aplicaciones
+        if isinstance(aplicacion, Mapping)
+        and (
+            str(aplicacion.get("tipo", "")).startswith("DESTINO_")
+            or aplicacion.get("tipo") == "CORRECCION_DOCUMENTAL_OPERADOR"
+        )
+    }
+
+
+def _destinos_confirmados_coincidentes(catalogo_obras, fila: Mapping[str, object]) -> list | None:
+    """Destinos CONFIRMADOS de la obra de la fila (sin texto degradado) que
+    corroboran su `despachar_a_crudo`. `None` si la fila no tiene con qué
+    consultar o la obra no tiene ninguno."""
+    from atlas_core.rutas.destino_entrega import texto_destino_degradado
+
+    despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
+    obra_documental = str(fila.get("obra_destino", "")).strip()
+    if not despachar_a or not obra_documental:
+        return None
+    try:
+        destinos = catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra_documental)
+    except (OSError, ValueError):
+        return None
+    destinos = [d for d in destinos if not texto_destino_degradado(d.direccion or "")]
+    if not destinos:
+        return None
+    texto_documental = normalizar_nombre_destino(despachar_a)
+    return [
+        destino for destino in destinos
+        if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
+        and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna)
+    ]
+
+
+def _ruta_calculada_reanclable(fila: Mapping[str, object], candidatos: list | None, *, solo_b_ocho: bool) -> bool:
+    """Caso real 475176: una ruta YA calculada sólo se re-ancla cuando el
+    texto documental corresponde a UN único destino confirmado
+    exclusivamente por la tolerancia de numeración OCR (esa ruta partió de
+    un número corrupto, no de la entidad conocida) y la fila todavía no
+    muestra ese destino canónico."""
+    if not candidatos or len(candidatos) != 1:
+        return False
+    destino = candidatos[0]
+    coincide = coincide_solo_por_numeracion_b_ocho if solo_b_ocho else coincide_solo_por_numeracion_ocr
+    return (
+        coincide(
+            destino.direccion.split(",", 1)[0], str(fila.get("despachar_a_crudo", "")),
+            comuna_confirmada=destino.comuna,
+        )
+        and str(fila.get("direccion_entrega", "")).strip() != destino.direccion
+    )
+
+
+def guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, ruta_ledger: str | Path | None = None,
+) -> list[str]:
+    """Selección read-only (sin red) para la reconciliación automática: filas
+    `RUTA_CALCULADA` cuyo destino confirmado se determina SÓLO por la regla
+    B->8 (caso 475176), sin decisión humana de destino en el ledger. Es la
+    cola focal que se suma a `revalidar_ruta_con_destino_confirmado_en_
+    catalogo_sin_ocr`; ninguna otra ruta calculada se reconsidera."""
+    ruta = Path(ruta_dataset)
+    carpeta = Path(carpeta_catalogos)
+    humanas = _guias_con_decision_humana_de_destino(
+        Path(ruta_ledger) if ruta_ledger is not None else ruta.parent / "decisiones_aplicadas.json"
+    )
+    if humanas is None:
+        return []
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        filas = _leer_filas(ruta)
+    except (OSError, ValueError):
+        return []
+    return [
+        numero_guia for fila in filas
+        if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+        and tiene_numeracion_b_inicial(str(fila.get("despachar_a_crudo", "")))
+        and (numero_guia := str(fila.get("numero_guia", "")).strip())
+        and numero_guia not in humanas
+        and _ruta_calculada_reanclable(
+            fila, _destinos_confirmados_coincidentes(catalogo_obras, fila), solo_b_ocho=True,
+        )
+    ]
+
+
 def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -4085,6 +4188,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
         plantas_por_id = {}
 
     guias_excluir_reintento = guias_excluir_reintento or set()
+    guias_decision_humana_destino = _guias_con_decision_humana_de_destino(ruta.parent / "decisiones_aplicadas.json")
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
@@ -4106,11 +4210,19 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             if numero_guia in guias_excluir_reintento:
                 continue
             # Caso real 475176: una ruta YA calculada sólo se reconsidera
-            # cuando su texto documental corresponde al destino confirmado
-            # únicamente por la tolerancia de numeración OCR (ver abajo) --
-            # esa ruta partió de un número corrupto ("B501"), no de la
-            # entidad conocida.
+            # cuando la guía fue pedida explícitamente (cola focal, nunca un
+            # barrido completo), no tiene decisión humana de destino, y su
+            # texto documental corresponde al destino confirmado únicamente
+            # por la tolerancia de numeración OCR (ver
+            # `_ruta_calculada_reanclable`) -- esa ruta partió de un número
+            # corrupto ("B501"), no de la entidad conocida.
             ruta_ya_calculada = str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value
+            if ruta_ya_calculada and (
+                guias_objetivo is None
+                or guias_decision_humana_destino is None
+                or numero_guia in guias_decision_humana_destino
+            ):
+                continue
             despachar_a = str(fila.get("despachar_a_crudo", "")).strip()
             planta_id = str(fila.get("planta_origen_id", "")).strip()
             obra_documental = str(fila.get("obra_destino", "")).strip()
@@ -4141,13 +4253,8 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                 destino for destino in destinos_confirmados_obra
                 if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna)
             ]
-            if ruta_ya_calculada and not (
-                len(candidatos_coincidentes) == 1
-                and coincide_solo_por_numeracion_ocr(
-                    candidatos_coincidentes[0].direccion.split(",", 1)[0], texto_documental,
-                    comuna_confirmada=candidatos_coincidentes[0].comuna,
-                )
-                and str(fila.get("direccion_entrega", "")).strip() != candidatos_coincidentes[0].direccion
+            if ruta_ya_calculada and not _ruta_calculada_reanclable(
+                fila, candidatos_coincidentes, solo_b_ocho=False,
             ):
                 continue
             if len(candidatos_coincidentes) != 1:

@@ -251,6 +251,23 @@ def coincide_solo_por_numeracion_ocr(
     return _coincide_con_numeracion_ocr(calle, texto, comuna_confirmada)
 
 
+def tiene_numeracion_b_inicial(texto_documental: str) -> bool:
+    """Prefiltro barato: el texto trae algún token "B<3+ dígitos>"."""
+    return bool(_NUMERACION_CON_B_INICIAL.search(normalizar_nombre_destino(texto_documental)))
+
+
+def coincide_solo_por_numeracion_b_ocho(
+    calle_confirmada: str, texto_documental: str, *, comuna_confirmada: str = "",
+) -> bool:
+    """Como `coincide_solo_por_numeracion_ocr`, pero sólo por la regla B->8
+    (caso 475176) -- nunca por O->0 ni por otra tolerancia."""
+    calle = normalizar_nombre_destino(calle_confirmada)
+    texto = normalizar_nombre_destino(texto_documental)
+    if not calle or not texto or calle in texto:
+        return False
+    return _coincide_con_numeracion_b_ocho(calle, texto, comuna_confirmada)
+
+
 def _calle_completa_contigua_en_texto(calle_variante: str, texto_variante: str) -> bool:
     tokens = _tokens_direccion(calle_variante)
     if not any(token.isdigit() for token in tokens):

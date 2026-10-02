@@ -41,6 +41,7 @@ from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
 from atlas_core.revalidacion_documental import (
     SEPARADOR_MOTIVOS,
     _indicadores_documentales_coherentes,
+    guias_ruta_calculada_reanclables_por_numeracion_b_ocho,
     reconciliar_bandeja_decisiones,
     reconciliar_decisiones_destino_no_resuelto,
     reconciliar_segunda_pasada_universal_sin_ocr,
@@ -1643,6 +1644,14 @@ def reconciliar_estado_derivado(
             }
         except (OSError, ValueError):
             guias_ruta_pendiente = None  # ante cualquier duda, sin acotar -- barrido completo de siempre
+        # Caso real 475176/473083: una ruta YA calculada (p. ej. al centro
+        # de la comuna) cuyo destino confirmado sólo se determina por la
+        # regla B->8 entra en la misma cola focal -- únicamente esas guías,
+        # nunca otra ruta calculada; sin decisión humana de destino.
+        if guias_ruta_pendiente is not None:
+            guias_ruta_pendiente |= set(guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            ))
         # Bloque P0 RECONCILIACIÓN FOCAL -- distinto del "P2 RUTEO" de
         # arriba (ese es un atajo de rendimiento puro, nunca deja de
         # procesar una fila elegible). Esto SÍ acota el universo cuando

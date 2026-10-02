@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from atlas_core.catalogo_destinos import coincide_solo_por_numeracion_ocr, direccion_confirmada_coincide
 from atlas_core.catalogo_plantas import CatalogoPlantas, EstadoCalidad
 from atlas_core.procesamiento_masivo import COLUMNAS
-from atlas_core.revalidacion_documental import revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr
+from atlas_core.revalidacion_documental import (
+    guias_ruta_calculada_reanclables_por_numeracion_b_ocho,
+    revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
+)
 from atlas_core.rutas.modelos import Coordenadas, EstadoRuta, ResultadoRuta
 from atlas_core.rutas.proveedor import ProveedorRutasSimulado
 
@@ -200,10 +203,111 @@ def test_ruta_calculada_con_texto_literal_u_otro_numero_no_se_toca(tmp_path):
 
     resultado = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor,
-        proveedor_rutas_fallback=ProveedorRutasSimulado(),
+        proveedor_rutas_fallback=ProveedorRutasSimulado(), guias_objetivo={"1", "2", "3"},
     )
 
     assert resultado["guias_actualizadas"] == []
     assert resultado["guias_contradiccion"] == []
     assert proveedor.destinos_ruteados == []
     assert _leer(dataset) == antes
+
+
+# --- 4. cola automática: sólo B->8, sin decisión humana, idempotente ---
+
+def _filas_cola():
+    return [
+        {"archivo": "475176.jpeg", "numero_guia": "475176", "despachar_a_crudo": DOCUMENTAL_475176,
+         "direccion_entrega": DOCUMENTAL_475176},
+        # Etiqueta ya canónica por documentos hermanos, ruta aún al centroide.
+        {"archivo": "473083.jpeg", "numero_guia": "473083", "despachar_a_crudo": DOCUMENTAL_475176,
+         "direccion_entrega": "GALVARINO 8501 QUILICURA"},
+        {"archivo": "1.jpeg", "numero_guia": "1", "despachar_a_crudo": "GALVARINO 8501 QUILICURA",
+         "direccion_entrega": "GALVARINO 8501 QUILICURA"},
+        # Coincidencia sólo por O->0: no entra a la cola automática B->8.
+        {"archivo": "2.jpeg", "numero_guia": "2", "despachar_a_crudo": "GALVARINO 85O1 QUILICURA",
+         "direccion_entrega": "GALVARINO 85O1 QUILICURA"},
+        {"archivo": "3.jpeg", "numero_guia": "3", "despachar_a_crudo": "GALVARINO B502 QUILICURA",
+         "direccion_entrega": "GALVARINO B502 QUILICURA"},
+        # Pendiente (no calculada): ya está en la cola de siempre, no aquí.
+        {"archivo": "4.jpeg", "numero_guia": "4", "despachar_a_crudo": DOCUMENTAL_475176,
+         "direccion_entrega": "", "estado_ruta": "REQUIERE_REVISION", "distancia_km": ""},
+    ]
+
+
+def test_cola_automatica_selecciona_solo_rutas_calculadas_por_b_ocho(tmp_path):
+    dataset, catalogos = _entorno(tmp_path, _filas_cola())
+
+    assert guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    ) == ["475176", "473083"]
+
+
+def test_decision_humana_de_destino_excluye_de_la_cola_y_del_reanclaje(tmp_path):
+    dataset, catalogos = _entorno(tmp_path, _filas_cola())
+    (dataset.parent / "decisiones_aplicadas.json").write_text(json.dumps({"aplicaciones": [
+        {"tipo": "DESTINO_NO_RESUELTO", "accion": "REGISTRAR_DIRECCION",
+         "documento": {"archivo": "473083.jpeg", "numero_guia": "473083"}},
+    ]}), encoding="utf-8")
+    proveedor = _ProveedorQueRegistra()
+
+    assert guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    ) == ["475176"]
+    resultado = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=ProveedorRutasSimulado(), guias_objetivo={"473083"},
+    )
+    assert resultado["guias_actualizadas"] == []
+    assert proveedor.destinos_ruteados == []
+
+
+def test_ledger_ilegible_abstiene_la_cola(tmp_path):
+    dataset, catalogos = _entorno(tmp_path, _filas_cola())
+    (dataset.parent / "decisiones_aplicadas.json").write_text("{no es json", encoding="utf-8")
+
+    assert guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+    ) == []
+
+
+def test_barrido_completo_nunca_reancla_rutas_calculadas(tmp_path):
+    dataset, catalogos = _entorno(tmp_path, _filas_cola()[:2])
+    antes = _leer(dataset)
+    proveedor = _ProveedorQueRegistra()
+
+    revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor,
+        proveedor_rutas_fallback=ProveedorRutasSimulado(),
+    )
+
+    assert proveedor.destinos_ruteados == []
+    assert _leer(dataset) == antes
+
+
+def test_cola_automatica_reancla_y_segunda_pasada_no_modifica(tmp_path):
+    dataset, catalogos = _entorno(tmp_path, _filas_cola()[:3])
+    proveedor = _ProveedorQueRegistra(
+        resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 13.1788, 19.5, "TEST"),
+    )
+
+    def _pasada():
+        cola = set(guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        ))
+        return revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos, proveedor_rutas=proveedor,
+            proveedor_rutas_fallback=ProveedorRutasSimulado(), guias_objetivo=cola,
+        )
+
+    assert sorted(_pasada()["guias_actualizadas"]) == ["473083", "475176"]
+    filas = _leer(dataset)
+    for guia in ("475176", "473083"):
+        assert filas[guia]["despachar_a_crudo"] == DOCUMENTAL_475176
+        assert filas[guia]["direccion_entrega"] == DIRECCION_CANONICA
+        assert filas[guia]["distancia_km"] == "13.1788"
+    assert filas["1"]["distancia_km"] == "13.4103"  # literal: intacta
+    despues = _leer(dataset)
+
+    assert _pasada()["guias_actualizadas"] == []
+    assert _leer(dataset) == despues
+    assert proveedor.destinos_ruteados == [COORD_DESTINO, COORD_DESTINO]
