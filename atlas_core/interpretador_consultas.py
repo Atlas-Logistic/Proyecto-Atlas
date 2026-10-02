@@ -88,6 +88,10 @@ class ResolucionEntidad:
     # poder responder "no encontré viajes asociados a X" en vez de perder
     # el filtro en silencio (Bloque 1 del ticket UNIVERSAL V1.1).
     token_no_reconocido: str = ""
+    # Fracción de las palabras significativas del valor que el texto nombra:
+    # desempata familias con el mismo número de palabras ("Quilicura" es la
+    # comuna completa, pero sólo una parte de la obra "CONSTRUMART SA QUILICURA").
+    cobertura: float = 0.0
 
 
 _PATRON_PALABRA = re.compile(r"[A-Z0-9]+")
@@ -114,6 +118,7 @@ def resolver_entidad_por_palabras(texto: str, valores_conocidos: Iterable[str]) 
     ambigüedad real (Bloque 14), se abstiene."""
     palabras_texto = _palabras(texto)
     coincidencias_por_valor: dict[str, frozenset[str]] = {}
+    cobertura_por_valor: dict[str, float] = {}
     for valor in {str(v).strip() for v in valores_conocidos if str(v).strip()}:
         palabras_valor = {
             p for p in _palabras(valor)
@@ -124,19 +129,31 @@ def resolver_entidad_por_palabras(texto: str, valores_conocidos: Iterable[str]) 
         coincidencias = palabras_valor & palabras_texto
         if coincidencias:
             coincidencias_por_valor[valor] = frozenset(coincidencias)
+            cobertura_por_valor[valor] = len(coincidencias) / len(palabras_valor)
     if not coincidencias_por_valor:
         return ResolucionEntidad(SIN_COINCIDENCIA)
     mejor_puntaje = max(len(p) for p in coincidencias_por_valor.values())
     mejores = sorted(v for v, p in coincidencias_por_valor.items() if len(p) == mejor_puntaje)
+    if len({normalizar_texto_atlas(v) for v in mejores}) == 1:
+        # Mismo valor escrito con otra capitalización/acentos ("QUILICURA" /
+        # "Quilicura"): el ejecutor compara normalizado, no es ambigüedad.
+        mejores = mejores[:1]
     if len(mejores) == 1:
-        return ResolucionEntidad(RESUELTA, valor=mejores[0], palabras_coincidentes=coincidencias_por_valor[mejores[0]])
+        return ResolucionEntidad(RESUELTA, valor=mejores[0], palabras_coincidentes=coincidencias_por_valor[mejores[0]],
+                                 cobertura=cobertura_por_valor[mejores[0]])
     # Bloque 14 -- palabras compartidas por TODOS los candidatos empatados
     # (unión, no sólo del primero): si esta ambigüedad queda enteramente
     # explicada por una coincidencia más fuerte de OTRA familia de
     # entidad, el llamador la descarta como evidencia ya cubierta en vez
     # de bloquear la consulta entera por una ambigüedad irrelevante.
     palabras_union = frozenset().union(*(coincidencias_por_valor[v] for v in mejores))
-    return ResolucionEntidad(AMBIGUA, candidatos=tuple(mejores), palabras_coincidentes=palabras_union)
+    return ResolucionEntidad(AMBIGUA, candidatos=tuple(mejores), palabras_coincidentes=palabras_union,
+                             cobertura=max(cobertura_por_valor[v] for v in mejores))
+
+
+def _orden_fuerza(item: tuple[str, ResolucionEntidad]) -> tuple[int, float]:
+    """Más palabras coincidentes primero; a igualdad, el valor nombrado más completo."""
+    return -len(item[1].palabras_coincidentes), -item[1].cobertura
 
 
 def resolver_patente_por_texto(texto: str, valores_conocidos: Iterable[str]) -> ResolucionEntidad:
@@ -184,6 +201,8 @@ class CatalogosConsulta:
     # combinados: un usuario que pregunta por una patente no sabe (ni
     # debería saber) cuál de las dos es.
     patentes: tuple[str, ...] = ()
+    plantas: tuple[str, ...] = ()
+    regiones: tuple[str, ...] = ()
 
 
 def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> CatalogosConsulta:
@@ -195,7 +214,13 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
     tipos_carga: set[str] = set()
     comunas: set[str] = set()
     patentes: set[str] = set()
+    plantas: set[str] = set()
+    regiones: set[str] = set()
     for viaje in viajes:
+        for columna, destino in (("planta_origen_nombre", plantas), ("region_entrega", regiones)):
+            valor = str(viaje.get(columna, "")).strip()
+            if valor:
+                destino.add(valor)
         choferes.update(_valores_multivalor(viaje, "choferes"))
         clientes.update(_valores_multivalor(viaje, "clientes"))
         obras.update(_valores_multivalor(viaje, "obras_destino"))
@@ -209,6 +234,7 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
         choferes=tuple(sorted(choferes)), clientes=tuple(sorted(clientes)),
         obras=tuple(sorted(obras)), tipos_carga=tuple(sorted(tipos_carga)),
         comunas=tuple(sorted(comunas)), patentes=tuple(sorted(patentes)),
+        plantas=tuple(sorted(plantas)), regiones=tuple(sorted(regiones)),
     )
 
 
@@ -404,7 +430,7 @@ def _resolver_filtros_entidad(
     filtros: dict[str, str] = {}
     avisos: list[str] = []
     palabras_reclamadas: set[str] = set()
-    for campo, resolucion in sorted(candidatos.items(), key=lambda item: -len(item[1].palabras_coincidentes)):
+    for campo, resolucion in sorted(candidatos.items(), key=_orden_fuerza):
         if resolucion.palabras_coincidentes and resolucion.palabras_coincidentes <= palabras_reclamadas:
             continue
         if resolucion.estado == AMBIGUA:
@@ -446,6 +472,14 @@ _PATRON_CHOFER_KW = re.compile(r"\bCHOFER(ES)?\b|\bCONDUCTOR(ES)?\b")
 _PATRON_CLIENTE_KW = re.compile(r"\bCLIENTES?\b|\bEMPRESAS?\b")
 _PATRON_VIAJE_KW = re.compile(r"\bVIAJES?\b")
 _PATRON_NUMERO_TRANSPORTE = re.compile(r"\b(\d{6,})\b")
+# Entidad pedida y filtros por identificador explícito (camino genérico de viajes).
+_PATRON_ENTIDAD_TRANSPORTE = re.compile(r"\b(?P<q>CUANT[OA]S?|QUE|CUALES?)\s+TRANSPORTES?\b")
+_PATRON_LISTAR_GUIAS = re.compile(r"\b(?:QUE|CUALES?)\s+GUIAS?\b")
+_PATRON_LISTAR_VIAJES = re.compile(r"\b(?:QUE|CUALES?)\s+VIAJES?\b")
+_PATRON_RUT_CON_DV = re.compile(r"\b(?P<rut>\d{1,2}\.?\d{3}\.?\d{3}\s*-\s*[\dK])\b")
+_PATRON_RUT_SIN_DV = re.compile(r"\bRUT\s+(?P<rut>\d{7,9})\b")
+_PATRON_GUIA_NUMERO = re.compile(r"\bGUIAS?\s+(?:N[°O]?\s*)?(\d{5,})\b")
+_PATRON_TRANSPORTE_NUMERO = re.compile(r"\bTRANSPORTES?\s+(?:N[°O]?\s*)?(\d{6,})\b")
 
 _PALABRAS_PERIODO = (
     (PERIODO_SEMANA_PASADA, ("SEMANA PASADA", "LA SEMANA PASADA")),
@@ -459,6 +493,7 @@ _PATRON_ULTIMOS_DIAS = re.compile(r"\bULTIM[OA]S?\s+(\d+)\s+DIAS?\b")
 _PATRON_RANGO_FECHAS = re.compile(
     r"\b(?:ENTRE|DESDE)\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})\s+(?:Y|HASTA)\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b"
 )
+_PATRON_FECHA_PUNTUAL = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
 
 
 def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
@@ -470,6 +505,11 @@ def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
     if rango:
         d1, m1, a1, d2, m2, a2 = rango.groups()
         return {"fecha_desde": f"{a1}-{int(m1):02d}-{int(d1):02d}", "fecha_hasta": f"{a2}-{int(m2):02d}-{int(d2):02d}"}
+    puntual = _PATRON_FECHA_PUNTUAL.search(texto_normalizado)
+    if puntual:
+        d, m, a = puntual.groups()
+        dia = f"{a}-{int(m):02d}-{int(d):02d}"
+        return {"fecha_desde": dia, "fecha_hasta": dia}
     for nombre_periodo, frases in _PALABRAS_PERIODO:
         if any(frase in texto_normalizado for frase in frases):
             return {"periodo": nombre_periodo}
@@ -519,6 +559,75 @@ def _filtros_periodo_ingesta(texto_normalizado: str) -> dict[str, str]:
         if any(frase in texto_normalizado for frase in frases):
             return {"periodo_ingesta": nombre_periodo}
     return {}
+
+
+# --- Presencia/ausencia de un campo operacional: "sin material", "no tienen
+# destino", "material ausente", "con patente rampla". Vocabulario por CAMPO
+# (sinónimos del nombre del campo) y por FORMA (marcadores de ausencia/
+# presencia) -- nunca frases completas. Produce los filtros `ausente`/
+# `presente` del ejecutor, cuyo valor es la lista de campos. ---
+_SINONIMOS_CAMPO_PRESENCIA = (
+    ("patente_rampla", ("PATENTE DE RAMPLA", "PATENTE DE LA RAMPLA", "PATENTE RAMPLA", "RAMPLA", "RAMPLAS")),
+    ("patente_tracto", ("PATENTE DE TRACTO", "PATENTE DEL TRACTO", "PATENTE TRACTO", "TRACTO", "TRACTOS",
+                        "PATENTE", "PATENTES")),
+    ("material", ("DESCRIPCION DE MATERIAL", "DESCRIPCION DEL MATERIAL", "MATERIAL", "MATERIALES")),
+    ("tipo_carga", ("TIPO DE CARGA",)),
+    ("destino", ("DIRECCION DE ENTREGA", "DIRECCION", "DIRECCIONES", "DESTINO", "DESTINOS")),
+    ("obra", ("OBRA", "OBRAS")),
+    ("cliente", ("CLIENTE", "CLIENTES")),
+    ("rut", ("RUT DEL CHOFER", "RUT")),
+    ("chofer", ("CHOFER", "CHOFERES", "CONDUCTOR", "CONDUCTORES")),
+    ("comuna", ("COMUNA", "COMUNAS")),
+    ("region", ("REGION", "REGIONES")),
+    ("origen", ("PLANTA DE ORIGEN", "PLANTA", "PLANTAS", "ORIGEN")),
+    ("peso", ("PESO", "KILOS", "KG", "TONELAJE")),
+    ("numero_guia", ("NUMERO DE GUIA", "GUIA")),
+    ("numero_transporte", ("NUMERO DE TRANSPORTE", "TRANSPORTE")),
+    ("fecha", ("FECHA",)),
+)
+_CAMPO_POR_SINONIMO = {s: campo for campo, sinonimos in _SINONIMOS_CAMPO_PRESENCIA for s in sinonimos}
+_ALTERNATIVA_CAMPO = "|".join(re.escape(s) for s in sorted(_CAMPO_POR_SINONIMO, key=len, reverse=True))
+_ARTICULO = r"(?:(?:EL|LA|LOS|LAS|UN|UNA|SU|SUS)\s+)?"
+_FIN_DE_MENCION = r"(?=\s*(?:$|[?.,;!]|\bY\b|\bE\b|\bO\b))"
+_PATRONES_AUSENCIA = (
+    re.compile(rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|LES?\s+FALTAN?|FALTAN?)\s+"
+               rf"{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO})\b"),
+    re.compile(rf"\b(?P<campo>{_ALTERNATIVA_CAMPO})\s+(?:AUSENTES?|VACI[OA]S?|FALTANTES?|NO\s+ENCONTRAD[OA]S?|"
+               rf"NO\s+INFORMAD[OA]S?|NO\s+REGISTRAD[OA]S?|SIN\s+DATOS?)\b"),
+)
+_PATRONES_PRESENCIA = (
+    # "con destino" sólo cuando el campo cierra la mención: "con destino
+    # Quilicura" es un VALOR de destino, no presencia.
+    re.compile(rf"\b(?:CON|TIENEN?)\s+{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO}){_FIN_DE_MENCION}"),
+    re.compile(rf"\b(?P<campo>{_ALTERNATIVA_CAMPO})\s+(?:PRESENTES?|REGISTRAD[OA]S?|INFORMAD[OA]S?|ASIGNAD[OA]S?)\b"),
+)
+
+
+def _extraer_presencia(texto_normalizado: str) -> tuple[dict[str, str], str]:
+    """Devuelve `(filtros, texto_sin_menciones)`. El texto devuelto ya no
+    contiene las menciones consumidas, para que "sin peso" nunca se lea
+    como métrica de peso ni "sin chofer" como entidad."""
+    restante = texto_normalizado
+    campos: dict[str, list[str]] = {"ausente": [], "presente": []}
+    for clave, patrones in (("ausente", _PATRONES_AUSENCIA), ("presente", _PATRONES_PRESENCIA)):
+        for patron in patrones:
+            for m in list(patron.finditer(restante)):
+                campo = _CAMPO_POR_SINONIMO[m.group("campo")]
+                if campo not in campos["ausente"] and campo not in campos[clave]:
+                    campos[clave].append(campo)
+            restante = patron.sub(" ", restante)
+    return {clave: ",".join(valores) for clave, valores in campos.items() if valores}, restante
+
+
+# Nombres de campo/entidad ("región", "comuna", "transportes"): dicen QUÉ se
+# filtra, nunca son evidencia de un valor (evita que "transportes" resuelva
+# el cliente "CONSTRUCCIONES Y TRANSPORTES").
+_PATRON_PALABRA_DE_CAMPO = re.compile(
+    r"\b(?:" + "|".join(sorted(
+        {p for s in _CAMPO_POR_SINONIMO for p in s.split() if len(p) >= 3}
+        | {"VIAJE", "VIAJES", "GUIAS", "TRANSPORTES"}, key=len, reverse=True,
+    )) + r")\b"
+)
 
 # Bloque R2 (adición -- FALLO DE LÓGICA/ASOCIACIÓN) -- causa raíz real:
 # "cuántos viajes con revisión tenemos" nunca poblaba `filtros["estado"]`
@@ -583,6 +692,9 @@ _PALABRAS_ESTRUCTURA_PREGUNTA = frozenset({
     "RECHAZADA", "RECHAZADAS", "RECHAZADO", "RECHAZADOS", "PENDIENTE", "PENDIENTES",
     "RESPUESTA", "TRAMITE", "MENOS", "MENOR", "MINIMO", "MINIMA", "TOP", "MOVIDO", "MOVIO",
     "ENTREGADO", "ENTREGO", "ENTREGA",
+}) | frozenset(p for s in _CAMPO_POR_SINONIMO for p in s.split()) | frozenset({
+    "AUSENTE", "AUSENTES", "VACIO", "VACIA", "VACIOS", "VACIAS", "FALTANTE", "FALTANTES", "SIN",
+    "TRANSPORTES", "SALIERON", "SALIO", "LLEVO", "LLEVARON",
 })
 _PATRON_PALABRA_CAPITALIZADA = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+")
 
@@ -867,11 +979,12 @@ def interpretar_consulta_determinista(
     # dimensión pedida. "chofer" no está en la tabla de dispatch a
     # propósito -- ese caso lo sigue resolviendo, sin cambios, el
     # chequeo de CHOFERES en plural.
+    presencia, normalizado_operativo = _extraer_presencia(normalizado)
     coincidencia_cuantos = _PATRON_CUANTOS_SUSTANTIVO.search(normalizado)
     if coincidencia_cuantos is not None:
         relacion_contada = _SUSTANTIVO_CUANTOS_A_RELACION.get(coincidencia_cuantos.group(1))
         if relacion_contada is not None:
-            filtros_relacion: dict[str, str] = {}
+            filtros_relacion: dict[str, str] = dict(presencia)
             for nombre_periodo, frases in _PALABRAS_PERIODO:
                 if any(frase in normalizado for frase in frases):
                     filtros_relacion["periodo"] = nombre_periodo
@@ -957,9 +1070,19 @@ def interpretar_consulta_determinista(
                 break
         return ConsultaAtlas(metrica=METRICA_COUNT_DISTINCT_CHOFER, filtros=filtros_chofer), tuple(avisos)
 
+    # Desde aquí la métrica, la agrupación y las entidades se leen sobre el
+    # texto SIN las menciones de presencia/ausencia ya convertidas en filtro.
     metrica = METRICA_COUNT_VIAJES
-    for candidata, palabras in _PALABRAS_METRICA:
-        if any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in palabras):
+    relacion: str | None = None
+    entidad_transporte = _PATRON_ENTIDAD_TRANSPORTE.search(normalizado_operativo)
+    if entidad_transporte is not None:
+        # "cuántos/qué transportes": la entidad contada es el transporte AZA,
+        # distinta del viaje físico (un viaje puede agrupar varios).
+        relacion = "transporte"
+        metrica = (METRICA_COUNT_DISTINCT_RELACION if entidad_transporte.group("q").startswith("CUANT")
+                   else METRICA_LIST_RELACION)
+    for candidata, palabras in (() if relacion else _PALABRAS_METRICA):
+        if any(re.search(rf"\b{re.escape(p)}\b", normalizado_operativo) for p in palabras):
             metrica = candidata
             break
     else:
@@ -971,26 +1094,42 @@ def interpretar_consulta_determinista(
         # "viaje(s)" -- cualquier otro "cuántos X" sin evidencia de
         # métrica se cede a B1 (o "no interpretable" sin B1 configurado),
         # nunca se adivina.
-        if not any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in ("VIAJE", "VIAJES")):
+        if relacion is None and not any(
+            re.search(rf"\b{re.escape(p)}\b", normalizado_operativo) for p in ("VIAJE", "VIAJES")
+        ):
             return None, avisos  # ninguna señal de métrica reconocible -- intentar B1
 
-    filtros: dict[str, str] = {}
-
-    for nombre_periodo, frases in _PALABRAS_PERIODO:
-        if any(frase in normalizado for frase in frases):
-            filtros["periodo"] = nombre_periodo
-            break
+    filtros: dict[str, str] = dict(presencia)
+    # Período con nombre, últimos N días, rango o fecha puntual.
+    filtros.update(_filtros_periodo(normalizado_operativo))
 
     for valor_estado, frases in _PALABRAS_ESTADO_VIAJE:
-        if any(re.search(rf"\b{re.escape(frase)}\b", normalizado) for frase in frases):
+        if any(re.search(rf"\b{re.escape(frase)}\b", normalizado_operativo) for frase in frases):
             filtros["estado"] = valor_estado
             break
+
+    # Identificadores explícitos: RUT, guía, transporte y patente conocida.
+    rut = _PATRON_RUT_CON_DV.search(normalizado_operativo) or _PATRON_RUT_SIN_DV.search(normalizado_operativo)
+    if rut:
+        filtros["rut"] = rut.group("rut")
+    guia = _PATRON_GUIA_NUMERO.search(normalizado_operativo)
+    if guia:
+        filtros["numero_guia"] = guia.group(1)
+    transporte = _PATRON_TRANSPORTE_NUMERO.search(normalizado_operativo)
+    if transporte:
+        filtros["numero_transporte"] = transporte.group(1)
+    if catalogos.patentes:
+        resolucion_patente = resolver_patente_por_texto(normalizado_operativo, catalogos.patentes)
+        if resolucion_patente.estado == RESUELTA:
+            filtros["patente"] = resolucion_patente.valor
+        elif resolucion_patente.estado == AMBIGUA:
+            return None, (*avisos, "AMBIGUO:patente:" + " | ".join(resolucion_patente.candidatos))
 
     agrupacion: str | None = None
     for campo_agrupacion, palabras in _PALABRAS_AGRUPACION:
         patrones = (rf"\bCADA {p}\b" for p in palabras)
         patrones_por = (rf"\bPOR {p}\b" for p in palabras)
-        if any(re.search(p, normalizado) for p in (*patrones, *patrones_por)):
+        if any(re.search(p, normalizado_operativo) for p in (*patrones, *patrones_por)):
             agrupacion = campo_agrupacion
             break
 
@@ -1029,16 +1168,19 @@ def interpretar_consulta_determinista(
     # aceptada más fuerte de otra familia se descarta (evidencia ya
     # explicada por la más fuerte, nunca un filtro extra espurio).
     candidatos_por_campo: dict[str, ResolucionEntidad] = {}
+    texto_entidades = _PATRON_PALABRA_DE_CAMPO.sub(" ", normalizado_operativo)
     for campo, valores, activa in (
         ("chofer", catalogos.choferes, agrupacion != "chofer"),
         ("cliente", catalogos.clientes, agrupacion != "cliente"),
         ("obra", catalogos.obras, agrupacion != "obra"),
         ("tipo_carga", catalogos.tipos_carga, agrupacion != "tipo_carga"),
         ("comuna", catalogos.comunas, agrupacion != "comuna"),
+        ("origen", catalogos.plantas, True),
+        ("region", catalogos.regiones, True),
     ):
         if not activa or not valores:
             continue
-        resolucion = resolver_entidad_por_palabras(texto, valores)
+        resolucion = resolver_entidad_por_palabras(texto_entidades, valores)
         if resolucion.estado in (RESUELTA, AMBIGUA):
             candidatos_por_campo[campo] = resolucion
 
@@ -1050,13 +1192,17 @@ def interpretar_consulta_determinista(
     # "cliente" = "SALOMON SACK SA") se descarta en silencio; sólo
     # bloquea la consulta una ambigüedad que sigue sin explicación.
     palabras_reclamadas: set[str] = set()
-    for campo, resolucion in sorted(
-        candidatos_por_campo.items(), key=lambda item: -len(item[1].palabras_coincidentes)
-    ):
+    for campo, resolucion in sorted(candidatos_por_campo.items(), key=_orden_fuerza):
         if campo == "obra" and "cliente" in filtros:
             continue  # ya cubierto por cliente -- evita sobre-restringir
         if resolucion.palabras_coincidentes and resolucion.palabras_coincidentes <= palabras_reclamadas:
             continue  # evidencia ya explicada por una coincidencia más fuerte de otra familia
+        if resolucion.estado == AMBIGUA and campo == "region" and len(resolucion.palabras_coincidentes) == 1:
+            # Variantes de escritura de la MISMA región ("Metropolitana" /
+            # "REGIÓN METROPOLITANA"): el filtro de región es por subcadena.
+            filtros[campo] = next(iter(resolucion.palabras_coincidentes))
+            palabras_reclamadas |= resolucion.palabras_coincidentes
+            continue
         if resolucion.estado == AMBIGUA:
             avisos.append(f"AMBIGUO:{campo}:" + " | ".join(resolucion.candidatos))
             continue
@@ -1078,7 +1224,17 @@ def interpretar_consulta_determinista(
     if sin_explicar:
         return None, (*avisos, "SIN_COINCIDENCIA:" + ", ".join(sin_explicar))
 
-    return ConsultaAtlas(metrica=metrica, filtros=filtros, agrupacion=agrupacion, limite=limite, orden=orden), tuple(avisos)
+    # La entidad pedida decide la forma: "qué guías" lista guías (sin
+    # duplicar las de un mismo viaje), "qué viajes" lista viajes.
+    if agrupacion is None and relacion is None:
+        if metrica == METRICA_COUNT_GUIAS and _PATRON_LISTAR_GUIAS.search(normalizado_operativo):
+            metrica, relacion = METRICA_LIST_RELACION, "guia"
+        elif metrica == METRICA_COUNT_VIAJES and _PATRON_LISTAR_VIAJES.search(normalizado_operativo):
+            metrica = METRICA_LISTAR_VIAJES
+
+    return ConsultaAtlas(
+        metrica=metrica, filtros=filtros, agrupacion=agrupacion, limite=limite, orden=orden, relacion=relacion,
+    ), tuple(avisos)
 
 
 def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> str | None:
@@ -1094,12 +1250,14 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
     B1"), nunca ejecuta la consulta rechazada tal cual."""
     normalizado = normalizar_texto_atlas(pregunta)
 
-    def _menciona(palabras: tuple[str, ...]) -> bool:
-        return any(re.search(rf"\b{re.escape(p)}\b", normalizado) for p in palabras)
+    def _menciona(palabras: tuple[str, ...], texto: str | None = None) -> bool:
+        return any(re.search(rf"\b{re.escape(p)}\b", normalizado if texto is None else texto) for p in palabras)
 
-    if _menciona(_PALABRAS_KM) and consulta.metrica != METRICA_SUM_KM:
+    # "sin peso" / "con chofer" son filtros de presencia, no la métrica pedida.
+    sin_presencia = _extraer_presencia(normalizado)[1]
+    if _menciona(_PALABRAS_KM, sin_presencia) and consulta.metrica != METRICA_SUM_KM:
         return "la pregunta pide distancia/km, pero la consulta no calcula distancia"
-    if _menciona(_PALABRAS_PESO) and consulta.metrica != METRICA_SUM_PESO:
+    if _menciona(_PALABRAS_PESO, sin_presencia) and consulta.metrica != METRICA_SUM_PESO:
         return "la pregunta pide peso/toneladas, pero la consulta no suma peso"
     # Bloque UNIVERSAL V1.1 (Bloque 3/12 del ticket) -- red de seguridad
     # para cuando B1 (no el determinístico, que ya no comete este error
@@ -1139,7 +1297,7 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
     ):
         return "la pregunta pide asociaciones patente-chofer ausentes, pero la consulta usa otra métrica o soporte"
     if (
-        _menciona(_PALABRAS_CHOFER_PLURAL)
+        _menciona(_PALABRAS_CHOFER_PLURAL, sin_presencia)
         and not _PATRON_AGRUPACION_CHOFER.search(normalizado)
         and consulta.metrica == METRICA_COUNT_VIAJES
     ):

@@ -99,6 +99,8 @@ _NOMBRE_FILTRO_LEGIBLE = {
     "patente_tracto": "patente tracto", "patente_rampla": "patente rampla",
     "estado": "estado", "numero_guia": "guía", "numero_transporte": "transporte",
     "periodo": "período", "patente": "patente",
+    "rut": "RUT", "origen": "planta", "region": "región", "viaje": "viaje",
+    "peso": "peso", "fecha": "fecha",
 }
 _NOMBRE_PERIODO_LEGIBLE = {
     "HOY": "hoy", "AYER": "ayer", "ESTA_SEMANA": "esta semana",
@@ -156,7 +158,7 @@ _NOMBRE_RELACION_LEGIBLE = {
     "destino": ("destino", "destinos"), "comuna": ("comuna", "comunas"), "material": ("material", "materiales"),
     "tipo_carga": ("tipo de carga", "tipos de carga"), "guia": ("guía", "guías"),
     "patente_tracto": ("patente tracto", "patentes tracto"), "patente_rampla": ("patente rampla", "patentes rampla"),
-    "vehiculo": ("patente", "patentes"),
+    "vehiculo": ("patente", "patentes"), "transporte": ("transporte", "transportes"),
 }
 
 
@@ -171,9 +173,19 @@ def _etiqueta_evento(tipo_evento: str | None, n: int) -> str:
 
 def _filtros_legibles(consulta: ConsultaAtlas) -> str:
     partes = []
-    for campo, valor in consulta.filtros.items():
+    filtros = consulta.filtros
+    for campo, valor in filtros.items():
         if campo == "periodo":
             partes.append(_NOMBRE_PERIODO_LEGIBLE.get(valor, valor))
+            continue
+        if campo in ("ausente", "presente"):
+            campos = ", ".join(_NOMBRE_FILTRO_LEGIBLE.get(c, c) for c in str(valor).split(",") if c)
+            partes.append(f"{'sin' if campo == 'ausente' else 'con'} {campos}")
+            continue
+        if campo == "fecha_desde" and filtros.get("fecha_hasta") == valor:
+            partes.append(f"fecha {valor}")
+            continue
+        if campo == "fecha_hasta" and filtros.get("fecha_desde") == valor:
             continue
         etiqueta = _NOMBRE_FILTRO_LEGIBLE.get(campo, campo)
         partes.append(f"{etiqueta} {valor}")
@@ -273,6 +285,12 @@ def _formatear_respuesta_relacion(resultado: ResultadoConsultaAtlas) -> str:
     valores = resultado.resultado
     par = _NOMBRE_RELACION_LEGIBLE.get(consulta.relacion or "", (consulta.relacion or "valor", (consulta.relacion or "valores") + "s"))
     etiqueta = par[0] if len(valores) == 1 else par[1]
+    if len(consulta.filtros) > 1 or any(c in consulta.filtros for c in ("ausente", "presente", "fecha_desde", "periodo")):
+        # Varios criterios: se nombran todos y se dice cuántos son.
+        contexto = _filtros_legibles(consulta)
+        if not valores:
+            return f"No encontré {par[1]} ({contexto})."
+        return f"{len(valores)} {etiqueta} ({contexto}): {', '.join(valores)}."
     sujeto = next(iter(consulta.filtros.values()), "")
     if not valores:
         return f"No encontré {etiqueta} asociad{'a' if len(valores) == 1 else 'as'} a {sujeto}." if sujeto else f"No encontré {etiqueta}."

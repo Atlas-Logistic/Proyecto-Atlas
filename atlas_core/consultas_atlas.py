@@ -17,6 +17,7 @@ devuelve un `ResultadoConsultaAtlas`."""
 from __future__ import annotations
 
 import csv
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -159,18 +160,43 @@ _CAMPO_A_COLUMNA = {
     "patente_tracto": "patentes_tracto", "patente_rampla": "patentes_rampla",
     "estado": "estado", "numero_guia": "numeros_guia",
     "numero_transporte": "numero_transporte",
+    "rut": "ruts_chofer", "origen": "planta_origen_nombre", "region": "region_entrega",
+    "viaje": "viaje_id",
 }
 # Columnas cuyo valor real puede traer varios elementos separados por
 # `SEPARADOR_MULTIVALOR` (ver `reporte_viajes.py` -- consolidación de
 # viaje). `numero_transporte`/`estado` son siempre un único valor.
 _COLUMNAS_MULTIVALOR = frozenset({
     "choferes", "clientes", "obras_destino", "materiales", "tipos_carga",
-    "patentes_tracto", "patentes_rampla", "numeros_guia",
+    "patentes_tracto", "patentes_rampla", "numeros_guia", "ruts_chofer", "transportes_aza",
 })
 # Filtros cuyo valor se compara por SUBCADENA (texto libre, sin
 # catálogo finito de valores posibles -- Bloque 7: "material" es
 # descripción libre, nunca una enumeración cerrada como tipo_carga).
-_FILTROS_SUBCADENA = frozenset({"material", "destino"})
+# "region" también: el reporte trae variantes reales del mismo valor
+# ("Metropolitana" / "REGIÓN METROPOLITANA").
+_FILTROS_SUBCADENA = frozenset({"material", "destino", "region"})
+
+# --- Presencia/ausencia de un campo ("sin material", "destino ausente",
+# "con patente rampla"). Filtros `ausente`/`presente`: su valor es la
+# lista de CAMPOS (separados por coma), nunca un valor de dato. Un campo
+# que existe por guía en `documentos_operacionales` se evalúa guía a
+# guía (un viaje "no tiene material" si alguna de sus guías no lo
+# trae); el resto, sobre la columna del viaje. `presente` es siempre el
+# complemento exacto de `ausente` -- ambos suman el universo. ---
+FILTROS_PRESENCIA = ("ausente", "presente")
+_COLUMNA_PRESENCIA = {
+    **_CAMPO_A_COLUMNA, "peso": "peso_total_viaje_kg", "fecha": "fecha",
+}
+_CAMPO_DOCUMENTO = {
+    "material": "descripcion_material", "cliente": "cliente", "obra": "obra_destino",
+    "numero_guia": "numero_guia", "peso": "peso_kg",
+}
+CAMPOS_PRESENCIA = frozenset(_COLUMNA_PRESENCIA)
+_VALORES_AUSENTES = frozenset({
+    "", "NO ENCONTRADO", "NO ENCONTRADA", "NO_ENCONTRADO", "NO_ENCONTRADA",
+    "N/A", "NA", "-", "SIN DATO", "SIN DATOS", "NONE", "NULL",
+})
 # Bloque UNIVERSAL V1 (Bloque 7/18 del ticket) -- "patente" es un filtro
 # VIRTUAL: un usuario que pregunta por una patente no sabe (ni debería
 # saber) si es tracto o rampla -- coincide contra CUALQUIERA de las dos
@@ -189,6 +215,7 @@ FILTROS_SOPORTADOS = frozenset(_CAMPO_A_COLUMNA) | frozenset({
     # `fecha_ingesta` (timestamp real de ingesta a Atlas), nunca por la
     # fecha documental. Ver `_rango_fecha_ingesta_de_consulta`.
     "periodo_ingesta", "fecha_ingesta_desde", "fecha_ingesta_hasta", "dias_ingesta",
+    *FILTROS_PRESENCIA,
 })
 
 # --- Bloque 4: agrupaciones V1. ---
@@ -216,6 +243,7 @@ _COLUMNA_RELACION = {
     "destino": "direccion_entrega", "comuna": "localidad_entrega",
     "material": "materiales", "tipo_carga": "tipos_carga", "guia": "numeros_guia",
     "patente_tracto": "patentes_tracto", "patente_rampla": "patentes_rampla",
+    "transporte": "transportes_aza",
 }
 RELACIONES_SOPORTADAS = frozenset(_COLUMNA_RELACION) | frozenset({"vehiculo"})
 
@@ -310,6 +338,12 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
         dominio_exclusivo = _CAMPOS_EXCLUSIVOS_POR_DOMINIO.get(campo)
         if dominio_exclusivo is not None and consulta.dominio != dominio_exclusivo:
             raise ErrorConsultaAtlas(f"El filtro {campo!r} sólo es válido para el dominio {dominio_exclusivo!r}.")
+        if campo in FILTROS_PRESENCIA:
+            if consulta.dominio != DOMINIO_VIAJES:
+                raise ErrorConsultaAtlas(f"El filtro {campo!r} sólo es válido para el dominio {DOMINIO_VIAJES!r}.")
+            campos = _campos_presencia(consulta.filtros[campo])
+            if not campos or any(c not in CAMPOS_PRESENCIA for c in campos):
+                raise ErrorConsultaAtlas(f"Campo de {campo} no soportado: {consulta.filtros[campo]!r}")
     if consulta.agrupacion is not None and consulta.agrupacion not in AGRUPACIONES_SOPORTADAS:
         raise ErrorConsultaAtlas(f"Agrupación no soportada: {consulta.agrupacion!r}")
     dominio_exclusivo_agrupacion = _CAMPOS_EXCLUSIVOS_POR_DOMINIO.get(consulta.agrupacion or "")
@@ -478,6 +512,66 @@ def _parsear_fecha_ingesta_dataset(texto: str) -> date | None:
         return None
 
 
+def _campos_presencia(valor: str) -> tuple[str, ...]:
+    return tuple(c.strip() for c in str(valor or "").split(",") if c.strip())
+
+
+def _valor_ausente(campo: str, valor: object) -> bool:
+    if normalizar_texto_atlas(str(valor or "")) in _VALORES_AUSENTES:
+        return True
+    return campo == "peso" and _num(str(valor)) <= 0
+
+
+def _documentos_viaje(viaje: Mapping[str, str]) -> list[Mapping[str, object]]:
+    """Guías del viaje tal como las persiste `reporte_viajes.py`; lista
+    vacía si el reporte no trae la columna (reportes antiguos)."""
+    crudo = str(viaje.get("documentos_operacionales", "") or "").strip()
+    if not crudo:
+        return []
+    try:
+        documentos = json.loads(crudo)
+    except ValueError:
+        return []
+    return [d for d in documentos if isinstance(d, Mapping)] if isinstance(documentos, list) else []
+
+
+def _filtros_documento(consulta: ConsultaAtlas) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Campos de `ausente`/`presente` que se evalúan guía a guía."""
+    ausentes = tuple(c for c in _campos_presencia(consulta.filtros.get("ausente", "")) if c in _CAMPO_DOCUMENTO)
+    presentes = tuple(c for c in _campos_presencia(consulta.filtros.get("presente", "")) if c in _CAMPO_DOCUMENTO)
+    return ausentes, presentes
+
+
+def _documento_cumple(documento: Mapping[str, object], ausentes: Sequence[str], presentes: Sequence[str]) -> bool:
+    return (
+        all(_valor_ausente(c, documento.get(_CAMPO_DOCUMENTO[c])) for c in ausentes)
+        and not any(_valor_ausente(c, documento.get(_CAMPO_DOCUMENTO[c])) for c in presentes)
+    )
+
+
+def _campo_ausente_en_viaje(viaje: Mapping[str, str], campo: str) -> bool:
+    documentos = _documentos_viaje(viaje) if campo in _CAMPO_DOCUMENTO else []
+    if documentos:
+        return any(_valor_ausente(campo, d.get(_CAMPO_DOCUMENTO[campo])) for d in documentos)
+    columna = _COLUMNA_PRESENCIA[campo]
+    valores = _valores_multivalor(viaje, columna) if columna in _COLUMNAS_MULTIVALOR else (str(viaje.get(columna, "")),)
+    return all(_valor_ausente(campo, v) for v in valores)
+
+
+def _guias_coincidentes(viaje: Mapping[str, str], consulta: ConsultaAtlas) -> tuple[str, ...]:
+    """Guías del viaje que cumplen la consulta. Con un filtro de
+    presencia por guía, sólo cuentan las guías que lo cumplen (un viaje
+    mixto aporta únicamente su guía sin material, nunca todas)."""
+    ausentes, presentes = _filtros_documento(consulta)
+    documentos = _documentos_viaje(viaje) if (ausentes or presentes) else []
+    if not documentos:
+        return _valores_multivalor(viaje, "numeros_guia")
+    return tuple(dict.fromkeys(
+        str(d.get("numero_guia", "")).strip() for d in documentos
+        if str(d.get("numero_guia", "")).strip() and _documento_cumple(d, ausentes, presentes)
+    ))
+
+
 def _fila_coincide(
     viaje: Mapping[str, str], consulta: ConsultaAtlas, rango_fecha: tuple[date, date] | None,
     rango_fecha_ingesta: tuple[date, date] | None = None,
@@ -502,12 +596,27 @@ def _fila_coincide(
             continue
         if campo == "tipo_evento":
             continue  # Bloque UNIVERSAL V1 -- sólo aplica al dominio EVENTOS
+        if campo in FILTROS_PRESENCIA:
+            ausente_buscado = campo == "ausente"
+            if any(_campo_ausente_en_viaje(viaje, c) != ausente_buscado for c in _campos_presencia(valor)):
+                return False
+            continue
         valor_normalizado = normalizar_texto_atlas(valor)
+        if campo == "rut":
+            # Mismo RUT con o sin puntos/guion.
+            buscado = re.sub(r"[^0-9K]", "", valor_normalizado)
+            if not any(re.sub(r"[^0-9K]", "", normalizar_texto_atlas(v)) == buscado
+                       for v in _valores_multivalor(viaje, "ruts_chofer")):
+                return False
+            continue
         if campo == "patente":
             # Bloque UNIVERSAL V1 (Bloque 7/18) -- filtro virtual: coincide
             # contra CUALQUIERA de las dos columnas reales, nunca exige
             # que el usuario sepa si es tracto o rampla.
             valores = _valores_multivalor(viaje, "patentes_tracto") + _valores_multivalor(viaje, "patentes_rampla")
+        elif campo == "numero_transporte":
+            # Un viaje físico multitransporte responde a cualquiera de sus transportes AZA.
+            valores = (str(viaje.get("numero_transporte", "")).strip(), *_valores_multivalor(viaje, "transportes_aza"))
         else:
             columna = _CAMPO_A_COLUMNA[campo]
             if columna in _COLUMNAS_MULTIVALOR:
@@ -523,12 +632,18 @@ def _fila_coincide(
     return True
 
 
-def _valor_metrica(viaje: Mapping[str, str], metrica: str) -> float:
+def _valor_metrica(viaje: Mapping[str, str], metrica: str, consulta: ConsultaAtlas | None = None) -> float:
     if metrica == METRICA_COUNT_VIAJES:
         return 1.0
+    ausentes, presentes = _filtros_documento(consulta) if consulta is not None else ((), ())
+    documentos = _documentos_viaje(viaje) if (ausentes or presentes) else []
     if metrica == METRICA_COUNT_GUIAS:
+        if documentos:
+            return float(len(_guias_coincidentes(viaje, consulta)))
         return float(len(_valores_multivalor(viaje, "numeros_guia")) or (1 if str(viaje.get("numeros_guia", "")).strip() else 0))
     if metrica == METRICA_SUM_PESO:
+        if documentos:
+            return sum(_num(str(d.get("peso_kg", ""))) for d in documentos if _documento_cumple(d, ausentes, presentes))
         return _num(viaje.get("peso_total_viaje_kg"))
     if metrica == METRICA_SUM_KM:
         return _num(viaje.get("distancia_km"))
@@ -617,6 +732,8 @@ def ejecutar_consulta_atlas(
             if consulta.relacion == "vehiculo":
                 valores.update(_valores_multivalor(v, "patentes_tracto"))
                 valores.update(_valores_multivalor(v, "patentes_rampla"))
+            elif consulta.relacion == "guia":
+                valores.update(_guias_coincidentes(v, consulta))
             else:
                 columna = _COLUMNA_RELACION[consulta.relacion]
                 if columna in _COLUMNAS_MULTIVALOR:
@@ -647,7 +764,7 @@ def ejecutar_consulta_atlas(
         )
 
     if consulta.agrupacion is None:
-        total = sum(_valor_metrica(v, consulta.metrica) for v in coincidencias)
+        total = sum(_valor_metrica(v, consulta.metrica, consulta) for v in coincidencias)
         if consulta.metrica == METRICA_COUNT_VIAJES:
             total = int(total)
         return ResultadoConsultaAtlas(
@@ -660,7 +777,7 @@ def ejecutar_consulta_atlas(
     for viaje in coincidencias:
         claves = _claves_agrupacion(viaje, consulta.agrupacion)
         for clave in claves:
-            acumulado[clave] = acumulado.get(clave, 0.0) + _valor_metrica(viaje, consulta.metrica)
+            acumulado[clave] = acumulado.get(clave, 0.0) + _valor_metrica(viaje, consulta.metrica, consulta)
             filas_por_grupo.setdefault(clave, []).append(viaje)
 
     filas_resultado = [
