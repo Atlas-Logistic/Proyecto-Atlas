@@ -46,7 +46,9 @@ from atlas_core.catalogo_destinos import (
     Destino,
     EstadoCalidadDestino,
     EstadoVigenciaDestino,
+    direccion_confirmada_coincide,
     normalizar_nombre_destino,
+    numeracion_con_ruido_ocr,
 )
 from atlas_core.geografia import EstadoNormalizacion, cargar_geografia
 from atlas_core.geografia.base_local import (
@@ -1942,6 +1944,7 @@ def calcular_ruta_con_planta_conocida(
     comuna_territorial_conocida: str = "",
     comuna_confirmada_humano: str = "",
     base_geografica_local: "BaseGeograficaLocal | None" = None,
+    destinos_relacion_confirmada: Iterable[Destino] = (),
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -1965,16 +1968,10 @@ def calcular_ruta_con_planta_conocida(
     # Misma autoridad canónica que `calcular_ruta_entrega_para_viaje`: un
     # reintento con planta conocida no vuelve a geocodificar un DESPACHAR A
     # cuya coordenada ya está confirmada en catálogo (dirección o alias).
-    canonico = _destino_con_coordenada_canonica_para(despachar_a_crudo, destinos_confirmados)
-    if canonico is not None:
-        entrega = ResultadoDestinoEntrega(
-            despachar_a_crudo=despachar_a_crudo,
-            coordenadas=Coordenadas(longitud=float(canonico.longitud), latitud=float(canonico.latitud)),
-            etiqueta_geocodificada=canonico.direccion, confianza=1.0,
-            estado=ESTADO_RESUELTO, localidad=canonico.comuna, region=canonico.region,
-            metodo_confirmacion="COORDENADA_CANONICA_CATALOGO",
-        )
-    else:
+    entrega = _entrega_desde_conocimiento_confirmado(
+        despachar_a_crudo, destinos_confirmados, destinos_relacion_confirmada,
+    )
+    if entrega is None:
         entrega = resolver_destino_entrega_validado(
             despachar_a_crudo, proveedor_rutas,
             punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
@@ -2095,6 +2092,108 @@ def _destino_con_coordenada_canonica_para(
     return candidatos[0] if len(candidatos) == 1 else None
 
 
+METODO_RELACION_OBRA_DESTINO_CONFIRMADA = "RELACION_OBRA_DESTINO_CONFIRMADA"
+
+
+def destino_por_relacion_confirmada(
+    despachar_a_crudo: str, destinos_relacion: Iterable[Destino],
+) -> Destino | None:
+    """Caso real 475176 -- catálogo primero, antes de geocodificar.
+
+    `destinos_relacion` son los destinos con relación obra->destino
+    CONFIRMADA (`CatalogoObrasDestinos.listar_destinos_confirmados_para_
+    obra`) de la obra ya identificada en el documento. Si el DESPACHAR A
+    corresponde a EXACTAMENTE UNO de ellos sólo gracias al ruido OCR que
+    el criterio estricto de siempre tolera (`direccion_confirmada_coincide`:
+    O->0, B->8, un token con typo -- con anclas numéricas y la comuna
+    confirmada), y ese destino ya trae coordenadas propias, ese
+    conocimiento resuelve el punto sin consultar ningún geocodificador
+    (mismo criterio que la re-anclaje posterior de `revalidar_ruta_con_
+    destino_confirmado_en_catalogo_sin_ocr`, ahora en el primer pase).
+
+    Se abstiene (devuelve `None` y el pipeline normal continúa) ante:
+    calle confirmada literal en el texto o ruido sólo en el maestro (no hay
+    ruido documental que corregir),
+    ninguna coincidencia (posible cambio real de destino: la revalidación
+    lo marca como contradicción, nunca se oculta), dos o más coincidencias
+    (ambigüedad: nunca "el primero"), destino sin coordenadas, texto
+    canónico degradado, o una comuna documental explícita incompatible con
+    la del destino confirmado (contradicción documental real)."""
+    texto_documental = normalizar_nombre_destino(despachar_a_crudo)
+    if not texto_documental:
+        return None
+    coincidentes = []
+    for destino in destinos_relacion:
+        if destino.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value:
+            continue
+        if texto_destino_degradado(destino.direccion or ""):
+            continue
+        calle = normalizar_nombre_destino((destino.direccion or "").split(",", 1)[0])
+        if calle and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna):
+            coincidentes.append(destino)
+    # Sin numeración en la calle confirmada (sólo comuna, camino largo,
+    # fundo) la coincidencia no identifica un punto: decide el pipeline.
+    if len(coincidentes) == 1 and not re.search(
+        r"\d", (coincidentes[0].direccion or "").split(",", 1)[0],
+    ):
+        return None
+    if len(coincidentes) != 1:
+        return None
+    destino = coincidentes[0]
+    # Un DESPACHAR A que ya trae la calle confirmada literal no está
+    # corrupto: el geocodificador (y su caché) lo resuelven igual que a
+    # todas las guías históricas hacia ese lugar, y cambiar aquí de fuente
+    # de coordenada alteraría los km frente al historial. La relación sólo
+    # gana cuando la coincidencia existe gracias al ruido OCR tolerado --
+    # justo cuando el texto corrupto llegaría al geocodificador.
+    calle_confirmada = destino.direccion.split(",", 1)[0]
+    if normalizar_nombre_destino(calle_confirmada) in texto_documental:
+        return None
+    # Si el ruido está en el maestro ("O1148", "73O") y no en el documento,
+    # el DESPACHAR A es el texto sano: no hay nada que corregir con el
+    # catálogo, y su etiqueta expondría la numeración corrupta.
+    if numeracion_con_ruido_ocr(calle_confirmada):
+        return None
+    try:
+        latitud, longitud = float(destino.latitud), float(destino.longitud)
+    except (TypeError, ValueError):
+        return None
+    if not (-90 <= latitud <= 90 and -180 <= longitud <= 180):
+        return None
+    # Cualquier comuna explícita incompatible con la confirmada es una
+    # posible contradicción documental real: nunca se oculta.
+    if destino.comuna and any(
+        not _comunas_territorialmente_compatibles(comuna, destino.comuna)
+        for comuna in _comunas_explicitas(despachar_a_crudo)
+    ):
+        return None
+    return destino
+
+
+def _entrega_desde_conocimiento_confirmado(
+    despachar_a_crudo: str,
+    destinos_confirmados: Iterable[Destino],
+    destinos_relacion_confirmada: Iterable[Destino],
+) -> ResultadoDestinoEntrega | None:
+    """Autoridad interna previa al geocodificador: primero la coordenada
+    canónica por dirección/alias exacto; luego la relación obra->destino
+    confirmada (`destino_por_relacion_confirmada`). `despachar_a_crudo`
+    se conserva siempre como evidencia documental."""
+    metodo = "COORDENADA_CANONICA_CATALOGO"
+    destino = _destino_con_coordenada_canonica_para(despachar_a_crudo, destinos_confirmados)
+    if destino is None:
+        metodo = METODO_RELACION_OBRA_DESTINO_CONFIRMADA
+        destino = destino_por_relacion_confirmada(despachar_a_crudo, destinos_relacion_confirmada)
+    if destino is None:
+        return None
+    return ResultadoDestinoEntrega(
+        despachar_a_crudo=despachar_a_crudo,
+        coordenadas=Coordenadas(longitud=float(destino.longitud), latitud=float(destino.latitud)),
+        etiqueta_geocodificada=destino.direccion, confianza=1.0, estado=ESTADO_RESUELTO,
+        localidad=destino.comuna, region=destino.region, metodo_confirmacion=metodo,
+    )
+
+
 def plan_impacto_coordenada_canonica(
     *, destino: Destino, filas: Iterable[dict[str, Any]],
 ) -> PlanImpactoCoordenadaCanonica:
@@ -2148,6 +2247,7 @@ def calcular_ruta_entrega_para_viaje(
     codigo_planta_mobile: str | None = None,
     categoria_documento: str | None = None,
     base_geografica_local: "BaseGeograficaLocal | None" = None,
+    destinos_relacion_confirmada: Iterable[Destino] = (),
 ) -> ResultadoRutaEntrega:
     """Orquesta PLANTA ORIGEN -> DESPACHAR A (Bloque E1). Nunca usa
     `DIRECCION`/`COMUNA`/`COD DESTINATARIO` del cliente como destino de
@@ -2198,15 +2298,12 @@ def calcular_ruta_entrega_para_viaje(
 
     # La coordenada canónica confirmada tiene autoridad sólo para el mismo
     # DESPACHAR A exacto; antecede al geocoder y nunca eleva destinos pendientes.
-    d = _destino_con_coordenada_canonica_para(despachar_a_crudo, destinos_confirmados)
-    if d is not None:
-        entrega = ResultadoDestinoEntrega(
-            despachar_a_crudo=despachar_a_crudo,
-            coordenadas=Coordenadas(longitud=float(d.longitud), latitud=float(d.latitud)),
-            etiqueta_geocodificada=d.direccion, confianza=1.0, estado=ESTADO_RESUELTO,
-            localidad=d.comuna, region=d.region, metodo_confirmacion="COORDENADA_CANONICA_CATALOGO",
-        )
-    else:
+    # Caso real 475176: luego, la relación obra->destino confirmada de la
+    # obra ya identificada (ver `destino_por_relacion_confirmada`).
+    entrega = _entrega_desde_conocimiento_confirmado(
+        despachar_a_crudo, destinos_confirmados, destinos_relacion_confirmada,
+    )
+    if entrega is None:
         entrega = resolver_destino_entrega_validado(
             despachar_a_crudo, proveedor_rutas,
             punto_gps_referencia=punto_gps_destino, radio_gps_km=radio_gps_destino_km,
@@ -2628,6 +2725,7 @@ def resolver_entrega_documento(
     proveedor_geocodificacion_fallback: ProveedorRutas | None = None,
     base_geografica_local: "BaseGeograficaLocal | None" = None,
     chofer_resuelto: str = "",
+    destinos_relacion_confirmada: Iterable[Destino] = (),
 ) -> dict[str, str]:
     """Orquesta, para UN documento (Bloque E2E R1), lo que hace falta
     persistir por cada guía nueva: `DESPACHAR A` crudo (siempre -- lectura
@@ -2680,7 +2778,14 @@ def resolver_entrega_documento(
     con ese valor nunca es una dirección real -- se trata como
     contaminado (ver `_despachar_a_lineal_contaminado`) igual que una
     etiqueta/RUT ajenos, disparando el mismo reintento geométrico.
-    Ausente (`""`), comportamiento idéntico a antes de este bloque."""
+    Ausente (`""`), comportamiento idéntico a antes de este bloque.
+
+    `destinos_relacion_confirmada` (caso real 475176, opcional): destinos
+    con relación CONFIRMADA para la obra ya identificada del documento.
+    Si uno solo corresponde al DESPACHAR A (ver `destino_por_relacion_
+    confirmada`), su coordenada se usa ANTES de cualquier geocodificador;
+    `despachar_a_crudo` sigue siendo el texto OCR original. Vacío,
+    comportamiento idéntico."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
     # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
@@ -2750,6 +2855,7 @@ def resolver_entrega_documento(
         destinos_confirmados=destinos_confirmados,
         proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
         base_geografica_local=base_geografica_local,
+        destinos_relacion_confirmada=destinos_relacion_confirmada,
     )
     resultado["direccion_entrega"] = ruta_entrega.direccion_entrega_geocodificada
     resultado["localidad_entrega"] = ruta_entrega.localidad_entrega

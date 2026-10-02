@@ -237,6 +237,13 @@ def _coincide_con_numeracion_ocr(calle: str, texto: str, comuna_confirmada: str 
     )
 
 
+def numeracion_con_ruido_ocr(texto: str) -> bool:
+    """True si el texto trae una numeración con letra leída por OCR en vez
+    de dígito (O->0, B->8, mismas reglas estrictas de arriba)."""
+    normalizado = normalizar_nombre_destino(texto)
+    return _numeracion_o_como_cero(normalizado) != normalizado or _numeracion_b_como_ocho(normalizado) != normalizado
+
+
 def coincide_solo_por_numeracion_ocr(
     calle_confirmada: str, texto_documental: str, *, comuna_confirmada: str = "",
 ) -> bool:

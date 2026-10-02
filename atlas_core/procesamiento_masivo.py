@@ -1919,9 +1919,24 @@ def _obra_confirmada_en_catalogo(
     que su nombre no es una entidad desconocida. No implica que el destino
     documental actual coincida con ninguno de sus destinos históricos.
     """
+    return bool(_destinos_relacion_confirmada_para_obra(
+        carpeta_catalogos, obra_documental=obra_documental, cliente_texto=cliente_texto,
+        rut_cliente=rut_cliente, identidad_cliente_corroborada=identidad_cliente_corroborada,
+    ))
+
+
+def _destinos_relacion_confirmada_para_obra(
+    carpeta_catalogos: str | Path, *, obra_documental: str,
+    cliente_texto: str = "", rut_cliente: str = "", identidad_cliente_corroborada: bool = False,
+) -> list:
+    """Destinos con relación obra->destino CONFIRMADA de la obra documental
+    (o de su canónico único si el nombre leído es un fragmento). Read-only;
+    ante error, ambigüedad de obra o ausencia, lista vacía. Caso real
+    475176: el ruteo del primer pase los consulta antes de geocodificar
+    (ver `destino_por_relacion_confirmada`)."""
     obra = str(obra_documental or "").strip()
     if obra in {"", "No encontrado"}:
-        return False
+        return []
     carpeta = Path(carpeta_catalogos)
     try:
         catalogo = CatalogoObrasDestinos(
@@ -1937,7 +1952,7 @@ def _obra_confirmada_en_catalogo(
                 identidad_cliente_corroborada=identidad_cliente_corroborada,
             )
             if cliente_id is None:
-                return False
+                return []
             candidatas = tuple(
                 candidata for candidata in catalogo.listar_obras()
                 if candidata.cliente_id == cliente_id
@@ -1950,11 +1965,11 @@ def _obra_confirmada_en_catalogo(
                 obras_confirmadas_mismo_cliente=candidatas,
             )
             if candidata is None:
-                return False
+                return []
             obra = candidata.nombre_canonico
-        return bool(catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra))
+        return list(catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra))
     except (OSError, ValueError, ErrorCatalogoObrasDestinos):
-        return False
+        return []
 
 
 def _revalidar_contaminacion_destino_final(
@@ -2211,6 +2226,7 @@ def procesar_archivo(
     campos_geometricos_sin_corroborar: set[str] = set()
     cliente_corroborado_n1 = False
     obra_destino_corroborada = None
+    destinos_relacion_obra: list = []
     chofer_geometrico = False
     patentes_geometricas_sin_homologar: set[str] = set()
     identidad_cliente_cabecera: dict[str, object] | None = None
@@ -3046,13 +3062,16 @@ def procesar_archivo(
             # obra canónica: la obra leída se conserva.
             datos["obra destino"] = obra_destino_corroborada.obra.nombre_canonico
             obra_final = str(datos["obra destino"])
-        obra_identidad_confirmada = _obra_confirmada_en_catalogo(
+        # Caso real 475176: los destinos confirmados de la obra identificada
+        # también alimentan el ruteo, que los consulta antes de geocodificar.
+        destinos_relacion_obra = _destinos_relacion_confirmada_para_obra(
             carpeta_catalogos,
             obra_documental=obra_documental,
             cliente_texto=str(datos.get("cliente", "")),
             rut_cliente=str(datos.get("RUT del cliente", "")),
             identidad_cliente_corroborada=cliente_corroborado_n1,
         )
+        obra_identidad_confirmada = bool(destinos_relacion_obra)
         if obra_destino_corroborada is not None or obra_identidad_confirmada:
             campos_geometricos_sin_corroborar.discard("obra destino")
             metodos_documento.add(
@@ -3320,6 +3339,9 @@ def procesar_archivo(
                 # se detecte como contaminado en vez de aceptarse tal
                 # cual (ver `_despachar_a_lineal_contaminado`).
                 chofer_resuelto=str(datos.get("chofer") or ""),
+                # Caso real 475176: conocimiento confirmado obra->destino
+                # antes que cualquier geocodificador.
+                destinos_relacion_confirmada=destinos_relacion_obra,
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",
@@ -3416,6 +3438,7 @@ def procesar_archivo(
                                     evidencia_origen=resultado_entrega["evidencia_origen"],
                                     punto_gps_destino=resultado_gps.punto_gps_destino,
                                     contexto_obra=str(datos.get("obra destino", "")),
+                                    destinos_relacion_confirmada=destinos_relacion_obra,
                                 )
                                 resultado_entrega.update({
                                     "direccion_entrega": ruta_recalculada.direccion_entrega_geocodificada,
@@ -3540,6 +3563,7 @@ def procesar_archivo(
                                 evidencia_origen=resultado_entrega.get("evidencia_origen", ""),
                                 punto_gps_destino=resultado_gps.punto_gps_destino,
                                 contexto_obra=str(datos.get("obra destino", "")),
+                                destinos_relacion_confirmada=destinos_relacion_obra,
                             )
                             if ruta_desambiguada.estado_ruta:
                                 resultado_entrega.update({
