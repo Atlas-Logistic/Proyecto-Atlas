@@ -493,6 +493,10 @@ class ResultadoDesambiguacionInequivoca:
     motivo: str = ""
     vias: tuple[str, ...] = ()
     identidad_confirmada: bool = False
+    # Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- la calle documental que
+    # el respaldo ubicó DENTRO de la comuna documental pero sin número
+    # (nunca una resolución: sólo explica por qué se abstiene).
+    calle_sin_numero_en_comuna: CandidatoGeocodificacion | None = None
 
 
 def resolver_destino_ambiguo_con_evidencia_inequivoca(
@@ -923,9 +927,18 @@ def resolver_destino_con_fallback_estructurado(
             vias=(VIA_BASE_LOCAL,), identidad_confirmada=identidad_confirmada,
         )
 
+    # Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- caso real 475208: el
+    # respaldo se consultaba sólo con "TENIENTE BERGMAN 4933, Chile" aunque
+    # la comuna (QUINTA NORMAL) ya era conocida. Misma regla que la consulta
+    # principal: se completa con la comuna confiable sólo si el texto no
+    # trae la suya; el texto documental de la decisión no cambia.
+    texto_consulta = texto
+    if comuna_territorial_conocida and not _comuna_documental_inequivoca(texto):
+        if _texto_normalizado_sin_acentos(comuna_territorial_conocida) not in _texto_normalizado_sin_acentos(texto):
+            texto_consulta = f"{texto} {comuna_territorial_conocida}".strip()
     try:
         resultado_fallback = _geocodificar_con_contexto(
-            proveedor_fallback, f"{texto}, Chile", _contexto_geografico_desde_texto(texto)
+            proveedor_fallback, f"{texto_consulta}, Chile", _contexto_geografico_desde_texto(texto_consulta)
         )
     except (OSError, ValueError):
         return _resuelto_por_base_local_ine() or ResultadoDesambiguacionInequivoca(
@@ -934,9 +947,16 @@ def resolver_destino_con_fallback_estructurado(
         )
     candidato = _candidato_unico_con_numero_de_calle(texto, resultado_fallback.candidatos or ())
     if candidato is None:
+        # Nunca resuelve con esto: sólo deja visible la calle documental
+        # ubicada en la comuna documental (sin número confirmado) para que
+        # quien llama se abstenga con el motivo verdadero.
         return _resuelto_por_base_local_ine() or ResultadoDesambiguacionInequivoca(
             motivo="FALLBACK_SIN_CANDIDATO_UNICO", vias=(VIA_FALLBACK_ESTRUCTURADO,),
             identidad_confirmada=identidad_confirmada,
+            calle_sin_numero_en_comuna=_candidato_calle_en_comuna_documental(
+                texto, resultado_fallback.candidatos or (),
+                _comuna_referencia_documental(texto, comuna_territorial_conocida),
+            ),
         )
     destino_corroborante = next(
         (
@@ -1370,6 +1390,30 @@ def resolver_destino_entrega(
     corroborado_por_gps = False
     metodo_confirmacion_fallback = ""
 
+    # Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- caso real 475208: con
+    # una comuna válida (del texto, o ya conocida por evidencia confiable),
+    # un candidato que la contradice -- o que nombra otra calle distinta de
+    # la documental -- no es una "ubicación posible". Se descarta ANTES de
+    # decidir si hay ambigüedad. Si no queda ninguno, no hay ambigüedad
+    # real: sigue el camino "sin candidato utilizable" (respaldo con la
+    # misma comuna, base local) y, si tampoco resuelve, se abstiene con el
+    # motivo que corresponde -- nunca elige ni inventa.
+    comuna_referencia = _comuna_referencia_documental(texto, comuna_territorial_conocida)
+    principales_contradicen_documento = False
+    fallback_sin_candidatos = None
+    if resultado.estado == EstadoRuta.RESULTADO_AMBIGUO and comuna_referencia and resultado.candidatos:
+        coherentes = tuple(
+            c for c in resultado.candidatos if not _candidato_contradice_documento(c, texto, comuna_referencia)
+        )
+        if not coherentes:
+            principales_contradicen_documento = True
+            resultado = replace(resultado, estado=EstadoRuta.DIRECCION_NO_ENCONTRADA, candidatos=())
+        elif len(coherentes) < len(resultado.candidatos):
+            resultado = replace(
+                resultado, candidatos=coherentes,
+                estado=EstadoRuta.RESULTADO_AMBIGUO if len(coherentes) > 1 else EstadoRuta.REQUIERE_REVISION,
+            )
+
     if resultado.estado == EstadoRuta.RESULTADO_AMBIGUO:
         # Bloque E2E R1.1 -- antes de decidir si hay ambigüedad real,
         # descarta candidatos sin ningún respaldo textual en el propio
@@ -1503,10 +1547,25 @@ def resolver_destino_entrega(
         ).resuelto and fallback_sin_candidatos.candidato is not None:
             candidato = fallback_sin_candidatos.candidato
             metodo_confirmacion_fallback = "FALLBACK_ESTRUCTURADO_CORROBORADO"
+        elif (
+            principales_contradicen_documento
+            and fallback_sin_candidatos is not None
+            and fallback_sin_candidatos.calle_sin_numero_en_comuna is not None
+        ):
+            # Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- el respaldo ubicó
+            # la calle documental en la comuna documental, sin número
+            # confirmado. Pasa por los mismos gates de abajo (nunca resuelve
+            # bajo el umbral de confianza): la abstención queda como
+            # CONFIANZA_INSUFICIENTE, no como "varias ubicaciones".
+            candidato = fallback_sin_candidatos.calle_sin_numero_en_comuna
+            metodo_confirmacion_fallback = METODO_CANDIDATOS_CONTRADICEN_DOCUMENTO
         else:
             return ResultadoDestinoEntrega(
                 despachar_a_crudo=texto, estado=ESTADO_REVISAR,
                 motivo=f"GEOCODIFICACION_{resultado.estado.value}",
+                metodo_confirmacion=(
+                    METODO_CANDIDATOS_CONTRADICEN_DOCUMENTO if principales_contradicen_documento else ""
+                ),
             )
     else:
         # Un único candidato (REQUIERE_REVISION): sigue exigiendo
@@ -2710,6 +2769,90 @@ def motivo_incoherencia_destino_documental(
             f"{'/'.join(sorted(nucleo_doc))} != {'/'.join(sorted(nucleo_geo))}"
         )
     return ""
+
+
+# Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- caso real 475208/475209
+# (transporte 0000361856): el documento dice "TENIENTE BERGMAN 4933 QUINTA
+# NORMAL" y el proveedor principal devolvió 5 candidatos ("3797 Pasaje
+# Parque Quinta Normal, Puente bajo" x4 y "Quinta Normal, Antofagasta").
+# Ninguno era la calle/número/comuna del documento, pero se contaban como
+# "varias ubicaciones posibles" (MULTIPLES_UBICACIONES_DISPERSAS) y el
+# respaldo se consultaba sin la comuna. Un candidato que CONTRADICE el
+# documento no es una ubicación posible: se descarta antes de hablar de
+# ambigüedad. Este valor marca, en `metodo_confirmacion`, que el resultado
+# salió de ese descarte (la revalidación lo usa para sustituir un motivo
+# MULTIPLES_UBICACIONES_DISPERSAS que nacía de candidatos contradictorios).
+METODO_CANDIDATOS_CONTRADICEN_DOCUMENTO = "CANDIDATOS_PRINCIPALES_CONTRADICEN_DOCUMENTO"
+
+
+def _comuna_referencia_documental(texto: str, comuna_territorial_conocida: str = "") -> str:
+    """Comuna real contra la que contrastar candidatos: la que el propio
+    texto menciona de forma inequívoca o, si no trae ninguna, la comuna ya
+    conocida por evidencia confiable (humano / catálogo / nombre de obra,
+    ver `resolver_comuna_territorial_conocida`) si es una comuna exacta del
+    catálogo territorial. Nunca inventa: "" si no hay ninguna válida."""
+    propia = _comuna_documental_inequivoca(texto)
+    if propia:
+        return propia
+    conocida = normalizar_comuna(str(comuna_territorial_conocida or ""))
+    return conocida.comuna if conocida.estado == ESTADO_COMUNA_EXACTA and conocida.comuna else ""
+
+
+def _nucleo_calle_de_etiqueta(etiqueta: str, *comunas_a_excluir: str) -> set[str]:
+    """Núcleo de calle del rasgo geocodificado: sólo el primer segmento de
+    la etiqueta (antes de la primera coma, lo más específico) y sin
+    números -- sirve igual para "3797 Pasaje X, Localidad" (número
+    adelante) y "Calle X 120, Localidad"; vacío para "Coronel, Biobío"."""
+    primer_segmento = str(etiqueta or "").split(",", 1)[0]
+    return _nucleo_calle(re.sub(r"\b\w*\d\w*\b", " ", primer_segmento), *comunas_a_excluir)
+
+
+def _candidato_contradice_documento(
+    candidato: CandidatoGeocodificacion, texto: str, comuna_referencia: str,
+) -> bool:
+    """True si el candidato contradice materialmente el documento: declara
+    una comuna real distinta de `comuna_referencia`, o nombra una calle
+    sin ningún token compatible con la calle documental (misma tolerancia
+    de abreviaturas/ruido OCR que `motivo_incoherencia_destino_documental`).
+    El número de casa NO descarta aquí: vecinos de la misma calle son
+    evidencia del mismo lugar (caso Mejillones). Un candidato sin comuna
+    determinable o sólo de nivel comuna/ciudad no es contradictorio
+    (ausencia != contradicción)."""
+    comuna_candidato = normalizar_comuna(candidato.localidad) if candidato.localidad else None
+    if (
+        comuna_candidato is not None and comuna_candidato.estado == ESTADO_COMUNA_EXACTA
+        and comuna_candidato.comuna and not _comuna_confirma_candidato(comuna_referencia, comuna_candidato.comuna)
+    ):
+        return True
+    comuna_texto = _comuna_documental_inequivoca(texto)
+    nucleo_doc = _nucleo_calle(texto, comuna_texto, comuna_referencia)
+    nucleo_geo = _nucleo_calle_de_etiqueta(candidato.etiqueta, comuna_texto, candidato.localidad)
+    if not nucleo_doc or not nucleo_geo:
+        return False
+    return not any(_tokens_calle_compatibles(a, b) for a in nucleo_doc for b in nucleo_geo)
+
+
+def _candidato_calle_en_comuna_documental(
+    texto: str, candidatos: Iterable[CandidatoGeocodificacion], comuna_referencia: str,
+) -> CandidatoGeocodificacion | None:
+    """El candidato de la MISMA calle documental dentro de la comuna
+    documental, cuando todos los candidatos coherentes son el mismo lugar
+    (p. ej. el respaldo ubica "Teniente Bergman, Quinta Normal" sin número).
+    Sólo sirve para abstenerse con el motivo correcto (confianza
+    insuficiente), nunca para resolver: su confianza sigue pasando por el
+    umbral normal. None si no hay comuna, no hay candidatos coherentes, o
+    no son el mismo lugar."""
+    if not comuna_referencia:
+        return None
+    coherentes = tuple(
+        c for c in candidatos
+        if c.localidad and _comuna_confirma_candidato(comuna_referencia, c.localidad)
+        and not _candidato_contradice_documento(c, texto, comuna_referencia)
+        and _nucleo_calle_de_etiqueta(c.etiqueta, comuna_referencia, c.localidad)
+    )
+    if not coherentes or not _candidatos_son_el_mismo_lugar(coherentes):
+        return None
+    return _mejor_candidato(coherentes)
 
 
 def resolver_entrega_documento(

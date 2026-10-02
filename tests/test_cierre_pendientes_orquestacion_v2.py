@@ -445,17 +445,21 @@ def _entorno_convergencia(tmp_path, *, con_imagen=True):
 
 
 def _proveedor_ruta_confiable():
-    consulta = f"{DIRECCION_CONFIRMADA}, Chile"
+    respuesta = ResultadoGeocodificacion(
+        EstadoRuta.REQUIERE_REVISION,
+        (CandidatoGeocodificacion(
+            Coordenadas(-70.64, -33.42), DIRECCION_CONFIRMADA + ", Santiago, RM, Chile", 0.95,
+            "Santiago", "Metropolitana",
+        ),),
+        "",
+    )
+    # Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- la comuna que el humano
+    # registró ("Santiago") acompaña también al reintento posterior (leída
+    # del ledger), así que la consulta puede llegar con o sin ella.
     return ProveedorRutasSimulado(
         geocodificaciones={
-            consulta: ResultadoGeocodificacion(
-                EstadoRuta.REQUIERE_REVISION,
-                (CandidatoGeocodificacion(
-                    Coordenadas(-70.64, -33.42), DIRECCION_CONFIRMADA + ", Santiago, RM, Chile", 0.95,
-                    "Santiago", "Metropolitana",
-                ),),
-                "",
-            ),
+            f"{DIRECCION_CONFIRMADA}, Chile": respuesta,
+            f"{DIRECCION_CONFIRMADA} Santiago, Chile": respuesta,
         },
         resultado_ruta=ResultadoRuta(EstadoRuta.RUTA_CALCULADA, 12.3, 18.4, "SINTETICO"),
     )

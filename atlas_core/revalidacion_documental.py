@@ -3634,6 +3634,39 @@ def _proveedor_rutas_fallback_predeterminado(*, raiz_atlas: str | Path | None = 
     )
 
 
+def _comunas_humanas_vigentes_por_guia(ruta_ledger: Path, filas: list[dict[str, str]]) -> dict[str, str]:
+    """Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- caso real 475208/475209:
+    la comuna que un humano registró con REGISTRAR_DIRECCION
+    (`comuna_manual`) sólo llegaba al intento inline de esa misma decisión;
+    los reintentos posteriores ya no la tenían. Se relee del ledger: la
+    aplicación MÁS RECIENTE por (guía, transporte), y sólo si su
+    `direccion_manual` sigue siendo el `despachar_a_crudo` vigente de la
+    fila (si la dirección cambió después, esa comuna ya no acompaña)."""
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    vigentes: dict[tuple[str, str], dict[str, object]] = {}
+    for aplicacion in ledger.get("aplicaciones", []) or []:
+        if aplicacion.get("tipo") != "DESTINO_NO_RESUELTO" or aplicacion.get("accion") != "REGISTRAR_DIRECCION":
+            continue
+        documento = aplicacion.get("documento") or {}
+        clave = (str(documento.get("numero_guia", "")).strip(), str(documento.get("numero_transporte", "")).strip())
+        if all(clave):
+            vigentes[clave] = aplicacion
+    salida: dict[str, str] = {}
+    for fila in filas:
+        guia = str(fila.get("numero_guia", "")).strip()
+        aplicacion = vigentes.get((guia, str(fila.get("numero_transporte", "")).strip()))
+        if aplicacion is None:
+            continue
+        direccion = " ".join(str(aplicacion.get("direccion_manual") or "").split()).casefold()
+        comuna = str(aplicacion.get("comuna_manual") or "").strip()
+        if comuna and direccion and direccion == " ".join(str(fila.get("despachar_a_crudo", "")).split()).casefold():
+            salida[guia] = comuna
+    return salida
+
+
 def revalidar_ruta_sin_destino_calculado_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -3719,6 +3752,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
     from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.destino_entrega import (
+        METODO_CANDIDATOS_CONTRADICEN_DOCUMENTO,
         calcular_ruta_con_planta_conocida,
         comuna_territorial_desde_evidencia,
         resolver_comuna_territorial_conocida,
@@ -3763,6 +3797,12 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
+        # La comuna humana del ledger acompaña también a los reintentos; la
+        # que entrega el llamador (intento inline de la decisión) manda.
+        comuna_manual_por_guia = {
+            **_comunas_humanas_vigentes_por_guia(ruta.parent / "decisiones_aplicadas.json", filas),
+            **comuna_manual_por_guia,
+        }
         guias_actualizadas: list[str] = []
         # Bloque P0 EVITAR SEGUNDO INTENTO -- caso real 473545: a
         # diferencia de `guias_actualizadas` (sólo guías cuyo resultado
@@ -3872,6 +3912,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             comuna_confirmada_humano = str(
                 comuna_manual_por_guia.get(str(fila.get("numero_guia", "")).strip(), "")
             ).strip()
+            comuna_registrada_por_humano = comuna_confirmada_humano
             # Una variante mal escrita de la comuna humana nunca desplaza a
             # la comuna válida que el propio documento trae.
             comuna_confirmada_humano = (
@@ -3938,9 +3979,21 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     motivo_ruta_base(motivo_previo_crudo) == "MULTIPLES_UBICACIONES_DISPERSAS"
                     and motivo_ruta_base(resultado.motivo_ruta or "") == "COORDENADA_NO_CONFIRMADA"
                 )
+                # Bloque COMUNA DOCUMENTAL EN LA RESOLUCIÓN -- caso real
+                # 475208/475209: la "dispersión" persistida estaba hecha de
+                # candidatos que contradicen la comuna/calle/número del
+                # documento. Sólo cuando la resolución fresca lo demuestra
+                # explícitamente (`metodo_confirmacion_destino`) se reemplaza
+                # el motivo; un reintento que simplemente falla distinto
+                # sigue sin tocarlo.
+                dispersion_contradice_documento = (
+                    motivo_ruta_base(motivo_previo_crudo) == "MULTIPLES_UBICACIONES_DISPERSAS"
+                    and resultado.metodo_confirmacion_destino == METODO_CANDIDATOS_CONTRADICEN_DOCUMENTO
+                )
                 if (
                     motivo_previo_tecnico or motivo_previo_sin_causa
                     or motivo_previo_reevaluable or identidad_recien_confirmada
+                    or dispersion_contradice_documento
                 ) and resultado.motivo_ruta:
                     motivo_nuevo = motivo_ruta_base(resultado.motivo_ruta)
                     if (
@@ -3969,7 +4022,9 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                         # mismos tres campos que ya escribe la rama
                         # RUTA_CALCULADA, nunca inventa nada nuevo.
                         fila["direccion_entrega"] = resultado.direccion_entrega_geocodificada
-                        fila["localidad_entrega"] = resultado.localidad_entrega
+                        # Una comuna registrada por un humano nunca se borra
+                        # porque el destino siga sin resolverse.
+                        fila["localidad_entrega"] = resultado.localidad_entrega or comuna_registrada_por_humano
                         fila["region_entrega"] = resultado.region_entrega
                         fila["codigo_pais"] = resultado.codigo_pais
                         fila["codigo_unidad"] = resultado.codigo_unidad
