@@ -53,6 +53,21 @@ from atlas_core.revalidacion_documental import (
 from atlas_core.rutas.modelos import CandidatoGeocodificacion, Coordenadas, EstadoRuta, ResultadoGeocodificacion, ResultadoRuta
 from atlas_core.rutas.proveedor import ProveedorRutasSimulado
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _proveedor_ocr_de_prueba(monkeypatch):
+    """El reproceso focal relee con el proveedor OCR de la ingesta; en la
+    suite delega en el doble `atlas_core.ocr.leer_texto_imagen`."""
+    import atlas_core.ocr
+
+    class _Proveedor:
+        def leer_texto(self, ruta):
+            return atlas_core.ocr.leer_texto_imagen(ruta)
+
+    monkeypatch.setattr("atlas_core.ocr_provider.crear_proveedor_ocr", lambda *a, **k: _Proveedor())
+
 COORD_AZA_COLINA = Coordenadas(-70.665977, -33.137558)
 COORD_AZA_RENCA = Coordenadas(-70.685226, -33.401595)
 DIRECCION_CONFIRMADA = "AV. LIBERTADOR 4500"

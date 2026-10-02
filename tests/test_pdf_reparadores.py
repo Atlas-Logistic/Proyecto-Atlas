@@ -29,6 +29,19 @@ from atlas_core.revalidacion_documental import (
 )
 from tests.fixtures_pdf_sinteticos import construir_pdf, pagina_escaneada, pagina_texto
 
+
+@pytest.fixture(autouse=True)
+def _proveedor_ocr_de_prueba(monkeypatch):
+    """El reproceso focal relee con el proveedor OCR de la ingesta; en la
+    suite delega en el doble `atlas_core.ocr.leer_texto_imagen`."""
+    import atlas_core.ocr
+
+    class _Proveedor:
+        def leer_texto(self, ruta):
+            return atlas_core.ocr.leer_texto_imagen(ruta)
+
+    monkeypatch.setattr("atlas_core.ocr_provider.crear_proveedor_ocr", lambda *a, **k: _Proveedor())
+
 MATERIAL = "B HORMIGON 25MM 12M A630-420H (N)"
 
 

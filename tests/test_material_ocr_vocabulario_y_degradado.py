@@ -139,3 +139,62 @@ def test_reproceso_sin_evidencia_conserva_ausencia(tmp_path):
     assert resultado["guias_actualizadas"] == []
     assert fila["descripcion_material"] == "" and fila["motivos_revision_documento"] == "MATERIAL_AUSENTE"
     assert json.loads(fila["metricas_procesamiento_json"])["recuperacion_p0"]["material_traza"]["resultado"] == "ABSTENCION"
+
+
+# ----------------------------------- relectura focal de imagen (grupo B)
+
+def _raiz_con_imagen(tmp_path, filas):
+    from PIL import Image
+
+    ruta = _raiz(tmp_path, filas, {})
+    entradas = tmp_path / "operacion" / "entradas" / "20261002_120000" / "lote"
+    entradas.mkdir(parents=True)
+    Image.new("RGB", (4, 4), color="white").save(entradas / "a.jpeg")
+    return ruta
+
+
+class _ProveedorIngesta:
+    def __init__(self, lineas):
+        self.lineas, self.llamadas = lineas, 0
+
+    def leer_texto(self, ruta):
+        self.llamadas += 1
+        return list(self.lineas)
+
+
+def test_relectura_focal_usa_ocr_de_ingesta_y_archiva_traza_previa(tmp_path, monkeypatch):
+    from atlas_core.revalidacion_documental import reprocesar_material_focal_desde_imagen_original
+    from atlas_core.trazabilidad_ocr import ruta_traza_ocr
+
+    ruta = _raiz_con_imagen(tmp_path, [_fila()])
+    trazas = tmp_path / "operacion" / "trazas_ocr"
+    persistir_traza_ocr(directorio=trazas, referencia_imagen="lote/a.jpeg", textos=["ALN 60 AA 1006 (N)"], bloques=[])
+    proveedor = _ProveedorIngesta(["DESCRIPCION", "3 HORMIG0N 25MM 7M A630-420B (N)", "Coladas: 2617667002"])
+    monkeypatch.setattr("atlas_core.ocr_provider.crear_proveedor_ocr", lambda *a, **k: proveedor)
+    monkeypatch.setattr("atlas_core.ocr.leer_texto_imagen", lambda *a, **k: pytest.fail("no debe usar EasyOCR"))
+
+    resultado = reprocesar_material_focal_desde_imagen_original(raiz_atlas=tmp_path, numero_guia="1")
+    assert resultado["aplicado"] is True
+    assert _leer(ruta)[0]["descripcion_material"] == "B HORMIGON 25MM 7M A630-420B (N)"
+    vigente = json.loads(ruta_traza_ocr(trazas, "lote/a.jpeg").read_text(encoding="utf-8"))
+    assert "3 HORMIG0N 25MM 7M A630-420B (N)" in vigente["ocr"]["lineas"]
+    archivadas = list((trazas / "historico").glob("*.json"))
+    assert len(archivadas) == 1
+    assert json.loads(archivadas[0].read_text(encoding="utf-8"))["ocr"]["lineas"] == ["ALN 60 AA 1006 (N)"]
+
+
+def test_reintento_focal_una_vez_por_avance_de_capacidad(tmp_path, monkeypatch):
+    from atlas_core.capacidades_reevaluacion import versiones_actuales
+    from atlas_core.revalidacion_documental import recuperar_material_ausente_focal_controlado
+
+    previa = {"recuperacion_p0": {"material_focal": {"version": 1, "resultado": "MATERIAL_NO_RECUPERABLE_TRAS_REPROCESO"}}}
+    ruta = _raiz_con_imagen(tmp_path, [_fila(metricas_procesamiento_json=json.dumps(previa))])
+    proveedor = _ProveedorIngesta(["GUIA DE DESPACHO"])  # la imagen sigue sin línea de producto
+    monkeypatch.setattr("atlas_core.ocr_provider.crear_proveedor_ocr", lambda *a, **k: proveedor)
+
+    primero = recuperar_material_ausente_focal_controlado(raiz_atlas=tmp_path)
+    segundo = recuperar_material_ausente_focal_controlado(raiz_atlas=tmp_path)
+    assert (primero["intentados"], segundo["intentados"], proveedor.llamadas) == (1, 0, 1)
+    nota = json.loads(_leer(ruta)[0]["metricas_procesamiento_json"])["recuperacion_p0"]["material_focal"]
+    assert nota["capacidad_material"] == versiones_actuales()["MATERIAL"]
+    assert _leer(ruta)[0]["descripcion_material"] == ""

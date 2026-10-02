@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from datetime import date, datetime, timezone
@@ -1525,12 +1526,14 @@ def recuperar_material_ausente_focal_controlado(
     envoltura sólo selecciona candidatos con evidencia preservada y registra
     el intento equivalente, de modo que un ciclo siguiente no reabra OCR.
     """
+    from atlas_core.capacidades_reevaluacion import DOMINIO_MATERIAL, versiones_actuales
     from atlas_core.evidencia_documental import resolver_ruta_evidencia
 
     raiz = Path(raiz_atlas)
     dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
     if not dataset.is_file() or limite_por_ciclo <= 0:
         return {"intentados": 0, "recuperados": [], "omitidos": 0}
+    capacidad_material = versiones_actuales()[DOMINIO_MATERIAL]
     with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
         try:
             filas = _leer_filas(dataset)
@@ -1543,7 +1546,13 @@ def recuperar_material_ausente_focal_controlado(
             if (
                 str(fila.get("descripcion_material", "")).strip() in _AUSENTES
                 and MotivoRevisionDocumento.MATERIAL_AUSENTE.value in motivos
-                and not (isinstance(ya, Mapping) and ya.get("version") == _VERSION_MATERIAL_FOCAL_P0)
+                and not (
+                    isinstance(ya, Mapping) and ya.get("version") == _VERSION_MATERIAL_FOCAL_P0
+                    # Un intento previo sólo bloquea mientras la capacidad de
+                    # MATERIAL no avance: una mejora de lectura/extracción
+                    # habilita UN reintento, nunca uno por ciclo.
+                    and ya.get("capacidad_material") == capacidad_material
+                )
                 and resolver_ruta_evidencia(raiz, str(fila.get("archivo", ""))).ruta is not None
             ):
                 candidatas.append(str(fila.get("numero_guia", "")).strip())
@@ -1557,7 +1566,7 @@ def recuperar_material_ausente_focal_controlado(
             fila = next((f for f in filas if str(f.get("numero_guia", "")).strip() == guia), None)
             if fila is not None:
                 _anotar_recuperacion_p0(fila, "material_focal", {
-                    "version": _VERSION_MATERIAL_FOCAL_P0,
+                    "version": _VERSION_MATERIAL_FOCAL_P0, "capacidad_material": capacidad_material,
                     "resultado": "RECUPERADO" if resultado.get("aplicado") else str(resultado.get("motivo", "ABSTENCION")),
                 })
                 _escribir_filas_completas(dataset, filas)
@@ -4568,6 +4577,26 @@ def revalidar_material_estampado_persistido_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+def _registrar_relectura_traza_ocr(raiz: Path, archivo: str, textos: list[str], proveedor: object) -> None:
+    """La relectura queda como traza vigente del documento; la traza
+    anterior (si existía) se archiva intacta en `trazas_ocr/historico`.
+    Diagnóstico: un fallo de escritura nunca impide el reproceso."""
+    from atlas_core.trazabilidad_ocr import persistir_traza_ocr
+
+    directorio = raiz / "operacion" / "trazas_ocr"
+    try:
+        previa = ruta_traza_ocr(directorio, archivo)
+        if previa.is_file():
+            historico = directorio / "historico"
+            historico.mkdir(parents=True, exist_ok=True)
+            sello = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            shutil.copy2(previa, historico / f"{previa.stem}.{sello}.json")
+        persistir_traza_ocr(directorio=directorio, referencia_imagen=archivo, textos=textos, bloques=None,
+                            proveedor=proveedor)
+    except OSError:
+        pass
+
+
 def reprocesar_material_focal_desde_imagen_original(
     *, raiz_atlas: str | Path, numero_guia: str, lector_ocr: object = None,
 ) -> dict[str, object]:
@@ -4649,9 +4678,18 @@ def reprocesar_material_focal_desde_imagen_original(
                 from atlas_core.ingesta_pdf import ProveedorPaginaPdf
 
                 textos = ProveedorPaginaPdf(None, evidencia.ruta_texto_pdf).leer_texto(evidencia.ruta)
-            else:
+            elif lector_ocr is not None:
                 textos = leer_texto_imagen(evidencia.ruta, lector=lector_ocr)
-        except (OSError, ValueError, FileNotFoundError, KeyError) as exc:
+            else:
+                # Mismo motor OCR que la ingesta actual (el que generó las
+                # trazas), nunca un motor distinto: EasyOCR en modo párrafo
+                # no recuperaba la línea de producto que sí lee la ingesta.
+                from atlas_core.ocr_provider import crear_proveedor_ocr
+
+                proveedor = crear_proveedor_ocr()
+                textos = proveedor.leer_texto(evidencia.ruta)
+                _registrar_relectura_traza_ocr(raiz, archivo, textos, proveedor)
+        except (OSError, ValueError, FileNotFoundError, KeyError, RuntimeError) as exc:
             return {
                 "aplicado": False, "motivo": "ERROR_OCR", "numero_guia": guia_objetivo,
                 "detalle": f"{type(exc).__name__}: {exc}",

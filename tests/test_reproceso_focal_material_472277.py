@@ -3,8 +3,8 @@
 imagen original conservada. `reprocesar_material_focal_desde_imagen_
 original` reintenta `extraer_descripcion_material` sobre la imagen YA
 existente -- la ÚNICA función de todo el módulo que ejecuta OCR nuevo, y
-sólo cuando se invoca explícitamente para UNA guía. El OCR real (EasyOCR)
-se sustituye por un doble de prueba (`atlas_core.ocr.leer_texto_imagen`)
+sólo cuando se invoca explícitamente para UNA guía. El OCR real (proveedor
+de la ingesta) se sustituye por un doble de prueba (`atlas_core.ocr.leer_texto_imagen`)
 -- nunca se ejercita el motor OCR real en la suite, sólo el contrato de
 esta función con lo que el OCR le devuelva."""
 from __future__ import annotations
@@ -22,6 +22,19 @@ from atlas_core.revalidacion_documental import (
 
 NUMERO_GUIA = "472277"
 ARCHIVO = "472277.jpeg"
+
+
+@pytest.fixture(autouse=True)
+def _proveedor_ocr_de_prueba(monkeypatch):
+    """La relectura usa el proveedor OCR de la ingesta; en la suite se
+    sustituye por uno que delega en el doble `atlas_core.ocr.leer_texto_imagen`."""
+    import atlas_core.ocr
+
+    class _Proveedor:
+        def leer_texto(self, ruta):
+            return atlas_core.ocr.leer_texto_imagen(ruta)
+
+    monkeypatch.setattr("atlas_core.ocr_provider.crear_proveedor_ocr", lambda *a, **k: _Proveedor())
 
 
 def _fila(**overrides):
