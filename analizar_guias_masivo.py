@@ -97,9 +97,9 @@ def crear_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = crear_parser()
-    argumentos = parser.parse_args()
+    argumentos = parser.parse_args(argv)
     if (
         argumentos.fecha_desde is not None
         and argumentos.fecha_hasta is not None
