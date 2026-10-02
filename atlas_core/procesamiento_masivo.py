@@ -583,8 +583,31 @@ def _es_fragmento_estampado_no_material(linea_normalizada: str) -> bool:
 
 _TERMINOS_MATERIAL = (
     r"HORMIGON|BARRAS?|ROLLOS?|ALAMBRON|BOBINAS?|"
-    r"ANGULOS?|REDONDOS?|CUADRADOS?|PLANAS?|PERFILES?|VIGAS?|MALLAS?"
+    r"ANGULOS?|REDONDOS?|CUADRADOS?|PLANAS?|PERFILES?|VIGAS?|MALLAS?|"
+    # Productos reales despachados en guías AZA (460486, 477043/477355/
+    # 477449, 480715) que quedaban como MATERIAL_AUSENTE con OCR limpio.
+    r"SAFEROCK|CHATARRAS?|HEXAGONOS?"
 )
+
+# Familias de producto cuya palabra es larga y estable: las únicas a las
+# que se les reconoce una lectura OCR deformada. Una palabra corta
+# (BARRA, VIGA...) deformada se confunde con texto cualquiera.
+_FAMILIAS_TOLERANTES_OCR = ("HORMIGON", "HEXAGONO")
+# Dígitos que el OCR entrega en lugar de la letra de forma parecida
+# (casos reales: "HORMIG0N", "HOMMI0ON", "HORM190H").
+_DIGITO_COMO_LETRA = str.maketrans({"0": "O", "1": "I", "5": "S", "6": "G", "8": "B", "9": "G"})
+# Una deformación mayor que la tabla de confusiones sólo se reconoce como
+# la familia si la MISMA línea trae contexto de producto siderúrgico:
+# coladas, calidad A630/A420/A270 (aun deformada: R630, 4630, A6j0) o
+# norma SAE. Sin ese contexto, una palabra parecida no es evidencia.
+_PATRON_CONTEXTO_SIDERURGICO = re.compile(
+    r"COLAD|\b[A4R1]\s?6[3J]0|\bA\s?[2-6]\d0\b|\bSAE\s?\d{3,4}\b"
+)
+_MAX_DIFERENCIAS_FAMILIA_DEGRADADA = 3
+# Familia reconocida pero diámetro/largo/calidad no legibles: se registra
+# SÓLO la familia, nunca atributos reconstruidos. El texto OCR original
+# sigue en la traza OCR del documento.
+_SUFIJO_DETALLE_ILEGIBLE = "(DETALLE ILEGIBLE EN OCR)"
 
 # Bloque PROPAGACIÓN MATERIAL M1 -- caso real 472640: cuando el documento
 # no trae saltos de línea limpios entre filas de la tabla DESCRIPCIÓN
@@ -625,7 +648,37 @@ def _tiene_evidencia_material(texto: str) -> bool:
     return bool(_PATRON_TERMINOS_MATERIAL.search(normalizado)) or any(
         _coincide_con_tolerancia_ocr(token, "HORMIGON")
         for token in re.findall(r"[A-Z]+", normalizado)
-    )
+    ) or bool(_tokens_familia_con_digitos(normalizado))
+
+
+def _tokens_familia_con_digitos(normalizado: str) -> dict[str, str]:
+    """Tokens que son EXACTAMENTE una familia tolerante salvo dígitos de
+    forma parecida ("HORMIG0N" -> "HORMIGON"). Es una lectura fiel de la
+    palabra: sólo cambia el dígito por su letra, nada más."""
+    encontrados: dict[str, str] = {}
+    for token in re.findall(r"[A-Z0-9]+", normalizado):
+        if not re.search(r"\d", token) or not re.search(r"[A-Z]", token):
+            continue
+        letras = token.translate(_DIGITO_COMO_LETRA)
+        if letras in _FAMILIAS_TOLERANTES_OCR:
+            encontrados[token] = letras
+    return encontrados
+
+
+def _familia_degradada(normalizado: str) -> str:
+    """Familia de producto reconocible en una línea OCR muy deformada
+    ("HORKIGOK ZzMM 7X: R630", "HEKAGONO 1 1/R** ... SAE 1045"): misma
+    longitud que la palabra, a lo sumo `_MAX_DIFERENCIAS_FAMILIA_DEGRADADA`
+    posiciones distintas (tras leer dígitos como letras) y contexto
+    siderúrgico en la misma línea. Devuelve "" si no hay certeza."""
+    if not _PATRON_CONTEXTO_SIDERURGICO.search(normalizado):
+        return ""
+    for token in re.findall(r"[A-Z0-9]+", normalizado):
+        letras = token.translate(_DIGITO_COMO_LETRA)
+        for familia in _FAMILIAS_TOLERANTES_OCR:
+            if len(letras) == len(familia) and sum(a != b for a, b in zip(letras, familia)) <= _MAX_DIFERENCIAS_FAMILIA_DEGRADADA:
+                return familia
+    return ""
 
 
 def _dividir_items_material_fusionados(limpia: str) -> list[str]:
@@ -675,12 +728,22 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             if not limpia:
                 continue
             normalizada = _normalizar(limpia)
-            if _tiene_evidencia_material(limpia) and not _es_fragmento_estampado_no_material(normalizada):
+            if _es_fragmento_estampado_no_material(normalizada):
+                continue
+            if _tiene_evidencia_material(limpia):
+                # La palabra de familia leída con dígitos se escribe con sus
+                # letras; el resto de la línea queda tal como lo leyó el OCR.
+                for token, familia in _tokens_familia_con_digitos(normalizada).items():
+                    limpia = re.sub(rf"\b{re.escape(token)}\b", familia, limpia, flags=re.IGNORECASE)
                 # Confusiones OCR acotadas al contexto inequívoco de una línea
                 # de acero: B/3/D al inicio y 8/B antes de MM.
                 limpia = re.sub(r"^[D3]\s+(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
                 limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
                 encontradas.extend(_dividir_items_material_fusionados(limpia))
+                continue
+            familia = _familia_degradada(normalizada)
+            if familia:
+                encontradas.append(f"{familia} {_SUFIJO_DETALLE_ILEGIBLE}")
     return " | ".join(dict.fromkeys(encontradas))
 
 

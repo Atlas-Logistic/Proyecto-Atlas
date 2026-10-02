@@ -55,6 +55,7 @@ from atlas_core.revalidacion_documental import (
     revalidar_indicadores_documentales_sin_ocr,
     revalidar_material_estampado_persistido_sin_ocr,
     revalidar_tipo_carga_sin_ocr,
+    recuperar_material_ausente_desde_traza_ocr_sin_ocr,
     recuperar_material_ausente_focal_controlado,
     recuperar_pendientes_desde_replay_traza_ocr_sin_ocr,
     revalidar_motivo_destino_ya_confirmado_sin_ocr,
@@ -1355,6 +1356,10 @@ def reconciliar_estado_derivado(
         recuperacion_replay = recuperar_pendientes_desde_replay_traza_ocr_sin_ocr(
             raiz_atlas=raiz,
         )
+        # MATERIAL ausente: primero el OCR YA persistido (traza OCR) con el
+        # extractor vigente -- sin OCR nuevo. Sólo lo que siga ausente
+        # queda para el paso focal por imagen de abajo.
+        recuperacion_material_traza = recuperar_material_ausente_desde_traza_ocr_sin_ocr(raiz_atlas=raiz)
         # MATERIAL no participa del replay. El único OCR posterior real es
         # focal y se limita a dos MATERIAL_AUSENTE con imagen preservada por
         # ciclo; su intento queda marcado para que abrir Desktop de nuevo no
@@ -1374,6 +1379,7 @@ def reconciliar_estado_derivado(
             # estricto para sus llamadores directos.
             sincronizacion_tipo_carga = {"filas_totales": 0, "guias_actualizadas": []}
         por_reintentar.extend(recuperacion_replay.get("guias_actualizadas", []))
+        por_reintentar.extend(recuperacion_material_traza.get("guias_actualizadas", []))
         por_reintentar.extend(recuperacion_material_focal.get("recuperados", []))
         por_reintentar = list(dict.fromkeys(por_reintentar))
 
@@ -1969,6 +1975,7 @@ def reconciliar_estado_derivado(
             | set(limpieza_obra_destino["guias_actualizadas"])
             | set(destino_vacio_confirmado["guias_actualizadas"])
             | set(recuperacion_replay["guias_actualizadas"])
+            | set(recuperacion_material_traza["guias_actualizadas"])
             | set(recuperacion_material_focal["recuperados"])
             | set(sincronizacion_tipo_carga["guias_actualizadas"])
         ),
@@ -1989,6 +1996,7 @@ def reconciliar_estado_derivado(
         },
         "recuperacion_p0": {
             "replay": recuperacion_replay,
+            "material_traza": recuperacion_material_traza,
             "material_focal": recuperacion_material_focal,
             "tipo_carga": sincronizacion_tipo_carga,
         },

@@ -164,6 +164,7 @@ _ERRORES_CATALOGO_VEHICULOS = (
 # registro ni se convierte cada reconciliación en un reproceso masivo.
 _VERSION_REPLAY_P0 = 1
 _VERSION_MATERIAL_FOCAL_P0 = 1
+_VERSION_MATERIAL_TRAZA_P0 = 1
 _LIMITE_MATERIAL_FOCAL_POR_CICLO = 2
 
 
@@ -1438,6 +1439,81 @@ def recuperar_pendientes_desde_replay_traza_ocr_sin_ocr(
         "revisadas": revisadas, "guias_actualizadas": actualizadas,
         "abstenciones": abstenciones, "sin_traza": sin_traza,
     }
+
+
+def recuperar_material_ausente_desde_traza_ocr_sin_ocr(*, raiz_atlas: str | Path) -> dict[str, object]:
+    """Reaplica `extraer_descripcion_material` sobre el OCR YA persistido
+    (traza OCR del documento) de cada fila con MATERIAL_AUSENTE.
+
+    Nunca relee la imagen ni ejecuta OCR. Sólo escribe `descripcion_material`
+    (vacía o "No encontrado"), su `tipo_carga` derivado, el retiro de
+    MATERIAL_AUSENTE y los indicadores documentales que dependen de ese
+    motivo -- mismas escrituras que `reprocesar_material_focal_desde_imagen_
+    original`. Una decisión humana sobre el material bloquea la fila. Cada
+    intento queda anotado con `_VERSION_MATERIAL_TRAZA_P0`: subirla cuando
+    el extractor aprenda algo nuevo vuelve a evaluar las filas pendientes.
+    """
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    ledger = raiz / "operacion" / "actual" / "decisiones_aplicadas.json"
+    directorios = (raiz / "operacion" / "trazas_ocr", dataset.parent / "trazas_ocr")
+    if not dataset.is_file():
+        return {"revisadas": 0, "guias_actualizadas": [], "sin_traza": 0}
+    try:
+        aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
+        aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)]
+    except (OSError, ValueError, AttributeError):
+        aplicaciones = []
+    motivo_material = MotivoRevisionDocumento.MATERIAL_AUSENTE.value
+    with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(dataset)
+        except (OSError, ValueError):
+            return {"revisadas": 0, "guias_actualizadas": [], "sin_traza": 0}
+        actualizadas: list[str] = []
+        revisadas = sin_traza = 0
+        for fila in filas:
+            motivos = [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()]
+            if (
+                str(fila.get("descripcion_material", "")).strip() not in _AUSENTES
+                or motivo_material not in motivos
+                or _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo="descripcion_material")
+            ):
+                continue
+            previa = _metricas_recuperacion_p0(fila).get("material_traza")
+            if isinstance(previa, Mapping) and previa.get("version") == _VERSION_MATERIAL_TRAZA_P0:
+                continue
+            archivo = str(fila.get("archivo", "")).strip()
+            ruta = next((ruta_traza_ocr(d, archivo) for d in directorios if ruta_traza_ocr(d, archivo).is_file()), None)
+            if ruta is None:
+                sin_traza += 1
+                continue  # una traza puede llegar después; no se consume el intento
+            revisadas += 1
+            try:
+                lineas = json.loads(ruta.read_text(encoding="utf-8")).get("ocr", {}).get("lineas", [])
+            except (OSError, ValueError, AttributeError):
+                lineas = []
+            material = extraer_descripcion_material(str(l) for l in lineas if isinstance(l, str)) if isinstance(lineas, list) else ""
+            _anotar_recuperacion_p0(fila, "material_traza", {
+                "version": _VERSION_MATERIAL_TRAZA_P0,
+                "resultado": "RECUPERADO" if material else "ABSTENCION", "traza": ruta.name,
+            })
+            if not material:
+                continue
+            fila["descripcion_material"] = material
+            fila["tipo_carga"] = clasificar_material(material).value
+            motivos_restantes = [m for m in motivos if m != motivo_material]
+            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
+            indicador, documental, operacional = _indicadores_documentales_coherentes(
+                motivos_restantes, str(fila.get("estado_ruta", "")).strip(),
+            )
+            fila["indicador_revision"] = indicador
+            fila["estado_documental"] = documental
+            fila["estado_operacional"] = operacional
+            actualizadas.append(str(fila.get("numero_guia", "")).strip() or archivo)
+        if revisadas:
+            _escribir_filas_completas(dataset, filas)
+    return {"revisadas": revisadas, "guias_actualizadas": actualizadas, "sin_traza": sin_traza}
 
 
 def recuperar_material_ausente_focal_controlado(

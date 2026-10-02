@@ -161,7 +161,10 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         }),
     ),
     DOMINIO_MATERIAL: Capacidad(
-        dominio=DOMINIO_MATERIAL, version=2,
+        # v3: SAFEROCK/CHATARRA/HEXAGONO en vocabulario, HORMIGON leído con
+        # dígitos y familia-sola en lecturas deformadas; reaplicado sobre la
+        # traza OCR ya persistida (sin OCR nuevo).
+        dominio=DOMINIO_MATERIAL, version=3,
         descripcion="Descripción/peso de material.",
         motivos_documentales=frozenset({"MATERIAL_AUSENTE", "MATERIAL_POSIBLEMENTE_CONTAMINADO"}),
     ),
