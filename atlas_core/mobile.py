@@ -2368,6 +2368,37 @@ def _sincronizar_contrato_v2(repositorio: "RepositorioEnviosMobile", envio_id: s
         pass
 
 
+def _huella_dataset(dataset: Path) -> str | None:
+    try:
+        return hashlib.sha256(Path(dataset).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _converger_envios_tras_reporte(repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path) -> bool:
+    """Bloque CONVERGENCIA MOBILE POST-REPORTE -- caso real 475222 (envío
+    6bcf5dcd, 2026-10-02; antes 475208/475209): la guía se procesó con
+    `indicador_revision=REVISAR` (OBRA_DESTINO_SIN_CORROBORAR) y el envío
+    quedó REQUIERE_REVISION; segundos después la batería de
+    `revalidar_y_regenerar_reporte` resolvió la fila (indicador OK, viaje
+    CONFIRMADO), pero el estado del envío ya se había derivado ANTES de esa
+    batería y nadie volvía a mirarlo -- Desktop lo seguía mostrando en
+    revisión hasta que "Refrescar datos" corría `reconciliar_estado_
+    derivado` (que sí revalida Mobile después de su batería).
+
+    Misma regla que esa reconciliación ("Mobile debe leer el indicador YA
+    convergido en esta misma pasada"): se revalida la asociación/estado
+    sobre la fila ya resuelta. Si esa convergencia escribe el dataset
+    (p. ej. transporte resuelto por respaldo de lote), el reporte publicado
+    quedó viejo y se regenera UNA vez más -- nunca más de una: cualquier
+    resto lo toma la próxima pasada natural, sin bucles."""
+    huella_antes = _huella_dataset(dataset)
+    _revalidar_asociacion_diagnosticable(repositorio, envio_id, dataset=dataset)
+    if _huella_dataset(dataset) == huella_antes:
+        return True
+    return _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+
+
 def procesar_y_revalidar_envio_mobile(
     repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, carpeta_catalogos,
 ) -> dict[str, bool]:
@@ -2397,6 +2428,8 @@ def procesar_y_revalidar_envio_mobile(
     if dataset:
         _revalidar_asociacion_diagnosticable(repositorio, envio_id, dataset=dataset)
     reconciliacion_ok = _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+    if dataset and reconciliacion_ok:
+        reconciliacion_ok = _converger_envios_tras_reporte(repositorio, envio_id, dataset=dataset)
     # Bloque MOBILE CONTRATO V2 -- DESPUÉS del reporte: los eventos
     # canónicos se enriquecen con el `viajes.csv` vigente.
     _sincronizar_contrato_v2(repositorio, envio_id, dataset=dataset)
