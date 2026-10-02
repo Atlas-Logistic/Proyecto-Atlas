@@ -172,6 +172,7 @@ _ERRORES_CATALOGO_VEHICULOS = (
 _VERSION_REPLAY_P0 = 1
 _VERSION_MATERIAL_FOCAL_P0 = 1
 _VERSION_MATERIAL_TRAZA_P0 = 1
+_VERSION_MATERIAL_DESCRIPCION_FOCAL_P1 = 1
 _LIMITE_MATERIAL_FOCAL_POR_CICLO = 2
 
 
@@ -4721,8 +4722,189 @@ def _registrar_relectura_traza_ocr(raiz: Path, archivo: str, textos: list[str], 
         pass
 
 
+def _texto_etiqueta_documental(texto: object) -> str:
+    """Normalización mínima para comparar encabezados, no productos OCR."""
+    return re.sub(r"[^A-Z]", "", _normalizar(str(texto)))
+
+
+def _caja_bloque_ocr(bloque: object) -> tuple[float, float, float, float] | None:
+    puntos = getattr(bloque, "bounding_box", None)
+    if not puntos or len(puntos) != 4:
+        return None
+    try:
+        xs = [float(p[0]) for p in puntos]
+        ys = [float(p[1]) for p in puntos]
+    except (IndexError, TypeError, ValueError):
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+_ENCABEZADOS_IZQUIERDA_DESCRIPCION = frozenset({"CODIGO", "CANTIDAD"})
+_ENCABEZADOS_DERECHA_DESCRIPCION = frozenset({"UNIDAD", "PRECIO", "VALOR"})
+_PIES_TABLA_MATERIAL = frozenset({"TIPODEDOCUMENTO", "PESOKG", "DESPACHARA"})
+# El borde izquierdo de la celda no está impreso como texto: se prueba con
+# dos anclajes estructurales y TODAS las lecturas deben coincidir. Si el
+# recorte amputa la primera letra en uno ("HORMIGON" vs "B HORMIGON",
+# casos reales 473550/474576) las lecturas difieren y Atlas se abstiene.
+_AVANCES_BORDE_IZQUIERDO = (0.05, 0.15)
+METODO_RELECTURA_FOCAL_DESCRIPCION = "RELECTURA_FOCAL_DESCRIPCION"
+
+
+def _localizar_region_descripcion_material(
+    bloques: Collection[object], *, avance_izquierdo: float = _AVANCES_BORDE_IZQUIERDO[0],
+) -> tuple[float, float, float, float] | None:
+    """Delimita la celda de producto bajo DESCRIPCION desde la estructura.
+
+    No usa coordenadas de una guía ni porcentajes de página: exige UN único
+    encabezado DESCRIPCION, un encabezado vecino a cada lado en su misma banda
+    y un pie de tabla debajo. Si la estructura no está completa, se abstiene
+    antes de cualquier OCR. La región empieza justo bajo el encabezado (caso
+    real 474993: con la franja gris del encabezado dentro del recorte el
+    detector funde la línea de producto con el borde de la tabla).
+    """
+    ubicados = []
+    for bloque in bloques:
+        caja = _caja_bloque_ocr(bloque)
+        if caja is not None:
+            ubicados.append((caja, _texto_etiqueta_documental(getattr(bloque, "texto", ""))))
+    descripciones = [c for c, etiqueta in ubicados if etiqueta == "DESCRIPCION"]
+    if len(descripciones) != 1:
+        return None
+    descripcion = descripciones[0]
+    centro_y = (descripcion[1] + descripcion[3]) / 2
+    alto = max(1.0, descripcion[3] - descripcion[1])
+    # Los encabezados de la misma banda dan los bordes de la columna. Se
+    # piden ambos lados: sin ellos un recorte ancho podría leer otra columna.
+    banda = [(c, e) for c, e in ubicados if abs(((c[1] + c[3]) / 2) - centro_y) <= alto * 1.8]
+    izquierdos = [c for c, e in banda if e in _ENCABEZADOS_IZQUIERDA_DESCRIPCION and c[2] <= descripcion[0]]
+    derechos = [c for c, e in banda if e in _ENCABEZADOS_DERECHA_DESCRIPCION and c[0] >= descripcion[2]]
+    if not izquierdos or not derechos:
+        return None
+    izquierdo = max(izquierdos, key=lambda c: c[2])
+    derecho = min(derechos, key=lambda c: c[0])
+    # El texto del encabezado va centrado en su celda: el borde izquierdo se
+    # ancla al encabezado previo y avanza sólo una fracción del espacio libre,
+    # para no amputar el inicio de la descripción ni invadir el código.
+    x1 = izquierdo[2] + (descripcion[0] - izquierdo[2]) * avance_izquierdo
+    x2 = (descripcion[2] + derecho[0]) / 2
+    pies = [c[1] for c, e in ubicados if e in _PIES_TABLA_MATERIAL and c[1] > descripcion[3]]
+    if not pies:
+        return None
+    pie_tabla = min(pies)
+    # Si el OCR completo vio "Coladas" dentro de la columna, cierra la fila de
+    # producto; si no, una ventana acotada de primeras filas, nunca la página.
+    cierres_colada = [c for c, e in ubicados
+                      if e.startswith("COLAD") and c[1] > descripcion[3]
+                      and c[0] >= x1 and c[2] <= x2 and c[3] < pie_tabla]
+    y2 = (max(c[3] for c in cierres_colada) + alto * 2) if cierres_colada else (descripcion[3] + alto * 6)
+    y2 = min(y2, pie_tabla)
+    y1 = descripcion[3]
+    return (x1, y1, x2, y2) if x1 < x2 and y1 < y2 else None
+
+
+def _leer_descripcion_focal(
+    proveedor: object, ruta_imagen: Path, caja: tuple[float, float, float, float], *, etiqueta: str = "",
+) -> list[dict[str, object]]:
+    """Lee la región EXACTA (sin margen) en dos variantes independientes.
+
+    El recorte se hace en el mismo marco orientado (EXIF) en que el proveedor
+    devolvió los bloques, y se entrega al mismo `leer_texto` de la ingesta.
+    Sin ampliaciones: en 474993 la línea se pierde al reescalar, así que una
+    ampliación sólo restaría votos, nunca sumaría evidencia."""
+    from PIL import Image, ImageOps
+
+    with Image.open(ruta_imagen) as imagen:
+        orientada = ImageOps.exif_transpose(imagen).convert("RGB")
+    x1, y1, x2, y2 = caja
+    recorte = (
+        max(0, int(x1)), max(0, int(y1)),
+        min(orientada.width, int(x2 + 0.999)), min(orientada.height, int(y2 + 0.999)),
+    )
+    if recorte[0] >= recorte[2] or recorte[1] >= recorte[3]:
+        raise ValueError("La región DESCRIPCION quedó fuera de la imagen")
+    original = orientada.crop(recorte)
+    variantes = (("original", original), ("grises", ImageOps.grayscale(original).convert("RGB")))
+    lecturas = []
+    with tempfile.TemporaryDirectory(prefix="atlas_descripcion_focal_") as temporal:
+        for nombre, variante in variantes:
+            ruta_variante = Path(temporal) / f"{nombre}.png"
+            variante.save(ruta_variante)
+            lineas = [str(t).strip() for t in proveedor.leer_texto(ruta_variante) if str(t).strip()]
+            lecturas.append({"variante": f"{etiqueta}{nombre}", "recorte": list(recorte), "lineas": lineas})
+    return lecturas
+
+
+def _consensuar_material_focal(lecturas: object) -> tuple[str, list[dict[str, object]]]:
+    """Acepta un material sólo si TODAS las variantes (mínimo dos) extraen
+    exactamente el mismo con las reglas vigentes del extractor. Una variante
+    vacía o distinta es una lectura ambigua: se abstiene."""
+    materiales = []
+    evidencia = []
+    for lectura in lecturas if isinstance(lecturas, list) else []:
+        if not isinstance(lectura, Mapping):
+            continue
+        lineas = [str(t) for t in lectura.get("lineas", []) if str(t).strip()]
+        material = extraer_descripcion_material(lineas)
+        materiales.append(material)
+        evidencia.append({**dict(lectura), "lineas": lineas, "material": material})
+    if len(materiales) >= 2 and materiales[0] and all(m == materiales[0] for m in materiales):
+        return materiales[0], evidencia
+    return "", evidencia
+
+
+def _registrar_traza_material_descripcion_focal(
+    raiz: Path, *, numero_guia: str, archivo: str, cajas: list[tuple[float, float, float, float]],
+    evidencia: list[dict[str, object]], material: str,
+) -> None:
+    """Persistencia aditiva: nunca reemplaza la traza OCR vigente ni la
+    original. El nombre incluye la guía y un hash del identificador lógico
+    (en Mobile el archivo siempre se llama original.jpg)."""
+    try:
+        destino = raiz / "operacion" / "trazas_ocr" / "focal_material"
+        destino.mkdir(parents=True, exist_ok=True)
+        sello = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        clave = hashlib.sha256(archivo.encode("utf-8")).hexdigest()[:12]
+        (destino / f"{numero_guia or 'sin_guia'}.{clave}.{sello}.json").write_text(json.dumps({
+            "version": _VERSION_MATERIAL_DESCRIPCION_FOCAL_P1, "numero_guia": numero_guia, "archivo": archivo,
+            "metodo": METODO_RELECTURA_FOCAL_DESCRIPCION, "cajas_documentales": [[round(v, 1) for v in caja] for caja in cajas],
+            "lecturas": evidencia, "material_consensuado": material,
+            "resultado": "RECUPERADO" if material else "ABSTENCION",
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _material_desde_descripcion_focal(
+    proveedor: object, ruta_imagen: Path, *, raiz: Path, numero_guia: str, archivo: str,
+) -> tuple[str, str]:
+    """Último recurso tras el flujo normal: localiza DESCRIPCION por estructura,
+    relee esa región y reutiliza las reglas actuales del extractor. Devuelve
+    (material, detalle); material vacío = abstención. Nunca lanza."""
+    try:
+        bloques = proveedor.leer_bloques(ruta_imagen)
+        cajas = [
+            _localizar_region_descripcion_material(bloques, avance_izquierdo=avance)
+            for avance in _AVANCES_BORDE_IZQUIERDO
+        ]
+        if any(caja is None for caja in cajas):
+            return "", "ESTRUCTURA_DESCRIPCION_INCOMPLETA"
+        lecturas = [
+            lectura
+            for avance, caja in zip(_AVANCES_BORDE_IZQUIERDO, cajas)
+            for lectura in _leer_descripcion_focal(proveedor, ruta_imagen, caja, etiqueta=f"borde_{avance:.2f}_")
+        ]
+    except (OSError, ValueError, KeyError, RuntimeError, AttributeError, TypeError) as exc:
+        return "", f"ERROR_RELECTURA_FOCAL: {type(exc).__name__}: {exc}"
+    material, evidencia = _consensuar_material_focal(lecturas)
+    _registrar_traza_material_descripcion_focal(
+        raiz, numero_guia=numero_guia, archivo=archivo, cajas=cajas, evidencia=evidencia, material=material,
+    )
+    return material, "" if material else "LECTURA_FOCAL_SIN_CONSENSO"
+
+
 def reprocesar_material_focal_desde_imagen_original(
     *, raiz_atlas: str | Path, numero_guia: str, lector_ocr: object = None,
+    proveedor_ocr: object = None,
 ) -> dict[str, object]:
     """Bloque REPROCESO FOCAL DE MATERIAL -- caso real 0000354651/472277
     (PRODALAM SA): a diferencia de TODAS las demás funciones de este
@@ -4810,7 +4992,7 @@ def reprocesar_material_focal_desde_imagen_original(
                 # no recuperaba la línea de producto que sí lee la ingesta.
                 from atlas_core.ocr_provider import crear_proveedor_ocr
 
-                proveedor = crear_proveedor_ocr()
+                proveedor = proveedor_ocr or crear_proveedor_ocr()
                 textos = proveedor.leer_texto(evidencia.ruta)
                 _registrar_relectura_traza_ocr(raiz, archivo, textos, proveedor)
         except (OSError, ValueError, FileNotFoundError, KeyError, RuntimeError) as exc:
@@ -4819,14 +5001,37 @@ def reprocesar_material_focal_desde_imagen_original(
                 "detalle": f"{type(exc).__name__}: {exc}",
             }
         material_recuperado = extraer_descripcion_material(textos)
+        metodo_material = ""
+        detalle_focal = ""
+        if not material_recuperado and evidencia.ruta_texto_pdf is None:
+            # Sólo tras el flujo normal fallido, y sólo con imagen: la
+            # estructura localiza DESCRIPCION antes de releerla; estructura o
+            # consenso incompletos conservan MATERIAL_AUSENTE intacto.
+            if proveedor_ocr is not None:
+                proveedor_focal = proveedor_ocr
+            elif lector_ocr is not None:
+                from atlas_core.ocr_provider import EasyOCRProvider
+
+                proveedor_focal = EasyOCRProvider(lector_ocr)
+            else:
+                proveedor_focal = proveedor
+            material_recuperado, detalle_focal = _material_desde_descripcion_focal(
+                proveedor_focal, evidencia.ruta, raiz=raiz, numero_guia=guia_objetivo, archivo=archivo,
+            )
+            if material_recuperado:
+                metodo_material = METODO_RELECTURA_FOCAL_DESCRIPCION
         if not material_recuperado:
             return {
                 "aplicado": False, "motivo": "MATERIAL_NO_RECUPERABLE_TRAS_REPROCESO",
                 "numero_guia": guia_objetivo,
+                **({"detalle_focal": detalle_focal} if detalle_focal else {}),
             }
 
         fila["descripcion_material"] = material_recuperado
         fila["tipo_carga"] = clasificar_material(material_recuperado).value
+        if metodo_material:
+            metodos = {m.strip() for m in str(fila.get("metodos_recuperacion_documento", "")).split("|") if m.strip()}
+            fila["metodos_recuperacion_documento"] = " | ".join(sorted(metodos | {metodo_material}))
         motivos_restantes = [m for m in motivos_actuales if m != motivo_material]
         fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
         indicador, documental, operacional = _indicadores_documentales_coherentes(
@@ -4840,6 +5045,7 @@ def reprocesar_material_focal_desde_imagen_original(
     return {
         "aplicado": True, "numero_guia": guia_objetivo,
         "descripcion_material": material_recuperado, "tipo_carga": fila["tipo_carga"],
+        **({"metodo": metodo_material} if metodo_material else {}),
     }
 
 
