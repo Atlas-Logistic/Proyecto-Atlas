@@ -20,6 +20,7 @@ from collections.abc import Mapping
 
 from atlas_core.consultas_atlas import DOMINIO_INCIDENCIAS_DOCUMENTALES, DOMINIO_VIAJES, METRICA_LIST_RELACION
 from atlas_core.responder_consulta_atlas import RespuestaConsultaAtlas, responder_consulta_atlas
+from atlas_core.soporte_consultas import soporte_semantico
 
 
 def _proveedor_interpretacion_opcional():
@@ -106,6 +107,9 @@ def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
             "total_coincidencias": r.total_coincidencias,
             "viajes_soporte": _serializar_resultado_iterable(r.viajes_soporte, recorte),
             "advertencias": list(r.advertencias),
+            # Soporte semántico (qué entidades componen la respuesta) --
+            # Desktop lo prefiere sobre `viajes_soporte` cuando existe.
+            "soporte": soporte_semantico(r),
         }
     return salida
 
