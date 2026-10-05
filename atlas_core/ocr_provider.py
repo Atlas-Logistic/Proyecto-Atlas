@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -43,10 +44,75 @@ RUTA_WORKER_PADDLE = Path(__file__).resolve().parent / "paddleocr_worker.py"
 
 TIMEOUT_INICIO_SEG = 120
 TIMEOUT_COMANDO_SEG = 180
+# Plazo para recoger el stderr y el código de salida de un worker que YA
+# cerró su stdout (terminó): nunca se acerca al timeout de cuelgue real.
+ESPERA_CIERRE_WORKER_SEG = 5
+# Cola del stderr del worker que se conserva para diagnóstico.
+MAX_STDERR_CONSERVADO = 64 * 1024
 
 
 class ProveedorOCRNoDisponible(RuntimeError):
-    """El proveedor no pudo iniciarse o dejó de responder."""
+    """El proveedor no pudo iniciarse o dejó de responder.
+
+    El mensaje es apto para mostrarse (sin traceback ni rutas internas);
+    ``detalle_tecnico`` conserva el stderr del worker, que además se
+    registra completo en el log."""
+
+    def __init__(self, mensaje: str, detalle_tecnico: str = "") -> None:
+        super().__init__(mensaje)
+        self.detalle_tecnico = detalle_tecnico
+
+
+class _DrenadorStderr:
+    """Lee el stderr del worker en un hilo propio desde que el proceso nace.
+
+    Sin esto, un worker que escribe más que el búfer del pipe (~4 KB en
+    Windows; p. ej. un traceback de importación) queda bloqueado en esa
+    escritura sin terminar nunca, y Atlas sólo lo detectaba al vencer el
+    timeout de arranque -- con el error real oculto. Conserva la cola del
+    texto (``MAX_STDERR_CONSERVADO``)."""
+
+    def __init__(self, stream: Any) -> None:
+        self._partes: list[str] = []
+        self._tamano = 0
+        self._candado = threading.Lock()
+        self._hilo = threading.Thread(target=self._leer, args=(stream,), daemon=True)
+        self._hilo.start()
+
+    def _leer(self, stream: Any) -> None:
+        try:
+            while True:
+                fragmento = stream.read(4096)
+                if not fragmento:
+                    return
+                with self._candado:
+                    self._partes.append(fragmento)
+                    self._tamano += len(fragmento)
+                    while self._tamano > MAX_STDERR_CONSERVADO and len(self._partes) > 1:
+                        self._tamano -= len(self._partes.pop(0))
+        except (OSError, ValueError):
+            return
+
+    def texto(self, espera_seg: float = 0.0) -> str:
+        if espera_seg > 0:
+            self._hilo.join(espera_seg)
+        with self._candado:
+            return "".join(self._partes)[-MAX_STDERR_CONSERVADO:]
+
+
+_PATRON_RUTA_WINDOWS = re.compile(r"[A-Za-z]:[\\/][^\"'\s]*")
+
+
+def _resumen_error_worker(stderr: str) -> str:
+    """Última línea significativa del stderr (normalmente ``Tipo: mensaje``
+    de la excepción), con las rutas reducidas a su nombre de archivo."""
+    lineas = [linea.strip() for linea in str(stderr or "").splitlines() if linea.strip()]
+    if not lineas:
+        return "sin detalle en stderr"
+    ultima = _PATRON_RUTA_WINDOWS.sub(
+        lambda m: re.split(r"[\\/]", m.group(0).rstrip("\\/"))[-1], lineas[-1]
+    )
+    return ultima[:300]
 
 
 def _leer_linea_con_timeout(stream, timeout_seg: float) -> str | None:
@@ -170,6 +236,7 @@ class PaddleOCRProvider:
         self._device = device or ("gpu" if _gpu_nvidia_disponible() else "cpu")
         self._ruta_python_forzada = ruta_python
         self._proceso: subprocess.Popen | None = None
+        self._drenador_stderr: _DrenadorStderr | None = None
         self._fallback_easyocr: EasyOCRProvider | None = None
         self._degradado_a_easyocr = False
 
@@ -194,29 +261,51 @@ class PaddleOCRProvider:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
+        self._drenador_stderr = _DrenadorStderr(proceso.stderr)
         proceso.stdin.write(json.dumps({"device": self._device}) + "\n")
         proceso.stdin.flush()
         linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_INICIO_SEG)
         if linea is None:
             _matar_arbol_proceso(proceso)
+            detalle = self._drenador_stderr.texto(ESPERA_CIERRE_WORKER_SEG)
+            logger.warning(
+                "Worker PaddleOCR sin respuesta en %ss al iniciar; stderr:\n%s",
+                TIMEOUT_INICIO_SEG, detalle,
+            )
             raise ProveedorOCRNoDisponible(
                 f"El worker de PaddleOCR no respondió en {TIMEOUT_INICIO_SEG}s al iniciar "
                 "(el proceso quedó sin completar el arranque -- puede deberse a una "
                 "dependencia nativa bloqueada por una política del sistema operativo, "
                 "un proceso interno colgado, u otra causa; se detuvo el proceso worker "
-                "para no bloquear el lote indefinidamente)."
+                "para no bloquear el lote indefinidamente).",
+                detalle,
             )
         if not linea:
-            error = proceso.stderr.read()
-            proceso.kill()
-            raise ProveedorOCRNoDisponible(f"El worker de PaddleOCR no respondió al iniciar: {error[-2000:]}")
+            raise self._worker_terminado(proceso, "al iniciar")
         respuesta = json.loads(linea)
         if not respuesta.get("ok"):
-            proceso.kill()
+            _matar_arbol_proceso(proceso)
             raise ProveedorOCRNoDisponible(f"El worker de PaddleOCR falló al iniciar: {respuesta}")
         logger.info("PaddleOCRProvider iniciado (device=%s)", respuesta.get("device"))
         self._proceso = proceso
         return proceso
+
+    def _worker_terminado(self, proceso: subprocess.Popen, momento: str) -> ProveedorOCRNoDisponible:
+        """El worker cerró su stdout: recoge código de salida y stderr (ya
+        drenado, nunca bloquea), deja el detalle completo en el log y
+        devuelve un error con un resumen sin traceback ni rutas."""
+        try:
+            codigo = proceso.wait(timeout=ESPERA_CIERRE_WORKER_SEG)
+        except subprocess.TimeoutExpired:
+            _matar_arbol_proceso(proceso)
+            codigo = None
+        drenador = self._drenador_stderr
+        detalle = drenador.texto(ESPERA_CIERRE_WORKER_SEG) if drenador is not None else ""
+        logger.warning("Worker PaddleOCR terminó %s (código %s); stderr:\n%s", momento, codigo, detalle)
+        return ProveedorOCRNoDisponible(
+            f"El worker de PaddleOCR terminó {momento} (código {codigo}): {_resumen_error_worker(detalle)}",
+            detalle,
+        )
 
     def _comando(self, **kwargs: Any) -> Any:
         proceso = self._asegurar_proceso()
@@ -236,8 +325,8 @@ class PaddleOCRProvider:
                 "siguiente documento)."
             )
         if not linea:
-            error = proceso.stderr.read() if proceso.stderr else ""
-            raise ProveedorOCRNoDisponible(f"El worker de PaddleOCR cerró la conexión: {error[-2000:]}")
+            self._proceso = None
+            raise self._worker_terminado(proceso, f"procesando {Path(str(kwargs.get('ruta'))).name}")
         respuesta = json.loads(linea)
         if not respuesta.get("ok"):
             raise RuntimeError(f"Error de PaddleOCR procesando {kwargs.get('ruta')}: {respuesta.get('error')}")

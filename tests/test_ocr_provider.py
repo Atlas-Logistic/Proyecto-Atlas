@@ -102,6 +102,9 @@ class _ProcesoFalso:
     def kill(self):
         pass
 
+    def wait(self, timeout=None):
+        return 1
+
 
 RUTA_PYTHON_FALSA = Path("C:/runtime-falso-para-tests/Scripts/python.exe")
 

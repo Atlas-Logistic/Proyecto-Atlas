@@ -16,10 +16,48 @@ atlas_core/ocr.py, esta copia debe actualizarse a mano — la aislación de
 proceso impide compartir el código directamente.
 """
 import json
+import os
 import sys
+
+# DLL del paquete `paddle` que NO se precargan al importarlo. En Windows,
+# `paddle/__init__.py` carga TODOS los `paddle/libs/*.dll` y aborta la
+# importación ante cualquier error de carga. `warprnnt.dll` implementa la
+# pérdida RNN-T (entrenamiento de voz), ajena a la inferencia OCR, y Smart
+# App Control la bloquea (WinError 4551) -- con ella en la lista Paddle no
+# arranca. Lista explícita y mínima: ninguna DLL de inferencia (phi.dll,
+# mkldnn.dll, common.dll, ...) puede agregarse aquí; el archivo instalado
+# nunca se modifica, sólo se omite de la precarga en este proceso.
+DLL_EXCLUIDAS_PRECARGA_PADDLE = frozenset({"warprnnt.dll"})
+
+
+def _importar_paddle_sin_dlls_excluidas():
+    """Importa `paddle` omitiendo de su precarga las DLL excluidas.
+
+    La precarga enumera los archivos con `glob.glob`; durante la
+    importación (y sólo entonces) ese resultado se filtra por nombre de
+    archivo. Fuera de Windows no hay precarga y se importa sin cambios."""
+    if os.name != "nt":
+        import paddle  # noqa: F401
+        return
+    import glob
+
+    glob_original = glob.glob
+
+    def _glob_sin_excluidas(pathname, *args, **kwargs):
+        return [
+            ruta for ruta in glob_original(pathname, *args, **kwargs)
+            if os.path.basename(ruta).lower() not in DLL_EXCLUIDAS_PRECARGA_PADDLE
+        ]
+
+    glob.glob = _glob_sin_excluidas
+    try:
+        import paddle  # noqa: F401
+    finally:
+        glob.glob = glob_original
 
 
 def _cargar_dependencias():
+    _importar_paddle_sin_dlls_excluidas()
     from paddleocr import PaddleOCR
     from PIL import Image, ImageEnhance, ImageOps
     import numpy as np
