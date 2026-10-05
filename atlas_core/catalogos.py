@@ -144,7 +144,10 @@ def rut_canonico_de_registro_chofer(
 
 
 def corroborar_chofer_por_nombre_y_rut_documental(
-    catalogo: FuenteCatalogo, nombre_chofer: str, rut_documental: str
+    catalogo: FuenteCatalogo,
+    nombre_chofer: str,
+    rut_documental: str,
+    dv_documental_leido: bool = True,
 ) -> tuple[str, str] | None:
     """Corrobora la identidad de un chofer cuando su nombre coincide EXACTO
     con un único chofer ACTIVO del catálogo. Devuelve
@@ -158,6 +161,12 @@ def corroborar_chofer_por_nombre_y_rut_documental(
       interno placeholder NO impide corroborar una entidad activa conocida
       -- corrobora con el RUT DOCUMENTAL si éste es estructuralmente
       válido; si no, ``None``.
+
+    - ``dv_documental_leido=False``: el OCR leyó sólo el cuerpo y el DV lo
+      calculó el extractor, así que su validez estructural no es evidencia.
+      Un cuerpo que difiere del canónico en UN dígito (misma longitud) se
+      trata como ruido OCR y corrobora con el RUT canónico; con dos o más
+      dígitos distintos sigue siendo contradicción -> ``None``.
 
     Nunca desambigua por fuzzy ni acepta un match de nombre no único
     (``buscar_chofer_por_nombre_exacto`` ya devuelve ``None`` ante dos
@@ -176,7 +185,14 @@ def corroborar_chofer_por_nombre_y_rut_documental(
 
     if rut_canonico is not None:
         if rut_doc_valido and normalizar_rut(rut_doc_validado.valor) != normalizar_rut(rut_canonico):
-            return None
+            if dv_documental_leido:
+                return None
+            cuerpo_doc = normalizar_rut(rut_doc_validado.valor)[:-1]
+            cuerpo_canonico = normalizar_rut(rut_canonico)[:-1]
+            if len(cuerpo_doc) != len(cuerpo_canonico) or sum(
+                a != b for a, b in zip(cuerpo_doc, cuerpo_canonico)
+            ) > 1:
+                return None
         return nombre_canonico, rut_canonico
     if rut_doc_valido:
         return nombre_canonico, rut_doc_validado.valor

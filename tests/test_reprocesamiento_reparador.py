@@ -445,3 +445,69 @@ def test_proveedor_explicito_del_llamador_evita_crear_uno_nuevo(tmp_path, monkey
     m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True, proveedor=object())
 
     assert llamadas_creacion == []
+
+
+def _reparar_con(monkeypatch, tmp_path, fila, extraido, ledger=()):
+    raiz = _raiz(tmp_path)
+    _escribir_manifiesto(raiz, lote="LOTE1", archivos=["IMG1.jpg"])
+    _crear_imagen(raiz, "LOTE1", "IMG1.jpg")
+    _escribir_dataset(raiz, [fila])
+    _escribir_ledger(raiz, list(ledger))
+    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: dict(extraido))
+    _stub_reconciliacion(monkeypatch, [])
+    resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=object())
+    return resultado, _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")[0]
+
+
+def test_rut_chofer_viaja_con_el_chofer_reparado(tmp_path, monkeypatch):
+    fila = _fila_base(chofer="No encontrado", rut_chofer="12345678-5", motivos_revision_documento="CHOFER_AUSENTE")
+    _, tras = _reparar_con(monkeypatch, tmp_path, fila, {"chofer": "JUAN PEREZ", "rut_chofer": "15.234.567-4"})
+    assert (tras["chofer"], tras["rut_chofer"]) == ("JUAN PEREZ", "15.234.567-4")
+
+
+def test_rut_chofer_no_cambia_si_el_chofer_no_se_repara(tmp_path, monkeypatch):
+    fila = _fila_base(chofer="JUAN PEREZ", rut_chofer="12345678-5", motivos_revision_documento="")
+    resultado, tras = _reparar_con(monkeypatch, tmp_path, fila, {"chofer": "JUAN PEREZ", "rut_chofer": "15.234.567-4"})
+    assert resultado["campos_cambiados_total"] == 0
+    assert tras["rut_chofer"] == "12345678-5"
+
+
+def test_rut_chofer_con_decision_humana_no_viaja_con_el_chofer(tmp_path, monkeypatch):
+    fila = _fila_base(chofer="No encontrado", rut_chofer="12345678-5", motivos_revision_documento="CHOFER_AUSENTE")
+    ledger = [{"documento": {"archivo": "IMG1.jpg", "numero_guia": "473100"}, "campo": "rut_chofer", "valor": "12345678-5"}]
+    _, tras = _reparar_con(
+        monkeypatch, tmp_path, fila, {"chofer": "JUAN PEREZ", "rut_chofer": "15.234.567-4"}, ledger,
+    )
+    assert (tras["chofer"], tras["rut_chofer"]) == ("JUAN PEREZ", "12345678-5")
+
+
+def test_material_contaminado_se_repara_y_retira_su_motivo(tmp_path, monkeypatch):
+    fila = _fila_base(
+        descripcion_material="FECHA DE EMISION CLIENTE DESCRIPCION ROLLO HORMIGON 10MM",
+        motivos_revision_documento="MATERIAL_POSIBLEMENTE_CONTAMINADO",
+        indicador_revision="REVISAR", estado_documental="REQUIERE_REVISION",
+    )
+    _, tras = _reparar_con(
+        monkeypatch, tmp_path, fila,
+        {"descripcion_material": "ROLLO HORMIGON 10MM", "motivos_revision_documento": ""},
+    )
+    assert tras["descripcion_material"] == "ROLLO HORMIGON 10MM"
+    assert tras["motivos_revision_documento"] == ""
+
+
+def test_material_sigue_contaminado_si_la_reextraccion_lo_marca(tmp_path, monkeypatch):
+    fila = _fila_base(
+        descripcion_material="MEMBRETE ROLLO", motivos_revision_documento="MATERIAL_POSIBLEMENTE_CONTAMINADO",
+    )
+    _, tras = _reparar_con(
+        monkeypatch, tmp_path, fila,
+        {"descripcion_material": "OTRO MEMBRETE ROLLO", "motivos_revision_documento": "MATERIAL_POSIBLEMENTE_CONTAMINADO"},
+    )
+    assert tras["motivos_revision_documento"] == "MATERIAL_POSIBLEMENTE_CONTAMINADO"
+
+
+def test_material_limpio_nunca_se_toca(tmp_path, monkeypatch):
+    fila = _fila_base(descripcion_material="ROLLO HORMIGON 10MM", motivos_revision_documento="")
+    resultado, tras = _reparar_con(monkeypatch, tmp_path, fila, {"descripcion_material": "ROLLO HORMIGON 12MM"})
+    assert resultado["campos_cambiados_total"] == 0
+    assert tras["descripcion_material"] == "ROLLO HORMIGON 10MM"

@@ -731,6 +731,33 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             if _es_fragmento_estampado_no_material(normalizada):
                 continue
             if _tiene_evidencia_material(limpia):
+                # Un OCR de tabla puede fusionar la fila DESCRIPCION con el
+                # membrete que la antecede (caso real 475256). Sólo cuando la
+                # línea completa ya es material contaminado según el mismo
+                # evaluador de publicación, y el texto desde el primer
+                # marcador de producto deja de serlo, se descarta el
+                # prefijo; nunca se trunca después del marcador (una línea
+                # puede traer varios ítems) ni se toca una línea creíble.
+                # Los índices de `normalizada` sólo sirven para cortar
+                # `limpia` si la normalización no cambió la longitud.
+                marcador = _PATRON_TERMINOS_MATERIAL.search(normalizada)
+                if (
+                    marcador is not None
+                    and len(normalizada) == len(limpia)
+                    and "DESCRIPCION" in normalizada[:marcador.start()]
+                    and evaluar_credibilidad_material(limpia).nivel == NivelCredibilidad.INVALIDO
+                ):
+                    # La designación de barra de una letra ("B HORMIGON",
+                    # leída también D/3, ver normalización más abajo) es
+                    # parte del ítem, no del membrete.
+                    prefijo_barra = re.search(r"(?<!\S)[BD3]\s+$", normalizada[:marcador.start()])
+                    inicio = prefijo_barra.start() if prefijo_barra else marcador.start()
+                    candidata = limpia[inicio:]
+                    if (
+                        _tiene_evidencia_material(candidata)
+                        and evaluar_credibilidad_material(candidata).nivel != NivelCredibilidad.INVALIDO
+                    ):
+                        limpia = candidata
                 # La palabra de familia leída con dígitos se escribe con sus
                 # letras; el resto de la línea queda tal como lo leyó el OCR.
                 for token, familia in _tokens_familia_con_digitos(normalizada).items():
@@ -2750,6 +2777,7 @@ def procesar_archivo(
         )
         catalogo_choferes = cargar_catalogo_json(ruta_choferes)
         rut_chofer = str(datos.get("RUT del chofer", "No encontrado")).strip()
+        dv_rut_chofer_leido = not datos.get("RUT del chofer (dv calculado)")
         if buscar_chofer_por_rut(catalogo_choferes, rut_chofer) is not None:
             # Corroborado: el RUT del chofer (independiente del nombre)
             # identifica un único chofer conocido en catálogo.
@@ -2773,7 +2801,7 @@ def procesar_archivo(
                 # estructuralmente válido corrobora la identidad. Nunca
                 # crea un segundo chofer ni desambigua por fuzzy.
                 corroboracion_catalogo = corroborar_chofer_por_nombre_y_rut_documental(
-                    catalogo_choferes, nombre_chofer, rut_chofer
+                    catalogo_choferes, nombre_chofer, rut_chofer, dv_rut_chofer_leido
                 )
                 if corroboracion_catalogo is not None:
                     datos["chofer"], datos["RUT del chofer"] = corroboracion_catalogo
@@ -2793,6 +2821,21 @@ def procesar_archivo(
                 # resto de candidatos (ver UMBRAL/MARGEN en catalogos.py) --
                 # nunca aplica un match ambiguo.
                 chofer_corroborado = True
+                # Una coincidencia fuzzy ya declarada segura converge a un
+                # nombre canónico único. Reutilizamos entonces la misma
+                # corroboración estricta de la coincidencia exacta: un RUT
+                # documental inválido (o con DV calculado y cuerpo a un
+                # dígito del canónico) se sustituye por el RUT canónico; uno
+                # leído válido pero contradictorio NO se sustituye y queda
+                # tal cual. Antes este paso sólo existía para el nombre
+                # exacto y dejaba el campo RUT obsoleto.
+                corroboracion_catalogo = corroborar_chofer_por_nombre_y_rut_documental(
+                    catalogo_choferes, decision_fuzzy.valor_resultado, rut_chofer,
+                    dv_rut_chofer_leido,
+                )
+                if corroboracion_catalogo is not None:
+                    datos["chofer"], datos["RUT del chofer"] = corroboracion_catalogo
+                    metodos_documento.add(MetodoObtencionDocumento.CATALOGO.value)
             logger.info(
                 "fuzzy-matching-catalogo-choferes-v1 estado=%s similitud=%s",
                 decision_fuzzy.estado,

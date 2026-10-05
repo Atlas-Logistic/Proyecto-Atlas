@@ -99,7 +99,16 @@ def _es_ancla_retira(texto_colapsado: str) -> bool:
     464550: "RETIRA" leído "RETRA"). No es una búsqueda de subcadena: exige
     que el bloque EMPIECE por RET(I)RA, igual de estricto que antes, solo
     con esta única variante conocida contemplada."""
-    return bool(_PATRON_ANCLA_RETIRA.match(texto_colapsado))
+    if _PATRON_ANCLA_RETIRA.match(texto_colapsado):
+        return True
+    # En fotografías de etiquetas impresas, un carácter puede quedar
+    # confundido sin perder la geometría de la etiqueta (p. ej. AETIRA). La
+    # tolerancia se limita a UNA sustitución en el bloque completo, nunca a
+    # una búsqueda parcial que pudiera anclar un campo ajeno, y conserva la
+    # terminación: RETIRO/RETIRE son palabras reales distintas, no ruido.
+    if len(texto_colapsado) != len("RETIRA") or not texto_colapsado.endswith("A"):
+        return False
+    return _distancia_edicion_acotada(texto_colapsado, "RETIRA", limite=1) <= 1
 
 
 def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
@@ -1321,6 +1330,26 @@ def _es_ancla_guia_despacho(texto_simple: str) -> bool:
     return longitud_prefijo_comun >= _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO
 
 
+def _es_encabezado_guia_geometrico(items: List[Dict[str, Any]], ancla: Dict[str, Any]) -> bool:
+    """Reconoce el encabezado de una guía aunque OCR pierda ``DESPACHO``.
+
+    No convierte un ``GUIA DE`` aislado en evidencia: exige que
+    ``ELECTRONICA`` esté en la misma columna y a distancia tipográfica
+    inmediata. Es la misma cabecera documental, no una regla por folio.
+    """
+    if _es_ancla_guia_despacho(ancla["simple"]):
+        return True
+    if ancla["simple"] != "GUIA DE":
+        return False
+    return any(
+        item is not ancla
+        and item["simple"] == "ELECTRONICA"
+        and -ancla["h"] <= item["y1"] - ancla["y2"] <= ancla["h"] * 2
+        and abs(item["cx"] - ancla["cx"]) <= max(ancla["x2"] - ancla["x1"], item["x2"] - item["x1"]) * 1.5
+        for item in items
+    )
+
+
 def _es_candidato_numero_guia_valido(numero: str) -> bool:
     """Nunca confunde el candidato con un numero_transporte (siempre 10
     dígitos con 4 ceros iniciales, formato "0000NNNNNN" -- ver
@@ -1355,7 +1384,7 @@ def _extraer_numero_guia_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     if not items:
         return {}
 
-    anclas = [item for item in items if _es_ancla_guia_despacho(item["simple"])]
+    anclas = [item for item in items if _es_encabezado_guia_geometrico(items, item)]
     if not anclas:
         return {}
 
@@ -3116,9 +3145,15 @@ def extraer_datos(
 
         return None, None
 
-    def buscar_rut_chofer() -> tuple[Optional[str], Optional[str]]:
-        """Devuelve (rut_valido, rut_documental_invalido) -- nunca ambos a
-        la vez. Bloque FIX RUT DOCUMENTAL: antes esta función reformateaba
+    def buscar_rut_chofer() -> tuple[Optional[str], Optional[str], bool]:
+        """Devuelve (rut_valido, rut_documental_invalido, dv_calculado) --
+        los dos primeros nunca a la vez. ``dv_calculado`` es True cuando el
+        OCR leyó sólo el cuerpo y el dígito verificador lo calculó Atlas: ese
+        RUT es estructuralmente válido por construcción, no por evidencia
+        documental (casos reales 473546/475256: cuerpo con un dígito mal
+        leído y DV fabricado que luego "contradecía" al catálogo).
+
+        Bloque FIX RUT DOCUMENTAL: antes esta función reformateaba
         lo que el OCR capturó SIN validar dígito verificador ni
         plausibilidad -- un RUT documentalmente inválido (dígito
         verificador correcto pero cuerpo implausible, p. ej. "55.555.555-5"
@@ -3144,20 +3179,21 @@ def extraer_datos(
         # clave de catálogo "10833150K").
         coincidencia = re.search(r"RUT\s*CHOFER\s*:?\s*([0-9.\sKk-]{7,15})", texto_busqueda)
         if coincidencia:
-            valor = limpiar_rut(coincidencia.group(1), agregar_dv="-" not in coincidencia.group(1))
+            dv_calculado = "-" not in coincidencia.group(1)
+            valor = limpiar_rut(coincidencia.group(1), agregar_dv=dv_calculado)
             if valor != "No encontrado":
                 candidato = valor.replace(".", "")
                 if validar_rut_chileno(candidato).estado == EstadoValidacion.VALIDO:
-                    return candidato, None
-                return None, candidato
+                    return candidato, None, dv_calculado
+                return None, candidato, dv_calculado
 
         coincidencia_pdte = re.search(r"PDTE\s+([0-9]{7,8})\s+\d{2}[-/]\d{2}[-/]\d{4}", texto_busqueda)
         if coincidencia_pdte:
             base = coincidencia_pdte.group(1)
             candidato = limpiar_rut(base, agregar_dv=True).replace(".", "")
             if validar_rut_chileno(candidato).estado == EstadoValidacion.VALIDO:
-                return candidato, None
-            return None, candidato
+                return candidato, None, True
+            return None, candidato, True
 
         # Bloque IDENTIDAD I1 -- se retiró un fallback sin comentario ni
         # justificación que asignaba el RUT "18098153-5" (un chofer real,
@@ -3167,7 +3203,7 @@ def extraer_datos(
         # etc. por coincidencia). Sin un patrón contextual que lo respalde,
         # se abstiene.
 
-        return None, None
+        return None, None, False
 
     def buscar_chofer_y_patentes() -> tuple[Optional[str], Optional[str], Optional[str]]:
         posicion = texto_busqueda.find("RETIRA PATENTE FECHA LLEGADA")
@@ -3412,9 +3448,13 @@ def extraer_datos(
     if rut_cliente_documental_invalido:
         datos["RUT del cliente (documento, invalido)"] = rut_cliente_documental_invalido
 
-    rut_chofer, rut_chofer_documental_invalido = buscar_rut_chofer()
+    rut_chofer, rut_chofer_documental_invalido, rut_chofer_dv_calculado = buscar_rut_chofer()
     if rut_chofer:
         datos["RUT del chofer"] = rut_chofer
+        if rut_chofer_dv_calculado:
+            # Evidencia de procedencia, nunca dato operacional: el llamador
+            # no debe tratar este DV como leído del documento.
+            datos["RUT del chofer (dv calculado)"] = True
     if rut_chofer_documental_invalido:
         # Bloque FIX RUT DOCUMENTAL: evidencia conservada, nunca usada
         # como dato operacional -- ver buscar_rut_chofer() y el

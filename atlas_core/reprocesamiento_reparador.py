@@ -135,6 +135,13 @@ CAMPOS_REPARABLES: dict[str, tuple[tuple[str, ...], object]] = {
         ),
         lambda v: v not in _AUSENTES,
     ),
+    # Caso real 475256: la fila de material quedó fusionada con el membrete.
+    # Sólo con el motivo de contaminación ya activo; la reconciliación
+    # vuelve a evaluar la credibilidad y recalcula `tipo_carga`.
+    "descripcion_material": (
+        (MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value,),
+        lambda v: v not in _AUSENTES,
+    ),
     "patente_tracto": (
         (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR.value, MotivoRevisionDocumento.PATENTE_AMBIGUA.value),
         lambda v: v in _AUSENTES or _patente_valida(v),
@@ -187,6 +194,22 @@ def _reparar_campos_documento(
         if not valor_nuevo or valor_nuevo == valor_actual or not es_valido(valor_nuevo):
             continue
         cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), campo, valor_actual, valor_nuevo))
+    # El RUT es parte de la identidad del chofer: si esta misma reextracción
+    # repara el chofer, su RUT viaja con él -- dejar el anterior mezclaría
+    # dos identidades en la fila (caso real 475256: JOSE LAZCANO junto al
+    # RUT de un cuerpo mal leído). Mismo ledger y validador de siempre.
+    campos_cambiados = {c.campo for c in cambios}
+    if "chofer" in campos_cambiados and "rut_chofer" not in campos_cambiados:
+        _, rut_valido = CAMPOS_REPARABLES["rut_chofer"]
+        rut_nuevo = str(extraido.get("rut_chofer", "")).strip()
+        rut_actual = str(fila.get("rut_chofer", "")).strip()
+        if (
+            rut_nuevo
+            and rut_nuevo != rut_actual
+            and rut_valido(rut_nuevo)
+            and not _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo="rut_chofer")
+        ):
+            cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), "rut_chofer", rut_actual, rut_nuevo))
     for campo, es_valido in CAMPOS_SIEMPRE_REEXAMINADOS.items():
         if _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=campo):
             continue  # el ledger siempre gana, también aquí
