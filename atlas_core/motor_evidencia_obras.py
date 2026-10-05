@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Callable, Iterable
 
 from atlas_core.catalogo_obras_destinos import Obra, normalizar_nombre_obra
 from atlas_core.motor_evidencia import (
@@ -389,6 +390,103 @@ def resolver_obra_por_prefijo_documental_confirmado(
         if any(normalizar_nombre_obra(clave).startswith(documental) for clave in claves):
             candidatos.append(obra)
     return candidatos[0] if len(candidatos) == 1 else None
+
+
+# Bloque VARIACIÓN CORROBORADA POR DESTINO (caso real 475353) -- "PRODALAM
+# SA TALCAEUANC" (OCR) vs la obra ya CONFIRMADA del mismo cliente cuyo
+# alias es "PRODALAM SA TALCAHUANO": dos caracteres de diferencia en un
+# único token, fuera del alcance de `coincide_salvo_variacion_ortografica_
+# menor` (== 1). El texto solo no basta para tolerar más; lo que hace
+# segura la relación es la conjunción con el destino CONFIRMADO de esa
+# obra apareciendo en el MISMO documento -- igual que ya exige el camino
+# por prefijo. Más estrecho en longitud (>= 8) para compensar la
+# tolerancia extra; nunca fuzzy global.
+_LONGITUD_MINIMA_VARIACION_CORROBORADA = 8
+_DISTANCIA_MAXIMA_VARIACION_CORROBORADA = 2
+_DESTINOS_AUSENTES = frozenset({"", "NO ENCONTRADO", "REVISAR", "ILEGIBLE"})
+
+
+def _token_unico_distinto(nombre_a: str, nombre_b: str) -> tuple[str, str] | None:
+    """El único par de tokens distinto entre dos nombres de igual número
+    de tokens, o `None` si difieren en cero, dos o más tokens."""
+    tokens_a = tuple(normalizar_nombre_obra(nombre_a).split())
+    tokens_b = tuple(normalizar_nombre_obra(nombre_b).split())
+    if not tokens_a or len(tokens_a) != len(tokens_b):
+        return None
+    diferencias = [(x, y) for x, y in zip(tokens_a, tokens_b) if x != y]
+    return diferencias[0] if len(diferencias) == 1 else None
+
+
+def _coincide_por_variacion_corroborable(nombre_documental: str, clave: str) -> tuple[str, str] | None:
+    par = _token_unico_distinto(nombre_documental, clave)
+    if par is None:
+        return None
+    token_documental, token_clave = par
+    if min(len(token_documental), len(token_clave)) < _LONGITUD_MINIMA_VARIACION_CORROBORADA:
+        return None
+    if _distancia_edicion(token_documental, token_clave) > _DISTANCIA_MAXIMA_VARIACION_CORROBORADA:
+        return None
+    return par
+
+
+def _token_es_otra_comuna_real(token_documental: str, token_candidato: str) -> bool:
+    """True si el token documental es, tal cual, el nombre EXACTO de una
+    comuna chilena distinta de la que nombra el token del candidato
+    ("TALCA" vs "TALCAHUANO"): ahí la diferencia no es ruido OCR sino
+    otro lugar real, y la variación no puede absorberla."""
+    from atlas_core.territorio_chile import ESTADO_COMUNA_EXACTA, normalizar_comuna
+
+    documental = normalizar_comuna(token_documental)
+    if documental.estado != ESTADO_COMUNA_EXACTA:
+        return False
+    return documental.comuna != normalizar_comuna(token_candidato).comuna
+
+
+def resolver_obra_por_variacion_ortografica_corroborada_por_destino(
+    *, nombre_documental: str, direccion_documental: str,
+    obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
+    destinos_confirmados_de_obra: Callable[[Obra], Iterable[object]],
+) -> Obra | None:
+    """Resuelve una variación OCR de hasta dos caracteres en un único token
+    sólo si el destino CONFIRMADO de la obra candidata coincide con la
+    dirección de este mismo documento.
+
+    Condiciones (todas): obras CONFIRMADAS/ACTIVAS del cliente ya resuelto
+    (responsabilidad del llamador); mismo número de tokens y exactamente
+    uno distinto, contra canónico o alias; ese token con distancia <= 2 y
+    largo >= 8; exactamente UN candidato textual (si hay dos, se abstiene
+    aunque sólo uno tenga destino a favor); y un destino confirmado de esa
+    obra coincide (`direccion_confirmada_coincide`) con la dirección
+    documental. Se abstiene además si la dirección falta, es placeholder o
+    está degradada, o si el token documental es otra comuna real."""
+    from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
+    from atlas_core.rutas.destino_entrega import texto_destino_degradado
+
+    documental = str(nombre_documental or "").strip()
+    direccion = str(direccion_documental or "").strip()
+    if not documental or direccion.upper() in _DESTINOS_AUSENTES or texto_destino_degradado(direccion):
+        return None
+    texto_direccion = normalizar_nombre_destino(direccion)
+    if not texto_direccion:
+        return None
+
+    candidatos: list[tuple[Obra, tuple[str, str]]] = []
+    for obra in obras_confirmadas_mismo_cliente:
+        for clave in (obra.nombre_canonico, *obra.aliases_documentales):
+            par = _coincide_por_variacion_corroborable(documental, clave)
+            if par is not None:
+                candidatos.append((obra, par))
+                break
+    if len(candidatos) != 1:
+        return None
+    obra, (token_documental, token_candidato) = candidatos[0]
+    if _token_es_otra_comuna_real(token_documental, token_candidato):
+        return None
+    for destino in destinos_confirmados_de_obra(obra):
+        calle = normalizar_nombre_destino(str(getattr(destino, "direccion", "") or "").split(",", 1)[0])
+        if calle and direccion_confirmada_coincide(calle, texto_direccion):
+            return obra
+    return None
 
 
 # Bloque RUIDO OCR INICIAL (caso real 472516) -- un artefacto de OCR real

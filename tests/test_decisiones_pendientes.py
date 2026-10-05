@@ -339,6 +339,45 @@ def test_variacion_ortografica_menor_no_pide_confirmar_destino_de_nuevo(tmp_path
     assert not any(x["tipo"] in {"OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR"} for x in ds)
 
 
+def _obra_con_destino_confirmado(carpeta, cliente, *, nombre_obra, direccion):
+    catalogo_destinos = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
+    destino = catalogo_destinos.crear(
+        cliente_id=cliente.cliente_id, nombre_destino=direccion, direccion=direccion, pais="CHILE",
+        fuente="TEST", estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+    )
+    obras = CatalogoObrasDestinos(carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json", ruta_destinos=carpeta / "destinos_maestros.json")
+    resultado = obras.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra=nombre_obra, destino_id=destino.destino_id, evidencia=_evidencia(),
+    )
+    relacion = next(r for r in obras.listar_relaciones() if r.obra_id == resultado.obra.obra_id)
+    obras.confirmar_relacion(relacion.relacion_id, actor="test")
+
+
+def test_variacion_de_dos_caracteres_corroborada_por_destino_no_genera_obra_desconocida(tmp_path):
+    """Caso real 475353: "TALCAEUANC" está a dos caracteres de la obra
+    confirmada; el destino confirmado de esa obra aparece en el mismo
+    documento, así que Atlas no pregunta ni por la obra ni por el destino."""
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="EMPRESA X SA")
+    _obra_con_destino_confirmado(carpeta, cliente, nombre_obra="EMPRESA X SA TALCAHUANO", direccion="AMERICO VESPUCIO 73O")
+    ds = detectar_decisiones_documento(
+        archivo="475353.png", datos=_datos_cliente(nombre="EMPRESA X SA", obra="EMPRESA X SA TALCAEUANC"),
+        carpeta_catalogos=carpeta, despachar_a_documental="AMERICO VESPUCIO 730 TALCAHUANO TALCAHUANO",
+    )
+    assert not any(x["tipo"] in {"OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR"} for x in ds)
+
+
+def test_variacion_de_dos_caracteres_con_otro_destino_sigue_preguntando(tmp_path):
+    carpeta = _catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="EMPRESA X SA")
+    _obra_con_destino_confirmado(carpeta, cliente, nombre_obra="EMPRESA X SA TALCAHUANO", direccion="AMERICO VESPUCIO 73O")
+    ds = detectar_decisiones_documento(
+        archivo="1.png", datos=_datos_cliente(nombre="EMPRESA X SA", obra="EMPRESA X SA TALCAEUANC"),
+        carpeta_catalogos=carpeta, despachar_a_documental="COLON 1200 TALCAHUANO",
+    )
+    assert any(x["tipo"] == "OBRA_DESCONOCIDA" for x in ds)
+
+
 def test_patente_desconocida_conserva_solo_registrar_no_registrar(tmp_path):
     ds=detectar_decisiones_documento(archivo="g.png",datos={"número de guía":"1","patente del tracto":"AB1234"},carpeta_catalogos=_catalogos(tmp_path))
     d=next(x for x in ds if x["tipo"]=="VEHICULO_DESCONOCIDO")

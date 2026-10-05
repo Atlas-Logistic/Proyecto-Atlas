@@ -98,14 +98,19 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         motivos_documentales=frozenset({"PATENTE_SIN_HOMOLOGAR", "PATENTE_AMBIGUA"}),
     ),
     DOMINIO_OBRA: Capacidad(
-        dominio=DOMINIO_OBRA, version=3,
+        dominio=DOMINIO_OBRA, version=4,
         descripcion=(
             "Extracción/catálogo/relaciones de obra destino y convergencia. "
             "v3: REVISIONES ESTANCADAS (473309) -- OBRA_DESCONOCIDA también se "
             "suprime cuando el texto documental es una lectura OCR levemente "
             "degradada del propio CLIENTE ya resuelto por RUT (distancia de "
             "edición <=2 sobre el nombre completo, nunca fuzzy general -- ver "
-            "coincide_con_cliente_por_variacion_ortografica_menor)."
+            "coincide_con_cliente_por_variacion_ortografica_menor). "
+            "v4: VARIACIÓN CORROBORADA POR DESTINO (475353) -- hasta dos "
+            "caracteres en un único token (>= 8) contra una obra confirmada "
+            "del mismo cliente, sólo si su destino confirmado aparece en el "
+            "mismo documento y no hay otro candidato textual (ver "
+            "resolver_obra_por_variacion_ortografica_corroborada_por_destino)."
         ),
         tipos_decision=frozenset({"OBRA_DESCONOCIDA"}),
         motivos_documentales=frozenset({"OBRA_DESTINO_SIN_CORROBORAR", "OBRA_DESTINO_POSIBLEMENTE_INVALIDA"}),

@@ -5,6 +5,8 @@ commit `fb8ba95`. Usa la evidencia externa REAL capturada del caso SIGRO
 (`tests/fixtures_verificacion_externa.py`)."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from atlas_core.catalogo_obras_destinos import Obra
 from atlas_core.motor_evidencia import RESULTADO_ALTA_NUEVA, RESULTADO_CONTRADICCION_DOCUMENTAL, RESULTADO_SUGERENCIA_HUMANA
 from atlas_core.motor_evidencia_obras import (
@@ -12,6 +14,7 @@ from atlas_core.motor_evidencia_obras import (
     coincide_salvo_variacion_ortografica_menor,
     evaluar_evidencia_obra,
     resolver_obra_por_prefijo_documental_confirmado,
+    resolver_obra_por_variacion_ortografica_corroborada_por_destino,
     resolver_obra_por_variacion_ortografica_menor,
 )
 from tests.fixtures_verificacion_externa import EVIDENCIA_SIGRO_CORPORATIVA, EVIDENCIA_SIGRO_DIRECTORIO
@@ -277,3 +280,77 @@ def test_prefijo_documental_ambiguo_o_demasiado_corto_se_abstiene():
     assert resolver_obra_por_prefijo_documental_confirmado(
         nombre_documental="BRA", obras_confirmadas_mismo_cliente=(obra_a,),
     ) is None
+
+
+# ============================================================
+# Variación OCR corroborada por destino confirmado (caso real 475353)
+# ============================================================
+
+
+def _obra_sucursal(nombre_canonico, *, aliases=(), obra_id="obra-sucursal") -> Obra:
+    return Obra(
+        obra_id=obra_id, cliente_id="cliente-x", nombre_canonico=nombre_canonico,
+        nombre_normalizado=nombre_canonico, aliases_documentales=tuple(aliases), estado="CONFIRMADA",
+        estado_vigencia="ACTIVO", evidencias=(),
+        fecha_creacion="2026-01-01T00:00:00+00:00", fecha_modificacion="2026-01-01T00:00:00+00:00",
+    )
+
+
+def _destinos(*direcciones):
+    return lambda obra: [SimpleNamespace(direccion=d) for d in direcciones]
+
+
+def _corroborada(nombre, obras, *, direccion="AMERICO VESPUCIO 730 TALCAHUANO TALCAHUANO", destinos=None):
+    return resolver_obra_por_variacion_ortografica_corroborada_por_destino(
+        nombre_documental=nombre, direccion_documental=direccion, obras_confirmadas_mismo_cliente=tuple(obras),
+        destinos_confirmados_de_obra=destinos or _destinos("AMERICO VESPUCIO 73O"),
+    )
+
+
+def test_corroborada_475353_resuelve_por_alias_y_destino_confirmado():
+    obra = _obra_sucursal("EMPRESA X TALCANUANO", aliases=("EMPRESA X TALCAHUANO",))
+    assert _corroborada("EMPRESA X TALCAEUANC", [obra]) is obra
+
+
+def test_corroborada_sin_destino_que_coincida_se_abstiene():
+    obra = _obra_sucursal("EMPRESA X TALCANUANO", aliases=("EMPRESA X TALCAHUANO",))
+    assert _corroborada("EMPRESA X TALCAEUANC", [obra], destinos=_destinos("COLON 1200")) is None
+    assert _corroborada("EMPRESA X TALCAEUANC", [obra], destinos=_destinos()) is None
+
+
+def test_corroborada_dos_candidatos_textuales_se_abstiene_aunque_uno_solo_tenga_destino():
+    a = _obra_sucursal("EMPRESA X TALCAHUANO", obra_id="a")
+    b = _obra_sucursal("EMPRESA X TALCAHUENO", obra_id="b")
+    destinos = lambda obra: [SimpleNamespace(direccion="AMERICO VESPUCIO 730")] if obra is a else []
+    assert _corroborada("EMPRESA X TALCAEUANO", [a, b], destinos=destinos) is None
+
+
+def test_corroborada_token_que_es_otra_comuna_real_se_abstiene():
+    """COLCHANE y COCHRANE son comunas reales distintas a distancia 2: la
+    diferencia es otro lugar, no ruido OCR, aunque el destino calce."""
+    obra = _obra_sucursal("EMPRESA X COCHRANE")
+    assert _corroborada("EMPRESA X COLCHANE", [obra]) is None
+    obra = _obra_sucursal("EMPRESA X PURRANQUE")
+    assert _corroborada("EMPRESA X PUMANQUE", [obra]) is None
+
+
+def test_corroborada_tres_caracteres_se_abstiene():
+    obra = _obra_sucursal("EMPRESA X TALCAHUANO")
+    assert _corroborada("EMPRESA X TALCEEUANC", [obra]) is None
+
+
+def test_corroborada_dos_tokens_distintos_o_distinto_numero_de_tokens_se_abstiene():
+    obra = _obra_sucursal("EMPRESA X TALCAHUANO")
+    assert _corroborada("EMPRESA Y TALCAEUANO", [obra]) is None
+    assert _corroborada("EMPRESA X TALCAEUANO NORTE", [obra]) is None
+
+
+def test_corroborada_token_menor_a_ocho_caracteres_se_abstiene():
+    obra = _obra_sucursal("EMPRESA X CORONEL")
+    assert _corroborada("EMPRESA X CORUNAL", [obra], destinos=_destinos("CALLE D 27")) is None
+
+
+def test_corroborada_direccion_ausente_placeholder_o_degradada_se_abstiene():
+    obra = _obra_sucursal("EMPRESA X TALCAHUANO")
+    for direccion in ("", "No encontrado", "REVISAR", "AMERICO VESPUCIO 730 TALCAHUANO TALCAH"):
+        assert _corroborada("EMPRESA X TALCAEUANC", [obra], direccion=direccion) is None

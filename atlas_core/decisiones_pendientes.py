@@ -67,7 +67,7 @@ from atlas_core.motor_evidencia_clientes import evaluar_evidencia_cliente
 from atlas_core.motor_evidencia_obras import (
     _PATRON_RUIDO_NUMERICO_INICIAL, coincide_con_cliente_por_variacion_ortografica_menor, evaluar_evidencia_obra,
     resolver_obra_por_prefijo_documental_confirmado, resolver_obra_por_ruido_ocr_inicial,
-    resolver_obra_por_variacion_ortografica_menor,
+    resolver_obra_por_variacion_ortografica_corroborada_por_destino, resolver_obra_por_variacion_ortografica_menor,
 )
 from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 from atlas_core.rutas.modelos import Coordenadas
@@ -2076,6 +2076,19 @@ def _decisiones_obra_para_cliente(
                         for destino in destinos
                     ):
                         obras = [obra_por_prefijo]
+            # Caso real 475353: hasta dos caracteres de diferencia en un
+            # único token, sólo si el destino confirmado de esa obra
+            # aparece en este mismo documento.
+            if not obras:
+                obra_corroborada = resolver_obra_por_variacion_ortografica_corroborada_por_destino(
+                    nombre_documental=obra_texto, direccion_documental=str(despachar_a_documental or ""),
+                    obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+                    destinos_confirmados_de_obra=lambda obra: catalogo_obras.listar_destinos_confirmados_para_obra(
+                        nombre_obra=obra.nombre_canonico
+                    ),
+                )
+                if obra_corroborada is not None:
+                    obras = [obra_corroborada]
         if not obras and clave in claves_cliente:
             pass
         elif not obras:

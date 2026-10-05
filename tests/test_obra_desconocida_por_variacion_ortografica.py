@@ -218,3 +218,64 @@ def test_prefijo_ocr_con_destino_humano_confirmado_retira_sin_aprender_alias(tmp
     assert json.loads(ruta_decisiones.read_text(encoding="utf-8"))["decisiones"] == []
     obra = next(o for o in catalogo.listar_obras() if o.obra_id == "obra-bravo")
     assert "EMPRESA CONSTRUCTORA BRA" not in obra.aliases_documentales
+
+
+# --- Caso real 475353: variación de dos caracteres corroborada por destino ---
+
+def _relacionar_destino_confirmado(carpeta, *, obra_id, direccion, comuna):
+    destinos = json.loads((carpeta / "destinos_maestros.json").read_text(encoding="utf-8"))
+    destinos["destinos"].append({
+        "destino_id": f"destino-{obra_id}", "cliente_id": "", "nombre_destino": direccion,
+        "nombre_normalizado": direccion, "codigo_destino": "", "direccion": direccion,
+        "comuna": comuna, "region": "", "pais": "CHILE", "latitud": None, "longitud": None,
+        "aliases": [], "estado_calidad": "CONFIRMADO", "estado_vigencia": "ACTIVO", "fuente": "TEST",
+        "observacion": "", "fecha_creacion": "2026-01-01T00:00:00+00:00", "fecha_modificacion": "2026-01-01T00:00:00+00:00",
+    })
+    (carpeta / "destinos_maestros.json").write_text(json.dumps(destinos), encoding="utf-8")
+    obras = json.loads((carpeta / "obras_destinos.json").read_text(encoding="utf-8"))
+    obras["relaciones"].append({
+        "relacion_id": f"rel-{obra_id}", "obra_id": obra_id, "destino_id": f"destino-{obra_id}", "estado": "CONFIRMADA",
+        "evidencias": [{"tipo": "CONFIRMACION_HUMANA", "identificador_fuente": "test", "referencia_hash": "", "campos_observados": {"decision": "CONFIRMADA"}, "fecha": "2026-01-01T00:00:00+00:00", "actor_proceso": "test", "resultado": "SOPORTA"}],
+        "fuente_confirmacion": "CONFIRMACION_HUMANA", "confirmado_por": "test", "fecha_confirmacion": "2026-01-01T00:00:00+00:00", "observaciones": "", "fecha_creacion": "2026-01-01T00:00:00+00:00", "fecha_modificacion": "2026-01-01T00:00:00+00:00",
+    })
+    (carpeta / "obras_destinos.json").write_text(json.dumps(obras), encoding="utf-8")
+
+
+def test_variacion_corroborada_por_destino_retira_la_decision_y_aprende_alias(tmp_path):
+    carpeta = _carpeta_catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="EMPRESA X SA")
+    catalogo = _escribir_obra_confirmada(
+        carpeta, cliente_id=cliente.cliente_id, nombre_canonico="EMPRESA X SA TALCAHUANO", obra_id="obra-talcahuano",
+    )
+    _relacionar_destino_confirmado(carpeta, obra_id="obra-talcahuano", direccion="AMERICO VESPUCIO 73O", comuna="TALCAHUANO")
+    ruta_decisiones = _escribir_decisiones(tmp_path, [_decision_obra_desconocida(
+        decision_id="dec-475353", numero_guia="475353", valor_documental="EMPRESA X SA TALCAEUANC",
+        cliente_id=cliente.cliente_id, destino_documental="AMERICO VESPUCIO 730 TALCAHUANO TALCAHUANO",
+    )])
+    resultado = revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
+        ruta_decisiones=ruta_decisiones, carpeta_catalogos=carpeta, ruta_dataset=_dataset_vacio(tmp_path),
+    )
+    assert [d["obra_canonica"] for d in resultado["decisiones_resueltas"]] == ["EMPRESA X SA TALCAHUANO"]
+    assert json.loads(ruta_decisiones.read_text(encoding="utf-8"))["decisiones"] == []
+    obra = next(o for o in catalogo.listar_obras() if o.obra_id == "obra-talcahuano")
+    assert "EMPRESA X SA TALCAEUANC" in obra.aliases_documentales
+    assert obra.nombre_canonico == "EMPRESA X SA TALCAHUANO"
+    assert obra.evidencias[-1].actor_proceso == "RESOLUCION_AUTOMATICA_VARIACION_CORROBORADA_DESTINO"
+
+
+def test_variacion_de_dos_caracteres_sin_destino_corroborante_no_se_retira(tmp_path):
+    carpeta = _carpeta_catalogos(tmp_path)
+    cliente = _cliente_confirmado(carpeta, nombre="EMPRESA X SA")
+    _escribir_obra_confirmada(
+        carpeta, cliente_id=cliente.cliente_id, nombre_canonico="EMPRESA X SA TALCAHUANO", obra_id="obra-talcahuano",
+    )
+    _relacionar_destino_confirmado(carpeta, obra_id="obra-talcahuano", direccion="COLON 1200", comuna="TALCAHUANO")
+    ruta_decisiones = _escribir_decisiones(tmp_path, [_decision_obra_desconocida(
+        decision_id="dec-sin-destino", numero_guia="1", valor_documental="EMPRESA X SA TALCAEUANC",
+        cliente_id=cliente.cliente_id, destino_documental="AMERICO VESPUCIO 730 TALCAHUANO",
+    )])
+    resultado = revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
+        ruta_decisiones=ruta_decisiones, carpeta_catalogos=carpeta, ruta_dataset=_dataset_vacio(tmp_path),
+    )
+    assert resultado["decisiones_resueltas"] == []
+    assert len(json.loads(ruta_decisiones.read_text(encoding="utf-8"))["decisiones"]) == 1

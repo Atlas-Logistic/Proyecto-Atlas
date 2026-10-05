@@ -2935,6 +2935,7 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
     from atlas_core.decisiones_pendientes import NOMBRE_LOCK_DECISIONES_PENDIENTES, _generar_artefacto_sin_lock
     from atlas_core.motor_evidencia_obras import (
         resolver_obra_por_prefijo_documental_confirmado,
+        resolver_obra_por_variacion_ortografica_corroborada_por_destino,
         resolver_obra_por_variacion_ortografica_menor,
     )
 
@@ -2987,6 +2988,18 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
             ):
                 obra = candidata
                 por_prefijo = True
+        por_destino = False
+        if obra is None:
+            # Caso real 475353: variación de hasta dos caracteres
+            # corroborada por el destino confirmado de la obra.
+            obra = resolver_obra_por_variacion_ortografica_corroborada_por_destino(
+                nombre_documental=documental, direccion_documental=str(contexto.get("destino_documental", "")),
+                obras_confirmadas_mismo_cliente=obras_confirmadas_mismo_cliente,
+                destinos_confirmados_de_obra=lambda o: catalogo_obras.listar_destinos_confirmados_para_obra(
+                    nombre_obra=o.nombre_canonico
+                ),
+            )
+            por_destino = obra is not None
         if obra is None:
             decisiones_restantes.append(decision)
             continue
@@ -3001,8 +3014,9 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
             },
             fecha=datetime.now(timezone.utc).isoformat(),
             actor_proceso=(
-                "RESOLUCION_AUTOMATICA_PREFIJO_DESTINO_CONFIRMADO"
-                if por_prefijo else "RESOLUCION_AUTOMATICA_VARIACION_ORTOGRAFICA_MENOR"
+                "RESOLUCION_AUTOMATICA_PREFIJO_DESTINO_CONFIRMADO" if por_prefijo
+                else "RESOLUCION_AUTOMATICA_VARIACION_CORROBORADA_DESTINO" if por_destino
+                else "RESOLUCION_AUTOMATICA_VARIACION_ORTOGRAFICA_MENOR"
             ),
             resultado=ResultadoEvidencia.SOPORTA.value,
         )

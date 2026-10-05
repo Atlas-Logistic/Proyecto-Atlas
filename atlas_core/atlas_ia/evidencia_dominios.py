@@ -269,6 +269,7 @@ def evidencia_obra_interna(
         from atlas_core.decisiones_pendientes import _identidad_cliente_por_rut
         from atlas_core.motor_evidencia_obras import (
             resolver_obra_por_prefijo_documental_confirmado,
+            resolver_obra_por_variacion_ortografica_corroborada_por_destino,
             resolver_obra_por_variacion_ortografica_menor,
         )
 
@@ -307,6 +308,16 @@ def evidencia_obra_interna(
         )
         or resolver_obra_por_prefijo_documental_confirmado(
             nombre_documental=nombre, obras_confirmadas_mismo_cliente=universo,
+        )
+        or (
+            resolver_obra_por_variacion_ortografica_corroborada_por_destino(
+                nombre_documental=nombre, direccion_documental=str(despachar_a_documental or ""),
+                obras_confirmadas_mismo_cliente=del_cliente,
+                destinos_confirmados_de_obra=lambda o: catalogo.listar_destinos_confirmados_para_obra(
+                    nombre_obra=o.nombre_canonico
+                ),
+            )
+            if cliente is not None else None
         )
     )
     if obra is None:
