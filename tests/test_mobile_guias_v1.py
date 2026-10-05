@@ -13,8 +13,13 @@ import threading
 import time
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
+from atlas_core.catalogo_vehiculos import (
+    TipoVehiculo, asociar_chofer_a_vehiculo_confirmado, confirmar_vehiculo,
+)
+from atlas_core.decisiones_pendientes import crear_decision
 from atlas_core.mobile import AutenticadorMobile, RepositorioEnviosMobile, hash_password, procesar_envio_mobile
 from atlas_core.procesamiento_masivo import COLUMNAS
 from servidor_mobile import crear_servidor
@@ -178,6 +183,102 @@ def test_mobile_regenera_decision_humana_desde_motivo_bloqueante(tmp_path: Path)
         viajes, _ = agrupar_viajes(list(csv.DictReader(archivo, delimiter=";")))
     assert viajes[0].estado == EstadoViaje.REQUIERE_REVISION
     assert viajes[0].estado != EstadoViaje.INCOMPLETO_TECNICO
+
+
+def _catalogos_para_patente_mobile(carpeta: Path) -> None:
+    carpeta.mkdir()
+    for nombre, contenido in {
+        "clientes.json": {"version_formato": 1, "clientes": []},
+        "empresas.json": {},
+        "vehiculos.json": {"version": 1, "vehiculos": []},
+        "obras_destinos.json": {"version_formato": 1, "obras": [], "relaciones": []},
+        "destinos_maestros.json": {"version_formato": 1, "destinos": []},
+        "plantas.json": {"version_formato": 1, "plantas": []},
+    }.items():
+        (carpeta / nombre).write_text(json.dumps(contenido), encoding="utf-8")
+
+
+def _asignar_tracto(catalogos: Path, patente: str, rut: str) -> None:
+    fecha = datetime(2026, 10, 5, tzinfo=timezone.utc)
+    ruta = catalogos / "vehiculos.json"
+    confirmar_vehiculo(
+        ruta, patente=patente, tipo=TipoVehiculo.TRACTO.value,
+        actor="TEST", fuente_decision="TEST", fecha=fecha,
+    )
+    asociar_chofer_a_vehiculo_confirmado(
+        ruta, patente=patente, actor="TEST", fuente_decision="TEST",
+        fecha=fecha, rut_chofer_asociado=rut,
+    )
+
+
+def _procesador_con_tarjeta_patente(monkeypatch, *, guia: str, transporte: str, patente_ocr: str, rut: str) -> None:
+    import atlas_core.mobile as mobile
+
+    def procesar(_imagen, **kwargs):
+        kwargs["recolector_decisiones"]([
+            crear_decision(
+                tipo="VEHICULO_DESCONOCIDO", entidad="VEHICULO", archivo="original.jpg",
+                numero_guia=guia, numero_transporte=transporte, campo="patente_tracto",
+                valor_documental=patente_ocr, valor_normalizado=patente_ocr,
+                identidad_resuelta=None, candidatos=(),
+                motivos=("SIN_VEHICULO_CONFIRMADO_COMPATIBLE",),
+                evidencias=({"tipo": "OCR_DOCUMENTAL", "campo": "patente_tracto", "valor": patente_ocr},),
+                acciones_permitidas=("REGISTRAR", "NO_REGISTRAR", "POSPONER"),
+                tipo_resolucion="INEQUIVOCO", tipo_vehiculo_propuesto="TRACTO",
+            )
+        ])
+        return {
+            "numero_guia": guia, "numero_transporte": transporte, "chofer": "SALOMON PIZARRO",
+            "rut_chofer": rut, "patente_tracto": patente_ocr, "patente_rampla": "JF9575",
+            "indicador_revision": "REVISAR", "estado_procesamiento": "OK",
+        }
+
+    monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda: object())
+    monkeypatch.setattr(mobile, "procesar_archivo", procesar)
+
+
+def test_mobile_auto_resuelve_patente_ocr_con_asignacion_humana_unica(tmp_path: Path, monkeypatch) -> None:
+    """Regresión 475252: Mobile debe ejecutar la misma pasada final que Desktop."""
+    rut = "18.091.588-5"
+    repo, envio_id = _recibir(tmp_path / "operacion/mobile/envios")
+    dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
+    _dataset_vacio(dataset)
+    catalogos = tmp_path / "catalogos_privados"
+    _catalogos_para_patente_mobile(catalogos)
+    _asignar_tracto(catalogos, "TG8925", rut)
+    _procesador_con_tarjeta_patente(
+        monkeypatch, guia="475252", transporte="0000362011", patente_ocr="1G8925", rut=rut,
+    )
+
+    procesar_envio_mobile(repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos)
+
+    pendientes = json.loads((dataset.parent / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    assert not any(d["tipo"] == "VEHICULO_DESCONOCIDO" for d in pendientes["decisiones"])
+    ledger = json.loads((dataset.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    aplicada = next(a for a in ledger["aplicaciones"] if a["documento"]["numero_guia"] == "475252")
+    assert aplicada["accion"] == "USAR_PATENTE_EXISTENTE"
+    assert aplicada["patente_canonica"] == "TG8925"
+
+
+def test_mobile_mantiene_revision_si_asignacion_del_chofer_es_ambigua(tmp_path: Path, monkeypatch) -> None:
+    rut = "18.091.588-5"
+    repo, envio_id = _recibir(tmp_path / "operacion/mobile/envios")
+    dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
+    _dataset_vacio(dataset)
+    catalogos = tmp_path / "catalogos_privados"
+    _catalogos_para_patente_mobile(catalogos)
+    _asignar_tracto(catalogos, "TG8925", rut)
+    _asignar_tracto(catalogos, "AB1234", rut)
+    _procesador_con_tarjeta_patente(
+        monkeypatch, guia="475253", transporte="0000362012", patente_ocr="1G8925", rut=rut,
+    )
+
+    procesar_envio_mobile(repo, envio_id, dataset=dataset, carpeta_catalogos=catalogos)
+
+    pendientes = json.loads((dataset.parent / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    tarjeta = next(d for d in pendientes["decisiones"] if d["tipo"] == "VEHICULO_DESCONOCIDO")
+    assert {c["patente"] for c in tarjeta["candidatos"]} == {"TG8925", "AB1234"}
+    assert tarjeta["evaluacion_evidencia"]["resultado"] != "RESUELTO_AUTOMATICAMENTE"
 
 
 def test_dataset_de_esquema_reducido_nunca_recibe_una_escritura_con_esquema_completo(tmp_path: Path) -> None:

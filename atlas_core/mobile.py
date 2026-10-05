@@ -1011,6 +1011,16 @@ def _procesar_envio_mobile_impl(
                     ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
                     decisiones=decisiones_reconciliadas, ruta_salida=ruta_artefacto,
                 )
+            # El lote Desktop no termina al publicar una tarjeta: pasa la
+            # bandeja por el motor de evidencia, que enriquece vehículos
+            # con la asignación humana chofer->vehículo y aplica sólo los
+            # casos realmente inequívocos. Mobile publicaba la misma
+            # tarjeta, pero omitía esa pasada final; por eso una lectura
+            # distinta con asignación fuerte quedaba pendiente aunque el
+            # Motor ya podía resolverla. Se invoca fuera del lock de la
+            # bandeja (el reconciliador adquiere ese lock por sí mismo).
+            from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
+            reconciliar_bandeja_decisiones(raiz_atlas=Path(dataset).parent.parent.parent)
 
         estado_final = _estado_final_mobile(datos, asociacion, captura_ilegible)
 
