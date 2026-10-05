@@ -1495,11 +1495,17 @@ def test_mobile_normal_append_vs_reemplazo_completo_concurrente_ninguna_fila_des
     )
 
     # Mobile intenta MIENTRAS la revalidación real todavía tiene el lock
-    # del dataset tomado -- el append se entera con un error explícito
-    # (nunca escribe a ciegas ni pierde el chequeo de duplicado).
-    resultado_mobile = mobile.procesar_envio_mobile(repo, envio_id, dataset=dataset)
-    assert resultado_mobile["estado"] == "ERROR"
-    assert "SesionOcupadaError" in resultado_mobile["error"]
+    # del dataset tomado -- el append se entera con un bloqueo explícito
+    # (nunca escribe a ciegas ni pierde el chequeo de duplicado). Caso
+    # real c4211f4c: la contención es concurrencia normal, así que el envío
+    # vuelve a RECIBIDO (reintentable) en vez de quedar en ERROR permanente.
+    from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+    with pytest.raises(SesionOcupadaError):
+        mobile.procesar_envio_mobile(repo, envio_id, dataset=dataset)
+    resultado_mobile = repo.cargar(envio_id)
+    assert resultado_mobile["estado"] == "RECIBIDO"
+    assert "SesionOcupadaError" in resultado_mobile["reintento_por_bloqueo"]["ultimo_error"]
     assert resultado_mobile.get("archivo_dataset", "") == ""
 
     puede_continuar.set()

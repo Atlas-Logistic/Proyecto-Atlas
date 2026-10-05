@@ -251,6 +251,8 @@ def procesar_envios_recibidos(
             salida = _procesar_envio_cloud(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
             if salida.get("completado"):
                 resultado["procesados"].append(envio_id)
+            elif salida.get("bloqueado"):
+                resultado["omitidos_por_bloqueo"].append(envio_id)
             elif salida.get("error"):
                 resultado["errores_procesamiento"][envio_id] = str(salida["error"])
         except SesionOcupadaError:

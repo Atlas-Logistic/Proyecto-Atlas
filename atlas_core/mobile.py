@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import hashlib
 import hmac
@@ -822,6 +823,10 @@ def _procesar_envio_mobile_impl(
             registro.setdefault("evidencia_firmada", {"estado": ESTADO_PENDIENTE_ASOCIACION, "motivo": "AUN_NO_EVALUADA"})
             repositorio.guardar(envio_id, registro)
         return registro
+    # Copia del registro tal como estaba antes de este intento: si el
+    # intento choca con un lock legítimo de otra sesión, el envío vuelve
+    # EXACTAMENTE a este estado (reintentable), nunca a ERROR.
+    registro_previo = copy.deepcopy(registro)
     registro["estado"] = "PROCESANDO"
     repositorio.guardar(envio_id, registro)
     try:
@@ -1032,6 +1037,24 @@ def _procesar_envio_mobile_impl(
             "archivo_dataset": archivo_dataset,
             "procesado_en": datetime.now(timezone.utc).isoformat(), "error": "",
         })
+    except SesionOcupadaError as error:
+        # Caso real c4211f4c (05-10-2026): otra sesión sostenía el lock del
+        # dataset/bandeja al momento de escribir. Es concurrencia normal,
+        # no un fallo del documento: el envío vuelve a su estado previo
+        # (RECIBIDO en el flujo normal) con original, SHA y metadatos
+        # intactos, y el bloqueo se relanza -- PULL lo cuenta como
+        # `omitidos_por_bloqueo` y lo reintenta en la pasada siguiente.
+        # Nada parcial queda publicado: la fila (si alcanzó a escribirse)
+        # está completa y el reintento la reconoce por su identificador.
+        reintento = dict(registro_previo.get("reintento_por_bloqueo") or {})
+        reintento.update({
+            "intentos": int(reintento.get("intentos") or 0) + 1,
+            "ultimo_en": datetime.now(timezone.utc).isoformat(),
+            "ultimo_error": f"{type(error).__name__}: {error}",
+        })
+        registro_previo["reintento_por_bloqueo"] = reintento
+        repositorio.guardar(envio_id, registro_previo)
+        raise
     except Exception as error:
         registro.update({"estado": "ERROR", "error": f"{type(error).__name__}: {error}"})
     repositorio.guardar(envio_id, registro)
