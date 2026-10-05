@@ -62,6 +62,7 @@ from atlas_core.catalogos import (
     corroborar_chofer_por_nombre_y_rut_documental,
     resolver_nombre_chofer_difuso,
 )
+from atlas_core.direccion_equivalente import calle_numero_normalizado
 from atlas_core.credibilidad_campos import (
     NivelCredibilidad, evaluar_credibilidad_direccion,
     evaluar_credibilidad_entidad_nombre, evaluar_credibilidad_material,
@@ -3268,17 +3269,8 @@ def revalidar_destino_contaminado_rut_etiqueta_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
-def _calle_numero_normalizado(texto: str) -> str | None:
-    """Prefijo "calle + número" normalizado de un texto de destino libre
-    (calle, posiblemente varias palabras, seguida del primer número que
-    aparece) -- `None` si no trae ningún número. Usado para comparar
-    calle+número SIN exigir que el resto del texto (comuna/ciudad) sea
-    idéntico -- eso es exactamente lo que un documento hermano con comuna
-    explícita agrega."""
-    match = re.search(r"\d+", texto)
-    if not match:
-        return None
-    return normalizar_nombre_destino(texto[: match.end()])
+# Compartido con la agrupación de entregas (`atlas_core.direccion_equivalente`).
+_calle_numero_normalizado = calle_numero_normalizado
 
 
 def revalidar_ruta_por_historial_de_obra_sin_ocr(

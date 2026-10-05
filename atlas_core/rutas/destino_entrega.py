@@ -57,6 +57,11 @@ from atlas_core.geografia.base_local import (
 )
 from atlas_core.catalogo_plantas import Planta
 from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_direccion
+from atlas_core.direccion_equivalente import (
+    calle_numero_normalizado,
+    comuna_oficial,
+    extension_geografica_compatible,
+)
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
     limpiar_sufijo_chofer_pegado,
@@ -2855,6 +2860,18 @@ def _candidato_calle_en_comuna_documental(
     return _mejor_candidato(coherentes)
 
 
+def _comuna_de_la_misma_direccion(identificadores, despachar_a: str) -> set[str]:
+    """Comuna de cabecera (DIRECCION/COMUNA) sólo cuando esa cabecera es la
+    misma calle + número que DESPACHAR A: la cabecera describe al cliente y
+    puede ser otra dirección, en cuyo caso no dice nada del despacho."""
+    direccion = getattr(identificadores, "direccion", None) or ""
+    comuna = comuna_oficial(getattr(identificadores, "comuna", None) or "")
+    nucleo = calle_numero_normalizado(despachar_a)
+    if comuna and nucleo and calle_numero_normalizado(direccion) == nucleo:
+        return {comuna}
+    return set()
+
+
 def resolver_entrega_documento(
     textos: Iterable[str],
     plantas: Iterable[Planta],
@@ -2945,18 +2962,32 @@ def resolver_entrega_documento(
         limpiar_sufijo_chofer_pegado(despachar_a_crudo, chofer_resuelto)
     ).strip()
 
-    if bloques is not None and (
-        not despachar_a_crudo
-        or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
-        or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
-    ):
+    if bloques is not None:
+        bloques = list(bloques)
+        lineal_descartable = (
+            not despachar_a_crudo
+            or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
+            or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
+        )
         try:
-            decision_geometrica = _extraer_despachar_a_geometrico(list(bloques))
+            decision_geometrica = _extraer_despachar_a_geometrico(bloques)
         except Exception:
             decision_geometrica = {}
         candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
         if candidato_geometrico and not _despachar_a_lineal_contaminado(
             candidato_geometrico, valor_chofer_resuelto=chofer_resuelto
+        ) and (
+            lineal_descartable
+            # Caso real 475368: PaddleOCR partió la fila ("CAMINO LO RUIZ
+            # 2901" + "SANTIAGO RENCA", con RUT CHOFER intercalado) y la
+            # lectura lineal quedó truncada pero limpia. Sólo se prefiere la
+            # geométrica si es la lineal completa más un sufijo puramente
+            # geográfico que no contradice la comuna del propio documento --
+            # nunca por ser simplemente más larga.
+            or extension_geografica_compatible(
+                despachar_a_crudo, candidato_geometrico,
+                comunas_conocidas=_comuna_de_la_misma_direccion(identificadores, despachar_a_crudo),
+            )
         ):
             despachar_a_crudo = candidato_geometrico
 

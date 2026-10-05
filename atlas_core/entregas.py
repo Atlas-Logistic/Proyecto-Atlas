@@ -38,6 +38,11 @@ from atlas_core.credibilidad_campos import (
     valor_publicable,
 )
 from atlas_core.catalogo_destinos import _limite_tolerancia_ocr_direccion
+from atlas_core.direccion_equivalente import (
+    comuna_oficial,
+    comuna_por_codigo,
+    direcciones_equivalentes_por_sufijo_geografico,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - sólo para anotaciones
     from atlas_core.gestor_viajes import DocumentoViaje
@@ -151,19 +156,52 @@ def _claves_equivalentes_por_tolerancia_ocr(clave_a: str, clave_b: str) -> bool:
     return distancia <= limite
 
 
+def _comunas_conocidas(documento: "DocumentoViaje") -> set[str]:
+    """Comunas oficiales ya establecidas para el documento (localidad
+    resuelta y código territorial opaco); vacío si no son comunas."""
+    return {
+        comuna for comuna in (
+            comuna_oficial(getattr(documento, "localidad_entrega", "")),
+            comuna_por_codigo(_evidencia(documento, "codigo_unidad")),
+        ) if comuna
+    }
+
+
+# Caso real 0000362325 -- la misma dirección impresa leída una vez sin su
+# sufijo de comuna/ciudad ("CAMINO LO RUIZ 2901" / "... 2901 SANTIAGO
+# RENCA") cambia la longitud de la clave y la tolerancia OCR de arriba
+# nunca la reconoce. Respaldo sólo para direccion_entrega/despachar_a:
+# mismo núcleo calle + número (calle con la misma tolerancia OCR, número
+# exacto) y un sufijo puramente geográfico sin comunas en conflicto -- ver
+# `atlas_core.direccion_equivalente`.
+def _direcciones_equivalentes(
+    a: "DocumentoViaje", b: "DocumentoViaje", campo: str,
+) -> bool:
+    return direcciones_equivalentes_por_sufijo_geografico(
+        getattr(a, campo, ""), getattr(b, campo, ""),
+        calles_equivalentes=_claves_equivalentes_por_tolerancia_ocr,
+        comunas_conocidas_a=_comunas_conocidas(a),
+        comunas_conocidas_b=_comunas_conocidas(b),
+    )
+
+
 def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     """True sólo si ambos documentos comparten al menos un nivel de señal
     de destino poblado y coinciden (con tolerancia a un typo de OCR de un
-    solo carácter, sólo para direccion_entrega/despachar_a -- ver bloque
-    arriba) en el más fuerte de esos niveles compartidos. Sin ningún nivel
-    compartido -> NO compatible (nunca se agrupa "por descarte")."""
+    solo carácter, o a un sufijo sólo geográfico tras calle + número, sólo
+    para direccion_entrega/despachar_a -- ver bloques arriba) en el más
+    fuerte de esos niveles compartidos. Sin ningún nivel compartido -> NO
+    compatible (nunca se agrupa "por descarte")."""
     niveles_a = dict(_niveles_destino(a))
     niveles_b = dict(_niveles_destino(b))
+    campos = {"direccion_entrega": "direccion_entrega", "despachar_a": "despachar_a_crudo"}
     for nombre in ("territorial", "direccion_entrega", "despachar_a"):
         if nombre in niveles_a and nombre in niveles_b:
             if nombre == "territorial":
                 return niveles_a[nombre] == niveles_b[nombre]
-            return _claves_equivalentes_por_tolerancia_ocr(niveles_a[nombre], niveles_b[nombre])
+            return _claves_equivalentes_por_tolerancia_ocr(
+                niveles_a[nombre], niveles_b[nombre]
+            ) or _direcciones_equivalentes(a, b, campos[nombre])
     return False
 
 
