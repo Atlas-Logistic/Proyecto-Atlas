@@ -180,6 +180,15 @@ _NEGACION_MISMO_VIAJE = re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|I
 _NUMERO_GUIA = re.compile(r"\b\d{5,9}\b")
 _COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
+# Catálogo de OBRAS (no guías): el cliente es obligatorio al registrar porque
+# es la procedencia verificable de la observación. Nunca se infiere desde el
+# nombre de la obra ni desde una conversación anterior.
+_OBRA_CATALOGO_CORREGIR = re.compile(
+    r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|ACTUALIZA|ACTUALIZAR)\s+(?:LA\s+)?OBRA\s+"
+    r"(?P<actual>.+?)\s+(?:A|POR|COMO)\s+(?P<nueva>.+)$")
+_OBRA_CATALOGO_REGISTRAR = re.compile(
+    r"^(?:REGISTRA|REGISTRAR|CREA|CREAR)\s+(?:LA\s+)?OBRA\s+(?P<obra>.+?)"
+    r"(?:\s+(?:PARA|DEL|DE)\s+(?:EL\s+)?CLIENTE\s+(?P<cliente>.+))?$")
 ACCION_INVESTIGAR_REVISION = "INVESTIGAR_REVISION"
 _GUIA_INVESTIGACION = re.compile(r"\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\b")
 _VERBO_INVESTIGAR = re.compile(r"\b(?:INVESTIGA(?:R)?|BUSCA(?:R)?|AVERIGUA(?:R)?)\b")
@@ -308,6 +317,18 @@ def interpretar_determinista(texto: str) -> Intencion | None:
             if m:
                 return Intencion("DOCUMENTO_ASIGNAR_OBRA", {"numero_guia": m.group("guia")},
                                  {"obra": original[m.start("obra"):m.end("obra")].strip(" ,:")})
+        m = _OBRA_CATALOGO_CORREGIR.match(plano)
+        if m and "GUIA" not in m.group("actual"):
+            return Intencion("OBRA_CORREGIR", {
+                "nombre_canonico": original[m.start("nueva"):m.end("nueva")].strip(" ,:")},
+                {"obra": original[m.start("actual"):m.end("actual")].strip(" ,:")})
+        m = _OBRA_CATALOGO_REGISTRAR.match(plano)
+        if m:
+            menciones = {}
+            if m.group("cliente"):
+                menciones["cliente"] = original[m.start("cliente"):m.end("cliente")].strip(" ,:")
+            return Intencion("OBRA_REGISTRAR", {
+                "nombre_obra": original[m.start("obra"):m.end("obra")].strip(" ,:")}, menciones)
     for patron in _DESTINO_GUIA:
         m = patron.match(plano)
         if m:
@@ -360,7 +381,7 @@ class ErrorContratoInterpretacion(ValueError):
 
 # mención -> parámetro de la acción que resuelve (nunca se pasa cruda).
 _MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id", "obra": "obra_id",
-                         "destino": "destino_id"}
+                         "destino": "destino_id", "cliente": "cliente_id"}
 _SOSPECHOSO = re.compile(
     r"(^[A-Za-z]:[\\/])|(\.\.[\\/])|(^[\\/])|(\\\\)|[;|&`$<>{}]|"
     r"\b(?:rm|del|rmdir|powershell|cmd|bash|sh|python|py|pip|import|exec|eval|subprocess|os\.system|"
@@ -481,6 +502,22 @@ def resolver_obra(obras: list, mencion: str) -> dict:
                                                               or normalizar_nombre_obra(o.nombre_canonico) in clave)]
     return {"estado": "AMBIGUO" if len(exactas) > 1 else "DESCONOCIDO",
             "candidatos": [{"obra_id": o.obra_id, "nombre": o.nombre_canonico} for o in parecidas[:10]]}
+
+
+def resolver_cliente(clientes: list, mencion: str) -> dict:
+    """Resuelve sólo identidad canónica/alias activa; nunca crea clientes."""
+    from atlas_core.catalogo_clientes import normalizar_nombre_cliente
+    clave = normalizar_nombre_cliente(mencion)
+    activos = [c for c in clientes if c.estado_vigencia == "ACTIVO"]
+    exactos = [c for c in activos if clave and clave in {
+        normalizar_nombre_cliente(x) for x in (c.razon_social, c.nombre_comercial, *c.aliases) if x}]
+    parecidos = exactos or [c for c in activos if clave and (
+        clave in normalizar_nombre_cliente(c.razon_social)
+        or normalizar_nombre_cliente(c.razon_social) in clave)]
+    if len(exactos) == 1:
+        return {"estado": "RESUELTO", "cliente_id": exactos[0].cliente_id, "nombre": exactos[0].razon_social}
+    return {"estado": "AMBIGUO" if len(exactos) > 1 else "DESCONOCIDO",
+            "candidatos": [{"nombre": c.razon_social} for c in parecidos[:10]]}
 
 
 def resolver_destino(destinos: list, mencion: str) -> dict:
@@ -825,6 +862,41 @@ def _preview_publico(presentacion: Mapping[str, str], preview: Mapping[str, obje
     return publico
 
 
+def _presentacion_catalogo_obra(preview: Mapping[str, object]) -> dict[str, str]:
+    """Vista humana de una mutación de obra, sin IDs, tokens ni parámetros."""
+    accion = str(preview.get("accion") or "")
+    actual = preview.get("valor_actual") or {}
+    propuesto = preview.get("valor_propuesto") or {}
+    if accion == "OBRA_CORREGIR":
+        return {"tipo": "obra_catalogo", "operacion": "CORREGIR",
+                "antes": str(actual.get("nombre_canonico") or "sin dato"),
+                "despues": str(propuesto.get("nombre_canonico") or "")}
+    return {"tipo": "obra_catalogo", "operacion": "REGISTRAR", "antes": "no existe",
+            "despues": str(propuesto.get("nombre_obra") or ""),
+            "cliente": str(propuesto.get("cliente") or "")}
+
+
+def _preview_catalogo_obra_publico(presentacion: Mapping[str, str]) -> dict:
+    publico = {"entidad": {"tipo": "obra"},
+               "valor_actual": {"nombre": presentacion["antes"]},
+               "valor_propuesto": {"nombre": presentacion["despues"]},
+               "revalidacion": "focal del catálogo de obras y conciliación de bandeja"}
+    if presentacion.get("cliente"):
+        publico["valor_propuesto"]["cliente"] = presentacion["cliente"]
+    return publico
+
+
+def _mensaje_preview_catalogo_obra(presentacion: Mapping[str, str]) -> str:
+    if presentacion["operacion"] == "REGISTRAR":
+        return (f"Obra actual: no existe.\nObra propuesta a crear: {presentacion['despues']}\n"
+                f"Cliente explícito: {presentacion.get('cliente') or 'sin dato'}.\n"
+                "Se creará sólo esta obra observada; no se crearán relaciones, destinos ni clientes. "
+                "¿Confirmas? (sí / no)")
+    return (f"Obra actual: {presentacion['antes']}\nCambio propuesto: {presentacion['despues']}\n"
+            "La equivalencia del nombre actual se conserva como alias; no se alteran cliente ni relaciones. "
+            "¿Confirmas? (sí / no)")
+
+
 def _evidencia_visible(registro: Mapping[str, object]) -> str:
     """Evidencia operacional comprensible: razón + dominios, sin scores ni códigos."""
     razon = str(registro.get("evidencia_relevante") or "").strip().rstrip(".")
@@ -976,15 +1048,41 @@ class OperadorB1:
             resolucion = resolver_obra(self.capa._ctx.catalogo_obras().listar_obras(), mencion)
             if resolucion["estado"] != "RESUELTO":
                 candidatos = resolucion["candidatos"]
-                listado = "; ".join(f"{c['nombre']} (obra_id {c['obra_id']})" for c in candidatos)
+                listado = "; ".join(str(c["nombre"]) for c in candidatos)
                 mensaje = (f"«{mencion}» coincide con más de una obra: {listado}. Indica cuál."
                            if resolucion["estado"] == "AMBIGUO" else
                            f"No encontré una obra existente llamada «{mencion}»"
                            + (f". ¿Te refieres a alguna de estas? {listado}" if candidatos else "")
                            + ". No creo obras nuevas desde aquí; repite la orden con el nombre exacto.")
-                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
-                        "mensaje": mensaje}
+                candidatos_publicos = ([{"nombre": c["nombre"]} for c in candidatos]
+                                       if intencion.accion == "OBRA_CORREGIR" else candidatos)
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion,
+                        "candidatos": candidatos_publicos, "mensaje": mensaje}
             parametros["obra_id"] = resolucion["obra_id"]
+            if intencion.accion == "OBRA_CORREGIR":
+                # La corrección conserva la equivalencia canónica existente.
+                parametros["aliases"] = [resolucion["nombre"]]
+        if intencion.accion == "OBRA_REGISTRAR" and "cliente" not in intencion.menciones:
+            return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [],
+                    "mensaje": "Para registrar una obra indica el cliente existente de forma explícita; no lo infiero."}
+        if "cliente" in intencion.menciones:
+            from atlas_core.catalogo_clientes import CatalogoClientes
+            mencion = intencion.menciones["cliente"]
+            resolucion = resolver_cliente(CatalogoClientes(self.capa._ctx.archivos["clientes"]).listar(), mencion)
+            if resolucion["estado"] != "RESUELTO":
+                candidatos = resolucion.get("candidatos") or []
+                listado = "; ".join(str(c["nombre"]) for c in candidatos)
+                if resolucion["estado"] == "AMBIGUO":
+                    mensaje = f"Cliente ambiguo: {listado}. Indica cuál."
+                else:
+                    mensaje = (f"No encontré un cliente existente llamado {mencion!r}"
+                               + (f". ¿Te refieres a alguno de estos? {listado}" if candidatos else "")
+                               + ". No crearé un cliente desde B1.")
+                candidatos_publicos = ([{"nombre": c["nombre"]} for c in candidatos]
+                                       if intencion.accion == "OBRA_CORREGIR" else candidatos)
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos_publicos,
+                        "mensaje": mensaje}
+            parametros["cliente_id"] = resolucion["cliente_id"]
         if "destino" in intencion.menciones:
             mencion = intencion.menciones["destino"]
             resolucion = resolver_destino(self.capa._ctx.catalogo_destinos().listar(), mencion)
@@ -1261,6 +1359,15 @@ class OperadorB1:
                 f"Dijiste {intencion.tipo_vehiculo_declarado}, pero {parametros.get('patente')} es "
                 f"{preview['valor_propuesto']['tipo']} en el catálogo. Revisa la patente.")}
         publico = {k: v for k, v in preview.items() if k != "token"}
+        if intencion.accion in {"OBRA_REGISTRAR", "OBRA_CORREGIR"} and preview.get("estado") != "SIN_CAMBIOS":
+            presentacion = _presentacion_catalogo_obra(preview)
+            self._fijar_pendiente(estado, conversacion_id, {
+                "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
+                "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat(),
+                "presentacion": presentacion})
+            return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion,
+                    "preview": _preview_catalogo_obra_publico(presentacion),
+                    "mensaje": _mensaje_preview_catalogo_obra(presentacion)}
         if preview.get("estado") == "SIN_CAMBIOS":
             mensaje = "Eso ya está así; no hay nada que confirmar."
             if intencion.accion == "VIAJE_AGRUPAR_GUIAS":
@@ -1290,6 +1397,12 @@ class OperadorB1:
         if estado_capa == "APLICADA":
             self._fijar_pendiente(estado, conversacion_id, None)
             if presentacion:
+                if presentacion.get("tipo") == "obra_catalogo":
+                    resultado_visible = {"estado": "APLICADA", "obra": {"nombre": presentacion["despues"]},
+                                         "revalidacion": "focal del catálogo y conciliación ejecutadas"}
+                    verbo = "creada" if presentacion["operacion"] == "REGISTRAR" else "corregida"
+                    return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado_visible,
+                            "mensaje": f"Obra {verbo}: {presentacion['despues']}."}
                 campo = _campo_presentacion(presentacion)
                 visible = {**resultado, "antes": {campo["clave"]: presentacion["antes"]},
                            "despues": {campo["clave"]: presentacion["despues"]}}
@@ -1309,6 +1422,14 @@ class OperadorB1:
                         "mensaje": f"No ejecuté nada: {motivo} y ya no hay cambio que confirmar "
                                    f"({nuevo.get('estado')}: {nuevo.get('mensaje', 'sin cambios')})."}
             if presentacion:
+                if presentacion.get("tipo") == "obra_catalogo":
+                    presentacion = _presentacion_catalogo_obra(nuevo)
+                    self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
+                                                                   "creado_en": self.reloj().isoformat(),
+                                                                   "presentacion": presentacion})
+                    return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                            "preview": _preview_catalogo_obra_publico(presentacion),
+                            "mensaje": f"No ejecuté nada: {motivo}. " + _mensaje_preview_catalogo_obra(presentacion)}
                 if (presentacion.get("campo") or "obra_destino") == "obra_destino":
                     presentacion = {**presentacion,
                                     "antes": str((nuevo.get("valor_actual") or {}).get("obra_destino") or "")}
