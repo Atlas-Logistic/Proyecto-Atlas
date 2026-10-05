@@ -541,7 +541,8 @@ def _plan_obra_corregir(ctx: _Contexto, p: dict) -> Plan:
         valor_propuesto={"nombre_canonico": nombre, "aliases_agregados": aliases},
         estado_base={"obra": obra.a_dict()}, sin_cambios=sin_cambios,
         afectados=_afectados_por_guias(ctx, _guias_por_obra(ctx, claves_actuales | propuestas)),
-        consecuencias=["Cambia el nombre canónico; el nombre anterior queda como alias sólo si se incluye en aliases.",
+        consecuencias=["Cambia el nombre canónico; el nombre anterior queda como alias si se incluye en aliases "
+                       "o si el nuevo canónico era un alias de esta obra (ese alias deja de serlo).",
                        "No altera estado, relaciones ni cliente de la obra."],
         revalidaciones=["REVALIDACION_REACTIVA_OBRA", "RECONCILIAR_BANDEJA"],
         archivos=("obras_destinos", "bandeja"),

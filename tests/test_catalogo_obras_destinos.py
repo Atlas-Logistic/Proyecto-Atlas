@@ -331,6 +331,78 @@ def test_actualizar_identidad_rechaza_identidad_o_alias_vacio_sin_escribir(
     assert catalogo.ruta.read_bytes() == antes
 
 
+def _obra_con_alias(catalogo, cliente, destino):
+    """Obra cuyo canónico es una lectura OCR y cuyo alias es el nombre real."""
+    observada = _observar(catalogo, cliente, destino).obra
+    return catalogo.actualizar_identidad_obra(
+        observada.obra_id, nombre_canonico="OBRA SUCURSAL TALCANUANO",
+        aliases_documentales=("OBRA SUCURSAL TALCAHUANO",), evidencia=_evidencia_externa(),
+    )
+
+
+def _promover(catalogo, obra, fuente="fuente-promocion"):
+    return catalogo.actualizar_identidad_obra(
+        obra.obra_id, nombre_canonico="OBRA SUCURSAL TALCAHUANO",
+        aliases_documentales=("OBRA SUCURSAL TALCANUANO",),
+        evidencia=Evidencia(**{**_evidencia_externa().a_dict(), "identificador_fuente": fuente}),
+    )
+
+
+def test_alias_existente_pasa_a_canonico(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    promovida = _promover(catalogo, _obra_con_alias(catalogo, cliente, destino))
+    assert promovida.nombre_canonico == "OBRA SUCURSAL TALCAHUANO"
+    assert promovida.nombre_normalizado == "OBRA SUCURSAL TALCAHUANO"
+
+
+def test_canonico_anterior_queda_como_alias_aunque_no_se_pida(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    obra = _obra_con_alias(catalogo, cliente, destino)
+    promovida = catalogo.actualizar_identidad_obra(
+        obra.obra_id, nombre_canonico="OBRA SUCURSAL TALCAHUANO", evidencia=_evidencia_externa(),
+    )
+    assert "OBRA SUCURSAL TALCANUANO" in promovida.aliases_documentales
+    assert catalogo.listar_obras()[0].aliases_documentales == promovida.aliases_documentales
+
+
+def test_promocion_no_deja_alias_duplicado_del_canonico(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    promovida = _promover(catalogo, _obra_con_alias(catalogo, cliente, destino))
+    claves = [normalizar_nombre_obra(a) for a in promovida.aliases_documentales]
+    assert normalizar_nombre_obra(promovida.nombre_canonico) not in claves
+    assert len(claves) == len(set(claves))
+    assert promovida.aliases_documentales == ("OBRA SUCURSAL TALCANUANO",)
+
+
+def test_promocion_sigue_rechazando_colision_con_otra_obra(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    obra = _obra_con_alias(catalogo, cliente, destino)
+    catalogo.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra="OTRA OBRA REAL", evidencia=_evidencia("guia-sintetica-2"),
+    )
+    antes = catalogo.ruta.read_bytes()
+    with pytest.raises(ErrorCatalogoObrasDestinos, match="colisiona"):
+        catalogo.actualizar_identidad_obra(
+            obra.obra_id, nombre_canonico="OBRA SUCURSAL TALCAHUANO",
+            aliases_documentales=("OTRA OBRA REAL",), evidencia=_evidencia_externa(),
+        )
+    with pytest.raises(ErrorCatalogoObrasDestinos, match="colisiona"):
+        catalogo.actualizar_identidad_obra(
+            obra.obra_id, nombre_canonico="OTRA OBRA REAL", evidencia=_evidencia_externa(),
+        )
+    assert catalogo.ruta.read_bytes() == antes
+
+
+def test_promocion_repetida_es_idempotente(tmp_path):
+    catalogo, cliente, destino = _entorno(tmp_path)
+    primera = _promover(catalogo, _obra_con_alias(catalogo, cliente, destino))
+    segunda = _promover(catalogo, primera, fuente="otra-fuente")
+    assert (segunda.nombre_canonico, segunda.aliases_documentales) == (
+        primera.nombre_canonico, primera.aliases_documentales,
+    )
+    assert segunda.obra_id == primera.obra_id and segunda.estado == primera.estado
+
+
 def test_actualizar_identidad_rechaza_colision_del_mismo_cliente(tmp_path):
     catalogo, cliente, destino = _entorno(tmp_path)
     primera = _observar(catalogo, cliente, destino).obra

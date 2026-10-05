@@ -380,7 +380,19 @@ class CatalogoObrasDestinos:
                     "no se puede actualizar la identidad de una obra inactiva"
                 )
             clave_canonica = normalizar_nombre_obra(nombre)
-            aliases = list(obra.aliases_documentales)
+            # Un alias de ESTA obra que pasa a ser canónico deja de ser
+            # alias (nunca ambos a la vez); el canónico anterior queda
+            # como alias para no perder el reconocimiento histórico.
+            promovido_desde_alias = (
+                clave_canonica != normalizar_nombre_obra(obra.nombre_canonico)
+                and any(normalizar_nombre_obra(alias) == clave_canonica for alias in obra.aliases_documentales)
+            )
+            if promovido_desde_alias:
+                aliases_nuevos = (obra.nombre_canonico, *aliases_nuevos)
+            aliases = [
+                alias for alias in obra.aliases_documentales
+                if normalizar_nombre_obra(alias) != clave_canonica
+            ]
             claves = {normalizar_nombre_obra(alias) for alias in aliases}
             for alias in aliases_nuevos:
                 clave = normalizar_nombre_obra(alias)

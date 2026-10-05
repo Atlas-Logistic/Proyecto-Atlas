@@ -259,6 +259,19 @@ def test_corregir_obra_rechaza_colision(entorno):
         "nombre_canonico": "OBRA A1", "aliases": ["OBRA A"]}
 
 
+def test_corregir_obra_promueve_alias_existente_a_canonico(entorno):
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    cliente_id = entorno["cliente"].cliente_id
+    p = capa.previsualizar("OBRA_REGISTRAR", {"cliente_id": cliente_id, "nombre_obra": "OBRA TALCANUANO",
+                                              "alias_documental": "OBRA TALCAHUANO"}, actor="JAVIER")
+    obra_id = capa.ejecutar(p["token"], actor="JAVIER", confirmado_por="JAVIER")["despues"]["obra_id"]
+    parametros = {"obra_id": obra_id, "nombre_canonico": "OBRA TALCAHUANO", "aliases": ["OBRA TALCANUANO"]}
+    ok = capa.previsualizar("OBRA_CORREGIR", parametros, actor="JAVIER")
+    assert capa.ejecutar(ok["token"], actor="JAVIER", confirmado_por="JAVIER")["despues"] == {
+        "nombre_canonico": "OBRA TALCAHUANO", "aliases": ["OBRA TALCANUANO"]}
+    assert capa.previsualizar("OBRA_CORREGIR", parametros, actor="JAVIER")["estado"] == "SIN_CAMBIOS"
+
+
 # ------------------------------------------------------------ documento
 
 
