@@ -452,17 +452,20 @@ def test_usar_patente_existente_dispara_revalidacion_via_ledger(tmp_path):
     assert incidencia.tipo_incidencia == TIPO_PATENTE_DOCUMENTAL_INCORRECTA
     assert incidencia.estado == EstadoIncidencia.CONFIRMADA.value
     assert "DISCREPANCIA_DOCUMENTAL_CONFIRMADA_POR_HUMANO" in incidencia.evidencia
-    # Ledger anterior al fix: al reintentar una decisión ya cerrada, el
-    # catch-up emite sin reabrir ni alterar la guía operacional.
+    # Ledger anterior al fix (sin la marca explícita): elegir un canónico no
+    # demuestra qué imprimió la guía, así que el catch-up no lo confirma; la
+    # incidencia ya existente se conserva como auditoría, sin tocarla.
+    ruta_incidencias = catalogos / "incidencias_documentales.json"
+    contenido_incidencias = ruta_incidencias.read_bytes()
     ruta_ledger = actual / "decisiones_aplicadas.json"
     ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
     ledger["aplicaciones"][-1].pop("discrepancia_documental_confirmada")
     ruta_ledger.write_text(json.dumps(ledger), encoding="utf-8")
-    (catalogos / "incidencias_documentales.json").unlink()
     resultado_catchup = reconciliar_incidencias_documentales_confirmadas_desde_ledger(
-        ruta_ledger=ruta_ledger, ruta_incidencias=catalogos / "incidencias_documentales.json", reloj=lambda: FECHA,
+        ruta_ledger=ruta_ledger, ruta_incidencias=ruta_incidencias, reloj=lambda: FECHA,
     )
-    assert resultado_catchup == {"decisiones_compatibles": 1, "incidencias_reconciliadas": 1}
+    assert resultado_catchup == {"decisiones_compatibles": 0, "incidencias_reconciliadas": 0}
+    assert ruta_incidencias.read_bytes() == contenido_incidencias
     # Un reintento de la decisión cerrada tampoco emite duplicado.
     assert aplicar_decision_obra(
         raiz_atlas=raiz, decision_id=decision_final["decision_id"], accion="USAR_PATENTE_EXISTENTE",

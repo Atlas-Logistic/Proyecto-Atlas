@@ -109,25 +109,12 @@ def _codigo_cliente_vigente(dataset: Path, archivo: str) -> str:
 
 
 def _confirma_discrepancia_documental(aplicacion: dict[str, object]) -> bool:
-    """Reconoce la confirmación explícita, incluso en ledger previo al fix."""
-    if aplicacion.get("discrepancia_documental_confirmada"):
-        return True
-    # Compatibilidad acotada: estas dos acciones humanas ya tenían la misma
-    # semántica explícita antes de que el ledger guardara la marca. No se
-    # generaliza desde OCR, catálogo ni historial.
-    return bool(
-        str(aplicacion.get("actor", "")) != "ATLAS_AUTOMATICO"
-        and (
-            (
-                aplicacion.get("tipo") == "VEHICULO_DESCONOCIDO"
-                and aplicacion.get("accion") in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE")
-            )
-            or (
-                aplicacion.get("tipo") == "CLIENTE_CANDIDATO"
-                and aplicacion.get("accion") == "CONFIRMAR"
-            )
-        )
-    )
+    """Sólo una confirmación documental explícita acusa a la guía.
+
+    Elegir un canónico resuelve operación, pero no demuestra qué imprimió la
+    guía. Los ledgers previos sin esta marca siguen auditables, no confirmados.
+    """
+    return bool(aplicacion.get("discrepancia_documental_confirmada"))
 
 
 def _emitir_incidencia_documental_confirmada(
@@ -170,6 +157,8 @@ def _emitir_incidencia_documental_confirmada(
             fecha=reloj(), estado=EstadoIncidencia.CONFIRMADA,
             fuente_resolucion="DECISION_HUMANA_DISCREPANCIA_DOCUMENTAL",
             actor=str(aplicacion.get("actor") or ""), decision_id=str(aplicacion.get("decision_id") or ""),
+            clasificacion="DOCUMENTAL_CONFIRMADA",
+            procedencia=(f"DECISION:{aplicacion.get('decision_id', '')}",),
         )
     except (OSError, ValueError):
         # La decisión operacional ya fue validada; una falla de su proyección
