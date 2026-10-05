@@ -56,12 +56,15 @@ from atlas_core.procesamiento_masivo import (
 )
 from atlas_core.revalidacion_documental import (
     SEPARADOR_MOTIVOS,
+    _anotar_recuperacion_p0,
     _escribir_filas_completas,
     _hay_decision_humana_para_campo,
     _indicadores_documentales_coherentes,
     _leer_filas,
+    _metricas_recuperacion_p0,
     revalidar_y_regenerar_reporte,
 )
+from atlas_core.trazabilidad_ocr import ruta_traza_ocr
 from atlas_core.validadores import validar_rut_chileno
 
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
@@ -142,6 +145,10 @@ CAMPOS_REPARABLES: dict[str, tuple[tuple[str, ...], object]] = {
         (MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value,),
         lambda v: v not in _AUSENTES,
     ),
+    # Horas AZA: sin motivo propio -- se completan si están ausentes o si el
+    # documento está degradado; sólo una hora HH:MM válida se promueve.
+    "hora_entrada_aza": ((), lambda v: bool(re.fullmatch(r"\d{1,2}:\d{2}", v))),
+    "hora_salida_aza": ((), lambda v: bool(re.fullmatch(r"\d{1,2}:\d{2}", v))),
     "patente_tracto": (
         (MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR.value, MotivoRevisionDocumento.PATENTE_AMBIGUA.value),
         lambda v: v in _AUSENTES or _patente_valida(v),
@@ -166,6 +173,76 @@ CAMPOS_REPARABLES: dict[str, tuple[tuple[str, ...], object]] = {
 CAMPOS_SIEMPRE_REEXAMINADOS: dict[str, object] = {
     "peso_kg": lambda v: v.isdigit(),
 }
+
+# Motivos que el extractor deriva del VALOR de un campo sin ser motivos de
+# degradación del propio campo (no habilitan su reparación). Si el campo se
+# reemplaza, el motivo describía el valor anterior: sobrevive sólo si la
+# reextracción lo vuelve a producir para el valor nuevo (caso real 475256:
+# peso 61 -> 28061 arrastraba PESO_OPERACIONALMENTE_ATIPICO).
+MOTIVOS_DERIVADOS_POR_CAMPO: dict[str, tuple[str, ...]] = {
+    "peso_kg": (MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value,),
+}
+
+
+def _motivos_de_campo(campo: str) -> tuple[str, ...]:
+    motivos_degradacion = CAMPOS_REPARABLES.get(campo, ((), None))[0]
+    return tuple(motivos_degradacion) + MOTIVOS_DERIVADOS_POR_CAMPO.get(campo, ())
+
+
+# --- Lectura previa hecha con el OCR de respaldo ------------------------
+# Cuando PaddleOCR no está disponible Atlas lee con EasyOCR (fallback), que
+# produce valores sintácticamente válidos pero incorrectos sin activar
+# ningún motivo (caso real 475256: cliente "410,U0O"). Si la traza OCR
+# vigente del documento demuestra esa lectura de respaldo y la relectura
+# actual se hizo efectivamente con PaddleOCR, el documento se trata como
+# DOCUMENTO_DEGRADADO (mismo mecanismo, mismas garantías: ledger, valores
+# ausentes nunca promueven, validador por campo). Tras aplicar la relectura
+# se anota en la fila para no volver a tratarla como degradada.
+_BACKEND_OCR_RESPALDO = "EasyOCRProvider"
+_BACKEND_OCR_PRINCIPAL = "PaddleOCRProvider"
+_CLAVE_RELECTURA_OCR_PRINCIPAL = "relectura_ocr_principal"
+
+
+def _backend_lectura_almacenada(raiz: Path, fila: Mapping[str, str]) -> str | None:
+    """Backend OCR de la traza vigente del documento, o None si no hay
+    traza que corresponda inequívocamente a este `archivo`."""
+    archivo = str(fila.get("archivo", "")).strip()
+    if not archivo:
+        return None
+    ruta = ruta_traza_ocr(raiz / "operacion" / "trazas_ocr", archivo)
+    try:
+        traza = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(traza, Mapping) or (traza.get("imagen") or {}).get("referencia") != archivo:
+        return None
+    nombre = str(((traza.get("ocr") or {}).get("backend") or {}).get("nombre") or "")
+    return nombre.rsplit(".", 1)[-1] or None
+
+
+def _backend_reextraccion(proveedor_documento: object) -> str | None:
+    """Backend que REALMENTE leyó la reextracción: un PaddleOCRProvider que
+    se degradó a EasyOCR durante la lectura no cuenta como PaddleOCR."""
+    from atlas_core.ocr_provider import PaddleOCRProvider
+
+    if isinstance(proveedor_documento, PaddleOCRProvider):
+        return _BACKEND_OCR_RESPALDO if proveedor_documento._degradado_a_easyocr else _BACKEND_OCR_PRINCIPAL
+    return type(proveedor_documento).__name__ if proveedor_documento is not None else None
+
+
+def _lectura_previa_por_ocr_de_respaldo(raiz: Path, fila: Mapping[str, str], proveedor_documento: object) -> bool:
+    if _metricas_recuperacion_p0(fila).get(_CLAVE_RELECTURA_OCR_PRINCIPAL):
+        return False  # esta relectura ya se aplicó una vez
+    return (
+        _backend_reextraccion(proveedor_documento) == _BACKEND_OCR_PRINCIPAL
+        and _backend_lectura_almacenada(raiz, fila) == _BACKEND_OCR_RESPALDO
+    )
+
+
+def _anotar_relectura_ocr_principal(fila: dict[str, str]) -> None:
+    _anotar_recuperacion_p0(fila, _CLAVE_RELECTURA_OCR_PRINCIPAL, {
+        "version": 1, "backend_previo": _BACKEND_OCR_RESPALDO, "backend_relectura": _BACKEND_OCR_PRINCIPAL,
+    })
 
 
 def _reparar_campos_documento(
@@ -210,6 +287,19 @@ def _reparar_campos_documento(
             and not _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo="rut_chofer")
         ):
             cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), "rut_chofer", rut_actual, rut_nuevo))
+    # La permanencia se deriva de las horas AZA: si una hora cambia, la
+    # permanencia de esa misma reextracción la acompaña.
+    if campos_cambiados & {"hora_entrada_aza", "hora_salida_aza"}:
+        permanencia_nueva = str(extraido.get("permanencia_minutos", "")).strip()
+        permanencia_actual = str(fila.get("permanencia_minutos", "")).strip()
+        if (
+            permanencia_nueva.isdigit()
+            and permanencia_nueva != permanencia_actual
+            and not _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo="permanencia_minutos")
+        ):
+            cambios.append(CambioCampo(
+                archivo_id, str(fila.get("numero_guia", "")), "permanencia_minutos", permanencia_actual, permanencia_nueva,
+            ))
     for campo, es_valido in CAMPOS_SIEMPRE_REEXAMINADOS.items():
         if _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=campo):
             continue  # el ledger siempre gana, también aquí
@@ -246,11 +336,7 @@ def _aplicar_cambios_a_fila(
     campos_cambiados = {c.campo for c in cambios}
     for cambio in cambios:
         fila[cambio.campo] = cambio.valor_nuevo
-    motivos_campos_cambiados = {
-        m for campo, (motivos_degradacion, _) in CAMPOS_REPARABLES.items()
-        for m in motivos_degradacion
-        if campo in campos_cambiados
-    }
+    motivos_campos_cambiados = {m for campo in campos_cambiados for m in _motivos_de_campo(campo)}
     motivos_restantes = sorted(
         (motivos_actuales - motivos_campos_cambiados) | (motivos_valor_nuevo & motivos_campos_cambiados)
     )
@@ -563,7 +649,8 @@ def reprocesar_lote_reparador(
             motivos_actuales = {
                 m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()
             }
-            documento_degradado = _MOTIVO_DOCUMENTO_DEGRADADO in motivos_actuales
+            relectura_ocr_principal = _lectura_previa_por_ocr_de_respaldo(raiz, fila, proveedor_documento)
+            documento_degradado = _MOTIVO_DOCUMENTO_DEGRADADO in motivos_actuales or relectura_ocr_principal
             cambios = _reparar_campos_documento(
                 fila, extraido, aplicaciones, documento_degradado=documento_degradado,
             )
@@ -571,6 +658,8 @@ def reprocesar_lote_reparador(
             _aplicar_cambios_a_fila(
                 fila, cambios, motivos_reextraccion=str(extraido.get("motivos_revision_documento", "")),
             )
+            if relectura_ocr_principal and cambios:
+                _anotar_relectura_ocr_principal(fila)
             documentos.append(DocumentoReparado(
                 archivo=archivo_id, numero_guia_antes=guia_antes,
                 numero_guia_despues=str(fila.get("numero_guia", "")),
@@ -939,7 +1028,8 @@ def revalidar_documentos_por_transporte(
             motivos_actuales = {
                 m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()
             }
-            documento_degradado = _MOTIVO_DOCUMENTO_DEGRADADO in motivos_actuales
+            relectura_ocr_principal = _lectura_previa_por_ocr_de_respaldo(raiz, fila, proveedor_documento)
+            documento_degradado = _MOTIVO_DOCUMENTO_DEGRADADO in motivos_actuales or relectura_ocr_principal
             cambios = _reparar_campos_documento(
                 fila, extraido, aplicaciones, documento_degradado=documento_degradado,
             )
@@ -947,6 +1037,8 @@ def revalidar_documentos_por_transporte(
             _aplicar_cambios_a_fila(
                 fila, cambios, motivos_reextraccion=str(extraido.get("motivos_revision_documento", "")),
             )
+            if relectura_ocr_principal and cambios:
+                _anotar_relectura_ocr_principal(fila)
             documentos.append(DocumentoReparado(
                 archivo=archivo_id, numero_guia_antes=guia_antes,
                 numero_guia_despues=str(fila.get("numero_guia", "")),
