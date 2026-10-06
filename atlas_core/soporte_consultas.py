@@ -24,7 +24,8 @@ from typing import Mapping, Sequence
 
 from atlas_core.consultas_atlas import (
     _CHOFERES_AUSENTES, _COLUMNA_RELACION, _COLUMNAS_MULTIVALOR, DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
-    DOMINIO_VIAJES, METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_DISTINCT_RELACION, METRICA_COUNT_GUIAS,
+    DOMINIO_EVENTOS, DOMINIO_VIAJES, METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_DISTINCT_RELACION,
+    METRICA_COUNT_GUIAS,
     METRICA_COUNT_PATENTES_SIN_CHOFER, METRICA_COUNT_VIAJES, METRICA_LIST_DISTINCT_CHOFER,
     METRICA_LIST_RELACION, METRICA_LISTAR_VIAJES, METRICA_SUM_KM, METRICA_SUM_PESO, METRICA_SUM_TIEMPO,
     ResultadoConsultaAtlas, _claves_agrupacion, _guias_coincidentes, _valor_metrica, _valores_multivalor,
@@ -98,6 +99,33 @@ def _fila_viaje(viaje: Mapping[str, str], *extra: str) -> list[str]:
 
 _COLUMNAS_VIAJE = ["Fecha", "Transporte", "Guías", "Chofer", "Cliente"]
 
+_ESTADO_CONFIRMACION_LEGIBLE = {
+    "APROBADA": "Confirmada",
+    "REPORTADA": "Pendiente de confirmación",
+    "ENVIADA": "Pendiente de confirmación",
+    "PENDIENTE_RESPUESTA": "Pendiente de confirmación",
+    "RECHAZADA": "Rechazada",
+}
+
+
+def _soporte_eventos(resultado: ResultadoConsultaAtlas) -> dict:
+    """Vista operacional de eventos, sin la traza técnica persistida."""
+    filas = []
+    for evento in resultado.viajes_soporte:
+        snapshot = evento.get("snapshot") if isinstance(evento.get("snapshot"), Mapping) else {}
+        guias = evento.get("numeros_guia", ())
+        guias_texto = " | ".join(str(g).strip() for g in guias if str(g).strip()) if isinstance(guias, (list, tuple, set)) else _texto(guias)
+        estado = _ESTADO_CONFIRMACION_LEGIBLE.get(_texto(evento.get("estado_gestion")), "Sin confirmación registrada")
+        filas.append([
+            _texto(evento.get("fecha_evento") or evento.get("fecha_operacional")),
+            _texto(evento.get("numero_transporte")), guias_texto,
+            _texto(evento.get("chofer") or snapshot.get("chofer")), estado,
+        ])
+    return _soporte(
+        "ESTADIAS", ["Fecha", "Transporte", "Guías", "Chofer", "Estado de confirmación"], filas,
+        resumen=_plural(len(filas), "estadía", "estadías"),
+    )
+
 
 def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
     consulta = resultado.consulta_interpretada
@@ -108,6 +136,10 @@ def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
         filas = [[r.get("patente"), r.get("transportes_soporte"), r.get("guias_soporte")] for r in viajes]
         return _soporte("PATENTES", ["Patente", "Transportes", "Guías"], filas,
                         resumen=_plural(len(filas), "patente sin chofer asociado", "patentes sin chofer asociado"))
+    # Las estadías persisten trazabilidad técnica (tipo, IDs, procedencia).
+    # Su vista de soporte siempre pasa por esta proyección operacional.
+    if consulta.dominio == DOMINIO_EVENTOS and consulta.filtros.get("tipo_evento") == "TIENE_ESTADIA":
+        return _soporte_eventos(resultado)
     if consulta.dominio != DOMINIO_VIAJES:
         return None  # incidencias/eventos ya tienen su propia vista semántica en Desktop
 

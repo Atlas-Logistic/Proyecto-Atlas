@@ -394,6 +394,11 @@ _PALABRAS_ESTADO_GESTION = (
         "ESPERANDO RESPUESTA", "EN TRAMITE", "PENDIENTE DE APROBACION",
         "PENDIENTES DE APROBACION", "POR APROBAR", "SIN APROBAR",
         "ESPERA AUTORIZACION", "ESPERANDO AUTORIZACION",
+        # En el lenguaje operacional, una estadía "por confirmar" aún
+        # espera la confirmación de gestión. Se resuelve con la misma
+        # macro canónica EN_ESPERA, no como un tipo de evento distinto.
+        "POR CONFIRMAR", "FALTA POR CONFIRMAR", "FALTAN POR CONFIRMAR",
+        "FALTABA POR CONFIRMAR", "FALTABAN POR CONFIRMAR",
     )),
 )
 _PATRON_TOP = re.compile(r"\bMAS\b|\bMAYOR\b")
@@ -922,6 +927,11 @@ def interpretar_consulta_determinista(
             valor for valor, frases in _PALABRAS_ESTADO_GESTION
             if any(re.search(rf"\b{re.escape(f)}\b", normalizado) for f in frases)
         )
+        # "Confirmada" sólo es un estado de gestión cuando la pregunta ya
+        # trata una estadía/evento. Fuera de este bloque puede calificar
+        # otros conceptos operacionales (p. ej. choferes confirmados).
+        if not estados_gestion_mencionados and re.search(r"\bCONFIRMAD[OA]S?\b", normalizado):
+            estados_gestion_mencionados = (GESTION_APROBADA,)
         if len(estados_gestion_mencionados) > 1 and agrupacion_evento is None:
             agrupacion_evento = "estado_gestion"
         elif len(estados_gestion_mencionados) == 1:

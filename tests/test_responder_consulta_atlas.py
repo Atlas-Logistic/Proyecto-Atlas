@@ -538,6 +538,35 @@ def test_caso1_estadias_aprobadas_y_en_espera_extremo_a_extremo(tmp_path):
     assert "2 estadías en espera" in solo_espera.texto_respuesta
 
 
+def test_estadias_por_confirmar_se_filtran_como_pendientes(tmp_path):
+    ruta = tmp_path / "viajes.csv"
+    _escribir_viajes(ruta, [_fila(numero_transporte=f"T{i}") for i in range(1, 6)])
+    for i, estado in enumerate(("APROBADA", "REPORTADA", "ENVIADA", "PENDIENTE_RESPUESTA", "RECHAZADA"), start=1):
+        registrar_evento(
+            raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=f"T{i}", origen="TEST",
+            estado_gestion=estado,
+            enriquecimiento={"viaje_id": f"T{i}", "vinculo_completo": True, "snapshot": {"chofer": "JUAN PEREZ"}},
+        )
+
+    pendientes = (
+        "¿cuántas estadías faltan por confirmar?", "estadías pendientes", "estadías por confirmar",
+    )
+    for pregunta in pendientes:
+        respuesta = responder_consulta_atlas(pregunta, ruta_viajes=ruta, raiz_atlas=tmp_path)
+        assert respuesta.estado == ESTADO_OK
+        assert respuesta.resultado.resultado == 3
+        assert respuesta.resultado.consulta_interpretada.filtros["estado_gestion"] == "EN_ESPERA"
+        assert "3 estadías en espera" in respuesta.texto_respuesta
+
+    confirmadas = responder_consulta_atlas("estadías confirmadas", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert confirmadas.resultado.resultado == 1
+    assert confirmadas.resultado.consulta_interpretada.filtros["estado_gestion"] == "APROBADA"
+
+    todas = responder_consulta_atlas("todas las estadías", ruta_viajes=ruta, raiz_atlas=tmp_path)
+    assert todas.resultado.resultado == 5
+    assert "estado_gestion" not in todas.resultado.consulta_interpretada.filtros
+
+
 def test_caso2_y_caso3_ranking_por_toneladas_extremo_a_extremo(tmp_path):
     ruta = tmp_path / "viajes.csv"
     _escribir_viajes(ruta, [

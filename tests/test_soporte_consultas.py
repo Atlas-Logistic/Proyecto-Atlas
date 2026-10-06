@@ -14,6 +14,7 @@ from atlas_core.consultas_atlas import (
     METRICA_LIST_RELACION, ConsultaAtlas, cargar_viajes, ejecutar_consulta_atlas,
 )
 from atlas_core.soporte_consultas import soporte_semantico
+from atlas_core.registro_eventos_operacionales import registrar_evento
 
 COLUMNAS = (
     "viaje_id", "numero_transporte", "fecha", "estado", "numeros_guia", "clientes", "obras_destino",
@@ -128,3 +129,20 @@ def test_soporte_no_expone_identificadores_internos(viajes_csv, capsys):
         texto = json.dumps(soporte, ensure_ascii=False)
         assert "viaje_id" not in texto and '"v0"' not in texto
         assert all(not c.startswith(("numero_", "estado")) for c in soporte["columnas"])
+
+
+def test_soporte_visible_de_estadias_no_expone_codigos_internos(viajes_csv, capsys, tmp_path):
+    registrar_evento(
+        raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte="0000361953", origen="TEST",
+        estado_gestion="REPORTADA", enriquecimiento={"viaje_id": "interno-1", "numeros_guia": ["475222"],
+        "fecha_operacional": "2026-10-02", "snapshot": {"chofer": "PATRICK ORTIZ"}, "vinculo_completo": True},
+    )
+    cli_consulta_atlas.main(["estadías pendientes", "--viajes", str(viajes_csv), "--raiz-atlas", str(tmp_path)])
+    salida = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    soporte = salida["resultado"]["soporte"]
+    texto = json.dumps(soporte, ensure_ascii=False)
+    assert soporte["tipo"] == "ESTADIAS"
+    assert soporte["columnas"] == ["Fecha", "Transporte", "Guías", "Chofer", "Estado de confirmación"]
+    assert soporte["filas"] == [["2026-10-02", "0000361953", "475222", "PATRICK ORTIZ", "Pendiente de confirmación"]]
+    assert "TIENE_ESTADIA" not in texto and "tipo_evento" not in texto and "interno-1" not in texto
