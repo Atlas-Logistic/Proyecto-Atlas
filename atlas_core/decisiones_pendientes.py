@@ -1409,6 +1409,28 @@ def _vehiculos_confirmados_para_rut(
 _ACCIONES_LEDGER_PATENTE_ELEGIDA = frozenset({"USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE"})
 
 
+def _actor_es_humano(actor: object) -> bool:
+    """Caso real 474708: una `SELECCIONAR_OTRA_PATENTE` aplicada por
+    `ATLAS_AUTOMATICO` (472477) contaba como "decisión humana previa" y
+    reforzaba al mismo candidato en la siguiente guía del chofer. Una
+    aplicación sin actor (ledger antiguo) se sigue tratando como humana."""
+    texto = str(actor or "").strip().upper()
+    return not (texto.startswith("ATLAS") or texto == "B1")
+
+
+def _distancia_documental_patente(a: str, b: str) -> int:
+    """Caracteres distintos entre la lectura documental y una patente del
+    catálogo (misma longitud); otra longitud nunca es "cercana"."""
+    return sum(x != y for x, y in zip(a, b)) if len(a) == len(b) else max(len(a), len(b))
+
+
+# Distancia documental máxima que tolera cada nivel para resolver solo
+# (misma calibración que `atlas_ia.evidencia_dominios.convergencia_vehiculo`).
+_DISTANCIA_DOCUMENTAL_MAXIMA_POR_NIVEL = {
+    "CONFIRMACION_HUMANA": 2, "DOCUMENTAL_INDEPENDIENTE": 1, "DOCUMENTAL_DEBIL": 1,
+}
+
+
 def _patentes_por_decision_humana_de_rut(
     *, campo: str, rut_normalizado: str, decisiones_aplicadas: Iterable[Mapping[str, object]],
 ) -> set[str]:
@@ -1439,6 +1461,8 @@ def _patentes_por_decision_humana_de_rut(
             continue
         if normalizar_rut(str(ap.get("rut_chofer", "") or "")) != rut_normalizado:
             continue
+        if not _actor_es_humano(ap.get("actor")):
+            continue  # una resolución automática previa nunca es "decisión humana"
         if str(ap.get("tipo_vehiculo", "")).strip() not in ("", tipo_campo):
             continue
         canonica = normalizar_patente_vehiculo(str(ap.get("patente_canonica", "") or ""))
@@ -1467,6 +1491,11 @@ def _razon_legible_candidato(*, patente: str, evidencias: tuple[str, ...], confl
     }
     razones = [frases_evidencia[e] for e in evidencias if e in frases_evidencia]
     razones += [f"corroborada por {e.split('(')[1].rstrip(')')} transporte(s) independiente(s)" for e in evidencias if e.startswith("CORROBORACION_TRANSPORTE_INDEPENDIENTE")]
+    razones += [
+        f"difiere de \"{valor_documental}\" en un solo carácter y ya circuló con el otro vehículo de este "
+        f"documento en {e.split('(')[1].rstrip(')')} transporte(s)"
+        for e in evidencias if e.startswith("COMBINACION_VEHICULO_CONOCIDA")
+    ]
     if any(e == "CORROBORACION_MISMO_TRANSPORTE" for e in evidencias):
         razones.append("aparece en otro documento del mismo transporte (no es una fuente independiente)")
     texto = f"Atlas considera \"{patente}\" porque " + "; ".join(razones) + "." if razones else f"Atlas encontró \"{patente}\" sin evidencia suficiente."
@@ -1479,6 +1508,7 @@ def evaluar_evidencia_patente(
     *, campo: str, valor_documental: str, rut_chofer: str, tipo_esperado: str | None,
     numero_transporte_actual: str, filas: Iterable[Mapping[str, object]], vehiculos: Iterable[object],
     decisiones_aplicadas: Iterable[Mapping[str, object]] = (),
+    patente_contexto: str = "",
 ) -> dict[str, object]:
     """Bloque VEHÍCULO E1 -- combina, de forma determinista y auditable,
     todas las señales ya disponibles en el sistema para explicar (nunca
@@ -1570,8 +1600,35 @@ def evaluar_evidencia_patente(
         if tipo_esperado else set()
     )
 
+    # Contexto del MISMO documento (caso real 474708): la otra patente ya
+    # leída (el tracto si se evalúa la rampla, o al revés). Una patente del
+    # catálogo a un solo carácter de la lectura que ya circuló con ese mismo
+    # vehículo en otro transporte es candidata aunque el chofer sea otro: el
+    # conjunto tracto+rampla es evidencia del vehículo, no del chofer.
+    campo_contexto = {"patente_rampla": "patente_tracto", "patente_tracto": "patente_rampla"}.get(campo, "")
+    contexto_norm = normalizar_patente_vehiculo(str(patente_contexto or ""))
+    pares_contexto: dict[str, set[str]] = {}
+    # Mismas guardas que la ampliación R11: tipo esperado inequívoco y un
+    # vehículo de contexto que existe confirmado/activo en el catálogo.
+    if (
+        tipo_esperado and campo_contexto and contexto_norm and contexto_norm != valor_norm
+        and contexto_norm in homologables_por_patente
+    ):
+        for fila in filas:
+            if normalizar_patente_vehiculo(str(fila.get(campo_contexto, "") or "")) != contexto_norm:
+                continue
+            patente_fila = normalizar_patente_vehiculo(str(fila.get(campo, "") or ""))
+            transporte_fila = str(fila.get("numero_transporte", "") or "").strip()
+            if (
+                patente_fila and patente_fila != valor_norm and transporte_fila
+                and transporte_fila != numero_transporte_actual
+                and _distancia_documental_patente(valor_norm, patente_fila) <= 1
+            ):
+                pares_contexto.setdefault(patente_fila, set()).add(transporte_fila)
+
     patentes_candidatas = (
         set(transportes_por_patente) | confirmadas_para_rut | decididas_por_humano | patentes_ocr_similares
+        | set(pares_contexto)
     ) - {valor_norm}
     candidatos: list[dict[str, object]] = []
     for patente in sorted(patentes_candidatas):
@@ -1619,11 +1676,14 @@ def evaluar_evidencia_patente(
             evidencias.append("DECISION_HUMANA_PREVIA_MISMO_RUT")
         if _diferencia_ocr_segura(valor_norm, patente):
             evidencias.append("SIMILITUD_OCR_CALIBRADA")
+        n_pares_contexto = len(pares_contexto.get(patente, ()))
+        if n_pares_contexto:
+            evidencias.append(f"COMBINACION_VEHICULO_CONOCIDA({n_pares_contexto})")
 
         es_ancla_humana = es_confirmacion_directa or es_decision_humana_previa
         if es_ancla_humana:
             nivel = NIVEL_CONFIRMACION_HUMANA
-        elif n_independientes >= 1:
+        elif n_independientes >= 1 or n_pares_contexto >= 1:
             nivel = NIVEL_DOCUMENTAL_INDEPENDIENTE
         else:
             nivel = NIVEL_DOCUMENTAL_DEBIL
@@ -1632,6 +1692,7 @@ def evaluar_evidencia_patente(
             "patente": patente, "vehiculo_id": vehiculo.vehiculo_id, "tipo_vehiculo": vehiculo.tipo,
             "nivel": nivel, "evidencias": tuple(evidencias), "conflictos": tuple(conflictos),
             "guias": guias, "transportes_independientes": n_independientes,
+            "distancia_documental": _distancia_documental_patente(valor_norm, patente),
             "referencias_fuente": referencias_fuente,
             "razon_legible": _razon_legible_candidato(
                 patente=patente, evidencias=tuple(evidencias), conflictos=tuple(conflictos), valor_documental=valor_documental,
@@ -1651,45 +1712,57 @@ def evaluar_evidencia_patente(
             "explicacion": f"No puedo determinarlo con seguridad: ningún vehículo confirmado/activo asociado a este RUT tiene evidencia relevante para \"{valor_documental}\".",
         }
 
-    mejor_nivel = candidatos[0]["nivel"]
-    competidores_mejor_nivel = [c for c in candidatos if c["nivel"] == mejor_nivel]
-    # Bloque VEHÍCULO E2 -- caso real 472339 (Cristopher Retamal, RUT
-    # 17576134-9): OCR leyó "BPHF67"; el chofer tiene DOS transportes
-    # independientes previos (472037, 472227) con "BPHR67" -- evidencia
-    # DOCUMENTAL_INDEPENDIENTE genuina, no repetición del mismo documento
-    # -- y "BPHF67"/"BPHR67" difieren en una única confusión OCR
-    # calibrada. Antes de este bloque, DOCUMENTAL_INDEPENDIENTE nunca
-    # podía resolver solo (sólo CONFIRMACION_HUMANA lo hacía), así que
-    # esta patente quedaba siempre en SUGERENCIA_HUMANA aunque no hubiera
-    # ningún candidato competidor.
-    #
-    # Se agrega DOCUMENTAL_INDEPENDIENTE como segundo nivel que también
-    # puede resolver solo -- pero SÓLO cuando, además de ser el único
-    # candidato en el nivel más alto, el propio candidato trae
-    # `SIMILITUD_OCR_CALIBRADA`: el valor documental de ESTE documento
-    # tiene que ser una lectura OCR plausible del canónico, no sólo "un
-    # vehículo que este chofer usó alguna vez". Esto es deliberado --
-    # evita que un histórico viejo se imponga cuando el chofer
-    # simplemente cambió de vehículo (la patente nueva, genuina, no se
-    # parece a ninguna anterior y por lo tanto nunca gana
-    # `SIMILITUD_OCR_CALIBRADA` contra sí misma).
-    resuelve_automaticamente = len(competidores_mejor_nivel) == 1 and (
-        mejor_nivel == NIVEL_CONFIRMACION_HUMANA
+    # Bloque VEHÍCULO E4 -- compatibilidad documental (caso real 474708:
+    # OCR "JE6159", real "JE6359"; el motor elegía "JD8659" por historial del
+    # chofer aunque difiere en 3 de 6 caracteres de lo leído). El historial
+    # corrige errores OCR, pero nunca impone una patente que el documento no
+    # puede haber querido decir:
+    # - sólo resuelve una candidata a la distancia que tolera su nivel;
+    # - y sólo si es la ÚNICA compatible con la lectura: dos o más
+    #   candidatas plausibles -- aunque una tenga más historial -- se
+    #   preguntan (publicar una decisión es preferible a asignar mal).
+    # Un empate en el nivel más alto sigue obligando a preguntar (E1/E3):
+    # la compatibilidad sólo puede redirigir o frenar una puntera única,
+    # nunca romper un empate.
+    compatibles = [
+        c for c in candidatos
+        if c["distancia_documental"] <= _DISTANCIA_DOCUMENTAL_MAXIMA_POR_NIVEL[c["nivel"]]
+    ]
+    empatadas_arriba = [c for c in candidatos if c["nivel"] == candidatos[0]["nivel"]]
+    if len(empatadas_arriba) > 1:
+        compatibles = empatadas_arriba
+    ganadora = compatibles[0] if len(compatibles) == 1 else None
+    evidencia_suficiente = ganadora is not None and (
+        ganadora["nivel"] == NIVEL_CONFIRMACION_HUMANA
         or (
-            mejor_nivel == NIVEL_DOCUMENTAL_INDEPENDIENTE
-            and "SIMILITUD_OCR_CALIBRADA" in competidores_mejor_nivel[0]["evidencias"]
+            ganadora["nivel"] == NIVEL_DOCUMENTAL_INDEPENDIENTE
+            and (
+                "SIMILITUD_OCR_CALIBRADA" in ganadora["evidencias"]
+                or any(e.startswith("COMBINACION_VEHICULO_CONOCIDA") for e in ganadora["evidencias"])
+            )
         )
     )
-    if resuelve_automaticamente:
-        resultado = RESULTADO_RESUELTO_AUTOMATICAMENTE
-        explicacion = candidatos[0]["razon_legible"]
+    if evidencia_suficiente:
+        candidatos.remove(ganadora)
+        candidatos.insert(0, ganadora)
+        return {
+            "resultado": RESULTADO_RESUELTO_AUTOMATICAMENTE, "candidatos": candidatos,
+            "explicacion": ganadora["razon_legible"], "ganadora": ganadora["patente"],
+        }
+    resultado = RESULTADO_SUGERENCIA_HUMANA
+    if not compatibles:
+        explicacion = (
+            f'Ninguna patente conocida es compatible con la lectura del documento ("{valor_documental}") '
+            "-- el historial no basta para elegir, requiere confirmación humana."
+        )
+    elif ganadora is None:
+        nombres = ", ".join(f'"{c["patente"]}"' for c in compatibles)
+        explicacion = (
+            f"Hay {len(compatibles)} candidatas con evidencia comparable ({nombres}) -- Atlas no elige "
+            "entre ellas, requiere confirmación humana."
+        )
     else:
-        resultado = RESULTADO_SUGERENCIA_HUMANA
-        if len(competidores_mejor_nivel) > 1:
-            nombres = ", ".join(f'"{c["patente"]}"' for c in competidores_mejor_nivel)
-            explicacion = f"Hay {len(competidores_mejor_nivel)} candidatas con evidencia comparable ({nombres}) -- Atlas no elige entre ellas, requiere confirmación humana."
-        else:
-            explicacion = candidatos[0]["razon_legible"]
+        explicacion = ganadora["razon_legible"]
 
     return {"resultado": resultado, "candidatos": candidatos, "explicacion": explicacion}
 
@@ -1765,11 +1838,14 @@ def enriquecer_decisiones_vehiculo(
             fila = filas_por_guia.get(guia)
             rut = str(fila.get("rut_chofer", "")).strip() if fila else ""
             if rut:
+                campo_decision = str(decision.get("campo", ""))
+                campo_otro = {"patente_rampla": "patente_tracto", "patente_tracto": "patente_rampla"}.get(campo_decision, "")
                 evaluacion = evaluar_evidencia_patente(
-                    campo=str(decision.get("campo", "")), valor_documental=str(decision.get("valor_documental", "")),
+                    campo=campo_decision, valor_documental=str(decision.get("valor_documental", "")),
                     rut_chofer=rut, tipo_esperado=decision.get("tipo_vehiculo_propuesto"),
                     numero_transporte_actual=transporte, filas=filas, vehiculos=vehiculos,
                     decisiones_aplicadas=decisiones_aplicadas,
+                    patente_contexto=str(fila.get(campo_otro, "")) if fila and campo_otro else "",
                 )
                 sugeridos = evaluacion["candidatos"]
                 motor_resolvio = evaluacion.get("resultado") == RESULTADO_RESUELTO_AUTOMATICAMENTE
@@ -1843,6 +1919,8 @@ def enriquecer_decisiones_vehiculo(
                 decision["evaluacion_evidencia"] = {
                     "resultado": evaluacion["resultado"], "explicacion": evaluacion["explicacion"],
                 }
+                if evaluacion.get("ganadora"):
+                    decision["evaluacion_evidencia"]["ganadora"] = evaluacion["ganadora"]
                 # Base limpia -- nunca acumula sobre acciones ya agregadas
                 # en una corrida anterior (evita duplicados y permite que
                 # unas candidatas que desaparecieron también retiren las

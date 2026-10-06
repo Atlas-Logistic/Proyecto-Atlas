@@ -7709,6 +7709,11 @@ def reconciliar_bandeja_decisiones(
             return None
         if len(cands) == 1:
             return None  # ya lo cubre USAR_PATENTE_EXISTENTE
+        # Bloque VEHÍCULO E4: la ganadora la decide el motor de evidencia
+        # (compatibilidad con la lectura documental), nunca sólo el nivel.
+        ganadora_motor = str((decision.get("evaluacion_evidencia") or {}).get("ganadora") or "")
+        if ganadora_motor:
+            return ganadora_motor if any(str(c.get("patente")) == ganadora_motor for c in cands) else None
         rangos = [(_ORDEN_NIVEL.get(str(c.get("nivel", "")), 9), c) for c in cands]
         mejor = min(r for r, _ in rangos)
         top = [c for r, c in rangos if r == mejor]
