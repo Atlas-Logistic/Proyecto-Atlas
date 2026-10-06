@@ -181,3 +181,62 @@ def test_marcador_y_numero_en_bloques_separados_misma_fila_se_recupera():
 
 def test_sin_bloques_se_abstiene_sin_excepcion():
     assert _extraer_numero_guia_geometrico([]) == {}
+
+
+# ============================================================
+# 7. Marcador ABSORBIDO por PaddleOCR -- caso real 475449 (Mobile,
+#    Salomón Pizarro, transporte 0000362416): la imagen dice "Nº 475449"
+#    pero el OCR entrega "N475449" pegado. Geometría real medida sobre una
+#    copia del original (que nunca se modifica).
+# ============================================================
+
+
+def _encabezado_real_475449():
+    return [
+        _bloque("R.U.T.:92.176.000-0", 2025, 359, 2658 - 2025, 501 - 359, conf=0.99),
+        _bloque("GUIA DE DESPACHO", 2001, 467, 2682 - 2001, 613 - 467, conf=0.99),
+        _bloque("ELECTRÓNICA", 2092, 558, 2582 - 2092, 679 - 558, conf=0.99),
+        _bloque("S.IL-SANTIAGO PONIENTE", 2096, 817, 2600 - 2096, 908 - 817, conf=0.95),
+        _bloque("0080557109", 2400, 899, 2704 - 2400, 972 - 899, conf=0.99),
+    ]
+
+
+def test_a_marcador_absorbido_bajo_el_ancla_recupera_475449():
+    bloques = [*_encabezado_real_475449(), _bloque("N475449", 2175, 686, 2498 - 2175, 780 - 686, conf=0.98)]
+    assert _extraer_numero_guia_geometrico(bloques) == {"valor": "475449"}
+
+
+def test_b_marcador_absorbido_fuera_de_la_ventana_se_abstiene():
+    bloques = [*_encabezado_real_475449(), _bloque("N475449", 2175, 3200, 320, 94, conf=0.98)]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
+
+
+def test_c_marcador_absorbido_y_otro_candidato_distinto_se_abstiene():
+    bloques = [
+        *_encabezado_real_475449(),
+        _bloque("N475449", 2175, 686, 2498 - 2175, 780 - 686, conf=0.98),
+        _bloque("Nº 475450", 2175, 760, 330, 90, conf=0.98),
+    ]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
+
+
+def test_d_marcador_absorbido_con_numero_transporte_se_rechaza():
+    bloques = [*_encabezado_real_475449(), _bloque("N0000362416", 2175, 686, 380, 94, conf=0.98)]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
+
+
+def test_d_marcador_absorbido_nunca_toma_un_cero_inicial_como_digito():
+    # "º" leído como "0": nunca se convierte en el número "0475449".
+    bloques = [*_encabezado_real_475449(), _bloque("N0475449", 2175, 686, 380, 94, conf=0.98)]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
+
+
+def test_e_formatos_con_marcador_explicito_siguen_funcionando():
+    for texto in ("Nº 475449", "N° 475449", "N? 475449", "N°475449"):
+        bloques = [*_encabezado_real_475449(), _bloque(texto, 2175, 686, 2498 - 2175, 780 - 686, conf=0.98)]
+        assert _extraer_numero_guia_geometrico(bloques) == {"valor": "475449"}, texto
+
+
+def test_marcador_absorbido_no_amplia_el_extractor_textual():
+    textos = ["ACEROS AZA S.A", "GUIA DE DESPACHO", "Sucursal Temuco", "ELECTRONICA", "N475449"]
+    assert extraer_datos(textos)["número de guía"] == "No encontrado"

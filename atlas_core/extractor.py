@@ -1360,6 +1360,11 @@ def _extraer_transporte_geometrico(
 # (caso 464453: "N? 464453") del signo "°" mal leído; nunca abre nada
 # más que esta posición puntual del marcador "N".
 _PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO?]\.?\s*([0-9]{5,8})$")
+# Caso real 475449 (Mobile, Salomón Pizarro): PaddleOCR absorbe el "º" y
+# entrega "N475449" pegado. Sólo para este camino geométrico (con las
+# mismas ancla/ventana/unicidad); el primer dígito nunca es 0 para no
+# convertir un "º" leído como "0" ("N0475449") en parte del número.
+_PATRON_MARCADOR_NUMERO_GUIA_ABSORBIDO = re.compile(r"^N([1-9][0-9]{4,7})$")
 _PATRON_MARCADOR_NUMERO_GUIA_SOLO = re.compile(r"^(?:N[°ºO?]\.?|NRO\.?)$")
 _PATRON_CANDIDATO_NUMERICO_PURO = re.compile(r"^[0-9]{5,8}$")
 
@@ -1462,7 +1467,10 @@ def _extraer_numero_guia_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         ]
 
         for item in en_ventana:
-            coincidencia = _PATRON_MARCADOR_NUMERO_GUIA.match(item["simple"])
+            coincidencia = (
+                _PATRON_MARCADOR_NUMERO_GUIA.match(item["simple"])
+                or _PATRON_MARCADOR_NUMERO_GUIA_ABSORBIDO.match(item["simple"])
+            )
             if coincidencia:
                 numero = coincidencia.group(1)
                 if _es_candidato_numero_guia_valido(numero):
