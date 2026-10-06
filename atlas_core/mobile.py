@@ -2240,6 +2240,7 @@ _EVENTO_CANONICO_MOBILE = {
 
 
 VIA_VIAJE_CREADO_CON_ESTA_GUIA = "VIAJE_CREADO_CON_ESTA_GUIA"
+VIA_DOCUMENTO_EN_VIAJE_DEL_REPORTE = "DOCUMENTO_EN_VIAJE_DEL_REPORTE"
 
 
 def _viajes_del_reporte_vigente(raiz: Path) -> list[dict]:
@@ -2288,11 +2289,30 @@ def _transporte_de_viaje_creado_con_esta_guia(viajes: list[dict], envio_id: str)
     return transportes[0] if len(transportes) == 1 else ""
 
 
+def _envio_en_revision_con_vinculo_propio(registro: Mapping[str, object], asociacion: Mapping[str, object]) -> bool:
+    """Caso real 475413 -> 0000362423 (envío 8fcb1e7f, 06-10-2026): la guía
+    creó su viaje, pero el envío quedó REQUIERE_REVISION por una duda
+    documental INDEPENDIENTE del vínculo (OBRA_DESTINO_SIN_CORROBORAR) y la
+    DEVOLUCION_TOTAL del chofer nunca llegó al viaje. La revisión sólo se
+    ignora para las incidencias cuando la duda no es sobre el vínculo mismo:
+    - foto ilegible (`problema_captura`): no hay documento que vincular;
+    - `PROPUESTA_REQUIERE_REVISION`: varios transportes, decide una persona."""
+    return (
+        registro.get("estado") == "REQUIERE_REVISION"
+        and not registro.get("problema_captura")
+        and asociacion.get("estado") != "PROPUESTA_REQUIERE_REVISION"
+    )
+
+
 def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -> list[dict]:
-    """Lleva las incidencias de los envíos GUIA ya ASOCIADOS a un viaje al
+    """Lleva las incidencias de los envíos GUIA vinculados a un viaje al
     registro canónico `eventos_operacionales.json`, con la MISMA semántica e
-    idempotencia que Desktop (un hecho por tipo y viaje). Cada envío recuerda
-    qué incidencias ya llevó (`eventos_canonicos`), así Mobile nunca:
+    idempotencia que Desktop (un hecho por tipo y viaje). Vinculado significa
+    ASOCIADO, o REQUIERE_REVISION por una duda ajena al vínculo cuando el
+    propio documento del envío figura en exactamente un viaje del reporte
+    vigente (ver `_envio_en_revision_con_vinculo_propio`). La observación
+    del chofer va como `nota` sólo si el hecho no tiene ya una. Cada envío
+    recuerda qué incidencias ya llevó (`eventos_canonicos`), así Mobile nunca:
     - reactiva un hecho que una persona anuló en Desktop;
     - retrocede una estadía ya APROBADA a "espera";
     - pisa la nota escrita en Desktop."""
@@ -2307,20 +2327,33 @@ def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -
         if not isinstance(asociacion, Mapping):
             asociacion = {}
         transporte = str(asociacion.get("numero_transporte") or "").strip()
-        if es_evidencia_firmada(registro) or registro.get("estado") != "ASOCIADO":
+        if es_evidencia_firmada(registro):
+            continue
+        en_revision = _envio_en_revision_con_vinculo_propio(registro, asociacion)
+        if registro.get("estado") != "ASOCIADO" and not en_revision:
             continue
         ya = registro.get("eventos_canonicos") or {}
         pendientes = [t for t in tipos_novedad_de(registro) if t in _EVENTO_CANONICO_MOBILE and t not in ya]
         if not pendientes:
             continue
         via = None
-        if not transporte and asociacion.get("estado") == "SIN_ASOCIACION":
+        if en_revision:
+            # Siempre la prueba del reporte, aunque la asociación tenga
+            # transporte: en revisión ese valor no basta por sí solo, y si
+            # contradice al viaje que contiene el documento no se proyecta.
+            if viajes_reporte is None:
+                viajes_reporte = _viajes_del_reporte_vigente(raiz)
+            del_reporte = _transporte_de_viaje_creado_con_esta_guia(viajes_reporte, envio_id)
+            transporte = del_reporte if del_reporte and transporte in ("", del_reporte) else ""
+            via = VIA_DOCUMENTO_EN_VIAJE_DEL_REPORTE if transporte else None
+        elif not transporte and asociacion.get("estado") == "SIN_ASOCIACION":
             if viajes_reporte is None:
                 viajes_reporte = _viajes_del_reporte_vigente(raiz)
             transporte = _transporte_de_viaje_creado_con_esta_guia(viajes_reporte, envio_id)
             via = VIA_VIAJE_CREADO_CON_ESTA_GUIA if transporte else None
         if not transporte:
             continue
+        observacion = str(registro.get("observacion") or "").strip()
         existentes = {e.get("clave_idempotencia"): e for e in reo.leer_eventos_operacionales(raiz=raiz).get("eventos", [])}
         try:
             enriquecimiento = reo.resolver_enriquecimiento_transporte(raiz=raiz, numero_transporte=transporte)
@@ -2344,8 +2377,11 @@ def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -
             ):
                 marcas[tipo_mobile] = {"resultado": "OMITIDO_ESTADIA_YA_APROBADA", "evento_id": existente.get("evento_id"), "en": ahora}
                 continue
+            # La observación del chofer sólo llena una nota vacía: nunca pisa
+            # la de Desktop ni la de otro envío que llegó antes.
+            nota = observacion if existente is None or not str(existente.get("nota") or "").strip() else ""
             comun = dict(
-                raiz=raiz, numero_transporte=transporte, origen=origen,
+                raiz=raiz, numero_transporte=transporte, origen=origen, nota=nota,
                 referencia=f"ENVIO_MOBILE:{envio_id}", enriquecimiento=enriquecimiento,
             )
             if estado_estadia:

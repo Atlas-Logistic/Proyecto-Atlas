@@ -343,7 +343,9 @@ def test_viaje_creado_con_dos_coincidencias_no_proyecta(operacion) -> None:
     assert repo.cargar(envio).get("eventos_canonicos") is None
 
 
-def test_viaje_creado_pero_envio_en_revision_no_proyecta(operacion) -> None:
+def test_viaje_creado_con_envio_en_revision_si_proyecta(operacion) -> None:
+    # Antes del caso real 475413 esto NO proyectaba: cualquier revisión
+    # documental borraba la incidencia aunque el viaje estuviera demostrado.
     repo, dataset = operacion
     envio = _guia_que_crea_viaje(repo, dataset, "474571", "0000360122")
     registro = repo.cargar(envio)
@@ -351,8 +353,11 @@ def test_viaje_creado_pero_envio_en_revision_no_proyecta(operacion) -> None:
     repo.guardar(envio, registro)
     _publicar_reporte(repo.raiz_atlas, [("0000360122", [envio])])
 
-    assert registrar_eventos_canonicos_mobile(repo) == []
-    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+    registrar_eventos_canonicos_mobile(repo)
+
+    estadia = _eventos(repo.raiz_atlas)[("TIENE_ESTADIA", "0000360122")]
+    assert estadia["estado_incidencia"] == "ESPERA_ESTADIA"
+    assert repo.cargar(envio)["eventos_canonicos"]["ESPERA_AUTORIZACION_ESTADIA"]["via"] == "DOCUMENTO_EN_VIAJE_DEL_REPORTE"
 
 
 def test_viaje_creado_espera_y_luego_tiene_estadia_pasa_a_aprobada(operacion) -> None:
@@ -398,3 +403,180 @@ def test_adaptador_de_consultas_da_identidad_propia_a_cada_incidencia() -> None:
     assert [(e["evento_id"], e["tipo_evento"]) for e in eventos] == [
         ("v1", "DOBLE_VUELTA"), ("v2:TIENE_ESTADIA", "TIENE_ESTADIA"), ("v2:DEVOLUCION_TOTAL", "DEVOLUCION_TOTAL"),
     ]
+
+
+# ---- guía en revisión con viaje demostrado (caso real 475413 -> 0000362423)
+#
+# La incidencia la declara el chofer sobre el VIAJE; una duda documental
+# independiente (obra/destino/cliente) no la hace desaparecer. El vínculo
+# documento -> viaje sigue exigiendo la MISMA prueba: el propio documento
+# del envío figura en exactamente un viaje del reporte vigente.
+
+def _guia_en_revision(repo, dataset, guia, transporte, *, tipos='["DEVOLUCION_TOTAL"]', **metadata):
+    """Mismo `procesar_envio_mobile`: el Core marca la guía REVISAR por una
+    duda de obra (independiente del vínculo con el viaje)."""
+    envio = _recibir(repo, tipos_novedad=tipos, **metadata)
+    procesar_envio_mobile(
+        repo, envio, dataset=dataset,
+        procesador=lambda ruta: {
+            "numero_guia": guia, "numero_transporte": transporte,
+            "indicador_revision": "REVISAR", "motivos_revision_documento": "OBRA_DESTINO_SIN_CORROBORAR",
+        },
+    )
+    registro = repo.cargar(envio)
+    assert registro["estado"] == "REQUIERE_REVISION"
+    assert registro["problema_captura"] is False
+    return envio
+
+
+def test_devolucion_total_en_guia_en_revision_con_viaje_demostrado_genera_evento(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423")
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio])])
+
+    (salida,) = registrar_eventos_canonicos_mobile(repo)
+
+    assert salida["numero_transporte"] == "0000362423"
+    devolucion = _eventos(repo.raiz_atlas)[("DEVOLUCION_TOTAL", "0000362423")]
+    assert devolucion["estado"] == "ACTIVO" and devolucion["nota"] == ""  # sin observación: nunca se inventa
+    assert devolucion["procedencias"][0]["referencia"] == f"ENVIO_MOBILE:{envio}"
+    marca = repo.cargar(envio)["eventos_canonicos"]["DEVOLUCION_TOTAL"]
+    assert marca["resultado"] == "CREADO" and marca["via"] == "DOCUMENTO_EN_VIAJE_DEL_REPORTE"
+
+
+def test_observacion_mobile_llega_como_nota_del_evento(operacion) -> None:
+    repo, dataset = operacion
+    observacion = "No se recibe por mal estado al ingreso y descarga de la obra. (Terreno lleno de barro)"
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423", observacion=observacion)
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio])])
+
+    registrar_eventos_canonicos_mobile(repo)
+
+    assert _eventos(repo.raiz_atlas)[("DEVOLUCION_TOTAL", "0000362423")]["nota"] == observacion
+
+
+def test_observacion_mobile_nunca_pisa_la_nota_de_desktop(operacion) -> None:
+    repo, dataset = operacion
+    reo.registrar_evento(
+        raiz=repo.raiz_atlas, tipo_evento="DEVOLUCION_TOTAL", numero_transporte="0000362423",
+        nota="Nota de Javier", origen="DESKTOP:Javier",
+    )
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423", observacion="texto del chofer")
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio])])
+
+    registrar_eventos_canonicos_mobile(repo)
+
+    devolucion = _eventos(repo.raiz_atlas)[("DEVOLUCION_TOTAL", "0000362423")]
+    assert devolucion["nota"] == "Nota de Javier"
+    assert repo.cargar(envio)["eventos_canonicos"]["DEVOLUCION_TOTAL"]["resultado"] == "EXISTENTE"
+
+
+def test_observacion_llega_como_nota_tambien_en_guia_asociada(operacion) -> None:
+    repo, dataset = operacion
+    envio = _recibir(repo, tipos_novedad='["ESPERA_AUTORIZACION_ESTADIA"]', observacion="estadia a espera de firma")
+    _procesar_guia(repo, envio, dataset, "475201", "0000361852")
+    assert repo.cargar(envio)["estado"] == "ASOCIADO"
+    _publicar_reporte(repo.raiz_atlas, [("0000361852", [envio])])
+
+    registrar_eventos_canonicos_mobile(repo)
+
+    estadia = _eventos(repo.raiz_atlas)[("TIENE_ESTADIA", "0000361852")]
+    assert estadia["nota"] == "estadia a espera de firma" and estadia["estado_incidencia"] == "ESPERA_ESTADIA"
+
+
+def test_guia_en_revision_sin_viaje_demostrado_no_genera_evento(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423")
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", ["otro-envio"])])  # 0 coincidencias
+
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+    assert repo.cargar(envio).get("eventos_canonicos") is None  # sin marca: reintentable
+
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio]), ("0000362424", [envio])])  # 2 viajes: ambiguo
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+
+
+def test_guia_en_revision_con_transporte_asociado_distinto_al_viaje_no_genera_evento(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423")
+    registro = repo.cargar(envio)
+    registro["resultado_asociacion"] = {**registro["resultado_asociacion"], "numero_transporte": "0000999999"}
+    repo.guardar(envio, registro)
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio])])
+
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+
+
+def test_envio_en_revision_por_asociacion_ambigua_o_captura_no_genera_evento(operacion) -> None:
+    repo, dataset = operacion
+    ambiguo = _guia_en_revision(repo, dataset, "475413", "0000362423")
+    registro = repo.cargar(ambiguo)
+    registro["resultado_asociacion"] = {**registro["resultado_asociacion"], "estado": "PROPUESTA_REQUIERE_REVISION"}
+    repo.guardar(ambiguo, registro)
+    ilegible = _guia_en_revision(repo, dataset, "475414", "0000362425")
+    registro = repo.cargar(ilegible)
+    registro["problema_captura"] = True
+    repo.guardar(ilegible, registro)
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [ambiguo]), ("0000362425", [ilegible])])
+
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"] == []
+
+
+def test_estadia_en_guia_en_revision_con_viaje_demostrado_genera_evento(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_en_revision(repo, dataset, "475419", "0000362421", tipos='["ESPERA_AUTORIZACION_ESTADIA"]')
+    _publicar_reporte(repo.raiz_atlas, [("0000362421", [envio])])
+
+    registrar_eventos_canonicos_mobile(repo)
+
+    estadia = _eventos(repo.raiz_atlas)[("TIENE_ESTADIA", "0000362421")]
+    assert estadia["estado_incidencia"] == "ESPERA_ESTADIA" and estadia["estado_gestion"] == "PENDIENTE_RESPUESTA"
+
+
+def test_reintentos_de_guia_en_revision_no_duplican_eventos(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423", observacion="barro")
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio])])
+    registrar_eventos_canonicos_mobile(repo)
+    revision_inicial = reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["revision"]
+
+    assert registrar_eventos_canonicos_mobile(repo) == []  # ya marcado en el envío
+    # aunque se pierda la marca del envío (reproceso), la clave de idempotencia evita el duplicado
+    registro = repo.cargar(envio)
+    registro.pop("eventos_canonicos")
+    repo.guardar(envio, registro)
+    (salida,) = registrar_eventos_canonicos_mobile(repo)
+    assert salida["eventos"]["DEVOLUCION_TOTAL"]["resultado"] == "EXISTENTE"
+
+    eventos = reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)
+    assert len(eventos["eventos"]) == 1 and eventos["revision"] == revision_inicial
+    # y si más tarde el envío converge a ASOCIADO, tampoco se repite
+    registro = repo.cargar(envio)
+    registro["estado"] = "ASOCIADO"
+    repo.guardar(envio, registro)
+    assert registrar_eventos_canonicos_mobile(repo) == []
+    assert len(reo.leer_eventos_operacionales(raiz=repo.raiz_atlas)["eventos"]) == 1
+
+
+def test_incidencia_y_pendiente_tecnico_independiente_conviven(operacion) -> None:
+    repo, dataset = operacion
+    envio = _guia_en_revision(repo, dataset, "475413", "0000362423")
+    _publicar_reporte(repo.raiz_atlas, [("0000362423", [envio])])
+    antes = repo.cargar(envio)
+    fila_antes = next(f for f in _filas(dataset) if f["archivo"] == f"mobile/{envio}/original.jpg")
+
+    registrar_eventos_canonicos_mobile(repo)
+
+    despues = repo.cargar(envio)
+    assert ("DEVOLUCION_TOTAL", "0000362423") in _eventos(repo.raiz_atlas)
+    # el pendiente documental sigue intacto: ni el envío ni la fila cambian de estado
+    assert despues["estado"] == "REQUIERE_REVISION"
+    assert despues["resultado_asociacion"] == antes["resultado_asociacion"]
+    fila_despues = next(f for f in _filas(dataset) if f["archivo"] == f"mobile/{envio}/original.jpg")
+    assert fila_despues == fila_antes
+    assert fila_despues["indicador_revision"] == "REVISAR"
+    assert fila_despues["motivos_revision_documento"] == "OBRA_DESTINO_SIN_CORROBORAR"
