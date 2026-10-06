@@ -906,6 +906,7 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
             simulacion = reparar_documento_focal_con_valores_conocidos(
                 raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=True,
                 reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
+                superar_resoluciones_automaticas=True,
                 numero_guia=str(fila.get("numero_guia", "")),
             )
         except ValueError as error:
@@ -996,6 +997,7 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
     resultado = reparar_documento_focal_con_valores_conocidos(
         raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=False,
         reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
+                superar_resoluciones_automaticas=True,
         numero_guia=str(plan.datos["guia"]),
     )
     if not resultado["cambios"]:

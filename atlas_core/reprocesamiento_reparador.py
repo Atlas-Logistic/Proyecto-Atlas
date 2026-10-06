@@ -806,7 +806,7 @@ def duplicados_guia_transporte(
 def reparar_documento_focal_con_valores_conocidos(
     *, raiz_atlas: str | Path, archivo: str, valores: Mapping[str, str], dry_run: bool = True,
     reconciliar: bool = True, tipos_ledger_superables: frozenset[str] = frozenset(),
-    numero_guia: str = "",
+    numero_guia: str = "", superar_resoluciones_automaticas: bool = False,
 ) -> dict[str, object]:
     """Persiste, para UN documento puntual ya identificado por
     `archivo`, valores YA conocidos de una reextracción real (nunca
@@ -819,6 +819,10 @@ def reparar_documento_focal_con_valores_conocidos(
     aplicación del ledger que NO bloquean el campo -- sólo para que una
     corrección explícita del operador pueda reemplazar a otra corrección
     explícita del operador; una decisión de Revisión sigue ganando.
+    `superar_resoluciones_automaticas`: una aplicación del ledger hecha por
+    Atlas o B1 (no por una persona) no bloquea el campo -- caso real 474708:
+    una SELECCIONAR_OTRA_PATENTE de ATLAS_AUTOMATICO impedía que la
+    corrección humana confirmada (DOCUMENTO_CORREGIR_CAMPO) la reemplazara.
 
     `archivo` debe identificar UNA fila (ruta completa; ver
     `_resolver_fila_por_archivo`); con `numero_guia` la fila además debe
@@ -833,6 +837,9 @@ def reparar_documento_focal_con_valores_conocidos(
         aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
         aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)
                         and str(a.get("tipo", "")) not in tipos_ledger_superables]
+        if superar_resoluciones_automaticas:
+            from atlas_core.decisiones_pendientes import _actor_es_humano
+            aplicaciones = [a for a in aplicaciones if _actor_es_humano(a.get("actor"))]
     except (OSError, ValueError):
         aplicaciones = []
 
