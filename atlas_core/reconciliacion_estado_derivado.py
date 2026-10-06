@@ -44,6 +44,7 @@ from atlas_core.revalidacion_documental import (
     guias_ruta_calculada_reanclables_por_numeracion_b_ocho,
     reconciliar_bandeja_decisiones,
     reconciliar_decisiones_destino_no_resuelto,
+    reconciliar_decisiones_peso_viaje,
     reconciliar_segunda_pasada_universal_sin_ocr,
     reconciliar_incidencias_rut_chofer_documental,
     revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr,
@@ -373,7 +374,15 @@ from atlas_core.revalidacion_documental import (
 # extractor.limpiar_sufijo_chofer_pegado`) -- caso real transporte
 # 0000360025, un viaje partido en dos entregas falsas. Subir a 25 fuerza
 # el primer barrido sobre operaciones ya migradas; idempotente.
-RULESET_VERSION = 25
+#
+# Subida de 25 a 26 -- REVISIÓN HUMANA SIEMPRE CON TARJETA: casos reales
+# sin ninguna vía visible para resolverlos: 475413 (cliente
+# sólo en el catálogo legado bloquea la pregunta de obra), 474708
+# (`PATENTE_SIN_HOMOLOGAR` sin tarjeta de vehículo) y 473263/473424 (peso
+# total del viaje fuera de rango, nuevo tipo `PESO_VIAJE_IMPLAUSIBLE`).
+# Subir a 26 fuerza el primer barrido sobre operaciones ya migradas;
+# idempotente.
+RULESET_VERSION = 26
 VERSION_ESTADO_DERIVADO = RULESET_VERSION
 NOMBRE_PENDIENTES_TECNICOS = "pendientes_tecnicos.json"
 INTERVALO_REINTENTO = timedelta(minutes=30)
@@ -1786,6 +1795,12 @@ def reconciliar_estado_derivado(
             raiz_atlas=raiz, reloj=lambda: instante, cache_memoizacion=_cache_regenerar_decisiones,
         )
         _marca_etapa("destino_no_resuelto")
+        # Peso total del viaje fuera de rango (casos reales 473263/473424):
+        # una tarjeta por viaje, nunca un viaje bloqueado sin pregunta.
+        deteccion_peso = reconciliar_decisiones_peso_viaje(
+            raiz_atlas=raiz, reloj=lambda: instante, cache_memoizacion=_cache_regenerar_decisiones,
+        )
+        _marca_etapa("peso_viaje_implausible")
         _t_bateria_fin = time.perf_counter()
 
         # Bloque REEVALUACIÓN RETROACTIVA UNIVERSAL -- traza: qué
@@ -1996,6 +2011,7 @@ def reconciliar_estado_derivado(
         "guias_contradiccion_destino_catalogo": limpieza_destino_catalogo["guias_contradiccion"],
         "destinos_coordenadas_completadas": limpieza_destino_coords["destinos_actualizados"],
         "decisiones_destino_no_resuelto_publicadas": deteccion_destino["decisiones_publicadas"],
+        "decisiones_peso_viaje": deteccion_peso,
         "envios_mobile_actualizados": limpieza_mobile["actualizados"],
         "decisiones_aplicadas_automaticamente": evidencia_decisiones["decisiones_aplicadas_automaticamente"],
         "convergencia_identidad_sin_ocr": {

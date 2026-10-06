@@ -78,6 +78,8 @@ ACCIONES = frozenset({
     "REGISTRAR_DIRECCION",
     # Bloque R9: única acción nueva de CLIENTE_AUSENTE.
     "REGISTRAR_CLIENTE_MANUAL",
+    # PESO_VIAJE_IMPLAUSIBLE: peso real escrito por un humano.
+    "CORREGIR_PESO",
 })
 LEDGER = "decisiones_aplicadas.json"
 
@@ -226,6 +228,7 @@ ACCIONES_POR_TIPO = {
     "CLIENTE_AUSENTE": frozenset({
         "REGISTRAR_CLIENTE_MANUAL", "NO_PUEDO_DETERMINAR", "POSPONER",
     }),
+    "PESO_VIAJE_IMPLAUSIBLE": frozenset({"CONFIRMAR", "CORREGIR_PESO", "POSPONER"}),
 }
 
 # Bloque P0 REVISIÓN V2 -- PLANIMPACTO AGRUPADO: tipos auditados para los
@@ -436,7 +439,7 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc), diferir_revalidacion_global: bool = False) -> dict[str, object]:
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, peso_corregido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc), diferir_revalidacion_global: bool = False) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -2004,6 +2007,57 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # ya no esté pendiente.
                     "evaluacion_evidencia_previa": decision.get("evaluacion_evidencia"),
                     "candidatos_evidencia_previos": decision.get("candidatos_evidencia"),
+                    "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                }
+            elif tipo == "PESO_VIAJE_IMPLAUSIBLE":
+                # CONFIRMAR: el peso documental es real -- se deja en el
+                # ledger y `gestor_viajes` deja de marcar ese mismo total.
+                # CORREGIR_PESO: Javier escribe el peso real del documento
+                # ancla; se reescribe `peso_kg` de ESA fila (mismo patrón de
+                # escritura directa con revert por campos que CLIENTE_AUSENTE).
+                documento_decision = decision.get("documento") or {}
+                archivo_decision = str(documento_decision.get("archivo") or "")
+                numero_guia_decision = str(documento_decision.get("numero_guia") or "")
+                peso_nuevo = None
+                if accion == "CORREGIR_PESO":
+                    texto_peso = str(peso_corregido or "").strip().replace(".", "").replace(" ", "")
+                    if not texto_peso.isdigit() or int(texto_peso) <= 0:
+                        raise ErrorAplicacionDecision("Indique el peso real en kilos, sólo con números (p. ej. 26940).")
+                    peso_nuevo = str(int(texto_peso))
+                    from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_peso
+                    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+                    with bloqueo_sesion(actual, "revalidacion_dataset"):
+                        filas_dataset = _leer_filas(dataset)
+                        fila_objetivo = next(
+                            (f for f in filas_dataset if str(f.get("archivo", "")) == archivo_decision), None,
+                        )
+                        if fila_objetivo is None:
+                            raise ErrorAplicacionDecision("No se encontró el documento de esta decisión en el dataset vigente.")
+                        snapshot_fila_antes = dict(fila_objetivo)
+                        fila_objetivo["peso_kg"] = peso_nuevo
+                        motivos_fila = {
+                            m.strip() for m in str(fila_objetivo.get("motivos_revision_documento", "")).split("|") if m.strip()
+                        }
+                        if evaluar_credibilidad_peso(peso_nuevo).nivel == NivelCredibilidad.CONFIABLE:
+                            motivos_fila.discard("PESO_OPERACIONALMENTE_ATIPICO")
+                        fila_objetivo["motivos_revision_documento"] = " | ".join(sorted(motivos_fila))
+                        fila_objetivo["indicador_revision"] = "REVISAR" if any(
+                            m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_fila
+                        ) else "OK"
+                        fila_objetivo["estado_documental"] = "REQUIERE_REVISION" if fila_objetivo["indicador_revision"] == "REVISAR" else "OK"
+                        revert_dataset_info = _calcular_revert_dataset(
+                            numero_guia=numero_guia_decision,
+                            snapshot_antes=snapshot_fila_antes, snapshot_despues=fila_objetivo,
+                        )
+                        _escribir_filas_completas(dataset, filas_dataset)
+                contexto_peso = decision.get("contexto") or {}
+                aplicacion = {
+                    "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
+                    "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": documento_decision,
+                    "numero_transporte_viaje": str(documento_decision.get("numero_transporte") or ""),
+                    "peso_total_viaje_kg": str(contexto_peso.get("peso_total_viaje_kg") or ""),
+                    "peso_documental": str(decision.get("valor_documental", "")),
+                    "peso_corregido": peso_nuevo,
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
             else:

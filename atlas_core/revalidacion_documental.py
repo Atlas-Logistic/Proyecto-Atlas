@@ -970,13 +970,30 @@ def regenerar_decisiones_obra_faltantes_sin_ocr(
         resolver_obras_resueltas_por_ledger(Path(ruta_ledger)) if ruta_ledger is not None else set()
     )
     try:
-        clientes_confirmados = {
-            normalizar_nombre_cliente(c.razon_social): c
-            for c in CatalogoClientes(carpeta / "clientes.json").listar()
-            if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
-        }
+        todos_los_clientes = CatalogoClientes(carpeta / "clientes.json").listar()
     except (OSError, ValueError):
-        clientes_confirmados = {}
+        todos_los_clientes = []
+    clientes_confirmados = {
+        normalizar_nombre_cliente(c.razon_social): c
+        for c in todos_los_clientes
+        if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+    }
+    guias_con_decision_cliente = {
+        str((d.get("documento") or {}).get("numero_guia", ""))
+        for d in decisiones_pendientes
+        if str(d.get("tipo", "")).startswith("CLIENTE_") or d.get("tipo") == "ALIAS_CANDIDATO"
+    }
+    guias_cliente_en_ledger: set[str] = set()
+    if ruta_ledger is not None:
+        try:
+            ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            ledger = {}
+        guias_cliente_en_ledger = {
+            str((a.get("documento") or {}).get("numero_guia", ""))
+            for a in ledger.get("aplicaciones", [])
+            if str(a.get("tipo", "")).startswith("CLIENTE_") or a.get("tipo") == "ALIAS_CANDIDATO"
+        }
 
     regeneradas: list[dict[str, object]] = []
     for fila in filas:
@@ -991,12 +1008,28 @@ def regenerar_decisiones_obra_faltantes_sin_ocr(
         if obra_documental in _AUSENTES or cliente_documental in _AUSENTES:
             continue
         cliente = clientes_confirmados.get(normalizar_nombre_cliente(cliente_documental))
-        if cliente is None:
-            continue
         comunes = {
             "archivo": str(fila.get("archivo", "")), "numero_guia": numero_guia,
             "numero_transporte": str(fila.get("numero_transporte", "")),
         }
+        if cliente is None:
+            # Caso real 475413 (FERRETERIA COVADONGA LTDA, RUT
+            # 94.707.000-2): el cliente sólo existe en el catálogo LEGADO
+            # (`empresas.json`), nunca en `clientes.json` -- sin identidad
+            # canónica la pregunta de obra/destino no se puede formular y
+            # el motivo quedaba sin ninguna tarjeta. La primera pregunta
+            # real es registrar el cliente; al registrarlo, esta misma red
+            # de seguridad encadena la de obra/destino en la pasada
+            # siguiente. Nunca si el cliente ya existe en `clientes.json`
+            # en cualquier estado, ni si un humano ya decidió el cliente de
+            # esta guía, ni si ya hay una tarjeta de cliente pendiente.
+            if numero_guia not in guias_con_decision_cliente and numero_guia not in guias_cliente_en_ledger:
+                decision_cliente = _decision_cliente_solo_en_catalogo_legado(
+                    fila=fila, carpeta=carpeta, todos_los_clientes=todos_los_clientes, comunes=comunes,
+                )
+                if decision_cliente is not None:
+                    regeneradas.append(decision_cliente)
+            continue
         regeneradas.extend(_decisiones_obra_para_cliente(
             carpeta=carpeta, cliente_id=cliente.cliente_id, cliente_razon_social=cliente.razon_social,
             cliente_aliases=cliente.aliases, obra_texto=obra_documental,
@@ -1004,6 +1037,103 @@ def regenerar_decisiones_obra_faltantes_sin_ocr(
             comunes=comunes,
         ))
     return list(decisiones_pendientes) + regeneradas
+
+
+def regenerar_decisiones_vehiculo_faltantes_sin_ocr(
+    *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    decisiones_pendientes: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Red de seguridad hermana de `regenerar_decisiones_obra_faltantes_
+    sin_ocr`, para `PATENTE_SIN_HOMOLOGAR`: un motivo vigente sin ninguna
+    tarjeta `VEHICULO_DESCONOCIDO` pendiente para ese documento se vuelve a
+    preguntar con el MISMO detector canónico (`detectar_decisiones_
+    documento`, sólo patentes/chofer ya persistidos -- nunca OCR). Caso
+    real 474708 (rampla JE6159): la tarjeta original nunca llegó a la
+    bandeja y el viaje quedó bloqueado sin pregunta. Nunca duplica (se
+    abstiene si el documento ya tiene una tarjeta de vehículo) y nunca
+    resucita una respuesta humana (`generar_artefacto` filtra el ledger
+    por `decision_id`)."""
+    from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+
+    try:
+        filas = _leer_filas(Path(ruta_dataset))
+    except (OSError, ValueError):
+        return list(decisiones_pendientes)
+    motivo_objetivo = MotivoRevisionDocumento.PATENTE_SIN_HOMOLOGAR.value
+    archivos_con_decision_vehiculo = {
+        str((d.get("documento") or {}).get("archivo", ""))
+        for d in decisiones_pendientes if d.get("tipo") == "VEHICULO_DESCONOCIDO"
+    }
+    regeneradas: list[dict[str, object]] = []
+    for fila in filas:
+        motivos = {m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m}
+        archivo = str(fila.get("archivo", ""))
+        if motivo_objetivo not in motivos or not archivo or archivo in archivos_con_decision_vehiculo:
+            continue
+        datos = {
+            "número de guía": fila.get("numero_guia", ""),
+            "número de transporte": fila.get("numero_transporte", ""),
+            "chofer": fila.get("chofer", ""), "RUT del chofer": fila.get("rut_chofer", ""),
+            "patente del tracto": fila.get("patente_tracto", ""),
+            "patente del carro": fila.get("patente_rampla", ""),
+        }
+        try:
+            decisiones = detectar_decisiones_documento(
+                archivo=archivo, datos=datos, carpeta_catalogos=carpeta_catalogos,
+            )
+        except (OSError, ValueError):
+            continue
+        regeneradas.extend(d for d in decisiones if d.get("tipo") == "VEHICULO_DESCONOCIDO")
+    return list(decisiones_pendientes) + regeneradas
+
+
+def _decision_cliente_solo_en_catalogo_legado(
+    *, fila: Mapping[str, str], carpeta: Path, todos_los_clientes: list,
+    comunes: Mapping[str, str],
+) -> dict[str, object] | None:
+    """`CLIENTE_DESCONOCIDO` para un cliente con RUT válido que no existe en
+    `clientes.json` (en ningún estado). Si aparece en el catálogo legado
+    `empresas.json`, se adjunta como evidencia -- nunca se registra solo:
+    lo decide Javier con la misma tarjeta Registrar/No registrar."""
+    from atlas_core.catalogo_clientes import normalizar_rut_cliente
+    from atlas_core.catalogos import buscar_empresa_por_rut, cargar_catalogo_json
+    from atlas_core.decisiones_pendientes import ACCIONES_ENTIDAD_DESCONOCIDA, crear_decision
+
+    cliente_documental = str(fila.get("cliente", "")).strip()
+    rut = str(fila.get("rut_cliente", "")).strip()
+    if rut in _AUSENTES or validar_rut_chileno(rut).estado != EstadoValidacion.VALIDO:
+        return None
+    try:
+        rut_normalizado = normalizar_rut_cliente(rut)
+    except ValueError:
+        return None
+    nombre_normalizado = normalizar_nombre_cliente(cliente_documental)
+    for existente in todos_los_clientes:
+        if existente.nombre_normalizado == nombre_normalizado:
+            return None
+        try:
+            if existente.rut and normalizar_rut_cliente(existente.rut) == rut_normalizado:
+                return None
+        except ValueError:
+            continue
+    evidencias: list[dict[str, object]] = [{"tipo": "RUT_VALIDO", "campo": "rut_cliente", "valor": rut}]
+    try:
+        empresa = buscar_empresa_por_rut(cargar_catalogo_json(carpeta / "empresas.json"), rut)
+    except (OSError, ValueError):
+        empresa = None
+    if empresa:
+        evidencias.append({
+            "tipo": "EMPRESA_CATALOGO_LEGADO", "valor": str(empresa.get("nombre", "")),
+            "codigo_cliente": str(empresa.get("codigo_cliente", "")),
+        })
+    return crear_decision(
+        tipo="CLIENTE_DESCONOCIDO", entidad="CLIENTE", campo="cliente",
+        valor_documental=cliente_documental, valor_normalizado=nombre_normalizado,
+        identidad_resuelta=None, candidatos=(),
+        motivos=("CLIENTE_SIN_IDENTIDAD_CANONICA_BLOQUEA_OBRA",),
+        evidencias=evidencias, acciones_permitidas=ACCIONES_ENTIDAD_DESCONOCIDA,
+        **comunes,
+    )
 
 
 def revalidar_cliente_sin_corroborar_sin_ocr(
@@ -6688,6 +6818,67 @@ def reconciliar_decisiones_destino_no_resuelto(
     return {"decisiones_candidatas": len(candidatas), "decisiones_publicadas": len(bandeja["decisiones"]), "bandeja": bandeja}
 
 
+def reconciliar_decisiones_peso_viaje(
+    *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
+    cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
+) -> dict[str, object]:
+    """Publica una tarjeta `PESO_VIAJE_IMPLAUSIBLE` por viaje cuyo peso
+    total sigue fuera de rango y retira las que ya no aplican (peso
+    corregido, confirmado o viaje que cambió). Sin OCR, sin red; sólo
+    (re)escribe la bandeja."""
+    from atlas_core.agrupacion_viajes import agrupaciones_activas, mapa_transporte_a_grupo
+    from atlas_core.decisiones_pendientes import (
+        NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
+        _generar_artefacto_sin_lock, detectar_decisiones_peso_viaje_implausible,
+        regenerar_decisiones_persistidas,
+    )
+    from atlas_core.gestor_viajes import pesos_viaje_confirmados_por_ledger
+
+    raiz = Path(raiz_atlas)
+    catalogos = raiz / "catalogos_privados"
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    artefacto_ruta = actual / NOMBRE_ARTEFACTO
+    try:
+        filas = _leer_filas(dataset)
+    except (OSError, ValueError):
+        return {"decisiones_candidatas": 0, "motivo": "SIN_DATASET"}
+    try:
+        ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        ledger = {}
+    candidatas = detectar_decisiones_peso_viaje_implausible(
+        filas, agrupaciones_transporte=mapa_transporte_a_grupo(agrupaciones_activas(actual)),
+        pesos_viaje_confirmados=pesos_viaje_confirmados_por_ledger(ledger),
+    )
+    ids_candidatas = {d["decision_id"] for d in candidatas}
+    with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            pendientes_actuales = json.loads(artefacto_ruta.read_text(encoding="utf-8")).get("decisiones", [])
+        except (OSError, json.JSONDecodeError):
+            pendientes_actuales = []
+        vigentes = [
+            d for d in pendientes_actuales
+            if d.get("tipo") != "PESO_VIAJE_IMPLAUSIBLE" or d.get("decision_id") in ids_candidatas
+        ]
+        ids_vigentes = {d.get("decision_id") for d in vigentes}
+        nuevas = [d for d in candidatas if d["decision_id"] not in ids_vigentes]
+        if not nuevas and len(vigentes) == len(pendientes_actuales):
+            return {"decisiones_candidatas": len(candidatas), "cambio": False}
+        regeneradas = regenerar_decisiones_persistidas(
+            decisiones=[*vigentes, *nuevas], carpeta_catalogos=catalogos,
+            ruta_dataset=dataset, cache_memoizacion=cache_memoizacion,
+        )
+        bandeja = _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones=regeneradas, ruta_salida=artefacto_ruta, reloj=reloj,
+        )
+    return {
+        "decisiones_candidatas": len(candidatas), "cambio": True,
+        "decisiones_publicadas": len(bandeja["decisiones"]),
+    }
+
+
 def detectar_decisiones_cliente_ausente_sin_ocr(
     *, raiz_atlas: str | Path,
 ) -> list[dict[str, object]]:
@@ -7455,6 +7646,9 @@ def reconciliar_bandeja_decisiones(
     pendientes_actuales = regenerar_decisiones_obra_faltantes_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos,
         decisiones_pendientes=pendientes_actuales, ruta_ledger=actual / "decisiones_aplicadas.json",
+    )
+    pendientes_actuales = regenerar_decisiones_vehiculo_faltantes_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones_pendientes=pendientes_actuales,
     )
 
     # Bloque P0 SHORT-CIRCUIT -- ver comentario junto a la declaración de

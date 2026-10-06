@@ -85,8 +85,12 @@ TIPOS_SOPORTADOS = frozenset({
     "VEHICULO_DESCONOCIDO", "CHOFER_DESCONOCIDO", "CHOFER_CANDIDATO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
     "OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR", "ALIAS_CANDIDATO",
     "ORIGEN_NO_CONFIRMADO", "DESTINO_NO_RESUELTO", "CLIENTE_AUSENTE",
+    "PESO_VIAJE_IMPLAUSIBLE",
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
+# Peso total del viaje > 30 t (`credibilidad_campos`): Javier confirma que
+# el peso documental es correcto, o escribe el peso real del documento.
+ACCIONES_PESO_VIAJE_IMPLAUSIBLE = ("CONFIRMAR", "CORREGIR_PESO", "POSPONER")
 
 
 def _obra_esta_ausente(obra_canonica: str) -> bool:
@@ -2454,6 +2458,53 @@ def detectar_decisiones_documento(
     return decisiones
 
 
+def detectar_decisiones_peso_viaje_implausible(
+    filas: Iterable[Mapping[str, object]], *,
+    agrupaciones_transporte: Mapping[str, str] | None = None,
+    pesos_viaje_confirmados: Mapping[str, int] | None = None,
+) -> list[dict[str, object]]:
+    """Una pregunta `PESO_VIAJE_IMPLAUSIBLE` por viaje cuyo peso total supera
+    el máximo operacional (`gestor_viajes`, Bloque O3). Casos reales
+    473263 (56.940 kg) y 473424 (42.868 kg): el viaje quedaba en revisión
+    para siempre sin ninguna tarjeta. Se ancla al documento de mayor peso.
+
+    Se abstiene cuando el mismo número de guía aparece en más de un
+    documento del viaje: la suma infla un duplicado (caso 472238), no es
+    una pregunta de peso para Javier."""
+    from atlas_core.credibilidad_campos import UMBRAL_MAXIMO_PESO_TOTAL_VIAJE_KG
+    from atlas_core.gestor_viajes import MotivoRevision, _peso_kg_numerico, agrupar_viajes
+
+    viajes, _ = agrupar_viajes(
+        filas, guias_revision_humana=(), agrupaciones_transporte=agrupaciones_transporte,
+        pesos_viaje_confirmados=pesos_viaje_confirmados,
+    )
+    decisiones: list[dict[str, object]] = []
+    for viaje in viajes:
+        if MotivoRevision.PESO_TOTAL_VIAJE_IMPLAUSIBLE not in viaje.motivos_revision:
+            continue
+        guias = [str(d.numero_guia).strip() for d in viaje.documentos]
+        if len(guias) != len(set(guias)):
+            continue
+        pesos = [(_peso_kg_numerico(d.peso_kg) or 0, d) for d in viaje.documentos]
+        peso_total = sum(p for p, _ in pesos)
+        _, ancla = max(pesos, key=lambda par: par[0])
+        decisiones.append(crear_decision(
+            tipo="PESO_VIAJE_IMPLAUSIBLE", entidad="PESO", archivo=ancla.archivo,
+            numero_guia=ancla.numero_guia, numero_transporte=viaje.numero_transporte,
+            campo="peso_kg", valor_documental=str(ancla.peso_kg), valor_normalizado=str(peso_total),
+            identidad_resuelta=None, candidatos=(), motivos=("PESO_TOTAL_VIAJE_IMPLAUSIBLE",),
+            evidencias=[{
+                "tipo": "PESO_TOTAL_VIAJE", "peso_total_viaje_kg": peso_total,
+                "documentos": [{"numero_guia": d.numero_guia, "archivo": d.archivo, "peso_kg": str(d.peso_kg)}
+                               for _, d in pesos],
+            }],
+            acciones_permitidas=ACCIONES_PESO_VIAJE_IMPLAUSIBLE,
+            contexto={"peso_total_viaje_kg": peso_total,
+                      "umbral_maximo_viaje_kg": int(UMBRAL_MAXIMO_PESO_TOTAL_VIAJE_KG)},
+        ))
+    return decisiones
+
+
 def detectar_decision_origen_no_confirmado(
     *, archivo: str, fila: Mapping[str, str], plantas: Iterable[Planta],
 ) -> dict[str, object] | None:
@@ -3361,6 +3412,19 @@ def _regenerar_decisiones_persistidas(
                     clientes=_clientes_convergencia,
                 )
                 return resultado.resultado == _IDENTIDAD_RESUELTA
+            # Caso real 474708 (rampla JE6159, Carlos Simón): la asignación
+            # chofer->vehículo convergía a JD8659 y retiraba la tarjeta,
+            # pero `revalidar_patente_sin_homologar_sin_ocr` no usa esa
+            # asignación y deja `PATENTE_SIN_HOMOLOGAR` en la fila -- el
+            # viaje quedaba bloqueado sin ninguna pregunta. Mientras el
+            # motivo siga vigente, la tarjeta se conserva (la asignación
+            # sigue llegando como sugerencia en `enriquecer_decisiones_
+            # vehiculo`).
+            motivos_vigentes = {
+                m.strip() for m in str(fila_vigente.get("motivos_revision_documento", "")).split("|")
+            }
+            if "PATENTE_SIN_HOMOLOGAR" in motivos_vigentes:
+                return False
             tipo_esperado = {
                 "patente_tracto": "TRACTO",
                 "patente_rampla": "CARRO",
@@ -4244,6 +4308,10 @@ def _generar_artefacto_sin_lock(
                 # dato. Una evidencia posterior distinta produce otro
                 # decision_id y sigue siendo revisable.
                 "REGISTRAR_DIRECCION",
+                # El peso corregido por un humano responde esta pregunta; si
+                # el total nuevo sigue fuera de rango, la evidencia cambió y
+                # el `decision_id` también.
+                "CORREGIR_PESO",
             }
         }
     except (OSError, json.JSONDecodeError, AttributeError):

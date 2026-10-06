@@ -149,6 +149,22 @@ def _peso_kg_numerico(valor: str) -> int | None:
     return int(texto) if texto.isdigit() else None
 
 
+def pesos_viaje_confirmados_por_ledger(ledger: Mapping[str, object]) -> dict[str, int]:
+    """{transporte: peso total} confirmado por un humano con
+    `PESO_VIAJE_IMPLAUSIBLE`/`CONFIRMAR` (la última confirmación gana)."""
+    confirmados: dict[str, int] = {}
+    for aplicacion in ledger.get("aplicaciones", []) or []:
+        if not isinstance(aplicacion, Mapping):
+            continue
+        if aplicacion.get("tipo") != "PESO_VIAJE_IMPLAUSIBLE" or aplicacion.get("accion") != "CONFIRMAR":
+            continue
+        transporte = str(aplicacion.get("numero_transporte_viaje") or "").strip()
+        peso = _peso_kg_numerico(str(aplicacion.get("peso_total_viaje_kg") or ""))
+        if transporte and peso is not None:
+            confirmados[transporte] = peso
+    return confirmados
+
+
 def _hora_a_minutos(valor: object) -> int | None:
     """Minutos desde medianoche para una hora ``"H:MM"``/``"HH:MM"`` real,
     o ``None`` si no lo es (los centinelas "No encontrado"/"Revisar"/… caen
@@ -1066,8 +1082,14 @@ def agrupar_viajes(
     reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     generador_id: Callable[[], str] | None = None,
     agrupaciones_transporte: Mapping[str, str] | None = None,
+    pesos_viaje_confirmados: Mapping[str, int] | None = None,
 ) -> tuple[list[Viaje], list[dict[str, object]]]:
     """Agrupa por transporte y conserva toda contradicción como revisión.
+
+    ``pesos_viaje_confirmados`` ({transporte: peso total en kg}, ver
+    `pesos_viaje_confirmados_por_ledger`): un peso total que Javier ya
+    confirmó como correcto para ese transporte no vuelve a marcar
+    `PESO_TOTAL_VIAJE_IMPLAUSIBLE` mientras el total vigente sea ese mismo.
 
     ``agrupaciones_transporte`` ({transporte: transporte principal}, ver
     `atlas_core.agrupacion_viajes`): transportes AZA que un humano confirmó
@@ -1088,6 +1110,10 @@ def agrupar_viajes(
     sin_transporte: list[dict[str, object]] = []
     grupo_de_transporte = {
         _clave_normalizada(t): _clave_normalizada(p) for t, p in (agrupaciones_transporte or {}).items()
+    }
+    pesos_confirmados = {
+        grupo_de_transporte.get(_clave_normalizada(t), _clave_normalizada(t)): int(p)
+        for t, p in (pesos_viaje_confirmados or {}).items()
     }
 
     for fila in _deduplicar_filas(filas):
@@ -1214,7 +1240,13 @@ def agrupar_viajes(
         pesos_documentos = [_peso_kg_numerico(d.peso_kg) for d in documentos]
         if pesos_documentos and all(peso is not None for peso in pesos_documentos):
             peso_total_viaje = str(sum(pesos_documentos))
-            if evaluar_credibilidad_peso_total_viaje(peso_total_viaje).nivel != NivelCredibilidad.CONFIABLE:
+            confirmado_por_humano = (
+                pesos_confirmados.get(clave_transporte) == sum(pesos_documentos)
+            )
+            if (
+                evaluar_credibilidad_peso_total_viaje(peso_total_viaje).nivel != NivelCredibilidad.CONFIABLE
+                and not confirmado_por_humano
+            ):
                 motivos.append(MotivoRevision.PESO_TOTAL_VIAJE_IMPLAUSIBLE)
         # Un documento marcado REVISAR por el pipeline (campos ausentes,
         # recuperación geométrica, chofer no homologado, etc.) nunca puede

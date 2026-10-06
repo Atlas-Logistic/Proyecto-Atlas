@@ -578,10 +578,16 @@ def generar_reporte_viajes(
     # Agrupaciones de viaje físico confirmadas por humano (misma carpeta que
     # el dataset y la bandeja); sin registro, agrupamiento histórico.
     from atlas_core.agrupacion_viajes import agrupaciones_activas, mapa_transporte_a_grupo
+    from atlas_core.gestor_viajes import pesos_viaje_confirmados_por_ledger
+    try:
+        ledger_decisiones = json.loads((origen.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ledger_decisiones = {}
     viajes, sin_transporte = agrupar_viajes(
         filas, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
         guias_revision_humana=guias_revision_humana, reloj=lambda: instante,
         agrupaciones_transporte=mapa_transporte_a_grupo(agrupaciones_activas(origen.parent)),
+        pesos_viaje_confirmados=pesos_viaje_confirmados_por_ledger(ledger_decisiones),
     )
     no_reconocidos = _construir_clientes_no_reconocidos(filas, catalogos)
     fecha_generacion = instante.isoformat()
