@@ -760,6 +760,25 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
 
     candidatos_validos: set[str] = set()
     for etiqueta_cliente in etiquetas_cliente:
+        # El valor nominal más cercano a la derecha de SEÑOR(ES) define la
+        # columna documental del cliente. Sólo se usa como evidencia
+        # adicional cuando la ventana normal R.U.T. -> valor no alcanza:
+        # en una foto inclinada ambos valores de la misma columna se
+        # desplazan verticalmente de forma parecida. No se infiere un
+        # nombre ni se usa el texto del cliente para validar el RUT.
+        valores_cliente = [
+            item for item in items
+            if item is not etiqueta_cliente
+            and _es_candidato_nominal_geometrico(item)
+            and item["x1"] >= etiqueta_cliente["x2"] - 8 * escala
+            and item["cy"] > etiqueta_cliente["cy"]
+            and item["cy"] - etiqueta_cliente["cy"]
+            <= max(etiqueta_cliente["h"], item["h"]) * 1.5
+        ]
+        valor_cliente = (
+            min(valores_cliente, key=lambda item: (item["x1"], item["cy"]))
+            if valores_cliente else None
+        )
         etiquetas_rut = [
             item for item in items
             if es_etiqueta_rut(item)
@@ -793,8 +812,47 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
                 and abs(item["cy"] - etiqueta_rut["cy"]) <= max(etiqueta_rut["h"], item["h"]) * 1.25
                 and item["x1"] >= etiqueta_rut["x2"] - 8 * escala
             ]
-            candidatos_texto = [item["texto"] for item in fila_valor]
-            candidatos_texto.extend(_candidatos_rut_multibloque(fila_valor))
+            # Fallback conservador para perspectiva/inclinación local. La
+            # ventana histórica anterior se conserva intacta arriba. Sólo
+            # se agrega una fila más lejana si existe un valor nominal de
+            # cliente en la MISMA columna X y el desplazamiento vertical de
+            # SEÑOR(ES)->cliente coincide con R.U.T.->candidato dentro de
+            # medio alto de la caja mayor. Así un RUT de solicitante/obra u
+            # otra columna no adquiere una asociación por mera distancia.
+            fila_inclinada: List[Dict[str, Any]] = []
+            if valor_cliente is not None:
+                desplazamiento_cliente = valor_cliente["cy"] - etiqueta_cliente["cy"]
+                tolerancia_local = max(
+                    etiqueta_cliente["h"], valor_cliente["h"], etiqueta_rut["h"],
+                ) * 0.5
+                fila_inclinada = [
+                    item for item in items
+                    if item is not etiqueta_rut and item is not etiqueta_cliente
+                    and item["x1"] >= etiqueta_rut["x2"] - 8 * escala
+                    and abs(
+                        (item["cy"] - etiqueta_rut["cy"]) - desplazamiento_cliente
+                    ) <= max(tolerancia_local, item["h"] * 0.5)
+                ]
+                # La propia semilla RUT debe iniciar en esa columna, no
+                # sólo cualquier texto de la fila (que podría ser el
+                # nombre del cliente mientras el RUT pertenece a otra
+                # sección). Los RUT fragmentados ya conservan el camino
+                # multibloque histórico dentro de la ventana normal.
+                semilla_rut_coherente = any(
+                    validar_rut_chileno(_normalizar_candidato_rut(item["texto"])).estado
+                    == EstadoValidacion.VALIDO
+                    and abs(item["x1"] - valor_cliente["x1"])
+                    <= max(item["h"], valor_cliente["h"]) * 1.25
+                    for item in fila_inclinada
+                )
+                if not semilla_rut_coherente:
+                    fila_inclinada = []
+            fila_candidata = [*fila_valor]
+            for item in fila_inclinada:
+                if item not in fila_candidata:
+                    fila_candidata.append(item)
+            candidatos_texto = [item["texto"] for item in fila_candidata]
+            candidatos_texto.extend(_candidatos_rut_multibloque(fila_candidata))
             for texto in candidatos_texto:
                 candidato = _normalizar_candidato_rut(texto)
                 resultado = validar_rut_chileno(candidato)

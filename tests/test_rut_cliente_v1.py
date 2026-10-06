@@ -91,6 +91,23 @@ def _bloques_rut_cliente_columna_etiquetas_inclinada():
     ]
 
 
+def _bloques_475411_paddle():
+    """Geometría PaddleOCR real de 475411, sin leer la imagen productiva.
+
+    La columna de valores queda desplazada por la inclinación: el salto
+    SEÑOR(ES)->cliente (79 px) y R.U.T.->RUT (77 px) es consistente, pero
+    el segundo excede la ventana histórica de una sola fila.
+    """
+    return [
+        _bloque("SEÑOR(ES)", 376, 1018, 205, 76, conf=0.999957),
+        _bloque("R.U.T", 374, 1061, 113, 52, conf=0.999989),
+        _bloque("CONSTRUCTORA IGNACIO HURTADO", 1873, 1072, 586, 92, conf=0.987392),
+        _bloque("AGF ACEROS DE CHILE SPA", 837, 1101, 471, 68, conf=0.979796),
+        _bloque("77.410.131-4", 835, 1139, 266, 50, conf=0.995645),
+        _bloque("CONSTRUCTORA IGNACIO HURTADO", 1875, 1162, 583, 88, conf=0.998991),
+    ]
+
+
 # ============================================================
 # 0. rut_cliente es su propia columna, backward-compatible (Sección 12)
 # ============================================================
@@ -118,6 +135,56 @@ def test_guias_agf_con_columna_de_etiquetas_inclinada_recuperan_rut_cliente(nume
 
     assert resultado == {"valor": "77.410.131-4"}, numero_guia
     assert resultado["valor"].replace(".", "") == "77410131-4"
+
+
+def test_475411_paddle_inclinado_recupera_rut_por_desplazamiento_local_de_columna():
+    assert _extraer_rut_cliente_geometrico(_bloques_475411_paddle()) == {
+        "valor": "77.410.131-4",
+    }
+
+
+def test_desplazamiento_inclinado_no_acepta_rut_invalido():
+    bloques = _bloques_475411_paddle()
+    bloques[4] = _bloque("77.410.131-5", 835, 1139, 266, 50)
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {}
+
+
+def test_desplazamiento_inclinado_se_abstiene_ante_dos_rut_validos_compatibles():
+    bloques = _bloques_475411_paddle() + [
+        _bloque("76.083.093-3", 1120, 1139, 240, 50),
+    ]
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {}
+
+
+def test_desplazamiento_inclinado_no_toma_rut_de_otra_columna():
+    bloques = _bloques_475411_paddle()
+    bloques[4] = _bloque("76.083.093-3", 1800, 1139, 240, 50)
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {}
+
+
+def test_distancia_grande_sin_desplazamiento_cliente_coherente_se_abstiene():
+    bloques = [
+        _bloque("SEÑOR(ES)", 100, 100, 90, 40),
+        _bloque("R.U.T.", 100, 125, 70, 30),
+        _bloque("CLIENTE GENERICO SPA", 300, 110, 240, 30),
+        _bloque("12.345.678-5", 300, 185, 150, 30),
+    ]
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {}
+
+
+def test_desplazamiento_inclinado_general_distinto_recupera_rut():
+    bloques = [
+        _bloque("SEÑOR(ES)", 100, 100, 90, 40),
+        _bloque("R.U.T.", 100, 125, 70, 30),
+        _bloque("EMPRESA EJEMPLO LTDA", 300, 160, 240, 30),
+        _bloque("12.345.678-5", 300, 178, 150, 30),
+    ]
+
+    assert _extraer_rut_cliente_geometrico(bloques) == {"valor": "12.345.678-5"}
 
 
 @pytest.mark.parametrize("numero_guia", ["475411", "472437"])
