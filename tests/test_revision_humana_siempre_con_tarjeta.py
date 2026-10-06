@@ -220,3 +220,45 @@ def test_corregir_peso_exige_un_numero(tmp_path):
     else:
         raise AssertionError("debió rechazar un peso no numérico")
     assert next(f for f in _leer_filas(op.dataset) if f["numero_guia"] == "473263")["peso_kg"] == "56940"
+
+
+def test_posponer_peso_no_escribe_ni_altera_la_tarjeta(tmp_path):
+    op = Operacion(tmp_path)
+    _escribir_csv(op.dataset, _filas_peso(op))
+    reconciliar_decisiones_peso_viaje(raiz_atlas=op.raiz)
+
+    antes_dataset = op.dataset.read_bytes()
+    antes_bandeja = (op.actual / "decisiones_pendientes.json").read_bytes()
+    ledger = op.actual / "decisiones_aplicadas.json"
+    assert not ledger.exists()
+
+    resultado = _aplicar_peso(op, "473263", "POSPONER")
+
+    assert resultado["ok"] is True
+    assert resultado["mensaje"] == "La decisión permanece pendiente."
+    assert op.dataset.read_bytes() == antes_dataset
+    assert (op.actual / "decisiones_pendientes.json").read_bytes() == antes_bandeja
+    assert not ledger.exists()
+
+
+def test_aplicar_peso_dos_veces_no_duplica_efectos(tmp_path):
+    op = Operacion(tmp_path)
+    _escribir_csv(op.dataset, _filas_peso(op))
+    reconciliar_decisiones_peso_viaje(raiz_atlas=op.raiz)
+    (tarjeta,) = _tarjetas(op, "473263")
+
+    primero = aplicar_decision_obra(
+        raiz_atlas=op.raiz, decision_id=tarjeta["decision_id"], accion="CONFIRMAR",
+        proveedor_rutas=_proveedor(), proveedor_rutas_fallback=_proveedor(),
+    )
+    segundo = aplicar_decision_obra(
+        raiz_atlas=op.raiz, decision_id=tarjeta["decision_id"], accion="CONFIRMAR",
+        proveedor_rutas=_proveedor(), proveedor_rutas_fallback=_proveedor(),
+    )
+
+    ledger = json.loads((op.actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert primero["ok"] is True and primero["idempotente"] is False
+    assert segundo["ok"] is True and segundo["idempotente"] is True
+    assert [(aplicacion["decision_id"], aplicacion["accion"]) for aplicacion in ledger] == [
+        (tarjeta["decision_id"], "CONFIRMAR"),
+    ]
