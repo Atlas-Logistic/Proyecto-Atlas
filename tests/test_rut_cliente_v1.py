@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from unittest.mock import Mock
 
+import pytest
+
 from atlas_core import procesamiento_masivo
 from atlas_core.extractor import _extraer_rut_cliente_geometrico
 from atlas_core.ocr import BloqueOCR
@@ -69,6 +71,26 @@ def _escribir_catalogo(tmp_path, nombre_archivo, contenido):
     return carpeta
 
 
+def _bloques_rut_cliente_columna_etiquetas_inclinada():
+    """Fixture fiel al patrón documental AZA de 475411/472437.
+
+    La columna izquierda está inclinada: la caja OCR de ``R.U.T.`` se
+    solapa levemente con la de ``SEÑOR(ES)`` aunque ambos rótulos pertenecen
+    a filas consecutivas. El valor del RUT queda a la derecha, bajo el
+    nombre del cliente; solicitante y obra viven en la columna separada.
+    """
+    return [
+        _bloque("SEÑOR(ES)", 114, 349, 98, 42),
+        _bloque("R.U.T.", 114, 369, 59, 33),
+        _bloque(": AGF ACEROS DE CHILE SPA", 326, 394, 223, 26),
+        _bloque(": 77.410.131-4", 325, 414, 128, 20),
+        _bloque("SOLICITANTE", 645, 402, 101, 21),
+        _bloque(": CONSTRUCTORA IGNACIO HURTADO", 811, 398, 230, 22),
+        _bloque("OBRA DESTINO", 645, 438, 113, 24),
+        _bloque(": CONSTRUCTORA IGNACIO HURTADO", 812, 436, 230, 22),
+    ]
+
+
 # ============================================================
 # 0. rut_cliente es su propia columna, backward-compatible (Sección 12)
 # ============================================================
@@ -82,6 +104,50 @@ def test_rut_cliente_es_su_propia_columna_al_final_backward_compatible():
 # ============================================================
 # 1. RUT cliente visible + nombre coincidente -> corroboración automática
 # ============================================================
+
+
+@pytest.mark.parametrize("numero_guia", ["475411", "472437"])
+def test_guias_agf_con_columna_de_etiquetas_inclinada_recuperan_rut_cliente(numero_guia):
+    """Regresión del patrón documental compartido, sin excepción por cliente.
+
+    El campo publicado conserva la representación documental habitual con
+    puntos; al quitar esos separadores coincide con el RUT canónico del
+    catálogo (``77410131-4``).
+    """
+    resultado = _extraer_rut_cliente_geometrico(_bloques_rut_cliente_columna_etiquetas_inclinada())
+
+    assert resultado == {"valor": "77.410.131-4"}, numero_guia
+    assert resultado["valor"].replace(".", "") == "77410131-4"
+
+
+@pytest.mark.parametrize("numero_guia", ["475411", "472437"])
+def test_patron_columna_etiquetas_inclinada_corroborra_cliente_sin_confundir_obra(
+    numero_guia, tmp_path, monkeypatch,
+):
+    carpeta_catalogos = _escribir_catalogo(
+        tmp_path,
+        "empresas.json",
+        {"774101314": {"nombre": "AGF ACEROS DE CHILE SPA"}},
+    )
+    _preparar_mocks(
+        monkeypatch,
+        _datos_lineales_completos(
+            cliente="AGF ACEROS DE CHILE SPA",
+            **{
+                "número de guía": numero_guia,
+                "obra destino": "CONSTRUCTORA IGNACIO HURTADO",
+                "RUT del cliente": "No encontrado",
+            },
+        ),
+        bloques=_bloques_rut_cliente_columna_etiquetas_inclinada(),
+    )
+
+    resultado = procesar_archivo(tmp_path / "guia.jpg", carpeta_catalogos=carpeta_catalogos)
+
+    assert resultado["cliente"] == "AGF ACEROS DE CHILE SPA"
+    assert resultado["obra_destino"] == "CONSTRUCTORA IGNACIO HURTADO"
+    assert resultado["rut_cliente"] == "77.410.131-4"
+    assert "CLIENTE_SIN_CORROBORAR" not in resultado["motivos_revision_documento"]
 
 
 def test_rut_cliente_visible_y_nombre_coincidente_corrobora_automaticamente(tmp_path, monkeypatch):

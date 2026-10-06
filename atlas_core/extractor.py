@@ -776,9 +776,13 @@ def _extraer_rut_cliente_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             # y=479, R.U.T. empieza en y=476, gap=-3). Un solapamiento
             # pequeño sigue siendo "la fila de abajo", nunca se confunde
             # con una etiqueta lejana porque el resto de la ventana
-            # (<= alto*1.5) sigue acotando el otro extremo. El centro de
+            # (<= alto*1.5) sigue acotando el otro extremo. En documentos
+            # con una leve inclinación, las dos cajas de la columna de
+            # etiquetas pueden solaparse algo más de medio alto; se tolera
+            # hasta 0.6 para no perder esa pareja inmediata, sin abrir la
+            # ventana a otra fila. El centro de
             # R.U.T. debe permanecer debajo del centro de SEÃ‘OR(ES).
-            and -max(etiqueta_cliente["h"], item["h"]) * 0.5
+            and -max(etiqueta_cliente["h"], item["h"]) * 0.6
             <= item["y1"] - etiqueta_cliente["y2"]
             <= max(etiqueta_cliente["h"], item["h"]) * 1.5
         ]
