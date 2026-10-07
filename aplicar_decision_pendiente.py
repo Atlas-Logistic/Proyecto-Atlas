@@ -1,8 +1,12 @@
 """CLI estrecho usado por Atlas Desktop para aplicar decisiones R3.3/R3.4."""
 import argparse
 import json
+import logging
 from atlas_core.almacenamiento_portable import SesionOcupadaError
-from atlas_core.aplicacion_decisiones import DecisionObsoletaError, ErrorAplicacionDecision, aplicar_decision_obra
+from atlas_core.aplicacion_decisiones import (
+    ERRORES_CATALOGO_ESPERABLES, DecisionObsoletaError, ErrorAplicacionDecision,
+    aplicar_decision_obra, mensaje_operacional_error_catalogo,
+)
 
 def main():
     # Bloque ORIGEN D1: 3 acciones nuevas de ORIGEN_NO_CONFIRMADO se suman a
@@ -52,6 +56,12 @@ def main():
             resultado={"ok":False,"error":str(error)}
     except ErrorAplicacionDecision as error:
         resultado={"ok":False,"error":str(error)}
+    except ERRORES_CATALOGO_ESPERABLES as error:
+        # Caso real 475484 (DestinoDuplicadoError): rechazo de dominio del
+        # catálogo, ya revertido. Desktop recibe sólo el aviso operacional;
+        # el detalle técnico queda en el log (stderr, salida 0).
+        logging.getLogger(__name__).exception("Decisión %s rechazada por el catálogo", args.decision_id)
+        resultado={"ok":False,"error":mensaje_operacional_error_catalogo(error)}
     except SesionOcupadaError:
         # Bloque P0 RECUPERACIÓN TRANSACCIONAL -- caso real 0000359449:
         # sin este `except`, este error (RuntimeError, no ErrorAplicacionDecision)

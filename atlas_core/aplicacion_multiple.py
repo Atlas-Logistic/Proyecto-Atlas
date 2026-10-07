@@ -63,9 +63,11 @@ from atlas_core.almacenamiento_portable import SesionOcupadaError
 _LOGGER = logging.getLogger(__name__)
 from atlas_core.aplicacion_decisiones import (
     TIPOS_ELEGIBLES_DIFERIR_REVALIDACION_GLOBAL,
+    ERRORES_CATALOGO_ESPERABLES,
     DecisionObsoletaError,
     ErrorAplicacionDecision,
     aplicar_decision_obra,
+    mensaje_operacional_error_catalogo,
 )
 
 # Mismo contrato de kwargs que `aplicar_decision_obra` -- nunca se
@@ -247,6 +249,15 @@ def aplicar_decisiones_multiples(
             resultados.append(ResultadoItemMultiple(
                 decision_id=decision_id, archivo=archivo, numero_guia=numero_guia,
                 tipo=tipo, accion=accion, aplicada=False, motivo=str(error),
+            ))
+        except ERRORES_CATALOGO_ESPERABLES as error:
+            # Caso real 475484: rechazo de dominio del catálogo (ya
+            # revertido por `aplicar_decision_obra`) -- igual que un error
+            # de aplicación: aviso operacional por ítem y el lote sigue.
+            _LOGGER.warning("Decisión %s del lote rechazada por el catálogo: %r", decision_id, error)
+            resultados.append(ResultadoItemMultiple(
+                decision_id=decision_id, archivo=archivo, numero_guia=numero_guia,
+                tipo=tipo, accion=accion, aplicada=False, motivo=mensaje_operacional_error_catalogo(error),
             ))
         except SesionOcupadaError:
             # Bloque P0 RECUPERACIÓN TRANSACCIONAL -- caso real 0000359449:

@@ -13,17 +13,19 @@ from pathlib import Path
 from atlas_core.investigacion_documental import decision_en_investigacion
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogo_clientes import (
-    CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError,
+    CatalogoClientes, ClienteDuplicadoError, ClienteNoEncontradoError, ErrorCatalogoClientes,
     EstadoBusquedaCliente, EstadoCalidadCliente, normalizar_nombre_cliente, normalizar_rut_cliente,
 )
-from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError, EstadoCalidadDestino
+from atlas_core.catalogo_destinos import (
+    CatalogoDestinos, DestinoDuplicadoError, ErrorCatalogoDestinos, EstadoCalidadDestino,
+)
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos, ErrorCatalogoObrasDestinos, EstadoVigencia,
     Evidencia, ResultadoEvidencia, TipoEvidencia,
 )
-from atlas_core.catalogo_plantas import CatalogoPlantas
+from atlas_core.catalogo_plantas import CatalogoPlantas, ErrorCatalogoPlantas
 from atlas_core.catalogo_vehiculos import (
-    TipoVehiculo, cargar_catalogo_vehiculos,
+    ErrorCatalogoVehiculos, TipoVehiculo, cargar_catalogo_vehiculos,
     confirmar_vehiculo, normalizar_patente_vehiculo,
 )
 from atlas_core.decisiones_pendientes import (
@@ -261,6 +263,25 @@ def _filas_de_documento(filas: list[dict[str, str]], documento: Mapping[str, obj
 
 class ErrorAplicacionDecision(ValueError): pass
 class DecisionObsoletaError(ErrorAplicacionDecision): pass
+
+
+# Rechazos de DOMINIO de los catálogos (duplicado, ambigüedad, entidad
+# inexistente...): esperables al aplicar una decisión, nunca un error de
+# programación. `aplicar_decision_obra` ya revirtió su transacción cuando
+# llegan aquí; el CLI/lote los convierte en un aviso operacional.
+ERRORES_CATALOGO_ESPERABLES: tuple[type[Exception], ...] = (
+    ErrorCatalogoDestinos, ErrorCatalogoObrasDestinos, ErrorCatalogoClientes,
+    ErrorCatalogoVehiculos, ErrorCatalogoPlantas,
+)
+
+
+def mensaje_operacional_error_catalogo(error: Exception) -> str:
+    """Texto para Revisión de Atlas -- sin traceback ni nombres internos."""
+    if isinstance(error, DestinoDuplicadoError):
+        causa = "esta dirección coincide con otro destino ya registrado en el catálogo"
+    else:
+        causa = f"el catálogo rechazó el cambio ({error})"
+    return f"No se pudo aplicar: {causa}. La decisión no se aplicó y sigue pendiente."
 
 
 def normalizar_rut_cliente_o_vacio(rut: str) -> str:
@@ -901,6 +922,12 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         if comuna_valida and comuna_valida != comuna_destino:
                             comuna_destino = comuna_valida
                             region_destino = region_destino or str(normalizar_comuna(comuna_valida).region or "")
+                        # Caso real 475484 (CAMINO LO RUIZ 3099 / RENCA): sin
+                        # región la clave física no encuentra el destino
+                        # global ya existente y se crearía un duplicado --
+                        # la región se deriva siempre de una comuna válida.
+                        if not region_destino:
+                            region_destino = str(normalizar_comuna(comuna_destino).region or "")
                     destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
                         nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
                         comuna=comuna_destino,

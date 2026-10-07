@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -176,6 +177,8 @@ _VERSION_MATERIAL_FOCAL_P0 = 1
 _VERSION_MATERIAL_TRAZA_P0 = 1
 _VERSION_MATERIAL_DESCRIPCION_FOCAL_P1 = 1
 _LIMITE_MATERIAL_FOCAL_POR_CICLO = 2
+
+logger = logging.getLogger(__name__)
 
 
 # Bloque R2.5 -- INVARIANTE DE INVALIDACIÓN: caso real 464264 (destino
@@ -2989,7 +2992,7 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
     resuelve (limitación real del proveedor, ambigüedad, etc.), el
     destino queda exactamente como estaba -- nunca inventa un punto,
     nunca sobreescribe una coordenada ya presente."""
-    from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
+    from atlas_core.catalogo_destinos import CatalogoDestinos, DestinoDuplicadoError, EstadoCalidadDestino
     from atlas_core.rutas.destino_entrega import (
         ESTADO_RESUELTO, resolver_destino_entrega_validado, texto_destino_degradado,
     )
@@ -3006,10 +3009,11 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
         proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=carpeta.parent)
     catalogo = CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json")
     destinos_actualizados: list[str] = []
+    destinos_duplicados: list[str] = []
     try:
         destinos = catalogo.listar()
     except (OSError, ValueError):
-        return {"destinos_actualizados": destinos_actualizados}
+        return {"destinos_actualizados": destinos_actualizados, "destinos_duplicados": destinos_duplicados}
     for destino in destinos:
         if destino.estado_calidad != EstadoCalidadDestino.CONFIRMADO.value:
             continue
@@ -3039,14 +3043,26 @@ def revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
             # que el punto validado aporta y el destino aún no tiene:
             # coordenadas + comuna + región (nunca se pisa un valor ya
             # presente -- `editar` con `None` conserva el actual).
-            catalogo.editar(
-                destino.destino_id, modificacion_manual=True,
-                latitud=resultado.coordenadas.latitud, longitud=resultado.coordenadas.longitud,
-                comuna=(resultado.localidad or None) if not destino.comuna else None,
-                region=(resultado.region or None) if not destino.region else None,
-            )
+            try:
+                catalogo.editar(
+                    destino.destino_id, modificacion_manual=True,
+                    latitud=resultado.coordenadas.latitud, longitud=resultado.coordenadas.longitud,
+                    comuna=(resultado.localidad or None) if not destino.comuna else None,
+                    region=(resultado.region or None) if not destino.region else None,
+                )
+            except DestinoDuplicadoError as error:
+                # Caso real 475484: completar comuna/región volvería este
+                # destino idéntico a otro activo. Nunca se fusiona ni se toca
+                # en silencio -- se salta ESTE destino y se registra; una
+                # decisión humana ajena nunca cae por un duplicado latente.
+                logger.warning(
+                    "Destino %s (%s) no completado: duplicaría otro destino activo (%s)",
+                    destino.destino_id, destino.direccion, error,
+                )
+                destinos_duplicados.append(destino.destino_id)
+                continue
             destinos_actualizados.append(destino.destino_id)
-    return {"destinos_actualizados": destinos_actualizados}
+    return {"destinos_actualizados": destinos_actualizados, "destinos_duplicados": destinos_duplicados}
 
 
 def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
