@@ -100,3 +100,25 @@ def test_cli_lista_viajes_de_incidencias_operacionales_sin_convertir_strings_a_d
     assert cuerpo["resultado"] == ["v1", "v2"]
     assert {e["numero_transporte"] for e in cuerpo["viajes_soporte"]} == {"T1", "T2"}
     assert all(e["tipo_evento"] == "TIENE_ESTADIA" for e in cuerpo["viajes_soporte"])
+
+
+def test_campo_mayor_al_limite_csv_no_rompe_la_consulta(tmp_path):
+    """Dataset real 07-10-2026: evidencia por viaje > 131072 caracteres (límite
+    por defecto de ``csv``). La consulta debe leerla completa y responder."""
+    ruta = tmp_path / "viajes.csv"
+    amplio = "[" + "x" * 200_000 + "]"
+    _escribir_viajes(ruta, [
+        _fila(viaje_id="v1", numero_transporte="T1", choferes="JUAN PEREZ", evidencias_documentos=amplio),
+        _fila(viaje_id="v2", numero_transporte="T2", choferes="PEDRO GOMEZ"),
+        _fila(viaje_id="v3", numero_transporte="T3", choferes="JUAN PEREZ"),
+    ])
+    resultado = _ejecutar_cli("¿Cuántos choferes trabajaron?", ruta)
+    assert resultado.returncode == 0, resultado.stderr
+    salida = json.loads(resultado.stdout)
+    assert salida["estado"] != "ERROR", salida
+    assert "field larger than field limit" not in resultado.stdout + resultado.stderr
+    assert salida["estado"] == "OK" and salida["resultado"]["resultado"] == 2
+    assert salida["resultado"]["unidades"] == "choferes"
+
+    from atlas_core.consultas_atlas import cargar_viajes
+    assert cargar_viajes(ruta)[0]["evidencias_documentos"] == amplio  # completo, sin truncar

@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -417,6 +418,23 @@ def resolver_periodo(nombre: str, *, hoy: date, dias: int | None = None) -> tupl
             raise ErrorConsultaAtlas(f"'dias' inválido para ULTIMOS_N_DIAS: {dias!r}")
         return hoy - timedelta(days=dias - 1), hoy
     raise ErrorConsultaAtlas(f"Período no soportado: {nombre!r}")
+
+
+# Mismo criterio que `atlas_core.mobile` (ed2b7bd) y `atlas_core.acciones_
+# operacionales` (4b077eb): el reporte conserva evidencia JSON por viaje que
+# puede superar el límite por defecto de ``csv`` (131072 caracteres); ese
+# límite no es una regla de Atlas. Cualquier otro ``csv.Error`` se propaga.
+def _configurar_limite_campo_csv() -> int:
+    limite = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limite)
+            return limite
+        except OverflowError:
+            limite //= 10
+
+
+LIMITE_CAMPO_CSV = _configurar_limite_campo_csv()
 
 
 def cargar_viajes(ruta_csv: str | Path) -> list[dict[str, str]]:
