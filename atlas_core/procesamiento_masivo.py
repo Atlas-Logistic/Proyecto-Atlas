@@ -143,6 +143,7 @@ from atlas_core.trazabilidad_ocr import (
     ESTADO_BLOQUES_NO_DISPONIBLES,
     ESTADO_BLOQUES_NO_SOLICITADOS,
     persistir_traza_ocr,
+    ruta_traza_ocr,
 )
 from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
@@ -4376,6 +4377,329 @@ def _corroborar_documentos_relacionados_bajo_lock(ruta_csv: Path, archivos_objet
     return cambios
 
 
+# Caso real 475498 (transporte 0000362665): campos que describen el VIAJE
+# (no la guía) y que, por eso, el consenso de las guías hermanas buenas puede
+# corroborar en una guía degradada. Peso, material, número de guía, fecha y
+# horas son propios de cada guía y nunca se copian.
+_CAMPOS_VIAJE_CORROBORABLES = (
+    "numero_transporte", "chofer", "rut_chofer", "cliente", "rut_cliente",
+    "codigo_cliente", "cod_destinatario", "obra_destino", "patente_tracto", "patente_rampla",
+)
+_PATRON_PATENTE_CHILENA = re.compile(r"[A-Z]{2}\d{4}|[A-Z]{4}\d{2}")
+_PATRON_TRANSPORTE_VALIDO = re.compile(r"\d{10}")
+_SENALES_IDENTIDAD_VIAJE = frozenset({"transporte", "rut_chofer", "patente_tracto", "patente_rampla"})
+# Motivos de AUSENCIA/FORMA que se retiran al rellenar el campo. Nunca un
+# motivo semántico (p. ej. CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA).
+_MOTIVOS_RESUELTOS_POR_CAMPO_VIAJE = {
+    "numero_transporte": ("TRANSPORTE_AUSENTE", "TRANSPORTE_AUSENTE_SIN_ETIQUETA"),
+    "chofer": ("CHOFER_AUSENTE",),
+    "rut_chofer": ("RUT_CHOFER_INVALIDO",),
+    "cliente": ("CLIENTE_AUSENTE",),
+    "rut_cliente": ("RUT_CLIENTE_INVALIDO",),
+    "patente_tracto": ("PATENTE_SIN_HOMOLOGAR", "PATENTE_AMBIGUA"),
+}
+
+
+def _texto_ausente(valor: object) -> bool:
+    return _normalizar(valor).strip() in {"", "NO ENCONTRADO", "NO DETERMINADO"}
+
+
+def _clave_comparable(campo: str, valor: object) -> str:
+    if campo in ("rut_chofer", "rut_cliente"):
+        return normalizar_rut(str(valor or ""))
+    return re.sub(r"[^0-9A-Z]", "", _normalizar(valor))
+
+
+def _valor_viaje_fuerte(fila: Mapping[str, str], campo: str) -> bool:
+    """El propio documento leyó `campo` de forma confiable: presente, sin
+    motivo de duda y, para identificadores con forma fija, bien formado."""
+    valor = str(fila.get(campo, "")).strip()
+    if _texto_ausente(valor) or _campo_en_duda(fila, campo):
+        return False
+    if campo in ("rut_chofer", "rut_cliente"):
+        return validar_rut_chileno(valor).estado == EstadoValidacion.VALIDO
+    if campo in ("patente_tracto", "patente_rampla"):
+        return bool(_PATRON_PATENTE_CHILENA.fullmatch(_clave_comparable(campo, valor)))
+    if campo == "numero_transporte":
+        return bool(_PATRON_TRANSPORTE_VALIDO.fullmatch(valor))
+    return True
+
+
+def _valor_viaje_debil(fila: Mapping[str, str], campo: str) -> bool:
+    """Ausente o con forma imposible para el campo ("GARC1A" como tracto).
+    Un valor presente y bien formado, aunque en duda, nunca es débil."""
+    valor = str(fila.get(campo, "")).strip()
+    if _texto_ausente(valor):
+        return True
+    if campo in ("rut_chofer", "rut_cliente"):
+        return validar_rut_chileno(valor).estado != EstadoValidacion.VALIDO
+    if campo in ("patente_tracto", "patente_rampla"):
+        return not _PATRON_PATENTE_CHILENA.fullmatch(_clave_comparable(campo, valor))
+    if campo == "numero_transporte":
+        return not _PATRON_TRANSPORTE_VALIDO.fullmatch(valor)
+    return False
+
+
+def _contradice_consenso(fila: Mapping[str, str], campo: str, valor_consenso: str) -> bool:
+    """Un identificador del viaje bien formado y distinto contradice aunque
+    venga en duda (otro transporte/RUT/patente válidos); el resto, sólo si
+    la guía lo leyó de forma confiable."""
+    propio = _clave_comparable(campo, fila.get(campo))
+    esperado = _clave_comparable(campo, valor_consenso)
+    if campo in ("numero_transporte", "rut_chofer", "patente_tracto", "patente_rampla"):
+        if _valor_viaje_debil(fila, campo) or propio == esperado:
+            return False
+        if campo == "numero_transporte":
+            return not _transportes_confundibles(propio, esperado)
+        if campo != "rut_chofer":
+            return not _difiere_en_a_lo_sumo_uno(propio, esperado)
+        return True
+    return _valor_viaje_fuerte(fila, campo) and propio != esperado
+
+
+def _difiere_en_a_lo_sumo_uno(a: str, b: str) -> bool:
+    return len(a) == len(b) and sum(x != y for x, y in zip(a, b)) <= 1
+
+
+def _destino_documental_compatible(crudo: str, referencia: str) -> bool:
+    """Misma numeración y misma calle salvo UN carácter OCR ("1 CALVARINO
+    8501 QUSLIC9A" ~ "GALVARINO 8501 QUILICURA")."""
+    numeros_crudo = set(re.findall(r"\d{3,6}", crudo or ""))
+    numeros_ref = set(re.findall(r"\d{3,6}", referencia or ""))
+    if not numeros_crudo & numeros_ref:
+        return False
+    calles_crudo = _tokens_calle_documental(crudo)
+    return any(
+        _difiere_en_a_lo_sumo_uno(token, calle)
+        for calle in _tokens_calle_documental(referencia) if len(calle) >= 5
+        for token in calles_crudo
+    )
+
+
+def _senales_mismo_viaje(
+    fila: Mapping[str, str], consenso: Mapping[str, str], textos_ocr: Iterable[str],
+    destinos_hermanas: Iterable[str] = (),
+) -> set[str]:
+    """Señales documentales PROPIAS de la guía degradada (fila u OCR crudo)
+    que coinciden con el consenso de sus hermanas."""
+    lineas = [_normalizar(t) for t in textos_ocr]
+    tokens = {t for linea in lineas for t in re.split(r"[^0-9A-Z]+", linea) if t}
+    digitos_por_linea = [normalizar_rut(linea) for linea in lineas]
+    senales: set[str] = set()
+
+    transporte = consenso.get("numero_transporte", "")
+    propio = str(fila.get("numero_transporte", "")).strip()
+    if transporte and (
+        propio == transporte or _transportes_confundibles(propio, transporte) or transporte in tokens
+    ):
+        senales.add("transporte")
+    rut = normalizar_rut(consenso.get("rut_chofer", ""))
+    if len(rut) >= 8 and (
+        normalizar_rut(fila.get("rut_chofer", "")) == rut or any(rut in d for d in digitos_por_linea)
+    ):
+        senales.add("rut_chofer")
+    for campo in ("patente_tracto", "patente_rampla"):
+        patente = _clave_comparable(campo, consenso.get(campo, ""))
+        if len(patente) == 6 and any(
+            _difiere_en_a_lo_sumo_uno(t, patente) for t in {*tokens, _clave_comparable(campo, fila.get(campo))}
+        ):
+            senales.add(campo)
+    codigo = re.sub(r"\D", "", consenso.get("codigo_cliente", ""))
+    if len(codigo) >= 6 and (codigo in tokens or codigo == re.sub(r"\D", "", str(fila.get("codigo_cliente", "")))):
+        senales.add("codigo_cliente")
+    crudo = str(fila.get("despachar_a_crudo", ""))
+    if any(_destino_documental_compatible(crudo, d) for d in destinos_hermanas if d):
+        senales.add("destino")
+    return senales
+
+
+def _consenso_viaje(hermanas: list[Mapping[str, str]]) -> dict[str, str] | None:
+    """Valor unánime de cada campo de viaje entre las guías hermanas que lo
+    leyeron de forma confiable. Desacuerdo en un identificador del viaje
+    (RUT, patentes) -> sin consenso; en otro campo -> ese campo se omite."""
+    consenso: dict[str, str] = {}
+    for campo in _CAMPOS_VIAJE_CORROBORABLES:
+        fuertes = [h for h in hermanas if _valor_viaje_fuerte(h, campo)]
+        if len({_clave_comparable(campo, h.get(campo)) for h in fuertes}) > 1:
+            if campo in _SENALES_IDENTIDAD_VIAJE:
+                return None
+            continue
+        if fuertes:
+            consenso[campo] = str(fuertes[0].get(campo, "")).strip()
+    return consenso
+
+
+# Mismo conjunto que `revalidacion_documental.CAMPOS_DERIVADOS_RUTA` (no se
+# importa: ese módulo importa éste).
+_CAMPOS_ENTREGA_RUTA_VIAJE = (
+    "distancia_km", "duracion_min", "proveedor_ruta",
+    "direccion_entrega", "localidad_entrega", "region_entrega",
+    "estado_ruta", "motivo_ruta", "estado_entrega",
+    "codigo_pais", "codigo_unidad", "codigo_contexto",
+)
+
+
+def _corroborar_entrega_mismo_viaje(
+    fila: dict[str, str], hermanas: list[Mapping[str, str]], transporte: str, senales: set[str],
+) -> list[str]:
+    """La guía degradada leyó un destino compatible con el de sus hermanas
+    ("1 CALVARINO 8501 QUSLIC9A" ~ "GALVARINO 8501 QUILICURA") y TODAS
+    ellas ya rutearon el mismo destino desde el mismo origen: comparte esa
+    entrega. `despachar_a_crudo` (verdad documental) nunca se toca; un
+    origen propio distinto, o una ruta propia ya calculada, se respetan."""
+    if "destino" not in senales or str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
+        return []
+    if any(str(h.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value for h in hermanas):
+        return []
+    claves = {
+        (str(h.get("planta_origen_id", "")).strip(), str(h.get("distancia_km", "")).strip(),
+         str(h.get("duracion_min", "")).strip())
+        for h in hermanas
+    }
+    if len(claves) != 1:
+        return []
+    planta_id = next(iter(claves))[0]
+    propia = str(fila.get("planta_origen_id", "")).strip()
+    if not planta_id or (propia and propia != planta_id):
+        return []
+    fuente = hermanas[0]
+    if not propia:
+        fila["planta_origen_id"] = planta_id
+        fila["planta_origen_nombre"] = str(fuente.get("planta_origen_nombre", ""))
+        fila["origen_determinado_por"] = "DOCUMENTO_HERMANO_MISMO_TRANSPORTE"
+        fila["evidencia_origen"] = f"MISMO_TRANSPORTE={transporte}"
+    for campo in _CAMPOS_ENTREGA_RUTA_VIAJE:
+        fila[campo] = str(fuente.get(campo, ""))
+    return ["entrega"]
+
+
+def entrega_corroborada_por_mismo_viaje(fila: Mapping[str, str]) -> bool:
+    """La entrega vigente de la fila vino de sus hermanas del mismo viaje
+    (`_corroborar_entrega_mismo_viaje`), no de geocodificar su crudo."""
+    try:
+        evidencia = json.loads(str(fila.get("evidencia_documentos_relacionados", "")) or "{}")
+    except ValueError:
+        return False
+    return (
+        isinstance(evidencia, dict) and evidencia.get("regla") == "MISMO_VIAJE"
+        and "entrega" in (evidencia.get("campos") or ())
+        and evidencia.get("numero_transporte") == str(fila.get("numero_transporte", "")).strip()
+    )
+
+
+def corroborar_campos_viaje_entre_guias_hermanas(
+    filas: list[dict[str, str]], archivos_objetivo: set[str], textos_ocr_por_archivo: Mapping[str, list[str]],
+) -> list[str]:
+    """Corrobora en una guía degradada, sólo con evidencia fuerte de MISMO
+    viaje, los campos de viaje que su OCR no pudo leer (caso real 475498
+    junto a 475497/475499, transporte 0000362665).
+
+    Mismo viaje = misma fecha + ninguna contradicción fuerte + al menos dos
+    señales de identidad (transporte, RUT chofer, tracto, rampla) y tres en
+    total (más código cliente, destino) leídas en la PROPIA guía, frente al
+    consenso unánime de al menos dos guías hermanas con transporte válido.
+    Si más de un transporte califica, se abstiene. Sólo rellena campos
+    débiles (ausentes, en duda o mal formados); nunca pisa un valor fuerte.
+    Muta `filas` y devuelve los archivos corroborados."""
+    grupos: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for otra in filas:
+        if _valor_viaje_fuerte(otra, "numero_transporte") and str(otra.get("estado_procesamiento", "")) == "OK":
+            grupos.setdefault((str(otra.get("fecha", "")).strip(), otra["numero_transporte"].strip()), []).append(otra)
+
+    corroborados: list[str] = []
+    for fila in filas:
+        archivo = str(fila.get("archivo", ""))
+        if archivo not in archivos_objetivo or str(fila.get("estado_procesamiento", "")) != "OK":
+            continue
+        debiles = [c for c in _CAMPOS_VIAJE_CORROBORABLES if _valor_viaje_debil(fila, c)]
+        fecha = str(fila.get("fecha", "")).strip()
+        if not debiles or _texto_ausente(fecha):
+            continue
+        calificados = []
+        for (fecha_grupo, transporte), miembros in grupos.items():
+            hermanas = [h for h in miembros if h is not fila]
+            if fecha_grupo != fecha or len(hermanas) < 2:
+                continue
+            consenso = _consenso_viaje(hermanas)
+            if not consenso:
+                continue
+            contradice = any(
+                _contradice_consenso(fila, campo, consenso[campo])
+                for campo in _CAMPOS_VIAJE_CORROBORABLES if campo in consenso
+            )
+            if contradice:
+                continue
+            senales = _senales_mismo_viaje(
+                fila, consenso, textos_ocr_por_archivo.get(archivo, ()),
+                [str(h.get(c, "")) for h in hermanas for c in ("despachar_a_crudo", "direccion_entrega")],
+            )
+            if len(senales & _SENALES_IDENTIDAD_VIAJE) >= 2 and len(senales) >= 3:
+                calificados.append((transporte, hermanas, consenso, senales))
+        if len(calificados) != 1:
+            continue
+        transporte, hermanas, consenso, senales = calificados[0]
+        campos = [c for c in debiles if c in consenso]
+        campos += _corroborar_entrega_mismo_viaje(fila, hermanas, transporte, senales)
+        if not campos:
+            continue
+        for campo in campos:
+            if campo in consenso:
+                fila[campo] = consenso[campo]
+        resueltos = {m for c in campos for m in _MOTIVOS_RESUELTOS_POR_CAMPO_VIAJE.get(c, ())}
+        if {"chofer", "rut_chofer"} <= set(campos):
+            resueltos.add("CHOFER_SIN_CORROBORAR")
+        motivos = [m for m in _motivos_ordenados(fila) if m not in resueltos]
+        fila["motivos_revision_documento"] = " | ".join(motivos)
+        fila["indicador_revision"] = "REVISAR" if any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos) else "OK"
+        fila["estado_documental"] = "REQUIERE_REVISION" if fila["indicador_revision"] == "REVISAR" else "OK"
+        fila["estado_operacional"] = (
+            "REQUIERE_REVISION"
+            if fila["estado_documental"] == "REQUIERE_REVISION" or _ruta_pendiente_de_resolucion(fila.get("estado_ruta"))
+            else "OK"
+        )
+        metodos = {m.strip() for m in fila.get("metodos_recuperacion_documento", "").split("|") if m.strip()}
+        metodos.add("DOCUMENTO_RELACIONADO")
+        fila["metodos_recuperacion_documento"] = " | ".join(sorted(metodos))
+        fila["evidencia_documentos_relacionados"] = json.dumps({
+            "regla": "MISMO_VIAJE", "numero_transporte": transporte, "campos": campos,
+            "archivos_fuente": sorted(str(h.get("archivo", "")) for h in hermanas),
+            "senales": sorted(senales),
+        }, ensure_ascii=False, sort_keys=True)
+        corroborados.append(archivo)
+    return corroborados
+
+
+def _motivos_ordenados(fila: Mapping[str, str]) -> list[str]:
+    return [m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()]
+
+
+def _corroborar_campos_viaje_en_dataset(ruta_csv: Path, archivos_objetivo: set[str], directorio_trazas: Path) -> list[str]:
+    """Envoltura de `corroborar_campos_viaje_entre_guias_hermanas` sobre el
+    CSV real, bajo el mismo lock que `_corroborar_documentos_relacionados`.
+    Las líneas OCR propias salen de la traza persistida de cada guía."""
+    if not archivos_objetivo or not ruta_csv.is_file():
+        return []
+    textos: dict[str, list[str]] = {}
+    for archivo in archivos_objetivo:
+        try:
+            traza = json.loads(ruta_traza_ocr(directorio_trazas, archivo).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        lineas = (traza.get("ocr") or {}).get("lineas") or []
+        textos[archivo] = [str(l.get("texto", "") if isinstance(l, Mapping) else l) for l in lineas]
+    with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo_csv:
+            filas = list(csv.DictReader(archivo_csv, delimiter=";"))
+        corroborados = corroborar_campos_viaje_entre_guias_hermanas(filas, archivos_objetivo, textos)
+        if corroborados:
+            temporal = ruta_csv.with_suffix(ruta_csv.suffix + ".mismo_viaje.tmp")
+            with temporal.open("w", newline="", encoding="utf-8-sig") as archivo_csv:
+                escritor = csv.DictWriter(archivo_csv, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+                escritor.writeheader(); escritor.writerows(filas)
+            temporal.replace(ruta_csv)
+    return corroborados
+
+
 # Valores de `obra_destino` que NO identifican una obra real -- nunca
 # habilitan una promoción histórica de destino (Codex 472477: la obra
 # "No encontrado" se usaba como clave de agrupación válida).
@@ -6115,6 +6439,29 @@ def procesar_carpeta(
         if not nuevos:
             break
     resumen["documentos_relacionados_corroborados"] = corroborados
+    # Caso real 475498: guía degradada del MISMO viaje que otras ya bien
+    # leídas -- sus campos de viaje se corroboran por consenso de las
+    # hermanas y sus decisiones se regeneran desde la fila corregida (mismo
+    # mecanismo canónico que la segunda pasada universal).
+    corroborados_viaje = _corroborar_campos_viaje_en_dataset(
+        ruta_csv, archivos_procesados_ahora, directorio_trazas_ocr,
+    )
+    if corroborados_viaje:
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as _archivo:
+            fila_por_archivo = {f.get("archivo", ""): f for f in csv.DictReader(_archivo, delimiter=";")}
+        regeneradas: list[dict[str, object]] = []
+        for archivo_corroborado in corroborados_viaje:
+            fila = fila_por_archivo.get(archivo_corroborado)
+            if fila is not None and carpeta_catalogos is not None:
+                regeneradas.extend(detectar_decisiones_documento(
+                    archivo=archivo_corroborado, datos=_datos_sinteticos_desde_fila(fila),
+                    carpeta_catalogos=Path(carpeta_catalogos),
+                ))
+        decisiones_pendientes[:] = [
+            d for d in decisiones_pendientes
+            if str((d.get("documento") or {}).get("archivo", "")) not in corroborados_viaje
+        ] + regeneradas
+    resumen["documentos_mismo_viaje_corroborados"] = sorted(corroborados_viaje)
     resumen["destinos_historial_revertidos"] = _revertir_promociones_historial_contaminado(ruta_csv)
     resumen["destinos_historial_resueltos"] = _resolver_destinos_contaminados_por_historial(
         ruta_csv, archivos_procesados_ahora,

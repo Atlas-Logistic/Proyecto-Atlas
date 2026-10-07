@@ -91,6 +91,7 @@ from atlas_core.procesamiento_masivo import (
     MOTIVOS_NO_BLOQUEANTES,
     MotivoRevisionDocumento,
     _combinar_fecha_hora,
+    entrega_corroborada_por_mismo_viaje,
     _dividir_items_material_fusionados,
     _es_fragmento_estampado_no_material,
     _normalizar,
@@ -2839,6 +2840,11 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
         for fila in filas:
             direccion = str(fila.get("direccion_entrega", "")).strip()
             if not direccion:
+                continue
+            # Caso real 475498: la entrega vino de las guías hermanas del
+            # mismo viaje (destino documental ya cotejado allí), no de
+            # geocodificar este crudo degradado ("1 CALVARINO 8501 ...").
+            if entrega_corroborada_por_mismo_viaje(fila):
                 continue
             localidad = str(fila.get("localidad_entrega", "")).strip()
             region = str(fila.get("region_entrega", "")).strip()
