@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from atlas_core.aplicacion_decisiones import aplicar_decision_obra
+from atlas_core.aplicacion_multiple import aplicar_decisiones_multiples
 from atlas_core.decisiones_pendientes import (
     crear_decision, detectar_decisiones_peso_viaje_implausible, regenerar_decisiones_persistidas,
 )
@@ -234,6 +235,37 @@ def test_peso_terminal_regenera_directo_sin_revalidacion_global(tmp_path, monkey
     with (op.raiz / Path(estado["reporte_vigente"]) / "viajes.csv").open(encoding="utf-8", newline="") as archivo:
         viajes = list(csv.DictReader(archivo, delimiter=";"))
     assert next(v for v in viajes if v["numero_transporte"] == "0000357311")["peso_total_viaje_kg"] == "22868"
+
+
+def test_lote_solo_peso_transmite_correccion_y_omite_reconciliacion_global(tmp_path, monkeypatch):
+    """PESO batch conserva la misma aplicación canónica, sin cierre global."""
+    llamadas_reconciliacion = []
+
+    def reconciliacion_falsa(**_kwargs):
+        llamadas_reconciliacion.append(True)
+        return {"reconciliado": True, "motivo": "TEST"}
+
+    monkeypatch.setattr(
+        "atlas_core.reconciliacion_estado_derivado.reconciliar_estado_derivado",
+        reconciliacion_falsa,
+    )
+    op = Operacion(tmp_path)
+    _escribir_csv(op.dataset, _filas_peso(op))
+    reconciliar_decisiones_peso_viaje(raiz_atlas=op.raiz)
+    por_guia = {d["documento"]["numero_guia"]: d for d in op.decisiones()}
+
+    resultado = aplicar_decisiones_multiples(raiz_atlas=op.raiz, solicitudes=[
+        {"decision_id": por_guia["473263"]["decision_id"], "accion": "CONFIRMAR"},
+        {"decision_id": por_guia["473424"]["decision_id"], "accion": "CORREGIR_PESO", "peso_corregido": "22868"},
+    ])
+
+    assert resultado.total_aplicadas == 2
+    assert resultado.modo_refresco_lote == "LOCAL_RAPIDO"
+    assert resultado.reconciliacion_ejecutada is False
+    assert llamadas_reconciliacion == []
+    assert next(f for f in _leer_filas(op.dataset) if f["numero_guia"] == "473424")["peso_kg"] == "22868"
+    ledger = json.loads((op.actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert [(a["accion"], a["peso_corregido"]) for a in ledger] == [("CONFIRMAR", None), ("CORREGIR_PESO", "22868")]
 
 
 def test_corregir_peso_exige_un_numero(tmp_path):
