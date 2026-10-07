@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import tempfile
 import unicodedata
@@ -191,6 +192,25 @@ from atlas_core.telemetria.enriquecimiento import (
 
 
 logger = logging.getLogger(__name__)
+
+# Mismo criterio que `mobile`, `acciones_operacionales`, `consultas_atlas` y
+# `resumen_procesamiento_desktop`: el dataset operacional conserva evidencia
+# por fila (p. ej. `resultado_atlas_ia_json`) que puede superar el límite por
+# defecto de ``csv`` (131072 caracteres); ese límite no es una regla de
+# Atlas. Vale para todos los lectores de este módulo (`_validar_csv_existente`
+# y los que releen el dataset durante `procesar_carpeta`). Se baja sólo si la
+# plataforma no admite ``sys.maxsize`` (Windows: C long de 32 bits).
+def _configurar_limite_campo_csv() -> int:
+    limite = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limite)
+            return limite
+        except OverflowError:
+            limite //= 10
+
+
+LIMITE_CAMPO_CSV = _configurar_limite_campo_csv()
 
 # Contexto efímero del lote: permite que `procesar_carpeta` entregue la
 # ubicación de evidencia a su implementación real sin cambiar el contrato de
