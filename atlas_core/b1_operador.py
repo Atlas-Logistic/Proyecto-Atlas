@@ -131,6 +131,17 @@ _SIN_VIAJES = re.compile(r"\bSIN\s+VIAJES?\b|\bNO\s+(?:TIENEN?|HAN\s+TENIDO|TUVI
 _CON_VIAJES = re.compile(r"\bCON\s+VIAJES?\b|\b(?:TIENEN?|HAN\s+TENIDO|TUVIERON|REGISTRAN)\s+VIAJES?\b")
 _OTRA_ENTIDAD = re.compile(r"\b(?:OBRAS?|CLIENTES?|DESTINOS?|VEHICULOS?|PATENTES?|CAMION(?:ES)?|TRACTOS?|RAMPLAS?|"
                            r"GUIAS?|DECISIONES|REVISIONES|TARJETAS|PLANTAS?)\b")
+# Estado de UN chofer concreto ("¿Luis Lara está activo?", "¿está inactivo
+# Luis Lara?", "¿cuál es el estado de Luis Lara?"): lectura, nunca una orden.
+_ESTADO_ADJ = r"(?:IN)?ACTIV[OA]|(?:DES)?HABILITAD[OA]"
+_ESTADO_INDIVIDUAL = (
+    re.compile(rf"^(?:EL\s+|LA\s+)?(?:CHOFER\s+|CONDUCTOR(?:A)?\s+)?(?P<chofer>.+?)\s+(?:ESTA|SIGUE|QUEDO)\s+(?:{_ESTADO_ADJ})$"),
+    re.compile(rf"^(?:ESTA|SIGUE)\s+(?:{_ESTADO_ADJ})\s+(?:EL\s+|LA\s+)?(?:CHOFER\s+|CONDUCTOR(?:A)?\s+)?(?P<chofer>.+)$"),
+    re.compile(r"^CUAL\s+ES\s+EL\s+ESTADO\s+(?:DE\s+|DEL\s+)(?:LA\s+)?(?:CHOFER\s+|CONDUCTOR(?:A)?\s+)?(?P<chofer>.+)$"),
+)
+# Una "mención" que en realidad es una pregunta general sobre el catálogo.
+_MENCION_GENERAL = re.compile(r"\b(?:CHOFERES|CONDUCTORES|CUANTOS|CUANTAS|QUIENES|QUIEN|CUALES|QUE|TODOS|"
+                              r"ALGUNO|ALGUN|NINGUNO|NINGUN|HAY)\b")
 _VERBO_LECTURA = re.compile(r"^(?:QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
 _LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
 _NO_ES_DECISION = re.compile(r"\b(?:ESTADIAS?|INCIDENCIAS?|DEVOLUCION(?:ES)?|VUELTAS?)\b")
@@ -392,6 +403,11 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         nombre = original[m.start("nombre"):m.end("nombre")].strip()
         return Intencion("OBRA_CONSULTAR", {"nombre": nombre} if nombre else {})
     if _VERBO_LECTURA.match(plano) or str(texto or "").strip().endswith("?"):
+        for patron in _ESTADO_INDIVIDUAL:
+            m = patron.match(plano)
+            if m and not _MENCION_GENERAL.search(m.group("chofer")):
+                return Intencion("CHOFER_CONSULTAR", {},
+                                 {"chofer": original[m.start("chofer"):m.end("chofer")].strip(" ,:")})
         consulta_choferes = _consulta_catalogo_choferes(plano)
         if consulta_choferes is not None:
             return Intencion("CHOFER_CONSULTAR", consulta_choferes)
@@ -691,6 +707,9 @@ def _resultado_lectura_publico(accion: str, resultado: Mapping[str, object]) -> 
 
 
 def _describir_catalogo_choferes(resultado: Mapping[str, object]) -> str:
+    if resultado.get("chofer_individual"):
+        chofer = (resultado.get("choferes") or [{}])[0]
+        return f"{chofer.get('nombre', '')} está {'ACTIVO' if chofer.get('activo') else 'INACTIVO'}."
     resumen = resultado.get("resumen") or {}
     periodo = resultado.get("periodo") or {}
     en_periodo = (f" entre el {_fecha_legible(periodo.get('desde'))} y el {_fecha_legible(periodo.get('hasta'))}"
@@ -1158,7 +1177,7 @@ class OperadorB1:
         parametros = dict(intencion.parametros)
         if "chofer" in intencion.menciones:
             resolucion = resolver_chofer(self.capa._ctx.choferes(), intencion.menciones["chofer"],
-                                         incluir_inactivos=intencion.accion == "CHOFER_CAMBIAR_ESTADO")
+                                         incluir_inactivos=intencion.accion in {"CHOFER_CAMBIAR_ESTADO", "CHOFER_CONSULTAR"})
             if resolucion["estado"] != "RESUELTO":
                 # Nunca una acción ejecutable ambigua ni claves internas: sólo
                 # nombre (y RUT real, si lo hay) para que el humano precise.

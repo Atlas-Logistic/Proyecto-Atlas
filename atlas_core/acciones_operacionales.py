@@ -395,6 +395,11 @@ def _consultar_choferes(ctx: _Contexto, p: dict) -> object:
     todas = [{**_vista_chofer(k, r), "con_viajes": k in con_viajes}
              for k, r in sorted(choferes.items()) if isinstance(r, dict)]
     vistas = todas
+    if p.get("chofer"):
+        # Estado de UN chofer concreto, ya resuelto por el llamador.
+        vistas = [v for v in todas if v["chofer_id"] == p["chofer"]]
+        if not vistas:
+            raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "chofer inexistente en el catálogo")
     if filtro != "TODOS":
         vistas = [v for v in vistas if v["activo"] is (filtro == "ACTIVO")]
     if viajes != "TODOS":
@@ -403,6 +408,7 @@ def _consultar_choferes(ctx: _Contexto, p: dict) -> object:
     con = sum(v["con_viajes"] for v in todas)
     return {
         "choferes": vistas, "total": len(vistas), "estado": filtro, "viajes": viajes,
+        "chofer_individual": bool(p.get("chofer")),
         "periodo": ({"desde": p.get("fecha_desde", ""), "hasta": p.get("fecha_hasta", "")}
                     if desde or hasta else None),
         "resumen": {"registrados": len(todas), "activos": activos, "inactivos": len(todas) - activos,
@@ -1362,7 +1368,7 @@ _REF = _P("texto", max_largo=500)
 ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
     DefinicionAccion("CHOFER_CONSULTAR", LECTURA,
                      "Choferes del catálogo: registrados, activos/inactivos y con/sin viajes (opcionalmente en un período).",
-                     {"estado": _P("enum", opciones=("ACTIVO", "INACTIVO", "TODOS")),
+                     {"chofer": _P("id"), "estado": _P("enum", opciones=("ACTIVO", "INACTIVO", "TODOS")),
                       "viajes": _P("enum", opciones=("CON", "SIN", "TODOS")),
                       "fecha_desde": _P("fecha"), "fecha_hasta": _P("fecha")}, consultar=_consultar_choferes),
     DefinicionAccion("OBRA_CONSULTAR", LECTURA, "Lista obras (opcionalmente por nombre) con sus relaciones.",

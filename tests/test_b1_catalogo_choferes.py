@@ -218,3 +218,51 @@ def test_dataset_con_campo_amplio_no_rompe_la_consulta(raiz):
         csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";").writerow(fila)
     r = _leer(raiz, "¿Cuántos choferes están registrados?")
     assert r["resultado"]["resumen"]["registrados"] == 6
+
+
+# Estado de UN chofer concreto: lectura directa, nunca la lista general ni
+# un preview de cambio de estado.
+@pytest.mark.parametrize("texto", [
+    "Felipe Lara está activo?", "¿Felipe Lara está inactivo?", "¿Está activo Felipe Lara?",
+    "¿Está inactivo Felipe Lara?", "¿Cuál es el estado de Felipe Lara?", "¿Felipe Lara está habilitado?",
+])
+def test_estado_de_un_chofer_inactivo_responde_directo(raiz, texto):
+    catalogo = raiz / "catalogos_privados" / "choferes.json"
+    antes = _huella(catalogo)
+    b1 = OperadorB1(raiz)
+    r = b1.atender("c", texto)
+    assert r["estado"] == "RESULTADO_LECTURA" and r["accion"] == "CHOFER_CONSULTAR", r
+    assert r["mensaje"] == "FELIPE LARA está INACTIVO."
+    assert r["resultado"]["total"] == 1 and _nombres(r) == ["FELIPE LARA"]
+    assert "167890121" not in json.dumps(r, ensure_ascii=False)
+    assert _huella(catalogo) == antes and b1.pendiente("c") is None
+    assert CapaAccionesOperacionales(raiz).auditoria() == []
+
+
+def test_estado_de_un_chofer_activo(raiz):
+    r = _leer(raiz, "¿Está activo Ana Rojas?")
+    assert r["mensaje"] == "ANA ROJAS está ACTIVO."
+
+
+def test_estado_de_chofer_inexistente_pide_aclaracion_sin_lista_general(raiz):
+    b1 = OperadorB1(raiz)
+    r = b1.atender("c", "¿Pedro Nadie está activo?")
+    assert r["estado"] == "ACLARACION_REQUERIDA" and r["candidatos"] == []
+    assert "resultado" not in r and b1.pendiente("c") is None
+
+
+def test_estado_de_chofer_ambiguo_pide_aclaracion_sin_lista_general(raiz):
+    b1 = OperadorB1(raiz)
+    r = b1.atender("c", "¿Diego Paz está activo?")
+    assert r["estado"] == "ACLARACION_REQUERIDA" and len(r["candidatos"]) == 2
+    assert all(set(c) <= {"nombre", "activo", "rut"} for c in r["candidatos"])
+    assert "resultado" not in r and "PENDIENTE0000" not in json.dumps(r, ensure_ascii=False)
+    assert b1.pendiente("c") is None
+
+
+def test_consultas_generales_de_estado_no_cambian(raiz):
+    activos = _leer(raiz, "¿Cuántos choferes están activos?")
+    assert activos["resultado"]["total"] == 5 and not activos["resultado"]["chofer_individual"]
+    inactivos = _leer(raiz, "¿Quiénes están inactivos?")
+    assert inactivos["resultado"]["total"] == 1 and _nombres(inactivos) == ["FELIPE LARA"]
+    assert not inactivos["resultado"]["chofer_individual"]
