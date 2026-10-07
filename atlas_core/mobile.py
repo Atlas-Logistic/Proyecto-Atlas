@@ -466,8 +466,12 @@ def asociar_documento(
     # Desktop). Reutiliza el mismo mecanismo de coincidencia por número de
     # guía que ya usa esta función, no una estrategia paralela.
     candidatas_por_guia = [f for f in filas if guia not in ("", "No encontrado") and f.get("numero_guia") == guia]
-    candidatas = candidatas_por_guia
-    if not candidatas and transporte not in ("", "No encontrado"):
+    # Caso real 475498 (envío e79c617e): la fila ya existente de la guía
+    # tenía transporte "No encontrado" -- un marcador, nunca un transporte.
+    # Sólo cuentan transportes válidos; si la fila de la guía no aporta
+    # ninguno, decide el transporte válido que leyó ESTE envío.
+    candidatas = [f for f in candidatas_por_guia if transporte_valido(f.get("numero_transporte", ""))]
+    if not candidatas and transporte_valido(transporte):
         candidatas = [f for f in filas if f.get("numero_transporte") == transporte]
     transportes = sorted({f.get("numero_transporte", "") for f in candidatas if f.get("numero_transporte")})
     documento_ya_existe = bool(candidatas_por_guia)
@@ -899,6 +903,17 @@ def _procesar_envio_mobile_impl(
         asociacion = asociar_documento(datos, filas, candidatos_lote=candidatos_lote)
         captura_ilegible = _captura_ilegible(datos)
 
+        # Caso real 475498 (e79c617e): reenvío de una guía ya registrada --
+        # la lectura nueva mejora la fila canónica sólo si la política de
+        # relectura lo autoriza; si no, comportamiento de siempre.
+        relectura_documento = None
+        if dataset and encabezado_compatible and not captura_ilegible:
+            relectura_documento = _promover_relectura_de_reenvio(
+                datos, asociacion, identificador=identificador, envio_id=envio_id,
+                imagen_sha256=str(registro.get("imagen_sha256", "")), dataset=Path(dataset),
+                carpeta_catalogos=carpeta_catalogos,
+            )
+
         archivo_dataset = ""
         if (
             dataset and encabezado_compatible and not captura_ilegible
@@ -1001,6 +1016,10 @@ def _procesar_envio_mobile_impl(
             # este mismo lock no reentrante) hace la escritura final,
             # todavía dentro de la misma sección crítica.
             ruta_artefacto = Path(dataset).parent / "decisiones_pendientes.json"
+            if relectura_documento and relectura_documento.get("promovida"):
+                # Las tarjetas del documento ya se regeneraron desde su fila
+                # canónica; las de esta lectura no tienen fila propia.
+                decisiones_nuevas.clear()
             with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
                 previas: list[dict[str, object]] = []
                 try:
@@ -1037,6 +1056,8 @@ def _procesar_envio_mobile_impl(
             "archivo_dataset": archivo_dataset,
             "procesado_en": datetime.now(timezone.utc).isoformat(), "error": "",
         })
+        if relectura_documento is not None:
+            registro["relectura_documento"] = relectura_documento
     except SesionOcupadaError as error:
         # Caso real c4211f4c (05-10-2026): otra sesión sostenía el lock del
         # dataset/bandeja al momento de escribir. Es concurrencia normal,
@@ -1795,6 +1816,122 @@ def _reprocesar_envio_mobile_persistido_impl(
     return registro
 
 
+def _promover_relectura_de_reenvio(
+    datos: Mapping[str, object], asociacion: Mapping[str, object], *,
+    identificador: str, envio_id: str, imagen_sha256: str,
+    dataset: Path, carpeta_catalogos: str | Path | None,
+) -> dict[str, object] | None:
+    """Caso real 475498 (envío e79c617e): un reenvío Mobile de una guía YA
+    registrada mejora esa MISMA fila sólo si la política de relectura de
+    Desktop lo autoriza (`_evaluar_relectura` + `_relectura_mejor` ->
+    `_promover_relectura`: identidad compatible, nunca evidencia peor, al
+    menos una duda resuelta y ninguna nueva; campos con decisión humana y
+    valores válidos no leídos se conservan). Nunca agrega una fila.
+
+    Devuelve None si no aplica (no es reenvío, cero o varias filas de la
+    guía, o la fila es la del propio envío); si no, el resultado de la
+    evaluación (`promovida`, `motivo`, `cambios`), ya registrado en el
+    historial de relecturas del documento canónico."""
+    from atlas_core.evidencia_documental import (
+        RELECTURA_PROMOVIDA, RELECTURA_RECHAZADA, registrar_relectura,
+    )
+    from atlas_core.procesamiento_masivo import _evaluar_relectura, _promover_relectura, _relectura_mejor
+
+    if asociacion.get("documento_ya_existe") is not True or not dataset.is_file():
+        return None
+    guia = str(datos.get("numero_guia", "")).strip()
+    filas = _filas_dataset(dataset)
+    vigentes = [f for f in filas if str(f.get("numero_guia", "")).strip() == guia]
+    if len(vigentes) != 1 or vigentes[0].get("archivo") == identificador:
+        return None
+    vigente = vigentes[0]
+    archivo = str(vigente.get("archivo", ""))
+    fila_nueva = {columna: str(datos.get(columna, "")) for columna in COLUMNAS}
+    fila_nueva.update(archivo=archivo, estado_procesamiento=str(datos.get("estado_procesamiento") or "OK"), error="")
+    identidades = {
+        (str(f.get("numero_guia", "")).strip(), str(f.get("numero_transporte", "")).strip()) for f in filas
+    }
+    motivo = _evaluar_relectura(vigente, fila_nueva, identidades_existentes=identidades)
+    # Un reenvío no es una relectura pedida: además de no perder nada, debe
+    # resolver dudas sin agregar ninguna (misma política, `_relectura_mejor`)
+    # -- una foto igual o peor nunca toca una fila ya buena.
+    if not motivo and not _relectura_mejor(vigente, fila_nueva):
+        motivo = "SIN_MEJORA"
+    cambios: dict[str, list[str]] = {}
+    conservados: dict[str, str] = {}
+    if not motivo:
+        cambios = _promover_relectura(dataset, archivo=archivo, fila_nueva=fila_nueva, conservados=conservados)
+        if carpeta_catalogos is not None:
+            _regenerar_decisiones_de_documento(dataset, archivo=archivo, carpeta_catalogos=carpeta_catalogos)
+    registrar_relectura(
+        dataset.parent.parent.parent, archivo=archivo, lote=f"mobile/{envio_id}", sha256=imagen_sha256,
+        resultado=RELECTURA_RECHAZADA if motivo else RELECTURA_PROMOVIDA, motivo=motivo,
+        anterior={c: str(vigente.get(c, "")) for c in ("numero_guia", "numero_transporte")},
+        detalle={"origen": "MOBILE", "envio_id": envio_id, "evidencia": identificador,
+                 "cambios": cambios, "conservados": conservados},
+    )
+    return {"archivo_canonico": archivo, "promovida": not motivo, "motivo": motivo, "cambios": cambios}
+
+
+def _regenerar_decisiones_de_documento(dataset: Path, *, archivo: str, carpeta_catalogos: str | Path) -> None:
+    """Tras una relectura promovida, las tarjetas de ESE documento se
+    regeneran desde la fila corregida (mismo mecanismo canónico que la
+    segunda pasada universal); las demás se conservan intactas."""
+    from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+    from atlas_core.procesamiento_masivo import _datos_sinteticos_desde_fila
+
+    fila = next((f for f in _filas_dataset(dataset) if f.get("archivo") == archivo), None)
+    if fila is None:
+        return
+    ruta_artefacto = dataset.parent / "decisiones_pendientes.json"
+    with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        try:
+            previas = list(json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", []))
+        except (OSError, json.JSONDecodeError):
+            previas = []
+        conservadas = [d for d in previas if str((d.get("documento") or {}).get("archivo", "")) != archivo]
+        regeneradas = detectar_decisiones_documento(
+            archivo=archivo, datos=_datos_sinteticos_desde_fila(fila), carpeta_catalogos=Path(carpeta_catalogos),
+        )
+        _generar_artefacto_sin_lock(
+            ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            decisiones=regenerar_decisiones_persistidas(
+                decisiones=conservadas + list(regeneradas), carpeta_catalogos=carpeta_catalogos, ruta_dataset=dataset,
+            ),
+            ruta_salida=ruta_artefacto,
+        )
+
+
+def recuperar_relectura_reenvio_mobile(
+    repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, carpeta_catalogos: str | Path | None,
+) -> dict[str, object]:
+    """Recuperación SIN OCR de un reenvío ya almacenado (caso real
+    e79c617e): reevalúa su `datos_ocr` guardado contra la fila canónica
+    con la misma política, actualiza su asociación y, si promovió,
+    regenera el reporte. Idempotente: una segunda llamada ya no cambia
+    la fila (la vigente es la promovida)."""
+    with bloqueo_sesion(
+        repositorio.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+    ):
+        registro = repositorio.cargar(envio_id)
+        datos = dict(registro.get("datos_ocr") or {})
+        if not datos or registro.get("problema_captura"):
+            return {"promovida": False, "motivo": "SIN_DATOS_OCR_UTILIZABLES"}
+        identificador = f"mobile/{envio_id}/{registro.get('foto_original', '')}"
+        asociacion = asociar_documento(datos, [f for f in _filas_dataset(dataset) if f.get("archivo") != identificador])
+        resultado = _promover_relectura_de_reenvio(
+            datos, asociacion, identificador=identificador, envio_id=envio_id,
+            imagen_sha256=str(registro.get("imagen_sha256", "")), dataset=dataset,
+            carpeta_catalogos=carpeta_catalogos,
+        ) or {"promovida": False, "motivo": "NO_ES_REENVIO_DE_DOCUMENTO_UNICO"}
+        registro["resultado_asociacion"] = asociacion
+        registro["relectura_documento"] = resultado
+        repositorio.guardar(envio_id, registro)
+    if resultado.get("promovida"):
+        _regenerar_reporte_tras_envio_mobile(repositorio, envio_id)
+    return resultado
+
+
 def _indicador_fila_canonica_de_reenvio(
     datos: Mapping[str, object], asociacion: Mapping[str, object], filas: list[dict[str, str]],
 ) -> str | None:
@@ -1879,6 +2016,10 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
             filas = list(csv.DictReader(archivo, delimiter=";"))
 
     def _asociacion_reintentable(asociacion: Mapping[str, object]) -> bool:
+        # Caso real 475498 (e79c617e): "asociado" a "No encontrado" no es
+        # una asociación resuelta -- se reevalúa como cualquier otra.
+        if asociacion.get("estado") == "ASOCIADO_AUTOMATICAMENTE":
+            return not transporte_valido(asociacion.get("numero_transporte", ""))
         return asociacion.get("estado") in ("SIN_ASOCIACION", "PROPUESTA_REQUIERE_REVISION")
 
     revisados = 0
