@@ -1795,6 +1795,44 @@ def _reprocesar_envio_mobile_persistido_impl(
     return registro
 
 
+def _indicador_fila_canonica_de_reenvio(
+    datos: Mapping[str, object], asociacion: Mapping[str, object], filas: list[dict[str, str]],
+) -> str | None:
+    """Bloque REENVÍO YA REGISTRADO -- caso real envío e8c572b1 (guía
+    475413, transporte 0000362423): un envío cuyo documento YA existía
+    (`documento_ya_existe`) nunca escribe fila propia en el dataset (ver
+    `_procesar_envio_mobile_impl`), así que `revalidar_asociacion_mobile_
+    sin_ocr` no tenía fuente fresca de `indicador_revision` y conservaba
+    para siempre el REVISAR de la foto fija de `datos_ocr`, aunque la fila
+    canónica del MISMO documento (otro envío) ya estuviera OK.
+
+    Devuelve el `indicador_revision` de esa fila canónica sólo si es
+    inequívoca: asociación automática a un único transporte, guía y
+    transporte leídos por ESTE envío, ambos coincidentes con la
+    asociación, y exactamente UNA fila con esa misma guía Y ese mismo
+    transporte (`filas` ya excluye la propia). En cualquier otro caso
+    devuelve None -- el llamador conserva el comportamiento histórico
+    (foto fija). Nunca escribe nada."""
+    if asociacion.get("estado") != "ASOCIADO_AUTOMATICAMENTE" or asociacion.get("documento_ya_existe") is not True:
+        return None
+    guia = str(datos.get("numero_guia", "")).strip()
+    transporte = str(datos.get("numero_transporte", "")).strip()
+    if guia in ("", "No encontrado") or transporte in ("", "No encontrado"):
+        return None
+    if str(asociacion.get("numero_guia", "")).strip() != guia:
+        return None
+    if str(asociacion.get("numero_transporte", "")).strip() != transporte:
+        return None
+    candidatas = [
+        f for f in filas
+        if str(f.get("numero_guia", "")).strip() == guia
+        and str(f.get("numero_transporte", "")).strip() == transporte
+    ]
+    if len(candidatas) != 1:
+        return None
+    return candidatas[0].get("indicador_revision")
+
+
 def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *, dataset: Path) -> dict[str, object]:
     """Bloque ASOCIACIÓN MOBILE V2, Sección 7 -- reevaluación: relee la
     operación vigente (`dataset`, ya persistida) y vuelve a intentar
@@ -1927,7 +1965,12 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 # cambió -- pero una decisión humana ya retiró el motivo
                 # documental que mantenía la fila en REVISAR).
                 fila_propia = next((f for f in filas if f.get("archivo") == identificador_propio), None)
-                indicador_actual = fila_propia.get("indicador_revision") if fila_propia else None
+                if fila_propia is not None:
+                    indicador_actual = fila_propia.get("indicador_revision")
+                else:
+                    indicador_actual = _indicador_fila_canonica_de_reenvio(
+                        datos, asociacion_nueva, filas_sin_propia,
+                    )
                 estado_nuevo = _estado_final_mobile(
                     datos, asociacion_nueva, False, indicador_revision_actual=indicador_actual,
                 )
