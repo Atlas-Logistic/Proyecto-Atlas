@@ -139,6 +139,12 @@ _ESTADO_INDIVIDUAL = (
     re.compile(rf"^(?:ESTA|SIGUE)\s+(?:{_ESTADO_ADJ})\s+(?:EL\s+|LA\s+)?(?:CHOFER\s+|CONDUCTOR(?:A)?\s+)?(?P<chofer>.+)$"),
     re.compile(r"^CUAL\s+ES\s+EL\s+ESTADO\s+(?:DE\s+|DEL\s+)(?:LA\s+)?(?:CHOFER\s+|CONDUCTOR(?:A)?\s+)?(?P<chofer>.+)$"),
 )
+# Antigüedad desde la última actividad: "más de N días sin cargar/trabajar/
+# viajes" (y "... que no cargan"). N siempre explícito, nunca un valor fijo.
+_INACTIVIDAD_CHOFERES = re.compile(
+    r"\bMAS\s+DE\s+(?P<n>\d{1,4})\s+DIAS?\s+(?:"
+    r"SIN\s+(?:HACER\s+|TENER\s+|REALIZAR\s+|REGISTRAR\s+)?(?:CARGAR|CARGAS?|TRABAJAR|VIAJES?|VIAJAR|ACTIVIDAD|SALIR|MANEJAR)"
+    r"|QUE\s+NO\s+(?:CARGAN?|TRABAJAN?|VIAJAN?|SALEN?|MANEJAN?))\b")
 # Una "mención" que en realidad es una pregunta general sobre el catálogo.
 _MENCION_GENERAL = re.compile(r"\b(?:CHOFERES|CONDUCTORES|CUANTOS|CUANTAS|QUIENES|QUIEN|CUALES|QUE|TODOS|"
                               r"ALGUNO|ALGUN|NINGUNO|NINGUN|HAY)\b")
@@ -403,6 +409,10 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         nombre = original[m.start("nombre"):m.end("nombre")].strip()
         return Intencion("OBRA_CONSULTAR", {"nombre": nombre} if nombre else {})
     if _VERBO_LECTURA.match(plano) or str(texto or "").strip().endswith("?"):
+        m = _INACTIVIDAD_CHOFERES.search(plano)
+        if m and not (_OTRA_ENTIDAD.search(plano) and not _PALABRA_CHOFER.search(plano)):
+            return Intencion("CHOFER_CONSULTAR", {"dias_sin_actividad": int(m.group("n")),
+                                                  "detalle": not re.match(r"^CUANT[OA]S\b", plano)})
         for patron in _ESTADO_INDIVIDUAL:
             m = patron.match(plano)
             if m and not _MENCION_GENERAL.search(m.group("chofer")):
@@ -693,6 +703,9 @@ def _choferes_publicos(choferes: list[Mapping[str, object]]) -> list[dict[str, o
         vista = {"nombre": str(c.get("nombre", "")), "activo": c.get("activo") is True}
         if "con_viajes" in c:
             vista["con_viajes"] = c.get("con_viajes") is True
+        for campo in ("ultimo_viaje", "dias_sin_actividad"):
+            if campo in c:
+                vista[campo] = c[campo]
         if vista["nombre"] in repetidos and c.get("rut"):
             vista["rut"] = str(c["rut"])
         publicos.append(vista)
@@ -702,11 +715,35 @@ def _choferes_publicos(choferes: list[Mapping[str, object]]) -> list[dict[str, o
 def _resultado_lectura_publico(accion: str, resultado: Mapping[str, object]) -> Mapping[str, object]:
     if accion != "CHOFER_CONSULTAR":
         return resultado
-    return {**{k: v for k, v in resultado.items() if k != "choferes"},
-            "choferes": _choferes_publicos(list(resultado.get("choferes") or []))}
+    publico = {**{k: v for k, v in resultado.items() if k not in {"choferes", "sin_viajes_registrados"}},
+               "choferes": _choferes_publicos(list(resultado.get("choferes") or []))}
+    if "sin_viajes_registrados" in resultado:
+        publico["sin_viajes_registrados"] = _choferes_publicos(list(resultado["sin_viajes_registrados"] or []))
+    return publico
+
+
+def _describir_inactividad_choferes(resultado: Mapping[str, object]) -> str:
+    dias, total = resultado.get("dias"), int(resultado.get("total", 0) or 0)
+    choferes = _choferes_publicos(list(resultado.get("choferes") or []))
+    sin_registro = _choferes_publicos(list(resultado.get("sin_viajes_registrados") or []))
+    texto = (f"{total} chofer{'es' if total != 1 else ''} activo{'s' if total != 1 else ''} "
+             f"lleva{'n' if total != 1 else ''} más de {dias} días sin cargar "
+             f"(al {_fecha_legible(resultado.get('fecha_referencia'))}).")
+    if resultado.get("detalle") and choferes:
+        texto += " Chofer | último viaje | días sin cargar: " + "; ".join(
+            f"{c['nombre']} | {_fecha_legible(c['ultimo_viaje'])} | {c['dias_sin_actividad']}" for c in choferes) + "."
+    if sin_registro:
+        k = len(sin_registro)
+        texto += (f" Además, {k} chofer{'es' if k != 1 else ''} activo{'s' if k != 1 else ''} "
+                  f"no tiene{'n' if k != 1 else ''} viajes registrados")
+        texto += (": " + "; ".join(c["nombre"] for c in sin_registro) + " (sin viajes registrados)."
+                  if resultado.get("detalle") else ".")
+    return texto
 
 
 def _describir_catalogo_choferes(resultado: Mapping[str, object]) -> str:
+    if resultado.get("modo") == "INACTIVIDAD":
+        return _describir_inactividad_choferes(resultado)
     if resultado.get("chofer_individual"):
         chofer = (resultado.get("choferes") or [{}])[0]
         return f"{chofer.get('nombre', '')} está {'ACTIVO' if chofer.get('activo') else 'INACTIVO'}."

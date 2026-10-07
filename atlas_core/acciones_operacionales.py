@@ -346,6 +346,20 @@ def choferes_catalogo_con_viajes(
     escribe. Primero el RUT canónico; el nombre/alias normalizado sólo para
     choferes SIN RUT canónico y sólo si ese nombre identifica a UN único
     chofer del catálogo."""
+    claves_por_rut, claves_por_nombre, sin_rut = _indices_catalogo_choferes(choferes)
+    encontrados: dict[str, str] = {}
+    for fila in filas:
+        if desde is not None or hasta is not None:
+            fecha = _fecha_documental(fila.get("fecha"))
+            if fecha is None or (desde and fecha < desde) or (hasta and fecha > hasta):
+                continue
+        coincidencia = _chofer_catalogo_de_fila(fila, claves_por_rut, claves_por_nombre, sin_rut)
+        if coincidencia is not None:
+            encontrados.setdefault(*coincidencia)
+    return encontrados
+
+
+def _indices_catalogo_choferes(choferes: Mapping[str, object]):
     from atlas_core.catalogos import _normalizar_nombre_chofer, normalizar_rut, rut_canonico_de_registro_chofer
 
     claves_por_rut: dict[str, set[str]] = {}
@@ -363,29 +377,72 @@ def choferes_catalogo_con_viajes(
             normalizado = _normalizar_nombre_chofer(str(nombre or ""))
             if normalizado:
                 claves_por_nombre.setdefault(normalizado, set()).add(clave)
+    return claves_por_rut, claves_por_nombre, sin_rut
 
-    encontrados: dict[str, str] = {}
+
+def _chofer_catalogo_de_fila(
+    fila: Mapping[str, str], claves_por_rut: Mapping[str, set[str]],
+    claves_por_nombre: Mapping[str, set[str]], sin_rut: set[str],
+) -> tuple[str, str] | None:
+    """(clave, "RUT"|"NOMBRE") del chofer del catálogo de una fila, o None."""
+    from atlas_core.catalogos import _normalizar_nombre_chofer, normalizar_rut
+
+    por_rut = claves_por_rut.get(normalizar_rut(str(fila.get("rut_chofer", ""))), set())
+    if len(por_rut) == 1:
+        return next(iter(por_rut)), "RUT"
+    if por_rut:
+        return None  # RUT compartido por varios registros: nunca se elige
+    por_nombre = claves_por_nombre.get(_normalizar_nombre_chofer(str(fila.get("chofer", ""))), set())
+    if len(por_nombre) == 1 and next(iter(por_nombre)) in sin_rut:
+        return next(iter(por_nombre)), "NOMBRE"
+    return None
+
+
+def ultimo_viaje_por_chofer_catalogo(
+    choferes: Mapping[str, object], filas: Iterable[Mapping[str, str]],
+) -> dict[str, date]:
+    """Fecha documental más reciente de cada chofer del catálogo en el
+    dataset, con el MISMO cruce que `choferes_catalogo_con_viajes`. Una fila
+    sin fecha legible no aporta. Estadística: nunca escribe."""
+    indices = _indices_catalogo_choferes(choferes)
+    ultimas: dict[str, date] = {}
     for fila in filas:
-        if desde is not None or hasta is not None:
-            fecha = _fecha_documental(fila.get("fecha"))
-            if fecha is None or (desde and fecha < desde) or (hasta and fecha > hasta):
-                continue
-        por_rut = claves_por_rut.get(normalizar_rut(str(fila.get("rut_chofer", ""))), set())
-        if len(por_rut) == 1:
-            encontrados.setdefault(next(iter(por_rut)), "RUT")
-            continue
-        if por_rut:
-            continue  # RUT compartido por varios registros: nunca se elige
-        por_nombre = claves_por_nombre.get(_normalizar_nombre_chofer(str(fila.get("chofer", ""))), set())
-        if len(por_nombre) == 1 and next(iter(por_nombre)) in sin_rut:
-            encontrados.setdefault(next(iter(por_nombre)), "NOMBRE")
-    return encontrados
+        fecha = _fecha_documental(fila.get("fecha"))
+        coincidencia = _chofer_catalogo_de_fila(fila, *indices) if fecha else None
+        if coincidencia is not None and fecha > ultimas.get(coincidencia[0], date.min):
+            ultimas[coincidencia[0]] = fecha
+    return ultimas
+
+
+def _consultar_inactividad_choferes(ctx: _Contexto, p: dict) -> dict[str, object]:
+    """Choferes ACTIVOS del catálogo con más de N días (estricto) desde su
+    último viaje. Los activos sin ningún viaje se informan aparte, sin una
+    antigüedad inventada; los inactivos no participan."""
+    dias = int(p["dias_sin_actividad"])
+    hoy = ctx.reloj().astimezone().date()
+    choferes = ctx.choferes()
+    ultimas = ultimo_viaje_por_chofer_catalogo(choferes, ctx.filas())
+    activos = [(k, r) for k, r in sorted(choferes.items()) if isinstance(r, dict) and r.get("activo", True) is True]
+    vencidos, sin_registro = [], []
+    for clave, registro in activos:
+        vista = _vista_chofer(clave, registro)
+        ultima = ultimas.get(clave)
+        if ultima is None:
+            sin_registro.append(vista)
+        elif (hoy - ultima).days > dias:
+            vencidos.append({**vista, "ultimo_viaje": ultima.isoformat(), "dias_sin_actividad": (hoy - ultima).days})
+    vencidos.sort(key=lambda v: (-v["dias_sin_actividad"], v["nombre"]))
+    return {"choferes": vencidos, "total": len(vencidos), "dias": dias, "fecha_referencia": hoy.isoformat(),
+            "sin_viajes_registrados": sin_registro, "activos": len(activos),
+            "detalle": bool(p.get("detalle")), "modo": "INACTIVIDAD"}
 
 
 def _consultar_choferes(ctx: _Contexto, p: dict) -> object:
     """Catálogo de choferes (registrados/activos/inactivos) cruzado con su
     actividad en el dataset vigente (con/sin viajes, opcionalmente en un
     período). Nunca cuenta choferes que no están en el catálogo."""
+    if p.get("dias_sin_actividad") is not None:
+        return _consultar_inactividad_choferes(ctx, p)
     filtro = p.get("estado", "TODOS")
     viajes = p.get("viajes", "TODOS")
     desde = date.fromisoformat(p["fecha_desde"]) if p.get("fecha_desde") else None
@@ -1370,7 +1427,8 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      "Choferes del catálogo: registrados, activos/inactivos y con/sin viajes (opcionalmente en un período).",
                      {"chofer": _P("id"), "estado": _P("enum", opciones=("ACTIVO", "INACTIVO", "TODOS")),
                       "viajes": _P("enum", opciones=("CON", "SIN", "TODOS")),
-                      "fecha_desde": _P("fecha"), "fecha_hasta": _P("fecha")}, consultar=_consultar_choferes),
+                      "fecha_desde": _P("fecha"), "fecha_hasta": _P("fecha"),
+                      "dias_sin_actividad": _P("numero"), "detalle": _P("bool")}, consultar=_consultar_choferes),
     DefinicionAccion("OBRA_CONSULTAR", LECTURA, "Lista obras (opcionalmente por nombre) con sus relaciones.",
                      {"nombre": _P("texto")}, consultar=_consultar_obras),
     DefinicionAccion("DECISION_CONSULTAR", LECTURA, "Lista decisiones pendientes (opcionalmente por guía).",
