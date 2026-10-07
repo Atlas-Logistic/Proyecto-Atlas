@@ -723,22 +723,46 @@ def _resultado_lectura_publico(accion: str, resultado: Mapping[str, object]) -> 
 
 
 def _describir_inactividad_choferes(resultado: Mapping[str, object]) -> str:
+    """Sólo el resumen natural: el detalle por chofer va en `tablas`
+    (ver `_tablas_inactividad_choferes`), nunca concatenado en el texto."""
     dias, total = resultado.get("dias"), int(resultado.get("total", 0) or 0)
-    choferes = _choferes_publicos(list(resultado.get("choferes") or []))
-    sin_registro = _choferes_publicos(list(resultado.get("sin_viajes_registrados") or []))
     texto = (f"{total} chofer{'es' if total != 1 else ''} activo{'s' if total != 1 else ''} "
              f"lleva{'n' if total != 1 else ''} más de {dias} días sin cargar "
              f"(al {_fecha_legible(resultado.get('fecha_referencia'))}).")
-    if resultado.get("detalle") and choferes:
-        texto += " Chofer | último viaje | días sin cargar: " + "; ".join(
-            f"{c['nombre']} | {_fecha_legible(c['ultimo_viaje'])} | {c['dias_sin_actividad']}" for c in choferes) + "."
-    if sin_registro:
-        k = len(sin_registro)
+    k = len(resultado.get("sin_viajes_registrados") or [])
+    if k:
         texto += (f" Además, {k} chofer{'es' if k != 1 else ''} activo{'s' if k != 1 else ''} "
-                  f"no tiene{'n' if k != 1 else ''} viajes registrados")
-        texto += (": " + "; ".join(c["nombre"] for c in sin_registro) + " (sin viajes registrados)."
-                  if resultado.get("detalle") else ".")
+                  f"no tiene{'n' if k != 1 else ''} viajes registrados.")
     return texto
+
+
+def _nombre_chofer_tabla(chofer: Mapping[str, object]) -> str:
+    return str(chofer["nombre"]) + (f" (RUT {chofer['rut']})" if chofer.get("rut") else "")
+
+
+def _tablas_inactividad_choferes(resultado: Mapping[str, object]) -> list[dict[str, object]]:
+    """Mismo contrato que el soporte semántico de Consultas que Desktop ya
+    renderiza ({tipo, resumen, columnas, filas} con celdas de texto): una
+    tabla por bloque, sin tablas vacías y sin claves internas."""
+    choferes = _choferes_publicos(list(resultado.get("choferes") or []))
+    sin_registro = _choferes_publicos(list(resultado.get("sin_viajes_registrados") or []))
+    tablas: list[dict[str, object]] = []
+    if choferes:
+        tablas.append({"tipo": "choferes_sin_cargar", "resumen": "",
+                       "columnas": ["Chofer", "Último viaje", "Días sin cargar"],
+                       "filas": [[_nombre_chofer_tabla(c), _fecha_legible(c["ultimo_viaje"]),
+                                  str(c["dias_sin_actividad"])] for c in choferes]})
+    if sin_registro:
+        tablas.append({"tipo": "choferes_sin_viajes_registrados",
+                       "resumen": f"Activos sin viajes registrados ({len(sin_registro)})",
+                       "columnas": ["Chofer"], "filas": [[_nombre_chofer_tabla(c)] for c in sin_registro]})
+    return tablas
+
+
+def _tablas_lectura(accion: str, resultado: Mapping[str, object]) -> list[dict[str, object]]:
+    if accion == "CHOFER_CONSULTAR" and resultado.get("modo") == "INACTIVIDAD":
+        return _tablas_inactividad_choferes(resultado)
+    return []
 
 
 def _describir_catalogo_choferes(resultado: Mapping[str, object]) -> str:
@@ -1542,9 +1566,13 @@ class OperadorB1:
             return {"estado": "RECHAZADA", "accion": intencion.accion, "codigo": preview.get("codigo"),
                     "mensaje": preview.get("mensaje")}
         if preview.get("estado") == "RESULTADO":
-            return {"estado": "RESULTADO_LECTURA", "accion": intencion.accion,
-                    "resultado": _resultado_lectura_publico(intencion.accion, preview["resultado"]),
-                    "mensaje": _describir_lectura(intencion.accion, preview["resultado"])}
+            respuesta = {"estado": "RESULTADO_LECTURA", "accion": intencion.accion,
+                         "resultado": _resultado_lectura_publico(intencion.accion, preview["resultado"]),
+                         "mensaje": _describir_lectura(intencion.accion, preview["resultado"])}
+            tablas = _tablas_lectura(intencion.accion, preview["resultado"])
+            if tablas:
+                respuesta["tablas"] = tablas
+            return respuesta
         if (intencion.tipo_vehiculo_declarado
                 and (preview.get("valor_propuesto") or {}).get("tipo") not in (None, intencion.tipo_vehiculo_declarado)):
             return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "mensaje": (
