@@ -94,6 +94,9 @@ class Intencion:
     parametros: dict[str, object] = field(default_factory=dict)
     menciones: dict[str, str] = field(default_factory=dict)
     tipo_vehiculo_declarado: str = ""
+    # Cambio de estado de VARIOS choferes: {"nombres": [...]} o {"grupo": "SIN_VIAJES"}
+    # (+ "cantidad" si el humano la dijo). Sólo lo produce el intérprete determinista.
+    lote: dict[str, object] = field(default_factory=dict)
     fuente: str = "DETERMINISTA"
 
 
@@ -105,6 +108,18 @@ _ESTADO_B = re.compile(
     r"(?:COMO\s+)?(IN)?ACTIV[OA]$")
 _ESTADO_C = re.compile(
     r"^(DESACTIVA|INACTIVA|ACTIVA|REACTIVA)(?:R)?\s+(?:A\s+|AL\s+)?(?:CHOFER\s+|CONDUCTOR\s+)?(?P<chofer>.+)$")
+# Varios choferes a la vez ("pon inactivos a estos choferes: A, B y C",
+# "activa a A y B", "pon los 11 choferes sin viajes como inactivos").
+_LOTE_ESTADO_A = re.compile(
+    r"^(?:PON|PONER|PONGA|DEJA|DEJAR|DEJE|MARCA|MARCAR|MARQUE)\s+(?:COMO\s+)?(IN)?ACTIV[OA]S?\s+(?:A\s+|AL\s+)?(?P<lista>.+)$")
+_LOTE_ESTADO_B = re.compile(
+    r"^(?:PON|PONER|DEJA|DEJAR|MARCA|MARCAR)\s+(?:A\s+|AL\s+)?(?P<lista>.+?)\s+(?:COMO\s+)?(IN)?ACTIV[OA]S?$")
+_LOTE_ESTADO_C = re.compile(r"^(DESACTIVA|INACTIVA|ACTIVA|REACTIVA)(?:R)?\s+(?:A\s+|AL\s+)?(?P<lista>.+)$")
+_LOTE_PREFIJO = re.compile(
+    r"^(?:A\s+)?(?:(?:TODOS\s+)?(?:LOS|LAS|ESTOS|ESTAS)\s+)?(?:SIGUIENTES\s+)?(?:(?P<n>\d{1,3})\s+)?"
+    r"(?:CHOFERES|CONDUCTORES|CONDUCTORAS)(?:\s+SIGUIENTES)?\s*:?\s*(?P<resto>.*)$")
+_LOTE_GRUPO_SIN_VIAJES = re.compile(r"^(?:SIN\s+VIAJES?|QUE\s+NO\s+TIENEN\s+VIAJES?)(?:\s+REGISTRADOS)?$")
+_LOTE_SEPARADOR = re.compile(r"\s*[,;]\s*|\s+[YE]\s+")
 _TRANSPORTE = re.compile(r"\b(?:REVALIDA|REPROCESA|RELEE|REEXTRAE|VUELVE A LEER)\w*\s+(?:EL\s+)?(?:TRANSPORTE|VIAJE)\s+"
                          r"(?:N[°O]?\s*)?(?P<n>\d{4,15})\b")
 _DESTRUCTIVA = re.compile(r"^(?:BORRA|BORRAR|ELIMINA|ELIMINAR|SUPRIME|SUPRIMIR|DESTRUYE)\w*\b(?P<resto>.*)$")
@@ -328,6 +343,44 @@ def _periodo_documental(plano: str) -> dict[str, str]:
     return {}
 
 
+def _intencion_estado_lote(original: str, plano: str) -> Intencion | None:
+    """Cambio de estado de VARIOS choferes; None si la orden nombra a uno
+    solo (sigue el camino individual de siempre). "Sin viajes" es el grupo
+    del catálogo sin viajes registrados (la misma lectura de B1), nunca la
+    antigüedad de "más de N días sin cargar"."""
+    for patron in (_LOTE_ESTADO_A, _LOTE_ESTADO_B, _LOTE_ESTADO_C):
+        m = patron.match(plano)
+        if not m:
+            continue
+        activo = m.group(1) in {"ACTIVA", "REACTIVA"} if patron is _LOTE_ESTADO_C else m.group(1) is None
+        inicio, fin = m.span("lista")
+        lista_plano, lista_original = plano[inicio:fin], original[inicio:fin]
+        prefijo = _LOTE_PREFIJO.match(lista_plano)
+        cantidad = {}
+        if prefijo:
+            if prefijo.group("n"):
+                cantidad = {"cantidad": int(prefijo.group("n"))}
+            lista_plano, lista_original = lista_plano[prefijo.start("resto"):], lista_original[prefijo.start("resto"):]
+            if _LOTE_GRUPO_SIN_VIAJES.match(lista_plano.strip()):
+                return Intencion("CHOFER_CAMBIAR_ESTADO_LOTE", {"activo": activo},
+                                 lote={"grupo": "SIN_VIAJES", **cantidad})
+            if re.match(r"^(?:CON|QUE|DE|DEL|CUYOS?|SIN)\b", lista_plano.strip()):
+                # Otro criterio ("con más de 45 días sin cargar"...): no se infiere.
+                return Intencion("CHOFER_CAMBIAR_ESTADO_LOTE", {"activo": activo},
+                                 lote={"grupo": "NO_SOPORTADO"})
+        partes, posicion = [], 0
+        for separador in [*_LOTE_SEPARADOR.finditer(lista_plano), None]:
+            corte = separador.start() if separador else len(lista_plano)
+            parte = lista_original[posicion:corte].strip(" .:")
+            if parte:
+                partes.append(parte)
+            posicion = separador.end() if separador else corte
+        if len(partes) < 2 and not prefijo:
+            return None
+        return Intencion("CHOFER_CAMBIAR_ESTADO_LOTE", {"activo": activo}, lote={"nombres": partes, **cantidad})
+    return None
+
+
 def interpretar_determinista(texto: str) -> Intencion | None:
     """Sólo patrones de alta certeza; ante la duda devuelve None."""
     from atlas_core.operaciones_conversacionales import _interpretar
@@ -340,6 +393,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         accion = ("EVIDENCIA_ELIMINAR" if re.search(r"EVIDENCIA|FOTO|IMAGEN|DOCUMENTO", resto)
                   else "HISTORIAL_ELIMINAR" if re.search(r"HISTORIAL|AUDITORIA|REGISTRO", resto) else "ENTIDAD_ELIMINAR")
         return Intencion(accion)
+    lote = _intencion_estado_lote(original, plano)
+    if lote is not None:
+        return lote
     for patron in (_ESTADO_A, _ESTADO_B, _ESTADO_C):
         m = patron.match(plano)
         if m:
@@ -829,6 +885,80 @@ def _resultado_chofer_estado_publico(presentacion: Mapping[str, object], *, reco
             "bandeja_reconciliada": reconciliada}
 
 
+_SIN_EFECTOS_CHOFER = ("No se borrarán los choferes ni se modificarán sus viajes históricos, RUT, alias ni "
+                       "vehículos.")
+
+
+def _estado_legible(activo: object) -> str:
+    return "ACTIVO" if activo else "INACTIVO"
+
+
+def _presentacion_chofer_lote(preview: Mapping[str, object], choferes: Mapping[str, dict]) -> dict[str, object]:
+    """Preview de un lote de choferes. Guarda las claves sólo para el
+    resultado (estado interno de la conversación); nunca se publican."""
+    from atlas_core.catalogos import rut_canonico_de_registro_chofer
+    entidad = preview.get("entidad") or {}
+    actuales = (preview.get("valor_actual") or {}).get("activo") or {}
+    nuevo = bool((preview.get("valor_propuesto") or {}).get("activo"))
+    afectados = preview.get("afectados") or {}
+    miembros = list(entidad.get("choferes") or [])
+    nombres = [str(c.get("nombre", "")) for c in miembros]
+    filas = []
+    for c in miembros:
+        rut = (rut_canonico_de_registro_chofer(c["id"], choferes.get(c["id"])) or "") if nombres.count(c["nombre"]) > 1 else ""
+        filas.append({"clave": c["id"], "nombre": str(c.get("nombre", "")) + (f" (RUT {rut})" if rut else ""),
+                      "antes": _estado_legible(actuales.get(c["id"]))})
+    return {"tipo": "chofer_estado_lote", "objetivo": _estado_legible(nuevo), "origen": _estado_legible(not nuevo),
+            "cambios": [f for f in filas if f["antes"] != _estado_legible(nuevo)],
+            "sin_cambio": [f for f in filas if f["antes"] == _estado_legible(nuevo)],
+            "guias_afectadas": int(afectados.get("total_guias", 0) or 0),
+            "decisiones_afectadas": int(afectados.get("total_decisiones", 0) or 0),
+            "consecuencias": [str(c) for c in preview.get("consecuencias") or []]}
+
+
+def _plural(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+def _tablas_chofer_lote(presentacion: Mapping[str, object]) -> list[dict[str, object]]:
+    """Mismo contrato de tabla que las lecturas ({tipo, resumen, columnas, filas})."""
+    objetivo, cambios, ya = presentacion["objetivo"], presentacion["cambios"], presentacion["sin_cambio"]
+    tablas: list[dict[str, object]] = []
+    if cambios:
+        tablas.append({"tipo": "choferes_cambio_estado", "resumen": "",
+                       "columnas": ["Chofer", "Estado actual", "Nuevo estado"],
+                       "filas": [[f["nombre"], f["antes"], objetivo] for f in cambios]})
+    if ya:
+        tablas.append({"tipo": "choferes_ya_en_estado",
+                       "resumen": f"{_plural(len(ya), 'Ya estaba', 'Ya estaban')} {objetivo}"
+                                  f"{'' if len(ya) == 1 else 'S'} ({len(ya)})",
+                       "columnas": ["Chofer"], "filas": [[f["nombre"]] for f in ya]})
+    return tablas
+
+
+def _preview_chofer_lote_publico(presentacion: Mapping[str, object]) -> dict[str, object]:
+    """Mismo contrato que Desktop ya consume para un chofer (entidad /
+    valor_actual / valor_propuesto / afectados), sin claves internas."""
+    n = len(presentacion["cambios"])
+    return {"entidad": {"nombre": f"{n} {_plural(n, 'chofer', 'choferes')}"},
+            "valor_actual": {"activo": presentacion["origen"] == "ACTIVO"},
+            "valor_propuesto": {"activo": presentacion["objetivo"] == "ACTIVO"},
+            "afectados": {"total_guias": presentacion["guias_afectadas"],
+                          "total_decisiones": presentacion["decisiones_afectadas"]},
+            "consecuencias": [_SIN_EFECTOS_CHOFER, *presentacion["consecuencias"]],
+            "choferes_a_cambiar": n, "choferes_sin_cambio": len(presentacion["sin_cambio"])}
+
+
+def _mensaje_chofer_lote(presentacion: Mapping[str, object]) -> str:
+    n, k, objetivo = len(presentacion["cambios"]), len(presentacion["sin_cambio"]), presentacion["objetivo"]
+    texto = (f"Se {_plural(n, 'cambiará', 'cambiarán')} {n} {_plural(n, 'chofer', 'choferes')} de "
+             f"{presentacion['origen']} a {objetivo}.")
+    if k:
+        texto += f" {k} {_plural(k, 'ya estaba', 'ya estaban')} {objetivo}{'' if k == 1 else 'S'} y no cambia{'' if k == 1 else 'n'}."
+    return (texto + f" {_SIN_EFECTOS_CHOFER} Guías relacionadas: {presentacion['guias_afectadas']}; decisiones "
+            f"pendientes: {presentacion['decisiones_afectadas']}.")
+
+
 def _mensaje_chofer_estado(presentacion: Mapping[str, object]) -> str:
     return (f"Dejar al chofer {presentacion['chofer']} como {presentacion['despues']} "
             f"(hoy {presentacion['antes']}). No se borra el chofer ni se modifican sus viajes, RUT, alias ni "
@@ -1235,6 +1365,8 @@ class OperadorB1:
         if definicion.riesgo != LECTURA:
             # Toda instrucción operacional nueva invalida el pendiente anterior.
             self._fijar_pendiente(estado, conversacion_id, None)
+        if intencion.accion == "CHOFER_CAMBIAR_ESTADO_LOTE":
+            return self._cambiar_estado_lote(estado, conversacion_id, intencion, texto)
         parametros = dict(intencion.parametros)
         if "chofer" in intencion.menciones:
             resolucion = resolver_chofer(self.capa._ctx.choferes(), intencion.menciones["chofer"],
@@ -1558,6 +1690,75 @@ class OperadorB1:
                 "preview": _preview_publico(presentacion, preview),
                 "mensaje": _mensaje_preview(presentacion)}
 
+    def _cambiar_estado_lote(self, estado: dict, conversacion_id: str, intencion: Intencion, texto: str) -> dict:
+        """Varios choferes, UN preview y UNA confirmación. Todo o nada desde
+        la resolución: si un solo nombre no identifica exactamente a un
+        chofer, no se prepara ningún cambio."""
+        accion = intencion.accion
+        lote = intencion.lote or {}
+        activo = intencion.parametros.get("activo") is True
+
+        def aclaracion(mensaje: str, candidatos: list | None = None) -> dict:
+            return {"estado": "ACLARACION_REQUERIDA", "accion": accion, "candidatos": candidatos or [],
+                    "mensaje": mensaje}
+
+        if lote.get("grupo") not in (None, "SIN_VIAJES") or not (lote.get("grupo") or lote.get("nombres")):
+            return aclaracion("Para cambiar varios choferes a la vez indica sus nombres (por ejemplo «pon inactivos "
+                              "a A, B y C») o «los choferes sin viajes». No infiero otros criterios.")
+        choferes = self.capa._ctx.choferes()
+        if lote.get("grupo") == "SIN_VIAJES":
+            # La MISMA lectura de catálogo que "¿cuántos choferes no tienen viajes?".
+            lectura = self.capa.previsualizar("CHOFER_CONSULTAR", {"estado": "TODOS", "viajes": "SIN"},
+                                              actor=ACTOR_B1, origen=ORIGEN_B1)
+            if lectura.get("estado") != "RESULTADO":
+                return {"estado": "RECHAZADA", "accion": accion, "codigo": lectura.get("codigo"),
+                        "mensaje": lectura.get("mensaje")}
+            claves = [str(c["chofer_id"]) for c in lectura["resultado"].get("choferes") or []]
+            if not claves:
+                return {"estado": "SIN_CAMBIOS", "accion": accion,
+                        "mensaje": "No hay choferes sin viajes registrados en el catálogo; no hay nada que cambiar."}
+        else:
+            claves, problemas, candidatos = [], [], []
+            for nombre in dict.fromkeys(str(n) for n in lote["nombres"]):
+                resolucion = resolver_chofer(choferes, nombre, incluir_inactivos=True)
+                if resolucion["estado"] == "RESUELTO":
+                    claves.append(str(resolucion["chofer"]))
+                    continue
+                opciones = [{"nombre": c["nombre"], "activo": c["activo"], **({"rut": c["rut"]} if c["rut"] else {})}
+                            for c in resolucion.get("candidatos") or []]
+                candidatos.extend(opciones)
+                problemas.append(
+                    f"«{nombre}» coincide con más de un chofer: " + "; ".join(
+                        c["nombre"] + (f" (RUT {c['rut']})" if c.get("rut") else "") for c in opciones) + "."
+                    if opciones else f"«{nombre}»: no encontré ese chofer en el catálogo.")
+            if problemas:
+                return aclaracion("No preparé ningún cambio (el lote se aplica completo o no se aplica): "
+                                  + " ".join(problemas) + " Repite la orden con los nombres completos o el RUT.",
+                                  candidatos)
+        parametros = {"choferes": list(dict.fromkeys(claves)), "activo": activo}
+        preview = self.capa.previsualizar(accion, parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
+                                          referencia=str(texto)[:500])
+        if preview.get("estado") not in ("PREVIEW", "SIN_CAMBIOS"):
+            return {"estado": "RECHAZADA", "accion": accion, "codigo": preview.get("codigo"),
+                    "mensaje": preview.get("mensaje")}
+        presentacion = _presentacion_chofer_lote(preview, choferes)
+        n, total = len(presentacion["cambios"]), len(presentacion["cambios"]) + len(presentacion["sin_cambio"])
+        if lote.get("cantidad") and lote["cantidad"] not in (n, total):
+            return aclaracion(
+                f"Dijiste {lote['cantidad']} choferes, pero encontré {total} "
+                f"({n} {_plural(n, 'cambiaría', 'cambiarían')} a {presentacion['objetivo']}). "
+                "No preparé ningún cambio; repite la orden sin la cantidad o con la lista de nombres.")
+        tablas = _tablas_chofer_lote(presentacion)
+        if preview.get("estado") == "SIN_CAMBIOS":
+            return {"estado": "SIN_CAMBIOS", "accion": accion, "tablas": tablas,
+                    "mensaje": f"{_plural(total, 'El chofer ya estaba', f'Los {total} choferes ya estaban')} "
+                               f"{presentacion['objetivo']}{'' if total == 1 else 'S'}; no hay nada que confirmar."}
+        self._fijar_pendiente(estado, conversacion_id, {
+            "token": preview["token"], "accion": accion, "parametros": parametros,
+            "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat(), "presentacion": presentacion})
+        return {"estado": "PREVIEW_PENDIENTE", "accion": accion, "preview": _preview_chofer_lote_publico(presentacion),
+                "tablas": tablas, "mensaje": _mensaje_chofer_lote(presentacion) + " ¿Confirmas? (sí / no)"}
+
     def _previsualizar(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
                        texto: str) -> dict:
         preview = self.capa.previsualizar(intencion.accion, parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
@@ -1630,6 +1831,8 @@ class OperadorB1:
         if estado_capa == "APLICADA":
             self._fijar_pendiente(estado, conversacion_id, None)
             if presentacion:
+                if presentacion.get("tipo") == "chofer_estado_lote":
+                    return self._resultado_chofer_lote(pendiente, presentacion, resultado)
                 if presentacion.get("tipo") == "chofer_estado":
                     reconciliada = bool((resultado.get("reconciliacion") or {}).get("ejecutado"))
                     return {"estado": "EJECUTADA", "accion": pendiente["accion"],
@@ -1661,6 +1864,16 @@ class OperadorB1:
                         "mensaje": f"No ejecuté nada: {motivo} y ya no hay cambio que confirmar "
                                    f"({nuevo.get('estado')}: {nuevo.get('mensaje', 'sin cambios')})."}
             if presentacion:
+                if presentacion.get("tipo") == "chofer_estado_lote":
+                    presentacion = _presentacion_chofer_lote(nuevo, self.capa._ctx.choferes())
+                    self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
+                                                                   "creado_en": self.reloj().isoformat(),
+                                                                   "presentacion": presentacion})
+                    return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                            "preview": _preview_chofer_lote_publico(presentacion),
+                            "tablas": _tablas_chofer_lote(presentacion),
+                            "mensaje": f"No ejecuté nada: {motivo}. " + _mensaje_chofer_lote(presentacion)
+                                       + " ¿Confirmas? (sí / no)"}
                 if presentacion.get("tipo") == "chofer_estado":
                     presentacion = _presentacion_chofer_estado(nuevo)
                     self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
@@ -1696,5 +1909,31 @@ class OperadorB1:
         self._fijar_pendiente(estado, conversacion_id, None)
         if estado_capa == "SIN_CAMBIOS":
             return {"estado": "SIN_CAMBIOS", "accion": pendiente["accion"], "mensaje": "Ya estaba aplicado."}
+        mensaje = resultado.get("mensaje")
+        if (presentacion or {}).get("tipo") == "chofer_estado_lote" and estado_capa == "FALLIDA":
+            # El lote nunca queda a medias en silencio: la capa restauró el
+            # respaldo tomado antes del primer cambio.
+            mensaje = (f"No se aplicó el lote ({mensaje}). "
+                       + ("Se restauró el catálogo: ningún chofer cambió de estado."
+                          if resultado.get("respaldo_restaurado") else "Revisa el catálogo de choferes."))
         return {"estado": "RECHAZADA" if estado_capa == "RECHAZADA" else "FALLIDA", "accion": pendiente["accion"],
-                "codigo": resultado.get("codigo"), "mensaje": resultado.get("mensaje")}
+                "codigo": resultado.get("codigo"), "mensaje": mensaje}
+
+    def _resultado_chofer_lote(self, pendiente: dict, presentacion: Mapping[str, object], resultado: dict) -> dict:
+        """Resultado individual (una fila por chofer, estado leído tras aplicar)
+        y agregado, sin claves internas."""
+        finales = (resultado.get("despues") or {}).get("activo") or {}
+        objetivo, cambios = presentacion["objetivo"], presentacion["cambios"]
+        reconciliada = bool((resultado.get("reconciliacion") or {}).get("ejecutado"))
+        n = len(cambios)
+        tablas = [{"tipo": "choferes_estado_aplicado", "resumen": "", "columnas": ["Chofer", "Antes", "Ahora"],
+                   "filas": [[f["nombre"], f["antes"], _estado_legible(finales.get(f["clave"]))] for f in cambios]}]
+        tablas += [t for t in _tablas_chofer_lote(presentacion) if t["tipo"] == "choferes_ya_en_estado"]
+        visible = {"estado": "APLICADA", "entidad": {"nombre": f"{n} {_plural(n, 'chofer', 'choferes')}"},
+                   "antes": {"activo": presentacion["origen"] == "ACTIVO"},
+                   "despues": {"activo": objetivo == "ACTIVO"},
+                   "choferes_cambiados": n, "choferes_sin_cambio": len(presentacion["sin_cambio"]),
+                   "bandeja_reconciliada": reconciliada}
+        return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": visible, "tablas": tablas,
+                "mensaje": f"Listo: {n} {_plural(n, 'chofer quedó', 'choferes quedaron')} {objetivo}"
+                           f"{'' if n == 1 else 'S'}." + (" Bandeja reconciliada." if reconciliada else "")}

@@ -128,6 +128,10 @@ def _validar_valor(nombre: str, spec: Parametro, valor: object) -> object:
         if not isinstance(valor, list) or len(valor) > 10:
             raise invalido("debe ser una lista de a lo más 10 textos")
         return [_validar_valor(nombre, Parametro("texto", max_largo=spec.max_largo), v) for v in valor]
+    if spec.tipo == "lista_id":
+        if not isinstance(valor, list) or not valor or len(valor) > 200:
+            raise invalido("debe ser una lista de 1 a 200 identificadores")
+        return [_validar_valor(nombre, Parametro("id"), v) for v in valor]
     if not isinstance(valor, str):
         raise invalido("debe ser texto")
     texto = " ".join(valor.split()) if spec.tipo == "texto" else valor.strip()
@@ -500,6 +504,58 @@ def _aplicar_chofer_estado(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> d
     from atlas_core.catalogos import cambiar_estado_chofer
     registro = cambiar_estado_chofer(ctx.archivos["choferes"], str(plan.datos["clave"]), bool(p["activo"]))
     return {"despues": {"activo": registro.get("activo")}, "reconciliar": True}
+
+
+def _plan_chofer_estado_lote(ctx: _Contexto, p: dict) -> Plan:
+    """Varios choferes al MISMO estado bajo un único preview. Cada
+    referencia debe resolver a exactamente un chofer (si una falla, falla
+    el plan entero: nada se aplica a medias); los repetidos cuentan una vez
+    y los que ya tienen el estado pedido quedan fuera de los cambios."""
+    from atlas_core.catalogos import normalizar_rut
+    choferes = ctx.choferes()
+    claves = list(dict.fromkeys(_resolver_chofer(choferes, str(r)) for r in p["choferes"]))
+    nuevo = bool(p["activo"])
+    cambios = [c for c in claves if (choferes[c].get("activo", True) is True) != nuevo]
+    ya = [c for c in claves if c not in cambios]
+    ruts = {normalizar_rut(c): c for c in cambios} | {
+        normalizar_rut(str(choferes[c].get("rut", ""))): c for c in cambios}
+    ruts.pop("", None)
+    guias = {str(f.get("numero_guia", "")).strip() for f in (ctx.filas() if cambios else [])
+             if normalizar_rut(str(f.get("rut_chofer", ""))) in ruts}
+    consecuencias = (
+        ["Los resolutores de identidad sólo consideran choferes activos: guías nuevas con estos choferes"
+         " quedarán sin corroborar hasta reactivarlos.", "El historial documental y los viajes existentes no se modifican."]
+        if not nuevo else
+        ["Los choferes vuelven a ser elegibles para resolver identidad en guías nuevas y en la bandeja."]
+    )
+    return Plan(
+        entidad={"tipo": "CHOFERES", "id": _huella(sorted(cambios))[:32],
+                 "choferes": [{"id": c, "nombre": str(choferes[c].get("nombre", ""))} for c in claves]},
+        valor_actual={"activo": {c: choferes[c].get("activo", True) is True for c in claves}},
+        valor_propuesto={"activo": nuevo},
+        estado_base={"choferes": {c: choferes[c] for c in claves}}, sin_cambios=not cambios,
+        afectados=_afectados_por_guias(ctx, guias), consecuencias=consecuencias,
+        revalidaciones=["RECONCILIAR_BANDEJA"], archivos=("choferes", "bandeja"),
+        datos={"cambios": cambios, "sin_cambio": ya},
+    )
+
+
+def _aplicar_chofer_estado_lote(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    """Reutiliza el único escritor de vigencia (`cambiar_estado_chofer`)
+    chofer por chofer. Cualquier fallo (o un estado final distinto del
+    pedido) se propaga: la capa restaura el respaldo del catálogo y de la
+    bandeja tomado antes del primer cambio, así que el lote queda completo
+    o sin aplicar. La bandeja se reconcilia UNA vez al final."""
+    from atlas_core.catalogos import cambiar_estado_chofer
+    nuevo = bool(p["activo"])
+    for clave in plan.datos["cambios"]:
+        cambiar_estado_chofer(ctx.archivos["choferes"], str(clave), nuevo)
+    finales = ctx.choferes()
+    despues = {c: (finales.get(c) or {}).get("activo", True) is True for c in plan.datos["cambios"]}
+    incompletos = [c for c, activo in despues.items() if activo != nuevo]
+    if incompletos:
+        raise ErrorAccionOperacional("LOTE_INCOMPLETO", f"{len(incompletos)} chofer(es) no quedaron en el estado pedido")
+    return {"despues": {"activo": despues}, "reconciliar": True}
 
 
 def _plan_chofer_alias(ctx: _Contexto, p: dict) -> Plan:
@@ -1436,6 +1492,10 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
     DefinicionAccion("CHOFER_CAMBIAR_ESTADO", OPERACIONAL_REVERSIBLE, "Activa o inactiva un chofer (nunca lo borra).",
                      {"chofer": _P("id", True), "activo": _P("bool", True), "referencia": _REF},
                      _plan_chofer_estado, _aplicar_chofer_estado),
+    DefinicionAccion("CHOFER_CAMBIAR_ESTADO_LOTE", OPERACIONAL_REVERSIBLE,
+                     "Activa o inactiva varios choferes con una sola confirmación (todo o nada; nunca los borra).",
+                     {"choferes": _P("lista_id", True), "activo": _P("bool", True), "referencia": _REF},
+                     _plan_chofer_estado_lote, _aplicar_chofer_estado_lote),
     DefinicionAccion("CHOFER_AGREGAR_ALIAS", OPERACIONAL_REVERSIBLE, "Agrega un alias nominal a un chofer.",
                      {"chofer": _P("id", True), "alias": _P("texto", True, max_largo=120), "referencia": _REF},
                      _plan_chofer_alias, _aplicar_chofer_alias),
