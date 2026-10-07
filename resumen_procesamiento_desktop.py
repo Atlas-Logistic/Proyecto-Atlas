@@ -5,11 +5,30 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 from atlas_core.evidencia_documental import leer_registro_relecturas
 from atlas_core.ingesta_pdf import directorio_evidencia_pdf_para_dataset, leer_evidencias_adicionales
 from atlas_core.investigacion_documental import raiz_desde_actual
+
+
+# Mismo criterio que `atlas_core.mobile`, `acciones_operacionales` y
+# `consultas_atlas`: el dataset operacional conserva evidencia por fila que
+# puede superar el límite por defecto de ``csv`` (131072 caracteres); ese
+# límite no es una regla de Atlas. Se baja sólo si la plataforma no admite
+# ``sys.maxsize``.
+def _configurar_limite_campo_csv() -> int:
+    limite = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limite)
+            return limite
+        except OverflowError:
+            limite //= 10
+
+
+LIMITE_CAMPO_CSV = _configurar_limite_campo_csv()
 
 
 def _leer_csv(
