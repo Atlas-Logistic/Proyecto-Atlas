@@ -2178,6 +2178,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             TIPOS_CON_REGENERACION_DIRECTA = {
                 ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"), ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"),
                 ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"),
+                # Peso ya dejó el documento/ledger canónicos; el reporte
+                # directo recalcula el viaje sin ejecutar la batería global.
+                ("PESO_VIAJE_IMPLAUSIBLE", "CONFIRMAR"),
+                ("PESO_VIAJE_IMPLAUSIBLE", "CORREGIR_PESO"),
             }
             requiere_revalidacion_global = (
                 accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
@@ -2359,6 +2363,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 # escribió el dataset arriba (cliente + motivos_revision_
                 # documento/indicador_revision).
                 or (tipo == "CLIENTE_AUSENTE" and accion == "REGISTRAR_CLIENTE_MANUAL")
+                or (tipo == "PESO_VIAJE_IMPLAUSIBLE" and accion in ("CONFIRMAR", "CORREGIR_PESO"))
             ):
                 # Bloque ORIGEN D1 -- a diferencia de DESTINO_SIN_CONFIRMAR/
                 # VEHICULO_DESCONOCIDO, aquí ya sabemos que el dataset
@@ -2417,7 +2422,11 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # Nunca un OCR masivo: sólo esta imagen, sólo si el motivo
             # sigue vigente en el dataset ya escrito arriba.
             numero_guia_para_material = str((decision.get("documento") or {}).get("numero_guia") or "")
-            if numero_guia_para_material and accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET:
+            if (
+                tipo != "PESO_VIAJE_IMPLAUSIBLE"
+                and numero_guia_para_material
+                and accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
+            ):
                 from atlas_core.procesamiento_masivo import MotivoRevisionDocumento
                 from atlas_core.revalidacion_documental import SEPARADOR_MOTIVOS, _leer_filas as _leer_filas_material
                 try:

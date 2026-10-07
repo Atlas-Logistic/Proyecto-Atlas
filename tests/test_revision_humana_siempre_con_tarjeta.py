@@ -9,7 +9,9 @@ Todo sintético en `tmp_path`, sin red.
 """
 from __future__ import annotations
 
+import csv
 import json
+from pathlib import Path
 
 from atlas_core.aplicacion_decisiones import aplicar_decision_obra
 from atlas_core.decisiones_pendientes import (
@@ -207,6 +209,31 @@ def test_aplicar_confirmar_y_corregir_peso_cierran_las_tarjetas(tmp_path):
     assert [(a["accion"], a["peso_corregido"]) for a in ledger] == [("CONFIRMAR", None), ("CORREGIR_PESO", "22868")]
     reconciliar_decisiones_peso_viaje(raiz_atlas=op.raiz)
     assert [d for d in op.decisiones() if d["tipo"] == "PESO_VIAJE_IMPLAUSIBLE"] == []
+
+
+def test_peso_terminal_regenera_directo_sin_revalidacion_global(tmp_path, monkeypatch):
+    """Confirmar y corregir peso no deben ejecutar la batería global."""
+    import atlas_core.revalidacion_documental as revalidacion
+
+    def no_debe_llamarse(**_kwargs):
+        raise AssertionError("PESO no debe invocar revalidar_y_regenerar_reporte")
+
+    monkeypatch.setattr(revalidacion, "revalidar_y_regenerar_reporte", no_debe_llamarse)
+    op = Operacion(tmp_path)
+    _escribir_csv(op.dataset, _filas_peso(op))
+    reconciliar_decisiones_peso_viaje(raiz_atlas=op.raiz)
+
+    confirmado = _aplicar_peso(op, "473263", "CONFIRMAR")
+    corregido = _aplicar_peso(op, "473424", "CORREGIR_PESO", peso_corregido="22868")
+
+    assert confirmado["reporte_regenerado"] is True
+    assert corregido["reporte_regenerado"] is True
+    assert next(f for f in _leer_filas(op.dataset) if f["numero_guia"] == "473424")["peso_kg"] == "22868"
+    assert [d for d in op.decisiones() if d["tipo"] == "PESO_VIAJE_IMPLAUSIBLE"] == []
+    estado = json.loads((op.actual / "estado_operacion.json").read_text(encoding="utf-8"))
+    with (op.raiz / Path(estado["reporte_vigente"]) / "viajes.csv").open(encoding="utf-8", newline="") as archivo:
+        viajes = list(csv.DictReader(archivo, delimiter=";"))
+    assert next(v for v in viajes if v["numero_transporte"] == "0000357311")["peso_total_viaje_kg"] == "22868"
 
 
 def test_corregir_peso_exige_un_numero(tmp_path):
