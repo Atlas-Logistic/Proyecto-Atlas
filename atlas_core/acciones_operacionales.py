@@ -30,6 +30,7 @@ import json
 import math
 import re
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -39,6 +40,21 @@ from typing import Callable, Iterable, Mapping
 from atlas_core.almacenamiento_portable import (
     SesionOcupadaError, bloqueo_sesion, escribir_json_atomico,
 )
+
+# Mismo criterio que `atlas_core.mobile` (ed2b7bd): el dataset operacional
+# conserva evidencia JSON por fila que puede superar el límite por defecto de
+# ``csv`` (131072 caracteres); ese límite no es una regla de Atlas.
+def _configurar_limite_campo_csv() -> int:
+    limite = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limite)
+            return limite
+        except OverflowError:
+            limite //= 10
+
+
+LIMITE_CAMPO_CSV = _configurar_limite_campo_csv()
 
 SCHEMA_VERSION = 1
 NOMBRE_REGISTRO = "acciones_operacionales.json"

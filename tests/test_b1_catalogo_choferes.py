@@ -205,3 +205,16 @@ def test_preview_y_resultado_no_exponen_ids_internos(raiz):
     lectura = _leer(raiz, "¿Cuántos choferes están registrados?")
     assert "123456785" not in json.dumps(lectura, ensure_ascii=False)
     assert all(set(c) <= {"nombre", "activo", "con_viajes", "rut"} for c in lectura["resultado"]["choferes"])
+
+
+# Dataset real (07-10-2026): evidencia JSON por fila > 131072 caracteres, el
+# límite por defecto de ``csv`` -- la consulta de catálogo no debe caerse.
+def test_dataset_con_campo_amplio_no_rompe_la_consulta(raiz):
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    with dataset.open("a", newline="", encoding="utf-8-sig") as archivo:
+        fila = {c: "" for c in COLUMNAS}
+        fila.update(archivo="500005.jpeg", numero_guia="500005", fecha="23-09-2026", chofer="ANA ROJAS",
+                    rut_chofer=RUT_ANA, metricas_procesamiento_json="x" * 200_000)
+        csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";").writerow(fila)
+    r = _leer(raiz, "¿Cuántos choferes están registrados?")
+    assert r["resultado"]["resumen"]["registrados"] == 6
