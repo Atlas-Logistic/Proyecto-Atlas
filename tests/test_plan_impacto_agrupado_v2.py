@@ -187,34 +187,41 @@ def test_tres_obras_guias_distintas_una_sola_revalidacion_agrupada(tmp_path, mon
     assert len(llamadas_reconciliacion) == 1
 
 
-def test_obra_mas_destino_mismo_viaje_una_sola_revalidacion(tmp_path, monkeypatch):
-    fila = _fila_destino("473880", "473880.jpeg")
+def test_475523_obra_mas_destino_mismo_viaje_un_solo_cierre_motor(tmp_path, monkeypatch):
+    """El lote real equivalente OBRA+DESTINO cierra una sola vez en Motor.
+
+    Desktop recibe ``SOLO_RELECTURA`` y no debe iniciar una reconciliación
+    adicional; esa parte se cubre en el test focal de Desktop.
+    """
+    fila = _fila_destino("475523", "475523.jpeg")
     ent = _entorno(tmp_path, filas_csv=[fila])
-    decision_obra = _decision_obra("473880.jpeg", "473880", ent["cliente"].cliente_id, "PRODALAM SA MELIPILLA")
-    decision_destino = detectar_decision_destino_no_resuelto(archivo="473880.jpeg", fila=fila)
+    decision_obra = _decision_obra("475523.jpeg", "475523", ent["cliente"].cliente_id, "RVC CONSTRUCTORA LIMITADA")
+    decision_destino = detectar_decision_destino_no_resuelto(archivo="475523.jpeg", fila=fila)
     generar_artefacto(
         ruta_dataset=ent["dataset"], carpeta_catalogos=ent["catalogos"],
         decisiones=[decision_obra, decision_destino],
         ruta_salida=ent["actual"] / "decisiones_pendientes.json",
     )
-    _contador_reconciliacion(monkeypatch)
+    llamadas_reconciliacion = _contador_reconciliacion(monkeypatch)
     llamadas_revalidacion = _contador_revalidacion_global(monkeypatch)
     solicitudes = [
         {"decision_id": decision_obra["decision_id"], "accion": "REGISTRAR"},
         {
             "decision_id": decision_destino["decision_id"], "accion": "REGISTRAR_DIRECCION",
-            "direccion_manual": "AV VICUNA MACKENNA 1354", "comuna_manual": "MELIPILLA",
+            "direccion_manual": "MANUEL JESUS RIVERA 80", "comuna_manual": "COQUIMBO",
         },
     ]
     resultado = aplicar_decisiones_multiples(raiz_atlas=ent["raiz"], solicitudes=solicitudes)
     assert resultado.total_aplicadas == 2
+    assert len(llamadas_reconciliacion) == 1
+    assert resultado.modo_refresco_lote == "SOLO_RELECTURA"
     # OBRA + DESTINO del MISMO viaje -> deduplicado a UNA guía en el
     # PlanImpacto agregado, UNA sola pasada de revalidación (nunca 2).
     assert len(llamadas_revalidacion) == 1
     assert resultado.plan_impacto_guias == 2  # 2 decisiones aportaron insumos...
     kwargs_revalidacion = llamadas_revalidacion[0]
     # ...pero la comuna manual de DESTINO llega correctamente agregada por guía.
-    assert kwargs_revalidacion["comuna_manual_por_guia"] == {"473880": "MELIPILLA"}
+    assert kwargs_revalidacion["comuna_manual_por_guia"] == {"475523": "COQUIMBO"}
 
 
 def test_tipo_no_elegible_ignora_el_flag_y_revalida_de_inmediato(tmp_path, monkeypatch):

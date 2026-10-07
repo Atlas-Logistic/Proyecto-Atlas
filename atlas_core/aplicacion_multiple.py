@@ -75,6 +75,7 @@ _CAMPOS_APLICACION = (
     "accion", "tipo_vehiculo", "planta_id_elegida", "patente_elegida", "motivo_rechazo",
     "direccion_manual", "comuna_manual", "razon_social_manual", "rut_manual",
     "nombre_obra_manual", "cliente_correccion_manual", "rut_chofer_elegido",
+    "peso_corregido",
 )
 
 
@@ -111,6 +112,11 @@ class ResultadoAplicacionMultiple:
     plan_impacto_ejecutado: bool = False
     plan_impacto_guias: int = 0
     plan_impacto_duracion_ms: float = 0.0
+    # Desktop ya no debe inferir el cierre ni lanzar una segunda
+    # reconciliación. PESO sólo necesita releer el reporte directo que cada
+    # aplicación acaba de publicar; cualquier otro lote sólo requiere releer
+    # el cierre que este Motor ya ejecutó (si correspondía).
+    modo_refresco_lote: str = "SOLO_RELECTURA"
 
     def a_dict(self) -> dict[str, object]:
         return {
@@ -122,6 +128,7 @@ class ResultadoAplicacionMultiple:
             "plan_impacto_ejecutado": self.plan_impacto_ejecutado,
             "plan_impacto_guias": self.plan_impacto_guias,
             "plan_impacto_duracion_ms": self.plan_impacto_duracion_ms,
+            "modo_refresco_lote": self.modo_refresco_lote,
         }
 
 
@@ -190,6 +197,7 @@ def aplicar_decisiones_multiples(
     vigentes_iniciales = _leer_decisiones_vigentes(raiz)
     resultados: list[ResultadoItemMultiple] = []
     algo_aplicado = False
+    algo_aplicado_no_peso = False
     planes_diferidos: list[dict[str, object]] = []
     detenido_por = ""
     for solicitud in solicitudes:
@@ -230,6 +238,8 @@ def aplicar_decisiones_multiples(
                 mensaje=str(resultado.get("mensaje", "")),
             ))
             algo_aplicado = True
+            if tipo != "PESO_VIAJE_IMPLAUSIBLE":
+                algo_aplicado_no_peso = True
             plan = resultado.get("plan_impacto_diferido")
             if isinstance(plan, dict):
                 planes_diferidos.append(plan)
@@ -304,7 +314,11 @@ def aplicar_decisiones_multiples(
 
     reconciliacion_ejecutada = False
     reconciliacion_motivo = ""
-    if algo_aplicado:
+    # PESO ya regenera su reporte directo dentro de aplicar_decision_obra
+    # (37d477b). Un lote compuesto sólo por PESO no gana nada con la
+    # reconciliación global y volvería a introducir su espera eliminada.
+    # En un lote mixto se conserva exactamente un cierre global, al final.
+    if algo_aplicado_no_peso:
         from atlas_core.reconciliacion_estado_derivado import reconciliar_estado_derivado
         resultado_reconciliacion = reconciliar_estado_derivado(
             raiz_atlas=raiz, reloj=reloj,
@@ -312,6 +326,8 @@ def aplicar_decisiones_multiples(
         )
         reconciliacion_ejecutada = bool(resultado_reconciliacion.get("reconciliado"))
         reconciliacion_motivo = str(resultado_reconciliacion.get("motivo", ""))
+    elif algo_aplicado:
+        reconciliacion_motivo = "LOTE_SOLO_PESO_REPORTE_DIRECTO"
 
     return ResultadoAplicacionMultiple(
         resultados=resultados,
@@ -322,4 +338,5 @@ def aplicar_decisiones_multiples(
         plan_impacto_ejecutado=plan_impacto_ejecutado,
         plan_impacto_guias=plan_impacto_guias,
         plan_impacto_duracion_ms=plan_impacto_duracion_ms,
+        modo_refresco_lote=("LOCAL_RAPIDO" if algo_aplicado and not algo_aplicado_no_peso else "SOLO_RELECTURA"),
     )
