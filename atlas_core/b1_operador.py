@@ -731,6 +731,24 @@ def _presentacion_chofer_estado(preview: Mapping[str, object]) -> dict[str, obje
             "consecuencias": [str(c) for c in preview.get("consecuencias") or []]}
 
 
+def _preview_chofer_estado_publico(presentacion: Mapping[str, object]) -> dict[str, object]:
+    """Mismo contrato que Desktop ya consume (entidad / valor_actual /
+    valor_propuesto / afectados), sin ninguna clave interna del catálogo."""
+    return {"entidad": {"nombre": presentacion["chofer"]},
+            "valor_actual": {"activo": presentacion["antes"] == "ACTIVO"},
+            "valor_propuesto": {"activo": presentacion["despues"] == "ACTIVO"},
+            "afectados": {"total_guias": presentacion["guias_afectadas"],
+                          "total_decisiones": presentacion["decisiones_afectadas"]},
+            "consecuencias": list(presentacion["consecuencias"]), "chofer": presentacion["chofer"]}
+
+
+def _resultado_chofer_estado_publico(presentacion: Mapping[str, object], *, reconciliada: bool) -> dict[str, object]:
+    return {"estado": "APLICADA", "entidad": {"nombre": presentacion["chofer"]}, "chofer": presentacion["chofer"],
+            "antes": {"activo": presentacion["antes"] == "ACTIVO"},
+            "despues": {"activo": presentacion["despues"] == "ACTIVO"},
+            "bandeja_reconciliada": reconciliada}
+
+
 def _mensaje_chofer_estado(presentacion: Mapping[str, object]) -> str:
     return (f"Dejar al chofer {presentacion['chofer']} como {presentacion['despues']} "
             f"(hoy {presentacion['antes']}). No se borra el chofer ni se modifican sus viajes, RUT, alias ni "
@@ -1488,7 +1506,7 @@ class OperadorB1:
                     "mensaje": _mensaje_preview_catalogo_obra(presentacion)}
         if intencion.accion == "CHOFER_CAMBIAR_ESTADO":
             presentacion = _presentacion_chofer_estado(preview)
-            visible = {k: v for k, v in presentacion.items() if k != "tipo"}
+            visible = _preview_chofer_estado_publico(presentacion)
             if preview.get("estado") == "SIN_CAMBIOS":
                 return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": visible,
                         "mensaje": f"El chofer {presentacion['chofer']} ya está {presentacion['antes']}; "
@@ -1531,9 +1549,7 @@ class OperadorB1:
                 if presentacion.get("tipo") == "chofer_estado":
                     reconciliada = bool((resultado.get("reconciliacion") or {}).get("ejecutado"))
                     return {"estado": "EJECUTADA", "accion": pendiente["accion"],
-                            "resultado": {"estado": "APLICADA", "chofer": presentacion["chofer"],
-                                          "antes": presentacion["antes"], "despues": presentacion["despues"],
-                                          "bandeja_reconciliada": reconciliada},
+                            "resultado": _resultado_chofer_estado_publico(presentacion, reconciliada=reconciliada),
                             "mensaje": f"Listo: el chofer {presentacion['chofer']} quedó {presentacion['despues']}."
                                        + (" Bandeja reconciliada." if reconciliada else "")}
                 if presentacion.get("tipo") == "obra_catalogo":
@@ -1567,7 +1583,7 @@ class OperadorB1:
                                                                    "creado_en": self.reloj().isoformat(),
                                                                    "presentacion": presentacion})
                     return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
-                            "preview": {k: v for k, v in presentacion.items() if k != "tipo"},
+                            "preview": _preview_chofer_estado_publico(presentacion),
                             "mensaje": f"No ejecuté nada: {motivo}. " + _mensaje_chofer_estado(presentacion)
                                        + " ¿Confirmas? (sí / no)"}
                 if presentacion.get("tipo") == "obra_catalogo":

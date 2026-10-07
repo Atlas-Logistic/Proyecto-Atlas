@@ -144,10 +144,13 @@ def test_inactivar_conserva_historico_y_repetir_es_idempotente(raiz):
     antes = json.loads(catalogo.read_text(encoding="utf-8"))["123456785"]
     huellas = (_huella(dataset), _huella(vehiculos))
     b1 = OperadorB1(raiz)
-    assert b1.atender("c", "Pon inactiva a Ana Rojas")["estado"] == "PREVIEW_PENDIENTE"
+    previa = b1.atender("c", "Pon inactiva a Ana Rojas")
+    assert previa["estado"] == "PREVIEW_PENDIENTE"
+    assert (previa["preview"]["valor_actual"], previa["preview"]["valor_propuesto"]) == ({"activo": True}, {"activo": False})
     e = b1.atender("c", "sí")
     assert e["estado"] == "EJECUTADA", e
-    assert e["resultado"]["antes"] == "ACTIVO" and e["resultado"]["despues"] == "INACTIVO"
+    assert e["resultado"]["entidad"] == {"nombre": "ANA ROJAS"}
+    assert (e["resultado"]["antes"], e["resultado"]["despues"]) == ({"activo": True}, {"activo": False})
     despues = json.loads(catalogo.read_text(encoding="utf-8"))["123456785"]
     assert despues == {**antes, "activo": False}   # nombre, RUT y alias intactos; nunca se borra
     assert (_huella(dataset), _huella(vehiculos)) == huellas  # viajes y vehículos intactos
@@ -185,11 +188,20 @@ def test_preview_y_resultado_no_exponen_ids_internos(raiz):
     b1 = OperadorB1(raiz)
     preview = b1.atender("c", "Pon inactiva a Carla Soto")
     assert preview["estado"] == "PREVIEW_PENDIENTE"
-    assert preview["preview"]["chofer"] == "CARLA SOTO"
+    # Contrato que consume Desktop: entidad.nombre + valor_actual/valor_propuesto, sin id.
+    assert preview["preview"]["entidad"] == {"nombre": "CARLA SOTO"}
+    assert "id" not in preview["preview"]["entidad"]
+    assert (preview["preview"]["valor_actual"], preview["preview"]["valor_propuesto"]) == ({"activo": True}, {"activo": False})
     texto = json.dumps(preview, ensure_ascii=False)
     assert "PENDIENTE00000001" not in texto and "CHOFER_CAMBIAR_ESTADO" not in preview["mensaje"]
     ejecutada = b1.atender("c", "sí")
+    assert ejecutada["resultado"]["entidad"] == {"nombre": "CARLA SOTO"}
+    assert (ejecutada["resultado"]["antes"], ejecutada["resultado"]["despues"]) == ({"activo": True}, {"activo": False})
     assert "PENDIENTE00000001" not in json.dumps(ejecutada, ensure_ascii=False)
+    # reactivar: no -> sí
+    reactivar = b1.atender("c", "Reactiva a Carla Soto")
+    assert (reactivar["preview"]["valor_actual"], reactivar["preview"]["valor_propuesto"]) == ({"activo": False}, {"activo": True})
+    assert "PENDIENTE00000001" not in json.dumps(reactivar, ensure_ascii=False)
     lectura = _leer(raiz, "¿Cuántos choferes están registrados?")
     assert "123456785" not in json.dumps(lectura, ensure_ascii=False)
     assert all(set(c) <= {"nombre", "activo", "con_viajes", "rut"} for c in lectura["resultado"]["choferes"])

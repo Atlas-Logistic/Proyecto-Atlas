@@ -98,7 +98,8 @@ def test_pon_inactivo_preview_confirmacion_cambio_auditoria(raiz):
     b1 = OperadorB1(raiz)
     r = b1.atender("conv2", "Pon inactivo a Luis Reyes")
     assert r["estado"] == "PREVIEW_PENDIENTE" and r["accion"] == "CHOFER_CAMBIAR_ESTADO"
-    assert (r["preview"]["chofer"], r["preview"]["antes"], r["preview"]["despues"]) == ("LUIS REYES", "ACTIVO", "INACTIVO")
+    assert r["preview"]["entidad"] == {"nombre": "LUIS REYES"}
+    assert (r["preview"]["valor_actual"], r["preview"]["valor_propuesto"]) == ({"activo": True}, {"activo": False})
     assert "123456785" not in r["mensaje"] and "123456785" not in str(r["preview"])
     assert _choferes(raiz)["123456785"]["activo"] is True
     e = b1.atender("conv2", "confirma")
@@ -141,7 +142,7 @@ def test_orden_ambigua_pregunta_y_no_adivina(raiz):
     assert desconocido["estado"] == "ACLARACION_REQUERIDA" and desconocido["candidatos"] == []
     # con el RUT la orden es inequívoca
     por_rut = b1.atender("c4", f"Pon inactivo a {RUT_JUAN_B}")
-    assert por_rut["estado"] == "PREVIEW_PENDIENTE" and por_rut["preview"]["chofer"] == "JUAN PEREZ SOTO"
+    assert por_rut["estado"] == "PREVIEW_PENDIENTE" and por_rut["preview"]["entidad"] == {"nombre": "JUAN PEREZ SOTO"}
     assert "173456786" not in str(por_rut["preview"])
     assert all(c["activo"] for c in _choferes(raiz).values())
 
@@ -257,7 +258,7 @@ def test_modelo_valido_llega_a_preview_por_el_mismo_contrato(raiz):
     modelo = _ModeloSimulado({"accion": "CHOFER_CAMBIAR_ESTADO", "parametros": {"activo": False},
                               "menciones": {"chofer": "Luis Reyes"}})
     r = OperadorB1(raiz, proveedor=modelo).atender("c", "saca de la lista de activos a Luis Reyes")
-    assert r["estado"] == "PREVIEW_PENDIENTE" and r["preview"]["chofer"] == "LUIS REYES"
+    assert r["estado"] == "PREVIEW_PENDIENTE" and r["preview"]["entidad"] == {"nombre": "LUIS REYES"}
     assert {a["accion"] for a in modelo.contrato} >= {"CHOFER_CAMBIAR_ESTADO", "CHOFER_ASIGNAR_VEHICULO"}
 
 
