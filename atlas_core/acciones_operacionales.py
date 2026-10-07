@@ -32,9 +32,9 @@ import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from atlas_core.almacenamiento_portable import (
     SesionOcupadaError, bloqueo_sesion, escribir_json_atomico,
@@ -90,7 +90,7 @@ _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 @dataclass(frozen=True)
 class Parametro:
-    tipo: str  # texto | id | rut | patente | bool | enum | numero | lista_texto | guia | transporte | archivo_documento
+    tipo: str  # texto | id | rut | patente | bool | enum | numero | lista_texto | guia | transporte | archivo_documento | fecha
     obligatorio: bool = False
     opciones: tuple[str, ...] = ()
     max_largo: int = 300
@@ -136,6 +136,11 @@ def _validar_valor(nombre: str, spec: Parametro, valor: object) -> object:
     elif spec.tipo == "guia":
         if not re.fullmatch(r"\d{3,12}", texto):
             raise invalido("número de guía inválido")
+    elif spec.tipo == "fecha":
+        try:
+            date.fromisoformat(texto)
+        except ValueError:
+            raise invalido("fecha inválida (AAAA-MM-DD)") from None
     elif spec.tipo == "transporte":
         if not re.fullmatch(r"\d{4,15}", texto):
             raise invalido("número de transporte inválido")
@@ -307,12 +312,86 @@ def _guias_de_chofer(ctx: _Contexto, clave: str, registro: Mapping[str, object])
             if normalizar_rut(str(f.get("rut_chofer", ""))) in ruts}
 
 
+def _fecha_documental(valor: object) -> date | None:
+    try:
+        return datetime.strptime(str(valor or "").strip(), "%d-%m-%Y").date()
+    except ValueError:
+        return None
+
+
+def choferes_catalogo_con_viajes(
+    choferes: Mapping[str, object], filas: Iterable[Mapping[str, str]], *,
+    desde: date | None = None, hasta: date | None = None,
+) -> dict[str, str]:
+    """Choferes del CATÁLOGO que aparecen al menos una vez en el dataset
+    operacional (o dentro de [desde, hasta]): {clave: "RUT" | "NOMBRE"}.
+
+    Cruce sólo para estadística -- nunca crea ni confirma identidad, nunca
+    escribe. Primero el RUT canónico; el nombre/alias normalizado sólo para
+    choferes SIN RUT canónico y sólo si ese nombre identifica a UN único
+    chofer del catálogo."""
+    from atlas_core.catalogos import _normalizar_nombre_chofer, normalizar_rut, rut_canonico_de_registro_chofer
+
+    claves_por_rut: dict[str, set[str]] = {}
+    claves_por_nombre: dict[str, set[str]] = {}
+    sin_rut: set[str] = set()
+    for clave, registro in choferes.items():
+        if not isinstance(registro, dict):
+            continue
+        rut = rut_canonico_de_registro_chofer(clave, registro)
+        if rut:
+            claves_por_rut.setdefault(normalizar_rut(rut), set()).add(clave)
+        else:
+            sin_rut.add(clave)
+        for nombre in (registro.get("nombre"), *(registro.get("aliases") or ())):
+            normalizado = _normalizar_nombre_chofer(str(nombre or ""))
+            if normalizado:
+                claves_por_nombre.setdefault(normalizado, set()).add(clave)
+
+    encontrados: dict[str, str] = {}
+    for fila in filas:
+        if desde is not None or hasta is not None:
+            fecha = _fecha_documental(fila.get("fecha"))
+            if fecha is None or (desde and fecha < desde) or (hasta and fecha > hasta):
+                continue
+        por_rut = claves_por_rut.get(normalizar_rut(str(fila.get("rut_chofer", ""))), set())
+        if len(por_rut) == 1:
+            encontrados.setdefault(next(iter(por_rut)), "RUT")
+            continue
+        if por_rut:
+            continue  # RUT compartido por varios registros: nunca se elige
+        por_nombre = claves_por_nombre.get(_normalizar_nombre_chofer(str(fila.get("chofer", ""))), set())
+        if len(por_nombre) == 1 and next(iter(por_nombre)) in sin_rut:
+            encontrados.setdefault(next(iter(por_nombre)), "NOMBRE")
+    return encontrados
+
+
 def _consultar_choferes(ctx: _Contexto, p: dict) -> object:
+    """Catálogo de choferes (registrados/activos/inactivos) cruzado con su
+    actividad en el dataset vigente (con/sin viajes, opcionalmente en un
+    período). Nunca cuenta choferes que no están en el catálogo."""
     filtro = p.get("estado", "TODOS")
-    vistas = [_vista_chofer(k, r) for k, r in sorted(ctx.choferes().items()) if isinstance(r, dict)]
+    viajes = p.get("viajes", "TODOS")
+    desde = date.fromisoformat(p["fecha_desde"]) if p.get("fecha_desde") else None
+    hasta = date.fromisoformat(p["fecha_hasta"]) if p.get("fecha_hasta") else None
+    choferes = ctx.choferes()
+    con_viajes = choferes_catalogo_con_viajes(choferes, ctx.filas(), desde=desde, hasta=hasta)
+    todas = [{**_vista_chofer(k, r), "con_viajes": k in con_viajes}
+             for k, r in sorted(choferes.items()) if isinstance(r, dict)]
+    vistas = todas
     if filtro != "TODOS":
         vistas = [v for v in vistas if v["activo"] is (filtro == "ACTIVO")]
-    return {"choferes": vistas, "total": len(vistas)}
+    if viajes != "TODOS":
+        vistas = [v for v in vistas if v["con_viajes"] is (viajes == "CON")]
+    activos = sum(v["activo"] for v in todas)
+    con = sum(v["con_viajes"] for v in todas)
+    return {
+        "choferes": vistas, "total": len(vistas), "estado": filtro, "viajes": viajes,
+        "periodo": ({"desde": p.get("fecha_desde", ""), "hasta": p.get("fecha_hasta", "")}
+                    if desde or hasta else None),
+        "resumen": {"registrados": len(todas), "activos": activos, "inactivos": len(todas) - activos,
+                    "con_viajes": con, "sin_viajes": len(todas) - con},
+    }
 
 
 def _plan_chofer_estado(ctx: _Contexto, p: dict) -> Plan:
@@ -1265,8 +1344,11 @@ _P = Parametro
 _REF = _P("texto", max_largo=500)
 
 ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
-    DefinicionAccion("CHOFER_CONSULTAR", LECTURA, "Lista choferes del catálogo y su estado.",
-                     {"estado": _P("enum", opciones=("ACTIVO", "INACTIVO", "TODOS"))}, consultar=_consultar_choferes),
+    DefinicionAccion("CHOFER_CONSULTAR", LECTURA,
+                     "Choferes del catálogo: registrados, activos/inactivos y con/sin viajes (opcionalmente en un período).",
+                     {"estado": _P("enum", opciones=("ACTIVO", "INACTIVO", "TODOS")),
+                      "viajes": _P("enum", opciones=("CON", "SIN", "TODOS")),
+                      "fecha_desde": _P("fecha"), "fecha_hasta": _P("fecha")}, consultar=_consultar_choferes),
     DefinicionAccion("OBRA_CONSULTAR", LECTURA, "Lista obras (opcionalmente por nombre) con sus relaciones.",
                      {"nombre": _P("texto")}, consultar=_consultar_obras),
     DefinicionAccion("DECISION_CONSULTAR", LECTURA, "Lista decisiones pendientes (opcionalmente por guía).",

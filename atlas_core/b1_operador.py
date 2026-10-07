@@ -122,8 +122,15 @@ _DOCUMENTO = re.compile(
 # Lecturas de CATÁLOGO acotadas: las preguntas sobre la operación ("qué
 # choferes trabajaron", "estadías pendientes", "qué obras tuvieron más
 # viajes") pertenecen a Consultas/Incidencias, nunca a B1 operador.
-_LECTURA_CHOFERES = re.compile(r"\b(?:CHOFERES|CONDUCTORES)\b.*\b(?:IN)?ACTIV[OA]S?\b"
-                               r"|\b(?:IN)?ACTIV[OA]S?\b.*\b(?:CHOFERES|CONDUCTORES)\b")
+# Catálogo de CHOFERES (no actividad): registrados / catálogo / activos /
+# inactivos / con-sin viajes. "Trabajaron", "hicieron viajes"... sin ninguna
+# de estas marcas sigue siendo una consulta sobre viajes (fuera de B1).
+_PALABRA_CHOFER = re.compile(r"\b(?:CHOFER(?:ES)?|CONDUCTOR(?:ES)?)\b")
+_MARCA_CATALOGO_CHOFERES = re.compile(r"\bREGISTRAD[OA]S?\b|\bCATALOGO\b|\b(?:IN)?ACTIV[OA]S?\b")
+_SIN_VIAJES = re.compile(r"\bSIN\s+VIAJES?\b|\bNO\s+(?:TIENEN?|HAN\s+TENIDO|TUVIERON|REGISTRAN)\s+VIAJES?\b")
+_CON_VIAJES = re.compile(r"\bCON\s+VIAJES?\b|\b(?:TIENEN?|HAN\s+TENIDO|TUVIERON|REGISTRAN)\s+VIAJES?\b")
+_OTRA_ENTIDAD = re.compile(r"\b(?:OBRAS?|CLIENTES?|DESTINOS?|VEHICULOS?|PATENTES?|CAMION(?:ES)?|TRACTOS?|RAMPLAS?|"
+                           r"GUIAS?|DECISIONES|REVISIONES|TARJETAS|PLANTAS?)\b")
 _VERBO_LECTURA = re.compile(r"^(?:QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
 _LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
 _NO_ES_DECISION = re.compile(r"\b(?:ESTADIAS?|INCIDENCIAS?|DEVOLUCION(?:ES)?|VUELTAS?)\b")
@@ -269,6 +276,41 @@ def _intencion_investigar_revision(plano: str) -> Intencion | None:
                      {"numero_guia": guia.group("guia") if guia else "", "campos": campos})
 
 
+def _consulta_catalogo_choferes(plano: str) -> dict[str, str] | None:
+    """Parámetros de CHOFER_CONSULTAR si la pregunta es sobre el CATÁLOGO de
+    choferes; None si no (p. ej. "¿cuántos choferes trabajaron?", que se
+    responde sobre viajes)."""
+    sin_viajes = bool(_SIN_VIAJES.search(plano))
+    con_viajes = not sin_viajes and bool(_CON_VIAJES.search(plano))
+    if not (_MARCA_CATALOGO_CHOFERES.search(plano) or sin_viajes or con_viajes) or _OTRA_ENTIDAD.search(plano):
+        return None
+    if not _PALABRA_CHOFER.search(plano) and not _MARCA_CATALOGO_CHOFERES.search(plano):
+        return None  # "¿cuántos tienen viajes?" sin decir de quién: no se asume
+    parametros = {
+        "estado": "INACTIVO" if re.search(r"\bINACTIV", plano) else "ACTIVO" if re.search(r"\bACTIV", plano) else "TODOS",
+    }
+    if sin_viajes or con_viajes:
+        parametros["viajes"] = "SIN" if sin_viajes else "CON"
+        parametros.update(_periodo_documental(plano))
+    return parametros
+
+
+def _periodo_documental(plano: str) -> dict[str, str]:
+    """Mismo intérprete de período que las consultas sobre viajes."""
+    from datetime import date
+    from atlas_core.consultas_atlas import resolver_periodo
+    from atlas_core.interpretador_consultas import _filtros_periodo
+
+    filtros = _filtros_periodo(plano)
+    if "fecha_desde" in filtros:
+        return {"fecha_desde": filtros["fecha_desde"], "fecha_hasta": filtros["fecha_hasta"]}
+    if "periodo" in filtros:
+        dias = int(filtros["dias"]) if filtros.get("dias") else None
+        desde, hasta = resolver_periodo(filtros["periodo"], hoy=date.today(), dias=dias)
+        return {"fecha_desde": desde.isoformat(), "fecha_hasta": hasta.isoformat()}
+    return {}
+
+
 def interpretar_determinista(texto: str) -> Intencion | None:
     """Sólo patrones de alta certeza; ante la duda devuelve None."""
     from atlas_core.operaciones_conversacionales import _interpretar
@@ -350,9 +392,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         nombre = original[m.start("nombre"):m.end("nombre")].strip()
         return Intencion("OBRA_CONSULTAR", {"nombre": nombre} if nombre else {})
     if _VERBO_LECTURA.match(plano) or str(texto or "").strip().endswith("?"):
-        if _LECTURA_CHOFERES.search(plano):
-            estado = "INACTIVO" if re.search(r"\bINACTIV", plano) else "ACTIVO"
-            return Intencion("CHOFER_CONSULTAR", {"estado": estado})
+        consulta_choferes = _consulta_catalogo_choferes(plano)
+        if consulta_choferes is not None:
+            return Intencion("CHOFER_CONSULTAR", consulta_choferes)
         m = _LECTURA_DECISIONES.search(plano)
         if m and not _NO_ES_DECISION.search(plano):
             return Intencion("DECISION_CONSULTAR", {"numero_guia": m.group("guia")} if m.group("guia") else {})
@@ -560,7 +602,7 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
                  f"{entidad.get('chofer')} (RUT {propuesto.get('rut_chofer')}).")
     elif accion == "CHOFER_CAMBIAR_ESTADO":
         estado = "ACTIVO" if propuesto.get("activo") else "INACTIVO"
-        texto = f"Dejar al chofer {entidad.get('nombre')} ({entidad.get('id')}) como {estado}."
+        texto = f"Dejar al chofer {entidad.get('nombre')} como {estado}."
     elif accion == "DECISION_APLICAR" and propuesto.get("accion") == "REGISTRAR_DIRECCION":
         documento = entidad.get("documento") or {}
         comuna = f", comuna {propuesto['comuna_manual']}" if propuesto.get("comuna_manual") else ""
@@ -620,13 +662,85 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
     return " ".join(partes)
 
 
+def _fecha_legible(iso: object) -> str:
+    texto = str(iso or "")
+    return f"{texto[8:10]}-{texto[5:7]}-{texto[:4]}" if len(texto) == 10 else texto
+
+
+def _choferes_publicos(choferes: list[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Sólo datos operacionales: nunca la clave interna del catálogo. El RUT
+    se muestra sólo para distinguir a dos choferes con el mismo nombre."""
+    repetidos = {n for n in (str(c.get("nombre", "")) for c in choferes)
+                 if sum(str(c.get("nombre", "")) == n for c in choferes) > 1}
+    publicos = []
+    for c in choferes:
+        vista = {"nombre": str(c.get("nombre", "")), "activo": c.get("activo") is True}
+        if "con_viajes" in c:
+            vista["con_viajes"] = c.get("con_viajes") is True
+        if vista["nombre"] in repetidos and c.get("rut"):
+            vista["rut"] = str(c["rut"])
+        publicos.append(vista)
+    return publicos
+
+
+def _resultado_lectura_publico(accion: str, resultado: Mapping[str, object]) -> Mapping[str, object]:
+    if accion != "CHOFER_CONSULTAR":
+        return resultado
+    return {**{k: v for k, v in resultado.items() if k != "choferes"},
+            "choferes": _choferes_publicos(list(resultado.get("choferes") or []))}
+
+
+def _describir_catalogo_choferes(resultado: Mapping[str, object]) -> str:
+    resumen = resultado.get("resumen") or {}
+    periodo = resultado.get("periodo") or {}
+    en_periodo = (f" entre el {_fecha_legible(periodo.get('desde'))} y el {_fecha_legible(periodo.get('hasta'))}"
+                  if periodo else "")
+    estado, viajes = resultado.get("estado", "TODOS"), resultado.get("viajes", "TODOS")
+    if estado == "TODOS" and viajes == "TODOS":
+        activos, inactivos = int(resumen.get("activos", 0)), int(resumen.get("inactivos", 0))
+        return (f"{resumen.get('registrados', 0)} choferes registrados en el catálogo: "
+                f"{activos} activo{'s' if activos != 1 else ''} y {inactivos} inactivo{'s' if inactivos != 1 else ''}; "
+                f"{resumen.get('con_viajes', 0)} con viajes y {resumen.get('sin_viajes', 0)} sin viajes{en_periodo}.")
+    partes = []
+    if estado != "TODOS":
+        partes.append("activos" if estado == "ACTIVO" else "inactivos")
+    if viajes != "TODOS":
+        partes.append(("con" if viajes == "CON" else "sin") + f" viajes{en_periodo}")
+    total = int(resultado.get("total", 0) or 0)
+    descripcion = f"chofer(es) del catálogo {' y '.join(partes)}"
+    if not total:
+        return f"0 {descripcion}."
+    nombres = "; ".join(
+        c["nombre"] + (f" (RUT {c['rut']})" if c.get("rut") else "")
+        for c in _choferes_publicos(list(resultado.get("choferes") or [])))
+    return f"{total} {descripcion} (de {resumen.get('registrados', 0)} registrados): {nombres}."
+
+
+def _presentacion_chofer_estado(preview: Mapping[str, object]) -> dict[str, object]:
+    """Preview/resultado de activar-inactivar un chofer sin claves internas."""
+    entidad = preview.get("entidad") or {}
+    afectados = preview.get("afectados") or {}
+
+    def legible(valor: object) -> str:
+        return "ACTIVO" if (valor or {}).get("activo") else "INACTIVO"
+
+    return {"tipo": "chofer_estado", "chofer": str(entidad.get("nombre", "")),
+            "antes": legible(preview.get("valor_actual")), "despues": legible(preview.get("valor_propuesto")),
+            "guias_afectadas": int(afectados.get("total_guias", 0) or 0) if isinstance(afectados, Mapping) else 0,
+            "decisiones_afectadas": int(afectados.get("total_decisiones", 0) or 0) if isinstance(afectados, Mapping) else 0,
+            "consecuencias": [str(c) for c in preview.get("consecuencias") or []]}
+
+
+def _mensaje_chofer_estado(presentacion: Mapping[str, object]) -> str:
+    return (f"Dejar al chofer {presentacion['chofer']} como {presentacion['despues']} "
+            f"(hoy {presentacion['antes']}). No se borra el chofer ni se modifican sus viajes, RUT, alias ni "
+            f"vehículos. Guías relacionadas: {presentacion['guias_afectadas']}; decisiones pendientes: "
+            f"{presentacion['decisiones_afectadas']}. " + " ".join(presentacion["consecuencias"]))
+
+
 def _describir_lectura(accion: str, resultado: Mapping[str, object]) -> str:
     if accion == "CHOFER_CONSULTAR":
-        choferes = resultado.get("choferes") or []
-        if not choferes:
-            return "No hay choferes con ese estado."
-        return f"{len(choferes)} chofer(es): " + "; ".join(
-            f"{c['nombre']} ({c['rut'] or c['chofer_id']}, {'activo' if c['activo'] else 'inactivo'})" for c in choferes)
+        return _describir_catalogo_choferes(resultado)
     if accion == "DECISION_CONSULTAR":
         decisiones = resultado.get("decisiones") or []
         return (f"{resultado.get('total', 0)} decisión(es) pendiente(s): "
@@ -1028,9 +1142,12 @@ class OperadorB1:
             resolucion = resolver_chofer(self.capa._ctx.choferes(), intencion.menciones["chofer"],
                                          incluir_inactivos=intencion.accion == "CHOFER_CAMBIAR_ESTADO")
             if resolucion["estado"] != "RESUELTO":
-                candidatos = resolucion.get("candidatos") or []
-                mensaje = ("¿A cuál chofer te refieres? " + "; ".join(f"{c['nombre']} (RUT {c['rut'] or c['chofer']})"
-                                                                      for c in candidatos)
+                # Nunca una acción ejecutable ambigua ni claves internas: sólo
+                # nombre (y RUT real, si lo hay) para que el humano precise.
+                candidatos = [{"nombre": c["nombre"], "activo": c["activo"], **({"rut": c["rut"]} if c["rut"] else {})}
+                              for c in resolucion.get("candidatos") or []]
+                mensaje = ("¿A cuál chofer te refieres? " + "; ".join(
+                               c["nombre"] + (f" (RUT {c['rut']})" if c.get("rut") else "") for c in candidatos)
                            + ". Repite la orden con el nombre completo o el RUT."
                            if candidatos else f"No encontré un chofer que coincida con «{intencion.menciones['chofer']}».")
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
@@ -1351,7 +1468,8 @@ class OperadorB1:
             return {"estado": "RECHAZADA", "accion": intencion.accion, "codigo": preview.get("codigo"),
                     "mensaje": preview.get("mensaje")}
         if preview.get("estado") == "RESULTADO":
-            return {"estado": "RESULTADO_LECTURA", "accion": intencion.accion, "resultado": preview["resultado"],
+            return {"estado": "RESULTADO_LECTURA", "accion": intencion.accion,
+                    "resultado": _resultado_lectura_publico(intencion.accion, preview["resultado"]),
                     "mensaje": _describir_lectura(intencion.accion, preview["resultado"])}
         if (intencion.tipo_vehiculo_declarado
                 and (preview.get("valor_propuesto") or {}).get("tipo") not in (None, intencion.tipo_vehiculo_declarado)):
@@ -1368,6 +1486,19 @@ class OperadorB1:
             return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion,
                     "preview": _preview_catalogo_obra_publico(presentacion),
                     "mensaje": _mensaje_preview_catalogo_obra(presentacion)}
+        if intencion.accion == "CHOFER_CAMBIAR_ESTADO":
+            presentacion = _presentacion_chofer_estado(preview)
+            visible = {k: v for k, v in presentacion.items() if k != "tipo"}
+            if preview.get("estado") == "SIN_CAMBIOS":
+                return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": visible,
+                        "mensaje": f"El chofer {presentacion['chofer']} ya está {presentacion['antes']}; "
+                                   "no hay nada que confirmar."}
+            self._fijar_pendiente(estado, conversacion_id, {
+                "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
+                "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat(),
+                "presentacion": presentacion})
+            return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion, "preview": visible,
+                    "mensaje": _mensaje_chofer_estado(presentacion) + " ¿Confirmas? (sí / no)"}
         if preview.get("estado") == "SIN_CAMBIOS":
             mensaje = "Eso ya está así; no hay nada que confirmar."
             if intencion.accion == "VIAJE_AGRUPAR_GUIAS":
@@ -1397,6 +1528,14 @@ class OperadorB1:
         if estado_capa == "APLICADA":
             self._fijar_pendiente(estado, conversacion_id, None)
             if presentacion:
+                if presentacion.get("tipo") == "chofer_estado":
+                    reconciliada = bool((resultado.get("reconciliacion") or {}).get("ejecutado"))
+                    return {"estado": "EJECUTADA", "accion": pendiente["accion"],
+                            "resultado": {"estado": "APLICADA", "chofer": presentacion["chofer"],
+                                          "antes": presentacion["antes"], "despues": presentacion["despues"],
+                                          "bandeja_reconciliada": reconciliada},
+                            "mensaje": f"Listo: el chofer {presentacion['chofer']} quedó {presentacion['despues']}."
+                                       + (" Bandeja reconciliada." if reconciliada else "")}
                 if presentacion.get("tipo") == "obra_catalogo":
                     resultado_visible = {"estado": "APLICADA", "obra": {"nombre": presentacion["despues"]},
                                          "revalidacion": "focal del catálogo y conciliación ejecutadas"}
@@ -1422,6 +1561,15 @@ class OperadorB1:
                         "mensaje": f"No ejecuté nada: {motivo} y ya no hay cambio que confirmar "
                                    f"({nuevo.get('estado')}: {nuevo.get('mensaje', 'sin cambios')})."}
             if presentacion:
+                if presentacion.get("tipo") == "chofer_estado":
+                    presentacion = _presentacion_chofer_estado(nuevo)
+                    self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
+                                                                   "creado_en": self.reloj().isoformat(),
+                                                                   "presentacion": presentacion})
+                    return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                            "preview": {k: v for k, v in presentacion.items() if k != "tipo"},
+                            "mensaje": f"No ejecuté nada: {motivo}. " + _mensaje_chofer_estado(presentacion)
+                                       + " ¿Confirmas? (sí / no)"}
                 if presentacion.get("tipo") == "obra_catalogo":
                     presentacion = _presentacion_catalogo_obra(nuevo)
                     self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
