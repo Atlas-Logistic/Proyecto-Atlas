@@ -167,6 +167,41 @@ def test_error_funcional_real_sigue_terminando_en_error(tmp_path):
     assert "reintento_por_bloqueo" not in registro
 
 
+def test_dataset_mobile_admite_campo_evidencia_mayor_al_limite_csv_y_lo_conserva(tmp_path):
+    repo, envio_id, dataset = _preparar(tmp_path)
+    evidencia_grande = "E" * (131072 + 1)
+    fila_existente = {columna: "" for columna in COLUMNAS}
+    fila_existente.update({
+        "archivo": "evidencia-preexistente.jpeg",
+        "numero_guia": "555110",
+        "numero_transporte": "0000999887",
+        "resultado_atlas_ia_json": evidencia_grande,
+    })
+    with dataset.open("a", newline="", encoding="utf-8-sig") as archivo:
+        csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";").writerow(fila_existente)
+
+    registro = procesar_envio_mobile(repo, envio_id, dataset=dataset, procesador=_Procesador())
+
+    assert registro["estado"] == "ASOCIADO"
+    filas = mobile._filas_dataset(dataset)
+    assert len(filas) == 2
+    assert filas[0]["resultado_atlas_ia_json"] == evidencia_grande
+    assert filas[1]["archivo"] == f"mobile/{envio_id}/original.jpg"
+
+
+def test_error_csv_distinto_del_limite_no_se_oculta(tmp_path, monkeypatch):
+    repo, envio_id, dataset = _preparar(tmp_path)
+
+    def _lector_corrupto(_archivo):
+        raise csv.Error("CSV malformado")
+
+    monkeypatch.setattr(mobile, "_lector_dataset_mobile", _lector_corrupto)
+    registro = procesar_envio_mobile(repo, envio_id, dataset=dataset, procesador=_Procesador())
+
+    assert registro["estado"] == "ERROR"
+    assert registro["error"] == "Error: CSV malformado"
+
+
 def test_pull_omite_por_bloqueo_y_procesa_en_la_pasada_siguiente(tmp_path, monkeypatch):
     repo, envio_id, dataset = _preparar(tmp_path)
     procesador = _Procesador()

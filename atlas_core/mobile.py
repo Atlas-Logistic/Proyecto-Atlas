@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,33 @@ from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.procesamiento_masivo import (
     COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
 )
+
+
+# El dataset operacional conserva evidencia JSON por fila. Algunas evidencias
+# válidas superan el límite por defecto de ``csv`` (131072 caracteres); ese
+# límite no es una regla documental ni una validación de Atlas. Se configura
+# una sola vez para todas las lecturas del dataset hechas por este módulo.
+def _configurar_limite_campo_csv_mobile() -> int:
+    limite = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limite)
+            return limite
+        except OverflowError:
+            limite //= 10
+
+
+LIMITE_CAMPO_CSV_MOBILE = _configurar_limite_campo_csv_mobile()
+
+
+def _lector_dataset_mobile(archivo) -> csv.DictReader:
+    """Construye el lector único del CSV operacional para Mobile.
+
+    No captura ``csv.Error``: un CSV realmente inválido debe conservar su
+    error y seguir el manejo normal del flujo, sin confundirse con el antiguo
+    límite accidental de tamaño de campo.
+    """
+    return csv.DictReader(archivo, delimiter=";")
 
 
 # Bloque P2 SPAWN/IPC -- ver comentario equivalente en
@@ -614,7 +642,7 @@ def _corregir_transporte_por_respaldo_lote_en_dataset(
         return False
     with bloqueo_sesion(dataset.parent, NOMBRE_LOCK_DATASET_OPERACIONAL):
         with dataset.open(encoding="utf-8-sig", newline="") as archivo_csv:
-            lector = csv.DictReader(archivo_csv, delimiter=";")
+            lector = _lector_dataset_mobile(archivo_csv)
             filas_frescas = list(lector)
             encabezado_fresco = list(lector.fieldnames or [])
         if encabezado_fresco != COLUMNAS:
@@ -765,7 +793,7 @@ def recuperar_envio_mobile_error_pre_persistencia(
             raise ErrorEnvioMobile("No existe el dataset operacional para recuperación")
         identificador = f"mobile/{envio_id}/original.jpg"
         with dataset.open(encoding="utf-8-sig", newline="") as archivo:
-            if any(fila.get("archivo") == identificador for fila in csv.DictReader(archivo, delimiter=";")):
+            if any(fila.get("archivo") == identificador for fila in _lector_dataset_mobile(archivo)):
                 raise ErrorEnvioMobile("El envío ya tiene una fila documental; usar reproceso persistido")
 
         registro["recuperacion_error_pre_persistencia"] = {
@@ -876,7 +904,7 @@ def _procesar_envio_mobile_impl(
         requiere_migracion_g1c = False
         if dataset and dataset.is_file():
             with dataset.open(encoding="utf-8-sig", newline="") as archivo:
-                lector = csv.DictReader(archivo, delimiter=";")
+                lector = _lector_dataset_mobile(archivo)
                 filas = list(lector)
                 encabezado_actual = list(lector.fieldnames or [])
                 if encabezado_actual == COLUMNAS_PRE_G1C:
@@ -953,7 +981,7 @@ def _procesar_envio_mobile_impl(
                 encabezado_fresco: list[str] = []
                 if dataset.is_file():
                     with dataset.open(encoding="utf-8-sig", newline="") as archivo_csv:
-                        lector_fresco = csv.DictReader(archivo_csv, delimiter=";")
+                        lector_fresco = _lector_dataset_mobile(archivo_csv)
                         filas_frescas = list(lector_fresco)
                         encabezado_fresco = list(lector_fresco.fieldnames or [])
                 if identificador not in {f.get("archivo", "") for f in filas_frescas}:
@@ -2013,7 +2041,7 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
     filas: list[dict[str, str]] = []
     if dataset and dataset.is_file():
         with dataset.open(encoding="utf-8-sig", newline="") as archivo:
-            filas = list(csv.DictReader(archivo, delimiter=";"))
+            filas = list(_lector_dataset_mobile(archivo))
 
     def _asociacion_reintentable(asociacion: Mapping[str, object]) -> bool:
         # Caso real 475498 (e79c617e): "asociado" a "No encontrado" no es
@@ -2246,7 +2274,7 @@ def _filas_dataset(dataset: Path) -> list[dict[str, str]]:
     if not dataset or not Path(dataset).is_file():
         return []
     with Path(dataset).open("r", encoding="utf-8-sig", newline="") as archivo:
-        return list(csv.DictReader(archivo, delimiter=";"))
+        return list(_lector_dataset_mobile(archivo))
 
 
 def _documento_de_fila(fila: Mapping[str, str]) -> dict[str, str]:
