@@ -86,6 +86,7 @@ from atlas_core.modelos import EstadoValidacion
 from atlas_core.clasificador_material import clasificar_material
 from atlas_core.procesamiento_masivo import (
     COLUMNAS,
+    LIMITE_CAMPO_CSV,
     COLUMNAS_PRE_INGESTA,
     COLUMNAS_PRE_G1C,
     COLUMNAS_PRE_CAPTURA,
@@ -7321,11 +7322,24 @@ _CAMPOS_RELACION_HISTORICA = (
 )
 
 
-def _relaciones_de_un_reporte(ruta_viajes_csv: Path) -> list[dict[str, object]]:
-    """Extrae, de UN `viajes.csv` ya publicado, las relaciones documentales
-    de evidencia histórica -- unidad de trabajo reutilizada tanto por el
-    fallback sin cache como por el cache incremental de abajo. Nunca lanza
-    -- una carpeta ilegible simplemente no aporta nada."""
+def _asegurar_limite_campo_csv_historico() -> None:
+    """`viajes.csv` publicados conservan `evidencias_documentos` por viaje,
+    que puede superar el límite por defecto de ``csv`` (131072 caracteres).
+    El límite es global del proceso y hasta ahora sólo se subía como efecto
+    lateral de importar `mobile`/`procesamiento_masivo` -- se asegura acá,
+    justo antes de cada lectura, sin depender del orden de importación (ni
+    de que otro código lo haya vuelto a bajar). Nunca lo baja."""
+    if csv.field_size_limit() < LIMITE_CAMPO_CSV:
+        csv.field_size_limit(LIMITE_CAMPO_CSV)
+
+
+def _leer_reporte_historico(ruta_viajes_csv: Path) -> list[dict[str, object]] | None:
+    """Como `_relaciones_de_un_reporte`, pero distingue "reporte sin
+    relaciones" (``[]``) de "reporte ilegible" (``None``): el cache
+    incremental NUNCA debe marcar como incorporada una carpeta que no pudo
+    leer -- se reintenta en la próxima llamada. Una lectura que falla a
+    mitad no aporta nada parcial."""
+    _asegurar_limite_campo_csv_historico()
     encontradas: dict[tuple[str, ...], dict[str, object]] = {}
     try:
         with ruta_viajes_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
@@ -7341,9 +7355,51 @@ def _relaciones_de_un_reporte(ruta_viajes_csv: Path) -> list[dict[str, object]]:
                     clave = tuple(fila[k] for k in _CAMPOS_RELACION_HISTORICA)
                     if clave[0] and clave[2]:
                         encontradas[clave] = fila
-    except (OSError, UnicodeDecodeError):
-        return []
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
     return list(encontradas.values())
+
+
+def _relaciones_de_un_reporte(ruta_viajes_csv: Path) -> list[dict[str, object]]:
+    """Extrae, de UN `viajes.csv` ya publicado, las relaciones documentales
+    de evidencia histórica -- unidad de trabajo del fallback sin cache.
+    Nunca lanza -- una carpeta ilegible simplemente no aporta nada."""
+    return _leer_reporte_historico(ruta_viajes_csv) or []
+
+
+def _huella_reporte(ruta_viajes_csv: Path) -> list[int] | None:
+    try:
+        info = ruta_viajes_csv.stat()
+    except OSError:
+        return None
+    return [info.st_mtime_ns, info.st_size]
+
+
+def _escribir_cache_atomico(ruta_cache: Path, contenido: dict[str, object]) -> None:
+    """Temporal único en la misma carpeta + `os.replace`: otro proceso
+    (PULL, mantenimiento, Desktop) nunca lee un cache vacío o a medio
+    escribir. Un fallo deja el cache anterior intacto y nunca rompe."""
+    temporal: Path | None = None
+    try:
+        ruta_cache.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, nombre = tempfile.mkstemp(
+            prefix=f".{ruta_cache.name}.", suffix=".tmp", dir=ruta_cache.parent,
+        )
+        temporal = Path(nombre)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as archivo:
+            json.dump(contenido, archivo, ensure_ascii=False)
+            archivo.flush()
+            os.fsync(archivo.fileno())
+        os.replace(temporal, ruta_cache)
+        temporal = None
+    except OSError:
+        pass  # el cache es sólo aceleración -- un fallo de escritura nunca rompe el resultado
+    finally:
+        if temporal is not None:
+            try:
+                temporal.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _leer_relaciones_historicas_reportadas_sin_cache(raiz: Path) -> list[dict[str, object]]:
@@ -7417,11 +7473,9 @@ def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]
 
     huellas_actuales: dict[str, list[int]] = {}
     for ruta in rutas_actuales:
-        try:
-            info = ruta.stat()
-        except OSError:
-            continue
-        huellas_actuales[ruta.parent.name] = [info.st_mtime_ns, info.st_size]
+        huella = _huella_reporte(ruta)
+        if huella is not None:
+            huellas_actuales[ruta.parent.name] = huella
 
     ruta_cache = _ruta_cache_relaciones_historicas(raiz)
     cache_valido = False
@@ -7453,25 +7507,41 @@ def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]
         carpetas_cache = {}
         relaciones_por_clave = {}
 
+    # Carpetas nuevas o PENDIENTES (ilegibles en una llamada anterior, por
+    # eso nunca registradas): se parsean. Una carpeta sólo queda registrada
+    # como incorporada si se leyó completa Y su huella no cambió durante la
+    # lectura (un `viajes.csv` todavía escribiéndose no se congela a medias:
+    # se reintenta). Las ilegibles no aportan nada parcial y no impiden
+    # guardar lo demás -- antes, un solo `csv.Error` abortaba toda la
+    # llamada sin escribir el cache y forzaba el escaneo completo siempre.
     carpetas_nuevas = [
         nombre for nombre in sorted(huellas_actuales) if nombre not in carpetas_cache
     ]
+    incorporadas: dict[str, list[int]] = {}
+    # Leídas pero NO registradas (huella cambió durante la lectura): valen
+    # para esta llamada, pero nunca entran al cache -- si la carpeta luego
+    # desaparece, el cache no puede seguir sirviendo su evidencia.
+    solo_esta_llamada: dict[tuple[str, ...], dict[str, object]] = {}
     for nombre in carpetas_nuevas:
-        for fila in _relaciones_de_un_reporte(raiz / "reportes" / nombre / "viajes.csv"):
+        ruta = raiz / "reportes" / nombre / "viajes.csv"
+        filas = _leer_reporte_historico(ruta)
+        if filas is None:
+            continue
+        registrable = _huella_reporte(ruta) == huellas_actuales[nombre]
+        destino = relaciones_por_clave if registrable else solo_esta_llamada
+        for fila in filas:
             clave = tuple(str(fila.get(k, "")) for k in _CAMPOS_RELACION_HISTORICA)
-            relaciones_por_clave[clave] = fila
+            destino[clave] = fila
+        if registrable:
+            incorporadas[nombre] = huellas_actuales[nombre]
 
-    if carpetas_nuevas or not cache_valido:
-        try:
-            ruta_cache.parent.mkdir(parents=True, exist_ok=True)
-            ruta_cache.write_text(json.dumps({
-                "carpetas": huellas_actuales,
-                "relaciones": list(relaciones_por_clave.values()),
-            }, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            pass  # el cache es sólo aceleración -- un fallo de escritura nunca rompe el resultado
+    if incorporadas or not cache_valido:
+        _escribir_cache_atomico(ruta_cache, {
+            "carpetas": {**carpetas_cache, **incorporadas},
+            "relaciones": list(relaciones_por_clave.values()),
+        })
 
-    return list(relaciones_por_clave.values())
+    return list({**relaciones_por_clave, **solo_esta_llamada}.values())
 
 
 def reconciliar_bandeja_decisiones(
