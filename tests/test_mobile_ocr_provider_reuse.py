@@ -207,8 +207,12 @@ def test_cloud_no_crea_ocr_para_envio_ya_procesado(monkeypatch):
         def cargar(self, _envio_id):
             return {"estado": "ASOCIADO"}
 
-    def revalidar_previo(_repositorio, envio_id, *, dataset=None, carpeta_catalogos=None):
-        llamadas.append((envio_id, dataset, carpeta_catalogos))
+    # Sin `proveedor_ocr` en la firma: si el consumidor lo pasara para un
+    # envío ya procesado, esta llamada fallaría. El consumidor PULL siempre
+    # difiere la reconciliación global (P0 BLOQUEO MOBILE, 5371e42).
+    def revalidar_previo(_repositorio, envio_id, *, dataset=None, carpeta_catalogos=None,
+                         diferir_reconciliacion_bandeja=False):
+        llamadas.append((envio_id, dataset, carpeta_catalogos, diferir_reconciliacion_bandeja))
         return {"procesamiento_ok": True, "reconciliacion_ok": True}
 
     monkeypatch.setattr(cloud, "crear_proveedor_ocr", lambda: creado.append(True))
@@ -220,7 +224,7 @@ def test_cloud_no_crea_ocr_para_envio_ya_procesado(monkeypatch):
     )
 
     assert salida == {"completado": True}
-    assert llamadas == [("ya-procesado", None, None)]
+    assert llamadas == [("ya-procesado", None, None, True)]
     assert creado == []
 
 
