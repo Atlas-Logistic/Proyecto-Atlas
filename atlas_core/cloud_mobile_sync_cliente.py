@@ -137,6 +137,27 @@ def sincronizar_envios_cloud(
     carpeta_catalogos: str | Path | None = None, lease_heartbeat_segundos: float = 60.0,
     puede_continuar: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    """Sincroniza una corrida Cloud y garantiza el cierre de su OCR aislado."""
+    compartido: dict[str, object | None] = {"proveedor": None}
+    try:
+        return _sincronizar_envios_cloud_impl(
+            base_url=base_url, token_motor=token_motor, consumidor=consumidor, repositorio=repositorio,
+            timeout=timeout, procesar=procesar, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            lease_heartbeat_segundos=lease_heartbeat_segundos, puede_continuar=puede_continuar,
+            proveedor_compartido=compartido,
+        )
+    finally:
+        cerrar = getattr(compartido["proveedor"], "cerrar", None)
+        if callable(cerrar):
+            cerrar()
+
+
+def _sincronizar_envios_cloud_impl(
+    *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
+    timeout: float, procesar: bool, dataset: Path | None, carpeta_catalogos: str | Path | None,
+    lease_heartbeat_segundos: float, puede_continuar: Callable[[], bool] | None,
+    proveedor_compartido: dict[str, object | None],
+) -> dict[str, Any]:
     """Ejecuta listado, lease, descarga, verificación, persistencia y confirmación.
 
     Nunca confirma Cloud hasta que el documento y la reconciliación requerida
@@ -149,12 +170,13 @@ def sincronizar_envios_cloud(
         "errores_procesamiento": {},
         "detenido_por_escritor": False,
     }
-    proveedor_ocr = None
+    proveedor_ocr = proveedor_compartido["proveedor"]
 
     def obtener_proveedor_ocr():
         nonlocal proveedor_ocr
         if proveedor_ocr is None:
             proveedor_ocr = crear_proveedor_ocr()
+            proveedor_compartido["proveedor"] = proveedor_ocr
         return proveedor_ocr
     if not _puede_continuar(puede_continuar):
         resumen["detenido_por_escritor"] = True
@@ -250,12 +272,7 @@ def sincronizar_envios_cloud(
         )
     elif procesar:
         resumen["detenido_por_escritor"] = True
-    try:
-        return resumen
-    finally:
-        cerrar = getattr(proveedor_ocr, "cerrar", None)
-        if callable(cerrar):
-            cerrar()
+    return resumen
 
 
 def _puede_continuar(guardia: Callable[[], bool] | None) -> bool:
