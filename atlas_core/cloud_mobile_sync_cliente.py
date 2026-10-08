@@ -239,7 +239,7 @@ def _sincronizar_envios_cloud_impl(
                 if checkpoint == "RECONCILIADO"
                 else _procesar_envio_cloud(
                     repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                    proveedor_ocr=obtener_proveedor_ocr(),
+                    obtener_proveedor_ocr=obtener_proveedor_ocr,
                 )
             )
             _sumar_resultado_procesamiento(resumen, envio_id, resultado)
@@ -262,13 +262,9 @@ def _sincronizar_envios_cloud_impl(
     if procesar and _puede_continuar(puede_continuar):
         # No se inicializa OCR sólo por el barrido: hacerlo únicamente si el
         # barrido realmente tiene un documento pendiente de OCR.
-        hay_pendiente_local = any(
-            registro.get("estado") in ("RECIBIDO", "PROCESANDO")
-            for registro in repositorio.historial()
-        )
         _sumar_recuperacion_local(
             resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-            proveedor_ocr=obtener_proveedor_ocr() if hay_pendiente_local else None,
+            obtener_proveedor_ocr=obtener_proveedor_ocr,
         )
     elif procesar:
         resumen["detenido_por_escritor"] = True
@@ -282,6 +278,7 @@ def _puede_continuar(guardia: Callable[[], bool] | None) -> bool:
 def procesar_envios_recibidos(
     repositorio: RepositorioEnviosMobile, *, dataset: Path | None, carpeta_catalogos: str | Path | None,
     proveedor_ocr: object | None = None,
+    obtener_proveedor_ocr: Callable[[], object] | None = None,
 ) -> dict[str, Any]:
     """Misma pasada que el cliente LAN (`mobile_sync_cliente`): todo envío
     local en RECIBIDO -- de esta corrida o de una anterior interrumpida --
@@ -297,7 +294,7 @@ def procesar_envios_recibidos(
         try:
             salida = _procesar_envio_cloud(
                 repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                proveedor_ocr=proveedor_ocr,
+                proveedor_ocr=proveedor_ocr, obtener_proveedor_ocr=obtener_proveedor_ocr,
             )
             if salida.get("completado"):
                 resultado["procesados"].append(envio_id)
@@ -336,11 +333,14 @@ def _procesar_envio_cloud(
     repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path | None,
     carpeta_catalogos: str | Path | None,
     proveedor_ocr: object | None = None,
+    obtener_proveedor_ocr: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     registro = repositorio.cargar(envio_id)
     if registro.get("estado") == "ERROR":
         return {"completado": False, "error": "ERROR funcional persistido"}
     try:
+        if proveedor_ocr is None and obtener_proveedor_ocr is not None:
+            proveedor_ocr = obtener_proveedor_ocr()
         salida = procesar_y_revalidar_envio_mobile(
             repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
             proveedor_ocr=proveedor_ocr,
@@ -369,10 +369,11 @@ def _sumar_recuperacion_local(
     resumen: dict[str, Any], repositorio: RepositorioEnviosMobile, *, dataset: Path | None,
     carpeta_catalogos: str | Path | None,
     proveedor_ocr: object | None = None,
+    obtener_proveedor_ocr: Callable[[], object] | None = None,
 ) -> None:
     recuperacion = procesar_envios_recibidos(
         repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-        proveedor_ocr=proveedor_ocr,
+        proveedor_ocr=proveedor_ocr, obtener_proveedor_ocr=obtener_proveedor_ocr,
     )
     for clave in ("procesados", "omitidos_por_bloqueo"):
         for envio_id in recuperacion[clave]:
