@@ -124,6 +124,55 @@ def test_servidor_http_reutiliza_proveedor_y_lo_cierra_una_vez(monkeypatch, tmp_
     assert proveedor.cierres == 1
 
 
+def test_cloud_simulado_no_crea_proveedor_ocr(monkeypatch):
+    creado = []
+    imagen = b"jpeg-cloud"
+
+    class Repo:
+        def __init__(self):
+            self.registro = {"envio_id": "uno", "estado": "RECIBIDO"}
+
+        def recibir(self, **_kwargs):
+            return self.registro, True
+
+        def cargar(self, _envio_id):
+            return self.registro
+
+        def guardar(self, _envio_id, registro):
+            self.registro = dict(registro)
+
+        def historial(self):
+            return [self.registro]
+
+    def json_cloud(_base, ruta, _token, **_kwargs):
+        if ruta.endswith("pendientes"):
+            return {"envios": [{"envio_id": "uno"}]}
+        if ruta.endswith("/lease"):
+            return {
+                "lease_token": "lease", "imagen_mime": "image/jpeg", "imagen_bytes": len(imagen),
+                "imagen_sha256": hashlib.sha256(imagen).hexdigest(), "descarga_url": "https://cloud/uno",
+                "empresa_id": "empresa", "documento_id": "doc", "chofer_id": "chofer",
+            }
+        if ruta.endswith("/renovar"):
+            return {"estado": "EN_LEASE"}
+        if ruta.endswith("/confirmar"):
+            return {"estado": "COMPLETADO"}
+        raise AssertionError(ruta)
+
+    monkeypatch.setattr(cloud, "crear_proveedor_ocr", lambda: creado.append(True))
+    monkeypatch.setattr(cloud, "_json", json_cloud)
+    monkeypatch.setattr(cloud, "_descargar", lambda *_a, **_k: imagen)
+    monkeypatch.setattr(cloud, "_marcar_aterrizado_cloud", lambda *_a, **_k: None)
+    monkeypatch.setattr(cloud, "_procesar_envio_cloud", lambda *_a, **_k: {"completado": True})
+
+    resultado = cloud.sincronizar_envios_cloud(
+        base_url="https://cloud", token_motor="token", consumidor="motor", repositorio=Repo(), procesar=True,
+    )
+
+    assert resultado["confirmados"] == ["uno"]
+    assert creado == []
+
+
 def test_cloud_cierra_proveedor_si_ocurre_excepcion_inesperada(monkeypatch):
     proveedor = _Proveedor()
     imagen = b"jpeg-cloud"
@@ -159,7 +208,14 @@ def test_cloud_cierra_proveedor_si_ocurre_excepcion_inesperada(monkeypatch):
     monkeypatch.setattr(cloud, "_json", json_cloud)
     monkeypatch.setattr(cloud, "_descargar", lambda *_a, **_k: imagen)
     monkeypatch.setattr(cloud, "_marcar_aterrizado_cloud", lambda *_a, **_k: None)
-    monkeypatch.setattr(cloud, "_procesar_envio_cloud", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("inesperado")))
+    usados = []
+
+    def procesamiento_simulado(*_args, **kwargs):
+        obtener = kwargs["obtener_proveedor_ocr"]
+        usados.extend((obtener(), obtener()))
+        raise RuntimeError("inesperado")
+
+    monkeypatch.setattr(cloud, "_procesar_envio_cloud", procesamiento_simulado)
 
     try:
         cloud.sincronizar_envios_cloud(
@@ -168,4 +224,5 @@ def test_cloud_cierra_proveedor_si_ocurre_excepcion_inesperada(monkeypatch):
         assert False, "la excepción inesperada debe propagarse"
     except RuntimeError as as_error:
         assert str(as_error) == "inesperado"
+    assert usados == [proveedor, proveedor]
     assert proveedor.cierres == 1
