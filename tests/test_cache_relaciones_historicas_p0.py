@@ -172,13 +172,13 @@ def test_c_segunda_corrida_sin_cambios_no_reparsea(tmp_path, monkeypatch):
     llamadas = []
     original = None
     import atlas_core.revalidacion_documental as rd
-    original = rd._relaciones_de_un_reporte
+    original = rd._leer_reporte_historico
 
     def _contador(ruta):
         llamadas.append(ruta)
         return original(ruta)
 
-    monkeypatch.setattr(rd, "_relaciones_de_un_reporte", _contador)
+    monkeypatch.setattr(rd, "_leer_reporte_historico", _contador)
     segunda = _leer_relaciones_historicas_reportadas(raiz)
     assert llamadas == []  # cero archivos reparseados
     assert {tuple(sorted(f.items())) for f in segunda} == {tuple(sorted(f.items())) for f in primera}
@@ -207,14 +207,14 @@ def test_d_reporte_nuevo_solo_incorpora_la_evidencia_nueva(tmp_path, monkeypatch
     ])
 
     import atlas_core.revalidacion_documental as rd
-    original = rd._relaciones_de_un_reporte
+    original = rd._leer_reporte_historico
     llamadas = []
 
     def _contador(ruta):
         llamadas.append(ruta.parent.name)
         return original(ruta)
 
-    monkeypatch.setattr(rd, "_relaciones_de_un_reporte", _contador)
+    monkeypatch.setattr(rd, "_leer_reporte_historico", _contador)
     segunda = _leer_relaciones_historicas_reportadas(raiz)
     assert llamadas == ["reporte_nuevo"]  # SÓLO el nuevo se reparseó
     assert len(segunda) == 4  # 3 anteriores + 1 nueva -- nada se perdió
