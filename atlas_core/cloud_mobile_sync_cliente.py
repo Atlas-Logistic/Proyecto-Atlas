@@ -339,12 +339,18 @@ def _procesar_envio_cloud(
     if registro.get("estado") == "ERROR":
         return {"completado": False, "error": "ERROR funcional persistido"}
     try:
-        if proveedor_ocr is None and obtener_proveedor_ocr is not None:
-            proveedor_ocr = obtener_proveedor_ocr()
-        salida = procesar_y_revalidar_envio_mobile(
-            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-            proveedor_ocr=proveedor_ocr,
-        )
+        argumentos_procesamiento: dict[str, object] = {
+            "dataset": dataset,
+            "carpeta_catalogos": carpeta_catalogos,
+        }
+        # Sólo RECIBIDO/PROCESANDO repite OCR. Un envío ya asociado sólo
+        # revalida/reconcilia y no debe cargar PaddleOCR.
+        if registro.get("estado") in ("RECIBIDO", "PROCESANDO"):
+            if proveedor_ocr is None and obtener_proveedor_ocr is not None:
+                proveedor_ocr = obtener_proveedor_ocr()
+            if proveedor_ocr is not None:
+                argumentos_procesamiento["proveedor_ocr"] = proveedor_ocr
+        salida = procesar_y_revalidar_envio_mobile(repositorio, envio_id, **argumentos_procesamiento)
     except SesionOcupadaError:
         return {"completado": False, "bloqueado": True}
     except Exception as error:

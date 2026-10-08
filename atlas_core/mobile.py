@@ -2706,10 +2706,15 @@ def procesar_y_revalidar_envio_mobile(
     # identificador mobile/<envio_id>/<archivo> bajo su lock común.
     registro = repositorio.cargar(envio_id)
     if registro.get("estado") in ("RECIBIDO", "PROCESANDO"):
-        registro = procesar_envio_mobile(
-            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-            proveedor_ocr=proveedor_ocr,
-        )
+        argumentos_procesamiento = {
+            "dataset": dataset,
+            "carpeta_catalogos": carpeta_catalogos,
+        }
+        # No alterar la firma efectiva de sustitutos previos cuando no hay
+        # proveedor compartido. Sólo los workers que ya lo crearon lo pasan.
+        if proveedor_ocr is not None:
+            argumentos_procesamiento["proveedor_ocr"] = proveedor_ocr
+        registro = procesar_envio_mobile(repositorio, envio_id, **argumentos_procesamiento)
     if registro.get("estado") == "ERROR":
         # ERROR es un resultado funcional persistido, no una interrupción:
         # nunca se reintenta como si fuera RECIBIDO/PROCESANDO.
