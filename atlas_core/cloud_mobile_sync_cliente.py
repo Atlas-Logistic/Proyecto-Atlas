@@ -20,9 +20,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from atlas_core.mobile import (
-    MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_y_revalidar_envio_mobile,
+    MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile,
+    procesar_y_revalidar_envio_mobile,
 )
 from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+
+def crear_proveedor_ocr():
+    """Import diferido, coherente con el punto de extensión Mobile testeable."""
+    from atlas_core.mobile import crear_proveedor_ocr as crear
+    return crear()
 
 
 class ErrorSincronizacionCloudMobile(RuntimeError):
@@ -142,6 +149,13 @@ def sincronizar_envios_cloud(
         "errores_procesamiento": {},
         "detenido_por_escritor": False,
     }
+    proveedor_ocr = None
+
+    def obtener_proveedor_ocr():
+        nonlocal proveedor_ocr
+        if proveedor_ocr is None:
+            proveedor_ocr = crear_proveedor_ocr()
+        return proveedor_ocr
     if not _puede_continuar(puede_continuar):
         resumen["detenido_por_escritor"] = True
         return resumen
@@ -203,6 +217,7 @@ def sincronizar_envios_cloud(
                 if checkpoint == "RECONCILIADO"
                 else _procesar_envio_cloud(
                     repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                    proveedor_ocr=obtener_proveedor_ocr(),
                 )
             )
             _sumar_resultado_procesamiento(resumen, envio_id, resultado)
@@ -223,10 +238,24 @@ def sincronizar_envios_cloud(
             if lease_activo is not None:
                 lease_activo.cerrar()
     if procesar and _puede_continuar(puede_continuar):
-        _sumar_recuperacion_local(resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+        # No se inicializa OCR sólo por el barrido: hacerlo únicamente si el
+        # barrido realmente tiene un documento pendiente de OCR.
+        hay_pendiente_local = any(
+            registro.get("estado") in ("RECIBIDO", "PROCESANDO")
+            for registro in repositorio.historial()
+        )
+        _sumar_recuperacion_local(
+            resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            proveedor_ocr=obtener_proveedor_ocr() if hay_pendiente_local else None,
+        )
     elif procesar:
         resumen["detenido_por_escritor"] = True
-    return resumen
+    try:
+        return resumen
+    finally:
+        cerrar = getattr(proveedor_ocr, "cerrar", None)
+        if callable(cerrar):
+            cerrar()
 
 
 def _puede_continuar(guardia: Callable[[], bool] | None) -> bool:
@@ -235,6 +264,7 @@ def _puede_continuar(guardia: Callable[[], bool] | None) -> bool:
 
 def procesar_envios_recibidos(
     repositorio: RepositorioEnviosMobile, *, dataset: Path | None, carpeta_catalogos: str | Path | None,
+    proveedor_ocr: object | None = None,
 ) -> dict[str, Any]:
     """Misma pasada que el cliente LAN (`mobile_sync_cliente`): todo envío
     local en RECIBIDO -- de esta corrida o de una anterior interrumpida --
@@ -248,7 +278,10 @@ def procesar_envios_recibidos(
             continue
         envio_id = str(registro.get("envio_id", ""))
         try:
-            salida = _procesar_envio_cloud(repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
+            salida = _procesar_envio_cloud(
+                repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                proveedor_ocr=proveedor_ocr,
+            )
             if salida.get("completado"):
                 resultado["procesados"].append(envio_id)
             elif salida.get("bloqueado"):
@@ -285,6 +318,7 @@ def _marcar_reconciliado_cloud(repositorio: RepositorioEnviosMobile, envio_id: s
 def _procesar_envio_cloud(
     repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path | None,
     carpeta_catalogos: str | Path | None,
+    proveedor_ocr: object | None = None,
 ) -> dict[str, object]:
     registro = repositorio.cargar(envio_id)
     if registro.get("estado") == "ERROR":
@@ -292,6 +326,7 @@ def _procesar_envio_cloud(
     try:
         salida = procesar_y_revalidar_envio_mobile(
             repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            proveedor_ocr=proveedor_ocr,
         )
     except SesionOcupadaError:
         return {"completado": False, "bloqueado": True}
@@ -316,9 +351,11 @@ def _sumar_resultado_procesamiento(resumen: dict[str, Any], envio_id: str, resul
 def _sumar_recuperacion_local(
     resumen: dict[str, Any], repositorio: RepositorioEnviosMobile, *, dataset: Path | None,
     carpeta_catalogos: str | Path | None,
+    proveedor_ocr: object | None = None,
 ) -> None:
     recuperacion = procesar_envios_recibidos(
         repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+        proveedor_ocr=proveedor_ocr,
     )
     for clave in ("procesados", "omitidos_por_bloqueo"):
         for envio_id in recuperacion[clave]:

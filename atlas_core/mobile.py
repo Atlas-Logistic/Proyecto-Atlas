@@ -726,6 +726,7 @@ def procesar_envio_mobile(
     dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None,
     orquestador_ia: object = None,
+    proveedor_ocr: object | None = None,
 ) -> dict:
     """Wrapper PROTEGIDO de `_procesar_envio_mobile_impl` -- adquiere el
     lock POR ENVÍO (`mobile_<envio_id>`) para TODA la operación, incluido
@@ -745,6 +746,7 @@ def procesar_envio_mobile(
         return _procesar_envio_mobile_impl(
             repositorio, envio_id, procesador=procesador, dataset=dataset,
             carpeta_catalogos=carpeta_catalogos, orquestador_ia=orquestador_ia,
+            proveedor_ocr=proveedor_ocr,
         )
 
 
@@ -831,6 +833,7 @@ def _procesar_envio_mobile_impl(
     dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None,
     orquestador_ia: object = None,
+    proveedor_ocr: object | None = None,
 ) -> dict:
     """Procesa un envío Mobile reutilizando el MISMO Core que Desktop.
 
@@ -871,7 +874,10 @@ def _procesar_envio_mobile_impl(
             # `crear_proveedor_ocr` es el nombre de módulo (envoltorio con
             # import diferido, ver arriba) -- nunca un import local aquí.
             argumentos: dict[str, object] = {}
-            argumentos["proveedor"] = crear_proveedor_ocr()
+            # El llamador trabajador puede mantener un proveedor vivo para
+            # toda su cola. Las llamadas directas conservan exactamente el
+            # comportamiento previo: crear uno para este envío.
+            argumentos["proveedor"] = proveedor_ocr if proveedor_ocr is not None else crear_proveedor_ocr()
             if carpeta_catalogos is not None:
                 argumentos["carpeta_catalogos"] = carpeta_catalogos
                 argumentos["recolector_decisiones"] = decisiones_nuevas.extend
@@ -2682,6 +2688,7 @@ def _converger_envios_tras_reporte(repositorio: "RepositorioEnviosMobile", envio
 
 def procesar_y_revalidar_envio_mobile(
     repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, carpeta_catalogos,
+    proveedor_ocr: object | None = None,
 ) -> dict[str, bool]:
     """Punto de entrada único para "qué pasa después de recibir un envío
     Mobile", sea que haya llegado por `POST /api/mobile/envios` (LAN,
@@ -2701,6 +2708,7 @@ def procesar_y_revalidar_envio_mobile(
     if registro.get("estado") in ("RECIBIDO", "PROCESANDO"):
         registro = procesar_envio_mobile(
             repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            proveedor_ocr=proveedor_ocr,
         )
     if registro.get("estado") == "ERROR":
         # ERROR es un resultado funcional persistido, no una interrupción:
