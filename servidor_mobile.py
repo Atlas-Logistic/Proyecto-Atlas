@@ -19,6 +19,7 @@ from atlas_core.catalogos import cargar_catalogo_json
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import (
     AutenticadorMobile, AutenticadorSincronizacionMobile, ErrorEnvioMobile, RepositorioEnviosMobile,
+    crear_proveedor_ocr,
     procesar_y_revalidar_envio_mobile,
 )
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
@@ -139,6 +140,21 @@ def crear_servidor(
 ) -> ThreadingHTTPServer:
     repositorio = RepositorioEnviosMobile(raiz)
     ejecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atlas-mobile")
+    proveedor_ocr = None
+
+    def procesar_en_worker(envio_id: str) -> None:
+        """Un proveedor por proceso trabajador, creado dentro de su único hilo.
+
+        Nunca se comparte con otro proceso/servidor: esta clausura pertenece a
+        esta instancia de ``crear_servidor`` y el executor es serial.
+        """
+        nonlocal proveedor_ocr
+        if proveedor_ocr is None:
+            proveedor_ocr = crear_proveedor_ocr()
+        procesar_y_revalidar_envio_mobile(
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            proveedor_ocr=proveedor_ocr,
+        )
     estado = leer_estado_operacion(raiz=raiz) or {}
     dataset = raiz / estado.get("dataset_operacional", "operacion/actual/analisis_completo_guias.csv")
     # Bloque GUÍAS MÓVILES V1 (Sección 2): misma fuente de catálogos que ya
@@ -303,8 +319,7 @@ def crear_servidor(
                 )
                 if nuevo and procesar:
                     ejecutor.submit(
-                        procesar_y_revalidar_envio_mobile, repositorio, registro["envio_id"],
-                        dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                        procesar_en_worker, registro["envio_id"],
                     )
                 _log_envio_debug(f"envio_id={registro['envio_id']!r} ACEPTADO (nuevo={nuevo}, estado={registro['estado']!r})")
                 self._json(202, {"resultado": "ACEPTADO", "envio_id": registro["envio_id"], "estado": registro["estado"], "duplicado": not nuevo})
@@ -318,6 +333,18 @@ def crear_servidor(
     servidor = ThreadingHTTPServer((host, puerto), Handler)
     servidor.repositorio = repositorio  # type: ignore[attr-defined]
     servidor.ejecutor = ejecutor  # type: ignore[attr-defined]
+    cerrar_servidor_original = servidor.server_close
+
+    def cerrar_servidor() -> None:
+        # Primero termina la cola: nunca se cierra el worker OCR mientras
+        # todavía atiende un documento. Luego se termina su proceso aislado.
+        ejecutor.shutdown(wait=True)
+        cerrar = getattr(proveedor_ocr, "cerrar", None)
+        if callable(cerrar):
+            cerrar()
+        cerrar_servidor_original()
+
+    servidor.server_close = cerrar_servidor  # type: ignore[method-assign]
     return servidor
 
 
@@ -355,7 +382,10 @@ def main() -> None:
         servidor.socket = contexto.wrap_socket(servidor.socket, server_side=True)
         esquema = "https"
     print(f"Atlas Mobile escuchando en {esquema}://{args.host}:{servidor.server_port}")
-    servidor.serve_forever()
+    try:
+        servidor.serve_forever()
+    finally:
+        servidor.server_close()
 
 
 if __name__ == "__main__":
