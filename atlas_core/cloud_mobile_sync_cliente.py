@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from atlas_core.mobile import (
     MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile, procesar_y_revalidar_envio_mobile,
+    reconciliar_bandeja_diferida_mobile,
 )
 from atlas_core.almacenamiento_portable import SesionOcupadaError
 
@@ -141,6 +142,7 @@ def sincronizar_envios_cloud(
         "fallidos": {}, "procesados": [], "omitidos_por_bloqueo": [],
         "errores_procesamiento": {},
         "detenido_por_escritor": False,
+        "reconciliacion_bandeja": None,
     }
     if not _puede_continuar(puede_continuar):
         resumen["detenido_por_escritor"] = True
@@ -226,6 +228,14 @@ def sincronizar_envios_cloud(
         _sumar_recuperacion_local(resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos)
     elif procesar:
         resumen["detenido_por_escritor"] = True
+    # P0 BLOQUEO MOBILE -- la reconciliación global de la bandeja corre UNA
+    # vez, DESPUÉS de cerrar y confirmar cada envío de esta pasada; lo que
+    # quede PENDIENTE (fallo, escritor perdido, interrupción) lo retoma la
+    # pasada siguiente.
+    if procesar and dataset and _puede_continuar(puede_continuar):
+        resumen["reconciliacion_bandeja"] = reconciliar_bandeja_diferida_mobile(
+            repositorio, raiz_atlas=Path(dataset).parent.parent.parent,
+        )
     return resumen
 
 
@@ -292,6 +302,7 @@ def _procesar_envio_cloud(
     try:
         salida = procesar_y_revalidar_envio_mobile(
             repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            diferir_reconciliacion_bandeja=True,
         )
     except SesionOcupadaError:
         return {"completado": False, "bloqueado": True}

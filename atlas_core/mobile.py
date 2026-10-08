@@ -726,6 +726,7 @@ def procesar_envio_mobile(
     dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None,
     orquestador_ia: object = None,
+    diferir_reconciliacion_bandeja: bool = False,
 ) -> dict:
     """Wrapper PROTEGIDO de `_procesar_envio_mobile_impl` -- adquiere el
     lock POR ENVÍO (`mobile_<envio_id>`) para TODA la operación, incluido
@@ -745,6 +746,7 @@ def procesar_envio_mobile(
         return _procesar_envio_mobile_impl(
             repositorio, envio_id, procesador=procesador, dataset=dataset,
             carpeta_catalogos=carpeta_catalogos, orquestador_ia=orquestador_ia,
+            diferir_reconciliacion_bandeja=diferir_reconciliacion_bandeja,
         )
 
 
@@ -831,6 +833,7 @@ def _procesar_envio_mobile_impl(
     dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None,
     orquestador_ia: object = None,
+    diferir_reconciliacion_bandeja: bool = False,
 ) -> dict:
     """Procesa un envío Mobile reutilizando el MISMO Core que Desktop.
 
@@ -1071,8 +1074,21 @@ def _procesar_envio_mobile_impl(
             # distinta con asignación fuerte quedaba pendiente aunque el
             # Motor ya podía resolverla. Se invoca fuera del lock de la
             # bandeja (el reconciliador adquiere ese lock por sí mismo).
-            from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
-            reconciliar_bandeja_decisiones(raiz_atlas=Path(dataset).parent.parent.parent)
+            #
+            # P0 BLOQUEO MOBILE (08-10-2026, envío 35f58c4e): esa pasada es
+            # GLOBAL (toda la bandeja + escaneo de `reportes/*/viajes.csv`)
+            # y sobre G: en streaming tardó horas, reteniendo el cierre de
+            # ESTE envío (envio.json, reporte, confirmación Cloud) y con él
+            # toda la cola PULL. Con `diferir_reconciliacion_bandeja` el
+            # envío sólo deja constancia persistida (`reconciliacion_
+            # bandeja.estado == PENDIENTE`) y el consumidor la ejecuta UNA
+            # vez al final de su pasada (`reconciliar_bandeja_diferida_
+            # mobile`), que sólo la marca COMPLETADA si realmente corrió.
+            if diferir_reconciliacion_bandeja:
+                registro["reconciliacion_bandeja"] = _solicitud_reconciliacion_bandeja(registro)
+            else:
+                from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
+                reconciliar_bandeja_decisiones(raiz_atlas=Path(dataset).parent.parent.parent)
 
         estado_final = _estado_final_mobile(datos, asociacion, captura_ilegible)
 
@@ -2682,6 +2698,7 @@ def _converger_envios_tras_reporte(repositorio: "RepositorioEnviosMobile", envio
 
 def procesar_y_revalidar_envio_mobile(
     repositorio: "RepositorioEnviosMobile", envio_id: str, *, dataset: Path, carpeta_catalogos,
+    diferir_reconciliacion_bandeja: bool = False,
 ) -> dict[str, bool]:
     """Punto de entrada único para "qué pasa después de recibir un envío
     Mobile", sea que haya llegado por `POST /api/mobile/envios` (LAN,
@@ -2699,8 +2716,11 @@ def procesar_y_revalidar_envio_mobile(
     # identificador mobile/<envio_id>/<archivo> bajo su lock común.
     registro = repositorio.cargar(envio_id)
     if registro.get("estado") in ("RECIBIDO", "PROCESANDO"):
+        # Sólo se pasa cuando se pide diferir: el resto de los llamadores
+        # (LAN, pruebas que sustituyen esta función) queda idéntico.
+        opciones = {"diferir_reconciliacion_bandeja": True} if diferir_reconciliacion_bandeja else {}
         registro = procesar_envio_mobile(
-            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos, **opciones,
         )
     if registro.get("estado") == "ERROR":
         # ERROR es un resultado funcional persistido, no una interrupción:
@@ -2715,3 +2735,81 @@ def procesar_y_revalidar_envio_mobile(
     # canónicos se enriquecen con el `viajes.csv` vigente.
     _sincronizar_contrato_v2(repositorio, envio_id, dataset=dataset)
     return {"procesamiento_ok": True, "reconciliacion_ok": reconciliacion_ok}
+
+
+def _solicitud_reconciliacion_bandeja(registro: Mapping[str, object]) -> dict[str, object]:
+    """Constancia persistida de que este envío dejó la bandeja global
+    pendiente de reconciliar. Un reproceso del mismo envío la renueva
+    (nuevo `solicitud_id`) sin perder el historial de intentos."""
+    previa = dict(registro.get("reconciliacion_bandeja") or {})
+    return {
+        "estado": "PENDIENTE",
+        "solicitud_id": secrets.token_hex(8),
+        "solicitada_en": datetime.now(timezone.utc).isoformat(),
+        "intentos": int(previa.get("intentos") or 0),
+    }
+
+
+def reconciliar_bandeja_diferida_mobile(
+    repositorio: "RepositorioEnviosMobile", *, raiz_atlas: str | Path,
+    reconciliador: Callable[..., object] | None = None,
+) -> dict[str, object]:
+    """Ejecuta UNA vez la reconciliación global de la bandeja que los
+    envíos procesados con `diferir_reconciliacion_bandeja=True` dejaron
+    PENDIENTE (P0 BLOQUEO MOBILE).
+
+    - Sin envíos PENDIENTE no hace nada (idempotente).
+    - Si la reconciliación falla, ningún envío se marca COMPLETADA: quedan
+      PENDIENTE con `intentos`/`ultimo_error`, y la próxima pasada (o una
+      corrida posterior a una interrupción) la vuelve a ejecutar.
+    - Sólo marca COMPLETADA, bajo el lock por envío, la MISMA solicitud
+      que vio al empezar (`solicitud_id`): una renovada mientras corría
+      (reproceso concurrente) sigue PENDIENTE. No depende del reloj.
+    - Nunca toca `estado` del envío ni la confirmación Cloud."""
+    pendientes = [
+        registro for registro in repositorio.historial()
+        if (registro.get("reconciliacion_bandeja") or {}).get("estado") == "PENDIENTE"
+    ]
+    if not pendientes:
+        return {"ejecutada": False, "pendientes": 0}
+    if reconciliador is None:
+        from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones as reconciliador
+    vistas = {
+        str(registro.get("envio_id", "")): (registro.get("reconciliacion_bandeja") or {}).get("solicitud_id")
+        for registro in pendientes
+    }
+    error: str | None = None
+    try:
+        reconciliador(raiz_atlas=Path(raiz_atlas))
+    except Exception as exc:  # la bandeja vigente queda intacta; se reintenta después
+        error = f"{type(exc).__name__}: {exc}"
+    fin = datetime.now(timezone.utc).isoformat()
+    marcados: list[str] = []
+    for envio_id, solicitud_vista in vistas.items():
+        try:
+            with bloqueo_sesion(
+                repositorio.raiz, f"mobile_{envio_id}",
+                tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS,
+            ):
+                registro = repositorio.cargar(envio_id)
+                solicitud = dict(registro.get("reconciliacion_bandeja") or {})
+                if solicitud.get("estado") != "PENDIENTE":
+                    continue
+                solicitud["intentos"] = int(solicitud.get("intentos") or 0) + 1
+                solicitud["ultimo_intento_en"] = fin
+                if error is not None:
+                    solicitud["ultimo_error"] = error
+                elif solicitud_vista and solicitud.get("solicitud_id") == solicitud_vista:
+                    solicitud.update({"estado": "COMPLETADA", "completada_en": fin})
+                    solicitud.pop("ultimo_error", None)
+                    marcados.append(envio_id)
+                registro["reconciliacion_bandeja"] = solicitud
+                repositorio.guardar(envio_id, registro)
+        except SesionOcupadaError:
+            continue  # otra operación sostiene el envío: sigue PENDIENTE
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue  # constancia ilegible: sigue PENDIENTE, nunca COMPLETADA a ciegas
+    return {
+        "ejecutada": error is None, "pendientes": len(pendientes),
+        "completados": marcados, "error": error,
+    }
