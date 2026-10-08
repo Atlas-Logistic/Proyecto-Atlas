@@ -47,6 +47,32 @@ def test_punto_de_entrada_mobile_reutiliza_el_proveedor_inyectado(monkeypatch, t
     assert recibidos == [("uno", proveedor), ("dos", proveedor)]
 
 
+def test_punto_de_entrada_mobile_no_pasa_proveedor_none_a_sustituto_previo(monkeypatch, tmp_path: Path):
+    recibidos = []
+
+    def procesar_previo(_repositorio, envio_id, *, dataset=None, carpeta_catalogos=None):
+        recibidos.append((envio_id, dataset, carpeta_catalogos))
+        return {"estado": "ASOCIADO"}
+
+    monkeypatch.setattr(mobile, "procesar_envio_mobile", procesar_previo)
+    monkeypatch.setattr(mobile, "_revalidar_asociacion_diagnosticable", lambda *_a, **_k: None)
+    monkeypatch.setattr(mobile, "_regenerar_reporte_tras_envio_mobile", lambda *_a, **_k: True)
+    monkeypatch.setattr(mobile, "_converger_envios_tras_reporte", lambda *_a, **_k: True)
+    monkeypatch.setattr(mobile, "_sincronizar_contrato_v2", lambda *_a, **_k: None)
+
+    class Repo:
+        def cargar(self, _envio_id):
+            return {"estado": "RECIBIDO"}
+
+    repo = Repo()
+    salida = mobile.procesar_y_revalidar_envio_mobile(
+        repo, "uno", dataset=tmp_path / "datos.csv", carpeta_catalogos=None,
+    )
+
+    assert salida == {"procesamiento_ok": True, "reconciliacion_ok": True}
+    assert recibidos == [("uno", tmp_path / "datos.csv", None)]
+
+
 def test_barrido_cloud_pasa_la_misma_instancia_a_envios_consecutivos(monkeypatch):
     proveedor = _Proveedor()
     usados = []
@@ -170,6 +196,31 @@ def test_cloud_simulado_no_crea_proveedor_ocr(monkeypatch):
     )
 
     assert resultado["confirmados"] == ["uno"]
+    assert creado == []
+
+
+def test_cloud_no_crea_ocr_para_envio_ya_procesado(monkeypatch):
+    creado = []
+    llamadas = []
+
+    class Repo:
+        def cargar(self, _envio_id):
+            return {"estado": "ASOCIADO"}
+
+    def revalidar_previo(_repositorio, envio_id, *, dataset=None, carpeta_catalogos=None):
+        llamadas.append((envio_id, dataset, carpeta_catalogos))
+        return {"procesamiento_ok": True, "reconciliacion_ok": True}
+
+    monkeypatch.setattr(cloud, "crear_proveedor_ocr", lambda: creado.append(True))
+    monkeypatch.setattr(cloud, "procesar_y_revalidar_envio_mobile", revalidar_previo)
+
+    salida = cloud._procesar_envio_cloud(
+        Repo(), "ya-procesado", dataset=None, carpeta_catalogos=None,
+        obtener_proveedor_ocr=cloud.crear_proveedor_ocr,
+    )
+
+    assert salida == {"completado": True}
+    assert llamadas == [("ya-procesado", None, None)]
     assert creado == []
 
 
