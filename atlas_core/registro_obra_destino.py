@@ -391,13 +391,36 @@ def evaluar_registro_obra_destino(
     }
 
 
+def claves_obra_de_relacion(*, carpeta_catalogos: str | Path, relacion_id: str) -> set[str]:
+    """Nombre canónico + TODOS los alias documentales (normalizados, sin
+    fuzzy) de la obra de la relación obra/destino recién confirmada -- las
+    mismas claves con las que la batería global reconoce esa obra en una
+    fila (`CatalogoObrasDestinos._claves_obra`). Vacío si la relación u
+    obra no se encuentran."""
+    if not str(relacion_id or "").strip():
+        return set()
+    carpeta = Path(carpeta_catalogos)
+    catalogo = CatalogoObrasDestinos(
+        ruta=carpeta / "obras_destinos.json", ruta_clientes=carpeta / "clientes.json",
+        ruta_destinos=carpeta / "destinos_maestros.json",
+    )
+    obras, relaciones = catalogo._leer()
+    obra_id = next((r.obra_id for r in relaciones if r.relacion_id == relacion_id), "")
+    obra = next((o for o in obras if obra_id and o.obra_id == obra_id), None)
+    return set() if obra is None else {c for c in catalogo._claves_obra(obra) if c}
+
+
 def guias_afectadas_por_registro(
     *, ruta_dataset: str | Path, numero_guia: str, nombres_obra: Iterable[str],
 ) -> tuple[set[str], set[str]]:
     """(guías, transportes) que un registro de obra+destino puede cambiar:
     la guía de la decisión, las guías cuyo `obra_destino` es esa obra
-    (texto documental o nombre canónico) y todas las guías de esos mismos
-    transportes (el viaje completo). Nada más se revalida."""
+    (texto documental de la propia guía, nombre canónico o cualquier alias
+    que reciba el llamador -- coincidencia exacta normalizada, nunca por
+    similitud) y todas las guías de esos mismos transportes (el viaje
+    completo), en cualquier transporte. Nada más se revalida."""
+    from atlas_core.procesamiento_masivo import _es_placeholder_obra_destino
+
     claves = {normalizar_nombre_obra(n) for n in nombres_obra if str(n or "").strip()}
     filas: list[dict[str, str]] = []
     _asegurar_limite_campo_csv()
@@ -406,6 +429,17 @@ def guias_afectadas_por_registro(
             filas = [dict(f) for f in csv.DictReader(archivo, delimiter=";")]
     except (OSError, UnicodeDecodeError):
         return {numero_guia}, set()
+    # La obra tal como la leyó la guía de la decisión también identifica
+    # esa obra (aunque aún no sea alias); un marcador vacío ("No
+    # encontrado") nunca, o arrastraría guías de obras ajenas.
+    claves |= {
+        clave
+        for f in filas
+        if str(f.get("numero_guia", "")).strip() == numero_guia
+        for clave in (normalizar_nombre_obra(str(f.get("obra_destino", ""))),)
+        if clave and not _es_placeholder_obra_destino(clave)
+    }
+    claves = {c for c in claves if c and not _es_placeholder_obra_destino(c)}
     transportes = {
         str(f.get("numero_transporte", "")).strip()
         for f in filas

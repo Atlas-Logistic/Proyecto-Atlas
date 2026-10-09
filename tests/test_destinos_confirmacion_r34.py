@@ -963,3 +963,41 @@ def test_b_cascada_de_aplicar_decision_obra_vs_otro_escritor_real_nunca_pierde_n
         filas_finales = {f["numero_guia"]: f for f in csv.DictReader(archivo, delimiter=";")}
     assert filas_finales["900002"]["tipo_carga"] == "ROLLOS"
     assert filas_finales["464715"]["motivos_revision_documento"] == ""
+
+
+def test_confirmar_destino_focal_incluye_guia_alias_de_la_obra_en_otro_transporte(tmp_path):
+    """La confirmación focal de DESTINO_SIN_CONFIRMAR cubre las mismas guías
+    que la batería global: una guía de la MISMA obra registrada con un alias,
+    en otro transporte, se revalida; una obra distinta de nombre parecido no."""
+    fila_alias = _fila_csv(
+        archivo="464799.jpeg", numero_guia="464799", numero_transporte="T-ALIAS",
+        obra_destino="CONST INMOBILIARIA E",
+    )
+    fila_similar = _fila_csv(
+        archivo="464800.jpeg", numero_guia="464800", numero_transporte="T-OTRA",
+        obra_destino=f"{OBRA_TEXTO} NORTE",
+    )
+    raiz, catalogos, actual, cliente, obra, decision = _entorno(
+        tmp_path, filas_csv=[_fila_csv(), fila_alias, fila_similar],
+    )
+    ruta_obras = catalogos / "obras_destinos.json"
+    contenido = json.loads(ruta_obras.read_text(encoding="utf-8"))
+    for registro in contenido["obras"]:
+        if registro["obra_id"] == obra.obra_id:
+            registro["aliases_documentales"] = [*registro.get("aliases_documentales", []), "CONST INMOBILIARIA E"]
+    ruta_obras.write_text(json.dumps(contenido, ensure_ascii=False), encoding="utf-8")
+    generar_artefacto(
+        ruta_dataset=actual / "analisis_completo_guias.csv", carpeta_catalogos=catalogos,
+        decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json",
+    )
+
+    resultado = aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
+
+    focal = resultado["revalidacion_focal"]
+    assert focal["alcance"] == "FOCAL"
+    assert "464799" in focal["guias"] and "T-ALIAS" in focal["transportes"]
+    assert "464800" not in focal["guias"] and "T-OTRA" not in focal["transportes"]
+    with (actual / "analisis_completo_guias.csv").open(encoding="utf-8-sig", newline="") as archivo:
+        filas = {f["numero_guia"]: f for f in csv.DictReader(archivo, delimiter=";")}
+    assert "OBRA_DESTINO_SIN_CORROBORAR" not in filas["464799"]["motivos_revision_documento"]
+    assert filas["464800"]["motivos_revision_documento"] == "OBRA_DESTINO_SIN_CORROBORAR"

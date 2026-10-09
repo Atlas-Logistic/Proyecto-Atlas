@@ -520,6 +520,7 @@ def _confirmar_destino_para_obra(
 
 def _revalidar_documentos_registro_conjunto(
     *, dataset: Path, catalogos: Path, ledger_ruta: Path, numero_guia: str, nombres_obra,
+    relacion_id: str = "",
 ) -> dict[str, object]:
     """Revalidación FOCAL tras confirmar una relación obra/destino: sólo
     la guía de la decisión, las guías de esa obra y las demás guías de sus
@@ -531,13 +532,17 @@ def _revalidar_documentos_registro_conjunto(
     antes de entrar, por lo que ambas rutas conservan exactamente la misma
     fuente auditable de la relación confirmada.
     """
-    from atlas_core.registro_obra_destino import guias_afectadas_por_registro
+    from atlas_core.registro_obra_destino import claves_obra_de_relacion, guias_afectadas_por_registro
     from atlas_core.revalidacion_documental import (
         revalidar_obra_destino_por_decision_aplicada_sin_ocr, revalidar_obra_destino_sin_ocr,
     )
 
+    # Las guías de esa obra escritas con un alias, en cualquier transporte,
+    # son las mismas que la batería global reconoce: el alcance focal usa
+    # sus mismas claves (canónico + aliases de la obra confirmada).
     guias, transportes = guias_afectadas_por_registro(
-        ruta_dataset=dataset, numero_guia=numero_guia, nombres_obra=nombres_obra,
+        ruta_dataset=dataset, numero_guia=numero_guia,
+        nombres_obra=(*nombres_obra, *claves_obra_de_relacion(carpeta_catalogos=catalogos, relacion_id=relacion_id)),
     )
     canonico = revalidar_obra_destino_por_decision_aplicada_sin_ocr(
         ruta_dataset=dataset, ruta_ledger=ledger_ruta, carpeta_catalogos=catalogos,
@@ -2538,8 +2543,11 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     resultado_extra["revalidacion_focal"] = _revalidar_documentos_registro_conjunto(
                         dataset=dataset, catalogos=catalogos, ledger_ruta=ledger_ruta,
                         numero_guia=str((decision.get("documento") or {}).get("numero_guia") or ""),
+                        relacion_id=str(resultado_extra.get("relacion_id") or ""),
                         nombres_obra=(
-                            str(decision.get("valor_documental", "")),
+                            # En DESTINO_SIN_CONFIRMAR el valor documental es
+                            # la DIRECCIÓN, nunca un nombre de obra.
+                            "" if tipo == "DESTINO_SIN_CONFIRMAR" else str(decision.get("valor_documental", "")),
                             str(
                                 (evaluacion_registro_conjunto or {}).get("obra", {}).get("nombre", "")
                                 or contexto_focal.get("obra_canonica", "")
