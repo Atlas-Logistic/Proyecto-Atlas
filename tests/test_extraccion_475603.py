@@ -227,3 +227,50 @@ def test_primer_pase_corrobora_obra_recortada_con_destino_documental(tmp_path):
     assert resolucion.obra.nombre_canonico == "CASA HELSINSKI"
     assert resolucion.destino.destino_id == destino.destino_id
     assert corroborar("12-10-2026 :17576134-9 LLEGADA") is None
+
+
+# ============================================================
+# Reextracción focal: DESPACHAR A persistido contaminado
+# ============================================================
+
+from atlas_core.reprocesamiento_reparador import _reparar_campos_documento  # noqa: E402
+
+_FILA_475603 = {
+    "archivo": "mobile/ae545488/original.jpg", "numero_guia": "475603",
+    "motivos_revision_documento": "OBRA_DESTINO_SIN_CORROBORAR",
+    "despachar_a_crudo": "12-10-2026 :17576134-9 LLEGADA",
+}
+
+
+def _cambios_destino(fila, nuevo, aplicaciones=()):
+    cambios = _reparar_campos_documento(
+        fila, {"despachar_a_crudo": nuevo}, list(aplicaciones), documento_degradado=False,
+    )
+    return [(c.campo, c.valor_anterior, c.valor_nuevo) for c in cambios if c.campo == "despachar_a_crudo"]
+
+
+def test_destino_persistido_contaminado_se_repara_sin_motivo_previo():
+    assert _cambios_destino(_FILA_475603, "HELSINSKI 5810 LA REINA SANTIAGO") == [
+        ("despachar_a_crudo", "12-10-2026 :17576134-9 LLEGADA", "HELSINSKI 5810 LA REINA SANTIAGO"),
+    ]
+
+
+def test_destino_persistido_contaminado_por_rut_o_etiqueta_tambien_se_repara():
+    for contaminado in ("17576134-9 FECHA SALIDA", "PATENTE : BDFG50"):
+        fila = {**_FILA_475603, "despachar_a_crudo": contaminado}
+        assert _cambios_destino(fila, "AV LAS CONDES 7090") == [("despachar_a_crudo", contaminado, "AV LAS CONDES 7090")]
+
+
+def test_destino_contaminado_nunca_se_reemplaza_por_otro_contaminado():
+    assert _cambios_destino(_FILA_475603, "08-10-2026 LLEGADA") == []
+
+
+def test_destino_valido_sin_motivo_permanece_intacto():
+    for valido in ("HELSINSKI 5810 LA REINA SANTIAGO", "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "AV LAS CONDES 7090"):
+        fila = {**_FILA_475603, "despachar_a_crudo": valido, "motivos_revision_documento": ""}
+        assert _cambios_destino(fila, "OTRA CALLE 1 RENCA") == []
+
+
+def test_destino_contaminado_con_decision_humana_lo_respeta_el_ledger():
+    ledger = [{"documento": {"archivo": _FILA_475603["archivo"], "numero_guia": "475603"}, "campo": "despachar_a_crudo"}]
+    assert _cambios_destino(_FILA_475603, "HELSINSKI 5810 LA REINA SANTIAGO", ledger) == []

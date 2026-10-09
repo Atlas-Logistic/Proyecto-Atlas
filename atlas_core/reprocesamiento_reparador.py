@@ -245,6 +245,17 @@ def _anotar_relectura_ocr_principal(fila: dict[str, str]) -> None:
     })
 
 
+def _destino_almacenado_contaminado(campo: str, fila: Mapping[str, str]) -> bool:
+    """Caso real 475603: un DESPACHAR A persistido sin motivo de degradación
+    ("12-10-2026 :17576134-9 LLEGADA") que el validador vigente de destino
+    documental rechaza también es un campo degradado."""
+    if campo != "despachar_a_crudo":
+        return False
+    from atlas_core.registro_obra_destino import motivo_destino_documental_no_confiable
+
+    return bool(motivo_destino_documental_no_confiable(str(fila.get(campo, "")).strip()))
+
+
 def _reparar_campos_documento(
     fila: Mapping[str, str], extraido: Mapping[str, object], aplicaciones: list[Mapping[str, object]],
     *, documento_degradado: bool,
@@ -262,14 +273,19 @@ def _reparar_campos_documento(
         # Un campo hoy AUSENTE no es un dato limpio: la reextracción real
         # puede completarlo (nunca sobrescribe un valor presente sin motivo).
         ausente = str(fila.get(campo, "")).strip() in _AUSENTES
+        solo_por_destino_contaminado = False
         if not documento_degradado and not ausente and not (motivos_actuales & set(motivos_degradacion)):
-            continue  # campo hoy limpio y documento no degradado -- nunca se toca
+            if not _destino_almacenado_contaminado(campo, fila):
+                continue  # campo hoy limpio y documento no degradado -- nunca se toca
+            solo_por_destino_contaminado = True
         if _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=campo):
             continue  # el ledger siempre gana
         valor_nuevo = str(extraido.get(campo, "")).strip()
         valor_actual = str(fila.get(campo, "")).strip()
         if not valor_nuevo or valor_nuevo == valor_actual or not es_valido(valor_nuevo):
             continue
+        if solo_por_destino_contaminado and _destino_almacenado_contaminado(campo, {campo: valor_nuevo}):
+            continue  # nunca reemplaza un destino contaminado por otro
         cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), campo, valor_actual, valor_nuevo))
     # El RUT es parte de la identidad del chofer: si esta misma reextracción
     # repara el chofer, su RUT viaja con él -- dejar el anterior mezclaría
