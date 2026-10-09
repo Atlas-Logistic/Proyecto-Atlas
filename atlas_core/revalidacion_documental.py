@@ -4705,7 +4705,9 @@ def _indicadores_documentales_coherentes(motivos: list[str], estado_ruta: str) -
     return indicador_revision, estado_documental, estado_operacional
 
 
-def revalidar_indicadores_documentales_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+def revalidar_indicadores_documentales_sin_ocr(
+    *, ruta_dataset: str | Path, guias_objetivo: Collection[str] | None = None,
+) -> dict[str, object]:
     """Bloque CONVERGENCIA DE ESTADO -- causa raíz sistémica real (viaje
     0000355433, guías 472623/472624): varios `revalidar_*_sin_ocr`
     retiran motivos de `motivos_revision_documento` (destino contaminado,
@@ -4731,12 +4733,19 @@ def revalidar_indicadores_documentales_sin_ocr(*, ruta_dataset: str | Path) -> d
     que ya corrió antes en la misma pasada) -- sólo hace que los TRES
     campos deriven, siempre, de la misma fuente y con el mismo criterio,
     para que ningún retiro de motivo vuelva a dejar sólo uno o dos de los
-    tres campos al día."""
+    tres campos al día.
+
+    `guias_objetivo` (opcional): sólo esas guías -- la confirmación focal
+    de una relación obra/destino converge únicamente lo que acaba de
+    revalidar. `None` (default) recorre todo el dataset, como siempre."""
     ruta = Path(ruta_dataset)
+    objetivo = {str(g).strip() for g in guias_objetivo} if guias_objetivo is not None else None
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
         actualizadas: list[str] = []
         for fila in filas:
+            if objetivo is not None and str(fila.get("numero_guia", "")).strip() not in objetivo:
+                continue
             motivos = [m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m]
             estado_ruta = str(fila.get("estado_ruta", "")).strip()
             indicador, documental, operacional = _indicadores_documentales_coherentes(motivos, estado_ruta)

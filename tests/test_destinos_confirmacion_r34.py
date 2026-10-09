@@ -1000,4 +1000,8 @@ def test_confirmar_destino_focal_incluye_guia_alias_de_la_obra_en_otro_transport
     with (actual / "analisis_completo_guias.csv").open(encoding="utf-8-sig", newline="") as archivo:
         filas = {f["numero_guia"]: f for f in csv.DictReader(archivo, delimiter=";")}
     assert "OBRA_DESTINO_SIN_CORROBORAR" not in filas["464799"]["motivos_revision_documento"]
+    # Los tres indicadores derivados convergen igual que en la batería global.
+    assert filas["464799"]["indicador_revision"] == "OK"
+    assert filas["464799"]["estado_documental"] == "OK"
     assert filas["464800"]["motivos_revision_documento"] == "OBRA_DESTINO_SIN_CORROBORAR"
+    assert filas["464800"]["estado_documental"] == "REQUIERE_REVISION"

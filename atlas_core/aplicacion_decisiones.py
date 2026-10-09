@@ -520,12 +520,13 @@ def _confirmar_destino_para_obra(
 
 def _revalidar_documentos_registro_conjunto(
     *, dataset: Path, catalogos: Path, ledger_ruta: Path, numero_guia: str, nombres_obra,
-    relacion_id: str = "",
+    relacion_id: str = "", proveedor_rutas: object = None, proveedor_rutas_fallback: object = None,
 ) -> dict[str, object]:
     """Revalidación FOCAL tras confirmar una relación obra/destino: sólo
     la guía de la decisión, las guías de esa obra y las demás guías de sus
     mismos transportes (el viaje). Mismos revalidadores de obra/destino que
-    la batería global, restringidos a ese alcance -- sin OCR, sin red.
+    la batería global, restringidos a ese alcance -- sin OCR; sólo consulta
+    ruta para las guías focales cuya ruta sigue pendiente.
 
     La usan tanto el registro conjunto de una obra nueva como la confirmación
     individual ``DESTINO_SIN_CONFIRMAR/CONFIRMAR``. El ledger ya está escrito
@@ -534,7 +535,9 @@ def _revalidar_documentos_registro_conjunto(
     """
     from atlas_core.registro_obra_destino import claves_obra_de_relacion, guias_afectadas_por_registro
     from atlas_core.revalidacion_documental import (
-        revalidar_obra_destino_por_decision_aplicada_sin_ocr, revalidar_obra_destino_sin_ocr,
+        _leer_filas, guias_ruta_calculada_reanclables_por_numeracion_b_ocho,
+        revalidar_indicadores_documentales_sin_ocr, revalidar_obra_destino_por_decision_aplicada_sin_ocr,
+        revalidar_obra_destino_sin_ocr, revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr,
     )
 
     # Las guías de esa obra escritas con un alias, en cualquier transporte,
@@ -552,9 +555,31 @@ def _revalidar_documentos_registro_conjunto(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=ledger_ruta,
         guias_objetivo=guias,
     )
+    # La relación recién confirmada también es un destino CONFIRMADO de
+    # catálogo para las rutas aún pendientes de esas mismas guías: mismo
+    # revalidador y mismo filtro que la reconciliación (ruta no calculada,
+    # o re-anclable sólo por la regla B->8), acotado al alcance focal.
+    try:
+        guias_ruta = {
+            str(f.get("numero_guia", "")).strip() for f in _leer_filas(dataset)
+            if str(f.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value
+        } | set(guias_ruta_calculada_reanclables_por_numeracion_b_ocho(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        ))
+    except (OSError, ValueError):
+        guias_ruta = set(guias)
+    ruta_catalogo = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos,
+        proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
+        guias_objetivo=guias_ruta & set(guias),
+    )
+    # Convergencia final de indicador/estado documental/estado operacional
+    # de esas guías (los revalidadores de arriba sólo retiran motivos).
+    indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset, guias_objetivo=guias)
     return {
         "alcance": "FOCAL", "guias": sorted(guias), "transportes": sorted(transportes),
         "nombre_canonico": canonico, "obra_destino": corroboracion,
+        "ruta_destino_catalogo": ruta_catalogo, "indicadores": indicadores,
     }
 
 
@@ -2544,6 +2569,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         dataset=dataset, catalogos=catalogos, ledger_ruta=ledger_ruta,
                         numero_guia=str((decision.get("documento") or {}).get("numero_guia") or ""),
                         relacion_id=str(resultado_extra.get("relacion_id") or ""),
+                        proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
                         nombres_obra=(
                             # En DESTINO_SIN_CONFIRMAR el valor documental es
                             # la DIRECCIÓN, nunca un nombre de obra.
