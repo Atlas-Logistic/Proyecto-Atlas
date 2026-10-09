@@ -228,3 +228,57 @@ def test_valor_vigente_ausente_o_cliente_no_confirmado_no_reemplaza(tmp_path):
     dataset_b = _dataset(otra, [_fila(obra_destino="OBRA NUEVA SA SUR")])
     decision_b = _obra_desconocida("COMUNA LEIDA", cliente_b)
     assert decision_b["decision_id"] in {d["decision_id"] for d in _reconciliar([decision_b], carpeta_b, dataset_b)}
+
+
+# ------------------------------- C. tarjeta Mobile con nombre corto (475603)
+
+
+def _obra_desconocida_mobile(valor, cliente, *, guia="500001", transporte="0000900001"):
+    return crear_decision(
+        tipo="OBRA_DESCONOCIDA", entidad="OBRA", archivo="original.jpg", numero_guia=guia,
+        numero_transporte=transporte, campo="obra_destino", valor_documental=valor, valor_normalizado=valor,
+        identidad_resuelta=None, candidatos=(), motivos=("OBRA_NO_EXISTE_PARA_CLIENTE",),
+        evidencias=({"tipo": "CLIENTE_RESUELTO", "entidad_id": cliente.cliente_id},),
+        acciones_permitidas=("REGISTRAR", "NO_REGISTRAR", "POSPONER"),
+        contexto={"cliente_id": cliente.cliente_id, "cliente_canonico": cliente.razon_social, "destino_documental": ""},
+    )
+
+
+def _fila_mobile(envio, guia="500001", transporte="0000900001", **overrides):
+    return _fila(guia, archivo=f"mobile/{envio}/original.jpg", numero_transporte=transporte, **overrides)
+
+
+def test_mobile_nombre_corto_coincidencia_unica_retira_la_tarjeta_superada(tmp_path):
+    carpeta, cliente = _catalogos(tmp_path)
+    _confirmar_obra(carpeta, cliente, "OBRA CONFIRMADA NORTE")
+    dataset = _dataset(tmp_path, [
+        _fila_mobile("aaa", obra_destino="OBRA CONFIRMADA NORTE", motivos_revision_documento=""),
+        _fila_mobile("bbb", guia="500002", obra_destino="OBRA AJENA"),
+    ])
+    resultado = _reconciliar([_obra_desconocida_mobile("OBRA CONFIRMAD", cliente)], carpeta, dataset)
+    assert _obras(resultado) == []
+
+
+def test_mobile_nombre_corto_varias_coincidencias_conserva_la_tarjeta(tmp_path):
+    carpeta, cliente = _catalogos(tmp_path)
+    _confirmar_obra(carpeta, cliente, "OBRA CONFIRMADA NORTE")
+    dataset = _dataset(tmp_path, [
+        _fila_mobile("aaa", obra_destino="OBRA CONFIRMADA NORTE", motivos_revision_documento=""),
+        _fila_mobile("bbb", obra_destino="OBRA CONFIRMADA NORTE", motivos_revision_documento=""),
+    ])
+    decision = _obra_desconocida_mobile("OBRA CONFIRMAD", cliente)
+    assert decision["decision_id"] in {d["decision_id"] for d in _reconciliar([decision], carpeta, dataset)}
+
+
+def test_mobile_nombre_corto_sin_coincidencia_conserva_la_tarjeta(tmp_path):
+    carpeta, cliente = _catalogos(tmp_path)
+    _confirmar_obra(carpeta, cliente, "OBRA CONFIRMADA NORTE")
+    dataset = _dataset(tmp_path, [
+        _fila_mobile("aaa", obra_destino="OBRA CONFIRMADA NORTE", motivos_revision_documento=""),
+    ])
+    for decision in (
+        _obra_desconocida_mobile("OBRA CONFIRMAD", cliente, guia="599999"),
+        _obra_desconocida_mobile("OBRA CONFIRMAD", cliente, transporte="0000999999"),
+        _obra_desconocida_mobile("OBRA CONFIRMAD", cliente, transporte=""),
+    ):
+        assert decision["decision_id"] in {d["decision_id"] for d in _reconciliar([decision], carpeta, dataset)}

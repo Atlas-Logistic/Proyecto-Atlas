@@ -3368,6 +3368,10 @@ def _regenerar_decisiones_persistidas(
         for decision in decisiones:
             documento = decision.get("documento") or {}
             fila_vigente = filas_por_archivo.get(str(documento.get("archivo", "")))
+            if fila_vigente is None and str(documento.get("numero_transporte", "")).strip() not in _AUSENTES:
+                # Caso real 475603: tarjeta Mobile con el nombre corto de la
+                # foto; sólo con una fila única por nombre, guía y transporte.
+                fila_vigente = _fila_mobile_unica_para_decision(documento, filas_mobile_por_nombre)
             valor_vigente = str((fila_vigente or {}).get("obra_destino", "")).strip()
             cliente = clientes_por_id.get(str((decision.get("contexto") or {}).get("cliente_id", "")))
             superada = (
