@@ -2722,6 +2722,22 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 # deduplica/filtra contra el ledger como a cualquier decisión
                 # (idempotente; nunca resucita una ya decidida terminalmente).
                 restantes.append(decision_siguiente)
+            if "revalidacion_focal" in resultado_extra:
+                # Sin reconciliación global posterior: las tarjetas que la
+                # confirmación focal cambió se publican con el mismo
+                # enriquecimiento que `reconciliar_bandeja_decisiones`.
+                from atlas_core.revalidacion_documental import enriquecer_decisiones_bandeja
+                try:
+                    aplicadas_ledger = [
+                        a for a in (json.loads(ledger_ruta.read_text(encoding="utf-8")).get("aplicaciones") or [])
+                        if isinstance(a, dict)
+                    ]
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    aplicadas_ledger = []
+                restantes = enriquecer_decisiones_bandeja(
+                    decisiones=restantes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+                    decisiones_aplicadas=aplicadas_ledger,
+                )
             bandeja = generar_artefacto(
                 ruta_dataset=dataset, carpeta_catalogos=catalogos,
                 decisiones=restantes, ruta_salida=artefacto_ruta, reloj=reloj,

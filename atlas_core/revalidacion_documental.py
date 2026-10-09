@@ -7561,6 +7561,101 @@ def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]
     return list({**relaciones_por_clave, **solo_esta_llamada}.values())
 
 
+def enriquecer_decisiones_bandeja(
+    *, decisiones: list[dict[str, object]], carpeta_catalogos: str | Path, ruta_dataset: str | Path,
+    relaciones_historicas: list[dict[str, object]] | None = None,
+    decisiones_aplicadas: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    """Cadena de enriquecimiento con la que `reconciliar_bandeja_decisiones`
+    publica la bandeja (vehículo, cliente, código cliente, obra y COD
+    DESTINATARIO), extraída sin cambios para que la confirmación focal de un
+    destino publique sus tarjetas con el MISMO contenido, sin reconciliar
+    toda la bandeja. `relaciones_historicas=None` las lee sólo si hay una
+    decisión de vehículo (mismo short-circuit de la reconciliación).
+    Nunca escribe nada."""
+    from atlas_core.catalogo_clientes import CatalogoClientes
+    from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
+    from atlas_core.codigo_cliente_destinatario import (
+        CatalogoCodigosCliente, enriquecer_decisiones_cliente_por_codigo,
+        enriquecer_decisiones_obra_por_destinatario,
+    )
+    from atlas_core.decisiones_pendientes import (
+        enriquecer_decisiones_cliente, enriquecer_decisiones_obra, enriquecer_decisiones_vehiculo,
+    )
+    from atlas_core.evidencia_entidades import AlmacenEvidenciaEntidades
+    from atlas_core.verificacion_externa import CacheVerificacionExterna
+
+    catalogos = Path(carpeta_catalogos)
+    dataset = Path(ruta_dataset)
+    if relaciones_historicas is None:
+        relaciones_historicas = (
+            _leer_relaciones_historicas_reportadas(catalogos.parent)
+            if any(str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in decisiones) else []
+        )
+    decisiones_aplicadas_ledger = list(decisiones_aplicadas or [])
+    filas = _leer_filas(dataset)
+    try:
+        vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
+    except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
+        vehiculos = ()
+    enriquecidas_locales = enriquecer_decisiones_vehiculo(
+        decisiones=decisiones, filas=filas, vehiculos=vehiculos,
+        relaciones_historicas=relaciones_historicas,
+        decisiones_aplicadas=decisiones_aplicadas_ledger,
+    )
+
+    try:
+        clientes_confirmados = [
+            c for c in CatalogoClientes(catalogos / "clientes.json").listar()
+            if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
+        ]
+    except (OSError, ValueError):
+        clientes_confirmados = ()
+    try:
+        confirmaciones = AlmacenEvidenciaEntidades(catalogos / "evidencia_entidades.json").listar()
+    except (OSError, ValueError):
+        confirmaciones = ()
+    try:
+        cache_externa = CacheVerificacionExterna.desde_dict(
+            json.loads((catalogos / "verificacion_externa_cache.json").read_text(encoding="utf-8"))
+        )
+    except (OSError, json.JSONDecodeError, ValueError):
+        cache_externa = CacheVerificacionExterna()
+    evidencia_externa_clientes = {clave: cache_externa.obtener(clave) or () for clave in cache_externa.entradas}
+    enriquecidas_locales = enriquecer_decisiones_cliente(
+        decisiones=enriquecidas_locales, clientes=clientes_confirmados, confirmaciones=confirmaciones,
+        evidencia_externa_por_clave=evidencia_externa_clientes,
+    )
+    # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: evidencia COMPLEMENTARIA
+    # en un campo aparte (`evaluacion_evidencia_codigo`) -- nunca
+    # reemplaza ni sube el nivel de `evaluacion_evidencia` de arriba
+    # (RUT/nombre), ver contrato P0 punto B.
+    enriquecidas_locales = enriquecer_decisiones_cliente_por_codigo(
+        decisiones=enriquecidas_locales, filas=filas,
+        clientes=clientes_confirmados,
+        catalogo_codigos=CatalogoCodigosCliente(catalogos / "codigos_cliente.json"),
+    )
+    try:
+        obras_vigentes = CatalogoObrasDestinos(
+            ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
+            ruta_destinos=catalogos / "destinos_maestros.json",
+        ).listar_obras()
+    except (OSError, ValueError):
+        obras_vigentes = ()
+    enriquecidas_locales = enriquecer_decisiones_obra(
+        decisiones=enriquecidas_locales, obras=obras_vigentes, evidencia_externa_por_clave=evidencia_externa_clientes,
+    )
+    # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: evidencia complementaria
+    # de OBRA_DESCONOCIDA por relación observada cliente+COD
+    # DESTINATARIO -> obra histórica; contexto informativo para
+    # DESTINO_NO_RESUELTO -- nunca toca despachar_a_crudo/dirección
+    # (contrato P0 puntos C/E).
+    enriquecidas_locales = enriquecer_decisiones_obra_por_destinatario(
+        decisiones=enriquecidas_locales, filas=filas,
+    )
+    return enriquecidas_locales
+
+
 def reconciliar_bandeja_decisiones(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
@@ -7673,65 +7768,9 @@ def reconciliar_bandeja_decisiones(
             decisiones=pendientes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
             cache_memoizacion=cache_memoizacion,
         )
-        filas = _leer_filas(dataset)
-        try:
-            vehiculos = cargar_catalogo_vehiculos(catalogos / "vehiculos.json").homologables()
-        except (OSError, CatalogoVehiculosAusenteError, CatalogoVehiculosCorruptoError, VersionCatalogoVehiculosDesconocidaError):
-            vehiculos = ()
-        enriquecidas_locales = enriquecer_decisiones_vehiculo(
-            decisiones=vigentes_locales, filas=filas, vehiculos=vehiculos,
-            relaciones_historicas=relaciones_historicas,
-            decisiones_aplicadas=decisiones_aplicadas_ledger,
-        )
-
-        try:
-            clientes_confirmados = [
-                c for c in CatalogoClientes(catalogos / "clientes.json").listar()
-                if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"
-            ]
-        except (OSError, ValueError):
-            clientes_confirmados = ()
-        try:
-            confirmaciones = AlmacenEvidenciaEntidades(catalogos / "evidencia_entidades.json").listar()
-        except (OSError, ValueError):
-            confirmaciones = ()
-        try:
-            cache_externa = CacheVerificacionExterna.desde_dict(
-                json.loads((catalogos / "verificacion_externa_cache.json").read_text(encoding="utf-8"))
-            )
-        except (OSError, json.JSONDecodeError, ValueError):
-            cache_externa = CacheVerificacionExterna()
-        evidencia_externa_clientes = {clave: cache_externa.obtener(clave) or () for clave in cache_externa.entradas}
-        enriquecidas_locales = enriquecer_decisiones_cliente(
-            decisiones=enriquecidas_locales, clientes=clientes_confirmados, confirmaciones=confirmaciones,
-            evidencia_externa_por_clave=evidencia_externa_clientes,
-        )
-        # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: evidencia COMPLEMENTARIA
-        # en un campo aparte (`evaluacion_evidencia_codigo`) -- nunca
-        # reemplaza ni sube el nivel de `evaluacion_evidencia` de arriba
-        # (RUT/nombre), ver contrato P0 punto B.
-        enriquecidas_locales = enriquecer_decisiones_cliente_por_codigo(
-            decisiones=enriquecidas_locales, filas=filas,
-            clientes=clientes_confirmados,
-            catalogo_codigos=CatalogoCodigosCliente(catalogos / "codigos_cliente.json"),
-        )
-        try:
-            obras_vigentes = CatalogoObrasDestinos(
-                ruta=catalogos / "obras_destinos.json", ruta_clientes=catalogos / "clientes.json",
-                ruta_destinos=catalogos / "destinos_maestros.json",
-            ).listar_obras()
-        except (OSError, ValueError):
-            obras_vigentes = ()
-        enriquecidas_locales = enriquecer_decisiones_obra(
-            decisiones=enriquecidas_locales, obras=obras_vigentes, evidencia_externa_por_clave=evidencia_externa_clientes,
-        )
-        # Bloque P0 CÓDIGO CLIENTE/DESTINATARIO: evidencia complementaria
-        # de OBRA_DESCONOCIDA por relación observada cliente+COD
-        # DESTINATARIO -> obra histórica; contexto informativo para
-        # DESTINO_NO_RESUELTO -- nunca toca despachar_a_crudo/dirección
-        # (contrato P0 puntos C/E).
-        enriquecidas_locales = enriquecer_decisiones_obra_por_destinatario(
-            decisiones=enriquecidas_locales, filas=filas,
+        enriquecidas_locales = enriquecer_decisiones_bandeja(
+            decisiones=vigentes_locales, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+            relaciones_historicas=relaciones_historicas, decisiones_aplicadas=decisiones_aplicadas_ledger,
         )
 
         bandeja_local = generar_artefacto(
