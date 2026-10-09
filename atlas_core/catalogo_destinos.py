@@ -560,24 +560,7 @@ class CatalogoDestinos:
         pais: str = "CHILE", fuente: str, latitud: float | None = None, longitud: float | None = None,
         estado_calidad: EstadoCalidadDestino | str = EstadoCalidadDestino.PENDIENTE,
     ) -> Destino:
-        resuelto = self.resolver_direccion_global(direccion, comuna=comuna, region=region)
-        if resuelto.estado == EstadoBusquedaDestino.SIN_COINCIDENCIA and not normalizar_nombre_destino(region):
-            # Caso real 475484 (CAMINO LO RUIZ 3099 / RENCA): sin región, la
-            # clave exacta no ve el destino activo que ya tiene región -- y
-            # el nuevo sin región se volvería duplicado en cuanto se
-            # geocodifique. Misma dirección + misma comuna: uno se reutiliza,
-            # varios son ambigüedad (nunca se crea ni se elige).
-            direccion_n, comuna_n, _ = clave_fisica_destino(direccion, comuna, region)
-            compatibles = [
-                d for d in self.listar()
-                if d.estado_vigencia == EstadoVigenciaDestino.ACTIVO.value
-                and _texto_direccion_normalizado(d.direccion) == direccion_n
-                and normalizar_nombre_destino(d.comuna) == comuna_n
-            ]
-            if len(compatibles) == 1:
-                resuelto = ResultadoBusquedaDestino(EstadoBusquedaDestino.COINCIDENCIA, compatibles[0], 1)
-            elif len(compatibles) > 1:
-                resuelto = ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, len(compatibles))
+        resuelto = self.buscar_reutilizable_global(direccion, comuna=comuna, region=region)
         if resuelto.estado == EstadoBusquedaDestino.COINCIDENCIA:
             destino = resuelto.destino
             # Bloque RESOLUCIÓN R16 -- una dirección global ya existente
@@ -615,6 +598,35 @@ class CatalogoDestinos:
             region=region, pais=pais, fuente=fuente, latitud=latitud, longitud=longitud,
             estado_calidad=estado_calidad,
         )
+
+    def buscar_reutilizable_global(
+        self, direccion: str, *, comuna: str = "", region: str = "",
+    ) -> ResultadoBusquedaDestino:
+        """Sólo lectura: qué destino global reutilizaría
+        `crear_o_reutilizar_global` para esta dirección (COINCIDENCIA),
+        si la búsqueda es AMBIGUA, o si crearía uno nuevo
+        (SIN_COINCIDENCIA). Una vista previa usa esto para mostrar el
+        destino real -- con sus coordenadas ya guardadas -- antes de
+        confirmar nada."""
+        resuelto = self.resolver_direccion_global(direccion, comuna=comuna, region=region)
+        if resuelto.estado == EstadoBusquedaDestino.SIN_COINCIDENCIA and not normalizar_nombre_destino(region):
+            # Caso real 475484 (CAMINO LO RUIZ 3099 / RENCA): sin región, la
+            # clave exacta no ve el destino activo que ya tiene región -- y
+            # el nuevo sin región se volvería duplicado en cuanto se
+            # geocodifique. Misma dirección + misma comuna: uno se reutiliza,
+            # varios son ambigüedad (nunca se crea ni se elige).
+            direccion_n, comuna_n, _ = clave_fisica_destino(direccion, comuna, region)
+            compatibles = [
+                d for d in self.listar()
+                if d.estado_vigencia == EstadoVigenciaDestino.ACTIVO.value
+                and _texto_direccion_normalizado(d.direccion) == direccion_n
+                and normalizar_nombre_destino(d.comuna) == comuna_n
+            ]
+            if len(compatibles) == 1:
+                resuelto = ResultadoBusquedaDestino(EstadoBusquedaDestino.COINCIDENCIA, compatibles[0], 1)
+            elif len(compatibles) > 1:
+                resuelto = ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, len(compatibles))
+        return resuelto
 
     def crear(
         self,

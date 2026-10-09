@@ -377,6 +377,7 @@ def resolver_obras_resueltas_por_ledger(ruta_ledger: str | Path) -> set[str]:
 
 def revalidar_obra_destino_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path, ruta_ledger: str | Path | None = None,
+    guias_objetivo: Collection[str] | None = None,
 ) -> dict[str, object]:
     """Relee cada fila del dataset y reevalúa ÚNICAMENTE el motivo
     ``OBRA_DESTINO_SIN_CORROBORAR`` contra `resolver_obra_destino_confirmada_global`
@@ -402,9 +403,14 @@ def revalidar_obra_destino_sin_ocr(
     aplicación terminal de obra/destino para ESTE `numero_guia` exacto (ver
     `resolver_obras_resueltas_por_ledger`), el motivo se retira aunque no
     exista relación destino CONFIRMADA -- un humano ya revisó este
-    documento y no queda ninguna pregunta pendiente que responder."""
+    documento y no queda ninguna pregunta pendiente que responder.
+
+    `guias_objetivo` (opcional): restringe la pasada a esas guías -- el
+    registro conjunto obra+destino sólo revalida los documentos que esa
+    decisión afecta. `None` (default) recorre todo el dataset, como siempre."""
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
+    objetivo = {str(g).strip() for g in guias_objetivo} if guias_objetivo is not None else None
     catalogo_obras = CatalogoObrasDestinos(
         ruta=carpeta / "obras_destinos.json",
         ruta_clientes=carpeta / "clientes.json",
@@ -419,6 +425,8 @@ def revalidar_obra_destino_sin_ocr(
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
         for fila in filas:
+            if objetivo is not None and str(fila.get("numero_guia", "")).strip() not in objetivo:
+                continue
             motivos = [m for m in fila.get("motivos_revision_documento", "").split(SEPARADOR_MOTIVOS) if m]
             if motivo_objetivo not in motivos:
                 continue

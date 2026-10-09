@@ -460,7 +460,94 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
-def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, peso_corregido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc), diferir_revalidacion_global: bool = False) -> dict[str, object]:
+def _confirmar_destino_para_obra(
+    *, catalogos: Path, catalogo_obras_ruta: Path, catalogo_destinos_ruta: Path, dataset: Path,
+    decision_id: str, documento: dict, cliente_id: str, cliente_canonico: str,
+    obra_canonica: str, destino_texto: str, comuna: str, region: str,
+    latitud: float | None, longitud: float | None, fuente: str, actor: str, reloj,
+):
+    """Confirma el destino de una obra ya identificada: crea/reutiliza el
+    destino global CONFIRMADO y deja CONFIRMADA la relación obra<->destino.
+
+    Única implementación de esta escritura -- la usan `DESTINO_SIN_CONFIRMAR`/
+    `CONFIRMAR` y el registro conjunto obra+destino (`OBRA_DESCONOCIDA`/
+    `REGISTRAR` con `confirmar_destino_conjunto`), así ambas vías aplican
+    exactamente las mismas validaciones geográficas."""
+    numero_guia = str(documento.get("numero_guia") or "")
+    # Una comuna declarada mal escrita (variante OCR/tipeo) no se aprende si
+    # la evidencia documental de ESTA guía trae la comuna válida; la región
+    # se deriva siempre de una comuna válida (caso real 475484).
+    from atlas_core.registro_obra_destino import comuna_region_validadas
+    comuna_destino, region_destino = comuna_region_validadas(
+        dataset=dataset, numero_guia=numero_guia, comuna=comuna, region=region,
+    )
+    destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
+        nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
+        comuna=comuna_destino,
+        region=region_destino,
+        latitud=latitud, longitud=longitud,
+        estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+    )
+    # Reutiliza la obra global existente (por nombre canónico, nunca crea una
+    # segunda) y crea/reutiliza la relación obra<->destino, dejándola
+    # CONFIRMADA -- eso promueve también la obra a CONFIRMADA (API canónica
+    # `confirmar_relacion`, evidencia humana auditable).
+    evidencia = Evidencia(
+        tipo=TipoEvidencia.GUIA.value,
+        identificador_fuente=str(numero_guia or documento.get("archivo")),
+        referencia_hash=decision_id,
+        campos_observados={
+            "obra": obra_canonica, "destino": destino_texto, "decision_id": decision_id,
+            "cliente_id_observado": cliente_id,
+            "cliente_canonico_observado": cliente_canonico,
+            "numero_guia": numero_guia,
+        },
+        fecha=reloj().astimezone(timezone.utc).isoformat(), actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
+    )
+    catalogo_obras = CatalogoObrasDestinos(ruta=catalogo_obras_ruta, ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogo_destinos_ruta)
+    resultado_obs = catalogo_obras.registrar_observacion(
+        cliente_id=cliente_id, nombre_obra=obra_canonica, destino_id=destino.destino_id, evidencia=evidencia,
+    )
+    relacion = resultado_obs.relacion
+    if relacion is None:
+        raise ErrorAplicacionDecision("No se pudo determinar la relación obra-destino.")
+    if relacion.estado == "PENDIENTE":
+        relacion = catalogo_obras.confirmar_relacion(
+            relacion.relacion_id, actor=actor, identificador_fuente=decision_id,
+        )
+    return destino, relacion
+
+
+def _revalidar_documentos_registro_conjunto(
+    *, dataset: Path, catalogos: Path, ledger_ruta: Path, numero_guia: str, nombres_obra,
+) -> dict[str, object]:
+    """Revalidación FOCAL tras el registro completo de una obra nueva: sólo
+    la guía de la decisión, las guías de esa obra y las demás guías de sus
+    mismos transportes (el viaje). Mismos revalidadores de obra/destino que
+    la batería global, restringidos a ese alcance -- sin OCR, sin red."""
+    from atlas_core.registro_obra_destino import guias_afectadas_por_registro
+    from atlas_core.revalidacion_documental import (
+        revalidar_obra_destino_por_decision_aplicada_sin_ocr, revalidar_obra_destino_sin_ocr,
+    )
+
+    guias, transportes = guias_afectadas_por_registro(
+        ruta_dataset=dataset, numero_guia=numero_guia, nombres_obra=nombres_obra,
+    )
+    canonico = revalidar_obra_destino_por_decision_aplicada_sin_ocr(
+        ruta_dataset=dataset, ruta_ledger=ledger_ruta, carpeta_catalogos=catalogos,
+        numeros_transporte=transportes,
+    )
+    corroboracion = revalidar_obra_destino_sin_ocr(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=ledger_ruta,
+        guias_objetivo=guias,
+    )
+    return {
+        "alcance": "FOCAL", "guias": sorted(guias), "transportes": sorted(transportes),
+        "nombre_canonico": canonico, "obra_destino": corroboracion,
+    }
+
+
+def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: str, tipo_vehiculo: str | None = None, planta_id_elegida: str | None = None, patente_elegida: str | None = None, motivo_rechazo: str | None = None, direccion_manual: str | None = None, comuna_manual: str | None = None, razon_social_manual: str | None = None, rut_manual: str | None = None, nombre_obra_manual: str | None = None, cliente_correccion_manual: str | None = None, rut_chofer_elegido: str | None = None, peso_corregido: str | None = None, proveedor_rutas: object = None, proveedor_rutas_fallback: object = None, actor: str = "JAVIER_DESKTOP", reloj=lambda: datetime.now(timezone.utc), diferir_revalidacion_global: bool = False, confirmar_destino_conjunto: bool = False, huella_vista_previa: str | None = None, base_geografica_local=None) -> dict[str, object]:
     raiz = Path(raiz_atlas); actual = raiz / "operacion" / "actual"; catalogos = raiz / "catalogos_privados"
     artefacto_ruta = actual / "decisiones_pendientes.json"; ledger_ruta = actual / LEDGER
     dataset = actual / "analisis_completo_guias.csv"
@@ -511,6 +598,13 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
         if acciones_validas_tipo is None or decision.get("estado") != "PENDIENTE" or accion not in acciones_validas_tipo:
             raise ErrorAplicacionDecision("Esta decisión no puede aplicarse en este bloque.")
         if accion not in decision.get("acciones_permitidas", []): raise ErrorAplicacionDecision("La acción no está permitida para esta decisión.")
+        # Registro completo de obra nueva (caso real 475629): sólo
+        # REGISTRAR de una OBRA_DESCONOCIDA puede confirmar también su
+        # destino, y sólo con la huella de la vista previa que Javier vio.
+        if confirmar_destino_conjunto and (tipo != "OBRA_DESCONOCIDA" or accion != "REGISTRAR"):
+            raise ErrorAplicacionDecision("Sólo el registro de una obra nueva puede confirmar también su destino.")
+        if confirmar_destino_conjunto and not str(huella_vista_previa or "").strip():
+            raise ErrorAplicacionDecision("Revise la vista previa de obra y destino antes de confirmar.")
         if accion == "POSPONER": return {"ok": True, "idempotente": False, "accion": accion, "mensaje": "La decisión permanece pendiente."}
         if _sha(dataset) != artefacto.get("dataset_sha256"):
             # Bloque R11 -- causa raíz de "la decisión quedó obsoleta porque
@@ -616,6 +710,11 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
         reporte_salida: Path | None = None
         reporte_salida_existia = False
         decision_siguiente: dict[str, object] | None = None
+        # Registro completo de obra nueva: la confirmación del destino que
+        # REGISTRAR habría encadenado como tarjeta aparte, ya aplicada en
+        # esta misma operación (segunda entrada del ledger).
+        aplicacion_destino_conjunto: dict[str, object] | None = None
+        evaluacion_registro_conjunto: dict[str, object] | None = None
         # Bloque CONSISTENCIA OPERACIONAL -- si alguna de las 3 ramas de
         # escritura directa del dataset llega a escribir, deja acá el
         # delta exacto (`_calcular_revert_dataset`) para que, si algo
@@ -640,6 +739,30 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 obra_texto = str(decision.get("valor_documental", "")).strip()
                 if not cliente_id or not obra_texto:
                     raise ErrorAplicacionDecision("La decisión no contiene identidad suficiente para aplicar la obra.")
+                if accion == "REGISTRAR" and confirmar_destino_conjunto:
+                    # Se vuelve a evaluar con los datos vigentes (bajo el
+                    # mismo lock): si algo cambió desde la vista previa, no
+                    # se confirma nada que Javier no haya visto.
+                    from atlas_core.registro_obra_destino import evaluar_registro_obra_destino
+                    if base_geografica_local is None:
+                        from atlas_core.geografia.base_local import cargar_base_geografica_local_ine
+                        base_geografica_local = cargar_base_geografica_local_ine(raiz=raiz)
+                    evaluacion_registro_conjunto = evaluar_registro_obra_destino(
+                        decision=decision, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+                        nombre_obra_manual=nombre_obra_manual, base_geografica_local=base_geografica_local,
+                    )
+                    # ErrorAplicacionDecision (no DecisionObsoletaError): la
+                    # bandeja no está obsoleta, sólo la vista previa -- el CLI
+                    # no debe reconciliar nada, Desktop la vuelve a pedir.
+                    if evaluacion_registro_conjunto["huella"] != str(huella_vista_previa).strip():
+                        raise ErrorAplicacionDecision(
+                            "La obra o su destino cambiaron desde la vista previa. Vuelva a revisarla antes de confirmar."
+                        )
+                    if not evaluacion_registro_conjunto["confirmacion_conjunta_disponible"]:
+                        raise ErrorAplicacionDecision(
+                            "Esta obra no admite confirmar su destino en la misma acción: "
+                            + str(evaluacion_registro_conjunto["motivo_no_disponible"])
+                        )
                 if accion == "REGISTRAR":
                     # Bloque 472339/CASA HELSINSKI -- si el motor de
                     # evidencia ya clasificó esta OBRA_DESCONOCIDA como
@@ -806,12 +929,58 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         documento=decision.get("documento"),
                         catalogo_obras=catalogo_obras_destinos,
                     )
+                    # Registro completo de obra nueva (caso real 475629): la
+                    # pregunta de destino que R3.4.2 acaba de construir se
+                    # responde aquí mismo con lo que Javier confirmó en la
+                    # vista previa -- misma escritura que DESTINO_SIN_
+                    # CONFIRMAR/CONFIRMAR (`_confirmar_destino_para_obra`),
+                    # nunca una tarjeta aparte.
+                    if evaluacion_registro_conjunto is not None and decision_siguiente is not None:
+                        ubicacion_conjunta = evaluacion_registro_conjunto.get("ubicacion") or {}
+                        destino_conjunto = evaluacion_registro_conjunto["destino"]
+                        destino_obj, relacion_conjunta = _confirmar_destino_para_obra(
+                            catalogos=catalogos, catalogo_obras_ruta=catalogo_obras_ruta,
+                            catalogo_destinos_ruta=catalogo_destinos_ruta, dataset=dataset,
+                            decision_id=str(decision_siguiente["decision_id"]),
+                            documento=decision.get("documento") or {},
+                            cliente_id=cliente_id, cliente_canonico=str(contexto.get("cliente_canonico", "")),
+                            obra_canonica=resultado_obs.obra.nombre_canonico,
+                            destino_texto=str(destino_conjunto["direccion"]),
+                            comuna=str(destino_conjunto["comuna"]), region=str(destino_conjunto["region"]),
+                            latitud=ubicacion_conjunta.get("latitud"), longitud=ubicacion_conjunta.get("longitud"),
+                            fuente=f"DECISION_HUMANA_REGISTRO_CONJUNTO:{decision_id}", actor=actor, reloj=reloj,
+                        )
+                        resultado_extra["destino_id"] = destino_obj.destino_id
+                        resultado_extra["relacion_id"] = relacion_conjunta.relacion_id
+                        resultado_extra["destino_confirmado_conjunto"] = True
+                        aplicacion_destino_conjunto = {
+                            "decision_id": str(decision_siguiente["decision_id"]),
+                            "tipo": "DESTINO_SIN_CONFIRMAR", "accion": "CONFIRMAR", "actor": actor,
+                            "fecha": reloj().astimezone(timezone.utc).isoformat(),
+                            "documento": decision.get("documento"),
+                            "valor_documental": str(destino_conjunto["direccion"]),
+                            "cliente_id": cliente_id, "obra_id": resultado_obs.obra.obra_id,
+                            "destino_id": destino_obj.destino_id, "relacion_id": relacion_conjunta.relacion_id,
+                            "origen": "REGISTRO_CONJUNTO_OBRA_DESTINO", "decision_origen_id": decision_id,
+                            "comuna": str(destino_conjunto["comuna"]), "region": str(destino_conjunto["region"]),
+                            "ubicacion": dict(ubicacion_conjunta) or None,
+                            "huella_vista_previa": evaluacion_registro_conjunto["huella"],
+                            "dataset_sha256": artefacto.get("dataset_sha256"),
+                            "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
+                        }
+                        decision_siguiente = None
                 aplicacion = {
                     "decision_id": decision_id, "tipo": tipo, "accion": accion, "actor": actor,
                     "fecha": reloj().astimezone(timezone.utc).isoformat(), "documento": decision.get("documento"),
                     "valor_documental": obra_texto, "cliente_id": cliente_id, "obra_id": resultado_extra.get("obra_id"),
                     "dataset_sha256": artefacto.get("dataset_sha256"), "catalogos_sha256_antes": artefacto.get("catalogos_sha256"),
                 }
+                if aplicacion_destino_conjunto is not None:
+                    aplicacion["registro_conjunto"] = {
+                        "decision_destino_id": aplicacion_destino_conjunto["decision_id"],
+                        "destino_id": aplicacion_destino_conjunto["destino_id"],
+                        "relacion_id": aplicacion_destino_conjunto["relacion_id"],
+                    }
             elif tipo == "DESTINO_SIN_CONFIRMAR":
                 identidad_obra = decision.get("identidad_resuelta") or {}
                 obra_id = str(identidad_obra.get("entidad_id", ""))
@@ -901,68 +1070,15 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # no se aprende si la evidencia documental de ESTA guía
                     # trae la comuna válida; ante ambigüedad se conserva tal
                     # cual (nunca se inventa).
-                    comuna_destino = comuna_correccion or comuna_fila
-                    region_destino = region_fila
-                    if comuna_destino:
-                        from atlas_core.revalidacion_documental import _leer_filas as _leer_filas_evid
-                        from atlas_core.rutas.destino_entrega import (
-                            comuna_territorial_desde_evidencia, textos_documentales_destino,
-                        )
-                        from atlas_core.territorio_chile import normalizar_comuna
-                        try:
-                            _fila_evid = next(
-                                (f for f in _leer_filas_evid(dataset)
-                                 if str(f.get("numero_guia", "")) == numero_guia), None,
-                            )
-                        except (OSError, ValueError):
-                            _fila_evid = None
-                        comuna_valida = comuna_territorial_desde_evidencia(
-                            comuna_destino, textos_documentales_destino(_fila_evid or {}),
-                        )
-                        if comuna_valida and comuna_valida != comuna_destino:
-                            comuna_destino = comuna_valida
-                            region_destino = region_destino or str(normalizar_comuna(comuna_valida).region or "")
-                        # Caso real 475484 (CAMINO LO RUIZ 3099 / RENCA): sin
-                        # región la clave física no encuentra el destino
-                        # global ya existente y se crearía un duplicado --
-                        # la región se deriva siempre de una comuna válida.
-                        if not region_destino:
-                            region_destino = str(normalizar_comuna(comuna_destino).region or "")
-                    destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
-                        nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
-                        comuna=comuna_destino,
-                        region=region_destino,
-                        latitud=lat_fila, longitud=lon_fila,
-                        estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+                    destino, relacion = _confirmar_destino_para_obra(
+                        catalogos=catalogos, catalogo_obras_ruta=catalogo_obras_ruta,
+                        catalogo_destinos_ruta=catalogo_destinos_ruta, dataset=dataset,
+                        decision_id=decision_id, documento=decision.get("documento") or {},
+                        cliente_id=cliente_id, cliente_canonico=str(contexto.get("cliente_canonico", "")),
+                        obra_canonica=obra_canonica, destino_texto=destino_texto,
+                        comuna=comuna_correccion or comuna_fila, region=region_fila,
+                        latitud=lat_fila, longitud=lon_fila, fuente=fuente, actor=actor, reloj=reloj,
                     )
-                    # B/C. Reutilizar la obra global existente (por nombre
-                    # canónico, nunca crea una segunda) y crear/reutilizar la
-                    # relación obra<->destino, dejándola CONFIRMADA -- eso
-                    # promueve también la obra a CONFIRMADA (API canónica
-                    # `confirmar_relacion`, evidencia humana auditable).
-                    evidencia = Evidencia(
-                        tipo=TipoEvidencia.GUIA.value,
-                        identificador_fuente=str(decision.get("documento", {}).get("numero_guia") or decision.get("documento", {}).get("archivo")),
-                        referencia_hash=decision_id,
-                        campos_observados={
-                            "obra": obra_canonica, "destino": destino_texto, "decision_id": decision_id,
-                            "cliente_id_observado": cliente_id,
-                            "cliente_canonico_observado": str(contexto.get("cliente_canonico", "")),
-                            "numero_guia": numero_guia,
-                        },
-                        fecha=reloj().astimezone(timezone.utc).isoformat(), actor_proceso=actor, resultado=ResultadoEvidencia.SOPORTA.value,
-                    )
-                    catalogo_obras = CatalogoObrasDestinos(ruta=catalogo_obras_ruta, ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogo_destinos_ruta)
-                    resultado_obs = catalogo_obras.registrar_observacion(
-                        cliente_id=cliente_id, nombre_obra=obra_canonica, destino_id=destino.destino_id, evidencia=evidencia,
-                    )
-                    relacion = resultado_obs.relacion
-                    if relacion is None:
-                        raise ErrorAplicacionDecision("No se pudo determinar la relación obra-destino.")
-                    if relacion.estado == "PENDIENTE":
-                        relacion = catalogo_obras.confirmar_relacion(
-                            relacion.relacion_id, actor=actor, identificador_fuente=decision_id,
-                        )
                     resultado_extra["destino_id"] = destino.destino_id
                     resultado_extra["relacion_id"] = relacion.relacion_id
                 aplicacion = {
@@ -2091,6 +2207,11 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 raise ErrorAplicacionDecision("Esta decisión no puede aplicarse en este bloque.")
 
             ledger.setdefault("aplicaciones", []).append(aplicacion)
+            if aplicacion_destino_conjunto is not None:
+                # Misma escritura atómica: la pregunta de destino queda
+                # respondida en el ledger con su propio decision_id, así
+                # `generar_artefacto` nunca la vuelve a publicar.
+                ledger["aplicaciones"].append(aplicacion_destino_conjunto)
             escribir_json_atomico(ledger_ruta, ledger)
             # Bloque P0 CÓDIGO CLIENTE -- punto ÚNICO y común de TODA
             # confirmación humana de identidad de CLIENTE: las cuatro
@@ -2213,6 +2334,10 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             requiere_revalidacion_global = (
                 accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
                 and (tipo, accion) not in TIPOS_CON_REGENERACION_DIRECTA
+                # Registro completo de obra nueva: sólo cambian la obra y su
+                # destino -- se revalidan únicamente los documentos/viajes
+                # afectados (rama de regeneración directa, más abajo).
+                and aplicacion_destino_conjunto is None
             )
             # Bloque P0 REVISIÓN V2 -- PLANIMPACTO AGRUPADO: un caller de
             # LOTE (`aplicar_decisiones_multiples`) puede pedir que ESTA
@@ -2391,7 +2516,17 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 # documento/indicador_revision).
                 or (tipo == "CLIENTE_AUSENTE" and accion == "REGISTRAR_CLIENTE_MANUAL")
                 or (tipo == "PESO_VIAJE_IMPLAUSIBLE" and accion in ("CONFIRMAR", "CORREGIR_PESO"))
+                or aplicacion_destino_conjunto is not None
             ):
+                if aplicacion_destino_conjunto is not None:
+                    resultado_extra["revalidacion_focal"] = _revalidar_documentos_registro_conjunto(
+                        dataset=dataset, catalogos=catalogos, ledger_ruta=ledger_ruta,
+                        numero_guia=str((decision.get("documento") or {}).get("numero_guia") or ""),
+                        nombres_obra=(
+                            str(decision.get("valor_documental", "")),
+                            str((evaluacion_registro_conjunto or {}).get("obra", {}).get("nombre", "")),
+                        ),
+                    )
                 # Bloque ORIGEN D1 -- a diferencia de DESTINO_SIN_CONFIRMAR/
                 # VEHICULO_DESCONOCIDO, aquí ya sabemos que el dataset
                 # cambió (se acaba de escribir arriba, en el bloque de
