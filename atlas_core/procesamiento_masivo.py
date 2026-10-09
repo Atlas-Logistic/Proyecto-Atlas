@@ -57,6 +57,10 @@ from atlas_core.validadores import (
     validar_rut_chileno,
 )
 from atlas_core.clasificador_material import clasificar_material
+from atlas_core.comprobantes_pesaje import (
+    TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
+    extraer_comprobante_pesaje_aza,
+)
 from atlas_core.credibilidad_campos import (
     NivelCredibilidad,
     evaluar_credibilidad_direccion,
@@ -2259,6 +2263,39 @@ def procesar_archivo(
         else extraer_datos(textos)
     )
     fin_extraccion = time.perf_counter()
+    comprobante = extraer_comprobante_pesaje_aza(textos)
+    if comprobante is not None:
+        # Un certificado de pesaje no es una guía: no debe entrar a las
+        # validaciones de transporte/destino ni producir una fila operacional.
+        metricas = {
+            "ocr_seg": round(fin_ocr - inicio_ocr, 4),
+            "extraccion_parsing_seg": round(fin_extraccion - fin_ocr, 4),
+            "tipo_documental": TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
+        }
+        if orientacion is not None and orientacion.diagnostico:
+            metricas["orientacion_documental"] = orientacion.diagnostico
+        return {
+            "tipo_documental": TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
+            "comprobante_pesaje": comprobante,
+            "numero_guia": "No encontrado", "numero_transporte": "No encontrado",
+            "fecha": comprobante["fecha"], "chofer": comprobante["chofer"],
+            "rut_chofer": comprobante["rut_chofer"], "cliente": "No encontrado",
+            "obra_destino": "No encontrado", "patente_tracto": comprobante["patente"],
+            "patente_rampla": "No encontrado", "descripcion_material": "",
+            "tipo_carga": "NO DETERMINADO", "indicador_revision": "OK",
+            "motivos_revision_documento": "", "metodos_recuperacion_documento": "COMPROBANTE_PESAJE_AZA",
+            "estado_documental": "OK", "estado_operacional": "OK",
+            "metricas_procesamiento_json": json.dumps(metricas, ensure_ascii=False, sort_keys=True),
+            "resultado_atlas_ia_json": "", "evidencia_documentos_relacionados": "",
+            "senal_calidad_captura": "", "peso_kg": comprobante["peso_neto_kg"],
+            "hora_entrada_aza": "No encontrado", "hora_salida_aza": "No encontrado",
+            "permanencia_minutos": "No encontrado", "despachar_a_crudo": "",
+            "direccion_entrega": "", "localidad_entrega": "", "region_entrega": "",
+            "estado_entrega": "NO_APLICA", "planta_origen_id": "",
+            "planta_origen_nombre": comprobante["planta"], "origen_determinado_por": "COMPROBANTE_PESAJE",
+            "evidencia_origen": "DOCUMENTAL", "distancia_km": "", "duracion_min": "",
+            "proveedor_ruta": "", "estado_ruta": "NO_APLICA", "motivo_ruta": "",
+        }
     # Bloque ESTADOS S2: `metodos_documento` es puramente informativo
     # (trazabilidad). `campos_geometricos_sin_corroborar` acumula qué
     # campos de identidad se recuperaron por geometría en ESTE documento

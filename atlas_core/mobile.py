@@ -94,6 +94,7 @@ TIPOS_NOVEDAD = (
 ROL_GUIA = "GUIA"
 ROL_EVIDENCIA_FIRMADA = "EVIDENCIA_FIRMADA"
 ROLES_DOCUMENTO = (ROL_GUIA, ROL_EVIDENCIA_FIRMADA)
+TIPO_DOCUMENTAL_COMPROBANTE_PESAJE = "COMPROBANTE_PESAJE"
 ESTADO_PENDIENTE_ASOCIACION = "PENDIENTE_ASOCIACION"
 ESTADO_EVIDENCIA_ASOCIADA = "EVIDENCIA_ASOCIADA"
 # Incompatibilidad operacional REAL ya definida en Atlas (no preferencia de
@@ -674,6 +675,55 @@ def _captura_ilegible(datos: Mapping[str, object]) -> bool:
     return guia in ("", "No encontrado") and transporte in ("", "No encontrado")
 
 
+def _asociar_comprobante_pesaje(
+    repositorio: "RepositorioEnviosMobile", registro: dict, datos: Mapping[str, object], *, dataset: Path,
+) -> dict:
+    """Asocia un ticket sólo si su número y dos identidades coinciden.
+
+    El comprobante nunca agrega una fila al dataset: queda como evidencia
+    adicional del documento de guía ya existente. Sin coincidencia suficiente
+    permanece conservado y pendiente, nunca se convierte en una revisión de
+    guía ficticia.
+    """
+    comprobante = datos.get("comprobante_pesaje") or {}
+    numero = str(comprobante.get("numero") or "").strip()
+    filas = _filas_dataset(dataset)
+    candidatas = [f for f in filas if numero and str(f.get("numero_guia") or "").strip() == numero]
+    def iguales(a: object, b: object) -> bool:
+        a, b = re.sub(r"[^A-Z0-9]", "", str(a or "").upper()), re.sub(r"[^A-Z0-9]", "", str(b or "").upper())
+        return bool(a and b and a == b)
+    compatibles = []
+    for fila in candidatas:
+        pruebas = sum((
+            iguales(comprobante.get("patente"), fila.get("patente_tracto")),
+            iguales(comprobante.get("rut_chofer"), fila.get("rut_chofer")),
+            iguales(comprobante.get("chofer"), fila.get("chofer")),
+        ))
+        if pruebas >= 2:
+            compatibles.append(fila)
+    if len(compatibles) != 1:
+        motivo = "SIN_COINCIDENCIA_INEQUIVOCA" if not compatibles else "COINCIDENCIAS_MULTIPLES"
+        registro.update({"estado": ESTADO_PENDIENTE_ASOCIACION, "tipo_documental": TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
+                         "datos_ocr": dict(datos), "comprobante_pesaje": {"estado": ESTADO_PENDIENTE_ASOCIACION, "motivo": motivo, "campos": comprobante}})
+        repositorio.guardar(str(registro["envio_id"]), registro)
+        return registro
+    fila = compatibles[0]
+    documento = _documento_de_fila(fila)
+    from atlas_core.ingesta_pdf import (
+        construir_asociacion_evidencia_mobile, directorio_evidencia_pdf_para_dataset, registrar_evidencia_adicional,
+    )
+    asociacion = construir_asociacion_evidencia_mobile(documento=documento, envio=registro, motivo="COMPROBANTE_PESAJE_AZA")
+    asociacion["evidencia"].update({"tipo_documental": TIPO_DOCUMENTAL_COMPROBANTE_PESAJE, "comprobante_pesaje": comprobante})
+    nueva = registrar_evidencia_adicional(directorio_evidencia_pdf_para_dataset(dataset), asociacion)
+    registro.update({"estado": ESTADO_EVIDENCIA_ASOCIADA, "tipo_documental": TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
+                     "datos_ocr": dict(datos), "archivo_dataset": "", "error": "",
+                     "comprobante_pesaje": {"estado": ESTADO_EVIDENCIA_ASOCIADA, "motivo": "COINCIDENCIA_EXACTA_NUMERO_Y_IDENTIDAD",
+                                            "campos": comprobante, "documento": documento, "evidencia_nueva": nueva,
+                                            "asociado_en": datetime.now(timezone.utc).isoformat()}})
+    repositorio.guardar(str(registro["envio_id"]), registro)
+    return registro
+
+
 def _estado_final_mobile(
     datos: Mapping[str, object], asociacion: Mapping[str, object], captura_ilegible: bool,
     *, indicador_revision_actual: str | None = None,
@@ -896,6 +946,18 @@ def _procesar_envio_mobile_impl(
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
             datos = dict(procesar_archivo(imagen, **argumentos))
+
+        if datos.get("tipo_documental") == TIPO_DOCUMENTAL_COMPROBANTE_PESAJE:
+            # No escala a IA, no crea decisiones, ni escribe dataset/viaje.
+            # La única salida permitida es evidencia asociada o pendiente.
+            if dataset is None:
+                registro.update({"estado": ESTADO_PENDIENTE_ASOCIACION,
+                                 "tipo_documental": TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
+                                 "datos_ocr": datos,
+                                 "comprobante_pesaje": {"estado": ESTADO_PENDIENTE_ASOCIACION, "motivo": "DATASET_NO_DISPONIBLE"}})
+                repositorio.guardar(envio_id, registro)
+                return registro
+            return _asociar_comprobante_pesaje(repositorio, registro, datos, dataset=Path(dataset))
 
         filas: list[dict[str, str]] = []
         encabezado_compatible = True
