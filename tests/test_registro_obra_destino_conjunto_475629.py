@@ -358,3 +358,32 @@ def test_registrar_sin_confirmacion_conjunta_conserva_el_flujo_anterior(tmp_path
     pendientes = _pendientes(actual)
     assert [d["tipo"] for d in pendientes] == ["DESTINO_SIN_CONFIRMAR"]
     assert pendientes[0]["valor_documental"] == DESTINO
+
+
+def test_475629_dataset_real_con_campos_mayores_al_limite_csv(tmp_path, base_ine):
+    """Prueba aislada con el dataset real (09-10): `resultado_atlas_ia_json`
+    supera los 131072 caracteres por defecto de ``csv`` y la vista previa se
+    caía con `_csv.Error: field larger than field limit`. Ahora la vista
+    previa y la confirmación conjunta funcionan con filas así de grandes."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    dataset = actual / "analisis_completo_guias.csv"
+    filas = list(_leer_csv(dataset).values())
+    for fila in filas:
+        fila["resultado_atlas_ia_json"] = json.dumps([{"evidencia": "x" * 200_000}])
+    _escribir_csv(dataset, filas)
+    generar_artefacto(ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json")
+    limite_previo = csv.field_size_limit(131072)  # límite por defecto de un proceso nuevo
+    try:
+        vista = previsualizar_registro_obra_destino(raiz_atlas=raiz, decision_id=decision["decision_id"], base_geografica_local=base_ine)
+        assert vista["confirmacion_conjunta_disponible"] is True
+        assert vista["destino"]["comuna"] == "San Miguel"
+        csv.field_size_limit(131072)
+        resultado = aplicar_decision_obra(
+            raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+            confirmar_destino_conjunto=True, huella_vista_previa=vista["huella"], base_geografica_local=base_ine,
+        )
+    finally:
+        csv.field_size_limit(max(limite_previo, csv.field_size_limit()))
+    assert resultado["ok"] is True and resultado["destino_confirmado_conjunto"] is True
+    assert resultado["revalidacion_focal"]["guias"] == ["475629", "475630"]
+    assert _pendientes(actual) == []

@@ -53,6 +53,18 @@ MOTIVO_COORDENADA_CONTRADICHA = "COORDENADA_EXISTENTE_CONTRADICE_BASE_TERRITORIA
 _PATRON_NUMERO_CALLE = re.compile(r"^\d+[A-Z]?$")
 
 
+def _asegurar_limite_campo_csv() -> None:
+    """El dataset operacional conserva evidencia por fila (p. ej.
+    `resultado_atlas_ia_json`) que supera el límite por defecto de ``csv``
+    (131072 caracteres). El límite es global del proceso: se asegura justo
+    antes de cada lectura, sin depender del orden de importación -- mismo
+    criterio que `revalidacion_documental`. Nunca lo baja."""
+    from atlas_core.procesamiento_masivo import LIMITE_CAMPO_CSV
+
+    if csv.field_size_limit() < LIMITE_CAMPO_CSV:
+        csv.field_size_limit(LIMITE_CAMPO_CSV)
+
+
 class ErrorRegistroObraDestino(ValueError):
     pass
 
@@ -101,6 +113,7 @@ def comuna_region_validadas(
 
 
 def _leer_fila(dataset: Path, numero_guia: str) -> dict[str, str] | None:
+    _asegurar_limite_campo_csv()
     try:
         with Path(dataset).open("r", newline="", encoding="utf-8-sig") as archivo:
             for fila in csv.DictReader(archivo, delimiter=";"):
@@ -324,6 +337,7 @@ def guias_afectadas_por_registro(
     transportes (el viaje completo). Nada más se revalida."""
     claves = {normalizar_nombre_obra(n) for n in nombres_obra if str(n or "").strip()}
     filas: list[dict[str, str]] = []
+    _asegurar_limite_campo_csv()
     try:
         with Path(ruta_dataset).open("r", newline="", encoding="utf-8-sig") as archivo:
             filas = [dict(f) for f in csv.DictReader(archivo, delimiter=";")]
