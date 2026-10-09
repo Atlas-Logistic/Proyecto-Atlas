@@ -459,15 +459,9 @@ def resolver_obra_por_variacion_ortografica_corroborada_por_destino(
     obra coincide (`direccion_confirmada_coincide`) con la dirección
     documental. Se abstiene además si la dirección falta, es placeholder o
     está degradada, o si el token documental es otra comuna real."""
-    from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
-    from atlas_core.rutas.destino_entrega import texto_destino_degradado
-
     documental = str(nombre_documental or "").strip()
-    direccion = str(direccion_documental or "").strip()
-    if not documental or direccion.upper() in _DESTINOS_AUSENTES or texto_destino_degradado(direccion):
-        return None
-    texto_direccion = normalizar_nombre_destino(direccion)
-    if not texto_direccion:
+    texto_direccion = _direccion_documental_comparable(direccion_documental)
+    if not documental or not texto_direccion:
         return None
 
     candidatos: list[tuple[Obra, tuple[str, str]]] = []
@@ -482,11 +476,82 @@ def resolver_obra_por_variacion_ortografica_corroborada_por_destino(
     obra, (token_documental, token_candidato) = candidatos[0]
     if _token_es_otra_comuna_real(token_documental, token_candidato):
         return None
+    return obra if _destino_confirmado_coincide(obra, texto_direccion, destinos_confirmados_de_obra) else None
+
+
+def _direccion_documental_comparable(direccion_documental: str) -> str:
+    """Dirección documental normalizada, o "" si falta, es placeholder o
+    está degradada (nunca corrobora una identidad)."""
+    from atlas_core.catalogo_destinos import normalizar_nombre_destino
+    from atlas_core.rutas.destino_entrega import texto_destino_degradado
+
+    direccion = str(direccion_documental or "").strip()
+    if direccion.upper() in _DESTINOS_AUSENTES or texto_destino_degradado(direccion):
+        return ""
+    return normalizar_nombre_destino(direccion)
+
+
+def _destino_confirmado_coincide(
+    obra: Obra, texto_direccion: str, destinos_confirmados_de_obra: Callable[[Obra], Iterable[object]],
+) -> bool:
+    from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
+
     for destino in destinos_confirmados_de_obra(obra):
         calle = normalizar_nombre_destino(str(getattr(destino, "direccion", "") or "").split(",", 1)[0])
         if calle and direccion_confirmada_coincide(calle, texto_direccion):
-            return obra
-    return None
+            return True
+    return False
+
+
+# Caso real 475603 -- "INMOB CASA HELSINS": el borde de la columna impresa
+# cortó el nombre a mitad de palabra ("HELSINSKI SPA"). El prefijo sin
+# corroborar exige 20 caracteres y un último token de una sola letra; aquí
+# la identidad la sostiene el destino CONFIRMADO de la obra presente en el
+# mismo documento, igual que en la variación corroborada de arriba.
+_TOKENS_MINIMOS_RECORTE_CORROBORADO = 3
+_LONGITUD_MINIMA_TOKEN_RECORTADO = 4
+
+
+def resolver_obra_por_recorte_corroborado_por_destino(
+    *, nombre_documental: str, direccion_documental: str,
+    obras_confirmadas_mismo_cliente: tuple[Obra, ...] = (),
+    destinos_confirmados_de_obra: Callable[[Obra], Iterable[object]],
+) -> Obra | None:
+    """Resuelve un nombre de obra recortado al final por el borde del campo.
+
+    Condiciones (todas): al menos tres tokens; todos menos el último
+    idénticos al inicio del canónico o de un alias de una obra CONFIRMADA/
+    ACTIVA del mismo cliente (responsabilidad del llamador); el último es
+    prefijo estricto (>= 4 caracteres) del token correspondiente, o el
+    nombre documental termina en un token completo antes que la clave;
+    exactamente UNA obra candidata; y un destino confirmado de esa obra
+    coincide con la dirección de este documento. Se abstiene si el último
+    token es otra comuna real. El recorte nunca debe aprenderse como alias."""
+    documental = normalizar_nombre_obra(nombre_documental)
+    tokens = documental.split()
+    texto_direccion = _direccion_documental_comparable(direccion_documental)
+    if len(tokens) < _TOKENS_MINIMOS_RECORTE_CORROBORADO or not texto_direccion:
+        return None
+    if len(tokens[-1]) < _LONGITUD_MINIMA_TOKEN_RECORTADO:
+        return None
+
+    candidatos: list[tuple[Obra, str]] = []
+    for obra in obras_confirmadas_mismo_cliente:
+        for clave in (obra.nombre_canonico, *obra.aliases_documentales):
+            tokens_clave = normalizar_nombre_obra(clave).split()
+            if len(tokens_clave) < len(tokens) or tokens_clave == tokens:
+                continue
+            if tokens_clave[: len(tokens) - 1] != tokens[:-1]:
+                continue
+            if tokens_clave[len(tokens) - 1].startswith(tokens[-1]):
+                candidatos.append((obra, tokens_clave[len(tokens) - 1]))
+                break
+    if len({obra.obra_id for obra, _ in candidatos}) != 1:
+        return None
+    obra, token_candidato = candidatos[0]
+    if tokens[-1] != token_candidato and _token_es_otra_comuna_real(tokens[-1], token_candidato):
+        return None
+    return obra if _destino_confirmado_coincide(obra, texto_direccion, destinos_confirmados_de_obra) else None
 
 
 # Bloque RUIDO OCR INICIAL (caso real 472516) -- un artefacto de OCR real

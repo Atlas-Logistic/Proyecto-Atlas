@@ -169,13 +169,16 @@ from atlas_core.catalogo_obras_destinos import (
 from atlas_core.motor_evidencia_obras import (
     nombre_obra_documental_parece_incompleto,
     resolver_obra_por_prefijo_documental_confirmado,
+    resolver_obra_por_recorte_corroborado_por_destino,
 )
 from atlas_core.decisiones_pendientes import detectar_decisiones_documento
 from atlas_core.rutas.destino_entrega import (
     CAMPOS_ENTREGA_DOCUMENTO,
     calcular_ruta_con_planta_conocida,
+    despachar_a_documental,
     resolver_entrega_documento,
 )
+from atlas_core.registro_obra_destino import motivo_destino_documental_no_confiable
 from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
 from atlas_core.rutas.modelos import EstadoRuta
 from atlas_core.rutas.origen_evidencia import (
@@ -805,13 +808,58 @@ def extraer_peso_kg_etiquetado(textos: Iterable[str]) -> str:
     for indice, linea in enumerate(lineas):
         if not re.search(r"\b(?:PESO|ESO)\s*KG\b", _normalizar(linea)):
             continue
-        ventana = " ".join(lineas[indice: indice + 4])
-        cola = re.split(r"(?:PESO|ESO)\s*KG\.?", _normalizar(ventana), maxsplit=1)[-1]
-        for candidato in re.findall(r"\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2,3})?|\d{3,5}", cola):
-            normalizado = _normalizar_peso_kg(candidato)
-            if normalizado != "No encontrado":
-                return normalizado
+        cola = re.split(r"(?:PESO|ESO)\s*KG\.?", _normalizar(linea), maxsplit=1)[-1]
+        for segmento in (cola, *(_normalizar(l) for l in lineas[indice + 1: indice + 4])):
+            for coincidencia in re.finditer(r"\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2,3})?|\d{3,5}", segmento):
+                candidato = coincidencia.group(0)
+                # Caso real 475603: un número sin separador de miles sólo es
+                # el peso si abre el valor tras la etiqueta; detrás de otro
+                # texto es la numeración de otro campo ("HELSINSKI 5810 LA
+                # REINA", DESPACHAR A intercalado), una fecha o un teléfono.
+                if not re.search(r"[.,]", candidato) and (
+                    segmento[: coincidencia.start()].strip(" :")
+                    or segmento[coincidencia.end(): coincidencia.end() + 1].isalpha()
+                ):
+                    continue
+                normalizado = _normalizar_peso_kg(candidato)
+                if normalizado != "No encontrado":
+                    return normalizado
     return "No encontrado"
+
+
+_PATRON_PESO_MILES = r"\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2,3})?"
+
+
+def extraer_peso_kg_corroborado_tara_bruto(textos: Iterable[str]) -> str:
+    """PESO KG impreso cerca de su etiqueta que coincide EXACTO con Peso
+    Bruto - Tara del mismo documento (PESO KG es el neto, ver
+    `extractor.buscar_peso`). Caso real 475603: Paddle leyó ":10.700,00"
+    antes de la etiqueta y la ventana posterior sólo traía otros campos;
+    Tara 8.890 y Bruto 19.590 lo corroboran. Sin esa igualdad aritmética,
+    o con valores distintos que la cumplan, se abstiene."""
+    lineas = [_normalizar(re.sub(r"\s+", " ", str(t)).strip()) for t in textos]
+    tara = bruto = None
+    for linea in lineas:
+        coincidencia_tara = re.search(rf"\bTARA\s*:?\s*({_PATRON_PESO_MILES})", linea)
+        coincidencia_bruto = re.search(rf"\bBRUTO\s*:?\s*({_PATRON_PESO_MILES})", linea)
+        if coincidencia_tara and coincidencia_bruto:
+            tara, bruto = coincidencia_tara.group(1), coincidencia_bruto.group(1)
+            break
+    if tara is None:
+        return "No encontrado"
+    tara_kg, bruto_kg = _normalizar_peso_kg(tara), _normalizar_peso_kg(bruto)
+    if "No encontrado" in (tara_kg, bruto_kg) or int(bruto_kg) <= int(tara_kg):
+        return "No encontrado"
+    neto = _normalizar_peso_kg(str(int(bruto_kg) - int(tara_kg)))
+    candidatos = set()
+    for indice, linea in enumerate(lineas):
+        if not re.search(r"\b(?:PESO|ESO)\s*KG\b", linea):
+            continue
+        for vecina in lineas[max(0, indice - 4): indice + 5]:
+            if "TARA" in vecina or "BRUTO" in vecina:
+                continue
+            candidatos.update(_normalizar_peso_kg(valor) for valor in re.findall(_PATRON_PESO_MILES, vecina))
+    return neto if neto in candidatos else "No encontrado"
 
 
 def _clasificar_contexto_fecha(
@@ -1956,6 +2004,34 @@ def _corroborar_obra_destino_confirmada(
             calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
             if calle and direccion_confirmada_coincide(calle, texto_documental):
                 return destino
+        if obra_a_corroborar != obra:
+            return None
+        # Caso real 475603: "INMOB CASA HELSINS", recortado por el borde
+        # del campo, sólo identifica a la obra confirmada del mismo cliente
+        # si el destino confirmado de esa obra está en este documento.
+        candidata = resolver_obra_por_recorte_corroborado_por_destino(
+            nombre_documental=obra, direccion_documental=direccion,
+            obras_confirmadas_mismo_cliente=tuple(
+                candidata for candidata in catalogo_obras.listar_obras()
+                if candidata.cliente_id == cliente_id
+                and candidata.estado == "CONFIRMADA"
+                and candidata.estado_vigencia == "ACTIVO"
+            ),
+            destinos_confirmados_de_obra=lambda o: catalogo_obras.listar_destinos_confirmados_para_obra(
+                nombre_obra=o.nombre_canonico
+            ),
+        )
+        if candidata is None:
+            return None
+        resolucion = catalogo_obras.resolver_obra_destino_confirmada(
+            cliente_id=cliente_id, nombre_obra=candidata.nombre_canonico,
+        )
+        if resolucion is not None:
+            return resolucion
+        for destino in catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=candidata.nombre_canonico):
+            calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
+            if calle and direccion_confirmada_coincide(calle, texto_documental):
+                return destino
         return None
     except (OSError, ValueError, ErrorCatalogoObrasDestinos):
         return None
@@ -2332,6 +2408,22 @@ def procesar_archivo(
             return None
         estado_bloques_ocr = ESTADO_BLOQUES_DISPONIBLES
         return bloques
+
+    def _despachar_a_documental_temprano() -> str:
+        """DESPACHAR A para corroborar obra/convergencia antes del ruteo.
+        Caso real 475603: si la lectura lineal está contaminada (fecha, RUT,
+        etiqueta), se usa la misma selección geométrica que el ruteo, que de
+        todos modos leerá los bloques más adelante."""
+        nonlocal bloques_guia
+        lineal = (extraer_identificadores_destino(textos).despachar_a or "").strip()
+        if not motivo_destino_documental_no_confiable(lineal):
+            return lineal
+        try:
+            if bloques_guia is None:
+                bloques_guia = _leer_bloques_con_estado()
+            return despachar_a_documental(textos, bloques_guia, chofer_resuelto=str(datos.get("chofer") or ""))
+        except Exception:
+            return lineal
 
     campos_ausentes = any(
         datos.get(campo) in {None, "", "No encontrado"}
@@ -3135,7 +3227,7 @@ def procesar_archivo(
         # comparar contra la dirección de entrega REAL del documento --
         # la resolución de ruta/geocodificación todavía no corrió a esta
         # altura de la función.
-        direccion_documental_temprana = (extraer_identificadores_destino(textos).despachar_a or "").strip()
+        direccion_documental_temprana = _despachar_a_documental_temprano()
         obra_destino_corroborada = _corroborar_obra_destino_confirmada(
             carpeta_catalogos,
             cliente_texto=str(datos.get("cliente", "")),
@@ -3167,7 +3259,10 @@ def procesar_archivo(
         # también alimentan el ruteo, que los consulta antes de geocodificar.
         destinos_relacion_obra = _destinos_relacion_confirmada_para_obra(
             carpeta_catalogos,
-            obra_documental=obra_documental,
+            # El canónico, si el prefijo/recorte ya se resolvió (475603).
+            obra_documental=(
+                obra_final if isinstance(obra_destino_corroborada, ResolucionObraDestino) else obra_documental
+            ),
             cliente_texto=str(datos.get("cliente", "")),
             rut_cliente=str(datos.get("RUT del cliente", "")),
             identidad_cliente_corroborada=cliente_corroborado_n1,
@@ -3328,7 +3423,7 @@ def procesar_archivo(
         try:
             _delta_conv = _convergencia_documental(
                 carpeta_catalogos, datos,
-                despachar_a_documental=(extraer_identificadores_destino(textos).despachar_a or "").strip(),
+                despachar_a_documental=_despachar_a_documental_temprano(),
             )
         except Exception as _exc_conv:  # nunca tumba el documento
             logger.warning("Convergencia documental omitida: %s: %s", type(_exc_conv).__name__, _exc_conv)
@@ -3767,6 +3862,10 @@ def procesar_archivo(
         if _normalizar_peso_kg(datos.get("peso")) != "No encontrado"
         else extraer_peso_kg_etiquetado(textos)
     )
+    if peso_kg_final == "No encontrado":
+        peso_kg_final = extraer_peso_kg_corroborado_tara_bruto(textos)
+        if peso_kg_final != "No encontrado":
+            metodos_documento.add("PESO_KG_CORROBORADO_BRUTO_MENOS_TARA")
     # Bloque O2 -- reexamina (nunca adivina) contra evidencia geométrica
     # independiente antes de aceptar un peso cuya lectura fue de baja
     # confianza; ver docstring de `_reexaminar_peso_por_baja_confianza`.

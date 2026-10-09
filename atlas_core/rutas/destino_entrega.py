@@ -2872,6 +2872,74 @@ def _comuna_de_la_misma_direccion(identificadores, despachar_a: str) -> set[str]
     return set()
 
 
+def despachar_a_documental(
+    textos: Iterable[str],
+    bloques: Iterable[Any] | None = None,
+    *,
+    chofer_resuelto: str = "",
+    identificadores: Any = None,
+) -> str:
+    """`DESPACHAR A` documental de este documento: la lectura lineal ya
+    limpiada o, si está contaminada y se entregan `bloques`, la lectura
+    geométrica (ver `resolver_entrega_documento`)."""
+    from atlas_core.registro_obra_destino import motivo_destino_documental_no_confiable
+
+    if identificadores is None:
+        identificadores = extraer_identificadores_destino(list(textos))
+    # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
+    # final, el RUT de OTRO campo sin su propia etiqueta (mismo
+    # intercalado de columnas de PaddleOCR que ya cubre
+    # `_despachar_a_lineal_contaminado`, pero aquí la dirección SÍ se
+    # leyó completa antes -- ver `limpiar_sufijo_rut_pegado`).
+    despachar_a_crudo = limpiar_sufijo_rut_pegado((identificadores.despachar_a or "").strip())
+    # Mismo intercalado, pero con el VALOR de RETIRA (el chofer ya
+    # resuelto) pegado al final -- ver `limpiar_sufijo_chofer_pegado`.
+    # El RUT del chofer puede quedar antes o después de su nombre: se
+    # repite la limpieza de RUT sobre el resultado.
+    despachar_a_crudo = limpiar_sufijo_rut_pegado(
+        limpiar_sufijo_chofer_pegado(despachar_a_crudo, chofer_resuelto)
+    ).strip()
+
+    if bloques is None:
+        return despachar_a_crudo
+    bloques = list(bloques)
+    lineal_descartable = (
+        not despachar_a_crudo
+        or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
+        or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
+    )
+    try:
+        decision_geometrica = _extraer_despachar_a_geometrico(bloques)
+    except Exception:
+        decision_geometrica = {}
+    candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
+    if candidato_geometrico and not _despachar_a_lineal_contaminado(
+        candidato_geometrico, valor_chofer_resuelto=chofer_resuelto
+    ) and (
+        lineal_descartable
+        # Caso real 475368: PaddleOCR partió la fila ("CAMINO LO RUIZ
+        # 2901" + "SANTIAGO RENCA", con RUT CHOFER intercalado) y la
+        # lectura lineal quedó truncada pero limpia. Sólo se prefiere la
+        # geométrica si es la lineal completa más un sufijo puramente
+        # geográfico que no contradice la comuna del propio documento --
+        # nunca por ser simplemente más larga.
+        or extension_geografica_compatible(
+            despachar_a_crudo, candidato_geometrico,
+            comunas_conocidas=_comuna_de_la_misma_direccion(identificadores, despachar_a_crudo),
+        )
+        # Caso real 475603: la lineal es "12-10-2026 :17576134-9 LLEGADA"
+        # (FECHA LLEGADA y RUT CHOFER intercalados); la geométrica, la
+        # dirección impresa. Sólo se cambia si la geométrica pasa el mismo
+        # validador que descalificó a la lineal.
+        or (
+            motivo_destino_documental_no_confiable(despachar_a_crudo)
+            and not motivo_destino_documental_no_confiable(candidato_geometrico)
+        )
+    ):
+        despachar_a_crudo = candidato_geometrico
+    return despachar_a_crudo
+
+
 def resolver_entrega_documento(
     textos: Iterable[str],
     plantas: Iterable[Planta],
@@ -2948,48 +3016,9 @@ def resolver_entrega_documento(
     comportamiento idéntico."""
     textos = list(textos)
     identificadores = extraer_identificadores_destino(textos)
-    # Bloque R2.2 Clase C -- una dirección real puede traer, pegado al
-    # final, el RUT de OTRO campo sin su propia etiqueta (mismo
-    # intercalado de columnas de PaddleOCR que ya cubre
-    # `_despachar_a_lineal_contaminado`, pero aquí la dirección SÍ se
-    # leyó completa antes -- ver `limpiar_sufijo_rut_pegado`).
-    despachar_a_crudo = limpiar_sufijo_rut_pegado((identificadores.despachar_a or "").strip())
-    # Mismo intercalado, pero con el VALOR de RETIRA (el chofer ya
-    # resuelto) pegado al final -- ver `limpiar_sufijo_chofer_pegado`.
-    # El RUT del chofer puede quedar antes o después de su nombre: se
-    # repite la limpieza de RUT sobre el resultado.
-    despachar_a_crudo = limpiar_sufijo_rut_pegado(
-        limpiar_sufijo_chofer_pegado(despachar_a_crudo, chofer_resuelto)
-    ).strip()
-
-    if bloques is not None:
-        bloques = list(bloques)
-        lineal_descartable = (
-            not despachar_a_crudo
-            or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
-            or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
-        )
-        try:
-            decision_geometrica = _extraer_despachar_a_geometrico(bloques)
-        except Exception:
-            decision_geometrica = {}
-        candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
-        if candidato_geometrico and not _despachar_a_lineal_contaminado(
-            candidato_geometrico, valor_chofer_resuelto=chofer_resuelto
-        ) and (
-            lineal_descartable
-            # Caso real 475368: PaddleOCR partió la fila ("CAMINO LO RUIZ
-            # 2901" + "SANTIAGO RENCA", con RUT CHOFER intercalado) y la
-            # lectura lineal quedó truncada pero limpia. Sólo se prefiere la
-            # geométrica si es la lineal completa más un sufijo puramente
-            # geográfico que no contradice la comuna del propio documento --
-            # nunca por ser simplemente más larga.
-            or extension_geografica_compatible(
-                despachar_a_crudo, candidato_geometrico,
-                comunas_conocidas=_comuna_de_la_misma_direccion(identificadores, despachar_a_crudo),
-            )
-        ):
-            despachar_a_crudo = candidato_geometrico
+    despachar_a_crudo = despachar_a_documental(
+        textos, bloques, chofer_resuelto=chofer_resuelto, identificadores=identificadores,
+    )
 
     resultado = {campo: "" for campo in CAMPOS_ENTREGA_DOCUMENTO}
     resultado["despachar_a_crudo"] = despachar_a_crudo
