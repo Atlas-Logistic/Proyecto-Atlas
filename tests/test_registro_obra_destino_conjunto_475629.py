@@ -22,7 +22,8 @@ from atlas_core.geografia.base_local import BaseGeograficaLocalSQLite
 from atlas_core.geografia.importador_ine import importar_a_sqlite
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.registro_obra_destino import (
-    MOTIVO_COORDENADA_CONTRADICHA, calle_y_numero, previsualizar_registro_obra_destino,
+    MOTIVO_COORDENADA_CONTRADICHA, MOTIVO_DESTINO_CONTAMINADO, MOTIVO_SIN_VALIDACION_GEOGRAFICA,
+    calle_y_numero, motivo_destino_documental_no_confiable, previsualizar_registro_obra_destino,
 )
 
 GUIA = "475629"
@@ -387,3 +388,107 @@ def test_475629_dataset_real_con_campos_mayores_al_limite_csv(tmp_path, base_ine
     assert resultado["ok"] is True and resultado["destino_confirmado_conjunto"] is True
     assert resultado["revalidacion_focal"]["guias"] == ["475629", "475630"]
     assert _pendientes(actual) == []
+
+
+def _sin_ruta(dataset, destino):
+    filas = list(_leer_csv(dataset).values())
+    for fila in filas:
+        if fila["numero_guia"] == GUIA:
+            fila.update({
+                "despachar_a_crudo": destino, "direccion_entrega": "", "localidad_entrega": "",
+                "region_entrega": "", "estado_entrega": "REVISAR", "estado_ruta": "REQUIERE_REVISION",
+                "motivo_ruta": "GEOCODIFICACION_DIRECCION_NO_ENCONTRADA", "distancia_km": "",
+            })
+    _escribir_csv(dataset, filas)
+
+
+def test_475603_destino_sin_validacion_geografica_no_se_confirma_con_la_obra(tmp_path, base_ine):
+    """Caso real 475603: DESPACHAR A mal extraído ("12-10-2026 :17576134-9
+    LLEGADA"), sin comuna, ubicación ni ruta. Confirmarlo con la obra lo
+    dejaría CONFIRMADO; la vista previa no lo ofrece y Motor lo rechaza."""
+    basura = "12-10-2026 :17576134-9 LLEGADA"
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    _sin_ruta(actual / "analisis_completo_guias.csv", basura)
+    decision["contexto"]["destino_documental"] = basura
+    generar_artefacto(ruta_dataset=actual / "analisis_completo_guias.csv", carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json")
+
+    vista = previsualizar_registro_obra_destino(raiz_atlas=raiz, decision_id=decision["decision_id"], base_geografica_local=base_ine)
+
+    assert vista["destino"]["requiere_confirmacion"] is True
+    assert vista["destino"]["comuna"] == "" and vista["ubicacion"] is None
+    assert vista["confirmacion_conjunta_disponible"] is False
+    assert vista["motivo_no_disponible"] == MOTIVO_DESTINO_CONTAMINADO
+    assert vista["validaciones"]["geografia"]["estado"] == "CONFLICTO"
+    with pytest.raises(ErrorAplicacionDecision, match=MOTIVO_DESTINO_CONTAMINADO):
+        aplicar_decision_obra(
+            raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR",
+            confirmar_destino_conjunto=True, huella_vista_previa=vista["huella"], base_geografica_local=base_ine,
+        )
+    assert _ledger(actual) == []
+    # "Registrar sólo la obra" sigue disponible y la dirección queda en su tarjeta.
+    assert aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="REGISTRAR")["ok"]
+    assert [d["tipo"] for d in _pendientes(actual)] == ["DESTINO_SIN_CONFIRMAR"]
+
+
+def test_sin_ruta_calculada_no_se_ofrece_aunque_la_calle_exista(tmp_path, base_ine):
+    """La comuna verificada sólo viene de una ruta calculada sobre esta
+    dirección -- sin ruta, la confirmación conjunta no se ofrece aunque la
+    calle exista en la base territorial."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    _sin_ruta(actual / "analisis_completo_guias.csv", DESTINO)
+    generar_artefacto(ruta_dataset=actual / "analisis_completo_guias.csv", carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json")
+    vista = previsualizar_registro_obra_destino(raiz_atlas=raiz, decision_id=decision["decision_id"], base_geografica_local=base_ine)
+    assert vista["confirmacion_conjunta_disponible"] is False
+    assert vista["motivo_no_disponible"] == MOTIVO_SIN_VALIDACION_GEOGRAFICA
+
+
+@pytest.mark.parametrize("texto", [
+    "12-10-2026 :17576134-9 LLEGADA",          # 475603: fecha + RUT + etiqueta
+    "10833150-K FECHA",                        # 460486: RUT + etiqueta
+    "SANTA ISABEL 585 SANTIAGO LAMPA :15454297-3",  # RUT pegado al final
+    "PATENTE : BDFG50",                        # etiqueta de otro campo
+    "3.812,00",                                # peso sin letras
+    "HELSINSKI 5810 FECHA LLEGADA",            # etiqueta en cualquier posición
+])
+def test_destino_contaminado_por_ocr_se_rechaza(texto):
+    assert motivo_destino_documental_no_confiable(texto) == MOTIVO_DESTINO_CONTAMINADO
+
+
+@pytest.mark.parametrize("texto", [
+    DESTINO, "PANAMERICANA NORTE 22650 SANTIAGO LAMPA", "HELSINSKI 5810 LA REINA SANTIAGO",
+    "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "CALLE D LOTE 27 Y 28 PANQUE INDRUST CORONEL",
+    "CAM. EL NOVICIADO LAMPA LAMPA", "PARCELA 12-3 LAMPA",
+])
+def test_direcciones_reales_no_se_marcan_contaminadas(texto):
+    assert motivo_destino_documental_no_confiable(texto) == ""
+
+
+def test_destino_contaminado_no_se_ofrece_aunque_la_fila_tenga_ruta(tmp_path, base_ine):
+    """El rechazo por contaminación es propio: no depende de que falte
+    geografía. Aunque la fila tuviera ruta calculada, un destino con fecha/
+    RUT/etiqueta nunca se confirma junto con la obra."""
+    basura = "12-10-2026 :17576134-9 LLEGADA"
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    dataset = actual / "analisis_completo_guias.csv"
+    filas = list(_leer_csv(dataset).values())
+    for fila in filas:
+        if fila["numero_guia"] == GUIA:
+            fila["despachar_a_crudo"] = basura
+    _escribir_csv(dataset, filas)
+    decision["contexto"]["destino_documental"] = basura
+    generar_artefacto(ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json")
+    vista = previsualizar_registro_obra_destino(raiz_atlas=raiz, decision_id=decision["decision_id"], base_geografica_local=base_ine)
+    assert vista["confirmacion_conjunta_disponible"] is False
+    assert vista["motivo_no_disponible"] == MOTIVO_DESTINO_CONTAMINADO
+
+
+def test_ruta_calculada_sobre_otra_direccion_no_valida_el_destino(tmp_path, base_ine):
+    """La ruta de la fila sólo cuenta si se calculó sobre ESTA misma
+    dirección documental."""
+    raiz, catalogos, actual, cliente, decision = _entorno(tmp_path)
+    decision["contexto"]["destino_documental"] = "OTRA CALLE 100 SAN MIGUEL"
+    generar_artefacto(ruta_dataset=actual / "analisis_completo_guias.csv", carpeta_catalogos=catalogos, decisiones=[decision], ruta_salida=actual / "decisiones_pendientes.json")
+    vista = previsualizar_registro_obra_destino(raiz_atlas=raiz, decision_id=decision["decision_id"], base_geografica_local=base_ine)
+    assert vista["destino"]["comuna"] == ""
+    assert vista["confirmacion_conjunta_disponible"] is False
+    assert vista["motivo_no_disponible"] == MOTIVO_SIN_VALIDACION_GEOGRAFICA

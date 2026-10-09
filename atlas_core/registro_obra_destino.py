@@ -49,6 +49,20 @@ MOTIVO_RELACION_YA_CONFIRMADA = "RELACION_OBRA_DESTINO_YA_CONFIRMADA"
 MOTIVO_RELACION_POR_EVIDENCIA = "RELACION_CONFIRMADA_POR_EVIDENCIA_EXTERNA"
 MOTIVO_DESTINO_AMBIGUO = "DESTINO_GLOBAL_AMBIGUO"
 MOTIVO_COORDENADA_CONTRADICHA = "COORDENADA_EXISTENTE_CONTRADICE_BASE_TERRITORIAL"
+# Caso real 475603 (prueba aislada 09-10): el DESPACHAR A extraído era
+# "12-10-2026 :17576134-9 LLEGADA" -- sin comuna, sin ubicación ni ruta.
+# Sin ninguna validación geográfica el destino nunca se confirma junto con la
+# obra: queda en su propia tarjeta, donde Javier escribe la dirección.
+MOTIVO_SIN_VALIDACION_GEOGRAFICA = "DESTINO_SIN_VALIDACION_GEOGRAFICA"
+MOTIVO_DESTINO_CONTAMINADO = "DESTINO_DOCUMENTAL_CONTAMINADO_OCR"
+
+_PATRON_FECHA = re.compile(r"(?<!\d)\d{1,2}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{2,4}(?!\d)")
+_PATRON_RUT_INCRUSTADO = re.compile(
+    r"(?<![\w.])((?:\d{1,2}\.?\d{3}\.?\d{3}|\d{7,8})\s*-\s*[\dkK])(?!\w)"
+)
+# Etiquetas del formulario que nunca forman parte de una dirección, además
+# del vocabulario estructural ya usado por el extractor.
+_ETIQUETAS_EXTRA = ("LLEGADA", "SALIDA", "CHOFER", "GIRO", "SENOR", "SENORES")
 
 _PATRON_NUMERO_CALLE = re.compile(r"^\d+[A-Z]?$")
 
@@ -79,6 +93,43 @@ def calle_y_numero(texto: str) -> str:
         if indice > 0 and _PATRON_NUMERO_CALLE.match(token):
             return " ".join(tokens[: indice + 1])
     return ""
+
+
+def motivo_destino_documental_no_confiable(texto: str) -> str:
+    """"" si el DESPACHAR A documental puede ser una dirección; si no,
+    `DESTINO_DOCUMENTAL_CONTAMINADO_OCR`. Reutiliza el detector del
+    extractor (`_despachar_a_lineal_contaminado`: etiqueta al inicio, RUT
+    completo, RUT + etiqueta) y lo completa con lo que la extracción lineal
+    deja pegado en cualquier posición: una fecha, un RUT con dígito
+    verificador válido o una etiqueta del formulario (caso real 475603:
+    "12-10-2026 :17576134-9 LLEGADA"). Sin ningún texto de calle tampoco es
+    una dirección."""
+    from atlas_core.extractor import _despachar_a_lineal_contaminado, etiquetas_estructurales_documento
+    from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
+
+    crudo = str(texto or "").strip()
+    if not crudo or _despachar_a_lineal_contaminado(crudo):
+        return MOTIVO_DESTINO_CONTAMINADO
+    if _PATRON_FECHA.search(crudo):
+        return MOTIVO_DESTINO_CONTAMINADO
+    if any(
+        validar_rut_chileno(m.group(1)).estado == EstadoValidacion.VALIDO
+        for m in _PATRON_RUT_INCRUSTADO.finditer(crudo)
+    ):
+        return MOTIVO_DESTINO_CONTAMINADO
+    simple = " " + " ".join(re.sub(r"[^A-Z0-9]+", " ", _sin_acentos(crudo).upper()).split()) + " "
+    etiquetas = tuple(etiquetas_estructurales_documento()) + _ETIQUETAS_EXTRA
+    if any(f" {etiqueta} " in simple for etiqueta in etiquetas):
+        return MOTIVO_DESTINO_CONTAMINADO
+    if not any(len(t) >= 3 and t.isalpha() for t in simple.split()):
+        return MOTIVO_DESTINO_CONTAMINADO
+    return ""
+
+
+def _sin_acentos(texto: str) -> str:
+    import unicodedata
+
+    return "".join(c for c in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(c))
 
 
 def comuna_region_validadas(
@@ -221,8 +272,13 @@ def evaluar_registro_obra_destino(
     destino_texto = str(contexto.get("destino_documental", "")).strip()
     fila = _leer_fila(dataset, numero_guia) if numero_guia else None
     # Mismo origen de comuna/región que `DESTINO_SIN_CONFIRMAR`/`CONFIRMAR`:
-    # sólo la localidad de una ruta YA calculada para esta guía.
-    ruta_calculada = fila is not None and str(fila.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+    # sólo la localidad de una ruta YA calculada para esta guía -- y sólo si
+    # esa ruta se calculó sobre ESTA misma dirección documental.
+    ruta_calculada = (
+        fila is not None
+        and str(fila.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+        and " ".join(str(fila.get("despachar_a_crudo", "")).upper().split()) == " ".join(destino_texto.upper().split())
+    )
     comuna_fila = str(fila.get("localidad_entrega") or "").strip() if ruta_calculada else ""
     region_fila = str(fila.get("region_entrega") or "").strip() if ruta_calculada else ""
     comuna, region = comuna_region_validadas(
@@ -246,6 +302,9 @@ def evaluar_registro_obra_destino(
         busqueda = catalogo_destinos.buscar_reutilizable_global(destino_texto, comuna=comuna, region=region)
         territorial = _ubicacion_territorial(base_geografica_local, destino_texto, comuna)
         motivos: list[str] = []
+        contaminacion = motivo_destino_documental_no_confiable(destino_texto)
+        if contaminacion:
+            motivos.append(contaminacion)
         if busqueda.estado == EstadoBusquedaDestino.AMBIGUA:
             motivos.append(MOTIVO_DESTINO_AMBIGUO)
         elif busqueda.estado == EstadoBusquedaDestino.COINCIDENCIA and busqueda.destino is not None:
@@ -274,6 +333,10 @@ def evaluar_registro_obra_destino(
                 }
         if ubicacion is None and territorial is not None:
             ubicacion = territorial
+        # Validación geográfica mínima: comuna validada Y (ubicación exacta
+        # o ruta ya calculada para esta guía).
+        if not motivos and (not comuna or (ubicacion is None and not ruta_calculada)):
+            motivos.append(MOTIVO_SIN_VALIDACION_GEOGRAFICA)
         if motivos:
             estado_geo = "CONFLICTO"
         elif ubicacion is None:
@@ -284,7 +347,7 @@ def evaluar_registro_obra_destino(
             estado_geo = "OK"
         validacion_geografica = {"estado": estado_geo, "motivos": motivos}
 
-    disponible = requiere_confirmacion and validacion_geografica["estado"] != "CONFLICTO"
+    disponible = requiere_confirmacion and not validacion_geografica["motivos"]
     if not requiere_confirmacion:
         motivo_no_disponible = motivo_no_requiere
     elif not disponible:
