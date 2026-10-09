@@ -184,7 +184,10 @@ def test_decision_consecutiva_obra_luego_destino_sin_obsolescencia(tmp_path):
     # retirado ANTES de esta segunda decisión, así que esta llamada puede
     # no tener nada nuevo que regenerar. Lo que importa (líneas 194-196
     # abajo) es el estado final, no cuál de las dos llamadas lo logró.
-    assert "reporte_regenerado" in resultado_destino["revalidacion"]
+    # CONFIRMAR de DESTINO_SIN_CONFIRMAR revalida focalmente y publica el
+    # reporte por la vía directa (sin batería global).
+    assert resultado_destino["revalidacion_focal"]["alcance"] == "FOCAL"
+    assert "reporte_regenerado" in resultado_destino
     assert _pendientes(actual) == []
 
     obras_cat = CatalogoObrasDestinos(ruta=catalogos/"obras_destinos.json", ruta_clientes=catalogos/"clientes.json", ruta_destinos=catalogos/"destinos_maestros.json")
