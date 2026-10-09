@@ -660,10 +660,11 @@ def test_cambio_efectivo_de_bandeja_regenera_reporte_sin_cambiar_dataset_y_es_id
     assert not (raiz / "reportes" / "reporte_segunda_pasada").exists()
 
 
-def test_confirmar_integra_revalidacion_automaticamente_y_reporte_vigente_cambia(tmp_path):
+def test_confirmar_integra_revalidacion_focal_y_reporte_vigente_cambia(tmp_path):
     raiz, catalogos, actual, cliente, obra, decision = _entorno(tmp_path)
     resultado = aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision["decision_id"], accion="CONFIRMAR")
-    assert resultado["revalidacion"]["reporte_regenerado"] is True
+    assert resultado["revalidacion_focal"]["alcance"] == "FOCAL"
+    assert resultado["reporte_regenerado"] is True
     dataset = actual / "analisis_completo_guias.csv"
     fila = list(csv.DictReader(dataset.open(encoding="utf-8-sig"), delimiter=";"))[0]
     assert "OBRA_DESTINO_SIN_CORROBORAR" not in fila["motivos_revision_documento"]
@@ -703,7 +704,7 @@ def _agregar_caso_destino(catalogos, cliente, *, guia, obra_texto, destino_texto
     )
 
 
-def test_r35_e2e_aplica_a_regenera_y_aplica_b_inmediatamente_sin_ocr(tmp_path):
+def test_r35_e2e_aplica_a_focal_y_aplica_b_inmediatamente_sin_ocr(tmp_path):
     fila_b = _fila_csv(
         numero_guia="464716", numero_transporte="T-464716", obra_destino="OBRA B",
         despachar_a_crudo="CALLE B 200", motivos_revision_documento="OBRA_DESTINO_SIN_CORROBORAR",
@@ -724,8 +725,11 @@ def test_r35_e2e_aplica_a_regenera_y_aplica_b_inmediatamente_sin_ocr(tmp_path):
         raiz_atlas=raiz, decision_id=decision_a["decision_id"], accion="CONFIRMAR",
     )
     artefacto_tras_a = json.loads((actual/"decisiones_pendientes.json").read_text(encoding="utf-8"))
-    assert resultado_a["ok"] and resultado_a["revalidacion"]["guias_actualizadas"] == ["464715"]
+    assert resultado_a["ok"] and resultado_a["revalidacion_focal"]["guias"] == ["464715"]
     assert [d["decision_id"] for d in artefacto_tras_a["decisiones"]] == [decision_b["decision_id"]]
+    # La otra decisión sigue pendiente e independiente. Su refresco de
+    # presentación proviene de `generar_artefacto`, no de una revalidación
+    # global del dataset, y continúa aplicable inmediatamente.
     assert artefacto_tras_a["decisiones"][0]["contexto"]["cliente_canonico"] == "CONSTRUMART SA"
     assert artefacto_tras_a["dataset_sha256"] == modulo._sha(actual/"analisis_completo_guias.csv")
 

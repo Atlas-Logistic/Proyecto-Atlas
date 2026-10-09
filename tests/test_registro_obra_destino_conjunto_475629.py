@@ -361,6 +361,71 @@ def test_registrar_sin_confirmacion_conjunta_conserva_el_flujo_anterior(tmp_path
     assert pendientes[0]["valor_documental"] == DESTINO
 
 
+def test_475629_confirmacion_individual_es_focal_publica_y_es_idempotente(tmp_path, base_ine, monkeypatch):
+    """La tarjeta encadenada no debe pagar una batería global.
+
+    Controla el alcance real (guía, viaje y obra), la publicación visible
+    para Desktop y que una guía ajena no sea modificada por esta decisión.
+    """
+    import atlas_core.revalidacion_documental as revalidacion
+
+    raiz, catalogos, actual, _cliente, decision_obra = _entorno(tmp_path)
+    aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision_obra["decision_id"], accion="REGISTRAR")
+    decision_destino = _pendientes(actual)[0]
+    ajena_antes = _leer_csv(actual / "analisis_completo_guias.csv")["900001"].copy()
+
+    def global_prohibida(**_kwargs):
+        raise AssertionError("DESTINO_SIN_CONFIRMAR/CONFIRMAR no debe usar revalidación global")
+
+    monkeypatch.setattr(revalidacion, "revalidar_y_regenerar_reporte", global_prohibida)
+    primero = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_destino["decision_id"], accion="CONFIRMAR",
+    )
+
+    assert primero["ok"] is True and primero["reporte_regenerado"] is True
+    assert "revalidacion" not in primero
+    assert primero["revalidacion_focal"]["alcance"] == "FOCAL"
+    assert primero["revalidacion_focal"]["guias"] == ["475629", "475630"]
+    assert primero["revalidacion_focal"]["transportes"] == [TRANSPORTE]
+    assert _pendientes(actual) == []
+    assert _leer_csv(actual / "analisis_completo_guias.csv")["900001"] == ajena_antes
+    estado = json.loads((actual / "estado_operacion.json").read_text(encoding="utf-8"))
+    assert (raiz / estado["reporte_vigente"] / "viajes.csv").is_file()
+
+    segunda = aplicar_decision_obra(
+        raiz_atlas=raiz, decision_id=decision_destino["decision_id"], accion="CONFIRMAR",
+    )
+    assert segunda["ok"] is True and segunda["idempotente"] is True
+    assert len([a for a in _ledger(actual) if a["decision_id"] == decision_destino["decision_id"]]) == 1
+
+
+def test_confirmacion_individual_falla_antes_del_ledger_si_no_puede_confirmar(tmp_path, base_ine):
+    """Un fallo de validación intermedio no altera catálogo, ledger ni bandeja."""
+    raiz, catalogos, actual, _cliente, decision_obra = _entorno(tmp_path)
+    aplicar_decision_obra(raiz_atlas=raiz, decision_id=decision_obra["decision_id"], accion="REGISTRAR")
+    decision_destino = _pendientes(actual)[0]
+    antes = {n: _sha(catalogos / n) for n in ("obras_destinos.json", "destinos_maestros.json")}
+    pendientes_antes = _sha(actual / "decisiones_pendientes.json")
+    ledger_antes = _sha(actual / "decisiones_aplicadas.json")
+
+    # Una tarjeta malformada se rechaza durante la confirmación, antes de
+    # publicar ledger o artefactos focales.
+    bandeja = json.loads((actual / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    bandeja["decisiones"][0]["identidad_resuelta"] = {}
+    bandeja["decisiones"][0]["contexto"]["obra_id"] = ""
+    bandeja["decisiones"][0]["contexto"]["cliente_id"] = ""
+    (actual / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    pendientes_antes = _sha(actual / "decisiones_pendientes.json")
+    with pytest.raises(ErrorAplicacionDecision):
+        aplicar_decision_obra(
+            raiz_atlas=raiz, decision_id=decision_destino["decision_id"], accion="CONFIRMAR",
+        )
+
+    assert {n: _sha(catalogos / n) for n in antes} == antes
+    assert _sha(actual / "decisiones_pendientes.json") == pendientes_antes
+    assert _sha(actual / "decisiones_aplicadas.json") == ledger_antes
+
+
 def test_475629_dataset_real_con_campos_mayores_al_limite_csv(tmp_path, base_ine):
     """Prueba aislada con el dataset real (09-10): `resultado_atlas_ia_json`
     supera los 131072 caracteres por defecto de ``csv`` y la vista previa se

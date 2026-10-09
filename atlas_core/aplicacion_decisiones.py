@@ -521,10 +521,16 @@ def _confirmar_destino_para_obra(
 def _revalidar_documentos_registro_conjunto(
     *, dataset: Path, catalogos: Path, ledger_ruta: Path, numero_guia: str, nombres_obra,
 ) -> dict[str, object]:
-    """Revalidación FOCAL tras el registro completo de una obra nueva: sólo
+    """Revalidación FOCAL tras confirmar una relación obra/destino: sólo
     la guía de la decisión, las guías de esa obra y las demás guías de sus
     mismos transportes (el viaje). Mismos revalidadores de obra/destino que
-    la batería global, restringidos a ese alcance -- sin OCR, sin red."""
+    la batería global, restringidos a ese alcance -- sin OCR, sin red.
+
+    La usan tanto el registro conjunto de una obra nueva como la confirmación
+    individual ``DESTINO_SIN_CONFIRMAR/CONFIRMAR``. El ledger ya está escrito
+    antes de entrar, por lo que ambas rutas conservan exactamente la misma
+    fuente auditable de la relación confirmada.
+    """
     from atlas_core.registro_obra_destino import guias_afectadas_por_registro
     from atlas_core.revalidacion_documental import (
         revalidar_obra_destino_por_decision_aplicada_sin_ocr, revalidar_obra_destino_sin_ocr,
@@ -2326,6 +2332,11 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             TIPOS_CON_REGENERACION_DIRECTA = {
                 ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"), ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"),
                 ("CLIENTE_AUSENTE", "REGISTRAR_CLIENTE_MANUAL"),
+                # Confirmar una relación obra/destino ya identificada sólo
+                # puede afectar sus documentos/viaje relacionados. Se
+                # revalida focalmente y se publica el reporte versionado en
+                # la rama directa de abajo; nunca se abre la batería global.
+                ("DESTINO_SIN_CONFIRMAR", "CONFIRMAR"),
                 # Peso ya dejó el documento/ledger canónicos; el reporte
                 # directo recalcula el viaje sin ejecutar la batería global.
                 ("PESO_VIAJE_IMPLAUSIBLE", "CONFIRMAR"),
@@ -2517,14 +2528,23 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 or (tipo == "CLIENTE_AUSENTE" and accion == "REGISTRAR_CLIENTE_MANUAL")
                 or (tipo == "PESO_VIAJE_IMPLAUSIBLE" and accion in ("CONFIRMAR", "CORREGIR_PESO"))
                 or aplicacion_destino_conjunto is not None
+                or (tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR")
             ):
-                if aplicacion_destino_conjunto is not None:
+                if aplicacion_destino_conjunto is not None or (
+                    tipo == "DESTINO_SIN_CONFIRMAR" and accion == "CONFIRMAR"
+                ):
+                    identidad_obra_focal = decision.get("identidad_resuelta") or {}
+                    contexto_focal = decision.get("contexto") or {}
                     resultado_extra["revalidacion_focal"] = _revalidar_documentos_registro_conjunto(
                         dataset=dataset, catalogos=catalogos, ledger_ruta=ledger_ruta,
                         numero_guia=str((decision.get("documento") or {}).get("numero_guia") or ""),
                         nombres_obra=(
                             str(decision.get("valor_documental", "")),
-                            str((evaluacion_registro_conjunto or {}).get("obra", {}).get("nombre", "")),
+                            str(
+                                (evaluacion_registro_conjunto or {}).get("obra", {}).get("nombre", "")
+                                or contexto_focal.get("obra_canonica", "")
+                                or identidad_obra_focal.get("valor_canonico", "")
+                            ),
                         ),
                     )
                 # Bloque ORIGEN D1 -- a diferencia de DESTINO_SIN_CONFIRMAR/
@@ -2585,7 +2605,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # sigue vigente en el dataset ya escrito arriba.
             numero_guia_para_material = str((decision.get("documento") or {}).get("numero_guia") or "")
             if (
-                tipo != "PESO_VIAJE_IMPLAUSIBLE"
+                tipo not in {"PESO_VIAJE_IMPLAUSIBLE", "DESTINO_SIN_CONFIRMAR"}
                 and numero_guia_para_material
                 and accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
             ):
