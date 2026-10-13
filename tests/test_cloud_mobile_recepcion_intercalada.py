@@ -49,7 +49,11 @@ class WorkerSimulado:
                 self.fallas_pendientes -= 1
                 raise ErrorSincronizacionCloudMobile("Cloud Motor GET pendientes: timed out")
             listado = [i for i, e in self.envios.items() if self._disponible(e)] + self.listado_extra
-            return {"envios": [{"envio_id": i} for i in listado]}
+            # `envioMotor` del Worker real anuncia el SHA-256 en el listado.
+            return {"envios": [
+                {"envio_id": i, "imagen_sha256": hashlib.sha256(self.envios[i]["bytes"]).hexdigest()}
+                for i in listado
+            ]}
         envio_id, accion = re.fullmatch(r"/api/motor/envios/([^/]+)/(lease|lease/renovar|confirmar)", ruta).groups()
         envio = self.envios[envio_id]
         if accion == "lease":
@@ -100,22 +104,37 @@ class Entorno:
         self.ocr: list[str] = []
         self.durante_ocr: dict[str, callable] = {}
         self.persistidos_en_ocr: dict[str, list[str]] = {}
+        self.descargas: list[str] = []
+        self.escrituras: list[str] = []
+        self.procesamiento_falla: set[str] = set()
         recibir_original = self.repo.recibir
+        guardar_original = self.repo.guardar
 
         def recibir(**kwargs):
             salida = recibir_original(**kwargs)
             self.worker.eventos.append(f"persistido:{kwargs['envio_id']}")
             return salida
 
+        def guardar(envio_id, registro):
+            self.escrituras.append(envio_id)
+            return guardar_original(envio_id, registro)
+
+        def descargar(url, **kwargs):
+            self.descargas.append(url)
+            return self.worker.descargar(url, **kwargs)
+
         self.repo.recibir = recibir  # type: ignore[method-assign]
-        monkeypatch.setattr(cloud, "_json", self.worker.json)
-        monkeypatch.setattr(cloud, "_descargar", self.worker.descargar)
+        self.repo.guardar = guardar  # type: ignore[method-assign]
+        monkeypatch.setattr(cloud, "_json", lambda *a, **k: self.worker.json(*a, **k))
+        monkeypatch.setattr(cloud, "_descargar", descargar)
         monkeypatch.setattr(cloud, "_procesar_envio_cloud", self._procesar)
 
     def _procesar(self, repositorio, envio_id, **_kwargs):
         registro = repositorio.cargar(envio_id)
         if registro["estado"] == "ERROR":
             return {"completado": False, "error": "ERROR funcional persistido"}
+        if envio_id in self.procesamiento_falla:  # error transitorio, no persistido como ERROR
+            return {"completado": False, "error": "reconciliación operacional no terminada"}
         if registro["estado"] in ("RECIBIDO", "PROCESANDO"):
             self.ocr.append(envio_id)
             self.worker.eventos.append(f"ocr:{envio_id}")
@@ -349,9 +368,10 @@ def test_error_funcional_en_cola_no_se_confirma_y_no_bloquea_al_resto(entorno):
     resultado = entorno.pull()
 
     assert resultado["confirmados"] == [B]
-    assert A in resultado["errores_procesamiento"]
+    assert resultado["errores_procesamiento"] == {A: "ERROR funcional persistido"}
+    assert resultado["omitidos_error_persistido"] == [A]
+    assert entorno.worker.leases_por_envio[A] == 1  # sólo el de la ingesta original
     assert [envio for envio, _ in entorno.worker.confirmaciones] == [B]
-    assert entorno.worker.envios[A]["estado"] == "EN_LEASE"  # sigue reintentable en Cloud
 
 
 def test_perdida_de_escritor_con_cola_no_procesa_ni_confirma_el_resto(entorno):
@@ -382,3 +402,137 @@ def test_sin_procesar_aterriza_todo_sin_ocr_ni_confirmar(entorno):
     assert entorno.ocr == []
     assert [e for e in entorno.worker.eventos if e.startswith("confirmado")] == []
     assert all(entorno.checkpoint(e) == "ATERRIZADO" for e in (A, B, C))
+
+
+# ------------------------------------------------ ERROR persistido sin reintento
+def _aterrizar_en_error(entorno: Entorno, envio_id: str) -> None:
+    entorno.worker.agregar(envio_id)
+    entorno.pull(procesar=False)
+    registro = entorno.repo.cargar(envio_id)
+    registro.update(estado="ERROR", error="Error: field larger than field limit (131072)")
+    entorno.repo.guardar(envio_id, registro)
+    entorno.worker.ahora += LEASE_SEGUNDOS + 1  # Cloud lo vuelve a ofrecer
+    entorno.worker.eventos.clear()
+    entorno.descargas.clear()
+    entorno.escrituras.clear()
+
+
+def test_error_persistido_no_se_leasea_descarga_ni_reescribe_en_ciclos_repetidos(entorno):
+    _aterrizar_en_error(entorno, A)
+    envio_json = entorno.repo.raiz / A / "envio.json"
+    antes = envio_json.read_bytes()
+
+    for _ in range(3):  # tres ciclos de la tarea programada
+        resultado = entorno.pull()
+        assert resultado["omitidos_error_persistido"] == [A]
+        assert resultado["errores_procesamiento"] == {A: "ERROR funcional persistido"}
+        assert resultado["leaseados"] == resultado["persistidos"] == resultado["confirmados"] == []
+        entorno.worker.ahora += 60
+
+    assert entorno.worker.leases_por_envio == {A: 1}  # sólo el lease de la ingesta original
+    assert entorno.descargas == []
+    assert entorno.escrituras == []
+    assert envio_json.read_bytes() == antes
+    assert entorno.ocr == []
+    assert entorno.worker.confirmaciones == []
+    assert entorno.worker._disponible(entorno.worker.envios[A])  # sigue PENDIENTE en Cloud
+
+
+def test_error_persistido_no_bloquea_ni_ocupa_cola_del_resto(entorno):
+    _aterrizar_en_error(entorno, A)
+    entorno.worker.agregar(B)
+
+    resultado = entorno.pull(max_leases_en_cola=1)
+
+    assert resultado["confirmados"] == [B]
+    assert resultado["omitidos_error_persistido"] == [A]
+
+
+def test_tras_recuperacion_explicita_vuelve_al_flujo_normal_y_se_confirma(entorno):
+    _aterrizar_en_error(entorno, A)
+    entorno.pull()
+    # Recuperación explícita (p. ej. recuperar_envio_mobile_error.py): el
+    # envío sale de ERROR. El PULL no lo decide nunca por su cuenta.
+    registro = entorno.repo.cargar(A)
+    registro.update(estado="RECIBIDO", error="")
+    entorno.repo.guardar(A, registro)
+
+    resultado = entorno.pull()
+
+    assert resultado["omitidos_error_persistido"] == []
+    assert resultado["confirmados"] == [A]
+    assert entorno.ocr == [A]
+
+
+def test_omision_se_mantiene_tras_reinicio_del_proceso(tmp_path, monkeypatch):
+    primero = Entorno(tmp_path, monkeypatch)
+    _aterrizar_en_error(primero, A)
+    # Proceso nuevo: sin estado en memoria, mismo disco y el mismo Cloud.
+    segundo = Entorno(tmp_path, monkeypatch)
+    segundo.worker = primero.worker
+
+    resultado = segundo.pull()
+
+    assert resultado["omitidos_error_persistido"] == [A]
+    assert segundo.descargas == [] and segundo.escrituras == []
+    assert primero.worker.leases_por_envio == {A: 1}
+
+
+def test_sha_distinto_al_local_no_se_omite(entorno):
+    _aterrizar_en_error(entorno, A)
+    entorno.worker.envios[A]["bytes"] = b"otro-documento"  # Cloud anuncia otro documento
+
+    resultado = entorno.pull()
+
+    assert resultado["omitidos_error_persistido"] == []
+    assert resultado["leaseados"] == [A]
+    assert entorno.worker.confirmaciones == []  # sigue en ERROR local: nunca se confirma
+
+
+def test_error_transitorio_de_procesamiento_se_reintenta_en_el_ciclo_siguiente(entorno):
+    entorno.worker.agregar(A)
+    entorno.procesamiento_falla.add(A)
+
+    primero = entorno.pull()
+    assert primero["confirmados"] == []
+    assert primero["omitidos_error_persistido"] == []
+    assert A in primero["errores_procesamiento"]
+
+    entorno.procesamiento_falla.clear()
+    entorno.worker.ahora += LEASE_SEGUNDOS + 1
+    segundo = entorno.pull()
+
+    assert segundo["confirmados"] == [A]
+    assert segundo["omitidos_error_persistido"] == []
+
+
+def test_descarga_fallida_transitoria_se_reintenta(entorno):
+    entorno.worker.agregar(A)
+    original = entorno.worker.descargar
+    fallas = {"n": 1}
+
+    def descargar(url, **kwargs):
+        if fallas["n"]:
+            fallas["n"] -= 1
+            raise ErrorSincronizacionCloudMobile("no se pudo descargar documento Cloud: timed out")
+        return original(url, **kwargs)
+
+    entorno.worker.descargar = descargar
+    primero = entorno.pull()
+    assert A in primero["fallidos"]
+
+    entorno.worker.ahora += LEASE_SEGUNDOS + 1
+    segundo = entorno.pull()
+    assert segundo["confirmados"] == [A]
+
+
+def test_reentrega_sin_cambios_no_reescribe_envio_json(entorno):
+    entorno.worker.agregar(A)
+    entorno.pull(procesar=False)
+    entorno.escrituras.clear()
+    entorno.worker.ahora += LEASE_SEGUNDOS + 1
+
+    resultado = entorno.pull(procesar=False)
+
+    assert resultado["persistidos"] == [A]
+    assert entorno.escrituras == []  # checkpoint ATERRIZADO idéntico: sin escritura en G:

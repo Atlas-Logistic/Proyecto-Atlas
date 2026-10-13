@@ -200,6 +200,7 @@ def _sincronizar_envios_cloud_impl(
         "detenido_por_escritor": False,
         "reconciliacion_bandeja": None,
         "errores_recepcion": [],
+        "omitidos_error_persistido": [],
     }
     proveedor_ocr = proveedor_compartido["proveedor"]
 
@@ -322,6 +323,15 @@ def _recibir_pendientes_cloud(
             break
         cola.vistos.add(envio_id)
         resumen["encontrados"] += 1
+        if _error_persistido_local(repositorio, envio_id, pendiente):
+            # ERROR funcional ya persistido con este MISMO documento: nunca
+            # se confirma ni se reprocesa solo. Sin lease, descarga ni
+            # escritura en G:; sigue PENDIENTE en Cloud y vuelve al flujo
+            # normal en cuanto una recuperación explícita lo saque de ERROR.
+            resumen["omitidos_error_persistido"].append(envio_id)
+            if procesar:
+                resumen["errores_procesamiento"][envio_id] = "ERROR funcional persistido"
+            continue
         lease_activo: LeaseMotor | None = None
         en_cola = False
         try:
@@ -479,14 +489,32 @@ def _procesar_recibido_local(
     return resultado
 
 
+def _error_persistido_local(repositorio: RepositorioEnviosMobile, envio_id: str, pendiente: dict) -> bool:
+    """Envío ya aterrizado en ERROR con el mismo SHA-256 que anuncia Cloud.
+
+    Sin SHA en el listado, sin registro local legible o con otro documento,
+    no se omite: sigue el camino normal (conservador)."""
+    sha_cloud = str(pendiente.get("imagen_sha256") or "")
+    if len(sha_cloud) != 64:
+        return False
+    try:
+        registro = repositorio.cargar(envio_id)
+    except (OSError, ValueError, KeyError):
+        return False
+    return registro.get("estado") == "ERROR" and registro.get("imagen_sha256") == sha_cloud
+
+
 def _marcar_aterrizado_cloud(repositorio: RepositorioEnviosMobile, envio_id: str, lease: dict) -> None:
     registro = repositorio.cargar(envio_id)
-    checkpoint = dict(registro.get("cloud_procesamiento") or {})
+    previo = dict(registro.get("cloud_procesamiento") or {})
+    checkpoint = dict(previo)
     checkpoint.update({
         "estado": checkpoint.get("estado") or "ATERRIZADO",
         "documento_id": lease.get("documento_id", ""),
         "imagen_sha256": lease.get("imagen_sha256", ""),
     })
+    if checkpoint == previo:
+        return  # reentrega del mismo envío: no reescribir envio.json en G:
     registro["cloud_procesamiento"] = checkpoint
     repositorio.guardar(envio_id, registro)
 
