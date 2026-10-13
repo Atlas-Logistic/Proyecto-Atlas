@@ -759,7 +759,7 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             if _es_fragmento_estampado_no_material(normalizada):
                 continue
             if _tiene_evidencia_material(limpia):
-                # Un OCR de tabla puede fusionar la fila DESCRIPCION con el
+                # Un OCR de tabla puede fusionar una fila de material con el
                 # membrete que la antecede (caso real 475256). Sólo cuando la
                 # línea completa ya es material contaminado según el mismo
                 # evaluador de publicación, y el texto desde el primer
@@ -772,7 +772,6 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
                 if (
                     marcador is not None
                     and len(normalizada) == len(limpia)
-                    and "DESCRIPCION" in normalizada[:marcador.start()]
                     and evaluar_credibilidad_material(limpia).nivel == NivelCredibilidad.INVALIDO
                 ):
                     # La designación de barra de una letra ("B HORMIGON",

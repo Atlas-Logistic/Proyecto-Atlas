@@ -9,6 +9,7 @@ import json
 import pytest
 
 from atlas_core.procesamiento_masivo import COLUMNAS, extraer_descripcion_material
+from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_material
 from atlas_core.revalidacion_documental import recuperar_material_ausente_desde_traza_ocr_sin_ocr
 from atlas_core.trazabilidad_ocr import persistir_traza_ocr
 
@@ -64,6 +65,22 @@ def test_sin_evidencia_suficiente_no_inventa_material(lineas):
 def test_lecturas_ya_aceptadas_no_cambian():
     lineas = ["B HORMIGON 12MM 12M A630-420H (N)", "B BORHIGON 22MM 12M A630-420H (N)"]
     assert extraer_descripcion_material(lineas) == " | ".join(lineas)
+
+
+def test_prefijo_de_cabecera_sin_etiqueta_descripcion_no_contamina_material_real():
+    """La etiqueta de columna puede perderse; se conserva solo el item."""
+    lectura = (
+        "Codigo Cliente 0001006226 FECHA DE EMISION 13-10-2026 "
+        "AGF ACEROS DE CHILE SPA SENOR(ES) RUT 77.410.131-4 GIRO "
+        "Construccion de proy APOQUINDO OF 605 PISO 6 6410 DIRECCION "
+        "LAS CONDES COMUNA SANTIAGO CIUDAD INDICADOR TRASLADO "
+        "Operacion constituye Venta TRANSPORTE TRANSPORTES EMPRESA MBT SPA "
+        "902/110002701 ROLLO HORMIGON 16MM A630-420H (N) "
+        "Coladas 2617901502,2617901602"
+    )
+    resultado = extraer_descripcion_material([lectura])
+    assert resultado == "ROLLO HORMIGON 16MM A630-420H (N) Coladas 2617901502,2617901602"
+    assert evaluar_credibilidad_material(resultado).nivel == NivelCredibilidad.CONFIABLE
 
 
 # --------------------------------------------------- reproceso histórico sin OCR
