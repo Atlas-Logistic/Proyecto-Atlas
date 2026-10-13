@@ -259,7 +259,7 @@ def test_cloud_cierra_proveedor_si_ocurre_excepcion_inesperada(monkeypatch):
             }
         raise AssertionError(ruta)
 
-    monkeypatch.setattr(cloud, "crear_proveedor_ocr", lambda: proveedor)
+    monkeypatch.setattr(cloud, "crear_proveedor_ocr", lambda *_a, **_k: proveedor)
     monkeypatch.setattr(cloud, "_json", json_cloud)
     monkeypatch.setattr(cloud, "_descargar", lambda *_a, **_k: imagen)
     monkeypatch.setattr(cloud, "_marcar_aterrizado_cloud", lambda *_a, **_k: None)

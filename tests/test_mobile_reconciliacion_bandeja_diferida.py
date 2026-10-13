@@ -80,7 +80,7 @@ class Entorno:
             return publicar_original(**kwargs)
 
         monkeypatch.setattr(mobile, "procesar_archivo", ocr_simulado)
-        monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda: object())
+        monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda *_a, **_k: object())
         monkeypatch.setattr(mobile, "_generar_artefacto_sin_lock", publicar_espia)
         if not reconciliador_real:
             monkeypatch.setattr("atlas_core.revalidacion_documental.reconciliar_bandeja_decisiones", reconciliador)
