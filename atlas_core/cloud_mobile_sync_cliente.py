@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import urllib.error
 import urllib.parse
@@ -25,11 +26,13 @@ from atlas_core.mobile import (
 )
 from atlas_core.almacenamiento_portable import SesionOcupadaError
 
+logger = logging.getLogger(__name__)
 
-def crear_proveedor_ocr():
+
+def crear_proveedor_ocr(preferido: str = "paddleocr"):
     """Import diferido, coherente con el punto de extensión Mobile testeable."""
     from atlas_core.mobile import crear_proveedor_ocr as crear
-    return crear()
+    return crear(preferido)
 
 
 class ErrorSincronizacionCloudMobile(RuntimeError):
@@ -136,6 +139,7 @@ def sincronizar_envios_cloud(
     timeout: float = 30.0, procesar: bool = False, dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None, lease_heartbeat_segundos: float = 60.0,
     puede_continuar: Callable[[], bool] | None = None,
+    proveedor_ocr_preferido: str = "paddleocr",
 ) -> dict[str, Any]:
     """Sincroniza una corrida Cloud y garantiza el cierre de su OCR aislado."""
     compartido: dict[str, object | None] = {"proveedor": None}
@@ -144,7 +148,7 @@ def sincronizar_envios_cloud(
             base_url=base_url, token_motor=token_motor, consumidor=consumidor, repositorio=repositorio,
             timeout=timeout, procesar=procesar, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
             lease_heartbeat_segundos=lease_heartbeat_segundos, puede_continuar=puede_continuar,
-            proveedor_compartido=compartido,
+            proveedor_compartido=compartido, proveedor_ocr_preferido=proveedor_ocr_preferido,
         )
     finally:
         cerrar = getattr(compartido["proveedor"], "cerrar", None)
@@ -156,7 +160,7 @@ def _sincronizar_envios_cloud_impl(
     *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
     timeout: float, procesar: bool, dataset: Path | None, carpeta_catalogos: str | Path | None,
     lease_heartbeat_segundos: float, puede_continuar: Callable[[], bool] | None,
-    proveedor_compartido: dict[str, object | None],
+    proveedor_compartido: dict[str, object | None], proveedor_ocr_preferido: str,
 ) -> dict[str, Any]:
     """Ejecuta listado, lease, descarga, verificación, persistencia y confirmación.
 
@@ -176,8 +180,12 @@ def _sincronizar_envios_cloud_impl(
     def obtener_proveedor_ocr():
         nonlocal proveedor_ocr
         if proveedor_ocr is None:
-            proveedor_ocr = crear_proveedor_ocr()
+            proveedor_ocr = crear_proveedor_ocr(proveedor_ocr_preferido)
             proveedor_compartido["proveedor"] = proveedor_ocr
+            logger.info(
+                "PULL Cloud: proveedor OCR efectivo=%s preferencia=%s",
+                type(proveedor_ocr).__name__, proveedor_ocr_preferido,
+            )
         return proveedor_ocr
     if not _puede_continuar(puede_continuar):
         resumen["detenido_por_escritor"] = True

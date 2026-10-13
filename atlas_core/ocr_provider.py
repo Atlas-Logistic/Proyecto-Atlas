@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import re
 import subprocess
@@ -426,6 +427,27 @@ class PaddleOCRProvider:
         self._proceso = None
 
 
+PROVEEDORES_OCR_ADMITIDOS = frozenset({"paddleocr", "easyocr"})
+
+
+def resolver_preferencia_ocr_desde_entorno(entorno: dict[str, str] | None = None) -> str:
+    """Devuelve la preferencia OCR explícita del proceso.
+
+    La ausencia de ``ATLAS_OCR_PROVIDER`` conserva el contrato histórico
+    (PaddleOCR preferido). Un valor desconocido es un error de configuración:
+    nunca se degrada silenciosamente a otro motor.
+    """
+    fuente_entorno = os.environ if entorno is None else entorno
+    valor = fuente_entorno.get("ATLAS_OCR_PROVIDER", "paddleocr")
+    preferido = str(valor).strip().lower()
+    if preferido not in PROVEEDORES_OCR_ADMITIDOS:
+        admitidos = ", ".join(sorted(PROVEEDORES_OCR_ADMITIDOS))
+        raise ValueError(
+            f"ATLAS_OCR_PROVIDER inválido: {valor!r}. Valores admitidos: {admitidos}."
+        )
+    return preferido
+
+
 def crear_proveedor_ocr(preferido: str = "paddleocr") -> ProveedorOCR:
     """Selecciona el proveedor OCR activo, con fallback conservador a EasyOCR.
 
@@ -433,6 +455,11 @@ def crear_proveedor_ocr(preferido: str = "paddleocr") -> ProveedorOCR:
     fallback temporal si Paddle no está disponible (venv ausente, worker no
     arranca, etc.) — Atlas nunca se queda sin poder leer OCR por esto.
     """
+    preferido = str(preferido).strip().lower()
+    if preferido not in PROVEEDORES_OCR_ADMITIDOS:
+        admitidos = ", ".join(sorted(PROVEEDORES_OCR_ADMITIDOS))
+        raise ValueError(f"Proveedor OCR inválido: {preferido!r}. Valores admitidos: {admitidos}.")
+
     if preferido == "easyocr":
         logger.info("Proveedor OCR: EasyOCR (solicitado explícitamente)")
         print("[Atlas OCR] Proveedor activo: EasyOCR (solicitado explícitamente)")

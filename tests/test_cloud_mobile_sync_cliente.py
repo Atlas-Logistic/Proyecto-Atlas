@@ -178,7 +178,7 @@ class CloudMobileRunnerProcesamientoTests(unittest.TestCase):
         def ocr_simulado(ruta, **_kwargs):
             self.ocr.append(Path(ruta).parent.name)
             return {"numero_guia": "900001", "numero_transporte": "0000800001"}
-        self.parches = [patch.object(mobile, "procesar_archivo", ocr_simulado), patch.object(mobile, "crear_proveedor_ocr", lambda: object())]
+        self.parches = [patch.object(mobile, "procesar_archivo", ocr_simulado), patch.object(mobile, "crear_proveedor_ocr", lambda *_args, **_kwargs: object())]
         for p in self.parches: p.start()
 
     def tearDown(self):

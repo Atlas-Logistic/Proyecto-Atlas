@@ -26,13 +26,15 @@ from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile
+from atlas_core.ocr_provider import resolver_preferencia_ocr_desde_entorno
 
 URL_CLOUD_POR_DEFECTO = "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
 
 
 def ejecutar_pull_con_escritor(
     *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
-    timeout: float, procesar: bool, dataset, carpeta_catalogos, fabrica_escritor=LeaseEscritorOperativo,
+    timeout: float, procesar: bool, dataset, carpeta_catalogos, proveedor_ocr_preferido: str = "paddleocr",
+    fabrica_escritor=LeaseEscritorOperativo,
 ) -> dict:
     """Ejecuta una pasada sólo bajo escritor global vigente.
 
@@ -47,6 +49,7 @@ def ejecutar_pull_con_escritor(
             repositorio=repositorio, timeout=timeout, procesar=procesar,
             dataset=dataset, carpeta_catalogos=carpeta_catalogos,
             puede_continuar=lambda: escritor.vigente,
+            proveedor_ocr_preferido=proveedor_ocr_preferido,
         )
 
 
@@ -62,6 +65,10 @@ def main() -> None:
 
     if not args.token:
         parser.error("Falta --token (o la variable de entorno ATLAS_CLOUD_MOTOR_TOKEN)")
+    try:
+        proveedor_ocr_preferido = resolver_preferencia_ocr_desde_entorno()
+    except ValueError as error:
+        parser.error(str(error))
 
     raiz = resolver_raiz_atlas(args.raiz_atlas)
     estado = leer_estado_operacion(raiz=raiz) or {}
@@ -75,6 +82,7 @@ def main() -> None:
         base_url=args.base_url, token_motor=args.token, consumidor=args.consumidor,
         repositorio=RepositorioEnviosMobile(raiz), timeout=args.timeout,
         procesar=not args.sin_procesar, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+        proveedor_ocr_preferido=proveedor_ocr_preferido,
     )
     print(json.dumps(resultado, ensure_ascii=True, indent=2))
 

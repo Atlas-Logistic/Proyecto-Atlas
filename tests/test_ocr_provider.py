@@ -12,6 +12,7 @@ from atlas_core.ocr_provider import (
     ProveedorOCR,
     ProveedorOCRNoDisponible,
     crear_proveedor_ocr,
+    resolver_preferencia_ocr_desde_entorno,
 )
 
 
@@ -210,6 +211,29 @@ def test_crear_proveedor_ocr_easyocr_explicito_no_toca_paddle(monkeypatch):
     proveedor = crear_proveedor_ocr("easyocr")
 
     assert isinstance(proveedor, EasyOCRProvider)
+    popen.assert_not_called()
+
+
+def test_preferencia_ocr_ausente_conserva_paddleocr():
+    assert resolver_preferencia_ocr_desde_entorno({}) == "paddleocr"
+
+
+def test_preferencia_ocr_easyocr_es_valida():
+    assert resolver_preferencia_ocr_desde_entorno({"ATLAS_OCR_PROVIDER": " easyocr "}) == "easyocr"
+
+
+def test_preferencia_ocr_invalida_falla_claramente():
+    with pytest.raises(ValueError, match="ATLAS_OCR_PROVIDER inválido.*easyocr.*paddleocr"):
+        resolver_preferencia_ocr_desde_entorno({"ATLAS_OCR_PROVIDER": "tesseract"})
+
+
+def test_crear_proveedor_ocr_invalido_no_intenta_paddle(monkeypatch):
+    popen = Mock()
+    monkeypatch.setattr(ocr_provider.subprocess, "Popen", popen)
+
+    with pytest.raises(ValueError, match="Proveedor OCR inválido"):
+        crear_proveedor_ocr("tesseract")
+
     popen.assert_not_called()
 
 
