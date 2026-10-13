@@ -7,6 +7,11 @@ Mobile 24/7 -- con `procesar=True`, tras el PULL procesa (OCR/B1/reporte)
 todo envío local todavía `RECIBIDO` con el MISMO punto de entrada que el
 flujo LAN (`procesar_y_revalidar_envio_mobile`), bajo el mismo lock por
 envío: idempotente aunque el PC se apague a mitad o corran dos PCs.
+
+Recepción intercalada -- la recepción (lease, descarga, `recibir()`) no
+espera al OCR: los envíos aterrizados esperan en cola con su lease vivo
+(máx. `MAX_LEASES_EN_COLA`) y antes de cada OCR se recibe lo nuevo. La
+confirmación sigue ocurriendo sólo tras RECONCILIADO.
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,6 +33,10 @@ from atlas_core.mobile import (
 from atlas_core.almacenamiento_portable import SesionOcupadaError
 
 logger = logging.getLogger(__name__)
+
+# Tope de envíos con lease Cloud vivo esperando OCR en una corrida: acota
+# latidos y llamadas al Worker; el resto sigue PENDIENTE en Cloud.
+MAX_LEASES_EN_COLA = 20
 
 
 def crear_proveedor_ocr(preferido: str = "paddleocr"):
@@ -139,7 +149,7 @@ def sincronizar_envios_cloud(
     timeout: float = 30.0, procesar: bool = False, dataset: Path | None = None,
     carpeta_catalogos: str | Path | None = None, lease_heartbeat_segundos: float = 60.0,
     puede_continuar: Callable[[], bool] | None = None,
-    proveedor_ocr_preferido: str = "paddleocr",
+    proveedor_ocr_preferido: str = "paddleocr", max_leases_en_cola: int = MAX_LEASES_EN_COLA,
 ) -> dict[str, Any]:
     """Sincroniza una corrida Cloud y garantiza el cierre de su OCR aislado."""
     compartido: dict[str, object | None] = {"proveedor": None}
@@ -149,6 +159,7 @@ def sincronizar_envios_cloud(
             timeout=timeout, procesar=procesar, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
             lease_heartbeat_segundos=lease_heartbeat_segundos, puede_continuar=puede_continuar,
             proveedor_compartido=compartido, proveedor_ocr_preferido=proveedor_ocr_preferido,
+            max_leases_en_cola=max_leases_en_cola,
         )
     finally:
         cerrar = getattr(compartido["proveedor"], "cerrar", None)
@@ -156,16 +167,30 @@ def sincronizar_envios_cloud(
             cerrar()
 
 
+@dataclass
+class _ColaRecepcion:
+    """Estado de recepción de UNA corrida: envíos aterrizados que esperan
+    OCR con su lease Cloud vivo (orden FIFO de Cloud) y los ya vistos o
+    intentados, para no pedir dos leases del mismo envío en la corrida."""
+    leases: dict[str, tuple[str, LeaseMotor]] = field(default_factory=dict)
+    vistos: set[str] = field(default_factory=set)
+    intentados: set[str] = field(default_factory=set)
+
+
 def _sincronizar_envios_cloud_impl(
     *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
     timeout: float, procesar: bool, dataset: Path | None, carpeta_catalogos: str | Path | None,
     lease_heartbeat_segundos: float, puede_continuar: Callable[[], bool] | None,
     proveedor_compartido: dict[str, object | None], proveedor_ocr_preferido: str,
+    max_leases_en_cola: int,
 ) -> dict[str, Any]:
     """Ejecuta listado, lease, descarga, verificación, persistencia y confirmación.
 
     Nunca confirma Cloud hasta que el documento y la reconciliación requerida
-    terminaron. No procesa OCR ni toca el receptor/PWA LAN fuera de la
+    terminaron. RECEPCIÓN INTERCALADA: cada envío aterriza y espera en una
+    cola local con su lease renovado; ANTES de cada OCR se vuelve a recibir
+    lo nuevo de Cloud. Un OCR lento retiene a lo sumo un documento, no la
+    recepción del resto. No toca el receptor/PWA LAN fuera de la
     orquestación Mobile ya existente.
     """
     resumen: dict[str, Any] = {
@@ -174,6 +199,7 @@ def _sincronizar_envios_cloud_impl(
         "errores_procesamiento": {},
         "detenido_por_escritor": False,
         "reconciliacion_bandeja": None,
+        "errores_recepcion": [],
     }
     proveedor_ocr = proveedor_compartido["proveedor"]
 
@@ -190,16 +216,114 @@ def _sincronizar_envios_cloud_impl(
     if not _puede_continuar(puede_continuar):
         resumen["detenido_por_escritor"] = True
         return resumen
+    cola = _ColaRecepcion()
+
+    def recibir(*, intercalada: bool) -> None:
+        try:
+            _recibir_pendientes_cloud(
+                base_url=base_url, token_motor=token_motor, consumidor=consumidor, repositorio=repositorio,
+                timeout=timeout, procesar=procesar, lease_heartbeat_segundos=lease_heartbeat_segundos,
+                puede_continuar=puede_continuar, cola=cola, resumen=resumen,
+                max_leases_en_cola=max_leases_en_cola,
+            )
+        except ErrorSincronizacionCloudMobile as error:
+            # La primera ronda conserva el contrato previo (Cloud caído o
+            # no HTTPS corta la corrida). Una ronda intercalada que falla
+            # sólo se salta: la cola local sigue procesándose.
+            if not intercalada:
+                raise
+            resumen["errores_recepcion"].append(str(error))
+
+    try:
+        recibir(intercalada=False)
+        if not procesar:
+            return resumen
+        atendidos: set[str] = set()
+        locales: list[str] | None = None
+        primera_ronda = True
+        while True:
+            if not _puede_continuar(puede_continuar):
+                resumen["detenido_por_escritor"] = True
+                break
+            if not primera_ronda:
+                recibir(intercalada=True)
+            primera_ronda = False
+            if cola.leases:
+                envio_id = next(iter(cola.leases))
+                lease_token, lease_activo = cola.leases.pop(envio_id)
+                atendidos.add(envio_id)
+                try:
+                    _procesar_y_confirmar_cloud(
+                        repositorio, envio_id, lease_token=lease_token, lease_activo=lease_activo,
+                        base_url=base_url, token_motor=token_motor, timeout=timeout, dataset=dataset,
+                        carpeta_catalogos=carpeta_catalogos, puede_continuar=puede_continuar,
+                        obtener_proveedor_ocr=obtener_proveedor_ocr, resumen=resumen,
+                    )
+                finally:
+                    lease_activo.cerrar()
+                continue
+            # Cola Cloud vacía: recuperación local de RECIBIDO/PROCESANDO
+            # (corridas interrumpidas, `--sin-procesar` previos, LAN), un
+            # envío por vuelta para seguir recibiendo entre OCR. La foto del
+            # historial se toma una vez: recorrer G: entre OCR es caro.
+            if locales is None:
+                locales = [
+                    str(registro.get("envio_id", "")) for registro in repositorio.historial()
+                    if registro.get("estado") in ("RECIBIDO", "PROCESANDO")
+                ]
+            locales = [envio_id for envio_id in locales if envio_id not in atendidos]
+            if not locales:
+                break
+            envio_id = locales.pop(0)
+            atendidos.add(envio_id)
+            local = _procesar_recibido_local(
+                repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                obtener_proveedor_ocr=obtener_proveedor_ocr,
+            )
+            _sumar_recuperacion_local(resumen, local)
+    finally:
+        # Lo que quede en cola (escritor perdido, excepción) nunca se
+        # confirma: el lease vence y Cloud lo vuelve a ofrecer.
+        for _token, lease_activo in cola.leases.values():
+            lease_activo.cerrar()
+        cola.leases.clear()
+    # P0 BLOQUEO MOBILE -- la reconciliación global de la bandeja corre UNA
+    # vez, DESPUÉS de cerrar y confirmar cada envío de esta pasada; lo que
+    # quede PENDIENTE (fallo, escritor perdido, interrupción) lo retoma la
+    # pasada siguiente.
+    if dataset and _puede_continuar(puede_continuar):
+        resumen["reconciliacion_bandeja"] = reconciliar_bandeja_diferida_mobile(
+            repositorio, raiz_atlas=Path(dataset).parent.parent.parent,
+        )
+    return resumen
+
+
+def _recibir_pendientes_cloud(
+    *, base_url: str, token_motor: str, consumidor: str, repositorio: RepositorioEnviosMobile,
+    timeout: float, procesar: bool, lease_heartbeat_segundos: float,
+    puede_continuar: Callable[[], bool] | None, cola: _ColaRecepcion, resumen: dict[str, Any],
+    max_leases_en_cola: int,
+) -> None:
+    """Una ronda de recepción, sin OCR: lease, descarga verificada,
+    `recibir()` y checkpoint ATERRIZADO. Con `procesar` el envío queda en
+    cola con su lease vivo; sin `procesar` el lease se suelta sin confirmar
+    (comportamiento previo de `--sin-procesar`)."""
+    if procesar and len(cola.leases) >= max_leases_en_cola:
+        return
     pendientes = _json(base_url, "/api/motor/envios/pendientes", token_motor, timeout=timeout).get("envios", [])
-    resumen["encontrados"] = len(pendientes)
     for pendiente in pendientes:
+        envio_id = str(pendiente.get("envio_id", ""))
+        if not envio_id or envio_id in cola.vistos:
+            continue
+        if procesar and len(cola.leases) >= max_leases_en_cola:
+            break  # el resto sigue PENDIENTE en Cloud para la próxima ronda
         if not _puede_continuar(puede_continuar):
             resumen["detenido_por_escritor"] = True
             break
-        envio_id = str(pendiente.get("envio_id", ""))
-        if not envio_id:
-            continue
+        cola.vistos.add(envio_id)
+        resumen["encontrados"] += 1
         lease_activo: LeaseMotor | None = None
+        en_cola = False
         try:
             lease = _json(base_url, f"/api/motor/envios/{urllib.parse.quote(envio_id, safe='')}/lease", token_motor, method="POST", body={"consumidor": consumidor}, timeout=timeout)
             resumen["leaseados"].append(envio_id)
@@ -239,53 +363,64 @@ def _sincronizar_envios_cloud_impl(
             _marcar_aterrizado_cloud(repositorio, envio_id, lease)
             if not procesar:
                 continue
-            if not _puede_continuar(puede_continuar):
-                resumen["detenido_por_escritor"] = True
-                continue
             checkpoint = (repositorio.cargar(envio_id).get("cloud_procesamiento") or {}).get("estado")
-            resultado = (
-                {"completado": True, "ya_reconciliado": True}
-                if checkpoint == "RECONCILIADO"
-                else _procesar_envio_cloud(
-                    repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                    obtener_proveedor_ocr=obtener_proveedor_ocr,
+            if checkpoint == "RECONCILIADO":
+                # Ya procesado en una corrida cuya confirmación no llegó:
+                # se confirma aquí, sin OCR ni esperar turno en la cola.
+                if not _puede_continuar(puede_continuar):
+                    resumen["detenido_por_escritor"] = True
+                    continue
+                _confirmar_cloud(
+                    base_url=base_url, token_motor=token_motor, envio_id=envio_id,
+                    lease_token=lease_token, lease_activo=lease_activo, timeout=timeout, resumen=resumen,
                 )
-            )
-            _sumar_resultado_procesamiento(resumen, envio_id, resultado)
-            if not resultado.get("completado"):
                 continue
-            if not _puede_continuar(puede_continuar):
-                resumen["detenido_por_escritor"] = True
-                continue
-            _marcar_reconciliado_cloud(repositorio, envio_id)
-            if not lease_activo.vigente or not lease_activo.renovar():
-                resumen["fallidos"][envio_id] = "lease Cloud perdido antes de confirmar"
-                continue
-            _json(base_url, f"/api/motor/envios/{urllib.parse.quote(envio_id, safe='')}/confirmar", token_motor, method="POST", body={"lease_token": lease_token}, timeout=timeout)
-            resumen["confirmados"].append(envio_id)
+            cola.leases[envio_id] = (lease_token, lease_activo)
+            en_cola = True
         except (ErrorSincronizacionCloudMobile, ErrorEnvioMobile, KeyError, TypeError, ValueError) as error:
             resumen["fallidos"][envio_id] = str(error)
         finally:
-            if lease_activo is not None:
+            if lease_activo is not None and not en_cola:
                 lease_activo.cerrar()
-    if procesar and _puede_continuar(puede_continuar):
-        # No se inicializa OCR sólo por el barrido: hacerlo únicamente si el
-        # barrido realmente tiene un documento pendiente de OCR.
-        _sumar_recuperacion_local(
-            resumen, repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+
+
+def _procesar_y_confirmar_cloud(
+    repositorio: RepositorioEnviosMobile, envio_id: str, *, lease_token: str, lease_activo: LeaseMotor,
+    base_url: str, token_motor: str, timeout: float, dataset: Path | None,
+    carpeta_catalogos: str | Path | None, puede_continuar: Callable[[], bool] | None,
+    obtener_proveedor_ocr: Callable[[], object], resumen: dict[str, Any],
+) -> None:
+    try:
+        resultado = _procesar_envio_cloud(
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
             obtener_proveedor_ocr=obtener_proveedor_ocr,
         )
-    elif procesar:
-        resumen["detenido_por_escritor"] = True
-    # P0 BLOQUEO MOBILE -- la reconciliación global de la bandeja corre UNA
-    # vez, DESPUÉS de cerrar y confirmar cada envío de esta pasada; lo que
-    # quede PENDIENTE (fallo, escritor perdido, interrupción) lo retoma la
-    # pasada siguiente.
-    if procesar and dataset and _puede_continuar(puede_continuar):
-        resumen["reconciliacion_bandeja"] = reconciliar_bandeja_diferida_mobile(
-            repositorio, raiz_atlas=Path(dataset).parent.parent.parent,
+        _sumar_resultado_procesamiento(resumen, envio_id, resultado)
+        if not resultado.get("completado"):
+            return
+        if not _puede_continuar(puede_continuar):
+            resumen["detenido_por_escritor"] = True
+            return
+        _marcar_reconciliado_cloud(repositorio, envio_id)
+        _confirmar_cloud(
+            base_url=base_url, token_motor=token_motor, envio_id=envio_id,
+            lease_token=lease_token, lease_activo=lease_activo, timeout=timeout, resumen=resumen,
         )
-    return resumen
+    except (ErrorSincronizacionCloudMobile, ErrorEnvioMobile, KeyError, TypeError, ValueError) as error:
+        resumen["fallidos"][envio_id] = str(error)
+
+
+def _confirmar_cloud(
+    *, base_url: str, token_motor: str, envio_id: str, lease_token: str, lease_activo: LeaseMotor,
+    timeout: float, resumen: dict[str, Any],
+) -> None:
+    """Confirma sólo con el token del propio lease y sólo si Cloud acaba de
+    aceptar su renovación; un lease perdido nunca se da por bueno."""
+    if not lease_activo.vigente or not lease_activo.renovar():
+        resumen["fallidos"][envio_id] = "lease Cloud perdido antes de confirmar"
+        return
+    _json(base_url, f"/api/motor/envios/{urllib.parse.quote(envio_id, safe='')}/confirmar", token_motor, method="POST", body={"lease_token": lease_token}, timeout=timeout)
+    resumen["confirmados"].append(envio_id)
 
 
 def _puede_continuar(guardia: Callable[[], bool] | None) -> bool:
@@ -307,22 +442,40 @@ def procesar_envios_recibidos(
     for registro in repositorio.historial():
         if registro.get("estado") not in ("RECIBIDO", "PROCESANDO"):
             continue
-        envio_id = str(registro.get("envio_id", ""))
-        try:
-            salida = _procesar_envio_cloud(
-                repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                proveedor_ocr=proveedor_ocr, obtener_proveedor_ocr=obtener_proveedor_ocr,
-            )
-            if salida.get("completado"):
-                resultado["procesados"].append(envio_id)
-            elif salida.get("bloqueado"):
-                resultado["omitidos_por_bloqueo"].append(envio_id)
-            elif salida.get("error"):
-                resultado["errores_procesamiento"][envio_id] = str(salida["error"])
-        except SesionOcupadaError:
+        local = _procesar_recibido_local(
+            repositorio, str(registro.get("envio_id", "")), dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            proveedor_ocr=proveedor_ocr, obtener_proveedor_ocr=obtener_proveedor_ocr,
+        )
+        for clave in ("procesados", "omitidos_por_bloqueo"):
+            resultado[clave].extend(local[clave])
+        resultado["errores_procesamiento"].update(local["errores_procesamiento"])
+    return resultado
+
+
+def _procesar_recibido_local(
+    repositorio: RepositorioEnviosMobile, envio_id: str, *, dataset: Path | None,
+    carpeta_catalogos: str | Path | None,
+    proveedor_ocr: object | None = None,
+    obtener_proveedor_ocr: Callable[[], object] | None = None,
+) -> dict[str, Any]:
+    """Recuperación local de UN envío, sin confirmación Cloud. Un fallo
+    aislado nunca corta la corrida."""
+    resultado: dict[str, Any] = {"procesados": [], "omitidos_por_bloqueo": [], "errores_procesamiento": {}}
+    try:
+        salida = _procesar_envio_cloud(
+            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+            proveedor_ocr=proveedor_ocr, obtener_proveedor_ocr=obtener_proveedor_ocr,
+        )
+        if salida.get("completado"):
+            resultado["procesados"].append(envio_id)
+        elif salida.get("bloqueado"):
             resultado["omitidos_por_bloqueo"].append(envio_id)
-        except Exception as error:  # nunca corta el resto del procesamiento
-            resultado["errores_procesamiento"][envio_id] = f"{type(error).__name__}: {error}"
+        elif salida.get("error"):
+            resultado["errores_procesamiento"][envio_id] = str(salida["error"])
+    except SesionOcupadaError:
+        resultado["omitidos_por_bloqueo"].append(envio_id)
+    except Exception as error:  # nunca corta el resto del procesamiento
+        resultado["errores_procesamiento"][envio_id] = f"{type(error).__name__}: {error}"
     return resultado
 
 
@@ -391,16 +544,7 @@ def _sumar_resultado_procesamiento(resumen: dict[str, Any], envio_id: str, resul
         resumen["errores_procesamiento"][envio_id] = str(resultado["error"])
 
 
-def _sumar_recuperacion_local(
-    resumen: dict[str, Any], repositorio: RepositorioEnviosMobile, *, dataset: Path | None,
-    carpeta_catalogos: str | Path | None,
-    proveedor_ocr: object | None = None,
-    obtener_proveedor_ocr: Callable[[], object] | None = None,
-) -> None:
-    recuperacion = procesar_envios_recibidos(
-        repositorio, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-        proveedor_ocr=proveedor_ocr, obtener_proveedor_ocr=obtener_proveedor_ocr,
-    )
+def _sumar_recuperacion_local(resumen: dict[str, Any], recuperacion: dict[str, Any]) -> None:
     for clave in ("procesados", "omitidos_por_bloqueo"):
         for envio_id in recuperacion[clave]:
             if envio_id not in resumen[clave]:
