@@ -591,7 +591,63 @@ def _extraer_asociaciones_geometricas(bloques: List[Any]) -> Dict[str, str]:
         resultado["cliente"] = cliente
     if destino:
         resultado["obra destino"] = destino
+    codigo_destinatario = _extraer_cod_destinatario_geometrico_desde_items(items, escala)
+    if codigo_destinatario:
+        resultado["cod destinatario"] = codigo_destinatario
     return resultado
+
+
+def _extraer_cod_destinatario_geometrico_desde_items(
+    items: List[Dict[str, Any]], escala: float,
+) -> Optional[str]:
+    """Lee ``COD DESTINATARIO`` desde su fila documental, no desde el orden
+    lineal del OCR.
+
+    En las guías AZA el membrete contiene varias columnas.  La lectura lineal
+    puede dejar la etiqueta seguida por ``DIRECCION`` (u otra etiqueta de la
+    columna vecina), aunque el código real esté a su derecha en la misma fila.
+    Un código sólo se acepta si es alfanumérico, contiene al menos un dígito y
+    es el candidato geométricamente no ambiguo de una etiqueta explícita.
+    """
+    etiquetas = [item for item in items if "COD DESTINATARIO" in item["simple"]]
+    decisiones: list[tuple[float, str]] = []
+    for etiqueta in etiquetas:
+        candidatos: list[tuple[float, str]] = []
+        for item in items:
+            if item is etiqueta:
+                continue
+            alto = max(etiqueta["h"], item["h"])
+            diferencia_y = abs(item["cy"] - etiqueta["cy"])
+            if diferencia_y > alto * 1.25 or item["x1"] < etiqueta["x2"] - 8 * escala:
+                continue
+            codigo = re.sub(r"[^A-Z0-9]", "", item["simple"])
+            if not re.fullmatch(r"[A-Z0-9]{4,15}", codigo) or not any(c.isdigit() for c in codigo):
+                continue
+            distancia = max(0.0, item["x1"] - etiqueta["x2"])
+            puntaje = distancia / (350 * escala) + diferencia_y / (alto * 8)
+            candidatos.append((puntaje, codigo))
+        if not candidatos:
+            continue
+        candidatos.sort()
+        mejor_puntaje, mejor_codigo = candidatos[0]
+        # Dos valores distintos igualmente cercanos son ambigüedad real; no
+        # se resuelve por el orden de entrega del OCR.
+        if any(
+            codigo != mejor_codigo and abs(puntaje - mejor_puntaje) <= 0.06
+            for puntaje, codigo in candidatos[1:]
+        ):
+            continue
+        decisiones.append((mejor_puntaje, mejor_codigo))
+    if not decisiones:
+        return None
+    decisiones.sort()
+    mejor_puntaje, mejor_codigo = decisiones[0]
+    if any(
+        codigo != mejor_codigo and abs(puntaje - mejor_puntaje) <= 0.06
+        for puntaje, codigo in decisiones[1:]
+    ):
+        return None
+    return mejor_codigo
 
 
 # Etiquetas de fila del encabezado de la guía (columnas izquierda y derecha)

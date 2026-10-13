@@ -115,6 +115,45 @@ def _resolver(carpeta, *, cliente_texto, rut_cliente, obra, direccion=""):
     )
 
 
+def test_alias_terminal_con_dos_destinos_solo_resuelve_con_direccion_literal(tmp_path):
+    """Un alias corto no elige un destino por su nombre: la dirección es la
+    evidencia que desambigua dos relaciones confirmadas."""
+    carpeta, clientes, cliente, reloj, ids = _crear_cliente(tmp_path)
+    destino_uno = _crear_destino(
+        carpeta, clientes, cliente, reloj, ids,
+        nombre="SUCURSAL UNO", direccion="AVENIDA UNO 100, SANTIAGO",
+    )
+    destino_dos = _crear_destino(
+        carpeta, clientes, cliente, reloj, ids,
+        nombre="SUCURSAL DOS", direccion="CAMINO DOS 200, SANTIAGO",
+    )
+    catalogo = _obras_destinos(carpeta, clientes)
+    primera = catalogo.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra="CONSTRUCTORA EJEMPLO LIMITADA",
+        destino_id=destino_uno.destino_id, evidencia=_evidencia("guia-uno"),
+    )
+    segunda = catalogo.registrar_observacion(
+        cliente_id=cliente.cliente_id, nombre_obra="CONSTRUCTORA EJEMPLO LIMITADA",
+        destino_id=destino_dos.destino_id, evidencia=_evidencia("guia-dos"),
+    )
+    catalogo.confirmar_relacion(primera.relacion.relacion_id, actor="HUMANO")
+    catalogo.confirmar_relacion(segunda.relacion.relacion_id, actor="HUMANO")
+    catalogo.actualizar_identidad_obra(
+        primera.relacion.obra_id,
+        nombre_canonico="CONSTRUCTORA EJEMPLO LIMITADA",
+        aliases_documentales=("CONSTRUCTORA EJEMPLO E",),
+        evidencia=_evidencia("alias"),
+    )
+
+    argumentos = dict(
+        cliente_texto=cliente.razon_social, rut_cliente="50.234.350-5",
+        obra="CONSTRUCTORA EJEMPLO E",
+    )
+    assert _resolver(carpeta, **argumentos) is None
+    resuelto = _resolver(carpeta, **argumentos, direccion="CAMINO DOS 200")
+    assert resuelto.destino_id == destino_dos.destino_id
+
+
 def _hipotesis(contexto, resultado, *, valor="", herramienta="", evidencia_usada=()):
     return HipotesisIA(
         hipotesis_id=calcular_hipotesis_id(contexto, valor), campo=contexto.campo,

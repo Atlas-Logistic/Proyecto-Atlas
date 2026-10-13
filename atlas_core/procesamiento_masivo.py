@@ -1969,6 +1969,17 @@ def _corroborar_obra_destino_confirmada(
         # Antes de consultar relaciones se busca, únicamente para ese caso,
         # un canónico completo y único del mismo cliente. Nunca se inventa el
         # resto del nombre ni se usa una coincidencia fuzzy.
+        direccion = str(direccion_documental or "").strip()
+        # Un alias documental exacto + una dirección literal confirmada es
+        # evidencia suficiente aun si el alias termina en una sola letra. La
+        # lista exige una obra global única y el bucle nunca elige un destino
+        # por nombre solo ni por similitud.
+        if direccion not in {"", "No encontrado"} and nombre_obra_documental_parece_incompleto(obra):
+            texto_documental = normalizar_nombre_destino(direccion)
+            for destino in catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra):
+                calle = normalizar_nombre_destino(destino.direccion.split(",", 1)[0])
+                if calle and direccion_confirmada_coincide(calle, texto_documental):
+                    return destino
         obra_a_corroborar = obra
         if nombre_obra_documental_parece_incompleto(obra):
             candidatas = tuple(
@@ -1992,7 +2003,6 @@ def _corroborar_obra_destino_confirmada(
         )
         if resolucion is not None:
             return resolucion
-        direccion = str(direccion_documental or "").strip()
         if direccion in {"", "No encontrado"}:
             return None
         texto_documental = normalizar_nombre_destino(direccion)
@@ -2424,6 +2434,13 @@ def procesar_archivo(
         except Exception:
             return lineal
 
+    codigo_destinatario_lineal = re.sub(
+        r"[^A-Z0-9]", "", str(datos.get("cod destinatario") or "").upper()
+    )
+    codigo_destinatario_sospechoso = (
+        not re.fullmatch(r"[A-Z0-9]{4,15}", codigo_destinatario_lineal or "")
+        or not any(caracter.isdigit() for caracter in codigo_destinatario_lineal)
+    )
     campos_ausentes = any(
         datos.get(campo) in {None, "", "No encontrado"}
         for campo in (
@@ -2438,7 +2455,8 @@ def procesar_archivo(
             # jamás llegaba a intentarse.
             "número de guía",
         )
-    ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer"))
+    ) or datos.get("chofer") in {None, "", "No encontrado"} or _chofer_lineal_contaminado(datos.get("chofer")) \
+        or codigo_destinatario_sospechoso
     if campos_ausentes:
         # Hallazgo REVISIÓN DE ATLAS (clase EXTRACCIÓN/CORROBORACIÓN, caso
         # real 472624 -- RUT del cliente): antes, los ~6 intentos de
@@ -2498,11 +2516,37 @@ def procesar_archivo(
                     )
 
             for campo in ("cliente", "obra destino"):
-                if datos.get(campo) in {None, "", "No encontrado"} and asociaciones.get(campo):
-                    datos[campo] = asociaciones[campo]
+                valor_actual = datos.get(campo)
+                valor_geometrico = asociaciones.get(campo)
+                # Una asociación etiqueta-valor no ambigua es evidencia más
+                # fuerte que la secuencia lineal del OCR.  Antes sólo se usaba
+                # si el campo venía vacío: una captura contaminada por GIRO o
+                # TELEFONO sobrevivía aunque el valor correcto estuviera
+                # geométricamente identificado. Una cadena contaminada puede
+                # seguir pareciendo un nombre creíble, por lo que esa señal no
+                # es un guardarraíl suficiente: la asociación de una etiqueta
+                # explícita gana siempre, salvo que el propio selector se haya
+                # abstenido por ambigüedad.
+                if valor_geometrico and valor_geometrico != valor_actual:
+                    datos[campo] = valor_geometrico
                     metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
                     campos_geometricos_sin_corroborar.add(campo)
                     logger.info("%s recuperado mediante asociacion-geometrica-conservadora-v1", campo)
+
+            # COD DESTINATARIO es evidencia de obra, no identidad del
+            # cliente. Su extracción lineal puede capturar una etiqueta de
+            # columna vecina (p. ej. "DIRECCION"); si la misma guía ofrece
+            # una asociación geométrica inequívoca, ésta es autoritativa.
+            codigo_geometrico = asociaciones.get("cod destinatario")
+            if codigo_geometrico:
+                codigo_actual = str(datos.get("cod destinatario") or "").strip()
+                codigo_actual_normalizado = re.sub(r"[^A-Z0-9]", "", codigo_actual.upper())
+                if not re.fullmatch(r"[A-Z0-9]{4,15}", codigo_actual_normalizado) or not any(
+                    caracter.isdigit() for caracter in codigo_actual_normalizado
+                ):
+                    datos["cod destinatario"] = codigo_geometrico
+                    metodos_documento.add(MetodoObtencionDocumento.GEOMETRICO.value)
+                    logger.info("cod destinatario recuperado mediante asociacion-geometrica-conservadora-v1")
 
             if datos.get("cliente") in {None, "", "No encontrado"}:
                 # Caso real 475042: etiquetas SEÑOR(ES)/R.U.T./CÓDIGO CLIENTE
