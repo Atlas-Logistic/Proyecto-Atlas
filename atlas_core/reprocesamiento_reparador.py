@@ -39,7 +39,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.evidencia_documental import paginas_pdf_procesables, resolver_ruta_evidencia
@@ -957,6 +957,7 @@ def revalidar_documentos_por_transporte(
     dry_run: bool = True,
     lector_ocr: object = None,
     proveedor: object = None,
+    puede_escribir: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Revalida TODOS los documentos ya persistidos de UN
     `numero_transporte`, reextrayéndolos contra su imagen ORIGINAL vía
@@ -982,7 +983,15 @@ def revalidar_documentos_por_transporte(
     nunca aplica ninguna decisión ni aprende catálogo por sí sola.
 
     `numero_transporte` es un parámetro obligatorio -- este mecanismo es
-    genérico para cualquier transporte futuro, no un script puntual."""
+    genérico para cualquier transporte futuro, no un script puntual.
+
+    `puede_escribir` (opcional) es la guarda del lease global de escritor
+    (`revalidar_transporte.py` pasa `lambda: escritor.vigente`). Con
+    `dry_run=False` se consulta antes de cada documento, justo antes de
+    reescribir el dataset y antes de la reconciliación: si devuelve False
+    se detiene sin escribir más (`escritor_operativo_perdido`). Si el
+    dataset ya quedó escrito pero la reconciliación no corrió, lo informa
+    en `reconciliacion_pendiente`."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -1005,6 +1014,14 @@ def revalidar_documentos_por_transporte(
         aplicaciones = []
 
     documentos: list[DocumentoReparado] = []
+    escritor_perdido = False
+    dataset_escrito = False
+
+    def _escritor_vigente() -> bool:
+        nonlocal escritor_perdido
+        if not dry_run and puede_escribir is not None and not escritor_perdido and not puede_escribir():
+            escritor_perdido = True
+        return not escritor_perdido
 
     with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
         try:
@@ -1022,6 +1039,10 @@ def revalidar_documentos_por_transporte(
         ]
 
         for fila in filas_del_transporte:
+            # Sin escritor vigente no tiene sentido seguir con OCR: nada de
+            # lo que se calcule podría persistirse.
+            if not _escritor_vigente():
+                break
             archivo_id = str(fila.get("archivo", "")).strip()
             evidencia = resolver_ruta_evidencia(raiz, archivo_id)
             if evidencia.ruta is None:
@@ -1068,14 +1089,15 @@ def revalidar_documentos_por_transporte(
                 fila_nueva=False, cambios=tuple(cambios),
             ))
 
-        if not dry_run and any(d.cambios for d in documentos):
+        if not dry_run and any(d.cambios for d in documentos) and _escritor_vigente():
             _escribir_filas_completas(dataset, filas)
+            dataset_escrito = True
 
     if proveedor_propio and hasattr(proveedor, "cerrar"):
         proveedor.cerrar()
 
     reconciliacion: dict[str, object] | None = None
-    if not dry_run and any(d.cambios for d in documentos):
+    if dataset_escrito and _escritor_vigente():
         reconciliacion = revalidar_y_regenerar_reporte(
             raiz_atlas=raiz,
             nombre_carpeta_reporte=f"reporte_revalidacion_transporte_{numero_transporte}_{int(time.time())}",
@@ -1101,5 +1123,8 @@ def revalidar_documentos_por_transporte(
         "campos_cambiados_total": sum(len(d.cambios) for d in documentos),
         "documentos_sin_reparar": [d.archivo for d in documentos if d.motivo_no_reparado],
         "reconciliacion": reconciliacion,
+        "escritor_operativo_perdido": escritor_perdido,
+        "dataset_escrito": dataset_escrito,
+        "reconciliacion_pendiente": dataset_escrito and reconciliacion is None,
         "tiempo_total_ms": round((time.perf_counter() - t_inicio) * 1000, 1),
     }
