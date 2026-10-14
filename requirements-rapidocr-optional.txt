@@ -1,0 +1,5 @@
+# Runtime aislado y opcional para RapidOCRProvider (CPU).
+# No añadir al entorno principal del Motor; instalar en un venv dedicado y
+# configurar ATLAS_RAPIDOCR_PYTHON sólo cuando se seleccione rapidocr.
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.31.0

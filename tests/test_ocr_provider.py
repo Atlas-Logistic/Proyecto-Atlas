@@ -10,6 +10,7 @@ from atlas_core.ocr_provider import (
     EasyOCRProvider,
     EasyOCRWorkerProvider,
     PaddleOCRProvider,
+    RapidOCRProvider,
     ProveedorOCR,
     ProveedorOCRNoDisponible,
     crear_proveedor_ocr,
@@ -138,6 +139,49 @@ def test_paddleocr_provider_cumple_el_protocolo():
     assert isinstance(PaddleOCRProvider(device="cpu"), ProveedorOCR)
 
 
+# --- contrato RapidOCRProvider (worker mockeado, sin instalar RapidOCR) ---
+
+def _preparar_proveedor_rapidocr(monkeypatch, respuestas=None, falla_al_iniciar=False):
+    proveedor = RapidOCRProvider(ruta_python=RUTA_PYTHON_FALSA)
+    proceso = _ProcesoFalso(
+        respuestas_init=json.dumps({"ok": True, "engine": "rapidocr-onnxruntime", "device": "cpu"}) + "\n",
+        respuestas=respuestas, falla_al_iniciar=falla_al_iniciar,
+    )
+    proceso.stdin.write = Mock(side_effect=proceso._escribir)
+    proceso.stdin.flush = Mock()
+    proceso.stdout = Mock()
+    proceso.stdout.readline = Mock(side_effect=proceso._leer_linea)
+    monkeypatch.setattr(ocr_provider.Path, "exists", lambda self: True)
+    monkeypatch.setattr(ocr_provider.subprocess, "Popen", Mock(return_value=proceso))
+    return proveedor, proceso
+
+
+def test_rapidocr_provider_cumple_el_protocolo():
+    assert isinstance(RapidOCRProvider(ruta_python=RUTA_PYTHON_FALSA), ProveedorOCR)
+
+
+def test_rapidocr_provider_reutiliza_bloques_y_separa_delimitador(monkeypatch):
+    crudos = [[[[0, 0], [10, 0], [10, 10], [0, 10]], "：17576134-9", 0.9]]
+    respuesta = json.dumps({"ok": True, "resultado": crudos}) + "\n"
+    proveedor, proceso = _preparar_proveedor_rapidocr(monkeypatch, respuestas=[respuesta])
+
+    bloques = proveedor.leer_bloques("guia.jpg")
+    textos = proveedor.leer_texto("guia.jpg")
+
+    assert bloques[0].texto == "17576134-9"
+    assert textos == ["17576134-9"]
+    assert proveedor.evidencia_ultima[0].texto_original == "：17576134-9"
+    assert sum('"op": "bloques"' in enviado for enviado in proceso._enviado) == 1
+
+
+def test_rapidocr_provider_error_de_imagen_no_cambia_de_proveedor(monkeypatch):
+    respuesta = json.dumps({"ok": False, "error": "ValueError: imagen ilegible"}) + "\n"
+    proveedor, _ = _preparar_proveedor_rapidocr(monkeypatch, respuestas=[respuesta])
+
+    with pytest.raises(RuntimeError, match="imagen ilegible"):
+        proveedor.leer_texto("guia.jpg")
+
+
 def test_paddleocr_provider_leer_texto_via_proceso_aislado(monkeypatch):
     respuesta = json.dumps({"ok": True, "resultado": "FECHA DE EMISION\n23-06-2025"}) + "\n"
     proveedor, proceso = _preparar_proveedor_paddle(monkeypatch, respuestas=[respuesta])
@@ -221,6 +265,19 @@ def test_preferencia_ocr_ausente_conserva_paddleocr():
 
 def test_preferencia_ocr_easyocr_es_valida():
     assert resolver_preferencia_ocr_desde_entorno({"ATLAS_OCR_PROVIDER": " easyocr "}) == "easyocr"
+
+
+def test_preferencia_ocr_rapidocr_es_explicita_y_valida():
+    assert resolver_preferencia_ocr_desde_entorno({"ATLAS_OCR_PROVIDER": " rapidocr "}) == "rapidocr"
+
+
+def test_crear_proveedor_rapidocr_no_afecta_ruta_paddle(monkeypatch):
+    proveedor = Mock(spec=RapidOCRProvider)
+    monkeypatch.setattr(ocr_provider, "RapidOCRProvider", Mock(return_value=proveedor))
+
+    assert crear_proveedor_ocr("rapidocr") is proveedor
+
+    proveedor._asegurar_proceso.assert_called_once_with()
 
 
 def test_preferencia_ocr_invalida_falla_claramente():

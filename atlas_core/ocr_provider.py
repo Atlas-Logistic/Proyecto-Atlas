@@ -39,10 +39,12 @@ from atlas_core.ocr import (
     leer_texto_imagen,
 )
 from atlas_core.paddle_runtime import asegurar_runtime_paddle
+from atlas_core.rapidocr_adapter import BloqueRapidOCR, adaptar_bloques_rapidocr
 
 logger = logging.getLogger(__name__)
 
 RUTA_WORKER_PADDLE = Path(__file__).resolve().parent / "paddleocr_worker.py"
+RUTA_WORKER_RAPIDOCR = Path(__file__).resolve().parent / "rapidocr_worker.py"
 MODULO_WORKER_EASYOCR = "atlas_core.easyocr_worker"
 RAIZ_PAQUETE_ATLAS = Path(__file__).resolve().parent.parent
 
@@ -546,7 +548,125 @@ class PaddleOCRProvider:
             self._fallback_easyocr = None
 
 
-PROVEEDORES_OCR_ADMITIDOS = frozenset({"paddleocr", "easyocr"})
+class RapidOCRProvider:
+    """RapidOCR/ONNX Runtime en CPU, siempre en un worker aislado.
+
+    Se selecciona sólo con ``ATLAS_OCR_PROVIDER=rapidocr``. El intérprete es
+    ``ATLAS_RAPIDOCR_PYTHON`` o, para pruebas/integraciones controladas, el
+    recibido en ``ruta_python``; nunca instala dependencias ni reemplaza a
+    PaddleOCR/EasyOCR. Mantiene en memoria la evidencia cruda/adaptada de la
+    última imagen para que texto y geometría provengan de la misma lectura.
+    """
+
+    def __init__(self, ruta_python: Path | None = None) -> None:
+        configurada = os.environ.get("ATLAS_RAPIDOCR_PYTHON", "").strip()
+        self._ruta_python = ruta_python or (Path(configurada) if configurada else Path(sys.executable))
+        self._proceso: subprocess.Popen | None = None
+        self._drenador_stderr: _DrenadorStderr | None = None
+        self._cache_ruta: str | None = None
+        self._cache_bloques: list[BloqueRapidOCR] | None = None
+
+    @property
+    def evidencia_ultima(self) -> tuple[BloqueRapidOCR, ...]:
+        """Traza en memoria; el Motor no la persiste ni la usa para decidir."""
+        return tuple(self._cache_bloques or ())
+
+    def _asegurar_proceso(self) -> subprocess.Popen:
+        if self._proceso is not None and self._proceso.poll() is None:
+            return self._proceso
+        if not self._ruta_python.exists():
+            raise ProveedorOCRNoDisponible(
+                "No se encontró el intérprete RapidOCR configurado; defina ATLAS_RAPIDOCR_PYTHON."
+            )
+        proceso = subprocess.Popen(
+            [str(self._ruta_python), str(RUTA_WORKER_RAPIDOCR)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        self._drenador_stderr = _DrenadorStderr(proceso.stderr)
+        linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_INICIO_SEG)
+        if linea is None:
+            _matar_arbol_proceso(proceso)
+            detalle = self._drenador_stderr.texto(ESPERA_CIERRE_WORKER_SEG)
+            raise ProveedorOCRNoDisponible(
+                f"El worker de RapidOCR no respondió en {TIMEOUT_INICIO_SEG}s al iniciar.", detalle
+            )
+        if not linea:
+            raise self._worker_terminado(proceso, "al iniciar")
+        respuesta = json.loads(linea)
+        if not respuesta.get("ok"):
+            _matar_arbol_proceso(proceso)
+            raise ProveedorOCRNoDisponible(f"El worker de RapidOCR falló al iniciar: {respuesta.get('error')}")
+        self._proceso = proceso
+        logger.info("RapidOCRProvider iniciado (CPU, worker aislado)")
+        return proceso
+
+    def _worker_terminado(self, proceso: subprocess.Popen, momento: str) -> ProveedorOCRNoDisponible:
+        try:
+            codigo = proceso.wait(timeout=ESPERA_CIERRE_WORKER_SEG)
+        except subprocess.TimeoutExpired:
+            _matar_arbol_proceso(proceso)
+            codigo = None
+        detalle = self._drenador_stderr.texto(ESPERA_CIERRE_WORKER_SEG) if self._drenador_stderr else ""
+        logger.warning("Worker RapidOCR terminó %s (código %s); stderr:\n%s", momento, codigo, detalle)
+        return ProveedorOCRNoDisponible(
+            f"El worker de RapidOCR terminó {momento} (código {codigo}): {_resumen_error_worker(detalle)}", detalle
+        )
+
+    def _comando(self, **kwargs: Any) -> Any:
+        proceso = self._asegurar_proceso()
+        try:
+            proceso.stdin.write(json.dumps(kwargs) + "\n")
+            proceso.stdin.flush()
+            linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_COMANDO_SEG)
+        except (BrokenPipeError, OSError) as exc:
+            raise ProveedorOCRNoDisponible(f"El proceso worker de RapidOCR murió: {exc}") from exc
+        if linea is None:
+            _matar_arbol_proceso(proceso)
+            self._proceso = None
+            raise ProveedorOCRNoDisponible(
+                f"El worker de RapidOCR no respondió en {TIMEOUT_COMANDO_SEG}s procesando {kwargs.get('ruta')}."
+            )
+        if not linea:
+            self._proceso = None
+            raise self._worker_terminado(proceso, f"procesando {Path(str(kwargs.get('ruta'))).name}")
+        respuesta = json.loads(linea)
+        if not respuesta.get("ok"):
+            raise RuntimeError(f"Error de RapidOCR procesando {kwargs.get('ruta')}: {respuesta.get('error')}")
+        return respuesta["resultado"]
+
+    def _bloques_adaptados(self, ruta_imagen: str | Path) -> list[BloqueRapidOCR]:
+        ruta = str(ruta_imagen)
+        if self._cache_ruta != ruta:
+            self._cache_bloques = adaptar_bloques_rapidocr(self._comando(op="bloques", ruta=ruta))
+            self._cache_ruta = ruta
+        return list(self._cache_bloques or [])
+
+    def leer_texto(self, ruta_imagen: str | Path) -> list[str]:
+        return [bloque.texto for bloque in self._bloques_adaptados(ruta_imagen)]
+
+    def leer_bloques(self, ruta_imagen: str | Path) -> list[BloqueOCR]:
+        return [bloque.a_bloque_atlas() for bloque in self._bloques_adaptados(ruta_imagen)]
+
+    def leer_focal(
+        self, ruta_imagen: str | Path, caja: tuple[float, float, float, float], allowlist: str
+    ) -> dict[str, Any]:
+        # RapidOCR no expone allowlist equivalente; el consenso/validadores
+        # canónicos posteriores conservan esa responsabilidad.
+        return dict(self._comando(op="focal", ruta=str(ruta_imagen), caja=list(caja)))
+
+    def cerrar(self) -> None:
+        if self._proceso is not None and self._proceso.poll() is None:
+            try:
+                self._proceso.stdin.close()
+            except OSError:
+                pass
+            self._proceso.terminate()
+        self._proceso = None
+        self._cache_ruta, self._cache_bloques = None, None
+
+
+PROVEEDORES_OCR_ADMITIDOS = frozenset({"paddleocr", "easyocr", "rapidocr"})
 
 
 def resolver_preferencia_ocr_desde_entorno(entorno: dict[str, str] | None = None) -> str:
@@ -583,6 +703,13 @@ def crear_proveedor_ocr(preferido: str = "paddleocr") -> ProveedorOCR:
         logger.info("Proveedor OCR: EasyOCR (solicitado explícitamente)")
         print("[Atlas OCR] Proveedor activo: EasyOCR (solicitado explícitamente)")
         return EasyOCRProvider()
+
+    if preferido == "rapidocr":
+        proveedor_rapidocr = RapidOCRProvider()
+        proveedor_rapidocr._asegurar_proceso()
+        logger.info("Proveedor OCR: RapidOCR CPU (solicitado explícitamente)")
+        print("[Atlas OCR] Proveedor activo: RapidOCR CPU (solicitado explícitamente)")
+        return proveedor_rapidocr
 
     proveedor = PaddleOCRProvider()
     try:

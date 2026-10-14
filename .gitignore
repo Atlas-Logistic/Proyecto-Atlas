@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.sqlite3
 .venv/
+.venv-rapidocr-eval/
 .env
 .env.*
 !.env.example
@@ -39,6 +40,13 @@ resultado_pruebas.txt
 # versionan, los resultados de cada corrida real no.
 experimentos_atlas_ia/resultados/*
 !experimentos_atlas_ia/resultados/.gitkeep
+
+# Evaluación aislada RapidOCR: tanto manifiestos con rutas reales como
+# resultados pueden contener OCR, coordenadas y datos de guías. Sólo se
+# versionan el runner, el ejemplo anonimizado y la documentación.
+experimentos_atlas_ia/rapidocr_cpu_eval/resultados_locales/*
+!experimentos_atlas_ia/rapidocr_cpu_eval/resultados_locales/.gitkeep
+experimentos_atlas_ia/rapidocr_cpu_eval/manifiesto_real.json
 
 # Hallazgo Codex #6 (diff Mobile -> reporte Desktop) -- certificados/
 # claves TLS temporales (p. ej. atlas-mobile-cert.pem/atlas-mobile-
