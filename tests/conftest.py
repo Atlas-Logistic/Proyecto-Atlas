@@ -24,6 +24,9 @@ def _aislar_almacenamiento_portable(monkeypatch):
       (p. ej. para probar la propia autodetección con un `tmp_path`).
     """
     monkeypatch.delenv("ATLAS_DATA_DIR", raising=False)
+    # Sin token Cloud ningún test puede tomar el lease real de escritor
+    # (lo usa el PULL de producción en este mismo PC).
+    monkeypatch.delenv("ATLAS_CLOUD_MOTOR_TOKEN", raising=False)
     monkeypatch.setattr(
         "atlas_core.almacenamiento_portable.autodetectar_raiz_drive",
         lambda: None,

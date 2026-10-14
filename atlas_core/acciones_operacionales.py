@@ -40,6 +40,7 @@ from typing import Callable, Iterable, Mapping
 from atlas_core.almacenamiento_portable import (
     SesionOcupadaError, bloqueo_sesion, escribir_json_atomico,
 )
+from atlas_core.escritor_operativo import lease_desde_entorno
 
 # Mismo criterio que `atlas_core.mobile` (ed2b7bd): el dataset operacional
 # conserva evidencia JSON por fila que puede superar el límite por defecto de
@@ -219,6 +220,8 @@ class _Contexto:
         self.proveedor_rutas_fallback = proveedor_rutas_fallback
         self.token = ""
         self.confirmado_por = ""
+        # Guarda del escritor global mientras corre una acción que lo exige.
+        self.puede_escribir: Callable[[], bool] | None = None
         # Únicos archivos que esta capa puede respaldar/restaurar -- rutas
         # fijas de la raíz, nunca derivadas de parámetros.
         self.archivos = {
@@ -284,6 +287,9 @@ class DefinicionAccion:
     planificar: Callable[[_Contexto, dict], Plan] | None = None
     aplicar: Callable[[_Contexto, dict, Plan, str], dict] | None = None
     consultar: Callable[[_Contexto, dict], object] | None = None
+    # Exige el lease global de escritor (el mismo del PULL Cloud) durante
+    # respaldo, aplicación y restauración.
+    escritor_global: bool = False
 
 
 def _afectados_por_guias(ctx: _Contexto, guias: set[str], *, limite: int = 50) -> dict[str, object]:
@@ -1469,7 +1475,12 @@ def _plan_transporte(ctx: _Contexto, p: dict) -> Plan:
 def _aplicar_transporte(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
     from atlas_core.reprocesamiento_reparador import revalidar_documentos_por_transporte
     resultado = revalidar_documentos_por_transporte(
-        raiz_atlas=ctx.raiz, numero_transporte=str(p["numero_transporte"]), dry_run=False)
+        raiz_atlas=ctx.raiz, numero_transporte=str(p["numero_transporte"]), dry_run=False,
+        puede_escribir=ctx.puede_escribir)
+    if resultado.get("escritor_operativo_perdido"):
+        detalle = ("dataset reescrito; la reconciliación quedó pendiente y la completa la próxima "
+                   "revalidación con escritor" if resultado.get("dataset_escrito") else "no se escribió nada")
+        raise ErrorAccionOperacional("ESCRITOR_PERDIDO", f"se perdió el escritor global: {detalle}")
     return {"despues": {"reextraido": True}, "servicio": resultado}
 
 
@@ -1552,7 +1563,7 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      _plan_viaje_agrupar, _aplicar_viaje_agrupar),
     DefinicionAccion("TRANSPORTE_REVALIDAR", SENSIBLE, "Re-extrae con OCR los documentos de un transporte.",
                      {"numero_transporte": _P("transporte", True), "referencia": _REF},
-                     _plan_transporte, _aplicar_transporte),
+                     _plan_transporte, _aplicar_transporte, escritor_global=True),
     # Declaradas sólo para que su rechazo sea explícito y auditable.
     DefinicionAccion("ENTIDAD_ELIMINAR", DESTRUCTIVA, "Eliminar entidades de catálogo: prohibido.", {}),
     DefinicionAccion("EVIDENCIA_ELIMINAR", DESTRUCTIVA, "Eliminar evidencia original: prohibido.", {}),
@@ -1586,8 +1597,10 @@ class CapaAccionesOperacionales:
     """Única puerta de escritura operacional para agentes."""
 
     def __init__(self, raiz_atlas: str | Path, *, reloj=lambda: datetime.now(timezone.utc),
-                 proveedor_rutas=None, proveedor_rutas_fallback=None, ttl_preview: timedelta = TTL_PREVIEW):
+                 proveedor_rutas=None, proveedor_rutas_fallback=None, ttl_preview: timedelta = TTL_PREVIEW,
+                 fabrica_escritor: Callable[[], object | None] = lease_desde_entorno):
         self.raiz = Path(raiz_atlas)
+        self._fabrica_escritor = fabrica_escritor
         self._reloj = reloj
         self._ttl = ttl_preview
         self._ctx = _Contexto(self.raiz, reloj, proveedor_rutas, proveedor_rutas_fallback)
@@ -1755,6 +1768,29 @@ class CapaAccionesOperacionales:
             return {"estado": "SIN_CAMBIOS", "token": token, "accion": definicion.nombre, "idempotente": True,
                     "auditoria_previa": anterior.get("auditoria_id") if anterior else None}
 
+        if not definicion.escritor_global:
+            return self._aplicar_confirmado(registro, preview, definicion, parametros, plan, token=token,
+                                            actor=actor, confirmado=confirmado, origen=origen)
+        # Sin el lease global no se respalda, aplica ni restaura nada: el
+        # preview sigue vigente para reintentar con el mismo token.
+        escritor = self._fabrica_escritor()
+        if escritor is None:
+            raise ErrorAccionOperacional(
+                "ESCRITOR_NO_DISPONIBLE", "falta ATLAS_CLOUD_MOTOR_TOKEN: sin escritor global no se ejecuta")
+        try:
+            if not escritor.adquirir() or not escritor.vigente:
+                raise ErrorAccionOperacional(
+                    "ESCRITOR_OCUPADO",
+                    "otro proceso (p. ej. el PULL) tiene el escritor global; reintente con el mismo token")
+            self._ctx.puede_escribir = lambda: escritor.vigente
+            return self._aplicar_confirmado(registro, preview, definicion, parametros, plan, token=token,
+                                            actor=actor, confirmado=confirmado, origen=origen)
+        finally:
+            self._ctx.puede_escribir = None
+            escritor.cerrar()
+
+    def _aplicar_confirmado(self, registro: dict, preview: dict, definicion: DefinicionAccion, parametros: dict,
+                            plan: Plan, *, token: str, actor: str, confirmado: str, origen: str) -> dict:
         self._ctx.token = token
         self._ctx.confirmado_por = confirmado
         respaldo = self._respaldar(plan.archivos, token)
@@ -1762,10 +1798,14 @@ class CapaAccionesOperacionales:
         try:
             salida = definicion.aplicar(self._ctx, parametros, plan, actor)
         except Exception as error:  # noqa: BLE001 -- se restaura y se audita cualquier fallo del servicio
-            self._restaurar(respaldo)
+            # Con el escritor global perdido, restaurar el respaldo podría
+            # pisar lo que otro escritor ya persistió: no se restaura.
+            restaurar = self._ctx.puede_escribir is None or self._ctx.puede_escribir()
+            if restaurar:
+                self._restaurar(respaldo)
             codigo = error.codigo if isinstance(error, ErrorAccionOperacional) else "ERROR_SERVICIO"
             publico = {"estado": "FALLIDA", "token": token, "accion": definicion.nombre, "codigo": codigo,
-                       "mensaje": f"{type(error).__name__}: {error}", "respaldo_restaurado": True}
+                       "mensaje": f"{type(error).__name__}: {error}", "respaldo_restaurado": restaurar}
             self._auditar(registro, preview, actor=actor, confirmado_por=confirmado, origen=origen,
                           instante=instante, despues=None, resultado="FALLIDA", publico=publico,
                           respaldo=respaldo)

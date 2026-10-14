@@ -18,6 +18,7 @@ from typing import Callable
 
 LEASE_HEARTBEAT_SEGUNDOS = 30.0
 MARGEN_RELEVO_SEGUNDOS = 30.0
+URL_CLOUD_POR_DEFECTO = "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
 
 
 class ErrorEscritorOperativo(RuntimeError):
@@ -171,3 +172,13 @@ class LeaseEscritorOperativo:
 
     def __exit__(self, _tipo, _valor, _traza) -> None:
         self.cerrar()
+
+
+def lease_desde_entorno(*, timeout: float = 30.0) -> LeaseEscritorOperativo | None:
+    """Lease con la misma configuración que el PULL (ATLAS_CLOUD_MOTOR_TOKEN y
+    ATLAS_CLOUD_MOBILE_URL). Sin token devuelve None: el llamador no escribe."""
+    token = os.environ.get("ATLAS_CLOUD_MOTOR_TOKEN", "").strip()
+    if not token:
+        return None
+    base_url = os.environ.get("ATLAS_CLOUD_MOBILE_URL", "").strip() or URL_CLOUD_POR_DEFECTO
+    return LeaseEscritorOperativo(base_url=base_url, token_motor=token, timeout=timeout)

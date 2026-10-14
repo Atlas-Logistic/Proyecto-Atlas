@@ -35,7 +35,9 @@ hacer X" -- imposibles por construcción):
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -950,6 +952,76 @@ def reparar_documento_focal_con_valores_conocidos(
 # evitar). Este es ese mecanismo mínimo: reprocesa EXCLUSIVAMENTE los
 # documentos de UN `numero_transporte` (parámetro -- nunca hardcodeado),
 # reutilizando el mismo pipeline real y las mismas garantías que arriba.
+# Marca durable de "dataset ya reescrito, reconciliación todavía no hecha".
+# Se escribe ANTES de reescribir el dataset y se borra sólo DESPUÉS de una
+# reconciliación exitosa: una pérdida del lease, una excepción o un corte
+# en medio la dejan en disco, y la siguiente revalidación con escritor (o
+# `revalidar_transporte.py --reconciliar-pendiente`) la completa.
+# `revalidar_y_regenerar_reporte` trabaja sólo sobre el dataset ya
+# persistido, así que repetirla no duplica ni pierde filas.
+NOMBRE_MARCA_RECONCILIACION_PENDIENTE = "reconciliacion_pendiente_revalidacion.json"
+
+
+def _ruta_marca_reconciliacion(raiz: Path) -> Path:
+    return raiz / "operacion" / "actual" / NOMBRE_MARCA_RECONCILIACION_PENDIENTE
+
+
+def leer_reconciliacion_pendiente(raiz_atlas: str | Path) -> list[str]:
+    """Transportes cuya reconciliación quedó pendiente ([] si no hay marca).
+    Una marca ilegible cuenta como pendiente: reconciliar de más es inocuo,
+    no reconciliar deja el estado derivado desalineado."""
+    ruta = _ruta_marca_reconciliacion(Path(raiz_atlas))
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        return ["MARCA_ILEGIBLE"]
+    transportes = datos.get("transportes") if isinstance(datos, Mapping) else None
+    return [str(t) for t in transportes] if isinstance(transportes, list) and transportes else ["MARCA_ILEGIBLE"]
+
+
+def _registrar_reconciliacion_pendiente(raiz: Path, numero_transporte: str) -> None:
+    ruta = _ruta_marca_reconciliacion(raiz)
+    transportes = [t for t in leer_reconciliacion_pendiente(raiz) if t != "MARCA_ILEGIBLE"]
+    if numero_transporte not in transportes:
+        transportes.append(numero_transporte)
+    contenido = json.dumps({"transportes": transportes, "registrado_en": time.time()}, ensure_ascii=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=ruta.parent, prefix=f".{ruta.name}.", suffix=".tmp", delete=False,
+    ) as archivo:
+        temporal = Path(archivo.name)
+        archivo.write(contenido)
+        archivo.flush()
+        os.fsync(archivo.fileno())
+    try:
+        os.replace(temporal, ruta)
+    except BaseException:
+        temporal.unlink(missing_ok=True)
+        raise
+
+
+def completar_reconciliacion_pendiente(
+    *, raiz_atlas: str | Path, puede_escribir: Callable[[], bool],
+) -> dict[str, object]:
+    """Completa, sin OCR, una reconciliación que quedó pendiente tras
+    reescribir el dataset. Exige escritor vigente; sin marca no hace nada."""
+    raiz = Path(raiz_atlas)
+    pendientes = leer_reconciliacion_pendiente(raiz)
+    if not pendientes:
+        return {"reconciliacion_pendiente": False, "transportes": [], "reconciliacion": None,
+                "escritor_operativo_perdido": False}
+    if not puede_escribir():
+        return {"reconciliacion_pendiente": True, "transportes": pendientes, "reconciliacion": None,
+                "escritor_operativo_perdido": True}
+    reconciliacion = revalidar_y_regenerar_reporte(
+        raiz_atlas=raiz, nombre_carpeta_reporte=f"reporte_reconciliacion_pendiente_{int(time.time())}",
+    )
+    _ruta_marca_reconciliacion(raiz).unlink(missing_ok=True)
+    return {"reconciliacion_pendiente": False, "transportes": pendientes, "reconciliacion": reconciliacion,
+            "escritor_operativo_perdido": False}
+
+
 def revalidar_documentos_por_transporte(
     *,
     raiz_atlas: str | Path,
@@ -989,9 +1061,13 @@ def revalidar_documentos_por_transporte(
     (`revalidar_transporte.py` pasa `lambda: escritor.vigente`). Con
     `dry_run=False` se consulta antes de cada documento, justo antes de
     reescribir el dataset y antes de la reconciliación: si devuelve False
-    se detiene sin escribir más (`escritor_operativo_perdido`). Si el
-    dataset ya quedó escrito pero la reconciliación no corrió, lo informa
-    en `reconciliacion_pendiente`."""
+    se detiene sin escribir más (`escritor_operativo_perdido`).
+
+    Antes de reescribir el dataset deja la marca durable de reconciliación
+    pendiente (ver `NOMBRE_MARCA_RECONCILIACION_PENDIENTE`) y la borra tras
+    reconciliar. Si al empezar ya había una marca de una corrida anterior,
+    esta corrida reconcilia aunque no tenga cambios propios, en una sola
+    pasada. `reconciliacion_pendiente` informa si la marca sigue en disco."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -1024,6 +1100,7 @@ def revalidar_documentos_por_transporte(
         return not escritor_perdido
 
     with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        pendientes_previas = leer_reconciliacion_pendiente(raiz)
         try:
             filas = _leer_filas(dataset)
         except (OSError, ValueError):
@@ -1090,6 +1167,7 @@ def revalidar_documentos_por_transporte(
             ))
 
         if not dry_run and any(d.cambios for d in documentos) and _escritor_vigente():
+            _registrar_reconciliacion_pendiente(raiz, numero_transporte)
             _escribir_filas_completas(dataset, filas)
             dataset_escrito = True
 
@@ -1097,11 +1175,12 @@ def revalidar_documentos_por_transporte(
         proveedor.cerrar()
 
     reconciliacion: dict[str, object] | None = None
-    if dataset_escrito and _escritor_vigente():
+    if not dry_run and (dataset_escrito or pendientes_previas) and _escritor_vigente():
         reconciliacion = revalidar_y_regenerar_reporte(
             raiz_atlas=raiz,
             nombre_carpeta_reporte=f"reporte_revalidacion_transporte_{numero_transporte}_{int(time.time())}",
         )
+        _ruta_marca_reconciliacion(raiz).unlink(missing_ok=True)
 
     return {
         "numero_transporte": numero_transporte,
@@ -1125,6 +1204,7 @@ def revalidar_documentos_por_transporte(
         "reconciliacion": reconciliacion,
         "escritor_operativo_perdido": escritor_perdido,
         "dataset_escrito": dataset_escrito,
-        "reconciliacion_pendiente": dataset_escrito and reconciliacion is None,
+        "reconciliaciones_pendientes_previas": pendientes_previas,
+        "reconciliacion_pendiente": bool(leer_reconciliacion_pendiente(raiz)),
         "tiempo_total_ms": round((time.perf_counter() - t_inicio) * 1000, 1),
     }
