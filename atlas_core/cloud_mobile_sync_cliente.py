@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import logging
 import threading
 import urllib.error
@@ -201,6 +202,7 @@ def _sincronizar_envios_cloud_impl(
         "reconciliacion_bandeja": None,
         "errores_recepcion": [],
         "omitidos_error_persistido": [],
+        "ocr_documentos": [],
     }
     proveedor_ocr = proveedor_compartido["proveedor"]
 
@@ -536,6 +538,8 @@ def _procesar_envio_cloud(
     registro = repositorio.cargar(envio_id)
     if registro.get("estado") == "ERROR":
         return {"completado": False, "error": "ERROR funcional persistido"}
+    proveedor_documento = None
+    inicio_documento = None
     try:
         argumentos_procesamiento: dict[str, object] = {
             "dataset": dataset,
@@ -550,20 +554,38 @@ def _procesar_envio_cloud(
             if proveedor_ocr is None and obtener_proveedor_ocr is not None:
                 proveedor_ocr = obtener_proveedor_ocr()
             if proveedor_ocr is not None:
+                proveedor_documento = proveedor_ocr
+                inicio_documento = time.monotonic()
                 argumentos_procesamiento["proveedor_ocr"] = proveedor_ocr
         salida = procesar_y_revalidar_envio_mobile(repositorio, envio_id, **argumentos_procesamiento)
     except SesionOcupadaError:
-        return {"completado": False, "bloqueado": True}
+        resultado: dict[str, object] = {"completado": False, "bloqueado": True}
     except Exception as error:
-        return {"completado": False, "error": f"{type(error).__name__}: {error}"}
-    if not salida.get("procesamiento_ok"):
-        return {"completado": False, "error": "procesamiento operacional no terminado"}
-    if not salida.get("reconciliacion_ok"):
-        return {"completado": False, "error": "reconciliación operacional no terminada"}
-    return {"completado": True}
+        resultado = {"completado": False, "error": f"{type(error).__name__}: {error}"}
+    else:
+        if not salida.get("procesamiento_ok"):
+            resultado = {"completado": False, "error": "procesamiento operacional no terminado"}
+        elif not salida.get("reconciliacion_ok"):
+            resultado = {"completado": False, "error": "reconciliación operacional no terminada"}
+        else:
+            resultado = {"completado": True}
+    if proveedor_documento is not None and inicio_documento is not None:
+        efectivo = getattr(proveedor_documento, "proveedor_efectivo_documento", None)
+        proveedor_efectivo = efectivo() if callable(efectivo) else type(proveedor_documento).__name__
+        segundos = round(time.monotonic() - inicio_documento, 3)
+        resultado.update(proveedor_ocr_efectivo=proveedor_efectivo, tiempo_documento_segundos=segundos)
+        logger.info("PULL Cloud OCR documento=%s proveedor_efectivo=%s tiempo_segundos=%.3f",
+                    envio_id, proveedor_efectivo, segundos)
+    return resultado
 
 
 def _sumar_resultado_procesamiento(resumen: dict[str, Any], envio_id: str, resultado: dict[str, object]) -> None:
+    if "proveedor_ocr_efectivo" in resultado:
+        resumen["ocr_documentos"].append({
+            "envio_id": envio_id,
+            "proveedor_efectivo": resultado["proveedor_ocr_efectivo"],
+            "tiempo_documento_segundos": resultado.get("tiempo_documento_segundos"),
+        })
     if resultado.get("completado") and not resultado.get("ya_reconciliado"):
         resumen["procesados"].append(envio_id)
     elif resultado.get("bloqueado"):

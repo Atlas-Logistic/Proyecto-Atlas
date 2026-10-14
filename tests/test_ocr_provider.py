@@ -467,8 +467,8 @@ def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lot
 
     resultado = proveedor.leer_texto("464264.jpeg")
 
-    assert resultado == ["fallback"]
-    assert ocr_provider.subprocess.Popen.call_count == 1
+    assert resultado == ["OK"]
+    assert ocr_provider.subprocess.Popen.call_count == 2
 
 
 @pytest.mark.parametrize(
@@ -517,7 +517,7 @@ def test_paddleocr_timeout_con_error_easyocr_conserva_el_error_sin_reintentar_pa
     easyocr.leer_texto.assert_called_once_with("guia.jpg")
 
 
-def test_paddleocr_degradado_usa_easyocr_en_operaciones_posteriores_sin_reintentar_paddle(monkeypatch, caplog):
+def test_paddleocr_degradado_usa_easyocr_en_operaciones_posteriores_del_mismo_documento(monkeypatch, caplog):
     proveedor = PaddleOCRProvider(device="cpu")
     asegurar = Mock()
     monkeypatch.setattr(proveedor, "_asegurar_proceso", asegurar)
@@ -540,6 +540,29 @@ def test_paddleocr_degradado_usa_easyocr_en_operaciones_posteriores_sin_reintent
     easyocr.leer_bloques.assert_called_once_with("guia.jpg")
     easyocr.leer_focal.assert_called_once_with("guia.jpg", (1, 2, 3, 4), ALLOWLIST_FECHA)
     assert caplog.text.count("PaddleOCR degradado; usando EasyOCR directamente") == 2
+
+
+def test_paddleocr_reintenta_despues_de_fallos_consecutivos_en_documentos_distintos(monkeypatch):
+    """Cada foto obtiene una oportunidad limpia de Paddle, aun si las dos
+    anteriores agotaron su fallback. Nunca se deja el PULL pegado a EasyOCR."""
+    proveedor = PaddleOCRProvider(device="cpu")
+    paddle = Mock(side_effect=[
+        ProveedorOCRNoDisponible("timeout uno"),
+        ProveedorOCRNoDisponible("timeout dos"),
+        "PADDLE TRES",
+    ])
+    monkeypatch.setattr(proveedor, "_comando", paddle)
+    easyocr = Mock()
+    easyocr.leer_texto.side_effect = [["EASY UNO"], ["EASY DOS"]]
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", Mock(return_value=easyocr))
+
+    assert proveedor.leer_texto("uno.jpeg") == ["EASY UNO"]
+    assert proveedor.proveedor_efectivo_documento() == "PaddleOCRProvider+EasyOCRWorkerProvider"
+    assert proveedor.leer_texto("dos.jpeg") == ["EASY DOS"]
+    assert proveedor.leer_texto("tres.jpeg") == ["PADDLE TRES"]
+    assert proveedor.proveedor_efectivo_documento() == "PaddleOCRProvider"
+    assert paddle.call_count == 3
+    assert easyocr.leer_texto.call_count == 2
 
 
 def test_matar_arbol_proceso_termina_un_proceso_real_colgado():

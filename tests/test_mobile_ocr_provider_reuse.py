@@ -281,3 +281,31 @@ def test_cloud_cierra_proveedor_si_ocurre_excepcion_inesperada(monkeypatch):
         assert str(as_error) == "inesperado"
     assert usados == [proveedor, proveedor]
     assert proveedor.cierres == 1
+
+
+def test_cloud_registra_proveedor_efectivo_y_tiempo_por_documento(monkeypatch):
+    class Proveedor:
+        def proveedor_efectivo_documento(self):
+            return "PaddleOCRProvider+EasyOCRWorkerProvider"
+
+    class Repo:
+        def cargar(self, _envio_id):
+            return {"estado": "RECIBIDO"}
+
+    monkeypatch.setattr(
+        cloud, "procesar_y_revalidar_envio_mobile",
+        lambda *_a, **_k: {"procesamiento_ok": True, "reconciliacion_ok": True},
+    )
+    resultado = cloud._procesar_envio_cloud(
+        Repo(), "guia-uno", dataset=None, carpeta_catalogos=None, proveedor_ocr=Proveedor(),
+    )
+    resumen = {"procesados": [], "omitidos_por_bloqueo": [], "errores_procesamiento": {}, "ocr_documentos": []}
+    cloud._sumar_resultado_procesamiento(resumen, "guia-uno", resultado)
+
+    assert resultado["completado"] is True
+    assert resultado["proveedor_ocr_efectivo"] == "PaddleOCRProvider+EasyOCRWorkerProvider"
+    assert isinstance(resultado["tiempo_documento_segundos"], float)
+    assert resumen["ocr_documentos"] == [{
+        "envio_id": "guia-uno", "proveedor_efectivo": "PaddleOCRProvider+EasyOCRWorkerProvider",
+        "tiempo_documento_segundos": resultado["tiempo_documento_segundos"],
+    }]

@@ -358,6 +358,11 @@ class PaddleOCRProvider:
         self._proceso: subprocess.Popen | None = None
         self._drenador_stderr: _DrenadorStderr | None = None
         self._fallback_easyocr: EasyOCRWorkerProvider | None = None
+        # El fallback pertenece a UNA fotografía, no a toda la instancia
+        # reutilizada por el PULL. Al cambiar de ruta se intenta Paddle de
+        # nuevo y, si el worker anterior agotó timeout, `_comando` ya lo dejó
+        # en None para que arranque uno limpio.
+        self._documento_fallback = ""
         self._degradado_a_easyocr = False
 
     @property
@@ -457,6 +462,24 @@ class PaddleOCRProvider:
             self._fallback_easyocr = EasyOCRWorkerProvider()
         return self._fallback_easyocr
 
+    def _preparar_documento(self, ruta: str | Path) -> None:
+        documento = str(ruta)
+        if documento != self._documento_fallback:
+            self._documento_fallback = documento
+            self._degradado_a_easyocr = False
+
+    def proveedor_efectivo_documento(self) -> str:
+        """Backend usado para la fotografía actual, apto para telemetría.
+
+        La respuesta mixta es deliberada: un documento puede haber alcanzado
+        Paddle antes de que una operación posterior agotara su timeout y se
+        resolviera con EasyOCR. Nunca se inventa un único motor en ese caso.
+        """
+        return (
+            "PaddleOCRProvider+EasyOCRWorkerProvider"
+            if self._degradado_a_easyocr else "PaddleOCRProvider"
+        )
+
     def _con_fallback_easyocr(self, operacion: str, ruta: str | Path, leer_paddle, leer_easyocr):
         """Reintenta una operación fallida de Paddle una sola vez con EasyOCR.
 
@@ -464,6 +487,7 @@ class PaddleOCRProvider:
         EasyOCR falla, su excepción se propaga sin volver a Paddle ni crear
         un ciclo entre proveedores.
         """
+        self._preparar_documento(ruta)
         if self._degradado_a_easyocr:
             mensaje = f"PaddleOCR degradado; usando EasyOCR directamente para {operacion} de {ruta}"
             logger.warning(mensaje)
@@ -475,7 +499,7 @@ class PaddleOCRProvider:
             self._degradado_a_easyocr = True
             mensaje = (
                 f"PaddleOCR no disponible durante {operacion} de {ruta}; degradado a EasyOCR "
-                f"para esta instancia y reintentando una vez con EasyOCR: {exc}"
+                f"sólo para este documento y reintentando una vez con EasyOCR: {exc}"
             )
             logger.warning(mensaje)
             print(f"[Atlas OCR] {mensaje}")
