@@ -231,6 +231,13 @@ def test_d_marcador_absorbido_nunca_toma_un_cero_inicial_como_digito():
     assert _extraer_numero_guia_geometrico(bloques) == {}
 
 
+def test_d_marcador_absorbido_nunca_toma_un_nueve_inicial_como_digito():
+    # Caso real 482179 (RapidOCR): "Nº 482179" leído "N9482179"; el "º"
+    # leído como "9" no se convierte en el número 9482179.
+    bloques = [*_encabezado_real_475449(), _bloque("N9482179", 2175, 686, 380, 94, conf=0.93)]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
+
+
 def test_e_formatos_con_marcador_explicito_siguen_funcionando():
     for texto in ("Nº 475449", "N° 475449", "N? 475449", "N°475449"):
         bloques = [*_encabezado_real_475449(), _bloque(texto, 2175, 686, 2498 - 2175, 780 - 686, conf=0.98)]

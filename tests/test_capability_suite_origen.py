@@ -283,6 +283,27 @@ def test_g_documento_hermano_del_mismo_transporte_ya_resuelto(tmp_path):
     assert fila_2["origen_determinado_por"] == "DOCUMENTO_HERMANO_MISMO_TRANSPORTE"
 
 
+def test_g_transporte_no_encontrado_nunca_hace_hermanas(tmp_path):
+    """Caso real 482179: "No encontrado" es ausencia, no un transporte.
+    Tomó el origen de 472126 (otro viaje, otro cliente) sólo porque
+    ninguna de las dos leyó su transporte."""
+    raiz, catalogos, actual, dataset, colina, renca = _entorno(tmp_path, [
+        _fila_csv(
+            numero_guia="472126", numero_transporte="No encontrado", patente_tracto="AA1111",
+            tipo_carga="BARRAS", descripcion_material="B HORMIGON 12MM 12M A630-420H (N)",
+        ),
+        _fila_csv(
+            numero_guia="482179", numero_transporte="No encontrado", patente_tracto="ZZ9999",
+            cliente="OTRO CLIENTE DISTINTO SA", tipo_carga="NO DETERMINADO", descripcion_material="",
+        ),
+    ])
+    _revalidar(raiz)
+    assert _fila_por_guia(dataset, "472126")["planta_origen_id"] == colina.planta_id
+    fila = _fila_por_guia(dataset, "482179")
+    assert fila["planta_origen_id"] == ""
+    assert fila["origen_determinado_por"] != "DOCUMENTO_HERMANO_MISMO_TRANSPORTE"
+
+
 # ============================================================
 # H. correlatividad de números de guía
 # ============================================================

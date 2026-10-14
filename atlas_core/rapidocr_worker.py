@@ -12,6 +12,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Sin clasificador de ángulo por línea, igual que PaddleOCR
+# (`use_textline_orientation=False`): la orientación del documento la
+# resuelve Atlas antes del OCR. Caso real 482179: el clasificador giró 180°
+# cajas cortas ya horizontales ("0000363997" -> "L665950000：", patente y
+# teléfono ilegibles); sin él se leen bien.
+USAR_CLASIFICADOR_ANGULO = False
+
 
 def _dependencias():
     import numpy as np
@@ -29,7 +36,7 @@ def _filas(resultado: Any) -> list[object]:
 def _bloques(engine: Any, ruta: str, Image, ImageOps, np) -> list[list[object]]:
     with Image.open(Path(ruta)) as imagen:
         orientada = ImageOps.exif_transpose(imagen).convert("RGB")
-        resultado = engine(np.asarray(orientada))
+        resultado = engine(np.asarray(orientada), use_cls=USAR_CLASIFICADOR_ANGULO)
     salida: list[list[object]] = []
     for fila in _filas(resultado):
         if not isinstance(fila, (list, tuple)) or len(fila) < 3:
@@ -65,7 +72,7 @@ def _focal(engine: Any, ruta: str, caja: list[float], Image, ImageEnhance, Image
                      ("ampliada_2x_contraste", ImageEnhance.Contrast(ImageOps.grayscale(ampliada)).enhance(1.35)))
     lecturas = []
     for nombre, variante in variantes:
-        bloques = _filas(engine(np.asarray(variante.convert("RGB"))))
+        bloques = _filas(engine(np.asarray(variante.convert("RGB")), use_cls=USAR_CLASIFICADOR_ANGULO))
         textos = [str(fila[1]) for fila in bloques if isinstance(fila, (list, tuple)) and len(fila) >= 3]
         confianzas = [float(fila[2]) for fila in bloques if isinstance(fila, (list, tuple)) and len(fila) >= 3 and isinstance(fila[2], (int, float))]
         lecturas.append({"variante": nombre, "texto": " ".join(textos), "confianza": min(confianzas) if confianzas else None})

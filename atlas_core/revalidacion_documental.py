@@ -170,6 +170,18 @@ _ERRORES_CATALOGO_VEHICULOS = (
     ValueError,
 )
 
+
+def _transporte_identificable(fila: Mapping[str, str]) -> str:
+    """`numero_transporte` que identifica un viaje, o "" si está ausente.
+
+    "No encontrado" es un marcador de ausencia, no un transporte: agrupar
+    por él junta guías de viajes distintos como si fueran hermanas (caso
+    real 482179 tomó el origen de 472126 con MISMO_TRANSPORTE=No encontrado).
+    """
+    transporte = str(fila.get("numero_transporte", "")).strip()
+    return "" if transporte in _AUSENTES else transporte
+
+
 # Recuperaciones P0: versiones locales y deliberadamente pequeñas.  Se
 # persisten dentro de la métrica ya propia de cada fila; no se introduce otro
 # registro ni se convierte cada reconciliación en un reproceso masivo.
@@ -765,7 +777,7 @@ def revalidar_fecha_documental_por_transporte_compartido_sin_ocr(
         filas = _leer_filas(ruta)
         grupos: dict[str, list[dict[str, str]]] = {}
         for fila in filas:
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             if transporte:
                 grupos.setdefault(transporte, []).append(fila)
 
@@ -886,7 +898,7 @@ def revalidar_fecha_por_telemetria_de_transporte_compartido_sin_ocr(
             return {"filas_totales": 0, "guias_actualizadas": []}
         grupos: dict[str, list[dict[str, str]]] = {}
         for fila in filas:
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             if transporte:
                 grupos.setdefault(transporte, []).append(fila)
 
@@ -2578,7 +2590,7 @@ def revalidar_destino_rechazado_por_evidencia_b1_sin_ocr(
             return {"filas_totales": 0, "guias_actualizadas": []}
         rechazados_por_transporte: dict[str, set[str]] = {}
         for fila in filas:
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             if not transporte:
                 continue
             for traza in _trazas_atlas_ia(fila):
@@ -2592,7 +2604,7 @@ def revalidar_destino_rechazado_por_evidencia_b1_sin_ocr(
 
         guias_actualizadas: list[str] = []
         for fila in filas:
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             rechazados = rechazados_por_transporte.get(transporte, set())
             if not rechazados:
                 continue
@@ -2777,7 +2789,7 @@ def revalidar_destino_propio_respaldado_por_b1_sin_ocr(
             if not valor:
                 continue
             _aplicar(fila, valor)
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             if transporte:
                 valores_respaldados_por_transporte[transporte] = valor
             guias_actualizadas.append(str(fila.get("numero_guia", "")).strip())
@@ -2793,7 +2805,7 @@ def revalidar_destino_propio_respaldado_por_b1_sin_ocr(
                 continue
             if str(fila.get("despachar_a_crudo", "")).strip():
                 continue
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             valor = valores_respaldados_por_transporte.get(transporte) if transporte else None
             if not valor:
                 continue
@@ -5371,7 +5383,7 @@ def revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(
 
         candidatos_por_transporte: dict[str, set[tuple[str, str]]] = {}
         for fila in filas:
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             planta_id = str(fila.get("planta_origen_id", "")).strip()
             if not transporte or not planta_id:
                 continue
@@ -5389,7 +5401,7 @@ def revalidar_origen_por_documento_hermano_de_transporte_sin_ocr(
                 or conflicto_gps_tiene_evidencia_real(motivo_origen_gps)
             ):
                 continue  # evidencia GPS real y propia de este documento -- nunca se pisa
-            transporte = str(fila.get("numero_transporte", "")).strip()
+            transporte = _transporte_identificable(fila)
             if not transporte:
                 continue
             candidatos = candidatos_por_transporte.get(transporte, set())

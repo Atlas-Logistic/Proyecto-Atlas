@@ -1418,9 +1418,11 @@ def _extraer_transporte_geometrico(
 _PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO?]\.?\s*([0-9]{5,8})$")
 # Caso real 475449 (Mobile, Salomón Pizarro): PaddleOCR absorbe el "º" y
 # entrega "N475449" pegado. Sólo para este camino geométrico (con las
-# mismas ancla/ventana/unicidad); el primer dígito nunca es 0 para no
-# convertir un "º" leído como "0" ("N0475449") en parte del número.
-_PATRON_MARCADOR_NUMERO_GUIA_ABSORBIDO = re.compile(r"^N([1-9][0-9]{4,7})$")
+# mismas ancla/ventana/unicidad); el primer dígito nunca es 0 ni 9 para no
+# convertir un "º" leído como dígito en parte del número: "N0475449", o
+# "N9482179" (caso real 482179, RapidOCR lee "Nº 482179" con el "º" como
+# "9"). Ante esa ambigüedad se abstiene; nunca recorta el dígito.
+_PATRON_MARCADOR_NUMERO_GUIA_ABSORBIDO = re.compile(r"^N([1-8][0-9]{4,7})$")
 _PATRON_MARCADOR_NUMERO_GUIA_SOLO = re.compile(r"^(?:N[°ºO?]\.?|NRO\.?)$")
 _PATRON_CANDIDATO_NUMERICO_PURO = re.compile(r"^[0-9]{5,8}$")
 

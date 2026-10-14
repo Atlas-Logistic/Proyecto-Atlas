@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 
 from atlas_core.rapidocr_adapter import adaptar_bloques_rapidocr, segmentar_delimitador_inicial
 from atlas_core import rapidocr_worker
@@ -33,14 +33,32 @@ def test_worker_transpone_exif_antes_de_enviar_a_rapidocr(tmp_path: Path):
     vistas = []
 
     class Engine:
-        def __call__(self, array):
-            vistas.append(array.shape)
+        def __call__(self, array, use_cls=True):
+            vistas.append((array.shape, use_cls))
             return ([[[[0, 0], [1, 0], [1, 1], [0, 1]], "OK", 0.9]], [0, 0, 0])
 
     bloques = rapidocr_worker._bloques(Engine(), str(ruta), Image, ImageOps, np)
 
-    assert vistas == [(3, 2, 3)]  # EXIF=6: 3x2 cruda pasa a 2x3 documental.
+    # EXIF=6: 3x2 cruda pasa a 2x3 documental; sin clasificador de ángulo
+    # por línea (caso real 482179: giraba 180° el número de transporte).
+    assert vistas == [((3, 2, 3), False)]
     assert bloques[0][1] == "OK"
+
+
+def test_worker_focal_tampoco_usa_clasificador_de_angulo(tmp_path: Path):
+    ruta = tmp_path / "doc.png"
+    Image.new("RGB", (40, 20), "white").save(ruta)
+    llamadas = []
+
+    class Engine:
+        def __call__(self, array, use_cls=True):
+            llamadas.append(use_cls)
+            return ([[[[0, 0], [1, 0], [1, 1], [0, 1]], "0000363997", 0.9]], [0, 0, 0])
+
+    resultado = rapidocr_worker._focal(Engine(), str(ruta), [5, 5, 30, 15], Image, ImageEnhance, ImageOps, np)
+
+    assert llamadas == [False] * 4
+    assert [l["texto"] for l in resultado["lecturas"]] == ["0000363997"] * 4
 
 
 def test_delimitador_rapidocr_llega_al_extractor_y_validador_canonicos():

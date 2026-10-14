@@ -445,7 +445,7 @@ def guias_afectadas_por_registro(
         for f in filas
         if str(f.get("numero_guia", "")).strip() == numero_guia
         or normalizar_nombre_obra(str(f.get("obra_destino", ""))) in claves
-    } - {""}
+    } - {"", "No encontrado"}  # el marcador de ausencia no identifica un viaje
     guias = {numero_guia} | {
         str(f.get("numero_guia", "")).strip()
         for f in filas

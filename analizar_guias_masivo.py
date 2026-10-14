@@ -218,12 +218,14 @@ def main(argv: list[str] | None = None) -> None:
                 if str(f.get("archivo", "")).strip() in archivos_nuevos
                 and str(f.get("numero_guia", "")).strip()
             }
+            # "No encontrado" no es un viaje: sin esto una guía sin
+            # transporte arrastraba al alcance a todas las demás sin
+            # transporte (caso real 482179 -> 472126).
             transportes_afectados = {
                 str(f.get("numero_transporte", "")).strip()
                 for f in _filas_lote
                 if str(f.get("numero_guia", "")).strip() in guias_nuevas
-                and str(f.get("numero_transporte", "")).strip()
-            }
+            } - {"", "No encontrado"}
             guias_afectadas = set(guias_nuevas) | {
                 str(f.get("numero_guia", "")).strip()
                 for f in _filas_lote
