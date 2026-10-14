@@ -27,6 +27,7 @@ from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile
 from atlas_core.ocr_provider import resolver_preferencia_ocr_desde_entorno
+from atlas_core.registro_ciclo_pull import ejecutar_con_registro_de_ciclo
 
 URL_CLOUD_POR_DEFECTO = "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
 
@@ -88,4 +89,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Un archivo por ciclo en %LOCALAPPDATA%\Atlas\logs\pull_ciclos: el log fijo de
+    # la tarea se sobrescribe y un ciclo interrumpido perdía su evidencia.
+    ejecutar_con_registro_de_ciclo(main)
