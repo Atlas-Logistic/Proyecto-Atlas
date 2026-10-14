@@ -160,6 +160,10 @@ from atlas_core.catalogo_clientes import (
     EstadoVigenciaCliente,
     normalizar_rut_cliente,
 )
+from atlas_core.convergencia_identidad_conocida import (
+    RESULTADO_RESUELTO,
+    resolver_identidad_cliente_contextual,
+)
 from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos,
@@ -2733,6 +2737,33 @@ def procesar_archivo(
         # de vehículos. Se aplica después de la recuperación geométrica (P1) para
         # cubrir el valor final, sea cual sea su origen. Nunca inventa una
         # patente nueva; ver jerarquía en resolver_patente_canonica.
+        # Cliente con texto OCR levemente corrompido: se consulta el catálogo
+        # vigente y se corrige sólo cuando RUT documental y similitud nominal
+        # alta convergen en el mismo cliente confirmado/activo. No aprende
+        # aliases ni fuerza ambigüedades.
+        try:
+            clientes_vigentes = CatalogoClientes(Path(carpeta_catalogos) / "clientes.json").listar()
+            cliente_documental = str(cliente_antes_catalogo or datos.get("cliente", "")).strip()
+            identidad_contextual = resolver_identidad_cliente_contextual(
+                nombre_documental=cliente_documental,
+                rut_documental=str(datos.get("RUT del cliente", "")),
+                clientes=clientes_vigentes,
+            )
+            if identidad_contextual.resultado == RESULTADO_RESUELTO:
+                datos["cliente"] = str(identidad_contextual.razon_social)
+                cliente_corroborado_n1 = True
+                metodos_documento.update({
+                    MetodoObtencionDocumento.CATALOGO_RUT_CLIENTE.value,
+                    MetodoObtencionDocumento.FUZZY.value,
+                })
+                campos_geometricos_sin_corroborar.discard("cliente")
+                logger.info(
+                    "cliente corregido mediante rut-y-similitud-documental-v1: %r -> %r",
+                    cliente_documental, identidad_contextual.razon_social,
+                )
+        except (ErrorCatalogoClientes, OSError, ValueError) as exc:
+            logger.warning("Resolución contextual de cliente omitida: %s: %s", type(exc).__name__, exc)
+
         try:
             vehiculos = Path(carpeta_catalogos) / "vehiculos.json"
             catalogo_vehiculos = cargar_catalogo_vehiculos(vehiculos)

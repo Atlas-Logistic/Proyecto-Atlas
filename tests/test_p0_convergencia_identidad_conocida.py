@@ -13,6 +13,7 @@ from atlas_core.convergencia_identidad_conocida import (
     RESULTADO_SIN_EVIDENCIA,
     resolver_identidad_nominal_fuerte_chofer,
     resolver_identidad_nominal_fuerte_cliente,
+    resolver_identidad_cliente_contextual,
 )
 from atlas_core.decisiones_pendientes import crear_decision, regenerar_decisiones_persistidas
 from atlas_core.procesamiento_masivo import COLUMNAS
@@ -227,6 +228,47 @@ def test_cliente_sin_coincidencia_ninguna_sin_evidencia():
         nombre_documental="EMPRESA TOTALMENTE DISTINTA SPA", rut_documental="No encontrado", clientes=[torres],
     )
     assert resultado.resultado == RESULTADO_SIN_EVIDENCIA
+
+
+def test_cliente_contextual_corrige_variante_ocr_solo_con_rut_y_nombre_unicos():
+    """Patrón OCR sintético: varias sustituciones, sin excepción por empresa."""
+    cliente = _cliente("cliente-1", "CONSTRUCTORA ALFA NORTE LTDA", rut=RUT_TORRES_CANONICO)
+    resultado = resolver_identidad_cliente_contextual(
+        nombre_documental="CONSTRVCTORA ALPA NORTF ILTDA",
+        rut_documental="50.234.350-5", clientes=[cliente],
+    )
+    assert resultado.resultado == RESULTADO_RESUELTO
+    assert resultado.razon_social == "CONSTRUCTORA ALFA NORTE LTDA"
+    assert resultado.via == "RUT_Y_SIMILITUD_DOCUMENTAL"
+
+
+def test_cliente_contextual_sin_rut_no_corrige_solo_por_similitud():
+    cliente = _cliente("cliente-1", "CONSTRUCTORA ALFA NORTE LTDA", rut=RUT_TORRES_CANONICO)
+    resultado = resolver_identidad_cliente_contextual(
+        nombre_documental="CONSTRVCTORA ALPA NORTF ILTDA",
+        rut_documental="No encontrado", clientes=[cliente],
+    )
+    assert resultado.resultado == RESULTADO_ABSTENCION
+
+
+def test_cliente_contextual_se_abstiene_si_rut_y_nombre_apuntan_a_empresas_distintas():
+    por_rut = _cliente("rut", "COMERCIAL ALFA SPA", rut=RUT_TORRES_CANONICO)
+    por_nombre = _cliente("nombre", "CONSTRUCTORA ALFA NORTE LTDA", rut="93772000-9")
+    resultado = resolver_identidad_cliente_contextual(
+        nombre_documental="CONSTRUCTORA ALFA NORTE LTDA",
+        rut_documental="50.234.350-5", clientes=[por_rut, por_nombre],
+    )
+    assert resultado.resultado == RESULTADO_ABSTENCION
+
+
+def test_cliente_contextual_se_abstiene_con_dos_candidatos_nominales_cercanos():
+    por_rut = _cliente("rut", "CONSTRUCTORA ALFA NORTE LTDA", rut=RUT_TORRES_CANONICO)
+    competidor = _cliente("competidor", "CONSTRUCTORA ALFA NORTE LIMITADA", rut="93772000-9")
+    resultado = resolver_identidad_cliente_contextual(
+        nombre_documental="CONSTRUCTORA ALFA NORTE LTDA",
+        rut_documental="50.234.350-5", clientes=[por_rut, competidor],
+    )
+    assert resultado.resultado == RESULTADO_ABSTENCION
 
 
 def test_bandeja_retira_cliente_desconocido_convergente_usando_rut_vigente(tmp_path):

@@ -162,6 +162,55 @@ class IdentidadClienteResuelta:
     explicacion: str
 
 
+def resolver_identidad_cliente_contextual(
+    *, nombre_documental: str, rut_documental: str, clientes: Iterable[Cliente],
+    umbral_similitud: float = 0.84, margen_ambiguedad: float = 0.08,
+) -> IdentidadClienteResuelta:
+    """Resuelve una variante OCR de un cliente conocido, sin aprenderla.
+
+    Exige RUT documental válido que identifique un único cliente
+    CONFIRMADO/ACTIVO y que el nombre de la misma guía converja hacia la
+    misma identidad con similitud alta y margen suficiente. Sin esas dos
+    evidencias, o ante conflicto, se abstiene.
+    """
+    vigentes = [c for c in clientes if c.estado_calidad == "CONFIRMADO" and c.estado_vigencia == "ACTIVO"]
+    try:
+        rut = normalizar_rut_cliente(rut_documental)
+    except ValueError:
+        rut = ""
+    por_rut = [c for c in vigentes if rut and c.rut == rut]
+    if len(por_rut) != 1:
+        return IdentidadClienteResuelta(RESULTADO_ABSTENCION, None, None, "",
+            "Sin RUT documental válido que identifique un único cliente confirmado/activo.")
+
+    nombre = normalizar_nombre_cliente(nombre_documental)
+    if not nombre:
+        return IdentidadClienteResuelta(RESULTADO_ABSTENCION, None, None, "",
+            "El RUT identifica un cliente, pero falta nombre documental para corroborar la lectura.")
+
+    candidatos: list[tuple[float, Cliente]] = []
+    for cliente in vigentes:
+        claves = {normalizar_nombre_cliente(valor) for valor in
+                  (cliente.razon_social, cliente.nombre_comercial, *cliente.aliases) if valor}
+        if claves:
+            candidatos.append((max(difflib.SequenceMatcher(None, nombre, clave).ratio() for clave in claves), cliente))
+    candidatos.sort(key=lambda item: (-item[0], item[1].cliente_id))
+    if not candidatos or candidatos[0][0] < umbral_similitud:
+        return IdentidadClienteResuelta(RESULTADO_ABSTENCION, None, None, "",
+            "El nombre documental no alcanza similitud suficiente con un cliente confirmado.")
+    mejor_similitud, mejor = candidatos[0]
+    if len(candidatos) > 1 and mejor_similitud - candidatos[1][0] < margen_ambiguedad:
+        return IdentidadClienteResuelta(RESULTADO_ABSTENCION, None, None, "",
+            "El nombre documental tiene candidatos confirmados demasiado cercanos; requiere revisión humana.")
+    cliente_rut = por_rut[0]
+    if mejor.cliente_id != cliente_rut.cliente_id:
+        return IdentidadClienteResuelta(RESULTADO_ABSTENCION, None, None, "",
+            "El RUT y el único mejor candidato nominal identifican clientes distintos; requiere revisión humana.")
+    return IdentidadClienteResuelta(
+        RESULTADO_RESUELTO, cliente_rut.cliente_id, cliente_rut.razon_social, "RUT_Y_SIMILITUD_DOCUMENTAL",
+        "RUT documental válido y nombre OCR de alta similitud convergen en un único cliente confirmado/activo.")
+
+
 def _nombre_exacto_cliente(nombre_documental: str, cliente: Cliente) -> bool:
     """Igualdad EXACTA tras normalizar -- nunca substring/fuzzy (eso ya
     lo cubren otros mecanismos existentes; este bloque exige certeza)."""
