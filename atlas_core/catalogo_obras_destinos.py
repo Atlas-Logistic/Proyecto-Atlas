@@ -426,6 +426,120 @@ class CatalogoObrasDestinos:
             self._escribir(obras, relaciones)
             return actualizada
 
+    def consolidar_obra_duplicada(
+        self,
+        obra_principal_id: str,
+        obra_duplicada_id: str,
+        *,
+        evidencia: Evidencia,
+    ) -> dict[str, object]:
+        """Conserva una obra confirmada e inactiva un duplicado no confirmado.
+
+        Esta operación no borra filas, evidencias ni relaciones. Sólo admite
+        un duplicado OBSERVADO/CANDIDATO del mismo cliente que la obra
+        principal CONFIRMADA. Las relaciones PENDIENTES se trasladan cuando
+        no colisionan; una relación humana CONFIRMADA en el duplicado exige
+        revisión humana y no se toca.
+        """
+        _validar_evidencia(evidencia)
+        if evidencia.tipo == TipoEvidencia.CONFIRMACION_HUMANA.value:
+            raise ErrorCatalogoObrasDestinos(
+                "la consolidación requiere evidencia operacional no decisional"
+            )
+        principal_id = _obligatorio(obra_principal_id, "obra_principal_id")
+        duplicada_id = _obligatorio(obra_duplicada_id, "obra_duplicada_id")
+        if principal_id == duplicada_id:
+            raise ErrorCatalogoObrasDestinos("las obras a consolidar deben ser distintas")
+        with bloqueo_sesion(self.ruta.parent, "obras_destinos"):
+            obras, relaciones = self._leer()
+            principal = self._obra(obras, principal_id)
+            duplicada = self._obra(obras, duplicada_id)
+            consolidacion_previa = any(
+                e.tipo == TipoEvidencia.CATALOGO.value
+                and e.campos_observados.get("operacion") == "CONSOLIDACION_OBRA_DUPLICADA"
+                and e.campos_observados.get("obra_duplicada_id") == duplicada_id
+                for e in principal.evidencias
+            )
+            if duplicada.estado_vigencia == EstadoVigencia.INACTIVO.value:
+                if consolidacion_previa:
+                    return {"principal": principal, "duplicada": duplicada,
+                            "relaciones_trasladadas": (), "idempotente": True}
+                raise ErrorCatalogoObrasDestinos(
+                    "la obra duplicada ya está inactiva por otro motivo"
+                )
+            if (principal.estado != EstadoObra.CONFIRMADA.value
+                    or principal.estado_vigencia != EstadoVigencia.ACTIVO.value):
+                raise ErrorCatalogoObrasDestinos(
+                    "la obra principal debe estar CONFIRMADA y ACTIVA"
+                )
+            if duplicada.estado not in {EstadoObra.OBSERVADA.value, EstadoObra.CANDIDATA.value}:
+                raise ErrorCatalogoObrasDestinos(
+                    "sólo se consolida una obra duplicada sin confirmar"
+                )
+            if not principal.cliente_id or principal.cliente_id != duplicada.cliente_id:
+                raise ErrorCatalogoObrasDestinos(
+                    "las obras no tienen el mismo cliente de procedencia"
+                )
+            relaciones_duplicada = [r for r in relaciones if r.obra_id == duplicada_id]
+            if any(r.estado == EstadoRelacion.CONFIRMADA.value for r in relaciones_duplicada):
+                raise ErrorCatalogoObrasDestinos(
+                    "el duplicado tiene una relación CONFIRMADA; requiere decisión humana"
+                )
+            destinos_principal = {
+                r.destino_id for r in relaciones if r.obra_id == principal_id
+                and r.estado not in {EstadoRelacion.RECHAZADA.value, EstadoRelacion.INACTIVA.value}
+            }
+            trasladables = [r for r in relaciones_duplicada if r.estado == EstadoRelacion.PENDIENTE.value]
+            if any(r.destino_id in destinos_principal for r in trasladables):
+                raise ErrorCatalogoObrasDestinos(
+                    "el duplicado tiene una relación pendiente que colisiona con la obra principal"
+                )
+            instante = self._instante_iso()
+            aliases = list(principal.aliases_documentales)
+            claves = self._claves_obra(principal)
+            for nombre in (duplicada.nombre_canonico, *duplicada.aliases_documentales):
+                clave = normalizar_nombre_obra(nombre)
+                if clave not in claves:
+                    aliases.append(nombre)
+                    claves.add(clave)
+            evidencia_consolidacion = Evidencia(
+                tipo=evidencia.tipo,
+                identificador_fuente=evidencia.identificador_fuente,
+                referencia_hash=evidencia.referencia_hash,
+                campos_observados={
+                    **evidencia.campos_observados,
+                    "operacion": "CONSOLIDACION_OBRA_DUPLICADA",
+                    "obra_duplicada_id": duplicada_id,
+                    "obra_principal_id": principal_id,
+                },
+                fecha=evidencia.fecha,
+                actor_proceso=evidencia.actor_proceso,
+                resultado=evidencia.resultado,
+            )
+            principal_nueva = replace(
+                principal,
+                aliases_documentales=tuple(aliases),
+                evidencias=self._agregar_evidencia(principal.evidencias, evidencia_consolidacion),
+                fecha_modificacion=instante,
+            )
+            duplicada_nueva = replace(
+                duplicada,
+                estado=EstadoObra.INACTIVA.value,
+                estado_vigencia=EstadoVigencia.INACTIVO.value,
+                fecha_modificacion=instante,
+            )
+            obras[obras.index(principal)] = principal_nueva
+            obras[obras.index(duplicada)] = duplicada_nueva
+            trasladadas: list[str] = []
+            for relacion in trasladables:
+                nueva = replace(relacion, obra_id=principal_id, fecha_modificacion=instante)
+                relaciones[relaciones.index(relacion)] = nueva
+                trasladadas.append(nueva.relacion_id)
+            self._validar_catalogo(obras, relaciones)
+            self._escribir(obras, relaciones)
+            return {"principal": principal_nueva, "duplicada": duplicada_nueva,
+                    "relaciones_trasladadas": tuple(trasladadas), "idempotente": False}
+
     def registrar_observacion(
         self,
         *,

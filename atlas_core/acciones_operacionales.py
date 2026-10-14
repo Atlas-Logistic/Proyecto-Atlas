@@ -28,6 +28,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -284,6 +285,7 @@ class DefinicionAccion:
     planificar: Callable[[_Contexto, dict], Plan] | None = None
     aplicar: Callable[[_Contexto, dict, Plan, str], dict] | None = None
     consultar: Callable[[_Contexto, dict], object] | None = None
+    requiere_escritor_global: bool = False
 
 
 def _afectados_por_guias(ctx: _Contexto, guias: set[str], *, limite: int = 50) -> dict[str, object]:
@@ -773,6 +775,74 @@ def _aplicar_obra_corregir(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> d
     reactiva = revalidar_tras_cambio_catalogo(ctx.archivos["obras_destinos"], obra_id=obra.obra_id)
     return {"despues": {"nombre_canonico": obra.nombre_canonico, "aliases": list(obra.aliases_documentales)},
             "revalidacion_focal": reactiva, "reconciliar": True}
+
+
+def _plan_obra_consolidar_duplicada(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.catalogo_obras_destinos import EstadoObra, EstadoRelacion, EstadoVigencia, normalizar_nombre_obra
+    principal = _obra(ctx, str(p["obra_principal_id"]))
+    duplicada = _obra(ctx, str(p["obra_duplicada_id"]))
+    if principal.obra_id == duplicada.obra_id:
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "las obras deben ser distintas")
+    ya_consolidada = (
+        duplicada.estado_vigencia == EstadoVigencia.INACTIVO.value
+        and any(e.tipo == "CATALOGO"
+                and e.campos_observados.get("operacion") == "CONSOLIDACION_OBRA_DUPLICADA"
+                and e.campos_observados.get("obra_duplicada_id") == duplicada.obra_id
+                for e in principal.evidencias)
+    )
+    if not ya_consolidada:
+        if principal.estado != EstadoObra.CONFIRMADA.value or principal.estado_vigencia != EstadoVigencia.ACTIVO.value:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la obra principal debe estar CONFIRMADA y ACTIVA")
+        if duplicada.estado not in {EstadoObra.OBSERVADA.value, EstadoObra.CANDIDATA.value} or duplicada.estado_vigencia != EstadoVigencia.ACTIVO.value:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el duplicado debe estar OBSERVADO/CANDIDATO y ACTIVO")
+        if not principal.cliente_id or principal.cliente_id != duplicada.cliente_id:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "las obras no tienen el mismo cliente de procedencia")
+    relaciones = ctx.catalogo_obras().listar_relaciones()
+    relaciones_duplicada = [r for r in relaciones if r.obra_id == duplicada.obra_id]
+    relaciones_principal = [r for r in relaciones if r.obra_id == principal.obra_id]
+    if not ya_consolidada and any(r.estado == EstadoRelacion.CONFIRMADA.value for r in relaciones_duplicada):
+        raise ErrorAccionOperacional("AMBIGUEDAD_REQUIERE_HUMANO", "el duplicado tiene una relación CONFIRMADA")
+    destinos_principal = {r.destino_id for r in relaciones if r.obra_id == principal.obra_id
+                           and r.estado not in {EstadoRelacion.RECHAZADA.value, EstadoRelacion.INACTIVA.value}}
+    pendientes = [r for r in relaciones_duplicada if r.estado == EstadoRelacion.PENDIENTE.value]
+    if not ya_consolidada and any(r.destino_id in destinos_principal for r in pendientes):
+        raise ErrorAccionOperacional("AMBIGUEDAD_REQUIERE_HUMANO", "una relación pendiente colisiona con la obra principal")
+    claves = {normalizar_nombre_obra(n) for n in (principal.nombre_canonico, *principal.aliases_documentales,
+                                                   duplicada.nombre_canonico, *duplicada.aliases_documentales)}
+    guias = _guias_por_obra(ctx, claves)
+    return Plan(
+        entidad={"tipo": "CONSOLIDACION_OBRA", "id": f"{principal.obra_id}:{duplicada.obra_id}",
+                 "obra_principal_id": principal.obra_id, "obra_duplicada_id": duplicada.obra_id},
+        valor_actual={"principal": principal.a_dict(), "duplicada": duplicada.a_dict()},
+        valor_propuesto={"conservar_obra_id": principal.obra_id, "inactivar_obra_id": duplicada.obra_id,
+                         "aliases_agregados": [n for n in (duplicada.nombre_canonico, *duplicada.aliases_documentales)
+                                              if normalizar_nombre_obra(n) not in {normalizar_nombre_obra(x) for x in (principal.nombre_canonico, *principal.aliases_documentales)}],
+                         "relaciones_pendientes_a_trasladar": [r.relacion_id for r in pendientes]},
+        estado_base={"principal": principal.a_dict(), "duplicada": duplicada.a_dict(),
+                     "relaciones_principal": [r.a_dict() for r in relaciones_principal],
+                     "relaciones_duplicada": [r.a_dict() for r in relaciones_duplicada]},
+        sin_cambios=ya_consolidada,
+        afectados={**_afectados_por_guias(ctx, guias),
+                    "relaciones_principal": [r.relacion_id for r in relaciones_principal],
+                    "relaciones_duplicada": [r.relacion_id for r in relaciones_duplicada]},
+        consecuencias=["Conserva la obra principal CONFIRMADA y marca el duplicado como INACTIVO; no borra obras, evidencias ni documentos.",
+                       "Traslada sólo relaciones PENDIENTES sin colisión; una relación CONFIRMADA bloquea la acción para revisión humana.",
+                       "Agrega los nombres del duplicado como aliases documentales de la obra principal."],
+        revalidaciones=["RECONCILIAR_BANDEJA_SIN_OCR"], archivos=("obras_destinos", "bandeja"),
+    )
+
+
+def _aplicar_obra_consolidar_duplicada(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    resultado = ctx.catalogo_obras().consolidar_obra_duplicada(
+        str(p["obra_principal_id"]), str(p["obra_duplicada_id"]),
+        evidencia=_evidencia_operador(ctx, actor, {"referencia": str(p.get("referencia", ""))}),
+    )
+    return {"despues": {"obra_principal_id": resultado["principal"].obra_id,
+                         "obra_duplicada_id": resultado["duplicada"].obra_id,
+                         "estado_duplicada": resultado["duplicada"].estado,
+                         "vigencia_duplicada": resultado["duplicada"].estado_vigencia,
+                         "relaciones_trasladadas": list(resultado["relaciones_trasladadas"])},
+            "reconciliar": True}
 
 
 def _plan_destino_registrar(ctx: _Contexto, p: dict) -> Plan:
@@ -1511,6 +1581,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"obra_id": _P("id", True), "nombre_canonico": _P("texto", True, max_largo=200),
                       "aliases": _P("lista_texto", max_largo=200), "referencia": _REF},
                      _plan_obra_corregir, _aplicar_obra_corregir),
+    DefinicionAccion("OBRA_CONSOLIDAR_DUPLICADA", OPERACIONAL_REVERSIBLE,
+                     "Conserva una obra CONFIRMADA e inactiva un duplicado OBSERVADO/CANDIDATO del mismo cliente.",
+                     {"obra_principal_id": _P("id", True), "obra_duplicada_id": _P("id", True), "referencia": _REF},
+                     _plan_obra_consolidar_duplicada, _aplicar_obra_consolidar_duplicada,
+                     requiere_escritor_global=True),
     DefinicionAccion("DESTINO_REGISTRAR", OPERACIONAL_REVERSIBLE, "Registra (o reutiliza y confirma) un destino global.",
                      {"direccion": _P("texto", True), "comuna": _P("texto", max_largo=80),
                       "region": _P("texto", max_largo=80), "nombre_destino": _P("texto"),
@@ -1572,6 +1647,7 @@ def catalogo_acciones() -> list[dict[str, object]]:
     """Contrato público: qué acciones existen, su riesgo y sus parámetros."""
     return [{
         "accion": d.nombre, "riesgo": d.riesgo, "autonomia_b1": POLITICA_AUTONOMIA[d.riesgo],
+        "requiere_escritor_global": d.requiere_escritor_global,
         "descripcion": d.descripcion,
         "parametros": {n: {"tipo": s.tipo, "obligatorio": s.obligatorio,
                            **({"opciones": list(s.opciones)} if s.opciones else {})}
@@ -1586,12 +1662,17 @@ class CapaAccionesOperacionales:
     """Única puerta de escritura operacional para agentes."""
 
     def __init__(self, raiz_atlas: str | Path, *, reloj=lambda: datetime.now(timezone.utc),
-                 proveedor_rutas=None, proveedor_rutas_fallback=None, ttl_preview: timedelta = TTL_PREVIEW):
+                 proveedor_rutas=None, proveedor_rutas_fallback=None, ttl_preview: timedelta = TTL_PREVIEW,
+                 fabrica_escritor=None, base_url_escritor: str | None = None,
+                 token_escritor: str | None = None):
         self.raiz = Path(raiz_atlas)
         self._reloj = reloj
         self._ttl = ttl_preview
         self._ctx = _Contexto(self.raiz, reloj, proveedor_rutas, proveedor_rutas_fallback)
         self._ruta_registro = self._ctx.actual / NOMBRE_REGISTRO
+        self._fabrica_escritor = fabrica_escritor
+        self._base_url_escritor = base_url_escritor
+        self._token_escritor = token_escritor
 
     # ------------------------------------------------------------ registro
 
@@ -1755,12 +1836,25 @@ class CapaAccionesOperacionales:
             return {"estado": "SIN_CAMBIOS", "token": token, "accion": definicion.nombre, "idempotente": True,
                     "auditoria_previa": anterior.get("auditoria_id") if anterior else None}
 
+        escritor = None
+        if definicion.requiere_escritor_global:
+            escritor = self._crear_escritor_global()
+            if not escritor.adquirir():
+                raise ErrorAccionOperacional(
+                    "ESCRITOR_GLOBAL_NO_ADQUIRIDO",
+                    "no se adquirió el lease global; no se escribió nada",
+                )
+
         self._ctx.token = token
         self._ctx.confirmado_por = confirmado
         respaldo = self._respaldar(plan.archivos, token)
         instante = self._reloj().astimezone(timezone.utc).isoformat()
         try:
+            if escritor is not None and not escritor.vigente:
+                raise ErrorAccionOperacional("ESCRITOR_GLOBAL_PERDIDO", "el lease global se perdió antes de escribir")
             salida = definicion.aplicar(self._ctx, parametros, plan, actor)
+            if escritor is not None and not escritor.vigente:
+                raise ErrorAccionOperacional("ESCRITOR_GLOBAL_PERDIDO", "el lease global se perdió durante la acción")
         except Exception as error:  # noqa: BLE001 -- se restaura y se audita cualquier fallo del servicio
             self._restaurar(respaldo)
             codigo = error.codigo if isinstance(error, ErrorAccionOperacional) else "ERROR_SERVICIO"
@@ -1769,6 +1863,8 @@ class CapaAccionesOperacionales:
             self._auditar(registro, preview, actor=actor, confirmado_por=confirmado, origen=origen,
                           instante=instante, despues=None, resultado="FALLIDA", publico=publico,
                           respaldo=respaldo)
+            if escritor is not None:
+                escritor.cerrar()
             return publico
         ids_antes = self._ids_decisiones_documento(plan)
         reconciliacion = self._reconciliar() if salida.get("reconciliar") else None
@@ -1793,7 +1889,32 @@ class CapaAccionesOperacionales:
             registro, preview, actor=actor, confirmado_por=confirmado, origen=origen, instante=instante,
             despues=salida.get("despues"), resultado="APLICADA", publico=publico, respaldo=respaldo,
         )
+        if escritor is not None:
+            escritor.cerrar()
         return publico
+
+    def _crear_escritor_global(self):
+        """Devuelve un lease global o falla cerrado, sin adivinar credenciales."""
+        base_url = self._base_url_escritor or os.environ.get(
+            "ATLAS_CLOUD_MOBILE_URL", "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
+        )
+        token = self._token_escritor if self._token_escritor is not None else os.environ.get("ATLAS_CLOUD_MOTOR_TOKEN", "")
+        if not token:
+            raise ErrorAccionOperacional(
+                "ESCRITOR_GLOBAL_NO_CONFIGURADO",
+                "falta token del escritor global; no se escribió nada",
+            )
+        if self._fabrica_escritor is None:
+            from atlas_core.escritor_operativo import LeaseEscritorOperativo
+            fabrica = LeaseEscritorOperativo
+        else:
+            fabrica = self._fabrica_escritor
+        try:
+            return fabrica(base_url=base_url, token_motor=token, timeout=30.0)
+        except Exception as error:  # noqa: BLE001 -- una dependencia de coordinación no permite fallback local
+            raise ErrorAccionOperacional(
+                "ESCRITOR_GLOBAL_NO_DISPONIBLE", f"no se pudo preparar el lease global: {error}"
+            ) from error
 
     # ------------------------------------------------------------ pasos comunes
 
