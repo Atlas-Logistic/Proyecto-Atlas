@@ -272,6 +272,98 @@ def test_corregir_obra_promueve_alias_existente_a_canonico(entorno):
     assert capa.previsualizar("OBRA_CORREGIR", parametros, actor="JAVIER")["estado"] == "SIN_CAMBIOS"
 
 
+class _EscritorDisponible:
+    vigente = True
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.adquisiciones = 0
+        self.cerrado = False
+
+    def adquirir(self):
+        self.adquisiciones += 1
+        return True
+
+    def cerrar(self):
+        self.cerrado = True
+
+
+def _registrar_obra(capa, cliente_id, nombre):
+    preview = capa.previsualizar("OBRA_REGISTRAR", {"cliente_id": cliente_id, "nombre_obra": nombre}, actor="JAVIER")
+    return capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")["despues"]["obra_id"]
+
+
+def test_consolidar_obra_duplicada_preview_respaldo_idempotencia_y_sin_documentos(entorno):
+    escritor = _EscritorDisponible()
+    capa = CapaAccionesOperacionales(
+        entorno["raiz"], fabrica_escritor=lambda: escritor,
+    )
+    cliente_id = entorno["cliente"].cliente_id
+    principal_id = _registrar_obra(capa, cliente_id, "CONSTRUCTORA INMOBILIARIA E")
+    destino = capa.previsualizar("DESTINO_REGISTRAR", {"direccion": "AV VINA 3451", "comuna": "SAN JOAQUIN"}, actor="JAVIER")
+    destino_id = capa.ejecutar(destino["token"], actor="JAVIER", confirmado_por="JAVIER")["despues"]["destino_id"]
+    vinculo = capa.previsualizar("OBRA_VINCULAR_DESTINO", {"obra_id": principal_id, "destino_id": destino_id}, actor="JAVIER")
+    assert capa.ejecutar(vinculo["token"], actor="JAVIER", confirmado_por="JAVIER")["estado"] == "APLICADA"
+    duplicada_id = _registrar_obra(capa, cliente_id, "CONSTRUCTORA INMOBILIARIA")
+    filas = list(csv.DictReader(entorno["dataset"].open(encoding="utf-8-sig", newline=""), delimiter=";"))
+    filas[0]["obra_destino"] = "CONSTRUCTORA INMOBILIARIA"
+    with entorno["dataset"].open("w", encoding="utf-8-sig", newline="") as archivo:
+        salida = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        salida.writeheader()
+        salida.writerows(filas)
+    antes_dataset = _sha(entorno["dataset"])
+    antes_duplicada = next(o for o in CatalogoObrasDestinos(
+        ruta=entorno["cat"] / "obras_destinos.json", ruta_clientes=entorno["cat"] / "clientes.json",
+        ruta_destinos=entorno["cat"] / "destinos_maestros.json").listar_obras() if o.obra_id == duplicada_id).evidencias
+
+    preview = capa.previsualizar("OBRA_CONSOLIDAR_DUPLICADA", {
+        "obra_principal_id": principal_id, "obra_duplicada_id": duplicada_id, "referencia": "evidencia documental única",
+    }, actor="JAVIER")
+    assert preview["estado"] == "PREVIEW"
+    assert preview["valor_propuesto"]["conservar_obra_id"] == principal_id
+    assert preview["afectados"]["guias"] == ["500001"]
+    assert preview["afectados"]["relaciones_duplicada"] == []
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    assert escritor.adquisiciones == 1 and escritor.cerrado is True
+    assert Path(entorno["raiz"] / resultado["respaldo"] / "obras_destinos.json").is_file()
+    assert _sha(entorno["dataset"]) == antes_dataset
+    catalogo = CatalogoObrasDestinos(ruta=entorno["cat"] / "obras_destinos.json",
+                                     ruta_clientes=entorno["cat"] / "clientes.json",
+                                     ruta_destinos=entorno["cat"] / "destinos_maestros.json")
+    obras = {o.obra_id: o for o in catalogo.listar_obras()}
+    assert obras[principal_id].estado == "CONFIRMADA"
+    assert "CONSTRUCTORA INMOBILIARIA" in obras[principal_id].aliases_documentales
+    assert obras[duplicada_id].estado == "INACTIVA" and obras[duplicada_id].estado_vigencia == "INACTIVO"
+    assert obras[duplicada_id].evidencias == antes_duplicada
+    assert capa.previsualizar("OBRA_CONSOLIDAR_DUPLICADA", {
+        "obra_principal_id": principal_id, "obra_duplicada_id": duplicada_id,
+    }, actor="JAVIER")["estado"] == "SIN_CAMBIOS"
+
+
+def test_consolidar_obra_duplicada_falla_cerrado_si_no_hay_escritor_global(entorno):
+    class EscritorOcupado(_EscritorDisponible):
+        def adquirir(self):
+            return False
+
+    capa_normal = CapaAccionesOperacionales(entorno["raiz"])
+    principal_id = _registrar_obra(capa_normal, entorno["cliente"].cliente_id, "OBRA PRINCIPAL")
+    # La principal se confirma por la vía canónica antes de intentar consolidar.
+    destino = capa_normal.previsualizar("DESTINO_REGISTRAR", {"direccion": "CALLE PRINCIPAL 1"}, actor="JAVIER")
+    destino_id = capa_normal.ejecutar(destino["token"], actor="JAVIER", confirmado_por="JAVIER")["despues"]["destino_id"]
+    vinculo = capa_normal.previsualizar("OBRA_VINCULAR_DESTINO", {"obra_id": principal_id, "destino_id": destino_id}, actor="JAVIER")
+    capa_normal.ejecutar(vinculo["token"], actor="JAVIER", confirmado_por="JAVIER")
+    duplicada_id = _registrar_obra(capa_normal, entorno["cliente"].cliente_id, "OBRA DUPLICADA")
+    antes = _sha(entorno["cat"] / "obras_destinos.json")
+    capa = CapaAccionesOperacionales(entorno["raiz"], fabrica_escritor=lambda: EscritorOcupado())
+    preview = capa.previsualizar("OBRA_CONSOLIDAR_DUPLICADA", {
+        "obra_principal_id": principal_id, "obra_duplicada_id": duplicada_id,
+    }, actor="JAVIER")
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["codigo"] == "ESCRITOR_OCUPADO"
+    assert _sha(entorno["cat"] / "obras_destinos.json") == antes
+
+
 # ------------------------------------------------------------ documento
 
 

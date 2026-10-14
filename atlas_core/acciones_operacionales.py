@@ -781,6 +781,74 @@ def _aplicar_obra_corregir(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> d
             "revalidacion_focal": reactiva, "reconciliar": True}
 
 
+def _plan_obra_consolidar_duplicada(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.catalogo_obras_destinos import EstadoObra, EstadoRelacion, EstadoVigencia, normalizar_nombre_obra
+    principal = _obra(ctx, str(p["obra_principal_id"]))
+    duplicada = _obra(ctx, str(p["obra_duplicada_id"]))
+    if principal.obra_id == duplicada.obra_id:
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "las obras deben ser distintas")
+    ya_consolidada = (
+        duplicada.estado_vigencia == EstadoVigencia.INACTIVO.value
+        and any(e.tipo == "CATALOGO"
+                and e.campos_observados.get("operacion") == "CONSOLIDACION_OBRA_DUPLICADA"
+                and e.campos_observados.get("obra_duplicada_id") == duplicada.obra_id
+                for e in principal.evidencias)
+    )
+    if not ya_consolidada:
+        if principal.estado != EstadoObra.CONFIRMADA.value or principal.estado_vigencia != EstadoVigencia.ACTIVO.value:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la obra principal debe estar CONFIRMADA y ACTIVA")
+        if duplicada.estado not in {EstadoObra.OBSERVADA.value, EstadoObra.CANDIDATA.value} or duplicada.estado_vigencia != EstadoVigencia.ACTIVO.value:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el duplicado debe estar OBSERVADO/CANDIDATO y ACTIVO")
+        if not principal.cliente_id or principal.cliente_id != duplicada.cliente_id:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "las obras no tienen el mismo cliente de procedencia")
+    relaciones = ctx.catalogo_obras().listar_relaciones()
+    relaciones_duplicada = [r for r in relaciones if r.obra_id == duplicada.obra_id]
+    relaciones_principal = [r for r in relaciones if r.obra_id == principal.obra_id]
+    if not ya_consolidada and any(r.estado == EstadoRelacion.CONFIRMADA.value for r in relaciones_duplicada):
+        raise ErrorAccionOperacional("AMBIGUEDAD_REQUIERE_HUMANO", "el duplicado tiene una relación CONFIRMADA")
+    destinos_principal = {r.destino_id for r in relaciones if r.obra_id == principal.obra_id
+                           and r.estado not in {EstadoRelacion.RECHAZADA.value, EstadoRelacion.INACTIVA.value}}
+    pendientes = [r for r in relaciones_duplicada if r.estado == EstadoRelacion.PENDIENTE.value]
+    if not ya_consolidada and any(r.destino_id in destinos_principal for r in pendientes):
+        raise ErrorAccionOperacional("AMBIGUEDAD_REQUIERE_HUMANO", "una relación pendiente colisiona con la obra principal")
+    claves = {normalizar_nombre_obra(n) for n in (principal.nombre_canonico, *principal.aliases_documentales,
+                                                   duplicada.nombre_canonico, *duplicada.aliases_documentales)}
+    guias = _guias_por_obra(ctx, claves)
+    return Plan(
+        entidad={"tipo": "CONSOLIDACION_OBRA", "id": f"{principal.obra_id}:{duplicada.obra_id}",
+                 "obra_principal_id": principal.obra_id, "obra_duplicada_id": duplicada.obra_id},
+        valor_actual={"principal": principal.a_dict(), "duplicada": duplicada.a_dict()},
+        valor_propuesto={"conservar_obra_id": principal.obra_id, "inactivar_obra_id": duplicada.obra_id,
+                         "aliases_agregados": [n for n in (duplicada.nombre_canonico, *duplicada.aliases_documentales)
+                                              if normalizar_nombre_obra(n) not in {normalizar_nombre_obra(x) for x in (principal.nombre_canonico, *principal.aliases_documentales)}],
+                         "relaciones_pendientes_a_trasladar": [r.relacion_id for r in pendientes]},
+        estado_base={"principal": principal.a_dict(), "duplicada": duplicada.a_dict(),
+                     "relaciones_principal": [r.a_dict() for r in relaciones_principal],
+                     "relaciones_duplicada": [r.a_dict() for r in relaciones_duplicada]},
+        sin_cambios=ya_consolidada,
+        afectados={**_afectados_por_guias(ctx, guias),
+                    "relaciones_principal": [r.relacion_id for r in relaciones_principal],
+                    "relaciones_duplicada": [r.relacion_id for r in relaciones_duplicada]},
+        consecuencias=["Conserva la obra principal CONFIRMADA y marca el duplicado como INACTIVO; no borra obras, evidencias ni documentos.",
+                       "Traslada sólo relaciones PENDIENTES sin colisión; una relación CONFIRMADA bloquea la acción para revisión humana.",
+                       "Agrega los nombres del duplicado como aliases documentales de la obra principal."],
+        revalidaciones=["RECONCILIAR_BANDEJA_SIN_OCR"], archivos=("obras_destinos", "bandeja"),
+    )
+
+
+def _aplicar_obra_consolidar_duplicada(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    resultado = ctx.catalogo_obras().consolidar_obra_duplicada(
+        str(p["obra_principal_id"]), str(p["obra_duplicada_id"]),
+        evidencia=_evidencia_operador(ctx, actor, {"referencia": str(p.get("referencia", ""))}),
+    )
+    return {"despues": {"obra_principal_id": resultado["principal"].obra_id,
+                         "obra_duplicada_id": resultado["duplicada"].obra_id,
+                         "estado_duplicada": resultado["duplicada"].estado,
+                         "vigencia_duplicada": resultado["duplicada"].estado_vigencia,
+                         "relaciones_trasladadas": list(resultado["relaciones_trasladadas"])},
+            "reconciliar": True}
+
+
 def _plan_destino_registrar(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.catalogo_destinos import EstadoBusquedaDestino
     if ("latitud" in p) != ("longitud" in p):
@@ -1522,6 +1590,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"obra_id": _P("id", True), "nombre_canonico": _P("texto", True, max_largo=200),
                       "aliases": _P("lista_texto", max_largo=200), "referencia": _REF},
                      _plan_obra_corregir, _aplicar_obra_corregir),
+    DefinicionAccion("OBRA_CONSOLIDAR_DUPLICADA", OPERACIONAL_REVERSIBLE,
+                     "Conserva una obra CONFIRMADA e inactiva un duplicado OBSERVADO/CANDIDATO del mismo cliente.",
+                     {"obra_principal_id": _P("id", True), "obra_duplicada_id": _P("id", True), "referencia": _REF},
+                     _plan_obra_consolidar_duplicada, _aplicar_obra_consolidar_duplicada,
+                     escritor_global=True),
     DefinicionAccion("DESTINO_REGISTRAR", OPERACIONAL_REVERSIBLE, "Registra (o reutiliza y confirma) un destino global.",
                      {"direccion": _P("texto", True), "comuna": _P("texto", max_largo=80),
                       "region": _P("texto", max_largo=80), "nombre_destino": _P("texto"),
@@ -1583,6 +1656,7 @@ def catalogo_acciones() -> list[dict[str, object]]:
     """Contrato público: qué acciones existen, su riesgo y sus parámetros."""
     return [{
         "accion": d.nombre, "riesgo": d.riesgo, "autonomia_b1": POLITICA_AUTONOMIA[d.riesgo],
+        "escritor_global": d.escritor_global,
         "descripcion": d.descripcion,
         "parametros": {n: {"tipo": s.tipo, "obligatorio": s.obligatorio,
                            **({"opciones": list(s.opciones)} if s.opciones else {})}
