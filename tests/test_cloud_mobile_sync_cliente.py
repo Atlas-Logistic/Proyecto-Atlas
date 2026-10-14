@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from atlas_core.cloud_mobile_sync_cliente import ErrorSincronizacionCloudMobile, sincronizar_envios_cloud
 from atlas_core.mobile import ErrorEnvioMobile
+from atlas_core.ocr_provider import ProveedorOCRNoDisponible
 
 
 BYTES = b"jpeg-cloud-prueba"
@@ -91,6 +92,41 @@ class CloudMobileSyncTests(unittest.TestCase):
         )
         self.assertEqual(confirmaciones, [])
         self.assertIn("envio-1", resultado["errores_procesamiento"])
+
+    def test_timeout_ocr_no_confirma_esa_foto_y_continua_con_la_siguiente(self):
+        """El error OCR queda recuperable y no retiene la cola Cloud."""
+        confirmados, procesados = [], []
+
+        def falso_json(_base, ruta, _token, **kwargs):
+            if ruta.endswith("pendientes"):
+                return {"envios": [{"envio_id": "envio-ocr-fallido"}, {"envio_id": "envio-siguiente"}]}
+            if ruta.endswith("/renovar"):
+                return {"estado": "EN_LEASE"}
+            if ruta.endswith("/lease"):
+                envio_id = ruta.split("/")[-2]
+                return lease(envio_id=envio_id, documento_id=f"doc_{envio_id}")
+            if ruta.endswith("/confirmar"):
+                confirmados.append(ruta.split("/")[-2])
+                return {"estado": "COMPLETADO"}
+            raise AssertionError(ruta)
+
+        def procesar(_repo, envio_id, **_kwargs):
+            procesados.append(envio_id)
+            if envio_id == "envio-ocr-fallido":
+                return {"completado": False, "error": "ProveedorOCRNoDisponible: PaddleOCR y EasyOCR agotaron timeout"}
+            return {"completado": True}
+
+        with patch("atlas_core.cloud_mobile_sync_cliente._json", side_effect=falso_json), \
+             patch("atlas_core.cloud_mobile_sync_cliente._descargar", return_value=BYTES), \
+             patch("atlas_core.cloud_mobile_sync_cliente._procesar_envio_cloud", side_effect=procesar):
+            resultado = sincronizar_envios_cloud(
+                base_url="https://cloud.test", token_motor="t", consumidor="motor", repositorio=Repo(),
+                timeout=1, procesar=True,
+            )
+
+        self.assertEqual(procesados, ["envio-ocr-fallido", "envio-siguiente"])
+        self.assertEqual(confirmados, ["envio-siguiente"])
+        self.assertIn("envio-ocr-fallido", resultado["errores_procesamiento"])
 
     def test_lease_perdido_no_confirma(self):
         resultado, confirmaciones = self.ejecutar(Repo(), procesar=True, renovar_falla=True)
@@ -254,6 +290,25 @@ class CloudMobileRunnerProcesamientoTests(unittest.TestCase):
         self.assertEqual(confirmaciones, [])
         self.assertEqual(self.ocr, [])
         self.assertIn(ENVIO_REAL, resultado["errores_procesamiento"])
+
+    def test_timeout_de_ambos_ocr_queda_en_error_recuperable_y_no_repite_la_foto(self):
+        with patch.object(
+            mobile, "procesar_archivo",
+            side_effect=ProveedorOCRNoDisponible("PaddleOCR y EasyOCR agotaron timeout"),
+        ):
+            resultado, confirmaciones = self.pull()
+
+        registro = self.repo.cargar(ENVIO_REAL)
+        self.assertEqual(confirmaciones, [])
+        self.assertEqual(registro["estado"], "ERROR")
+        self.assertIn("PaddleOCR y EasyOCR agotaron timeout", registro["error"])
+        self.assertIn(ENVIO_REAL, resultado["errores_procesamiento"])
+
+        # Un nuevo PULL no invoca OCR ni confirma el ERROR persistido: queda
+        # disponible para recuperación explícita, con el original intacto.
+        resultado_reintento, confirmaciones_reintento = self.pull()
+        self.assertEqual(confirmaciones_reintento, [])
+        self.assertIn(ENVIO_REAL, resultado_reintento["errores_procesamiento"])
 
     def test_sin_procesar_por_defecto_no_confirma(self):
         with patch("atlas_core.cloud_mobile_sync_cliente._json", side_effect=lambda b, r, t, **k: {"envios": []}):
