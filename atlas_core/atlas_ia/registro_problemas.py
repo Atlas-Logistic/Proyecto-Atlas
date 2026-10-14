@@ -155,7 +155,9 @@ def recopilar_evidencia_documentos_relacionados(
                 continue
             señales = sum((
                 otra.get("fecha") == fila.get("fecha"),
-                otra.get("numero_transporte") == fila.get("numero_transporte"),
+                # Un transporte ausente en ambas no es señal (caso 482179).
+                fila.get("numero_transporte") not in {None, "", "No encontrado"}
+                and otra.get("numero_transporte") == fila.get("numero_transporte"),
                 _normalizar_texto(otra.get("chofer")) == _normalizar_texto(fila.get("chofer")),
                 otra.get("patente_tracto") == fila.get("patente_tracto"),
                 _normalizar_texto(otra.get("obra_destino")) == _normalizar_texto(fila.get("obra_destino")),

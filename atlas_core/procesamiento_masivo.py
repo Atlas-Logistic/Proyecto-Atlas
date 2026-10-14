@@ -4569,7 +4569,9 @@ def _corroborar_documentos_relacionados_bajo_lock(ruta_csv: Path, archivos_objet
                 "chofer": _normalizar(otra.get("chofer")) == _normalizar(fila.get("chofer")),
                 "patente": otra.get("patente_tracto") == fila.get("patente_tracto"),
                 "obra": _normalizar(otra.get("obra_destino")) == _normalizar(fila.get("obra_destino")),
-                "transporte": otra.get("numero_transporte") == fila.get("numero_transporte"),
+                # "No encontrado" en ambas no es el mismo viaje (caso 482179).
+                "transporte": bool(_transporte_util_para_evidencia(fila.get("numero_transporte")))
+                and otra.get("numero_transporte") == fila.get("numero_transporte"),
             }
             if senales["chofer"] and senales["patente"] and sum(senales.values()) >= 4:
                 candidatas.append((otra, senales))
