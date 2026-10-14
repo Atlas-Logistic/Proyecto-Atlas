@@ -8,6 +8,7 @@ from atlas_core import ocr_provider
 from atlas_core.ocr import ALLOWLIST_FECHA, ALLOWLIST_TRANSPORTE, BloqueOCR
 from atlas_core.ocr_provider import (
     EasyOCRProvider,
+    EasyOCRWorkerProvider,
     PaddleOCRProvider,
     ProveedorOCR,
     ProveedorOCRNoDisponible,
@@ -258,7 +259,7 @@ def test_crear_proveedor_ocr_cae_a_easyocr_si_paddle_no_arranca(monkeypatch):
 
     proveedor = crear_proveedor_ocr("paddleocr")
 
-    assert isinstance(proveedor, EasyOCRProvider)
+    assert isinstance(proveedor, EasyOCRWorkerProvider)
 
 
 def test_gpu_nvidia_disponible_sin_nvidia_smi_devuelve_false(monkeypatch):
@@ -361,7 +362,7 @@ def test_leer_linea_con_timeout_devuelve_none_si_el_stream_nunca_responde():
     assert duracion < 2  # no esperó los 999s del stream colgado
 
 
-def test_asegurar_proceso_no_disponible_si_el_worker_nunca_manda_listo(monkeypatch):
+def test_inicio_paddle_colgado_se_degrada_al_fallback_acotado(monkeypatch):
     """Reproduce el incidente real: el proceso worker queda vivo pero jamás
     imprime la línea de arranque (equivalente a `PaddleOCR(...)` bloqueado
     esperando un subproceso interno que Code Integrity nunca deja
@@ -381,12 +382,15 @@ def test_asegurar_proceso_no_disponible_si_el_worker_nunca_manda_listo(monkeypat
     monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", matar)
 
     inicio = _time.perf_counter()
-    with pytest.raises(ProveedorOCRNoDisponible, match="no respondió en 0.2s al iniciar"):
-        proveedor.leer_texto("guia.jpg")
+    easyocr = Mock()
+    easyocr.leer_texto.return_value = ["fallback"]
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", Mock(return_value=easyocr))
+    assert proveedor.leer_texto("guia.jpg") == ["fallback"]
     duracion = _time.perf_counter() - inicio
 
     assert duracion < 3
     matar.assert_called_once_with(proceso)
+    easyocr.leer_texto.assert_called_once_with("guia.jpg")
 
 
 def test_comando_no_disponible_si_el_worker_deja_de_responder_a_mitad_de_lote(monkeypatch):
@@ -400,14 +404,40 @@ def test_comando_no_disponible_si_el_worker_deja_de_responder_a_mitad_de_lote(mo
     monkeypatch.setattr(ocr_provider, "TIMEOUT_COMANDO_SEG", 0.2)
     matar = Mock()
     monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", matar)
+    easyocr = Mock()
+    easyocr.leer_texto.side_effect = ProveedorOCRNoDisponible("EasyOCR agotó timeout")
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", Mock(return_value=easyocr))
     # Recién ahora, procesando una imagen concreta, el worker se cuelga.
     proceso.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
 
-    with pytest.raises(ProveedorOCRNoDisponible, match="no respondió en 0.2s procesando"):
+    with pytest.raises(ProveedorOCRNoDisponible, match="PaddleOCR y EasyOCR"):
         proveedor.leer_texto("464170.jpeg")
 
     matar.assert_called_once_with(proceso)
     assert proveedor._proceso is None  # se puede reintentar con un proceso nuevo
+
+
+def test_easyocr_fallback_timeout_termina_worker_y_libera_el_proveedor(monkeypatch):
+    """El respaldo también debe estar acotado: nunca puede congelar PULL."""
+    proceso = _ProcesoFalso(respuestas=[])
+    proceso.pid = 999999
+    proceso.stdout = Mock()
+    proceso.stdout.readline = Mock(side_effect=proceso._leer_linea)
+    monkeypatch.setattr(ocr_provider.subprocess, "Popen", Mock(return_value=proceso))
+    monkeypatch.setattr(ocr_provider, "TIMEOUT_COMANDO_EASYOCR_SEG", 0.2)
+    matar = Mock()
+    monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", matar)
+    proveedor = EasyOCRWorkerProvider()
+    proveedor._asegurar_proceso()
+    proceso.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
+
+    inicio = _time.perf_counter()
+    with pytest.raises(ProveedorOCRNoDisponible, match="EasyOCR no respondi"):
+        proveedor.leer_texto("464170.jpeg")
+
+    assert _time.perf_counter() - inicio < 3
+    matar.assert_called_once_with(proceso)
+    assert proveedor._proceso is None
 
 
 def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lote(monkeypatch):
@@ -422,7 +452,7 @@ def test_comando_colgado_no_deja_el_proveedor_inutilizable_para_el_resto_del_lot
     monkeypatch.setattr(ocr_provider, "_matar_arbol_proceso", Mock())
     easyocr = Mock()
     easyocr.leer_texto.return_value = ["fallback"]
-    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", Mock(return_value=easyocr))
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", Mock(return_value=easyocr))
     proceso_colgado.stdout.readline = Mock(side_effect=lambda: _time.sleep(999))
     assert proveedor.leer_texto("464170.jpeg") == ["fallback"]
 
@@ -459,7 +489,7 @@ def test_paddleocr_timeout_reintenta_una_vez_la_misma_operacion_con_easyocr(
     easyocr = Mock()
     getattr(easyocr, metodo_easyocr).return_value = resultado_easyocr
     fabrica_easyocr = Mock(return_value=easyocr)
-    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", fabrica_easyocr)
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", fabrica_easyocr)
 
     with caplog.at_level("WARNING"):
         resultado = getattr(proveedor, f"leer_{operacion}")(*argumentos)
@@ -478,7 +508,7 @@ def test_paddleocr_timeout_con_error_easyocr_conserva_el_error_sin_reintentar_pa
     monkeypatch.setattr(proveedor, "_comando", paddle)
     easyocr = Mock()
     easyocr.leer_texto.side_effect = RuntimeError("EasyOCR falló")
-    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", Mock(return_value=easyocr))
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", Mock(return_value=easyocr))
 
     with pytest.raises(ProveedorOCRNoDisponible, match="worker agotó timeout"):
         proveedor.leer_texto("guia.jpg")
@@ -497,7 +527,7 @@ def test_paddleocr_degradado_usa_easyocr_en_operaciones_posteriores_sin_reintent
     easyocr.leer_texto.return_value = ["TEXTO"]
     easyocr.leer_bloques.return_value = []
     easyocr.leer_focal.return_value = {"lecturas": []}
-    monkeypatch.setattr(ocr_provider, "EasyOCRProvider", Mock(return_value=easyocr))
+    monkeypatch.setattr(ocr_provider, "EasyOCRWorkerProvider", Mock(return_value=easyocr))
 
     with caplog.at_level("WARNING"):
         assert proveedor.leer_texto("guia.jpg") == ["TEXTO"]
@@ -505,7 +535,7 @@ def test_paddleocr_degradado_usa_easyocr_en_operaciones_posteriores_sin_reintent
         assert proveedor.leer_focal("guia.jpg", (1, 2, 3, 4), ALLOWLIST_FECHA) == {"lecturas": []}
 
     assert paddle.call_count == 1
-    assert asegurar.call_count == 1
+    assert asegurar.call_count == 0
     easyocr.leer_texto.assert_called_once_with("guia.jpg")
     easyocr.leer_bloques.assert_called_once_with("guia.jpg")
     easyocr.leer_focal.assert_called_once_with("guia.jpg", (1, 2, 3, 4), ALLOWLIST_FECHA)

@@ -24,6 +24,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -42,9 +43,15 @@ from atlas_core.paddle_runtime import asegurar_runtime_paddle
 logger = logging.getLogger(__name__)
 
 RUTA_WORKER_PADDLE = Path(__file__).resolve().parent / "paddleocr_worker.py"
+MODULO_WORKER_EASYOCR = "atlas_core.easyocr_worker"
+RAIZ_PAQUETE_ATLAS = Path(__file__).resolve().parent.parent
 
 TIMEOUT_INICIO_SEG = 120
 TIMEOUT_COMANDO_SEG = 180
+# El fallback automático de Paddle corre aislado: una carga/inferencia de
+# EasyOCR bloqueada no puede retener el escritor global del PULL para siempre.
+TIMEOUT_INICIO_EASYOCR_SEG = 120
+TIMEOUT_COMANDO_EASYOCR_SEG = 180
 # Plazo para recoger el stderr y el código de salida de un worker que YA
 # cerró su stdout (terminó): nunca se acerca al timeout de cuelgue real.
 ESPERA_CIERRE_WORKER_SEG = 5
@@ -211,6 +218,118 @@ class EasyOCRProvider:
         return _leer_region_focal(ruta_imagen, caja, lector=self._lector_o_crear(), allowlist=allowlist)
 
 
+class EasyOCRWorkerProvider:
+    """EasyOCR acotado en un worker para el fallback automático del PULL.
+
+    No reemplaza ``EasyOCRProvider``: éste conserva el contrato de uso
+    explícito en proceso. Este adaptador existe para el camino degradado desde
+    PaddleOCR, donde un timeout debe liberar CPU, lock y lease para la guía
+    siguiente. El worker no escribe datos de Atlas; sólo devuelve OCR por
+    stdout y se mata junto a sus descendientes al vencer el límite.
+    """
+
+    def __init__(self, ruta_python: Path | None = None) -> None:
+        self._ruta_python = ruta_python or Path(sys.executable)
+        self._proceso: subprocess.Popen | None = None
+        self._drenador_stderr: _DrenadorStderr | None = None
+
+    def _detalle(self) -> str:
+        return self._drenador_stderr.texto(ESPERA_CIERRE_WORKER_SEG) if self._drenador_stderr else ""
+
+    def _asegurar_proceso(self) -> subprocess.Popen:
+        if self._proceso is not None and self._proceso.poll() is None:
+            return self._proceso
+        proceso = subprocess.Popen(
+            [str(self._ruta_python), "-m", MODULO_WORKER_EASYOCR],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1, cwd=str(RAIZ_PAQUETE_ATLAS),
+        )
+        self._drenador_stderr = _DrenadorStderr(proceso.stderr)
+        linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_INICIO_EASYOCR_SEG)
+        if linea is None:
+            _matar_arbol_proceso(proceso)
+            raise ProveedorOCRNoDisponible(
+                f"El worker de EasyOCR no respondió en {TIMEOUT_INICIO_EASYOCR_SEG}s al iniciar "
+                "(se detuvo para no bloquear el lote indefinidamente).", self._detalle(),
+            )
+        if not linea:
+            _matar_arbol_proceso(proceso)
+            raise ProveedorOCRNoDisponible(
+                f"El worker de EasyOCR terminó al iniciar: {_resumen_error_worker(self._detalle())}", self._detalle(),
+            )
+        try:
+            respuesta = json.loads(linea)
+        except json.JSONDecodeError as error:
+            _matar_arbol_proceso(proceso)
+            raise ProveedorOCRNoDisponible("El worker de EasyOCR devolvió un inicio inválido", self._detalle()) from error
+        if not respuesta.get("ok"):
+            _matar_arbol_proceso(proceso)
+            raise ProveedorOCRNoDisponible(
+                f"El worker de EasyOCR falló al iniciar: {respuesta.get('error', 'sin detalle')}", self._detalle(),
+            )
+        self._proceso = proceso
+        logger.info("EasyOCRWorkerProvider iniciado para fallback acotado")
+        return proceso
+
+    def _comando(self, **kwargs: Any) -> Any:
+        proceso = self._asegurar_proceso()
+        try:
+            proceso.stdin.write(json.dumps(kwargs) + "\n")
+            proceso.stdin.flush()
+            linea = _leer_linea_con_timeout(proceso.stdout, TIMEOUT_COMANDO_EASYOCR_SEG)
+        except (BrokenPipeError, OSError) as error:
+            self._proceso = None
+            raise ProveedorOCRNoDisponible(f"El worker de EasyOCR murió: {error}", self._detalle()) from error
+        if linea is None:
+            _matar_arbol_proceso(proceso)
+            self._proceso = None
+            raise ProveedorOCRNoDisponible(
+                f"El worker de EasyOCR no respondió en {TIMEOUT_COMANDO_EASYOCR_SEG}s procesando "
+                f"{kwargs.get('ruta')} (se detuvo para no bloquear el lote indefinidamente).", self._detalle(),
+            )
+        if not linea:
+            _matar_arbol_proceso(proceso)
+            self._proceso = None
+            raise ProveedorOCRNoDisponible(
+                f"El worker de EasyOCR terminó procesando {Path(str(kwargs.get('ruta'))).name}: "
+                f"{_resumen_error_worker(self._detalle())}", self._detalle(),
+            )
+        respuesta = json.loads(linea)
+        if not respuesta.get("ok"):
+            raise RuntimeError(f"Error de EasyOCR procesando {kwargs.get('ruta')}: {respuesta.get('error')}")
+        return respuesta["resultado"]
+
+    def leer_texto(self, ruta_imagen: str | Path) -> list[str]:
+        return [str(linea) for linea in self._comando(op="texto", ruta=str(ruta_imagen))]
+
+    def leer_bloques(self, ruta_imagen: str | Path) -> list[BloqueOCR]:
+        salida = []
+        for bloque in self._comando(op="bloques", ruta=str(ruta_imagen)):
+            puntos = tuple((float(p[0]), float(p[1])) for p in bloque["bbox"])
+            if len(puntos) == 4:
+                salida.append(BloqueOCR(str(bloque.get("texto", "")), puntos, float(bloque["confianza"])))
+        return salida
+
+    def leer_focal(
+        self, ruta_imagen: str | Path, caja: tuple[float, float, float, float], allowlist: str
+    ) -> dict[str, Any]:
+        return dict(self._comando(op="focal", ruta=str(ruta_imagen), caja=list(caja), allowlist=allowlist))
+
+    def cerrar(self) -> None:
+        proceso, self._proceso = self._proceso, None
+        if proceso is None or proceso.poll() is not None:
+            return
+        try:
+            proceso.stdin.close()
+        except (AttributeError, OSError):
+            pass
+        try:
+            proceso.terminate()
+            proceso.wait(timeout=ESPERA_CIERRE_WORKER_SEG)
+        except (OSError, subprocess.TimeoutExpired):
+            _matar_arbol_proceso(proceso)
+
+
 def _gpu_nvidia_disponible() -> bool:
     """Detección genérica: ¿hay una GPU NVIDIA utilizable? Sin hardcodear ningún modelo."""
     try:
@@ -238,7 +357,7 @@ class PaddleOCRProvider:
         self._ruta_python_forzada = ruta_python
         self._proceso: subprocess.Popen | None = None
         self._drenador_stderr: _DrenadorStderr | None = None
-        self._fallback_easyocr: EasyOCRProvider | None = None
+        self._fallback_easyocr: EasyOCRWorkerProvider | None = None
         self._degradado_a_easyocr = False
 
     @property
@@ -333,9 +452,9 @@ class PaddleOCRProvider:
             raise RuntimeError(f"Error de PaddleOCR procesando {kwargs.get('ruta')}: {respuesta.get('error')}")
         return respuesta["resultado"]
 
-    def _easyocr(self) -> EasyOCRProvider:
+    def _easyocr(self) -> EasyOCRWorkerProvider:
         if self._fallback_easyocr is None:
-            self._fallback_easyocr = EasyOCRProvider()
+            self._fallback_easyocr = EasyOCRWorkerProvider()
         return self._fallback_easyocr
 
     def _con_fallback_easyocr(self, operacion: str, ruta: str | Path, leer_paddle, leer_easyocr):
@@ -364,14 +483,16 @@ class PaddleOCRProvider:
                 return leer_easyocr()
             except Exception as error_easyocr:
                 logger.warning(
-                    "EasyOCR also failed during %s of %s; preserving PaddleOCR error: %s",
-                    operacion, ruta, error_easyocr,
+                    "EasyOCR también falló durante %s de %s; PaddleOCR: %s; EasyOCR: %s",
+                    operacion, ruta, exc, error_easyocr,
                 )
-                raise exc from error_easyocr
+                raise ProveedorOCRNoDisponible(
+                    f"PaddleOCR y EasyOCR no estuvieron disponibles durante {operacion} de {ruta}. "
+                    f"PaddleOCR: {exc}. EasyOCR: {error_easyocr}",
+                    getattr(error_easyocr, "detalle_tecnico", ""),
+                ) from error_easyocr
 
     def leer_texto(self, ruta_imagen: str | Path) -> list[str]:
-        if not self._degradado_a_easyocr:
-            self._asegurar_proceso()
         return self._con_fallback_easyocr(
             "texto", ruta_imagen,
             lambda: (
@@ -382,9 +503,6 @@ class PaddleOCRProvider:
         )
 
     def leer_bloques(self, ruta_imagen: str | Path) -> list[BloqueOCR]:
-        if not self._degradado_a_easyocr:
-            self._asegurar_proceso()
-
         def convertir(crudos) -> list[BloqueOCR]:
             bloques = []
             for b in crudos:
@@ -409,8 +527,6 @@ class PaddleOCRProvider:
         # equivalente en su API publica; el recorte/margen/variantes son
         # idénticos a EasyOCRProvider, la limitación de caracteres queda del
         # lado de extraer_fecha/consenso, que ya validan el formato resultante.
-        if not self._degradado_a_easyocr:
-            self._asegurar_proceso()
         return self._con_fallback_easyocr(
             "lectura focal", ruta_imagen,
             lambda: self._comando(op="focal", ruta=str(ruta_imagen), caja=list(caja)),
@@ -425,6 +541,9 @@ class PaddleOCRProvider:
                 pass
             self._proceso.terminate()
         self._proceso = None
+        if self._fallback_easyocr is not None:
+            self._fallback_easyocr.cerrar()
+            self._fallback_easyocr = None
 
 
 PROVEEDORES_OCR_ADMITIDOS = frozenset({"paddleocr", "easyocr"})
@@ -472,7 +591,7 @@ def crear_proveedor_ocr(preferido: str = "paddleocr") -> ProveedorOCR:
         mensaje = f"PaddleOCR no disponible, usando EasyOCR como fallback: {exc}"
         logger.warning(mensaje)
         print(f"[Atlas OCR] {mensaje}")  # visible en la CLI aunque no haya logging configurado
-        return EasyOCRProvider()
+        return EasyOCRWorkerProvider()
     logger.info("Proveedor OCR: PaddleOCR (device=%s)", proveedor.device)
     print(f"[Atlas OCR] Proveedor activo: PaddleOCR (device={proveedor.device})")
     return proveedor
