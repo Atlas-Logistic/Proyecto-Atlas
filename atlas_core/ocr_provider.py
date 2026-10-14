@@ -687,13 +687,18 @@ def resolver_preferencia_ocr_desde_entorno(entorno: dict[str, str] | None = None
     return preferido
 
 
-def crear_proveedor_ocr(preferido: str = "paddleocr") -> ProveedorOCR:
+def crear_proveedor_ocr(preferido: str | None = None) -> ProveedorOCR:
     """Selecciona el proveedor OCR activo, con fallback conservador a EasyOCR.
 
     PaddleOCR es el proveedor principal configurable; EasyOCR queda como
     fallback temporal si Paddle no está disponible (venv ausente, worker no
     arranca, etc.) — Atlas nunca se queda sin poder leer OCR por esto.
+
+    Sin ``preferido`` explícito se usa ``ATLAS_OCR_PROVIDER`` (ausente =
+    ``paddleocr``), así Desktop/CLI y el PULL respetan la misma selección.
     """
+    if preferido is None:
+        preferido = resolver_preferencia_ocr_desde_entorno()
     preferido = str(preferido).strip().lower()
     if preferido not in PROVEEDORES_OCR_ADMITIDOS:
         admitidos = ", ".join(sorted(PROVEEDORES_OCR_ADMITIDOS))

@@ -280,6 +280,24 @@ def test_crear_proveedor_rapidocr_no_afecta_ruta_paddle(monkeypatch):
     proveedor._asegurar_proceso.assert_called_once_with()
 
 
+def test_crear_proveedor_sin_argumento_respeta_atlas_ocr_provider(monkeypatch):
+    proveedor = Mock(spec=RapidOCRProvider)
+    monkeypatch.setattr(ocr_provider, "RapidOCRProvider", Mock(return_value=proveedor))
+    monkeypatch.setenv("ATLAS_OCR_PROVIDER", "rapidocr")
+
+    assert crear_proveedor_ocr() is proveedor
+
+
+def test_crear_proveedor_sin_argumento_ni_entorno_conserva_paddle(monkeypatch):
+    monkeypatch.delenv("ATLAS_OCR_PROVIDER", raising=False)
+    rapidocr = Mock()
+    monkeypatch.setattr(ocr_provider, "RapidOCRProvider", rapidocr)
+    monkeypatch.setattr(ocr_provider, "asegurar_runtime_paddle", lambda: None)
+
+    assert isinstance(crear_proveedor_ocr(), EasyOCRWorkerProvider)
+    rapidocr.assert_not_called()
+
+
 def test_preferencia_ocr_invalida_falla_claramente():
     with pytest.raises(ValueError, match="ATLAS_OCR_PROVIDER inválido.*easyocr.*paddleocr"):
         resolver_preferencia_ocr_desde_entorno({"ATLAS_OCR_PROVIDER": "tesseract"})
