@@ -105,6 +105,17 @@ def test_transporte_con_multiples_candidatos_no_asocia_ciegamente() -> None:
     assert set(resultado["candidatos"]) == {"0000355419", "0000355420"}
 
 
+def test_reenvio_misma_guia_con_transporte_documental_distinto_no_reutiliza_historial() -> None:
+    """482263: el folio previo no reemplaza el transporte impreso actual."""
+    resultado = asociar_documento(
+        {"numero_guia": "482263", "numero_transporte": "0000364243"},
+        [{"archivo": "historico.jpg", "numero_guia": "482263", "numero_transporte": "0000564243"}],
+    )
+    assert resultado["estado"] == "PROPUESTA_REQUIERE_REVISION"
+    assert resultado["numero_transporte"] == ""
+    assert resultado["candidatos"] == ["0000564243"]
+
+
 # ============================================================
 # 4. Ceros iniciales -- identidad exacta, nunca se corrompe/colapsa
 # ============================================================

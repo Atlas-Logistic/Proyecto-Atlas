@@ -500,6 +500,17 @@ def asociar_documento(
     # Sólo cuentan transportes válidos; si la fila de la guía no aporta
     # ninguno, decide el transporte válido que leyó ESTE envío.
     candidatas = [f for f in candidatas_por_guia if transporte_valido(f.get("numero_transporte", ""))]
+    # Una guía histórica con el mismo folio no puede sustituir el transporte
+    # documental actual. Si ambos son válidos y difieren, hay contradicción
+    # real: se expone para revisión y nunca se asocia al transporte previo.
+    transportes_de_guia = sorted({str(f.get("numero_transporte", "")).strip() for f in candidatas})
+    if transporte_valido(transporte) and transportes_de_guia and transporte not in transportes_de_guia:
+        return {
+            "estado": "PROPUESTA_REQUIERE_REVISION", "numero_transporte": "", "numero_guia": guia,
+            "candidatos": transportes_de_guia,
+            "motivo": "La guía ya existe con un transporte distinto al leído en este documento; no se asocia sin corroboración.",
+            "documento_ya_existe": True,
+        }
     if not candidatas and transporte_valido(transporte):
         candidatas = [f for f in filas if f.get("numero_transporte") == transporte]
     transportes = sorted({f.get("numero_transporte", "") for f in candidatas if f.get("numero_transporte")})

@@ -762,7 +762,14 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             normalizada = _normalizar(limpia)
             if _es_fragmento_estampado_no_material(normalizada):
                 continue
-            if _tiene_evidencia_material(limpia):
+            # RapidOCR puede pegar la designación de barra a una familia
+            # inequívoca ("3HORMIGON ...", caso 482264). Aún no pasa
+            # `_tiene_evidencia_material` porque no hay límite de palabra;
+            # se admite sólo este patrón completo, antes de normalizarlo.
+            evidencia_material = _tiene_evidencia_material(limpia) or bool(
+                re.match(r"^[D3]\s*HORMIGON\b", normalizada)
+            )
+            if evidencia_material:
                 # Un OCR de tabla puede fusionar una fila de material con el
                 # membrete que la antecede (caso real 475256). Sólo cuando la
                 # línea completa ya es material contaminado según el mismo
@@ -795,7 +802,11 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
                     limpia = re.sub(rf"\b{re.escape(token)}\b", familia, limpia, flags=re.IGNORECASE)
                 # Confusiones OCR acotadas al contexto inequívoco de una línea
                 # de acero: B/3/D al inicio y 8/B antes de MM.
-                limpia = re.sub(r"^[D3]\s+(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
+                # RapidOCR puede pegar la designación de barra a la familia
+                # ("3HORMIGON ...", caso 482264). Es la misma confusión
+                # D/3 -> B ya cubierta abajo; el separador ausente no puede
+                # hacer que se descarte una partida que sí fue leída.
+                limpia = re.sub(r"^[D3]\s*(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
                 limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
                 encontradas.extend(_dividir_items_material_fusionados(limpia))
                 continue

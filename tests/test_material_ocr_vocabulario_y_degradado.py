@@ -67,6 +67,18 @@ def test_lecturas_ya_aceptadas_no_cambian():
     assert extraer_descripcion_material(lineas) == " | ".join(lineas)
 
 
+def test_rapidocr_preserva_segunda_partida_con_designacion_pegada():
+    """482264: la foto y RapidOCR traen ambas filas; ``3HORMIGON`` no es
+    ausencia de evidencia sino la designación B pegada a la familia."""
+    lineas = [
+        "B HORMIGON 8MM 6M A630-420H (N)",
+        "3HORMIGON 12MM 6M A630-420H (N)",
+    ]
+    assert extraer_descripcion_material(lineas) == (
+        "B HORMIGON 8MM 6M A630-420H (N) | B HORMIGON 12MM 6M A630-420H (N)"
+    )
+
+
 def test_prefijo_de_cabecera_sin_etiqueta_descripcion_no_contamina_material_real():
     """La etiqueta de columna puede perderse; se conserva solo el item."""
     lectura = (
