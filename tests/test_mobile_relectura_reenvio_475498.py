@@ -237,10 +237,12 @@ def test_transporte_ocr_invalido_no_inventa_asociacion():
     assert asociacion["documento_ya_existe"] is True
 
 
-def test_asociacion_por_guia_prefiere_transporte_valido_de_la_fila():
+def test_asociacion_por_guia_con_transporte_valido_contradictorio_requiere_revision():
     filas = [_vieja_475498(numero_transporte="0000362999")]
     asociacion = asociar_documento(_lectura_mobile(), filas)
-    assert asociacion["numero_transporte"] == "0000362999"  # comportamiento de siempre
+    assert asociacion["estado"] == "PROPUESTA_REQUIERE_REVISION"
+    assert asociacion["numero_transporte"] == ""
+    assert asociacion["candidatos"] == ["0000362999"]
 
 
 def test_revalidacion_reevalua_asociado_a_transporte_invalido(tmp_path, monkeypatch):

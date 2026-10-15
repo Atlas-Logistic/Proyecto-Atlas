@@ -10,7 +10,7 @@ $git = 'C:\Program Files\Git\cmd\git.exe'
 $desarrollo = $PSScriptRoot
 $estable = Join-Path (Split-Path $desarrollo -Parent) 'Proyecto-Atlas-Estable'
 $rutaTarea = '\Atlas\'
-$nombreTarea = 'MantenimientoPendientesTecnicos'
+$nombreTarea = 'Atlas Mobile - PULL Cloud a Motor'
 
 & $git -C $desarrollo fetch --quiet origin
 if ($LASTEXITCODE -ne 0) { throw 'git fetch falló' }

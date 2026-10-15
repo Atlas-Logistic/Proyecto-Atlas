@@ -105,8 +105,12 @@ def test_misma_guia_con_transporte_distinto_no_es_candidata(tmp_path: Path) -> N
     dataset = tmp_path / "operacion/actual/analisis_completo_guias.csv"
     _dataset_con_filas(dataset, [_fila_canonica("OK", transporte="0000362999")])
     repo, envio_id = _reenvio_procesado(tmp_path, dataset)
-    # La asociación (por guía) apunta al transporte de la fila, no al leído.
-    assert repo.cargar(envio_id)["resultado_asociacion"]["numero_transporte"] == "0000362999"
+    # La fila histórica contradictoria no puede reemplazar lo leído en el
+    # documento actual: queda para revisión, sin asociación automática.
+    asociacion = repo.cargar(envio_id)["resultado_asociacion"]
+    assert asociacion["estado"] == "PROPUESTA_REQUIERE_REVISION"
+    assert asociacion["numero_transporte"] == ""
+    assert asociacion["candidatos"] == ["0000362999"]
 
     resumen = revalidar_asociacion_mobile_sin_ocr(repo, dataset=dataset)
 
