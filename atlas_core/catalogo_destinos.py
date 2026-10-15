@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 from uuid import uuid4
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
+from atlas_core.cache_validacion_catalogos import huella_contenido, registrar_validado, ya_validado
 from atlas_core.geografia import texto_normalizado
 from atlas_core.catalogo_clientes import (
     CatalogoClientes,
@@ -854,6 +855,10 @@ class CatalogoDestinos:
     def _leer(self) -> list[Destino]:
         if not self.ruta.exists():
             return []
+        # Ver `atlas_core.cache_validacion_catalogos`: sólo se omite la
+        # validación de abajo si ESTE contenido exacto ya la pasó y no
+        # cambió mientras se parseaba.
+        huella = huella_contenido("catalogo_destinos", self.ruta)
         try:
             with self.ruta.open("r", encoding="utf-8") as archivo:
                 contenido = json.load(archivo)
@@ -865,6 +870,9 @@ class CatalogoDestinos:
         if not isinstance(registros, list):
             raise CatalogoDestinosCorruptoError("destinos debe ser una lista")
         destinos = [Destino.desde_dict(registro) for registro in registros]
+        contenido_estable = huella is not None and huella_contenido("catalogo_destinos", self.ruta) == huella
+        if contenido_estable and ya_validado(huella):
+            return destinos
         ids = [destino.destino_id for destino in destinos]
         if len(ids) != len(set(ids)):
             raise CatalogoDestinosCorruptoError("el catálogo contiene IDs duplicados")
@@ -873,6 +881,8 @@ class CatalogoDestinos:
                 self._validar_duplicado(destinos, destino, excluir_id=destino.destino_id)
         except ErrorCatalogoDestinos as error:
             raise CatalogoDestinosCorruptoError(str(error)) from error
+        if contenido_estable:
+            registrar_validado(huella)
         return destinos
 
     def _escribir(self, destinos: Iterable[Destino]) -> None:

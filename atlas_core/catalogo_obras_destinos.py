@@ -29,6 +29,7 @@ from atlas_core.almacenamiento_portable import (
     escribir_json_atomico,
     ruta_catalogos_privados,
 )
+from atlas_core.cache_validacion_catalogos import huella_contenido, registrar_validado, ya_validado
 from atlas_core.catalogo_clientes import CatalogoClientes
 from atlas_core.catalogo_destinos import CatalogoDestinos
 
@@ -940,6 +941,12 @@ class CatalogoObrasDestinos:
     def _leer(self) -> tuple[list[Obra], list[RelacionObraDestino]]:
         if not self.ruta.exists():
             return [], []
+        # Ver `atlas_core.cache_validacion_catalogos`. `_validar_catalogo`
+        # depende también de clientes y destinos (referencias), así que la
+        # huella cubre los tres archivos.
+        huella = huella_contenido(
+            "catalogo_obras_destinos", self.ruta, self.ruta_clientes, self.ruta_destinos,
+        )
         try:
             contenido = json.loads(self.ruta.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -958,7 +965,14 @@ class CatalogoObrasDestinos:
             raise CatalogoObrasDestinosCorruptoError("obras y relaciones deben ser listas")
         obras = [Obra.desde_dict(o) for o in contenido["obras"]]
         relaciones = [RelacionObraDestino.desde_dict(r) for r in contenido["relaciones"]]
+        contenido_estable = huella is not None and huella_contenido(
+            "catalogo_obras_destinos", self.ruta, self.ruta_clientes, self.ruta_destinos,
+        ) == huella
+        if contenido_estable and ya_validado(huella):
+            return obras, relaciones
         self._validar_catalogo(obras, relaciones, corrupto=True)
+        if contenido_estable:
+            registrar_validado(huella)
         return obras, relaciones
 
     def _validar_catalogo(
