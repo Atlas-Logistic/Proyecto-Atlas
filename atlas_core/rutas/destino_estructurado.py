@@ -71,7 +71,7 @@ _ETIQUETAS_CORTE = (
     r"SOLICITANTE",
     r"SE[ÑN]OR",
     r"INDICADOR\s+TRASLADO",
-    r"DESPACHAR\s+A",
+    r"DESPACHAR\s*A",
     r"RETIRA",
     r"RUT\s+CHOFER",
     r"PATENTE",
@@ -90,7 +90,7 @@ _PATRON_COMUNA = re.compile(
     rf"\bCOMUNA\b\s*[:\-]?\s*(.+?)(?=\s+{_LIMITE}\b|$)"
 )
 _PATRON_DESPACHAR_A = re.compile(
-    rf"\bDESPACHAR\s+A\b\s*[:\-]?\s*(.+?)(?=\s+{_LIMITE}\b|$)"
+    rf"\bDESPACHAR\s*A\b\s*[:\-]?\s*(.+?)(?=\s+{_LIMITE}\b|$)"
 )
 
 

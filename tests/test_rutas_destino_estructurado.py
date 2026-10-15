@@ -302,6 +302,14 @@ def test_extrae_despachar_a_hasta_la_siguiente_etiqueta():
     assert resultado.despachar_a == "VISTA CLARA 2351 CERRILLOS"
 
 
+def test_rapidocr_acepta_etiqueta_despachara_sin_espacio():
+    """481131: RapidOCR leyó la dirección, pero compactó la etiqueta."""
+    resultado = extraer_identificadores_destino([
+        "DESPACHARA", ":AVDA CORDILLERA 482 QUILICURA", "RUT CHOFER", ":10833150-K",
+    ])
+    assert resultado.despachar_a == "AVDA CORDILLERA 482 QUILICURA"
+
+
 # --- concordancia: sin DESPACHAR A en el documento, se considera concordante ---
 
 def test_sin_despachar_a_se_considera_concordante(entorno):
