@@ -624,6 +624,71 @@ def _transportes_resueltos_del_lote(
     return sorted(transportes)
 
 
+class _HistorialPorLote:
+    """Relectura fresca ACOTADA para el respaldo por lote dentro de UNA
+    pasada de `revalidar_asociacion_mobile_sin_ocr`.
+
+    Antes la pasada releía `historial()` completo (todos los envio.json)
+    por cada envío reintentable con `lote_id` -- caso medido: 88 envíos x
+    130 archivos = ~11.700 lecturas en G: (~33 s por reconciliación). Para
+    `_transportes_resueltos_del_lote` sólo importan los envíos de ESE lote,
+    así que basta releer esos: mismo contenido fresco que vería un
+    `historial()` completo en ese instante, filtrado al lote.
+
+    `lote_id` se fija al recibir el envío y nunca se reescribe, así que el
+    índice lote -> envíos armado con el snapshot inicial sigue vigente.
+    Un envío que aparece DURANTE la pasada (u otro que en el snapshot aún
+    no tenía envio.json legible) se detecta listando la carpeta antes de
+    cada consulta y se incorpora al índice -- igual que lo habría visto la
+    relectura completa. Un envío borrado o ilegible se omite, igual que en
+    `historial()`."""
+
+    def __init__(self, repositorio: "RepositorioEnviosMobile", historial: list[dict[str, object]]) -> None:
+        self._repositorio = repositorio
+        self._por_lote: dict[str, list[str]] = {}
+        self._conocidos: set[str] = set()
+        for registro in historial:
+            self._indexar_snapshot(registro)
+
+    def _indexar(self, carpeta: str, registro: Mapping[str, object]) -> None:
+        if not carpeta or carpeta in self._conocidos:
+            return
+        self._conocidos.add(carpeta)
+        self._por_lote.setdefault(str(registro.get("lote_id", "")), []).append(carpeta)
+
+    def _indexar_snapshot(self, registro: Mapping[str, object]) -> None:
+        # `historial()` no expone la carpeta; `recibir` usa `envio_id` como
+        # nombre. Si alguna no coincidiera, la carpeta real queda sin
+        # conocer y `_incorporar_nuevos` la indexa por su nombre.
+        self._indexar(str(registro.get("envio_id", "")), registro)
+
+    def _incorporar_nuevos(self) -> None:
+        try:
+            carpetas = [entrada.name for entrada in os.scandir(self._repositorio.raiz) if entrada.is_dir()]
+        except OSError:
+            return
+        for carpeta in carpetas:
+            if carpeta in self._conocidos:
+                continue
+            try:
+                registro = self._repositorio.cargar(carpeta)
+            except (OSError, json.JSONDecodeError):
+                continue  # aún sin envio.json legible: se reintenta en la próxima consulta
+            self._indexar(carpeta, registro)
+
+    def registros_frescos(self, lote_id: str, *, excluir_envio_id: str) -> list[dict[str, object]]:
+        self._incorporar_nuevos()
+        registros: list[dict[str, object]] = []
+        for carpeta in self._por_lote.get(lote_id, []):
+            if carpeta == excluir_envio_id:
+                continue  # `_transportes_resueltos_del_lote` lo excluiría igual
+            try:
+                registros.append(self._repositorio.cargar(carpeta))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return registros
+
+
 def _corregir_transporte_por_respaldo_lote_en_dataset(
     dataset: Path, *, identificador_documento: str, numero_transporte: str,
 ) -> bool:
@@ -2147,7 +2212,11 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
 
     revisados = 0
     actualizados: list[str] = []
-    for registro_historial in repositorio.historial():
+    # Una sola lectura completa por pasada; el respaldo por lote relee
+    # sólo los hermanos de cada envío (ver `_HistorialPorLote`).
+    historial_inicial = repositorio.historial()
+    historial_por_lote = _HistorialPorLote(repositorio, historial_inicial)
+    for registro_historial in historial_inicial:
         asociacion_previa_historial = registro_historial.get("resultado_asociacion") or {}
         if (
             not _asociacion_reintentable(asociacion_previa_historial)
@@ -2202,15 +2271,18 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 # sigue pendiente; si ya está resuelta, se conserva TAL
                 # CUAL (nunca se re-evalúa, nunca se inventa una nueva).
                 if reintentar_asociacion:
-                    # Bloque RESPALDO POR LOTE -- `historial()` se
-                    # relee FRESCO acá (nunca el snapshot con el que
-                    # empezó este barrido) para que un hermano de la
-                    # MISMA tanda que ya convergió más temprano en este
-                    # mismo barrido cuente igual -- la convergencia es
-                    # transitiva e independiente del orden de llegada.
+                    # Bloque RESPALDO POR LOTE -- los hermanos de la
+                    # tanda se releen FRESCOS acá (nunca el snapshot con
+                    # el que empezó este barrido) para que un hermano de
+                    # la MISMA tanda que ya convergió más temprano en
+                    # este mismo barrido cuente igual -- la convergencia
+                    # es transitiva e independiente del orden de llegada.
                     lote_id = str(registro.get("lote_id", "")).strip()
                     candidatos_lote: list[str] = (
-                        _transportes_resueltos_del_lote(repositorio.historial(), lote_id, excluir_envio_id=envio_id)
+                        _transportes_resueltos_del_lote(
+                            historial_por_lote.registros_frescos(lote_id, excluir_envio_id=envio_id),
+                            lote_id, excluir_envio_id=envio_id,
+                        )
                         if lote_id else []
                     )
                     asociacion_nueva = asociar_documento(datos, filas_sin_propia, candidatos_lote=candidatos_lote)
