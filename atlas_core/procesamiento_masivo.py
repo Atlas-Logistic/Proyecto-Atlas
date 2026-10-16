@@ -4304,6 +4304,7 @@ def _promover_relectura(
         reemplazo = {columna: str(fila_nueva.get(columna, "")) for columna in COLUMNAS}
         reemplazo["archivo"] = archivo
         reemplazo["fecha_ingesta_utc"] = str(vigente.get("fecha_ingesta_utc", "")) or reemplazo["fecha_ingesta_utc"]
+        anotar_fecha_recepcion(reemplazo, fecha_recepcion_de(vigente))
         for columna in COLUMNAS:
             if _hay_decision_humana_para_campo(aplicaciones, fila=vigente, campo=columna):
                 reemplazo[columna] = str(vigente.get(columna, ""))
@@ -4477,6 +4478,41 @@ def asociar_evidencias_pdf_de_lote(
                 resumen=resumen, aplicar=aplicar,
             )
     return resumen
+
+
+def fecha_recepcion_de(fila: Mapping[str, object]) -> str:
+    """`fecha_recepcion_utc` guardada en `metricas_procesamiento_json`, o ""."""
+    try:
+        metricas = json.loads(str(fila.get("metricas_procesamiento_json") or "{}"))
+    except ValueError:
+        return ""
+    return str(metricas.get("fecha_recepcion_utc") or "") if isinstance(metricas, dict) else ""
+
+
+def anotar_fecha_recepcion(datos: dict, recibido_en: object) -> None:
+    """Recepción REAL del documento en Atlas (Mobile: `recibido_en` del
+    envío; Desktop: `ingresado_en_utc` del lote), distinta de
+    `fecha_ingesta_utc` (cuándo se procesó: puede ser días después si el
+    OCR se demora, caso real 482209). Va dentro de
+    `metricas_procesamiento_json` para no cambiar el esquema del dataset;
+    toda reescritura posterior de esa columna conserva las claves que no
+    conoce. Nunca pisa una recepción ya anotada; un valor sin zona horaria
+    o ilegible se ignora."""
+    texto = str(recibido_en or "").strip()
+    try:
+        instante = datetime.fromisoformat(texto.replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if instante.tzinfo is None:
+        return
+    try:
+        metricas = json.loads(str(datos.get("metricas_procesamiento_json") or "{}"))
+    except ValueError:
+        metricas = {}
+    if not isinstance(metricas, dict):
+        metricas = {}
+    metricas.setdefault("fecha_recepcion_utc", instante.astimezone(timezone.utc).isoformat())
+    datos["metricas_procesamiento_json"] = json.dumps(metricas, ensure_ascii=False, sort_keys=True)
 
 
 def _persistir_manifiesto_seleccion_desktop(
@@ -6335,6 +6371,10 @@ def procesar_carpeta(
     ruta_manifiesto_ingesta = _persistir_manifiesto_seleccion_desktop(
         raiz=raiz, archivos=archivos, ruta_csv=ruta_csv,
     )
+    recepcion_por_nombre = {
+        str(s.get("nombre_archivo", "")): str(s.get("ingresado_en_utc", ""))
+        for s in json.loads(ruta_manifiesto_ingesta.read_text(encoding="utf-8")).get("seleccion", [])
+    }
     paginas_pdf: dict[str, PaginaPdfRasterizada] = {}
     errores_entrada: dict[str, str] = {}
     entradas_ocr = _preparar_entradas_ocr(
@@ -6558,6 +6598,9 @@ def procesar_carpeta(
                     estado_procesamiento="OK",
                     error="",
                 )
+                if relectura is None:
+                    anotar_fecha_recepcion(
+                        fila, recepcion_por_nombre.get(Path(identificador.split("::")[0]).name))
                 _imprimir_metricas_documento(
                     identificador,
                     json.loads(fila.get("metricas_procesamiento_json") or "{}"),

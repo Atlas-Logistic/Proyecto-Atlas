@@ -25,7 +25,8 @@ from atlas_core.decisiones_pendientes import (
 )
 from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.procesamiento_masivo import (
-    COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, escalar_resultado_ia_en_memoria, procesar_archivo,
+    COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, anotar_fecha_recepcion, escalar_resultado_ia_en_memoria,
+    procesar_archivo,
 )
 
 
@@ -1022,6 +1023,8 @@ def _procesar_envio_mobile_impl(
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
             datos = dict(procesar_archivo(imagen, **argumentos))
+        # Recepción real del envío (no su procesamiento) para el filtro Hoy.
+        anotar_fecha_recepcion(datos, registro.get("recibido_en"))
 
         if datos.get("tipo_documental") == TIPO_DOCUMENTAL_COMPROBANTE_PESAJE:
             # No escala a IA, no crea decisiones, ni escribe dataset/viaje.
@@ -1751,6 +1754,7 @@ def _reprocesar_envio_mobile_persistido_impl(
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
             datos = dict(procesar_archivo(imagen, **argumentos))
+            anotar_fecha_recepcion(datos, registro.get("recibido_en"))
 
             datos, resumen_ia = escalar_resultado_ia_en_memoria(
                 datos, otras_filas, orquestador_ia=orquestador_ia, carpeta_catalogos=carpeta_catalogos,
