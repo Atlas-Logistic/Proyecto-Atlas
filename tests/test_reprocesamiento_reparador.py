@@ -511,3 +511,91 @@ def test_material_limpio_nunca_se_toca(tmp_path, monkeypatch):
     resultado, tras = _reparar_con(monkeypatch, tmp_path, fila, {"descripcion_material": "ROLLO HORMIGON 12MM"})
     assert resultado["campos_cambiados_total"] == 0
     assert tras["descripcion_material"] == "ROLLO HORMIGON 10MM"
+
+
+# --- filtro por documento (caso real lote 20261016_121143: 482247 / 482179) ---
+
+def _lote_dos_documentos(tmp_path, monkeypatch):
+    raiz = _raiz(tmp_path)
+    _escribir_manifiesto(raiz, lote="LOTE1", archivos=["482179.jpeg", "482247.jpeg"])
+    for nombre in ("482179.jpeg", "482247.jpeg"):
+        _crear_imagen(raiz, "LOTE1", nombre)
+    _escribir_dataset(raiz, [
+        _fila_base(archivo="482179.jpeg", numero_guia="482179", numero_transporte="0000363997",
+                   despachar_a_crudo="", patente_tracto="No encontrado",
+                   motivos_revision_documento="PATENTE_SIN_HOMOLOGAR", indicador_revision="REVISAR",
+                   estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION"),
+        _fila_base(archivo="482247.jpeg", numero_guia="No encontrado", numero_transporte="0000364199",
+                   motivos_revision_documento="GUIA_AUSENTE", indicador_revision="REVISAR",
+                   estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION"),
+    ])
+    _escribir_ledger(raiz, [])
+    leidos = []
+
+    def procesar(ruta, **kw):
+        leidos.append(ruta.name)
+        if ruta.name == "482247.jpeg":
+            return {"numero_guia": "482247", "numero_transporte": "0000364199"}
+        return {"despachar_a_crudo": "GALVARINO B501 QUILICURA", "patente_tracto": "DD2494"}
+
+    monkeypatch.setattr(m, "procesar_archivo", procesar)
+    return raiz, leidos
+
+
+def test_filtro_por_documento_lee_y_escribe_solo_el_seleccionado(tmp_path, monkeypatch):
+    raiz, leidos = _lote_dos_documentos(tmp_path, monkeypatch)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    antes = {f["archivo"]: f for f in _leer_filas(dataset)}
+    llamadas = []
+    _stub_reconciliacion(monkeypatch, llamadas)
+
+    simulacion = m.reprocesar_lote_reparador(raiz_atlas=raiz, nombre_lote="LOTE1", dry_run=True,
+                                             proveedor=object(), archivos=("482247.jpeg",))
+    assert leidos == ["482247.jpeg"]  # nunca OCR sobre 482179
+    assert [d["archivo"] for d in simulacion["documentos"]] == ["482247.jpeg"]
+    assert {f["archivo"]: f for f in _leer_filas(dataset)} == antes
+
+    resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, nombre_lote="LOTE1", dry_run=False,
+                                            proveedor=object(), archivos=("482247.jpeg",))
+    despues = {f["archivo"]: f for f in _leer_filas(dataset)}
+    assert [(c["campo"], c["despues"]) for c in resultado["documentos"][0]["cambios"]] == [("numero_guia", "482247")]
+    assert despues["482247.jpeg"]["numero_guia"] == "482247"
+    assert despues["482179.jpeg"] == antes["482179.jpeg"]  # ninguna escritura sobre la otra guía
+    assert len(llamadas) == 1
+
+
+def test_sin_filtro_el_lote_completo_se_comporta_como_siempre(tmp_path, monkeypatch):
+    raiz, leidos = _lote_dos_documentos(tmp_path, monkeypatch)
+    resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, nombre_lote="LOTE1", dry_run=True, proveedor=object())
+    assert sorted(leidos) == ["482179.jpeg", "482247.jpeg"]
+    assert resultado["documentos_reprocesados"] == 2
+
+
+def test_filtro_con_documento_fuera_del_lote_no_lee_ni_escribe(tmp_path, monkeypatch):
+    raiz, leidos = _lote_dos_documentos(tmp_path, monkeypatch)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    antes = dataset.read_bytes()
+    for archivos in (("999999.jpeg",), ()):
+        with pytest.raises(ValueError, match="fuera del lote"):
+            m.reprocesar_lote_reparador(raiz_atlas=raiz, nombre_lote="LOTE1", dry_run=False,
+                                        proveedor=object(), archivos=archivos)
+    assert leidos == [] and dataset.read_bytes() == antes
+
+
+def test_filtro_aborta_sin_escribir_si_cambiaria_una_fila_no_seleccionada(tmp_path, monkeypatch):
+    raiz, _ = _lote_dos_documentos(tmp_path, monkeypatch)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    antes = dataset.read_bytes()
+    leer_original, aplicar_original = m._leer_filas, m._aplicar_cambios_a_fila
+    leidas = []
+    monkeypatch.setattr(m, "_leer_filas", lambda ruta: leidas.append(leer_original(ruta)) or leidas[-1])
+
+    def aplicar_y_contaminar(fila, cambios, **kw):
+        aplicar_original(fila, cambios, **kw)
+        leidas[-1][0]["despachar_a_crudo"] = "CONTAMINADO"  # fila de 482179, no seleccionada
+
+    monkeypatch.setattr(m, "_aplicar_cambios_a_fila", aplicar_y_contaminar)
+    with pytest.raises(RuntimeError, match="filas no seleccionadas"):
+        m.reprocesar_lote_reparador(raiz_atlas=raiz, nombre_lote="LOTE1", dry_run=False,
+                                    proveedor=object(), archivos=("482247.jpeg",))
+    assert dataset.read_bytes() == antes

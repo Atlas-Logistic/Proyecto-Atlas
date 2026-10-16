@@ -522,13 +522,21 @@ def reprocesar_lote_reparador(
     dry_run: bool = True,
     lector_ocr: object = None,
     proveedor: object = None,
+    archivos: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     """Modo REPROCESAMIENTO_REPARADOR -- ver docstring del módulo para
     las garantías estructurales. `dry_run=True` (default, EXPLÍCITO):
     calcula y reporta todo, no escribe nada -- ni el dataset, ni la
     bandeja, ni dispara reconciliación. Sólo con `dry_run=False` se
     persisten los cambios y corre `revalidar_y_regenerar_reporte` al
-    final (reconciliación canónica ya existente, nunca una nueva)."""
+    final (reconciliación canónica ya existente, nunca una nueva).
+
+    `archivos` (opcional; sin él, todo el lote como siempre): caso real lote
+    20261016_121143, donde reparar 482247 escribía también una dirección
+    OCR errónea en 482179. Sólo esos nombres del manifiesto se releen y se
+    reparan; un nombre que no esté en el lote es ValueError. Antes de
+    escribir se comprueba que toda fila no seleccionada siga idéntica a la
+    leída -- si no, nada se escribe (RuntimeError)."""
     raiz = Path(raiz_atlas)
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
@@ -537,6 +545,12 @@ def reprocesar_lote_reparador(
     t_inicio = time.perf_counter()
 
     nombre_lote_resuelto, seleccion = _cargar_manifiesto(raiz, nombre_lote=nombre_lote)
+    if archivos is not None:
+        pedidos = {str(a).strip() for a in archivos if str(a).strip()}
+        en_lote = {str(e.get("nombre_archivo", "")).strip() for e in seleccion}
+        if not pedidos or pedidos - en_lote:
+            raise ValueError(f"archivos fuera del lote {nombre_lote_resuelto}: {sorted(pedidos - en_lote) or '(ninguno)'}")
+        seleccion = [e for e in seleccion if str(e.get("nombre_archivo", "")).strip() in pedidos]
 
     # Caso real lote 20260916_151401: sin esto, `procesar_archivo` caía al
     # camino EasyOCR legacy por defecto (proveedor=None) -- un motor
@@ -570,6 +584,7 @@ def reprocesar_lote_reparador(
             (str(f.get("numero_guia", "")).strip(), str(f.get("numero_transporte", "")).strip())
             for f in filas
         }
+        filas_leidas = [dict(f) for f in filas] if archivos is not None else None
 
         documentos: list[DocumentoReparado] = []
         filas_nuevas: list[dict[str, str]] = []
@@ -685,6 +700,16 @@ def reprocesar_lote_reparador(
             ))
             tiempos_por_imagen.append(time.perf_counter() - t_imagen)
 
+        if filas_leidas is not None:
+            # Aislamiento de escritura con `archivos`: sólo las filas de los
+            # documentos procesados pueden diferir de lo leído.
+            procesados = {d.archivo for d in documentos}
+            ajenas = [
+                str(antes.get("archivo", "")) for antes, ahora in zip(filas_leidas, filas)
+                if str(antes.get("archivo", "")) not in procesados and antes != ahora
+            ]
+            if ajenas:
+                raise RuntimeError(f"el reparador por documento modificaría filas no seleccionadas: {ajenas}")
         if not dry_run and (any(d.cambios for d in documentos) or filas_nuevas):
             _escribir_filas_completas(dataset, filas + filas_nuevas)
 

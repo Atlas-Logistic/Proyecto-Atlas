@@ -13,10 +13,13 @@ def main():
     parser.add_argument("--raiz-atlas", required=True)
     parser.add_argument("--lote", default=None, help="Nombre del manifiesto; por defecto el más reciente")
     parser.add_argument("--ejecutar", action="store_true", help="Persiste los cambios (sin esto: dry-run)")
+    parser.add_argument("--archivo", action="append", default=None,
+                        help="Sólo este documento del lote (repetible); por defecto, el lote completo")
     args = parser.parse_args()
 
     resultado = reprocesar_lote_reparador(
         raiz_atlas=args.raiz_atlas, nombre_lote=args.lote, dry_run=not args.ejecutar,
+        archivos=tuple(args.archivo) if args.archivo else None,
     )
     print(json.dumps(resultado, ensure_ascii=True, indent=2))
 
