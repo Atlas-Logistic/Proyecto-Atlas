@@ -1453,6 +1453,74 @@ def _aplicar_documento_corregir_chofer(ctx: _Contexto, p: dict, plan: Plan, acto
     return {"despues": valores, "guias_revalidar": list(plan.datos["guias_viaje"])}
 
 
+def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
+    """Caso real 9482179 -> 482179: RapidOCR leyó el "º" de "Nº 482179" como
+    "9" y el folio quedó con 7 dígitos. Sólo corrige ESE patrón (el folio
+    persistido es "9" + el folio pedido, de 6 dígitos), nunca un folio que ya
+    tenga otro documento ni uno con tarjetas pendientes que quedarían
+    huérfanas. La lectura OCR original queda en el ledger."""
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    archivo, actual, transporte = (str(fila.get("archivo", "")), str(fila.get("numero_guia", "")).strip(),
+                                   str(fila.get("numero_transporte", "")))
+    nuevo = str(p["numero_guia_corregido"]).strip()
+    if not re.fullmatch(r"[1-9][0-9]{5}", nuevo):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "el folio corregido debe tener 6 dígitos")
+    if actual != "9" + nuevo:
+        raise ErrorAccionOperacional(
+            "PRECONDICION_FALLIDA", "sólo se corrige un folio leído con el marcador º como 9 inicial")
+    otros = sorted(str(f.get("archivo", "")) for f in ctx.filas()
+                   if str(f.get("numero_guia", "")).strip() == nuevo and str(f.get("archivo", "")) != archivo)
+    if otros:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"el folio {nuevo} ya pertenece a otro documento")
+    pendientes = [d for d in ctx.decisiones() if str((d.get("documento") or {}).get("numero_guia", "")) == actual]
+    if pendientes:
+        raise ErrorAccionOperacional(
+            "PRECONDICION_FALLIDA", "la guía tiene tarjetas pendientes; resuélvalas antes de corregir el folio")
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": actual,
+                 "numero_transporte": transporte, "campo": "numero_guia"},
+        valor_actual={"numero_guia": actual}, valor_propuesto={"numero_guia": nuevo},
+        estado_base={"fila": fila}, sin_cambios=False,
+        afectados={"guias": [actual, nuevo], "archivo": archivo, "numero_transporte": transporte},
+        consecuencias=[
+            f"El documento {archivo} pasa del folio {actual} al {nuevo}; ningún otro campo cambia.",
+            "La lectura OCR original queda en el ledger de auditoría.",
+            "Sólo se revalida este documento y se regenera el reporte; no se reconcilia la bandeja global.",
+        ],
+        revalidaciones=["MANTENIMIENTO_FOCAL_GUIAS", "REGENERAR_REPORTE_VIAJES"],
+        archivos=("dataset", "ledger_decisiones"),
+        datos={"archivo": archivo, "guia": actual, "guia_nueva": nuevo, "transporte": transporte},
+    )
+
+
+def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.reprocesamiento_reparador import reparar_documento_focal_con_valores_conocidos
+
+    nuevo = str(plan.datos["guia_nueva"])
+    resultado = reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=ctx.raiz, archivo=str(plan.datos["archivo"]), valores={"numero_guia": nuevo}, dry_run=False,
+        reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
+        superar_resoluciones_automaticas=True, numero_guia=str(plan.datos["guia"]),
+        campos_adicionales_permitidos=frozenset({"numero_guia"}),
+    )
+    cambios = resultado.get("cambios", [])
+    if ([(c["campo"], c["antes"], c["despues"]) for c in cambios]
+            != [("numero_guia", str(plan.datos["guia"]), nuevo)] or str(resultado.get("archivo")) != plan.datos["archivo"]):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el reparador no aplicó exactamente el folio del preview")
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        ledger.setdefault("aplicaciones", []).append({
+            "decision_id": f"ACCION_OPERACIONAL:{ctx.token}", "tipo": TIPO_LEDGER_CORRECCION,
+            "accion": "CORREGIR_NUMERO_GUIA", "actor": actor, "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "documento": {"archivo": plan.datos["archivo"], "numero_guia": nuevo,
+                          "numero_transporte": plan.datos["transporte"]},
+            "campo": "numero_guia", "valor_documental": plan.datos["guia"], "valor_corregido": nuevo,
+            "referencia": str(p.get("referencia", "")),
+        })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    return {"despues": {"numero_guia": nuevo}, "guias_revalidar": [nuevo], "regenerar_reporte": True}
+
+
 # =============================================================== DECISIONES
 
 
@@ -1712,6 +1780,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "rut_chofer": _P("rut", True), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
+    DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
+                     "Corrige un folio leído con el marcador º como 9 inicial (9482179 -> 482179).",
+                     {"numero_guia": _P("guia", True), "numero_guia_corregido": _P("guia", True),
+                      "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
+                     _plan_documento_corregir_numero_guia, _aplicar_documento_corregir_numero_guia),
     DefinicionAccion("DOCUMENTO_ASIGNAR_OBRA", OPERACIONAL_REVERSIBLE,
                      "Asigna a una guía una obra EXISTENTE del catálogo (sin crear obra ni alias).",
                      {"numero_guia": _P("guia", True), "obra_id": _P("id", True),

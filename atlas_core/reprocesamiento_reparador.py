@@ -778,6 +778,13 @@ CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA: dict[str, object] = {
     "rut_chofer": lambda v: validar_rut_chileno(v).estado == EstadoValidacion.VALIDO,
 }
 
+# Mismo criterio: el folio sólo lo habilita la acción tipada
+# DOCUMENTO_CORREGIR_NUMERO_GUIA (caso real 9482179 -> 482179). Folio AZA de
+# 6 dígitos; nunca se asigna un folio que ya tenga otro documento.
+CAMPOS_NUMERO_GUIA_CORREGIDO: dict[str, object] = {
+    "numero_guia": lambda v: bool(re.fullmatch(r"[1-9][0-9]{5}", v)),
+}
+
 # Motivos que cada campo puede retirar al promoverse -- mismo criterio
 # que `CAMPOS_REPARABLES`. `codigo_cliente`/`cod_destinatario` no tienen
 # motivo propio en `MotivoRevisionDocumento` (bloque P0 cerrado, nunca
@@ -787,6 +794,7 @@ CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA: dict[str, object] = {
 # en sí la retira, aparte, el bloque de convergencia de identidades
 # conocidas (`regenerar_decisiones_persistidas`), nunca este módulo.
 _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
+    "numero_guia": (_MOTIVO_GUIA,),
     "chofer": (
         MotivoRevisionDocumento.CHOFER_AUSENTE.value,
         MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR.value,
@@ -859,7 +867,10 @@ def reparar_documento_focal_con_valores_conocidos(
 
     `campos_adicionales_permitidos` sólo admite la pareja completa
     ``{"chofer", "rut_chofer"}`` para la acción documental que ya verificó
-    esa identidad en catálogo; cualquier otra solicitud sigue ignorándose.
+    esa identidad en catálogo, o ``{"numero_guia"}`` para
+    DOCUMENTO_CORREGIR_NUMERO_GUIA (que además se bloquea aquí, bajo el
+    lock, si otra fila ya tiene ese folio); cualquier otra solicitud sigue
+    ignorándose.
 
     `archivo` debe identificar UNA fila (ruta completa; ver
     `_resolver_fila_por_archivo`); con `numero_guia` la fila además debe
@@ -871,8 +882,10 @@ def reparar_documento_focal_con_valores_conocidos(
     t_inicio = time.perf_counter()
 
     identidad_confirmada = campos_adicionales_permitidos == frozenset(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA)
+    numero_guia_corregido = campos_adicionales_permitidos == frozenset(CAMPOS_NUMERO_GUIA_CORREGIDO)
     campos_permitidos = {**CAMPOS_FOCALES_CONOCIDOS,
-                         **(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA if identidad_confirmada else {})}
+                         **(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA if identidad_confirmada else {}),
+                         **(CAMPOS_NUMERO_GUIA_CORREGIDO if numero_guia_corregido else {})}
     try:
         aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
         aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)
@@ -917,6 +930,13 @@ def reparar_documento_focal_con_valores_conocidos(
                 )
                 if duplicados:
                     continue  # nunca crea un duplicado guía+transporte
+            if campo == "numero_guia":
+                duplicados = sorted(
+                    str(otra.get("archivo", "")) for otra in filas
+                    if otra is not fila and str(otra.get("numero_guia", "")).strip() == valor_nuevo
+                )
+                if duplicados:
+                    continue  # nunca asigna un folio que ya tiene otro documento
             cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), campo, valor_actual, valor_nuevo))
 
         if duplicados:

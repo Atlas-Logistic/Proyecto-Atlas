@@ -841,3 +841,77 @@ def test_corregir_transporte_preview_obsoleto_si_cambia_el_viaje_destino(entorno
     assert r["estado"] == "PREVIEW_OBSOLETO", r
     assert _filas_dataset(entorno)["500001.jpeg"]["numero_transporte"] == T_ANTERIOR
     assert r["preview_nuevo"]["afectados"]["viaje_destino"]["guias_existentes"] == ["500003", "500004"]
+
+
+def _sin_reporte_real(monkeypatch, llamadas: list):
+    monkeypatch.setattr(CapaAccionesOperacionales, "_regenerar_reporte",
+                        lambda self: llamadas.append("reporte") or {"ok": True})
+
+
+def test_corregir_numero_guia_nueve_absorbido_es_focal_y_auditable(entorno, monkeypatch):
+    """Caso real 9482179 -> 482179: sólo cambia el folio, deja la lectura OCR
+    en el ledger y no reconcilia la bandeja."""
+    _escribir_dataset(entorno, [_fila("9482179", archivo="482179.jpeg", numero_transporte="No encontrado",
+                                      motivos_revision_documento="TRANSPORTE_AUSENTE", indicador_revision="REVISAR",
+                                      estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION"),
+                                _fila("500002")])
+    bandeja_antes = _sha(entorno["actual"] / "decisiones_pendientes.json")
+    antes = _filas_dataset(entorno)
+    forzadas: list[set[str]] = []
+    reportes: list[str] = []
+    _sin_mantenimiento_real(monkeypatch, forzadas)
+    _sin_reporte_real(monkeypatch, reportes)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA",
+                                 {"numero_guia": "9482179", "numero_guia_corregido": "482179"}, actor="JAVIER")
+    assert preview["estado"] == "PREVIEW", preview
+    assert (preview["valor_actual"], preview["valor_propuesto"]) == ({"numero_guia": "9482179"}, {"numero_guia": "482179"})
+
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    filas = _filas_dataset(entorno)
+    fila = filas["482179.jpeg"]
+    assert fila["numero_guia"] == "482179"
+    assert {k: v for k, v in fila.items() if k != "numero_guia"} == {
+        k: v for k, v in antes["482179.jpeg"].items() if k != "numero_guia"}  # ningún otro campo cambia
+    assert filas["500002.jpeg"] == antes["500002.jpeg"]
+    assert forzadas == [{"482179"}] and reportes == ["reporte"]
+    assert resultado["reconciliacion"] is None
+    assert _sha(entorno["actual"] / "decisiones_pendientes.json") == bandeja_antes
+    aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert [(a["accion"], a["campo"], a["valor_documental"], a["valor_corregido"], a["documento"]["numero_guia"])
+            for a in aplicaciones if a["tipo"] == "CORRECCION_DOCUMENTAL_OPERADOR"] == [
+        ("CORREGIR_NUMERO_GUIA", "numero_guia", "9482179", "482179", "482179")]
+
+
+def test_corregir_numero_guia_rechaza_folio_ajeno_patron_distinto_o_tarjetas(entorno):
+    _escribir_dataset(entorno, [_fila("9482179", archivo="482179.jpeg"), _fila("482180"), _fila("500001")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+
+    def preview(actual, nuevo):
+        return capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA",
+                                  {"numero_guia": actual, "numero_guia_corregido": nuevo}, actor="JAVIER")
+
+    assert preview("9482179", "482180")["codigo"] == "PRECONDICION_FALLIDA"  # no es "9" + folio
+    assert preview("500001", "500002")["codigo"] == "PRECONDICION_FALLIDA"   # folio sin 9 absorbido
+    assert preview("9482179", "48217")["codigo"] == "PARAMETRO_INVALIDO"
+    _escribir_dataset(entorno, [_fila("9482180", archivo="otro.jpeg"), _fila("482180")])
+    duplicado = preview("9482180", "482180")
+    assert duplicado["codigo"] == "PRECONDICION_FALLIDA" and "otro documento" in duplicado["mensaje"]
+    # 500001 tiene una tarjeta pendiente en la bandeja del entorno
+    _escribir_dataset(entorno, [_fila("9500001", archivo="x.jpeg")])
+    bandeja = json.loads((entorno["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    bandeja["decisiones"][0]["documento"]["numero_guia"] = "9500001"
+    (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    assert "tarjetas pendientes" in preview("9500001", "500001")["mensaje"]
+
+
+def test_reparador_no_habilita_numero_guia_sin_la_accion_tipada(entorno):
+    from atlas_core.reprocesamiento_reparador import reparar_documento_focal_con_valores_conocidos
+    _escribir_dataset(entorno, [_fila("9482179", archivo="482179.jpeg")])
+    resultado = reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=entorno["raiz"], archivo="482179.jpeg", valores={"numero_guia": "482179"},
+        dry_run=False, reconciliar=False)
+    assert resultado["campos_ignorados_no_autorizados"] == ["numero_guia"]
+    assert _filas_dataset(entorno)["482179.jpeg"]["numero_guia"] == "9482179"
