@@ -3398,15 +3398,6 @@ def procesar_archivo(
             identidad_cliente_corroborada=cliente_corroborado_n1,
         )
         obra_identidad_confirmada = bool(destinos_relacion_obra)
-        # Sólo ruteo (caso 482402): sin obra, los destinos confirmados del
-        # cliente; nunca cuenta como identidad de obra confirmada.
-        destinos_relacion_ruteo = destinos_relacion_obra or _destinos_confirmados_cliente_sin_obra(
-            carpeta_catalogos,
-            obra_documental=obra_documental,
-            cliente_texto=str(datos.get("cliente", "")),
-            rut_cliente=str(datos.get("RUT del cliente", "")),
-            identidad_cliente_corroborada=cliente_corroborado_n1,
-        )
         if obra_destino_corroborada is not None or obra_identidad_confirmada:
             campos_geometricos_sin_corroborar.discard("obra destino")
             metodos_documento.add(
@@ -3434,6 +3425,21 @@ def procesar_archivo(
             )
             if cliente_id_para_obra is not None:
                 campos_geometricos_sin_corroborar.add("obra destino")
+
+    # Sólo ruteo (caso 482402): sin obra, los destinos confirmados del
+    # cliente; nunca cuenta como identidad de obra confirmada. Fuera del
+    # bloque anterior a propósito: ese bloque sólo corre con obra leída, y
+    # el respaldo es justamente para cuando NO la hay (dentro, la variable
+    # quedaba sin definir y el enriquecimiento logístico se omitía entero).
+    destinos_relacion_ruteo = destinos_relacion_obra
+    if not destinos_relacion_ruteo and carpeta_catalogos is not None:
+        destinos_relacion_ruteo = _destinos_confirmados_cliente_sin_obra(
+            carpeta_catalogos,
+            obra_documental=obra_documental,
+            cliente_texto=str(datos.get("cliente", "")),
+            rut_cliente=str(datos.get("RUT del cliente", "")),
+            identidad_cliente_corroborada=cliente_corroborado_n1,
+        )
 
     # Bloque ESTADOS S2 -- corroboración de cliente/obra_destino recuperados
     # por geometría. Único criterio de corroboración disponible hoy para
