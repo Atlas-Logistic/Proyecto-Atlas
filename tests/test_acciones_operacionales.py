@@ -915,3 +915,67 @@ def test_reparador_no_habilita_numero_guia_sin_la_accion_tipada(entorno):
         dry_run=False, reconciliar=False)
     assert resultado["campos_ignorados_no_autorizados"] == ["numero_guia"]
     assert _filas_dataset(entorno)["482179.jpeg"]["numero_guia"] == "9482179"
+
+
+def test_corregir_numero_guia_ausente_es_focal_y_auditable(entorno, monkeypatch):
+    """Casos reales 482352/482350 (Mobile): folio "No encontrado" leído de la
+    foto; sólo cambia el folio y sus estados, la lectura queda en el ledger."""
+    ausente = dict(numero_guia="No encontrado", numero_transporte="0000364476",
+                   motivos_revision_documento="GUIA_AUSENTE", indicador_revision="REVISAR",
+                   estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION")
+    _escribir_dataset(entorno, [_fila("x", archivo="mobile/bd45/original.jpg", **ausente),
+                                _fila("y", archivo="mobile/otro/original.jpg",
+                                      **{**ausente, "numero_transporte": "0000364455"})])
+    antes = _filas_dataset(entorno)
+    bandeja_antes = _sha(entorno["actual"] / "decisiones_pendientes.json")
+    forzadas: list[set[str]] = []
+    reportes: list[str] = []
+    _sin_mantenimiento_real(monkeypatch, forzadas)
+    _sin_reporte_real(monkeypatch, reportes)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+
+    sin_archivo = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA",
+                                     {"numero_guia": "No encontrado", "numero_guia_corregido": "482350"},
+                                     actor="JAVIER")
+    assert sin_archivo["codigo"] == "PARAMETRO_INVALIDO"
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA",
+                                 {"numero_guia": "No encontrado", "numero_guia_corregido": "482350",
+                                  "archivo": "mobile/bd45/original.jpg"}, actor="JAVIER")
+    assert preview["estado"] == "PREVIEW", preview
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+
+    filas = _filas_dataset(entorno)
+    fila = filas["mobile/bd45/original.jpg"]
+    assert (fila["numero_guia"], fila["motivos_revision_documento"], fila["estado_documental"]) == ("482350", "", "OK")
+    derivados = {"numero_guia", "motivos_revision_documento", "indicador_revision", "estado_documental",
+                 "estado_operacional"}
+    assert {k: v for k, v in fila.items() if k not in derivados} == {
+        k: v for k, v in antes["mobile/bd45/original.jpg"].items() if k not in derivados}
+    assert filas["mobile/otro/original.jpg"] == antes["mobile/otro/original.jpg"]
+    assert forzadas == [{"482350"}] and reportes == ["reporte"] and resultado["reconciliacion"] is None
+    assert _sha(entorno["actual"] / "decisiones_pendientes.json") == bandeja_antes
+    aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert [(a["accion"], a["valor_documental"], a["valor_corregido"]) for a in aplicaciones
+            if a["tipo"] == "CORRECCION_DOCUMENTAL_OPERADOR"] == [("CORREGIR_NUMERO_GUIA", "No encontrado", "482350")]
+
+
+def test_corregir_numero_guia_ausente_rechaza_duplicado_y_tarjetas_del_mismo_documento(entorno):
+    ausente = dict(numero_guia="No encontrado", numero_transporte="0000364476")
+    _escribir_dataset(entorno, [_fila("x", archivo="mobile/bd45/original.jpg", **ausente), _fila("482350")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+
+    def preview(nuevo):
+        return capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA",
+                                  {"numero_guia": "No encontrado", "numero_guia_corregido": nuevo,
+                                   "archivo": "mobile/bd45/original.jpg"}, actor="JAVIER")
+
+    assert "otro documento" in preview("482350")["mensaje"]
+    bandeja = json.loads((entorno["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))
+    tarjeta = bandeja["decisiones"][0]
+    tarjeta["documento"].update({"numero_guia": "No encontrado", "numero_transporte": "0000999999"})
+    (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    assert preview("482351")["estado"] == "PREVIEW"  # tarjeta de OTRO documento sin folio: no bloquea
+    tarjeta["documento"]["numero_transporte"] = "0000364476"
+    (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    assert "tarjetas pendientes" in preview("482351")["mensaje"]

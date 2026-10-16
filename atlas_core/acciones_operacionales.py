@@ -1453,26 +1453,46 @@ def _aplicar_documento_corregir_chofer(ctx: _Contexto, p: dict, plan: Plan, acto
     return {"despues": valores, "guias_revalidar": list(plan.datos["guias_viaje"])}
 
 
+GUIA_AUSENTE_DOCUMENTAL = "No encontrado"
+
+
 def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     """Caso real 9482179 -> 482179: RapidOCR leyó el "º" de "Nº 482179" como
     "9" y el folio quedó con 7 dígitos. Sólo corrige ESE patrón (el folio
     persistido es "9" + el folio pedido, de 6 dígitos), nunca un folio que ya
     tenga otro documento ni uno con tarjetas pendientes que quedarían
-    huérfanas. La lectura OCR original queda en el ledger."""
-    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    huérfanas. La lectura OCR original queda en el ledger.
+
+    Casos reales 482352/482350 (Mobile, 15-10): también un folio AUSENTE
+    ("No encontrado"), que el operador toma de la foto. Como varias filas
+    comparten "No encontrado", ahí `archivo` es obligatorio y las tarjetas
+    pendientes se buscan por guía y transporte del documento."""
+    guia_pedida = str(p["numero_guia"]).strip()
+    ausente = guia_pedida == GUIA_AUSENTE_DOCUMENTAL
+    if not ausente and not re.fullmatch(r"\d{3,12}", guia_pedida):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "número de guía inválido")
+    if ausente and not str(p.get("archivo", "")).strip():
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "con folio ausente hay que indicar 'archivo'")
+    fila = _fila_documento(ctx, guia_pedida, str(p.get("archivo", "")))
     archivo, actual, transporte = (str(fila.get("archivo", "")), str(fila.get("numero_guia", "")).strip(),
                                    str(fila.get("numero_transporte", "")))
     nuevo = str(p["numero_guia_corregido"]).strip()
     if not re.fullmatch(r"[1-9][0-9]{5}", nuevo):
         raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "el folio corregido debe tener 6 dígitos")
-    if actual != "9" + nuevo:
+    if actual != "9" + nuevo and actual != GUIA_AUSENTE_DOCUMENTAL:
         raise ErrorAccionOperacional(
-            "PRECONDICION_FALLIDA", "sólo se corrige un folio leído con el marcador º como 9 inicial")
+            "PRECONDICION_FALLIDA",
+            "sólo se corrige un folio ausente o leído con el marcador º como 9 inicial")
     otros = sorted(str(f.get("archivo", "")) for f in ctx.filas()
                    if str(f.get("numero_guia", "")).strip() == nuevo and str(f.get("archivo", "")) != archivo)
     if otros:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"el folio {nuevo} ya pertenece a otro documento")
-    pendientes = [d for d in ctx.decisiones() if str((d.get("documento") or {}).get("numero_guia", "")) == actual]
+    pendientes = [
+        d for d in ctx.decisiones()
+        if str((d.get("documento") or {}).get("numero_guia", "")) == actual
+        and (actual != GUIA_AUSENTE_DOCUMENTAL
+             or str((d.get("documento") or {}).get("numero_transporte", "")) == transporte)
+    ]
     if pendientes:
         raise ErrorAccionOperacional(
             "PRECONDICION_FALLIDA", "la guía tiene tarjetas pendientes; resuélvalas antes de corregir el folio")
@@ -1781,8 +1801,8 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "referencia": _REF},
                      _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
     DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
-                     "Corrige un folio leído con el marcador º como 9 inicial (9482179 -> 482179).",
-                     {"numero_guia": _P("guia", True), "numero_guia_corregido": _P("guia", True),
+                     "Corrige un folio ausente o leído con el marcador º como 9 inicial (9482179 -> 482179).",
+                     {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_corregir_numero_guia, _aplicar_documento_corregir_numero_guia),
     DefinicionAccion("DOCUMENTO_ASIGNAR_OBRA", OPERACIONAL_REVERSIBLE,
