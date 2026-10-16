@@ -1484,34 +1484,100 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
         raise ErrorAccionOperacional(
             "PRECONDICION_FALLIDA",
             "sólo se corrige un folio ausente o leído con el marcador º como 9 inicial")
+    if ausente and sum(str(f.get("archivo", "")) == archivo for f in ctx.filas()) != 1:
+        raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "el archivo no identifica un único documento")
     otros = sorted(str(f.get("archivo", "")) for f in ctx.filas()
                    if str(f.get("numero_guia", "")).strip() == nuevo and str(f.get("archivo", "")) != archivo)
     if otros:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"el folio {nuevo} ya pertenece a otro documento")
+    decisiones = ctx.decisiones()
     pendientes = [
-        d for d in ctx.decisiones()
+        d for d in decisiones
         if str((d.get("documento") or {}).get("numero_guia", "")) == actual
         and (actual != GUIA_AUSENTE_DOCUMENTAL
              or str((d.get("documento") or {}).get("numero_transporte", "")) == transporte)
     ]
-    if pendientes:
+    trasladar: list[dict[str, str]] = []
+    if pendientes and actual != GUIA_AUSENTE_DOCUMENTAL:
         raise ErrorAccionOperacional(
             "PRECONDICION_FALLIDA", "la guía tiene tarjetas pendientes; resuélvalas antes de corregir el folio")
+    if pendientes:
+        # Caso real 482402 (folio ausente con DESTINO_NO_RESUELTO pendiente):
+        # las tarjetas del MISMO documento se conservan y sólo pasan a citar
+        # el folio nuevo; su id se recalcula con la misma identidad que usa la
+        # bandeja. Una tarjeta "No encontrado" del mismo transporte que no
+        # cite este archivo es otra identidad: nunca se adivina.
+        trasladar = _tarjetas_a_trasladar(pendientes, decisiones, archivo=archivo, nuevo=nuevo)
+    consecuencias = [
+        f"El documento {archivo} pasa del folio {actual} al {nuevo}; ningún otro campo cambia.",
+        "La lectura OCR original queda en el ledger de auditoría.",
+        "Sólo se revalida este documento y se regenera el reporte; no se reconcilia la bandeja global.",
+    ]
+    if trasladar:
+        consecuencias.append(
+            f"{len(trasladar)} tarjeta(s) pendiente(s) de este documento ("
+            + ", ".join(sorted({t['tipo'] for t in trasladar}))
+            + f") se conservan abiertas y pasan a citar el folio {nuevo}; no se cierra ni se resuelve ninguna.")
     return Plan(
         entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": actual,
                  "numero_transporte": transporte, "campo": "numero_guia"},
         valor_actual={"numero_guia": actual}, valor_propuesto={"numero_guia": nuevo},
-        estado_base={"fila": fila}, sin_cambios=False,
-        afectados={"guias": [actual, nuevo], "archivo": archivo, "numero_transporte": transporte},
-        consecuencias=[
-            f"El documento {archivo} pasa del folio {actual} al {nuevo}; ningún otro campo cambia.",
-            "La lectura OCR original queda en el ledger de auditoría.",
-            "Sólo se revalida este documento y se regenera el reporte; no se reconcilia la bandeja global.",
-        ],
+        estado_base={"fila": fila, "tarjetas": pendientes}, sin_cambios=False,
+        afectados={"guias": [actual, nuevo], "archivo": archivo, "numero_transporte": transporte,
+                   "tarjetas_trasladadas": trasladar},
+        consecuencias=consecuencias,
         revalidaciones=["MANTENIMIENTO_FOCAL_GUIAS", "REGENERAR_REPORTE_VIAJES"],
-        archivos=("dataset", "ledger_decisiones"),
-        datos={"archivo": archivo, "guia": actual, "guia_nueva": nuevo, "transporte": transporte},
+        archivos=("dataset", "ledger_decisiones", "bandeja") if trasladar else ("dataset", "ledger_decisiones"),
+        datos={"archivo": archivo, "guia": actual, "guia_nueva": nuevo, "transporte": transporte,
+               "tarjetas": trasladar},
     )
+
+
+def _tarjetas_a_trasladar(pendientes: list[dict], decisiones: list[dict], *, archivo: str,
+                          nuevo: str) -> list[dict[str, str]]:
+    from atlas_core.decisiones_pendientes import _decision_id
+    if any(not str((d.get("documento") or {}).get("archivo", "")).strip() for d in pendientes):
+        raise ErrorAccionOperacional(
+            "ENTIDAD_AMBIGUA",
+            "hay tarjetas pendientes con folio ausente en este transporte sin archivo; "
+            "no se puede asegurar a qué documento pertenecen")
+    existentes = {str(d.get("decision_id", "")) for d in decisiones}
+    trasladar = []
+    # Las que citan OTRO archivo son de otro documento: quedan intactas.
+    for d in (d for d in pendientes if str((d.get("documento") or {}).get("archivo", "")) == archivo):
+        documento = {**(d.get("documento") or {}), "numero_guia": nuevo}
+        id_nuevo = _decision_id(tipo=str(d.get("tipo", "")), documento=documento, campo=str(d.get("campo", "")),
+                                valor_documental=str(d.get("valor_documental", "")),
+                                evidencias=[dict(e) for e in d.get("evidencias") or []])
+        if id_nuevo in existentes:
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA", f"ya existe una tarjeta {d.get('tipo')} para el folio {nuevo}")
+        trasladar.append({"decision_id": str(d.get("decision_id", "")), "decision_id_nuevo": id_nuevo,
+                          "tipo": str(d.get("tipo", ""))})
+    return trasladar
+
+
+def _trasladar_tarjetas_a_folio(ctx: _Contexto, tarjetas: list[dict[str, str]], *, archivo: str, nuevo: str) -> None:
+    """Re-referencia (nunca cierra ni crea) las tarjetas del plan. Exige que
+    cada una siga en la bandeja; si no, falla y la capa restaura."""
+    from atlas_core.decisiones_pendientes import NOMBRE_LOCK_DECISIONES_PENDIENTES
+    por_id = {t["decision_id"]: t for t in tarjetas}
+    with bloqueo_sesion(ctx.actual, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+        contenido = _leer_json(ctx.archivos["bandeja"], {})
+        clave = "decisiones" if isinstance(contenido.get("decisiones"), list) else "decisions"
+        vistas = set()
+        for decision in contenido.get(clave) or []:
+            traslado = por_id.get(str(decision.get("decision_id", ""))) if isinstance(decision, dict) else None
+            if traslado is None:
+                continue
+            if str((decision.get("documento") or {}).get("archivo", "")) != archivo:
+                raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "una tarjeta cambió de documento desde el preview")
+            decision["documento"] = {**decision["documento"], "numero_guia": nuevo}
+            decision["decision_id"] = traslado["decision_id_nuevo"]
+            vistas.add(traslado["decision_id"])
+        if vistas != set(por_id):
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "una tarjeta pendiente ya no está en la bandeja")
+        escribir_json_atomico(ctx.archivos["bandeja"], contenido)
 
 
 def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
@@ -1539,7 +1605,12 @@ def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan,
             "referencia": str(p.get("referencia", "")),
         })
         escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
-    return {"despues": {"numero_guia": nuevo}, "guias_revalidar": [nuevo], "regenerar_reporte": True}
+    tarjetas = plan.datos.get("tarjetas") or []
+    if tarjetas:
+        _trasladar_tarjetas_a_folio(ctx, tarjetas, archivo=str(plan.datos["archivo"]), nuevo=nuevo)
+    return {"despues": {"numero_guia": nuevo,
+                        **({"tarjetas_trasladadas": tarjetas} if tarjetas else {})},
+            "guias_revalidar": [nuevo], "regenerar_reporte": True}
 
 
 # =============================================================== DECISIONES

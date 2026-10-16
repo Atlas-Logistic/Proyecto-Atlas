@@ -978,4 +978,143 @@ def test_corregir_numero_guia_ausente_rechaza_duplicado_y_tarjetas_del_mismo_doc
     assert preview("482351")["estado"] == "PREVIEW"  # tarjeta de OTRO documento sin folio: no bloquea
     tarjeta["documento"]["numero_transporte"] = "0000364476"
     (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
-    assert "tarjetas pendientes" in preview("482351")["mensaje"]
+    # Mismo transporte, pero cita OTRO archivo: es de otro documento y no se toca.
+    otro = preview("482351")
+    assert otro["estado"] == "PREVIEW" and otro["afectados"]["tarjetas_trasladadas"] == []
+    # Sin archivo no hay identidad documental: nunca se adivina a quién pertenece.
+    tarjeta["documento"]["archivo"] = ""
+    (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    assert preview("482351")["codigo"] == "ENTIDAD_AMBIGUA"
+
+
+# --- caso real 482402: folio ausente con DESTINO_NO_RESUELTO pendiente -----
+
+ARCHIVO_482402 = "mobile/582cfc39-3483-4a7f-b1be-0b8b3dc27932/original.jpg"
+
+
+def _entorno_482402(entorno, *filas_extra):
+    from atlas_core.decisiones_pendientes import generar_artefacto
+    fila = _fila("x", archivo=ARCHIVO_482402, numero_guia="No encontrado", numero_transporte="0000364552",
+                 cliente="ARMACERO MATCO SA", obra_destino="No encontrado", descripcion_material="",
+                 despachar_a_crudo="SANTA ISABSL SB5 SANTIAGO LAMPA", direccion_entrega="",
+                 estado_ruta="REQUIERE_REVISION", motivo_ruta="MULTIPLES_UBICACIONES_DISPERSAS(5)",
+                 motivos_revision_documento="GUIA_AUSENTE | MATERIAL_AUSENTE", indicador_revision="REVISAR",
+                 estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION")
+    _escribir_dataset(entorno, [fila, _fila("500001"), *filas_extra])
+    destino = crear_decision(
+        tipo="DESTINO_NO_RESUELTO", entidad="DESTINO", archivo=ARCHIVO_482402, numero_guia="No encontrado",
+        numero_transporte="0000364552", campo="despachar_a_crudo",
+        valor_documental="SANTA ISABSL SB5 SANTIAGO LAMPA", valor_normalizado="SANTA ISABSL SB5 SANTIAGO LAMPA",
+        identidad_resuelta=None, candidatos=(), motivos=("MULTIPLES_UBICACIONES_DISPERSAS(5)",),
+        evidencias=({"tipo": "RUTA_BLOQUEADA", "despachar_a_crudo": "SANTA ISABSL SB5 SANTIAGO LAMPA"},),
+        acciones_permitidas=("REGISTRAR_DIRECCION", "NO_PUEDO_DETERMINAR", "POSPONER"),
+        contexto={"obra_ausente": True, "comuna_sugerida": "Lampa", "b1_propuesta": "SANTA ISABEL 585"},
+    )
+    generar_artefacto(ruta_dataset=entorno["dataset"], carpeta_catalogos=entorno["cat"],
+                      decisiones=[entorno["decision"], destino])
+    return destino
+
+
+def _preview_482402(capa, nuevo="482402"):
+    return capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA",
+                              {"numero_guia": "No encontrado", "numero_guia_corregido": nuevo,
+                               "archivo": ARCHIVO_482402}, actor="JAVIER")
+
+
+def test_482402_folio_ausente_conserva_y_traslada_su_tarjeta_pendiente(entorno, monkeypatch):
+    from atlas_core.decisiones_pendientes import _decision_id
+    destino = _entorno_482402(entorno)
+    antes = _filas_dataset(entorno)
+    bandeja_antes = _bandeja(entorno)
+    forzadas: list[set[str]] = []
+    reportes: list[str] = []
+    _sin_mantenimiento_real(monkeypatch, forzadas)
+    _sin_reporte_real(monkeypatch, reportes)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+
+    preview = _preview_482402(capa)
+    assert preview["estado"] == "PREVIEW", preview
+    id_nuevo = _decision_id(tipo="DESTINO_NO_RESUELTO", documento={**destino["documento"], "numero_guia": "482402"},
+                            campo=destino["campo"], valor_documental=destino["valor_documental"],
+                            evidencias=destino["evidencias"])
+    assert preview["afectados"]["tarjetas_trasladadas"] == [{
+        "decision_id": destino["decision_id"], "decision_id_nuevo": id_nuevo, "tipo": "DESTINO_NO_RESUELTO"}]
+    assert any("se conservan abiertas" in c for c in preview["consecuencias"])
+    assert _bandeja(entorno) == bandeja_antes  # el preview no escribe
+
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    assert resultado["reconciliacion"] is None and forzadas == [{"482402"}] and reportes == ["reporte"]
+
+    # Dataset: sólo el folio y sus estados derivados; destino, material y OCR intactos.
+    filas = _filas_dataset(entorno)
+    fila = filas[ARCHIVO_482402]
+    assert fila["numero_guia"] == "482402"
+    derivados = {"numero_guia", "motivos_revision_documento", "indicador_revision", "estado_documental",
+                 "estado_operacional"}
+    assert {k: v for k, v in fila.items() if k not in derivados} == {
+        k: v for k, v in antes[ARCHIVO_482402].items() if k not in derivados}
+    assert "GUIA_AUSENTE" not in fila["motivos_revision_documento"]
+    assert filas["500001.jpeg"] == antes["500001.jpeg"]
+
+    # Bandeja: mismas tarjetas, misma cabecera; la de destino sigue PENDIENTE y
+    # sólo cambia su folio (y su id, recalculado con la identidad canónica).
+    bandeja = _bandeja(entorno)
+    assert {k: v for k, v in bandeja.items() if k != "decisiones"} == {
+        k: v for k, v in bandeja_antes.items() if k != "decisiones"}
+    assert len(bandeja["decisiones"]) == len(bandeja_antes["decisiones"]) == 2
+    nueva = next(d for d in bandeja["decisiones"] if d["tipo"] == "DESTINO_NO_RESUELTO")
+    vieja = next(d for d in bandeja_antes["decisiones"] if d["tipo"] == "DESTINO_NO_RESUELTO")
+    assert nueva["decision_id"] == id_nuevo and nueva["documento"]["numero_guia"] == "482402"
+    assert {k: v for k, v in nueva.items() if k not in {"decision_id", "documento"}} == {
+        k: v for k, v in vieja.items() if k not in {"decision_id", "documento"}}
+    assert nueva["documento"]["archivo"] == ARCHIVO_482402 and nueva.get("estado", "PENDIENTE") == "PENDIENTE"
+    assert next(d for d in bandeja["decisiones"] if d["tipo"] == "OBRA_DESCONOCIDA") == entorno["decision"]
+
+    # Auditoría e idempotencia.
+    aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert [(a["valor_documental"], a["valor_corregido"]) for a in aplicaciones
+            if a["tipo"] == "CORRECCION_DOCUMENTAL_OPERADOR"] == [("No encontrado", "482402")]
+    assert capa.auditoria()[-1]["despues"]["tarjetas_trasladadas"][0]["decision_id_nuevo"] == id_nuevo
+    repetido = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert repetido["idempotente"] is True and _bandeja(entorno) == bandeja
+    assert _preview_482402(capa)["estado"] == "RECHAZADA"  # ya no hay folio ausente que corregir
+
+
+def test_482402_conflictos_de_identidad_bloquean(entorno):
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    # El folio ya pertenece a otro documento.
+    _entorno_482402(entorno, _fila("482402", archivo="otro.jpeg"))
+    assert "otro documento" in _preview_482402(capa)["mensaje"]
+    # Dos filas con el mismo archivo: no hay identidad documental única.
+    _entorno_482402(entorno, _fila("y", archivo=ARCHIVO_482402, numero_guia="No encontrado",
+                                   numero_transporte="0000364552"))
+    assert _preview_482402(capa)["codigo"] in {"ENTIDAD_AMBIGUA", "ENTIDAD_NO_ENCONTRADA"}
+    # Ya existe la tarjeta equivalente para el folio nuevo: nunca se duplica.
+    destino = _entorno_482402(entorno)
+    bandeja = _bandeja(entorno)
+    gemela = json.loads(json.dumps(next(d for d in bandeja["decisiones"] if d["tipo"] == "DESTINO_NO_RESUELTO")))
+    from atlas_core.decisiones_pendientes import _decision_id
+    gemela["documento"]["numero_guia"] = "482402"
+    gemela["decision_id"] = _decision_id(tipo=gemela["tipo"], documento=gemela["documento"], campo=gemela["campo"],
+                                         valor_documental=gemela["valor_documental"], evidencias=gemela["evidencias"])
+    bandeja["decisiones"].append(gemela)
+    (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    duplicada = _preview_482402(capa)
+    assert duplicada["codigo"] == "PRECONDICION_FALLIDA" and "ya existe una tarjeta" in duplicada["mensaje"]
+    assert destino["decision_id"] in {d["decision_id"] for d in _bandeja(entorno)["decisiones"]}
+
+
+def test_482402_tarjeta_que_cambia_tras_el_preview_no_se_aplica(entorno, monkeypatch):
+    _entorno_482402(entorno)
+    _sin_mantenimiento_real(monkeypatch)
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = _preview_482402(capa)
+    bandeja = _bandeja(entorno)
+    bandeja["decisiones"] = [d for d in bandeja["decisiones"] if d["tipo"] != "DESTINO_NO_RESUELTO"]
+    (entorno["actual"] / "decisiones_pendientes.json").write_text(json.dumps(bandeja), encoding="utf-8")
+    dataset_antes = _sha(entorno["dataset"])
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "PREVIEW_OBSOLETO", resultado
+    assert _sha(entorno["dataset"]) == dataset_antes
