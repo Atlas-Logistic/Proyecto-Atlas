@@ -2922,3 +2922,37 @@ def resolver_clientes_confirmados_por_ledger(
             continue
         indice[numero_guia] = valor_canonico
     return indice
+
+
+def resolver_choferes_confirmados_por_ledger(
+    ruta_ledger: str | Path,
+) -> dict[str, tuple[str, str]]:
+    """Caso real 482136 -- índice de solo lectura del ledger análogo a
+    `resolver_clientes_confirmados_por_ledger`: ``numero_guia`` ->
+    ``(valor_documental, rut_confirmado)`` para las aplicaciones
+    `CHOFER_CANDIDATO`/`CHOFER_DESCONOCIDO` que fijaron un
+    ``chofer_confirmado`` (CONFIRMAR/REGISTRAR). Único consumidor:
+    `revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr`, para que la
+    confirmación humana de ESE documento prevalezca sobre un RUT documental
+    mal extraído (482136: "10800-6" salió de la dirección y, por tener DV
+    válido, bloqueaba la corroboración como contradicción). La confirmación
+    es por documento y por la lectura que el humano vio, nunca por texto
+    suelto. Ausencia/corrupción del ledger = sin confirmaciones."""
+    indice: dict[str, tuple[str, str]] = {}
+    try:
+        ledger = json.loads(Path(ruta_ledger).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return indice
+    for aplicacion in ledger.get("aplicaciones", []):
+        if aplicacion.get("tipo") not in ("CHOFER_CANDIDATO", "CHOFER_DESCONOCIDO"):
+            continue
+        confirmado = aplicacion.get("chofer_confirmado")
+        if not isinstance(confirmado, dict):
+            continue
+        rut = str(confirmado.get("rut") or "").strip()
+        valor_documental = str(aplicacion.get("valor_documental") or "").strip()
+        numero_guia = str((aplicacion.get("documento") or {}).get("numero_guia", "")).strip()
+        if not rut or not valor_documental or not numero_guia:
+            continue
+        indice[numero_guia] = (valor_documental, rut)
+    return indice

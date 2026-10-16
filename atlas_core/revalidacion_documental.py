@@ -34,6 +34,7 @@ from typing import Collection, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
 from atlas_core.aplicacion_decisiones import (
+    resolver_choferes_confirmados_por_ledger,
     resolver_clientes_confirmados_por_ledger,
     resolver_patentes_confirmadas_por_ledger,
 )
@@ -7272,6 +7273,7 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
     dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
     catalogo_choferes = cargar_catalogo_json(raiz / "catalogos_privados" / "choferes.json")
     motivo_objetivo = MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR.value
+    confirmaciones_ledger = resolver_choferes_confirmados_por_ledger(dataset.parent / "decisiones_aplicadas.json")
 
     with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
         try:
@@ -7311,6 +7313,20 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
                         catalogo_choferes, difuso.valor_resultado,
                         str(fila.get("rut_chofer", "")).strip(),
                     )
+            # Caso real 482136: un humano ya confirmó en Revisión el chofer de
+            # ESTE documento, pero el `rut_chofer` mal extraído ("10800-6",
+            # sacado de la dirección, con DV válido) bloqueaba como
+            # contradicción. La confirmación sólo vale para la misma lectura
+            # que el humano vio y para un chofer activo del catálogo; la
+            # lectura original queda en el ledger (`rut_documental`).
+            if corroboracion is None:
+                confirmado = confirmaciones_ledger.get(str(fila.get("numero_guia", "")).strip())
+                if confirmado is not None and confirmado[0] == nombre_chofer:
+                    registro_confirmado = buscar_chofer_por_rut(catalogo_choferes, confirmado[1])
+                    if isinstance(registro_confirmado, dict) and registro_confirmado.get("activo", True) is True:
+                        corroboracion = corroborar_chofer_por_nombre_y_rut_documental(
+                            catalogo_choferes, str(registro_confirmado.get("nombre", "")).strip(), confirmado[1],
+                        )
             if corroboracion is None:
                 continue
             nombre_canonico, rut_corroborado = corroboracion
