@@ -228,6 +228,35 @@ _OBRA_CATALOGO_CORREGIR = re.compile(
 _OBRA_CATALOGO_REGISTRAR = re.compile(
     r"^(?:REGISTRA|REGISTRAR|CREA|CREAR)\s+(?:LA\s+)?OBRA\s+(?P<obra>.+?)"
     r"(?:\s+(?:PARA|DEL|DE)\s+(?:EL\s+)?CLIENTE\s+(?P<cliente>.+))?$")
+# Observación a varias guías: "agrega la observación TEXTO a las guías N, M"
+# o "agrega a las guías N, M la observación TEXTO". El texto se toma del
+# original (sin normalizar); los números sólo de la lista de guías, nunca del
+# texto (que puede traer montos).
+_VERBO_OBSERVACION = (r"(?:AGREGA|AGREGAR|AGREGALE|ANADE|ANADIR|INCORPORA|INCORPORAR|REGISTRA|REGISTRAR|ANOTA|ANOTAR|"
+                      r"PON|PONER|PONLE|COLOCA|COLOCAR)")
+_LISTA_GUIAS_OBS = r"(?P<lista>\d{3,12}(?:(?:\s*[,;]\s*|\s+[YE]\s+|\s+)\d{3,12})*)"
+_GUIAS_OBS = r"(?:LAS\s+|LOS\s+)?(?:VIAJES?\s+DE\s+(?:LAS\s+)?)?GUIAS?\s*(?:N[°O]?S?\.?\s*)?:?\s*"
+_OBSERVACION_LOTE = (
+    re.compile(rf"^{_VERBO_OBSERVACION}\s+(?:LA\s+|UNA\s+|ESTA\s+)?OBSERVACION\s*:?\s*(?P<texto>.+?)\s*,?\s+"
+               rf"(?:A|EN|PARA)\s+{_GUIAS_OBS}{_LISTA_GUIAS_OBS}$"),
+    re.compile(rf"^{_VERBO_OBSERVACION}\s+(?:A|EN)\s+{_GUIAS_OBS}{_LISTA_GUIAS_OBS}\s*,?\s*:?\s*"
+               rf"(?:LA\s+|UNA\s+|ESTA\s+)?OBSERVACION\s*:?\s*(?P<texto>.+)$"),
+)
+
+
+def _intencion_observacion_lote(texto: str, original: str, plano: str) -> Intencion | None:
+    crudo = " ".join(str(texto or "").split()).strip(" .!?¿¡")
+    fuente = crudo if len(crudo) == len(plano) else original
+    for patron in _OBSERVACION_LOTE:
+        m = patron.match(plano)
+        if m:
+            observacion = fuente[m.start("texto"):m.end("texto")].strip(" :\"'«»“”")
+            guias = list(dict.fromkeys(re.findall(r"\d{3,12}", m.group("lista"))))
+            if observacion and guias:
+                return Intencion("VIAJE_AGREGAR_OBSERVACION", {"guias": guias, "texto": observacion})
+    return None
+
+
 ACCION_INVESTIGAR_REVISION = "INVESTIGAR_REVISION"
 _GUIA_INVESTIGACION = re.compile(r"\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\b")
 _VERBO_INVESTIGAR = re.compile(r"\b(?:INVESTIGA(?:R)?|BUSCA(?:R)?|AVERIGUA(?:R)?)\b")
@@ -393,6 +422,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         accion = ("EVIDENCIA_ELIMINAR" if re.search(r"EVIDENCIA|FOTO|IMAGEN|DOCUMENTO", resto)
                   else "HISTORIAL_ELIMINAR" if re.search(r"HISTORIAL|AUDITORIA|REGISTRO", resto) else "ENTIDAD_ELIMINAR")
         return Intencion(accion)
+    observacion = _intencion_observacion_lote(texto, original, plano)
+    if observacion is not None:
+        return observacion
     lote = _intencion_estado_lote(original, plano)
     if lote is not None:
         return lote
@@ -718,6 +750,13 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
             motivos = unico.get("motivos_revision") or []
             texto += (f" Peso total {_peso_legible(unico.get('peso_total_kg'))}. Estado resultante: "
                       f"{unico['estado_resultante']}{' (' + ', '.join(motivos) + ')' if motivos else ''}.")
+    elif accion == "VIAJE_AGREGAR_OBSERVACION":
+        detalle = propuesto.get("guias") or []
+        agregar = [d for d in detalle if d.get("estado") == "AGREGAR"]
+        viajes = len(propuesto.get("observaciones") or {})
+        texto = (f"Agregar la observación «{propuesto.get('texto')}» a {len(agregar)} "
+                 f"{_plural(len(agregar), 'guía', 'guías')} ({viajes} {_plural(viajes, 'viaje', 'viajes')}).")
+        return " ".join([texto, *(str(c) for c in preview.get("consecuencias") or [])])
     elif accion == "DESTINO_CONFIRMAR_COORDENADA":
         texto = (f"Confirmar la coordenada del destino {entidad.get('direccion')!r}: "
                  f"{propuesto.get('latitud')}, {propuesto.get('longitud')}.")
@@ -742,6 +781,22 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
             partes.append(f"Retirará {len(afectados['decisiones_obsoletas'])} decisión(es) obsoleta(s).")
     partes.extend(str(c) for c in preview.get("consecuencias") or [])
     return " ".join(partes)
+
+
+_ESTADO_OBSERVACION_LEGIBLE = {
+    "AGREGAR": "Se agrega", "YA_PRESENTE": "Ya la tiene (sin cambio)",
+    "NO_ENCONTRADA": "No existe en Atlas (no se aplica)", "SIN_TRANSPORTE": "Sin transporte (no se aplica)",
+    "TRANSPORTE_AMBIGUO": "Transporte ambiguo (no se aplica)",
+}
+
+
+def _tablas_observacion(preview: Mapping[str, object]) -> list[dict[str, object]]:
+    detalle = (preview.get("valor_propuesto") or {}).get("guias") or []
+    filas = [[d.get("numero_guia", ""), d.get("numero_transporte", "") or "—",
+              _ESTADO_OBSERVACION_LEGIBLE.get(d.get("estado"), d.get("estado")),
+              " | ".join(d.get("observaciones_vigentes") or []) or "—"] for d in detalle]
+    return [{"tipo": "observacion_viaje_preview", "resumen": "",
+             "columnas": ["Guía", "Transporte", "Resultado", "Observación canónica vigente"], "filas": filas}] if filas else []
 
 
 def _fecha_legible(iso: object) -> str:
@@ -1802,6 +1857,16 @@ class OperadorB1:
                 "presentacion": presentacion})
             return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion, "preview": visible,
                     "mensaje": _mensaje_chofer_estado(presentacion) + " ¿Confirmas? (sí / no)"}
+        if intencion.accion == "VIAJE_AGREGAR_OBSERVACION":
+            tablas = _tablas_observacion(preview)
+            if preview.get("estado") == "SIN_CAMBIOS":
+                return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico, "tablas": tablas,
+                        "mensaje": "Las guías indicadas ya tienen esa observación; no hay nada que confirmar."}
+            self._fijar_pendiente(estado, conversacion_id, {
+                "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
+                "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat()})
+            return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion, "preview": publico, "tablas": tablas,
+                    "mensaje": _describir_preview(preview) + " ¿Confirmas? (sí / no)"}
         if preview.get("estado") == "SIN_CAMBIOS":
             mensaje = "Eso ya está así; no hay nada que confirmar."
             if intencion.accion == "VIAJE_AGRUPAR_GUIAS":
@@ -1851,6 +1916,16 @@ class OperadorB1:
                 return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": visible,
                         "mensaje": f"Aplicado: la guía {presentacion['numero_guia']} {campo['aplicado']} "
                                    f"{presentacion['despues']}."}
+            if pendiente["accion"] == "VIAJE_AGREGAR_OBSERVACION":
+                observaciones = (resultado.get("despues") or {}).get("observaciones") or {}
+                n = len(observaciones)
+                tablas = [{"tipo": "observacion_viaje_aplicada", "resumen": "",
+                           "columnas": ["Transporte", "Observación resultante (verificada en disco)"],
+                           "filas": [[t, nota.replace("\n", " | ")] for t, nota in observaciones.items()]}]
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                        "tablas": tablas,
+                        "mensaje": f"Listo: observación agregada y verificada en {n} {_plural(n, 'viaje', 'viajes')}. "
+                                   "Recarga Atlas Viajes para verla en Observaciones."}
             return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
                     "mensaje": _describir_resultado(resultado)}
         if estado_capa == "PREVIEW_OBSOLETO" or resultado.get("codigo") in {"PREVIEW_EXPIRADO", "TOKEN_DESCONOCIDO"}:
@@ -1902,10 +1977,13 @@ class OperadorB1:
                         "mensaje": f"No ejecuté nada: {motivo}. " + _mensaje_preview(presentacion)}
             self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
                                                            "creado_en": self.reloj().isoformat()})
-            return {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
-                    "preview": {k: v for k, v in nuevo.items() if k != "token"},
-                    "mensaje": f"No ejecuté nada: {motivo}. Propuesta vigente: {_describir_preview(nuevo)} "
-                               "¿Confirmas? (sí / no)"}
+            renovado = {"estado": "PREVIEW_RENOVADO", "accion": pendiente["accion"], "ejecutado": False,
+                        "preview": {k: v for k, v in nuevo.items() if k != "token"},
+                        "mensaje": f"No ejecuté nada: {motivo}. Propuesta vigente: {_describir_preview(nuevo)} "
+                                   "¿Confirmas? (sí / no)"}
+            if pendiente["accion"] == "VIAJE_AGREGAR_OBSERVACION":
+                renovado["tablas"] = _tablas_observacion(nuevo)
+            return renovado
         self._fijar_pendiente(estado, conversacion_id, None)
         if estado_capa == "SIN_CAMBIOS":
             return {"estado": "SIN_CAMBIOS", "accion": pendiente["accion"], "mensaje": "Ya estaba aplicado."}
