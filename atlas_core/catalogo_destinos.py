@@ -176,6 +176,14 @@ def _token_ocr_limitado(coincidente: str, documental: str) -> bool:
     return _distancia_edicion_acotada(coincidente[:len(documental)], documental, 2) <= 2
 
 
+def _sustitucion_ocr_unica(coincidente: str, documental: str) -> bool:
+    """UN carácter distinto, mismo largo, token alfabético de 6+ letras."""
+    return (
+        len(coincidente) == len(documental) >= 6 and coincidente.isalpha() and documental.isalpha()
+        and sum(a != b for a, b in zip(coincidente, documental)) == 1
+    )
+
+
 # Caso real 480676 (AUSIN SAN BERNARDO): la numeración "01148" quedó
 # confirmada como "O1148" (letra O inicial leída por OCR en 460807), y el
 # tokenizador parte "O1148" en O + 1148 -- las anclas numéricas nunca
@@ -232,9 +240,50 @@ def _coincide_con_numeracion_b_ocho(calle: str, texto: str, comuna_confirmada: s
     return _calle_completa_contigua_en_texto(calle_variante, texto_variante)
 
 
+# Casos reales 482106 ("CAMINO A MELIPILLA 10B00 ... MAIPU" vs confirmado
+# 10800) y 482402 ("SANTA ISABSL SB5 ... LAMPA" vs confirmado 585): letras
+# leídas por OCR DENTRO de una numeración (no sólo la B/O iniciales de
+# arriba). Nunca es una interpretación libre: el token documental sólo
+# equivale al número EXACTO de la calle confirmada contra la que se compara,
+# con el mismo largo, al menos un dígito y terminando en dígito (una letra
+# final, "12B", es numeración real). Sólo con comuna confirmada aportada por
+# el llamador y presente en el texto: dirección + número + comuna convergen.
+_LETRAS_OCR_COMO_DIGITO = str.maketrans({"O": "0", "B": "8", "S": "5", "I": "1", "L": "1", "Z": "2"})
+_TOKEN_NUMERACION_MIXTA = re.compile(r"\b(?=[0-9OBSILZ]*\d)[0-9OBSILZ]*[OBSILZ][0-9OBSILZ]*\d\b")
+
+
+def _comuna_confirmada_en_texto(comuna_confirmada: str, texto: str) -> bool:
+    comuna = normalizar_nombre_destino(comuna_confirmada)
+    return bool(comuna) and bool(re.search(rf"\b{re.escape(comuna)}\b", texto))
+
+
+def _numeracion_mixta_como_maestro(calle: str, texto: str, comuna_confirmada: str) -> str:
+    """Texto con cada numeración OCR mixta reemplazada por el número de la
+    calle confirmada al que equivale exactamente; sin cambios si no aplica."""
+    if not _comuna_confirmada_en_texto(comuna_confirmada, texto):
+        return texto
+    numeros = {t for t in _tokens_direccion(calle) if t.isdigit()}
+    if not numeros:
+        return texto
+
+    def reemplazo(coincidencia: re.Match) -> str:
+        token = coincidencia.group(0)
+        equivalente = token.translate(_LETRAS_OCR_COMO_DIGITO)
+        return equivalente if equivalente in numeros else token
+
+    return _TOKEN_NUMERACION_MIXTA.sub(reemplazo, texto)
+
+
+def _coincide_con_numeracion_mixta(calle: str, texto: str, comuna_confirmada: str) -> bool:
+    texto_variante = _numeracion_mixta_como_maestro(calle, texto, comuna_confirmada)
+    return texto_variante != texto and _calle_completa_contigua_en_texto(calle, texto_variante)
+
+
 def _coincide_con_numeracion_ocr(calle: str, texto: str, comuna_confirmada: str = "") -> bool:
-    return _coincide_con_numeracion_o_cero(calle, texto) or _coincide_con_numeracion_b_ocho(
-        calle, texto, comuna_confirmada,
+    return (
+        _coincide_con_numeracion_o_cero(calle, texto)
+        or _coincide_con_numeracion_b_ocho(calle, texto, comuna_confirmada)
+        or _coincide_con_numeracion_mixta(calle, texto, comuna_confirmada)
     )
 
 
@@ -326,6 +375,9 @@ def direccion_confirmada_coincide(
         return True
     if _coincide_con_numeracion_ocr(calle, texto, comuna_confirmada):
         return True
+    # Numeración OCR mixta ya fijada contra el número confirmado: los
+    # números siguen siendo anclas exactas para la tolerancia de abajo.
+    texto = _numeracion_mixta_como_maestro(calle, texto, comuna_confirmada)
     if not _anclas_fuertes_conservadas(calle, texto, comuna_confirmada):
         return False
 
@@ -341,7 +393,12 @@ def direccion_confirmada_coincide(
     if not numeros_calle or numeros_calle != numeros_texto:
         return False
     vias = {"CALLE", "AVENIDA", "AV", "AVDA", "CAMINO", "PASAJE", "RUTA"}
-    if not (set(tokens_calle) & vias):
+    # Sin nombre de vía (caso real 482402, "SANTA ISABEL 585"), la comuna
+    # confirmada presente reemplaza a la vía como ancla, y la tolerancia se
+    # reduce a UNA sustitución de un carácter en un token largo (nunca
+    # truncamiento ni dos ediciones).
+    con_via = bool(set(tokens_calle) & vias)
+    if not con_via and not _comuna_confirmada_en_texto(comuna_confirmada, texto):
         return False
     if any(token in vias and token not in tokens_calle for token in tokens_texto):
         return False
@@ -358,7 +415,10 @@ def direccion_confirmada_coincide(
                 continue
             if maestro.isdigit() or maestro in _TOKENS_ESTRUCTURALES_DIRECCION:
                 break
-            if tolerados or not _token_ocr_limitado(maestro, documental):
+            if tolerados or not (
+                _token_ocr_limitado(maestro, documental) if con_via
+                else _sustitucion_ocr_unica(maestro, documental)
+            ):
                 break
             tolerados += 1
         else:
@@ -376,7 +436,7 @@ def direccion_confirmada_coincide(
                 and bool(set(tokens_calle) & {"LOTE", "SITIO", "PARCELA"})
                 and anclas_exactas >= 3
             )
-            if tolerados == 1 and anclas_exactas >= 2 and (not truncado or anclas_truncamiento):
+            if tolerados == 1 and anclas_exactas >= (2 if con_via else 1) and (not truncado or anclas_truncamiento):
                 return True
 
     # Separaci?n espuria OCR: conserva la conducta previa s?lo con n?meros

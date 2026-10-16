@@ -2124,6 +2124,51 @@ def _destinos_relacion_confirmada_para_obra(
         return []
 
 
+def _destinos_confirmados_cliente_sin_obra(
+    carpeta_catalogos: str | Path, *, obra_documental: str,
+    cliente_texto: str = "", rut_cliente: str = "", identidad_cliente_corroborada: bool = False,
+) -> list:
+    """Caso real 482402: sin obra leída no hay relación obra->destino que
+    consultar, pero el cliente sí está identificado (RUT o identidad
+    corroborada). Sus destinos CONFIRMADOS y ACTIVOS -- propios del maestro
+    o de sus obras CONFIRMADAS -- son los candidatos para el DESPACHAR A
+    (`destino_por_relacion_confirmada` exige una sola coincidencia y la
+    comuna). Sólo para ruteo: nunca identifica ni confirma la obra. Vacío
+    si hay obra, si el cliente no se resuelve sin ambigüedad o ante error."""
+    if str(obra_documental or "").strip() not in {"", "No encontrado"}:
+        return []
+    carpeta = Path(carpeta_catalogos)
+    try:
+        cliente_id = _resolver_cliente_id_corroborado(
+            carpeta, cliente_texto=cliente_texto, rut_cliente=rut_cliente,
+            identidad_cliente_corroborada=identidad_cliente_corroborada,
+        )
+        if cliente_id is None:
+            return []
+        from atlas_core.catalogo_destinos import (
+            CatalogoDestinos, EstadoCalidadDestino, EstadoVigenciaDestino,
+        )
+        catalogo = CatalogoObrasDestinos(
+            ruta=carpeta / "obras_destinos.json",
+            ruta_clientes=carpeta / "clientes.json",
+            ruta_destinos=carpeta / "destinos_maestros.json",
+        )
+        destinos = {
+            d.destino_id: d
+            for d in CatalogoDestinos(carpeta / "destinos_maestros.json", ruta_clientes=carpeta / "clientes.json").listar()
+            if d.cliente_id == cliente_id
+            and d.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
+            and d.estado_vigencia == EstadoVigenciaDestino.ACTIVO.value
+        }
+        for obra in catalogo.listar_obras():
+            if obra.cliente_id == cliente_id and obra.estado == "CONFIRMADA" and obra.estado_vigencia == "ACTIVO":
+                for destino in catalogo.listar_destinos_confirmados_para_obra(nombre_obra=obra.nombre_canonico):
+                    destinos.setdefault(destino.destino_id, destino)
+        return list(destinos.values())
+    except (OSError, ValueError, ErrorCatalogoObrasDestinos):
+        return []
+
+
 def _revalidar_contaminacion_destino_final(
     motivos: list[str], resultado_entrega: Mapping[str, object], *, destino_lineal: str = "",
 ) -> None:
@@ -3353,6 +3398,15 @@ def procesar_archivo(
             identidad_cliente_corroborada=cliente_corroborado_n1,
         )
         obra_identidad_confirmada = bool(destinos_relacion_obra)
+        # Sólo ruteo (caso 482402): sin obra, los destinos confirmados del
+        # cliente; nunca cuenta como identidad de obra confirmada.
+        destinos_relacion_ruteo = destinos_relacion_obra or _destinos_confirmados_cliente_sin_obra(
+            carpeta_catalogos,
+            obra_documental=obra_documental,
+            cliente_texto=str(datos.get("cliente", "")),
+            rut_cliente=str(datos.get("RUT del cliente", "")),
+            identidad_cliente_corroborada=cliente_corroborado_n1,
+        )
         if obra_destino_corroborada is not None or obra_identidad_confirmada:
             campos_geometricos_sin_corroborar.discard("obra destino")
             metodos_documento.add(
@@ -3622,7 +3676,7 @@ def procesar_archivo(
                 chofer_resuelto=str(datos.get("chofer") or ""),
                 # Caso real 475176: conocimiento confirmado obra->destino
                 # antes que cualquier geocodificador.
-                destinos_relacion_confirmada=destinos_relacion_obra,
+                destinos_relacion_confirmada=destinos_relacion_ruteo,
             )
             logger.info(
                 "enriquecimiento-logistico-documento-v1 estado_ruta=%s motivo_ruta=%s estado_entrega=%s",
@@ -3719,7 +3773,7 @@ def procesar_archivo(
                                     evidencia_origen=resultado_entrega["evidencia_origen"],
                                     punto_gps_destino=resultado_gps.punto_gps_destino,
                                     contexto_obra=str(datos.get("obra destino", "")),
-                                    destinos_relacion_confirmada=destinos_relacion_obra,
+                                    destinos_relacion_confirmada=destinos_relacion_ruteo,
                                 )
                                 resultado_entrega.update({
                                     "direccion_entrega": ruta_recalculada.direccion_entrega_geocodificada,
@@ -3844,7 +3898,7 @@ def procesar_archivo(
                                 evidencia_origen=resultado_entrega.get("evidencia_origen", ""),
                                 punto_gps_destino=resultado_gps.punto_gps_destino,
                                 contexto_obra=str(datos.get("obra destino", "")),
-                                destinos_relacion_confirmada=destinos_relacion_obra,
+                                destinos_relacion_confirmada=destinos_relacion_ruteo,
                             )
                             if ruta_desambiguada.estado_ruta:
                                 resultado_entrega.update({
