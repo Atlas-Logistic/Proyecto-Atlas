@@ -1368,6 +1368,91 @@ def _aplicar_documento_obra(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> 
     return salida
 
 
+def _identidad_chofer_activa(ctx: _Contexto, nombre: str, rut: str) -> tuple[str, str, str]:
+    """Resuelve una identidad documental sólo contra el catálogo activo.
+
+    El RUT y el nombre deben apuntar al MISMO registro.  No consulta ni usa
+    identidad autenticada de Mobile: los dos valores provienen siempre de la
+    confirmación humana documentada en el preview.
+    """
+    from atlas_core.catalogos import _normalizar_nombre_chofer, normalizar_rut, rut_canonico_de_registro_chofer
+
+    clave = _resolver_chofer(ctx.choferes(), rut)
+    registro = ctx.choferes()[clave]
+    if registro.get("activo", True) is not True:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el chofer del catálogo está inactivo")
+    rut_canonico = rut_canonico_de_registro_chofer(clave, registro)
+    if not rut_canonico or normalizar_rut(rut) != normalizar_rut(rut_canonico):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el RUT no coincide con la identidad activa del catálogo")
+    nombres = [registro.get("nombre", ""), *(registro.get("aliases") or [])]
+    if _normalizar_nombre_chofer(nombre) not in {
+        _normalizar_nombre_chofer(str(valor)) for valor in nombres if str(valor).strip()
+    }:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el nombre no coincide con la identidad del RUT en catálogo")
+    return clave, str(registro.get("nombre", "")).strip(), rut_canonico
+
+
+def _plan_documento_corregir_chofer(ctx: _Contexto, p: dict) -> Plan:
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    clave, nombre, rut = _identidad_chofer_activa(ctx, str(p["chofer"]), str(p["rut_chofer"]))
+    archivo, guia, transporte = (str(fila.get("archivo", "")), str(fila.get("numero_guia", "")),
+                                  str(fila.get("numero_transporte", "")))
+    viaje = sorted({str(otra.get("numero_guia", "")).strip() for otra in ctx.filas()
+                     if str(otra.get("numero_transporte", "")).strip() == transporte} - {""})
+    actual = {campo: str(fila.get(campo, "")).strip() for campo in ("chofer", "rut_chofer")}
+    propuesto = {"chofer": nombre, "rut_chofer": rut}
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia,
+                 "numero_transporte": transporte, "campo": "IDENTIDAD_CHOFER"},
+        valor_actual=actual, valor_propuesto=propuesto,
+        estado_base={"fila": fila, "chofer_id": clave, "chofer": ctx.choferes()[clave]},
+        sin_cambios=actual == propuesto,
+        afectados={"guias": viaje, "guia_corregida": guia, "numero_transporte": transporte},
+        consecuencias=[
+            "La identidad se toma exclusivamente del catálogo activo y coincide por nombre y RUT.",
+            "La lectura documental previa se conserva en el ledger de auditoría.",
+            "Sólo se revalidan esta guía y las guías de su viaje; no se reconcilia la bandeja global ni se regenera el reporte.",
+        ],
+        revalidaciones=["MANTENIMIENTO_FOCAL_GUIAS_DEL_VIAJE"],
+        archivos=("dataset", "ledger_decisiones"),
+        datos={"archivo": archivo, "guia": guia, "transporte": transporte, "guias_viaje": viaje,
+               "chofer_id": clave},
+    )
+
+
+def _aplicar_documento_corregir_chofer(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.reprocesamiento_reparador import reparar_documento_focal_con_valores_conocidos
+
+    valores = {"chofer": str(plan.valor_propuesto["chofer"]), "rut_chofer": str(plan.valor_propuesto["rut_chofer"])}
+    resultado = reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=ctx.raiz, archivo=str(plan.datos["archivo"]), valores=valores, dry_run=False,
+        reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
+        superar_resoluciones_automaticas=True, numero_guia=str(plan.datos["guia"]),
+        campos_adicionales_permitidos=frozenset({"chofer", "rut_chofer"}),
+    )
+    cambios = {str(cambio["campo"]): cambio for cambio in resultado.get("cambios", [])}
+    esperados = {campo for campo, valor in valores.items() if str(plan.valor_actual.get(campo, "")) != valor}
+    if set(cambios) != esperados:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el reparador no aplicó exactamente la identidad de chofer")
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        aplicaciones = ledger.setdefault("aplicaciones", [])
+        for campo in ("chofer", "rut_chofer"):
+            if campo not in cambios:
+                continue
+            aplicaciones.append({
+                "decision_id": f"ACCION_OPERACIONAL:{ctx.token}:{campo}", "tipo": TIPO_LEDGER_CORRECCION,
+                "accion": "CORREGIR_IDENTIDAD_CHOFER", "actor": actor,
+                "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+                "documento": {"archivo": plan.datos["archivo"], "numero_guia": plan.datos["guia"],
+                              "numero_transporte": plan.datos["transporte"]},
+                "campo": campo, "valor_documental": cambios[campo]["antes"],
+                "valor_corregido": cambios[campo]["despues"], "referencia": str(p.get("referencia", "")),
+            })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    return {"despues": valores, "guias_revalidar": list(plan.datos["guias_viaje"])}
+
+
 # =============================================================== DECISIONES
 
 
@@ -1621,6 +1706,12 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "valor": _P("texto", True, max_largo=200), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_campo, _aplicar_documento_campo),
+    DefinicionAccion("DOCUMENTO_CORREGIR_IDENTIDAD_CHOFER", OPERACIONAL_REVERSIBLE,
+                     "Corrige conjuntamente chofer y RUT documental con una identidad activa existente del catálogo.",
+                     {"numero_guia": _P("guia", True), "chofer": _P("texto", True, max_largo=120),
+                      "rut_chofer": _P("rut", True), "archivo": _P("archivo_documento", max_largo=260),
+                      "referencia": _REF},
+                     _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
     DefinicionAccion("DOCUMENTO_ASIGNAR_OBRA", OPERACIONAL_REVERSIBLE,
                      "Asigna a una guía una obra EXISTENTE del catálogo (sin crear obra ni alias).",
                      {"numero_guia": _P("guia", True), "obra_id": _P("id", True),

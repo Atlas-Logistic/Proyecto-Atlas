@@ -769,6 +769,15 @@ CAMPOS_FOCALES_CONOCIDOS: dict[str, object] = {
     "numero_transporte": lambda v: bool(re.fullmatch(r"[0-9]{10}", v)),
 }
 
+# No se añaden al conjunto público genérico: sólo la acción tipada de
+# corrección documental puede habilitarlos después de corroborar la identidad
+# en el catálogo activo. Así un llamador directo del reparador no puede usarlo
+# para imponer un nombre/RUT arbitrarios.
+CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA: dict[str, object] = {
+    "chofer": lambda v: v not in _AUSENTES,
+    "rut_chofer": lambda v: validar_rut_chileno(v).estado == EstadoValidacion.VALIDO,
+}
+
 # Motivos que cada campo puede retirar al promoverse -- mismo criterio
 # que `CAMPOS_REPARABLES`. `codigo_cliente`/`cod_destinatario` no tienen
 # motivo propio en `MotivoRevisionDocumento` (bloque P0 cerrado, nunca
@@ -778,6 +787,11 @@ CAMPOS_FOCALES_CONOCIDOS: dict[str, object] = {
 # en sí la retira, aparte, el bloque de convergencia de identidades
 # conocidas (`regenerar_decisiones_persistidas`), nunca este módulo.
 _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
+    "chofer": (
+        MotivoRevisionDocumento.CHOFER_AUSENTE.value,
+        MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR.value,
+    ),
+    "rut_chofer": (MotivoRevisionDocumento.RUT_CHOFER_INVALIDO.value,),
     "cliente": (
         MotivoRevisionDocumento.CLIENTE_AUSENTE.value,
         MotivoRevisionDocumento.CLIENTE_SIN_CORROBORAR.value,
@@ -825,6 +839,7 @@ def reparar_documento_focal_con_valores_conocidos(
     *, raiz_atlas: str | Path, archivo: str, valores: Mapping[str, str], dry_run: bool = True,
     reconciliar: bool = True, tipos_ledger_superables: frozenset[str] = frozenset(),
     numero_guia: str = "", superar_resoluciones_automaticas: bool = False,
+    campos_adicionales_permitidos: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     """Persiste, para UN documento puntual ya identificado por
     `archivo`, valores YA conocidos de una reextracción real (nunca
@@ -842,6 +857,10 @@ def reparar_documento_focal_con_valores_conocidos(
     una SELECCIONAR_OTRA_PATENTE de ATLAS_AUTOMATICO impedía que la
     corrección humana confirmada (DOCUMENTO_CORREGIR_CAMPO) la reemplazara.
 
+    `campos_adicionales_permitidos` sólo admite la pareja completa
+    ``{"chofer", "rut_chofer"}`` para la acción documental que ya verificó
+    esa identidad en catálogo; cualquier otra solicitud sigue ignorándose.
+
     `archivo` debe identificar UNA fila (ruta completa; ver
     `_resolver_fila_por_archivo`); con `numero_guia` la fila además debe
     ser de esa guía. Si no, ValueError y nada se escribe."""
@@ -851,6 +870,9 @@ def reparar_documento_focal_con_valores_conocidos(
     ledger = actual / "decisiones_aplicadas.json"
     t_inicio = time.perf_counter()
 
+    identidad_confirmada = campos_adicionales_permitidos == frozenset(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA)
+    campos_permitidos = {**CAMPOS_FOCALES_CONOCIDOS,
+                         **(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA if identidad_confirmada else {})}
     try:
         aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
         aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)
@@ -877,13 +899,13 @@ def reparar_documento_focal_con_valores_conocidos(
         campos_bloqueados_ledger: list[str] = []
         duplicados: list[str] = []
         for campo, valor_nuevo_crudo in valores.items():
-            if campo not in CAMPOS_FOCALES_CONOCIDOS:
+            if campo not in campos_permitidos:
                 campos_ignorados.append(campo)  # nunca toca un campo no autorizado
                 continue
             if _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=campo):
                 campos_bloqueados_ledger.append(campo)  # el ledger siempre gana
                 continue
-            es_valido = CAMPOS_FOCALES_CONOCIDOS[campo]
+            es_valido = campos_permitidos[campo]
             valor_nuevo = str(valor_nuevo_crudo).strip()
             valor_actual = str(fila.get(campo, "")).strip()
             if not valor_nuevo or valor_nuevo == valor_actual or not es_valido(valor_nuevo):

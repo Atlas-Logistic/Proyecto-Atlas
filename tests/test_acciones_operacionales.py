@@ -111,6 +111,7 @@ def test_chofer_consulta_preview_ejecucion_auditoria_e_idempotencia(entorno):
     assert [c["nombre"] for c in inactivos["resultado"]["choferes"]] == ["ANA SOTO"]
     assert not (entorno["actual"] / "acciones_operacionales.json").exists()
 
+
     # 2. preview: estructura completa y ningún dato operacional escrito
     antes = _sha(entorno["cat"] / "choferes.json")
     preview = capa.previsualizar("CHOFER_CAMBIAR_ESTADO", {"chofer": RUT_ACTIVO, "activo": False},
@@ -157,6 +158,54 @@ def test_chofer_consulta_preview_ejecucion_auditoria_e_idempotencia(entorno):
 
     activos = capa.consultar("CHOFER_CONSULTAR", {"estado": "ACTIVO"}, actor="B1", origen="B1")
     assert activos["resultado"]["total"] == 0
+
+
+def test_corregir_identidad_documental_chofer_activa_es_focal_y_auditable(entorno, monkeypatch):
+    """La corrección de operador cambia ambos campos sin reconciliar globalmente."""
+    _escribir_dataset(entorno, [_fila("500001", chofer="No encontrado", rut_chofer="No encontrado"),
+                                _fila("500002")])
+    bandeja_antes = _sha(entorno["actual"] / "decisiones_pendientes.json")
+    forzadas: list[set[str]] = []
+    _sin_mantenimiento_real(monkeypatch, forzadas)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+
+    preview = capa.previsualizar(
+        "DOCUMENTO_CORREGIR_IDENTIDAD_CHOFER",
+        {"numero_guia": "500001", "chofer": "LUIS REYES", "rut_chofer": RUT_ACTIVO}, actor="JAVIER",
+    )
+    assert preview["estado"] == "PREVIEW", preview
+    assert preview["valor_actual"] == {"chofer": "No encontrado", "rut_chofer": "No encontrado"}
+    assert preview["valor_propuesto"] == {"chofer": "LUIS REYES", "rut_chofer": "12.345.678-5"}
+    assert preview["afectados"]["guias"] == ["500001", "500002"]
+    assert preview["revalidaciones"] == ["MANTENIMIENTO_FOCAL_GUIAS_DEL_VIAJE"]
+
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    filas = _filas_dataset(entorno)
+    assert (filas["500001.jpeg"]["chofer"], filas["500001.jpeg"]["rut_chofer"]) == ("LUIS REYES", "12.345.678-5")
+    assert filas["500002.jpeg"]["chofer"] == "LUIS REYES"  # no fue modificado
+    assert forzadas == [{"500001", "500002"}]
+    assert resultado["reconciliacion"] is None and resultado["revalidacion"]["reporte"] is None
+    assert _sha(entorno["actual"] / "decisiones_pendientes.json") == bandeja_antes
+    aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    correcciones = [a for a in aplicaciones if a["accion"] == "CORREGIR_IDENTIDAD_CHOFER"]
+    assert [(a["campo"], a["valor_documental"], a["valor_corregido"]) for a in correcciones] == [
+        ("chofer", "No encontrado", "LUIS REYES"), ("rut_chofer", "No encontrado", "12.345.678-5"),
+    ]
+
+
+def test_corregir_identidad_documental_chofer_rechaza_nombre_o_rut_contradictorios(entorno):
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    nombre = capa.previsualizar(
+        "DOCUMENTO_CORREGIR_IDENTIDAD_CHOFER",
+        {"numero_guia": "500001", "chofer": "ANA SOTO", "rut_chofer": RUT_ACTIVO}, actor="JAVIER",
+    )
+    assert nombre["codigo"] == "PRECONDICION_FALLIDA" and "nombre no coincide" in nombre["mensaje"]
+    inactivo = capa.previsualizar(
+        "DOCUMENTO_CORREGIR_IDENTIDAD_CHOFER",
+        {"numero_guia": "500001", "chofer": "ANA SOTO", "rut_chofer": RUT_INACTIVO}, actor="JAVIER",
+    )
+    assert inactivo["codigo"] == "PRECONDICION_FALLIDA" and "inactivo" in inactivo["mensaje"]
 
 
 def test_preview_obsoleto_si_la_entidad_cambio(entorno):
