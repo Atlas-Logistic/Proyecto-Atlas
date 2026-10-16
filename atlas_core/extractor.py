@@ -1423,6 +1423,11 @@ _PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO?]\.?\s*([0-9]{5,8})$")
 # "N9482179" (caso real 482179, RapidOCR lee "Nº 482179" con el "º" como
 # "9"). Ante esa ambigüedad se abstiene; nunca recorta el dígito.
 _PATRON_MARCADOR_NUMERO_GUIA_ABSORBIDO = re.compile(r"^N([1-8][0-9]{4,7})$")
+# Casos reales 482179/482247 (RapidOCR): el "º" leído como "9" queda pegado
+# a un folio de 6 dígitos ("N9482247"). Los folios AZA del dataset son todos
+# de 6 dígitos, así que un "9" seguido de EXACTAMENTE seis dígitos es el
+# marcador; con otra cantidad de dígitos sigue siendo ambiguo y se abstiene.
+_PATRON_MARCADOR_NUMERO_GUIA_NUEVE_ABSORBIDO = re.compile(r"^N9([1-9][0-9]{5})$")
 _PATRON_MARCADOR_NUMERO_GUIA_SOLO = re.compile(r"^(?:N[°ºO?]\.?|NRO\.?)$")
 _PATRON_CANDIDATO_NUMERICO_PURO = re.compile(r"^[0-9]{5,8}$")
 
@@ -1528,6 +1533,7 @@ def _extraer_numero_guia_geometrico(bloques: List[Any]) -> Dict[str, Any]:
             coincidencia = (
                 _PATRON_MARCADOR_NUMERO_GUIA.match(item["simple"])
                 or _PATRON_MARCADOR_NUMERO_GUIA_ABSORBIDO.match(item["simple"])
+                or _PATRON_MARCADOR_NUMERO_GUIA_NUEVE_ABSORBIDO.match(item["simple"])
             )
             if coincidencia:
                 numero = coincidencia.group(1)

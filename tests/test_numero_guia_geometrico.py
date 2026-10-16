@@ -233,9 +233,19 @@ def test_d_marcador_absorbido_nunca_toma_un_cero_inicial_como_digito():
 
 def test_d_marcador_absorbido_nunca_toma_un_nueve_inicial_como_digito():
     # Caso real 482179 (RapidOCR): "Nº 482179" leído "N9482179"; el "º"
-    # leído como "9" no se convierte en el número 9482179.
-    bloques = [*_encabezado_real_475449(), _bloque("N9482179", 2175, 686, 380, 94, conf=0.93)]
-    assert _extraer_numero_guia_geometrico(bloques) == {}
+    # leído como "9" nunca se convierte en el número 9482179: con seis
+    # dígitos detrás, el 9 es el marcador (casos reales 482179/482247).
+    for texto, numero in (("N9482179", "482179"), ("N9482247", "482247")):
+        bloques = [*_encabezado_real_475449(), _bloque(texto, 2175, 686, 380, 94, conf=0.93)]
+        assert _extraer_numero_guia_geometrico(bloques) == {"valor": numero}, texto
+
+
+def test_d_nueve_inicial_sin_seis_digitos_detras_sigue_absteniendose():
+    # Con cinco o siete dígitos detrás del 9 no hay forma de saber si el 9
+    # es el marcador o parte del folio.
+    for texto in ("N948217", "N94821790", "N9048217"):
+        bloques = [*_encabezado_real_475449(), _bloque(texto, 2175, 686, 380, 94, conf=0.93)]
+        assert _extraer_numero_guia_geometrico(bloques) == {}, texto
 
 
 def test_e_formatos_con_marcador_explicito_siguen_funcionando():
