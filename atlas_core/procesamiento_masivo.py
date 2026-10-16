@@ -57,6 +57,7 @@ from atlas_core.validadores import (
     validar_rut_chileno,
 )
 from atlas_core.clasificador_material import clasificar_material
+from atlas_core.material_codigo_sap import analizar_items_material
 from atlas_core.comprobantes_pesaje import (
     TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
     extraer_comprobante_pesaje_aza,
@@ -1261,6 +1262,12 @@ class MotivoRevisionDocumento(str, Enum):
     # de un campo operacional secundario (no de identidad) se registra
     # pero nunca por sí sola invalida el documento completo.
     MATERIAL_AUSENTE = "MATERIAL_AUSENTE"
+    # Materiales AZA fase 1 (casos 482229/473309/474216): algún ítem de
+    # material quedó deformado por el OCR (familia, diámetro, largo o
+    # calidad ilegibles, caracteres ajenos, confianza baja). Informativo:
+    # el texto OCR se conserva tal cual y el detalle por ítem (código SAP,
+    # confianza, señales) queda en `metricas_procesamiento_json`.
+    MATERIAL_OCR_NO_CONFIABLE = "MATERIAL_OCR_NO_CONFIABLE"
     # Bloque INTELIGENCIA N1 (Fase I) -- informativo únicamente: el cliente
     # trae un RUT chileno válido y un nombre documental consistente, pero
     # ese RUT no existe (todavía) en `empresas.json` ni el nombre calzó por
@@ -1330,6 +1337,9 @@ class MotivoRevisionDocumento(str, Enum):
 
 MOTIVOS_NO_BLOQUEANTES = frozenset({
     MotivoRevisionDocumento.MATERIAL_AUSENTE.value,
+    # Fase 1: marca el material, no bloquea el documento (sin tarjeta que
+    # lo resuelva, bloquear dejaría documentos huérfanos en revisión).
+    MotivoRevisionDocumento.MATERIAL_OCR_NO_CONFIABLE.value,
     MotivoRevisionDocumento.CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA.value,
     # Bloque R5 I: no bloquea Revisión de Atlas -- se resuelve como
     # Incidencia Documental, un flujo separado (ver
@@ -3937,6 +3947,18 @@ def procesar_archivo(
         motivos_documento, resultado_entrega, destino_lineal=destino_lineal,
     )
 
+    # Materiales AZA fase 1: código SAP por ítem y material OCR no confiable.
+    # Aquí, después del enriquecimiento logístico, porque es éste el que lee
+    # los bloques geométricos del documento; nunca se dispara otra lectura
+    # OCR. Sólo observa: `descripcion` no cambia.
+    items_material: list = []
+    try:
+        items_material = analizar_items_material(descripcion, textos=textos, bloques=bloques_guia)
+    except Exception as exc:  # observabilidad: nunca invalida el documento
+        logger.warning("Análisis de material por ítem omitido: %s: %s", type(exc).__name__, exc)
+    if any(item.no_confiable for item in items_material):
+        _motivo(MotivoRevisionDocumento.MATERIAL_OCR_NO_CONFIABLE)
+
     requiere_revision = any(m not in MOTIVOS_NO_BLOQUEANTES for m in motivos_documento)
 
     if recolector_decisiones is not None and carpeta_catalogos is not None:
@@ -3994,6 +4016,10 @@ def procesar_archivo(
         # Auditoría de la recuperación del cliente por cabecera documental:
         # nombre/RUT/código leídos + cliente maestro + vía y corroboraciones.
         metricas["recuperacion_cliente_documental"] = recuperacion_cliente_documental
+    if items_material:
+        # Trazabilidad por ítem: texto OCR original, código SAP y cómo se
+        # asoció, confianza OCR, señales y advertencias.
+        metricas["material_items"] = [item.como_dict() for item in items_material]
 
     # Bloque C1 -- peso: se calcula aquí (antes del `return`, no dentro
     # del propio diccionario) para poder evaluar su credibilidad y

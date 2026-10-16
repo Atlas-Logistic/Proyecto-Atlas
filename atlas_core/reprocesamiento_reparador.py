@@ -144,7 +144,8 @@ CAMPOS_REPARABLES: dict[str, tuple[tuple[str, ...], object]] = {
     # Sólo con el motivo de contaminación ya activo; la reconciliación
     # vuelve a evaluar la credibilidad y recalcula `tipo_carga`.
     "descripcion_material": (
-        (MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value,),
+        (MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value,
+         MotivoRevisionDocumento.MATERIAL_OCR_NO_CONFIABLE.value),
         lambda v: v not in _AUSENTES,
     ),
     # Horas AZA: sin motivo propio -- se completan si están ausentes o si el
