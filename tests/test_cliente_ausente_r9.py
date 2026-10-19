@@ -278,6 +278,38 @@ def test_registrar_cliente_manual_con_motivo_no_bloqueante_restante_queda_ok(tmp
     assert fila_final["estado_documental"] == "OK"
 
 
+def test_registrar_cliente_manual_no_reprocesa_material_ausente_ajeno(tmp_path, monkeypatch):
+    """Una decisión de cliente no autoriza releer material coexistente."""
+    fila = _fila_csv(motivos_revision_documento="MATERIAL_AUSENTE | CLIENTE_AUSENTE")
+    entorno = _entorno(tmp_path, filas_csv=[fila])
+    decision = detectar_decision_cliente_ausente(archivo="472238.jpeg", fila=fila)
+    _publicar(entorno, decision)
+
+    def _ocr_prohibido(**kwargs):
+        raise AssertionError("una decision de cliente no debe reprocesar material")
+
+    monkeypatch.setattr(
+        "atlas_core.revalidacion_documental.reprocesar_material_focal_desde_imagen_original",
+        _ocr_prohibido,
+    )
+    resultado = aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"],
+        accion="REGISTRAR_CLIENTE_MANUAL", razon_social_manual="ACMA SA",
+    )
+
+    assert resultado["ok"] is True
+    assert "material_focal" not in resultado
+    fila_final = _leer_csv(entorno["dataset"])["472238.jpeg"]
+    assert fila_final["motivos_revision_documento"] == "MATERIAL_AUSENTE"
+    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    assert any(
+        a["decision_id"] == decision["decision_id"]
+        and a["tipo"] == "CLIENTE_AUSENTE"
+        and a["accion"] == "REGISTRAR_CLIENTE_MANUAL"
+        for a in ledger["aplicaciones"]
+    )
+
+
 def test_otras_decisiones_pendientes_quedan_intactas_al_resolver_una(tmp_path):
     """Aplicar una decisión nunca debe tocar otra decisión pendiente no
     relacionada (mismo principio que exige la prueba real de las 3

@@ -2623,8 +2623,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     resultado_extra["reporte_no_publicado_motivo"] = "DATASET_AVANZO_DURANTE_GENERACION"
 
             # Bloque CIERRE DE ORQUESTACIÓN (caso real 472477) --
-            # convergencia final tras CUALQUIER decisión aplicada
-            # (general, nunca restringida a un tipo/guía en particular):
+            # convergencia final tras registrar una dirección de destino:
             # si el documento de ESTA decisión sigue con `MATERIAL_
             # AUSENTE`, se intenta el reproceso focal YA existente
             # (`reprocesar_material_focal_desde_imagen_original` --
@@ -2637,9 +2636,16 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # abstenerse, lo que a su vez puede desbloquear la ruta.
             # Nunca un OCR masivo: sólo esta imagen, sólo si el motivo
             # sigue vigente en el dataset ya escrito arriba.
+            # Sólo registrar una dirección aporta la evidencia que justifica
+            # reintentar material para la convergencia origen/ruta. Un
+            # MATERIAL_AUSENTE coexistente no autoriza OCR para cliente,
+            # origen ni otras decisiones ajenas al material.
             numero_guia_para_material = str((decision.get("documento") or {}).get("numero_guia") or "")
+            requiere_reproceso_material = (
+                tipo == "DESTINO_NO_RESUELTO" and accion == "REGISTRAR_DIRECCION"
+            )
             if (
-                tipo not in {"PESO_VIAJE_IMPLAUSIBLE", "DESTINO_SIN_CONFIRMAR"}
+                requiere_reproceso_material
                 and numero_guia_para_material
                 and accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
             ):
