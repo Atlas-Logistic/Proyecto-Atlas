@@ -1944,6 +1944,19 @@ def _despachar_a_lineal_contaminado(valor: Any, *, valor_chofer_resuelto: str = 
     chofer_simple = _texto_simple(str(valor_chofer_resuelto or ""))
     if chofer_simple and texto == chofer_simple:
         return True
+    # El OCR puede cortar el segundo apellido al final de la caja.  Una
+    # coincidencia de dos o más nombres iniciales del chofer sigue siendo
+    # evidencia documental inequívoca de contaminación cuando el valor no
+    # tiene numeración de dirección.  No se aplica a una calle que sólo
+    # contenga esos nombres (p. ej. "PASAJE JUAN PEREZ 123").
+    tokens_chofer = _tokens_valor(chofer_simple)
+    tokens_texto = _tokens_valor(texto)
+    if (
+        len(tokens_chofer) >= 3
+        and 2 <= len(tokens_texto) < len(tokens_chofer)
+        and tokens_texto == tokens_chofer[:len(tokens_texto)]
+    ):
+        return True
     return any(
         texto == etiqueta or texto.startswith(etiqueta + " ")
         for etiqueta in _ETIQUETAS_ESTRUCTURALES_DESPACHO
@@ -2192,6 +2205,19 @@ def _extraer_despachar_a_geometrico(
         simple = item["simple"]
         if simple == "DESPACHAR A" or simple.startswith("DESPACHAR A "):
             return True, False, False
+        # En 482513 EasyOCR separó la última "A" en su propia caja. No se
+        # acepta "DESPACHAR" a secas: la A debe estar inmediatamente a la
+        # derecha, en la misma fila, de modo que la etiqueta completa quede
+        # respaldada por la geometría del documento y no por una suposición.
+        if simple == "DESPACHAR" and any(
+            otro is not item
+            and otro["simple"] == "A"
+            and otro["x1"] >= item["x2"] - 4 * escala
+            and otro["x1"] - item["x2"] <= 12 * escala
+            and abs(otro["cy"] - item["cy"]) <= max(item["h"], otro["h"])
+            for otro in items
+        ):
+            return True, False, False
 
         def es_sufijo(longitud: int) -> bool:
             sufijo = _FRASE_DESPACHAR_A[-longitud:]
@@ -2404,6 +2430,28 @@ def _extraer_despachar_a_geometrico(
         texto_compuesto = re.sub(
             r"\s+", " ", " ".join(bloque["texto"].strip() for bloque in cadena)
         ).strip()
+        # Un mismo dato puede venir impreso dos veces contiguas en el
+        # formulario. Si OCR leyó una de esas copias con una variación mínima
+        # (482513: "VIIACURA VITACURA"), conservar ambas palabras degrada el
+        # destino operacional sin aportar evidencia nueva. Se colapsan sólo
+        # duplicados alfabéticos largos, consecutivos y tolerantes entre sí;
+        # la traza OCR original permanece intacta para auditoría.
+        palabras = texto_compuesto.split()
+        palabras_colapsadas: List[str] = []
+        for palabra in palabras:
+            simple_palabra = _texto_simple(palabra)
+            if (
+                palabras_colapsadas
+                and len(simple_palabra) >= 6
+                and simple_palabra.isalpha()
+                and _token_coincide_tolerante(
+                    simple_palabra, _texto_simple(palabras_colapsadas[-1])
+                )
+            ):
+                palabras_colapsadas[-1] = palabra
+            else:
+                palabras_colapsadas.append(palabra)
+        texto_compuesto = " ".join(palabras_colapsadas)
         if ancla_truncada and not (
             re.search(r"[A-Z]", _texto_simple(texto_compuesto))
             and re.search(r"\d{1,5}", texto_compuesto)
