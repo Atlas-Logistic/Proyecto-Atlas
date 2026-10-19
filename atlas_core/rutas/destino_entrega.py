@@ -2909,7 +2909,9 @@ def despachar_a_documental(
         or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
     )
     try:
-        decision_geometrica = _extraer_despachar_a_geometrico(bloques)
+        decision_geometrica = _extraer_despachar_a_geometrico(
+            bloques, valor_chofer_resuelto=chofer_resuelto,
+        )
     except Exception:
         decision_geometrica = {}
     candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
@@ -2937,6 +2939,14 @@ def despachar_a_documental(
         )
     ):
         despachar_a_crudo = candidato_geometrico
+    elif lineal_descartable:
+        # La lectura lineal ya fue identificada como valor de otro campo
+        # (RETIRA/RUT/PATENTE/FECHA) y no existe una alternativa geométrica
+        # suficiente. No se conserva como destino operacional: la evidencia
+        # OCR original sigue disponible para auditoría, pero este campo se
+        # abstiene en vez de inventar una dirección o enviar al ruteo el
+        # nombre de un chofer.
+        return ""
     return despachar_a_crudo
 
 
