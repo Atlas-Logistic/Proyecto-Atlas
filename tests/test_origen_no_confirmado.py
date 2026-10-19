@@ -332,6 +332,40 @@ def test_confirmar_planta_escribe_confirmacion_humana(tmp_path):
     assert fila["motivo_origen_gps"].startswith("DETENCION_REAL_FUERA_DE_TODA_GEOCERCA")
 
 
+def test_confirmar_planta_no_reprocesa_material_ausente_ajeno(tmp_path, monkeypatch):
+    """Confirmar origen conserva auditoría sin disparar OCR de material."""
+    entorno = _entorno(tmp_path)
+    decision = _decision_estadia(entorno)
+    filas = _leer_csv(entorno["dataset"])
+    filas[0]["descripcion_material"] = ""
+    filas[0]["tipo_carga"] = "NO DETERMINADO"
+    filas[0]["motivos_revision_documento"] = "MATERIAL_AUSENTE"
+    _escribir_csv(entorno["dataset"], filas)
+
+    def _ocr_prohibido(**kwargs):
+        raise AssertionError("una decision de origen no debe reprocesar material")
+
+    monkeypatch.setattr(
+        "atlas_core.revalidacion_documental.reprocesar_material_focal_desde_imagen_original",
+        _ocr_prohibido,
+    )
+    resultado = aplicar_decision_obra(
+        raiz_atlas=entorno["raiz"], decision_id=decision["decision_id"], accion="CONFIRMAR_PLANTA",
+    )
+
+    assert resultado["ok"] is True
+    assert "material_focal" not in resultado
+    fila = _leer_csv(entorno["dataset"])[0]
+    assert fila["motivos_revision_documento"] == "MATERIAL_AUSENTE"
+    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
+    assert any(
+        a["decision_id"] == decision["decision_id"]
+        and a["tipo"] == "ORIGEN_NO_CONFIRMADO"
+        and a["accion"] == "CONFIRMAR_PLANTA"
+        for a in ledger["aplicaciones"]
+    )
+
+
 def test_confirmar_planta_revert_no_pisa_cambio_concurrente_posterior(tmp_path, monkeypatch):
     """Bloque CONSISTENCIA OPERACIONAL, Fase 1 -- #8: si `aplicar_decision_
     obra` falla DESPUÉS de escribir el origen (CONFIRMAR_PLANTA) y, en el
