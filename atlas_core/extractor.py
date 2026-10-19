@@ -2150,7 +2150,9 @@ def _existe_valor_duplicado_en_documento(
     return False
 
 
-def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
+def _extraer_despachar_a_geometrico(
+    bloques: List[Any], *, valor_chofer_resuelto: str = "",
+) -> Dict[str, Any]:
     """Localiza el valor de DESPACHAR A por posición real en la imagen (no
     por el orden de lectura lineal de PaddleOCR/EasyOCR, que puede
     intercalar columnas -- ver `_despachar_a_lineal_contaminado`). Nunca
@@ -2184,6 +2186,7 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     if not items:
         return {}
     escala = _escala_geometrica_texto(items)
+    chofer_simple = _texto_simple(str(valor_chofer_resuelto or ""))
 
     def _ancla_despacho(item: Dict[str, Any]) -> tuple[bool, bool, bool]:
         """Devuelve (es_ancla, truncada_en_borde, requiere_corroboracion_duplicado).
@@ -2257,6 +2260,15 @@ def _extraer_despachar_a_geometrico(bloques: List[Any]) -> Dict[str, Any]:
         if not 2 <= len(texto) <= 80 or not re.search(r"[A-Z]", texto):
             return False
         if es_estructural(item):
+            return False
+        # Bloque DESPACHAR A / RETIRA -- los OCR de formularios AZA pueden
+        # ordenar primero el valor de RETIRA, dejándolo horizontalmente más
+        # cerca de DESPACHAR A que la dirección impresa debajo. Un nombre no
+        # se descarta por "parecer persona": sólo se excluye cuando coincide
+        # exactamente con el chofer YA resuelto del mismo documento. Así el
+        # selector geométrico continúa con la dirección contigua, y una calle
+        # legítima que comparte sólo parte del nombre permanece válida.
+        if chofer_simple and texto == chofer_simple:
             return False
         if _patente_valida(texto.replace(" ", "")):
             # Un valor de patente suelto (p. ej. "BDFG50") nunca es texto de
