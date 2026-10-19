@@ -317,3 +317,130 @@ def analizar_items_material(descripcion: str, *, textos: Iterable[str] = (), blo
             resultado.descripcion_ocr, confianza=resultado.confianza_ocr,
             codigo_sap=resultado.codigo_sap, referencias=referencias)
     return salida
+
+
+# --------------------------------------------------------------- filas omitidas
+#
+# Casos reales 482396 (falta "B HORMIGON 22MM 6M", 4.695 kg) y 472818: la
+# tabla trae N filas CANTIDAD/CODIGO, pero sólo N-1 descripciones llegaron
+# al dataset, sin ningún motivo. Las filas se reconocen por su código SAP y
+# su cantidad (en AZA, la suma de CANTIDAD es exactamente PESO KG). Sólo
+# observa: nunca agrega ítems, motivos ni estados.
+
+FILAS_SIN_EVIDENCIA = "SIN_EVIDENCIA"
+FILAS_SIN_OMISION = "SIN_OMISION"
+FILAS_OMISION_CONFIRMADA = "OMISION_CONFIRMADA"
+# Faltan filas con certeza (conteo + suma = PESO KG), pero no se sabe cuáles:
+# algún ítem leído no tiene código propio que lo ate a su fila.
+FILAS_OMISION_SIN_IDENTIFICAR = "OMISION_SIN_IDENTIFICAR"
+FILAS_NO_CONCLUYENTE = "NO_CONCLUYENTE"
+
+MOTIVO_CODIGO_REPETIDO = "CODIGO_REPETIDO"
+MOTIVO_CANTIDAD_NO_LEIDA = "CANTIDAD_NO_LEIDA"
+MOTIVO_PESO_AUSENTE = "PESO_AUSENTE"
+MOTIVO_SUMA_DISTINTA_PESO = "SUMA_DISTINTA_PESO"
+MOTIVO_FILAS_NO_SUPERAN_ITEMS = "FILAS_NO_SUPERAN_ITEMS"
+
+TOLERANCIA_PESO_KG = 1
+
+# Cantidad AZA en kg con separador de miles ("4.695", "27,871" con la coma
+# leída por el OCR) o hasta 3 dígitos ("270"). Sin decimales: otra forma no
+# es una cantidad legible y se abstiene.
+_CANTIDAD_KG = r"\d{1,3}(?:[.,]\d{3})+|\d{1,3}"
+_CANTIDAD_PEGADA = re.compile(rf"(?<![\d.,/])({_CANTIDAD_KG})\s*(1100\d{{5}})(?!\d)")
+_CANTIDAD_SOLA = re.compile(rf"^(?:{_CANTIDAD_KG})$")
+
+
+def _kg(cantidad: str) -> int:
+    return int(re.sub(r"[.,]", "", cantidad))
+
+
+@dataclass
+class FilaMaterialDocumental:
+    codigo_sap: str
+    cantidad_kg: int | None = None
+    fuente_cantidad: str = ""  # PEGADA_AL_CODIGO | MISMA_FILA_GEOMETRICA | ""
+
+
+def _cantidad_en_misma_fila(caja_codigo, bloques) -> int | None:
+    """Única cantidad suelta a la izquierda del código, en su misma fila."""
+    x0, y0, _x1, y1 = caja_codigo
+    alto = max(y1 - y0, 1.0)
+    candidatas = set()
+    for bloque in bloques:
+        caja = _caja(bloque)
+        texto = _texto(bloque).strip()
+        if caja is None or not _CANTIDAD_SOLA.fullmatch(texto):
+            continue
+        centro = (caja[1] + caja[3]) / 2
+        if y0 - alto / 2 <= centro <= y1 + alto / 2 and caja[2] <= x0 + alto:
+            candidatas.add(_kg(texto))
+    return candidatas.pop() if len(candidatas) == 1 else None
+
+
+def filas_material_documentales(*, textos: Iterable[str] = (), bloques: Sequence | None = None
+                                ) -> list[FilaMaterialDocumental]:
+    """Una fila por aparición de código SAP en la tabla, con su cantidad si
+    está pegada al código o (con geometría) sola en la misma fila."""
+    filas: list[FilaMaterialDocumental] = []
+    bloques = list(bloques or [])
+    fuentes = [(_texto(b), _caja(b)) for b in bloques] if bloques else [(str(t), None) for t in textos]
+    for texto, caja in fuentes:
+        pegadas = {m.group(2): _kg(m.group(1)) for m in _CANTIDAD_PEGADA.finditer(texto)}
+        for codigo in _CODIGO_SAP.findall(texto):
+            if codigo in pegadas:
+                filas.append(FilaMaterialDocumental(codigo, pegadas[codigo], "PEGADA_AL_CODIGO"))
+                continue
+            cantidad = _cantidad_en_misma_fila(caja, bloques) if caja is not None else None
+            filas.append(FilaMaterialDocumental(codigo, cantidad, EVIDENCIA_MISMA_FILA if cantidad is not None else ""))
+    return filas
+
+
+def detectar_filas_material_omitidas(items: Sequence[ItemMaterialOCR], *, peso_kg: str,
+                                     textos: Iterable[str] = (), bloques: Sequence | None = None) -> dict:
+    """Compara las filas documentales (código + cantidad) con los ítems
+    leídos. `OMISION_CONFIRMADA` sólo si hay códigos de la tabla sin ítem,
+    toda fila tiene cantidad, la suma es PESO KG (±1 kg) y cada ítem leído
+    tiene su propio código: así los faltantes quedan identificados sin
+    ambigüedad. Ante cualquier duda devuelve otro estado con su motivo."""
+    filas = filas_material_documentales(textos=textos, bloques=bloques)
+    resultado: dict = {
+        "estado": FILAS_SIN_EVIDENCIA, "motivo": "", "items_leidos": len(items),
+        "filas_documentales": [asdict(f) for f in filas], "peso_kg": peso_kg,
+        "suma_cantidades_kg": None, "filas_faltantes": 0, "faltantes": [],
+    }
+    if not filas:
+        return resultado
+    codigos = [f.codigo_sap for f in filas]
+    con_codigo = {i.codigo_sap for i in items if i.codigo_sap}
+    sin_item = [f for f in filas if f.codigo_sap not in con_codigo]
+    completas = all(f.cantidad_kg is not None for f in filas)
+    suma = sum(f.cantidad_kg for f in filas) if completas else None
+    peso = int(peso_kg) if re.fullmatch(r"\d{1,6}", str(peso_kg or "")) else None
+    suma_coincide = suma is not None and peso is not None and abs(suma - peso) <= TOLERANCIA_PESO_KG
+    resultado.update(suma_cantidades_kg=suma, suma_coincide_peso=suma_coincide)
+
+    def no_concluyente(motivo: str) -> dict:
+        resultado.update(estado=FILAS_NO_CONCLUYENTE, motivo=motivo)
+        return resultado
+
+    if len(set(codigos)) != len(codigos):
+        return no_concluyente(MOTIVO_CODIGO_REPETIDO)
+    if not sin_item:
+        resultado["estado"] = FILAS_SIN_OMISION
+        return resultado
+    if not completas:
+        return no_concluyente(MOTIVO_CANTIDAD_NO_LEIDA)
+    if peso is None:
+        return no_concluyente(MOTIVO_PESO_AUSENTE)
+    if not suma_coincide:
+        return no_concluyente(MOTIVO_SUMA_DISTINTA_PESO)
+    if len(filas) <= len(items):
+        return no_concluyente(MOTIVO_FILAS_NO_SUPERAN_ITEMS)
+    resultado["filas_faltantes"] = len(filas) - len(items)
+    if len(con_codigo) != len(items):
+        resultado["estado"] = FILAS_OMISION_SIN_IDENTIFICAR
+        return resultado
+    resultado.update(estado=FILAS_OMISION_CONFIRMADA,
+                     faltantes=[{"codigo_sap": f.codigo_sap, "cantidad_kg": f.cantidad_kg} for f in sin_item])
+    return resultado

@@ -57,7 +57,9 @@ from atlas_core.validadores import (
     validar_rut_chileno,
 )
 from atlas_core.clasificador_material import clasificar_material
-from atlas_core.material_codigo_sap import analizar_items_material
+from atlas_core.material_codigo_sap import (
+    FILAS_SIN_EVIDENCIA, analizar_items_material, detectar_filas_material_omitidas,
+)
 from atlas_core.comprobantes_pesaje import (
     TIPO_DOCUMENTAL_COMPROBANTE_PESAJE,
     extraer_comprobante_pesaje_aza,
@@ -3952,6 +3954,9 @@ def procesar_archivo(
     # los bloques geométricos del documento; nunca se dispara otra lectura
     # OCR. Sólo observa: `descripcion` no cambia.
     items_material: list = []
+    # Los mismos bloques para el conteo de filas omitidas (más abajo, tras el
+    # peso final): ítems y filas deben venir de la misma lectura.
+    bloques_material = bloques_guia
     try:
         items_material = analizar_items_material(descripcion, textos=textos, bloques=bloques_guia)
     except Exception as exc:  # observabilidad: nunca invalida el documento
@@ -4058,6 +4063,17 @@ def procesar_archivo(
         _motivo(MotivoRevisionDocumento.PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR)
     if evaluar_credibilidad_peso(peso_kg_final).nivel != NivelCredibilidad.CONFIABLE:
         _motivo(MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO)
+
+    # Materiales: filas de la tabla (código SAP + cantidad) sin ítem leído
+    # (casos reales 482396, 472818). Sólo observabilidad en métricas: no
+    # agrega motivos ni cambia estados.
+    try:
+        filas_material = detectar_filas_material_omitidas(
+            items_material, peso_kg=peso_kg_final, textos=textos, bloques=bloques_material)
+        if filas_material["estado"] != FILAS_SIN_EVIDENCIA:
+            metricas["material_filas"] = filas_material
+    except Exception as exc:  # observabilidad: nunca invalida el documento
+        logger.warning("Detección de filas de material omitidas omitida: %s: %s", type(exc).__name__, exc)
 
     resultado = {
         "numero_guia": str(datos.get("número de guía", "No encontrado")),
