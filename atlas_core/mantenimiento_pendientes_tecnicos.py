@@ -154,6 +154,91 @@ def _observabilidad(
     }
 
 
+def revalidar_ruta_confirmada_focal(
+    *, raiz_atlas: str | Path, numero_guia: str, proveedor_rutas=None,
+    proveedor_rutas_fallback=None, reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Reintenta UNA guía contra su destino de catálogo ya confirmado.
+
+    Es una vía manual/focal: no selecciona elegibles, no recorre la cola
+    técnica y no genera reportes. Reutiliza el revalidador de destinos
+    confirmados con ``solo_con_coordenadas=False`` para que, si el único
+    destino corroborado aún no tiene lat/lon, consulte exclusivamente su
+    dirección canónica. ``despachar_a_crudo`` pertenece al documento y queda
+    bajo la garantía del revalidador de ruta.
+
+    Al resolver la ruta, retira sólo el registro técnico de esa guía y
+    republica sólo sus tarjetas de destino. Los registros y tarjetas ajenos
+    se conservan; una ruta que no converge no altera su pendiente previo.
+    """
+    raiz = Path(raiz_atlas)
+    guia = str(numero_guia).strip()
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    if not guia:
+        return {"ejecutado": False, "motivo": "GUIA_INVALIDA"}
+    if not dataset.is_file():
+        return {"ejecutado": False, "motivo": "SIN_DATASET", "numero_guia": guia}
+
+    try:
+        # Comparte el cerrojo exterior del mantenimiento para no entrelazar
+        # una edición focal de cola con una pasada automática. No se llama a
+        # `mantener_pendientes_tecnicos`: ésta recorrería toda la cola.
+        with bloqueo_sesion(actual, "reconciliacion_estado_derivado"):
+            resultado_ruta = revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
+                ruta_dataset=dataset,
+                carpeta_catalogos=raiz / "catalogos_privados",
+                proveedor_rutas=proveedor_rutas,
+                proveedor_rutas_fallback=proveedor_rutas_fallback,
+                guias_objetivo={guia},
+                solo_con_coordenadas=False,
+            )
+            filas = {
+                str(fila.get("numero_guia", "")).strip(): fila
+                for fila in _leer_filas(dataset)
+            }
+            fila = filas.get(guia)
+            if fila is None:
+                return {
+                    "ejecutado": False, "motivo": "GUIA_NO_ENCONTRADA",
+                    "numero_guia": guia, "ruta": resultado_ruta,
+                }
+            ruta_resuelta = str(fila.get("estado_ruta", "")).strip() == "RUTA_CALCULADA"
+            pendiente_retirado = False
+            ruta_pendientes = actual / NOMBRE_PENDIENTES_TECNICOS
+            if ruta_resuelta:
+                try:
+                    contenido = json.loads(ruta_pendientes.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    contenido = None
+                if isinstance(contenido, dict) and isinstance(contenido.get("pendientes"), list):
+                    anteriores = contenido["pendientes"]
+                    restantes = [
+                        registro for registro in anteriores
+                        if str((registro or {}).get("numero_guia", "")).strip() != guia
+                    ]
+                    if len(restantes) != len(anteriores):
+                        # Conserva literalmente todos los registros ajenos y
+                        # cualquier metadato compatible del artefacto.
+                        contenido["pendientes"] = restantes
+                        escribir_json_atomico(ruta_pendientes, contenido)
+                        pendiente_retirado = True
+
+            # Esta reconciliación está explícitamente acotada: reemplaza sólo
+            # las tarjetas de la guía focal y conserva las demás en la bandeja.
+            tarjetas = reconciliar_decisiones_destino_no_resuelto(
+                raiz_atlas=raiz, reloj=reloj, guias_objetivo={guia},
+            )
+            return {
+                "ejecutado": True, "numero_guia": guia,
+                "ruta_resuelta": ruta_resuelta,
+                "pendiente_tecnico_retirado": pendiente_retirado,
+                "ruta": resultado_ruta, "tarjetas": tarjetas,
+            }
+    except SesionOcupadaError:
+        return {"ejecutado": False, "motivo": "OTRA_SESION_ACTIVA", "numero_guia": guia}
+
+
 def mantener_pendientes_tecnicos(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     proveedor_rutas=None, proveedor_rutas_fallback=None, solo_plan: bool = False,
