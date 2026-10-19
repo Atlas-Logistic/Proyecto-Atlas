@@ -1442,6 +1442,23 @@ _PATRON_CANDIDATO_NUMERICO_PURO = re.compile(r"^[0-9]{5,8}$")
 # aplicada aquí a esta ancla fija específica, nunca un literal por guía.
 _ANCLA_GUIA_DESPACHO = "GUIA DE DESPACHO"
 _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO = 12  # > 2/3 de los 16 caracteres del ancla completa
+# Casos reales 482399/482483 (RapidOCR, Mobile): el encabezado llega como
+# "GUIA DEDESPACHO" -- RapidOCR pega palabras de una misma línea. Se compara
+# además la forma SIN ESPACIOS, con la misma tolerancia de prefijo expresada
+# en caracteres no blancos ("GUIA DE DESP" -> 10); nunca se relaja nada más.
+_ANCLA_GUIA_DESPACHO_COMPACTA = _ANCLA_GUIA_DESPACHO.replace(" ", "")
+_LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO_COMPACTA = len(
+    _ANCLA_GUIA_DESPACHO[:_LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO].replace(" ", "")
+)
+
+
+def _longitud_prefijo_comun(texto: str, ancla: str) -> int:
+    longitud = 0
+    for a, b in zip(texto, ancla):
+        if a != b:
+            break
+        longitud += 1
+    return longitud
 
 
 def _es_ancla_guia_despacho(texto_simple: str) -> bool:
@@ -1449,15 +1466,20 @@ def _es_ancla_guia_despacho(texto_simple: str) -> bool:
     DESPACHO", o comparte con ella un prefijo común de al menos
     `_LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO` caracteres (tolera un
     sufijo final truncado por el OCR -- nunca sustituciones en medio,
-    nunca un prefijo corto y ambiguo)."""
+    nunca un prefijo corto y ambiguo). Las mismas dos reglas se aplican
+    también sin espacios, para palabras pegadas por el OCR ("GUIA
+    DEDESPACHO")."""
     if _ANCLA_GUIA_DESPACHO in texto_simple:
         return True
-    longitud_prefijo_comun = 0
-    for a, b in zip(texto_simple, _ANCLA_GUIA_DESPACHO):
-        if a != b:
-            break
-        longitud_prefijo_comun += 1
-    return longitud_prefijo_comun >= _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO
+    if _longitud_prefijo_comun(texto_simple, _ANCLA_GUIA_DESPACHO) >= _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO:
+        return True
+    compacto = texto_simple.replace(" ", "")
+    if _ANCLA_GUIA_DESPACHO_COMPACTA in compacto:
+        return True
+    return (
+        _longitud_prefijo_comun(compacto, _ANCLA_GUIA_DESPACHO_COMPACTA)
+        >= _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO_COMPACTA
+    )
 
 
 def _es_encabezado_guia_geometrico(items: List[Dict[str, Any]], ancla: Dict[str, Any]) -> bool:
