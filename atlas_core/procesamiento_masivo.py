@@ -163,6 +163,7 @@ from atlas_core.catalogo_clientes import (
 )
 from atlas_core.convergencia_identidad_conocida import (
     RESULTADO_RESUELTO,
+    reconciliar_patentes_por_asignacion_chofer,
     resolver_identidad_cliente_contextual,
 )
 from atlas_core.catalogo_destinos import direccion_confirmada_coincide, normalizar_nombre_destino
@@ -1203,6 +1204,9 @@ class MetodoObtencionDocumento(str, Enum):
     # nombre documental exacto (ver `_completar_cliente_ausente_por_cabecera_documental`).
     CATALOGO_CODIGO_CLIENTE = "CATALOGO_CODIGO_CLIENTE"
     CATALOGO_OBRA_DESTINO = "CATALOGO_OBRA_DESTINO"
+    # Caso real 482559: tracto/carro reubicados o completados desde la
+    # asignación chofer->vehículo confirmada (ver `_reconciliar_patentes_por_asignacion`).
+    ASIGNACION_CHOFER_VEHICULO = "ASIGNACION_CHOFER_VEHICULO"
     # Bloque INTELIGENCIA N1: limpieza estructural de un nombre de entidad
     # (sufijos societarios/prefijo suelto, ver `normalizar_nombre_societario`)
     # -- nunca decide identidad, solo corrige una corrupción OCR segura del
@@ -2267,6 +2271,37 @@ def _base_geografica_ine_memoizada():
     return _BASE_INE_MEMO.get("base")
 
 
+def _reconciliar_patentes_por_asignacion(
+    datos: dict, carpeta_catalogos: Path | str, vehiculos_homologables, *, con_problema: bool,
+) -> dict[str, object] | None:
+    """Aplica `reconciliar_patentes_por_asignacion_chofer` sobre `datos` y
+    devuelve la traza (valores OCR originales incluidos) para las métricas.
+    Sin cambio: traza sólo si la lectura tenía un problema que explicar."""
+    tracto_ocr = str(datos.get("patente del tracto", "No encontrado"))
+    carro_ocr = str(datos.get("patente del carro", "No encontrado"))
+    choferes = cargar_catalogo_json(Path(carpeta_catalogos) / "choferes.json")
+    reconciliacion = reconciliar_patentes_por_asignacion_chofer(
+        nombre_documental=str(datos.get("chofer", "")), rut_documental=str(datos.get("RUT del chofer", "")),
+        patente_tracto=tracto_ocr, patente_carro=carro_ocr, choferes=choferes, vehiculos=vehiculos_homologables,
+    )
+    ausente = {"", "No encontrado"}
+    if reconciliacion.resultado == RESULTADO_RESUELTO:
+        datos["patente del tracto"] = reconciliacion.patente_tracto
+        datos["patente del carro"] = reconciliacion.patente_carro
+        logger.info("patentes reconciliadas por asignacion confirmada: %s/%s -> %s/%s",
+                    tracto_ocr, carro_ocr, reconciliacion.patente_tracto, reconciliacion.patente_carro)
+    elif not (con_problema or tracto_ocr.strip() in ausente or carro_ocr.strip() in ausente):
+        return None
+    return {
+        "metodo": "ASIGNACION_CHOFER_VEHICULO", "resultado": reconciliacion.resultado,
+        "valor_ocr": {"patente_tracto": tracto_ocr, "patente_rampla": carro_ocr},
+        "valor_aplicado": ({"patente_tracto": reconciliacion.patente_tracto,
+                            "patente_rampla": reconciliacion.patente_carro}
+                           if reconciliacion.resultado == RESULTADO_RESUELTO else None),
+        "explicacion": reconciliacion.explicacion,
+    }
+
+
 def procesar_archivo(
     ruta: Path,
     lector_ocr: object = None,
@@ -2774,6 +2809,7 @@ def procesar_archivo(
     cliente_antes_catalogo = datos.get("cliente")
     chofer_antes_catalogo = datos.get("chofer")
     obra_destino_antes_catalogo = datos.get("obra destino")
+    patentes_por_asignacion: dict[str, object] | None = None
     if carpeta_catalogos is not None:
         # La geometría puede recuperar valores después de la extracción lineal;
         # reaplicar la misma fuente al final conserva el nombre canónico.
@@ -2837,6 +2873,7 @@ def procesar_archivo(
             rampla_documental_valida = _patente_valida(
                 str(datos.get("patente del carro", "No encontrado"))
             )
+            patente_ambigua = False
             for campo, tipo_esperado in (
                 ("patente del tracto", "TRACTO"),
                 ("patente del carro", "CARRO"),
@@ -2874,11 +2911,23 @@ def procesar_archivo(
                         decision_patente.valor_original, decision_patente.valor_resultado,
                     )
                 elif decision_patente.estado == "AMBIGUO":
+                    patente_ambigua = True
                     _motivo(MotivoRevisionDocumento.PATENTE_AMBIGUA)
                     logger.info(
                         "%s homologacion abstenida por ambiguedad de catalogo: %s",
                         campo, decision_patente.valor_original,
                     )
+            # Caso real 482559: tracto/carro intercambiados o uno ausente,
+            # con una asignación chofer->vehículo única y confirmada. Antes
+            # de PATENTE_SIN_HOMOLOGAR; nunca ante PATENTE_AMBIGUA.
+            if not patente_ambigua:
+                patentes_por_asignacion = _reconciliar_patentes_por_asignacion(
+                    datos, carpeta_catalogos, catalogo_vehiculos.homologables(),
+                    con_problema=bool(patentes_geometricas_sin_homologar),
+                )
+                if patentes_por_asignacion and patentes_por_asignacion["resultado"] == RESULTADO_RESUELTO:
+                    metodos_documento.add(MetodoObtencionDocumento.ASIGNACION_CHOFER_VEHICULO.value)
+                    patentes_geometricas_sin_homologar.clear()
         except Exception as exc:
             logger.warning("Homologación de patente omitida: %s: %s", type(exc).__name__, exc)
     if patentes_geometricas_sin_homologar:
@@ -4005,6 +4054,8 @@ def procesar_archivo(
         # + confianza -- el OCR nunca se pierde aunque el canónico se haya
         # aplicado solo.
         metricas["resoluciones_convergentes"] = resoluciones_convergentes
+    if patentes_por_asignacion:
+        metricas["patentes_por_asignacion_chofer"] = patentes_por_asignacion
     if desempates_vehiculo:
         # Observabilidad del desempate de VEHÍCULO (Bloque E3): candidatos
         # considerados, evidencias/fuentes independientes por candidato,
