@@ -17,7 +17,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Collection, Mapping, Sequence
 
 from atlas_core.almacenamiento_portable import SesionOcupadaError, bloqueo_sesion, escribir_json_atomico
 from atlas_core.decisiones_pendientes import (
@@ -2253,7 +2253,12 @@ def _alcance_causal_mobile(repositorio, envio_ids, dataset, *, registro_actual=N
     return guias, elegidos
 
 
-def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *, dataset: Path, envios_objetivo: set[str] | None = None) -> dict[str, object]:
+def revalidar_asociacion_mobile_sin_ocr(
+    repositorio: RepositorioEnviosMobile, *, dataset: Path,
+    envios_objetivo: set[str] | None = None,
+    envio_ids: Collection[str] | None = None, traza: Mapping[str, object] | None = None,
+    dry_run: bool = False,
+) -> dict[str, object]:
     """Bloque ASOCIACIÓN MOBILE V2, Sección 7 -- reevaluación: relee la
     operación vigente (`dataset`, ya persistida) y vuelve a intentar
     `asociar_documento` para los envíos que quedaron SIN_ASOCIACION o
@@ -2292,7 +2297,21 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
     todavía en revisión) -- pero sólo se REINTENTA `asociar_documento`
     cuando la asociación en sí lo amerita; una ya resuelta nunca se
     revisita, sólo se usa tal cual para recalcular `estado`. Devuelve un
-    resumen, mismo criterio que el resto de `revalidar_*_sin_ocr`."""
+    resumen, mismo criterio que el resto de `revalidar_*_sin_ocr`.
+
+    Bloque CONVERGENCIA FOCAL POST-ACCIÓN -- caso real 482559 (envío
+    bd67b564, 2026-10-20): `envio_ids` limita el barrido a esos envíos
+    (misma regla, nunca una segunda), para que una corrección operacional
+    no dependa de que llegue otro envío. Con `traza`, cada envío que
+    cambia guarda en `convergencias_estado` quién lo provocó y qué estado
+    tenía antes. `dry_run` sólo informa en `propuestos` el estado que
+    tendría cada envío, sin escribir nada."""
+    # `envios_objetivo` (alcance causal) y `envio_ids` (convergencia post-
+    # acción) son filtros por envío; si llegan ambos se exige pertenecer a los dos.
+    objetivo = None if envio_ids is None else {str(i) for i in envio_ids}
+    if envios_objetivo is not None:
+        objetivo = {str(i) for i in envios_objetivo} if objetivo is None else objetivo & {str(i) for i in envios_objetivo}
+    propuestos: dict[str, str] = {}
     filas: list[dict[str, str]] = []
     if dataset and dataset.is_file():
         with dataset.open(encoding="utf-8-sig", newline="") as archivo:
@@ -2312,7 +2331,7 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
     historial_inicial = repositorio.historial()
     historial_por_lote = _HistorialPorLote(repositorio, historial_inicial)
     for registro_historial in historial_inicial:
-        if envios_objetivo is not None and registro_historial['envio_id'] not in envios_objetivo:
+        if objetivo is not None and str(registro_historial.get("envio_id", "")) not in objetivo:
             continue
         asociacion_previa_historial = registro_historial.get("resultado_asociacion") or {}
         if (
@@ -2409,6 +2428,16 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
                 )
                 if asociacion_nueva == asociacion_previa and estado_nuevo == registro.get("estado"):
                     continue
+                if dry_run:
+                    propuestos[envio_id] = estado_nuevo
+                    continue
+                if traza is not None:
+                    registro["convergencias_estado"] = [*(registro.get("convergencias_estado") or []), {
+                        **traza, "estado_anterior": registro.get("estado"), "estado_nuevo": estado_nuevo,
+                        "asociacion_cambiada": asociacion_nueva != asociacion_previa,
+                        "indicador_revision_fila": indicador_actual,
+                        "en": datetime.now(timezone.utc).isoformat(),
+                    }]
                 registro["resultado_asociacion"] = asociacion_nueva
                 registro["estado"] = estado_nuevo
                 repositorio.guardar(envio_id, registro)
@@ -2429,7 +2458,39 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
         except SesionOcupadaError:
             continue
 
+    if dry_run:
+        return {"revisados": revisados, "actualizados": [], "propuestos": propuestos}
     return {"revisados": revisados, "actualizados": actualizados}
+
+
+def converger_envios_mobile_de_guias(
+    raiz_atlas: Path, *, dataset: Path, guias: Collection[str], traza: Mapping[str, object],
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Recalcula, sin OCR, el `estado` de los envíos Mobile cuyas filas del
+    dataset son de `guias` (vínculo por `archivo` = mobile/<envio_id>/...),
+    y de ningún otro envío. Lo usa la capa de acciones operacionales tras
+    una corrección validada: si la fila ya no tiene motivos (indicador OK)
+    el envío deja REQUIERE_REVISION; si sigue en REVISAR, no cambia."""
+    objetivo = {str(g).strip() for g in guias if str(g).strip()}
+    envio_ids: set[str] = set()
+    if objetivo and dataset.is_file():
+        with dataset.open(encoding="utf-8-sig", newline="") as archivo:
+            for fila in _lector_dataset_mobile(archivo):
+                if str(fila.get("numero_guia", "")).strip() not in objetivo:
+                    continue
+                coincidencia = re.match(r"^mobile/([^/]+)/", str(fila.get("archivo", "")))
+                if coincidencia:
+                    envio_ids.add(coincidencia.group(1))
+    repositorio = RepositorioEnviosMobile(raiz_atlas=Path(raiz_atlas))
+    existentes = sorted(i for i in envio_ids if (repositorio.raiz / i / "envio.json").is_file())
+    if not existentes:
+        return {"envios": [], "revisados": 0, "actualizados": [], "estados": {}}
+    resultado = revalidar_asociacion_mobile_sin_ocr(
+        repositorio, dataset=dataset, envio_ids=existentes, traza=traza, dry_run=dry_run,
+    )
+    estados = {i: str(repositorio.cargar(i).get("estado", "")) for i in existentes}
+    return {"envios": existentes, **resultado, "estados": estados}
 
 
 # Bloque MOBILE SINCRONIZACIÓN PULL V1 -- movidas tal cual desde

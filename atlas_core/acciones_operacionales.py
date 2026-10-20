@@ -2395,6 +2395,48 @@ def _aplicar_viaje_observacion(ctx: _Contexto, p: dict, plan: Plan, actor: str) 
                         "verificacion": {"persistida": True, "transportes": sorted(agregar)}}}
 
 
+# =============================================================== MOBILE
+
+
+def _simular_mobile(ctx: _Contexto, guia: str) -> dict:
+    from atlas_core.mobile import converger_envios_mobile_de_guias
+    return converger_envios_mobile_de_guias(ctx.raiz, dataset=ctx.archivos["dataset"], guias={guia},
+                                            traza={}, dry_run=True)
+
+
+def _plan_mobile_estado(ctx: _Contexto, p: dict) -> Plan:
+    guia = str(p["numero_guia"])
+    filas = [f for f in ctx.filas() if str(f.get("numero_guia", "")).strip() == guia]
+    if not filas:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "documento inexistente en el dataset")
+    simulacion = _simular_mobile(ctx, guia)
+    if not simulacion["envios"]:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la guía no tiene envío Mobile")
+    estados = simulacion["estados"]
+    return Plan(
+        entidad={"tipo": "ENVIO_MOBILE", "id": ",".join(simulacion["envios"]), "numero_guia": guia},
+        valor_actual={"estados": estados},
+        valor_propuesto={"estados": {**estados, **simulacion["propuestos"]}},
+        estado_base={"estados": estados, "indicadores": sorted(str(f.get("indicador_revision", "")) for f in filas)},
+        sin_cambios=not simulacion["propuestos"],
+        afectados={"guias": [guia], "envios": simulacion["envios"]},
+        consecuencias=["Recalcula el estado del envío con la fila vigente (sin OCR); nunca otro envío.",
+                       "Si la fila sigue en REVISAR, el envío sigue en revisión."],
+        revalidaciones=["CONVERGENCIA_MOBILE_FOCAL"],
+        archivos=("dataset",),
+    )
+
+
+def _aplicar_mobile_estado(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.mobile import converger_envios_mobile_de_guias
+    resultado = converger_envios_mobile_de_guias(
+        ctx.raiz, dataset=ctx.archivos["dataset"], guias={str(p["numero_guia"])},
+        traza={"origen": "ACCION_OPERACIONAL", "accion": "MOBILE_RECALCULAR_ESTADO", "token": ctx.token,
+               "actor": actor, "confirmado_por": ctx.confirmado_por},
+    )
+    return {"despues": {"estados": resultado["estados"], "actualizados": resultado["actualizados"]}}
+
+
 # =============================================================== TRANSPORTE (sensible)
 
 
@@ -2678,6 +2720,10 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_corregir_numero_guia, _aplicar_documento_corregir_numero_guia),
+    DefinicionAccion("MOBILE_RECALCULAR_ESTADO", OPERACIONAL_REVERSIBLE,
+                     "Recalcula sin OCR el estado del envío Mobile de una guía con su fila vigente.",
+                     {"numero_guia": _P("guia", True), "referencia": _REF},
+                     _plan_mobile_estado, _aplicar_mobile_estado),
     DefinicionAccion("DOCUMENTO_ASIGNAR_OBRA", OPERACIONAL_REVERSIBLE,
                      "Asigna a una guía una obra EXISTENTE del catálogo (sin crear obra ni alias).",
                      {"numero_guia": _P("guia", True), "obra_id": _P("id", True),
@@ -3009,8 +3055,13 @@ class CapaAccionesOperacionales:
         revalidacion = {
             "focal": salida.get("revalidacion_focal"),
             "guias": self._revalidar_guias(set(salida.get("guias_revalidar") or ())),
-            "reporte": self._regenerar_reporte() if salida.get("regenerar_reporte") else None,
         }
+        # Después de revalidar las guías (indicador ya convergido) y antes del
+        # reporte: el envío Mobile del documento corregido no espera a otro envío.
+        revalidacion["mobile"] = self._converger_mobile(
+            plan, set(salida.get("guias_revalidar") or ()), token=token, actor=actor, accion=definicion.nombre,
+        )
+        revalidacion["reporte"] = self._regenerar_reporte() if salida.get("regenerar_reporte") else None
         publico = {
             "estado": "APLICADA", "token": token, "accion": definicion.nombre, "riesgo": definicion.riesgo,
             "entidad": plan.entidad, "antes": plan.valor_actual, "despues": salida.get("despues"),
@@ -3028,6 +3079,24 @@ class CapaAccionesOperacionales:
         return publico
 
     # ------------------------------------------------------------ pasos comunes
+
+    def _converger_mobile(self, plan: Plan, guias_extra: set[str], *, token: str, actor: str,
+                          accion: str) -> dict | None:
+        """Estado de los envíos Mobile de las guías afectadas, con la misma
+        regla del barrido Mobile (sin OCR, sólo esos envíos). La acción ya
+        está aplicada: un fallo aquí se informa, nunca la deshace."""
+        from atlas_core.mobile import converger_envios_mobile_de_guias
+        guias = {str(g) for g in (plan.afectados.get("guias") or []) if g} | {str(g) for g in guias_extra if g}
+        if not guias:
+            return None
+        try:
+            return converger_envios_mobile_de_guias(
+                self.raiz, dataset=self._ctx.archivos["dataset"], guias=guias,
+                traza={"origen": "ACCION_OPERACIONAL", "accion": accion, "token": token, "actor": actor,
+                       "confirmado_por": self._ctx.confirmado_por},
+            )
+        except Exception as error:  # noqa: BLE001 -- diagnosticable, nunca revierte la acción
+            return {"estado": "ERROR", "error": f"{type(error).__name__}: {error}"}
 
     def _ids_decisiones_documento(self, plan: Plan) -> set[str]:
         guias = {str(g) for g in (plan.afectados.get("guias") or []) if g}
