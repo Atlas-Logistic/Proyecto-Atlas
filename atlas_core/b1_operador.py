@@ -1364,6 +1364,19 @@ class OperadorB1:
 
     # ------------------------------------------------------------ entrada
 
+    def consultar(self, texto: str) -> dict:
+        """Consulta sin locks ni estado conversacional; rechaza acciones antes de resolverlas."""
+        try:
+            intencion = self._interpretar(texto)
+        except ErrorContratoInterpretacion as error:
+            return {"estado": "RECHAZADA", "mensaje": str(error)}
+        if intencion is None:
+            return {"estado": "NO_INTERPRETADA", "mensaje": "Continúe con la consulta de viajes."}
+        definicion = ACCIONES.get(intencion.accion)
+        if definicion is None or definicion.riesgo != LECTURA:
+            return {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."}
+        return self._instruccion({"conversaciones": {}}, "solo-consulta", texto)
+
     def atender(self, conversacion_id: str, texto: str) -> dict:
         if not _ID.fullmatch(str(conversacion_id or "")):
             return {"estado": "RECHAZADA", "mensaje": "conversación inválida"}

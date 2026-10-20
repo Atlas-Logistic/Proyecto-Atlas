@@ -15,6 +15,17 @@ from atlas_core.procesamiento_masivo import COLUMNAS
 RUT_PIZARRO, RUT_REYES, RUT_JUAN_A, RUT_JUAN_B = "15432876-9", "12345678-5", "16789012-1", "17345678-6"
 
 
+def test_solo_consulta_no_persiste_ni_ejecuta_acciones(raiz):
+    antes = {str(p.relative_to(raiz)): p.read_bytes() for p in raiz.rglob('*') if p.is_file()}
+    operador = OperadorB1(raiz)
+    respuesta = operador.consultar('Muéstrame los choferes activos')
+    assert respuesta['estado'] == 'RESULTADO_LECTURA'
+    for texto in ['Pizarro usa JF9575', 'sí', 'investiga la guía 500001']:
+        assert operador.consultar(texto)['estado'] in {'RECHAZADA', 'NO_INTERPRETADA'}
+    despues = {str(p.relative_to(raiz)): p.read_bytes() for p in raiz.rglob('*') if p.is_file()}
+    assert antes == despues
+
+
 def _vehiculo(patente, tipo):
     evidencia = {"tipo": "CONFIRMACION_HUMANA", "identificador_fuente": "TEST", "referencia_hash": "",
                  "campos_observados": {"patente": patente, "tipo": tipo, "observacion": ""},

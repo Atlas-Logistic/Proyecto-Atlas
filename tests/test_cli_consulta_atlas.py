@@ -8,6 +8,7 @@ import csv
 import json
 import subprocess
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 from atlas_core.registro_eventos_operacionales import registrar_evento
@@ -85,9 +86,10 @@ def test_cli_nunca_deja_el_proceso_sin_salida_json_ante_error(tmp_path):
 
 def test_cli_lista_viajes_de_incidencias_operacionales_sin_convertir_strings_a_dict(tmp_path):
     ruta = tmp_path / "viajes.csv"
+    reciente = (date.today() - timedelta(days=2)).strftime('%d-%m-%Y')
     _escribir_viajes(ruta, [
-        _fila(viaje_id="v1", numero_transporte="T1", fecha="12-09-2026", numeros_guia="473001"),
-        _fila(viaje_id="v2", numero_transporte="T2", fecha="11-09-2026", numeros_guia="473002"),
+        _fila(viaje_id="v1", numero_transporte="T1", fecha=reciente, numeros_guia="473001"),
+        _fila(viaje_id="v2", numero_transporte="T2", fecha=reciente, numeros_guia="473002"),
     ])
     for transporte in ("T1", "T2"):
         registrar_evento(raiz=tmp_path, tipo_evento="TIENE_ESTADIA", numero_transporte=transporte, origen="TEST")
