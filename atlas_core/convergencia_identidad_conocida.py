@@ -30,6 +30,7 @@ cliente exige más certeza que la de chofer."""
 from __future__ import annotations
 
 import difflib
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, Mapping
@@ -390,4 +391,96 @@ def resolver_patente_operacional_canonica_por_chofer(
             f"({patente}) -- asignación operacional canónica, la lectura OCR documental se conserva "
             "como evidencia aparte."
         ),
+    )
+
+
+# ============================================================
+# PATENTES INTERCAMBIADAS / INCOMPLETAS POR ASIGNACIÓN CONFIRMADA
+# ============================================================
+#
+# Caso real 482559 (Mobile, 2026-10-20): el OCR leyó el carro asignado
+# (JF9575) en el campo del tracto y no encontró el carro; el catálogo ya
+# tenía confirmado al chofer con un tracto y un carro únicos. Misma fuente
+# de verdad que la regla de arriba (asignación confirmada, nunca historial),
+# aplicada a la pareja tracto/carro: se corrige sólo si TODA patente leída
+# es una de las dos asignadas (confusión de campo o ausencia), nunca si la
+# guía muestra un vehículo distinto.
+
+RESULTADO_SIN_CAMBIOS = "SIN_CAMBIOS"
+
+
+@dataclass(frozen=True)
+class ReconciliacionPatentesAsignacion:
+    resultado: str
+    patente_tracto: str | None
+    patente_carro: str | None
+    explicacion: str
+
+
+def _patente_leida(valor: str) -> str | None:
+    """'' = ausente; None = texto que no es una patente (contradicción)."""
+    texto = str(valor or "").strip()
+    if texto in _AUSENTES:
+        return ""
+    patente = "".join(texto.split()).upper().replace("-", "")
+    return patente if re.fullmatch(r"(?=.*[A-Z])(?=.*\d)[A-Z0-9]{6}", patente) else None
+
+
+def reconciliar_patentes_por_asignacion_chofer(
+    *, nombre_documental: str, rut_documental: str, patente_tracto: str, patente_carro: str,
+    choferes: Mapping[str, object], vehiculos: Iterable[object],
+) -> ReconciliacionPatentesAsignacion:
+    """`vehiculos` deben ser los homologables (CONFIRMADO/ACTIVO). Exige:
+    chofer único por nombre con RUT documental válido e igual al canónico,
+    exactamente un TRACTO y un CARRO confirmados para ese RUT, y que cada
+    patente leída sea una de esas dos. Nunca escribe catálogos."""
+    from atlas_core.catalogos import rut_canonico_de_registro_chofer
+
+    def abstencion(resultado: str, motivo: str) -> ReconciliacionPatentesAsignacion:
+        return ReconciliacionPatentesAsignacion(resultado, None, None, motivo)
+
+    identidad = resolver_identidad_nominal_fuerte_chofer(
+        nombre_documental=nombre_documental, rut_documental=rut_documental, choferes=choferes,
+    )
+    if identidad.resultado != RESULTADO_RESUELTO or not identidad.identificador:
+        return abstencion(RESULTADO_ABSTENCION, "Chofer no identificado de forma inequívoca.")
+    registro = choferes.get(identidad.identificador)
+    rut_canonico = rut_canonico_de_registro_chofer(identidad.identificador, registro if isinstance(registro, dict) else None)
+    if not rut_canonico:
+        return abstencion(RESULTADO_ABSTENCION, "El chofer identificado no tiene RUT canónico en catálogo.")
+    if validar_rut_chileno(str(rut_documental or "")).estado != EstadoValidacion.VALIDO:
+        return abstencion(RESULTADO_ABSTENCION, "Sin RUT documental válido que corrobore al chofer.")
+    if normalizar_rut(rut_documental) != normalizar_rut(rut_canonico):
+        return abstencion(RESULTADO_ABSTENCION, "El RUT documental contradice al chofer identificado por nombre.")
+
+    vehiculos = list(vehiculos)
+    asignadas: dict[str, str] = {}
+    for tipo in ("TRACTO", "CARRO"):
+        asignacion = resolver_patente_operacional_canonica_por_chofer(
+            nombre_documental=nombre_documental, rut_documental=rut_documental, choferes=choferes,
+            vehiculos=vehiculos, tipo_esperado=tipo,
+        )
+        if asignacion.resultado != RESULTADO_RESUELTO or not asignacion.patente:
+            return abstencion(asignacion.resultado, f"{tipo}: {asignacion.explicacion}")
+        asignadas[tipo] = asignacion.patente
+
+    leidas = [_patente_leida(patente_tracto), _patente_leida(patente_carro)]
+    if any(p is None for p in leidas):
+        return abstencion(RESULTADO_ABSTENCION, "Una lectura no tiene forma de patente; no se interpreta.")
+    presentes = {p for p in leidas if p}
+    if not presentes:
+        return abstencion(RESULTADO_SIN_EVIDENCIA, "La guía no muestra ninguna patente que corrobore la asignación.")
+    ajenas = sorted(presentes - set(asignadas.values()))
+    if ajenas:
+        return abstencion(
+            RESULTADO_ABSTENCION,
+            f"La guía muestra {', '.join(ajenas)}, distinta de la asignación confirmada; se respeta la evidencia.",
+        )
+    tracto, carro = asignadas["TRACTO"], asignadas["CARRO"]
+    if leidas == [tracto, carro]:
+        return ReconciliacionPatentesAsignacion(RESULTADO_SIN_CAMBIOS, tracto, carro, "Lectura ya coincide.")
+    return ReconciliacionPatentesAsignacion(
+        RESULTADO_RESUELTO, tracto, carro,
+        f"{identidad.nombre_canonico}: las patentes leídas pertenecen a su asignación confirmada "
+        f"(tracto {tracto}, carro {carro}); se corrigió la ubicación/ausencia, no el vehículo.",
     )
