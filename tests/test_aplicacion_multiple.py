@@ -92,7 +92,8 @@ def _contador_reconciliacion(monkeypatch):
     llamadas = []
 
     def _falso(*, raiz_atlas, reloj=None, proveedor_rutas=None, proveedor_rutas_fallback=None,
-               guias_excluir_reintento_ruta=None):
+               guias_excluir_reintento_ruta=None, guias_objetivo=None):
+        assert guias_objetivo is not None  # nunca cierre global de un lote
         llamadas.append(raiz_atlas)
         return {"reconciliado": True, "motivo": "TEST"}
 

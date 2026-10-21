@@ -201,6 +201,7 @@ def aplicar_decisiones_multiples(
     algo_aplicado = False
     algo_aplicado_no_peso = False
     planes_diferidos: list[dict[str, object]] = []
+    guias_afectadas: set[str] = set()
     detenido_por = ""
     for solicitud in solicitudes:
         decision_id = str(solicitud.get("decision_id", "")).strip()
@@ -240,6 +241,7 @@ def aplicar_decisiones_multiples(
                 mensaje=str(resultado.get("mensaje", "")),
             ))
             algo_aplicado = True
+            guias_afectadas.update(resultado.get('guias_afectadas') or ({numero_guia} if numero_guia else set()))
             if tipo != "PESO_VIAJE_IMPLAUSIBLE":
                 algo_aplicado_no_peso = True
             plan = resultado.get("plan_impacto_diferido")
@@ -307,38 +309,42 @@ def aplicar_decisiones_multiples(
     # propios -- ninguna guía que ya tuvo su intento real en ESTA
     # operación (inline o batería diferida) debe pagar otra consulta ahí.
     guias_excluir_reintento_ruta: set[str] = set()
-    if planes_diferidos:
-        comuna_manual_por_guia, guias_excluir_reintento_ruta = _construir_plan_impacto_agrupado(planes_diferidos)
-        from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
-        instante = reloj()
-        nombre_carpeta = f"reporte_revalidacion_plan_impacto_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
-        _t0 = time.perf_counter()
-        revalidar_y_regenerar_reporte(
-            raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
-            proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
-            comuna_manual_por_guia=comuna_manual_por_guia or None,
-            guias_excluir_reintento_ruta=guias_excluir_reintento_ruta or None,
-        )
-        plan_impacto_duracion_ms = round((time.perf_counter() - _t0) * 1000, 1)
-        plan_impacto_ejecutado = True
-        plan_impacto_guias = len(planes_diferidos)
+    from atlas_core.alcance_revalidacion import alcance_guias
+    with alcance_guias(raiz/'operacion/actual/analisis_completo_guias.csv',guias_afectadas):
+        if planes_diferidos:
+            comuna_manual_por_guia, guias_excluir_reintento_ruta = _construir_plan_impacto_agrupado(planes_diferidos)
+            from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
+            instante = reloj()
+            nombre_carpeta = f"reporte_revalidacion_plan_impacto_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
+            _t0 = time.perf_counter()
+            revalidar_y_regenerar_reporte(
+                raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
+                guias_objetivo=guias_afectadas,
+                proveedor_rutas=proveedor_rutas, proveedor_rutas_fallback=proveedor_rutas_fallback,
+                comuna_manual_por_guia=comuna_manual_por_guia or None,
+                guias_excluir_reintento_ruta=guias_excluir_reintento_ruta or None,
+            )
+            plan_impacto_duracion_ms = round((time.perf_counter() - _t0) * 1000, 1)
+            plan_impacto_ejecutado = True
+            plan_impacto_guias = len(planes_diferidos)
 
-    reconciliacion_ejecutada = False
-    reconciliacion_motivo = ""
-    # PESO ya regenera su reporte directo dentro de aplicar_decision_obra
-    # (37d477b). Un lote compuesto sólo por PESO no gana nada con la
-    # reconciliación global y volvería a introducir su espera eliminada.
-    # En un lote mixto se conserva exactamente un cierre global, al final.
-    if algo_aplicado_no_peso:
-        from atlas_core.reconciliacion_estado_derivado import reconciliar_estado_derivado
-        resultado_reconciliacion = reconciliar_estado_derivado(
-            raiz_atlas=raiz, reloj=reloj,
-            guias_excluir_reintento_ruta=guias_excluir_reintento_ruta or None,
-        )
-        reconciliacion_ejecutada = bool(resultado_reconciliacion.get("reconciliado"))
-        reconciliacion_motivo = str(resultado_reconciliacion.get("motivo", ""))
-    elif algo_aplicado:
-        reconciliacion_motivo = "LOTE_SOLO_PESO_REPORTE_DIRECTO"
+        reconciliacion_ejecutada = False
+        reconciliacion_motivo = ""
+        # PESO ya regenera su reporte directo dentro de aplicar_decision_obra
+        # (37d477b). Un lote compuesto sólo por PESO no gana nada con la
+        # reconciliación global y volvería a introducir su espera eliminada.
+        # En un lote mixto se conserva exactamente un cierre global, al final.
+        if algo_aplicado_no_peso:
+            from atlas_core.reconciliacion_estado_derivado import reconciliar_estado_derivado
+            resultado_reconciliacion = reconciliar_estado_derivado(
+                raiz_atlas=raiz, reloj=reloj,
+                guias_objetivo=guias_afectadas,
+                guias_excluir_reintento_ruta=guias_excluir_reintento_ruta or None,
+            )
+            reconciliacion_ejecutada = bool(resultado_reconciliacion.get("reconciliado"))
+            reconciliacion_motivo = str(resultado_reconciliacion.get("motivo", ""))
+        elif algo_aplicado:
+            reconciliacion_motivo = "LOTE_SOLO_PESO_REPORTE_DIRECTO"
 
     return ResultadoAplicacionMultiple(
         resultados=resultados,

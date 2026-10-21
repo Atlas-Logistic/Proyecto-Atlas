@@ -4,6 +4,7 @@ El módulo sólo observa resultados y catálogos. Nunca aplica decisiones ni
 modifica catálogos; la única escritura permitida es el artefacto versionado.
 """
 from __future__ import annotations
+from atlas_core.alcance_revalidacion import guias_en_alcance, conservar_decisiones_ajenas
 
 import hashlib
 import json
@@ -2896,6 +2897,12 @@ def regenerar_decisiones_persistidas(
     (`atlas_core.investigacion_documental`): las decisiones de un documento
     en cuarentena activa nunca entran ni salen de la regeneración -- ni las
     persistidas ni las que los detectores internos vuelvan a producir."""
+    decisiones = list(decisiones)
+    guias = guias_en_alcance(ruta_dataset) if ruta_dataset is not None else None
+    ajenas = []
+    if guias is not None:
+        ajenas = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() not in guias]
+        decisiones = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() in guias]
     archivos = (
         archivos_en_investigacion(raiz_desde_actual(Path(ruta_dataset).parent))
         if ruta_dataset is not None else frozenset()
@@ -2905,7 +2912,8 @@ def regenerar_decisiones_persistidas(
         carpeta_catalogos=carpeta_catalogos, ids_resueltos=ids_resueltos,
         ruta_dataset=ruta_dataset, cache_memoizacion=cache_memoizacion,
     )
-    return excluir_decisiones_en_investigacion(resultado, archivos) if archivos else resultado
+    resultado = excluir_decisiones_en_investigacion(resultado, archivos) if archivos else resultado
+    return ajenas + resultado if guias is not None else resultado
 
 
 def _regenerar_decisiones_persistidas(
@@ -4419,7 +4427,7 @@ def _generar_artefacto_sin_lock(
         "generado_en": reloj().astimezone(timezone.utc).isoformat(),
         "dataset_sha256": _sha256(dataset),
         "catalogos_sha256": hashes,
-        "decisiones": decisiones_unicas,
+        "decisiones": conservar_decisiones_ajenas(dataset, salida, decisiones_unicas),
     }
     escribir_json_atomico(salida, artefacto)
     return artefacto

@@ -9,6 +9,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from atlas_core.alcance_revalidacion import alcance_decision_persistida, guias_en_alcance
 
 from atlas_core.investigacion_documental import decision_en_investigacion
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
@@ -601,7 +602,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
     with bloqueo_sesion(
         actual, "aplicar_decision_obra",
         tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_APLICAR_DECISION_SEGUNDOS,
-    ):
+    ), alcance_decision_persistida(raiz, decision_id, accion=accion,nombres_adicionales={
+        'obra_destino':nombre_obra_manual,'cliente':cliente_correccion_manual,
+    }):
         try: ledger = json.loads(ledger_ruta.read_text(encoding="utf-8"))
         except FileNotFoundError: ledger = {"schema_version": 1, "aplicaciones": []}
         except (OSError, json.JSONDecodeError) as error: raise ErrorAplicacionDecision("El historial de decisiones no se puede leer.") from error
@@ -669,6 +672,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             try:
                 revalidar_y_regenerar_reporte(
                     raiz_atlas=raiz,
+                    guias_objetivo=guias_en_alcance(dataset),
                     nombre_carpeta_reporte=f"reporte_revalidacion_{reloj().strftime('%Y%m%d_%H%M%S_%f')}",
                     reloj=reloj,
                 )
@@ -2314,50 +2318,9 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # sabe reconocerlas vía el ledger -- caso real que lo motivó:
             # 464265 (VP6521->VP8521, confirmado por Javier) seguía
             # mostrando PATENTE_SIN_HOMOLOGAR después de confirmarse.
-            # Bloque R10 -- causa raíz de "decisión cerrada pero el viaje
-            # sigue REQUIERE_REVISION" (caso real 472163: OBRA_DESCONOCIDA/
-            # REGISTRAR sólo escribía el catálogo de obras -- nunca se
-            # revalidaba el motivo documental `OBRA_DESTINO_SIN_CORROBORAR`
-            # de ESE mismo documento, así que quedaba fijado para siempre
-            # aunque `revalidar_obra_destino_sin_ocr` ya sabía retirarlo vía
-            # el ledger, R4.9). Antes de este bloque, cada tipo de decisión
-            # necesitaba agregarse A MANO a esta condición para heredar la
-            # revalidación -- la misma clase de "whitelist cerrada" que R7
-            # ya eliminó para B1. Ahora es al revés: CUALQUIER acción que
-            # cierre una decisión (nunca POSPONER/NO_PUEDO_DETERMINAR, que
-            # no escriben nada) dispara `revalidar_y_regenerar_reporte`
-            # -- sin OCR, sin red, idempotente (sólo regenera si algo
-            # cambió) -- salvo los 2 tipos que ya regeneran directo más
-            # abajo porque SABEN que el dataset cambió (evitar el trabajo
-            # redundante, no por riesgo). Cubre obra/cliente/destino/
-            # vehículo/alias hoy y cualquier tipo de decisión nuevo mañana,
-            # sin volver a tocar esta lista.
-            #
-            # Bloque CIERRE DE ORQUESTACIÓN (caso real 472477) -- hasta
-            # aquí, `("DESTINO_NO_RESUELTO", "REGISTRAR_DIRECCION")` vivía
-            # en `TIPOS_CON_REGENERACION_DIRECTA` igual que los otros dos:
-            # el dataset SÍ acababa de cambiar (dirección/comuna/obra ya
-            # escritas arriba), así que evitar la batería completa parecía
-            # sólo una optimización ("no por riesgo", como dice el
-            # comentario original). Pero esa evidencia nueva (destino
-            # recién resuelto) es exactamente la que puede desbloquear, en
-            # la MISMA pasada, revalidadores que `generar_reporte_viajes`
-            # nunca ejecuta: resolución de origen por categoría/vecinos
-            # GPS, cálculo de ruta ahora que el origen puede resolverse,
-            # convergencia de indicadores y, sobre todo, el redescubrimiento
-            # de decisiones nuevas (`detectar_decisiones_origen_sin_ocr`/
-            # `_destino_no_resuelto_sin_ocr`/`_cliente_ausente_sin_ocr`,
-            # dentro de `revalidar_y_regenerar_reporte`) para CUALQUIER
-            # guía del dataset a la que esta evidencia nueva le abra o le
-            # cierre una pregunta -- nunca sólo la guía de esta decisión.
-            # Se saca de la whitelist de regeneración directa: ahora cae
-            # en la rama de arriba, igual que obra/cliente/vehículo. Se
-            # reutiliza `revalidar_y_regenerar_reporte` tal cual (mismo
-            # mecanismo, sin duplicar lógica); es idempotente por diseño
-            # (sólo regenera/republica si algo cambió de verdad) y cada
-            # revalidador que corre adentro sigue restringido a su propio
-            # motivo -- nunca toca una fila que no calce su patrón, así
-            # que viajes ajenos a esta evidencia quedan intactos.
+            # P0: cerrar una decision ejecuta la bateria canonica dentro del
+            # alcance causal activo (documentos, entidad y viajes afectados).
+            # Filtrar cada regla por motivo NO protege las demas guias.
             ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET = ("POSPONER", "NO_PUEDO_DETERMINAR")
             TIPOS_CON_REGENERACION_DIRECTA = {
                 ("ORIGEN_NO_CONFIRMADO", "CONFIRMAR_PLANTA"), ("ORIGEN_NO_CONFIRMADO", "SELECCIONAR_OTRA_PLANTA"),
@@ -2372,7 +2335,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 ("PESO_VIAJE_IMPLAUSIBLE", "CONFIRMAR"),
                 ("PESO_VIAJE_IMPLAUSIBLE", "CORREGIR_PESO"),
             }
-            requiere_revalidacion_global = (
+            requiere_revalidacion_focal = (
                 accion not in ACCIONES_TERMINALES_SIN_EFECTO_EN_DATASET
                 and (tipo, accion) not in TIPOS_CON_REGENERACION_DIRECTA
                 # Registro completo de obra nueva: sólo cambian la obra y su
@@ -2404,7 +2367,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             # el lote cerrado.
             diferir_esta_revalidacion = (
                 diferir_revalidacion_global
-                and requiere_revalidacion_global
+                and requiere_revalidacion_focal
                 and tipo in TIPOS_ELEGIBLES_DIFERIR_REVALIDACION_GLOBAL
             )
             if diferir_esta_revalidacion:
@@ -2435,7 +2398,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         and guia_con_intento_ruta_en_esta_operacion
                     ),
                 }
-            elif requiere_revalidacion_global:
+            elif requiere_revalidacion_focal:
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
@@ -2486,6 +2449,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 )
                 resultado_extra["revalidacion"] = revalidar_y_regenerar_reporte(
                     raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta, reloj=reloj,
+                    guias_objetivo=guias_en_alcance(dataset),
                     proveedor_rutas=proveedor_rutas,
                     comuna_manual_por_guia=comuna_manual_por_guia_decision,
                     guias_excluir_reintento_ruta=guias_excluir_reintento_ruta_decision,
@@ -2680,6 +2644,7 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                         )
                         resultado_extra["revalidacion_tras_material"] = _revalidar_convergencia(
                             raiz_atlas=raiz, nombre_carpeta_reporte=nombre_carpeta_convergencia, reloj=reloj,
+                            guias_objetivo=guias_en_alcance(dataset),
                             proveedor_rutas=proveedor_rutas,
                         )
 
@@ -2850,7 +2815,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
             ("CLIENTE_AUSENTE", "NO_PUEDO_DETERMINAR"): "Decisión guardada. Atlas no volverá a preguntar por este cliente mientras la evidencia no cambie.",
         }
         mensaje = mensajes.get((tipo, accion), "Decisión aplicada.")
-        return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra, "mensaje": mensaje}
+        return {"ok": True, "idempotente": False, "accion": accion, **resultado_extra,
+                "guias_afectadas":sorted(guias_en_alcance(dataset) or ()), "mensaje": mensaje}
 
 
 def resolver_patentes_confirmadas_por_ledger(

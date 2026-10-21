@@ -18,6 +18,7 @@ conserva intacta. El resto de la fila -- todo dato documental -- permanece
 byte por byte igual.
 """
 from __future__ import annotations
+from atlas_core.alcance_revalidacion import guias_en_alcance
 
 import csv
 import hashlib
@@ -279,7 +280,7 @@ _COLUMNAS_ACEPTADAS = (
 )
 
 
-def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
+def _leer_filas(ruta_csv: Path, *, completas=False) -> list[dict[str, str]]:
     with ruta_csv.open("r", newline="", encoding="utf-8-sig") as archivo:
         lector = csv.DictReader(archivo, delimiter=";")
         campos = list(lector.fieldnames or [])
@@ -287,7 +288,9 @@ def _leer_filas(ruta_csv: Path) -> list[dict[str, str]]:
             raise ValueError(
                 "El dataset tiene un esquema incompatible; se esperaba el encabezado oficial."
             )
-        return list(lector)
+        filas = list(lector)
+        guias = guias_en_alcance(ruta_csv)
+        return filas if guias is None or completas else [f for f in filas if str(f.get('numero_guia','')).strip() in guias]
 
 
 def _huella_contenido_dataset(ruta_csv: Path) -> str | None:
@@ -307,7 +310,7 @@ def _huella_contenido_dataset(ruta_csv: Path) -> str | None:
     if not ruta_csv.is_file():
         return None
     try:
-        filas = _leer_filas(ruta_csv)
+        filas = _leer_filas(ruta_csv, completas=True)
     except ValueError:
         return None
     return hashlib.sha256(repr(filas).encode("utf-8")).hexdigest()
@@ -329,6 +332,25 @@ def _reporte_vigente_valido(raiz: Path, estado: dict | None) -> bool:
 
 
 def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
+    guias = guias_en_alcance(ruta_csv)
+    if guias is not None:
+        # Los revalidadores sólo reciben las filas afectadas. Publicar conserva
+        # el resto desde el dataset vigente, nunca desde un snapshot anterior.
+        from collections import defaultdict, deque
+        nuevas = defaultdict(deque)
+        for fila in filas:
+            if str(fila.get('numero_guia','')).strip() not in guias:
+                raise ValueError('Revalidación intentó escribir una guía fuera de alcance.')
+            nuevas[(fila.get('archivo',''),fila.get('numero_guia',''))].append(fila)
+        with ruta_csv.open(encoding='utf-8-sig',newline='') as f:
+            completas = list(csv.DictReader(f,delimiter=';'))
+        for i,fila in enumerate(completas):
+            if str(fila.get('numero_guia','')).strip() in guias:
+                clave = (fila.get('archivo',''),fila.get('numero_guia',''))
+                if not nuevas[clave]: raise ValueError('Revalidación focal incompleta; no se publica.')
+                completas[i] = nuevas[clave].popleft()
+        if any(nuevas.values()): raise ValueError('Revalidación focal agregó documentos; no se publica.')
+        filas = completas
     # Caso real 474823: un surrogate suelto en cualquier valor abortaba la
     # escritura UTF-8 a mitad de archivo. Se sanea sólo lo inválido (con
     # trazabilidad en el log); el texto Unicode válido queda intacto.
@@ -2157,7 +2179,7 @@ def revalidar_origen_por_vecinos_temporales_gps_sin_ocr(
         except (OSError, ValueError):
             return {"guias_actualizadas": []}
         gps_confirmados_por_patente: dict[str, list[tuple]] = {}
-        for fila in filas:
+        for fila in _leer_filas(ruta, completas=True):
             if str(fila.get("origen_determinado_por", "")).strip() != "TELEMETRIA_GPS":
                 continue
             patente = str(fila.get("patente_tracto", "")).strip().upper()
@@ -3136,6 +3158,10 @@ def revalidar_obra_desconocida_por_variacion_ortografica_sin_ocr(
     decisiones_restantes: list[dict[str, object]] = []
     decisiones_resueltas: list[dict[str, object]] = []
     for decision in bandeja.get("decisiones", []):
+        guias_scope = guias_en_alcance(Path(ruta_dataset)) if ruta_dataset is not None else None
+        if guias_scope is not None and str((decision.get('documento') or {}).get('numero_guia','')).strip() not in guias_scope:
+            decisiones_restantes.append(decision)
+            continue
         if decision.get("tipo") != "OBRA_DESCONOCIDA" or decision.get("estado", "PENDIENTE") != "PENDIENTE":
             decisiones_restantes.append(decision)
             continue
@@ -3506,7 +3532,7 @@ def revalidar_ruta_por_historial_de_obra_sin_ocr(
         # Hermanos candidatos: RUTA_CALCULADA, con comuna explícita ya
         # geocodificada, agrupados por (obra, planta de origen).
         hermanos_por_obra_planta: dict[tuple[str, str], list[dict[str, str]]] = {}
-        for hermano in filas:
+        for hermano in _leer_filas(ruta, completas=True):
             if str(hermano.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value:
                 continue
             if not str(hermano.get("localidad_entrega", "")).strip():
@@ -3640,7 +3666,7 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
         # nunca ubica, rutea ni rellena otra dirección de la misma obra.
         filas_por_obra: dict[tuple[str, int], list[dict[str, str]]] = {}
         direcciones_por_obra: dict[str, list[str]] = {}
-        for fila in filas:
+        for fila in (filas if guias_en_alcance(ruta) is None else _leer_filas(ruta, completas=True)):
             obra = normalizar_nombre_obra(str(fila.get("obra_destino", "")))
             direccion = str(fila.get("despachar_a_crudo", "")).strip()
             if not obra or not direccion:
@@ -3656,6 +3682,9 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
         guias_actualizadas: list[str] = []
         destinos_aprendidos: list[str] = []
         for (obra_clave, indice_direccion), filas_obra in filas_por_obra.items():
+            scope = guias_en_alcance(ruta)
+            if scope is not None and not any(str(f.get('numero_guia','')).strip() in scope for f in filas_obra):
+                continue
             direccion_grupo = direcciones_por_obra[obra_clave][indice_direccion]
             if len(filas_obra) < 2:
                 continue  # nunca converge con una sola fila de esa obra/dirección
@@ -3695,6 +3724,9 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
             punto_convergente = base_punto
 
             for fila in filas_obra:
+                if scope is not None:
+                    fila = next((f for f in filas if f.get('archivo') == fila.get('archivo') and f.get('numero_guia') == fila.get('numero_guia')), None)
+                    if fila is None: continue
                 if str(fila.get("estado_ruta", "")).strip() == EstadoRuta.RUTA_CALCULADA.value:
                     continue
                 planta_id = str(fila.get("planta_origen_id", "")).strip()
@@ -4678,7 +4710,7 @@ def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
         # otra fila del mismo cliente -- el propio dataset ya persistido
         # es el histórico, sin necesidad de un catálogo aparte.
         crudos_por_cliente: dict[str, list[str]] = {}
-        for fila in filas:
+        for fila in _leer_filas(ruta, completas=True):
             cliente = str(fila.get("cliente", "")).strip()
             crudo = str(fila.get("despachar_a_crudo", "")).strip()
             if cliente and crudo:
@@ -5711,7 +5743,7 @@ def revalidar_origen_por_historial_de_cliente_sin_ocr(
             return {"filas_totales": 0, "guias_actualizadas": []}
 
         plantas_por_cliente: dict[str, list[str]] = {}
-        for fila in filas:
+        for fila in _leer_filas(ruta, completas=True):
             if str(fila.get("origen_determinado_por", "")).strip() not in _FUENTES_ORIGEN_CONFIABLES_PARA_HISTORIAL:
                 continue
             cliente = normalizar_nombre_cliente(str(fila.get("cliente", "")).strip())
@@ -5779,6 +5811,25 @@ def _firma_efectiva_bandeja(ruta: Path) -> tuple[str, ...] | None:
 
 
 def revalidar_y_regenerar_reporte(
+    *, raiz_atlas, nombre_carpeta_reporte, reloj=None, proveedor_rutas=None,
+    proveedor_rutas_fallback=None, comuna_manual_por_guia=None,
+    guias_excluir_reintento_ruta=None, guias_objetivo=None,
+):
+    from atlas_core.alcance_revalidacion import alcance_guias
+    dataset = Path(raiz_atlas)/'operacion/actual/analisis_completo_guias.csv'
+    with alcance_guias(dataset,guias_objetivo):
+        resultado = _revalidar_y_regenerar_reporte(
+            raiz_atlas=raiz_atlas,nombre_carpeta_reporte=nombre_carpeta_reporte,reloj=reloj,
+            proveedor_rutas=proveedor_rutas,proveedor_rutas_fallback=proveedor_rutas_fallback,
+            comuna_manual_por_guia=comuna_manual_por_guia,
+            guias_excluir_reintento_ruta=guias_excluir_reintento_ruta,
+        )
+        guias = guias_en_alcance(dataset)
+        return {**resultado,'alcance':'GLOBAL' if guias is None else 'FOCAL',
+                'guias_objetivo':None if guias is None else sorted(guias)}
+
+
+def _revalidar_y_regenerar_reporte(
     *, raiz_atlas: str | Path, nombre_carpeta_reporte: str, reloj=None, proveedor_rutas=None,
     proveedor_rutas_fallback=None,
     comuna_manual_por_guia: dict[str, str] | None = None,
@@ -5843,11 +5894,11 @@ def revalidar_y_regenerar_reporte(
     from atlas_core.aplicacion_decisiones import (
         reconciliar_incidencias_documentales_confirmadas_desde_ledger,
     )
-    resultado_incidencias_confirmadas = reconciliar_incidencias_documentales_confirmadas_desde_ledger(
+    resultado_incidencias_confirmadas = (reconciliar_incidencias_documentales_confirmadas_desde_ledger(
         ruta_ledger=actual / "decisiones_aplicadas.json",
         ruta_incidencias=catalogos / "incidencias_documentales.json",
         reloj=reloj or (lambda: datetime.now(timezone.utc)),
-    )
+    ) if guias_en_alcance(dataset) is None else {'omitido':'MANTENIMIENTO_GLOBAL'})
 
     # Hallazgo Codex (diff Mobile -> reporte Desktop) -- un envío Mobile
     # nuevo que agrega una fila LIMPIA al dataset (sin motivo que ninguna
@@ -5947,9 +5998,9 @@ def revalidar_y_regenerar_reporte(
     # A/Vía C nunca podrán emparejarlo contra el texto documental sin
     # importar cuántas veces se reintente geocodificación después -- hay
     # que corregir la IDENTIDAD antes de intentar resolver la RUTA.
-    resultado_destino_confirmado_ledger = revalidar_destino_confirmado_desde_ledger_sin_ocr(
+    resultado_destino_confirmado_ledger = (revalidar_destino_confirmado_desde_ledger_sin_ocr(
         carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
-    )
+    ) if guias_en_alcance(dataset) is None else {'omitido':'MANTENIMIENTO_GLOBAL'})
     # Bloque CORRECCIÓN ESTRUCTURAL DE ORIGEN DOCUMENTAL AZA -- causa raíz
     # real (464367): un origen determinado ÚNICAMENTE por
     # `evidencia_origen="ENCABEZADO_GUIA"` (membrete/casa matriz
@@ -6072,9 +6123,9 @@ def revalidar_y_regenerar_reporte(
     # Javier, pero sin coordenadas hasta ahora) es exactamente lo que Vía
     # A necesita para desbloquear, en esta misma pasada, cualquier guía
     # hermana que comparta esa dirección -- ver docstring de la función.
-    resultado_destinos_confirmados = revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
+    resultado_destinos_confirmados = (revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
         carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
-    )
+    ) if guias_en_alcance(dataset) is None else {'omitido':'MANTENIMIENTO_GLOBAL'})
     # Bloque DESTINO HUMANO YA CONFIRMADO (Codex 472037) -- corre justo
     # ANTES de la revalidación de ruta, a propósito: un `despachar_a_
     # crudo` recién llenado aquí desde una confirmación humana YA
@@ -6389,7 +6440,7 @@ def revalidar_y_regenerar_reporte(
         decisiones_pendientes=(ruta_decisiones if ruta_decisiones.is_file() else None),
         dataset_sha256=huella_para_publicar,
         huella_filas_dataset=huella_filas_final,
-        firma_bateria_compartida=firma_bateria_compartida,
+        firma_bateria_compartida=(firma_bateria_compartida if guias_en_alcance(dataset) is None else None),
         raiz=raiz,
     )
     return {**resultado_revalidacion, "reporte_regenerado": True, "reporte_vigente": str(salida)}
@@ -7632,6 +7683,9 @@ def enriquecer_decisiones_bandeja(
 
     catalogos = Path(carpeta_catalogos)
     dataset = Path(ruta_dataset)
+    guias_scope = guias_en_alcance(dataset)
+    if guias_scope is not None:
+        decisiones = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() in guias_scope]
     if relaciones_historicas is None:
         relaciones_historicas = (
             _leer_relaciones_historicas_reportadas(catalogos.parent)
