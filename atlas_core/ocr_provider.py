@@ -19,6 +19,7 @@ OCR, y siempre deja un log visible de cuál se usó.
 from __future__ import annotations
 
 import json
+import contextlib
 import logging
 import os
 import queue
@@ -165,10 +166,13 @@ def _matar_arbol_proceso(proceso: "subprocess.Popen") -> None:
     es una herramienta nativa de Windows (Atlas es Windows-only), sin
     dependencia nueva."""
     try:
-        subprocess.run(
-            ["taskkill", "/PID", str(proceso.pid), "/T", "/F"],
-            capture_output=True, timeout=15,
-        )
+        desktop = sys.modules.get('atlas_core.desktop_operacion')
+        permiso = desktop.permiso_cierre_worker_ocr(proceso.pid) if desktop else contextlib.nullcontext()
+        with permiso:
+            subprocess.run(
+                ["taskkill", "/PID", str(proceso.pid), "/T", "/F"],
+                capture_output=True, timeout=15,
+            )
     except (OSError, subprocess.TimeoutExpired):
         pass
     try:
@@ -710,7 +714,11 @@ def crear_proveedor_ocr(preferido: str | None = None) -> ProveedorOCR:
         return EasyOCRProvider()
 
     if preferido == "rapidocr":
-        proveedor_rapidocr = RapidOCRProvider()
+        if os.environ.get('ATLAS_OCR_MANUAL') == '1':
+            from atlas_core.ocr_manual import RapidOCRManualProvider
+            proveedor_rapidocr = RapidOCRManualProvider()
+        else:
+            proveedor_rapidocr = RapidOCRProvider()
         proveedor_rapidocr._asegurar_proceso()
         logger.info("Proveedor OCR: RapidOCR CPU (solicitado explícitamente)")
         print("[Atlas OCR] Proveedor activo: RapidOCR CPU (solicitado explícitamente)")

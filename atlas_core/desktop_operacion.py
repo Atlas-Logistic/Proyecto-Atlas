@@ -11,6 +11,7 @@ import json
 import os
 import runpy
 import shutil
+import subprocess
 import sys
 import uuid
 import tempfile
@@ -32,6 +33,32 @@ ESCRITORES = frozenset({
     'retomar_entradas_desktop.py', 'generar_reporte_viajes.py', 'resumen_procesamiento_desktop.py',
 })
 _auditoria = ContextVar('desktop_escrituras', default=None)
+_worker_ocr = ContextVar('desktop_worker_ocr', default=None)
+_cierre_worker_ocr = ContextVar('desktop_cierre_worker_ocr', default=None)
+
+@contextlib.contextmanager
+def permiso_cierre_worker_ocr(pid):
+    """Permiso temporal para terminar el árbol del worker OCR, nunca otro PID."""
+    token = _cierre_worker_ocr.set(str(pid) if _worker_ocr.get() else None)
+    try: yield
+    finally: _cierre_worker_ocr.reset(token)
+
+def _comando_exacto(args, esperado):
+    """Windows audita la línea serializada y executable=None; POSIX, argv."""
+    ejecutable, comando = args[:2]
+    esperado = list(map(str,esperado))
+    if ejecutable is not None and str(ejecutable) != esperado[0]: return False
+    if isinstance(comando,str): return comando == subprocess.list2cmdline(esperado)
+    return isinstance(comando,(list,tuple)) and list(map(str,comando)) == esperado
+
+def _es_worker_ocr_permitido(args):
+    permitido = _worker_ocr.get()
+    if permitido and _comando_exacto(args, permitido): return True
+    return _es_cierre_worker_ocr(args)
+
+def _es_cierre_worker_ocr(args):
+    pid = _cierre_worker_ocr.get()
+    return bool(pid and _comando_exacto(args,['taskkill','/PID',pid,'/T','/F']))
 def _auditar(evento, args):
     sesion_actual = _auditoria.get()
     if sesion_actual is None: return
@@ -43,6 +70,10 @@ def _auditar(evento, args):
         destinos = [ruta]
     elif evento in {'os.mkdir','os.remove','os.rmdir','os.chmod','os.utime','os.truncate'}: destinos = [args[0]]
     elif evento in {'os.rename','os.link','os.symlink'}: destinos = args[:2]
+    elif evento == 'subprocess.Popen' and _es_worker_ocr_permitido(args):
+        if not vigente() and not _es_cierre_worker_ocr(args):
+            raise PermissionError('Escritor global perdido: worker OCR detenido.')
+        return
     elif evento in {'subprocess.Popen','os.system','os.startfile','os.exec','os.posix_spawn'}:
         raise PermissionError('Desktop no permite procesos operacionales ajenos al Motor.')
     else: return
@@ -182,7 +213,23 @@ def ejecutar(solicitud):
     if accion not in {'ingresar','script'}: raise ValueError('Acción Desktop inválida.')
     if accion == 'script' and Path(solicitud['argumentos'][0]).name not in ESCRITORES:
         raise PermissionError('Acción Desktop no admitida.')
-    with sesion(raiz) as comprobar:
-        if accion == 'ingresar': return ingresar(raiz, solicitud.get('archivos',[]), comprobar)
-        comprobar()
-        return {'ok':True,'salida':ejecutar_script(solicitud['argumentos'],solicitud.get('entrada'))}
+    # Solo el ingreso manual RapidOCR puede lanzar este worker exacto.
+    # Los scripts operacionales y cualquier otro proceso siguen bloqueados.
+    permiso = None
+    if accion == 'ingresar' and os.environ.get('ATLAS_OCR_PROVIDER') == 'rapidocr':
+        python = Path(os.environ.get('ATLAS_RAPIDOCR_PYTHON') or sys.executable).resolve()
+        if python.name.lower() not in {'python.exe', 'python', 'python3'} or not python.is_file():
+            raise PermissionError('El runtime OCR manual debe ser un intérprete Python existente.')
+        permiso = (python, (RAIZ_CODIGO/'atlas_core'/'rapidocr_worker.py').resolve())
+    token = _worker_ocr.set(permiso)
+    anterior_manual = os.environ.get('ATLAS_OCR_MANUAL')
+    os.environ['ATLAS_OCR_MANUAL'] = '1' if accion == 'ingresar' else '0'
+    try:
+        with sesion(raiz) as comprobar:
+            if accion == 'ingresar': return ingresar(raiz, solicitud.get('archivos',[]), comprobar)
+            comprobar()
+            return {'ok':True,'salida':ejecutar_script(solicitud['argumentos'],solicitud.get('entrada'))}
+    finally:
+        _worker_ocr.reset(token)
+        if anterior_manual is None: os.environ.pop('ATLAS_OCR_MANUAL',None)
+        else: os.environ['ATLAS_OCR_MANUAL'] = anterior_manual

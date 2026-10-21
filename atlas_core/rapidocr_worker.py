@@ -53,7 +53,7 @@ def _bloques(engine: Any, ruta: str, Image, ImageOps, np) -> list[list[object]]:
     return salida
 
 
-def _focal(engine: Any, ruta: str, caja: list[float], Image, ImageEnhance, ImageOps, np) -> dict[str, object]:
+def _focal(engine: Any, ruta: str, caja: list[float], Image, ImageEnhance, ImageOps, np, *, solo_linea=False) -> dict[str, object]:
     with Image.open(Path(ruta)) as imagen:
         orientada = ImageOps.exif_transpose(imagen).convert("RGB")
         x1, y1, x2, y2 = (float(valor) for valor in caja)
@@ -61,6 +61,10 @@ def _focal(engine: Any, ruta: str, caja: list[float], Image, ImageEnhance, Image
             raise ValueError("La caja focal no tiene dimensiones válidas")
         ancho, alto = x2 - x1, y2 - y1
         margen_x, margen_y = max(4, round(ancho * 0.12)), max(4, round(alto * 0.35))
+        if solo_linea:
+            # Caja de una sola línea ya detectada: el margen mezcla bordes
+            # de tabla/filas vecinas y empeora el reconocimiento de números.
+            margen_x = margen_y = 0
         recorte = (max(0, int(x1) - margen_x), max(0, int(y1) - margen_y),
                    min(orientada.width, int(x2 + 0.999) + margen_x), min(orientada.height, int(y2 + 0.999) + margen_y))
         if recorte[0] >= recorte[2] or recorte[1] >= recorte[3]:
@@ -70,8 +74,16 @@ def _focal(engine: Any, ruta: str, caja: list[float], Image, ImageEnhance, Image
         variantes = (("original", original), ("grises", ImageOps.grayscale(original)),
                      ("ampliada_2x", ampliada),
                      ("ampliada_2x_contraste", ImageEnhance.Contrast(ImageOps.grayscale(ampliada)).enhance(1.35)))
+        if solo_linea:
+            variantes = (("original", original), *((f"canal_{c}", original.getchannel(c)) for c in 'RGB'))
     lecturas = []
     for nombre, variante in variantes:
+        if solo_linea:
+            filas = _filas(engine(np.asarray(variante.convert("RGB")), use_det=False, use_cls=False))
+            textos = [str(f[0]) for f in filas if len(f) >= 2]
+            confianzas = [float(f[1]) for f in filas if len(f) >= 2]
+            lecturas.append({"variante": nombre, "texto": " ".join(textos), "confianza": min(confianzas) if confianzas else None})
+            continue
         bloques = _filas(engine(np.asarray(variante.convert("RGB")), use_cls=USAR_CLASIFICADOR_ANGULO))
         textos = [str(fila[1]) for fila in bloques if isinstance(fila, (list, tuple)) and len(fila) >= 3]
         confianzas = [float(fila[2]) for fila in bloques if isinstance(fila, (list, tuple)) and len(fila) >= 3 and isinstance(fila[2], (int, float))]
@@ -99,6 +111,8 @@ def main() -> int:
                 resultado = "\n".join(str(fila[1]) for fila in _bloques(engine, ruta, Image, ImageOps, np))
             elif op == "focal":
                 resultado = _focal(engine, ruta, list(comando["caja"]), Image, ImageEnhance, ImageOps, np)
+            elif op == "focal_linea":
+                resultado = _focal(engine, ruta, list(comando["caja"]), Image, ImageEnhance, ImageOps, np, solo_linea=True)
             else:
                 raise ValueError(f"Operación desconocida: {op}")
             print(json.dumps({"ok": True, "resultado": resultado}), flush=True)
