@@ -7854,7 +7854,14 @@ def reconciliar_bandeja_decisiones(
     # pasadas siguientes sólo filtran/enriquecen/auto-aplican miembros de
     # este mismo conjunto -- nunca fabrican un tipo nuevo de la nada), así
     # que basta evaluar esto UNA vez, antes de la primera pasada.
-    if any(en_alcance(d) and str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales):
+    # El ingreso focal usa evidencia del dataset y del ledger vigentes.
+    # Consultar reportes antiguos aqui descarga/abre el historial de Drive
+    # incluso con cache frio o invalidado y retiene el escritor de Desktop.
+    # El enriquecimiento historico queda para la reconciliacion global;
+    # una evidencia ausente nunca autoriza una confirmacion nueva.
+    if guias_objetivo is None and any(
+        str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales
+    ):
         relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
 
     resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)

@@ -329,3 +329,26 @@ def test_reconciliacion_focal_conserva_decision_ajena_sin_historico_ni_autoaplic
     assert r['decisiones_aplicadas_automaticamente']==[]
     assert r['bandeja']['decisiones']==artefacto['decisiones']
     assert dataset.read_bytes()==antes
+
+
+@pytest.mark.parametrize('rut_catalogo,autoaplica', [('99999999-9', False), ('15489424-1', True)])
+def test_reconciliacion_focal_vehiculo_propio_no_abre_historial(tmp_path, monkeypatch, rut_catalogo, autoaplica):
+    raiz, cat, actual = _entorno(tmp_path)
+    decision = _decision_vehiculo(cat, rut=rut_catalogo)
+    dataset = actual / 'analisis_completo_guias.csv'
+    with dataset.open('w', newline='', encoding='utf-8-sig') as f:
+        w = csv.DictWriter(f, fieldnames=COLUMNAS, delimiter=';', extrasaction='ignore')
+        w.writeheader()
+        w.writerow(_fila(rut_chofer='15489424-1', patente_rampla='JD8629'))
+    generar_artefacto(ruta_dataset=dataset, carpeta_catalogos=cat, decisiones=[decision],
+                     ruta_salida=actual / 'decisiones_pendientes.json')
+    antes = dataset.read_bytes()
+    def prohibido(*args, **kwargs):
+        raise AssertionError('El ingreso focal no debe abrir reportes historicos ni con cache frio')
+    monkeypatch.setattr('atlas_core.revalidacion_documental._leer_relaciones_historicas_reportadas', prohibido)
+    numero = str(decision['documento']['numero_guia'])
+    r = reconciliar_bandeja_decisiones(raiz_atlas=raiz, guias_objetivo={numero})
+    assert bool(r['decisiones_aplicadas_automaticamente']) == autoaplica
+    assert any(d['tipo'] == 'VEHICULO_DESCONOCIDO' for d in r['bandeja']['decisiones']) == (not autoaplica)
+    if not autoaplica:
+        assert dataset.read_bytes() == antes
