@@ -6,13 +6,14 @@ from atlas_core import paddle_runtime
 
 # --- resolución de ruta, portable, sin usuario/Desktop hardcodeados ---
 
-def test_ruta_runtime_usa_localappdata_sin_nombre_de_usuario(monkeypatch):
+def test_ruta_runtime_usa_localappdata_sin_nombre_de_usuario(monkeypatch, tmp_path):
     monkeypatch.delenv(paddle_runtime.VARIABLE_ENTORNO_OVERRIDE, raising=False)
-    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\cualquiera\AppData\Local")
+    local = tmp_path / "usuario" / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
 
     ruta = paddle_runtime.ruta_runtime_paddle()
 
-    assert ruta == Path(r"C:\Users\cualquiera\AppData\Local") / "Atlas" / "runtime" / "paddleocr"
+    assert ruta == local / "Atlas" / "runtime" / "paddleocr"
     assert "ocr_eval_gpu_env" not in str(ruta)
     assert "Desktop" not in str(ruta)
 
