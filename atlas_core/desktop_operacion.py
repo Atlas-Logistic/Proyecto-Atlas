@@ -1,7 +1,7 @@
-"""Escrituras manuales de Desktop bajo el mismo árbitro del PULL.
+"""Escrituras manuales de Desktop bajo exclusividad explícita.
 
 No recibe envíos Mobile ni inicia PULL. Las raíces locales no comparten
-archivos con oficina; las raíces Drive/UNC requieren lease global.
+archivos; Drive/UNC requieren lease global o política de equipo único.
 """
 from __future__ import annotations
 import contextlib
@@ -14,6 +14,7 @@ import shutil
 import sys
 import uuid
 import tempfile
+import re
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -62,13 +63,20 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
     raiz = Path(raiz).resolve()
     with contextlib.ExitStack() as stack:
         escritor = None
-        if compartida(raiz):
+        from atlas_core.exclusividad_equipo import politica_equipo_unico, EscritorEquipoUnico
+        politica = politica_equipo_unico(raiz)
+        if politica:
+            escritor = EscritorEquipoUnico(raiz)
+        elif compartida(raiz):
             escritor = fabrica()
             if escritor is None:
-                raise PermissionError('Falta ATLAS_CLOUD_MOTOR_TOKEN: necesario sólo para arbitrar el dataset compartido con oficina; PULL no debe estar activo en JAVO.')
+                raise PermissionError('Modo compartido sin lease: configure una política autorizada de equipo único o la credencial legítima del árbitro Cloud.')
+        if escritor is not None:
             stack.enter_context(escritor)
             if not escritor.adquirir():
-                raise PermissionError('Dataset compartido ocupado o árbitro inaccesible. No se inició ninguna escritura.')
+                raise PermissionError('Escritor ocupado o exclusividad no verificable. No se inició ninguna escritura.')
+            if politica:
+                escritor.recuperar_bloqueos_huerfanos()
         def comprobar():
             if escritor is not None and (not escritor.vigente or not escritor.renovar()):
                 raise PermissionError('Se perdió la exclusividad del escritor; operación detenida.')
@@ -76,6 +84,11 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
         # El lease se adquiere ANTES de crear incluso el lock local en Drive.
         stack.enter_context(bloqueo_sesion(raiz/'operacion'/'actual', 'desktop_manual'))
         raices = [raiz, Path(tempfile.gettempdir()).resolve()]
+        # Cache derivado local: siempre se contrasta con las huellas de Drive.
+        # Se permite sólo este directorio, sin ampliar el permiso a AppData.
+        cache = Path(os.environ.get('LOCALAPPDATA', tempfile.gettempdir()))/'Atlas'/'cache'
+        cache.mkdir(parents=True, exist_ok=True)
+        raices.append(cache.resolve())
         if os.environ.get('EASYOCR_MODULE_PATH'): raices.append(Path(os.environ['EASYOCR_MODULE_PATH']).resolve())
         token = _auditoria.set((raices, lambda: escritor is None or escritor.vigente))
         try: yield comprobar
@@ -116,6 +129,22 @@ def ingresar(raiz, archivos, comprobar):
     catalogos = raiz/'catalogos_privados'
     validar_fuente_catalogos(catalogos)
     comprobar()
+    dataset = raiz/'operacion'/'actual'/'analisis_completo_guias.csv'
+    csv.field_size_limit(2147483647)
+    existentes = []
+    if dataset.is_file():
+        with dataset.open(encoding='utf-8-sig',newline='') as f: vigentes=list(csv.DictReader(f,delimiter=';'))
+        numeros={r.get('numero_guia','').strip():r for r in vigentes}
+        nuevos=[]
+        for p in originales:
+            if re.fullmatch(r'\d{3,12}',p.stem) and p.stem in numeros:
+                r=numeros[p.stem]
+                existentes.append({'archivo':p.name,'numero_guia':p.stem,'numero_transporte':r.get('numero_transporte',''),'encontrado':True,'ya_existia':True})
+            else: nuevos.append(p)
+        originales=nuevos
+    if not originales:
+        estado=leer_estado_operacion(raiz=raiz) or {}
+        return {'ok':True,'cantidad':0,'existentes':existentes,'resumen':existentes,'carpetaReportes':str(raiz/estado.get('reporte_vigente',''))}
     marca = datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]
     entrada = raiz/'operacion'/'entradas'/marca
     entrada.mkdir(parents=True, exist_ok=False)
@@ -123,7 +152,6 @@ def ingresar(raiz, archivos, comprobar):
         comprobar()
         with p.open('rb') as fuente, (entrada/p.name).open('xb') as destino:
             shutil.copyfileobj(fuente, destino)
-    dataset = raiz/'operacion'/'actual'/'analisis_completo_guias.csv'
     snapshot = entrada/'_snapshot_antes.json'
     _cli(['resumen_procesamiento_desktop.py','snapshot','--csv-masivo',dataset,'--salida',snapshot])
     comprobar()
@@ -142,7 +170,7 @@ def ingresar(raiz, archivos, comprobar):
         filas = list(csv.DictReader(f,delimiter=';'))
     errores = [f.get('error','Error de procesamiento') for f in filas if any(f.get('archivo','') == p.name or f.get('archivo','').startswith(p.name+'::') for p in originales) and f.get('estado_procesamiento') == 'ERROR']
     if errores: raise RuntimeError('Guía guardada para revisión técnica, sin éxito de procesamiento: '+'; '.join(errores))
-    return {'ok':True,'cantidad':len(originales),'resumen':resumen,'carpetaReportes':str(vigente),'lote':marca}
+    return {'ok':True,'cantidad':len(originales),'resumen':resumen+existentes,'existentes':existentes,'carpetaReportes':str(vigente),'lote':marca}
 
 def ejecutar(solicitud):
     raiz = Path(solicitud['raiz']).resolve(strict=True)

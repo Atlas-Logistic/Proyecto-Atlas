@@ -64,6 +64,12 @@ def main() -> None:
     parser.add_argument("--sin-procesar", action="store_true", help="Sólo sincroniza (aterriza localmente); no dispara OCR/B1/reporte")
     args = parser.parse_args()
 
+    # La política manual de equipo único excluye PULL también si se invoca
+    # directamente, no sólo mediante el Programador de tareas.
+    from atlas_core.exclusividad_equipo import politica_equipo_unico
+    if politica_equipo_unico(resolver_raiz_atlas(args.raiz_atlas)):
+        parser.error('PULL deshabilitado por la política explícita de escritor manual único.')
+
     if not args.token:
         parser.error("Falta --token (o la variable de entorno ATLAS_CLOUD_MOTOR_TOKEN)")
     try:

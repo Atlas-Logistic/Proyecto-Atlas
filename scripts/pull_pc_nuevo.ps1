@@ -1,5 +1,11 @@
 # Preparado para activación explícita. No usar el lanzador histórico de oficina.
 $ErrorActionPreference = 'Stop'
+$politicaAtlas = Join-Path $env:LOCALAPPDATA 'Atlas\desktop_operacion.json'
+if (Test-Path -LiteralPath $politicaAtlas) {
+    if ((Get-Content -LiteralPath $politicaAtlas -Raw | ConvertFrom-Json).modo_escritor -eq 'equipo_unico') {
+        throw 'PULL DESACTIVADO: este equipo está configurado como escritor manual único.'
+    }
+}
 $base = Split-Path $PSScriptRoot -Parent
 $gate = 'C:\Atlas\activacion-operativa\autorizacion.json'
 if (!(Test-Path -LiteralPath $gate)) { throw 'PULL DESACTIVADO: falta autorización explícita y verificación de exclusividad.' }

@@ -298,3 +298,34 @@ def test_f2_reconciliar_bandeja_mismo_resultado_con_decision_vehiculo(tmp_path, 
     assert aplicadas[0]["resultado"]["ok"] is True
     tipos = {d["tipo"] for d in r["bandeja"]["decisiones"]}
     assert "VEHICULO_DESCONOCIDO" not in tipos  # candidato único -> resuelta
+
+def test_historial_no_enumera_contenido_de_cada_reporte(tmp_path,monkeypatch):
+    import os
+    raiz,_,_=_entorno(tmp_path)
+    monkeypatch.setenv('ATLAS_CACHE_DIR',str(tmp_path/'cache'))
+    _escribir_reporte(raiz,'primero',evidencias_por_viaje=[[{'numero_guia':'900001','rut_chofer':'123','numero_transporte':'T1'}]])
+    (raiz/'reportes'/'incompleto').mkdir()
+    real=os.scandir
+    def listado(ruta):
+        from pathlib import Path
+        if Path(ruta).parent==raiz/'reportes':
+            raise AssertionError('No enumerar cada carpeta remota')
+        return real(ruta)
+    monkeypatch.setattr(os,'scandir',listado)
+    relaciones=_leer_relaciones_historicas_reportadas(raiz)
+    assert [r['numero_guia'] for r in relaciones]==['900001']
+
+def test_reconciliacion_focal_conserva_decision_ajena_sin_historico_ni_autoaplicarla(tmp_path,monkeypatch):
+    raiz,cat,actual=_entorno(tmp_path)
+    decision=_decision_vehiculo(cat)
+    dataset=actual/'analisis_completo_guias.csv'
+    with dataset.open('w',newline='',encoding='utf-8-sig') as f:
+        w=csv.DictWriter(f,fieldnames=COLUMNAS,delimiter=';',extrasaction='ignore');w.writeheader();w.writerow(_fila(rut_chofer='15489424-1',patente_rampla='JD8629'))
+    artefacto=generar_artefacto(ruta_dataset=dataset,carpeta_catalogos=cat,decisiones=[decision],ruta_salida=actual/'decisiones_pendientes.json')
+    antes=dataset.read_bytes()
+    def prohibido(*args,**kwargs): raise AssertionError('No leer ni autoaplicar decisiones fuera del alcance')
+    monkeypatch.setattr('atlas_core.revalidacion_documental._leer_relaciones_historicas_reportadas',prohibido)
+    r=reconciliar_bandeja_decisiones(raiz_atlas=raiz,guias_objetivo={'900002'})
+    assert r['decisiones_aplicadas_automaticamente']==[]
+    assert r['bandeja']['decisiones']==artefacto['decisiones']
+    assert dataset.read_bytes()==antes
