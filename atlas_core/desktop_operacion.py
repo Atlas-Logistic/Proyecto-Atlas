@@ -63,7 +63,7 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
     raiz = Path(raiz).resolve()
     with contextlib.ExitStack() as stack:
         escritor = None
-        from atlas_core.exclusividad_equipo import politica_equipo_unico, EscritorEquipoUnico
+        from atlas_core.exclusividad_equipo import politica_equipo_unico, EscritorEquipoUnico, recuperar_bloqueos_huerfanos
         politica = politica_equipo_unico(raiz)
         if politica:
             escritor = EscritorEquipoUnico(raiz)
@@ -75,8 +75,9 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
             stack.enter_context(escritor)
             if not escritor.adquirir():
                 raise PermissionError('Escritor ocupado o exclusividad no verificable. No se inició ninguna escritura.')
-            if politica:
-                escritor.recuperar_bloqueos_huerfanos()
+            # Mutex local o lease Cloud: con exclusividad vigente, un lock de
+            # este PC cuyo PID terminó es huérfano (caída a mitad de ingreso).
+            recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
         def comprobar():
             if escritor is not None and (not escritor.vigente or not escritor.renovar()):
                 raise PermissionError('Se perdió la exclusividad del escritor; operación detenida.')

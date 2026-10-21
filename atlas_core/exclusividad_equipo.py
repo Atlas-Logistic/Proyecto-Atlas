@@ -51,6 +51,37 @@ $procesos=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '(?i)^
         raise PermissionError('PULL habilitado o en ejecución; modo manual de equipo único bloqueado.')
     return datos
 
+def recuperar_bloqueos_huerfanos(raiz, *, escritor):
+    """Sólo con un escritor vigente (mutex local o lease Cloud): recupera locks
+    del mismo PC cuyo PID ya terminó.
+
+    Un PID vivo, inaccesible, reutilizado o de otro host nunca se elimina.
+    """
+    if escritor is None or not escritor.vigente: raise PermissionError('Recuperación sin exclusividad.')
+    if os.name != 'nt': return []
+    k=ctypes.WinDLL('kernel32',use_last_error=True)
+    k.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+    k.OpenProcess.restype=wintypes.HANDLE
+    k.GetExitCodeProcess.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
+    k.CloseHandle.argtypes=[wintypes.HANDLE]
+    recuperados=[]
+    for ruta in (Path(raiz)/'operacion'/'actual').glob('.atlas_lock_*'):
+        original=ruta.read_bytes()
+        try: info=json.loads(original)
+        except (ValueError,UnicodeError): continue
+        if str(info.get('host','')).casefold()!=socket.gethostname().casefold(): continue
+        pid=info.get('pid')
+        if not isinstance(pid,int) or pid<=0: continue
+        h=k.OpenProcess(0x1000,False,pid)
+        if h:
+            codigo=wintypes.DWORD()
+            try: muerto=bool(k.GetExitCodeProcess(h,ctypes.byref(codigo))) and codigo.value!=259
+            finally: k.CloseHandle(h)
+        else: muerto=ctypes.get_last_error()==87
+        if muerto and ruta.read_bytes()==original:
+            ruta.unlink(); recuperados.append(ruta.name)
+    return recuperados
+
 class EscritorEquipoUnico:
     def __init__(self,raiz,*,verificar=comprobar_pull_detenido):
         self.raiz=Path(raiz).resolve()
@@ -89,32 +120,8 @@ class EscritorEquipoUnico:
         return True
     def renovar(self): return self.vigente
     def recuperar_bloqueos_huerfanos(self):
-        """Sólo bajo mutex: recupera locks del mismo PC cuyo PID ya terminó.
-
-        Un PID vivo, inaccesible, reutilizado o de otro host nunca se elimina.
-        """
         if not self.vigente: raise PermissionError('Recuperación sin exclusividad.')
-        k=self._k
-        k.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
-        k.OpenProcess.restype=wintypes.HANDLE
-        k.GetExitCodeProcess.argtypes=[wintypes.HANDLE,ctypes.POINTER(wintypes.DWORD)]
-        recuperados=[]
-        for ruta in (self.raiz/'operacion'/'actual').glob('.atlas_lock_*'):
-            original=ruta.read_bytes()
-            try: info=json.loads(original)
-            except (ValueError,UnicodeError): continue
-            if str(info.get('host','')).casefold()!=socket.gethostname().casefold(): continue
-            pid=info.get('pid')
-            if not isinstance(pid,int) or pid<=0: continue
-            h=k.OpenProcess(0x1000,False,pid)
-            if h:
-                codigo=wintypes.DWORD()
-                try: muerto=bool(k.GetExitCodeProcess(h,ctypes.byref(codigo))) and codigo.value!=259
-                finally: k.CloseHandle(h)
-            else: muerto=ctypes.get_last_error()==87
-            if muerto and ruta.read_bytes()==original:
-                ruta.unlink(); recuperados.append(ruta.name)
-        return recuperados
+        return recuperar_bloqueos_huerfanos(self.raiz, escritor=self)
     def cerrar(self):
         self._detener.set()
         if self._hilo: self._hilo.join(timeout=22)
