@@ -45,6 +45,12 @@ def ejecutar_pull_con_escritor(
     with fabrica_escritor(base_url=base_url, token_motor=token_motor, timeout=timeout) as escritor:
         if not escritor.adquirir():
             return {"escritor_operativo": "NO_ADQUIRIDO", "encontrados": 0, "confirmados": []}
+        # Mismo criterio que el ingreso manual: bajo lease vigente, un lock de
+        # este PC cuyo PID terminó no debe bloquear la pasada durante horas.
+        from atlas_core.exclusividad_equipo import recuperar_bloqueos_huerfanos
+        raiz = getattr(repositorio, "raiz_atlas", None)
+        if raiz is not None:
+            recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
         return sincronizar_envios_cloud(
             base_url=base_url, token_motor=token_motor, consumidor=consumidor,
             repositorio=repositorio, timeout=timeout, procesar=procesar,
