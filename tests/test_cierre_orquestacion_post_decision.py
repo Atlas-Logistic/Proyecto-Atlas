@@ -253,7 +253,7 @@ def test_b_origen_se_resuelve_solo_por_vecinos_gps_sin_pedir_decision_humana(tmp
 #    su propia decisión pendiente.
 # ---------------------------------------------------------------------
 
-def test_c_ambiguedad_real_de_otra_guia_regenera_su_propia_decision(tmp_path):
+def test_c_decision_no_abre_ambiguedad_ajena_hasta_mantenimiento_explicito(tmp_path):
     raiz, catalogos, actual, dataset, decision, planta_colina = _entorno(tmp_path)
     # Antes de aplicar nada: AMBIG1 no tiene ninguna decisión publicada
     # todavía (sólo se publicó la de TARGET, ver `_entorno`).
@@ -275,8 +275,11 @@ def test_c_ambiguedad_real_de_otra_guia_regenera_su_propia_decision(tmp_path):
     # real -- totalmente ajena a la decisión que se acaba de aplicar -- y
     # publica su propia tarjeta. Nunca se "resuelve en silencio" lo que
     # sigue siendo, honestamente, una pregunta para un humano.
-    assert decision_ambig is not None, "AMBIG1 debería tener una decisión DESTINO_NO_RESUELTO pendiente"
-    assert decision_ambig["tipo"] == "DESTINO_NO_RESUELTO"
+    assert decision_ambig is None
+    # La decisión focal no descubre tarjetas ajenas. Esa tarea corresponde
+    # a una operación explícita de mantenimiento, que sigue disponible.
+    revalidar_y_regenerar_reporte(raiz_atlas=raiz,nombre_carpeta_reporte='mantenimiento_explicito')
+    assert any(d['tipo']=='DESTINO_NO_RESUELTO' and d['documento']['numero_guia']=='AMBIG1' for d in _pendientes(actual))
     # Su propio destino nunca se tocó -- Atlas nunca "arregla" direcciones.
     assert _fila_por_guia(dataset, "AMBIG1")["motivo_ruta"] == "GEOCODIFICACION_DEMASIADO_GENERICA"
 
@@ -294,6 +297,7 @@ def test_d_reejecutar_sin_evidencia_nueva_es_idempotente(tmp_path):
 
     resultado_segunda_pasada = revalidar_y_regenerar_reporte(
         raiz_atlas=raiz, nombre_carpeta_reporte="reporte_segunda_pasada_idempotencia",
+        guias_objetivo={'TARGET'},
     )
     assert resultado_segunda_pasada["guias_actualizadas"] == []
     assert resultado_segunda_pasada["bandeja_cambio_efectivo"] is False

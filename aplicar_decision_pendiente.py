@@ -52,7 +52,13 @@ def main():
         # tarjeta muerta a mano.
         try:
             from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
-            reconciliar_bandeja_decisiones(raiz_atlas=args.raiz_atlas)
+            from pathlib import Path
+            from atlas_core.alcance_revalidacion import alcance_decision_persistida, guias_en_alcance
+            with alcance_decision_persistida(args.raiz_atlas,args.decision_id,accion=args.accion):
+                reconciliar_bandeja_decisiones(
+                    raiz_atlas=args.raiz_atlas,
+                    guias_objetivo=guias_en_alcance(Path(args.raiz_atlas)/'operacion/actual/analisis_completo_guias.csv'),
+                )
             resultado=aplicar_decision_obra(**argumentos)
         except ErrorAplicacionDecision as error_reintento:
             resultado={"ok":False,"error":str(error_reintento)}
