@@ -18,7 +18,7 @@ conserva intacta. El resto de la fila -- todo dato documental -- permanece
 byte por byte igual.
 """
 from __future__ import annotations
-from atlas_core.alcance_revalidacion import guias_en_alcance
+from atlas_core.alcance_revalidacion import alcance_guias, guias_en_alcance
 
 import csv
 import hashlib
@@ -7845,6 +7845,9 @@ def reconciliar_bandeja_decisiones(
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
     artefacto_ruta = actual / NOMBRE_ARTEFACTO
+    # Un alcance explicito nunca amplia el contexto causal heredado.
+    with alcance_guias(dataset, guias_objetivo):
+        guias_objetivo = guias_en_alcance(dataset)
     # Bloque P0 SHORT-CIRCUIT -- `relaciones_historicas` (ver más abajo,
     # después de conocer `pendientes_actuales`) sólo se calcula si de
     # verdad hay una decisión que la use (`VEHICULO_DESCONOCIDO`, la
@@ -7876,10 +7879,13 @@ def reconciliar_bandeja_decisiones(
             relaciones_historicas=relaciones_historicas, decisiones_aplicadas=decisiones_aplicadas_ledger,
         )
 
-        bandeja_local = generar_artefacto(
-            ruta_dataset=dataset, carpeta_catalogos=catalogos,
-            decisiones=[*conservadas, *enriquecidas_locales], ruta_salida=artefacto_ruta, reloj=reloj,
-        )
+        # La publicacion conserva las tarjetas ajenas exactas, incluso
+        # frente al filtrado de ledger o enriquecimiento de la bandeja.
+        with alcance_guias(dataset, guias_objetivo):
+            bandeja_local = generar_artefacto(
+                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                decisiones=[*conservadas, *enriquecidas_locales], ruta_salida=artefacto_ruta, reloj=reloj,
+            )
         return {"vigentes": vigentes_locales, "bandeja": bandeja_local}
 
     try:
@@ -7894,13 +7900,16 @@ def reconciliar_bandeja_decisiones(
     # OBRA_DESTINO_SIN_CORROBORAR vigente pero ninguna tarjeta pendiente
     # (nunca motivo sin decisión) -- sin OCR, ver
     # `regenerar_decisiones_obra_faltantes_sin_ocr`.
-    pendientes_actuales = regenerar_decisiones_obra_faltantes_sin_ocr(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos,
-        decisiones_pendientes=pendientes_actuales, ruta_ledger=actual / "decisiones_aplicadas.json",
-    )
-    pendientes_actuales = regenerar_decisiones_vehiculo_faltantes_sin_ocr(
-        ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones_pendientes=pendientes_actuales,
-    )
+    # Ambos detectores leen solo las filas del alcance causal. Las
+    # tarjetas ajenas ya existentes se conservan, pero no se crean nuevas.
+    with alcance_guias(dataset, guias_objetivo):
+        pendientes_actuales = regenerar_decisiones_obra_faltantes_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            decisiones_pendientes=pendientes_actuales, ruta_ledger=actual / "decisiones_aplicadas.json",
+        )
+        pendientes_actuales = regenerar_decisiones_vehiculo_faltantes_sin_ocr(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos, decisiones_pendientes=pendientes_actuales,
+        )
 
     # Bloque P0 SHORT-CIRCUIT -- ver comentario junto a la declaración de
     # `relaciones_historicas` más arriba. `pendientes_actuales` ya es el
