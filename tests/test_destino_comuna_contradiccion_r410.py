@@ -161,3 +161,14 @@ def test_no_retira_generico_si_la_ruta_ya_quedo_calculada(tmp_path):
     _escribir_csv(dataset, [fila])
     resultado = revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
     assert resultado["guias_actualizadas"] == []
+
+def test_focal_no_retira_ruta_de_documento_ajeno(tmp_path):
+    ruta=tmp_path/'dataset.csv'
+    fuera=_fila_csv(numero_guia='460807',estado_ruta='RUTA_CALCULADA',distancia_km='650')
+    dentro=_fila_csv(numero_guia='460808',archivo='460808.jpeg')
+    _escribir_csv(ruta,[fuera,dentro])
+    r=revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=ruta,guias_objetivo={'460808'})
+    filas=_leer(ruta)
+    assert r['guias_actualizadas']==['460808']
+    assert filas[0]==fuera
+    assert filas[1]['direccion_entrega']==''

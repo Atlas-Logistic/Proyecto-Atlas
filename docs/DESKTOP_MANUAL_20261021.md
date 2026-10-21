@@ -1,9 +1,14 @@
-# Canal manual Desktop — 21/10/2026
+# Operación manual en JAVO — 21/10/2026
 
-desktop_operacion_cli.py recibe JSON por stdin. `ingresar` conserva originales, crea lote único, usa el procesador canónico con reconciliación focal, genera reporte y devuelve un resultado sólo si no hay filas ERROR. `script` limita la ejecución a CLIs de revisión expresamente enumerados, conservando stdin y argv.
+Sustituye la conclusión anterior sobre una credencial de oficina: Javier confirmó que hay un único computador, siempre con él. El ingreso manual no consume PULL ni necesita autenticarse en Cloud.
 
-Raíces compartidas: lease global de escritor antes de cualquier escritura y durante toda la transacción. Ausencia de token, ocupación o pérdida de lease fallan cerrado; no se ejecuta PULL. Raíces locales físicamente independientes pueden operar sin PULL ni red. Auditoría limita escrituras a raíz operacional, temporales y modelos configurados; conserva los locks de dataset del Motor.
+`ATLAS_CLOUD_MOTOR_TOKEN` es el Bearer de `CLOUD_MOTOR_AUTH_SECRET` del Worker Atlas Mobile Cloud. No lo emite Desktop: un administrador configura el mismo secreto en el Worker y en el cliente autorizado. El script Cloud `configurar_secreto_motor_prueba.ps1` sirve para ese aprovisionamiento. No se ejecutó, no se generó ningún secreto y no se desplegó Cloud.
 
-35 pruebas focales/regresión aprobadas (7 nuevas de sesión y 28 de deduplicación/recuperación/ingesta focal). Aplicación instalada probada con PDF/PNG, viaje 0000990001 y revisión real sobre datos aislados.
+La política local explícita `modo_escritor=equipo_unico` está ligada al hostname, MachineGuid y raíz exacta. Adquiere un mutex Global de Windows antes de crear locks/entradas; rechaza otro escritor y comprueba periódicamente que no existan procesos o tareas PULL habilitados. Si se pierde esa condición, las escrituras fallan cerrado. El perfil no se deduce de un token ausente. Para varios computadores se conserva el lease Cloud y su credencial legítima.
 
-En JAVO falta ATLAS_CLOUD_MOTOR_TOKEN para arbitrar G: con oficina y falta autorización de Javier para la primera escritura real. No hacen falta credenciales Mobile/Onelogis ni acceso administrativo Cloudflare para esta función. No se activó PULL ni se modificaron datos productivos.
+Los locks de archivo del Motor permanecen. Tras una caída, sólo bajo mutex adquirido se recuperan locks del mismo host cuyo PID se comprueba terminado; un PID vivo, inaccesible o remoto se conserva. El guardián de escrituras sigue limitado a la raíz aprobada, temporales, modelos y el directorio local de caché derivado. El caché de relaciones históricas siempre se verifica contra las huellas de los reportes; no reemplaza al dataset.
+
+El ingreso usa Python de `.venv`, conserva el original y evita reingresar una guía numérica ya existente. Mantiene las decisiones ajenas al alcance focal y no revalida rutas geográficas ajenas durante ese ingreso. La búsqueda de reportes enumera sólo el directorio padre, sin listar cada subcarpeta remota.
+
+Validación final: 96 pruebas Motor focales/regresión; Windows mutex entre procesos, pérdida/ocupación y recuperación de locks; prueba de ingreso/selector/revisión/lector en la aplicación instalada con datos aislados. La primera guía real autorizada se conserva una sola vez y se visualiza en la aplicación principal; los campos no reconocidos se mantienen para revisión, sin confirmación ficticia. Evidencia local en C:\Atlas\cierre-desktop-20261021. No se versionan datos operacionales, imágenes ni configuración local con identidad del equipo.
+

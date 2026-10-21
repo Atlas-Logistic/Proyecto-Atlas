@@ -2821,6 +2821,7 @@ def revalidar_destino_propio_respaldado_por_b1_sin_ocr(
 
 def revalidar_destino_contra_comuna_documental_sin_ocr(
     *, ruta_dataset: str | Path,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque F (R4.10) -- limpieza retroactiva, sin OCR y sin red: releé
     cada fila con `direccion_entrega` YA persistida (de una corrida
@@ -2863,6 +2864,8 @@ def revalidar_destino_contra_comuna_documental_sin_ocr(
         filas = _leer_filas(ruta)
         guias_actualizadas: list[str] = []
         for fila in filas:
+            if guias_objetivo is not None and str(fila.get('numero_guia','')) not in guias_objetivo:
+                continue
             direccion = str(fila.get("direccion_entrega", "")).strip()
             if not direccion:
                 continue
@@ -5662,6 +5665,7 @@ _MINIMO_OBSERVACIONES_HISTORIAL_CLIENTE = 2
 
 def revalidar_origen_por_historial_de_cliente_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque CAPABILITY SUITE DE ORIGEN -- causa raíz real 472477: un
     cliente puede tener, en el propio dataset ya persistido, una
@@ -5718,6 +5722,8 @@ def revalidar_origen_por_historial_de_cliente_sin_ocr(
 
         actualizadas: list[str] = []
         for fila in filas:
+            if guias_objetivo is not None and str(fila.get('numero_guia','')) not in guias_objetivo:
+                continue
             if str(fila.get("planta_origen_id", "")).strip():
                 continue  # ya tiene origen -- nunca se reinvestiga
             motivo_origen_gps = str(fila.get("motivo_origen_gps", "")).strip()
@@ -7447,13 +7453,24 @@ def _escribir_cache_atomico(ruta_cache: Path, contenido: dict[str, object]) -> N
                 pass
 
 
+def _rutas_reportes_historicos(raiz: Path) -> list[Path]:
+    """Lista sólo el directorio reportes; no enumera cada carpeta en Drive.
+
+    Path.glob('*/viajes.csv') hace scandir de cada reporte en Python 3.12.
+    La existencia y huella del archivo se verifican al leer/stat, igual que antes.
+    """
+    directorio = Path(raiz) / 'reportes'
+    if not directorio.is_dir(): return []
+    return sorted(carpeta / 'viajes.csv' for carpeta in directorio.iterdir() if carpeta.is_dir())
+
+
 def _leer_relaciones_historicas_reportadas_sin_cache(raiz: Path) -> list[dict[str, object]]:
     """Escaneo COMPLETO, SIN cache -- el comportamiento original, byte a
     byte. Usado como fallback seguro cuando el cache incremental está
     ausente/corrupto/inutilizable (nunca puede dar un resultado peor que
     éste, sólo más lento)."""
     unicas: dict[tuple[str, ...], dict[str, object]] = {}
-    for ruta in sorted((raiz / "reportes").glob("*/viajes.csv")):
+    for ruta in _rutas_reportes_historicos(raiz):
         for fila in _relaciones_de_un_reporte(ruta):
             clave = tuple(str(fila.get(k, "")) for k in _CAMPOS_RELACION_HISTORICA)
             unicas[clave] = fila
@@ -7512,7 +7529,7 @@ def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]
     velocidad."""
     raiz = Path(raiz)
     try:
-        rutas_actuales = sorted((raiz / "reportes").glob("*/viajes.csv"))
+        rutas_actuales = _rutas_reportes_historicos(raiz)
     except OSError:
         return _leer_relaciones_historicas_reportadas_sin_cache(raiz)
 
@@ -7687,6 +7704,7 @@ def enriquecer_decisiones_bandeja(
 def reconciliar_bandeja_decisiones(
     *, raiz_atlas: str | Path, reloj=lambda: datetime.now(timezone.utc),
     cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
+    guias_objetivo: set[str] | None = None,
 ) -> dict[str, object]:
     """Bloque RECONCILIACIÓN D1 -- re-publica la bandeja de decisiones
     pendientes vigente con un `dataset_sha256`/`catalogos_sha256` frescos,
@@ -7783,6 +7801,8 @@ def reconciliar_bandeja_decisiones(
     # llamada, no de la definición, así que asignarla más abajo, antes
     # de invocar el closure, es seguro).
     relaciones_historicas: list[dict[str, object]] = []
+    def en_alcance(decision):
+        return guias_objetivo is None or str((decision.get('documento') or {}).get('numero_guia','')) in guias_objetivo
     try:
         _ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
         decisiones_aplicadas_ledger = [
@@ -7792,8 +7812,9 @@ def reconciliar_bandeja_decisiones(
         decisiones_aplicadas_ledger = []
 
     def _regenerar_enriquecer_publicar(pendientes: list[dict[str, object]]) -> dict[str, object]:
+        conservadas = [d for d in pendientes if not en_alcance(d)]
         vigentes_locales = regenerar_decisiones_persistidas(
-            decisiones=pendientes, carpeta_catalogos=catalogos, ruta_dataset=dataset,
+            decisiones=[d for d in pendientes if en_alcance(d)], carpeta_catalogos=catalogos, ruta_dataset=dataset,
             cache_memoizacion=cache_memoizacion,
         )
         enriquecidas_locales = enriquecer_decisiones_bandeja(
@@ -7803,7 +7824,7 @@ def reconciliar_bandeja_decisiones(
 
         bandeja_local = generar_artefacto(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,
-            decisiones=enriquecidas_locales, ruta_salida=artefacto_ruta, reloj=reloj,
+            decisiones=[*conservadas, *enriquecidas_locales], ruta_salida=artefacto_ruta, reloj=reloj,
         )
         return {"vigentes": vigentes_locales, "bandeja": bandeja_local}
 
@@ -7833,7 +7854,7 @@ def reconciliar_bandeja_decisiones(
     # pasadas siguientes sólo filtran/enriquecen/auto-aplican miembros de
     # este mismo conjunto -- nunca fabrican un tipo nuevo de la nada), así
     # que basta evaluar esto UNA vez, antes de la primera pasada.
-    if any(str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales):
+    if any(en_alcance(d) and str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales):
         relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
 
     resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)
@@ -7899,7 +7920,7 @@ def reconciliar_bandeja_decisiones(
     for _ in range(MAX_ITERACIONES_AUTO_RESOLUCION):
         candidatas = [
             d for d in bandeja["decisiones"]
-            if d.get("tipo") in _ACCION_AUTO_POR_TIPO
+            if en_alcance(d) and d.get("tipo") in _ACCION_AUTO_POR_TIPO
             and (d.get("evaluacion_evidencia") or {}).get("resultado") == "RESUELTO_AUTOMATICAMENTE"
             and (
                 d.get("tipo") != "VEHICULO_DESCONOCIDO"

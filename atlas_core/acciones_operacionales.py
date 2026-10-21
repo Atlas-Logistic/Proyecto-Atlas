@@ -2313,7 +2313,7 @@ class CapaAccionesOperacionales:
                           respaldo=respaldo)
             return publico
         ids_antes = self._ids_decisiones_documento(plan)
-        reconciliacion = self._reconciliar() if salida.get("reconciliar") else None
+        reconciliacion = self._reconciliar(guias_objetivo=set(plan.afectados.get('guias') or []) or None) if salida.get("reconciliar") else None
         red_seguridad = (_retirar_obsoletas_por_campo(self._ctx, *salida["retirar_obsoletas"])
                          if salida.get("retirar_obsoletas") else [])
         ids_despues = self._ids_decisiones_documento(plan)
@@ -2396,7 +2396,7 @@ class CapaAccionesOperacionales:
             else:
                 shutil.copy2(respaldo["ruta"] / nombre, destino)
 
-    def _reconciliar(self) -> dict | None:
+    def _reconciliar(self, *, guias_objetivo=None) -> dict | None:
         """Republica la bandeja con hashes frescos y retira decisiones que el
         nuevo estado vuelve obsoletas -- `reconciliar_bandeja_decisiones` es
         la vía canónica (sin OCR, sin tocar el CSV documental)."""
@@ -2404,7 +2404,7 @@ class CapaAccionesOperacionales:
             return {"ejecutado": False, "motivo": "SIN_BANDEJA_O_DATASET"}
         from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
         try:
-            resultado = reconciliar_bandeja_decisiones(raiz_atlas=self.raiz, reloj=self._reloj)
+            resultado = reconciliar_bandeja_decisiones(raiz_atlas=self.raiz, reloj=self._reloj, guias_objetivo=guias_objetivo)
         except Exception as error:  # noqa: BLE001 -- la escritura ya ocurrió; la tarea periódica lo retoma
             return {"ejecutado": False, "motivo": "ERROR_RECONCILIACION", "error": f"{type(error).__name__}: {error}"}
         return {"ejecutado": True, **{k: v for k, v in (resultado or {}).items()

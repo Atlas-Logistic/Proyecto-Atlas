@@ -1443,7 +1443,7 @@ def reconciliar_estado_derivado(
         # columnas ya escritas.
         limpieza_geo_contradiccion = (
             _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
-            else revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset)
+            else revalidar_destino_contra_comuna_documental_sin_ocr(ruta_dataset=dataset, guias_objetivo=guias_objetivo)
         )
         limpieza_material = (
             _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
@@ -1569,7 +1569,7 @@ def reconciliar_estado_derivado(
         limpieza_origen_historial_cliente = (
             _sin_cambio_guias() if _bateria_compartida_sigue_fresca()
             else revalidar_origen_por_historial_de_cliente_sin_ocr(
-                ruta_dataset=dataset, carpeta_catalogos=catalogos,
+                ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_objetivo,
             )
         )
         # Bloque FIX RUT AUSENTE -- caso real 464367 (CARLOS ÑANCUCHEO):
@@ -1747,6 +1747,7 @@ def reconciliar_estado_derivado(
         # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
         evidencia_decisiones = reconciliar_bandeja_decisiones(
             raiz_atlas=raiz, reloj=lambda: instante, cache_memoizacion=_cache_regenerar_decisiones,
+            guias_objetivo=guias_objetivo,
         )
         _marca_etapa("bandeja_decisiones_evidencia")
         # Bloque AUTORIDAD OPERACIONAL / SEGUNDA PASADA UNIVERSAL -- SIN

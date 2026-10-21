@@ -55,3 +55,15 @@ def test_nombres_repetidos_se_rechazan_antes_de_copiar(tmp_path):
     with pytest.raises(ValueError,match='mismo nombre'):
         d.ingresar(tmp_path,[a/'guia.pdf',b/'guia.pdf'],lambda:None)
     assert not (tmp_path/'operacion').exists()
+
+def test_guia_existente_por_numero_no_se_copia_ni_reprocesa(tmp_path,monkeypatch):
+    import csv
+    monkeypatch.setattr('atlas_core.fuente_catalogos.validar_fuente_catalogos',lambda *a,**kw:None)
+    actual=tmp_path/'operacion'/'actual'; actual.mkdir(parents=True)
+    with (actual/'analisis_completo_guias.csv').open('w',newline='',encoding='utf-8') as f:
+        w=csv.DictWriter(f,fieldnames=['numero_guia','numero_transporte'],delimiter=';'); w.writeheader(); w.writerow({'numero_guia':'482553','numero_transporte':'T1'})
+    original=tmp_path/'482553.jpeg'; original.write_bytes(b'original inalterado')
+    r=d.ingresar(tmp_path,[original],lambda:None)
+    assert r['cantidad']==0 and r['existentes'][0]['numero_guia']=='482553'
+    assert not (tmp_path/'operacion'/'entradas').exists()
+    assert original.read_bytes()==b'original inalterado'

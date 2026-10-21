@@ -251,3 +251,14 @@ def test_f_historial_nunca_reinvestiga_un_origen_ya_confirmado_distinto(tmp_path
     fila = _fila_por_guia(dataset, "TARGET")
     assert fila["planta_origen_id"] == renca.planta_id
     assert fila["origen_determinado_por"] == "CONFIRMACION_HUMANA"
+
+def test_historial_focal_usa_evidencia_ajena_sin_modificar_filas_ajenas(tmp_path):
+    from atlas_core.revalidacion_documental import revalidar_origen_por_historial_de_cliente_sin_ocr
+    raiz,cat,actual,dataset,colina,_=_entorno(tmp_path,[])
+    historia=[_fila_csv(numero_guia=f'H{i}',planta_origen_id=colina.planta_id,origen_determinado_por='TELEMETRIA_GPS') for i in range(2)]
+    ajena=_fila_csv(numero_guia='AJENA')
+    _escribir_csv(dataset,[*historia,ajena,_fila_csv(numero_guia='TARGET')])
+    r=revalidar_origen_por_historial_de_cliente_sin_ocr(ruta_dataset=dataset,carpeta_catalogos=cat,guias_objetivo={'TARGET'})
+    assert r['guias_actualizadas']==['TARGET']
+    assert _fila_por_guia(dataset,'AJENA')==ajena
+    assert _fila_por_guia(dataset,'TARGET')['planta_origen_id']==colina.planta_id
