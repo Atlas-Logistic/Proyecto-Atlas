@@ -100,10 +100,38 @@ def ejecutar_script(argumentos, entrada=None):
         raise PermissionError('Acción Desktop no admitida.')
     return _cli([script.name, *argumentos[1:]], entrada)
 
+class _SalidaCLI(io.StringIO):
+    """Captura la respuesta interna y entrega el progreso sin esperar al CLI."""
+
+    def __init__(self, stderr):
+        super().__init__()
+        self._stderr = stderr
+        self._pendiente = ''
+
+    def _linea(self, linea):
+        if re.fullmatch(r'\[\d+/\d+\]\s+[^\r\n]+', linea.rstrip('\r\n')):
+            self._stderr.write(linea if linea.endswith('\n') else linea + '\n')
+            self._stderr.flush()
+        else:
+            super().write(linea)
+
+    def write(self, texto):
+        self._pendiente += texto
+        while '\n' in self._pendiente:
+            linea, self._pendiente = self._pendiente.split('\n', 1)
+            self._linea(linea + '\n')
+        return len(texto)
+
+    def finalizar(self):
+        if self._pendiente:
+            self._linea(self._pendiente)
+            self._pendiente = ''
+
+
 def _cli(argumentos, entrada=None):
     anteriores = sys.argv
     stdin_anterior = sys.stdin
-    salida = io.StringIO()
+    salida = _SalidaCLI(sys.stderr)
     try:
         sys.argv = [str(RAIZ_CODIGO/argumentos[0]), *map(str, argumentos[1:])]
         if entrada is not None: sys.stdin = io.StringIO(entrada)
@@ -113,8 +141,11 @@ def _cli(argumentos, entrada=None):
             except SystemExit as e:
                 if e.code not in (None, 0): raise RuntimeError('Motor terminó con error: '+str(e.code)) from e
     finally:
-        sys.argv = anteriores
-        sys.stdin = stdin_anterior
+        try:
+            salida.finalizar()
+        finally:
+            sys.argv = anteriores
+            sys.stdin = stdin_anterior
     return salida.getvalue()
 
 def ingresar(raiz, archivos, comprobar):
