@@ -32,6 +32,7 @@ ESCRITORES = frozenset({
     'gestionar_catalogos.py', 'reconciliar_estado_derivado.py',
     'retomar_entradas_desktop.py', 'generar_reporte_viajes.py', 'resumen_procesamiento_desktop.py',
 })
+RUNTIME_RAPIDOCR_MANUAL = Path(os.environ.get('LOCALAPPDATA', '')) / 'Atlas' / 'runtime' / 'rapidocr' / 'Scripts' / 'python.exe'
 _auditoria = ContextVar('desktop_escrituras', default=None)
 _worker_ocr = ContextVar('desktop_worker_ocr', default=None)
 _cierre_worker_ocr = ContextVar('desktop_cierre_worker_ocr', default=None)
@@ -208,11 +209,20 @@ def ejecutar(solicitud):
     raiz = Path(solicitud['raiz']).resolve(strict=True)
     os.environ['ATLAS_DATA_DIR'] = str(raiz)
     os.environ['ATLAS_CATALOGOS_DIR'] = str(raiz/'catalogos_privados')
-    os.environ.setdefault('ATLAS_OCR_PROVIDER','easyocr')
     accion = solicitud.get('accion')
     if accion not in {'ingresar','script'}: raise ValueError('Acción Desktop inválida.')
     if accion == 'script' and Path(solicitud['argumentos'][0]).name not in ESCRITORES:
         raise PermissionError('Acción Desktop no admitida.')
+    # El proveedor se decide dentro de esta invocación, no en el entorno de
+    # usuario: RapidOCR queda limitado al ingreso manual. PULL arranca en
+    # otro proceso y conserva su propio lanzador/configuración.
+    proveedor_anterior = os.environ.get('ATLAS_OCR_PROVIDER')
+    python_rapidocr_anterior = os.environ.get('ATLAS_RAPIDOCR_PYTHON')
+    if accion == 'ingresar':
+        os.environ['ATLAS_OCR_PROVIDER'] = 'rapidocr'
+        os.environ['ATLAS_RAPIDOCR_PYTHON'] = str(RUNTIME_RAPIDOCR_MANUAL)
+    else:
+        os.environ.setdefault('ATLAS_OCR_PROVIDER','easyocr')
     # Solo el ingreso manual RapidOCR puede lanzar este worker exacto.
     # Los scripts operacionales y cualquier otro proceso siguen bloqueados.
     permiso = None
@@ -233,3 +243,7 @@ def ejecutar(solicitud):
         _worker_ocr.reset(token)
         if anterior_manual is None: os.environ.pop('ATLAS_OCR_MANUAL',None)
         else: os.environ['ATLAS_OCR_MANUAL'] = anterior_manual
+        if proveedor_anterior is None: os.environ.pop('ATLAS_OCR_PROVIDER', None)
+        else: os.environ['ATLAS_OCR_PROVIDER'] = proveedor_anterior
+        if python_rapidocr_anterior is None: os.environ.pop('ATLAS_RAPIDOCR_PYTHON', None)
+        else: os.environ['ATLAS_RAPIDOCR_PYTHON'] = python_rapidocr_anterior

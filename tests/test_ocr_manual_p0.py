@@ -1,6 +1,7 @@
 ﻿from pathlib import Path
 from dataclasses import replace
 import pytest
+from contextlib import contextmanager
 from atlas_core.ocr import BloqueOCR
 from atlas_core.rapidocr_adapter import BloqueRapidOCR
 from atlas_core.ocr_manual import RapidOCRManualProvider, separar_etiqueta, localizar_fecha_emision, consensuar_fecha
@@ -71,6 +72,25 @@ def test_factory_no_cambia_pull(monkeypatch):
     assert type(crear_proveedor_ocr('rapidocr')) is RapidOCRProvider
     monkeypatch.setenv('ATLAS_OCR_MANUAL','1')
     assert type(crear_proveedor_ocr('rapidocr')) is RapidOCRManualProvider
+
+
+def test_desktop_limita_rapidocr_al_ingreso_y_restaura_entorno(tmp_path, monkeypatch):
+    """RapidOCR queda dentro de la invocación manual, nunca en PULL."""
+    vistos = []
+    @contextmanager
+    def sesion_falsa(_raiz):
+        yield lambda: None
+    def ingreso_falso(_raiz, _archivos, _comprobar):
+        import os
+        vistos.append((os.environ.get('ATLAS_OCR_PROVIDER'), os.environ.get('ATLAS_RAPIDOCR_PYTHON'), os.environ.get('ATLAS_OCR_MANUAL')))
+        return {'ok': True}
+    monkeypatch.setattr(d, 'sesion', sesion_falsa)
+    monkeypatch.setattr(d, 'ingresar', ingreso_falso)
+    monkeypatch.delenv('ATLAS_OCR_PROVIDER', raising=False)
+    monkeypatch.delenv('ATLAS_RAPIDOCR_PYTHON', raising=False)
+    monkeypatch.delenv('ATLAS_OCR_MANUAL', raising=False)
+    assert d.ejecutar({'raiz': str(tmp_path), 'accion': 'ingresar', 'archivos': []}) == {'ok': True}
+    assert vistos == [('rapidocr', str(d.RUNTIME_RAPIDOCR_MANUAL), '1')]
 
 
 def test_auditoria_solo_worker_exacto_con_permiso_y_lease(tmp_path):
