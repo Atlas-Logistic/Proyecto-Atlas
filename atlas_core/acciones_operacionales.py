@@ -1113,8 +1113,8 @@ def _aplicar_obra_destino(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> di
 
 
 def _campos_documentales() -> tuple[str, ...]:
-    from atlas_core.reprocesamiento_reparador import CAMPOS_FOCALES_CONOCIDOS
-    return tuple(sorted(CAMPOS_FOCALES_CONOCIDOS))
+    from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, CAMPOS_FOCALES_CONOCIDOS
+    return tuple(sorted({*CAMPOS_FOCALES_CONOCIDOS, *CAMPOS_DOCUMENTALES_CONTROLADOS}))
 
 
 def _fila_documento(ctx: _Contexto, guia: str, archivo: str) -> dict[str, str]:
@@ -1179,7 +1179,7 @@ def _precondiciones_cambio_transporte(ctx: _Contexto, fila: Mapping[str, str], n
 
 def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.investigacion_documental import archivos_en_investigacion
-    from atlas_core.reprocesamiento_reparador import reparar_documento_focal_con_valores_conocidos
+    from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
     fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
     archivo = str(fila.get("archivo", ""))
     if archivo in archivos_en_investigacion(ctx.raiz):
@@ -1197,6 +1197,7 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
                 reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
                 superar_resoluciones_automaticas=True,
                 numero_guia=str(fila.get("numero_guia", "")),
+                campos_adicionales_permitidos=frozenset(CAMPOS_DOCUMENTALES_CONTROLADOS),
             )
         except ValueError as error:
             # La fila del documento no es única o no es de la guía: nunca se elige otra.
@@ -1227,7 +1228,8 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
                    "decisiones_obsoletas": [{"decision_id": d.get("decision_id"), "tipo": d.get("tipo"),
                                              "valor_documental": d.get("valor_documental")} for d in obsoletas]},
         consecuencias=["El valor queda protegido en el ledger: un reproceso/OCR no lo revierte.",
-                       "Se retiran las decisiones que preguntaban por el valor anterior y se recalcula la bandeja."],
+                       "Se retiran sólo las decisiones que preguntaban por el valor anterior; los motivos críticos ajenos se conservan.",
+                       "Se recalculan datos derivados, la bandeja y el reporte del viaje de esta guía, sin reconciliación global."],
         revalidaciones=["RETIRO_DECISIONES_OBSOLETAS", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIA",
                         "REGENERAR_REPORTE_VIAJES"],
         archivos=("dataset", "bandeja", "ledger_decisiones"),
@@ -1281,13 +1283,14 @@ def _plan_documento_transporte(ctx: _Contexto, p: dict, fila: dict[str, str], *,
 
 
 def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
-    from atlas_core.reprocesamiento_reparador import reparar_documento_focal_con_valores_conocidos
+    from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
     campo, valor, archivo = str(p["campo"]).lower(), str(p["valor"]), str(plan.datos["archivo"])
     resultado = reparar_documento_focal_con_valores_conocidos(
         raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=False,
         reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
                 superar_resoluciones_automaticas=True,
         numero_guia=str(plan.datos["guia"]),
+        campos_adicionales_permitidos=frozenset(CAMPOS_DOCUMENTALES_CONTROLADOS),
     )
     if not resultado["cambios"]:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el reparador no aplicó el cambio")
