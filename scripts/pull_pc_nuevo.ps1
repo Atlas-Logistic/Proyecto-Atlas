@@ -1,24 +1,42 @@
-# Preparado para activación explícita. No usar el lanzador histórico de oficina.
+# Consumidor autorizado: mismo lease Cloud que las operaciones manuales compartidas.
+[CmdletBinding()]
+param(
+    [string]$Config = (Join-Path $env:LOCALAPPDATA 'Atlas\desktop_operacion.json'),
+    [string]$Autorizacion = (Join-Path $env:LOCALAPPDATA 'Atlas\pull_autorizacion.json'),
+    [switch]$Validar
+)
 $ErrorActionPreference = 'Stop'
-$politicaAtlas = Join-Path $env:LOCALAPPDATA 'Atlas\desktop_operacion.json'
-if (Test-Path -LiteralPath $politicaAtlas) {
-    if ((Get-Content -LiteralPath $politicaAtlas -Raw | ConvertFrom-Json).modo_escritor -eq 'equipo_unico') {
-        throw 'PULL DESACTIVADO: este equipo está configurado como escritor manual único.'
-    }
+$c = Get-Content -LiteralPath $Config -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($c.modo_escritor -ne 'lease_cloud' -or !$c.autorizada -or !$c.habilitada) {
+    throw 'PULL requiere politica explicita lease_cloud habilitada; equipo_unico no es compatible.'
 }
-$base = Split-Path $PSScriptRoot -Parent
-$gate = 'C:\Atlas\activacion-operativa\autorizacion.json'
-if (!(Test-Path -LiteralPath $gate)) { throw 'PULL DESACTIVADO: falta autorización explícita y verificación de exclusividad.' }
-$autorizacion = Get-Content -LiteralPath $gate -Raw | ConvertFrom-Json
-if ($autorizacion.autor -ne 'Javier' -or !$autorizacion.exclusividad_verificada -or [datetime]$autorizacion.vence_utc -le [datetime]::UtcNow) {
-    throw 'Autorización operacional inválida o vencida.'
-}
-if (!$env:ATLAS_CLOUD_MOTOR_TOKEN) { throw 'Falta credencial del escritor Cloud.' }
-$env:ATLAS_DATA_DIR = 'G:\Mi unidad\Atlas'
-$env:ATLAS_CATALOGOS_DIR = Join-Path $env:ATLAS_DATA_DIR 'catalogos_privados'
-$env:ATLAS_OCR_PROVIDER = 'easyocr'
+$a = Get-Content -LiteralPath $Autorizacion -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($a.autor -ne 'Javier' -or !$a.exclusividad_verificada -or
+    [datetime]$a.vence_utc -le [datetime]::UtcNow) { throw 'Autorizacion PULL invalida o vencida.' }
+if (!$env:ATLAS_CLOUD_MOTOR_TOKEN) { throw 'Falta credencial Motor del usuario.' }
+$base = (Resolve-Path -LiteralPath $c.proyecto).Path
+$raiz = (Resolve-Path -LiteralPath $c.raiz).Path
 $pythonAtlas = Join-Path $base '.venv\Scripts\python.exe'
-if (!(Test-Path -LiteralPath $pythonAtlas)) { throw 'Falta Python real .venv.' }
-# sincronizar_mobile_cloud exige lease global y falla cerrado sin exclusividad.
-& $pythonAtlas -B (Join-Path $base 'sincronizar_mobile_cloud.py') --raiz-atlas $env:ATLAS_DATA_DIR
+if ($c.python) { $pythonAtlas = $c.python }
+$rapid = $env:ATLAS_RAPIDOCR_PYTHON
+if (!$rapid) { $rapid = Join-Path $env:LOCALAPPDATA 'Atlas\runtime\rapidocr\Scripts\python.exe' }
+foreach ($ruta in @($pythonAtlas, $rapid, (Join-Path $base 'sincronizar_mobile_cloud.py'))) {
+    if (!(Test-Path -LiteralPath $ruta -PathType Leaf)) { throw "Falta runtime o Motor: $ruta" }
+}
+$env:ATLAS_OPERACION_CONFIG = (Resolve-Path -LiteralPath $Config).Path
+$env:ATLAS_DATA_DIR = $raiz
+$env:ATLAS_CATALOGOS_DIR = Join-Path $raiz 'catalogos_privados'
+$env:ATLAS_OCR_PROVIDER = 'rapidocr'
+$env:ATLAS_OCR_MANUAL = '0'
+$env:ATLAS_RAPIDOCR_PYTHON = $rapid
+$env:PYTHONUNBUFFERED = '1'
+if ($Validar) {
+    [pscustomobject]@{Proyecto=$base;Raiz=$raiz;Python=$pythonAtlas;RapidPython=$rapid;OCR=$env:ATLAS_OCR_PROVIDER;Modo=$c.modo_escritor} | ConvertTo-Json
+    return
+}
+$logs = Join-Path $env:LOCALAPPDATA 'Atlas\logs'
+New-Item -ItemType Directory -Path $logs -Force | Out-Null
+# cmdlets de redireccion convierten stderr nativo en errores terminantes en PS5.
+$ErrorActionPreference = 'Continue'
+& $pythonAtlas -B (Join-Path $base 'sincronizar_mobile_cloud.py') --raiz-atlas $raiz *> (Join-Path $logs 'mobile_pull_cloud.log')
 exit $LASTEXITCODE

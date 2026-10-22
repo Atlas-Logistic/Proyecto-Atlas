@@ -17,6 +17,8 @@ corrida. Pensado para el Programador de tareas o a mano, desde UN PC.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import logging
 import json
 import os
 import socket
@@ -51,13 +53,16 @@ def ejecutar_pull_con_escritor(
         raiz = getattr(repositorio, "raiz_atlas", None)
         if raiz is not None:
             recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
-        return sincronizar_envios_cloud(
-            base_url=base_url, token_motor=token_motor, consumidor=consumidor,
-            repositorio=repositorio, timeout=timeout, procesar=procesar,
-            dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-            puede_continuar=lambda: escritor.vigente,
-            proveedor_ocr_preferido=proveedor_ocr_preferido,
-        )
+        from atlas_core.guardia_pull import proteger_escrituras
+        guardia = proteger_escrituras(raiz, lambda: escritor.vigente) if raiz is not None else contextlib.nullcontext()
+        with guardia:
+            return sincronizar_envios_cloud(
+                base_url=base_url, token_motor=token_motor, consumidor=consumidor,
+                repositorio=repositorio, timeout=timeout, procesar=procesar,
+                dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                puede_continuar=lambda: escritor.vigente,
+                proveedor_ocr_preferido=proveedor_ocr_preferido,
+            )
 
 
 def main() -> None:
@@ -98,9 +103,13 @@ def main() -> None:
         proveedor_ocr_preferido=proveedor_ocr_preferido,
     )
     print(json.dumps(resultado, ensure_ascii=True, indent=2))
+    if (resultado.get("escritor_operativo") == "NO_ADQUIRIDO" or resultado.get("detenido_por_escritor")
+            or resultado.get("fallidos") or resultado.get("errores_procesamiento") or resultado.get("errores_recepcion")):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
     # Un archivo por ciclo en %LOCALAPPDATA%\Atlas\logs\pull_ciclos: el log fijo de
     # la tarea se sobrescribe y un ciclo interrumpido perdía su evidencia.
+    logging.basicConfig(level=logging.INFO)
     ejecutar_con_registro_de_ciclo(main)
