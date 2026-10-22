@@ -1,5 +1,17 @@
 # PULL CASA con RapidOCR y lease compartido
 
+## Estado de cierre: NO reactivar autom?ticamente
+
+Los cuatro env?os se recuperaron con RapidOCR y ACK normal, pero la tarea CASA qued? Disabled y el gate se retir?. El ciclo 22/10 16:18:15?16:26:03 termin? con c?digo 0; ese ?xito t?cnico NO certifica respeto del alcance solicitado.
+
+La activaci?n expuso una dependencia no detectada por las pruebas focales del lanzador/lease: `mobile._regenerar_reporte_tras_envio_mobile` llama `revalidar_y_regenerar_reporte` sin alcance (mobile.py:2405), y `reconciliar_bandeja_diferida_mobile` llama al reconciliador global sin alcance (mobile.py:2950 aprox.; invocado por cloud_mobile_sync_cliente.py:296). El resumen acredita que la reconciliaci?n global se ejecut?. No debi? activarse con la prohibici?n de reconciliaci?n global antes de revisar esas entradas.
+
+Impacto comparado con respaldo: 578 -> 582 filas; 577 filas previas id?nticas, cuatro nuevas y la gu?a previa 482188 con cambios de campos derivados de entrega/ruta (direcci?n/coordenadas administrativas/ruta vaciadas, motivo GEOCODIFICACION_CALLE_DOCUMENTAL_DISTINTA: HOLANDA != NUEVA). No se restaur? a ciegas. Cat?logos conservan sus hashes; decisiones humanas no confirmadas por el agente.
+
+Dependencia m?nima antes de reactivar: focalizar en Motor la regeneraci?n/revalidaci?n y la reconciliaci?n diferida por los documentos/env?os causales, preservando otras filas y tarjetas; comprobar tambi?n la revalidaci?n de asociaci?n de otros env?os. Probar esa preservaci?n con dataset previo y luego evaluar por separado 482188 mediante canal controlado. No requiere cambios en la app Mobile, Desktop ni Cloud, pero ampl?a el alcance m?s all? del lanzador/configuraci?n/tarea y no se implement? en este cierre. No correr nuevamente PULL para intentar repararlo.
+
+Informe privado y reversi?n: C:/Atlas/diagnostico-mobile-20261022/activacion-casa. Las pruebas sint?ticas acreditan solo los controles y la configuraci?n ensayados, no la focalidad del flujo Mobile operativo.
+
 Base d495011. Incremento operacional; no resuelve arbitraje frente a escritores remotos que ignoran Cloud.
 
 ## Contrato
