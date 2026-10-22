@@ -44,6 +44,17 @@ def ejecutar_pull_con_escritor(
     Si Cloud no está disponible o otro PC posee el lease, no llama al PULL:
     así no existe un fallback local que pueda escribir G: sin arbitraje.
     """
+    from atlas_core.autorizacion_pull import autorizacion_vigente
+    autorizacion = os.environ.get('ATLAS_PULL_AUTORIZACION')
+    config = os.environ.get('ATLAS_OPERACION_CONFIG', '')
+
+    def autorizado():
+        # El CLI manual conserva su politica existente; el lanzador automatico
+        # proporciona siempre el gate y se vuelve a leer antes de cada mutacion.
+        return not autorizacion or autorizacion_vigente(autorizacion, config)
+
+    if not autorizado():
+        raise PermissionError('Autorizacion PULL revocada o invalida.')
     with fabrica_escritor(base_url=base_url, token_motor=token_motor, timeout=timeout) as escritor:
         if not escritor.adquirir():
             return {"escritor_operativo": "NO_ADQUIRIDO", "encontrados": 0, "confirmados": []}
@@ -51,16 +62,17 @@ def ejecutar_pull_con_escritor(
         # este PC cuyo PID terminó no debe bloquear la pasada durante horas.
         from atlas_core.exclusividad_equipo import recuperar_bloqueos_huerfanos
         raiz = getattr(repositorio, "raiz_atlas", None)
-        if raiz is not None:
-            recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
         from atlas_core.guardia_pull import proteger_escrituras
-        guardia = proteger_escrituras(raiz, lambda: escritor.vigente) if raiz is not None else contextlib.nullcontext()
+        vigente = lambda: escritor.vigente and autorizado()
+        guardia = proteger_escrituras(raiz, vigente) if raiz is not None else contextlib.nullcontext()
         with guardia:
+            if raiz is not None:
+                recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
             return sincronizar_envios_cloud(
                 base_url=base_url, token_motor=token_motor, consumidor=consumidor,
                 repositorio=repositorio, timeout=timeout, procesar=procesar,
                 dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                puede_continuar=lambda: escritor.vigente,
+                puede_continuar=vigente,
                 proveedor_ocr_preferido=proveedor_ocr_preferido,
             )
 

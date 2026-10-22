@@ -10,9 +10,6 @@ $c = Get-Content -LiteralPath $Config -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($c.modo_escritor -ne 'lease_cloud' -or !$c.autorizada -or !$c.habilitada) {
     throw 'PULL requiere politica explicita lease_cloud habilitada; equipo_unico no es compatible.'
 }
-$a = Get-Content -LiteralPath $Autorizacion -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($a.autor -ne 'Javier' -or !$a.exclusividad_verificada -or
-    [datetime]$a.vence_utc -le [datetime]::UtcNow) { throw 'Autorizacion PULL invalida o vencida.' }
 if (!$env:ATLAS_CLOUD_MOTOR_TOKEN) { throw 'Falta credencial Motor del usuario.' }
 $base = (Resolve-Path -LiteralPath $c.proyecto).Path
 $raiz = (Resolve-Path -LiteralPath $c.raiz).Path
@@ -24,6 +21,9 @@ foreach ($ruta in @($pythonAtlas, $rapid, (Join-Path $base 'sincronizar_mobile_c
     if (!(Test-Path -LiteralPath $ruta -PathType Leaf)) { throw "Falta runtime o Motor: $ruta" }
 }
 $env:ATLAS_OPERACION_CONFIG = (Resolve-Path -LiteralPath $Config).Path
+$env:ATLAS_PULL_AUTORIZACION = (Resolve-Path -LiteralPath $Autorizacion).Path
+& $pythonAtlas -B (Join-Path $base 'atlas_core\autorizacion_pull.py') --autorizacion $env:ATLAS_PULL_AUTORIZACION --config $env:ATLAS_OPERACION_CONFIG
+if ($LASTEXITCODE -ne 0) { throw 'Autorizacion PULL ausente, invalida, revocada o vencida.' }
 $env:ATLAS_DATA_DIR = $raiz
 $env:ATLAS_CATALOGOS_DIR = Join-Path $raiz 'catalogos_privados'
 $env:ATLAS_OCR_PROVIDER = 'rapidocr'

@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import shutil
 from unittest.mock import patch
 
 import pytest
@@ -92,11 +94,13 @@ def test_lanzador_configura_rapidocr_y_no_admite_equipo_unico(tmp_path, monkeypa
     (proyecto / '.venv/Scripts').mkdir(parents=True)
     (proyecto / '.venv/Scripts/python.exe').touch()
     (proyecto / 'sincronizar_mobile_cloud.py').touch()
+    (proyecto / 'atlas_core').mkdir()
+    shutil.copyfile(RAIZ / 'atlas_core/autorizacion_pull.py', proyecto / 'atlas_core/autorizacion_pull.py')
     rapid = tmp_path / 'rapid.exe'; rapid.touch()
     monkeypatch.setenv('ATLAS_RAPIDOCR_PYTHON', str(rapid))
     monkeypatch.setenv('ATLAS_CLOUD_MOTOR_TOKEN', 'sintetico')
     c = tmp_path / 'config.json'; a = tmp_path / 'auth.json'
-    politica = dict(proyecto=str(proyecto), raiz=str(tmp_path), autorizada=True, habilitada=True, modo_escritor='lease_cloud')
+    politica = dict(proyecto=str(proyecto), raiz=str(tmp_path), python=sys.executable, autorizada=True, habilitada=True, modo_escritor='lease_cloud')
     c.write_text(json.dumps(politica))
     a.write_text(json.dumps(dict(autor='Javier',exclusividad_verificada=True,vence_utc='2099-01-01T00:00:00Z')))
     result = _ps('pull_pc_nuevo.ps1','-Config',c,'-Autorizacion',a,'-Validar')
@@ -107,6 +111,14 @@ def test_lanzador_configura_rapidocr_y_no_admite_equipo_unico(tmp_path, monkeypa
     assert _ps('pull_pc_nuevo.ps1','-Config',c,'-Autorizacion',a,'-Validar').returncode != 0
     politica['modo_escritor'] = 'lease_cloud'; c.write_text(json.dumps(politica))
     a.write_text(json.dumps(dict(autor='Javier',exclusividad_verificada=True,vence_utc='2000-01-01T00:00:00Z')))
+    assert _ps('pull_pc_nuevo.ps1','-Config',c,'-Autorizacion',a,'-Validar').returncode != 0
+    from atlas_core.autorizacion_pull import identidad_equipo
+    politica['machine_guid'] = identidad_equipo(); c.write_text(json.dumps(politica))
+    persistente = dict(schema_version=1,modo='persistente',autor='Javier',exclusividad_verificada=True,
+                      habilitada=True,revocada=False,machine_guid=politica['machine_guid'])
+    a.write_text(json.dumps(persistente))
+    assert _ps('pull_pc_nuevo.ps1','-Config',c,'-Autorizacion',a,'-Validar').returncode == 0
+    persistente['revocada'] = True; a.write_text(json.dumps(persistente))
     assert _ps('pull_pc_nuevo.ps1','-Config',c,'-Autorizacion',a,'-Validar').returncode != 0
 
 
