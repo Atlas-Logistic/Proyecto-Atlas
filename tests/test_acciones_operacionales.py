@@ -457,13 +457,92 @@ def test_corregir_campo_documental_retira_y_recalcula_decisiones_obsoletas(entor
 
 def test_campo_documental_no_autorizado_o_invalido(entorno):
     capa = CapaAccionesOperacionales(entorno["raiz"])
-    assert capa.previsualizar("DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": "500001", "campo": "peso_kg", "valor": "1"},
+    assert capa.previsualizar("DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": "500001", "campo": "peso_kg", "valor": "0"},
                               actor="JAVIER")["codigo"] == "PARAMETRO_INVALIDO"
     assert capa.previsualizar("DOCUMENTO_CORREGIR_CAMPO",
                               {"numero_guia": "500001", "campo": "rut_cliente", "valor": "99.999.999-0"},
                               actor="JAVIER")["codigo"] == "PARAMETRO_INVALIDO"
     assert capa.previsualizar("DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": "999999", "campo": "cliente", "valor": "X"},
                               actor="JAVIER")["codigo"] == "ENTIDAD_NO_ENCONTRADA"
+
+
+@pytest.mark.parametrize(("guia", "campo", "valor"), [
+    # Casos sintéticos inspirados en las guías informadas: ejercitan cada
+    # campo nuevo, sin utilizar ni alterar ninguna guía productiva.
+    ("475510", "fecha", "22-10-2026"),
+    ("482631", "peso_kg", "28500"),
+    ("482580", "hora_entrada_aza", "07:45"),
+    ("482726", "hora_salida_aza", "08:35"),
+])
+def test_corregir_campos_operacionales_nuevos_tiene_preview_validado(entorno, guia, campo, valor):
+    with entorno["dataset"].open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    filas.append(_fila(guia, fecha="21-10-2026", peso_kg="27000", hora_entrada_aza="07:00",
+                       hora_salida_aza="08:00", descripcion_material="MATERIAL OCR"))
+    with entorno["dataset"].open("w", encoding="utf-8-sig", newline="") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    preview = CapaAccionesOperacionales(entorno["raiz"]).previsualizar(
+        "DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": guia, "campo": campo, "valor": valor}, actor="JAVIER",
+    )
+    assert preview["estado"] == "PREVIEW", preview
+    assert preview["valor_actual"][campo] != preview["valor_propuesto"][campo]
+    assert preview["requiere_confirmacion"] is True
+    assert any("sin reconciliación global" in consecuencia for consecuencia in preview["consecuencias"])
+
+
+@pytest.mark.parametrize(("campo", "valor"), [
+    ("fecha", "2026-10-22"), ("fecha", "31-02-2026"),
+    ("peso_kg", "100001"), ("peso_kg", "28,500"),
+    ("hora_entrada_aza", "24:00"), ("hora_salida_aza", "8:35"),
+    ("descripcion_material", "No encontrado"),
+])
+def test_corregir_campos_operacionales_nuevos_rechaza_formato_o_rango(entorno, campo, valor):
+    resultado = CapaAccionesOperacionales(entorno["raiz"]).previsualizar(
+        "DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": "500001", "campo": campo, "valor": valor}, actor="JAVIER",
+    )
+    assert resultado["codigo"] == "PARAMETRO_INVALIDO", resultado
+
+
+def test_corregir_material_conserva_revision_critica_y_ledger_frena_ocr_futuro(entorno):
+    with entorno["dataset"].open(encoding="utf-8-sig", newline="") as archivo:
+        filas = list(csv.DictReader(archivo, delimiter=";"))
+    filas.append(_fila(
+        "482673", descripcion_material="No encontrado", estado_ruta="RUTA_CALCULADA",
+        motivos_revision_documento="DOCUMENTO_DEGRADADO | CLIENTE_AUSENTE | MATERIAL_AUSENTE",
+        indicador_revision="REVISAR", estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION",
+    ))
+    with entorno["dataset"].open("w", encoding="utf-8-sig", newline="") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        escritor.writerows(filas)
+
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar(
+        "DOCUMENTO_CORREGIR_CAMPO",
+        {"numero_guia": "482673", "campo": "descripcion_material", "valor": "GRAVA 3/4"}, actor="JAVIER",
+    )
+    resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    assert resultado["revalidacion"]["guias"] is not None
+    assert resultado["revalidacion"]["reporte"] is not None
+
+    with entorno["dataset"].open(encoding="utf-8-sig", newline="") as archivo:
+        fila = next(f for f in csv.DictReader(archivo, delimiter=";") if f["numero_guia"] == "482673")
+    assert fila["descripcion_material"] == "GRAVA 3/4"
+    assert "DOCUMENTO_DEGRADADO" in fila["motivos_revision_documento"]
+    assert "CLIENTE_AUSENTE" in fila["motivos_revision_documento"]
+    assert fila["indicador_revision"] == "REVISAR"
+    assert fila["estado_documental"] == "REQUIERE_REVISION"
+
+    from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
+    intento_ocr = reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=entorno["raiz"], archivo="482673.jpeg", valores={"descripcion_material": "LECTURA OCR"},
+        dry_run=True, numero_guia="482673", campos_adicionales_permitidos=frozenset(CAMPOS_DOCUMENTALES_CONTROLADOS),
+    )
+    assert intento_ocr["campos_bloqueados_por_ledger"] == ["descripcion_material"]
 
 
 def test_campo_fijado_por_decision_de_revision_no_se_pisa(entorno):

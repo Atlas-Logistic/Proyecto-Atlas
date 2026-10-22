@@ -40,6 +40,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -89,6 +90,33 @@ _MOTIVO_TRANSPORTE_SIN_ETIQUETA = MotivoRevisionDocumento.TRANSPORTE_AUSENTE_SIN
 # cada campo, sin excepción). Un documento SIN este motivo conserva el
 # gating estricto por motivo específico de siempre.
 _MOTIVO_DOCUMENTO_DEGRADADO = MotivoRevisionDocumento.DOCUMENTO_DEGRADADO.value
+
+
+def _fecha_emision_valida(valor: str) -> bool:
+    """Fecha documental canónica: DD-MM-AAAA y dentro de un rango operativo.
+
+    El dataset histórico de Atlas usa este formato (no ISO); validarla aquí
+    impide que una corrección humana deje una fecha que los consumidores de
+    viajes no puedan interpretar.
+    """
+    try:
+        fecha = datetime.strptime(valor, "%d-%m-%Y").date()
+    except ValueError:
+        return False
+    return 2000 <= fecha.year <= 2100
+
+
+def _peso_documental_valido(valor: str) -> bool:
+    # Kilogramos enteros: sin signo, decimales ni separadores ambiguos.
+    return bool(re.fullmatch(r"[1-9][0-9]{0,5}", valor)) and int(valor) <= 100_000
+
+
+def _hora_documental_valida(valor: str) -> bool:
+    return bool(re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", valor))
+
+
+def _material_documental_valido(valor: str) -> bool:
+    return valor not in _AUSENTES and len(valor) <= 200
 
 # --- Campos reparables -----------------------------------------------
 # Cada entrada: campo -> (motivos que lo marcan degradado hoy,
@@ -795,6 +823,20 @@ CAMPOS_FOCALES_CONOCIDOS: dict[str, object] = {
     "numero_transporte": lambda v: bool(re.fullmatch(r"[0-9]{10}", v)),
 }
 
+# No se exponen al reparador genérico: únicamente
+# DOCUMENTO_CORREGIR_CAMPO los habilita después de producir preview,
+# confirmación humana, respaldo y auditoría. Así mantenemos la superficie
+# previa del reparador (que también usan mantenimientos técnicos) acotada.
+CAMPOS_DOCUMENTALES_CONTROLADOS: dict[str, object] = {
+    # No gatillan OCR ni una reconciliación global; el ledger posterior
+    # protege cada valor de OCR.
+    "fecha": _fecha_emision_valida,
+    "peso_kg": _peso_documental_valido,
+    "hora_entrada_aza": _hora_documental_valida,
+    "hora_salida_aza": _hora_documental_valida,
+    "descripcion_material": _material_documental_valido,
+}
+
 # No se añaden al conjunto público genérico: sólo la acción tipada de
 # corrección documental puede habilitarlos después de corroborar la identidad
 # en el catálogo activo. Así un llamador directo del reparador no puede usarlo
@@ -852,6 +894,18 @@ _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
         MotivoRevisionDocumento.PATENTE_AMBIGUA.value,
     ),
     "numero_transporte": (_MOTIVO_TRANSPORTE, _MOTIVO_TRANSPORTE_SIN_ETIQUETA),
+    # Sólo se retiran motivos que describen exactamente el campo corregido.
+    # En particular, DOCUMENTO_DEGRADADO y cualquier otro motivo crítico
+    # independiente se conservan y mantienen el documento en revisión.
+    "fecha": (MotivoRevisionDocumento.FECHA_SIN_CORROBORAR.value,),
+    "peso_kg": (MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value,),
+    "hora_entrada_aza": (),
+    "hora_salida_aza": (),
+    "descripcion_material": (
+        MotivoRevisionDocumento.MATERIAL_AUSENTE.value,
+        MotivoRevisionDocumento.MATERIAL_OCR_NO_CONFIABLE.value,
+        MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value,
+    ),
 }
 
 
@@ -909,9 +963,11 @@ def reparar_documento_focal_con_valores_conocidos(
 
     identidad_confirmada = campos_adicionales_permitidos == frozenset(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA)
     numero_guia_corregido = campos_adicionales_permitidos == frozenset(CAMPOS_NUMERO_GUIA_CORREGIDO)
+    correccion_documental_controlada = campos_adicionales_permitidos == frozenset(CAMPOS_DOCUMENTALES_CONTROLADOS)
     campos_permitidos = {**CAMPOS_FOCALES_CONOCIDOS,
                          **(CAMPOS_IDENTIDAD_CHOFER_CONFIRMADA if identidad_confirmada else {}),
-                         **(CAMPOS_NUMERO_GUIA_CORREGIDO if numero_guia_corregido else {})}
+                         **(CAMPOS_NUMERO_GUIA_CORREGIDO if numero_guia_corregido else {}),
+                         **(CAMPOS_DOCUMENTALES_CONTROLADOS if correccion_documental_controlada else {})}
     try:
         aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
         aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)
