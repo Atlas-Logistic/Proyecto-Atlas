@@ -139,6 +139,71 @@ guías, y 11 de ellos tienen una alternativa no confirmada.
   planilla. Si un camión rígido realmente no lleva rampla (`NO_APLICA`), debe
   declararlo una persona.
 
+## Respaldo de los estados de A (auditoría 2026-10-22)
+
+`auditar_respaldo_a.py` no modifica la referencia: escribe aparte el respaldo
+de cada campo de A. Hechos verificados en las planillas:
+
+- v1 fue creada por un script (openpyxl, 17/07) y guardada después por una
+  persona en Excel (18/07). La versión prellenada es salida del script.
+- Los colores de celda (verde «alta confianza», amarillo) son idénticos en el
+  prellenado: los puso el generador, no son una marca humana.
+- `VALIDADO`: 10 filas ya traían «SÍ» desde el prellenado, sin marca humana
+  posterior. 20 filas pasaron de «REVISAR» a «SI», lo que es una marca humana
+  explícita, pero de fila, no de campo.
+- Un cambio frente al prellenado no prueba por sí solo autoría humana del
+  campo, y la ausencia de cambio no prueba duda.
+- El único respaldo explícito **por campo** es `fecha_real_validada` de la
+  revisión humana de fechas.
+
+| Respaldo | Campos de A |
+|---|---:|
+| `EXPLICITO_CAMPO_REVISION_FECHAS` | 29 |
+| `CONFLICTO_ENTRE_FUENTES_HUMANAS` | 1 |
+| `EXPLICITO_FILA` (fila marcada SI tras el prellenado) | 320 |
+| `NINGUNO` (fila «SÍ» del generador) | 160 |
+| `SIN_FUENTE` (`despachar_a`) | 30 |
+
+144 valores marcados hoy `CONFIRMADO_HUMANO` tienen respaldo `NINGUNO`. Un
+comparador estricto debe filtrar por la columna `respaldo`.
+
+## Propuestas visuales del agente y revisión por lotes
+
+Las lecturas del agente se guardan **separadas** de la referencia, con
+`fuente = AGENTE_VISUAL <modelo>`, el recorte usado como evidencia y su caja
+normalizada. Sólo cubren campos `PENDIENTE_CONFIRMACION` (todos los de B y C,
+y los pendientes de A). No se usó OCR ni resultados de Atlas. No se completó
+nada a partir de otras guías ni de catálogos.
+
+Estados de propuesta: `PROPUESTA`, `AMBIGUO` (los caracteres dudosos se
+marcan con `?`), `ILEGIBLE`, `AUSENTE_EN_DOCUMENTO` y `NO_VISIBLE`.
+
+| Bloque | Propuesta | Ambiguo | Ilegible | Ausente en documento | Total |
+|---|---:|---:|---:|---:|---:|
+| A (pendientes) | 69 | 20 | 1 | 6 | 96 |
+| B | 345 | 4 | 0 | 11 | 360 |
+| C | 233 | 24 | 8 | 5 | 270 |
+
+Herramientas:
+
+- `recortar.py`: recorta, rota y amplía con Pillow. Caja normalizada 0–1; sin
+  OCR.
+- `preparar_revision.py`: genera `propuestas_agente.csv` y lotes de hasta 50
+  filas sin partir guías. Cada lote tiene una página HTML estática (recorte
+  junto a la propuesta, sin scripts ni recursos externos) y un CSV donde la
+  persona registra `ACEPTAR`, `CORREGIR` (con `valor_corregido` o
+  `estado_corregido`) o `DUDA`.
+
+Regla para el comparador: leer sólo `referencia_campos.csv`. Las propuestas
+pasan a la referencia únicamente con una decisión humana registrada en el CSV
+del lote; hasta entonces cuentan como pendientes.
+
+Hallazgos visuales que conviene confirmar primero: el código de destinatario
+impreso coincide con el código de cliente en varias guías (es el documento, no
+un error de transcripción). La planilla registra en algunos casos SOLICITANTE
+u OBRA como cliente, o DESPACHAR A como dirección. Hay patentes leídas con un
+carácter distinto del registrado.
+
 ## Reutilizable para el comparador
 
 En Motor: `atlas_core.catalogos.normalizar_rut` y `normalizar_patente`,
