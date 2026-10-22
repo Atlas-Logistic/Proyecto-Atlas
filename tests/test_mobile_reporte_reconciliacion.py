@@ -381,7 +381,7 @@ def test_fallo_revalidando_asociacion_no_impide_la_reconciliacion_del_reporte(tm
         repositorio.guardar(envio_id_arg, registro)
         return registro
 
-    def revalidar_asociacion_rota(repositorio, *, dataset):
+    def revalidar_asociacion_rota(repositorio, *, dataset, **kwargs):
         raise RuntimeError("catálogo ilegible (simulado)")
 
     monkeypatch.setattr(mobile_mod, "procesar_envio_mobile", procesar_envio_mobile_falso)

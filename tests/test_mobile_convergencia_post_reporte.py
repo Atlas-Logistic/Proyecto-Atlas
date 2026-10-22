@@ -175,8 +175,8 @@ def test_convergencia_que_escribe_el_dataset_publica_un_segundo_reporte_automati
     revalidar_real = mobile_mod.revalidar_asociacion_mobile_sin_ocr
     llamadas: list[int] = []
 
-    def revalidar_con_respaldo_de_lote(repositorio, *, dataset):
-        resultado = revalidar_real(repositorio, dataset=dataset)
+    def revalidar_con_respaldo_de_lote(repositorio, *, dataset, **kwargs):
+        resultado = revalidar_real(repositorio, dataset=dataset, **kwargs)
         llamadas.append(1)
         if len(llamadas) == 2:  # la pasada POST-reporte
             hermana = {c: "" for c in COLUMNAS}
@@ -205,7 +205,7 @@ def test_fallo_del_reporte_no_dispara_convergencia_ni_segundo_reporte(escenario,
     llamadas: list[int] = []
     monkeypatch.setattr(
         mobile_mod, "revalidar_asociacion_mobile_sin_ocr",
-        lambda repositorio, *, dataset: llamadas.append(1) or {"revisados": 0, "actualizados": []},
+        lambda repositorio, *, dataset, **kwargs: llamadas.append(1) or {"revisados": 0, "actualizados": []},
     )
 
     def reporte_roto(**_kwargs):

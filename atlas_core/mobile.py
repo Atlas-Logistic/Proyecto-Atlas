@@ -24,6 +24,7 @@ from atlas_core.decisiones_pendientes import (
     NOMBRE_LOCK_DECISIONES_PENDIENTES, _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
 )
 from atlas_core.gestor_viajes import transporte_valido
+from atlas_core.alcance_revalidacion import alcance_guias, guias_en_alcance
 from atlas_core.procesamiento_masivo import (
     COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, anotar_fecha_recepcion, escalar_resultado_ia_en_memoria,
     procesar_archivo,
@@ -1193,50 +1194,55 @@ def _procesar_envio_mobile_impl(
             # protegido `generar_artefacto`, que reintentaría adquirir
             # este mismo lock no reentrante) hace la escritura final,
             # todavía dentro de la misma sección crítica.
-            ruta_artefacto = Path(dataset).parent / "decisiones_pendientes.json"
-            if relectura_documento and relectura_documento.get("promovida"):
-                # Las tarjetas del documento ya se regeneraron desde su fila
-                # canónica; las de esta lectura no tienen fila propia.
-                decisiones_nuevas.clear()
-            with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
-                previas: list[dict[str, object]] = []
-                try:
-                    previas = list(json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", []))
-                except (OSError, json.JSONDecodeError):
-                    pass
-                decisiones_reconciliadas = regenerar_decisiones_persistidas(
-                    decisiones=previas + decisiones_nuevas,
-                    carpeta_catalogos=carpeta_catalogos,
-                    ruta_dataset=dataset,
-                )
-                _generar_artefacto_sin_lock(
-                    ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-                    decisiones=decisiones_reconciliadas, ruta_salida=ruta_artefacto,
-                )
-            # El lote Desktop no termina al publicar una tarjeta: pasa la
-            # bandeja por el motor de evidencia, que enriquece vehículos
-            # con la asignación humana chofer->vehículo y aplica sólo los
-            # casos realmente inequívocos. Mobile publicaba la misma
-            # tarjeta, pero omitía esa pasada final; por eso una lectura
-            # distinta con asignación fuerte quedaba pendiente aunque el
-            # Motor ya podía resolverla. Se invoca fuera del lock de la
-            # bandeja (el reconciliador adquiere ese lock por sí mismo).
-            #
-            # P0 BLOQUEO MOBILE (08-10-2026, envío 35f58c4e): esa pasada es
-            # GLOBAL (toda la bandeja + escaneo de `reportes/*/viajes.csv`)
-            # y sobre G: en streaming tardó horas, reteniendo el cierre de
-            # ESTE envío (envio.json, reporte, confirmación Cloud) y con él
-            # toda la cola PULL. Con `diferir_reconciliacion_bandeja` el
-            # envío sólo deja constancia persistida (`reconciliacion_
-            # bandeja.estado == PENDIENTE`) y el consumidor la ejecuta UNA
-            # vez al final de su pasada (`reconciliar_bandeja_diferida_
-            # mobile`), que sólo la marca COMPLETADA si realmente corrió.
-            if diferir_reconciliacion_bandeja:
-                registro["reconciliacion_bandeja"] = _solicitud_reconciliacion_bandeja(registro)
-            else:
-                from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
-                reconciliar_bandeja_decisiones(raiz_atlas=Path(dataset).parent.parent.parent)
-
+            guias, _ = _alcance_causal_mobile(
+                repositorio, {envio_id}, dataset,
+                registro_actual={**registro, 'datos_ocr': datos, 'resultado_asociacion': asociacion,
+                                 'relectura_documento': relectura_documento or {}},
+            )
+            with alcance_guias(dataset, guias):
+                ruta_artefacto = Path(dataset).parent / "decisiones_pendientes.json"
+                if relectura_documento and relectura_documento.get("promovida"):
+                    # Las tarjetas del documento ya se regeneraron desde su fila
+                    # canónica; las de esta lectura no tienen fila propia.
+                    decisiones_nuevas.clear()
+                with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+                    previas: list[dict[str, object]] = []
+                    try:
+                        previas = list(json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", []))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                    decisiones_reconciliadas = regenerar_decisiones_persistidas(
+                        decisiones=previas + decisiones_nuevas,
+                        carpeta_catalogos=carpeta_catalogos,
+                        ruta_dataset=dataset,
+                    )
+                    _generar_artefacto_sin_lock(
+                        ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                        decisiones=decisiones_reconciliadas, ruta_salida=ruta_artefacto,
+                    )
+                # El lote Desktop no termina al publicar una tarjeta: pasa la
+                # bandeja por el motor de evidencia, que enriquece vehículos
+                # con la asignación humana chofer->vehículo y aplica sólo los
+                # casos realmente inequívocos. Mobile publicaba la misma
+                # tarjeta, pero omitía esa pasada final; por eso una lectura
+                # distinta con asignación fuerte quedaba pendiente aunque el
+                # Motor ya podía resolverla. Se invoca fuera del lock de la
+                # bandeja (el reconciliador adquiere ese lock por sí mismo).
+                #
+                # P0 BLOQUEO MOBILE (08-10-2026, envío 35f58c4e): esa pasada es
+                # GLOBAL (toda la bandeja + escaneo de `reportes/*/viajes.csv`)
+                # y sobre G: en streaming tardó horas, reteniendo el cierre de
+                # ESTE envío (envio.json, reporte, confirmación Cloud) y con él
+                # toda la cola PULL. Con `diferir_reconciliacion_bandeja` el
+                # envío sólo deja constancia persistida (`reconciliacion_
+                # bandeja.estado == PENDIENTE`) y el consumidor la ejecuta UNA
+                # vez al final de su pasada (`reconciliar_bandeja_diferida_
+                # mobile`), que sólo la marca COMPLETADA si realmente corrió.
+                if diferir_reconciliacion_bandeja:
+                    registro["reconciliacion_bandeja"] = _solicitud_reconciliacion_bandeja(registro)
+                else:
+                    from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
+                    reconciliar_bandeja_decisiones(raiz_atlas=Path(dataset).parent.parent.parent, guias_objetivo=guias)
         estado_final = _estado_final_mobile(datos, asociacion, captura_ilegible)
 
         registro.update({
@@ -2075,23 +2081,24 @@ def _regenerar_decisiones_de_documento(dataset: Path, *, archivo: str, carpeta_c
     fila = next((f for f in _filas_dataset(dataset) if f.get("archivo") == archivo), None)
     if fila is None:
         return
-    ruta_artefacto = dataset.parent / "decisiones_pendientes.json"
-    with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
-        try:
-            previas = list(json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", []))
-        except (OSError, json.JSONDecodeError):
-            previas = []
-        conservadas = [d for d in previas if str((d.get("documento") or {}).get("archivo", "")) != archivo]
-        regeneradas = detectar_decisiones_documento(
-            archivo=archivo, datos=_datos_sinteticos_desde_fila(fila), carpeta_catalogos=Path(carpeta_catalogos),
-        )
-        _generar_artefacto_sin_lock(
-            ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-            decisiones=regenerar_decisiones_persistidas(
-                decisiones=conservadas + list(regeneradas), carpeta_catalogos=carpeta_catalogos, ruta_dataset=dataset,
-            ),
-            ruta_salida=ruta_artefacto,
-        )
+    with alcance_guias(dataset, {str(fila.get('numero_guia') or '').strip()} - {''}):
+        ruta_artefacto = dataset.parent / "decisiones_pendientes.json"
+        with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+            try:
+                previas = list(json.loads(ruta_artefacto.read_text(encoding="utf-8")).get("decisiones", []))
+            except (OSError, json.JSONDecodeError):
+                previas = []
+            conservadas = [d for d in previas if str((d.get("documento") or {}).get("archivo", "")) != archivo]
+            regeneradas = detectar_decisiones_documento(
+                archivo=archivo, datos=_datos_sinteticos_desde_fila(fila), carpeta_catalogos=Path(carpeta_catalogos),
+            )
+            _generar_artefacto_sin_lock(
+                ruta_dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                decisiones=regenerar_decisiones_persistidas(
+                    decisiones=conservadas + list(regeneradas), carpeta_catalogos=carpeta_catalogos, ruta_dataset=dataset,
+                ),
+                ruta_salida=ruta_artefacto,
+            )
 
 
 def recuperar_relectura_reenvio_mobile(
@@ -2162,7 +2169,83 @@ def _indicador_fila_canonica_de_reenvio(
     return candidatas[0].get("indicador_revision")
 
 
-def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *, dataset: Path) -> dict[str, object]:
+def _alcance_causal_mobile(repositorio, envio_ids, dataset, *, registro_actual=None):
+    """Documento/reenvio canonico, transporte y vinculos explicitos de lote/evidencia.
+
+    Leer otras filas como evidencia no autoriza revalidarlas. No se expande
+    por chofer, cliente, obra, fecha ni placeholders compartidos. Sin una
+    guia identificable se devuelve vacio, nunca mantenimiento global.
+    """
+    filas = _filas_dataset(Path(dataset)) if dataset and Path(dataset).is_file() else []
+    registros = {r['envio_id']: r for r in repositorio.historial()}
+    if registro_actual is not None:
+        registros[registro_actual['envio_id']] = registro_actual
+    elegidos = set(envio_ids)
+    guias, transportes, lotes = set(), set(), set()
+
+    def guia(valor):
+        texto = str(valor or '').strip()
+        return texto if texto.upper() not in {'', 'NO ENCONTRADO', 'NO DETERMINADO', 'SIN DATO', 'N/A'} else ''
+
+    def identidades(registro):
+        doc = registro.get('datos_ocr') or {}
+        asociacion = registro.get('resultado_asociacion') or {}
+        archivos = {str(registro.get('archivo_dataset') or ''),
+                    f"mobile/{registro['envio_id']}/{registro.get('foto_original', 'original.jpg')}",
+                    str((registro.get('relectura_documento') or {}).get('archivo_canonico') or '')} - {''}
+        propias = [f for f in filas if f.get('archivo') in archivos]
+        documentos = propias or [doc, asociacion]
+        gs = {guia(d.get('numero_guia')) for d in documentos} - {''}
+        ts = {str(d.get('numero_transporte') or '').strip() for d in documentos
+              if transporte_valido(d.get('numero_transporte', ''))}
+        if propias and not ts:
+            # Una fila aun sin transporte puede tener asociacion resuelta;
+            # eso no la vuelve candidata a otro viaje de la misma tanda.
+            ts.update(str(d.get('numero_transporte') or '').strip() for d in [asociacion, doc]
+                      if guia(d.get('numero_guia')) in gs and transporte_valido(d.get('numero_transporte', '')))
+        return gs, ts
+
+    identidades_por_envio = {id: identidades(r) for id, r in registros.items()}
+    # Punto fijo acotado por filas/envios existentes: preserva hermanos del
+    # mismo viaje y la inferencia de transporte por lote, sin barrido escritor.
+    cambio = True
+    while cambio:
+        anterior = (set(elegidos), set(guias), set(transportes), set(lotes))
+        for id in tuple(elegidos):
+            registro = registros.get(id)
+            if registro is None:
+                continue
+            gs, ts = identidades_por_envio[id]
+            guias.update(gs); transportes.update(ts)
+            lote = str(registro.get('lote_id') or '').strip()
+            if lote:
+                lotes.add(lote)
+            referencia = str(registro.get('evidencia_de_envio_id') or '').strip()
+            if referencia:
+                elegidos.add(referencia)
+        for fila in filas:
+            g = guia(fila.get('numero_guia'))
+            t = str(fila.get('numero_transporte') or '').strip()
+            if (g and g in guias) or (transporte_valido(t) and t in transportes):
+                if g:
+                    guias.add(g)
+                if transporte_valido(t):
+                    transportes.add(t)
+        for id, registro in registros.items():
+            gs, ts = identidades_por_envio[id]
+            if (gs & guias or ts & transportes or
+                (not ts and registro.get('lote_id') and registro['lote_id'] in lotes) or
+                registro.get('evidencia_de_envio_id') in elegidos):
+                elegidos.add(id)
+        cambio = anterior != (elegidos, guias, transportes, lotes)
+    heredado = guias_en_alcance(dataset) if dataset else None
+    if heredado is not None:
+        guias &= heredado
+        elegidos = {id for id in elegidos if identidades_por_envio.get(id, (set(), set()))[0] & guias}
+    return guias, elegidos
+
+
+def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *, dataset: Path, envios_objetivo: set[str] | None = None) -> dict[str, object]:
     """Bloque ASOCIACIÓN MOBILE V2, Sección 7 -- reevaluación: relee la
     operación vigente (`dataset`, ya persistida) y vuelve a intentar
     `asociar_documento` para los envíos que quedaron SIN_ASOCIACION o
@@ -2221,6 +2304,8 @@ def revalidar_asociacion_mobile_sin_ocr(repositorio: RepositorioEnviosMobile, *,
     historial_inicial = repositorio.historial()
     historial_por_lote = _HistorialPorLote(repositorio, historial_inicial)
     for registro_historial in historial_inicial:
+        if envios_objetivo is not None and registro_historial['envio_id'] not in envios_objetivo:
+            continue
         asociacion_previa_historial = registro_historial.get("resultado_asociacion") or {}
         if (
             not _asociacion_reintentable(asociacion_previa_historial)
@@ -2362,7 +2447,8 @@ def _revalidar_asociacion_diagnosticable(repositorio: "RepositorioEnviosMobile",
     siguen describiendo únicamente el resultado de procesar el documento),
     y nunca duplica ni reprocesa nada."""
     try:
-        revalidar_asociacion_mobile_sin_ocr(repositorio, dataset=dataset)
+        _, envios = _alcance_causal_mobile(repositorio, {envio_id}, dataset)
+        revalidar_asociacion_mobile_sin_ocr(repositorio, dataset=dataset, envios_objetivo=envios)
     except Exception as error:  # nunca debe impedir la reconciliación del reporte que sigue.
         try:
             with bloqueo_sesion(
@@ -2402,8 +2488,11 @@ def _regenerar_reporte_tras_envio_mobile(repositorio: "RepositorioEnviosMobile",
     sello = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     intento: dict[str, object] = {"intentado_en": datetime.now(timezone.utc).isoformat()}
     try:
+        dataset = repositorio.raiz_atlas / 'operacion/actual/analisis_completo_guias.csv'
+        guias, _ = _alcance_causal_mobile(repositorio, {envio_id}, dataset)
         resultado = revalidar_y_regenerar_reporte(
             raiz_atlas=repositorio.raiz_atlas, nombre_carpeta_reporte=f"reporte_mobile_{sello}",
+            guias_objetivo=guias,
         )
         intento.update({
             "estado": "OK",
@@ -2861,7 +2950,7 @@ def procesar_y_revalidar_envio_mobile(
     `servidor_mobile.py`) o por el consumidor PULL local (`atlas_core.
     mobile_sync_cliente`, Bloque MOBILE SINCRONIZACIÓN PULL V1). Procesa
     (OCR/B1/asociación) y, en el MISMO hilo llamante, reintenta la
-    asociación de cualquier otro envío que hubiera quedado SIN_ASOCIACION/
+    asociación de hermanos causales que hubieran quedado SIN_ASOCIACION/
     PROPUESTA_REQUIERE_REVISION, y siempre reconcilia el reporte/`estado_
     operacion.json` al final -- incluso si el paso de revalidación de
     asociación falló (ver `_revalidar_asociacion_diagnosticable`)."""
@@ -2900,7 +2989,7 @@ def procesar_y_revalidar_envio_mobile(
 
 
 def _solicitud_reconciliacion_bandeja(registro: Mapping[str, object]) -> dict[str, object]:
-    """Constancia persistida de que este envío dejó la bandeja global
+    """Constancia persistida de que este envío dejó su bandeja focal
     pendiente de reconciliar. Un reproceso del mismo envío la renueva
     (nuevo `solicitud_id`) sin perder el historial de intentos."""
     previa = dict(registro.get("reconciliacion_bandeja") or {})
@@ -2916,7 +3005,7 @@ def reconciliar_bandeja_diferida_mobile(
     repositorio: "RepositorioEnviosMobile", *, raiz_atlas: str | Path,
     reconciliador: Callable[..., object] | None = None,
 ) -> dict[str, object]:
-    """Ejecuta UNA vez la reconciliación global de la bandeja que los
+    """Ejecuta UNA vez la reconciliación focal de la bandeja que los
     envíos procesados con `diferir_reconciliacion_bandeja=True` dejaron
     PENDIENTE (P0 BLOQUEO MOBILE).
 
@@ -2942,7 +3031,10 @@ def reconciliar_bandeja_diferida_mobile(
     }
     error: str | None = None
     try:
-        reconciliador(raiz_atlas=Path(raiz_atlas))
+        dataset = Path(raiz_atlas) / 'operacion/actual/analisis_completo_guias.csv'
+        guias, _ = _alcance_causal_mobile(repositorio, set(vistas), dataset)
+        with alcance_guias(dataset, guias):
+            reconciliador(raiz_atlas=Path(raiz_atlas), guias_objetivo=guias)
     except Exception as exc:  # la bandeja vigente queda intacta; se reintenta después
         error = f"{type(exc).__name__}: {exc}"
     fin = datetime.now(timezone.utc).isoformat()

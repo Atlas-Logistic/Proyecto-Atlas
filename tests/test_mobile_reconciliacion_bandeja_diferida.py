@@ -267,7 +267,7 @@ def test_solicitud_renovada_durante_la_pasada_sigue_pendiente(tmp_path, monkeypa
     registro["reconciliacion_bandeja"] = mobile._solicitud_reconciliacion_bandeja(registro)
     entorno.repo.guardar(ENVIO, registro)
 
-    def reconciliador_con_reproceso_concurrente(*, raiz_atlas):
+    def reconciliador_con_reproceso_concurrente(*, raiz_atlas, guias_objetivo):
         # Un reproceso del mismo envío renueva la solicitud mientras corre la pasada.
         actual = entorno.repo.cargar(ENVIO)
         actual["reconciliacion_bandeja"] = mobile._solicitud_reconciliacion_bandeja(actual)
