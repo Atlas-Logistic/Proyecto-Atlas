@@ -89,6 +89,7 @@ from atlas_core.extractor import (
     detectar_captura_recortada_posible,
     etiqueta_propietaria_valor_encabezado,
     extraer_datos,
+    patron_etiqueta_fecha,
 )
 
 # Bloque P2 SPAWN/IPC -- `atlas_core.ocr` (vía `easyocr` -> `torch` ->
@@ -883,9 +884,9 @@ def _clasificar_contexto_fecha(
     fin_candidato: int,
 ) -> tuple[int, str]:
     etiquetas = (
-        (re.compile(r"FECHA\s+(?:DE\s+)?EMISION"), 0, "FECHA DE EMISION"),
-        (re.compile(r"FECHA\s+(?:DE\s+)?SALIDA"), 1, "FECHA SALIDA"),
-        (re.compile(r"FECHA\s+(?:DE\s+)?LLEGADA"), 2, "FECHA LLEGADA"),
+        (re.compile(patron_etiqueta_fecha("EMISION")), 0, "FECHA DE EMISION"),
+        (re.compile(patron_etiqueta_fecha("SALIDA")), 1, "FECHA SALIDA"),
+        (re.compile(patron_etiqueta_fecha("LLEGADA")), 2, "FECHA LLEGADA"),
         (re.compile(r"\bFECHA\b"), 2, "OTRA ETIQUETA DE FECHA"),
     )
     encontradas: list[tuple[int, int, int, str]] = []
