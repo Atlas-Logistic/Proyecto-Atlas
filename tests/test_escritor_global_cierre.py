@@ -14,6 +14,7 @@ from atlas_core import reprocesamiento_reparador as m
 from atlas_core.acciones_operacionales import CapaAccionesOperacionales
 from atlas_core.escritor_operativo import LeaseEscritorOperativo, lease_desde_entorno
 from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+from tests.lectura_ocr_reparador import con_lectura
 from tests.test_revalidacion_transporte_escritor import (
     TRANSPORTE, CloudEscritor, Fabrica, _dataset, _pesos, _pull, _raiz,
 )
@@ -44,7 +45,7 @@ def _marca(raiz):
 
 def _perder_tras_escribir(raiz, monkeypatch):
     """Corrida que reescribe el dataset y pierde el lease antes de reconciliar."""
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     vigencia = iter([True, True, True, False])  # doc1, doc2, escritura, reconciliación
     return m.revalidar_documentos_por_transporte(
         raiz_atlas=raiz, numero_transporte=TRANSPORTE, dry_run=False, proveedor=object(),
@@ -69,7 +70,7 @@ def test_recuperacion_sin_ocr_reconcilia_una_vez_sin_tocar_filas(tmp_path, cloud
     raiz = _raiz(tmp_path)
     _perder_tras_escribir(raiz, monkeypatch)
     filas_antes = _leer_filas(_dataset(raiz))
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: pytest.fail("la recuperación no hace OCR"))
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: pytest.fail("la recuperación no hace OCR")))
 
     resultado = cli.ejecutar_reconciliacion_pendiente_con_escritor(
         base_url="https://cloud.test", token_motor="t", raiz_atlas=raiz, fabrica_escritor=Fabrica(),
@@ -107,7 +108,7 @@ def test_siguiente_revalidacion_completa_la_pendiente_en_una_sola_pasada(tmp_pat
 
 def test_corte_entre_marca_y_dataset_es_recuperable(tmp_path, reconciliaciones, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     def corte(_dataset, _filas):
         raise OSError("corte de energía")
@@ -128,7 +129,7 @@ def test_corte_entre_marca_y_dataset_es_recuperable(tmp_path, reconciliaciones, 
 
 def test_reconciliacion_que_falla_conserva_la_marca(tmp_path, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     def rota(**_kw):
         raise RuntimeError("reporte roto")
@@ -244,7 +245,7 @@ def _respaldos(raiz):
 def test_accion_con_pull_activo_no_respalda_ni_escribe_y_el_token_sigue_valido(
         tmp_path, cloud, reconciliaciones, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     capa = _capa(raiz, _fabrica_accion())
     token = _preview(capa)
     cloud.token = "lease-del-pull"
@@ -264,7 +265,7 @@ def test_accion_con_pull_activo_no_respalda_ni_escribe_y_el_token_sigue_valido(
 
 def test_accion_sin_token_cloud_no_ejecuta(tmp_path, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: pytest.fail("sin escritor no hay OCR"))
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: pytest.fail("sin escritor no hay OCR")))
     capa = CapaAccionesOperacionales(raiz)  # fábrica por defecto: lee el entorno (conftest quita el token)
 
     rechazo = _ejecutar(capa, _preview(capa))
@@ -281,7 +282,7 @@ def test_accion_activa_bloquea_al_pull(tmp_path, cloud, reconciliaciones, monkey
         pulls.append(_pull(Fabrica(), lambda **_k: {"confirmados": ["x"]}))
         return {"peso_kg": "9307"}
 
-    monkeypatch.setattr(m, "procesar_archivo", ocr)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(ocr))
     capa = _capa(raiz, _fabrica_accion())
 
     assert _ejecutar(capa, _preview(capa))["estado"] == "APLICADA"
@@ -302,7 +303,7 @@ def test_accion_con_lease_perdido_no_restaura_encima_del_pull(tmp_path, cloud, r
         _escribir_filas_completas(_dataset(raiz), [*filas, nueva])
         return {"peso_kg": "9307"}
 
-    monkeypatch.setattr(m, "procesar_archivo", ocr_y_relevo)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(ocr_y_relevo))
     capa = _capa(raiz, fabrica)
 
     resultado = _ejecutar(capa, _preview(capa))
@@ -316,7 +317,7 @@ def test_accion_con_lease_perdido_no_restaura_encima_del_pull(tmp_path, cloud, r
 
 def test_accion_con_error_y_lease_vigente_restaura_y_libera(tmp_path, cloud, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     def rota(**_kw):
         raise RuntimeError("reporte roto")

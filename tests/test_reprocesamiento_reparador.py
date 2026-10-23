@@ -10,6 +10,7 @@ import pytest
 from atlas_core import reprocesamiento_reparador as m
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+from tests.lectura_ocr_reparador import con_lectura
 
 
 def _raiz(tmp_path):
@@ -86,7 +87,7 @@ def test_identifica_lote_por_manifiesto_mas_reciente(tmp_path, monkeypatch):
     _escribir_dataset(raiz, [_fila_base()])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True, proveedor=object())
 
     assert resultado["lote"] == "LOTE1"
@@ -101,7 +102,7 @@ def test_identifica_lote_por_nombre_explicito(tmp_path, monkeypatch):
     _escribir_dataset(raiz, [_fila_base()])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, nombre_lote="LOTE1", dry_run=True, proveedor=object())
 
     assert resultado["lote"] == "LOTE1"
@@ -121,7 +122,7 @@ def test_dry_run_no_escribe_nada_en_el_dataset(tmp_path, monkeypatch):
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"chofer": "JUAN PEREZ SOTO"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"chofer": "JUAN PEREZ SOTO"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -142,7 +143,7 @@ def test_promueve_campo_degradado_con_valor_estructuralmente_valido(tmp_path, mo
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"chofer": "JUAN PEREZ SOTO"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"chofer": "JUAN PEREZ SOTO"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -166,7 +167,7 @@ def test_campo_con_decision_humana_nunca_se_toca(tmp_path, monkeypatch):
         {"documento": {"archivo": "IMG1.jpg", "numero_guia": "473100"}, "campo": "chofer", "valor": "PEDRO GOMEZ"},
     ])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"chofer": "OTRO NOMBRE DISTINTO"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"chofer": "OTRO NOMBRE DISTINTO"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -186,7 +187,7 @@ def test_campo_limpio_nunca_se_toca_aunque_extraccion_traiga_otro_valor(tmp_path
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"cliente": "OTRA EMPRESA"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"cliente": "OTRA EMPRESA"}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=object())
 
     assert resultado["campos_cambiados_total"] == 0
@@ -203,7 +204,7 @@ def test_valor_estructuralmente_invalido_no_se_promueve(tmp_path, monkeypatch):
     _escribir_ledger(raiz, [])
 
     # "ABC" no cumple el formato estructural de un RUT -- nunca se promueve.
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"rut_chofer": "ABC"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"rut_chofer": "ABC"}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=object())
 
     assert resultado["campos_cambiados_total"] == 0
@@ -220,7 +221,7 @@ def test_imagen_no_encontrada_se_reporta_sin_intentar_extraccion(tmp_path, monke
     _escribir_ledger(raiz, [])
 
     llamado = []
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: llamado.append(1) or {})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: llamado.append(1) or {}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True, proveedor=object())
 
     assert llamado == []  # nunca se intenta OCR sin imagen
@@ -282,7 +283,7 @@ def test_reporte_incluye_metricas_de_tiempo_y_conteos(tmp_path, monkeypatch):
     _escribir_dataset(raiz, [_fila_base()])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True, proveedor=object())
 
     assert resultado["tiempo_total_ms"] >= 0
@@ -307,7 +308,7 @@ def test_error_de_extraccion_no_aborta_el_resto_del_lote(tmp_path, monkeypatch):
             raise RuntimeError("OCR falló")
         return {}
 
-    monkeypatch.setattr(m, "procesar_archivo", _procesar)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(_procesar))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True, proveedor=object())
 
     assert resultado["documentos_reprocesados"] == 2
@@ -337,10 +338,10 @@ def test_documento_degradado_habilita_reparar_campo_sin_motivo_especifico(tmp_pa
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {
         "numero_guia": "473326", "chofer": "CRISTOPHER RETAMAL", "cliente": "PRODALAM SA",
         "patente_tracto": "BPHR67",
-    })
+    }))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -371,7 +372,7 @@ def test_sin_documento_degradado_mantiene_gating_estricto_por_campo(tmp_path, mo
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"cliente": "OTRO NOMBRE"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"cliente": "OTRO NOMBRE"}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=object())
 
     assert resultado["campos_cambiados_total"] == 0
@@ -392,7 +393,7 @@ def test_ledger_gana_incluso_con_documento_degradado(tmp_path, monkeypatch):
         {"documento": {"archivo": "IMG1.jpg", "numero_guia": "473100"}, "campo": "chofer", "valor": "CONFIRMADO POR HUMANO"},
     ])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"chofer": "OTRO CHOFER DISTINTO"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"chofer": "OTRO CHOFER DISTINTO"}))
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=object())
 
     campos_tocados = {c["campo"] for d in resultado["documentos"] for c in d["cambios"]}
@@ -423,7 +424,7 @@ def test_sin_proveedor_explicito_crea_uno_real_una_vez_y_lo_cierra(tmp_path, mon
         return _ProveedorFalso()
 
     monkeypatch.setattr(m, "crear_proveedor_ocr", _crear_falso)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {}))
 
     m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True)
 
@@ -440,7 +441,7 @@ def test_proveedor_explicito_del_llamador_evita_crear_uno_nuevo(tmp_path, monkey
 
     llamadas_creacion = []
     monkeypatch.setattr(m, "crear_proveedor_ocr", lambda: llamadas_creacion.append(1))
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {}))
 
     m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=True, proveedor=object())
 
@@ -453,7 +454,7 @@ def _reparar_con(monkeypatch, tmp_path, fila, extraido, ledger=()):
     _crear_imagen(raiz, "LOTE1", "IMG1.jpg")
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, list(ledger))
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: dict(extraido))
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: dict(extraido)))
     _stub_reconciliacion(monkeypatch, [])
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=object())
     return resultado, _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")[0]
@@ -538,7 +539,7 @@ def _lote_dos_documentos(tmp_path, monkeypatch):
             return {"numero_guia": "482247", "numero_transporte": "0000364199"}
         return {"despachar_a_crudo": "GALVARINO B501 QUILICURA", "patente_tracto": "DD2494"}
 
-    monkeypatch.setattr(m, "procesar_archivo", procesar)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(procesar))
     return raiz, leidos
 
 

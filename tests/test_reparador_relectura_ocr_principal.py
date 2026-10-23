@@ -19,6 +19,7 @@ from atlas_core.ocr_provider import EasyOCRProvider, PaddleOCRProvider
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
 from atlas_core.trazabilidad_ocr import persistir_traza_ocr
+from tests.lectura_ocr_reparador import con_lectura
 
 ARCHIVO = "IMG1.jpg"
 LECTURA_BUENA = {
@@ -91,7 +92,7 @@ def _paddle(degradado=False):
 
 
 def _reparar(monkeypatch, raiz, extraido, proveedor):
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: dict(extraido))
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: dict(extraido)))
     monkeypatch.setattr(m, "revalidar_y_regenerar_reporte", lambda **kw: {"reporte_vigente": "stub"})
     resultado = m.reprocesar_lote_reparador(raiz_atlas=raiz, dry_run=False, proveedor=proveedor)
     return resultado, _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")[0]

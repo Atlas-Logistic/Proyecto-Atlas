@@ -14,6 +14,7 @@ import json
 from atlas_core import reprocesamiento_reparador as m
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+from tests.lectura_ocr_reparador import con_lectura
 
 
 def _raiz(tmp_path):
@@ -78,7 +79,7 @@ def test_reextrae_y_persiste_peso_corregido_solo_para_el_transporte_pedido(tmp_p
     _escribir_dataset(raiz, [fila_objetivo, fila_ajena])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -104,7 +105,7 @@ def test_dry_run_no_escribe_nada(tmp_path, monkeypatch):
     _escribir_dataset(raiz, [_fila_base(peso_kg="19307")])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -126,7 +127,7 @@ def test_peso_ya_correcto_no_genera_cambio_ni_reconciliacion(tmp_path, monkeypat
     _escribir_dataset(raiz, [_fila_base(archivo="474286.jpg", numero_guia="474286", peso_kg="9535")])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9535"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9535"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -146,7 +147,7 @@ def test_decision_humana_sobre_peso_nunca_se_pisa(tmp_path, monkeypatch):
         {"documento": {"archivo": "IMG1.jpg", "numero_guia": "474285"}, "campo": "peso_kg"},
     ])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -169,9 +170,9 @@ def test_no_promueve_campo_identidad_limpio_sin_motivo_de_degradacion(tmp_path, 
     _escribir_dataset(raiz, [fila])
     _escribir_ledger(raiz, [])
 
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {
         "peso_kg": "9307", "chofer": "OTRO NOMBRE LEIDO DISTINTO",
-    })
+    }))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -187,7 +188,7 @@ def test_transporte_inexistente_no_encuentra_documentos_ni_escribe(tmp_path, mon
     _crear_imagen(raiz, "474285.jpg")
     _escribir_dataset(raiz, [_fila_base()])
     _escribir_ledger(raiz, [])
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 
@@ -227,7 +228,7 @@ def test_multiples_guias_del_mismo_transporte_se_reprocesan_todas(tmp_path, monk
         nombre = ruta.name if hasattr(ruta, "name") else str(ruta)
         return {"peso_kg": pesos_corregidos[nombre]}
 
-    monkeypatch.setattr(m, "procesar_archivo", _procesar)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(_procesar))
     llamadas = []
     _stub_reconciliacion(monkeypatch, llamadas)
 

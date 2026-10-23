@@ -231,6 +231,11 @@ def _motivos_de_campo(campo: str) -> tuple[str, ...]:
 # se anota en la fila para no volver a tratarla como degradada.
 _BACKEND_OCR_RESPALDO = "EasyOCRProvider"
 _BACKEND_OCR_PRINCIPAL = "PaddleOCRProvider"
+# RapidOCR es el proveedor vigente de ingreso manual y PULL
+# (`ATLAS_OCR_PROVIDER=rapidocr`); una relectura con él también supera a la
+# lectura de respaldo. Elegirlo sigue siendo decisión de la configuración.
+_BACKEND_OCR_RAPIDOCR = "RapidOCRProvider"
+_BACKENDS_OCR_PRINCIPALES = frozenset({_BACKEND_OCR_PRINCIPAL, _BACKEND_OCR_RAPIDOCR})
 _CLAVE_RELECTURA_OCR_PRINCIPAL = "relectura_ocr_principal"
 
 
@@ -254,10 +259,12 @@ def _backend_lectura_almacenada(raiz: Path, fila: Mapping[str, str]) -> str | No
 def _backend_reextraccion(proveedor_documento: object) -> str | None:
     """Backend que REALMENTE leyó la reextracción: un PaddleOCRProvider que
     se degradó a EasyOCR durante la lectura no cuenta como PaddleOCR."""
-    from atlas_core.ocr_provider import PaddleOCRProvider
+    from atlas_core.ocr_provider import PaddleOCRProvider, RapidOCRProvider
 
     if isinstance(proveedor_documento, PaddleOCRProvider):
         return _BACKEND_OCR_RESPALDO if proveedor_documento._degradado_a_easyocr else _BACKEND_OCR_PRINCIPAL
+    if isinstance(proveedor_documento, RapidOCRProvider):
+        return _BACKEND_OCR_RAPIDOCR  # incluye RapidOCRManualProvider
     return type(proveedor_documento).__name__ if proveedor_documento is not None else None
 
 
@@ -265,14 +272,15 @@ def _lectura_previa_por_ocr_de_respaldo(raiz: Path, fila: Mapping[str, str], pro
     if _metricas_recuperacion_p0(fila).get(_CLAVE_RELECTURA_OCR_PRINCIPAL):
         return False  # esta relectura ya se aplicó una vez
     return (
-        _backend_reextraccion(proveedor_documento) == _BACKEND_OCR_PRINCIPAL
+        _backend_reextraccion(proveedor_documento) in _BACKENDS_OCR_PRINCIPALES
         and _backend_lectura_almacenada(raiz, fila) == _BACKEND_OCR_RESPALDO
     )
 
 
-def _anotar_relectura_ocr_principal(fila: dict[str, str]) -> None:
+def _anotar_relectura_ocr_principal(fila: dict[str, str], backend_relectura: str | None = None) -> None:
     _anotar_recuperacion_p0(fila, _CLAVE_RELECTURA_OCR_PRINCIPAL, {
-        "version": 1, "backend_previo": _BACKEND_OCR_RESPALDO, "backend_relectura": _BACKEND_OCR_PRINCIPAL,
+        "version": 1, "backend_previo": _BACKEND_OCR_RESPALDO,
+        "backend_relectura": backend_relectura or _BACKEND_OCR_PRINCIPAL,
     })
 
 
@@ -287,17 +295,215 @@ def _destino_almacenado_contaminado(campo: str, fila: Mapping[str, str]) -> bool
     return bool(motivo_destino_documental_no_confiable(str(fila.get(campo, "")).strip()))
 
 
+# --- Procedencia documental de la relectura -----------------------------
+# Casos reales 482580/482661/482634/473325 (relectura RapidOCR, laboratorio
+# 23/10): el validador estructural aceptaba valores con formato correcto pero
+# tomados de OTRO campo -- la hora de entrada como salida, un monto como peso,
+# el carro ("CARRO:JF6468") como tracto, un RUT que no está impreso. Para los
+# campos cuyo valor es un literal del documento, el valor nuevo sólo se
+# promueve si la MISMA lectura OCR de la relectura lo muestra en la posición
+# de ese campo. Sin esa evidencia el reparador se abstiene: conserva el valor
+# actual y deja el motivo vigente para revisión humana.
+_CAMPOS_CON_PROCEDENCIA = frozenset({
+    "numero_transporte", "rut_chofer", "rut_cliente", "patente_tracto", "patente_rampla",
+    "hora_entrada_aza", "hora_salida_aza", "peso_kg",
+})
+_CAMPOS_HORA = ("hora_entrada_aza", "hora_salida_aza")
+_ETIQUETAS_HORA = {"hora_entrada_aza": "HORAENTRADA", "hora_salida_aza": "HORASALIDA"}
+# Etiquetas de la franja inferior AZA que nunca forman parte de DESPACHAR A
+# (caso real 482726: "RUTCHOFER VIBTA CIARA Z3ST CELLLOS 9708275-1").
+_ETIQUETAS_AJENAS_DESTINO = ("RUTCHOFER", "FECHASALIDA", "FECHALLEGADA", "PATENTE", "TOTALEXENTO")
+
+
+@dataclass(frozen=True)
+class BloqueEvidencia:
+    texto: str
+    x0: float
+    x1: float
+    y0: float
+    y1: float
+
+    @property
+    def centro_y(self) -> float:
+        return (self.y0 + self.y1) / 2
+
+
+@dataclass(frozen=True)
+class EvidenciaOCR:
+    """Líneas y bloques de la lectura OCR que produjo la reextracción."""
+    lineas: tuple[str, ...]
+    bloques: tuple[BloqueEvidencia, ...]
+
+    @property
+    def textos_compactos(self) -> tuple[str, ...]:
+        return tuple(_compactar(t) for t in self.lineas + tuple(b.texto for b in self.bloques))
+
+
+def _compactar(texto: object) -> str:
+    return re.sub(r"[^0-9A-Z]", "", str(texto).upper())
+
+
+def _cargar_evidencia_ocr(ruta: Path) -> EvidenciaOCR | None:
+    try:
+        ocr = json.loads(ruta.read_text(encoding="utf-8")).get("ocr") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    bloques = []
+    for bloque in ocr.get("bloques") or ():
+        caja = bloque.get("bounding_box") if isinstance(bloque, Mapping) else None
+        if not caja:
+            continue
+        xs, ys = [float(p[0]) for p in caja], [float(p[1]) for p in caja]
+        bloques.append(BloqueEvidencia(str(bloque.get("texto", "")), min(xs), max(xs), min(ys), max(ys)))
+    lineas = tuple(str(l) for l in ocr.get("lineas") or ())
+    if not lineas and not bloques:
+        return None
+    return EvidenciaOCR(lineas=lineas, bloques=tuple(bloques))
+
+
+def _reextraer_con_evidencia(ruta: Path, referencia: str, **kwargs) -> tuple[dict[str, object], EvidenciaOCR | None]:
+    """`procesar_archivo` de siempre, persistiendo su traza en un directorio
+    temporal propio (nunca en `operacion/trazas_ocr`) para conocer la lectura
+    exacta de la que salió cada valor."""
+    with tempfile.TemporaryDirectory(prefix="atlas_reparador_") as temporal:
+        extraido = dict(procesar_archivo(
+            ruta, directorio_trazas_ocr=temporal, referencia_imagen_traza=referencia, **kwargs,
+        ))
+        return extraido, _cargar_evidencia_ocr(ruta_traza_ocr(temporal, referencia))
+
+
+def _hora_en_su_etiqueta(campo: str, valor: str, evidencia: EvidenciaOCR) -> bool:
+    """La hora está en un bloque cuya etiqueta de hora más cercana en la misma
+    fila (a su izquierda, o en el mismo bloque) es la de ESTE campo."""
+    digitos_valor = valor.replace(":", "").zfill(4)
+    etiquetas = [
+        (c, b) for b in evidencia.bloques for c, e in _ETIQUETAS_HORA.items() if e in _compactar(b.texto)
+    ]
+    for bloque in evidencia.bloques:
+        compacto = _compactar(bloque.texto)
+        propias = [c for c, e in _ETIQUETAS_HORA.items() if e in compacto]
+        digitos = re.sub(r"\D", "", bloque.texto)
+        if propias:
+            if propias == [campo] and digitos.startswith(digitos_valor):
+                return True
+            continue
+        if not re.fullmatch(r"\d{4}(?:\d{2})?", digitos) or not digitos.startswith(digitos_valor):
+            continue
+        a_la_izquierda = [
+            (abs(bloque.centro_y - e.centro_y), c, e) for c, e in etiquetas if e.x1 <= bloque.x0 + 1
+        ]
+        if not a_la_izquierda:
+            continue
+        distancia, campo_cercano, etiqueta = min(a_la_izquierda, key=lambda t: t[0])
+        if campo_cercano == campo and distancia <= (etiqueta.y1 - etiqueta.y0):
+            return True
+    return False
+
+
+def _misma_fila(a: BloqueEvidencia, b: BloqueEvidencia) -> bool:
+    """Solapamiento vertical de al menos la mitad del bloque más bajo."""
+    solape = min(a.y1, b.y1) - max(a.y0, b.y0)
+    return solape >= 0.5 * min(a.y1 - a.y0, b.y1 - b.y0)
+
+
+def _numero_documental(texto: str) -> int | None:
+    """"27:974,00" / "8.920,000" -> kilos enteros; None si no es un número."""
+    match = re.fullmatch(r"(\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?", texto.strip().replace(":", "."))
+    return int(match.group(1).replace(".", "")) if match else None
+
+
+def _pesos_respaldados(evidencia: EvidenciaOCR) -> set[int]:
+    """Pesos que el documento sostiene: el valor a la derecha de PESO KG. y
+    PESO BRUTO - TARA. Nunca VALOR TOTAL/NETO (montos)."""
+    pesos: set[int] = set()
+    texto = " ".join(evidencia.lineas + tuple(b.texto for b in evidencia.bloques)).upper()
+    tara = re.search(r"TARA\W*(\d[\d.,:]*)", texto)
+    bruto = re.search(r"BRUTO\W*(\d[\d.,:]*)", texto)
+    if tara and bruto:
+        kilos_tara, kilos_bruto = _numero_documental(tara.group(1)), _numero_documental(bruto.group(1))
+        if kilos_tara is not None and kilos_bruto is not None and kilos_bruto > kilos_tara:
+            pesos.add(kilos_bruto - kilos_tara)
+    for etiqueta in evidencia.bloques:
+        compacto = _compactar(etiqueta.texto)
+        if "PESOKG" not in compacto:
+            continue
+        resto = re.split(r"(?i)KG\.?\s*:?", etiqueta.texto, maxsplit=1)[-1]
+        if (kilos := _numero_documental(resto.strip(" :"))) is not None:
+            pesos.add(kilos)
+        # Caso real 482580: el VALOR TOTAL "12.624" de la fila superior roza
+        # la de PESO KG.; sólo cuenta un bloque realmente alineado con ella.
+        misma_fila = [
+            b for b in evidencia.bloques
+            if b is not etiqueta and b.x0 >= etiqueta.x1 - 1 and _misma_fila(b, etiqueta)
+        ]
+        if misma_fila:
+            cercano = min(misma_fila, key=lambda b: (abs(b.centro_y - etiqueta.centro_y), b.x0))
+            if (kilos := _numero_documental(cercano.texto.strip(" :"))) is not None:
+                pesos.add(kilos)
+    return pesos
+
+
+def _valor_con_procedencia(campo: str, valor: str, evidencia: EvidenciaOCR | None) -> bool:
+    if campo not in _CAMPOS_CON_PROCEDENCIA:
+        return True
+    if evidencia is None:
+        return False  # sin la lectura de la que salió el valor no hay procedencia
+    if campo in _CAMPOS_HORA:
+        return _hora_en_su_etiqueta(campo, valor, evidencia)
+    if campo == "peso_kg":
+        return valor.isdigit() and int(valor) in _pesos_respaldados(evidencia)
+    compacto = _compactar(valor)
+    textos = evidencia.textos_compactos
+    if not compacto or not any(compacto in t for t in textos):
+        return False  # el literal no está impreso en esta lectura
+    if campo == "patente_tracto":
+        return not any(f"CARRO{compacto}" in t for t in textos)
+    if campo == "patente_rampla":
+        return not any(f"{compacto}CARRO" in t for t in textos)
+    return True
+
+
+def _direccion_plausible(valor: str) -> bool:
+    """Calle con número y sin tokens que mezclen letras y dígitos: casos
+    reales 482580 "SANTA ISHEEL SSSSANTIAGOLNPA" (sin número), 482634
+    "LABSTERA 525HANTIAGO", 482722 "CERDA 13I3", 482553 "GALVARINO BSOI"."""
+    from atlas_core.registro_obra_destino import _PATRON_NUMERO_CALLE, calle_y_numero
+
+    tokens = re.sub(r"[^0-9A-Z ]", " ", valor.upper()).split()
+    mezclados = [
+        t for t in tokens
+        if re.search(r"\d", t) and re.search(r"[A-Z]", t) and not _PATRON_NUMERO_CALLE.match(t)
+    ]
+    return bool(calle_y_numero(valor)) and not mezclados
+
+
+def _minutos(hora: str) -> int | None:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", hora)
+    return int(match.group(1)) * 60 + int(match.group(2)) if match else None
+
+
 def _reparar_campos_documento(
     fila: Mapping[str, str], extraido: Mapping[str, object], aplicaciones: list[Mapping[str, object]],
-    *, documento_degradado: bool,
+    *, documento_degradado: bool, evidencia_ocr: EvidenciaOCR | None = None,
 ) -> list[CambioCampo]:
     """Compara `fila` (persistida) contra `extraido` (reextracción real vía
     `procesar_archivo`) y devuelve sólo los cambios seguros -- misma lógica
     para cualquier llamador (lote completo o un transporte puntual, ver
-    `revalidar_documentos_por_transporte`), nunca duplicada."""
+    `revalidar_documentos_por_transporte`), nunca duplicada.
+
+    `evidencia_ocr` es la lectura de la que salió `extraido`; sin ella los
+    campos de `_CAMPOS_CON_PROCEDENCIA` nunca se promueven."""
     archivo_id = str(fila.get("archivo", ""))
     motivos_actuales = {
         m.strip() for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()
+    }
+    # La reextracción evalúa su propio valor con las reglas de siempre: si
+    # vuelve a marcar el campo como degradado (caso real 482580: cliente
+    # "ACRDMATCOSA" con CLIENTE_SIN_CORROBORAR), ese valor no es evidencia.
+    # PATENTE_SIN_HOMOLOGAR no distingue tracto de rampla: las patentes se
+    # juzgan por su procedencia.
+    motivos_reextraccion = {
+        m.strip() for m in str(extraido.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m.strip()
     }
     cambios: list[CambioCampo] = []
     for campo, (motivos_degradacion, es_valido) in CAMPOS_REPARABLES.items():
@@ -317,7 +523,36 @@ def _reparar_campos_documento(
             continue
         if solo_por_destino_contaminado and _destino_almacenado_contaminado(campo, {campo: valor_nuevo}):
             continue  # nunca reemplaza un destino contaminado por otro
+        if valor_nuevo in _AUSENTES:
+            continue  # caso real 482661: no leer la patente nunca borra "J56468"
+        if not campo.startswith("patente_") and motivos_reextraccion & set(motivos_degradacion):
+            continue  # la propia reextracción no respalda este valor
+        if campo == "despachar_a_crudo" and (
+            _destino_almacenado_contaminado(campo, {campo: valor_nuevo})
+            or any(e in _compactar(valor_nuevo) for e in _ETIQUETAS_AJENAS_DESTINO)
+            or not _direccion_plausible(valor_nuevo)
+        ):
+            continue  # destino con texto de otra sección o ilegible
+        if not _valor_con_procedencia(campo, valor_nuevo, evidencia_ocr):
+            continue
         cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), campo, valor_actual, valor_nuevo))
+    # Coherencia entre campos hermanos: una salida que no es posterior a la
+    # entrada, o el mismo vehículo como tracto y carro, no se promueven.
+    def _final(campo: str) -> str:
+        nuevo = next((c.valor_nuevo for c in cambios if c.campo == campo), None)
+        return nuevo if nuevo is not None else str(fila.get(campo, "")).strip()
+
+    # Una hora persistida que esta lectura no respalda (caso real 473616:
+    # salida "00:11" de la lectura de respaldo) no invalida la nueva.
+    entrada, salida = _minutos(_final("hora_entrada_aza")), _minutos(_final("hora_salida_aza"))
+    if (
+        entrada is not None and salida is not None and salida <= entrada
+        and all(_valor_con_procedencia(c, _final(c), evidencia_ocr) for c in _CAMPOS_HORA)
+    ):
+        cambios = [c for c in cambios if c.campo not in _CAMPOS_HORA]
+    tracto, rampla = _final("patente_tracto"), _final("patente_rampla")
+    if tracto not in _AUSENTES and tracto == rampla:
+        cambios = [c for c in cambios if c.campo not in ("patente_tracto", "patente_rampla")]
     # El RUT es parte de la identidad del chofer: si esta misma reextracción
     # repara el chofer, su RUT viaja con él -- dejar el anterior mezclaría
     # dos identidades en la fila (caso real 475256: JOSE LAZCANO junto al
@@ -332,12 +567,18 @@ def _reparar_campos_documento(
             and rut_nuevo != rut_actual
             and rut_valido(rut_nuevo)
             and not _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo="rut_chofer")
+            and _valor_con_procedencia("rut_chofer", rut_nuevo, evidencia_ocr)
         ):
             cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), "rut_chofer", rut_actual, rut_nuevo))
-    # La permanencia se deriva de las horas AZA: si una hora cambia, la
-    # permanencia de esa misma reextracción la acompaña.
-    if campos_cambiados & {"hora_entrada_aza", "hora_salida_aza"}:
-        permanencia_nueva = str(extraido.get("permanencia_minutos", "")).strip()
+    # La permanencia se deriva de las horas AZA finales, y sólo si ESTA lectura
+    # respalda ambas (caso real 482661: entrada nueva 12:41 con la salida
+    # persistida "19:55" de la lectura de respaldo daría 434 minutos).
+    if campos_cambiados & set(_CAMPOS_HORA):
+        entrada, salida = _minutos(_final("hora_entrada_aza")), _minutos(_final("hora_salida_aza"))
+        respaldadas = all(_valor_con_procedencia(c, _final(c), evidencia_ocr) for c in _CAMPOS_HORA)
+        permanencia_nueva = (
+            str(salida - entrada) if respaldadas and entrada is not None and salida is not None else ""
+        )
         permanencia_actual = str(fila.get("permanencia_minutos", "")).strip()
         if (
             permanencia_nueva.isdigit()
@@ -354,6 +595,8 @@ def _reparar_campos_documento(
         valor_actual = str(fila.get(campo, "")).strip()
         if not valor_nuevo or valor_nuevo == valor_actual or not es_valido(valor_nuevo):
             continue
+        if not _valor_con_procedencia(campo, valor_nuevo, evidencia_ocr):
+            continue  # caso real 482580: 12624 sin PESO KG. ni BRUTO - TARA que lo sostenga
         cambios.append(CambioCampo(archivo_id, str(fila.get("numero_guia", "")), campo, valor_actual, valor_nuevo))
     return cambios
 
@@ -655,10 +898,10 @@ def reprocesar_lote_reparador(
                 proveedor_documento, lector_documento = proveedor_para_documento(
                     ruta_texto_pdf=evidencia.ruta_texto_pdf, proveedor=proveedor, lector_ocr=lector_ocr,
                 )
-                extraido = dict(procesar_archivo(
-                    evidencia.ruta, lector_ocr=lector_documento, proveedor=proveedor_documento,
+                extraido, evidencia_ocr = _reextraer_con_evidencia(
+                    evidencia.ruta, archivo_id, lector_ocr=lector_documento, proveedor=proveedor_documento,
                     carpeta_catalogos=catalogos,
-                ))
+                )
             except Exception as exc:  # cada documento es una unidad independiente
                 documentos.append(DocumentoReparado(
                     archivo=archivo_id, numero_guia_antes=str((fila or {}).get("numero_guia", "")),
@@ -715,13 +958,14 @@ def reprocesar_lote_reparador(
             documento_degradado = _MOTIVO_DOCUMENTO_DEGRADADO in motivos_actuales or relectura_ocr_principal
             cambios = _reparar_campos_documento(
                 fila, extraido, aplicaciones, documento_degradado=documento_degradado,
+                evidencia_ocr=evidencia_ocr,
             )
             guia_antes = str(fila.get("numero_guia", ""))
             _aplicar_cambios_a_fila(
                 fila, cambios, motivos_reextraccion=str(extraido.get("motivos_revision_documento", "")),
             )
             if relectura_ocr_principal and cambios:
-                _anotar_relectura_ocr_principal(fila)
+                _anotar_relectura_ocr_principal(fila, _backend_reextraccion(proveedor_documento))
             documentos.append(DocumentoReparado(
                 archivo=archivo_id, numero_guia_antes=guia_antes,
                 numero_guia_despues=str(fila.get("numero_guia", "")),
@@ -1258,10 +1502,10 @@ def revalidar_documentos_por_transporte(
                 proveedor_documento, lector_documento = proveedor_para_documento(
                     ruta_texto_pdf=evidencia.ruta_texto_pdf, proveedor=proveedor, lector_ocr=lector_ocr,
                 )
-                extraido = dict(procesar_archivo(
-                    evidencia.ruta, lector_ocr=lector_documento, proveedor=proveedor_documento,
+                extraido, evidencia_ocr = _reextraer_con_evidencia(
+                    evidencia.ruta, archivo_id, lector_ocr=lector_documento, proveedor=proveedor_documento,
                     carpeta_catalogos=catalogos,
-                ))
+                )
             except Exception as exc:  # cada documento es una unidad independiente
                 documentos.append(DocumentoReparado(
                     archivo=archivo_id, numero_guia_antes=str(fila.get("numero_guia", "")),
@@ -1277,13 +1521,14 @@ def revalidar_documentos_por_transporte(
             documento_degradado = _MOTIVO_DOCUMENTO_DEGRADADO in motivos_actuales or relectura_ocr_principal
             cambios = _reparar_campos_documento(
                 fila, extraido, aplicaciones, documento_degradado=documento_degradado,
+                evidencia_ocr=evidencia_ocr,
             )
             guia_antes = str(fila.get("numero_guia", ""))
             _aplicar_cambios_a_fila(
                 fila, cambios, motivos_reextraccion=str(extraido.get("motivos_revision_documento", "")),
             )
             if relectura_ocr_principal and cambios:
-                _anotar_relectura_ocr_principal(fila)
+                _anotar_relectura_ocr_principal(fila, _backend_reextraccion(proveedor_documento))
             documentos.append(DocumentoReparado(
                 archivo=archivo_id, numero_guia_antes=guia_antes,
                 numero_guia_despues=str(fila.get("numero_guia", "")),

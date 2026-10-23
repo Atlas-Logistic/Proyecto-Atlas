@@ -16,6 +16,7 @@ from atlas_core.almacenamiento_portable import SesionOcupadaError
 from atlas_core.escritor_operativo import ErrorEscritorOperativo, LeaseEscritorOperativo
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+from tests.lectura_ocr_reparador import con_lectura
 from sincronizar_mobile_cloud import ejecutar_pull_con_escritor
 
 TRANSPORTE = "0000359510"
@@ -145,7 +146,7 @@ def test_pull_activo_impide_revalidacion_sin_ocr_ni_escritura(tmp_path, cloud, r
     raiz = _raiz(tmp_path)
     fabrica = Fabrica()
     ocr = []
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: ocr.append(a) or {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: ocr.append(a) or {"peso_kg": "9307"}))
     vistos = {}
 
     def pull_que_dura(**kwargs):
@@ -174,7 +175,7 @@ def test_revalidacion_activa_impide_pull_y_lo_libera_al_terminar(tmp_path, cloud
         pulls_durante.append(_pull(fabrica, lambda **_k: {"confirmados": ["x"]}))
         return {"peso_kg": "9307"}
 
-    monkeypatch.setattr(m, "procesar_archivo", ocr_lento)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(ocr_lento))
 
     resultado = _revalidar(raiz, fabrica)
 
@@ -204,7 +205,7 @@ def test_lease_perdido_durante_ocr_no_escribe_ni_reconcilia(tmp_path, cloud, rec
         assert not fabrica.instancias[-1].renovar()  # el heartbeat detecta la pérdida
         return {"peso_kg": "9307"}
 
-    monkeypatch.setattr(m, "procesar_archivo", ocr_y_vence)
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(ocr_y_vence))
 
     resultado = _revalidar(raiz, fabrica)
 
@@ -219,7 +220,7 @@ def test_lease_perdido_durante_ocr_no_escribe_ni_reconcilia(tmp_path, cloud, rec
 
 def test_lease_perdido_tras_escribir_dataset_deja_reconciliacion_pendiente(tmp_path, cloud, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     reconciliaciones = []
     monkeypatch.setattr(m, "revalidar_y_regenerar_reporte", lambda **kw: reconciliaciones.append(kw))
     vigencia = iter([True, True, True, False])  # doc1, doc2, escritura, reconciliación
@@ -238,7 +239,7 @@ def test_lease_perdido_tras_escribir_dataset_deja_reconciliacion_pendiente(tmp_p
 
 def test_guarda_no_se_consulta_en_dry_run(tmp_path, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     def guarda():
         raise AssertionError("dry-run no consulta el escritor")
@@ -255,7 +256,7 @@ def test_guarda_no_se_consulta_en_dry_run(tmp_path, monkeypatch):
 
 def test_falla_en_reconciliacion_libera_lease_y_lock(tmp_path, cloud, monkeypatch):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     def reconciliacion_rota(**_kw):
         raise RuntimeError("reporte roto")
@@ -275,7 +276,7 @@ def test_falla_en_reconciliacion_libera_lease_y_lock(tmp_path, cloud, monkeypatc
 def test_lock_de_revalidacion_vigente_aborta_y_libera_el_lease(tmp_path, cloud, reconciliaciones, monkeypatch):
     raiz = _raiz(tmp_path)
     _lock(raiz).write_text('{"pid": 1}', encoding="utf-8")  # otra aplicación de decisión en curso
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     with pytest.raises(SesionOcupadaError):
         _revalidar(raiz, Fabrica())
@@ -290,7 +291,7 @@ def test_lock_huerfano_tras_interrupcion_se_recupera_bajo_lease(tmp_path, cloud,
     _lock(raiz).write_text('{"pid": 1}', encoding="utf-8")
     viejo = time.time() - 7 * 3600  # > 6 h: proceso anterior murió sin liberar
     os.utime(_lock(raiz), (viejo, viejo))
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
 
     resultado = _revalidar(raiz, Fabrica())
 
@@ -304,7 +305,7 @@ def test_lock_huerfano_tras_interrupcion_se_recupera_bajo_lease(tmp_path, cloud,
 
 def test_cli_dry_run_no_pide_token_ni_lease(tmp_path, cloud, monkeypatch, capsys):
     raiz = _raiz(tmp_path)
-    monkeypatch.setattr(m, "procesar_archivo", lambda *a, **kw: {"peso_kg": "9307"})
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"peso_kg": "9307"}))
     monkeypatch.delenv("ATLAS_CLOUD_MOTOR_TOKEN", raising=False)
     monkeypatch.setattr("sys.argv", ["revalidar_transporte.py", "--raiz-atlas", str(raiz), "--numero-transporte", TRANSPORTE])
 
