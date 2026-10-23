@@ -7,8 +7,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--raiz-atlas', required=True)
     parser.add_argument('--texto', required=True)
+    parser.add_argument('--derivar-operacionales', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(OperadorB1(args.raiz_atlas).consultar(args.texto), ensure_ascii=True))
+    print(json.dumps(OperadorB1(args.raiz_atlas).consultar(args.texto, derivar_operacionales=args.derivar_operacionales), ensure_ascii=True))
 
 if __name__ == '__main__':
     main()

@@ -24,6 +24,7 @@ from atlas_core.escritor_operativo import lease_desde_entorno
 
 RAIZ_CODIGO = Path(__file__).resolve().parent.parent
 ESCRITORES = frozenset({
+    'b1_operador_cli.py',
     'aplicar_decision_pendiente.py', 'aplicar_decisiones_multiples.py',
     'forzar_correccion_destino.py', 'previsualizar_registro_obra.py',
     'acciones_operacionales_cli.py', 'eventos_operacionales_cli.py',

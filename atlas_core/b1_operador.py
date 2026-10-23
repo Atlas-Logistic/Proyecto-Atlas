@@ -572,7 +572,12 @@ def validar_intencion(intencion: Intencion) -> Intencion:
         if _MENCIONES_PERMITIDAS[mencion] not in esquema:
             raise ErrorContratoInterpretacion(f"la acción no admite la mención {mencion}")
     for nombre, valor in {**intencion.parametros, **intencion.menciones}.items():
-        _guardia_valor(nombre, valor)
+        # El simbolo monetario ante un importe es texto documental, no shell.
+        # Validar una copia; conservar intacta la observacion que se persistira.
+        validable = valor
+        if intencion.accion == "VIAJE_AGREGAR_OBSERVACION" and nombre == "texto" and isinstance(valor, str):
+            validable = re.sub(r"\$(?=\s*\d)", "", valor)
+        _guardia_valor(nombre, validable)
     return intencion
 
 
@@ -1405,8 +1410,10 @@ class OperadorB1:
 
     # ------------------------------------------------------------ entrada
 
-    def consultar(self, texto: str) -> dict:
+    def consultar(self, texto: str, *, derivar_operacionales: bool = False) -> dict:
         """Consulta sin locks ni estado conversacional; rechaza acciones antes de resolverlas."""
+        if derivar_operacionales and (es_confirmacion(texto) or es_cancelacion(texto)):
+            return {"estado": "REQUIERE_OPERADOR"}
         try:
             intencion = self._interpretar(texto)
         except ErrorContratoInterpretacion as error:
@@ -1415,6 +1422,8 @@ class OperadorB1:
             return {"estado": "NO_INTERPRETADA", "mensaje": "Continúe con la consulta de viajes."}
         definicion = ACCIONES.get(intencion.accion)
         if definicion is None or definicion.riesgo != LECTURA:
+            if derivar_operacionales:
+                return {"estado": "REQUIERE_OPERADOR"}
             return {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."}
         return self._instruccion({"conversaciones": {}}, "solo-consulta", texto)
 

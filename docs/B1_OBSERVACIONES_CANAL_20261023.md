@@ -1,0 +1,13 @@
+﻿# B1 observaciones: canal controlado (23-10-2026)
+
+Desktop ed48419 sustituyo b1_operador_cli.py por b1_consulta_cli.py y elimino la conversacion. b7d96a4 habilito despues el canal manual, pero no restauro B1 ni incluyo su CLI en ESCRITORES. El parser y la escritura de 3746923 siguen presentes; la proyeccion Desktop 06b845f sigue anexando notas sin reemplazarlas.
+
+Correccion: el lector clasifica sin escribir. Solo cuando Desktop esta autorizado devuelve REQUIERE_OPERADOR para acciones/confirmacion/cancelacion; Desktop reenvia el turno y la conversacion al CLI original por desktop_operacion. Lecturas continúan sin lease, preview ni tokens operacionales. El canal conserva lease_cloud, mutex, revalidacion del preview, confirmacion y auditoria existentes. No hay escritor alternativo.
+
+Adicional comprobado: el contrato general rechazaba $30.000 como codigo. Solo en texto de VIAJE_AGREGAR_OBSERVACION se permite el simbolo ante un digito para validar; el texto original se conserva y las demas prohibiciones siguen vigentes. Esta limitacion ya existia el 16/10; no se atribuye a una regresion posterior.
+
+La ruta de incidencias no conoce la accion observacion libre: genera cinco acciones vacias/ACCION_NO_PERMITIDA y la UI muestra Accion no reconocida. No prueba perdida documental. El mensaje Escritor ocupado o exclusividad no verificable viene exclusivamente de adquirir()==False en desktop_operacion.sesion: lease ocupado, credencial rechazada o transporte Cloud fallido. Se reproduce en pruebas sin escrituras; no se elimina ni se evade. Perfil efectivo lease_cloud, politica_equipo_unico devuelve None. No hay evidencia que permita atribuir retrospectivamente el mensaje del usuario a una de esas tres causas; la comprobacion Cloud actual encontro arbitro accesible y libre.
+
+Pruebas: siete guias/transp., guias compartiendo transporte (una nota por transporte), preview sin eventos, confirmacion, auditoria unica, original Mobile intacto, idempotencia, cancelacion, observacion con importe y rechazo de comandos. Se conservan consultas de revisiones, rangos y soporte cronologico y regresion Mobile. Datos reales solo copiados a laboratorio; no se confirma el adicional productivo.
+
+Cinco guias verificadas: 482918/0000365704 Rodrigo Nahuelnir/Torres Ocaranza; 482634/0000365167 Rene Garcia/Comercial A y B; 482741/0000365295/Comercial A y B sin chofer en dataset, aunque el original muestra Salomon Pizarro (no se corrige el documento). 482902 y 482740 ausentes en dataset/reporte/envios y originales no localizados. Las tres presentes tienen un solo documento por transporte; sin agrupacion compartida entre ellas. Preview en copia: tres Se agrega, dos No existe (no se aplica); nota previa de 482741 conservada. No se inventan transportes ni choferes.
