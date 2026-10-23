@@ -470,6 +470,16 @@ def _parsear_fecha_dataset(texto: str) -> date | None:
         return None
 
 
+def ordenar_viajes_por_fecha(viajes: Sequence[Mapping[str, str]], *, descendente: bool = False) -> list[Mapping[str, str]]:
+    """Orden documental existente, con desempate por transporte/ID y sin fecha al final."""
+    def clave(viaje):
+        fecha = _parsear_fecha_dataset(viaje.get("fecha", ""))
+        ordinal = fecha.toordinal() if fecha is not None else 0
+        return (fecha is None, -ordinal if descendente else ordinal,
+                str(viaje.get("numero_transporte") or ""), str(viaje.get("viaje_id") or ""))
+    return sorted(viajes, key=clave)
+
+
 def _parsear_fecha_iso(texto: str) -> date | None:
     try:
         return date.fromisoformat(str(texto or "").strip())
@@ -772,19 +782,19 @@ def ejecutar_consulta_atlas(
         )
 
     if consulta.metrica == METRICA_LISTAR_VIAJES:
-        filas = list(coincidencias)
-        filas.sort(key=lambda v: _parsear_fecha_dataset(v.get("fecha", "")) or date.min, reverse=(consulta.orden == "DESC"))
+        filas = ordenar_viajes_por_fecha(coincidencias, descendente=(consulta.orden == "DESC"))
         if consulta.limite is not None:
             filas = filas[: consulta.limite]
         return ResultadoConsultaAtlas(
             consulta_interpretada=consulta, resultado=tuple(filas), unidades=unidades,
-            total_coincidencias=len(coincidencias), viajes_soporte=tuple(filas),
+            total_coincidencias=len(coincidencias), viajes_soporte=tuple(ordenar_viajes_por_fecha(filas)),
         )
 
     if consulta.agrupacion is None:
         total = sum(_valor_metrica(v, consulta.metrica, consulta) for v in coincidencias)
         if consulta.metrica == METRICA_COUNT_VIAJES:
             total = int(total)
+            coincidencias = ordenar_viajes_por_fecha(coincidencias)
         return ResultadoConsultaAtlas(
             consulta_interpretada=consulta, resultado=total, unidades=unidades,
             total_coincidencias=len(coincidencias), viajes_soporte=tuple(coincidencias),

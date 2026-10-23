@@ -29,7 +29,7 @@ from atlas_core.consultas_atlas import (
     METRICA_COUNT_PATENTES_SIN_CHOFER, METRICA_COUNT_VIAJES, METRICA_LIST_DISTINCT_CHOFER,
     METRICA_LIST_RELACION, METRICA_LISTAR_VIAJES, METRICA_SUM_KM, METRICA_SUM_PESO, METRICA_SUM_TIEMPO,
     ResultadoConsultaAtlas, _claves_agrupacion, _guias_coincidentes, _valor_metrica, _valores_multivalor,
-    normalizar_texto_atlas,
+    normalizar_texto_atlas, _parsear_fecha_dataset,
 )
 
 # Entidad (singular/plural) y encabezado por relación -- siempre lenguaje humano.
@@ -91,8 +91,13 @@ def _entidades_con_viajes(
 
 
 def _fila_viaje(viaje: Mapping[str, str], *extra: str) -> list[str]:
+    fecha = _texto(viaje.get("fecha"))
+    if not fecha:
+        fecha = "Sin fecha"
+    elif _parsear_fecha_dataset(fecha) is None:
+        fecha = f"Fecha no interpretable: {fecha}"
     return [
-        _texto(viaje.get("fecha")), _texto(viaje.get("numero_transporte")),
+        fecha, _texto(viaje.get("numero_transporte")),
         _texto(viaje.get("numeros_guia")), _texto(viaje.get("choferes")), _texto(viaje.get("clientes")), *extra,
     ]
 
