@@ -1560,6 +1560,17 @@ def _extraer_numero_guia_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     return {}
 
 
+def patron_etiqueta_fecha(tipo: str) -> str:
+    """Etiqueta "FECHA [DE] <tipo>" tolerando espacios omitidos por el OCR.
+
+    RapidOCR puede entregar "FECHA DEEMISION" o "FECHADEEMISION" (caso real
+    482851): exigir los espacios hacía perder la etiqueta de emisión frente a
+    SALIDA/LLEGADA. El mismo patrón sirve a la regla lineal y a la geométrica,
+    y conserva la distinción entre tipos (nunca colapsa uno en otro).
+    """
+    return rf"FECHA\s*(?:DE\s*)?{tipo}"
+
+
 def _extraer_fecha_geometrico(bloques: List[Any]) -> Dict[str, Any]:
     """Localiza la zona de FECHA DE EMISIÓN mediante geometría OCR conservadora.
 
@@ -1575,13 +1586,13 @@ def _extraer_fecha_geometrico(bloques: List[Any]) -> Dict[str, Any]:
 
     def es_etiqueta_emision(item: Dict[str, Any]) -> bool:
         texto = _texto_colapsado(item)
-        return bool(re.fullmatch(r"FECHA(?: DE)? EMISION", texto)) or texto == "EMISION"
+        return bool(re.fullmatch(patron_etiqueta_fecha("EMISION"), texto)) or texto == "EMISION"
 
     def es_etiqueta_fecha_rival(item: Dict[str, Any]) -> bool:
         texto = _texto_colapsado(item)
-        if bool(re.fullmatch(r"FECHA(?: DE)? SALIDA", texto)) or texto == "SALIDA":
+        if bool(re.fullmatch(patron_etiqueta_fecha("SALIDA"), texto)) or texto == "SALIDA":
             return True
-        if bool(re.fullmatch(r"FECHA(?: DE)? LLEGADA", texto)) or texto == "LLEGADA":
+        if bool(re.fullmatch(patron_etiqueta_fecha("LLEGADA"), texto)) or texto == "LLEGADA":
             return True
         return False
 
