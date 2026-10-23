@@ -2282,9 +2282,17 @@ class CapaAccionesOperacionales:
                           respaldo=respaldo)
             return publico
         ids_antes = self._ids_decisiones_documento(plan)
+        # La red de seguridad retira ANTES de reconciliar: así la
+        # reconciliación canónica vuelve a publicar, con el valor nuevo, toda
+        # tarjeta cuya condición siga vigente (caso real 482580: corregir el
+        # transporte quitaba CLIENTE_AUSENTE después de reconciliar y nadie la
+        # republicaba aunque el cliente seguía ausente). Una segunda pasada
+        # garantiza que ninguna tarjeta republicada pregunte por el valor anterior.
+        retirar = salida.get("retirar_obsoletas")
+        red_seguridad = _retirar_obsoletas_por_campo(self._ctx, *retirar) if retirar else []
         reconciliacion = self._reconciliar(guias_objetivo=set(plan.afectados.get('guias') or []) or None) if salida.get("reconciliar") else None
-        red_seguridad = (_retirar_obsoletas_por_campo(self._ctx, *salida["retirar_obsoletas"])
-                         if salida.get("retirar_obsoletas") else [])
+        if retirar:
+            red_seguridad += _retirar_obsoletas_por_campo(self._ctx, *retirar)
         ids_despues = self._ids_decisiones_documento(plan)
         revalidacion = {
             "focal": salida.get("revalidacion_focal"),
