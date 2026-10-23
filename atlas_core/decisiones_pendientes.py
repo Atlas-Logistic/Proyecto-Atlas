@@ -1385,22 +1385,40 @@ def _transportes_por_patente_de_chofer(
 def _vehiculos_confirmados_para_rut(
     *, rut_normalizado: str, tipo_esperado: str | None, vehiculos: Iterable[object],
 ) -> set[str]:
-    """Patentes CONFIRMADO/ACTIVO cuya evidencia de confirmación humana
-    quedó explícitamente asociada a este RUT (`rut_chofer_asociado`, ver
-    `confirmar_vehiculo`) -- nunca inferido: sólo lo que un humano ya
-    dejó dicho explícitamente al confirmar ese vehículo."""
-    resultado: set[str] = set()
+    """Patentes CONFIRMADO/ACTIVO cuya asignación VIGENTE es este RUT (ver
+    `_asignaciones_vigentes`) -- nunca inferido: sólo lo que un humano dejó
+    dicho explícitamente (`rut_chofer_asociado`, `confirmar_vehiculo`/
+    `CHOFER_ASIGNAR_VEHICULO`). Una asignación ya reemplazada es historial
+    y no cuenta."""
+    return {
+        patente for patente, (rut, tipo) in _asignaciones_vigentes(vehiculos).items()
+        if rut == rut_normalizado and (not tipo_esperado or tipo == tipo_esperado)
+    }
+
+
+def _asignaciones_vigentes(vehiculos: Iterable[object]) -> dict[str, tuple[str, str]]:
+    """`{patente: (rut_chofer, tipo)}`: el único chofer vigente de cada camión.
+
+    Fuente única: las evidencias `CONFIRMACION_HUMANA` con
+    `rut_chofer_asociado` del catálogo de vehículos (append-only; las escriben
+    `confirmar_vehiculo` y `CHOFER_ASIGNAR_VEHICULO`). El chofer vigente de un
+    camión es el de su asignación explícita más reciente; las anteriores son
+    historial y nunca compiten. Un cambio sólo ocurre por una asignación
+    explícita nueva -- nunca por OCR ni por viajes históricos. Un chofer con
+    dos camiones vigentes del mismo tipo es una contradicción que decide un
+    humano (nunca se elige "el más reciente")."""
+    vigentes: dict[str, tuple[str, str]] = {}
     for v in vehiculos:
-        if tipo_esperado and v.tipo != tipo_esperado:
+        if v.estado_calidad != "CONFIRMADO" or v.estado_vigencia != "ACTIVO":
             continue
-        for e in v.evidencias:
-            if (
-                e.tipo == "CONFIRMACION_HUMANA"
-                and normalizar_rut(str(e.campos_observados.get("rut_chofer_asociado", ""))) == rut_normalizado
-            ):
-                resultado.add(v.patente_canonica)
-                break
-    return resultado
+        asignaciones = [
+            (str(e.fecha), normalizar_rut(str(e.campos_observados.get("rut_chofer_asociado", ""))))
+            for e in v.evidencias
+            if e.tipo == "CONFIRMACION_HUMANA" and str(e.campos_observados.get("rut_chofer_asociado", "")).strip()
+        ]
+        if asignaciones:
+            vigentes[v.patente_canonica] = (max(asignaciones)[1], v.tipo)
+    return vigentes
 
 
 # Acciones del ledger que CIERRAN una VEHICULO_DESCONOCIDO fijando una
@@ -1423,6 +1441,21 @@ def _distancia_documental_patente(a: str, b: str) -> int:
     """Caracteres distintos entre la lectura documental y una patente del
     catálogo (misma longitud); otra longitud nunca es "cercana"."""
     return sum(x != y for x, y in zip(a, b)) if len(a) == len(b) else max(len(a), len(b))
+
+
+def _distancia_edicion_patente(a: str, b: str) -> int:
+    """Ediciones mínimas entre dos patentes: sustitución (confusión letra/
+    número), omisión, adición o transposición de dos caracteres adyacentes
+    (distancia OSA). Sólo se usa contra la asignación VIGENTE del chofer:
+    caso real 482995 JF9557 -> JF9575 es una transposición (1 edición)."""
+    filas = [list(range(len(b) + 1))] + [[i] + [0] * len(b) for i in range(1, len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            costo = 0 if a[i - 1] == b[j - 1] else 1
+            filas[i][j] = min(filas[i - 1][j] + 1, filas[i][j - 1] + 1, filas[i - 1][j - 1] + costo)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                filas[i][j] = min(filas[i][j], filas[i - 2][j - 2] + 1)
+    return filas[len(a)][len(b)]
 
 
 # Distancia documental máxima que tolera cada nivel para resolver solo
@@ -1563,8 +1596,12 @@ def evaluar_evidencia_patente(
     transportes_por_patente = _transportes_por_patente_de_chofer(
         campo=campo, filas=filas, rut_normalizado=rut_normalizado,
     )
+    # Asignación vigente chofer-camión: el tipo sale del campo leído cuando la
+    # tarjeta no lo trae (caso real 483017, tracto sin tipo propuesto), así
+    # la patente de un tracto nunca corrige la de un carro ni al revés.
+    tipo_vigente = tipo_esperado or {"patente_tracto": "TRACTO", "patente_rampla": "CARRO"}.get(campo)
     confirmadas_para_rut = _vehiculos_confirmados_para_rut(
-        rut_normalizado=rut_normalizado, tipo_esperado=tipo_esperado, vehiculos=vehiculos,
+        rut_normalizado=rut_normalizado, tipo_esperado=tipo_vigente, vehiculos=vehiculos,
     )
     # Bloque VEHÍCULO E3 -- desempate contextual: una decisión humana
     # previa del MISMO RUT y campo, ya registrada en el ledger
@@ -1671,10 +1708,26 @@ def evaluar_evidencia_patente(
         elif transportes:
             evidencias.append("CORROBORACION_MISMO_TRANSPORTE")
         es_confirmacion_directa = patente in confirmadas_para_rut
+        distancia = _distancia_documental_patente(valor_norm, patente)
         if es_confirmacion_directa:
             evidencias.append("CONFIRMACION_HUMANA_ASOCIADA_AL_CHOFER")
+            # Camión vigente del chofer: tolera sustitución, omisión, adición o
+            # transposición. Si otro vehículo confirmado del mismo tipo queda
+            # igual de cerca de la lectura, la coincidencia es ambigua.
+            distancia = _distancia_edicion_patente(valor_norm, patente)
+            if distancia <= _DISTANCIA_DOCUMENTAL_MAXIMA_POR_NIVEL[NIVEL_CONFIRMACION_HUMANA] and any(
+                otra != patente and otro.tipo == vehiculo.tipo
+                and _distancia_edicion_patente(valor_norm, otra) <= distancia
+                for otra, otro in homologables_por_patente.items()
+            ):
+                conflictos.append("OTRO_VEHICULO_CONFIRMADO_IGUAL_DE_CERCANO")
         if es_decision_humana_previa:
             evidencias.append("DECISION_HUMANA_PREVIA_MISMO_RUT")
+            if confirmadas_para_rut and patente not in confirmadas_para_rut:
+                # El chofer tiene otro camión vigente de este tipo: una
+                # decisión anterior sobre esta patente es historial.
+                es_decision_humana_previa = False
+                conflictos.append("NO_ES_LA_ASIGNACION_VIGENTE")
         if _diferencia_ocr_segura(valor_norm, patente):
             evidencias.append("SIMILITUD_OCR_CALIBRADA")
         n_pares_contexto = len(pares_contexto.get(patente, ()))
@@ -1693,7 +1746,7 @@ def evaluar_evidencia_patente(
             "patente": patente, "vehiculo_id": vehiculo.vehiculo_id, "tipo_vehiculo": vehiculo.tipo,
             "nivel": nivel, "evidencias": tuple(evidencias), "conflictos": tuple(conflictos),
             "guias": guias, "transportes_independientes": n_independientes,
-            "distancia_documental": _distancia_documental_patente(valor_norm, patente),
+            "distancia_documental": distancia,
             "referencias_fuente": referencias_fuente,
             "razon_legible": _razon_legible_candidato(
                 patente=patente, evidencias=tuple(evidencias), conflictos=tuple(conflictos), valor_documental=valor_documental,
@@ -1733,7 +1786,7 @@ def evaluar_evidencia_patente(
     if len(empatadas_arriba) > 1:
         compatibles = empatadas_arriba
     ganadora = compatibles[0] if len(compatibles) == 1 else None
-    evidencia_suficiente = ganadora is not None and (
+    evidencia_suficiente = ganadora is not None and "OTRO_VEHICULO_CONFIRMADO_IGUAL_DE_CERCANO" not in ganadora["conflictos"] and (
         ganadora["nivel"] == NIVEL_CONFIRMACION_HUMANA
         or (
             ganadora["nivel"] == NIVEL_DOCUMENTAL_INDEPENDIENTE
