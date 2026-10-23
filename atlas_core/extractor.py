@@ -2476,6 +2476,16 @@ def detectar_captura_recortada_posible(bloques: List[Any]) -> bool:
 _ETIQUETAS_PATENTE_TRACTO = ("PATENTE", "TRACTO")
 _ETIQUETAS_PATENTE_CARRO = ("CARRO", "RAMPLA", "REMOLQUE")
 _ETIQUETAS_PATENTE_TODAS = _ETIQUETAS_PATENTE_TRACTO + _ETIQUETAS_PATENTE_CARRO
+# Casos reales 482953 ("ND6443CARRO:JB6878") y 482772/482902
+# ("KN5439CARRO:JF6468"), RapidOCR: la etiqueta del segundo campo llega PEGADA
+# al valor del primero. Con `\b` la etiqueta no se reconocía (no hay borde de
+# palabra entre "3" y "C"), el valor del tracto quedaba como un token de 11
+# caracteres y el único token de 6 que sobrevivía -- el del carro -- se tomaba
+# como tracto. Toda patente chilena termina en dígito, así que una etiqueta
+# sólo se rechaza si la precede una LETRA (p. ej. "CONTRACTO"), y un valor de
+# 6 caracteres termina en un borde o justo antes de una etiqueta pegada.
+_INICIO_ETIQUETA_PATENTE = r"(?<![A-Z])"
+_FIN_VALOR_PATENTE = r"(?:(?![A-Z0-9])|(?=(?:" + "|".join(_ETIQUETAS_PATENTE_TODAS) + r")))"
 
 
 # Confusiones de OCR YA CONFIRMADAS con una guía real cada una -- nunca una
@@ -2525,14 +2535,17 @@ def _valor_tras_etiqueta_en_bloque(texto: str, etiquetas: tuple[str, ...]) -> Op
     conocidas dentro de la propia etiqueta (ver
     `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`)."""
     texto_tolerante = _tolerante_confusion_ocr_etiqueta(texto)
-    patron = re.compile(r"\b(?:" + "|".join(re.escape(e) for e in etiquetas) + r")\b")
+    patron = re.compile(_INICIO_ETIQUETA_PATENTE + r"(?:" + "|".join(re.escape(e) for e in etiquetas) + r")\b")
     coincidencia = patron.search(texto_tolerante)
     if not coincidencia:
         return None
     resto = texto[coincidencia.end():].lstrip(" :;,-.")
-    valor = re.match(r"([A-Z0-9]{6})\b", resto)
-    if valor and _patente_valida(valor.group(1)):
-        return valor.group(1)
+    inicio_resto = len(texto) - len(resto)
+    # La etiqueta pegada que cierra el valor se busca en el texto tolerante
+    # (misma longitud); el valor devuelto sale siempre del texto original.
+    valor = re.compile(r"([A-Z0-9]{6})" + _FIN_VALOR_PATENTE).match(texto_tolerante, inicio_resto)
+    if valor and _patente_valida(texto[valor.start(1):valor.end(1)]):
+        return texto[valor.start(1):valor.end(1)]
     return None
 
 
@@ -2546,10 +2559,14 @@ def _valor_unico_residual(texto: str) -> Optional[str]:
     ENCONTRAR el par a remover (ver `_CONFUSIONES_OCR_ETIQUETA_VEHICULAR`)
     -- el texto removido y el residual devuelto siempre vienen del texto
     ORIGINAL sin sustituir, así que un valor documental que legítimamente
-    contenga "0" o "B" nunca se corrompe."""
+    contenga "0" o "B" nunca se corrompe. El par se remueve aunque la
+    etiqueta venga pegada a cualquier carácter previo (482953/482772/482902):
+    el valor de otra etiqueta nunca es residual de ésta -- con una etiqueta
+    pegada irreconocible el residual queda vacío y se abstiene."""
     texto_tolerante = _tolerante_confusion_ocr_etiqueta(texto)
     patron = re.compile(
-        r"\b(?:" + "|".join(re.escape(e) for e in _ETIQUETAS_PATENTE_TODAS) + r")\b\s*:?\s*[A-Z0-9]{6}\b"
+        r"(?:" + "|".join(re.escape(e) for e in _ETIQUETAS_PATENTE_TODAS)
+        + r")\b\s*:?\s*[A-Z0-9]{6}" + _FIN_VALOR_PATENTE
     )
     recortes = [(m.start(), m.end()) for m in patron.finditer(texto_tolerante)]
     texto_residual = texto
@@ -3362,8 +3379,16 @@ def extraer_datos(
         if coincidencia_carro and _patente_valida(coincidencia_carro.group(1)):
             patente_carro = _normalizar_patente(coincidencia_carro.group(1))
 
+        # El par CARRO:valor nunca es candidato a tracto; enmascararlo deja
+        # además separado un valor de tracto pegado a la etiqueta
+        # ("ND6443CARRO:JB6878", caso real 482953).
+        bloque_tracto = bloque
+        if coincidencia_carro:
+            inicio, fin = coincidencia_carro.span()
+            bloque_tracto = bloque[:inicio] + " " * (fin - inicio) + bloque[fin:]
+
         coincidencia_patente = None
-        for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", bloque):
+        for coincidencia in re.finditer(r"\b[A-Z0-9]{6}\b", bloque_tracto):
             posible = coincidencia.group(0)
             if _patente_valida(posible):
                 coincidencia_patente = coincidencia

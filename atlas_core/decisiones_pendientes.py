@@ -1421,6 +1421,45 @@ def _asignaciones_vigentes(vehiculos: Iterable[object]) -> dict[str, tuple[str, 
     return vigentes
 
 
+def clasificar_patentes_por_asignacion_vigente(
+    tracto: str, rampla: str, rut_chofer: str, vehiculos: Iterable[object],
+) -> tuple[str, str] | None:
+    """`(tracto, rampla)` reubicados según la asignación vigente del chofer, o
+    `None` si no corresponde reclasificar.
+
+    Casos reales 482953/482772/482902: la patente del CARRO vigente del chofer
+    quedó en el campo tracto. Sólo actúa con el chofer identificado y
+    exactamente un TRACTO y un CARRO vigentes confirmados para él, y sólo con
+    coincidencia EXACTA: una patente leída en el campo equivocado se mueve al
+    suyo. Nunca completa el campo que el documento no trae (la patente
+    asignada no es una lectura) ni corrige valores, y se abstiene ante
+    evidencia contradictoria (el otro campo trae una patente ajena a la
+    asignación) -- esa queda para revisión humana."""
+    rut = normalizar_rut(str(rut_chofer or ""))
+    if not rut:
+        return None
+    propios: dict[str, list[str]] = {}
+    for patente, (rut_vigente, tipo) in _asignaciones_vigentes(vehiculos).items():
+        if rut_vigente == rut:
+            propios.setdefault(tipo, []).append(patente)
+    if len(propios.get("TRACTO", ())) != 1 or len(propios.get("CARRO", ())) != 1:
+        return None
+    tracto_vigente, carro_vigente = propios["TRACTO"][0], propios["CARRO"][0]
+
+    def _leida(valor: str) -> str | None:
+        texto = re.sub(r"[\s.\-]", "", str(valor or "")).upper()
+        return texto if texto and texto != "NOENCONTRADO" else None
+
+    tracto_leido, rampla_leida = _leida(tracto), _leida(rampla)
+    if tracto_leido == carro_vigente and rampla_leida in (None, carro_vigente):
+        return "No encontrado", carro_vigente
+    if tracto_leido == carro_vigente and rampla_leida == tracto_vigente:
+        return tracto_vigente, carro_vigente
+    if tracto_leido is None and rampla_leida == tracto_vigente:
+        return tracto_vigente, "No encontrado"
+    return None
+
+
 # Acciones del ledger que CIERRAN una VEHICULO_DESCONOCIDO fijando una
 # patente canónica -- una decisión humana explícita sobre qué vehículo
 # corresponde a este documento (nunca un registro nuevo, nunca un

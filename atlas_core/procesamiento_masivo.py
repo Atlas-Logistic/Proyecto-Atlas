@@ -177,7 +177,10 @@ from atlas_core.motor_evidencia_obras import (
     resolver_obra_por_prefijo_documental_confirmado,
     resolver_obra_por_recorte_corroborado_por_destino,
 )
-from atlas_core.decisiones_pendientes import detectar_decisiones_documento
+from atlas_core.decisiones_pendientes import (
+    clasificar_patentes_por_asignacion_vigente,
+    detectar_decisiones_documento,
+)
 from atlas_core.rutas.destino_entrega import (
     CAMPOS_ENTREGA_DOCUMENTO,
     calcular_ruta_con_planta_conocida,
@@ -2470,6 +2473,7 @@ def procesar_archivo(
     destinos_relacion_obra: list = []
     chofer_geometrico = False
     patentes_geometricas_sin_homologar: set[str] = set()
+    reclasificacion_patentes: dict[str, str] | None = None
     identidad_cliente_cabecera: dict[str, object] | None = None
     recuperacion_cliente_documental: dict[str, object] | None = None
     bloques_guia = None
@@ -2835,6 +2839,38 @@ def procesar_archivo(
             vehiculos = Path(carpeta_catalogos) / "vehiculos.json"
             catalogo_vehiculos = cargar_catalogo_vehiculos(vehiculos)
             por_patente = {v.patente_canonica: v for v in catalogo_vehiculos.homologables()}
+            # Casos reales 482953/482772/482902: el carro vigente del chofer
+            # leído en el campo tracto vuelve a su campo (sólo coincidencia
+            # exacta con su asignación vigente; ver
+            # `clasificar_patentes_por_asignacion_vigente`). La lectura
+            # original queda en `metricas["reclasificacion_patentes"]`.
+            tracto_leido = str(datos.get("patente del tracto", "No encontrado"))
+            carro_leido = str(datos.get("patente del carro", "No encontrado"))
+            reclasificadas = clasificar_patentes_por_asignacion_vigente(
+                tracto_leido, carro_leido, str(datos.get("RUT del chofer", "")),
+                catalogo_vehiculos.homologables(),
+            )
+            if reclasificadas is not None:
+                datos["patente del tracto"], datos["patente del carro"] = reclasificadas
+                # La marca "recuperada por geometría" acompaña al valor movido.
+                campos_patente = ("patente del tracto", "patente del carro")
+                valores_geometricos = {
+                    valor for campo, valor in zip(campos_patente, (tracto_leido, carro_leido))
+                    if campo in patentes_geometricas_sin_homologar
+                }
+                patentes_geometricas_sin_homologar -= set(campos_patente)
+                patentes_geometricas_sin_homologar |= {
+                    campo for campo, valor in zip(campos_patente, reclasificadas) if valor in valores_geometricos
+                }
+                reclasificacion_patentes = {
+                    "metodo": "ASIGNACION_VIGENTE_CHOFER",
+                    "tracto_leido": tracto_leido, "carro_leido": carro_leido,
+                    "tracto": reclasificadas[0], "carro": reclasificadas[1],
+                }
+                logger.info(
+                    "patentes reclasificadas por asignacion-vigente-chofer-v1: tracto %s -> %s, carro %s -> %s",
+                    tracto_leido, reclasificadas[0], carro_leido, reclasificadas[1],
+                )
             rampla_documental_valida = _patente_valida(
                 str(datos.get("patente del carro", "No encontrado"))
             )
@@ -4013,6 +4049,8 @@ def procesar_archivo(
         # AMBIGUA), valor OCR original y valor canónico aplicado -- también
         # cuando Atlas se abstuvo.
         metricas["desempates_vehiculo"] = desempates_vehiculo
+    if reclasificacion_patentes is not None:
+        metricas["reclasificacion_patentes"] = reclasificacion_patentes
     if recuperacion_cliente_documental is not None:
         # Auditoría de la recuperación del cliente por cabecera documental:
         # nombre/RUT/código leídos + cliente maestro + vía y corroboraciones.
