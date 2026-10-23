@@ -24,3 +24,14 @@ ilegibles o repetidas puede leer la fila de otro documento.
 
 ## Pruebas
 `tests/test_homologacion_patente_guia_ilegible_482995.py`: base 5/6 fallan, corregido 6/6.
+
+## Datos de entrega conservados sin geocodificación
+Aplicar la homologación revalida la guía (`aplicar_decision_obra` -> `revalidar_y_regenerar_reporte` ->
+`revalidar_ruta_sin_destino_calculado_sin_ocr`). Con motivo previo técnico (`SIN_CREDENCIAL`) se reintenta la
+ruta; sin credencial vuelve a fallar (`GEOCODIFICACION_SIN_CREDENCIAL`) y la rama de "motivo cambiado"
+sobrescribía dirección, comuna, región y códigos con los valores vacíos del intento fallido
+(GALVARINO 8501 QUILICURA en 482995). Ahora un fallo transitorio (`_MOTIVOS_FALLO_TRANSITORIO`) sin dirección
+geocodificada nueva sólo actualiza `estado_ruta`/`motivo_ruta`; un rechazo con evidencia o una ruta calculada
+siguen reemplazando los campos. `tests/test_ruta_conserva_territorio_sin_credencial_482995.py`: base falla,
+corregido pasa. Laboratorio sobre copia productiva: tarjeta cerrada (ATLAS_AUTOMATICO JF9557 -> JF9575),
+territorio intacto, sólo esa fila cambia.

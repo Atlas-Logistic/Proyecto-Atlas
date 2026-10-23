@@ -4008,7 +4008,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES,
         motivo_ruta_base,
     )
-    from atlas_core.decisiones_pendientes import resumen_hallazgo_b1
+    from atlas_core.decisiones_pendientes import _MOTIVOS_FALLO_TRANSITORIO, resumen_hallazgo_b1
 
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         filas = _leer_filas(ruta)
@@ -4217,6 +4217,20 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     ):
                         fila["estado_ruta"] = resultado.estado_ruta
                         fila["motivo_ruta"] = resultado.motivo_ruta
+                        # Un reintento que vuelve a fallar por una causa
+                        # transitoria (sin credencial/conexión, cuota...) sin
+                        # dirección geocodificada nueva no es evidencia contra
+                        # la resolución territorial ya persistida: se corrige
+                        # sólo la etiqueta. Caso real 482995: la homologación
+                        # de su rampla reintentaba la ruta sin credencial y
+                        # vaciaba GALVARINO 8501 QUILICURA, comuna, región y
+                        # códigos territoriales.
+                        if (
+                            motivo_nuevo in _MOTIVOS_FALLO_TRANSITORIO
+                            and not resultado.direccion_entrega_geocodificada
+                        ):
+                            guias_actualizadas.append(str(fila.get("numero_guia", "")))
+                            continue
                         # Bloque CONFIRMACIÓN D2 -- caso real 472044
                         # (PUERTA DEL SOL 83 LAS CONDES): estas tres
                         # columnas quedaban SIN TOCAR en esta rama (sólo
