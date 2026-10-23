@@ -1823,20 +1823,42 @@ def enriquecer_decisiones_vehiculo(
         v.patente_canonica: v for v in vehiculos
         if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
     }
-    filas_por_guia: dict[str, dict[str, object]] = {}
+    # La fila del documento se identifica por `archivo` (único). Caso real
+    # 482995 (envío Mobile ae70a62b, guía leída "No encontrado"): buscarla
+    # por número de guía tomaba la PRIMERA fila con esa guía -- la de otro
+    # documento (473316, otro chofer) -- y evaluaba la patente con el RUT y
+    # el historial ajenos (candidatas JB6878/JK2501 en vez de JF9575). Si el
+    # archivo no identifica una única fila se recurre a la guía, y sólo si es
+    # legible y única; si no, no se evalúa (la tarjeta queda para revisión).
+    filas_por_archivo: dict[str, dict[str, object]] = {}
+    archivos_repetidos: set[str] = set()
+    filas_por_guia_unica: dict[str, list[dict[str, object]]] = {}
     for fila in filas:
-        guia = str(fila.get("numero_guia", ""))
-        if guia and guia not in filas_por_guia:
-            filas_por_guia[guia] = fila
+        archivo_fila = str(fila.get("archivo", "")).strip()
+        if archivo_fila in filas_por_archivo:
+            archivos_repetidos.add(archivo_fila)
+        elif archivo_fila:
+            filas_por_archivo[archivo_fila] = fila
+        guia_fila = str(fila.get("numero_guia", "")).strip()
+        if guia_fila not in _AUSENTES:
+            filas_por_guia_unica.setdefault(guia_fila, []).append(fila)
+    for archivo_fila in archivos_repetidos:
+        filas_por_archivo.pop(archivo_fila)
+
+    def _fila_del_documento(documento: Mapping[str, object]) -> Mapping[str, object] | None:
+        archivo_documento = str(documento.get("archivo", "")).strip()
+        if archivo_documento in filas_por_archivo:
+            return filas_por_archivo[archivo_documento]
+        candidatas = filas_por_guia_unica.get(str(documento.get("numero_guia", "")).strip(), [])
+        return candidatas[0] if len(candidatas) == 1 else None
 
     salida: list[dict[str, object]] = []
     for decision_original in decisiones:
         decision = dict(decision_original)
         if decision.get("tipo") == "VEHICULO_DESCONOCIDO":
             documento = decision.get("documento") or {}
-            guia = str(documento.get("numero_guia", ""))
             transporte = str(documento.get("numero_transporte", ""))
-            fila = filas_por_guia.get(guia)
+            fila = _fila_del_documento(documento)
             rut = str(fila.get("rut_chofer", "")).strip() if fila else ""
             if rut:
                 campo_decision = str(decision.get("campo", ""))
