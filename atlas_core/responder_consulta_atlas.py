@@ -182,6 +182,11 @@ def _filtros_legibles(consulta: ConsultaAtlas) -> str:
             campos = ", ".join(_NOMBRE_FILTRO_LEGIBLE.get(c, c) for c in str(valor).split(",") if c)
             partes.append(f"{'sin' if campo == 'ausente' else 'con'} {campos}")
             continue
+        if campo == "fecha_desde" and "fecha_hasta" in filtros and filtros["fecha_hasta"] != valor:
+            partes.append(f"período {valor} al {filtros['fecha_hasta']} (ambos incluidos)")
+            continue
+        if campo == "fecha_hasta" and "fecha_desde" in filtros:
+            continue
         if campo == "fecha_desde" and filtros.get("fecha_hasta") == valor:
             partes.append(f"fecha {valor}")
             continue
@@ -448,6 +453,12 @@ def responder_consulta_atlas(
     turnos, nunca este módulo. Un "muéstramelos" sin ningún contenido
     propio reutiliza su `filtros`/`dominio` EXACTOS (ver
     `interpretador_consultas._es_seguimiento_listar_bare`)."""
+    # Valida fechas antes de cualquier ruta de interpretacion o proveedor.
+    from atlas_core.interpretador_consultas import _filtros_periodo
+    try:
+        _filtros_periodo(pregunta.upper())
+    except ValueError as error:
+        return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
     viajes = cargar_viajes(ruta_viajes)
     catalogos = construir_catalogos_consulta(viajes)
 

@@ -15,6 +15,7 @@ ejecutarse (Bloque 20: "el LLM nunca calcula, nunca decide solo")."""
 from __future__ import annotations
 
 import re
+from datetime import date
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
@@ -495,26 +496,42 @@ _PALABRAS_PERIODO = (
     (PERIODO_HOY, ("HOY",)),
 )
 _PATRON_ULTIMOS_DIAS = re.compile(r"\bULTIM[OA]S?\s+(\d+)\s+DIAS?\b")
+_FECHA_TEXTO = r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?(?![\d/-])"
 _PATRON_RANGO_FECHAS = re.compile(
-    r"\b(?:ENTRE|DESDE)\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})\s+(?:Y|HASTA)\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b"
+    r"\b(?:ENTRE|DESDE|DEL?)\s+" + _FECHA_TEXTO
+    + r"\s+(?:Y|HASTA|AL?)\s+" + _FECHA_TEXTO + r"\b"
 )
-_PATRON_FECHA_PUNTUAL = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
+_PATRON_FECHA_PUNTUAL = re.compile(r"\b" + _FECHA_TEXTO + r"\b")
 
 
 def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
-    """Extrae una ventana real antes de contar o agrupar cualquier dominio."""
+    """Ventana inclusiva; sin año usa el año actual de la politica temporal."""
+    rango = _PATRON_RANGO_FECHAS.search(texto_normalizado)
+    puntual = _PATRON_FECHA_PUNTUAL.search(texto_normalizado)
+    # Una ventana incompleta nunca se degrada a una fecha ni al historico.
+    if puntual and re.search(r"\b(?:ENTRE|DESDE)\s+\d|[\d/-]+\s+(?:AL|HASTA|Y)\b", texto_normalizado) and not rango:
+        raise ValueError("No pude interpretar el rango de fechas; indica ambas fechas completas.")
+    if re.search(r"\b(?:ENTRE|DESDE|DEL?|AL|HASTA)\s+\d+[/-]|\b\d+/", texto_normalizado) and not (rango or puntual):
+        raise ValueError("No pude interpretar la fecha solicitada.")
+    if rango or puntual:
+        if rango:
+            d1, m1, a1, d2, m2, a2 = rango.groups()
+            a1, a2 = a1 or a2 or str(date.today().year), a2 or a1 or str(date.today().year)
+        else:
+            d1, m1, a1 = puntual.groups()
+            a1 = a1 or str(date.today().year)
+            d2, m2, a2 = d1, m1, a1
+        try:
+            desde = date(int(a1), int(m1), int(d1))
+            hasta = date(int(a2), int(m2), int(d2))
+        except ValueError as error:
+            raise ValueError("Fecha inválida en el período solicitado.") from error
+        if desde > hasta:
+            raise ValueError("Rango inválido: la fecha inicial es posterior a la final.")
+        return {"fecha_desde": desde.isoformat(), "fecha_hasta": hasta.isoformat()}
     ultimos = _PATRON_ULTIMOS_DIAS.search(texto_normalizado)
     if ultimos:
         return {"periodo": PERIODO_ULTIMOS_N_DIAS, "dias": ultimos.group(1)}
-    rango = _PATRON_RANGO_FECHAS.search(texto_normalizado)
-    if rango:
-        d1, m1, a1, d2, m2, a2 = rango.groups()
-        return {"fecha_desde": f"{a1}-{int(m1):02d}-{int(d1):02d}", "fecha_hasta": f"{a2}-{int(m2):02d}-{int(d2):02d}"}
-    puntual = _PATRON_FECHA_PUNTUAL.search(texto_normalizado)
-    if puntual:
-        d, m, a = puntual.groups()
-        dia = f"{a}-{int(m):02d}-{int(d):02d}"
-        return {"fecha_desde": dia, "fecha_hasta": dia}
     for nombre_periodo, frases in _PALABRAS_PERIODO:
         if any(frase in texto_normalizado for frase in frases):
             return {"periodo": nombre_periodo}
@@ -550,20 +567,10 @@ def _filtros_periodo_ingesta(texto_normalizado: str) -> dict[str, str]:
     jamás se confundan con el filtro de fecha documental."""
     if not _menciona_ingesta(texto_normalizado):
         return {}
-    ultimos = _PATRON_ULTIMOS_DIAS.search(texto_normalizado)
-    if ultimos:
-        return {"periodo_ingesta": PERIODO_ULTIMOS_N_DIAS, "dias_ingesta": ultimos.group(1)}
-    rango = _PATRON_RANGO_FECHAS.search(texto_normalizado)
-    if rango:
-        d1, m1, a1, d2, m2, a2 = rango.groups()
-        return {
-            "fecha_ingesta_desde": f"{a1}-{int(m1):02d}-{int(d1):02d}",
-            "fecha_ingesta_hasta": f"{a2}-{int(m2):02d}-{int(d2):02d}",
-        }
-    for nombre_periodo, frases in _PALABRAS_PERIODO:
-        if any(frase in texto_normalizado for frase in frases):
-            return {"periodo_ingesta": nombre_periodo}
-    return {}
+    filtros = _filtros_periodo(texto_normalizado)
+    equivalencias = {"periodo": "periodo_ingesta", "dias": "dias_ingesta",
+                     "fecha_desde": "fecha_ingesta_desde", "fecha_hasta": "fecha_ingesta_hasta"}
+    return {equivalencias[k]: v for k, v in filtros.items()}
 
 
 # --- Presencia/ausencia de un campo operacional: "sin material", "no tienen
