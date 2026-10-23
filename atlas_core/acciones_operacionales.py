@@ -1634,11 +1634,23 @@ def _consultar_decisiones(ctx: _Contexto, p: dict) -> object:
     guia = str(p.get("numero_guia", ""))
     decisiones = [d for d in ctx.decisiones()
                   if not guia or str((d.get("documento") or {}).get("numero_guia", "")) == guia]
-    return {"decisiones": [
+    resultado = {"decisiones": [
         {"decision_id": d.get("decision_id"), "tipo": d.get("tipo"), "campo": d.get("campo"),
          "valor_documental": d.get("valor_documental"), "documento": d.get("documento"),
-         "acciones_permitidas": d.get("acciones_permitidas")} for d in decisiones[:200]],
-        "total": len(decisiones)}
+         "acciones_permitidas": d.get("acciones_permitidas"),
+         **({k: d.get(k) for k in ("motivos", "contexto", "candidatos", "evidencias")} if guia else {})}
+        for d in (decisiones if guia else decisiones[:200])], "total": len(decisiones)}
+    if guia:
+        resultado["numero_guia"] = guia
+        resultado["documentos"] = [
+            {k: fila.get(k, "") for k in ("numero_guia", "cliente", "obra_destino", "despachar_a_crudo", "direccion_entrega")}
+            for fila in ctx.filas() if str(fila.get("numero_guia", "")) == guia]
+        for decision in resultado["decisiones"]:
+            nombre = (decision.get("contexto") or {}).get("obra_canonica")
+            decision["obras_vinculadas"] = (
+                _consultar_obras(ctx, {"nombre": nombre})["obras"]
+                if nombre and ctx.archivos["obras_destinos"].is_file() else [])
+    return resultado
 
 
 def _plan_decision(ctx: _Contexto, p: dict) -> Plan:

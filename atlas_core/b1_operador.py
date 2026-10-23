@@ -163,8 +163,8 @@ _INACTIVIDAD_CHOFERES = re.compile(
 # Una "mención" que en realidad es una pregunta general sobre el catálogo.
 _MENCION_GENERAL = re.compile(r"\b(?:CHOFERES|CONDUCTORES|CUANTOS|CUANTAS|QUIENES|QUIEN|CUALES|QUE|TODOS|"
                               r"ALGUNO|ALGUN|NINGUNO|NINGUN|HAY)\b")
-_VERBO_LECTURA = re.compile(r"^(?:QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
-_LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS)\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
+_VERBO_LECTURA = re.compile(r"^(?:CONSULTA(?:R)?|QUE|CUALES|CUANTOS|LISTA|LISTAR|MUESTRA|MUESTRAME|DAME|VER|HAY|QUIENES)\b")
+_LECTURA_DECISIONES = re.compile(r"\b(?:DECISIONES|REVISIONES|TARJETAS|REVISION(?=\s+(?:DE\s+LA\s+|DE\s+)?GUIA))\b(?:.*\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12}))?")
 _NO_ES_DECISION = re.compile(r"\b(?:ESTADIAS?|INCIDENCIAS?|DEVOLUCION(?:ES)?|VUELTAS?)\b")
 # DESTINO de una guía (mismo camino que Revisión: DESTINO_NO_RESUELTO /
 # REGISTRAR_DIRECCION). Frases: "el destino de la guía N es X", "la guía N va
@@ -871,6 +871,40 @@ def _tablas_inactividad_choferes(resultado: Mapping[str, object]) -> list[dict[s
 
 
 def _tablas_lectura(accion: str, resultado: Mapping[str, object]) -> list[dict[str, object]]:
+    if accion == "DECISION_CONSULTAR" and resultado.get("numero_guia"):
+        tablas = []
+        for documento in resultado.get("documentos") or []:
+            tablas.append({"tipo": "documento_revision", "resumen": "Valores registrados de la guía",
+                           "columnas": ["Campo", "Valor"], "filas": [
+                               ["Cliente", documento.get("cliente") or "No disponible"],
+                               ["Obra documental", documento.get("obra_destino") or "No disponible"],
+                               ["Dirección documental", documento.get("despachar_a_crudo") or "No disponible"],
+                               ["Destino registrado", documento.get("direccion_entrega") or "No disponible"]]})
+        if not resultado.get("documentos"):
+            tablas.append({"tipo": "documento_revision", "resumen": "",
+                           "columnas": ["Campo", "Valor"],
+                           "filas": [["Valores documentales", "No disponibles en el dataset vigente"]]})
+        for decision in resultado.get("decisiones") or []:
+            contexto = decision.get("contexto") or {}
+            filas = [["Tipo", decision.get("tipo") or "No disponible"],
+                     ["Motivo", ", ".join(decision.get("motivos") or []) or "No disponible"],
+                     ["Valor documental", decision.get("valor_documental") or "No disponible"],
+                     ["Cliente de catálogo", contexto.get("cliente_canonico") or "No disponible"],
+                     ["Obra de catálogo", contexto.get("obra_canonica") or "No disponible"],
+                     ["Acciones declaradas en la revisión", ", ".join(decision.get("acciones_permitidas") or []) or "Ninguna disponible"]]
+            if not decision.get("evidencias"):
+                filas.append(["Evidencia registrada", "No disponible"])
+            if not decision.get("obras_vinculadas"):
+                filas.append(["Vínculos de catálogo", "No disponibles para esta obra"])
+            for evidencia in decision.get("evidencias") or []:
+                filas.append(["Evidencia registrada", str(evidencia)])
+            for obra in decision.get("obras_vinculadas") or []:
+                filas.append(["Obra vinculada", f"{obra['nombre']} ({obra['estado']})"])
+                for relacion in obra.get("relaciones") or []:
+                    filas.append(["Relación de catálogo", f"Destino {relacion['destino_id']}: {relacion['estado']}"])
+            tablas.append({"tipo": "detalle_revision", "resumen": "Revisión vigente",
+                           "columnas": ["Campo", "Valor"], "filas": filas})
+        return tablas
     if accion == "CHOFER_CONSULTAR" and resultado.get("modo") == "INACTIVIDAD":
         return _tablas_inactividad_choferes(resultado)
     return []
@@ -1026,6 +1060,13 @@ def _describir_lectura(accion: str, resultado: Mapping[str, object]) -> str:
         return _describir_catalogo_choferes(resultado)
     if accion == "DECISION_CONSULTAR":
         decisiones = resultado.get("decisiones") or []
+        if resultado.get("numero_guia"):
+            return (f"Guía {resultado['numero_guia']}: {resultado.get('total', 0)} revisiones vigentes. "
+                    "Consulta de solo lectura. Los valores y vínculos mostrados son registros existentes. "
+                    "Esta lectura no compara obras ni demuestra que una obra sea duplicada de otra confirmada. "
+                    "Las acciones declaradas no constituyen una recomendación ni acreditan sus precondiciones. "
+                    "No puedo proponer una acción sobre una supuesta duplicación con esta evidencia. "
+                    "No se aplicaron cambios ni se confirmó el destino.")
         return (f"{resultado.get('total', 0)} decisión(es) pendiente(s): "
                 + "; ".join(f"{d['tipo']} guía {(d.get('documento') or {}).get('numero_guia')}" for d in decisiones)
                 if decisiones else "No hay decisiones pendientes.")
