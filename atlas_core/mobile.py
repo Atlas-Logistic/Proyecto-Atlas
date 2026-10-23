@@ -2776,6 +2776,73 @@ def _envio_en_revision_con_vinculo_propio(registro: Mapping[str, object], asocia
     )
 
 
+def _vinculo_evento_mobile(registro, viajes_reporte, raiz):
+    asociacion = registro.get("resultado_asociacion") or {}
+    if not isinstance(asociacion, Mapping):
+        asociacion = {}
+    envio_id = str(registro.get("envio_id") or "")
+    transporte = str(asociacion.get("numero_transporte") or "").strip()
+    en_revision = _envio_en_revision_con_vinculo_propio(registro, asociacion)
+    if registro.get("estado") != "ASOCIADO" and not en_revision:
+        return "", None, viajes_reporte
+    via = None
+    if en_revision or (not transporte and asociacion.get("estado") == "SIN_ASOCIACION"):
+        if viajes_reporte is None:
+            viajes_reporte = _viajes_del_reporte_vigente(raiz)
+        del_reporte = _transporte_de_viaje_creado_con_esta_guia(viajes_reporte, envio_id)
+        if en_revision:
+            transporte = del_reporte if del_reporte and transporte in ("", del_reporte) else ""
+            via = VIA_DOCUMENTO_EN_VIAJE_DEL_REPORTE if transporte else None
+        else:
+            transporte = del_reporte
+            via = VIA_VIAJE_CREADO_CON_ESTA_GUIA if transporte else None
+    return transporte, via, viajes_reporte
+
+
+def registrar_observaciones_canonicas_mobile(repositorio, *, envios_objetivo=None):
+    """Proyecta textos originales con vinculo probado, independientemente de incidencias.
+
+    El envio conserva su observacion original. El evento libre acumula textos,
+    procedencias por envio y notas administrativas existentes; no reactiva anulados.
+    """
+    from atlas_core import registro_eventos_operacionales as reo
+    raiz = repositorio.raiz_atlas
+    viajes = None
+    salida = []
+    for registro in repositorio.historial():
+        envio_id = str(registro.get("envio_id") or "")
+        if envios_objetivo is not None and envio_id not in envios_objetivo:
+            continue
+        texto = str(registro.get("observacion") or "").strip()
+        if not texto or es_evidencia_firmada(registro) or registro.get("observacion_canonica"):
+            continue
+        transporte, via, viajes = _vinculo_evento_mobile(registro, viajes, raiz)
+        if not transporte:
+            continue
+        existente = next((e for e in reo.leer_eventos_operacionales(raiz=raiz).get("eventos", [])
+                          if e.get("clave_idempotencia") == reo.clave_idempotencia(
+                              contexto_empresarial=reo.CONTEXTO_EMPRESARIAL_SIN_ASIGNAR,
+                              tipo_evento="OBSERVACION_OPERACIONAL", numero_transporte=transporte)), None)
+        if existente and existente.get("estado") == reo.ESTADO_ANULADO:
+            continue
+        enriquecimiento = reo.resolver_enriquecimiento_transporte(raiz=raiz, numero_transporte=transporte)
+        resultado = reo.registrar_evento(
+            raiz=raiz, tipo_evento="OBSERVACION_OPERACIONAL", numero_transporte=transporte,
+            nota=texto, anexar_nota=True,
+            origen=f"MOBILE:{registro.get('usuario') or registro.get('chofer_id') or 'chofer'}",
+            referencia=f"ENVIO_MOBILE:{envio_id}", enriquecimiento=enriquecimiento)
+        evento = resultado["evento"]
+        marca = {"evento_id": evento["evento_id"], "numero_transporte": transporte,
+                 "via": via, "en": datetime.now(timezone.utc).isoformat()}
+        with bloqueo_sesion(repositorio.raiz, f"mobile_{envio_id}",
+                            tiempo_expiracion_segundos=TIEMPO_EXPIRACION_LOCK_ENVIO_SEGUNDOS):
+            actual = repositorio.cargar(envio_id)
+            actual["observacion_canonica"] = marca
+            repositorio.guardar(envio_id, actual)
+        salida.append({"envio_id": envio_id, **marca})
+    return salida
+
+
 def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -> list[dict]:
     """Lleva las incidencias de los envíos GUIA vinculados a un viaje al
     registro canónico `eventos_operacionales.json`, con la MISMA semántica e
@@ -2808,21 +2875,7 @@ def registrar_eventos_canonicos_mobile(repositorio: "RepositorioEnviosMobile") -
         pendientes = [t for t in tipos_novedad_de(registro) if t in _EVENTO_CANONICO_MOBILE and t not in ya]
         if not pendientes:
             continue
-        via = None
-        if en_revision:
-            # Siempre la prueba del reporte, aunque la asociación tenga
-            # transporte: en revisión ese valor no basta por sí solo, y si
-            # contradice al viaje que contiene el documento no se proyecta.
-            if viajes_reporte is None:
-                viajes_reporte = _viajes_del_reporte_vigente(raiz)
-            del_reporte = _transporte_de_viaje_creado_con_esta_guia(viajes_reporte, envio_id)
-            transporte = del_reporte if del_reporte and transporte in ("", del_reporte) else ""
-            via = VIA_DOCUMENTO_EN_VIAJE_DEL_REPORTE if transporte else None
-        elif not transporte and asociacion.get("estado") == "SIN_ASOCIACION":
-            if viajes_reporte is None:
-                viajes_reporte = _viajes_del_reporte_vigente(raiz)
-            transporte = _transporte_de_viaje_creado_con_esta_guia(viajes_reporte, envio_id)
-            via = VIA_VIAJE_CREADO_CON_ESTA_GUIA if transporte else None
+        transporte, via, viajes_reporte = _vinculo_evento_mobile(registro, viajes_reporte, raiz)
         if not transporte:
             continue
         observacion = str(registro.get("observacion") or "").strip()
@@ -2889,6 +2942,10 @@ def _sincronizar_contrato_v2(repositorio: "RepositorioEnviosMobile", envio_id: s
         intento["eventos"] = registrar_eventos_canonicos_mobile(repositorio)
     except Exception as error:
         intento["error_eventos"] = f"{type(error).__name__}: {error}"
+    try:
+        intento["observaciones"] = registrar_observaciones_canonicas_mobile(repositorio)
+    except Exception as error:
+        intento["error_observaciones"] = f"{type(error).__name__}: {error}"
     if dataset:
         try:
             intento["evidencias"] = reintentar_evidencias_firmadas_pendientes(repositorio, dataset=dataset)

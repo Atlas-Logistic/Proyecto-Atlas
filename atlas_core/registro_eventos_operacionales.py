@@ -364,6 +364,7 @@ def registrar_evento(
     tipo_evento: str,
     numero_transporte: str,
     nota: str = "",
+    anexar_nota: bool = False,
     contexto_empresarial: str = CONTEXTO_EMPRESARIAL_SIN_ASIGNAR,
     origen: str,
     referencia: str = "",
@@ -383,6 +384,9 @@ def registrar_evento(
     - no existe        -> se crea ACTIVO (``creado=True``);
     - existe ACTIVO    -> no se duplica; sólo se fusiona nota/procedencia
       nuevas si las hay (``creado=False``);
+    ``anexar_nota`` conserva la nota existente y agrega un bloque exacto
+    solo si no esta ya presente; la combinacion ocurre bajo el mismo lock.
+
     - existe ANULADO   -> se REACTIVA el MISMO ``evento_id``
       (``reactivado=True``), nunca se crea otro hecho lógico.
 
@@ -501,6 +505,12 @@ def registrar_evento(
             reactivado = True
 
         nota_nueva = str(nota or "")
+        if anexar_nota:
+            anterior = str(existente.get("nota") or "")
+            if f"\n{nota_nueva.strip()}\n" in f"\n{anterior.strip()}\n":
+                nota_nueva = anterior
+            elif anterior.strip() and nota_nueva.strip():
+                nota_nueva = anterior + "\n" + nota_nueva
         if nota_nueva and nota_nueva != str(existente.get("nota", "")):
             existente["nota"] = nota_nueva
             existente["historial"].append(
