@@ -33,7 +33,10 @@ from atlas_core.catalogo_vehiculos_catchup import (
     construir_universo_patentes,
     detectar_pares_sospechosos,
 )
-from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json
+from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json, rut_canonico_de_registro_chofer
+from atlas_core.fichas_choferes import (
+    EMPRESA_ACTUAL, leer_almacen, fichas_por_referencia, asignaciones_de_chofer,
+)
 from atlas_core.procesamiento_masivo import COLUMNAS, COLUMNAS_PRE_G1C
 from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
 
@@ -334,10 +337,12 @@ def _historico_entidad(filas_entidad: list[dict[str, str]], *, campo_contraparte
     }
 
 
-def _cargar_vehiculos_por_patente(raiz_atlas: str | Path) -> dict[str, object]:
+def _cargar_vehiculos_por_patente(raiz_atlas: str | Path, *, estricto=False) -> dict[str, object]:
     try:
         vehiculos = cargar_catalogo_vehiculos(Path(raiz_atlas) / "catalogos_privados" / "vehiculos.json").homologables()
     except _ERRORES_CATALOGO_VEHICULOS:
+        if estricto:
+            raise
         return {}
     return {v.patente_canonica: v for v in vehiculos}
 
@@ -348,12 +353,10 @@ def construir_ficha_chofer(*, identificador: str, registro_catalogo: Mapping[str
     nombres_reconocidos = {_normalizar_nombre_entidad(n) for n in [nombre_canonico, *aliases] if n}
     filas_chofer = [f for f in filas if _normalizar_nombre_entidad(str(f.get("chofer", ""))) in nombres_reconocidos]
 
-    rut_confirmado = None
-    if not identificador.upper().startswith("PENDIENTE") and len(identificador) >= 2:
-        candidato = validar_rut_chileno(f"{identificador[:-1]}-{identificador[-1]}")
-        if candidato.estado == EstadoValidacion.VALIDO:
-            rut_confirmado = candidato.valor
+    rut_confirmado = rut_canonico_de_registro_chofer(identificador, registro_catalogo)
 
+    # `rut` conserva el contrato histórico para otros lectores; la identidad
+    # principal nueva usa exclusivamente `rut_catalogo`, jamás el dataset.
     rut = (
         {"estado": "CONFIRMADO", "valor": rut_confirmado, "candidatos": [{"valor": rut_confirmado, "apariciones": None}]}
         if rut_confirmado else _resumen_rut_historico(filas_chofer, campo_rut="rut_chofer")
@@ -367,6 +370,8 @@ def construir_ficha_chofer(*, identificador: str, registro_catalogo: Mapping[str
         "activo": bool(registro_catalogo.get("activo", True)),
         "observacion_catalogo": str(registro_catalogo.get("observacion", "")).strip(),
         "rut": rut,
+        "rut_catalogo": {"estado": "CONFIRMADO" if rut_confirmado else "SIN_CONFIRMAR", "valor": rut_confirmado},
+        "asignaciones_vigentes": asignaciones_de_chofer(rut_confirmado, vehiculos_por_patente.values()),
         "vehiculos": _vehiculos_asociados(filas_chofer, vehiculos_por_patente),
         "combinaciones_tracto_rampla": _combinaciones_tracto_rampla(filas_chofer, vehiculos_por_patente),
         "historico": _historico_entidad(filas_chofer, campo_contraparte="cliente"),
@@ -497,15 +502,39 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
     raiz = Path(raiz_atlas)
     carpeta = raiz / "catalogos_privados"
     filas = _leer_filas_dataset(raiz)
-    vehiculos_por_patente = _cargar_vehiculos_por_patente(raiz)
+    try:
+        vehiculos_por_patente = _cargar_vehiculos_por_patente(raiz, estricto=True)
+        asignaciones_disponibles = True
+    except _ERRORES_CATALOGO_VEHICULOS:
+        vehiculos_por_patente = {}
+        asignaciones_disponibles = False
 
     choferes_json = cargar_catalogo_json(carpeta / "choferes.json")
+    try:
+        almacen_fichas = leer_almacen(raiz, empresa=EMPRESA_ACTUAL)
+        por_referencia = fichas_por_referencia(almacen_fichas)
+        error_fichas = None
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        por_referencia = {}
+        error_fichas = 'Almacén complementario no disponible: ' + str(error)
     fichas_choferes = [
         construir_ficha_chofer(identificador=str(ident), registro_catalogo=registro, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
         for ident, registro in choferes_json.items()
         if isinstance(registro, dict)
     ]
     fichas_choferes.sort(key=lambda f: f["nombre_canonico"])
+    for ficha in fichas_choferes:
+        if not asignaciones_disponibles:
+            ficha['asignaciones_vigentes'] = {rol: {'estado': 'NO_DISPONIBLE', 'patente': None, 'candidatos': []}
+                                              for rol in ('tracto', 'rampla')}
+        persistida = por_referencia.get(ficha['identificador'])
+        ficha['empresa'] = EMPRESA_ACTUAL
+        ficha['ficha_digital'] = ({'ficha_id': persistida['ficha_id'],
+                                  'complementarios': persistida['complementarios'],
+                                  'revision': almacen_fichas['revision']} if persistida else None)
+        ficha['ficha_digital_error'] = error_fichas or (
+            'Debe vincularse la ficha complementaria de este chofer.'
+            if almacen_fichas and almacen_fichas['version'] == 2 and not persistida else None)
 
     try:
         clientes = CatalogoClientes(carpeta / "clientes.json").listar()
