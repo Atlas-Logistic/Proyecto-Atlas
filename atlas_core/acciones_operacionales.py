@@ -1303,7 +1303,8 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
         ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
         ledger.setdefault("aplicaciones", []).append({
             "decision_id": f"ACCION_OPERACIONAL:{ctx.token}", "tipo": TIPO_LEDGER_CORRECCION,
-            "accion": "CORREGIR_CAMPO", "actor": actor, "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "accion": "CORREGIR_CAMPO", "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
             "documento": {"archivo": archivo, "numero_guia": plan.datos["guia"],
                           "numero_transporte": plan.datos["transporte"]},
             "campo": campo, "valor_documental": antes, "valor_corregido": valor,

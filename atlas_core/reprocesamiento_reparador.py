@@ -1142,7 +1142,10 @@ _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
     # En particular, DOCUMENTO_DEGRADADO y cualquier otro motivo crítico
     # independiente se conservan y mantienen el documento en revisión.
     "fecha": (MotivoRevisionDocumento.FECHA_SIN_CORROBORAR.value,),
-    "peso_kg": (MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value,),
+    # Ambos describen el peso anterior (atípico / autocorregido por OCR). Un
+    # peso nuevo atípico vuelve a marcarse abajo, igual que CORREGIR_PESO.
+    "peso_kg": (MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value,
+                MotivoRevisionDocumento.PESO_CORREGIDO_POR_BAJA_CONFIANZA_OCR.value),
     "hora_entrada_aza": (),
     "hora_salida_aza": (),
     "descripcion_material": (
@@ -1276,6 +1279,11 @@ def reparar_documento_focal_con_valores_conocidos(
                 if campo in {c.campo for c in cambios}
             }
             motivos_restantes = [m for m in sorted(motivos_actuales) if m not in motivos_resueltos]
+            if "peso_kg" in {c.campo for c in cambios}:
+                from atlas_core.credibilidad_campos import NivelCredibilidad, evaluar_credibilidad_peso
+                atipico = MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value
+                if evaluar_credibilidad_peso(fila["peso_kg"]).nivel != NivelCredibilidad.CONFIABLE:
+                    motivos_restantes = sorted({*motivos_restantes, atipico})
             fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
             indicador, documental, operacional = _indicadores_documentales_coherentes(
                 motivos_restantes, str(fila.get("estado_ruta", "")).strip(),

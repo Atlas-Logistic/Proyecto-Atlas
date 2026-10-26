@@ -184,6 +184,35 @@ _DESTINO_GUIA = [
 # solo viaje ("las guías A y B pertenecen al mismo viaje", "son del mismo
 # viaje", "junta las guías A y B en un solo viaje"). Nunca una pregunta ni
 # una negación.
+# PESO de una guía dicho por un humano: "en la guía N el peso correcto es
+# 12.450 kg", "el peso de la guía N es 12450", "corrige el peso de la guía N
+# a 12.450 kilos", "la guía N pesa 12.450 kg". El valor sólo se acepta en
+# kilos enteros (`_peso_kg_declarado`); nunca se infiere, redondea ni convierte.
+_PESO = r"(?:EL\s+)?PESO(?:\s+(?:CORRECTO|REAL|VERDADERO))?"
+_PESO_ES = r"(?:\s+(?:ES(?:\s+DE)?|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A)\s+|\s*:\s*)"
+_PESO_GUIA = [
+    re.compile(r"^EN\s+LA\s+" + _GUIA + r"\s*,?\s*" + _PESO + _PESO_ES + r"(?P<peso>.+)$"),
+    re.compile(r"^" + _PESO + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + _PESO_ES + r"(?P<peso>.+)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _PESO + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+               + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<peso>.+)$"),
+    re.compile(r"^(?:LA\s+)?" + _GUIA + r"\s+(?:PESA|TIENE\s+UN\s+PESO(?:\s+(?:CORRECTO|REAL))?\s+DE)\s+(?P<peso>.+)$"),
+]
+# Miles sólo con punto en grupos de 3 ("12.450"); coma, decimales u otra
+# unidad (toneladas) son ambiguos y se rechazan.
+_PESO_KG = re.compile(r"^(?P<n>[1-9]\d{0,2}(?:\.\d{3})+|[1-9]\d*)\s*(?:KG|KGS|KILOS?|KILOGRAMOS?)?$")
+
+
+def _peso_kg_declarado(original: str) -> str:
+    from atlas_core.reprocesamiento_reparador import _peso_documental_valido
+    m = _PESO_KG.match(_plano(original).strip())
+    kilos = m.group("n").replace(".", "") if m else ""
+    if not kilos or not _peso_documental_valido(kilos):
+        raise ErrorContratoInterpretacion(
+            f"No entendí el peso «{original}». Indícalo en kilos enteros, por ejemplo «12.450 kg». "
+            "No se corrigió nada.")
+    return kilos
+
+
 _MISMO_VIAJE = re.compile(
     r"\bGUIAS\b.*\b(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|JUNTA|JUNTAR|AGRUPA|AGRUPAR|UNE|UNIR)\b"
     r".*\b(?:(?:AL|DEL|EL|EN\s+EL|A\s+UN|EN\s+UN|UN)\s+(?:MISMO|SOLO|UNICO)\s+(?:VIAJE|REPARTO))\b"
@@ -452,6 +481,14 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         if len(guias) >= 2:
             return Intencion("VIAJE_AGRUPAR_GUIAS", {"guias": guias})
     if not es_pregunta:
+        for patron in _PESO_GUIA:
+            m = patron.match(plano)
+            if m:
+                # La instrucción humana queda también en el ledger de la decisión.
+                return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+                    "numero_guia": m.group("guia"), "campo": "peso_kg",
+                    "valor": _peso_kg_declarado(original[m.start("peso"):m.end("peso")].strip()),
+                    "referencia": " ".join(str(texto).split())[:500]})
         for patron in _COORDENADA_DESTINO:
             m = patron.match(plano)
             if m:
@@ -701,6 +738,15 @@ def resolver_destino(destinos: list, mencion: str) -> dict:
 # --------------------------------------------------------------- formato
 
 
+_RECHAZO_PESO = {
+    "ENTIDAD_AMBIGUA": "La guía {guia} tiene más de un documento en Atlas; no corrijo el peso de una guía ambigua. "
+                       "No se corrigió nada.",
+    "ENTIDAD_NO_ENCONTRADA": "No encontré la guía {guia} en Atlas. No se corrigió nada.",
+    "CAMPO_FIJADO_POR_DECISION_HUMANA": "El peso de la guía {guia} ya fue fijado por una decisión de Revisión de "
+                                        "Atlas; corrígelo desde esa decisión. No se corrigió nada.",
+}
+
+
 def _peso_legible(valor: object) -> str:
     texto = str(valor or "").strip()
     return f"{int(texto):,} kg".replace(",", ".") if texto.isdigit() else "peso no disponible"
@@ -771,6 +817,11 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
         texto = (f"Asignar la obra de la guía {entidad.get('numero_guia')} (transporte "
                  f"{entidad.get('numero_transporte')}): actual {(actual or {}).get('obra_destino')!r} -> "
                  f"{propuesto.get('obra_destino')!r} (obra existente, obra_id {propuesto.get('obra_id')}).")
+    elif accion == "DOCUMENTO_CORREGIR_CAMPO" and entidad.get("campo") == "peso_kg":
+        texto = (f"Corregir el peso de la guía {entidad.get('numero_guia')} (transporte "
+                 f"{entidad.get('numero_transporte') or 'sin transporte'}): peso actual "
+                 f"{_peso_legible((actual or {}).get('peso_kg'))}, peso propuesto "
+                 f"{_peso_legible(propuesto.get('peso_kg'))}. Sólo cambia el peso de esta guía.")
     elif accion == "DOCUMENTO_CORREGIR_CAMPO":
         texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
                  f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")
@@ -1472,7 +1523,7 @@ class OperadorB1:
         if intencion is None:
             return {"estado": "NO_INTERPRETADA", "mensaje": (
                 "No reconocí una instrucción operacional. Puedo: asociar vehículo a chofer, activar/inactivar un "
-                "chofer, corregir un campo o la obra de una guía, o consultar choferes, obras y decisiones.")}
+                "chofer, corregir el peso, un campo o la obra de una guía, o consultar choferes, obras y decisiones.")}
         if intencion.accion == ACCION_INVESTIGAR_REVISION:
             return self._investigar_revision(intencion, estado, conversacion_id)
         if intencion.accion == ACCION_DESDE_INVESTIGACION:
@@ -1882,8 +1933,12 @@ class OperadorB1:
         preview = self.capa.previsualizar(intencion.accion, parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
                                           referencia=str(texto)[:500])
         if preview.get("estado") == "RECHAZADA":
+            mensaje = preview.get("mensaje")
+            if intencion.accion == "DOCUMENTO_CORREGIR_CAMPO" and parametros.get("campo") == "peso_kg":
+                mensaje = _RECHAZO_PESO.get(str(preview.get("codigo")), "{m}").format(
+                    guia=parametros.get("numero_guia"), m=mensaje)
             return {"estado": "RECHAZADA", "accion": intencion.accion, "codigo": preview.get("codigo"),
-                    "mensaje": preview.get("mensaje")}
+                    "mensaje": mensaje}
         if preview.get("estado") == "RESULTADO":
             respuesta = {"estado": "RESULTADO_LECTURA", "accion": intencion.accion,
                          "resultado": _resultado_lectura_publico(intencion.accion, preview["resultado"]),
@@ -1989,6 +2044,12 @@ class OperadorB1:
                         "tablas": tablas,
                         "mensaje": f"Listo: observación agregada y verificada en {n} {_plural(n, 'viaje', 'viajes')}. "
                                    "Recarga Atlas Viajes para verla en Observaciones."}
+            if pendiente["accion"] == "DOCUMENTO_CORREGIR_CAMPO" and pendiente["parametros"].get("campo") == "peso_kg":
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                        "mensaje": (f"Listo: la guía {pendiente['parametros']['numero_guia']} quedó con peso "
+                                    f"{_peso_legible((resultado.get('despues') or {}).get('peso_kg'))} "
+                                    f"(antes {_peso_legible((resultado.get('antes') or {}).get('peso_kg'))}). "
+                                    "La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.")}
             return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
                     "mensaje": _describir_resultado(resultado)}
         if estado_capa == "PREVIEW_OBSOLETO" or resultado.get("codigo") in {"PREVIEW_EXPIRADO", "TOKEN_DESCONOCIDO"}:
