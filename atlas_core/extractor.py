@@ -1415,7 +1415,8 @@ def _extraer_transporte_geometrico(
 # "?" se suma a la clase de marcador -- confusión OCR real y confirmada
 # (caso 464453: "N? 464453") del signo "°" mal leído; nunca abre nada
 # más que esta posición puntual del marcador "N".
-_PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºO?]\.?\s*([0-9]{5,8})$")
+# Caso real 482813 (RapidOCR): el "º" leído como "Q" ("NQ482813").
+_PATRON_MARCADOR_NUMERO_GUIA = re.compile(r"^N[°ºOQ?]\.?\s*([0-9]{5,8})$")
 # Caso real 475449 (Mobile, Salomón Pizarro): PaddleOCR absorbe el "º" y
 # entrega "N475449" pegado. Sólo para este camino geométrico (con las
 # mismas ancla/ventana/unicidad); el primer dígito nunca es 0 ni 9 para no
@@ -1452,12 +1453,23 @@ def _es_ancla_guia_despacho(texto_simple: str) -> bool:
     nunca un prefijo corto y ambiguo)."""
     if _ANCLA_GUIA_DESPACHO in texto_simple:
         return True
-    longitud_prefijo_comun = 0
-    for a, b in zip(texto_simple, _ANCLA_GUIA_DESPACHO):
-        if a != b:
-            break
-        longitud_prefijo_comun += 1
-    return longitud_prefijo_comun >= _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO
+    # Casos reales 483169/483170/483211 (RapidOCR): la misma frase fija sin
+    # espacios ("GUIA DEDESPACHO", "GUIADEDESPACHO"). Se compara también sin
+    # espacios, con el mismo umbral de prefijo (12 de 16 = 10 de 14 letras).
+    for texto, ancla, minimo in (
+        (texto_simple, _ANCLA_GUIA_DESPACHO, _LONGITUD_MINIMA_PREFIJO_ANCLA_GUIA_DESPACHO),
+        (texto_simple.replace(" ", ""), _ANCLA_GUIA_DESPACHO.replace(" ", ""), 10),
+    ):
+        if ancla in texto:
+            return True
+        longitud_prefijo_comun = 0
+        for a, b in zip(texto, ancla):
+            if a != b:
+                break
+            longitud_prefijo_comun += 1
+        if longitud_prefijo_comun >= minimo:
+            return True
+    return False
 
 
 def _es_encabezado_guia_geometrico(items: List[Dict[str, Any]], ancla: Dict[str, Any]) -> bool:

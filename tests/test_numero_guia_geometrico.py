@@ -19,6 +19,8 @@ mecanismo nunca confunde el número de guía con un numero_transporte de 10
 dígitos."""
 from __future__ import annotations
 
+import pytest
+
 from atlas_core.extractor import _extraer_numero_guia_geometrico, extraer_datos
 from atlas_core.ocr import BloqueOCR
 
@@ -257,3 +259,34 @@ def test_e_formatos_con_marcador_explicito_siguen_funcionando():
 def test_marcador_absorbido_no_amplia_el_extractor_textual():
     textos = ["ACEROS AZA S.A", "GUIA DE DESPACHO", "Sucursal Temuco", "ELECTRONICA", "N475449"]
     assert extraer_datos(textos)["número de guía"] == "No encontrado"
+
+
+# ============================================================
+# 8. Ancla sin espacios y marcador "NQ" -- casos reales 26/10/2026
+#    (RapidOCR): 483169/483170/483211 leían "GUIA DEDESPACHO" o
+#    "GUIADEDESPACHO" + "N483169" y quedaban sin número de guía; 482813
+#    leía "NQ482813".
+# ============================================================
+
+
+@pytest.mark.parametrize("ancla", ["GUIA DEDESPACHO", "GUIADEDESPACHO"])
+def test_ancla_sin_espacios_recupera_numero_absorbido(ancla):
+    encabezado = [b if b.texto != "GUIA DE DESPACHO" else _bloque(ancla, 2001, 467, 681, 146) for b in _encabezado_real_475449()]
+    bloques = [*encabezado, _bloque("N483169", 2175, 686, 323, 94, conf=0.98)]
+    assert _extraer_numero_guia_geometrico(bloques) == {"valor": "483169"}
+
+
+def test_marcador_q_leido_por_el_signo_ordinal_recupera_numero():
+    bloques = [*_encabezado_real_475449(), _bloque("NQ482813", 2175, 686, 323, 94, conf=0.98)]
+    assert _extraer_numero_guia_geometrico(bloques) == {"valor": "482813"}
+
+
+def test_ancla_compacta_no_acepta_otra_frase():
+    bloques = [_bloque("GUIADEENTRADA", 2001, 467, 681, 146), _bloque("N483169", 2175, 686, 323, 94)]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
+
+
+def test_ancla_compacta_nunca_toma_el_numero_de_transporte():
+    encabezado = [b if b.texto != "GUIA DE DESPACHO" else _bloque("GUIADEDESPACHO", 2001, 467, 681, 146) for b in _encabezado_real_475449()]
+    bloques = [*encabezado, _bloque("N0000366240", 2175, 686, 323, 94)]
+    assert _extraer_numero_guia_geometrico(bloques) == {}
