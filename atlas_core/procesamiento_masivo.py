@@ -6877,6 +6877,20 @@ def procesar_carpeta(
     resumen["destinos_historial_resueltos"] = _resolver_destinos_contaminados_por_historial(
         ruta_csv, archivos_procesados_ahora,
     )
+    if carpeta_catalogos is not None:
+        from atlas_core.convergencia_destino_confirmado import (
+            revalidar_destinos_confirmados_convergentes, retirar_decisiones_destino_convergente,
+        )
+        with ruta_csv.open("r", newline="", encoding="utf-8-sig") as _archivo:
+            guias_lote = {f.get("numero_guia", "") for f in csv.DictReader(_archivo, delimiter=";")
+                          if f.get("archivo") in archivos_procesados_ahora}
+        resumen["destinos_confirmados_convergentes"] = revalidar_destinos_confirmados_convergentes(
+            ruta_dataset=ruta_csv, carpeta_catalogos=carpeta_catalogos,
+            guias_objetivo=guias_lote, directorio_trazas=directorio_trazas_ocr,
+        )
+        decisiones_pendientes[:] = retirar_decisiones_destino_convergente(
+            decisiones_pendientes, ruta_dataset=ruta_csv, carpeta_catalogos=carpeta_catalogos,
+        )
     if orquestador_ia is None:
         # Bloque M2-C -- `ruta_csv` ya tiene TODO el lote volcado a disco
         # en este punto (ver el `finally` arriba); se relee fresco para

@@ -3027,6 +3027,11 @@ def regenerar_decisiones_persistidas(
         ruta_dataset=ruta_dataset, cache_memoizacion=cache_memoizacion,
     )
     resultado = excluir_decisiones_en_investigacion(resultado, archivos) if archivos else resultado
+    if ruta_dataset is not None:
+        from atlas_core.convergencia_destino_confirmado import retirar_decisiones_destino_convergente
+        resultado = retirar_decisiones_destino_convergente(
+            resultado, ruta_dataset=ruta_dataset, carpeta_catalogos=carpeta_catalogos,
+        )
     return ajenas + resultado if guias is not None else resultado
 
 

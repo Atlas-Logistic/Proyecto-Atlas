@@ -1396,6 +1396,12 @@ def reconciliar_estado_derivado(
         convergencia_identidad = revalidar_convergencia_identidad_sin_ocr(
             ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_objetivo,
         )
+        from atlas_core.convergencia_destino_confirmado import revalidar_destinos_confirmados_convergentes
+        convergencia_destino = revalidar_destinos_confirmados_convergentes(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos,
+            guias_objetivo=guias_objetivo, directorio_trazas=raiz / "operacion" / "trazas_ocr",
+        )
+        por_reintentar.extend(convergencia_destino["guias_actualizadas"])
         _marca_etapa("recuperacion_p0_y_convergencia_identidad")
 
         # Bloque RECONCILIACIÓN POST-DECISIÓN -- caso real 472640: estas
@@ -1982,6 +1988,7 @@ def reconciliar_estado_derivado(
         "reporte_vigente": str(reporte),
         "guias_actualizadas": sorted(
             set(limpieza["guias_actualizadas"])
+            | set(convergencia_destino["guias_actualizadas"])
             | set(limpieza_sufijo_destino["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])
             | set(limpieza_origen["guias_actualizadas"])

@@ -5970,6 +5970,11 @@ def _revalidar_y_regenerar_reporte(
     # toca su propio motivo -- se ejecutan en secuencia (no anidadas) y son
     # conmutativas/idempotentes entre sí, así que el orden no importa. Se
     # combina el resultado para decidir si hace falta regenerar el reporte.
+    from atlas_core.convergencia_destino_confirmado import revalidar_destinos_confirmados_convergentes
+    resultado_convergencia_destino = revalidar_destinos_confirmados_convergentes(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_en_alcance(dataset),
+        directorio_trazas=raiz / 'operacion' / 'trazas_ocr',
+    )
     resultado_obra_destino = revalidar_obra_destino_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
@@ -6241,6 +6246,7 @@ def _revalidar_y_regenerar_reporte(
     resultado_indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset)
     guias_actualizadas = sorted(
         set(resultado_obra_destino["guias_actualizadas"])
+        | set(resultado_convergencia_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
         | set(resultado_cliente["guias_actualizadas"])
         | set(resultado_destino_contradicho["guias_actualizadas"])
@@ -6276,6 +6282,7 @@ def _revalidar_y_regenerar_reporte(
         "motivo_destino_resuelto": resultado_motivo_destino_resuelto,
         "destino_contradicho": resultado_destino_contradicho,
         "destino_sin_numero": resultado_destino_sin_numero,
+        "destinos_confirmados_convergentes": resultado_convergencia_destino,
         "cliente_ausente": resultado_cliente_ausente,
         "destino_confirmado_ledger": resultado_destino_confirmado_ledger,
         "origen_vecinos_gps_contra_evidencia_propia": resultado_origen_vecinos_contra_evidencia_propia,
