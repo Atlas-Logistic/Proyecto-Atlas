@@ -1915,7 +1915,8 @@ def _plan_transporte(ctx: _Contexto, p: dict) -> Plan:
         estado_base={"filas": filas},
         afectados=_afectados_por_guias(ctx, {str(f.get("numero_guia", "")) for f in filas}),
         consecuencias=["Re-extrae con OCR y puede cambiar campos documentales (el ledger humano siempre gana).",
-                       "Dispara la reconciliación canónica global `revalidar_y_regenerar_reporte`."],
+                       "Reconcilia sólo las guías de este transporte (`revalidar_y_regenerar_reporte` focal); "
+                       "nunca recalcula viajes ajenos."],
         revalidaciones=["REVALIDAR_Y_REGENERAR_REPORTE"],
         archivos=("dataset", "bandeja"),
     )
@@ -1926,6 +1927,9 @@ def _aplicar_transporte(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict
     resultado = revalidar_documentos_por_transporte(
         raiz_atlas=ctx.raiz, numero_transporte=str(p["numero_transporte"]), dry_run=False,
         puede_escribir=ctx.puede_escribir)
+    if resultado.get("impedimento"):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "alcance focal no demostrable "
+                                     f"({resultado['impedimento']}); no se reextrajo ni escribió nada")
     if resultado.get("escritor_operativo_perdido"):
         detalle = ("dataset reescrito; la reconciliación quedó pendiente y la completa la próxima "
                    "revalidación con escritor" if resultado.get("dataset_escrito") else "no se escribió nada")

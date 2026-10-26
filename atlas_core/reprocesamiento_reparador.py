@@ -1369,21 +1369,54 @@ def _registrar_reconciliacion_pendiente(raiz: Path, numero_transporte: str) -> N
         raise
 
 
+_GUIAS_SIN_IDENTIDAD = frozenset({"", "NO ENCONTRADO"})
+
+
+def _guias_de_transportes(filas: list[dict[str, str]], transportes: set[str]) -> tuple[set[str], str]:
+    """Alcance focal de la reconciliación tras revalidar transportes: sus guías.
+
+    Revalidar un transporte nunca reconcilia el dataset completo (una pasada
+    global recalcula rutas/destinos/origen de viajes ajenos). Si el alcance no
+    es demostrable (marca ilegible, documento sin número de guía) devuelve un
+    impedimento: el llamador no escribe ni reconcilia, nunca cae a global."""
+    if "MARCA_ILEGIBLE" in transportes:
+        return set(), "MARCA_RECONCILIACION_ILEGIBLE"
+    guias: set[str] = set()
+    for fila in filas:
+        if str(fila.get("numero_transporte", "")).strip() not in transportes:
+            continue
+        guia = str(fila.get("numero_guia", "")).strip()
+        if guia.upper() in _GUIAS_SIN_IDENTIDAD:
+            return set(), "DOCUMENTO_SIN_NUMERO_DE_GUIA"
+        guias.add(guia)
+    return guias, ""
+
+
 def completar_reconciliacion_pendiente(
     *, raiz_atlas: str | Path, puede_escribir: Callable[[], bool],
 ) -> dict[str, object]:
     """Completa, sin OCR, una reconciliación que quedó pendiente tras
-    reescribir el dataset. Exige escritor vigente; sin marca no hace nada."""
+    reescribir el dataset, sólo sobre las guías de los transportes marcados.
+    Exige escritor vigente; sin marca no hace nada."""
     raiz = Path(raiz_atlas)
     pendientes = leer_reconciliacion_pendiente(raiz)
     if not pendientes:
         return {"reconciliacion_pendiente": False, "transportes": [], "reconciliacion": None,
                 "escritor_operativo_perdido": False}
+    try:
+        filas = _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")
+    except (OSError, ValueError):
+        filas = []
+    alcance, impedimento = _guias_de_transportes(filas, set(pendientes))
+    if impedimento:
+        return {"reconciliacion_pendiente": True, "transportes": pendientes, "reconciliacion": None,
+                "escritor_operativo_perdido": False, "impedimento": impedimento}
     if not puede_escribir():
         return {"reconciliacion_pendiente": True, "transportes": pendientes, "reconciliacion": None,
                 "escritor_operativo_perdido": True}
     reconciliacion = revalidar_y_regenerar_reporte(
         raiz_atlas=raiz, nombre_carpeta_reporte=f"reporte_reconciliacion_pendiente_{int(time.time())}",
+        guias_objetivo=alcance,
     )
     _ruta_marca_reconciliacion(raiz).unlink(missing_ok=True)
     return {"reconciliacion_pendiente": False, "transportes": pendientes, "reconciliacion": reconciliacion,
@@ -1417,10 +1450,13 @@ def revalidar_documentos_por_transporte(
     `dry_run=True` (default, EXPLÍCITO): calcula y reporta, no escribe
     nada -- ni el dataset, ni dispara reconciliación. Sólo con
     `dry_run=False` se persiste y corre la reconciliación canónica YA
-    existente (`revalidar_y_regenerar_reporte` -- nunca una nueva),
-    exactamente igual que el resto de este módulo: regenera el reporte
-    oficial y la bandeja de decisiones a partir del dataset ya corregido,
-    nunca aplica ninguna decisión ni aprende catálogo por sí sola.
+    existente (`revalidar_y_regenerar_reporte` -- nunca una nueva), con
+    alcance FOCAL: sólo las guías de este transporte (y de transportes
+    que una corrida anterior dejó pendientes), nunca el dataset completo;
+    si ese alcance no es demostrable informa `impedimento` sin reextraer
+    ni escribir. Regenera el reporte oficial y la bandeja de decisiones a
+    partir del dataset ya corregido, nunca aplica ninguna decisión ni
+    aprende catálogo por sí sola.
 
     `numero_transporte` es un parámetro obligatorio -- este mecanismo es
     genérico para cualquier transporte futuro, no un script puntual.
@@ -1482,8 +1518,13 @@ def revalidar_documentos_por_transporte(
         filas_del_transporte = [
             f for f in filas if str(f.get("numero_transporte", "")).strip() == numero_transporte
         ]
+        # Alcance de la reconciliación posterior: guías de este transporte y
+        # de los que una corrida anterior dejó pendientes. Sin alcance
+        # demostrable no se reextrae ni se escribe nada (nunca global).
+        alcance, impedimento = _guias_de_transportes(filas, {numero_transporte, *pendientes_previas})
+        bloqueado = bool(impedimento) and not dry_run
 
-        for fila in filas_del_transporte:
+        for fila in ([] if bloqueado else filas_del_transporte):
             # Sin escritor vigente no tiene sentido seguir con OCR: nada de
             # lo que se calcule podría persistirse.
             if not _escritor_vigente():
@@ -1539,15 +1580,22 @@ def revalidar_documentos_por_transporte(
             _registrar_reconciliacion_pendiente(raiz, numero_transporte)
             _escribir_filas_completas(dataset, filas)
             dataset_escrito = True
+        # La reextracción puede corregir el número de guía: el nuevo también
+        # queda en el alcance de la reconciliación.
+        alcance |= {
+            str(f.get("numero_guia", "")).strip() for f in filas_del_transporte
+            if str(f.get("numero_guia", "")).strip().upper() not in _GUIAS_SIN_IDENTIDAD
+        }
 
     if proveedor_propio and hasattr(proveedor, "cerrar"):
         proveedor.cerrar()
 
     reconciliacion: dict[str, object] | None = None
-    if not dry_run and (dataset_escrito or pendientes_previas) and _escritor_vigente():
+    if not bloqueado and not dry_run and (dataset_escrito or pendientes_previas) and _escritor_vigente():
         reconciliacion = revalidar_y_regenerar_reporte(
             raiz_atlas=raiz,
             nombre_carpeta_reporte=f"reporte_revalidacion_transporte_{numero_transporte}_{int(time.time())}",
+            guias_objetivo=alcance,
         )
         _ruta_marca_reconciliacion(raiz).unlink(missing_ok=True)
 
@@ -1575,5 +1623,7 @@ def revalidar_documentos_por_transporte(
         "dataset_escrito": dataset_escrito,
         "reconciliaciones_pendientes_previas": pendientes_previas,
         "reconciliacion_pendiente": bool(leer_reconciliacion_pendiente(raiz)),
+        "alcance_reconciliacion": sorted(alcance),
+        "impedimento": impedimento if bloqueado else "",
         "tiempo_total_ms": round((time.perf_counter() - t_inicio) * 1000, 1),
     }

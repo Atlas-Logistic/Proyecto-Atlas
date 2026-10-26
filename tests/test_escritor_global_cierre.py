@@ -173,8 +173,11 @@ def test_marca_ilegible_cuenta_como_pendiente(tmp_path, reconciliaciones):
     _marca(raiz).write_text("{corrupta", encoding="utf-8")
 
     assert m.leer_reconciliacion_pendiente(raiz) == ["MARCA_ILEGIBLE"]
-    m.completar_reconciliacion_pendiente(raiz_atlas=raiz, puede_escribir=lambda: True)
-    assert len(reconciliaciones) == 1 and not _marca(raiz).exists()
+    resultado = m.completar_reconciliacion_pendiente(raiz_atlas=raiz, puede_escribir=lambda: True)
+    # Sin alcance demostrable nunca se reconcilia global (26/10/2026): la
+    # marca se conserva y se informa el impedimento.
+    assert reconciliaciones == [] and _marca(raiz).exists()
+    assert resultado["reconciliacion_pendiente"] is True and resultado["impedimento"] == "MARCA_RECONCILIACION_ILEGIBLE"
 
 
 def test_cli_reconciliar_pendiente_respeta_al_pull(tmp_path, cloud, reconciliaciones, monkeypatch, capsys):
