@@ -1521,7 +1521,15 @@ def revalidar_documentos_por_transporte(
         # Alcance de la reconciliación posterior: guías de este transporte y
         # de los que una corrida anterior dejó pendientes. Sin alcance
         # demostrable no se reextrae ni se escribe nada (nunca global).
-        alcance, impedimento = _guias_de_transportes(filas, {numero_transporte, *pendientes_previas})
+        # Un documento del PROPIO transporte sin número de guía no impide
+        # releerlo (la relectura puede recuperarlo, casos 483169/483170/
+        # 483211): su alcance se fija tras la reextracción. Los transportes
+        # pendientes de corridas anteriores sí deben tenerlo ya.
+        alcance, impedimento = _guias_de_transportes(filas, set(pendientes_previas) - {numero_transporte})
+        alcance_propio, impedimento_propio = _guias_de_transportes(filas, {numero_transporte})
+        if impedimento_propio != "DOCUMENTO_SIN_NUMERO_DE_GUIA":
+            impedimento = impedimento or impedimento_propio
+        alcance |= alcance_propio
         bloqueado = bool(impedimento) and not dry_run
 
         for fila in ([] if bloqueado else filas_del_transporte):
@@ -1576,7 +1584,14 @@ def revalidar_documentos_por_transporte(
                 fila_nueva=False, cambios=tuple(cambios),
             ))
 
-        if not dry_run and any(d.cambios for d in documentos) and _escritor_vigente():
+        # Si tras releer algún documento del transporte sigue sin número de
+        # guía, el alcance de la reconciliación no es demostrable: no se
+        # escribe nada (nunca una escritura parcial ni una reconciliación global).
+        if not dry_run and not bloqueado and any(
+            str(f.get("numero_guia", "")).strip().upper() in _GUIAS_SIN_IDENTIDAD for f in filas_del_transporte
+        ):
+            impedimento, bloqueado = "DOCUMENTO_SIN_NUMERO_DE_GUIA", True
+        if not dry_run and not bloqueado and any(d.cambios for d in documentos) and _escritor_vigente():
             _registrar_reconciliacion_pendiente(raiz, numero_transporte)
             _escribir_filas_completas(dataset, filas)
             dataset_escrito = True

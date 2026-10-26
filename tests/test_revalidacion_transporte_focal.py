@@ -61,12 +61,9 @@ def test_marca_pendiente_de_otro_transporte_amplia_el_alcance_solo_a_ese_transpo
     assert llamadas[0]["guias_objetivo"] == {"483106", "999999"}
 
 
-@pytest.mark.parametrize("preparar, impedimento", [
-    (lambda raiz: _marca(raiz, "no-es-lista"), "MARCA_RECONCILIACION_ILEGIBLE"),
-    (lambda raiz: _dataset(raiz, guia_objetivo="No encontrado"), "DOCUMENTO_SIN_NUMERO_DE_GUIA"),
-])
-def test_sin_alcance_demostrable_no_reextrae_escribe_ni_reconcilia(tmp_path, monkeypatch, preparar, impedimento):
-    raiz = _raiz(tmp_path); _dataset(raiz); preparar(raiz)
+def test_sin_alcance_demostrable_no_reextrae_escribe_ni_reconcilia(tmp_path, monkeypatch):
+    raiz = _raiz(tmp_path); _dataset(raiz); _marca(raiz, "no-es-lista")
+    impedimento = "MARCA_RECONCILIACION_ILEGIBLE"
     dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
     antes = dataset.read_bytes()
     ocr = []
@@ -112,3 +109,34 @@ def test_fila_ajena_queda_intacta(tmp_path, monkeypatch):
     ajena = next(f for f in _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")
                  if f["numero_transporte"] == AJENO)
     assert ajena["peso_kg"] == "12345" and ajena["numero_guia"] == "999999"
+
+
+def test_documento_propio_sin_guia_se_relee_y_sin_recuperarla_no_escribe(tmp_path, monkeypatch):
+    """26/10/2026: el documento sin número de guía del propio transporte se
+    relee; si la relectura no lo recupera, no se escribe ni se reconcilia."""
+    raiz = _raiz(tmp_path); _dataset(raiz, guia_objetivo="No encontrado")
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    antes = dataset.read_bytes()
+    ocr = []
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: ocr.append(1) or {"peso_kg": "9307"}))
+    llamadas = []; _stub_reconciliacion(monkeypatch, llamadas)
+
+    resultado = m.revalidar_documentos_por_transporte(
+        raiz_atlas=raiz, numero_transporte=OBJETIVO, dry_run=False, proveedor=object())
+
+    assert ocr and resultado["impedimento"] == "DOCUMENTO_SIN_NUMERO_DE_GUIA"
+    assert llamadas == [] and resultado["dataset_escrito"] is False and dataset.read_bytes() == antes
+
+
+def test_documento_propio_sin_guia_recuperada_se_escribe_y_reconcilia_esa_guia(tmp_path, monkeypatch):
+    """Casos 483169/483170/483211: la relectura recupera el número de guía."""
+    raiz = _raiz(tmp_path); _dataset(raiz, guia_objetivo="No encontrado")
+    monkeypatch.setattr(m, "procesar_archivo", con_lectura(lambda *a, **kw: {"numero_guia": "483169"}))
+    llamadas = []; _stub_reconciliacion(monkeypatch, llamadas)
+
+    resultado = m.revalidar_documentos_por_transporte(
+        raiz_atlas=raiz, numero_transporte=OBJETIVO, dry_run=False, proveedor=object())
+
+    filas = {f["numero_transporte"]: f for f in _leer_filas(raiz / "operacion" / "actual" / "analisis_completo_guias.csv")}
+    assert resultado["impedimento"] == "" and filas[OBJETIVO]["numero_guia"] == "483169"
+    assert llamadas[0]["guias_objetivo"] == {"483169"} and filas[AJENO]["numero_guia"] == "999999"

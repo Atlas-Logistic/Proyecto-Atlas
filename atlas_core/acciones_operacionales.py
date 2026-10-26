@@ -2008,6 +2008,73 @@ def _aplicar_documento_material(ctx: _Contexto, p: dict, plan: Plan, actor: str)
             "regenerar_reporte": True}
 
 
+# =============================================================== NÚMERO DE GUÍA (OCR, sólo el número)
+
+
+def _leer_numero_guia_evidencia(ctx: _Contexto, archivo: str) -> str:
+    """Relee sólo el número de guía de la evidencia original del documento."""
+    from atlas_core.evidencia_documental import resolver_ruta_evidencia
+    from atlas_core.ingesta_pdf import proveedor_para_documento
+    from atlas_core.ocr_provider import crear_proveedor_ocr
+    from atlas_core.recuperacion_numero_guia import leer_numero_guia
+    evidencia = resolver_ruta_evidencia(ctx.raiz, archivo)
+    if evidencia.ruta is None:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"evidencia original no disponible ({evidencia.ubicacion})")
+    proveedor = crear_proveedor_ocr()
+    try:
+        proveedor_documento, _ = proveedor_para_documento(
+            ruta_texto_pdf=evidencia.ruta_texto_pdf, proveedor=proveedor, lector_ocr=None)
+        return leer_numero_guia(evidencia.ruta, proveedor=proveedor_documento)
+    finally:
+        if hasattr(proveedor, "cerrar"):
+            proveedor.cerrar()
+
+
+def _plan_documento_numero_guia(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.investigacion_documental import archivos_en_investigacion
+    from atlas_core import recuperacion_numero_guia as rg
+    archivo = str(p["archivo"])
+    filas = ctx.filas()
+    objetivo = [f for f in filas if str(f.get("archivo", "")) == archivo]
+    if len(objetivo) != 1:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "documento no encontrado o no único en el dataset")
+    fila = objetivo[0]
+    if archivo in archivos_en_investigacion(ctx.raiz):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el documento está en investigación (cuarentena)")
+    numero = _leer_numero_guia_evidencia(ctx, archivo)
+    veredicto, valores = rg.evaluar_recuperacion(fila, numero, filas)
+    if veredicto in (rg.SIN_EVIDENCIA, rg.DUPLICADO):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"{veredicto}: lectura OCR {numero or 'sin número'}")
+    return Plan(
+        entidad={"tipo": "NUMERO_GUIA_DOCUMENTO", "id": archivo, "numero_transporte": fila.get("numero_transporte", "")},
+        valor_actual={c: fila.get(c, "") for c in sorted(rg.CAMPOS_ESCRITOS)},
+        valor_propuesto={"veredicto": veredicto, "lectura_ocr": numero, **valores},
+        # Fila completa: cualquier cambio concurrente invalida el preview.
+        estado_base={"fila": fila},
+        sin_cambios=not valores,
+        afectados=_afectados_por_guias(ctx, {numero}),
+        consecuencias=["Sólo escribe el número de guía leído en la evidencia original, retira GUIA_AUSENTE y "
+                       "recalcula los estados de revisión; nunca ruta, destino, identidad, material ni ledger.",
+                       "No registra una decisión humana: el valor proviene del OCR.",
+                       "Regenera el reporte de viajes desde el dataset (sin OCR ni red)."],
+        revalidaciones=[],
+        archivos=("dataset",),
+        datos={"archivo": archivo, "fila": fila, "valores": valores},
+    )
+
+
+def _aplicar_documento_numero_guia(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.recuperacion_numero_guia import ErrorRecuperacionGuia, aplicar_en_dataset
+    if ctx.puede_escribir is not None and not ctx.puede_escribir():
+        raise ErrorAccionOperacional("ESCRITOR_PERDIDO", "se perdió el escritor global: no se escribió nada")
+    try:
+        aplicar_en_dataset(ctx.archivos["dataset"], archivo=plan.datos["archivo"],
+                           fila_base=plan.datos["fila"], valores=plan.datos["valores"])
+    except ErrorRecuperacionGuia as error:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", str(error)) from error
+    return {"despues": dict(plan.datos["valores"]), "regenerar_reporte": True}
+
+
 # =============================================================== registro
 
 _P = Parametro
@@ -2114,6 +2181,10 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"numero_guia": _P("guia", True), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_material, _aplicar_documento_material, escritor_global=True),
+    DefinicionAccion("DOCUMENTO_RECUPERAR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
+                     "Relee con OCR sólo el número de guía de un documento sin número y lo recupera sin tocar otros campos.",
+                     {"archivo": _P("archivo_documento", True, max_largo=260), "referencia": _REF},
+                     _plan_documento_numero_guia, _aplicar_documento_numero_guia, escritor_global=True),
     # Declaradas sólo para que su rechazo sea explícito y auditable.
     DefinicionAccion("ENTIDAD_ELIMINAR", DESTRUCTIVA, "Eliminar entidades de catálogo: prohibido.", {}),
     DefinicionAccion("EVIDENCIA_ELIMINAR", DESTRUCTIVA, "Eliminar evidencia original: prohibido.", {}),
