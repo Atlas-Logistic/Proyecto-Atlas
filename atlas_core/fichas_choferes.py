@@ -6,7 +6,9 @@ de una selección del renderer. Las lecturas no crean archivos ni UUID.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import re
 import shutil
 import uuid
@@ -18,6 +20,55 @@ from atlas_core.catalogos import rut_canonico_de_registro_chofer, normalizar_rut
 
 EMPRESA_ACTUAL = 'MBT'
 VERSION = 2
+MAXIMO_ARCHIVO_LICENCIA = 20 * 1024 * 1024
+EXTENSIONES_LICENCIA = frozenset({'.pdf', '.jpg', '.jpeg', '.png'})
+
+
+def _ahora():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _fecha_vencimiento_valida(valor):
+    texto = str(valor or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', texto):
+        raise ValueError('La fecha de vencimiento debe usar AAAA-MM-DD')
+    try:
+        datetime.strptime(texto, '%Y-%m-%d')
+    except ValueError as error:
+        raise ValueError('La fecha de vencimiento no es válida') from error
+    return texto
+
+
+def _clase_licencia_valida(valor):
+    texto = str(valor or '').strip().upper()
+    if not re.fullmatch(r'[A-Z][0-9]{0,2}', texto):
+        raise ValueError('La clase de licencia no es válida')
+    return texto
+
+
+def _tipo_archivo_licencia(ruta):
+    ruta = Path(ruta)
+    if ruta.is_symlink():
+        raise ValueError('El archivo seleccionado no puede ser un enlace')
+    ruta = ruta.resolve(strict=True)
+    if not ruta.is_file():
+        raise ValueError('El archivo seleccionado no es un archivo regular')
+    extension = ruta.suffix.lower()
+    if extension not in EXTENSIONES_LICENCIA:
+        raise ValueError('Seleccione un PDF, JPG o PNG válido')
+    tamano = ruta.stat().st_size
+    if not 0 < tamano <= MAXIMO_ARCHIVO_LICENCIA:
+        raise ValueError('El archivo debe tener entre 1 byte y 20 MB')
+    cabecera = ruta.read_bytes()[:16]
+    firmas = {
+        '.pdf': cabecera.startswith(b'%PDF-'),
+        '.jpg': cabecera.startswith(b'\xff\xd8\xff'),
+        '.jpeg': cabecera.startswith(b'\xff\xd8\xff'),
+        '.png': cabecera.startswith(b'\x89PNG\r\n\x1a\n'),
+    }
+    if not firmas[extension]:
+        raise ValueError('El contenido no corresponde al tipo de archivo seleccionado')
+    return ruta, extension, tamano
 
 
 def ruta_almacen(raiz, empresa):
@@ -193,3 +244,115 @@ def inicializar_almacen(raiz, *, empresa, actor, vinculos=None):
             escribir_json_atomico(ruta, propuesto)
             return {'modificado': True, 'fichas': len(propuesto['choferes']),
                     'revision': propuesto['revision'], 'respaldo': str(respaldo)}
+
+
+def _copiar_licencia_nueva(origen, destino, comprobar):
+    """Copia por creación exclusiva y devuelve huella; nunca reutiliza nombre."""
+    origen, extension, tamano_esperado = _tipo_archivo_licencia(origen)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    temporal = destino.with_name('.' + destino.name + '.tmp-' + uuid.uuid4().hex)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with origen.open('rb') as entrada, temporal.open('xb') as salida:
+            while bloque := entrada.read(1024 * 1024):
+                comprobar()
+                total += len(bloque)
+                if total > MAXIMO_ARCHIVO_LICENCIA:
+                    raise ValueError('El archivo supera el máximo permitido')
+                digest.update(bloque)
+                salida.write(bloque)
+        if total != tamano_esperado or origen.stat().st_size != tamano_esperado:
+            raise ValueError('El archivo cambió durante la copia; no se registró')
+        # Nunca se reemplaza un adjunto: el destino fue generado por UUID y
+        # `rename` en Windows falla si alguien ocupó ese nombre entre medio.
+        if destino.exists():
+            raise FileExistsError('Ya existe un adjunto con ese identificador')
+        os.rename(temporal, destino)
+    except Exception:
+        temporal.unlink(missing_ok=True)
+        raise
+    return extension, total, digest.hexdigest()
+
+
+def registrar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo,
+                              vencimiento, clase, archivo_origen, actor='DESKTOP'):
+    """Registra una licencia nueva y conserva las anteriores como trazabilidad.
+
+    La identidad se comprueba por UUID *y* referencia actual del catálogo; no
+    se toma nombre ni RUT del renderer. Es una escritura documental aislada:
+    jamás modifica catálogos, asignaciones ni viajes.
+    """
+    ficha_id = str(uuid.UUID(str(ficha_id)))
+    referencia_catalogo = str(referencia_catalogo or '')
+    vencimiento = _fecha_vencimiento_valida(vencimiento)
+    clase = _clase_licencia_valida(clase)
+    origen, extension, _ = _tipo_archivo_licencia(archivo_origen)
+    from atlas_core.desktop_operacion import sesion
+    with sesion(raiz) as comprobar:
+        ruta = ruta_almacen(raiz, empresa)
+        with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
+            catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'
+            catalogo_bytes = catalogo_ruta.read_bytes()
+            catalogo = json.loads(catalogo_bytes.decode('utf-8-sig'))
+            if referencia_catalogo not in catalogo:
+                raise ValueError('La ficha ya no corresponde a un chofer vigente del catálogo')
+            anterior = leer_almacen(raiz, empresa=empresa)
+            if not anterior or anterior.get('version') != VERSION:
+                raise ValueError('La base de fichas debe inicializarse antes de adjuntar una licencia')
+            indice = fichas_por_referencia(anterior)
+            ficha = indice.get(referencia_catalogo)
+            if not ficha or ficha.get('ficha_id') != ficha_id:
+                raise ValueError('La identidad de la ficha cambió; recargue Catálogos antes de adjuntar')
+            propuesta = copy.deepcopy(anterior)
+            ficha_nueva = fichas_por_referencia(propuesta)[referencia_catalogo]
+            documento_id = str(uuid.uuid4())
+            instante = _ahora()
+            anterior_ids = [d['documento_id'] for d in ficha_nueva['documentos']
+                            if d.get('tipo') == 'LICENCIA_CONDUCIR' and not d.get('reemplazado_por')]
+            destino_relativo = Path('archivos') / 'choferes' / ficha_id / (documento_id + extension)
+            destino = ruta.parent / destino_relativo
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            if not destino.parent.resolve().is_relative_to(ruta.parent.resolve()):
+                raise ValueError('La carpeta de adjuntos apunta fuera de la empresa')
+            respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
+            respaldo.mkdir(parents=True)
+            shutil.copy2(ruta, respaldo / ruta.name)
+            extension, bytes_archivo, huella = _copiar_licencia_nueva(origen, destino, comprobar)
+            documento = {
+                'documento_id': documento_id, 'tipo': 'LICENCIA_CONDUCIR', 'clase': clase,
+                'vencimiento': vencimiento, 'archivo': destino_relativo.as_posix(),
+                'sha256': huella, 'bytes': bytes_archivo, 'creado_en': instante,
+            }
+            if anterior_ids:
+                documento['reemplaza_documentos'] = anterior_ids
+                for previo in ficha_nueva['documentos']:
+                    if previo.get('documento_id') in anterior_ids:
+                        previo['reemplazado_por'] = documento_id
+            ficha_nueva['documentos'].append(documento)
+            ficha_nueva['historial'].append({
+                'accion': 'LICENCIA_REEMPLAZADA' if anterior_ids else 'LICENCIA_REGISTRADA',
+                'actor': actor, 'fecha': instante, 'documento_id': documento_id,
+                'reemplaza_documentos': anterior_ids, 'sha256': huella,
+            })
+            propuesta['revision'] = int(anterior['revision']) + 1
+            _validar_v2(propuesta)
+            escribir_json_atomico(respaldo / 'manifest.json', {
+                'empresa': empresa, 'actor': actor, 'operacion': ficha_nueva['historial'][-1]['accion'],
+                'ficha_id': ficha_id, 'documento_id': documento_id,
+                'sha256': huella, 'bytes': bytes_archivo, 'revision_anterior': anterior['revision'],
+                'ruta_relativa': str(ruta.relative_to(raiz)),
+            })
+            comprobar()
+            if catalogo_ruta.read_bytes() != catalogo_bytes:
+                destino.unlink(missing_ok=True)
+                raise ValueError('El catálogo cambió durante la carga; no se publicó la licencia')
+            try:
+                escribir_json_atomico(ruta, propuesta)
+            except Exception:
+                destino.unlink(missing_ok=True)
+                raise
+            return {'ok': True, 'documento_id': documento_id, 'ficha_id': ficha_id,
+                    'vencimiento': vencimiento, 'reemplazados': len(anterior_ids),
+                    'revision': propuesta['revision'], 'sha256': huella,
+                    'respaldo': str(respaldo)}

@@ -33,6 +33,7 @@ ESCRITORES = frozenset({
     'asociar_evidencia_mobile.py', 'resolver_envio_mobile.py',
     'gestionar_catalogos.py', 'reconciliar_estado_derivado.py',
     'retomar_entradas_desktop.py', 'generar_reporte_viajes.py', 'resumen_procesamiento_desktop.py',
+    'registrar_licencia_chofer.py',
 })
 _auditoria = ContextVar('desktop_escrituras', default=None)
 _worker_ocr = ContextVar('desktop_worker_ocr', default=None)

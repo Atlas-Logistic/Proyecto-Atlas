@@ -1,12 +1,13 @@
 import copy
 import json
+import os
 from types import SimpleNamespace as NS
 
 import pytest
 
 from atlas_core.fichas_choferes import (
     preparar_almacen, leer_almacen, ruta_almacen, fichas_por_referencia,
-    asignaciones_de_chofer, inicializar_almacen,
+    asignaciones_de_chofer, inicializar_almacen, registrar_licencia_chofer,
 )
 from atlas_core.catalogo_fichas import construir_ficha_chofer
 
@@ -146,3 +147,72 @@ def test_inicializacion_idempotente_solo_crea_almacen_complementario(tmp_path):
     assert not inicializar_almacen(tmp_path, empresa='MBT', actor='TEST')['modificado']
     assert almacen.read_bytes() == bytes_antes
     assert ruta.read_bytes() == contenido
+
+
+def _raiz_licencia(tmp_path):
+    catalogos = tmp_path / 'catalogos_privados'; catalogos.mkdir()
+    (catalogos / 'choferes.json').write_text(json.dumps(CATALOGO), encoding='utf-8')
+    (tmp_path / 'operacion' / 'actual').mkdir(parents=True)
+    inicializar_almacen(tmp_path, empresa='MBT', actor='TEST')
+    return fichas_por_referencia(leer_almacen(tmp_path, empresa='MBT'))['123456785']['ficha_id']
+
+
+def test_registrar_y_reemplazar_licencia_conserva_archivos_hash_y_auditoria(tmp_path):
+    ficha_id = _raiz_licencia(tmp_path)
+    primero = tmp_path / 'licencia.pdf'; primero.write_bytes(b'%PDF-1.4\nlicencia ficticia')
+    resultado = registrar_licencia_chofer(tmp_path, empresa='MBT', ficha_id=ficha_id,
+        referencia_catalogo='123456785', vencimiento='2027-06-30', clase='a5', archivo_origen=primero)
+    assert resultado['ok'] and resultado['reemplazados'] == 0
+    assert 'archivo' not in resultado
+    datos = leer_almacen(tmp_path, empresa='MBT'); ficha = fichas_por_referencia(datos)['123456785']
+    anterior = ficha['documentos'][0]
+    assert anterior['clase'] == 'A5' and len(anterior['sha256']) == 64
+    assert (ruta_almacen(tmp_path, 'MBT').parent / anterior['archivo']).is_file()
+    assert primero.read_bytes() == b'%PDF-1.4\nlicencia ficticia'
+    segundo = tmp_path / 'licencia.png'; segundo.write_bytes(b'\x89PNG\r\n\x1a\narchivo ficticio')
+    reemplazo = registrar_licencia_chofer(tmp_path, empresa='MBT', ficha_id=ficha_id,
+        referencia_catalogo='123456785', vencimiento='2028-06-30', clase='B', archivo_origen=segundo)
+    datos = leer_almacen(tmp_path, empresa='MBT'); ficha = fichas_por_referencia(datos)['123456785']
+    anterior_persistido = ficha['documentos'][0]
+    nueva = ficha['documentos'][-1]
+    assert reemplazo['reemplazados'] == 1 and anterior_persistido['reemplazado_por'] == nueva['documento_id']
+    assert nueva['reemplaza_documentos'] == [anterior['documento_id']]
+    assert (ruta_almacen(tmp_path, 'MBT').parent / anterior['archivo']).is_file()
+    assert (ruta_almacen(tmp_path, 'MBT').parent / nueva['archivo']).is_file()
+    assert ficha['historial'][-1]['accion'] == 'LICENCIA_REEMPLAZADA'
+
+
+@pytest.mark.parametrize('nombre,contenido', [
+    ('mal.pdf', b'no es un pdf'), ('mal.exe', b'MZ'), ('vacio.pdf', b''),
+])
+def test_licencia_rechaza_tipo_contenido_y_archivo_invalido(tmp_path, nombre, contenido):
+    ficha_id = _raiz_licencia(tmp_path)
+    origen = tmp_path / nombre; origen.write_bytes(contenido)
+    with pytest.raises(ValueError):
+        registrar_licencia_chofer(tmp_path, empresa='MBT', ficha_id=ficha_id,
+            referencia_catalogo='123456785', vencimiento='2027-01-01', clase='A5', archivo_origen=origen)
+    assert not leer_almacen(tmp_path, empresa='MBT')['choferes'][0]['documentos']
+
+
+def test_licencia_no_cruza_empresa_ni_acepta_referencia_distinta(tmp_path):
+    ficha_id = _raiz_licencia(tmp_path)
+    origen = tmp_path / 'licencia.pdf'; origen.write_bytes(b'%PDF-1.4\nsegura')
+    with pytest.raises(ValueError):
+        registrar_licencia_chofer(tmp_path, empresa='MBT', ficha_id=ficha_id,
+            referencia_catalogo='PENDIENTE00000006', vencimiento='2027-01-01', clase='A5', archivo_origen=origen)
+    with pytest.raises(ValueError):
+        registrar_licencia_chofer(tmp_path, empresa='OTRA', ficha_id=ficha_id,
+            referencia_catalogo='123456785', vencimiento='2027-01-01', clase='A5', archivo_origen=origen)
+
+
+def test_licencia_rechaza_enlace_simbolico_de_origen(tmp_path):
+    ficha_id = _raiz_licencia(tmp_path)
+    origen = tmp_path / 'licencia.pdf'; origen.write_bytes(b'%PDF-1.4\nsegura')
+    enlace = tmp_path / 'enlace.pdf'
+    try:
+        os.symlink(origen, enlace)
+    except OSError:
+        pytest.skip('El entorno no permite crear enlaces simbólicos')
+    with pytest.raises(ValueError, match='enlace'):
+        registrar_licencia_chofer(tmp_path, empresa='MBT', ficha_id=ficha_id,
+            referencia_catalogo='123456785', vencimiento='2027-01-01', clase='A5', archivo_origen=enlace)
