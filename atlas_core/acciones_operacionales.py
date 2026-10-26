@@ -1937,6 +1937,77 @@ def _aplicar_transporte(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict
     return {"despues": {"reextraido": True}, "servicio": resultado}
 
 
+# =============================================================== MATERIAL (OCR, sólo material)
+
+
+def _leer_material_evidencia(ctx: _Contexto, archivo: str):
+    """Relee sólo el material de la evidencia original del documento."""
+    from atlas_core.evidencia_documental import resolver_ruta_evidencia
+    from atlas_core.ingesta_pdf import proveedor_para_documento
+    from atlas_core.ocr_provider import crear_proveedor_ocr
+    from atlas_core.recuperacion_material import leer_material
+    evidencia = resolver_ruta_evidencia(ctx.raiz, archivo)
+    if evidencia.ruta is None:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"evidencia original no disponible ({evidencia.ubicacion})")
+    proveedor = crear_proveedor_ocr()
+    try:
+        proveedor_documento, _ = proveedor_para_documento(
+            ruta_texto_pdf=evidencia.ruta_texto_pdf, proveedor=proveedor, lector_ocr=None)
+        return leer_material(evidencia.ruta, proveedor=proveedor_documento)
+    finally:
+        if hasattr(proveedor, "cerrar"):
+            proveedor.cerrar()
+
+
+def _plan_documento_material(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.investigacion_documental import archivos_en_investigacion
+    from atlas_core import recuperacion_material as rm
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    archivo = str(fila.get("archivo", ""))
+    if archivo in archivos_en_investigacion(ctx.raiz):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el documento está en investigación (cuarentena)")
+    aplicaciones = [a for a in _leer_json(ctx.archivos["ledger_decisiones"], {}).get("aplicaciones") or []
+                    if isinstance(a, dict)]
+    if rm.protegido_por_decision(fila, aplicaciones):
+        raise ErrorAccionOperacional("CAMPO_FIJADO_POR_DECISION_HUMANA",
+                                     "una decisión registrada ya fijó el material o el tipo de carga de este documento")
+    lectura = _leer_material_evidencia(ctx, archivo)
+    veredicto, valores = rm.evaluar_recuperacion(fila, lectura, aplicaciones)
+    visibles = ("descripcion_material", "tipo_carga", "motivos_revision_documento")
+    return Plan(
+        entidad={"tipo": "MATERIAL_DOCUMENTO", "id": archivo, "numero_guia": fila.get("numero_guia", "")},
+        valor_actual={c: fila.get(c, "") for c in visibles},
+        valor_propuesto={"veredicto": veredicto, "lectura_ocr": lectura.descripcion,
+                         **{c: v for c, v in valores.items() if c in visibles},
+                         "material_items": [i.get("descripcion_ocr") for i in lectura.items]},
+        # Fila completa: cualquier cambio concurrente invalida el preview.
+        estado_base={"fila": fila},
+        sin_cambios=not valores,
+        afectados=_afectados_por_guias(ctx, {str(fila.get("numero_guia", ""))}),
+        consecuencias=["Sólo cambia material, tipo de carga, ítems de material y los motivos de material del "
+                       "documento; nunca rutas, destinos, identidad, estados, ledger ni bandeja.",
+                       "No registra una decisión humana: el valor proviene del OCR de la evidencia original.",
+                       "Regenera el reporte de viajes desde el dataset (sin OCR ni red)."],
+        revalidaciones=[],
+        archivos=("dataset",),
+        datos={"archivo": archivo, "fila": fila, "valores": valores, "veredicto": veredicto},
+    )
+
+
+def _aplicar_documento_material(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.recuperacion_material import ErrorRecuperacionMaterial, aplicar_en_dataset
+    if ctx.puede_escribir is not None and not ctx.puede_escribir():
+        raise ErrorAccionOperacional("ESCRITOR_PERDIDO", "se perdió el escritor global: no se escribió nada")
+    try:
+        cambios = aplicar_en_dataset(ctx.archivos["dataset"], archivo=plan.datos["archivo"],
+                                     fila_base=plan.datos["fila"], valores=plan.datos["valores"])
+    except ErrorRecuperacionMaterial as error:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", str(error)) from error
+    return {"despues": {"veredicto": plan.datos["veredicto"],
+                        **{c: nuevo for c, (_, nuevo) in cambios.items() if c != "metricas_procesamiento_json"}},
+            "regenerar_reporte": True}
+
+
 # =============================================================== registro
 
 _P = Parametro
@@ -2038,6 +2109,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
     DefinicionAccion("TRANSPORTE_REVALIDAR", SENSIBLE, "Re-extrae con OCR los documentos de un transporte.",
                      {"numero_transporte": _P("transporte", True), "referencia": _REF},
                      _plan_transporte, _aplicar_transporte, escritor_global=True),
+    DefinicionAccion("DOCUMENTO_RECUPERAR_MATERIAL", OPERACIONAL_REVERSIBLE,
+                     "Relee con OCR sólo el material de una guía y lo recupera, mejora o completa sin tocar otros campos.",
+                     {"numero_guia": _P("guia", True), "archivo": _P("archivo_documento", max_largo=260),
+                      "referencia": _REF},
+                     _plan_documento_material, _aplicar_documento_material, escritor_global=True),
     # Declaradas sólo para que su rechazo sea explícito y auditable.
     DefinicionAccion("ENTIDAD_ELIMINAR", DESTRUCTIVA, "Eliminar entidades de catálogo: prohibido.", {}),
     DefinicionAccion("EVIDENCIA_ELIMINAR", DESTRUCTIVA, "Eliminar evidencia original: prohibido.", {}),
