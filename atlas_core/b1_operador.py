@@ -213,6 +213,131 @@ def _peso_kg_declarado(original: str) -> str:
     return kilos
 
 
+# B1 EN TARJETAS DE REVISIÓN -- Desktop antepone "@revision:<decision_id>" a
+# lo que el operador escribe en una tarjeta. El Motor lee esa tarjeta VIGENTE
+# de la bandeja (nunca confía en datos enviados por Desktop) y reescribe la
+# instrucción a la frase canónica que B1 ya interpreta: ningún tipo de
+# corrección nuevo, mismas acciones, preview, confirmación y auditoría.
+_REVISION = re.compile(r"^@revision:(?P<id>[A-Za-z0-9_.:-]{1,128})(?:\s+(?P<texto>.*))?$", re.S)
+_PATENTE_SUELTA = re.compile(r"^[A-Z]{2,4}\d{2,4}$")
+# campo de la tarjeta -> (cómo lo nombra el operador, frase canónica de B1,
+# valor que se acepta escrito solo, cómo se nombra en los mensajes, ejemplo)
+_REVISION_CAMPOS = {
+    # Un número suelto va siempre al validador de peso, que explica el formato.
+    "peso_kg": (r"PESO", "En la guía {guia} el peso correcto es {valor}", re.compile(r"^-?\d"),
+                "el peso", "el peso correcto es 12.450 kg"),
+    "patente_tracto": (r"PATENTE(?:\s+DEL\s+TRACTO)?|TRACTO", "Corrige el tracto de la guía {guia} a {valor}",
+                       _PATENTE_SUELTA, "la patente del tracto", "la patente correcta es AB1234"),
+    "patente_rampla": (r"PATENTE(?:\s+DE\s+LA\s+RAMPLA)?|RAMPLA", "Corrige la rampla de la guía {guia} a {valor}",
+                       _PATENTE_SUELTA, "la patente de la rampla", "la patente correcta es JC4173"),
+    "cliente": (r"CLIENTE", "Corrige el cliente de la guía {guia} a {valor}", None,
+                "el cliente", "el cliente es CONSTRUCTORA EJEMPLO SPA"),
+    "obra_destino": (r"OBRA", "La obra de la guía {guia} es {valor}", None, "la obra", "la obra es EDIFICIO CENTRAL"),
+    "despachar_a_crudo": (r"DESTINO|DIRECCION(?:\s+DE\s+ENTREGA)?", "El destino de la guía {guia} es {valor}", None,
+                          "el destino", "el destino es AV. EJEMPLO 123, COMUNA DE MAIPU"),
+}
+_REVISION_NO_SOPORTADO = {"chofer": "el chofer", "rut_chofer": "el RUT del chofer", "destino_entrega": "el destino",
+                          "planta_origen": "la planta de origen"}
+_REVISION_TIPOS_DESTINO = {"DESTINO_NO_RESUELTO"}
+# Únicas acciones de B1 que una tarjeta puede usar (correcciones ya existentes).
+_REVISION_ACCIONES = {"DOCUMENTO_CORREGIR_CAMPO", "DOCUMENTO_ASIGNAR_OBRA", "DECISION_APLICAR"}
+
+
+def separar_contexto_revision(texto: str) -> tuple[str, str]:
+    """("decision_id", instrucción) si el texto viene de una tarjeta de Revisión."""
+    m = _REVISION.match(str(texto or "").strip())
+    return (m.group("id"), (m.group("texto") or "").strip()) if m else ("", str(texto or ""))
+
+
+def _guia_revision(decision: Mapping[str, object]) -> str:
+    return str((decision.get("documento") or {}).get("numero_guia", "")).strip()
+
+
+def instruccion_en_revision(decision: Mapping[str, object], texto: str) -> str | None:
+    """Frase canónica de B1 para lo escrito en la tarjeta, o None si no se
+    entiende como corrección del dato que la tarjeta revisa. Una orden que ya
+    nombra una guía se interpreta tal cual (la guía se verifica después)."""
+    original, plano = _limpio(texto)
+    mencion = re.search(r"(?:\bEN\s+)?(?:\bLA\s+)?\bGUIA\s+(?:N[°O]?\s*)?(?P<n>\d{3,12})\s*,?\s*", plano)
+    if mencion:
+        try:
+            explicita = interpretar_determinista(texto)
+            if mencion.group("n") != _guia_revision(decision) or (
+                    explicita is not None and explicita.accion in _REVISION_ACCIONES):
+                return texto
+        except ErrorContratoInterpretacion:
+            return texto
+        # La guía de la propia tarjeta en una frase que B1 no tiene: se quita y
+        # se interpreta como el resto de lo escrito en la tarjeta.
+        original = (original[:mencion.start()] + original[mencion.end():]).strip(" ,")
+        plano = _plano(original)
+    regla = _REVISION_CAMPOS.get(str(decision.get("campo") or ""))
+    if regla is None or not plano or not _guia_revision(decision).isdigit():
+        return None
+    palabras, frase, suelto = regla[0], regla[1], regla[2]
+    dato = rf"(?:(?:EL|LA)\s+)?(?:{palabras})(?:\s+(?:CORRECT[OA]|REAL|VERDADER[OA]))?"
+    for patron in (rf"^(?:{dato}\s*)?:\s*(?P<v>.+)$",
+                   rf"^(?:{dato}\s+)?(?:ES(?:\s+DE)?|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A)\s+(?P<v>.+)$",
+                   rf"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR|PON|PONER)(?:LO|LA)?\s+(?:{dato}\s+)?"
+                   rf"(?:A|POR|EN|COMO)\s+(?P<v>.+)$"):
+        m = re.match(patron, plano)
+        if m:
+            return frase.format(guia=_guia_revision(decision), valor=original[m.start("v"):m.end("v")].strip())
+    if suelto is not None and suelto.match(plano):
+        return frase.format(guia=_guia_revision(decision), valor=original)
+    return None
+
+
+def aclaracion_revision(decision: Mapping[str, object]) -> str:
+    campo, guia = str(decision.get("campo") or ""), _guia_revision(decision)
+    if not guia.isdigit():
+        # Todas las correcciones de B1 identifican la guía por su número.
+        return ("Esta tarjeta es de un documento sin número de guía; B1 corrige por número de guía. "
+                "Usa las opciones de la tarjeta. No se corrigió nada.")
+    regla = _REVISION_CAMPOS.get(campo)
+    if regla is None or (campo == "despachar_a_crudo" and decision.get("tipo") not in _REVISION_TIPOS_DESTINO):
+        dato = _REVISION_NO_SOPORTADO.get(campo, "este dato")
+        return (f"Desde esta tarjeta B1 todavía no corrige {dato} de la guía {guia}. "
+                "Usa las opciones de la tarjeta. No se corrigió nada.")
+    return (f"No entendí la corrección de {regla[3]} de la guía {guia}. Escribe, por ejemplo: «{regla[4]}». "
+            "No se corrigió nada.")
+
+
+def ajustar_a_revision(intencion: Intencion, decision: Mapping[str, object], instruccion: str,
+                       archivos_dataset: set[str] | None = None) -> str:
+    """Limita la intención a la guía y al dato de la tarjeta y fija el
+    documento exacto (sólo si la tarjeta nombra un archivo que existe en el
+    dataset; tarjetas antiguas traen sólo "original.jpg" y se resuelven por
+    guía, que sigue rechazando la ambigüedad). Devuelve un mensaje de
+    rechazo, o "" si se admite."""
+    guia, campo = _guia_revision(decision), str(decision.get("campo") or "")
+    archivo = str((decision.get("documento") or {}).get("archivo", "")).strip()
+    p = intencion.parametros
+    if intencion.accion == "DOCUMENTO_CORREGIR_CAMPO":
+        guia_orden, admitida = str(p.get("numero_guia") or ""), p.get("campo") == campo and campo in _REVISION_CAMPOS
+    elif intencion.accion == "DOCUMENTO_ASIGNAR_OBRA":
+        guia_orden, admitida = str(p.get("numero_guia") or ""), campo == "obra_destino"
+    elif intencion.accion == "DECISION_APLICAR" and p.get("accion_decision") == "REGISTRAR_DIRECCION":
+        guia_orden = str(intencion.menciones.get("guia_destino") or "")
+        admitida = decision.get("tipo") in _REVISION_TIPOS_DESTINO and "REGISTRAR_DIRECCION" in (
+            decision.get("acciones_permitidas") or [])
+    else:
+        return aclaracion_revision(decision)
+    if guia_orden != guia:
+        return f"Esta tarjeta es de la guía {guia}; la instrucción menciona la guía {guia_orden}. No se corrigió nada."
+    if not admitida:
+        return aclaracion_revision(decision)
+    if intencion.accion == "DECISION_APLICAR":
+        # La tarjeta identifica la revisión exacta: sin adivinar entre varias.
+        p["decision_id"] = str(decision["decision_id"])
+        intencion.menciones.pop("guia_destino", None)
+    else:
+        if archivo and (archivos_dataset is None or archivo in archivos_dataset):
+            p["archivo"] = archivo
+        p["referencia"] = f"Revisión de Atlas, guía {guia}: {' '.join(str(instruccion).split())}"[:500]
+    return ""
+
+
 _MISMO_VIAJE = re.compile(
     r"\bGUIAS\b.*\b(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|JUNTA|JUNTAR|AGRUPA|AGRUPAR|UNE|UNIR)\b"
     r".*\b(?:(?:AL|DEL|EL|EN\s+EL|A\s+UN|EN\s+UN|UN)\s+(?:MISMO|SOLO|UNICO)\s+(?:VIAJE|REPARTO))\b"
@@ -1463,6 +1588,10 @@ class OperadorB1:
 
     def consultar(self, texto: str, *, derivar_operacionales: bool = False) -> dict:
         """Consulta sin locks ni estado conversacional; rechaza acciones antes de resolverlas."""
+        if separar_contexto_revision(texto)[0]:
+            # Lo escrito en una tarjeta de Revisión siempre es una corrección.
+            return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
+                    {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."})
         if derivar_operacionales and (es_confirmacion(texto) or es_cancelacion(texto)):
             return {"estado": "REQUIERE_OPERADOR"}
         try:
@@ -1484,6 +1613,7 @@ class OperadorB1:
         try:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
+                decision_id, texto = separar_contexto_revision(texto)
                 if es_confirmacion(texto):
                     self._olvidar_investigacion(estado, conversacion_id)
                     return self._confirmar(estado, conversacion_id)
@@ -1493,6 +1623,8 @@ class OperadorB1:
                     self._fijar_pendiente(estado, conversacion_id, None)
                     return {"estado": "CANCELADA" if tenia else "SIN_PREVIEW_PENDIENTE",
                             "mensaje": "Operación pendiente descartada." if tenia else "No había nada pendiente."}
+                if decision_id:
+                    return self._instruccion_revision(estado, conversacion_id, decision_id, texto)
                 return self._instruccion(estado, conversacion_id, texto)
         except SesionOcupadaError:
             return {"estado": "RECHAZADA", "mensaje": "Otra operación de esta conversación está en curso."}
@@ -1510,12 +1642,39 @@ class OperadorB1:
         propuesta = self.proveedor.interpretar(str(texto), catalogo_acciones())
         return None if propuesta is None else intencion_desde_modelo(propuesta)
 
-    def _instruccion(self, estado: dict, conversacion_id: str, texto: str) -> dict:
+    def _instruccion_revision(self, estado: dict, conversacion_id: str, decision_id: str, texto: str) -> dict:
+        decision = next((d for d in self.capa._ctx.decisiones() if d.get("decision_id") == decision_id
+                         and d.get("estado", "PENDIENTE") == "PENDIENTE"), None)
+        if decision is None:
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "RECHAZADA", "codigo": "REVISION_NO_PENDIENTE",
+                    "mensaje": "Esta revisión ya no está pendiente; actualiza Revisión de Atlas. No se corrigió nada."}
+        otra = re.search(r"\bGUIA\s+(?:N[°O]?\s*)?(\d{3,12})", _limpio(texto)[1])
+        if otra and otra.group(1) != _guia_revision(decision):
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": (
+                f"Esta tarjeta es de la guía {_guia_revision(decision)}; la instrucción menciona la guía "
+                f"{otra.group(1)}. No se corrigió nada.")}
+        canonica = instruccion_en_revision(decision, texto)
+        if canonica is None:
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": aclaracion_revision(decision)}
+        return self._instruccion(estado, conversacion_id, canonica, revision=(decision, texto))
+
+    def _instruccion(self, estado: dict, conversacion_id: str, texto: str,
+                     revision: tuple[Mapping[str, object], str] | None = None) -> dict:
         try:
             intencion = self._interpretar(texto)
         except ErrorContratoInterpretacion as error:
             self._olvidar_investigacion(estado, conversacion_id)
             return {"estado": "RECHAZADA", "codigo": "CONTRATO_INTERPRETACION", "mensaje": str(error)}
+        if revision is not None:
+            rechazo = (aclaracion_revision(revision[0]) if intencion is None
+                       else ajustar_a_revision(intencion, revision[0], revision[1],
+                                               {str(f.get("archivo", "")) for f in self.capa._ctx.filas()}))
+            if rechazo:
+                self._fijar_pendiente(estado, conversacion_id, None)
+                return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": rechazo}
         if intencion is None or intencion.accion not in {ACCION_INVESTIGAR_REVISION, ACCION_DESDE_INVESTIGACION}:
             # Sólo la investigación INMEDIATAMENTE anterior es reutilizable:
             # cualquier otra instrucción la deja sin efecto.
