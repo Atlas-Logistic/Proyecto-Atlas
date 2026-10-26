@@ -67,3 +67,39 @@ def test_guia_existente_por_numero_no_se_copia_ni_reprocesa(tmp_path,monkeypatch
     assert r['cantidad']==0 and r['existentes'][0]['numero_guia']=='482553'
     assert not (tmp_path/'operacion'/'entradas').exists()
     assert original.read_bytes()==b'original inalterado'
+
+class LeaseOcupado(Lease):
+    """Ocupado por otro titular (409) durante `ocupado_intentos` intentos."""
+    def __init__(self,ocupado_intentos,ocupado=True):
+        super().__init__(); self.pendientes=ocupado_intentos; self.marca=ocupado; self.intentos=0; self.ocupado=False
+    def adquirir(self):
+        self.intentos+=1
+        if self.pendientes: self.pendientes-=1; self.ocupado=self.marca; return False
+        self.ocupado=False; return True
+
+def _reloj_simulado(monkeypatch):
+    ahora=[0.0]
+    monkeypatch.setattr(d,'_reloj',lambda:ahora[0])
+    monkeypatch.setattr(d,'_dormir',lambda s:ahora.__setitem__(0,ahora[0]+s))
+    return ahora
+
+def test_escritor_ocupado_por_pull_espera_y_luego_escribe(tmp_path,monkeypatch):
+    monkeypatch.setattr(d,'compartida',lambda _:True); ahora=_reloj_simulado(monkeypatch)
+    lease=LeaseOcupado(7)  # ~35 s de un ciclo PULL
+    with d.sesion(tmp_path,fabrica=lambda:lease) as comprobar:
+        comprobar(); (tmp_path/'sintetico.json').write_text('{}')
+    assert lease.intentos==8 and ahora[0]==35 and lease.cerrado
+
+def test_escritor_ocupado_mas_alla_de_la_espera_no_escribe(tmp_path,monkeypatch):
+    monkeypatch.setattr(d,'compartida',lambda _:True); ahora=_reloj_simulado(monkeypatch)
+    lease=LeaseOcupado(10**6)
+    with pytest.raises(PermissionError,match='Escritor ocupado por otro proceso Atlas'):
+        with d.sesion(tmp_path,fabrica=lambda:lease): pytest.fail('No debe entrar')
+    assert ahora[0]==d.ESPERA_ESCRITOR_OCUPADO_SEGUNDOS and list(tmp_path.iterdir())==[]
+
+def test_exclusividad_no_verificable_no_se_reintenta(tmp_path,monkeypatch):
+    monkeypatch.setattr(d,'compartida',lambda _:True); ahora=_reloj_simulado(monkeypatch)
+    lease=LeaseOcupado(10**6,ocupado=False)  # Cloud caído o credencial inválida
+    with pytest.raises(PermissionError,match='exclusividad no verificable'):
+        with d.sesion(tmp_path,fabrica=lambda:lease): pytest.fail('No debe entrar')
+    assert lease.intentos==1 and ahora[0]==0 and list(tmp_path.iterdir())==[]

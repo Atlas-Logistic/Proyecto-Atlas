@@ -66,6 +66,30 @@ class EscritorOperativoTests(unittest.TestCase):
             self.assertFalse(lease.vigente)
         self.assertEqual([ruta for ruta, _ in api.llamadas], ["/api/motor/escritor/estado", "/api/motor/escritor/adquirir"])
 
+    def test_ocupado_solo_ante_409_de_adquirir(self):
+        import io, urllib.error
+        from atlas_core import escritor_operativo as eo
+        def http(codigo):
+            def abrir(request, timeout=0):
+                if request.full_url.endswith("/estado"):
+                    return io.BytesIO(b'{"vigente": true, "epoca": 3}')
+                raise urllib.error.HTTPError(request.full_url, codigo, "x", {}, io.BytesIO(b"{}"))
+            return abrir
+        lease = LeaseEscritorOperativo(base_url="https://cloud.test", token_motor="t", escritor_id="casa-1", heartbeat_segundos=0)
+        with patch("urllib.request.urlopen", side_effect=http(409)):
+            self.assertFalse(lease.adquirir())
+            self.assertTrue(lease.ocupado)
+            with self.assertRaises(eo.EscritorOcupado):
+                eo._json("https://cloud.test", "/api/motor/escritor/adquirir", "t", method="POST", body={}, timeout=1)
+            with self.assertRaises(ErrorEscritorOperativo) as renovar:
+                eo._json("https://cloud.test", "/api/motor/escritor/renovar", "t", method="POST", body={}, timeout=1)
+            self.assertNotIsInstance(renovar.exception, eo.EscritorOcupado)
+        for codigo in (401, 503):
+            with patch("urllib.request.urlopen", side_effect=http(codigo)):
+                self.assertFalse(lease.adquirir())
+                self.assertFalse(lease.ocupado)
+        self.assertFalse(lease.vigente)
+
     def test_relevo_con_epoca_previa_respeta_margen(self):
         api = ApiEscritor(epoca_previa=1)
         esperas: list[float] = []

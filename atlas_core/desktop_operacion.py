@@ -15,6 +15,7 @@ import subprocess
 import sys
 import uuid
 import tempfile
+import time
 import re
 from contextvars import ContextVar
 from datetime import datetime
@@ -90,6 +91,22 @@ def compartida(raiz):
     texto = str(raiz).replace('/', '\\').lower()
     return texto.startswith('\\\\') or (len(texto) > 1 and texto[1] == ':' and texto[0] != 'c') or 'onedrive' in texto or 'google drive' in texto
 
+# Cada ciclo PULL retiene el lease ~35 s cada 2 min (incluye el margen de
+# relevo). Un turno manual que coincide no falla: espera, acotado, SÓLO
+# mientras Cloud responda ESCRITOR_OCUPADO. Cloud caído o credencial
+# inválida no se reintentan. Nunca se escribe sin lease.
+ESPERA_ESCRITOR_OCUPADO_SEGUNDOS = 150
+INTERVALO_ESCRITOR_OCUPADO_SEGUNDOS = 5
+_dormir = time.sleep
+_reloj = time.monotonic
+
+def _adquirir_con_espera(escritor):
+    limite = _reloj() + ESPERA_ESCRITOR_OCUPADO_SEGUNDOS
+    while not escritor.adquirir():
+        if not getattr(escritor, 'ocupado', False) or _reloj() >= limite: return False
+        _dormir(INTERVALO_ESCRITOR_OCUPADO_SEGUNDOS)
+    return True
+
 @contextlib.contextmanager
 def sesion(raiz, *, fabrica=lease_desde_entorno):
     raiz = Path(raiz).resolve()
@@ -105,7 +122,9 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
                 raise PermissionError('Modo compartido sin lease: configure una política autorizada de equipo único o la credencial legítima del árbitro Cloud.')
         if escritor is not None:
             stack.enter_context(escritor)
-            if not escritor.adquirir():
+            if not _adquirir_con_espera(escritor):
+                if getattr(escritor, 'ocupado', False):
+                    raise PermissionError(f'Escritor ocupado por otro proceso Atlas (p. ej. PULL procesando envíos) tras esperar {ESPERA_ESCRITOR_OCUPADO_SEGUNDOS} s. No se inició ninguna escritura; reintente.')
                 raise PermissionError('Escritor ocupado o exclusividad no verificable. No se inició ninguna escritura.')
             # Mutex local o lease Cloud: con exclusividad vigente, un lock de
             # este PC cuyo PID terminó es huérfano (caída a mitad de ingreso).

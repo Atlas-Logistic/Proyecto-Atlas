@@ -25,6 +25,10 @@ class ErrorEscritorOperativo(RuntimeError):
     pass
 
 
+class EscritorOcupado(ErrorEscritorOperativo):
+    """Cloud respondió 409 a `/adquirir`: otro titular tiene el lease vigente."""
+
+
 def _url(base_url: str, ruta: str) -> str:
     url = base_url.rstrip("/") + ruta
     if not url.startswith("https://"):
@@ -41,7 +45,12 @@ def _json(base_url: str, ruta: str, token: str, *, method: str = "GET", body: di
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read())
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+    except urllib.error.HTTPError as error:
+        # Sólo ESCRITOR_OCUPADO produce 409 en /adquirir: estado legítimo y
+        # transitorio, distinto de Cloud caído o credencial inválida.
+        tipo = EscritorOcupado if error.code == 409 and ruta.endswith("/adquirir") else ErrorEscritorOperativo
+        raise tipo(f"Cloud escritor {method} {ruta}: {error}") from error
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
         raise ErrorEscritorOperativo(f"Cloud escritor {method} {ruta}: {error}") from error
 
 
@@ -90,6 +99,8 @@ class LeaseEscritorOperativo:
         self._dormir = dormir or (lambda segundos: self._detener.wait(segundos))
         self.lease_token = ""
         self.epoca = 0
+        # True sólo si el último `adquirir` falló porque otro titular lo tiene.
+        self.ocupado = False
         self._detener = threading.Event()
         self._perdido = threading.Event()
         self._hilo: threading.Thread | None = None
@@ -102,12 +113,16 @@ class LeaseEscritorOperativo:
         return _json(self.base_url, "/api/motor/escritor/estado", self.token_motor, timeout=self.timeout)
 
     def adquirir(self) -> bool:
+        self.ocupado = False
         try:
             previo = self.consultar()
             respuesta = _json(
                 self.base_url, "/api/motor/escritor/adquirir", self.token_motor,
                 method="POST", body={"escritor_id": self.escritor_id}, timeout=self.timeout,
             )
+        except EscritorOcupado:
+            self.ocupado = True
+            return False
         except ErrorEscritorOperativo:
             return False
         token = str(respuesta.get("lease_token") or "")
