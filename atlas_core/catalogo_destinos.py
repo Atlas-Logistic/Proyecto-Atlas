@@ -356,6 +356,142 @@ def _anclas_fuertes_conservadas(calle: str, texto: str, comuna_confirmada: str) 
     return not comuna or comuna in texto
 
 
+# Bloque DIRECCIONES CONOCIDAS CON OTRO FORMATO (26/10/2026) -- la misma
+# dirección confirmada se escribe/lee como "CAM. LO RUIZ N° 2.901",
+# "CAMINOLO RUIZ 2901" o "CAMINO LO RUIZ 290I" (482771): sin estas
+# equivalencias se trataba como nueva o como contradicción del catálogo.
+# Sólo cambian la escritura, nunca los números: la numeración confirmada
+# sigue siendo un ancla exacta.
+_ABREVIATURAS_VIA = {
+    "CAM": "CAMINO", "AV": "AVENIDA", "AVDA": "AVENIDA", "AVE": "AVENIDA", "PDTE": "PRESIDENTE",
+    "PSJE": "PASAJE", "PJE": "PASAJE", "GRAL": "GENERAL", "STA": "SANTA", "STO": "SANTO",
+}
+_MARCADORES_NUMERO = frozenset({"N", "NO", "NRO", "NUM", "NUMERO"})
+_NUMERACION_FINAL_IL = re.compile(r"^\d{2,}[0-9IL]*[IL]$")
+
+
+def forma_comparable_direccion(texto: str) -> str:
+    """Normalización de escritura para comparar direcciones: mayúsculas sin
+    tildes ni puntuación, abreviaturas de vía expandidas y sin el marcador
+    "N°/NRO" delante de la numeración. Nunca altera números ni palabras."""
+    tokens = normalizar_nombre_destino(texto).split()
+    salida = []
+    for indice, token in enumerate(tokens):
+        if token in _MARCADORES_NUMERO and indice + 1 < len(tokens) and tokens[indice + 1][:1].isdigit():
+            continue
+        salida.append(_ABREVIATURAS_VIA.get(token, token))
+    return " ".join(salida)
+
+
+def _numeracion_como_maestro(texto: str, numeros: set[str], comuna_confirmada: str) -> str:
+    """Numeración partida por separador de miles ("2 901") o con I/L final
+    leída por OCR ("290I"), sólo si equivale EXACTAMENTE a un número de la
+    calle confirmada. La I/L final exige además la comuna confirmada."""
+    tokens = texto.split()
+    salida: list[str] = []
+    indice = 0
+    while indice < len(tokens):
+        token = tokens[indice]
+        siguiente = tokens[indice + 1] if indice + 1 < len(tokens) else ""
+        if re.fullmatch(r"\d{1,3}", token) and re.fullmatch(r"\d{3}", siguiente) and token + siguiente in numeros:
+            salida.append(token + siguiente)
+            indice += 2
+            continue
+        if (_NUMERACION_FINAL_IL.match(token) and token.translate(_LETRAS_OCR_COMO_DIGITO) in numeros
+                and _comuna_confirmada_en_texto(comuna_confirmada, texto)):
+            token = token.translate(_LETRAS_OCR_COMO_DIGITO)
+        salida.append(token)
+        indice += 1
+    return " ".join(salida)
+
+
+def _coincide_con_palabras_pegadas(calle: str, texto: str) -> bool:
+    """La calle confirmada aparece con sus palabras pegadas o separadas de
+    otra forma ("CAMINOLO RUIZ 2901"): mismas letras y misma numeración
+    exacta a continuación, sin cambiar ningún carácter."""
+    tokens_calle, tokens_texto = calle.split(), texto.split()
+    primero = next((i for i, t in enumerate(tokens_calle) if t.isdigit()), None)
+    if not primero:
+        return False
+    letras_calle, cola = "".join(tokens_calle[:primero]), tokens_calle[primero:]
+    if len(letras_calle) < 6 or not letras_calle.isalpha():
+        return False
+    for inicio in range(len(tokens_texto) - len(cola) + 1):
+        if tokens_texto[inicio:inicio + len(cola)] != cola:
+            continue
+        previos = []
+        for token in reversed(tokens_texto[:inicio]):
+            if not token.isalpha():
+                break
+            previos.insert(0, token)
+        if "".join(previos).endswith(letras_calle):
+            return True
+    return False
+
+
+def _coincide_con_otro_formato(calle: str, texto: str, comuna_confirmada: str) -> bool:
+    numeros = {t for t in _tokens_direccion(calle) if t.isdigit()}
+    if not numeros:
+        return False
+    texto = _numeracion_como_maestro(texto, numeros, comuna_confirmada)
+    numeros_texto = [t for t in _tokens_direccion(texto) if t.isdigit()]
+    # Ninguna otra numeración en el texto: nunca se elige entre dos números.
+    if sorted(set(numeros_texto)) != sorted(numeros):
+        return False
+    return _contiene_direccion(calle, texto) or _coincide_con_palabras_pegadas(calle, texto)
+
+
+def _contiene_direccion(calle: str, texto: str) -> bool:
+    return bool(re.search(rf"(?<![A-Z0-9]){re.escape(calle)}(?![A-Z0-9])", texto))
+
+
+_RUIDO_TERRITORIAL_FINAL = frozenset({"CHILE", "REGION", "METROPOLITANA", "RM", "SANTIAGO", "DE"})
+
+
+def _clave_fisica_destino(destino) -> tuple[tuple[str, ...], str]:
+    comuna = forma_comparable_direccion(getattr(destino, "comuna", "") or "")
+    tokens = forma_comparable_direccion((getattr(destino, "direccion", "") or "").split(",", 1)[0]).split()
+    while tokens and (tokens[-1] in _RUIDO_TERRITORIAL_FINAL or tokens[-1] in comuna.split()):
+        tokens.pop()
+    return tuple(tokens), comuna
+
+
+def _distancia_metros(a, b) -> float:
+    from math import asin, cos, radians, sin, sqrt
+    lat1, lon1, lat2, lon2 = map(radians, (a[0], a[1], b[0], b[1]))
+    h = sin((lat2 - lat1) / 2) ** 2 + cos(lat1) * cos(lat2) * sin((lon2 - lon1) / 2) ** 2
+    return 2 * 6_371_000 * asin(sqrt(h))
+
+
+DISTANCIA_MAXIMA_DESTINOS_EQUIVALENTES_M = 150.0
+
+
+def consolidar_destinos_equivalentes(destinos: Iterable) -> list:
+    """Varios destinos confirmados que son la MISMA dirección física (misma
+    calle y numeración, misma comuna, sólo cambia el formato -- p. ej.
+    "CAMINO LO RUIZ 2901, RENCA, CHILE" y "CAMINO LO RUIZ 2901") y cuyas
+    coordenadas coinciden (≤150 m) son una sola coincidencia, no una
+    ambigüedad. Devuelve uno con coordenadas. Si difieren en dirección,
+    comuna o coordenadas, devuelve la lista intacta: el llamador se abstiene."""
+    destinos = list(destinos)
+    if len(destinos) < 2:
+        return destinos
+    claves = {_clave_fisica_destino(d) for d in destinos}
+    if len(claves) != 1 or not any(t.isdigit() for t in next(iter(claves))[0]):
+        return destinos
+    con_coordenadas = []
+    for destino in destinos:
+        try:
+            con_coordenadas.append((destino, (float(getattr(destino, "latitud", None)),
+                                              float(getattr(destino, "longitud", None)))))
+        except (TypeError, ValueError):
+            continue
+    if any(_distancia_metros(a[1], b[1]) > DISTANCIA_MAXIMA_DESTINOS_EQUIVALENTES_M
+           for a in con_coordenadas for b in con_coordenadas):
+        return destinos
+    return [con_coordenadas[0][0] if con_coordenadas else destinos[0]]
+
+
 def direccion_confirmada_coincide(
     calle_confirmada: str, texto_documental: str, *, comuna_confirmada: str = "",
 ) -> bool:
@@ -367,13 +503,16 @@ def direccion_confirmada_coincide(
     una comuna confirmada. La selecci?n entre varios destinos sigue siendo
     responsabilidad del llamador: m?s de una coincidencia debe abstenerse.
     """
-    calle = normalizar_nombre_destino(calle_confirmada)
-    texto = normalizar_nombre_destino(texto_documental)
+    calle = forma_comparable_direccion(calle_confirmada)
+    texto = forma_comparable_direccion(texto_documental)
     if not calle or not texto:
         return False
-    if calle in texto:
+    # Secuencia completa, nunca parte de otro número ("2901" no está en "29011").
+    if _contiene_direccion(calle, texto):
         return True
     if _coincide_con_numeracion_ocr(calle, texto, comuna_confirmada):
+        return True
+    if _coincide_con_otro_formato(calle, texto, comuna_confirmada):
         return True
     # Numeración OCR mixta ya fijada contra el número confirmado: los
     # números siguen siendo anclas exactas para la tolerancia de abajo.

@@ -46,6 +46,7 @@ from atlas_core.catalogo_destinos import (
     Destino,
     EstadoCalidadDestino,
     EstadoVigenciaDestino,
+    consolidar_destinos_equivalentes,
     direccion_confirmada_coincide,
     normalizar_nombre_destino,
     numeracion_con_ruido_ocr,
@@ -2195,6 +2196,8 @@ def destino_por_relacion_confirmada(
         calle = normalizar_nombre_destino((destino.direccion or "").split(",", 1)[0])
         if calle and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna):
             coincidentes.append(destino)
+    # La misma dirección confirmada dos veces con otro formato es una sola.
+    coincidentes = consolidar_destinos_equivalentes(coincidentes)
     # Sin numeración en la calle confirmada (sólo comuna, camino largo,
     # fundo) la coincidencia no identifica un punto: decide el pipeline.
     if len(coincidentes) == 1 and not re.search(

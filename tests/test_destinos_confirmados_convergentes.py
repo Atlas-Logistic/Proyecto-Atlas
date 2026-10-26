@@ -93,7 +93,10 @@ def test_no_cierra_por_coincidencia_nominal(catalogo, campo, valor):
 
 
 def test_ambiguedad_y_catalogo_inactivo_se_abstienen(catalogo):
-    catalogo.destinos.append(NS(**{**vars(catalogo.destinos[0]), 'destino_id': 'otro'}))
+    # Ambigüedad real: mismo texto, coordenadas a >1 km (26/10/2026: un
+    # duplicado idéntico de la misma dirección ya no es ambigüedad).
+    catalogo.destinos[0].latitud, catalogo.destinos[0].longitud = -33.4025, -70.6865
+    catalogo.destinos.append(NS(**{**vars(catalogo.destinos[0]), 'destino_id': 'otro', 'latitud': -33.4125}))
     assert resolver(fila()) is None
     catalogo.destinos.pop()
     catalogo.obras[0].estado_vigencia = 'INACTIVO'
@@ -168,3 +171,10 @@ def test_filtro_solo_destino_obra_y_con_catalogo_vigente(catalogo, tmp_path):
     assert modulo.retirar_decisiones_destino_convergente([*ds, manual], **kwargs) == [*ds[2:], manual]
     catalogo.obras[0].estado_vigencia = 'INACTIVO'
     assert modulo.retirar_decisiones_destino_convergente(ds, **kwargs) == ds
+
+
+def test_duplicado_identico_de_la_misma_direccion_no_es_ambiguedad(catalogo):
+    """CAMINO LO RUIZ 2901 confirmado dos veces (con y sin ", RENCA, CHILE")."""
+    copia = NS(**{**vars(catalogo.destinos[0]), 'destino_id': 'otro', 'direccion': 'CAMINO LO RUIZ 2901, RENCA, CHILE'})
+    catalogo.destinos.append(copia)
+    assert resolver(fila()) is not None

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_rut_cliente
 from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
-from atlas_core.catalogo_destinos import direccion_confirmada_coincide
+from atlas_core.catalogo_destinos import consolidar_destinos_equivalentes, direccion_confirmada_coincide
 
 
 def _clave(texto):
@@ -143,6 +143,12 @@ def resolver_destino_confirmado(fila, *, carpeta_catalogos, lineas=(), filas=(),
             if not compatibles:
                 continue
             candidatos[(obra.obra_id, destino.destino_id)] = (obra, destino, compatibles[0])
+    # Dos destinos de la MISMA obra que son la misma dirección con otro
+    # formato (y coordenadas compatibles) no son ambigüedad.
+    if len(candidatos) > 1 and len({obra.obra_id for obra, _, _ in candidatos.values()}) == 1:
+        unico = consolidar_destinos_equivalentes([destino for _, destino, _ in candidatos.values()])
+        if len(unico) == 1:
+            return next(c for c in candidatos.values() if c[1] is unico[0])
     return next(iter(candidatos.values())) if len(candidatos) == 1 else None
 
 

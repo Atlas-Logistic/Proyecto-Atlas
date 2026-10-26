@@ -43,6 +43,7 @@ from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cli
 from atlas_core.catalogo_destinos import (
     coincide_solo_por_numeracion_b_ocho,
     coincide_solo_por_numeracion_ocr,
+    consolidar_destinos_equivalentes,
     direccion_confirmada_coincide,
     normalizar_nombre_destino,
     tiene_numeracion_b_inicial,
@@ -4329,11 +4330,11 @@ def _destinos_confirmados_coincidentes(catalogo_obras, fila: Mapping[str, object
     if not destinos:
         return None
     texto_documental = normalizar_nombre_destino(despachar_a)
-    return [
+    return consolidar_destinos_equivalentes([
         destino for destino in destinos
         if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
         and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna)
-    ]
+    ])
 
 
 def _ruta_calculada_reanclable(fila: Mapping[str, object], candidatos: list | None, *, solo_b_ocho: bool) -> bool:
@@ -4534,10 +4535,11 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             if not destinos_confirmados_obra:
                 continue
             texto_documental = normalizar_nombre_destino(despachar_a)
-            candidatos_coincidentes = [
+            # La misma dirección confirmada con otro formato es una sola.
+            candidatos_coincidentes = consolidar_destinos_equivalentes([
                 destino for destino in destinos_confirmados_obra
                 if (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0])) and direccion_confirmada_coincide(calle, texto_documental, comuna_confirmada=destino.comuna)
-            ]
+            ])
             if ruta_ya_calculada and not _ruta_calculada_reanclable(
                 fila, candidatos_coincidentes, solo_b_ocho=False,
             ):
