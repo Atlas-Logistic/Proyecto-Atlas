@@ -412,10 +412,20 @@ def test_6_agotable_sin_evidencia_nueva_nunca_repite_red(op, espia):
             if d["documento"]["numero_guia"] == "474597"] == ["DESTINO_NO_RESUELTO"]
 
 
+class _ProveedorSinConexion(ProveedorRutasSimulado):
+    """El proveedor sigue caído todo el día (si respondiera, el motivo pasaría
+    a la causa real y dejaría de ser transitorio)."""
+
+    def geocodificar(self, direccion):
+        self.llamadas_geocodificacion += 1
+        return ResultadoGeocodificacion(EstadoRuta.SIN_CONEXION, (), "")
+
+
 def test_6b_transitorio_llamadas_acotadas_en_un_dia(op, espia):
     op.sembrar([_fila("474597", "GEOCODIFICACION_SIN_CONEXION", op.planta_id)], intentos=0)
     for paso in range(0, 24 * 60, 5):
-        op.mantener(AHORA + timedelta(minutes=paso))
+        op.mantener(AHORA + timedelta(minutes=paso), proveedor_rutas=_ProveedorSinConexion(),
+                    proveedor_rutas_fallback=_ProveedorSinConexion())
     externos = [g for etapa, g in espia if etapa == "externo"]
     assert len(externos) == 5  # tope TRANSITORIO, nunca 288 pasadas
     assert op.pendientes()["474597"]["estado_espera"] == "ESPERANDO_PROVEEDOR"

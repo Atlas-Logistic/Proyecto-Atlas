@@ -2056,6 +2056,7 @@ def _plan_documento_numero_guia(ctx: _Contexto, p: dict) -> Plan:
         afectados=_afectados_por_guias(ctx, {numero}),
         consecuencias=["Sólo escribe el número de guía leído en la evidencia original, retira GUIA_AUSENTE y "
                        "recalcula los estados de revisión; nunca ruta, destino, identidad, material ni ledger.",
+                       "Reconcilia la bandeja de esa guía: publica sus preguntas pendientes y actualiza sus tarjetas.",
                        "No registra una decisión humana: el valor proviene del OCR.",
                        "Regenera el reporte de viajes desde el dataset (sin OCR ni red)."],
         revalidaciones=[],
@@ -2073,7 +2074,9 @@ def _aplicar_documento_numero_guia(ctx: _Contexto, p: dict, plan: Plan, actor: s
                            fila_base=plan.datos["fila"], valores=plan.datos["valores"])
     except ErrorRecuperacionGuia as error:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", str(error)) from error
-    return {"despues": dict(plan.datos["valores"]), "regenerar_reporte": True}
+    # Caso 483169: recuperar el número no publicaba sus preguntas válidas y la
+    # tarjeta de peso conservaba "No encontrado". Se reconcilia esa guía.
+    return {"despues": dict(plan.datos["valores"]), "reconciliar": True, "regenerar_reporte": True}
 
 
 # =============================================================== registro

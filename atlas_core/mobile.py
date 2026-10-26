@@ -22,6 +22,7 @@ from typing import Callable, Mapping, Sequence
 from atlas_core.almacenamiento_portable import SesionOcupadaError, bloqueo_sesion, escribir_json_atomico
 from atlas_core.decisiones_pendientes import (
     NOMBRE_LOCK_DECISIONES_PENDIENTES, _generar_artefacto_sin_lock, regenerar_decisiones_persistidas,
+    reidentificar_documento,
 )
 from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.alcance_revalidacion import alcance_guias, guias_en_alcance
@@ -1024,6 +1025,7 @@ def _procesar_envio_mobile_impl(
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
             datos = dict(procesar_archivo(imagen, **argumentos))
+            _identidad_canonica_mobile(decisiones_nuevas, imagen, identificador)
         # Recepción real del envío (no su procesamiento) para el filtro Hoy.
         anotar_fecha_recepcion(datos, registro.get("recibido_en"))
 
@@ -1760,6 +1762,7 @@ def _reprocesar_envio_mobile_persistido_impl(
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
             datos = dict(procesar_archivo(imagen, **argumentos))
+            _identidad_canonica_mobile(decisiones_nuevas, imagen, identificador)
             anotar_fecha_recepcion(datos, registro.get("recibido_en"))
 
             datos, resumen_ia = escalar_resultado_ia_en_memoria(
@@ -2528,6 +2531,17 @@ def tipos_novedad_de(registro: Mapping[str, object]) -> list[str]:
         return [str(t) for t in tipos if str(t).strip()]
     legado = str(registro.get("tipo_novedad") or "").strip()
     return [legado] if legado else []
+
+
+def _identidad_canonica_mobile(decisiones: list[dict[str, object]], imagen: Path, identificador: str) -> None:
+    """El detector de `procesar_archivo` identifica el documento por el nombre
+    del archivo ("original.jpg"); en el dataset Mobile la fila es
+    `mobile/<envío>/<foto>` (caso 482816: tarjetas que nunca se cerraban).
+    Se re-identifican en sitio antes de publicarlas."""
+    nombre = Path(imagen).name
+    for indice, decision in enumerate(decisiones):
+        if nombre != identificador and str((decision.get("documento") or {}).get("archivo", "")) == nombre:
+            decisiones[indice] = reidentificar_documento(decision, {"archivo": identificador})
 
 
 def _filas_dataset(dataset: Path) -> list[dict[str, str]]:

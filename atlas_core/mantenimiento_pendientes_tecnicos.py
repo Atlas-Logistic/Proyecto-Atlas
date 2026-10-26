@@ -14,7 +14,7 @@ from atlas_core.capacidades_reevaluacion import versiones_actuales
 from atlas_core.decisiones_pendientes import (
     _guias_con_direccion_confirmada_por_humano,
     _guias_destino_terminado_por_humano,
-    clasificar_fallo_tecnico,
+    clase_de_registro_tecnico,
     guias_destino_confirmado_sin_ubicacion_ruteable,
     guias_destino_conocido_ruta_pendiente,
 )
@@ -77,7 +77,7 @@ def _plan(
             orden = (causa not in _CAUSAS_CAMBIO, str(registro.get("ultimo_intento") or ""), guia)
             candidatos.append((orden, {
                 "numero_guia": guia, "causa": causa,
-                "clase": clasificar_fallo_tecnico(str(registro["motivo_actual"])),
+                "clase": clase_de_registro_tecnico(registro),
             }))
     candidatos.sort(key=lambda par: par[0])
     elegibles = [e for _, e in candidatos[:MAX_GUIAS_POR_PASADA]]
@@ -210,7 +210,11 @@ def mantener_pendientes_tecnicos(
                 externos = {
                     e["numero_guia"] for e in elegibles
                     if filas_intermedias.get(e["numero_guia"], {}).get("estado_ruta") != "RUTA_CALCULADA"
-                    and (e["clase"] == "TRANSITORIO" or e["causa"] in {"CONOCIMIENTO_CAMBIO", "CAMBIO_NOTIFICADO"})
+                    # Sin motivo el ruteo nunca se intentó: su primer intento
+                    # real puede consultar al proveedor externo.
+                    and (e["clase"] == "TRANSITORIO"
+                         or not filas_intermedias.get(e["numero_guia"], {}).get("motivo_ruta", "").strip()
+                         or e["causa"] in {"CONOCIMIENTO_CAMBIO", "CAMBIO_NOTIFICADO"})
                 }
                 if externos:
                     revalidar_ruta_sin_destino_calculado_sin_ocr(
@@ -250,11 +254,22 @@ def mantener_pendientes_tecnicos(
             for guia, fila in filas_pendientes.items():
                 previo = previos.get(guia)
                 registro = _registro_pendiente(fila, previo)
-                registro["huella_conocimiento"] = huellas.get(guia) or conocimiento_para_guia(
-                    fila, catalogos=raiz / "catalogos_privados",
-                    decisiones_aplicadas=actual / "decisiones_aplicadas.json",
-                    version_reglas=RULESET_VERSION, versiones_capacidades=versiones_actuales(),
-                )
+                huella_previa = (previo or {}).get("huella_conocimiento")
+                if guia not in ids and huella_previa:
+                    # Un cambio de conocimiento que esta pasada no alcanzó a
+                    # atender (máx. 10 por pasada) sigue pendiente: sólo se
+                    # sella la huella nueva de las guías intentadas.
+                    registro["huella_conocimiento"] = huella_previa
+                else:
+                    # Una guía intentada se sella con su estado POSTERIOR al
+                    # intento: si el motivo cambió (p. ej. de sin conexión a
+                    # no encontrada), la huella anterior al intento la haría
+                    # parecer "conocimiento nuevo" y se reintentaría sin fin.
+                    registro["huella_conocimiento"] = (None if guia in ids else huellas.get(guia)) or conocimiento_para_guia(
+                        fila, catalogos=raiz / "catalogos_privados",
+                        decisiones_aplicadas=actual / "decisiones_aplicadas.json",
+                        version_reglas=RULESET_VERSION, versiones_capacidades=versiones_actuales(),
+                    )
                 if guia in ids:
                     if causas[guia] in {"CONOCIMIENTO_CAMBIO", "CAMBIO_NOTIFICADO"}:
                         registro["intentos_misma_evidencia"] = 0

@@ -13,7 +13,7 @@ from typing import Mapping
 
 from atlas_core.catalogo_destinos import normalizar_nombre_destino
 from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
-from atlas_core.decisiones_pendientes import clasificar_fallo_tecnico
+from atlas_core.decisiones_pendientes import clase_de_registro_tecnico
 from atlas_core.capacidades_reevaluacion import dominios_de_motivo_tecnico
 
 INTERVALO_MAXIMO = timedelta(minutes=30)
@@ -93,7 +93,7 @@ def elegibilidad(
     anterior = registro.get("huella_conocimiento")
     if anterior and anterior != huella_actual:
         return True, "CONOCIMIENTO_CAMBIO"
-    clase = clasificar_fallo_tecnico(str(registro.get("motivo_actual", "")))
+    clase = clase_de_registro_tecnico(registro)
     intentos = int(registro.get("intentos_misma_evidencia", 0) or 0)
     if clase == "DETERMINISTA":
         return False, "SIN_CAMBIO"

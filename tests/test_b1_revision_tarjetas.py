@@ -228,13 +228,16 @@ def test_correccion_desde_tarjeta_persiste_frente_a_ocr(tarjetas):
     assert next(f for f in _filas(tarjetas) if f["numero_guia"] == GUIA)["peso_kg"] == "12450"
 
 
-def test_tarjeta_antigua_con_archivo_inexistente_se_resuelve_por_guia(tarjetas):
+def test_tarjeta_antigua_original_jpg_se_publica_con_su_documento_y_b1_la_usa(tarjetas):
     vieja = _decision("PESO_VIAJE_IMPLAUSIBLE", "peso_kg", "1245", ("CONFIRMAR", "CORREGIR_PESO", "POSPONER"), "PESO",
                       archivo="original.jpg")
     generar_artefacto(ruta_dataset=tarjetas["dataset"], carpeta_catalogos=tarjetas["cat"], decisiones=[vieja])
+    bandeja = json.loads((tarjetas["actual"] / "decisiones_pendientes.json").read_text(encoding="utf-8"))["decisiones"]
+    publicada = next(d for d in bandeja if d["tipo"] == "PESO_VIAJE_IMPLAUSIBLE")
+    assert publicada["documento"]["archivo"] == ARCHIVO and publicada["decision_id"] != vieja["decision_id"]
     b1 = OperadorB1(tarjetas["raiz"])
-    conv = "revision-vieja"
-    preview = b1.atender(conv, _en(vieja["decision_id"], "12.450 kg"))
+    assert b1.atender("revision-vieja", _en(vieja["decision_id"], "12.450 kg"))["codigo"] == "REVISION_NO_PENDIENTE"
+    preview = b1.atender("revision-nueva", _en(publicada["decision_id"], "12.450 kg"))
     assert preview["estado"] == "PREVIEW_PENDIENTE", preview
     assert preview["preview"]["entidad"]["id"] == ARCHIVO
 

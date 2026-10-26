@@ -4048,7 +4048,14 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
             if planta is None:
                 continue
             motivo_previo_crudo = str(fila.get("motivo_ruta", "")).strip()
-            motivo_previo_tecnico = motivo_ruta_base(motivo_previo_crudo) in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
+            # Casos 482909/483208/483223: "GEOCODIFICACION_SIN_CREDENCIAL" (con
+            # prefijo) no estaba en el catálogo técnico y quedaba congelado
+            # aunque ORS ya respondiera. Todo fallo transitorio del proveedor
+            # (misma clasificación que la cola técnica) es reemplazable.
+            motivo_previo_tecnico = (
+                motivo_ruta_base(motivo_previo_crudo) in MOTIVOS_RUTA_TECNICOS_NO_ELEGIBLES
+                or motivo_ruta_base(motivo_previo_crudo) in _MOTIVOS_FALLO_TRANSITORIO
+            )
             # Bloque LOGÍSTICA L1 -- caso real (460807/472008/472018/
             # 472037/472073/472099/472163): `motivo_ruta` había quedado
             # en blanco (reset por un intento anterior -- p. ej.
@@ -6931,18 +6938,23 @@ def reconciliar_decisiones_destino_no_resuelto(
                            if str((d.get("documento") or {}).get("numero_guia", "")).strip() not in guias_objetivo]
             del_objetivo = [d for d in pendientes_actuales
                             if str((d.get("documento") or {}).get("numero_guia", "")).strip() in guias_objetivo]
-        regeneradas = regenerar_decisiones_persistidas(
-            decisiones=[*del_objetivo, *candidatas], carpeta_catalogos=catalogos,
-            # Bloque CIERRE OPERACIONAL DE PENDIENTE_TECNICO -- pasar el
-            # dataset activa el filtro R19 (descarta tarjetas cuyo
-            # `motivo_ruta` vigente ya no coincide -- limpieza de tarjetas
-            # obsoletas) y le da a la supresión "la obra ya tiene destino
-            # confirmado" el `motivo_ruta` VIGENTE para no silenciar un
-            # callejón sin salida real (caso 464715: destino confirmado por
-            # un humano que aun así NO produce ruta).
-            ruta_dataset=dataset,
-            cache_memoizacion=cache_memoizacion,
-        )
+        # Focal de verdad: los detectores internos de la regeneración sólo
+        # miran las guías objetivo (caso 483169: corregir otra guía publicaba
+        # sus preguntas). Sin objetivo, el alcance sigue siendo global.
+        from atlas_core.alcance_revalidacion import alcance_guias
+        with alcance_guias(dataset, guias_objetivo):
+            regeneradas = regenerar_decisiones_persistidas(
+                decisiones=[*del_objetivo, *candidatas], carpeta_catalogos=catalogos,
+                # Bloque CIERRE OPERACIONAL DE PENDIENTE_TECNICO -- pasar el
+                # dataset activa el filtro R19 (descarta tarjetas cuyo
+                # `motivo_ruta` vigente ya no coincide -- limpieza de tarjetas
+                # obsoletas) y le da a la supresión "la obra ya tiene destino
+                # confirmado" el `motivo_ruta` VIGENTE para no silenciar un
+                # callejón sin salida real (caso 464715: destino confirmado por
+                # un humano que aun así NO produce ruta).
+                ruta_dataset=dataset,
+                cache_memoizacion=cache_memoizacion,
+            )
         restantes = [*no_objetivo, *regeneradas]
         bandeja = _generar_artefacto_sin_lock(
             ruta_dataset=dataset, carpeta_catalogos=catalogos,

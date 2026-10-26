@@ -30,7 +30,8 @@ from atlas_core.decisiones_pendientes import (
     _guias_destino_terminado_por_humano,
     _motivo_ruta_base,
     _obra_esta_ausente,
-    clasificar_fallo_tecnico,
+    clase_de_registro_tecnico,
+    clasificar_pendiente_tecnico,
     guias_destino_confirmado_sin_ubicacion_ruteable,
     guias_destino_conocido_ruta_pendiente,
 )
@@ -584,7 +585,10 @@ def _registro_pendiente(fila: dict[str, str], previo: dict[str, object] | None) 
         # DETERMINISTA). `estado_espera` / `causa_siguiente_accion` /
         # `proxima_oportunidad` (fecha ISO real o null) se completan en
         # `_ciclo_vida_pendiente`, tras el reintento de esta pasada.
-        "clase_fallo": clasificar_fallo_tecnico(str(fila.get("motivo_ruta", "")).strip()),
+        "clase_fallo": clasificar_pendiente_tecnico(
+            str(fila.get("motivo_ruta", "")).strip(), obra=str(fila.get("obra_destino", "")),
+            destino_documental=str(fila.get("despachar_a_crudo", "")),
+        ),
         "proxima_oportunidad": None,
         # Compatibilidad: `escalamiento` se conserva para llamadores/tests
         # previos a 2B; `estado_espera` es la señal canónica desde 2B.
@@ -604,7 +608,7 @@ def _ciclo_vida_pendiente(
     ESPERANDO_COOLDOWN / ESPERANDO_PROVEEDOR / ESPERANDO_EVIDENCIA_NUEVA /
     AGOTADO (condición explícita no humana)."""
     motivo = str(registro.get("motivo_actual", ""))
-    clase = clasificar_fallo_tecnico(motivo)
+    clase = clase_de_registro_tecnico(registro)
     base = _motivo_ruta_base(motivo)
     intentos = int(registro.get("intentos_misma_evidencia", 0) or 0)
     maximo = MAX_REINTENTOS_POR_CLASE.get(clase, 0)
@@ -672,6 +676,9 @@ def _ciclo_vida_pendiente(
         )
         return _resultado(ESTADO_ESPERA_COOLDOWN, causa, proxima)
     # Agotó el máximo de su clase.
+    if not motivo:
+        # Ruteo intentado sin producir motivo: nada que preguntar a un humano.
+        return _resultado(ESTADO_ESPERA_EVIDENCIA, "RUTEO_SIN_RESULTADO_TRAS_MAX_INTENTOS", None)
     if clase == "TRANSITORIO":
         return _resultado(
             ESTADO_ESPERA_PROVEEDOR,
@@ -1021,7 +1028,7 @@ def reconciliar_estado_derivado(
             # consulta técnica ni volver a preguntar.
             continue
         motivo_registro = str(registro.get("motivo_actual", ""))
-        clase = clasificar_fallo_tecnico(motivo_registro)
+        clase = clase_de_registro_tecnico(registro)
         intentos = int(registro["intentos_misma_evidencia"])
         # La CAPACIDAD de un dominio que gobierna este motivo avanzó
         # (p. ej. GEOGRAFIA 2->3: maestro territorial INE v3 activo) --

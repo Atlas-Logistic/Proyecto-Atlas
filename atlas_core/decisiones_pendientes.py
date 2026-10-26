@@ -6,6 +6,7 @@ modifica catálogos; la única escritura permitida es el artefacto versionado.
 from __future__ import annotations
 from atlas_core.alcance_revalidacion import guias_en_alcance, conservar_decisiones_ajenas
 
+import csv
 import hashlib
 import json
 import re
@@ -336,6 +337,29 @@ def clasificar_fallo_tecnico(motivo_ruta: str) -> str:
     if base in MOTIVOS_DESTINO_TECNICO_AGOTABLE:
         return CLASE_FALLO_AGOTABLE
     return CLASE_FALLO_DETERMINISTA
+
+
+def clasificar_pendiente_tecnico(motivo_ruta: str, *, obra: str = "", destino_documental: str = "") -> str:
+    """Clase de ciclo de vida de un pendiente técnico. Un motivo VACÍO no es
+    un fallo determinista: el ruteo nunca se intentó (casos 483138, 482771,
+    482772, 483017: destino resuelto mientras faltaba la credencial ORS).
+    Recibe reintentos acotados como AGOTABLE, salvo que la obra ausente
+    bloquee el ruteo, que sigue esperando acción humana
+    (`OBRA_AUSENTE_BLOQUEA_RUTEO`)."""
+    if not str(motivo_ruta or "").strip():
+        if _obra_esta_ausente(obra) and str(destino_documental or "").strip():
+            return CLASE_FALLO_DETERMINISTA
+        return CLASE_FALLO_AGOTABLE
+    return clasificar_fallo_tecnico(motivo_ruta)
+
+
+def clase_de_registro_tecnico(registro: Mapping[str, object]) -> str:
+    """`clasificar_pendiente_tecnico` sobre un registro de `pendientes_tecnicos.json`."""
+    datos = registro.get("datos_disponibles") or {}
+    return clasificar_pendiente_tecnico(
+        str(registro.get("motivo_actual", "")), obra=str(datos.get("obra", "")),
+        destino_documental=str(datos.get("destino_documental", "")),
+    )
 
 # Mismo valor que `reconciliacion_estado_derivado.MAX_REINTENTOS_IGUALES_
 # ARRANQUE` -- deliberadamente una constante local propia (no un import)
@@ -3002,6 +3026,102 @@ def _fila_mobile_unica_para_decision(
     return coincidentes[0] if len(coincidentes) == 1 else None
 
 
+_GUIAS_SIN_NUMERO = {"", "No encontrado", "REVISAR", "Ilegible"}
+_CACHE_IDENTIDAD: dict[str, tuple[tuple[int, int], object]] = {}
+
+
+def _leer_memoizado(ruta: Path, leer):
+    """Una lectura por versión del archivo (mtime, tamaño); ausente => None."""
+    try:
+        info = ruta.stat()
+    except OSError:
+        return None
+    firma = (info.st_mtime_ns, info.st_size)
+    previo = _CACHE_IDENTIDAD.get(str(ruta))
+    if previo is None or previo[0] != firma:
+        previo = (firma, leer(ruta))
+        _CACHE_IDENTIDAD[str(ruta)] = previo
+    return previo[1]
+
+
+def _filas_identidad(ruta: Path) -> list[tuple[str, str, str]]:
+    csv.field_size_limit(max(csv.field_size_limit(), 10 ** 8))
+    with ruta.open(encoding="utf-8-sig", newline="") as archivo:
+        return [(str(f.get("archivo", "")), str(f.get("numero_guia", "")).strip(),
+                 str(f.get("numero_transporte", "")).strip()) for f in csv.DictReader(archivo, delimiter=";")]
+
+
+def _claves_resueltas(ruta: Path) -> set[tuple[str, str, str, str]]:
+    try:
+        aplicaciones = json.loads(ruta.read_text(encoding="utf-8")).get("aplicaciones", [])
+    except (OSError, ValueError):
+        return set()
+    return {(str(a.get("tipo", "")), str(a.get("campo", "")), str(a.get("valor_documental", "")),
+             str((a.get("documento") or {}).get("archivo", ""))) for a in aplicaciones if isinstance(a, Mapping)}
+
+
+def reidentificar_documento(decision: Mapping[str, object], documento: Mapping[str, str]) -> dict[str, object]:
+    """La misma pregunta con la identidad documental vigente (`decision_id` recalculado)."""
+    nueva = {**decision, "documento": {**(decision.get("documento") or {}), **documento}}
+    nueva["decision_id"] = _decision_id(
+        tipo=str(nueva.get("tipo", "")), documento=nueva["documento"], campo=str(nueva.get("campo", "")),
+        valor_documental=str(nueva.get("valor_documental", "")),
+        evidencias=[dict(e) for e in nueva.get("evidencias") or []],
+    )
+    return nueva
+
+
+def normalizar_identidad_documental(
+    decisiones: Iterable[Mapping[str, object]], *, ruta_dataset: str | Path,
+) -> list[dict[str, object]]:
+    """Alinea la identidad de cada tarjeta con la fila vigente del dataset:
+    - Mobile publicaba el nombre base ("original.jpg") en vez de
+      `mobile/<envío>/<foto>` (caso 482816): se re-identifica cuando guía y
+      transporte apuntan a UNA sola fila con ese nombre.
+    - La guía se recuperó después de publicar la tarjeta (caso 483169,
+      "No encontrado" -> número): se re-identifica con el número vigente.
+    Si la pregunta re-identificada ya existe en la bandeja o ya fue resuelta
+    en el ledger, la tarjeta antigua se retira (nunca se vuelve a preguntar)."""
+    decisiones = [dict(d) for d in decisiones]
+    ruta = Path(ruta_dataset)
+    filas = _leer_memoizado(ruta, _filas_identidad)
+    if not filas:
+        return decisiones
+    por_archivo = {archivo: (guia, transporte) for archivo, guia, transporte in filas}
+    cambios: dict[int, dict[str, object]] = {}
+    for indice, decision in enumerate(decisiones):
+        doc = decision.get("documento") or {}
+        archivo = str(doc.get("archivo", ""))
+        guia, transporte = str(doc.get("numero_guia", "")).strip(), str(doc.get("numero_transporte", "")).strip()
+        if archivo in por_archivo:
+            guia_vigente, transporte_vigente = por_archivo[archivo]
+            if (guia in _GUIAS_SIN_NUMERO and guia_vigente not in _GUIAS_SIN_NUMERO
+                    and transporte == transporte_vigente):
+                cambios[indice] = reidentificar_documento(decision, {"numero_guia": guia_vigente})
+        elif archivo and "/" not in archivo and guia not in _GUIAS_SIN_NUMERO:
+            filas_mobile = [a for a, g, t in filas if a.endswith("/" + archivo) and g == guia and t == transporte]
+            if len(filas_mobile) == 1:
+                cambios[indice] = reidentificar_documento(decision, {"archivo": filas_mobile[0]})
+    if not cambios:
+        return decisiones
+
+    def clave(d: Mapping[str, object]) -> tuple[str, str, str, str]:
+        return (str(d.get("tipo", "")), str(d.get("campo", "")), str(d.get("valor_documental", "")),
+                str((d.get("documento") or {}).get("archivo", "")))
+
+    vigentes = {clave(d) for i, d in enumerate(decisiones) if i not in cambios}
+    resueltas = _leer_memoizado(ruta.parent / "decisiones_aplicadas.json", _claves_resueltas) or set()
+    salida = []
+    for indice, decision in enumerate(decisiones):
+        nueva = cambios.get(indice)
+        if nueva is None:
+            salida.append(decision)
+        elif clave(nueva) not in vigentes and clave(nueva) not in resueltas:
+            vigentes.add(clave(nueva))
+            salida.append(nueva)
+    return salida
+
+
 def regenerar_decisiones_persistidas(
     *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
     ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
@@ -3012,6 +3132,8 @@ def regenerar_decisiones_persistidas(
     en cuarentena activa nunca entran ni salen de la regeneración -- ni las
     persistidas ni las que los detectores internos vuelvan a producir."""
     decisiones = list(decisiones)
+    if ruta_dataset is not None:
+        decisiones = normalizar_identidad_documental(decisiones, ruta_dataset=ruta_dataset)
     guias = guias_en_alcance(ruta_dataset) if ruta_dataset is not None else None
     ajenas = []
     if guias is not None:
@@ -3814,7 +3936,12 @@ def _regenerar_decisiones_persistidas(
         for decision_existente in decisiones:
             guia_existente = str((decision_existente.get("documento") or {}).get("numero_guia", ""))
             tipos_ya_presentes.setdefault(guia_existente, set()).add(str(decision_existente.get("tipo", "")))
+        # Con alcance causal, sólo se preguntan cosas nuevas de las guías del
+        # alcance (caso 483169: atender otra guía publicaba sus preguntas).
+        guias_alcance = guias_en_alcance(ruta_dataset)
         for numero_guia, fila_actual in filas_por_guia.items():
+            if guias_alcance is not None and numero_guia not in guias_alcance:
+                continue
             archivo_fila = str(fila_actual.get("archivo") or numero_guia)
             tipos_de_esta_guia = tipos_ya_presentes.setdefault(numero_guia, set())
             for nueva in (
@@ -4546,7 +4673,11 @@ def _generar_artefacto_sin_lock(
         "generado_en": reloj().astimezone(timezone.utc).isoformat(),
         "dataset_sha256": _sha256(dataset),
         "catalogos_sha256": hashes,
-        "decisiones": conservar_decisiones_ajenas(dataset, salida, decisiones_unicas),
+        # Toda publicación pasa por aquí, también la que conserva tarjetas
+        # ajenas a un alcance focal: todas quedan con su identidad vigente.
+        "decisiones": normalizar_identidad_documental(
+            conservar_decisiones_ajenas(dataset, salida, decisiones_unicas), ruta_dataset=dataset,
+        ),
     }
     escribir_json_atomico(salida, artefacto)
     return artefacto
