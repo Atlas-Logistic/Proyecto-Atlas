@@ -764,6 +764,13 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             limpia = re.sub(r"\s+", " ", linea).strip()
             if not limpia:
                 continue
+            # RapidOCR también omite el espacio tras la designación B
+            # ("BHORMIGON ...") y entre la familia y el diámetro
+            # ("HORMIGON16MM", casos 483106/483138/482816): sin límite de
+            # palabra la partida leída se descartaba entera. Sólo se separan
+            # esas dos formas; el resto de la línea queda como la leyó el OCR.
+            limpia = re.sub(r"^B(?=HORMIGON)", "B ", limpia, flags=re.IGNORECASE)
+            limpia = re.sub(r"\b(HORMIGON)(?=\d{1,2}\s*MM\b)", r"\1 ", limpia, flags=re.IGNORECASE)
             normalizada = _normalizar(limpia)
             if _es_fragmento_estampado_no_material(normalizada):
                 continue

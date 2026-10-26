@@ -79,6 +79,25 @@ def test_rapidocr_preserva_segunda_partida_con_designacion_pegada():
     )
 
 
+@pytest.mark.parametrize("linea, esperado", [
+    # 483106 (foto: B HORMIGON 16MM 11M A630-420H (N)): B y diámetro pegados.
+    ("BHORMIGON16MM 11MA630-420H(N)", "B HORMIGON 16MM 11MA630-420H(N)"),
+    # 483138 / 482816: sólo la designación B pegada.
+    ("BHORMIGON 10MM 12MA630-420H (N)", "B HORMIGON 10MM 12MA630-420H (N)"),
+    ("BHORMIGON 18MM 12M A630-420H (N)", "B HORMIGON 18MM 12M A630-420H (N)"),
+])
+def test_rapidocr_designacion_b_o_diametro_pegados_no_descartan_la_partida(linea, esperado):
+    assert extraer_descripcion_material([linea]) == esperado
+
+
+def test_normalizacion_de_pegados_no_toca_otras_lecturas():
+    """Sin B inicial pegada ni <n>MM tras HORMIGON, la línea no cambia."""
+    for linea in ("B HORMIGON 10MM 12M A630-420H (N)", "ROLLO HORMIGON 8MM A630-420H (N)", "HORMIGON 12MM 12M A630-420H (N)"):
+        assert extraer_descripcion_material([linea]) == linea
+    # "B" seguida de otra palabra no es la designación pegada.
+    assert extraer_descripcion_material(["BODEGA PRODUCTO TERMINADO"]) == ""
+
+
 def test_prefijo_de_cabecera_sin_etiqueta_descripcion_no_contamina_material_real():
     """La etiqueta de columna puede perderse; se conserva solo el item."""
     lectura = (
