@@ -3641,8 +3641,7 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.destino_entrega import MARGEN_MISMO_LUGAR_KM
-    from atlas_core.rutas.geocerca import distancia_km_haversine
-    from atlas_core.rutas.modelos import Coordenadas
+    from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
 
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
@@ -3734,7 +3733,13 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
                 planta = plantas_por_id.get(planta_id)
                 if planta is None:
                     continue
-                origen = Coordenadas(planta.longitud, planta.latitud)
+                # Mismo punto de partida que las demás vías de ruteo: el acceso
+                # real de la planta (`punto_ruteo_*`), no su coordenada textual.
+                # Caso real AZA COLINA: la textual queda a 18,5 km del recinto
+                # (La Estera 525: 30,13 km en vez de 7,00 km).
+                origen = coordenada_ruteo_planta(planta)
+                if origen is None:
+                    continue
                 try:
                     resultado_ruta = proveedor_rutas.calcular_ruta(origen, punto_convergente, perfil)
                 except (OSError, ValueError):
