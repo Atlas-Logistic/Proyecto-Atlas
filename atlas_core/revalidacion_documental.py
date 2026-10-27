@@ -3606,6 +3606,32 @@ def _direcciones_documentales_compatibles(a: object, b: object) -> bool:
     return direccion_confirmada_coincide(texto_a, texto_b) or direccion_confirmada_coincide(texto_b, texto_a)
 
 
+def _destino_con_etiqueta_residual_convergencia(texto: object) -> bool:
+    """Etiqueta completa del formulario, incluso compuesta sin espacios.
+
+    Solo se usa en convergencia GPS historica; no altera la evidencia.
+    Los limites de palabra evitan confundir una etiqueta con parte de una calle.
+    """
+    from atlas_core.extractor import (
+        _ETIQUETAS_FILA_ENCABEZADO, _FRASE_DESPACHAR_A,
+        _texto_simple, etiquetas_estructurales_documento,
+    )
+
+    valor = _texto_simple(str(texto or ""))
+    etiquetas = (*etiquetas_estructurales_documento(), *_ETIQUETAS_FILA_ENCABEZADO, _FRASE_DESPACHAR_A)
+    for etiqueta in etiquetas:
+        partes = re.findall(r"[A-Z0-9]+", etiqueta)
+        if not partes:
+            continue
+        patron = r"(?<!\w)" + r"[\s.]*".join(map(re.escape, partes)) + r"(?!\w)"
+        for coincidencia in re.finditer(patron, valor):
+            # CIUDAD tambien forma parte de nombres de calles legitimos.
+            if etiqueta == "CIUDAD" and re.search(r"\b\d+\b", valor[coincidencia.end():]):
+                continue
+            return True
+    return False
+
+
 def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     *, ruta_dataset: str | Path, carpeta_catalogos: str | Path,
     proveedor_rutas=None, perfil: str = "driving-hgv",
@@ -3671,7 +3697,7 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
         for fila in (filas if guias_en_alcance(ruta) is None else _leer_filas(ruta, completas=True)):
             obra = normalizar_nombre_obra(str(fila.get("obra_destino", "")))
             direccion = str(fila.get("despachar_a_crudo", "")).strip()
-            if not obra or not direccion:
+            if not obra or not direccion or _destino_con_etiqueta_residual_convergencia(direccion):
                 continue  # sin dirección no hay a qué atribuir un punto
             grupos = direcciones_por_obra.setdefault(obra, [])
             indice = next((i for i, representante in enumerate(grupos)
@@ -3789,6 +3815,7 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
                             destino.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value
                             and destino.latitud is None and destino.longitud is None
                             # Sólo el destino de ESTA dirección; nunca otro de la misma obra.
+                            and not _destino_con_etiqueta_residual_convergencia(destino.direccion)
                             and _direcciones_documentales_compatibles(destino.direccion, direccion_grupo)
                         ):
                             catalogo_destinos.editar(
