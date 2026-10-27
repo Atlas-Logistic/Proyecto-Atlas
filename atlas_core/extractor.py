@@ -129,7 +129,7 @@ def _normalizar_bloques_geometricos(bloques: List[Any]) -> List[Dict[str, Any]]:
         items.append(
             {
                 "texto": texto,
-                "simple": _texto_simple(texto),
+                "simple": _canonizar_etiqueta_compuesta(_texto_simple(texto)),
                 "x1": min(xs),
                 "y1": min(ys),
                 "x2": max(xs),
@@ -619,6 +619,12 @@ def _extraer_cod_destinatario_geometrico_desde_items(
             alto = max(etiqueta["h"], item["h"])
             diferencia_y = abs(item["cy"] - etiqueta["cy"])
             if diferencia_y > alto * 1.25 or item["x1"] < etiqueta["x2"] - 8 * escala:
+                continue
+            # En filas apretadas el valor de HORA ENTRADA ("07:22:00") cae en
+            # la tolerancia vertical y, sin sus ":", parecía un código que
+            # competía con el real (casos 482740, 483208). Una hora nunca es
+            # un COD DESTINATARIO.
+            if _PATRON_HORA_TOKEN_COMPLETO.match(item["texto"].strip()):
                 continue
             codigo = re.sub(r"[^A-Z0-9]", "", item["simple"])
             if not re.fullmatch(r"[A-Z0-9]{4,15}", codigo) or not any(c.isdigit() for c in codigo):
@@ -1868,6 +1874,31 @@ _ETIQUETAS_ESTRUCTURALES_DESPACHO = (
     "OBRA DESTINO", "DIRECCION", "COMUNA", "CIUDAD", "COD DESTINATARIO",
     "INDICADOR TRASLADO",
 )
+
+
+# RapidOCR (camino Mobile/PULL e ingreso manual) entrega con frecuencia las
+# etiquetas compuestas del formulario AZA sin sus espacios internos
+# ("OBRADESTINO", "CODDESTINATARIO", "DESPACHARA", "RUTCHOFER" -- casos
+# reales 482740, 482908/482909, 483208, 483223). Los extractores geométricos
+# comparan `simple` contra la forma espaciada, así que esas etiquetas no
+# anclaban su valor ni delimitaban el del campo vecino. Mismo vocabulario ya
+# existente (fila del encabezado + etiquetas estructurales del pie), nunca una
+# lista nueva. Quedan fuera FECHA DE EMISION y NRO. TRANSPORTE, que tienen su
+# propio reconocimiento tolerante.
+_ETIQUETAS_COMPUESTAS_SIN_ESPACIOS = {
+    re.sub(r"\s+", "", etiqueta): etiqueta
+    for etiqueta in sorted({_FRASE_DESPACHAR_A, *_ETIQUETAS_FILA_ENCABEZADO, *_ETIQUETAS_ESTRUCTURALES_DESPACHO})
+    if " " in etiqueta and etiqueta not in {"FECHA DE EMISION", "NRO. TRANSPORTE", "NRO TRANSPORTE"}
+}
+
+
+def _canonizar_etiqueta_compuesta(texto_simple: str) -> str:
+    """Forma espaciada de una etiqueta compuesta leída sin espacios, sólo
+    cuando el bloque COMPLETO es esa etiqueta ("OBRADESTINO" ->
+    "OBRA DESTINO"). Un bloque con la etiqueta y un valor pegados, o
+    cualquier valor, se devuelve intacto: nunca separa texto de forma
+    indiscriminada. El texto OCR original (`texto`) no se modifica."""
+    return _ETIQUETAS_COMPUESTAS_SIN_ESPACIOS.get(re.sub(r"\s+", "", texto_simple), texto_simple)
 
 
 def etiquetas_estructurales_documento() -> tuple[str, ...]:

@@ -62,20 +62,25 @@ _ETIQUETAS_CORTE = (
     r"DIRECCI[O0]N",
     r"COMUNA",
     r"CIUDAD",
-    r"HORA\s+ENTRADA",
-    r"HORA\s+SALIDA",
+    # Las etiquetas compuestas toleran espacios omitidos: RapidOCR entrega
+    # "RUTCHOFER"/"OBRADESTINO" (caso real 483223: "... LAMPA RUTCHOFER").
+    # Sólo delimitan dónde termina un valor; nunca anclan uno nuevo.
+    r"HORA\s*ENTRADA",
+    r"HORA\s*SALIDA",
     r"GIRO",
     r"TELEFONO",
     r"R\.?\s*U\.?\s*T\.?",
-    r"OBRA\s+DESTINO",
+    r"OBRA\s*DESTINO",
     r"SOLICITANTE",
     r"SE[ÑN]OR",
-    r"INDICADOR\s+TRASLADO",
+    r"INDICADOR\s*TRASLADO",
     r"DESPACHAR\s*A",
-    r"RETIRA",
-    r"RUT\s+CHOFER",
+    # Misma variante sin "I" que ya acepta `extractor._es_ancla_retira`
+    # (caso real 482813: "LAESTERA 222 RETRA RENE GARCIA RUTCHOFER ...").
+    r"RETI?RA",
+    r"RUT\s*CHOFER",
     r"PATENTE",
-    r"FECHA\s+SALIDA",
+    r"FECHA\s*SALIDA",
     r"NOMBRE",
 )
 _LIMITE = "(?:" + "|".join(_ETIQUETAS_CORTE) + ")"
