@@ -3641,7 +3641,9 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     from atlas_core.catalogo_obras_destinos import CatalogoObrasDestinos
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.destino_entrega import MARGEN_MISMO_LUGAR_KM
-    from atlas_core.rutas.geocerca import coordenada_ruteo_planta, distancia_km_haversine
+    from atlas_core.rutas.geocerca import (
+        coordenada_ruteo_planta, distancia_km_haversine, resolver_planta_por_posicion,
+    )
 
     ruta = Path(ruta_dataset)
     carpeta = Path(carpeta_catalogos)
@@ -3709,8 +3711,11 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
                     hora_entrada=hora_entrada_dt, hora_salida=hora_salida_dt,
                     plantas=list(plantas_por_id.values()),
                 )
-                if resultado_gps.punto_gps_destino is not None:
-                    puntos.append((fila, resultado_gps.punto_gps_destino))
+                punto = resultado_gps.punto_gps_destino
+                if punto is not None and resolver_planta_por_posicion(
+                    punto, plantas_por_id.values()
+                ).motivo == "FUERA_DE_GEOCERCA":
+                    puntos.append((fila, punto))
 
             if len(puntos) < 2:
                 continue  # una sola observación GPS no basta
