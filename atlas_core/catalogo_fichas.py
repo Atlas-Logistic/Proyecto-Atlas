@@ -14,6 +14,7 @@ a B1 ni hace red -- sólo agrega evidencia ya persistida."""
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -33,7 +34,7 @@ from atlas_core.catalogo_vehiculos_catchup import (
     construir_universo_patentes,
     detectar_pares_sospechosos,
 )
-from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json, rut_canonico_de_registro_chofer
+from atlas_core.catalogos import _normalizar_nombre_entidad, cargar_catalogo_json, rut_canonico_de_registro_chofer, normalizar_rut
 from atlas_core.fichas_choferes import (
     EMPRESA_ACTUAL, leer_almacen, fichas_por_referencia, asignaciones_de_chofer,
 )
@@ -347,13 +348,56 @@ def _cargar_vehiculos_por_patente(raiz_atlas: str | Path, *, estricto=False) -> 
     return {v.patente_canonica: v for v in vehiculos}
 
 
-def construir_ficha_chofer(*, identificador: str, registro_catalogo: Mapping[str, object], filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object]) -> dict[str, object]:
+def _leer_decisiones_patentes(raiz: Path) -> list[dict]:
+    try:
+        datos = json.loads((raiz / "operacion" / "actual" / "decisiones_aplicadas.json").read_text(encoding="utf-8-sig"))
+        aplicaciones = datos.get("aplicaciones", [])
+        return aplicaciones if isinstance(aplicaciones, list) else []
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def _filas_vehiculos_confiables(filas, rut, vehiculos, decisiones):
+    """Proyecci?n conservadora: no modifica filas ni eleva OCR a relaci?n."""
+    rut = normalizar_rut(rut or "")
+    respaldados = set()
+    for patente, vehiculo in vehiculos.items():
+        for evidencia in getattr(vehiculo, "evidencias", ()):
+            if (evidencia.tipo == "CONFIRMACION_HUMANA" and evidencia.resultado == "SOPORTA"
+                    and rut and normalizar_rut(evidencia.campos_observados.get("rut_chofer_asociado", "")) == rut):
+                respaldados.add((patente, vehiculo.tipo))
+    salida = []
+    for fila in filas:
+        proyectada = dict(fila)
+        for campo, rol in (("patente_tracto", "TRACTO"), ("patente_rampla", "CARRO")):
+            original = normalizar_patente_vehiculo(fila.get(campo, ""))
+            guia = str(fila.get("numero_guia", "")).strip()
+            candidatas = [d for d in decisiones if isinstance(d, dict)
+                and d.get("tipo") == "VEHICULO_DESCONOCIDO" and d.get("decision_id")
+                and d.get("campo") == campo and d.get("accion") in ("USAR_PATENTE_EXISTENTE", "SELECCIONAR_OTRA_PATENTE", "REGISTRAR")
+                and str((d.get("documento") or {}).get("numero_guia", "")).strip() == guia and guia not in _AUSENTES
+                and normalizar_patente_vehiculo(d.get("valor_documental", "")) == original
+                and (not (d.get("documento") or {}).get("numero_transporte") or (d.get("documento") or {}).get("numero_transporte") == fila.get("numero_transporte"))]
+            valores = {normalizar_patente_vehiculo(d.get("patente_canonica", "")) for d in candidatas}
+            destino = next(iter(valores)) if len(valores) == 1 else (original if not candidatas else "")
+            vehiculo = vehiculos.get(destino)
+            humano = any(str(d.get("actor", "")).upper() in ("JAVIER_MBT", "JAVIER_DESKTOP") for d in candidatas)
+            identidad_fila = rut and normalizar_rut(fila.get("rut_chofer", "")) == rut
+            valido = vehiculo and vehiculo.tipo == rol and identidad_fila and ((destino, rol) in respaldados or (candidatas and humano))
+            proyectada[campo] = destino if valido else ""
+        salida.append(proyectada)
+    return salida
+
+
+def construir_ficha_chofer(*, identificador: str, registro_catalogo: Mapping[str, object], filas: list[dict[str, str]], vehiculos_por_patente: Mapping[str, object], decisiones: list[dict] | None = None) -> dict[str, object]:
     nombre_canonico = str(registro_catalogo.get("nombre", "")).strip()
     aliases = [str(a) for a in (registro_catalogo.get("aliases") or [])]
     nombres_reconocidos = {_normalizar_nombre_entidad(n) for n in [nombre_canonico, *aliases] if n}
     filas_chofer = [f for f in filas if _normalizar_nombre_entidad(str(f.get("chofer", ""))) in nombres_reconocidos]
 
     rut_confirmado = rut_canonico_de_registro_chofer(identificador, registro_catalogo)
+
+    filas_confiables = _filas_vehiculos_confiables(filas_chofer, rut_confirmado, vehiculos_por_patente, decisiones or [])
 
     # `rut` conserva el contrato histórico para otros lectores; la identidad
     # principal nueva usa exclusivamente `rut_catalogo`, jamás el dataset.
@@ -373,7 +417,10 @@ def construir_ficha_chofer(*, identificador: str, registro_catalogo: Mapping[str
         "rut_catalogo": {"estado": "CONFIRMADO" if rut_confirmado else "SIN_CONFIRMAR", "valor": rut_confirmado},
         "asignaciones_vigentes": asignaciones_de_chofer(rut_confirmado, vehiculos_por_patente.values()),
         "vehiculos": _vehiculos_asociados(filas_chofer, vehiculos_por_patente),
+        "vehiculos_evidencia_documental": _vehiculos_asociados(filas_chofer, {}),
+        "vehiculos_confiables": _vehiculos_asociados(filas_confiables, vehiculos_por_patente),
         "combinaciones_tracto_rampla": _combinaciones_tracto_rampla(filas_chofer, vehiculos_por_patente),
+        "combinaciones_confiables": _combinaciones_tracto_rampla(filas_confiables, vehiculos_por_patente),
         "historico": _historico_entidad(filas_chofer, campo_contraparte="cliente"),
         "guias_relacionadas": sorted({str(f.get("numero_guia", "")) for f in filas_chofer if f.get("numero_guia") not in _AUSENTES}),
     }
@@ -517,8 +564,9 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
     except (OSError, ValueError, KeyError, TypeError) as error:
         por_referencia = {}
         error_fichas = 'Almacén complementario no disponible: ' + str(error)
+    decisiones_patentes = _leer_decisiones_patentes(raiz)
     fichas_choferes = [
-        construir_ficha_chofer(identificador=str(ident), registro_catalogo=registro, filas=filas, vehiculos_por_patente=vehiculos_por_patente)
+        construir_ficha_chofer(identificador=str(ident), registro_catalogo=registro, filas=filas, vehiculos_por_patente=vehiculos_por_patente, decisiones=decisiones_patentes)
         for ident, registro in choferes_json.items()
         if isinstance(registro, dict)
     ]
