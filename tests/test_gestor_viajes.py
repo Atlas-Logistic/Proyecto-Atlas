@@ -1377,12 +1377,9 @@ def test_mayoria_de_direccion_entrega_no_se_extiende_a_localidad_region_estado()
     viajes, _ = agrupar_viajes(filas)
     viaje = viajes[0].a_dict()
 
-    # La ruta sí consolida (las 3 firmas de routing son idénticas --
-    # `distancia_km`/`duracion_min`/`proveedor_ruta`/`estado_ruta` no
-    # incluyen `localidad_entrega`), pero `localidad_entrega` no
-    # unánime debe quedar vacía en vez de "votarse" 2 contra 1.
-    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
-    assert viaje["direccion_entrega"] == "SANTA ISABEL 585 SANTIAGO LAMPA"
+    # Comunas distintas producen entregas separadas y sin ruta unica.
+    assert viaje["estado_ruta"] == ""
+    assert viaje["direccion_entrega"] == ""
     assert viaje["localidad_entrega"] == ""
 
 
@@ -1412,15 +1409,7 @@ def test_documentos_individuales_conservan_su_propio_typo_ocr_tras_consolidar_po
 
 
 def test_direccion_entrega_del_viaje_nunca_es_un_valor_contaminado_aunque_gane_por_mayoria():
-    # Los 3 documentos comparten exactamente el mismo bloque de ruta (la
-    # firma que usa `_bloque_routing_consolidado` no incluye
-    # `direccion_entrega`), así que el viaje consolida a RUTA_CALCULADA
-    # sin importar el texto de la dirección. 2 de los 3 traen un
-    # `direccion_entrega` contaminado por una etiqueta de otra sección
-    # ("PATENTE BDFG50" -- INVÁLIDO según `credibilidad_campos.
-    # evaluar_credibilidad_direccion`); el tercero trae la dirección real.
-    # Antes del fix, la mayoría (2 contra 1) imponía el valor contaminado
-    # como `direccion_entrega` del viaje.
+    # Sin evidencia de una entrega comun, no se publica una ruta unica.
     filas = [
         _fila_con_destino(
             archivo=f"{n}.jpg", numero_guia=n, numero_transporte="0000359996",
@@ -1438,8 +1427,8 @@ def test_direccion_entrega_del_viaje_nunca_es_un_valor_contaminado_aunque_gane_p
     viajes, _ = agrupar_viajes(filas)
     viaje = viajes[0].a_dict()
 
-    assert viaje["estado_ruta"] == "RUTA_CALCULADA"
-    assert viaje["direccion_entrega"] == "SAN LUIS 1201 QUILICURA"
+    assert viaje["estado_ruta"] == ""
+    assert viaje["direccion_entrega"] == ""
 
 
 def test_direccion_entrega_del_viaje_sin_ningun_valor_confiable_queda_vacia():

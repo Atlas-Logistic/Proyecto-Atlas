@@ -192,6 +192,28 @@ def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     para direccion_entrega/despachar_a -- ver bloques arriba) en el más
     fuerte de esos niveles compartidos. Sin ningún nivel compartido -> NO
     compatible (nunca se agrupa "por descarte")."""
+    # Un codigo territorial comun no puede prevalecer sobre dos destinos
+    # operacionales distintos. Comparar calle y localidad antes de agrupar;
+    # conservar la tolerancia OCR solo cuando el numero coincide.
+    direccion_a = str(getattr(a, "direccion_entrega", "") or "").strip()
+    direccion_b = str(getattr(b, "direccion_entrega", "") or "").strip()
+    if (evaluar_credibilidad_direccion(direccion_a).nivel == NivelCredibilidad.CONFIABLE
+            and evaluar_credibilidad_direccion(direccion_b).nivel == NivelCredibilidad.CONFIABLE):
+        import re
+        numeros_a = re.findall(r"\b\d+\b", direccion_a)
+        numeros_b = re.findall(r"\b\d+\b", direccion_b)
+        if numeros_a and numeros_b and numeros_a != numeros_b:
+            return False
+        localidad_a = str(getattr(a, "localidad_entrega", "") or "").strip()
+        localidad_b = str(getattr(b, "localidad_entrega", "") or "").strip()
+        if _presente(localidad_a) and _presente(localidad_b):
+            comuna_a = comuna_oficial(localidad_a) or _clave(localidad_a)
+            comuna_b = comuna_oficial(localidad_b) or _clave(localidad_b)
+            if _clave(comuna_a) != _clave(comuna_b):
+                return False
+        if not (_claves_equivalentes_por_tolerancia_ocr(_clave(direccion_a), _clave(direccion_b))
+                or _direcciones_equivalentes(a, b, "direccion_entrega")):
+            return False
     niveles_a = dict(_niveles_destino(a))
     niveles_b = dict(_niveles_destino(b))
     campos = {"direccion_entrega": "direccion_entrega", "despachar_a": "despachar_a_crudo"}

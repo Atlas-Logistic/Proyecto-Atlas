@@ -680,6 +680,16 @@ class Viaje:
         if not informados:
             return {campo: "" for campo in campos}
 
+        # Las rutas de entregas distintas no representan una ruta del viaje.
+        # Un fallo unico sigue siendo un diagnostico real, sin km ni tiempos.
+        if len(self.entregas) > 1:
+            fallos = {(b["estado_ruta"], b["motivo_ruta"]) for b in informados
+                      if b["estado_ruta"] and _clave_normalizada(b["estado_ruta"]) != "ruta_calculada"}
+            salida = {campo: "" for campo in campos}
+            if len(fallos) == 1:
+                salida["estado_ruta"], salida["motivo_ruta"] = next(iter(fallos))
+            return salida
+
         firmas = {tuple(bloque[campo] for campo in campos) for bloque in informados}
         if len(firmas) == 1:
             return informados[0]
