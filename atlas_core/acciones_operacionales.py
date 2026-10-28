@@ -2920,6 +2920,18 @@ class CapaAccionesOperacionales:
                     "ESCRITOR_OCUPADO",
                     "otro proceso (p. ej. el PULL) tiene el escritor global; reintente con el mismo token")
             self._ctx.puede_escribir = lambda: escritor.vigente
+            if adicional:
+                plan = self._planificar(definicion, parametros)
+                if _huella(plan.estado_base) != preview["huella_base"]:
+                    nuevo = self._construir_preview(definicion, parametros, plan, actor=preview["solicitado_por"],
+                                                    origen=preview["origen"], referencia=preview.get("referencia", ""))
+                    registro["previews"][token]["estado"] = "OBSOLETO"
+                    if not plan.sin_cambios:
+                        registro["previews"][nuevo["token"]] = nuevo
+                    self._guardar_registro(registro)
+                    return {"estado": "PREVIEW_OBSOLETO", "token": token, "accion": definicion.nombre,
+                            "mensaje": "La informacion cambio al adquirir el escritor; no se ejecuto nada.",
+                            "preview_nuevo": nuevo}
             return self._aplicar_confirmado(registro, preview, definicion, parametros, plan, token=token,
                                             actor=actor, confirmado=confirmado, origen=origen)
         finally:

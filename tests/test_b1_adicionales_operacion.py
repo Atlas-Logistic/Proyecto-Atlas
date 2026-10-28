@@ -72,3 +72,44 @@ def test_confirmacion_sin_escritor_no_modifica(raiz):
     r=b.atender('c','si')
     assert r['estado']!='EJECUTADA'
     assert json.dumps(eventos(raiz),sort_keys=True)==antes
+
+
+def test_confirmado_sobrevive_dos_pull_y_regeneracion(raiz, tmp_path, monkeypatch):
+    from atlas_core.mobile import RepositorioEnviosMobile
+    from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
+    from atlas_core.reporte_viajes import generar_reporte_viajes
+    import atlas_core.cloud_mobile_sync_cliente as cloud
+    b = operador(raiz)
+    assert b.atender('c', ORDEN)['estado'] == 'PREVIEW_PENDIENTE'
+    assert b.atender('c', 'si')['estado'] == 'EJECUTADA'
+    anteriores = json.dumps(eventos(raiz), sort_keys=True)
+    monkeypatch.setattr(cloud, '_json', lambda *args, **kwargs: {'envios': []})
+    repo = RepositorioEnviosMobile(raiz)
+    dataset = raiz/'operacion/actual/analisis_completo_guias.csv'
+    for _ in range(2):
+        r = sincronizar_envios_cloud(base_url='https://cloud.test', token_motor='sintetico', consumidor='prueba',
+                                     repositorio=repo, procesar=True, dataset=dataset,
+                                     carpeta_catalogos=raiz/'catalogos_privados')
+        assert r['encontrados'] == 0 and not r['fallidos']
+        assert json.dumps(eventos(raiz), sort_keys=True) == anteriores
+    generar_reporte_viajes(dataset, tmp_path/'reporte', carpeta_catalogos=raiz/'catalogos_privados')
+    assert json.dumps(eventos(raiz), sort_keys=True) == anteriores
+    assert b.atender('c', ORDEN)['estado'] == 'SIN_CAMBIOS'
+    for transporte in ('0000366043', '0000365998'):
+        notas = [e['nota'] for e in eventos(raiz) if e.get('estado')=='ACTIVO' and e.get('numero_transporte') == transporte]
+        assert sum(n.count('ADICIONAL DE $15.000') for n in notas) == 1
+
+
+def test_cambio_entre_preview_y_lease_no_pisa_ni_duplica(raiz):
+    class Concurrente(Escritor):
+        def adquirir(self):
+            registrar_evento(raiz=raiz, tipo_evento='OBSERVACION_OPERACIONAL', numero_transporte='0000365998',
+                             nota='VIAJE CON ADICIONAL DE 15 MIL', origen='TEST')
+            return True
+    b=OperadorB1(raiz, capa=CapaAccionesOperacionales(raiz, fabrica_escritor=lambda: Concurrente()))
+    assert b.atender('c', ORDEN)['estado']=='PREVIEW_PENDIENTE'
+    r=b.atender('c','si')
+    assert r['estado']=='PREVIEW_RENOVADO' and r['ejecutado'] is False
+    notas=[e['nota'] for e in eventos(raiz) if e['numero_transporte']=='0000365998']
+    assert notas==['VIAJE CON ADICIONAL DE 15 MIL']
+    assert not any('ADICIONAL' in e['nota'] for e in eventos(raiz) if e['numero_transporte']=='0000366043')
