@@ -220,6 +220,13 @@ class AlmacenIncidenciasDocumentales:
                 incidencias.append(incidencia)
                 self._escribir(incidencias)
                 return incidencia
+            if (existente.estado == EstadoIncidencia.DETECTADA.value
+                    and incidencia.estado == EstadoIncidencia.CONFIRMADA.value):
+                # Una detección automática que luego confirma un humano se
+                # reemplaza por la confirmación (misma identidad, nunca duplica).
+                incidencias[incidencias.index(existente)] = incidencia
+                self._escribir(incidencias)
+                return incidencia
             return existente  # idempotente: la misma incidencia no se duplica
 
     def _leer(self) -> list[IncidenciaDocumental]:

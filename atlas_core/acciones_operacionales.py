@@ -235,6 +235,7 @@ class _Contexto:
             "ledger_decisiones": self.actual / "decisiones_aplicadas.json",
             "agrupaciones_viaje": self.actual / "agrupaciones_viaje.json",
             "eventos_operacionales": self.actual / "eventos_operacionales.json",
+            "incidencias": self.catalogos / "incidencias_documentales.json",
         }
 
     def filas(self) -> list[dict[str, str]]:
@@ -1589,6 +1590,255 @@ def _aplicar_documento_chofer_operacional(ctx: _Contexto, p: dict, plan: Plan, a
             "persistencia_verificada": True, "reconciliar": True, "regenerar_reporte": True}
 
 
+def _plan_documento_error_documental_aza(ctx: _Contexto, p: dict) -> Plan:
+    """Confirmación del administrador: lo impreso por AZA (patentes y/o RUT
+    del chofer) es un error documental y la operación usa el equipo vigente
+    del chofer. Exige chofer inequívoco (operacional fijado o corroborado por
+    nombre y RUT) y una asignación vigente única por tipo; una patente impresa
+    que el catálogo conoce es contradicción y se abstiene. Nunca escribe el
+    dataset documental ni toca guías hermanas."""
+    from atlas_core.catalogos import normalizar_rut, rut_canonico_de_registro_chofer
+    from atlas_core.chofer_operacional import choferes_operacionales_por_ledger
+    from atlas_core.equipo_operacional import (
+        CAMPOS_EQUIPO, ResolutorEquipoOperacional, _patente, asignaciones_vigentes_con_fecha,
+        errores_documentales_aza_por_ledger, rut_chofer_inequivoco,
+    )
+    from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
+
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    archivo, guia, transporte = str(fila.get("archivo", "")), str(fila.get("numero_guia", "")).strip(), _transporte(fila)
+    choferes = ctx.choferes()
+    rut = rut_chofer_inequivoco(fila, choferes=choferes, choferes_operacionales=choferes_operacionales_por_ledger(
+        ctx.archivos["ledger_decisiones"]))
+    if not rut:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el chofer de la guía no está identificado de forma "
+                                     "inequívoca; fije primero su chofer operacional")
+    clave = next((k for k, r in choferes.items() if isinstance(r, dict) and normalizar_rut(k) == rut), "")
+    registro = choferes.get(clave) or {}
+    nombre, rut_canonico = str(registro.get("nombre", "")).strip(), rut_canonico_de_registro_chofer(clave, registro) or ""
+    resolutor = ResolutorEquipoOperacional(carpeta_catalogos=ctx.catalogos, ruta_ledger=ctx.archivos["ledger_decisiones"])
+    vehiculos = resolutor._vehiculos
+    conocidas = {v.patente_canonica for v in vehiculos} | {a for v in vehiculos for a in (v.aliases or ())}
+    vigentes = asignaciones_vigentes_con_fecha(vehiculos)
+    discrepancias, equipo = [], {}
+    for campo, tipo in CAMPOS_EQUIPO.items():
+        propias = sorted(pat for pat, (r, t, _f) in vigentes.items() if r == rut and t == tipo)
+        if len(propias) != 1:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"{nombre or 'el chofer'} no tiene exactamente una "
+                                         f"asignación vigente confirmada de {tipo} ({', '.join(propias) or 'ninguna'})")
+        equipo[campo] = propias[0]
+        documental = _patente(fila.get(campo))
+        if documental and documental != propias[0]:
+            if documental in conocidas:
+                raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"la patente impresa {documental} es un "
+                                             "vehículo conocido del catálogo; puede ser un cambio real de equipo")
+            discrepancias.append({"campo": campo, "valor_documental": documental, "valor_operacional": propias[0]})
+    rut_documental = str(fila.get("rut_chofer", "")).strip()
+    if (validar_rut_chileno(rut_documental).estado == EstadoValidacion.VALIDO
+            and normalizar_rut(rut_documental) != rut):
+        discrepancias.append({"campo": "rut_chofer", "valor_documental": rut_documental,
+                              "valor_operacional": rut_canonico})
+    vigente = errores_documentales_aza_por_ledger(ctx.archivos["ledger_decisiones"]).get(archivo, {})
+    sin_cambios = not discrepancias or (
+        {(d["campo"], d["valor_documental"], d["valor_operacional"]) for d in discrepancias}
+        == {(c, d["valor_documental"], d["valor_operacional"]) for c, d in vigente.items()})
+    hermanas = sorted({str(f.get("numero_guia", "")).strip() for f in ctx.filas()
+                       if transporte and _transporte(f) == transporte} - {guia, ""})
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia, "numero_transporte": transporte,
+                 "campo": "ERROR_DOCUMENTAL_AZA"},
+        valor_actual={"impreso": {d["campo"]: d["valor_documental"] for d in discrepancias},
+                      "chofer": nombre},
+        valor_propuesto={"operacional": {**equipo, **({"rut_chofer": rut_canonico} if any(
+            d["campo"] == "rut_chofer" for d in discrepancias) else {})}, "discrepancias": discrepancias},
+        estado_base={"fila": fila, "chofer": registro, "vigentes": {k: list(v) for k, v in vigentes.items()
+                                                                  if v[0] == rut}, "ledger": vigente},
+        sin_cambios=sin_cambios,
+        afectados={"guias": [guia], "total_guias": 1, "numero_transporte": transporte,
+                   "guias_hermanas_sin_cambios": hermanas},
+        consecuencias=[
+            f"Atlas usará el equipo vigente de {nombre}: tracto {equipo['patente_tracto']} y rampla "
+            f"{equipo['patente_rampla']} en viajes, consultas y reportes de la guía {guia}.",
+            "Se conservan sin cambios las patentes y el RUT impresos, el OCR y la fotografía.",
+            *([f"Se registra «Error documental AZA» en Incidencias: " + "; ".join(
+                f"{d['campo']} impreso {d['valor_documental']} -> {d['valor_operacional']}" for d in discrepancias)]
+              if discrepancias else []),
+            *([f"Las otras guías del transporte {transporte} ({', '.join(hermanas)}) no se modifican."]
+              if hermanas else []),
+        ],
+        revalidaciones=["PATENTE_SIN_HOMOLOGAR_FOCAL", "RECONCILIACION_FOCAL_DE_LA_GUIA", "REGENERAR_REPORTE_VIAJES"],
+        archivos=("dataset", "ledger_decisiones", "bandeja", "incidencias"),
+        datos={"archivo": archivo, "guia": guia, "transporte": transporte, "chofer_id": clave, "rut": rut_canonico},
+    )
+
+
+def _aplicar_documento_error_documental_aza(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.equipo_operacional import (
+        CAMPOS_EQUIPO, TIPO_INCIDENCIA_ERROR_DOCUMENTAL_AZA, TIPO_LEDGER_ERROR_DOCUMENTAL_AZA,
+        errores_documentales_aza_por_ledger,
+    )
+    from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales, EstadoIncidencia
+    from atlas_core.revalidacion_documental import revalidar_patente_sin_homologar_sin_ocr
+
+    discrepancias = list(plan.valor_propuesto["discrepancias"])
+    archivo, guia = str(plan.datos["archivo"]), str(plan.datos["guia"])
+    decision_id = f"ACCION_OPERACIONAL:{ctx.token}"
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        ledger.setdefault("aplicaciones", []).append({
+            "decision_id": decision_id, "tipo": TIPO_LEDGER_ERROR_DOCUMENTAL_AZA,
+            "accion": "CONFIRMAR_ERROR_DOCUMENTAL_AZA", "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "documento": {"archivo": archivo, "numero_guia": guia, "numero_transporte": plan.datos["transporte"]},
+            "chofer_id": plan.datos["chofer_id"], "rut_chofer_operacional": plan.datos["rut"],
+            "equipo_operacional": {k: v for k, v in plan.valor_propuesto["operacional"].items()},
+            "discrepancias": discrepancias, "referencia": str(p.get("referencia", "")),
+        })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    almacen = AlmacenIncidenciasDocumentales(ctx.archivos["incidencias"])
+    for d in discrepancias:
+        almacen.registrar(
+            contexto=str(plan.valor_actual.get("chofer") or d["valor_operacional"]), numero_guia=guia,
+            numero_transporte=str(plan.datos["transporte"]), campo=d["campo"],
+            valor_documental=d["valor_documental"], valor_canonico=d["valor_operacional"],
+            tipo_incidencia=TIPO_INCIDENCIA_ERROR_DOCUMENTAL_AZA,
+            evidencia=("ERROR_DOCUMENTAL_AZA_CONFIRMADO_POR_ADMINISTRADOR", f"DECISION:{decision_id}"),
+            fecha=ctx.reloj(), estado=EstadoIncidencia.CONFIRMADA, fuente_resolucion="CONFIRMACION_ADMINISTRADOR",
+            actor=actor, decision_id=decision_id, clasificacion="DOCUMENTAL_CONFIRMADA",
+            procedencia=(f"DECISION:{decision_id}",),
+        )
+    revalidar_patente_sin_homologar_sin_ocr(
+        ruta_dataset=ctx.archivos["dataset"], carpeta_catalogos=ctx.catalogos,
+        ruta_ledger=ctx.archivos["ledger_decisiones"], guias_objetivo={guia})
+    # Persistencia comprobada en disco antes de informar.
+    vigente = errores_documentales_aza_por_ledger(ctx.archivos["ledger_decisiones"]).get(archivo, {})
+    esperadas = {d["campo"]: d["valor_operacional"] for d in discrepancias if d["campo"] in CAMPOS_EQUIPO}
+    registradas = {(i.campo, i.valor_documental) for i in almacen.listar(estado="CONFIRMADA") if i.numero_guia == guia}
+    if ({c: v["valor_operacional"] for c, v in vigente.items() if c in CAMPOS_EQUIPO} != esperadas
+            or any((d["campo"], d["valor_documental"]) not in registradas for d in discrepancias)):
+        raise ErrorAccionOperacional("PERSISTENCIA_NO_VERIFICADA", "la confirmación no quedó persistida como se esperaba")
+    return {"despues": plan.valor_propuesto["operacional"], "persistencia_verificada": True,
+            "reconciliar": True, "regenerar_reporte": True}
+
+
+def _plan_documento_comuna_destino(ctx: _Contexto, p: dict) -> Plan:
+    """Normalización geográfica de UNA guía: la comuna impresa no es una
+    comuna oficial (p. ej. CAUTIN, una provincia) y el administrador indica la
+    real. Corrige el destino operacional, conserva lo impreso en el ledger y
+    corrige en el catálogo sólo los destinos con esa misma dirección y esa
+    comuna no oficial. La ruta la calcula el geocodificador si la evidencia
+    basta; nunca se inventan coordenadas ni kilómetros."""
+    from atlas_core.territorio_chile import normalizar_comuna
+
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    archivo, guia = str(fila.get("archivo", "")), str(fila.get("numero_guia", "")).strip()
+    oficial = normalizar_comuna(str(p["comuna"]))
+    if oficial.estado not in ("EXACTA", "NORMALIZADA_SEGURA") or not oficial.comuna:
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", f"«{p['comuna']}» no es una comuna oficial de Chile")
+    texto = str(fila.get("despachar_a_crudo", "")).strip()
+    partes = [x.strip() for x in texto.split(",") if x.strip()]
+    if len(partes) > 1 and normalizar_comuna(partes[-1]).estado not in ("EXACTA", "NORMALIZADA_SEGURA"):
+        base, comuna_documental = ", ".join(partes[:-1]), partes[-1]
+    else:
+        base, localidad = texto, str(fila.get("localidad_entrega", "")).strip()
+        comuna_documental = localidad if localidad and normalizar_comuna(localidad).estado not in (
+            "EXACTA", "NORMALIZADA_SEGURA") else ""
+    if not base or not comuna_documental:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el destino de la guía no trae una comuna no oficial "
+                                     "que normalizar")
+    nuevo = f"{base}, {oficial.comuna.upper()}"
+    clave_doc = _clave_texto(comuna_documental)
+    destinos = [d for d in ctx.catalogo_destinos().listar()
+                if _clave_texto(d.comuna) == clave_doc and _clave_texto(d.direccion).startswith(_clave_texto(base))]
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia,
+                 "numero_transporte": _transporte(fila), "campo": "despachar_a_crudo"},
+        valor_actual={"despachar_a_crudo": texto, "comuna_documental": comuna_documental},
+        valor_propuesto={"despachar_a_crudo": nuevo, "comuna": oficial.comuna, "region": oficial.region or ""},
+        estado_base={"fila": fila, "destinos": [d.a_dict() for d in destinos]},
+        sin_cambios=texto == nuevo,
+        afectados={"guias": [guia], "total_guias": 1, "destinos_catalogo": [d.destino_id for d in destinos]},
+        consecuencias=[
+            f"Destino operacional de la guía {guia}: {nuevo}.",
+            f"«{comuna_documental}» no es una comuna oficial; queda registrado como impreso en el ledger y en "
+            "Incidencias (normalización geográfica).",
+            *([f"Se corrige la comuna de {len(destinos)} destino(s) del catálogo con esa dirección."] if destinos else []),
+            "La ruta se recalcula sólo con geocodificación suficiente; no se inventan coordenadas ni kilómetros.",
+        ],
+        revalidaciones=["MANTENIMIENTO_FOCAL_GUIA", "RECONCILIACION_FOCAL_DE_LA_GUIA", "REGENERAR_REPORTE_VIAJES"],
+        archivos=("dataset", "ledger_decisiones", "bandeja", "destinos_maestros", "incidencias"),
+        datos={"archivo": archivo, "guia": guia, "transporte": _transporte(fila), "base": base,
+               "comuna_documental": comuna_documental, "destinos": [d.destino_id for d in destinos]},
+    )
+
+
+def _clave_texto(valor: object) -> str:
+    import unicodedata
+    texto = unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode().upper()
+    return " ".join(re.findall(r"[A-Z0-9]+", texto))
+
+
+def _aplicar_documento_comuna_destino(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.incidencias_documentales import (
+        TIPO_COMUNA_DOCUMENTAL_INCORRECTA, AlmacenIncidenciasDocumentales, EstadoIncidencia,
+    )
+    from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
+    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+
+    archivo, guia = str(plan.datos["archivo"]), str(plan.datos["guia"])
+    nuevo, comuna = str(plan.valor_propuesto["despachar_a_crudo"]), str(plan.valor_propuesto["comuna"])
+    resultado = reparar_documento_focal_con_valores_conocidos(
+        raiz_atlas=ctx.raiz, archivo=archivo, valores={"despachar_a_crudo": nuevo}, dry_run=False, reconciliar=False,
+        # La confirmación de dirección previa con la comuna no oficial queda
+        # superada por esta normalización explícita (ambas en el ledger).
+        tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION, "DESTINO_NO_RESUELTO"}),
+        superar_resoluciones_automaticas=True, numero_guia=guia,
+        campos_adicionales_permitidos=frozenset(CAMPOS_DOCUMENTALES_CONTROLADOS),
+    )
+    if [c["campo"] for c in resultado["cambios"]] != ["despachar_a_crudo"]:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el reparador no aplicó exactamente el destino")
+    with bloqueo_sesion(ctx.actual, "revalidacion_dataset"):
+        filas = _leer_filas(ctx.archivos["dataset"])
+        objetivo = [f for f in filas if str(f.get("archivo", "")) == archivo and str(f.get("numero_guia", "")).strip() == guia]
+        if len(objetivo) == 1 and _clave_texto(objetivo[0].get("localidad_entrega")) == _clave_texto(
+                plan.datos["comuna_documental"]):
+            objetivo[0]["localidad_entrega"] = ""
+            _escribir_filas_completas(ctx.archivos["dataset"], filas)
+    catalogo = ctx.catalogo_destinos()
+    for destino_id in plan.datos["destinos"]:
+        catalogo.editar(destino_id, modificacion_manual=True, comuna=comuna,
+                        region=str(plan.valor_propuesto.get("region") or "") or None,
+                        observacion=f"Comuna normalizada: «{plan.datos['comuna_documental']}» impreso -> {comuna}")
+    decision_id = f"ACCION_OPERACIONAL:{ctx.token}"
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        ledger.setdefault("aplicaciones", []).append({
+            "decision_id": decision_id, "tipo": TIPO_LEDGER_CORRECCION, "accion": "NORMALIZAR_COMUNA_DESTINO",
+            "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "documento": {"archivo": archivo, "numero_guia": guia, "numero_transporte": plan.datos["transporte"]},
+            "campo": "despachar_a_crudo", "valor_documental": plan.valor_actual["despachar_a_crudo"],
+            "valor_corregido": nuevo,
+            "normalizacion_geografica": {"comuna_documental": plan.datos["comuna_documental"], "comuna": comuna,
+                                         "region": plan.valor_propuesto.get("region", ""),
+                                         "destinos_catalogo": list(plan.datos["destinos"])},
+            "referencia": str(p.get("referencia", "")),
+        })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    AlmacenIncidenciasDocumentales(ctx.archivos["incidencias"]).registrar(
+        contexto=nuevo, numero_guia=guia, numero_transporte=str(plan.datos["transporte"]), campo="comuna_destino",
+        valor_documental=str(plan.datos["comuna_documental"]), valor_canonico=comuna.upper(),
+        tipo_incidencia=TIPO_COMUNA_DOCUMENTAL_INCORRECTA,
+        evidencia=("COMUNA_IMPRESA_NO_OFICIAL", "CONFIRMACION_ADMINISTRADOR", f"DECISION:{decision_id}"),
+        fecha=ctx.reloj(), estado=EstadoIncidencia.CONFIRMADA, fuente_resolucion="NORMALIZACION_GEOGRAFICA",
+        actor=actor, decision_id=decision_id, clasificacion="DOCUMENTAL_CONFIRMADA",
+        procedencia=(f"DECISION:{decision_id}",),
+    )
+    return {"despues": {"despachar_a_crudo": nuevo, "comuna": comuna}, "reconciliar": True,
+            "retirar_obsoletas": (archivo, "despachar_a_crudo", nuevo), "guias_revalidar": [guia],
+            "regenerar_reporte": True}
+
+
 GUIA_AUSENTE_DOCUMENTAL = "No encontrado"
 
 
@@ -2292,6 +2542,18 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "confirmar_discrepancia_rut": _P("bool"), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_chofer_operacional, _aplicar_documento_chofer_operacional),
+    DefinicionAccion("DOCUMENTO_CONFIRMAR_ERROR_DOCUMENTAL_AZA", OPERACIONAL_REVERSIBLE,
+                     "Confirma que patentes y/o RUT impresos por AZA son un error documental: la guía usa el equipo "
+                     "vigente de su chofer inequívoco y la discrepancia queda en Incidencias.",
+                     {"numero_guia": _P("guia", True), "archivo": _P("archivo_documento", max_largo=260),
+                      "referencia": _REF},
+                     _plan_documento_error_documental_aza, _aplicar_documento_error_documental_aza),
+    DefinicionAccion("DOCUMENTO_NORMALIZAR_COMUNA_DESTINO", OPERACIONAL_REVERSIBLE,
+                     "Reemplaza una comuna de destino no oficial impresa en una guía por la comuna oficial indicada; "
+                     "conserva lo impreso y corrige el catálogo de esa dirección.",
+                     {"numero_guia": _P("guia", True), "comuna": _P("texto", True, max_largo=80),
+                      "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
+                     _plan_documento_comuna_destino, _aplicar_documento_comuna_destino),
     DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
                      "Corrige un folio ausente o leído con el marcador º como 9 inicial (9482179 -> 482179).",
                      {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),

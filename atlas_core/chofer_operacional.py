@@ -93,6 +93,29 @@ def retirar_decisiones_chofer_operacional(
                     and correccion_de_documento(indice, d.get("documento") or {}) is not None)]
 
 
+def revalidar_motivos_choferes_operacionales_sin_ocr(*, ruta_dataset: str | Path) -> dict[str, object]:
+    """Pase del ciclo del PULL: una relectura que vuelve a traer un motivo de
+    identidad de chofer a un documento con chofer operacional fijado lo
+    pierde otra vez. Sólo esas filas; nunca `chofer`/`rut_chofer`."""
+    from atlas_core.almacenamiento_portable import bloqueo_sesion
+    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+
+    ruta = Path(ruta_dataset)
+    operacionales = choferes_operacionales_por_ledger(ruta.parent / "decisiones_aplicadas.json")
+    if not operacionales:
+        return {"guias_actualizadas": []}
+    with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
+        try:
+            filas = _leer_filas(ruta)
+        except (OSError, ValueError):
+            return {"guias_actualizadas": []}
+        actualizadas = [str(f.get("numero_guia", "")) for f in filas
+                        if str(f.get("archivo", "")).strip() in operacionales and retirar_motivos_identidad_chofer(f)]
+        if actualizadas:
+            _escribir_filas_completas(ruta, filas)
+    return {"guias_actualizadas": actualizadas}
+
+
 def retirar_motivos_identidad_chofer(fila: dict[str, str]) -> bool:
     """Retira de la fila los motivos de identidad de chofer y recalcula sus
     estados con la misma regla del revalidador de chofer. Nunca toca

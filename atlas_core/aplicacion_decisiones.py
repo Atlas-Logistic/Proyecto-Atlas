@@ -1479,6 +1479,15 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # reemplaza si viene vacía -- `revalidar_ruta_sin_
                     # destino_calculado_sin_ocr` resuelve sola en ese caso.
                     comuna_final = str(comuna_manual or "").strip()
+                    # Caso real 482909: «CAUTIN» (una provincia) quedó como
+                    # comuna CONFIRMADA de un destino del catálogo. Sólo una
+                    # comuna oficial puede confirmarse.
+                    if comuna_final:
+                        from atlas_core.territorio_chile import normalizar_comuna
+                        if normalizar_comuna(comuna_final).estado not in ("EXACTA", "NORMALIZADA_SEGURA"):
+                            raise ErrorAplicacionDecision(
+                                f"«{comuna_final}» no es una comuna oficial de Chile; indique la comuna "
+                                "(no la provincia, región o ciudad genérica).")
                     from atlas_core.revalidacion_documental import (
                         _escribir_filas_completas, _leer_filas,
                         invalidar_derivados_ruta,

@@ -3160,6 +3160,24 @@ def regenerar_decisiones_persistidas(
         resultado = retirar_decisiones_chofer_operacional(
             resultado, ruta_ledger=Path(ruta_dataset).parent / "decisiones_aplicadas.json",
         )
+        # Patente impresa distinta ya resuelta (error documental AZA
+        # confirmado o asignación vigente única): sin tarjeta repetitiva.
+        if any(d.get("tipo") == "VEHICULO_DESCONOCIDO" for d in resultado):
+            from atlas_core.equipo_operacional import (
+                ResolutorEquipoOperacional, retirar_decisiones_vehiculo_resueltas,
+            )
+            try:
+                with Path(ruta_dataset).open(encoding="utf-8-sig", newline="") as archivo:
+                    filas_por_archivo = {str(f.get("archivo", "")).strip(): f
+                                         for f in csv.DictReader(archivo, delimiter=";")}
+            except OSError:
+                filas_por_archivo = {}
+            resultado = retirar_decisiones_vehiculo_resueltas(
+                resultado, filas_por_archivo=filas_por_archivo,
+                resolutor=ResolutorEquipoOperacional(
+                    carpeta_catalogos=carpeta_catalogos,
+                    ruta_ledger=Path(ruta_dataset).parent / "decisiones_aplicadas.json"),
+            )
     return ajenas + resultado if guias is not None else resultado
 
 

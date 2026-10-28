@@ -1358,6 +1358,9 @@ def revalidar_patente_sin_homologar_sin_ocr(
         except _ERRORES_CATALOGO_VEHICULOS:
             return {"filas_totales": len(filas), "guias_actualizadas": guias_actualizadas}
         vehiculos_homologables = catalogo.homologables()
+        from atlas_core.equipo_operacional import ResolutorEquipoOperacional
+        resolutor_equipo = ResolutorEquipoOperacional(
+            carpeta_catalogos=carpeta, ruta_ledger=ruta.parent / "decisiones_aplicadas.json")
 
         def resolver_contextual(
             *, fila: Mapping[str, str], campo: str, valor_documental: str,
@@ -1374,6 +1377,12 @@ def revalidar_patente_sin_homologar_sin_ocr(
                 resuelto = _vehiculo_homologado(
                     vehiculos_homologables, normalizar_patente_vehiculo(canonica_ledger),
                 )
+                if resuelto is not None:
+                    return resuelto
+            # Error documental AZA confirmado o asignación vigente única del
+            # chofer inequívoco: la patente impresa se conserva tal cual.
+            if operacional := resolutor_equipo.patente_operacional(fila, campo):
+                resuelto = _vehiculo_homologado(vehiculos_homologables, normalizar_patente_vehiculo(operacional))
                 if resuelto is not None:
                     return resuelto
             try:
@@ -5959,6 +5968,25 @@ def _revalidar_y_regenerar_reporte(
         ruta_incidencias=catalogos / "incidencias_documentales.json",
         reloj=reloj or (lambda: datetime.now(timezone.utc)),
     ) if guias_en_alcance(dataset) is None else {'omitido':'MANTENIMIENTO_GLOBAL'})
+    # Patentes impresas distintas de la asignación vigente única de un chofer
+    # inequívoco: incidencia DETECTADA (las confirmadas ya se registraron).
+    if guias_en_alcance(dataset) is None:
+        from atlas_core.equipo_operacional import (
+            ResolutorEquipoOperacional, proyectar_incidencias_equipo_por_asignacion,
+        )
+        try:
+            resultado_incidencias_confirmadas = {
+                **resultado_incidencias_confirmadas,
+                "equipo_por_asignacion": proyectar_incidencias_equipo_por_asignacion(
+                    filas=_leer_filas(dataset),
+                    resolutor=ResolutorEquipoOperacional(
+                        carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json"),
+                    ruta_incidencias=catalogos / "incidencias_documentales.json",
+                    reloj=reloj or (lambda: datetime.now(timezone.utc)),
+                ),
+            }
+        except (OSError, ValueError) as error:
+            logger.warning("No se proyectaron incidencias de equipo operacional: %s", error)
 
     # Hallazgo Codex (diff Mobile -> reporte Desktop) -- un envío Mobile
     # nuevo que agrega una fila LIMPIA al dataset (sin motivo que ninguna
@@ -6027,6 +6055,10 @@ def _revalidar_y_regenerar_reporte(
     resultado_patente = revalidar_patente_sin_homologar_sin_ocr(
         ruta_dataset=dataset, carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json",
     )
+    # Chofer operacional fijado por un humano: una relectura no le devuelve
+    # el motivo de identidad (`atlas_core.chofer_operacional`).
+    from atlas_core.chofer_operacional import revalidar_motivos_choferes_operacionales_sin_ocr
+    resultado_chofer_operacional = revalidar_motivos_choferes_operacionales_sin_ocr(ruta_dataset=dataset)
     # R4.8: mismo patrón, restringido a CLIENTE_SIN_CORROBORAR -- ver
     # `revalidar_cliente_sin_corroborar_sin_ocr`.
     resultado_cliente = revalidar_cliente_sin_corroborar_sin_ocr(
@@ -6294,6 +6326,7 @@ def _revalidar_y_regenerar_reporte(
         set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_convergencia_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
+        | set(resultado_chofer_operacional["guias_actualizadas"])
         | set(resultado_cliente["guias_actualizadas"])
         | set(resultado_destino_contradicho["guias_actualizadas"])
         | set(resultado_destino_sin_numero["guias_actualizadas"])
