@@ -2259,6 +2259,33 @@ def _eventos_por_transporte(ctx: _Contexto, transportes: set[str]) -> list[dict]
             if isinstance(e, dict) and str(e.get("numero_transporte", "")).strip() in transportes]
 
 
+
+def _adicional_ya_registrado(texto: str, eventos: list[dict], transporte: str) -> bool:
+    """Detecta equivalencia de montos solo para la orden canonica de adicional."""
+    from atlas_core.consulta_adicionales import _MONTO, _monto, _normalizar
+    propuesta = re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO + r")", _normalizar(texto))
+    if not propuesta:
+        return False
+    importe = _monto(propuesta.group(1))
+    for evento in eventos:
+        if evento.get("estado") != "ACTIVO" or str(evento.get("numero_transporte", "")).strip() != transporte:
+            continue
+        for linea in str(evento.get("nota") or "").splitlines():
+            nota = _normalizar(linea)
+            if not re.search(r"\bADICIONAL(?:ES)?\b", nota):
+                continue
+            if re.search(r"\b(?:POR|CADA)\s+(?:GUIA|DOCUMENTO|FOTO)\b|\b(?:SIN|NO(?:\s+\w+){0,4})\s+ADICIONAL", nota):
+                raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "Observacion de adicional ambigua; revise antes de agregar.")
+            encontrados = re.findall(r"\bADICIONAL\s+(?:DE|POR|ES DE)\s*(" + _MONTO + r")", nota)
+            if len(encontrados) != 1 or len(re.findall(r"\bADICIONAL(?:ES)?\b", nota)) != 1:
+                raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "No se puede verificar el adicional existente; revise la observacion.")
+            if re.search(r"\d", nota.replace(encontrados[0], "", 1)):
+                raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "Observacion con importes ambiguos; revise antes de agregar.")
+            if _monto(encontrados[0]) == importe:
+                return True
+    return False
+
+
 def _plan_viaje_observacion(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.registro_eventos_operacionales import CONTEXTO_EMPRESARIAL_SIN_ASIGNAR
     texto = str(p["texto"])
@@ -2291,7 +2318,7 @@ def _plan_viaje_observacion(ctx: _Contexto, p: dict) -> Plan:
             estado = "SIN_TRANSPORTE"
         elif len(transportes) > 1:
             estado = "TRANSPORTE_AMBIGUO"
-        elif _observacion_contiene(previa, texto):
+        elif _observacion_contiene(previa, texto) or _adicional_ya_registrado(texto, eventos, transporte):
             estado = "YA_PRESENTE"
         else:
             estado = "AGREGAR"
@@ -2876,7 +2903,9 @@ class CapaAccionesOperacionales:
             return {"estado": "SIN_CAMBIOS", "token": token, "accion": definicion.nombre, "idempotente": True,
                     "auditoria_previa": anterior.get("auditoria_id") if anterior else None}
 
-        if not definicion.escritor_global:
+        adicional = (definicion.nombre == "VIAJE_AGREGAR_OBSERVACION" and
+                     re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE \$[0-9.]+", str(parametros.get("texto", ""))))
+        if not definicion.escritor_global and not adicional:
             return self._aplicar_confirmado(registro, preview, definicion, parametros, plan, token=token,
                                             actor=actor, confirmado=confirmado, origen=origen)
         # Sin el lease global no se respalda, aplica ni restaura nada: el

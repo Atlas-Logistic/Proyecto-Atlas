@@ -446,6 +446,25 @@ def _intencion_observacion_lote(texto: str, original: str, plano: str) -> Intenc
     return None
 
 
+_ADICIONAL_GUIAS = re.compile(
+    rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?"
+    r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)\s+"
+    r"(?:A|PARA|EN)\s+(?:(?:CADA\s+UNO\s+DE\s+)?(?:ESTOS\s+)?VIAJES?\s*,?\s*(?:DE\s+)?)?"
+    rf"{_GUIAS_OBS}{_LISTA_GUIAS_OBS}$")
+
+def _intencion_adicional_guias(plano: str) -> Intencion | None:
+    from atlas_core.consulta_adicionales import _monto
+    m = _ADICIONAL_GUIAS.fullmatch(plano)
+    if not m:
+        return None
+    importe = _monto(m.group("monto"))
+    if importe is None or importe <= 0:
+        return None
+    guias = list(dict.fromkeys(re.findall(r"\d{3,12}", m.group("lista"))))
+    texto = f"ESTE VIAJE TIENE ADICIONAL DE ${importe:,}".replace(",", ".")
+    return Intencion("VIAJE_AGREGAR_OBSERVACION", {"guias": guias, "texto": texto})
+
+
 ACCION_INVESTIGAR_REVISION = "INVESTIGAR_REVISION"
 _GUIA_INVESTIGACION = re.compile(r"\bGUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\b")
 _VERBO_INVESTIGAR = re.compile(r"\b(?:INVESTIGA(?:R)?|BUSCA(?:R)?|AVERIGUA(?:R)?)\b")
@@ -611,6 +630,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         accion = ("EVIDENCIA_ELIMINAR" if re.search(r"EVIDENCIA|FOTO|IMAGEN|DOCUMENTO", resto)
                   else "HISTORIAL_ELIMINAR" if re.search(r"HISTORIAL|AUDITORIA|REGISTRO", resto) else "ENTIDAD_ELIMINAR")
         return Intencion(accion)
+    adicional = _intencion_adicional_guias(plano)
+    if adicional is not None:
+        return adicional
     observacion = _intencion_observacion_lote(texto, original, plano)
     if observacion is not None:
         return observacion
@@ -1036,11 +1058,13 @@ _ESTADO_OBSERVACION_LEGIBLE = {
 
 def _tablas_observacion(preview: Mapping[str, object]) -> list[dict[str, object]]:
     detalle = (preview.get("valor_propuesto") or {}).get("guias") or []
-    filas = [[d.get("numero_guia", ""), d.get("numero_transporte", "") or "—",
+    propuesto = (preview.get("valor_propuesto") or {}).get("texto", "")
+    filas = [[d.get("numero_guia", ""), d.get("numero_transporte", "") or "-",
               _ESTADO_OBSERVACION_LEGIBLE.get(d.get("estado"), d.get("estado")),
-              " | ".join(d.get("observaciones_vigentes") or []) or "—"] for d in detalle]
+              " | ".join(d.get("observaciones_vigentes") or []) or "-", propuesto] for d in detalle]
     return [{"tipo": "observacion_viaje_preview", "resumen": "",
-             "columnas": ["Guía", "Transporte", "Resultado", "Observación canónica vigente"], "filas": filas}] if filas else []
+             "columnas": ["Guia", "Transporte", "Resultado", "Observacion vigente", "Cambio propuesto"],
+             "filas": filas}] if filas else []
 
 
 def _fecha_legible(iso: object) -> str:
@@ -1730,6 +1754,13 @@ class OperadorB1:
 
     def _instruccion(self, estado: dict, conversacion_id: str, texto: str,
                      revision: tuple[Mapping[str, object], str] | None = None) -> dict:
+        _, plano_adicional = _limpio(texto)
+        if (re.match(r"^" + _VERBO_OBSERVACION + r"\s+(?:UN\s+)?ADICIONAL\b", plano_adicional)
+                and re.search(r"\b(?:ESTOS|ESOS)\s+VIAJES\b", plano_adicional)
+                and not re.search(r"\bGUIAS?\b", plano_adicional)):
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "mensaje":
+                    "Indica los numeros de guia de esos viajes para preparar la propuesta; no se guardo ningun cambio."}
         try:
             intencion = self._interpretar(texto)
         except ErrorContratoInterpretacion as error:
