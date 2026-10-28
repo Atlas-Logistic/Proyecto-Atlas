@@ -969,6 +969,7 @@ def _documento_desde_fila(
     *,
     normalizador_chofer: Callable[[str], str] | None,
     resolver_patente: Callable[[str, str, str], str] | None = None,
+    choferes_operacionales: Mapping[str, Mapping[str, str]] | None = None,
 ) -> DocumentoViaje:
     evidencia = {str(clave): str(valor or "") for clave, valor in fila.items()}
     chofer_original = str(fila.get("chofer", "")).strip()
@@ -977,6 +978,13 @@ def _documento_desde_fila(
         if normalizador_chofer and _valor_presente(chofer_original)
         else chofer_original
     )
+    rut_chofer = str(fila.get("rut_chofer", "")).strip()
+    # Chofer operacional fijado por un humano para ESTE documento (ver
+    # `atlas_core.chofer_operacional`): sólo cambia el valor operacional;
+    # `evidencia` ya conserva el nombre y el RUT impresos tal cual.
+    correccion = (choferes_operacionales or {}).get(str(fila.get("archivo", "")).strip())
+    if correccion:
+        chofer, rut_chofer = correccion["nombre"], correccion["rut"]
     # Bloque VEHÍCULO D1 (cierre, G1) -- `evidencia` (arriba) ya capturó la
     # fila documental tal cual, byte a byte, ANTES de este bloque: la
     # evidencia original (p. ej. "JD6659") sigue disponible íntegra en
@@ -1019,7 +1027,7 @@ def _documento_desde_fila(
         origen=origen.strip(),
         chofer=str(chofer).strip(),
         chofer_original=chofer_original,
-        rut_chofer=str(fila.get("rut_chofer", "")).strip(),
+        rut_chofer=rut_chofer,
         patente_tracto=patente_tracto,
         patente_rampla=patente_rampla,
         descripcion_material=str(fila.get("descripcion_material", "")).strip(),
@@ -1083,8 +1091,14 @@ def agrupar_viajes(
     generador_id: Callable[[], str] | None = None,
     agrupaciones_transporte: Mapping[str, str] | None = None,
     pesos_viaje_confirmados: Mapping[str, int] | None = None,
+    choferes_operacionales: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[list[Viaje], list[dict[str, object]]]:
     """Agrupa por transporte y conserva toda contradicción como revisión.
+
+    ``choferes_operacionales`` ({archivo: {nombre, rut}}, ver
+    `atlas_core.chofer_operacional`): chofer operacional fijado por un humano
+    para ese documento exacto. Las demás guías del viaje conservan el suyo;
+    si difieren, el conflicto de chofer se mantiene visible.
 
     ``pesos_viaje_confirmados`` ({transporte: peso total en kg}, ver
     `pesos_viaje_confirmados_por_ledger`): un peso total que Javier ya
@@ -1130,6 +1144,7 @@ def agrupar_viajes(
         documentos = [
             _documento_desde_fila(
                 fila, normalizador_chofer=normalizador_chofer, resolver_patente=resolver_patente,
+                choferes_operacionales=choferes_operacionales,
             )
             for fila in filas_grupo
         ]

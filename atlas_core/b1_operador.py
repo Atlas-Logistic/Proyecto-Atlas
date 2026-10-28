@@ -235,12 +235,17 @@ _REVISION_CAMPOS = {
     "obra_destino": (r"OBRA", "La obra de la guía {guia} es {valor}", None, "la obra", "la obra es EDIFICIO CENTRAL"),
     "despachar_a_crudo": (r"DESTINO|DIRECCION(?:\s+DE\s+ENTREGA)?", "El destino de la guía {guia} es {valor}", None,
                           "el destino", "el destino es AV. EJEMPLO 123, COMUNA DE MAIPU"),
+    # Nombre o RUT escrito solo; siempre se resuelve contra el catálogo activo.
+    "chofer": (r"CHOFER|CONDUCTOR(?:A)?", "El chofer de la guía {guia} es {valor}",
+               re.compile(r"^(?:[A-Z][A-Z.' -]{2,}|[0-9.]{1,12}-?[0-9K])$"), "el chofer", "el chofer es JUAN PEREZ"),
 }
-_REVISION_NO_SOPORTADO = {"chofer": "el chofer", "rut_chofer": "el RUT del chofer", "destino_entrega": "el destino",
-                          "planta_origen": "la planta de origen"}
+_REVISION_CAMPOS["rut_chofer"] = (r"RUT(?:\s+DEL\s+CHOFER)?|CHOFER|CONDUCTOR(?:A)?", *_REVISION_CAMPOS["chofer"][1:])
+_REVISION_CAMPOS_CHOFER = {"chofer", "rut_chofer"}
+_REVISION_NO_SOPORTADO = {"destino_entrega": "el destino", "planta_origen": "la planta de origen"}
 _REVISION_TIPOS_DESTINO = {"DESTINO_NO_RESUELTO"}
 # Únicas acciones de B1 que una tarjeta puede usar (correcciones ya existentes).
-_REVISION_ACCIONES = {"DOCUMENTO_CORREGIR_CAMPO", "DOCUMENTO_ASIGNAR_OBRA", "DECISION_APLICAR"}
+_REVISION_ACCIONES = {"DOCUMENTO_CORREGIR_CAMPO", "DOCUMENTO_ASIGNAR_OBRA", "DECISION_APLICAR",
+                      "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL"}
 
 
 def separar_contexto_revision(texto: str) -> tuple[str, str]:
@@ -317,6 +322,8 @@ def ajustar_a_revision(intencion: Intencion, decision: Mapping[str, object], ins
         guia_orden, admitida = str(p.get("numero_guia") or ""), p.get("campo") == campo and campo in _REVISION_CAMPOS
     elif intencion.accion == "DOCUMENTO_ASIGNAR_OBRA":
         guia_orden, admitida = str(p.get("numero_guia") or ""), campo == "obra_destino"
+    elif intencion.accion == "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL":
+        guia_orden, admitida = str(p.get("numero_guia") or ""), campo in _REVISION_CAMPOS_CHOFER
     elif intencion.accion == "DECISION_APLICAR" and p.get("accion_decision") == "REGISTRAR_DIRECCION":
         guia_orden = str(intencion.menciones.get("guia_destino") or "")
         admitida = decision.get("tipo") in _REVISION_TIPOS_DESTINO and "REGISTRAR_DIRECCION" in (
@@ -353,6 +360,30 @@ _OBRA_GUIA = [
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|ASIGNA|ASIGNAR)\s+(?:LA\s+)?OBRA\s+(?:DE\s+LA\s+|DE\s+|A\s+LA\s+)?"
                + _GUIA + r"\s*(?:A|POR|COMO|:)\s*(?:LA\s+OBRA\s+)?(?P<obra>.+)$"),
 ]
+# CHOFER operacional de una guía: "el chofer de la guía N es X", "en la guía N
+# el chofer correcto es X", "corrige/cambia el chofer de la guía N a X". X es
+# un nombre o RUT que se resuelve SÓLO contra el catálogo activo; nunca se
+# toca el RUT impreso ni otras guías del transporte.
+ACCION_CHOFER_OPERACIONAL = "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL"
+_CHOFER = r"(?:EL\s+)?(?:CHOFER|CONDUCTOR(?:A)?)(?:\s+(?:CORRECT[OA]|REAL|VERDADER[OA]|OPERACIONAL))?"
+_CHOFER_ES = r"(?:\s+(?:ES|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A)\s+|\s*:\s*)"
+_CHOFER_GUIA = [
+    re.compile(r"^" + _CHOFER + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + _CHOFER_ES + r"(?:EL\s+CHOFER\s+)?(?P<chofer>.+)$"),
+    re.compile(r"^EN\s+LA\s+" + _GUIA + r"\s*,?\s*" + _CHOFER + _CHOFER_ES + r"(?P<chofer>.+)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _CHOFER + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+               + r"\s+(?:A|POR|COMO)\s+(?:EL\s+CHOFER\s+)?(?P<chofer>.+)$"),
+]
+# Confirmación administrativa específica de una discrepancia de RUT: nunca
+# basta un "sí" cuando el RUT impreso contradice al chofer propuesto.
+_CONFIRMAR_DISCREPANCIA = re.compile(r"^CONFIRMO\s+(?:LA\s+)?DISCREPANCIA(?:\s+(?:DE(?:L)?\s+)?RUT)?$")
+_PIDE_DISCREPANCIA = (" El RUT impreso en la guía contradice al chofer propuesto: para aplicarla de todos modos "
+                      "escribe «confirmo la discrepancia de RUT», o «no» para cancelar.")
+
+
+def es_confirmacion_discrepancia(texto: str) -> bool:
+    return bool(_CONFIRMAR_DISCREPANCIA.match(_limpio(texto)[1]))
+
+
 # COORDENADA de un destino existente, dada por un humano: "la coordenada del
 # destino X es LAT, LON", "el destino X está en LAT, LON", "confirma la
 # coordenada LAT, LON para el destino X", "confirma la coordenada del destino
@@ -606,6 +637,12 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         if len(guias) >= 2:
             return Intencion("VIAJE_AGRUPAR_GUIAS", {"guias": guias})
     if not es_pregunta:
+        for patron in _CHOFER_GUIA:
+            m = patron.match(plano)
+            if m:
+                return Intencion(ACCION_CHOFER_OPERACIONAL, {
+                    "numero_guia": m.group("guia"), "referencia": " ".join(str(texto).split())[:500]},
+                    {"chofer": original[m.start("chofer"):m.end("chofer")].strip(" ,:")})
         for patron in _PESO_GUIA:
             m = patron.match(plano)
             if m:
@@ -872,6 +909,13 @@ _RECHAZO_PESO = {
 }
 
 
+_RECHAZO_CHOFER = {
+    "ENTIDAD_AMBIGUA": "La guía {guia} tiene más de un documento en Atlas; no corrijo el chofer de una guía ambigua. "
+                       "No se corrigió nada.",
+    "ENTIDAD_NO_ENCONTRADA": "No encontré la guía {guia} en Atlas. No se corrigió nada.",
+}
+
+
 def _peso_legible(valor: object) -> str:
     texto = str(valor or "").strip()
     return f"{int(texto):,} kg".replace(",", ".") if texto.isdigit() else "peso no disponible"
@@ -942,6 +986,13 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
         texto = (f"Asignar la obra de la guía {entidad.get('numero_guia')} (transporte "
                  f"{entidad.get('numero_transporte')}): actual {(actual or {}).get('obra_destino')!r} -> "
                  f"{propuesto.get('obra_destino')!r} (obra existente, obra_id {propuesto.get('obra_id')}).")
+    elif accion == ACCION_CHOFER_OPERACIONAL:
+        actual = actual or {}
+        texto = (f"Corregir el chofer operacional de la guía {entidad.get('numero_guia')} (transporte "
+                 f"{entidad.get('numero_transporte') or 'sin transporte'}): chofer actual "
+                 f"{actual.get('chofer') or 'sin chofer'} (RUT {actual.get('rut_chofer') or 'sin RUT'}) -> "
+                 f"chofer propuesto {propuesto.get('chofer')} (RUT {propuesto.get('rut_chofer')}).")
+        return " ".join([texto, *(str(c) for c in preview.get("consecuencias") or [])])
     elif accion == "DOCUMENTO_CORREGIR_CAMPO" and entidad.get("campo") == "peso_kg":
         texto = (f"Corregir el peso de la guía {entidad.get('numero_guia')} (transporte "
                  f"{entidad.get('numero_transporte') or 'sin transporte'}): peso actual "
@@ -1592,7 +1643,8 @@ class OperadorB1:
             # Lo escrito en una tarjeta de Revisión siempre es una corrección.
             return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
                     {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."})
-        if derivar_operacionales and (es_confirmacion(texto) or es_cancelacion(texto)):
+        if derivar_operacionales and (es_confirmacion(texto) or es_cancelacion(texto)
+                                      or es_confirmacion_discrepancia(texto)):
             return {"estado": "REQUIERE_OPERADOR"}
         try:
             intencion = self._interpretar(texto)
@@ -1614,6 +1666,9 @@ class OperadorB1:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
                 decision_id, texto = separar_contexto_revision(texto)
+                if es_confirmacion_discrepancia(texto):
+                    self._olvidar_investigacion(estado, conversacion_id)
+                    return self._confirmar(estado, conversacion_id, discrepancia_rut=True)
                 if es_confirmacion(texto):
                     self._olvidar_investigacion(estado, conversacion_id)
                     return self._confirmar(estado, conversacion_id)
@@ -2096,6 +2151,9 @@ class OperadorB1:
             if intencion.accion == "DOCUMENTO_CORREGIR_CAMPO" and parametros.get("campo") == "peso_kg":
                 mensaje = _RECHAZO_PESO.get(str(preview.get("codigo")), "{m}").format(
                     guia=parametros.get("numero_guia"), m=mensaje)
+            elif intencion.accion == ACCION_CHOFER_OPERACIONAL:
+                mensaje = _RECHAZO_CHOFER.get(str(preview.get("codigo")), "{m}. No se corrigió nada.").format(
+                    guia=parametros.get("numero_guia"), m=mensaje)
             return {"estado": "RECHAZADA", "accion": intencion.accion, "codigo": preview.get("codigo"),
                     "mensaje": mensaje}
         if preview.get("estado") == "RESULTADO":
@@ -2112,6 +2170,8 @@ class OperadorB1:
                 f"Dijiste {intencion.tipo_vehiculo_declarado}, pero {parametros.get('patente')} es "
                 f"{preview['valor_propuesto']['tipo']} en el catálogo. Revisa la patente.")}
         publico = {k: v for k, v in preview.items() if k != "token"}
+        if intencion.accion == ACCION_CHOFER_OPERACIONAL:
+            return self._pendiente_chofer_operacional(estado, conversacion_id, preview, parametros, str(texto)[:500])
         if intencion.accion in {"OBRA_REGISTRAR", "OBRA_CORREGIR"} and preview.get("estado") != "SIN_CAMBIOS":
             presentacion = _presentacion_catalogo_obra(preview)
             self._fijar_pendiente(estado, conversacion_id, {
@@ -2162,10 +2222,96 @@ class OperadorB1:
         return {"estado": "PREVIEW_PENDIENTE", "accion": intencion.accion, "preview": publico,
                 "mensaje": _describir_preview(preview) + " ¿Confirmas? (sí / no)"}
 
-    def _confirmar(self, estado: dict, conversacion_id: str) -> dict:
+    def _pendiente_chofer_operacional(self, estado: dict, conversacion_id: str, preview: Mapping[str, object],
+                                      parametros: dict, referencia: str, *, estado_respuesta: str = "PREVIEW_PENDIENTE",
+                                      prefijo: str = "") -> dict:
+        """Preview del chofer operacional: guía, chofer actual/propuesto y RUT.
+        Con discrepancia de RUT sin confirmar, el pendiente sólo se ejecuta con
+        la confirmación administrativa específica, nunca con un "sí"."""
+        publico = {k: v for k, v in preview.items() if k != "token"}
+        propuesto = preview.get("valor_propuesto") or {}
+        if preview.get("estado") == "SIN_CAMBIOS":
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "SIN_CAMBIOS", "accion": ACCION_CHOFER_OPERACIONAL, "preview": publico, "mensaje": (
+                f"{prefijo}La guía {(preview.get('entidad') or {}).get('numero_guia')} ya tiene como chofer "
+                f"operacional a {propuesto.get('chofer')}; no hay nada que confirmar.")}
+        administrativa = bool(propuesto.get("discrepancia_rut")) and not propuesto.get("discrepancia_confirmada")
+        self._fijar_pendiente(estado, conversacion_id, {
+            "token": preview["token"], "accion": ACCION_CHOFER_OPERACIONAL, "parametros": parametros,
+            "referencia": referencia, "creado_en": self.reloj().isoformat(), "huella_base": preview["huella_base"],
+            "requiere_confirmacion_discrepancia": administrativa, "preview_publico": publico})
+        respuesta = {"estado": estado_respuesta, "accion": ACCION_CHOFER_OPERACIONAL, "preview": publico,
+                     "mensaje": prefijo + _describir_preview(preview)
+                                + (_PIDE_DISCREPANCIA if administrativa else " ¿Confirmas? (sí / no)")}
+        if estado_respuesta == "PREVIEW_RENOVADO":
+            respuesta["ejecutado"] = False
+        if administrativa:
+            respuesta["confirmacion_requerida"] = "DISCREPANCIA_RUT"
+        return respuesta
+
+    def _confirmar_chofer_operacional(self, estado: dict, conversacion_id: str, pendiente: dict,
+                                      discrepancia_rut: bool) -> dict:
+        requiere = bool(pendiente.get("requiere_confirmacion_discrepancia"))
+        if requiere and not discrepancia_rut:
+            return {"estado": "PREVIEW_PENDIENTE", "accion": ACCION_CHOFER_OPERACIONAL,
+                    "preview": pendiente.get("preview_publico"), "confirmacion_requerida": "DISCREPANCIA_RUT",
+                    "mensaje": "No apliqué nada." + _PIDE_DISCREPANCIA}
+        if discrepancia_rut and not requiere:
+            return {"estado": "ACLARACION_REQUERIDA", "accion": ACCION_CHOFER_OPERACIONAL, "candidatos": [],
+                    "mensaje": "Esta corrección no tiene una discrepancia de RUT que confirmar; responde «sí» o «no»."}
+
+        def renovar(motivo: str) -> dict:
+            # Siempre desde los parámetros sin confirmación administrativa: una
+            # discrepancia vigente vuelve a exigirla sobre el preview nuevo.
+            nuevo = self.capa.previsualizar(ACCION_CHOFER_OPERACIONAL, pendiente["parametros"], actor=ACTOR_B1,
+                                            origen=ORIGEN_B1, referencia=pendiente.get("referencia", ""))
+            if nuevo.get("estado") == "RECHAZADA":
+                self._fijar_pendiente(estado, conversacion_id, None)
+                return {"estado": "RECHAZADA", "accion": ACCION_CHOFER_OPERACIONAL, "codigo": nuevo.get("codigo"),
+                        "mensaje": f"No ejecuté nada: {motivo} y la corrección ya no es válida ({nuevo.get('mensaje')})."}
+            return self._pendiente_chofer_operacional(
+                estado, conversacion_id, nuevo, pendiente["parametros"], pendiente.get("referencia", ""),
+                estado_respuesta="PREVIEW_RENOVADO", prefijo=f"No ejecuté nada: {motivo}. ")
+
+        token = pendiente["token"]
+        if discrepancia_rut:
+            # El MISMO preview que vio el humano, ahora con su confirmación
+            # administrativa: si algo cambió desde entonces, no se ejecuta.
+            confirmado = self.capa.previsualizar(
+                ACCION_CHOFER_OPERACIONAL, {**pendiente["parametros"], "confirmar_discrepancia_rut": True},
+                actor=ACTOR_B1, origen=ORIGEN_B1, referencia=pendiente.get("referencia", ""))
+            if confirmado.get("estado") != "PREVIEW" or confirmado.get("huella_base") != pendiente.get("huella_base"):
+                return renovar("cambió la información")
+            token = confirmado["token"]
+        resultado = self.capa.ejecutar(token, actor=ACTOR_B1, origen=ORIGEN_B1, confirmado_por=self.usuario,
+                                       accion_esperada=ACCION_CHOFER_OPERACIONAL)
+        estado_capa = resultado.get("estado")
+        if estado_capa == "PREVIEW_OBSOLETO" or resultado.get("codigo") in {"PREVIEW_EXPIRADO", "TOKEN_DESCONOCIDO"}:
+            return renovar("cambió la información" if estado_capa == "PREVIEW_OBSOLETO" else "la propuesta expiró")
+        self._fijar_pendiente(estado, conversacion_id, None)
+        if estado_capa == "APLICADA" and resultado.get("persistencia_verificada"):
+            entidad, despues = resultado.get("entidad") or {}, resultado.get("despues") or {}
+            return {"estado": "EJECUTADA", "accion": ACCION_CHOFER_OPERACIONAL, "resultado": resultado, "mensaje": (
+                f"Listo: la guía {entidad.get('numero_guia')} quedó con chofer operacional {despues.get('chofer')} "
+                f"(RUT {despues.get('rut_chofer')}). Se conservan el RUT impreso, el OCR y la fotografía; las demás "
+                "guías del transporte no cambiaron.")}
+        if estado_capa == "SIN_CAMBIOS":
+            return {"estado": "SIN_CAMBIOS", "accion": ACCION_CHOFER_OPERACIONAL, "mensaje": "Ya estaba aplicado."}
+        restaurado = " Atlas restauró el estado anterior." if resultado.get("respaldo_restaurado") else ""
+        return {"estado": "FALLIDA" if estado_capa in {"FALLIDA", "APLICADA"} else "RECHAZADA",
+                "accion": ACCION_CHOFER_OPERACIONAL, "codigo": resultado.get("codigo"),
+                "mensaje": f"No se aplicó la corrección del chofer: {resultado.get('mensaje') or 'sin verificación'}."
+                           f"{restaurado}"}
+
+    def _confirmar(self, estado: dict, conversacion_id: str, *, discrepancia_rut: bool = False) -> dict:
         pendiente = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
         if not pendiente:
             return {"estado": "SIN_PREVIEW_PENDIENTE", "mensaje": "No hay ninguna operación pendiente de confirmar."}
+        if pendiente.get("accion") == ACCION_CHOFER_OPERACIONAL:
+            return self._confirmar_chofer_operacional(estado, conversacion_id, pendiente, discrepancia_rut)
+        if discrepancia_rut:
+            return {"estado": "ACLARACION_REQUERIDA", "candidatos": [],
+                    "mensaje": "No hay una discrepancia de RUT pendiente de confirmar; responde «sí» o «no»."}
         resultado = self.capa.ejecutar(pendiente["token"], actor=ACTOR_B1, origen=ORIGEN_B1,
                                        confirmado_por=self.usuario, accion_esperada=pendiente["accion"])
         estado_capa = resultado.get("estado")

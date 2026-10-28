@@ -166,10 +166,14 @@ def test_peso_invalido_desde_la_tarjeta_se_rechaza(tarjetas):
     assert r["estado"] == "RECHAZADA" and "kilos enteros" in r["mensaje"]
 
 
-def test_tarjeta_sin_correccion_soportada_lo_explica(tarjetas):
-    r = OperadorB1(tarjetas["raiz"]).atender("revision-c", _en(tarjetas["chofer"], "el chofer es JUAN PEREZ"))
+def test_tarjeta_de_chofer_con_chofer_inexistente_pide_aclaracion(tarjetas):
+    # 28/10: la tarjeta de chofer ya corrige el chofer operacional
+    # (test_b1_chofer_operacional.py); un chofer fuera del catálogo no se adivina.
+    b1 = OperadorB1(tarjetas["raiz"])
+    r = b1.atender("revision-c", _en(tarjetas["chofer"], "el chofer es JUAN PEREZ"))
     assert r["estado"] == "ACLARACION_REQUERIDA"
-    assert r["mensaje"].startswith(f"Desde esta tarjeta B1 todavía no corrige el chofer de la guía {GUIA}")
+    assert "JUAN PEREZ" in r["mensaje"]
+    assert b1.atender("revision-c", "sí")["estado"] == "SIN_PREVIEW_PENDIENTE"
 
 
 def test_rampla_desde_su_tarjeta_cambia_solo_la_rampla(tarjetas):

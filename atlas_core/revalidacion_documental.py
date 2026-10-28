@@ -7403,6 +7403,8 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
     catalogo_choferes = cargar_catalogo_json(raiz / "catalogos_privados" / "choferes.json")
     motivo_objetivo = MotivoRevisionDocumento.CHOFER_SIN_CORROBORAR.value
     confirmaciones_ledger = resolver_choferes_confirmados_por_ledger(dataset.parent / "decisiones_aplicadas.json")
+    from atlas_core.chofer_operacional import choferes_operacionales_por_ledger, retirar_motivos_identidad_chofer
+    choferes_operacionales = choferes_operacionales_por_ledger(dataset.parent / "decisiones_aplicadas.json")
 
     with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
         try:
@@ -7411,6 +7413,14 @@ def revalidar_chofer_sin_corroborar_por_catalogo_sin_ocr(
             return {"filas_totales": 0, "guias_actualizadas": []}
         guias_actualizadas: list[str] = []
         for fila in filas:
+            # Chofer operacional fijado por un humano para ESTE documento: la
+            # identidad ya está resuelta aunque una relectura haya vuelto a
+            # traer el motivo. Se conserva lo documental (`chofer`,
+            # `rut_chofer` impreso) tal cual; el reporte usa el ledger.
+            if str(fila.get("archivo", "")).strip() in choferes_operacionales:
+                if retirar_motivos_identidad_chofer(fila):
+                    guias_actualizadas.append(str(fila.get("numero_guia", "")))
+                continue
             motivos = [
                 m for m in str(fila.get("motivos_revision_documento", "")).split(SEPARADOR_MOTIVOS) if m
             ]

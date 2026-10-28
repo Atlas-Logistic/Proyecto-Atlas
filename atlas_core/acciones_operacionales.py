@@ -1458,6 +1458,137 @@ def _aplicar_documento_corregir_chofer(ctx: _Contexto, p: dict, plan: Plan, acto
     return {"despues": valores, "guias_revalidar": list(plan.datos["guias_viaje"])}
 
 
+def _plan_documento_chofer_operacional(ctx: _Contexto, p: dict) -> Plan:
+    """Chofer OPERACIONAL de UNA guía con un chofer activo del catálogo (ver
+    `atlas_core.chofer_operacional`). Nunca escribe `chofer`/`rut_chofer` del
+    dataset (RUT impreso, OCR), ni otras guías del transporte, ni asignaciones
+    chofer-vehículo. Un RUT impreso válido de otra identidad es una
+    discrepancia visible que exige `confirmar_discrepancia_rut`."""
+    from atlas_core.catalogos import buscar_chofer_por_rut, normalizar_rut, rut_canonico_de_registro_chofer
+    from atlas_core.chofer_operacional import (
+        MOTIVOS_IDENTIDAD_CHOFER, TIPOS_DECISION_CHOFER, choferes_operacionales_por_ledger, correccion_de_documento,
+    )
+    from atlas_core.validadores import EstadoValidacion, validar_rut_chileno
+
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    choferes = ctx.choferes()
+    clave = _resolver_chofer(choferes, str(p["chofer"]))
+    registro = choferes[clave]
+    if registro.get("activo", True) is not True:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el chofer del catálogo está inactivo")
+    nombre, rut = str(registro.get("nombre", "")).strip(), rut_canonico_de_registro_chofer(clave, registro) or ""
+    if not nombre or not rut:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el chofer del catálogo no tiene nombre y RUT válidos")
+    archivo, guia, transporte = (str(fila.get("archivo", "")), str(fila.get("numero_guia", "")).strip(),
+                                  _transporte(fila))
+    chofer_doc, rut_doc = str(fila.get("chofer", "")).strip(), str(fila.get("rut_chofer", "")).strip()
+    vigente = choferes_operacionales_por_ledger(ctx.archivos["ledger_decisiones"]).get(archivo)
+    discrepancia = (validar_rut_chileno(rut_doc).estado == EstadoValidacion.VALIDO
+                    and normalizar_rut(rut_doc) != normalizar_rut(rut))
+    motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()}
+    if vigente:
+        sin_cambios = vigente["chofer_id"] == clave
+    else:
+        sin_cambios = (chofer_doc == nombre and normalizar_rut(rut_doc) == normalizar_rut(rut)
+                       and not motivos & MOTIVOS_IDENTIDAD_CHOFER)
+    hermanas = sorted({str(f.get("numero_guia", "")).strip() for f in ctx.filas()
+                       if transporte and _transporte(f) == transporte} - {guia, ""})
+    tarjetas = [{"decision_id": d.get("decision_id"), "tipo": d.get("tipo"), "numero_guia": guia}
+                for d in ctx.decisiones() if d.get("tipo") in TIPOS_DECISION_CHOFER
+                and correccion_de_documento({archivo: {"numero_guia": guia, "numero_transporte": transporte}},
+                                            d.get("documento") or {}) is not None]
+    consecuencias = [
+        f"Sólo cambia el chofer operacional de la guía {guia}: Atlas usará {nombre} (RUT {rut}) en viajes, "
+        "consultas y reportes.",
+        f"Se conservan sin cambios el chofer y el RUT impresos ({chofer_doc or 'sin nombre'} / "
+        f"{rut_doc or 'sin RUT'}), el OCR y la fotografía.",
+    ]
+    if hermanas:
+        consecuencias.append(f"Las otras guías del transporte {transporte} ({', '.join(hermanas)}) no se "
+                             "modifican ni se revalidan.")
+    consecuencias.append("No cambia asignaciones de tractos ni ramplas.")
+    if discrepancia:
+        dueno = buscar_chofer_por_rut(choferes, rut_doc)
+        de_quien = (f", que en el catálogo corresponde a {str(dueno.get('nombre', '')).strip()},"
+                    if isinstance(dueno, dict) and str(dueno.get("nombre", "")).strip() else "")
+        consecuencias.append(f"DISCREPANCIA: el RUT impreso {rut_doc}{de_quien} no corresponde a {nombre} "
+                             f"(RUT {rut}). Requiere confirmación administrativa específica.")
+    consecuencias.append("La corrección queda en auditoría; una nueva lectura OCR, el PULL o una revalidación "
+                         "no la reemplazan.")
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia,
+                 "numero_transporte": transporte, "campo": "CHOFER_OPERACIONAL"},
+        valor_actual={"chofer": vigente["nombre"] if vigente else chofer_doc,
+                      "rut_chofer": vigente["rut"] if vigente else rut_doc,
+                      "fuente": "CORRECCION_OPERACIONAL" if vigente else "DOCUMENTO",
+                      "chofer_documental": chofer_doc, "rut_documental": rut_doc},
+        valor_propuesto={"chofer": nombre, "rut_chofer": rut, "discrepancia_rut": discrepancia,
+                         "discrepancia_confirmada": discrepancia and p.get("confirmar_discrepancia_rut") is True},
+        estado_base={"fila": fila, "chofer_id": clave, "chofer": registro, "vigente": vigente,
+                     "tarjetas": sorted(str(t["decision_id"]) for t in tarjetas)},
+        sin_cambios=sin_cambios,
+        afectados={"guias": [guia], "total_guias": 1, "numero_transporte": transporte,
+                   "guias_hermanas_sin_cambios": hermanas,
+                   "decisiones_pendientes": tarjetas, "total_decisiones": len(tarjetas)},
+        consecuencias=consecuencias,
+        revalidaciones=["RECONCILIACION_FOCAL_DE_LA_GUIA"],
+        archivos=("dataset", "ledger_decisiones", "bandeja"),
+        datos={"archivo": archivo, "guia": guia, "transporte": transporte, "chofer_id": clave},
+    )
+
+
+def _aplicar_documento_chofer_operacional(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.chofer_operacional import (
+        MOTIVOS_IDENTIDAD_CHOFER, TIPO_LEDGER_CHOFER_OPERACIONAL, choferes_operacionales_por_ledger,
+        retirar_motivos_identidad_chofer,
+    )
+    from atlas_core.revalidacion_documental import _escribir_filas_completas, _leer_filas
+
+    propuesto, actual = plan.valor_propuesto, plan.valor_actual
+    if propuesto["discrepancia_rut"] and not propuesto["discrepancia_confirmada"]:
+        raise ErrorAccionOperacional("DISCREPANCIA_RUT_SIN_CONFIRMAR",
+                                     "el RUT impreso contradice al chofer propuesto; falta la confirmación administrativa")
+    archivo, guia = str(plan.datos["archivo"]), str(plan.datos["guia"])
+    decision_id = f"ACCION_OPERACIONAL:{ctx.token}"
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        ledger.setdefault("aplicaciones", []).append({
+            "decision_id": decision_id, "tipo": TIPO_LEDGER_CHOFER_OPERACIONAL,
+            "accion": "CORREGIR_CHOFER_OPERACIONAL", "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "documento": {"archivo": archivo, "numero_guia": guia, "numero_transporte": plan.datos["transporte"]},
+            "chofer_id": plan.datos["chofer_id"],
+            "chofer_operacional": {"nombre": propuesto["chofer"], "rut": propuesto["rut_chofer"]},
+            "chofer_anterior": {"nombre": actual["chofer"], "rut": actual["rut_chofer"], "fuente": actual["fuente"]},
+            "chofer_documental": actual["chofer_documental"], "rut_documental": actual["rut_documental"],
+            "discrepancia_rut": propuesto["discrepancia_rut"],
+            "discrepancia_confirmada": propuesto["discrepancia_confirmada"],
+            "referencia": str(p.get("referencia", "")),
+        })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    # Sólo el estado de revisión de ESTE documento; chofer/RUT impresos intactos.
+    with bloqueo_sesion(ctx.actual, "revalidacion_dataset"):
+        filas = _leer_filas(ctx.archivos["dataset"])
+        objetivo = [f for f in filas if str(f.get("archivo", "")) == archivo
+                    and str(f.get("numero_guia", "")).strip() == guia]
+        if len(objetivo) > 1:
+            raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "el documento aparece más de una vez en el dataset")
+        if objetivo and retirar_motivos_identidad_chofer(objetivo[0]):
+            _escribir_filas_completas(ctx.archivos["dataset"], filas)
+    # Persistencia comprobada en disco antes de informar la corrección.
+    vigente = choferes_operacionales_por_ledger(ctx.archivos["ledger_decisiones"]).get(archivo) or {}
+    fila = next((f for f in ctx.filas() if str(f.get("archivo", "")) == archivo
+                 and str(f.get("numero_guia", "")).strip() == guia), {})
+    motivos = {m.strip() for m in str(fila.get("motivos_revision_documento", "")).split("|") if m.strip()}
+    if (vigente.get("decision_id") != decision_id or vigente.get("rut") != propuesto["rut_chofer"]
+            or str(fila.get("chofer", "")).strip() != actual["chofer_documental"]
+            or str(fila.get("rut_chofer", "")).strip() != actual["rut_documental"]
+            or motivos & MOTIVOS_IDENTIDAD_CHOFER):
+        raise ErrorAccionOperacional("PERSISTENCIA_NO_VERIFICADA", "la corrección no quedó persistida como se esperaba")
+    return {"despues": {"chofer": propuesto["chofer"], "rut_chofer": propuesto["rut_chofer"]},
+            "persistencia_verificada": True, "reconciliar": True, "regenerar_reporte": True}
+
+
 GUIA_AUSENTE_DOCUMENTAL = "No encontrado"
 
 
@@ -2154,6 +2285,13 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "rut_chofer": _P("rut", True), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
+    DefinicionAccion("DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL", OPERACIONAL_REVERSIBLE,
+                     "Fija el chofer operacional de UNA guía con un chofer activo del catálogo; conserva el RUT "
+                     "impreso, el OCR y la fotografía, sin tocar otras guías del transporte.",
+                     {"numero_guia": _P("guia", True), "chofer": _P("texto", True, max_largo=120),
+                      "confirmar_discrepancia_rut": _P("bool"), "archivo": _P("archivo_documento", max_largo=260),
+                      "referencia": _REF},
+                     _plan_documento_chofer_operacional, _aplicar_documento_chofer_operacional),
     DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
                      "Corrige un folio ausente o leído con el marcador º como 9 inicial (9482179 -> 482179).",
                      {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),
@@ -2462,6 +2600,7 @@ class CapaAccionesOperacionales:
             "retiradas_por_red_de_seguridad": red_seguridad,
             "reconciliacion": reconciliacion, "revalidacion": revalidacion,
             "servicio": salida.get("servicio"), "respaldo": respaldo.get("carpeta"), "idempotente": False,
+            **({"persistencia_verificada": True} if salida.get("persistencia_verificada") else {}),
         }
         publico["auditoria_id"] = self._auditar(
             registro, preview, actor=actor, confirmado_por=confirmado, origen=origen, instante=instante,

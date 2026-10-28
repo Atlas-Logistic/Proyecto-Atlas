@@ -3154,6 +3154,12 @@ def regenerar_decisiones_persistidas(
         resultado = retirar_decisiones_destino_convergente(
             resultado, ruta_dataset=ruta_dataset, carpeta_catalogos=carpeta_catalogos,
         )
+        # Chofer operacional ya fijado por un humano para el documento: la
+        # tarjeta de chofer no vuelve aunque una relectura la regenere.
+        from atlas_core.chofer_operacional import retirar_decisiones_chofer_operacional
+        resultado = retirar_decisiones_chofer_operacional(
+            resultado, ruta_ledger=Path(ruta_dataset).parent / "decisiones_aplicadas.json",
+        )
     return ajenas + resultado if guias is not None else resultado
 
 
