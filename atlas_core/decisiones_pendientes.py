@@ -87,12 +87,31 @@ TIPOS_SOPORTADOS = frozenset({
     "VEHICULO_DESCONOCIDO", "CHOFER_DESCONOCIDO", "CHOFER_CANDIDATO", "CLIENTE_DESCONOCIDO", "CLIENTE_CANDIDATO",
     "OBRA_DESCONOCIDA", "DESTINO_SIN_CONFIRMAR", "ALIAS_CANDIDATO",
     "ORIGEN_NO_CONFIRMADO", "DESTINO_NO_RESUELTO", "CLIENTE_AUSENTE",
-    "PESO_VIAJE_IMPLAUSIBLE",
+    "PESO_VIAJE_IMPLAUSIBLE", "PESO_NO_DISPONIBLE",
 })
 _AUSENTES = {"", "No encontrado", "REVISAR", "Ilegible"}
 # Peso total del viaje > 30 t (`credibilidad_campos`): Javier confirma que
 # el peso documental es correcto, o escribe el peso real del documento.
 ACCIONES_PESO_VIAJE_IMPLAUSIBLE = ("CONFIRMAR", "CORREGIR_PESO", "POSPONER")
+# Caso real 483526 (transporte 0000367059): la foto trae peso y DESPACHAR A,
+# pero el margen izquierdo cortado dejó al OCR sin sus etiquetas; la guía
+# quedaba en revisión sin ninguna tarjeta. PESO_NO_DISPONIBLE y el motivo
+# DESTINO_DOCUMENTAL_AUSENTE (tarjeta DESTINO_NO_RESUELTO) se corrigen con
+# B1 en la propia tarjeta (DOCUMENTO_CORREGIR_CAMPO / destino operacional).
+# Por decisión de Javier sólo se publican para guías ingresadas desde esta
+# fecha (UTC); las anteriores siguen corrigiéndose por el chat de B1.
+INGESTA_DESDE_TARJETAS_CAMPO_AUSENTE = "2026-10-28"
+MOTIVO_DESTINO_DOCUMENTAL_AUSENTE = "DESTINO_DOCUMENTAL_AUSENTE"
+ACCIONES_PESO_NO_DISPONIBLE = ("POSPONER",)
+
+
+def _ingresada_desde_tarjetas_campo_ausente(fila: Mapping[str, str]) -> bool:
+    return str(fila.get("fecha_ingesta_utc", "")).strip()[:10] >= INGESTA_DESDE_TARJETAS_CAMPO_AUSENTE
+
+
+def _sin_destino_documental(fila: Mapping[str, str]) -> bool:
+    return all(str(fila.get(campo, "")).strip() in _AUSENTES
+               for campo in ("despachar_a_crudo", "direccion_entrega", "estado_ruta", "motivo_ruta"))
 
 
 def _obra_esta_ausente(obra_canonica: str) -> bool:
@@ -984,6 +1003,12 @@ def detectar_decision_destino_no_resuelto(
         elif motivo_base in MOTIVOS_DESTINO_TECNICO_AGOTABLE:
             if int(intentos_misma_evidencia) < UMBRAL_INTENTOS_TECNICOS_AGOTADOS:
                 return None
+        elif (not motivo_base and _sin_destino_documental(fila)
+              and _ingresada_desde_tarjetas_campo_ausente(fila)):
+            # Caso real 483526: ningún texto de destino que rutear ni que
+            # preguntar junto a la obra -- sólo un humano puede leerlo en la
+            # foto.
+            motivo_base = MOTIVO_DESTINO_DOCUMENTAL_AUSENTE
         elif not motivo_base and not estado_ruta:
             # Bloque BLOQUEO PREVIO AL RUTEO (Codex 472623/472624) -- un
             # `motivo_ruta`/`estado_ruta` vacíos NO significan "nada que
@@ -2722,6 +2747,34 @@ def detectar_decisiones_peso_viaje_implausible(
     return decisiones
 
 
+def detectar_decisiones_peso_no_disponible(
+    filas: Iterable[Mapping[str, str]],
+) -> list[dict[str, object]]:
+    """Una pregunta `PESO_NO_DISPONIBLE` por guía procesada sin peso
+    numérico (caso real 483526), sólo si se ingresó desde
+    `INGESTA_DESDE_TARJETAS_CAMPO_AUSENTE`. Nunca propone un valor: el
+    humano lo lee en la foto y lo corrige con B1 en la tarjeta. Al quedar
+    corregido (dataset protegido por el ledger) deja de detectarse."""
+    from atlas_core.gestor_viajes import _peso_kg_numerico
+
+    decisiones: list[dict[str, object]] = []
+    for fila in filas:
+        guia = str(fila.get("numero_guia", "")).strip()
+        peso = str(fila.get("peso_kg", "")).strip()
+        if (str(fila.get("estado_procesamiento", "")).strip() != "OK" or not guia.isdigit()
+                or _peso_kg_numerico(peso) is not None or not _ingresada_desde_tarjetas_campo_ausente(fila)):
+            continue
+        decisiones.append(crear_decision(
+            tipo="PESO_NO_DISPONIBLE", entidad="PESO", archivo=str(fila.get("archivo", "")),
+            numero_guia=guia, numero_transporte=str(fila.get("numero_transporte", "")),
+            campo="peso_kg", valor_documental=peso, valor_normalizado="",
+            identidad_resuelta=None, candidatos=(), motivos=("PESO_NO_DISPONIBLE",),
+            evidencias=[{"tipo": "PESO_DOCUMENTAL_NO_LEIDO", "peso_kg": peso}],
+            acciones_permitidas=ACCIONES_PESO_NO_DISPONIBLE,
+        ))
+    return decisiones
+
+
 def detectar_decision_origen_no_confirmado(
     *, archivo: str, fila: Mapping[str, str], plantas: Iterable[Planta],
 ) -> dict[str, object] | None:
@@ -3841,6 +3894,23 @@ def _regenerar_decisiones_persistidas(
                     )
                 ) is not None
                 and _destino_aceptado_por_b1(fila_vigente)
+            )
+        ]
+        # Caso real 483526: la pregunta por un destino documental ausente
+        # deja de aplicar en cuanto el documento trae destino o ruta (por
+        # ejemplo, tras un reproceso). La confirmación humana la retira el
+        # escritor de la bandeja (`retirar_decisiones_destino_operacional`).
+        decisiones = [
+            decision for decision in decisiones
+            if not (
+                str(decision.get("tipo", "")) == "DESTINO_NO_RESUELTO"
+                and MOTIVO_DESTINO_DOCUMENTAL_AUSENTE in {str(m) for m in decision.get("motivos") or []}
+                and (
+                    fila_vigente := filas_por_guia.get(
+                        str((decision.get("documento") or {}).get("numero_guia", ""))
+                    )
+                ) is not None
+                and not _sin_destino_documental(fila_vigente)
             )
         ]
     # Bloque CIERRE REAL DE CONVERGENCIA DE DESTINOS -- caso real 464265:
