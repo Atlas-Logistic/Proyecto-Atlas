@@ -9,8 +9,40 @@ from atlas_core.registro_eventos_operacionales import leer_eventos_operacionales
 
 ORDEN = "Agrega la observaci\u00f3n ESTE VIAJE TIENE ADICIONAL DE $30.000 POR RETIRO FUERA DE AZA a las gu\u00edas " + ", ".join(str(500001+i) for i in range(7))
 
+
+class _Arbitro:
+    """Mismo contrato que el \u00e1rbitro Cloud: adquirir solo si nadie tiene el lease (no reentrante)."""
+    titular = None
+
+
+class _Lease:
+    def __init__(self, arbitro): self.a, self.tengo, self.ocupado = arbitro, False, False
+    @property
+    def vigente(self): return self.tengo
+    def adquirir(self):
+        self.ocupado = self.a.titular is not None
+        if self.ocupado: return False
+        self.a.titular, self.tengo = self, True
+        return True
+    def renovar(self): return self.tengo
+    def cerrar(self):
+        if self.tengo: self.a.titular, self.tengo = None, False
+    def __enter__(self): return self
+    def __exit__(self, *a): self.cerrar()
+
+
+@pytest.fixture
+def arbitro(monkeypatch):
+    """Ra\u00edz compartida con lease, como la operaci\u00f3n real: el adicional exige el escritor global
+    y B1 corre dentro de la sesi\u00f3n que ya lo tiene."""
+    a = _Arbitro()
+    monkeypatch.setattr(d, 'compartida', lambda raiz: True)
+    monkeypatch.setitem(d.sesion.__wrapped__.__kwdefaults__, 'fabrica', lambda: _Lease(a))
+    return a
+
+
 @pytest.mark.parametrize("compartido", [False, True])
-def test_siete_viajes_por_canal_controlado(tmp_path, compartido):
+def test_siete_viajes_por_canal_controlado(tmp_path, compartido, arbitro):
     actual = tmp_path/'operacion'/'actual'
     actual.mkdir(parents=True)
     (tmp_path/'catalogos_privados').mkdir()
@@ -42,6 +74,7 @@ def test_siete_viajes_por_canal_controlado(tmp_path, compartido):
     from atlas_core.acciones_operacionales import CapaAccionesOperacionales
     assert len(CapaAccionesOperacionales(tmp_path).auditoria())==1
     assert turno(ORDEN)['estado']=='SIN_CAMBIOS'
+    assert arbitro.titular is None  # la sesion libera el unico lease; nadie lo pidio dos veces
 
 def test_lease_cloud_es_el_vigente_y_rechazo_no_escribe(tmp_path,monkeypatch):
     from atlas_core import exclusividad_equipo as ex

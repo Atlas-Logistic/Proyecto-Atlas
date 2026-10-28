@@ -38,6 +38,16 @@ ESCRITORES = frozenset({
 _auditoria = ContextVar('desktop_escrituras', default=None)
 _worker_ocr = ContextVar('desktop_worker_ocr', default=None)
 _cierre_worker_ocr = ContextVar('desktop_cierre_worker_ocr', default=None)
+# Escritor global que la sesión ya tiene: el árbitro Cloud no es reentrante,
+# así que una acción ejecutada dentro de la sesión (B1 por el canal Desktop)
+# debe usar este mismo lease en vez de pedir otro (que respondería 409).
+_escritor_sesion = ContextVar('desktop_escritor_sesion', default=None)
+
+
+def escritor_de_sesion():
+    """Escritor global vigente de la sesión Desktop en curso, o None."""
+    escritor = _escritor_sesion.get()
+    return escritor if escritor is not None and escritor.vigente else None
 
 @contextlib.contextmanager
 def permiso_cierre_worker_ocr(pid):
@@ -144,8 +154,11 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
         raices.append(cache.resolve())
         if os.environ.get('EASYOCR_MODULE_PATH'): raices.append(Path(os.environ['EASYOCR_MODULE_PATH']).resolve())
         token = _auditoria.set((raices, lambda: escritor is None or escritor.vigente))
+        token_escritor = _escritor_sesion.set(escritor)
         try: yield comprobar
-        finally: _auditoria.reset(token)
+        finally:
+            _escritor_sesion.reset(token_escritor)
+            _auditoria.reset(token)
 
 def ejecutar_script(argumentos, entrada=None):
     script = Path(argumentos[0])

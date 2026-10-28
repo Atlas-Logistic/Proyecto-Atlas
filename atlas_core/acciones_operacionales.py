@@ -2261,17 +2261,23 @@ def _eventos_por_transporte(ctx: _Contexto, transportes: set[str]) -> list[dict]
 
 
 def _adicional_ya_registrado(texto: str, eventos: list[dict], transporte: str) -> bool:
-    """Detecta equivalencia de montos solo para la orden canonica de adicional."""
-    from atlas_core.consulta_adicionales import _MONTO, _monto, _normalizar
-    propuesta = re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO + r")", _normalizar(texto))
+    """Detecta equivalencia de montos solo para la orden canonica de adicional.
+    Con motivo libre, el mismo importe con el mismo motivo es duplicado; con
+    otro motivo (o uno solo de los dos con motivo) no se adivina: se pide
+    revisar."""
+    from atlas_core.consulta_adicionales import _MONTO, _monto, _normalizar, _sin_motivo_canonico
+    propuesta_completa = _normalizar(texto).strip()
+    propuesta = re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO + r")", _sin_motivo_canonico(propuesta_completa))
     if not propuesta:
         return False
     importe = _monto(propuesta.group(1))
+    con_motivo = propuesta.group(0) != propuesta_completa
     for evento in eventos:
         if evento.get("estado") != "ACTIVO" or str(evento.get("numero_transporte", "")).strip() != transporte:
             continue
         for linea in str(evento.get("nota") or "").splitlines():
-            nota = _normalizar(linea)
+            completa = _normalizar(linea).strip()
+            nota = _sin_motivo_canonico(completa)
             if not re.search(r"\bADICIONAL(?:ES)?\b", nota):
                 continue
             if re.search(r"\b(?:POR|CADA)\s+(?:GUIA|DOCUMENTO|FOTO)\b|\b(?:SIN|NO(?:\s+\w+){0,4})\s+ADICIONAL", nota):
@@ -2282,7 +2288,11 @@ def _adicional_ya_registrado(texto: str, eventos: list[dict], transporte: str) -
             if re.search(r"\d", nota.replace(encontrados[0], "", 1)):
                 raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "Observacion con importes ambiguos; revise antes de agregar.")
             if _monto(encontrados[0]) == importe:
-                return True
+                if completa == propuesta_completa or (not con_motivo and nota == completa):
+                    return True
+                raise ErrorAccionOperacional(
+                    "PRECONDICION_FALLIDA",
+                    f"El viaje ya tiene un adicional de ${importe:,} con otro motivo; revise antes de agregar.".replace(",", "."))
     return False
 
 
@@ -2728,6 +2738,24 @@ def catalogo_acciones() -> list[dict[str, object]]:
 # =============================================================== fachada
 
 
+class _EscritorPrestado:
+    """El lease de la sesión Desktop en curso: se usa mientras siga vigente,
+    nunca se vuelve a adquirir ni se libera aquí (lo libera la sesión)."""
+
+    def __init__(self, escritor):
+        self._escritor = escritor
+
+    @property
+    def vigente(self) -> bool:
+        return bool(self._escritor.vigente)
+
+    def adquirir(self) -> bool:
+        return self.vigente
+
+    def cerrar(self) -> None:
+        pass
+
+
 class CapaAccionesOperacionales:
     """Única puerta de escritura operacional para agentes."""
 
@@ -2904,13 +2932,19 @@ class CapaAccionesOperacionales:
                     "auditoria_previa": anterior.get("auditoria_id") if anterior else None}
 
         adicional = (definicion.nombre == "VIAJE_AGREGAR_OBSERVACION" and
-                     re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE \$[0-9.]+", str(parametros.get("texto", ""))))
+                     re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE \$[0-9.]+(?: (?:POR|DEBIDO A|CORRESPONDIENTE A) .+)?",
+                                  str(parametros.get("texto", ""))))
         if not definicion.escritor_global and not adicional:
             return self._aplicar_confirmado(registro, preview, definicion, parametros, plan, token=token,
                                             actor=actor, confirmado=confirmado, origen=origen)
         # Sin el lease global no se respalda, aplica ni restaura nada: el
-        # preview sigue vigente para reintentar con el mismo token.
-        escritor = self._fabrica_escritor()
+        # preview sigue vigente para reintentar con el mismo token. Dentro de
+        # una sesión Desktop (B1 por el canal instalado) se usa el lease que
+        # la sesión ya tiene: el árbitro Cloud no es reentrante y la sesión
+        # lo libera al terminar.
+        from atlas_core.desktop_operacion import escritor_de_sesion
+        de_sesion = escritor_de_sesion()
+        escritor = _EscritorPrestado(de_sesion) if de_sesion is not None else self._fabrica_escritor()
         if escritor is None:
             raise ErrorAccionOperacional(
                 "ESCRITOR_NO_DISPONIBLE", "falta ATLAS_CLOUD_MOTOR_TOKEN: sin escritor global no se ejecuta")

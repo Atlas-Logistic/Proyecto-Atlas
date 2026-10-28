@@ -24,6 +24,27 @@ def _monto(texto):
     return valor
 
 
+# Linea canonica que B1 escribe con motivo libre: "ESTE VIAJE TIENE ADICIONAL DE
+# $15.000 POR SEGUNDA VUELTA DEL VIERNES 23/10/2026". Las cifras del motivo
+# (fechas) no son importes; B1 nunca guarda un motivo con otro importe, otro
+# adicional o un monto por guia, y si una nota los trae no se neutraliza.
+_LINEA_CANONICA_CON_MOTIVO = re.compile(
+    r'(ESTE VIAJE TIENE ADICIONAL DE \$\d{1,3}(?:[.]\d{3})*) (?P<motivo>(?:POR|DEBIDO A|CORRESPONDIENTE A) .+)')
+
+
+def _sin_motivo_canonico(nota):
+    """Nota normalizada sin el motivo de sus lineas canonicas de adicional."""
+    lineas = []
+    for linea in nota.split('\n'):
+        m = _LINEA_CANONICA_CON_MOTIVO.fullmatch(linea.strip())
+        motivo = m.group('motivo') if m else ''
+        if m and not re.search(r'\$|\b(?:MIL|LUCAS|PESOS|ADICIONAL(?:ES)?)\b|\b(?:POR|CADA)\s+(?:GUIA|DOCUMENTO|FOTO)\b',
+                               motivo):
+            linea = m.group(1)
+        lineas.append(linea)
+    return '\n'.join(lineas)
+
+
 def _consulta(pregunta):
     texto = _normalizar(pregunta).strip().strip('¿? ')
     if not re.search(r'\bADICIONAL(?:ES)?\b', texto):
@@ -79,7 +100,7 @@ def consultar_adicionales(pregunta, viajes, raiz_atlas):
     for evento in eventos:
         if evento.get('estado') != 'ACTIVO' or evento.get('tipo_evento') != 'OBSERVACION_OPERACIONAL':
             continue
-        nota = _normalizar(evento.get('nota') or '')
+        nota = _sin_motivo_canonico(_normalizar(evento.get('nota') or ''))
         if not re.search(r'\bADICIONAL(?:ES)?\b', nota):
             continue
         # No convertir importes por guia, negados, o varios conceptos en un monto de viaje.

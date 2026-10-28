@@ -446,23 +446,73 @@ def _intencion_observacion_lote(texto: str, original: str, plano: str) -> Intenc
     return None
 
 
+# Motivo libre del adicional ("... de $15.000 por segunda vuelta del viernes
+# 23/10/2026 a las guías ..."), antes o después de la lista de guías. Se
+# conserva tal cual (del original, con tildes); nunca se infiere ni completa.
+_CONECTOR_MOTIVO_ADICIONAL = r"(?:POR|DEBIDO\s+A|CORRESPONDIENTE\s+A)"
 _ADICIONAL_GUIAS = re.compile(
     rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?"
-    r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)\s+"
-    r"(?:A|PARA|EN)\s+(?:(?:CADA\s+UNO\s+DE\s+)?(?:ESTOS\s+)?VIAJES?\s*,?\s*(?:DE\s+)?)?"
-    rf"{_GUIAS_OBS}{_LISTA_GUIAS_OBS}$")
+    r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)"
+    rf"(?:\s+(?P<motivo>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+?))?\s*,?\s+"
+    r"(?:A|PARA|EN)\s+(?:(?:CADA\s+UNO\s+DE\s+)?(?:ESTOS\s+)?VIAJES?\s*,?\s*(?:DE\s+)?)?(?:LA\s+)?"
+    rf"{_GUIAS_OBS}{_LISTA_GUIAS_OBS}"
+    rf"(?:\s*,?\s+(?P<motivo_final>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+))?$")
+_ORDEN_ADICIONAL = re.compile(rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\b")
+_DIAS_SEMANA = ("LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "DOMINGO")
 
-def _intencion_adicional_guias(plano: str) -> Intencion | None:
+
+def _problema_motivo_adicional(motivo: str) -> str:
+    """Motivo (plano) que no puede guardarse sin preguntar: otro importe,
+    un monto por guía, otro adicional o una fecha imposible o que contradice
+    el día de la semana escrito. "" si se conserva tal cual."""
+    if re.search(r"\$|\b(?:MIL|LUCAS|PESOS)\b", motivo):
+        return "el motivo menciona otro importe"
+    if re.search(r"\bADICIONAL(?:ES)?\b", motivo):
+        return "el motivo menciona otro adicional"
+    if re.search(r"\b(?:POR|CADA)\s+(?:GUIA|DOCUMENTO|FOTO)\b", motivo):
+        return "no queda claro si el monto es por viaje o por guía"
+    from datetime import date
+    fechas = []
+    for d, m, a in re.findall(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4}|\d{2})\b", motivo):
+        try:
+            fechas.append(date(int(a) + (2000 if len(a) == 2 else 0), int(m), int(d)))
+        except ValueError:
+            return f"la fecha {d}/{m}/{a} no existe"
+    dias = [d for d in _DIAS_SEMANA if re.search(rf"\b{d}\b", motivo)]
+    if len(fechas) == 1 and len(dias) == 1 and _DIAS_SEMANA[fechas[0].weekday()] != dias[0]:
+        return f"el {fechas[0]:%d/%m/%Y} no fue {dias[0].lower()}"
+    return ""
+
+
+def _adicional_guias(original: str, plano: str) -> tuple[Intencion | None, str]:
+    """(intención, "") para una orden de adicional por guías explícitas;
+    (None, motivo de aclaración) si es una orden de adicional que no puede
+    proponerse sin preguntar; (None, "") si no es una orden de adicional."""
     from atlas_core.consulta_adicionales import _monto
     m = _ADICIONAL_GUIAS.fullmatch(plano)
     if not m:
-        return None
+        if _ORDEN_ADICIONAL.match(plano) and re.search(r"\bGUIAS?\b\D*\d{3,12}", plano):
+            return None, ("no pude separar el monto, el motivo y las guías. Escribe, por ejemplo: «agrega un adicional "
+                          "de $15.000 por MOTIVO a las guías 483082 y 483043»")
+        return None, ""
     importe = _monto(m.group("monto"))
     if importe is None or importe <= 0:
-        return None
-    guias = list(dict.fromkeys(re.findall(r"\d{3,12}", m.group("lista"))))
+        return None, ""
+    if m.group("motivo") and m.group("motivo_final"):
+        return None, "la orden trae dos motivos; indica uno solo"
+    grupo = "motivo" if m.group("motivo") else "motivo_final" if m.group("motivo_final") else ""
     texto = f"ESTE VIAJE TIENE ADICIONAL DE ${importe:,}".replace(",", ".")
-    return Intencion("VIAJE_AGREGAR_OBSERVACION", {"guias": guias, "texto": texto})
+    if grupo:
+        problema = _problema_motivo_adicional(m.group(grupo))
+        if problema:
+            return None, problema
+        texto += " " + original[m.start(grupo):m.end(grupo)].strip(" ,")
+    guias = list(dict.fromkeys(re.findall(r"\d{3,12}", m.group("lista"))))
+    return Intencion("VIAJE_AGREGAR_OBSERVACION", {"guias": guias, "texto": texto}), ""
+
+
+def _intencion_adicional_guias(original: str, plano: str) -> Intencion | None:
+    return _adicional_guias(original, plano)[0]
 
 
 ACCION_INVESTIGAR_REVISION = "INVESTIGAR_REVISION"
@@ -630,7 +680,7 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         accion = ("EVIDENCIA_ELIMINAR" if re.search(r"EVIDENCIA|FOTO|IMAGEN|DOCUMENTO", resto)
                   else "HISTORIAL_ELIMINAR" if re.search(r"HISTORIAL|AUDITORIA|REGISTRO", resto) else "ENTIDAD_ELIMINAR")
         return Intencion(accion)
-    adicional = _intencion_adicional_guias(plano)
+    adicional = _intencion_adicional_guias(original, plano)
     if adicional is not None:
         return adicional
     observacion = _intencion_observacion_lote(texto, original, plano)
@@ -1754,13 +1804,18 @@ class OperadorB1:
 
     def _instruccion(self, estado: dict, conversacion_id: str, texto: str,
                      revision: tuple[Mapping[str, object], str] | None = None) -> dict:
-        _, plano_adicional = _limpio(texto)
+        original_adicional, plano_adicional = _limpio(texto)
         if (re.match(r"^" + _VERBO_OBSERVACION + r"\s+(?:UN\s+)?ADICIONAL\b", plano_adicional)
                 and re.search(r"\b(?:ESTOS|ESOS)\s+VIAJES\b", plano_adicional)
                 and not re.search(r"\bGUIAS?\b", plano_adicional)):
             self._fijar_pendiente(estado, conversacion_id, None)
             return {"estado": "ACLARACION_REQUERIDA", "mensaje":
                     "Indica los numeros de guia de esos viajes para preparar la propuesta; no se guardo ningun cambio."}
+        aclaracion = _adicional_guias(original_adicional, plano_adicional)[1]
+        if aclaracion:
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "mensaje":
+                    f"No preparé el adicional: {aclaracion}. No se guardó ningún cambio."}
         try:
             intencion = self._interpretar(texto)
         except ErrorContratoInterpretacion as error:
