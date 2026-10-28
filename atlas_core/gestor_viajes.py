@@ -585,7 +585,7 @@ class Viaje:
             return ""
         return _calcular_permanencia_minutos(entrada, salida)
 
-    def _campo_ruta_consolidado(self, campo: str) -> str:
+    def _campo_ruta_consolidado(self, campo: str, documentos=None) -> str:
         """Bloque E2E R1 -- mismo criterio conservador que hora_entrada_aza/
         hora_salida_aza: un campo de enriquecimiento logístico (calculado
         por documento, no por viaje) solo se consolida al nivel de viaje si
@@ -613,9 +613,10 @@ class Viaje:
         truncado o contaminado por otra sección, ver `credibilidad_
         campos.evaluar_credibilidad_direccion`) nunca entra a la cuenta,
         gane o no la mayoría de votos crudos."""
+        documentos = self.documentos if documentos is None else documentos
         if campo == "direccion_entrega":
             valores_presentes = [
-                str(getattr(d, campo) or "").strip() for d in self.documentos
+                str(getattr(d, campo) or "").strip() for d in documentos
                 if _valor_presente(getattr(d, campo, ""))
             ]
             valores_confiables = [
@@ -629,7 +630,7 @@ class Viaje:
             if votos > len(valores_confiables) - votos:
                 return next(v for v in valores_confiables if _clave_normalizada(v) == clave_mayoritaria)
             return ""
-        valores = _valores_unicos(getattr(d, campo) for d in self.documentos)
+        valores = _valores_unicos(getattr(d, campo) for d in documentos)
         return valores[0] if len(valores) == 1 else ""
 
     def _campo_destino_consolidado(self, campo: str) -> str:
@@ -657,12 +658,22 @@ class Viaje:
         consolidado`. Ningún dato por documento se toca -- `despachar_a_
         crudo`/las decisiones humanas existentes siguen intactas; esto
         sólo decide qué se PRESENTA como destino consolidado del viaje."""
-        if self.documentos and all(d.destino_operacional_confirmado for d in self.documentos) and len(self.entregas) == 1:
-            # La identidad humana no depende de haber calculado una ruta.
-            return self._campo_ruta_consolidado(campo)
+        if any(d.destino_operacional_confirmado for d in self.documentos) and len(self.entregas) == 1:
+            # La identidad humana no depende de haber calculado una ruta;
+            # una hermana documental reunida con ella no la contradice.
+            return self._campo_ruta_consolidado(campo, self._documentos_destino())
         if _clave_normalizada(self._bloque_routing_consolidado()["estado_ruta"]) != "ruta_calculada":
             return ""
         return self._campo_ruta_consolidado(campo)
+
+    def _documentos_destino(self) -> list[DocumentoViaje]:
+        """Con una sola entrega, los mismos documentos que fijan su destino
+        y ruta (`entregas.documentos_de_destino`); si no, todos."""
+        if len(self.entregas) == 1:
+            from atlas_core.entregas import documentos_de_destino
+
+            return documentos_de_destino(self.documentos)
+        return list(self.documentos)
 
     def _bloque_routing_consolidado(self) -> dict[str, str]:
         """Consolida la ruta como una unidad, nunca campo por campo.
@@ -678,7 +689,7 @@ class Viaje:
         )
         bloques = [
             {campo: str(getattr(documento, campo) or "").strip() for campo in campos}
-            for documento in self.documentos
+            for documento in self._documentos_destino()
         ]
         informados = [bloque for bloque in bloques if any(bloque.values())]
         if not informados:

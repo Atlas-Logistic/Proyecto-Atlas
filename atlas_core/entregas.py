@@ -28,6 +28,7 @@ determinista: N puede ser 1, 2, 5 o cualquier cantidad.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import TYPE_CHECKING, Sequence
 
@@ -39,8 +40,10 @@ from atlas_core.credibilidad_campos import (
 )
 from atlas_core.catalogo_destinos import _limite_tolerancia_ocr_direccion
 from atlas_core.direccion_equivalente import (
+    _descomponer,
     comuna_oficial,
     comuna_por_codigo,
+    comunas_en_sufijo,
     direcciones_equivalentes_por_sufijo_geografico,
 )
 
@@ -185,6 +188,68 @@ def _direcciones_equivalentes(
     )
 
 
+# Caso real 0000366871 (guías 483490/483491): ambas imprimen "PANAMERICANA
+# NORTE 22650 SANTIAGO LAMPA", pero en 483490 una firma tapa el "22" y el
+# OCR pega la "A" de la etiqueta "DESPACHAR A" ("APANAMERICANA NORTE 650
+# ..."); 483491 trae "RUTCHOFER ..." de la etiqueta vecina. El administrador
+# confirmó por B1 el destino de 483491. Una guía hermana sin confirmación
+# sólo se reúne con esa entrega si su PROPIO texto documental es compatible
+# con el destino humano: misma calle (admitiendo sólo ese residuo de
+# etiqueta), número igual o con dígitos perdidos a la izquierda (al menos
+# 3 restantes), sufijo sólo geográfico, comuna conocida igual a la
+# confirmada y mismo cliente. Nunca por transporte, comuna o código
+# territorial solos, y nunca entre dos documentos sin confirmación.
+_RESIDUO_ETIQUETA = re.compile(r"^(?:RUT ?CHOFER|DESPACHAR ?A|A)\s*")
+
+
+def _calles_compatibles_con_confirmada(calle_documental: str, calle_confirmada: str) -> bool:
+    confirmada = _clave(calle_confirmada)
+    return any(
+        _claves_equivalentes_por_tolerancia_ocr(_clave(candidata), confirmada)
+        for candidata in (calle_documental, _RESIDUO_ETIQUETA.sub("", calle_documental, count=1))
+        if candidata
+    )
+
+
+def _numero_compatible_con_confirmado(numero_documental: str, numero_confirmado: str) -> bool:
+    if numero_documental == numero_confirmado:
+        return True
+    return len(numero_documental) >= 3 and numero_confirmado.endswith(numero_documental)
+
+
+def _documento_compatible_con_destino_confirmado(
+    documento: "DocumentoViaje", confirmado: "DocumentoViaje",
+) -> bool:
+    cliente = _cliente_identidad(documento)
+    if not cliente or cliente != _cliente_identidad(confirmado):
+        return False
+    comuna = comuna_oficial(getattr(confirmado, "localidad_entrega", ""))
+    destino = _descomponer(getattr(confirmado, "direccion_entrega", ""))
+    if not comuna or destino is None:
+        return False
+    calle_confirmada, numero_confirmado, _ = destino
+    comunas = set(_comunas_conocidas(documento))
+    compatibles = 0
+    for campo in ("direccion_entrega", "despachar_a_crudo"):
+        texto = getattr(documento, campo, "")
+        if not _presente(texto):
+            continue
+        partes = _descomponer(texto)
+        if partes is None:
+            continue
+        calle, numero, sufijo = partes
+        comunas_sufijo = comunas_en_sufijo(sufijo)
+        if (comunas_sufijo is None
+                or not _numero_compatible_con_confirmado(numero, numero_confirmado)
+                or not _calles_compatibles_con_confirmada(calle, calle_confirmada)):
+            return False
+        comunas |= comunas_sufijo
+        compatibles += 1
+    # "SANTIAGO" acompaña a la comuna real en los documentos AZA.
+    comunas = {c for c in comunas if c != "SANTIAGO"} or comunas
+    return compatibles > 0 and comunas == {comuna}
+
+
 def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     """True sólo si ambos documentos comparten al menos un nivel de señal
     de destino poblado y coinciden (con tolerancia a un typo de OCR de un
@@ -199,7 +264,8 @@ def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     confirmado_b = bool(getattr(b, "destino_operacional_confirmado", False))
     if confirmado_a or confirmado_b:
         if not (confirmado_a and confirmado_b):
-            return False
+            confirmado, documental = (a, b) if confirmado_a else (b, a)
+            return _documento_compatible_con_destino_confirmado(documental, confirmado)
         direccion_a = _clave(getattr(a, "direccion_entrega", ""))
         direccion_b = _clave(getattr(b, "direccion_entrega", ""))
         comuna_a = _clave(getattr(a, "localidad_entrega", ""))
@@ -244,12 +310,23 @@ def _contradice(valor_a: str, valor_b: str) -> bool:
     return bool(valor_a) and bool(valor_b) and valor_a != valor_b
 
 
+# Caso real 0000366871: la misma obra impresa "AGF ACEROS DE CHILE SPA" se
+# leyó "AGE ..." en una guía. Misma tolerancia OCR que las direcciones, pero
+# sólo letra por letra: un dígito distinto ("TORRE 1"/"TORRE 2") sigue
+# siendo otra obra.
+def _obras_equivalentes_por_ocr(obra_a: str, obra_b: str) -> bool:
+    if not _claves_equivalentes_por_tolerancia_ocr(obra_a, obra_b):
+        return False
+    return all(x == y or (x.isalpha() and y.isalpha()) for x, y in zip(obra_a, obra_b))
+
+
 def _misma_entrega(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     if not _destino_compatible(a, b):
         return False
     if _contradice(_cliente_identidad(a), _cliente_identidad(b)):
         return False
-    if _contradice(_obra_identidad(a), _obra_identidad(b)):
+    obra_a, obra_b = _obra_identidad(a), _obra_identidad(b)
+    if _contradice(obra_a, obra_b) and not _obras_equivalentes_por_ocr(obra_a, obra_b):
         return False
     return True
 
@@ -373,20 +450,29 @@ def _destino_operacional_consolidado(documentos) -> str:
     return _primer_presente([getattr(d, "despachar_a_crudo", "") for d in documentos])
 
 
+def documentos_de_destino(documentos) -> list:
+    """Documentos que fijan destino y ruta de una entrega: los de destino
+    confirmado por un humano si los hay (una hermana documental reunida
+    con ellos nunca aporta su propia ruta), si no todos."""
+    confirmados = [d for d in documentos if getattr(d, "destino_operacional_confirmado", False)]
+    return confirmados or list(documentos)
+
+
 def _entrega_a_dict(documentos) -> dict[str, object]:
-    routing = _routing_consolidado(documentos)
+    destino = documentos_de_destino(documentos)
+    routing = _routing_consolidado(destino)
     return {
         "numeros_guia": sorted(
             {d.numero_guia.strip() for d in documentos if _presente(d.numero_guia)}
         ),
         "clientes": _lista_publicable(documentos, "cliente"),
         "obras_destino": _lista_publicable(documentos, "obra_destino"),
-        "destino_operacional": _destino_operacional_consolidado(documentos),
+        "destino_operacional": _destino_operacional_consolidado(destino),
         "localidad_entrega": _consolidar_unico(
-            [getattr(d, "localidad_entrega", "") for d in documentos]
+            [getattr(d, "localidad_entrega", "") for d in destino]
         ),
         "region_entrega": _consolidar_unico(
-            [getattr(d, "region_entrega", "") for d in documentos]
+            [getattr(d, "region_entrega", "") for d in destino]
         ),
         "distancia_km": routing["distancia_km"],
         "duracion_min": routing["duracion_min"],
