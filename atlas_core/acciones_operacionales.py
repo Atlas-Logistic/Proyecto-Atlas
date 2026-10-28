@@ -1936,10 +1936,13 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     nuevo = str(p["numero_guia_corregido"]).strip()
     if not re.fullmatch(r"[1-9][0-9]{5}", nuevo):
         raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "el folio corregido debe tener 6 dígitos")
-    if actual != "9" + nuevo and actual != GUIA_AUSENTE_DOCUMENTAL:
+    digito_inicial_omitido = bool(re.fullmatch(r"[0-9]{5}", actual)) and nuevo[1:] == actual
+    if digito_inicial_omitido and not str(p.get("archivo", "")).strip():
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "con digito inicial ausente hay que indicar archivo")
+    if actual != "9" + nuevo and actual != GUIA_AUSENTE_DOCUMENTAL and not digito_inicial_omitido:
         raise ErrorAccionOperacional(
             "PRECONDICION_FALLIDA",
-            "sólo se corrige un folio ausente o leído con el marcador º como 9 inicial")
+            "solo se admite folio ausente, un digito inicial omitido o marcador inicial interpretado como 9")
     if ausente and sum(str(f.get("archivo", "")) == archivo for f in ctx.filas()) != 1:
         raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "el archivo no identifica un único documento")
     otros = sorted(str(f.get("archivo", "")) for f in ctx.filas()
@@ -1969,6 +1972,8 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
         "La lectura OCR original queda en el ledger de auditoría.",
         "Sólo se revalida este documento y se regenera el reporte; no se reconcilia la bandeja global.",
     ]
+    if digito_inicial_omitido:
+        consecuencias[-1] = "Se regenera el reporte sin recalcular destino ni ruta."
     if trasladar:
         consecuencias.append(
             f"{len(trasladar)} tarjeta(s) pendiente(s) de este documento ("
@@ -1982,10 +1987,10 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
         afectados={"guias": [actual, nuevo], "archivo": archivo, "numero_transporte": transporte,
                    "tarjetas_trasladadas": trasladar},
         consecuencias=consecuencias,
-        revalidaciones=["MANTENIMIENTO_FOCAL_GUIAS", "REGENERAR_REPORTE_VIAJES"],
+        revalidaciones=(["REGENERAR_REPORTE_VIAJES"] if digito_inicial_omitido else ["MANTENIMIENTO_FOCAL_GUIAS", "REGENERAR_REPORTE_VIAJES"]),
         archivos=("dataset", "ledger_decisiones", "bandeja") if trasladar else ("dataset", "ledger_decisiones"),
         datos={"archivo": archivo, "guia": actual, "guia_nueva": nuevo, "transporte": transporte,
-               "tarjetas": trasladar},
+               "tarjetas": trasladar, "digito_inicial_omitido": digito_inicial_omitido},
     )
 
 
@@ -2066,7 +2071,7 @@ def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan,
         _trasladar_tarjetas_a_folio(ctx, tarjetas, archivo=str(plan.datos["archivo"]), nuevo=nuevo)
     return {"despues": {"numero_guia": nuevo,
                         **({"tarjetas_trasladadas": tarjetas} if tarjetas else {})},
-            "guias_revalidar": [nuevo], "regenerar_reporte": True}
+            "guias_revalidar": [] if plan.datos.get("digito_inicial_omitido") else [nuevo], "regenerar_reporte": True}
 
 
 # =============================================================== DECISIONES
@@ -2632,7 +2637,7 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_comuna_destino, _aplicar_documento_comuna_destino),
     DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
-                     "Corrige un folio ausente o leído con el marcador º como 9 inicial (9482179 -> 482179).",
+                     "Corrige un folio ausente, con digito inicial omitido o marcador inicial interpretado como 9.",
                      {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_corregir_numero_guia, _aplicar_documento_corregir_numero_guia),

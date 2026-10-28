@@ -1197,3 +1197,27 @@ def test_482402_tarjeta_que_cambia_tras_el_preview_no_se_aplica(entorno, monkeyp
     resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
     assert resultado["estado"] == "PREVIEW_OBSOLETO", resultado
     assert _sha(entorno["dataset"]) == dataset_antes
+
+
+def test_corregir_folio_digito_inicial_omitido_focal_y_auditable(entorno, monkeypatch):
+    _escribir_dataset(entorno, [_fila("83315", archivo="objetivo.jpg", numero_transporte="0000366559", estado_documental="OK", indicador_revision="OK", estado_operacional="REQUIERE_REVISION", estado_ruta="REQUIERE_REVISION"), _fila("500002")])
+    antes = _filas_dataset(entorno)
+    revalidadas = []
+    _sin_mantenimiento_real(monkeypatch, revalidadas)
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    def preview(actual="83315", nuevo="483315", archivo="objetivo.jpg"):
+        return capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {"numero_guia": actual, "numero_guia_corregido": nuevo, "archivo": archivo}, actor="JAVIER")
+    assert preview(archivo="")["codigo"] == "PARAMETRO_INVALIDO"
+    assert preview(nuevo="483316")["codigo"] == "PRECONDICION_FALLIDA"
+    plan = preview()
+    assert plan["estado"] == "PREVIEW", plan
+    r = capa.ejecutar(plan["token"], actor="JAVIER", confirmado_por="JAVIER")
+    assert r["estado"] == "APLICADA", r
+    assert not revalidadas
+    despues = _filas_dataset(entorno)
+    assert despues["objetivo.jpg"]["numero_guia"] == "483315"
+    assert {k:v for k,v in despues["objetivo.jpg"].items() if k != "numero_guia"} == {k:v for k,v in antes["objetivo.jpg"].items() if k != "numero_guia"}
+    assert despues["500002.jpeg"] == antes["500002.jpeg"]
+    ledger = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert any(a.get("accion") == "CORREGIR_NUMERO_GUIA" and a.get("valor_documental") == "83315" and a.get("valor_corregido") == "483315" for a in ledger)
