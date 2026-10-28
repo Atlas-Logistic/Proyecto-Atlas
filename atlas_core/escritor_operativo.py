@@ -59,6 +59,30 @@ def ruta_identidad_escritor() -> Path:
     return base / "Atlas" / "escritor_operativo_id.txt"
 
 
+def ruta_relevo_confirmado() -> Path:
+    return ruta_identidad_escritor().parent / "escritor_operativo_relevo.json"
+
+
+def leer_relevo_confirmado(ruta: Path) -> dict:
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def registrar_relevo_confirmado(ruta: Path, *, escritor_id: str, epoca: int) -> None:
+    """Sólo tras `LIBERADO` de Cloud. Reemplazo atómico; si falla, el próximo
+    relevo aplica el margen (conservador)."""
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        temporal = ruta.with_name(f"{ruta.name}.{os.getpid()}.tmp")
+        temporal.write_text(json.dumps({"escritor_id": escritor_id, "epoca": epoca}), encoding="utf-8")
+        os.replace(temporal, ruta)
+    except OSError:
+        pass
+
+
 def identidad_escritor(*, ruta: Path | None = None) -> str:
     """Identidad estable por instalación, con override explícito para soporte."""
     override = os.environ.get("ATLAS_ESCRITOR_ID", "").strip()
@@ -89,6 +113,7 @@ class LeaseEscritorOperativo:
         timeout: float = 30.0, heartbeat_segundos: float = LEASE_HEARTBEAT_SEGUNDOS,
         margen_relevo_segundos: float = MARGEN_RELEVO_SEGUNDOS,
         dormir: Callable[[float], None] | None = None,
+        ruta_relevo: Path | None = None,
     ) -> None:
         self.base_url = base_url
         self.token_motor = token_motor
@@ -97,6 +122,7 @@ class LeaseEscritorOperativo:
         self.heartbeat_segundos = heartbeat_segundos
         self.margen_relevo_segundos = margen_relevo_segundos
         self._dormir = dormir or (lambda segundos: self._detener.wait(segundos))
+        self.ruta_relevo = ruta_relevo or ruta_relevo_confirmado()
         self.lease_token = ""
         self.epoca = 0
         # True sólo si el último `adquirir` falló porque otro titular lo tiene.
@@ -131,15 +157,26 @@ class LeaseEscritorOperativo:
         self.lease_token = token
         self.epoca = int(respuesta.get("epoca") or 0)
         self._iniciar_heartbeat()
-        # epoca previa > 0 significa que ya hubo un titular. Este cliente no
-        # distingue vencimiento de liberación voluntaria: aplica el margen en
-        # ambos casos, conservador y sin depender de Drive.
-        if int(previo.get("epoca") or 0) > 0 and self.margen_relevo_segundos > 0:
+        # epoca previa > 0 significa que ya hubo un titular. Cloud no distingue
+        # vencimiento de liberación voluntaria, así que el margen se aplica
+        # salvo evidencia local inequívoca: este mismo PC recibió LIBERADO de
+        # la época inmediatamente anterior y nadie más la tuvo entre medio.
+        epoca_previa = int(previo.get("epoca") or 0)
+        if epoca_previa > 0 and self.margen_relevo_segundos > 0 and not self._relevo_confirmado(previo, epoca_previa):
             self._dormir(self.margen_relevo_segundos)
         if not self.vigente:
             self.cerrar()
             return False
         return True
+
+    def _relevo_confirmado(self, previo: dict, epoca_previa: int) -> bool:
+        relevo = leer_relevo_confirmado(self.ruta_relevo)
+        return (
+            previo.get("vigente") is False
+            and relevo.get("escritor_id") == self.escritor_id
+            and relevo.get("epoca") == epoca_previa
+            and self.epoca == epoca_previa + 1
+        )
 
     def renovar(self) -> bool:
         if not self.vigente:
@@ -173,11 +210,16 @@ class LeaseEscritorOperativo:
         if self._hilo is not None:
             self._hilo.join(timeout=self.timeout + 1)
         if self.lease_token:
+            # Sólo un lease aún vigente, con el heartbeat detenido, deja
+            # constancia de relevo; perdido o sin LIBERADO, el siguiente espera.
+            confiable = not self._perdido.is_set() and (self._hilo is None or not self._hilo.is_alive())
             try:
-                _json(
+                respuesta = _json(
                     self.base_url, "/api/motor/escritor/liberar", self.token_motor,
                     method="POST", body={"lease_token": self.lease_token}, timeout=self.timeout,
                 )
+                if confiable and respuesta.get("estado") == "LIBERADO" and self.epoca > 0:
+                    registrar_relevo_confirmado(self.ruta_relevo, escritor_id=self.escritor_id, epoca=self.epoca)
             except ErrorEscritorOperativo:
                 pass
         self.lease_token = ""
