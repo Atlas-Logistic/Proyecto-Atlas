@@ -28,6 +28,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -2904,7 +2905,12 @@ class CapaAccionesOperacionales:
             if nombre is None:
                 destino.unlink(missing_ok=True)
             else:
-                shutil.copy2(respaldo["ruta"] / nombre, destino)
+                # Atómico: un lector concurrente nunca ve el archivo a medio
+                # copiar (incidente 28/10: la ingesta de Desktop leyó el
+                # dataset durante una restauración en Drive y lo truncó).
+                temporal = destino.with_name(f".{destino.name}.restauracion.tmp")
+                shutil.copy2(respaldo["ruta"] / nombre, temporal)
+                os.replace(temporal, destino)
 
     def _reconciliar(self, *, guias_objetivo=None) -> dict | None:
         """Republica la bandeja con hashes frescos y retira decisiones que el

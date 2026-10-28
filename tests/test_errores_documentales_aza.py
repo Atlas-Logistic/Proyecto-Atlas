@@ -295,3 +295,20 @@ def test_registrar_direccion_rechaza_comuna_no_oficial(temuco):
                               accion="REGISTRAR_DIRECCION", direccion_manual="ANTONIO VARAS 1134",
                               comuna_manual="CAUTIN")
     assert hashlib.sha256(temuco["dataset"].read_bytes()).hexdigest() == antes
+
+
+def test_restauracion_tras_fallo_es_atomica(varas, monkeypatch):
+    """Incidente 28/10: una restauración copiada en el lugar fue leída a medias
+    por otro escritor (ingesta de Desktop) y truncó el dataset en Drive."""
+    import atlas_core.acciones_operacionales as modulo
+    reemplazos, original = [], modulo.os.replace
+    monkeypatch.setattr(modulo.os, "replace", lambda a, b: (reemplazos.append(str(b)), original(a, b)))
+    antes = varas["dataset"].read_bytes()
+    capa = CapaAccionesOperacionales(varas["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL", {"numero_guia": "482816", "chofer": "142938162"},
+                                 actor="CLAUDE_CODE", origen="HUMANO")
+    r = capa.ejecutar(preview["token"], actor="CLAUDE_CODE", origen="HUMANO", confirmado_por="JAVIER")
+    assert r["estado"] == "FALLIDA" and r["respaldo_restaurado"] is True
+    assert str(varas["dataset"]) in reemplazos
+    assert varas["dataset"].read_bytes() == antes
+    assert not list(varas["actual"].glob(".*.restauracion.tmp"))
