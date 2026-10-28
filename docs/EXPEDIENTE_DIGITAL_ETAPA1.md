@@ -22,3 +22,12 @@ archivos ni Mobile. No modifica catálogos, fichas, B1, viajes ni OCR. Sin despl
 CLI/IPC de lectura y registro con preview y confirmación, carga y validación de archivos (reutilizar la de
 licencias de `fichas_choferes`), interfaz en Desktop, alertas y decidir la migración de las licencias de fichas
 al expediente.
+
+## Integración etapa 2A (28/10/2026)
+
+Integrado sobre 198c5c9 sin cambios de código. La licencia de conducir se sigue escribiendo sólo con
+`fichas_choferes.registrar_licencia_chofer` en `fichas_documentales.json` (botón de Desktop): fuente única,
+sin almacén paralelo. `estado_expediente` la lee en sólo lectura (verificado contra una licencia escrita por
+ese escritor: sólo la vigente, separada por empresa, mismo estado de vencimiento que Desktop) y
+`expediente_documentos.json` no se crea. `registrar_documento` queda sin consumidores hasta decidir SOAP,
+revisión técnica y permiso de circulación y la migración de licencias.
