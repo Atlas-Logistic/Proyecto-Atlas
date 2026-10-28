@@ -336,6 +336,7 @@ class DocumentoViaje:
     # nunca `fecha` (documental).
     fecha_ingesta_utc: str
     evidencia: dict[str, str]
+    destino_operacional_confirmado: bool = False
 
 
 # Bloque ORIGEN DE VIAJE: jerarquía de confianza de la fuente que determinó
@@ -656,6 +657,9 @@ class Viaje:
         consolidado`. Ningún dato por documento se toca -- `despachar_a_
         crudo`/las decisiones humanas existentes siguen intactas; esto
         sólo decide qué se PRESENTA como destino consolidado del viaje."""
+        if self.documentos and all(d.destino_operacional_confirmado for d in self.documentos) and len(self.entregas) == 1:
+            # La identidad humana no depende de haber calculado una ruta.
+            return self._campo_ruta_consolidado(campo)
         if _clave_normalizada(self._bloque_routing_consolidado()["estado_ruta"]) != "ruta_calculada":
             return ""
         return self._campo_ruta_consolidado(campo)
@@ -981,7 +985,9 @@ def _documento_desde_fila(
     resolver_patente: Callable[[str, str, str], str] | None = None,
     choferes_operacionales: Mapping[str, Mapping[str, str]] | None = None,
 ) -> DocumentoViaje:
-    evidencia = {str(clave): str(valor or "") for clave, valor in fila.items()}
+    original = fila.get("_evidencia_documental_original")
+    evidencia_fila = original if isinstance(original, Mapping) else fila
+    evidencia = {str(clave): str(valor or "") for clave, valor in evidencia_fila.items()}
     chofer_original = str(fila.get("chofer", "")).strip()
     chofer = (
         normalizador_chofer(chofer_original)
@@ -1075,6 +1081,7 @@ def _documento_desde_fila(
         duracion_estadia_gps_min=str(fila.get("duracion_estadia_gps_min", "")).strip(),
         fecha_ingesta_utc=str(fila.get("fecha_ingesta_utc", "")).strip(),
         evidencia=evidencia,
+        destino_operacional_confirmado=isinstance(original, Mapping),
     )
 
 

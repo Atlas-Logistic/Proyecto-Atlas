@@ -192,6 +192,19 @@ def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     para direccion_entrega/despachar_a -- ver bloques arriba) en el más
     fuerte de esos niveles compartidos. Sin ningún nivel compartido -> NO
     compatible (nunca se agrupa "por descarte")."""
+    # Un destino humano no hereda ni comparte ruta con un documento que
+    # no tenga su propia confirmacion operacional. Dos confirmaciones solo
+    # coinciden si direccion y comuna declaradas son exactamente iguales.
+    confirmado_a = bool(getattr(a, "destino_operacional_confirmado", False))
+    confirmado_b = bool(getattr(b, "destino_operacional_confirmado", False))
+    if confirmado_a or confirmado_b:
+        if not (confirmado_a and confirmado_b):
+            return False
+        direccion_a = _clave(getattr(a, "direccion_entrega", ""))
+        direccion_b = _clave(getattr(b, "direccion_entrega", ""))
+        comuna_a = _clave(getattr(a, "localidad_entrega", ""))
+        comuna_b = _clave(getattr(b, "localidad_entrega", ""))
+        return bool(direccion_a and comuna_a and direccion_a == direccion_b and comuna_a == comuna_b)
     # Un codigo territorial comun no puede prevalecer sobre dos destinos
     # operacionales distintos. Comparar calle y localidad antes de agrupar;
     # conservar la tolerancia OCR solo cuando el numero coincide.

@@ -100,7 +100,7 @@ def test_formas_de_la_instruccion(texto):
 
 def test_no_captura_preguntas_ni_otras_ordenes():
     assert interpretar_determinista(f"¿Cuál es la coordenada del destino {NOVICIADO}?") is None
-    assert interpretar_determinista("El destino de la guía 472037 es Avenida Apoquindo 1234").accion == "DECISION_APLICAR"
+    assert interpretar_determinista("El destino de la guía 472037 es Avenida Apoquindo 1234").accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
 
 
 def test_noviciado_preview_confirmacion_ruteo_idempotencia(entorno, b1):

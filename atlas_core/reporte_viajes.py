@@ -591,11 +591,21 @@ def generar_reporte_viajes(
     from atlas_core.chofer_operacional import indice_choferes_operacionales
     from atlas_core.gestor_viajes import pesos_viaje_confirmados_por_ledger
     try:
-        ledger_decisiones = json.loads((origen.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        ledger_decisiones = json.loads((origen.parent / "decisiones_aplicadas.json").read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
         ledger_decisiones = {}
+    except (OSError, ValueError) as error:
+        raise RuntimeError("No se puede leer el ledger; no se publica el reporte") from error
+    # La decision humana es una proyeccion operacional, nunca una edicion del CSV documental.
+    from atlas_core.destino_operacional import proyectar_destino
+    filas_operacionales = []
+    for fila in filas:
+        proyectada = proyectar_destino(fila, ledger_decisiones)
+        if proyectada != fila:
+            proyectada["_evidencia_documental_original"] = dict(fila)
+        filas_operacionales.append(proyectada)
     viajes, sin_transporte = agrupar_viajes(
-        filas, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
+        filas_operacionales, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
         guias_revision_humana=guias_revision_humana, reloj=lambda: instante,
         agrupaciones_transporte=mapa_transporte_a_grupo(agrupaciones_activas(origen.parent)),
         pesos_viaje_confirmados=pesos_viaje_confirmados_por_ledger(ledger_decisiones),

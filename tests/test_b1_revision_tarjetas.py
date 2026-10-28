@@ -97,10 +97,10 @@ def test_destino_usa_la_revision_exacta_de_la_tarjeta():
     from atlas_core.b1_operador import interpretar_determinista
     canonica = instruccion_en_revision(tarjeta, "el destino es AV EJEMPLO 123, COMUNA DE MAIPU")
     intencion = interpretar_determinista(canonica)
-    assert intencion.accion == "DECISION_APLICAR"
+    assert intencion.accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
     assert ajustar_a_revision(intencion, tarjeta, "x") == ""
-    # Aunque la guía tenga otra revisión de destino, se usa la de ESTA tarjeta.
-    assert intencion.parametros["decision_id"] == "d2" and "guia_destino" not in intencion.menciones
+    assert intencion.parametros["archivo"] == ARCHIVO
+    assert intencion.parametros["numero_guia"] == GUIA
 
 
 def test_accion_ajena_a_la_tarjeta_se_rechaza():

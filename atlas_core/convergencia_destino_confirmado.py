@@ -172,14 +172,18 @@ def revalidar_destinos_confirmados_convergentes(*, ruta_dataset, carpeta_catalog
         aplicaciones = []
     except (OSError, ValueError):
         return {'guias_actualizadas': [], 'abstencion': 'LEDGER_ILEGIBLE'}
+    from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+    destinos_humanos = identidades_destino_confirmado(ruta.parent / "decisiones_aplicadas.json")
     actualizadas = []
     cache = {}
     from atlas_core.investigacion_documental import archivos_en_investigacion
     cuarentena = archivos_en_investigacion(Path(carpeta_catalogos).parent)
     with bloqueo_sesion(ruta.parent, 'revalidacion_dataset'):
         filas = _leer_filas(ruta)
-        testigos = [f for f in _leer_filas(ruta, completas=True) if f.get('archivo') not in cuarentena]
+        testigos = [f for f in _leer_filas(ruta, completas=True) if f.get('archivo') not in cuarentena and not tiene_destino_confirmado(f, destinos_humanos)]
         for fila in filas:
+            if tiene_destino_confirmado(fila, destinos_humanos):
+                continue
             guia = str(fila.get('numero_guia', ''))
             if guias_objetivo is not None and guia not in guias_objetivo:
                 continue

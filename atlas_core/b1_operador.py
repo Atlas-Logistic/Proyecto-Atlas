@@ -240,12 +240,14 @@ _REVISION_CAMPOS = {
                re.compile(r"^(?:[A-Z][A-Z.' -]{2,}|[0-9.]{1,12}-?[0-9K])$"), "el chofer", "el chofer es JUAN PEREZ"),
 }
 _REVISION_CAMPOS["rut_chofer"] = (r"RUT(?:\s+DEL\s+CHOFER)?|CHOFER|CONDUCTOR(?:A)?", *_REVISION_CAMPOS["chofer"][1:])
+# Tarjetas de relación obra-destino (DESTINO_SIN_CONFIRMAR): mismo destino operacional.
+_REVISION_CAMPOS["destino_entrega"] = _REVISION_CAMPOS["despachar_a_crudo"]
 _REVISION_CAMPOS_CHOFER = {"chofer", "rut_chofer"}
-_REVISION_NO_SOPORTADO = {"destino_entrega": "el destino", "planta_origen": "la planta de origen"}
+_REVISION_NO_SOPORTADO = {"planta_origen": "la planta de origen"}
 _REVISION_TIPOS_DESTINO = {"DESTINO_NO_RESUELTO"}
 # Únicas acciones de B1 que una tarjeta puede usar (correcciones ya existentes).
 _REVISION_ACCIONES = {"DOCUMENTO_CORREGIR_CAMPO", "DOCUMENTO_ASIGNAR_OBRA", "DECISION_APLICAR",
-                      "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL"}
+                      "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL", "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}
 
 
 def separar_contexto_revision(texto: str) -> tuple[str, str]:
@@ -300,7 +302,7 @@ def aclaracion_revision(decision: Mapping[str, object]) -> str:
         return ("Esta tarjeta es de un documento sin número de guía; B1 corrige por número de guía. "
                 "Usa las opciones de la tarjeta. No se corrigió nada.")
     regla = _REVISION_CAMPOS.get(campo)
-    if regla is None or (campo == "despachar_a_crudo" and decision.get("tipo") not in _REVISION_TIPOS_DESTINO):
+    if regla is None:
         dato = _REVISION_NO_SOPORTADO.get(campo, "este dato")
         return (f"Desde esta tarjeta B1 todavía no corrige {dato} de la guía {guia}. "
                 "Usa las opciones de la tarjeta. No se corrigió nada.")
@@ -322,6 +324,8 @@ def ajustar_a_revision(intencion: Intencion, decision: Mapping[str, object], ins
         guia_orden, admitida = str(p.get("numero_guia") or ""), p.get("campo") == campo and campo in _REVISION_CAMPOS
     elif intencion.accion == "DOCUMENTO_ASIGNAR_OBRA":
         guia_orden, admitida = str(p.get("numero_guia") or ""), campo == "obra_destino"
+    elif intencion.accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
+        guia_orden, admitida = str(p.get("numero_guia") or ""), True
     elif intencion.accion == "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL":
         guia_orden, admitida = str(p.get("numero_guia") or ""), campo in _REVISION_CAMPOS_CHOFER
     elif intencion.accion == "DECISION_APLICAR" and p.get("accion_decision") == "REGISTRAR_DIRECCION":
@@ -679,13 +683,16 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         m = patron.match(plano)
         if m:
             direccion = original[m.start("dir"):m.end("dir")].strip(" ,")
-            parametros = {"accion_decision": "REGISTRAR_DIRECCION"}
-            comuna = _COMUNA_EXPLICITA.match(_plano(direccion))
-            if comuna:
-                parametros["comuna_manual"] = direccion[comuna.start("comuna"):comuna.end("comuna")].strip()
-                direccion = direccion[:comuna.end("dir")].strip(" ,")
-            parametros["direccion_manual"] = direccion
-            return Intencion("DECISION_APLICAR", parametros, {"guia_destino": m.group("guia")})
+            comuna_match = _COMUNA_EXPLICITA.match(_plano(direccion))
+            if comuna_match:
+                comuna = direccion[comuna_match.start("comuna"):comuna_match.end("comuna")].strip()
+                direccion = direccion[:comuna_match.end("dir")].strip(" ,")
+            elif "," in direccion:
+                direccion, comuna = (v.strip() for v in direccion.rsplit(",", 1))
+            else:
+                comuna = ""
+            return Intencion("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", {
+                "numero_guia": m.group("guia"), "direccion": direccion, "comuna": comuna})
     m = _DOCUMENTO.match(plano)
     if m:
         return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
@@ -937,6 +944,11 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
     elif accion == "CHOFER_CAMBIAR_ESTADO":
         estado = "ACTIVO" if propuesto.get("activo") else "INACTIVO"
         texto = f"Dejar al chofer {entidad.get('nombre')} como {estado}."
+    elif accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
+        texto = (f"Destino de la guia {entidad.get('numero_guia')}: "
+                 f"{(actual or {}).get('direccion') or 'sin destino'} -> "
+                 f"{propuesto.get('direccion')}, {propuesto.get('comuna')}. "
+                 "La ruta anterior se descarta y se recalcula al confirmar; el documento original se conserva.")
     elif accion == "DECISION_APLICAR" and propuesto.get("accion") == "REGISTRAR_DIRECCION":
         documento = entidad.get("documento") or {}
         comuna = f", comuna {propuesto['comuna_manual']}" if propuesto.get("comuna_manual") else ""
@@ -1738,6 +1750,10 @@ class OperadorB1:
             return {"estado": "NO_INTERPRETADA", "mensaje": (
                 "No reconocí una instrucción operacional. Puedo: asociar vehículo a chofer, activar/inactivar un "
                 "chofer, corregir el peso, un campo o la obra de una guía, o consultar choferes, obras y decisiones.")}
+        if intencion.accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL" and not intencion.parametros.get("comuna"):
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [],
+                    "mensaje": "Indica la direccion completa y la comuna, separadas por una coma. No se cambio nada."}
         if intencion.accion == ACCION_INVESTIGAR_REVISION:
             return self._investigar_revision(intencion, estado, conversacion_id)
         if intencion.accion == ACCION_DESDE_INVESTIGACION:
@@ -2355,6 +2371,24 @@ class OperadorB1:
                                     f"{_peso_legible((resultado.get('despues') or {}).get('peso_kg'))} "
                                     f"(antes {_peso_legible((resultado.get('antes') or {}).get('peso_kg'))}). "
                                     "La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.")}
+            if pendiente["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
+                reporte = (resultado.get("revalidacion") or {}).get("reporte") or {}
+                if not resultado.get("persistencia_verificada"):
+                    return {"estado": "FALLIDA", "accion": pendiente["accion"],
+                            "mensaje": "No se pudo verificar la persistencia del destino."}
+                despues = resultado.get("despues") or {}
+                if despues.get("ruta") == "CALCULADA":
+                    mensaje = (f"Destino operacional guardado y verificado. Ruta recalculada: "
+                               f"{despues.get('distancia_km')} km.")
+                else:
+                    mensaje = ("Destino operacional guardado y verificado. La ruta anterior se descartó y la nueva "
+                               "queda pendiente: no se pudo calcular con seguridad para esta dirección.")
+                if not reporte.get("regenerado"):
+                    mensaje += " No se pudo actualizar el viaje; vuelve a cargar Atlas."
+                if not (resultado.get("reconciliacion") or {}).get("ejecutado"):
+                    mensaje += " No se pudo actualizar la bandeja de revisiones."
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                        "mensaje": mensaje}
             return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
                     "mensaje": _describir_resultado(resultado)}
         if estado_capa == "PREVIEW_OBSOLETO" or resultado.get("codigo") in {"PREVIEW_EXPIRADO", "TOKEN_DESCONOCIDO"}:

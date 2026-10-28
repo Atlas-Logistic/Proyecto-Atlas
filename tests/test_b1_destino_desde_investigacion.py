@@ -116,7 +116,8 @@ def _huellas(b1):
 def test_separacion_de_intenciones_de_destino():
     assert interpretar_determinista(f"¿Cuál es el destino de la guía {GUIA}?") is None  # consulta interna
     asignacion = interpretar_determinista(f"El destino de la guía {GUIA} es Avenida Apoquindo 1234")
-    assert asignacion.accion == "DECISION_APLICAR"
+    # Una asignación explícita es el destino operacional de la guía.
+    assert asignacion.accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
     investigacion = interpretar_determinista(INVESTIGA)
     assert investigacion.accion == ACCION_INVESTIGAR_REVISION
     assert investigacion.parametros == {"numero_guia": GUIA, "campos": ("despachar_a_crudo",)}
@@ -135,8 +136,8 @@ def test_consulta_simple_no_investiga(b1):
 
 
 def test_asignacion_explicita_sigue_generando_preview(b1):
-    r = b1.atender("c", f"El destino de la guía {GUIA} es Avenida Apoquindo 1234")
-    assert r["estado"] == "PREVIEW_PENDIENTE" and r["accion"] == "DECISION_APLICAR"
+    r = b1.atender("c", f"El destino de la guía {GUIA} es Avenida Apoquindo 1234, LAS CONDES")
+    assert r["estado"] == "PREVIEW_PENDIENTE" and r["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
     assert b1.investigaciones == []
 
 

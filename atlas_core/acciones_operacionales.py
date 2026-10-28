@@ -1460,6 +1460,76 @@ def _aplicar_documento_corregir_chofer(ctx: _Contexto, p: dict, plan: Plan, acto
     return {"despues": valores, "guias_revalidar": list(plan.datos["guias_viaje"])}
 
 
+def _plan_documento_destino_operacional(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.destino_operacional import proyectar_destino
+    from atlas_core.direccion_equivalente import comuna_oficial
+    from atlas_core.credibilidad_campos import evaluar_credibilidad_direccion, NivelCredibilidad
+    direccion, comuna = str(p["direccion"]).strip(), str(p["comuna"]).strip()
+    if not comuna_oficial(comuna):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "Indica una comuna oficial explicita.")
+    if evaluar_credibilidad_direccion(direccion).nivel != NivelCredibilidad.CONFIABLE:
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "Indica una direccion completa y sin ambiguedad.")
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    archivo, guia = str(fila.get("archivo", "")).strip(), str(fila.get("numero_guia", "")).strip()
+    if not archivo:
+        raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "El documento no tiene archivo identificable.")
+    ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+    actual = proyectar_destino(fila, ledger)
+    anterior = {"direccion": str(actual.get("direccion_entrega") or fila.get("despachar_a_crudo") or ""),
+                "comuna": str(actual.get("localidad_entrega") or "")}
+    propuesto = {"direccion": direccion, "comuna": comuna_oficial(comuna)}
+    return Plan(entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia,
+                         "numero_transporte": _transporte(fila), "campo": "DESTINO_OPERACIONAL"},
+                valor_actual=anterior, valor_propuesto=propuesto,
+                estado_base={"fila": fila, "destino_actual": anterior},
+                sin_cambios=anterior == propuesto,
+                afectados={"guias": [guia], "total_guias": 1},
+                consecuencias=["Solo cambia el destino operacional de esta guia.",
+                               "La ruta anterior se descarta; al confirmar se recalcula para esta direccion "
+                               "y, si no es valida, queda pendiente.",
+                               "El documento original, el OCR y las demas guias no se modifican."],
+                archivos=("ledger_decisiones", "bandeja"),
+                datos={"archivo": archivo, "guia": guia, "transporte": _transporte(fila)})
+
+
+def _aplicar_documento_destino_operacional(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.destino_operacional import TIPO, calcular_ruta_operacional, proyectar_destino, ruta_valida
+    # La ruta se calcula para la dirección confirmada (proveedor externo, sin
+    # lock); sólo se publica si es válida, si no queda pendiente.
+    ruta = calcular_ruta_operacional(
+        plan.estado_base["fila"], plan.valor_propuesto["direccion"], plan.valor_propuesto["comuna"],
+        carpeta_catalogos=ctx.catalogos, proveedor_rutas=ctx.proveedor_rutas,
+        proveedor_rutas_fallback=ctx.proveedor_rutas_fallback)
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        ledger.setdefault("aplicaciones", []).append({
+            "decision_id": f"ACCION_OPERACIONAL:{ctx.token}", "tipo": TIPO,
+            "accion": "CORREGIR_DESTINO_OPERACIONAL", "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "documento": {"archivo": plan.datos["archivo"], "numero_guia": plan.datos["guia"],
+                          "numero_transporte": plan.datos["transporte"]},
+            "destino_operacional": plan.valor_propuesto, "destino_anterior": plan.valor_actual,
+            "referencia": str(p.get("referencia", "")),
+            "ruta_operacional": ruta,
+        })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    comprobado = _leer_json(ctx.archivos["ledger_decisiones"], {})
+    entradas = comprobado.get("aplicaciones", [])
+    if not entradas or entradas[-1].get("decision_id") != f"ACCION_OPERACIONAL:{ctx.token}":
+        raise ErrorAccionOperacional("PERSISTENCIA_NO_VERIFICADA", "No se verifico la decision operacional.")
+    fila = _fila_documento(ctx, plan.datos["guia"], plan.datos["archivo"])
+    proyectada = proyectar_destino(fila, comprobado)
+    if (proyectada.get("direccion_entrega") != plan.valor_propuesto["direccion"] or
+            proyectada.get("localidad_entrega") != plan.valor_propuesto["comuna"]):
+        raise ErrorAccionOperacional("PERSISTENCIA_NO_VERIFICADA", "No se verifico el destino operacional.")
+    calculada = ruta_valida(ruta, plan.valor_propuesto["comuna"])
+    return {"despues": {**plan.valor_propuesto,
+                        "distancia_km": ruta["distancia_km"] if calculada else "",
+                        "duracion_min": ruta["duracion_min"] if calculada else "",
+                        "ruta": "CALCULADA" if calculada else "PENDIENTE"},
+            "persistencia_verificada": True, "reconciliar": True, "regenerar_reporte": True}
+
+
 def _plan_documento_chofer_operacional(ctx: _Contexto, p: dict) -> Plan:
     """Chofer OPERACIONAL de UNA guía con un chofer activo del catálogo (ver
     `atlas_core.chofer_operacional`). Nunca escribe `chofer`/`rut_chofer` del
@@ -2536,6 +2606,12 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "rut_chofer": _P("rut", True), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
+    DefinicionAccion("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", OPERACIONAL_REVERSIBLE,
+                     "Fija el destino operacional de una guia sin alterar su documento.",
+                     {"numero_guia": _P("guia", True), "direccion": _P("texto", True, max_largo=200),
+                      "comuna": _P("texto", True, max_largo=80),
+                      "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
+                     _plan_documento_destino_operacional, _aplicar_documento_destino_operacional),
     DefinicionAccion("DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL", OPERACIONAL_REVERSIBLE,
                      "Fija el chofer operacional de UNA guía con un chofer activo del catálogo; conserva el RUT "
                      "impreso, el OCR y la fotografía, sin tocar otras guías del transporte.",

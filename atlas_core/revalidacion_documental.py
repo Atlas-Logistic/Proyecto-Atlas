@@ -352,6 +352,29 @@ def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> No
                 completas[i] = nuevas[clave].popleft()
         if any(nuevas.values()): raise ValueError('Revalidación focal agregó documentos; no se publica.')
         filas = completas
+    # Los datos documentales y derivados anteriores de un destino humano no
+    # se reescriben durante una revalidacion automatica. La vista operacional
+    # se obtiene del ledger; conservar las demas columnas sin cambios.
+    from atlas_core.destino_operacional import identidades_destino_confirmado
+    identidades = identidades_destino_confirmado(ruta_csv.parent / "decisiones_aplicadas.json")
+    if identidades:
+        with ruta_csv.open(encoding="utf-8-sig", newline="") as archivo:
+            originales = {(str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()): f
+                          for f in csv.DictReader(archivo, delimiter=";")}
+        campos_protegidos = {"despachar_a_crudo", "latitud_entrega", "longitud_entrega", *CAMPOS_DERIVADOS_RUTA}
+        claves_nuevas = [(str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()) for f in filas]
+        for identidad in identidades:
+            if identidad in originales and claves_nuevas.count(identidad) != 1:
+                raise ValueError("Documento con destino confirmado eliminado o duplicado; escritura detenida")
+        for fila in filas:
+            clave = (str(fila.get("archivo", "")).strip(), str(fila.get("numero_guia", "")).strip())
+            if clave in identidades:
+                original = originales.get(clave)
+                if original is None:
+                    raise ValueError("Documento confirmado ausente; no se reescribe el dataset")
+                for campo in campos_protegidos:
+                    if campo in original:
+                        fila[campo] = original[campo]
     # Caso real 474823: un surrogate suelto en cualquier valor abortaba la
     # escritura UTF-8 a mitad de archivo. Se sanea sólo lo inválido (con
     # trazabilidad en el log); el texto Unicode válido queda intacto.
@@ -3525,6 +3548,8 @@ def revalidar_ruta_por_historial_de_obra_sin_ocr(
     from atlas_core.decisiones_pendientes import _guias_con_direccion_confirmada_por_humano
 
     ruta = Path(ruta_dataset)
+    from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+    destinos_humanos = identidades_destino_confirmado(ruta.parent / "decisiones_aplicadas.json")
     ledger = ruta.parent / "decisiones_aplicadas.json"
     try:
         guias_direccion_confirmada = _guias_con_direccion_confirmada_por_humano(ledger)
@@ -3543,6 +3568,8 @@ def revalidar_ruta_por_historial_de_obra_sin_ocr(
         # geocodificada, agrupados por (obra, planta de origen).
         hermanos_por_obra_planta: dict[tuple[str, str], list[dict[str, str]]] = {}
         for hermano in _leer_filas(ruta, completas=True):
+            if tiene_destino_confirmado(hermano, destinos_humanos):
+                continue
             if str(hermano.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value:
                 continue
             if not str(hermano.get("localidad_entrega", "")).strip():
@@ -3557,6 +3584,8 @@ def revalidar_ruta_por_historial_de_obra_sin_ocr(
 
         guias_actualizadas: list[str] = []
         for fila in filas:
+            if tiene_destino_confirmado(fila, destinos_humanos):
+                continue
             guia = str(fila.get("numero_guia", "")).strip()
             if guia not in guias_direccion_confirmada:
                 continue
@@ -3681,6 +3710,8 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
     )
 
     ruta = Path(ruta_dataset)
+    from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+    destinos_humanos = identidades_destino_confirmado(ruta.parent / "decisiones_aplicadas.json")
     carpeta = Path(carpeta_catalogos)
     if proveedor_rutas is None:
         # Bloque P0 AISLAMIENTO DE CACHÉ -- ver docstring de
@@ -3704,6 +3735,8 @@ def revalidar_ruta_por_convergencia_gps_historica_sin_ocr(
         filas_por_obra: dict[tuple[str, int], list[dict[str, str]]] = {}
         direcciones_por_obra: dict[str, list[str]] = {}
         for fila in (filas if guias_en_alcance(ruta) is None else _leer_filas(ruta, completas=True)):
+            if tiene_destino_confirmado(fila, destinos_humanos):
+                continue
             obra = normalizar_nombre_obra(str(fila.get("obra_destino", "")))
             direccion = str(fila.get("despachar_a_crudo", "")).strip()
             if not obra or not direccion or _destino_con_etiqueta_residual_convergencia(direccion):
@@ -4079,8 +4112,14 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
         # la batería diferida -- ver `TIPOS_ELEGIBLES_DIFERIR_
         # REVALIDACION_GLOBAL` en `aplicacion_decisiones.py`.
         guias_intentadas: list[str] = []
+        from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+        destinos_humanos = identidades_destino_confirmado(ruta.parent / "decisiones_aplicadas.json")
         for fila in filas:
             if guias_objetivo is not None and str(fila.get("numero_guia", "")).strip() not in guias_objetivo:
+                continue
+            # Su ruta se calcula al confirmar el destino operacional, nunca
+            # desde el destino documental que la decisión reemplazó.
+            if tiene_destino_confirmado(fila, destinos_humanos):
                 continue
             if str(fila.get("numero_guia", "")).strip() in guias_excluir_reintento:
                 continue
@@ -4760,6 +4799,8 @@ def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
     from atlas_core.rutas.destino_entrega import resolver_direccion_canonica_mas_limpia
 
     ruta = Path(ruta_dataset)
+    from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+    destinos_humanos = identidades_destino_confirmado(ruta.parent / "decisiones_aplicadas.json")
     catalogos = Path(carpeta_catalogos)
     candidatos_catalogo: list[str] = []
     try:
@@ -4780,6 +4821,8 @@ def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
         # es el histórico, sin necesidad de un catálogo aparte.
         crudos_por_cliente: dict[str, list[str]] = {}
         for fila in _leer_filas(ruta, completas=True):
+            if tiene_destino_confirmado(fila, destinos_humanos):
+                continue
             cliente = str(fila.get("cliente", "")).strip()
             crudo = str(fila.get("despachar_a_crudo", "")).strip()
             if cliente and crudo:
@@ -4787,6 +4830,8 @@ def revalidar_direccion_entrega_por_documentos_hermanos_sin_ocr(
 
         guias_actualizadas: list[str] = []
         for fila in filas:
+            if tiene_destino_confirmado(fila, destinos_humanos):
+                continue
             if str(fila.get("estado_ruta", "")).strip() != EstadoRuta.RUTA_CALCULADA.value:
                 continue
             entrega_actual = str(fila.get("direccion_entrega", "")).strip()
@@ -5420,6 +5465,8 @@ def revalidar_destino_rut_pegado_persistido_sin_ocr(
     impreso bajo RETIRA quedó pegado al final de DESPACHAR A y partió el
     viaje en dos entregas falsas) -- mismas garantías: nunca relee OCR."""
     ruta = Path(ruta_dataset)
+    from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+    destinos_humanos = identidades_destino_confirmado(ruta.parent / "decisiones_aplicadas.json")
     with bloqueo_sesion(ruta.parent, "revalidacion_dataset"):
         try:
             filas = _leer_filas(ruta)
@@ -5427,6 +5474,8 @@ def revalidar_destino_rut_pegado_persistido_sin_ocr(
             return {"filas_totales": 0, "guias_actualizadas": []}
         actualizadas: list[str] = []
         for fila in filas:
+            if tiene_destino_confirmado(fila, destinos_humanos):
+                continue
             cambio = False
             chofer = str(fila.get("chofer", "")).strip()
             for campo in ("despachar_a_crudo", "direccion_entrega"):

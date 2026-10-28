@@ -58,7 +58,7 @@ def test_evidencia_incompleta_no_inventa(entorno):
 
 def test_modificacion_explicita_conservada():
     assert interpretar_determinista('corrige la obra de la guia 500001 a Obra Norte').accion=='DOCUMENTO_ASIGNAR_OBRA'
-    assert interpretar_determinista('el destino de la guia 500001 es Calle Uno 123').accion=='DECISION_APLICAR'
+    assert interpretar_determinista('el destino de la guia 500001 es Calle Uno 123').accion=='DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL'
     assert interpretar_determinista('cuales guias estan pendientes de revision') is None
 
 

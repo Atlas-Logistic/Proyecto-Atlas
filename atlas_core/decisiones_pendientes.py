@@ -3154,6 +3154,11 @@ def regenerar_decisiones_persistidas(
         resultado = retirar_decisiones_destino_convergente(
             resultado, ruta_dataset=ruta_dataset, carpeta_catalogos=carpeta_catalogos,
         )
+        # El destino operacional confirmado resuelve solo la tarjeta de destino
+        # de ese documento; no oculta otras revisiones de la misma guia.
+        from atlas_core.destino_operacional import retirar_decisiones_destino_operacional
+        resultado = retirar_decisiones_destino_operacional(
+            resultado, ruta_ledger=Path(ruta_dataset).parent / "decisiones_aplicadas.json")
         # Chofer operacional ya fijado por un humano para el documento: la
         # tarjeta de chofer no vuelve aunque una relectura la regenere.
         from atlas_core.chofer_operacional import retirar_decisiones_chofer_operacional
@@ -4703,5 +4708,10 @@ def _generar_artefacto_sin_lock(
             conservar_decisiones_ajenas(dataset, salida, decisiones_unicas), ruta_dataset=dataset,
         ),
     }
+    # Destino operacional confirmado desde Desktop: ninguna publicación (ni
+    # las tarjetas ajenas conservadas) vuelve a preguntar por ese destino.
+    from atlas_core.destino_operacional import retirar_decisiones_destino_operacional
+    artefacto["decisiones"] = retirar_decisiones_destino_operacional(
+        artefacto["decisiones"], ruta_ledger=ruta_ledger)
     escribir_json_atomico(salida, artefacto)
     return artefacto

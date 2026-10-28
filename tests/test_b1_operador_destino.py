@@ -45,15 +45,16 @@ def _preparar(tmp_path, *, publicar=True):
 ])
 def test_variantes_de_la_misma_intencion(texto):
     intencion = interpretar_determinista(texto)
-    assert intencion is not None and intencion.accion == "DECISION_APLICAR"
-    assert intencion.parametros == {"accion_decision": "REGISTRAR_DIRECCION", "direccion_manual": DIRECCION}
-    assert intencion.menciones == {"guia_destino": "472037"}
+    assert intencion is not None and intencion.accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
+    assert intencion.parametros == {"numero_guia": "472037", "direccion": DIRECCION, "comuna": ""}
+    assert intencion.menciones == {}
 
 
 def test_comuna_explicita_viaja_separada():
     intencion = interpretar_determinista("El destino de la guía 472037 es San Damián 0100, comuna Las Condes")
-    assert intencion.parametros == {"accion_decision": "REGISTRAR_DIRECCION",
-                                    "direccion_manual": "SAN DAMIÁN 0100", "comuna_manual": "LAS CONDES"}
+    assert intencion.parametros["numero_guia"] == "472037"
+    assert intencion.parametros["direccion"].endswith("0100")
+    assert intencion.parametros["comuna"] == "LAS CONDES"
 
 
 def test_no_captura_otras_intenciones():
@@ -64,41 +65,23 @@ def test_no_captura_otras_intenciones():
 def test_destino_por_lenguaje_natural_preview_confirmacion_y_aplicacion(tmp_path):
     entorno, decision, b1 = _preparar(tmp_path)
     dataset, actual = entorno["dataset"], entorno["actual"]
-    huellas = {n: _sha(actual / n) for n in ("analisis_completo_guias.csv", "decisiones_aplicadas.json",
-                                             "decisiones_pendientes.json")}
-
-    r = b1.atender("c", "El destino de la guía 472037 es Avenida Apoquindo 1234")
+    antes = dataset.read_bytes()
+    texto = "El destino de la guia 472037 es Avenida Apoquindo 1234, LAS CONDES"
+    r = b1.atender("c", texto)
     assert r["estado"] == "PREVIEW_PENDIENTE", r
-    assert r["accion"] == "DECISION_APLICAR"
-    assert r["preview"]["entidad"]["id"] == decision["decision_id"]
-    assert r["preview"]["valor_propuesto"] == {"accion": "REGISTRAR_DIRECCION", "direccion_manual": DIRECCION}
-    assert "guía 472037" in r["mensaje"] and DIRECCION in r["mensaje"] and "¿Confirmas?" in r["mensaje"]
-    # nada escrito antes de confirmar
-    assert {n: _sha(actual / n) for n in huellas} == huellas
-
-    e = b1.atender("c", "sí")
+    assert r["preview"]["entidad"]["id"] == "472037.jpeg"
+    assert r["preview"]["valor_propuesto"] == {"direccion": DIRECCION, "comuna": "LAS CONDES"}
+    assert dataset.read_bytes() == antes
+    e = b1.atender("c", "si")
     assert e["estado"] == "EJECUTADA", e
-    fila = _leer_csv(dataset)[0]
-    assert fila["despachar_a_crudo"] == DIRECCION
-    assert fila["estado_ruta"] == "RUTA_CALCULADA"
-    bandeja = json.loads((actual / "decisiones_pendientes.json").read_text(encoding="utf-8"))
-    assert decision["decision_id"] not in {d["decision_id"] for d in bandeja["decisiones"]}
-    ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
-    aplicadas = [a for a in ledger if a["decision_id"] == decision["decision_id"]]
-    assert len(aplicadas) == 1 and aplicadas[0]["accion"] == "REGISTRAR_DIRECCION" and aplicadas[0]["actor"] == "B1"
+    assert e["resultado"]["persistencia_verificada"] is True
+    assert dataset.read_bytes() == antes
+    aplicaciones = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
+    assert len([a for a in aplicaciones if a.get("tipo") == "DESTINO_OPERACIONAL_DOCUMENTO"]) == 1
     auditoria = b1.capa.auditoria()
-    assert len(auditoria) == 1 and auditoria[0]["accion"] == "DECISION_APLICAR"
-    assert auditoria[0]["confirmado_por"] == "JAVIER" and auditoria[0]["resultado"] == "APLICADA"
-
-    # idempotencia: el mismo token no reaplica y la misma orden ya no tiene nada pendiente
-    token = auditoria[0]["token"]
-    antes = _sha(dataset)
-    assert b1.capa.ejecutar(token, actor="B1", origen="B1", confirmado_por="JAVIER")["idempotente"] is True
-    otra = b1.atender("c", "El destino de la guía 472037 es Avenida Apoquindo 1234")
-    assert otra["estado"] == "ACLARACION_REQUERIDA"
-    assert _sha(dataset) == antes and len(b1.capa.auditoria()) == 1
-    assert len([a for a in json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
-                if a["decision_id"] == decision["decision_id"]]) == 1
+    assert auditoria[-1]["confirmado_por"] == "JAVIER"
+    assert b1.capa.ejecutar(auditoria[-1]["token"], actor="B1", origen="B1", confirmado_por="JAVIER")["idempotente"] is True
+    assert b1.atender("c", texto)["estado"] == "SIN_CAMBIOS"
 
 
 def test_sin_revision_de_destino_pendiente_pide_aclaracion_y_no_escribe(tmp_path):
@@ -106,7 +89,7 @@ def test_sin_revision_de_destino_pendiente_pide_aclaracion_y_no_escribe(tmp_path
     antes = _sha(entorno["dataset"])
     r = b1.atender("c", "El destino de la guía 472037 es Avenida Apoquindo 1234")
     assert r["estado"] == "ACLARACION_REQUERIDA"
-    assert "no tiene una revisión de destino pendiente" in r["mensaje"]
+    assert "comuna" in r["mensaje"]
     assert b1.pendiente("c") is None
     assert b1.atender("c", "sí")["estado"] == "SIN_PREVIEW_PENDIENTE"
     assert _sha(entorno["dataset"]) == antes
@@ -114,5 +97,5 @@ def test_sin_revision_de_destino_pendiente_pide_aclaracion_y_no_escribe(tmp_path
 
 def test_guia_de_otra_revision_no_se_confunde(tmp_path):
     entorno, _decision, b1 = _preparar(tmp_path)
-    r = b1.atender("c", "El destino de la guía 999999 es Avenida Apoquindo 1234")
-    assert r["estado"] == "ACLARACION_REQUERIDA" and "999999" in r["mensaje"]
+    r = b1.atender("c", "El destino de la guia 999999 es Avenida Apoquindo 1234, LAS CONDES")
+    assert r["estado"] == "RECHAZADA" and "inexistente" in r["mensaje"]

@@ -1667,6 +1667,9 @@ def _reprocesar_envio_mobile_persistido_impl(
     except ValueError as error:
         raise ErrorEnvioMobile(f"El dataset tiene un esquema incompatible: {error}") from error
     indice_fila = _validar_coincidencia_unica(filas)
+    from atlas_core.destino_operacional import identidades_destino_confirmado, tiene_destino_confirmado
+    if tiene_destino_confirmado(filas[indice_fila], identidades_destino_confirmado(dataset.parent / "decisiones_aplicadas.json")):
+        raise ErrorEnvioMobile("Documento con destino operacional confirmado; reproceso detenido para conservarlo.")
     # El resto del dataset (todas las filas MENOS la que se va a
     # reemplazar) es el mismo "historial" que vería un documento nuevo
     # -- asociación/B1 evalúan este documento contra sus HERMANOS reales
@@ -1820,6 +1823,8 @@ def _reprocesar_envio_mobile_persistido_impl(
             with bloqueo_sesion(dataset.parent, NOMBRE_LOCK_DATASET_OPERACIONAL):
                 filas_frescas = _leer_filas(dataset)
                 indice_fresco = _validar_coincidencia_unica(filas_frescas)
+                if tiene_destino_confirmado(filas_frescas[indice_fresco], identidades_destino_confirmado(dataset.parent / "decisiones_aplicadas.json")):
+                    raise ErrorEnvioMobile("Destino confirmado durante el reproceso; documento conservado.")
                 # Microcorrección (Codex, Problema A) -- el journal se
                 # escribe PRIMERO, con el dataset TODAVÍA sin tocar: si
                 # esta escritura falla, el dataset ni se tocó -- sigue

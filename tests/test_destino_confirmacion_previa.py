@@ -177,7 +177,7 @@ def _sha(ruta):
 
 def test_intencion():
     assert interpretar_determinista(ORDEN).accion == ACCION_DESTINO_CONFIRMADO_PREVIO
-    assert interpretar_determinista(f"El destino de la guía {GUIA} es {CALLE}").accion == "DECISION_APLICAR"
+    assert interpretar_determinista(f"El destino de la guía {GUIA} es {CALLE}").accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
     assert interpretar_determinista(f"¿Cuál es el destino de la guía {GUIA}?") is None
 
 
