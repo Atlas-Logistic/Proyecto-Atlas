@@ -460,6 +460,19 @@ def responder_consulta_atlas(
     except ValueError as error:
         return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
     viajes = cargar_viajes(ruta_viajes)
+    if consulta_anterior and "adicional" in consulta_anterior.filtros:
+        import re
+        if re.fullmatch(r"\s*(?:muestramelos|muestra(?:melos)?|listalos|listar|cuales son)\s*[?]?\s*", pregunta.lower()):
+            return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE,
+                texto_respuesta="Para listar esos viajes, repite la consulta de adicional con su monto.")
+    from atlas_core.consulta_adicionales import consultar_adicionales
+    adicionales = consultar_adicionales(pregunta, viajes, raiz_atlas)
+    if adicionales is not None:
+        if adicionales[0] == "limitacion":
+            return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE, texto_respuesta=adicionales[1])
+        resultado = adicionales[1]
+        return RespuestaConsultaAtlas(estado=ESTADO_OK if resultado.total_coincidencias else ESTADO_SIN_RESULTADOS,
+                                      texto_respuesta=adicionales[2], resultado=resultado)
     catalogos = construir_catalogos_consulta(viajes)
 
     consulta, avisos = interpretar_consulta_determinista(
