@@ -7087,14 +7087,15 @@ def reconciliar_decisiones_peso_viaje(
     cache_memoizacion: dict[tuple[object, ...], list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     """Publica una tarjeta `PESO_VIAJE_IMPLAUSIBLE` por viaje cuyo peso
-    total sigue fuera de rango y retira las que ya no aplican (peso
-    corregido, confirmado o viaje que cambió). Sin OCR, sin red; sólo
-    (re)escribe la bandeja."""
+    total sigue fuera de rango y una `PESO_NO_DISPONIBLE` por guía sin peso
+    (caso 483526), y retira las que ya no aplican (peso corregido,
+    confirmado o viaje que cambió). Sin OCR, sin red; sólo (re)escribe la
+    bandeja."""
     from atlas_core.agrupacion_viajes import agrupaciones_activas, mapa_transporte_a_grupo
     from atlas_core.decisiones_pendientes import (
         NOMBRE_ARTEFACTO, NOMBRE_LOCK_DECISIONES_PENDIENTES,
-        _generar_artefacto_sin_lock, detectar_decisiones_peso_viaje_implausible,
-        regenerar_decisiones_persistidas,
+        _generar_artefacto_sin_lock, detectar_decisiones_peso_no_disponible,
+        detectar_decisiones_peso_viaje_implausible, regenerar_decisiones_persistidas,
     )
     from atlas_core.gestor_viajes import pesos_viaje_confirmados_por_ledger
 
@@ -7114,7 +7115,7 @@ def reconciliar_decisiones_peso_viaje(
     candidatas = detectar_decisiones_peso_viaje_implausible(
         filas, agrupaciones_transporte=mapa_transporte_a_grupo(agrupaciones_activas(actual)),
         pesos_viaje_confirmados=pesos_viaje_confirmados_por_ledger(ledger),
-    )
+    ) + detectar_decisiones_peso_no_disponible(filas)
     ids_candidatas = {d["decision_id"] for d in candidatas}
     with bloqueo_sesion(artefacto_ruta.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
         try:
@@ -7123,7 +7124,8 @@ def reconciliar_decisiones_peso_viaje(
             pendientes_actuales = []
         vigentes = [
             d for d in pendientes_actuales
-            if d.get("tipo") != "PESO_VIAJE_IMPLAUSIBLE" or d.get("decision_id") in ids_candidatas
+            if d.get("tipo") not in {"PESO_VIAJE_IMPLAUSIBLE", "PESO_NO_DISPONIBLE"}
+            or d.get("decision_id") in ids_candidatas
         ]
         ids_vigentes = {d.get("decision_id") for d in vigentes}
         nuevas = [d for d in candidatas if d["decision_id"] not in ids_vigentes]

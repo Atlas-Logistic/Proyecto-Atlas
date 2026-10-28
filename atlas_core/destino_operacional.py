@@ -68,6 +68,18 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
             for campo in CAMPOS_RUTA:
                 salida[campo] = str(ruta.get(campo) or "")
             salida["estado_entrega"] = "RESUELTO"
+        # Casos reales 483491/483526: el estado operacional documental
+        # reflejaba la ruta que faltaba; con el destino confirmado se
+        # recalcula con la regla de siempre (documento en revisión o ruta no
+        # calculada), así el viaje no queda en revisión por una ruta ya
+        # resuelta ni sale de ella si la ruta sigue pendiente.
+        salida["estado_operacional"] = (
+            "REQUIERE_REVISION"
+            if str(fila.get("estado_documental", "")).strip() == "REQUIERE_REVISION"
+            or str(fila.get("indicador_revision", "")).strip().casefold() == "revisar"
+            or salida["estado_ruta"] != RUTA_CALCULADA
+            else "OK"
+        )
     return salida
 
 
