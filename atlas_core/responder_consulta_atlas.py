@@ -460,11 +460,28 @@ def responder_consulta_atlas(
     except ValueError as error:
         return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
     viajes = cargar_viajes(ruta_viajes)
+    # La direccion de entrega del reporte es de viaje; no identifica la
+    # direccion de cada guia de un viaje con varios documentos.
+    from atlas_core.consultas_atlas import normalizar_texto_atlas
+    import re
+    texto_seguro = normalizar_texto_atlas(pregunta)
+    if (re.search(r"\bGUIAS?\b", texto_seguro)
+            and re.search(r"\b(?:SIN|NO TIENEN?|FALTA(?:N)?)\s+(?:LA\s+)?DIRECCION(?: DE ENTREGA)?\b", texto_seguro)):
+        return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE,
+            texto_respuesta="No puedo contar guias sin direccion de entrega: el reporte disponible contiene la direccion consolidada por viaje, no por guia.")
     if consulta_anterior and "adicional" in consulta_anterior.filtros:
         import re
         if re.fullmatch(r"\s*(?:muestramelos|muestra(?:melos)?|listalos|listar|cuales son)\s*[?]?\s*", pregunta.lower()):
             return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE,
                 texto_respuesta="Para listar esos viajes, repite la consulta de adicional con su monto.")
+    from atlas_core.consulta_pendientes_b1 import consultar_pendientes_tecnicos
+    pendientes = consultar_pendientes_tecnicos(pregunta, viajes, raiz_atlas)
+    if pendientes is not None:
+        if pendientes[0] == "limitacion":
+            return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE, texto_respuesta=pendientes[1])
+        resultado = pendientes[1]
+        return RespuestaConsultaAtlas(estado=ESTADO_OK if resultado.total_coincidencias else ESTADO_SIN_RESULTADOS,
+                                      texto_respuesta=pendientes[2], resultado=resultado)
     from atlas_core.consulta_adicionales import consultar_adicionales
     adicionales = consultar_adicionales(pregunta, viajes, raiz_atlas)
     if adicionales is not None:
@@ -478,6 +495,17 @@ def responder_consulta_atlas(
     consulta, avisos = interpretar_consulta_determinista(
         pregunta, catalogos=catalogos, contexto_previo=consulta_anterior,
     )
+
+    if consulta is not None and consulta.filtros.get("ausente"):
+        from atlas_core.consultas_atlas import _COLUMNA_PRESENCIA, _CAMPO_DOCUMENTO, _documentos_viaje
+        campos = consulta.filtros["ausente"].split(",")
+        if any(_COLUMNA_PRESENCIA.get(c.strip()) not in v for c in campos for v in viajes):
+            return RespuestaConsultaAtlas(estado=ESTADO_FUENTE_NO_DISPONIBLE,
+                texto_respuesta="El reporte no contiene el campo solicitado; no puedo contar sus ausencias.")
+        if consulta.metrica == METRICA_COUNT_GUIAS and any(c.strip() in _CAMPO_DOCUMENTO for c in campos):
+            if any(not _documentos_viaje(v) and v.get("numeros_guia") for v in viajes):
+                return RespuestaConsultaAtlas(estado=ESTADO_FUENTE_NO_DISPONIBLE,
+                    texto_respuesta="El reporte no contiene el detalle documental necesario para contar las guias sin ese dato.")
 
     ambiguos = [a for a in avisos if a.startswith("AMBIGUO:")]
     if ambiguos:

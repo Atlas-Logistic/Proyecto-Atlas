@@ -197,6 +197,7 @@ CAMPOS_PRESENCIA = frozenset(_COLUMNA_PRESENCIA)
 _VALORES_AUSENTES = frozenset({
     "", "NO ENCONTRADO", "NO ENCONTRADA", "NO_ENCONTRADO", "NO_ENCONTRADA",
     "N/A", "NA", "-", "SIN DATO", "SIN DATOS", "NONE", "NULL",
+    "NO DETERMINADO", "NO DETERMINADA", "NO_DETERMINADO", "NO_DETERMINADA",
 })
 # Bloque UNIVERSAL V1 (Bloque 7/18 del ticket) -- "patente" es un filtro
 # VIRTUAL: un usuario que pregunta por una patente no sabe (ni debería
