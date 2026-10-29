@@ -41,8 +41,10 @@ EXCLUIDOS_PRIMER_NIVEL = frozenset({
 # Línea base de la activación: archivos mutables que la operación reescribe.
 SEMILLA_CARPETAS = ("operacion/actual", "operacion/procesamiento", "catalogos_privados", "fichas_digitales")
 SEMILLA_ENVIOS = "operacion/mobile/envios"
-LOTE_CONFIRMACION = 200
-LOTE_CONSULTA = 500
+# Lotes chicos: el Worker consulta R2/D1 por elemento y cada solicitud debe
+# terminar dentro del timeout del cliente y de los límites por solicitud.
+LOTE_CONFIRMACION = 50
+LOTE_CONSULTA = 50
 
 log = logging.getLogger(__name__)
 
