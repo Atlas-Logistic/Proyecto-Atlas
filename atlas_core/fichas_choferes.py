@@ -356,3 +356,104 @@ def registrar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo,
                     'vencimiento': vencimiento, 'reemplazados': len(anterior_ids),
                     'revision': propuesta['revision'], 'sha256': huella,
                     'respaldo': str(respaldo)}
+
+
+ESTADO_PENDIENTE_EXTRACCION = 'PENDIENTE_EXTRACCION'
+_EXTENSION_POR_MIME = {'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png'}
+_FIRMA_POR_EXTENSION = {'.pdf': b'%PDF-', '.jpg': b'\xff\xd8\xff', '.png': b'\x89PNG\r\n\x1a\n'}
+
+
+def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, contenido, mime_type,
+                                        sha256, origen_documento_id, recibido_en, comprobar,
+                                        actor='MOBILE'):
+    """Guarda en la ficha el original de una licencia enviada desde Mobile.
+
+    Queda PENDIENTE_EXTRACCION: sin clase ni vencimiento, nunca vigente y sin
+    reemplazar las licencias anteriores. La ficha se resuelve sólo por la
+    referencia de catálogo (el `chofer_id` del token Mobile). Lo invoca el
+    PULL bajo su propio lease: `comprobar` lanza si se perdió. Idempotente
+    por `origen_documento_id` (el documento Cloud).
+    """
+    referencia_catalogo = str(referencia_catalogo or '')
+    origen_documento_id = str(origen_documento_id or '')
+    if not referencia_catalogo or not origen_documento_id:
+        raise ValueError('Documento Mobile sin chofer o sin identificador')
+    extension = _EXTENSION_POR_MIME.get(mime_type)
+    if not extension or not contenido.startswith(_FIRMA_POR_EXTENSION[extension]):
+        raise ValueError('El contenido no corresponde a un PDF, JPG o PNG')
+    if not 0 < len(contenido) <= MAXIMO_ARCHIVO_LICENCIA:
+        raise ValueError('El archivo debe tener entre 1 byte y 20 MB')
+    huella = hashlib.sha256(contenido).hexdigest()
+    if huella != str(sha256 or '').lower():
+        raise ValueError('La huella del archivo recibido no coincide')
+    comprobar()
+    ruta = ruta_almacen(raiz, empresa)
+    with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
+        catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'
+        catalogo_bytes = catalogo_ruta.read_bytes()
+        if referencia_catalogo not in json.loads(catalogo_bytes.decode('utf-8-sig')):
+            raise ValueError('El chofer de la sesión Mobile no es un chofer vigente del catálogo')
+        anterior = leer_almacen(raiz, empresa=empresa)
+        if not anterior or anterior.get('version') != VERSION:
+            raise ValueError('La base de fichas debe inicializarse antes de recibir una licencia')
+        for ficha in anterior['choferes']:
+            for doc in ficha['documentos']:
+                if doc.get('origen_documento_id') == origen_documento_id:
+                    return {'ok': True, 'idempotente': True, 'documento_id': doc['documento_id'],
+                            'ficha_id': ficha['ficha_id'], 'sha256': doc.get('sha256')}
+        if referencia_catalogo not in fichas_por_referencia(anterior):
+            raise ValueError('El chofer de la sesión Mobile no tiene ficha digital')
+        propuesta = copy.deepcopy(anterior)
+        ficha_nueva = fichas_por_referencia(propuesta)[referencia_catalogo]
+        ficha_id = ficha_nueva['ficha_id']
+        documento_id = str(uuid.uuid4())
+        instante = _ahora()
+        destino_relativo = Path('archivos') / 'choferes' / ficha_id / (documento_id + extension)
+        destino = ruta.parent / destino_relativo
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        if not destino.parent.resolve().is_relative_to(ruta.parent.resolve()):
+            raise ValueError('La carpeta de adjuntos apunta fuera de la empresa')
+        respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
+        respaldo.mkdir(parents=True)
+        shutil.copy2(ruta, respaldo / ruta.name)
+        temporal = destino.with_name('.' + destino.name + '.tmp-' + uuid.uuid4().hex)
+        try:
+            with temporal.open('xb') as salida:
+                salida.write(contenido)
+            if destino.exists():
+                raise FileExistsError('Ya existe un adjunto con ese identificador')
+            os.rename(temporal, destino)
+        except Exception:
+            temporal.unlink(missing_ok=True)
+            raise
+        documento = {
+            'documento_id': documento_id, 'tipo': 'LICENCIA_CONDUCIR',
+            'estado_revision': ESTADO_PENDIENTE_EXTRACCION, 'origen': 'MOBILE',
+            'origen_documento_id': origen_documento_id, 'archivo': destino_relativo.as_posix(),
+            'sha256': huella, 'bytes': len(contenido), 'creado_en': instante,
+            'recibido_en': str(recibido_en or instante),
+        }
+        ficha_nueva['documentos'].append(documento)
+        ficha_nueva['historial'].append({
+            'accion': 'LICENCIA_RECIBIDA_MOBILE', 'actor': actor, 'fecha': instante,
+            'documento_id': documento_id, 'origen_documento_id': origen_documento_id, 'sha256': huella,
+        })
+        propuesta['revision'] = int(anterior['revision']) + 1
+        _validar_v2(propuesta)
+        escribir_json_atomico(respaldo / 'manifest.json', {
+            'empresa': empresa, 'actor': actor, 'operacion': 'LICENCIA_RECIBIDA_MOBILE',
+            'ficha_id': ficha_id, 'documento_id': documento_id, 'origen_documento_id': origen_documento_id,
+            'sha256': huella, 'bytes': len(contenido), 'revision_anterior': anterior['revision'],
+            'ruta_relativa': str(ruta.relative_to(raiz)),
+        })
+        comprobar()
+        if catalogo_ruta.read_bytes() != catalogo_bytes:
+            destino.unlink(missing_ok=True)
+            raise ValueError('El catálogo cambió durante la recepción; no se publicó la licencia')
+        try:
+            escribir_json_atomico(ruta, propuesta)
+        except Exception:
+            destino.unlink(missing_ok=True)
+            raise
+        return {'ok': True, 'idempotente': False, 'documento_id': documento_id, 'ficha_id': ficha_id,
+                'revision': propuesta['revision'], 'sha256': huella, 'respaldo': str(respaldo)}

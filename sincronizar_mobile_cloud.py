@@ -24,6 +24,7 @@ import os
 import socket
 
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
+from atlas_core.cloud_fichas_documentos import sincronizar_licencias_cloud
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
@@ -73,13 +74,25 @@ def ejecutar_pull_con_escritor(
         with guardia:
             if raiz is not None:
                 recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
-            return sincronizar_envios_cloud(
+            resultado = sincronizar_envios_cloud(
                 base_url=base_url, token_motor=token_motor, consumidor=consumidor,
                 repositorio=repositorio, timeout=timeout, procesar=procesar,
                 dataset=dataset, carpeta_catalogos=carpeta_catalogos,
                 puede_continuar=vigente,
                 proveedor_ocr_preferido=proveedor_ocr_preferido,
             )
+            # Licencias enviadas desde Mobile: después de las guías y bajo el
+            # mismo lease. Un fallo aquí no altera el resultado de las guías.
+            if raiz is not None and vigente():
+                try:
+                    resultado["licencias_mobile"] = sincronizar_licencias_cloud(
+                        base_url=base_url, token_motor=token_motor, consumidor=consumidor,
+                        raiz=raiz, timeout=timeout, puede_continuar=vigente,
+                    )
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Licencias Mobile no sincronizadas: %s", error)
+                    resultado["licencias_mobile"] = {"error": str(error)}
+            return resultado
 
 
 def main() -> None:
