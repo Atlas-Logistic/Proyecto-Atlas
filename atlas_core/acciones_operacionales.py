@@ -1115,7 +1115,7 @@ def _aplicar_obra_destino(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> di
 
 
 def _campos_documentales() -> tuple[str, ...]:
-    from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, CAMPOS_FOCALES_CONOCIDOS
+    from atlas_core.campos_documentales import CAMPOS_DOCUMENTALES_CONTROLADOS, CAMPOS_FOCALES_CONOCIDOS
     return tuple(sorted({*CAMPOS_FOCALES_CONOCIDOS, *CAMPOS_DOCUMENTALES_CONTROLADOS}))
 
 

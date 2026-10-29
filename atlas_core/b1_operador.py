@@ -215,7 +215,7 @@ _PESO_KG = re.compile(r"^(?P<n>[1-9]\d{0,2}(?:\.\d{3})+|[1-9]\d*)\s*(?:KG|KGS|KI
 
 
 def _peso_kg_declarado(original: str) -> str:
-    from atlas_core.reprocesamiento_reparador import _peso_documental_valido
+    from atlas_core.campos_documentales import _peso_documental_valido
     m = _PESO_KG.match(_plano(original).strip())
     kilos = m.group("n").replace(".", "") if m else ""
     if not kilos or not _peso_documental_valido(kilos):
