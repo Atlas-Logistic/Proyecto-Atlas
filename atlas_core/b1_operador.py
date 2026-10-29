@@ -197,6 +197,18 @@ _PESO_GUIA = [
                + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<peso>.+)$"),
     re.compile(r"^(?:LA\s+)?" + _GUIA + r"\s+(?:PESA|TIENE\s+UN\s+PESO(?:\s+(?:CORRECTO|REAL))?\s+DE)\s+(?P<peso>.+)$"),
 ]
+# MATERIAL de una guía. Recuperar = propuesta desde la evidencia original
+# (OCR, DOCUMENTO_RECUPERAR_MATERIAL); "el material de la guía N es X" = valor
+# humano (DOCUMENTO_CORREGIR_CAMPO, con ledger). Ninguna escribe sin "sí".
+_MATERIAL = r"(?:EL\s+)?MATERIAL(?:\s+(?:CORRECTO|REAL|VERDADERO))?"
+_MATERIAL_RECUPERAR = re.compile(
+    r"^(?:RECUPERA|RECUPERAR|PROPON|PROPONER|PROPONME|LEE|LEER|OBTEN|OBTENER)\s+" + _MATERIAL
+    + r"\s+(?:DE\s+LA\s+|DE\s+|EN\s+LA\s+)" + _GUIA + r"$")
+_MATERIAL_GUIA = [
+    re.compile(r"^" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + _PESO_ES + r"(?P<material>.+)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+               + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<material>.+)$"),
+]
 # Miles sólo con punto en grupos de 3 ("12.450"); coma, decimales u otra
 # unidad (toneladas) son ambiguos y se rechazan.
 _PESO_KG = re.compile(r"^(?P<n>[1-9]\d{0,2}(?:\.\d{3})+|[1-9]\d*)\s*(?:KG|KGS|KILOS?|KILOGRAMOS?)?$")
@@ -727,6 +739,17 @@ def interpretar_determinista(texto: str) -> Intencion | None:
                     "numero_guia": m.group("guia"), "campo": "peso_kg",
                     "valor": _peso_kg_declarado(original[m.start("peso"):m.end("peso")].strip()),
                     "referencia": " ".join(str(texto).split())[:500]})
+        m = _MATERIAL_RECUPERAR.match(plano)
+        if m:
+            return Intencion("DOCUMENTO_RECUPERAR_MATERIAL", {
+                "numero_guia": m.group("guia"), "referencia": " ".join(str(texto).split())[:500]})
+        for patron in _MATERIAL_GUIA:
+            m = patron.match(plano)
+            if m:
+                material = " ".join(original[m.start("material"):m.end("material")].split()).strip(" .,:").upper()
+                return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+                    "numero_guia": m.group("guia"), "campo": "descripcion_material", "valor": material,
+                    "referencia": " ".join(str(texto).split())[:500]})
         for patron in _COORDENADA_DESTINO:
             m = patron.match(plano)
             if m:
@@ -988,6 +1011,9 @@ _RECHAZO_PESO = {
 }
 
 
+_SUGERENCIA_MATERIAL = "Si conoces el material, escríbelo así: «el material de la guía {guia} es …»."
+
+
 _RECHAZO_CHOFER = {
     "ENTIDAD_AMBIGUA": "La guía {guia} tiene más de un documento en Atlas; no corrijo el chofer de una guía ambigua. "
                        "No se corrigió nada.",
@@ -1005,6 +1031,11 @@ def _km_legible(valor: object) -> str:
         return f"{float(str(valor)):.0f} km"
     except ValueError:
         return "ruta no disponible"
+
+
+def _material_legible(valor: object) -> str:
+    texto = str(valor or "").strip()
+    return f"«{texto}»" if texto else "sin material"
 
 
 def _describir_preview(preview: Mapping[str, object]) -> str:
@@ -1082,6 +1113,20 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
                  f"{entidad.get('numero_transporte') or 'sin transporte'}): peso actual "
                  f"{_peso_legible((actual or {}).get('peso_kg'))}, peso propuesto "
                  f"{_peso_legible(propuesto.get('peso_kg'))}. Sólo cambia el peso de esta guía.")
+    elif accion == "DOCUMENTO_CORREGIR_CAMPO" and entidad.get("campo") == "descripcion_material":
+        texto = (f"Corregir el material de la guía {entidad.get('numero_guia')} (transporte "
+                 f"{entidad.get('numero_transporte') or 'sin transporte'}): material actual "
+                 f"{_material_legible((actual or {}).get('descripcion_material'))}, material propuesto "
+                 f"{_material_legible(propuesto.get('descripcion_material'))}. Origen: indicado por el usuario "
+                 "(decisión humana). Sólo cambia el material de esta guía y su tipo de carga derivado; "
+                 "el documento original no se modifica.")
+    elif accion == "DOCUMENTO_RECUPERAR_MATERIAL":
+        texto = (f"Material de la guía {entidad.get('numero_guia')}: actual "
+                 f"{_material_legible((actual or {}).get('descripcion_material'))}, propuesto "
+                 f"{_material_legible(propuesto.get('descripcion_material'))}"
+                 f"{' (tipo de carga ' + str(propuesto['tipo_carga']) + ')' if propuesto.get('tipo_carga') else ''}. "
+                 f"Origen: lectura OCR de la evidencia original ({propuesto.get('veredicto')}); "
+                 "no es una decisión humana hasta que la confirmes.")
     elif accion == "DOCUMENTO_CORREGIR_CAMPO":
         texto = (f"Corregir {entidad.get('campo')} de la guía {entidad.get('numero_guia')}: "
                  f"{(actual or {}).get(entidad.get('campo'))!r} -> {propuesto.get(entidad.get('campo'))!r}.")
@@ -2264,6 +2309,9 @@ class OperadorB1:
             elif intencion.accion == ACCION_CHOFER_OPERACIONAL:
                 mensaje = _RECHAZO_CHOFER.get(str(preview.get("codigo")), "{m}. No se corrigió nada.").format(
                     guia=parametros.get("numero_guia"), m=mensaje)
+            elif intencion.accion == "DOCUMENTO_RECUPERAR_MATERIAL" and preview.get("codigo") == "PRECONDICION_FALLIDA":
+                mensaje = f"No pude leer el material de la guía {parametros.get('numero_guia')}: {mensaje}. " + \
+                    _SUGERENCIA_MATERIAL.format(guia=parametros.get("numero_guia"))
             return {"estado": "RECHAZADA", "accion": intencion.accion, "codigo": preview.get("codigo"),
                     "mensaje": mensaje}
         if preview.get("estado") == "RESULTADO":
@@ -2316,6 +2364,16 @@ class OperadorB1:
                     "mensaje": _describir_preview(preview) + " ¿Confirmas? (sí / no)"}
         if preview.get("estado") == "SIN_CAMBIOS":
             mensaje = "Eso ya está así; no hay nada que confirmar."
+            if intencion.accion == "DOCUMENTO_RECUPERAR_MATERIAL":
+                # Abstención: la lectura no da un material mejor que el actual.
+                guia, propuesto = parametros.get("numero_guia"), preview.get("valor_propuesto") or {}
+                actual = ((preview.get("valor_actual") or {}).get("descripcion_material") or "").strip()
+                mensaje = ((f"La guía {guia} ya tiene el material {_material_legible(actual)} y la evidencia original "
+                            "no aporta uno mejor" if actual else
+                            f"La evidencia original no permite proponer un material confiable para la guía {guia}")
+                           + f" (resultado {propuesto.get('veredicto')}; lectura OCR "
+                           f"{_material_legible(propuesto.get('lectura_ocr'))}). No se cambió nada. "
+                           + _SUGERENCIA_MATERIAL.format(guia=guia))
             if intencion.accion == "VIAJE_AGRUPAR_GUIAS":
                 unico = (preview.get("valor_propuesto") or {}).get("viaje_unico") or {}
                 mensaje = (f"Las guías {', '.join((preview.get('entidad') or {}).get('guias') or [])} ya pertenecen "
@@ -2465,6 +2523,18 @@ class OperadorB1:
                                     f"{_peso_legible((resultado.get('despues') or {}).get('peso_kg'))} "
                                     f"(antes {_peso_legible((resultado.get('antes') or {}).get('peso_kg'))}). "
                                     "La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.")}
+            if pendiente["accion"] == "DOCUMENTO_CORREGIR_CAMPO" and pendiente["parametros"].get("campo") == "descripcion_material":
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                        "mensaje": (f"Listo: la guía {pendiente['parametros']['numero_guia']} quedó con material "
+                                    f"{_material_legible((resultado.get('despues') or {}).get('descripcion_material'))} "
+                                    f"(antes {_material_legible((resultado.get('antes') or {}).get('descripcion_material'))}). "
+                                    "La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.")}
+            if pendiente["accion"] == "DOCUMENTO_RECUPERAR_MATERIAL":
+                despues = resultado.get("despues") or {}
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                        "mensaje": (f"Listo: la guía {pendiente['parametros']['numero_guia']} quedó con material "
+                                    f"{_material_legible(despues.get('descripcion_material'))}, leído de la evidencia "
+                                    "original. No quedó registrado como decisión humana.")}
             if pendiente["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
                 reporte = (resultado.get("revalidacion") or {}).get("reporte") or {}
                 if not resultado.get("persistencia_verificada"):

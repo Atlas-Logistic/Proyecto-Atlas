@@ -116,7 +116,10 @@ def _hora_documental_valida(valor: str) -> bool:
 
 
 def _material_documental_valido(valor: str) -> bool:
-    return valor not in _AUSENTES and len(valor) <= 200
+    # "NO DETERMINADO" es justamente la ausencia que se corrige: nunca un material.
+    marcador = " ".join(str(valor).replace("_", " ").split()).upper()
+    ausentes = {a.upper() for a in _AUSENTES} | {"NO DETERMINADO", "NO DETERMINADA"}
+    return valor not in _AUSENTES and marcador not in ausentes and len(valor) <= 200
 
 # --- Campos reparables -----------------------------------------------
 # Cada entrada: campo -> (motivos que lo marcan degradado hoy,
@@ -1284,6 +1287,14 @@ def reparar_documento_focal_con_valores_conocidos(
                 atipico = MotivoRevisionDocumento.PESO_OPERACIONALMENTE_ATIPICO.value
                 if evaluar_credibilidad_peso(fila["peso_kg"]).nivel != NivelCredibilidad.CONFIABLE:
                     motivos_restantes = sorted({*motivos_restantes, atipico})
+            material = next((c for c in cambios if c.campo == "descripcion_material"), None)
+            if material is not None:
+                # tipo_carga se deriva del material (igual que DOCUMENTO_RECUPERAR_MATERIAL);
+                # uno fijado aparte, distinto del derivado del material anterior, se respeta.
+                from atlas_core.clasificador_material import clasificar_material
+                if str(fila.get("tipo_carga", "")).strip() in {
+                        "", "NO DETERMINADO", clasificar_material(material.valor_anterior).value}:
+                    fila["tipo_carga"] = clasificar_material(material.valor_nuevo).value
             fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
             indicador, documental, operacional = _indicadores_documentales_coherentes(
                 motivos_restantes, str(fila.get("estado_ruta", "")).strip(),
