@@ -86,6 +86,12 @@ def test_desktop_limita_rapidocr_al_ingreso_y_restaura_entorno(tmp_path, monkeyp
         return {'ok': True}
     monkeypatch.setattr(d, 'sesion', sesion_falsa)
     monkeypatch.setattr(d, 'ingresar', ingreso_falso)
+    # El perfil Atlas de pruebas está aislado (conftest): el runtime manual
+    # se simula con un intérprete existente para que pase el permiso del worker.
+    runtime = tmp_path / 'runtime' / 'python.exe'
+    runtime.parent.mkdir()
+    runtime.write_bytes(b'')
+    monkeypatch.setattr(d, 'RUNTIME_RAPIDOCR_MANUAL', runtime)
     monkeypatch.delenv('ATLAS_OCR_PROVIDER', raising=False)
     monkeypatch.delenv('ATLAS_RAPIDOCR_PYTHON', raising=False)
     monkeypatch.delenv('ATLAS_OCR_MANUAL', raising=False)

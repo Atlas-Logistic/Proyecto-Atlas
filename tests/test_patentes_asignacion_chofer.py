@@ -134,9 +134,16 @@ def test_regresion_482559_carro_leido_como_tracto_y_carro_ausente(tmp_path, monk
     assert (resultado["patente_tracto"], resultado["patente_rampla"]) == (TRACTO, CARRO)
     assert "PATENTE_SIN_HOMOLOGAR" not in resultado["motivos_revision_documento"]
     assert "ASIGNACION_CHOFER_VEHICULO" in resultado["metodos_recuperacion_documento"]
-    traza = json.loads(resultado["metricas_procesamiento_json"])["patentes_por_asignacion_chofer"]
+    metricas = json.loads(resultado["metricas_procesamiento_json"])
+    # Integración CASA+OFICINA: la reclasificación por asignación vigente
+    # (CASA, 482953/482772/482902) devuelve primero el carro a su campo; la
+    # lectura OCR original queda en `reclasificacion_patentes` y esta traza
+    # recibe ese valor ya reclasificado para completar el tracto ausente.
+    assert metricas["reclasificacion_patentes"]["tracto_leido"] == CARRO
+    assert metricas["reclasificacion_patentes"]["carro_leido"] == "No encontrado"
+    traza = metricas["patentes_por_asignacion_chofer"]
     assert traza["resultado"] == RESULTADO_RESUELTO
-    assert traza["valor_ocr"] == {"patente_tracto": CARRO, "patente_rampla": "No encontrado"}
+    assert traza["valor_ocr"] == {"patente_tracto": "No encontrado", "patente_rampla": CARRO}
     assert traza["valor_aplicado"] == {"patente_tracto": TRACTO, "patente_rampla": CARRO}
 
 
