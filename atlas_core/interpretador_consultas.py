@@ -605,7 +605,7 @@ _PATRONES_AUSENCIA = (
     re.compile(rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|LES?\s+FALTAN?|FALTAN?)\s+"
                rf"{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO})\b"),
     re.compile(rf"\b(?P<campo>{_ALTERNATIVA_CAMPO})\s+(?:AUSENTES?|VACI[OA]S?|FALTANTES?|NO\s+ENCONTRAD[OA]S?|"
-               rf"NO\s+INFORMAD[OA]S?|NO\s+REGISTRAD[OA]S?|SIN\s+DATOS?)\b"),
+               rf"NO\s+INFORMAD[OA]S?|NO\s+REGISTRAD[OA]S?|NO\s+DETERMINAD[OA]S?|SIN\s+DATOS?)\b"),
 )
 _PATRONES_PRESENCIA = (
     # "con destino" sólo cuando el campo cierra la mención: "con destino

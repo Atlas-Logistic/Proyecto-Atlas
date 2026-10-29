@@ -81,6 +81,8 @@ def consultar_revisiones(ctx, texto):
     mensaje = (f"{n} {'viaje' if n == 1 else 'viajes'} con revisiones pendientes "
                f"({len(pendientes)} {'revisión pendiente' if len(pendientes) == 1 else 'revisiones pendientes'}; "
                f"{len(viajes)} {'viaje' if len(viajes) == 1 else 'viajes'} en el reporte vigente).")
+    if not pendientes:
+        mensaje += ' La bandeja operacional esta vacia; no incluye revisiones Mobile ni demuestra ausencia global de problemas.'
     if sin_viaje:
         mensaje += f' {sin_viaje} revisiones pendientes no se pudieron asociar a un viaje del reporte.'
     respuesta = {'estado': 'RESULTADO_LECTURA', 'accion': 'VIAJES_CON_REVISION',
