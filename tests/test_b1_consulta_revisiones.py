@@ -33,6 +33,10 @@ def test_consultas_revisiones(entorno, pregunta, accion, total):
     r = b1.consultar(pregunta)
     assert r['estado'] == 'RESULTADO_LECTURA' and r['accion'] == accion
     assert r['resultado']['total_revisiones' if accion == 'REVISIONES_PENDIENTES' else 'total_viajes'] == total
+    if accion == 'VIAJES_CON_REVISION':
+        # Viajes afectados, revisiones pendientes y total del reporte, por separado.
+        assert (r['resultado']['total_revisiones'], r['resultado']['viajes_reporte']) == (3, 3)
+        assert r['mensaje'].startswith('1 viaje con revisiones pendientes (3 revisiones pendientes; 3 viajes')
     if pregunta.startswith('Muéstrame'):
         assert r['tablas'][0]['filas'] == [['123', '100 | 101', '']]
     assert {p: p.read_bytes() for p in entorno['raiz'].rglob('*') if p.is_file()} == antes
@@ -50,6 +54,19 @@ def test_asociacion_incompleta_y_fuentes_no_disponibles(entorno):
     assert 'no se pudieron asociar' in r['mensaje'] or 'no se pudo asociar' in r['mensaje']
     ruta.unlink()
     assert b1.consultar('Cuántas revisiones pendientes hay')['estado'] == 'RECHAZADA'
+
+
+def test_lee_viajes_del_reporte_vigente(entorno, monkeypatch):
+    preparar(entorno)
+    reporte = entorno['raiz'] / 'reportes' / 'reporte_x'
+    reporte.mkdir(parents=True)
+    (entorno['actual'] / 'viajes.csv').replace(reporte / 'viajes.csv')
+    from atlas_core import consulta_revisiones_b1
+    monkeypatch.setattr(consulta_revisiones_b1, 'leer_estado_operacion',
+                        lambda raiz: {'reporte_vigente': 'reportes/reporte_x'})
+    r = OperadorB1(entorno['raiz']).consultar('Muéstrame los viajes con revisión pendiente')
+    assert r['estado'] == 'RESULTADO_LECTURA' and r['resultado']['total_viajes'] == 1
+    assert r['tablas'][0]['filas'] == [['123', '100 | 101', '']]
 
 
 def test_no_intercepta_otras_consultas():

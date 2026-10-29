@@ -4,6 +4,8 @@ import json
 import re
 import unicodedata
 
+from atlas_core.almacenamiento_portable import leer_estado_operacion
+
 
 def _normalizar(texto):
     texto = unicodedata.normalize('NFD', str(texto or '').upper())
@@ -22,6 +24,14 @@ def _modo(texto):
     return None
 
 
+def _ruta_viajes(ctx):
+    # El reporte vigente lo publica el manifiesto de operación (misma fuente
+    # que Desktop y Mobile); operacion/actual no contiene viajes.csv.
+    estado = leer_estado_operacion(raiz=ctx.raiz) or {}
+    reporte = str(estado.get('reporte_vigente') or '').strip()
+    return ctx.raiz / reporte / 'viajes.csv' if reporte else ctx.actual / 'viajes.csv'
+
+
 def consultar_revisiones(ctx, texto):
     modo = _modo(texto)
     if not modo:
@@ -37,8 +47,9 @@ def consultar_revisiones(ctx, texto):
         if modo == 'revisiones':
             n = len(pendientes)
             return {'estado': 'RESULTADO_LECTURA', 'accion': 'REVISIONES_PENDIENTES',
-                    'resultado': {'total_revisiones': n}, 'mensaje': f'{n} revisiones pendientes.'}
-        with (ctx.actual / 'viajes.csv').open(encoding='utf-8-sig', newline='') as f:
+                    'resultado': {'total_revisiones': n},
+                    'mensaje': f"{n} {'revisión pendiente' if n == 1 else 'revisiones pendientes'}."}
+        with _ruta_viajes(ctx).open(encoding='utf-8-sig', newline='') as f:
             lector = csv.DictReader(f, delimiter=';')
             if not {'viaje_id', 'numeros_guia', 'documentos'}.issubset(lector.fieldnames or []):
                 raise ValueError('reporte inválido')
@@ -66,11 +77,15 @@ def consultar_revisiones(ctx, texto):
     encontrados = [v for j, v in enumerate(viajes) if j in encontrados_indices]
     n = len(encontrados)
     sin_viaje = len(pendientes) - len(asociadas)
-    mensaje = f'{n} viajes con revisiones pendientes.'
+    # Se separan viajes afectados, revisiones pendientes y total del reporte.
+    mensaje = (f"{n} {'viaje' if n == 1 else 'viajes'} con revisiones pendientes "
+               f"({len(pendientes)} {'revisión pendiente' if len(pendientes) == 1 else 'revisiones pendientes'}; "
+               f"{len(viajes)} {'viaje' if len(viajes) == 1 else 'viajes'} en el reporte vigente).")
     if sin_viaje:
         mensaje += f' {sin_viaje} revisiones pendientes no se pudieron asociar a un viaje del reporte.'
     respuesta = {'estado': 'RESULTADO_LECTURA', 'accion': 'VIAJES_CON_REVISION',
-                 'resultado': {'total_viajes': n, 'revisiones_sin_viaje': sin_viaje}, 'mensaje': mensaje}
+                 'resultado': {'total_viajes': n, 'total_revisiones': len(pendientes),
+                               'viajes_reporte': len(viajes), 'revisiones_sin_viaje': sin_viaje}, 'mensaje': mensaje}
     if modo == 'lista':
         respuesta['tablas'] = [{'tipo': 'viajes_revision', 'resumen': 'Viajes con revisiones pendientes',
             'columnas': ['Transporte', 'Guías', 'Fecha'], 'filas': [[v.get('numero_transporte', ''), v.get('numeros_guia', ''), v.get('fecha', '')] for v in encontrados]}]
