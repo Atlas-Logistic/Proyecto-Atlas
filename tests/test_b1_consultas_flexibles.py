@@ -28,6 +28,24 @@ def test_pendientes_tecnicos_son_registro_no_estado(fuente):
     archivo.unlink()
     assert responder_consulta_atlas('Cuantos viajes tienen pendientes tecnicos', ruta_viajes=ruta, raiz_atlas=raiz).resultado is None
 
+
+def test_pendientes_registrados_informan_la_cifra_por_estado_sin_mezclarlas(fuente):
+    import csv
+    raiz, ruta, *_ = fuente
+    with ruta.open(encoding='utf-8-sig', newline='') as f:
+        filas = list(csv.DictReader(f, delimiter=';'))
+    for i, f in enumerate(filas):
+        f['estado'] = 'INCOMPLETO_TECNICO' if i < 2 else 'OK'
+    with ruta.open('w', encoding='utf-8-sig', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=list(filas[0]), delimiter=';'); w.writeheader(); w.writerows(filas)
+    (raiz/'operacion/actual/pendientes_tecnicos.json').write_text(json.dumps({'pendientes': [{'numero_guia': '1'}]}), encoding='utf-8')
+    r = responder_consulta_atlas('Cuantos viajes tienen pendientes tecnicos', ruta_viajes=ruta, raiz_atlas=raiz)
+    assert r.resultado.resultado == 1
+    assert '2 viajes del reporte estan en estado INCOMPLETO_TECNICO' in r.texto_respuesta
+    # Otra forma de la pregunta sigue contando por estado, como antes.
+    r = responder_consulta_atlas('cuantos pendientes tecnicos hay?', ruta_viajes=ruta, raiz_atlas=raiz)
+    assert r.resultado.consulta_interpretada.filtros == {'estado': 'INCOMPLETO_TECNICO'} and r.resultado.resultado == 2
+
 def test_combinacion_adicional_chofer_fecha_y_dato_ausente(fuente):
     import csv
     raiz, ruta, *_ = fuente

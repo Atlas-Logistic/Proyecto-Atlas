@@ -52,4 +52,9 @@ def consultar_pendientes_tecnicos(pregunta, viajes, raiz):
         mensaje += f' {sin_vinculo} pendientes no se pudieron asociar de forma unica a un viaje.'
     if not pendientes:
         mensaje += ' La fuente esta vacia; esto no demuestra que no existan otros problemas.'
+    # Medida distinta que responde "cuantos pendientes tecnicos hay": se
+    # informa para que las dos cifras no se confundan.
+    incompletos = sum(1 for v in por_id.values() if str(v.get('estado') or '').strip() == 'INCOMPLETO_TECNICO')
+    if incompletos != len(soporte):
+        mensaje += f' Aparte, {incompletos} viajes del reporte estan en estado INCOMPLETO_TECNICO; no todos tienen un pendiente tecnico registrado.'
     return ('resultado', resultado, mensaje)
