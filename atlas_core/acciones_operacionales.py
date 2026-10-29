@@ -2991,6 +2991,8 @@ class CapaAccionesOperacionales:
         from atlas_core.desktop_operacion import escritor_de_sesion
         de_sesion = escritor_de_sesion()
         escritor = _EscritorPrestado(de_sesion) if de_sesion is not None else self._fabrica_escritor()
+        if de_sesion is None and hasattr(escritor, "vincular_raiz"):
+            escritor.vincular_raiz(self.raiz)
         if escritor is None:
             raise ErrorAccionOperacional(
                 "ESCRITOR_NO_DISPONIBLE", "falta ATLAS_CLOUD_MOTOR_TOKEN: sin escritor global no se ejecuta")

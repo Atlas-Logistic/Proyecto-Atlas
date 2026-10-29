@@ -7,6 +7,7 @@ queda en modo seguro: no inicia escrituras operacionales.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import urllib.error
@@ -26,7 +27,12 @@ class ErrorEscritorOperativo(RuntimeError):
 
 
 class EscritorOcupado(ErrorEscritorOperativo):
-    """Cloud respondió 409 a `/adquirir`: otro titular tiene el lease vigente."""
+    """Cloud respondió 409 a `/adquirir`: otro titular tiene el lease vigente,
+    el último escritor conserva prioridad, o el protocolo es obsoleto."""
+
+    def __init__(self, mensaje: str, codigo: str = "ESCRITOR_OCUPADO") -> None:
+        super().__init__(mensaje)
+        self.codigo = codigo
 
 
 def _url(base_url: str, ruta: str) -> str:
@@ -48,8 +54,13 @@ def _json(base_url: str, ruta: str, token: str, *, method: str = "GET", body: di
     except urllib.error.HTTPError as error:
         # Sólo ESCRITOR_OCUPADO produce 409 en /adquirir: estado legítimo y
         # transitorio, distinto de Cloud caído o credencial inválida.
-        tipo = EscritorOcupado if error.code == 409 and ruta.endswith("/adquirir") else ErrorEscritorOperativo
-        raise tipo(f"Cloud escritor {method} {ruta}: {error}") from error
+        if error.code == 409 and ruta.endswith("/adquirir"):
+            try:
+                codigo = str(json.loads(error.read()).get("error") or "ESCRITOR_OCUPADO")
+            except (OSError, ValueError, AttributeError):
+                codigo = "ESCRITOR_OCUPADO"
+            raise EscritorOcupado(f"Cloud escritor {method} {ruta}: {error}", codigo) from error
+        raise ErrorEscritorOperativo(f"Cloud escritor {method} {ruta}: {error}") from error
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
         raise ErrorEscritorOperativo(f"Cloud escritor {method} {ruta}: {error}") from error
 
@@ -114,6 +125,7 @@ class LeaseEscritorOperativo:
         margen_relevo_segundos: float = MARGEN_RELEVO_SEGUNDOS,
         dormir: Callable[[float], None] | None = None,
         ruta_relevo: Path | None = None,
+        custodia=None,
     ) -> None:
         self.base_url = base_url
         self.token_motor = token_motor
@@ -127,6 +139,12 @@ class LeaseEscritorOperativo:
         self.epoca = 0
         # True sólo si el último `adquirir` falló porque otro titular lo tiene.
         self.ocupado = False
+        # Código del último `adquirir` fallido (PRIORIDAD_OTRO_EQUIPO, ...).
+        self.motivo = ""
+        # Protocolo 2: con custodia, el lease sólo queda vigente con la copia
+        # local alineada a la marca Cloud (ver atlas_core.estado_confirmado).
+        self.custodia = custodia
+        self.marca: dict = {}
         self._detener = threading.Event()
         self._perdido = threading.Event()
         self._hilo: threading.Thread | None = None
@@ -138,16 +156,30 @@ class LeaseEscritorOperativo:
     def consultar(self) -> dict:
         return _json(self.base_url, "/api/motor/escritor/estado", self.token_motor, timeout=self.timeout)
 
+    def vincular_raiz(self, raiz) -> None:
+        """Activa el protocolo 2 sobre la raíz operacional que se escribirá."""
+        from atlas_core.estado_confirmado import ClienteEstado, CustodiaEstado
+        self.custodia = CustodiaEstado(raiz, ClienteEstado(self.base_url, self.token_motor, self.timeout))
+
     def adquirir(self) -> bool:
         self.ocupado = False
+        self.motivo = ""
+        cuerpo = {"escritor_id": self.escritor_id}
+        if self.custodia is not None:
+            from atlas_core.estado_confirmado import PROTOCOLO
+            cuerpo["protocolo"] = PROTOCOLO
         try:
             previo = self.consultar()
             respuesta = _json(
                 self.base_url, "/api/motor/escritor/adquirir", self.token_motor,
-                method="POST", body={"escritor_id": self.escritor_id}, timeout=self.timeout,
+                method="POST", body=cuerpo, timeout=self.timeout,
             )
-        except EscritorOcupado:
-            self.ocupado = True
+        except EscritorOcupado as error:
+            codigo = getattr(error, "codigo", "ESCRITOR_OCUPADO")
+            # Sólo un titular vigente justifica esperar; la prioridad del otro
+            # equipo dura minutos y el protocolo obsoleto no se resuelve solo.
+            self.ocupado = codigo == "ESCRITOR_OCUPADO"
+            self.motivo = {"ESCRITOR_PRIORIDAD": "PRIORIDAD_OTRO_EQUIPO"}.get(codigo, codigo)
             return False
         except ErrorEscritorOperativo:
             return False
@@ -156,6 +188,12 @@ class LeaseEscritorOperativo:
             return False
         self.lease_token = token
         self.epoca = int(respuesta.get("epoca") or 0)
+        self.marca = respuesta.get("marca") if isinstance(respuesta.get("marca"), dict) else {}
+        if self.custodia is not None and not self.marca:
+            # Worker sin protocolo 2: no hay marca que verificar, no se escribe.
+            self.motivo = "CLOUD_SIN_ESTADO_CONFIRMADO"
+            self.cerrar()
+            return False
         self._iniciar_heartbeat()
         # epoca previa > 0 significa que ya hubo un titular. Cloud no distingue
         # vencimiento de liberación voluntaria, así que el margen se aplica
@@ -167,6 +205,18 @@ class LeaseEscritorOperativo:
         if not self.vigente:
             self.cerrar()
             return False
+        if self.custodia is not None:
+            try:
+                self.custodia.alinear(self)
+            except Exception as error:  # noqa: BLE001 - cualquier duda: no escribir
+                logging.getLogger(__name__).warning("Estado local no verificado; lease liberado sin escribir: %s", error)
+                self.motivo = "ESTADO_NO_VERIFICADO"
+                self.cerrar()
+                return False
+            if not self.vigente:
+                self.cerrar()
+                return False
+            self.custodia.iniciar(self)
         return True
 
     def _relevo_confirmado(self, previo: dict, epoca_previa: int) -> bool:
@@ -206,6 +256,18 @@ class LeaseEscritorOperativo:
         self._hilo.start()
 
     def cerrar(self) -> None:
+        custodia = self.custodia
+        if custodia is not None and custodia in _custodias_activas():
+            # Antes de detener el heartbeat: subir contenido puede tardar y la
+            # confirmación exige el lease vigente. Si falla, el diario local
+            # queda para el próximo turno de este equipo.
+            try:
+                if self.vigente:
+                    custodia.confirmar(self)
+            except Exception as error:  # noqa: BLE001
+                logging.getLogger(__name__).warning("Estado no confirmado al cerrar; queda diario local: %s", error)
+            finally:
+                custodia.detener()
         self._detener.set()
         if self._hilo is not None:
             self._hilo.join(timeout=self.timeout + 1)
@@ -231,11 +293,19 @@ class LeaseEscritorOperativo:
         self.cerrar()
 
 
-def lease_desde_entorno(*, timeout: float = 30.0) -> LeaseEscritorOperativo | None:
+def _custodias_activas():
+    from atlas_core.estado_confirmado import _activas
+    return _activas
+
+
+def lease_desde_entorno(*, timeout: float = 30.0, raiz=None) -> LeaseEscritorOperativo | None:
     """Lease con la misma configuración que el PULL (ATLAS_CLOUD_MOTOR_TOKEN y
     ATLAS_CLOUD_MOBILE_URL). Sin token devuelve None: el llamador no escribe."""
     token = os.environ.get("ATLAS_CLOUD_MOTOR_TOKEN", "").strip()
     if not token:
         return None
     base_url = os.environ.get("ATLAS_CLOUD_MOBILE_URL", "").strip() or URL_CLOUD_POR_DEFECTO
-    return LeaseEscritorOperativo(base_url=base_url, token_motor=token, timeout=timeout)
+    lease = LeaseEscritorOperativo(base_url=base_url, token_motor=token, timeout=timeout)
+    if raiz is not None:
+        lease.vincular_raiz(raiz)
+    return lease

@@ -36,7 +36,7 @@ def _escritor(raiz: Path):
     """El mismo escritor que PULL y Desktop: equipo único o lease Cloud."""
     from atlas_core.escritor_operativo import lease_desde_entorno
     from atlas_core.exclusividad_equipo import EscritorEquipoUnico, politica_equipo_unico
-    return EscritorEquipoUnico(raiz) if politica_equipo_unico(raiz) else lease_desde_entorno()
+    return EscritorEquipoUnico(raiz) if politica_equipo_unico(raiz) else lease_desde_entorno(raiz=raiz)
 
 
 def pasada_programada(raiz: Path, *, fabrica_escritor=_escritor) -> dict[str, object]:

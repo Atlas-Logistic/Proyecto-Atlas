@@ -132,9 +132,16 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
             escritor = fabrica()
             if escritor is None:
                 raise PermissionError('Modo compartido sin lease: configure una política autorizada de equipo único o la credencial legítima del árbitro Cloud.')
+            # Protocolo 2: la copia local se alinea con la marca Cloud antes de escribir.
+            if hasattr(escritor, 'vincular_raiz'): escritor.vincular_raiz(raiz)
         if escritor is not None:
             stack.enter_context(escritor)
             if not _adquirir_con_espera(escritor):
+                motivo = getattr(escritor, 'motivo', '')
+                if motivo == 'PRIORIDAD_OTRO_EQUIPO':
+                    raise PermissionError('Otro computador Atlas es el escritor activo. Este equipo podrá escribir cuando el otro lleve 10 minutos sin actividad. No se inició ninguna escritura.')
+                if motivo == 'ESTADO_NO_VERIFICADO':
+                    raise PermissionError('Los datos de este equipo aún no coinciden con el último estado confirmado (Google Drive sincronizando). No se inició ninguna escritura; reintente en unos minutos.')
                 if getattr(escritor, 'ocupado', False):
                     raise PermissionError(f'Escritor ocupado por otro proceso Atlas (p. ej. PULL procesando envíos) tras esperar {ESPERA_ESCRITOR_OCUPADO_SEGUNDOS} s. No se inició ninguna escritura; reintente.')
                 raise PermissionError('Escritor ocupado o exclusividad no verificable. No se inició ninguna escritura.')

@@ -55,13 +55,18 @@ def ejecutar_pull_con_escritor(
 
     if not autorizado():
         raise PermissionError('Autorizacion PULL revocada o invalida.')
+    raiz = getattr(repositorio, "raiz_atlas", None)
     with fabrica_escritor(base_url=base_url, token_motor=token_motor, timeout=timeout) as escritor:
+        # Protocolo 2: alinear la copia local con la marca Cloud antes de
+        # tomar envíos; si no coincide, el lease se libera sin consumir nada.
+        if raiz is not None and hasattr(escritor, "vincular_raiz"):
+            escritor.vincular_raiz(raiz)
         if not escritor.adquirir():
-            return {"escritor_operativo": "NO_ADQUIRIDO", "encontrados": 0, "confirmados": []}
+            return {"escritor_operativo": "NO_ADQUIRIDO", "motivo": getattr(escritor, "motivo", ""),
+                    "encontrados": 0, "confirmados": []}
         # Mismo criterio que el ingreso manual: bajo lease vigente, un lock de
         # este PC cuyo PID terminó no debe bloquear la pasada durante horas.
         from atlas_core.exclusividad_equipo import recuperar_bloqueos_huerfanos
-        raiz = getattr(repositorio, "raiz_atlas", None)
         from atlas_core.guardia_pull import proteger_escrituras
         vigente = lambda: escritor.vigente and autorizado()
         guardia = proteger_escrituras(raiz, vigente) if raiz is not None else contextlib.nullcontext()
@@ -115,6 +120,9 @@ def main() -> None:
         proveedor_ocr_preferido=proveedor_ocr_preferido,
     )
     print(json.dumps(resultado, ensure_ascii=True, indent=2))
+    # Equipo en espera mientras el otro conserva prioridad: estado normal.
+    if resultado.get("escritor_operativo") == "NO_ADQUIRIDO" and resultado.get("motivo") == "PRIORIDAD_OTRO_EQUIPO":
+        return
     if (resultado.get("escritor_operativo") == "NO_ADQUIRIDO" or resultado.get("detenido_por_escritor")
             or resultado.get("fallidos") or resultado.get("errores_procesamiento") or resultado.get("errores_recepcion")):
         raise SystemExit(1)
