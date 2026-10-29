@@ -30,6 +30,7 @@ class CloudEscritor:
         self.epoca = 0
         self.adquisiciones: list[str] = []
         self.liberaciones = 0
+        self.version_estado = 0
 
     def __call__(self, _base, ruta, _token, *, method="GET", body=None, timeout=0):
         if ruta.endswith("/estado"):
@@ -40,7 +41,21 @@ class CloudEscritor:
             self.epoca += 1
             self.token = f"lease-{self.epoca}"
             self.adquisiciones.append(body["escritor_id"])
-            return {"estado": "ADQUIRIDO", "lease_token": self.token, "epoca": self.epoca}
+            respuesta = {"estado": "ADQUIRIDO", "lease_token": self.token, "epoca": self.epoca}
+            if body.get("protocolo", 1) >= 2:
+                respuesta["marca"] = {"version": self.version_estado}
+            return respuesta
+        # Protocolo 2 sin contenido: acepta confirmaciones y mantiene vacío el
+        # manifiesto (la semántica de la marca se prueba en test_estado_confirmado).
+        if ruta.endswith("/estado/manifiesto"):
+            return {"version": self.version_estado, "archivos": []}
+        if ruta.endswith("/estado/faltantes"):
+            return {"faltantes": []}
+        if ruta.endswith("/estado/confirmar"):
+            if not self.token or body["lease_token"] != self.token:
+                raise ErrorEscritorOperativo("HTTP 409 ESCRITOR_NO_VIGENTE")
+            self.version_estado += 1
+            return {"estado": "CONFIRMADO", "version": self.version_estado}
         if ruta.endswith("/renovar"):
             if not self.token or body["lease_token"] != self.token:
                 raise ErrorEscritorOperativo("HTTP 409 LEASE_PERDIDO")
