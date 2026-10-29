@@ -12,7 +12,9 @@ def consultar_pendientes_tecnicos(pregunta, viajes, raiz):
     contar = re.fullmatch(r'CUANTOS VIAJES (?:TIENEN|CON|TIENEN UN) PENDIENTES? TECNICOS?(?: HAY)?', texto)
     listar = re.fullmatch(r'(?:MUESTRAME|MUESTRA|LISTA|LISTAR|CUALES SON) (?:LOS )?VIAJES (?:CON|QUE TIENEN) PENDIENTES? TECNICOS?', texto)
     if not contar and not listar:
-        return ('limitacion', 'No pude interpretar todos los filtros de pendientes tecnicos.')
+        # Otras formas ("cuantos pendientes tecnicos hay") siguen respondiendo
+        # por el estado del viaje en el interprete general.
+        return None
     try:
         if raiz is None:
             raise ValueError()
