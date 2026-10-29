@@ -1725,6 +1725,10 @@ class OperadorB1:
 
     def consultar(self, texto: str, *, derivar_operacionales: bool = False) -> dict:
         """Consulta sin locks ni estado conversacional; rechaza acciones antes de resolverlas."""
+        from atlas_core.consulta_revisiones_b1 import consultar_revisiones
+        respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
+        if respuesta_revision is not None:
+            return respuesta_revision
         if separar_contexto_revision(texto)[0]:
             # Lo escrito en una tarjeta de Revisión siempre es una corrección.
             return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
@@ -1748,6 +1752,10 @@ class OperadorB1:
     def atender(self, conversacion_id: str, texto: str) -> dict:
         if not _ID.fullmatch(str(conversacion_id or "")):
             return {"estado": "RECHAZADA", "mensaje": "conversación inválida"}
+        from atlas_core.consulta_revisiones_b1 import consultar_revisiones
+        respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
+        if respuesta_revision is not None:
+            return respuesta_revision
         try:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
