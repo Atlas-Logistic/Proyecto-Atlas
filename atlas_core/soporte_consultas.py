@@ -28,8 +28,8 @@ from atlas_core.consultas_atlas import (
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_PATENTES_SIN_CHOFER, METRICA_COUNT_VIAJES, METRICA_LIST_DISTINCT_CHOFER,
     METRICA_LIST_RELACION, METRICA_LISTAR_VIAJES, METRICA_SUM_KM, METRICA_SUM_PESO, METRICA_SUM_TIEMPO,
-    ResultadoConsultaAtlas, _claves_agrupacion, _guias_coincidentes, _valor_metrica, _valores_multivalor,
-    normalizar_texto_atlas, _parsear_fecha_dataset,
+    ResultadoConsultaAtlas, _campos_presencia, _claves_agrupacion, _guias_coincidentes, _valor_metrica,
+    _valores_multivalor, campos_ausentes_en_viaje, normalizar_texto_atlas, _parsear_fecha_dataset,
 )
 
 # Entidad (singular/plural) y encabezado por relación -- siempre lenguaje humano.
@@ -103,6 +103,13 @@ def _fila_viaje(viaje: Mapping[str, str], *extra: str) -> list[str]:
 
 
 _COLUMNAS_VIAJE = ["Fecha", "Transporte", "Guías", "Chofer", "Cliente"]
+
+_NOMBRE_DATO = {
+    "patente_tracto": "patente del tracto", "patente_rampla": "patente de la rampla", "material": "material",
+    "tipo_carga": "tipo de carga", "destino": "dirección", "obra": "obra", "cliente": "cliente", "rut": "RUT",
+    "chofer": "chofer", "comuna": "comuna", "region": "región", "origen": "planta de origen", "peso": "peso",
+    "numero_guia": "número de guía", "numero_transporte": "número de transporte", "fecha": "fecha",
+}
 
 _ESTADO_CONFIRMACION_LEGIBLE = {
     "APROBADA": "Confirmada",
@@ -192,6 +199,16 @@ def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
         filas = [_fila_viaje(v, f"{valor:g}") for v, valor in usados]
         return _soporte("VIAJES", [*_COLUMNAS_VIAJE, encabezado], filas,
                         resumen=_plural(len(filas), "viaje usado en el cálculo", "viajes usados en el cálculo"))
+
+    if metrica in (METRICA_COUNT_VIAJES, METRICA_LISTAR_VIAJES) and consulta.filtros.get("ausente_alguno"):
+        # Faltantes generales: un viaje por fila con todos sus datos faltantes.
+        campos = _campos_presencia(consulta.filtros["ausente_alguno"])
+        filas = [
+            _fila_viaje(v, ", ".join(_NOMBRE_DATO.get(c, c) for c in campos_ausentes_en_viaje(v, campos)))
+            for v in viajes
+        ]
+        return _soporte("VIAJES", [*_COLUMNAS_VIAJE, "Datos faltantes"], filas,
+                        resumen=_plural(len(filas), "viaje con datos faltantes", "viajes con datos faltantes"))
 
     if metrica in (METRICA_COUNT_VIAJES, METRICA_LISTAR_VIAJES) or consulta.agrupacion:
         columnas = list(_COLUMNAS_VIAJE)

@@ -602,10 +602,13 @@ _ALTERNATIVA_CAMPO = "|".join(re.escape(s) for s in sorted(_CAMPO_POR_SINONIMO, 
 _ARTICULO = r"(?:(?:EL|LA|LOS|LAS|UN|UNA|SU|SUS)\s+)?"
 _FIN_DE_MENCION = r"(?=\s*(?:$|[?.,;!]|\bY\b|\bE\b|\bO\b))"
 _IDENTIFICAR = r"(?:PENDIENTES?\s+(?:DE|POR)\s+IDENTIFICAR|POR\s+IDENTIFICAR|SIN\s+IDENTIFICAR|NO\s+IDENTIFICAD[OA]S?)"
+# "les falta información del material", "sin datos de chofer": el campo
+# nombrado sigue siendo el filtro, no una consulta general de faltantes.
+_DATOS_DE = r"(?:(?:LA\s+|LOS\s+)?(?:INFORMACION|INFO|DATOS?)\s+(?:DE|DEL|SOBRE)\s+)?"
 _PATRONES_AUSENCIA = (
     re.compile(rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|LES?\s+FALTAN?|FALTAN?|"
                rf"FALTANTES?\s+DE|FALTAN?\s+(?:DE\s+|POR\s+)?IDENTIFICAR|{_IDENTIFICAR})\s+"
-               rf"{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO})\b"),
+               rf"{_DATOS_DE}{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO})\b"),
     re.compile(rf"\b(?P<campo>{_ALTERNATIVA_CAMPO})\s+(?:AUSENTES?|VACI[OA]S?|FALTANTES?|NO\s+ENCONTRAD[OA]S?|"
                rf"NO\s+INFORMAD[OA]S?|NO\s+REGISTRAD[OA]S?|NO\s+DETERMINAD[OA]S?|SIN\s+DATOS?|"
                rf"DESCONOCID[OA]S?|{_IDENTIFICAR})\b"),
@@ -619,6 +622,42 @@ _PATRON_AUSENCIA_NO_APLICADA = re.compile(
     rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|FALTAN?|FALTANTES?|"
     rf"AUSENTES?|VACI[OA]S?|DESCONOCID[OA]S?|{_IDENTIFICAR})\b(?:\s+[A-Z0-9]+){{0,3}}"
 )
+
+# --- Faltantes generales: "qué viajes tienen campos faltantes", "les falta
+# información", "datos incompletos", "viajes incompletos". Sin un campo
+# nombrado, la condición es "falta al menos uno" de este catálogo (los mismos
+# campos y la misma regla de ausencia del filtro `ausente`). La patente de
+# rampla queda fuera: un camión rígido no la lleva, así que su ausencia no es
+# por sí sola un dato faltante (sigue consultable con "sin rampla"). ---
+FILTRO_AUSENTE_ALGUNO = "ausente_alguno"
+CAMPOS_FALTANTE_GENERAL = tuple(
+    campo for campo, _ in _SINONIMOS_CAMPO_PRESENCIA if campo != "patente_rampla"
+)
+_SUSTANTIVO_GENERAL = r"(?:CAMPOS?|DATOS?|INFORMACION(?:ES)?|INFO|ANTECEDENTES?|ALGO)"
+_RELLENO_GENERAL = r"(?:(?:ALGUN[OA]?S?|TOD[OA]S?|EL|LA|LOS|LAS|SU|SUS|UN|UNA|MAS|OTR[OA]S?)\s+){0,2}"
+_COMPLETAR = r"(?:COMPLETAR|LLENAR|RELLENAR|INGRESAR)"
+# "información de los viajes" sigue siendo general; "información del
+# color" nombra algo concreto que no es un campo (CONDICION_NO_APLICADA).
+_SIN_COMPLEMENTO = r"(?!\s+(?:DE|DEL|SOBRE)\b(?!\s+(?:LOS\s+|ESTOS\s+|ESOS\s+)?VIAJES?\b))"
+_PATRONES_FALTANTE_GENERAL = (
+    re.compile(rf"\b(?P<marca>(?:(?:LES?\s+)?FALTAN?(?:\s+(?:DE|POR))?|SIN|NO\s+TIENEN?|NO\s+TRAEN?|"
+               rf"CARECEN\s+DE|FALTANTES?\s+DE)\s+{_RELLENO_GENERAL}{_SUSTANTIVO_GENERAL}\b{_SIN_COMPLEMENTO})"),
+    re.compile(rf"\b(?P<marca>{_SUSTANTIVO_GENERAL}\s+(?:QUE\s+(?:ESTAN\s+|QUEDARON\s+|SIGUEN\s+|LES\s+)?)?"
+               rf"(?:FALTANTES?|FALTAN?|VACI[OA]S?|INCOMPLET[OA]S?(?!\s+TECNIC)|AUSENTES?|EN\s+BLANCO|"
+               rf"SIN\s+(?:{_COMPLETAR}|VALOR(?:ES)?)|POR\s+{_COMPLETAR}|PENDIENTES?\s+(?:DE|POR)\s+{_COMPLETAR}|"
+               rf"NO\s+(?:INFORMAD|REGISTRAD|COMPLETAD|DETERMINAD)[OA]S?))\b"),
+    # "qué viajes están incompletos": sólo se consume el calificativo.
+    re.compile(rf"\bVIAJES?\s+(?P<marca>(?:QUE\s+)?(?:ESTAN\s+|QUEDARON\s+|SIGUEN\s+)?"
+               rf"(?:INCOMPLET[OA]S?(?!\s+TECNIC)|SIN\s+{_COMPLETAR}|POR\s+{_COMPLETAR}|PENDIENTES?\s+(?:DE|POR)\s+{_COMPLETAR}))\b"),
+)
+# Faltantes y revisiones son consultas distintas: "campos faltantes por
+# revisar" o "datos pendientes" no dicen cuál de las dos se pide.
+_PATRON_REVISION = re.compile(r"\b(?:REVISION(?:ES)?|REVISAR|REVISAD[OA]S?)\b")
+_PATRON_PENDIENTE_AMBIGUO = re.compile(
+    rf"\b{_SUSTANTIVO_GENERAL}\s+(?:QUE\s+(?:ESTAN\s+|QUEDAN\s+|SIGUEN\s+)?)?PENDIENTES?\b"
+    rf"|\bVIAJES?\b.*\b(?:TIENEN?|CON|QUEDAN?)\s+(?:COSAS\s+)?PENDIENTES?\s*(?:$|[?.!,])"
+)
+_VOCABULARIO_GENERAL_TOLERANTE = ("INFORMACION", "INCOMPLETO", "INCOMPLETOS", "INCOMPLETA", "INCOMPLETAS")
 
 # Errores menores de escritura en el marcador ("les fata material") o en
 # el campo que lo sigue ("sin materal"). La corrección se limita a esas
@@ -659,7 +698,8 @@ def _corregir_tolerante(palabra: str, vocabulario: Iterable[str]) -> str:
 
 def _corregir_menciones_ausencia(texto_normalizado: str) -> str:
     coincidencias = list(_PATRON_PALABRA.finditer(texto_normalizado))
-    palabras = [_corregir_tolerante(m.group(), _MARCADORES_TOLERANTES) for m in coincidencias]
+    palabras = [_corregir_tolerante(m.group(), (*_MARCADORES_TOLERANTES, *_VOCABULARIO_GENERAL_TOLERANTE))
+                for m in coincidencias]
     for i in range(1, len(palabras)):
         for anterior in palabras[max(0, i - 3):i][::-1]:
             if anterior in _MARCADORES_ANTES_DE_CAMPO:
@@ -693,7 +733,17 @@ def _extraer_presencia(texto_normalizado: str) -> tuple[dict[str, str], str]:
                 if campo not in campos["ausente"] and campo not in campos[clave]:
                     campos[clave].append(campo)
             restante = patron.sub(" ", restante)
-    return {clave: ",".join(valores) for clave, valores in campos.items() if valores}, restante
+    filtros = {clave: ",".join(valores) for clave, valores in campos.items() if valores}
+    general = False
+    for patron in _PATRONES_FALTANTE_GENERAL:
+        for m in reversed(list(patron.finditer(restante))):
+            general = True
+            restante = restante[:m.start("marca")] + " " + restante[m.end("marca"):]
+    # Un campo nombrado manda: "les falta información del material" es
+    # una consulta de material, no de cualquier dato.
+    if general and "ausente" not in filtros:
+        filtros[FILTRO_AUSENTE_ALGUNO] = ",".join(CAMPOS_FALTANTE_GENERAL)
+    return filtros, restante
 
 
 # Nombres de campo/entidad ("región", "comuna", "transportes"): dicen QUÉ se
@@ -1062,6 +1112,10 @@ def interpretar_consulta_determinista(
     # propósito -- ese caso lo sigue resolviendo, sin cambios, el
     # chequeo de CHOFERES en plural.
     presencia, normalizado_operativo = _extraer_presencia(normalizado)
+    if (FILTRO_AUSENTE_ALGUNO in presencia and _PATRON_REVISION.search(normalizado)) or (
+        not presencia and _PATRON_PENDIENTE_AMBIGUO.search(normalizado_operativo)
+    ):
+        return None, (*avisos, "AMBIGUO_FALTANTES_REVISIONES")
     # "Filtro no resuelto ≠ quitar filtro": una ausencia pedida sobre algo
     # que no es un campo consultable nunca se responde con el total.
     ausencia_no_aplicada = _PATRON_AUSENCIA_NO_APLICADA.search(normalizado_operativo)
@@ -1318,6 +1372,11 @@ def interpretar_consulta_determinista(
             metrica, relacion = METRICA_LIST_RELACION, "guia"
         elif metrica == METRICA_COUNT_VIAJES and _PATRON_LISTAR_VIAJES.search(normalizado_operativo):
             metrica = METRICA_LISTAR_VIAJES
+
+    # Los faltantes generales se consolidan por viaje (con la guía de cada
+    # faltante en el detalle); contar guías mezclaría datos de viaje y de guía.
+    if FILTRO_AUSENTE_ALGUNO in filtros and (metrica == METRICA_COUNT_GUIAS or relacion == "guia"):
+        return None, (*avisos, "FALTANTES_GENERALES_POR_VIAJE")
 
     return ConsultaAtlas(
         metrica=metrica, filtros=filtros, agrupacion=agrupacion, limite=limite, orden=orden, relacion=relacion,

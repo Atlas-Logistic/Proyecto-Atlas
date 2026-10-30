@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from atlas_core.consultas_atlas import (
-    _CAMPO_DOCUMENTO, _documentos_viaje, _valor_ausente, _valores_multivalor,
+    _CAMPO_DOCUMENTO, _documentos_viaje, _valor_ausente, _valores_multivalor, campos_ausentes_en_viaje,
 )
 
 VERSION_CONTRATO = 1
@@ -163,18 +163,21 @@ def _item_viaje(viaje, campo, clave, limitacion):
 def construir_faltantes(
     campos: Iterable[str], viajes_soporte: Iterable[Mapping[str, str]], *,
     todos_los_viajes: Iterable[Mapping[str, str]], raiz_atlas: str | Path | None = None,
+    solo_ausentes: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Un elemento por guía afectada y campo; o uno por viaje cuando la
     evidencia no permite identificar la guía. `todos_los_viajes` sirve para
     detectar folios repetidos en el reporte (B1 no podría corregirlos sin
-    ambigüedad)."""
+    ambigüedad). Con `solo_ausentes` (faltantes generales), cada viaje
+    aporta sólo los campos que le faltan según el ejecutor."""
+    campos = tuple(campos)
     folios = Counter(
         _texto(d.get("numero_guia")) for v in todos_los_viajes for d in _documentos_viaje(v)
     )
     referencias = _Referencias(raiz_atlas)
     items: list[dict[str, object]] = []
     for viaje in viajes_soporte:
-        for campo in campos:
+        for campo in (campos_ausentes_en_viaje(viaje, campos) if solo_ausentes else campos):
             clave, documentos = _documentos_para(viaje, campo)
             guias_viaje = _valores_multivalor(viaje, "numeros_guia")
             if not documentos:

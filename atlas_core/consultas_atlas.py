@@ -185,7 +185,9 @@ _FILTROS_SUBCADENA = frozenset({"material", "destino", "region"})
 # guía (un viaje "no tiene material" si alguna de sus guías no lo
 # trae); el resto, sobre la columna del viaje. `presente` es siempre el
 # complemento exacto de `ausente` -- ambos suman el universo. ---
-FILTROS_PRESENCIA = ("ausente", "presente")
+# `ausente_alguno` (faltantes generales): el viaje cumple si le falta AL
+# MENOS UNO de los campos listados, con la misma regla de `ausente`.
+FILTROS_PRESENCIA = ("ausente", "presente", "ausente_alguno")
 _COLUMNA_PRESENCIA = {
     **_CAMPO_A_COLUMNA, "peso": "peso_total_viaje_kg", "fecha": "fecha",
 }
@@ -590,6 +592,11 @@ def _campo_ausente_en_viaje(viaje: Mapping[str, str], campo: str) -> bool:
     return all(_valor_ausente(campo, v) for v in valores)
 
 
+def campos_ausentes_en_viaje(viaje: Mapping[str, str], campos: Sequence[str]) -> tuple[str, ...]:
+    """Campos de `campos` que faltan en el viaje, en el mismo orden."""
+    return tuple(c for c in campos if _campo_ausente_en_viaje(viaje, c))
+
+
 def _guias_coincidentes(viaje: Mapping[str, str], consulta: ConsultaAtlas) -> tuple[str, ...]:
     """Guías del viaje que cumplen la consulta. Con un filtro de
     presencia por guía, sólo cuentan las guías que lo cumplen (un viaje
@@ -628,6 +635,10 @@ def _fila_coincide(
             continue
         if campo == "tipo_evento":
             continue  # Bloque UNIVERSAL V1 -- sólo aplica al dominio EVENTOS
+        if campo == "ausente_alguno":
+            if not campos_ausentes_en_viaje(viaje, _campos_presencia(valor)):
+                return False
+            continue
         if campo in FILTROS_PRESENCIA:
             ausente_buscado = campo == "ausente"
             if any(_campo_ausente_en_viaje(viaje, c) != ausente_buscado for c in _campos_presencia(valor)):

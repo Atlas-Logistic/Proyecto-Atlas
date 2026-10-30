@@ -178,6 +178,9 @@ def _filtros_legibles(consulta: ConsultaAtlas) -> str:
         if campo == "periodo":
             partes.append(_NOMBRE_PERIODO_LEGIBLE.get(valor, valor))
             continue
+        if campo == "ausente_alguno":
+            partes.append("con algún dato faltante")
+            continue
         if campo in ("ausente", "presente"):
             campos = ", ".join(_NOMBRE_FILTRO_LEGIBLE.get(c, c) for c in str(valor).split(",") if c)
             partes.append(f"{'sin' if campo == 'ausente' else 'con'} {campos}")
@@ -195,6 +198,40 @@ def _filtros_legibles(consulta: ConsultaAtlas) -> str:
         etiqueta = _NOMBRE_FILTRO_LEGIBLE.get(campo, campo)
         partes.append(f"{etiqueta} {valor}")
     return ", ".join(partes)
+
+
+# Frases que ya resuelven las capacidades existentes (consulta de ausencia
+# general y bandeja de revisiones de B1).
+_OPCIONES_FALTANTES_REVISIONES = (
+    "qué viajes tienen datos faltantes",
+    "muéstrame los viajes con revisión pendiente",
+)
+
+
+def _resumen_faltantes_generales(resultado: ResultadoConsultaAtlas) -> str:
+    """Qué falta, por dato y por nivel (guía o dato consolidado del viaje),
+    y qué no incluye la consulta."""
+    items = resultado.faltantes or ()
+    viajes_por_campo: dict[str, set[str]] = {}
+    for item in items:
+        viajes_por_campo.setdefault(str(item["campo"]), set()).add(str(item["viaje_id"]))
+    partes = []
+    if items:
+        por_dato = ", ".join(
+            f"{_NOMBRE_FILTRO_LEGIBLE.get(c, c.replace('_', ' '))} {len(v)}"
+            for c, v in sorted(viajes_por_campo.items(), key=lambda par: (-len(par[1]), par[0]))
+        )
+        en_guia = sum(1 for i in items if i.get("nivel") == "GUIA")
+        partes.append(
+            f"Viajes por dato faltante: {por_dato}. "
+            f"{len(items)} faltante{'s' if len(items) != 1 else ''}: {en_guia} en guías y "
+            f"{len(items) - en_guia} sólo en el dato consolidado del viaje."
+        )
+    partes.append(
+        "No incluye revisiones operacionales pendientes ni la patente de rampla "
+        "(un camión rígido no la lleva; consúltala con «viajes sin rampla»)."
+    )
+    return " ".join(partes)
 
 
 def _nota_cobertura_km(resultado: ResultadoConsultaAtlas) -> str | None:
@@ -496,9 +533,9 @@ def responder_consulta_atlas(
         pregunta, catalogos=catalogos, contexto_previo=consulta_anterior,
     )
 
-    if consulta is not None and consulta.filtros.get("ausente"):
+    if consulta is not None and (consulta.filtros.get("ausente") or consulta.filtros.get("ausente_alguno")):
         from atlas_core.consultas_atlas import _COLUMNA_PRESENCIA, _CAMPO_DOCUMENTO, _documentos_viaje
-        campos = consulta.filtros["ausente"].split(",")
+        campos = (consulta.filtros.get("ausente") or consulta.filtros["ausente_alguno"]).split(",")
         if any(_COLUMNA_PRESENCIA.get(c.strip()) not in v for c in campos for v in viajes):
             return RespuestaConsultaAtlas(estado=ESTADO_FUENTE_NO_DISPONIBLE,
                 texto_respuesta="El reporte no contiene el campo solicitado; no puedo contar sus ausencias.")
@@ -506,6 +543,26 @@ def responder_consulta_atlas(
             if any(not _documentos_viaje(v) and v.get("numeros_guia") for v in viajes):
                 return RespuestaConsultaAtlas(estado=ESTADO_FUENTE_NO_DISPONIBLE,
                     texto_respuesta="El reporte no contiene el detalle documental necesario para contar las guias sin ese dato.")
+
+    # Faltantes de datos y revisiones operacionales son fuentes distintas:
+    # nunca se elige una por la persona.
+    if "AMBIGUO_FALTANTES_REVISIONES" in avisos:
+        return RespuestaConsultaAtlas(
+            estado=ESTADO_AMBIGUA,
+            texto_respuesta=(
+                "¿Buscas viajes con datos faltantes (campos sin valor, como material, peso o chofer) "
+                "o viajes con revisiones operacionales pendientes? Son consultas distintas."
+            ),
+            opciones_aclaracion=_OPCIONES_FALTANTES_REVISIONES,
+        )
+    if "FALTANTES_GENERALES_POR_VIAJE" in avisos:
+        return RespuestaConsultaAtlas(
+            estado=ESTADO_NO_INTERPRETABLE,
+            texto_respuesta=(
+                "Los datos faltantes en general se consultan por viaje, con la guía afectada en el detalle. "
+                "Pregunta «qué viajes tienen datos faltantes», o nombra el dato (por ejemplo «guías sin material»)."
+            ),
+        )
 
     ambiguos = [a for a in avisos if a.startswith("AMBIGUO:")]
     if ambiguos:
@@ -653,6 +710,12 @@ def responder_consulta_atlas(
             resultado = replace(resultado, faltantes=construir_faltantes(
                 [c.strip() for c in consulta.filtros["ausente"].split(",")], resultado.viajes_soporte,
                 todos_los_viajes=viajes, raiz_atlas=raiz_atlas))
+        elif consulta.filtros.get("ausente_alguno"):
+            from dataclasses import replace
+            from atlas_core.faltantes_guia import construir_faltantes
+            resultado = replace(resultado, faltantes=construir_faltantes(
+                [c.strip() for c in consulta.filtros["ausente_alguno"].split(",")], resultado.viajes_soporte,
+                todos_los_viajes=viajes, raiz_atlas=raiz_atlas, solo_ausentes=True))
     try:
         validar_consistencia_respuesta(resultado)
     except ErrorConsultaAtlas as error:
@@ -668,6 +731,8 @@ def responder_consulta_atlas(
     if unidad_no_disponible is not None:
         palabra = unidad_no_disponible.split(":", 1)[1].lower()
         texto = f"No tengo registrada la cantidad de {palabra} por unidad. Sí puedo verificar el peso: {texto}"
+    if consulta.filtros.get("ausente_alguno"):
+        texto = f"{texto} {_resumen_faltantes_generales(resultado)}"
     estado = ESTADO_SIN_RESULTADOS if resultado.total_coincidencias == 0 else ESTADO_OK
     _registro.debug("Consulta ejecutada: métrica=%s dominio=%s resultado=%r", consulta.metrica, consulta.dominio, resultado.resultado)
     return RespuestaConsultaAtlas(estado=estado, texto_respuesta=texto, resultado=resultado)
