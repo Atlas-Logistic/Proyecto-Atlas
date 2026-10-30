@@ -197,12 +197,17 @@ def test_pull_invoca_licencias_tras_las_guias_y_un_fallo_no_altera_su_resultado(
                       carpeta_catalogos=None, fabrica_escritor=lambda **_: Escritor())
     with patch('sincronizar_mobile_cloud.sincronizar_envios_cloud', return_value={'confirmados': ['e1']}), \
          patch('atlas_core.exclusividad_equipo.recuperar_bloqueos_huerfanos'), \
+         patch('sincronizar_mobile_cloud.publicar_asignaciones_cloud', return_value={'publicadas': 1}) as asignaciones, \
          patch('sincronizar_mobile_cloud.sincronizar_licencias_cloud', return_value={'incorporados': []}) as licencias:
         resultado = ejecutar_pull_con_escritor(**argumentos)
-    assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'incorporados': []}}
+    assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'incorporados': []},
+                         'asignaciones_vehiculo': {'publicadas': 1}}
     assert licencias.call_args.kwargs['raiz'] == tmp_path and licencias.call_args.kwargs['puede_continuar']()
+    assert asignaciones.call_args.kwargs['raiz'] == tmp_path and asignaciones.call_args.kwargs['puede_continuar']()
     with patch('sincronizar_mobile_cloud.sincronizar_envios_cloud', return_value={'confirmados': ['e1']}), \
          patch('atlas_core.exclusividad_equipo.recuperar_bloqueos_huerfanos'), \
+         patch('sincronizar_mobile_cloud.publicar_asignaciones_cloud', side_effect=OSError('Cloud')), \
          patch('sincronizar_mobile_cloud.sincronizar_licencias_cloud', side_effect=OSError('Drive')):
         resultado = ejecutar_pull_con_escritor(**argumentos)
-    assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'error': 'Drive'}}
+    assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'error': 'Drive'},
+                         'asignaciones_vehiculo': {'error': 'Cloud'}}

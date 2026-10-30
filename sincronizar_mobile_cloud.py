@@ -24,6 +24,7 @@ import os
 import socket
 
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
+from atlas_core.cloud_asignaciones_vehiculo import publicar_asignaciones_cloud
 from atlas_core.cloud_fichas_documentos import sincronizar_licencias_cloud
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
@@ -92,6 +93,17 @@ def ejecutar_pull_con_escritor(
                 except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
                     logging.getLogger(__name__).warning("Licencias Mobile no sincronizadas: %s", error)
                     resultado["licencias_mobile"] = {"error": str(error)}
+            # Asignación vigente confirmada -> Cloud (sólo para vincular
+            # documentos de vehículo). Mismo lease; un fallo no corta el PULL.
+            if raiz is not None and vigente():
+                try:
+                    resultado["asignaciones_vehiculo"] = publicar_asignaciones_cloud(
+                        base_url=base_url, token_motor=token_motor, raiz=raiz, timeout=timeout,
+                        puede_continuar=vigente,
+                    )
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Asignaciones de vehículo no publicadas: %s", error)
+                    resultado["asignaciones_vehiculo"] = {"error": str(error)}
             return resultado
 
 
