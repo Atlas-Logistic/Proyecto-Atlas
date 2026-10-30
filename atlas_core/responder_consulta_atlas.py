@@ -535,6 +535,22 @@ def responder_consulta_atlas(
             texto_respuesta=f"No encontré viajes asociados a {token}.",
         )
 
+    # Misma regla para una ausencia pedida sobre algo que no es un campo
+    # consultable: definitiva, sin B1 (que podría volver a descartarla) y
+    # nunca el total de viajes.
+    condicion_no_aplicada = next((a for a in avisos if a.startswith("CONDICION_NO_APLICADA:")), None)
+    if condicion_no_aplicada is not None:
+        from atlas_core.consultas_atlas import CAMPOS_PRESENCIA
+        frase = condicion_no_aplicada.split(":", 1)[1].lower()
+        campos = sorted({_NOMBRE_FILTRO_LEGIBLE.get(c, c.replace("_", " ")) for c in CAMPOS_PRESENCIA})
+        return RespuestaConsultaAtlas(
+            estado=ESTADO_NO_INTERPRETABLE,
+            texto_respuesta=(
+                f"No pude aplicar la condición «{frase}», así que no respondo con el total de viajes. "
+                f"Puedo consultar datos faltantes de: {', '.join(campos)}. ¿Cuál de ellos quieres revisar?"
+            ),
+        )
+
     # Bloque 6/7 -- "estructuralmente válida" no basta: si el
     # determinístico propuso algo semánticamente incompatible con la
     # pregunta (Bloque 2: KM+COUNT_VIAJES, CHOFERES+COUNT_VIAJES,

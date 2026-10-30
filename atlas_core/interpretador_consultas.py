@@ -601,12 +601,77 @@ _CAMPO_POR_SINONIMO = {s: campo for campo, sinonimos in _SINONIMOS_CAMPO_PRESENC
 _ALTERNATIVA_CAMPO = "|".join(re.escape(s) for s in sorted(_CAMPO_POR_SINONIMO, key=len, reverse=True))
 _ARTICULO = r"(?:(?:EL|LA|LOS|LAS|UN|UNA|SU|SUS)\s+)?"
 _FIN_DE_MENCION = r"(?=\s*(?:$|[?.,;!]|\bY\b|\bE\b|\bO\b))"
+_IDENTIFICAR = r"(?:PENDIENTES?\s+(?:DE|POR)\s+IDENTIFICAR|POR\s+IDENTIFICAR|SIN\s+IDENTIFICAR|NO\s+IDENTIFICAD[OA]S?)"
 _PATRONES_AUSENCIA = (
-    re.compile(rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|LES?\s+FALTAN?|FALTAN?)\s+"
+    re.compile(rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|LES?\s+FALTAN?|FALTAN?|"
+               rf"FALTANTES?\s+DE|FALTAN?\s+(?:DE\s+|POR\s+)?IDENTIFICAR|{_IDENTIFICAR})\s+"
                rf"{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO})\b"),
     re.compile(rf"\b(?P<campo>{_ALTERNATIVA_CAMPO})\s+(?:AUSENTES?|VACI[OA]S?|FALTANTES?|NO\s+ENCONTRAD[OA]S?|"
-               rf"NO\s+INFORMAD[OA]S?|NO\s+REGISTRAD[OA]S?|NO\s+DETERMINAD[OA]S?|SIN\s+DATOS?)\b"),
+               rf"NO\s+INFORMAD[OA]S?|NO\s+REGISTRAD[OA]S?|NO\s+DETERMINAD[OA]S?|SIN\s+DATOS?|"
+               rf"DESCONOCID[OA]S?|{_IDENTIFICAR})\b"),
+    # "sin peso ni fecha": NI sólo aparece en una negación.
+    re.compile(rf"\bNI\s+{_ARTICULO}(?P<campo>{_ALTERNATIVA_CAMPO})\b"),
 )
+# Marcadores de ausencia que siguen en el texto tras extraer los campos
+# reconocidos: la pregunta pide una condición que Atlas no supo aplicar
+# ("les falta el color"). Nunca se descarta en silencio.
+_PATRON_AUSENCIA_NO_APLICADA = re.compile(
+    rf"\b(?:SIN|NO\s+TIENEN?|NO\s+TRAEN?|NO\s+REGISTRAN?|NO\s+INFORMAN?|FALTAN?|FALTANTES?|"
+    rf"AUSENTES?|VACI[OA]S?|DESCONOCID[OA]S?|{_IDENTIFICAR})\b(?:\s+[A-Z0-9]+){{0,3}}"
+)
+
+# Errores menores de escritura en el marcador ("les fata material") o en
+# el campo que lo sigue ("sin materal"). La corrección se limita a esas
+# posiciones: nunca toca nombres propios del resto de la pregunta.
+_MARCADORES_TOLERANTES = ("FALTA", "FALTAN", "FALTANTE", "FALTANTES", "IDENTIFICAR")
+_MARCADORES_ANTES_DE_CAMPO = frozenset({"SIN", "TIENE", "TIENEN", "TRAE", "TRAEN", "REGISTRA", "REGISTRAN",
+                                        "INFORMA", "INFORMAN", *_MARCADORES_TOLERANTES})
+_PALABRAS_INTERMEDIAS = frozenset({"EL", "LA", "LOS", "LAS", "UN", "UNA", "SU", "SUS", "DE", "POR"})
+_CAMPOS_UNA_PALABRA = tuple(s for s in _CAMPO_POR_SINONIMO if " " not in s)
+_PATRON_PALABRA = re.compile(r"[A-Z0-9]+")
+
+
+def _a_una_edicion(a: str, b: str, *, sustitucion: bool) -> bool:
+    """Una letra omitida, sobrante o traspuesta; cambiada sólo si se
+    permite."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diferencias = [i for i in range(len(a)) if a[i] != b[i]]
+        if len(diferencias) == 2 and diferencias[1] == diferencias[0] + 1:
+            i, j = diferencias
+            return a[i] == b[j] and a[j] == b[i]
+        return sustitucion and len(diferencias) == 1
+    corta, larga = (a, b) if len(a) < len(b) else (b, a)
+    return any(larga[:i] + larga[i + 1:] == corta for i in range(len(larga)))
+
+
+def _corregir_tolerante(palabra: str, vocabulario: Iterable[str]) -> str:
+    if len(palabra) < 4 or palabra in vocabulario:
+        return palabra
+    for candidata in vocabulario:
+        # Las palabras cortas no toleran una letra cambiada: "SALTA" o
+        # "PASO" no son "FALTA" ni "PESO".
+        if _a_una_edicion(palabra, candidata, sustitucion=len(candidata) >= 6):
+            return candidata
+    return palabra
+
+
+def _corregir_menciones_ausencia(texto_normalizado: str) -> str:
+    coincidencias = list(_PATRON_PALABRA.finditer(texto_normalizado))
+    palabras = [_corregir_tolerante(m.group(), _MARCADORES_TOLERANTES) for m in coincidencias]
+    for i in range(1, len(palabras)):
+        for anterior in palabras[max(0, i - 3):i][::-1]:
+            if anterior in _MARCADORES_ANTES_DE_CAMPO:
+                palabras[i] = _corregir_tolerante(palabras[i], _CAMPOS_UNA_PALABRA)
+                break
+            if anterior not in _PALABRAS_INTERMEDIAS:
+                break
+    partes, inicio = [], 0
+    for m, palabra in zip(coincidencias, palabras):
+        partes += [texto_normalizado[inicio:m.start()], palabra]
+        inicio = m.end()
+    return "".join(partes) + texto_normalizado[inicio:]
 _PATRONES_PRESENCIA = (
     # "con destino" sólo cuando el campo cierra la mención: "con destino
     # Quilicura" es un VALOR de destino, no presencia.
@@ -619,7 +684,7 @@ def _extraer_presencia(texto_normalizado: str) -> tuple[dict[str, str], str]:
     """Devuelve `(filtros, texto_sin_menciones)`. El texto devuelto ya no
     contiene las menciones consumidas, para que "sin peso" nunca se lea
     como métrica de peso ni "sin chofer" como entidad."""
-    restante = texto_normalizado
+    restante = _corregir_menciones_ausencia(texto_normalizado)
     campos: dict[str, list[str]] = {"ausente": [], "presente": []}
     for clave, patrones in (("ausente", _PATRONES_AUSENCIA), ("presente", _PATRONES_PRESENCIA)):
         for patron in patrones:
@@ -997,6 +1062,11 @@ def interpretar_consulta_determinista(
     # propósito -- ese caso lo sigue resolviendo, sin cambios, el
     # chequeo de CHOFERES en plural.
     presencia, normalizado_operativo = _extraer_presencia(normalizado)
+    # "Filtro no resuelto ≠ quitar filtro": una ausencia pedida sobre algo
+    # que no es un campo consultable nunca se responde con el total.
+    ausencia_no_aplicada = _PATRON_AUSENCIA_NO_APLICADA.search(normalizado_operativo)
+    if ausencia_no_aplicada is not None:
+        return None, (*avisos, "CONDICION_NO_APLICADA:" + ausencia_no_aplicada.group().strip())
     coincidencia_cuantos = _PATRON_CUANTOS_SUSTANTIVO.search(normalizado)
     if coincidencia_cuantos is not None:
         relacion_contada = _SUSTANTIVO_CUANTOS_A_RELACION.get(coincidencia_cuantos.group(1))
@@ -1271,7 +1341,12 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
         return any(re.search(rf"\b{re.escape(p)}\b", normalizado if texto is None else texto) for p in palabras)
 
     # "sin peso" / "con chofer" son filtros de presencia, no la métrica pedida.
-    sin_presencia = _extraer_presencia(normalizado)[1]
+    presencia_pedida, sin_presencia = _extraer_presencia(normalizado)
+    if consulta.dominio == DOMINIO_VIAJES:
+        for clave, campos in presencia_pedida.items():
+            aplicados = set(str(consulta.filtros.get(clave) or "").split(","))
+            if not set(campos.split(",")) <= aplicados:
+                return f"la pregunta pide viajes con campos {clave}s ({campos}), pero la consulta no los filtra"
     if _menciona(_PALABRAS_KM, sin_presencia) and consulta.metrica != METRICA_SUM_KM:
         return "la pregunta pide distancia/km, pero la consulta no calcula distancia"
     if _menciona(_PALABRAS_PESO, sin_presencia) and consulta.metrica != METRICA_SUM_PESO:
@@ -1332,7 +1407,8 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
     # `estado_gestion` en el dominio EVENTOS, nunca ignorarlo en
     # silencio (mismo criterio que el resto de esta red de seguridad).
     if (
-        any(_menciona(frases) for _, frases in _PALABRAS_ESTADO_GESTION)
+        # "material pendiente de identificar" es ausencia, no gestión.
+        any(_menciona(frases, sin_presencia) for _, frases in _PALABRAS_ESTADO_GESTION)
         # "pendiente técnico" (dataset VIAJES, `estado_ruta`/`estado_
         # operacional`) es un concepto TOTALMENTE distinto que ya
         # resuelve su propio bloque más arriba -- nunca lo reclama este
