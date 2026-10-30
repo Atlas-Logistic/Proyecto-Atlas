@@ -111,6 +111,9 @@ def _respuesta_a_dict(respuesta: RespuestaConsultaAtlas) -> dict:
             # Desktop lo prefiere sobre `viajes_soporte` cuando existe.
             "soporte": soporte_semantico(r),
         }
+        if r.faltantes is not None:
+            from atlas_core.faltantes_guia import VERSION_CONTRATO
+            salida["resultado"]["faltantes"] = {"version": VERSION_CONTRATO, "items": list(r.faltantes)}
     return salida
 
 

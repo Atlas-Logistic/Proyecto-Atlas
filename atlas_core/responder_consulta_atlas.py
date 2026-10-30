@@ -646,6 +646,13 @@ def responder_consulta_atlas(
         resultado = ejecutar_consulta_asociaciones_patente_chofer(consulta, viajes)
     else:
         resultado = ejecutar_consulta_atlas(consulta, viajes)
+        if consulta.filtros.get("ausente"):
+            # Detalle por guía de lo que falta; no altera coincidencias ni cifras.
+            from dataclasses import replace
+            from atlas_core.faltantes_guia import construir_faltantes
+            resultado = replace(resultado, faltantes=construir_faltantes(
+                [c.strip() for c in consulta.filtros["ausente"].split(",")], resultado.viajes_soporte,
+                todos_los_viajes=viajes, raiz_atlas=raiz_atlas))
     try:
         validar_consistencia_respuesta(resultado)
     except ErrorConsultaAtlas as error:

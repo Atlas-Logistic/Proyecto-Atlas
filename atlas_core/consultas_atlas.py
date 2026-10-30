@@ -307,6 +307,9 @@ class ResultadoConsultaAtlas:
     total_coincidencias: int
     viajes_soporte: tuple[Mapping[str, str], ...]
     advertencias: tuple[str, ...] = ()
+    # Consultas con filtro `ausente`: guía y campo faltante de cada viaje
+    # soporte (`faltantes_guia.construir_faltantes`).
+    faltantes: tuple[Mapping[str, object], ...] | None = None
 
 
 def validar_consulta(consulta: ConsultaAtlas) -> None:
