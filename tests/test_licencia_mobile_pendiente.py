@@ -20,6 +20,14 @@ from atlas_core.fichas_choferes import (
 CATALOGO = {'123456785': {'nombre': 'ANA TEST', 'activo': True},
             '111111111': {'nombre': 'SIN FICHA TEST', 'activo': True}}
 JPEG = b'\xff\xd8\xff\xe0licencia original desde el celular'
+FRENTE = b'\xff\xd8\xff\xe0frente de la licencia'
+REVERSO = b'\x89PNG\r\n\x1a\nreverso de la licencia'
+sha = lambda b: hashlib.sha256(b).hexdigest()
+
+
+def _caras(frente=FRENTE, reverso=REVERSO, mime_reverso='image/png'):
+    return [{'cara': 'FRENTE', 'contenido': frente, 'mime_type': 'image/jpeg', 'sha256': sha(frente)},
+            {'cara': 'REVERSO', 'contenido': reverso, 'mime_type': mime_reverso, 'sha256': sha(reverso)}]
 
 
 def _raiz(tmp_path, catalogo=CATALOGO):
@@ -123,12 +131,20 @@ class CloudFalso:
         self.confirmados = []
 
     def json(self, base_url, ruta, token, *, method='GET', body=None, timeout):
-        if ruta.endswith('/pendientes'):
+        self.rutas = getattr(self, 'rutas', []) + [(ruta, body)]
+        if ruta.split('?')[0].endswith('/pendientes'):
             return {'documentos': [{k: d[k] for k in ('documento_id', 'titular', 'tipo')} for d in self.documentos]}
         documento_id = ruta.split('/')[-2]
         doc = next(d for d in self.documentos if d['documento_id'] == documento_id)
         if ruta.endswith('/lease'):
-            return {**doc, 'lease_token': f'lt-{documento_id}', 'descarga_url': f'https://cloud.test/{documento_id}'}
+            if 'caras' in doc:
+                return {**{k: v for k, v in doc.items() if k != 'caras'}, 'formato': 'FRENTE_REVERSO',
+                        'lease_token': f'lt-{documento_id}',
+                        'caras': [{'cara': c['cara'], 'mime_type': c['mime_type'], 'bytes': len(c['contenido']),
+                                   'sha256': c.get('sha_cloud', sha(c['contenido'])),
+                                   'descarga_url': f"https://cloud.test/{documento_id}/{c['cara']}"}
+                                  for c in doc['caras']]}
+            return {**doc, 'formato': 'UNICA', 'lease_token': f'lt-{documento_id}', 'descarga_url': f'https://cloud.test/{documento_id}'}
         if ruta.endswith('/confirmar'):
             if self.falla_confirmar:
                 raise consumidor.ErrorSincronizacionCloudMobile('caida')
@@ -138,6 +154,11 @@ class CloudFalso:
         raise AssertionError(ruta)
 
     def descargar(self, url, *, esperado_bytes, timeout):
+        for d in self.documentos:
+            for c in d.get('caras', []):
+                if url.endswith(f"{d['documento_id']}/{c['cara']}"):
+                    assert esperado_bytes == len(c['contenido'])
+                    return c['contenido']
         doc = next(d for d in self.documentos if url.endswith(d['documento_id']))
         assert esperado_bytes == len(doc['contenido'])
         return doc['contenido']
@@ -211,3 +232,83 @@ def test_pull_invoca_licencias_tras_las_guias_y_un_fallo_no_altera_su_resultado(
         resultado = ejecutar_pull_con_escritor(**argumentos)
     assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'error': 'Drive'},
                          'asignaciones_vehiculo': {'error': 'Cloud'}}
+
+
+# ---- Licencia de frente y reverso: un documento, dos originales ----
+
+def _registrar_caras(raiz, **cambios):
+    return _registrar(raiz, contenido=None, mime_type=None, sha256=None, **cambios)
+
+
+def test_licencia_dos_caras_es_un_documento_con_sus_dos_originales_intactos(tmp_path):
+    raiz = _raiz(tmp_path)
+    resultado = _registrar_caras(raiz, caras=_caras())
+    ficha = _ficha(raiz)
+    [doc] = ficha['documentos']
+    assert doc['formato'] == 'FRENTE_REVERSO' and doc['estado_revision'] == 'PENDIENTE_EXTRACCION'
+    base = f"archivos/choferes/{ficha['ficha_id']}/{doc['documento_id']}"
+    assert [(c['cara'], c['archivo'], c['sha256']) for c in doc['caras']] == [
+        ('FRENTE', f'{base}-frente.jpg', sha(FRENTE)), ('REVERSO', f'{base}-reverso.png', sha(REVERSO))]
+    assert doc['archivo'] == f'{base}-frente.jpg'  # lectores antiguos ven al menos el frente
+    assert doc['sha256'] == sha(f'{sha(FRENTE)}:{sha(REVERSO)}'.encode()) and doc['bytes'] == len(FRENTE) + len(REVERSO)
+    carpeta = ruta_almacen(raiz, 'MBT').parent
+    assert (carpeta / doc['caras'][0]['archivo']).read_bytes() == FRENTE
+    assert (carpeta / doc['caras'][1]['archivo']).read_bytes() == REVERSO
+    assert len(ficha['historial']) == 2 and ficha['historial'][-1]['accion'] == 'LICENCIA_RECIBIDA_MOBILE'
+    manifiesto = json.loads((Path(resultado['respaldo']) / 'manifest.json').read_text(encoding='utf-8'))
+    assert [a['cara'] for a in manifiesto['archivos']] == ['FRENTE', 'REVERSO']
+    # Idempotente por documento Cloud: el reintento no duplica ni reescribe.
+    assert _registrar_caras(raiz, caras=_caras())['idempotente']
+    assert len(_ficha(raiz)['documentos']) == 1
+
+
+@pytest.mark.parametrize('caras,motivo', [
+    (_caras()[:1], 'frente y reverso'),
+    (_caras(reverso=b'%PDF-1.4 reverso', mime_reverso='application/pdf'), 'foto JPG o PNG'),
+    ([{**_caras()[0]}, {**_caras()[1], 'sha256': '0' * 64}], 'huella'),
+])
+def test_licencia_dos_caras_incompleta_o_alterada_no_escribe_nada(tmp_path, caras, motivo):
+    raiz = _raiz(tmp_path)
+    antes = ruta_almacen(raiz, 'MBT').read_bytes()
+    with pytest.raises(ValueError, match=motivo):
+        _registrar_caras(raiz, caras=caras)
+    assert ruta_almacen(raiz, 'MBT').read_bytes() == antes
+    assert not (ruta_almacen(raiz, 'MBT').parent / 'archivos').exists()
+
+
+def test_lease_perdido_con_dos_caras_no_deja_archivos_ni_publica(tmp_path):
+    raiz = _raiz(tmp_path)
+    antes = ruta_almacen(raiz, 'MBT').read_bytes()
+    llamadas = []
+
+    def perdido():
+        llamadas.append(1)
+        if len(llamadas) > 1:
+            raise PermissionError('lease perdido')
+    with pytest.raises(PermissionError):
+        _registrar_caras(raiz, caras=_caras(), comprobar=perdido)
+    assert ruta_almacen(raiz, 'MBT').read_bytes() == antes
+    assert not any(p.is_file() for p in (ruta_almacen(raiz, 'MBT').parent / 'archivos').rglob('*'))
+
+
+def test_pull_incorpora_las_dos_caras_y_declara_que_las_soporta(tmp_path):
+    raiz = _raiz(tmp_path)
+    doc = {**_doc_cloud('dfm_2c', '123456785'), 'caras': _caras()}
+    cloud = CloudFalso([doc, _doc_cloud('dfm_antigua', '123456785', JPEG + b'antigua')])
+    resumen = _sincronizar(raiz, cloud)
+    assert cloud.confirmados == ['dfm_2c', 'dfm_antigua'] and not resumen['errores']
+    assert cloud.rutas[0][0].endswith('/pendientes?formatos=FRENTE_REVERSO')
+    assert all(body['formatos'] == ['FRENTE_REVERSO'] for ruta, body in cloud.rutas if ruta.endswith('/lease'))
+    por_origen = {d['origen_documento_id']: d for d in _ficha(raiz)['documentos']}
+    assert por_origen['dfm_2c']['formato'] == 'FRENTE_REVERSO'
+    # La antigua de una imagen sigue igual: nunca pasa a contar como de dos caras.
+    assert 'formato' not in por_origen['dfm_antigua'] and 'caras' not in por_origen['dfm_antigua']
+
+
+def test_pull_con_una_cara_alterada_no_incorpora_ni_confirma(tmp_path):
+    raiz = _raiz(tmp_path)
+    caras = _caras()
+    caras[1]['sha_cloud'] = '0' * 64
+    cloud = CloudFalso([{**_doc_cloud('dfm_2c', '123456785'), 'caras': caras}])
+    assert _sincronizar(raiz, cloud)['errores'] and cloud.confirmados == []
+    assert _ficha(raiz)['documentos'] == []

@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Callable
 
 from atlas_core.cloud_mobile_sync_cliente import ErrorSincronizacionCloudMobile, _descargar, _json
-from atlas_core.fichas_choferes import EMPRESA_ACTUAL, ESTADO_PENDIENTE_EXTRACCION, registrar_licencia_mobile_pendiente
+from atlas_core.fichas_choferes import (
+    EMPRESA_ACTUAL, ESTADO_PENDIENTE_EXTRACCION, FORMATO_FRENTE_REVERSO, registrar_licencia_mobile_pendiente,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,10 @@ def sincronizar_licencias_cloud(
         if not puede_continuar():
             raise PermissionError("Lease PULL perdido: recepción de licencias detenida.")
 
-    pendientes = _json(base_url, f"{RUTA_FICHAS}/pendientes", token_motor, timeout=timeout).get("documentos", [])
+    # Este Motor incorpora la licencia de frente y reverso: lo declara para que
+    # Cloud se la entregue (a un Motor anterior nunca se la entrega).
+    pendientes = _json(base_url, f"{RUTA_FICHAS}/pendientes?formatos={FORMATO_FRENTE_REVERSO}", token_motor,
+                       timeout=timeout).get("documentos", [])
     resumen["encontrados"] = len(pendientes)
     for pendiente in pendientes:
         if not puede_continuar():
@@ -46,20 +51,32 @@ def sincronizar_licencias_cloud(
             continue
         ruta = f"{RUTA_FICHAS}/{urllib.parse.quote(documento_id, safe='')}"
         try:
-            lease = _json(base_url, f"{ruta}/lease", token_motor, method="POST", body={"consumidor": consumidor}, timeout=timeout)
-            contenido = _descargar(lease["descarga_url"], esperado_bytes=int(lease["bytes"]), timeout=timeout)
-            if hashlib.sha256(contenido).hexdigest() != lease["sha256"]:
-                raise ErrorSincronizacionCloudMobile("hash descargado no coincide")
-        except (ErrorSincronizacionCloudMobile, KeyError, ValueError) as error:
+            lease = _json(base_url, f"{ruta}/lease", token_motor, method="POST",
+                          body={"consumidor": consumidor, "formatos": [FORMATO_FRENTE_REVERSO]}, timeout=timeout)
+            if lease.get("formato") == FORMATO_FRENTE_REVERSO:
+                # Ambas caras completas y verificadas o nada: nunca a medias.
+                caras = []
+                for cara in lease["caras"]:
+                    contenido = _descargar(cara["descarga_url"], esperado_bytes=int(cara["bytes"]), timeout=timeout)
+                    if hashlib.sha256(contenido).hexdigest() != cara["sha256"]:
+                        raise ErrorSincronizacionCloudMobile(f"hash descargado de {cara['cara']} no coincide")
+                    caras.append({"cara": cara["cara"], "contenido": contenido, "mime_type": cara["mime_type"],
+                                  "sha256": cara["sha256"]})
+                originales = {"caras": caras}
+            else:
+                contenido = _descargar(lease["descarga_url"], esperado_bytes=int(lease["bytes"]), timeout=timeout)
+                if hashlib.sha256(contenido).hexdigest() != lease["sha256"]:
+                    raise ErrorSincronizacionCloudMobile("hash descargado no coincide")
+                originales = {"contenido": contenido, "mime_type": lease["mime_type"], "sha256": lease["sha256"]}
+        except (ErrorSincronizacionCloudMobile, KeyError, ValueError, TypeError) as error:
             logger.warning("Licencia Mobile %s no descargada: %s", documento_id, error)
             resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
             continue
         try:
             resultado = registrar_licencia_mobile_pendiente(
-                raiz, empresa=empresa, referencia_catalogo=lease["chofer_id"], contenido=contenido,
-                mime_type=lease["mime_type"], sha256=lease["sha256"], origen_documento_id=documento_id,
+                raiz, empresa=empresa, referencia_catalogo=lease["chofer_id"], origen_documento_id=documento_id,
                 recibido_en=lease.get("recibido_en") or lease.get("enviado_en"), comprobar=comprobar,
-                actor=f"MOBILE:{lease['chofer_id']}",
+                actor=f"MOBILE:{lease['chofer_id']}", **originales,
             )
         except ValueError as error:
             logger.warning("Licencia Mobile %s sin vincular: %s", documento_id, error)

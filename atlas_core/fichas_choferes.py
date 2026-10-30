@@ -102,8 +102,12 @@ def _validar_v2(datos):
             if doc['documento_id'] in documentos:
                 raise ValueError('Identificador de documento duplicado')
             documentos.add(doc['documento_id'])
-            archivo = doc.get('archivo')
-            if archivo:
+            if 'caras' in doc and (doc.get('formato') != 'FRENTE_REVERSO' or not isinstance(doc['caras'], list)
+                                   or sorted(c.get('cara') for c in doc['caras'] if isinstance(c, dict)) != ['FRENTE', 'REVERSO']):
+                raise ValueError('Licencia de dos caras incompleta')
+            for archivo in [doc.get('archivo'), *(c.get('archivo') for c in doc.get('caras') or [])]:
+                if not archivo:
+                    continue
                 p = PureWindowsPath(archivo)
                 if p.is_absolute() or p.drive or '..' in p.parts or not p.parts or p.parts[0] != 'archivos':
                     raise ValueError('Adjunto fuera de la empresa')
@@ -363,10 +367,31 @@ _EXTENSION_POR_MIME = {'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/p
 _FIRMA_POR_EXTENSION = {'.pdf': b'%PDF-', '.jpg': b'\xff\xd8\xff', '.png': b'\x89PNG\r\n\x1a\n'}
 
 
-def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, contenido, mime_type,
-                                        sha256, origen_documento_id, recibido_en, comprobar,
+CARAS_LICENCIA = ('FRENTE', 'REVERSO')
+FORMATO_FRENTE_REVERSO = 'FRENTE_REVERSO'
+
+
+def _original_valido(contenido, mime_type, sha256, *, cara=None):
+    extension = _EXTENSION_POR_MIME.get(mime_type)
+    if not extension or (cara and extension == '.pdf') or not contenido.startswith(_FIRMA_POR_EXTENSION[extension]):
+        raise ValueError('El contenido no corresponde a una foto JPG o PNG' if cara else 'El contenido no corresponde a un PDF, JPG o PNG')
+    if not 0 < len(contenido) <= MAXIMO_ARCHIVO_LICENCIA:
+        raise ValueError('El archivo debe tener entre 1 byte y 20 MB')
+    huella = hashlib.sha256(contenido).hexdigest()
+    if huella != str(sha256 or '').lower():
+        raise ValueError('La huella del archivo recibido no coincide')
+    return {'cara': cara, 'contenido': contenido, 'extension': extension, 'sha256': huella}
+
+
+def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, origen_documento_id, recibido_en,
+                                        comprobar, contenido=None, mime_type=None, sha256=None, caras=None,
                                         actor='MOBILE'):
-    """Guarda en la ficha el original de una licencia enviada desde Mobile.
+    """Guarda en la ficha los originales de una licencia enviada desde Mobile.
+
+    Licencia nueva: `caras` = [{cara: FRENTE|REVERSO, contenido, mime_type,
+    sha256}], UN documento con sus dos fotos (formato FRENTE_REVERSO).
+    Licencia antigua: `contenido`/`mime_type`/`sha256` de su única imagen; queda
+    igual que siempre y nunca cuenta como de dos caras.
 
     Queda PENDIENTE_EXTRACCION: sin clase ni vencimiento, nunca vigente y sin
     reemplazar las licencias anteriores. La ficha se resuelve sólo por la
@@ -378,14 +403,17 @@ def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, c
     origen_documento_id = str(origen_documento_id or '')
     if not referencia_catalogo or not origen_documento_id:
         raise ValueError('Documento Mobile sin chofer o sin identificador')
-    extension = _EXTENSION_POR_MIME.get(mime_type)
-    if not extension or not contenido.startswith(_FIRMA_POR_EXTENSION[extension]):
-        raise ValueError('El contenido no corresponde a un PDF, JPG o PNG')
-    if not 0 < len(contenido) <= MAXIMO_ARCHIVO_LICENCIA:
-        raise ValueError('El archivo debe tener entre 1 byte y 20 MB')
-    huella = hashlib.sha256(contenido).hexdigest()
-    if huella != str(sha256 or '').lower():
-        raise ValueError('La huella del archivo recibido no coincide')
+    if caras is not None:
+        por_cara = {c.get('cara'): c for c in caras}
+        if sorted(por_cara) != sorted(CARAS_LICENCIA) or len(caras) != len(CARAS_LICENCIA):
+            raise ValueError('La licencia debe traer frente y reverso')
+        originales = [_original_valido(por_cara[c]['contenido'], por_cara[c]['mime_type'], por_cara[c]['sha256'], cara=c)
+                      for c in CARAS_LICENCIA]
+        huella = hashlib.sha256(':'.join(o['sha256'] for o in originales).encode('ascii')).hexdigest()
+    else:
+        originales = [_original_valido(contenido, mime_type, sha256)]
+        huella = originales[0]['sha256']
+    bytes_totales = sum(len(o['contenido']) for o in originales)
     comprobar()
     ruta = ruta_almacen(raiz, empresa)
     with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
@@ -408,31 +436,48 @@ def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, c
         ficha_id = ficha_nueva['ficha_id']
         documento_id = str(uuid.uuid4())
         instante = _ahora()
-        destino_relativo = Path('archivos') / 'choferes' / ficha_id / (documento_id + extension)
-        destino = ruta.parent / destino_relativo
-        destino.parent.mkdir(parents=True, exist_ok=True)
-        if not destino.parent.resolve().is_relative_to(ruta.parent.resolve()):
+        carpeta_relativa = Path('archivos') / 'choferes' / ficha_id
+        (ruta.parent / carpeta_relativa).mkdir(parents=True, exist_ok=True)
+        if not (ruta.parent / carpeta_relativa).resolve().is_relative_to(ruta.parent.resolve()):
             raise ValueError('La carpeta de adjuntos apunta fuera de la empresa')
         respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
         respaldo.mkdir(parents=True)
         shutil.copy2(ruta, respaldo / ruta.name)
-        temporal = destino.with_name('.' + destino.name + '.tmp-' + uuid.uuid4().hex)
-        try:
-            with temporal.open('xb') as salida:
-                salida.write(contenido)
-            if destino.exists():
-                raise FileExistsError('Ya existe un adjunto con ese identificador')
-            os.rename(temporal, destino)
-        except Exception:
-            temporal.unlink(missing_ok=True)
-            raise
+        escritos = []
+
+        def deshacer():
+            for destino in escritos:
+                destino.unlink(missing_ok=True)
+
+        for original in originales:
+            sufijo = '-' + original['cara'].lower() if original['cara'] else ''
+            original['relativo'] = carpeta_relativa / (documento_id + sufijo + original['extension'])
+            destino = ruta.parent / original['relativo']
+            temporal = destino.with_name('.' + destino.name + '.tmp-' + uuid.uuid4().hex)
+            try:
+                with temporal.open('xb') as salida:
+                    salida.write(original['contenido'])
+                if destino.exists():
+                    raise FileExistsError('Ya existe un adjunto con ese identificador')
+                os.rename(temporal, destino)
+                escritos.append(destino)
+            except Exception:
+                temporal.unlink(missing_ok=True)
+                deshacer()
+                raise
         documento = {
             'documento_id': documento_id, 'tipo': 'LICENCIA_CONDUCIR',
             'estado_revision': ESTADO_PENDIENTE_EXTRACCION, 'origen': 'MOBILE',
-            'origen_documento_id': origen_documento_id, 'archivo': destino_relativo.as_posix(),
-            'sha256': huella, 'bytes': len(contenido), 'creado_en': instante,
+            'origen_documento_id': origen_documento_id, 'archivo': originales[0]['relativo'].as_posix(),
+            'sha256': huella, 'bytes': bytes_totales, 'creado_en': instante,
             'recibido_en': str(recibido_en or instante),
         }
+        if caras is not None:
+            # Una sola entidad documental con sus dos originales; `archivo`
+            # (el frente) mantiene legibles las fichas para lectores antiguos.
+            documento['formato'] = FORMATO_FRENTE_REVERSO
+            documento['caras'] = [{'cara': o['cara'], 'archivo': o['relativo'].as_posix(), 'sha256': o['sha256'],
+                                   'bytes': len(o['contenido'])} for o in originales]
         ficha_nueva['documentos'].append(documento)
         ficha_nueva['historial'].append({
             'accion': 'LICENCIA_RECIBIDA_MOBILE', 'actor': actor, 'fecha': instante,
@@ -443,17 +488,22 @@ def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, c
         escribir_json_atomico(respaldo / 'manifest.json', {
             'empresa': empresa, 'actor': actor, 'operacion': 'LICENCIA_RECIBIDA_MOBILE',
             'ficha_id': ficha_id, 'documento_id': documento_id, 'origen_documento_id': origen_documento_id,
-            'sha256': huella, 'bytes': len(contenido), 'revision_anterior': anterior['revision'],
+            'sha256': huella, 'bytes': bytes_totales, 'revision_anterior': anterior['revision'],
             'ruta_relativa': str(ruta.relative_to(raiz)),
+            'archivos': [{'cara': o['cara'], 'archivo': o['relativo'].as_posix(), 'sha256': o['sha256']} for o in originales],
         })
-        comprobar()
+        try:
+            comprobar()
+        except Exception:
+            deshacer()
+            raise
         if catalogo_ruta.read_bytes() != catalogo_bytes:
-            destino.unlink(missing_ok=True)
+            deshacer()
             raise ValueError('El catálogo cambió durante la recepción; no se publicó la licencia')
         try:
             escribir_json_atomico(ruta, propuesta)
         except Exception:
-            destino.unlink(missing_ok=True)
+            deshacer()
             raise
         return {'ok': True, 'idempotente': False, 'documento_id': documento_id, 'ficha_id': ficha_id,
                 'revision': propuesta['revision'], 'sha256': huella, 'respaldo': str(respaldo)}
