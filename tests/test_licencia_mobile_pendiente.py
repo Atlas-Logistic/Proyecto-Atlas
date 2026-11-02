@@ -302,8 +302,10 @@ def test_pull_incorpora_las_dos_caras_y_declara_que_las_soporta(tmp_path):
     cloud = CloudFalso([doc, _doc_cloud('dfm_antigua', '123456785', JPEG + b'antigua')])
     resumen = _sincronizar(raiz, cloud)
     assert cloud.confirmados == ['dfm_2c', 'dfm_antigua'] and not resumen['errores']
-    assert cloud.rutas[0][0].endswith('/pendientes?formatos=FRENTE_REVERSO')
-    assert all(body['formatos'] == ['FRENTE_REVERSO'] for ruta, body in cloud.rutas if ruta.endswith('/lease'))
+    # Declara las dos caras y los tipos de vehículo que sabe incorporar.
+    assert cloud.rutas[0][0].endswith('/pendientes?formatos=FRENTE_REVERSO&tipos=SOAP,REVISION_TECNICA,PERMISO_CIRCULACION')
+    assert all(body['formatos'] == ['FRENTE_REVERSO'] and body['tipos'] == ['SOAP', 'REVISION_TECNICA', 'PERMISO_CIRCULACION']
+               for ruta, body in cloud.rutas if ruta.endswith('/lease'))
     por_origen = {d['origen_documento_id']: d for d in _ficha(raiz)['documentos']}
     assert por_origen['dfm_2c']['formato'] == 'FRENTE_REVERSO'
     # La antigua de una imagen sigue igual: nunca pasa a contar como de dos caras.
