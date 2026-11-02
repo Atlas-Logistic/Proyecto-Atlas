@@ -758,75 +758,97 @@ def _dividir_items_material_fusionados(limpia: str) -> list[str]:
     return [s for s in segmentos if s]
 
 
+# Etiquetas que cierran la tabla de productos AZA (mismo pie que usa el
+# recorte focal, `revalidacion_documental._PIES_TABLA_MATERIAL`, más VALOR
+# TOTAL). Caso real 483843: la glosa libre "C2 ROLLOS RICARDO 995468705",
+# impresa junto a VALOR TOTAL, se publicaba como un segundo material.
+_CIERRES_TABLA_MATERIAL = ("TIPODEDOCUMENTO", "VALORTOTAL", "PESOKG", "DESPACHARA")
+
+
+def _fin_tabla_material(lineas: list[str]) -> int:
+    """Índice del primer pie leído DESPUÉS del encabezado DESCRIPCION. Sin
+    encabezado, o con el orden de lectura invertido (foto girada: el pie
+    antes que la tabla, casos 480603/480604), no se recorta nada."""
+    etiquetas = [re.sub(r"[^A-Z]", "", _normalizar(linea)) for linea in lineas]
+    encabezado = next((i for i, e in enumerate(etiquetas) if e == "DESCRIPCION"), None)
+    if encabezado is None:
+        return len(lineas)
+    return next(
+        (i for i in range(encabezado + 1, len(lineas)) if etiquetas[i].startswith(_CIERRES_TABLA_MATERIAL)),
+        len(lineas),
+    )
+
+
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
-    """Conserva líneas OCR con evidencia explícita de material."""
+    """Conserva líneas OCR con evidencia explícita de material, sólo hasta el
+    pie de la tabla de productos (ver `_fin_tabla_material`)."""
     encontradas: list[str] = []
-    for bloque in textos:
-        for linea in str(bloque).splitlines():
-            limpia = re.sub(r"\s+", " ", linea).strip()
-            if not limpia:
-                continue
-            # RapidOCR también omite el espacio tras la designación B
-            # ("BHORMIGON ...") y entre la familia y el diámetro
-            # ("HORMIGON16MM", casos 483106/483138/482816): sin límite de
-            # palabra la partida leída se descartaba entera. Sólo se separan
-            # esas dos formas; el resto de la línea queda como la leyó el OCR.
-            limpia = re.sub(r"^B(?=HORMIGON)", "B ", limpia, flags=re.IGNORECASE)
-            limpia = re.sub(r"\b(HORMIGON)(?=\d{1,2}\s*MM\b)", r"\1 ", limpia, flags=re.IGNORECASE)
-            normalizada = _normalizar(limpia)
-            if _es_fragmento_estampado_no_material(normalizada):
-                continue
-            # RapidOCR puede pegar la designación de barra a una familia
-            # inequívoca ("3HORMIGON ...", caso 482264). Aún no pasa
-            # `_tiene_evidencia_material` porque no hay límite de palabra;
-            # se admite sólo este patrón completo, antes de normalizarlo.
-            evidencia_material = _tiene_evidencia_material(limpia) or bool(
-                re.match(r"^[D3]\s*HORMIGON\b", normalizada)
-            )
-            if evidencia_material:
-                # Un OCR de tabla puede fusionar una fila de material con el
-                # membrete que la antecede (caso real 475256). Sólo cuando la
-                # línea completa ya es material contaminado según el mismo
-                # evaluador de publicación, y el texto desde el primer
-                # marcador de producto deja de serlo, se descarta el
-                # prefijo; nunca se trunca después del marcador (una línea
-                # puede traer varios ítems) ni se toca una línea creíble.
-                # Los índices de `normalizada` sólo sirven para cortar
-                # `limpia` si la normalización no cambió la longitud.
-                marcador = _PATRON_TERMINOS_MATERIAL.search(normalizada)
+    lineas = [linea for bloque in textos for linea in str(bloque).splitlines()]
+    for linea in lineas[:_fin_tabla_material(lineas)]:
+        limpia = re.sub(r"\s+", " ", linea).strip()
+        if not limpia:
+            continue
+        # RapidOCR también omite el espacio tras la designación B
+        # ("BHORMIGON ...") y entre la familia y el diámetro
+        # ("HORMIGON16MM", casos 483106/483138/482816): sin límite de
+        # palabra la partida leída se descartaba entera. Sólo se separan
+        # esas dos formas; el resto de la línea queda como la leyó el OCR.
+        limpia = re.sub(r"^B(?=HORMIGON)", "B ", limpia, flags=re.IGNORECASE)
+        limpia = re.sub(r"\b(HORMIGON)(?=\d{1,2}\s*MM\b)", r"\1 ", limpia, flags=re.IGNORECASE)
+        normalizada = _normalizar(limpia)
+        if _es_fragmento_estampado_no_material(normalizada):
+            continue
+        # RapidOCR puede pegar la designación de barra a una familia
+        # inequívoca ("3HORMIGON ...", caso 482264). Aún no pasa
+        # `_tiene_evidencia_material` porque no hay límite de palabra;
+        # se admite sólo este patrón completo, antes de normalizarlo.
+        evidencia_material = _tiene_evidencia_material(limpia) or bool(
+            re.match(r"^[D3]\s*HORMIGON\b", normalizada)
+        )
+        if evidencia_material:
+            # Un OCR de tabla puede fusionar una fila de material con el
+            # membrete que la antecede (caso real 475256). Sólo cuando la
+            # línea completa ya es material contaminado según el mismo
+            # evaluador de publicación, y el texto desde el primer
+            # marcador de producto deja de serlo, se descarta el
+            # prefijo; nunca se trunca después del marcador (una línea
+            # puede traer varios ítems) ni se toca una línea creíble.
+            # Los índices de `normalizada` sólo sirven para cortar
+            # `limpia` si la normalización no cambió la longitud.
+            marcador = _PATRON_TERMINOS_MATERIAL.search(normalizada)
+            if (
+                marcador is not None
+                and len(normalizada) == len(limpia)
+                and evaluar_credibilidad_material(limpia).nivel == NivelCredibilidad.INVALIDO
+            ):
+                # La designación de barra de una letra ("B HORMIGON",
+                # leída también D/3, ver normalización más abajo) es
+                # parte del ítem, no del membrete.
+                prefijo_barra = re.search(r"(?<!\S)[BD3]\s+$", normalizada[:marcador.start()])
+                inicio = prefijo_barra.start() if prefijo_barra else marcador.start()
+                candidata = limpia[inicio:]
                 if (
-                    marcador is not None
-                    and len(normalizada) == len(limpia)
-                    and evaluar_credibilidad_material(limpia).nivel == NivelCredibilidad.INVALIDO
+                    _tiene_evidencia_material(candidata)
+                    and evaluar_credibilidad_material(candidata).nivel != NivelCredibilidad.INVALIDO
                 ):
-                    # La designación de barra de una letra ("B HORMIGON",
-                    # leída también D/3, ver normalización más abajo) es
-                    # parte del ítem, no del membrete.
-                    prefijo_barra = re.search(r"(?<!\S)[BD3]\s+$", normalizada[:marcador.start()])
-                    inicio = prefijo_barra.start() if prefijo_barra else marcador.start()
-                    candidata = limpia[inicio:]
-                    if (
-                        _tiene_evidencia_material(candidata)
-                        and evaluar_credibilidad_material(candidata).nivel != NivelCredibilidad.INVALIDO
-                    ):
-                        limpia = candidata
-                # La palabra de familia leída con dígitos se escribe con sus
-                # letras; el resto de la línea queda tal como lo leyó el OCR.
-                for token, familia in _tokens_familia_con_digitos(normalizada).items():
-                    limpia = re.sub(rf"\b{re.escape(token)}\b", familia, limpia, flags=re.IGNORECASE)
-                # Confusiones OCR acotadas al contexto inequívoco de una línea
-                # de acero: B/3/D al inicio y 8/B antes de MM.
-                # RapidOCR puede pegar la designación de barra a la familia
-                # ("3HORMIGON ...", caso 482264). Es la misma confusión
-                # D/3 -> B ya cubierta abajo; el separador ausente no puede
-                # hacer que se descarte una partida que sí fue leída.
-                limpia = re.sub(r"^[D3]\s*(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
-                limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
-                encontradas.extend(_dividir_items_material_fusionados(limpia))
-                continue
-            familia = _familia_degradada(normalizada)
-            if familia:
-                encontradas.append(f"{familia} {_SUFIJO_DETALLE_ILEGIBLE}")
+                    limpia = candidata
+            # La palabra de familia leída con dígitos se escribe con sus
+            # letras; el resto de la línea queda tal como lo leyó el OCR.
+            for token, familia in _tokens_familia_con_digitos(normalizada).items():
+                limpia = re.sub(rf"\b{re.escape(token)}\b", familia, limpia, flags=re.IGNORECASE)
+            # Confusiones OCR acotadas al contexto inequívoco de una línea
+            # de acero: B/3/D al inicio y 8/B antes de MM.
+            # RapidOCR puede pegar la designación de barra a la familia
+            # ("3HORMIGON ...", caso 482264). Es la misma confusión
+            # D/3 -> B ya cubierta abajo; el separador ausente no puede
+            # hacer que se descarte una partida que sí fue leída.
+            limpia = re.sub(r"^[D3]\s*(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
+            limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
+            encontradas.extend(_dividir_items_material_fusionados(limpia))
+            continue
+        familia = _familia_degradada(normalizada)
+        if familia:
+            encontradas.append(f"{familia} {_SUFIJO_DETALLE_ILEGIBLE}")
     return " | ".join(dict.fromkeys(encontradas))
 
 
