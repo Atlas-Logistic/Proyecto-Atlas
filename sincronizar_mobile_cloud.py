@@ -28,9 +28,10 @@ from atlas_core.cloud_asignaciones_vehiculo import publicar_asignaciones_cloud
 from atlas_core.cloud_fichas_documentos import sincronizar_licencias_cloud
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
+from atlas_core.extraccion_licencias import extraer_licencias_pendientes
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile
-from atlas_core.ocr_provider import resolver_preferencia_ocr_desde_entorno
+from atlas_core.ocr_provider import crear_proveedor_ocr, resolver_preferencia_ocr_desde_entorno
 from atlas_core.registro_ciclo_pull import ejecutar_con_registro_de_ciclo
 
 URL_CLOUD_POR_DEFECTO = "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
@@ -93,6 +94,20 @@ def ejecutar_pull_con_escritor(
                 except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
                     logging.getLogger(__name__).warning("Licencias Mobile no sincronizadas: %s", error)
                     resultado["licencias_mobile"] = {"error": str(error)}
+            # Extracción OCR de las licencias PENDIENTE_EXTRACCION: sólo
+            # propone campos para revisión humana; un fallo no corta el PULL.
+            if raiz is not None and vigente():
+                def comprobar_lease() -> None:
+                    if not vigente():
+                        raise PermissionError("Lease PULL perdido: extracción de licencias detenida.")
+                try:
+                    resultado["extraccion_licencias"] = extraer_licencias_pendientes(
+                        raiz, comprobar=comprobar_lease,
+                        fabrica_ocr=lambda: crear_proveedor_ocr(proveedor_ocr_preferido),
+                    )
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Licencias Mobile sin extracción: %s", error)
+                    resultado["extraccion_licencias"] = {"error": str(error)}
             # Asignación vigente confirmada -> Cloud (sólo para vincular
             # documentos de vehículo). Mismo lease; un fallo no corta el PULL.
             if raiz is not None and vigente():
