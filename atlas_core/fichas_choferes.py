@@ -105,6 +105,13 @@ def _validar_v2(datos):
             if 'caras' in doc and (doc.get('formato') != 'FRENTE_REVERSO' or not isinstance(doc['caras'], list)
                                    or sorted(c.get('cara') for c in doc['caras'] if isinstance(c, dict)) != ['FRENTE', 'REVERSO']):
                 raise ValueError('Licencia de dos caras incompleta')
+            clasificacion = doc.get('clasificacion_cara')
+            if clasificacion is not None and (
+                    'caras' in doc or doc.get('formato') == 'FRENTE_REVERSO' or not isinstance(clasificacion, dict)
+                    or clasificacion.get('cara') != 'FRENTE' or clasificacion.get('archivo') != doc.get('archivo')
+                    or str(clasificacion.get('sha256', '')).lower() != str(doc.get('sha256', '')).lower()
+                    or clasificacion.get('confirmacion_humana') is not True or not clasificacion.get('autor')):
+                raise ValueError('Clasificación de cara de licencia inválida')
             for archivo in [doc.get('archivo'), *(c.get('archivo') for c in doc.get('caras') or [])]:
                 if not archivo:
                     continue
@@ -646,3 +653,90 @@ def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, d
             escribir_json_atomico(ruta, propuesta)
             return {'ok': True, 'modificado': True, 'accion': accion, 'documento_id': documento_id,
                     'ficha_id': ficha_id, 'revision': propuesta['revision'], 'respaldo': str(respaldo)}
+
+
+def clasificar_anverso_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, documento_id, sha256,
+                                      autor, confirmacion_humana, actor='DESKTOP'):
+    """Registra, por una persona, que la imagen única de una licencia ya
+    registrada es su ANVERSO (frente).
+
+    Sólo para licencias de una imagen (envío anterior a frente y reverso). La
+    persona tuvo a la vista ESE original: `documento_id` + `sha256` deben ser
+    los del documento y los bytes del archivo conservado deben tener esa misma
+    huella. Agrega `clasificacion_cara` (cara FRENTE, archivo, huella, autor y
+    fecha) y una entrada de historial; no cambia el formato histórico, el
+    archivo, los datos, la extracción ni el estado de revisión, no crea otra
+    licencia y no marca ningún reverso. Nunca se infiere: exige
+    `confirmacion_humana=True`. Repetirla con el mismo original no cambia nada.
+    """
+    from atlas_core.desktop_operacion import sesion
+
+    if confirmacion_humana is not True:
+        raise ValueError('Falta la confirmación explícita de la persona que revisó la imagen')
+    autor = ' '.join(str(autor or '').split())
+    if not 2 <= len(autor) <= 80:
+        raise ValueError('Indique quién clasifica la imagen')
+    ficha_id = str(uuid.UUID(str(ficha_id)))
+    referencia_catalogo = str(referencia_catalogo or '')
+    documento_id = str(documento_id or '')
+    sha256 = str(sha256 or '').lower()
+    if not re.fullmatch(r'[0-9a-f]{64}', sha256):
+        raise ValueError('La imagen cambió desde que se revisó; recargue la ficha antes de clasificarla')
+    with sesion(raiz, reutilizar=True) as comprobar:
+        ruta = ruta_almacen(raiz, empresa)
+        with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
+            catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'
+            catalogo_bytes = catalogo_ruta.read_bytes()
+            if referencia_catalogo not in json.loads(catalogo_bytes.decode('utf-8-sig')):
+                raise ValueError('La ficha ya no corresponde a un chofer vigente del catálogo')
+            anterior = leer_almacen(raiz, empresa=empresa)
+            if not anterior or anterior.get('version') != VERSION:
+                raise ValueError('La base de fichas no está inicializada')
+            ficha = fichas_por_referencia(anterior).get(referencia_catalogo)
+            if not ficha or ficha.get('ficha_id') != ficha_id:
+                raise ValueError('La identidad de la ficha cambió; recargue Catálogos antes de clasificar')
+            propuesta = copy.deepcopy(anterior)
+            ficha_nueva = fichas_por_referencia(propuesta)[referencia_catalogo]
+            documento = next((d for d in ficha_nueva['documentos'] if d.get('documento_id') == documento_id), None)
+            if documento is None or documento.get('tipo') != 'LICENCIA_CONDUCIR':
+                raise ValueError('La licencia indicada no pertenece a esta ficha')
+            if str(documento.get('sha256', '')).lower() != sha256:
+                raise ValueError('La imagen cambió desde que se revisó; recargue la ficha antes de clasificarla')
+            if documento.get('reemplazado_por'):
+                raise ValueError('Esa licencia fue reemplazada por otra')
+            if 'caras' in documento or documento.get('formato') == FORMATO_FRENTE_REVERSO or not documento.get('archivo'):
+                raise ValueError('Sólo se clasifica una licencia de una sola imagen')
+            previa = documento.get('clasificacion_cara')
+            if previa:
+                return {'ok': True, 'modificado': False, 'documento_id': documento_id, 'ficha_id': ficha_id,
+                        'revision': anterior['revision'], 'cara': previa['cara']}
+            original = ruta.parent / PureWindowsPath(documento['archivo']).as_posix()
+            if not original.resolve().is_relative_to(ruta.parent.resolve()) or not original.is_file():
+                raise ValueError('No se encuentra el archivo original de la licencia')
+            if hashlib.sha256(original.read_bytes()).hexdigest() != sha256:
+                raise ValueError('El archivo conservado no coincide con la huella registrada; no se clasificó')
+            instante = _ahora()
+            documento['clasificacion_cara'] = {
+                'cara': 'FRENTE', 'archivo': documento['archivo'], 'sha256': sha256, 'autor': autor, 'actor': actor,
+                'fecha': instante, 'confirmacion_humana': True,
+            }
+            ficha_nueva['historial'].append({
+                'accion': 'LICENCIA_ANVERSO_CLASIFICADO', 'actor': actor, 'autor': autor, 'fecha': instante,
+                'documento_id': documento_id, 'sha256': sha256,
+            })
+            propuesta['revision'] = int(anterior['revision']) + 1
+            _validar_v2(propuesta)
+            respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
+            respaldo.mkdir(parents=True)
+            shutil.copy2(ruta, respaldo / ruta.name)
+            escribir_json_atomico(respaldo / 'manifest.json', {
+                'empresa': empresa, 'actor': actor, 'autor': autor, 'operacion': 'LICENCIA_ANVERSO_CLASIFICADO',
+                'ficha_id': ficha_id, 'documento_id': documento_id, 'sha256': sha256,
+                'revision_anterior': anterior['revision'], 'ruta_relativa': str(ruta.relative_to(raiz)),
+            })
+            comprobar()
+            if catalogo_ruta.read_bytes() != catalogo_bytes:
+                raise ValueError('El catálogo cambió durante la clasificación; no se publicó')
+            escribir_json_atomico(ruta, propuesta)
+            return {'ok': True, 'modificado': True, 'documento_id': documento_id, 'ficha_id': ficha_id,
+                    'revision': propuesta['revision'], 'cara': 'FRENTE', 'respaldo': str(respaldo)}
