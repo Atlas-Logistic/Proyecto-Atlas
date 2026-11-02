@@ -1901,6 +1901,50 @@ def _canonizar_etiqueta_compuesta(texto_simple: str) -> str:
     return _ETIQUETAS_COMPUESTAS_SIN_ESPACIOS.get(re.sub(r"\s+", "", texto_simple), texto_simple)
 
 
+# P0 destinos contaminados (02/11/2026, casos reales 483859/483843/483491/
+# 482967/482487 al inicio, 482483/482941 al final, 482813 en medio): la
+# lectura lineal de DESPACHAR A arrastra la etiqueta compuesta de la fila
+# vecina, casi siempre "RUTCHOFER" ("RUTCHOFER PANAMERICANA NORTE 22650
+# SANTIAGO LAMPA"). `_canonizar_etiqueta_compuesta` sólo reconoce un bloque
+# que ES la etiqueta, y `_despachar_a_lineal_contaminado` sólo la forma
+# espaciada al inicio. Mismo vocabulario (`_ETIQUETAS_COMPUESTAS_SIN_
+# ESPACIOS`), con o sin sus espacios internos y sólo como palabra completa:
+# nunca una lista nueva ni parte de una calle ("DESPACHAR ARTURO PRAT").
+_ALTERNATIVAS_ETIQUETA_COMPUESTA = "|".join(
+    r"\s*".join(map(re.escape, etiqueta.split()))
+    for etiqueta in sorted(set(_ETIQUETAS_COMPUESTAS_SIN_ESPACIOS.values()), key=len, reverse=True)
+)
+_PATRON_RESIDUO_ETIQUETA_COMPUESTA = re.compile(
+    rf"(?<!\w)(?:{_ALTERNATIVAS_ETIQUETA_COMPUESTA})(?!\w)", re.IGNORECASE
+)
+_PATRON_RESIDUO_ETIQUETA_COMPUESTA_INICIO = re.compile(
+    rf"^[\s:]*(?:{_ALTERNATIVAS_ETIQUETA_COMPUESTA})(?!\w)[\s:]*", re.IGNORECASE
+)
+_PATRON_RESIDUO_ETIQUETA_COMPUESTA_FINAL = re.compile(
+    rf"[\s:]*(?<!\w)(?:{_ALTERNATIVAS_ETIQUETA_COMPUESTA})[\s:]*$", re.IGNORECASE
+)
+
+
+def contiene_residuo_etiqueta_compuesta(valor: Any) -> bool:
+    """True si el valor trae, como palabra completa y en cualquier
+    posición, una etiqueta compuesta del formulario (con o sin espacios)."""
+    return bool(_PATRON_RESIDUO_ETIQUETA_COMPUESTA.search(str(valor or "")))
+
+
+def limpiar_residuo_etiqueta_compuesta(valor: Any) -> str:
+    """Quita etiquetas compuestas pegadas sólo en los BORDES del valor
+    ("RUTCHOFER CAMINO ..." / "... MAIPU RUTCHOFER"). Una etiqueta en medio
+    no se recorta: no hay forma de saber qué parte es dirección, y el
+    llamador debe tratar el valor como contaminado. Nunca toca el resto."""
+    texto = str(valor or "").strip()
+    while True:
+        limpio = _PATRON_RESIDUO_ETIQUETA_COMPUESTA_INICIO.sub("", texto, count=1)
+        limpio = _PATRON_RESIDUO_ETIQUETA_COMPUESTA_FINAL.sub("", limpio, count=1).strip()
+        if limpio == texto:
+            return limpio
+        texto = limpio
+
+
 def etiquetas_estructurales_documento() -> tuple[str, ...]:
     """Bloque C1 -- acceso público y reutilizable al mismo vocabulario
     general (`_ETIQUETAS_ESTRUCTURALES_DESPACHO`) que ya usa
@@ -2010,6 +2054,10 @@ def _despachar_a_lineal_contaminado(valor: Any, *, valor_chofer_resuelto: str = 
         and 2 <= len(tokens_texto) < len(tokens_chofer)
         and tokens_texto == tokens_chofer[:len(tokens_texto)]
     ):
+        return True
+    # Etiqueta compuesta en cualquier posición, incluso sin espacios
+    # ("... RETRA RENE GARCIA RUTCHOFER 9701225-1", caso real 482813).
+    if contiene_residuo_etiqueta_compuesta(texto_crudo):
         return True
     return any(
         texto == etiqueta or texto.startswith(etiqueta + " ")

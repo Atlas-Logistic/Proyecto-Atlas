@@ -65,6 +65,8 @@ from atlas_core.direccion_equivalente import (
 )
 from atlas_core.extractor import (
     _despachar_a_lineal_contaminado,
+    contiene_residuo_etiqueta_compuesta,
+    limpiar_residuo_etiqueta_compuesta,
     limpiar_sufijo_chofer_pegado,
     limpiar_sufijo_rut_pegado,
     _extraer_despachar_a_geometrico,
@@ -2875,6 +2877,11 @@ def _comuna_de_la_misma_direccion(identificadores, despachar_a: str) -> set[str]
     return set()
 
 
+# Cuerpo de RUT (7-8 dígitos, con o sin puntos) con guión y verificador al
+# final, válido o no: ninguna numeración de calle tiene esa forma.
+_PATRON_CUERPO_RUT_FINAL = re.compile(r"(?<!\d)(?:\d{7,8}|\d{1,2}\.\d{3}\.\d{3})\s*-\s*[0-9K]\s*$", re.IGNORECASE)
+
+
 def despachar_a_documental(
     textos: Iterable[str],
     bloques: Iterable[Any] | None = None,
@@ -2902,12 +2909,28 @@ def despachar_a_documental(
     despachar_a_crudo = limpiar_sufijo_rut_pegado(
         limpiar_sufijo_chofer_pegado(despachar_a_crudo, chofer_resuelto)
     ).strip()
+    # P0 destinos contaminados (casos reales 483859/483843): etiqueta
+    # compuesta de la fila vecina pegada al inicio o al final, a menudo sin
+    # espacios ("RUTCHOFER ..."). Sólo se recorta en los bordes. Si queda una
+    # etiqueta en medio, o el RUT de esa etiqueta no se pudo recortar
+    # (dígito verificador mal leído: "... 9706225-1"), la lectura lineal deja
+    # de ser confiable y decide la geometría o se abstiene.
+    residuo_no_recortable = False
+    if contiene_residuo_etiqueta_compuesta(despachar_a_crudo):
+        despachar_a_crudo = limpiar_sufijo_rut_pegado(
+            limpiar_residuo_etiqueta_compuesta(despachar_a_crudo)
+        ).strip()
+        residuo_no_recortable = bool(
+            contiene_residuo_etiqueta_compuesta(despachar_a_crudo)
+            or _PATRON_CUERPO_RUT_FINAL.search(despachar_a_crudo)
+        )
 
     if bloques is None:
-        return despachar_a_crudo
+        return "" if residuo_no_recortable else despachar_a_crudo
     bloques = list(bloques)
     lineal_descartable = (
         not despachar_a_crudo
+        or residuo_no_recortable
         or _despachar_a_lineal_contaminado(despachar_a_crudo, valor_chofer_resuelto=chofer_resuelto)
         or evaluar_credibilidad_direccion(despachar_a_crudo).nivel == NivelCredibilidad.INVALIDO
     )
