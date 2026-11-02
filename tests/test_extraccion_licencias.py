@@ -253,3 +253,80 @@ def test_licencia_registrada_por_una_persona_no_se_procesa(tmp_path):
     resumen = extraer_licencias_pendientes(raiz, comprobar=lambda: None, fabrica_ocr=lambda: llamadas.append(1))
     assert resumen['pendientes'] == 0 and not llamadas
     assert 'extraccion_automatica' not in fichas_por_referencia(leer_almacen(raiz, empresa='MBT'))['123456785']['documentos'][0]
+
+
+# ---------------------------------------------------------------- licencia real sin rótulos legibles
+# Distribución del OCR real (frente antiguo fotografiado de lado): se leen los
+# valores pero casi ningún rótulo, y los que se leen pierden espacios. Datos
+# personales ficticios.
+
+LINEAS_SIN_ROTULOS = ['LICENCIA DE CONDUCTOR', 'REPUBLICADECHHLE', 'SOTO PEREZ', 'JUAN ANDRE', 'MAIPU', RUT, 'CD',
+                      'A4 Ley19495', 'FECHAULTIMO CONTROL', '19/06/2023', '07/05/2028']
+
+
+def test_clase_profesional_junto_a_su_ley_se_extrae_sin_rotulo_clase():
+    campos = _campos(LINEAS_SIN_ROTULOS)
+    assert (campos['clase']['estado'], campos['clase']['valor']) == ('EXTRAIDO', 'A4')
+    assert campos['rut']['estado'] == 'EXTRAIDO'
+
+
+def test_sin_rotulos_nombre_y_vencimiento_no_se_deducen_por_posicion():
+    campos = _campos(LINEAS_SIN_ROTULOS)
+    # Sin APELLIDOS/NOMBRES no se sabe qué línea es cuál; la fecha sin rótulo
+    # de próximo control no se toma por estar después del último control.
+    assert (campos['nombre']['motivo'], campos['vencimiento']['motivo']) == ('NO_ENCONTRADO', 'NO_ENCONTRADO')
+    assert campos['nombre']['valor'] is None and campos['vencimiento']['valor'] is None
+
+
+def test_rotulos_con_espacios_perdidos_por_el_ocr():
+    campos = _campos(['FECHAULTIMO CONTROL 19/06/2023', 'FECHACONTROL', '07/05/2028'])
+    assert (campos['vencimiento']['estado'], campos['vencimiento']['valor']) == ('EXTRAIDO', '2028-05-07')
+
+
+def test_ley_19495_solo_respalda_clases_profesionales():
+    assert _campos(['B Ley19495'])['clase']['motivo'] == 'NO_ENCONTRADO'
+    assert _campos(['XA4 LEY 19495'])['clase']['motivo'] == 'NO_ENCONTRADO'
+    campos = _campos(['A4 Ley 19.495', 'CLASE A2'])
+    assert campos['clase']['motivo'] == 'VARIAS_CLASES' and campos['clase']['observados'] == ['A2', 'A4']
+
+
+# ---------------------------------------------------------------- re-extracción controlada
+
+
+def test_extraccion_incompleta_de_version_anterior_se_reextrae_una_vez(tmp_path, monkeypatch):
+    from atlas_core import extraccion_licencias as modulo
+    raiz = _raiz(tmp_path)
+    recibido = _recibir(raiz, dos_caras=False)
+    monkeypatch.setattr(modulo, 'VERSION_EXTRACCION', 1)
+    _extraer(raiz, OCRFalso({UNICA: ['RUN ' + RUT]}))  # extractor anterior: sólo el RUT
+    previa, _ = _documento(raiz, recibido['documento_id'])
+    assert previa['extraccion_automatica']['estado'] == 'PARCIAL'
+    monkeypatch.setattr(modulo, 'VERSION_EXTRACCION', 2)
+    ocr = OCRFalso({UNICA: LINEAS_SIN_ROTULOS})
+    resumen = _extraer(raiz, ocr)
+    assert resumen['pendientes'] == 1 and ocr.leidas == [UNICA]
+    doc, ficha = _documento(raiz, recibido['documento_id'])
+    assert doc['extraccion_automatica']['version'] == 2
+    assert doc['extraccion_automatica']['campos']['clase']['valor'] == 'A4'
+    assert doc['extracciones_anteriores'] == [previa['extraccion_automatica']]  # se conserva intacta
+    assert ficha['historial'][-1]['version_anterior'] == 1 and ficha['historial'][-1]['estado_anterior'] == 'PARCIAL'
+    assert doc['estado_revision'] == 'PENDIENTE_EXTRACCION' and 'clase' not in doc
+    assert doc['extraccion_automatica']['confirmado_por_humano'] is False
+    # Misma versión: nunca otra vez.
+    llamadas = []
+    assert extraer_licencias_pendientes(raiz, comprobar=lambda: None,
+                                        fabrica_ocr=lambda: llamadas.append(1))['pendientes'] == 0
+    assert not llamadas
+
+
+def test_extraccion_completa_no_se_reextrae_al_subir_version(tmp_path, monkeypatch):
+    from atlas_core import extraccion_licencias as modulo
+    raiz = _raiz(tmp_path)
+    _recibir(raiz)
+    monkeypatch.setattr(modulo, 'VERSION_EXTRACCION', 1)
+    _extraer(raiz, OCRFalso({FRENTE: LINEAS_FRENTE, REVERSO: LINEAS_REVERSO}))
+    monkeypatch.setattr(modulo, 'VERSION_EXTRACCION', 2)
+    llamadas = []
+    assert extraer_licencias_pendientes(raiz, comprobar=lambda: None,
+                                        fabrica_ocr=lambda: llamadas.append(1))['pendientes'] == 0
+    assert not llamadas

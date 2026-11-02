@@ -16,7 +16,8 @@ vencimiento. Nunca las confirma:
   catálogo de choferes sólo se lee: un RUT que lo contradice se informa.
 
 Corre dentro del ciclo PULL bajo su lease (`comprobar`), después de recibir
-las licencias. Cada documento se procesa una sola vez.
+las licencias. Cada documento se procesa una vez por versión del extractor
+(`VERSION_EXTRACCION`), conservando la extracción anterior.
 """
 from __future__ import annotations
 
@@ -41,7 +42,9 @@ from atlas_core.validadores import validar_fecha, validar_rut_chileno
 
 logger = logging.getLogger(__name__)
 
-VERSION_EXTRACCION = 1
+# Subirla re-extrae UNA vez las licencias cuya extracción anterior quedó
+# incompleta (ver `_pendientes`); la anterior se conserva.
+VERSION_EXTRACCION = 2
 EXTRAIDO = "EXTRAIDO"
 PENDIENTE_REVISION = "PENDIENTE_REVISION"
 CAMPOS = ("nombre", "rut", "clase", "vencimiento")
@@ -51,9 +54,14 @@ CARA_UNICA = "UNICA"
 
 _RUT = re.compile(r"(?<![\dK])(\d{1,2}[ .]?\d{3}[ .]?\d{3}\s*-\s*[\dK])(?![\dK])")
 _FECHA = re.compile(r"(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{4})(?!\d)")
+# El OCR real junta palabras de los rótulos ("FECHAULTIMO CONTROL",
+# "REPUBLICADECHHLE"): los espacios entre palabras del rótulo son opcionales.
 _ETIQUETA_VENCIMIENTO = re.compile(
-    r"PROXIMO\s+CONTROL|FECHA\s+(?:DE\s+)?CONTROL|VENCIMIENTO|\bVENCE\b|VALIDA\s+HASTA")
+    r"PROXIMO\s*CONTROL|FECHA\s*(?:DE\s*)?CONTROL|VENCIMIENTO|\bVENCE\b|VALIDA\s*HASTA")
 _ETIQUETA_CLASE = re.compile(r"\bCLASES?\b")
+# Licencia real sin rótulo CLASE legible: la clase profesional va impresa
+# junto a su ley ("A4 Ley19495"). Sólo A1-A5, que son las de la Ley 19.495.
+_CLASE_CON_LEY = re.compile(r"(?<![A-Z0-9])(A[1-5])\s*LEY\s*19\.?495(?!\d)")
 _ETIQUETAS_NOMBRE = {"apellidos": re.compile(r"\bAPELLIDOS?\b"), "nombres": re.compile(r"\bNOMBRES?\b")}
 # Cualquier rótulo impreso: nunca puede tomarse como el valor de otro rótulo.
 _ROTULO = re.compile(
@@ -113,6 +121,7 @@ def _extraer_clase(caras: Mapping[str, list[str]]) -> dict:
     hallazgos, ilegibles = [], []
     for cara, lineas in caras.items():
         for i, linea in enumerate(lineas):
+            hallazgos.extend((clase, cara) for clase in _CLASE_CON_LEY.findall(linea))
             if not _ETIQUETA_CLASE.search(linea):
                 continue
             for texto in _valor_tras_etiqueta(lineas, i, _ETIQUETA_CLASE):
@@ -205,6 +214,15 @@ def _caras_del_documento(documento: Mapping) -> list[tuple[str, str, str]]:
     return [(CARA_UNICA, documento["archivo"], documento.get("sha256", ""))]
 
 
+def _por_extraer(documento: Mapping) -> bool:
+    """Sin extracción, o con una incompleta de una versión anterior del
+    extractor: una re-extracción por versión, nunca en cada ciclo."""
+    previa = documento.get("extraccion_automatica")
+    if previa is None:
+        return True
+    return previa.get("estado") != "COMPLETA" and int(previa.get("version") or 0) < VERSION_EXTRACCION
+
+
 def _pendientes(datos: Mapping) -> list[tuple[dict, dict]]:
     return [
         (ficha, documento)
@@ -212,7 +230,7 @@ def _pendientes(datos: Mapping) -> list[tuple[dict, dict]]:
         for documento in ficha.get("documentos", [])
         if documento.get("tipo") == "LICENCIA_CONDUCIR"
         and documento.get("estado_revision") == ESTADO_PENDIENTE_EXTRACCION
-        and not documento.get("reemplazado_por") and "extraccion_automatica" not in documento
+        and not documento.get("reemplazado_por") and _por_extraer(documento)
     ]
 
 
@@ -310,11 +328,15 @@ def _registrar(raiz, ruta: Path, empresa: str, ficha_id: str, documento_id: str,
                          if f["ficha_id"] == ficha_id and d["documento_id"] == documento_id), None)
         if objetivo is None:
             return False  # ya extraída, reemplazada o registrada por una persona entre medio
+        previa = objetivo.get("extraccion_automatica")
+        if previa is not None:
+            objetivo.setdefault("extracciones_anteriores", []).append(previa)
         objetivo["extraccion_automatica"] = extraccion
         ficha = next(f for f in propuesta["choferes"] if f["ficha_id"] == ficha_id)
         ficha["historial"].append({
             "accion": "LICENCIA_EXTRACCION_AUTOMATICA", "actor": actor, "fecha": extraccion["fecha"],
-            "documento_id": documento_id, "estado": extraccion["estado"],
+            "documento_id": documento_id, "estado": extraccion["estado"], "version": extraccion["version"],
+            **({"version_anterior": previa.get("version"), "estado_anterior": previa.get("estado")} if previa else {}),
         })
         propuesta["revision"] = int(anterior["revision"]) + 1
         _validar_v2(propuesta)
