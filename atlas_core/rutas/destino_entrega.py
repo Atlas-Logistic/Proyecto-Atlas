@@ -2880,6 +2880,17 @@ def _comuna_de_la_misma_direccion(identificadores, despachar_a: str) -> set[str]
 # Cuerpo de RUT (7-8 dígitos, con o sin puntos) con guión y verificador al
 # final, válido o no: ninguna numeración de calle tiene esa forma.
 _PATRON_CUERPO_RUT_FINAL = re.compile(r"(?<!\d)(?:\d{7,8}|\d{1,2}\.\d{3}\.\d{3})\s*-\s*[0-9K]\s*$", re.IGNORECASE)
+# Número fundido con texto en un solo token ("5ESSANTIAIGOLUA", caso 483859:
+# "585 SANTIAGO LAMPA" leído sin espacios). Una designación corta ("3B",
+# "KM20", "2DA") nunca llega a tres letras pegadas al número.
+_PATRON_TOKEN_NUMERO_FUNDIDO = re.compile(r"\b(?=\w*\d)(?=(?:\w*[A-ZÑ]){3})\w+", re.IGNORECASE)
+
+
+def _destino_legible_tras_residuo(valor: str) -> bool:
+    """Sólo para una lectura que arrastró una etiqueta compuesta: el OCR de
+    esa fila ya se mezcló, así que el texto restante debe ser legible por sí
+    mismo para aceptarse sin intervención humana."""
+    return bool(valor) and not _PATRON_TOKEN_NUMERO_FUNDIDO.search(valor)
 
 
 def despachar_a_documental(
@@ -2914,15 +2925,19 @@ def despachar_a_documental(
     # espacios ("RUTCHOFER ..."). Sólo se recorta en los bordes. Si queda una
     # etiqueta en medio, o el RUT de esa etiqueta no se pudo recortar
     # (dígito verificador mal leído: "... 9706225-1"), la lectura lineal deja
-    # de ser confiable y decide la geometría o se abstiene.
+    # de ser confiable y decide la geometría o se abstiene. En esa misma
+    # fila mezclada, tanto la lineal limpia como la geométrica deben ser
+    # legibles (ver `_destino_legible_tras_residuo`); si no, abstención.
     residuo_no_recortable = False
-    if contiene_residuo_etiqueta_compuesta(despachar_a_crudo):
+    lectura_con_residuo = contiene_residuo_etiqueta_compuesta(despachar_a_crudo)
+    if lectura_con_residuo:
         despachar_a_crudo = limpiar_sufijo_rut_pegado(
             limpiar_residuo_etiqueta_compuesta(despachar_a_crudo)
         ).strip()
         residuo_no_recortable = bool(
             contiene_residuo_etiqueta_compuesta(despachar_a_crudo)
             or _PATRON_CUERPO_RUT_FINAL.search(despachar_a_crudo)
+            or not _destino_legible_tras_residuo(despachar_a_crudo)
         )
 
     if bloques is None:
@@ -2941,6 +2956,8 @@ def despachar_a_documental(
     except Exception:
         decision_geometrica = {}
     candidato_geometrico = str(decision_geometrica.get("valor") or "").strip()
+    if lectura_con_residuo and not _destino_legible_tras_residuo(candidato_geometrico):
+        candidato_geometrico = ""
     if candidato_geometrico and not _despachar_a_lineal_contaminado(
         candidato_geometrico, valor_chofer_resuelto=chofer_resuelto
     ) and (

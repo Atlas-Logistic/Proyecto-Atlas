@@ -86,6 +86,7 @@ from atlas_core.extractor import (
     _patente_valida,
     _peso_tiene_forma_sospechosa,
     _reexaminar_peso_por_baja_confianza,
+    contiene_residuo_etiqueta_compuesta,
     detectar_captura_recortada_posible,
     etiqueta_propietaria_valor_encabezado,
     extraer_datos,
@@ -4039,6 +4040,15 @@ def procesar_archivo(
     _revalidar_contaminacion_destino_final(
         motivos_documento, resultado_entrega, destino_lineal=destino_lineal,
     )
+    # P0 destinos OCR corruptos (caso real 483859): la lectura arrastró una
+    # etiqueta compuesta y ninguna lectura dejó una dirección aceptable. El
+    # destino queda vacío y pendiente de revisión, nunca un OK sin destino.
+    if (
+        contiene_residuo_etiqueta_compuesta(destino_lineal)
+        and not str(resultado_entrega.get("despachar_a_crudo") or "").strip()
+        and not _despachar_a_documental_temprano()
+    ):
+        _motivo(MotivoRevisionDocumento.DESTINO_CONTAMINADO_POR_OTRA_SECCION)
 
     # Materiales AZA fase 1: código SAP por ítem y material OCR no confiable.
     # Aquí, después del enriquecimiento logístico, porque es éste el que lee

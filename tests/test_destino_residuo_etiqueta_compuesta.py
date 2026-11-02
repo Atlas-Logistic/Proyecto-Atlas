@@ -64,8 +64,9 @@ def _solo_lineal(valor: str) -> str:
         ("483491", "PANAMERICANA NORTE 22650 SANTIAGO LAMPA"),
         ("482967", "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU"),
         # RUT mal leído (9706225-1, verificador inválido): la lineal deja de
-        # ser confiable y decide la lectura geométrica, tal como la leyó el OCR.
-        ("483859", "ANTA ISABEL 5ESSANTIAIGOLUA"),
+        # ser confiable y la geométrica ("ANTA ISABEL 5ESSANTIAIGOLUA") no es
+        # legible: abstención (ver test_destino_ocr_corrupto_tras_residuo).
+        ("483859", ""),
     ],
 )
 def test_trazas_reales_no_guardan_la_etiqueta_en_el_destino(guia, esperado):
@@ -152,7 +153,7 @@ def test_detector_lineal_reconoce_la_etiqueta_sin_espacios_en_cualquier_posicion
 # ============================================================
 
 
-@pytest.mark.parametrize("guia", ["483859", "483843", "483491", "482967"])
+@pytest.mark.parametrize("guia", ["483843", "483491", "482967"])
 def test_ruta_de_ingesta_recibe_el_destino_limpio(monkeypatch, guia):
     lineas, bloques = _cargar_bloques(guia)
     planta = SimpleNamespace(planta_id="p1", nombre="AZA COLINA")
@@ -177,3 +178,20 @@ def test_ruta_de_ingesta_recibe_el_destino_limpio(monkeypatch, guia):
 
     assert recibidos and not contiene_residuo_etiqueta_compuesta(recibidos[0])
     assert not contiene_residuo_etiqueta_compuesta(resultado["despachar_a_crudo"])
+
+
+def test_483859_sin_destino_legible_no_llega_al_calculo_de_ruta(monkeypatch):
+    lineas, bloques = _cargar_bloques("483859")
+    planta = SimpleNamespace(planta_id="p1", nombre="AZA COLINA")
+    monkeypatch.setattr(
+        enriquecimiento_viaje, "resolver_planta_origen",
+        lambda **_: (planta, "", "CATEGORIA_DESTINO_EXTERNO", ""),
+    )
+    monkeypatch.setattr(
+        destino_entrega, "calcular_ruta_entrega_para_viaje",
+        lambda **_: pytest.fail("no debe rutearse un destino abstenido"),
+    )
+
+    resultado = resolver_entrega_documento(lineas, [planta], object(), bloques=bloques)
+
+    assert resultado["despachar_a_crudo"] == ""
