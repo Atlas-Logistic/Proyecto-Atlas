@@ -3505,6 +3505,181 @@ def revalidar_destino_contaminado_rut_etiqueta_sin_ocr(
     return {"filas_totales": len(filas), "guias_actualizadas": actualizadas}
 
 
+_VERSION_DESTINO_RESIDUO_ETIQUETA = 1
+_PATRON_NUMERO_CALLE_PROPIO = re.compile(r"(?<!\w)\d{1,6}(?!\w)")
+_PATRON_TOKEN_MIXTO_LARGO = re.compile(r"\b(?=\w*\d)(?=(?:\w*[A-Za-zÑñ]){3})\w+")
+
+
+def _destino_reconstruido_confiable(valor: str) -> bool:
+    """Más estricto que la ingesta: sólo se promueve en un histórico una
+    dirección sin residuo, con número de calle como palabra propia y sin
+    tokens que mezclen dígitos y texto ("5ESSANTIAIGOLUA", caso 483859)."""
+    from atlas_core.extractor import contiene_residuo_etiqueta_compuesta
+    from atlas_core.registro_obra_destino import motivo_destino_documental_no_confiable
+
+    return bool(
+        valor
+        and not contiene_residuo_etiqueta_compuesta(valor)
+        and not motivo_destino_documental_no_confiable(valor)
+        and evaluar_credibilidad_direccion(valor).nivel == NivelCredibilidad.CONFIABLE
+        and _PATRON_NUMERO_CALLE_PROPIO.search(valor)
+        and not _PATRON_TOKEN_MIXTO_LARGO.search(valor)
+    )
+
+
+def _traza_con_bloques(directorio: Path, archivo: str) -> tuple[Path, list[str], tuple] | None:
+    """Traza OCR ya persistida más reciente (vigente o histórica) del mismo
+    documento que conserve bloques; nunca relee la imagen."""
+    from atlas_core.replay_traza_ocr import ErrorReplayTrazaOCR, reconstruir_bloques_desde_traza
+
+    vigente = ruta_traza_ocr(directorio, archivo)
+    candidatas = [vigente, *sorted((directorio / "historico").glob(f"{vigente.stem}.*.json"), reverse=True)]
+    for ruta in candidatas:
+        try:
+            traza = json.loads(ruta.read_text(encoding="utf-8"))
+            bloques = reconstruir_bloques_desde_traza(traza, referencia_esperada=archivo)
+        except (OSError, ValueError, ErrorReplayTrazaOCR):
+            continue
+        return ruta, [str(t) for t in traza["ocr"].get("lineas") or []], bloques
+    return None
+
+
+def _calles_numero_confirmadas(carpeta_catalogos: Path, aplicaciones: list[Mapping[str, object]]) -> set[str]:
+    """Calle + número de destinos ya confirmados (catálogo maestro o destino
+    operacional confirmado en el ledger): única corroboración independiente
+    del OCR para un texto nuevo leído de la traza."""
+    from atlas_core.catalogo_destinos import CatalogoDestinos, ErrorCatalogoDestinos
+
+    confirmadas = {
+        str((a.get("destino_operacional") or {}).get("direccion", ""))
+        for a in aplicaciones
+        if a.get("tipo") == "DESTINO_OPERACIONAL_DOCUMENTO" and isinstance(a.get("destino_operacional"), Mapping)
+    }
+    try:
+        destinos = CatalogoDestinos(
+            carpeta_catalogos / "destinos_maestros.json", ruta_clientes=carpeta_catalogos / "clientes.json",
+        ).listar()
+    except (OSError, ValueError, ErrorCatalogoDestinos):
+        destinos = []
+    for destino in destinos:
+        estado = getattr(destino.estado_calidad, "value", destino.estado_calidad)
+        if estado == "CONFIRMADO":
+            confirmadas.update((destino.direccion, destino.nombre_destino))
+    return {numero for texto in confirmadas if (numero := calle_numero_normalizado(str(texto or "")))}
+
+
+def revalidar_destino_residuo_etiqueta_compuesta_sin_ocr(
+    *, raiz_atlas: str | Path, directorio_trazas: str | Path | None = None,
+    carpeta_catalogos: str | Path | None = None,
+) -> dict[str, object]:
+    """P0 destinos contaminados -- filas persistidas antes de e844ae6 con una
+    etiqueta compuesta ("RUTCHOFER") en `despachar_a_crudo` o en la
+    `direccion_entrega` derivada de él.
+
+    Nunca toca un documento con destino confirmado o con decisión humana
+    sobre el destino. Reconstruye con la misma regla de ingesta
+    (`despachar_a_documental`) sobre el valor persistido y, si existe, la
+    traza OCR con bloques ya guardada: la traza debe corroborar la misma
+    calle y número; si no hay valor confiable, la geometría de la traza
+    sólo vale si su calle y número coinciden con un destino ya confirmado o
+    con la geocodificación existente (caso 482813: el OCR leyó "LAESTERA
+    222" donde dice "LA ESTERA 525"). Si no, se abstiene: vacía el destino,
+    nunca promueve texto corrupto.
+    Sólo invalida los derivados de ruta cuya dirección estaba contaminada o
+    ya no corresponde; no recalcula rutas ni cambia estados operacionales.
+    Sin OCR ni red; idempotente; deja auditoría en la fila.
+
+    No está cableada al PULL: se ensaya sobre copias."""
+    from types import SimpleNamespace
+
+    from atlas_core.destino_operacional import identidades_destino_confirmado
+    from atlas_core.extractor import contiene_residuo_etiqueta_compuesta
+    from atlas_core.rutas.destino_entrega import despachar_a_documental
+
+    raiz = Path(raiz_atlas)
+    dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
+    ledger = dataset.parent / "decisiones_aplicadas.json"
+    trazas = Path(directorio_trazas) if directorio_trazas is not None else raiz / "operacion" / "trazas_ocr"
+    try:
+        aplicaciones = json.loads(ledger.read_text(encoding="utf-8")).get("aplicaciones", [])
+        aplicaciones = [a for a in aplicaciones if isinstance(a, Mapping)]
+    except FileNotFoundError:
+        aplicaciones = []
+    confirmados = identidades_destino_confirmado(ledger)  # ledger dañado: falla cerrado
+    calles_confirmadas = _calles_numero_confirmadas(
+        Path(carpeta_catalogos) if carpeta_catalogos is not None else raiz / "catalogos_privados", aplicaciones,
+    )
+
+    detalle: list[dict[str, object]] = []
+    with bloqueo_sesion(dataset.parent, "revalidacion_dataset"):
+        filas = _leer_filas(dataset)
+        cambiadas = False
+        for fila in filas:
+            crudo = str(fila.get("despachar_a_crudo", "")).strip()
+            direccion = str(fila.get("direccion_entrega", "")).strip()
+            if not (contiene_residuo_etiqueta_compuesta(crudo) or contiene_residuo_etiqueta_compuesta(direccion)):
+                continue
+            archivo = str(fila.get("archivo", "")).strip()
+            guia = str(fila.get("numero_guia", "")).strip()
+            registro: dict[str, object] = {
+                "numero_guia": guia, "archivo": archivo,
+                "despachar_a_previo": crudo, "direccion_entrega_previa": direccion,
+            }
+            if (archivo, guia) in confirmados or any(
+                _hay_decision_humana_para_campo(aplicaciones, fila=fila, campo=campo)
+                for campo in ("despachar_a_crudo", "direccion_entrega")
+            ):
+                detalle.append({**registro, "resultado": "PROTEGIDO_DECISION_HUMANA"})
+                continue
+
+            limpio = despachar_a_documental([], identificadores=SimpleNamespace(despachar_a=crudo))
+            traza = _traza_con_bloques(trazas, archivo)
+            por_traza = despachar_a_documental(traza[1], traza[2]) if traza else ""
+            if _destino_reconstruido_confiable(limpio):
+                nuevo, fuente = limpio, "VALOR_PERSISTIDO"
+                if por_traza and calle_numero_normalizado(por_traza) != calle_numero_normalizado(limpio):
+                    nuevo, fuente = "", "CONTRADICCION_CON_TRAZA"
+            elif _destino_reconstruido_confiable(por_traza):
+                corroboradas = calles_confirmadas | (
+                    {calle_numero_normalizado(direccion)} if not contiene_residuo_etiqueta_compuesta(direccion) else set()
+                )
+                if calle_numero_normalizado(por_traza) in corroboradas:
+                    nuevo, fuente = por_traza, "TRAZA_OCR_GEOMETRICA_CORROBORADA"
+                else:
+                    nuevo, fuente = "", "TRAZA_SIN_CORROBORACION"
+            else:
+                nuevo, fuente = "", "SIN_DIRECCION_CONFIABLE"
+
+            ruta_vigente = any(str(fila.get(c, "")).strip() for c in ("direccion_entrega", "distancia_km"))
+            invalidar = ruta_vigente and (
+                not nuevo
+                or contiene_residuo_etiqueta_compuesta(direccion)
+                or (direccion and calle_numero_normalizado(direccion) != calle_numero_normalizado(nuevo))
+            )
+            fila["despachar_a_crudo"] = nuevo
+            if invalidar:
+                fila.update(invalidar_derivados_ruta())
+                fila["estado_entrega"] = "NO_INTENTADO"
+            resultado = "CORREGIDO" if nuevo else "ABSTENCION"
+            auditoria = {
+                **registro, "version": _VERSION_DESTINO_RESIDUO_ETIQUETA, "resultado": resultado,
+                "fuente": fuente, "despachar_a_nuevo": nuevo, "ruta_invalidada": invalidar,
+                "traza": traza[0].name if traza else "",
+            }
+            _anotar_recuperacion_p0(fila, "destino_residuo_etiqueta", auditoria)
+            detalle.append(auditoria)
+            cambiadas = True
+        if cambiadas:
+            _escribir_filas_completas(dataset, filas)
+    return {
+        "filas_totales": len(filas),
+        "corregidas": [d["numero_guia"] for d in detalle if d["resultado"] == "CORREGIDO"],
+        "abstenciones": [d["numero_guia"] for d in detalle if d["resultado"] == "ABSTENCION"],
+        "protegidas": [d["numero_guia"] for d in detalle if d["resultado"] == "PROTEGIDO_DECISION_HUMANA"],
+        "detalle": detalle,
+    }
+
+
 # Compartido con la agrupación de entregas (`atlas_core.direccion_equivalente`).
 _calle_numero_normalizado = calle_numero_normalizado
 
