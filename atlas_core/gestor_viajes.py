@@ -779,11 +779,65 @@ class Viaje:
 
     @property
     def localidad_entrega(self) -> str:
-        return self._campo_destino_consolidado("localidad_entrega")
+        return self._campo_destino_consolidado("localidad_entrega") or self._territorio_recuperado()[0]
 
     @property
     def region_entrega(self) -> str:
-        return self._campo_destino_consolidado("region_entrega")
+        return self._campo_destino_consolidado("region_entrega") or self._territorio_recuperado()[1]
+
+    def _territorio_recuperado(self) -> tuple[str, str]:
+        """(comuna, región) del viaje cuando la consolidación de destino lo
+        deja vacío pero sus guías lo determinan sin ambigüedad.
+
+        `_campo_destino_consolidado` exige ruta del viaje `RUTA_CALCULADA`
+        y texto idéntico, así que un viaje cuyas guías dicen todas "Renca"/
+        "Metropolitana" queda sin comuna ni región cuando sus km difieren
+        (0000367068), y "RM" frente a "Metropolitana" cuenta como
+        contradicción (0000362665). Sólo se usa para el campo vacío: nunca
+        reemplaza un valor ya consolidado ni toca las guías.
+
+        Cada guía de destino (`_documentos_destino`) debe tener su propio
+        destino resuelto (confirmado por humano, o ruta calculada sin
+        entrega `REVISAR`); una guía en revisión o sin dato deja el viaje
+        sin evidencia suficiente. La comuna exige una comuna oficial
+        idéntica en todas, y "SANTIAGO" no basta: en las guías AZA suele
+        ser la ciudad, no la comuna (`direccion_equivalente._CIUDAD_
+        GENERICA`). La región se normaliza con `region_valida`, o se toma de
+        la comuna oficial de la guía (catálogo territorial, sin
+        geocodificar); si ambas existen y difieren, la guía se contradice y
+        no se recupera nada."""
+        from atlas_core.direccion_equivalente import _CIUDAD_GENERICA, comuna_oficial
+        from atlas_core.territorio_chile import normalizar_comuna, region_valida
+
+        documentos = self._documentos_destino()
+        if not documentos or not all(
+            d.destino_operacional_confirmado or (
+                _clave_normalizada(d.estado_ruta) == "ruta_calculada"
+                and _clave_normalizada(d.estado_entrega) != "revisar"
+            )
+            for d in documentos
+        ):
+            return "", ""
+        comunas: list[tuple[str, str]] = []
+        regiones: list[tuple[str, str]] = []
+        for d in documentos:
+            comuna = comuna_oficial(d.localidad_entrega) if _valor_presente(d.localidad_entrega) else ""
+            region_comuna = (normalizar_comuna(comuna).region or "") if comuna else ""
+            region = (region_valida(d.region_entrega) or "") if _valor_presente(d.region_entrega) else ""
+            if region and region_comuna and _clave_normalizada(region) != _clave_normalizada(region_comuna):
+                return "", ""
+            comuna_util = "" if comuna == _CIUDAD_GENERICA else comuna
+            comunas.append((comuna_util, str(d.localidad_entrega).strip() if comuna_util else ""))
+            regiones.append((region or region_comuna, str(d.region_entrega).strip() if region else ""))
+
+        def _unanime(pares: list[tuple[str, str]]) -> str:
+            claves = {_clave_normalizada(clave) for clave, _ in pares}
+            if "" in claves or len(claves) != 1:
+                return ""
+            literales = [literal for _, literal in pares if literal]
+            return Counter(literales).most_common(1)[0][0] if literales else pares[0][0]
+
+        return _unanime(comunas), _unanime(regiones)
 
     @property
     def estado_entrega(self) -> str:

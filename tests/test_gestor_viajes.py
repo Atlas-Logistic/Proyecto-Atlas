@@ -1307,7 +1307,9 @@ def test_ruta_a_nivel_de_viaje_se_abstiene_ante_empate_estricto_nunca_promedia()
     assert viaje["duracion_min"] == ""
     assert viaje["proveedor_ruta"] == ""
     assert viaje["direccion_entrega"] == ""
-    assert viaje["localidad_entrega"] == ""
+    # La ruta se abstiene, pero ambas guías determinan la misma comuna y
+    # región (`Viaje._territorio_recuperado`).
+    assert (viaje["localidad_entrega"], viaje["region_entrega"]) == ("Lampa", "Metropolitana")
 
 
 def test_ruta_de_la_mayoria_no_aplica_a_nivel_de_viaje_si_algun_documento_fallo():
