@@ -29,6 +29,7 @@ from atlas_core.cloud_fichas_documentos import sincronizar_licencias_cloud
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.extraccion_licencias import extraer_licencias_pendientes
+from atlas_core.extraccion_vencimientos_vehiculos import extraer_vencimientos_vehiculos
 from atlas_core.identificacion_patentes import identificar_patentes_documentos
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile
@@ -123,6 +124,20 @@ def ejecutar_pull_con_escritor(
                 except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
                     logging.getLogger(__name__).warning("Documentos de vehículo sin identificación: %s", error)
                     resultado["identificacion_patentes"] = {"error": str(error)}
+            # Vencimiento impreso en SOAP / revisión técnica / permiso: sólo
+            # propuesta para revisión humana; un fallo no corta el PULL.
+            if raiz is not None and vigente():
+                def comprobar_lease_vencimientos() -> None:
+                    if not vigente():
+                        raise PermissionError("Lease PULL perdido: extracción de vencimientos detenida.")
+                try:
+                    resultado["vencimientos_vehiculo"] = extraer_vencimientos_vehiculos(
+                        raiz, comprobar=comprobar_lease_vencimientos,
+                        fabrica_ocr=lambda: crear_proveedor_ocr(proveedor_ocr_preferido),
+                    )
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Documentos de vehículo sin vencimiento propuesto: %s", error)
+                    resultado["vencimientos_vehiculo"] = {"error": str(error)}
             # Asignación vigente confirmada -> Cloud (sólo para vincular
             # documentos de vehículo). Mismo lease; un fallo no corta el PULL.
             if raiz is not None and vigente():

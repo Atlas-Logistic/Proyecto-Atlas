@@ -220,13 +220,18 @@ def test_pull_invoca_licencias_tras_las_guias_y_un_fallo_no_altera_su_resultado(
          patch('atlas_core.exclusividad_equipo.recuperar_bloqueos_huerfanos'), \
          patch('sincronizar_mobile_cloud.publicar_asignaciones_cloud', return_value={'publicadas': 1}) as asignaciones, \
          patch('sincronizar_mobile_cloud.sincronizar_licencias_cloud', return_value={'incorporados': []}) as licencias,          patch('sincronizar_mobile_cloud.crear_proveedor_ocr', return_value='OCR') as fabrica,          patch('sincronizar_mobile_cloud.extraer_licencias_pendientes', return_value={'pendientes': 0}) as extraccion, \
-         patch('sincronizar_mobile_cloud.identificar_patentes_documentos', return_value={'pendientes': 0}) as patentes:
+         patch('sincronizar_mobile_cloud.identificar_patentes_documentos', return_value={'pendientes': 0}) as patentes,          patch('sincronizar_mobile_cloud.extraer_vencimientos_vehiculos', return_value={'pendientes': 0}) as vencimientos:
         resultado = ejecutar_pull_con_escritor(**argumentos, proveedor_ocr_preferido='rapidocr')
         ocr = extraccion.call_args.kwargs['fabrica_ocr']()
+        ocr_vencimientos = vencimientos.call_args.kwargs['fabrica_ocr']()
     assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'incorporados': []},
                          'extraccion_licencias': {'pendientes': 0}, 'identificacion_patentes': {'pendientes': 0},
-                         'asignaciones_vehiculo': {'publicadas': 1}}
+                         'vencimientos_vehiculo': {'pendientes': 0}, 'asignaciones_vehiculo': {'publicadas': 1}}
     assert patentes.call_args.args == (tmp_path,)
+    # Vencimientos tras identificar la patente, bajo el mismo lease y con el OCR configurado.
+    assert vencimientos.call_args.args == (tmp_path,)
+    vencimientos.call_args.kwargs['comprobar']()
+    assert ocr_vencimientos == 'OCR'
     assert licencias.call_args.kwargs['raiz'] == tmp_path and licencias.call_args.kwargs['puede_continuar']()
     # Extracción tras recibir licencias, bajo el mismo lease y con el OCR configurado.
     assert extraccion.call_args.args == (tmp_path,)
@@ -237,11 +242,11 @@ def test_pull_invoca_licencias_tras_las_guias_y_un_fallo_no_altera_su_resultado(
          patch('atlas_core.exclusividad_equipo.recuperar_bloqueos_huerfanos'), \
          patch('sincronizar_mobile_cloud.publicar_asignaciones_cloud', side_effect=OSError('Cloud')), \
          patch('sincronizar_mobile_cloud.sincronizar_licencias_cloud', side_effect=OSError('Drive')),          patch('sincronizar_mobile_cloud.extraer_licencias_pendientes', side_effect=OSError('OCR')), \
-         patch('sincronizar_mobile_cloud.identificar_patentes_documentos', side_effect=OSError('OCR patentes')):
+         patch('sincronizar_mobile_cloud.identificar_patentes_documentos', side_effect=OSError('OCR patentes')),          patch('sincronizar_mobile_cloud.extraer_vencimientos_vehiculos', side_effect=OSError('OCR vencimientos')):
         resultado = ejecutar_pull_con_escritor(**argumentos)
     assert resultado == {'confirmados': ['e1'], 'licencias_mobile': {'error': 'Drive'},
                          'extraccion_licencias': {'error': 'OCR'}, 'identificacion_patentes': {'error': 'OCR patentes'},
-                         'asignaciones_vehiculo': {'error': 'Cloud'}}
+                         'vencimientos_vehiculo': {'error': 'OCR vencimientos'}, 'asignaciones_vehiculo': {'error': 'Cloud'}}
 
 
 # ---- Licencia de frente y reverso: un documento, dos originales ----
