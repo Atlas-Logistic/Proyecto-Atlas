@@ -507,3 +507,142 @@ def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, o
             raise
         return {'ok': True, 'idempotente': False, 'documento_id': documento_id, 'ficha_id': ficha_id,
                 'revision': propuesta['revision'], 'sha256': huella, 'respaldo': str(respaldo)}
+
+
+ESTADO_CONFIRMADA = 'CONFIRMADA'
+_CAMPOS_CONFIRMACION = ('rut', 'nombre', 'clase', 'vencimiento')
+
+
+def _palabras_nombre(valor):
+    import unicodedata
+    texto = unicodedata.normalize('NFKD', str(valor or '').upper())
+    texto = ''.join(c for c in texto if not unicodedata.combining(c))
+    return re.findall(r'[A-Z]+', texto)
+
+
+def _nombre_licencia_valido(valor):
+    texto = ' '.join(str(valor or '').split())
+    palabras = _palabras_nombre(texto)
+    if len(palabras) < 2 or any(len(p) < 2 for p in palabras) or re.search(r"[^A-Za-zÀ-ÿ' ]", texto):
+        raise ValueError('Indique el nombre completo tal como figura en la licencia')
+    return ' '.join(palabras)
+
+
+def _valores_documento(documento):
+    titular = documento.get('titular') or {}
+    return {'rut': titular.get('rut'), 'nombre': titular.get('nombre'),
+            'clase': documento.get('clase'), 'vencimiento': documento.get('vencimiento')}
+
+
+def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, documento_id, sha256,
+                              rut, nombre, clase, vencimiento, autor, confirmacion_humana, actor='DESKTOP'):
+    """Corrige y confirma, por una persona, los datos de una licencia YA registrada.
+
+    Actualiza el MISMO documento (`documento_id` + `sha256` que la persona tuvo
+    a la vista): no crea otra licencia, no reemplaza ninguna y no toca sus
+    fotos (una imagen o frente y reverso). `extraccion_automatica` y las
+    extracciones anteriores quedan íntegras; la confirmación registra valores
+    anteriores, nuevos, autor y fecha, y una corrección posterior conserva la
+    confirmación previa en `confirmaciones_anteriores`.
+
+    Exige `confirmacion_humana=True`: la lectura OCR nunca confirma sola. El
+    RUT debe ser el del chofer en el catálogo y el nombre debe contener su
+    nombre (o un alias) del catálogo; si no, se rechaza sin modificar el
+    catálogo (la identidad se corrige sólo por su propio canal).
+    """
+    from atlas_core.desktop_operacion import sesion
+    from atlas_core.modelos import EstadoValidacion
+    from atlas_core.validadores import validar_rut_chileno
+
+    if confirmacion_humana is not True:
+        raise ValueError('Falta la confirmación explícita de la persona que revisó la licencia')
+    autor = ' '.join(str(autor or '').split())
+    if not 2 <= len(autor) <= 80:
+        raise ValueError('Indique quién confirma la licencia')
+    ficha_id = str(uuid.UUID(str(ficha_id)))
+    referencia_catalogo = str(referencia_catalogo or '')
+    documento_id = str(documento_id or '')
+    rut_validado = validar_rut_chileno(str(rut or ''))
+    if rut_validado.estado != EstadoValidacion.VALIDO:
+        raise ValueError('El RUT de la licencia no es válido')
+    nuevos = {'rut': rut_validado.valor, 'nombre': _nombre_licencia_valido(nombre),
+              'clase': _clase_licencia_valida(clase), 'vencimiento': _fecha_vencimiento_valida(vencimiento)}
+    with sesion(raiz) as comprobar:
+        ruta = ruta_almacen(raiz, empresa)
+        with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
+            catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'
+            catalogo_bytes = catalogo_ruta.read_bytes()
+            catalogo = json.loads(catalogo_bytes.decode('utf-8-sig'))
+            if referencia_catalogo not in catalogo:
+                raise ValueError('La ficha ya no corresponde a un chofer vigente del catálogo')
+            anterior = leer_almacen(raiz, empresa=empresa)
+            if not anterior or anterior.get('version') != VERSION:
+                raise ValueError('La base de fichas no está inicializada')
+            ficha = fichas_por_referencia(anterior).get(referencia_catalogo)
+            if not ficha or ficha.get('ficha_id') != ficha_id:
+                raise ValueError('La identidad de la ficha cambió; recargue Catálogos antes de confirmar')
+            # Coherencia con el chofer del catálogo, sin modificarlo.
+            ruts = {validar_rut_chileno(r).valor
+                    for r in (rut_canonico_de_registro_chofer(ref, catalogo.get(ref))
+                              for ref in ficha['referencias_catalogo'])
+                    if r}
+            if not ruts:
+                raise ValueError('El chofer no tiene RUT confirmado en el catálogo; regularícelo antes de confirmar la licencia')
+            if nuevos['rut'] not in ruts:
+                raise ValueError('El RUT de la licencia no corresponde al chofer de esta ficha')
+            registro = catalogo[referencia_catalogo]
+            palabras = set(_palabras_nombre(nuevos['nombre']))
+            if not any(set(_palabras_nombre(n)) and set(_palabras_nombre(n)) <= palabras
+                       for n in [registro.get('nombre'), *(registro.get('aliases') or [])]):
+                raise ValueError('El nombre de la licencia no coincide con el chofer de esta ficha')
+            propuesta = copy.deepcopy(anterior)
+            ficha_nueva = fichas_por_referencia(propuesta)[referencia_catalogo]
+            documento = next((d for d in ficha_nueva['documentos'] if d.get('documento_id') == documento_id), None)
+            if documento is None or documento.get('tipo') != 'LICENCIA_CONDUCIR':
+                raise ValueError('La licencia indicada no pertenece a esta ficha')
+            if not sha256 or str(documento.get('sha256', '')).lower() != str(sha256).lower():
+                raise ValueError('La licencia cambió desde que se revisó; recargue la ficha antes de confirmar')
+            if documento.get('reemplazado_por'):
+                raise ValueError('Esa licencia fue reemplazada por otra; confirme la licencia vigente')
+            previos = _valores_documento(documento)
+            if documento.get('estado_revision') == ESTADO_CONFIRMADA and previos == nuevos:
+                return {'ok': True, 'modificado': False, 'documento_id': documento_id, 'ficha_id': ficha_id,
+                        'revision': anterior['revision']}
+            instante = _ahora()
+            extraccion = documento.get('extraccion_automatica') or {}
+            campos_ocr = extraccion.get('campos') or {}
+            confirmacion = {
+                'autor': autor, 'actor': actor, 'fecha': instante, 'valores': nuevos, 'anteriores': previos,
+                'estado_revision_anterior': documento.get('estado_revision'),
+                'extraccion_version': extraccion.get('version'),
+                'distintos_de_ocr': sorted(c for c in _CAMPOS_CONFIRMACION
+                                           if (campos_ocr.get(c) or {}).get('valor') != nuevos[c]),
+            }
+            if documento.get('confirmacion_humana'):
+                documento.setdefault('confirmaciones_anteriores', []).append(documento['confirmacion_humana'])
+            documento['confirmacion_humana'] = confirmacion
+            documento['titular'] = {'rut': nuevos['rut'], 'nombre': nuevos['nombre']}
+            documento['clase'], documento['vencimiento'] = nuevos['clase'], nuevos['vencimiento']
+            documento['estado_revision'] = ESTADO_CONFIRMADA
+            accion = ('LICENCIA_CORREGIDA' if confirmacion['estado_revision_anterior'] == ESTADO_CONFIRMADA
+                      else 'LICENCIA_CONFIRMADA')
+            ficha_nueva['historial'].append({
+                'accion': accion, 'actor': actor, 'autor': autor, 'fecha': instante, 'documento_id': documento_id,
+                'campos': sorted(c for c in _CAMPOS_CONFIRMACION if previos[c] != nuevos[c]),
+            })
+            propuesta['revision'] = int(anterior['revision']) + 1
+            _validar_v2(propuesta)
+            respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
+            respaldo.mkdir(parents=True)
+            shutil.copy2(ruta, respaldo / ruta.name)
+            escribir_json_atomico(respaldo / 'manifest.json', {
+                'empresa': empresa, 'actor': actor, 'autor': autor, 'operacion': accion, 'ficha_id': ficha_id,
+                'documento_id': documento_id, 'revision_anterior': anterior['revision'],
+                'ruta_relativa': str(ruta.relative_to(raiz)),
+            })
+            comprobar()
+            if catalogo_ruta.read_bytes() != catalogo_bytes:
+                raise ValueError('El catálogo cambió durante la confirmación; no se publicó')
+            escribir_json_atomico(ruta, propuesta)
+            return {'ok': True, 'modificado': True, 'accion': accion, 'documento_id': documento_id,
+                    'ficha_id': ficha_id, 'revision': propuesta['revision'], 'respaldo': str(respaldo)}

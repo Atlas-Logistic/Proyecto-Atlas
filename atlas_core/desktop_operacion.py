@@ -33,7 +33,7 @@ ESCRITORES = frozenset({
     'asociar_evidencia_mobile.py', 'resolver_envio_mobile.py',
     'gestionar_catalogos.py', 'reconciliar_estado_derivado.py',
     'retomar_entradas_desktop.py', 'generar_reporte_viajes.py', 'resumen_procesamiento_desktop.py',
-    'registrar_licencia_chofer.py',
+    'registrar_licencia_chofer.py', 'confirmar_licencia_chofer.py',
 })
 RUNTIME_RAPIDOCR_MANUAL = Path(os.environ.get('LOCALAPPDATA', '')) / 'Atlas' / 'runtime' / 'rapidocr' / 'Scripts' / 'python.exe'
 _auditoria = ContextVar('desktop_escrituras', default=None)
