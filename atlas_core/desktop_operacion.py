@@ -43,6 +43,7 @@ _cierre_worker_ocr = ContextVar('desktop_cierre_worker_ocr', default=None)
 # así que una acción ejecutada dentro de la sesión (B1 por el canal Desktop)
 # debe usar este mismo lease en vez de pedir otro (que respondería 409).
 _escritor_sesion = ContextVar('desktop_escritor_sesion', default=None)
+_sesion_actual = ContextVar('desktop_sesion_actual', default=None)
 
 
 def escritor_de_sesion():
@@ -120,8 +121,16 @@ def _adquirir_con_espera(escritor):
     return True
 
 @contextlib.contextmanager
-def sesion(raiz, *, fabrica=lease_desde_entorno):
+def sesion(raiz, *, fabrica=lease_desde_entorno, reutilizar=False):
     raiz = Path(raiz).resolve()
+    actual = _sesion_actual.get()
+    if actual is not None and reutilizar:
+        raiz_actual, comprobar_actual = actual
+        if raiz != raiz_actual:
+            raise PermissionError('La raíz no coincide con la sesión Desktop activa.')
+        comprobar_actual()
+        yield comprobar_actual
+        return
     with contextlib.ExitStack() as stack:
         escritor = None
         from atlas_core.exclusividad_equipo import politica_equipo_unico, EscritorEquipoUnico, recuperar_bloqueos_huerfanos
@@ -163,8 +172,10 @@ def sesion(raiz, *, fabrica=lease_desde_entorno):
         if os.environ.get('EASYOCR_MODULE_PATH'): raices.append(Path(os.environ['EASYOCR_MODULE_PATH']).resolve())
         token = _auditoria.set((raices, lambda: escritor is None or escritor.vigente))
         token_escritor = _escritor_sesion.set(escritor)
+        token_sesion = _sesion_actual.set((raiz, comprobar))
         try: yield comprobar
         finally:
+            _sesion_actual.reset(token_sesion)
             _escritor_sesion.reset(token_escritor)
             _auditoria.reset(token)
 

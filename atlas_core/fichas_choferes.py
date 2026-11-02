@@ -567,7 +567,7 @@ def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, d
         raise ValueError('El RUT de la licencia no es válido')
     nuevos = {'rut': rut_validado.valor, 'nombre': _nombre_licencia_valido(nombre),
               'clase': _clase_licencia_valida(clase), 'vencimiento': _fecha_vencimiento_valida(vencimiento)}
-    with sesion(raiz) as comprobar:
+    with sesion(raiz, reutilizar=True) as comprobar:
         ruta = ruta_almacen(raiz, empresa)
         with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
             catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'

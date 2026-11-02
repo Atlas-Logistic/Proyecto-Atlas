@@ -236,3 +236,66 @@ def test_canal_oficial_desktop_exige_la_marca_de_confirmacion(tmp_path):
     salida = json.loads(con_marca.stdout)
     assert salida['ok'] and salida['accion'] == 'LICENCIA_CONFIRMADA'
     assert _doc(raiz, doc['documento_id'])['estado_revision'] == 'CONFIRMADA'
+
+def test_canal_desktop_confirma_sin_retomar_el_bloqueo_y_conserva_la_licencia(tmp_path):
+    raiz = _raiz(tmp_path)
+    doc = _recibir(raiz)
+    ficha = _ficha(raiz)
+    carpeta = ruta_almacen(raiz, 'MBT').parent
+    fotos = [(carpeta / c['archivo']).read_bytes() for c in doc['caras']]
+    args = [str(RAIZ_MOTOR / 'confirmar_licencia_chofer.py'), '--raiz-atlas', str(raiz),
+            '--ficha-id', ficha['ficha_id'], '--referencia-catalogo', REF,
+            '--documento-id', doc['documento_id'], '--sha256', doc['sha256'], '--rut', RUT,
+            '--nombre', 'ANA TEST', '--clase', 'A4', '--vencimiento', '2028-05-07',
+            '--autor', 'Javier', '--confirmo-revision-humana']
+    solicitud = {'accion': 'script', 'raiz': str(raiz), 'argumentos': args, 'entrada': None}
+    proceso = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-B', '-u', str(RAIZ_MOTOR / 'desktop_operacion_cli.py')],
+                             input=json.dumps(solicitud), capture_output=True, text=True, cwd=RAIZ_MOTOR)
+    assert proceso.returncode == 0, proceso.stderr
+    assert json.loads(json.loads(proceso.stdout)['salida'])['ok']
+    [actual] = _ficha(raiz)['documentos']
+    assert actual['documento_id'] == doc['documento_id']
+    assert actual['extraccion_automatica'] == doc['extraccion_automatica']
+    assert actual['confirmacion_humana']['autor'] == 'Javier'
+    assert [(carpeta / c['archivo']).read_bytes() for c in actual['caras']] == fotos
+
+
+def test_reutilizar_sesion_rechaza_otra_raiz(tmp_path):
+    from atlas_core.desktop_operacion import sesion
+    raiz = tmp_path / 'uno'; raiz.mkdir()
+    otra = tmp_path / 'dos'; otra.mkdir()
+    with sesion(raiz):
+        with pytest.raises(PermissionError, match='ra.z no coincide'):
+            with sesion(otra, reutilizar=True):
+                pytest.fail('No debe aceptar otra raiz')
+
+
+def test_reutilizar_sesion_comprueba_vigencia(tmp_path):
+    from atlas_core import desktop_operacion as modulo
+    def perdida():
+        raise PermissionError('lease perdido')
+    token = modulo._sesion_actual.set((tmp_path.resolve(), perdida))
+    try:
+        with pytest.raises(PermissionError, match='lease perdido'):
+            with modulo.sesion(tmp_path, reutilizar=True):
+                pytest.fail('No debe omitir la vigencia')
+    finally:
+        modulo._sesion_actual.reset(token)
+
+
+def test_canal_desktop_rechaza_huella_distinta_sin_escribir(tmp_path):
+    raiz = _raiz(tmp_path)
+    doc = _recibir(raiz)
+    archivo = ruta_almacen(raiz, 'MBT')
+    antes = archivo.read_bytes()
+    args = [str(RAIZ_MOTOR / 'confirmar_licencia_chofer.py'), '--raiz-atlas', str(raiz),
+            '--ficha-id', _ficha(raiz)['ficha_id'], '--referencia-catalogo', REF,
+            '--documento-id', doc['documento_id'], '--sha256', '0' * 64, '--rut', RUT,
+            '--nombre', 'ANA TEST', '--clase', 'A4', '--vencimiento', '2028-05-07',
+            '--autor', 'Javier', '--confirmo-revision-humana']
+    solicitud = {'accion': 'script', 'raiz': str(raiz), 'argumentos': args}
+    proceso = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-B', '-u', str(RAIZ_MOTOR / 'desktop_operacion_cli.py')],
+                             input=json.dumps(solicitud), capture_output=True, text=True, cwd=RAIZ_MOTOR)
+    assert proceso.returncode != 0
+    assert 'recargue la ficha' in proceso.stderr
+    assert archivo.read_bytes() == antes
