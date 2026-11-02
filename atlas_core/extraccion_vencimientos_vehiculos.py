@@ -1,14 +1,19 @@
 """Extracción automática del vencimiento de SOAP, revisión técnica y permiso de circulación.
 
 Lee con el OCR existente (`ProveedorOCR.leer_texto`) el original ya guardado
-del documento de vehículo y propone la fecha de vencimiento impresa. Nunca la
-confirma:
+del documento de vehículo y extrae la fecha de vencimiento impresa:
 
-- El resultado queda en `extraccion_automatica` del mismo documento
+- La lectura queda en `extraccion_automatica` del mismo documento
   (`campos.vencimiento`, con evidencia y las otras fechas leídas),
   `procedencia: AUTOMATICA_OCR` y `confirmado_por_humano: false`.
-  `estado_revision` sigue PENDIENTE_EXTRACCION y el `vencimiento` del
-  documento no se toca: no genera alertas ni pasa a vigente.
+- Una fecha inequívoca (EXTRAIDO, con evidencia, del mismo original) de un
+  documento asociado a un vehículo pasa a ser su `vencimiento` operativo
+  (`activar_vencimientos_extraidos`, sin volver a leer el OCR):
+  `estado_revision` VENCIMIENTO_OCR_AUTOMATICO y `vencimiento_registro` con
+  procedencia OCR_AUTOMATICO, evidencia y `confirmado_por_humano: false`.
+  Nunca es una confirmación humana. La vigencia (vigente, próximo a vencer,
+  vencido) no se guarda: quien la muestra la calcula con la fecha del día.
+  Una abstención deja el documento PENDIENTE_EXTRACCION, sin vencimiento.
 - Se distingue el vencimiento de las fechas de emisión, pago, contratación,
   inspección o inicio de vigencia por el rótulo impreso que las acompaña. En
   el SOAP los rótulos RIGE DESDE / HASTA salen en una columna y sus valores en
@@ -17,8 +22,8 @@ confirma:
   anterior a la de emisión/pago/inspección o un plazo improbable, el campo
   queda PENDIENTE_REVISION con su motivo; nunca se elige por aproximación.
 - El original sólo se lee (se verifica su SHA-256). Un documento con
-  vencimiento registrado, ya revisado o confirmado por una persona no se
-  procesa. Cada documento se lee una vez por `VERSION_EXTRACCION`; una
+  vencimiento registrado por una persona, ya revisado o confirmado no se
+  procesa ni se sobrescribe. Cada documento se lee una vez por `VERSION_EXTRACCION`; una
   extracción anterior se conserva en `extracciones_anteriores`.
 
 Corre en el ciclo PULL bajo su lease (`comprobar`), después de identificar la
@@ -46,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 VERSION_EXTRACCION = 1
 PROCEDENCIA = "AUTOMATICA_OCR"
+# Vencimiento operativo registrado sin intervención humana.
+ESTADO_VENCIMIENTO_AUTOMATICO = "VENCIMIENTO_OCR_AUTOMATICO"
+PROCEDENCIA_VENCIMIENTO = "OCR_AUTOMATICO"
 EXTRAIDO = "EXTRAIDO"
 PENDIENTE_REVISION = "PENDIENTE_REVISION"
 # Ventana de líneas tras un rótulo sin valor: el OCR lee primero la columna de
@@ -239,14 +247,22 @@ def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
 # ------------------------------------------------------------------ ciclo PULL
 
 
+def _vencimiento_automatico(documento: dict) -> bool:
+    return documento.get("estado_revision") == ESTADO_VENCIMIENTO_AUTOMATICO and \
+        (documento.get("vencimiento_registro") or {}).get("procedencia") == PROCEDENCIA_VENCIMIENTO
+
+
 def _confirmado_por_persona(documento: dict) -> bool:
-    return bool(documento.get("vencimiento")) or documento.get("estado_revision") != ESTADO_PENDIENTE_EXTRACCION \
-        or bool(documento.get("confirmacion_humana")) or bool(documento.get("revision_humana"))
+    if documento.get("confirmacion_humana") or documento.get("revision_humana"):
+        return True
+    if _vencimiento_automatico(documento):
+        return False
+    return bool(documento.get("vencimiento")) or documento.get("estado_revision") != ESTADO_PENDIENTE_EXTRACCION
 
 
 def _por_extraer(documento: dict) -> bool:
     if documento.get("tipo") not in TIPOS_VEHICULO or documento.get("reemplazado_por") \
-            or _confirmado_por_persona(documento):
+            or _confirmado_por_persona(documento) or _vencimiento_automatico(documento):
         return False
     previa = documento.get("extraccion_automatica")
     if previa is None:
@@ -280,14 +296,22 @@ def extraer_vencimientos_vehiculos(
     agrega `extraccion_automatica` + historial si el documento sigue igual de
     pendiente. Un original alterado o un fallo del OCR no registran nada (se
     reintenta en el ciclo siguiente)."""
-    resumen: dict = {"pendientes": 0, "extraidos": [], "errores": []}
+    resumen: dict = {"pendientes": 0, "extraidos": [], "errores": [], "activados": []}
     datos = leer_almacen(raiz, empresa=empresa)
     if not datos or datos.get("version") != VERSION:
         return resumen
     objetivos = [(p, d) for p, d in _ubicaciones(datos) if _por_extraer(d)]
     resumen["pendientes"] = len(objetivos)
-    if not objetivos:
-        return resumen
+    if objetivos:
+        _extraer(raiz, objetivos, resumen, comprobar=comprobar, fabrica_ocr=fabrica_ocr, empresa=empresa, actor=actor)
+    # Lecturas inequívocas (nuevas o de ciclos anteriores) -> vencimiento operativo, sin OCR.
+    activacion = activar_vencimientos_extraidos(raiz, comprobar=comprobar, empresa=empresa, actor=actor)
+    resumen["activados"] = activacion["activados"]
+    resumen["errores"] += activacion["errores"]
+    return resumen
+
+
+def _extraer(raiz, objetivos, resumen: dict, *, comprobar, fabrica_ocr, empresa: str, actor: str) -> None:
     ruta = ruta_almacen(raiz, empresa)
     creado: list = []
 
@@ -327,7 +351,6 @@ def extraer_vencimientos_vehiculos(
         cerrar = getattr(creado[0], "cerrar", None) if creado else None
         if callable(cerrar):
             cerrar()
-    return resumen
 
 
 def _registrar(raiz, ruta: Path, empresa: str, documento_id: str, extraccion: dict, actor: str,
@@ -370,3 +393,101 @@ def _registrar(raiz, ruta: Path, empresa: str, documento_id: str, extraccion: di
         comprobar()
         escribir_json_atomico(ruta, propuesta)
         return True
+
+
+# ------------------------------------------------ vencimiento operativo (sin OCR)
+
+
+def _activable(patente: str | None, documento: dict) -> bool:
+    """Lectura inequívoca, con evidencia y del mismo original, de un documento
+    asociado a un vehículo, aún sin vencimiento ni intervención humana."""
+    if not patente or documento.get("tipo") not in TIPOS_VEHICULO or documento.get("reemplazado_por") \
+            or documento.get("estado_revision") != ESTADO_PENDIENTE_EXTRACCION or documento.get("vencimiento") \
+            or _confirmado_por_persona(documento):
+        return False
+    extraccion = documento.get("extraccion_automatica") or {}
+    campo = (extraccion.get("campos") or {}).get("vencimiento") or {}
+    archivos = extraccion.get("archivos") or []
+    try:
+        date.fromisoformat(str(campo.get("valor") or ""))
+    except ValueError:
+        return False
+    return (extraccion.get("estado") == "COMPLETA" and extraccion.get("confirmado_por_humano") is False
+            and extraccion.get("procedencia") == PROCEDENCIA and campo.get("estado") == EXTRAIDO
+            and not campo.get("motivo") and bool(campo.get("evidencia"))
+            and len(archivos) == 1 and archivos[0].get("sha256") == documento.get("sha256")
+            and archivos[0].get("archivo") == documento.get("archivo"))
+
+
+def activar_vencimientos_extraidos(
+    raiz: str | Path, *, comprobar: Callable[[], None], empresa: str = EMPRESA_ACTUAL, actor: str = "MOTOR_OCR",
+) -> dict:
+    """Registra como vencimiento operativo cada lectura inequívoca ya extraída.
+
+    No ejecuta OCR: usa `extraccion_automatica` y verifica que el original
+    conserve su huella. No toca archivo, sha256, patente, asociación ni la
+    lectura; una abstención o un dato humano nunca se activan."""
+    resumen: dict = {"activados": [], "errores": []}
+    datos = leer_almacen(raiz, empresa=empresa)
+    if not datos or datos.get("version") != VERSION:
+        return resumen
+    ruta = ruta_almacen(raiz, empresa)
+    for patente, documento in [(p, d) for p, d in _ubicaciones(datos) if _activable(p, d)]:
+        comprobar()
+        documento_id = documento["documento_id"]
+        original = (ruta.parent / documento["archivo"]).resolve()
+        try:
+            if not original.is_relative_to(ruta.parent.resolve()) or \
+                    hashlib.sha256(original.read_bytes()).hexdigest() != str(documento["sha256"]).lower():
+                raise ValueError("El original no coincide con su huella registrada")
+        except (OSError, ValueError) as error:
+            resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
+            continue
+        valor = _activar(raiz, ruta, empresa, documento_id, actor, comprobar)
+        if valor:
+            resumen["activados"].append({"documento_id": documento_id, "tipo": documento["tipo"], "patente": patente,
+                                         "vencimiento": valor})
+    return resumen
+
+
+def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comprobar: Callable[[], None]) -> str | None:
+    with bloqueo_sesion(Path(raiz) / "operacion" / "actual", "fichas_choferes_" + empresa):
+        anterior = leer_almacen(raiz, empresa=empresa)
+        propuesta = copy.deepcopy(anterior)
+        actual = next(((p, d) for p, d in _ubicaciones(propuesta) if d.get("documento_id") == documento_id), None)
+        # Movido, registrado o revisado por una persona entre medio: no se toca.
+        if actual is None or not _activable(*actual):
+            return None
+        patente, documento = actual
+        extraccion = documento["extraccion_automatica"]
+        campo = extraccion["campos"]["vencimiento"]
+        instante = _ahora()
+        documento["vencimiento"] = campo["valor"]
+        documento["estado_revision"] = ESTADO_VENCIMIENTO_AUTOMATICO
+        documento["vencimiento_registro"] = {
+            "procedencia": PROCEDENCIA_VENCIMIENTO, "confirmado_por_humano": False, "actor": actor, "fecha": instante,
+            "estado_revision_anterior": ESTADO_PENDIENTE_EXTRACCION, "version_extraccion": extraccion["version"],
+            "fecha_extraccion": extraccion["fecha"], "motor_ocr": extraccion.get("motor_ocr", ""),
+            "archivo": documento["archivo"], "sha256": documento["sha256"], "evidencia": campo["evidencia"],
+        }
+        ficha = next(v for v in propuesta["vehiculos"] if v.get("patente") == patente)
+        ficha.setdefault("historial", []).append({
+            "accion": "DOCUMENTO_VEHICULO_VENCIMIENTO_AUTOMATICO", "actor": actor, "fecha": instante,
+            "documento_id": documento_id, "tipo": documento["tipo"], "vencimiento": campo["valor"],
+            "procedencia": PROCEDENCIA_VENCIMIENTO, "confirmado_por_humano": False,
+            "version_extraccion": extraccion["version"],
+        })
+        propuesta["revision"] = int(anterior["revision"]) + 1
+        _validar_v2(propuesta)
+        _validar_vehiculos(propuesta)
+        respaldo = Path(raiz) / "respaldos" / "fichas_choferes" / uuid.uuid4().hex
+        respaldo.mkdir(parents=True)
+        shutil.copy2(ruta, respaldo / ruta.name)
+        escribir_json_atomico(respaldo / "manifest.json", {
+            "empresa": empresa, "actor": actor, "operacion": "ACTIVACION_VENCIMIENTO_AUTOMATICO_DOCUMENTO_VEHICULO",
+            "documento_id": documento_id, "patente": patente, "vencimiento": campo["valor"],
+            "revision_anterior": anterior["revision"], "ruta_relativa": str(ruta.relative_to(raiz)),
+        })
+        comprobar()
+        escribir_json_atomico(ruta, propuesta)
+        return campo["valor"]

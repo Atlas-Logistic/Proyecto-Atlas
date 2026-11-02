@@ -133,23 +133,34 @@ def _documentos(raiz):
     return textos, ids
 
 
-def test_propone_vencimiento_sin_confirmarlo_y_conserva_lo_demas(raiz):
+VENCIMIENTOS_REALES = {"SOAP": "2027-09-30", "REVISION_TECNICA": "2027-03-25", "PERMISO_CIRCULACION": "2027-09-30"}
+
+
+def test_extrae_y_registra_vencimiento_automatico_sin_confirmacion_humana_y_conserva_lo_demas(raiz):
     textos, ids = _documentos(raiz)
     antes = {t: copy.deepcopy(_ubicar(raiz, i)) for t, i in ids.items()}
     ocr = OCRFalso(textos)
     resumen = _extraer(raiz, ocr)
     assert ocr.cerrado and resumen["pendientes"] == 3 and not resumen["errores"]
     assert {(e["tipo"], e["vencimiento"], e["estado"], e["patente"]) for e in resumen["extraidos"]} == {
-        ("SOAP", "2027-09-30", "EXTRAIDO", TRACTO), ("REVISION_TECNICA", "2027-03-25", "EXTRAIDO", TRACTO),
-        ("PERMISO_CIRCULACION", "2027-09-30", "EXTRAIDO", TRACTO)}
+        (t, v, "EXTRAIDO", TRACTO) for t, v in VENCIMIENTOS_REALES.items()}
+    assert {(e["tipo"], e["vencimiento"], e["patente"]) for e in resumen["activados"]} == {
+        (t, v, TRACTO) for t, v in VENCIMIENTOS_REALES.items()}
     datos = leer_almacen(raiz, empresa="MBT")
     for tipo, documento_id in ids.items():
         patente, documento = _ubicar(raiz, documento_id)
         patente_antes, previo = antes[tipo]
         assert patente == patente_antes == TRACTO
         extraccion = documento.pop("extraccion_automatica")
-        assert documento == previo  # asociación, patente, sha256, archivo, estado y vencimiento intactos
-        assert documento["estado_revision"] == "PENDIENTE_EXTRACCION" and "vencimiento" not in documento
+        registro = documento.pop("vencimiento_registro")
+        assert documento.pop("vencimiento") == VENCIMIENTOS_REALES[tipo]
+        assert documento.pop("estado_revision") == "VENCIMIENTO_OCR_AUTOMATICO"
+        assert previo.pop("estado_revision") == "PENDIENTE_EXTRACCION" and "vencimiento" not in previo
+        assert documento == previo  # asociación, patente, sha256, archivo, origen e historial intactos
+        assert registro["procedencia"] == "OCR_AUTOMATICO" and registro["confirmado_por_humano"] is False
+        assert registro["actor"] == "MOTOR_OCR" and registro["sha256"] == documento["sha256"]
+        assert registro["evidencia"] == extraccion["campos"]["vencimiento"]["evidencia"]
+        assert not {"confirmacion_humana", "revision_humana", "confirmado_por", "autor"} & (set(registro) | set(documento))
         assert extraccion["confirmado_por_humano"] is False and extraccion["procedencia"] == "AUTOMATICA_OCR"
         assert extraccion["actor"] == "MOTOR_OCR" and extraccion["estado"] == "COMPLETA"
         assert extraccion["archivos"] == [{"archivo": documento["archivo"], "sha256": documento["sha256"]}]
@@ -159,16 +170,136 @@ def test_propone_vencimiento_sin_confirmarlo_y_conserva_lo_demas(raiz):
     ficha = next(v for v in datos["vehiculos"] if v["patente"] == TRACTO)
     eventos = [h for h in ficha["historial"] if h["accion"] == "DOCUMENTO_VEHICULO_EXTRACCION_VENCIMIENTO"]
     assert len(eventos) == 3 and all(e["actor"] == "MOTOR_OCR" for e in eventos)
-    respaldos = list((raiz / "respaldos" / "fichas_choferes").glob("*/manifest.json"))
-    assert sum("EXTRACCION_VENCIMIENTO" in r.read_text(encoding="utf-8") for r in respaldos) == 3
+    activados = [h for h in ficha["historial"] if h["accion"] == "DOCUMENTO_VEHICULO_VENCIMIENTO_AUTOMATICO"]
+    assert len(activados) == 3 and all(h["procedencia"] == "OCR_AUTOMATICO" and h["confirmado_por_humano"] is False
+                                       for h in activados)
+    respaldos = [r.read_text(encoding="utf-8") for r in (raiz / "respaldos" / "fichas_choferes").glob("*/manifest.json")]
+    assert sum("EXTRACCION_VENCIMIENTO" in r for r in respaldos) == 3
+    assert sum("ACTIVACION_VENCIMIENTO_AUTOMATICO" in r for r in respaldos) == 3
 
 
 def test_una_sola_lectura_por_version(raiz):
     textos, _ = _documentos(raiz)
     _extraer(raiz, OCRFalso(textos))
+    revision = leer_almacen(raiz, empresa="MBT")["revision"]
     segundo = OCRFalso(textos)
-    assert _extraer(raiz, segundo) == {"pendientes": 0, "extraidos": [], "errores": []}
-    assert segundo.leidas == []
+    assert _extraer(raiz, segundo) == {"pendientes": 0, "extraidos": [], "errores": [], "activados": []}
+    assert segundo.leidas == [] and leer_almacen(raiz, empresa="MBT")["revision"] == revision
+
+
+# ------------------------------------------- vencimiento operativo automático
+
+
+def _solo_extraccion_previa(raiz, textos):
+    """Estado de producción tras b673268: lecturas EXTRAIDO sin vencimiento operativo."""
+    original = modulo.activar_vencimientos_extraidos
+    modulo.activar_vencimientos_extraidos = lambda *a, **k: {"activados": [], "errores": []}
+    try:
+        _extraer(raiz, OCRFalso(textos))
+    finally:
+        modulo.activar_vencimientos_extraidos = original
+
+
+def test_reconcilia_propuestas_existentes_sin_ocr_ni_tocar_originales(raiz):
+    textos, ids = _documentos(raiz)
+    _solo_extraccion_previa(raiz, textos)
+    antes = {t: copy.deepcopy(_ubicar(raiz, i)[1]) for t, i in ids.items()}
+    assert all("vencimiento" not in d for d in antes.values())
+    ocr = OCRFalso({})  # cualquier lectura fallaría
+    resumen = _extraer(raiz, ocr)
+    assert ocr.leidas == [] and resumen["pendientes"] == 0 and not resumen["errores"]
+    assert {(a["tipo"], a["vencimiento"]) for a in resumen["activados"]} == set(VENCIMIENTOS_REALES.items())
+    for tipo, documento_id in ids.items():
+        patente, documento = _ubicar(raiz, documento_id)
+        assert patente == TRACTO and documento["vencimiento"] == VENCIMIENTOS_REALES[tipo]
+        for clave in ("archivo", "sha256", "asociacion", "identificacion_patente", "extraccion_automatica", "procedencia"):
+            assert documento[clave] == antes[tipo][clave]
+        assert sha((ruta_almacen(raiz, "MBT").parent / documento["archivo"]).read_bytes()) == documento["sha256"]
+
+
+@pytest.mark.parametrize("lineas", [
+    ["VENCE: 30/09/2027", "VENCIMIENTO: 31/03/2027"],       # ambigua
+    ["VENCE: 30/09/27"],                                    # ilegible
+    ["FECHA DE PAGO 05/10/2026", "VENCE: 30/09/2026"],      # contradictoria
+    ["FECHA", "05/10/2026", "VENCE: 30/09/2030"],           # improbable
+])
+def test_abstencion_no_registra_vencimiento_y_queda_pendiente(raiz, lineas):
+    documento_id, contenido = _recibir(raiz, "dudoso", tipo="PERMISO_CIRCULACION")
+    resumen = _extraer(raiz, OCRFalso({contenido: lineas}))
+    _, documento = _ubicar(raiz, documento_id)
+    assert resumen["activados"] == [] and "vencimiento" not in documento and "vencimiento_registro" not in documento
+    assert documento["estado_revision"] == "PENDIENTE_EXTRACCION"
+    assert documento["extraccion_automatica"]["campos"]["vencimiento"]["estado"] == "PENDIENTE_REVISION"
+
+
+def test_documento_por_clasificar_no_recibe_vencimiento_operativo(raiz):
+    documento_id, contenido = _recibir(raiz, "sin-patente-2", tipo="SOAP", patente="")
+    resumen = _extraer(raiz, OCRFalso({contenido: SOAP_REAL}))
+    patente, documento = _ubicar(raiz, documento_id)
+    assert patente is None and resumen["activados"] == [] and "vencimiento" not in documento
+
+
+def test_lectura_alterada_o_de_otro_original_no_se_activa(raiz):
+    textos, ids = _documentos(raiz)
+    _solo_extraccion_previa(raiz, textos)
+    import json
+    ruta = ruta_almacen(raiz, "MBT")
+    datos = json.loads(ruta.read_text(encoding="utf-8"))
+    for d in datos["vehiculos"][0]["documentos"]:
+        if d["documento_id"] == ids["SOAP"]:
+            d["extraccion_automatica"]["archivos"][0]["sha256"] = "0" * 64
+        if d["documento_id"] == ids["PERMISO_CIRCULACION"]:
+            d["extraccion_automatica"]["campos"]["vencimiento"]["evidencia"] = []
+    ruta.write_text(json.dumps(datos), encoding="utf-8")
+    _, rt = _ubicar(raiz, ids["REVISION_TECNICA"])
+    (ruta.parent / rt["archivo"]).write_bytes(JPEG("alterado"))
+    resumen = _extraer(raiz, OCRFalso({}))
+    assert resumen["activados"] == [] and [e["documento_id"] for e in resumen["errores"]] == [ids["REVISION_TECNICA"]]
+    assert all("vencimiento" not in _ubicar(raiz, i)[1] for i in ids.values())
+
+
+@pytest.mark.parametrize("cambios", [
+    {"vencimiento": "2027-01-01"},
+    {"estado_revision": "CONFIRMADA", "vencimiento": "2027-01-01"},
+    {"confirmacion_humana": {"autor": "JAVIER"}},
+    {"revision_humana": {"autor": "JAVIER"}},
+])
+def test_fecha_confirmada_por_una_persona_nunca_se_sobrescribe(raiz, cambios):
+    textos, ids = _documentos(raiz)
+    _solo_extraccion_previa(raiz, textos)
+    _editar_documento(raiz, ids["SOAP"], **cambios)
+    antes = copy.deepcopy(_ubicar(raiz, ids["SOAP"]))
+    resumen = _extraer(raiz, OCRFalso({}))
+    assert _ubicar(raiz, ids["SOAP"]) == antes
+    assert "SOAP" not in {a["tipo"] for a in resumen["activados"]} and len(resumen["activados"]) == 2
+
+
+def test_confirmacion_humana_entre_lectura_y_activacion_gana(raiz, monkeypatch):
+    textos, ids = _documentos(raiz)
+    _solo_extraccion_previa(raiz, textos)
+    activar = modulo._activar
+
+    def con_persona(raiz_, ruta, empresa, documento_id, actor, comprobar):
+        if documento_id == ids["SOAP"]:
+            _editar_documento(raiz, documento_id, vencimiento="2027-01-01", estado_revision="CONFIRMADA")
+        return activar(raiz_, ruta, empresa, documento_id, actor, comprobar)
+
+    monkeypatch.setattr(modulo, "_activar", con_persona)
+    resumen = _extraer(raiz, OCRFalso({}))
+    _, soap = _ubicar(raiz, ids["SOAP"])
+    assert soap["vencimiento"] == "2027-01-01" and soap["estado_revision"] == "CONFIRMADA"
+    assert "vencimiento_registro" not in soap and len(resumen["activados"]) == 2
+
+
+def test_vencimiento_automatico_no_se_relee_ni_se_reactiva(raiz, monkeypatch):
+    textos, ids = _documentos(raiz)
+    _extraer(raiz, OCRFalso(textos))
+    revision = leer_almacen(raiz, empresa="MBT")["revision"]
+    monkeypatch.setattr(modulo, "VERSION_EXTRACCION", 2)  # ni siquiera una versión nueva relee
+    segundo = OCRFalso(textos)
+    resumen = _extraer(raiz, segundo)
+    assert segundo.leidas == [] and resumen["activados"] == []
+    assert leer_almacen(raiz, empresa="MBT")["revision"] == revision
 
 
 def test_abstencion_queda_pendiente_y_se_reintenta_una_vez_con_otra_version(raiz, monkeypatch):
