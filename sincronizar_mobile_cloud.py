@@ -29,6 +29,7 @@ from atlas_core.cloud_fichas_documentos import sincronizar_licencias_cloud
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.extraccion_licencias import extraer_licencias_pendientes
+from atlas_core.identificacion_patentes import identificar_patentes_documentos
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile
 from atlas_core.ocr_provider import crear_proveedor_ocr, resolver_preferencia_ocr_desde_entorno
@@ -108,6 +109,20 @@ def ejecutar_pull_con_escritor(
                 except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
                     logging.getLogger(__name__).warning("Licencias Mobile sin extracción: %s", error)
                     resultado["extraccion_licencias"] = {"error": str(error)}
+            # Patente impresa en SOAP / revisión técnica / permiso: asocia al
+            # vehículo sólo si es inequívoca; un fallo no corta el PULL.
+            if raiz is not None and vigente():
+                def comprobar_lease_patentes() -> None:
+                    if not vigente():
+                        raise PermissionError("Lease PULL perdido: identificación de patentes detenida.")
+                try:
+                    resultado["identificacion_patentes"] = identificar_patentes_documentos(
+                        raiz, comprobar=comprobar_lease_patentes,
+                        fabrica_ocr=lambda: crear_proveedor_ocr(proveedor_ocr_preferido),
+                    )
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Documentos de vehículo sin identificación: %s", error)
+                    resultado["identificacion_patentes"] = {"error": str(error)}
             # Asignación vigente confirmada -> Cloud (sólo para vincular
             # documentos de vehículo). Mismo lease; un fallo no corta el PULL.
             if raiz is not None and vigente():
