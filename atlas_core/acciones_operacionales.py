@@ -2496,6 +2496,45 @@ def _leer_material_evidencia(ctx: _Contexto, archivo: str):
             proveedor.cerrar()
 
 
+def _leer_material_traza(ctx: _Contexto, archivo: str):
+    """Material desde la traza OCR vigente del documento, sin volver a leer
+    OCR (caso 483897: la relectura con otro backend no reproduce la lectura
+    original). Sólo la traza que corresponde inequívocamente a `archivo`
+    (misma ruta y misma referencia de imagen, igual que
+    `reprocesamiento_reparador`), con backend declarado y líneas legibles,
+    y sólo si la evidencia original sigue disponible. La traza vigente ya
+    refleja una relectura promovida (la anterior queda en `historico`).
+    Devuelve (lectura, procedencia) o None."""
+    from atlas_core.evidencia_documental import resolver_ruta_evidencia
+    from atlas_core.recuperacion_material import material_desde_lineas
+    from atlas_core.replay_traza_ocr import ErrorReplayTrazaOCR, _reconstruir_bloque
+    from atlas_core.trazabilidad_ocr import ruta_traza_ocr
+    if resolver_ruta_evidencia(ctx.raiz, archivo).ruta is None:
+        return None
+    ruta = ruta_traza_ocr(ctx.raiz / "operacion" / "trazas_ocr", archivo)
+    try:
+        contenido = ruta.read_bytes()
+        traza = json.loads(contenido.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(traza, dict) or not isinstance(traza.get("imagen"), dict) or not isinstance(traza.get("ocr"), dict):
+        return None
+    ocr = traza["ocr"]
+    backend = str((ocr.get("backend") or {}).get("nombre") or "").strip() if isinstance(ocr.get("backend"), dict) else ""
+    lineas = ocr.get("lineas")
+    if (traza["imagen"].get("referencia") != archivo or not backend or not isinstance(lineas, list)
+            or not lineas or not all(isinstance(linea, str) for linea in lineas)):
+        return None
+    bloques = None
+    if isinstance(ocr.get("bloques"), list):
+        try:
+            bloques = [_reconstruir_bloque(bloque, indice) for indice, bloque in enumerate(ocr["bloques"])]
+        except ErrorReplayTrazaOCR:
+            return None
+    procedencia = {"traza_ocr": ruta.name, "sha256": hashlib.sha256(contenido).hexdigest(), "backend": backend}
+    return material_desde_lineas(lineas, bloques), procedencia
+
+
 def _plan_documento_material(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.investigacion_documental import archivos_en_investigacion
     from atlas_core import recuperacion_material as rm
@@ -2508,17 +2547,32 @@ def _plan_documento_material(ctx: _Contexto, p: dict) -> Plan:
     if rm.protegido_por_decision(fila, aplicaciones):
         raise ErrorAccionOperacional("CAMPO_FIJADO_POR_DECISION_HUMANA",
                                      "una decisión registrada ya fijó el material o el tipo de carga de este documento")
-    lectura = _leer_material_evidencia(ctx, archivo)
-    veredicto, valores = rm.evaluar_recuperacion(fila, lectura, aplicaciones)
+    # Primero la traza OCR guardada; sin traza válida o sin evidencia
+    # suficiente en ella se mantiene la relectura de la evidencia original.
+    # Sólo cuenta si recupera, mejora o completa el material: la mayoría de
+    # las trazas no guarda bloques y sin geometría los ítems se asocian peor,
+    # así que una mera SINCRONIZACIÓN desde la traza degradaría ítems y
+    # motivos de un material que no cambia.
+    traza = _leer_material_traza(ctx, archivo)
+    if traza is not None:
+        lectura, procedencia = traza
+        veredicto, valores = rm.evaluar_recuperacion(fila, lectura, aplicaciones)
+    if traza is None or veredicto not in (rm.RECUPERAR, rm.MEJORAR, rm.COMPLETAR):
+        procedencia = None
+        lectura = _leer_material_evidencia(ctx, archivo)
+        veredicto, valores = rm.evaluar_recuperacion(fila, lectura, aplicaciones)
     visibles = ("descripcion_material", "tipo_carga", "motivos_revision_documento")
+    fuente = {"fuente_lectura": "TRAZA_OCR_GUARDADA", "traza_ocr": procedencia["traza_ocr"]} if procedencia \
+        else {"fuente_lectura": "RELECTURA_OCR"}
     return Plan(
         entidad={"tipo": "MATERIAL_DOCUMENTO", "id": archivo, "numero_guia": fila.get("numero_guia", "")},
         valor_actual={c: fila.get(c, "") for c in visibles},
         valor_propuesto={"veredicto": veredicto, "lectura_ocr": lectura.descripcion,
                          **{c: v for c, v in valores.items() if c in visibles},
-                         "material_items": [i.get("descripcion_ocr") for i in lectura.items]},
-        # Fila completa: cualquier cambio concurrente invalida el preview.
-        estado_base={"fila": fila},
+                         "material_items": [i.get("descripcion_ocr") for i in lectura.items], **fuente},
+        # Fila completa (y la traza leída): cualquier cambio concurrente
+        # invalida el preview.
+        estado_base={"fila": fila, **({"traza_ocr": procedencia} if procedencia else {})},
         sin_cambios=not valores,
         afectados=_afectados_por_guias(ctx, {str(fila.get("numero_guia", ""))}),
         consecuencias=["Sólo cambia material, tipo de carga, ítems de material y los motivos de material del "
