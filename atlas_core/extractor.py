@@ -222,12 +222,27 @@ def clasificar_valor_obra_destino(texto: str) -> str:
         return "NUMERO"
     if _parece_direccion_calle(texto):
         return "DIRECCION"
-    admin = sum(1 for t in tokens if t in _TOKENS_ADMINISTRATIVOS)
-    if tokens[0] in _TOKENS_ADMINISTRATIVOS or admin * 2 >= len(tokens):
+    # Caso real 0000368327 (483940/483941): la etiqueta "Nro. TRANSPORTE"
+    # leída sin espacio ("NRO.TRANSPORTE") es un solo token. Sólo para
+    # reconocer etiquetas del formulario el punto también separa; el resto
+    # de la clasificación conserva los tokens originales.
+    etiquetas = [parte for t in tokens for parte in t.split(".") if parte]
+    admin = sum(1 for t in etiquetas if t in _TOKENS_ADMINISTRATIVOS)
+    if etiquetas[0] in _TOKENS_ADMINISTRATIVOS or admin * 2 >= len(etiquetas):
         return "ADMINISTRATIVO"
     if tokens[0] in _TOKENS_VIA_DIRECCION:
         return "DIRECCION"
     return "NOMINAL"
+
+
+def es_etiqueta_formulario(texto: str) -> bool:
+    """True si el texto es SÓLO una etiqueta del formulario de guía
+    ("NRO.TRANSPORTE", "COD. DESTINATARIO"): todas sus palabras, también
+    separadas por punto, son etiquetas. Un nombre que sólo empieza con una
+    de ellas ("CLIENTE EJEMPLO SPA") no lo es."""
+    palabras = [parte for t in _tokens_valor(texto) for parte in t.split(".") if parte]
+    etiquetas = _TOKENS_ADMINISTRATIVOS | _ETIQUETAS_ESTRUCTURALES_1_PALABRA
+    return bool(palabras) and all(p in etiquetas for p in palabras)
 
 
 def _es_candidato_nominal_geometrico(item: Dict[str, Any]) -> bool:

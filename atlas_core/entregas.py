@@ -98,10 +98,17 @@ def _cliente_identidad(documento: "DocumentoViaje") -> str:
 
 
 def _obra_identidad(documento: "DocumentoViaje") -> str:
+    """Una etiqueta del formulario capturada como obra (caso real
+    0000368327, "NRO.TRANSPORTE") no es identidad y nunca contradice a la
+    obra real de una guía hermana."""
+    from atlas_core.extractor import es_etiqueta_formulario
+
     obra = valor_publicable(
         getattr(documento, "obra_destino", ""), evaluar_credibilidad_entidad_nombre
     )
-    return _clave(obra) if _presente(obra) else ""
+    if not _presente(obra) or es_etiqueta_formulario(obra):
+        return ""
+    return _clave(obra)
 
 
 def _niveles_destino(documento: "DocumentoViaje") -> list[tuple[str, str]]:
@@ -190,12 +197,29 @@ def _calles_equivalentes(calle_a: str, calle_b: str) -> bool:
     return bool(compacta_a) and compacta_a == _clave(calle_b).replace(" ", "")
 
 
+#
+# Caso real 0000368327 (483939): RETIRA ("PATRICK ORTIZ") va impreso en la
+# misma fila que DESPACHAR A y el OCR lo antepuso a la calle. Sólo para
+# comparar se ignora un prefijo de palabras completas idéntico al chofer
+# documental de ESA guía; la dirección almacenada no cambia.
+def _calle_sin_chofer_propio(calle: str, documento: "DocumentoViaje") -> str:
+    chofer = _clave(getattr(documento, "chofer_original", "")).split()
+    palabras = str(calle or "").split()
+    if (chofer and _presente(" ".join(chofer)) and len(palabras) > len(chofer)
+            and [_clave(p) for p in palabras[:len(chofer)]] == chofer):
+        return " ".join(palabras[len(chofer):])
+    return str(calle or "")
+
+
 def _direcciones_equivalentes(
     a: "DocumentoViaje", b: "DocumentoViaje", campo: str,
 ) -> bool:
+    def calles_equivalentes(calle_a: str, calle_b: str) -> bool:
+        return _calles_equivalentes(_calle_sin_chofer_propio(calle_a, a), _calle_sin_chofer_propio(calle_b, b))
+
     return direcciones_equivalentes_por_sufijo_geografico(
         getattr(a, campo, ""), getattr(b, campo, ""),
-        calles_equivalentes=_calles_equivalentes,
+        calles_equivalentes=calles_equivalentes,
         comunas_conocidas_a=_comunas_conocidas(a),
         comunas_conocidas_b=_comunas_conocidas(b),
     )
