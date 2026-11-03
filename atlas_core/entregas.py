@@ -177,12 +177,25 @@ def _comunas_conocidas(documento: "DocumentoViaje") -> set[str]:
 # mismo núcleo calle + número (calle con la misma tolerancia OCR, número
 # exacto) y un sufijo puramente geográfico sin comunas en conflicto -- ver
 # `atlas_core.direccion_equivalente`.
+#
+# Caso real 0000368092 (guías 483891/483892/483894): las tres imprimen
+# "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", pero el OCR de 483891 omitió
+# un espacio ("CAMINOA MELIPILLA"). Sólo el NOMBRE de la calle admite
+# además espacios insertados u omitidos (mismas letras y dígitos en el
+# mismo orden); el número sigue exacto y el sufijo sólo geográfico.
+def _calles_equivalentes(calle_a: str, calle_b: str) -> bool:
+    if _claves_equivalentes_por_tolerancia_ocr(calle_a, calle_b):
+        return True
+    compacta_a = _clave(calle_a).replace(" ", "")
+    return bool(compacta_a) and compacta_a == _clave(calle_b).replace(" ", "")
+
+
 def _direcciones_equivalentes(
     a: "DocumentoViaje", b: "DocumentoViaje", campo: str,
 ) -> bool:
     return direcciones_equivalentes_por_sufijo_geografico(
         getattr(a, campo, ""), getattr(b, campo, ""),
-        calles_equivalentes=_claves_equivalentes_por_tolerancia_ocr,
+        calles_equivalentes=_calles_equivalentes,
         comunas_conocidas_a=_comunas_conocidas(a),
         comunas_conocidas_b=_comunas_conocidas(b),
     )
@@ -205,7 +218,7 @@ _RESIDUO_ETIQUETA = re.compile(r"^(?:RUT ?CHOFER|DESPACHAR ?A|A)\s*")
 def _calles_compatibles_con_confirmada(calle_documental: str, calle_confirmada: str) -> bool:
     confirmada = _clave(calle_confirmada)
     return any(
-        _claves_equivalentes_por_tolerancia_ocr(_clave(candidata), confirmada)
+        _calles_equivalentes(_clave(candidata), confirmada)
         for candidata in (calle_documental, _RESIDUO_ETIQUETA.sub("", calle_documental, count=1))
         if candidata
     )
