@@ -15,6 +15,7 @@ umbral ni vocabulario del propio código de producción (`atlas_core.
 credibilidad_campos`) referencia una guía, empresa o cliente concretos."""
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
 from atlas_core import procesamiento_masivo
@@ -84,9 +85,14 @@ def test_material_contaminado_por_otras_secciones_queda_marcado_no_publicable_li
 
     resultado = procesar_archivo(tmp_path / "guia.jpg")
 
-    # 6. El valor documental NUNCA se reemplaza -- se conserva íntegro.
-    assert resultado["descripcion_material"] == _MATERIAL_CONTAMINADO_472624
-    # 2. Pero SÍ queda marcado -- nunca "OK" silencioso con basura adentro.
+    # 6. Nunca se sustituye por un valor inventado, y desde 03/11/2026
+    # (caso 482107) tampoco se registra como material: queda vacío y la
+    # lectura descartada se conserva como evidencia en las métricas.
+    assert resultado["descripcion_material"] == ""
+    descartado = json.loads(resultado["metricas_procesamiento_json"])["material_contaminado_descartado"]
+    assert descartado["lectura_ocr"] == _MATERIAL_CONTAMINADO_472624
+    assert descartado["motivo"] == "MATERIAL_POSIBLEMENTE_CONTAMINADO"
+    # 2. Y SÍ queda marcado -- nunca "OK" silencioso con basura adentro.
     assert MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO.value in resultado["motivos_revision_documento"]
     assert resultado["indicador_revision"] == "REVISAR"
     assert resultado["estado_documental"] == "REQUIERE_REVISION"

@@ -779,6 +779,39 @@ def _fin_tabla_material(lineas: list[str]) -> int:
     )
 
 
+def _depurar_items_linea_contaminada(items: list[str]) -> list[str]:
+    """Ítems de una línea que el evaluador ya declaró contaminada.
+
+    Casos 482107/482166 (párrafo EasyOCR con membrete, transportista y
+    producto) y 473444: si lo depurado seguía sin pasar se conservaba la
+    línea completa. Ahora cada ítem creíble se conserva tal cual (varias
+    partidas fusionadas sólo son largas, caso 473391); al que sigue
+    contaminado se le quita lo anterior a su primer marcador de producto,
+    nunca lo posterior, y si aun así no pasa se descarta. Sin ítem que
+    pase, la línea se abstiene: la lectura original queda en la traza OCR.
+    Los índices de la normalización sólo sirven para cortar si la
+    normalización no cambió la longitud."""
+    depurados = []
+    for item in items:
+        if evaluar_credibilidad_material(item).nivel == NivelCredibilidad.INVALIDO:
+            normalizado = _normalizar(item)
+            marcador = _PATRON_TERMINOS_MATERIAL.search(normalizado)
+            if marcador is None or len(normalizado) != len(item):
+                continue
+            # La designación de barra de una letra ("B HORMIGON", leída
+            # también D/3) es parte del ítem, no del membrete.
+            prefijo_barra = re.search(r"(?<!\S)[BD3]\s+$", normalizado[:marcador.start()])
+            item = item[prefijo_barra.start() if prefijo_barra else marcador.start():]
+            item = re.sub(r"^[D3]\s*(?=HORMIGON\b)", "B ", item, flags=re.IGNORECASE)
+            if (
+                not _tiene_evidencia_material(item)
+                or evaluar_credibilidad_material(item).nivel == NivelCredibilidad.INVALIDO
+            ):
+                continue
+        depurados.append(item)
+    return depurados
+
+
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
     """Conserva líneas OCR con evidencia explícita de material, sólo hasta el
     pie de la tabla de productos (ver `_fin_tabla_material`)."""
@@ -809,31 +842,11 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
         )
         if evidencia_material:
             # Un OCR de tabla puede fusionar una fila de material con el
-            # membrete que la antecede (caso real 475256). Sólo cuando la
-            # línea completa ya es material contaminado según el mismo
-            # evaluador de publicación, y el texto desde el primer
-            # marcador de producto deja de serlo, se descarta el
-            # prefijo; nunca se trunca después del marcador (una línea
-            # puede traer varios ítems) ni se toca una línea creíble.
-            # Los índices de `normalizada` sólo sirven para cortar
-            # `limpia` si la normalización no cambió la longitud.
-            marcador = _PATRON_TERMINOS_MATERIAL.search(normalizada)
-            if (
-                marcador is not None
-                and len(normalizada) == len(limpia)
-                and evaluar_credibilidad_material(limpia).nivel == NivelCredibilidad.INVALIDO
-            ):
-                # La designación de barra de una letra ("B HORMIGON",
-                # leída también D/3, ver normalización más abajo) es
-                # parte del ítem, no del membrete.
-                prefijo_barra = re.search(r"(?<!\S)[BD3]\s+$", normalizada[:marcador.start()])
-                inicio = prefijo_barra.start() if prefijo_barra else marcador.start()
-                candidata = limpia[inicio:]
-                if (
-                    _tiene_evidencia_material(candidata)
-                    and evaluar_credibilidad_material(candidata).nivel != NivelCredibilidad.INVALIDO
-                ):
-                    limpia = candidata
+            # membrete que la antecede (caso real 475256). Ver
+            # `_depurar_items_linea_contaminada`: con la línea completa ya
+            # contaminada según el mismo evaluador de publicación, nunca se
+            # conserva entera.
+            contaminada = evaluar_credibilidad_material(limpia).nivel == NivelCredibilidad.INVALIDO
             # La palabra de familia leída con dígitos se escribe con sus
             # letras; el resto de la línea queda tal como lo leyó el OCR.
             for token, familia in _tokens_familia_con_digitos(normalizada).items():
@@ -846,7 +859,10 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             # hacer que se descarte una partida que sí fue leída.
             limpia = re.sub(r"^[D3]\s*(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
             limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
-            encontradas.extend(_dividir_items_material_fusionados(limpia))
+            items = _dividir_items_material_fusionados(limpia)
+            if contaminada:
+                items = _depurar_items_linea_contaminada(items)
+            encontradas.extend(items)
             continue
         familia = _familia_degradada(normalizada)
         if familia:
@@ -3456,6 +3472,18 @@ def procesar_archivo(
             logger.warning("Corroboración geométrica de fecha omitida: %s: %s", type(exc).__name__, exc)
 
     descripcion = extraer_descripcion_material(textos)
+    # Barrera antes de publicar: un material que el mismo evaluador
+    # declara contaminado (otras secciones de la guía) no se registra como
+    # material; queda vacío con MATERIAL_POSIBLEMENTE_CONTAMINADO (ver
+    # bloque C1 más abajo); la lectura descartada y sus señales quedan en
+    # las métricas del documento (Mobile puede no tener traza OCR).
+    credibilidad_material = evaluar_credibilidad_material(descripcion)
+    material_contaminado = bool(descripcion) and credibilidad_material.nivel == NivelCredibilidad.INVALIDO
+    material_descartado = None
+    if material_contaminado:
+        material_descartado = {"lectura_ocr": descripcion, "motivo": credibilidad_material.motivo,
+                               "senales": list(credibilidad_material.senales)}
+        descripcion = ""
     # Bloque ORIGEN OPERACIONAL V2 -- calculado aquí (no en la construcción
     # final de `datos`, más abajo) para poder cruzarlo con la fusión de
     # evidencia de origen (Mobile/documento) más adelante en esta misma
@@ -3668,7 +3696,7 @@ def procesar_archivo(
     # motivo trazable correspondiente para que quede en revisión (o,
     # más adelante, escale a B1 vía `atlas_ia.registro_problemas`, ver
     # bloque U1) en vez de publicarse como dato limpio.
-    if evaluar_credibilidad_material(descripcion).nivel != NivelCredibilidad.CONFIABLE:
+    if material_contaminado or evaluar_credibilidad_material(descripcion).nivel != NivelCredibilidad.CONFIABLE:
         _motivo(MotivoRevisionDocumento.MATERIAL_POSIBLEMENTE_CONTAMINADO)
     if evaluar_credibilidad_entidad_nombre(datos.get("obra destino")).nivel != NivelCredibilidad.CONFIABLE:
         _motivo(MotivoRevisionDocumento.OBRA_DESTINO_POSIBLEMENTE_INVALIDA)
@@ -4151,6 +4179,8 @@ def procesar_archivo(
         # Trazabilidad por ítem: texto OCR original, código SAP y cómo se
         # asoció, confianza OCR, señales y advertencias.
         metricas["material_items"] = [item.como_dict() for item in items_material]
+    if material_descartado is not None:
+        metricas["material_contaminado_descartado"] = material_descartado
 
     # Bloque C1 -- peso: se calcula aquí (antes del `return`, no dentro
     # del propio diccionario) para poder evaluar su credibilidad y

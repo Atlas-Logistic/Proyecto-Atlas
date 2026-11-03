@@ -1714,6 +1714,9 @@ def recuperar_material_ausente_desde_traza_ocr_sin_ocr(*, raiz_atlas: str | Path
             except (OSError, ValueError, AttributeError):
                 lineas = []
             material = extraer_descripcion_material(str(l) for l in lineas if isinstance(l, str)) if isinstance(lineas, list) else ""
+            # Un material contaminado nunca completa la fila (se abstiene).
+            if material and evaluar_credibilidad_material(material).nivel == NivelCredibilidad.INVALIDO:
+                material = ""
             _anotar_recuperacion_p0(fila, "material_traza", {
                 "version": _VERSION_MATERIAL_TRAZA_P0,
                 "resultado": "RECUPERADO" if material else "ABSTENCION", "traza": ruta.name,
@@ -5394,6 +5397,9 @@ def reprocesar_material_focal_desde_imagen_original(
                 "detalle": f"{type(exc).__name__}: {exc}",
             }
         material_recuperado = extraer_descripcion_material(textos)
+        # Un material contaminado no cuenta como recuperado.
+        if material_recuperado and evaluar_credibilidad_material(material_recuperado).nivel == NivelCredibilidad.INVALIDO:
+            material_recuperado = ""
         metodo_material = ""
         detalle_focal = ""
         if not material_recuperado and evidencia.ruta_texto_pdf is None:
