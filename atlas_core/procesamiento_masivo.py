@@ -793,8 +793,10 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
         # ("HORMIGON16MM", casos 483106/483138/482816): sin límite de
         # palabra la partida leída se descartaba entera. Sólo se separan
         # esas dos formas; el resto de la línea queda como la leyó el OCR.
+        # El largo también puede venir pegado al diámetro ("HORMIGON10MM6M",
+        # casos 483897/483812): basta con que tras MM no siga otra letra.
         limpia = re.sub(r"^B(?=HORMIGON)", "B ", limpia, flags=re.IGNORECASE)
-        limpia = re.sub(r"\b(HORMIGON)(?=\d{1,2}\s*MM\b)", r"\1 ", limpia, flags=re.IGNORECASE)
+        limpia = re.sub(r"\b(HORMIGON)(?=\d{1,2}\s*MM(?![A-Z]))", r"\1 ", limpia, flags=re.IGNORECASE)
         normalizada = _normalizar(limpia)
         if _es_fragmento_estampado_no_material(normalizada):
             continue
