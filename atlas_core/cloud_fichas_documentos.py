@@ -26,12 +26,13 @@ from atlas_core.cloud_mobile_sync_cliente import ErrorSincronizacionCloudMobile,
 from atlas_core.fichas_choferes import (
     EMPRESA_ACTUAL, ESTADO_PENDIENTE_EXTRACCION, FORMATO_FRENTE_REVERSO, registrar_licencia_mobile_pendiente,
 )
-from atlas_core.fichas_vehiculos import TIPOS_VEHICULO, registrar_documento_vehiculo_mobile
+from atlas_core.fichas_vehiculos import TIPOS_VEHICULO, TIPO_SEGURO_CARGA, registrar_documento_vehiculo_mobile
 
 logger = logging.getLogger(__name__)
 
 RUTA_FICHAS = "/api/motor/fichas/documentos"
 RESULTADO_VEHICULO = "RECIBIDO_PENDIENTE_REVISION"
+TIPOS_RECEPCION_VEHICULO = (*TIPOS_VEHICULO, TIPO_SEGURO_CARGA)
 
 
 def _descargar_unico(lease: dict, timeout: float) -> dict:
@@ -54,7 +55,7 @@ def sincronizar_licencias_cloud(
     # Este Motor incorpora la licencia de frente y reverso y los documentos de
     # vehículo: lo declara para que Cloud se los entregue (a un Motor anterior
     # nunca se los entrega).
-    tipos = ",".join(TIPOS_VEHICULO)
+    tipos = ",".join(TIPOS_RECEPCION_VEHICULO)
     pendientes = _json(base_url, f"{RUTA_FICHAS}/pendientes?formatos={FORMATO_FRENTE_REVERSO}&tipos={tipos}",
                        token_motor, timeout=timeout).get("documentos", [])
     resumen["encontrados"] = len(pendientes)
@@ -64,14 +65,14 @@ def sincronizar_licencias_cloud(
             break
         documento_id = str(pendiente.get("documento_id", ""))
         es_licencia = pendiente.get("titular") == "CHOFER" and pendiente.get("tipo") == "LICENCIA_CONDUCIR"
-        es_vehiculo = pendiente.get("titular") == "VEHICULO" and pendiente.get("tipo") in TIPOS_VEHICULO
+        es_vehiculo = pendiente.get("titular") == "VEHICULO" and pendiente.get("tipo") in TIPOS_RECEPCION_VEHICULO
         if not (es_licencia or es_vehiculo):
             continue
         ruta = f"{RUTA_FICHAS}/{urllib.parse.quote(documento_id, safe='')}"
         try:
             lease = _json(base_url, f"{ruta}/lease", token_motor, method="POST",
                           body={"consumidor": consumidor, "formatos": [FORMATO_FRENTE_REVERSO],
-                                "tipos": list(TIPOS_VEHICULO)}, timeout=timeout)
+                                "tipos": list(TIPOS_RECEPCION_VEHICULO)}, timeout=timeout)
             if es_vehiculo:
                 if lease.get("titular") != "VEHICULO" or lease.get("tipo") != pendiente.get("tipo") \
                         or lease.get("formato", "UNICA") != "UNICA":

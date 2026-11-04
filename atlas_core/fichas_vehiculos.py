@@ -39,6 +39,7 @@ from atlas_core.fichas_choferes import (
 )
 
 TIPOS_VEHICULO = ("SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION")
+TIPO_SEGURO_CARGA = "SEGURO_CARGA"
 ESTADO_PENDIENTE_CLASIFICACION = "PENDIENTE_CLASIFICACION"
 PENDIENTES = "documentos_vehiculo_pendientes"
 _PATENTE = re.compile(r"[A-Z0-9]{4,8}")
@@ -112,9 +113,11 @@ def registrar_documento_vehiculo_mobile(
     chofer_id = str(chofer_id or "")
     if not origen_documento_id or not chofer_id:
         raise ValueError("Documento Mobile sin chofer o sin identificador")
-    if tipo not in TIPOS_VEHICULO:
+    if tipo not in (*TIPOS_VEHICULO, TIPO_SEGURO_CARGA):
         raise ValueError(f"Tipo de documento de vehículo no admitido: {tipo}")
     patente_cloud = normalizar_patente_vehiculo(str(patente_cloud or ""))
+    if tipo == TIPO_SEGURO_CARGA and patente_cloud:
+        raise ValueError("El seguro de carga debe recibirse sin patente asociada")
     original = _original_valido(contenido, mime_type, sha256)
     comprobar()
     ruta = ruta_almacen(raiz, empresa)
@@ -131,10 +134,15 @@ def registrar_documento_vehiculo_mobile(
             raise ValueError("La base de fichas debe inicializarse antes de recibir documentos de vehículo")
         patente_previa, previo = _existente(anterior, origen_documento_id)
         if previo is not None:
+            if tipo == TIPO_SEGURO_CARGA and (previo.get("tipo") != tipo or
+                    (previo.get("procedencia") or {}).get("chofer_id") != chofer_id):
+                raise ValueError("El identificador de seguro pertenece a otro remitente o tipo")
             return {"ok": True, "idempotente": True, "duplicado": False, "documento_id": previo["documento_id"],
                     "patente": patente_previa, "motivo": (previo.get("clasificacion") or {}).get("motivo", "")}
         clasificacion = _clasificar(chofer_id, patente_cloud, choferes, vehiculos) if _PATENTE.fullmatch(patente_cloud) \
             else {"patente": None, "motivo": "SIN_PATENTE_CLOUD", "candidatos": []}
+        if tipo == TIPO_SEGURO_CARGA:
+            clasificacion = {"patente": None, "motivo": "SEGURO_SIN_VEHICULO_ACREDITADO", "candidatos": []}
         patente = clasificacion["patente"]
         propuesta = copy.deepcopy(anterior)
         propuesta.setdefault("vehiculos", [])
@@ -152,7 +160,8 @@ def registrar_documento_vehiculo_mobile(
             carpeta_relativa = Path("archivos") / "vehiculos" / "sin_clasificar"
         procedencia = {"chofer_id": chofer_id, "patente_cloud": patente_cloud, "recibido_en": str(recibido_en or instante)}
         igual = next((d for d in destino_lista if d.get("tipo") == tipo and d.get("sha256") == original["sha256"]
-                      and (patente or (d.get("clasificacion") or {}).get("patente_cloud") == patente_cloud)), None)
+                      and (patente or (d.get("clasificacion") or {}).get("patente_cloud") == patente_cloud)
+                      and (tipo != TIPO_SEGURO_CARGA or (d.get("procedencia") or {}).get("chofer_id") == chofer_id)), None)
         escritos = []
         if igual is not None:
             # El mismo archivo otra vez: un solo documento, con ambos orígenes.
