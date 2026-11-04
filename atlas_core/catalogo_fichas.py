@@ -526,7 +526,7 @@ def construir_snapshot_fichas(*, raiz_atlas: str | Path) -> dict[str, object]:
     for ficha in fichas_choferes:
         if not asignaciones_disponibles:
             ficha['asignaciones_vigentes'] = {rol: {'estado': 'NO_DISPONIBLE', 'patente': None, 'candidatos': []}
-                                              for rol in ('tracto', 'rampla')}
+                                              for rol in ('tracto', 'rampla', 'camion_rigido')}
         persistida = por_referencia.get(ficha['identificador'])
         ficha['empresa'] = EMPRESA_ACTUAL
         ficha['ficha_digital'] = ({'ficha_id': persistida['ficha_id'],
