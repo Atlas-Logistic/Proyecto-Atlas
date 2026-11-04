@@ -167,7 +167,7 @@ def test_mismo_archivo_desde_otro_envio_no_duplica(raiz):
 @pytest.mark.parametrize("cambios,motivo", [
     ({"sha256": "0" * 64}, "huella"),
     ({"mime_type": "image/png"}, "no corresponde"),
-    ({"tipo": "SEGURO_CARGA"}, "no admitido"),
+    ({"tipo": "TIPO_DESCONOCIDO"}, "no admitido"),
     ({"tipo": "LICENCIA_CONDUCIR"}, "no admitido"),
     ({"chofer_id": ""}, "sin chofer"),
 ])
@@ -275,7 +275,7 @@ def test_pull_recibe_los_tres_tipos_y_licencias_con_su_resultado_propio(raiz):
     assert [(v["documento_id"], v["patente"], v["motivo"]) for v in resumen["vehiculos"]] == [
         ("dfv_soap", "CC5678", ""), ("dfv_rt", None, "TRACTO_Y_CARRO"), ("dfv_pc", "CC5678", "")]
     assert [i["documento_id"] for i in resumen["incorporados"]] == ["dfm_lic"]
-    assert cloud.rutas[0][0].endswith("&tipos=SOAP,REVISION_TECNICA,PERMISO_CIRCULACION")
+    assert cloud.rutas[0][0].endswith("&tipos=SOAP,REVISION_TECNICA,PERMISO_CIRCULACION,SEGURO_CARGA")
     assert sorted(d["tipo"] for d in _vehiculo(raiz, "CC5678")["documentos"]) == ["PERMISO_CIRCULACION", "SOAP"]
     # Un segundo ciclo con lo mismo no duplica nada.
     revision = _datos(raiz)["revision"]
@@ -311,7 +311,59 @@ def test_pull_con_fallo_de_persistencia_no_confirma_y_sigue_con_los_demas(raiz, 
 
 
 def test_pull_no_toma_tipos_no_admitidos(raiz):
-    cloud = CloudFalso([_doc_cloud("dfv_seguro", "SEGURO_CARGA", SOLO, "CC5678", JPEG("seguro"))])
+    cloud = CloudFalso([_doc_cloud("dfv_seguro", "TIPO_DESCONOCIDO", SOLO, "CC5678", JPEG("seguro"))])
     resumen = _sincronizar(raiz, cloud)
     assert resumen["vehiculos"] == [] and cloud.confirmados == []
     assert all(not r.endswith("/lease") for r, _ in cloud.rutas)
+
+
+def test_seguro_cloud_se_recibe_sin_patente_y_sin_activar_ocr(raiz):
+    from atlas_core.identificacion_patentes import _por_identificar
+    contenido = JPEG("seguro carga")
+    cloud = CloudFalso([_doc_cloud("seguro_1", "SEGURO_CARGA", SOLO, "", contenido)])
+    resumen = _sincronizar(raiz, cloud)
+    assert not resumen["errores"] and not resumen["sin_vincular"]
+    assert cloud.confirmados == [("seguro_1", "RECIBIDO_PENDIENTE_REVISION")]
+    assert resumen["vehiculos"][0]["patente"] is None
+    doc = _datos(raiz)[PENDIENTES][0]
+    assert doc["tipo"] == "SEGURO_CARGA" and doc["procedencia"]["chofer_id"] == SOLO
+    assert doc["clasificacion"]["motivo"] == "SEGURO_SIN_VEHICULO_ACREDITADO"
+    assert "asociacion" not in doc and not _por_identificar(doc)
+    assert _archivo(raiz, doc["archivo"]) == contenido and doc["sha256"] == sha(contenido)
+    assert _datos(raiz)["vehiculos"] == []
+    revision = _datos(raiz)["revision"]
+    _sincronizar(raiz, cloud)
+    assert _datos(raiz)["revision"] == revision
+
+
+def test_seguro_deduplica_por_remitente_y_no_acepta_patente(raiz):
+    original = JPEG("mismo seguro")
+    primero = _registrar(raiz, "seg-1", tipo="SEGURO_CARGA", patente="", contenido=original)
+    repetido = _registrar(raiz, "seg-2", tipo="SEGURO_CARGA", patente="", contenido=original)
+    otro = _registrar(raiz, "seg-3", chofer=COMBO, tipo="SEGURO_CARGA", patente="", contenido=original)
+    assert repetido["duplicado"] and repetido["documento_id"] == primero["documento_id"]
+    assert otro["documento_id"] != primero["documento_id"]
+    with pytest.raises(ValueError, match="sin patente"):
+        _registrar(raiz, "seg-4", tipo="SEGURO_CARGA", patente="CC5678")
+    with pytest.raises(ValueError, match="otro remitente"):
+        _registrar(raiz, "seg-1", chofer=COMBO, tipo="SEGURO_CARGA", patente="", contenido=original)
+
+
+def test_seguro_lease_perdido_no_persiste_ni_confirma(raiz):
+    antes = ruta_almacen(raiz, "MBT").read_bytes()
+    cloud = CloudFalso([_doc_cloud("seguro_1", "SEGURO_CARGA", SOLO, "", JPEG("seguro"))])
+    with patch.object(consumidor, "_json", cloud.json), patch.object(consumidor, "_descargar", cloud.descargar):
+        resultado = consumidor.sincronizar_licencias_cloud(base_url="https://cloud.test", token_motor="t", consumidor="JAVO",
+                                                          raiz=raiz, timeout=1, puede_continuar=lambda: False)
+    assert resultado["detenido_por_escritor"] and cloud.confirmados == []
+    assert ruta_almacen(raiz, "MBT").read_bytes() == antes
+
+
+def test_seguro_aislado_por_empresa(raiz):
+    inicializar_almacen(raiz, empresa="OTRA", actor="TEST")
+    contenido = JPEG("seguro")
+    _registrar(raiz, "seg-empresa", tipo="SEGURO_CARGA", patente="", contenido=contenido)
+    assert leer_almacen(raiz, empresa="OTRA").get(PENDIENTES, []) == []
+    _registrar(raiz, "seg-empresa", tipo="SEGURO_CARGA", patente="", contenido=contenido, empresa="OTRA")
+    assert len(_datos(raiz)[PENDIENTES]) == 1
+    assert len(leer_almacen(raiz, empresa="OTRA")[PENDIENTES]) == 1
