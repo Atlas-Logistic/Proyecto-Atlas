@@ -367,3 +367,12 @@ def test_seguro_aislado_por_empresa(raiz):
     _registrar(raiz, "seg-empresa", tipo="SEGURO_CARGA", patente="", contenido=contenido, empresa="OTRA")
     assert len(_datos(raiz)[PENDIENTES]) == 1
     assert len(leer_almacen(raiz, empresa="OTRA")[PENDIENTES]) == 1
+
+
+def test_seguro_hash_incorrecto_no_persiste_ni_confirma(raiz):
+    antes = ruta_almacen(raiz, "MBT").read_bytes()
+    cloud = CloudFalso([{**_doc_cloud("seguro_1", "SEGURO_CARGA", SOLO, "", JPEG("seguro")),
+                         "sha_cloud": "0" * 64}])
+    resultado = _sincronizar(raiz, cloud)
+    assert resultado["errores"] and not cloud.confirmados
+    assert ruta_almacen(raiz, "MBT").read_bytes() == antes
