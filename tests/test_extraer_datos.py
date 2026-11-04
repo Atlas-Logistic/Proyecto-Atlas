@@ -1657,18 +1657,14 @@ def test_guia11():
 
     datos = extraer_datos(textos)
 
+    # P0 04/11/2026: hasta 7360b18 estos campos los fijaba una regla por
+    # número de guía, no esta lectura. Sin ella, lo ilegible se abstiene en
+    # vez de inventarse.
     assert datos["número de guía"] == "462871", datos
-    assert datos["número de transporte"] == "0000347469", datos
-    assert datos["cliente"] == "AUSIN HNOS LTDA", datos
-    assert datos["obra destino"] == "CONST CERRO APOQUINDO CUATRO", datos
-    assert datos["RUT del cliente"] == "81293200-4", datos
-    assert datos["chofer"] == "CRISTOPHER RETAMAL", datos
     assert datos["RUT del chofer"] == "17576134-9", datos
-    assert datos["patente del tracto"] == "BPHR67", datos
-    assert datos["patente del carro"] == "No encontrado", datos
-    assert datos["hora de entrada"] == "08:53", datos
-    assert datos["hora de salida"] == "10:00", datos
-    assert datos["peso"] == "17.772,000", datos
+    for campo in ("número de transporte", "obra destino", "RUT del cliente", "chofer",
+                  "patente del tracto", "hora de entrada", "hora de salida", "peso"):
+        assert datos[campo] == "No encontrado", (campo, datos)
 
 
 
@@ -1689,8 +1685,10 @@ def probar_guia5():
     assert datos["número de transporte"] == "0000346245", datos
     assert datos["cliente"] == "AMERICAN SCREW CHILE SPA", datos
     assert datos["obra destino"] == "AMERICAN SCREW CHILE SPA", datos
-    assert datos["RUT del cliente"] == "91410000-3", datos
-    assert datos["chofer"] == "RODRIGO NAHUELÑIR", datos
+    # Formato real del extractor; los valores anteriores venían de la regla
+    # fija por número de guía retirada el 04/11/2026.
+    assert datos["RUT del cliente"] == "91.410.000-3", datos
+    assert datos["chofer"] == "RODRIGO NAHUELNIR", datos
     assert datos["RUT del chofer"] == "15454297-3", datos
     assert datos["patente del tracto"] == "SB6486", datos
     assert datos["patente del carro"] == "JF4288", datos
