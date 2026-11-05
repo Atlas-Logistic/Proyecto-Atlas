@@ -151,7 +151,7 @@ def asignaciones_de_chofer(rut, vehiculos):
     ) for v in vehiculos]
     vigentes = _asignaciones_vigentes(confirmados)
     resultado = {}
-    for rol, tipo in (('tracto', 'TRACTO'), ('rampla', 'CARRO')):
+    for rol, tipo in (('tracto', 'TRACTO'), ('rampla', 'CARRO'), ('camion_rigido', 'CAMION_RIGIDO')):
         patentes = sorted(p for p, (r, t) in vigentes.items()
                           if rut and r == normalizar_rut(rut) and t == tipo)
         resultado[rol] = {'estado': 'CONFIRMADO' if len(patentes) == 1 else 'CONFLICTO' if patentes else 'SIN_ASIGNACION',

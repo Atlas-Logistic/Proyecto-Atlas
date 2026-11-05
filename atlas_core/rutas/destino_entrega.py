@@ -70,6 +70,9 @@ from atlas_core.extractor import (
     limpiar_sufijo_chofer_pegado,
     limpiar_sufijo_rut_pegado,
     _extraer_despachar_a_geometrico,
+    _texto_simple,
+    _token_coincide_tolerante,
+    _tokens_valor,
 )
 from atlas_core.rutas.destino_estructurado import extraer_identificadores_destino
 from atlas_core.rutas.geocerca import (
@@ -2893,6 +2896,38 @@ def _destino_legible_tras_residuo(valor: str) -> bool:
     return bool(valor) and not _PATRON_TOKEN_NUMERO_FUNDIDO.search(valor)
 
 
+def _geometrico_tras_prefijo_chofer(lineal: str, geometrico: str, chofer_resuelto: str) -> bool:
+    """P0 contaminación de destino (caso real 483939, RapidOCR): la lectura
+    lineal antepuso el valor de RETIRA a la dirección ("PATRICK ORTIZ
+    MAESTRA LIDIA TORRES 92 SANTIAGO RECOLETA"), mientras que la lectura
+    geométrica, con las cajas separadas de la misma fila, dio la dirección
+    sola. `limpiar_sufijo_chofer_pegado` sólo recorta sufijos, y la regla de
+    prefijo de `_despachar_a_lineal_contaminado` exige un chofer de 3 o más
+    tokens.
+
+    Sólo se prefiere la geométrica cuando hay evidencia doble y exacta:
+    la lineal es, token a token, el chofer ya resuelto de este documento
+    (2 o más palabras alfabéticas, o sus 2 o más primeras palabras si el
+    OCR cortó el apellido) seguido EXACTAMENTE de la geométrica completa, y
+    la geométrica conserva numeración. Si falta cualquiera de las dos
+    condiciones, no cambia nada."""
+    tokens_chofer = _tokens_valor(_texto_simple(chofer_resuelto))
+    if len(tokens_chofer) < 2 or not all(t.isalpha() for t in tokens_chofer):
+        return False
+    tokens_lineal = _tokens_valor(_texto_simple(lineal))
+    tokens_geometrico = _tokens_valor(_texto_simple(geometrico))
+    if not tokens_geometrico or len(tokens_lineal) <= len(tokens_geometrico):
+        return False
+    prefijo = tokens_lineal[: -len(tokens_geometrico)]
+    if tokens_lineal[-len(tokens_geometrico):] != tokens_geometrico:
+        return False
+    if not 2 <= len(prefijo) <= len(tokens_chofer):
+        return False
+    if not all(_token_coincide_tolerante(p, o) for p, o in zip(prefijo, tokens_chofer)):
+        return False
+    return bool(re.search(r"\d", geometrico) and re.search(r"[A-Za-z]", geometrico))
+
+
 def despachar_a_documental(
     textos: Iterable[str],
     bloques: Iterable[Any] | None = None,
@@ -2980,6 +3015,9 @@ def despachar_a_documental(
             motivo_destino_documental_no_confiable(despachar_a_crudo)
             and not motivo_destino_documental_no_confiable(candidato_geometrico)
         )
+        # Caso real 483939: chofer (RETIRA) antepuesto; ver
+        # `_geometrico_tras_prefijo_chofer`.
+        or _geometrico_tras_prefijo_chofer(despachar_a_crudo, candidato_geometrico, chofer_resuelto)
     ):
         despachar_a_crudo = candidato_geometrico
     elif lineal_descartable:
