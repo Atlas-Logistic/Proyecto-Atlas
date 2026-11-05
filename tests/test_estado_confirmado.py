@@ -8,8 +8,10 @@ desfasa a voluntad para reproducir retrasos y archivos pendientes de subir.
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,6 +24,10 @@ from atlas_core import estado_confirmado as ec
 
 def sha(datos: bytes) -> str:
     return hashlib.sha256(datos).hexdigest()
+
+
+def trabajador_sha_lento(_ruta: str, _resultados) -> None:
+    time.sleep(1)
 
 
 class CloudFalsa:
@@ -265,6 +271,116 @@ class RelevoEstadoConfirmado(unittest.TestCase):
         progreso = ec._leer_json(lease.custodia._ruta_progreso, {})
         self.assertEqual(progreso["estado"], "PENDIENTE")
         self.assertEqual(progreso["actual"], DATASET)
+
+    def test_timeout_sha256_termina_el_proceso_hijo(self):
+        ruta = self.oficina.archivo(DATASET)
+        self.oficina.escribir(DATASET, "v1")
+        antes = {hijo.pid for hijo in multiprocessing.active_children()}
+        with self.assertRaises(ec.VerificacionPendiente):
+            ec.sha256_archivo_con_plazo(ruta, 0.05, trabajador=trabajador_sha_lento)
+        time.sleep(0.1)
+        vivos = {hijo.pid for hijo in multiprocessing.active_children() if hijo.is_alive()}
+        self.assertFalse(vivos - antes)
+
+    def test_fallo_repetido_deja_ruta_error_y_contador_accionables(self):
+        self.turno(self.casa, {DATASET: "v1"})
+        self.cloud.avanzar(11)
+        self.oficina.escribir(DATASET, "v1")
+
+        def lectura_bloqueada(_ruta):
+            raise ec.VerificacionPendiente("lectura de custodia excedió 15s: simulada")
+
+        for esperado in (1, 2):
+            lease = self.oficina.lease()
+            lease.custodia = ec.CustodiaEstado(
+                self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+                hash_archivo=lectura_bloqueada,
+            )
+            self.assertFalse(lease.adquirir())
+            progreso = ec._leer_json(lease.custodia._ruta_progreso, {})
+            self.assertEqual(progreso["actual"], DATASET)
+            self.assertEqual(progreso["fallos_consecutivos"], esperado)
+            self.assertIn("excedió", progreso["ultimo_error"])
+            self.assertIsNone(self.cloud.lease["token"])
+
+    def test_limites_de_huellas_y_tiempo_no_permiten_escribir(self):
+        rutas = {f"operacion/actual/ruta_{i:03d}.json": "x" for i in range(129)}
+        for rel, texto in rutas.items():
+            self.oficina.escribir(rel, texto)
+            contenido = texto.encode()
+            self.cloud.objetos[sha(contenido)] = contenido
+            self.cloud.archivos.append((rel, 1, sha(contenido)))
+        self.cloud.marca["version"] = 1
+        calculadas = []
+
+        def hash_observada(ruta):
+            calculadas.append(ruta)
+            return ec.sha256_archivo(ruta)
+
+        lease = self.oficina.lease()
+        lease.custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            max_huellas_nuevas=128, plazo_alineacion_segundos=60, hash_archivo=hash_observada,
+        )
+        self.assertFalse(lease.adquirir())
+        self.assertEqual(lease.motivo, "CUSTODIA_PENDIENTE")
+        self.assertEqual(len(calculadas), 128)
+        self.assertIsNone(self.cloud.lease["token"])
+
+        reloj = iter((0.0, 0.0, 46.0)).__next__
+        temporal = self.oficina.local / "tiempo"
+        custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=temporal,
+            max_huellas_nuevas=128, plazo_alineacion_segundos=45, hash_archivo=hash_observada, reloj=reloj,
+        )
+        with self.assertRaises(ec.VerificacionPendiente):
+            custodia._huellas_locales(list(rutas)[:2], limitar=True)
+        self.assertEqual(len(ec._leer_json(custodia._ruta_huellas, {})), 1)
+
+    def test_version_nueva_del_manifiesto_no_acepta_cache_obsoleta(self):
+        self.turno(self.casa, {DATASET: "v1"})
+        self.cloud.avanzar(11)
+        self.oficina.escribir(DATASET, "v1")
+        primera = self.oficina.lease()
+        primera.custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            hash_archivo=ec.sha256_archivo,
+        )
+        self.assertTrue(primera.adquirir(), primera.motivo)
+        primera.cerrar()
+        self.cloud.avanzar(11)
+        self.turno(self.casa, {DATASET: "v2"})
+        self.cloud.avanzar(11)
+        segunda = self.oficina.lease()
+        segunda.custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            hash_archivo=ec.sha256_archivo,
+        )
+        self.assertTrue(segunda.adquirir(), segunda.motivo)
+        self.assertEqual(segunda.custodia.version, 2)
+        self.assertEqual(self.oficina.leer(DATASET), "v2")
+        segunda.cerrar()
+
+    def test_cache_de_huellas_se_invalida_por_tamano_o_mtime(self):
+        self.oficina.escribir(DATASET, "v1")
+        calculadas = []
+
+        def hash_observada(ruta):
+            calculadas.append(ruta)
+            return ec.sha256_archivo(ruta)
+
+        custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            hash_archivo=hash_observada,
+        )
+        custodia._huellas_locales([DATASET])
+        custodia._huellas_locales([DATASET])
+        self.assertEqual(len(calculadas), 1)
+        ruta = self.oficina.archivo(DATASET)
+        st = ruta.stat()
+        os.utime(ruta, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+        custodia._huellas_locales([DATASET])
+        self.assertEqual(len(calculadas), 2)
 
     def test_apagado_inesperado_se_confirma_al_volver_si_nadie_confirmo(self):
         self.turno(self.casa, {DATASET: "v1"})

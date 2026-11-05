@@ -100,11 +100,11 @@ def _calcular_sha256_en_proceso(ruta: str, resultados) -> None:
         resultados.put(("error", f"{type(error).__name__}: {error}"))
 
 
-def sha256_archivo_con_plazo(ruta: Path, plazo_segundos: float) -> str:
+def sha256_archivo_con_plazo(ruta: Path, plazo_segundos: float, *, trabajador=_calcular_sha256_en_proceso) -> str:
     """Calcula SHA-256 sin permitir que una lectura remota retenga el lease."""
     contexto = multiprocessing.get_context("spawn")
     resultados = contexto.Queue()
-    proceso = contexto.Process(target=_calcular_sha256_en_proceso, args=(str(ruta), resultados), daemon=True)
+    proceso = contexto.Process(target=trabajador, args=(str(ruta), resultados), daemon=True)
     proceso.start()
     try:
         try:
@@ -286,12 +286,20 @@ class CustodiaEstado:
 
     # ------------------------------------------------------------- huellas
     def _guardar_progreso_huellas(self, *, total: int, comprobadas: int, nuevas: int,
-                                  actual: str | None, estado: str) -> None:
-        _escribir_json(self._ruta_progreso, {
+                                  actual: str | None, estado: str, error: str | None = None) -> None:
+        anterior = _leer_json(self._ruta_progreso, {})
+        fallos = 1 if error else 0
+        if error and anterior.get("version") == self.version and anterior.get("actual") == actual:
+            fallos = int(anterior.get("fallos_consecutivos") or 0) + 1
+        datos = {
             "version": self.version, "total": total, "comprobadas": comprobadas,
             "nuevas_sha256": nuevas, "actual": actual, "estado": estado,
             "actualizado_utc": datetime.now(timezone.utc).isoformat(),
-        })
+            "fallos_consecutivos": fallos,
+        }
+        if error:
+            datos["ultimo_error"] = error
+        _escribir_json(self._ruta_progreso, datos)
 
     def _calcular_huella(self, ruta: Path) -> str:
         if self._hash_archivo is not None:
@@ -330,9 +338,9 @@ class CustodiaEstado:
                 )
             try:
                 sha = self._calcular_huella(ruta)
-            except VerificacionPendiente:
+            except VerificacionPendiente as error:
                 self._guardar_progreso_huellas(total=total, comprobadas=comprobadas - 1, nuevas=nuevas,
-                                                actual=rel, estado="PENDIENTE")
+                                                actual=rel, estado="PENDIENTE", error=str(error))
                 raise
             cache[rel] = [st.st_size, st.st_mtime_ns, sha]
             # Un corte o timeout posterior no pierde una verificación ya hecha.
