@@ -49,8 +49,27 @@ relaciones (y la migración del registro). La custodia Cloud
 
 Snapshot permanente bajo demanda: `python publicacion_reportes.py --raiz <Atlas> --snapshot`.
 
-## Activación (no ejecutada)
+## Interacción con la custodia Cloud de PULL
 
+Medido con el audit hook real de `estado_confirmado` sobre el mismo escenario
+(decisión + 4 ingresos Mobile + 2 revalidaciones):
+
+- `snapshots` (por defecto): las rutas rastreadas son **idénticas** a las de
+  CASA `8069ea6` (19 rutas); no se crea el registro. Desplegar en este modo
+  no cambia lo que la custodia sube.
+- `rotativo`: única ruta rastreada adicional,
+  `catalogos_privados/registro_relaciones_operacionales.json`; ningún
+  `reportes/` entra en la custodia. Cada cambio del registro se sube completo
+  (~700 bytes por relación): ~22-37 MB/día al primer mes y ~270-445 MB/día al
+  año con 30-50 relaciones nuevas diarias y ~35 publicaciones. La retención
+  de versiones antiguas en R2 depende del Worker, que no está en este
+  repositorio: **no está demostrado que sea segura**. El modo rotativo queda
+  bloqueado hasta que Cloud confirme retención/limpieza o se decida otra
+  ubicación del registro.
+
+## Activación (no ejecutada; bloqueada por la custodia)
+
+0. Resolver la sección anterior (decisión Cloud/Codex).
 1. Desplegar el código (rama sobre el registro incremental), integrado con lo
    instalado y con el trabajo de PULL vigente.
 2. Comprobar `python migrar_relaciones_operacionales.py --raiz <Atlas> --estado`

@@ -372,8 +372,22 @@ def test_conflictos_de_la_migracion_se_conservan(tmp_path):
     discrepante = "RELACION_DOCUMENTAL_DISCREPANTE"
     assert entradas["AA1111"]["conflictos"] == [{"tipo": discrepante, "con": entradas["ZZ9999"]["clave"]}]
     assert entradas["ZZ9999"]["conflictos"] == [{"tipo": discrepante, "con": entradas["AA1111"]["clave"]}]
-    rutas = sorted(f["ruta"] for f in entradas["AA1111"]["fuentes"])
-    assert rutas == ["reportes/r1/viajes.csv", "reportes/r2/viajes.csv"]
+    # Una sola fuente migrada por relación (la primera observación); el detalle
+    # por reporte queda en migracion.reportes, sin hacer crecer cada relación.
+    assert [f["ruta"] for f in entradas["AA1111"]["fuentes"]] == ["reportes/r1/viajes.csv"]
+    reportes = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))["empresas"]["oficina"]["migracion"]["reportes"]
+    assert sorted(reportes) == ["reportes/r1/viajes.csv", "reportes/r2/viajes.csv", "reportes/r3/viajes.csv"]
+
+
+def test_tamano_del_registro_no_crece_con_la_cantidad_de_snapshots(tmp_path):
+    raiz = tmp_path / "Atlas"
+    relaciones = [_relacion(str(g), f"PP{g:04d}") for g in range(40)]
+    for indice in range(60):  # 60 snapshots completos con las mismas 40 relaciones
+        _reporte(raiz, f"r{indice:03d}", relaciones)
+    registro.migrar_reportes_historicos(raiz, aplicar=True, lote=20)
+    contenido = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))
+    entradas = contenido["empresas"]["oficina"]["relaciones"]
+    assert len(entradas) == 40 and all(len(e["fuentes"]) == 1 for e in entradas)
 
 
 def test_segunda_migracion_simultanea_queda_bloqueada(tmp_path, monkeypatch):
@@ -486,11 +500,58 @@ def test_cli_codigos_de_salida(tmp_path, capsys):
     import migrar_relaciones_operacionales as cli
     raiz = tmp_path / "Atlas"
     _reporte(raiz, "r1", [_relacion()])
-    assert cli.main(["--raiz", str(raiz), "--activar"]) == 2
+    base = ["--raiz", str(raiz), "--sin-escritor"]
+    assert cli.main([*base, "--activar"]) == 2
     assert cli.main(["--raiz", str(raiz)]) == 0 and not registro.ruta_registro(raiz).exists()
-    assert cli.main(["--raiz", str(raiz), "--aplicar"]) == 0
-    assert cli.main(["--raiz", str(raiz), "--verificar"]) == 0
-    assert cli.main(["--raiz", str(raiz), "--activar"]) == 0
+    assert cli.main([*base, "--aplicar"]) == 0
+    assert cli.main([*base, "--verificar"]) == 0
+    assert cli.main([*base, "--activar"]) == 0
     capsys.readouterr()
     assert cli.main(["--raiz", str(raiz), "--estado"]) == 0
     assert json.loads(capsys.readouterr().out)["activo"] is True
+
+
+class _EscritorFalso:
+    def __init__(self, libre=True):
+        self.libre, self.dentro, self.eventos = libre, False, []
+
+    def __enter__(self):
+        self.eventos.append("entrar")
+        return self
+
+    def __exit__(self, *_a):
+        self.dentro = False
+        self.eventos.append("cerrar")
+
+    def adquirir(self):
+        self.dentro = self.libre
+        self.eventos.append("adquirir")
+        return self.libre
+
+    @property
+    def vigente(self):
+        return self.dentro
+
+
+def test_cli_escribe_solo_dentro_del_turno_del_escritor(tmp_path, monkeypatch):
+    import migrar_relaciones_operacionales as cli
+    raiz = tmp_path / "Atlas"
+    _reporte(raiz, "r1", [_relacion()])
+    # Sin escritor configurado (sin token ni política): bloqueado, nada escrito.
+    assert cli.main(["--raiz", str(raiz), "--aplicar"], fabrica_escritor=lambda _r: None) == 2
+    ocupado = _EscritorFalso(libre=False)
+    assert cli.main(["--raiz", str(raiz), "--aplicar"], fabrica_escritor=lambda _r: ocupado) == 2
+    assert not registro.ruta_registro(raiz).exists()
+    # Con el escritor adquirido, cada escritura del registro ocurre dentro del turno.
+    escritor = _EscritorFalso()
+    original = registro.escribir_json_atomico
+
+    def vigilada(ruta, contenido):
+        assert escritor.vigente, "escritura del registro fuera del turno de custodia"
+        return original(ruta, contenido)
+
+    monkeypatch.setattr(registro, "escribir_json_atomico", vigilada)
+    for accion in ("--aplicar", "--verificar", "--activar", "--desactivar"):
+        assert cli.main(["--raiz", str(raiz), accion], fabrica_escritor=lambda _r: escritor) == 0
+    assert escritor.eventos.count("adquirir") == 4 and escritor.eventos[-1] == "cerrar"
+    assert registro.estado_registro(raiz)["estado_migracion"] == registro.ESTADO_VERIFICADA

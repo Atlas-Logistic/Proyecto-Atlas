@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 
+from atlas_core.publicacion_reportes import ruta_reporte_automatico
 from atlas_core.acciones_operacionales import CapaAccionesOperacionales, TIPO_LEDGER_CORRECCION
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
@@ -99,7 +100,7 @@ def test_E_resolucion_automatica_no_reaparece_tras_revalidar(entorno):
     revalidar_y_regenerar_reporte(raiz_atlas=entorno["raiz"], nombre_carpeta_reporte="reporte_e")
 
     assert _fila_vigente(entorno)["patente_rampla"] == REAL
-    with (entorno["raiz"] / "reportes" / "reporte_e" / "viajes.csv").open(encoding="utf-8-sig", newline="") as archivo:
+    with (ruta_reporte_automatico(entorno["raiz"], "reporte_e") / "viajes.csv").open(encoding="utf-8-sig", newline="") as archivo:
         viaje = next(v for v in csv.DictReader(archivo, delimiter=";") if "500001" in v["numeros_guia"])
     assert viaje["patentes_rampla"] == REAL
     assert ERRONEA not in viaje["patentes_rampla"]

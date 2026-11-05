@@ -17,10 +17,23 @@ migración, su verificación y su activación son por empresa.
 
 ## Garantías
 
-- **Procedencias estables.** Una fuente se identifica sin `observado_en` ni
-  `sha256`: otra regeneración con el mismo dataset (aunque cambie su huella)
-  no modifica una relación ya registrada. Sin relación ni fuente nueva no se
-  escribe nada.
+- **Procedencias estables.** Una fuente se identifica sin `observado_en`,
+  `sha256` ni `ruta`: otra regeneración con el mismo dataset (aunque cambie su
+  huella) no modifica una relación ya registrada, y la migración guarda una
+  sola fuente migrada por relación aunque aparezca en cientos de snapshots
+  (el detalle por reporte queda en `migracion.reportes`). Sin relación ni
+  fuente nueva no se escribe nada.
+- **Sin escrituras antes de migrar.** La regeneración sólo incorpora el
+  dataset una vez que la migración de la empresa está `completa` o
+  `verificada`; antes informa `registro_relaciones.omitido =
+  MIGRACION_NO_COMPLETA` y no crea ni toca el archivo.
+- **Custodia Cloud.** `catalogos_privados/` está custodiado por PULL: cada
+  cambio del registro se sube completo a Cloud al cerrar el turno, y una
+  escritura fuera de turno se revierte en la siguiente alineación. Por eso
+  `migrar_relaciones_operacionales.py` ejecuta `--aplicar`, `--verificar`,
+  `--activar` y `--desactivar` con el mismo escritor que PULL y Desktop
+  (lease Cloud o equipo único); sin escritor disponible responde código 2 sin
+  escribir. `--sin-escritor` es sólo para raíces de prueba.
 - **Integridad.** Un registro ausente equivale a vacío. Uno ilegible, de
   versión desconocida o estructuralmente inválido lanza `REGISTRO_ILEGIBLE` /
   `REGISTRO_INCOMPATIBLE`, nunca se sobrescribe, y el consumidor vuelve al
@@ -72,7 +85,10 @@ estable; respaldo verificable de `catalogos_privados/`.
 
    Repetir hasta que `estado` sea `completa`, `ilegibles` esté vacío y una
    nueva ejecución informe `procesados = 0`. Código de salida 2 =
-   bloqueado (registro ilegible/incompatible u otra migración en curso).
+   bloqueado (registro ilegible/incompatible, otra migración en curso, sin
+   escritor configurado o `ESCRITOR_OCUPADO`). Mientras dura, la migración
+   retiene el lease: PULL espera (`ESCRITOR_OCUPADO`) hasta que termine, así
+   que se ejecuta en una ventana acordada.
 
 3. Verificar (sólo lectura de reportes; marca `verificada` si todo calza):
 
@@ -94,6 +110,6 @@ estable; respaldo verificable de `catalogos_privados/`.
    Reversión: `--desactivar` (el consumidor vuelve a los históricos al
    instante). Los reportes históricos no se borran, mueven ni depuran.
 
-Durante la regeneración normal, el Motor incorpora relaciones desde el
-dataset operacional ya validado, sin tocar reportes históricos, esté o no
-activado el registro.
+Una vez completa la migración, la regeneración normal incorpora relaciones
+desde el dataset operacional ya validado, sin tocar reportes históricos;
+antes de eso no escribe el registro.

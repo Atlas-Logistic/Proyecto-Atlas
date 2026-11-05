@@ -51,7 +51,11 @@ ESTADO_VERIFICADA = "verificada"
 LOTE_MIGRACION = 50
 ESPERA_ESCRITURA_S = 5.0
 # Datos de observación, no de identidad: no distinguen una fuente de otra.
-_CAMPOS_NO_IDENTITARIOS = frozenset({"observado_en", "sha256"})
+# ``ruta`` (reporte histórico migrado) tampoco: cada relación aparece en
+# cientos de snapshots y una fuente por snapshot haría crecer el registro
+# -- que la custodia Cloud sube completo en cada cambio -- sin información
+# nueva; el detalle por reporte queda en ``migracion.reportes``.
+_CAMPOS_NO_IDENTITARIOS = frozenset({"observado_en", "sha256", "ruta"})
 
 _T = TypeVar("_T")
 
@@ -357,6 +361,18 @@ def relaciones_si_activo(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) 
     except RegistroRelacionesError:
         return None
     return _relaciones_de(empresa) if _activa(empresa) else None
+
+
+def requiere_incorporacion_dataset(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> bool:
+    """La regeneración sólo alimenta el registro una vez completa la
+    migración: antes, los snapshots siguen siendo la fuente y no se escribe
+    nada. Un registro ilegible devuelve ``True`` para que el intento se
+    informe (``REGISTRO_ILEGIBLE``) sin escribir."""
+    try:
+        empresa = _leer_compartido(raiz)["empresas"].get(empresa_id)
+    except RegistroRelacionesError:
+        return True
+    return _migracion(empresa).get("estado") in (ESTADO_COMPLETA, ESTADO_VERIFICADA)
 
 
 def incorporar_relaciones(

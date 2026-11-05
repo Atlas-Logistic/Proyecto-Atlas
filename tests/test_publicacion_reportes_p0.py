@@ -115,6 +115,8 @@ def test_medicion_snapshots_antes_y_despues_con_mobile_y_revalidacion(tmp_path, 
     assert despues == []               # ninguna permanente nueva
     assert len(_rotativos(raiz_b)) <= 2
     assert hist_despues == hist_antes  # nada previo tocado
+    # Modo por defecto sin migración: catalogos_privados (custodiado) sin registro.
+    assert not registro.ruta_registro(raiz_a).exists()
 
     # Mismo resultado operacional: reporte vigente, dataset, bandeja y ledger.
     assert _viajes_vigentes(raiz_b) == _viajes_vigentes(raiz_a)

@@ -6602,10 +6602,17 @@ def _revalidar_y_regenerar_reporte(
     # Actualización incremental portable desde el dataset ya verificado;
     # nunca reabre ni modifica los reportes publicados.
     # Un registro ilegible/incompatible u ocupado nunca se sobrescribe ni
-    # interrumpe la regeneración: queda informado por su código.
-    from atlas_core.registro_relaciones_operacionales import RegistroRelacionesError, incorporar_dataset
+    # interrumpe la regeneración: queda informado por su código. Antes de
+    # completar la migración no se escribe nada (los snapshots siguen siendo
+    # la fuente y catalogos_privados -- custodiado por Cloud -- no cambia).
+    from atlas_core.registro_relaciones_operacionales import (
+        RegistroRelacionesError, incorporar_dataset, requiere_incorporacion_dataset,
+    )
     try:
-        resultado_revalidacion["registro_relaciones"] = incorporar_dataset(raiz, dataset)
+        if requiere_incorporacion_dataset(raiz):
+            resultado_revalidacion["registro_relaciones"] = incorporar_dataset(raiz, dataset)
+        else:
+            resultado_revalidacion["registro_relaciones"] = {"omitido": "MIGRACION_NO_COMPLETA"}
     except RegistroRelacionesError as error_registro:
         resultado_revalidacion["registro_relaciones"] = {"bloqueado": error_registro.codigo}
     except (OSError, ValueError, TypeError):

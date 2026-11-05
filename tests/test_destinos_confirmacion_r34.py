@@ -4,6 +4,7 @@ import json
 import pytest
 
 import atlas_core.aplicacion_decisiones as modulo
+from atlas_core.publicacion_reportes import ruta_reporte_automatico
 from atlas_core.aplicacion_decisiones import DecisionObsoletaError, ErrorAplicacionDecision, aplicar_decision_obra
 from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
 from atlas_core.catalogo_destinos import CatalogoDestinos
@@ -609,8 +610,8 @@ def test_revalidar_y_regenerar_reporte_publica_nuevo_reporte_vigente(tmp_path):
     resultado = revalidar_y_regenerar_reporte(raiz_atlas=raiz, nombre_carpeta_reporte="reporte_prueba_r34")
     assert resultado["reporte_regenerado"] is True
     estado = json.loads((actual/"estado_operacion.json").read_text(encoding="utf-8"))
-    assert estado["reporte_vigente"] == "reportes/reporte_prueba_r34"
-    assert (raiz/"reportes"/"reporte_prueba_r34"/"viajes.csv").exists()
+    assert raiz / estado["reporte_vigente"] == ruta_reporte_automatico(raiz, "reporte_prueba_r34")
+    assert (ruta_reporte_automatico(raiz, "reporte_prueba_r34")/"viajes.csv").exists()
 
 
 def test_revalidar_y_regenerar_reporte_no_hace_nada_si_no_cambio_nada(tmp_path):
@@ -644,7 +645,7 @@ def test_cambio_efectivo_de_bandeja_regenera_reporte_sin_cambiar_dataset_y_es_id
     decisiones = _pendientes(actual)
     assert [d["tipo"] for d in decisiones] == ["CLIENTE_AUSENTE"]
     viajes = list(csv.DictReader(
-        (raiz / "reportes" / "reporte_por_cambio_bandeja" / "viajes.csv").open(encoding="utf-8-sig"),
+        (ruta_reporte_automatico(raiz, "reporte_por_cambio_bandeja") / "viajes.csv").open(encoding="utf-8-sig"),
         delimiter=";",
     ))
     assert viajes[0]["estado"] == "REQUIERE_REVISION"
@@ -796,7 +797,8 @@ def test_r35_fallo_al_publicar_bandeja_revierte_catalogos_pero_nunca_dataset_ni_
     # actualizado -- nunca se revierte esa publicación legítima sólo
     # porque el paso posterior (`generar_artefacto`) falló.
     assert (actual/"estado_operacion.json").exists()
-    assert list((raiz/"reportes").iterdir()) == []
+    # Ningún reporte publicado (en ningún modo de publicación).
+    assert list((raiz/"reportes").rglob("viajes.csv")) == []
 
 
 def _entorno_dos_destinos(tmp_path):

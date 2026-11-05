@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from atlas_core.publicacion_reportes import ruta_reporte_automatico
 from atlas_core.almacenamiento_portable import SesionOcupadaError, leer_estado_operacion
 from atlas_core.decisiones_pendientes import generar_artefacto
 from atlas_core.mobile import (
@@ -1600,7 +1601,7 @@ def test_c_d_e_generacion_de_reporte_mientras_dataset_cambia_no_publica_version_
     assert estado is not None
     huella_real = revalidacion_documental._sha256_archivo(dataset)
     assert estado["dataset_sha256"] == huella_real
-    assert estado["reporte_vigente"] == "reportes/reporte_2"
+    assert tmp_path / estado["reporte_vigente"] == ruta_reporte_automatico(tmp_path, "reporte_2")
     viajes_csv = (tmp_path / estado["reporte_vigente"] / "viajes.csv").read_text(encoding="utf-8-sig")
     assert "CLIENTE CAMBIADO POR OTRO PROCESO" in viajes_csv
 

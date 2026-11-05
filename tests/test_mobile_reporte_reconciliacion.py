@@ -17,6 +17,7 @@ import json
 import uuid
 from pathlib import Path
 
+from atlas_core.publicacion_reportes import ruta_reporte_automatico
 from atlas_core.almacenamiento_portable import escribir_estado_operacion, leer_estado_operacion
 from atlas_core.decisiones_pendientes import generar_artefacto
 from atlas_core.mobile import RepositorioEnviosMobile, _regenerar_reporte_tras_envio_mobile
@@ -349,7 +350,7 @@ def test_estado_historico_real_con_dataset_sha256_binario_no_dispara_falsa_migra
         raiz_atlas=tmp_path, nombre_carpeta_reporte="reporte_tras_fila_nueva_real",
     )
     assert resultado_con_cambio["reporte_regenerado"] is True, resultado_con_cambio
-    ruta_viajes = tmp_path / "reportes" / "reporte_tras_fila_nueva_real" / "viajes.csv"
+    ruta_viajes = ruta_reporte_automatico(tmp_path, "reporte_tras_fila_nueva_real") / "viajes.csv"
     assert ruta_viajes.is_file()
     assert "472623" in ruta_viajes.read_text(encoding="utf-8-sig")
 
