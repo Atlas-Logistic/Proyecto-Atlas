@@ -101,7 +101,10 @@ def incorporar_relaciones(
         if all(json.dumps(x, ensure_ascii=False, sort_keys=True) != firma_fuente for x in fuentes if isinstance(x, dict)):
             fuentes.append(fuente)
             fuentes_agregadas += 1
-    escribir_json_atomico(ruta_registro(raiz), registro)
+    # Sin relación ni fuente nueva no hay cambio efectivo: no se crea ni se
+    # reescribe el registro (los conflictos sólo nacen con una relación nueva).
+    if agregadas or fuentes_agregadas:
+        escribir_json_atomico(ruta_registro(raiz), registro)
     return {"relaciones_agregadas": agregadas, "fuentes_agregadas": fuentes_agregadas, "total": len(empresa["relaciones"])}
 
 
