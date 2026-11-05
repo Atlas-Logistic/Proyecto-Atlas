@@ -3229,7 +3229,8 @@ class CapaAccionesOperacionales:
         from atlas_core.reporte_viajes import _sha256_archivo, generar_reporte_viajes
         actual, dataset = self._ctx.actual, self._ctx.archivos["dataset"]
         instante = self._reloj()
-        reporte = self.raiz / "reportes" / f"accion_operacional_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
+        from atlas_core.publicacion_reportes import ruta_reporte_automatico
+        reporte = ruta_reporte_automatico(self.raiz, f"accion_operacional_{instante.strftime('%Y%m%d_%H%M%S_%f')}")
         try:
             huella = _sha256_archivo(dataset)
             generar_reporte_viajes(dataset, reporte, carpeta_catalogos=self._ctx.catalogos,

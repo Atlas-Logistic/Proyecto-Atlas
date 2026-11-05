@@ -6530,7 +6530,8 @@ def _revalidar_y_regenerar_reporte(
     if not guias_actualizadas and not bandeja_cambio_efectivo and not dataset_incorporo_cambios:
         return {**resultado_revalidacion, "reporte_regenerado": False}
 
-    salida = raiz / "reportes" / nombre_carpeta_reporte
+    from atlas_core.publicacion_reportes import ruta_reporte_automatico
+    salida = ruta_reporte_automatico(raiz, nombre_carpeta_reporte)
     kwargs = {"carpeta_catalogos": catalogos, "ruta_ledger": actual / "decisiones_aplicadas.json"}
     if reloj is not None:
         kwargs["reloj"] = reloj
@@ -7843,11 +7844,28 @@ def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]
 def _relaciones_historicas_operacionales(raiz: Path) -> list[dict[str, object]]:
     """Registro portable sólo si la migración de la empresa está completa,
     verificada y activada; si no (o si el registro es ilegible o
-    incompatible), el lector histórico vigente. Así el consumidor nunca
-    abandona los reportes antes de tiempo ni pierde evidencia."""
-    from atlas_core.registro_relaciones_operacionales import relaciones_si_activo
+    incompatible), el lector histórico vigente más la evidencia capturada
+    de reportes publicados sin snapshot. Así el consumidor nunca abandona
+    los reportes antes de tiempo ni pierde evidencia."""
+    from atlas_core.registro_relaciones_operacionales import (
+        relaciones_de_reportes_publicados, relaciones_si_activo,
+    )
     relaciones = relaciones_si_activo(raiz)
-    return relaciones if relaciones is not None else _leer_relaciones_historicas_reportadas(raiz)
+    if relaciones is not None:
+        return relaciones
+    historicas = _leer_relaciones_historicas_reportadas(raiz)
+    # Publicación rotativa: la evidencia de los reportes vigentes que ya no
+    # quedan como snapshot se capturó en el registro; se suma a la de los
+    # reportes históricos (sin duplicar) para que el lector no pierda nada.
+    publicadas = relaciones_de_reportes_publicados(raiz) or []
+    if not publicadas:
+        return historicas
+
+    def _clave(fila: dict[str, object]) -> tuple[str, ...]:
+        return tuple(str(fila.get(k, "")).strip() for k in _CAMPOS_RELACION_HISTORICA)
+
+    vistas = {_clave(fila) for fila in historicas}
+    return [*historicas, *(fila for fila in publicadas if _clave(fila) not in vistas)]
 
 
 def enriquecer_decisiones_bandeja(

@@ -321,7 +321,8 @@ def mantener_pendientes_tecnicos(
                         "pendientes": sorted(ids & set(filas_pendientes)),
                         "reporte_regenerado": False, **_informe()}
 
-            reporte = raiz / "reportes" / f"mantenimiento_tecnico_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
+            from atlas_core.publicacion_reportes import ruta_reporte_automatico
+            reporte = ruta_reporte_automatico(raiz, f"mantenimiento_tecnico_{instante.strftime('%Y%m%d_%H%M%S_%f')}")
             huella_dataset = _sha256_archivo(dataset)
             try:
                 generar_reporte_viajes(

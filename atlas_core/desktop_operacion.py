@@ -273,7 +273,8 @@ def ingresar(raiz, archivos, comprobar):
     comprobar()
     _cli(['analizar_guias_masivo.py',entrada,'--salida',dataset,'--catalogos',catalogos,'--reconciliar-focal','--sin-telemetria'])
     comprobar()
-    reporte = raiz/'reportes'/('reporte_desktop_'+marca)
+    from atlas_core.publicacion_reportes import ruta_reporte_automatico
+    reporte = ruta_reporte_automatico(raiz, 'reporte_desktop_'+marca)
     _cli(['generar_reporte_viajes.py',dataset,reporte,'--catalogos',catalogos])
     estado = leer_estado_operacion(raiz=raiz) or {}
     vigente = raiz/estado.get('reporte_vigente','')

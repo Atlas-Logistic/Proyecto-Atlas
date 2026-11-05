@@ -2411,7 +2411,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 from atlas_core.revalidacion_documental import revalidar_y_regenerar_reporte
                 instante = reloj()
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
-                reporte_salida = raiz / "reportes" / nombre_carpeta
+                from atlas_core.publicacion_reportes import ruta_reporte_automatico
+                reporte_salida = ruta_reporte_automatico(raiz, nombre_carpeta)
                 reporte_salida_existia = reporte_salida.exists()
                 # Bloque CIERRE DE ORQUESTACIÓN -- si ESTA decisión acaba
                 # de escribir una comuna humana (REGISTRAR_DIRECCION), esa
@@ -2564,7 +2565,8 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                 from atlas_core.reporte_viajes import generar_reporte_viajes
                 instante = reloj()
                 nombre_carpeta = f"reporte_revalidacion_{instante.strftime('%Y%m%d_%H%M%S_%f')}"
-                reporte_salida = raiz / "reportes" / nombre_carpeta
+                from atlas_core.publicacion_reportes import ruta_reporte_automatico
+                reporte_salida = ruta_reporte_automatico(raiz, nombre_carpeta)
                 reporte_salida_existia = reporte_salida.exists()
                 # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
                 # VERSIONADA: se captura la huella del dataset justo ANTES

@@ -44,6 +44,7 @@ CAMPOS = ("numero_guia", "numero_transporte", "rut_chofer", "patente_tracto", "p
 
 TIPO_DATASET = "dataset_operacional"
 TIPO_MIGRADO = "reporte_historico_migrado"
+TIPO_PUBLICADO = "reporte_vigente_publicado"
 ESTADO_EN_CURSO = "en_curso"
 ESTADO_COMPLETA = "completa"
 ESTADO_VERIFICADA = "verificada"
@@ -456,6 +457,43 @@ def _leer_reporte(ruta: Path) -> tuple[str, int, list[dict[str, str]]] | None:
     if extraidas is None:
         return None
     return hashlib.sha256(contenido).hexdigest(), len(contenido), extraidas
+
+
+class ReporteIlegible(RegistroRelacionesError):
+    codigo = "REPORTE_ILEGIBLE"
+
+
+def capturar_reporte_publicado(
+    raiz: str | Path, viajes_csv: str | Path, *, empresa_id: str = EMPRESA_LEGADA,
+) -> dict[str, int]:
+    """Incorpora la misma evidencia que el lector histórico leería de ese
+    ``viajes.csv`` (``evidencias_documentos``), para reportes vigentes que
+    no quedan como snapshot permanente. Una sola fuente por relación: la
+    identidad es sólo el tipo, así republicar no hace crecer el registro."""
+    leido = _leer_reporte(Path(viajes_csv))
+    if leido is None:
+        raise ReporteIlegible(f"no se puede leer {viajes_csv}")
+    sha, _tamano, extraidas = leido
+    return incorporar_relaciones(
+        raiz, extraidas, empresa_id=empresa_id, procedencia={"tipo": TIPO_PUBLICADO, "sha256": sha},
+    )
+
+
+def relaciones_de_reportes_publicados(
+    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA,
+) -> list[dict[str, object]] | None:
+    """Relaciones capturadas de reportes vigentes no conservados como
+    snapshot: complementan al lector histórico mientras el registro no esté
+    activado. ``None`` si el registro es ilegible o incompatible."""
+    try:
+        empresa = _leer_compartido(raiz)["empresas"].get(empresa_id)
+    except RegistroRelacionesError:
+        return None
+    relaciones = empresa.get("relaciones", []) if isinstance(empresa, Mapping) else []
+    return [
+        dict(r["relacion"]) for r in relaciones
+        if any(isinstance(f, Mapping) and f.get("tipo") == TIPO_PUBLICADO for f in r["fuentes"])
+    ]
 
 
 def _rutas_reportes(base: Path) -> list[Path]:

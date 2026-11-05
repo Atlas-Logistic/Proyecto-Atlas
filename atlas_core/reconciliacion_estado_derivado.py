@@ -979,7 +979,8 @@ def reconciliar_estado_derivado(
     instante = reloj().astimezone(timezone.utc)
     sello = instante.strftime("%Y%m%d_%H%M%S_%f")
     respaldo = raiz / "respaldos" / f"reconciliacion_estado_derivado_v{VERSION_ESTADO_DERIVADO}_{sello}"
-    reporte = raiz / "reportes" / f"reporte_desktop_reconciliado_v{VERSION_ESTADO_DERIVADO}_{sello}"
+    from atlas_core.publicacion_reportes import ruta_reporte_automatico
+    reporte = ruta_reporte_automatico(raiz, f"reporte_desktop_reconciliado_v{VERSION_ESTADO_DERIVADO}_{sello}")
     estado_ruta = actual / "estado_operacion.json"
     decisiones = actual / NOMBRE_ARTEFACTO
     ruta_pendientes = actual / NOMBRE_PENDIENTES_TECNICOS

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import socket
 import tempfile
@@ -287,6 +288,13 @@ def escribir_estado_operacion(
         contenido["firma_bateria_compartida"] = firma_bateria_compartida
     ruta_manifiesto = raiz_efectiva / RUTA_RELATIVA_MANIFIESTO_OPERACION
     escribir_json_atomico(ruta_manifiesto, contenido)
+    # Publicación rotativa (ver `atlas_core.publicacion_reportes`): sin
+    # efecto fuera de `reportes/vigentes`; jamás impide publicar.
+    try:
+        from atlas_core.publicacion_reportes import tras_publicar_reporte_vigente
+        tras_publicar_reporte_vigente(raiz_efectiva, raiz_efectiva / ruta_reporte_relativa)
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("Fallo tras publicar el reporte vigente rotativo")
     return ruta_manifiesto
 
 
