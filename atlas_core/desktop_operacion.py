@@ -30,7 +30,7 @@ ESCRITORES = frozenset({
     'forzar_correccion_destino.py', 'previsualizar_registro_obra.py',
     'acciones_operacionales_cli.py', 'eventos_operacionales_cli.py',
     'confirmar_incidencias_operacionales.py', 'proponer_incidencias_operacionales.py',
-    'asociar_evidencia_mobile.py', 'resolver_envio_mobile.py',
+    'asociar_evidencia_mobile.py', 'resolver_envio_mobile.py', 'revision_mobile_cli.py',
     'gestionar_catalogos.py', 'reconciliar_estado_derivado.py',
     'retomar_entradas_desktop.py', 'generar_reporte_viajes.py', 'resumen_procesamiento_desktop.py',
     'registrar_licencia_chofer.py', 'confirmar_licencia_chofer.py', 'clasificar_anverso_licencia.py',
