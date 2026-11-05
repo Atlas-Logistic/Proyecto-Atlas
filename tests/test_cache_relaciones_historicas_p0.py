@@ -34,6 +34,7 @@ from atlas_core.revalidacion_documental import (
     _ruta_cache_relaciones_historicas,
     reconciliar_bandeja_decisiones,
 )
+from atlas_core.registro_relaciones_operacionales import migrar_reportes_historicos
 
 
 def _fila(**ov):
@@ -290,6 +291,14 @@ def test_f2_reconciliar_bandeja_mismo_resultado_con_decision_vehiculo(tmp_path, 
         ruta_dataset=_csv_ruta, carpeta_catalogos=cat, decisiones=[decision],
         ruta_salida=actual / "decisiones_pendientes.json",
         reloj=lambda: datetime.now(timezone.utc),
+    )
+    # Activación controlada: primero una migración verificable; después el
+    # ciclo normal no puede volver a abrir el histórico.
+    assert migrar_reportes_historicos(raiz)["relaciones_extraidas"] == 1
+    assert migrar_reportes_historicos(raiz, aplicar=True)["relaciones_agregadas"] == 1
+    monkeypatch.setattr(
+        "atlas_core.revalidacion_documental._leer_relaciones_historicas_reportadas",
+        lambda *_: (_ for _ in ()).throw(AssertionError("no leer reportes históricos")),
     )
 
     r = reconciliar_bandeja_decisiones(raiz_atlas=raiz)

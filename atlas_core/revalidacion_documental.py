@@ -6598,6 +6598,13 @@ def _revalidar_y_regenerar_reporte(
         firma_bateria_compartida=(firma_bateria_compartida if guias_en_alcance(dataset) is None else None),
         raiz=raiz,
     )
+    # Actualización incremental portable desde el dataset ya verificado;
+    # nunca reabre ni modifica los reportes publicados.
+    try:
+        from atlas_core.registro_relaciones_operacionales import incorporar_dataset
+        resultado_revalidacion["registro_relaciones"] = incorporar_dataset(raiz, dataset)
+    except (OSError, ValueError, TypeError):
+        resultado_revalidacion["registro_relaciones"] = {"bloqueado": "ESCRITURA_REGISTRO_FALLO"}
     return {**resultado_revalidacion, "reporte_regenerado": True, "reporte_vigente": str(salida)}
 
 
@@ -7859,8 +7866,9 @@ def enriquecer_decisiones_bandeja(
     if guias_scope is not None:
         decisiones = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() in guias_scope]
     if relaciones_historicas is None:
+        from atlas_core.registro_relaciones_operacionales import leer_relaciones
         relaciones_historicas = (
-            _leer_relaciones_historicas_reportadas(catalogos.parent)
+            leer_relaciones(catalogos.parent)
             if any(str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in decisiones) else []
         )
     decisiones_aplicadas_ledger = list(decisiones_aplicadas or [])
@@ -8097,7 +8105,8 @@ def reconciliar_bandeja_decisiones(
     if guias_objetivo is None and any(
         str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales
     ):
-        relaciones_historicas = _leer_relaciones_historicas_reportadas(raiz)
+        from atlas_core.registro_relaciones_operacionales import leer_relaciones
+        relaciones_historicas = leer_relaciones(raiz)
 
     resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)
     vigentes = resultado_primero["vigentes"]
