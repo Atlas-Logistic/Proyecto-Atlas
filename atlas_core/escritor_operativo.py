@@ -206,8 +206,14 @@ class LeaseEscritorOperativo:
             self.cerrar()
             return False
         if self.custodia is not None:
+            from atlas_core.estado_confirmado import VerificacionPendiente
             try:
                 self.custodia.alinear(self)
+            except VerificacionPendiente as error:
+                logging.getLogger(__name__).info("Custodia pendiente; lease liberado sin escribir: %s", error)
+                self.motivo = "CUSTODIA_PENDIENTE"
+                self.cerrar()
+                return False
             except Exception as error:  # noqa: BLE001 - cualquier duda: no escribir
                 logging.getLogger(__name__).warning("Estado local no verificado; lease liberado sin escribir: %s", error)
                 self.motivo = "ESTADO_NO_VERIFICADO"

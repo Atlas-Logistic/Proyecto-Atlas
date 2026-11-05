@@ -25,10 +25,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
+import queue
 import shutil
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -45,12 +48,23 @@ SEMILLA_ENVIOS = "operacion/mobile/envios"
 # terminar dentro del timeout del cliente y de los límites por solicitud.
 LOTE_CONFIRMACION = 50
 LOTE_CONSULTA = 50
+# La primera alineación puede encontrar una caché vacía sobre una unidad de
+# Drive grande. No puede mantener el lease indefinidamente: se valida por
+# tramos, se persiste cada huella comprobada y sólo se permite escribir cuando
+# el tramo finaliza con todas las rutas verificadas.
+MAX_HUELLAS_NUEVAS_POR_ALINEACION = 128
+PLAZO_ALINEACION_SEGUNDOS = 45.0
+PLAZO_LECTURA_HUELLA_SEGUNDOS = 15.0
 
 log = logging.getLogger(__name__)
 
 
 class EstadoNoVerificado(RuntimeError):
     """La copia local no coincide con la marca de Cloud: no se escribe."""
+
+
+class VerificacionPendiente(EstadoNoVerificado):
+    """La custodia quedó incompleta: el lease debe liberarse sin escribir."""
 
 
 def ruta_local() -> Path:
@@ -76,6 +90,38 @@ def sha256_archivo(ruta: Path) -> str:
         for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
             h.update(bloque)
     return h.hexdigest()
+
+
+def _calcular_sha256_en_proceso(ruta: str, resultados) -> None:
+    """Aísla una lectura que el proveedor de Drive pudiera dejar bloqueada."""
+    try:
+        resultados.put(("ok", sha256_archivo(Path(ruta))))
+    except BaseException as error:  # el padre convierte cualquier fallo en cierre seguro
+        resultados.put(("error", f"{type(error).__name__}: {error}"))
+
+
+def sha256_archivo_con_plazo(ruta: Path, plazo_segundos: float) -> str:
+    """Calcula SHA-256 sin permitir que una lectura remota retenga el lease."""
+    contexto = multiprocessing.get_context("spawn")
+    resultados = contexto.Queue()
+    proceso = contexto.Process(target=_calcular_sha256_en_proceso, args=(str(ruta), resultados), daemon=True)
+    proceso.start()
+    try:
+        try:
+            estado, detalle = resultados.get(timeout=plazo_segundos)
+        except queue.Empty as error:
+            raise VerificacionPendiente(
+                f"lectura de custodia excedió {plazo_segundos:.0f}s: {ruta}"
+            ) from error
+        if estado != "ok":
+            raise EstadoNoVerificado(f"no se pudo calcular SHA-256 de {ruta}: {detalle}")
+        return detalle
+    finally:
+        if proceso.is_alive():
+            proceso.terminate()
+        proceso.join()
+        resultados.close()
+        resultados.join_thread()
 
 
 def _leer_json(ruta: Path, defecto):
@@ -194,7 +240,11 @@ sys.addaudithook(_auditar)
 
 
 class CustodiaEstado:
-    def __init__(self, raiz, cliente: ClienteEstado, *, carpeta_local: Path | None = None) -> None:
+    def __init__(self, raiz, cliente: ClienteEstado, *, carpeta_local: Path | None = None,
+                 max_huellas_nuevas: int = MAX_HUELLAS_NUEVAS_POR_ALINEACION,
+                 plazo_alineacion_segundos: float = PLAZO_ALINEACION_SEGUNDOS,
+                 plazo_lectura_huella_segundos: float = PLAZO_LECTURA_HUELLA_SEGUNDOS,
+                 hash_archivo=None, reloj=time.monotonic) -> None:
         self.raiz = Path(os.path.abspath(raiz))
         self._raiz_norm = os.path.normcase(str(self.raiz)).rstrip("\\/") + os.sep
         self.cliente = cliente
@@ -206,6 +256,11 @@ class CustodiaEstado:
         self.resumen: dict = {}
         self._lease = None
         self._cerrojo = threading.Lock()
+        self.max_huellas_nuevas = max_huellas_nuevas
+        self.plazo_alineacion_segundos = plazo_alineacion_segundos
+        self.plazo_lectura_huella_segundos = plazo_lectura_huella_segundos
+        self._hash_archivo = hash_archivo
+        self._reloj = reloj
 
     # --------------------------------------------------------------- rutas
     @property
@@ -214,6 +269,8 @@ class CustodiaEstado:
     def _ruta_manifiesto(self): return self.local / "manifiesto.json"
     @property
     def _ruta_pendiente(self): return self.local / "pendiente.json"
+    @property
+    def _ruta_progreso(self): return self.local / "progreso_huellas.json"
 
     def contiene(self, ruta) -> bool:
         return os.path.normcase(os.path.abspath(os.fsdecode(ruta))).startswith(self._raiz_norm)
@@ -228,10 +285,26 @@ class CustodiaEstado:
         return self.raiz.joinpath(*rel.split("/"))
 
     # ------------------------------------------------------------- huellas
-    def _huellas_locales(self, rels) -> dict[str, str | None]:
+    def _guardar_progreso_huellas(self, *, total: int, comprobadas: int, nuevas: int,
+                                  actual: str | None, estado: str) -> None:
+        _escribir_json(self._ruta_progreso, {
+            "version": self.version, "total": total, "comprobadas": comprobadas,
+            "nuevas_sha256": nuevas, "actual": actual, "estado": estado,
+            "actualizado_utc": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def _calcular_huella(self, ruta: Path) -> str:
+        if self._hash_archivo is not None:
+            return self._hash_archivo(ruta)
+        return sha256_archivo_con_plazo(ruta, self.plazo_lectura_huella_segundos)
+
+    def _huellas_locales(self, rels, *, limitar: bool = False) -> dict[str, str | None]:
         cache = _leer_json(self._ruta_huellas, {})
         salida = {}
-        for rel in rels:
+        total = len(rels)
+        nuevas = 0
+        inicio = self._reloj()
+        for comprobadas, rel in enumerate(rels, start=1):
             ruta = self._abs(rel)
             try:
                 st = ruta.stat()
@@ -242,13 +315,39 @@ class CustodiaEstado:
                 salida[rel] = None
                 continue
             previo = cache.get(rel)
-            if previo and previo[0] == st.st_size and previo[1] == st.st_mtime_ns:
+            if (isinstance(previo, list) and len(previo) == 3
+                    and previo[0] == st.st_size and previo[1] == st.st_mtime_ns
+                    and isinstance(previo[2], str)):
                 salida[rel] = previo[2]
                 continue
-            sha = sha256_archivo(ruta)
+            if limitar and (nuevas >= self.max_huellas_nuevas
+                             or self._reloj() - inicio >= self.plazo_alineacion_segundos):
+                self._guardar_progreso_huellas(total=total, comprobadas=comprobadas - 1, nuevas=nuevas,
+                                                actual=rel, estado="PENDIENTE")
+                raise VerificacionPendiente(
+                    f"custodia pendiente v{self.version}: {comprobadas - 1}/{total} rutas comprobadas; "
+                    f"se reanudará desde la caché sin escribir"
+                )
+            try:
+                sha = self._calcular_huella(ruta)
+            except VerificacionPendiente:
+                self._guardar_progreso_huellas(total=total, comprobadas=comprobadas - 1, nuevas=nuevas,
+                                                actual=rel, estado="PENDIENTE")
+                raise
             cache[rel] = [st.st_size, st.st_mtime_ns, sha]
+            # Un corte o timeout posterior no pierde una verificación ya hecha.
+            _escribir_json(self._ruta_huellas, cache)
             salida[rel] = sha
+            nuevas += 1
+            if limitar:
+                self._guardar_progreso_huellas(total=total, comprobadas=comprobadas, nuevas=nuevas,
+                                                actual=rel, estado="EN_CURSO")
+                log.info("Custodia v%s: %d/%d rutas comprobadas (%d SHA-256 nuevas)",
+                         self.version, comprobadas, total, nuevas)
         _escribir_json(self._ruta_huellas, cache)
+        if limitar:
+            self._guardar_progreso_huellas(total=total, comprobadas=total, nuevas=nuevas,
+                                            actual=None, estado="COMPLETA")
         return salida
 
     def _cargar_manifiesto(self, version: int) -> dict[str, str | None]:
@@ -269,7 +368,7 @@ class CustodiaEstado:
         self.manifiesto = dict(self._cargar_manifiesto(self.version))
         resumen = {"version": self.version, "restaurados": [], "borrados": [], "cuarentena": [], "pendiente_confirmado": 0}
         self._recuperar_pendiente(lease, resumen)
-        locales = self._huellas_locales(self.manifiesto)
+        locales = self._huellas_locales(self.manifiesto, limitar=True)
         distintos = {rel: sha for rel, sha in locales.items() if sha != self.manifiesto[rel]}
         if distintos:
             consultas = [[rel, sha] for rel, sha in distintos.items() if sha]
@@ -292,7 +391,7 @@ class CustodiaEstado:
                     resumen["restaurados"].append(rel)
             if resumen["cuarentena"]:
                 log.warning("Estado confirmado: %d archivo(s) local(es) nunca confirmados en cuarentena %s", len(resumen["cuarentena"]), destino_cuarentena)
-            locales = self._huellas_locales(self.manifiesto)
+            locales = self._huellas_locales(self.manifiesto, limitar=True)
             residuo = [rel for rel, sha in locales.items() if sha != self.manifiesto[rel]]
             if residuo:
                 raise EstadoNoVerificado(f"copia local no coincide con la marca Cloud v{self.version}: {residuo[:5]}")

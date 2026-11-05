@@ -212,6 +212,60 @@ class RelevoEstadoConfirmado(unittest.TestCase):
         sincronizar.assert_not_called()
         sincronizar_local.assert_not_called()
 
+    def test_alineacion_extensa_se_reanuda_desde_huellas_persistidas(self):
+        rutas = {DATASET: "v1", CATALOGO: "cat-1"}
+        self.turno(self.casa, rutas)
+        self.cloud.avanzar(11)
+        for rel, texto in rutas.items():
+            self.oficina.escribir(rel, texto)
+        calculadas = []
+
+        def hash_observada(ruta):
+            calculadas.append(ruta)
+            return ec.sha256_archivo(ruta)
+
+        primer_lease = self.oficina.lease()
+        primer_lease.custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            max_huellas_nuevas=1, plazo_alineacion_segundos=60, hash_archivo=hash_observada,
+        )
+        self.assertFalse(primer_lease.adquirir())
+        self.assertEqual(primer_lease.motivo, "CUSTODIA_PENDIENTE")
+        self.assertIsNone(self.cloud.lease["token"])
+        self.assertEqual(len(ec._leer_json(primer_lease.custodia._ruta_huellas, {})), 1)
+        progreso = ec._leer_json(primer_lease.custodia._ruta_progreso, {})
+        self.assertEqual(progreso["estado"], "PENDIENTE")
+
+        segundo_lease = self.oficina.lease()
+        segundo_lease.custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            max_huellas_nuevas=1, plazo_alineacion_segundos=60, hash_archivo=hash_observada,
+        )
+        self.assertTrue(segundo_lease.adquirir(), segundo_lease.motivo)
+        self.assertEqual(len(calculadas), 2)
+        self.assertEqual(ec._leer_json(segundo_lease.custodia._ruta_progreso, {})["estado"], "COMPLETA")
+        segundo_lease.cerrar()
+
+    def test_espera_de_sha256_libera_el_lease_y_deja_progreso_pendiente(self):
+        self.turno(self.casa, {DATASET: "v1"})
+        self.cloud.avanzar(11)
+        self.oficina.escribir(DATASET, "v1")
+
+        def lectura_bloqueada(_ruta):
+            raise ec.VerificacionPendiente("lectura de custodia excedió 15s: simulada")
+
+        lease = self.oficina.lease()
+        lease.custodia = ec.CustodiaEstado(
+            self.oficina.raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=self.oficina.local,
+            hash_archivo=lectura_bloqueada,
+        )
+        self.assertFalse(lease.adquirir())
+        self.assertEqual(lease.motivo, "CUSTODIA_PENDIENTE")
+        self.assertIsNone(self.cloud.lease["token"])
+        progreso = ec._leer_json(lease.custodia._ruta_progreso, {})
+        self.assertEqual(progreso["estado"], "PENDIENTE")
+        self.assertEqual(progreso["actual"], DATASET)
+
     def test_apagado_inesperado_se_confirma_al_volver_si_nadie_confirmo(self):
         self.turno(self.casa, {DATASET: "v1"})
         lease = self.casa.lease()
