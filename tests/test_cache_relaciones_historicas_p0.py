@@ -34,7 +34,9 @@ from atlas_core.revalidacion_documental import (
     _ruta_cache_relaciones_historicas,
     reconciliar_bandeja_decisiones,
 )
-from atlas_core.registro_relaciones_operacionales import migrar_reportes_historicos
+from atlas_core.registro_relaciones_operacionales import (
+    activar_registro, migrar_reportes_historicos, verificar_migracion,
+)
 
 
 def _fila(**ov):
@@ -296,6 +298,8 @@ def test_f2_reconciliar_bandeja_mismo_resultado_con_decision_vehiculo(tmp_path, 
     # ciclo normal no puede volver a abrir el histórico.
     assert migrar_reportes_historicos(raiz)["relaciones_extraidas"] == 1
     assert migrar_reportes_historicos(raiz, aplicar=True)["relaciones_agregadas"] == 1
+    assert verificar_migracion(raiz)["ok"] is True
+    assert activar_registro(raiz)["activo"] is True
     monkeypatch.setattr(
         "atlas_core.revalidacion_documental._leer_relaciones_historicas_reportadas",
         lambda *_: (_ for _ in ()).throw(AssertionError("no leer reportes históricos")),

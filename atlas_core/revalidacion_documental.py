@@ -6600,9 +6600,13 @@ def _revalidar_y_regenerar_reporte(
     )
     # Actualización incremental portable desde el dataset ya verificado;
     # nunca reabre ni modifica los reportes publicados.
+    # Un registro ilegible/incompatible u ocupado nunca se sobrescribe ni
+    # interrumpe la regeneración: queda informado por su código.
+    from atlas_core.registro_relaciones_operacionales import RegistroRelacionesError, incorporar_dataset
     try:
-        from atlas_core.registro_relaciones_operacionales import incorporar_dataset
         resultado_revalidacion["registro_relaciones"] = incorporar_dataset(raiz, dataset)
+    except RegistroRelacionesError as error_registro:
+        resultado_revalidacion["registro_relaciones"] = {"bloqueado": error_registro.codigo}
     except (OSError, ValueError, TypeError):
         resultado_revalidacion["registro_relaciones"] = {"bloqueado": "ESCRITURA_REGISTRO_FALLO"}
     return {**resultado_revalidacion, "reporte_regenerado": True, "reporte_vigente": str(salida)}
@@ -7836,6 +7840,16 @@ def _leer_relaciones_historicas_reportadas(raiz: Path) -> list[dict[str, object]
     return list({**relaciones_por_clave, **solo_esta_llamada}.values())
 
 
+def _relaciones_historicas_operacionales(raiz: Path) -> list[dict[str, object]]:
+    """Registro portable sólo si la migración de la empresa está completa,
+    verificada y activada; si no (o si el registro es ilegible o
+    incompatible), el lector histórico vigente. Así el consumidor nunca
+    abandona los reportes antes de tiempo ni pierde evidencia."""
+    from atlas_core.registro_relaciones_operacionales import relaciones_si_activo
+    relaciones = relaciones_si_activo(raiz)
+    return relaciones if relaciones is not None else _leer_relaciones_historicas_reportadas(raiz)
+
+
 def enriquecer_decisiones_bandeja(
     *, decisiones: list[dict[str, object]], carpeta_catalogos: str | Path, ruta_dataset: str | Path,
     relaciones_historicas: list[dict[str, object]] | None = None,
@@ -7866,9 +7880,8 @@ def enriquecer_decisiones_bandeja(
     if guias_scope is not None:
         decisiones = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() in guias_scope]
     if relaciones_historicas is None:
-        from atlas_core.registro_relaciones_operacionales import leer_relaciones
         relaciones_historicas = (
-            leer_relaciones(catalogos.parent)
+            _relaciones_historicas_operacionales(catalogos.parent)
             if any(str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in decisiones) else []
         )
     decisiones_aplicadas_ledger = list(decisiones_aplicadas or [])
@@ -8105,8 +8118,7 @@ def reconciliar_bandeja_decisiones(
     if guias_objetivo is None and any(
         str(d.get("tipo", "")) == "VEHICULO_DESCONOCIDO" for d in pendientes_actuales
     ):
-        from atlas_core.registro_relaciones_operacionales import leer_relaciones
-        relaciones_historicas = leer_relaciones(raiz)
+        relaciones_historicas = _relaciones_historicas_operacionales(raiz)
 
     resultado_primero = _regenerar_enriquecer_publicar(pendientes_actuales)
     vigentes = resultado_primero["vigentes"]
