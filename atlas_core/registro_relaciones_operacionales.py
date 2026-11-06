@@ -88,6 +88,10 @@ class RegistroOcupado(RegistroRelacionesError):
     codigo = "REGISTRO_OCUPADO"
 
 
+class MigracionNoPreparada(RegistroRelacionesError):
+    codigo = "MIGRACION_NO_PREPARADA"
+
+
 class MigracionNoVerificada(RegistroRelacionesError):
     codigo = "MIGRACION_NO_VERIFICADA"
 
@@ -705,6 +709,45 @@ def _simular(base: Path, empresa_id: str) -> dict[str, object]:
     return resultado
 
 
+def _confirmar_avance(
+    base: Path, empresa_id: str, items: list[tuple[str, str, int, list[dict[str, str]], int]], *,
+    exigidas: list[str] | None, totales: dict[str, int], espera: float,
+) -> str | None:
+    """Una escritura atómica: relaciones + avance de ``items``
+    (``relativa, sha, tamaño, relaciones, cantidad``). Con ``exigidas`` (lista
+    de reportes sin ilegibles) marca ``completa`` si todos quedaron migrados."""
+    def operar(registro: dict[str, object]) -> tuple[bool, str | None]:
+        empresa = registro["empresas"].setdefault(empresa_id, {"relaciones": []})
+        migracion = empresa.setdefault("migracion", {})
+        reportes = migracion.setdefault("reportes", {})
+        ahora = _ahora()
+        cambio = False
+        if migracion.get("estado") is None:
+            migracion.update({"estado": ESTADO_EN_CURSO, "iniciada_en": ahora})
+            cambio = True
+        indice = _Indice(empresa)
+        for relativa, sha, tamano, extraidas, cantidad in items:
+            agregadas, fuentes = _unir(
+                empresa, extraidas, {"tipo": TIPO_MIGRADO, "ruta": relativa, "sha256": sha},
+                ahora=ahora, indice=indice,
+            )
+            totales["relaciones_agregadas"] += agregadas
+            totales["fuentes_agregadas"] += fuentes
+            avance = {"sha256": sha, "tamano": tamano, "relaciones": cantidad}
+            if reportes.get(relativa) != avance:
+                reportes[relativa] = avance
+                cambio = True
+            cambio = cambio or bool(agregadas or fuentes)
+        if exigidas is not None and migracion.get("estado") == ESTADO_EN_CURSO and all(
+            r in reportes for r in exigidas
+        ):
+            migracion.update({"estado": ESTADO_COMPLETA, "completada_en": ahora})
+            cambio = True
+        return cambio, migracion.get("estado")
+
+    return _modificar(base, operar, espera=espera)
+
+
 def _aplicar(base: Path, empresa_id: str, lote: int, espera: float) -> dict[str, object]:
     rutas = _rutas_reportes(base)
     migrados_previos = dict(_migracion(_leer_compartido(base)["empresas"].get(empresa_id)).get("reportes", {}))
@@ -712,39 +755,11 @@ def _aplicar(base: Path, empresa_id: str, lote: int, espera: float) -> dict[str,
     extraidas_unicas: set[str] = set()
     totales = {"relaciones_agregadas": 0, "fuentes_agregadas": 0, "procesados": 0}
     omitidos = 0
-    pendientes: list[tuple[str, str, int, list[dict[str, str]]]] = []
+    pendientes: list[tuple[str, str, int, list[dict[str, str]], int]] = []
 
-    def confirmar(items: list[tuple[str, str, int, list[dict[str, str]]]], *, final: bool) -> str | None:
-        def operar(registro: dict[str, object]) -> tuple[bool, str | None]:
-            empresa = registro["empresas"].setdefault(empresa_id, {"relaciones": []})
-            migracion = empresa.setdefault("migracion", {})
-            reportes = migracion.setdefault("reportes", {})
-            ahora = _ahora()
-            cambio = False
-            if migracion.get("estado") is None:
-                migracion.update({"estado": ESTADO_EN_CURSO, "iniciada_en": ahora})
-                cambio = True
-            indice = _Indice(empresa)
-            for relativa, sha, tamano, extraidas in items:
-                agregadas, fuentes = _unir(
-                    empresa, extraidas, {"tipo": TIPO_MIGRADO, "ruta": relativa, "sha256": sha},
-                    ahora=ahora, indice=indice,
-                )
-                totales["relaciones_agregadas"] += agregadas
-                totales["fuentes_agregadas"] += fuentes
-                avance = {"sha256": sha, "tamano": tamano, "relaciones": len(extraidas)}
-                if reportes.get(relativa) != avance:
-                    reportes[relativa] = avance
-                    cambio = True
-                cambio = cambio or bool(agregadas or fuentes)
-            if final and migracion.get("estado") == ESTADO_EN_CURSO and not ilegibles and all(
-                _relativa(base, r) in reportes for r in rutas
-            ):
-                migracion.update({"estado": ESTADO_COMPLETA, "completada_en": ahora})
-                cambio = True
-            return cambio, migracion.get("estado")
-
-        return _modificar(base, operar, espera=espera)
+    def confirmar(items, *, final: bool) -> str | None:
+        exigidas = [_relativa(base, r) for r in rutas] if final and not ilegibles else None
+        return _confirmar_avance(base, empresa_id, items, exigidas=exigidas, totales=totales, espera=espera)
 
     for ruta in rutas:
         relativa = _relativa(base, ruta)
@@ -763,7 +778,7 @@ def _aplicar(base: Path, empresa_id: str, lote: int, espera: float) -> dict[str,
             continue
         sha, tamano, extraidas = leido
         extraidas_unicas.update(_clave(r) for r in extraidas)
-        pendientes.append((relativa, sha, tamano, extraidas))
+        pendientes.append((relativa, sha, tamano, extraidas, len(extraidas)))
         totales["procesados"] += 1
         if len(pendientes) >= lote:
             confirmar(pendientes, final=False)
@@ -777,12 +792,129 @@ def _aplicar(base: Path, empresa_id: str, lote: int, espera: float) -> dict[str,
     }
 
 
-def verificar_migracion(
+# --------------------------------------------------------------------------
+# Migración en dos fases: lectura sin escritor, escritura breve con escritor
+# --------------------------------------------------------------------------
+# Leer ~1.600 reportes (5,6 GiB en Drive) lleva horas. Los reportes están
+# fuera de la custodia y no cambian: leerlos no necesita el lease. Sólo la
+# escritura del registro (``catalogos_privados``, custodiado) lo necesita, y
+# es una única escritura atómica de segundos. Así PULL sigue operando durante
+# la lectura y el lease se toma sólo para escribir.
+
+def ruta_plan_migracion(raiz: str | Path, empresa_id: str = EMPRESA_LEGADA) -> Path:
+    """Avance de la lectura, local y fuera de Drive (nunca se custodia)."""
+    huella = hashlib.sha256(str(Path(raiz).resolve()).encode("utf-8")).hexdigest()[:16]
+    return _directorio_local() / "registro_relaciones" / f"{huella}.{empresa_id}.plan_migracion.json"
+
+
+def _guardar_plan(ruta: Path, plan: Mapping[str, object]) -> None:
+    """Escritura atómica local (nunca bajo la raíz Atlas ni su custodia)."""
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    temporal = ruta.with_name(f"{ruta.name}.{os.getpid()}.tmp")
+    temporal.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporal, ruta)
+
+
+def _leer_plan(ruta: Path, empresa_id: str) -> dict[str, object]:
+    vacio: dict[str, object] = {"version": 1, "empresa": empresa_id, "reportes": {}, "relaciones": []}
+    try:
+        plan = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return vacio
+    if (not isinstance(plan, dict) or plan.get("version") != 1 or plan.get("empresa") != empresa_id
+            or not isinstance(plan.get("reportes"), dict) or not isinstance(plan.get("relaciones"), list)):
+        return vacio
+    return plan
+
+
+def preparar_migracion(
+    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, lote: int = LOTE_MIGRACION,
+) -> dict[str, object]:
+    """Fase 1, SIN escritor y sin escribir la raíz: lee los reportes aún no
+    migrados y guarda el avance cada ``lote`` en un plan local (fuera de
+    Drive). Un corte pierde a lo sumo el lote en curso; repetir reanuda.
+    Cada relación queda con el primer reporte (en orden) que la trae: la
+    misma fuente migrada que dejaría ``migrar_reportes_historicos``."""
+    base = Path(raiz)
+    _leer_compartido(base)  # registro ilegible/incompatible: se detiene antes de leer reportes
+    ruta_plan = ruta_plan_migracion(base, empresa_id)
+    with _cerrojo(ruta_cerrojo(base, "migracion"), 0):
+        migrados = _migracion(_leer_compartido(base)["empresas"].get(empresa_id)).get("reportes", {})
+        plan = _leer_plan(ruta_plan, empresa_id)
+        conocidas = {_clave(e["relacion"]) for e in plan["relaciones"]}
+        rutas = _rutas_reportes(base)
+        ilegibles: list[str] = []
+        leidos = omitidos = 0
+        for ruta in rutas:
+            relativa = _relativa(base, ruta)
+            try:
+                tamano_actual = ruta.stat().st_size
+            except OSError:
+                ilegibles.append(relativa)
+                continue
+            previo = migrados.get(relativa) or plan["reportes"].get(relativa)
+            if isinstance(previo, dict) and previo.get("tamano") == tamano_actual:
+                omitidos += 1
+                continue
+            leido = _leer_reporte(ruta)
+            if leido is None:
+                ilegibles.append(relativa)
+                continue
+            sha, tamano, extraidas = leido
+            plan["reportes"][relativa] = {"sha256": sha, "tamano": tamano, "relaciones": len(extraidas)}
+            for relacion in extraidas:
+                clave = _clave(relacion)
+                if clave not in conocidas:
+                    conocidas.add(clave)
+                    plan["relaciones"].append({"relacion": relacion, "ruta": relativa, "sha256": sha})
+            leidos += 1
+            if leidos % max(int(lote), 1) == 0:
+                _guardar_plan(ruta_plan, plan)
+        plan["rutas"] = [_relativa(base, r) for r in rutas]
+        plan["ilegibles"] = ilegibles
+        _guardar_plan(ruta_plan, plan)
+    return {
+        "modo": "preparar", "reportes": len(rutas) - len(ilegibles), "leidos": leidos,
+        "omitidos_ya_migrados": omitidos, "pendientes_de_aplicar": len(plan["reportes"]),
+        "relaciones_extraidas": len(plan["relaciones"]), "ilegibles": ilegibles, "plan": str(ruta_plan),
+    }
+
+
+def aplicar_migracion_preparada(
     raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, object]:
-    """Relee TODOS los reportes actuales (sólo lectura) y exige que cada
-    relación esté en el registro. Si la migración está completa y todo
-    calza, la marca ``verificada``; si no, no escribe nada."""
+    """Fase 2, CON escritor: una sola escritura atómica del registro base con
+    lo leído en la fase 1. No abre reportes. Marca ``completa`` sólo si no
+    hubo ilegibles y todos los reportes listados quedaron migrados. Después
+    retira el plan local (repetir no agrega nada)."""
+    base = Path(raiz)
+    ruta_plan = ruta_plan_migracion(base, empresa_id)
+    with _cerrojo(ruta_cerrojo(base, "migracion"), 0):
+        plan = _leer_plan(ruta_plan, empresa_id)
+        if "rutas" not in plan:
+            raise MigracionNoPreparada(f"sin plan completo en {ruta_plan}: ejecutar la preparación")
+        por_reporte: dict[str, list[dict[str, str]]] = {}
+        for entrada in plan["relaciones"]:
+            por_reporte.setdefault(entrada["ruta"], []).append(entrada["relacion"])
+        items = [
+            (relativa, avance["sha256"], avance["tamano"], por_reporte.get(relativa, []), avance["relaciones"])
+            for relativa, avance in sorted(plan["reportes"].items())
+        ]
+        totales = {"relaciones_agregadas": 0, "fuentes_agregadas": 0}
+        exigidas = None if plan.get("ilegibles") else list(plan["rutas"])
+        estado = _confirmar_avance(base, empresa_id, items, exigidas=exigidas, totales=totales, espera=espera)
+        ruta_plan.unlink(missing_ok=True)
+    return {
+        "modo": "aplicar", "reportes_aplicados": len(items), "ilegibles": plan.get("ilegibles", []),
+        **totales, "relaciones_registradas": len(leer_relaciones(base, empresa_id=empresa_id)), "estado": estado,
+    }
+
+
+def leer_verificacion(
+    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA,
+) -> tuple[dict[str, object], set[str]]:
+    """Fase de lectura de la verificación, SIN escritor ni escritura: relee
+    todos los reportes. Devuelve el resultado y las claves exigidas."""
     base = Path(raiz)
     empresa = _leer_compartido(base)["empresas"].get(empresa_id)
     migracion = _migracion(empresa)
@@ -819,20 +951,50 @@ def verificar_migracion(
         "relaciones_ausentes": len(ausentes), "ejemplos_ausentes": sorted(ausentes)[:10],
         "ilegibles": ilegibles, "cambiados": cambiados, "no_migrados": no_migrados,
     }
-    if ok and estado_previo == ESTADO_COMPLETA:
-        def operar(registro: dict[str, object]) -> tuple[bool, str]:
-            actual = _migracion(registro["empresas"].get(empresa_id))
-            if actual.get("estado") != ESTADO_COMPLETA:
-                return False, str(actual.get("estado"))
-            actual.update({"estado": ESTADO_VERIFICADA, "verificada_en": _ahora(), "verificacion": {
-                "reportes": resultado["reportes_leidos"], "relaciones_extraidas": len(extraidas_unicas),
-                "relaciones_registradas": len(claves),
-            }})
-            return True, ESTADO_VERIFICADA
-        resultado["estado"] = _modificar(base, operar, espera=espera)
-    else:
-        resultado["estado"] = estado_previo
+    return resultado, extraidas_unicas
+
+
+def marcar_verificada(
+    raiz: str | Path, resultado: dict[str, object], exigidas: set[str], *,
+    empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S,
+) -> dict[str, object]:
+    """Fase de escritura de la verificación (CON escritor; no abre reportes).
+    Bajo cerrojo vuelve a exigir, sobre el registro vigente de ESTE momento
+    (p. ej. tras la alineación de la custodia), estado ``completa`` y todas
+    las claves leídas; si algo no calza, no escribe."""
+    resultado = dict(resultado)
+    if not (resultado["ok"] and resultado["estado_previo"] == ESTADO_COMPLETA):
+        resultado["estado"] = resultado["estado_previo"]
+        return resultado
+    base = Path(raiz)
+
+    def operar(registro: dict[str, object]) -> tuple[bool, str]:
+        actual = _migracion(registro["empresas"].get(empresa_id))
+        if actual.get("estado") != ESTADO_COMPLETA:
+            return False, str(actual.get("estado"))
+        claves = set(_Indice(_leer_fresco(base)["empresas"].get(empresa_id) or {}).por_clave)
+        faltan = exigidas - claves
+        if faltan:
+            resultado.update({"ok": False, "relaciones_ausentes": len(faltan), "ejemplos_ausentes": sorted(faltan)[:10]})
+            return False, ESTADO_COMPLETA
+        actual.update({"estado": ESTADO_VERIFICADA, "verificada_en": _ahora(), "verificacion": {
+            "reportes": resultado["reportes_leidos"], "relaciones_extraidas": len(exigidas),
+            "relaciones_registradas": len(claves),
+        }})
+        return True, ESTADO_VERIFICADA
+
+    resultado["estado"] = _modificar(base, operar, espera=espera)
     return resultado
+
+
+def verificar_migracion(
+    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S,
+) -> dict[str, object]:
+    """Relee TODOS los reportes actuales (sólo lectura) y exige que cada
+    relación esté en el registro. Si la migración está completa y todo
+    calza, la marca ``verificada``; si no, no escribe nada."""
+    resultado, exigidas = leer_verificacion(raiz, empresa_id=empresa_id)
+    return marcar_verificada(raiz, resultado, exigidas, empresa_id=empresa_id, espera=espera)
 
 
 def _cambiar_activacion(raiz: str | Path, empresa_id: str, activo: bool, espera: float) -> dict[str, object]:

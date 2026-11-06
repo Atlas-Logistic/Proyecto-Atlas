@@ -554,7 +554,17 @@ def test_cli_escribe_solo_dentro_del_turno_del_escritor(tmp_path, monkeypatch):
         return original(ruta, contenido)
 
     monkeypatch.setattr(registro, "escribir_json_atomico", vigilada)
+    lectura_original = registro._leer_reporte
+    lecturas_en_turno = []
+
+    def leer_vigilado(ruta):
+        lecturas_en_turno.append(escritor.vigente)
+        return lectura_original(ruta)
+
+    monkeypatch.setattr(registro, "_leer_reporte", leer_vigilado)
     for accion in ("--aplicar", "--verificar", "--activar", "--desactivar"):
         assert cli.main(["--raiz", str(raiz), accion], fabrica_escritor=lambda _r: escritor) == 0
     assert escritor.eventos.count("adquirir") == 4 and escritor.eventos[-1] == "cerrar"
     assert registro.estado_registro(raiz)["estado_migracion"] == registro.ESTADO_VERIFICADA
+    # Los reportes (lectura larga) se leen SIEMPRE fuera del turno: PULL no espera la lectura.
+    assert lecturas_en_turno and not any(lecturas_en_turno)

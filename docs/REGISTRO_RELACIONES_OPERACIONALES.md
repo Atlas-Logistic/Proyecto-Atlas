@@ -86,11 +86,14 @@ migración, su verificación y su activación son por empresa.
 ## Procedimiento de migración real (no ejecutado)
 
 Requisitos previos: código desplegado en el equipo que hará la migración; ese
-equipo es el **único escritor** (PULL/mantenimiento del otro equipo
-detenidos o sin escribir la raíz durante la ventana); PULL recuperado y
-estable; respaldo verificable de `catalogos_privados/`.
+equipo es el **único escritor** (hoy CASA; OFICINA apagada); PULL recuperado
+y estable; respaldo verificable de `catalogos_privados/`. **No hace falta
+detener PULL**: la migración y la verificación leen los reportes sin tomar
+el escritor y lo toman sólo para una escritura atómica de segundos (PULL, si
+coincide, responde `ESCRITOR_OCUPADO` en ese ciclo y sigue en el próximo).
 
-1. Estado y simulación, sin escritura:
+1. Estado y simulación, sin escritura (≈3 min en CASA, 06/11: 1.607
+   reportes, 836 relaciones, 0 ilegibles):
 
    ```powershell
    python migrar_relaciones_operacionales.py --raiz <Atlas> --estado
@@ -101,25 +104,32 @@ estable; respaldo verificable de `catalogos_privados/`.
    `registro.legible`. Para comparar con otra auditoría, usar `fuentes[].ruta`
    (relativa, separador `/`) y `sha256`, nunca rutas locales absolutas.
 
-2. Aplicar por lotes (reanudable; si se corta, repetir el mismo comando):
+2. Aplicar (dos fases en un comando; reanudable):
 
    ```powershell
    python migrar_relaciones_operacionales.py --raiz <Atlas> --aplicar --lote 50
    ```
 
-   Repetir hasta que `estado` sea `completa`, `ilegibles` esté vacío y una
-   nueva ejecución informe `procesados = 0`. Código de salida 2 =
-   bloqueado (registro ilegible/incompatible, otra migración en curso, sin
-   escritor configurado o `ESCRITOR_OCUPADO`). Mientras dura, la migración
-   retiene el lease: PULL espera (`ESCRITOR_OCUPADO`) hasta que termine, así
-   que se ejecuta en una ventana acordada.
+   Fase 1 **sin escritor**: lee los reportes aún no migrados y guarda el
+   avance cada `--lote` en un plan local
+   (`%LOCALAPPDATA%\Atlas\cache\registro_relaciones\*.plan_migracion.json`,
+   nunca en Drive ni en la custodia). Fase 2 **con escritor**: una sola
+   escritura atómica del registro base (no abre reportes) y borra el plan.
+   Si el escritor está ocupado sale con código 2 y conserva el plan:
+   repetir el comando no relee lo ya leído. Repetir hasta que `estado` sea
+   `completa` e `ilegibles` esté vacío. Los reportes que aparecen durante
+   la lectura no son exigidos: llegan por el dataset y la verificación los
+   admite como `no_migrados`.
 
-3. Verificar (sólo lectura de reportes; marca `verificada` si todo calza):
+3. Verificar (lectura sin escritor; marca con escritor):
 
    ```powershell
    python migrar_relaciones_operacionales.py --raiz <Atlas> --verificar
    ```
 
+   Relee todos los reportes sin escritor; si todo calza, toma el escritor y
+   vuelve a exigir, sobre el registro ya alineado con Cloud, estado
+   `completa` y todas las relaciones leídas antes de marcar `verificada`.
    Exige `ok = true`, `relaciones_ausentes = 0` e `ilegibles = []`. Código
    de salida 1 = no verificada. `no_migrados` lista reportes posteriores cuyas
    relaciones ya llegaron por el dataset; `cambiados`, reportes cuya huella
@@ -132,7 +142,20 @@ estable; respaldo verificable de `catalogos_privados/`.
    ```
 
    Reversión: `--desactivar` (el consumidor vuelve a los históricos al
-   instante). Los reportes históricos no se borran, mueven ni depuran.
+   instante). **La reversión sólo es completa donde existen los reportes
+   históricos** (Drive de CASA/OFICINA): un equipo reinstalado sin
+   `reportes/` obtiene todo del registro mientras está activo, y nada del
+   lector histórico tras desactivar. Por eso los reportes históricos no se
+   borran, mueven ni depuran mientras la reversión deba ser posible.
+
+Validación aislada (Worker real `b39e3bd` con D1 SQLite y R2 en memoria,
+lease, custodia y CLI reales; `C:/Atlas/pruebas/cierre-diario-20261106`):
+con el flujo anterior los 3 ciclos de PULL durante la lectura recibieron
+`ESCRITOR_OCUPADO`; con dos fases los 3 adquirieron y el escritor se tomó
+0,13 s. Un equipo reinstalado sin `reportes/` recuperó las 2.408 relaciones
+(2.401 históricas + dataset + diario) idénticas a CASA, con migración
+`verificada` y `activo`; la consolidación propagó el borrado de los
+segmentos y las relaciones no cambiaron.
 
 Una vez completa la migración, la regeneración normal incorpora relaciones
 desde el dataset operacional ya validado, sin tocar reportes históricos;

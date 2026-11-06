@@ -1,8 +1,10 @@
 """Migración explícita (primero simulación) del registro operacional Atlas.
 
-Sin bandera: simula (no escribe). ``--aplicar`` migra por lotes y es
-reanudable; ``--verificar`` relee los reportes y marca la migración
-verificada sólo si todo calza; ``--activar`` / ``--desactivar`` deciden si el
+Sin bandera: simula (no escribe). ``--aplicar`` lee los reportes SIN
+escritor (avance en un plan local fuera de Drive, reanudable) y luego toma el
+escritor sólo para una escritura atómica del registro; ``--verificar`` relee
+los reportes SIN escritor y toma el escritor sólo para marcar la migración
+verificada si todo calza (rechequeado sobre el registro alineado); ``--activar`` / ``--desactivar`` deciden si el
 consumidor usa el registro o vuelve al lector histórico; ``--consolidar``
 incorpora al registro base los segmentos del diario de días anteriores y los
 retira; ``--estado`` informa (incluye el diario).
@@ -22,8 +24,9 @@ import sys
 from pathlib import Path
 
 from atlas_core.registro_relaciones_operacionales import (
-    LOTE_MIGRACION, RegistroRelacionesError, activar_registro, consolidar_diario, desactivar_registro,
-    estado_registro, migrar_reportes_historicos, verificar_migracion,
+    LOTE_MIGRACION, RegistroRelacionesError, activar_registro, aplicar_migracion_preparada, consolidar_diario,
+    desactivar_registro, estado_registro, leer_verificacion, marcar_verificada, migrar_reportes_historicos,
+    preparar_migracion,
 )
 
 
@@ -75,10 +78,16 @@ def main(argv: list[str] | None = None, *, fabrica_escritor=_escritor) -> int:
 
     try:
         if a.aplicar:
-            resultado = escribiendo(lambda: migrar_reportes_historicos(
-                a.raiz, empresa_id=a.empresa, aplicar=True, lote=a.lote))
+            # Lectura larga sin lease (PULL sigue operando); escritura breve con lease.
+            preparacion = preparar_migracion(a.raiz, empresa_id=a.empresa, lote=a.lote)
+            resultado = {"preparacion": preparacion, **escribiendo(
+                lambda: aplicar_migracion_preparada(a.raiz, empresa_id=a.empresa))}
         elif a.verificar:
-            resultado = escribiendo(lambda: verificar_migracion(a.raiz, empresa_id=a.empresa))
+            lectura, exigidas = leer_verificacion(a.raiz, empresa_id=a.empresa)
+            if lectura["ok"] and lectura["estado_previo"] == "completa":
+                resultado = escribiendo(lambda: marcar_verificada(a.raiz, lectura, exigidas, empresa_id=a.empresa))
+            else:  # nada que marcar: no se toma el escritor
+                resultado = {**lectura, "estado": lectura["estado_previo"]}
             codigo = 0 if resultado["ok"] else 1
         elif a.activar:
             resultado = escribiendo(lambda: activar_registro(a.raiz, empresa_id=a.empresa))

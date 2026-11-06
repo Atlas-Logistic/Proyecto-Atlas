@@ -42,8 +42,15 @@ relaciones (y la migración del registro). La custodia Cloud
   histórico) se captura en el registro de relaciones con una sola fuente por
   relación, y el consumidor la suma a la de los reportes históricos. Se
   conservan las `conservar` publicaciones más recientes (por defecto 3) y la
-  vigente; las demás se borran sólo si su evidencia quedó capturada o
-  preservada. Si la captura falla, el reporte se copia como snapshot
+  vigente; las demás se borran sólo si su evidencia quedó preservada como
+  snapshot, o si fue capturada **por un proceso anterior** (su segmento ya
+  se confirmó en Cloud al cerrar aquel turno) **y** sus relaciones están en
+  el registro tal como quedó tras la alineación. Si faltan (p. ej. el turno
+  que la capturó cayó y otro equipo relevó: el segmento fue a cuarentena),
+  se vuelve a capturar en el turno vigente y la carpeta se conserva hasta
+  el próximo proceso. La poda sólo borra dentro de `reportes/vigentes`:
+  auditoría (`operacion/actual`), respaldos (`respaldos/`), confirmaciones y
+  originales (`operacion/mobile/envios`) nunca están ahí. Si la captura falla, el reporte se copia como snapshot
   permanente bajo `reportes/`. Si el registro deja de ser legible, los
   productores vuelven solos a `snapshots`.
 

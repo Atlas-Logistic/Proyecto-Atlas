@@ -46,6 +46,12 @@ CONSERVAR_MINIMO = 2
 
 log = logging.getLogger(__name__)
 
+# Publicaciones capturadas por ESTE proceso: su segmento del diario puede no
+# estar confirmado aún en Cloud (se confirma al cerrar el turno). Si el turno
+# cae y otro equipo releva, ese segmento va a cuarentena local; por eso nunca
+# se podan en el mismo proceso que las capturó.
+_CAPTURADAS_EN_PROCESO: set[str] = set()
+
 
 def raiz_vigentes(raiz: str | Path) -> Path:
     return Path(raiz) / "reportes" / CARPETA_VIGENTES
@@ -132,6 +138,7 @@ def tras_publicar_reporte_vigente(raiz: str | Path, reporte: str | Path) -> dict
         marcador = {"publicado_en": marcador.get("publicado_en") or _ahora()}
         try:
             marcador.update({"capturado": True, **capturar_reporte_publicado(raiz, reporte / "viajes.csv")})
+            _CAPTURADAS_EN_PROCESO.add(_identidad_carpeta(reporte))
         except (RegistroRelacionesError, OSError, ValueError) as error:
             # Sin captura, la evidencia queda donde el lector histórico la lee.
             marcador.update({"capturado": False, "motivo": getattr(error, "codigo", type(error).__name__)})
@@ -143,9 +150,41 @@ def tras_publicar_reporte_vigente(raiz: str | Path, reporte: str | Path) -> dict
     return {"aplica": True, **marcador, "poda": podar_vigentes(raiz)}
 
 
+def _identidad_carpeta(carpeta: Path) -> str:
+    try:
+        return str(carpeta.resolve())
+    except OSError:
+        return str(carpeta)
+
+
+def _evidencia_en_registro(raiz: Path, carpeta: Path) -> bool:
+    """La evidencia de esa publicación está en el registro TAL COMO ESTÁ AHORA
+    (tras la alineación con Cloud). Si falta (p. ej. su segmento quedó en
+    cuarentena tras un relevo), se vuelve a capturar en este turno y se
+    conserva la carpeta: nunca se borra evidencia que sólo existe en ella."""
+    from atlas_core import registro_relaciones_operacionales as registro
+    leido = registro._leer_reporte(carpeta / "viajes.csv")
+    if leido is None:
+        return False
+    try:
+        presentes = {registro._clave(r) for r in registro.leer_relaciones(raiz)}
+    except registro.RegistroRelacionesError:
+        return False
+    if all(registro._clave(r) in presentes for r in leido[2]):
+        return True
+    try:
+        registro.capturar_reporte_publicado(raiz, carpeta / "viajes.csv")
+        _CAPTURADAS_EN_PROCESO.add(_identidad_carpeta(carpeta))
+    except (registro.RegistroRelacionesError, OSError, ValueError):
+        pass
+    return False
+
+
 def podar_vigentes(raiz: str | Path, *, conservar: int | None = None) -> dict[str, object]:
     """Borra publicaciones rotativas antiguas, nunca la vigente, nunca una sin
-    evidencia capturada/preservada, nunca nada fuera de ``reportes/vigentes``."""
+    evidencia capturada/preservada, nunca nada fuera de ``reportes/vigentes``.
+    Una capturada (no preservada como snapshot) sólo se borra si NO la capturó
+    este proceso y su evidencia está en el registro vigente."""
     raiz = Path(raiz)
     conservar = max(int(conservar or leer_configuracion(raiz)["conservar"]), CONSERVAR_MINIMO)
     directorio = raiz_vigentes(raiz)
@@ -164,6 +203,10 @@ def podar_vigentes(raiz: str | Path, *, conservar: int | None = None) -> dict[st
             conservadas.append(nombre)
         elif not (marcador.get("capturado") or marcador.get("preservado_en")):
             retenidas.append(nombre)  # su evidencia sólo existe aquí: nunca se borra
+        elif not marcador.get("preservado_en") and (
+            _identidad_carpeta(carpeta) in _CAPTURADAS_EN_PROCESO or not _evidencia_en_registro(raiz, carpeta)
+        ):
+            retenidas.append(nombre)  # captura aún sin confirmar en Cloud, o ausente del registro
         else:
             try:
                 shutil.rmtree(carpeta)

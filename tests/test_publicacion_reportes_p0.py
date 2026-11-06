@@ -16,6 +16,14 @@ from atlas_core.revalidacion_documental import _leer_filas
 from tests.test_decision_alcance_focal_p0 import preparar
 
 
+@pytest.fixture(autouse=True)
+def _proceso_nuevo():
+    """Cada prueba empieza como un proceso nuevo (sin capturas propias)."""
+    pub._CAPTURADAS_EN_PROCESO.clear()
+    yield
+    pub._CAPTURADAS_EN_PROCESO.clear()
+
+
 def _snapshots(raiz):
     """Snapshots permanentes: lo que el lector histórico recorre y nunca se borra."""
     return sorted(p.parent.name for p in (raiz / "reportes").glob("*/viajes.csv"))
@@ -113,6 +121,12 @@ def test_medicion_snapshots_antes_y_despues_con_mobile_y_revalidacion(tmp_path, 
               f"rotativos_vivos={len(_rotativos(raiz_b))} (decision + {ingresos} ingresos Mobile + 2 revalidaciones globales)")
     assert len(antes) >= ingresos + 1  # una carpeta completa por publicación
     assert despues == []               # ninguna permanente nueva
+    # Todo ocurrió en un mismo proceso: nada capturado aquí se poda todavía
+    # (su segmento no está confirmado en Cloud). El siguiente proceso (próximo
+    # ciclo de PULL) poda hasta conservar 2.
+    assert pub._CAPTURADAS_EN_PROCESO
+    pub._CAPTURADAS_EN_PROCESO.clear()
+    pub.podar_vigentes(raiz_b)
     assert len(_rotativos(raiz_b)) <= 2
     assert hist_despues == hist_antes  # nada previo tocado
     # Modo por defecto sin migración: catalogos_privados (custodiado) sin registro.
@@ -187,7 +201,11 @@ def test_poda_conserva_vigente_recientes_y_lo_no_capturado(tmp_path):
     pub.configurar(raiz, modo=pub.MODO_ROTATIVO, conservar=2)
     for i in range(5):
         _publicar(raiz, f"reporte_mobile_{i}", [_rel(str(i))])
-    assert _rotativos(raiz) == ["reporte_mobile_3", "reporte_mobile_4"]
+    # Mismo proceso: capturas aún sin confirmar en Cloud, nada se poda.
+    assert len(_rotativos(raiz)) == 5
+    pub._CAPTURADAS_EN_PROCESO.clear()  # próximo proceso (ciclo de PULL siguiente)
+    _publicar(raiz, "reporte_mobile_5", [_rel("5")])
+    assert _rotativos(raiz) == ["reporte_mobile_4", "reporte_mobile_5"]
 
     otra = tmp_path / "Otra"
     vigentes = pub.raiz_vigentes(otra)
@@ -200,6 +218,14 @@ def test_poda_conserva_vigente_recientes_y_lo_no_capturado(tmp_path):
     (otra / "operacion" / "actual").mkdir(parents=True)
     (otra / "operacion" / "actual" / "estado_operacion.json").write_text(
         json.dumps({"schema_version": 1, "reporte_vigente": "reportes/vigentes/a"}), encoding="utf-8")
+    # "b" dice capturado, pero su evidencia NO está en el registro de esta
+    # raíz (p. ej. su segmento quedó en cuarentena tras un relevo): se vuelve
+    # a capturar y se conserva.
+    poda = pub.podar_vigentes(otra, conservar=2)
+    assert poda["borradas"] == [] and sorted(poda["retenidas"]) == ["b", "sin_captura"]
+    assert {"numero_guia": "b"}.items() <= registro.leer_relaciones(otra)[0].items()
+    # Proceso siguiente: la evidencia ya está en el registro -> se poda.
+    pub._CAPTURADAS_EN_PROCESO.clear()
     poda = pub.podar_vigentes(otra, conservar=2)
     assert poda["borradas"] == ["b"]
     assert sorted(poda["conservadas"]) == ["a", "c", "d"] and poda["retenidas"] == ["sin_captura"]
