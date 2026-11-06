@@ -919,6 +919,20 @@ def _intentar_consulta_relacional(
     return None
 
 
+# Explicit transport lookup, independent of whether a guide was read.
+_BUSQUEDA_TRANSPORTE = re.compile(
+    r"^(?:(?:BUSCA(?:R)?|BUSCAME|MUESTRA(?:ME)?|MOSTRAR|LOCALIZA(?:R)?|VER|CONSULTA(?:R)?)\s+)?"
+    r"(?:EL\s+)?(?:VIAJE(?:\s+(?:DEL?\s+)?TRANSPORTE)?|(?:NUMERO\s+DE\s+)?TRANSPORTE)\s+"
+    r"(?:(?:NUMERO|N[O\u00b0])\s*(?:DE\s*)?)?(?P<numero>\d{6,12})"
+    r"(?:\s+(?:DEL?\s+|FECHA\s+)?(?P<fecha>\d{1,2}[/-]\d{1,2}[/-]\d{4}))?"
+    r"(?:\s+(?:PATENTE\s+)?(?P<patente>[A-Z]{2,4}\d{2,4}))?\s*[?.!]*$"
+)
+
+
+def busqueda_transporte_explicita(texto: str):
+    return _BUSQUEDA_TRANSPORTE.fullmatch(normalizar_texto_atlas(texto))
+
+
 def interpretar_consulta_determinista(
     texto: str, *, catalogos: CatalogosConsulta, contexto_previo: ConsultaAtlas | None = None,
 ) -> tuple[ConsultaAtlas | None, tuple[str, ...]]:
@@ -937,6 +951,15 @@ def interpretar_consulta_determinista(
     ni reinterpreta un texto con contenido real."""
     normalizado = normalizar_texto_atlas(texto)
     avisos: list[str] = []
+
+    busqueda = busqueda_transporte_explicita(texto)
+    if busqueda:
+        filtros = {"numero_transporte": busqueda.group("numero")}
+        if busqueda.group("fecha"):
+            filtros.update(_filtros_periodo(busqueda.group("fecha")))
+        if busqueda.group("patente"):
+            filtros["patente"] = busqueda.group("patente")
+        return ConsultaAtlas(metrica=METRICA_LISTAR_VIAJES, filtros=filtros), ()
 
     if contexto_previo is not None and _es_seguimiento_listar_bare(normalizado):
         return ConsultaAtlas(
