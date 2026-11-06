@@ -3,7 +3,9 @@
 Sin bandera: simula (no escribe). ``--aplicar`` migra por lotes y es
 reanudable; ``--verificar`` relee los reportes y marca la migración
 verificada sólo si todo calza; ``--activar`` / ``--desactivar`` deciden si el
-consumidor usa el registro o vuelve al lector histórico; ``--estado`` informa.
+consumidor usa el registro o vuelve al lector histórico; ``--consolidar``
+incorpora al registro base los segmentos del diario de días anteriores y los
+retira; ``--estado`` informa (incluye el diario).
 
 Las acciones que escriben el registro (``catalogos_privados``, custodiado por
 Cloud) se ejecutan con el MISMO escritor que PULL y Desktop (lease Cloud con
@@ -20,8 +22,8 @@ import sys
 from pathlib import Path
 
 from atlas_core.registro_relaciones_operacionales import (
-    LOTE_MIGRACION, RegistroRelacionesError, activar_registro, desactivar_registro, estado_registro,
-    migrar_reportes_historicos, verificar_migracion,
+    LOTE_MIGRACION, RegistroRelacionesError, activar_registro, consolidar_diario, desactivar_registro,
+    estado_registro, migrar_reportes_historicos, verificar_migracion,
 )
 
 
@@ -59,7 +61,10 @@ def main(argv: list[str] | None = None, *, fabrica_escritor=_escritor) -> int:
     accion.add_argument("--verificar", action="store_true", help="Relee reportes; no activa.")
     accion.add_argument("--activar", action="store_true", help="Sólo con migración verificada.")
     accion.add_argument("--desactivar", action="store_true", help="El consumidor vuelve a los históricos.")
+    accion.add_argument("--consolidar", action="store_true",
+                        help="Incorpora al registro base los segmentos del diario anteriores a --hasta.")
     accion.add_argument("--estado", action="store_true")
+    p.add_argument("--hasta", default=None, help="AAAAMMDD exclusivo para --consolidar (defecto: hoy UTC).")
     p.add_argument("--lote", type=int, default=LOTE_MIGRACION)
     p.add_argument("--sin-escritor", action="store_true", help="Sólo raíces de prueba: escribe sin lease ni custodia.")
     a = p.parse_args(argv)
@@ -79,6 +84,8 @@ def main(argv: list[str] | None = None, *, fabrica_escritor=_escritor) -> int:
             resultado = escribiendo(lambda: activar_registro(a.raiz, empresa_id=a.empresa))
         elif a.desactivar:
             resultado = escribiendo(lambda: desactivar_registro(a.raiz, empresa_id=a.empresa))
+        elif a.consolidar:
+            resultado = escribiendo(lambda: consolidar_diario(a.raiz, hasta=a.hasta))
         elif a.estado:
             resultado = estado_registro(a.raiz, empresa_id=a.empresa)
         else:

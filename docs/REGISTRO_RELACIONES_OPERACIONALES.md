@@ -27,9 +27,33 @@ migración, su verificación y su activación son por empresa.
   dataset una vez que la migración de la empresa está `completa` o
   `verificada`; antes informa `registro_relaciones.omitido =
   MIGRACION_NO_COMPLETA` y no crea ni toca el archivo.
-- **Custodia Cloud.** `catalogos_privados/` está custodiado por PULL: cada
-  cambio del registro se sube completo a Cloud al cerrar el turno, y una
-  escritura fuera de turno se revierte en la siguiente alineación. Por eso
+- **Diario incremental.** El ciclo normal (dataset tras la migración y
+  captura de reportes publicados en modo rotativo) nunca reescribe el
+  registro base: agrega sólo la unión nueva al segmento del día
+  `catalogos_privados/registro_relaciones_diario/<AAAAMMDD>.json`
+  (escritura atómica). El registro vigente es siempre *base + segmentos
+  reproducidos en orden de nombre con la misma unión idempotente*; todos
+  los lectores (consumidor, estado, verificación, migración) usan esa
+  vista. Reproducir un segmento ya incorporado no cambia nada, por eso un
+  corte a mitad de la consolidación o una copia en conflicto de Drive
+  (`20261106 (1).json`) se reproducen sin duplicar ni perder. Un segmento
+  ilegible o de versión desconocida vuelve ilegible el registro completo
+  (mismo tratamiento que el base: el consumidor vuelve a los históricos y
+  nada se sobrescribe ni se borra). Los segmentos están en una subcarpeta:
+  no cambian la firma de catálogos de la batería compartida (igual que en
+  modo snapshots).
+- **Consolidación controlada.** `--consolidar` (con el escritor de PULL)
+  incorpora al base los segmentos de días anteriores a `--hasta` (por
+  defecto hoy UTC, el segmento en uso no se toca) y recién después los
+  borra; nunca borra uno que cambió tras leerlo. Cada consolidación sube el
+  base completo una vez: hacerla mensual o cuando `--estado` muestre más de
+  ~30 segmentos.
+- **Custodia Cloud.** `catalogos_privados/` está custodiado por PULL: al
+  cerrar el turno se sube cada archivo cambiado (R2 direccionado por
+  huella), y una escritura fuera de turno se revierte en la siguiente
+  alineación. Con el diario, un turno normal sube sólo el segmento del día
+  (KB), no el registro completo; el otro equipo recupera los segmentos
+  confirmados en su alineación aunque Drive esté atrasado. Por eso
   `migrar_relaciones_operacionales.py` ejecuta `--aplicar`, `--verificar`,
   `--activar` y `--desactivar` con el mismo escritor que PULL y Desktop
   (lease Cloud o equipo único); sin escritor disponible responde código 2 sin

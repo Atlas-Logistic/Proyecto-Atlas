@@ -57,19 +57,34 @@ Medido con el audit hook real de `estado_confirmado` sobre el mismo escenario
 - `snapshots` (por defecto): las rutas rastreadas son **idénticas** a las de
   CASA `8069ea6` (19 rutas); no se crea el registro. Desplegar en este modo
   no cambia lo que la custodia sube.
-- `rotativo`: única ruta rastreada adicional,
-  `catalogos_privados/registro_relaciones_operacionales.json`; ningún
-  `reportes/` entra en la custodia. Cada cambio del registro se sube completo
-  (~700 bytes por relación): ~22-37 MB/día al primer mes y ~270-445 MB/día al
-  año con 30-50 relaciones nuevas diarias y ~35 publicaciones. La retención
-  de versiones antiguas en R2 depende del Worker, que no está en este
-  repositorio: **no está demostrado que sea segura**. El modo rotativo queda
-  bloqueado hasta que Cloud confirme retención/limpieza o se decida otra
-  ubicación del registro.
+- `rotativo` (antes del diario, `f90a922`): única ruta rastreada adicional,
+  `catalogos_privados/registro_relaciones_operacionales.json`, subida
+  completa (~700 bytes por relación) en cada turno con un cambio: ~22-37
+  MB/día al primer mes y ~270-445 MB/día al año. Bloqueaba el modo
+  rotativo porque R2 conserva cada versión completa.
+- `rotativo` con diario incremental: la captura escribe sólo el segmento
+  del día `catalogos_privados/registro_relaciones_diario/<AAAAMMDD>.json`;
+  el registro base no cambia. Medido con `CustodiaEstado` real (audit
+  hook, R2 simulado por huella) sobre un registro migrado de 2.000
+  relaciones (1,4 MB) y 15 turnos en 3 días con una relación nueva por
+  turno: **monolítico 15 subidas / 21,1 MB; diario 15 subidas / 18,6 KB**
+  (`tests/test_registro_relaciones_diario_p0.py`). Lo subido por turno ya no
+  depende del tamaño del registro sino de lo nuevo del día; cada
+  consolidación (mensual) sube el base completo una vez. Ningún `reportes/`
+  entra en la custodia.
 
-## Activación (no ejecutada; bloqueada por la custodia)
+Volumen real medido (solo lectura de `G:`, 06/11/2026): 1.597 snapshots,
+5,58 GiB; últimos 15 días 361 reportes (~24/día, ~190 MB/día). De esos, 339
+(94 %) son de productores automáticos que el modo rotativo redirige; el
+resto son `reporte_desktop_*` del drop de Desktop (`main.js`, protegido) y
+reportes manuales.
 
-0. Resolver la sección anterior (decisión Cloud/Codex).
+## Activación (no ejecutada)
+
+0. Con el diario, la custodia ya no sube el registro completo por turno.
+   Antes de activar: desplegar el mismo código en CASA y OFICINA (una
+   versión sin diario no vería los segmentos) y confirmar con Cloud/Codex
+   que el crecimiento de R2 por segmento (KB/día) es aceptable.
 1. Desplegar el código (rama sobre el registro incremental), integrado con lo
    instalado y con el trabajo de PULL vigente.
 2. Comprobar `python migrar_relaciones_operacionales.py --raiz <Atlas> --estado`

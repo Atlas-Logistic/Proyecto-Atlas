@@ -199,7 +199,7 @@ def test_confirmacion_fija_solo_identidad_operacional_con_auditoria(con_choferes
     # Catálogos (choferes, vehículos/asignaciones) intactos.
     # El registro de relaciones no es un catálogo (publicación rotativa lo alimenta).
     assert {p.name: _sha(p) for p in con_choferes["cat"].iterdir()
-            if p.name != "registro_relaciones_operacionales.json"} == catalogos_antes
+            if p.name not in ("registro_relaciones_operacionales.json", "registro_relaciones_diario")} == catalogos_antes
 
     entrada = [a for a in _ledger(con_choferes) if a["tipo"] == TIPO_LEDGER_CHOFER_OPERACIONAL]
     assert len(entrada) == 1

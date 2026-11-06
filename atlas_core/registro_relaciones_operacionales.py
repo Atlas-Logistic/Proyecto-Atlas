@@ -21,6 +21,14 @@ Garantías:
   que siempre relee el archivo bajo cerrojo: ninguna escritura concurrente
   del mismo equipo se pierde.
 * Nunca crea ni modifica ``confirmaciones_humanas``.
+* Diario incremental: el ciclo normal (dataset y reportes publicados) no
+  reescribe el registro base; agrega sólo la unión nueva a un segmento
+  diario ``registro_relaciones_diario/<AAAAMMDD>.json``. El registro vigente
+  es SIEMPRE base + segmentos reproducidos en orden con la misma unión
+  idempotente, así que reproducir un segmento ya incorporado (corte a mitad
+  de una consolidación, copia en conflicto de Drive) no cambia nada. La
+  custodia Cloud sube sólo el segmento del día, no el registro completo.
+  La consolidación (``consolidar_diario``) es explícita y controlada.
 """
 from __future__ import annotations
 
@@ -29,6 +37,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -50,6 +59,9 @@ ESTADO_COMPLETA = "completa"
 ESTADO_VERIFICADA = "verificada"
 LOTE_MIGRACION = 50
 ESPERA_ESCRITURA_S = 5.0
+CARPETA_DIARIO = "registro_relaciones_diario"
+TIPO_SEGMENTO = "diario_registro_relaciones"
+_NOMBRE_SEGMENTO = re.compile(r"^(\d{8})\.json$")
 # Datos de observación, no de identidad: no distinguen una fuente de otra.
 # ``ruta`` (reporte histórico migrado) tampoco: cada relación aparece en
 # cientos de snapshots y una fuente por snapshot haría crecer el registro
@@ -87,6 +99,11 @@ class MigracionNoVerificada(RegistroRelacionesError):
 def ruta_registro(raiz: str | Path) -> Path:
     """Archivo privado, portable y respaldable por Drive; no es la única copia."""
     return Path(raiz) / "catalogos_privados" / "registro_relaciones_operacionales.json"
+
+
+def ruta_diario(raiz: str | Path) -> Path:
+    """Segmentos del diario, junto al registro base (misma custodia)."""
+    return Path(raiz) / "catalogos_privados" / CARPETA_DIARIO
 
 
 def _directorio_local() -> Path:
@@ -193,8 +210,8 @@ def _huella_archivo(ruta: Path) -> tuple[int, int] | None:
     return (info.st_mtime_ns, info.st_size)
 
 
-def _leer_fresco(raiz: str | Path) -> dict[str, object]:
-    """Copia propia, mutable, leída del disco ahora."""
+def _leer_base(raiz: str | Path) -> dict[str, object]:
+    """Sólo el registro base (sin diario): copia propia, mutable."""
     ruta = ruta_registro(raiz)
     try:
         texto = ruta.read_text(encoding="utf-8")
@@ -209,16 +226,105 @@ def _leer_fresco(raiz: str | Path) -> dict[str, object]:
     return _validar(valor)
 
 
-# ruta -> (huella stat, registro parseado). Sólo lectura: nunca se muta.
-_MEMORIA: dict[str, tuple[tuple[int, int], dict[str, object]]] = {}
+def _segmentos(raiz: str | Path) -> list[Path]:
+    """Todo ``*.json`` visible del diario, en orden de nombre. También las
+    copias en conflicto de Drive (``20261106 (1).json``): la unión es
+    idempotente, así que reproducirlas nunca duplica ni pierde nada."""
+    directorio = ruta_diario(raiz)
+    try:
+        archivos = [p for p in directorio.iterdir() if p.is_file()]
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise RegistroIlegible(f"no se puede listar el diario: {error}") from error
+    return sorted(
+        (p for p in archivos if p.suffix.lower() == ".json" and not p.name.startswith(".")),
+        key=lambda p: p.name,
+    )
+
+
+def _validar_segmento(valor: object, nombre: str) -> dict[str, object]:
+    if not isinstance(valor, dict):
+        raise RegistroIlegible(f"segmento {nombre}: no es un objeto JSON")
+    version = valor.get("version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise RegistroIlegible(f"segmento {nombre}: sin versión entera")
+    if version != VERSION:
+        raise RegistroIncompatible(f"segmento {nombre}: versión {version}; sólo se entiende {VERSION}")
+    entradas = valor.get("entradas")
+    if valor.get("tipo") != TIPO_SEGMENTO or not isinstance(entradas, list):
+        raise RegistroIlegible(f"segmento {nombre}: estructura inválida")
+    for entrada in entradas:
+        if not (
+            isinstance(entrada, dict) and isinstance(entrada.get("empresa"), str)
+            and isinstance(entrada.get("observado_en"), str)
+            and isinstance(entrada.get("procedencia"), dict)
+            and isinstance(entrada["procedencia"].get("tipo"), str)
+            and isinstance(entrada.get("relaciones"), list)
+            and all(isinstance(r, dict) for r in entrada["relaciones"])
+        ):
+            raise RegistroIlegible(f"segmento {nombre}: entrada estructuralmente inválida")
+    return valor
+
+
+def _segmento_vacio() -> dict[str, object]:
+    return {"version": VERSION, "tipo": TIPO_SEGMENTO, "entradas": []}
+
+
+def _leer_segmento(ruta: Path) -> dict[str, object]:
+    try:
+        texto = ruta.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _segmento_vacio()
+    except (OSError, UnicodeDecodeError) as error:
+        raise RegistroIlegible(f"no se puede leer el segmento {ruta.name}: {error}") from error
+    try:
+        valor = json.loads(texto)
+    except json.JSONDecodeError as error:
+        raise RegistroIlegible(f"segmento {ruta.name}: JSON inválido: {error}") from error
+    return _validar_segmento(valor, ruta.name)
+
+
+def _reproducir(registro: dict[str, object], segmentos: Iterable[Mapping[str, object]]) -> None:
+    """Aplica los segmentos sobre ``registro`` con la MISMA unión del ciclo
+    directo: el resultado equivale a haber escrito cada entrada en el
+    registro base, y reproducir dos veces una entrada no cambia nada."""
+    indices: dict[str, _Indice] = {}
+    for segmento in segmentos:
+        for entrada in segmento["entradas"]:
+            empresa_id = entrada["empresa"]
+            empresa = registro["empresas"].setdefault(empresa_id, {"relaciones": []})
+            indice = indices.get(empresa_id)
+            if indice is None:
+                indice = indices[empresa_id] = _Indice(empresa)
+            _unir(empresa, entrada["relaciones"], entrada["procedencia"], ahora=entrada["observado_en"], indice=indice)
+
+
+def _leer_fresco(raiz: str | Path) -> dict[str, object]:
+    """Registro vigente (base + diario): copia propia, leída del disco ahora."""
+    registro = _leer_base(raiz)
+    _reproducir(registro, [_leer_segmento(p) for p in _segmentos(raiz)])
+    return registro
+
+
+# ruta del base -> (huellas stat de base y segmentos, registro vigente). Nunca se muta.
+_MEMORIA: dict[str, tuple[tuple[object, ...], dict[str, object]]] = {}
+
+
+def _huella_vigente(raiz: str | Path) -> tuple[object, ...]:
+    segmentos = []
+    for ruta in _segmentos(raiz):
+        huella = _huella_archivo(ruta)
+        if huella is not None:
+            segmentos.append((ruta.name, huella))
+    return (_huella_archivo(ruta_registro(raiz)), tuple(segmentos))
 
 
 def _leer_compartido(raiz: str | Path) -> dict[str, object]:
-    """Lectura sin reparsear si el archivo no cambió. NO mutar el resultado."""
-    ruta = ruta_registro(raiz)
-    clave = str(ruta)
-    huella = _huella_archivo(ruta)
-    if huella is None:
+    """Registro vigente sin reparsear si nada cambió. NO mutar el resultado."""
+    clave = str(ruta_registro(raiz))
+    huella = _huella_vigente(raiz)
+    if huella == (None, ()):
         _MEMORIA.pop(clave, None)
         return _vacio()
     previo = _MEMORIA.get(clave)
@@ -230,17 +336,48 @@ def _leer_compartido(raiz: str | Path) -> dict[str, object]:
 
 
 def _modificar(raiz: str | Path, operar: Callable[[dict[str, object]], tuple[bool, _T]], *, espera: float) -> _T:
-    """Transacción: cerrojo, relectura fresca, cambio y escritura sólo si cambió."""
+    """Transacción sobre el registro BASE (migración, verificación,
+    activación): cerrojo, relectura fresca, cambio y escritura sólo si
+    cambió. El diario no se toca; al leer se reproduce encima."""
     ruta = ruta_registro(raiz)
     with _cerrojo(ruta_cerrojo(raiz, "escritura"), espera):
-        registro = _leer_fresco(raiz)
+        _leer_fresco(raiz)  # un segmento ilegible también bloquea: nunca se escribe a ciegas
+        registro = _leer_base(raiz)
         cambio, resultado = operar(registro)
         if cambio:
             escribir_json_atomico(ruta, registro)
-            huella = _huella_archivo(ruta)
-            if huella is not None:
-                _MEMORIA[str(ruta)] = (huella, registro)
+            _MEMORIA.pop(str(ruta), None)
         return resultado
+
+
+def _dia(instante: str) -> str:
+    return instante[:10].replace("-", "")
+
+
+def _anotar_diario(
+    raiz: str | Path, empresa_id: str, relaciones: list[dict[str, str]], procedencia: Mapping[str, object],
+    *, espera: float,
+) -> dict[str, int]:
+    """Ciclo normal: agrega al segmento del día sólo la unión nueva. El
+    registro base no se reescribe; la custodia sube sólo este segmento."""
+    with _cerrojo(ruta_cerrojo(raiz, "escritura"), espera):
+        vigente = _leer_fresco(raiz)
+        empresa = vigente["empresas"].setdefault(empresa_id, {"relaciones": []})
+        indice = _Indice(empresa)
+        identidad = _identidad_fuente(procedencia)
+        nuevas = [r for r in relaciones if not indice.tiene_fuente(_clave(r), identidad)]
+        if not nuevas:
+            return {"relaciones_agregadas": 0, "fuentes_agregadas": 0, "total": len(indice.por_clave)}
+        ahora = _ahora()
+        ruta = ruta_diario(raiz) / f"{_dia(ahora)}.json"
+        segmento = _leer_segmento(ruta)
+        segmento["entradas"].append({
+            "empresa": empresa_id, "observado_en": ahora, "procedencia": dict(procedencia), "relaciones": nuevas,
+        })
+        agregadas, fuentes = _unir(empresa, nuevas, procedencia, ahora=ahora, indice=indice)
+        escribir_json_atomico(ruta, segmento)
+        _MEMORIA.pop(str(ruta_registro(raiz)), None)
+        return {"relaciones_agregadas": agregadas, "fuentes_agregadas": fuentes, "total": len(empresa["relaciones"])}
 
 
 # --------------------------------------------------------------------------
@@ -336,6 +473,12 @@ def _relaciones_de(empresa: Mapping[str, object] | None) -> list[dict[str, objec
 # API operacional
 # --------------------------------------------------------------------------
 
+def contenido_vigente(raiz: str | Path) -> dict[str, object]:
+    """Registro vigente completo (base + diario), copia propia: auditoría y
+    pruebas. Lanza si el base o algún segmento es ilegible."""
+    return _leer_fresco(raiz)
+
+
 def leer_relaciones(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> list[dict[str, object]]:
     """Contenido del registro (cero acceso a reportes). Lanza si es ilegible."""
     return _relaciones_de(_leer_compartido(raiz)["empresas"].get(empresa_id))
@@ -379,21 +522,15 @@ def incorporar_relaciones(
     raiz: str | Path, relaciones: Iterable[Mapping[str, object]], *, empresa_id: str = EMPRESA_LEGADA,
     procedencia: Mapping[str, object], espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, int]:
-    """Unión idempotente; sin relación ni fuente nueva no lee bajo cerrojo ni escribe."""
+    """Unión idempotente; sin relación ni fuente nueva no lee bajo cerrojo ni
+    escribe. Lo nuevo va al segmento diario: nunca reescribe el registro base."""
     lista = [r for r in (_normalizar(x) for x in relaciones) if r is not None]
     empresa_actual = _leer_compartido(raiz)["empresas"].get(empresa_id)
     indice = _Indice(empresa_actual or {})
     identidad = _identidad_fuente(procedencia)
     if all(indice.tiene_fuente(_clave(r), identidad) for r in lista):
         return {"relaciones_agregadas": 0, "fuentes_agregadas": 0, "total": len(indice.por_clave)}
-
-    def operar(registro: dict[str, object]) -> tuple[bool, dict[str, int]]:
-        empresa = registro["empresas"].setdefault(empresa_id, {"relaciones": []})
-        agregadas, fuentes = _unir(empresa, lista, procedencia, ahora=_ahora(), indice=_Indice(empresa))
-        resumen = {"relaciones_agregadas": agregadas, "fuentes_agregadas": fuentes, "total": len(empresa["relaciones"])}
-        return bool(agregadas or fuentes), resumen
-
-    return _modificar(raiz, operar, espera=espera)
+    return _anotar_diario(raiz, empresa_id, lista, procedencia, espera=espera)
 
 
 def _asegurar_limite_csv() -> None:
@@ -724,15 +861,62 @@ def desactivar_registro(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, e
     return _cambiar_activacion(raiz, empresa_id, False, espera)
 
 
+def consolidar_diario(
+    raiz: str | Path, *, hasta: str | None = None, espera: float = ESPERA_ESCRITURA_S,
+) -> dict[str, object]:
+    """Consolidación controlada: incorpora al registro base los segmentos de
+    días anteriores a ``hasta`` (AAAAMMDD; por defecto hoy UTC, así el
+    segmento en uso no se toca) más cualquier copia con nombre no diario, y
+    recién después los borra. Un corte entre la escritura del base y el
+    borrado sólo deja segmentos ya incorporados, cuya reproducción no cambia
+    nada. Con un segmento ilegible se detiene sin escribir ni borrar."""
+    limite = hasta or _dia(_ahora())
+    with _cerrojo(ruta_cerrojo(raiz, "migracion"), 0), _cerrojo(ruta_cerrojo(raiz, "escritura"), espera):
+        vigente = _leer_fresco(raiz)
+        elegidos = [
+            p for p in _segmentos(raiz)
+            if (coincide := _NOMBRE_SEGMENTO.match(p.name)) is None or coincide.group(1) < limite
+        ]
+        if not elegidos:
+            return {"consolidados": [], "relaciones": _contar(vigente), "base_reescrito": False}
+        huellas = {p: _huella_archivo(p) for p in elegidos}
+        base = _leer_base(raiz)
+        _reproducir(base, [_leer_segmento(p) for p in elegidos])
+        escribir_json_atomico(ruta_registro(raiz), base)
+        _MEMORIA.pop(str(ruta_registro(raiz)), None)
+        borrados, conservados = [], []
+        for ruta in elegidos:
+            # Nunca borra un segmento que cambió después de leerlo.
+            if _huella_archivo(ruta) == huellas[ruta]:
+                ruta.unlink(missing_ok=True)
+                borrados.append(ruta.name)
+            else:
+                conservados.append(ruta.name)
+        return {
+            "consolidados": borrados, "conservados": conservados, "relaciones": _contar(base), "base_reescrito": True,
+        }
+
+
+def _contar(registro: Mapping[str, object]) -> dict[str, int]:
+    return {e: len(v.get("relaciones", [])) for e, v in registro["empresas"].items()}
+
+
+def _estado_diario(raiz: str | Path) -> dict[str, object]:
+    segmentos = _segmentos(raiz)
+    tamanos = [h[1] for h in (_huella_archivo(p) for p in segmentos) if h is not None]
+    return {"segmentos": len(segmentos), "bytes": sum(tamanos), "nombres": [p.name for p in segmentos]}
+
+
 def estado_registro(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> dict[str, object]:
     try:
         empresa = _leer_compartido(raiz)["empresas"].get(empresa_id)
+        diario = _estado_diario(raiz)
     except RegistroRelacionesError as error:
         return {"legible": False, "codigo": error.codigo, "detalle": str(error), "activo": False}
     migracion = _migracion(empresa)
     return {
         "legible": True, "empresa": empresa_id, "relaciones": len(_relaciones_de(empresa)),
         "estado_migracion": migracion.get("estado"), "activo": _activa(empresa),
-        "reportes_migrados": len(migracion.get("reportes", {})),
+        "reportes_migrados": len(migracion.get("reportes", {})), "diario": diario,
         **{k: migracion[k] for k in ("iniciada_en", "completada_en", "verificada_en", "verificacion") if k in migracion},
     }

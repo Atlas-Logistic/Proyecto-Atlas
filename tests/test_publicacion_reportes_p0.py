@@ -134,7 +134,7 @@ def test_medicion_snapshots_antes_y_despues_con_mobile_y_revalidacion(tmp_path, 
     guias = {c[0] for c in _claves(rd._relaciones_historicas_operacionales(raiz_b))}
     assert {f"90000{i}" for i in range(ingresos)} <= guias
     # Una sola fuente por relación aunque se haya publicado varias veces.
-    contenido = json.loads(registro.ruta_registro(raiz_b).read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz_b)
     for entrada in contenido["empresas"]["oficina"]["relaciones"]:
         tipos = [f["tipo"] for f in entrada["fuentes"]]
         assert tipos.count(registro.TIPO_PUBLICADO) <= 1
@@ -285,13 +285,16 @@ def test_republicar_no_recaptura_ni_hace_crecer_el_registro(tmp_path, monkeypatc
     pub.configurar(raiz, modo=pub.MODO_ROTATIVO)
     salida = _publicar(raiz, "reporte_mobile_1", [_rel("1")])
     _publicar(raiz, "reporte_mobile_2", [_rel("1")])  # misma evidencia, otro reporte
-    ruta = registro.ruta_registro(raiz)
-    antes = ruta.read_bytes()
+    def almacenado():
+        archivos = [registro.ruta_registro(raiz), *sorted(registro.ruta_diario(raiz).glob("*"))]
+        return [(a.name, a.read_bytes()) for a in archivos if a.is_file()]
+    antes = almacenado()
+    assert antes
     capturas = []
     monkeypatch.setattr(registro, "capturar_reporte_publicado", lambda *a, **k: capturas.append(a) or {})
     escribir_estado_operacion(reporte_vigente=salida, raiz=raiz)  # republicación del mismo vigente
-    assert capturas == [] and ruta.read_bytes() == antes
-    entrada = json.loads(antes)["empresas"]["oficina"]["relaciones"][0]
+    assert capturas == [] and almacenado() == antes
+    entrada = registro.contenido_vigente(raiz)["empresas"]["oficina"]["relaciones"][0]
     assert [f["tipo"] for f in entrada["fuentes"]] == [registro.TIPO_PUBLICADO]
 
 

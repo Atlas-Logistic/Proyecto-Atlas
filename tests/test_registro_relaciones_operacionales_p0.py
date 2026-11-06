@@ -41,7 +41,7 @@ def test_conflicto_y_empresa_separada_se_preservan(tmp_path):
     registro.incorporar_relaciones(raiz, [_relacion("1", "AA1111")], empresa_id="a", procedencia={"tipo": "prueba"})
     registro.incorporar_relaciones(raiz, [_relacion("1", "BB2222")], empresa_id="a", procedencia={"tipo": "prueba2"})
     registro.incorporar_relaciones(raiz, [_relacion("1", "CC3333")], empresa_id="b", procedencia={"tipo": "prueba"})
-    contenido = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     assert len(contenido["empresas"]["a"]["relaciones"]) == 2
     assert all(r["conflictos"] for r in contenido["empresas"]["a"]["relaciones"])
     assert len(registro.leer_relaciones(raiz, empresa_id="b")) == 1
@@ -66,7 +66,9 @@ def _prohibir_escritura(monkeypatch):
 
 
 def _huella(ruta):
-    return ruta.read_bytes(), ruta.stat().st_mtime_ns
+    """Base + diario: cualquier escritura del registro vigente la cambia."""
+    archivos = [ruta, *sorted((ruta.parent / registro.CARPETA_DIARIO).glob("*"))]
+    return [(a.name, a.read_bytes(), a.stat().st_mtime_ns) for a in archivos if a.is_file()]
 
 
 def test_sin_relaciones_validas_no_crea_registro(tmp_path, monkeypatch):
@@ -123,12 +125,12 @@ def test_relacion_nueva_sigue_escribiendo_y_conserva_lo_existente(tmp_path):
     raiz = tmp_path / "Atlas"
     registro.incorporar_relaciones(raiz, [_relacion("1", "AA1111")], procedencia={"tipo": "prueba"})
     ruta = registro.ruta_registro(raiz)
-    contenido = json.loads(ruta.read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     contenido["empresas"]["oficina"]["relaciones"][0]["confirmaciones_humanas"] = [{"por": "humano"}]
     ruta.write_text(json.dumps(contenido), encoding="utf-8")
     resultado = registro.incorporar_relaciones(raiz, [_relacion("2", "BB2222")], procedencia={"tipo": "prueba2"})
     assert resultado == {"relaciones_agregadas": 1, "fuentes_agregadas": 1, "total": 2}
-    despues = json.loads(ruta.read_text(encoding="utf-8"))["empresas"]["oficina"]["relaciones"]
+    despues = registro.contenido_vigente(raiz)["empresas"]["oficina"]["relaciones"]
     assert [r["relacion"]["numero_guia"] for r in despues] == ["1", "2"]
     assert despues[0]["confirmaciones_humanas"] == [{"por": "humano"}]
     assert despues[1]["fuentes"][0]["tipo"] == "prueba2"
@@ -147,7 +149,7 @@ def _dataset(raiz, filas):
 
 
 def _entradas(raiz, empresa="oficina"):
-    contenido = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     return {e["clave"]: e for e in contenido["empresas"][empresa]["relaciones"]}
 
 
@@ -301,7 +303,7 @@ def _tres_reportes(raiz):
 
 
 def _resumen(raiz, empresa="oficina"):
-    contenido = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     datos = contenido["empresas"][empresa]
     relaciones = {
         e["clave"]: (
@@ -375,7 +377,7 @@ def test_conflictos_de_la_migracion_se_conservan(tmp_path):
     # Una sola fuente migrada por relación (la primera observación); el detalle
     # por reporte queda en migracion.reportes, sin hacer crecer cada relación.
     assert [f["ruta"] for f in entradas["AA1111"]["fuentes"]] == ["reportes/r1/viajes.csv"]
-    reportes = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))["empresas"]["oficina"]["migracion"]["reportes"]
+    reportes = registro.contenido_vigente(raiz)["empresas"]["oficina"]["migracion"]["reportes"]
     assert sorted(reportes) == ["reportes/r1/viajes.csv", "reportes/r2/viajes.csv", "reportes/r3/viajes.csv"]
 
 
@@ -385,7 +387,7 @@ def test_tamano_del_registro_no_crece_con_la_cantidad_de_snapshots(tmp_path):
     for indice in range(60):  # 60 snapshots completos con las mismas 40 relaciones
         _reporte(raiz, f"r{indice:03d}", relaciones)
     registro.migrar_reportes_historicos(raiz, aplicar=True, lote=20)
-    contenido = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     entradas = contenido["empresas"]["oficina"]["relaciones"]
     assert len(entradas) == 40 and all(len(e["fuentes"]) == 1 for e in entradas)
 
@@ -441,18 +443,18 @@ def test_migracion_y_dataset_conservan_confirmaciones_conflictos_y_otras_empresa
     registro.incorporar_relaciones(raiz, [_relacion("1", "AA1111")], procedencia={"tipo": "previa"})
     registro.incorporar_relaciones(raiz, [_relacion("1", "QQ0000")], empresa_id="b", procedencia={"tipo": "previa"})
     ruta = registro.ruta_registro(raiz)
-    contenido = json.loads(ruta.read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     confirmacion = {"por": "operador", "decision_id": "d-1", "en": "2026-11-05"}
     contenido["empresas"]["oficina"]["relaciones"][0]["confirmaciones_humanas"] = [confirmacion]
     contenido["empresas"]["oficina"]["relaciones"][0]["conflictos"] = [{"tipo": "MANUAL", "con": "x"}]
     ruta.write_text(json.dumps(contenido), encoding="utf-8")
-    empresa_b = json.loads(ruta.read_text(encoding="utf-8"))["empresas"]["b"]
+    empresa_b = registro.contenido_vigente(raiz)["empresas"]["b"]
 
     _tres_reportes(raiz)
     registro.migrar_reportes_historicos(raiz, aplicar=True, lote=1)
     registro.incorporar_dataset(raiz, _dataset(raiz, [dict(_relacion("1", "AA1111"), otro="")]))
 
-    contenido = json.loads(ruta.read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
     relaciones = contenido["empresas"]["oficina"]["relaciones"]
     entrada = next(e for e in relaciones if e["relacion"]["patente_tracto"] == "AA1111")
     assert entrada["confirmaciones_humanas"] == [confirmacion]
@@ -489,11 +491,12 @@ def test_lecturas_repetidas_no_reparsean_hasta_que_el_archivo_cambia(tmp_path, m
         assert len(registro.leer_relaciones(raiz)) == 1
         registro.incorporar_relaciones(raiz, [_relacion("1")], procedencia={"tipo": "prueba"})
     assert len(lecturas) == 1
-    contenido = json.loads(registro.ruta_registro(raiz).read_text(encoding="utf-8"))
+    contenido = registro.contenido_vigente(raiz)
+    leidas = len(lecturas)
     relaciones = contenido["empresas"]["oficina"]["relaciones"]
     relaciones.append(dict(relaciones[0], clave="otra"))
     registro.ruta_registro(raiz).write_text(json.dumps(contenido), encoding="utf-8")
-    assert len(registro.leer_relaciones(raiz)) == 2 and len(lecturas) == 2
+    assert len(registro.leer_relaciones(raiz)) == 2 and len(lecturas) == leidas + 1
 
 
 def test_cli_codigos_de_salida(tmp_path, capsys):
