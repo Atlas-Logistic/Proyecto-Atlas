@@ -22,7 +22,9 @@ carpeta con marca de tiempo única, nunca reemplaza contenido previo.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
@@ -242,7 +244,8 @@ class CustodiaEstado:
                 salida[rel] = None
                 continue
             previo = cache.get(rel)
-            if previo and previo[0] == st.st_size and previo[1] == st.st_mtime_ns:
+            if (rel != "operacion/actual/analisis_completo_guias.csv" and previo
+                    and previo[0] == st.st_size and previo[1] == st.st_mtime_ns):
                 salida[rel] = previo[2]
                 continue
             sha = sha256_archivo(ruta)
@@ -263,6 +266,37 @@ class CustodiaEstado:
         return archivos
 
     # ---------------------------------------------------------- alineación
+    def _proteger_dataset_local(self, distintos: dict[str, str | None]) -> None:
+        """Fail closed before a Cloud alignment can discard local documents."""
+        rel = "operacion/actual/analisis_completo_guias.csv"
+        if rel not in distintos or not distintos[rel]:
+            return
+        esperado = self.manifiesto[rel]
+        if not esperado:
+            raise EstadoNoVerificado("Cloud eliminaria el dataset local; requiere revision")
+        remoto = self.cliente.descargar(esperado)
+        if hashlib.sha256(remoto).hexdigest() != esperado:
+            raise EstadoNoVerificado("dataset Cloud no coincide con su huella")
+        def identidades(datos: bytes) -> set[str]:
+            csv.field_size_limit(max(csv.field_size_limit(), 100_000_000))
+            try:
+                lector = csv.DictReader(io.StringIO(datos.decode("utf-8-sig"), newline=""), delimiter=";", strict=True)
+                if not lector.fieldnames or "archivo" not in lector.fieldnames:
+                    raise ValueError("falta columna archivo")
+                resultado = set()
+                for fila in lector:
+                    if None in fila or any(v is None for v in fila.values()):
+                        raise ValueError("fila incompleta")
+                    archivo = (fila.get("archivo") or "").strip()
+                    if not archivo or archivo in resultado:
+                        raise ValueError("identidad ausente o duplicada")
+                    resultado.add(archivo)
+                return resultado
+            except (UnicodeError, csv.Error, ValueError) as error:
+                raise EstadoNoVerificado(f"dataset no verificable: {error}") from error
+        if identidades(self._abs(rel).read_bytes()) - identidades(remoto):
+            raise EstadoNoVerificado("alineacion eliminaria documentos locales; requiere recuperacion")
+
     def alinear(self, lease) -> dict:
         """Antes de escribir: copia local == marca Cloud, o EstadoNoVerificado."""
         self.version = int(lease.marca.get("version") or 0)
@@ -272,6 +306,7 @@ class CustodiaEstado:
         locales = self._huellas_locales(self.manifiesto)
         distintos = {rel: sha for rel, sha in locales.items() if sha != self.manifiesto[rel]}
         if distintos:
+            self._proteger_dataset_local(distintos)
             consultas = [[rel, sha] for rel, sha in distintos.items() if sha]
             conocidos = dict(zip((c[0] for c in consultas), self.cliente.conocidos(consultas))) if consultas else {}
             destino_cuarentena = self.local / "cuarentena" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")

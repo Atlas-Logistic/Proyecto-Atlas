@@ -137,7 +137,7 @@ class Equipo:
         return self.archivo(rel).read_text(encoding="utf-8")
 
 
-DATASET = "operacion/actual/analisis_completo_guias.csv"
+DATASET = "operacion/actual/archivo_generico.txt"
 CATALOGO = "catalogos_privados/vehiculos.json"
 
 
@@ -239,7 +239,7 @@ class RelevoEstadoConfirmado(unittest.TestCase):
             self.assertTrue(vuelta.adquirir(), vuelta.motivo)
             self.assertEqual(vuelta.custodia.resumen["cuarentena"], [DATASET])
         self.assertEqual(self.casa.leer(DATASET), "oficina-v2")
-        copias = list((self.casa.local / "cuarentena").rglob("analisis_completo_guias.csv"))
+        copias = list((self.casa.local / "cuarentena").rglob("archivo_generico.txt"))
         self.assertEqual([c.read_text(encoding="utf-8") for c in copias], ["casa-sin-confirmar"])
 
     def test_equipo_que_vuelve_con_archivos_viejos_no_sobrescribe_lo_nuevo(self):
