@@ -50,6 +50,7 @@ from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales
 from atlas_core.interpretador_consultas import (
     CatalogosConsulta,
     construir_catalogos_consulta,
+    busqueda_transporte_explicita,
     interpretar_consulta_determinista,
     validar_compatibilidad_semantica,
 )
@@ -722,6 +723,39 @@ def responder_consulta_atlas(
         _registro.error("Respuesta descartada por inconsistencia semántica: %s", error)
         return RespuestaConsultaAtlas(estado=ESTADO_CONSULTA_INVALIDA, texto_respuesta=str(error))
     texto = _formatear_respuesta(resultado)
+    busqueda = busqueda_transporte_explicita(pregunta)
+    if busqueda and resultado.total_coincidencias > 1:
+        # Desktop runs an option as a new query, so every offered option
+        # must itself uniquely identify a result and be parseable.
+        opciones_lista = []
+        for v in resultado.viajes_soporte:
+            fecha = str(v.get("fecha") or "").strip()
+            patente = str(v.get("patentes_tracto") or "").strip()
+            detalle = ""
+            if re.fullmatch(r"\d{1,2}-\d{1,2}-\d{4}", fecha):
+                detalle += f" fecha {fecha}"
+            if re.fullmatch(r"[A-Z]{2,4}\d{2,4}", patente):
+                detalle += f" patente {patente}"
+            if not detalle:
+                continue
+            opcion = f"transporte {busqueda.group('numero')}{detalle}"
+            interpretada, _ = interpretar_consulta_determinista(opcion, catalogos=catalogos)
+            if interpretada and ejecutar_consulta_atlas(interpretada, viajes).total_coincidencias == 1:
+                if opcion not in opciones_lista:
+                    opciones_lista.append(opcion)
+        opciones = tuple(opciones_lista)
+        return RespuestaConsultaAtlas(estado=ESTADO_AMBIGUA,
+            texto_respuesta="Hay varios viajes con ese transporte. Precisa fecha y patente; si no bastan, identifica el documento en Desktop antes de actuar. No se cambio nada.",
+            opciones_aclaracion=opciones, resultado=resultado)
+    if busqueda and resultado.total_coincidencias == 1:
+        viaje = resultado.viajes_soporte[0]
+        from atlas_core.consultas_atlas import _documentos_viaje
+        documentos = _documentos_viaje(viaje)
+        faltan_folios = any(str(d.get("numero_guia") or "").strip().upper() in
+                            {"", "NO ENCONTRADO", "NO DISPONIBLE", "NO DETERMINADO"}
+                            for d in documentos)
+        if faltan_folios or not str(viaje.get("numeros_guia") or "").strip():
+            texto += " Hay un documento sin n\u00famero de gu\u00eda disponible; identifica su original antes de corregirlo."
     # Bloque UNIVERSAL V1.1 (Bloque 3 del ticket) -- "unidad solicitada ≠
     # unidad disponible -> explicar la limitación": la consulta SÍ se
     # ejecuta (peso, la unidad que Atlas realmente tiene) pero la
