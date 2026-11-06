@@ -85,16 +85,32 @@ def _codigo_territorial(documento: "DocumentoViaje") -> str:
     return ""
 
 
-def _cliente_identidad(documento: "DocumentoViaje") -> str:
-    """RUT de cliente si el dato existe (identidad canónica estable);
-    si no, el nombre publicable normalizado."""
-    rut = _evidencia(documento, "rut_cliente")
-    if _presente(rut):
-        return "rut:" + _clave(rut).replace(".", "").replace("-", "")
-    nombre = valor_publicable(
-        getattr(documento, "cliente", ""), evaluar_credibilidad_entidad_nombre
-    )
-    return ("nombre:" + _clave(nombre)) if _presente(nombre) else ""
+# Caso real 0000368939 (chofer JOSÉ LAZCANO, guías 484139/484140, SODIMAC
+# RENCA BOD 209): una guía trae el RUT de cliente impreso y la otra no (OCR
+# "No encontrado"). La identidad anterior era "rut:..." para una y
+# "nombre:..." para la otra, y compararlas como texto declaraba
+# contradicción entre el MISMO cliente: la entrega física única se partía en
+# dos. Se compara en el nivel más fuerte que AMBAS guías traen: RUT con RUT;
+# si a alguna le falta, nombre publicable con nombre publicable. Sin un nivel
+# común no hay evidencia (ni de igualdad ni de contradicción). Compartir
+# cliente nunca basta para agrupar: el destino sigue siendo obligatorio.
+def _comparar_clientes(a: "DocumentoViaje", b: "DocumentoViaje") -> bool | None:
+    """True = mismo cliente; False = contradicción; None = sin nivel común."""
+    def niveles(documento: "DocumentoViaje") -> tuple[str, str]:
+        rut = _evidencia(documento, "rut_cliente")
+        nombre = valor_publicable(getattr(documento, "cliente", ""), evaluar_credibilidad_entidad_nombre)
+        return (
+            _clave(rut).replace(".", "").replace("-", "") if _presente(rut) else "",
+            _clave(nombre) if _presente(nombre) else "",
+        )
+
+    rut_a, nombre_a = niveles(a)
+    rut_b, nombre_b = niveles(b)
+    if rut_a and rut_b:
+        return rut_a == rut_b
+    if nombre_a and nombre_b:
+        return nombre_a == nombre_b
+    return None
 
 
 def _obra_identidad(documento: "DocumentoViaje") -> str:
@@ -257,8 +273,7 @@ def _numero_compatible_con_confirmado(numero_documental: str, numero_confirmado:
 def _documento_compatible_con_destino_confirmado(
     documento: "DocumentoViaje", confirmado: "DocumentoViaje",
 ) -> bool:
-    cliente = _cliente_identidad(documento)
-    if not cliente or cliente != _cliente_identidad(confirmado):
+    if _comparar_clientes(documento, confirmado) is not True:
         return False
     comuna = comuna_oficial(getattr(confirmado, "localidad_entrega", ""))
     destino = _descomponer(getattr(confirmado, "direccion_entrega", ""))
@@ -360,7 +375,7 @@ def _obras_equivalentes_por_ocr(obra_a: str, obra_b: str) -> bool:
 def _misma_entrega(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     if not _destino_compatible(a, b):
         return False
-    if _contradice(_cliente_identidad(a), _cliente_identidad(b)):
+    if _comparar_clientes(a, b) is False:
         return False
     obra_a, obra_b = _obra_identidad(a), _obra_identidad(b)
     if _contradice(obra_a, obra_b) and not _obras_equivalentes_por_ocr(obra_a, obra_b):
