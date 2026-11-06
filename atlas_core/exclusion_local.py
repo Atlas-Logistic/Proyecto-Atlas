@@ -10,31 +10,44 @@ un mutex con nombre de Windows (``Global\\AtlasEscritorTurno-<sha>``):
   migración lo heredan sin cambios propios.
 - El mutex lo posee un hilo dedicado del proceso: el turno es del PROCESO
   (cualquier hilo puede escribir) y se libera desde cualquier hilo. Si el
-  proceso termina sin soltarlo, el kernel lo abandona y el siguiente lo
-  recibe con ``WAIT_ABANDONED``: nunca queda bloqueado por una interrupción.
-  El abandono se informa (``abandonado``) y se anota en la caché local; la
-  recuperación de operaciones queda para una etapa posterior.
-- Reentrante dentro del proceso: un segundo turno de la misma raíz en el mismo
-  proceso no espera (el árbitro dentro del proceso sigue siendo Cloud).
+  proceso termina sin soltarlo, el kernel libera el mutex: nunca queda
+  bloqueado por una interrupción. El abandono se detecta con un marcador local
+  (Windows sólo informa ``WAIT_ABANDONED`` si otro proceso tenía el mutex
+  abierto), se informa (``abandonado``) y se anota; la recuperación de
+  operaciones queda para una etapa posterior.
+- Todas las esperas son acotadas (no se aceptan esperas infinitas). Si el hilo
+  dueño falla o no responde en plazo, ``adquirir`` lanza ``ErrorTurno``; si la
+  liberación no se confirma, ``soltar`` lanza ``ErrorTurno``. Nunca se
+  interpreta un fallo como turno obtenido.
+- Reentrante dentro del proceso. Cada raíz tiene su propia transición
+  (adquirir/soltar), sostenida hasta que el mutex quedó tomado o liberado; el
+  registro global sólo se toma por instantes, nunca durante una espera.
 
 Guardia (audit hook, se instala al importar ``atlas_core``): en una raíz
-protegida, toda escritura de un proceso que no posee el turno se rechaza
+protegida, una escritura de un proceso que no posee el turno se rechaza
 (``ATLAS_EXCLUSION_LOCAL=exigir``, por defecto), sólo se anota (``observar``)
-o se ignora (``desactivada``). Raíces protegidas: ``ATLAS_EXCLUSION_RAICES``
-explícitas, más ``ATLAS_DATA_DIR`` y la raíz de la política de operación
+o se ignora (``desactivada``; ``observar`` y ``desactivada`` NO protegen).
+Raíces protegidas: ``ATLAS_EXCLUSION_RAICES`` explícitas, más
+``ATLAS_DATA_DIR`` y la raíz de la política de operación
 (``desktop_operacion.json``) cuando son compartidas (Drive, UNC, unidad
 distinta de C:). Una raíz local de desarrollo o de pruebas no se protege.
 
-Límites (no se asumen): sólo excluye procesos Python del Motor de este equipo
-que importan ``atlas_core``. No protege contra Google Drive, personas, otros
-programas ni escritores de otro computador; eso sigue a cargo del lease Cloud
-y de la custodia.
+Cobertura REAL de la guardia (ver docs/EXCLUSION_LOCAL_ESCRITORES.md y
+tests/test_exclusion_local_fallos.py): intercepta por RUTA TEXTUAL los eventos
+de auditoría listados en ``_EVENTOS``. NO cubre: escrituras por un descriptor
+abierto antes (con turno o antes de importar atlas_core), llamadas nativas
+(ctypes/Win32), alias de ruta (junction, enlace, ``\\\\?\\``, 8.3, unidad
+mapeada frente a UNC), eventos no listados (p. ej. sqlite3), procesos hijos ni
+procesos ajenos al Motor, ni escritores de otro computador (eso sigue a cargo
+del lease Cloud y de la custodia). La exclusión entre escritores del Motor la
+da el turno que toman los escritores; la guardia es una defensa adicional.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -48,7 +61,6 @@ CODIGO_OCUPADO = "ESCRITOR_LOCAL_OCUPADO"
 _WAIT_OBJECT_0 = 0x0
 _WAIT_ABANDONED = 0x80
 _WAIT_TIMEOUT = 0x102
-_INFINITO = 0xFFFFFFFF
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +108,17 @@ def ruta_registro_observaciones() -> Path:
 
 # --------------------------------------------------------- mutex de Windows
 
+# Esperas SIEMPRE acotadas: más allá de la espera pedida, el hilo dueño tiene
+# este margen para informar su resultado, y la liberación este plazo para
+# confirmarse. Si no ocurre, se informa como error (nunca como turno obtenido).
+MARGEN_RESPUESTA_SEGUNDOS = 5.0
+PLAZO_LIBERACION_SEGUNDOS = 10.0
+
+
+class ErrorTurno(OSError):
+    """Fallo del mecanismo de turno. Nunca equivale a turno obtenido."""
+
+
 def _kernel32():
     import ctypes
     from ctypes import wintypes
@@ -111,8 +134,16 @@ def _kernel32():
     return k
 
 
+def _ultimo_error() -> int:
+    import ctypes
+    return ctypes.get_last_error()
+
+
 class _Poseedor(threading.Thread):
-    """Hilo dueño del mutex: lo toma, avisa y lo sostiene hasta ``soltar``."""
+    """Hilo dueño del mutex: lo toma, informa SIEMPRE un resultado y lo
+    sostiene hasta ``soltar``. Cualquier excepción (carga de kernel32,
+    CreateMutexW, espera) se informa como ERROR, nunca deja al llamador
+    esperando."""
 
     def __init__(self, nombre: str, espera_ms: int) -> None:
         super().__init__(name="atlas-turno-escritura", daemon=True)
@@ -120,54 +151,82 @@ class _Poseedor(threading.Thread):
         self.espera_ms = espera_ms
         self.resultado = ""  # ADQUIRIDO | ABANDONADO | OCUPADO | ERROR
         self.error = ""
+        self.liberado = False
+        self.error_liberacion = ""
         self._listo = threading.Event()
         self._soltar = threading.Event()
 
     def run(self) -> None:
-        k = _kernel32()
-        handle = k.CreateMutexW(None, False, self.nombre)
-        if not handle:
-            import ctypes
-            self.resultado, self.error = "ERROR", f"CreateMutexW: {ctypes.get_last_error()}"
-            self._listo.set()
-            return
+        k = handle = None
         try:
+            k = _kernel32()
+            handle = k.CreateMutexW(None, False, self.nombre)
+            if not handle:
+                self.resultado, self.error = "ERROR", f"CreateMutexW error={_ultimo_error()}"
+                return
             espera = k.WaitForSingleObject(handle, self.espera_ms)
+            if espera == _WAIT_TIMEOUT:
+                self.resultado = "OCUPADO"
+                return
             if espera not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
-                self.resultado = "OCUPADO" if espera == _WAIT_TIMEOUT else "ERROR"
-                if self.resultado == "ERROR":
-                    import ctypes
-                    self.error = f"WaitForSingleObject={espera:#x} error={ctypes.get_last_error()}"
-                self._listo.set()
+                self.resultado, self.error = "ERROR", f"WaitForSingleObject={espera:#x} error={_ultimo_error()}"
                 return
             self.resultado = "ABANDONADO" if espera == _WAIT_ABANDONED else "ADQUIRIDO"
             self._listo.set()
             self._soltar.wait()
-            k.ReleaseMutex(handle)
+            if k.ReleaseMutex(handle):
+                self.liberado = True
+            else:
+                self.error_liberacion = f"ReleaseMutex error={_ultimo_error()}"
+        except BaseException as error:  # noqa: BLE001 -- se informa; nunca queda el llamador esperando
+            if self._listo.is_set():
+                self.error_liberacion = f"{type(error).__name__}: {error}"
+            else:
+                self.resultado, self.error = "ERROR", f"{type(error).__name__}: {error}"
         finally:
-            k.CloseHandle(handle)
+            if handle and k is not None:
+                # Cerrar sin ReleaseMutex (sólo tras un error) deja el mutex
+                # abandonado al terminar este hilo: lo libera el kernel.
+                k.CloseHandle(handle)
+            self._listo.set()
 
-    def esperar_resultado(self) -> str:
-        self._listo.wait()
+    def esperar_resultado(self, limite_segundos: float) -> str:
+        if not self._listo.wait(limite_segundos):
+            # Sin respuesta en plazo: se pide soltar (si tomara el mutex más
+            # tarde, lo libera de inmediato) y se informa como error.
+            self._soltar.set()
+            self.error = self.error or f"el hilo dueño del mutex no respondió en {limite_segundos:.1f} s"
+            return "ERROR"
         return self.resultado
 
-    def soltar(self) -> None:
+    def soltar(self) -> bool:
+        """True sólo si el mutex quedó liberado y el hilo terminó."""
         self._soltar.set()
-        self.join(timeout=10)
+        self.join(timeout=PLAZO_LIBERACION_SEGUNDOS)
+        return not self.is_alive() and self.liberado
 
 
-class _TurnoProceso:
-    """Turno compartido por todos los hilos y objetos del proceso para una raíz."""
+class _EstadoRaiz:
+    """Turno de una raíz dentro del proceso. ``transicion`` serializa adquirir
+    y soltar de ESA raíz y se mantiene hasta que el mutex quedó tomado o
+    liberado: otro hilo nunca ve un estado intermedio. Un hilo nunca sostiene
+    la transición de dos raíces a la vez."""
 
-    def __init__(self, raiz_norm: str, poseedor: _Poseedor | None) -> None:
-        self.raiz_norm = raiz_norm
-        self.poseedor = poseedor
+    def __init__(self) -> None:
+        self.transicion = threading.Lock()
+        self.poseedor: _Poseedor | None = None
         self.referencias = 0
 
 
-_cerrojo = threading.RLock()          # registro del proceso (lo consulta la guardia)
-_cerrojo_adquisicion = threading.Lock()  # una adquisición a la vez dentro del proceso
-_turnos: dict[str, _TurnoProceso] = {}
+# Sólo protege el diccionario y los contadores (lo consulta la guardia): se
+# toma por instantes, nunca durante una espera, E/S ni otro cerrojo.
+_registro = threading.RLock()
+_estados: dict[str, _EstadoRaiz] = {}
+
+
+def _estado(raiz_norm: str) -> _EstadoRaiz:
+    with _registro:
+        return _estados.setdefault(raiz_norm, _EstadoRaiz())
 
 
 def ruta_marcador(raiz_norm: str) -> Path:
@@ -218,11 +277,18 @@ class TurnoEscritura:
 
     ``with TurnoEscritura(raiz): ...`` (lanza ``TurnoOcupado``), o
     ``adquirir()`` -> bool y ``soltar()`` (idempotente).
+
+    ``adquirir`` devuelve False si otro proceso lo tiene (espera acotada) y
+    lanza ``ErrorTurno`` si el mecanismo falla. ``soltar`` lanza
+    ``ErrorTurno`` si no puede confirmar la liberación.
     """
 
     def __init__(self, raiz, *, espera_segundos: float = 0.0) -> None:
         self.raiz_norm = normalizar_raiz(raiz)
-        self.espera_segundos = max(0.0, float(espera_segundos))
+        espera = float(espera_segundos)
+        if not math.isfinite(espera) or espera < 0:
+            raise ValueError("espera_segundos debe ser finita y no negativa")
+        self.espera_segundos = espera
         self.abandonado = False
         self.error = ""
         self._tomado = False
@@ -231,66 +297,85 @@ class TurnoEscritura:
     def vigente(self) -> bool:
         return self._tomado
 
+    def _plazo_transicion(self) -> float:
+        return self.espera_segundos + MARGEN_RESPUESTA_SEGUNDOS + PLAZO_LIBERACION_SEGUNDOS
+
     def adquirir(self) -> bool:
         if self._tomado:
             return True
-        with _cerrojo_adquisicion:
-            with _cerrojo:
-                turno = _turnos.get(self.raiz_norm)
-                if turno is not None:  # reentrante: el proceso ya lo posee
-                    turno.referencias += 1
+        estado = _estado(self.raiz_norm)
+        if not estado.transicion.acquire(timeout=self._plazo_transicion()):
+            self.error = "otra transición del turno en este proceso no terminó en plazo"
+            return False
+        try:
+            with _registro:
+                if estado.referencias > 0:  # reentrante: el proceso ya lo posee
+                    estado.referencias += 1
                     self._tomado = True
                     return True
             poseedor = None
             resultado = "ADQUIRIDO"
             if os.name == "nt":
-                espera_ms = _INFINITO if self.espera_segundos == float("inf") else int(self.espera_segundos * 1000)
-                poseedor = _Poseedor(nombre_mutex(self.raiz_norm), espera_ms)
-                poseedor.start()
-                resultado = poseedor.esperar_resultado()
+                poseedor = _Poseedor(nombre_mutex(self.raiz_norm), int(self.espera_segundos * 1000))
+                try:
+                    poseedor.start()
+                except BaseException as error:
+                    raise ErrorTurno(f"No se pudo iniciar el hilo del turno de escritura: {error}") from error
+                resultado = poseedor.esperar_resultado(self.espera_segundos + MARGEN_RESPUESTA_SEGUNDOS)
+                if resultado == "OCUPADO":
+                    return False
                 if resultado not in ("ADQUIRIDO", "ABANDONADO"):
                     self.error = poseedor.error
-                    if resultado == "ERROR":
-                        raise OSError(f"Mutex de turno de escritura no disponible: {poseedor.error}")
-                    return False
-            # Con el mutex en mano: el marcador del dueño anterior sólo puede
-            # existir si terminó sin soltar (Windows no siempre informa
-            # WAIT_ABANDONED: el objeto se destruye si nadie más lo tenía abierto).
-            marcador = ruta_marcador(self.raiz_norm)
-            anterior = _leer_marcador(marcador)
-            if resultado == "ABANDONADO" or anterior is not None:
-                self.abandonado = True
-                log.warning("Turno de escritura abandonado por un proceso terminado (%s); requiere verificación.",
-                            self.raiz_norm)
-                _anotar_abandono(self.raiz_norm, anterior, "WAIT_ABANDONED" if resultado == "ABANDONADO" else "MARCADOR")
-            _escribir_marcador(marcador, self.raiz_norm)
-            with _cerrojo:
-                turno = _TurnoProceso(self.raiz_norm, poseedor)
-                turno.referencias = 1
-                _turnos[self.raiz_norm] = turno
-        self._tomado = True
-        return True
+                    raise ErrorTurno(f"Mutex de turno de escritura no disponible: {poseedor.error}")
+            try:
+                # Con el mutex en mano: el marcador del dueño anterior sólo
+                # puede existir si terminó sin soltar.
+                marcador = ruta_marcador(self.raiz_norm)
+                anterior = _leer_marcador(marcador)
+                if resultado == "ABANDONADO" or anterior is not None:
+                    self.abandonado = True
+                    log.warning("Turno de escritura abandonado por un proceso terminado (%s); requiere verificación.",
+                                self.raiz_norm)
+                    _anotar_abandono(self.raiz_norm, anterior,
+                                     "WAIT_ABANDONED" if resultado == "ABANDONADO" else "MARCADOR")
+                _escribir_marcador(marcador, self.raiz_norm)
+            except BaseException:
+                if poseedor is not None:  # nunca un mutex tomado sin registro
+                    poseedor.soltar()
+                raise
+            with _registro:
+                estado.poseedor = poseedor
+                estado.referencias = 1
+            self._tomado = True
+            return True
+        finally:
+            estado.transicion.release()
 
     def soltar(self) -> None:
         if not self._tomado:
             return
-        self._tomado = False
-        with _cerrojo:
-            turno = _turnos.get(self.raiz_norm)
-            if turno is None:
-                return
-            turno.referencias -= 1
-            if turno.referencias > 0:
-                return
-            del _turnos[self.raiz_norm]
-        # Primero el marcador (aún con el mutex), después el mutex: un corte
-        # entre ambos se ve como turno limpio, y ya no quedaba escritura.
+        estado = _estado(self.raiz_norm)
+        if not estado.transicion.acquire(timeout=self._plazo_transicion()):
+            raise ErrorTurno(f"No se pudo soltar el turno de {self.raiz_norm}: transición bloqueada")
         try:
-            ruta_marcador(self.raiz_norm).unlink(missing_ok=True)
-        except OSError as error:
-            log.warning("No se pudo borrar el marcador del turno local: %s", error)
-        if turno.poseedor is not None:
-            turno.poseedor.soltar()
+            self._tomado = False
+            with _registro:
+                estado.referencias -= 1
+                if estado.referencias > 0:
+                    return
+                poseedor, estado.poseedor = estado.poseedor, None
+            # Contador en 0: la guardia ya rechaza escrituras. Primero el
+            # marcador (aún con el mutex), después el mutex, todo dentro de la
+            # transición: ningún hilo del proceso ve el mutex a medio soltar.
+            try:
+                ruta_marcador(self.raiz_norm).unlink(missing_ok=True)
+            except OSError as error:
+                log.warning("No se pudo borrar el marcador del turno local: %s", error)
+            if poseedor is not None and not poseedor.soltar():
+                raise ErrorTurno(f"No se confirmó la liberación del mutex de {self.raiz_norm}: "
+                                 f"{poseedor.error_liberacion or 'el hilo dueño no terminó en plazo'}")
+        finally:
+            estado.transicion.release()
 
     def __enter__(self) -> "TurnoEscritura":
         if not self.adquirir():
@@ -304,8 +389,8 @@ class TurnoEscritura:
 def posee_turno(ruta) -> bool:
     """True si este proceso posee el turno de una raíz que contiene ``ruta``."""
     ruta_norm = os.path.normcase(os.path.abspath(os.fsdecode(ruta)))
-    with _cerrojo:
-        return any(_dentro(ruta_norm, raiz) for raiz in _turnos)
+    with _registro:
+        return any(estado.referencias > 0 and _dentro(ruta_norm, raiz) for raiz, estado in _estados.items())
 
 
 # ----------------------------------------------------------------- guardia
@@ -372,8 +457,12 @@ def _destinos(evento: str, args) -> list:
                 (flags and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))):
             return []
         return [ruta]
-    if evento in {"os.rename", "os.link", "os.symlink"}:
+    if evento in {"os.rename", "os.link", "os.symlink", "shutil.move"}:
         return list(args[:2])
+    if evento in {"shutil.copyfile", "shutil.copytree", "shutil.copymode", "shutil.copystat", "_winapi.CopyFile2"}:
+        # En Windows (3.12+) copy2 y el respaldo de move copian con CopyFile2
+        # nativo, sin evento `open`: el destino viene en estos eventos.
+        return [args[1]]
     if evento in {"os.remove", "os.rmdir", "os.mkdir", "os.truncate", "os.chmod", "os.utime", "shutil.rmtree"}:
         return [args[0]]
     return []
@@ -411,7 +500,8 @@ def _guardia(evento: str, args) -> None:
 
 
 _EVENTOS = frozenset({"open", "os.rename", "os.link", "os.symlink", "os.remove", "os.rmdir", "os.mkdir",
-                      "os.truncate", "os.chmod", "os.utime", "shutil.rmtree"})
+                      "os.truncate", "os.chmod", "os.utime", "shutil.rmtree", "shutil.move", "shutil.copyfile",
+                      "shutil.copytree", "shutil.copymode", "shutil.copystat", "_winapi.CopyFile2"})
 _instalada = False
 
 

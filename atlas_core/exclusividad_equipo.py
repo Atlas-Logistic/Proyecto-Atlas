@@ -137,11 +137,17 @@ class EscritorEquipoUnico:
         if not self.vigente: raise PermissionError('Recuperación sin exclusividad.')
         return recuperar_bloqueos_huerfanos(self.raiz, escritor=self)
     def cerrar(self):
-        self._detener.set()
-        if self._hilo: self._hilo.join(timeout=22)
-        if self.handle:
-            self._k.ReleaseMutex(self.handle); self._k.CloseHandle(self.handle); self.handle=None
-        self._soltar_turno()
+        # El turno local se suelta siempre, aunque falle un paso anterior; la
+        # excepción se propaga (encadenada), nunca se oculta.
+        try:
+            self._detener.set()
+            if self._hilo: self._hilo.join(timeout=22)
+            if self.handle:
+                try: self._k.ReleaseMutex(self.handle)
+                finally:
+                    self._k.CloseHandle(self.handle); self.handle=None
+        finally:
+            self._soltar_turno()
     def _soltar_turno(self):
         turno,self.turno=self.turno,None
         if turno is not None: turno.soltar()

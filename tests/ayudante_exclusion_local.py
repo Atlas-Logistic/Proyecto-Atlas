@@ -76,6 +76,19 @@ def main() -> int:
         turno.soltar()
         senal(control, "soltado")
         return 0
+    if modo == "cruzado":  # sostiene <raiz> y, a la orden, pide <otra> con espera acotada
+        otra, espera = extra[0], float(extra[1])
+        primero = el.TurnoEscritura(raiz)
+        assert primero.adquirir()
+        senal(control, "cruzado_tomado", ok=True)
+        esperar_orden(control, "pedir")
+        inicio = time.monotonic()
+        segundo = el.TurnoEscritura(otra, espera_segundos=espera)
+        ok = segundo.adquirir()
+        senal(control, "cruzado", ok=ok, duracion=time.monotonic() - inicio)
+        segundo.soltar()
+        primero.soltar()
+        return 0
     if modo == "tomar_y_morir":  # sostiene el turno y termina SIN soltarlo
         turno = el.TurnoEscritura(raiz)
         assert turno.adquirir()

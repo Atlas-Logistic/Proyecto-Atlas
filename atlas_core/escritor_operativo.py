@@ -301,6 +301,25 @@ class LeaseEscritorOperativo:
         self._hilo.start()
 
     def cerrar(self) -> None:
+        # Cada paso corre aunque el anterior falle (try/finally anidados) y la
+        # excepción se propaga encadenada, nunca se oculta. El turno local se
+        # suelta SIEMPRE al final, después de detener el heartbeat e intentar
+        # liberar el lease: ninguna excepción deja el turno tomado.
+        try:
+            try:
+                self._cerrar_custodia()
+            finally:
+                try:
+                    self._detener.set()
+                    if self._hilo is not None:
+                        self._hilo.join(timeout=self.timeout + 1)
+                finally:
+                    self._liberar_lease()
+        finally:
+            self.lease_token = ""
+            self._soltar_turno()
+
+    def _cerrar_custodia(self) -> None:
         custodia = self.custodia
         if custodia is not None and custodia in _custodias_activas():
             # Antes de detener el heartbeat: subir contenido puede tardar y la
@@ -313,9 +332,8 @@ class LeaseEscritorOperativo:
                 logging.getLogger(__name__).warning("Estado no confirmado al cerrar; queda diario local: %s", error)
             finally:
                 custodia.detener()
-        self._detener.set()
-        if self._hilo is not None:
-            self._hilo.join(timeout=self.timeout + 1)
+
+    def _liberar_lease(self) -> None:
         if self.lease_token:
             # Sólo un lease aún vigente, con el heartbeat detenido, deja
             # constancia de relevo; perdido o sin LIBERADO, el siguiente espera.
@@ -329,10 +347,6 @@ class LeaseEscritorOperativo:
                     registrar_relevo_confirmado(self.ruta_relevo, escritor_id=self.escritor_id, epoca=self.epoca)
             except ErrorEscritorOperativo:
                 pass
-        self.lease_token = ""
-        # Último paso: el turno local cubre también la confirmación de
-        # custodia y la liberación del lease.
-        self._soltar_turno()
 
     def __enter__(self) -> "LeaseEscritorOperativo":
         return self
