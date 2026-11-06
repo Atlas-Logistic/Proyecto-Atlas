@@ -148,10 +148,42 @@ class LeaseEscritorOperativo:
         self._detener = threading.Event()
         self._perdido = threading.Event()
         self._hilo: threading.Thread | None = None
+        # Turno local (atlas_core.exclusion_local): exclusión física entre
+        # procesos del Motor de este equipo durante TODO el turno, desde antes
+        # de pedir el lease hasta después de liberarlo.
+        self.turno = None
+        self.turno_abandonado = False
 
     @property
     def vigente(self) -> bool:
         return bool(self.lease_token) and not self._perdido.is_set()
+
+    def _raiz_turno(self):
+        if self.custodia is not None and getattr(self.custodia, "raiz", None) is not None:
+            return self.custodia.raiz
+        return os.environ.get("ATLAS_DATA_DIR", "").strip() or None
+
+    def _tomar_turno(self) -> bool:
+        from atlas_core.exclusion_local import CODIGO_OCUPADO, TurnoEscritura
+        raiz = self._raiz_turno()
+        if raiz is None:
+            return True  # sin raíz no hay turno; la guardia rechaza escribir en una raíz protegida
+        if self.turno is None or not self.turno.vigente:
+            self.turno = TurnoEscritura(raiz)
+            if not self.turno.adquirir():
+                self.turno = None
+                # Igual que un titular Cloud vigente: estado legítimo y breve,
+                # el llamador puede reintentar (Desktop espera acotado).
+                self.ocupado = True
+                self.motivo = CODIGO_OCUPADO
+                return False
+            self.turno_abandonado = self.turno.abandonado
+        return True
+
+    def _soltar_turno(self) -> None:
+        turno, self.turno = self.turno, None
+        if turno is not None:
+            turno.soltar()
 
     def consultar(self) -> dict:
         return _json(self.base_url, "/api/motor/escritor/estado", self.token_motor, timeout=self.timeout)
@@ -164,6 +196,19 @@ class LeaseEscritorOperativo:
     def adquirir(self) -> bool:
         self.ocupado = False
         self.motivo = ""
+        if not self._tomar_turno():
+            return False
+        try:
+            adquirido = self._adquirir_cloud()
+        except BaseException:
+            if not self.lease_token:
+                self._soltar_turno()
+            raise
+        if not adquirido and not self.lease_token:
+            self._soltar_turno()
+        return adquirido
+
+    def _adquirir_cloud(self) -> bool:
         cuerpo = {"escritor_id": self.escritor_id}
         if self.custodia is not None:
             from atlas_core.estado_confirmado import PROTOCOLO
@@ -285,6 +330,9 @@ class LeaseEscritorOperativo:
             except ErrorEscritorOperativo:
                 pass
         self.lease_token = ""
+        # Último paso: el turno local cubre también la confirmación de
+        # custodia y la liberación del lease.
+        self._soltar_turno()
 
     def __enter__(self) -> "LeaseEscritorOperativo":
         return self

@@ -90,6 +90,8 @@ class EscritorEquipoUnico:
         self._perdido=threading.Event()
         self._detener=threading.Event()
         self._hilo=None
+        self.turno=None
+        self.turno_abandonado=False
         self._k=ctypes.WinDLL('kernel32',use_last_error=True)
         self._k.CreateMutexW.argtypes=[ctypes.c_void_p,wintypes.BOOL,wintypes.LPCWSTR]
         self._k.CreateMutexW.restype=wintypes.HANDLE
@@ -100,11 +102,23 @@ class EscritorEquipoUnico:
     @property
     def vigente(self): return self.handle is not None and not self._perdido.is_set()
     def adquirir(self):
+        # Turno local compartido con el lease Cloud (atlas_core.exclusion_local):
+        # primero el turno, después el mutex propio de este modo; mismo orden
+        # en todos los escritores, sin inversión de bloqueos.
+        from atlas_core.exclusion_local import TurnoEscritura
+        self.turno=TurnoEscritura(self.raiz)
+        if not self.turno.adquirir():
+            self.turno=None
+            return False
+        self.turno_abandonado=self.turno.abandonado
         nombre='Global\\AtlasDesktopWriter-'+hashlib.sha256(str(self.raiz).casefold().encode()).hexdigest()
         h=self._k.CreateMutexW(None,False,nombre)
-        if not h: raise PermissionError('No se pudo acceder al mutex del escritor de Windows.')
+        if not h:
+            self._soltar_turno()
+            raise PermissionError('No se pudo acceder al mutex del escritor de Windows.')
         if self._k.WaitForSingleObject(h,0) not in (0,0x80):
             self._k.CloseHandle(h)
+            self._soltar_turno()
             return False
         self.handle=h
         try: self.verificar()
@@ -127,5 +141,9 @@ class EscritorEquipoUnico:
         if self._hilo: self._hilo.join(timeout=22)
         if self.handle:
             self._k.ReleaseMutex(self.handle); self._k.CloseHandle(self.handle); self.handle=None
+        self._soltar_turno()
+    def _soltar_turno(self):
+        turno,self.turno=self.turno,None
+        if turno is not None: turno.soltar()
     def __enter__(self): return self
     def __exit__(self,*args): self.cerrar()
