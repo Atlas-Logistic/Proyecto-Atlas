@@ -141,10 +141,10 @@ def test_registrar_en_mbt_sigue_igual(mundo):  # noqa: F811
 def test_bajo_solo_consulta_de_desktop(mundo):  # noqa: F811
     """Consultas Desktop: os.putenv y escritura prohibidos; el perfil sigue sin filtrarse."""
     salida = _correr(mundo, NORTE, """
-        def veto(e, a):
-            if e in ("os.putenv", "os.unsetenv"):
-                raise PermissionError("putenv")
-        sys.addaudithook(veto)
+    def veto(e, a):
+        if e in ("os.putenv", "os.unsetenv"):
+            raise PermissionError("putenv")
+    sys.addaudithook(veto)
     """ + RESOLVER, **{
         **ae.abrir_empresa(mundo[0], NORTE).entorno(), "ATLAS_CLOUD_MOTOR_TOKEN": "", "OPENROUTER_API_KEY__TRANSPORTES_NORTE": "or-norte"})
     assert _valores(salida) == ["or-norte", "", ""]

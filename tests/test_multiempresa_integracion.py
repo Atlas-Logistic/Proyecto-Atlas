@@ -474,14 +474,16 @@ def test_cambio_de_computador_casa_oficina_casa(mundo, tmp_path, monkeypatch):  
         with _lease(oficina, "t-a", "pc-oficina", tmp_path / "lo") as lease:
             assert lease.adquirir(), lease.motivo
             assert ae.confirmar_restauracion(oficina).cloud_id == a.cloud_id
-            ap.escribir_json_atomico(oficina.raiz / rel, {"v": 2})
+            # Otro tamaño: la caché de huellas de la custodia (tamaño + mtime) no
+            # distingue dos escrituras iguales de tamaño dentro de un tic del reloj.
+            ap.escribir_json_atomico(oficina.raiz / rel, {"v": 22222})
         nube.avanzar(11)
         # De vuelta en CASA, con su copia atrasada y su LOCALAPPDATA.
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
         assert json.loads((a.raiz / rel).read_text(encoding="utf-8")) == {"v": 1}
         with _lease(a, "t-a", "pc-1", tmp_path / "l1") as lease:
             assert lease.adquirir(), lease.motivo
-        assert json.loads((a.raiz / rel).read_text(encoding="utf-8")) == {"v": 2}
+        assert json.loads((a.raiz / rel).read_text(encoding="utf-8")) == {"v": 22222}
     assert _arbol(b.raiz) == antes_b
     assert "pc-oficina" in str(nube.lease) or nube.lease["epoca"] >= 3
 
