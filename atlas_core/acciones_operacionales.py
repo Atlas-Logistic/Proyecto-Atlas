@@ -2894,7 +2894,8 @@ class CapaAccionesOperacionales:
         ahora = self._reloj()
         registro["previews"] = {
             t: v for t, v in registro.get("previews", {}).items()
-            if v.get("estado") == "PREVIEW" and datetime.fromisoformat(v["expira_en"]) > ahora
+            if v.get("estado") == "PREVIEW" and (v.get("publicacion_iniciada")
+                                                    or datetime.fromisoformat(v["expira_en"]) > ahora)
         }
         escribir_json_atomico(self._ruta_registro, registro)
 
@@ -3011,6 +3012,23 @@ class CapaAccionesOperacionales:
         preview = registro.get("previews", {}).get(token)
         if preview is None:
             raise ErrorAccionOperacional("TOKEN_DESCONOCIDO", "no existe un preview vigente con ese token")
+        if preview.get("accion") in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
+                                     "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
+            if any(v.get("publicacion_iniciada") for v in registro.get("previews", {}).values()
+                   if isinstance(v, dict)):
+                raise ErrorAccionOperacional(
+                    "PUBLICACION_INCOMPLETA",
+                    "Hay una publicación documental interrumpida; no se aplican nuevas correcciones.",
+                )
+            ledger = _leer_json(self._ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+            if not isinstance(ledger, dict) or not isinstance(ledger.get("aplicaciones"), list):
+                raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "ledger documental inválido")
+            if any(isinstance(a, dict) and a.get("decision_id") == f"ACCION_OPERACIONAL:{token}"
+                   for a in ledger["aplicaciones"]):
+                raise ErrorAccionOperacional(
+                    "PUBLICACION_INCOMPLETA",
+                    "La decisión ya fue registrada pero falta cerrar su publicación; no se vuelve a aplicar.",
+                )
         if accion_esperada is not None and str(accion_esperada).upper() != preview["accion"]:
             raise ErrorAccionOperacional("TOKEN_NO_CORRESPONDE", "el token pertenece a otra acción")
         if datetime.fromisoformat(preview["expira_en"]) <= self._reloj():
@@ -3019,6 +3037,11 @@ class CapaAccionesOperacionales:
         confirmado = str(confirmado_por or "").strip()
         if definicion.riesgo in (OPERACIONAL_REVERSIBLE, SENSIBLE) and not _ID.fullmatch(confirmado):
             raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "falta la confirmación humana explícita")
+        if definicion.nombre in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
+                                 "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
+            from atlas_core.decisiones_pendientes import _actor_es_humano
+            if not _actor_es_humano(confirmado):
+                raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "el confirmante debe ser una persona")
         if definicion.riesgo == SENSIBLE and (origen != ORIGEN_HUMANO or not autorizacion_sensible):
             raise ErrorAccionOperacional(
                 "FUERA_DE_AUTONOMIA", "acción SENSIBLE: sólo un humano con autorización explícita puede ejecutarla",
@@ -3091,6 +3114,13 @@ class CapaAccionesOperacionales:
         self._ctx.confirmado_por = confirmado
         respaldo = self._respaldar(plan.archivos, token)
         instante = self._reloj().astimezone(timezone.utc).isoformat()
+        if definicion.nombre in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
+                                 "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
+            # Persistir antes de tocar el dataset o el ledger: un corte en
+            # cualquier escritura deja el mismo token bloqueado al reintentar.
+            # No equivale a recuperar ni a publicar una transacción completa.
+            preview["publicacion_iniciada"] = {"respaldo": respaldo.get("carpeta"), "fecha": instante}
+            self._guardar_registro(registro)
         try:
             salida = definicion.aplicar(self._ctx, parametros, plan, actor)
         except Exception as error:  # noqa: BLE001 -- se restaura y se audita cualquier fallo del servicio
