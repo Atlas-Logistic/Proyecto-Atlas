@@ -96,10 +96,16 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
         direccion = str(destino.get("direccion") or "").strip()
         comuna = str(destino.get("comuna") or "").strip()
         if direccion and comuna:
-            vigente = direccion, comuna, entrada.get("ruta_operacional")
+            vigente = direccion, comuna, entrada.get("ruta_operacional"), bool(entrada.get("conservar_estado_operacional"))
             break
     if vigente:
-        direccion, comuna, ruta = vigente
+        direccion, comuna, ruta, conservar = vigente
+        if conservar:
+            salida["direccion_entrega"], salida["localidad_entrega"] = direccion, comuna
+            salida["estado_ruta_historica"] = salida.get("estado_ruta", "")
+            salida["estado_ruta"] = "REQUIERE_COMPROBACION"
+            salida["ruta_requiere_comprobacion"] = True
+            return salida
         for campo in DERIVADOS:
             salida[campo] = ""
         salida["direccion_entrega"], salida["localidad_entrega"] = direccion, comuna

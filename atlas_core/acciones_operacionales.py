@@ -1120,6 +1120,8 @@ def _campos_documentales() -> tuple[str, ...]:
 
 
 def _fila_documento(ctx: _Contexto, guia: str, archivo: str) -> dict[str, str]:
+    if not guia.isdigit() and (guia != GUIA_AUSENTE_DOCUMENTAL or not archivo):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "un documento sin folio requiere archivo exacto")
     filas = [f for f in ctx.filas() if str(f.get("numero_guia", "")).strip() == guia
              and (not archivo or str(f.get("archivo", "")) == archivo)]
     if not filas:
@@ -1293,6 +1295,7 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
                 superar_resoluciones_automaticas=True,
         numero_guia=str(plan.datos["guia"]),
         campos_adicionales_permitidos=frozenset(CAMPOS_DOCUMENTALES_CONTROLADOS),
+        conservar_estado_operacional=bool(plan.datos.get("conservar_estado")),
     )
     if not resultado["cambios"]:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el reparador no aplicó el cambio")
@@ -1313,6 +1316,8 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
             "referencia": str(p.get("referencia", "")),
         })
         escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    if plan.datos.get("conservar_estado"):
+        return {"despues": {campo: valor}, "guias_revalidar": [], "omitir_convergencia_mobile": True, "regenerar_reporte": True}
     if campo == "numero_transporte":
         return {"despues": {campo: valor}, "reconciliar": True,
                 "retirar_obsoletas": (archivo, campo, valor, str(plan.datos["transporte"])),
@@ -1355,7 +1360,11 @@ def _plan_documento_obra(ctx: _Contexto, p: dict) -> Plan:
     if obra.estado_vigencia != "ACTIVO" or obra.estado in {"RECHAZADA", "INACTIVA"}:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la obra está rechazada o inactiva")
     base = _plan_documento_campo(ctx, {"numero_guia": p["numero_guia"], "campo": "obra_destino",
-                                       "valor": obra.nombre_canonico, "archivo": p.get("archivo", "")})
+                                       "valor": obra.nombre_canonico, "archivo": p.get("archivo", ""), "conservar_estado": p.get("conservar_estado", False)})
+    if p.get("conservar_estado"):
+        base.consecuencias = ["Se conserva la ruta y los estados operacionales; el documento original permanece intacto."]
+        base.revalidaciones = ["REGENERAR_REPORTE_VIAJES"]
+        base.datos["conservar_estado"] = True
     base.entidad["obra_id"] = obra.obra_id
     base.valor_propuesto = {"obra_destino": obra.nombre_canonico, "obra_id": obra.obra_id}
     base.estado_base = {"documento": base.estado_base, "obra": obra.a_dict()}
@@ -1363,7 +1372,7 @@ def _plan_documento_obra(ctx: _Contexto, p: dict) -> Plan:
         f"Reutiliza la obra existente {obra.nombre_canonico!r} (obra_id {obra.obra_id}); "
         "no crea obra nueva ni registra el valor anterior como alias.",
         *base.consecuencias,
-        "Revalidación focal sólo de esta guía y su viaje.",
+        *( [] if p.get("conservar_estado") else ["Revalidación focal sólo de esta guía y su viaje."] ),
     ]
     return base
 
@@ -1485,8 +1494,7 @@ def _plan_documento_destino_operacional(ctx: _Contexto, p: dict) -> Plan:
                 sin_cambios=anterior == propuesto,
                 afectados={"guias": [guia], "total_guias": 1},
                 consecuencias=["Solo cambia el destino operacional de esta guia.",
-                               "La ruta anterior se descarta; al confirmar se recalcula para esta direccion "
-                               "y, si no es valida, queda pendiente.",
+                               ("La ruta histórica se conserva y requiere comprobación para la nueva dirección." if p.get("conservar_estado") else "La ruta anterior se descarta; al confirmar se recalcula para esta direccion y, si no es valida, queda pendiente."),
                                "El documento original, el OCR y las demas guias no se modifican."],
                 archivos=("ledger_decisiones", "bandeja"),
                 datos={"archivo": archivo, "guia": guia, "transporte": _transporte(fila)})
@@ -1496,10 +1504,11 @@ def _aplicar_documento_destino_operacional(ctx: _Contexto, p: dict, plan: Plan, 
     from atlas_core.destino_operacional import TIPO, calcular_ruta_operacional, proyectar_destino, ruta_valida
     # La ruta se calcula para la dirección confirmada (proveedor externo, sin
     # lock); sólo se publica si es válida, si no queda pendiente.
-    ruta = calcular_ruta_operacional(
+    conservar = bool(p.get("conservar_estado"))
+    ruta = ({"estado_ruta": "PENDIENTE"} if conservar else calcular_ruta_operacional(
         plan.estado_base["fila"], plan.valor_propuesto["direccion"], plan.valor_propuesto["comuna"],
         carpeta_catalogos=ctx.catalogos, proveedor_rutas=ctx.proveedor_rutas,
-        proveedor_rutas_fallback=ctx.proveedor_rutas_fallback)
+        proveedor_rutas_fallback=ctx.proveedor_rutas_fallback))
     with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
         ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
         ledger.setdefault("aplicaciones", []).append({
@@ -1510,7 +1519,7 @@ def _aplicar_documento_destino_operacional(ctx: _Contexto, p: dict, plan: Plan, 
                           "numero_transporte": plan.datos["transporte"]},
             "destino_operacional": plan.valor_propuesto, "destino_anterior": plan.valor_actual,
             "referencia": str(p.get("referencia", "")),
-            "ruta_operacional": ruta,
+            "ruta_operacional": ruta, "conservar_estado_operacional": conservar,
         })
         escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
     comprobado = _leer_json(ctx.archivos["ledger_decisiones"], {})
@@ -1527,7 +1536,7 @@ def _aplicar_documento_destino_operacional(ctx: _Contexto, p: dict, plan: Plan, 
                         "distancia_km": ruta["distancia_km"] if calculada else "",
                         "duracion_min": ruta["duracion_min"] if calculada else "",
                         "ruta": "CALCULADA" if calculada else "PENDIENTE"},
-            "persistencia_verificada": True, "reconciliar": True, "regenerar_reporte": True}
+            "persistencia_verificada": True, "reconciliar": not conservar, "omitir_convergencia_mobile": conservar, "regenerar_reporte": True}
 
 
 def _plan_documento_chofer_operacional(ctx: _Contexto, p: dict) -> Plan:
@@ -2748,7 +2757,7 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
     DefinicionAccion("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", OPERACIONAL_REVERSIBLE,
                      "Fija el destino operacional de una guia sin alterar su documento.",
-                     {"numero_guia": _P("guia", True), "direccion": _P("texto", True, max_largo=200),
+                     {"numero_guia": _P("texto", True, max_largo=20), "conservar_estado": _P("bool"), "direccion": _P("texto", True, max_largo=200),
                       "comuna": _P("texto", True, max_largo=80),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_destino_operacional, _aplicar_documento_destino_operacional),
@@ -2782,7 +2791,7 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      _plan_mobile_estado, _aplicar_mobile_estado),
     DefinicionAccion("DOCUMENTO_ASIGNAR_OBRA", OPERACIONAL_REVERSIBLE,
                      "Asigna a una guía una obra EXISTENTE del catálogo (sin crear obra ni alias).",
-                     {"numero_guia": _P("guia", True), "obra_id": _P("id", True),
+                     {"numero_guia": _P("texto", True, max_largo=20), "obra_id": _P("id", True), "conservar_estado": _P("bool"),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_obra, _aplicar_documento_obra),
     DefinicionAccion("DECISION_APLICAR", OPERACIONAL_REVERSIBLE, "Aplica una decisión pendiente de Revisión.",
