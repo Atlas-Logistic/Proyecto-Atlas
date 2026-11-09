@@ -8,8 +8,10 @@ Uso: python ayudante_exclusion_local.py <modo> <raiz> <control> [args...]
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -97,6 +99,62 @@ def main() -> int:
             esperar_orden(control, "morir")
             os._exit(7)  # salida abrupta: sin finally ni atexit
         time.sleep(600)  # la prueba lo termina con TerminateProcess
+        return 0
+    if modo == "pausar_en":  # se detiene en un punto crítico para que la prueba lo mate
+        punto = extra[0]
+
+        def pausar(nombre: str) -> None:
+            if nombre == punto:
+                senal(control, "en_punto", punto=nombre)
+                time.sleep(600)
+
+        el._punto = pausar
+        turno = el.TurnoEscritura(raiz)
+        assert turno.adquirir()
+        turno.soltar()
+        return 0
+    if modo == "tomar_con_hijo":  # sostiene el turno con un hijo de larga vida
+        inherit = bool(extra and extra[0] == "heredar")
+        turno = el.TurnoEscritura(raiz)
+        assert turno.adquirir()
+        archivo_pid = control / "hijo.pid"
+        codigo = f"import os,time,pathlib;pathlib.Path(r'{archivo_pid}').write_text(str(os.getpid()));time.sleep(120)"
+        subprocess.Popen([sys.executable, "-I", "-c", codigo], close_fds=not inherit,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fin = time.monotonic() + 30
+        while not archivo_pid.exists() and time.monotonic() < fin:
+            time.sleep(0.02)
+        senal(control, "tomar", ok=True, hijo=int(archivo_pid.read_text()))
+        time.sleep(600)
+        return 0
+    if modo == "intervalos":  # alterna turnos y registra cuándo creyó poseerlo (QPC)
+        duracion = float(extra[0])
+        kernel = ctypes.WinDLL("kernel32")
+
+        def qpc() -> int:
+            valor = ctypes.c_longlong()
+            kernel.QueryPerformanceCounter(ctypes.byref(valor))
+            return valor.value
+
+        marca = Path(raiz) / "exclusion.marca"
+        intervalos, colisiones = [], 0
+        fin = time.monotonic() + duracion
+        while time.monotonic() < fin:
+            turno = el.TurnoEscritura(raiz)
+            if not turno.adquirir():
+                continue
+            inicio = qpc()
+            assert el.posee_turno(raiz) and turno.vigente
+            try:
+                with open(marca, "x", encoding="utf-8"):
+                    pass
+                os.remove(marca)
+            except FileExistsError:
+                colisiones += 1
+            termino = qpc()
+            intervalos.append([inicio, termino])
+            turno.soltar()
+        senal(control, "intervalos", intervalos=intervalos, colisiones=colisiones)
         return 0
     if modo == "excepcion":  # una excepción dentro del turno lo libera
         try:

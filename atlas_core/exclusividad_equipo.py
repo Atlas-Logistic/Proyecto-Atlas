@@ -100,8 +100,12 @@ class EscritorEquipoUnico:
         self._k.ReleaseMutex.argtypes=[wintypes.HANDLE]
         self._k.CloseHandle.argtypes=[wintypes.HANDLE]
     @property
-    def vigente(self): return self.handle is not None and not self._perdido.is_set()
+    def vigente(self): return self.handle is not None and not self._perdido.is_set() and (self.turno is None or self.turno.vigente)
     def adquirir(self):
+        try: return self._adquirir()
+        except BaseException:
+            self.cerrar(); raise
+    def _adquirir(self):
         # Turno local compartido con el lease Cloud (atlas_core.exclusion_local):
         # primero el turno, después el mutex propio de este modo; mismo orden
         # en todos los escritores, sin inversión de bloqueos.

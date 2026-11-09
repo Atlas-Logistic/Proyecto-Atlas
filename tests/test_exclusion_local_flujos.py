@@ -22,7 +22,7 @@ from atlas_core import escritor_operativo as eo
 from atlas_core import exclusion_local as el
 from tests.test_b1_operador import raiz  # noqa: F401  (fixture sintética de B1)
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="mutex con nombre de Windows")
+pytestmark = pytest.mark.skipif(os.name != "nt", reason="bloqueo de archivo de Windows")
 REPO = Path(__file__).resolve().parent.parent
 AYUDANTE = Path(__file__).with_name("ayudante_exclusion_local.py")
 

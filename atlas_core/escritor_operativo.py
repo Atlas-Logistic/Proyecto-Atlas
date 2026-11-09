@@ -156,7 +156,8 @@ class LeaseEscritorOperativo:
 
     @property
     def vigente(self) -> bool:
-        return bool(self.lease_token) and not self._perdido.is_set()
+        return (bool(self.lease_token) and not self._perdido.is_set()
+                and (self.turno is None or self.turno.vigente))
 
     def _raiz_turno(self):
         if self.custodia is not None and getattr(self.custodia, "raiz", None) is not None:
@@ -196,9 +197,9 @@ class LeaseEscritorOperativo:
     def adquirir(self) -> bool:
         self.ocupado = False
         self.motivo = ""
-        if not self._tomar_turno():
-            return False
         try:
+            if not self._tomar_turno():
+                return False
             adquirido = self._adquirir_cloud()
         except BaseException:
             if not self.lease_token:

@@ -8,38 +8,44 @@ En un mismo equipo Windows, para cada raíz operacional, **un solo proceso del M
 
 | Pieza | Dónde | Qué hace |
 |---|---|---|
-| Turno local | `atlas_core/exclusion_local.py` (`TurnoEscritura`) | Mutex con nombre de Windows `Global\AtlasEscritorTurno-<sha256(raíz)>`. Lo posee un hilo dedicado, así que el turno pertenece al **proceso**. Es reentrante dentro del proceso y `soltar()` es idempotente |
+| Turno local | `atlas_core/exclusion_local.py` (`TurnoEscritura`) | Bloqueo de 1 byte (`msvcrt.locking`) en `%LOCALAPPDATA%\Atlas\cache\exclusion_local\turno_<sha256(raíz)>.lock`. Pertenece a un **handle del proceso**: no hay hilo propietario y cualquier hilo puede soltarlo. Un único dueño por proceso y raíz, **sin reentrancia**; `soltar()` es idempotente |
 | Integración | `LeaseEscritorOperativo.adquirir/cerrar` y `EscritorEquipoUnico.adquirir/cerrar` | El turno se toma **antes** de consultar Cloud y se suelta **al final** de `cerrar()`, después de confirmar la custodia, detener el heartbeat e intentar liberar el lease. PULL, sesión Desktop, B1, mantenimiento (`--tarea-programada`), migración y `estado_confirmado --sembrar` lo heredan sin cambios propios |
 | Guardia | Audit hook que se instala al importar `atlas_core` | Defensa adicional, con la cobertura acotada que se detalla más abajo |
 
 ## Esperas, fallos y liberación (contrato)
 
+- **Orden.** Físico primero, lógico después: se registra sólo tras bloquear y escribir los datos del dueño. Al soltar se retira primero lo lógico (la guardia ya rechaza) y lo físico se libera en `finally`, con cierre incondicional del handle. Por eso `posee_turno` o `vigente` verdaderos implican el bloqueo concedido por el kernel.
 - **Esperas acotadas.** Toda espera es finita. `espera_segundos` infinita, NaN o negativa → `ValueError`.
-  - La espera del mutex dura lo que se pidió más `MARGEN_RESPUESTA_SEGUNDOS` (5 s) para que el hilo dueño responda.
-  - La transición de una raíz dentro del proceso tiene un plazo adicional de `PLAZO_LIBERACION_SEGUNDOS` (10 s).
-- **Fallo del hilo dueño.** Si fallan la carga de `kernel32`, `CreateMutexW`, `WaitForSingleObject` o `start()`, o si el hilo no responde a tiempo, `adquirir()` lanza `ErrorTurno` (un `OSError`). Nunca lo trata como turno obtenido ni deja al llamador esperando.
-  - Si el hilo tardío toma el mutex después, lo libera de inmediato, porque la orden de soltar ya está dada.
-- **Ocupado.** Si otro proceso tiene el turno, `adquirir()` devuelve `False`. En los escritores, esto se traduce en `ocupado=True` y `motivo="ESCRITOR_LOCAL_OCUPADO"`, **sin llamar a Cloud**:
+  - El bloqueo se intenta sin bloquear (`LK_NBLCK`) hasta el plazo pedido.
+  - Las transiciones de otros hilos del proceso se esperan como máximo ese plazo más `MARGEN_TRANSICION_SEGUNDOS` (15 s).
+- **Ocupado.** Si otro proceso u otra instancia del mismo proceso tiene el turno, `adquirir()` devuelve `False`. En los escritores: `ocupado=True` y `motivo="ESCRITOR_LOCAL_OCUPADO"`, **sin llamar a Cloud**:
   - Desktop reintenta con su espera acotada (150 s).
   - PULL omite el ciclo (`NO_ADQUIRIDO`).
   - Mantenimiento omite la pasada.
-- **Cierre.** `LeaseEscritorOperativo.cerrar()` ejecuta cada paso aunque falle el anterior, mediante `try/finally` anidados: custodia, heartbeat, liberación del lease y, al final, el turno. `EscritorEquipoUnico.cerrar()` hace lo mismo con su propio mutex.
-  - **El turno se suelta ante cualquier excepción.** La excepción se propaga encadenada; nunca se oculta.
-  - Si la liberación del mutex no puede confirmarse, `soltar()` lanza `ErrorTurno`. En ese caso el proceso ya no se considera dueño (la guardia rechaza) y otro proceso verá el mutex ocupado hasta que el hilo termine: falla cerrada, y visible.
-- **Hilos y raíces.** Cada raíz tiene su propia transición (`adquirir`/`soltar`), que se mantiene hasta que el mutex quedó tomado o liberado.
-  - Otro hilo nunca ve el mutex "a medio soltar"; espera la transición y lo obtiene. Esto corrige el falso "ocupado" que encontró Codex.
-  - El registro global solo se toma por instantes, nunca durante una espera ni una E/S. Un hilo nunca sostiene la transición de dos raíces a la vez.
-  - Entre procesos, las esperas cruzadas sobre dos raíces terminan dentro de su plazo, sin interbloqueo.
+- **Sin reentrancia.** Una adquisición anidada de otra instancia recibe `False` (antes fallaba con el 409 de Cloud). La misma instancia, siendo dueña, recibe `True` sin efecto y un único `soltar()` la libera.
+- **Fallo del mecanismo.** `open` denegado, caché inaccesible, error de `locking` distinto de "bloqueado", sin espacio para los datos del dueño: `ErrorTurno` (un `OSError`), sin posesión ni handle abierto. Fuera de Windows no hay mecanismo: `ErrorTurno`.
+- **Cierre.** `LeaseEscritorOperativo.cerrar()` ejecuta cada paso aunque falle el anterior: custodia, heartbeat, liberación del lease y, al final, el turno. `EscritorEquipoUnico.cerrar()` hace lo mismo con su propio mutex. Si falla `LK_UNLCK`, el handle se cierra igual y se informa `ErrorTurno`.
+- **Vigencia.** `vigente` de ambos escritores exige también `turno.vigente`.
+- **Hilos.** Cada raíz tiene una transición que serializa `adquirir` y `soltar`, también entre hilos de la misma instancia. La posee un testigo por llamada que se fija dentro del `try` y se borra con una asignación, sin el riesgo de un `Lock` tomado justo antes de una interrupción.
 
 ## Interrupción y abandono
 
-- Si el proceso termina por cualquier motivo (`TerminateProcess`, `os._exit`, caída), el kernel libera el mutex. **Nunca queda bloqueado por una interrupción.**
-- Una excepción, incluida `KeyboardInterrupt`, dentro de `with TurnoEscritura` o después de tomar el mutex libera el turno y se propaga.
-- **Señal de abandono.** Windows solo informa `WAIT_ABANDONED` si otro proceso mantenía el mutex abierto. Por eso el abandono se detecta con un **marcador local** (`%LOCALAPPDATA%\Atlas\cache\exclusion_local\turno_<sha>.json`):
-  - Lo escribe y lo borra solo quien posee el mutex.
-  - Si existe al adquirir, el dueño anterior terminó sin soltar → `abandonado=True`, y queda anotado en `abandonos.jsonl`.
-  - El marcador es **por perfil** (`LOCALAPPDATA`): la señal no cruza usuarios distintos.
+- Si el proceso termina por cualquier motivo, el kernel libera el bloqueo. Los hijos no lo conservan: el handle no es heredable.
+- Una excepción, incluida `KeyboardInterrupt`, en cualquier punto de `adquirir` o `soltar` deja el turno sin posesión ni bloqueo, y se propaga.
+- **Señal de abandono.** El archivo guarda los datos del dueño mientras lo posee (se sobrescriben sin vaciarlo antes) y se vacía al soltar. Si al adquirir no está vacío → `abandonado=True`, anotado en `abandonos.jsonl`.
+  - Es por perfil (`LOCALAPPDATA`).
+  - Puede dar falsos positivos (terminación tras retirar el registro y antes de vaciar), nunca falsos negativos para dueños registrados.
   - La **recuperación** de operaciones interrumpidas no forma parte de esta etapa.
+
+**Límites declarados, no demostrables más allá de esto:**
+
+| Límite | Consecuencia |
+|---|---|
+| Una interrupción asíncrona DENTRO del propio bloque de limpieza | Puede saltarse el cierre explícito. Lo lógico sigue sin indicar posesión; el handle se cierra al liberarse su última referencia o al terminar el proceso, y una traza retenida puede demorarlo |
+| Usuarios de Windows distintos | No se excluyen: el archivo es por perfil. PULL y Desktop corren como `corte`. Ubicarlo en `%ProgramData%` sería una decisión aparte |
+| Liberación diferida | Windows puede demorar el desbloqueo tras la terminación abrupta de un proceso. Medido 0,05–0,08 s, sin cota garantizada: el siguiente puede ver "ocupado" brevemente |
+| `locking` informa EACCES también por acceso denegado | Se ve como "ocupado", falla cerrado hasta agotar el plazo |
+| Afinidad de hilo del mutex propio de `EscritorEquipoUnico` | Anterior a esta etapa y fuera de alcance |
 
 ## Raíces protegidas y modos
 
@@ -78,7 +84,7 @@ La guardia compara **rutas textuales** (`abspath` + `normcase`) en los eventos d
 | **Alias de ruta**: junction o enlace hacia la raíz y prefijo `\\?\`. Por el mismo motivo tampoco se cubren los nombres cortos 8.3 ni la diferencia entre unidad mapeada y UNC | `test_limite_alias_de_ruta_escribe_sin_turno` |
 | **Eventos no listados**, por ejemplo `sqlite3`, que crea y escribe su base sin un `open` auditado | `test_limite_eventos_no_listados_sqlite_escribe_sin_turno` |
 | **Procesos ajenos al Motor** (Google Drive, Explorador, Excel, scripts sin `atlas_core`, procesos hijos) | `test_limite_un_proceso_ajeno_al_motor_escribe_aunque_otro_tenga_el_turno` |
-| **Otro computador**: el mutex es local | — |
+| **Otro computador**: el bloqueo es local | — |
 | **Proceso vivo y colgado**: retiene el turno, y los demás fallan cerrado hasta que termina | `test_limite_un_proceso_colgado_retiene_el_turno_hasta_que_termina` |
 
 **Consecuencia.** La exclusión entre escritores del Motor se apoya en el **turno que toman los escritores**, no en la guardia. La guardia evita que código del Motor sin turno escriba por las vías cubiertas.
@@ -91,11 +97,7 @@ La guardia compara **rutas textuales** (`abspath` + `normcase`) en los eventos d
 
 ## Pruebas
 
-- `tests/test_exclusion_local.py`: procesos reales con concurrencia, espera, `taskkill /F`, `os._exit`, excepción, lease vencido en el mismo equipo, equipo único, 3 × 25 ciclos, guardia, modos y reentrancia.
+- `tests/test_exclusion_local.py`: procesos reales con concurrencia, espera, `taskkill /F`, `os._exit`, excepción, lease vencido en el mismo equipo, equipo único, 3 × 25 ciclos, guardia, modos y ausencia de reentrancia.
 - `tests/test_exclusion_local_flujos.py`: lectores directos de Desktop, sesión Desktop y pasada PULL con `exigir`.
-- `tests/test_exclusion_local_fallos.py`: fallos inyectados y límites.
-  - Fallos al adquirir: `kernel32`, `CreateMutexW`, hilo que no responde, `start()` y una interrupción después de tomar el mutex.
-  - Fallos al soltar: liberación no confirmada.
-  - Fallos al cerrar el lease: en la custodia, la liberación, el heartbeat y el propio turno; y al cerrar el equipo único: en `ReleaseMutex`.
-  - Carreras: adquisición durante una liberación pausada, espera en una raíz frente a otra raíz, esperas cruzadas entre procesos y 12 hilos × 40 ciclos.
-  - Cobertura de la guardia y sus límites.
+- `tests/test_exclusion_local_fallos.py`: cierre del lease y del equipo único con excepciones, esperas entre raíces, cobertura de la guardia y sus límites.
+- `tests/test_exclusion_local_bloqueo.py`: F1-F4 de la revisión de b4d0de2; interrupción y terminación en cada punto crítico; solapamiento de intervalos QPC entre procesos; concurrencia de una misma instancia y de 12 hilos; soltar desde otro hilo; herencia a hijos; errores del sistema; pérdida forzada del turno en los escritores.

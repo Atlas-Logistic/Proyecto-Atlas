@@ -1,16 +1,10 @@
-"""Exclusión local (C1): fallos inyectados, carreras entre hilos y cobertura
-REAL de la guardia. Corrige los bloqueos de la revisión de Codex a 1364fd1:
+"""Exclusión local (C1): cierre con fallos, esperas entre raíces y cobertura
+REAL de la guardia. Lo cubierto se prueba; lo NO cubierto (descriptor abierto,
+llamadas nativas, alias de ruta, eventos no listados) se demuestra como límite,
+no se afirma protección. Las interrupciones por punto, F1-F4 y las invariantes
+del bloqueo están en tests/test_exclusion_local_bloqueo.py.
 
-1. Hilo dueño que falla antes de informar -> sin espera indefinida.
-2. Cierre de LeaseEscritorOperativo / EscritorEquipoUnico con excepciones ->
-   el turno se suelta siempre y la excepción se propaga.
-3. Carreras adquirir/soltar entre hilos y entre raíces -> sin "ocupado" falso
-   y sin cerrojo global sostenido durante una espera.
-4. Cobertura de la guardia: lo cubierto se prueba; lo NO cubierto (descriptor
-   abierto, llamadas nativas, alias de ruta, eventos no listados) se demuestra
-   como límite, no se afirma protección.
-
-Mutex, hilos y procesos son reales (Windows). Nada toca G: ni Cloud.
+Hilos y procesos son reales (Windows). Nada toca G: ni Cloud.
 """
 from __future__ import annotations
 
@@ -31,7 +25,7 @@ from atlas_core import escritor_operativo as eo
 from atlas_core import exclusion_local as el
 from tests.test_exclusion_local import entorno, ordenar, senal, terminar_ok  # noqa: F401
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="mutex con nombre de Windows")
+pytestmark = pytest.mark.skipif(os.name != "nt", reason="bloqueo de archivo de Windows")
 
 
 def _en_hilo(funcion, limite: float = 30.0):
@@ -65,96 +59,12 @@ def _otro_proceso_obtiene(entorno, nombre: str) -> bool:  # noqa: F811
     return ok
 
 
-# ------------------------------------------- 1. hilo dueño que falla o no responde
-
-@pytest.mark.parametrize("fallo", ["kernel32", "create_mutex"])
-def test_fallo_del_hilo_dueno_antes_de_informar_no_deja_espera_indefinida(entorno, monkeypatch, fallo):  # noqa: F811
-    real = el._kernel32
-
-    def kernel32_roto():
-        if fallo == "kernel32":
-            raise OSError("kernel32 no disponible (inyectado)")
-        k = real()
-
-        class Envoltura:
-            def __getattr__(self, nombre):
-                return getattr(k, nombre)
-
-            @staticmethod
-            def CreateMutexW(*_args):
-                return None
-        return Envoltura()
-
-    monkeypatch.setattr(el, "_kernel32", kernel32_roto)
-    turno = el.TurnoEscritura(entorno["raiz"])
-    resultado = _en_hilo(turno.adquirir, limite=10)
-    assert isinstance(resultado.get("error"), el.ErrorTurno), resultado
-    assert resultado["duracion"] < 2
-    assert not turno.vigente and not el.posee_turno(entorno["raiz"])
-    monkeypatch.setattr(el, "_kernel32", real)
-    turno = el.TurnoEscritura(entorno["raiz"])
-    assert turno.adquirir()  # el estado quedó limpio
-    turno.soltar()
-
-
-def test_hilo_dueno_que_no_responde_en_plazo_es_error_y_no_retiene_el_mutex(entorno, monkeypatch):  # noqa: F811
-    real = el._kernel32
-    monkeypatch.setattr(el, "MARGEN_RESPUESTA_SEGUNDOS", 0.5)
-
-    def kernel32_lento():
-        time.sleep(2.0)  # el hilo dueño se demora más que espera + margen
-        return real()
-
-    monkeypatch.setattr(el, "_kernel32", kernel32_lento)
-    turno = el.TurnoEscritura(entorno["raiz"])
-    resultado = _en_hilo(turno.adquirir, limite=10)
-    assert isinstance(resultado.get("error"), el.ErrorTurno) and "no respondió" in str(resultado["error"])
-    assert resultado["duracion"] < 1.5
-    monkeypatch.setattr(el, "_kernel32", real)
-    time.sleep(2.5)  # el hilo tardío toma el mutex y, con la orden de soltar ya dada, lo libera
-    assert _otro_proceso_obtiene(entorno, "tras_tardio")
-
-
-def test_fallo_al_iniciar_el_hilo_es_error_y_libera_la_transicion(entorno, monkeypatch):  # noqa: F811
-    def no_inicia(_self):
-        raise RuntimeError("can't start new thread (inyectado)")
-
-    monkeypatch.setattr(el._Poseedor, "start", no_inicia)
-    resultado = _en_hilo(el.TurnoEscritura(entorno["raiz"]).adquirir, limite=10)
-    assert isinstance(resultado.get("error"), el.ErrorTurno)
-    monkeypatch.undo()
-    t = el.TurnoEscritura(entorno["raiz"])
-    assert _en_hilo(t.adquirir, limite=10)["valor"] is True
-    t.soltar()
-
-
-def test_interrupcion_tras_tomar_el_mutex_lo_suelta_y_se_propaga(entorno, monkeypatch):  # noqa: F811
-    def interrumpir(*_args):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(el, "_escribir_marcador", interrumpir)
-    with pytest.raises(KeyboardInterrupt):
-        el.TurnoEscritura(entorno["raiz"]).adquirir()
-    assert not el.posee_turno(entorno["raiz"])
-    assert _otro_proceso_obtiene(entorno, "tras_interrupcion")
-
+# ------------------------------------------- 1. parámetros
 
 def test_espera_infinita_o_negativa_se_rechaza():
     for valor in (float("inf"), float("nan"), -1):
         with pytest.raises(ValueError):
             el.TurnoEscritura("C:\\x", espera_segundos=valor)
-
-
-def test_liberacion_no_confirmada_se_informa_como_error(entorno, monkeypatch):  # noqa: F811
-    turno = el.TurnoEscritura(entorno["raiz"])
-    assert turno.adquirir()
-    poseedor = el._estados[turno.raiz_norm].poseedor
-    real = el._Poseedor.soltar
-    monkeypatch.setattr(el._Poseedor, "soltar", lambda self: False)
-    with pytest.raises(el.ErrorTurno, match="No se confirmó la liberación"):
-        turno.soltar()
-    assert not el.posee_turno(entorno["raiz"])  # la guardia ya no permite escribir
-    assert real(poseedor) is True  # (limpieza real del mutex de la prueba)
 
 
 # ------------------------------------------- 2. cierre con excepciones inesperadas
@@ -255,37 +165,8 @@ def test_cierre_de_equipo_unico_suelta_el_turno_si_falla_release_mutex(entorno):
 
 # ------------------------------------------------- 3. carreras entre hilos y raíces
 
-def test_adquirir_durante_una_liberacion_pausada_espera_y_obtiene_el_turno(entorno, monkeypatch):  # noqa: F811
-    """Revisión Codex (2): antes, soltar borraba el registro antes de liberar el
-    mutex y una adquisición concurrente del MISMO proceso devolvía ocupado."""
-    real = el._Poseedor.soltar
-    liberando = threading.Event()
-
-    def soltar_lento(self):
-        liberando.set()
-        time.sleep(1.0)
-        return real(self)
-
-    monkeypatch.setattr(el._Poseedor, "soltar", soltar_lento)
-    primero = el.TurnoEscritura(entorno["raiz"])
-    assert primero.adquirir()
-    hilo_soltar = threading.Thread(target=primero.soltar)
-    hilo_soltar.start()
-    assert liberando.wait(5)
-    segundo = el.TurnoEscritura(entorno["raiz"])
-    resultado = _en_hilo(segundo.adquirir, limite=20)
-    hilo_soltar.join(20)
-    assert resultado.get("valor") is True, resultado
-    assert resultado["duracion"] >= 0.5  # esperó a que la liberación terminara
-    assert el.posee_turno(entorno["raiz"])
-    monkeypatch.undo()
-    segundo.soltar()
-    assert not el.posee_turno(entorno["raiz"])
-
-
 def test_espera_en_una_raiz_no_bloquea_la_adquisicion_de_otra(entorno, tmp_path):  # noqa: F811
-    """Revisión Codex: el cerrojo global de adquisición se sostenía durante la
-    espera del mutex. Ahora cada raíz tiene su transición."""
+    """Cada raíz tiene su transición: esperar una no bloquea otra."""
     a = entorno["lanzar"]("tomar")  # otro proceso sostiene la raíz protegida
     senal(entorno["control"], "tomar", proceso=a)
     otra = tmp_path / "otra_raiz"
@@ -293,7 +174,7 @@ def test_espera_en_una_raiz_no_bloquea_la_adquisicion_de_otra(entorno, tmp_path)
     esperando = el.TurnoEscritura(entorno["raiz"], espera_segundos=3)
     hilo = threading.Thread(target=esperando.adquirir)
     hilo.start()
-    time.sleep(0.3)  # el hilo ya está esperando el mutex de la primera raíz
+    time.sleep(0.3)  # el hilo ya está esperando el bloqueo de la primera raíz
     rapido = el.TurnoEscritura(otra)
     resultado = _en_hilo(rapido.adquirir, limite=10)
     assert resultado.get("valor") is True and resultado["duracion"] < 1.0, resultado
@@ -333,36 +214,6 @@ def test_esperas_cruzadas_entre_procesos_terminan_acotadas_sin_interbloqueo(ento
         for p in (p1, p2):
             if p.poll() is None:
                 p.kill()
-
-
-def test_hilos_concurrentes_adquieren_y_sueltan_sin_falsos_ocupados_ni_bloqueos(entorno):  # noqa: F811
-    raiz = entorno["raiz"]
-    fallos: list = []
-
-    def trabajar(n):
-        for i in range(40):
-            turno = el.TurnoEscritura(raiz, espera_segundos=5)
-            try:
-                if not turno.adquirir():
-                    fallos.append(("ocupado", n, i))
-                    continue
-                (raiz / f"hilo_{n}.txt").write_text(str(i), encoding="utf-8")
-            except BaseException as error:  # noqa: BLE001
-                fallos.append((type(error).__name__, n, i))
-            finally:
-                turno.soltar()
-
-    hilos = [threading.Thread(target=trabajar, args=(n,), daemon=True) for n in range(12)]
-    inicio = time.monotonic()
-    for h in hilos:
-        h.start()
-    for h in hilos:
-        h.join(120)
-    assert not any(h.is_alive() for h in hilos), "bloqueo entre hilos"
-    assert fallos == []
-    assert time.monotonic() - inicio < 120
-    assert not el.posee_turno(raiz)
-    assert _otro_proceso_obtiene(entorno, "tras_hilos")
 
 
 # ---------------------------------------------------- 4. cobertura de la guardia

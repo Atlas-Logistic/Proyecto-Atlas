@@ -218,6 +218,7 @@ class RelevoEstadoConfirmado(unittest.TestCase):
         self.assertTrue(lease.adquirir())
         self.casa.escribir(DATASET, "v2-sin-confirmar")
         lease.custodia.detener()  # corte de luz: sin confirmar ni liberar
+        lease._soltar_turno()  # el proceso muere: el kernel libera el bloqueo local
         self.cloud.avanzar(3)
         with self.casa.lease() as vuelta:
             self.assertTrue(vuelta.adquirir(), vuelta.motivo)
@@ -231,6 +232,7 @@ class RelevoEstadoConfirmado(unittest.TestCase):
         self.assertTrue(lease.adquirir())
         self.casa.escribir(DATASET, "casa-sin-confirmar")
         lease.custodia.detener()
+        lease._soltar_turno()  # el proceso muere: el kernel libera el bloqueo local
         self.cloud.avanzar(11)
         self.oficina.escribir(DATASET, "v1")
         self.turno(self.oficina, {DATASET: "oficina-v2"})

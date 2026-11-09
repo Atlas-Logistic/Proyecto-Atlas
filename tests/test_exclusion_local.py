@@ -20,7 +20,7 @@ import pytest
 from atlas_core import escritor_operativo as eo
 from atlas_core import exclusion_local as el
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="mutex con nombre de Windows")
+pytestmark = pytest.mark.skipif(os.name != "nt", reason="bloqueo de archivo de Windows")
 
 AYUDANTE = Path(__file__).with_name("ayudante_exclusion_local.py")
 REPO = AYUDANTE.parent.parent
@@ -301,20 +301,24 @@ def test_guardia_en_proceso_exige_turno_y_respeta_modos(entorno):
         os.environ["ATLAS_EXCLUSION_LOCAL"] = "exigir"
 
 
-def test_turno_reentrante_en_el_proceso_y_liberacion_con_la_ultima_referencia(entorno, tmp_path):
+def test_turno_no_es_reentrante_y_otra_instancia_lo_obtiene_tras_soltar(entorno, tmp_path):
     raiz = entorno["raiz"]
     primero, segundo = el.TurnoEscritura(raiz), el.TurnoEscritura(raiz)
-    assert primero.adquirir() and segundo.adquirir()
-    primero.soltar()
-    assert el.posee_turno(raiz / "x")  # aún lo sostiene `segundo`
+    assert primero.adquirir()
+    assert primero.adquirir()  # la misma instancia: sin efecto, una sola posesión
+    assert segundo.adquirir() is False and not segundo.vigente
+    segundo.soltar()  # no es dueña: no libera lo ajeno
+    assert primero.vigente and el.posee_turno(raiz / "x")
     control_b = tmp_path / "control_b"
     control_b.mkdir()
     b = entorno["lanzar"]("tomar", control_propio=control_b)
     assert senal(control_b, "tomar", proceso=b)["ok"] is False
     terminar_ok(b)
-    segundo.soltar()
-    segundo.soltar()  # idempotente
+    primero.soltar()  # un solo soltar basta
+    primero.soltar()  # idempotente
     assert not el.posee_turno(raiz / "x")
+    assert segundo.adquirir() and segundo.vigente
+    segundo.soltar()
 
 
 class _CloudSecuencia:
