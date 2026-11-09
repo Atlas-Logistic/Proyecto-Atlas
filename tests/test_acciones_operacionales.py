@@ -955,7 +955,7 @@ def test_corregir_numero_guia_nueve_absorbido_es_focal_y_auditable(entorno, monk
     assert {k: v for k, v in fila.items() if k != "numero_guia"} == {
         k: v for k, v in antes["482179.jpeg"].items() if k != "numero_guia"}  # ningún otro campo cambia
     assert filas["500002.jpeg"] == antes["500002.jpeg"]
-    assert forzadas == [{"482179"}] and reportes == ["reporte"]
+    assert forzadas == [] and reportes == ["reporte"]
     assert resultado["reconciliacion"] is None
     assert _sha(entorno["actual"] / "decisiones_pendientes.json") == bandeja_antes
     aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
@@ -998,7 +998,7 @@ def test_reparador_no_habilita_numero_guia_sin_la_accion_tipada(entorno):
 
 def test_corregir_numero_guia_ausente_es_focal_y_auditable(entorno, monkeypatch):
     """Casos reales 482352/482350 (Mobile): folio "No encontrado" leído de la
-    foto; sólo cambia el folio y sus estados, la lectura queda en el ledger."""
+    foto; sólo cambia el folio, la lectura queda en el ledger."""
     ausente = dict(numero_guia="No encontrado", numero_transporte="0000364476",
                    motivos_revision_documento="GUIA_AUSENTE", indicador_revision="REVISAR",
                    estado_documental="REQUIERE_REVISION", estado_operacional="REQUIERE_REVISION")
@@ -1026,13 +1026,12 @@ def test_corregir_numero_guia_ausente_es_focal_y_auditable(entorno, monkeypatch)
 
     filas = _filas_dataset(entorno)
     fila = filas["mobile/bd45/original.jpg"]
-    assert (fila["numero_guia"], fila["motivos_revision_documento"], fila["estado_documental"]) == ("482350", "", "OK")
-    derivados = {"numero_guia", "motivos_revision_documento", "indicador_revision", "estado_documental",
-                 "estado_operacional"}
+    assert (fila["numero_guia"], fila["motivos_revision_documento"], fila["estado_documental"]) == ("482350", "GUIA_AUSENTE", "REQUIERE_REVISION")
+    derivados = {"numero_guia"}
     assert {k: v for k, v in fila.items() if k not in derivados} == {
         k: v for k, v in antes["mobile/bd45/original.jpg"].items() if k not in derivados}
     assert filas["mobile/otro/original.jpg"] == antes["mobile/otro/original.jpg"]
-    assert forzadas == [{"482350"}] and reportes == ["reporte"] and resultado["reconciliacion"] is None
+    assert forzadas == [] and reportes == ["reporte"] and resultado["reconciliacion"] is None
     assert _sha(entorno["actual"] / "decisiones_pendientes.json") == bandeja_antes
     aplicaciones = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8"))["aplicaciones"]
     assert [(a["accion"], a["valor_documental"], a["valor_corregido"]) for a in aplicaciones
@@ -1123,17 +1122,16 @@ def test_482402_folio_ausente_conserva_y_traslada_su_tarjeta_pendiente(entorno, 
 
     resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
     assert resultado["estado"] == "APLICADA", resultado
-    assert resultado["reconciliacion"] is None and forzadas == [{"482402"}] and reportes == ["reporte"]
+    assert resultado["reconciliacion"] is None and forzadas == [] and reportes == ["reporte"]
 
-    # Dataset: sólo el folio y sus estados derivados; destino, material y OCR intactos.
+    # Dataset: sólo el folio; estados, destino, material y OCR intactos.
     filas = _filas_dataset(entorno)
     fila = filas[ARCHIVO_482402]
     assert fila["numero_guia"] == "482402"
-    derivados = {"numero_guia", "motivos_revision_documento", "indicador_revision", "estado_documental",
-                 "estado_operacional"}
+    derivados = {"numero_guia"}
     assert {k: v for k, v in fila.items() if k not in derivados} == {
         k: v for k, v in antes[ARCHIVO_482402].items() if k not in derivados}
-    assert "GUIA_AUSENTE" not in fila["motivos_revision_documento"]
+    assert fila["motivos_revision_documento"] == antes[ARCHIVO_482402]["motivos_revision_documento"]
     assert filas["500001.jpeg"] == antes["500001.jpeg"]
 
     # Bandeja: mismas tarjetas, misma cabecera; la de destino sigue PENDIENTE y

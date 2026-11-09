@@ -29,6 +29,35 @@ def _identidad(documento: Mapping[str, object]) -> tuple[str, str]:
     return str(documento.get("archivo") or "").strip(), str(documento.get("numero_guia") or "").strip()
 
 
+def _folios_anteriores(fila: Mapping[str, object], aplicaciones: list):
+    """Identidades anteriores unidas por correcciones auditadas del mismo documento.
+
+    Se recorre hacia atrás para respetar el orden de las correcciones y nunca
+    inferir una relación por folio o transporte por sí solos.
+    """
+    from atlas_core.decisiones_pendientes import _actor_es_humano
+    archivo, guia = _identidad(fila)
+    transporte = str(fila.get("numero_transporte") or "").strip()
+    vigentes = {guia}
+    for entrada in reversed(aplicaciones):
+        yield entrada, vigentes
+        if not isinstance(entrada, Mapping) or not archivo or not transporte:
+            continue
+        doc = entrada.get("documento")
+        if not isinstance(doc, Mapping):
+            continue
+        actor = str(entrada.get("actor") or "").strip()
+        anterior = str(entrada.get("valor_documental") or "").strip()
+        nuevo = str(entrada.get("valor_corregido") or "").strip()
+        if (entrada.get("tipo") == "CORRECCION_DOCUMENTAL_OPERADOR"
+                and entrada.get("accion") == "CORREGIR_NUMERO_GUIA"
+                and entrada.get("campo") == "numero_guia" and actor and _actor_es_humano(actor)
+                and _identidad(doc) == (archivo, nuevo)
+                and str(doc.get("numero_transporte") or "").strip() == transporte
+                and nuevo in vigentes and anterior and anterior != nuevo):
+            vigentes.add(anterior)
+
+
 def ruta_valida(ruta: object, comuna: str) -> bool:
     return (isinstance(ruta, Mapping) and ruta.get("estado_ruta") == RUTA_CALCULADA
             and bool(str(ruta.get("distancia_km") or "").strip())
@@ -45,19 +74,23 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
     if not isinstance(aplicaciones, list):
         return salida
     vigente = None
-    for entrada in aplicaciones:
+    for entrada, folios in _folios_anteriores(fila, aplicaciones):
         if not isinstance(entrada, Mapping) or entrada.get("tipo") != TIPO:
             continue
         documento = entrada.get("documento")
         destino = entrada.get("destino_operacional")
         if not isinstance(documento, Mapping) or not isinstance(destino, Mapping):
             continue
-        if _identidad(documento) != (archivo, guia):
+        archivo_entrada, guia_entrada = _identidad(documento)
+        if archivo_entrada != archivo or guia_entrada not in folios:
+            continue
+        if guia_entrada != guia and str(documento.get("numero_transporte") or "").strip() != str(fila.get("numero_transporte") or "").strip():
             continue
         direccion = str(destino.get("direccion") or "").strip()
         comuna = str(destino.get("comuna") or "").strip()
         if direccion and comuna:
             vigente = direccion, comuna, entrada.get("ruta_operacional")
+            break
     if vigente:
         direccion, comuna, ruta = vigente
         for campo in DERIVADOS:
@@ -147,9 +180,25 @@ def identidades_destino_confirmado(ruta_ledger):
     aplicaciones = ledger.get("aplicaciones", []) if isinstance(ledger, Mapping) else None
     if not isinstance(aplicaciones, list):
         raise ValueError("Ledger de decisiones sin aplicaciones validas")
+    from atlas_core.decisiones_pendientes import _actor_es_humano
     identidades = set()
     for e in aplicaciones:
-        if not isinstance(e, Mapping) or e.get("tipo") != TIPO:
+        if not isinstance(e, Mapping):
+            continue
+        if (e.get("tipo") == "CORRECCION_DOCUMENTAL_OPERADOR" and e.get("accion") == "CORREGIR_NUMERO_GUIA"
+                and e.get("campo") == "numero_guia" and str(e.get("actor") or "").strip()
+                and _actor_es_humano(e.get("actor")) and isinstance(e.get("documento"), Mapping)):
+            d = e["documento"]
+            archivo, nuevo = _identidad(d)
+            transporte = str(d.get("numero_transporte") or "").strip()
+            anterior = str(e.get("valor_documental") or "").strip()
+            if (archivo and transporte and anterior and nuevo and anterior != nuevo
+                    and nuevo == str(e.get("valor_corregido") or "").strip()
+                    and (archivo, anterior, transporte) in identidades):
+                identidades.remove((archivo, anterior, transporte))
+                identidades.add((archivo, nuevo, transporte))
+            continue
+        if e.get("tipo") != TIPO:
             continue
         d, v = e.get("documento"), e.get("destino_operacional")
         if not isinstance(d, Mapping) or not isinstance(v, Mapping):
@@ -157,8 +206,8 @@ def identidades_destino_confirmado(ruta_ledger):
         archivo, guia = _identidad(d)
         if not archivo or not guia or not v.get("direccion") or not v.get("comuna"):
             raise ValueError("Decision de destino incompleta")
-        identidades.add((archivo, guia))
-    return frozenset(identidades)
+        identidades.add((archivo, guia, str(d.get("numero_transporte") or "").strip()))
+    return frozenset((archivo, guia) for archivo, guia, _ in identidades)
 
 
 def retirar_decisiones_destino_operacional(decisiones, *, ruta_ledger):

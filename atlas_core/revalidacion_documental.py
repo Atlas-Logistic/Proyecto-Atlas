@@ -332,7 +332,7 @@ def _reporte_vigente_valido(raiz: Path, estado: dict | None) -> bool:
     return (raiz / reporte_vigente / "viajes.csv").is_file()
 
 
-def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
+def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]], *, transicion_folio=None) -> None:
     guias = guias_en_alcance(ruta_csv)
     if guias is not None:
         # Los revalidadores sólo reciben las filas afectadas. Publicar conserva
@@ -363,6 +363,18 @@ def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]]) -> No
                           for f in csv.DictReader(archivo, delimiter=";")}
         campos_protegidos = {"despachar_a_crudo", "latitud_entrega", "longitud_entrega", *CAMPOS_DERIVADOS_RUTA}
         claves_nuevas = [(str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()) for f in filas]
+        if transicion_folio is not None and (transicion_folio[0], transicion_folio[1]) in identidades:
+            archivo_id, guia_anterior, guia_nueva, transporte = transicion_folio
+            antigua, nueva = (archivo_id, guia_anterior), (archivo_id, guia_nueva)
+            candidatas = [f for f in filas if (str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()) == nueva]
+            original = originales.get(antigua)
+            if (not original or len(candidatas) != 1 or claves_nuevas.count(antigua) != 0
+                    or not transporte or str(original.get("numero_transporte", "")).strip() != transporte
+                    or candidatas[0] != {**original, "numero_guia": guia_nueva}):
+                raise ValueError("Transición de folio no identifica un documento único e intacto")
+            if antigua in identidades:
+                identidades = (identidades - {antigua}) | {nueva}
+                originales[nueva] = original
         for identidad in identidades:
             if identidad in originales and claves_nuevas.count(identidad) != 1:
                 raise ValueError("Documento con destino confirmado eliminado o duplicado; escritura detenida")
