@@ -153,11 +153,20 @@ class LeaseEscritorOperativo:
         # de pedir el lease hasta después de liberarlo.
         self.turno = None
         self.turno_abandonado = False
+        self._turno_exigido = False
 
     @property
     def vigente(self) -> bool:
         return (bool(self.lease_token) and not self._perdido.is_set()
-                and (self.turno is None or self.turno.vigente))
+                and self._turno_autoriza())
+
+    def _turno_autoriza(self) -> bool:
+        """Con raíz operacional, sólo un turno físico vigente autoriza. Sin
+        raíz no hay turno que exigir (y la guardia sigue rechazando escribir
+        en una raíz protegida); haber tomado uno ya obliga para siempre."""
+        if self.turno is not None:
+            return self.turno.vigente
+        return not self._turno_exigido and self._raiz_turno() is None
 
     def _raiz_turno(self):
         if self.custodia is not None and getattr(self.custodia, "raiz", None) is not None:
@@ -169,6 +178,7 @@ class LeaseEscritorOperativo:
         raiz = self._raiz_turno()
         if raiz is None:
             return True  # sin raíz no hay turno; la guardia rechaza escribir en una raíz protegida
+        self._turno_exigido = True
         if self.turno is None or not self.turno.vigente:
             self.turno = TurnoEscritura(raiz)
             if not self.turno.adquirir():

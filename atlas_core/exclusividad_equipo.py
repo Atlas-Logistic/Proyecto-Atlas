@@ -100,7 +100,7 @@ class EscritorEquipoUnico:
         self._k.ReleaseMutex.argtypes=[wintypes.HANDLE]
         self._k.CloseHandle.argtypes=[wintypes.HANDLE]
     @property
-    def vigente(self): return self.handle is not None and not self._perdido.is_set() and (self.turno is None or self.turno.vigente)
+    def vigente(self): return self.handle is not None and not self._perdido.is_set() and self.turno is not None and self.turno.vigente
     def adquirir(self):
         try: return self._adquirir()
         except BaseException:

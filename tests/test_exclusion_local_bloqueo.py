@@ -471,6 +471,76 @@ def test_equipo_unico_deja_de_estar_vigente_si_el_turno_se_pierde(entorno):  # n
     assert el._propietarios == {}
 
 
+def _escritor_con_raiz(tipo, entorno, monkeypatch):  # noqa: F811
+    if tipo == "lease":
+        return _lease(entorno, monkeypatch, _Cloud())
+    from atlas_core.exclusividad_equipo import EscritorEquipoUnico
+    return EscritorEquipoUnico(entorno["raiz"], verificar=lambda: None)
+
+
+TIPOS_ESCRITOR = ["lease", "equipo_unico"]
+
+
+@pytest.mark.parametrize("tipo", TIPOS_ESCRITOR)
+def test_regresion_codex_escritor_no_sigue_vigente_tras_soltar_el_turno(entorno, monkeypatch, tipo):  # noqa: F811
+    """Reproducción de Codex sobre ce90d27: _soltar_turno() dejaba turno=None y
+    el bloqueo libre, pero vigente seguía True y otro turno adquiría."""
+    escritor = _escritor_con_raiz(tipo, entorno, monkeypatch)
+    assert escritor.adquirir() and escritor.vigente
+    escritor._soltar_turno()
+    assert escritor.turno is None and escritor.vigente is False
+    assert _otro_proceso_obtiene(entorno, "tras_soltar_turno")
+    assert escritor.vigente is False
+    escritor.cerrar()
+    assert escritor.vigente is False
+
+
+@pytest.mark.parametrize("tipo", TIPOS_ESCRITOR)
+def test_escritor_no_sigue_vigente_si_el_turno_se_invalida_conservando_el_objeto(entorno, monkeypatch, tipo):  # noqa: F811
+    escritor = _escritor_con_raiz(tipo, entorno, monkeypatch)
+    assert escritor.adquirir()
+    escritor.turno.soltar()
+    assert escritor.turno is not None and escritor.vigente is False
+    assert _otro_proceso_obtiene(entorno, "tras_invalidar")
+    escritor.cerrar()
+
+
+@pytest.mark.parametrize("tipo", TIPOS_ESCRITOR)
+@pytest.mark.parametrize("punto", PUNTOS_SOLTAR)
+def test_escritor_no_sigue_vigente_tras_interrumpir_la_liberacion(entorno, monkeypatch, tipo, punto):  # noqa: F811
+    escritor = _escritor_con_raiz(tipo, entorno, monkeypatch)
+    assert escritor.adquirir()
+    _inyectar(monkeypatch, punto, KeyboardInterrupt)
+    with pytest.raises(KeyboardInterrupt):
+        escritor._soltar_turno()
+    assert escritor.vigente is False
+    assert _otro_proceso_obtiene(entorno, "tras_interrumpir")
+    escritor.cerrar()
+    assert escritor.vigente is False
+
+
+def test_lease_con_raiz_no_recupera_vigencia_si_la_raiz_desaparece_del_entorno(entorno, monkeypatch):  # noqa: F811
+    escritor = _escritor_con_raiz("lease", entorno, monkeypatch)
+    assert escritor.adquirir()
+    escritor._soltar_turno()
+    monkeypatch.delenv("ATLAS_DATA_DIR")
+    assert escritor._raiz_turno() is None and escritor.vigente is False
+    escritor.cerrar()
+
+
+def test_lease_sin_raiz_es_vigente_pero_no_elude_la_exclusion(entorno, monkeypatch):  # noqa: F811
+    escritor = _escritor_con_raiz("lease", entorno, monkeypatch)
+    monkeypatch.delenv("ATLAS_DATA_DIR")
+    assert escritor.adquirir() and escritor.turno is None and escritor.vigente is True
+    with pytest.raises(el.EscrituraSinTurno):
+        (entorno["raiz"] / "sin_turno.txt").write_text("x", encoding="utf-8")
+    assert not (entorno["raiz"] / "sin_turno.txt").exists()
+    # Si aparece una raíz operacional sin turno, deja de autorizar.
+    monkeypatch.setenv("ATLAS_DATA_DIR", str(entorno["raiz"]))
+    assert escritor.vigente is False
+    escritor.cerrar()
+
+
 def test_adquisicion_anidada_de_escritores_falla_con_ocupado_local(entorno, monkeypatch):  # noqa: F811
     primero = _lease(entorno, monkeypatch, _Cloud())
     assert primero.adquirir()
