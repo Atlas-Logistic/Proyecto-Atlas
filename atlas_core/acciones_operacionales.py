@@ -3103,6 +3103,174 @@ class CapaAccionesOperacionales:
         except SesionOcupadaError as error:
             return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
 
+    def _respaldo_verificado(self, marca: dict, clave: str) -> Path:
+        base = marca.get("respaldo")
+        huellas = marca.get("huellas_antes") or {}
+        if not isinstance(base, str) or not base or not huellas.get(clave):
+            raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", f"sin respaldo de {clave}")
+        segura = (self.raiz / "respaldos" / "acciones_operacionales").resolve()
+        ruta = (self.raiz / base / self._ctx.archivos[clave].name).resolve()
+        if not ruta.is_relative_to(segura) or not ruta.is_file() or _huella_archivo(ruta) != huellas[clave]:
+            raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", f"respaldo de {clave} no verificable")
+        return ruta
+
+    def _huella_dataset_corregido(self, preview: dict, marca: dict) -> str:
+        accion = preview.get("accion")
+        if accion == "DOCUMENTO_CORREGIR_NUMERO_GUIA":
+            campo = "numero_guia"
+        elif accion == "DOCUMENTO_ASIGNAR_OBRA" and (preview.get("parametros") or {}).get("conservar_estado") is True:
+            campo = "obra_destino"
+        else:
+            raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "acción documental no admitida")
+        entidad, antes, despues = preview.get("entidad"), preview.get("valor_actual"), preview.get("valor_propuesto")
+        if not all(isinstance(x, dict) for x in (entidad, antes, despues)):
+            raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "preview documental inválido")
+        respaldo = self._respaldo_verificado(marca, "dataset")
+        from atlas_core.procesamiento_masivo import COLUMNAS
+        from atlas_core.texto_unicode import sanear_filas_csv
+        with respaldo.open("r", encoding="utf-8-sig", newline="") as original:
+            lector = csv.DictReader(original, delimiter=";")
+            if lector.fieldnames != list(COLUMNAS):
+                raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "columnas del respaldo no coinciden")
+            filas = list(lector)
+        candidatas = [f for f in filas if f.get("archivo") == entidad.get("id")]
+        if len(candidatas) != 1:
+            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "identidad documental ambigua")
+        fila = candidatas[0]
+        if (fila.get("numero_guia") != entidad.get("numero_guia")
+                or fila.get("numero_transporte") != entidad.get("numero_transporte")
+                or fila.get(campo) != antes.get(campo) or not isinstance(despues.get(campo), str)):
+            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "identidad o valor anterior no coincide")
+        fila[campo] = despues[campo]
+        sanear_filas_csv(filas)
+        salida = io.StringIO(newline="")
+        escritor = csv.DictWriter(salida, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
+        escritor.writeheader()
+        escritor.writerows(filas)
+        return hashlib.sha256(salida.getvalue().encode("utf-8-sig")).hexdigest()
+
+    def _restaurar_respaldo_verificado(self, origen: Path, destino: Path, huella: str) -> None:
+        temporal = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destino.parent, prefix=".recuperacion_b1_", delete=False) as archivo:
+                temporal = Path(archivo.name)
+                with origen.open("rb") as fuente:
+                    shutil.copyfileobj(fuente, archivo)
+                archivo.flush()
+                os.fsync(archivo.fileno())
+            if _huella_archivo(temporal) != huella:
+                raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "respaldo cambió durante la copia")
+            os.replace(temporal, destino)
+        finally:
+            if temporal is not None:
+                temporal.unlink(missing_ok=True)
+
+    def recuperar_folio_obra_tras_ledger(self, token: str) -> dict:
+        """Reanuda folio u obra con ledger y, opcionalmente, bandeja escritos.
+
+        Sólo revierte archivos que coinciden exactamente con el resultado
+        canónico de ESTE token. Los cuatro recursos se verifican antes de la
+        primera escritura y cada estado intermedio admite un nuevo intento.
+        """
+        try:
+            with _bloqueo_acciones(self._ctx.actual):
+                registro = self._leer_registro()
+                self._verificar_sin_otra_publicacion(registro, token)
+                previa = next((a for a in registro.get("auditoria", []) if a.get("token") == token), None)
+                if previa:
+                    return {**previa["resultado_publico"], "idempotente": True}
+                preview = registro.get("previews", {}).get(token)
+                marca = (preview.get("publicacion_iniciada") or preview.get("confirmacion_recuperable")) if isinstance(preview, dict) else None
+                if not isinstance(marca, dict) or not isinstance(marca.get("huellas_antes"), dict):
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "sin huellas verificables")
+                actor, confirmante, origen = marca.get("actor"), marca.get("confirmado_por"), marca.get("origen")
+                from atlas_core.decisiones_pendientes import _actor_es_humano, NOMBRE_LOCK_DECISIONES_PENDIENTES
+                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _ID.fullmatch(confirmante)
+                        or not _actor_es_humano(confirmante) or origen not in ORIGENES):
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "confirmación humana no verificable")
+                accion = preview.get("accion")
+                if accion not in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA"}:
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "acción no admitida")
+                entidad, antes, despues = preview.get("entidad"), preview.get("valor_actual"), preview.get("valor_propuesto")
+                parametros, afectados = preview.get("parametros"), preview.get("afectados")
+                if not all(isinstance(x, dict) for x in (entidad, antes, despues, parametros, afectados)):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "preview documental inválido")
+                huellas = marca["huellas_antes"]
+                dataset_esperado = self._huella_dataset_corregido(preview, marca)
+                respaldo_ledger = self._respaldo_verificado(marca, "ledger_decisiones")
+                anterior_ledger = _leer_json(respaldo_ledger, None)
+                if not isinstance(anterior_ledger, dict) or not isinstance(anterior_ledger.get("aplicaciones"), list):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "respaldo de ledger inválido")
+                tarjetas = afectados.get("tarjetas_trasladadas") or []
+                if not isinstance(tarjetas, list):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "tarjetas del preview inválidas")
+                respaldo_bandeja = self._respaldo_verificado(marca, "bandeja") if tarjetas else None
+                bandeja_esperada = None
+                if tarjetas:
+                    contenido = _leer_json(respaldo_bandeja, None)
+                    if not isinstance(contenido, dict):
+                        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "respaldo de bandeja inválido")
+                    clave = "decisiones" if isinstance(contenido.get("decisiones"), list) else "decisions"
+                    if not isinstance(contenido.get(clave), list):
+                        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "decisiones de bandeja inválidas")
+                    por_id = {t["decision_id"]: t for t in tarjetas if isinstance(t, dict) and "decision_id" in t and "decision_id_nuevo" in t}
+                    if len(por_id) != len(tarjetas):
+                        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "tarjetas duplicadas o incompletas")
+                    vistas = set()
+                    for decision in contenido[clave]:
+                        traslado = por_id.get(str(decision.get("decision_id", ""))) if isinstance(decision, dict) else None
+                        if traslado is not None:
+                            if (decision.get("documento") or {}).get("archivo") != entidad.get("id"):
+                                raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "tarjeta de otro documento")
+                            decision["documento"] = {**decision["documento"], "numero_guia": despues.get("numero_guia")}
+                            decision["decision_id"] = traslado["decision_id_nuevo"]
+                            vistas.add(traslado["decision_id"])
+                    if vistas != set(por_id):
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "bandeja de respaldo no coincide")
+                    bandeja_esperada = hashlib.sha256((json.dumps(contenido, ensure_ascii=False, indent=2) + "\n").encode("utf-8")).hexdigest()
+                with bloqueo_sesion(self._ctx.actual, "revalidacion_dataset"), bloqueo_sesion(self._ctx.actual, "aplicar_decision_obra"), bloqueo_sesion(self._ctx.actual, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+                    actuales = self._huellas_publicacion()
+                    if set(actuales) != set(huellas) or actuales["estado_operacion"] != huellas["estado_operacion"]:
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "estado del reporte no verificable")
+                    if actuales["dataset"] not in {huellas["dataset"], dataset_esperado}:
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "dataset con cambios ajenos")
+                    if actuales["bandeja"] != huellas["bandeja"] and (not tarjetas or actuales["bandeja"] != bandeja_esperada):
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "bandeja con cambios ajenos")
+                    if actuales["ledger_decisiones"] != huellas["ledger_decisiones"]:
+                        ledger = _leer_json(self._ctx.archivos["ledger_decisiones"], None)
+                        if not isinstance(ledger, dict) or not isinstance(ledger.get("aplicaciones"), list) or len(ledger["aplicaciones"]) != len(anterior_ledger["aplicaciones"]) + 1:
+                            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "ledger con cambios ajenos")
+                        entrada = ledger["aplicaciones"][-1]
+                        if not isinstance(entrada, dict) or not isinstance(entrada.get("fecha"), str):
+                            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "fecha del asiento no verificable")
+                        try:
+                            if datetime.fromisoformat(entrada["fecha"]) < datetime.fromisoformat(str(marca.get("fecha") or "")):
+                                raise ValueError("fecha anterior")
+                        except (ValueError, TypeError):
+                            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "fecha del asiento no verificable") from None
+                        campo = "numero_guia" if accion == "DOCUMENTO_CORREGIR_NUMERO_GUIA" else "obra_destino"
+                        guia_ledger = despues[campo] if campo == "numero_guia" else entidad.get("numero_guia")
+                        esperado = {"decision_id": f"ACCION_OPERACIONAL:{token}", "tipo": TIPO_LEDGER_CORRECCION,
+                                    "accion": "CORREGIR_NUMERO_GUIA" if campo == "numero_guia" else "CORREGIR_CAMPO",
+                                    "actor": actor, "confirmado_por": confirmante, "fecha": entrada["fecha"],
+                                    "documento": {"archivo": entidad.get("id"), "numero_guia": guia_ledger,
+                                                  "numero_transporte": entidad.get("numero_transporte")},
+                                    "campo": campo, "valor_documental": antes.get(campo),
+                                    "valor_corregido": despues.get(campo), "referencia": str(parametros.get("referencia", ""))}
+                        esperado_ledger = {**anterior_ledger, "aplicaciones": [*anterior_ledger["aplicaciones"], esperado]}
+                        hash_esperado = hashlib.sha256((json.dumps(esperado_ledger, ensure_ascii=False, indent=2) + "\n").encode("utf-8")).hexdigest()
+                        if ledger != esperado_ledger or actuales["ledger_decisiones"] != hash_esperado:
+                            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "ledger no coincide con el token")
+                    if actuales["bandeja"] != huellas["bandeja"]:
+                        self._restaurar_respaldo_verificado(respaldo_bandeja, self._ctx.archivos["bandeja"], huellas["bandeja"])
+                    if actuales["ledger_decisiones"] != huellas["ledger_decisiones"]:
+                        self._restaurar_respaldo_verificado(respaldo_ledger, self._ctx.archivos["ledger_decisiones"], huellas["ledger_decisiones"])
+                return self.recuperar_dataset_antes_del_ledger(token)
+        except ErrorAccionOperacional as error:
+            return _rechazo(error, token=str(token))
+        except SesionOcupadaError as error:
+            return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
+
     def recuperar_dataset_antes_del_ledger(self, token: str) -> dict:
         """Recupera exclusivamente el corte posterior al CSV y anterior al ledger.
 
@@ -3409,7 +3577,10 @@ class CapaAccionesOperacionales:
                     raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "el reintento debe conservar la confirmación original")
                 if preview["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
                     return self.recuperar_destino_tras_ledger(token)
-                return self.recuperar_dataset_antes_del_ledger(token)
+                resultado = self.recuperar_dataset_antes_del_ledger(token)
+                if resultado.get("codigo") == "PUBLICACION_INCOMPLETA":
+                    return self.recuperar_folio_obra_tras_ledger(token)
+                return resultado
             if any(v.get("publicacion_iniciada") for v in registro.get("previews", {}).values()
                    if isinstance(v, dict)):
                 raise ErrorAccionOperacional(

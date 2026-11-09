@@ -26,10 +26,6 @@ def test_interrupcion_tras_ledger_no_duplica_folio(entorno, monkeypatch):
 
     ledger_path = entorno["actual"] / "decisiones_aplicadas.json"
     antes = ledger_path.read_bytes()
-    reintento = CapaAccionesOperacionales(entorno["raiz"]).ejecutar(
-        preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
-    assert reintento["codigo"] == "PUBLICACION_INCOMPLETA"
-    assert ledger_path.read_bytes() == antes
     entradas = json.loads(antes)["aplicaciones"]
     assert len([e for e in entradas if e["decision_id"] == f"ACCION_OPERACIONAL:{preview['token']}"]) == 1
     assert entradas[-1]["confirmado_por"] == "JAVIER"
@@ -39,9 +35,13 @@ def test_interrupcion_tras_ledger_no_duplica_folio(entorno, monkeypatch):
     assert inspeccion["archivos"]["dataset"]["estado"] == "MODIFICADO"
     assert inspeccion["archivos"]["ledger_decisiones"]["estado"] == "MODIFICADO"
     assert not inspeccion["conflictos"]
-    recuperacion = CapaAccionesOperacionales(entorno["raiz"]).recuperar_publicacion_sin_cambios(preview["token"])
-    assert recuperacion["codigo"] == "PUBLICACION_INCOMPLETA"
-    assert ledger_path.read_bytes() == antes
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    reintento = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert reintento["estado"] == "APLICADA", reintento
+    assert nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")["idempotente"]
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+    assert len([e for e in json.loads(ledger_path.read_bytes())["aplicaciones"]
+                if e["decision_id"] == f"ACCION_OPERACIONAL:{preview['token']}"]) == 1
 
 
 def test_interrupcion_antes_ledger_bloquea_reintento(entorno, monkeypatch):
@@ -356,6 +356,206 @@ def test_inspeccion_identifica_escritura_de_obra_o_destino(entorno, monkeypatch,
     assert inspeccion["entradas_ledger"] == 1
     assert inspeccion["archivos"]["ledger_decisiones"]["estado"] == "MODIFICADO"
     assert inspeccion["archivos"]["dataset"]["estado"] == ("MODIFICADO" if accion == "obra" else "SIN_CAMBIOS")
+
+
+@pytest.mark.parametrize("accion", ["folio", "obra"])
+def test_recupera_tras_ledger_folio_u_obra_en_nuevo_proceso(entorno, monkeypatch, accion):
+    import subprocess
+    import sys
+    from tests.test_acciones_operacionales import _registrar_obra
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009", distancia_km="12")])
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    obra_id = _registrar_obra(capa, entorno["cliente"].cliente_id, "CONSTRUCTORA EJEMPLO LTDA")
+    nombre, extras = (("DOCUMENTO_CORREGIR_NUMERO_GUIA", {"numero_guia_corregido": "484180"})
+                      if accion == "folio" else ("DOCUMENTO_ASIGNAR_OBRA", {"obra_id": obra_id, "conservar_estado": True}))
+    preview = capa.previsualizar(nombre, {"numero_guia": "No encontrado", "archivo": archivo, **extras}, actor="B1", origen="B1")
+    monkeypatch.setattr(capa, "_regenerar_reporte", lambda: (_ for _ in ()).throw(SystemExit("corte tras ledger")))
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    programa = ("import json, sys; from atlas_core.acciones_operacionales import CapaAccionesOperacionales as C; "
+                "C._regenerar_reporte = lambda self: {'regenerado': True}; "
+                "print(json.dumps(C(sys.argv[1]).ejecutar(sys.argv[2], actor='B1', origen='B1', confirmado_por='JAVIER')))")
+    proceso = subprocess.run([sys.executable, "-c", programa, str(entorno["raiz"]), preview["token"]],
+                             capture_output=True, text=True, timeout=30)
+    assert proceso.returncode == 0, proceso.stderr
+    resultado = json.loads(proceso.stdout)
+    assert resultado["estado"] == "APLICADA", resultado
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    assert nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")["idempotente"]
+    vista = nueva._ctx.instantanea_documental()
+    assert len([e for e in vista["ledger"]["aplicaciones"] if e.get("decision_id") == f"ACCION_OPERACIONAL:{preview['token']}"]) == 1
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+    assert vista["filas"][0]["distancia_km"] == "12"
+
+
+def test_recupera_bandeja_trasladada(entorno, monkeypatch):
+    import atlas_core.acciones_operacionales as acciones
+    from tests.test_acciones_operacionales import _entorno_482402, ARCHIVO_482402
+    _entorno_482402(entorno)
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "482402", "archivo": ARCHIVO_482402,
+    }, actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW", preview
+    escribir = acciones.escribir_json_atomico
+    def cortar_bandeja(ruta, contenido):
+        escribir(ruta, contenido)
+        if ruta.name == "decisiones_pendientes.json":
+            raise SystemExit("corte tras bandeja")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", cortar_bandeja)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    resultado = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    assert nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")["idempotente"]
+    vista = nueva._ctx.instantanea_documental()
+    tarjetas = [d for d in vista["decisiones"] if (d.get("documento") or {}).get("archivo") == ARCHIVO_482402]
+    assert len(tarjetas) == 1 and tarjetas[0]["documento"]["numero_guia"] == "482402"
+    assert len([e for e in vista["ledger"]["aplicaciones"] if e.get("decision_id") == f"ACCION_OPERACIONAL:{preview['token']}"]) == 1
+
+
+@pytest.mark.parametrize("accion", ["folio", "obra"])
+def test_recuperacion_coincide_con_publicacion_sin_corte(entorno, tmp_path, monkeypatch, accion):
+    import shutil
+    import atlas_core.acciones_operacionales as acciones
+    from tests.test_acciones_operacionales import _entorno_482402, _registrar_obra, ARCHIVO_482402
+    _entorno_482402(entorno)
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    obra_id = _registrar_obra(capa, entorno["cliente"].cliente_id, "CONSTRUCTORA EJEMPLO LTDA")
+    nombre, extras = (("DOCUMENTO_CORREGIR_NUMERO_GUIA", {"numero_guia_corregido": "482402"})
+                      if accion == "folio" else ("DOCUMENTO_ASIGNAR_OBRA", {"obra_id": obra_id, "conservar_estado": True}))
+    preview = capa.previsualizar(nombre, {"numero_guia": "No encontrado", "archivo": ARCHIVO_482402, **extras},
+                                 actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW", preview
+    control = tmp_path / "control"
+    shutil.copytree(entorno["raiz"], control)
+    normal = CapaAccionesOperacionales(control).ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert normal["estado"] == "APLICADA", normal
+    if accion == "folio":
+        escribir = acciones.escribir_json_atomico
+        def cortar(ruta, contenido):
+            escribir(ruta, contenido)
+            if ruta.name == "decisiones_pendientes.json":
+                raise SystemExit("corte")
+        monkeypatch.setattr(acciones, "escribir_json_atomico", cortar)
+    else:
+        monkeypatch.setattr(capa, "_regenerar_reporte", lambda: (_ for _ in ()).throw(SystemExit("corte")))
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    if accion == "folio":
+        monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    recuperada = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert recuperada["estado"] == "APLICADA", recuperada
+    actual_control = control / "operacion" / "actual"
+    assert entorno["dataset"].read_bytes() == (actual_control / "analisis_completo_guias.csv").read_bytes()
+    assert (entorno["actual"] / "decisiones_pendientes.json").read_bytes() == (actual_control / "decisiones_pendientes.json").read_bytes()
+    a = json.loads((entorno["actual"] / "decisiones_aplicadas.json").read_text(encoding="utf-8-sig"))
+    b = json.loads((actual_control / "decisiones_aplicadas.json").read_text(encoding="utf-8-sig"))
+    for ledger in (a, b):
+        next(e for e in ledger["aplicaciones"] if e.get("decision_id") == f"ACCION_OPERACIONAL:{preview['token']}")["fecha"] = "FECHA"
+    assert a == b
+
+
+@pytest.mark.parametrize("ajeno", ["dataset", "ledger", "bandeja"])
+def test_recuperacion_bandeja_rechaza_cambios_ajenos(entorno, monkeypatch, ajeno):
+    import atlas_core.acciones_operacionales as acciones
+    from tests.test_acciones_operacionales import _entorno_482402, ARCHIVO_482402
+    _entorno_482402(entorno)
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "482402", "archivo": ARCHIVO_482402,
+    }, actor="B1", origen="B1")
+    escribir = acciones.escribir_json_atomico
+    def cortar_bandeja(ruta, contenido):
+        escribir(ruta, contenido)
+        if ruta.name == "decisiones_pendientes.json":
+            raise SystemExit("corte")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", cortar_bandeja)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    rutas = {"dataset": entorno["dataset"], "ledger": entorno["actual"] / "decisiones_aplicadas.json",
+             "bandeja": entorno["actual"] / "decisiones_pendientes.json"}
+    with rutas[ajeno].open("ab") as archivo:
+        archivo.write(b" ")
+    anteriores = {k: p.read_bytes() for k, p in rutas.items()}
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    resultado = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert resultado["codigo"] == "PUBLICACION_INCOMPLETA", resultado
+    assert all(rutas[k].read_bytes() == v for k, v in anteriores.items())
+
+
+@pytest.mark.parametrize("etapa", ["decisiones_pendientes.json", "decisiones_aplicadas.json"])
+def test_segundo_corte_durante_restauracion_de_bandeja_o_ledger(entorno, monkeypatch, etapa):
+    import atlas_core.acciones_operacionales as acciones
+    from tests.test_acciones_operacionales import _entorno_482402, ARCHIVO_482402
+    _entorno_482402(entorno)
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "482402", "archivo": ARCHIVO_482402,
+    }, actor="B1", origen="B1")
+    escribir = acciones.escribir_json_atomico
+    def cortar_bandeja(ruta, contenido):
+        escribir(ruta, contenido)
+        if ruta.name == "decisiones_pendientes.json":
+            raise SystemExit("primer corte")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", cortar_bandeja)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    recuperador = CapaAccionesOperacionales(entorno["raiz"])
+    restaurar = recuperador._restaurar_respaldo_verificado
+    def restaurar_y_cortar(origen, destino, huella):
+        restaurar(origen, destino, huella)
+        if destino.name == etapa:
+            raise SystemExit("segundo corte")
+    monkeypatch.setattr(recuperador, "_restaurar_respaldo_verificado", restaurar_y_cortar)
+    with pytest.raises(SystemExit):
+        recuperador.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    resultado = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+
+
+@pytest.mark.parametrize("accion", ["folio", "obra", "destino"])
+def test_estado_reporte_real_publicado_sigue_bloqueado(entorno, monkeypatch, accion):
+    import atlas_core.almacenamiento_portable as almacenamiento
+    from tests.test_acciones_operacionales import _registrar_obra
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    obra_id = _registrar_obra(capa, entorno["cliente"].cliente_id, "CONSTRUCTORA EJEMPLO LTDA")
+    acciones = {
+        "folio": ("DOCUMENTO_CORREGIR_NUMERO_GUIA", {"numero_guia_corregido": "484180"}),
+        "obra": ("DOCUMENTO_ASIGNAR_OBRA", {"obra_id": obra_id, "conservar_estado": True}),
+        "destino": ("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", {
+            "direccion": "PRESIDENTE RIESCO 5903", "comuna": "LAS CONDES", "conservar_estado": True}),
+    }
+    nombre, extras = acciones[accion]
+    preview = capa.previsualizar(nombre, {"numero_guia": "No encontrado", "archivo": archivo, **extras}, actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW", preview
+    escribir = almacenamiento.escribir_estado_operacion
+    def publicar_y_cortar(**kwargs):
+        escribir(**kwargs)
+        raise SystemExit("corte tras estado real")
+    monkeypatch.setattr(almacenamiento, "escribir_estado_operacion", publicar_y_cortar)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    estado = entorno["actual"] / "estado_operacion.json"
+    antes = estado.read_bytes()
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    resultado = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert resultado["codigo"] == "PUBLICACION_INCOMPLETA", resultado
+    assert estado.read_bytes() == antes
 
 
 @pytest.mark.parametrize("etapa", ["bandeja", "estado_operacion"])
