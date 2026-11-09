@@ -1824,6 +1824,19 @@ class OperadorB1:
 
     def consultar(self, texto: str, *, derivar_operacionales: bool = False) -> dict:
         """Consulta sin locks ni estado conversacional; rechaza acciones antes de resolverlas."""
+        from atlas_core.acciones_operacionales import ErrorAccionOperacional
+        self.capa._ctx.sin_bloqueo = True
+        try:
+            return self._consultar(texto, derivar_operacionales=derivar_operacionales)
+        except ErrorAccionOperacional as error:
+            if error.codigo != "PUBLICACION_INCOMPLETA":
+                raise
+            return {"estado": "RECHAZADA", "codigo": error.codigo,
+                    "mensaje": "Hay una corrección en publicación; vuelve a consultar en unos segundos."}
+        finally:
+            self.capa._ctx.sin_bloqueo = False
+
+    def _consultar(self, texto: str, *, derivar_operacionales: bool = False) -> dict:
         from atlas_core.consulta_revisiones_b1 import consultar_revisiones
         respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
         if respuesta_revision is not None:

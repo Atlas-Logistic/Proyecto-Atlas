@@ -320,6 +320,40 @@ def test_material_corte_tras_reporte_real_se_reconoce(entorno, monkeypatch):
     assert MATERIAL in (entorno["raiz"] / vigente / "viajes.csv").read_text(encoding="utf-8-sig")
 
 
+def test_dataset_alterado_tras_reporte_no_se_reconoce(entorno, monkeypatch):
+    import atlas_core.almacenamiento_portable as almacenamiento
+    objetivo = _fila("484293", archivo="484293.jpeg", numero_transporte="0000369273", descripcion_material="",
+                     tipo_carga="NO DETERMINADO", motivos_revision_documento="MATERIAL_AUSENTE")
+    _escribir_dataset(entorno, [_fila("484292", archivo="484292.jpeg", numero_transporte="0000369273"), objetivo])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    p = _preview_material(capa)
+    escribir = almacenamiento.escribir_estado_operacion
+    def publicar_y_cortar(**kwargs):
+        escribir(**kwargs)
+        raise SystemExit("corte tras publicar")
+    monkeypatch.setattr(almacenamiento, "escribir_estado_operacion", publicar_y_cortar)
+    with pytest.raises(SystemExit):
+        _confirmar(capa, p["token"])
+    monkeypatch.setattr(almacenamiento, "escribir_estado_operacion", escribir)
+    filas = _filas_dataset(entorno)
+    filas["484292.jpeg"] = {**filas["484292.jpeg"], "tipo_carga": "AJENO"}
+    _escribir_dataset(entorno, list(filas.values()))
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    r = _confirmar(nueva, p["token"])
+    assert r.get("codigo") == "PUBLICACION_INCOMPLETA", r
+    assert not [a for a in nueva.auditoria() if a["token"] == p["token"]]
+
+
+def test_fallo_del_primer_paso_no_propone_el_segundo(entorno, monkeypatch):
+    capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
+    tarjeta = next(d for d in capa._ctx.decisiones() if d["tipo"] == "DESTINO_NO_RESUELTO")
+    b1.atender("prueba", f"@revision:{tarjeta['decision_id']} la obra correcta es {OBRA} y la dirección correcta es {DIRECCION}")
+    monkeypatch.setattr(capa, "ejecutar", lambda *a, **k: {"estado": "FALLIDA", "codigo": "ERROR_SERVICIO", "mensaje": "fallo simulado"})
+    r = b1.atender("prueba", "si")
+    assert r["estado"] != "EJECUTADA", r
+    assert "PRESIDENTE RIESCO" not in json.dumps(r, ensure_ascii=False)
+
+
 def test_reporte_de_otro_escritor_no_se_atribuye_al_token(entorno, monkeypatch):
     import atlas_core.almacenamiento_portable as almacenamiento
     capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
@@ -396,6 +430,28 @@ def test_lector_directo_detecta_publicacion_sin_locks(entorno, monkeypatch):
     assert sorted(x.name for x in entorno["actual"].iterdir()) == locks  # sin locks ni escrituras
     assert _confirmar(CapaAccionesOperacionales(entorno["raiz"]), p["token"])["estado"] == "APLICADA"
     acciones.exigir_publicacion_documental_completa(entorno["raiz"], espera_segundos=0.05)
+
+
+def test_consulta_solo_lectura_no_crea_lock_y_se_abstiene_en_publicacion(entorno, monkeypatch):
+    import atlas_core.acciones_operacionales as acciones
+    capa, b1, hermana, objetivo = _caso_material(entorno, monkeypatch)
+    lock = entorno["actual"] / ".atlas_lock_acciones_operacionales"
+    assert b1.consultar("Muéstrame los choferes activos")["estado"] == "RESULTADO_LECTURA"
+    assert not lock.exists()
+    p = _preview_material(capa)
+    escribir = acciones.escribir_json_atomico
+    def corte(ruta, contenido):
+        if ruta.name == "decisiones_aplicadas.json":
+            raise SystemExit("corte")
+        escribir(ruta, contenido)
+    monkeypatch.setattr(acciones, "escribir_json_atomico", corte)
+    with pytest.raises(SystemExit):
+        _confirmar(capa, p["token"])
+    monkeypatch.setattr(acciones, "_ESPERA_LECTURA_SEGUNDOS", 0.05)
+    monkeypatch.setattr(acciones.exigir_publicacion_documental_completa, "__kwdefaults__", {"espera_segundos": 0.05})
+    respuesta = b1.consultar("Muéstrame los choferes activos")
+    assert respuesta.get("codigo") == "PUBLICACION_INCOMPLETA", respuesta
+    assert capa._ctx.sin_bloqueo is False
 
 
 def test_cli_de_reporte_se_abstiene_durante_publicacion(entorno, monkeypatch):

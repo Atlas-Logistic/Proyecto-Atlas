@@ -302,6 +302,7 @@ class _Contexto:
         self.proveedor_rutas_fallback = proveedor_rutas_fallback
         self.token = ""
         self.confirmado_por = ""
+        self.sin_bloqueo = False
         # Guarda del escritor global mientras corre una acción que lo exige.
         self.puede_escribir: Callable[[], bool] | None = None
         # Únicos archivos que esta capa puede respaldar/restaurar -- rutas
@@ -323,6 +324,13 @@ class _Contexto:
     @contextlib.contextmanager
     def _lectura_documental(self):
         propietario = str(self.actual.resolve()) in getattr(_LOCK_LOCAL, "activos", set())
+        if self.sin_bloqueo and not propietario:
+            # SOLO CONSULTA no puede crear el archivo del lock: la marca durable
+            # se comprueba antes y después de leer.
+            exigir_publicacion_documental_completa(self.raiz)
+            yield
+            exigir_publicacion_documental_completa(self.raiz, espera_segundos=0)
+            return
         with _bloqueo_acciones(self.actual, esperar=True):
             if not propietario:
                 registro = _leer_json(self.actual / NOMBRE_REGISTRO, {"previews": {}})
