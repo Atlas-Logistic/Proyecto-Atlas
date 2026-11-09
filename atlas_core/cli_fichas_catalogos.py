@@ -12,10 +12,35 @@ import sys
 from atlas_core.catalogo_fichas import construir_snapshot_fichas
 
 
+def _expediente(argumentos: argparse.Namespace) -> int:
+    from atlas_core.expediente_digital import (
+        ErrorExpedienteDigital, empresa_del_proceso, preparar_alertas_vencimiento, vista_expediente_desktop,
+    )
+    empresa = empresa_del_proceso()
+    try:
+        if argumentos.expediente_alertas:
+            resultado = {"empresa": empresa, "alertas": preparar_alertas_vencimiento(argumentos.raiz_atlas, empresa=empresa)}
+        else:
+            resultado = vista_expediente_desktop(argumentos.raiz_atlas, empresa=empresa,
+                                                 entidad=argumentos.expediente_entidad,
+                                                 referencia=argumentos.expediente_referencia or "")
+    except ErrorExpedienteDigital as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(json.dumps(resultado, ensure_ascii=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Snapshot de fichas de Catálogos (choferes/clientes/obras/vehículos), sólo lectura.")
     parser.add_argument("--raiz-atlas", required=True, help="Raíz real de Atlas (contiene catalogos_privados/ y operacion/actual/)")
+    # Expediente digital: también sólo lectura; usa este mismo canal de consulta de Desktop.
+    parser.add_argument("--expediente-entidad", choices=("CHOFER", "VEHICULO"))
+    parser.add_argument("--expediente-referencia")
+    parser.add_argument("--expediente-alertas", action="store_true")
     argumentos = parser.parse_args(argv)
+    if argumentos.expediente_alertas or argumentos.expediente_entidad:
+        return _expediente(argumentos)
     snapshot = construir_snapshot_fichas(raiz_atlas=argumentos.raiz_atlas)
     # Bloque CATALOGOS V2 -- ensure_ascii=True a propósito, mismo
     # criterio ya usado por cli_consulta_atlas.py: Desktop lee stdout
