@@ -61,4 +61,14 @@ anterior donde difiera. Sin consumidores todavía: sin interfaz, sin CLI, sin no
   omisión usaría `<raiz>/catalogos_privados` para ambas.
 - **Concurrencia:** `bloqueo_sesion` rechaza al competidor con `SesionOcupadaError`; quien integre debe reintentar.
 
-Pendiente de decidir: migración de licencias de fichas al expediente, entrada CLI/IPC e interfaz, envío de alertas.
+Pendiente de decidir: migración de licencias de fichas al expediente, envío de alertas.
+
+## Interfaz Desktop (09/11/2026)
+
+- **Lectura:** `construir_fichas_catalogos.py --expediente-entidad/--expediente-referencia` y `--expediente-alertas`, por el
+  canal SOLO CONSULTA (la lista de scripts de `instalacion_consulta.js` no cambia).
+- **Escritura:** `registrar_expediente_digital.py`, sólo por el canal operacional (`ESCRITORES`). Rechaza licencias: su
+  fuente única sigue siendo `registrar_licencia_chofer.py`, y `vista_expediente_desktop` no las ofrece para registrar.
+- **Empresa:** `empresa_del_proceso()` da el código de almacén en mayúsculas.
+- **Precedencia:** un documento de ficha con vencimiento posterior prevalece sobre el del expediente, para que una
+  renovación llegada por Mobile no quede oculta.

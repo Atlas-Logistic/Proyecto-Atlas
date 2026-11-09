@@ -70,6 +70,13 @@ class ErrorExpedienteDigital(ValueError):
     pass
 
 
+def empresa_del_proceso() -> str:
+    """Código de almacén de la empresa activa: el identificador multiempresa va
+    en minúsculas y `fichas_digitales/<EMPRESA>` sólo admite mayúsculas."""
+    from atlas_core.fichas_choferes import EMPRESA_ACTUAL
+    return EMPRESA_ACTUAL.upper()
+
+
 def ruta_almacen_expediente(raiz: str | Path, empresa: str) -> Path:
     from atlas_core.fichas_choferes import ruta_almacen
     try:
@@ -327,7 +334,7 @@ def _guardar_original(carpeta_empresa: Path, expediente_id: str, documento_id: s
     destino.parent.mkdir(parents=True, exist_ok=True)
     if not destino.parent.resolve().is_relative_to(carpeta_empresa.resolve()):
         raise ErrorExpedienteDigital("la carpeta de originales apunta fuera de la empresa")
-    temporal = destino.with_name("." + destino.name + ".tmp-" + uuid.uuid4().hex)
+    temporal = destino.with_name(".tmp-" + uuid.uuid4().hex)  # corto: rutas largas en Windows
     try:
         with temporal.open("xb") as salida:
             salida.write(contenido)
@@ -530,9 +537,16 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
     propios = [{**d, "fuente": "EXPEDIENTE", "pendiente_revision": False, "confirmado_por_humano": True,
                 "referencias": referencias[d["expediente_id"]]}
                for d in datos["documentos"] if d["estado"] == ACTIVO]
-    cubiertos = {(d["entidad"], r, d["tipo"]) for d in propios for r in d["referencias"]}
-    externos = [d for d in _documentos_de_fichas(raiz, empresa, _carpeta(raiz, carpeta_catalogos))
-                if not any((d["entidad"], r, d["tipo"]) in cubiertos for r in d["referencias"])]
+    claves = lambda d: [(d["entidad"], r, d["tipo"]) for r in d["referencias"]]  # noqa: E731
+    registrados = {k: d["fecha_vencimiento"] for d in propios for k in claves(d)}
+    fichas = _documentos_de_fichas(raiz, empresa, _carpeta(raiz, carpeta_catalogos))
+    # Una renovación llegada después por la ficha no queda oculta tras el registro antiguo.
+    mas_recientes = [d for d in fichas if not d["pendiente_revision"]
+                     and _dias_para_vencer(d["fecha_vencimiento"], date.min) is not None
+                     and any(k in registrados and d["fecha_vencimiento"] > registrados[k] for k in claves(d))]
+    superados = {k for d in mas_recientes for k in claves(d)}
+    propios = [d for d in propios if not superados & set(claves(d))]
+    externos = [d for d in fichas if d in mas_recientes or not any(k in registrados for k in claves(d))]
     vista = []
     for d in propios + externos:
         estado = PENDIENTE_REVISION if d["pendiente_revision"] else estado_vencimiento(
@@ -633,6 +647,23 @@ def preparar_alertas_vencimiento(raiz: str | Path, *, empresa: str, hoy: date | 
         "fuente": d["fuente"],
     } for d in documentos_por_atender(raiz, empresa=empresa, hoy=hoy, dias_por_vencer=dias_por_vencer,
                                       carpeta_catalogos=carpeta_catalogos)]
+
+
+def vista_expediente_desktop(raiz: str | Path, *, empresa: str, entidad: str, referencia: str,
+                             hoy: date | None = None) -> dict:
+    """Lo que muestra la ficha en Desktop. La licencia no se ofrece para registrar:
+    su fuente única sigue siendo la ficha del chofer."""
+    consulta = consultar_expediente(raiz, empresa=empresa, entidad=entidad, referencia=referencia, hoy=hoy)
+    tipos = tipos_documento(leer_expediente(raiz, empresa=empresa))
+    ids = {d["documento_id"] for d in consulta["documentos"]}
+    return {
+        **consulta,
+        "alertas": [a for a in preparar_alertas_vencimiento(raiz, empresa=empresa, hoy=hoy) if a["documento_id"] in ids],
+        "tipos_registrables": [
+            {"tipo": t, "nombre": c["nombre"], "requiere_vencimiento": c["requiere_vencimiento"]}
+            for t, c in tipos.items()
+            if c["entidad"] == consulta["entidad"] and c["activo"] and t != "LICENCIA_CONDUCIR"],
+    }
 
 
 def verificar_originales(raiz: str | Path, *, empresa: str) -> list[dict]:
