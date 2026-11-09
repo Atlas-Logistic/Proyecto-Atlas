@@ -18,8 +18,9 @@ from pathlib import Path, PureWindowsPath
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogos import rut_canonico_de_registro_chofer, normalizar_rut
 
-from atlas_core.aislamiento_empresas import EMPRESA_MBT as _MBT, empresa_proceso as _empresa_proceso
-EMPRESA_ACTUAL = 'MBT' if _empresa_proceso() == _MBT else _empresa_proceso()
+from atlas_core.aislamiento_empresas import empresa_proceso as _empresa_proceso
+# El almacén se nombra en mayúsculas; el identificador de empresa va en minúsculas.
+EMPRESA_ACTUAL = _empresa_proceso().upper()
 VERSION = 2
 MAXIMO_ARCHIVO_LICENCIA = 20 * 1024 * 1024
 EXTENSIONES_LICENCIA = frozenset({'.pdf', '.jpg', '.jpeg', '.png'})
@@ -73,7 +74,7 @@ def _tipo_archivo_licencia(ruta):
 
 
 def ruta_almacen(raiz, empresa):
-    if not re.fullmatch(r'[A-Z0-9][A-Z0-9_-]{1,31}', str(empresa)):
+    if not re.fullmatch(r'[A-Z0-9][A-Z0-9_-]{1,39}', str(empresa)):
         raise ValueError('Empresa inválida')
     base = Path(raiz) / 'fichas_digitales'
     ruta = base / empresa / 'fichas_documentales.json'
@@ -262,7 +263,7 @@ def _copiar_licencia_nueva(origen, destino, comprobar):
     """Copia por creación exclusiva y devuelve huella; nunca reutiliza nombre."""
     origen, extension, tamano_esperado = _tipo_archivo_licencia(origen)
     destino.parent.mkdir(parents=True, exist_ok=True)
-    temporal = destino.with_name('.' + destino.name + '.tmp-' + uuid.uuid4().hex)
+    temporal = destino.with_name('.tmp-' + uuid.uuid4().hex)  # corto: rutas largas en Windows
     digest = hashlib.sha256()
     total = 0
     try:
@@ -301,7 +302,7 @@ def registrar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo,
     clase = _clase_licencia_valida(clase)
     origen, extension, _ = _tipo_archivo_licencia(archivo_origen)
     from atlas_core.desktop_operacion import sesion
-    with sesion(raiz) as comprobar:
+    with sesion(raiz, reutilizar=True) as comprobar:
         ruta = ruta_almacen(raiz, empresa)
         with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
             catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'

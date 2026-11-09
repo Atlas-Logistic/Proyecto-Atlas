@@ -224,7 +224,7 @@ def test_todo_el_estado_local_es_de_la_empresa(mundo):  # noqa: F811
     n = json.loads(_proceso(mundo, NORTE, LISTA_LOCAL, **extra))
     s = json.loads(_proceso(mundo, SUR, LISTA_LOCAL, **extra))
     assert (n.pop("token"), s.pop("token")) == ("token-norte", None)  # jamás hereda el token de MBT
-    assert (n.pop("fichas"), s.pop("fichas")) == (NORTE, SUR)
+    assert (n.pop("fichas"), s.pop("fichas")) == (NORTE.upper(), SUR.upper())  # nombre del almacén
     base = Path(os.environ["LOCALAPPDATA"]) / "Atlas" / "empresas"
     for empresa, rutas in ((NORTE, n), (SUR, s)):
         assert all(Path(v).is_relative_to(base / empresa) for v in rutas.values()), rutas
