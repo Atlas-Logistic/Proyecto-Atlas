@@ -924,7 +924,7 @@ def test_corregir_transporte_preview_obsoleto_si_cambia_el_viaje_destino(entorno
 
 def _sin_reporte_real(monkeypatch, llamadas: list):
     monkeypatch.setattr(CapaAccionesOperacionales, "_regenerar_reporte",
-                        lambda self: llamadas.append("reporte") or {"ok": True})
+                        lambda self: llamadas.append("reporte") or {"regenerado": True})
 
 
 def test_corregir_numero_guia_nueve_absorbido_es_focal_y_auditable(entorno, monkeypatch):

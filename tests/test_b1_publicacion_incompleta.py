@@ -65,8 +65,7 @@ def test_interrupcion_antes_ledger_bloquea_reintento(entorno, monkeypatch):
     with pytest.raises(SystemExit):
         capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
     antes = entorno["dataset"].read_bytes()
-    reintento = CapaAccionesOperacionales(entorno["raiz"]).ejecutar(
-        preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    reintento = CapaAccionesOperacionales(entorno["raiz"]).recuperar_publicacion_sin_cambios(preview["token"])
     assert reintento["codigo"] == "PUBLICACION_INCOMPLETA"
     assert entorno["dataset"].read_bytes() == antes
     inspeccion = CapaAccionesOperacionales(entorno["raiz"]).inspeccionar_publicacion_interrumpida(preview["token"])
@@ -81,6 +80,236 @@ def test_interrupcion_antes_ledger_bloquea_reintento(entorno, monkeypatch):
     recuperacion = CapaAccionesOperacionales(entorno["raiz"]).recuperar_publicacion_sin_cambios(preview["token"])
     assert recuperacion["codigo"] == "PUBLICACION_INCOMPLETA"
     assert entorno["dataset"].read_bytes() == antes
+
+
+@pytest.mark.parametrize("accion", ["folio", "obra"])
+def test_recupera_dataset_confirmado_antes_del_ledger(entorno, monkeypatch, accion):
+    import subprocess
+    import sys
+    import atlas_core.acciones_operacionales as acciones
+    from tests.test_acciones_operacionales import _registrar_obra
+
+    archivo = "mobile/prueba/original.jpg"
+    fila = _fila("No encontrado", archivo=archivo, numero_transporte="0000369009", distancia_km="12")
+    otra = _fila("500002")
+    _escribir_dataset(entorno, [fila, otra])
+    foto = entorno["raiz"] / archivo
+    foto.parent.mkdir(parents=True)
+    foto.write_bytes(b"original")
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    obra_id = _registrar_obra(capa, entorno["cliente"].cliente_id, "CONSTRUCTORA EJEMPLO LTDA")
+    nombre, extras = (("DOCUMENTO_CORREGIR_NUMERO_GUIA", {"numero_guia_corregido": "484180"})
+                      if accion == "folio" else ("DOCUMENTO_ASIGNAR_OBRA", {"obra_id": obra_id, "conservar_estado": True}))
+    preview = capa.previsualizar(nombre, {"numero_guia": "No encontrado", "archivo": archivo, **extras},
+                                 actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW", preview
+    escribir = acciones.escribir_json_atomico
+    def corte(ruta, contenido):
+        if ruta.name == "decisiones_aplicadas.json":
+            raise SystemExit("corte antes del ledger")
+        escribir(ruta, contenido)
+    monkeypatch.setattr(acciones, "escribir_json_atomico", corte)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    programa = ("import json, sys; from atlas_core.acciones_operacionales import CapaAccionesOperacionales as C; "
+                "C._regenerar_reporte = lambda self: {'regenerado': True}; "
+                "print(json.dumps(C(sys.argv[1]).ejecutar(sys.argv[2], actor='B1', origen='B1', confirmado_por='JAVIER')))")
+    proceso = subprocess.run([sys.executable, "-c", programa, str(entorno["raiz"]), preview["token"]],
+                             capture_output=True, text=True, timeout=30)
+    assert proceso.returncode == 0, proceso.stderr
+    resultado = json.loads(proceso.stdout)
+    assert resultado["estado"] == "APLICADA", resultado
+    assert nueva.recuperar_dataset_antes_del_ledger(preview["token"])["idempotente"]
+    vista = nueva._ctx.instantanea_documental()
+    documento = next(f for f in vista["filas"] if f["archivo"] == archivo)
+    assert documento["numero_guia"] == ("484180" if accion == "folio" else "No encontrado")
+    assert documento["obra_destino"] == ("CONSTRUCTORA EJEMPLO LTDA" if accion == "obra" else fila["obra_destino"])
+    assert documento["cliente"] == fila["cliente"]
+    assert documento["estado_ruta"] == fila["estado_ruta"]
+    assert documento["distancia_km"] == "12"
+    assert next(f for f in vista["filas"] if f["archivo"] == otra["archivo"]) == otra
+    assert foto.read_bytes() == b"original"
+    entradas = [e for e in vista["ledger"]["aplicaciones"] if e.get("decision_id") == f"ACCION_OPERACIONAL:{preview['token']}"]
+    assert len(entradas) == 1 and entradas[0]["confirmado_por"] == "JAVIER"
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+
+
+@pytest.mark.parametrize("ajeno", ["dataset", "ledger", "respaldo"])
+def test_recuperacion_dataset_no_sobrescribe_cambio_ajeno(entorno, monkeypatch, ajeno):
+    import atlas_core.acciones_operacionales as acciones
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "484180", "archivo": archivo,
+    }, actor="B1", origen="B1")
+    escribir = acciones.escribir_json_atomico
+    def corte(ruta, contenido):
+        if ruta.name == "decisiones_aplicadas.json":
+            raise SystemExit("corte")
+        escribir(ruta, contenido)
+    monkeypatch.setattr(acciones, "escribir_json_atomico", corte)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    registro = json.loads((entorno["actual"] / "acciones_operacionales.json").read_text(encoding="utf-8-sig"))
+    respaldo = entorno["raiz"] / registro["previews"][preview["token"]]["publicacion_iniciada"]["respaldo"] / entorno["dataset"].name
+    if ajeno == "dataset":
+        with entorno["dataset"].open("ab") as f:
+            f.write(b" ")
+    elif ajeno == "ledger":
+        (entorno["actual"] / "decisiones_aplicadas.json").write_text('{"aplicaciones": [{"decision_id": "ajeno"}]}', encoding="utf-8")
+    else:
+        with respaldo.open("ab") as f:
+            f.write(b" ")
+    antes_dataset = entorno["dataset"].read_bytes()
+    antes_ledger = (entorno["actual"] / "decisiones_aplicadas.json").read_bytes()
+    resultado = CapaAccionesOperacionales(entorno["raiz"]).recuperar_dataset_antes_del_ledger(preview["token"])
+    assert resultado["codigo"] in {"PUBLICACION_INCOMPLETA", "RECUPERACION_NO_DISPONIBLE"}
+    assert entorno["dataset"].read_bytes() == antes_dataset
+    assert (entorno["actual"] / "decisiones_aplicadas.json").read_bytes() == antes_ledger
+
+
+def test_segundo_corte_tras_restaurar_dataset_se_puede_reintentar(entorno, monkeypatch):
+    import atlas_core.acciones_operacionales as acciones
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "484180", "archivo": archivo,
+    }, actor="B1", origen="B1")
+    escribir = acciones.escribir_json_atomico
+    def corte(ruta, contenido):
+        if ruta.name == "decisiones_aplicadas.json":
+            raise SystemExit("corte de publicación")
+        escribir(ruta, contenido)
+    monkeypatch.setattr(acciones, "escribir_json_atomico", corte)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    recuperador = CapaAccionesOperacionales(entorno["raiz"])
+    monkeypatch.setattr(recuperador, "recuperar_publicacion_sin_cambios",
+                        lambda token: (_ for _ in ()).throw(SystemExit("segundo corte")))
+    with pytest.raises(SystemExit):
+        recuperador.recuperar_dataset_antes_del_ledger(preview["token"])
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    resultado = nueva.recuperar_dataset_antes_del_ledger(preview["token"])
+    assert resultado["estado"] == "APLICADA", resultado
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+
+
+def test_recuperacion_publica_reporte_real_sintetico(entorno, monkeypatch):
+    import atlas_core.acciones_operacionales as acciones
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "484180", "archivo": archivo,
+    }, actor="B1", origen="B1")
+    escribir = acciones.escribir_json_atomico
+    def corte(ruta, contenido):
+        if ruta.name == "decisiones_aplicadas.json":
+            raise SystemExit("corte")
+        escribir(ruta, contenido)
+    monkeypatch.setattr(acciones, "escribir_json_atomico", corte)
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(acciones, "escribir_json_atomico", escribir)
+    resultado = CapaAccionesOperacionales(entorno["raiz"]).ejecutar(
+        preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert resultado["estado"] == "APLICADA", resultado
+    assert resultado["revalidacion"]["reporte"]["regenerado"] is True
+    estado = json.loads((entorno["actual"] / "estado_operacion.json").read_text(encoding="utf-8-sig"))
+    assert (entorno["raiz"] / estado["reporte_vigente"] / "viajes.csv").is_file()
+
+
+def test_recupera_destino_tras_ledger_en_otro_proceso(entorno, monkeypatch):
+    import subprocess
+    import sys
+    archivo = "mobile/prueba/original.jpg"
+    fila = _fila("No encontrado", archivo=archivo, numero_transporte="0000369009", distancia_km="12")
+    _escribir_dataset(entorno, [fila])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", {
+        "numero_guia": "No encontrado", "archivo": archivo, "direccion": "PRESIDENTE RIESCO 5903",
+        "comuna": "LAS CONDES", "conservar_estado": True,
+    }, actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW", preview
+    monkeypatch.setattr(capa, "_regenerar_reporte", lambda: (_ for _ in ()).throw(SystemExit("corte antes de reporte")))
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    programa = ("import json, sys; from atlas_core.acciones_operacionales import CapaAccionesOperacionales as C; "
+                "C._regenerar_reporte = lambda self: {'regenerado': True}; "
+                "print(json.dumps(C(sys.argv[1]).ejecutar(sys.argv[2], actor='B1', origen='B1', confirmado_por='JAVIER')))")
+    proceso = subprocess.run([sys.executable, "-c", programa, str(entorno["raiz"]), preview["token"]],
+                             capture_output=True, text=True, timeout=30)
+    assert proceso.returncode == 0, proceso.stderr
+    resultado = json.loads(proceso.stdout)
+    assert resultado["estado"] == "APLICADA", resultado
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    assert nueva.recuperar_destino_tras_ledger(preview["token"])["idempotente"]
+    vista = nueva._ctx.instantanea_documental()
+    assert vista["filas"][0]["distancia_km"] == "12"
+    entradas = [e for e in vista["ledger"]["aplicaciones"] if e.get("decision_id") == f"ACCION_OPERACIONAL:{preview['token']}"]
+    assert len(entradas) == 1 and entradas[0]["confirmado_por"] == "JAVIER"
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+
+
+def test_reporte_fallido_no_cierra_recuperacion_destino(entorno, monkeypatch):
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", {
+        "numero_guia": "No encontrado", "archivo": archivo, "direccion": "PRESIDENTE RIESCO 5903",
+        "comuna": "LAS CONDES", "conservar_estado": True,
+    }, actor="B1", origen="B1")
+    monkeypatch.setattr(capa, "_regenerar_reporte", lambda: (_ for _ in ()).throw(SystemExit("corte")))
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    monkeypatch.setattr(CapaAccionesOperacionales, "_regenerar_reporte", lambda self: {"regenerado": False})
+    nueva = CapaAccionesOperacionales(entorno["raiz"])
+    fallo = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert fallo["estado"] == "FALLIDA" and fallo["codigo"] == "PUBLICACION_INCOMPLETA"
+    assert not [a for a in nueva.auditoria() if a["token"] == preview["token"]]
+    from atlas_core.acciones_operacionales import ErrorAccionOperacional
+    with pytest.raises(ErrorAccionOperacional):
+        nueva._ctx.instantanea_documental()
+    monkeypatch.setattr(CapaAccionesOperacionales, "_regenerar_reporte", lambda self: {"regenerado": True})
+    completo = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    assert completo["estado"] == "APLICADA", completo
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+
+
+@pytest.mark.parametrize("ajeno", ["dataset", "ledger", "estado_operacion"])
+def test_recuperacion_destino_rechaza_cambio_ajeno(entorno, monkeypatch, ajeno):
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", {
+        "numero_guia": "No encontrado", "archivo": archivo, "direccion": "PRESIDENTE RIESCO 5903",
+        "comuna": "LAS CONDES", "conservar_estado": True,
+    }, actor="B1", origen="B1")
+    monkeypatch.setattr(capa, "_regenerar_reporte", lambda: (_ for _ in ()).throw(SystemExit("corte")))
+    with pytest.raises(SystemExit):
+        capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
+    if ajeno == "dataset":
+        with entorno["dataset"].open("ab") as archivo_csv:
+            archivo_csv.write(b" ")
+    elif ajeno == "ledger":
+        ruta = entorno["actual"] / "decisiones_aplicadas.json"
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+        datos["aplicaciones"].append({"decision_id": "ajeno"})
+        ruta.write_text(json.dumps(datos), encoding="utf-8")
+    else:
+        (entorno["actual"] / "estado_operacion.json").write_text('{"reporte_vigente": "otro"}', encoding="utf-8")
+    antes = {p: p.read_bytes() for p in (entorno["actual"] / "decisiones_aplicadas.json", entorno["dataset"])}
+    recuperacion = CapaAccionesOperacionales(entorno["raiz"]).recuperar_destino_tras_ledger(preview["token"])
+    assert recuperacion["codigo"] == "PUBLICACION_INCOMPLETA"
+    assert all(p.read_bytes() == contenido for p, contenido in antes.items())
 
 
 def test_inspeccion_detecta_confirmacion_ajena_sin_escribir(entorno, monkeypatch):
@@ -193,7 +422,7 @@ def test_reinicio_recupera_corte_sin_efectos(entorno, monkeypatch, accion):
         capa.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
     monkeypatch.setitem(ACCIONES, nombre, original)
     nueva = CapaAccionesOperacionales(entorno["raiz"])
-    recuperacion = nueva.recuperar_publicacion_sin_cambios(preview["token"])
+    recuperacion = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
     assert recuperacion["estado"] == "APLICADA", recuperacion
     assert nueva.auditoria()[-1]["confirmado_por"] == "JAVIER"
     assert nueva.recuperar_publicacion_sin_cambios(preview["token"])["idempotente"]
