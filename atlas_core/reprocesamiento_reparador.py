@@ -1126,6 +1126,7 @@ def reparar_documento_focal_con_valores_conocidos(
     reconciliar: bool = True, tipos_ledger_superables: frozenset[str] = frozenset(),
     numero_guia: str = "", superar_resoluciones_automaticas: bool = False,
     campos_adicionales_permitidos: frozenset[str] = frozenset(),
+    conservar_estado_operacional: bool = False,
 ) -> dict[str, object]:
     """Persiste, para UN documento puntual ya identificado por
     `archivo`, valores YA conocidos de una reextracción real (nunca
@@ -1243,15 +1244,22 @@ def reparar_documento_focal_con_valores_conocidos(
                 if str(fila.get("tipo_carga", "")).strip() in {
                         "", "NO DETERMINADO", clasificar_material(material.valor_anterior).value}:
                     fila["tipo_carga"] = clasificar_material(material.valor_nuevo).value
-            fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
-            indicador, documental, operacional = _indicadores_documentales_coherentes(
-                motivos_restantes, str(fila.get("estado_ruta", "")).strip(),
-            )
-            fila["indicador_revision"] = indicador
-            fila["estado_documental"] = documental
-            fila["estado_operacional"] = operacional
+            if not conservar_estado_operacional:
+                fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
+                indicador, documental, operacional = _indicadores_documentales_coherentes(
+                    motivos_restantes, str(fila.get("estado_ruta", "")).strip(),
+                )
+                fila["indicador_revision"] = indicador
+                fila["estado_documental"] = documental
+                fila["estado_operacional"] = operacional
             if not dry_run:
-                _escribir_filas_completas(dataset, filas)
+                if conservar_estado_operacional and numero_guia_corregido and len(cambios) == 1:
+                    cambio = cambios[0]
+                    _escribir_filas_completas(dataset, filas, transicion_folio=(
+                        archivo_id, cambio.valor_anterior, cambio.valor_nuevo,
+                        str(fila.get("numero_transporte", "")).strip()))
+                else:
+                    _escribir_filas_completas(dataset, filas)
 
     reconciliacion: dict[str, object] | None = None
     if not dry_run and cambios and reconciliar:

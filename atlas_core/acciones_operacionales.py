@@ -1970,7 +1970,7 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     consecuencias = [
         f"El documento {archivo} pasa del folio {actual} al {nuevo}; ningún otro campo cambia.",
         "La lectura OCR original queda en el ledger de auditoría.",
-        "Sólo se revalida este documento y se regenera el reporte; no se reconcilia la bandeja global.",
+        "Se conservan los estados y la ruta; se regenera el reporte sin reconciliar la bandeja global.",
     ]
     if digito_inicial_omitido:
         consecuencias[-1] = "Se regenera el reporte sin recalcular destino ni ruta."
@@ -1987,7 +1987,7 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
         afectados={"guias": [actual, nuevo], "archivo": archivo, "numero_transporte": transporte,
                    "tarjetas_trasladadas": trasladar},
         consecuencias=consecuencias,
-        revalidaciones=(["REGENERAR_REPORTE_VIAJES"] if digito_inicial_omitido else ["MANTENIMIENTO_FOCAL_GUIAS", "REGENERAR_REPORTE_VIAJES"]),
+        revalidaciones=["REGENERAR_REPORTE_VIAJES"],
         archivos=("dataset", "ledger_decisiones", "bandeja") if trasladar else ("dataset", "ledger_decisiones"),
         datos={"archivo": archivo, "guia": actual, "guia_nueva": nuevo, "transporte": transporte,
                "tarjetas": trasladar, "digito_inicial_omitido": digito_inicial_omitido},
@@ -2050,6 +2050,7 @@ def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan,
         reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
         superar_resoluciones_automaticas=True, numero_guia=str(plan.datos["guia"]),
         campos_adicionales_permitidos=frozenset({"numero_guia"}),
+        conservar_estado_operacional=True,
     )
     cambios = resultado.get("cambios", [])
     if ([(c["campo"], c["antes"], c["despues"]) for c in cambios]
@@ -2059,7 +2060,8 @@ def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan,
         ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
         ledger.setdefault("aplicaciones", []).append({
             "decision_id": f"ACCION_OPERACIONAL:{ctx.token}", "tipo": TIPO_LEDGER_CORRECCION,
-            "accion": "CORREGIR_NUMERO_GUIA", "actor": actor, "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "accion": "CORREGIR_NUMERO_GUIA", "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
             "documento": {"archivo": plan.datos["archivo"], "numero_guia": nuevo,
                           "numero_transporte": plan.datos["transporte"]},
             "campo": "numero_guia", "valor_documental": plan.datos["guia"], "valor_corregido": nuevo,
@@ -2071,7 +2073,7 @@ def _aplicar_documento_corregir_numero_guia(ctx: _Contexto, p: dict, plan: Plan,
         _trasladar_tarjetas_a_folio(ctx, tarjetas, archivo=str(plan.datos["archivo"]), nuevo=nuevo)
     return {"despues": {"numero_guia": nuevo,
                         **({"tarjetas_trasladadas": tarjetas} if tarjetas else {})},
-            "guias_revalidar": [] if plan.datos.get("digito_inicial_omitido") else [nuevo], "regenerar_reporte": True}
+            "guias_revalidar": [], "omitir_convergencia_mobile": True, "regenerar_reporte": True}
 
 
 # =============================================================== DECISIONES
@@ -3114,7 +3116,7 @@ class CapaAccionesOperacionales:
         }
         # Después de revalidar las guías (indicador ya convergido) y antes del
         # reporte: el envío Mobile del documento corregido no espera a otro envío.
-        revalidacion["mobile"] = self._converger_mobile(
+        revalidacion["mobile"] = None if salida.get("omitir_convergencia_mobile") else self._converger_mobile(
             plan, set(salida.get("guias_revalidar") or ()), token=token, actor=actor, accion=definicion.nombre,
         )
         revalidacion["reporte"] = self._regenerar_reporte() if salida.get("regenerar_reporte") else None
