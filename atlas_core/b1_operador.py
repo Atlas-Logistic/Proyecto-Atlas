@@ -262,6 +262,35 @@ _REVISION_ACCIONES = {"DOCUMENTO_CORREGIR_CAMPO", "DOCUMENTO_ASIGNAR_OBRA", "DEC
                       "DOCUMENTO_CORREGIR_CHOFER_OPERACIONAL", "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}
 
 
+_ENLACE_CORRECCION = r"(?:\s+(?:ES|A|POR|DEBE\s+SER)\s+|\s*:\s*|\s+)"
+_VERBO_CORRECCION = r"(?:(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR|PON|PONER)\s+)?"
+_DATO_OBRA = r"(?:LA\s+)?OBRA(?:\s+CORRECTA)?"
+_DATO_DIRECCION = r"(?:(?:EL|LA)\s+)?(?:DESTINO|DIRECCION(?:\s+DE\s+ENTREGA)?)(?:\s+CORRECT[OA])?"
+_OBRA_Y_DIRECCION = re.compile(
+    rf"^{_VERBO_CORRECCION}{_DATO_OBRA}{_ENLACE_CORRECCION}(?P<obra>.+?)\s*[,;]?\s+Y\s+{_DATO_DIRECCION}{_ENLACE_CORRECCION}(?P<dir>.+)$")
+_DIRECCION_Y_OBRA = re.compile(
+    rf"^{_VERBO_CORRECCION}{_DATO_DIRECCION}{_ENLACE_CORRECCION}(?P<dir>.+?)\s*[;]?\s+Y\s+{_DATO_OBRA}{_ENLACE_CORRECCION}(?P<obra>.+)$")
+_RESERVA_FINAL = re.compile(r"\s*[,;.]?\s+(?:CONSERVANDO|MANTENIENDO|SIN\s+CAMBIAR)\b.*$")
+_GUIA_Y_TRANSPORTE = re.compile(
+    r"^(?:(?:CORRIGE|CORREGIR)\s+)?(?:EN\s+)?(?:LA\s+)?GUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\s*,?\s*(?:DEL?\s+)?"
+    r"TRANSPORTE\s+(?P<transporte>\d{3,})\s*[:,;-]?\s*(?P<resto>.+)$")
+_MATERIAL_SUELTO = re.compile(rf"^(?:EL\s+)?MATERIAL(?:\s+CORRECTO)?{_ENLACE_CORRECCION}(?P<valor>.+)$")
+
+
+def separar_obra_y_direccion(texto: str) -> tuple[str, str] | None:
+    """(frase de obra, frase de dirección) si una sola orden pide ambas."""
+    original, plano = _limpio(texto)
+    m = _OBRA_Y_DIRECCION.match(plano) or _DIRECCION_Y_OBRA.match(plano)
+    if m is None:
+        return None
+    fin = _RESERVA_FINAL.search(plano)
+    corte = fin.start() if fin else len(plano)
+    def tramo(nombre: str) -> str:
+        return original[m.start(nombre):min(m.end(nombre), corte)].strip(" ,;.")
+    obra, direccion = tramo("obra"), tramo("dir")
+    return (f"la obra es {obra}", f"la dirección es {direccion}") if obra and direccion else None
+
+
 def separar_contexto_revision(texto: str) -> tuple[str, str]:
     """("decision_id", instrucción) si el texto viene de una tarjeta de Revisión."""
     m = _REVISION.match(str(texto or "").strip())
@@ -1835,7 +1864,9 @@ class OperadorB1:
                     return self._confirmar(estado, conversacion_id, discrepancia_rut=True)
                 if es_confirmacion(texto):
                     self._olvidar_investigacion(estado, conversacion_id)
-                    return self._confirmar(estado, conversacion_id)
+                    siguiente = ((estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente") or {}).get("siguiente")
+                    resultado = self._confirmar(estado, conversacion_id)
+                    return self._continuar_correccion(estado, conversacion_id, siguiente, resultado)
                 if es_cancelacion(texto):
                     self._olvidar_investigacion(estado, conversacion_id)
                     tenia = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
@@ -1844,6 +1875,9 @@ class OperadorB1:
                             "mensaje": "Operación pendiente descartada." if tenia else "No había nada pendiente."}
                 if decision_id:
                     return self._instruccion_revision(estado, conversacion_id, decision_id, texto)
+                por_transporte = self._instruccion_guia_transporte(estado, conversacion_id, texto)
+                if por_transporte is not None:
+                    return por_transporte
                 return self._instruccion(estado, conversacion_id, texto)
         except SesionOcupadaError:
             return {"estado": "RECHAZADA", "mensaje": "Otra operación de esta conversación está en curso."}
@@ -1861,7 +1895,86 @@ class OperadorB1:
         propuesta = self.proveedor.interpretar(str(texto), catalogo_acciones())
         return None if propuesta is None else intencion_desde_modelo(propuesta)
 
+    def _tiene_destino_confirmado(self, parametros: Mapping[str, object]) -> bool:
+        from atlas_core.destino_operacional import TIPO
+        guia, archivo = str(parametros.get("numero_guia") or ""), str(parametros.get("archivo") or "")
+        vista = self.capa._ctx.instantanea_documental()
+        archivos = {str(f.get("archivo") or "") for f in vista["filas"]
+                    if (archivo and f.get("archivo") == archivo) or (not archivo and str(f.get("numero_guia") or "") == guia)}
+        return len(archivos) == 1 and any(
+            isinstance(a, dict) and a.get("tipo") == TIPO and (a.get("documento") or {}).get("archivo") in archivos
+            for a in vista["ledger"].get("aplicaciones") or [])
+
+    def _dejar_siguiente(self, estado: dict, conversacion_id: str, respuesta: dict, siguiente: dict, aviso: str) -> dict:
+        """Una orden con dos correcciones: cada una conserva su propia vista
+        previa, confirmación y auditoría; si no se confirma, la otra no ocurre."""
+        pendiente = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("pendiente")
+        if respuesta.get("estado") == "PREVIEW_PENDIENTE" and pendiente:
+            self._fijar_pendiente(estado, conversacion_id, {**pendiente, "siguiente": siguiente})
+            respuesta = {**respuesta, "mensaje": f"{respuesta.get('mensaje', '')} {aviso}".strip()}
+        return respuesta
+
+    def _continuar_correccion(self, estado: dict, conversacion_id: str, siguiente: object, resultado: dict) -> dict:
+        if not isinstance(siguiente, dict) or resultado.get("estado") != "EJECUTADA":
+            return resultado
+        texto = str(siguiente.get("texto") or "")
+        decision_id = str(siguiente.get("decision_id") or "")
+        respuesta = (self._instruccion_revision(estado, conversacion_id, decision_id, texto) if decision_id
+                     else self._instruccion(estado, conversacion_id, texto))
+        return {**respuesta, "aplicado_previo": resultado.get("mensaje", ""),
+                "mensaje": f"{resultado.get('mensaje', '')} {respuesta.get('mensaje', '')}".strip()}
+
+    def _correccion_compuesta(self, estado: dict, conversacion_id: str, decision_id: str, partes: tuple[str, str]) -> dict:
+        obra, direccion = partes
+        return self._dejar_siguiente(estado, conversacion_id, self._instruccion_revision(estado, conversacion_id, decision_id, obra),
+                                     {"decision_id": decision_id, "texto": direccion},
+                                     "Al confirmar te mostraré la dirección para que la confirmes por separado.")
+
+    def _instruccion_guia_transporte(self, estado: dict, conversacion_id: str, texto: str) -> dict | None:
+        """«Guía N, transporte T: …» identifica un documento aunque su folio
+        no se haya leído. Sin un documento único no se elige ninguno."""
+        original, plano = _limpio(texto)
+        m = _GUIA_Y_TRANSPORTE.match(plano)
+        if m is None:
+            return None
+        guia, transporte = m.group("guia"), m.group("transporte")
+        resto = original[m.start("resto"):m.end("resto")].strip()
+        partes = separar_obra_y_direccion(resto)
+        material = _MATERIAL_SUELTO.match(_plano(resto))
+        if partes is None and material is None:
+            return None
+        filas = [f for f in self.capa._ctx.filas() if str(f.get("numero_transporte") or "").strip() == transporte]
+        propias = [f for f in filas if str(f.get("numero_guia") or "").strip() == guia]
+        if not propias and partes is not None:
+            propias = [f for f in filas if not str(f.get("numero_guia") or "").strip().isdigit()]
+        if len(propias) != 1:
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": (
+                f"No identifiqué un documento único para la guía {guia} del transporte {transporte}. No se corrigió nada.")}
+        if material is not None:
+            if not str(propias[0].get("numero_guia") or "").strip().isdigit():
+                return None
+            valor = resto[material.start("valor"):material.end("valor")].strip()
+            return self._instruccion(estado, conversacion_id, f"El material de la guía {guia} es {valor}")
+        archivo = str(propias[0].get("archivo") or "").strip()
+        tarjetas = [d for d in self.capa._ctx.decisiones() if d.get("estado", "PENDIENTE") == "PENDIENTE"
+                    and str((d.get("documento") or {}).get("archivo") or "").strip() == archivo
+                    and d.get("tipo") == "DESTINO_NO_RESUELTO"]
+        if len(tarjetas) == 1:
+            return self._correccion_compuesta(estado, conversacion_id, str(tarjetas[0]["decision_id"]), partes)
+        if not str(propias[0].get("numero_guia") or "").strip().isdigit():
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": (
+                "El documento no tiene folio leído y no hay una única tarjeta de revisión que lo identifique. No se corrigió nada.")}
+        obra, direccion = (p.split(" es ", 1)[1] for p in partes)
+        return self._dejar_siguiente(estado, conversacion_id, self._instruccion(estado, conversacion_id, f"La obra de la guía {guia} es {obra}"),
+                                     {"decision_id": "", "texto": f"El destino de la guía {guia} es {direccion}"},
+                                     "Al confirmar te mostraré la dirección para que la confirmes por separado.")
+
     def _instruccion_revision(self, estado: dict, conversacion_id: str, decision_id: str, texto: str) -> dict:
+        partes = separar_obra_y_direccion(texto)
+        if partes is not None:
+            return self._correccion_compuesta(estado, conversacion_id, decision_id, partes)
         decision = next((d for d in self.capa._ctx.decisiones() if d.get("decision_id") == decision_id
                          and d.get("estado", "PENDIENTE") == "PENDIENTE"), None)
         if decision is None:
@@ -1919,6 +2032,11 @@ class OperadorB1:
             if rechazo:
                 self._fijar_pendiente(estado, conversacion_id, None)
                 return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": rechazo}
+        if (intencion is not None and intencion.accion == "DOCUMENTO_ASIGNAR_OBRA"
+                and self._tiene_destino_confirmado(intencion.parametros)):
+            # Con destino decidido por una persona, corregir la obra no
+            # recalcula su ruta ni sus estados.
+            intencion.parametros["conservar_estado"] = True
         if intencion is None or intencion.accion not in {ACCION_INVESTIGAR_REVISION, ACCION_DESDE_INVESTIGACION}:
             # Sólo la investigación INMEDIATAMENTE anterior es reutilizable:
             # cualquier otra instrucción la deja sin efecto.

@@ -527,7 +527,7 @@ def test_segundo_corte_durante_restauracion_de_bandeja_o_ledger(entorno, monkeyp
 
 
 @pytest.mark.parametrize("accion", ["folio", "obra", "destino"])
-def test_estado_reporte_real_publicado_sigue_bloqueado(entorno, monkeypatch, accion):
+def test_corte_tras_reporte_real_se_reconoce_sin_republicar(entorno, monkeypatch, accion):
     import atlas_core.almacenamiento_portable as almacenamiento
     from tests.test_acciones_operacionales import _registrar_obra
     archivo = "mobile/prueba/original.jpg"
@@ -554,8 +554,12 @@ def test_estado_reporte_real_publicado_sigue_bloqueado(entorno, monkeypatch, acc
     antes = estado.read_bytes()
     nueva = CapaAccionesOperacionales(entorno["raiz"])
     resultado = nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
-    assert resultado["codigo"] == "PUBLICACION_INCOMPLETA", resultado
+    assert resultado["estado"] == "APLICADA" and resultado["recuperada_tras_corte"], resultado
+    assert resultado["revalidacion"]["reporte"]["reconocido_tras_corte"] is True
     assert estado.read_bytes() == antes
+    assert len([a for a in nueva.auditoria() if a["token"] == preview["token"]]) == 1
+    nueva._ctx.instantanea_documental()
+    assert nueva.ejecutar(preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")["idempotente"]
 
 
 @pytest.mark.parametrize("etapa", ["bandeja", "estado_operacion"])

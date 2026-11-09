@@ -53,9 +53,12 @@ def test_tarjeta_corrige_tres_campos_en_cualquier_orden(entorno, monkeypatch, or
               "obra": "la obra correcta es CONSTRUCTORA IGNACIO HURTADO LTDA",
               "folio": "el folio correcto es 484180"}
     for nombre in orden:
-        tarjeta = next(d for d in capa._ctx.decisiones() if d["tipo"] == "DESTINO_NO_RESUELTO")
+        tarjeta = next((d for d in capa._ctx.decisiones() if d["tipo"] == "DESTINO_NO_RESUELTO"), None)
         antes = entorno["dataset"].read_bytes()
-        preview = b1.atender("prueba", f"@revision:{tarjeta['decision_id']} {frases[nombre]}")
+        # Con destino confirmado y folio legible la tarjeta ya se cerró: la guía se corrige por su número.
+        instruccion = (f"@revision:{tarjeta['decision_id']} {frases[nombre]}" if tarjeta
+                       else f"La obra de la guía 484180 es CONSTRUCTORA IGNACIO HURTADO LTDA")
+        preview = b1.atender("prueba", instruccion)
         assert preview["estado"] == "PREVIEW_PENDIENTE", preview
         assert entorno["dataset"].read_bytes() == antes
         resultado = b1.atender("prueba", "si")

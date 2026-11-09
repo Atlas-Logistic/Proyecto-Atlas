@@ -41,6 +41,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Iterable, Mapping
 
 from atlas_core.almacenamiento_portable import (
@@ -103,6 +104,19 @@ TTL_PREVIEW = timedelta(minutes=30)
 # humana_para_campo`), y ningún lector del ledger la confunde con una
 # decisión de Revisión (todos filtran por tipo/acción).
 TIPO_LEDGER_CORRECCION = "CORRECCION_DOCUMENTAL_OPERADOR"
+
+_ACCIONES_CIERRAN_TARJETA_DESTINO = frozenset({"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"})
+_ACCIONES_PUBLICACION_BASE = frozenset({"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
+                                        "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"})
+
+
+def _publicacion_protegida(accion: object, parametros: object) -> bool:
+    """Correcciones documentales que publican bajo marca durable. El cambio de
+    transporte reubica guías entre viajes y conserva su flujo propio."""
+    if accion in _ACCIONES_PUBLICACION_BASE:
+        return True
+    return (accion == "DOCUMENTO_CORREGIR_CAMPO" and isinstance(parametros, Mapping)
+            and str(parametros.get("campo") or "").lower() != "numero_transporte")
 
 # --------------------------------------------------------------- riesgo
 
@@ -258,6 +272,24 @@ def _leer_json(ruta: Path, defecto):
         return defecto
     except (OSError, json.JSONDecodeError) as error:
         raise ErrorAccionOperacional("ESTADO_ILEGIBLE", f"no se pudo leer {ruta.name}") from error
+
+
+def publicacion_documental_incompleta(raiz: str | Path) -> bool:
+    """Sin locks ni escrituras: también sirve a lectores en SOLO CONSULTA."""
+    registro = _leer_json(Path(raiz) / "operacion" / "actual" / NOMBRE_REGISTRO, {})
+    previews = registro.get("previews") if isinstance(registro, dict) else None
+    return isinstance(previews, dict) and any(
+        isinstance(p, dict) and (p.get("publicacion_iniciada") or p.get("confirmacion_recuperable"))
+        for p in previews.values())
+
+
+def exigir_publicacion_documental_completa(raiz: str | Path, *, espera_segundos: float = _ESPERA_LECTURA_SEGUNDOS) -> None:
+    """Para quien combina dataset, ledger y bandeja fuera de la capa de acciones."""
+    limite = time.monotonic() + espera_segundos
+    while publicacion_documental_incompleta(raiz):
+        if time.monotonic() >= limite:
+            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "lectura detenida: publicación documental incompleta")
+        time.sleep(0.05)
 
 
 class _Contexto:
@@ -2956,6 +2988,7 @@ class CapaAccionesOperacionales:
         self._ttl = ttl_preview
         self._ctx = _Contexto(self.raiz, reloj, proveedor_rutas, proveedor_rutas_fallback)
         self._ruta_registro = self._ctx.actual / NOMBRE_REGISTRO
+        self._antes_de_publicar_reporte: Callable[[str, str], None] | None = None
 
     # ------------------------------------------------------------ registro
 
@@ -3024,7 +3057,8 @@ class CapaAccionesOperacionales:
                     raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "preview documental inválido")
                 esperadas = {"DOCUMENTO_CORREGIR_NUMERO_GUIA": "CORREGIR_NUMERO_GUIA",
                              "DOCUMENTO_ASIGNAR_OBRA": "CORREGIR_CAMPO",
-                             "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL": "CORREGIR_DESTINO_OPERACIONAL"}
+                             "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL": "CORREGIR_DESTINO_OPERACIONAL",
+                             "DOCUMENTO_CORREGIR_CAMPO": "CORREGIR_CAMPO"}
                 accion = preview.get("accion")
                 if accion not in esperadas:
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "acción documental no admitida")
@@ -3049,6 +3083,9 @@ class CapaAccionesOperacionales:
                                 (entrada.get("campo") != "numero_guia" or entrada.get("valor_corregido") != propuesto.get("numero_guia")))
                             or (accion == "DOCUMENTO_ASIGNAR_OBRA" and
                                 (entrada.get("campo") != "obra_destino" or entrada.get("valor_corregido") != propuesto.get("obra_destino")))
+                            or (accion == "DOCUMENTO_CORREGIR_CAMPO" and
+                                (entrada.get("campo") != entidad.get("campo")
+                                 or entrada.get("valor_corregido") != propuesto.get(entidad.get("campo"))))
                             or (accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL" and
                                 entrada.get("destino_operacional") != propuesto)):
                         conflictos.append("ACCION_O_VALOR_NO_COINCIDE")
@@ -3454,6 +3491,190 @@ class CapaAccionesOperacionales:
         except SesionOcupadaError as error:
             return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
 
+    def _cerrar_tarjetas_destino(self, archivo: str) -> list[str]:
+        """Una tarjeta de destino se cierra con la decisión humana del destino
+        y un folio legible: sin folio sigue siendo el único modo de identificar
+        el documento para completarlo. Las demás revisiones no se tocan."""
+        from atlas_core.decisiones_pendientes import NOMBRE_LOCK_DECISIONES_PENDIENTES
+        from atlas_core.destino_operacional import TIPO, TIPOS_TARJETA_DESTINO
+        filas = [f for f in self._ctx._filas_sin_bloqueo() if f.get("archivo") == archivo]
+        if len(filas) != 1 or not str(filas[0].get("numero_guia") or "").strip().isdigit():
+            return []
+        ledger = _leer_json(self._ctx.archivos["ledger_decisiones"], {})
+        if not any(isinstance(a, dict) and a.get("tipo") == TIPO and (a.get("documento") or {}).get("archivo") == archivo
+                   for a in ledger.get("aplicaciones") or []):
+            return []
+        if not self._ctx.archivos["bandeja"].is_file():
+            return []
+        with bloqueo_sesion(self._ctx.actual, NOMBRE_LOCK_DECISIONES_PENDIENTES):
+            contenido = _leer_json(self._ctx.archivos["bandeja"], {})
+            clave = "decisiones" if isinstance(contenido.get("decisiones"), list) else "decisions"
+            decisiones = [d for d in contenido.get(clave) or [] if isinstance(d, dict)]
+            cerradas = [d for d in decisiones if d.get("tipo") in TIPOS_TARJETA_DESTINO
+                        and (d.get("documento") or {}).get("archivo") == archivo]
+            if cerradas:
+                contenido[clave] = [d for d in decisiones if d not in cerradas]
+                escribir_json_atomico(self._ctx.archivos["bandeja"], contenido)
+        return [str(d.get("decision_id", "")) for d in cerradas]
+
+    def _reconocer_reporte_publicado(self, registro: dict, preview: dict, marca: dict, token: str) -> dict | None:
+        """Cierra la auditoría si el reporte vigente es el que preparó ESTE token.
+
+        La carpeta se registra antes de publicar y es única por publicación:
+        un puntero que la nombra no puede ser de otro escritor. Devuelve None
+        si ese reporte no llegó a publicarse (siguen los otros caminos).
+        """
+        intento = marca.get("reporte_intento")
+        if not isinstance(intento, dict) or not intento.get("reporte"):
+            return None
+        estado = _leer_json(self._ctx.actual / "estado_operacion.json", None)
+        if not isinstance(estado, dict) or str(estado.get("reporte_vigente") or "").replace("\\", "/") != intento["reporte"]:
+            return None
+        huella = self._huellas_publicacion()["dataset"]
+        if huella != intento.get("dataset_sha256") or estado.get("dataset_sha256") != huella:
+            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "el dataset ya no coincide con el reporte publicado")
+        inspeccion = self.inspeccionar_publicacion_interrumpida(token)
+        if inspeccion.get("estado") != "INTERRUMPIDA" or inspeccion.get("entradas_ledger") != 1:
+            raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "asiento del reporte publicado no verificable")
+        reporte = {"regenerado": True, "reporte": intento["reporte"], "reconocido_tras_corte": True}
+        if preview["accion"] in _ACCIONES_CIERRAN_TARJETA_DESTINO:
+            self._cerrar_tarjetas_destino(str((preview.get("entidad") or {}).get("id") or ""))
+        return self._cerrar_recuperada(registro, preview, marca, token, {"reporte": reporte}, reconciliacion=None)
+
+    def _cerrar_recuperada(self, registro: dict, preview: dict, marca: dict, token: str, revalidacion: dict,
+                           *, reconciliacion: dict | None) -> dict:
+        destino = preview["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"
+        publico = {"estado": "APLICADA", "token": token, "accion": preview["accion"], "riesgo": preview["riesgo"],
+                   "entidad": preview["entidad"], "antes": preview["valor_actual"], "despues": preview["valor_propuesto"],
+                   "decisiones_retiradas": [], "decisiones_nuevas": [], "retiradas_por_red_de_seguridad": [],
+                   "reconciliacion": reconciliacion, "revalidacion": revalidacion, "servicio": None,
+                   "respaldo": marca.get("respaldo"), "idempotente": False, "recuperada_tras_corte": True,
+                   **({"persistencia_verificada": True} if destino else {})}
+        publico["auditoria_id"] = self._auditar(
+            registro, preview, actor=marca["actor"], confirmado_por=marca["confirmado_por"], origen=marca["origen"],
+            instante=str(marca.get("fecha") or ""), despues=preview["valor_propuesto"], resultado="APLICADA",
+            publico=publico, respaldo={"carpeta": marca.get("respaldo")},
+        )
+        return publico
+
+    def _dataset_limitado_a_documento(self, respaldo: Path, preview: dict, *, solo_fila: bool) -> bool:
+        """El dataset difiere del respaldo sólo en el documento corregido (o,
+        ya con asiento, en su viaje) y ese documento tiene el valor confirmado."""
+        def leer(ruta: Path) -> tuple[list[str] | None, list[dict[str, str]]]:
+            with ruta.open("r", encoding="utf-8-sig", newline="") as flujo:
+                lector = csv.DictReader(flujo, delimiter=";")
+                return lector.fieldnames, list(lector)
+        columnas_antes, antes = leer(respaldo)
+        columnas_ahora, ahora = leer(self._ctx.archivos["dataset"])
+        entidad, campo = preview["entidad"], preview["entidad"]["campo"]
+        if columnas_antes != columnas_ahora or len(antes) != len(ahora):
+            return False
+        objetivo = 0
+        for previa, fila in zip(antes, ahora):
+            if previa.get("archivo") != fila.get("archivo"):
+                return False
+            if previa.get("archivo") == entidad["id"]:
+                objetivo += 1
+                if (fila.get(campo) != preview["valor_propuesto"].get(campo) or previa.get(campo) != preview["valor_actual"].get(campo)
+                        or previa.get("numero_transporte") != entidad.get("numero_transporte")):
+                    return False
+            elif previa != fila and (solo_fila or previa.get("numero_transporte") != entidad.get("numero_transporte")):
+                return False
+        return objetivo == 1
+
+    def recuperar_campo_documental(self, token: str) -> dict:
+        """Corte de una corrección de campo: sin asiento vuelve al respaldo y
+        reejecuta; con asiento la decisión ya es firme y sólo completa los
+        pasos derivados. Cualquier cambio ajeno mantiene el bloqueo."""
+        try:
+            with _bloqueo_acciones(self._ctx.actual):
+                registro = self._leer_registro()
+                self._verificar_sin_otra_publicacion(registro, token)
+                previa = next((a for a in registro.get("auditoria", []) if a.get("token") == token), None)
+                if previa:
+                    return {**previa["resultado_publico"], "idempotente": True}
+                preview = registro.get("previews", {}).get(token)
+                marca = (preview.get("publicacion_iniciada") or preview.get("confirmacion_recuperable")) if isinstance(preview, dict) else None
+                if not isinstance(marca, dict) or not isinstance(marca.get("huellas_antes"), dict):
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "sin huellas verificables")
+                huellas = marca["huellas_antes"]
+                if huellas == self._huellas_publicacion():
+                    return self.recuperar_publicacion_sin_cambios(token)
+                if preview.get("accion") != "DOCUMENTO_CORREGIR_CAMPO":
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "acción no admitida")
+                inspeccion = self.inspeccionar_publicacion_interrumpida(token)
+                if inspeccion.get("estado") != "INTERRUMPIDA" or inspeccion.get("entradas_ledger") not in (0, 1):
+                    raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "asiento de la corrección no verificable")
+                respaldo = self._respaldo_verificado(marca, "dataset")
+                sin_asiento = inspeccion["entradas_ledger"] == 0
+                with bloqueo_sesion(self._ctx.actual, "revalidacion_dataset"):
+                    actuales = self._huellas_publicacion()
+                    if actuales["estado_operacion"] != huellas["estado_operacion"]:
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "estado del reporte no verificable")
+                    if sin_asiento and (actuales["ledger_decisiones"] != huellas["ledger_decisiones"]
+                                        or actuales["bandeja"] != huellas["bandeja"]):
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "hay cambios ajenos; no se sobrescriben")
+                    if not self._dataset_limitado_a_documento(respaldo, preview, solo_fila=sin_asiento):
+                        raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "dataset con cambios ajenos")
+                    if sin_asiento:
+                        self._restaurar_respaldo_verificado(respaldo, self._ctx.archivos["dataset"], huellas["dataset"])
+                if sin_asiento:
+                    return self.recuperar_publicacion_sin_cambios(token)
+                return self._completar_campo_asentado(registro, preview, marca, token)
+        except ErrorAccionOperacional as error:
+            return _rechazo(error, token=str(token))
+        except SesionOcupadaError as error:
+            return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
+
+    def _completar_campo_asentado(self, registro: dict, preview: dict, marca: dict, token: str) -> dict:
+        definicion = self._definicion(preview["accion"])
+        escritor = None
+        if definicion.escritor_global:
+            from atlas_core.desktop_operacion import escritor_de_sesion
+            de_sesion = escritor_de_sesion()
+            escritor = _EscritorPrestado(de_sesion) if de_sesion is not None else self._fabrica_escritor()
+            if escritor is None:
+                raise ErrorAccionOperacional("ESCRITOR_NO_DISPONIBLE", "sin escritor global no se completa la corrección")
+            if de_sesion is None and hasattr(escritor, "vincular_raiz"):
+                escritor.vincular_raiz(self.raiz)
+        try:
+            if escritor is not None:
+                if not escritor.adquirir() or not escritor.vigente:
+                    raise ErrorAccionOperacional("ESCRITOR_OCUPADO", "otro proceso tiene el escritor global; reintente")
+                self._ctx.puede_escribir = lambda: escritor.vigente
+            self._ctx.token, self._ctx.confirmado_por = token, marca["confirmado_por"]
+            entidad = preview["entidad"]
+            campo, valor = entidad["campo"], preview["valor_propuesto"][entidad["campo"]]
+            retirar = (entidad["id"], campo, valor)
+            _retirar_obsoletas_por_campo(self._ctx, *retirar)
+            reconciliacion = self._reconciliar(guias_objetivo={str(entidad.get("numero_guia") or "")} - {""} or None)
+            _retirar_obsoletas_por_campo(self._ctx, *retirar)
+            guias = {str(entidad.get("numero_guia") or "")}
+            revalidacion: dict = {"focal": None, "guias": self._revalidar_guias(guias), "mobile": self._converger_mobile(
+                SimpleNamespace(afectados=preview.get("afectados") or {}), guias, token=token,
+                actor=marca["actor"], accion=preview["accion"])}
+            self._antes_de_publicar_reporte = self._intento_reporte(registro, marca)
+            try:
+                revalidacion["reporte"] = self._regenerar_reporte()
+            finally:
+                self._antes_de_publicar_reporte = None
+            if not revalidacion["reporte"].get("regenerado"):
+                return {"estado": "FALLIDA", "token": token, "accion": preview["accion"],
+                        "codigo": "PUBLICACION_INCOMPLETA", "revalidacion": revalidacion,
+                        "mensaje": "La corrección está registrada, pero el reporte no se publicó; la lectura sigue bloqueada."}
+            return self._cerrar_recuperada(registro, preview, marca, token, revalidacion, reconciliacion=reconciliacion)
+        finally:
+            self._ctx.puede_escribir = None
+            if escritor is not None:
+                escritor.cerrar()
+
+    def _intento_reporte(self, registro: dict, marca: dict):
+        """Deja constancia durable del reporte de este token antes de publicarlo."""
+        def registrar(reporte: str, huella: str) -> None:
+            marca["reporte_intento"] = {"reporte": reporte, "dataset_sha256": huella}
+            self._guardar_registro(registro)
+        return registrar
+
     # ------------------------------------------------------------ preview
 
     @staticmethod
@@ -3567,14 +3788,18 @@ class CapaAccionesOperacionales:
             raise ErrorAccionOperacional("TOKEN_DESCONOCIDO", "no existe un preview vigente con ese token")
         if accion_esperada is not None and str(accion_esperada).upper() != preview["accion"]:
             raise ErrorAccionOperacional("TOKEN_NO_CORRESPONDE", "el token pertenece a otra acción")
-        if preview.get("accion") in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
-                                     "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
+        if _publicacion_protegida(preview.get("accion"), preview.get("parametros")):
             self._verificar_sin_otra_publicacion(registro, token)
             marca_propia = preview.get("publicacion_iniciada") or preview.get("confirmacion_recuperable")
             if isinstance(marca_propia, dict) and not recuperando:
                 if (actor != marca_propia.get("actor") or confirmado_por != marca_propia.get("confirmado_por")
                         or origen != marca_propia.get("origen")):
                     raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "el reintento debe conservar la confirmación original")
+                reconocida = self._reconocer_reporte_publicado(registro, preview, marca_propia, token)
+                if reconocida is not None:
+                    return reconocida
+                if preview["accion"] == "DOCUMENTO_CORREGIR_CAMPO":
+                    return self.recuperar_campo_documental(token)
                 if preview["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
                     return self.recuperar_destino_tras_ledger(token)
                 resultado = self.recuperar_dataset_antes_del_ledger(token)
@@ -3602,8 +3827,7 @@ class CapaAccionesOperacionales:
         confirmado = str(confirmado_por or "").strip()
         if definicion.riesgo in (OPERACIONAL_REVERSIBLE, SENSIBLE) and not _ID.fullmatch(confirmado):
             raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "falta la confirmación humana explícita")
-        if definicion.nombre in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
-                                 "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
+        if _publicacion_protegida(definicion.nombre, preview.get("parametros")):
             from atlas_core.decisiones_pendientes import _actor_es_humano
             if not _actor_es_humano(confirmado):
                 raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "el confirmante debe ser una persona")
@@ -3679,8 +3903,7 @@ class CapaAccionesOperacionales:
         self._ctx.confirmado_por = confirmado
         respaldo = self._respaldar(plan.archivos, token)
         instante = self._reloj().astimezone(timezone.utc).isoformat()
-        if definicion.nombre in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
-                                 "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
+        if _publicacion_protegida(definicion.nombre, parametros):
             # Persistir antes de tocar el dataset o el ledger: un corte en
             # cualquier escritura deja el mismo token bloqueado al reintentar.
             # No equivale a recuperar ni a publicar una transacción completa.
@@ -3725,7 +3948,12 @@ class CapaAccionesOperacionales:
         revalidacion["mobile"] = None if salida.get("omitir_convergencia_mobile") else self._converger_mobile(
             plan, set(salida.get("guias_revalidar") or ()), token=token, actor=actor, accion=definicion.nombre,
         )
-        revalidacion["reporte"] = self._regenerar_reporte() if salida.get("regenerar_reporte") else None
+        marca_reporte = preview.get("publicacion_iniciada") or preview.get("confirmacion_recuperable")
+        self._antes_de_publicar_reporte = self._intento_reporte(registro, marca_reporte) if isinstance(marca_reporte, dict) else None
+        try:
+            revalidacion["reporte"] = self._regenerar_reporte() if salida.get("regenerar_reporte") else None
+        finally:
+            self._antes_de_publicar_reporte = None
         if (preview.get("confirmacion_recuperable") and salida.get("regenerar_reporte")
                 and not (revalidacion["reporte"] or {}).get("regenerado")):
             # No cerrar la marca ni auditar como aplicada una recuperación
@@ -3733,10 +3961,14 @@ class CapaAccionesOperacionales:
             return {"estado": "FALLIDA", "token": token, "accion": definicion.nombre,
                     "codigo": "PUBLICACION_INCOMPLETA", "revalidacion": revalidacion,
                     "mensaje": "La corrección se reintentó, pero el reporte no se publicó; la lectura sigue bloqueada."}
+        # Tras el reporte: un corte aquí no deja una publicación a medias, y el
+        # reintento que reconoce el reporte vuelve a cerrarla.
+        cerradas = (self._cerrar_tarjetas_destino(str(plan.entidad.get("id") or ""))
+                    if definicion.nombre in _ACCIONES_CIERRAN_TARJETA_DESTINO else [])
         publico = {
             "estado": "APLICADA", "token": token, "accion": definicion.nombre, "riesgo": definicion.riesgo,
             "entidad": plan.entidad, "antes": plan.valor_actual, "despues": salida.get("despues"),
-            "decisiones_retiradas": sorted(ids_antes - ids_despues),
+            "decisiones_retiradas": sorted((ids_antes - ids_despues) | set(cerradas)),
             "decisiones_nuevas": sorted(ids_despues - ids_antes),
             "retiradas_por_red_de_seguridad": red_seguridad,
             "reconciliacion": reconciliacion, "revalidacion": revalidacion,
@@ -3850,6 +4082,8 @@ class CapaAccionesOperacionales:
             huella = _sha256_archivo(dataset)
             generar_reporte_viajes(dataset, reporte, carpeta_catalogos=self._ctx.catalogos,
                                    ruta_ledger=self._ctx.archivos["ledger_decisiones"], reloj=lambda: instante)
+            if self._antes_de_publicar_reporte is not None:
+                self._antes_de_publicar_reporte(reporte.relative_to(self.raiz).as_posix(), huella)
             escribir_estado_operacion(
                 reporte_vigente=reporte, dataset_operacional=dataset,
                 decisiones_pendientes=self._ctx.archivos["bandeja"] if self._ctx.archivos["bandeja"].is_file() else None,

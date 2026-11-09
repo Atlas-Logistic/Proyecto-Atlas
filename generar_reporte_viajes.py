@@ -31,6 +31,12 @@ def crear_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     argumentos = crear_parser().parse_args()
+    from atlas_core.acciones_operacionales import ErrorAccionOperacional, exigir_publicacion_documental_completa
+    try:
+        # Combina dataset y ledger: nunca publica a partir de una corrección B1 a medias.
+        exigir_publicacion_documental_completa(argumentos.csv.resolve().parent.parent.parent)
+    except ErrorAccionOperacional as error:
+        raise SystemExit(f"No se genera el reporte: {error}") from error
     # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
     # VERSIONADA: se captura la huella del CSV justo ANTES de generar el
     # reporte y se vuelve a comprobar justo DESPUÉS -- si otra operación

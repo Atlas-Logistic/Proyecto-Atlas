@@ -202,6 +202,8 @@ def investigar_revision(numero_guia: str, *, raiz_atlas: str | Path | None = Non
     abstiene con causa explícita.
     """
     raiz = resolver_raiz_atlas(raiz_atlas)
+    from atlas_core.acciones_operacionales import exigir_publicacion_documental_completa
+    exigir_publicacion_documental_completa(raiz)
     dataset = raiz / "operacion" / "actual" / "analisis_completo_guias.csv"
     with dataset.open(encoding="utf-8-sig", newline="") as flujo:
         filas = list(csv.DictReader(flujo, delimiter=";"))
