@@ -2982,6 +2982,77 @@ class CapaAccionesOperacionales:
         rutas["estado_operacion"] = self._ctx.actual / "estado_operacion.json"
         return {clave: _huella_archivo(ruta) for clave, ruta in rutas.items()}
 
+    def inspeccionar_publicacion_interrumpida(self, token: str) -> dict:
+        """Identifica diferencias y comprueba el asiento, sin modificar archivos.
+
+        Una huella distinta no prueba quién hizo el cambio: el resultado no
+        autoriza restaurar ni completar una publicación parcialmente escrita.
+        """
+        try:
+            with _bloqueo_acciones(self._ctx.actual):
+                registro = self._leer_registro()
+                previas = [a for a in registro.get("auditoria", []) if a.get("token") == token]
+                if len(previas) > 1:
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "auditoría duplicada para el token")
+                if previas:
+                    return {"estado": "AUDITADA", "token": token, "auditoria_id": previas[0].get("auditoria_id")}
+                preview = registro.get("previews", {}).get(token)
+                marca = (preview.get("publicacion_iniciada") or preview.get("confirmacion_recuperable")) if isinstance(preview, dict) else None
+                if not isinstance(marca, dict) or not isinstance(marca.get("huellas_antes"), dict):
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "no hay huellas previas verificables")
+                anteriores = marca["huellas_antes"]
+                actuales = self._huellas_publicacion()
+                if set(anteriores) != set(actuales):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "las huellas previas están incompletas")
+                ledger = _leer_json(self._ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+                if not isinstance(ledger, dict) or not isinstance(ledger.get("aplicaciones"), list):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "ledger documental inválido")
+                entradas = [e for e in ledger["aplicaciones"] if isinstance(e, dict)
+                            and e.get("decision_id") == f"ACCION_OPERACIONAL:{token}"]
+                entidad = preview.get("entidad") or {}
+                propuesto = preview.get("valor_propuesto") or {}
+                if not isinstance(entidad, dict) or not isinstance(propuesto, dict):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "preview documental inválido")
+                esperadas = {"DOCUMENTO_CORREGIR_NUMERO_GUIA": "CORREGIR_NUMERO_GUIA",
+                             "DOCUMENTO_ASIGNAR_OBRA": "CORREGIR_CAMPO",
+                             "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL": "CORREGIR_DESTINO_OPERACIONAL"}
+                accion = preview.get("accion")
+                if accion not in esperadas:
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "acción documental no admitida")
+                conflictos = []
+                from atlas_core.decisiones_pendientes import _actor_es_humano
+                confirmante = marca.get("confirmado_por")
+                if not isinstance(confirmante, str) or not _ID.fullmatch(confirmante) or not _actor_es_humano(confirmante):
+                    conflictos.append("CONFIRMACION_HUMANA_NO_VERIFICABLE")
+                if len(entradas) > 1:
+                    conflictos.append("TOKEN_DUPLICADO_EN_LEDGER")
+                for entrada in entradas:
+                    documento = entrada.get("documento") or {}
+                    guia_esperada = propuesto.get("numero_guia") if accion == "DOCUMENTO_CORREGIR_NUMERO_GUIA" else entidad.get("numero_guia")
+                    if (not isinstance(documento, dict) or documento.get("archivo") != entidad.get("id")
+                            or str(documento.get("numero_guia") or "") != str(guia_esperada or "")
+                            or str(documento.get("numero_transporte") or "") != str(entidad.get("numero_transporte") or "")
+                            or entrada.get("actor") != marca.get("actor")
+                            or entrada.get("confirmado_por") != marca.get("confirmado_por")):
+                        conflictos.append("IDENTIDAD_O_CONFIRMACION_NO_COINCIDE")
+                    if (entrada.get("accion") != esperadas[accion]
+                            or (accion == "DOCUMENTO_CORREGIR_NUMERO_GUIA" and
+                                (entrada.get("campo") != "numero_guia" or entrada.get("valor_corregido") != propuesto.get("numero_guia")))
+                            or (accion == "DOCUMENTO_ASIGNAR_OBRA" and
+                                (entrada.get("campo") != "obra_destino" or entrada.get("valor_corregido") != propuesto.get("obra_destino")))
+                            or (accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL" and
+                                entrada.get("destino_operacional") != propuesto)):
+                        conflictos.append("ACCION_O_VALOR_NO_COINCIDE")
+                archivos = {k: {"antes": anteriores[k], "actual": actuales[k],
+                                 "estado": "SIN_CAMBIOS" if anteriores[k] == actuales[k] else "MODIFICADO"}
+                            for k in actuales}
+                return {"estado": "CONFLICTO" if conflictos else "INTERRUMPIDA", "token": token,
+                        "archivos": archivos, "entradas_ledger": len(entradas), "conflictos": conflictos}
+        except ErrorAccionOperacional as error:
+            return _rechazo(error, token=str(token))
+        except SesionOcupadaError as error:
+            return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
+
     def recuperar_publicacion_sin_cambios(self, token: str) -> dict:
         """Reintenta una confirmación interrumpida sólo si no dejó efectos.
 
