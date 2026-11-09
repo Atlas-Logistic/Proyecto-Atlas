@@ -202,6 +202,19 @@ def _huella(valor: object) -> str:
     return hashlib.sha256(serializado.encode("utf-8")).hexdigest()
 
 
+def _huella_archivo(ruta: Path) -> str | None:
+    try:
+        with ruta.open("rb") as archivo:
+            resumen = hashlib.sha256()
+            for bloque in iter(lambda: archivo.read(1024 * 1024), b""):
+                resumen.update(bloque)
+            return resumen.hexdigest()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", f"no se pudo verificar {ruta.name}") from error
+
+
 def _leer_json(ruta: Path, defecto):
     try:
         return json.loads(ruta.read_text(encoding="utf-8-sig"))
@@ -2894,13 +2907,58 @@ class CapaAccionesOperacionales:
         ahora = self._reloj()
         registro["previews"] = {
             t: v for t, v in registro.get("previews", {}).items()
-            if v.get("estado") == "PREVIEW" and (v.get("publicacion_iniciada")
+            if v.get("estado") == "PREVIEW" and (v.get("publicacion_iniciada") or v.get("confirmacion_recuperable")
                                                     or datetime.fromisoformat(v["expira_en"]) > ahora)
         }
         escribir_json_atomico(self._ruta_registro, registro)
 
     def auditoria(self) -> list[dict]:
         return list(self._leer_registro().get("auditoria", []))
+
+    def _huellas_publicacion(self) -> dict[str, str | None]:
+        rutas = {k: self._ctx.archivos[k] for k in ("dataset", "ledger_decisiones", "bandeja")}
+        rutas["estado_operacion"] = self._ctx.actual / "estado_operacion.json"
+        return {clave: _huella_archivo(ruta) for clave, ruta in rutas.items()}
+
+    def recuperar_publicacion_sin_cambios(self, token: str) -> dict:
+        """Reintenta una confirmación interrumpida sólo si no dejó efectos.
+
+        Nunca restaura snapshots ni interpreta cambios de otros escritores.
+        La confirmación original se registra antes de reanudar y el preview
+        vuelve a pasar las precondiciones normales.
+        """
+        try:
+            with bloqueo_sesion(self._ctx.actual, NOMBRE_LOCK):
+                registro = self._leer_registro()
+                previa = next((a for a in registro.get("auditoria", []) if a.get("token") == token), None)
+                if previa:
+                    return {**previa["resultado_publico"], "idempotente": True}
+                preview = registro.get("previews", {}).get(token)
+                marca = (preview.get("publicacion_iniciada") or preview.get("confirmacion_recuperable")) if isinstance(preview, dict) else None
+                if not isinstance(marca, dict) or not isinstance(marca.get("huellas_antes"), dict):
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "no hay huellas previas verificables")
+                actor, confirmante, origen = marca.get("actor"), marca.get("confirmado_por"), marca.get("origen")
+                from atlas_core.decisiones_pendientes import _actor_es_humano
+                if not isinstance(actor, str) or not isinstance(confirmante, str) or not _ID.fullmatch(confirmante) or not _actor_es_humano(confirmante) or origen not in ORIGENES:
+                    raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "falta la confirmación humana original verificable")
+                if marca["huellas_antes"] != self._huellas_publicacion():
+                    raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "hay archivos modificados; no se restaura ni desbloquea")
+                ledger = _leer_json(self._ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+                if not isinstance(ledger, dict) or not isinstance(ledger.get("aplicaciones"), list):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "ledger documental inválido")
+                if any(isinstance(e, dict) and e.get("decision_id") == f"ACCION_OPERACIONAL:{token}"
+                       for e in ledger["aplicaciones"]):
+                    raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "la decisión ya figura en el ledger")
+                preview["confirmacion_recuperable"] = marca
+                preview.pop("publicacion_iniciada", None)
+                self._guardar_registro(registro)
+                return self._ejecutar_bloqueado(token, actor=actor, confirmado_por=confirmante, origen=origen,
+                                                autorizacion_sensible=False, accion_esperada=preview["accion"],
+                                                recuperando=True)
+        except ErrorAccionOperacional as error:
+            return _rechazo(error, token=str(token))
+        except SesionOcupadaError as error:
+            return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
 
     # ------------------------------------------------------------ preview
 
@@ -3003,7 +3061,8 @@ class CapaAccionesOperacionales:
             return _rechazo(ErrorAccionOperacional("SESION_OCUPADA", str(error)), token=str(token))
 
     def _ejecutar_bloqueado(self, token: str, *, actor: str, confirmado_por: str, origen: str,
-                            autorizacion_sensible: bool, accion_esperada: str | None) -> dict:
+                            autorizacion_sensible: bool, accion_esperada: str | None,
+                            recuperando: bool = False) -> dict:
         registro = self._leer_registro()
         previa = next((a for a in registro.get("auditoria", []) if a.get("token") == token), None)
         if previa is not None:
@@ -3031,7 +3090,7 @@ class CapaAccionesOperacionales:
                 )
         if accion_esperada is not None and str(accion_esperada).upper() != preview["accion"]:
             raise ErrorAccionOperacional("TOKEN_NO_CORRESPONDE", "el token pertenece a otra acción")
-        if datetime.fromisoformat(preview["expira_en"]) <= self._reloj():
+        if not recuperando and datetime.fromisoformat(preview["expira_en"]) <= self._reloj():
             raise ErrorAccionOperacional("PREVIEW_EXPIRADO", "el preview expiró; solicite uno nuevo")
         definicion = self._definicion(preview["accion"])
         confirmado = str(confirmado_por or "").strip()
@@ -3119,7 +3178,9 @@ class CapaAccionesOperacionales:
             # Persistir antes de tocar el dataset o el ledger: un corte en
             # cualquier escritura deja el mismo token bloqueado al reintentar.
             # No equivale a recuperar ni a publicar una transacción completa.
-            preview["publicacion_iniciada"] = {"respaldo": respaldo.get("carpeta"), "fecha": instante}
+            preview["publicacion_iniciada"] = {"respaldo": respaldo.get("carpeta"), "fecha": instante,
+                                               "actor": actor, "confirmado_por": confirmado, "origen": origen,
+                                               "huellas_antes": self._huellas_publicacion()}
             self._guardar_registro(registro)
         try:
             salida = definicion.aplicar(self._ctx, parametros, plan, actor)
