@@ -82,6 +82,13 @@ def empresa_proceso() -> str:
     return os.environ.get(VARIABLE_EMPRESA, "").strip() or EMPRESA_MBT
 
 
+def nombre_credencial(nombre: str) -> str:
+    """Variable de una credencial en este proceso: MBT usa la histórica; otra
+    empresa, sólo la propia (``NOMBRE__<ID>``), nunca la de MBT."""
+    empresa = empresa_proceso()
+    return nombre if empresa == EMPRESA_MBT else f"{nombre}__{empresa.upper().replace('-', '_')}"
+
+
 def base_local(empresa_id: str | None = None) -> Path:
     """Equivalente por empresa de ``%LOCALAPPDATA%/Atlas``: MBT, la misma de siempre."""
     empresa = empresa_id or empresa_proceso()
