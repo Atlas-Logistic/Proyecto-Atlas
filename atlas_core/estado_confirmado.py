@@ -213,8 +213,6 @@ class CustodiaEstado:
 
     # --------------------------------------------------------------- rutas
     @property
-    def _ruta_huellas(self): return self.local / "huellas.json"
-    @property
     def _ruta_manifiesto(self): return self.local / "manifiesto.json"
     @property
     def _ruta_pendiente(self): return self.local / "pendiente.json"
@@ -233,27 +231,18 @@ class CustodiaEstado:
 
     # ------------------------------------------------------------- huellas
     def _huellas_locales(self, rels) -> dict[str, str | None]:
-        cache = _leer_json(self._ruta_huellas, {})
+        """Siempre por contenido: dos escrituras de igual tamaño pueden compartir
+        fecha (en Windows, dentro de un mismo tic del reloj), de modo que tamaño
+        y fecha no prueban que un archivo siga igual."""
         salida = {}
         for rel in rels:
             ruta = self._abs(rel)
             try:
-                st = ruta.stat()
+                ruta.stat()
             except OSError:
                 salida[rel] = None
                 continue
-            if not ruta.is_file():
-                salida[rel] = None
-                continue
-            previo = cache.get(rel)
-            if (rel != "operacion/actual/analisis_completo_guias.csv" and previo
-                    and previo[0] == st.st_size and previo[1] == st.st_mtime_ns):
-                salida[rel] = previo[2]
-                continue
-            sha = sha256_archivo(ruta)
-            cache[rel] = [st.st_size, st.st_mtime_ns, sha]
-            salida[rel] = sha
-        _escribir_json(self._ruta_huellas, cache)
+            salida[rel] = sha256_archivo(ruta) if ruta.is_file() else None
         return salida
 
     def _cargar_manifiesto(self, version: int) -> dict[str, str | None]:
