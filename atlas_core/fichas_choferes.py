@@ -18,7 +18,8 @@ from pathlib import Path, PureWindowsPath
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
 from atlas_core.catalogos import rut_canonico_de_registro_chofer, normalizar_rut
 
-EMPRESA_ACTUAL = 'MBT'
+from atlas_core.aislamiento_empresas import EMPRESA_MBT as _MBT, empresa_proceso as _empresa_proceso
+EMPRESA_ACTUAL = 'MBT' if _empresa_proceso() == _MBT else _empresa_proceso()
 VERSION = 2
 MAXIMO_ARCHIVO_LICENCIA = 20 * 1024 * 1024
 EXTENSIONES_LICENCIA = frozenset({'.pdf', '.jpg', '.jpeg', '.png'})

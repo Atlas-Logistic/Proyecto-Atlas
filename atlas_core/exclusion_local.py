@@ -118,8 +118,8 @@ def _dentro(ruta_norm: str, raiz_norm: str) -> bool:
 
 
 def ruta_registro_abandonos() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local")
-    return base / "Atlas" / "cache" / "exclusion_local" / "abandonos.jsonl"
+    from atlas_core.aislamiento_empresas import base_local
+    return base_local() / "cache" / "exclusion_local" / "abandonos.jsonl"
 
 
 def ruta_registro_observaciones() -> Path:

@@ -176,6 +176,8 @@ def main() -> None:
         parser.error(str(error))
 
     raiz = resolver_raiz_atlas(args.raiz_atlas)
+    from atlas_core.aislamiento_empresas import exigir_raiz_de_proceso
+    exigir_raiz_de_proceso(raiz)
     estado = leer_estado_operacion(raiz=raiz) or {}
     dataset = raiz / estado.get("dataset_operacional", "operacion/actual/analisis_completo_guias.csv")
     try:

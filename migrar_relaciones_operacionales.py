@@ -58,7 +58,7 @@ def _con_escritor(raiz: str, operacion, *, fabrica, sin_escritor: bool):
 def main(argv: list[str] | None = None, *, fabrica_escritor=_escritor) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--raiz", required=True)
-    p.add_argument("--empresa", default="oficina")
+    p.add_argument("--empresa", default=None)
     accion = p.add_mutually_exclusive_group()
     accion.add_argument("--aplicar", action="store_true", help="Migra por lotes; reanudable e idempotente.")
     accion.add_argument("--verificar", action="store_true", help="Relee reportes; no activa.")

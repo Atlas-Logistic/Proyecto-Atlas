@@ -166,7 +166,9 @@ def sesion(raiz, *, fabrica=lease_desde_entorno, reutilizar=False):
         raices = [raiz, Path(tempfile.gettempdir()).resolve()]
         # Cache derivado local: siempre se contrasta con las huellas de Drive.
         # Se permite sólo este directorio, sin ampliar el permiso a AppData.
-        cache = Path(os.environ.get('LOCALAPPDATA', tempfile.gettempdir()))/'Atlas'/'cache'
+        from atlas_core.aislamiento_empresas import EMPRESA_MBT, base_local, empresa_proceso
+        cache = (base_local() if empresa_proceso() != EMPRESA_MBT or os.environ.get('LOCALAPPDATA')
+                 else Path(tempfile.gettempdir())/'Atlas')/'cache'
         cache.mkdir(parents=True, exist_ok=True)
         raices.append(cache.resolve())
         if os.environ.get('EASYOCR_MODULE_PATH'): raices.append(Path(os.environ['EASYOCR_MODULE_PATH']).resolve())
@@ -291,6 +293,8 @@ def ingresar(raiz, archivos, comprobar):
 
 def ejecutar(solicitud):
     raiz = Path(solicitud['raiz']).resolve(strict=True)
+    from atlas_core.aislamiento_empresas import exigir_raiz_de_proceso
+    exigir_raiz_de_proceso(raiz)
     os.environ['ATLAS_DATA_DIR'] = str(raiz)
     os.environ['ATLAS_CATALOGOS_DIR'] = str(raiz/'catalogos_privados')
     accion = solicitud.get('accion')

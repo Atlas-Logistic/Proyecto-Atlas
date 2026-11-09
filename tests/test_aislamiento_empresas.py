@@ -366,6 +366,7 @@ def test_custodia_vacia_y_marca_alterada(mundo, tmp_path):
         nube = nubes.por_token["t-a"]
         huella = dict((r, s) for r, _v, s in nube.archivos)[ae.RUTA_MARCA]
         nube.objetos[huella] = b"alterado"
+        (a.raiz / ae.RUTA_MARCA).unlink()  # recuperación: hay que descargarla
         with pytest.raises(ae.ErrorAislamiento, match="CUSTODIA_NO_VERIFICABLE"):
             ae.verificar_custodia_cloud(a, _cliente("t-a"))
 

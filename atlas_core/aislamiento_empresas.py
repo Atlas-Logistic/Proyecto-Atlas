@@ -17,8 +17,9 @@ Las violaciones lanzan ``ErrorAislamiento`` (``RuntimeError``, no ``OSError``):
 varios lectores del Motor convierten ``OSError`` en "sin datos" y un cruce de
 empresas no debe pasar en silencio.
 
-Este módulo no cambia el comportamiento de nada hasta que un punto de entrada
-lo integre (ver docs/AISLAMIENTO_EMPRESAS.md).
+``entrar_proceso`` corre al importar ``atlas_core``: ninguna CLI puede saltarse
+la frontera. Mientras no exista ``Atlas_empresas`` y no se pida otra empresa,
+MBT sigue exactamente igual: sin guarda y con las mismas rutas locales.
 """
 from __future__ import annotations
 
@@ -27,7 +28,9 @@ import json
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
+from functools import lru_cache, wraps
 from pathlib import Path
 
 from atlas_core import almacenamiento_portable as ap
@@ -42,6 +45,7 @@ RUTA_MARCA = "catalogos_privados/empresa_identidad.json"
 VERSION_MARCA = 1
 VARIABLE_EMPRESA = "ATLAS_EMPRESA_ID"
 VARIABLE_RAIZ_MBT = "ATLAS_RAIZ_MBT"
+VARIABLE_TOKEN = "ATLAS_CLOUD_MOTOR_TOKEN"
 
 _PATRON_ID = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 _RESERVADOS = frozenset({
@@ -52,6 +56,11 @@ _EVENTOS_UNA_RUTA = frozenset({
     "open", "os.listdir", "os.scandir", "os.mkdir", "os.rmdir", "os.remove", "os.truncate", "os.chmod", "os.utime",
 })
 _EVENTOS_DOS_RUTAS = frozenset({"os.rename", "os.link", "os.symlink"})
+# Consultas de metadatos: no emiten evento de auditoría y delatarían existencia,
+# tamaño o fechas de archivos ajenos; se interceptan directamente.
+_SONDAS_OS = ("stat", "lstat", "access", "readlink")
+_SONDAS_PATH = ("exists", "lexists", "isfile", "isdir", "islink", "ismount", "isjunction", "getsize", "getmtime",
+                "getatime", "getctime")
 
 
 class ErrorAislamiento(RuntimeError):
@@ -69,8 +78,57 @@ def validar_empresa_id(empresa_id: str) -> str:
     return empresa_id
 
 
+def empresa_proceso() -> str:
+    return os.environ.get(VARIABLE_EMPRESA, "").strip() or EMPRESA_MBT
+
+
+def base_local(empresa_id: str | None = None) -> Path:
+    """Equivalente por empresa de ``%LOCALAPPDATA%/Atlas``: MBT, la misma de siempre."""
+    empresa = empresa_id or empresa_proceso()
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local") / "Atlas"
+    return base if empresa == EMPRESA_MBT else base / "empresas" / validar_empresa_id(empresa)
+
+
+def empresa_de_raiz(raiz: str | os.PathLike) -> str:
+    """Empresa dueña de una raíz, por su posición; no hace E/S."""
+    ruta = Path(raiz)
+    return ruta.name if ruta.parent.name.lower() == CARPETA_EMPRESAS.lower() else EMPRESA_MBT
+
+
+def registro_id_de_raiz(raiz: str | os.PathLike) -> str:
+    """Clave del registro de relaciones: ``oficina`` es exclusiva de MBT."""
+    empresa = empresa_de_raiz(raiz)
+    return REGISTRO_MBT if empresa == EMPRESA_MBT else empresa
+
+
+def por_empresa_de_raiz(funcion):
+    """Completa ``empresa_id=None`` con la empresa dueña de la raíz (primer argumento)."""
+    from inspect import signature
+    parametros = list(signature(funcion).parameters)
+    posicion = parametros.index("empresa_id")
+    @wraps(funcion)
+    def envoltura(raiz, *args, **kwargs):
+        if len(args) >= posicion:  # pasado por posición
+            if args[posicion - 1] is None:
+                args = (*args[:posicion - 1], registro_id_de_raiz(raiz), *args[posicion:])
+        elif kwargs.get("empresa_id") is None:
+            kwargs["empresa_id"] = registro_id_de_raiz(raiz)
+        return funcion(raiz, *args, **kwargs)
+    return envoltura
+
+
+def _norm_real(texto: str) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(texto))
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(texto))
+
+
+_norm_cache = lru_cache(maxsize=8192)(_norm_real)
+
+
 def _norm(ruta: str | os.PathLike) -> str:
-    return os.path.normcase(os.path.realpath(os.fspath(ruta)))
+    return _norm_cache(os.fspath(ruta))
 
 
 def _dentro(ruta_norm: str, raiz_norm: str) -> bool:
@@ -144,23 +202,29 @@ class ContextoEmpresa:
 
     # Estado local de máquina, fuera de la raíz sincronizada.
     def _local(self) -> Path:
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local")
-        return base / "Atlas" / "cache" / "empresas" / self.empresa_id
+        return base_local(self.empresa_id)
 
     def carpeta_custodia(self) -> Path:
         """Para ``CustodiaEstado(carpeta_local=...)``."""
         if self.es_mbt:
             from atlas_core.estado_confirmado import ruta_local
             return ruta_local()
-        return self._local() / "estado_confirmado"
+        return self._local() / "cache" / "estado_confirmado"
 
     def entorno(self) -> dict[str, str]:
         """Variables para lanzar un proceso del Motor de esta empresa."""
         entorno = {ap.VARIABLE_ENTORNO: str(self.raiz), VARIABLE_EMPRESA: self.empresa_id,
                    VARIABLE_RAIZ_MBT: str(self.raiz_mbt)}
         if not self.es_mbt:
-            entorno["ATLAS_CACHE_DIR"] = str(self._local())
-            entorno["ATLAS_DIAGNOSTICO_DIR"] = str(self._local() / "diagnostico")
+            local = self._local()
+            entorno.update({
+                "ATLAS_CATALOGOS_DIR": str(self.catalogos()),
+                "ATLAS_CACHE_DIR": str(local / "cache"),
+                "ATLAS_DIAGNOSTICO_DIR": str(local / "diagnostico"),
+                "ATLAS_PULL_LOG_DIR": str(local / "logs" / "pull_ciclos"),
+                "ATLAS_OPERACION_CONFIG": str(local / "desktop_operacion.json"),
+                "ATLAS_PULL_AUTORIZACION": str(local / "pull_autorizacion.json"),
+            })
         return entorno
 
 
@@ -268,9 +332,16 @@ def verificar_custodia_cloud(contexto: ContextoEmpresa, cliente) -> dict[str, ob
     """Antes de alinear o restaurar. Cloud deduce la empresa del token y su
     manifiesto no la declara: un token equivocado volcaría datos ajenos."""
     datos = cliente.manifiesto()
-    archivos = {fila[0]: fila[1] for fila in datos.get("archivos", []) if fila[1]}
+    archivos = {fila[0]: fila[1] for fila in datos.get("archivos", [])}
+    return verificar_manifiesto_empresa(contexto.raiz, archivos, cliente.descargar)
+
+
+def verificar_manifiesto_empresa(raiz: str | os.PathLike, manifiesto: dict, descargar) -> dict[str, object]:
+    """El manifiesto debe pertenecer a la empresa dueña de ``raiz``."""
+    empresa_id = empresa_de_raiz(raiz)
+    archivos = {ruta: huella for ruta, huella in manifiesto.items() if huella}
     huella = archivos.get(RUTA_MARCA)
-    if contexto.es_mbt:
+    if empresa_id == EMPRESA_MBT:
         if huella:
             raise ErrorAislamiento("CUSTODIA_AJENA", "la custodia pertenece a otra empresa")
         return {"estado": "COINCIDE", "archivos": len(archivos)}
@@ -278,32 +349,51 @@ def verificar_custodia_cloud(contexto: ContextoEmpresa, cliente) -> dict[str, ob
         if archivos:
             raise ErrorAislamiento("CUSTODIA_AJENA", "custodia con datos y sin marca de empresa")
         return {"estado": "VACIA", "archivos": 0}
-    contenido = cliente.descargar(huella)
+    local = Path(raiz).joinpath(*RUTA_MARCA.split("/"))
+    try:
+        contenido = local.read_bytes()
+    except FileNotFoundError:
+        contenido = b""
+    if hashlib.sha256(contenido).hexdigest() != huella:
+        contenido = descargar(huella)
     if hashlib.sha256(contenido).hexdigest() != huella:
         raise ErrorAislamiento("CUSTODIA_NO_VERIFICABLE", "la marca no coincide con su huella")
     marca = _interpretar_marca(contenido)
-    if marca["empresa_id"] != contexto.empresa_id:
+    if marca["empresa_id"] != empresa_id:
         raise ErrorAislamiento("CUSTODIA_AJENA", str(marca["empresa_id"]))
     return {"estado": "COINCIDE", "archivos": len(archivos)}
 
 
 # ----------------------------------------------------- guarda del proceso
 _guarda: dict | None = None
+_hilo = threading.local()
 
 
-def _vetada(ruta: object) -> bool:
+def _vetada(ruta: object, *, sonda: bool = False) -> bool:
     if isinstance(ruta, bytes):
         ruta = os.fsdecode(ruta)
-    if not isinstance(ruta, (str, os.PathLike)):
+    if not isinstance(ruta, (str, os.PathLike)) or getattr(_hilo, "dentro", False):
         return False
-    guarda, normal = _guarda, _norm(ruta)
-    if _dentro(normal, guarda["propia"]):
+    guarda = _guarda
+    _hilo.dentro = True  # realpath usa lstat: sin reentrada
+    try:
+        normal = _norm(ruta)
+    finally:
+        _hilo.dentro = False
+    if any(_dentro(normal, propia) for propia in guarda["propias"]):
+        return False
+    # Los ancestros de lo propio no revelan nada de otra empresa.
+    if sonda and any(_dentro(propia, normal) for propia in guarda["propias"]):
         return False
     return any(_dentro(normal, vetada) for vetada in guarda["vetadas"])
 
 
 def _gancho(evento: str, argumentos: tuple) -> None:
     if _guarda is None:
+        return
+    if evento == "os.mkdir":  # crear lo propio crea sus ancestros si faltan
+        if _vetada(argumentos[0], sonda=True):
+            raise ErrorAislamiento("ACCESO_ENTRE_EMPRESAS", f"{_guarda['empresa_id']}: {argumentos[0]!r}")
         return
     if evento in _EVENTOS_UNA_RUTA:
         rutas = argumentos[:1]
@@ -323,8 +413,72 @@ def activar_guarda(contexto: ContextoEmpresa) -> None:
         if _guarda["empresa_id"] != contexto.empresa_id:
             raise ErrorAislamiento("PROCESO_DE_OTRA_EMPRESA", _guarda["empresa_id"])
         return
-    vetadas = [_norm(_base_empresas(contexto.raiz_mbt))]
-    if not contexto.es_mbt:
-        vetadas.append(_norm(contexto.raiz_mbt))
-    _guarda = {"empresa_id": contexto.empresa_id, "propia": _norm(contexto.raiz), "vetadas": vetadas}
+    local = base_local(EMPRESA_MBT)
+    if contexto.es_mbt:
+        propias = [_norm(contexto.raiz)]
+        vetadas = [_norm(_base_empresas(contexto.raiz_mbt)), _norm(local / "empresas")]
+    else:
+        # En la carpeta local de MBT sólo se comparten los runtimes de OCR.
+        propias = [_norm(contexto.raiz), _norm(base_local(contexto.empresa_id)), _norm(local / "runtime")]
+        vetadas = [_norm(_base_empresas(contexto.raiz_mbt)), _norm(contexto.raiz_mbt), _norm(local)]
+    _guarda = {"empresa_id": contexto.empresa_id, "cloud_id": contexto.cloud_id, "propias": propias, "vetadas": vetadas}
     sys.addaudithook(_gancho)
+    _instalar_sondas()
+
+
+def _envolver_sonda(original, nombre: str):
+    @wraps(original)
+    def sonda(ruta, *args, **kwargs):
+        if _vetada(ruta, sonda=True):
+            raise ErrorAislamiento("ACCESO_ENTRE_EMPRESAS", f"{_guarda['empresa_id']}: {nombre} {ruta!r}")
+        return original(ruta, *args, **kwargs)
+    return sonda
+
+
+def _instalar_sondas() -> None:
+    for modulo, nombres in ((os, _SONDAS_OS), (os.path, _SONDAS_PATH)):
+        for nombre in nombres:
+            original = getattr(modulo, nombre, None)
+            if original is not None:
+                setattr(modulo, nombre, _envolver_sonda(original, nombre))
+
+
+def multiempresa_activa(raiz: str | os.PathLike) -> bool:
+    """Hay más de una empresa que separar (con MBT sola no se hace nada extra)."""
+    return _guarda is not None or empresa_de_raiz(raiz) != EMPRESA_MBT or _base_empresas(Path(raiz)).is_dir()
+
+
+def exigir_raiz_de_proceso(raiz: str | os.PathLike) -> None:
+    """Con guarda activa, ``raiz`` debe ser exactamente la de la empresa del proceso."""
+    if _guarda is not None and _norm(raiz) != _guarda["propias"][0]:
+        raise ErrorAislamiento("RAIZ_DE_OTRA_EMPRESA", f"{_guarda['empresa_id']}: {os.fspath(raiz)}")
+
+
+def exigir_lease_empresa(empresa_cloud: object) -> None:
+    """Un documento de Cloud sólo entra a la raíz de su empresa. Sin guarda
+    (MBT sin otras empresas) no hay nada que separar y no cambia nada."""
+    if _guarda is not None and empresa_cloud != _guarda["cloud_id"]:
+        raise ErrorAislamiento("LEASE_DE_OTRA_EMPRESA", f"{_guarda['empresa_id']}: {empresa_cloud!r}")
+
+
+def entrar_proceso() -> ContextoEmpresa | None:
+    """Se ejecuta al importar ``atlas_core``. Falla cerrado ante un entorno ambiguo."""
+    if empresa_proceso() != EMPRESA_MBT:
+        contexto = contexto_desde_entorno()
+        # La credencial general es la de MBT: sin la propia, sin token.
+        token = os.environ.get(f"{VARIABLE_TOKEN}__{contexto.empresa_id.upper().replace('-', '_')}", "").strip()
+        os.environ.update(contexto.entorno())
+        os.environ.pop(VARIABLE_TOKEN, None)
+        if token:
+            os.environ[VARIABLE_TOKEN] = token
+        activar_guarda(contexto)
+        return contexto
+    raiz = ap.resolver_raiz_atlas()
+    _validar_raiz_mbt(raiz)
+    if not _base_empresas(raiz).is_dir():
+        if _leer_marca(raiz) is not None:
+            raise ErrorAislamiento("RAIZ_DE_OTRA_EMPRESA", str(raiz))
+        return None
+    contexto = abrir_empresa(raiz, EMPRESA_MBT)
+    activar_guarda(contexto)
+    return contexto
