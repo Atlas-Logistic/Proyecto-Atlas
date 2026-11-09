@@ -291,6 +291,16 @@ def separar_obra_y_direccion(texto: str) -> tuple[str, str] | None:
     return (f"la obra es {obra}", f"la dirección es {direccion}") if obra and direccion else None
 
 
+def es_correccion_por_guia_y_transporte(texto: str) -> bool:
+    """«Guía N, transporte T: …» con obra y dirección o material."""
+    original, plano = _limpio(texto)
+    m = _GUIA_Y_TRANSPORTE.match(plano)
+    if m is None:
+        return False
+    resto = original[m.start("resto"):m.end("resto")].strip()
+    return separar_obra_y_direccion(resto) is not None or _MATERIAL_SUELTO.match(_plano(resto)) is not None
+
+
 def separar_contexto_revision(texto: str) -> tuple[str, str]:
     """("decision_id", instrucción) si el texto viene de una tarjeta de Revisión."""
     m = _REVISION.match(str(texto or "").strip())
@@ -1841,7 +1851,7 @@ class OperadorB1:
         respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
         if respuesta_revision is not None:
             return respuesta_revision
-        if separar_contexto_revision(texto)[0]:
+        if separar_contexto_revision(texto)[0] or es_correccion_por_guia_y_transporte(texto):
             # Lo escrito en una tarjeta de Revisión siempre es una corrección.
             return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
                     {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."})

@@ -157,6 +157,17 @@ def test_guia_y_transporte_identifican_documento_sin_folio(entorno, monkeypatch,
     assert corregida["obra_destino"] == OBRA and corregida["cliente"] == fila["cliente"]
 
 
+@pytest.mark.parametrize("frase", [
+    f"Guía 484180, transporte 0000369009: obra a {OBRA} y dirección a {DIRECCION}",
+    "Guía 484293, transporte 0000369273: material B HORMIGON 12MM",
+])
+def test_consulta_deriva_correccion_por_guia_y_transporte(entorno, monkeypatch, frase):
+    # Desktop pregunta primero a la consulta de solo lectura.
+    capa, b1, _h, _o = _caso_material(entorno, monkeypatch)
+    assert b1.consultar(frase, derivar_operacionales=True)["estado"] == "REQUIERE_OPERADOR"
+    assert b1.consultar(frase)["estado"] == "RECHAZADA"
+
+
 def test_guia_y_transporte_material(entorno, monkeypatch):
     capa, b1, hermana, objetivo = _caso_material(entorno, monkeypatch)
     r = b1.atender("prueba", "Guía 484293, transporte 0000369273: material B HORMIGON 12MM 12M A630-420H (N)")
