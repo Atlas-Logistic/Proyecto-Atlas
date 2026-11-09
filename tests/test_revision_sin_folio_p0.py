@@ -29,6 +29,9 @@ def test_no_se_transfiere_a_otro_documento_transporte_o_cambio_automatico():
         return proyectar_destino(fila, {"aplicaciones": [d, c]}).get("direccion_entrega")
     assert proyectar(destino, cambio) == "CALLE 123"
     assert proyectar(destino, {**cambio, "actor": "ATLAS_AUTOMATICO"}) is None
+    assert proyectar(destino, {**cambio, "actor": "B1", "confirmado_por": "JAVIER"}) == "CALLE 123"
+    assert proyectar(destino, {**cambio, "actor": "B1", "confirmado_por": "ATLAS_AUTOMATICO"}) is None
+    assert proyectar(destino, {**cambio, "actor": "B1", "confirmado_por": ""}) is None
     assert proyectar(destino, {**cambio, "documento": {**fila, "archivo": "mobile/b/original.jpg"}}) is None
     assert proyectar(destino, {**cambio, "documento": {**fila, "numero_transporte": "0000999999"}}) is None
     assert proyectar({**destino, "documento": {**anterior, "numero_transporte": "0000999999"}}, cambio) is None

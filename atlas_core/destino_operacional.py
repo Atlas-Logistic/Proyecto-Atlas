@@ -29,13 +29,21 @@ def _identidad(documento: Mapping[str, object]) -> tuple[str, str]:
     return str(documento.get("archivo") or "").strip(), str(documento.get("numero_guia") or "").strip()
 
 
+def _correccion_folio_humana(entrada: Mapping[str, object]) -> bool:
+    from atlas_core.decisiones_pendientes import _actor_es_humano
+    actor = str(entrada.get("actor") or "").strip()
+    confirmante = str(entrada.get("confirmado_por") or "").strip()
+    if actor.upper() == "B1":
+        return bool(confirmante and _actor_es_humano(confirmante))
+    return bool(actor and _actor_es_humano(actor) and (not confirmante or _actor_es_humano(confirmante)))
+
+
 def _folios_anteriores(fila: Mapping[str, object], aplicaciones: list):
     """Identidades anteriores unidas por correcciones auditadas del mismo documento.
 
     Se recorre hacia atrás para respetar el orden de las correcciones y nunca
     inferir una relación por folio o transporte por sí solos.
     """
-    from atlas_core.decisiones_pendientes import _actor_es_humano
     archivo, guia = _identidad(fila)
     transporte = str(fila.get("numero_transporte") or "").strip()
     vigentes = {guia}
@@ -46,12 +54,11 @@ def _folios_anteriores(fila: Mapping[str, object], aplicaciones: list):
         doc = entrada.get("documento")
         if not isinstance(doc, Mapping):
             continue
-        actor = str(entrada.get("actor") or "").strip()
         anterior = str(entrada.get("valor_documental") or "").strip()
         nuevo = str(entrada.get("valor_corregido") or "").strip()
         if (entrada.get("tipo") == "CORRECCION_DOCUMENTAL_OPERADOR"
                 and entrada.get("accion") == "CORREGIR_NUMERO_GUIA"
-                and entrada.get("campo") == "numero_guia" and actor and _actor_es_humano(actor)
+                and entrada.get("campo") == "numero_guia" and _correccion_folio_humana(entrada)
                 and _identidad(doc) == (archivo, nuevo)
                 and str(doc.get("numero_transporte") or "").strip() == transporte
                 and nuevo in vigentes and anterior and anterior != nuevo):
@@ -180,14 +187,13 @@ def identidades_destino_confirmado(ruta_ledger):
     aplicaciones = ledger.get("aplicaciones", []) if isinstance(ledger, Mapping) else None
     if not isinstance(aplicaciones, list):
         raise ValueError("Ledger de decisiones sin aplicaciones validas")
-    from atlas_core.decisiones_pendientes import _actor_es_humano
     identidades = set()
     for e in aplicaciones:
         if not isinstance(e, Mapping):
             continue
         if (e.get("tipo") == "CORRECCION_DOCUMENTAL_OPERADOR" and e.get("accion") == "CORREGIR_NUMERO_GUIA"
-                and e.get("campo") == "numero_guia" and str(e.get("actor") or "").strip()
-                and _actor_es_humano(e.get("actor")) and isinstance(e.get("documento"), Mapping)):
+                and e.get("campo") == "numero_guia" and _correccion_folio_humana(e)
+                and isinstance(e.get("documento"), Mapping)):
             d = e["documento"]
             archivo, nuevo = _identidad(d)
             transporte = str(d.get("numero_transporte") or "").strip()
