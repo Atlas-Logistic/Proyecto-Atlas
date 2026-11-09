@@ -25,6 +25,7 @@ extensible (`ACCIONES`).
 from __future__ import annotations
 
 import csv
+import contextlib
 import hashlib
 import json
 import math
@@ -32,6 +33,8 @@ import os
 import re
 import shutil
 import sys
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -61,6 +64,37 @@ LIMITE_CAMPO_CSV = _configurar_limite_campo_csv()
 SCHEMA_VERSION = 1
 NOMBRE_REGISTRO = "acciones_operacionales.json"
 NOMBRE_LOCK = "acciones_operacionales"
+_LOCK_LOCAL = threading.local()
+_ESPERA_LECTURA_SEGUNDOS = 3.0
+
+
+@contextlib.contextmanager
+def _bloqueo_acciones(actual: Path, *, esperar: bool = False):
+    """El lock portable es reentrante sólo para el hilo que ya lo adquirió."""
+    clave = str(actual.resolve())
+    activos = getattr(_LOCK_LOCAL, "activos", None)
+    if activos is None:
+        activos = _LOCK_LOCAL.activos = set()
+    if clave in activos:
+        yield
+        return
+    limite = time.monotonic() + (_ESPERA_LECTURA_SEGUNDOS if esperar else 0)
+    while True:
+        lock = bloqueo_sesion(actual, NOMBRE_LOCK)
+        try:
+            lock.__enter__()
+        except SesionOcupadaError:
+            if not esperar or time.monotonic() >= limite:
+                raise
+            time.sleep(0.05)
+        else:
+            break
+    activos.add(clave)
+    try:
+        yield
+    finally:
+        activos.remove(clave)
+        lock.__exit__(None, None, None)
 TTL_PREVIEW = timedelta(minutes=30)
 # Tipo con que una corrección documental del operador queda en el ledger
 # de decisiones: el replay OCR/reparador la respeta (`_hay_decision_
@@ -252,17 +286,45 @@ class _Contexto:
             "incidencias": self.catalogos / "incidencias_documentales.json",
         }
 
-    def filas(self) -> list[dict[str, str]]:
+    @contextlib.contextmanager
+    def _lectura_documental(self):
+        propietario = str(self.actual.resolve()) in getattr(_LOCK_LOCAL, "activos", set())
+        with _bloqueo_acciones(self.actual, esperar=True):
+            if not propietario:
+                registro = _leer_json(self.actual / NOMBRE_REGISTRO, {"previews": {}})
+                if not isinstance(registro, dict) or not isinstance(registro.get("previews", {}), dict):
+                    raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "registro de acciones inválido")
+                if any(isinstance(p, dict) and (p.get("publicacion_iniciada") or p.get("confirmacion_recuperable"))
+                       for p in registro.get("previews", {}).values()):
+                    raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "lectura detenida: publicación documental incompleta")
+            yield
+
+    def _filas_sin_bloqueo(self) -> list[dict[str, str]]:
         ruta = self.archivos["dataset"]
         if not ruta.is_file():
             return []
         with ruta.open("r", newline="", encoding="utf-8-sig") as archivo:
             return list(csv.DictReader(archivo, delimiter=";"))
 
-    def decisiones(self) -> list[dict[str, object]]:
+    def filas(self) -> list[dict[str, str]]:
+        with self._lectura_documental():
+            return self._filas_sin_bloqueo()
+
+    def _decisiones_sin_bloqueo(self) -> list[dict[str, object]]:
         contenido = _leer_json(self.archivos["bandeja"], {})
         clave = "decisiones" if isinstance(contenido.get("decisiones"), list) else "decisions"
         return [d for d in contenido.get(clave) or [] if isinstance(d, dict)]
+
+    def decisiones(self) -> list[dict[str, object]]:
+        with self._lectura_documental():
+            return self._decisiones_sin_bloqueo()
+
+    def instantanea_documental(self) -> dict[str, object]:
+        """Lee CSV, ledger y bandeja bajo el mismo bloqueo de publicación B1."""
+        with self._lectura_documental():
+            return {"filas": self._filas_sin_bloqueo(),
+                    "ledger": _leer_json(self.archivos["ledger_decisiones"], {"aplicaciones": []}),
+                    "decisiones": self._decisiones_sin_bloqueo()}
 
     def choferes(self) -> dict[str, dict]:
         contenido = _leer_json(self.archivos["choferes"], {})
@@ -2928,7 +2990,7 @@ class CapaAccionesOperacionales:
         vuelve a pasar las precondiciones normales.
         """
         try:
-            with bloqueo_sesion(self._ctx.actual, NOMBRE_LOCK):
+            with _bloqueo_acciones(self._ctx.actual):
                 registro = self._leer_registro()
                 previa = next((a for a in registro.get("auditoria", []) if a.get("token") == token), None)
                 if previa:
@@ -3009,25 +3071,25 @@ class CapaAccionesOperacionales:
             definicion = self._definicion(accion)
             limpios = _validar_parametros(_esquema(definicion), parametros)
             actor = self._validar_actor(actor, origen)
-            if definicion.riesgo == LECTURA:
-                return {"estado": "RESULTADO", "accion": definicion.nombre, "riesgo": LECTURA,
-                        "requiere_confirmacion": False, "resultado": definicion.consultar(self._ctx, limpios)}
-            plan = self._planificar(definicion, limpios)
-            preview = self._construir_preview(definicion, limpios, plan, actor=actor, origen=origen,
-                                              referencia=str(referencia or "")[:500])
-            if plan.sin_cambios:
-                # Nada que confirmar: sin token ejecutable, sin escritura.
-                anterior = next((a for a in reversed(self.auditoria())
-                                 if a.get("idempotency_key") == preview["idempotency_key"]
-                                 and a.get("resultado") == "APLICADA"), None)
-                preview.update(token=None, idempotente=True,
-                               auditoria_previa=anterior.get("auditoria_id") if anterior else None)
-            else:
-                with bloqueo_sesion(self._ctx.actual, NOMBRE_LOCK):
+            with self._ctx._lectura_documental():
+                if definicion.riesgo == LECTURA:
+                    return {"estado": "RESULTADO", "accion": definicion.nombre, "riesgo": LECTURA,
+                            "requiere_confirmacion": False, "resultado": definicion.consultar(self._ctx, limpios)}
+                plan = self._planificar(definicion, limpios)
+                preview = self._construir_preview(definicion, limpios, plan, actor=actor, origen=origen,
+                                                  referencia=str(referencia or "")[:500])
+                if plan.sin_cambios:
+                    # Nada que confirmar: sin token ejecutable, sin escritura.
+                    anterior = next((a for a in reversed(self.auditoria())
+                                     if a.get("idempotency_key") == preview["idempotency_key"]
+                                     and a.get("resultado") == "APLICADA"), None)
+                    preview.update(token=None, idempotente=True,
+                                   auditoria_previa=anterior.get("auditoria_id") if anterior else None)
+                else:
                     registro = self._leer_registro()
                     registro.setdefault("previews", {})[preview["token"]] = preview
                     self._guardar_registro(registro)
-            return preview
+                return preview
         except ErrorAccionOperacional as error:
             return _rechazo(error, accion=str(accion))
         except SesionOcupadaError as error:
@@ -3051,7 +3113,7 @@ class CapaAccionesOperacionales:
         """Ejecuta EXACTAMENTE el preview identificado por `token`."""
         try:
             actor = self._validar_actor(actor, origen)
-            with bloqueo_sesion(self._ctx.actual, NOMBRE_LOCK):
+            with _bloqueo_acciones(self._ctx.actual):
                 return self._ejecutar_bloqueado(str(token or ""), actor=actor, confirmado_por=confirmado_por,
                                                 origen=origen, autorizacion_sensible=autorizacion_sensible,
                                                 accion_esperada=accion_esperada)

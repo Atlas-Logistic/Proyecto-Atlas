@@ -63,6 +63,10 @@ def test_interrupcion_antes_ledger_bloquea_reintento(entorno, monkeypatch):
         preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")
     assert reintento["codigo"] == "PUBLICACION_INCOMPLETA"
     assert entorno["dataset"].read_bytes() == antes
+    from atlas_core.acciones_operacionales import ErrorAccionOperacional
+    with pytest.raises(ErrorAccionOperacional) as lectura:
+        CapaAccionesOperacionales(entorno["raiz"])._ctx.instantanea_documental()
+    assert lectura.value.codigo == "PUBLICACION_INCOMPLETA"
     recuperacion = CapaAccionesOperacionales(entorno["raiz"]).recuperar_publicacion_sin_cambios(preview["token"])
     assert recuperacion["codigo"] == "PUBLICACION_INCOMPLETA"
     assert entorno["dataset"].read_bytes() == antes
@@ -131,6 +135,71 @@ def test_recuperacion_rechaza_cambio_ajeno_y_no_restaura(entorno, monkeypatch):
     assert ledger.read_bytes() == contenido_ajeno
 
 
+def test_lectura_no_espera_indefinidamente_lock_abandonado(entorno, monkeypatch):
+    import time
+    import atlas_core.acciones_operacionales as acciones
+    from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+    monkeypatch.setattr(acciones, "_ESPERA_LECTURA_SEGUNDOS", 0.1)
+    lock = entorno["actual"] / ".atlas_lock_acciones_operacionales"
+    lock.write_text('{"pid": 12345}', encoding="utf-8")
+    inicio = time.monotonic()
+    with pytest.raises(SesionOcupadaError):
+        CapaAccionesOperacionales(entorno["raiz"])._ctx.instantanea_documental()
+    assert time.monotonic() - inicio < 2
+
+
+def test_lector_frena_tras_terminacion_brutal_de_otro_proceso(entorno, monkeypatch):
+    import os
+    import subprocess
+    import sys
+    import time
+    import atlas_core.acciones_operacionales as acciones
+    from atlas_core.acciones_operacionales import ErrorAccionOperacional
+    from atlas_core.almacenamiento_portable import SesionOcupadaError
+
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "484180", "archivo": archivo,
+    }, actor="B1", origen="B1")
+    programa = '''
+import sys, time
+from pathlib import Path
+import atlas_core.acciones_operacionales as a
+raiz = Path(sys.argv[1])
+real = a.escribir_json_atomico
+def escribir(ruta, contenido):
+    if ruta.name == "decisiones_aplicadas.json":
+        print("PAUSADO", flush=True)
+        time.sleep(60)
+    return real(ruta, contenido)
+a.escribir_json_atomico = escribir
+a.CapaAccionesOperacionales(raiz).ejecutar(sys.argv[2], actor="B1", origen="B1", confirmado_por="JAVIER")
+'''
+    hijo = subprocess.Popen([sys.executable, "-c", programa, str(entorno["raiz"]), preview["token"]],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert hijo.stdout.readline().strip() == "PAUSADO"
+        hijo.terminate()
+        hijo.wait(timeout=10)
+    finally:
+        if hijo.poll() is None:
+            hijo.kill()
+            hijo.wait(timeout=10)
+    monkeypatch.setattr(acciones, "_ESPERA_LECTURA_SEGUNDOS", 0.1)
+    with pytest.raises(SesionOcupadaError):
+        capa._ctx.instantanea_documental()
+    lock = entorno["actual"] / ".atlas_lock_acciones_operacionales"
+    pasado = time.time() - 6 * 3600 - 10
+    os.utime(lock, (pasado, pasado))
+    with pytest.raises(ErrorAccionOperacional) as lectura:
+        capa._ctx.instantanea_documental()
+    assert lectura.value.codigo == "PUBLICACION_INCOMPLETA"
+    assert not lock.exists()
+
+
 def test_recuperacion_concurrente_no_ejecuta_dos_veces(entorno, monkeypatch):
     from dataclasses import replace
     from threading import Event, Thread
@@ -167,6 +236,61 @@ def test_recuperacion_concurrente_no_ejecuta_dos_veces(entorno, monkeypatch):
     assert resultados[0]["estado"] == "APLICADA"
     auditoria = capa.auditoria()
     assert len([a for a in auditoria if a["token"] == preview["token"]]) == 1
+
+
+def test_reproduce_lector_con_dataset_nuevo_y_ledger_anterior(entorno, monkeypatch):
+    """Otro proceso espera y lee CSV y ledger bajo el mismo bloqueo."""
+    import subprocess
+    import sys
+    from threading import Event, Thread
+    import atlas_core.acciones_operacionales as acciones
+
+    archivo = "mobile/prueba/original.jpg"
+    _escribir_dataset(entorno, [_fila("No encontrado", archivo=archivo, numero_transporte="0000369009")])
+    _sin_reporte_real(monkeypatch, [])
+    capa = CapaAccionesOperacionales(entorno["raiz"])
+    preview = capa.previsualizar("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+        "numero_guia": "No encontrado", "numero_guia_corregido": "484180", "archivo": archivo,
+    }, actor="B1", origen="B1")
+    assert preview["estado"] == "PREVIEW"
+    listo, continuar = Event(), Event()
+    escribir = acciones.escribir_json_atomico
+
+    def detener_antes_del_ledger(ruta, contenido):
+        if ruta == entorno["actual"] / "decisiones_aplicadas.json":
+            listo.set()
+            assert continuar.wait(10)
+        return escribir(ruta, contenido)
+
+    monkeypatch.setattr(acciones, "escribir_json_atomico", detener_antes_del_ledger)
+    resultados = []
+    hilo = Thread(target=lambda: resultados.append(capa.ejecutar(
+        preview["token"], actor="B1", origen="B1", confirmado_por="JAVIER")))
+    hilo.start()
+    lector = None
+    try:
+        assert listo.wait(10)
+        programa = ("import json, sys; from atlas_core.acciones_operacionales import CapaAccionesOperacionales; "
+                    "c = CapaAccionesOperacionales(sys.argv[1]); print('INICIADO', flush=True); "
+                    "filas = c._ctx.filas(); vista = c._ctx.instantanea_documental(); "
+                    "print(json.dumps({'filas_directas': filas, 'vista': vista}), flush=True)")
+        lector = subprocess.Popen([sys.executable, "-c", programa, str(entorno["raiz"])],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert lector.stdout.readline().strip() == "INICIADO"
+        with pytest.raises(subprocess.TimeoutExpired):
+            lector.wait(timeout=0.3)
+    finally:
+        continuar.set()
+        hilo.join(10)
+    assert not hilo.is_alive()
+    assert resultados[0]["estado"] == "APLICADA"
+    salida, errores = lector.communicate(timeout=10)
+    assert lector.returncode == 0, errores
+    resultado_lector = json.loads(salida)
+    assert resultado_lector["filas_directas"][0]["numero_guia"] == "484180"
+    vista = resultado_lector["vista"]
+    assert vista["filas"][0]["numero_guia"] == "484180"
+    assert any(e["decision_id"] == f"ACCION_OPERACIONAL:{preview['token']}" for e in vista["ledger"]["aplicaciones"])
 
 
 @pytest.mark.parametrize("confirmante", ["B1", "ATLAS_AUTOMATICO"])
