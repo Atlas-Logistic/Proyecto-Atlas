@@ -231,6 +231,25 @@ def test_todo_el_estado_local_es_de_la_empresa(mundo):  # noqa: F811
     assert not set(n.values()) & set(s.values())
 
 
+def test_entorno_completo_no_exige_putenv_bajo_solo_consulta(mundo):  # noqa: F811
+    """Desktop corre sus consultas con os.putenv prohibido."""
+    _m, a, _b = mundo
+    entorno = {**a.entorno(), "ATLAS_CLOUD_MOTOR_TOKEN": "t-n", "ATLAS_CLOUD_MOTOR_TOKEN__TRANSPORTES_NORTE": "t-n"}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ATLAS_")}
+    env.update(entorno, PYTHONPATH=str(MOTOR))
+    codigo = textwrap.dedent("""\
+        import sys
+        def veto(e, a):
+            if e in ("os.putenv", "os.unsetenv"):
+                raise PermissionError("putenv")
+        sys.addaudithook(veto)
+        import atlas_core.aislamiento_empresas as ae
+        assert ae._guarda["empresa_id"] == "transportes-norte"
+        """)
+    r = subprocess.run([sys.executable, "-c", codigo], capture_output=True, text=True, env=env, cwd=MOTOR, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
 def test_sin_token_propio_no_hay_lease(mundo):  # noqa: F811
     _proceso(mundo, SUR, """
         from atlas_core.escritor_operativo import lease_desde_entorno

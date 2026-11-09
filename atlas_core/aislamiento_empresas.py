@@ -467,10 +467,16 @@ def entrar_proceso() -> ContextoEmpresa | None:
         contexto = contexto_desde_entorno()
         # La credencial general es la de MBT: sin la propia, sin token.
         token = os.environ.get(f"{VARIABLE_TOKEN}__{contexto.empresa_id.upper().replace('-', '_')}", "").strip()
-        os.environ.update(contexto.entorno())
-        os.environ.pop(VARIABLE_TOKEN, None)
-        if token:
-            os.environ[VARIABLE_TOKEN] = token
+        # Sólo lo que difiere: Desktop lanza consultas con os.putenv prohibido y
+        # ya entrega el entorno completo.
+        for clave, valor in contexto.entorno().items():
+            if os.environ.get(clave) != valor:
+                os.environ[clave] = valor
+        if os.environ.get(VARIABLE_TOKEN, "") != token:
+            if token:
+                os.environ[VARIABLE_TOKEN] = token
+            else:
+                os.environ.pop(VARIABLE_TOKEN, None)
         activar_guarda(contexto)
         return contexto
     raiz = ap.resolver_raiz_atlas()
