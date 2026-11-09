@@ -6,10 +6,15 @@ del proceso; en Windows, fallback de sólo lectura a HKCU\\Environment.
 Nunca registra el valor en logs ni salidas.
 
 Secretos = locales por usuario/PC (nunca Git ni Drive/G:). Se registran
-una vez por PC con `registrar_credencial.py`; ver docs/CREDENCIALES_LOCALES.md."""
+una vez por PC con `registrar_credencial.py`; ver docs/CREDENCIALES_LOCALES.md.
+
+Una empresa distinta de MBT sólo ve `NOMBRE__<ID>`, en el entorno y en el
+perfil: sin credencial propia, la función queda "no configurada"."""
 from __future__ import annotations
 
 import os
+
+from atlas_core.aislamiento_empresas import nombre_credencial
 
 # Únicas credenciales que `registrar_credencial.py` acepta escribir.
 CREDENCIALES_PERMITIDAS = ("TAVILY_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY")
@@ -31,10 +36,11 @@ def resolver_credencial(nombre: str, api_key: str | None = None) -> str:
     """Resuelve la credencial `nombre` del proceso o del perfil Windows, sin persistirla."""
     if api_key is not None:
         return api_key.strip()
-    valor = os.getenv(nombre, "").strip()
+    efectivo = nombre_credencial(nombre)
+    valor = os.getenv(efectivo, "").strip()
     if valor:
         return valor
-    return _leer_entorno_usuario_windows(nombre)
+    return _leer_entorno_usuario_windows(efectivo)
 
 
 def resolver_openrouter_api_key(api_key: str | None = None) -> str:
@@ -71,5 +77,5 @@ def registrar_credencial_usuario(nombre: str, valor: str) -> None:
         raise ValueError("El valor de la credencial contiene espacios o caracteres de control.")
     if os.name != "nt":
         raise OSError("El registro de credenciales sólo está disponible en Windows.")
-    _escribir_entorno_usuario_windows(nombre, valor)
+    _escribir_entorno_usuario_windows(nombre_credencial(nombre), valor)
     _notificar_cambio_entorno_windows()

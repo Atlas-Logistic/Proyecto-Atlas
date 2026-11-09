@@ -58,8 +58,8 @@ class EstadoNoVerificado(RuntimeError):
 def ruta_local() -> Path:
     # Dentro de LOCALAPPDATA/Atlas/cache: única carpeta local que la sesión
     # Desktop autoriza a escribir además de la raíz y los temporales.
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local")
-    return base / "Atlas" / "cache" / "estado_confirmado"
+    from atlas_core.aislamiento_empresas import base_local
+    return base_local() / "cache" / "estado_confirmado"
 
 
 def rastreable(rel: str) -> bool:
@@ -197,6 +197,8 @@ sys.addaudithook(_auditar)
 
 class CustodiaEstado:
     def __init__(self, raiz, cliente: ClienteEstado, *, carpeta_local: Path | None = None) -> None:
+        from atlas_core.aislamiento_empresas import exigir_raiz_de_proceso
+        exigir_raiz_de_proceso(raiz)
         self.raiz = Path(os.path.abspath(raiz))
         self._raiz_norm = os.path.normcase(str(self.raiz)).rstrip("\\/") + os.sep
         self.cliente = cliente
@@ -210,8 +212,6 @@ class CustodiaEstado:
         self._cerrojo = threading.Lock()
 
     # --------------------------------------------------------------- rutas
-    @property
-    def _ruta_huellas(self): return self.local / "huellas.json"
     @property
     def _ruta_manifiesto(self): return self.local / "manifiesto.json"
     @property
@@ -231,27 +231,18 @@ class CustodiaEstado:
 
     # ------------------------------------------------------------- huellas
     def _huellas_locales(self, rels) -> dict[str, str | None]:
-        cache = _leer_json(self._ruta_huellas, {})
+        """Siempre por contenido: dos escrituras de igual tamaño pueden compartir
+        fecha (en Windows, dentro de un mismo tic del reloj), de modo que tamaño
+        y fecha no prueban que un archivo siga igual."""
         salida = {}
         for rel in rels:
             ruta = self._abs(rel)
             try:
-                st = ruta.stat()
+                ruta.stat()
             except OSError:
                 salida[rel] = None
                 continue
-            if not ruta.is_file():
-                salida[rel] = None
-                continue
-            previo = cache.get(rel)
-            if (rel != "operacion/actual/analisis_completo_guias.csv" and previo
-                    and previo[0] == st.st_size and previo[1] == st.st_mtime_ns):
-                salida[rel] = previo[2]
-                continue
-            sha = sha256_archivo(ruta)
-            cache[rel] = [st.st_size, st.st_mtime_ns, sha]
-            salida[rel] = sha
-        _escribir_json(self._ruta_huellas, cache)
+            salida[rel] = sha256_archivo(ruta) if ruta.is_file() else None
         return salida
 
     def _cargar_manifiesto(self, version: int) -> dict[str, str | None]:
@@ -297,10 +288,25 @@ class CustodiaEstado:
         if identidades(self._abs(rel).read_bytes()) - identidades(remoto):
             raise EstadoNoVerificado("alineacion eliminaria documentos locales; requiere recuperacion")
 
+    def _exigir_custodia_propia(self) -> None:
+        """Antes de restaurar nada: un token ajeno volcaría datos de otra empresa."""
+        from atlas_core.aislamiento_empresas import ErrorAislamiento, multiempresa_activa, verificar_manifiesto_empresa
+        try:
+            manifiesto = self.manifiesto
+            if multiempresa_activa(self.raiz):
+                # La caché local va por versión: con varias empresas, un token
+                # ajeno de igual versión pasaría por el manifiesto propio.
+                datos = self.cliente.manifiesto()
+                manifiesto = {fila[0]: fila[1] for fila in datos.get("archivos", [])}
+            verificar_manifiesto_empresa(self.raiz, manifiesto, self.cliente.descargar)
+        except ErrorAislamiento as error:
+            raise EstadoNoVerificado(str(error)) from error
+
     def alinear(self, lease) -> dict:
         """Antes de escribir: copia local == marca Cloud, o EstadoNoVerificado."""
         self.version = int(lease.marca.get("version") or 0)
         self.manifiesto = dict(self._cargar_manifiesto(self.version))
+        self._exigir_custodia_propia()
         resumen = {"version": self.version, "restaurados": [], "borrados": [], "cuarentena": [], "pendiente_confirmado": 0}
         self._recuperar_pendiente(lease, resumen)
         locales = self._huellas_locales(self.manifiesto)

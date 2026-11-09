@@ -66,8 +66,8 @@ def _json(base_url: str, ruta: str, token: str, *, method: str = "GET", body: di
 
 
 def ruta_identidad_escritor() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local")
-    return base / "Atlas" / "escritor_operativo_id.txt"
+    from atlas_core.aislamiento_empresas import base_local
+    return base_local() / "escritor_operativo_id.txt"
 
 
 def ruta_relevo_confirmado() -> Path:

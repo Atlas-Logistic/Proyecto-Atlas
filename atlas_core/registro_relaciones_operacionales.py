@@ -49,6 +49,7 @@ from atlas_core.almacenamiento_portable import escribir_json_atomico
 
 VERSION = 1
 EMPRESA_LEGADA = "oficina"
+from atlas_core.aislamiento_empresas import por_empresa_de_raiz  # noqa: E402
 CAMPOS = ("numero_guia", "numero_transporte", "rut_chofer", "patente_tracto", "patente_rampla")
 
 TIPO_DATASET = "dataset_operacional"
@@ -483,7 +484,8 @@ def contenido_vigente(raiz: str | Path) -> dict[str, object]:
     return _leer_fresco(raiz)
 
 
-def leer_relaciones(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> list[dict[str, object]]:
+@por_empresa_de_raiz
+def leer_relaciones(raiz: str | Path, *, empresa_id: str | None = None) -> list[dict[str, object]]:
     """Contenido del registro (cero acceso a reportes). Lanza si es ilegible."""
     return _relaciones_de(_leer_compartido(raiz)["empresas"].get(empresa_id))
 
@@ -498,7 +500,8 @@ def _activa(empresa: Mapping[str, object] | None) -> bool:
     return migracion.get("estado") == ESTADO_VERIFICADA and migracion.get("activo") is True
 
 
-def relaciones_si_activo(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> list[dict[str, object]] | None:
+@por_empresa_de_raiz
+def relaciones_si_activo(raiz: str | Path, *, empresa_id: str | None = None) -> list[dict[str, object]] | None:
     """Consumidor operacional. ``None`` = el registro aún no reemplaza a los
     históricos para esa empresa (sin migración verificada y activada, o
     registro ilegible/incompatible): el llamador debe usar el lector
@@ -510,7 +513,8 @@ def relaciones_si_activo(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) 
     return _relaciones_de(empresa) if _activa(empresa) else None
 
 
-def requiere_incorporacion_dataset(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> bool:
+@por_empresa_de_raiz
+def requiere_incorporacion_dataset(raiz: str | Path, *, empresa_id: str | None = None) -> bool:
     """La regeneración sólo alimenta el registro una vez completa la
     migración: antes, los snapshots siguen siendo la fuente y no se escribe
     nada. Un registro ilegible devuelve ``True`` para que el intento se
@@ -522,8 +526,9 @@ def requiere_incorporacion_dataset(raiz: str | Path, *, empresa_id: str = EMPRES
     return _migracion(empresa).get("estado") in (ESTADO_COMPLETA, ESTADO_VERIFICADA)
 
 
+@por_empresa_de_raiz
 def incorporar_relaciones(
-    raiz: str | Path, relaciones: Iterable[Mapping[str, object]], *, empresa_id: str = EMPRESA_LEGADA,
+    raiz: str | Path, relaciones: Iterable[Mapping[str, object]], *, empresa_id: str | None = None,
     procedencia: Mapping[str, object], espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, int]:
     """Unión idempotente; sin relación ni fuente nueva no lee bajo cerrojo ni
@@ -556,7 +561,8 @@ def _filas_csv(contenido: bytes) -> list[dict[str, str]] | None:
         return None
 
 
-def incorporar_dataset(raiz: str | Path, dataset: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> dict[str, int]:
+@por_empresa_de_raiz
+def incorporar_dataset(raiz: str | Path, dataset: str | Path, *, empresa_id: str | None = None) -> dict[str, int]:
     """Actualización incremental desde la fuente operacional, no desde reportes."""
     ruta = Path(dataset)
     try:
@@ -620,8 +626,9 @@ class ReporteIlegible(RegistroRelacionesError):
     codigo = "REPORTE_ILEGIBLE"
 
 
+@por_empresa_de_raiz
 def capturar_reporte_publicado(
-    raiz: str | Path, viajes_csv: str | Path, *, empresa_id: str = EMPRESA_LEGADA,
+    raiz: str | Path, viajes_csv: str | Path, *, empresa_id: str | None = None,
 ) -> dict[str, int]:
     """Incorpora la misma evidencia que el lector histórico leería de ese
     ``viajes.csv`` (``evidencias_documentos``), para reportes vigentes que
@@ -636,8 +643,9 @@ def capturar_reporte_publicado(
     )
 
 
+@por_empresa_de_raiz
 def relaciones_de_reportes_publicados(
-    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA,
+    raiz: str | Path, *, empresa_id: str | None = None,
 ) -> list[dict[str, object]] | None:
     """Relaciones capturadas de reportes vigentes no conservados como
     snapshot: complementan al lector histórico mientras el registro no esté
@@ -664,8 +672,9 @@ def _relativa(base: Path, ruta: Path) -> str:
     return ruta.relative_to(base).as_posix()
 
 
+@por_empresa_de_raiz
 def migrar_reportes_historicos(
-    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, aplicar: bool = False,
+    raiz: str | Path, *, empresa_id: str | None = None, aplicar: bool = False,
     lote: int = LOTE_MIGRACION, espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, object]:
     """Simula por defecto (sin escribir). ``aplicar=True`` es reanudable e
@@ -801,7 +810,8 @@ def _aplicar(base: Path, empresa_id: str, lote: int, espera: float) -> dict[str,
 # es una única escritura atómica de segundos. Así PULL sigue operando durante
 # la lectura y el lease se toma sólo para escribir.
 
-def ruta_plan_migracion(raiz: str | Path, empresa_id: str = EMPRESA_LEGADA) -> Path:
+@por_empresa_de_raiz
+def ruta_plan_migracion(raiz: str | Path, empresa_id: str | None = None) -> Path:
     """Avance de la lectura, local y fuera de Drive (nunca se custodia)."""
     huella = hashlib.sha256(str(Path(raiz).resolve()).encode("utf-8")).hexdigest()[:16]
     return _directorio_local() / "registro_relaciones" / f"{huella}.{empresa_id}.plan_migracion.json"
@@ -827,8 +837,9 @@ def _leer_plan(ruta: Path, empresa_id: str) -> dict[str, object]:
     return plan
 
 
+@por_empresa_de_raiz
 def preparar_migracion(
-    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, lote: int = LOTE_MIGRACION,
+    raiz: str | Path, *, empresa_id: str | None = None, lote: int = LOTE_MIGRACION,
 ) -> dict[str, object]:
     """Fase 1, SIN escritor y sin escribir la raíz: lee los reportes aún no
     migrados y guarda el avance cada ``lote`` en un plan local (fuera de
@@ -880,8 +891,9 @@ def preparar_migracion(
     }
 
 
+@por_empresa_de_raiz
 def aplicar_migracion_preparada(
-    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S,
+    raiz: str | Path, *, empresa_id: str | None = None, espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, object]:
     """Fase 2, CON escritor: una sola escritura atómica del registro base con
     lo leído en la fase 1. No abre reportes. Marca ``completa`` sólo si no
@@ -910,8 +922,9 @@ def aplicar_migracion_preparada(
     }
 
 
+@por_empresa_de_raiz
 def leer_verificacion(
-    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA,
+    raiz: str | Path, *, empresa_id: str | None = None,
 ) -> tuple[dict[str, object], set[str]]:
     """Fase de lectura de la verificación, SIN escritor ni escritura: relee
     todos los reportes. Devuelve el resultado y las claves exigidas."""
@@ -954,9 +967,10 @@ def leer_verificacion(
     return resultado, extraidas_unicas
 
 
+@por_empresa_de_raiz
 def marcar_verificada(
     raiz: str | Path, resultado: dict[str, object], exigidas: set[str], *,
-    empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S,
+    empresa_id: str | None = None, espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, object]:
     """Fase de escritura de la verificación (CON escritor; no abre reportes).
     Bajo cerrojo vuelve a exigir, sobre el registro vigente de ESTE momento
@@ -987,8 +1001,9 @@ def marcar_verificada(
     return resultado
 
 
+@por_empresa_de_raiz
 def verificar_migracion(
-    raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S,
+    raiz: str | Path, *, empresa_id: str | None = None, espera: float = ESPERA_ESCRITURA_S,
 ) -> dict[str, object]:
     """Relee TODOS los reportes actuales (sólo lectura) y exige que cada
     relación esté en el registro. Si la migración está completa y todo
@@ -1013,12 +1028,14 @@ def _cambiar_activacion(raiz: str | Path, empresa_id: str, activo: bool, espera:
     return _modificar(raiz, operar, espera=espera)
 
 
-def activar_registro(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S) -> dict[str, object]:
+@por_empresa_de_raiz
+def activar_registro(raiz: str | Path, *, empresa_id: str | None = None, espera: float = ESPERA_ESCRITURA_S) -> dict[str, object]:
     """El consumidor deja los históricos sólo desde aquí, y sólo si está verificada."""
     return _cambiar_activacion(raiz, empresa_id, True, espera)
 
 
-def desactivar_registro(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA, espera: float = ESPERA_ESCRITURA_S) -> dict[str, object]:
+@por_empresa_de_raiz
+def desactivar_registro(raiz: str | Path, *, empresa_id: str | None = None, espera: float = ESPERA_ESCRITURA_S) -> dict[str, object]:
     """Reversión inmediata: el consumidor vuelve al lector histórico."""
     return _cambiar_activacion(raiz, empresa_id, False, espera)
 
@@ -1069,7 +1086,8 @@ def _estado_diario(raiz: str | Path) -> dict[str, object]:
     return {"segmentos": len(segmentos), "bytes": sum(tamanos), "nombres": [p.name for p in segmentos]}
 
 
-def estado_registro(raiz: str | Path, *, empresa_id: str = EMPRESA_LEGADA) -> dict[str, object]:
+@por_empresa_de_raiz
+def estado_registro(raiz: str | Path, *, empresa_id: str | None = None) -> dict[str, object]:
     try:
         empresa = _leer_compartido(raiz)["empresas"].get(empresa_id)
         diario = _estado_diario(raiz)

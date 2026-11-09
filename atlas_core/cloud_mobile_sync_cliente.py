@@ -30,6 +30,7 @@ from atlas_core.mobile import (
     MAX_IMAGEN_BYTES, MIME_PERMITIDOS, ErrorEnvioMobile, RepositorioEnviosMobile,
     procesar_y_revalidar_envio_mobile, reconciliar_bandeja_diferida_mobile,
 )
+from atlas_core.aislamiento_empresas import exigir_lease_empresa
 from atlas_core.almacenamiento_portable import SesionOcupadaError
 
 logger = logging.getLogger(__name__)
@@ -340,6 +341,7 @@ def _recibir_pendientes_cloud(
             lease_token = str(lease.get("lease_token", ""))
             if not lease_token:
                 raise ErrorSincronizacionCloudMobile("lease Cloud sin token")
+            exigir_lease_empresa(lease.get("empresa_id"))
             lease_activo = LeaseMotor(
                 base_url=base_url, token_motor=token_motor, envio_id=envio_id,
                 lease_token=lease_token, timeout=timeout, intervalo_segundos=lease_heartbeat_segundos,

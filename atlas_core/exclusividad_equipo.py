@@ -15,7 +15,8 @@ import subprocess
 import threading
 
 def ruta_politica():
-    return Path(os.environ['LOCALAPPDATA'])/'Atlas'/'desktop_operacion.json'
+    from atlas_core.aislamiento_empresas import base_local
+    return base_local()/'desktop_operacion.json'
 
 def identidad_equipo():
     import winreg

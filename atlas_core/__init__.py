@@ -6,3 +6,8 @@
 from atlas_core.exclusion_local import instalar_guardia as _instalar_guardia
 
 _instalar_guardia()
+
+# Frontera entre empresas: mismo criterio, sin depender de cada CLI.
+from atlas_core.aislamiento_empresas import entrar_proceso as _entrar_proceso  # noqa: E402
+
+_entrar_proceso()
