@@ -408,6 +408,16 @@ class CustodiaEstado:
         cambios = [c for c in cambios if c[1] is not None or c[0] in self.manifiesto]
         if not cambios:
             return []
+        borrados = [rel for rel, sha in cambios if sha is None]
+        if borrados:
+            # Google Drive se reinicia solo y desmonta la unidad unos segundos:
+            # sin raíz todo parece borrado. Un borrado se confirma sólo si la
+            # raíz sigue montada y una segunda comprobación lo ratifica; si no,
+            # el diario local queda para el próximo turno.
+            self._exigir_raiz_disponible()
+            if any(self._huellas_locales(borrados).values()):
+                raise EstadoNoVerificado("un archivo dado por borrado sigue en la raíz; no se confirma")
+            self._exigir_raiz_disponible()
         huellas = sorted({sha for _rel, sha in cambios if sha})
         for sha in self.cliente.faltantes(huellas) if huellas else []:
             rel = next(r for r, s in cambios if s == sha)
@@ -422,6 +432,14 @@ class CustodiaEstado:
                 self.manifiesto[rel] = sha
             _escribir_json(self._ruta_manifiesto, {"version": self.version, "archivos": self.manifiesto})
         return cambios
+
+    def _exigir_raiz_disponible(self) -> None:
+        try:
+            disponible = self.raiz.is_dir()
+        except OSError:
+            disponible = False
+        if not disponible:
+            raise EstadoNoVerificado("raíz operacional no disponible; no se confirman borrados")
 
     # -------------------------------------------------------------- semilla
     def rutas_semilla(self) -> list[str]:

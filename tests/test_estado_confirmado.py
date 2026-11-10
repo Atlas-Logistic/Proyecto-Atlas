@@ -274,6 +274,56 @@ class RelevoEstadoConfirmado(unittest.TestCase):
             self.assertTrue(lease.adquirir())
         self.assertFalse(self.oficina.archivo("operacion/actual/temporal.json").exists())
 
+    def test_unidad_desmontada_al_cerrar_no_confirma_borrados_y_conserva_el_diario(self):
+        # Incidente 10/11/2026: Google Drive se reinició y desmontó G: mientras
+        # Desktop cerraba su turno; la custodia confirmó todo como borrado.
+        self.turno(self.casa, {DATASET: "v1", CATALOGO: "cat-1"})
+        version = self.cloud.marca["version"]
+        lease = self.casa.lease()
+        self.assertTrue(lease.adquirir(), lease.motivo)
+        self.casa.escribir(DATASET, "v2")
+        vacia = self.casa.raiz / "reportes" / "vacia"
+        vacia.mkdir(parents=True)
+        os.rmdir(vacia)  # borrado sin ruta: obliga a buscar archivos ausentes
+        self.assertTrue(lease.custodia.borrado_sin_ruta)
+        oculta = self.casa.raiz.with_name("Atlas-desmontada")
+        os.rename(self.casa.raiz, oculta)
+        lease.cerrar()
+        self.assertEqual(self.cloud.marca["version"], version)
+        self.assertEqual(self.cloud._vigentes()[DATASET][0], sha(b"v1"))
+        self.assertEqual(self.cloud._vigentes()[CATALOGO][0], sha(b"cat-1"))
+        self.assertTrue((self.casa.local / "pendiente.json").is_file())
+        os.rename(oculta, self.casa.raiz)  # la unidad vuelve
+        self.cloud.avanzar(3)
+        with self.casa.lease() as vuelta:
+            self.assertTrue(vuelta.adquirir(), vuelta.motivo)
+            self.assertEqual(vuelta.custodia.resumen["pendiente_confirmado"], 1)
+            self.assertEqual(vuelta.custodia.resumen["borrados"], [])
+        self.assertEqual(self.casa.leer(DATASET), "v2")
+        self.assertEqual(self.casa.leer(CATALOGO), "cat-1")
+        self.assertEqual(self.cloud._vigentes()[DATASET][0], sha(b"v2"))
+        self.assertEqual(self.cloud._vigentes()[CATALOGO][0], sha(b"cat-1"))
+
+    def test_borrado_que_reaparece_al_recomprobar_no_se_confirma(self):
+        self.turno(self.casa, {DATASET: "v1", CATALOGO: "cat-1"})
+        version = self.cloud.marca["version"]
+        lease = self.casa.lease()
+        self.assertTrue(lease.adquirir(), lease.motivo)
+        custodia = lease.custodia
+        real = custodia._huellas_locales
+        llamadas = []
+
+        def primera_sin_unidad(rels):
+            llamadas.append(1)
+            return {rel: None for rel in rels} if len(llamadas) == 1 else real(rels)
+
+        with patch.object(custodia, "_huellas_locales", side_effect=primera_sin_unidad):
+            with self.assertRaises(ec.EstadoNoVerificado):
+                custodia._confirmar_rutas(lease, [DATASET, CATALOGO])
+        lease.cerrar()
+        self.assertEqual(self.cloud.marca["version"], version)
+        self.assertEqual(self.cloud._vigentes()[DATASET][0], sha(b"v1"))
+
     def test_registro_omite_temporales_locks_y_carpetas_inmutables(self):
         with self.casa.lease() as lease:
             self.assertTrue(lease.adquirir())
