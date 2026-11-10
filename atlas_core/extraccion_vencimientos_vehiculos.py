@@ -472,6 +472,30 @@ def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comp
             "archivo": documento["archivo"], "sha256": documento["sha256"], "evidencia": campo["evidencia"],
         }
         ficha = next(v for v in propuesta["vehiculos"] if v.get("patente") == patente)
+        # El vínculo Cloud sólo retira el anterior después de acreditar patente,
+        # vencimiento y cobertura del nuevo. Sin correspondencia única no se infiere.
+        from atlas_core.expediente_digital import TIPOS_POLIZA, _coberturas_extraidas
+        referencia = documento.get("reemplaza_origen_id", "")
+        identificacion = documento.get("identificacion_patente") or {}
+        asociacion = documento.get("asociacion") or {}
+        candidatos = [(p, d) for p, d in _ubicaciones(propuesta)
+                      if referencia and referencia in (d.get("origen_documento_id"), *d.get("origenes_adicionales", []))]
+        if (documento.get("tipo") in TIPOS_POLIZA and _coberturas_extraidas(extraccion)
+                and identificacion.get("estado") == "ASOCIADA" and identificacion.get("patente") == patente
+                and identificacion.get("evidencia") and asociacion.get("metodo") == "PATENTE_DOCUMENTAL"
+                and asociacion.get("patente") == patente and len(candidatos) == 1):
+            anterior_patente, anterior_doc = candidatos[0]
+            anterior_asociacion = anterior_doc.get("asociacion") or {}
+            if (anterior_doc is not documento and anterior_patente == patente and not anterior_doc.get("reemplazado_por")
+                    and anterior_doc.get("tipo") in TIPOS_POLIZA
+                    and anterior_asociacion.get("metodo") == "PATENTE_DOCUMENTAL"
+                    and anterior_asociacion.get("patente") == patente):
+                anterior_doc["reemplazado_por"] = documento_id
+                ficha.setdefault("historial", []).append({
+                    "accion": "POLIZA_REEMPLAZADA_MOBILE", "actor": actor, "fecha": instante,
+                    "documento_id": anterior_doc["documento_id"], "reemplazado_por": documento_id,
+                    "reemplaza_origen_id": referencia,
+                })
         ficha.setdefault("historial", []).append({
             "accion": "DOCUMENTO_VEHICULO_VENCIMIENTO_AUTOMATICO", "actor": actor, "fecha": instante,
             "documento_id": documento_id, "tipo": documento["tipo"], "vencimiento": campo["valor"],

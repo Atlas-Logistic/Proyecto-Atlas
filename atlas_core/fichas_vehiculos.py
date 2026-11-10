@@ -104,13 +104,18 @@ def _existente(datos: dict, origen_documento_id: str):
 
 def registrar_documento_vehiculo_mobile(
     raiz, *, empresa, origen_documento_id, chofer_id, tipo, patente_cloud, recibido_en, contenido, mime_type,
-    sha256, comprobar, actor="MOBILE",
+    sha256, comprobar, actor="MOBILE", reemplaza_origen_id="",
 ):
     """Guarda el original y lo asocia al vehículo o lo deja por clasificar.
 
     Devuelve {ok, idempotente, duplicado, documento_id, patente|None, motivo}.
     Un catálogo ilegible lanza (el PULL no confirma y reintenta)."""
     origen_documento_id = str(origen_documento_id or "")
+    reemplaza_origen_id = str(reemplaza_origen_id or "")
+    if reemplaza_origen_id and (tipo not in ("POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO")
+                                  or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", reemplaza_origen_id)
+                                  or reemplaza_origen_id == origen_documento_id):
+        reemplaza_origen_id = ""
     chofer_id = str(chofer_id or "")
     if not origen_documento_id or not chofer_id:
         raise ValueError("Documento Mobile sin chofer o sin identificador")
@@ -160,7 +165,9 @@ def registrar_documento_vehiculo_mobile(
             destino_lista = propuesta.setdefault(PENDIENTES, [])
             carpeta_relativa = Path("archivos") / "vehiculos" / "sin_clasificar"
         procedencia = {"chofer_id": chofer_id, "patente_cloud": patente_cloud, "recibido_en": str(recibido_en or instante)}
-        igual = next((d for d in destino_lista if d.get("tipo") == tipo and d.get("sha256") == original["sha256"]
+        polizas = ("POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO")
+        igual = next((d for d in destino_lista if (d.get("tipo") == tipo or (tipo in polizas and d.get("tipo") in polizas))
+                      and d.get("sha256") == original["sha256"]
                       and (patente or (d.get("clasificacion") or {}).get("patente_cloud") == patente_cloud)
                       and (tipo != TIPO_SEGURO_CARGA or (d.get("procedencia") or {}).get("chofer_id") == chofer_id)), None)
         escritos = []
@@ -193,6 +200,8 @@ def registrar_documento_vehiculo_mobile(
                 "sha256": original["sha256"], "bytes": len(original["contenido"]), "mime_type": mime_type,
                 "creado_en": instante, "recibido_en": procedencia["recibido_en"], "procedencia": procedencia,
             }
+            if reemplaza_origen_id:
+                documento["reemplaza_origen_id"] = reemplaza_origen_id
             if patente:
                 documento["asociacion"] = {"metodo": "ASIGNACION_CONFIRMADA", "rol": "TRACTO", "chofer_id": chofer_id,
                                            "fecha": instante}
