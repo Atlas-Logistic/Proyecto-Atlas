@@ -366,6 +366,31 @@ def _coberturas_extraidas(extraccion: dict) -> list[str]:
     return sorted(set(valores))
 
 
+def _revision_vigente(documento: dict) -> dict:
+    """Revisión humana hecha sobre este mismo original (nunca se hereda a otro archivo)."""
+    revision = documento.get("revision_humana") or {}
+    return revision if revision.get("sha256") and revision.get("sha256") == documento.get("sha256") else {}
+
+
+def _coberturas_documento(documento: dict) -> list[str]:
+    """Coberturas acreditadas: las leídas con evidencia, también tras la revisión humana
+    (que sólo puede confirmar las leídas, nunca agregar)."""
+    revision = _revision_vigente(documento)
+    if revision:
+        return list(revision.get("coberturas") or [])
+    return _coberturas_extraidas(documento.get("extraccion_automatica") or {})
+
+
+def _anteriores_operativos(datos: dict, actual: dict, hoy: date) -> list[dict]:
+    """Documentos operativos del mismo vehículo frente a los que decide `renovacion_documental`."""
+    return [{"documento_id": d["documento_id"], "tipo": d["tipo"], "vencimiento": d["fecha_vencimiento"],
+             "coberturas": _coberturas_documento(d), "origenes": [d["documento_id"]]}
+            for d in datos["documentos"]
+            if d is not actual and d["expediente_id"] == actual["expediente_id"] and d["estado"] == ACTIVO
+            and (not d.get("pendiente_revision") or d.get("transicion_programada"))
+            and _dias_para_vencer(d.get("fecha_vencimiento") or "", hoy) is not None]
+
+
 # ------------------------------------------------------------------ escritura de documentos
 
 
@@ -520,12 +545,7 @@ def registrar_documento_vehiculo_desktop(
         decision = None
         if tipo_detectado and p and vencimiento and (tipo_detectado not in TIPOS_POLIZA or coberturas):
             from atlas_core.renovacion_documental import decidir_renovacion, inicio_acreditado
-            anteriores = [{"documento_id": d["documento_id"], "tipo": d["tipo"], "vencimiento": d["fecha_vencimiento"],
-                           "coberturas": _coberturas_extraidas(d.get("extraccion_automatica") or {}), "origenes": []}
-                          for d in datos["documentos"]
-                          if d is not actual and d["expediente_id"] == actual["expediente_id"] and d["estado"] == ACTIVO
-                          and (not d.get("pendiente_revision") or d.get("transicion_programada"))
-                          and _dias_para_vencer(d.get("fecha_vencimiento") or "", hoy) is not None]
+            anteriores = _anteriores_operativos(datos, actual, hoy)
             # Misma regla que la activación Mobile; Desktop no ofrece vínculo explícito.
             decision = decidir_renovacion({"tipo": tipo_detectado, "tipo_informado": tipo, "vencimiento": vencimiento,
                                            "inicio": inicio_acreditado(campos.get("vencimiento")),
@@ -634,6 +654,280 @@ def anular_documento(raiz: str | Path, *, empresa: str, documento_id: str, actor
         return dict(documento)
 
 
+# ------------------------------------------------------------------ revisión humana de pendientes vehiculares
+#
+# Una persona revisa en Desktop un documento vehicular del expediente que el OCR
+# dejó pendiente: completa lo que no se pudo leer y lo confirma o lo rechaza.
+# Nunca contradice lo leído con evidencia del mismo original (tipo, patente,
+# fechas, inicio de vigencia, coberturas): si la lectura es errónea, se rechaza y
+# se adjunta un original legible. La consecuencia la decide SIEMPRE
+# `renovacion_documental.decidir_renovacion` con los mismos anteriores que el
+# alta; sólo se confirma si activa, reemplaza o programa. Ambigüedades de la regla
+# (vencimiento no posterior, coberturas reducidas, etc.) siguen pendientes.
+
+CONFIRMAR, RECHAZAR, BLOQUEADO = "CONFIRMAR", "RECHAZAR", "BLOQUEADO"
+_CAMPOS_REVISION = ("tipo", "patente", "fecha_emision", "fecha_vencimiento", "inicio_vigencia")
+_CONFIRMABLES = ("ACTIVAR", "REEMPLAZAR", "PROGRAMAR")
+
+
+def _autor(autor: object) -> str:
+    texto = " ".join(str(autor or "").split())
+    if not texto or len(texto) > 80 or re.search(r"[\x00-\x1f\x7f]", texto):
+        raise ErrorExpedienteDigital("indique quién revisó el documento (hasta 80 caracteres)")
+    return texto
+
+
+def _revisable(documento: dict) -> bool:
+    from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
+    return (documento["estado"] == ACTIVO and documento["entidad"] == VEHICULO
+            and bool(documento.get("pendiente_revision")) and not documento.get("transicion_programada")
+            and documento["tipo"] in (*TIPOS_VEHICULO, "DOCUMENTO_VEHICULO_PENDIENTE"))
+
+
+def _campo_leido(campo: dict | None) -> bool:
+    campo = campo or {}
+    return campo.get("estado") == "EXTRAIDO" and bool(campo.get("valor")) and not campo.get("motivo")
+
+
+def _lectura(documento: dict) -> dict:
+    """Lo leído con evidencia del mismo original y por qué falta lo demás (códigos)."""
+    from atlas_core.renovacion_documental import inicio_acreditado
+    extraccion = documento.get("extraccion_automatica") or {}
+    valida = bool(extraccion) and extraccion.get("sha256") == documento.get("sha256")
+    campos = (extraccion.get("campos") or {}) if valida else {}
+    tipo, patente, emision, vencimiento = (campos.get(c) or {} for c in ("tipo_documental", "patente", "emision", "vencimiento"))
+    inicio = vencimiento.get("inicio_vigencia") or {}
+    leido = {
+        "tipo": tipo.get("valor") if _campo_leido(tipo) else None,
+        "patente": patente.get("valor") if _campo_leido(patente) else None,
+        "fecha_emision": emision.get("valor") if _campo_leido(emision) else None,
+        "fecha_vencimiento": vencimiento.get("valor") if _campo_leido(vencimiento) else None,
+        "inicio_vigencia": inicio_acreditado(vencimiento) or None,
+        "coberturas": _coberturas_extraidas(extraccion) if valida else [],
+    }
+    otro_vehiculo = patente.get("motivo") == "PATENTE_DISTINTA"
+    motivos = []
+    if not valida or extraccion.get("estado") != "COMPLETA":
+        motivos.append("LECTURA_FALLIDA")
+    else:
+        posible = (documento.get("posible_reemplazo") or {}).get("motivo")
+        if not leido["tipo"]:
+            motivos.append("TIPO_NO_IDENTIFICADO")
+        elif documento.get("tipo_informado") not in (None, leido["tipo"]) and posible != "TIPO_LEIDO_CON_VIGENTE":
+            motivos.append("TIPO_DISTINTO_DEL_INFORMADO")
+        if otro_vehiculo:
+            motivos.append("PATENTE_DE_OTRO_VEHICULO")
+        elif not leido["patente"]:
+            motivos.append("PATENTE_NO_LEIDA")
+        if not leido["fecha_vencimiento"]:
+            motivos.append("VENCIMIENTO_NO_LEIDO")
+        if emision.get("motivo") == "FECHA_INCONSISTENTE":
+            motivos.append("EMISION_INCONSISTENTE")
+        if inicio.get("motivo") not in (None, "", "NO_ENCONTRADO"):
+            motivos.append("INICIO_AMBIGUO")
+        if leido["tipo"] in TIPOS_POLIZA and not leido["coberturas"]:
+            motivos.append("COBERTURAS_NO_LEIDAS")
+    if (documento.get("posible_reemplazo") or {}).get("motivo"):
+        motivos.append(documento["posible_reemplazo"]["motivo"])
+    observados = [v for v in inicio.get("observados") or [] if _fecha_iso(v)]
+    return {"leido": leido, "motivos": list(dict.fromkeys(motivos)), "otro_vehiculo": otro_vehiculo,
+            "estado_inicio": inicio or None, "inicios_observados": sorted(set(observados))}
+
+
+def _vehiculo_de(raiz: str | Path, carpeta_catalogos, patente: str) -> str:
+    try:
+        return _referencia_vehiculo(_carpeta(raiz, carpeta_catalogos), patente)
+    except ErrorExpedienteDigital:
+        return ""
+
+
+def _evaluar_revision(raiz: str | Path, datos: dict, documento: dict, propuesta: dict | None, hoy: date,
+                      carpeta_catalogos=None) -> dict:
+    """Consecuencia de confirmar con `propuesta`: la de `decidir_renovacion`, o BLOQUEADO si
+    los datos no permiten aplicarla (falta, contradice la lectura o es de otro vehículo)."""
+    from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
+    from atlas_core.renovacion_documental import decidir_renovacion
+    lectura, propuesta = _lectura(documento), propuesta or {}
+    leido = lectura["leido"]
+
+    def bloqueo(motivo: str, campo: str = "", detalle: str = "") -> dict:
+        return {"accion": BLOQUEADO, "motivo": motivo, "campo": campo, "detalle": detalle, "documentos": [],
+                "fecha": "", "valores": {}}
+
+    valores = {}
+    for campo in _CAMPOS_REVISION:
+        propio = " ".join(str(propuesta.get(campo) or "").split())
+        if campo in ("tipo", "patente"):
+            propio = propio.upper()
+        if leido[campo] and propio and propio != leido[campo] and campo != "patente":
+            return bloqueo("CONTRADICE_LECTURA", campo)
+        valores[campo] = propio or leido[campo] or ""
+    if lectura["otro_vehiculo"]:
+        return bloqueo("PATENTE_DE_OTRO_VEHICULO", "patente")
+    if not valores["tipo"]:
+        return bloqueo("TIPO_FALTANTE", "tipo")
+    if valores["tipo"] not in TIPOS_VEHICULO:
+        return bloqueo("TIPO_NO_ADMITIDO", "tipo")
+    if not valores["patente"]:
+        return bloqueo("PATENTE_FALTANTE", "patente")
+    expediente = next(e for e in datos["expedientes"] if e["expediente_id"] == documento["expediente_id"])
+    vehiculo = _vehiculo_de(raiz, carpeta_catalogos, valores["patente"])
+    if leido["patente"] and vehiculo != _vehiculo_de(raiz, carpeta_catalogos, leido["patente"]):
+        return bloqueo("CONTRADICE_LECTURA", "patente")
+    if not vehiculo or vehiculo not in expediente["referencias"]:
+        return bloqueo("PATENTE_NO_CORRESPONDE", "patente")
+    if not valores["fecha_vencimiento"]:
+        return bloqueo("VENCIMIENTO_FALTANTE", "fecha_vencimiento")
+    try:
+        emision, vencimiento = _fechas(valores["fecha_emision"], valores["fecha_vencimiento"], True, hoy)
+        inicio = _fecha(valores["inicio_vigencia"], "inicio de vigencia") if valores["inicio_vigencia"] else ""
+    except ErrorExpedienteDigital as error:
+        return bloqueo("FECHAS_NO_VALIDAS", "", str(error))
+    inicio_humano = bool(inicio) and not leido["inicio_vigencia"]
+    if inicio_humano and lectura["inicios_observados"] and inicio not in lectura["inicios_observados"]:
+        # Ante varias fechas de inicio en el original, la persona elige una de ellas; no inventa otra.
+        return bloqueo("INICIO_NO_OBSERVADO", "inicio_vigencia")
+    coberturas = leido["coberturas"] if valores["tipo"] in TIPOS_POLIZA else []
+    if valores["tipo"] in TIPOS_POLIZA and not coberturas:
+        return bloqueo("COBERTURAS_SIN_EVIDENCIA", "coberturas")
+    reemplaza = str(propuesta.get("reemplaza") or "").strip()
+    # El tipo confirmado por la persona resuelve la duda entre informado y leído; todo lo demás
+    # (vínculo, cobertura, vencimiento posterior, vigencia futura) lo decide la regla única.
+    decision = decidir_renovacion({
+        "tipo": valores["tipo"], "tipo_informado": valores["tipo"], "vencimiento": vencimiento, "inicio": inicio,
+        "estado_inicio": None if inicio_humano else lectura["estado_inicio"], "coberturas": coberturas,
+        "reemplaza": reemplaza}, _anteriores_operativos(datos, documento, hoy), hoy)
+    valores.update(fecha_emision=emision, fecha_vencimiento=vencimiento, inicio_vigencia=inicio, coberturas=coberturas,
+                   reemplaza=reemplaza)
+    return {**decision, "campo": "", "detalle": "", "valores": valores}
+
+
+def _clave_consecuencia(evaluacion: dict) -> str:
+    """Huella de lo que se mostró en la vista previa: confirmar exige que no haya cambiado."""
+    contenido = {c: evaluacion[c] for c in ("accion", "motivo", "documentos", "fecha", "valores")}
+    return hashlib.sha256(json.dumps(contenido, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def _pendiente_de_vehiculo(raiz: str | Path, empresa: str, datos: dict, referencia: object, documento_id: object,
+                           carpeta_catalogos=None) -> dict:
+    _, equivalentes, _ = _identidad(raiz, empresa, VEHICULO, referencia, carpeta_catalogos)
+    expediente = _buscar_expediente(datos, VEHICULO, equivalentes)
+    documento = _buscar_documento(datos, documento_id)
+    if expediente is None or documento["expediente_id"] != expediente["expediente_id"]:
+        raise ErrorExpedienteDigital("el documento no pertenece a este vehículo")
+    if not _revisable(documento):
+        raise ErrorExpedienteDigital("el documento ya no está pendiente de revisión")
+    return documento
+
+
+def _resumen_documento(documento: dict) -> dict:
+    return {"documento_id": documento["documento_id"], "tipo": documento["tipo"],
+            "fecha_emision": documento.get("fecha_emision", ""), "fecha_vencimiento": documento.get("fecha_vencimiento", ""),
+            "coberturas": _coberturas_documento(documento), "archivo": documento.get("archivo", ""),
+            "registrado_en": documento.get("registrado_en", "")}
+
+
+def revisar_documento_pendiente(raiz: str | Path, *, empresa: str, referencia: str, documento_id: str,
+                                propuesta: dict | None = None, reloj: _Reloj = _ahora_utc,
+                                carpeta_catalogos: str | Path | None = None) -> dict:
+    """Vista previa de la revisión (sólo lee): lo leído, los motivos de la duda, los
+    anteriores del vehículo y la consecuencia exacta que tendría confirmar."""
+    from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
+    hoy = reloj().astimezone(timezone.utc).date()
+    datos = _leer_a_fecha(raiz, empresa, hoy)
+    documento = _pendiente_de_vehiculo(raiz, empresa, datos, referencia, documento_id, carpeta_catalogos)
+    lectura = _lectura(documento)
+    evaluacion = _evaluar_revision(raiz, datos, documento, propuesta, hoy, carpeta_catalogos)
+    from atlas_core.renovacion_documental import tipos_acreditados
+    # Sólo los anteriores que acreditan lo mismo que el tipo en revisión (y los que nombra la decisión).
+    tipo_revisado = str((propuesta or {}).get("tipo") or "").upper() or lectura["leido"]["tipo"] or documento.get("tipo_informado") or ""
+    acredita = tipos_acreditados({"tipo": tipo_revisado, "coberturas": lectura["leido"]["coberturas"]})
+    operativos = {a["documento_id"] for a in _anteriores_operativos(datos, documento, hoy)
+                  if acredita & tipos_acreditados(a) or a["documento_id"] in evaluacion["documentos"]}
+    nombres = tipos_documento(datos)
+    return {
+        "empresa": empresa,
+        "documento": {**_resumen_documento(documento), "tipo_informado": documento.get("tipo_informado", ""),
+                      "datos_informados": documento.get("datos_informados") or {}, "sha256": documento.get("sha256", "")},
+        "leido": lectura["leido"], "motivos": lectura["motivos"], "inicios_observados": lectura["inicios_observados"],
+        "editables": [c for c in _CAMPOS_REVISION if not lectura["leido"][c] and not (c == "patente" and lectura["otro_vehiculo"])],
+        "tipos": [{"tipo": t, "nombre": nombres[t]["nombre"]} for t in TIPOS_VEHICULO],
+        "anteriores": [_resumen_documento(d) for d in datos["documentos"] if d["documento_id"] in operativos],
+        "consecuencia": {**{c: evaluacion[c] for c in ("accion", "motivo", "campo", "detalle", "documentos", "fecha")},
+                         "clave": _clave_consecuencia(evaluacion)},
+        "puede_confirmar": evaluacion["accion"] in _CONFIRMABLES,
+    }
+
+
+def resolver_documento_pendiente(
+    raiz: str | Path, *, empresa: str, referencia: str, documento_id: str, sha256: str, decision: str, autor: str,
+    confirmacion_humana: bool, motivo: str = "", propuesta: dict | None = None, clave_consecuencia: str = "",
+    actor: str = "DESKTOP", reloj: _Reloj = _ahora_utc, carpeta_catalogos: str | Path | None = None,
+) -> dict:
+    """Confirma o rechaza un pendiente vehicular revisado por una persona. Confirmar
+    recalcula bajo bloqueo la misma consecuencia de la vista previa y sólo la aplica si
+    coincide y la regla la permite. Rechazar lo deja anulado con su original e historial."""
+    actor, autor, decision = _actor(actor), _autor(autor), str(decision or "").upper()
+    if confirmacion_humana is not True:
+        raise ErrorExpedienteDigital("falta la confirmación de que una persona revisó el original")
+    if decision not in (CONFIRMAR, RECHAZAR):
+        raise ErrorExpedienteDigital("decisión no admitida")
+    motivo = _motivo(motivo) if decision == RECHAZAR else ""
+    carpeta = ruta_almacen_expediente(raiz, empresa).parent
+    with _mutacion(raiz, empresa) as datos:
+        hoy = reloj().astimezone(timezone.utc).date()
+        _aplicar_transiciones(datos, hoy, reloj)
+        documento = _pendiente_de_vehiculo(raiz, empresa, datos, referencia, documento_id, carpeta_catalogos)
+        if not sha256 or documento.get("sha256") != sha256:
+            raise ErrorExpedienteDigital("el documento cambió desde que se abrió; vuelva a revisarlo")
+        instante = _instante(reloj)
+        if decision == RECHAZAR:
+            documento["estado"] = ANULADO
+            documento["rechazo"] = {"autor": autor, "motivo": motivo, "en": instante, "actor": actor,
+                                    "motivos_revisados": _lectura(documento)["motivos"]}
+            _evento(datos, "DOCUMENTO_RECHAZADO_EN_REVISION", actor, instante, expediente_id=documento["expediente_id"],
+                    documento_id=documento["documento_id"], autor=autor, motivo=motivo,
+                    cambios={"estado": {"antes": ACTIVO, "despues": ANULADO}})
+            return dict(documento)
+        ruta = carpeta / str(documento.get("archivo") or "")
+        if not documento.get("archivo") or not ruta.resolve().is_relative_to(carpeta.resolve()) or not ruta.is_file() \
+                or hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
+            raise ErrorExpedienteDigital("el original no está íntegro; no se puede confirmar")
+        evaluacion = _evaluar_revision(raiz, datos, documento, propuesta, hoy, carpeta_catalogos)
+        if not clave_consecuencia or _clave_consecuencia(evaluacion) != clave_consecuencia:
+            raise ErrorExpedienteDigital("la consecuencia cambió desde la vista previa; vuelva a revisarla")
+        accion = evaluacion["accion"]
+        if accion not in _CONFIRMABLES:
+            raise ErrorExpedienteDigital("este documento no puede confirmarse: queda pendiente por seguridad")
+        v = evaluacion["valores"]
+        motivos = _lectura(documento)["motivos"]
+        cambios = {c: {"antes": documento.get(c, ""), "despues": v[c]}
+                   for c in ("tipo", "fecha_emision", "fecha_vencimiento") if documento.get(c, "") != v[c]}
+        documento.update({c: v[c] for c in ("tipo", "fecha_emision", "fecha_vencimiento")}, confirmado_por_humano=True)
+        resuelto = documento.pop("posible_reemplazo", None)
+        documento["revision_humana"] = {
+            "autor": autor, "en": instante, "actor": actor, "sha256": documento["sha256"], "decision": accion,
+            "motivo_regla": evaluacion["motivo"], "patente": v["patente"], "inicio_vigencia": v["inicio_vigencia"],
+            "coberturas": v["coberturas"], "cambios": cambios, "motivos_revisados": motivos,
+            "posible_reemplazo_resuelto": resuelto, "reemplaza": evaluacion["documentos"]}
+        reemplazados = []
+        if accion == "PROGRAMAR":
+            documento["transicion_programada"] = {"fecha": evaluacion["fecha"], "reemplaza": evaluacion["documentos"],
+                                                  "motivo": evaluacion["motivo"], "registrado": instante}
+        else:
+            documento["pendiente_revision"] = False
+            for previo in datos["documentos"]:
+                if previo["documento_id"] in evaluacion["documentos"] and previo["estado"] == ACTIVO:
+                    previo.update(estado=REEMPLAZADO, reemplazado_por=documento["documento_id"])
+                    reemplazados.append(previo["documento_id"])
+        _evento(datos, "DOCUMENTO_REVISION_CONFIRMADA", actor, instante, expediente_id=documento["expediente_id"],
+                documento_id=documento["documento_id"], tipo=documento["tipo"], autor=autor, cambios=cambios,
+                renovacion=accion, motivo_regla=evaluacion["motivo"], reemplaza=reemplazados,
+                programado_desde=evaluacion["fecha"] if accion == "PROGRAMAR" else "",
+                anteriores=evaluacion["documentos"])
+        return dict(documento)
+
+
 # ------------------------------------------------------------------ vista derivada
 
 
@@ -691,6 +985,10 @@ def _vista_coberturas(documento: dict) -> dict:
     extraccion = documento.get("extraccion_automatica") or {}
     campos = extraccion.get("campos") or {}
     huella = documento.get("sha256")
+    if documento.get("fuente") == "EXPEDIENTE" and _revision_vigente(documento).get("coberturas"):
+        # Confirmada por una persona sobre este original, con coberturas leídas con evidencia.
+        return {**documento, "tipos_cubiertos": _coberturas_documento(documento),
+                "pendiente_revision": bool(documento.get("pendiente_revision"))}
     if documento.get("fuente") == "EXPEDIENTE":
         patente = campos.get("patente") or {}
         vinculado = bool(huella and extraccion.get("sha256") == huella and patente.get("estado") == "EXTRAIDO"
