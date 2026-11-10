@@ -2039,6 +2039,16 @@ def _aplicar_documento_comuna_destino(ctx: _Contexto, p: dict, plan: Plan, actor
 GUIA_AUSENTE_DOCUMENTAL = "No encontrado"
 
 
+def _fila_documental_corregida(fila: dict, campo: str, antes: Mapping, despues: Mapping) -> None:
+    """Fila esperada tras una corrección documental publicada (para verificar
+    una recuperación): el campo corregido y, si el folio estaba ausente, sólo
+    el retiro de GUIA_AUSENTE, igual que el reparador."""
+    fila[campo] = despues[campo]
+    if campo == "numero_guia" and not str(antes.get(campo) or "").strip().isdigit():
+        from atlas_core.revalidacion_documental import retirar_guia_ausente
+        fila["motivos_revision_documento"] = retirar_guia_ausente(fila.get("motivos_revision_documento"))
+
+
 def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     """Caso real 9482179 -> 482179: RapidOCR leyó el "º" de "Nº 482179" como
     "9" y el folio quedó con 7 dígitos. Sólo corrige ESE patrón (el folio
@@ -2100,6 +2110,9 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     ]
     if digito_inicial_omitido:
         consecuencias[-1] = "Se regenera el reporte sin recalcular destino ni ruta."
+    if actual == GUIA_AUSENTE_DOCUMENTAL:
+        consecuencias[0] = (f"El documento {archivo} (transporte {transporte}) pasa de folio ausente al {nuevo}; "
+                            "sólo se retira el motivo GUIA_AUSENTE y los demás motivos se conservan.")
     if trasladar:
         consecuencias.append(
             f"{len(trasladar)} tarjeta(s) pendiente(s) de este documento ("
@@ -3186,7 +3199,7 @@ class CapaAccionesOperacionales:
                 or fila.get("numero_transporte") != entidad.get("numero_transporte")
                 or fila.get(campo) != antes.get(campo) or not isinstance(despues.get(campo), str)):
             raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "identidad o valor anterior no coincide")
-        fila[campo] = despues[campo]
+        _fila_documental_corregida(fila, campo, antes, despues)
         sanear_filas_csv(filas)
         salida = io.StringIO(newline="")
         escritor = csv.DictWriter(salida, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")
@@ -3376,7 +3389,7 @@ class CapaAccionesOperacionales:
                         or fila.get("numero_transporte") != entidad.get("numero_transporte")
                         or fila.get(campo) != antes.get(campo) or not isinstance(despues.get(campo), str)):
                     raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "identidad o valor anterior no coincide")
-                fila[campo] = despues[campo]
+                _fila_documental_corregida(fila, campo, antes, despues)
                 sanear_filas_csv(filas)
                 salida = io.StringIO(newline="")
                 escritor = csv.DictWriter(salida, fieldnames=COLUMNAS, delimiter=";", extrasaction="ignore")

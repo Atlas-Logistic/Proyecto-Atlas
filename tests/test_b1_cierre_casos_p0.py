@@ -604,3 +604,90 @@ def test_cli_de_reporte_se_abstiene_durante_publicacion(entorno, monkeypatch):
                              capture_output=True, text=True, timeout=60)
     assert proceso.returncode != 0 and "documental incompleta" in proceso.stderr, proceso.stderr
     assert not salida.exists()
+
+
+# ------------------------------------------------- folio ausente por transporte (B1)
+
+FRASE_FOLIO = "El documento del transporte 0000369009 corresponde a la guía 484180"
+
+
+def _caso_folio_pendiente(entorno, monkeypatch):
+    # Estado de CASA: obra y dirección ya confirmadas por B1; falta el folio.
+    capa, b1, fila, otra = _caso_obra_ya_corregida(entorno, monkeypatch)
+    import atlas_core.destino_operacional as destino_modulo
+    monkeypatch.setattr(destino_modulo, "calcular_ruta_operacional", lambda *a, **k: pytest.fail("no recalcular"))
+    assert b1.atender("previo", FRASE_DIRECCION_SOLA)["estado"] == "PREVIEW_PENDIENTE"
+    assert b1.atender("previo", "si")["estado"] == "EJECUTADA"
+    return capa, b1, _filas_dataset(entorno)[ARCHIVO_369009], otra
+
+
+@pytest.mark.parametrize("frase", [
+    FRASE_FOLIO,
+    "El folio del transporte 0000369009 es 484180",
+    "Transporte 0000369009: el folio correcto es 484180",
+    "Corrige el folio del transporte 0000369009 a 484180",
+])
+def test_folio_ausente_por_transporte_con_confirmacion(entorno, monkeypatch, frase):
+    capa, b1, fila, otra = _caso_folio_pendiente(entorno, monkeypatch)
+    antes, ledger_antes = entorno["dataset"].read_bytes(), _ledger(entorno)
+    bandeja_antes = _bandeja(entorno)
+    primero = b1.atender("prueba", frase)
+    assert primero["estado"] == "PREVIEW_PENDIENTE", primero
+    assert primero["accion"] == "DOCUMENTO_CORREGIR_NUMERO_GUIA"
+    mensaje = primero["mensaje"]
+    assert "folio ausente" in mensaje and "'484180'" in mensaje and "0000369009" in mensaje
+    assert "LEANDRO" in mensaje or "chofer" in mensaje
+    assert "No encontrado" not in mensaje.split(". ")[0] and "chofer que coincida" not in mensaje
+    assert primero["preview"]["entidad"]["id"] == ARCHIVO_369009
+    assert primero["preview"]["valor_propuesto"] == {"numero_guia": "484180"}
+    # Nada se escribe sin la confirmación humana.
+    assert entorno["dataset"].read_bytes() == antes and _ledger(entorno) == ledger_antes
+    assert _bandeja(entorno) == bandeja_antes
+    final = b1.atender("prueba", "si")
+    assert final["estado"] == "EJECUTADA", final
+    corregida = _filas_dataset(entorno)[ARCHIVO_369009]
+    assert corregida["numero_guia"] == "484180"
+    assert corregida["motivos_revision_documento"] == "OBRA_DESTINO_SIN_CORROBORAR"
+    for campo in ("cliente", "obra_destino", "despachar_a_crudo", "descripcion_material", "estado_operacional",
+                  "estado_ruta", "distancia_km", "numero_transporte", "indicador_revision", "estado_documental"):
+        assert corregida[campo] == fila[campo], campo
+    assert _filas_dataset(entorno)["500002.jpeg"] == otra
+    asiento = [a for a in _ledger(entorno)["aplicaciones"][len(ledger_antes["aplicaciones"]):]
+               if a.get("campo") == "numero_guia"]
+    assert len(asiento) == 1 and asiento[0]["confirmado_por"] == "JAVIER"
+    assert asiento[0]["valor_documental"] == "No encontrado" and asiento[0]["valor_corregido"] == "484180"
+    assert not any(d["tipo"] == "DESTINO_NO_RESUELTO" for d in _bandeja(entorno))
+    assert (entorno["raiz"] / ARCHIVO_369009).read_bytes() == b"original sintetico"
+    assert b1.atender("prueba", FRASE_FOLIO)["estado"] == "SIN_CAMBIOS"
+
+
+def test_folio_ausente_cancelado_no_escribe(entorno, monkeypatch):
+    capa, b1, fila, otra = _caso_folio_pendiente(entorno, monkeypatch)
+    antes, ledger_antes, bandeja_antes = entorno["dataset"].read_bytes(), _ledger(entorno), _bandeja(entorno)
+    assert b1.atender("prueba", FRASE_FOLIO)["estado"] == "PREVIEW_PENDIENTE"
+    b1.atender("prueba", "no")
+    assert b1.atender("prueba", "si")["estado"] != "EJECUTADA"
+    assert entorno["dataset"].read_bytes() == antes and _ledger(entorno) == ledger_antes
+    assert _bandeja(entorno) == bandeja_antes
+
+
+def test_folio_por_transporte_no_elige_entre_varios_sin_folio(entorno, monkeypatch):
+    capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
+    _escribir_dataset(entorno, [fila, _fila("No encontrado", archivo="mobile/otra/original.jpg", numero_transporte="0000369009")])
+    antes = entorno["dataset"].read_bytes()
+    r = b1.atender("prueba", FRASE_FOLIO)
+    assert r["estado"] == "ACLARACION_REQUERIDA" and "2 encontrados" in r["mensaje"], r
+    assert entorno["dataset"].read_bytes() == antes
+
+
+def test_folio_por_transporte_deriva_desde_consulta(entorno, monkeypatch):
+    capa, b1, _h, _o = _caso_material(entorno, monkeypatch)
+    assert b1.consultar(FRASE_FOLIO, derivar_operacionales=True)["estado"] == "REQUIERE_OPERADOR"
+    assert b1.consultar(FRASE_FOLIO)["estado"] == "RECHAZADA"
+
+
+def test_retirar_guia_ausente_conserva_los_demas_motivos():
+    from atlas_core.revalidacion_documental import retirar_guia_ausente
+    assert retirar_guia_ausente("OBRA_DESTINO_SIN_CORROBORAR | GUIA_AUSENTE") == "OBRA_DESTINO_SIN_CORROBORAR"
+    assert retirar_guia_ausente("GUIA_AUSENTE | B | A") == "B | A"
+    assert retirar_guia_ausente("GUIA_AUSENTE") == ""

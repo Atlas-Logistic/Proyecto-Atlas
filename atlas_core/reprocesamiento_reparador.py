@@ -69,6 +69,7 @@ from atlas_core.revalidacion_documental import (
     _indicadores_documentales_coherentes,
     _leer_filas,
     _metricas_recuperacion_p0,
+    retirar_guia_ausente,
     revalidar_y_regenerar_reporte,
 )
 from atlas_core.trazabilidad_ocr import ruta_traza_ocr
@@ -1255,6 +1256,9 @@ def reparar_documento_focal_con_valores_conocidos(
             if not dry_run:
                 if conservar_estado_operacional and numero_guia_corregido and len(cambios) == 1:
                     cambio = cambios[0]
+                    if cambio.campo == "numero_guia" and not str(cambio.valor_anterior).strip().isdigit():
+                        # Folio ausente registrado: sólo se retira GUIA_AUSENTE; estados intactos.
+                        fila["motivos_revision_documento"] = retirar_guia_ausente(fila.get("motivos_revision_documento"))
                     _escribir_filas_completas(dataset, filas, transicion_folio=(
                         archivo_id, cambio.valor_anterior, cambio.valor_nuevo,
                         str(fila.get("numero_transporte", "")).strip()))

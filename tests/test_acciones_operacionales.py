@@ -1026,8 +1026,9 @@ def test_corregir_numero_guia_ausente_es_focal_y_auditable(entorno, monkeypatch)
 
     filas = _filas_dataset(entorno)
     fila = filas["mobile/bd45/original.jpg"]
-    assert (fila["numero_guia"], fila["motivos_revision_documento"], fila["estado_documental"]) == ("482350", "GUIA_AUSENTE", "REQUIERE_REVISION")
-    derivados = {"numero_guia"}
+    # 10/11/2026: el folio registrado retira sólo GUIA_AUSENTE; los estados se conservan.
+    assert (fila["numero_guia"], fila["motivos_revision_documento"], fila["estado_documental"]) == ("482350", "", "REQUIERE_REVISION")
+    derivados = {"numero_guia", "motivos_revision_documento"}
     assert {k: v for k, v in fila.items() if k not in derivados} == {
         k: v for k, v in antes["mobile/bd45/original.jpg"].items() if k not in derivados}
     assert filas["mobile/otro/original.jpg"] == antes["mobile/otro/original.jpg"]
@@ -1128,10 +1129,12 @@ def test_482402_folio_ausente_conserva_y_traslada_su_tarjeta_pendiente(entorno, 
     filas = _filas_dataset(entorno)
     fila = filas[ARCHIVO_482402]
     assert fila["numero_guia"] == "482402"
-    derivados = {"numero_guia"}
+    derivados = {"numero_guia", "motivos_revision_documento"}
     assert {k: v for k, v in fila.items() if k not in derivados} == {
         k: v for k, v in antes[ARCHIVO_482402].items() if k not in derivados}
-    assert fila["motivos_revision_documento"] == antes[ARCHIVO_482402]["motivos_revision_documento"]
+    # 10/11/2026: sólo se retira GUIA_AUSENTE; los demás motivos se conservan.
+    from atlas_core.revalidacion_documental import retirar_guia_ausente
+    assert fila["motivos_revision_documento"] == retirar_guia_ausente(antes[ARCHIVO_482402]["motivos_revision_documento"])
     assert filas["500001.jpeg"] == antes["500001.jpeg"]
 
     # Bandeja: mismas tarjetas, misma cabecera; la de destino sigue PENDIENTE y

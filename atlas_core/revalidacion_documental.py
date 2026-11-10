@@ -332,6 +332,12 @@ def _reporte_vigente_valido(raiz: Path, estado: dict | None) -> bool:
     return (raiz / reporte_vigente / "viajes.csv").is_file()
 
 
+def retirar_guia_ausente(motivos: object) -> str:
+    """Motivos sin GUIA_AUSENTE, en su orden: un folio registrado ya no está ausente."""
+    return SEPARADOR_MOTIVOS.join(m.strip() for m in str(motivos or "").split("|")
+                                  if m.strip() and m.strip() != "GUIA_AUSENTE")
+
+
 def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]], *, transicion_folio=None) -> None:
     guias = guias_en_alcance(ruta_csv)
     if guias is not None:
@@ -368,9 +374,14 @@ def _escribir_filas_completas(ruta_csv: Path, filas: list[dict[str, str]], *, tr
             antigua, nueva = (archivo_id, guia_anterior), (archivo_id, guia_nueva)
             candidatas = [f for f in filas if (str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()) == nueva]
             original = originales.get(antigua)
+            admitidas = [{**original, "numero_guia": guia_nueva}] if original else []
+            if original and not str(guia_anterior).strip().isdigit():
+                # Folio que estaba ausente: además sólo puede retirarse GUIA_AUSENTE.
+                admitidas.append({**admitidas[0], "motivos_revision_documento":
+                                  retirar_guia_ausente(original.get("motivos_revision_documento"))})
             if (not original or len(candidatas) != 1 or claves_nuevas.count(antigua) != 0
                     or not transporte or str(original.get("numero_transporte", "")).strip() != transporte
-                    or candidatas[0] != {**original, "numero_guia": guia_nueva}):
+                    or candidatas[0] not in admitidas):
                 raise ValueError("Transición de folio no identifica un documento único e intacto")
             if antigua in identidades:
                 identidades = (identidades - {antigua}) | {nueva}

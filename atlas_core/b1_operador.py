@@ -310,8 +310,35 @@ def separar_obra_y_direccion(texto: str) -> tuple[str, str] | None:
     return (f"la obra es {obra}", f"la dirección es {direccion}") if obra and direccion else None
 
 
+# Folio de un documento sin folio leído, identificado por su transporte:
+# «el documento del transporte T corresponde a la guía F», «el folio del
+# transporte T es F», «transporte T: el folio correcto es F».
+_TRANSPORTE_FOLIO = r"TRANSPORTE\s+(?:N[°O]?\s*)?(?P<transporte>\d{3,})"
+_FOLIO_PROPUESTO = r"(?:LA\s+)?(?:GUIA\s+|FOLIO\s+)?(?:N[°O]?\s*)?(?P<folio>\d{6})\s*\.?$"
+_DATO_FOLIO = r"(?:EL\s+|LA\s+)?(?:FOLIO|NUMERO\s+DE\s+(?:LA\s+)?GUIA|GUIA)(?:\s+CORRECT[OA])?"
+_FOLIO_POR_TRANSPORTE = [
+    re.compile(rf"^(?:EL\s+)?DOCUMENTO\s+DEL?\s+{_TRANSPORTE_FOLIO}\s+(?:CORRESPONDE\s+A|ES|PERTENECE\s+A)\s+{_FOLIO_PROPUESTO}"),
+    re.compile(rf"^{_DATO_FOLIO}\s+DEL?\s+(?:DOCUMENTO\s+DEL?\s+)?{_TRANSPORTE_FOLIO}\s*(?:ES|CORRESPONDE\s+A|:)\s*{_FOLIO_PROPUESTO}"),
+    re.compile(rf"^(?:EN\s+)?(?:EL\s+)?{_TRANSPORTE_FOLIO}\s*[:,;-]?\s*{_DATO_FOLIO}\s*(?:ES|CORRESPONDE\s+A|:)\s*{_FOLIO_PROPUESTO}"),
+    re.compile(rf"^(?:CORRIGE|CORREGIR|REGISTRA|REGISTRAR|ASIGNA|ASIGNAR)\s+{_DATO_FOLIO}\s+DEL?\s+(?:DOCUMENTO\s+DEL?\s+)?"
+               rf"{_TRANSPORTE_FOLIO}\s*(?:A|COMO|:|EN)\s*{_FOLIO_PROPUESTO}"),
+]
+
+
+def folio_por_transporte(texto: str) -> tuple[str, str] | None:
+    """(transporte, folio) si la frase registra el folio del documento de un transporte."""
+    plano = _limpio(texto)[1]
+    for patron in _FOLIO_POR_TRANSPORTE:
+        m = patron.match(plano)
+        if m:
+            return m.group("transporte"), m.group("folio")
+    return None
+
+
 def es_correccion_por_guia_y_transporte(texto: str) -> bool:
     """«Guía N, transporte T: …» con obra y dirección o material."""
+    if folio_por_transporte(texto) is not None:
+        return True
     original, plano = _limpio(texto)
     m = _GUIA_Y_TRANSPORTE.match(plano)
     if m is None:
@@ -1122,6 +1149,11 @@ def _material_legible(valor: object) -> str:
     return f"«{texto}»" if texto else "sin material"
 
 
+def _folio_legible(numero: object) -> str:
+    texto = str(numero or "").strip()
+    return repr(texto) if texto.isdigit() else "folio ausente"
+
+
 def _guia_legible(numero: object) -> str:
     """«guía N», o «sin folio leído» si el documento no tiene folio: nunca «guía No encontrado»."""
     texto = str(numero or "").strip()
@@ -1191,7 +1223,7 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
         return " ".join([texto, *(str(c) for c in preview.get("consecuencias") or [])])
     elif accion == "DOCUMENTO_CORREGIR_NUMERO_GUIA":
         texto = (f"Corregir el folio del documento {entidad.get('id')} (transporte {entidad.get('numero_transporte')}): "
-                 f"{(actual or {}).get('numero_guia')!r} -> {propuesto.get('numero_guia')!r}.")
+                 f"{_folio_legible((actual or {}).get('numero_guia'))} -> {propuesto.get('numero_guia')!r}.")
     elif accion == "DOCUMENTO_ASIGNAR_OBRA":
         texto = (f"Asignar la obra del documento {entidad.get('id')}, guía {entidad.get('numero_guia')} (transporte "
                  f"{entidad.get('numero_transporte')}): actual {(actual or {}).get('obra_destino')!r} -> "
@@ -1929,6 +1961,9 @@ class OperadorB1:
                             "mensaje": "Operación pendiente descartada." if tenia else "No había nada pendiente."}
                 if decision_id:
                     return self._instruccion_revision(estado, conversacion_id, decision_id, texto)
+                por_folio = self._instruccion_folio_transporte(estado, conversacion_id, texto)
+                if por_folio is not None:
+                    return por_folio
                 por_transporte = self._instruccion_guia_transporte(estado, conversacion_id, texto)
                 if por_transporte is not None:
                     return por_transporte
@@ -1983,6 +2018,38 @@ class OperadorB1:
         return self._dejar_siguiente(estado, conversacion_id, self._instruccion_revision(estado, conversacion_id, decision_id, obra),
                                      {"decision_id": decision_id, "texto": direccion},
                                      "Al confirmar te mostraré la dirección para que la confirmes por separado.")
+
+    def _instruccion_folio_transporte(self, estado: dict, conversacion_id: str, texto: str) -> dict | None:
+        """Folio de un documento sin folio leído, por su transporte: el único
+        documento sin folio del transporte; nunca se elige entre varios. Usa
+        la corrección de folio existente (vista previa, confirmación, ledger)."""
+        pedido = folio_por_transporte(texto)
+        if pedido is None:
+            return None
+        transporte, folio = pedido
+        filas = [f for f in self.capa._ctx.filas() if str(f.get("numero_transporte") or "").strip() == transporte]
+        if any(str(f.get("numero_guia") or "").strip() == folio for f in filas):
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "SIN_CAMBIOS", "mensaje": (
+                f"La guía {folio} ya está registrada en el transporte {transporte}; no hay nada que confirmar.")}
+        sin_folio = [f for f in filas if not str(f.get("numero_guia") or "").strip().isdigit()]
+        if len(sin_folio) != 1:
+            self._fijar_pendiente(estado, conversacion_id, None)
+            return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": (
+                f"No identifiqué un único documento sin folio en el transporte {transporte} "
+                f"({len(sin_folio)} encontrados). No se corrigió nada.")}
+        fila = sin_folio[0]
+        intencion = Intencion("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+            "numero_guia": str(fila.get("numero_guia") or "").strip(), "numero_guia_corregido": folio,
+            "archivo": str(fila.get("archivo") or "").strip(),
+            "referencia": f"B1, transporte {transporte}: {' '.join(str(texto).split())}"[:500]})
+        respuesta = self._instruccion(estado, conversacion_id, texto, intencion_revision=intencion)
+        if respuesta.get("estado") == "PREVIEW_PENDIENTE":
+            datos = ", ".join(f"{n} {fila.get(c)}" for n, c in (("chofer", "chofer"), ("fecha", "fecha"))
+                              if str(fila.get(c) or "").strip())
+            if datos:
+                respuesta = {**respuesta, "mensaje": f"Documento del transporte {transporte}: {datos}. {respuesta.get('mensaje', '')}"}
+        return respuesta
 
     def _instruccion_guia_transporte(self, estado: dict, conversacion_id: str, texto: str) -> dict | None:
         """«Guía N, transporte T: …» identifica un documento aunque su folio

@@ -81,7 +81,10 @@ def test_folio_real_preserva_destino_ruta_estado_y_auditoria(entorno, monkeypatc
     resultado = capa.ejecutar(preview["token"], actor="JAVIER", confirmado_por="JAVIER")
     assert resultado["estado"] == "APLICADA", resultado.get("mensaje")
     despues = _filas_dataset(entorno)
-    assert despues[archivo] == {**antes[archivo], "numero_guia": "484180"}
+    # 10/11/2026: además del folio, sólo se retira GUIA_AUSENTE.
+    from atlas_core.revalidacion_documental import retirar_guia_ausente
+    assert despues[archivo] == {**antes[archivo], "numero_guia": "484180", "motivos_revision_documento":
+                                retirar_guia_ausente(antes[archivo]["motivos_revision_documento"])}
     assert despues["500002.jpeg"] == antes["500002.jpeg"]
     ledger = json.loads(ruta_ledger.read_text(encoding="utf-8"))
     assert ledger["aplicaciones"][0] == destino
@@ -89,7 +92,7 @@ def test_folio_real_preserva_destino_ruta_estado_y_auditoria(entorno, monkeypatc
     proyectada = proyectar_destino(despues[archivo], ledger)
     assert proyectada["direccion_entrega"] == "PRESIDENTE RIESCO 5903"
     assert proyectada["distancia_km"] == "17"
-    assert proyectada == {**vista_antes, "numero_guia": "484180"}
+    assert proyectada == {**vista_antes, "numero_guia": "484180", "motivos_revision_documento": ""}
     assert original.read_bytes() == b"fotografia sintetica"
     from atlas_core.destino_operacional import identidades_destino_confirmado
     from atlas_core.revalidacion_documental import _escribir_filas_completas
