@@ -1,6 +1,6 @@
 """Documentos de vehículo enviados desde Mobile -> ficha del vehículo.
 
-SOAP, revisión técnica y permiso de circulación llegan desde Cloud con la
+Los documentos vehiculares llegan desde Cloud con la
 patente que Cloud fijó al recibirlos (la asignación que Motor le publicó,
 `cloud_asignaciones_vehiculo`). Motor la acepta sólo si la asignación
 confirmada vigente la respalda sin ambigüedad, con la misma regla de la
@@ -38,7 +38,8 @@ from atlas_core.fichas_choferes import (
     leer_almacen, ruta_almacen,
 )
 
-TIPOS_VEHICULO = ("SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION")
+TIPOS_VEHICULO = ("SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION",
+                  "CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO")
 TIPO_SEGURO_CARGA = "SEGURO_CARGA"
 ESTADO_PENDIENTE_CLASIFICACION = "PENDIENTE_CLASIFICACION"
 PENDIENTES = "documentos_vehiculo_pendientes"

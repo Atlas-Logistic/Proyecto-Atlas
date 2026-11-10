@@ -311,7 +311,7 @@ def test_abstencion_queda_pendiente_y_se_reintenta_una_vez_con_otra_version(raiz
         "PENDIENTE_REVISION", "VARIAS_FECHAS", ["2027-03-31", "2027-09-30"])
     assert documento["extraccion_automatica"]["estado"] == "SIN_DATOS"
     assert _extraer(raiz, OCRFalso({}))["pendientes"] == 0
-    monkeypatch.setattr(modulo, "VERSION_EXTRACCION", 2)
+    monkeypatch.setattr(modulo, "VERSION_EXTRACCION", modulo.VERSION_EXTRACCION + 1)
     _extraer(raiz, OCRFalso({contenido: ["VENCE: 30/09/2027"]}))
     _, documento = _ubicar(raiz, documento_id)
     assert documento["extraccion_automatica"]["campos"]["vencimiento"]["valor"] == "2027-09-30"

@@ -313,8 +313,10 @@ def test_pull_incorpora_las_dos_caras_y_declara_que_las_soporta(tmp_path):
     resumen = _sincronizar(raiz, cloud)
     assert cloud.confirmados == ['dfm_2c', 'dfm_antigua'] and not resumen['errores']
     # Declara las dos caras y los tipos de vehículo que sabe incorporar.
-    assert cloud.rutas[0][0].endswith('/pendientes?formatos=FRENTE_REVERSO&tipos=SOAP,REVISION_TECNICA,PERMISO_CIRCULACION')
-    assert all(body['formatos'] == ['FRENTE_REVERSO'] and body['tipos'] == ['SOAP', 'REVISION_TECNICA', 'PERMISO_CIRCULACION']
+    tipos = {'SOAP', 'REVISION_TECNICA', 'PERMISO_CIRCULACION', 'CERTIFICADO_EMISION_GASES',
+             'POLIZA_RESPONSABILIDAD_CIVIL', 'POLIZA_ROBO', 'SEGURO_CARGA'}
+    assert set(cloud.rutas[0][0].split('&tipos=')[1].split(',')) == tipos
+    assert all(body['formatos'] == ['FRENTE_REVERSO'] and set(body['tipos']) == tipos
                for ruta, body in cloud.rutas if ruta.endswith('/lease'))
     por_origen = {d['origen_documento_id']: d for d in _ficha(raiz)['documentos']}
     assert por_origen['dfm_2c']['formato'] == 'FRENTE_REVERSO'

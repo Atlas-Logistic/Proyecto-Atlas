@@ -49,7 +49,7 @@ from atlas_core.fichas_vehiculos import PENDIENTES, TIPOS_VEHICULO, _validar_veh
 
 logger = logging.getLogger(__name__)
 
-VERSION_EXTRACCION = 1
+VERSION_EXTRACCION = 2
 PROCEDENCIA = "AUTOMATICA_OCR"
 # Vencimiento operativo registrado sin intervención humana.
 ESTADO_VENCIMIENTO_AUTOMATICO = "VENCIMIENTO_OCR_AUTOMATICO"
@@ -281,9 +281,8 @@ def _leer(carpeta: Path, documento: dict, proveedor: Callable[[], object]) -> li
         raise ValueError("Adjunto fuera de la empresa")
     if hashlib.sha256(ruta.read_bytes()).hexdigest() != str(documento.get("sha256", "")).lower():
         raise ValueError("El original no coincide con su huella registrada")
-    if ruta.suffix.lower() == ".pdf":
-        return None  # el OCR existente lee imágenes
-    return list(proveedor().leer_texto(ruta))
+    from atlas_core.lectura_documento_vehiculo import leer_texto_documento
+    return leer_texto_documento(ruta, proveedor)
 
 
 def extraer_vencimientos_vehiculos(
@@ -335,12 +334,14 @@ def _extraer(raiz, objetivos, resumen: dict, *, comprobar, fabrica_ocr, empresa:
                          "otras_fechas": [], "observados": [], "referencias": []}
             else:
                 campo = extraer_vencimiento(documento["tipo"], lineas)
+            from atlas_core.lectura_documento_vehiculo import extraer_campos_adicionales
+            adicionales = extraer_campos_adicionales(lineas or [])
             extraccion = {
                 "version": VERSION_EXTRACCION, "fecha": _ahora(), "actor": actor, "procedencia": PROCEDENCIA,
                 "motor_ocr": type(creado[0]).__name__ if creado else "", "confirmado_por_humano": False,
                 "estado": "COMPLETA" if campo["estado"] == EXTRAIDO else "SIN_DATOS", "regla": documento["tipo"],
                 "archivos": [{"archivo": documento["archivo"], "sha256": documento["sha256"]}],
-                "campos": {"vencimiento": campo},
+                "campos": {"vencimiento": campo, **adicionales},
             }
             if _registrar(raiz, ruta, empresa, documento_id, extraccion, actor, comprobar):
                 resumen["extraidos"].append({
