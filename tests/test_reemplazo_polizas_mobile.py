@@ -40,11 +40,16 @@ def test_cloud_motor_expediente_reemplazo_explicito_o_independiente(raiz, cobert
     assert not _vehiculo(raiz, "CC5678")["documentos"][0].get("reemplazado_por")
     extraer(raiz, textos)
     docs = _vehiculo(raiz, "CC5678")["documentos"]
-    assert len(docs) == 2 and docs[0].get("reemplazado_por", "") == (docs[1]["documento_id"] if vinculo else "")
+    # Se reemplaza sólo con cobertura completa: por vínculo explícito, o sin él si el tipo leído
+    # coincide con el informado (único anterior, vencimiento posterior). Si no, ambos quedan.
+    reemplaza = cobertura == "RESPONSABILIDAD CIVIL Y ROBO" and (vinculo or tipo_nuevo == RC)
+    assert len(docs) == 2 and docs[0].get("reemplazado_por", "") == (docs[1]["documento_id"] if reemplaza else "")
+    assert bool(docs[1].get("posible_reemplazo")) == (not reemplaza)
+    assert bool(docs[1].get("vencimiento")) == reemplaza  # el pendiente no tiene vencimiento operativo
     activos = ver(raiz)["documentos"]
-    assert len(activos) == (1 if vinculo else 2)
+    assert len(activos) == (1 if reemplaza else 2)
     faltantes = {a["tipo"] for a in ver(raiz)["ausentes"]}
-    assert (ROBO in faltantes) == (vinculo and cobertura == "RESPONSABILIDAD CIVIL")
+    assert ROBO not in faltantes and RC not in faltantes  # ninguna cobertura se retira sin evidencia
     assert all((raiz / "fichas_digitales" / "MBT" / d["archivo"]).is_file() for d in docs)
     # Un reintento de Cloud no duplica ni reaplica.
     _sincronizar(raiz, CloudFalso([doc2]))

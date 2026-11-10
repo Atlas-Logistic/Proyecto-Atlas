@@ -244,7 +244,7 @@ def test_tipo_leido_con_vigente_del_mismo_tipo_queda_como_posible_reemplazo(raiz
     assert documento["posible_reemplazo"]["documentos"] == [rt_id]
     assert _ubicar(raiz, rt_id)[1] == antes_rt  # el vigente se conserva intacto
     ficha = next(v for v in leer_almacen(raiz, empresa="MBT")["vehiculos"] if v["patente"] == TRACTO)
-    assert [h["vigentes"] for h in ficha["historial"] if h["accion"] == "DOCUMENTO_VEHICULO_POSIBLE_REEMPLAZO"] == [[rt_id]]
+    assert [h["anteriores"] for h in ficha["historial"] if h["accion"] == "DOCUMENTO_VEHICULO_POSIBLE_REEMPLAZO"] == [[rt_id]]
     revision = leer_almacen(raiz, empresa="MBT")["revision"]
     extraer_vencimientos_vehiculos(raiz, comprobar=lambda: None, fabrica_ocr=lambda: OCRFalso({}))
     assert leer_almacen(raiz, empresa="MBT")["revision"] == revision  # sin escrituras repetidas

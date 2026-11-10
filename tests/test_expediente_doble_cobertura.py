@@ -61,16 +61,29 @@ def test_cobertura_por_evidencia_sin_duplicar_original(raiz, texto, cubiertas, a
     assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == JPEG
 
 
-def test_reemplazo_conserva_historial_y_ajusta_ambas_coberturas(raiz):
+def test_poliza_con_menos_coberturas_no_retira_la_anterior(raiz):
     primera = registrar(raiz, "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO")
     ambigua = registrar(raiz, "COBERTURA: RESPONSABILIDAD CIVIL Y ROBO EXCLUIDO")
     assert ambigua["pendiente_revision"]
     assert not faltantes(consulta(raiz))
-    nueva = registrar(raiz, "COBERTURA: RESPONSABILIDAD CIVIL")
+    nueva = registrar(raiz, "COBERTURA: RESPONSABILIDAD CIVIL", vencimiento="30/09/2028")
+    assert nueva["pendiente_revision"] and nueva["posible_reemplazo"]["motivo"] == "COBERTURAS_REDUCIDAS"
+    assert nueva["posible_reemplazo"]["documentos"] == [primera["documento_id"]]
     vista = consulta(raiz)
-    assert faltantes(vista) == {ROBO: True}  # el intento ambiguo permanece pendiente
+    assert not faltantes(vista)  # robo sigue acreditado por la primera
+    assert vista["historico"] == []
+    assert any(d["documento_id"] == primera["documento_id"] and d["tipos_cubiertos"] == [RC, ROBO]
+               for d in vista["documentos"])
+
+
+def test_renovacion_con_iguales_coberturas_reemplaza_y_conserva_historial(raiz):
+    primera = registrar(raiz, "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO")
+    nueva = registrar(raiz, "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO", vencimiento="30/09/2028")
+    assert not nueva["pendiente_revision"] and "posible_reemplazo" not in nueva
+    vista = consulta(raiz)
+    assert not faltantes(vista)
     assert [d["documento_id"] for d in vista["historico"]] == [primera["documento_id"]]
-    assert any(d["documento_id"] == nueva["documento_id"] and d["tipos_cubiertos"] == [RC] for d in vista["documentos"])
+    assert vista["historico"][0]["reemplazado_por"] == nueva["documento_id"]
     assert (raiz / "fichas_digitales" / "MBT" / primera["archivo"]).read_bytes() == JPEG
 
 

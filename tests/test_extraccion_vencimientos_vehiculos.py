@@ -287,10 +287,10 @@ def test_confirmacion_humana_entre_lectura_y_activacion_gana(raiz, monkeypatch):
     _solo_extraccion_previa(raiz, textos)
     activar = modulo._activar
 
-    def con_persona(raiz_, ruta, empresa, documento_id, actor, comprobar):
+    def con_persona(raiz_, ruta, empresa, documento_id, actor, comprobar, *resto):
         if documento_id == ids["SOAP"]:
             _editar_documento(raiz, documento_id, vencimiento="2027-01-01", estado_revision="CONFIRMADA")
-        return activar(raiz_, ruta, empresa, documento_id, actor, comprobar)
+        return activar(raiz_, ruta, empresa, documento_id, actor, comprobar, *resto)
 
     monkeypatch.setattr(modulo, "_activar", con_persona)
     resumen = _extraer(raiz, OCRFalso({}))

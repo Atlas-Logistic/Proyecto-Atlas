@@ -28,6 +28,7 @@ Fuera de alcance: interfaz, envío de notificaciones y Mobile.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -513,48 +514,78 @@ def registrar_documento_vehiculo_desktop(
                                       "fecha_vencimiento": fecha_vencimiento_informada}
         actual["fecha_emision"] = emision
         actual["fecha_vencimiento"] = vencimiento
-        reemplazados = []
-        indice = datos["documentos"].index(actual)
-        posterior_activo = any(d["expediente_id"] == actual["expediente_id"] and d["tipo"] == tipo_detectado
-                               and d["estado"] == ACTIVO and not d.get("pendiente_revision")
-                               for d in datos["documentos"][indice + 1:])
+        hoy = reloj().astimezone(timezone.utc).date()
+        _aplicar_transiciones(datos, hoy, reloj)  # las programadas que ya comenzaron se materializan primero
         coberturas = _coberturas_extraidas(lectura) if tipo_detectado in TIPOS_POLIZA else []
-        # Tipo leído distinto del informado con un vigente del mismo tipo: el anterior se conserva
-        # y el nuevo queda pendiente de resolver como posible reemplazo (nunca se activa solo).
-        vigentes = _vigentes_que_cubren(datos["documentos"], actual, tipo_detectado,
-                                        reloj().astimezone(timezone.utc).date()) if tipo_detectado and tipo_detectado != tipo else []
-        if vigentes:
-            actual["posible_reemplazo"] = {"documentos": vigentes, "motivo": "TIPO_LEIDO_CON_VIGENTE",
-                                           "fecha": _instante(reloj)}
-        elif tipo_detectado and p and vencimiento and not posterior_activo and (tipo_detectado not in TIPOS_POLIZA or coberturas):
+        decision = None
+        if tipo_detectado and p and vencimiento and (tipo_detectado not in TIPOS_POLIZA or coberturas):
+            from atlas_core.renovacion_documental import decidir_renovacion, inicio_acreditado
+            anteriores = [{"documento_id": d["documento_id"], "tipo": d["tipo"], "vencimiento": d["fecha_vencimiento"],
+                           "coberturas": _coberturas_extraidas(d.get("extraccion_automatica") or {}), "origenes": []}
+                          for d in datos["documentos"]
+                          if d is not actual and d["expediente_id"] == actual["expediente_id"] and d["estado"] == ACTIVO
+                          and (not d.get("pendiente_revision") or d.get("transicion_programada"))
+                          and _dias_para_vencer(d.get("fecha_vencimiento") or "", hoy) is not None]
+            # Misma regla que la activación Mobile; Desktop no ofrece vínculo explícito.
+            decision = decidir_renovacion({"tipo": tipo_detectado, "tipo_informado": tipo, "vencimiento": vencimiento,
+                                           "inicio": inicio_acreditado(campos.get("vencimiento")),
+                                           "coberturas": coberturas, "reemplaza": ""}, anteriores, hoy)
+        reemplazados = []
+        if decision and decision["accion"] in ("ACTIVAR", "REEMPLAZAR"):
             actual["pendiente_revision"] = False
             for previo in datos["documentos"]:
-                if previo is not actual and previo["expediente_id"] == actual["expediente_id"] \
-                        and previo["tipo"] == tipo_detectado and previo["estado"] == ACTIVO and not previo.get("pendiente_revision") \
-                        and (tipo_detectado not in TIPOS_POLIZA or tipo_detectado in coberturas):
+                if previo["documento_id"] in decision["documentos"]:
                     previo.update(estado=REEMPLAZADO, reemplazado_por=actual["documento_id"])
                     reemplazados.append(previo["documento_id"])
+        elif decision and decision["accion"] == "PROGRAMAR":
+            actual["transicion_programada"] = {"fecha": decision["fecha"], "reemplaza": decision["documentos"],
+                                               "motivo": decision["motivo"], "registrado": _instante(reloj)}
+        elif decision:  # PENDIENTE: se conservan ambos; nunca se activa solo
+            actual["posible_reemplazo"] = {"documentos": decision["documentos"], "motivo": decision["motivo"],
+                                           "registrado": _instante(reloj)}
         _evento(datos, "DOCUMENTO_EXTRACCION_OCR", "MOTOR_OCR", _instante(reloj),
                 expediente_id=actual["expediente_id"], documento_id=actual["documento_id"],
                 reemplaza=reemplazados, pendiente_revision=actual["pendiente_revision"],
-                posible_reemplazo=vigentes)
+                renovacion=decision["accion"] if decision else "", motivo=decision["motivo"] if decision else "",
+                anteriores=decision["documentos"] if decision else [])
         return dict(actual)
 
 
-def _vigentes_que_cubren(documentos: list[dict], actual: dict, tipo: str, hoy: date) -> list[str]:
-    """Documentos activos, no pendientes y no vencidos del mismo expediente que acreditan `tipo`
-    (una póliza también por su cobertura leída)."""
-    vigentes = []
-    for d in documentos:
-        if d is actual or d["expediente_id"] != actual["expediente_id"] or d["estado"] != ACTIVO \
-                or d.get("pendiente_revision"):
+def _aplicar_transiciones(datos: dict, hoy: date, reloj: _Reloj | None = None) -> None:
+    """Materializa los reemplazos programados cuya vigencia ya comenzó. Con `reloj` deja
+    constancia en el historial (escritura); sin él sólo ajusta una copia para consultar."""
+    activos = {d["documento_id"]: d for d in datos["documentos"] if d["estado"] == ACTIVO}
+    for nuevo in list(activos.values()):
+        programada = nuevo.get("transicion_programada") or {}
+        fecha = _fecha_iso(programada.get("fecha"))
+        if not fecha or fecha > hoy or not nuevo.get("pendiente_revision") or nuevo.get("posible_reemplazo"):
             continue
-        cubre = d["tipo"] == tipo or (tipo in TIPOS_POLIZA and d["tipo"] in TIPOS_POLIZA
-                                      and tipo in _coberturas_extraidas(d.get("extraccion_automatica") or {}))
-        dias = _dias_para_vencer(d.get("fecha_vencimiento") or "", hoy)
-        if cubre and dias is not None and dias >= 0:
-            vigentes.append(d["documento_id"])
-    return vigentes
+        retirados = []
+        for documento_id in programada.get("reemplaza") or []:
+            previo = activos.get(documento_id)
+            if previo is not None and previo["estado"] == ACTIVO:
+                previo.update(estado=REEMPLAZADO, reemplazado_por=nuevo["documento_id"])
+                retirados.append(documento_id)
+        nuevo["pendiente_revision"] = False
+        nuevo["transicion_aplicada"] = {**programada, "aplicada": hoy.isoformat()}
+        nuevo.pop("transicion_programada")
+        if reloj is not None:
+            _evento(datos, "DOCUMENTO_REEMPLAZO_PROGRAMADO_APLICADO", "MOTOR", _instante(reloj),
+                    expediente_id=nuevo["expediente_id"], documento_id=nuevo["documento_id"], reemplaza=retirados)
+
+
+def _fecha_iso(valor) -> date | None:
+    try:
+        return date.fromisoformat(str(valor or ""))
+    except ValueError:
+        return None
+
+
+def _leer_a_fecha(raiz: str | Path, empresa: str, hoy: date) -> dict:
+    """Expediente tal como rige `hoy` (con reemplazos programados ya cumplidos). Sólo lee."""
+    datos = copy.deepcopy(leer_expediente(raiz, empresa=empresa))
+    _aplicar_transiciones(datos, hoy)
+    return datos
 
 
 def _documento_activo(datos: dict, documento_id: object) -> dict:
@@ -644,7 +675,7 @@ def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente:
                      identificacion_patente=doc.get("identificacion_patente"), asociacion=doc.get("asociacion"),
                      vencimiento_registro=doc.get("vencimiento_registro"), patente_ficha=patente_ficha,
                      tipo_informado=doc.get("tipo_informado"))
-    for clave in ("tipo_informado", "posible_reemplazo"):
+    for clave in ("tipo_informado", "posible_reemplazo", "transicion_programada"):
         if doc.get(clave):
             vista[clave] = doc[clave]
     return vista
@@ -719,7 +750,7 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
     `hoy`. Incluye los de las fichas que el expediente no registró. Nunca
     escribe. Una ficha ilegible es un error, no una ausencia de documentos."""
     hoy = hoy or date.today()
-    datos = leer_expediente(raiz, empresa=empresa)
+    datos = _leer_a_fecha(raiz, empresa, hoy)
     referencias = {e["expediente_id"]: e["referencias"] for e in datos["expedientes"]}
     propios = [_vista_coberturas({**d, "fuente": "EXPEDIENTE", "pendiente_revision": d.get("pendiente_revision", False),
                 "confirmado_por_humano": d.get("confirmado_por_humano", True),
@@ -769,7 +800,8 @@ def consultar_expediente(raiz: str | Path, *, empresa: str, entidad: str, refere
     trazabilidad. Lectura pura: si aún no existe, informa `existe: False`."""
     entidad = str(entidad).upper()
     clave, equivalentes, _ = _identidad(raiz, empresa, entidad, referencia, carpeta_catalogos)
-    datos = leer_expediente(raiz, empresa=empresa)
+    hoy = hoy or date.today()
+    datos = _leer_a_fecha(raiz, empresa, hoy)
     expediente = _buscar_expediente(datos, entidad, equivalentes)
     conocidas = set(equivalentes) | set(expediente["referencias"] if expediente else ())
     documentos = [d for d in estado_expediente(raiz, empresa=empresa, hoy=hoy, dias_por_vencer=dias_por_vencer,
