@@ -53,6 +53,7 @@ TIPOS_BASE = {
     "POLIZA_ROBO": {"entidad": VEHICULO, "nombre": "Póliza de seguro contra robos", "obligatorio": True},
     "SEGURO_CARGA": {"entidad": VEHICULO, "nombre": "Seguro de carga", "obligatorio": False},
 }
+TIPOS_POLIZA = frozenset({"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"})
 DIAS_POR_VENCER = 30
 VENCIDO, POR_VENCER, VIGENTE, SIN_VENCIMIENTO = "VENCIDO", "POR_VENCER", "VIGENTE", "SIN_VENCIMIENTO"
 PENDIENTE_REVISION, FECHA_INVALIDA = "PENDIENTE_REVISION", "FECHA_INVALIDA"
@@ -355,6 +356,15 @@ def _buscar_documento(datos: dict, documento_id: object) -> dict:
     raise ErrorExpedienteDigital("el documento no existe en esta empresa")
 
 
+def _coberturas_extraidas(extraccion: dict) -> list[str]:
+    campo = (extraccion.get("campos") or {}).get("coberturas") or {}
+    valores = campo.get("valor")
+    if campo.get("estado") != "EXTRAIDO" or campo.get("motivo") or not campo.get("evidencia") \
+            or not isinstance(valores, list) or not valores or any(not isinstance(v, str) or v not in TIPOS_POLIZA for v in valores):
+        return []
+    return sorted(set(valores))
+
+
 # ------------------------------------------------------------------ escritura de documentos
 
 
@@ -502,11 +512,13 @@ def registrar_documento_vehiculo_desktop(
         posterior_activo = any(d["expediente_id"] == actual["expediente_id"] and d["tipo"] == tipo
                                and d["estado"] == ACTIVO and not d.get("pendiente_revision")
                                for d in datos["documentos"][indice + 1:])
-        if p and vencimiento and not posterior_activo:
+        coberturas = _coberturas_extraidas(lectura) if tipo in TIPOS_POLIZA else []
+        if p and vencimiento and not posterior_activo and (tipo not in TIPOS_POLIZA or coberturas):
             actual["pendiente_revision"] = False
             for previo in datos["documentos"]:
                 if previo is not actual and previo["expediente_id"] == actual["expediente_id"] \
-                        and previo["tipo"] == tipo and previo["estado"] == ACTIVO and not previo.get("pendiente_revision"):
+                        and previo["tipo"] == tipo and previo["estado"] == ACTIVO and not previo.get("pendiente_revision") \
+                        and (tipo not in TIPOS_POLIZA or tipo in coberturas):
                     previo.update(estado=REEMPLAZADO, reemplazado_por=actual["documento_id"])
                     reemplazados.append(previo["documento_id"])
         _evento(datos, "DOCUMENTO_EXTRACCION_OCR", "MOTOR_OCR", _instante(reloj),
@@ -588,15 +600,51 @@ def _indice_patentes(catalogos: Path) -> dict[str, str]:
     return {p: v.vehiculo_id for v in vehiculos for p in (v.patente_canonica, *v.aliases)}
 
 
-def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente: str) -> dict:
+def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente: str, patente_ficha: str = "") -> dict:
     vencimiento = str(doc.get("vencimiento") or "")
-    return {
+    vista = {
         "documento_id": doc["documento_id"], "entidad": entidad, "referencia_catalogo": referencias[-1],
         "referencias": referencias, "tipo": doc["tipo"], "fecha_emision": "", "fecha_vencimiento": vencimiento,
         "estado": ACTIVO, "archivo": str(doc.get("archivo", "")), "sha256": str(doc.get("sha256", "")),
         "fuente": fuente, "pendiente_revision": not vencimiento,
         "confirmado_por_humano": bool(vencimiento) and doc.get("estado_revision") != _ESTADO_OCR_AUTOMATICO,
     }
+    if doc.get("tipo") in TIPOS_POLIZA:
+        vista.update(extraccion_automatica=doc.get("extraccion_automatica"),
+                     identificacion_patente=doc.get("identificacion_patente"), asociacion=doc.get("asociacion"),
+                     vencimiento_registro=doc.get("vencimiento_registro"), patente_ficha=patente_ficha)
+    return vista
+
+
+def _vista_coberturas(documento: dict) -> dict:
+    """Una sola entrada documental, con requisitos derivados del OCR de su original."""
+    if documento.get("tipo") not in TIPOS_POLIZA:
+        return documento
+    extraccion = documento.get("extraccion_automatica") or {}
+    campos = extraccion.get("campos") or {}
+    huella = documento.get("sha256")
+    if documento.get("fuente") == "EXPEDIENTE":
+        patente = campos.get("patente") or {}
+        vinculado = bool(huella and extraccion.get("sha256") == huella and patente.get("estado") == "EXTRAIDO"
+                         and patente.get("valor") and patente.get("evidencia") and not patente.get("motivo"))
+    else:
+        ident = documento.get("identificacion_patente") or {}
+        asociacion = documento.get("asociacion") or {}
+        registro = documento.get("vencimiento_registro") or {}
+        archivos = extraccion.get("archivos") or []
+        vinculado = bool(huella and ident.get("estado") == "ASOCIADA" and ident.get("evidencia")
+                         and asociacion.get("metodo") == "PATENTE_DOCUMENTAL"
+                         and ident.get("patente") == asociacion.get("patente") == documento.get("patente_ficha")
+                         and registro.get("procedencia") == "OCR_AUTOMATICO" and registro.get("sha256") == huella
+                         and len(archivos) == 1 and archivos[0].get("sha256") == huella
+                         and archivos[0].get("archivo") == documento.get("archivo"))
+    vencimiento = campos.get("vencimiento") or {}
+    confiable = (vinculado and extraccion.get("procedencia") == "AUTOMATICA_OCR"
+                 and vencimiento.get("estado") == "EXTRAIDO" and vencimiento.get("valor") == documento.get("fecha_vencimiento")
+                 and vencimiento.get("evidencia") and not vencimiento.get("motivo"))
+    coberturas = _coberturas_extraidas(extraccion) if confiable else []
+    return {**documento, "tipos_cubiertos": coberturas,
+            "pendiente_revision": bool(documento.get("pendiente_revision") or not coberturas)}
 
 
 def _documentos_de_fichas(raiz: str | Path, empresa: str, catalogos: Path) -> list[dict]:
@@ -612,10 +660,14 @@ def _documentos_de_fichas(raiz: str | Path, empresa: str, catalogos: Path) -> li
     patentes = _indice_patentes(catalogos) if fichas.get("vehiculos") else {}
     for ficha in fichas.get("vehiculos", []):
         patente = str(ficha.get("patente", ""))
-        documentos += [_documento_de_ficha(doc, VEHICULO, [patentes.get(patente, patente)], "FICHA_VEHICULO")
+        documentos += [_documento_de_ficha(doc, VEHICULO, [patentes.get(patente, patente)], "FICHA_VEHICULO", patente)
                        for doc in ficha.get("documentos", []) if doc.get("tipo") and not doc.get("reemplazado_por")]
+    documentos = [_vista_coberturas(d) for d in documentos]
     resultado, mejores = [], {}
     for doc in documentos:
+        if doc["tipo"] in TIPOS_POLIZA:
+            resultado.append(doc)
+            continue
         if doc["pendiente_revision"] or _dias_para_vencer(doc["fecha_vencimiento"], date.min) is None:
             resultado.append(doc)
             continue
@@ -633,20 +685,21 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
     hoy = hoy or date.today()
     datos = leer_expediente(raiz, empresa=empresa)
     referencias = {e["expediente_id"]: e["referencias"] for e in datos["expedientes"]}
-    propios = [{**d, "fuente": "EXPEDIENTE", "pendiente_revision": d.get("pendiente_revision", False),
+    propios = [_vista_coberturas({**d, "fuente": "EXPEDIENTE", "pendiente_revision": d.get("pendiente_revision", False),
                 "confirmado_por_humano": d.get("confirmado_por_humano", True),
-                "referencias": referencias[d["expediente_id"]]}
+                "referencias": referencias[d["expediente_id"]]})
                for d in datos["documentos"] if d["estado"] == ACTIVO]
     claves = lambda d: [(d["entidad"], r, d["tipo"]) for r in d["referencias"]]  # noqa: E731
-    registrados = {k: d["fecha_vencimiento"] for d in propios if not d["pendiente_revision"] for k in claves(d)}
+    registrados = {k: d["fecha_vencimiento"] for d in propios
+                   if not d["pendiente_revision"] and d["tipo"] not in TIPOS_POLIZA for k in claves(d)}
     fichas = _documentos_de_fichas(raiz, empresa, _carpeta(raiz, carpeta_catalogos))
     # Una renovación llegada después por la ficha no queda oculta tras el registro antiguo.
-    mas_recientes = [d for d in fichas if not d["pendiente_revision"]
+    mas_recientes = [d for d in fichas if d["tipo"] not in TIPOS_POLIZA and not d["pendiente_revision"]
                      and _dias_para_vencer(d["fecha_vencimiento"], date.min) is not None
                      and any(k in registrados and d["fecha_vencimiento"] > registrados[k] for k in claves(d))]
     superados = {k for d in mas_recientes for k in claves(d)}
-    propios = [d for d in propios if d["pendiente_revision"] or not superados & set(claves(d))]
-    externos = [d for d in fichas if d in mas_recientes or not any(k in registrados for k in claves(d))]
+    propios = [d for d in propios if d["tipo"] in TIPOS_POLIZA or d["pendiente_revision"] or not superados & set(claves(d))]
+    externos = [d for d in fichas if d["tipo"] in TIPOS_POLIZA or d in mas_recientes or not any(k in registrados for k in claves(d))]
     vista = []
     for d in propios + externos:
         estado = PENDIENTE_REVISION if d["pendiente_revision"] else estado_vencimiento(
@@ -656,8 +709,17 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
 
 
 def _ausentes(tipos: dict, entidad: str, documentos: list[dict]) -> list[dict]:
-    presentes = {d["tipo"] for d in documentos if d["estado_vencimiento"] != PENDIENTE_REVISION}
-    pendientes = {d["tipo"] for d in documentos if d["estado_vencimiento"] == PENDIENTE_REVISION}
+    presentes, pendientes = set(), set()
+    for d in documentos:
+        if d["tipo"] in TIPOS_POLIZA:
+            if d["estado_vencimiento"] == PENDIENTE_REVISION:
+                pendientes.update(TIPOS_POLIZA)
+            elif d["estado_vencimiento"] not in (VENCIDO, FECHA_INVALIDA, SIN_VENCIMIENTO):
+                presentes.update(d.get("tipos_cubiertos", []))
+        elif d["estado_vencimiento"] == PENDIENTE_REVISION:
+            pendientes.add(d["tipo"])
+        else:
+            presentes.add(d["tipo"])
     return [{"tipo": t, "nombre": c["nombre"], "pendiente_revision": t in pendientes} for t, c in tipos.items()
             if c["entidad"] == entidad and c["obligatorio"] and c["activo"] and t not in presentes]
 
@@ -744,7 +806,7 @@ def preparar_alertas_vencimiento(raiz: str | Path, *, empresa: str, hoy: date | 
         "empresa": empresa, "nivel": d["estado_vencimiento"], "documento_id": d["documento_id"],
         "entidad": d["entidad"], "referencia_catalogo": d["referencia_catalogo"], "tipo": d["tipo"],
         "fecha_vencimiento": d["fecha_vencimiento"], "dias_para_vencer": d["dias_para_vencer"],
-        "fuente": d["fuente"],
+        "fuente": d["fuente"], **({"tipos_cubiertos": d["tipos_cubiertos"]} if "tipos_cubiertos" in d else {}),
     } for d in documentos_por_atender(raiz, empresa=empresa, hoy=hoy, dias_por_vencer=dias_por_vencer,
                                       carpeta_catalogos=carpeta_catalogos)]
 

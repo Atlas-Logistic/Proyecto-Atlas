@@ -76,8 +76,9 @@ def test_reemplazo_conserva_historial(entorno):
 def test_nuevos_tipos_se_registran_y_calculan_vigencia(entorno, tipo):
     documento = _reg(entorno, tipo=tipo, fecha_vencimiento="2026-11-27")
     vista = estado_expediente(entorno["raiz"], empresa="MBT", hoy=HOY)
+    esperado = "POR_VENCER" if tipo == "CERTIFICADO_EMISION_GASES" else "PENDIENTE_REVISION"
     assert [(d["documento_id"], d["estado_vencimiento"]) for d in vista] == [
-        (documento["documento_id"], "POR_VENCER")]
+        (documento["documento_id"], esperado)]
 
 
 def test_estado_de_vencimiento_es_derivado(entorno):
