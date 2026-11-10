@@ -362,7 +362,7 @@ def registrar_documento(
     raiz: str | Path, *, empresa: str, entidad: str, referencia: str, tipo: str, actor: str,
     fecha_vencimiento: str = "", fecha_emision: str = "", archivo: str = "", sha256: str = "",
     contenido: bytes | None = None, mime_type: str = "",
-    carpeta_catalogos: str | Path | None = None, reloj: _Reloj = _ahora_utc,
+    carpeta_catalogos: str | Path | None = None, reloj: _Reloj = _ahora_utc, pendiente_ocr: bool = False,
 ) -> dict:
     """Agrega un documento activo al expediente (creándolo si hace falta); el
     activo anterior del mismo tipo queda REEMPLAZADO. `contenido` custodia el
@@ -380,7 +380,7 @@ def registrar_documento(
             if not definicion or definicion["entidad"] != entidad or not definicion["activo"]:
                 raise ErrorExpedienteDigital(f"tipo {tipo!r} no admitido para {entidad!r}")
             clave, equivalentes, ficha_id = _identidad(raiz, empresa, entidad, referencia, carpeta_catalogos)
-            emision, vencimiento = _fechas(fecha_emision, fecha_vencimiento, definicion["requiere_vencimiento"],
+            emision, vencimiento = _fechas(fecha_emision, fecha_vencimiento, definicion["requiere_vencimiento"] and not pendiente_ocr,
                                            reloj().astimezone(timezone.utc).date())
             referencia_archivo = _archivo(archivo)
             original = None
@@ -403,10 +403,13 @@ def registrar_documento(
                 "estado": ACTIVO, "archivo": referencia_archivo, "sha256": sha256, "registrado_en": instante,
                 "actor": actor, "reemplazado_por": "",
             }
+            if pendiente_ocr:
+                documento["pendiente_revision"] = True
+                documento["confirmado_por_humano"] = False
             reemplazados = []
             for previo in datos["documentos"]:
                 if previo["expediente_id"] == expediente["expediente_id"] and previo["tipo"] == tipo \
-                        and previo["estado"] == ACTIVO:
+                        and previo["estado"] == ACTIVO and not pendiente_ocr:
                     previo.update(estado=REEMPLAZADO, reemplazado_por=documento_id)
                     reemplazados.append(previo["documento_id"])
             datos["documentos"].append(documento)
@@ -417,6 +420,99 @@ def registrar_documento(
             escrito.unlink(missing_ok=True)
         raise
     return documento
+
+
+def registrar_documento_vehiculo_desktop(
+    raiz: str | Path, *, empresa: str, referencia: str, tipo: str, contenido: bytes, mime_type: str,
+    fabrica_ocr, fecha_emision_informada: str = "", fecha_vencimiento_informada: str = "",
+    reloj: _Reloj = _ahora_utc,
+) -> dict:
+    """Custodia primero, lee el mismo original y publica sólo una asociación inequívoca."""
+    from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
+    from atlas_core.extraccion_vencimientos_vehiculos import extraer_vencimiento
+    from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
+    from atlas_core.identificacion_patentes import identificar_patente
+    from atlas_core.lectura_documento_vehiculo import leer_texto_documento, extraer_campos_adicionales
+
+    if tipo not in TIPOS_VEHICULO:
+        raise ErrorExpedienteDigital("tipo vehicular sin procesamiento OCR")
+    documento = registrar_documento(raiz, empresa=empresa, entidad=VEHICULO, referencia=referencia, tipo=tipo,
+                                    actor="DESKTOP", contenido=contenido, mime_type=mime_type,
+                                    pendiente_ocr=True, reloj=reloj)
+    ruta = ruta_almacen_expediente(raiz, empresa).parent / documento["archivo"]
+    proveedor = None
+    lectura = {"estado": "PENDIENTE_REVISION", "motivo": "ERROR_OCR", "campos": {
+        nombre: {"valor": None, "estado": PENDIENTE_REVISION, "motivo": "ERROR_OCR", "evidencia": []}
+        for nombre in ("patente", "emision", "vencimiento", "aseguradora", "numero_poliza", "coberturas")}}
+    try:
+        if hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
+            raise ValueError("Original alterado")
+        proveedor = fabrica_ocr()
+        lineas = leer_texto_documento(ruta, lambda: proveedor,
+                                     directorio_temporal=ruta_almacen_expediente(raiz, empresa).parent)
+        if lineas is None:
+            lectura["motivo"] = "PDF_ILEGIBLE"
+            for campo in lectura["campos"].values():
+                campo["motivo"] = "PDF_ILEGIBLE"
+        else:
+            catalogo = cargar_catalogo_vehiculos(Path(raiz) / "catalogos_privados" / "vehiculos.json")
+            patente = identificar_patente(lineas, catalogo)
+            campos = {"vencimiento": extraer_vencimiento(tipo, lineas), **extraer_campos_adicionales(lineas)}
+            campos["patente"] = {"valor": patente["patente"], "estado": "EXTRAIDO" if patente["patente"] else PENDIENTE_REVISION,
+                                 "motivo": patente["motivo"], "evidencia": patente["evidencia"]}
+            lectura = {"estado": "COMPLETA", "motivo": "", "campos": campos}
+    except Exception:  # conserva el original y deja constancia para un reintento posterior
+        pass
+    finally:
+        cerrar = getattr(proveedor, "cerrar", None)
+        if callable(cerrar):
+            try:
+                cerrar()
+            except Exception:
+                pass
+
+    with _mutacion(raiz, empresa) as datos:
+        actual = _buscar_documento(datos, documento["documento_id"])
+        if actual["estado"] != ACTIVO or actual.get("sha256") != documento["sha256"]:
+            raise ErrorExpedienteDigital("El documento cambió durante la lectura")
+        if not ruta.resolve().is_relative_to(ruta_almacen_expediente(raiz, empresa).parent.resolve()) or \
+                hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
+            raise ErrorExpedienteDigital("El original cambió durante la lectura")
+        campos = lectura["campos"]
+        p = (campos.get("patente") or {}).get("valor")
+        if p and _referencia_vehiculo(_carpeta(raiz, None), p) != actual["referencia_catalogo"]:
+            campos["patente"].update(valor=None, observado=p, estado=PENDIENTE_REVISION, motivo="PATENTE_DISTINTA")
+            p = None
+        vencimiento = (campos.get("vencimiento") or {}).get("valor") or ""
+        emision = (campos.get("emision") or {}).get("valor") or ""
+        try:
+            if emision:
+                _fechas(emision, vencimiento, False, reloj().astimezone(timezone.utc).date())
+        except ErrorExpedienteDigital:
+            campos["emision"].update(valor=None, estado=PENDIENTE_REVISION, motivo="FECHA_INCONSISTENTE")
+            emision = ""
+        actual["extraccion_automatica"] = {**lectura, "procedencia": "AUTOMATICA_OCR",
+                                          "sha256": documento["sha256"], "fecha": _instante(reloj)}
+        actual["datos_informados"] = {"fecha_emision": fecha_emision_informada,
+                                      "fecha_vencimiento": fecha_vencimiento_informada}
+        actual["fecha_emision"] = emision
+        actual["fecha_vencimiento"] = vencimiento
+        reemplazados = []
+        indice = datos["documentos"].index(actual)
+        posterior_activo = any(d["expediente_id"] == actual["expediente_id"] and d["tipo"] == tipo
+                               and d["estado"] == ACTIVO and not d.get("pendiente_revision")
+                               for d in datos["documentos"][indice + 1:])
+        if p and vencimiento and not posterior_activo:
+            actual["pendiente_revision"] = False
+            for previo in datos["documentos"]:
+                if previo is not actual and previo["expediente_id"] == actual["expediente_id"] \
+                        and previo["tipo"] == tipo and previo["estado"] == ACTIVO and not previo.get("pendiente_revision"):
+                    previo.update(estado=REEMPLAZADO, reemplazado_por=actual["documento_id"])
+                    reemplazados.append(previo["documento_id"])
+        _evento(datos, "DOCUMENTO_EXTRACCION_OCR", "MOTOR_OCR", _instante(reloj),
+                expediente_id=actual["expediente_id"], documento_id=actual["documento_id"],
+                reemplaza=reemplazados, pendiente_revision=actual["pendiente_revision"])
+        return dict(actual)
 
 
 def _documento_activo(datos: dict, documento_id: object) -> dict:
@@ -537,18 +633,19 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
     hoy = hoy or date.today()
     datos = leer_expediente(raiz, empresa=empresa)
     referencias = {e["expediente_id"]: e["referencias"] for e in datos["expedientes"]}
-    propios = [{**d, "fuente": "EXPEDIENTE", "pendiente_revision": False, "confirmado_por_humano": True,
+    propios = [{**d, "fuente": "EXPEDIENTE", "pendiente_revision": d.get("pendiente_revision", False),
+                "confirmado_por_humano": d.get("confirmado_por_humano", True),
                 "referencias": referencias[d["expediente_id"]]}
                for d in datos["documentos"] if d["estado"] == ACTIVO]
     claves = lambda d: [(d["entidad"], r, d["tipo"]) for r in d["referencias"]]  # noqa: E731
-    registrados = {k: d["fecha_vencimiento"] for d in propios for k in claves(d)}
+    registrados = {k: d["fecha_vencimiento"] for d in propios if not d["pendiente_revision"] for k in claves(d)}
     fichas = _documentos_de_fichas(raiz, empresa, _carpeta(raiz, carpeta_catalogos))
     # Una renovación llegada después por la ficha no queda oculta tras el registro antiguo.
     mas_recientes = [d for d in fichas if not d["pendiente_revision"]
                      and _dias_para_vencer(d["fecha_vencimiento"], date.min) is not None
                      and any(k in registrados and d["fecha_vencimiento"] > registrados[k] for k in claves(d))]
     superados = {k for d in mas_recientes for k in claves(d)}
-    propios = [d for d in propios if not superados & set(claves(d))]
+    propios = [d for d in propios if d["pendiente_revision"] or not superados & set(claves(d))]
     externos = [d for d in fichas if d in mas_recientes or not any(k in registrados for k in claves(d))]
     vista = []
     for d in propios + externos:

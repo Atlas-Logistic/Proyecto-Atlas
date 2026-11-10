@@ -39,7 +39,7 @@ def test_lectura_mobile_reutiliza_ocr_y_conserva_original(raiz, tipo, formato):
     original = raiz / "fichas_digitales" / "MBT" / documento["archivo"]
     assert hashlib.sha256(original.read_bytes()).hexdigest() == documento["sha256"]
     assert ocr.rutas == ([".jpg", ".jpg"] if formato == "imagen" else [".png", ".png"])
-    assert not list(original.parent.glob(".ocr-vehiculo-*"))
+    assert not list(original.parent.glob(".ocr-*"))
 
 
 def test_valores_ambiguos_no_se_inventan():
@@ -72,4 +72,4 @@ def test_pdf_multipagina_y_fallo_no_produce_lectura_parcial(tmp_path):
     falla = Falla()
     with pytest.raises(RuntimeError, match="fallo OCR"):
         leer_texto_documento(ruta, lambda: falla)
-    assert not list(tmp_path.glob(".ocr-vehiculo-*"))
+    assert not list(tmp_path.glob(".ocr-*"))

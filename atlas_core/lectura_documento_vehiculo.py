@@ -5,13 +5,13 @@ import re
 import unicodedata
 
 
-def leer_texto_documento(ruta: Path, proveedor):
+def leer_texto_documento(ruta: Path, proveedor, *, directorio_temporal: Path | None = None):
     """Lee todas las páginas; un PDF incompleto nunca produce una lectura parcial."""
     ruta = Path(ruta)
     if ruta.suffix.lower() != ".pdf":
         return list(proveedor().leer_texto(ruta))
     from atlas_core.ingesta_pdf import rasterizar_pdf
-    with TemporaryDirectory(prefix=".ocr-vehiculo-", dir=ruta.parent) as temporal:
+    with TemporaryDirectory(prefix=".ocr-", dir=directorio_temporal or ruta.parent) as temporal:
         resultado = rasterizar_pdf(ruta, temporal)
         if resultado.errores or not resultado.procesable or len(resultado.paginas) != resultado.paginas_declaradas:
             return None
