@@ -268,7 +268,9 @@ def _por_extraer(documento: dict) -> bool:
     previa = documento.get("extraccion_automatica")
     if previa is None:
         return True
-    return previa.get("estado") != "COMPLETA" and int(previa.get("version") or 0) < VERSION_EXTRACCION
+    # Una lectura anterior sin tipo documental se apoyó sólo en el tipo seleccionado: se relee una vez.
+    sin_tipo = "tipo_documental" not in (previa.get("campos") or {})
+    return (previa.get("estado") != "COMPLETA" or sin_tipo) and int(previa.get("version") or 0) < VERSION_EXTRACCION
 
 
 def _ubicaciones(datos: dict) -> list[tuple[str | None, dict]]:
@@ -330,8 +332,10 @@ def _extraer(raiz, objetivos, resumen: dict, *, comprobar, fabrica_ocr, empresa:
                 logger.warning("Documento de vehículo %s sin extracción de vencimiento: %s", documento_id, error)
                 resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
                 continue
-            from atlas_core.lectura_documento_vehiculo import extraer_campos_adicionales, identificar_tipo_documental
+            from atlas_core.lectura_documento_vehiculo import (TIPO_PENDIENTE, extraer_campos_adicionales,
+                                                               identificar_tipo_documental)
             tipo = identificar_tipo_documental(lineas or [])
+            tipo_operativo = tipo["valor"] or TIPO_PENDIENTE
             if lineas is None or not tipo["valor"]:
                 campo = {"valor": None, "estado": PENDIENTE_REVISION, "motivo": "FORMATO_SIN_OCR", "evidencia": [],
                          "otras_fechas": [], "observados": [], "referencias": []}
@@ -343,13 +347,13 @@ def _extraer(raiz, objetivos, resumen: dict, *, comprobar, fabrica_ocr, empresa:
             extraccion = {
                 "version": VERSION_EXTRACCION, "fecha": _ahora(), "actor": actor, "procedencia": PROCEDENCIA,
                 "motor_ocr": type(creado[0]).__name__ if creado else "", "confirmado_por_humano": False,
-                "estado": "COMPLETA" if campo["estado"] == EXTRAIDO else "SIN_DATOS", "regla": documento["tipo"],
+                "estado": "COMPLETA" if campo["estado"] == EXTRAIDO else "SIN_DATOS", "regla": tipo_operativo,
                 "archivos": [{"archivo": documento["archivo"], "sha256": documento["sha256"]}],
                 "campos": {"tipo_documental": tipo, "vencimiento": campo, **adicionales},
             }
             if _registrar(raiz, ruta, empresa, documento_id, extraccion, actor, comprobar):
                 resumen["extraidos"].append({
-                    "documento_id": documento_id, "tipo": documento["tipo"], "patente": patente,
+                    "documento_id": documento_id, "tipo": tipo_operativo, "patente": patente,
                     "estado": campo["estado"], "vencimiento": campo["valor"], "motivo": campo["motivo"],
                 })
     finally:
@@ -415,10 +419,10 @@ def _activable(patente: str | None, documento: dict) -> bool:
             or _confirmado_por_persona(documento):
         return False
     extraccion = documento.get("extraccion_automatica") or {}
-    if documento.get("tipo_documental_requiere_ocr"):
-        tipo = (extraccion.get("campos") or {}).get("tipo_documental") or {}
-        if tipo.get("estado") != EXTRAIDO or tipo.get("valor") != documento.get("tipo") or not tipo.get("evidencia"):
-            return False
+    # El tipo operativo exige evidencia OCR del mismo original; el tipo seleccionado nunca basta.
+    tipo = (extraccion.get("campos") or {}).get("tipo_documental") or {}
+    if tipo.get("estado") != EXTRAIDO or tipo.get("valor") != documento.get("tipo") or not tipo.get("evidencia"):
+        return False
     campo = (extraccion.get("campos") or {}).get("vencimiento") or {}
     archivos = extraccion.get("archivos") or []
     try:

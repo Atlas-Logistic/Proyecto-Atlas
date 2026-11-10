@@ -725,6 +725,9 @@ def _ausentes(tipos: dict, entidad: str, documentos: list[dict]) -> list[dict]:
                 pendientes.update(TIPOS_POLIZA)
             elif d["estado_vencimiento"] not in (VENCIDO, FECHA_INVALIDA, SIN_VENCIMIENTO):
                 presentes.update(d.get("tipos_cubiertos", []))
+        elif d["tipo"] == "DOCUMENTO_VEHICULO_PENDIENTE":
+            # Sin evidencia de tipo no acredita nada: el requisito informado queda recibido y pendiente.
+            pendientes.add(d.get("tipo_informado") or d["tipo"])
         elif d["estado_vencimiento"] == PENDIENTE_REVISION:
             pendientes.add(d["tipo"])
         else:

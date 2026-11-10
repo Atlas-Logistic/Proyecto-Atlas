@@ -40,6 +40,7 @@ from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, es_confusio
 from atlas_core.extractor import patente_tiene_formato_chileno_estandar
 from atlas_core.fichas_choferes import EMPRESA_ACTUAL, VERSION, _ahora, _validar_v2, leer_almacen, ruta_almacen
 from atlas_core.fichas_vehiculos import ESTADO_PENDIENTE_CLASIFICACION, PENDIENTES, TIPOS_VEHICULO, _validar_vehiculos
+from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,8 @@ def _es_humana(documento: dict) -> bool:
 
 def _por_identificar(documento: dict) -> bool:
     previa = documento.get("identificacion_patente")
-    return (documento.get("tipo") in TIPOS_VEHICULO and documento.get("origen") == "MOBILE"
+    # Un documento cuyo tipo quedó pendiente por OCR sigue siendo vehicular.
+    return (documento.get("tipo") in (*TIPOS_VEHICULO, TIPO_PENDIENTE) and documento.get("origen") == "MOBILE"
             and not documento.get("reemplazado_por") and not _es_humana(documento)
             and (previa is None or (int(previa.get("version") or 0) < VERSION_IDENTIFICACION
                  and previa.get("motivo") == "FORMATO_SIN_OCR" and str(documento.get("archivo", "")).lower().endswith(".pdf"))))

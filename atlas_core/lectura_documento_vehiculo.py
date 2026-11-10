@@ -10,7 +10,7 @@ TIPO_PENDIENTE = "DOCUMENTO_VEHICULO_PENDIENTE"
 def identificar_tipo_documental(lineas):
     """Clasifica por títulos explícitos; títulos incompatibles obligan a abstenerse."""
     reglas = {
-        "SOAP": r"\bSOAP\b|\bSEGURO\s+OBLIGATORIO\s+DE?\s*ACCIDENTES\s+PERSONALES\b",
+        "SOAP": r"\bSOAP\b|\bSEGURO\s+OBLIGATORIO\s+(?:DE\s+)?ACCIDENTES\s+PERSONALES\b",
         "REVISION_TECNICA": r"\bCERTIFICADO\s+DE\s+REVISION\s+TECNICA\b|\bREVISION\s+TECNICA\s+VEHICULAR\b",
         "CERTIFICADO_EMISION_GASES": r"\bCERTIFICADO\s+DE\s+EMISION(?:ES)?\s+(?:DE\s+)?(?:GASES|CONTAMINANTES)\b",
         "PERMISO_CIRCULACION": r"\bPERMISO\s+DE\s+CIRCULACION\b",
@@ -29,9 +29,10 @@ def identificar_tipo_documental(lineas):
         compacto = re.sub(r"\s+", "", texto)
         if "CERTIFICADODEREVISIONTECNICA" in compacto:
             evidencias.setdefault("REVISION_TECNICA", []).append(texto)
-    if (any("SEGURO OBLIGATORIO ACCIDENTES" in x for x in normalizadas)
-            and any("PERSONALES" in x for x in normalizadas)):
-        evidencias.setdefault("SOAP", []).extend(x for x in normalizadas if "SEGURO OBLIGATORIO ACCIDENTES" in x)
+    # RapidOCR parte el título del SOAP en dos líneas ("...ACCIDENTES" / "PERSONALES ...").
+    partido = [x for x in normalizadas if re.search(r"SEGURO OBLIGATORIO (?:DE )?ACCIDENTES", x)]
+    if partido and any(re.match(r"PERSONALES\b", x) for x in normalizadas):
+        evidencias.setdefault("SOAP", []).extend(partido)
     polizas = {"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"}
     if any(re.search(r"\bPOLIZA\b", texto) for texto in normalizadas):
         cobertura = extraer_campos_adicionales(normalizadas)["coberturas"]
