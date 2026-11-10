@@ -204,6 +204,27 @@ def test_guia_y_transporte_solo_obra_no_se_lee_como_chofer(entorno, monkeypatch)
     assert b1.atender("prueba", "si")["estado"] != "EJECUTADA"
 
 
+def test_guia_y_transporte_obra_limitada_y_ltda_son_la_misma(entorno, monkeypatch):
+    # En CASA el catálogo dice «… LIMITADA» y la orden «… LTDA.»; aquí, al revés.
+    capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
+    antes = entorno["dataset"].read_bytes()
+    r = b1.atender("prueba", "Guía 484180, transporte 0000369009: la obra es CONSTRUCTORA IGNACIO HURTADO LIMITADA")
+    assert r["estado"] == "PREVIEW_PENDIENTE", r
+    assert r["preview"]["valor_propuesto"]["obra_destino"] == OBRA
+    assert entorno["dataset"].read_bytes() == antes
+
+
+def test_resolver_obra_ltda_no_adivina_entre_dos():
+    from types import SimpleNamespace
+    from atlas_core.b1_operador import resolver_obra
+    obra = lambda i, n: SimpleNamespace(obra_id=i, nombre_canonico=n, aliases_documentales=(), estado="CONFIRMADA",
+                                        estado_vigencia="ACTIVO")
+    assert resolver_obra([obra("1", "ALFA LIMITADA")], "ALFA LTDA")["obra_id"] == "1"
+    assert resolver_obra([obra("1", "ALFA LTDA")], "alfa limitada")["obra_id"] == "1"
+    assert resolver_obra([obra("1", "ALFA LIMITADA"), obra("2", "ALFA LTDA")], "ALFA LTDA")["estado"] == "AMBIGUO"
+    assert resolver_obra([obra("1", "ALFALTDA")], "ALFA LIMITADA")["estado"] == "DESCONOCIDO"
+
+
 def test_guia_y_transporte_solo_obra_cancelada_no_escribe(entorno, monkeypatch):
     capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
     antes = entorno["dataset"].read_bytes()

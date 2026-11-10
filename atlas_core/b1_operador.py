@@ -1027,8 +1027,13 @@ def resolver_decision_destino(decisiones: list[Mapping[str, object]], guia: str)
 def resolver_obra(obras: list, mencion: str) -> dict:
     """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'obra_id', 'nombre', 'candidatos'}.
     Sólo coincidencia exacta normalizada con el nombre canónico o un alias de
-    una obra vigente; nunca crea obra ni adivina entre varias."""
-    from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
+    una obra vigente; nunca crea obra ni adivina entre varias. LTDA y
+    LIMITADA son la misma forma jurídica al comparar."""
+    from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra as _normalizar
+
+    def normalizar_nombre_obra(nombre: str) -> str:
+        return re.sub(r"\bLTDA\b", "LIMITADA", _normalizar(nombre))
+
     clave = normalizar_nombre_obra(mencion)
     vigentes = [o for o in obras if o.estado_vigencia == "ACTIVO" and o.estado not in {"RECHAZADA", "INACTIVA"}]
     exactas = [o for o in vigentes
