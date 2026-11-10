@@ -529,6 +529,7 @@ def registrar_documento_vehiculo_desktop(
             # Misma regla que la activación Mobile; Desktop no ofrece vínculo explícito.
             decision = decidir_renovacion({"tipo": tipo_detectado, "tipo_informado": tipo, "vencimiento": vencimiento,
                                            "inicio": inicio_acreditado(campos.get("vencimiento")),
+                                           "estado_inicio": (campos.get("vencimiento") or {}).get("inicio_vigencia"),
                                            "coberturas": coberturas, "reemplaza": ""}, anteriores, hoy)
         reemplazados = []
         if decision and decision["accion"] in ("ACTIVAR", "REEMPLAZAR"):

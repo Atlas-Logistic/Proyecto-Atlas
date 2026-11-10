@@ -39,6 +39,9 @@ def tipos_acreditados(documento: dict) -> frozenset[str]:
 
 def inicio_acreditado(campo_vencimiento: dict | None) -> str:
     """Comienzo de vigencia leído junto al vencimiento (par «desde/hasta» del mismo original)."""
+    campo = (campo_vencimiento or {}).get("inicio_vigencia")
+    if campo is not None:
+        return campo.get("valor") or "" if campo.get("estado") == "EXTRAIDO" else ""
     for evidencia in (campo_vencimiento or {}).get("evidencia") or []:
         if isinstance(evidencia, dict) and _fecha(evidencia.get("par_desde")):
             return evidencia["par_desde"]
@@ -53,6 +56,15 @@ def decidir_renovacion(nuevo: dict, anteriores: list[dict], hoy: date) -> dict:
 
     def resultado(accion, motivo="", documentos=(), fecha=""):
         return {"accion": accion, "motivo": motivo, "documentos": [d["documento_id"] for d in documentos], "fecha": fecha}
+
+    inicio = _fecha(nuevo.get("inicio"))
+    estado_inicio = nuevo.get("estado_inicio") or {}
+    if estado_inicio.get("motivo") not in (None, "", "NO_ENCONTRADO"):
+        return resultado(PENDIENTE, "INICIO_AMBIGUO", relacionados)
+    if inicio and _fecha(nuevo.get("vencimiento")) and inicio >= _fecha(nuevo.get("vencimiento")):
+        return resultado(PENDIENTE, "FECHAS_CONTRADICTORIAS", relacionados)
+    if not relacionados and not nuevo.get("reemplaza") and inicio and inicio > hoy:
+        return resultado(PROGRAMAR, "VIGENCIA_FUTURA", fecha=inicio.isoformat())
 
     if nuevo.get("reemplaza"):
         # Vínculo explícito: debe resolver exactamente un documento operativo relacionado del mismo vehículo.
@@ -70,6 +82,8 @@ def decidir_renovacion(nuevo: dict, anteriores: list[dict], hoy: date) -> dict:
         if len(relacionados) > 1:
             return resultado(PENDIENTE, "VARIOS_ANTERIORES", relacionados)
         objetivo = relacionados[0]
+    if objetivo.get("tipo") in TIPOS_POLIZA and not objetivo.get("coberturas"):
+        return resultado(PENDIENTE, "COBERTURAS_ANTERIORES_NO_ACREDITADAS", [objetivo])
     if not tipos_acreditados(objetivo) <= tipos:
         # Nunca se retira una cobertura (RC o robo) que el nuevo no acredita.
         return resultado(PENDIENTE, "COBERTURAS_REDUCIDAS", [objetivo])

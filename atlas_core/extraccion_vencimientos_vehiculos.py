@@ -49,7 +49,7 @@ from atlas_core.fichas_vehiculos import PENDIENTES, TIPOS_VEHICULO, _validar_veh
 
 logger = logging.getLogger(__name__)
 
-VERSION_EXTRACCION = 3
+VERSION_EXTRACCION = 4
 PROCEDENCIA = "AUTOMATICA_OCR"
 # Vencimiento operativo registrado sin intervención humana.
 ESTADO_VENCIMIENTO_AUTOMATICO = "VENCIMIENTO_OCR_AUTOMATICO"
@@ -76,7 +76,7 @@ _FECHA_INCOMPLETA = re.compile(r"\d{1,2}\s*[/.-]\s*\d{1,2}\s*[/.-]\s*\d{2,3}(?!\
 FIN, INICIO, REFERENCIA = "FIN", "INICIO", "REFERENCIA"
 _ROTULOS_COMUNES = [
     (FIN, r"FECHA\s*(?:DE\s*)?VENCIMIENTO|VENCIMIENTO|\bVENCE\b|VALID[AO]\s*HASTA|VIGENTE\s*HASTA"),
-    (INICIO, r"RIGE\s*DESDE|VIGENCIA\s*DESDE|\bDESDE\b|\bRIGE\b"),
+    (INICIO, r"FECHA\s*(?:DE\s*)?INICIO\s*(?:DE\s*)?VIGENCIA|INICIO\s*(?:DE\s*)?VIGENCIA|VIGENCIA\s*(?:A\s*PARTIR\s*DE|DESDE)|VALID[AO]\s*DESDE|VIGENTE\s*DESDE|RIGE\s*(?:A\s*PARTIR\s*DE|DESDE)|\bDESDE\b|\bRIGE\b"),
     (REFERENCIA, r"FECHA\s*(?:DE\s*)?(?:EMISION|PAGO|CONTRATACION|INSPECCION|REVISION|EMITIDO)|\bFECHA\b|"
                  r"\bEMISION\b|\bEMITID[OA]\b|CONTRATACION|INSPECCION|\bPAGAD[OA]\b"),
 ]
@@ -88,6 +88,9 @@ _FIN_POR_TIPO = {
     "REVISION_TECNICA": r"PROXIMA\s*REVISION|PROXIMO\s*CONTROL",
     # Comprobante de pago: VENCE / VENCIMIENTO (cuerpo y talones).
     "PERMISO_CIRCULACION": r"",
+    "CERTIFICADO_EMISION_GASES": r"VIGENCIA\s*HASTA|TERMINO\s*(?:DE\s*)?VIGENCIA",
+    "POLIZA_RESPONSABILIDAD_CIVIL": r"\bHASTA\b|VIGENCIA\s*HASTA|TERMINO\s*(?:DE\s*)?VIGENCIA",
+    "POLIZA_ROBO": r"\bHASTA\b|VIGENCIA\s*HASTA|TERMINO\s*(?:DE\s*)?VIGENCIA",
 }
 # El vencimiento de una cuota es un plazo de pago, no de vigencia.
 _CUOTA = re.compile(r"CUOTA")
@@ -142,7 +145,7 @@ def _segmentos(linea: str, reglas) -> list[tuple[str, str, str]]:
             for i, (clase, rotulo, _, fin) in enumerate(marcas)]
 
 
-def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
+def _extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
     """Decisión pura sobre el texto OCR de un documento de vehículo."""
     if tipo not in TIPOS_VEHICULO:
         raise ValueError(f"Tipo de documento de vehículo no admitido: {tipo}")
@@ -242,6 +245,39 @@ def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
     if referencias and (date.fromisoformat(valor) - date.fromisoformat(max(referencias))).days > PLAZO_MAXIMO_DIAS:
         return {**base, "valor": None, "estado": PENDIENTE_REVISION, "motivo": "PLAZO_IMPROBABLE"}
     return {**base, "valor": valor, "estado": EXTRAIDO, "motivo": ""}
+
+
+def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
+    """Extrae por separado el inicio, sin inferirlo de la emisi?n."""
+    lineas = list(lineas)
+    vencimiento = _extraer_vencimiento(tipo, lineas)
+    candidatos = []
+    incompleto = False
+    for evidencia in vencimiento.get("evidencia", []):
+        if evidencia.get("par_desde"):
+            candidatos.append((evidencia["par_desde"], evidencia))
+    for linea in map(_normalizar, lineas):
+        segmentos = _segmentos(linea, _rotulos(tipo))
+        for clase, rotulo, fechas, malas in [(c, r, *_fechas(t)) for c, r, t in segmentos]:
+            if clase != INICIO:
+                continue
+            validas = [f for f in fechas if not f["hora"]]
+            candidatos.extend((f["valor"], {"rotulo": rotulo, "texto": linea}) for f in validas)
+            if malas or (not validas and not vencimiento.get("evidencia", [])):
+                incompleto = True
+            elif not validas and not any(e.get("par_desde") for e in vencimiento.get("evidencia", [])):
+                incompleto = True
+    valores = sorted({v for v, _ in candidatos})
+    fin = vencimiento.get("valor")
+    contradictorio = bool(fin and any(v >= fin for v in valores))
+    motivo = ("FECHAS_CONTRADICTORIAS" if contradictorio else "VARIAS_FECHAS" if len(valores) > 1
+              else "ILEGIBLE" if incompleto else "NO_ENCONTRADO" if not valores else "")
+    vencimiento["inicio_vigencia"] = {
+        "valor": valores[0] if not motivo else None,
+        "estado": EXTRAIDO if not motivo else PENDIENTE_REVISION,
+        "motivo": motivo, "evidencia": [e for _, e in candidatos][:10], "observados": valores,
+    }
+    return vencimiento
 
 
 # ------------------------------------------------------------------ ciclo PULL
@@ -465,7 +501,7 @@ def _decision(datos: dict, patente: str, documento: dict, hoy: date | None = Non
                            "coberturas": _coberturas_extraidas(d.get("extraccion_automatica") or {}),
                            "origenes": [d.get("origen_documento_id"), *d.get("origenes_adicionales", [])]})
     nuevo = {"tipo": documento["tipo"], "tipo_informado": documento.get("tipo_informado"), "vencimiento": campo["valor"],
-             "inicio": inicio_acreditado(campo), "coberturas": _coberturas_extraidas(extraccion),
+             "inicio": inicio_acreditado(campo), "estado_inicio": campo.get("inicio_vigencia"), "coberturas": _coberturas_extraidas(extraccion),
              "reemplaza": documento.get("reemplaza_origen_id") or ""}
     return decidir_renovacion(nuevo, anteriores, hoy or date.today())
 

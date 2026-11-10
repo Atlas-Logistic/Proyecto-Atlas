@@ -96,7 +96,7 @@ def test_vinculo_explicito_verificable_reemplaza_sólo_el_elegido():
     ([RC, ROBO], [ROBO], PENDIENTE, "COBERTURAS_REDUCIDAS"),
     ([RC, ROBO], [RC, ROBO], REEMPLAZAR, ""),
     ([RC], [RC, ROBO], REEMPLAZAR, ""),  # ampliación de cobertura
-    ([], [RC], REEMPLAZAR, ""),  # anterior sin coberturas leídas: acredita su propio tipo
+    ([], [RC], PENDIENTE, "COBERTURAS_ANTERIORES_NO_ACREDITADAS"),  # anterior sin coberturas leídas: acredita su propio tipo
 ])
 def test_poliza_nunca_retira_una_cobertura_sin_evidencia(cubre_anterior, cubre_nuevo, accion, motivo):
     for reemplaza, origenes in (("", ()), ("x", ("x",))):
@@ -279,3 +279,53 @@ def test_desktop_renovacion_no_cruza_empresas(expediente):
     assert leer_expediente(expediente, empresa="OTRA")["documentos"][0]["estado"] == "ACTIVO"
     assert [d["documento_id"] for d in ver(expediente, HOY, "OTRA")["documentos"]] == [otra["documento_id"]]
     assert json.dumps(leer_expediente(expediente, empresa="MBT")).count(otra["documento_id"]) == 0
+
+
+@pytest.mark.parametrize("tipo", ["SOAP", "REVISION_TECNICA", "CERTIFICADO_EMISION_GASES",
+                                  "PERMISO_CIRCULACION", RC, ROBO])
+@pytest.mark.parametrize("rotulo", ["INICIO DE VIGENCIA", "FECHA DE INICIO DE VIGENCIA",
+                                    "VIGENCIA DESDE", "VALIDO DESDE", "RIGE A PARTIR DE"])
+def test_inicio_rotulado_en_los_seis_documentos(tipo, rotulo):
+    from atlas_core.extraccion_vencimientos_vehiculos import extraer_vencimiento
+    campo = extraer_vencimiento(tipo, ["FECHA DE EMISION 01/01/2026",
+                                       rotulo + " 01/12/2026", "VENCIMIENTO 30/11/2027"])
+    assert campo["valor"] == "2027-11-30"
+    assert campo["inicio_vigencia"]["valor"] == "2026-12-01"
+    assert inicio_acreditado(campo) == "2026-12-01"
+
+
+def test_inicio_ausente_ambiguo_y_contradictorio():
+    from atlas_core.extraccion_vencimientos_vehiculos import extraer_vencimiento
+    ausente = extraer_vencimiento("SOAP", ["FECHA DE EMISION 01/01/2026", "VENCIMIENTO 31/12/2027"])
+    assert ausente["inicio_vigencia"]["motivo"] == "NO_ENCONTRADO"
+    assert inicio_acreditado(ausente) == ""
+    ambiguo = extraer_vencimiento("SOAP", ["INICIO DE VIGENCIA 01/01/2027",
+                                              "VIGENCIA DESDE 01/02/2027", "VENCIMIENTO 31/12/2027"])
+    assert ambiguo["inicio_vigencia"]["motivo"] == "VARIAS_FECHAS"
+    decision = decidir_renovacion(nuevo("SOAP", "2027-12-31", estado_inicio=ambiguo["inicio_vigencia"]),
+                                  [anterior("a", "SOAP", "2026-12-31")], HOY)
+    assert decision["motivo"] == "INICIO_AMBIGUO"
+    contradictorio = extraer_vencimiento("SOAP", ["INICIO DE VIGENCIA 01/01/2028", "VENCIMIENTO 31/12/2027"])
+    assert contradictorio["estado"] == "PENDIENTE_REVISION"
+
+
+def test_futuro_sin_anterior_se_programa():
+    assert decidir_renovacion(nuevo("SOAP", "2028-09-30", inicio="2027-10-01"), [], HOY) == {
+        "accion": PROGRAMAR, "motivo": "VIGENCIA_FUTURA", "documentos": [], "fecha": "2027-10-01"}
+
+
+def test_mobile_futuro_sin_anterior_no_se_activa_anticipadamente(raiz):
+    documento_id, contenido = _recibir(raiz, "soap-sin-anterior", tipo="SOAP")
+    _ciclo(raiz, {contenido: soap("01/10/2027", "30/09/2028")})
+    assert _ubicar(raiz, documento_id)[1]["transicion_programada"]["reemplaza"] == []
+    assert _ciclo(raiz, {}, hoy=date(2027, 9, 30))["activados"] == []
+    assert _ciclo(raiz, {}, hoy=date(2027, 10, 1))["activados"][0]["documento_id"] == documento_id
+
+
+def test_desktop_futuro_sin_anterior_no_se_activa_anticipadamente(expediente):
+    doc = alta(expediente, soap("01/10/2027", "30/09/2028", PATENTE))
+    assert doc["pendiente_revision"] and doc["transicion_programada"]["reemplaza"] == []
+    antes = ver(expediente, date(2027, 9, 30))
+    despues = ver(expediente, date(2027, 10, 1))
+    assert antes["documentos"][0]["estado_vencimiento"] == "PENDIENTE_REVISION"
+    assert despues["documentos"][0]["estado_vencimiento"] != "PENDIENTE_REVISION"

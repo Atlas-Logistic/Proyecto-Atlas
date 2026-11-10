@@ -63,14 +63,23 @@ def test_alta_desktop_ocr_custodia_y_consulta(raiz, monkeypatch, formato, tipo):
         "VENCIMIENTO: 30/09/2027", "ASEGURADORA: COMPANIA EJEMPLO", "POLIZA: ABC123"] +
         ([cobertura] if tipo.startswith("POLIZA_") else []), tipo=tipo)
     assert ocr.cerrado and ocr.rutas == ([".png"] if formato == "pdf" else ["." + formato])
-    assert not doc["pendiente_revision"] and doc["fecha_vencimiento"] == "2027-09-30"
+    assert doc["fecha_vencimiento"] == "2027-09-30"
+    if tipo.startswith("POLIZA_"):
+        assert doc["pendiente_revision"]
+        assert doc["posible_reemplazo"]["motivo"] == "COBERTURAS_ANTERIORES_NO_ACREDITADAS"
+    else:
+        assert not doc["pendiente_revision"]
     campos = doc["extraccion_automatica"]["campos"]
     assert campos["patente"]["valor"] == PATENTE and campos["numero_poliza"]["valor"] == "ABC123"
     assert campos["tipo_documental"]["valor"] == tipo
     assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == contenido == archivo.read_bytes()
     consulta = consultar_expediente(raiz, empresa="MBT", entidad="VEHICULO", referencia=PATENTE)
-    assert consulta["documentos"][0]["documento_id"] == doc["documento_id"]
-    assert consulta["historico"][0]["documento_id"] == previo["documento_id"]
+    if tipo.startswith("POLIZA_"):
+        assert {d["documento_id"] for d in consulta["documentos"]} == {doc["documento_id"], previo["documento_id"]}
+        assert not consulta["historico"]
+    else:
+        assert consulta["documentos"][0]["documento_id"] == doc["documento_id"]
+        assert consulta["historico"][0]["documento_id"] == previo["documento_id"]
 
 
 @pytest.mark.parametrize("lineas", [
