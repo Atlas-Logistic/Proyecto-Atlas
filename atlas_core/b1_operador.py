@@ -278,14 +278,18 @@ _MATERIAL_SUELTO = re.compile(rf"^(?:EL\s+)?MATERIAL(?:\s+CORRECTO)?{_ENLACE_COR
 # Sólo la obra («la obra es X»): sin esto la frase caía al intérprete general,
 # que leía «… LA OBRA es CONSTRUCTORA …» como chofer ↔ patente.
 _OBRA_SUELTA = re.compile(rf"^{_VERBO_CORRECCION}{_DATO_OBRA}{_ENLACE_CORRECCION}(?P<valor>.+)$")
+# Sólo la dirección («la dirección de destino es X»): mismo caso que la obra.
+_DIRECCION_SUELTA = re.compile(
+    rf"^{_VERBO_CORRECCION}(?:(?:EL|LA)\s+)?(?:DESTINO|DIRECCION(?:\s+DE\s+(?:ENTREGA|DESTINO))?)(?:\s+CORRECT[OA])?"
+    rf"{_ENLACE_CORRECCION}(?P<valor>.+)$")
 
 
-def _obra_suelta(resto: str) -> str:
-    """Obra pedida sola tras «Guía N, transporte T:», o "" si no es eso."""
+def _obra_suelta(resto: str, patron: re.Pattern = _OBRA_SUELTA) -> str:
+    """Obra (o dirección) pedida sola tras «Guía N, transporte T:», o "" si no es eso."""
     if separar_obra_y_direccion(resto) is not None:
         return ""
     plano = _plano(resto)
-    m = _OBRA_SUELTA.match(plano)
+    m = patron.match(plano)
     if m is None:
         return ""
     fin = _RESERVA_FINAL.search(plano)
@@ -314,7 +318,7 @@ def es_correccion_por_guia_y_transporte(texto: str) -> bool:
         return False
     resto = original[m.start("resto"):m.end("resto")].strip()
     return (separar_obra_y_direccion(resto) is not None or _MATERIAL_SUELTO.match(_plano(resto)) is not None
-            or bool(_obra_suelta(resto)))
+            or bool(_obra_suelta(resto)) or bool(_obra_suelta(resto, _DIRECCION_SUELTA)))
 
 
 def separar_contexto_revision(texto: str) -> tuple[str, str]:
@@ -432,7 +436,7 @@ def ajustar_a_revision(intencion: Intencion, decision: Mapping[str, object], ins
             p["archivo"] = archivo
         if (decision.get("tipo") == "DESTINO_NO_RESUELTO" or not guia.isdigit()) and intencion.accion in {"DOCUMENTO_ASIGNAR_OBRA", "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"}:
             p["conservar_estado"] = True
-        p["referencia"] = f"Revisión de Atlas, guía {guia}: {' '.join(str(instruccion).split())}"[:500]
+        p["referencia"] = f"Revisión de Atlas, {_guia_legible(guia)}: {' '.join(str(instruccion).split())}"[:500]
     return ""
 
 
@@ -1118,6 +1122,12 @@ def _material_legible(valor: object) -> str:
     return f"«{texto}»" if texto else "sin material"
 
 
+def _guia_legible(numero: object) -> str:
+    """«guía N», o «sin folio leído» si el documento no tiene folio: nunca «guía No encontrado»."""
+    texto = str(numero or "").strip()
+    return f"guía {texto}" if texto.isdigit() else "sin folio leído"
+
+
 def _describir_preview(preview: Mapping[str, object]) -> str:
     accion, entidad = preview.get("accion"), preview.get("entidad") or {}
     actual, propuesto = preview.get("valor_actual"), preview.get("valor_propuesto") or {}
@@ -1128,7 +1138,7 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
         estado = "ACTIVO" if propuesto.get("activo") else "INACTIVO"
         texto = f"Dejar al chofer {entidad.get('nombre')} como {estado}."
     elif accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
-        texto = (f"Destino del documento {entidad.get('id')} (guía {entidad.get('numero_guia')}, transporte {entidad.get('numero_transporte')}): "
+        texto = (f"Destino del documento {entidad.get('id')} ({_guia_legible(entidad.get('numero_guia'))}, transporte {entidad.get('numero_transporte')}): "
                  f"{(actual or {}).get('direccion') or 'sin destino'} -> "
                  f"{propuesto.get('direccion')}, {propuesto.get('comuna')}. "
                  + ("La ruta histórica se conserva y requiere comprobación para la nueva dirección; el documento original se conserva."
@@ -1986,11 +1996,12 @@ class OperadorB1:
         partes = separar_obra_y_direccion(resto)
         material = _MATERIAL_SUELTO.match(_plano(resto))
         obra_sola = _obra_suelta(resto)
-        if partes is None and material is None and not obra_sola:
+        direccion_sola = _obra_suelta(resto, _DIRECCION_SUELTA)
+        if partes is None and material is None and not obra_sola and not direccion_sola:
             return None
         filas = [f for f in self.capa._ctx.filas() if str(f.get("numero_transporte") or "").strip() == transporte]
         propias = [f for f in filas if str(f.get("numero_guia") or "").strip() == guia]
-        if not propias and (partes is not None or obra_sola):
+        if not propias and (partes is not None or obra_sola or direccion_sola):
             propias = [f for f in filas if not str(f.get("numero_guia") or "").strip().isdigit()]
         if len(propias) != 1:
             self._fijar_pendiente(estado, conversacion_id, None)
@@ -2005,8 +2016,9 @@ class OperadorB1:
         tarjetas = [d for d in self.capa._ctx.decisiones() if d.get("estado", "PENDIENTE") == "PENDIENTE"
                     and str((d.get("documento") or {}).get("archivo") or "").strip() == archivo
                     and d.get("tipo") == "DESTINO_NO_RESUELTO"]
-        if len(tarjetas) == 1 and obra_sola:
-            return self._instruccion_revision(estado, conversacion_id, str(tarjetas[0]["decision_id"]), f"la obra es {obra_sola}")
+        if len(tarjetas) == 1 and (obra_sola or direccion_sola):
+            canonica = f"la obra es {obra_sola}" if obra_sola else f"la dirección es {direccion_sola}"
+            return self._instruccion_revision(estado, conversacion_id, str(tarjetas[0]["decision_id"]), canonica)
         if len(tarjetas) == 1:
             return self._correccion_compuesta(estado, conversacion_id, str(tarjetas[0]["decision_id"]), partes)
         if not str(propias[0].get("numero_guia") or "").strip().isdigit():
@@ -2015,6 +2027,8 @@ class OperadorB1:
                 "El documento no tiene folio leído y no hay una única tarjeta de revisión que lo identifique. No se corrigió nada.")}
         if obra_sola:
             return self._instruccion(estado, conversacion_id, f"La obra de la guía {guia} es {obra_sola}")
+        if direccion_sola:
+            return self._instruccion(estado, conversacion_id, f"El destino de la guía {guia} es {direccion_sola}")
         obra, direccion = (p.split(" es ", 1)[1] for p in partes)
         return self._dejar_siguiente(estado, conversacion_id, self._instruccion(estado, conversacion_id, f"La obra de la guía {guia} es {obra}"),
                                      {"decision_id": "", "texto": f"El destino de la guía {guia} es {direccion}"},
