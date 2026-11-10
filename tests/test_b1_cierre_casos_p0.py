@@ -160,6 +160,7 @@ def test_guia_y_transporte_identifican_documento_sin_folio(entorno, monkeypatch,
 @pytest.mark.parametrize("frase", [
     f"Guía 484180, transporte 0000369009: obra a {OBRA} y dirección a {DIRECCION}",
     "Guía 484293, transporte 0000369273: material B HORMIGON 12MM",
+    f"Guía 484180, transporte 0000369009: la obra es {OBRA}.",
 ])
 def test_consulta_deriva_correccion_por_guia_y_transporte(entorno, monkeypatch, frase):
     # Desktop pregunta primero a la consulta de solo lectura.
@@ -174,6 +175,42 @@ def test_guia_y_transporte_material(entorno, monkeypatch):
     assert r["estado"] == "PREVIEW_PENDIENTE", r
     assert b1.atender("prueba", "si")["estado"] == "EJECUTADA"
     assert _filas_dataset(entorno)["484293.jpeg"]["descripcion_material"] == "B HORMIGON 12MM 12M A630-420H (N)"
+
+
+FRASE_OBRA_SOLA = f"Guía 484180, transporte 0000369009: la obra es {OBRA}."
+
+
+def test_guia_y_transporte_solo_obra_no_se_lee_como_chofer(entorno, monkeypatch):
+    # Frase exacta de CASA: B1 respondía «No encontré un chofer que coincida…».
+    capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
+    import atlas_core.destino_operacional as destino_modulo
+    monkeypatch.setattr(destino_modulo, "calcular_ruta_operacional", lambda *a, **k: pytest.fail("no recalcular"))
+    antes, ledger_antes = entorno["dataset"].read_bytes(), _ledger(entorno)
+    primero = b1.atender("prueba", FRASE_OBRA_SOLA)
+    assert primero["estado"] == "PREVIEW_PENDIENTE", primero
+    assert "chofer" not in primero.get("mensaje", "").lower()
+    vista = json.dumps(primero.get("preview"), ensure_ascii=False)
+    assert OBRA in vista and "0000369009" in vista and DIRECCION not in vista
+    # Nada se escribe sin la confirmación humana.
+    assert entorno["dataset"].read_bytes() == antes and _ledger(entorno) == ledger_antes
+    final = b1.atender("prueba", "si")
+    assert final["estado"] == "EJECUTADA", final
+    corregida = _filas_dataset(entorno)[ARCHIVO_369009]
+    assert corregida["obra_destino"] == OBRA
+    for campo in ("cliente", "despachar_a_crudo", "estado_operacional", "estado_ruta", "distancia_km", "numero_guia"):
+        assert corregida[campo] == fila[campo], campo
+    assert _filas_dataset(entorno)["500002.jpeg"] == otra
+    # Sólo la obra: no queda una segunda corrección encadenada.
+    assert b1.atender("prueba", "si")["estado"] != "EJECUTADA"
+
+
+def test_guia_y_transporte_solo_obra_cancelada_no_escribe(entorno, monkeypatch):
+    capa, b1, fila, otra = _caso_obra_direccion(entorno, monkeypatch)
+    antes = entorno["dataset"].read_bytes()
+    assert b1.atender("prueba", FRASE_OBRA_SOLA)["estado"] == "PREVIEW_PENDIENTE"
+    b1.atender("prueba", "no")
+    assert b1.atender("prueba", "si")["estado"] != "EJECUTADA"
+    assert entorno["dataset"].read_bytes() == antes
 
 
 def test_transporte_ambiguo_no_elige_documento(entorno, monkeypatch):

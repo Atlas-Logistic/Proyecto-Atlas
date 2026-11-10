@@ -275,6 +275,21 @@ _GUIA_Y_TRANSPORTE = re.compile(
     r"^(?:(?:CORRIGE|CORREGIR)\s+)?(?:EN\s+)?(?:LA\s+)?GUIA\s+(?:N[°O]?\s*)?(?P<guia>\d{3,12})\s*,?\s*(?:DEL?\s+)?"
     r"TRANSPORTE\s+(?P<transporte>\d{3,})\s*[:,;-]?\s*(?P<resto>.+)$")
 _MATERIAL_SUELTO = re.compile(rf"^(?:EL\s+)?MATERIAL(?:\s+CORRECTO)?{_ENLACE_CORRECCION}(?P<valor>.+)$")
+# Sólo la obra («la obra es X»): sin esto la frase caía al intérprete general,
+# que leía «… LA OBRA es CONSTRUCTORA …» como chofer ↔ patente.
+_OBRA_SUELTA = re.compile(rf"^{_VERBO_CORRECCION}{_DATO_OBRA}{_ENLACE_CORRECCION}(?P<valor>.+)$")
+
+
+def _obra_suelta(resto: str) -> str:
+    """Obra pedida sola tras «Guía N, transporte T:», o "" si no es eso."""
+    if separar_obra_y_direccion(resto) is not None:
+        return ""
+    plano = _plano(resto)
+    m = _OBRA_SUELTA.match(plano)
+    if m is None:
+        return ""
+    fin = _RESERVA_FINAL.search(plano)
+    return resto[m.start("valor"):min(m.end("valor"), fin.start() if fin else len(plano))].strip(" ,;.")
 
 
 def separar_obra_y_direccion(texto: str) -> tuple[str, str] | None:
@@ -298,7 +313,8 @@ def es_correccion_por_guia_y_transporte(texto: str) -> bool:
     if m is None:
         return False
     resto = original[m.start("resto"):m.end("resto")].strip()
-    return separar_obra_y_direccion(resto) is not None or _MATERIAL_SUELTO.match(_plano(resto)) is not None
+    return (separar_obra_y_direccion(resto) is not None or _MATERIAL_SUELTO.match(_plano(resto)) is not None
+            or bool(_obra_suelta(resto)))
 
 
 def separar_contexto_revision(texto: str) -> tuple[str, str]:
@@ -1964,11 +1980,12 @@ class OperadorB1:
         resto = original[m.start("resto"):m.end("resto")].strip()
         partes = separar_obra_y_direccion(resto)
         material = _MATERIAL_SUELTO.match(_plano(resto))
-        if partes is None and material is None:
+        obra_sola = _obra_suelta(resto)
+        if partes is None and material is None and not obra_sola:
             return None
         filas = [f for f in self.capa._ctx.filas() if str(f.get("numero_transporte") or "").strip() == transporte]
         propias = [f for f in filas if str(f.get("numero_guia") or "").strip() == guia]
-        if not propias and partes is not None:
+        if not propias and (partes is not None or obra_sola):
             propias = [f for f in filas if not str(f.get("numero_guia") or "").strip().isdigit()]
         if len(propias) != 1:
             self._fijar_pendiente(estado, conversacion_id, None)
@@ -1983,12 +2000,16 @@ class OperadorB1:
         tarjetas = [d for d in self.capa._ctx.decisiones() if d.get("estado", "PENDIENTE") == "PENDIENTE"
                     and str((d.get("documento") or {}).get("archivo") or "").strip() == archivo
                     and d.get("tipo") == "DESTINO_NO_RESUELTO"]
+        if len(tarjetas) == 1 and obra_sola:
+            return self._instruccion_revision(estado, conversacion_id, str(tarjetas[0]["decision_id"]), f"la obra es {obra_sola}")
         if len(tarjetas) == 1:
             return self._correccion_compuesta(estado, conversacion_id, str(tarjetas[0]["decision_id"]), partes)
         if not str(propias[0].get("numero_guia") or "").strip().isdigit():
             self._fijar_pendiente(estado, conversacion_id, None)
             return {"estado": "ACLARACION_REQUERIDA", "candidatos": [], "mensaje": (
                 "El documento no tiene folio leído y no hay una única tarjeta de revisión que lo identifique. No se corrigió nada.")}
+        if obra_sola:
+            return self._instruccion(estado, conversacion_id, f"La obra de la guía {guia} es {obra_sola}")
         obra, direccion = (p.split(" es ", 1)[1] for p in partes)
         return self._dejar_siguiente(estado, conversacion_id, self._instruccion(estado, conversacion_id, f"La obra de la guía {guia} es {obra}"),
                                      {"decision_id": "", "texto": f"El destino de la guía {guia} es {direccion}"},
