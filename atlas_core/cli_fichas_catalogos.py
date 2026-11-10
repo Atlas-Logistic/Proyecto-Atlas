@@ -14,11 +14,24 @@ from atlas_core.catalogo_fichas import construir_snapshot_fichas
 
 def _expediente(argumentos: argparse.Namespace) -> int:
     from atlas_core.expediente_digital import (
-        ErrorExpedienteDigital, empresa_del_proceso, preparar_alertas_vencimiento, vista_expediente_desktop,
+        ErrorExpedienteDigital, empresa_del_proceso, preparar_alertas_vencimiento, revisar_documento_pendiente,
+        vista_expediente_desktop,
     )
     empresa = empresa_del_proceso()
     try:
-        if argumentos.expediente_alertas:
+        if argumentos.expediente_revision_documento:
+            try:
+                propuesta = json.loads(argumentos.expediente_revision_propuesta or "{}")
+            except ValueError as error:
+                raise ErrorExpedienteDigital("propuesta de revisión ilegible") from error
+            if not isinstance(propuesta, dict):
+                raise ErrorExpedienteDigital("propuesta de revisión ilegible")
+            # Vista previa: misma evaluación que la confirmación, sin escribir.
+            resultado = revisar_documento_pendiente(argumentos.raiz_atlas, empresa=empresa,
+                                                    referencia=argumentos.expediente_referencia or "",
+                                                    documento_id=argumentos.expediente_revision_documento,
+                                                    propuesta=propuesta)
+        elif argumentos.expediente_alertas:
             resultado = {"empresa": empresa, "alertas": preparar_alertas_vencimiento(argumentos.raiz_atlas, empresa=empresa)}
         else:
             resultado = vista_expediente_desktop(argumentos.raiz_atlas, empresa=empresa,
@@ -38,8 +51,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expediente-entidad", choices=("CHOFER", "VEHICULO"))
     parser.add_argument("--expediente-referencia")
     parser.add_argument("--expediente-alertas", action="store_true")
+    parser.add_argument("--expediente-revision-documento")
+    parser.add_argument("--expediente-revision-propuesta")
     argumentos = parser.parse_args(argv)
-    if argumentos.expediente_alertas or argumentos.expediente_entidad:
+    if argumentos.expediente_alertas or argumentos.expediente_entidad or argumentos.expediente_revision_documento:
         return _expediente(argumentos)
     snapshot = construir_snapshot_fichas(raiz_atlas=argumentos.raiz_atlas)
     # Bloque CATALOGOS V2 -- ensure_ascii=True a propósito, mismo

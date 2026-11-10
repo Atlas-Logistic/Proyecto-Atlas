@@ -223,7 +223,7 @@ def test_consultar_vencimientos_agrupa_y_filtra(dos):
 def test_consulta_de_identidad_sin_expediente_no_escribe(dos):
     consulta = _consulta(dos)
     assert not consulta["existe"] and consulta["documentos"] == []
-    assert {a["tipo"] for a in consulta["ausentes"]} == {"SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION"}
+    assert {a["tipo"] for a in consulta["ausentes"]} == {"SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION", "CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"}
     assert not _almacen(dos).exists()
 
 
@@ -353,7 +353,7 @@ def test_ausentes_por_identidad_activa(dos):
     ausentes = {(a["referencia_catalogo"], a["tipo"]) for a in documentos_ausentes(
         dos["raiz"], empresa=NORTE, carpeta_catalogos=dos[NORTE])}
     assert ausentes == {(PATENTE, "REVISION_TECNICA"), (PATENTE, "PERMISO_CIRCULACION"), ("ZZ1234", "SOAP"),
-                        ("ZZ1234", "REVISION_TECNICA"), ("ZZ1234", "PERMISO_CIRCULACION")}
+                        ("ZZ1234", "REVISION_TECNICA"), ("ZZ1234", "PERMISO_CIRCULACION")} | {(p, t) for p in (PATENTE, "ZZ1234") for t in ("CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO")}
 
 
 def test_ausentes_ignora_identidades_inactivas(dos):

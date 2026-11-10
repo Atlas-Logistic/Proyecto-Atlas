@@ -275,7 +275,9 @@ def test_pull_recibe_los_tres_tipos_y_licencias_con_su_resultado_propio(raiz):
     assert [(v["documento_id"], v["patente"], v["motivo"]) for v in resumen["vehiculos"]] == [
         ("dfv_soap", "CC5678", ""), ("dfv_rt", None, "TRACTO_Y_CARRO"), ("dfv_pc", "CC5678", "")]
     assert [i["documento_id"] for i in resumen["incorporados"]] == ["dfm_lic"]
-    assert cloud.rutas[0][0].endswith("&tipos=SOAP,REVISION_TECNICA,PERMISO_CIRCULACION,SEGURO_CARGA")
+    assert set(cloud.rutas[0][0].split("&tipos=")[1].split(",")) == {
+        "SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION", "CERTIFICADO_EMISION_GASES",
+        "POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO", "SEGURO_CARGA"}
     assert sorted(d["tipo"] for d in _vehiculo(raiz, "CC5678")["documentos"]) == ["PERMISO_CIRCULACION", "SOAP"]
     # Un segundo ciclo con lo mismo no duplica nada.
     revision = _datos(raiz)["revision"]

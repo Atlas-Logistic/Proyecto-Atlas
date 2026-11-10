@@ -156,6 +156,11 @@ def test_extrae_y_registra_vencimiento_automatico_sin_confirmacion_humana_y_cons
         assert documento.pop("vencimiento") == VENCIMIENTOS_REALES[tipo]
         assert documento.pop("estado_revision") == "VENCIMIENTO_OCR_AUTOMATICO"
         assert previo.pop("estado_revision") == "PENDIENTE_EXTRACCION" and "vencimiento" not in previo
+        # El tipo seleccionado queda como dato informado; el operativo lo acredita el título leído.
+        assert documento.pop("tipo_informado") == previo["tipo"] == documento["tipo"] == tipo
+        tipo_ocr = extraccion["campos"]["tipo_documental"]
+        assert (tipo_ocr["valor"], tipo_ocr["estado"], tipo_ocr["candidatos"]) == (tipo, "EXTRAIDO", [tipo])
+        assert tipo_ocr["evidencia"] and extraccion["regla"] == tipo
         assert documento == previo  # asociación, patente, sha256, archivo, origen e historial intactos
         assert registro["procedencia"] == "OCR_AUTOMATICO" and registro["confirmado_por_humano"] is False
         assert registro["actor"] == "MOTOR_OCR" and registro["sha256"] == documento["sha256"]
@@ -217,16 +222,19 @@ def test_reconcilia_propuestas_existentes_sin_ocr_ni_tocar_originales(raiz):
         assert sha((ruta_almacen(raiz, "MBT").parent / documento["archivo"]).read_bytes()) == documento["sha256"]
 
 
-@pytest.mark.parametrize("lineas", [
-    ["VENCE: 30/09/2027", "VENCIMIENTO: 31/03/2027"],       # ambigua
-    ["VENCE: 30/09/27"],                                    # ilegible
-    ["FECHA DE PAGO 05/10/2026", "VENCE: 30/09/2026"],      # contradictoria
-    ["FECHA", "05/10/2026", "VENCE: 30/09/2030"],           # improbable
+@pytest.mark.parametrize("lineas,motivo", [
+    (["VENCE: 30/09/2027", "VENCIMIENTO: 31/03/2027"], "VARIAS_FECHAS"),           # ambigua
+    (["VENCE: 30/09/27"], "ILEGIBLE"),                                               # ilegible
+    (["FECHA DE PAGO 05/10/2026", "VENCE: 30/09/2026"], "FECHAS_CONTRADICTORIAS"),   # contradictoria
+    (["FECHA", "05/10/2026", "VENCE: 30/09/2030"], "PLAZO_IMPROBABLE"),             # improbable
 ])
-def test_abstencion_no_registra_vencimiento_y_queda_pendiente(raiz, lineas):
+def test_abstencion_no_registra_vencimiento_y_queda_pendiente(raiz, lineas, motivo):
     documento_id, contenido = _recibir(raiz, "dudoso", tipo="PERMISO_CIRCULACION")
-    resumen = _extraer(raiz, OCRFalso({contenido: lineas}))
+    # Con el tipo acreditado, la abstención se debe sólo a las fechas.
+    resumen = _extraer(raiz, OCRFalso({contenido: ["PERMISO DE CIRCULACION", *lineas]}))
     _, documento = _ubicar(raiz, documento_id)
+    assert documento["tipo"] == "PERMISO_CIRCULACION"
+    assert documento["extraccion_automatica"]["campos"]["vencimiento"]["motivo"] == motivo
     assert resumen["activados"] == [] and "vencimiento" not in documento and "vencimiento_registro" not in documento
     assert documento["estado_revision"] == "PENDIENTE_EXTRACCION"
     assert documento["extraccion_automatica"]["campos"]["vencimiento"]["estado"] == "PENDIENTE_REVISION"
@@ -279,10 +287,10 @@ def test_confirmacion_humana_entre_lectura_y_activacion_gana(raiz, monkeypatch):
     _solo_extraccion_previa(raiz, textos)
     activar = modulo._activar
 
-    def con_persona(raiz_, ruta, empresa, documento_id, actor, comprobar):
+    def con_persona(raiz_, ruta, empresa, documento_id, actor, comprobar, *resto):
         if documento_id == ids["SOAP"]:
             _editar_documento(raiz, documento_id, vencimiento="2027-01-01", estado_revision="CONFIRMADA")
-        return activar(raiz_, ruta, empresa, documento_id, actor, comprobar)
+        return activar(raiz_, ruta, empresa, documento_id, actor, comprobar, *resto)
 
     monkeypatch.setattr(modulo, "_activar", con_persona)
     resumen = _extraer(raiz, OCRFalso({}))
@@ -304,15 +312,15 @@ def test_vencimiento_automatico_no_se_relee_ni_se_reactiva(raiz, monkeypatch):
 
 def test_abstencion_queda_pendiente_y_se_reintenta_una_vez_con_otra_version(raiz, monkeypatch):
     documento_id, contenido = _recibir(raiz, "ambiguo", tipo="PERMISO_CIRCULACION")
-    _extraer(raiz, OCRFalso({contenido: ["VENCE: 30/09/2027", "VENCIMIENTO: 31/03/2027"]}))
+    _extraer(raiz, OCRFalso({contenido: ["PERMISO DE CIRCULACION", "VENCE: 30/09/2027", "VENCIMIENTO: 31/03/2027"]}))
     _, documento = _ubicar(raiz, documento_id)
     campo = documento["extraccion_automatica"]["campos"]["vencimiento"]
     assert (campo["estado"], campo["motivo"], campo["observados"]) == (
         "PENDIENTE_REVISION", "VARIAS_FECHAS", ["2027-03-31", "2027-09-30"])
     assert documento["extraccion_automatica"]["estado"] == "SIN_DATOS"
     assert _extraer(raiz, OCRFalso({}))["pendientes"] == 0
-    monkeypatch.setattr(modulo, "VERSION_EXTRACCION", 2)
-    _extraer(raiz, OCRFalso({contenido: ["VENCE: 30/09/2027"]}))
+    monkeypatch.setattr(modulo, "VERSION_EXTRACCION", modulo.VERSION_EXTRACCION + 1)
+    _extraer(raiz, OCRFalso({contenido: ["PERMISO DE CIRCULACION", "VENCE: 30/09/2027"]}))
     _, documento = _ubicar(raiz, documento_id)
     assert documento["extraccion_automatica"]["campos"]["vencimiento"]["valor"] == "2027-09-30"
     assert documento["extracciones_anteriores"][0]["campos"]["vencimiento"]["motivo"] == "VARIAS_FECHAS"

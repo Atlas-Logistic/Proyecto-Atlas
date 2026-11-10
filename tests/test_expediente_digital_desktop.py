@@ -61,14 +61,14 @@ def test_vista_vehiculo_ofrece_sus_tipos_y_filtra_alertas_ajenas(raiz):
     registrar_documento(raiz, empresa="MBT", entidad="CHOFER", referencia=RUT, tipo="LICENCIA_CONDUCIR",
                         fecha_vencimiento="2026-11-20", actor="T", reloj=RELOJ)
     vista = vista_expediente_desktop(raiz, empresa="MBT", entidad="VEHICULO", referencia=PATENTE, hoy=HOY)
-    assert {t["tipo"] for t in vista["tipos_registrables"]} == {"SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION", "SEGURO_CARGA"}
+    assert {t["tipo"] for t in vista["tipos_registrables"]} == {"SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION", "SEGURO_CARGA", "CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"}
     assert vista["alertas"] == []
 
 
 def test_cli_consulta_no_escribe_y_devuelve_empresa(raiz, capsys):
     assert main(["--raiz-atlas", str(raiz), "--expediente-entidad", "VEHICULO", "--expediente-referencia", PATENTE]) == 0
     salida = json.loads(capsys.readouterr().out)
-    assert (salida["empresa"], salida["existe"]) == ("MBT", False) and len(salida["ausentes"]) == 3
+    assert (salida["empresa"], salida["existe"]) == ("MBT", False) and len(salida["ausentes"]) == 6
     assert not (raiz / "fichas_digitales").exists()
 
 

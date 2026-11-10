@@ -49,7 +49,7 @@ from atlas_core.fichas_vehiculos import PENDIENTES, TIPOS_VEHICULO, _validar_veh
 
 logger = logging.getLogger(__name__)
 
-VERSION_EXTRACCION = 1
+VERSION_EXTRACCION = 4
 PROCEDENCIA = "AUTOMATICA_OCR"
 # Vencimiento operativo registrado sin intervención humana.
 ESTADO_VENCIMIENTO_AUTOMATICO = "VENCIMIENTO_OCR_AUTOMATICO"
@@ -76,7 +76,7 @@ _FECHA_INCOMPLETA = re.compile(r"\d{1,2}\s*[/.-]\s*\d{1,2}\s*[/.-]\s*\d{2,3}(?!\
 FIN, INICIO, REFERENCIA = "FIN", "INICIO", "REFERENCIA"
 _ROTULOS_COMUNES = [
     (FIN, r"FECHA\s*(?:DE\s*)?VENCIMIENTO|VENCIMIENTO|\bVENCE\b|VALID[AO]\s*HASTA|VIGENTE\s*HASTA"),
-    (INICIO, r"RIGE\s*DESDE|VIGENCIA\s*DESDE|\bDESDE\b|\bRIGE\b"),
+    (INICIO, r"FECHA\s*(?:DE\s*)?INICIO\s*(?:DE\s*)?VIGENCIA|INICIO\s*(?:DE\s*)?VIGENCIA|VIGENCIA\s*(?:A\s*PARTIR\s*DE|DESDE)|VALID[AO]\s*DESDE|VIGENTE\s*DESDE|RIGE\s*(?:A\s*PARTIR\s*DE|DESDE)|\bDESDE\b|\bRIGE\b"),
     (REFERENCIA, r"FECHA\s*(?:DE\s*)?(?:EMISION|PAGO|CONTRATACION|INSPECCION|REVISION|EMITIDO)|\bFECHA\b|"
                  r"\bEMISION\b|\bEMITID[OA]\b|CONTRATACION|INSPECCION|\bPAGAD[OA]\b"),
 ]
@@ -88,6 +88,9 @@ _FIN_POR_TIPO = {
     "REVISION_TECNICA": r"PROXIMA\s*REVISION|PROXIMO\s*CONTROL",
     # Comprobante de pago: VENCE / VENCIMIENTO (cuerpo y talones).
     "PERMISO_CIRCULACION": r"",
+    "CERTIFICADO_EMISION_GASES": r"VIGENCIA\s*HASTA|TERMINO\s*(?:DE\s*)?VIGENCIA",
+    "POLIZA_RESPONSABILIDAD_CIVIL": r"\bHASTA\b|VIGENCIA\s*HASTA|TERMINO\s*(?:DE\s*)?VIGENCIA",
+    "POLIZA_ROBO": r"\bHASTA\b|VIGENCIA\s*HASTA|TERMINO\s*(?:DE\s*)?VIGENCIA",
 }
 # El vencimiento de una cuota es un plazo de pago, no de vigencia.
 _CUOTA = re.compile(r"CUOTA")
@@ -142,7 +145,7 @@ def _segmentos(linea: str, reglas) -> list[tuple[str, str, str]]:
             for i, (clase, rotulo, _, fin) in enumerate(marcas)]
 
 
-def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
+def _extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
     """Decisión pura sobre el texto OCR de un documento de vehículo."""
     if tipo not in TIPOS_VEHICULO:
         raise ValueError(f"Tipo de documento de vehículo no admitido: {tipo}")
@@ -244,6 +247,39 @@ def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
     return {**base, "valor": valor, "estado": EXTRAIDO, "motivo": ""}
 
 
+def extraer_vencimiento(tipo: str, lineas: Iterable[str]) -> dict:
+    """Extrae por separado el inicio, sin inferirlo de la emisi?n."""
+    lineas = list(lineas)
+    vencimiento = _extraer_vencimiento(tipo, lineas)
+    candidatos = []
+    incompleto = False
+    for evidencia in vencimiento.get("evidencia", []):
+        if evidencia.get("par_desde"):
+            candidatos.append((evidencia["par_desde"], evidencia))
+    for linea in map(_normalizar, lineas):
+        segmentos = _segmentos(linea, _rotulos(tipo))
+        for clase, rotulo, fechas, malas in [(c, r, *_fechas(t)) for c, r, t in segmentos]:
+            if clase != INICIO:
+                continue
+            validas = [f for f in fechas if not f["hora"]]
+            candidatos.extend((f["valor"], {"rotulo": rotulo, "texto": linea}) for f in validas)
+            if malas or (not validas and not vencimiento.get("evidencia", [])):
+                incompleto = True
+            elif not validas and not any(e.get("par_desde") for e in vencimiento.get("evidencia", [])):
+                incompleto = True
+    valores = sorted({v for v, _ in candidatos})
+    fin = vencimiento.get("valor")
+    contradictorio = bool(fin and any(v >= fin for v in valores))
+    motivo = ("FECHAS_CONTRADICTORIAS" if contradictorio else "VARIAS_FECHAS" if len(valores) > 1
+              else "ILEGIBLE" if incompleto else "NO_ENCONTRADO" if not valores else "")
+    vencimiento["inicio_vigencia"] = {
+        "valor": valores[0] if not motivo else None,
+        "estado": EXTRAIDO if not motivo else PENDIENTE_REVISION,
+        "motivo": motivo, "evidencia": [e for _, e in candidatos][:10], "observados": valores,
+    }
+    return vencimiento
+
+
 # ------------------------------------------------------------------ ciclo PULL
 
 
@@ -261,13 +297,16 @@ def _confirmado_por_persona(documento: dict) -> bool:
 
 
 def _por_extraer(documento: dict) -> bool:
-    if documento.get("tipo") not in TIPOS_VEHICULO or documento.get("reemplazado_por") \
+    from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
+    if documento.get("tipo") not in (*TIPOS_VEHICULO, TIPO_PENDIENTE) or documento.get("reemplazado_por") \
             or _confirmado_por_persona(documento) or _vencimiento_automatico(documento):
         return False
     previa = documento.get("extraccion_automatica")
     if previa is None:
         return True
-    return previa.get("estado") != "COMPLETA" and int(previa.get("version") or 0) < VERSION_EXTRACCION
+    # Una lectura anterior sin tipo documental se apoyó sólo en el tipo seleccionado: se relee una vez.
+    sin_tipo = "tipo_documental" not in (previa.get("campos") or {})
+    return (previa.get("estado") != "COMPLETA" or sin_tipo) and int(previa.get("version") or 0) < VERSION_EXTRACCION
 
 
 def _ubicaciones(datos: dict) -> list[tuple[str | None, dict]]:
@@ -281,14 +320,13 @@ def _leer(carpeta: Path, documento: dict, proveedor: Callable[[], object]) -> li
         raise ValueError("Adjunto fuera de la empresa")
     if hashlib.sha256(ruta.read_bytes()).hexdigest() != str(documento.get("sha256", "")).lower():
         raise ValueError("El original no coincide con su huella registrada")
-    if ruta.suffix.lower() == ".pdf":
-        return None  # el OCR existente lee imágenes
-    return list(proveedor().leer_texto(ruta))
+    from atlas_core.lectura_documento_vehiculo import leer_texto_documento
+    return leer_texto_documento(ruta, proveedor)
 
 
 def extraer_vencimientos_vehiculos(
     raiz: str | Path, *, comprobar: Callable[[], None], fabrica_ocr: Callable[[], object],
-    empresa: str = EMPRESA_ACTUAL, actor: str = "MOTOR_OCR",
+    empresa: str = EMPRESA_ACTUAL, actor: str = "MOTOR_OCR", hoy: date | None = None,
 ) -> dict:
     """Propone una vez el vencimiento de cada documento de vehículo pendiente.
 
@@ -305,7 +343,7 @@ def extraer_vencimientos_vehiculos(
     if objetivos:
         _extraer(raiz, objetivos, resumen, comprobar=comprobar, fabrica_ocr=fabrica_ocr, empresa=empresa, actor=actor)
     # Lecturas inequívocas (nuevas o de ciclos anteriores) -> vencimiento operativo, sin OCR.
-    activacion = activar_vencimientos_extraidos(raiz, comprobar=comprobar, empresa=empresa, actor=actor)
+    activacion = activar_vencimientos_extraidos(raiz, comprobar=comprobar, empresa=empresa, actor=actor, hoy=hoy)
     resumen["activados"] = activacion["activados"]
     resumen["errores"] += activacion["errores"]
     return resumen
@@ -330,21 +368,28 @@ def _extraer(raiz, objetivos, resumen: dict, *, comprobar, fabrica_ocr, empresa:
                 logger.warning("Documento de vehículo %s sin extracción de vencimiento: %s", documento_id, error)
                 resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
                 continue
-            if lineas is None:
+            from atlas_core.lectura_documento_vehiculo import (TIPO_PENDIENTE, extraer_campos_adicionales,
+                                                               identificar_tipo_documental)
+            tipo = identificar_tipo_documental(lineas or [])
+            tipo_operativo = tipo["valor"] or TIPO_PENDIENTE
+            if lineas is None or not tipo["valor"]:
                 campo = {"valor": None, "estado": PENDIENTE_REVISION, "motivo": "FORMATO_SIN_OCR", "evidencia": [],
                          "otras_fechas": [], "observados": [], "referencias": []}
+                if lineas is not None:
+                    campo["motivo"] = "TIPO_PENDIENTE"
             else:
-                campo = extraer_vencimiento(documento["tipo"], lineas)
+                campo = extraer_vencimiento(tipo["valor"], lineas)
+            adicionales = extraer_campos_adicionales(lineas or [])
             extraccion = {
                 "version": VERSION_EXTRACCION, "fecha": _ahora(), "actor": actor, "procedencia": PROCEDENCIA,
                 "motor_ocr": type(creado[0]).__name__ if creado else "", "confirmado_por_humano": False,
-                "estado": "COMPLETA" if campo["estado"] == EXTRAIDO else "SIN_DATOS", "regla": documento["tipo"],
+                "estado": "COMPLETA" if campo["estado"] == EXTRAIDO else "SIN_DATOS", "regla": tipo_operativo,
                 "archivos": [{"archivo": documento["archivo"], "sha256": documento["sha256"]}],
-                "campos": {"vencimiento": campo},
+                "campos": {"tipo_documental": tipo, "vencimiento": campo, **adicionales},
             }
             if _registrar(raiz, ruta, empresa, documento_id, extraccion, actor, comprobar):
                 resumen["extraidos"].append({
-                    "documento_id": documento_id, "tipo": documento["tipo"], "patente": patente,
+                    "documento_id": documento_id, "tipo": tipo_operativo, "patente": patente,
                     "estado": campo["estado"], "vencimiento": campo["valor"], "motivo": campo["motivo"],
                 })
     finally:
@@ -369,6 +414,10 @@ def _registrar(raiz, ruta: Path, empresa: str, documento_id: str, extraccion: di
         if previa is not None:
             documento.setdefault("extracciones_anteriores", []).append(previa)
         documento["extraccion_automatica"] = extraccion
+        from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
+        tipo_antes = documento.get("tipo_informado") or documento.get("tipo")
+        documento["tipo_informado"] = tipo_antes
+        documento["tipo"] = extraccion["campos"]["tipo_documental"].get("valor") or TIPO_PENDIENTE
         campo = extraccion["campos"]["vencimiento"]
         evento = {"accion": "DOCUMENTO_VEHICULO_EXTRACCION_VENCIMIENTO", "actor": actor, "fecha": extraccion["fecha"],
                   "documento_id": documento_id, "tipo": documento["tipo"], "estado": campo["estado"],
@@ -405,7 +454,17 @@ def _activable(patente: str | None, documento: dict) -> bool:
             or documento.get("estado_revision") != ESTADO_PENDIENTE_EXTRACCION or documento.get("vencimiento") \
             or _confirmado_por_persona(documento):
         return False
+    # Pendiente por ambigüedad: nunca se activa solo, ni cuando el anterior vence.
+    if documento.get("posible_reemplazo"):
+        return False
     extraccion = documento.get("extraccion_automatica") or {}
+    # El tipo operativo exige evidencia OCR del mismo original; el tipo seleccionado nunca basta.
+    tipo = (extraccion.get("campos") or {}).get("tipo_documental") or {}
+    if tipo.get("estado") != EXTRAIDO or tipo.get("valor") != documento.get("tipo") or not tipo.get("evidencia"):
+        return False
+    from atlas_core.expediente_digital import TIPOS_POLIZA, _coberturas_extraidas
+    if documento.get("tipo") in TIPOS_POLIZA and not _coberturas_extraidas(extraccion):
+        return False  # una póliza sólo acredita las coberturas leídas en su original
     campo = (extraccion.get("campos") or {}).get("vencimiento") or {}
     archivos = extraccion.get("archivos") or []
     try:
@@ -419,14 +478,45 @@ def _activable(patente: str | None, documento: dict) -> bool:
             and archivos[0].get("archivo") == documento.get("archivo"))
 
 
+def _decision(datos: dict, patente: str, documento: dict, hoy: date | None = None) -> dict:
+    """Misma regla de renovación que el alta Desktop (`renovacion_documental`)."""
+    from atlas_core.expediente_digital import _coberturas_extraidas
+    from atlas_core.renovacion_documental import decidir_renovacion, inicio_acreditado
+    extraccion = documento["extraccion_automatica"]
+    campo = extraccion["campos"]["vencimiento"]
+    ficha = next((v for v in datos.get("vehiculos", []) if v.get("patente") == patente), {})
+    anteriores = []
+    for d in ficha.get("documentos", []):
+        if d.get("documento_id") == documento["documento_id"] or d.get("reemplazado_por"):
+            continue
+        vence = d.get("vencimiento")
+        if not vence and d.get("transicion_programada"):
+            # Renovación ya programada sobre un anterior: otra más sobre el mismo es ambigua.
+            vence = (((d.get("extraccion_automatica") or {}).get("campos") or {}).get("vencimiento") or {}).get("valor")
+        try:
+            date.fromisoformat(str(vence or ""))
+        except ValueError:
+            continue  # sin vencimiento operativo no acredita nada todavía
+        anteriores.append({"documento_id": d["documento_id"], "tipo": d.get("tipo"), "vencimiento": vence,
+                           "coberturas": _coberturas_extraidas(d.get("extraccion_automatica") or {}),
+                           "origenes": [d.get("origen_documento_id"), *d.get("origenes_adicionales", [])]})
+    nuevo = {"tipo": documento["tipo"], "tipo_informado": documento.get("tipo_informado"), "vencimiento": campo["valor"],
+             "inicio": inicio_acreditado(campo), "estado_inicio": campo.get("inicio_vigencia"), "coberturas": _coberturas_extraidas(extraccion),
+             "reemplaza": documento.get("reemplaza_origen_id") or ""}
+    return decidir_renovacion(nuevo, anteriores, hoy or date.today())
+
+
 def activar_vencimientos_extraidos(
     raiz: str | Path, *, comprobar: Callable[[], None], empresa: str = EMPRESA_ACTUAL, actor: str = "MOTOR_OCR",
+    hoy: date | None = None,
 ) -> dict:
     """Registra como vencimiento operativo cada lectura inequívoca ya extraída.
 
     No ejecuta OCR: usa `extraccion_automatica` y verifica que el original
     conserve su huella. No toca archivo, sha256, patente, asociación ni la
-    lectura; una abstención o un dato humano nunca se activan."""
+    lectura; una abstención o un dato humano nunca se activan. Una renovación
+    sigue `renovacion_documental`: reemplaza, se programa o queda pendiente."""
+    from atlas_core.renovacion_documental import PENDIENTE, PROGRAMAR
     resumen: dict = {"activados": [], "errores": []}
     datos = leer_almacen(raiz, empresa=empresa)
     if not datos or datos.get("version") != VERSION:
@@ -435,6 +525,11 @@ def activar_vencimientos_extraidos(
     for patente, documento in [(p, d) for p, d in _ubicaciones(datos) if _activable(p, d)]:
         comprobar()
         documento_id = documento["documento_id"]
+        decision = _decision(datos, patente, documento, hoy)
+        if decision["accion"] in (PENDIENTE, PROGRAMAR):
+            if _marca(decision) != _marca_registrada(documento, decision):
+                _marcar(raiz, ruta, empresa, documento_id, decision, actor, comprobar, hoy)
+            continue
         original = (ruta.parent / documento["archivo"]).resolve()
         try:
             if not original.is_relative_to(ruta.parent.resolve()) or \
@@ -443,14 +538,74 @@ def activar_vencimientos_extraidos(
         except (OSError, ValueError) as error:
             resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
             continue
-        valor = _activar(raiz, ruta, empresa, documento_id, actor, comprobar)
+        valor = _activar(raiz, ruta, empresa, documento_id, actor, comprobar, hoy)
         if valor:
             resumen["activados"].append({"documento_id": documento_id, "tipo": documento["tipo"], "patente": patente,
                                          "vencimiento": valor})
     return resumen
 
 
-def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comprobar: Callable[[], None]) -> str | None:
+_CLAVE_MARCA = {"PENDIENTE": "posible_reemplazo", "PROGRAMAR": "transicion_programada"}
+
+
+def _marca(decision: dict) -> dict:
+    if decision["accion"] == "PENDIENTE":
+        return {"documentos": decision["documentos"], "motivo": decision["motivo"]}
+    return {"fecha": decision["fecha"], "reemplaza": decision["documentos"]}
+
+
+def _marca_registrada(documento: dict, decision: dict) -> dict:
+    registrada = documento.get(_CLAVE_MARCA[decision["accion"]]) or {}
+    return {k: registrada.get(k) for k in _marca(decision)}
+
+
+def _escribir(raiz, ruta: Path, empresa: str, anterior: dict, propuesta: dict, actor: str, operacion: str,
+              detalle: dict, comprobar: Callable[[], None]) -> None:
+    propuesta["revision"] = int(anterior["revision"]) + 1
+    _validar_v2(propuesta)
+    _validar_vehiculos(propuesta)
+    respaldo = Path(raiz) / "respaldos" / "fichas_choferes" / uuid.uuid4().hex
+    respaldo.mkdir(parents=True)
+    shutil.copy2(ruta, respaldo / ruta.name)
+    escribir_json_atomico(respaldo / "manifest.json", {
+        "empresa": empresa, "actor": actor, "operacion": operacion, **detalle,
+        "revision_anterior": anterior["revision"], "ruta_relativa": str(ruta.relative_to(raiz)),
+    })
+    comprobar()
+    escribir_json_atomico(ruta, propuesta)
+
+
+def _marcar(raiz, ruta: Path, empresa: str, documento_id: str, esperada: dict, actor: str,
+            comprobar: Callable[[], None], hoy: date | None) -> None:
+    """Deja constancia de la renovación pendiente o programada; no toca el anterior ni activa nada."""
+    with bloqueo_sesion(Path(raiz) / "operacion" / "actual", "fichas_choferes_" + empresa):
+        anterior = leer_almacen(raiz, empresa=empresa)
+        propuesta = copy.deepcopy(anterior)
+        actual = next(((p, d) for p, d in _ubicaciones(propuesta) if d.get("documento_id") == documento_id), None)
+        if actual is None or not _activable(*actual):
+            return
+        patente, documento = actual
+        decision = _decision(propuesta, patente, documento, hoy)
+        if decision["accion"] != esperada["accion"] or _marca(decision) == _marca_registrada(documento, decision):
+            return
+        instante = _ahora()
+        documento[_CLAVE_MARCA[decision["accion"]]] = {**_marca(decision), "motivo": decision["motivo"],
+                                                       "registrado": instante}
+        accion = "DOCUMENTO_VEHICULO_POSIBLE_REEMPLAZO" if decision["accion"] == "PENDIENTE" \
+            else "DOCUMENTO_VEHICULO_REEMPLAZO_PROGRAMADO"
+        ficha = next(v for v in propuesta["vehiculos"] if v.get("patente") == patente)
+        ficha.setdefault("historial", []).append({
+            "accion": accion, "actor": actor, "fecha": instante, "documento_id": documento_id, "tipo": documento["tipo"],
+            "tipo_informado": documento.get("tipo_informado"), "anteriores": decision["documentos"],
+            "motivo": decision["motivo"], "desde": decision["fecha"],
+        })
+        _escribir(raiz, ruta, empresa, anterior, propuesta, actor, "RENOVACION_" + decision["accion"],
+                  {"documento_id": documento_id, "patente": patente, "anteriores": decision["documentos"]}, comprobar)
+
+
+def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comprobar: Callable[[], None],
+             hoy: date | None = None) -> str | None:
+    from atlas_core.renovacion_documental import ACTIVAR, REEMPLAZAR
     with bloqueo_sesion(Path(raiz) / "operacion" / "actual", "fichas_choferes_" + empresa):
         anterior = leer_almacen(raiz, empresa=empresa)
         propuesta = copy.deepcopy(anterior)
@@ -459,6 +614,9 @@ def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comp
         if actual is None or not _activable(*actual):
             return None
         patente, documento = actual
+        decision = _decision(propuesta, patente, documento, hoy)
+        if decision["accion"] not in (ACTIVAR, REEMPLAZAR):
+            return None
         extraccion = documento["extraccion_automatica"]
         campo = extraccion["campos"]["vencimiento"]
         instante = _ahora()
@@ -470,24 +628,26 @@ def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comp
             "fecha_extraccion": extraccion["fecha"], "motor_ocr": extraccion.get("motor_ocr", ""),
             "archivo": documento["archivo"], "sha256": documento["sha256"], "evidencia": campo["evidencia"],
         }
+        programada = documento.pop("transicion_programada", None)
         ficha = next(v for v in propuesta["vehiculos"] if v.get("patente") == patente)
+        # El anterior se retira sólo con sustitución inequívoca; su original e historial se conservan.
+        for previo in ficha.get("documentos", []):
+            if previo.get("documento_id") in decision["documentos"]:
+                previo["reemplazado_por"] = documento_id
+                ficha.setdefault("historial", []).append({
+                    "accion": "DOCUMENTO_VEHICULO_REEMPLAZADO", "actor": actor, "fecha": instante,
+                    "documento_id": previo["documento_id"], "reemplazado_por": documento_id,
+                    "reemplaza_origen_id": documento.get("reemplaza_origen_id", ""),
+                    "explicito": bool(documento.get("reemplaza_origen_id")),
+                    "programado_desde": (programada or {}).get("fecha", ""),
+                })
         ficha.setdefault("historial", []).append({
             "accion": "DOCUMENTO_VEHICULO_VENCIMIENTO_AUTOMATICO", "actor": actor, "fecha": instante,
             "documento_id": documento_id, "tipo": documento["tipo"], "vencimiento": campo["valor"],
             "procedencia": PROCEDENCIA_VENCIMIENTO, "confirmado_por_humano": False,
             "version_extraccion": extraccion["version"],
         })
-        propuesta["revision"] = int(anterior["revision"]) + 1
-        _validar_v2(propuesta)
-        _validar_vehiculos(propuesta)
-        respaldo = Path(raiz) / "respaldos" / "fichas_choferes" / uuid.uuid4().hex
-        respaldo.mkdir(parents=True)
-        shutil.copy2(ruta, respaldo / ruta.name)
-        escribir_json_atomico(respaldo / "manifest.json", {
-            "empresa": empresa, "actor": actor, "operacion": "ACTIVACION_VENCIMIENTO_AUTOMATICO_DOCUMENTO_VEHICULO",
-            "documento_id": documento_id, "patente": patente, "vencimiento": campo["valor"],
-            "revision_anterior": anterior["revision"], "ruta_relativa": str(ruta.relative_to(raiz)),
-        })
-        comprobar()
-        escribir_json_atomico(ruta, propuesta)
+        _escribir(raiz, ruta, empresa, anterior, propuesta, actor, "ACTIVACION_VENCIMIENTO_AUTOMATICO_DOCUMENTO_VEHICULO",
+                  {"documento_id": documento_id, "patente": patente, "vencimiento": campo["valor"],
+                   "reemplaza": decision["documentos"]}, comprobar)
         return campo["valor"]

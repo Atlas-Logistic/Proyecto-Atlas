@@ -12,7 +12,7 @@ catálogo de vehículos (sólo vehículos CONFIRMADOS y ACTIVOS):
   `asociacion.metodo = PATENTE_DOCUMENTAL` y el tipo del vehículo (tracto,
   carro o camión rígido), aunque no sea la patente que fijó Cloud.
 - Varias patentes, una lectura que sólo calza corrigiendo el OCR, una
-  patente desconocida o no confirmada, ninguna patente, un PDF o un error de
+  patente desconocida o no confirmada, ninguna patente, un PDF ilegible o un error de
   OCR -> `documentos_vehiculo_pendientes` con motivo y candidatos; un
   documento que estaba sólo por asignación también vuelve ahí. Nunca se
   inventa ni se corrige una patente.
@@ -40,10 +40,11 @@ from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, es_confusio
 from atlas_core.extractor import patente_tiene_formato_chileno_estandar
 from atlas_core.fichas_choferes import EMPRESA_ACTUAL, VERSION, _ahora, _validar_v2, leer_almacen, ruta_almacen
 from atlas_core.fichas_vehiculos import ESTADO_PENDIENTE_CLASIFICACION, PENDIENTES, TIPOS_VEHICULO, _validar_vehiculos
+from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
 
 logger = logging.getLogger(__name__)
 
-VERSION_IDENTIFICACION = 1
+VERSION_IDENTIFICACION = 2
 METODO = "PATENTE_DOCUMENTAL"
 _ROTULO = re.compile(r"\b(?:PATENTE|PPU|PLACA|INSCRIPCION)\b")
 # Desde 2007 las patentes usan sólo consonantes: "HORA 12" nunca es patente.
@@ -135,9 +136,11 @@ def _es_humana(documento: dict) -> bool:
 
 def _por_identificar(documento: dict) -> bool:
     previa = documento.get("identificacion_patente")
-    return (documento.get("tipo") in TIPOS_VEHICULO and documento.get("origen") == "MOBILE"
+    # Un documento cuyo tipo quedó pendiente por OCR sigue siendo vehicular.
+    return (documento.get("tipo") in (*TIPOS_VEHICULO, TIPO_PENDIENTE) and documento.get("origen") == "MOBILE"
             and not documento.get("reemplazado_por") and not _es_humana(documento)
-            and (previa is None or int(previa.get("version") or 0) < VERSION_IDENTIFICACION))
+            and (previa is None or (int(previa.get("version") or 0) < VERSION_IDENTIFICACION
+                 and previa.get("motivo") == "FORMATO_SIN_OCR" and str(documento.get("archivo", "")).lower().endswith(".pdf"))))
 
 
 def _ubicaciones(datos: dict) -> list[tuple[str | None, dict]]:
@@ -152,9 +155,8 @@ def _leer(carpeta: Path, documento: dict, proveedor: Callable[[], object]) -> li
         raise ValueError("Adjunto fuera de la empresa")
     if hashlib.sha256(ruta.read_bytes()).hexdigest() != str(documento.get("sha256", "")).lower():
         raise ValueError("El original no coincide con su huella registrada")
-    if ruta.suffix.lower() == ".pdf":
-        return None  # el OCR existente lee imágenes
-    return list(proveedor().leer_texto(ruta))
+    from atlas_core.lectura_documento_vehiculo import leer_texto_documento
+    return leer_texto_documento(ruta, proveedor)
 
 
 def identificar_patentes_documentos(
