@@ -4,6 +4,50 @@ from tempfile import TemporaryDirectory
 import re
 import unicodedata
 
+TIPO_PENDIENTE = "DOCUMENTO_VEHICULO_PENDIENTE"
+
+
+def identificar_tipo_documental(lineas):
+    """Clasifica por títulos explícitos; títulos incompatibles obligan a abstenerse."""
+    reglas = {
+        "SOAP": r"\bSOAP\b|\bSEGURO\s+OBLIGATORIO\s+DE?\s*ACCIDENTES\s+PERSONALES\b",
+        "REVISION_TECNICA": r"\bCERTIFICADO\s+DE\s+REVISION\s+TECNICA\b|\bREVISION\s+TECNICA\s+VEHICULAR\b",
+        "CERTIFICADO_EMISION_GASES": r"\bCERTIFICADO\s+DE\s+EMISION(?:ES)?\s+(?:DE\s+)?(?:GASES|CONTAMINANTES)\b",
+        "PERMISO_CIRCULACION": r"\bPERMISO\s+DE\s+CIRCULACION\b",
+        "POLIZA_RESPONSABILIDAD_CIVIL": r"\bPOLIZA\s+(?:DE\s+)?(?:SEGURO\s+DE\s+)?RESPONSABILIDAD\s+CIVIL\b",
+        "POLIZA_ROBO": r"\bPOLIZA\s+(?:DE\s+)?(?:SEGURO\s+)?(?:CONTRA\s+)?ROBOS?\b",
+    }
+    evidencias = {}
+    normalizadas = []
+    for linea in lineas:
+        texto = unicodedata.normalize("NFKD", str(linea).upper())
+        texto = " ".join("".join(c for c in texto if not unicodedata.combining(c)).split())
+        normalizadas.append(texto)
+        for tipo, patron in reglas.items():
+            if re.search(patron, texto):
+                evidencias.setdefault(tipo, []).append(texto)
+        compacto = re.sub(r"\s+", "", texto)
+        if "CERTIFICADODEREVISIONTECNICA" in compacto:
+            evidencias.setdefault("REVISION_TECNICA", []).append(texto)
+    if (any("SEGURO OBLIGATORIO ACCIDENTES" in x for x in normalizadas)
+            and any("PERSONALES" in x for x in normalizadas)):
+        evidencias.setdefault("SOAP", []).extend(x for x in normalizadas if "SEGURO OBLIGATORIO ACCIDENTES" in x)
+    polizas = {"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"}
+    if any(re.search(r"\bPOLIZA\b", texto) for texto in normalizadas):
+        cobertura = extraer_campos_adicionales(normalizadas)["coberturas"]
+        if cobertura["estado"] == "EXTRAIDO":
+            for tipo in cobertura["valor"]:
+                evidencias.setdefault(tipo, []).extend(cobertura["evidencia"])
+    encontrados = set(evidencias)
+    if encontrados and encontrados <= polizas:
+        # Una póliza con dos coberturas sigue siendo un único documento.
+        tipo = "POLIZA_RESPONSABILIDAD_CIVIL" if "POLIZA_RESPONSABILIDAD_CIVIL" in encontrados else "POLIZA_ROBO"
+    else:
+        tipo = next(iter(encontrados)) if len(encontrados) == 1 else None
+    return {"valor": tipo, "estado": "EXTRAIDO" if tipo else "PENDIENTE_REVISION",
+            "motivo": "" if tipo else "VARIOS_TIPOS" if encontrados else "NO_ENCONTRADO",
+            "candidatos": sorted(encontrados), "evidencia": [e for t in sorted(evidencias) for e in evidencias[t]][:10]}
+
 
 def leer_texto_documento(ruta: Path, proveedor, *, directorio_temporal: Path | None = None):
     """Lee todas las páginas; un PDF incompleto nunca produce una lectura parcial."""

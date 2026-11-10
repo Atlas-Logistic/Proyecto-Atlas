@@ -55,14 +55,18 @@ def test_alta_desktop_ocr_custodia_y_consulta(raiz, monkeypatch, formato, tipo):
     archivo.write_bytes(contenido)
     previo = registrar_documento(raiz, empresa="MBT", entidad="VEHICULO", referencia=PATENTE, tipo=tipo,
                                  fecha_vencimiento="2026-12-31", actor="TEST", reloj=RELOJ)
-    doc, ocr = ejecutar_alta(raiz, archivo, monkeypatch, ["PATENTE KN5439", "FECHA DE EMISION: 01/10/2026",
-        "VENCIMIENTO: 30/09/2027", "ASEGURADORA: COMPANIA EJEMPLO", "POLIZA: ABC123",
-        "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO"], tipo=tipo)
+    titulos = {"SOAP": "SOAP", "REVISION_TECNICA": "CERTIFICADO DE REVISION TECNICA",
+               "PERMISO_CIRCULACION": "PERMISO DE CIRCULACION", "CERTIFICADO_EMISION_GASES": "CERTIFICADO DE EMISION DE GASES",
+               "POLIZA_RESPONSABILIDAD_CIVIL": "POLIZA DE RESPONSABILIDAD CIVIL", "POLIZA_ROBO": "POLIZA DE ROBO"}
+    cobertura = "COBERTURA: ROBO" if tipo == "POLIZA_ROBO" else "COBERTURA: RESPONSABILIDAD CIVIL"
+    doc, ocr = ejecutar_alta(raiz, archivo, monkeypatch, [titulos[tipo], "PATENTE KN5439", "FECHA DE EMISION: 01/10/2026",
+        "VENCIMIENTO: 30/09/2027", "ASEGURADORA: COMPANIA EJEMPLO", "POLIZA: ABC123"] +
+        ([cobertura] if tipo.startswith("POLIZA_") else []), tipo=tipo)
     assert ocr.cerrado and ocr.rutas == ([".png"] if formato == "pdf" else ["." + formato])
     assert not doc["pendiente_revision"] and doc["fecha_vencimiento"] == "2027-09-30"
     campos = doc["extraccion_automatica"]["campos"]
     assert campos["patente"]["valor"] == PATENTE and campos["numero_poliza"]["valor"] == "ABC123"
-    assert campos["coberturas"]["valor"] == ["POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"]
+    assert campos["tipo_documental"]["valor"] == tipo
     assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == contenido == archivo.read_bytes()
     consulta = consultar_expediente(raiz, empresa="MBT", entidad="VEHICULO", referencia=PATENTE)
     assert consulta["documentos"][0]["documento_id"] == doc["documento_id"]
@@ -70,8 +74,8 @@ def test_alta_desktop_ocr_custodia_y_consulta(raiz, monkeypatch, formato, tipo):
 
 
 @pytest.mark.parametrize("lineas", [
-    ["PATENTE KN5439", "VENCE: 30/09/2027", "VENCE: 31/03/2027", "POLIZA: ABC123"],
-    ["PATENTE ZZ1234", "VENCE: 30/09/2027", "POLIZA: ABC123"],
+    ["SOAP", "PATENTE KN5439", "VENCE: 30/09/2027", "VENCE: 31/03/2027", "POLIZA: ABC123"],
+    ["SOAP", "PATENTE ZZ1234", "VENCE: 30/09/2027", "POLIZA: ABC123"],
 ])
 def test_dato_ambiguo_no_reemplaza_documento_anterior(raiz, monkeypatch, lineas):
     previo = registrar_documento(raiz, empresa="MBT", entidad="VEHICULO", referencia=PATENTE, tipo="SOAP",

@@ -19,7 +19,7 @@ JPEG = b"\xff\xd8\xff\xe0foto-sintetica"
 
 class OCR:
     def __init__(self, patente, cobertura, vencimiento="30/09/2027"):
-        self.lineas = [f"PATENTE {patente}", f"VENCIMIENTO: {vencimiento}", cobertura]
+        self.lineas = ["POLIZA", f"PATENTE {patente}", f"VENCIMIENTO: {vencimiento}", cobertura]
 
     def leer_texto(self, ruta):
         return self.lineas

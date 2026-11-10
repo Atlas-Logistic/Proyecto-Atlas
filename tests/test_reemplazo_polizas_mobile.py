@@ -31,8 +31,8 @@ def test_cloud_motor_expediente_reemplazo_explicito_o_independiente(raiz, cobert
     doc2 = _doc_cloud("origen_nuevo", tipo_nuevo, SOLO, "CC5678", nuevo)
     if vinculo:
         doc2["reemplaza_documento_id"] = "origen_viejo"
-    textos = {viejo: ["PATENTE CC5678", "VENCE: 30/09/2027", "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO"],
-              nuevo: ["PATENTE CC5678", "VENCE: 30/09/2028", "COBERTURAS: " + cobertura]}
+    textos = {viejo: ["POLIZA", "PATENTE CC5678", "VENCE: 30/09/2027", "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO"],
+              nuevo: ["POLIZA", "PATENTE CC5678", "VENCE: 30/09/2028", "COBERTURAS: " + cobertura]}
     assert not _sincronizar(raiz, CloudFalso([doc1]))["errores"]
     extraer(raiz, textos)
     assert not _sincronizar(raiz, CloudFalso([doc2]))["errores"]
@@ -57,8 +57,8 @@ def test_vinculo_no_resuelto_o_cobertura_ambigua_no_retira_anterior(raiz, origen
     viejo, nuevo = JPEG("v"), JPEG("n")
     doc1 = _doc_cloud("origen_viejo", RC, SOLO, "CC5678", viejo)
     doc2 = {**_doc_cloud("origen_nuevo", RC, SOLO, "CC5678", nuevo), "reemplaza_documento_id": origen}
-    textos = {viejo: ["PATENTE CC5678", "VENCE: 30/09/2027", "COBERTURA: RESPONSABILIDAD CIVIL"],
-              nuevo: ["PATENTE CC5678", "VENCE: 30/09/2028", "COBERTURA: " + cobertura]}
+    textos = {viejo: ["POLIZA", "PATENTE CC5678", "VENCE: 30/09/2027", "COBERTURA: RESPONSABILIDAD CIVIL"],
+              nuevo: ["POLIZA", "PATENTE CC5678", "VENCE: 30/09/2028", "COBERTURA: " + cobertura]}
     _sincronizar(raiz, CloudFalso([doc1])); extraer(raiz, textos)
     _sincronizar(raiz, CloudFalso([doc2])); extraer(raiz, textos)
     assert not _vehiculo(raiz, "CC5678")["documentos"][0].get("reemplazado_por")

@@ -199,6 +199,7 @@ def registrar_documento_vehiculo_mobile(
                 "origen": "MOBILE", "origen_documento_id": origen_documento_id, "archivo": relativo.as_posix(),
                 "sha256": original["sha256"], "bytes": len(original["contenido"]), "mime_type": mime_type,
                 "creado_en": instante, "recibido_en": procedencia["recibido_en"], "procedencia": procedencia,
+                "tipo_documental_requiere_ocr": tipo in TIPOS_VEHICULO,
             }
             if reemplaza_origen_id:
                 documento["reemplaza_origen_id"] = reemplaza_origen_id

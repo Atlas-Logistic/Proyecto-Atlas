@@ -10,12 +10,16 @@ from tests.test_identificacion_patentes import TRACTO, _recibir, _ubicar, raiz  
 
 
 class OCR:
-    def __init__(self):
+    def __init__(self, tipo="SOAP"):
         self.rutas = []
+        self.tipo = tipo
 
     def leer_texto(self, ruta):
         self.rutas.append(ruta.suffix)
-        return ["PATENTE BPHR67", "FECHA DE EMISION: 01/10/2026", "VENCIMIENTO: 30/09/2027",
+        titulos = {"SOAP": "SOAP", "REVISION_TECNICA": "CERTIFICADO DE REVISION TECNICA",
+                   "PERMISO_CIRCULACION": "PERMISO DE CIRCULACION", "CERTIFICADO_EMISION_GASES": "CERTIFICADO DE EMISION DE GASES",
+                   "POLIZA_RESPONSABILIDAD_CIVIL": "POLIZA DE RESPONSABILIDAD CIVIL", "POLIZA_ROBO": "POLIZA DE ROBO"}
+        return [titulos[self.tipo], "PATENTE BPHR67", "FECHA DE EMISION: 01/10/2026", "VENCIMIENTO: 30/09/2027",
                 "ASEGURADORA: COMPANIA EJEMPLO", "POLIZA: ABC123"]
 
 
@@ -27,7 +31,7 @@ def test_lectura_mobile_reutiliza_ocr_y_conserva_original(raiz, tipo, formato):
                  construir_pdf([pagina_escaneada("documento sintetico")]))
     doc_id, _ = _recibir(raiz, formato + tipo, tipo=tipo, contenido=contenido,
                          mime="image/jpeg" if formato == "imagen" else "application/pdf")
-    ocr = OCR()
+    ocr = OCR(tipo)
     identificar_patentes_documentos(raiz, comprobar=lambda: None, fabrica_ocr=lambda: ocr)
     extraer_vencimientos_vehiculos(raiz, comprobar=lambda: None, fabrica_ocr=lambda: ocr)
     patente, documento = _ubicar(raiz, doc_id)
@@ -60,7 +64,7 @@ def test_pdf_multipagina_y_fallo_no_produce_lectura_parcial(tmp_path):
     ruta = tmp_path / "documento.pdf"
     ruta.write_bytes(construir_pdf([pagina_escaneada("pagina uno"), pagina_escaneada("pagina dos")]))
     ocr = OCR()
-    assert len(leer_texto_documento(ruta, lambda: ocr)) == 10
+    assert len(leer_texto_documento(ruta, lambda: ocr)) == 12
     assert ocr.rutas == [".png", ".png"]
 
     class Falla(OCR):

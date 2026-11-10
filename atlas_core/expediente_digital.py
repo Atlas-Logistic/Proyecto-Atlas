@@ -442,7 +442,7 @@ def registrar_documento_vehiculo_desktop(
     from atlas_core.extraccion_vencimientos_vehiculos import extraer_vencimiento
     from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
     from atlas_core.identificacion_patentes import identificar_patente
-    from atlas_core.lectura_documento_vehiculo import leer_texto_documento, extraer_campos_adicionales
+    from atlas_core.lectura_documento_vehiculo import leer_texto_documento, extraer_campos_adicionales, identificar_tipo_documental, TIPO_PENDIENTE
 
     if tipo not in TIPOS_VEHICULO:
         raise ErrorExpedienteDigital("tipo vehicular sin procesamiento OCR")
@@ -453,7 +453,7 @@ def registrar_documento_vehiculo_desktop(
     proveedor = None
     lectura = {"estado": "PENDIENTE_REVISION", "motivo": "ERROR_OCR", "campos": {
         nombre: {"valor": None, "estado": PENDIENTE_REVISION, "motivo": "ERROR_OCR", "evidencia": []}
-        for nombre in ("patente", "emision", "vencimiento", "aseguradora", "numero_poliza", "coberturas")}}
+        for nombre in ("tipo_documental", "patente", "emision", "vencimiento", "aseguradora", "numero_poliza", "coberturas")}}
     try:
         if hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
             raise ValueError("Original alterado")
@@ -467,7 +467,10 @@ def registrar_documento_vehiculo_desktop(
         else:
             catalogo = cargar_catalogo_vehiculos(Path(raiz) / "catalogos_privados" / "vehiculos.json")
             patente = identificar_patente(lineas, catalogo)
-            campos = {"vencimiento": extraer_vencimiento(tipo, lineas), **extraer_campos_adicionales(lineas)}
+            tipo_ocr = identificar_tipo_documental(lineas)
+            vencimiento = (extraer_vencimiento(tipo_ocr["valor"], lineas) if tipo_ocr["valor"] else
+                           {"valor": None, "estado": PENDIENTE_REVISION, "motivo": "TIPO_PENDIENTE", "evidencia": []})
+            campos = {"tipo_documental": tipo_ocr, "vencimiento": vencimiento, **extraer_campos_adicionales(lineas)}
             campos["patente"] = {"valor": patente["patente"], "estado": "EXTRAIDO" if patente["patente"] else PENDIENTE_REVISION,
                                  "motivo": patente["motivo"], "evidencia": patente["evidencia"]}
             lectura = {"estado": "COMPLETA", "motivo": "", "campos": campos}
@@ -489,6 +492,9 @@ def registrar_documento_vehiculo_desktop(
                 hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
             raise ErrorExpedienteDigital("El original cambió durante la lectura")
         campos = lectura["campos"]
+        tipo_detectado = (campos.get("tipo_documental") or {}).get("valor")
+        actual["tipo_informado"] = tipo
+        actual["tipo"] = tipo_detectado or TIPO_PENDIENTE
         p = (campos.get("patente") or {}).get("valor")
         if p and _referencia_vehiculo(_carpeta(raiz, None), p) != actual["referencia_catalogo"]:
             campos["patente"].update(valor=None, observado=p, estado=PENDIENTE_REVISION, motivo="PATENTE_DISTINTA")
@@ -509,16 +515,16 @@ def registrar_documento_vehiculo_desktop(
         actual["fecha_vencimiento"] = vencimiento
         reemplazados = []
         indice = datos["documentos"].index(actual)
-        posterior_activo = any(d["expediente_id"] == actual["expediente_id"] and d["tipo"] == tipo
+        posterior_activo = any(d["expediente_id"] == actual["expediente_id"] and d["tipo"] == tipo_detectado
                                and d["estado"] == ACTIVO and not d.get("pendiente_revision")
                                for d in datos["documentos"][indice + 1:])
-        coberturas = _coberturas_extraidas(lectura) if tipo in TIPOS_POLIZA else []
-        if p and vencimiento and not posterior_activo and (tipo not in TIPOS_POLIZA or coberturas):
+        coberturas = _coberturas_extraidas(lectura) if tipo_detectado in TIPOS_POLIZA else []
+        if tipo_detectado and p and vencimiento and not posterior_activo and (tipo_detectado not in TIPOS_POLIZA or coberturas):
             actual["pendiente_revision"] = False
             for previo in datos["documentos"]:
                 if previo is not actual and previo["expediente_id"] == actual["expediente_id"] \
-                        and previo["tipo"] == tipo and previo["estado"] == ACTIVO and not previo.get("pendiente_revision") \
-                        and (tipo not in TIPOS_POLIZA or tipo in coberturas):
+                        and previo["tipo"] == tipo_detectado and previo["estado"] == ACTIVO and not previo.get("pendiente_revision") \
+                        and tipo == tipo_detectado and (tipo_detectado not in TIPOS_POLIZA or tipo_detectado in coberturas):
                     previo.update(estado=REEMPLAZADO, reemplazado_por=actual["documento_id"])
                     reemplazados.append(previo["documento_id"])
         _evento(datos, "DOCUMENTO_EXTRACCION_OCR", "MOTOR_OCR", _instante(reloj),
@@ -609,15 +615,18 @@ def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente:
         "fuente": fuente, "pendiente_revision": not vencimiento,
         "confirmado_por_humano": bool(vencimiento) and doc.get("estado_revision") != _ESTADO_OCR_AUTOMATICO,
     }
-    if doc.get("tipo") in TIPOS_POLIZA:
+    if doc.get("tipo") in TIPOS_POLIZA or doc.get("tipo") == "DOCUMENTO_VEHICULO_PENDIENTE":
         vista.update(extraccion_automatica=doc.get("extraccion_automatica"),
                      identificacion_patente=doc.get("identificacion_patente"), asociacion=doc.get("asociacion"),
-                     vencimiento_registro=doc.get("vencimiento_registro"), patente_ficha=patente_ficha)
+                     vencimiento_registro=doc.get("vencimiento_registro"), patente_ficha=patente_ficha,
+                     tipo_informado=doc.get("tipo_informado"))
     return vista
 
 
 def _vista_coberturas(documento: dict) -> dict:
     """Una sola entrada documental, con requisitos derivados del OCR de su original."""
+    if documento.get("tipo") == "DOCUMENTO_VEHICULO_PENDIENTE" and documento.get("tipo_informado") in TIPOS_POLIZA:
+        return {**documento, "tipos_cubiertos": [], "pendiente_revision": True}
     if documento.get("tipo") not in TIPOS_POLIZA:
         return documento
     extraccion = documento.get("extraccion_automatica") or {}
@@ -711,7 +720,7 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
 def _ausentes(tipos: dict, entidad: str, documentos: list[dict]) -> list[dict]:
     presentes, pendientes = set(), set()
     for d in documentos:
-        if d["tipo"] in TIPOS_POLIZA:
+        if d["tipo"] in TIPOS_POLIZA or (d["tipo"] == "DOCUMENTO_VEHICULO_PENDIENTE" and d.get("tipo_informado") in TIPOS_POLIZA):
             if d["estado_vencimiento"] == PENDIENTE_REVISION:
                 pendientes.update(TIPOS_POLIZA)
             elif d["estado_vencimiento"] not in (VENCIDO, FECHA_INVALIDA, SIN_VENCIMIENTO):

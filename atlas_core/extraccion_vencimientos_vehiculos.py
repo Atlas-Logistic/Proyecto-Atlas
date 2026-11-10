@@ -49,7 +49,7 @@ from atlas_core.fichas_vehiculos import PENDIENTES, TIPOS_VEHICULO, _validar_veh
 
 logger = logging.getLogger(__name__)
 
-VERSION_EXTRACCION = 2
+VERSION_EXTRACCION = 3
 PROCEDENCIA = "AUTOMATICA_OCR"
 # Vencimiento operativo registrado sin intervención humana.
 ESTADO_VENCIMIENTO_AUTOMATICO = "VENCIMIENTO_OCR_AUTOMATICO"
@@ -261,7 +261,8 @@ def _confirmado_por_persona(documento: dict) -> bool:
 
 
 def _por_extraer(documento: dict) -> bool:
-    if documento.get("tipo") not in TIPOS_VEHICULO or documento.get("reemplazado_por") \
+    from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
+    if documento.get("tipo") not in (*TIPOS_VEHICULO, TIPO_PENDIENTE) or documento.get("reemplazado_por") \
             or _confirmado_por_persona(documento) or _vencimiento_automatico(documento):
         return False
     previa = documento.get("extraccion_automatica")
@@ -329,19 +330,22 @@ def _extraer(raiz, objetivos, resumen: dict, *, comprobar, fabrica_ocr, empresa:
                 logger.warning("Documento de vehículo %s sin extracción de vencimiento: %s", documento_id, error)
                 resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
                 continue
-            if lineas is None:
+            from atlas_core.lectura_documento_vehiculo import extraer_campos_adicionales, identificar_tipo_documental
+            tipo = identificar_tipo_documental(lineas or [])
+            if lineas is None or not tipo["valor"]:
                 campo = {"valor": None, "estado": PENDIENTE_REVISION, "motivo": "FORMATO_SIN_OCR", "evidencia": [],
                          "otras_fechas": [], "observados": [], "referencias": []}
+                if lineas is not None:
+                    campo["motivo"] = "TIPO_PENDIENTE"
             else:
-                campo = extraer_vencimiento(documento["tipo"], lineas)
-            from atlas_core.lectura_documento_vehiculo import extraer_campos_adicionales
+                campo = extraer_vencimiento(tipo["valor"], lineas)
             adicionales = extraer_campos_adicionales(lineas or [])
             extraccion = {
                 "version": VERSION_EXTRACCION, "fecha": _ahora(), "actor": actor, "procedencia": PROCEDENCIA,
                 "motor_ocr": type(creado[0]).__name__ if creado else "", "confirmado_por_humano": False,
                 "estado": "COMPLETA" if campo["estado"] == EXTRAIDO else "SIN_DATOS", "regla": documento["tipo"],
                 "archivos": [{"archivo": documento["archivo"], "sha256": documento["sha256"]}],
-                "campos": {"vencimiento": campo, **adicionales},
+                "campos": {"tipo_documental": tipo, "vencimiento": campo, **adicionales},
             }
             if _registrar(raiz, ruta, empresa, documento_id, extraccion, actor, comprobar):
                 resumen["extraidos"].append({
@@ -370,6 +374,10 @@ def _registrar(raiz, ruta: Path, empresa: str, documento_id: str, extraccion: di
         if previa is not None:
             documento.setdefault("extracciones_anteriores", []).append(previa)
         documento["extraccion_automatica"] = extraccion
+        from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
+        tipo_antes = documento.get("tipo_informado") or documento.get("tipo")
+        documento["tipo_informado"] = tipo_antes
+        documento["tipo"] = extraccion["campos"]["tipo_documental"].get("valor") or TIPO_PENDIENTE
         campo = extraccion["campos"]["vencimiento"]
         evento = {"accion": "DOCUMENTO_VEHICULO_EXTRACCION_VENCIMIENTO", "actor": actor, "fecha": extraccion["fecha"],
                   "documento_id": documento_id, "tipo": documento["tipo"], "estado": campo["estado"],
@@ -407,6 +415,10 @@ def _activable(patente: str | None, documento: dict) -> bool:
             or _confirmado_por_persona(documento):
         return False
     extraccion = documento.get("extraccion_automatica") or {}
+    if documento.get("tipo_documental_requiere_ocr"):
+        tipo = (extraccion.get("campos") or {}).get("tipo_documental") or {}
+        if tipo.get("estado") != EXTRAIDO or tipo.get("valor") != documento.get("tipo") or not tipo.get("evidencia"):
+            return False
     campo = (extraccion.get("campos") or {}).get("vencimiento") or {}
     archivos = extraccion.get("archivos") or []
     try:
