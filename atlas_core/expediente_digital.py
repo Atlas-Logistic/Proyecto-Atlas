@@ -519,18 +519,42 @@ def registrar_documento_vehiculo_desktop(
                                and d["estado"] == ACTIVO and not d.get("pendiente_revision")
                                for d in datos["documentos"][indice + 1:])
         coberturas = _coberturas_extraidas(lectura) if tipo_detectado in TIPOS_POLIZA else []
-        if tipo_detectado and p and vencimiento and not posterior_activo and (tipo_detectado not in TIPOS_POLIZA or coberturas):
+        # Tipo leído distinto del informado con un vigente del mismo tipo: el anterior se conserva
+        # y el nuevo queda pendiente de resolver como posible reemplazo (nunca se activa solo).
+        vigentes = _vigentes_que_cubren(datos["documentos"], actual, tipo_detectado,
+                                        reloj().astimezone(timezone.utc).date()) if tipo_detectado and tipo_detectado != tipo else []
+        if vigentes:
+            actual["posible_reemplazo"] = {"documentos": vigentes, "motivo": "TIPO_LEIDO_CON_VIGENTE",
+                                           "fecha": _instante(reloj)}
+        elif tipo_detectado and p and vencimiento and not posterior_activo and (tipo_detectado not in TIPOS_POLIZA or coberturas):
             actual["pendiente_revision"] = False
             for previo in datos["documentos"]:
                 if previo is not actual and previo["expediente_id"] == actual["expediente_id"] \
                         and previo["tipo"] == tipo_detectado and previo["estado"] == ACTIVO and not previo.get("pendiente_revision") \
-                        and tipo == tipo_detectado and (tipo_detectado not in TIPOS_POLIZA or tipo_detectado in coberturas):
+                        and (tipo_detectado not in TIPOS_POLIZA or tipo_detectado in coberturas):
                     previo.update(estado=REEMPLAZADO, reemplazado_por=actual["documento_id"])
                     reemplazados.append(previo["documento_id"])
         _evento(datos, "DOCUMENTO_EXTRACCION_OCR", "MOTOR_OCR", _instante(reloj),
                 expediente_id=actual["expediente_id"], documento_id=actual["documento_id"],
-                reemplaza=reemplazados, pendiente_revision=actual["pendiente_revision"])
+                reemplaza=reemplazados, pendiente_revision=actual["pendiente_revision"],
+                posible_reemplazo=vigentes)
         return dict(actual)
+
+
+def _vigentes_que_cubren(documentos: list[dict], actual: dict, tipo: str, hoy: date) -> list[str]:
+    """Documentos activos, no pendientes y no vencidos del mismo expediente que acreditan `tipo`
+    (una póliza también por su cobertura leída)."""
+    vigentes = []
+    for d in documentos:
+        if d is actual or d["expediente_id"] != actual["expediente_id"] or d["estado"] != ACTIVO \
+                or d.get("pendiente_revision"):
+            continue
+        cubre = d["tipo"] == tipo or (tipo in TIPOS_POLIZA and d["tipo"] in TIPOS_POLIZA
+                                      and tipo in _coberturas_extraidas(d.get("extraccion_automatica") or {}))
+        dias = _dias_para_vencer(d.get("fecha_vencimiento") or "", hoy)
+        if cubre and dias is not None and dias >= 0:
+            vigentes.append(d["documento_id"])
+    return vigentes
 
 
 def _documento_activo(datos: dict, documento_id: object) -> dict:
@@ -620,6 +644,9 @@ def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente:
                      identificacion_patente=doc.get("identificacion_patente"), asociacion=doc.get("asociacion"),
                      vencimiento_registro=doc.get("vencimiento_registro"), patente_ficha=patente_ficha,
                      tipo_informado=doc.get("tipo_informado"))
+    for clave in ("tipo_informado", "posible_reemplazo"):
+        if doc.get(clave):
+            vista[clave] = doc[clave]
     return vista
 
 

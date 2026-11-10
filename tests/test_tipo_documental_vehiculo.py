@@ -215,3 +215,108 @@ def test_expediente_desktop_poliza_doble_es_un_original_que_cubre_ambos(tmp_path
     assert [d["documento_id"] for d in polizas] == [doc["documento_id"]]
     assert polizas[0]["tipos_cubiertos"] == ["POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"]
     assert not {"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"} & {a["tipo"] for a in consulta["ausentes"]}
+
+
+# ------------------------------------------- tipo leído distinto del informado
+
+
+REVISION_OTRA = [x.replace("25MARZO2027", "25ABRIL2027") for x in REVISION_REAL]
+
+
+def _rt_vigente(raiz):
+    rt_id, rt = _recibir(raiz, "rt-vigente", tipo="REVISION_TECNICA")
+    _ciclo(raiz, {rt: REVISION_REAL})
+    assert _ubicar(raiz, rt_id)[1]["vencimiento"] == "2027-03-25"
+    return rt_id
+
+
+def test_tipo_leido_con_vigente_del_mismo_tipo_queda_como_posible_reemplazo(raiz):
+    from atlas_core.fichas_choferes import leer_almacen
+    rt_id = _rt_vigente(raiz)
+    antes_rt = _ubicar(raiz, rt_id)[1]
+    nuevo_id, nuevo = _recibir(raiz, "rt-como-soap-2", tipo="SOAP")
+    resumen = _ciclo(raiz, {nuevo: REVISION_OTRA})
+    _, documento = _ubicar(raiz, nuevo_id)
+    assert resumen["activados"] == [] and "vencimiento" not in documento
+    assert documento["estado_revision"] == "PENDIENTE_EXTRACCION"
+    assert (documento["tipo"], documento["tipo_informado"]) == ("REVISION_TECNICA", "SOAP")
+    assert documento["extraccion_automatica"]["campos"]["vencimiento"]["valor"] == "2027-04-25"
+    assert documento["posible_reemplazo"]["documentos"] == [rt_id]
+    assert _ubicar(raiz, rt_id)[1] == antes_rt  # el vigente se conserva intacto
+    ficha = next(v for v in leer_almacen(raiz, empresa="MBT")["vehiculos"] if v["patente"] == TRACTO)
+    assert [h["vigentes"] for h in ficha["historial"] if h["accion"] == "DOCUMENTO_VEHICULO_POSIBLE_REEMPLAZO"] == [[rt_id]]
+    revision = leer_almacen(raiz, empresa="MBT")["revision"]
+    extraer_vencimientos_vehiculos(raiz, comprobar=lambda: None, fabrica_ocr=lambda: OCRFalso({}))
+    assert leer_almacen(raiz, empresa="MBT")["revision"] == revision  # sin escrituras repetidas
+
+
+def test_tipo_leido_sin_vigente_del_mismo_tipo_se_activa(raiz):
+    from tests.test_extraccion_vencimientos_vehiculos import _editar_documento
+    rt_id = _rt_vigente(raiz)
+    _editar_documento(raiz, rt_id, vencimiento="2020-03-25")  # vencido
+    nuevo_id, nuevo = _recibir(raiz, "rt-como-soap-3", tipo="SOAP")
+    resumen = _ciclo(raiz, {nuevo: REVISION_OTRA})
+    _, documento = _ubicar(raiz, nuevo_id)
+    assert [a["documento_id"] for a in resumen["activados"]] == [nuevo_id]
+    assert documento["vencimiento"] == "2027-04-25" and "posible_reemplazo" not in documento
+
+
+def test_renovacion_con_el_mismo_tipo_informado_no_cambia(raiz):
+    rt_id = _rt_vigente(raiz)
+    nuevo_id, nuevo = _recibir(raiz, "rt-renovacion", tipo="REVISION_TECNICA")
+    resumen = _ciclo(raiz, {nuevo: REVISION_OTRA})
+    assert [a["documento_id"] for a in resumen["activados"]] == [nuevo_id]
+    assert "posible_reemplazo" not in _ubicar(raiz, nuevo_id)[1]
+
+
+def test_consulta_del_expediente_expone_tipo_informado_y_posible_reemplazo(raiz):
+    rt_id = _rt_vigente(raiz)
+    nuevo_id, nuevo = _recibir(raiz, "rt-como-soap-4", tipo="SOAP")
+    _ciclo(raiz, {nuevo: REVISION_OTRA})
+    from atlas_core.expediente_digital import _documentos_de_fichas
+    vistas = {d["documento_id"]: d for d in _documentos_de_fichas(raiz, "MBT", raiz / "catalogos_privados")}
+    assert vistas[nuevo_id]["tipo_informado"] == "SOAP" and vistas[nuevo_id]["pendiente_revision"]
+    assert vistas[nuevo_id]["posible_reemplazo"]["documentos"] == [rt_id]
+    assert "tipo_informado" not in vistas[rt_id] or vistas[rt_id]["tipo_informado"] == "REVISION_TECNICA"
+
+
+def _alta(tmp_path, monkeypatch, nombre, lineas, tipo):
+    from tests.test_expediente_desktop_ocr import PATENTE, ejecutar_alta
+    archivo = tmp_path / (nombre + ".jpg")
+    archivo.write_bytes(b"\xff\xd8\xff\xe0" + nombre.encode())
+    return ejecutar_alta(tmp_path, archivo, monkeypatch, [x.replace("BPHR67", PATENTE) for x in lineas], tipo=tipo)[0]
+
+
+@pytest.fixture
+def expediente(tmp_path):
+    from tests.test_expediente_desktop_ocr import PATENTE, _catalogos
+    _catalogos(tmp_path / "catalogos_privados", "ANA", vehiculos=(PATENTE, "ZZ1234"))
+    return tmp_path
+
+
+def test_expediente_tipo_leido_con_vigente_conserva_el_anterior(expediente, monkeypatch):
+    from atlas_core.expediente_digital import leer_expediente
+    soap = _alta(expediente, monkeypatch, "soap", ["SOAP", "PATENTE BPHR67", "VENCIMIENTO: 30/09/2027"], "SOAP")
+    assert not soap["pendiente_revision"]
+    nuevo = _alta(expediente, monkeypatch, "soap-como-permiso",
+                  ["SOAP", "PATENTE BPHR67", "VENCIMIENTO: 30/10/2027"], "PERMISO_CIRCULACION")
+    assert (nuevo["tipo"], nuevo["tipo_informado"], nuevo["pendiente_revision"]) == ("SOAP", "PERMISO_CIRCULACION", True)
+    assert nuevo["posible_reemplazo"]["documentos"] == [soap["documento_id"]]
+    estados = {d["documento_id"]: d["estado"] for d in leer_expediente(expediente, empresa="MBT")["documentos"]}
+    assert estados == {soap["documento_id"]: "ACTIVO", nuevo["documento_id"]: "ACTIVO"}
+
+
+def test_expediente_poliza_vigente_por_cobertura_bloquea_activacion(expediente, monkeypatch):
+    poliza = _alta(expediente, monkeypatch, "poliza", POLIZA_RC_ROBO, "POLIZA_RESPONSABILIDAD_CIVIL")
+    assert not poliza["pendiente_revision"]
+    robo = _alta(expediente, monkeypatch, "robo-como-soap",
+                 ["POLIZA DE SEGURO CONTRA ROBO", "PATENTE BPHR67", "VENCIMIENTO: 30/09/2028", "COBERTURA: ROBO"], "SOAP")
+    assert (robo["tipo"], robo["pendiente_revision"]) == ("POLIZA_ROBO", True)
+    assert robo["posible_reemplazo"]["documentos"] == [poliza["documento_id"]]
+
+
+def test_expediente_tipo_leido_sin_vigente_se_activa(expediente, monkeypatch):
+    nuevo = _alta(expediente, monkeypatch, "solo", ["SOAP", "PATENTE BPHR67", "VENCIMIENTO: 30/09/2027"],
+                  "PERMISO_CIRCULACION")
+    assert (nuevo["tipo"], nuevo["pendiente_revision"], nuevo["fecha_vencimiento"]) == ("SOAP", False, "2027-09-30")
+    assert "posible_reemplazo" not in nuevo

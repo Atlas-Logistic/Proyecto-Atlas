@@ -452,6 +452,12 @@ def activar_vencimientos_extraidos(
     for patente, documento in [(p, d) for p, d in _ubicaciones(datos) if _activable(p, d)]:
         comprobar()
         documento_id = documento["documento_id"]
+        vigentes = _vigentes_que_cubren(datos, patente, documento)
+        if vigentes:
+            # Tipo leído distinto del informado y ya hay un vigente: se conserva el anterior.
+            if (documento.get("posible_reemplazo") or {}).get("documentos") != vigentes:
+                _marcar_posible_reemplazo(raiz, ruta, empresa, documento_id, actor, comprobar)
+            continue
         original = (ruta.parent / documento["archivo"]).resolve()
         try:
             if not original.is_relative_to(ruta.parent.resolve()) or \
@@ -467,18 +473,81 @@ def activar_vencimientos_extraidos(
     return resumen
 
 
+def _vigentes_que_cubren(datos: dict, patente: str | None, documento: dict) -> list[str]:
+    """Sólo cuando el tipo leído difiere del informado: documentos vigentes (no vencidos ni
+    reemplazados) del mismo vehículo que ya acreditan ese tipo, también por cobertura de póliza."""
+    tipo = documento.get("tipo")
+    if not patente or not documento.get("tipo_informado") or documento.get("tipo_informado") == tipo:
+        return []
+    from atlas_core.expediente_digital import TIPOS_POLIZA, _coberturas_extraidas
+    hoy = date.today().isoformat()
+    ficha = next((v for v in datos.get("vehiculos", []) if v.get("patente") == patente), {})
+    explicito = documento.get("reemplaza_origen_id") or ""  # reemplazo ya elegido por una persona en Mobile
+    vigentes = []
+    for d in ficha.get("documentos", []):
+        if d is documento or d.get("documento_id") == documento.get("documento_id") or d.get("reemplazado_por") \
+                or (explicito and explicito in (d.get("origen_documento_id"), *d.get("origenes_adicionales", []))):
+            continue
+        try:
+            vence = date.fromisoformat(str(d.get("vencimiento") or "")).isoformat()
+        except ValueError:
+            continue
+        cubre = d.get("tipo") == tipo or (tipo in TIPOS_POLIZA and d.get("tipo") in TIPOS_POLIZA
+                                          and tipo in _coberturas_extraidas(d.get("extraccion_automatica") or {}))
+        if cubre and vence >= hoy:
+            vigentes.append(d["documento_id"])
+    return vigentes
+
+
+def _marcar_posible_reemplazo(raiz, ruta: Path, empresa: str, documento_id: str, actor: str,
+                              comprobar: Callable[[], None]) -> None:
+    """Deja constancia en el documento nuevo; no toca el vigente ni activa vencimiento."""
+    with bloqueo_sesion(Path(raiz) / "operacion" / "actual", "fichas_choferes_" + empresa):
+        anterior = leer_almacen(raiz, empresa=empresa)
+        propuesta = copy.deepcopy(anterior)
+        actual = next(((p, d) for p, d in _ubicaciones(propuesta) if d.get("documento_id") == documento_id), None)
+        if actual is None or not _activable(*actual):
+            return
+        patente, documento = actual
+        vigentes = _vigentes_que_cubren(propuesta, patente, documento)
+        if not vigentes or (documento.get("posible_reemplazo") or {}).get("documentos") == vigentes:
+            return
+        instante = _ahora()
+        documento["posible_reemplazo"] = {"documentos": vigentes, "motivo": "TIPO_LEIDO_CON_VIGENTE", "fecha": instante}
+        ficha = next(v for v in propuesta["vehiculos"] if v.get("patente") == patente)
+        ficha.setdefault("historial", []).append({
+            "accion": "DOCUMENTO_VEHICULO_POSIBLE_REEMPLAZO", "actor": actor, "fecha": instante,
+            "documento_id": documento_id, "tipo": documento["tipo"], "tipo_informado": documento["tipo_informado"],
+            "vigentes": vigentes,
+        })
+        propuesta["revision"] = int(anterior["revision"]) + 1
+        _validar_v2(propuesta)
+        _validar_vehiculos(propuesta)
+        respaldo = Path(raiz) / "respaldos" / "fichas_choferes" / uuid.uuid4().hex
+        respaldo.mkdir(parents=True)
+        shutil.copy2(ruta, respaldo / ruta.name)
+        escribir_json_atomico(respaldo / "manifest.json", {
+            "empresa": empresa, "actor": actor, "operacion": "POSIBLE_REEMPLAZO_DOCUMENTO_VEHICULO",
+            "documento_id": documento_id, "patente": patente, "vigentes": vigentes,
+            "revision_anterior": anterior["revision"], "ruta_relativa": str(ruta.relative_to(raiz)),
+        })
+        comprobar()
+        escribir_json_atomico(ruta, propuesta)
+
+
 def _activar(raiz, ruta: Path, empresa: str, documento_id: str, actor: str, comprobar: Callable[[], None]) -> str | None:
     with bloqueo_sesion(Path(raiz) / "operacion" / "actual", "fichas_choferes_" + empresa):
         anterior = leer_almacen(raiz, empresa=empresa)
         propuesta = copy.deepcopy(anterior)
         actual = next(((p, d) for p, d in _ubicaciones(propuesta) if d.get("documento_id") == documento_id), None)
         # Movido, registrado o revisado por una persona entre medio: no se toca.
-        if actual is None or not _activable(*actual):
+        if actual is None or not _activable(*actual) or _vigentes_que_cubren(propuesta, *actual):
             return None
         patente, documento = actual
         extraccion = documento["extraccion_automatica"]
         campo = extraccion["campos"]["vencimiento"]
         instante = _ahora()
+        documento.pop("posible_reemplazo", None)  # el vigente anterior ya no lo está
         documento["vencimiento"] = campo["valor"]
         documento["estado_revision"] = ESTADO_VENCIMIENTO_AUTOMATICO
         documento["vencimiento_registro"] = {
