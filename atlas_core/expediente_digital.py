@@ -48,6 +48,9 @@ TIPOS_BASE = {
     "REVISION_TECNICA": {"entidad": VEHICULO, "nombre": "Revisión técnica", "obligatorio": True},
     "SOAP": {"entidad": VEHICULO, "nombre": "SOAP", "obligatorio": True},
     "PERMISO_CIRCULACION": {"entidad": VEHICULO, "nombre": "Permiso de circulación", "obligatorio": True},
+    "CERTIFICADO_EMISION_GASES": {"entidad": VEHICULO, "nombre": "Certificado de emisión de gases o contaminantes", "obligatorio": True},
+    "POLIZA_RESPONSABILIDAD_CIVIL": {"entidad": VEHICULO, "nombre": "Póliza de responsabilidad civil", "obligatorio": True},
+    "POLIZA_ROBO": {"entidad": VEHICULO, "nombre": "Póliza de seguro contra robos", "obligatorio": True},
     "SEGURO_CARGA": {"entidad": VEHICULO, "nombre": "Seguro de carga", "obligatorio": False},
 }
 DIAS_POR_VENCER = 30

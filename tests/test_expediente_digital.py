@@ -72,6 +72,14 @@ def test_reemplazo_conserva_historial(entorno):
     assert [d["documento_id"] for d in vista] == [segundo["documento_id"]]
 
 
+@pytest.mark.parametrize("tipo", ["CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"])
+def test_nuevos_tipos_se_registran_y_calculan_vigencia(entorno, tipo):
+    documento = _reg(entorno, tipo=tipo, fecha_vencimiento="2026-11-27")
+    vista = estado_expediente(entorno["raiz"], empresa="MBT", hoy=HOY)
+    assert [(d["documento_id"], d["estado_vencimiento"]) for d in vista] == [
+        (documento["documento_id"], "POR_VENCER")]
+
+
 def test_estado_de_vencimiento_es_derivado(entorno):
     _reg(entorno, tipo="SOAP", fecha_vencimiento="2026-10-27")
     _reg(entorno, tipo="REVISION_TECNICA", fecha_vencimiento="2026-11-27")
