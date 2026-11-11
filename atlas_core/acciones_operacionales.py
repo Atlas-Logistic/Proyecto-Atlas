@@ -2111,12 +2111,21 @@ def _fila_documental_corregida(fila: dict, campo: str, antes: Mapping, despues: 
         fila["motivos_revision_documento"] = retirar_guia_ausente(fila.get("motivos_revision_documento"))
 
 
+# Dígito que el OCR antepone al folio al leer el "Nº" de la guía (casos reales
+# 9482179 y 8484553).
+_MARCADORES_FOLIO_ABSORBIDOS = ("8", "9")
+
+
 def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     """Caso real 9482179 -> 482179: RapidOCR leyó el "º" de "Nº 482179" como
     "9" y el folio quedó con 7 dígitos. Sólo corrige ESE patrón (el folio
     persistido es "9" + el folio pedido, de 6 dígitos), nunca un folio que ya
     tenga otro documento ni uno con tarjetas pendientes que quedarían
     huérfanas. La lectura OCR original queda en el ledger.
+
+    Caso real 8484553 -> 484553 (Mobile, 11-11, transporte 0000369979): el
+    mismo "Nº" leído como "8" ("N8484553" en la traza OCR). Se admite con
+    exactamente las mismas protecciones que el "9".
 
     Casos reales 482352/482350 (Mobile, 15-10): también un folio AUSENTE
     ("No encontrado"), que el operador toma de la foto. Como varias filas
@@ -2137,10 +2146,11 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     digito_inicial_omitido = bool(re.fullmatch(r"[0-9]{5}", actual)) and nuevo[1:] == actual
     if digito_inicial_omitido and not str(p.get("archivo", "")).strip():
         raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "con digito inicial ausente hay que indicar archivo")
-    if actual != "9" + nuevo and actual != GUIA_AUSENTE_DOCUMENTAL and not digito_inicial_omitido:
+    marcador_absorbido = actual in {marcador + nuevo for marcador in _MARCADORES_FOLIO_ABSORBIDOS}
+    if not marcador_absorbido and actual != GUIA_AUSENTE_DOCUMENTAL and not digito_inicial_omitido:
         raise ErrorAccionOperacional(
             "PRECONDICION_FALLIDA",
-            "solo se admite folio ausente, un digito inicial omitido o marcador inicial interpretado como 9")
+            "solo se admite folio ausente, un digito inicial omitido o marcador inicial interpretado como 8 o 9")
     if ausente and sum(str(f.get("archivo", "")) == archivo for f in ctx.filas()) != 1:
         raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "el archivo no identifica un único documento")
     otros = sorted(str(f.get("archivo", "")) for f in ctx.filas()
@@ -2973,7 +2983,7 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_comuna_destino, _aplicar_documento_comuna_destino),
     DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
-                     "Corrige un folio ausente, con digito inicial omitido o marcador inicial interpretado como 9.",
+                     "Corrige un folio ausente, con digito inicial omitido o marcador inicial interpretado como 8 o 9.",
                      {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_corregir_numero_guia, _aplicar_documento_corregir_numero_guia),

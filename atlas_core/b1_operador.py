@@ -209,6 +209,22 @@ _MATERIAL_GUIA = [
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
                + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<material>.+)$"),
 ]
+# FOLIO de una guía existente mal leído (caso real 8484553 -> 484553): "corrige
+# el número de guía X a Y", "la guía X tiene como número correcto Y". Sólo
+# admite al final una reserva que pide no tocar nada más ("no modifiques
+# ningún otro dato del viaje"), sin números: cualquier otra cola no se
+# interpreta. La acción decide si el cambio es compatible (folio ausente,
+# dígito omitido o "Nº" leído como 8/9) y nada se escribe sin "sí".
+_FOLIO_NUEVO = r"(?:EL\s+)?(?:N[°O]?\s*)?(?P<folio>\d{6})"
+_GUIA_ACTUAL = r"(?:N[°O]?\s*)?(?P<guia>\d{5,9})"
+_SIN_OTROS_CAMBIOS = (r"(?:\s*[,;.]\s*|\s+)(?:Y\s+)?(?:NO\s+(?:MODIFIQUES|CAMBIES|TOQUES|ALTERES)|"
+                      r"SIN\s+(?:MODIFICAR|CAMBIAR|TOCAR|ALTERAR))(?:\s+[A-Z]+)*")
+_FOLIO_GUIA_CORREGIR = [
+    re.compile(r"^(?:CORRIGE|CORREGIR)\s+(?:EL\s+)?(?:NUMERO\s+DE\s+(?:LA\s+)?GUIA|FOLIO\s+DE\s+(?:LA\s+)?GUIA)\s+"
+               + _GUIA_ACTUAL + r"\s+(?:A|POR)\s+" + _FOLIO_NUEVO + r"(?:" + _SIN_OTROS_CAMBIOS + r")?$"),
+    re.compile(r"^LA\s+GUIA\s+" + _GUIA_ACTUAL + r"\s+TIENE\s+COMO\s+(?:NUMERO|FOLIO)\s+CORRECTO\s+"
+               + _FOLIO_NUEVO + r"(?:" + _SIN_OTROS_CAMBIOS + r")?$"),
+]
 # Miles sólo con punto en grupos de 3 ("12.450"); coma, decimales u otra
 # unidad (toneladas) son ambiguos y se rechazan.
 _PESO_KG = re.compile(r"^(?P<n>[1-9]\d{0,2}(?:\.\d{3})+|[1-9]\d*)\s*(?:KG|KGS|KILOS?|KILOGRAMOS?)?$")
@@ -844,6 +860,14 @@ def interpretar_determinista(texto: str) -> Intencion | None:
                 return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
                     "numero_guia": m.group("guia"), "campo": "peso_kg",
                     "valor": _peso_kg_declarado(original[m.start("peso"):m.end("peso")].strip()),
+                    "referencia": " ".join(str(texto).split())[:500]})
+        for patron in _FOLIO_GUIA_CORREGIR:
+            m = patron.match(plano)
+            if m:
+                # El documento exacto se resuelve después contra el dataset
+                # (`_archivo_unico_de_guia`); la acción valida el patrón.
+                return Intencion("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+                    "numero_guia": m.group("guia"), "numero_guia_corregido": m.group("folio"),
                     "referencia": " ".join(str(texto).split())[:500]})
         m = _MATERIAL_RECUPERAR.match(plano)
         if m:
@@ -2269,7 +2293,28 @@ class OperadorB1:
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos,
                         "mensaje": mensaje}
             parametros["destino_id"] = resolucion["destino_id"]
+        if (intencion.accion == "DOCUMENTO_CORREGIR_NUMERO_GUIA" and revision is None
+                and intencion_revision is None and not str(parametros.get("archivo") or "").strip()):
+            archivo, rechazo = self._archivo_unico_de_guia(str(parametros.get("numero_guia") or ""))
+            if rechazo:
+                self._fijar_pendiente(estado, conversacion_id, None)
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [],
+                        "mensaje": rechazo}
+            parametros["archivo"] = archivo
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
+
+    def _archivo_unico_de_guia(self, guia: str) -> tuple[str, str]:
+        """(archivo, "") del ÚNICO documento con ese folio, o ("", motivo). Una
+        corrección de folio nunca elige entre documentos: sin documento, con
+        varios o con un archivo repetido no se prepara nada."""
+        filas = [f for f in self.capa._ctx.filas() if str(f.get("numero_guia") or "").strip() == guia]
+        archivos = [str(f.get("archivo") or "").strip() for f in filas]
+        if not filas:
+            return "", f"No encontré la guía {guia}. No se corrigió nada."
+        if len(filas) != 1 or not archivos[0]:
+            return "", (f"La guía {guia} aparece en {len(filas)} documentos; no elijo uno. "
+                        "Corrígela desde su tarjeta de revisión. No se corrigió nada.")
+        return archivos[0], ""
 
     def _investigar_revision(self, intencion: Intencion, estado: dict | None = None,
                              conversacion_id: str = "") -> dict:
