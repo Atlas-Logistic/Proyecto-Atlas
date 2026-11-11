@@ -27,9 +27,24 @@ from atlas_core.decisiones_pendientes import (
 from atlas_core.gestor_viajes import transporte_valido
 from atlas_core.alcance_revalidacion import alcance_guias, guias_en_alcance
 from atlas_core.procesamiento_masivo import (
-    COLUMNAS, COLUMNAS_PRE_G1C, _escribir_filas, anotar_fecha_recepcion, escalar_resultado_ia_en_memoria,
-    procesar_archivo,
+    COLUMNAS, COLUMNAS_PRE_G1C, _directorio_trazas_ocr_para_salida, _escribir_filas, anotar_fecha_recepcion,
+    escalar_resultado_ia_en_memoria, procesar_archivo,
 )
+
+
+def _argumentos_traza_ocr_mobile(dataset: Path | None, identificador: str) -> dict[str, object]:
+    """Traza OCR de un envío Mobile con el mismo mecanismo que el lote de
+    Desktop (`procesar_carpeta`): `operacion/trazas_ocr`, hermana del
+    dataset, nombrada por el identificador lógico `mobile/<envio>/<foto>`
+    (todas las fotos Mobile se llaman igual). La traza guarda sólo líneas y
+    geometría OCR más esa referencia lógica: nunca copia la imagen ni una
+    ruta local. Sin dataset no hay operación a la que asociarla."""
+    if dataset is None:
+        return {}
+    return {
+        "directorio_trazas_ocr": _directorio_trazas_ocr_para_salida(Path(dataset)),
+        "referencia_imagen_traza": identificador,
+    }
 
 
 # El dataset operacional conserva evidencia JSON por fila. Algunas evidencias
@@ -1024,6 +1039,7 @@ def _procesar_envio_mobile_impl(
             planta_informada = str(registro.get("planta_origen_informada", "")).strip()
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
+            argumentos.update(_argumentos_traza_ocr_mobile(dataset, identificador))
             datos = dict(procesar_archivo(imagen, **argumentos))
             _identidad_canonica_mobile(decisiones_nuevas, imagen, identificador)
         # Recepción real del envío (no su procesamiento) para el filtro Hoy.
@@ -1764,6 +1780,7 @@ def _reprocesar_envio_mobile_persistido_impl(
             planta_informada = str(registro.get("planta_origen_informada", "")).strip()
             if planta_informada:
                 argumentos["planta_origen_informada"] = planta_informada
+            argumentos.update(_argumentos_traza_ocr_mobile(dataset, identificador))
             datos = dict(procesar_archivo(imagen, **argumentos))
             _identidad_canonica_mobile(decisiones_nuevas, imagen, identificador)
             anotar_fecha_recepcion(datos, registro.get("recibido_en"))

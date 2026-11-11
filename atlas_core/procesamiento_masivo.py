@@ -812,6 +812,27 @@ def _depurar_items_linea_contaminada(items: list[str]) -> list[str]:
     return depurados
 
 
+# Caso real 484553 (envío Mobile leído como "8484553"): RapidOCR parte la
+# H de HORMIGON en dos trazos verticales ("B1IORMIGON 8MM12MA630-4201(N)").
+# Las tolerancias de arriba conservan la longitud de la palabra, así que
+# nunca la reconocían y el material legible quedaba MATERIAL_AUSENTE. Sólo
+# se reconstruye la H si tras los dos trazos sigue EXACTAMENTE "ORMIGON"
+# (sin otra letra delante salvo la designación de barra B/D/3) y la misma
+# línea trae el diámetro inmediatamente después ("8MM", "8 MM"): sin ese
+# contexto de producto no se toca nada. El resto de la línea queda tal
+# como lo leyó el OCR.
+_PATRON_H_FRAGMENTADA_HORMIGON = re.compile(
+    r"(?<![A-Z0-9])([BD3]?)\s*[1Il|]{2}(?=ORMIGON\s*\d{1,2}\s*MM(?![A-Z]))ORMIGON",
+    re.IGNORECASE,
+)
+
+
+def _reconstruir_h_fragmentada(linea: str) -> str:
+    return _PATRON_H_FRAGMENTADA_HORMIGON.sub(
+        lambda m: f"{m.group(1)}{' ' if m.group(1) else ''}HORMIGON", linea,
+    )
+
+
 def extraer_descripcion_material(textos: Iterable[str]) -> str:
     """Conserva líneas OCR con evidencia explícita de material, sólo hasta el
     pie de la tabla de productos (ver `_fin_tabla_material`)."""
@@ -821,6 +842,7 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
         limpia = re.sub(r"\s+", " ", linea).strip()
         if not limpia:
             continue
+        limpia = _reconstruir_h_fragmentada(limpia)
         # RapidOCR también omite el espacio tras la designación B
         # ("BHORMIGON ...") y entre la familia y el diámetro
         # ("HORMIGON16MM", casos 483106/483138/482816): sin límite de
