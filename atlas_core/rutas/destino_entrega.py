@@ -1712,6 +1712,12 @@ def _motivo_incoherencia_destino_validado(
     Extraído para poder aplicar EXACTAMENTE las mismas guardas al
     candidato de la base territorial INE (GEOGRAFÍA 3) antes de aceptarlo
     como rescate -- nunca un camino más laxo."""
+    # P0 falsa confianza geográfica (0000369696): comuna geocodificada sin
+    # respaldo documental tras la etiqueta "SANTIAGO" -- ver
+    # `_motivo_comuna_no_respaldada_tras_santiago`.
+    motivo_santiago = _motivo_comuna_no_respaldada_tras_santiago(despachar_a_crudo or "", localidad or "")
+    if motivo_santiago:
+        return motivo_santiago
     comuna_documental = _comuna_documental_inequivoca(despachar_a_crudo or "")
     if (
         comuna_documental and localidad
@@ -2558,6 +2564,143 @@ def _comuna_documental_inequivoca(texto: str) -> str:
             especifica = comunas[es_santiago.index(False)]
             if _comunas_territorialmente_compatibles("Santiago", especifica):
                 return especifica
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# COMUNA DOCUMENTAL TRAS LA ETIQUETA "SANTIAGO" (P0 falsa confianza geográfica)
+# ---------------------------------------------------------------------------
+# Caso real 0000369696 (guías 484436/484437, ARMACERO MATCO): ambas imprimen
+# "SANTA ISABEL 585 SANTIAGO LAMPA", pero el OCR de 484437 leyó "SANTA ISABEL
+# SSS SANTIAGO LAVPA". Sin número ni comuna reconocible, la única comuna exacta
+# del texto era "SANTIAGO" -- la etiqueta de CIUDAD que los documentos AZA
+# anteponen a la comuna real --, así que `_comuna_documental_inequivoca` la
+# daba por evidencia documental y aceptaba "Santa Isabel, Santiago, RM, Chile"
+# (comuna 13101, 24,8 km en vez de 5) como destino confiable. Esa comuna la
+# infirió el geocodificador; el documento no la respalda.
+#
+# Aquí se distingue qué comuna dice el documento DESPUÉS de esa etiqueta:
+# - EXACTA: comuna del catálogo cerrado (comportamiento de siempre);
+# - OCR_UN_CARACTER: una sola sustitución de letra, mismo largo, >= 5 letras,
+#   contra UNA única comuna de la región de Santiago (la etiqueta ya fija la
+#   región). Nunca inserción ni eliminación ("LAPA" no es "LAMPA"), nunca
+#   otra región ("LAJE" no es "Laja"), nunca números ni direcciones;
+# - ILEGIBLE: hay texto de comuna pero no se reconoce de ninguna de esas formas;
+# - "" (sin cola): "SANTIAGO" es la última palabra útil -- puede ser
+#   genuinamente la comuna; nada cambia.
+# Sólo la usa la puerta EN VIVO (`_motivo_incoherencia_destino_validado`):
+# nunca reescribe filas históricas ni el texto documental.
+LECTURA_COMUNA_EXACTA = "EXACTA"
+LECTURA_COMUNA_OCR_UN_CARACTER = "OCR_UN_CARACTER"
+LECTURA_COMUNA_ILEGIBLE = "ILEGIBLE"
+LONGITUD_MINIMA_COMUNA_OCR = 5
+# Mismo motivo base que la contradicción de comuna documental: ya genera la
+# tarjeta de destino (`MOTIVOS_DESTINO_NO_RESUELTO`) y tiene texto en Desktop.
+# El detalle conserva la causa para auditoría.
+MOTIVO_COMUNA_CONTRADICE = "GEOCODIFICACION_CONTRADICE_COMUNA_DOCUMENTAL"
+DETALLE_SOLO_SANTIAGO_GENERICO = "SOLO_SANTIAGO_GENERICO"
+# Palabras que siguen a "SANTIAGO" sin ser una comuna: nivel territorial
+# genérico o etiquetas del formulario pegadas por el OCR ("... LAMPA FECHA").
+_TOKENS_NO_COMUNA_TRAS_SANTIAGO = frozenset({
+    "CENTRO", "CHILE", "RM", "REGION", "REG", "METROPOLITANA", "DE", "DEL",
+    "FECHA", "SALIDA", "LLEGADA", "RUT", "CHOFER", "RETIRA", "PATENTE",
+    "CARRO", "GUIA", "NRO", "TRANSPORTE", "HORA", "FONO", "TELEFONO",
+})
+
+
+@dataclass(frozen=True)
+class LecturaComunaTrasSantiago:
+    estado: str = ""
+    cola: str = ""
+    comuna: str = ""
+
+
+def _comunas_region_santiago_a_una_sustitucion(frase: str) -> set[str]:
+    """Comunas de la región de Santiago a exactamente UNA sustitución de
+    letra de `frase` (mismo largo; los espacios deben coincidir)."""
+    from atlas_core import territorio_chile
+
+    indice = territorio_chile._INDICE_COMUNAS
+    region_santiago = (indice.get("SANTIAGO") or ("", ""))[1]
+    if not region_santiago or len(frase.replace(" ", "")) < LONGITUD_MINIMA_COMUNA_OCR:
+        return set()
+    encontradas: set[str] = set()
+    for clave, (canonica, region) in indice.items():
+        if region != region_santiago or len(clave) != len(frase):
+            continue
+        diferencias = [(x, y) for x, y in zip(frase, clave) if x != y]
+        if len(diferencias) == 1 and all(c.isalpha() for c in diferencias[0]):
+            encontradas.add(canonica)
+    return encontradas
+
+
+def _es_santiago_repetido(token: str) -> bool:
+    """Caso real 474097 ("... SANTIAGO SASTTAGO"): la etiqueta repetida y mal
+    leída no es una comuna ilegible -- mismo largo y <= 2 sustituciones."""
+    return len(token) == len("SANTIAGO") and sum(x != y for x, y in zip(token, "SANTIAGO")) <= 2
+
+
+def leer_comuna_tras_etiqueta_santiago(texto: str) -> LecturaComunaTrasSantiago:
+    """Qué comuna declara el documento tras su última etiqueta "SANTIAGO"
+    (ver bloque arriba). Sólo lectura; nunca altera `texto`."""
+    tokens = [
+        _texto_normalizado_sin_acentos(t).upper()
+        for t in re.findall(r"[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", str(texto or ""))
+    ]
+    if "SANTIAGO" not in tokens:
+        return LecturaComunaTrasSantiago()
+    ultimo = len(tokens) - 1 - tokens[::-1].index("SANTIAGO")
+    cola = [
+        t for t in tokens[ultimo + 1:]
+        if t.isalpha() and t not in _TOKENS_NO_COMUNA_TRAS_SANTIAGO and not _es_santiago_repetido(t)
+    ]
+    if not cola:
+        return LecturaComunaTrasSantiago()
+    cola_texto = " ".join(cola)
+    ventanas = [
+        " ".join(cola[inicio:inicio + largo])
+        for largo in range(min(4, len(cola)), 0, -1)
+        for inicio in range(len(cola) - largo + 1)
+    ]
+    for ventana in ventanas:
+        exacta = normalizar_comuna(ventana)
+        if exacta.estado == ESTADO_COMUNA_EXACTA and exacta.comuna:
+            return LecturaComunaTrasSantiago(LECTURA_COMUNA_EXACTA, cola_texto, exacta.comuna)
+    candidatas: set[str] = set()
+    for ventana in ventanas:
+        candidatas |= _comunas_region_santiago_a_una_sustitucion(ventana)
+    if len(candidatas) == 1:
+        return LecturaComunaTrasSantiago(LECTURA_COMUNA_OCR_UN_CARACTER, cola_texto, next(iter(candidatas)))
+    return LecturaComunaTrasSantiago(LECTURA_COMUNA_ILEGIBLE, cola_texto)
+
+
+def _motivo_comuna_no_respaldada_tras_santiago(despachar_a_crudo: str, localidad: str) -> str:
+    """Rechazo de una comuna geocodificada que el documento no respalda:
+    - comuna documental ILEGIBLE u OCR_UN_CARACTER y el geocodificador
+      devolvió la comuna "Santiago": su única base es la etiqueta de ciudad;
+    - comuna documental OCR_UN_CARACTER y el geocodificador devolvió OTRA
+      comuna real: la contradice.
+    Con comuna EXACTA o sin cola no decide nada (reglas de siempre). Una
+    comuna ILEGIBLE no contradice a otra comuna geocodificada distinta de
+    Santiago: ausencia de evidencia no es contradicción."""
+    lectura = leer_comuna_tras_etiqueta_santiago(despachar_a_crudo)
+    if lectura.estado not in (LECTURA_COMUNA_ILEGIBLE, LECTURA_COMUNA_OCR_UN_CARACTER) or not localidad:
+        return ""
+    geocodificada = normalizar_comuna(localidad)
+    comuna_geo = geocodificada.comuna if geocodificada.estado == ESTADO_COMUNA_EXACTA else ""
+    if not comuna_geo:
+        return ""
+    if _texto_normalizado_sin_acentos(comuna_geo).upper() == "SANTIAGO":
+        detalle = f"{lectura.estado} ~ {lectura.comuna}" if lectura.comuna else lectura.estado
+        return (
+            f"{MOTIVO_COMUNA_CONTRADICE}: {DETALLE_SOLO_SANTIAGO_GENERICO} "
+            f"comuna documental {lectura.cola} [{detalle}] != {localidad}"
+        )
+    if lectura.estado == LECTURA_COMUNA_OCR_UN_CARACTER and comuna_geo != lectura.comuna:
+        return (
+            f"{MOTIVO_COMUNA_CONTRADICE}: {lectura.comuna} "
+            f"[OCR {lectura.cola}] != {localidad}"
+        )
     return ""
 
 
