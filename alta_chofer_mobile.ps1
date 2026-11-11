@@ -1,4 +1,5 @@
-param([string]$Usuario, [string]$Rut, [string]$Nombre)
+param([string]$Usuario, [string]$Rut, [string]$Nombre, [switch]$Existente)
+# -Existente: el chofer ya esta activo en el catalogo; solo se crea su cuenta Mobile (no toca choferes.json).
 # Alta interactiva de un chofer MBT en Atlas Mobile (catalogo + credencial local + D1 + prueba de ingreso).
 # Uso: doble clic en alta_chofer_mobile.cmd (o con -Usuario -Rut -Nombre). La contrasena SOLO se escribe
 # cuando se pide (no se muestra); nunca va en argumentos, archivos ni registros.
@@ -28,6 +29,7 @@ function Alta([switch]$SoloValidar) {
   $a = @('-B', (Join-Path $motor 'alta_chofer_mobile.py'), '--raiz-atlas', $raiz, '--usuario', $Usuario, '--rut', $Rut,
          '--nombre', $Nombre, '--empresa', $empresaCloud)
   if ($SoloValidar) { $a += '--solo-validar' }
+  if ($Existente) { $a += '--chofer-existente' }
   $ErrorActionPreference = 'Continue'
   $linea = & $py @a | Select-Object -Last 1
   $codigo = $LASTEXITCODE
@@ -81,7 +83,7 @@ try {
   Paso '1/5 Validacion de datos y duplicados (no escribe)'
   $v = Alta -SoloValidar
   if ($v.codigo -ne 0) { Fin "RECHAZADO: $($v.r.codigo) - $($v.r.detalle)" 1 }
-  Write-Host "Usuario: $($v.r.usuario)   RUT: $($v.r.chofer_id)   Nombre: $($v.r.nombre)   Empresa: $($v.r.empresa_cloud)"
+  Write-Host "Usuario: $($v.r.usuario)   RUT: $($v.r.chofer_id)   Nombre: $($v.r.nombre)   Empresa: $($v.r.empresa_cloud)   Modo: $($v.r.modo)"
   if (!(Confirmar 'Datos correctos?')) { Fin 'Cancelado. No se escribio nada.' 1 }
 
   Paso '2/5 Respaldo de catalogos'
@@ -98,7 +100,7 @@ try {
   Write-Host "Respaldo verificado (acceso solo de su usuario): $destino"
 
   Paso '3/5 Alta local con el escritor oficial'
-  Write-Host 'Escriba la contrasena inicial cuando se pida (no se muestra) y repitala.'
+  Write-Host 'Escriba la contrasena cuando se pida (no se muestra) y repitala.'
   $a = Alta
   if ($a.codigo -eq 3) {
     Write-Host 'El escritor sigue ocupado (normalmente PULL procesando envios). No se escribio nada.' -ForegroundColor Yellow
@@ -143,7 +145,7 @@ try {
     } catch { $ok = $false; $http = $_.Exception.Response.StatusCode.value__ }
   } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b); $cuerpo = $null; $s = $null; $resp = $null }
   if (!$ok) { Fin "El ingreso en mobile.dttacgroup.cl fallo (HTTP $http). La cuenta existe en D1; revise la contrasena escrita." 1 }
-  Fin "LISTO: $($v.r.usuario) ($($v.r.nombre), RUT $($v.r.chofer_id)) puede ingresar en mobile.dttacgroup.cl. Sin vehiculos asignados." 0
+  Fin "LISTO: $($v.r.usuario) ($($v.r.nombre), RUT $($v.r.chofer_id)) puede ingresar en mobile.dttacgroup.cl. Vehiculos y asignaciones sin cambios." 0
 } catch {
   Fin "ERROR: $($_.Exception.Message)" 1
 }

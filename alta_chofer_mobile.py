@@ -97,12 +97,29 @@ def validar_empresa(raiz: Path, empresa: str) -> None:
                         f"Este comando sólo da de alta choferes de MBT (empresa Cloud {CLOUD_MBT!r}) en la raíz de MBT.")
 
 
-def comprobar_duplicados(datos: dict[str, str], choferes: dict, usuarios: dict) -> None:
-    """Rechaza cualquier coincidencia: el alta nunca reemplaza ni fusiona."""
+def comprobar_duplicados(datos: dict[str, str], choferes: dict, usuarios: dict, *, existente: bool = False) -> str:
+    """Rechaza cualquier coincidencia: el alta nunca reemplaza ni fusiona.
+
+    Chofer nuevo: el RUT y el nombre no pueden existir en el catálogo.
+    Chofer existente: debe haber exactamente un registro activo con ese RUT y
+    ese nombre (sin acentos), y ningún otro registro con el mismo nombre.
+    Devuelve el `chofer_id` (clave exacta del catálogo) para la credencial."""
     rut, usuario, nombre = datos["rut"], datos["usuario"], _sin_acentos(datos["nombre"])
+    propios = [clave for clave in choferes if normalizar_rut(clave) == rut]
+    if existente:
+        if len(propios) != 1:
+            raise ErrorAlta("CHOFER_NO_ENCONTRADO" if not propios else "RUT_AMBIGUO",
+                            "El RUT no corresponde a exactamente un chofer del catálogo.")
+        registro = choferes[propios[0]] if isinstance(choferes[propios[0]], dict) else {}
+        if registro.get("activo") is not True:
+            raise ErrorAlta("CHOFER_INACTIVO", "El chofer del catálogo no está activo.")
+        if _sin_acentos(str(registro.get("nombre", ""))) != nombre:
+            raise ErrorAlta("NOMBRE_NO_COINCIDE", "El nombre no coincide con el del catálogo para ese RUT.")
+    elif propios:
+        raise ErrorAlta("RUT_DUPLICADO", "El RUT ya existe en el catálogo de choferes.")
     for clave, registro in choferes.items():
-        if normalizar_rut(clave) == rut:
-            raise ErrorAlta("RUT_DUPLICADO", "El RUT ya existe en el catálogo de choferes.")
+        if clave in propios and existente:
+            continue
         registro = registro if isinstance(registro, dict) else {}
         nombres = [registro.get("nombre", "")] + list(registro.get("aliases") or [])
         if any(isinstance(n, str) and _sin_acentos(n) == nombre for n in nombres):
@@ -115,6 +132,7 @@ def comprobar_duplicados(datos: dict[str, str], choferes: dict, usuarios: dict) 
     for nombre_cuenta, cuenta in cuentas.items():
         if isinstance(cuenta, dict) and normalizar_rut(str(cuenta.get("chofer_id", ""))) == rut:
             raise ErrorAlta("CUENTA_DUPLICADA", f"El RUT ya tiene la cuenta Mobile {nombre_cuenta!r}.")
+    return propios[0] if existente else rut
 
 
 def pedir_password(usuario: str, pedir: Callable[[str], str] = getpass.getpass) -> str:
@@ -152,37 +170,43 @@ def _exigir_vigente(escritor) -> None:
         raise ErrorAlta("ESCRITOR_PERDIDO", "Se perdió la exclusividad del escritor antes de escribir.", SALIDA_SIN_ESCRITOR)
 
 
-def aplicar_alta(raiz: Path, datos: dict[str, str], password_hash: str, escritor) -> None:
-    """Con el escritor vigente: relee, revalida y agrega los dos registros.
-    Si falla la credencial, el chofer recién agregado se retira (mismo turno)."""
+def aplicar_alta(raiz: Path, datos: dict[str, str], password_hash: str, escritor, *, existente: bool = False) -> str:
+    """Con el escritor vigente: relee, revalida y agrega los registros.
+    Chofer existente: sólo la credencial; el catálogo de choferes no se escribe.
+    Si falla la credencial de un chofer nuevo, el chofer se retira (mismo turno)."""
     ruta_choferes, ruta_usuarios = _rutas(raiz)
     choferes, usuarios = _leer(ruta_choferes), _leer(ruta_usuarios)
-    comprobar_duplicados(datos, choferes, usuarios)  # el estado pudo cambiar al alinear la custodia
-    nuevos_choferes = {**choferes, datos["rut"]: {"nombre": datos["nombre"], "activo": True}}
+    # El estado pudo cambiar al alinear la custodia.
+    chofer_id = comprobar_duplicados(datos, choferes, usuarios, existente=existente)
     nuevos_usuarios = {**usuarios, "usuarios": {**usuarios["usuarios"],
-                                               datos["usuario"]: {"chofer_id": datos["rut"], "password_hash": password_hash}}}
+                                               datos["usuario"]: {"chofer_id": chofer_id, "password_hash": password_hash}}}
     _exigir_vigente(escritor)
-    escribir_json_atomico(ruta_choferes, nuevos_choferes)
+    if not existente:
+        escribir_json_atomico(ruta_choferes, {**choferes, chofer_id: {"nombre": datos["nombre"], "activo": True}})
     try:
         _exigir_vigente(escritor)
         escribir_json_atomico(ruta_usuarios, nuevos_usuarios)
     except BaseException:
-        if escritor.vigente:
+        if not existente and escritor.vigente:
             escribir_json_atomico(ruta_choferes, choferes)
         raise
+    return chofer_id
 
 
 def verificar_alta(raiz: Path, datos: dict[str, str], password: str | None,
-                   choferes_antes: dict, usuarios_antes: dict) -> dict[str, bool]:
+                   choferes_antes: dict, usuarios_antes: dict, *, chofer_id: str | None = None,
+                   existente: bool = False) -> dict[str, bool]:
+    chofer_id = chofer_id or datos["rut"]
     ruta_choferes, ruta_usuarios = _rutas(raiz)
     choferes, usuarios = _leer(ruta_choferes), _leer(ruta_usuarios)
     cuentas = usuarios.get("usuarios", {})
     cuenta = cuentas.get(datos["usuario"], {})
     resultado = {
-        "chofer_registrado": choferes.get(datos["rut"]) == {"nombre": datos["nombre"], "activo": True},
-        "credencial_local": cuenta.get("chofer_id") == datos["rut"]
+        "chofer_registrado": (choferes == choferes_antes and chofer_id in choferes) if existente
+        else choferes.get(chofer_id) == {"nombre": datos["nombre"], "activo": True},
+        "credencial_local": cuenta.get("chofer_id") == chofer_id
         and (password is None or verificar_password(password, str(cuenta.get("password_hash", "")))),
-        "otros_choferes_intactos": {k: v for k, v in choferes.items() if k != datos["rut"]} == choferes_antes,
+        "otros_choferes_intactos": {k: v for k, v in choferes.items() if existente or k != chofer_id} == choferes_antes,
         "otras_cuentas_intactas": {k: v for k, v in cuentas.items() if k != datos["usuario"]} == usuarios_antes.get("usuarios")
         and {k: v for k, v in usuarios.items() if k != "usuarios"} == {k: v for k, v in usuarios_antes.items() if k != "usuarios"},
     }
@@ -190,15 +214,16 @@ def verificar_alta(raiz: Path, datos: dict[str, str], password: str | None,
 
 
 def ejecutar(raiz: Path, *, usuario: str, rut: str, nombre: str, empresa: str = CLOUD_MBT, solo_validar: bool = False,
-             pedir: Callable[[str], str] = getpass.getpass, fabrica_escritor=escritor_oficial,
+             existente: bool = False, pedir: Callable[[str], str] = getpass.getpass, fabrica_escritor=escritor_oficial,
              adquirir: Callable = adquirir_con_espera) -> dict:
     raiz = Path(raiz)
     datos = normalizar_datos(usuario=usuario, rut=rut, nombre=nombre)
     validar_empresa(raiz, empresa)
     ruta_choferes, ruta_usuarios = _rutas(raiz)
     choferes, usuarios = _leer(ruta_choferes), _leer(ruta_usuarios)
-    comprobar_duplicados(datos, choferes, usuarios)
-    resumen = {"usuario": datos["usuario"], "chofer_id": datos["rut"], "nombre": datos["nombre"], "empresa_cloud": empresa}
+    chofer_id = comprobar_duplicados(datos, choferes, usuarios, existente=existente)
+    resumen = {"usuario": datos["usuario"], "chofer_id": chofer_id, "nombre": datos["nombre"], "empresa_cloud": empresa,
+               "modo": "CHOFER_EXISTENTE" if existente else "CHOFER_NUEVO"}
     if solo_validar:
         return {**resumen, "resultado": "VALIDO_SIN_ESCRIBIR"}
     password = pedir_password(datos["usuario"], pedir)
@@ -214,8 +239,8 @@ def ejecutar(raiz: Path, *, usuario: str, rut: str, nombre: str, empresa: str = 
                 ocupado = motivo in ("ESCRITOR_OCUPADO", "ESCRITOR_LOCAL_OCUPADO") or getattr(escritor, "ocupado", False)
                 raise ErrorAlta(motivo, "No se obtuvo el escritor; no se escribió nada.", SALIDA_OCUPADO if ocupado else SALIDA_SIN_ESCRITOR)
             choferes, usuarios = _leer(ruta_choferes), _leer(ruta_usuarios)
-            aplicar_alta(raiz, datos, password_hash, escritor)
-            verificacion = verificar_alta(raiz, datos, password, choferes, usuarios)
+            chofer_id = aplicar_alta(raiz, datos, password_hash, escritor, existente=existente)
+            verificacion = verificar_alta(raiz, datos, password, choferes, usuarios, chofer_id=chofer_id, existente=existente)
         # El cierre del escritor (fin del with) confirma la custodia en Cloud.
         if not all(verificacion.values()):
             raise ErrorAlta("VERIFICACION_FALLIDA", f"Verificación posterior incompleta: {verificacion}", SALIDA_SIN_ESCRITOR)
@@ -232,11 +257,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--nombre", required=True)
     parser.add_argument("--empresa", default=CLOUD_MBT, help=f"identificador Cloud de la empresa (sólo {CLOUD_MBT})")
     parser.add_argument("--solo-validar", action="store_true", help="valida datos y duplicados sin pedir contraseña ni escribir")
+    parser.add_argument("--chofer-existente", action="store_true",
+                        help="el chofer ya está activo en el catálogo: sólo se crea la credencial (no escribe choferes.json)")
     args = parser.parse_args(argv)
     fecha = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         resultado = ejecutar(resolver_raiz_atlas(args.raiz_atlas), usuario=args.usuario, rut=args.rut, nombre=args.nombre,
-                             empresa=args.empresa, solo_validar=args.solo_validar)
+                             empresa=args.empresa, solo_validar=args.solo_validar, existente=args.chofer_existente)
         salida = SALIDA_OK
     except ErrorAlta as error:
         resultado, salida = {"resultado": "RECHAZADO", "codigo": error.codigo, "detalle": error.detalle}, error.salida

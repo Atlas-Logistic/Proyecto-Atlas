@@ -300,5 +300,91 @@ def test_procedimiento_interactivo_no_pasa_contrasena_por_argumento():
     assert "Read-Host -AsSecureString" in ps1 and "ZeroFreeBSTR" in ps1
     assert "--empresa-id $empresaCloud" in ps1 and f"'{alta.CLOUD_MBT}'" in ps1
     assert "Enable-ScheduledTask" in ps1.split("} finally {")[1]  # PULL se reactiva siempre
+    assert "if ($Existente) { $a += '--chofer-existente' }" in ps1
     cmd = (repo / "alta_chofer_mobile.cmd").read_bytes()
     assert b"alta_chofer_mobile.ps1" in cmd and b"\r\n" in cmd
+
+
+# --- chofer ya existente en el catálogo: sólo credencial ---------------------
+
+def existente(raiz, **datos):
+    return ejecutar(raiz, existente=True, **{"usuario": "jose.l", "rut": "10.833.150-K", "nombre": "Jose Lazcano", **datos})
+
+
+@pytest.fixture
+def sin_cuenta_lazcano(raiz):
+    with TurnoEscritura(raiz):
+        ruta = raiz / "catalogos_privados" / "usuarios_mobile.json"
+        usuarios = json.loads(ruta.read_text(encoding="utf-8"))
+        del usuarios["usuarios"]["jose.lazcano"]
+        ruta.write_text(json.dumps(usuarios, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return raiz
+
+
+def test_existente_solo_agrega_credencial_y_no_escribe_catalogo(sin_cuenta_lazcano):
+    raiz = sin_cuenta_lazcano
+    catalogo_antes = (raiz / "catalogos_privados" / "choferes.json").read_bytes()
+    usuarios_antes = leer(raiz, "usuarios_mobile.json")
+    resultado = existente(raiz)
+    assert resultado["resultado"] == "ALTA_APLICADA" and resultado["modo"] == "CHOFER_EXISTENTE"
+    assert resultado["chofer_id"] == "10833150K" and all(resultado["verificacion"].values())
+    assert (raiz / "catalogos_privados" / "choferes.json").read_bytes() == catalogo_antes
+    usuarios = leer(raiz, "usuarios_mobile.json")["usuarios"]
+    assert {k: v for k, v in usuarios.items() if k != "jose.l"} == usuarios_antes["usuarios"]
+    assert usuarios["jose.l"]["chofer_id"] == "10833150K"
+    assert verificar_password(PASSWORD, usuarios["jose.l"]["password_hash"])
+
+
+def test_existente_usa_la_clave_exacta_del_catalogo(sin_cuenta_lazcano):
+    assert existente(sin_cuenta_lazcano, rut="10833150-k", solo_validar=True)["chofer_id"] == "10833150K"
+
+
+@pytest.mark.parametrize("datos, codigo", [
+    ({"rut": "11.640.500-8", "nombre": "RAIMUNDO PINEDA"}, "CHOFER_NO_ENCONTRADO"),
+    ({"nombre": "JOSE LAZCANA"}, "NOMBRE_NO_COINCIDE"),
+    ({"nombre": "SALOMON PIZARRO"}, "NOMBRE_NO_COINCIDE"),
+])
+def test_existente_rechaza_rut_o_nombre_que_no_coinciden(sin_cuenta_lazcano, datos, codigo):
+    antes, pedir, escritores = bytes_catalogos(sin_cuenta_lazcano), pedir_fijo(), []
+    with pytest.raises(alta.ErrorAlta) as error:
+        existente(sin_cuenta_lazcano, escritores=escritores, pedir=pedir, **datos)
+    assert error.value.codigo == codigo and pedir.pedidas == [] and escritores == []
+    assert bytes_catalogos(sin_cuenta_lazcano) == antes
+
+
+def test_existente_con_cuenta_previa_no_se_duplica(raiz):
+    antes = bytes_catalogos(raiz)
+    with pytest.raises(alta.ErrorAlta) as error:
+        existente(raiz, usuario="jose.lazcano2")
+    assert error.value.codigo == "CUENTA_DUPLICADA" and bytes_catalogos(raiz) == antes
+
+
+def test_existente_inactivo_rechazado(sin_cuenta_lazcano):
+    with TurnoEscritura(sin_cuenta_lazcano):
+        ruta = sin_cuenta_lazcano / "catalogos_privados" / "choferes.json"
+        choferes = json.loads(ruta.read_text(encoding="utf-8"))
+        choferes["10833150K"]["activo"] = False
+        ruta.write_text(json.dumps(choferes, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(alta.ErrorAlta) as error:
+        existente(sin_cuenta_lazcano)
+    assert error.value.codigo == "CHOFER_INACTIVO"
+
+
+def test_existente_fallo_de_credencial_no_toca_el_catalogo(sin_cuenta_lazcano, monkeypatch):
+    catalogo_antes = (sin_cuenta_lazcano / "catalogos_privados" / "choferes.json").read_bytes()
+    original = alta.escribir_json_atomico
+
+    def fallar(ruta, contenido):
+        if Path(ruta).name == "usuarios_mobile.json":
+            raise OSError("fallo simulado")
+        return original(ruta, contenido)
+    monkeypatch.setattr(alta, "escribir_json_atomico", fallar)
+    with pytest.raises(OSError):
+        existente(sin_cuenta_lazcano)
+    assert (sin_cuenta_lazcano / "catalogos_privados" / "choferes.json").read_bytes() == catalogo_antes
+
+
+def test_nuevo_sigue_rechazando_rut_existente(raiz):
+    with pytest.raises(alta.ErrorAlta) as error:
+        ejecutar(raiz, usuario="luis.x", rut="10.833.150-K", nombre="JOSE LAZCANO")
+    assert error.value.codigo == "RUT_DUPLICADO"
