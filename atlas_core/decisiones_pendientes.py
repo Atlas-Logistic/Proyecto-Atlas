@@ -3175,6 +3175,76 @@ def normalizar_identidad_documental(
     return salida
 
 
+def _reenvio_mobile_no_promovido(raiz: Path, archivo: str) -> tuple[str, str, str] | None:
+    """`(archivo_canonico, guia, transporte)` si `envio.json` acredita que
+    `archivo` (`mobile/<envío>/<foto>`) es un reenvío NO promovido de un
+    documento que ya existía; `None` ante cualquier duda."""
+    partes = archivo.split("/")
+    if len(partes) != 3 or partes[0] != "mobile" or not partes[1] or not partes[2]:
+        return None
+    try:
+        registro = json.loads(
+            (raiz / "operacion" / "mobile" / "envios" / partes[1] / "envio.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(registro, Mapping):
+        return None
+    asociacion = registro.get("resultado_asociacion") or {}
+    relectura = registro.get("relectura_documento") or {}
+    datos = registro.get("datos_ocr") or {}
+    if not (isinstance(asociacion, Mapping) and isinstance(relectura, Mapping) and isinstance(datos, Mapping)):
+        return None
+    if (str(registro.get("envio_id", "")) != partes[1] or str(registro.get("foto_original", "")) != partes[2]
+            or str(registro.get("archivo_dataset", "")).strip()
+            or asociacion.get("documento_ya_existe") is not True or relectura.get("promovida") is not False):
+        return None
+    canonico = str(relectura.get("archivo_canonico", "")).strip()
+    if not canonico or canonico == archivo:
+        return None
+    return canonico, str(datos.get("numero_guia", "")).strip(), str(datos.get("numero_transporte", "")).strip()
+
+
+def retirar_decisiones_reenvio_mobile_huerfanas(
+    decisiones: Iterable[Mapping[str, object]], *, ruta_dataset: str | Path,
+) -> list[dict[str, object]]:
+    """Retira las tarjetas de un reenvío Mobile NO promovido (caso real
+    484396/0000369573, envío 5dd077a0): esa lectura no tiene fila propia, así
+    que ninguna corrección de la fila canónica las alcanza y quedaban en
+    Revisión de Atlas para siempre. Sólo retira con prueba inequívoca:
+    - el `archivo` de la tarjeta (`mobile/<envío>/<foto>`) no es fila del dataset;
+    - su `envio.json` acredita reenvío de documento existente, sin fila
+      propia (`archivo_dataset` vacío) y relectura `promovida: False`;
+    - el `archivo_canonico` de esa relectura es exactamente UNA fila vigente
+      con la misma guía y transporte que la tarjeta y que la lectura.
+    Cualquier otra tarjeta (sin envío legible, otra guía, canónica ausente o
+    ambigua) se conserva tal cual. Nunca toca el ledger de decisiones aplicadas."""
+    decisiones = [dict(d) for d in decisiones]
+    ruta = Path(ruta_dataset)
+    raiz = raiz_desde_actual(ruta.parent)
+    filas = _leer_memoizado(ruta, _filas_identidad) if raiz is not None else None
+    if not filas:
+        return decisiones
+    por_archivo: dict[str, list[tuple[str, str]]] = {}
+    for archivo_fila, guia_fila, transporte_fila in filas:
+        por_archivo.setdefault(archivo_fila, []).append((guia_fila, transporte_fila))
+    salida: list[dict[str, object]] = []
+    for decision in decisiones:
+        doc = decision.get("documento") or {}
+        archivo = str(doc.get("archivo", "")).strip() if isinstance(doc, Mapping) else ""
+        if archivo.startswith("mobile/") and archivo not in por_archivo:
+            reenvio = _reenvio_mobile_no_promovido(raiz, archivo)
+            if reenvio is not None:
+                canonico, guia_leida, transporte_leido = reenvio
+                guia = str(doc.get("numero_guia", "")).strip()
+                transporte = str(doc.get("numero_transporte", "")).strip()
+                if (guia not in _GUIAS_SIN_NUMERO and transporte not in _GUIAS_SIN_NUMERO
+                        and por_archivo.get(canonico) == [(guia, transporte)]
+                        and (guia_leida, transporte_leido) == (guia, transporte)):
+                    continue
+        salida.append(decision)
+    return salida
+
+
 def regenerar_decisiones_persistidas(
     *, decisiones: Iterable[Mapping[str, object]], carpeta_catalogos: str | Path,
     ids_resueltos: Iterable[str] = (), ruta_dataset: str | Path | None = None,
@@ -3192,6 +3262,8 @@ def regenerar_decisiones_persistidas(
     if guias is not None:
         ajenas = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() not in guias]
         decisiones = [d for d in decisiones if str((d.get('documento') or {}).get('numero_guia','')).strip() in guias]
+    if ruta_dataset is not None:
+        decisiones = retirar_decisiones_reenvio_mobile_huerfanas(decisiones, ruta_dataset=ruta_dataset)
     archivos = (
         archivos_en_investigacion(raiz_desde_actual(Path(ruta_dataset).parent))
         if ruta_dataset is not None else frozenset()

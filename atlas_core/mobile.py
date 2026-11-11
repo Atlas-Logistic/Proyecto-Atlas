@@ -1219,9 +1219,12 @@ def _procesar_envio_mobile_impl(
             )
             with alcance_guias(dataset, guias):
                 ruta_artefacto = Path(dataset).parent / "decisiones_pendientes.json"
-                if relectura_documento and relectura_documento.get("promovida"):
-                    # Las tarjetas del documento ya se regeneraron desde su fila
-                    # canónica; las de esta lectura no tienen fila propia.
+                if (relectura_documento and relectura_documento.get("promovida")) or _reenvio_sin_fila_propia(
+                        asociacion, identificador=identificador, dataset=Path(dataset)):
+                    # Las tarjetas del documento viven en su fila canónica
+                    # (regeneradas si se promovió); las de esta lectura no
+                    # tienen fila propia: ninguna corrección las alcanzaría
+                    # (caso real 484396, reenvío 5dd077a0 SIN_MEJORA).
                     decisiones_nuevas.clear()
                 with bloqueo_sesion(ruta_artefacto.parent, NOMBRE_LOCK_DECISIONES_PENDIENTES):
                     previas: list[dict[str, object]] = []
@@ -2632,6 +2635,15 @@ def _filas_dataset(dataset: Path) -> list[dict[str, str]]:
         return []
     with Path(dataset).open("r", encoding="utf-8-sig", newline="") as archivo:
         return list(_lector_dataset_mobile(archivo))
+
+
+def _reenvio_sin_fila_propia(asociacion: Mapping[str, object], *, identificador: str, dataset: Path) -> bool:
+    """Reenvío de un documento ya registrado cuya lectura NO quedó como fila
+    del dataset (lectura fresca: un reintento cuyo intento previo sí escribió
+    la fila del envío conserva sus tarjetas)."""
+    if asociacion.get("documento_ya_existe") is not True or not Path(dataset).is_file():
+        return False
+    return identificador not in {str(f.get("archivo", "")).strip() for f in _filas_dataset(Path(dataset))}
 
 
 def _documento_de_fila(fila: Mapping[str, str]) -> dict[str, str]:
