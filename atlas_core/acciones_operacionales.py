@@ -1298,6 +1298,65 @@ def _precondiciones_cambio_transporte(ctx: _Contexto, fila: Mapping[str, str], n
     return {"origen": origen, "destino": destino}
 
 
+# Caso real 484396 (0000369573, SALOMÓN PIZARRO): desde una tarjeta de rampla,
+# «la patente es TG8925» se aplicó como rampla aunque TG8925 es el TRACTO
+# confirmado y asignado a ese chofer. Una patente que el catálogo confirma
+# inequívocamente como el OTRO tipo nunca se guarda en este campo: se rechaza
+# y se indica el campo que corresponde, sin moverla. Patente desconocida,
+# no confirmada o de un tipo sin campo propio (camión rígido): como siempre.
+# Confirmada con ambos tipos: no se elige, se pide revisión del catálogo.
+_TIPO_VEHICULO_POR_CAMPO = {"patente_tracto": "TRACTO", "patente_rampla": "CARRO"}
+_CAMPO_POR_TIPO_VEHICULO = {tipo: campo for campo, tipo in _TIPO_VEHICULO_POR_CAMPO.items()}
+_NOMBRE_CAMPO_PATENTE = {"patente_tracto": "tracto", "patente_rampla": "rampla"}
+
+
+def _validar_tipo_patente_para_campo(ctx: _Contexto, campo: str, valor: str) -> None:
+    esperado = _TIPO_VEHICULO_POR_CAMPO.get(campo)
+    if esperado is None:
+        return
+    from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos, normalizar_patente_vehiculo
+    from atlas_core.catalogos import normalizar_rut
+    from atlas_core.equipo_operacional import asignaciones_vigentes_con_fecha
+    patente = normalizar_patente_vehiculo(valor)
+    if not patente:
+        return
+    try:
+        vehiculos = cargar_catalogo_vehiculos(ctx.archivos["vehiculos"]).vehiculos
+    except Exception:  # noqa: BLE001 -- sin catálogo no hay evidencia de tipo: comportamiento de siempre
+        return
+    confirmados = [
+        v for v in vehiculos
+        if v.estado_calidad == "CONFIRMADO" and v.estado_vigencia == "ACTIVO"
+        and (v.patente_canonica == patente or patente in (v.aliases or ()))
+    ]
+    tipos = {v.tipo for v in confirmados}
+    if not tipos or tipos == {esperado}:
+        return
+    if len(tipos) > 1:
+        raise ErrorAccionOperacional(
+            "TIPO_VEHICULO_AMBIGUO",
+            f"la patente {patente} figura confirmada como {' y '.join(sorted(tipos))} en el catálogo de vehículos; "
+            f"no se guardó como {_NOMBRE_CAMPO_PATENTE[campo]}. Requiere revisión del catálogo. No se corrigió nada.",
+        )
+    tipo = next(iter(tipos))
+    correcto = _CAMPO_POR_TIPO_VEHICULO.get(tipo)
+    if correcto is None:
+        return
+    asignacion = ""
+    vigente = asignaciones_vigentes_con_fecha(vehiculos).get(confirmados[0].patente_canonica)
+    if vigente:
+        rut = vigente[0]
+        nombre = next((str(r.get("nombre") or "") for clave, r in ctx.choferes().items()
+                       if isinstance(r, Mapping) and normalizar_rut(clave) == rut), "")
+        asignacion = f", asignado a {nombre or 'RUT ' + rut}"
+    raise ErrorAccionOperacional(
+        "PATENTE_DE_OTRO_TIPO",
+        f"{patente} está confirmada como {_NOMBRE_CAMPO_PATENTE[correcto]} en el catálogo de vehículos{asignacion}; "
+        f"corresponde al campo {_NOMBRE_CAMPO_PATENTE[correcto]}, no a {_NOMBRE_CAMPO_PATENTE[campo]}. "
+        f"No se corrigió nada. Para guardarla, corrige el campo «{_NOMBRE_CAMPO_PATENTE[correcto]}».",
+    )
+
+
 def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.investigacion_documental import archivos_en_investigacion
     from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
@@ -1306,6 +1365,9 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     if archivo in archivos_en_investigacion(ctx.raiz):
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el documento está en investigación (cuarentena)")
     campo, valor = str(p["campo"]).lower(), str(p["valor"])
+    # Antes de comparar con el valor actual: repetir una patente ya mal
+    # ubicada debe explicar el tipo, no responder «sin cambios».
+    _validar_tipo_patente_para_campo(ctx, campo, valor)
     actual = str(fila.get(campo, "")).strip()
     if actual == valor:
         sin_cambios = True
