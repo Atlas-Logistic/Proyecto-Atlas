@@ -345,3 +345,15 @@ def test_transiciones_cumplidas_se_aplican_antes_de_revisar(raiz):
     despues = lambda: datetime(2027, 10, 2, 12, tzinfo=timezone.utc)  # noqa: E731
     resolver(raiz, pendiente, propuesta={"tipo": "REVISION_TECNICA", "fecha_vencimiento": "2028-09-30"}, reloj=despues)
     assert eventos(raiz, "DOCUMENTO_REEMPLAZO_PROGRAMADO_APLICADO")
+
+
+def test_revision_desktop_no_confirma_mientras_fichas_esta_ocupado(raiz):
+    from atlas_core.almacenamiento_portable import bloqueo_sesion, SesionOcupadaError
+    pendiente = alta(raiz, SIN_TIPO, tipo='REVISION_TECNICA', contenido=b'lock-desktop')
+    propuesta = {'tipo': 'REVISION_TECNICA', 'fecha_vencimiento': '2027-09-30'}
+    clave = revisar(raiz, pendiente, propuesta)['consecuencia']['clave']
+    antes = almacen(raiz)
+    with bloqueo_sesion(raiz / 'operacion' / 'actual', 'fichas_choferes_MBT'):
+        with pytest.raises(SesionOcupadaError):
+            resolver(raiz, pendiente, propuesta=propuesta, clave=clave)
+    assert almacen(raiz) == antes

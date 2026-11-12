@@ -138,6 +138,7 @@ def _por_identificar(documento: dict) -> bool:
     previa = documento.get("identificacion_patente")
     # Un documento cuyo tipo quedó pendiente por OCR sigue siendo vehicular.
     return (documento.get("tipo") in (*TIPOS_VEHICULO, TIPO_PENDIENTE) and documento.get("origen") == "MOBILE"
+            and not documento.get("revision_humana") and not documento.get("rechazo")
             and not documento.get("reemplazado_por") and not _es_humana(documento)
             and (previa is None or (int(previa.get("version") or 0) < VERSION_IDENTIFICACION
                  and previa.get("motivo") == "FORMATO_SIN_OCR" and str(documento.get("archivo", "")).lower().endswith(".pdf"))))

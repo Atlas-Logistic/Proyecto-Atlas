@@ -742,7 +742,7 @@ def _vehiculo_de(raiz: str | Path, carpeta_catalogos, patente: str) -> str:
 
 
 def _evaluar_revision(raiz: str | Path, datos: dict, documento: dict, propuesta: dict | None, hoy: date,
-                      carpeta_catalogos=None) -> dict:
+                      carpeta_catalogos=None, anteriores=None) -> dict:
     """Consecuencia de confirmar con `propuesta`: la de `decidir_renovacion`, o BLOQUEADO si
     los datos no permiten aplicarla (falta, contradice la lectura o es de otro vehículo)."""
     from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
@@ -796,7 +796,7 @@ def _evaluar_revision(raiz: str | Path, datos: dict, documento: dict, propuesta:
     decision = decidir_renovacion({
         "tipo": valores["tipo"], "tipo_informado": valores["tipo"], "vencimiento": vencimiento, "inicio": inicio,
         "estado_inicio": None if inicio_humano else lectura["estado_inicio"], "coberturas": coberturas,
-        "reemplaza": reemplaza}, _anteriores_operativos(datos, documento, hoy), hoy)
+        "reemplaza": reemplaza}, _anteriores_operativos(datos, documento, hoy) if anteriores is None else anteriores, hoy)
     valores.update(fecha_emision=emision, fecha_vencimiento=vencimiento, inicio_vigencia=inicio, coberturas=coberturas,
                    reemplaza=reemplaza)
     return {**decision, "campo": "", "detalle": "", "valores": valores}
@@ -827,22 +827,62 @@ def _resumen_documento(documento: dict) -> dict:
             "registrado_en": documento.get("registrado_en", "")}
 
 
+def _revision_desktop_contexto(raiz, empresa, datos, documento, propuesta, hoy, carpeta_catalogos=None):
+    """Evalúa una revisión frente a ambos almacenes sin escribirlos."""
+    from atlas_core.identificacion_patentes import _ubicaciones
+    fichas = _leer_fichas(raiz, empresa)
+    anteriores = _anteriores_operativos(datos, documento, hoy)
+    expediente = next(e for e in datos['expedientes'] if e['expediente_id'] == documento['expediente_id'])
+    fichas_anteriores = []
+    for patente, d in _ubicaciones(fichas or {}):
+        if not patente or d.get('reemplazado_por') or d.get('rechazo') or not d.get('vencimiento'):
+            continue
+        if _vehiculo_de(raiz, carpeta_catalogos, patente) not in expediente['referencias']:
+            continue
+        if _dias_para_vencer(d['vencimiento'], hoy) is None:
+            continue
+        rev = d.get('revision_humana') or {}
+        cobertura = rev.get('coberturas') if rev.get('sha256') == d.get('sha256') else _coberturas_extraidas(d.get('extraccion_automatica') or {})
+        anteriores.append({'documento_id': d['documento_id'], 'tipo': d['tipo'], 'vencimiento': d['vencimiento'],
+                           'coberturas': cobertura or [], 'origenes': [d['documento_id'], d.get('origen_documento_id'), *d.get('origenes_adicionales', [])]})
+        fichas_anteriores.append(d)
+    evaluacion = _evaluar_revision(raiz, datos, documento, propuesta, hoy, carpeta_catalogos, anteriores)
+    if evaluacion['accion'] in ('REEMPLAZAR', 'PROGRAMAR') and set(evaluacion['documentos']) & {d['documento_id'] for d in fichas_anteriores}:
+        evaluacion.update(accion='PENDIENTE', motivo='RENOVACION_ENTRE_ALMACENES')
+    catalogo = _carpeta(raiz, carpeta_catalogos) / 'vehiculos.json'
+    carpeta = ruta_almacen_expediente(raiz, empresa).parent.resolve()
+    ruta = (carpeta / str(documento.get('archivo') or '')).resolve()
+    original = hashlib.sha256(ruta.read_bytes()).hexdigest() if ruta.is_relative_to(carpeta) and ruta.is_file() else ''
+    clave = hashlib.sha256(json.dumps({'fichas': fichas, 'expedientes': datos['expedientes'],
+                                     'documentos': datos['documentos'], 'evaluacion': evaluacion,
+                                     'catalogo': hashlib.sha256(catalogo.read_bytes()).hexdigest(), 'original': original},
+                                    sort_keys=True, ensure_ascii=True).encode()).hexdigest()[:32]
+    return evaluacion, anteriores, fichas_anteriores, clave
+
+
 def revisar_documento_pendiente(raiz: str | Path, *, empresa: str, referencia: str, documento_id: str,
                                 propuesta: dict | None = None, reloj: _Reloj = _ahora_utc,
                                 carpeta_catalogos: str | Path | None = None) -> dict:
     """Vista previa de la revisión (sólo lee): lo leído, los motivos de la duda, los
     anteriores del vehículo y la consecuencia exacta que tendría confirmar."""
+    from atlas_core.identificacion_patentes import _ubicaciones
+    fichas = _leer_fichas(raiz, empresa)
+    if fichas and any(d.get('documento_id') == documento_id and d.get('origen') == 'MOBILE'
+                      for _, d in _ubicaciones(fichas)):
+        from atlas_core.revision_vehiculo_mobile import revisar
+        return revisar(raiz, empresa=empresa, referencia=referencia, documento_id=documento_id,
+                       propuesta=propuesta, reloj=reloj, carpeta_catalogos=carpeta_catalogos)
     from atlas_core.fichas_vehiculos import TIPOS_VEHICULO
     hoy = reloj().astimezone(timezone.utc).date()
     datos = _leer_a_fecha(raiz, empresa, hoy)
     documento = _pendiente_de_vehiculo(raiz, empresa, datos, referencia, documento_id, carpeta_catalogos)
     lectura = _lectura(documento)
-    evaluacion = _evaluar_revision(raiz, datos, documento, propuesta, hoy, carpeta_catalogos)
+    evaluacion, anteriores, fichas_anteriores, clave = _revision_desktop_contexto(raiz, empresa, datos, documento, propuesta, hoy, carpeta_catalogos)
     from atlas_core.renovacion_documental import tipos_acreditados
     # Sólo los anteriores que acreditan lo mismo que el tipo en revisión (y los que nombra la decisión).
     tipo_revisado = str((propuesta or {}).get("tipo") or "").upper() or lectura["leido"]["tipo"] or documento.get("tipo_informado") or ""
     acredita = tipos_acreditados({"tipo": tipo_revisado, "coberturas": lectura["leido"]["coberturas"]})
-    operativos = {a["documento_id"] for a in _anteriores_operativos(datos, documento, hoy)
+    operativos = {a["documento_id"] for a in anteriores
                   if acredita & tipos_acreditados(a) or a["documento_id"] in evaluacion["documentos"]}
     nombres = tipos_documento(datos)
     return {
@@ -852,9 +892,12 @@ def revisar_documento_pendiente(raiz: str | Path, *, empresa: str, referencia: s
         "leido": lectura["leido"], "motivos": lectura["motivos"], "inicios_observados": lectura["inicios_observados"],
         "editables": [c for c in _CAMPOS_REVISION if not lectura["leido"][c] and not (c == "patente" and lectura["otro_vehiculo"])],
         "tipos": [{"tipo": t, "nombre": nombres[t]["nombre"]} for t in TIPOS_VEHICULO],
-        "anteriores": [_resumen_documento(d) for d in datos["documentos"] if d["documento_id"] in operativos],
+        "anteriores": ([_resumen_documento(d) for d in datos["documentos"] if d["documento_id"] in operativos] +
+                       [{"documento_id": d['documento_id'], "tipo": d['tipo'], "fecha_emision": "", "fecha_vencimiento": d['vencimiento'],
+                         "coberturas": _coberturas_extraidas(d.get('extraccion_automatica') or {}), "archivo": d.get('archivo', ''),
+                         "registrado_en": d.get('recibido_en', '')} for d in fichas_anteriores if d['documento_id'] in operativos]),
         "consecuencia": {**{c: evaluacion[c] for c in ("accion", "motivo", "campo", "detalle", "documentos", "fecha")},
-                         "clave": _clave_consecuencia(evaluacion)},
+                         "clave": clave},
         "puede_confirmar": evaluacion["accion"] in _CONFIRMABLES,
     }
 
@@ -867,6 +910,15 @@ def resolver_documento_pendiente(
     """Confirma o rechaza un pendiente vehicular revisado por una persona. Confirmar
     recalcula bajo bloqueo la misma consecuencia de la vista previa y sólo la aplica si
     coincide y la regla la permite. Rechazar lo deja anulado con su original e historial."""
+    from atlas_core.identificacion_patentes import _ubicaciones
+    fichas = _leer_fichas(raiz, empresa)
+    if fichas and any(d.get('documento_id') == documento_id and d.get('origen') == 'MOBILE'
+                      for _, d in _ubicaciones(fichas)):
+        from atlas_core.revision_vehiculo_mobile import resolver
+        return resolver(raiz, empresa=empresa, referencia=referencia, documento_id=documento_id, sha256=sha256,
+                        decision=str(decision or '').upper(), autor=autor, confirmacion_humana=confirmacion_humana,
+                        motivo=motivo, propuesta=propuesta, clave_consecuencia=clave_consecuencia, actor=actor,
+                        reloj=reloj, carpeta_catalogos=carpeta_catalogos)
     actor, autor, decision = _actor(actor), _autor(autor), str(decision or "").upper()
     if confirmacion_humana is not True:
         raise ErrorExpedienteDigital("falta la confirmación de que una persona revisó el original")
@@ -874,7 +926,11 @@ def resolver_documento_pendiente(
         raise ErrorExpedienteDigital("decisión no admitida")
     motivo = _motivo(motivo) if decision == RECHAZAR else ""
     carpeta = ruta_almacen_expediente(raiz, empresa).parent
-    with _mutacion(raiz, empresa) as datos:
+    # Misma secuencia que la revisión Mobile; adquisición sin espera.
+    # _mutacion publica el expediente antes de liberar catálogo y fichas.
+    with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa), \
+         bloqueo_sesion(_carpeta(raiz, carpeta_catalogos), 'catalogo_vehiculos'), \
+         _mutacion(raiz, empresa) as datos:
         hoy = reloj().astimezone(timezone.utc).date()
         _aplicar_transiciones(datos, hoy, reloj)
         documento = _pendiente_de_vehiculo(raiz, empresa, datos, referencia, documento_id, carpeta_catalogos)
@@ -893,8 +949,8 @@ def resolver_documento_pendiente(
         if not documento.get("archivo") or not ruta.resolve().is_relative_to(carpeta.resolve()) or not ruta.is_file() \
                 or hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
             raise ErrorExpedienteDigital("el original no está íntegro; no se puede confirmar")
-        evaluacion = _evaluar_revision(raiz, datos, documento, propuesta, hoy, carpeta_catalogos)
-        if not clave_consecuencia or _clave_consecuencia(evaluacion) != clave_consecuencia:
+        evaluacion, _, _, clave = _revision_desktop_contexto(raiz, empresa, datos, documento, propuesta, hoy, carpeta_catalogos)
+        if not clave_consecuencia or clave != clave_consecuencia:
             raise ErrorExpedienteDigital("la consecuencia cambió desde la vista previa; vuelva a revisarla")
         accion = evaluacion["accion"]
         if accion not in _CONFIRMABLES:
@@ -969,7 +1025,7 @@ def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente:
         vista.update(extraccion_automatica=doc.get("extraccion_automatica"),
                      identificacion_patente=doc.get("identificacion_patente"), asociacion=doc.get("asociacion"),
                      vencimiento_registro=doc.get("vencimiento_registro"), patente_ficha=patente_ficha,
-                     tipo_informado=doc.get("tipo_informado"))
+                     tipo_informado=doc.get("tipo_informado"), revision_humana=doc.get("revision_humana"))
     for clave in ("tipo_informado", "posible_reemplazo", "transicion_programada"):
         if doc.get(clave):
             vista[clave] = doc[clave]
@@ -985,7 +1041,7 @@ def _vista_coberturas(documento: dict) -> dict:
     extraccion = documento.get("extraccion_automatica") or {}
     campos = extraccion.get("campos") or {}
     huella = documento.get("sha256")
-    if documento.get("fuente") == "EXPEDIENTE" and _revision_vigente(documento).get("coberturas"):
+    if _revision_vigente(documento).get("coberturas"):
         # Confirmada por una persona sobre este original, con coberturas leídas con evidencia.
         return {**documento, "tipos_cubiertos": _coberturas_documento(documento),
                 "pendiente_revision": bool(documento.get("pendiente_revision"))}
@@ -1027,7 +1083,8 @@ def _documentos_de_fichas(raiz: str | Path, empresa: str, catalogos: Path) -> li
     for ficha in fichas.get("vehiculos", []):
         patente = str(ficha.get("patente", ""))
         documentos += [_documento_de_ficha(doc, VEHICULO, [patentes.get(patente, patente)], "FICHA_VEHICULO", patente)
-                       for doc in ficha.get("documentos", []) if doc.get("tipo") and not doc.get("reemplazado_por")]
+                       for doc in ficha.get("documentos", []) if doc.get("tipo") and not doc.get("reemplazado_por")
+                       and not doc.get("rechazo")]
     documentos = [_vista_coberturas(d) for d in documentos]
     resultado, mejores = [], {}
     for doc in documentos:
