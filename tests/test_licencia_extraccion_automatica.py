@@ -335,3 +335,43 @@ def test_canal_oficial_desktop_adjunta_y_lee_sin_procesos_ajenos(tmp_path, nombr
     assert resultado['ok'] and resultado['estado'] == estado
     doc = _doc(raiz, resultado['documento_id'])
     assert (ruta_almacen(raiz, 'MBT').parent / doc['archivo']).read_bytes() == archivo.read_bytes()
+
+
+# ---------------------------------------------------------------- frente real: fecha antes del rótulo
+
+# Orden real del OCR del frente actual (sintético): la fecha de cada control
+# aparece ANTES de su rótulo y un rótulo viene cortado ("ULTMO").
+FRENTE_ACTUAL = ['LICENCIADECONDUCTOR', 'A4 Ley19495', f'RUN {RUT}', '09/08/2024', 'FECHA ULTMOCONTROL',
+                 '09/08/2028', 'FECHADECONTROL']
+
+
+def test_par_de_fechas_de_control_da_el_vencimiento_solo_si_se_pide():
+    sin = extraer_campos_licencia({'FRENTE': FRENTE_ACTUAL})
+    con = extraer_campos_licencia({'FRENTE': FRENTE_ACTUAL}, inferir_vencimiento_por_controles=True)
+    assert sin['vencimiento']['estado'] != EXTRAIDO
+    assert con['vencimiento']['valor'] == '2028-08-09' and con['vencimiento']['metodo'] == 'PAR_FECHAS_CONTROL'
+
+
+@pytest.mark.parametrize('lineas', [
+    ['01/02/1980'] + FRENTE_ACTUAL,  # tres fechas (nacimiento u otra): ambiguo
+    [l if l != '09/08/2028' else '09/08/2040' for l in FRENTE_ACTUAL],  # 16 años entre controles
+    [l for l in FRENTE_ACTUAL if 'ULTMO' not in l],  # sin rótulo de último control
+], ids=['tres-fechas', 'intervalo-imposible', 'sin-rotulo'])
+def test_par_de_fechas_ambiguo_no_infiere(lineas):
+    campo = extraer_campos_licencia({'FRENTE': lineas}, inferir_vencimiento_por_controles=True)['vencimiento']
+    assert campo['estado'] != EXTRAIDO and 'metodo' not in campo
+
+
+def test_foto_del_frente_actual_se_registra_en_pull_y_mobile_no_infiere(tmp_path):
+    raiz = _raiz(tmp_path)
+    desktop = _adjuntar(raiz, _archivo(tmp_path, 'frente.jpg', b'\xff\xd8\xff\xe0frente actual'))
+    foto = b'\xff\xd8\xff\xe0frente mobile'
+    mobile = registrar_licencia_mobile_pendiente(
+        raiz, empresa='MBT', referencia_catalogo=REF, origen_documento_id='dfm_2', recibido_en='2026-11-02T12:00:00Z',
+        comprobar=lambda: None, contenido=foto, mime_type='image/jpeg', sha256=sha(foto))
+    _pull(raiz, OCRFalso(FRENTE_ACTUAL))
+    doc = _doc(raiz, desktop['documento_id'])
+    assert doc['estado_revision'] == ESTADO_REGISTRO_AUTOMATICO and doc['vencimiento'] == '2028-08-09' and doc['clase'] == 'A4'
+    assert doc['registro_automatico']['pendientes'] == {'nombre': 'NO_ENCONTRADO'}
+    propuesta = _doc(raiz, mobile['documento_id'])['extraccion_automatica']['campos']['vencimiento']
+    assert propuesta['estado'] != EXTRAIDO and 'metodo' not in propuesta

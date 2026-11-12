@@ -62,6 +62,7 @@ VERSION_EXTRACCION = 3
 # Una licencia en PDF tiene una o dos páginas; más es otro documento.
 MAX_PAGINAS_LICENCIA_PDF = 4
 DPI_OCR_PDF = 300
+MAX_PIXELES_OCR_PDF = 12_000_000
 # Vencimiento plausible de una licencia (control cada 2 a 6 años en Chile):
 # fuera de este rango es una lectura dudosa y la completa una persona.
 ANIOS_VENCIMIENTO_PASADO = 20
@@ -80,6 +81,8 @@ _FECHA = re.compile(r"(?<!\d)(\d{1,2})\s*[/.-]\s*(\d{1,2})\s*[/.-]\s*(\d{4})(?!\
 # "REPUBLICADECHHLE"): los espacios entre palabras del rótulo son opcionales.
 _ETIQUETA_VENCIMIENTO = re.compile(
     r"PROXIMO\s*CONTROL|FECHA\s*(?:DE\s*)?CONTROL|VENCIMIENTO|\bVENCE\b|VALIDA\s*HASTA")
+# "ULTIMO CONTROL" con los cortes reales del OCR ("FECHAULTIMOCONTROL", "ULTMOCONTROL").
+_ETIQUETA_ULTIMO_CONTROL = re.compile(r"ULT\w*\s*CONTROL")
 _ETIQUETA_CLASE = re.compile(r"\bCLASES?\b")
 # Licencia real sin rótulo CLASE legible: la clase profesional va impresa
 # junto a su ley ("A4 Ley19495"). Sólo A1-A5, que son las de la Ley 19.495.
@@ -204,12 +207,44 @@ def _extraer_nombre(caras: Mapping[str, list[str]]) -> dict:
     return _campo(None, motivo, observados=nombres["observados"] + apellidos["observados"])
 
 
-def extraer_campos_licencia(caras: Mapping[str, Iterable[str]], *, ruts_catalogo: Iterable[str] = ()) -> dict:
+def _vencimiento_por_fechas_de_control(caras: Mapping[str, list[str]]) -> dict | None:
+    """Frente de la licencia actual: «FECHA ÚLTIMO CONTROL» y «FECHA DE CONTROL»
+    con una fecha cada uno, y el OCR suele entregar la fecha ANTES de su rótulo
+    (o el rótulo cortado). Si la cara con el rótulo de último control trae
+    exactamente dos fechas válidas separadas por 1 a 8 años, la posterior es el
+    próximo control (el vencimiento). Más fechas (licencia antigua con tabla de
+    clases) o dos caras que no concuerdan: no se infiere nada."""
+    candidatos = []
+    for cara, lineas in caras.items():
+        if not any(_ETIQUETA_ULTIMO_CONTROL.search(l) for l in lineas):
+            continue
+        fechas = set()
+        for linea in lineas:
+            for dia, mes, anio in _FECHA.findall(linea):
+                campo = validar_fecha(f"{int(dia):02d}/{int(mes):02d}/{anio}", formato_esperado="DD/MM/YYYY")
+                if campo.estado == EstadoValidacion.VALIDO:
+                    fechas.add(campo.valor)
+        if len(fechas) != 2:
+            return None
+        anterior, posterior = sorted(fechas, key=date.fromisoformat)
+        if not 1 <= date.fromisoformat(posterior).year - date.fromisoformat(anterior).year <= 8:
+            return None
+        candidatos.append((posterior, anterior, cara))
+    if len({c[0] for c in candidatos}) != 1:
+        return None
+    posterior, anterior, cara = candidatos[0]
+    return {**_campo(posterior, caras=[cara], observados=[anterior, posterior]), "metodo": "PAR_FECHAS_CONTROL"}
+
+
+def extraer_campos_licencia(caras: Mapping[str, Iterable[str]], *, ruts_catalogo: Iterable[str] = (),
+                            inferir_vencimiento_por_controles: bool = False) -> dict:
     """Campos propuestos a partir del texto OCR de cada cara del MISMO documento.
 
     `ruts_catalogo`: RUT canónicos del chofer de la ficha. Un RUT legible que
     no es ninguno de ellos queda PENDIENTE_REVISION (CONTRADICE_CATALOGO); la
-    identidad confirmada no se toca."""
+    identidad confirmada no se toca. `inferir_vencimiento_por_controles`
+    (licencias adjuntadas en Desktop): si el rótulo no entrega el vencimiento,
+    se intenta con el par de fechas de control (`_vencimiento_por_fechas_de_control`)."""
     normalizadas = {cara: [l for l in (_normalizar(x) for x in lineas) if l] for cara, lineas in caras.items()}
     campos = {
         "nombre": _extraer_nombre(normalizadas),
@@ -217,6 +252,8 @@ def extraer_campos_licencia(caras: Mapping[str, Iterable[str]], *, ruts_catalogo
         "clase": _extraer_clase(normalizadas),
         "vencimiento": _extraer_vencimiento(normalizadas),
     }
+    if inferir_vencimiento_por_controles and campos["vencimiento"]["motivo"] in ("NO_ENCONTRADO", "ILEGIBLE"):
+        campos["vencimiento"] = _vencimiento_por_fechas_de_control(normalizadas) or campos["vencimiento"]
     ruts = {validar_rut_chileno(r).valor for r in ruts_catalogo} - {None}
     if campos["rut"]["estado"] == EXTRAIDO and ruts and campos["rut"]["valor"] not in ruts:
         campos["rut"] = _campo(None, "CONTRADICE_CATALOGO", caras=campos["rut"]["caras"],
@@ -269,6 +306,14 @@ class _RequiereOCR(Exception):
     """El original necesita OCR y esta lectura no lo permite (adjunto en Desktop)."""
 
 
+def _dpi_ocr(ancho_pt: float, alto_pt: float) -> float:
+    """300 dpi, o menos si la página es grande: un PDF armado desde fotos de
+    celular trae páginas de varios metros y a 300 dpi superaría el límite de
+    píxeles. Se apunta a una imagen del tamaño de una foto (~12 Mpx)."""
+    area = max(float(ancho_pt) * float(alto_pt), 1.0)
+    return min(float(DPI_OCR_PDF), 72.0 * (MAX_PIXELES_OCR_PDF / area) ** 0.5)
+
+
 def _lineas_pdf(ruta: Path, *, permitir_ocr: bool, proveedor: Callable[[], object],
                 temporal: Callable[[], Path]) -> tuple[dict, list[str]]:
     """Texto de cada página: el embebido si es utilizable (mismas reglas que la
@@ -293,6 +338,7 @@ def _lineas_pdf(ruta: Path, *, permitir_ocr: bool, proveedor: Callable[[], objec
             cara = f"PAGINA_{indice + 1}"
             pagina = documento[indice]
             try:
+                ancho_pt, alto_pt = pagina.get_size()
                 caracteres = _caracteres_pagina(pagina)
                 utilizable, _ = _clasificar_texto_pagina(caracteres)
                 lineas = [s["texto"] for s in _segmentos_texto_pagina(pagina, caracteres, DPI_OCR_PDF)] if utilizable else None
@@ -305,7 +351,7 @@ def _lineas_pdf(ruta: Path, *, permitir_ocr: bool, proveedor: Callable[[], objec
             if not permitir_ocr:
                 raise _RequiereOCR(cara)
             imagen = temporal() / f"{uuid.uuid4().hex}.png"
-            _rasterizar_pagina(documento, indice, imagen, DPI_OCR_PDF)
+            _rasterizar_pagina(documento, indice, imagen, _dpi_ocr(ancho_pt, alto_pt))
             try:
                 textos[cara] = list(proveedor().leer_texto(imagen))
             finally:
@@ -473,7 +519,11 @@ def extraer_licencias_pendientes(
                 resumen["errores"].append({"documento_id": doc_id, "error": str(error)})
                 continue
             if textos:
-                campos = extraer_campos_licencia(textos, ruts_catalogo=_ruts_de_ficha(ficha, catalogo))
+                # La inferencia por fechas de control sólo para lo adjuntado en Desktop:
+                # las propuestas de la revisión Mobile no cambian.
+                campos = extraer_campos_licencia(
+                    textos, ruts_catalogo=_ruts_de_ficha(ficha, catalogo),
+                    inferir_vencimiento_por_controles=documento.get("origen") == ORIGEN_DESKTOP)
             else:
                 campos = {c: _campo(None, "FORMATO_SIN_OCR") for c in CAMPOS}
             extraccion = {
