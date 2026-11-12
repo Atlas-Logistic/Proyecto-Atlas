@@ -1012,15 +1012,37 @@ def _indice_patentes(catalogos: Path) -> dict[str, str]:
     return {p: v.vehiculo_id for v in vehiculos for p in (v.patente_canonica, *v.aliases)}
 
 
+def _ultima_correccion_fechas(doc: dict) -> dict:
+    """Resumen de la última corrección manual de fechas (autor, fecha y campos), o {}."""
+    correcciones = doc.get("correcciones_fechas") or []
+    ultima = correcciones[-1] if correcciones and isinstance(correcciones[-1], dict) else {}
+    if not ultima:
+        return {}
+    return {"autor": ultima.get("autor", ""), "fecha": ultima.get("fecha", ""),
+            "campos": sorted(ultima.get("cambios") or {}), "cantidad": len(correcciones)}
+
+
+def _vencimiento_corregido(documento: dict) -> bool:
+    """El vencimiento registrado es el que confirmó una persona sobre este mismo original."""
+    registro = (documento.get("fechas_confirmadas") or {}).get("fecha_vencimiento") or {}
+    return bool(registro.get("valor")) and registro.get("valor") == documento.get("fecha_vencimiento") \
+        and registro.get("sha256") == documento.get("sha256")
+
+
 def _documento_de_ficha(doc: dict, entidad: str, referencias: list[str], fuente: str, patente_ficha: str = "") -> dict:
     vencimiento = str(doc.get("vencimiento") or "")
     vista = {
         "documento_id": doc["documento_id"], "entidad": entidad, "referencia_catalogo": referencias[-1],
-        "referencias": referencias, "tipo": doc["tipo"], "fecha_emision": "", "fecha_vencimiento": vencimiento,
+        "referencias": referencias, "tipo": doc["tipo"], "fecha_emision": str(doc.get("emision") or ""),
+        "fecha_vencimiento": vencimiento,
         "estado": ACTIVO, "archivo": str(doc.get("archivo", "")), "sha256": str(doc.get("sha256", "")),
         "fuente": fuente, "pendiente_revision": not vencimiento,
         "confirmado_por_humano": bool(vencimiento) and doc.get("estado_revision") != _ESTADO_OCR_AUTOMATICO,
     }
+    if doc.get("fechas_confirmadas"):
+        vista["fechas_confirmadas"] = doc["fechas_confirmadas"]
+    if _ultima_correccion_fechas(doc):
+        vista["correccion_fechas"] = _ultima_correccion_fechas(doc)
     if doc.get("tipo") in TIPOS_POLIZA or doc.get("tipo") == "DOCUMENTO_VEHICULO_PENDIENTE":
         vista.update(extraccion_automatica=doc.get("extraccion_automatica"),
                      identificacion_patente=doc.get("identificacion_patente"), asociacion=doc.get("asociacion"),
@@ -1061,9 +1083,11 @@ def _vista_coberturas(documento: dict) -> dict:
                          and len(archivos) == 1 and archivos[0].get("sha256") == huella
                          and archivos[0].get("archivo") == documento.get("archivo"))
     vencimiento = campos.get("vencimiento") or {}
+    leido = (vencimiento.get("estado") == "EXTRAIDO" and vencimiento.get("valor") == documento.get("fecha_vencimiento")
+             and vencimiento.get("evidencia") and not vencimiento.get("motivo"))
+    # Un vencimiento corregido por una persona sobre el mismo original no cambia las coberturas leídas.
     confiable = (vinculado and extraccion.get("procedencia") == "AUTOMATICA_OCR"
-                 and vencimiento.get("estado") == "EXTRAIDO" and vencimiento.get("valor") == documento.get("fecha_vencimiento")
-                 and vencimiento.get("evidencia") and not vencimiento.get("motivo"))
+                 and (leido or _vencimiento_corregido(documento)))
     coberturas = _coberturas_extraidas(extraccion) if confiable else []
     return {**documento, "tipos_cubiertos": coberturas,
             "pendiente_revision": bool(documento.get("pendiente_revision") or not coberturas)}
@@ -1110,7 +1134,8 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
     referencias = {e["expediente_id"]: e["referencias"] for e in datos["expedientes"]}
     propios = [_vista_coberturas({**d, "fuente": "EXPEDIENTE", "pendiente_revision": d.get("pendiente_revision", False),
                 "confirmado_por_humano": d.get("confirmado_por_humano", True),
-                "referencias": referencias[d["expediente_id"]]})
+                "referencias": referencias[d["expediente_id"]],
+                **({"correccion_fechas": _ultima_correccion_fechas(d)} if _ultima_correccion_fechas(d) else {})})
                for d in datos["documentos"] if d["estado"] == ACTIVO]
     claves = lambda d: [(d["entidad"], r, d["tipo"]) for r in d["referencias"]]  # noqa: E731
     registrados = {k: d["fecha_vencimiento"] for d in propios

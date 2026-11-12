@@ -19,7 +19,19 @@ def _expediente(argumentos: argparse.Namespace) -> int:
     )
     empresa = empresa_del_proceso()
     try:
-        if argumentos.expediente_revision_documento:
+        if argumentos.expediente_fechas_documento:
+            # Corrección manual de fechas: vista previa (valores actuales, propuestos y vigencia), sin escribir.
+            from atlas_core.correccion_fechas_documentales import ErrorCorreccionFechas, previsualizar_correccion_fechas
+            try:
+                propuesta = json.loads(argumentos.expediente_fechas_propuesta or "{}")
+                resultado = previsualizar_correccion_fechas(
+                    argumentos.raiz_atlas, empresa=empresa, entidad=argumentos.expediente_entidad or "",
+                    referencia=argumentos.expediente_referencia or "",
+                    documento_id=argumentos.expediente_fechas_documento, propuesta=propuesta)
+            except ValueError as error:  # incluye ErrorCorreccionFechas y JSON ilegible
+                raise ErrorExpedienteDigital(str(error) if isinstance(error, ErrorCorreccionFechas)
+                                             else "propuesta de fechas ilegible") from error
+        elif argumentos.expediente_revision_documento:
             try:
                 propuesta = json.loads(argumentos.expediente_revision_propuesta or "{}")
             except ValueError as error:
@@ -53,8 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expediente-alertas", action="store_true")
     parser.add_argument("--expediente-revision-documento")
     parser.add_argument("--expediente-revision-propuesta")
+    parser.add_argument("--expediente-fechas-documento")
+    parser.add_argument("--expediente-fechas-propuesta")
     argumentos = parser.parse_args(argv)
-    if argumentos.expediente_alertas or argumentos.expediente_entidad or argumentos.expediente_revision_documento:
+    if argumentos.expediente_alertas or argumentos.expediente_entidad or argumentos.expediente_revision_documento \
+            or argumentos.expediente_fechas_documento:
         return _expediente(argumentos)
     snapshot = construir_snapshot_fichas(raiz_atlas=argumentos.raiz_atlas)
     # Bloque CATALOGOS V2 -- ensure_ascii=True a propósito, mismo
