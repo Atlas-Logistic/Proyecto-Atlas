@@ -1,23 +1,34 @@
-"""Extracción automática de la licencia de conducir recibida desde Mobile.
+"""Extracción automática de la licencia de conducir (Mobile y Desktop).
 
-Lee con el OCR existente (`ocr_provider.ProveedorOCR.leer_texto`) las fotos
-ya guardadas en la ficha -- frente y reverso como UN documento, o la única
-imagen de una licencia antigua -- y propone nombre, RUT, clase y fecha de
-vencimiento. Nunca las confirma:
+Lee los originales ya guardados en la ficha -- frente y reverso como UN
+documento, la única imagen de una licencia antigua o un PDF -- y propone
+nombre, RUT, clase y fecha de vencimiento. Las imágenes y las páginas PDF
+escaneadas pasan por el OCR existente (`ocr_provider.ProveedorOCR.leer_texto`);
+una página PDF con texto embebido utilizable se lee sin OCR, con las mismas
+reglas que la ingesta de guías (`ingesta_pdf`).
 
 - El resultado queda en `extraccion_automatica` del mismo documento, con
-  `confirmado_por_humano: false`. `estado_revision` sigue
-  PENDIENTE_EXTRACCION y `clase`/`vencimiento` del documento siguen vacíos:
-  la licencia no pasa a vigente ni reemplaza a otra hasta que una persona
-  la registre.
+  `confirmado_por_humano: false`.
 - Un dato ilegible, ausente, ambiguo o contradictorio queda
   PENDIENTE_REVISION con su motivo; nunca se completa por aproximación.
-- Las imágenes originales sólo se leen (y se verifica su SHA-256). El
-  catálogo de choferes sólo se lee: un RUT que lo contradice se informa.
+- Licencia recibida desde Mobile: nunca se registra sola. `estado_revision`
+  sigue PENDIENTE_EXTRACCION y `clase`/`vencimiento` siguen vacíos hasta que
+  una persona la confirme.
+- Licencia adjuntada en Desktop (origen DESKTOP): si la identidad coincide
+  con el chofer del catálogo y el vencimiento es confiable, se registran
+  automáticamente los datos confiables (`evaluar_registro_automatico`) con
+  `estado_revision` VENCIMIENTO_OCR_AUTOMATICO y `registro_automatico`
+  (procedencia, sin confirmación humana). Lo que no es confiable queda vacío
+  para que una persona lo complete. Nunca reemplaza una licencia con un
+  vencimiento posterior ni toca una confirmación humana.
+- Los originales sólo se leen (y se verifica su SHA-256). El catálogo de
+  choferes sólo se lee: un RUT que lo contradice se informa.
 
 Corre dentro del ciclo PULL bajo su lease (`comprobar`), después de recibir
-las licencias. Cada documento se procesa una vez por versión del extractor
-(`VERSION_EXTRACCION`), conservando la extracción anterior.
+las licencias, y también al adjuntar en Desktop sin OCR (`permitir_ocr=False`:
+sólo PDF con texto embebido; lo demás queda para el ciclo PULL). Cada
+documento se procesa una vez por versión del extractor (`VERSION_EXTRACCION`),
+conservando la extracción anterior.
 """
 from __future__ import annotations
 
@@ -27,15 +38,18 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 import unicodedata
 import uuid
+from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion, escribir_json_atomico
-from atlas_core.catalogos import rut_canonico_de_registro_chofer
+from atlas_core.catalogos import normalizar_rut, rut_canonico_de_registro_chofer
 from atlas_core.fichas_choferes import (
-    EMPRESA_ACTUAL, ESTADO_PENDIENTE_EXTRACCION, VERSION, _ahora, _validar_v2, leer_almacen, ruta_almacen,
+    EMPRESA_ACTUAL, ESTADO_PENDIENTE_EXTRACCION, ESTADO_REGISTRO_AUTOMATICO, ORIGEN_DESKTOP, VERSION, _ahora,
+    _validar_v2, leer_almacen, nombre_coincide_con_catalogo, ruta_almacen,
 )
 from atlas_core.modelos import EstadoValidacion
 from atlas_core.validadores import validar_fecha, validar_rut_chileno
@@ -43,8 +57,16 @@ from atlas_core.validadores import validar_fecha, validar_rut_chileno
 logger = logging.getLogger(__name__)
 
 # Subirla re-extrae UNA vez las licencias cuya extracción anterior quedó
-# incompleta (ver `_pendientes`); la anterior se conserva.
-VERSION_EXTRACCION = 2
+# incompleta (ver `_pendientes`); la anterior se conserva. 3: lectura de PDF.
+VERSION_EXTRACCION = 3
+# Una licencia en PDF tiene una o dos páginas; más es otro documento.
+MAX_PAGINAS_LICENCIA_PDF = 4
+DPI_OCR_PDF = 300
+# Vencimiento plausible de una licencia (control cada 2 a 6 años en Chile):
+# fuera de este rango es una lectura dudosa y la completa una persona.
+ANIOS_VENCIMIENTO_PASADO = 20
+ANIOS_VENCIMIENTO_FUTURO = 10
+PROCEDENCIA_AUTOMATICA = "EXTRACCION_AUTOMATICA"
 EXTRAIDO = "EXTRAIDO"
 PENDIENTE_REVISION = "PENDIENTE_REVISION"
 CAMPOS = ("nombre", "rut", "clase", "vencimiento")
@@ -243,8 +265,62 @@ def _ruts_de_ficha(ficha: Mapping, catalogo: Mapping) -> list[str]:
     return ruts
 
 
-def _leer_caras(carpeta: Path, documento: Mapping, proveedor: Callable[[], object]) -> tuple[dict, list[dict]]:
-    """OCR de cada cara tras verificar que el original sigue intacto."""
+class _RequiereOCR(Exception):
+    """El original necesita OCR y esta lectura no lo permite (adjunto en Desktop)."""
+
+
+def _lineas_pdf(ruta: Path, *, permitir_ocr: bool, proveedor: Callable[[], object],
+                temporal: Callable[[], Path]) -> tuple[dict, list[str]]:
+    """Texto de cada página: el embebido si es utilizable (mismas reglas que la
+    ingesta de guías); si no, OCR de la página rasterizada. Un PDF que PDFium
+    no abre devuelve {} (queda FORMATO_SIN_OCR, sin OCR)."""
+    import pypdfium2 as pdfium
+
+    from atlas_core.ingesta_pdf import (
+        _caracteres_pagina, _clasificar_texto_pagina, _rasterizar_pagina, _segmentos_texto_pagina,
+    )
+    try:
+        documento = pdfium.PdfDocument(str(ruta))
+    except Exception as error:  # noqa: BLE001 -- PDF dañado, cifrado o no PDF: nada que leer
+        logger.warning("PDF de licencia ilegible %s: %s", ruta.name, error)
+        return {}, []
+    try:
+        paginas = len(documento)
+        if not 0 < paginas <= MAX_PAGINAS_LICENCIA_PDF:
+            raise ValueError(f"El PDF tiene {paginas} páginas; una licencia tiene a lo más {MAX_PAGINAS_LICENCIA_PDF}")
+        textos, metodos = {}, []
+        for indice in range(paginas):
+            cara = f"PAGINA_{indice + 1}"
+            pagina = documento[indice]
+            try:
+                caracteres = _caracteres_pagina(pagina)
+                utilizable, _ = _clasificar_texto_pagina(caracteres)
+                lineas = [s["texto"] for s in _segmentos_texto_pagina(pagina, caracteres, DPI_OCR_PDF)] if utilizable else None
+            finally:
+                pagina.close()
+            if lineas is not None:
+                textos[cara] = lineas
+                metodos.append("TEXTO_EMBEBIDO")
+                continue
+            if not permitir_ocr:
+                raise _RequiereOCR(cara)
+            imagen = temporal() / f"{uuid.uuid4().hex}.png"
+            _rasterizar_pagina(documento, indice, imagen, DPI_OCR_PDF)
+            try:
+                textos[cara] = list(proveedor().leer_texto(imagen))
+            finally:
+                imagen.unlink(missing_ok=True)
+            metodos.append("OCR")
+        return textos, metodos
+    finally:
+        documento.close()
+
+
+def _leer_caras(carpeta: Path, documento: Mapping, proveedor: Callable[[], object], *,
+                permitir_ocr: bool = True, temporal: Callable[[], Path] | None = None) -> tuple[dict, list[dict]]:
+    """Texto de cada cara (o página PDF) tras verificar que el original sigue intacto.
+
+    Sin `permitir_ocr` lanza `_RequiereOCR` si algo sólo se puede leer con OCR."""
     textos, archivos = {}, []
     for cara, archivo, sha256 in _caras_del_documento(documento):
         ruta = (carpeta / archivo).resolve()
@@ -252,49 +328,149 @@ def _leer_caras(carpeta: Path, documento: Mapping, proveedor: Callable[[], objec
             raise ValueError("Adjunto fuera de la empresa")
         if hashlib.sha256(ruta.read_bytes()).hexdigest() != str(sha256).lower():
             raise ValueError(f"El original de {cara} no coincide con su huella registrada")
-        archivos.append({"cara": cara, "archivo": archivo, "sha256": sha256})
+        entrada = {"cara": cara, "archivo": archivo, "sha256": sha256}
+        archivos.append(entrada)
         if ruta.suffix.lower() == ".pdf":
-            continue  # el OCR existente lee imágenes; un PDF queda para revisión
+            paginas, metodos = _lineas_pdf(ruta, permitir_ocr=permitir_ocr, proveedor=proveedor,
+                                           temporal=temporal or (lambda: Path(tempfile.gettempdir())))
+            if metodos:
+                entrada["paginas"] = metodos
+            textos.update(paginas)
+            continue
+        if not permitir_ocr:
+            raise _RequiereOCR(cara)
         textos[cara] = list(proveedor().leer_texto(ruta))
     return textos, archivos
 
 
+def _vencimiento_plausible(valor: str, hoy: date) -> bool:
+    try:
+        fecha = date.fromisoformat(str(valor))
+    except ValueError:
+        return False
+    return (date(hoy.year - ANIOS_VENCIMIENTO_PASADO, 1, 1) <= fecha
+            <= date(hoy.year + ANIOS_VENCIMIENTO_FUTURO, 12, 31))
+
+
+def evaluar_registro_automatico(campos: Mapping[str, Mapping], *, ruts_catalogo: Iterable[str],
+                                registros_catalogo: Iterable[Mapping], vigentes: Iterable[Mapping],
+                                hoy: date) -> dict:
+    """Qué datos de una licencia adjuntada en Desktop son confiables para
+    registrarlos sin confirmación humana. Función pura.
+
+    - Identidad: el RUT leído es el del chofer en el catálogo, o -- sin RUT
+      legible -- el nombre leído contiene el del catálogo. Un RUT o nombre
+      leído que contradice al chofer bloquea todo el registro.
+    - Vencimiento: leído sin ambigüedad y dentro de un rango plausible. Sin
+      él no se registra nada (la licencia no tendría vigencia).
+    - Nunca deja atrás una licencia registrada que vence después.
+    Devuelve `registrar`, `valores` confiables, `pendientes` {campo: motivo},
+    `motivo` si no se registra y `reemplaza` (licencias vigentes superadas)."""
+    # Mismo RUT aunque venga escrito con o sin puntos y guion.
+    ruts = {normalizar_rut(validar_rut_chileno(r).valor or "") for r in ruts_catalogo} - {""}
+    registros = [r for r in registros_catalogo if isinstance(r, Mapping)]
+    rut, nombre = campos.get("rut") or {}, campos.get("nombre") or {}
+    nombre_leido = nombre.get("estado") == EXTRAIDO and nombre.get("valor")
+    nombre_ok = bool(nombre_leido) and any(nombre_coincide_con_catalogo(nombre["valor"], r) for r in registros)
+    rut_ok = rut.get("estado") == EXTRAIDO and normalizar_rut(rut.get("valor") or "") in ruts
+    resultado = {"registrar": False, "valores": {}, "pendientes": {}, "motivo": "", "reemplaza": []}
+    if rut.get("motivo") == "CONTRADICE_CATALOGO" or (rut.get("estado") == EXTRAIDO and not rut_ok and ruts) \
+            or (nombre_leido and not nombre_ok):
+        resultado["motivo"] = "IDENTIDAD_NO_COINCIDE"
+        return resultado
+    if not (rut_ok or (rut.get("motivo") in ("NO_ENCONTRADO", "ILEGIBLE") and nombre_ok)):
+        resultado["motivo"] = "IDENTIDAD_NO_VERIFICADA"
+        return resultado
+    valores, pendientes = {}, {}
+    for clave, confiable in (("rut", rut_ok), ("nombre", nombre_ok)):
+        if confiable:
+            valores[clave] = campos[clave]["valor"]
+        else:
+            pendientes[clave] = (campos.get(clave) or {}).get("motivo") or "NO_VERIFICABLE"
+    clase = campos.get("clase") or {}
+    if clase.get("estado") == EXTRAIDO and clase.get("valor") in CLASES_VALIDAS:
+        valores["clase"] = clase["valor"]
+    else:
+        pendientes["clase"] = clase.get("motivo") or "NO_ENCONTRADO"
+    vencimiento = campos.get("vencimiento") or {}
+    if vencimiento.get("estado") != EXTRAIDO:
+        pendientes["vencimiento"] = vencimiento.get("motivo") or "NO_ENCONTRADO"
+    elif not _vencimiento_plausible(vencimiento.get("valor"), hoy):
+        pendientes["vencimiento"] = "FUERA_DE_RANGO"
+    else:
+        valores["vencimiento"] = vencimiento["valor"]
+    resultado.update(valores=valores, pendientes=pendientes)
+    if "vencimiento" not in valores:
+        resultado["motivo"] = "VENCIMIENTO_NO_CONFIABLE"
+        return resultado
+    vigentes = [d for d in vigentes if d.get("vencimiento")]
+    if any(str(d["vencimiento"]) > valores["vencimiento"] for d in vigentes):
+        resultado["motivo"] = "VENCE_ANTES_QUE_LA_REGISTRADA"
+        return resultado
+    resultado.update(registrar=True, reemplaza=[d["documento_id"] for d in vigentes])
+    return resultado
+
+
+def _licencias_vigentes(ficha: Mapping, excepto: str) -> list[dict]:
+    """Licencias registradas (con datos) que siguen activas en la ficha."""
+    return [d for d in ficha.get("documentos", [])
+            if d.get("tipo") == "LICENCIA_CONDUCIR" and d.get("documento_id") != excepto
+            and not d.get("reemplazado_por") and d.get("estado_revision") != ESTADO_PENDIENTE_EXTRACCION]
+
+
 def extraer_licencias_pendientes(
-    raiz: str | Path, *, comprobar: Callable[[], None], fabrica_ocr: Callable[[], object],
-    empresa: str = EMPRESA_ACTUAL, actor: str = "MOTOR_OCR",
+    raiz: str | Path, *, comprobar: Callable[[], None], fabrica_ocr: Callable[[], object] | None,
+    empresa: str = EMPRESA_ACTUAL, actor: str = "MOTOR_OCR", documento_id: str | None = None,
+    permitir_ocr: bool = True, hoy: date | None = None,
 ) -> dict:
     """Extrae una vez cada licencia PENDIENTE_EXTRACCION de la ficha.
 
     El OCR corre fuera del bloqueo; la escritura vuelve a leer la ficha y sólo
-    agrega `extraccion_automatica` + historial si el documento sigue igual de
-    pendiente. `fabrica_ocr` se invoca sólo si hay algo que leer; el
-    proveedor creado se cierra al terminar."""
+    agrega `extraccion_automatica` + historial (y, si corresponde, el registro
+    automático) si el documento sigue igual de pendiente. `fabrica_ocr` se
+    invoca sólo si hay algo que leer con OCR; el proveedor creado se cierra al
+    terminar. `documento_id` limita la lectura a ese documento. Sin
+    `permitir_ocr`, lo que necesita OCR queda en `diferidas`, sin escribir,
+    para el próximo ciclo PULL."""
     resumen: dict = {"pendientes": 0, "extraidas": [], "errores": []}
     datos = leer_almacen(raiz, empresa=empresa)
     if not datos or datos.get("version") != VERSION:
         return resumen
-    pendientes = _pendientes(datos)
+    pendientes = [(f, d) for f, d in _pendientes(datos) if documento_id is None or d["documento_id"] == documento_id]
     resumen["pendientes"] = len(pendientes)
     if not pendientes:
         return resumen
     ruta = ruta_almacen(raiz, empresa)
     catalogo = json.loads((Path(raiz) / "catalogos_privados" / "choferes.json").read_text(encoding="utf-8-sig"))
+    hoy = hoy or date.today()
     creado: list = []
+    carpeta_temporal: list = []
 
     def proveedor():
+        if fabrica_ocr is None:
+            raise _RequiereOCR("sin proveedor OCR")
         if not creado:
             creado.append(fabrica_ocr())
         return creado[0]
 
+    def temporal() -> Path:
+        if not carpeta_temporal:
+            carpeta_temporal.append(tempfile.TemporaryDirectory(prefix="atlas-licencia-"))
+        return Path(carpeta_temporal[0].name)
+
     try:
         for ficha, documento in pendientes:
             comprobar()
-            documento_id = documento["documento_id"]
+            doc_id = documento["documento_id"]
             try:
-                textos, archivos = _leer_caras(ruta.parent, documento, proveedor)
+                textos, archivos = _leer_caras(ruta.parent, documento, proveedor,
+                                               permitir_ocr=permitir_ocr and fabrica_ocr is not None, temporal=temporal)
+            except _RequiereOCR:
+                resumen.setdefault("diferidas", []).append(doc_id)
+                continue
             except Exception as error:  # noqa: BLE001 -- una licencia no corta las demás
-                logger.warning("Licencia %s sin extracción: %s", documento_id, error)
-                resumen["errores"].append({"documento_id": documento_id, "error": str(error)})
+                logger.warning("Licencia %s sin extracción: %s", doc_id, error)
+                resumen["errores"].append({"documento_id": doc_id, "error": str(error)})
                 continue
             if textos:
                 campos = extraer_campos_licencia(textos, ruts_catalogo=_ruts_de_ficha(ficha, catalogo))
@@ -306,28 +482,77 @@ def extraer_licencias_pendientes(
                 "confirmado_por_humano": False, "estado": _resumen_estado(campos),
                 "archivos": archivos, "campos": campos,
             }
-            if _registrar(raiz, ruta, empresa, ficha["ficha_id"], documento_id, extraccion, actor, comprobar):
+            registro = _registrar(raiz, ruta, empresa, ficha["ficha_id"], doc_id, extraccion, actor, comprobar,
+                                  catalogo=catalogo, hoy=hoy)
+            if registro is not None:
                 resumen["extraidas"].append({
-                    "documento_id": documento_id, "ficha_id": ficha["ficha_id"], "estado": extraccion["estado"],
+                    "documento_id": doc_id, "ficha_id": ficha["ficha_id"], "estado": extraccion["estado"],
                     "extraidos": [c for c in CAMPOS if campos[c]["estado"] == EXTRAIDO],
                     "pendientes": {c: campos[c]["motivo"] for c in CAMPOS if campos[c]["estado"] != EXTRAIDO},
+                    **({"registro": registro} if registro else {}),
                 })
     finally:
         cerrar = getattr(creado[0], "cerrar", None) if creado else None
         if callable(cerrar):
             cerrar()
+        if carpeta_temporal:
+            carpeta_temporal[0].cleanup()
+    return resumen
+
+
+def _aplicar_registro(ficha: dict, objetivo: dict, extraccion: dict, actor: str,
+                      catalogo: Mapping, hoy: date) -> dict:
+    """Registro automático de una licencia adjuntada en Desktop (bajo el bloqueo)."""
+    evaluacion = evaluar_registro_automatico(
+        extraccion["campos"], ruts_catalogo=_ruts_de_ficha(ficha, catalogo),
+        registros_catalogo=[catalogo.get(r) for r in ficha.get("referencias_catalogo", [])],
+        vigentes=_licencias_vigentes(ficha, objetivo["documento_id"]), hoy=hoy)
+    resumen = {"registrada": evaluacion["registrar"], "registrados": sorted(evaluacion["valores"]),
+               "por_completar": sorted(evaluacion["pendientes"]), "motivo": evaluacion["motivo"]}
+    extraccion["registro"] = {"registrada": evaluacion["registrar"], "motivo": evaluacion["motivo"],
+                              "pendientes": evaluacion["pendientes"]}
+    if not evaluacion["registrar"]:
+        return resumen
+    valores = evaluacion["valores"]
+    objetivo["vencimiento"] = valores["vencimiento"]
+    if "clase" in valores:
+        objetivo["clase"] = valores["clase"]
+    titular = {k: valores[k] for k in ("rut", "nombre") if k in valores}
+    if titular:
+        objetivo["titular"] = titular
+    objetivo["estado_revision"] = ESTADO_REGISTRO_AUTOMATICO
+    objetivo["registro_automatico"] = {
+        "procedencia": PROCEDENCIA_AUTOMATICA, "confirmado_por_humano": False, "actor": actor,
+        "fecha": extraccion["fecha"], "extraccion_version": extraccion["version"], "sha256": objetivo.get("sha256"),
+        "campos": sorted(valores), "pendientes": evaluacion["pendientes"],
+    }
+    if evaluacion["reemplaza"]:
+        objetivo["reemplaza_documentos"] = evaluacion["reemplaza"]
+        for previo in ficha["documentos"]:
+            if previo.get("documento_id") in evaluacion["reemplaza"]:
+                previo["reemplazado_por"] = objetivo["documento_id"]
+    ficha["historial"].append({
+        "accion": "LICENCIA_REGISTRADA_AUTOMATICA", "actor": actor, "fecha": extraccion["fecha"],
+        "documento_id": objetivo["documento_id"], "campos": sorted(valores),
+        "pendientes": sorted(evaluacion["pendientes"]), "reemplaza_documentos": evaluacion["reemplaza"],
+    })
+    resumen["reemplazados"] = len(evaluacion["reemplaza"])
+    resumen["vencimiento"] = valores["vencimiento"]
     return resumen
 
 
 def _registrar(raiz, ruta: Path, empresa: str, ficha_id: str, documento_id: str, extraccion: dict,
-               actor: str, comprobar: Callable[[], None]) -> bool:
+               actor: str, comprobar: Callable[[], None], *, catalogo: Mapping, hoy: date) -> dict | None:
+    """Escribe la extracción. None si el documento ya no está pendiente; {} si
+    se escribió sin registro automático (Mobile); el resumen del registro si es
+    una licencia adjuntada en Desktop."""
     with bloqueo_sesion(Path(raiz) / "operacion" / "actual", "fichas_choferes_" + empresa):
         anterior = leer_almacen(raiz, empresa=empresa)
         propuesta = copy.deepcopy(anterior)
         objetivo = next((d for f, d in _pendientes(propuesta)
                          if f["ficha_id"] == ficha_id and d["documento_id"] == documento_id), None)
         if objetivo is None:
-            return False  # ya extraída, reemplazada o registrada por una persona entre medio
+            return None  # ya extraída, reemplazada o registrada por una persona entre medio
         previa = objetivo.get("extraccion_automatica")
         if previa is not None:
             objetivo.setdefault("extracciones_anteriores", []).append(previa)
@@ -338,6 +563,9 @@ def _registrar(raiz, ruta: Path, empresa: str, ficha_id: str, documento_id: str,
             "documento_id": documento_id, "estado": extraccion["estado"], "version": extraccion["version"],
             **({"version_anterior": previa.get("version"), "estado_anterior": previa.get("estado")} if previa else {}),
         })
+        # Sólo la licencia adjuntada en Desktop se registra sola; la de Mobile sigue su revisión.
+        registro = (_aplicar_registro(ficha, objetivo, extraccion, actor, catalogo, hoy)
+                    if objetivo.get("origen") == ORIGEN_DESKTOP else {})
         propuesta["revision"] = int(anterior["revision"]) + 1
         _validar_v2(propuesta)
         respaldo = Path(raiz) / "respaldos" / "fichas_choferes" / uuid.uuid4().hex
@@ -347,7 +575,8 @@ def _registrar(raiz, ruta: Path, empresa: str, ficha_id: str, documento_id: str,
             "empresa": empresa, "actor": actor, "operacion": "LICENCIA_EXTRACCION_AUTOMATICA",
             "ficha_id": ficha_id, "documento_id": documento_id, "revision_anterior": anterior["revision"],
             "ruta_relativa": str(ruta.relative_to(raiz)),
+            **({"registro_automatico": registro["registrada"]} if registro else {}),
         })
         comprobar()
         escribir_json_atomico(ruta, propuesta)
-        return True
+        return registro

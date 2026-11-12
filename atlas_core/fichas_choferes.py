@@ -372,6 +372,82 @@ def registrar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo,
 
 
 ESTADO_PENDIENTE_EXTRACCION = 'PENDIENTE_EXTRACCION'
+# Datos registrados por la lectura automática, sin confirmación humana. Es el
+# mismo valor que ya usan los documentos vehiculares: el expediente digital
+# lo trata como «vigencia registrada, no confirmada por una persona».
+ESTADO_REGISTRO_AUTOMATICO = 'VENCIMIENTO_OCR_AUTOMATICO'
+ORIGEN_DESKTOP = 'DESKTOP'
+
+
+def adjuntar_licencia_desktop(raiz, *, empresa, ficha_id, referencia_catalogo, archivo_origen, actor='DESKTOP'):
+    """Conserva el original de una licencia adjuntada en Desktop, sin datos escritos a mano.
+
+    Queda PENDIENTE_EXTRACCION (origen DESKTOP): sin clase ni vencimiento,
+    nunca vigente por sí sola y sin reemplazar la licencia registrada. La
+    lectura automática (`extraccion_licencias`) registra después los datos
+    confiables; lo demás lo completa una persona. Misma identidad, copia
+    exclusiva, respaldo y comprobaciones que `registrar_licencia_chofer`.
+    """
+    ficha_id = str(uuid.UUID(str(ficha_id)))
+    referencia_catalogo = str(referencia_catalogo or '')
+    origen, extension, _ = _tipo_archivo_licencia(archivo_origen)
+    from atlas_core.desktop_operacion import sesion
+    with sesion(raiz, reutilizar=True) as comprobar:
+        ruta = ruta_almacen(raiz, empresa)
+        with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
+            catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'
+            catalogo_bytes = catalogo_ruta.read_bytes()
+            if referencia_catalogo not in json.loads(catalogo_bytes.decode('utf-8-sig')):
+                raise ValueError('La ficha ya no corresponde a un chofer vigente del catálogo')
+            anterior = leer_almacen(raiz, empresa=empresa)
+            if not anterior or anterior.get('version') != VERSION:
+                raise ValueError('La base de fichas debe inicializarse antes de adjuntar una licencia')
+            ficha = fichas_por_referencia(anterior).get(referencia_catalogo)
+            if not ficha or ficha.get('ficha_id') != ficha_id:
+                raise ValueError('La identidad de la ficha cambió; recargue Catálogos antes de adjuntar')
+            propuesta = copy.deepcopy(anterior)
+            ficha_nueva = fichas_por_referencia(propuesta)[referencia_catalogo]
+            documento_id = str(uuid.uuid4())
+            instante = _ahora()
+            destino_relativo = Path('archivos') / 'choferes' / ficha_id / (documento_id + extension)
+            destino = ruta.parent / destino_relativo
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            if not destino.parent.resolve().is_relative_to(ruta.parent.resolve()):
+                raise ValueError('La carpeta de adjuntos apunta fuera de la empresa')
+            respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
+            respaldo.mkdir(parents=True)
+            shutil.copy2(ruta, respaldo / ruta.name)
+            extension, bytes_archivo, huella = _copiar_licencia_nueva(origen, destino, comprobar)
+            ficha_nueva['documentos'].append({
+                'documento_id': documento_id, 'tipo': 'LICENCIA_CONDUCIR',
+                'estado_revision': ESTADO_PENDIENTE_EXTRACCION, 'origen': ORIGEN_DESKTOP,
+                'archivo': destino_relativo.as_posix(), 'sha256': huella, 'bytes': bytes_archivo,
+                'creado_en': instante, 'recibido_en': instante,
+            })
+            ficha_nueva['historial'].append({
+                'accion': 'LICENCIA_ADJUNTADA_DESKTOP', 'actor': actor, 'fecha': instante,
+                'documento_id': documento_id, 'sha256': huella,
+            })
+            propuesta['revision'] = int(anterior['revision']) + 1
+            _validar_v2(propuesta)
+            escribir_json_atomico(respaldo / 'manifest.json', {
+                'empresa': empresa, 'actor': actor, 'operacion': 'LICENCIA_ADJUNTADA_DESKTOP',
+                'ficha_id': ficha_id, 'documento_id': documento_id, 'sha256': huella, 'bytes': bytes_archivo,
+                'revision_anterior': anterior['revision'], 'ruta_relativa': str(ruta.relative_to(raiz)),
+            })
+            comprobar()
+            if catalogo_ruta.read_bytes() != catalogo_bytes:
+                destino.unlink(missing_ok=True)
+                raise ValueError('El catálogo cambió durante la carga; no se publicó la licencia')
+            try:
+                escribir_json_atomico(ruta, propuesta)
+            except Exception:
+                destino.unlink(missing_ok=True)
+                raise
+            return {'ok': True, 'documento_id': documento_id, 'ficha_id': ficha_id, 'sha256': huella,
+                    'revision': propuesta['revision'], 'respaldo': str(respaldo)}
+
+
 _EXTENSION_POR_MIME = {'application/pdf': '.pdf', 'image/jpeg': '.jpg', 'image/png': '.png'}
 _FIRMA_POR_EXTENSION = {'.pdf': b'%PDF-', '.jpg': b'\xff\xd8\xff', '.png': b'\x89PNG\r\n\x1a\n'}
 
@@ -537,6 +613,13 @@ def _nombre_licencia_valido(valor):
     return ' '.join(palabras)
 
 
+def nombre_coincide_con_catalogo(nombre, registro):
+    """El nombre leído contiene todas las palabras del nombre (o de un alias) del chofer del catálogo."""
+    palabras = set(_palabras_nombre(nombre))
+    return any(set(_palabras_nombre(n)) and set(_palabras_nombre(n)) <= palabras
+               for n in [(registro or {}).get('nombre'), *((registro or {}).get('aliases') or [])])
+
+
 def _valores_documento(documento):
     titular = documento.get('titular') or {}
     return {'rut': titular.get('rut'), 'nombre': titular.get('nombre'),
@@ -599,10 +682,7 @@ def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, d
                 raise ValueError('El chofer no tiene RUT confirmado en el catálogo; regularícelo antes de confirmar la licencia')
             if nuevos['rut'] not in ruts:
                 raise ValueError('El RUT de la licencia no corresponde al chofer de esta ficha')
-            registro = catalogo[referencia_catalogo]
-            palabras = set(_palabras_nombre(nuevos['nombre']))
-            if not any(set(_palabras_nombre(n)) and set(_palabras_nombre(n)) <= palabras
-                       for n in [registro.get('nombre'), *(registro.get('aliases') or [])]):
+            if not nombre_coincide_con_catalogo(nuevos['nombre'], catalogo[referencia_catalogo]):
                 raise ValueError('El nombre de la licencia no coincide con el chofer de esta ficha')
             propuesta = copy.deepcopy(anterior)
             ficha_nueva = fichas_por_referencia(propuesta)[referencia_catalogo]
