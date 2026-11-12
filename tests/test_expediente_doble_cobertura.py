@@ -46,10 +46,10 @@ def faltantes(vista):
 
 
 @pytest.mark.parametrize("texto,cubiertas,ausentes", [
-    ("COBERTURA: RESPONSABILIDAD CIVIL", [RC], {ROBO: False}),
+    ("COBERTURA: RESPONSABILIDAD CIVIL", [RC], {}),
     ("COBERTURA: ROBO", [ROBO], {RC: False}),
     ("COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO", [RC, ROBO], {}),
-    ("COBERTURA: RESPONSABILIDAD CIVIL Y ROBO EXCLUIDO", [], {RC: True, ROBO: True}),
+    ("COBERTURA: RESPONSABILIDAD CIVIL Y ROBO EXCLUIDO", [], {RC: True}),
 ])
 def test_cobertura_por_evidencia_sin_duplicar_original(raiz, texto, cubiertas, ausentes):
     doc = registrar(raiz, texto)
@@ -89,9 +89,9 @@ def test_renovacion_con_iguales_coberturas_reemplaza_y_conserva_historial(raiz):
 
 def test_vencimiento_y_aislamiento_multiempresa(raiz):
     doc = registrar(raiz, "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO")
-    assert faltantes(consulta(raiz, empresa="OTRA")) == {RC: False, ROBO: False}
+    assert faltantes(consulta(raiz, empresa="OTRA")) == {RC: False}
     vista = consulta(raiz, hoy=date(2027, 10, 1))
-    assert faltantes(vista) == {RC: False, ROBO: False}
+    assert faltantes(vista) == {RC: False}
     assert vista["documentos"][0]["estado_vencimiento"] == "VENCIDO"
     alerta = preparar_alertas_vencimiento(raiz, empresa="MBT", hoy=date(2027, 10, 1))
     assert len(alerta) == 1 and alerta[0]["documento_id"] == doc["documento_id"]
@@ -103,7 +103,7 @@ def test_anulacion_retira_ambas_coberturas_sin_borrar_el_original(raiz):
     doc = registrar(raiz, "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO")
     anular_documento(raiz, empresa="MBT", documento_id=doc["documento_id"], actor="TEST", motivo="Anulada", reloj=RELOJ)
     vista = consulta(raiz)
-    assert faltantes(vista) == {RC: False, ROBO: False}
+    assert faltantes(vista) == {RC: False}
     assert vista["historico"][0]["documento_id"] == doc["documento_id"]
     assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == JPEG
 
@@ -120,7 +120,7 @@ def test_patente_dudosa_no_acredita_coberturas(raiz):
     registrar(raiz, "COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO", patente="ZZ1234")
     vista = consulta(raiz)
     assert vista["documentos"][0]["tipos_cubiertos"] == []
-    assert faltantes(vista) == {RC: True, ROBO: True}
+    assert faltantes(vista) == {RC: True}
 
 
 def test_cobertura_mobile_usa_patente_y_original_del_flujo_existente(raiz_mobile):
@@ -138,4 +138,4 @@ def test_cobertura_mobile_usa_patente_y_original_del_flujo_existente(raiz_mobile
     ficha = next(v for v in datos["vehiculos"] if v["patente"] == TRACTO)
     ficha["documentos"][0]["asociacion"]["patente"] = "ZZ1234"
     ruta.write_text(json.dumps(datos), encoding="utf-8")
-    assert faltantes(consulta(raiz_mobile, patente=TRACTO)) == {RC: True, ROBO: True}
+    assert faltantes(consulta(raiz_mobile, patente=TRACTO)) == {RC: True}

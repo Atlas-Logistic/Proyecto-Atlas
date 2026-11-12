@@ -51,7 +51,7 @@ TIPOS_BASE = {
     "PERMISO_CIRCULACION": {"entidad": VEHICULO, "nombre": "Permiso de circulación", "obligatorio": True},
     "CERTIFICADO_EMISION_GASES": {"entidad": VEHICULO, "nombre": "Certificado de emisión de gases o contaminantes", "obligatorio": True},
     "POLIZA_RESPONSABILIDAD_CIVIL": {"entidad": VEHICULO, "nombre": "Póliza de responsabilidad civil", "obligatorio": True},
-    "POLIZA_ROBO": {"entidad": VEHICULO, "nombre": "Póliza de seguro contra robos", "obligatorio": True},
+    "POLIZA_ROBO": {"entidad": VEHICULO, "nombre": "Póliza de seguro contra robos", "obligatorio": False},
     "SEGURO_CARGA": {"entidad": VEHICULO, "nombre": "Seguro de carga", "obligatorio": False},
 }
 TIPOS_POLIZA = frozenset({"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"})
@@ -1156,7 +1156,7 @@ def estado_expediente(raiz: str | Path, *, empresa: str, hoy: date | None = None
     return sorted(vista, key=lambda d: (d["dias_para_vencer"] is None, d["dias_para_vencer"] or 0))
 
 
-def _ausentes(tipos: dict, entidad: str, documentos: list[dict]) -> list[dict]:
+def _ausentes(tipos: dict, entidad: str, documentos: list[dict], *, requeridos: set[str] | None = None) -> list[dict]:
     presentes, pendientes = set(), set()
     for d in documentos:
         if d["tipo"] in TIPOS_POLIZA or (d["tipo"] == "DOCUMENTO_VEHICULO_PENDIENTE" and d.get("tipo_informado") in TIPOS_POLIZA):
@@ -1172,7 +1172,81 @@ def _ausentes(tipos: dict, entidad: str, documentos: list[dict]) -> list[dict]:
         else:
             presentes.add(d["tipo"])
     return [{"tipo": t, "nombre": c["nombre"], "pendiente_revision": t in pendientes} for t, c in tipos.items()
-            if c["entidad"] == entidad and c["obligatorio"] and c["activo"] and t not in presentes]
+            if c["entidad"] == entidad and c["activo"] and (c["obligatorio"] if requeridos is None else t in requeridos) and t not in presentes]
+
+
+# Requisitos de operación MBT; no son afirmaciones sobre obligaciones legales.
+_REQUISITOS_VEHICULO_MBT = frozenset({"SOAP", "POLIZA_RESPONSABILIDAD_CIVIL", "SEGURO_CARGA",
+    "REVISION_TECNICA", "PERMISO_CIRCULACION", "CERTIFICADO_EMISION_GASES"})
+_REQUISITOS_CHOFER_MBT = ("LICENCIA_CONDUCIR", "SOAP", "POLIZA_RESPONSABILIDAD_CIVIL", "SEGURO_CARGA",
+    "REVISION_TECNICA", "PERMISO_CIRCULACION", "CERTIFICADO_EMISION_GASES")
+
+
+def _tipo_vehiculo_requisitos(catalogos: Path, clave: str) -> str | None:
+    from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
+    catalogo = cargar_catalogo_vehiculos(catalogos / "vehiculos.json")
+    v = next((v for v in catalogo.vehiculos if v.vehiculo_id == clave), None)
+    if not v or v.estado_calidad != "CONFIRMADO" or v.estado_vigencia != "ACTIVO":
+        return None
+    if any(e.resultado == "CONTRADICE" and e.campos_observados.get("tipo")
+           and e.campos_observados["tipo"] != v.tipo for e in v.evidencias):
+        return None
+    return v.tipo if v.tipo in ("TRACTO", "CARRO", "CAMION_RIGIDO") else None
+
+
+def _requeridos_vehiculo(tipos: dict, empresa: str, tipo: str | None) -> set[str]:
+    if tipo is None:
+        return set()
+    requeridos = {t for t, c in tipos.items() if c["entidad"] == VEHICULO and c["activo"] and c["obligatorio"]}
+    if empresa.upper() == "MBT":
+        requeridos |= {t for t in _REQUISITOS_VEHICULO_MBT if tipos[t]["activo"]}
+    if tipo == "CARRO":
+        requeridos -= {"SOAP", "CERTIFICADO_EMISION_GASES"}
+    return requeridos
+
+
+def _requisitos_chofer(empresa, clave, documentos, documentos_chofer, tipos, catalogos):
+    from atlas_core.catalogo_vehiculos import cargar_catalogo_vehiculos
+    from atlas_core.catalogos import cargar_catalogo_json, rut_canonico_de_registro_chofer
+    from atlas_core.fichas_choferes import asignaciones_de_chofer
+    registros = cargar_catalogo_json(catalogos / "choferes.json")
+    rut = rut_canonico_de_registro_chofer(clave, registros.get(clave))
+    try:
+        catalogo = cargar_catalogo_vehiculos(catalogos / "vehiculos.json")
+        vehiculos_catalogo = catalogo.homologables()
+        vehiculos = {v.patente_canonica: v for v in catalogo.vehiculos}
+    except (OSError, ValueError):
+        vehiculos_catalogo, vehiculos = (), {}
+    asignaciones = asignaciones_de_chofer(rut, vehiculos_catalogo)
+    detalles = []
+    for rol, asignacion in asignaciones.items():
+        if asignacion["estado"] != "CONFIRMADO":
+            continue
+        v = vehiculos[asignacion["patente"]]
+        tipo = _tipo_vehiculo_requisitos(catalogos, v.vehiculo_id)
+        requeridos = _requeridos_vehiculo(tipos, empresa, tipo)
+        propios = [d for d in documentos if d["entidad"] == VEHICULO and v.vehiculo_id in d["referencias"]]
+        faltantes = {a["tipo"]: a for a in _ausentes(tipos, VEHICULO, propios, requeridos=requeridos)}
+        detalles.append((rol, v, tipo, requeridos, faltantes))
+    licencia = _ausentes(tipos, CHOFER, documentos_chofer)
+    resultado = []
+    for t in _REQUISITOS_CHOFER_MBT:
+        if t == "LICENCIA_CONDUCIR":
+            falta = next((a for a in licencia if a["tipo"] == t), None)
+            estado = "PENDIENTE_REVISION" if falta and falta["pendiente_revision"] else "FALTANTE" if falta else "PRESENTE"
+            resultado.append({"tipo": t, "nombre": tipos[t]["nombre"], "ambito": "CHOFER", "estado": estado, "vehiculos": []})
+            continue
+        items = []
+        for rol, v, tipo, requeridos, faltantes in detalles:
+            falta = faltantes.get(t)
+            estado = ("TIPO_INCIERTO" if tipo is None else "NO_APLICA" if t not in requeridos else
+                      "PENDIENTE_REVISION" if falta and falta["pendiente_revision"] else "FALTANTE" if falta else "PRESENTE")
+            items.append({"referencia_catalogo": v.vehiculo_id, "patente": v.patente_canonica,
+                          "tipo_vehiculo": tipo, "rol": rol, "estado": estado})
+        resultado.append({"tipo": t, "nombre": tipos[t]["nombre"],
+                          "ambito": "COBERTURA" if t in ("POLIZA_RESPONSABILIDAD_CIVIL", "SEGURO_CARGA") else "VEHICULO",
+                          "estado": "SIN_ASIGNACION" if not items else "POR_VEHICULO", "vehiculos": items})
+    return resultado, asignaciones
 
 
 def consultar_expediente(raiz: str | Path, *, empresa: str, entidad: str, referencia: str, hoy: date | None = None,
@@ -1185,14 +1259,26 @@ def consultar_expediente(raiz: str | Path, *, empresa: str, entidad: str, refere
     datos = _leer_a_fecha(raiz, empresa, hoy)
     expediente = _buscar_expediente(datos, entidad, equivalentes)
     conocidas = set(equivalentes) | set(expediente["referencias"] if expediente else ())
-    documentos = [d for d in estado_expediente(raiz, empresa=empresa, hoy=hoy, dias_por_vencer=dias_por_vencer,
-                                               carpeta_catalogos=carpeta_catalogos)
-                  if d["entidad"] == entidad and conocidas & set(d["referencias"])]
+    todos = estado_expediente(raiz, empresa=empresa, hoy=hoy, dias_por_vencer=dias_por_vencer,
+                              carpeta_catalogos=carpeta_catalogos)
+    documentos = [d for d in todos if d["entidad"] == entidad and conocidas & set(d["referencias"])]
     expediente_id = expediente["expediente_id"] if expediente else ""
+    tipos = tipos_documento(datos)
+    catalogos = _carpeta(raiz, carpeta_catalogos)
+    tipo_vehiculo = _tipo_vehiculo_requisitos(catalogos, clave) if entidad == VEHICULO else None
+    requeridos = _requeridos_vehiculo(tipos, empresa, tipo_vehiculo) if entidad == VEHICULO else None
+    adicionales = {}
+    if entidad == VEHICULO:
+        adicionales = {"tipo_vehiculo": tipo_vehiculo, "tipo_vehiculo_estado": "CONFIRMADO" if tipo_vehiculo else "INCIERTO",
+                       "requisitos_aplicables": sorted(requeridos)}
+    elif empresa.upper() == "MBT":
+        requisitos, asignaciones = _requisitos_chofer(empresa, clave, todos, documentos, tipos, catalogos)
+        adicionales = {"requisitos_documentales": requisitos, "asignaciones_requisitos": asignaciones}
     return {
+        **adicionales,
         "empresa": empresa, "entidad": entidad, "referencia_catalogo": clave, "existe": expediente is not None,
         "expediente_id": expediente_id, "documentos": documentos,
-        "ausentes": _ausentes(tipos_documento(datos), entidad, documentos),
+        "ausentes": _ausentes(tipos, entidad, documentos, requeridos=requeridos),
         "historico": [d for d in datos["documentos"] if d["expediente_id"] == expediente_id and d["estado"] != ACTIVO],
         "trazabilidad": [e for e in datos["historial"] if expediente_id and e.get("expediente_id") == expediente_id],
     }
@@ -1234,7 +1320,10 @@ def documentos_ausentes(raiz: str | Path, *, empresa: str, carpeta_catalogos: st
     for entidad, clave in _identidades_activas(_carpeta(raiz, carpeta_catalogos)):
         conocidas = set(ficha_de.get(clave, {}).get("referencias_catalogo", [clave])) if entidad == CHOFER else {clave}
         propios = [d for d in vista if d["entidad"] == entidad and conocidas & set(d["referencias"])]
-        resultado += [{"entidad": entidad, "referencia_catalogo": clave, **a} for a in _ausentes(tipos, entidad, propios)]
+        requeridos = (_requeridos_vehiculo(tipos, empresa, _tipo_vehiculo_requisitos(_carpeta(raiz, carpeta_catalogos), clave))
+                      if entidad == VEHICULO else None)
+        resultado += [{"entidad": entidad, "referencia_catalogo": clave, **a}
+                      for a in _ausentes(tipos, entidad, propios, requeridos=requeridos)]
     return resultado
 
 
