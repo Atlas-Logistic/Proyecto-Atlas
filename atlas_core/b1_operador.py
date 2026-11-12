@@ -204,8 +204,13 @@ _MATERIAL = r"(?:EL\s+)?MATERIAL(?:\s+(?:CORRECTO|REAL|VERDADERO))?"
 _MATERIAL_RECUPERAR = re.compile(
     r"^(?:RECUPERA|RECUPERAR|PROPON|PROPONER|PROPONME|LEE|LEER|OBTEN|OBTENER)\s+" + _MATERIAL
     + r"\s+(?:DE\s+LA\s+|DE\s+|EN\s+LA\s+)" + _GUIA + r"$")
+# Como _PESO_ES, pero admite una coma opcional tras el verbo ("es, ROLLO …",
+# caso real 484418). Exige espacio o coma: "ES" nunca se separa de la
+# palabra siguiente ("ESTRIBO") y la descripción no puede quedar vacía.
+_MATERIAL_ES = (r"(?:\s+(?:ES(?:\s+DE)?|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A)(?:\s*,\s*|\s+)"
+                r"|\s*:\s*)")
 _MATERIAL_GUIA = [
-    re.compile(r"^" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + _PESO_ES + r"(?P<material>.+)$"),
+    re.compile(r"^" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + _MATERIAL_ES + r"(?P<material>[^\s,].*)$"),
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
                + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<material>.+)$"),
 ]
