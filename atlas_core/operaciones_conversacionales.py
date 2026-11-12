@@ -31,6 +31,9 @@ _PATRON = re.compile(
     re.I,
 )
 _PATRON_ASOCIA = re.compile(r"\bASOCIA\s+([A-Z0-9-]{4,12})\s+A\s+(.+?)\s*$", re.I)
+# Referencia a una guía numerada ("GUÍA 484418", "GUIA N° 484418") dentro del
+# supuesto chofer: la frase no es una asociación chofer ↔ vehículo.
+_GUIA_NUMERADA = re.compile(r"\bGU[IÍ]A\s+(?:N[°ºO]?\.?\s*)?\d", re.I)
 _NOMBRE_LEDGER = "operaciones_conversacionales.json"
 
 
@@ -122,11 +125,17 @@ def _interpretar(texto: str) -> tuple[str, str, str] | None:
     t = " ".join(t.split())
     m = _PATRON_ASOCIA.search(t)
     if m:
+        if _GUIA_NUMERADA.search(m.group(2)):
+            return None
         return "", m.group(2).strip(), m.group(1).strip()
     m = _PATRON.search(t)
     if not m:
         return None
     clase, chofer, patente = m.groups()
+    if _GUIA_NUMERADA.search(chofer):
+        # "el cliente/tracto/fecha de la guía 484418 es X" habla de un campo de
+        # la guía, no de un chofer: nunca es una asociación chofer ↔ vehículo.
+        return None
     if clase == "RAMPLA":
         tipo = "RAMPLA"
     elif clase:  # TRACTO o CAMIÓN: intención explícita de tracto
