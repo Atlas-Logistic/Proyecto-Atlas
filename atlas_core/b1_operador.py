@@ -516,6 +516,24 @@ _CHOFER_GUIA = [
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _CHOFER + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
                + r"\s+(?:A|POR|COMO)\s+(?:EL\s+CHOFER\s+)?(?P<chofer>.+)$"),
 ]
+# CLIENTE de una guía dicho como afirmación (caso real 484418: "el cliente de
+# la guía 484418 es SODIMAC SA" caía al intérprete general y se leía como
+# chofer ↔ patente). Misma acción que "Corrige el cliente de la guía N a X"
+# (_DOCUMENTO, que no cambia): DOCUMENTO_CORREGIR_CAMPO con campo cliente,
+# preview y "sí". Coma opcional tras el verbo; el valor no puede empezar con
+# espacio ni coma. "RUT del cliente" y "código cliente" nunca coinciden.
+_CLIENTE = r"(?:EL\s+)?CLIENTE(?:\s+(?:CORRECTO|REAL|VERDADERO))?"
+_CLIENTE_ES = (r"(?:\s+(?:ES|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+A)(?:\s*,\s*|\s+)"
+               r"|\s*:\s*)")
+_CLIENTE_GUIA = [
+    re.compile(r"^" + _CLIENTE + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + r"\s*,?" + _CLIENTE_ES
+               + r"(?P<cliente>[^\s,].*)$"),
+    re.compile(r"^EN\s+LA\s+" + _GUIA + r"\s*,?\s*" + _CLIENTE + _CLIENTE_ES + r"(?P<cliente>[^\s,].*)$"),
+    re.compile(r"^(?:FIJA|FIJAR)\s+" + _CLIENTE + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+               + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<cliente>[^\s,].*)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _CLIENTE + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+               + r"\s*:\s*(?P<cliente>[^\s,].*)$"),
+]
 # Confirmación administrativa específica de una discrepancia de RUT: nunca
 # basta un "sí" cuando el RUT impreso contradice al chofer propuesto.
 _CONFIRMAR_DISCREPANCIA = re.compile(r"^CONFIRMO\s+(?:LA\s+)?DISCREPANCIA(?:\s+(?:DE(?:L)?\s+)?RUT)?$")
@@ -858,6 +876,15 @@ def interpretar_determinista(texto: str) -> Intencion | None:
                 return Intencion(ACCION_CHOFER_OPERACIONAL, {
                     "numero_guia": m.group("guia"), "referencia": " ".join(str(texto).split())[:500]},
                     {"chofer": original[m.start("chofer"):m.end("chofer")].strip(" ,:")})
+        for patron in _CLIENTE_GUIA:
+            m = patron.match(plano)
+            if m:
+                # Mismo camino que "Corrige el cliente de la guía N a X": valor
+                # humano tal cual, sin resolver ni crear clientes del catálogo.
+                return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+                    "numero_guia": m.group("guia"), "campo": "cliente",
+                    "valor": " ".join(original[m.start("cliente"):m.end("cliente")].split()).strip(" ,:"),
+                    "referencia": " ".join(str(texto).split())[:500]})
         for patron in _PESO_GUIA:
             m = patron.match(plano)
             if m:
