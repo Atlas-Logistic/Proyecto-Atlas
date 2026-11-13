@@ -668,6 +668,93 @@ def anular_documento(raiz: str | Path, *, empresa: str, documento_id: str, actor
 CONFIRMAR, RECHAZAR, BLOQUEADO = "CONFIRMAR", "RECHAZAR", "BLOQUEADO"
 _CAMPOS_REVISION = ("tipo", "patente", "fecha_emision", "fecha_vencimiento", "inicio_vigencia")
 _CONFIRMABLES = ("ACTIVAR", "REEMPLAZAR", "PROGRAMAR")
+# Aceptación simple (contrato 2): emisión y vencimiento los puede corregir la persona aunque el OCR los
+# haya leído (queda la procedencia de cada fecha); tipo, patente e inicio leídos siguen sin poder
+# contradecirse. Completar a mano tipo, patente, inicio o el documento reemplazado exige, sin revisor
+# declarado, la confirmación explícita de que esos datos aparecen en el original.
+CONTRATO_ACEPTACION = 2
+_CAMPOS_FECHA_REVISION = ("fecha_emision", "fecha_vencimiento")
+_CAMPOS_CONFIRMACION_ORIGINAL = ("tipo", "patente", "inicio_vigencia", "reemplaza")
+PERSONA_DECLARADA, PERSONA_NO_DECLARADA = "DECLARADA", "NO_DECLARADA"
+
+
+def _equipo_canal() -> dict | None:
+    """Equipo que acepta: la identidad del escritor operativo de esta instalación (la misma que registra
+    el lease de Cloud, por eso verificable) si ya existe. Nunca la crea; un override de entorno queda
+    marcado como no verificable."""
+    override = os.environ.get("ATLAS_ESCRITOR_ID", "").strip()
+    if override:
+        return {"id": override[:80], "fuente": "OVERRIDE_ENTORNO", "verificable": False}
+    try:
+        from atlas_core.escritor_operativo import ruta_identidad_escritor
+        valor = ruta_identidad_escritor().read_text(encoding="utf-8").strip()
+    except (OSError, ImportError, ValueError):
+        return None
+    if re.fullmatch(r"pc-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", valor):
+        return {"id": valor, "fuente": "ESCRITOR_OPERATIVO", "verificable": True}
+    return None
+
+
+def _autoria(autor: object, revisor_no_declarado: bool, actor: str) -> dict:
+    """Quién decide. Con nombre: el de siempre. Sin nombre (sólo canal Desktop y pedido explícitamente):
+    persona no declarada, canal y equipo; nunca se inventa una identidad humana."""
+    texto = " ".join(str(autor or "").split())
+    if revisor_no_declarado is True:
+        if texto:
+            raise ErrorExpedienteDigital("indique un revisor o declare que no se informa, no ambos")
+        if actor != "DESKTOP":
+            raise ErrorExpedienteDigital("sólo el canal Desktop puede aceptar sin revisor declarado")
+        return {"autor": None, "persona": PERSONA_NO_DECLARADA, "canal": actor, "equipo": _equipo_canal()}
+    return {"autor": _autor(autor), "persona": PERSONA_DECLARADA, "canal": actor}
+
+
+def _auditoria_autoria(autoria: dict) -> dict:
+    """Campos de auditoría que se agregan a la decisión (el `autor` ya va aparte)."""
+    salida = {"persona": autoria["persona"], "canal": autoria["canal"]}
+    if autoria["persona"] == PERSONA_NO_DECLARADA:
+        salida["equipo"] = autoria.get("equipo")
+    return salida
+
+
+def _marcar_fechas_humanas(documento: dict, fechas: dict, autoria: dict, instante: str) -> None:
+    """Fechas escritas por la persona al aceptar: mismo registro que la corrección manual (`fechas_confirmadas`),
+    así nunca figuran como lectura automática. Las que vienen del OCR no se marcan."""
+    confirmadas = dict(documento.get("fechas_confirmadas") or {})
+    for campo, f in fechas.items():
+        if f["origen"] == "HUMANO":
+            confirmadas[campo] = {"valor": f["valor"], "autor": autoria["autor"], "actor": autoria["canal"], "fecha": instante,
+                                  "sha256": documento.get("sha256", ""), "en": "ACEPTACION", **_auditoria_autoria(autoria)}
+    if confirmadas:
+        documento["fechas_confirmadas"] = confirmadas
+
+
+def _datos_completados(propuesta: dict | None, leido: dict) -> list[str]:
+    """Datos que la persona indica y que el OCR no leyó (tipo, patente, inicio) o la elección del reemplazado."""
+    propuesta = propuesta or {}
+    completados = [c for c in ("tipo", "patente", "inicio_vigencia")
+                   if " ".join(str(propuesta.get(c) or "").split()) and not leido.get(c)]
+    if str(propuesta.get("reemplaza") or "").strip():
+        completados.append("reemplaza")
+    return completados
+
+
+def _exigir_confirmacion_original(autoria: dict, completados: list[str], confirmo_original: bool) -> None:
+    if autoria["persona"] == PERSONA_NO_DECLARADA and completados and confirmo_original is not True:
+        nombres = {"tipo": "tipo", "patente": "patente", "inicio_vigencia": "inicio de vigencia", "reemplaza": "documento reemplazado"}
+        raise ErrorExpedienteDigital("confirme que estos datos aparecen en el original: "
+                                     + ", ".join(nombres[c] for c in completados))
+
+
+def _procedencia_fechas(leido: dict, propuesta: dict | None, valores: dict) -> dict:
+    """Por cada fecha: lo leído por OCR, lo aceptado y de dónde viene (OCR o la persona)."""
+    propuesta = propuesta or {}
+    salida = {}
+    for campo in _CAMPOS_FECHA_REVISION:
+        propio = " ".join(str(propuesta.get(campo) or "").split())
+        ocr = leido.get(campo) or ""
+        humano = bool(propio) and propio != ocr
+        salida[campo] = {"ocr": ocr, "valor": valores.get(campo, ""), "origen": "HUMANO" if humano else ("OCR" if ocr else "")}
+    return salida
 
 
 def _autor(autor: object) -> str:
@@ -759,7 +846,8 @@ def _evaluar_revision(raiz: str | Path, datos: dict, documento: dict, propuesta:
         propio = " ".join(str(propuesta.get(campo) or "").split())
         if campo in ("tipo", "patente"):
             propio = propio.upper()
-        if leido[campo] and propio and propio != leido[campo] and campo != "patente":
+        # Emisión y vencimiento: la persona puede corregir lo leído (queda su procedencia); lo demás leído no.
+        if leido[campo] and propio and propio != leido[campo] and campo not in ("patente", *_CAMPOS_FECHA_REVISION):
             return bloqueo("CONTRADICE_LECTURA", campo)
         valores[campo] = propio or leido[campo] or ""
     if lectura["otro_vehiculo"]:
@@ -890,7 +978,7 @@ def revisar_documento_pendiente(raiz: str | Path, *, empresa: str, referencia: s
         "documento": {**_resumen_documento(documento), "tipo_informado": documento.get("tipo_informado", ""),
                       "datos_informados": documento.get("datos_informados") or {}, "sha256": documento.get("sha256", "")},
         "leido": lectura["leido"], "motivos": lectura["motivos"], "inicios_observados": lectura["inicios_observados"],
-        "editables": [c for c in _CAMPOS_REVISION if not lectura["leido"][c] and not (c == "patente" and lectura["otro_vehiculo"])],
+        **_vista_aceptacion(lectura),
         "tipos": [{"tipo": t, "nombre": nombres[t]["nombre"]} for t in TIPOS_VEHICULO],
         "anteriores": ([_resumen_documento(d) for d in datos["documentos"] if d["documento_id"] in operativos] +
                        [{"documento_id": d['documento_id'], "tipo": d['tipo'], "fecha_emision": "", "fecha_vencimiento": d['vencimiento'],
@@ -902,14 +990,30 @@ def revisar_documento_pendiente(raiz: str | Path, *, empresa: str, referencia: s
     }
 
 
+def _vista_aceptacion(lectura: dict, *, otro_vehiculo: bool | None = None) -> dict:
+    """Parte de la vista previa que usa la aceptación simple: qué se puede escribir, qué fechas precargar
+    (sólo lo leído con evidencia) y qué datos completados exigen confirmar el original."""
+    otro = lectura["otro_vehiculo"] if otro_vehiculo is None else otro_vehiculo
+    return {
+        "editables": [c for c in _CAMPOS_REVISION if c in _CAMPOS_FECHA_REVISION
+                      or (not lectura["leido"][c] and not (c == "patente" and otro))],
+        "contrato_aceptacion": CONTRATO_ACEPTACION,
+        "precarga": {c: lectura["leido"][c] or "" for c in _CAMPOS_FECHA_REVISION},
+        "confirmacion_original": [c for c in _CAMPOS_CONFIRMACION_ORIGINAL if c == "reemplaza" or not lectura["leido"][c]],
+    }
+
+
 def resolver_documento_pendiente(
-    raiz: str | Path, *, empresa: str, referencia: str, documento_id: str, sha256: str, decision: str, autor: str,
+    raiz: str | Path, *, empresa: str, referencia: str, documento_id: str, sha256: str, decision: str, autor: str = "",
     confirmacion_humana: bool, motivo: str = "", propuesta: dict | None = None, clave_consecuencia: str = "",
     actor: str = "DESKTOP", reloj: _Reloj = _ahora_utc, carpeta_catalogos: str | Path | None = None,
+    revisor_no_declarado: bool = False, confirmo_original: bool = False,
 ) -> dict:
     """Confirma o rechaza un pendiente vehicular revisado por una persona. Confirmar
     recalcula bajo bloqueo la misma consecuencia de la vista previa y sólo la aplica si
-    coincide y la regla la permite. Rechazar lo deja anulado con su original e historial."""
+    coincide y la regla la permite. Rechazar lo deja anulado con su original e historial.
+    `revisor_no_declarado`: Desktop decide sin nombre (queda persona no declarada, canal y equipo);
+    entonces completar tipo, patente, inicio o reemplazado exige `confirmo_original`."""
     from atlas_core.identificacion_patentes import _ubicaciones
     fichas = _leer_fichas(raiz, empresa)
     if fichas and any(d.get('documento_id') == documento_id and d.get('origen') == 'MOBILE'
@@ -918,8 +1022,11 @@ def resolver_documento_pendiente(
         return resolver(raiz, empresa=empresa, referencia=referencia, documento_id=documento_id, sha256=sha256,
                         decision=str(decision or '').upper(), autor=autor, confirmacion_humana=confirmacion_humana,
                         motivo=motivo, propuesta=propuesta, clave_consecuencia=clave_consecuencia, actor=actor,
-                        reloj=reloj, carpeta_catalogos=carpeta_catalogos)
-    actor, autor, decision = _actor(actor), _autor(autor), str(decision or "").upper()
+                        reloj=reloj, carpeta_catalogos=carpeta_catalogos, revisor_no_declarado=revisor_no_declarado,
+                        confirmo_original=confirmo_original)
+    actor, decision = _actor(actor), str(decision or "").upper()
+    autoria = _autoria(autor, revisor_no_declarado, actor)
+    autor = autoria["autor"]
     if confirmacion_humana is not True:
         raise ErrorExpedienteDigital("falta la confirmación de que una persona revisó el original")
     if decision not in (CONFIRMAR, RECHAZAR):
@@ -940,15 +1047,18 @@ def resolver_documento_pendiente(
         if decision == RECHAZAR:
             documento["estado"] = ANULADO
             documento["rechazo"] = {"autor": autor, "motivo": motivo, "en": instante, "actor": actor,
-                                    "motivos_revisados": _lectura(documento)["motivos"]}
+                                    "motivos_revisados": _lectura(documento)["motivos"], **_auditoria_autoria(autoria)}
             _evento(datos, "DOCUMENTO_RECHAZADO_EN_REVISION", actor, instante, expediente_id=documento["expediente_id"],
                     documento_id=documento["documento_id"], autor=autor, motivo=motivo,
-                    cambios={"estado": {"antes": ACTIVO, "despues": ANULADO}})
+                    cambios={"estado": {"antes": ACTIVO, "despues": ANULADO}}, **_auditoria_autoria(autoria))
             return dict(documento)
         ruta = carpeta / str(documento.get("archivo") or "")
         if not documento.get("archivo") or not ruta.resolve().is_relative_to(carpeta.resolve()) or not ruta.is_file() \
                 or hashlib.sha256(ruta.read_bytes()).hexdigest() != documento["sha256"]:
             raise ErrorExpedienteDigital("el original no está íntegro; no se puede confirmar")
+        lectura = _lectura(documento)
+        completados = _datos_completados(propuesta, lectura["leido"])
+        _exigir_confirmacion_original(autoria, completados, confirmo_original)
         evaluacion, _, _, clave = _revision_desktop_contexto(raiz, empresa, datos, documento, propuesta, hoy, carpeta_catalogos)
         if not clave_consecuencia or clave != clave_consecuencia:
             raise ErrorExpedienteDigital("la consecuencia cambió desde la vista previa; vuelva a revisarla")
@@ -956,16 +1066,21 @@ def resolver_documento_pendiente(
         if accion not in _CONFIRMABLES:
             raise ErrorExpedienteDigital("este documento no puede confirmarse: queda pendiente por seguridad")
         v = evaluacion["valores"]
-        motivos = _lectura(documento)["motivos"]
+        motivos = lectura["motivos"]
+        fechas = _procedencia_fechas(lectura["leido"], propuesta, v)
+        correccion_ocr = {c: {"antes": f["ocr"], "despues": f["valor"]} for c, f in fechas.items() if f["origen"] == "HUMANO" and f["ocr"]}
         cambios = {c: {"antes": documento.get(c, ""), "despues": v[c]}
                    for c in ("tipo", "fecha_emision", "fecha_vencimiento") if documento.get(c, "") != v[c]}
         documento.update({c: v[c] for c in ("tipo", "fecha_emision", "fecha_vencimiento")}, confirmado_por_humano=True)
         resuelto = documento.pop("posible_reemplazo", None)
+        _marcar_fechas_humanas(documento, fechas, autoria, instante)
         documento["revision_humana"] = {
             "autor": autor, "en": instante, "actor": actor, "sha256": documento["sha256"], "decision": accion,
             "motivo_regla": evaluacion["motivo"], "patente": v["patente"], "inicio_vigencia": v["inicio_vigencia"],
             "coberturas": v["coberturas"], "cambios": cambios, "motivos_revisados": motivos,
-            "posible_reemplazo_resuelto": resuelto, "reemplaza": evaluacion["documentos"]}
+            "posible_reemplazo_resuelto": resuelto, "reemplaza": evaluacion["documentos"],
+            "fechas": fechas, "correccion_ocr": correccion_ocr, "datos_completados": completados,
+            "confirmo_original": bool(completados) and confirmo_original is True, **_auditoria_autoria(autoria)}
         reemplazados = []
         if accion == "PROGRAMAR":
             documento["transicion_programada"] = {"fecha": evaluacion["fecha"], "reemplaza": evaluacion["documentos"],
@@ -980,7 +1095,8 @@ def resolver_documento_pendiente(
                 documento_id=documento["documento_id"], tipo=documento["tipo"], autor=autor, cambios=cambios,
                 renovacion=accion, motivo_regla=evaluacion["motivo"], reemplaza=reemplazados,
                 programado_desde=evaluacion["fecha"] if accion == "PROGRAMAR" else "",
-                anteriores=evaluacion["documentos"])
+                anteriores=evaluacion["documentos"], fechas=fechas, correccion_ocr=correccion_ocr,
+                datos_completados=completados, **_auditoria_autoria(autoria))
         return dict(documento)
 
 

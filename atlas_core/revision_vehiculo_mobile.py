@@ -140,16 +140,19 @@ def revisar(raiz, *, empresa, referencia, documento_id, propuesta, reloj, carpet
     return {'empresa': empresa, 'documento': {**exp._resumen_documento(virtual),
             'tipo_informado': doc.get('tipo_informado') or doc.get('tipo'), 'datos_informados': {}, 'sha256': doc['sha256']},
             'leido': lectura['leido'], 'motivos': lectura['motivos'], 'inicios_observados': lectura['inicios_observados'],
-            'editables': [c for c in exp._CAMPOS_REVISION if not lectura['leido'][c]],
+            **exp._vista_aceptacion(lectura, otro_vehiculo=False),
             'tipos': [{'tipo': t, 'nombre': tipos[t]['nombre']} for t in TIPOS_VEHICULO], 'anteriores': anteriores,
             'consecuencia': {**{c: evaluacion[c] for c in ('accion', 'motivo', 'campo', 'detalle', 'documentos', 'fecha')}, 'clave': clave},
             'puede_confirmar': evaluacion['accion'] in ('ACTIVAR', 'REEMPLAZAR')}
 
 
 def resolver(raiz, *, empresa, referencia, documento_id, sha256, decision, autor, confirmacion_humana,
-             motivo, propuesta, clave_consecuencia, actor, reloj, carpeta_catalogos=None):
+             motivo, propuesta, clave_consecuencia, actor, reloj, carpeta_catalogos=None,
+             revisor_no_declarado=False, confirmo_original=False):
     from atlas_core.extraccion_vencimientos_vehiculos import _escribir
-    actor, autor = exp._actor(actor), exp._autor(autor)
+    actor = exp._actor(actor)
+    autoria = exp._autoria(autor, revisor_no_declarado, actor)
+    autor = autoria['autor']
     if confirmacion_humana is not True or decision not in ('CONFIRMAR', 'RECHAZAR'):
         raise exp.ErrorExpedienteDigital('Falta una decisión humana válida')
     motivo = exp._motivo(motivo) if decision == 'RECHAZAR' else ''
@@ -164,13 +167,17 @@ def resolver(raiz, *, empresa, referencia, documento_id, sha256, decision, autor
             raiz, empresa, referencia, documento_id, propuesta, reloj, carpeta_catalogos)
         if doc.get('sha256') != sha256:
             raise exp.ErrorExpedienteDigital('El documento cambió desde la vista previa')
+        lectura = exp._lectura(virtual)
+        completados = exp._datos_completados(propuesta, lectura['leido'])
+        if decision == 'CONFIRMAR':
+            exp._exigir_confirmacion_original(autoria, completados, confirmo_original)
         if decision == 'CONFIRMAR' and (clave != clave_consecuencia or evaluacion['accion'] not in ('ACTIVAR', 'REEMPLAZAR')):
             raise exp.ErrorExpedienteDigital('La consecuencia cambió o queda pendiente por seguridad')
         datos = copy.deepcopy(anterior)
         ubicacion, actual = _buscar(datos, documento_id)
         instante = exp._instante(reloj)
         revision = {'autor': autor, 'actor': actor, 'en': instante, 'sha256': sha256, 'decision': decision,
-                    'motivos_revisados': exp._lectura(virtual)['motivos']}
+                    'motivos_revisados': lectura['motivos'], **exp._auditoria_autoria(autoria)}
         if decision == 'RECHAZAR':
             actual['estado_revision'] = 'RECHAZADO_EN_REVISION'
             actual['rechazo'] = {**revision, 'motivo': motivo}
@@ -181,18 +188,27 @@ def resolver(raiz, *, empresa, referencia, documento_id, sha256, decision, autor
             if not ubicacion:
                 datos[PENDIENTES].remove(actual)
                 _ficha_vehiculo(datos, vehiculo.patente_canonica)['documentos'].append(actual)
+            fechas = exp._procedencia_fechas(lectura['leido'], propuesta, valores)
             actual.update(tipo=valores['tipo'], vencimiento=valores['fecha_vencimiento'], estado_revision='CONFIRMADO_HUMANO')
-            actual['clasificacion_humana'] = {'patente': vehiculo.patente_canonica, 'autor': autor, 'fecha': instante}
+            if valores['fecha_emision']:
+                actual['emision'] = valores['fecha_emision']
+            exp._marcar_fechas_humanas(actual, fechas, autoria, instante)
+            actual['clasificacion_humana'] = {'patente': vehiculo.patente_canonica, 'autor': autor, 'fecha': instante,
+                                              **exp._auditoria_autoria(autoria)}
             revision.update(patente=vehiculo.patente_canonica, inicio_vigencia=valores['inicio_vigencia'],
                             coberturas=valores['coberturas'], renovacion=evaluacion['accion'],
-                            reemplaza=evaluacion['documentos'])
+                            reemplaza=evaluacion['documentos'], fechas=fechas, datos_completados=completados,
+                            correccion_ocr={c: {'antes': f['ocr'], 'despues': f['valor']} for c, f in fechas.items()
+                                            if f['origen'] == 'HUMANO' and f['ocr']},
+                            confirmo_original=bool(completados) and confirmo_original is True)
             for p, previo in _ubicaciones(datos):
                 if previo.get('documento_id') in evaluacion['documentos']:
                     previo['reemplazado_por'] = documento_id
             actual.pop('posible_reemplazo', None)
         actual['revision_humana'] = revision
         actual.setdefault('historial', []).append({'accion': 'DOCUMENTO_REVISION_' + decision, 'actor': actor,
-                                                   'autor': autor, 'fecha': instante, 'motivo': motivo,
+                                                   'autor': autor, **exp._auditoria_autoria(autoria),
+                                                   'fecha': instante, 'motivo': motivo,
                                                    'documento_id': documento_id, 'sha256': sha256,
                                                    'renovacion': revision.get('renovacion', '')})
         # _escribir usa la misma validación, respaldo y publicación atómica que PULL.

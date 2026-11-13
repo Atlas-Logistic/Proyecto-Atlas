@@ -17,7 +17,12 @@ if __name__ == '__main__':
     parser.add_argument('--documento-id', required=True)
     parser.add_argument('--sha256', required=True)
     parser.add_argument('--decision', required=True, choices=('CONFIRMAR', 'RECHAZAR'))
-    parser.add_argument('--autor', required=True)
+    # Con nombre (--autor) o, desde Desktop, explícitamente sin nombre (--revisor-no-declarado); nunca ambos.
+    parser.add_argument('--autor', default='')
+    parser.add_argument('--revisor-no-declarado', action='store_true',
+                        help='Desktop acepta o rechaza sin nombre: queda persona no declarada, canal y equipo')
+    parser.add_argument('--confirmo-original', action='store_true',
+                        help='Los datos completados a mano (tipo, patente, inicio, reemplazado) aparecen en el original')
     parser.add_argument('--motivo', default='')
     parser.add_argument('--propuesta', default='{}')
     parser.add_argument('--clave-consecuencia', default='')
@@ -33,5 +38,6 @@ if __name__ == '__main__':
     documento = resolver_documento_pendiente(
         args.raiz_atlas, empresa=empresa_del_proceso(), referencia=args.referencia, documento_id=args.documento_id,
         sha256=args.sha256, decision=args.decision, autor=args.autor, motivo=args.motivo, propuesta=propuesta,
-        clave_consecuencia=args.clave_consecuencia, confirmacion_humana=args.confirmo_revision_humana, actor='DESKTOP')
+        clave_consecuencia=args.clave_consecuencia, confirmacion_humana=args.confirmo_revision_humana, actor='DESKTOP',
+        revisor_no_declarado=args.revisor_no_declarado, confirmo_original=args.confirmo_original)
     print(json.dumps({k: documento[k] for k in ('documento_id', 'estado', 'tipo', 'pendiente_revision')}, ensure_ascii=True))

@@ -113,7 +113,9 @@ def test_tipo_leido_distinto_con_vigente_se_resuelve_con_la_regla_unica(raiz):
     nuevo = alta(raiz, soap("01/11/2026", "31/10/2027", PATENTE), tipo="PERMISO_CIRCULACION", contenido=b"nuevo")
     assert nuevo["posible_reemplazo"]["motivo"] == "TIPO_LEIDO_CON_VIGENTE"
     vista = revisar(raiz, nuevo)
-    assert vista["motivos"] == ["TIPO_LEIDO_CON_VIGENTE"] and vista["editables"] == ["fecha_emision"]
+    # Emisión y vencimiento siempre editables (contrato 2); tipo, patente e inicio leídos, no.
+    assert vista["motivos"] == ["TIPO_LEIDO_CON_VIGENTE"] and vista["editables"] == ["fecha_emision", "fecha_vencimiento"]
+    assert vista["precarga"] == {"fecha_emision": "", "fecha_vencimiento": "2027-10-31"}
     assert [a["documento_id"] for a in vista["anteriores"]] == [viejo["documento_id"]]
     assert (vista["consecuencia"]["accion"], vista["consecuencia"]["documentos"]) == ("REEMPLAZAR", [viejo["documento_id"]])
     confirmado = resolver(raiz, nuevo)
@@ -216,8 +218,9 @@ def test_poliza_con_menos_coberturas_no_retira_la_anterior(raiz):
         assert revisar(raiz, solo_robo, propuesta)["consecuencia"]["motivo"] == "COBERTURAS_REDUCIDAS"
 
 
+# Emisión y vencimiento leídos sí se pueden corregir al aceptar (contrato 2; ver test_aceptacion_simple.py).
 @pytest.mark.parametrize("campo,valor", [
-    ("tipo", "PERMISO_CIRCULACION"), ("fecha_vencimiento", "2029-12-31"), ("inicio_vigencia", "2026-10-01"),
+    ("tipo", "PERMISO_CIRCULACION"), ("inicio_vigencia", "2026-10-01"),
 ])
 def test_lo_leido_con_evidencia_no_se_contradice(raiz, campo, valor):
     alta(raiz, soap("01/10/2026", "30/09/2027", PATENTE), contenido=b"viejo")
