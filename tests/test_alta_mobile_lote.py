@@ -55,7 +55,7 @@ def test_flujo_completo_mantiene_catalogo_y_usa_clave_una_vez(raiz):
     antes = (raiz / 'catalogos_privados' / 'choferes.json').read_bytes()
     recibidas = []
     resultado = lote.procesar(raiz, c, CUENTA, PASSWORD, ejecutar=ejecutar_real,
-                              ingreso=lambda u, p, r: recibidas.append((u, p, r)) or True)
+                              ingreso=lambda u, p, r: (recibidas.append((u, p, r)) or True, 200, 'identidad verificada'))
     assert resultado.startswith('HABILITADO')
     assert recibidas == [('nuevo.test', PASSWORD, '10833150K')]
     assert (raiz / 'catalogos_privados' / 'choferes.json').read_bytes() == antes
@@ -77,8 +77,9 @@ def test_publicacion_no_reemplaza_si_aparece_duplicado():
 
 def test_login_fallido_informa_estado_individual(raiz):
     c = Cloud()
-    resultado = lote.procesar(raiz, c, CUENTA, PASSWORD, ejecutar=ejecutar_real, ingreso=lambda *_: False)
+    resultado = lote.procesar(raiz, c, CUENTA, PASSWORD, ejecutar=ejecutar_real, ingreso=lambda *_: (False, 401, 'CREDENCIALES_INVALIDAS'))
     assert resultado.startswith('PENDIENTE: local y D1 verificadas')
+    assert 'HTTP 401, CREDENCIALES_INVALIDAS' in resultado
     assert PASSWORD not in resultado
 
 def test_escritor_no_disponible_no_publica(raiz):
@@ -108,3 +109,31 @@ def test_lanzador_captura_una_vez_por_cuenta_y_continua(monkeypatch, tmp_path, c
     assert len(capturas) == 5
     assert salida.count('HABILITADO') == 4 and salida.count('PENDIENTE') == 1
     assert PASSWORD not in salida
+
+def test_login_envia_agente_oficial_y_verifica_identidad(monkeypatch):
+    from io import BytesIO
+    class Respuesta:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return json.dumps({'token': 'secreto-sintetico', 'chofer_id': CUENTA[1]}).encode()
+    def abrir(req, timeout):
+        assert req.get_header('User-agent') == 'Atlas-Migracion-Usuarios/1.0'
+        return Respuesta()
+    monkeypatch.setattr(lote.urllib.request, 'urlopen', abrir)
+    resultado = lote.login(CUENTA[0], PASSWORD, CUENTA[1])
+    assert resultado == (True, 200, 'identidad verificada')
+    assert 'secreto-sintetico' not in str(resultado)
+    assert lote.login(CUENTA[0], PASSWORD, 'otro-rut')[0] is False
+
+@pytest.mark.parametrize('status,body,detalle', [
+    (403, b'error code: 1010', 'error code: 1010'),
+    (401, b'{"error":"CREDENCIALES_INVALIDAS"}', 'CREDENCIALES_INVALIDAS'),
+    (500, b'{"error":"secreto sensible", "token":"abc"}', 'respuesta no reconocida'),
+])
+def test_login_informa_http_sin_revelar_cuerpo(monkeypatch, status, body, detalle):
+    from io import BytesIO
+    def abrir(req, timeout):
+        raise lote.urllib.error.HTTPError(req.full_url, status, 'fallo', {}, BytesIO(body))
+    monkeypatch.setattr(lote.urllib.request, 'urlopen', abrir)
+    assert lote.login(CUENTA[0], PASSWORD, CUENTA[1]) == (False, status, detalle)

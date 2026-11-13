@@ -8,7 +8,9 @@ import getpass
 import importlib.util
 import json
 import os
+import re
 import sys
+import urllib.error
 import urllib.request
 import warnings
 from pathlib import Path
@@ -79,13 +81,29 @@ def publicar(cloud, usuario, rut, nombre, password):
 
 def login(usuario, password, rut):
     body = json.dumps({'usuario': usuario, 'password': password}).encode('utf-8')
-    req = urllib.request.Request(URL, data=body, method='POST', headers={'Content-Type': 'application/json'})
+    # Es el User-Agent del migrador oficial; el predeterminado de urllib es
+    # rechazado por Cloudflare antes de llegar a la autenticacion.
+    req = urllib.request.Request(URL, data=body, method='POST', headers={
+        'Content-Type': 'application/json', 'User-Agent': 'Atlas-Migracion-Usuarios/1.0'})
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             datos = json.loads(response.read())
-            return response.status == 200 and bool(datos.get('token')) and datos.get('chofer_id') == rut
-    except Exception:
-        return False
+            ok = response.status == 200 and bool(datos.get('token')) and datos.get('chofer_id') == rut
+            return ok, response.status, 'identidad verificada' if ok else 'respuesta o identidad inesperada'
+    except urllib.error.HTTPError as e:
+        # Solo se expone un codigo de error estructurado, nunca el cuerpo entero.
+        contenido = e.read(1024).decode('utf-8', 'replace').strip()
+        detalle = 'respuesta no reconocida'
+        try:
+            codigo = json.loads(contenido).get('error', '')
+            if codigo in ('CREDENCIALES_INVALIDAS', 'NO_AUTORIZADO', 'ERROR_INTERNO'):
+                detalle = codigo
+        except (ValueError, AttributeError):
+            if re.fullmatch(r'error code: [0-9]{1,8}', contenido):
+                detalle = contenido
+        return False, e.code, detalle
+    except Exception as e:
+        return False, None, type(e).__name__
 
 
 def procesar(raiz, cloud, cuenta, password, *, ejecutar=alta.ejecutar, ingreso=login):
@@ -107,8 +125,9 @@ def procesar(raiz, cloud, cuenta, password, *, ejecutar=alta.ejecutar, ingreso=l
         if len(filas) != 1 or filas[0] != {'nombre_usuario': usuario, 'chofer_id': rut,
                                             'empresa_id': cloud.EMPRESA, 'nombre_chofer': nombre_mobile, 'activo': 1}:
             return 'PENDIENTE: cuenta local y publicacion realizadas; D1 no verificable'
-        if not ingreso(usuario, password, rut):
-            return 'PENDIENTE: local y D1 verificadas; ingreso Mobile fallido'
+        ok, http, detalle = ingreso(usuario, password, rut)
+        if not ok:
+            return f'PENDIENTE: local y D1 verificadas; ingreso Mobile fallido (HTTP {http}, {detalle})'
         return 'HABILITADO: local, D1 e ingreso Mobile verificados'
     except Exception as e:
         # No imprimir excepciones externas que pudieran contener datos sensibles.
