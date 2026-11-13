@@ -1194,15 +1194,24 @@ def _tipo_vehiculo_requisitos(catalogos: Path, clave: str) -> str | None:
     return v.tipo if v.tipo in ("TRACTO", "CARRO", "CAMION_RIGIDO") else None
 
 
+# Lo que NO se exige a cada tipo (única fuente para la vista del vehículo, la del chofer y los ausentes).
+# Coberturas: la responsabilidad civil corresponde al tracto y el seguro de carga a la rampla; el camión
+# rígido lleva ambas. Una póliza sólo acredita al vehículo al que está asociada (sin coberturas compartidas).
+_NO_EXIGIDOS_POR_TIPO = {
+    "TRACTO": frozenset({"SEGURO_CARGA"}),
+    "CARRO": frozenset({"SOAP", "CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL"}),
+    "CAMION_RIGIDO": frozenset(),
+}
+
+
 def _requeridos_vehiculo(tipos: dict, empresa: str, tipo: str | None) -> set[str]:
+    # Tipo incierto: no se calcula ningún requisito (ni se marcan faltantes).
     if tipo is None:
         return set()
     requeridos = {t for t, c in tipos.items() if c["entidad"] == VEHICULO and c["activo"] and c["obligatorio"]}
     if empresa.upper() == "MBT":
         requeridos |= {t for t in _REQUISITOS_VEHICULO_MBT if tipos[t]["activo"]}
-    if tipo == "CARRO":
-        requeridos -= {"SOAP", "CERTIFICADO_EMISION_GASES"}
-    return requeridos
+    return requeridos - _NO_EXIGIDOS_POR_TIPO.get(tipo, frozenset())
 
 
 def _requisitos_chofer(empresa, clave, documentos, documentos_chofer, tipos, catalogos):

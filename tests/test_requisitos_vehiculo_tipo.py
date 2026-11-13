@@ -11,8 +11,9 @@ from tests.test_motor_evidencia_vehiculos import _confirmar
 TODOS = {"SOAP", "POLIZA_RESPONSABILIDAD_CIVIL", "SEGURO_CARGA", "REVISION_TECNICA",
          "PERMISO_CIRCULACION", "CERTIFICADO_EMISION_GASES"}
 
-@pytest.mark.parametrize(('patente','esperados'), [(TRACTO,TODOS), (RIGIDO,TODOS),
-    (CARRO,TODOS-{'SOAP','CERTIFICADO_EMISION_GASES'})])
+# Coberturas por tipo: RC al tracto, seguro de carga a la rampla, ambas al camión rígido.
+@pytest.mark.parametrize(('patente','esperados'), [(TRACTO,TODOS-{'SEGURO_CARGA'}), (RIGIDO,TODOS),
+    (CARRO,TODOS-{'SOAP','CERTIFICADO_EMISION_GASES','POLIZA_RESPONSABILIDAD_CIVIL'})])
 def test_aplicabilidad_en_expediente_y_lista_general(raiz, patente, esperados):
     vista = vista_expediente_desktop(raiz, empresa='MBT', entidad='VEHICULO', referencia=patente)
     assert set(vista['requisitos_aplicables']) == esperados
@@ -34,7 +35,7 @@ def test_tipo_no_confirmado_no_inventa_faltantes(raiz):
     assert not any(x['referencia_catalogo']==vista['referencia_catalogo'] for x in documentos_ausentes(raiz,empresa='MBT'))
 
 
-def test_chofer_contiene_siete_y_rampla_no_exige_soap_ni_gases(raiz):
+def test_chofer_contiene_siete_con_coberturas_por_tipo(raiz):
     vista=vista_expediente_desktop(raiz,empresa='MBT',entidad='CHOFER',referencia=SOLO)
     req={x['tipo']:x for x in vista['requisitos_documentales']}
     assert set(req)==TODOS|{'LICENCIA_CONDUCIR'}
@@ -50,8 +51,10 @@ def test_chofer_contiene_siete_y_rampla_no_exige_soap_ni_gases(raiz):
     req={x['tipo']:x for x in vista['requisitos_documentales']}
     for t in ('SOAP','CERTIFICADO_EMISION_GASES'):
         assert {x['tipo_vehiculo']:x['estado'] for x in req[t]['vehiculos']}=={'TRACTO':'FALTANTE','CARRO':'NO_APLICA'}
-    for t in ('REVISION_TECNICA','PERMISO_CIRCULACION','POLIZA_RESPONSABILIDAD_CIVIL','SEGURO_CARGA'):
+    for t in ('REVISION_TECNICA','PERMISO_CIRCULACION'):
         assert {x['tipo_vehiculo']:x['estado'] for x in req[t]['vehiculos']}=={'TRACTO':'FALTANTE','CARRO':'FALTANTE'}
+    assert {x['tipo_vehiculo']:x['estado'] for x in req['POLIZA_RESPONSABILIDAD_CIVIL']['vehiculos']}=={'TRACTO':'FALTANTE','CARRO':'NO_APLICA'}
+    assert {x['tipo_vehiculo']:x['estado'] for x in req['SEGURO_CARGA']['vehiculos']}=={'TRACTO':'NO_APLICA','CARRO':'FALTANTE'}
 
 
 def test_consulta_no_altera_fichas_ni_documentos(raiz):
@@ -89,7 +92,7 @@ def test_poliza_no_se_proyecta_a_otro_vehiculo(raiz):
     assert not doc['pendiente_revision']
     vista=consultar_expediente(raiz,empresa='MBT',entidad='CHOFER',referencia=SOLO)
     requisito=next(r for r in vista['requisitos_documentales'] if r['tipo']=='POLIZA_RESPONSABILIDAD_CIVIL')
-    assert {v['patente']:v['estado'] for v in requisito['vehiculos']}=={TRACTO:'PRESENTE',CARRO:'FALTANTE'}
+    assert {v['patente']:v['estado'] for v in requisito['vehiculos']}=={TRACTO:'PRESENTE',CARRO:'NO_APLICA'}
     assert (raiz/'fichas_digitales'/'MBT'/doc['archivo']).read_bytes()==original
 
 

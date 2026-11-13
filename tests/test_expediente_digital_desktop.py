@@ -68,7 +68,10 @@ def test_vista_vehiculo_ofrece_sus_tipos_y_filtra_alertas_ajenas(raiz):
 def test_cli_consulta_no_escribe_y_devuelve_empresa(raiz, capsys):
     assert main(["--raiz-atlas", str(raiz), "--expediente-entidad", "VEHICULO", "--expediente-referencia", PATENTE]) == 0
     salida = json.loads(capsys.readouterr().out)
-    assert (salida["empresa"], salida["existe"]) == ("MBT", False) and len(salida["ausentes"]) == 6
+    # Tracto: sus cinco requisitos (la responsabilidad civil sí; el seguro de carga corresponde a la rampla).
+    assert (salida["empresa"], salida["existe"]) == ("MBT", False)
+    assert {a["tipo"] for a in salida["ausentes"]} == {"SOAP", "REVISION_TECNICA", "PERMISO_CIRCULACION",
+                                                      "CERTIFICADO_EMISION_GASES", "POLIZA_RESPONSABILIDAD_CIVIL"}
     assert not (raiz / "fichas_digitales").exists()
 
 
