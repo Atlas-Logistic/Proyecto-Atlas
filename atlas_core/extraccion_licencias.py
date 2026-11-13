@@ -157,9 +157,12 @@ def _extraer_clase(caras: Mapping[str, list[str]]) -> dict:
                         ilegibles.append(token)
     campo = _unico(hallazgos, ilegibles=ilegibles)
     if campo["motivo"] == "CONTRADICCION":
-        # Varias clases leídas: puede tener más de una o ser un error de OCR.
-        # La ficha admite una sola; la elige una persona.
+        # Varias clases leídas: la licencia puede acreditar más de una (p. ej. A2 y A5) o ser un error de
+        # OCR. Se informan como valores individuales reconocidos (`valores`, nunca un rango) y una persona
+        # las confirma o corrige contra el original; no se registran solas.
         campo["motivo"] = "VARIAS_CLASES"
+        orden = ("A1", "A2", "A3", "A4", "A5", "B", "C", "D", "E", "F")
+        campo["valores"] = sorted({valor for valor, _ in hallazgos}, key=orden.index)
     return campo
 
 
@@ -567,6 +570,7 @@ def _aplicar_registro(ficha: dict, objetivo: dict, extraccion: dict, actor: str,
     objetivo["vencimiento"] = valores["vencimiento"]
     if "clase" in valores:
         objetivo["clase"] = valores["clase"]
+        objetivo["clases"] = [valores["clase"]]
     titular = {k: valores[k] for k in ("rut", "nombre") if k in valores}
     if titular:
         objetivo["titular"] = titular

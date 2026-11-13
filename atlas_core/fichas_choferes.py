@@ -48,6 +48,55 @@ def _clase_licencia_valida(valor):
     return texto
 
 
+# Clases de una licencia chilena, en el orden en que se muestran. Una licencia puede acreditar varias
+# (p. ej. A2 y A5): se guardan como valores individuales en `clases`; `clase` queda como texto legible
+# («A2» o «A2, A5») para lectores anteriores. Una clase fuera de esta lista pero con el formato admitido
+# antes (letra + hasta dos dígitos) se conserva tal cual, al final.
+ORDEN_CLASES_LICENCIA = ('A1', 'A2', 'A3', 'A4', 'A5', 'B', 'C', 'D', 'E', 'F')
+
+
+def normalizar_clases_licencia(valor):
+    """Lista de clases individuales, sin repetir y en orden canónico. Acepta una lista o un texto separado por
+    comas, punto y coma, espacios o «y». Un guion o una barra no se interpretan como rango («A2-A5» no es
+    A2, A3, A4 y A5): se rechazan para que una persona indique cada clase acreditada por el documento."""
+    if isinstance(valor, (list, tuple, set, frozenset)):
+        partes = [str(v or '') for v in valor]
+    else:
+        partes = [str(valor or '')]
+    tokens = []
+    for parte in partes:
+        texto = parte.strip().upper()
+        if re.search(r'[-–—/\\]', texto):
+            raise ValueError('Indique cada clase por separado (por ejemplo, A2 y A5); «A2-A5» no se interpreta como rango')
+        tokens.extend(t for t in re.split(r'[,;\s]+|\bY\b', texto) if t)
+    if not tokens:
+        raise ValueError('La clase de licencia no es válida')
+    clases = []
+    for token in tokens:
+        clase = _clase_licencia_valida(token)
+        if clase not in clases:
+            clases.append(clase)
+    return sorted(clases, key=lambda c: (ORDEN_CLASES_LICENCIA.index(c) if c in ORDEN_CLASES_LICENCIA else len(ORDEN_CLASES_LICENCIA), c))
+
+
+def texto_clases_licencia(clases):
+    return ', '.join(clases)
+
+
+def clases_de_licencia(documento):
+    """Clases de un documento de licencia: `clases` si existe; si no (licencias anteriores), su única `clase`."""
+    clases = (documento or {}).get('clases')
+    if isinstance(clases, list) and clases:
+        return list(clases)
+    clase = (documento or {}).get('clase')
+    if not clase:
+        return []
+    try:
+        return normalizar_clases_licencia(clase)
+    except ValueError:
+        return [str(clase)]
+
+
 def _tipo_archivo_licencia(ruta):
     ruta = Path(ruta)
     if ruta.is_symlink():
@@ -299,7 +348,7 @@ def registrar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo,
     ficha_id = str(uuid.UUID(str(ficha_id)))
     referencia_catalogo = str(referencia_catalogo or '')
     vencimiento = _fecha_vencimiento_valida(vencimiento)
-    clase = _clase_licencia_valida(clase)
+    clases = normalizar_clases_licencia(clase)
     origen, extension, _ = _tipo_archivo_licencia(archivo_origen)
     from atlas_core.desktop_operacion import sesion
     with sesion(raiz, reutilizar=True) as comprobar:
@@ -333,8 +382,8 @@ def registrar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo,
             shutil.copy2(ruta, respaldo / ruta.name)
             extension, bytes_archivo, huella = _copiar_licencia_nueva(origen, destino, comprobar)
             documento = {
-                'documento_id': documento_id, 'tipo': 'LICENCIA_CONDUCIR', 'clase': clase,
-                'vencimiento': vencimiento, 'archivo': destino_relativo.as_posix(),
+                'documento_id': documento_id, 'tipo': 'LICENCIA_CONDUCIR', 'clase': texto_clases_licencia(clases),
+                'clases': clases, 'vencimiento': vencimiento, 'archivo': destino_relativo.as_posix(),
                 'sha256': huella, 'bytes': bytes_archivo, 'creado_en': instante,
             }
             if anterior_ids:
@@ -595,7 +644,8 @@ def registrar_licencia_mobile_pendiente(raiz, *, empresa, referencia_catalogo, o
 
 
 ESTADO_CONFIRMADA = 'CONFIRMADA'
-_CAMPOS_CONFIRMACION = ('rut', 'nombre', 'clase', 'vencimiento')
+# Se comparan las clases como lista (`clases`); `clase` (texto) se guarda junto a ellas por compatibilidad.
+_CAMPOS_CONFIRMACION = ('rut', 'nombre', 'clases', 'vencimiento')
 
 
 def _palabras_nombre(valor):
@@ -622,8 +672,18 @@ def nombre_coincide_con_catalogo(nombre, registro):
 
 def _valores_documento(documento):
     titular = documento.get('titular') or {}
-    return {'rut': titular.get('rut'), 'nombre': titular.get('nombre'),
-            'clase': documento.get('clase'), 'vencimiento': documento.get('vencimiento')}
+    clases = clases_de_licencia(documento)
+    return {'rut': titular.get('rut'), 'nombre': titular.get('nombre'), 'clases': clases,
+            'clase': texto_clases_licencia(clases) if clases else documento.get('clase'),
+            'vencimiento': documento.get('vencimiento')}
+
+
+def _clases_ocr(campos_ocr):
+    """Clases que leyó el OCR: la única leída, o todas las reconocidas cuando leyó varias (pendientes de confirmar)."""
+    campo = campos_ocr.get('clase') or {}
+    if campo.get('valor'):
+        return [campo['valor']]
+    return list(campo.get('valores') or [])
 
 
 def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, documento_id, sha256,
@@ -657,8 +717,10 @@ def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, d
     rut_validado = validar_rut_chileno(str(rut or ''))
     if rut_validado.estado != EstadoValidacion.VALIDO:
         raise ValueError('El RUT de la licencia no es válido')
-    nuevos = {'rut': rut_validado.valor, 'nombre': _nombre_licencia_valido(nombre),
-              'clase': _clase_licencia_valida(clase), 'vencimiento': _fecha_vencimiento_valida(vencimiento)}
+    # `clase`: una clase («A2»), una lista (["A2", "A5"]) o un texto separado por comas («A2, A5»).
+    clases = normalizar_clases_licencia(clase)
+    nuevos = {'rut': rut_validado.valor, 'nombre': _nombre_licencia_valido(nombre), 'clases': clases,
+              'clase': texto_clases_licencia(clases), 'vencimiento': _fecha_vencimiento_valida(vencimiento)}
     with sesion(raiz, reutilizar=True) as comprobar:
         ruta = ruta_almacen(raiz, empresa)
         with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
@@ -705,13 +767,13 @@ def confirmar_licencia_chofer(raiz, *, empresa, ficha_id, referencia_catalogo, d
                 'estado_revision_anterior': documento.get('estado_revision'),
                 'extraccion_version': extraccion.get('version'),
                 'distintos_de_ocr': sorted(c for c in _CAMPOS_CONFIRMACION
-                                           if (campos_ocr.get(c) or {}).get('valor') != nuevos[c]),
+                                           if (_clases_ocr(campos_ocr) if c == 'clases' else (campos_ocr.get(c) or {}).get('valor')) != nuevos[c]),
             }
             if documento.get('confirmacion_humana'):
                 documento.setdefault('confirmaciones_anteriores', []).append(documento['confirmacion_humana'])
             documento['confirmacion_humana'] = confirmacion
             documento['titular'] = {'rut': nuevos['rut'], 'nombre': nuevos['nombre']}
-            documento['clase'], documento['vencimiento'] = nuevos['clase'], nuevos['vencimiento']
+            documento['clase'], documento['clases'], documento['vencimiento'] = nuevos['clase'], nuevos['clases'], nuevos['vencimiento']
             documento['estado_revision'] = ESTADO_CONFIRMADA
             accion = ('LICENCIA_CORREGIDA' if confirmacion['estado_revision_anterior'] == ESTADO_CONFIRMADA
                       else 'LICENCIA_CONFIRMADA')

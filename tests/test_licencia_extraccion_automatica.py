@@ -266,7 +266,7 @@ def test_una_persona_corrige_lo_registrado_y_queda_la_diferencia(tmp_path):
     doc = _doc(raiz, resultado['documento_id'])
     assert doc['estado_revision'] == 'CONFIRMADA' and doc['clase'] == 'A5'
     assert doc['confirmacion_humana']['estado_revision_anterior'] == ESTADO_REGISTRO_AUTOMATICO
-    assert doc['confirmacion_humana']['distintos_de_ocr'] == ['clase']
+    assert doc['confirmacion_humana']['distintos_de_ocr'] == ['clases']  # se compara la lista de clases
     assert doc['registro_automatico']['campos'] == ['clase', 'nombre', 'rut', 'vencimiento']  # la lectura queda
 
 

@@ -47,10 +47,14 @@ if __name__ == '__main__':
     parser.add_argument('--referencia-catalogo', required=True)
     parser.add_argument('--vencimiento')
     parser.add_argument('--clase')
+    parser.add_argument('--clases', help='Varias clases individuales separadas por coma, p. ej. A2,A5')
     parser.add_argument('--archivo', required=True)
     parser.add_argument('--automatica', action='store_true',
                         help='Conserva el original y registra solo los datos leídos con confianza')
     args = parser.parse_args()
+    if args.clase and args.clases:
+        parser.error('Use --clase o --clases, no ambos')
+    args.clase = args.clases or args.clase
     if args.automatica:
         if args.vencimiento or args.clase:
             parser.error('--automatica no admite --vencimiento ni --clase')

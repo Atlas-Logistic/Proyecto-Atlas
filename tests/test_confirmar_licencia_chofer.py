@@ -106,14 +106,15 @@ def test_confirma_el_mismo_documento_de_dos_caras_y_conserva_ocr_y_fotos(tmp_pat
     # Auditoría: autor, fecha, anteriores, nuevos y diferencias con la lectura OCR.
     confirmacion = confirmado['confirmacion_humana']
     assert confirmacion['autor'] == 'Javier' and confirmacion['actor'] == 'DESKTOP' and confirmacion['fecha']
-    assert confirmacion['anteriores'] == dict.fromkeys(('rut', 'nombre', 'clase', 'vencimiento'))
+    # Clases como lista (`clases`) además del texto `clase`; sin clases previas, lista vacía.
+    assert confirmacion['anteriores'] == {**dict.fromkeys(('rut', 'nombre', 'clase', 'vencimiento')), 'clases': []}
     assert confirmacion['valores'] == {'rut': '12.345.678-5', 'nombre': 'ANA MARIA TEST SOTO',
-                                       'clase': 'A4', 'vencimiento': '2028-05-07'}
+                                       'clase': 'A4', 'clases': ['A4'], 'vencimiento': '2028-05-07'}
     assert confirmacion['estado_revision_anterior'] == 'PENDIENTE_EXTRACCION'
     assert confirmacion['distintos_de_ocr'] == ['nombre', 'vencimiento']
     assert ficha['historial'][-1] == {'accion': 'LICENCIA_CONFIRMADA', 'actor': 'DESKTOP', 'autor': 'Javier',
                                       'fecha': confirmacion['fecha'], 'documento_id': doc['documento_id'],
-                                      'campos': ['clase', 'nombre', 'rut', 'vencimiento']}
+                                      'campos': ['clases', 'nombre', 'rut', 'vencimiento']}
     manifiesto = json.loads((Path(resultado['respaldo']) / 'manifest.json').read_text(encoding='utf-8'))
     assert manifiesto['operacion'] == 'LICENCIA_CONFIRMADA' and manifiesto['autor'] == 'Javier'
 
