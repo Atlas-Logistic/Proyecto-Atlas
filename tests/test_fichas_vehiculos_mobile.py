@@ -260,6 +260,30 @@ def _sincronizar(raiz, cloud):
                                                       raiz=raiz, timeout=1, puede_continuar=lambda: True)
 
 
+def test_pull_no_confirma_conflictos_y_conserva_reintento_identico(raiz):
+    from atlas_core.expediente_digital import resolver_documento_pendiente
+    from tests.test_expediente_digital_base import RELOJ
+    contenido = JPEG('original revisado')
+    recibido = _registrar(raiz, 'original', contenido=contenido)
+    doc = _vehiculo(raiz, 'CC5678')['documentos'][0]
+    resolver_documento_pendiente(raiz, empresa='MBT', referencia='CC5678', documento_id=recibido['documento_id'],
+        sha256=doc['sha256'], decision='RECHAZAR', motivo='Documento incorrecto', autor='Revisor',
+        confirmacion_humana=True, reloj=RELOJ)
+    ruta = ruta_almacen(raiz, 'MBT')
+    antes = ruta.read_bytes()
+    retry = CloudFalso([_doc_cloud('original', 'SOAP', SOLO, 'CC5678', contenido)])
+    _sincronizar(raiz, retry)
+    assert retry.confirmados == [('original', 'RECIBIDO_PENDIENTE_REVISION')]
+    cloud = CloudFalso([_doc_cloud('original', 'SOAP', SOLO, 'CC5678', JPEG('otro original')),
+                        _doc_cloud('nuevo', 'SOAP', SOLO, '', contenido)])
+    resumen = _sincronizar(raiz, cloud)
+    assert cloud.confirmados == []
+    assert [d['documento_id'] for d in resumen['sin_vincular']] == ['original', 'nuevo']
+    assert 'identificador de origen' in resumen['sin_vincular'][0]['motivo']
+    assert 'decisión humana' in resumen['sin_vincular'][1]['motivo']
+    assert ruta.read_bytes() == antes
+
+
 def test_pull_recibe_los_tres_tipos_y_licencias_con_su_resultado_propio(raiz):
     licencia = JPEG("licencia")
     cloud = CloudFalso([

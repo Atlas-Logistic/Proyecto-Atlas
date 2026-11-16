@@ -140,11 +140,19 @@ def registrar_documento_vehiculo_mobile(
             raise ValueError("La base de fichas debe inicializarse antes de recibir documentos de vehículo")
         patente_previa, previo = _existente(anterior, origen_documento_id)
         if previo is not None:
+            if previo.get("sha256") != original["sha256"]:
+                raise ValueError("El identificador de origen corresponde a otro original")
             if tipo == TIPO_SEGURO_CARGA and (previo.get("tipo") != tipo or
                     (previo.get("procedencia") or {}).get("chofer_id") != chofer_id):
                 raise ValueError("El identificador de seguro pertenece a otro remitente o tipo")
             return {"ok": True, "idempotente": True, "duplicado": False, "documento_id": previo["documento_id"],
                     "patente": patente_previa, "motivo": (previo.get("clasificacion") or {}).get("motivo", "")}
+        documentos = (d for grupo in [*anterior.get("vehiculos", []),
+                                      {"documentos": anterior.get(PENDIENTES, [])}]
+                      for d in grupo.get("documentos", []))
+        if any(d.get("sha256") == original["sha256"] and (d.get("revision_humana") or d.get("rechazo"))
+               for d in documentos):
+            raise ValueError("El original ya tiene una decisión humana; requiere revisión antes de otra recepción")
         clasificacion = _clasificar(chofer_id, patente_cloud, choferes, vehiculos) if _PATENTE.fullmatch(patente_cloud) \
             else {"patente": None, "motivo": "SIN_PATENTE_CLOUD", "candidatos": []}
         if tipo == TIPO_SEGURO_CARGA:

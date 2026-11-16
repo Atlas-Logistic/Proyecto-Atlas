@@ -104,17 +104,48 @@ def test_reingreso_mismos_bytes_no_elude_rechazo(raiz):
     resolver_documento_pendiente(raiz, empresa='MBT', referencia=TRACTO, documento_id=documento_id,
         sha256=doc['sha256'], decision='RECHAZAR', motivo='Original incorrecto', autor='Revisor',
         confirmacion_humana=True, reloj=RELOJ)
-    nuevo_id, _ = _recibir(raiz, 'otro-origen', patente='', contenido=contenido)
-    with pytest.raises(ErrorExpedienteDigital, match='decisión humana'):
-        revisar_documento_pendiente(raiz, empresa='MBT', referencia='SIN_CLASIFICAR',
-                                    documento_id=nuevo_id, propuesta={}, reloj=RELOJ)
+    with pytest.raises(ValueError, match='decisión humana'):
+        _recibir(raiz, 'otro-origen', patente='', contenido=contenido)
     assert _ubicar(raiz, documento_id)[1]['rechazo']['motivo'] == 'Original incorrecto'
 
 
-def test_mismo_origen_con_otros_bytes_conserva_idempotencia_existente(raiz):
-    anterior, _ = _recibir(raiz, 'mismo-origen')
-    repetido, _ = _recibir(raiz, 'mismo-origen', contenido=b'\xff\xd8\xff\xe0otros')
-    assert repetido == anterior
+def test_mismo_origen_con_otros_bytes_rechaza_conflicto(raiz):
+    _recibir(raiz, 'mismo-origen')
+    with pytest.raises(ValueError, match='identificador de origen'):
+        _recibir(raiz, 'mismo-origen', contenido=b'\xff\xd8\xff\xe0otros')
+
+
+@pytest.mark.parametrize('decision,patente', [('CONFIRMAR', TRACTO), ('RECHAZAR', ''), ('RECHAZAR', TRACTO)])
+def test_reingreso_decision_humana_y_reintento_mismo_id(raiz, decision, patente):
+    from atlas_core.fichas_choferes import ruta_almacen
+    documento_id, contenido = _recibir(raiz, 'original', patente=patente)
+    referencia = patente or 'SIN_CLASIFICAR'
+    _, doc = _ubicar(raiz, documento_id)
+    propuesta = {'tipo': 'SOAP', 'patente': TRACTO, 'fecha_vencimiento': '2027-09-30'}
+    vista = revisar_documento_pendiente(raiz, empresa='MBT', referencia=referencia,
+                                       documento_id=documento_id, propuesta=propuesta, reloj=RELOJ)
+    resolver_documento_pendiente(raiz, empresa='MBT', referencia=referencia, documento_id=documento_id,
+        sha256=doc['sha256'], decision=decision, autor='Revisor', motivo='Original incorrecto',
+        confirmacion_humana=True, propuesta=propuesta, clave_consecuencia=vista['consecuencia']['clave'], reloj=RELOJ)
+    carpeta = ruta_almacen(raiz, 'MBT').parent
+    antes = {p.relative_to(carpeta): p.read_bytes() for p in carpeta.rglob('*') if p.is_file()}
+    repetido, _ = _recibir(raiz, 'original', patente=patente, contenido=contenido)
+    assert repetido == documento_id
+    for nueva_patente, nuevo_tipo in [('', 'SOAP'), (TRACTO, 'PERMISO_CIRCULACION')]:
+        with pytest.raises(ValueError, match='decisión humana'):
+            _recibir(raiz, 'otro-origen', patente=nueva_patente, tipo=nuevo_tipo, contenido=contenido)
+    assert {p.relative_to(carpeta): p.read_bytes() for p in carpeta.rglob('*') if p.is_file()} == antes
+
+
+def test_origen_adicional_con_sha_diferente_no_es_idempotente(raiz):
+    from atlas_core.fichas_choferes import ruta_almacen
+    _, contenido = _recibir(raiz, 'original')
+    _recibir(raiz, 'adicional', contenido=contenido)
+    ruta = ruta_almacen(raiz, 'MBT')
+    antes = ruta.read_bytes()
+    with pytest.raises(ValueError, match='identificador de origen'):
+        _recibir(raiz, 'adicional', contenido=b'\xff\xd8\xff\xe0otros')
+    assert ruta.read_bytes() == antes
 
 
 
@@ -186,6 +217,7 @@ def test_recurso_ocupado_aborta_sin_escribir_y_libera_fichas(raiz, recurso):
 
 def test_confirmacion_previa_bloquea_revision_de_copia_reingresada(raiz):
     documento_id, contenido = _recibir(raiz, 'confirmado-original')
+    nuevo, _ = _recibir(raiz, 'confirmado-copia', patente='', contenido=contenido)
     _, doc = _ubicar(raiz, documento_id)
     propuesta = {'tipo': 'SOAP', 'patente': TRACTO, 'fecha_vencimiento': '2027-09-30'}
     vista = revisar_documento_pendiente(raiz, empresa='MBT', referencia=TRACTO, documento_id=documento_id,
@@ -193,7 +225,6 @@ def test_confirmacion_previa_bloquea_revision_de_copia_reingresada(raiz):
     resolver_documento_pendiente(raiz, empresa='MBT', referencia=TRACTO, documento_id=documento_id,
         sha256=doc['sha256'], decision='CONFIRMAR', autor='Revisor', confirmacion_humana=True,
         propuesta=propuesta, clave_consecuencia=vista['consecuencia']['clave'], reloj=RELOJ)
-    nuevo, _ = _recibir(raiz, 'confirmado-copia', patente='', contenido=contenido)
     with pytest.raises(ErrorExpedienteDigital, match='decisión humana'):
         revisar_documento_pendiente(raiz, empresa='MBT', referencia='SIN_CLASIFICAR',
                                     documento_id=nuevo, propuesta={}, reloj=RELOJ)
