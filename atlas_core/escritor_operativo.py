@@ -19,6 +19,12 @@ from typing import Callable
 
 LEASE_HEARTBEAT_SEGUNDOS = 30.0
 MARGEN_RELEVO_SEGUNDOS = 30.0
+
+# Motivos de `adquirir` fallido sin titular ajeno (sólo diagnóstico: el
+# resultado sigue siendo no adquirido y `ocupado` sigue en False).
+MOTIVO_CLOUD_NO_DISPONIBLE = "CLOUD_NO_DISPONIBLE"
+MOTIVO_RESPUESTA_CLOUD_INVALIDA = "RESPUESTA_CLOUD_INVALIDA"
+MOTIVO_LEASE_PERDIDO_EN_RELEVO = "LEASE_PERDIDO_EN_RELEVO"
 URL_CLOUD_POR_DEFECTO = "https://atlas-mobile-cloud-receiver.1986jaar.workers.dev"
 
 
@@ -63,6 +69,15 @@ def _json(base_url: str, ruta: str, token: str, *, method: str = "GET", body: di
         raise ErrorEscritorOperativo(f"Cloud escritor {method} {ruta}: {error}") from error
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
         raise ErrorEscritorOperativo(f"Cloud escritor {method} {ruta}: {error}") from error
+
+
+def _motivo_error_cloud(error: ErrorEscritorOperativo) -> str:
+    """Cloud respondió algo inutilizable (HTTP distinto de 409, JSON roto) o
+    no se pudo hablar con él (red, DNS, tiempo agotado)."""
+    causa = error.__cause__
+    if isinstance(causa, (urllib.error.HTTPError, json.JSONDecodeError)):
+        return MOTIVO_RESPUESTA_CLOUD_INVALIDA
+    return MOTIVO_CLOUD_NO_DISPONIBLE
 
 
 def ruta_identidad_escritor() -> Path:
@@ -237,10 +252,20 @@ class LeaseEscritorOperativo:
             self.ocupado = codigo == "ESCRITOR_OCUPADO"
             self.motivo = {"ESCRITOR_PRIORIDAD": "PRIORIDAD_OTRO_EQUIPO"}.get(codigo, codigo)
             return False
-        except ErrorEscritorOperativo:
+        except ErrorEscritorOperativo as error:
+            # Sin lease igual que antes; sólo se deja constancia del porqué.
+            # El texto de `_json` nunca incluye el token (método, ruta y causa).
+            self.motivo = _motivo_error_cloud(error)
+            logging.getLogger(__name__).warning("Escritor Cloud no adquirido (%s): %s", self.motivo, error)
             return False
         token = str(respuesta.get("lease_token") or "")
         if respuesta.get("estado") != "ADQUIRIDO" or not token:
+            # Sólo el estado: la respuesta podría traer un lease_token.
+            self.motivo = MOTIVO_RESPUESTA_CLOUD_INVALIDA
+            logging.getLogger(__name__).warning(
+                "Escritor Cloud no adquirido (%s): estado=%r, lease_token %s",
+                self.motivo, respuesta.get("estado"), "presente" if token else "ausente",
+            )
             return False
         self.lease_token = token
         self.epoca = int(respuesta.get("epoca") or 0)
@@ -259,6 +284,8 @@ class LeaseEscritorOperativo:
         if epoca_previa > 0 and self.margen_relevo_segundos > 0 and not self._relevo_confirmado(previo, epoca_previa):
             self._dormir(self.margen_relevo_segundos)
         if not self.vigente:
+            self.motivo = MOTIVO_LEASE_PERDIDO_EN_RELEVO
+            logging.getLogger(__name__).warning("Escritor Cloud no adquirido (%s): época %s", self.motivo, self.epoca)
             self.cerrar()
             return False
         if self.custodia is not None:
