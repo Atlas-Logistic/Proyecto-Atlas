@@ -26,7 +26,8 @@ def _buscar(datos, documento_id):
         raise exp.ErrorExpedienteDigital('El documento no existe en esta empresa')
     patente, documento = hallados[0]
     if any(d is not documento and d.get('sha256') == documento.get('sha256')
-           and (d.get('revision_humana') or d.get('rechazo')) for _, d in _ubicaciones(datos)):
+           and (d.get('revision_humana') or d.get('rechazo') or d.get('revision_manual_obligatoria'))
+           for _, d in _ubicaciones(datos)):
         raise exp.ErrorExpedienteDigital('El original ya tiene una decisión humana en otra ficha')
     if (documento.get('estado_revision') != 'PENDIENTE_EXTRACCION' or documento.get('revision_humana')
             or documento.get('rechazo') or documento.get('reemplazado_por') or documento.get('transicion_programada')):

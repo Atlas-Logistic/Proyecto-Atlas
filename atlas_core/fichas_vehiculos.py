@@ -150,7 +150,9 @@ def registrar_documento_vehiculo_mobile(
         documentos = (d for grupo in [*anterior.get("vehiculos", []),
                                       {"documentos": anterior.get(PENDIENTES, [])}]
                       for d in grupo.get("documentos", []))
-        if any(d.get("sha256") == original["sha256"] and (d.get("revision_humana") or d.get("rechazo"))
+        if any(d.get("sha256") == original["sha256"] and
+               (d.get("revision_humana") or d.get("rechazo") or
+                any(e.get("accion") == "DOCUMENTO_DESCARTADO" for e in d.get("historial", [])))
                for d in documentos):
             raise ValueError("El original ya tiene una decisión humana; requiere revisión antes de otra recepción")
         clasificacion = _clasificar(chofer_id, patente_cloud, choferes, vehiculos) if _PATENTE.fullmatch(patente_cloud) \

@@ -299,6 +299,7 @@ def _confirmado_por_persona(documento: dict) -> bool:
 def _por_extraer(documento: dict) -> bool:
     from atlas_core.lectura_documento_vehiculo import TIPO_PENDIENTE
     if documento.get("tipo") not in (*TIPOS_VEHICULO, TIPO_PENDIENTE) or documento.get("reemplazado_por") \
+            or documento.get("revision_manual_obligatoria") \
             or _confirmado_por_persona(documento) or _vencimiento_automatico(documento):
         return False
     previa = documento.get("extraccion_automatica")
@@ -451,6 +452,7 @@ def _activable(patente: str | None, documento: dict) -> bool:
     """Lectura inequívoca, con evidencia y del mismo original, de un documento
     asociado a un vehículo, aún sin vencimiento ni intervención humana."""
     if not patente or documento.get("tipo") not in TIPOS_VEHICULO or documento.get("reemplazado_por") \
+            or documento.get("revision_manual_obligatoria") \
             or documento.get("estado_revision") != ESTADO_PENDIENTE_EXTRACCION or documento.get("vencimiento") \
             or _confirmado_por_persona(documento):
         return False
