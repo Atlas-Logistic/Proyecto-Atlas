@@ -438,6 +438,12 @@ def _coincide_con_otro_formato(calle: str, texto: str, comuna_confirmada: str) -
     # Ninguna otra numeración en el texto: nunca se elige entre dos números.
     if sorted(set(numeros_texto)) != sorted(numeros):
         return False
+    # Caso real 484838: el espacio omitido puede estar también entre la
+    # calle y su numeración ("SANTA ISABEL585"). Separarlo no cambia ningún
+    # carácter ni la numeración (ya exigida igual arriba); sin vía, la
+    # tolerancia por token exigía además una comuna que no todo llamador
+    # aporta (supresión de DESTINO_SIN_CONFIRMAR).
+    texto = re.sub(r"(?<=[A-Z])(?=\d)", " ", texto)
     return _contiene_direccion(calle, texto) or _coincide_con_palabras_pegadas(calle, texto)
 
 

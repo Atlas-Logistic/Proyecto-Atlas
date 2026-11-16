@@ -215,7 +215,9 @@ def test_pasada_programada_omite_con_b1_en_curso_o_escritor_ocupado(tmp_path, mo
 
 def test_geografia_declara_la_convergencia_de_destinos():
     from atlas_core.capacidades_reevaluacion import REGISTRO_CAPACIDADES
-    assert REGISTRO_CAPACIDADES["GEOGRAFIA"].version == 5
+    # v6: numeración pegada a la calle en la consulta y reintento de guías
+    # con tarjeta DESTINO_NO_RESUELTO (caso real 484838).
+    assert REGISTRO_CAPACIDADES["GEOGRAFIA"].version == 6
 
 
 # ------------------------------------------------------------ mantenimiento

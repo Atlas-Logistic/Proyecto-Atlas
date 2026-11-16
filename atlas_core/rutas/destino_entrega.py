@@ -1269,6 +1269,28 @@ def _texto_geocodificable_sin_etiqueta_ciudad_santiago(texto: str) -> str:
     return " ".join(_PATRON_TOKEN_SANTIAGO.sub(" ", texto).split())
 
 
+# Bloque RESOLUCIÓN R19 -- caso real 484838 (viaje 0000370724): el OCR leyó
+# "SANTA ISABEL585 SANTIAGO LAMPA" (sin el espacio entre calle y número)
+# y el geocodificador, sin poder separar la numeración, sólo devolvió la
+# comuna ("Lampa") -> GEOCODIFICACION_DEMASIADO_GENERICA y dos tarjetas
+# DESTINO, mientras las guías hermanas con "SANTA ISABEL 585" resuelven a
+# nivel de calle. El catálogo ya tolera ese formato
+# (`catalogo_destinos.direccion_confirmada_coincide`); faltaba en la
+# consulta. Sólo una palabra de al menos tres letras seguida de 1-6
+# dígitos al final del token ("ISABEL585" -> "ISABEL 585"): siglas cortas
+# ("KM20", "CL14"), una letra suelta ("N585") o números con letras en
+# medio ("58S", OCR) nunca se tocan. Igual que R17/R18, sólo cambia la
+# consulta: `despachar_a_crudo` se conserva tal cual y la identidad la
+# siguen decidiendo las mismas reglas de candidatos y catálogo.
+_PATRON_CALLE_CON_NUMERACION_PEGADA = re.compile(
+    r"(?<![A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ])([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,})(\d{1,6})(?![A-Za-z0-9])"
+)
+
+
+def _texto_geocodificable_con_numeracion_separada(texto: str) -> str:
+    return _PATRON_CALLE_CON_NUMERACION_PEGADA.sub(r"\1 \2", texto)
+
+
 def resolver_destino_entrega(
     despachar_a_crudo: str | None,
     proveedor_geocodificacion: ProveedorRutas,
@@ -1369,6 +1391,9 @@ def resolver_destino_entrega(
     # resolvería (normalización local primero, nunca ORS para corregir
     # un typo que el catálogo ya resuelve -- Fase N).
     texto_geocodificable = normalizar_direccion_con_comunas(texto)
+    # Bloque RESOLUCIÓN R19 -- ver `_texto_geocodificable_con_numeracion_
+    # separada`: "ISABEL585" se consulta como "ISABEL 585".
+    texto_geocodificable = _texto_geocodificable_con_numeracion_separada(texto_geocodificable)
     # Bloque RESOLUCIÓN R17 -- ver docstring de la función: quita SÓLO
     # para la consulta un token "SANTIAGO" redundante cuando el texto ya
     # trae otra comuna real distinta.

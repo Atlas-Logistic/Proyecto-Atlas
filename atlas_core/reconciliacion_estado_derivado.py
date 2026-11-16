@@ -495,6 +495,32 @@ def _pendientes_ruta(dataset: Path, decisiones: Path) -> list[dict[str, str]]:
     ]
 
 
+def _guias_destino_no_resuelto_reintentables(dataset: Path, decisiones: Path) -> list[str]:
+    """Guías con tarjeta DESTINO_NO_RESUELTO pendiente que cumplen los
+    mismos requisitos de ruta que `_pendientes_ruta` (salvo la exclusión
+    por tarjeta humana): indicador OK, sin ruta calculada, con planta y
+    con DESPACHAR A."""
+    try:
+        artefacto = json.loads(decisiones.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    con_tarjeta = {
+        str((d.get("documento") or {}).get("numero_guia", "")).strip()
+        for d in (artefacto.get("decisiones") or [])
+        if isinstance(d, dict) and d.get("estado") == "PENDIENTE" and d.get("tipo") == "DESTINO_NO_RESUELTO"
+    }
+    if not con_tarjeta:
+        return []
+    return [
+        str(f.get("numero_guia", "")).strip() for f in _leer_filas(dataset)
+        if str(f.get("numero_guia", "")).strip() in con_tarjeta
+        and str(f.get("indicador_revision", "")).strip() == "OK"
+        and str(f.get("estado_ruta", "")).strip() != "RUTA_CALCULADA"
+        and str(f.get("planta_origen_id", "")).strip()
+        and str(f.get("despachar_a_crudo", "")).strip()
+    ]
+
+
 CAUSA_SIN_PREGUNTA_HUMANA_PUBLICABLE = "ACCION_HUMANA_SIN_PREGUNTA_PUBLICABLE"
 
 
@@ -1082,6 +1108,20 @@ def reconciliar_estado_derivado(
                 pass
         if capacidad_del_dominio_avanzo or ((intentos < maximo and vencido) and en_scope):
             por_reintentar.append(str(registro["numero_guia"]))
+    # Caso real 484838: GEOGRAFIA/DESTINO declaran DESTINO_NO_RESUELTO entre
+    # sus `tipos_decision`, pero una guía con esa tarjeta pendiente sale de
+    # `_pendientes_ruta` (vía humana) y la mejora del dominio nunca la
+    # alcanzaba. Al avanzar uno de esos dominios se reintenta su ruta UNA
+    # vez (idempotente: re-estampadas las versiones, ya no avanza), con
+    # los mismos requisitos de la cola técnica; nunca si un humano ya
+    # confirmó la dirección o cerró la decisión. Si no resuelve, la
+    # tarjeta queda tal cual.
+    from atlas_core.capacidades_reevaluacion import dominios_de_decision as _dominios_de_decision
+    for guia in _guias_destino_no_resuelto_reintentables(dataset, decisiones):
+        if (_dominios_avanzados & _dominios_de_decision("DESTINO_NO_RESUELTO")
+                and guia not in guias_direccion_confirmada and guia not in guias_destino_terminado
+                and guia not in por_reintentar):
+            por_reintentar.append(guia)
     # Bloque R2.5 -- PROYECCIÓN CANÓNICA -> OPERACIÓN: caso real 464264
     # (decisión humana aplicada; "Revisión de Atlas" ya reflejaba 0
     # decisiones, pero `viajes.csv` seguía siendo el snapshot generado

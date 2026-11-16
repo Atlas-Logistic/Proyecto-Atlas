@@ -129,7 +129,7 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
         motivos_documentales=frozenset({"DESTINO_FRAGMENTO_TRUNCADO", "DESTINO_CONTAMINADO_POR_OTRA_SECCION"}),
     ),
     DOMINIO_GEOGRAFIA: Capacidad(
-        dominio=DOMINIO_GEOGRAFIA, version=5,
+        dominio=DOMINIO_GEOGRAFIA, version=6,
         descripcion=(
             "Geocodificación, resolución de calles/comunas, bases locales. "
             "v2: base geográfica local propia (GEOGRAFÍA 2C -- backend SQLite "
@@ -157,7 +157,11 @@ REGISTRO_CAPACIDADES: dict[str, Capacidad] = {
             "La Estera 525 'SANTIAGO' -> Lampa, caso 483106). Medido en copia: "
             "reactiva una vez sólo los pendientes de este dominio, 10 por "
             "pasada del mantenimiento; igual costo en PULL y en la "
-            "reconciliación global."
+            "reconciliación global. "
+            "v6: numeración pegada a la calle ('SANTA ISABEL585') se separa "
+            "en la consulta al geocodificador (R19, caso 484838); el avance "
+            "reintenta también, una vez, las guías con tarjeta "
+            "DESTINO_NO_RESUELTO pendiente."
         ),
         tipos_decision=frozenset({"DESTINO_NO_RESUELTO"}),
         motivos_tecnicos=frozenset({
