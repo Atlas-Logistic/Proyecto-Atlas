@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from atlas_core.almacenamiento_portable import bloqueo_sesion
-from atlas_core.expediente_digital import ErrorExpedienteDigital, _actor, _autor, _instante
+from atlas_core.expediente_digital import ErrorExpedienteDigital, _actor, _autoria, _auditoria_autoria, _instante
 from atlas_core.extraccion_vencimientos_vehiculos import _escribir
 from atlas_core.fichas_choferes import leer_almacen, ruta_almacen
 from atlas_core.fichas_vehiculos import PENDIENTES
@@ -21,13 +21,15 @@ MOTIVOS = frozenset({'DUPLICADO', 'DOCUMENTO_INCORRECTO', 'NO_CORRESPONDE', 'OTR
 
 
 def decidir(raiz, *, empresa, documento_id, sha256, decision, autor, actor, confirmacion_humana,
-            comprobar, motivo='', descarte_id='', reloj=lambda: datetime.now(timezone.utc)):
+            comprobar, motivo='', descarte_id='', revisor_no_declarado=False, reloj=lambda: datetime.now(timezone.utc)):
     """DESCARTAR o REVERTIR un descarte concreto; nunca mueve ni borra el original.
 
     REVERTIR exige el descarte_id vigente, y deja revisión manual obligatoria.
     Un consumidor productivo debe invocarlo dentro de su sesión de escritor.
     """
-    actor, autor = _actor(actor), _autor(autor)
+    actor = _actor(actor)
+    autoria = _autoria(autor, revisor_no_declarado, actor)
+    autor = autoria['autor']
     if confirmacion_humana is not True or decision not in ('DESCARTAR', 'REVERTIR'):
         raise ErrorExpedienteDigital('Se requiere una decisión humana explícita')
     if not callable(comprobar):
@@ -69,11 +71,13 @@ def decidir(raiz, *, empresa, documento_id, sha256, decision, autor, actor, conf
         evento = {'accion': 'DOCUMENTO_DESCARTADO' if decision == 'DESCARTAR' else 'DOCUMENTO_DESCARTE_REVERTIDO',
                   'decision': decision, 'descarte_id': identificador, 'documento_id': documento_id,
                   'sha256': sha256, 'autor': autor, 'actor': actor, 'fecha': instante,
-                  'motivo': motivo if decision == 'DESCARTAR' else actual_descarte['motivo']}
+                  'motivo': motivo if decision == 'DESCARTAR' else actual_descarte['motivo'],
+                  **_auditoria_autoria(autoria)}
         doc.setdefault('historial', []).append(evento)
         if decision == 'DESCARTAR':
             doc['descarte'] = {'id': identificador, 'motivo': motivo, 'autor': autor, 'actor': actor,
-                               'en': instante, 'sha256': sha256, 'decision': decision}
+                               'en': instante, 'sha256': sha256, 'decision': decision,
+                               **_auditoria_autoria(autoria)}
             doc['rechazo'] = copy.deepcopy(doc['descarte'])
             doc['revision_humana'] = copy.deepcopy(doc['descarte'])
             doc['estado_revision'] = 'RECHAZADO_EN_REVISION'

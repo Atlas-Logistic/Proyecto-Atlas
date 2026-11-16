@@ -16,7 +16,7 @@ if __name__ == '__main__':
     parser.add_argument('--referencia', required=True)
     parser.add_argument('--documento-id', required=True)
     parser.add_argument('--sha256', required=True)
-    parser.add_argument('--decision', required=True, choices=('CONFIRMAR', 'RECHAZAR'))
+    parser.add_argument('--decision', required=True, choices=('CONFIRMAR', 'RECHAZAR', 'DESCARTAR'))
     # Con nombre (--autor) o, desde Desktop, explícitamente sin nombre (--revisor-no-declarado); nunca ambos.
     parser.add_argument('--autor', default='')
     parser.add_argument('--revisor-no-declarado', action='store_true',
@@ -35,6 +35,21 @@ if __name__ == '__main__':
         raise ErrorExpedienteDigital('propuesta de revisión ilegible') from error
     if not isinstance(propuesta, dict):
         raise ErrorExpedienteDigital('propuesta de revisión ilegible')
+    if args.decision == 'DESCARTAR':
+        from pathlib import Path
+        from atlas_core.desktop_operacion import _sesion_actual
+        from atlas_core.descarte_documento_mobile import decidir
+        sesion = _sesion_actual.get()
+        if not sesion or Path(args.raiz_atlas).resolve() != sesion[0]:
+            raise PermissionError('Se requiere la sesión de escritura de Desktop')
+        if args.referencia != 'SIN_CLASIFICAR' or propuesta:
+            raise ErrorExpedienteDigital('Sólo se descartan documentos sin clasificar')
+        documento = decidir(args.raiz_atlas, empresa=empresa_del_proceso(), documento_id=args.documento_id,
+            sha256=args.sha256, decision='DESCARTAR', autor=args.autor, actor='DESKTOP',
+            confirmacion_humana=args.confirmo_revision_humana, comprobar=sesion[1], motivo=args.motivo,
+            revisor_no_declarado=args.revisor_no_declarado)
+        print(json.dumps({'ok': True, 'estado': documento['estado']}, ensure_ascii=True))
+        raise SystemExit(0)
     documento = resolver_documento_pendiente(
         args.raiz_atlas, empresa=empresa_del_proceso(), referencia=args.referencia, documento_id=args.documento_id,
         sha256=args.sha256, decision=args.decision, autor=args.autor, motivo=args.motivo, propuesta=propuesta,

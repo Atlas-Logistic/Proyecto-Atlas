@@ -37,7 +37,8 @@ def test_descarte_conserva_original_y_otros_documentos(raiz, motivo):
     assert final['rechazo']['motivo'] == motivo and final['descarte']['id'] == resultado['descarte_id']
     assert final['historial'][-1] == {'accion': 'DOCUMENTO_DESCARTADO', 'decision': 'DESCARTAR',
         'descarte_id': resultado['descarte_id'], 'documento_id': documento_id, 'sha256': doc['sha256'],
-        'autor': 'Revisor', 'actor': 'TEST', 'fecha': RELOJ().isoformat(), 'motivo': motivo}
+        'autor': 'Revisor', 'actor': 'TEST', 'fecha': RELOJ().isoformat(), 'motivo': motivo,
+        'persona': 'DECLARADA', 'canal': 'TEST'}
     assert original.read_bytes() == contenido and _ubicar(raiz, otro)[1] == anterior_otro
     assert not _por_identificar(final) and not _por_extraer(final) and not _activable(None, final)
 
@@ -152,3 +153,37 @@ def test_ciclos_documentales_omiten_descarte_y_reversion(raiz):
         assert identificacion['pendientes'] == extraccion['pendientes'] == 0
         assert not identificacion['errores'] and not extraccion['errores'] and not extraccion['activados']
         assert _archivos(raiz) == antes
+
+
+def test_desktop_usa_sesion_y_auditoria_sin_nombre(raiz, monkeypatch):
+    import json
+    from atlas_core import desktop_operacion
+    monkeypatch.setenv('ATLAS_ESCRITOR_ID', 'equipo-sintetico')
+    documento_id, contenido = _recibir(raiz, 'original', patente='')
+    _, doc = _ubicar(raiz, documento_id)
+    args = ['resolver_documento_expediente.py', '--raiz-atlas', str(raiz), '--referencia', 'SIN_CLASIFICAR',
+            '--documento-id', documento_id, '--sha256', doc['sha256'], '--decision', 'DESCARTAR',
+            '--revisor-no-declarado', '--motivo', 'DUPLICADO', '--confirmo-revision-humana']
+    antes = _archivos(raiz)
+    with pytest.raises(PermissionError, match='sesión'):
+        desktop_operacion.ejecutar_script(args)
+    assert _archivos(raiz) == antes
+    llamadas = []
+    token = desktop_operacion._sesion_actual.set((raiz.resolve(), lambda: llamadas.append(True)))
+    try:
+        salida = json.loads(desktop_operacion.ejecutar_script(args))
+    finally:
+        desktop_operacion._sesion_actual.reset(token)
+    assert salida['ok'] and len(llamadas) >= 2
+    _, final = _ubicar(raiz, documento_id)
+    auditoria = final['historial'][-1]
+    assert auditoria['autor'] is None and auditoria['persona'] == 'NO_DECLARADA'
+    assert auditoria['canal'] == 'DESKTOP' and auditoria['equipo']
+    assert (ruta_almacen(raiz, 'MBT').parent / final['archivo']).read_bytes() == contenido
+
+
+def test_persona_no_declarada_no_se_admite_fuera_de_desktop(raiz):
+    documento_id, _ = _recibir(raiz, 'original', patente='')
+    _, doc = _ubicar(raiz, documento_id)
+    with pytest.raises(ErrorExpedienteDigital, match='sólo el canal Desktop'):
+        _decision(raiz, documento_id, doc, autor='', revisor_no_declarado=True)
