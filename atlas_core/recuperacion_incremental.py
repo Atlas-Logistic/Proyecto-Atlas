@@ -53,6 +53,10 @@ MARCA_COPIA = "COPIA_PREVIA_RECUPERACION"
 VARIABLE_DESACTIVAR = "ATLAS_RECUPERACION_INCREMENTAL"
 LIMITE_OCR_POR_CICLO = 2
 LIMITE_TRAZA_POR_CICLO = 10
+# Ciclo PULL: a lo más una pasada cada 10 min por equipo y 30 s de
+# relecturas por pasada (la reconciliación focal posterior es aparte).
+INTERVALO_MINIMO_PULL_SEGUNDOS = 600
+PRESUPUESTO_PULL_SEGUNDOS = 30.0
 _AUSENTES = {"", "NO ENCONTRADO"}
 
 GRUPOS: dict[str, tuple[str, ...]] = {
@@ -675,8 +679,17 @@ def recuperar_campos_ausentes(
     limite_ocr: int = LIMITE_OCR_POR_CICLO, limite_traza: int = LIMITE_TRAZA_POR_CICLO,
     reconciliar: bool = True, lector: LectorDocumental | None = None,
     directorio_respaldo: Path | None = None, reloj: Callable[[], datetime] = _ahora,
+    presupuesto_segundos: float | None = None,
+    cronometro: Callable[[], float] | None = None,
 ) -> dict[str, object]:
-    """Una pasada con presupuesto. Devuelve el resumen del lote."""
+    """Una pasada con presupuesto. Devuelve el resumen del lote.
+
+    `presupuesto_segundos`: no se inicia una relectura nueva pasado ese
+    tiempo, ni una con OCR pasada la mitad (lo no leído queda para otra
+    pasada, sin consumir intento)."""
+    import time
+    cronometro = cronometro or time.monotonic
+    inicio_lecturas = cronometro()
     from atlas_core.almacenamiento_portable import bloqueo_sesion
     from atlas_core.capacidades_reevaluacion import versiones_actuales
     from atlas_core.catalogos import cargar_catalogo_json
@@ -737,10 +750,16 @@ def recuperar_campos_ausentes(
     propio = lector is None and bool(plan)
     if propio:
         lector = LectorDocumental(raiz, fabrica_ocr)
+    leidas = 0
     try:
         for fila, grupos, traza in plan:
+            if presupuesto_segundos is not None:
+                transcurrido = cronometro() - inicio_lecturas
+                if transcurrido >= presupuesto_segundos or (traza is None and transcurrido >= presupuesto_segundos / 2):
+                    continue
             if comprobar is not None:
                 comprobar()
+            leidas += 1
             archivo = str(fila["archivo"])
             ruta = resolver_ruta_evidencia(raiz, archivo).ruta
             referencia = sha_referencia(raiz, fila)
@@ -773,7 +792,7 @@ def recuperar_campos_ausentes(
         if propio and lector is not None:
             lector.cerrar()
 
-    resumen["intentados"] = len(plan)
+    resumen["intentados"] = leidas
     if not propuestas:
         return resumen
 
@@ -832,6 +851,37 @@ def recuperar_campos_ausentes(
             ).items() if k in {"reconciliado", "motivo", "version"}
         }
     return resumen
+
+
+def _marca_pull_local() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return Path(base) / "Atlas" / "cache" / "recuperacion_incremental_ultima_pasada.json"
+
+
+def ejecutar_en_ciclo_pull(
+    *, raiz_atlas: str | Path, comprobar: Callable[[], None], fabrica_ocr: Callable[[], object],
+    marca: Path | None = None, ahora: Callable[[], float] | None = None,
+    intervalo_segundos: float = INTERVALO_MINIMO_PULL_SEGUNDOS,
+    presupuesto_segundos: float = PRESUPUESTO_PULL_SEGUNDOS,
+) -> dict[str, object]:
+    """Pasada acotada para el ciclo PULL: como máximo una cada `intervalo`
+    por equipo (marca local, fuera de la custodia) y `presupuesto` de
+    relecturas. Devuelve {} si no corresponde ejecutar."""
+    import time
+    ahora = ahora or time.time
+    marca = marca or _marca_pull_local()
+    try:
+        ultima = float(json.loads(marca.read_text(encoding="utf-8")).get("en_epoch", 0))
+    except (OSError, ValueError, AttributeError):
+        ultima = 0.0
+    if ahora() - ultima < intervalo_segundos:
+        return {}
+    marca.parent.mkdir(parents=True, exist_ok=True)
+    marca.write_text(json.dumps({"en_epoch": ahora()}), encoding="utf-8")
+    return recuperar_campos_ausentes(
+        raiz_atlas=raiz_atlas, comprobar=comprobar, fabrica_ocr=fabrica_ocr,
+        presupuesto_segundos=presupuesto_segundos,
+    )
 
 
 def revertir_lote(*, raiz_atlas: str | Path, lote: str, reconciliar: bool = True) -> dict[str, object]:

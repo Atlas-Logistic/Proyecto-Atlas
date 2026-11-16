@@ -158,8 +158,8 @@ def ejecutar_pull_con_escritor(
                     if not vigente():
                         raise PermissionError("Lease PULL perdido: recuperación de campos detenida.")
                 try:
-                    from atlas_core.recuperacion_incremental import recuperar_campos_ausentes
-                    recuperacion = recuperar_campos_ausentes(
+                    from atlas_core.recuperacion_incremental import ejecutar_en_ciclo_pull
+                    recuperacion = ejecutar_en_ciclo_pull(
                         raiz_atlas=raiz, comprobar=comprobar_lease_recuperacion,
                         fabrica_ocr=lambda: crear_proveedor_ocr(proveedor_ocr_preferido),
                     )

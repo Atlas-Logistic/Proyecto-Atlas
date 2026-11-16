@@ -391,7 +391,7 @@ def _pull(tmp_path, envios, recuperar):
          patch("sincronizar_mobile_cloud.extraer_licencias_pendientes", return_value={}), \
          patch("sincronizar_mobile_cloud.identificar_patentes_documentos", return_value={}), \
          patch("sincronizar_mobile_cloud.extraer_vencimientos_vehiculos", return_value={}), \
-         patch("atlas_core.recuperacion_incremental.recuperar_campos_ausentes", side_effect=recuperar) as llamada:
+         patch("atlas_core.recuperacion_incremental.ejecutar_en_ciclo_pull", side_effect=recuperar) as llamada:
         return ejecutar_pull_con_escritor(**argumentos), llamada
 
 
@@ -441,3 +441,30 @@ def test_carro_ilegible_no_se_confunde_con_camion_sin_carro(raiz, tmp_path):
     for fila in (deformada, sin_etiqueta):
         assert ri.intentos_de_fila(filas[fila["archivo"]])["patente_rampla"]["resultado"] == ri.SIN_MEJORA
         assert filas[fila["archivo"]]["patente_rampla"] == "No encontrado"
+
+
+def test_presupuesto_de_tiempo_no_inicia_lecturas_ni_consume_intentos(raiz, tmp_path):
+    filas = [_fila(f"t{i}", f"48200{i}", patente_rampla="No encontrado") for i in range(4)]
+    ruta = _escribir(raiz, filas)
+    reloj = iter([0.0, 0.0, 10.0, 31.0, 31.0, 31.0])
+    lector = LectorFalso({f["archivo"]: (_datos(patente_rampla="JB8529"), LINEAS_BLOQUE) for f in filas})
+    # Sin traza todas son OCR: la segunda empieza a los 10 s (< 15 = mitad); la tercera ya no.
+    ri.recuperar_campos_ausentes(raiz_atlas=raiz, lector=lector, reconciliar=False, limite_ocr=50,
+                                 directorio_respaldo=tmp_path / "r", presupuesto_segundos=30,
+                                 cronometro=lambda: next(reloj))
+    assert len(lector.llamadas) == 2
+    sin_intento = [f for f in _leer(ruta).values() if "patente_rampla" not in ri.intentos_de_fila(f)]
+    assert len(sin_intento) == 2
+
+
+def test_ciclo_pull_respeta_intervalo_minimo(raiz, tmp_path, monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(ri, "recuperar_campos_ausentes", lambda **k: llamadas.append(k) or {"intentados": 1})
+    marca = tmp_path / "marca.json"
+    reloj = iter([1000.0, 1000.0, 1300.0, 1700.0, 1700.0])
+    argumentos = dict(raiz_atlas=raiz, comprobar=lambda: None, fabrica_ocr=lambda: None, marca=marca,
+                      ahora=lambda: next(reloj))
+    assert ri.ejecutar_en_ciclo_pull(**argumentos) == {"intentados": 1}
+    assert ri.ejecutar_en_ciclo_pull(**argumentos) == {}  # 300 s después: no
+    assert ri.ejecutar_en_ciclo_pull(**argumentos) == {"intentados": 1}  # 700 s: sí
+    assert len(llamadas) == 2 and llamadas[0]["presupuesto_segundos"] == ri.PRESUPUESTO_PULL_SEGUNDOS
