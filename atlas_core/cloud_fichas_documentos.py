@@ -100,6 +100,8 @@ def sincronizar_licencias_cloud(
                     raiz, empresa=empresa, origen_documento_id=documento_id, chofer_id=lease["chofer_id"],
                     tipo=lease["tipo"], patente_cloud=lease.get("patente", ""),
                     reemplaza_origen_id=lease.get("reemplaza_documento_id") or "",
+                    # Rol declarado en Mobile; un Cloud anterior no lo envía ('').
+                    rol_cloud=lease.get("rol") or "",
                     recibido_en=lease.get("recibido_en") or lease.get("enviado_en"), comprobar=comprobar,
                     actor=f"MOBILE:{lease['chofer_id']}", **originales,
                 )

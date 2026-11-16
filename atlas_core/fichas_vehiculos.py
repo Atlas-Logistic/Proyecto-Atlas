@@ -46,8 +46,19 @@ PENDIENTES = "documentos_vehiculo_pendientes"
 _PATENTE = re.compile(r"[A-Z0-9]{4,8}")
 
 
-def _clasificar(chofer_id: str, patente_cloud: str, choferes: dict, vehiculos) -> dict:
-    """{patente, motivo, candidatos}: patente sólo si es inequívoca."""
+ROLES_CLOUD = {"TRACTO": "tracto", "RAMPLA": "rampla"}
+# Lo único que Mobile envía para la rampla (el seguro de carga es del chofer).
+TIPOS_RAMPLA = ("PERMISO_CIRCULACION", "REVISION_TECNICA")
+
+
+def _clasificar(chofer_id: str, patente_cloud: str, choferes: dict, vehiculos, rol_cloud: str = "", tipo: str = "") -> dict:
+    """{patente, motivo, candidatos, rol}: patente sólo si es inequívoca.
+
+    `rol_cloud` es el rol que declaró el chofer en Mobile (TRACTO/RAMPLA) y
+    `patente_cloud` la que Cloud resolvió para ese rol. Con rol declarado, el
+    documento se asocia sólo si esa patente sigue siendo hoy la asignación
+    CONFIRMADA de ese rol. Sin rol (Mobile anterior) la regla es la de siempre:
+    con tracto y carro asignados el documento queda por clasificar."""
     registro = choferes.get(chofer_id)
     if not isinstance(registro, dict) or not registro.get("activo", True):
         return {"patente": None, "motivo": "CHOFER_NO_VIGENTE", "candidatos": []}
@@ -57,6 +68,17 @@ def _clasificar(chofer_id: str, patente_cloud: str, choferes: dict, vehiculos) -
     asignacion = asignaciones_de_chofer(rut, vehiculos)
     tracto, rampla = asignacion["tracto"], asignacion["rampla"]
     candidatos = sorted(set(tracto["candidatos"]) | set(rampla["candidatos"]))
+    if rol_cloud:
+        if rol_cloud not in ROLES_CLOUD:
+            return {"patente": None, "motivo": "ROL_DESCONOCIDO", "candidatos": candidatos}
+        if rol_cloud == "RAMPLA" and tipo not in TIPOS_RAMPLA:
+            return {"patente": None, "motivo": "TIPO_NO_CORRESPONDE_A_RAMPLA", "candidatos": candidatos}
+        propia = asignacion[ROLES_CLOUD[rol_cloud]]
+        if propia["estado"] != "CONFIRMADO":
+            return {"patente": None, "motivo": "SIN_ASIGNACION_CONFIRMADA", "candidatos": candidatos}
+        if propia["patente"] != patente_cloud:
+            return {"patente": None, "motivo": "ASIGNACION_DISTINTA", "candidatos": candidatos}
+        return {"patente": patente_cloud, "motivo": "", "candidatos": [patente_cloud], "rol": rol_cloud}
     if tracto["estado"] != "CONFIRMADO":
         return {"patente": None, "motivo": "SIN_ASIGNACION_CONFIRMADA", "candidatos": candidatos}
     if tracto["patente"] != patente_cloud:
@@ -64,7 +86,7 @@ def _clasificar(chofer_id: str, patente_cloud: str, choferes: dict, vehiculos) -
     if rampla["estado"] != "SIN_ASIGNACION":
         # Tracto y carro tienen cada uno su SOAP, revisión y permiso.
         return {"patente": None, "motivo": "TRACTO_Y_CARRO", "candidatos": candidatos}
-    return {"patente": patente_cloud, "motivo": "", "candidatos": [patente_cloud]}
+    return {"patente": patente_cloud, "motivo": "", "candidatos": [patente_cloud], "rol": "TRACTO"}
 
 
 def _validar_vehiculos(datos: dict) -> None:
@@ -104,12 +126,15 @@ def _existente(datos: dict, origen_documento_id: str):
 
 def registrar_documento_vehiculo_mobile(
     raiz, *, empresa, origen_documento_id, chofer_id, tipo, patente_cloud, recibido_en, contenido, mime_type,
-    sha256, comprobar, actor="MOBILE", reemplaza_origen_id="",
+    sha256, comprobar, actor="MOBILE", reemplaza_origen_id="", rol_cloud="",
 ):
     """Guarda el original y lo asocia al vehículo o lo deja por clasificar.
 
-    Devuelve {ok, idempotente, duplicado, documento_id, patente|None, motivo}.
-    Un catálogo ilegible lanza (el PULL no confirma y reintenta)."""
+    `rol_cloud`: rol declarado en Mobile ('' = Mobile anterior, sin rol); ver
+    `_clasificar`. Devuelve {ok, idempotente, duplicado, documento_id,
+    patente|None, motivo}. Un catálogo ilegible lanza (el PULL no confirma y
+    reintenta)."""
+    rol_cloud = str(rol_cloud or "").strip().upper()
     origen_documento_id = str(origen_documento_id or "")
     reemplaza_origen_id = str(reemplaza_origen_id or "")
     if reemplaza_origen_id and (tipo not in ("POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO")
@@ -122,6 +147,8 @@ def registrar_documento_vehiculo_mobile(
     if tipo not in (*TIPOS_VEHICULO, TIPO_SEGURO_CARGA):
         raise ValueError(f"Tipo de documento de vehículo no admitido: {tipo}")
     patente_cloud = normalizar_patente_vehiculo(str(patente_cloud or ""))
+    if tipo == TIPO_SEGURO_CARGA and rol_cloud:
+        raise ValueError("El seguro de carga debe recibirse sin rol de vehículo")
     if tipo == TIPO_SEGURO_CARGA and patente_cloud:
         raise ValueError("El seguro de carga debe recibirse sin patente asociada")
     original = _original_valido(contenido, mime_type, sha256)
@@ -155,7 +182,7 @@ def registrar_documento_vehiculo_mobile(
                 any(e.get("accion") == "DOCUMENTO_DESCARTADO" for e in d.get("historial", [])))
                for d in documentos):
             raise ValueError("El original ya tiene una decisión humana; requiere revisión antes de otra recepción")
-        clasificacion = _clasificar(chofer_id, patente_cloud, choferes, vehiculos) if _PATENTE.fullmatch(patente_cloud) \
+        clasificacion = _clasificar(chofer_id, patente_cloud, choferes, vehiculos, rol_cloud, tipo) if _PATENTE.fullmatch(patente_cloud) \
             else {"patente": None, "motivo": "SIN_PATENTE_CLOUD", "candidatos": []}
         if tipo == TIPO_SEGURO_CARGA:
             clasificacion = {"patente": None, "motivo": "SEGURO_SIN_VEHICULO_ACREDITADO", "candidatos": []}
@@ -175,6 +202,8 @@ def registrar_documento_vehiculo_mobile(
             destino_lista = propuesta.setdefault(PENDIENTES, [])
             carpeta_relativa = Path("archivos") / "vehiculos" / "sin_clasificar"
         procedencia = {"chofer_id": chofer_id, "patente_cloud": patente_cloud, "recibido_en": str(recibido_en or instante)}
+        if rol_cloud:
+            procedencia["rol_cloud"] = rol_cloud
         polizas = ("POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO")
         igual = next((d for d in destino_lista if (d.get("tipo") == tipo or (tipo in polizas and d.get("tipo") in polizas))
                       and d.get("sha256") == original["sha256"]
@@ -213,7 +242,7 @@ def registrar_documento_vehiculo_mobile(
             if reemplaza_origen_id:
                 documento["reemplaza_origen_id"] = reemplaza_origen_id
             if patente:
-                documento["asociacion"] = {"metodo": "ASIGNACION_CONFIRMADA", "rol": "TRACTO", "chofer_id": chofer_id,
+                documento["asociacion"] = {"metodo": "ASIGNACION_CONFIRMADA", "rol": clasificacion["rol"], "chofer_id": chofer_id,
                                            "fecha": instante}
             else:
                 documento["clasificacion"] = {"estado": ESTADO_PENDIENTE_CLASIFICACION, "motivo": clasificacion["motivo"],

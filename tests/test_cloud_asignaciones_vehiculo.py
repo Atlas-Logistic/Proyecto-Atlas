@@ -62,8 +62,11 @@ def test_envia_el_conjunto_completo_bajo_lease(raiz, monkeypatch):
     llamadas = []
     monkeypatch.setattr(modulo, "_json", lambda base, ruta, token, **kw: llamadas.append((ruta, kw)) or {"asignaciones": 1, "cambios": 1})
     r = modulo.publicar_asignaciones_cloud(base_url="https://cloud.local", token_motor="t", raiz=raiz, timeout=5, puede_continuar=lambda: True)
-    assert r == {"publicadas": 1, "cambios": 1}
-    assert llamadas == [("/api/motor/asignaciones/vehiculos", {"method": "POST", "body": {"asignaciones": [{"chofer_id": SALOMON, "patente": "TG8925"}]}, "timeout": 5})]
+    # Cloud anterior: no informa `ramplas` (las ignora).
+    assert r == {"publicadas": 1, "ramplas_publicadas": None, "cambios": 1}
+    assert llamadas == [("/api/motor/asignaciones/vehiculos", {"method": "POST", "body": {
+        "asignaciones": [{"chofer_id": SALOMON, "patente": "TG8925"}],
+        "ramplas": [{"chofer_id": SALOMON, "patente": "JF9575"}]}, "timeout": 5})]
     llamadas.clear()
     r = modulo.publicar_asignaciones_cloud(base_url="https://cloud.local", token_motor="t", raiz=raiz, timeout=5, puede_continuar=lambda: False)
     assert r["detenido_por_escritor"] is True and llamadas == []
