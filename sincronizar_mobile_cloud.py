@@ -149,6 +149,29 @@ def ejecutar_pull_con_escritor(
                 except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
                     logging.getLogger(__name__).warning("Asignaciones de vehículo no publicadas: %s", error)
                     resultado["asignaciones_vehiculo"] = {"error": str(error)}
+            # P0 recuperación incremental de campos ausentes: sólo en ciclos
+            # sin envíos nuevos (las guías nuevas tienen prioridad), con
+            # presupuesto fijo de relecturas y bajo el mismo lease/guardia.
+            if (raiz is not None and vigente() and not any(
+                    resultado.get(clave) for clave in ("encontrados", "confirmados", "procesados", "omitidos_por_bloqueo"))):
+                def comprobar_lease_recuperacion() -> None:
+                    if not vigente():
+                        raise PermissionError("Lease PULL perdido: recuperación de campos detenida.")
+                try:
+                    from atlas_core.recuperacion_incremental import recuperar_campos_ausentes
+                    recuperacion = recuperar_campos_ausentes(
+                        raiz_atlas=raiz, comprobar=comprobar_lease_recuperacion,
+                        fabrica_ocr=lambda: crear_proveedor_ocr(proveedor_ocr_preferido),
+                    )
+                    if recuperacion.get("dataset_escrito") or recuperacion.get("intentados"):
+                        resultado["recuperacion_campos_ausentes"] = {
+                            "lote": recuperacion.get("lote"), "intentados": recuperacion.get("intentados"),
+                            "recuperados": len(recuperacion.get("recuperados") or []),
+                            "guias": recuperacion.get("guias_actualizadas"),
+                        }
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Recuperación de campos ausentes omitida: %s", error)
+                    resultado["recuperacion_campos_ausentes"] = {"error": str(error)}
             return resultado
 
 
